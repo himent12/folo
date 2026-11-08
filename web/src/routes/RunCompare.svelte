@@ -205,7 +205,7 @@
             <tbody>
               <tr>
                 <td class="k">Status</td>
-                {#each chosen as r (r.id)}<td><StatusBadge status={r.status} size="sm" /></td>{/each}
+                {#each chosen as r (r.id)}<td><StatusBadge status={r.status} plain /></td>{/each}
               </tr>
               <tr>
                 <td class="k">Best mAP50-95</td>

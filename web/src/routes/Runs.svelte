@@ -59,8 +59,8 @@
     return (end - Date.parse(r.started)) / 1000;
   }
 
-  const tone = (r: Run) =>
-    r.status === 'failed' ? 'danger' : r.status === 'completed' ? 'success' : r.status === 'running' ? 'accent' : 'neutral';
+  // Progress bars stay neutral; only a live run's bar carries the accent ("now"). Status is the dot beside it.
+  const tone = (r: Run) => (r.status === 'running' ? 'accent' : 'neutral');
 </script>
 
 <Page title="Runs">
@@ -105,12 +105,14 @@
       </EmptyState>
     {:else}
       <div class="scroll">
-        <table class="table runs">
+        <table class="table runs" class:selecting={selected.length > 0}>
           <thead>
             <tr>
               <th class="check"><span class="sr-only">Select for comparison</span></th>
               <th>Run</th>
               <th>Status</th>
+              <th class="hide-md">Dataset</th>
+              <th class="hide-md">Model</th>
               <th>Progress</th>
               <th class="r">Best mAP50-95</th>
               <th class="hide-lg">mAP per epoch</th>
@@ -134,9 +136,10 @@
                 </td>
                 <td>
                   <a class="name" href={href(`/runs/${r.id}`)} onclick={(e) => e.stopPropagation()}>{r.name}</a>
-                  <span class="sub"><span>{dsName.get(r.config.dataset_id) ?? r.config.dataset_id}</span><span class="mono">{r.config.arch}</span><span class="mono">{r.id}</span></span>
                 </td>
-                <td><StatusBadge status={r.status} size="sm" /></td>
+                <td><StatusBadge status={r.status} plain /></td>
+                <td class="hide-md muted">{dsName.get(r.config.dataset_id) ?? r.config.dataset_id}</td>
+                <td class="hide-md"><span class="mono muted">{r.config.arch}</span></td>
                 <td>
                   <div class="prog">
                     <Progress value={r.status === 'running' ? r.step / Math.max(1, r.steps_per_epoch * r.epochs) : r.epoch / r.epochs} size="xs" tone={tone(r)} label="{r.name} progress" />
@@ -214,10 +217,14 @@
     padding: var(--space-4);
   }
   .runs td {
-    height: 52px;
+    height: 40px;
   }
+  /* Selected for comparison: a 2 px accent bar on the row's leading edge. */
   .runs tr.on {
     background: var(--bg-selected);
+  }
+  .runs tr.on td:first-child {
+    box-shadow: inset 2px 0 0 var(--accent-line);
   }
   .check {
     width: 36px;
@@ -236,6 +243,12 @@
   input[type='checkbox'] {
     accent-color: var(--accent-line);
     cursor: pointer;
+  }
+  /* Checkboxes appear on hover, on focus, or for every row once one is selected (Linear-style). */
+  @media (hover: hover) {
+    .runs:not(.selecting) tbody tr:not(:hover) .check input:not(:focus-visible):not(:checked) {
+      opacity: 0;
+    }
   }
   .name {
     display: block;
@@ -288,7 +301,9 @@
     .hide-lg {
       display: none;
     }
-    .runs .sub .mono:last-child {
+  }
+  @media (max-width: 1199px) {
+    .hide-md {
       display: none;
     }
   }

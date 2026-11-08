@@ -174,10 +174,10 @@
                       <a class="run-name" href={href(`/runs/${r.id}`)} onclick={(e) => e.stopPropagation()}>{r.name}</a>
                       <span class="run-sub">{dsById.get(r.config.dataset_id)?.name ?? r.config.dataset_id} · {r.config.arch}</span>
                     </td>
-                    <td><StatusBadge status={r.status} size="sm" /></td>
+                    <td><StatusBadge status={r.status} plain /></td>
                     <td class="hide-sm">
                       <div class="prog">
-                        <Progress value={r.epoch / r.epochs} size="xs" tone={r.status === 'failed' ? 'danger' : r.status === 'completed' ? 'success' : r.status === 'running' ? 'accent' : 'neutral'} label="{r.name} progress" />
+                        <Progress value={r.epoch / r.epochs} size="xs" tone={r.status === 'running' ? 'accent' : 'neutral'} label="{r.name} progress" />
                         <span class="num faint">{r.epoch}/{r.epochs}</span>
                       </div>
                     </td>
