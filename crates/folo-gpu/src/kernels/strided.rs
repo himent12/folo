@@ -311,14 +311,32 @@ const FILL_SRC: &str = "@group(0) @binding(1) var<storage, read_write> Y: array<
 /// Conversions shared by casts.
 const CAST_FNS: &str = r#"
 fn isnan1(v: f32) -> bool { return (bitcast<u32>(v) & 0x7fffffffu) > 0x7f800000u; }
+// f32 to binary16 bits, rounding to nearest even in integer arithmetic (WGSL leaves `pack2x16float`'s rounding
+// to the implementation), with the `half` crate's NaN encoding.
 fn f16bits(v: f32) -> u32 {
   let b = bitcast<u32>(v);
   let sgn = (b >> 16u) & 0x8000u;
   let a = b & 0x7fffffffu;
-  if (a > 0x7f800000u) { return sgn | 0x7e00u; }
-  // |v| >= 65520 rounds to infinity in binary16.
+  if (a > 0x7f800000u) { return sgn | 0x7e00u | ((a >> 13u) & 0x3ffu); }
+  // |v| >= 65520 rounds to infinity.
   if (a >= 0x477ff000u) { return sgn | 0x7c00u; }
-  return pack2x16float(vec2<f32>(clamp(v, -65504.0, 65504.0), 0.0)) & 0xffffu;
+  let e = i32(a >> 23u) - 127;
+  if (e >= -14) {
+    // Normal: drop 13 mantissa bits; a carry into the exponent is the correct rounding.
+    var out = (u32(e + 15) << 10u) | ((a >> 13u) & 0x3ffu);
+    let rem = a & 0x1fffu;
+    if (rem > 0x1000u || (rem == 0x1000u && (out & 1u) == 1u)) { out += 1u; }
+    return sgn | out;
+  }
+  if (e < -25) { return sgn; }
+  // Subnormal: value / 2^-24 = m >> s with the implicit bit restored.
+  let m = (a & 0x7fffffu) | 0x800000u;
+  let s = u32(-e - 1);
+  var out = m >> s;
+  let rem = m & ((1u << s) - 1u);
+  let half = 1u << (s - 1u);
+  if (rem > half || (rem == half && (out & 1u) == 1u)) { out += 1u; }
+  return sgn | out;
 }
 // binary16 bits to f32; NaNs keep sign and payload with the quiet bit set (as the `half` crate does).
 fn f16tof32(h: u32) -> f32 {
@@ -327,14 +345,49 @@ fn f16tof32(h: u32) -> f32 {
   }
   return unpack2x16float(h).x;
 }
-// i64 bits to f32 by magnitude (negating first avoids cancellation between the two halves).
-fn i64tof32(lo: u32, hi: u32) -> f32 {
-  if ((hi >> 31u) == 1u) {
-    let nlo = ~lo + 1u;
-    let nhi = ~hi + select(0u, 1u, nlo == 0u);
-    return -(f32(nhi) * 4294967296.0 + f32(nlo));
+// 64-bit unsigned helpers on (lo, hi) pairs; shift amounts are 0..63.
+fn shl64(v: vec2<u32>, s: u32) -> vec2<u32> {
+  if (s == 0u) { return v; }
+  if (s >= 32u) { return vec2<u32>(0u, v.x << (s - 32u)); }
+  return vec2<u32>(v.x << s, (v.y << s) | (v.x >> (32u - s)));
+}
+fn shr64(v: vec2<u32>, s: u32) -> vec2<u32> {
+  if (s == 0u) { return v; }
+  if (s >= 32u) { return vec2<u32>(v.y >> (s - 32u), 0u); }
+  return vec2<u32>((v.x >> s) | (v.y << (32u - s)), v.y >> s);
+}
+// `v` rounded to its top `n` significant bits, to nearest even.
+fn round_bits(v: vec2<u32>, n: u32) -> vec2<u32> {
+  var len = 32u - countLeadingZeros(v.x);
+  if (v.y != 0u) { len = 64u - countLeadingZeros(v.y); }
+  if (len <= n) { return v; }
+  let s = len - n;
+  var q = shr64(v, s);
+  let back = shl64(q, s);
+  // r = v - back (< 2^s), compared with half = 2^(s - 1).
+  let rlo = v.x - back.x;
+  let rhi = v.y - back.y - select(0u, 1u, v.x < back.x);
+  let half = shl64(vec2<u32>(1u, 0u), s - 1u);
+  let gt = rhi > half.y || (rhi == half.y && rlo > half.x);
+  let eq = rhi == half.y && rlo == half.x;
+  if (gt || (eq && (q.x & 1u) == 1u)) {
+    q.x += 1u;
+    if (q.x == 0u) { q.y += 1u; }
   }
-  return f32(hi) * 4294967296.0 + f32(lo);
+  return shl64(q, s);
+}
+// Integer (i64 bits) to f32 as the CPU does it: round to f64's 53 bits, then to `n` bits (24 for f32, 11 for
+// the f16 path). The result has at most `n` significant bits, so both halves convert exactly.
+fn int2f(v: vec2<u32>, n: u32) -> f32 {
+  let neg = (v.y >> 31u) == 1u;
+  var m = v;
+  if (neg) {
+    m.x = ~v.x + 1u;
+    m.y = ~v.y + select(0u, 1u, m.x == 0u);
+  }
+  let r = round_bits(round_bits(m, 53u), n);
+  let f = f32(r.y) * 4294967296.0 + f32(r.x);
+  return select(f, -f, neg);
 }
 // Float to integer: truncate toward zero and saturate; NaN becomes 0 (Rust `as` semantics).
 fn f2u8(v: f32) -> u32 { if (isnan1(v) || v <= 0.0) { return 0u; } if (v >= 255.0) { return 255u; } return u32(v); }
@@ -373,9 +426,8 @@ fn gen_cast(spec: &Spec) -> String {
     let load_f = match src {
         Elem::F32 => "bitcast<f32>(X[e])",
         Elem::F16 => "f16tof32((X[e >> 1u] >> ((e & 1u) * 16u)) & 0xffffu)",
-        Elem::U8 => "f32(rd(e))",
-        Elem::U32 => "f32(X[e])",
-        Elem::I64 => "i64tof32(X[2u * e], X[2u * e + 1u])",
+        // Integer sources convert through `int2f` in `conv`.
+        Elem::U8 | Elem::U32 | Elem::I64 => "0.0",
     };
     let load_i = match src {
         Elem::U8 => "vec2<u32>(rd(e), 0u)",
@@ -387,8 +439,10 @@ fn gen_cast(spec: &Spec) -> String {
     let _ = writeln!(s, "fn load_i(e: u32) -> vec2<u32> {{ return {load_i}; }}");
     // `conv(e)` returns the destination bits of source element `e` in the low bits (two words for i64).
     let conv = match (dst, src.is_float()) {
-        (Elem::F32, _) => "vec2<u32>(bitcast<u32>(load_f(e)), 0u)",
-        (Elem::F16, _) => "vec2<u32>(f16bits(load_f(e)), 0u)",
+        (Elem::F32, true) => "vec2<u32>(bitcast<u32>(load_f(e)), 0u)",
+        (Elem::F32, false) => "vec2<u32>(bitcast<u32>(int2f(load_i(e), 24u)), 0u)",
+        (Elem::F16, true) => "vec2<u32>(f16bits(load_f(e)), 0u)",
+        (Elem::F16, false) => "vec2<u32>(f16bits(int2f(load_i(e), 11u)), 0u)",
         (Elem::U8, true) => "vec2<u32>(f2u8(load_f(e)), 0u)",
         (Elem::U8, false) => "vec2<u32>(i2u8(load_i(e)), 0u)",
         (Elem::U32, true) => "vec2<u32>(f2u32(load_f(e)), 0u)",

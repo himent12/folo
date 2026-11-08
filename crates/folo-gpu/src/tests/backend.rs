@@ -243,19 +243,14 @@ fn casts_all_pairs() {
             let g = c.to_device(dev).unwrap();
             for &to in &all {
                 let (cc, gc) = (c.to_dtype(to).unwrap(), g.to_dtype(to).unwrap());
-                if to.is_float() && !from.is_float() && from == DType::I64 {
-                    // i64 -> float goes through two f32 halves on the GPU (vs f64 on the CPU).
-                    assert_close_t(&gc, &cc, 0.0, 1e-6, &format!("cast {from} -> {to}"));
-                } else {
-                    assert_same(
-                        &gc,
-                        &cc,
-                        &format!(
-                            "cast {from} -> {to} of {:?}",
-                            c.to_dtype(DType::F32).unwrap().to_vec::<f32>().unwrap()
-                        ),
-                    );
-                }
+                assert_same(
+                    &gc,
+                    &cc,
+                    &format!(
+                        "cast {from} -> {to} of {:?}",
+                        c.to_dtype(DType::F32).unwrap().to_vec::<f32>().unwrap()
+                    ),
+                );
             }
             // A strided source.
             let (cs, gs) = (c.slice(0, 1, c.dims()[0], 3).unwrap(), g.slice(0, 1, c.dims()[0], 3).unwrap());
@@ -265,6 +260,43 @@ fn casts_all_pairs() {
                 &format!("strided cast {from}"),
             );
         }
+    }
+}
+
+#[test]
+fn casts_round_like_the_cpu() {
+    let dev = dev!();
+    // Integers next to f32 / f16 rounding midpoints, including the f64 double-rounding cases
+    // (2^62 + 2^38 + 1024 rounds up only because f64 keeps the sticky bit).
+    let mut ints: Vec<i64> = vec![
+        (1 << 62) + (1 << 38) + 1024,
+        (1 << 24) + 1,
+        (1 << 24) + 3,
+        (1 << 25) + 2,
+        2049,
+        2051,
+        4097,
+        65519,
+        65520,
+        65535,
+    ];
+    ints.extend([(1i64 << 53) + 1, (1 << 54) + 3, i64::MAX, i64::MAX - 1, 4294967295, 16777217 * 3]);
+    let neg: Vec<i64> = ints.iter().map(|v| v.wrapping_neg()).collect();
+    ints.extend(neg);
+    ints.push(i64::MIN);
+    let n = ints.len();
+    let i = Tensor::from_slice(&ints, [n]).unwrap();
+    let u = Tensor::from_slice(&ints.iter().map(|&v| v as u32).collect::<Vec<_>>(), [n]).unwrap();
+    // f32 values on f16 midpoints, subnormal boundaries and overflow.
+    let mut fl = vec![1.0f32 + 1.0 / 2048.0, 1.0 + 3.0 / 2048.0, 2049.0, 2051.0, 65504.0, 65519.0, 65520.0];
+    fl.extend([6.0e-8, 2.9802322e-8, 2.9802326e-8, 5.9604645e-8 * 1.5, 6.1035156e-5, 6.1e-5, 1e-10, -3.0e-5]);
+    fl.extend((0..64).map(|k| f32::from_bits(0x3880_0000 + k * 0x1001)));
+    let f = Tensor::from_slice(&fl, [fl.len()]).unwrap();
+    for (src, to) in
+        [(&i, DType::F32), (&i, DType::F16), (&u, DType::F32), (&u, DType::F16), (&f, DType::F16)]
+    {
+        let g = src.to_device(dev).unwrap().to_dtype(to).unwrap();
+        assert_same(&g, &src.to_dtype(to).unwrap(), &format!("{} -> {to}", src.dtype()));
     }
 }
 
