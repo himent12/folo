@@ -626,13 +626,19 @@ for e in 0 .. epochs:
       zero gradients
 ```
 `t` advances only with an optimizer step, as FORMAT.md requires. A window made only of non-finite batches is
-skipped without a step, so the run can end with `t < T` (the remaining iterations are not made up). Ten consecutive
-non-finite batches abort the run with an error.
+skipped without a step, so the run can end with `t < T` (the remaining iterations are not made up).
+
+**Non-finite batches.** The train-mode forward updates BN running statistics before the loss is known, so the
+trainer snapshots every `running_mean` / `running_var` before each forward (well under 100k floats even for folo-x).
+If the loss is not finite, or any running statistic became non-finite, it restores the snapshot, so the next EMA
+update never sees poisoned buffers. Ten consecutive non-finite batches, or an epoch without a single finite batch,
+abort the run with an error (`status: failed`).
 
 **Progress reporting (API `Run` / `Step`).** `Run.step` and `Step.step` count training **batches** completed in the
 run (`e · nb + k + 1`), and `Run.steps_per_epoch = nb`. The optimizer iteration `t` is internal (checkpoints only).
 `Step.lr` is the current LR of the `decay` group. `Step.loss` holds the batch's reported items (§7.4), and
-`Epoch.train_loss` their mean over the epoch's finite batches.
+`Epoch.train_loss` their mean over the epoch's finite batches. A non-finite batch emits no `step` event, only a
+`log` warning (`level: warn`). The counters still advance, so every emitted number is finite JSON.
 
 ### 8.4 LR schedule and warmup
 The schedule is a function of the iteration `t` (optimizer steps, FORMAT.md's `unit: "iteration"`), with
@@ -802,6 +808,8 @@ batch 2, in train mode so BN uses batch statistics).
   `round(3 · 13) = 39`). Check the LR and momentum of every group at `t ∈ {0, 50, 99, 100, 129}`, that
   `lf(0) = 1` and `lf(129) = lrf`, and that `warmup_epochs = 0` gives `W = 0`.
 - Accumulation never crosses an epoch boundary: after each epoch the gradient buffers are zero.
+- A forward that produces NaN in a BN layer (inject it), followed by a valid batch: the BN running statistics,
+  the EMA and eval-mode outputs stay finite, and no `step` event carries a non-finite value.
 - A window whose batches are all non-finite (inject NaN) takes no optimizer step and leaves `t`, `optim.__step`,
   `sched.__step` and `ema.__updates` unchanged. A checkpoint written after it resumes to the same state as an
   uninterrupted run.
