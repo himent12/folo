@@ -72,6 +72,9 @@ try {
           await page.clock.runFor(scene.advance ?? 2000);
           if (scene.setup) await scene.setup(page, { vp, theme });
           await settle(page);
+          // Horizontal document overflow is always a layout bug (wide content must scroll inside its own box).
+          const over = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+          if (over > 0) failures.push(`${name}: page overflows horizontally by ${over}px`);
           await page.screenshot({ path: resolve(outDir, `${name}.png`), fullPage: scene.fullPage ?? vp !== 'mobile' });
           count++;
         } catch (e) {
