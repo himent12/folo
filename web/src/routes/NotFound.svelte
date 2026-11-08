@@ -29,7 +29,8 @@
   }
   .nf > :global(.empty) {
     width: min(480px, 100%);
-    border: 1px dashed var(--line-strong);
+    background: var(--bg-panel);
+    border: 1px solid var(--line-default);
     border-radius: var(--radius-lg);
   }
 </style>

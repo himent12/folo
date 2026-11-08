@@ -350,7 +350,8 @@
     gap: var(--space-3);
     padding: var(--space-12) var(--space-6);
     text-align: center;
-    border: 1px dashed var(--line-strong);
+    background: var(--bg-panel);
+    border: 1px solid var(--line-default);
     border-radius: var(--radius-lg);
   }
   .q-mark {

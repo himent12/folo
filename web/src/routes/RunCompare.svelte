@@ -376,7 +376,7 @@
     height: var(--control-md);
     padding: 0 10px;
     border-radius: var(--radius-full);
-    border: 1px dashed var(--line-strong);
+    border: 1px solid var(--line-default);
     color: var(--text-secondary);
   }
   .add select {
