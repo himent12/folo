@@ -35,7 +35,7 @@ impl FoloApp {
         let subtitle = if self.store.runs.is_loading() {
             "Loading…".to_string()
         } else {
-            format!("{} runs · {} active · {} failed", runs.len(), active, count(RunFilter::Failed))
+            format!("{} · {} active · {} failed", plural(runs.len(), "run"), active, count(RunFilter::Failed))
         };
         let new = if self.store.datasets.ready().is_some_and(|d| d.is_empty()) {
             self.button_disabled(
@@ -250,6 +250,22 @@ impl FoloApp {
         self.page_frame(&t, header, body, cx)
     }
 
+    /// Resume a stopped or failed run where it left off (its last finished epoch).
+    fn resume_button(&self, id: &str, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let rid = id.to_string();
+        self.button(
+            "run-resume",
+            "Resume",
+            Btn::Secondary,
+            Some("icons/play.svg"),
+            window,
+            cx,
+            act(move |this, _, cx| this.resume_run(rid.clone(), cx)),
+        )
+        .tooltip(crate::controls::tip("Continue from the last finished epoch", None))
+        .into_any_element()
+    }
+
     pub fn run_view(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
         let Some(r) = self.store.run(id).cloned() else {
@@ -309,6 +325,9 @@ impl FoloApp {
                 );
             }
             RunStatus::Completed | RunStatus::Stopped => {
+                if r.status == RunStatus::Stopped {
+                    actions.push(self.resume_button(&r.id, window, cx));
+                }
                 if let Some(mid) = r.model_id.clone() {
                     let m2 = mid.clone();
                     actions.push(
@@ -343,6 +362,7 @@ impl FoloApp {
                 }
             }
             RunStatus::Failed => {
+                actions.push(self.resume_button(&r.id, window, cx));
                 // Reuse the whole config; for out-of-memory failures, halve the batch.
                 let mut cfg = r.config.clone();
                 let oom = r.error.as_deref().is_some_and(|e| e.contains("out of memory"));
@@ -756,7 +776,6 @@ impl FoloApp {
         );
         lr.y_range = Some((0., (d.lr_max * 1.15).max(1e-4)));
         lr.y_ticks = 3;
-        lr.markers = vec![Marker { x: 3., label: "warmup".into(), color: t.text_tertiary, lane: Some(0) }];
 
         // Legend values: at the shared cursor, else the latest point.
         let v = |pts: &[(f32, f32)], fmt: fn(f32) -> String| {
@@ -907,7 +926,7 @@ impl FoloApp {
             ))
             .child(row(
                 card("Precision and recall", "validation", pr_legend, line_chart(&t, pr)).into_any_element(),
-                card("Learning rate", "cosine · warmup 3", lr_legend, line_chart(&t, lr)).into_any_element(),
+                card("Learning rate", "per step", lr_legend, line_chart(&t, lr)).into_any_element(),
                 0.6,
                 0.4,
             ));

@@ -97,6 +97,15 @@ impl RunData {
         }
     }
 
+    /// A resumed run restarts after its last finished (validated) epoch, so steps past that epoch
+    /// may be the interrupted attempt's: keep history only up to the boundary; live steps refill
+    /// the rest. (The server's history may still list the old tail until the new one is flushed.)
+    pub fn cut_to_last_epoch(&mut self) {
+        let last = self.metrics.epochs.last().map_or(0, |e| e.epoch);
+        self.metrics.steps.retain(|s| s.epoch <= last);
+        self.derived.replace(None);
+    }
+
     pub fn push_epoch(&mut self, e: Epoch) {
         if self.metrics.epochs.last().is_none_or(|l| e.epoch > l.epoch) {
             self.metrics.epochs.push(e);
@@ -262,6 +271,8 @@ pub struct Store {
     pub log_rev: u64,
     /// Live events that arrived while a run's history was loading, merged in when it lands.
     pending: HashMap<String, Vec<RunEvent>>,
+    /// Runs resumed and still active: every history load is cut back to the last finished epoch.
+    resumed: std::collections::HashSet<String>,
     pub images_px: ImageCache,
     /// Throughput history for the system card (GPU util samples), newest last.
     pub gpu_util: VecDeque<f32>,
@@ -284,6 +295,7 @@ impl Store {
             logs: HashMap::new(),
             log_rev: 0,
             pending: HashMap::new(),
+            resumed: Default::default(),
             images_px: ImageCache::default(),
             gpu_util: VecDeque::new(),
         }
@@ -309,6 +321,9 @@ impl Store {
     pub fn install_run_data(&mut self, run_id: &str, data: ApiResult<RunData>) {
         let mut load: Load<RunData> = data.into();
         if let Load::Ready(d) = &mut load {
+            if self.resumed.contains(run_id) {
+                d.cut_to_last_epoch();
+            }
             for ev in self.pending.get(run_id).into_iter().flatten() {
                 match ev {
                     RunEvent::Step(s) => d.push_step(*s),
@@ -342,9 +357,29 @@ impl Store {
         self.prune_pending(run_id);
     }
 
+    /// A run was resumed: drop its history and buffered events; the next history load and the
+    /// first new step rebuild it.
+    pub fn reset_for_resume(&mut self, run_id: &str) {
+        self.run_data.remove(run_id);
+        self.logs.remove(run_id);
+        self.samples.remove(run_id);
+        self.pending.remove(run_id);
+        self.resumed.insert(run_id.to_string());
+    }
+
     /// Forget live events buffered for histories still loading (a new data source: ids may repeat).
     pub fn clear_pending(&mut self) {
         self.pending.clear();
+        self.resumed.clear();
+    }
+
+    /// The run list is authoritative: a resumed run it reports finished needs no more cutting
+    /// (its terminal status event may never have arrived).
+    pub fn sync_resumed(&mut self) {
+        let Some(runs) = self.runs.ready() else { return };
+        let active: std::collections::HashSet<&str> =
+            runs.iter().filter(|r| r.status.is_active()).map(|r| r.id.as_str()).collect();
+        self.resumed.retain(|id| active.contains(id.as_str()));
     }
 
     fn prune_pending(&mut self, run_id: &str) {
@@ -418,6 +453,10 @@ impl Store {
                         r.eta_s = None;
                     }
                 }
+                // Finished: the server's history is complete again.
+                if !st.status.is_active() {
+                    self.resumed.remove(run_id);
+                }
             }
         }
         let _ = spe;
@@ -470,6 +509,66 @@ mod tests {
         assert_eq!(store.run_data[id].ready().unwrap().derived().loss[3].len(), before + 1);
         store.apply(id, RunEvent::Status(StatusEvent { status: RunStatus::Completed, error: None }));
         assert_eq!(store.run(id).unwrap().status, RunStatus::Completed);
+    }
+
+    #[test]
+    fn resumed_history_is_cut_to_the_last_finished_epoch() {
+        // Two finished epochs of 10 steps, then 4 steps of epoch 3 before the stop.
+        let loss = || crate::api::Loss { box_: 1., cls: 1., dfl: 1., total: 3. };
+        let step = |n: u64| Step {
+            epoch: ((n - 1) / 10 + 1) as u32,
+            step: n,
+            lr: 0.01,
+            loss: loss(),
+            imgs_per_s: 1.,
+            eta_s: 1.,
+        };
+        let epoch = |n: u32| Epoch {
+            epoch: n,
+            train_loss: loss(),
+            val: crate::api::ValMetrics {
+                map50: 0.5,
+                map50_95: 0.3,
+                precision: 0.5,
+                recall: 0.5,
+                per_class: vec![],
+            },
+            duration_s: 1.,
+        };
+        let stale = || RunMetrics { steps: (1..=24).map(step).collect(), epochs: vec![epoch(1), epoch(2)] };
+        let mut store = Store::new(Arc::new(MockBackend::new(4200, true)));
+        let id = "run_r";
+        store.reset_for_resume(id);
+        // The new stream missed steps 21-22; the server still lists the old 21-24.
+        store.run_data.insert(id.into(), Load::Loading);
+        store.apply(id, RunEvent::Step(step(23)));
+        store.install_run_data(id, Ok(RunData::new(stale(), 10)));
+        let d = store.run_data[id].ready().unwrap();
+        assert_eq!(d.metrics.steps.iter().map(|s| s.step).collect::<Vec<_>>().last(), Some(&23));
+        assert!(!d.metrics.steps.iter().any(|s| s.step == 24), "old tail kept");
+        assert_eq!(d.metrics.steps.len(), 21);
+        // A reconnect mid-epoch reloads the stale history again: still cut.
+        store.run_data.insert(id.into(), Load::Loading);
+        store.install_run_data(id, Ok(RunData::new(stale(), 10)));
+        assert_eq!(store.run_data[id].ready().unwrap().metrics.steps.len(), 20);
+        // Once the run ends, histories are taken as they are.
+        store.apply(id, RunEvent::Status(StatusEvent { status: RunStatus::Completed, error: None }));
+        store.run_data.insert(id.into(), Load::Loading);
+        store.install_run_data(id, Ok(RunData::new(stale(), 10)));
+        assert_eq!(store.run_data[id].ready().unwrap().metrics.steps.len(), 24);
+    }
+
+    #[test]
+    fn a_run_list_reporting_the_resumed_run_finished_clears_the_cut() {
+        let mut store = Store::new(Arc::new(MockBackend::new(4200, true)));
+        let mut runs = store.api.runs().unwrap();
+        let id = runs[0].id.clone();
+        store.reset_for_resume(&id);
+        // The terminal status event was missed; the next run-list refresh says it stopped.
+        runs[0].status = RunStatus::Stopped;
+        store.runs = Load::Ready(runs);
+        store.sync_resumed();
+        assert!(!store.resumed.contains(&id));
     }
 
     #[test]

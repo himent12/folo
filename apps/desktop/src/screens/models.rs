@@ -27,7 +27,7 @@ impl FoloApp {
         let t = theme(cx);
         let models = self.store.models.ready().cloned();
         let subtitle = models.as_ref().map_or("Loading…".to_string(), |m| {
-            format!("{} models · best and last checkpoints, plus exports", m.len())
+            format!("{} · best and last checkpoints, plus exports", plural(m.len(), "model"))
         });
         let open = self
             .button(

@@ -627,3 +627,8 @@ pub fn appear<E: IntoElement + Styled + 'static>(el: E, id: &str) -> gpui::AnyEl
 pub fn select_bar(t: &Theme) -> Div {
     div().absolute().left_0().top(px(4.)).bottom(px(4.)).w(px(2.)).rounded_full().bg(t.accent_fill())
 }
+
+/// "1 dataset", "3 datasets".
+pub fn plural(n: usize, noun: &str) -> String {
+    if n == 1 { format!("1 {noun}") } else { format!("{n} {noun}s") }
+}

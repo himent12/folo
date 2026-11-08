@@ -112,6 +112,15 @@ impl HttpBackend {
         self.decode(resp)
     }
 
+    /// A POST that may legitimately take minutes (indexing a large folder, writing images).
+    fn post_slow<B: Serialize, T: DeserializeOwned>(&self, path: &str, body: &B) -> ApiResult<T> {
+        let resp = agent(Some(Duration::from_secs(600)))
+            .post(&self.url(path))
+            .send_json(body)
+            .map_err(|e| self.unreachable(&e))?;
+        self.decode(resp)
+    }
+
     fn post_empty<T: DeserializeOwned>(&self, path: &str) -> ApiResult<T> {
         let resp = self
             .agent
@@ -265,6 +274,22 @@ impl Backend for HttpBackend {
 
     fn stop_run(&self, id: &str) -> ApiResult<Run> {
         self.post_empty(&format!("/runs/{}/stop", seg(id)))
+    }
+
+    fn resume_run(&self, id: &str) -> ApiResult<Run> {
+        #[derive(Serialize)]
+        struct Resume<'a> {
+            resume_run_id: &'a str,
+        }
+        self.post("/runs", &Resume { resume_run_id: id })
+    }
+
+    fn register_dataset(&self, req: &RegisterDataset) -> ApiResult<Dataset> {
+        self.post_slow("/datasets", req)
+    }
+
+    fn synth_dataset(&self, req: &SyntheticDataset) -> ApiResult<Dataset> {
+        self.post_slow("/datasets/synthetic", req)
     }
 
     fn metrics(&self, id: &str) -> ApiResult<RunMetrics> {

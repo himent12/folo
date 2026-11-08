@@ -6,9 +6,9 @@
 pub use folo_api::{
     Arch, Augment, BBox, BestEpoch, ClassMetrics, CpuInfo, Dataset, DatasetFormat, DatasetStats, Epoch,
     ExportResult, GpuBackend, GpuInfo, Health, Histogram, ImageInfo, ImagePage, ImageSize, LogLevel, LogLine,
-    Loss, MemoryInfo, Model, ModelEval, ModelMetrics, Optimizer, PrCurve, PredictResponse, Run, RunEvent,
-    RunMetrics, RunSamples, RunStatus, Sample, ScoredBox, Split, Splits, StatusEvent, Step, SystemInfo,
-    Timing, TrainConfig, ValMetrics,
+    Loss, MemoryInfo, Model, ModelEval, ModelMetrics, Optimizer, PrCurve, PredictResponse, RegisterDataset,
+    Run, RunEvent, RunMetrics, RunSamples, RunStatus, Sample, ScoredBox, Split, Splits, StatusEvent, Step,
+    SyntheticDataset, SystemInfo, Timing, TrainConfig, ValMetrics,
 };
 
 /// Display helpers for wire enums.

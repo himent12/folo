@@ -110,6 +110,22 @@ pub trait Backend: Send + Sync + 'static {
     fn events(&self, id: &str) -> ApiResult<Subscription>;
 
     fn predict(&self, req: &PredictRequest) -> ApiResult<PredictResponse>;
+
+    /// Register a dataset folder (`POST /api/datasets`). The built-in demo has a fixed set.
+    fn register_dataset(&self, _req: &RegisterDataset) -> ApiResult<Dataset> {
+        Err(ApiError::new("not_supported", "Registering folders needs folo serve")
+            .with_hint("The built-in demo has a fixed set of datasets."))
+    }
+    /// Generate a synthetic shapes dataset (`POST /api/datasets/synthetic`).
+    fn synth_dataset(&self, _req: &SyntheticDataset) -> ApiResult<Dataset> {
+        Err(ApiError::new("not_supported", "Synthetic datasets need folo serve")
+            .with_hint("Run `folo dataset synth`, or connect to folo serve in Settings."))
+    }
+    /// Resume a stopped or failed run from its last checkpoint (`POST /api/runs` with
+    /// `resume_run_id`; the server answers 200 with the same run, queued again).
+    fn resume_run(&self, _id: &str) -> ApiResult<Run> {
+        Err(ApiError::new("not_supported", "Resuming runs needs folo serve"))
+    }
 }
 
 /// A live event stream. Dropping it tells the producer to stop: the mock's worker at its next tick,

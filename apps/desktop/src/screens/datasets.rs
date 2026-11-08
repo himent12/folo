@@ -26,7 +26,11 @@ impl FoloApp {
         let list = self.store.datasets.ready().cloned();
         let subtitle = match &list {
             Some(l) => {
-                format!("{} datasets · {} images", l.len(), int(l.iter().map(|d| d.splits.total()).sum()))
+                format!(
+                    "{} · {} images",
+                    plural(l.len(), "dataset"),
+                    int(l.iter().map(|d| d.splits.total()).sum())
+                )
             }
             None => "Loading…".into(),
         };
@@ -38,14 +42,7 @@ impl FoloApp {
                 Some("icons/folder-open.svg"),
                 window,
                 cx,
-                act(|this, _, cx| {
-                    this.toast(
-                        Tone::Info,
-                        "Registering folders needs folo serve",
-                        Some("The built-in demo has three datasets.".into()),
-                        cx,
-                    );
-                }),
+                act(|this, _, cx| this.add_dataset_folder(cx)),
             )
             .into_any_element();
         let synth = self
@@ -56,14 +53,7 @@ impl FoloApp {
                 Some("icons/zap.svg"),
                 window,
                 cx,
-                act(|this, _, cx| {
-                    this.toast(
-                        Tone::Info,
-                        "Synthetic datasets need folo serve",
-                        Some("Run `folo dataset synth` or start the server.".into()),
-                        cx,
-                    );
-                }),
+                act(|this, w, cx| this.open_synth(w, cx)),
             )
             .into_any_element();
         let header = page_header(&t, "Datasets", subtitle, vec![synth, add]);

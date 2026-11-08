@@ -35,7 +35,7 @@ impl FoloApp {
                     1 => "1 run training".to_string(),
                     n => format!("{n} runs training"),
                 };
-                format!("{d} datasets · {m} models · {live}")
+                format!("{} · {} · {live}", plural(d, "dataset"), plural(m, "model"))
             }
             // The error panel below says it; the subtitle doesn't repeat it.
             _ if self.store.runs.error().is_some() => String::new(),
@@ -200,6 +200,8 @@ impl FoloApp {
                 map.x_range = Some((0., total));
                 map.x_int = true;
                 map.ease_key = crate::charts::ease_key(&r.id);
+                // Epochs are whole numbers ("5", not "5.0").
+                map.x_fmt = |v| format!("{v:.0}");
                 map.y_range = Some((0., 1.));
                 map.y_ticks = 4;
                 map.y_fmt = Some(|v| format!("{v:.2}"));
@@ -381,11 +383,17 @@ impl FoloApp {
             .border_t_1()
             .border_color(t.line_subtle);
         if let Some(g) = s.gpus.first() {
+            // wgpu can't report memory or load on every platform: say so instead of "0 B · 0%".
             let util = g.util.unwrap_or(0.0);
-            let (vram, vu) = bytes(g.memory_bytes);
+            let label = if g.memory_bytes > 0 {
+                let (vram, vu) = bytes(g.memory_bytes);
+                format!("{} · {vram} {vu}", crate::ui::short_gpu(&g.name))
+            } else {
+                format!("{} · memory unknown", crate::ui::short_gpu(&g.name))
+            };
             row = row.child(meter(
-                format!("{} · {vram} {vu}", crate::ui::short_gpu(&g.name)),
-                format!("{:.0}%", util * 100.),
+                label,
+                g.util.map_or("–".into(), |u| format!("{:.0}%", u * 100.)),
                 util,
                 if util > 0.95 { t.warning_solid } else { t.text_tertiary },
             ));
@@ -520,7 +528,7 @@ impl FoloApp {
             row = row
                 .child(cell(
                     crate::ui::short_gpu(&g.name),
-                    format!("{:.0}%", util * 100.),
+                    g.util.map_or("–".into(), |u| format!("{:.0}%", u * 100.)),
                     util,
                     // A meter, not an action: neutral like CPU and memory, amber when saturated.
                     if util > 0.95 { t.warning_solid } else { t.text_tertiary },
@@ -796,7 +804,23 @@ impl FoloApp {
                         (0..3).map(|i| div().flex_1().h(px(196.)).child(skeleton(&t, format!("ov-ds-{i}")))),
                     ))
                 } else {
-                    d.child(div().p(px(16.)).flex().gap(px(16.)).children(cards))
+                    let n = cards.len();
+                    d.child(
+                        div()
+                            .p(px(16.))
+                            .flex()
+                            .gap(px(16.))
+                            .children(cards.into_iter().map(|c| {
+                                div()
+                                    .flex_grow()
+                                    .flex_basis(px(0.))
+                                    .min_w_0()
+                                    .flex()
+                                    .child(c)
+                                    .into_any_element()
+                            }))
+                            .children((n..3).map(|_| div().flex_grow().flex_basis(px(0.)).min_w_0())),
+                    )
                 }
             })
             .into_any_element()

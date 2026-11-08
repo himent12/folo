@@ -188,6 +188,30 @@ impl NewRunForm {
 
 pub type ModelsOrderKey = (usize, usize, &'static str, bool);
 
+/// Image sizes and class sets offered for synthetic datasets.
+pub const SYNTH_IMGSZ: [u32; 3] = [256, 320, 640];
+pub const SYNTH_CLASSES: [&[&str]; 3] = [
+    &["circle", "square", "triangle"],
+    &["circle", "square", "triangle", "star", "hexagon"],
+    &["circle", "square", "triangle", "star", "ring", "cross", "hexagon", "heart"],
+];
+
+/// Images in a synthetic dataset: a whole number in 1..=100000 (the server's limits).
+pub fn parse_images(s: &str) -> Option<u64> {
+    s.trim().replace([',', '_', ' '], "").parse::<u64>().ok().filter(|v| (1..=100_000).contains(v))
+}
+
+pub struct SynthForm {
+    /// Which opening of the dialog this is: a late answer only touches its own dialog.
+    pub id: u64,
+    pub name: Entity<TextInput>,
+    pub images: Entity<TextInput>,
+    pub imgsz: usize,
+    pub classes: usize,
+    pub submitting: bool,
+    pub error: Option<String>,
+}
+
 pub struct NewRunForm {
     pub name: Entity<TextInput>,
     pub dataset: usize,
@@ -394,6 +418,11 @@ pub struct FoloApp {
     // Overlays
     pub palette: Option<Palette>,
     pub new_run: Option<NewRunForm>,
+    /// The Generate synthetic dataset dialog.
+    pub synth: Option<SynthForm>,
+    pub synth_seq: u64,
+    /// Restore focus to the opener on the next render (set where no window is at hand).
+    pub restore_pending: bool,
     pub confirm_stop: Option<String>,
     pub toasts: Vec<Toast>,
     /// The toast under the pointer (its expiry waits).
@@ -416,6 +445,8 @@ pub struct FoloApp {
     subscriptions: HashMap<String, crate::api::Subscription>,
     /// Runs whose event stream is being opened (off the UI thread).
     subscribing: std::collections::HashSet<String>,
+    /// Per run: which subscription attempt is current (a resume supersedes one in flight).
+    sub_attempt: HashMap<String, u64>,
     /// Bumped on every data-source switch; async results from an older source are discarded.
     backend_gen: u64,
     /// Bumped on every connection attempt; only the latest one may install its result.
@@ -507,6 +538,9 @@ impl FoloApp {
             reduce_motion: calm,
             palette: None,
             new_run: None,
+            synth: None,
+            synth_seq: 0,
+            restore_pending: false,
             confirm_stop: None,
             toasts: Vec::new(),
             toast_hover: None,
@@ -521,6 +555,7 @@ impl FoloApp {
             slider_bounds: Rc::new(RefCell::new(HashMap::new())),
             subscriptions: HashMap::new(),
             subscribing: Default::default(),
+            sub_attempt: HashMap::new(),
             backend_gen: 0,
             connect_seq: 0,
             history_tickets: HashMap::new(),
@@ -644,6 +679,7 @@ impl FoloApp {
                 |api| api.runs(),
                 |this, r, cx| {
                     this.store.runs = r.map(newest_first_runs).into();
+                    this.store.sync_resumed();
                     this.subscribe_active(cx);
                 },
             );
@@ -723,11 +759,15 @@ impl FoloApp {
     pub fn ensure_samples(&mut self, id: &str, cx: &mut Context<Self>) {
         if self.store.samples.get(id).is_none_or(|l| l.needs_fetch()) {
             self.store.samples.insert(id.to_string(), Load::Loading);
+            let ticket = self.history_ticket(id, "samples");
             let (rid, key, epoch) = (id.to_string(), id.to_string(), self.sample_epoch);
             self.fetch(
                 cx,
                 move |api| api.samples(&rid, epoch),
                 move |this, r, _| {
+                    if this.history_tickets.get(&(key.clone(), "samples")) != Some(&ticket) {
+                        return;
+                    }
                     this.store.samples.insert(key, r.into());
                 },
             );
@@ -870,11 +910,15 @@ impl FoloApp {
         }
         let api = self.store.api.clone();
         let generation = self.backend_gen;
+        let attempt = self.sub_attempt.get(&id).copied().unwrap_or(0);
         cx.spawn(async move |this, cx| {
             let rid = id.clone();
             let sub = cx.background_executor().spawn(async move { api.events(&rid) }).await;
             this.update(cx, |this, cx| {
-                if this.backend_gen != generation {
+                // Superseded (a new source, or the run was resumed): the newer attempt owns it.
+                if this.backend_gen != generation
+                    || this.sub_attempt.get(&id).copied().unwrap_or(0) != attempt
+                {
                     return;
                 }
                 this.subscribing.remove(&id);
@@ -903,6 +947,7 @@ impl FoloApp {
             |this, r, cx| {
                 if let Ok(runs) = r {
                     this.store.runs = Load::Ready(newest_first_runs(runs));
+                    this.store.sync_resumed();
                     this.subscribe_active(cx);
                 }
             },
@@ -1105,6 +1150,215 @@ impl FoloApp {
             Some(fh) => window.focus(&fh),
             None => window.focus(&self.root_focus),
         }
+    }
+
+    /// Generate synthetic: a small dialog against folo serve; the built-in demo explains itself.
+    pub fn open_synth(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.server_mode == ServerMode::Mock {
+            self.toast(
+                Tone::Info,
+                "Synthetic datasets need folo serve",
+                Some("Run `folo dataset synth`, or connect to folo serve in Settings.".into()),
+                cx,
+            );
+            return;
+        }
+        self.remember_focus(window, cx);
+        let taken: Vec<String> = self
+            .store
+            .datasets
+            .ready()
+            .map(|d| d.iter().map(|d| d.name.clone()).collect())
+            .unwrap_or_default();
+        let default_name = (1..)
+            .map(|n| if n == 1 { "shapes".to_string() } else { format!("shapes-{n}") })
+            .find(|n| !taken.contains(n));
+        let name = cx.new(|cx| {
+            let mut i = TextInput::new("shapes", cx);
+            i.set_text(default_name.unwrap_or_default(), cx);
+            i
+        });
+        let images = cx.new(|cx| {
+            let mut i = TextInput::new("1000", cx);
+            i.set_text("1000", cx);
+            i
+        });
+        window.focus(&name.read(cx).focus_handle(cx));
+        self.synth_seq += 1;
+        self.synth = Some(SynthForm {
+            id: self.synth_seq,
+            name,
+            images,
+            imgsz: 1,
+            classes: 0,
+            submitting: false,
+            error: None,
+        });
+        cx.notify();
+    }
+
+    pub fn close_synth(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.synth = None;
+        self.restore_focus(window);
+        cx.notify();
+    }
+
+    pub fn submit_synth(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(f) = self.synth.as_mut() else { return };
+        if f.submitting {
+            return;
+        }
+        let name = f.name.read(cx).text().trim().to_string();
+        let images = parse_images(&f.images.read(cx).text());
+        let (Some(images), false) = (images, name.is_empty()) else {
+            f.error = Some(if name.is_empty() {
+                "Give the dataset a name.".into()
+            } else {
+                "Images: a whole number from 1 to 100,000.".into()
+            });
+            cx.notify();
+            return;
+        };
+        f.submitting = true;
+        f.error = None;
+        let form = f.id;
+        let req = SyntheticDataset {
+            name,
+            images,
+            classes: SYNTH_CLASSES[f.classes].iter().map(|s| s.to_string()).collect(),
+            imgsz: SYNTH_IMGSZ[f.imgsz],
+            seed: 0,
+        };
+        cx.notify();
+        self.fetch(
+            cx,
+            move |api| api.synth_dataset(&req),
+            move |this, r, cx| {
+                let mine = this.synth.as_ref().is_some_and(|f| f.id == form);
+                match r {
+                    Ok(ds) => {
+                        if mine {
+                            this.synth = None;
+                            // Back to whatever opened the dialog, on the next frame (needs a window).
+                            this.restore_pending = true;
+                        }
+                        this.dataset_added(ds, "Generated", cx);
+                    }
+                    Err(e) if mine => {
+                        if let Some(f) = this.synth.as_mut() {
+                            f.submitting = false;
+                            f.error = Some(e.message);
+                        }
+                    }
+                    // Its dialog is gone (dismissed, or another one open): say so instead.
+                    Err(e) => this.toast(Tone::Danger, e.message, e.hint.map(Into::into), cx),
+                }
+            },
+        );
+    }
+
+    /// Add dataset: pick a folder and register it with folo serve.
+    pub fn add_dataset_folder(&mut self, cx: &mut Context<Self>) {
+        if self.server_mode == ServerMode::Mock {
+            self.toast(
+                Tone::Info,
+                "Registering folders needs folo serve",
+                Some("The built-in demo has a fixed set of datasets.".into()),
+                cx,
+            );
+            return;
+        }
+        let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Add dataset".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(paths))) = rx.await
+                && let Some(p) = paths.into_iter().next()
+            {
+                this.update(cx, |this, cx| {
+                    let path = p.to_string_lossy().to_string();
+                    let folder = p.file_name().map_or(path.clone(), |n| n.to_string_lossy().to_string());
+                    this.toast(
+                        Tone::Info,
+                        format!("Indexing {folder}"),
+                        Some("Reading every image header…".into()),
+                        cx,
+                    );
+                    let req = RegisterDataset { name: None, path, format: Default::default() };
+                    this.fetch(
+                        cx,
+                        move |api| api.register_dataset(&req),
+                        |this, r, cx| match r {
+                            Ok(ds) => this.dataset_added(ds, "Added", cx),
+                            Err(e) => this.toast(Tone::Danger, e.message, e.hint.map(Into::into), cx),
+                        },
+                    );
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    /// A new dataset from the server: list it first and say so, with a way to open it.
+    fn dataset_added(&mut self, ds: crate::api::Dataset, verb: &str, cx: &mut Context<Self>) {
+        let (id, name) = (ds.id.clone(), ds.name.clone());
+        let body = format!("{} images · {}", int(ds.splits.total()), ds.classes.join(", "));
+        if let Some(list) = self.store.datasets.ready_mut() {
+            list.retain(|d| d.id != ds.id);
+            list.insert(0, ds);
+        }
+        self.toast_with(
+            Tone::Accent,
+            format!("{verb} {name}"),
+            Some(body.into()),
+            Some((
+                "Open".into(),
+                Rc::new(move |this: &mut Self, w: &mut Window, cx: &mut Context<Self>| {
+                    this.navigate(Route::Dataset(id.clone()), w, cx)
+                }),
+            )),
+            cx,
+        );
+    }
+
+    /// Resume a stopped or failed run from its last checkpoint.
+    pub fn resume_run(&mut self, id: String, cx: &mut Context<Self>) {
+        self.fetch(
+            cx,
+            move |api| api.resume_run(&id),
+            |this, r, cx| match r {
+                Ok(run) => {
+                    let (rid, name) = (run.id.clone(), run.name.clone());
+                    if let Some(runs) = this.store.runs.ready_mut()
+                        && let Some(slot) = runs.iter_mut().find(|r| r.id == rid)
+                    {
+                        *slot = run;
+                    }
+                    // Resumed steps replace the earlier ones. Retire everything tied to the old
+                    // attempt (stream, in-flight history, buffered events), then open a fresh
+                    // stream; the dashboard reloads history once it is open.
+                    this.subscriptions.remove(&rid);
+                    *this.sub_attempt.entry(rid.clone()).or_default() += 1;
+                    this.subscribing.remove(&rid);
+                    this.store.reset_for_resume(&rid);
+                    this.history_ticket(&rid, "metrics");
+                    this.history_ticket(&rid, "logs");
+                    this.history_ticket(&rid, "samples");
+                    this.resubscribe(rid.clone(), cx);
+                    this.toast(
+                        Tone::Accent,
+                        format!("Resuming {name}"),
+                        Some("From its last finished epoch, with the optimizer state.".into()),
+                        cx,
+                    );
+                }
+                Err(e) => this.toast(Tone::Danger, e.message, e.hint.map(Into::into), cx),
+            },
+        );
     }
 
     pub fn close_new_run(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2124,6 +2378,9 @@ pub fn focus_ring(t: &Theme, radius: f32) -> gpui::Div {
 
 impl Render for FoloApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if std::mem::take(&mut self.restore_pending) {
+            self.restore_focus(window);
+        }
         let t = theme(cx);
         self.ensure_core(cx);
         let titlebar = self.titlebar(window, cx).into_any_element();
@@ -2170,6 +2427,8 @@ impl Render for FoloApp {
             .on_action(cx.listener(|this, _: &Submit, w, cx| {
                 if this.new_run.is_some() {
                     this.submit_new_run(w, cx);
+                } else if this.synth.is_some() {
+                    this.submit_synth(w, cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &FocusNext, w, cx| {
@@ -2254,7 +2513,10 @@ impl Render for FoloApp {
 impl FoloApp {
     /// A dialog, the stop confirmation or the inspector is up: the page behind is inert.
     pub fn modal_open(&self) -> bool {
-        self.new_run.is_some() || self.confirm_stop.is_some() || self.inspector.is_some()
+        self.new_run.is_some()
+            || self.synth.is_some()
+            || self.confirm_stop.is_some()
+            || self.inspector.is_some()
     }
 
     fn nav_shortcut(&mut self, route: Route, window: &mut Window, cx: &mut Context<Self>) {
@@ -2270,6 +2532,8 @@ impl FoloApp {
             &["stop-", "dialog-close"]
         } else if self.new_run.is_some() {
             &["nr-", "dialog-close"]
+        } else if self.synth.is_some() {
+            &["syn-", "dialog-close"]
         } else if self.inspector.is_some() {
             &["insp-"]
         } else if self.palette.is_some() {
@@ -2289,6 +2553,11 @@ impl FoloApp {
         {
             return true;
         }
+        if let Some(f) = &self.synth
+            && [&f.name, &f.images].iter().any(|i| i.read(cx).focus_handle(cx).is_focused(window))
+        {
+            return true;
+        }
         if let Some(p) = &self.palette {
             return p.input.read(cx).focus_handle(cx).is_focused(window);
         }
@@ -2298,7 +2567,7 @@ impl FoloApp {
     /// Tab / Shift-Tab, trapped inside the topmost overlay.
     fn cycle_focus(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
         // The newly focused control scrolls into view inside whichever of these holds it.
-        let containers = if self.new_run.is_some() {
+        let containers = if self.new_run.is_some() || self.synth.is_some() {
             vec![self.dialog_scroll.clone()]
         } else if matches!(self.route, Route::Playground) {
             vec![self.play_side_scroll.clone(), self.page_scroll.clone()]
@@ -2493,6 +2762,9 @@ impl FoloApp {
         } else if self.new_run.is_some() {
             self.new_run = None;
             self.restore_focus(window);
+        } else if self.synth.is_some() {
+            self.synth = None;
+            self.restore_focus(window);
         } else if self.inspector.is_some() {
             self.close_inspector(window, cx);
         } else if let Some(p) = self.parent_route() {
@@ -2627,5 +2899,15 @@ mod tests {
         assert_eq!(parse_close("20", 10.), None);
         assert_eq!(parse_close(" 7 ", 10.), Some(7));
         assert_eq!(parse_close("x", 10.), None);
+    }
+
+    #[test]
+    fn synthetic_image_count() {
+        use super::parse_images;
+        assert_eq!(parse_images("1,000"), Some(1000));
+        assert_eq!(parse_images(" 240 "), Some(240));
+        assert_eq!(parse_images("0"), None);
+        assert_eq!(parse_images("100001"), None);
+        assert_eq!(parse_images("ten"), None);
     }
 }

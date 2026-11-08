@@ -669,7 +669,7 @@ impl FoloApp {
                     )
                     .child(text(ty::XS, t.text_tertiary).tnum().child(format!(
                         "{} · {:.0} fps at this size",
-                        p.device,
+                        device_name(&p.device, self.store.system.ready()),
                         1000. / total
                     )));
                 timing = Some(timing_el.into_any_element());
@@ -842,4 +842,16 @@ impl FoloApp {
             .map_or(0, |p| p.boxes.iter().filter(|b| b.score >= self.play_conf).count());
         (0..n).find(|i| self.fh(format!("det-{i}"), cx).is_focused(window))
     }
+}
+
+/// "gpu:0" as the adapter's name ("RTX 4080 SUPER"), "cpu" as "CPU"; anything else as given.
+fn device_name(device: &str, system: Option<&crate::api::SystemInfo>) -> String {
+    if device == "cpu" {
+        return "CPU".into();
+    }
+    device
+        .strip_prefix("gpu:")
+        .and_then(|n| n.parse::<u32>().ok())
+        .and_then(|n| system?.gpus.iter().find(|g| g.ordinal == n))
+        .map_or(device.to_string(), |g| crate::ui::short_gpu(&g.name))
 }
