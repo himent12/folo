@@ -602,6 +602,11 @@ fn pooling_and_upsampling() {
             v[0].adaptive_avg_pool2d(hw)
         });
     }
+    // Window arithmetic that would wrap u32 is rejected rather than computed wrongly (65536 · 65537 > 2^32).
+    let tall = Tensor::ones([1, 1, 65536, 1]).to_device(dev).unwrap();
+    let e = tall.adaptive_avg_pool2d([65536, 1]).unwrap_err().to_string();
+    assert!(e.contains("overflows"), "{e}");
+    assert!(tall.adaptive_avg_pool2d([1, 1]).is_ok());
     check(dev, std::slice::from_ref(&x), 1e-6, 1e-5, "upsample 2x", |v| v[0].upsample_nearest2d(2));
     check(dev, std::slice::from_ref(&x), 1e-6, 1e-5, "upsample 2x3", |v| v[0].upsample_nearest2d_hw([2, 3]));
     // Ties: constant planes pick the first element of each window.

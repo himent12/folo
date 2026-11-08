@@ -317,7 +317,19 @@ pub fn avg_pool2d_backward(
     launch(ctx, &POOL, 3, &[g, gx], total, (h, w, oh, ow), win.kernel, win.stride, win.padding)
 }
 
-/// Adaptive average pooling of `planes × h × w` to `oh × ow` (PyTorch's window rule).
+/// The shader computes adaptive window bounds as `(o + 1) · in + out - 1` in `u32`; reject sizes where that wraps.
+fn check_adaptive((h, w): (usize, usize), (oh, ow): (usize, usize)) -> Result<()> {
+    let fits = |i: usize, o: usize| (o as u64).saturating_mul(i as u64 + 1) <= u32::MAX as u64;
+    if !fits(h, oh) || !fits(w, ow) {
+        return Err(shape_err(format!(
+            "adaptive_avg_pool2d: {h}x{w} -> {oh}x{ow} overflows the window arithmetic (input · output must stay below 2^32)"
+        )));
+    }
+    Ok(())
+}
+
+/// Adaptive average pooling of `planes × h × w` to `oh × ow` (PyTorch's window rule). Fails when
+/// `(output + 1) · input` would exceed `u32` on either axis.
 pub fn adaptive_avg_pool2d(
     ctx: &GpuContext,
     x: &wgpu::Buffer,
@@ -328,6 +340,7 @@ pub fn adaptive_avg_pool2d(
     if h == 0 || w == 0 || oh == 0 || ow == 0 {
         return Err(shape_err("adaptive_avg_pool2d: empty plane"));
     }
+    check_adaptive((h, w), (oh, ow))?;
     let n = prod(&[planes, oh, ow])?;
     check_buf(x, prod(&[planes, h, w])?, DType::F32, "adaptive_avg_pool2d input")?;
     check_buf(y, n, DType::F32, "adaptive_avg_pool2d output")?;
@@ -345,6 +358,7 @@ pub fn adaptive_avg_pool2d_backward(
     if h == 0 || w == 0 || oh == 0 || ow == 0 {
         return Err(shape_err("adaptive_avg_pool2d_backward: empty plane"));
     }
+    check_adaptive((h, w), (oh, ow))?;
     check_buf(g, prod(&[planes, oh, ow])?, DType::F32, "adaptive_avg_pool2d_backward grad")?;
     let total = prod(&[planes, h, w])?;
     check_buf(gx, total, DType::F32, "adaptive_avg_pool2d_backward output")?;
