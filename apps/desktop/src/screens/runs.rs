@@ -1251,7 +1251,12 @@ impl FoloApp {
                                     "end" => max,
                                     _ => return,
                                 };
-                                s.set_offset(gpui::point(s.offset().x, -to.clamp(px(0.), max)));
+                                let to = to.clamp(px(0.), max);
+                                s.set_offset(gpui::point(s.offset().x, -to));
+                                // The key decides following now (a reflow before the next frame
+                                // could otherwise hide the move).
+                                this.log_follow = max - to < px(8.);
+                                this.log_last_y = to;
                                 cx.stop_propagation();
                                 cx.notify();
                             }))
@@ -1310,6 +1315,11 @@ impl FoloApp {
         };
         // Follow the tail; scrolling up pauses it, scrolling back to the bottom resumes. Decided
         // only when the offset moved, so a reflow (a wrapped line after a resize) doesn't pause it.
+        if self.log_run.as_deref() != Some(r.id.as_str()) {
+            self.log_run = Some(r.id.clone());
+            self.log_follow = true;
+            self.log_last_y = -self.log_scroll.offset().y;
+        }
         let (y, max) = (-self.log_scroll.offset().y, self.log_scroll.max_offset().height);
         if y != self.log_last_y {
             // Tighter than one keyboard line (21 px), so a single Up press pauses following.
@@ -1353,6 +1363,7 @@ impl FoloApp {
                 window,
                 cx,
                 act(|this, _, cx| {
+                    this.log_follow = true;
                     this.log_scroll.scroll_to_bottom();
                     cx.notify();
                 }),

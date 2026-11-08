@@ -383,6 +383,8 @@ pub struct FoloApp {
     pub log_follow: bool,
     /// The log's scroll offset at the last render, to tell a scroll from a reflow.
     pub log_last_y: Pixels,
+    /// The run whose log that state belongs to (another run's log starts following).
+    pub log_run: Option<String>,
     pub sample_epoch: Option<u32>,
 
     // Models
@@ -554,6 +556,7 @@ impl FoloApp {
             log_seen: 0,
             log_follow: true,
             log_last_y: px(0.),
+            log_run: None,
             sample_epoch: None,
             export_open: false,
             pr_hover: None,
