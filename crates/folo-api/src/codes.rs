@@ -65,6 +65,12 @@ pub const CODES: &[Code] = &[
         "a device (gpu:<n>) this machine does not have; the hint lists the ones it has",
     ),
     c("epoch_not_available", 404, 3, "an epoch that has not been validated yet"),
+    c(
+        "weights_not_found",
+        404,
+        3,
+        "published weights that are unknown or not downloaded; the hint says `folo weights pull <name>` (CLI)",
+    ),
     c("route_not_found", 404, 3, "no such HTTP route"),
     c("method_not_allowed", 405, 2, "wrong HTTP method"),
     // Conflicts.
@@ -96,6 +102,19 @@ pub const CODES: &[Code] = &[
     c("bind_failed", 500, 1, "`folo serve` could not bind its address (CLI)"),
     c("serve_failed", 500, 1, "`folo serve` stopped with an error (CLI)"),
     c("mcp_failed", 500, 1, "`folo mcp` stopped with an error (CLI)"),
+    c("gh_failed", 502, 1, "`folo weights pull`: the GitHub CLI is missing or its download failed (CLI)"),
+    c(
+        "checksum_missing",
+        502,
+        1,
+        "`folo weights pull`: the release's SHA256SUMS does not list the file (CLI)",
+    ),
+    c(
+        "checksum_mismatch",
+        502,
+        1,
+        "`folo weights pull`: the download's SHA-256 differs from SHA256SUMS; nothing was installed (CLI)",
+    ),
 ];
 
 /// The entry for `code`, if it is part of the vocabulary.
