@@ -1,4 +1,5 @@
 <script lang="ts">
+  import ChartSkeleton from '$lib/charts/ChartSkeleton.svelte';
   import { untrack } from 'svelte';
   import GitCompare from '@lucide/svelte/icons/git-compare-arrows';
   import X from '@lucide/svelte/icons/x';
@@ -17,7 +18,6 @@
   import ErrorState from '$lib/ui/ErrorState.svelte';
   import Panel from '$lib/ui/Panel.svelte';
   import Segmented from '$lib/ui/Segmented.svelte';
-  import Skeleton from '$lib/ui/Skeleton.svelte';
   import StatusBadge from '$lib/ui/StatusBadge.svelte';
 
   setCrumbs({ label: 'Runs', path: '/runs' }, { label: 'Compare' });
@@ -120,7 +120,7 @@
     ['Model', (r) => r.config.arch],
     ['Epochs', (r) => `${r.epoch}/${r.epochs}`],
     ['Batch', (r) => String(r.config.batch)],
-    ['Image size', (r) => String(r.config.imgsz)],
+    ['Image size', (r) => `${r.config.imgsz} px`],
     ['Optimizer', (r) => r.config.optimizer],
     ['LR', (r) => String(r.config.lr0)],
     ['Mosaic / mixup', (r) => `${r.config.augment.mosaic} / ${r.config.augment.mixup}`],
@@ -182,9 +182,10 @@
         {/each}
         {#if ids.length < MAX && candidates.length}{@render adder()}{/if}
       </div>
-      {#if !sameData && chosen.length > 1}
-        <p class="note">Different datasets: compare the shape of the curves, not their values.</p>
-      {/if}
+      <p class="note">
+        Press a run's colour key to keep its line in front.{#if !sameData && chosen.length > 1}{' '}Different datasets:
+          compare the shape of the curves, not their values.{/if}
+      </p>
       <header class="c-head">
         <Segmented label="Metric" bind:value={metricId} options={METRICS.map((m) => ({ value: m.id, label: m.label }))} />
         <Segmented size="sm" label="X axis" bind:value={x} options={[{ value: 'epoch', label: 'By epoch' }, { value: 'progress', label: '% of run' }]} />
@@ -192,7 +193,7 @@
       {#if metrics.error}
         <ErrorState error={metrics.error} compact retry={() => metrics.refresh()} title="Could not load these runs' metrics" />
       {:else if !metrics.data || !runs.data}
-        <Skeleton h="{narrow ? 240 : 340}px" r="var(--radius-md)" />
+        <ChartSkeleton height={narrow ? 240 : 340} legend={false} />
       {:else}
         <LineChart
           {series}
@@ -349,6 +350,25 @@
     color: var(--text-tertiary);
   }
   @media (max-width: 767px) {
+    /* Phones: the legend is a list of aligned rows (key, name, value, remove), not wrapping chips. */
+    .chips {
+      display: grid;
+      gap: 0;
+    }
+    .chips .chip {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto auto;
+      border-radius: 0;
+      border-width: 0 0 1px;
+      background: none;
+      padding: 0;
+      height: 40px;
+    }
+    .chips .chip a {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
     /* The side-by-side table scrolls sideways on phones: the faded edge says there are more runs. */
     .scroll {
       mask-image: linear-gradient(90deg, #000 calc(100% - 32px), transparent);

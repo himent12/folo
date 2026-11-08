@@ -1,4 +1,5 @@
 <script lang="ts">
+  import ChartSkeleton from '$lib/charts/ChartSkeleton.svelte';
   import ArrowRight from '@lucide/svelte/icons/arrow-right';
   import { LiveRun } from '$lib/api/live.svelte';
   import type { Dataset, Run } from '$lib/api/types';
@@ -11,7 +12,6 @@
   import { href } from '$lib/router.svelte';
   import Button from '$lib/ui/Button.svelte';
   import Progress from '$lib/ui/Progress.svelte';
-  import Skeleton from '$lib/ui/Skeleton.svelte';
   import Stat from '$lib/ui/Stat.svelte';
   import StatusBadge from '$lib/ui/StatusBadge.svelte';
 
@@ -81,7 +81,7 @@
     <div class="chart">
       <p class="chart-title">Validation mAP <span class="faint">by epoch</span></p>
       {#if live.loading}
-        <Skeleton h="200px" r="var(--radius-md)" />
+        <ChartSkeleton height={200} />
       {:else}
         <LineChart
           series={charts.map}

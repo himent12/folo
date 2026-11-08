@@ -316,7 +316,8 @@
     });
   }
 
-  const PATTERNS = { dash: [6, 3], dot: [1.5, 3], dashdot: [7, 3, 1.5, 3] } as const;
+  // Dots are 0-length dashes drawn with round caps (stroke width), so they read as dots, not a faint hairline.
+  const PATTERNS = { dash: [6, 3], dot: [0.01, 3.5], dashdot: [7, 3, 0.01, 3] } as const;
   /** stroke-dasharray for a series (scaled for the small legend swatch). */
   function dashOf(s: Series, k = 1): string | undefined {
     const p = s.pattern ? PATTERNS[s.pattern] : s.dashed ? PATTERNS.dash : null;
