@@ -68,7 +68,8 @@ is reproducible everywhere. Head priors (MODEL.md §6.5): `BOX_BIAS_PRIOR = 2.0`
   leading `{`, trailing spaces only, no duplicate keys, string-only metadata, exact coverage of the data section);
   every safetensors dtype parses, and `decode` refuses those FOLO does not use with a clear error. `write` uses
   the FOLO layout (descending dtype size, then name; header padded so data starts 8-aligned); `write_file` writes
-  `<path>.tmp` and renames it.
+  a fresh, uniquely named temporary file next to the target (`create_temp_beside`, `create_new`, so it never
+  truncates an existing file) and renames it.
 - `Metadata` / `ModelConfig`: typed `folo.*` keys, validated (format major version, MODEL.md §3 config rules,
   `num_classes == len(classes)`); unknown keys are kept in `extra` and written back.
 - `ModelFile::open` (memory-mapped) / `from_bytes` / `import` (plain safetensors plus caller metadata) validate

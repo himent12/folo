@@ -86,16 +86,16 @@ pub enum OptimizerArg {
     Adamw,
 }
 
-/// `folo train`. Mirrors `TrainConfig` in docs/API.md.
+/// `folo train`. Mirrors `TrainConfig` in docs/API.md (plus the docs/MODEL.md §8.1 recipe keys).
 #[derive(Debug, Args)]
 pub struct TrainArgs {
-    /// Dataset: a folder (YOLO or COCO), a data.yaml, or a registered dataset id.
-    #[arg(long)]
-    pub data: String,
+    /// Dataset: a folder (YOLO or COCO) or a data.yaml.
+    #[arg(long, required_unless_present = "resume")]
+    pub data: Option<String>,
     /// Architecture (folo-n, folo-s, folo-m, folo-l, folo-x) or .folo weights to fine-tune.
-    #[arg(long, default_value = "folo-n")]
+    #[arg(long, visible_alias = "arch", default_value = "folo-n")]
     pub model: String,
-    /// Run name [default: <dataset>-<arch suffix>].
+    /// Run name [default: <dataset>-<arch suffix>]; an existing run folder gets a numeric suffix.
     #[arg(long)]
     pub name: Option<String>,
     /// Number of epochs.
@@ -110,12 +110,27 @@ pub struct TrainArgs {
     /// Device: auto, cpu or gpu:<n>.
     #[arg(long, default_value = "auto")]
     pub device: String,
+    /// Data loader worker threads [default: min(cores, 8)].
+    #[arg(long)]
+    pub workers: Option<usize>,
     /// Optimizer.
     #[arg(long, value_enum, default_value_t = OptimizerArg::Auto)]
     pub optimizer: OptimizerArg,
-    /// Initial learning rate.
+    /// Initial learning rate (ignored by --optimizer auto).
     #[arg(long, default_value_t = 0.01)]
     pub lr0: f32,
+    /// Final learning rate as a fraction of lr0.
+    #[arg(long, default_value_t = 0.01)]
+    pub lrf: f64,
+    /// Cosine instead of linear learning-rate decay.
+    #[arg(long)]
+    pub cos_lr: bool,
+    /// Warmup length in epochs.
+    #[arg(long, default_value_t = 3.0)]
+    pub warmup_epochs: f64,
+    /// Stop after this many epochs without a mAP@0.5:0.95 gain.
+    #[arg(long, default_value_t = 100)]
+    pub patience: u32,
     /// RNG seed.
     #[arg(long, default_value_t = 0)]
     pub seed: u64,
@@ -143,6 +158,10 @@ pub struct TrainArgs {
     /// Folder that run outputs (weights, metrics) go under.
     #[arg(long, default_value = "runs")]
     pub project: PathBuf,
+    /// Continue an interrupted run from its checkpoint (runs/<name>/weights/last.folo). The run's stored settings
+    /// are used; only --workers and --device may change.
+    #[arg(long)]
+    pub resume: Option<PathBuf>,
 }
 
 /// Dataset split.
@@ -159,21 +178,21 @@ pub enum SplitArg {
 /// `folo val`.
 #[derive(Debug, Args)]
 pub struct ValArgs {
-    /// Weights (.folo) to evaluate.
+    /// Weights (.folo) to evaluate (EMA weights when the file has them).
     #[arg(long)]
     pub model: PathBuf,
-    /// Dataset: a folder, a data.yaml, or a registered dataset id.
+    /// Dataset: a folder (YOLO or COCO) or a data.yaml.
     #[arg(long)]
     pub data: String,
     /// Split to evaluate.
     #[arg(long, value_enum, default_value_t = SplitArg::Val)]
     pub split: SplitArg,
     /// Batch size.
-    #[arg(long, default_value_t = 16)]
+    #[arg(long, default_value_t = 32)]
     pub batch: u32,
-    /// Square input size in pixels.
-    #[arg(long, default_value_t = 640)]
-    pub imgsz: u32,
+    /// Square input size in pixels [default: the model's training size].
+    #[arg(long)]
+    pub imgsz: Option<u32>,
     /// Confidence threshold (low for mAP).
     #[arg(long, default_value_t = 0.001)]
     pub conf: f32,
@@ -183,15 +202,18 @@ pub struct ValArgs {
     /// Device: auto, cpu or gpu:<n>.
     #[arg(long, default_value = "auto")]
     pub device: String,
+    /// Data loader worker threads [default: min(cores, 8)].
+    #[arg(long)]
+    pub workers: Option<usize>,
 }
 
 /// `folo predict`.
 #[derive(Debug, Args)]
 pub struct PredictArgs {
-    /// Weights (.folo).
+    /// Weights (.folo; EMA weights when the file has them).
     #[arg(long)]
     pub model: PathBuf,
-    /// Images or folders of images.
+    /// Images or folders of images (searched recursively).
     #[arg(required = true)]
     pub sources: Vec<PathBuf>,
     /// Confidence threshold.
@@ -203,13 +225,13 @@ pub struct PredictArgs {
     /// Maximum detections per image.
     #[arg(long, default_value_t = 300)]
     pub max_det: u32,
-    /// Square input size in pixels.
-    #[arg(long, default_value_t = 640)]
-    pub imgsz: u32,
+    /// Letterbox size in pixels [default: the model's training size].
+    #[arg(long)]
+    pub imgsz: Option<u32>,
     /// Device: auto, cpu or gpu:<n>.
     #[arg(long, default_value = "auto")]
     pub device: String,
-    /// Write annotated images to this folder.
+    /// Write annotated images (boxes coloured by class, with class id and score) to this folder.
     #[arg(long)]
     pub save: Option<PathBuf>,
 }
@@ -217,8 +239,10 @@ pub struct PredictArgs {
 /// Export format.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum ExportFormatArg {
-    /// `.folo` with f16 weights.
+    /// Fused `.folo` with f16 weights.
     FoloF16,
+    /// Fused `.folo` with f32 weights.
+    Folo,
     /// ONNX.
     Onnx,
 }
@@ -232,10 +256,10 @@ pub struct ExportArgs {
     /// Target format.
     #[arg(long, value_enum, default_value_t = ExportFormatArg::FoloF16)]
     pub format: ExportFormatArg,
-    /// Output file [default: next to the input].
+    /// Output file [default: next to the input, `<name>-fused.folo` / `<name>-f16.folo`].
     #[arg(long)]
     pub output: Option<PathBuf>,
-    /// Square input size baked into the export.
+    /// Square input size baked into the export (ONNX only; `.folo` files are size-independent).
     #[arg(long, default_value_t = 640)]
     pub imgsz: u32,
 }

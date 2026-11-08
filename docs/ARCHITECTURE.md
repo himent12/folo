@@ -126,10 +126,20 @@ The exact block definitions, layer tables, parameter names, head, loss, training
 - **Box ops, NMS, metrics** work on plain slices so they are reusable everywhere: IoU / GIoU / DIoU / CIoU,
   xywh↔xyxy, class-aware batched NMS, COCO-style mAP@0.5 and mAP@0.5:0.95 (101-point interpolation), precision /
   recall / F1 curves, confusion matrix. `docs/METRICS.md` defines exactly how mAP is computed.
-- **Trainer**: epochs, AMP-free f32 training on CPU or GPU, warmup, cosine LR, EMA, gradient clipping, validation every
-  epoch, best/last checkpoints, metrics streamed as events (consumed by the CLI's progress UI, `--json` lines and the
-  server's SSE).
-- **Predictor**: letterbox, forward, decode, NMS, rescale; batch and streaming APIs; fused BN for inference.
+- **Trainer** (`folo_vision::train::Trainer`, MODEL.md §8): folo-data's `DataLoader` (seeded per epoch and sample, so
+  batches do not depend on the worker count) → tensors → train-mode forward → loss → backward into a
+  `GradAccumulator` (nominal batch 64) → schedule (warmup + linear / cosine, in optimizer steps), global-norm
+  clipping, SGD / AdamW with `decay` / `bn` / `bias` groups (`auto` picks per §8.2), EMA. Batches with a non-finite
+  loss or BatchNorm statistic are skipped and their running statistics restored. After every epoch: validation of the
+  EMA model with `metrics::Evaluator`, fitness mAP@0.5:0.95, `last.folo` / `best.folo` checkpoints (complete
+  FORMAT.md state, atomic), early stopping. Resume from a checkpoint is bit-exact. Events (`status`, rate-limited
+  `step`, `epoch`, `log`: the API.md payloads as `folo_api::RunEvent`) go to a callback and to the run's
+  `metrics.jsonl`; the CLI's progress view and `--json` consume them, the server will. The device is a parameter
+  (`place_model` is the one place that changes once a module can move to the GPU). `folo_vision::val::validate`
+  is the same validation for `folo val`.
+- **Predictor** (`folo_vision::predict::Predictor`): loads `.folo` (EMA when present), fuses BN, letterboxes (rect for
+  one image, square for a batch), forward, decode, NMS, rescale to the original image, with a preprocess /
+  inference / postprocess timing split.
 
 ## folo-server and folo-cli
 - `folo-server` (axum + tokio) implements `docs/API.md`: datasets, models, training runs with live SSE metrics, and

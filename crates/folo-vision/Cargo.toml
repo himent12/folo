@@ -13,14 +13,16 @@ workspace = true
 
 [dependencies]
 # The detection math (boxes, decode, NMS, metrics, assigner) is tensor-free; the loss and the `model` module
-# build on folo-core / folo-nn.
+# build on folo-core / folo-nn. The trainer and predictor read data through folo-data and speak docs/API.md's
+# event types (folo-api).
+folo-api.workspace = true
 folo-core.workspace = true
+folo-data.workspace = true
 folo-nn.workspace = true
 rayon.workspace = true
 serde.workspace = true
-
-[dev-dependencies]
 serde_json.workspace = true
+thiserror.workspace = true
 
 [[bench]]
 name = "post"
@@ -32,4 +34,8 @@ harness = false
 
 [[bench]]
 name = "model"
+harness = false
+
+[[bench]]
+name = "train_step"
 harness = false

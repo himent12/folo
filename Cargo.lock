@@ -489,9 +489,12 @@ name = "folo-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "folo-api",
  "folo-data",
  "folo-gpu",
+ "folo-nn",
  "folo-server",
+ "folo-vision",
  "serde",
  "serde_json",
  "tokio",
@@ -574,11 +577,14 @@ dependencies = [
 name = "folo-vision"
 version = "0.1.0"
 dependencies = [
+ "folo-api",
  "folo-core",
+ "folo-data",
  "folo-nn",
  "rayon",
  "serde",
  "serde_json",
+ "thiserror",
 ]
 
 [[package]]
