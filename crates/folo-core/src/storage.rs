@@ -276,6 +276,17 @@ impl StorageCell {
         self.data.write().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Write access without a version bump, for callers that may not write after all (a fused backend hook that
+    /// can answer `NotSupported`); they call [`StorageCell::mark_modified`] once the data did change.
+    pub fn write_unversioned(&self) -> RwLockWriteGuard<'_, Storage> {
+        self.data.write().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Bump the version after a write through [`StorageCell::write_unversioned`].
+    pub fn mark_modified(&self) {
+        self.version.fetch_add(1, Ordering::Relaxed);
+    }
+
     pub fn version(&self) -> u64 {
         self.version.load(Ordering::Relaxed)
     }

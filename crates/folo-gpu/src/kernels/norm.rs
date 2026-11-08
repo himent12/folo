@@ -5,16 +5,18 @@
 //!    partial (count, mean, M2), merged across the workgroup with Chan et al.'s pairwise formula. Chunks are
 //!    sized so the GPU fills up even when there are few channels and long planes.
 //! 2. `bn_finalize`: one workgroup per channel merges its partials into the mean and biased variance,
-//!    writes `mean`, `invstd = 1 / sqrt(var + eps)` and the per-channel `(scale, shift)`, and optionally
-//!    updates the running statistics in place.
-//! 3. `bn_apply`: `y = act(x · scale + shift)`, `vec4` when `H·W` is a multiple of 4.
+//!    writes `mean` and `invstd = 1 / sqrt(var + eps)`, and optionally updates the running statistics in
+//!    place.
+//! 3. `bn_apply`: `y = act(((x − mean) · invstd) · w + b)`, `vec4` when `H·W` is a multiple of 4. Centring
+//!    first matters: the expanded `x · scale + shift` loses everything to cancellation when the mean is large
+//!    against the spread.
 //!
 //! Backward (the analytic BatchNorm gradient through the activation), three dispatches:
 //! 1. `bn_bwd_reduce`: per (channel, chunk) partial sums of `dz` and `dz · x̂`, where
 //!    `x̂ = (x − mean) · invstd`, `z = x̂ · w + b` is recomputed and `dz = g · act'(z)`;
-//! 2. `bn_bwd_finalize`: `db = Σdz`, `dw = Σdz·x̂` and the coefficients of
-//!    `dx = w · invstd · (dz − db / n − x̂ · dw / n)`, rewritten as `scale · dz + alpha · x + beta`;
-//! 3. `bn_bwd_dx`: that expression per element.
+//! 2. `bn_bwd_finalize`: `db = Σdz` and `dw = Σdz·x̂`;
+//! 3. `bn_bwd_dx`: `dx = w · invstd · (dz − db / n − x̂ · dw / n)` per element, with `x̂` and `z` recomputed by
+//!    the same expressions as the forward and the reduction pass.
 //!
 //! So a forward reads `x` twice and writes `y` once, and a backward reads `x` and `g` twice and writes `dx`
 //! once, against about ten passes forward and twenty backward for BatchNorm + SiLU as separate ops.
@@ -197,7 +199,7 @@ pub fn batch_norm_forward(
     }
     let (chunks, len) = plan(m, d.c);
     let part = ctx.alloc(DType::F32.bytes(prod(&[d.c, chunks, 3])?))?;
-    let coef = ctx.alloc(DType::F32.bytes(2 * d.c))?;
+    let coef = ctx.alloc(DType::F32.bytes(4 * d.c))?;
 
     let k = ctx.kernel(&STATS, Spec::new().u32("ACT", 0))?;
     ctx.dispatch(&k, &[x, part.raw()], &d.walk_params(m, chunks, len)?, [chunks as u32, d.c as u32, 1])?;
@@ -242,7 +244,7 @@ pub fn batch_norm_backward(
     }
     let (chunks, len) = plan(m, d.c);
     let part = ctx.alloc(DType::F32.bytes(prod(&[d.c, chunks, 2])?))?;
-    let coef = ctx.alloc(DType::F32.bytes(4 * d.c))?;
+    let coef = ctx.alloc(DType::F32.bytes(6 * d.c))?;
     let act = d.act.code();
 
     let k = ctx.kernel(&BWD_REDUCE, Spec::new().u32("ACT", act))?;

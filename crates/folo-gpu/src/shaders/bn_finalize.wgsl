@@ -1,5 +1,5 @@
 // Pass 2 of train-mode BatchNorm: merge the chunk partials of each channel, write the mean, invstd, the
-// apply coefficients K = (scale, shift) and, with RUNNING, the running-statistic update.
+// apply coefficients K = (mean, invstd, w, b) and, with RUNNING, the running-statistic update.
 // Grid: (C). Params: 0 = C, 1 = chunks, 2 = eps, 3 = 1 - momentum, 4 = momentum, 5 = momentum · n / (n - 1).
 @group(0) @binding(1) var<storage, read> PART: array<f32>;
 @group(0) @binding(2) var<storage, read> W: array<f32>;
@@ -39,9 +39,10 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) 
         let inv = 1.0 / sqrt(var_b + pf(2u));
         MEAN[c] = m;
         INVSTD[c] = inv;
-        let scale = inv * W[c];
-        K[2u * c] = scale;
-        K[2u * c + 1u] = B[c] - m * scale;
+        K[4u * c] = m;
+        K[4u * c + 1u] = inv;
+        K[4u * c + 2u] = W[c];
+        K[4u * c + 3u] = B[c];
         if (RUNNING) {
             RM[c] = RM[c] * pf(3u) + pf(4u) * m;
             RV[c] = RV[c] * pf(3u) + pf(5u) * var_b;

@@ -431,3 +431,63 @@ fn fused_batch_norm_without_running_stats() {
     close(&dw, &Tensor::zeros([3]), 1e-4, 0.0, "dw");
     close(&dx, &Tensor::zeros([2, 3, 5, 3]), 1e-5, 0.0, "dx");
 }
+
+/// Inputs with a large mean and a small spread (and constant planes): the fused kernels centre before scaling,
+/// so they match an `f64` reference and the composite gradients instead of losing the signal to cancellation.
+#[test]
+fn fused_batch_norm_large_mean() {
+    let dev = gpu!();
+    let rng = &mut Rng::seed(42);
+    let (eps, shape) = (1e-3f64, [4usize, 2, 6, 5]);
+    let x = Tensor::randn(shape, 0.0, 0.5, rng).add_scalar(1000.0).unwrap();
+    let to = |t: &Tensor| t.to_device(dev).unwrap().detach().requires_grad_();
+    let (xg, g, b) = (to(&x), to(&Tensor::full([2], 1.5)), to(&Tensor::full([2], 0.25)));
+    let bn = BatchNorm2d::from_tensors(
+        g.clone(),
+        b.clone(),
+        Tensor::zeros([2]).to_device(dev).unwrap(),
+        Tensor::ones([2]).to_device(dev).unwrap(),
+        eps,
+        0.1,
+    )
+    .unwrap();
+    let y = bn.forward_act(&xg, Activation::Silu).unwrap();
+    assert_eq!(y.grad_fn_name(), Some("batch_norm2d_act"));
+    // f64 reference of the normalisation.
+    let (xs, ys) = (x.to_vec::<f32>().unwrap(), y.to_vec::<f32>().unwrap());
+    let hw = shape[2] * shape[3];
+    for ch in 0..2 {
+        let idx: Vec<usize> =
+            (0..shape[0]).flat_map(|n| ((n * 2 + ch) * hw)..((n * 2 + ch + 1) * hw)).collect();
+        let n = idx.len() as f64;
+        let mean = idx.iter().map(|&i| xs[i] as f64).sum::<f64>() / n;
+        let var = idx.iter().map(|&i| (xs[i] as f64 - mean).powi(2)).sum::<f64>() / n;
+        for &i in &idx {
+            let z = (xs[i] as f64 - mean) / (var + eps).sqrt() * 1.5 + 0.25;
+            let want = z / (1.0 + (-z).exp());
+            assert!((ys[i] as f64 - want).abs() <= 2e-3, "y[{i}]: {} vs {want}", ys[i]);
+        }
+    }
+    let w = Tensor::randn(shape, 0.0, 1.0, rng).to_device(dev).unwrap();
+    let g1 = y.mul(&w).unwrap().sum_all().unwrap().backward().unwrap();
+    let want = Activation::Silu.forward(&composite_bn(&xg, &g, &b, eps)).unwrap();
+    let g2 = want.mul(&w).unwrap().sum_all().unwrap().backward().unwrap();
+    for (t, name) in [(&xg, "dx"), (&g, "dweight"), (&b, "dbias")] {
+        close(g1.get(t).unwrap(), g2.get(t).unwrap(), 5e-3, 5e-3, name);
+    }
+    // Constant planes, however large: x̂ = 0 exactly, so y = act(β).
+    for v in [1e6f32, 1e30] {
+        let xc = Tensor::full([2, 1, 2, 2], v).to_device(dev).unwrap();
+        let out = xc
+            .batch_norm_act_train(
+                &Tensor::ones([1]).to_device(dev).unwrap(),
+                &Tensor::zeros([1]).to_device(dev).unwrap(),
+                eps,
+                None,
+                None,
+            )
+            .unwrap()
+            .expect("fused kernels");
+        assert_eq!(out.y.to_vec::<f32>().unwrap(), vec![0.0; 8], "constant {v}");
+    }
+}

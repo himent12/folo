@@ -1,6 +1,6 @@
 // Pass 2 of the BatchNorm backward: per channel, db = Σdz and dw = Σdz·x̂, and the dx coefficients
-// K = (scale, shift, alpha, beta) with dx = scale · dz + alpha · x + beta, where scale = w · invstd and
-// x · scale + shift is the forward's pre-activation. Grid: (C). Params: 0 = C, 1 = chunks, 2 = 1 / (N·hw).
+// K = (mean, invstd, w, b, db / n, dw / n) for dx = w · invstd · (dz − db / n − x̂ · dw / n).
+// Grid: (C). Params: 0 = C, 1 = chunks, 2 = 1 / (N·hw).
 @group(0) @binding(1) var<storage, read> PART: array<f32>;
 @group(0) @binding(2) var<storage, read> MEAN: array<f32>;
 @group(0) @binding(3) var<storage, read> INVSTD: array<f32>;
@@ -38,14 +38,11 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) 
         let dw = s2[0];
         DB[c] = db;
         DW[c] = dw;
-        let m = MEAN[c];
-        let inv = INVSTD[c];
-        let scale = W[c] * inv;
-        // dx = scale · (dz - db / n - x̂ · dw / n) with x̂ = (x - m) · inv.
-        let alpha = -scale * dw * pf(2u) * inv;
-        K[4u * c] = scale;
-        K[4u * c + 1u] = B[c] - m * scale;
-        K[4u * c + 2u] = alpha;
-        K[4u * c + 3u] = -scale * db * pf(2u) - alpha * m;
+        K[6u * c] = MEAN[c];
+        K[6u * c + 1u] = INVSTD[c];
+        K[6u * c + 2u] = W[c];
+        K[6u * c + 3u] = B[c];
+        K[6u * c + 4u] = db * pf(2u);
+        K[6u * c + 5u] = dw * pf(2u);
     }
 }

@@ -42,6 +42,7 @@ fn close(got: &Tensor, want: &Tensor, atol: f32, rtol: f32, what: &str) {
     let (g, w) = (got.to_vec::<f32>().unwrap(), want.to_vec::<f32>().unwrap());
     let mut worst = (0, 0.0f32);
     for (i, (&a, &b)) in g.iter().zip(&w).enumerate() {
+        assert!(a.is_finite() && b.is_finite(), "{what}[{i}]: got {a}, want {b} (non-finite)");
         let e = (a - b).abs() - rtol * b.abs();
         if e > worst.1 {
             worst = (i, e);

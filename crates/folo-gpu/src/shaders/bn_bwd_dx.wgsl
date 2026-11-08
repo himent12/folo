@@ -1,5 +1,6 @@
-// Pass 3 of the BatchNorm backward: DX = scale · dz + alpha · x + beta with dz = g · act'(x · scale + shift)
-// and K = (scale, shift, alpha, beta) per channel. Spec: VEC4. Params: 0 = element count (E units), 1 = C,
+// Pass 3 of the BatchNorm backward: DX = w · invstd · (dz − db / n − x̂ · dw / n) with x̂ = (x − mean) · invstd and
+// dz = g · act'(x̂ · w + b), the same pre-activation expression as the forward and the reduction pass.
+// K = (mean, invstd, w, b, db / n, dw / n) per channel. Spec: VEC4. Params: 0 = element count (E units), 1 = C,
 // 2 = hw.
 @group(0) @binding(1) var<storage, read> X: array<E>;
 @group(0) @binding(2) var<storage, read> G: array<E>;
@@ -14,11 +15,13 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
     var lanes = 1u;
     if (VEC) { lanes = 4u; }
     let c = ((i * lanes) / pu(2u)) % pu(1u);
-    let x = V4(X[i]);
-    let scale = K[4u * c];
+    let k = 6u * c;
+    let inv = K[k + 1u];
+    let w = K[k + 2u];
+    let xh = (V4(X[i]) - K[k]) * inv;
     var dz = V4(G[i]);
     if (ACT != 0u) {
-        dz *= bn_act_grad(x * scale + K[4u * c + 1u]);
+        dz *= bn_act_grad(xh * w + K[k + 3u]);
     }
-    DX[i] = OUT(scale * dz + K[4u * c + 2u] * x + K[4u * c + 3u]);
+    DX[i] = OUT((w * inv) * (dz - K[k + 4u] - xh * K[k + 5u]));
 }

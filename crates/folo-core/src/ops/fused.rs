@@ -141,9 +141,16 @@ impl Tensor {
             if rm.same_storage(rv) {
                 return Err(Error::invalid_arg(OP, "running mean and variance share a storage"));
             }
-            let (mut gm, mut gv) = (rm.cell().write(), rv.cell().write());
+            // Versions are bumped only if the backend may have written (not on `NotSupported`), so a
+            // fallback leaves graphs that saved the running statistics intact.
+            let (mut gm, mut gv) = (rm.cell().write_unversioned(), rv.cell().write_unversioned());
             let up = RunningUpdate { mean: &mut gm, var: &mut gv, momentum: momentum as f32 };
-            b.batch_norm_act(v[0], v[1], v[2], eps as f32, act, Some(up))
+            let r = b.batch_norm_act(v[0], v[1], v[2], eps as f32, act, Some(up));
+            if !matches!(&r, Err(e) if unsupported(e)) {
+                rm.cell().mark_modified();
+                rv.cell().mark_modified();
+            }
+            r
         });
         let (y, mean, invstd) = match r {
             Ok(s) => s,
@@ -259,10 +266,17 @@ impl Tensor {
         let b = self.backend()?;
         let r = {
             let gr = grad.cell().read();
-            let mut pw = self.cell().write();
-            let mut sw: Vec<_> = state.iter().map(|t| t.cell().write()).collect();
+            let mut pw = self.cell().write_unversioned();
+            let mut sw: Vec<_> = state.iter().map(|t| t.cell().write_unversioned()).collect();
             let mut sm: Vec<&mut crate::Storage> = sw.iter_mut().map(|g| &mut **g).collect();
-            b.optimizer_step(&mut pw, crate::backend::View::new(&gr, grad.layout()), &mut sm, step)
+            let r = b.optimizer_step(&mut pw, crate::backend::View::new(&gr, grad.layout()), &mut sm, step);
+            // Bump versions only if the backend may have written, so a fallback keeps existing graphs valid.
+            if !matches!(&r, Err(e) if unsupported(e)) {
+                for t in std::iter::once(self).chain(state.iter().copied()) {
+                    t.cell().mark_modified();
+                }
+            }
+            r
         };
         match r {
             Ok(()) => Ok(true),
