@@ -83,6 +83,13 @@ training and evaluation pipeline, a server, a CLI and a web studio.
   `mcp` (Model Context Protocol server over stdio so agents can train and run models), `doctor`. Every command takes
   `--json` (one JSON object per line on stdout, human text on stderr) and uses stable exit codes.
 
+## Front ends
+- **FOLO Studio** (`web/`): Svelte 5 + TypeScript + Vite, a custom design system (tokens, components) and no UI kit.
+  Talks only to `docs/API.md`; `web/src/lib/api/` holds the typed client and a dev mock.
+- **FOLO Desktop** (`apps/desktop/`): native Rust app on GPUI (Zed's GPU-accelerated UI framework). Same screens and
+  design language as Studio. It talks to a local `folo serve` over the same API (it can spawn one), so the engine and
+  the UI stay decoupled. It is a separate cargo workspace so the main workspace and its CI stay GPUI-free.
+
 ## Agent-first design
 - Machine-readable everything: `--json`, JSON Schemas for configs, `folo describe` prints the CLI surface as JSON.
 - `folo mcp` exposes tools: `list_datasets`, `dataset_stats`, `train`, `run_status`, `predict`, `val`, `export`.

@@ -12,6 +12,7 @@ Status keys: `[ ]` todo, `[~]` in progress, `[x]` merged. The orchestrator keeps
 - [ ] server + CLI skeleton: API.md endpoints with `--mock`, `folo serve`, `folo describe`, `--json` conventions
 - [ ] gpu: wgpu device, buffer pool, WGSL GEMM / elementwise / reduce kernels with CPU-parity tests
 - [ ] Studio v1 (web/) against the mock server, UI hill-climb loop to 9/10
+- [ ] Desktop v1 (apps/desktop, GPUI) against the mock server, UI hill-climb loop to 9/10
 
 ## M2 — learning end to end (CPU)
 - [ ] nn: Module, Conv2d, BatchNorm2d, activations, pooling, upsample, concat, init, SGD/AdamW, schedules, EMA, .folo IO
