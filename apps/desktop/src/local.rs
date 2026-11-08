@@ -45,6 +45,17 @@ static LOAD: Mutex<()> = Mutex::new(());
 /// Bumped by [`forget_all`]: a load that started before can't publish into the new backend's cache.
 static GENERATION: AtomicU64 = AtomicU64::new(0);
 
+/// The cache generation a request belongs to: taken when the request is scheduled (with its
+/// backend), so a request scheduled before a backend switch can't publish into the new backend's
+/// cache, however late it gets to loading.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Generation(u64);
+
+/// The current cache generation (see [`Generation`]).
+pub fn generation() -> Generation {
+    Generation(GENERATION.load(Ordering::SeqCst))
+}
+
 /// A lock that survives a panic elsewhere (the data under it stays consistent: whole entries).
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
@@ -84,8 +95,13 @@ fn device(target: Target) -> ApiResult<(Device, String)> {
 
 /// The predictor of `model_id` on `target`: the loaded one while the server says its weights are
 /// unchanged (or can't be reached), else freshly downloaded and loaded.
-fn predictor(api: &dyn Backend, model_id: &str, target: Target) -> ApiResult<Arc<Mutex<Predictor>>> {
-    predictor_with(&api.describe(), model_id, target, |etag| api.model_weights(model_id, etag))
+fn predictor(
+    api: &dyn Backend,
+    model_id: &str,
+    target: Target,
+    generation: Generation,
+) -> ApiResult<Arc<Mutex<Predictor>>> {
+    predictor_with(&api.describe(), model_id, target, generation, |etag| api.model_weights(model_id, etag))
 }
 
 /// [`predictor`] over any weights source: `fetch(etag)` answers `None` when `etag` is current.
@@ -93,9 +109,9 @@ fn predictor_with(
     server: &str,
     model_id: &str,
     target: Target,
+    generation: Generation,
     fetch: impl FnOnce(Option<&str>) -> ApiResult<Option<Weights>>,
 ) -> ApiResult<Arc<Mutex<Predictor>>> {
-    let generation = GENERATION.load(Ordering::SeqCst);
     let _loading = lock(&LOAD);
     let is = |l: &Loaded| l.server == server && l.model_id == model_id && l.target == target;
     let held = lock(&CACHE).iter().find(|l| is(l)).map(|l| (l.etag.clone(), l.predictor.clone()));
@@ -124,7 +140,7 @@ fn predictor_with(
     let predictor = Arc::new(Mutex::new(predictor));
     let mut cache = lock(&CACHE);
     // The backend changed while this loaded: use it for this answer, but don't keep it.
-    if GENERATION.load(Ordering::SeqCst) != generation {
+    if self::generation() != generation {
         return Ok(predictor);
     }
     cache.retain(|l| !is(l));
@@ -159,7 +175,13 @@ pub fn forget_all() {
 }
 
 /// `POST /api/predict`, answered in this process. `device` reads "local:<name>".
-pub fn predict(api: &dyn Backend, req: &PredictRequest, target: Target) -> ApiResult<PredictResponse> {
+/// `generation` is [`generation()`] as of when the request was scheduled.
+pub fn predict(
+    api: &dyn Backend,
+    req: &PredictRequest,
+    target: Target,
+    generation: Generation,
+) -> ApiResult<PredictResponse> {
     let (_, name) = device(target)?;
     let encoded;
     let bytes: &[u8] = match &req.input {
@@ -174,7 +196,7 @@ pub fn predict(api: &dyn Backend, req: &PredictRequest, target: Target) -> ApiRe
             }
         },
     };
-    run(&*predictor(api, &req.model_id, target)?, bytes, req, &name)
+    run(&*predictor(api, &req.model_id, target, generation)?, bytes, req, &name)
 }
 
 /// One prediction of encoded `bytes` with a loaded predictor.
@@ -243,29 +265,32 @@ mod tests {
         let bytes = weights();
         let fresh = |etag: &str| Ok(Some(Weights { bytes: bytes.clone(), etag: etag.into() }));
         let srv = "test-local";
-        let first = predictor_with(srv, "m_1", Target::Cpu, |held| {
+        let first = predictor_with(srv, "m_1", Target::Cpu, generation(), |held| {
             assert_eq!(held, None);
             fresh("\"a\"")
         })
         .unwrap();
         // Unchanged: the loaded model is reused, and the ETag it was loaded with is what's sent.
-        let same = predictor_with(srv, "m_1", Target::Cpu, |held| {
+        let same = predictor_with(srv, "m_1", Target::Cpu, generation(), |held| {
             assert_eq!(held, Some("\"a\""));
             Ok(None)
         })
         .unwrap();
         assert!(Arc::ptr_eq(&first, &same));
         // The server is gone: the copy here still runs. Other errors (a deleted model) don't hide.
-        let offline =
-            predictor_with(srv, "m_1", Target::Cpu, |_| Err(ApiError::new("server_unreachable", "x")));
+        let offline = predictor_with(srv, "m_1", Target::Cpu, generation(), |_| {
+            Err(ApiError::new("server_unreachable", "x"))
+        });
         assert!(Arc::ptr_eq(&first, &offline.unwrap()));
-        let gone = predictor_with(srv, "m_1", Target::Cpu, |_| Err(ApiError::new("model_not_found", "x")));
+        let gone = predictor_with(srv, "m_1", Target::Cpu, generation(), |_| {
+            Err(ApiError::new("model_not_found", "x"))
+        });
         assert_eq!(gone.err().map(|e| e.code), Some("model_not_found".into()));
         // Retrained: a new ETag loads the new file.
-        let retrained = predictor_with(srv, "m_1", Target::Cpu, |_| fresh("\"b\"")).unwrap();
+        let retrained = predictor_with(srv, "m_1", Target::Cpu, generation(), |_| fresh("\"b\"")).unwrap();
         assert!(!Arc::ptr_eq(&first, &retrained));
         // Same id on another server is another model.
-        let other = predictor_with("elsewhere", "m_1", Target::Cpu, |held| {
+        let other = predictor_with("elsewhere", "m_1", Target::Cpu, generation(), |held| {
             assert_eq!(held, None);
             fresh("\"a\"")
         });
@@ -299,7 +324,7 @@ mod tests {
         let (a, b) = std::thread::scope(|s| {
             let load = || {
                 started.wait();
-                predictor_with(srv, "m_r", Target::Cpu, |held| match held {
+                predictor_with(srv, "m_r", Target::Cpu, generation(), |held| match held {
                     None => {
                         fresh_loads.fetch_add(1, Ordering::SeqCst);
                         // A slow download: the other request must wait for it, then revalidate.
@@ -326,13 +351,21 @@ mod tests {
         let _serial = lock(&SERIAL);
         let bytes = weights();
         let srv = "test-switch";
-        let p = predictor_with(srv, "m_s", Target::Cpu, |_| {
+        let p = predictor_with(srv, "m_s", Target::Cpu, generation(), |_| {
             // The user switches servers while this download is under way.
             forget_all();
             Ok(Some(Weights { bytes: bytes.clone(), etag: "\"s\"".into() }))
         });
         assert!(p.is_ok(), "the request still gets its answer");
         assert!(!lock(&CACHE).iter().any(|l| l.server == srv), "but the old server's model isn't cached");
+        // Scheduled before a switch, loading only after it (its image was still downloading).
+        let scheduled = generation();
+        forget_all();
+        let late = predictor_with(srv, "m_s", Target::Cpu, scheduled, |_| {
+            Ok(Some(Weights { bytes: bytes.clone(), etag: "\"s\"".into() }))
+        });
+        assert!(late.is_ok());
+        assert!(!lock(&CACHE).iter().any(|l| l.server == srv), "a late request can't publish either");
     }
 
     #[test]
@@ -367,7 +400,7 @@ mod tests {
             }
             // Twice: the second run reuses the loaded model (a 304).
             for _ in 0..2 {
-                let local = predict(&api, &req, target).unwrap();
+                let local = predict(&api, &req, target, generation()).unwrap();
                 println!(
                     "{:<7} {:>3} boxes, {:>3} >= 0.25, {:.1} ms on {}",
                     format!("{target:?}"),

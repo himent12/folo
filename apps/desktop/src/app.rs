@@ -1839,10 +1839,12 @@ impl FoloApp {
         self.play_pred_seq += 1;
         let seq = self.play_pred_seq;
         let target = self.play_target;
+        // Taken with the backend handle: a switch after this makes the load's model throwaway.
+        let generation = crate::local::generation();
         self.fetch(
             cx,
             move |api| match target {
-                Some(t) => crate::local::predict(api, &req, t),
+                Some(t) => crate::local::predict(api, &req, t, generation),
                 None => api.predict(&req),
             },
             move |this, r, _| {
