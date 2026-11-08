@@ -771,7 +771,17 @@ impl FoloApp {
             .collect();
         let loss_max = (0..4).filter(|&i| self.loss_parts[i]).map(|i| d.loss_max[i]).fold(0f32, f32::max);
         let mut loss = base("run-loss", loss_series, primary_h);
-        loss.y_range = Some((0., crate::charts::nice_ceil((loss_max * 1.05).max(0.1), 4)));
+        let loss_min = (0..4)
+            .filter(|&i| self.loss_parts[i])
+            .flat_map(|i| d.loss[i].iter().map(|p| p.1))
+            .filter(|v| *v > 0.)
+            .fold(f32::INFINITY, f32::min);
+        let loss_min = if loss_min.is_finite() { loss_min } else { 0.5 };
+        loss.log_y = true;
+        loss.y_range = Some((
+            2f32.powi(loss_min.max(1e-3).log2().floor() as i32),
+            2f32.powi((loss_max.max(loss_min * 2.) * 1.05).log2().ceil() as i32),
+        ));
         let mut map = base(
             "run-map",
             vec![

@@ -810,7 +810,7 @@ impl FoloApp {
                                 .child(text(ty::XS, t.text_tertiary).child(if close_mosaic < 0.5 {
                                     "Off: mosaic all the way through".to_string()
                                 } else {
-                                    format!("The last {close_mosaic:.0} epochs train on plain images")
+                                    format!("last {close_mosaic:.0} epochs train without mosaic")
                                 })),
                         ),
                     ),
@@ -972,7 +972,7 @@ impl FoloApp {
                     .flex_none()
                     .items_center()
                     .gap(px(8.))
-                    .child(text(ty::XS, t.text_tertiary).whitespace_nowrap().mr(px(4.)).child("Ctrl Enter"))
+                    .child(div().mr(px(4.)).child(shortcut(&t, &["Ctrl", "Enter"])))
                     .child(cancel)
                     .child(start),
             );

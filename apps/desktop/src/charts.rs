@@ -160,16 +160,10 @@ impl LineChart {
     }
 }
 
-/// Round tick spacing near `range / n`: 1, 2, 2.5 or 5 × 10^k.
-/// `v` rounded up to the next tick of a nice step (axis tops that land on a label).
-pub fn nice_ceil(v: f32, n: usize) -> f32 {
-    let step = nice_step(v, n);
-    (v / step).ceil() * step
-}
-
 /// Height of one marker-label lane above a plot.
 const LANE: f32 = 16.;
 
+/// Round tick spacing near `range / n`: 1, 2, 2.5 or 5 × 10^k.
 pub fn nice_step(range: f32, n: usize) -> f32 {
     if range <= 0.0 || !range.is_finite() {
         return 1.0;
@@ -282,6 +276,17 @@ pub fn format_step(v: f32, step: f32) -> String {
         d += 1;
     }
     format!("{v:.d$}")
+}
+
+/// Powers of two from `y0` to `y1` (both > 0), for log axes.
+pub fn pow2_ticks(y0: f32, y1: f32) -> Vec<f32> {
+    let mut t = 2f32.powi(y0.max(1e-6).log2().ceil() as i32);
+    let mut out = Vec::new();
+    while t <= y1 * 1.0001 && out.len() < 16 {
+        out.push(t);
+        t *= 2.;
+    }
+    out
 }
 
 /// The power of ten a y axis over `y0..y1` with `ticks` ticks shows once, if its values are tiny
@@ -801,13 +806,16 @@ fn paint_line_chart(
         y1 = y0 + 1.0;
     }
     let (ly0, ly1) = if spec.log_y { (y0.max(1e-6).ln(), y1.max(1e-6).ln()) } else { (y0, y1) };
-    let yticks = if spec.log_y { Vec::new() } else { ticks(y0, y1, spec.y_ticks) };
+    // Log axes tick at powers of two (0.5 1 2 4 8): a factor of two reads the same everywhere.
+    let yticks = if spec.log_y { pow2_ticks(y0, y1) } else { ticks(y0, y1, spec.y_ticks) };
     let ystep = nice_step(y1 - y0, spec.y_ticks);
     // Tiny values share one power of ten, shown once ("0 5 10" and "× 10⁻³", design/README).
     let ypow = (spec.y_fmt.is_none() && !spec.log_y).then(|| axis_pow(y0, y1, spec.y_ticks)).flatten();
     let ylabels: Vec<String> = yticks
         .iter()
         .map(|v| match (spec.y_fmt, ypow) {
+            // Powers of two read as plain numbers: 8, 4, 2, 1, 0.5, 0.25.
+            (None, _) if spec.log_y => format!("{v}"),
             (Some(f), _) => f(*v),
             (None, Some(p)) => {
                 let k = 10f32.powi(-p);
@@ -1521,6 +1529,12 @@ mod tests {
         let pts = [(0.0, 1.0), (0.2, 0.9), (0.4, 0.5)];
         assert_eq!(value_near(&pts, 0.41, 1.), Some(0.5));
         assert_eq!(value_near(&pts, 0.9, 1.), None);
+    }
+
+    #[test]
+    fn log_axes_tick_at_powers_of_two() {
+        assert_eq!(pow2_ticks(0.4, 9.), vec![0.5, 1., 2., 4., 8.]);
+        assert_eq!(pow2_ticks(1., 1.5), vec![1.]);
     }
 
     #[test]
