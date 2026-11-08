@@ -1,0 +1,44 @@
+# FOLO Desktop: its own cargo workspace so the root workspace and its CI stay GPUI-free.
+[workspace]
+resolver = "3"
+
+[package]
+name = "folo-desktop"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/himent12/folo"
+description = "FOLO Desktop: the native GPUI front end for FOLO"
+publish = false
+
+[[bin]]
+name = "folo-desktop"
+path = "src/main.rs"
+
+[dependencies]
+gpui = "0.2.2"
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Same major as gpui's own `image` dependency, so RenderImage frames are the same type.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+
+[build-dependencies]
+serde_json = "1"
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
