@@ -171,3 +171,22 @@ fn staged_upload_from_another_thread() {
         assert_eq!(back, data, "length {len}");
     }
 }
+
+/// A lost device (here: destroyed on purpose) makes waits and readbacks return `DeviceLost` instead of panicking
+/// inside wgpu, and stays lost. Uses a private context so the shared one other tests use is untouched.
+#[test]
+fn lost_device_is_an_error_not_a_panic() {
+    let _shared = gpu!();
+    let ctx = crate::GpuContext::new().unwrap();
+    let buf = ctx.upload(&[1, 2, 3, 4]).unwrap();
+    ctx.sync().unwrap();
+    ctx.device().destroy();
+    let err = ctx.sync().and_then(|_| ctx.read(buf.raw(), 0, 4).map(|_| ())).unwrap_err();
+    assert!(matches!(err, crate::GpuError::DeviceLost(_)), "{err}");
+    assert!(ctx.lost_reason().is_some());
+    assert!(matches!(ctx.sync(), Err(crate::GpuError::DeviceLost(_))));
+    // As folo-core sees it through the backend: recognisable, unlike other backend errors.
+    let core = |msg: String| folo_core::Error::Backend { backend: crate::backend::BACKEND_NAME, msg };
+    assert!(crate::is_device_lost(&core(err.to_string())));
+    assert!(!crate::is_device_lost(&core(crate::GpuError::Wgpu("validation".into()).to_string())));
+}

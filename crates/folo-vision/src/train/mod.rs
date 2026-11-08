@@ -529,7 +529,7 @@ impl Trainer {
             )));
         }
         self.emitter.status(RunStatus::Running, None);
-        let r = self.run_inner();
+        let r = self.run_inner().map_err(|e| self.explain_device_loss(e));
         match &r {
             Ok(s) => self.emitter.status(s.status, None),
             Err(e) => {
@@ -538,6 +538,26 @@ impl Trainer {
             }
         }
         r
+    }
+
+    /// A lost GPU device (driver reset, TDR) fails the run with a message that says so and where to resume: the
+    /// checkpoints are only written at epoch boundaries, so `weights/last.folo` still holds the last finished epoch.
+    fn explain_device_loss(&self, e: Error) -> Error {
+        let lost = matches!(&e, Error::Core(c) if folo_gpu::is_device_lost(c))
+            || matches!(&e, Error::Nn(folo_nn::Error::Core(c)) if folo_gpu::is_device_lost(c));
+        if !lost {
+            return e;
+        }
+        let resume = match &self.opts_dir {
+            Some(dir) if self.epoch > 0 => format!(
+                "; {} still holds epoch {}: resume with `folo train --resume {}`",
+                dir.join("weights/last.folo").display(),
+                self.epoch,
+                dir.join("weights/last.folo").display()
+            ),
+            _ => String::new(),
+        };
+        Error::Failed(format!("the GPU device was lost during epoch {} ({e}){resume}", self.epoch + 1))
     }
 
     fn run_inner(&mut self) -> Result<TrainSummary> {

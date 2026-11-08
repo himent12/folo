@@ -206,6 +206,8 @@ struct Inner {
     kernels: Mutex<HashMap<KernelKey, Arc<Kernel>>>,
     batch: Mutex<Batch>,
     errors: Arc<Mutex<Vec<String>>>,
+    /// Set once the device is lost (by wgpu's device-lost callback, or by a poll that failed fatally).
+    lost: Arc<Mutex<Option<String>>>,
     dummy: wgpu::Buffer,
     dispatches: AtomicU64,
     submissions: AtomicU64,
@@ -437,6 +439,13 @@ impl GpuContext {
                 v.push(e.to_string());
             }
         }));
+        let lost: Arc<Mutex<Option<String>>> = Arc::default();
+        let flag = lost.clone();
+        device.set_device_lost_callback(move |reason, msg| {
+            if let Ok(mut l) = flag.lock() {
+                l.get_or_insert_with(|| format!("{reason:?}: {msg}"));
+            }
+        });
         let dl = device.limits();
         let caps = Capabilities {
             shader_f16: device.features().contains(wgpu::Features::SHADER_F16),
@@ -463,6 +472,7 @@ impl GpuContext {
                 kernels: Mutex::default(),
                 batch: Mutex::default(),
                 errors,
+                lost,
                 dummy,
                 dispatches: AtomicU64::new(0),
                 submissions: AtomicU64::new(0),
@@ -753,12 +763,36 @@ impl GpuContext {
     }
 
     /// Blocks until the device is idle (returns at once in the browser, where WebGPU's `poll` cannot wait).
+    ///
+    /// A lost device is [`GpuError::DeviceLost`], not a panic: wgpu treats a failed poll on a lost device as fatal
+    /// and panics inside `Device::poll` (its message still reaches stderr through the panic hook), so the poll
+    /// runs under `catch_unwind` and the loss is remembered, failing every later wait at once.
     fn wait_idle(&self) -> Result<()> {
-        self.inner
-            .device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .map(|_| ())
-            .map_err(|e| GpuError::Poll(e.to_string()))
+        if let Some(why) = self.lost_reason() {
+            return Err(GpuError::DeviceLost(why));
+        }
+        let polled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.inner.device.poll(wgpu::PollType::wait_indefinitely())
+        }));
+        match polled {
+            Ok(r) => r.map(|_| ()).map_err(|e| GpuError::Poll(e.to_string())),
+            Err(panic) => {
+                let msg = panic
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string()))
+                    .unwrap_or_else(|| "Device::poll panicked".into());
+                let why = self.lost_reason().unwrap_or(msg);
+                self.inner.lost.lock().expect("lost lock").get_or_insert_with(|| why.clone());
+                Err(GpuError::DeviceLost(why))
+            }
+        }
+    }
+
+    /// Why the device was lost (wgpu's reason and message), if it was. Every wait then fails with
+    /// [`GpuError::DeviceLost`].
+    pub fn lost_reason(&self) -> Option<String> {
+        self.inner.lost.lock().expect("lost lock").clone()
     }
 
     fn take_error(&self) -> Result<()> {

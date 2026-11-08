@@ -683,7 +683,10 @@ and a `u8 → f32 / 255` conversion on the device; the loss is folo-gpu's (§7.4
 and the factor on the device. A step waits for the GPU twice, both after the loss: the reported items and the
 finiteness check of the running statistics (one readback for all of them). Validation uploads `u8` batches too and
 runs the predictor's forward + decode on the device (NMS on the host). The numbers are the same as on the CPU up to
-float rounding (sums in other orders), so a run is reproducible on one device but not bit-identical across devices.
+float rounding (sums in other orders), so a run is reproducible on one device (a GPU resume is bit-exact) but not
+bit-identical across devices. If the GPU is lost mid-run (a driver reset / TDR), the run fails with `status: failed`
+and a message naming the lost device and the `--resume` command: checkpoints are written only at epoch boundaries, so
+`weights/last.folo` still holds the last finished epoch.
 
 **Progress reporting (API `Run` / `Step`).** `Run.step` and `Step.step` count training **batches** completed in the
 run (`e · nb + k + 1`), and `Run.steps_per_epoch = nb`. The optimizer iteration `t` is internal (checkpoints only).

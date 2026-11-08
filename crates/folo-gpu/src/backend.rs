@@ -203,6 +203,13 @@ pub fn dense_buffer(t: &folo_core::Tensor) -> Option<wgpu::Buffer> {
     })
 }
 
+/// Whether a folo-core error is this backend reporting a lost device ([`GpuError::DeviceLost`]): the GPU was reset
+/// or removed, so nothing on it can continue and a run should stop and resume from its last checkpoint.
+pub fn is_device_lost(e: &Error) -> bool {
+    let lost = GpuError::DeviceLost(String::new()).to_string();
+    matches!(e, Error::Backend { backend, msg } if *backend == BACKEND_NAME && msg.starts_with(lost.as_str()))
+}
+
 fn core_err(e: GpuError) -> Error {
     Error::Backend { backend: BACKEND_NAME, msg: e.to_string() }
 }
