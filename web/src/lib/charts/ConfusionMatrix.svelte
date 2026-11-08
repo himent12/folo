@@ -6,9 +6,9 @@
    */
   import { classColor } from '$lib/design/tokens';
   import { prefs } from '$lib/prefs.svelte';
-  // Cell labels are pure white or black, switched where the ramp's luminance crosses over (computed from the theme's
-  // ink and well colours): every label then keeps >= 4.5:1 over the whole ramp (worst 4.6:1 dark, 4.58:1 light).
-  const flip = $derived(prefs.resolvedTheme === 'light' ? 0.51 : 0.55);
+  import { CONFUSION_FLIP } from './confusionInk';
+  // Cell labels are pure white or black, switched near the ramp's luminance crossover (see ./confusionInk).
+  const flip = $derived(CONFUSION_FLIP[prefs.resolvedTheme]);
 
   let {
     classes,
