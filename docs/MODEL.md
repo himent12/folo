@@ -504,8 +504,9 @@ v = (4 / π²) · (atan(w2 / h2) − atan(w1 / h1))²
 α = v / (1 − iou + v + eps)                 # treated as a constant: no gradient flows through α
 CIoU = iou − (rho2 / c2 + v · α)
 ```
-folo-vision's box ops already provide CIoU. The loss needs exactly this form, including the `eps` placements, and a
-differentiable version for `pd_box`.
+folo-vision provides exactly this form, including the `eps` placements, as `boxes::ciou_eps`; the assigner uses it.
+`boxes::iou(.., IouKind::Ciou)` is a different, eps-free variant (identical boxes give exactly 1) for general use, not
+for the assigner or the loss. The loss also needs a differentiable version of `ciou_eps` for `pd_box`.
 
 ### 7.3 Task-aligned assigner
 Per image, for ground truths `g` and anchors `a` (anchor points in pixels), with `top_k = 10`, `alpha = 0.5`,
@@ -527,6 +528,10 @@ Per image, for ground truths `g` and anchors `a` (anchor points in pixels), with
    stride.
 
 An image with no gt has every anchor background. The assigner runs without autograd (`no_grad`).
+
+Implementation: `folo_vision::assign` (`assign`, `TalConfig` with these defaults and `min_box_size = 16`,
+`candidate_box`, `dfl_targets`, `dfl_bins`), one image at a time on plain slices, everything in input pixels.
+`crates/folo-vision/tests/assign_cases.rs` has a hand-checked test for each step above.
 
 ### 7.4 Terms
 Over the whole batch (all images, all anchors, all classes):
@@ -713,9 +718,10 @@ augmentation: resize as above and pad to a square `s × s` (§9.2) only.
 - Validate after every epoch and always after the last, with the EMA weights (or the live model if `ema = false`),
   at the training `imgsz`, with batch `2 · batch`, `conf = 0.001`, `iou = 0.7`, `max_det = 300`, multi-label NMS
   (§9.3).
-- Metrics: precision, recall, mAP@0.5 and mAP@0.5:0.95 (COCO-style, 101-point, folo-vision metrics), computed in
-  the network input space: ground-truth boxes go through the same resize and pad as the image, so predictions need
-  no inverse map. Fitness is mAP@0.5:0.95.
+- Metrics: precision, recall, mAP@0.5 and mAP@0.5:0.95 exactly as docs/METRICS.md defines them (pycocotools mAP,
+  101-point, at most 100 detections per class per image out of the 300 NMS keeps; precision and recall at the
+  confidence that maximises the class-mean F1), computed in the network input space: ground-truth boxes go through
+  the same resize and pad as the image, so predictions need no inverse map. Fitness is mAP@0.5:0.95.
 - Best and early stopping: `best_fitness` starts at −∞ and `best_epoch` at −1. After validating epoch `e`, if
   `fitness > best_fitness`, set both and write `best`. Write `last` every epoch. Stop after epoch `e` when
   `e − best_epoch >= patience`. Checkpoints persist `{ "epoch": best_epoch, "fitness": best_fitness }` as

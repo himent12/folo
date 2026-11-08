@@ -214,7 +214,12 @@ mod tests {
         assert_eq!(a.points[80], [0.5, 1.5]);
         assert_eq!(a.point_px(6400), [8.0, 8.0]);
         assert_eq!(a.point_px(8399), [624.0, 624.0]);
-        // Non-square, non-multiple input.
+        // MODEL.md §10.2: a rectangular 384x640 (H x W) input has 48·80 + 24·40 + 12·20 = 5040 anchors.
+        let a = make_anchors(384, 640, &[8, 16, 32], 0.5);
+        assert_eq!(a.len(), 5040);
+        assert_eq!(a.levels[2], AnchorLevel { stride: 32, height: 12, width: 20, start: 4800 });
+        assert_eq!(a.point_px(4800 + 20), [16.0, 48.0]);
+        // Non-square, non-multiple input (outside the spec, which requires multiples of 32): ceil, like the convs.
         let a = make_anchors(100, 50, &[32], 0.5);
         assert_eq!((a.levels[0].height, a.levels[0].width), (4, 2));
     }
