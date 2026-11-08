@@ -199,6 +199,9 @@ pub struct Trainer {
     /// Unknown `folo.*` metadata of the checkpoint a run resumed from, written back into its checkpoints
     /// (FORMAT.md: tools that rewrite a file preserve them).
     extra_meta: BTreeMap<String, String>,
+    /// The last checkpoint this trainer wrote or resumed from, and the epochs it holds (named when a lost GPU
+    /// device fails the run).
+    last_saved: Option<(PathBuf, u32)>,
 }
 
 impl Trainer {
@@ -280,6 +283,7 @@ impl Trainer {
         t.epoch = u32::try_from(r.epoch).map_err(|_| Error::Config("folo.epoch out of range".into()))?;
         t.best = r.best;
         t.extra_meta = file.metadata().extra.clone();
+        t.last_saved = Some((path.to_path_buf(), t.epoch));
         t.consecutive_bad = match file.metadata().extra.get(NONFINITE_STREAK_KEY) {
             Some(v) => v
                 .parse()
@@ -423,6 +427,7 @@ impl Trainer {
             at_boundary: true,
             consecutive_bad: 0,
             extra_meta: BTreeMap::new(),
+            last_saved: None,
         })
     }
 
@@ -540,24 +545,13 @@ impl Trainer {
         r
     }
 
-    /// A lost GPU device (driver reset, TDR) fails the run with a message that says so and where to resume: the
-    /// checkpoints are only written at epoch boundaries, so `weights/last.folo` still holds the last finished epoch.
+    /// A lost GPU device (driver reset, TDR) fails the run with a message that says so and names the checkpoint to
+    /// resume from. Checkpoints are written only at epoch boundaries, so the last one written stays intact.
     fn explain_device_loss(&self, e: Error) -> Error {
-        let lost = matches!(&e, Error::Core(c) if folo_gpu::is_device_lost(c))
-            || matches!(&e, Error::Nn(folo_nn::Error::Core(c)) if folo_gpu::is_device_lost(c));
-        if !lost {
+        if !device_lost(&e) {
             return e;
         }
-        let resume = match &self.opts_dir {
-            Some(dir) if self.epoch > 0 => format!(
-                "; {} still holds epoch {}: resume with `folo train --resume {}`",
-                dir.join("weights/last.folo").display(),
-                self.epoch,
-                dir.join("weights/last.folo").display()
-            ),
-            _ => String::new(),
-        };
-        Error::Failed(format!("the GPU device was lost during epoch {} ({e}){resume}", self.epoch + 1))
+        Error::Failed(device_loss_message(&e, self.last_saved.as_ref().map(|(p, n)| (p.as_path(), *n))))
     }
 
     fn run_inner(&mut self) -> Result<TrainSummary> {
@@ -859,7 +853,7 @@ impl Trainer {
 
     /// `weights/last.folo` (and `best.folo` when `improved`) and the epoch's samples.
     fn write_epoch_files(
-        &self,
+        &mut self,
         e: u32,
         improved: bool,
         samples: &[ValSample],
@@ -869,6 +863,7 @@ impl Trainer {
         let weights = dir.join("weights");
         let last = weights.join("last.folo");
         self.save_checkpoint(&last)?;
+        self.last_saved = Some((last.clone(), self.epoch));
         if improved {
             let best = weights.join("best.folo");
             let (tmp, mut f) = folo_nn::io::safetensors::create_temp_beside(&best)?;
@@ -944,6 +939,29 @@ impl Trainer {
     }
 }
 
+/// Whether `e` is folo-gpu reporting a lost device, from the trainer's own tensor work, a layer, or the batch
+/// feeder.
+fn device_lost(e: &Error) -> bool {
+    match e {
+        Error::Core(c) | Error::Nn(folo_nn::Error::Core(c)) => folo_gpu::is_device_lost(c),
+        _ => false,
+    }
+}
+
+/// The failure message of a run whose GPU was lost: the cause, and the checkpoint to resume from (the last one
+/// written or resumed from, with the epochs it holds) or that there is none.
+fn device_loss_message(e: &Error, last: Option<(&Path, u32)>) -> String {
+    let resume = match last {
+        Some((p, n)) => format!(
+            "{} holds the state after epoch {n}: resume with `folo train --resume {}`",
+            p.display(),
+            p.display()
+        ),
+        None => "no checkpoint was written yet: start the run again".into(),
+    };
+    format!("the GPU device was lost ({e}); {resume}")
+}
+
 fn loss_json(i: &LossItems) -> folo_api::Loss {
     folo_api::Loss { box_: i.box_, cls: i.cls, dfl: i.dfl, total: i.total() }
 }
@@ -960,6 +978,24 @@ struct Clock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A lost GPU device is recognised wherever it surfaces (tensor work, a layer, the batch feeder) and the
+    /// message names the checkpoint that was actually written; other errors are left alone.
+    #[test]
+    fn device_loss_is_explained() {
+        let lost = || folo_core::Error::from(folo_gpu::GpuError::DeviceLost("Destroyed".into()));
+        let other = folo_core::Error::from(folo_gpu::GpuError::Wgpu("validation".into()));
+        assert!(device_lost(&Error::Core(lost())));
+        assert!(device_lost(&Error::Nn(folo_nn::Error::Core(lost()))));
+        assert!(!device_lost(&Error::Core(other)));
+        assert!(!device_lost(&Error::Failed("GPU device lost".into())));
+        let p = Path::new("runs/r6/weights/last.folo");
+        let m = device_loss_message(&Error::Core(lost()), Some((p, 266)));
+        assert!(m.contains("GPU device lost") && m.contains("after epoch 266"), "{m}");
+        assert!(m.contains(&format!("--resume {}", p.display())), "{m}");
+        let m = device_loss_message(&Error::Core(lost()), None);
+        assert!(m.contains("no checkpoint was written yet"), "{m}");
+    }
 
     /// MODEL.md §10.4: patience 2 with fitness [0.1, 0.3, 0.2, 0.2] stops after epoch 3 (best epoch 1), and a
     /// resume from the epoch-2 state (the `folo.best` a checkpoint persists) stops at the same epoch.

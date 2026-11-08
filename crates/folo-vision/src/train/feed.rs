@@ -26,7 +26,7 @@ impl Feeder {
             .spawn(move || {
                 for b in iter {
                     let item = b.map_err(Error::from).and_then(|mut b| {
-                        let staged = ctx.stage(&b.images_u8).map_err(|e| Error::Failed(e.to_string()))?;
+                        let staged = ctx.stage(&b.images_u8).map_err(|e| Error::Core(e.into()))?;
                         b.images_u8 = Vec::new();
                         Ok((b, staged))
                     });
@@ -71,7 +71,40 @@ pub(crate) fn staged_tensor(
     if staged.len() != n as u64 {
         return Err(Error::Failed(format!("staged batch holds {} bytes, expected {n}", staged.len())));
     }
-    let buf = ctx.upload_staged(staged).map_err(|e| Error::Failed(e.to_string()))?;
+    let buf = ctx.upload_staged(staged).map_err(|e| Error::Core(e.into()))?;
     let x = folo_gpu::tensor_from_buffer(device, DType::U8, shape, buf)?;
     Ok(x.to_dtype(DType::F32)?.div_scalar(255.0)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use folo_data::synthetic::{SyntheticConfig, SyntheticDataset};
+    use folo_data::{DataLoader, LoaderConfig, Split};
+
+    /// A batch staged on a lost device comes out of the feeder as a folo-core error that folo-gpu recognises as
+    /// device loss (so the trainer names the checkpoint to resume from), not as a generic failure.
+    #[test]
+    fn feeder_reports_a_lost_device() {
+        let Ok(ctx) = GpuContext::new() else {
+            eprintln!("note: skipping GPU test, no adapter");
+            return;
+        };
+        if ctx.summary().device_type == "Cpu" && std::env::var("FOLO_GPU_TEST_SOFTWARE").is_err() {
+            eprintln!("note: skipping GPU test on a software adapter");
+            return;
+        }
+        let cfg = SyntheticConfig { images: 4, imgsz: 64, ..SyntheticConfig::default() };
+        let ds = std::sync::Arc::new(SyntheticDataset::new(cfg, Split::Train).unwrap());
+        let lc =
+            LoaderConfig { batch_size: 2, imgsz: 64, workers: 1, u8_images: true, ..LoaderConfig::default() };
+        let loader = DataLoader::new(ds, lc).unwrap();
+        ctx.device().destroy();
+        let mut feed = Feeder::new(loader.epoch(0), ctx).unwrap();
+        match feed.next() {
+            Some(Err(Error::Core(e))) => assert!(folo_gpu::is_device_lost(&e), "{e}"),
+            other => panic!("expected a device-lost error, got {:?}", other.map(|r| r.map(|_| ()))),
+        }
+        assert!(feed.next().is_none(), "the feeder stops after the error");
+    }
 }

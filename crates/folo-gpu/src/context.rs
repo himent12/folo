@@ -595,7 +595,7 @@ impl GpuContext {
             .slice(..)
             .get_mapped_range_mut()
             .map(|mut view| view.slice(..data.len()).copy_from_slice(data))
-            .map_err(|e| GpuError::Map(e.to_string()));
+            .map_err(|e| self.or_lost(GpuError::Map(e.to_string())));
         buf.unmap();
         copied?;
         Ok(Staged { buf, len })
@@ -768,13 +768,18 @@ impl GpuContext {
     /// and panics inside `Device::poll` (its message still reaches stderr through the panic hook), so the poll
     /// runs under `catch_unwind` and the loss is remembered, failing every later wait at once.
     fn wait_idle(&self) -> Result<()> {
+        self.poll_checked(wgpu::PollType::wait_indefinitely())
+    }
+
+    /// One `Device::poll` that turns a lost device into [`GpuError::DeviceLost`]: before the poll if the loss is
+    /// already known, if wgpu panics inside the poll (it treats a poll on a lost device as fatal), and after a
+    /// successful poll if the device-lost callback fired during it. A loss found here is remembered.
+    fn poll_checked(&self, how: wgpu::PollType) -> Result<()> {
         if let Some(why) = self.lost_reason() {
             return Err(GpuError::DeviceLost(why));
         }
-        let polled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.inner.device.poll(wgpu::PollType::wait_indefinitely())
-        }));
-        match polled {
+        let polled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.inner.device.poll(how)));
+        let res = match polled {
             Ok(r) => r.map(|_| ()).map_err(|e| GpuError::Poll(e.to_string())),
             Err(panic) => {
                 let msg = panic
@@ -782,17 +787,29 @@ impl GpuContext {
                     .cloned()
                     .or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string()))
                     .unwrap_or_else(|| "Device::poll panicked".into());
-                let why = self.lost_reason().unwrap_or(msg);
-                self.inner.lost.lock().expect("lost lock").get_or_insert_with(|| why.clone());
-                Err(GpuError::DeviceLost(why))
+                let mut lost = self.inner.lost.lock().unwrap_or_else(|p| p.into_inner());
+                return Err(GpuError::DeviceLost(lost.get_or_insert(msg).clone()));
             }
+        };
+        match self.lost_reason() {
+            Some(why) => Err(GpuError::DeviceLost(why)),
+            None => res,
         }
     }
 
     /// Why the device was lost (wgpu's reason and message), if it was. Every wait then fails with
     /// [`GpuError::DeviceLost`].
     pub fn lost_reason(&self) -> Option<String> {
-        self.inner.lost.lock().expect("lost lock").clone()
+        self.inner.lost.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
+    /// `e`, or [`GpuError::DeviceLost`] if the device turns out to be lost (checked with a non-blocking poll): wgpu
+    /// reports work on a lost device as ordinary validation or map errors.
+    fn or_lost(&self, e: GpuError) -> GpuError {
+        match self.poll_checked(wgpu::PollType::Poll) {
+            Err(lost @ GpuError::DeviceLost(_)) => lost,
+            _ => e,
+        }
     }
 
     fn take_error(&self) -> Result<()> {

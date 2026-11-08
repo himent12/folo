@@ -210,6 +210,13 @@ pub fn is_device_lost(e: &Error) -> bool {
     matches!(e, Error::Backend { backend, msg } if *backend == BACKEND_NAME && msg.starts_with(lost.as_str()))
 }
 
+/// A folo-gpu error as folo-core sees it from this backend (so [`is_device_lost`] recognises a lost device).
+impl From<GpuError> for Error {
+    fn from(e: GpuError) -> Self {
+        core_err(e)
+    }
+}
+
 fn core_err(e: GpuError) -> Error {
     Error::Backend { backend: BACKEND_NAME, msg: e.to_string() }
 }

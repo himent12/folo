@@ -177,16 +177,25 @@ fn staged_upload_from_another_thread() {
 #[test]
 fn lost_device_is_an_error_not_a_panic() {
     let _shared = gpu!();
-    let ctx = crate::GpuContext::new().unwrap();
-    let buf = ctx.upload(&[1, 2, 3, 4]).unwrap();
-    ctx.sync().unwrap();
-    ctx.device().destroy();
-    let err = ctx.sync().and_then(|_| ctx.read(buf.raw(), 0, 4).map(|_| ())).unwrap_err();
-    assert!(matches!(err, crate::GpuError::DeviceLost(_)), "{err}");
+    let is_lost = |r: crate::Result<()>| matches!(r, Err(crate::GpuError::DeviceLost(_)));
+    // Each first call after the loss reports it (a fresh context per case, so no earlier call found it first).
+    let fresh = || {
+        let ctx = crate::GpuContext::new().unwrap();
+        let buf = ctx.upload(&[1, 2, 3, 4]).unwrap();
+        ctx.sync().unwrap();
+        ctx.device().destroy();
+        (ctx, buf)
+    };
+    let (ctx, _buf) = fresh();
+    assert!(is_lost(ctx.sync()), "first sync");
     assert!(ctx.lost_reason().is_some());
-    assert!(matches!(ctx.sync(), Err(crate::GpuError::DeviceLost(_))));
+    assert!(is_lost(ctx.sync()), "and every later one");
+    let (ctx, buf) = fresh();
+    assert!(is_lost(ctx.read(buf.raw(), 0, 4).map(|_| ())), "first readback");
+    let (ctx, _buf) = fresh();
+    assert!(is_lost(ctx.stage(&[7; 64]).map(|_| ())), "staging (the trainer's feeder thread)");
     // As folo-core sees it through the backend: recognisable, unlike other backend errors.
-    let core = |msg: String| folo_core::Error::Backend { backend: crate::backend::BACKEND_NAME, msg };
-    assert!(crate::is_device_lost(&core(err.to_string())));
-    assert!(!crate::is_device_lost(&core(crate::GpuError::Wgpu("validation".into()).to_string())));
+    let err = ctx.sync().unwrap_err();
+    assert!(crate::is_device_lost(&folo_core::Error::from(err)));
+    assert!(!crate::is_device_lost(&folo_core::Error::from(crate::GpuError::Wgpu("validation".into()))));
 }
