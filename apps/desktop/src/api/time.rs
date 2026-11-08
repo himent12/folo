@@ -60,39 +60,42 @@ pub fn clock(t: i64) -> String {
     format!("{:02}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
 }
 
-/// `clock` in the machine's local time, as Studio shows log times (the server's are UTC).
+/// `clock` in the machine's local time, as Studio shows log times (the server's are UTC). Each
+/// time is converted with the rules for its own date, so a July log reads in summer time in November.
 pub fn local_clock(t: i64) -> String {
-    clock(t + local_offset())
+    clock(t + local_offset_at(t))
 }
 
-/// Seconds east of UTC, read once (Windows: the current bias, daylight saving included; UTC
-/// elsewhere).
-fn local_offset() -> i64 {
-    static OFFSET: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
-    *OFFSET.get_or_init(query_offset)
-}
-
+/// Seconds east of UTC at `t` (Windows: the zone's rules for that date, daylight saving included;
+/// UTC elsewhere).
 #[cfg(windows)]
-fn query_offset() -> i64 {
-    use windows_sys::Win32::System::Time::{GetTimeZoneInformation, TIME_ZONE_INFORMATION};
-    // GetTimeZoneInformation's return values (winnt.h; not exported by windows-sys).
-    const TIME_ZONE_ID_STANDARD: u32 = 1;
-    const TIME_ZONE_ID_DAYLIGHT: u32 = 2;
-    // SAFETY: a plain out-parameter struct, zeroed and then filled by the call.
-    let mut tz: TIME_ZONE_INFORMATION = unsafe { std::mem::zeroed() };
-    let id = unsafe { GetTimeZoneInformation(&mut tz) };
-    let bias = tz.Bias
-        + match id {
-            TIME_ZONE_ID_DAYLIGHT => tz.DaylightBias,
-            TIME_ZONE_ID_STANDARD => tz.StandardBias,
-            _ => 0,
-        };
-    // Bias is minutes to add to local time to get UTC.
-    -(bias as i64) * 60
+fn local_offset_at(t: i64) -> i64 {
+    use windows_sys::Win32::Foundation::SYSTEMTIME;
+    use windows_sys::Win32::System::Time::SystemTimeToTzSpecificLocalTime;
+    let (y, mo, d) = civil_from_days(t.div_euclid(86_400));
+    let s = t.rem_euclid(86_400);
+    let utc = SYSTEMTIME {
+        wYear: y as u16,
+        wMonth: mo as u16,
+        wDayOfWeek: 0,
+        wDay: d as u16,
+        wHour: (s / 3600) as u16,
+        wMinute: (s / 60 % 60) as u16,
+        wSecond: (s % 60) as u16,
+        wMilliseconds: 0,
+    };
+    // SAFETY: both pointers are to live SYSTEMTIMEs; a null zone means the current one.
+    let mut local: SYSTEMTIME = unsafe { std::mem::zeroed() };
+    if unsafe { SystemTimeToTzSpecificLocalTime(std::ptr::null(), &utc, &mut local) } == 0 {
+        return 0;
+    }
+    let days = days_from_civil(local.wYear as i64, local.wMonth as i64, local.wDay as i64);
+    let lt = days * 86_400 + local.wHour as i64 * 3600 + local.wMinute as i64 * 60 + local.wSecond as i64;
+    lt - t
 }
 
 #[cfg(not(windows))]
-fn query_offset() -> i64 {
+fn local_offset_at(_t: i64) -> i64 {
     0
 }
 

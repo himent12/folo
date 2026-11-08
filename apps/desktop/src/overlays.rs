@@ -1907,6 +1907,11 @@ impl FoloApp {
                         .child(row(kbd(&t, "Drag").into_any_element(), "pan"))
                 },
             );
+        // Fitted by any path (the readout, 0, −, another image), focus left on the readout moves
+        // to its neighbour.
+        if zoom <= 1.0 && self.fh("insp-fit", cx).is_focused(window) {
+            self.focus_key("insp-zoom-in", window, cx);
+        }
         // Zoom in the top bar, right-aligned before Close, as Playground keeps it in its header.
         let zoom_ctrls = div()
             .flex()
@@ -1925,13 +1930,11 @@ impl FoloApp {
                 zoom,
                 window,
                 cx,
-                act(|this, w, cx| {
+                act(|this, _, cx| {
                     if let Some(i) = this.inspector.as_mut() {
                         i.zoom = 1.0;
                         i.pan = (0., 0.);
                     }
-                    // Fitted, the readout is text: keyboard focus moves to its neighbour.
-                    this.focus_key("insp-zoom-in", w, cx);
                     cx.notify();
                 }),
             ))

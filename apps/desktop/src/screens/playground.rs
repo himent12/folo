@@ -218,6 +218,11 @@ impl FoloApp {
         let paint_cell = bounds_cell.clone();
         let wheel_cell = bounds_cell.clone();
         let (zoom, pan) = (self.play_zoom, self.play_pan);
+        // Fitted (by the readout, 0, −, or a new image), the readout is text: focus left on it
+        // moves to its neighbour instead of falling back to the window.
+        if zoom <= 1.0 && self.fh("play-fit", cx).is_focused(window) {
+            window.focus(&self.fh("play-zoom-in", cx));
+        }
         let zoom_bar = div()
             .flex()
             .items_center()
@@ -235,11 +240,9 @@ impl FoloApp {
                 zoom,
                 window,
                 cx,
-                act(|this, w, cx| {
+                act(|this, _, cx| {
                     this.play_zoom = 1.0;
                     this.play_pan = (0., 0.);
-                    // Fitted, the readout is text: keyboard focus moves to its neighbour.
-                    this.focus_key("play-zoom-in", w, cx);
                     cx.notify();
                 }),
             ))

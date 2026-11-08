@@ -711,15 +711,15 @@ impl FoloApp {
                 let on = iso == Some(class);
                 let pinned = self.pr_pin == Some(class);
                 let name = m.classes.get(class as usize).cloned().unwrap_or_default();
-                // A name the 68 px slot (54 px beside the pin) cuts short shows whole on hover and
-                // keyboard focus.
-                let long = name.chars().count() > if pinned { 7 } else { 9 };
+                // The full name (the 68 px slot, 54 beside the pin, can cut it short) and what a
+                // click does, on hover and on keyboard focus.
+                let tip_text = format!("{name} · {}", if pinned { "click to unpin" } else { "click to pin" });
                 let ring = self.ring(&self.fh(key.clone(), cx), window);
                 let el = div()
                     .id(SharedString::from(key.clone()))
                     .relative()
-                    .when(long, |d| d.tooltip(crate::controls::tip(name.clone(), None)))
-                    .when(long && ring, |d| d.child(crate::controls::focus_tip(&t, name.clone(), 28.)))
+                    .tooltip(crate::controls::tip(tip_text.clone(), None))
+                    .when(ring, |d| d.child(crate::controls::focus_tip(&t, tip_text.clone(), 28.)))
                     .h(px(28.))
                     .px(px(8.))
                     .flex()
@@ -735,6 +735,15 @@ impl FoloApp {
                         let next = if *h { Some(class) } else { None };
                         if this.pr_focus != next && (*h || this.pr_focus == Some(class)) {
                             this.pr_focus = next;
+                            cx.notify();
+                        }
+                    }))
+                    // A real pointer move (not a row scrolled under a still pointer) ends keyboard
+                    // mode, so the hovered class isolates again.
+                    .on_mouse_move(cx.listener(move |this, _: &gpui::MouseMoveEvent, _, cx| {
+                        if this.kb {
+                            this.kb = false;
+                            this.pr_focus = Some(class);
                             cx.notify();
                         }
                     }))
@@ -1391,6 +1400,13 @@ impl FoloApp {
                         let next = if *h { Some(class) } else { None };
                         if this.pr_focus != next && (*h || this.pr_focus == Some(class)) {
                             this.pr_focus = next;
+                            cx.notify();
+                        }
+                    }))
+                    .on_mouse_move(cx.listener(move |this, _: &gpui::MouseMoveEvent, _, cx| {
+                        if this.kb {
+                            this.kb = false;
+                            this.pr_focus = Some(class);
                             cx.notify();
                         }
                     }))
