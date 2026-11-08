@@ -78,7 +78,7 @@
   let advancedOpen = $state(false);
   /** Up to 1199 px the augmentation settings fold behind a one-line summary (wide screens always show them). */
   let augOpen = $state(false);
-  /** Up to 1199 px the dock opens the summary as a sheet, so the run can be reviewed without scrolling down. */
+  /** Below 960 px the dock opens the summary as a sheet, so the run can be reviewed without scrolling down. */
   let sumOpen = $state(false);
 
   const datasets = new Resource(async (s) => {
@@ -165,6 +165,7 @@
   const batchN = $derived(Math.max(1, Math.round(Number(batch) || 16)));
   const imgszN = $derived(Number(imgsz) || 640);
   const onCpu = $derived(device === 'cpu' || (device === 'auto' && !gpu));
+  const archNote = $derived(arches.find((a) => a.arch === arch)?.note ?? '');
   const est = $derived(estimate(arch, dataset?.splits.train ?? 0, epochs, batchN, imgszN, onCpu));
   // wgpu cannot report adapter memory (real servers send 0): then there is no meter and no out-of-memory guess.
   const gpuMem = $derived(gpu && gpu.memory_bytes > 0 ? gpu.memory_bytes : null);
@@ -347,8 +348,7 @@
   </ul>
 {/snippet}
 
-{#snippet estimates(withName: boolean)}
-  {@render reviewList(withName)}
+{#snippet figures()}
   <dl class="est">
     <dt>Steps / epoch</dt><dd class="num">{num(est.stepsPerEpoch)}</dd>
     <dt>Est. time</dt><dd class="num">{roughDuration(est.totalSeconds)} <span class="faint">(~{num(Math.round(est.imgsPerS / 10) * 10, 0)} img/s)</span></dd>
@@ -367,6 +367,11 @@
   {:else if onCpu}
     <p class="warning soft"><TriangleAlert size={14} /> Training on the CPU is roughly 14× slower than on a GPU.</p>
   {/if}
+{/snippet}
+
+{#snippet estimates(withName: boolean)}
+  {@render reviewList(withName)}
+  {@render figures()}
 {/snippet}
 
 <Page title="New training run">
@@ -403,7 +408,8 @@
                   <input type="radio" name="dataset" value={d.id} bind:group={datasetId} class="sr-only" />
                   <span class="c-top"><span class="c-name">{d.name}</span><span class="c-fmt mono">{d.format}</span></span>
                   {#if on}<span class="tick" aria-hidden="true"><Check size={14} strokeWidth={2.25} /></span>{/if}
-                  <span class="c-meta num">{compact(d.splits.train)} train · {compact(d.splits.val)} val · {d.classes.length} classes</span>
+                  <!-- Breaks only between the parts, so a narrow card never leaves "classes" alone on a line. -->
+                  <span class="c-meta num"><span>{compact(d.splits.train)} train</span> · <span>{compact(d.splits.val)} val</span> · <span>{d.classes.length} classes</span></span>
                   {#if d.stats}<ClassStrip counts={d.stats.class_counts} classes={d.classes} height={4} />{/if}
                 </label>
               {/each}
@@ -413,7 +419,7 @@
 
         <Panel title="2 · Model" id="sec-model">
           <div class="arches" role="radiogroup" aria-label="Model size">
-            <!-- Up to 1199 px the cards become single-line rows; this is their column header. -->
+            <!-- Below 960 px the cards become single-line rows; this is their column header. -->
             <div class="a-head" aria-hidden="true"><span class="a-head-lead"></span><span>Params</span><span>GFLOPs</span><span>Latency</span></div>
             {#each arches as a (a.arch)}
               {@const on = a.arch === arch}
@@ -423,13 +429,15 @@
                 {#if on}<span class="tick" aria-hidden="true"><Check size={14} strokeWidth={2.25} /></span>{/if}
                 <span class="a-note">{a.note}</span>
                 <span class="a-bars">
-                  <span class="a-row"><span class="faint">Params</span><span class="num">{compact(a.params)}</span></span>
-                  <span class="a-row"><span class="faint">GFLOPs</span><span class="num">{num(a.flops, 1)}</span></span>
-                  <span class="a-row"><span class="faint">Latency</span>{#if a.ms !== undefined}<span class="num">{num(a.ms, 2)} ms</span>{:else}<span class="faint">not measured</span>{/if}</span>
+                  <span class="a-row"><span class="a-k faint">Params</span><span class="num">{compact(a.params)}</span></span>
+                  <span class="a-row"><span class="a-k faint">GFLOPs</span><span class="num">{num(a.flops, 1)}</span></span>
+                  <span class="a-row"><span class="a-k faint">Latency</span>{#if a.ms !== undefined}<span class="num">{num(a.ms, 2)} ms</span>{:else}<span class="faint" title="Not measured"><span class="nm-long">not measured</span><span class="nm-short">—</span></span>{/if}</span>
                 </span>
               </label>
             {/each}
           </div>
+          <!-- Phones: the rows have no room for the notes, so the chosen size's purpose sits under them. -->
+          <p class="a-sel"><span class="mono">{arch}</span> {archNote}</p>
           <p class="ref">Latency is measured end to end on an RTX 4080 SUPER: one decoded 640 px image in, boxes out, NMS included (fp32).</p>
           <div class="row2">
             <Field label="Start from" for="weights" hint="Fine-tuning from a trained model converges much faster.">
@@ -541,11 +549,17 @@
 
       <aside class="summary">
         <Panel title="Summary">
+          <!-- Two groups: what the run is (name, settings) and what it costs (estimates, Start). A rail stacks them; a
+               full-width summary (below 960 px) sets them side by side. -->
           <div class="sum">
-            <Field label="Run name" for="name" error={errors.name}>
-              <Input id="name" bind:value={name} oninput={() => (nameEdited = true)} invalid={!!errors.name} spellcheck="false" autocomplete="off" />
-            </Field>
-            {@render estimates(false)}
+            <div class="sum-col">
+              <Field label="Run name" for="name" error={errors.name}>
+                <Input id="name" bind:value={name} oninput={() => (nameEdited = true)} invalid={!!errors.name} spellcheck="false" autocomplete="off" />
+              </Field>
+              {@render reviewList(false)}
+            </div>
+            <div class="sum-col">
+            {@render figures()}
             <div class="start" bind:this={startEl}>
               <Button type="submit" variant="primary" size="lg" icon={Play} block loading={submitting} disabled={!valid}>Start training</Button>
               <!-- A disabled Start always says why, next to it (the field may be far away). -->
@@ -558,6 +572,7 @@
                 <span class="cli-copy"><Button size="sm" variant="ghost" icon={Copy} aria-label="Copy command" title="Copy command" onclick={copyCli} /></span>
               </div>
             </details>
+            </div>
           </div>
         </Panel>
       </aside>
@@ -674,6 +689,12 @@
     font-size: var(--type-sm-size);
     color: var(--text-secondary);
   }
+  .c-meta > span {
+    white-space: nowrap;
+  }
+  .nm-short {
+    display: none;
+  }
   .arches {
     display: grid;
     grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -756,9 +777,12 @@
     font-size: var(--type-sm-size);
     color: var(--text-tertiary);
   }
-  .sum {
+  .sum,
+  .sum-col {
     display: grid;
+    align-content: start;
     gap: var(--space-4);
+    min-width: 0;
   }
   /* Settings to review: 28 px rows, each a way back to its control. */
   .review {
@@ -853,6 +877,7 @@
   }
   .ds-pick,
   .a-head,
+  .a-sel,
   .aug-toggle {
     display: none;
   }
@@ -1019,6 +1044,30 @@
     display: none;
   }
   @media (max-width: 1199px) {
+    /* Laptops keep the sticky rail beside the form; the model cards go two by two so their notes stay readable. */
+    .layout {
+      grid-template-columns: minmax(0, 1fr) 300px;
+    }
+    .arches {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+    /* The preview takes a little more of the narrower form, so its frames keep their one-line tags. */
+    .aug {
+      grid-template-columns: minmax(0, 5fr) minmax(0, 6fr);
+      gap: var(--space-4);
+    }
+    .aug-toggle {
+      display: flex;
+    }
+    .aug.shut,
+    .aug-actions.shut {
+      display: none;
+    }
+    .aug-toggle[aria-expanded='true'] {
+      margin-bottom: var(--space-3);
+    }
+  }
+  @media (max-width: 959px) {
     .layout {
       padding-bottom: 64px;
     }
@@ -1073,9 +1122,14 @@
     .summary {
       position: static;
     }
-    /* Stacked under the form, the summary keeps the rail's measure so labels stay next to their values. */
+    /* Full width under the form: the settings on the left, the estimates and Start on the right. */
     .summary .sum {
-      max-width: 480px;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      column-gap: var(--space-6);
+    }
+    .summary .est {
+      padding-top: 0;
+      border-top: 0;
     }
     /* Model sizes as single-line rows: letter, name, note, then the three specs in columns. */
     .arches {
@@ -1132,23 +1186,17 @@
       text-align: right;
       white-space: nowrap;
     }
-    .a-row .faint {
+    .a-row .a-k,
+    .nm-long {
       display: none;
+    }
+    .nm-short {
+      display: inline;
     }
     .arch .tick {
       position: static;
       grid-column: -2;
       grid-row: 1;
-    }
-    .aug-toggle {
-      display: flex;
-    }
-    .aug.shut,
-    .aug-actions.shut {
-      display: none;
-    }
-    .aug-toggle[aria-expanded='true'] {
-      margin-bottom: var(--space-3);
     }
   }
   .dock-est .faint {
@@ -1214,6 +1262,24 @@
     }
     .a-note {
       display: none;
+    }
+    .a-sel {
+      display: block;
+      margin-top: var(--space-2);
+      font-size: var(--type-sm-size);
+      line-height: var(--type-sm-line);
+      color: var(--text-secondary);
+    }
+    .a-sel .mono {
+      margin-right: var(--space-1);
+      color: var(--text-tertiary);
+    }
+    .summary .sum {
+      grid-template-columns: minmax(0, 1fr);
+    }
+    .summary .est {
+      padding-top: var(--space-3);
+      border-top: 1px solid var(--line-subtle);
     }
     .fields,
     .aug {
