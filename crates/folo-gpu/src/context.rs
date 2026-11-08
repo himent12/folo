@@ -439,6 +439,11 @@ impl GpuContext {
         } else {
             caps.max_buffer_size
         };
+        if bytes > limit {
+            return Err(GpuError::Limit(format!(
+                "buffer of {bytes} bytes exceeds the device limit ({limit} bytes)"
+            )));
+        }
         let mut class = size_class(bytes);
         if class > limit {
             // Near the limit, allocate the exact size instead of rounding past it.

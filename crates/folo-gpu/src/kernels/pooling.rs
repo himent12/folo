@@ -39,8 +39,11 @@ impl Window2d {
                     "window {self:?}: kernel, stride and dilation must be non-zero"
                 )));
             }
-            let span = d * (k - 1) + 1;
-            let padded = n + 2 * p;
+            let span = d.checked_mul(k - 1).and_then(|v| v.checked_add(1));
+            let padded = p.checked_mul(2).and_then(|v| v.checked_add(n));
+            let (Some(span), Some(padded)) = (span, padded) else {
+                return Err(shape_err(format!("window {self:?} overflows for a {h}x{w} input")));
+            };
             if padded < span {
                 return Err(shape_err(format!("window {self:?} does not fit a {h}x{w} input")));
             }

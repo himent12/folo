@@ -116,6 +116,8 @@ fn shape_and_dtype_errors() {
     assert!(GpuTensor::empty(&ctx, &[1 << 32, 1 << 32], DType::F32).is_err());
     assert!(GpuTensor::empty(&ctx, &[0, 1 << 40, 1 << 40], DType::F32).is_err());
     assert!(GpuTensor::empty(&ctx, &[1 << 40], DType::F32).is_err());
+    assert!(GpuTensor::empty(&ctx, &[usize::MAX], DType::F32).is_err());
+    assert!(ctx.alloc(u64::MAX - 3).is_err());
     assert!(t.reshape(&[0, 1 << 40, 1 << 40]).is_err());
     let empty = GpuTensor::zeros(&ctx, &[0, 4], DType::F32).unwrap();
     assert_eq!(empty.unary(UnaryOp::Exp).unwrap().to_vec().unwrap(), Vec::<f32>::new());

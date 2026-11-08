@@ -23,6 +23,11 @@ pub fn size_class(bytes: u64) -> u64 {
     if bytes <= MIN_CLASS {
         return MIN_CLASS;
     }
+    if bytes > 1 << 62 {
+        // No GPU buffer is this large; return it unrounded (rounding would overflow) so the caller's limit
+        // check rejects it.
+        return bytes;
+    }
     let p = bytes.next_power_of_two();
     let half = p / 2;
     let step = (half / 4).max(MIN_CLASS);
@@ -161,6 +166,8 @@ mod tests {
         assert_eq!(size_class(1 << 20), 1 << 20);
         assert_eq!(size_class((1 << 20) + 1), (1 << 20) + (1 << 18));
         assert_eq!(size_class(3 << 20), 3 << 20);
+        assert_eq!(size_class(u64::MAX), u64::MAX);
+        assert_eq!(size_class((1 << 62) + 1), (1 << 62) + 1);
         let mut prev = 0;
         for b in (1..5_000_000u64).step_by(9973) {
             let c = size_class(b);

@@ -143,6 +143,13 @@ fn max_pool() {
     }
     let gx = GpuTensor::zeros(&ctx, &[1, 1, 4, 4], DType::F32).unwrap();
     assert!(gx.max_pool2d(Window2d::square(2, 2, 2)).is_err());
+    // Overflowing geometry is an error, not a panic, through the tensor API too.
+    assert!(gx.max_pool2d(Window2d::square(1, 1, usize::MAX)).is_err());
+    let huge_dilation =
+        Window2d { kernel: (3, 3), stride: (1, 1), padding: (0, 0), dilation: (usize::MAX, 1) };
+    assert!(gx.max_pool2d(huge_dilation).is_err());
+    let w = GpuTensor::zeros(&ctx, &[1, 1, 3, 3], DType::F32).unwrap();
+    assert!(gx.conv2d(&w, None, (1, 1), (usize::MAX, 0), (1, 1), 1, crate::UnaryOp::Identity).is_err());
 }
 
 #[test]

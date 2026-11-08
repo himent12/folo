@@ -201,7 +201,7 @@ pub fn pick_config(ctx: &GpuContext, d: &GemmDesc) -> TileConfig {
     for cfg in [TileConfig::LARGE, TileConfig::MEDIUM] {
         let (bm, bn) = (cfg.bm as usize, cfg.bn as usize);
         let groups = d.m.div_ceil(bm).saturating_mul(d.n.div_ceil(bn)).saturating_mul(batch);
-        let row_waste = (d.m.div_ceil(bm) * bm) as f64 / d.m.max(1) as f64;
+        let row_waste = d.m.div_ceil(bm).saturating_mul(bm) as f64 / d.m.max(1) as f64;
         if groups >= 64 && row_waste <= 1.25 && cfg.workgroup_bytes() <= ctx.caps().max_workgroup_storage {
             return cfg;
         }

@@ -200,6 +200,8 @@ fn gemm_rejects_bad_configs_and_sizes() {
     // Sizes whose extents overflow are rejected, not wrapped.
     let huge = GemmDesc::new(1 << 40, 1 << 40, 1 << 40, false, false, 1);
     assert!(gemm::gemm(&ctx, &huge, buf.raw(), buf.raw(), None, buf.raw()).is_err());
+    let tall = GemmDesc::new(usize::MAX, 1, 1, false, false, 1);
+    assert!(gemm::gemm(&ctx, &tall, buf.raw(), buf.raw(), None, buf.raw()).is_err());
     // An operand that is too small is rejected.
     let d = GemmDesc::new(128, 128, 128, false, false, 1);
     assert!(gemm::gemm(&ctx, &d, buf.raw(), buf.raw(), None, buf.raw()).is_err());
