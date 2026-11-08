@@ -1132,8 +1132,18 @@ impl FoloApp {
         // Toasts with an action stay until used or dismissed; others expire, but not while hovered.
         let expires = action.is_none();
         self.toasts.push(Toast { id, tone, title: title.into(), body, action });
-        if self.toasts.len() > 3 {
-            self.toasts.remove(0);
+        // Over three, the oldest passive toast goes first: one with an action waits for its action
+        // or a dismissal (the stack folds them) unless five are waiting. The focused toast stays.
+        while self.toasts.len() > 3 {
+            let focus = self.toast_focus;
+            let gone =
+                self.toasts.iter().position(|t| t.action.is_none() && Some(t.id) != focus).or_else(|| {
+                    (self.toasts.len() > 5)
+                        .then(|| self.toasts.iter().position(|t| Some(t.id) != focus))
+                        .flatten()
+                });
+            let Some(i) = gone else { break };
+            self.toasts.remove(i);
         }
         if !self.frozen && expires {
             cx.spawn(async move |this, cx| {
