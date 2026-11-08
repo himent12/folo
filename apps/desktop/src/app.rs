@@ -346,6 +346,9 @@ pub struct FoloApp {
     backend_gen: u64,
     /// Bumped on every connection attempt; only the latest one may install its result.
     connect_seq: u64,
+    /// The latest request per (run, "metrics" | "logs"); older responses are dropped.
+    history_tickets: HashMap<(String, &'static str), u64>,
+    history_seq: u64,
     _tasks: Vec<Task<()>>,
     _subs: Vec<Subscription>,
 }
@@ -426,6 +429,8 @@ impl FoloApp {
             subscribing: Default::default(),
             backend_gen: 0,
             connect_seq: 0,
+            history_tickets: HashMap::new(),
+            history_seq: 0,
             _tasks: Vec::new(),
             _subs: Vec::new(),
         };
@@ -595,16 +600,28 @@ impl FoloApp {
         let spe = self.store.run(id).map_or(1, |r| r.steps_per_epoch);
         if self.store.run_data.get(id).is_none_or(|l| l.needs_fetch()) {
             self.store.run_data.insert(id.to_string(), Load::Loading);
+            let ticket = self.history_ticket(id, "metrics");
             let rid = id.to_string();
             let key = id.to_string();
             self.fetch(
                 cx,
                 move |api| api.metrics(&rid),
                 move |this, r, _| {
+                    // A reload started since: this older snapshot must not overwrite it.
+                    if this.history_tickets.get(&(key.clone(), "metrics")) != Some(&ticket) {
+                        return;
+                    }
                     this.store.install_run_data(&key, r.map(|m| RunData::new(m, spe)));
                 },
             );
         }
+    }
+
+    /// A fresh ticket for one history request of a run; earlier tickets stop counting.
+    fn history_ticket(&mut self, id: &str, what: &'static str) -> u64 {
+        self.history_seq += 1;
+        self.history_tickets.insert((id.to_string(), what), self.history_seq);
+        self.history_seq
     }
 
     pub fn ensure_samples(&mut self, id: &str, cx: &mut Context<Self>) {
@@ -624,11 +641,15 @@ impl FoloApp {
     pub fn ensure_logs(&mut self, id: &str, cx: &mut Context<Self>) {
         if self.store.logs.get(id).is_none_or(|l| l.needs_fetch()) {
             self.store.logs.insert(id.to_string(), Load::Loading);
+            let ticket = self.history_ticket(id, "logs");
             let (rid, key) = (id.to_string(), id.to_string());
             self.fetch(
                 cx,
                 move |api| api.logs(&rid),
                 move |this, r, _| {
+                    if this.history_tickets.get(&(key.clone(), "logs")) != Some(&ticket) {
+                        return;
+                    }
                     this.store.install_logs(&key, r);
                     this.log_scroll.scroll_to_bottom();
                 },
@@ -734,33 +755,16 @@ impl FoloApp {
             .map(|runs| runs.iter().filter(|r| r.status.is_active()).map(|r| r.id.clone()).collect())
             .unwrap_or_default();
         for id in ids {
-            if self.subscriptions.contains_key(&id) || !self.subscribing.insert(id.clone()) {
-                continue;
+            if !self.subscriptions.contains_key(&id) {
+                self.resubscribe(id, cx);
             }
-            // Opening a stream is network I/O: never on the UI thread.
-            let api = self.store.api.clone();
-            let generation = self.backend_gen;
-            cx.spawn(async move |this, cx| {
-                let rid = id.clone();
-                let sub = cx.background_executor().spawn(async move { api.events(&rid) }).await;
-                this.update(cx, |this, _| {
-                    if this.backend_gen != generation {
-                        return;
-                    }
-                    this.subscribing.remove(&id);
-                    if let Ok(sub) = sub {
-                        this.subscriptions.insert(id, sub);
-                    }
-                })
-                .ok();
-            })
-            .detach();
         }
     }
 
-    /// A live stream dropped out. Open a new one first, then reload the run's history: events from
-    /// the new stream buffer while the history loads and merge into it, so nothing in between is
-    /// lost. (If the stream can't be reopened, the run list refresh sorts out its status.)
+    /// Open a run's live stream (off the UI thread), then reload whatever history of it is already
+    /// loaded: events from the stream buffer while the history loads and merge into it, so nothing
+    /// between an earlier snapshot (or a dropped stream) and this stream is lost. A failed attempt
+    /// is retried by the periodic run-list refresh.
     fn resubscribe(&mut self, id: String, cx: &mut Context<Self>) {
         if !self.subscribing.insert(id.clone()) {
             return;
@@ -775,10 +779,7 @@ impl FoloApp {
                     return;
                 }
                 this.subscribing.remove(&id);
-                let Ok(sub) = sub else {
-                    this.refresh_runs(cx);
-                    return;
-                };
+                let Ok(sub) = sub else { return };
                 this.subscriptions.insert(id.clone(), sub);
                 let had_data = this.store.run_data.remove(&id).is_some();
                 let had_logs = this.store.logs.remove(&id).is_some();

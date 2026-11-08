@@ -75,16 +75,8 @@ impl FoloApp {
             .font_family(crate::theme::MONO)
             .text_size(px(ty::SM.size))
             .when(url_ring, |d| d.child(crate::app::focus_ring(&t, radius::MD)))
-            .map(|d| {
-                // With mock data the address is unused: show it read-only (not focusable).
-                if self.server_mode == ServerMode::Mock {
-                    d.bg(t.bg_inset)
-                        .border_color(t.line_subtle)
-                        .child(text(ty::SM, t.text_disabled).child(self.server_url.read(cx).text()))
-                } else {
-                    d.child(self.server_url.clone())
-                }
-            })
+            // Always editable, even while the demo is installed: it's where the next Connect goes.
+            .child(self.server_url.clone())
             .into_any_element();
         let connect = self
             .button(
@@ -149,7 +141,7 @@ impl FoloApp {
                     .items_center()
                     .gap(px(8.))
                     .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _, cx| {
-                        if ev.keystroke.key == "enter" && this.server_mode == ServerMode::Local {
+                        if ev.keystroke.key == "enter" {
                             this.switch_source(ServerMode::Local, cx);
                             cx.stop_propagation();
                         }
