@@ -72,7 +72,9 @@ app: chart plots, image canvases, code/log views. In light mode panels are white
 ## Detection classes
 `classes.palette`: 16 saturated, mid-to-high-lightness colours chosen to stay distinct from each other and legible on
 arbitrary photos. Class `i` → `palette[i % 16]`, in both themes. Adjacent entries stay distinguishable under
-colour-vision deficiency, and every box also carries its class name, so colour is never the only cue.
+colour-vision deficiency, and every box also carries its class name, so colour is never the only cue. The palette
+contains no lime, so a class is never mistaken for the accent (live state, primary action). On page surfaces (swatches,
+bars, curves) the light theme draws class colours darker so they keep ≥ 3:1; boxes on photos use the palette as is.
 - Box: 2 px stroke in the class colour, wrapped by a 1 px outer halo in `classes.halo` so it reads on bright and dark
   images alike. Optional fill at `fill_opacity` on hover/selection.
 - Label chip: class colour fill, `chip_text` (near black) text, `xs` medium, radius `xs`, sitting on the box's top-left
