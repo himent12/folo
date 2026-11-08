@@ -423,27 +423,36 @@ impl FoloApp {
                             None,
                         ))
                     })
-                    .child(stat(
-                        &t,
-                        "Broken labels",
-                        broken.to_string(),
-                        "",
-                        Some(if broken > 0 {
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(4.))
-                                .min_w_0()
-                                .child(text(ty::XS, t.text_secondary).whitespace_nowrap().child(if narrow_strip {
-                                    "Copy command"
-                                } else {
-                                    "Copy check command"
-                                }))
-                                .child(div().flex_none().child(icon("icons/copy.svg", 12., t.text_secondary)))
-                        } else {
-                            div().child(text(ty::XS, t.success_text).child("all labels valid"))
-                        }),
-                    ));
+                    .child(if broken > 0 {
+                        // Actionable: a warning, not one more inventory count.
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(6.))
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(4.))
+                                    .child(icon("icons/triangle-alert.svg", 12., t.warning_solid))
+                                    .child(
+                                        text(ty::XS, t.warning_text)
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .child("Broken labels"),
+                                    ),
+                            )
+                            .child(metric(&t, broken.to_string(), "", ty::X2XL, ty::SM))
+                            .child(broken_detail(&t, narrow_strip))
+                    } else {
+                        stat(
+                            &t,
+                            "Broken labels",
+                            broken.to_string(),
+                            "",
+                            Some(div().child(text(ty::XS, t.success_text).child("all labels valid"))),
+                        )
+                    });
                 if broken > 0 {
                     let cmd = format!("folo dataset check \"{}\"", ds.path);
                     self.bind(
@@ -824,7 +833,7 @@ impl FoloApp {
                             .flex()
                             .items_center()
                             .gap(px(8.))
-                            .child(swatch(t.class(i as u32), 8.))
+                            .child(crate::ui::class_swatch(&t, t.class(i as u32), 8.))
                             .child(text(ty::SM, t.text_secondary).truncate().child(name.clone())),
                     )
                     .child(
@@ -1024,6 +1033,21 @@ impl FoloApp {
             .when(ring, |d| d.child(crate::app::focus_ring(&t, radius::LG)))
             .into_any_element()
     }
+}
+
+/// Under the broken-label count: the check command to copy, or that every label is valid.
+fn broken_detail(t: &crate::theme::Theme, narrow: bool) -> gpui::Div {
+    if narrow { copy_cmd(t, "Copy command") } else { copy_cmd(t, "Copy check command") }
+}
+
+fn copy_cmd(t: &crate::theme::Theme, label: &'static str) -> gpui::Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(4.))
+        .min_w_0()
+        .child(text(ty::XS, t.text_secondary).whitespace_nowrap().child(label))
+        .child(div().flex_none().child(icon("icons/copy.svg", 12., t.text_secondary)))
 }
 
 #[cfg(test)]

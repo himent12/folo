@@ -281,6 +281,35 @@ pub fn format_step(v: f32, step: f32) -> String {
     format!("{v:.d$}")
 }
 
+/// An exponent in superscript digits ("-3" → "⁻³").
+pub fn superscript(p: i32) -> String {
+    p.to_string()
+        .chars()
+        .map(|c| match c {
+            '-' => '⁻',
+            '0' => '⁰',
+            '1' => '¹',
+            '2' => '²',
+            '3' => '³',
+            '4' => '⁴',
+            '5' => '⁵',
+            '6' => '⁶',
+            '7' => '⁷',
+            '8' => '⁸',
+            _ => '⁹',
+        })
+        .collect()
+}
+
+/// A small value with three significant figures and a power of ten ("6.58 × 10⁻³").
+pub fn sci3(v: f32) -> String {
+    if v == 0. || !v.is_finite() {
+        return format!("{v}");
+    }
+    let p = v.abs().log10().floor() as i32;
+    format!("{:.2} × 10{}", v / 10f32.powi(p), superscript(p))
+}
+
 pub fn format_tick(v: f32) -> String {
     let a = v.abs();
     if a == 0.0 {
@@ -773,8 +802,20 @@ fn paint_line_chart(
     let (ly0, ly1) = if spec.log_y { (y0.max(1e-6).ln(), y1.max(1e-6).ln()) } else { (y0, y1) };
     let yticks = if spec.log_y { Vec::new() } else { ticks(y0, y1, spec.y_ticks) };
     let ystep = nice_step(y1 - y0, spec.y_ticks);
-    let ylabels: Vec<String> =
-        yticks.iter().map(|v| spec.y_fmt.map_or_else(|| format_step(*v, ystep), |f| f(*v))).collect();
+    // Tiny values share one power of ten, shown once ("0 5 10" and "× 10⁻³", design/README).
+    let ypow = (spec.y_fmt.is_none() && !spec.log_y && ystep > 0. && ystep < 0.01)
+        .then(|| ystep.log10().floor() as i32);
+    let ylabels: Vec<String> = yticks
+        .iter()
+        .map(|v| match (spec.y_fmt, ypow) {
+            (Some(f), _) => f(*v),
+            (None, Some(p)) => {
+                let k = 10f32.powi(-p);
+                format_step(*v * k, ystep * k)
+            }
+            (None, None) => format_step(*v, ystep),
+        })
+        .collect();
     // A shared minimum gutter keeps plots in a grid aligned.
     let label_w = ylabels.iter().map(|l| text_width(window, l, label_size)).fold(px(30.), |a, b| a.max(b));
     let left = bounds.left() + label_w + px(10.);
@@ -839,6 +880,20 @@ fn paint_line_chart(
     };
 
     // Grid + y labels.
+    if let Some(p) = ypow {
+        // The shared factor, once, above the axis labels.
+        let f = format!("× 10{}", superscript(p));
+        let w = text_width(window, &f, label_size);
+        paint_text(
+            window,
+            cx,
+            &f,
+            point(plot.left() - px(8.) - w, plot.top() - px(label_size + 10.)),
+            t.chart_label,
+            label_size,
+            false,
+        );
+    }
     for (v, l) in yticks.iter().zip(&ylabels) {
         let y = sy(*v);
         window.paint_quad(fill(
@@ -1464,6 +1519,13 @@ mod tests {
         let pts = [(0.0, 1.0), (0.2, 0.9), (0.4, 0.5)];
         assert_eq!(value_near(&pts, 0.41, 1.), Some(0.5));
         assert_eq!(value_near(&pts, 0.9, 1.), None);
+    }
+
+    #[test]
+    fn small_values_share_a_power_of_ten() {
+        assert_eq!(superscript(-3), "⁻³");
+        assert_eq!(sci3(0.00658), "6.58 × 10⁻³");
+        assert_eq!(sci3(0.0001), "1.00 × 10⁻⁴");
     }
 
     #[test]

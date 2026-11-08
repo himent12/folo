@@ -1603,7 +1603,7 @@ impl FoloApp {
                             }
                         }
                     }))
-                    .child(swatch(t.class(b.class), 8.))
+                    .child(crate::ui::class_swatch(&t, t.class(b.class), 8.))
                     .child(
                         text(ty::SM, t.text_primary)
                             .w(px(70.))

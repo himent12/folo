@@ -47,6 +47,8 @@ impl FoloApp {
             Some("Connect to folo serve first")
         } else if no_ds {
             Some("Add a dataset first")
+        } else if self.store.datasets.ready().is_none() {
+            Some("Loading datasets…")
         } else {
             None
         };
@@ -252,6 +254,8 @@ impl FoloApp {
             .flex()
             .flex_col()
             .gap(px(24.))
+            // Spread over the chart's height: the first row level with its title, the last with its axis.
+            .justify_between()
             .child(
                 div()
                     .flex()

@@ -423,6 +423,8 @@ pub struct FoloApp {
     pub synth_seq: u64,
     /// Restore focus to the opener on the next render (set where no window is at hand).
     pub restore_pending: bool,
+    /// The window is below 1120 px wide (16 px page gutters); set each render.
+    pub narrow: bool,
     pub confirm_stop: Option<String>,
     pub toasts: Vec<Toast>,
     /// The toast under the pointer (its expiry waits).
@@ -541,6 +543,7 @@ impl FoloApp {
             synth: None,
             synth_seq: 0,
             restore_pending: false,
+            narrow: false,
             confirm_stop: None,
             toasts: Vec::new(),
             toast_hover: None,
@@ -1406,6 +1409,10 @@ impl FoloApp {
     }
 
     pub fn open_new_run(&mut self, dataset: Option<&str>, window: &mut Window, cx: &mut Context<Self>) {
+        // Nothing to train on until the dataset list is in (Ctrl+N included).
+        if self.store.datasets.ready().is_none_or(|d| d.is_empty()) {
+            return;
+        }
         if self.new_run.is_none() {
             self.remember_focus(window, cx);
         }
@@ -2381,6 +2388,7 @@ impl Render for FoloApp {
         if std::mem::take(&mut self.restore_pending) {
             self.restore_focus(window);
         }
+        self.narrow = window.viewport_size().width < px(1120.);
         let t = theme(cx);
         self.ensure_core(cx);
         let titlebar = self.titlebar(window, cx).into_any_element();
@@ -2798,7 +2806,7 @@ impl FoloApp {
                             .flex()
                             .flex_col()
                             .gap(px(16.))
-                            .px(px(24.))
+                            .px(px(if self.narrow { 16. } else { 24. }))
                             .pt(px(20.))
                             .pb(px(32.))
                             .child(header)

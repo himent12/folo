@@ -625,3 +625,47 @@ Round 17 changes:
   - The loss legend gets a focusable help icon.
   - The log has a taller top fade.
   - A 4 px gap before the copy icon.
+
+## Round 17
+
+| Line | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | avg |
+|------|---|---|---|---|---|---|---|---|---|----|----|----|-----|
+| Opus 5.5 | 8 | 8 | 8 | 8 | 8 | 8 | 8 | 8 | 8 | 8 | 9 | 8 | 8.1 |
+| GPT-6.1 Sol | 9 | 9 | 8 | 8 | 8 | 8 | 8 | 9 | 8 | 9 | 7 | 8 | 8.3 |
+
+A regression cost Opus a point on most lines. The PR legend's line keys had collapsed to zero width (no `flex_none` beside fixed-width columns), so the curves couldn't be told apart.
+
+Other items:
+- The Precision column read "–" at rest.
+- The future band showed on one chart of four.
+- Validation samples had no chips.
+- Precision shared a hue with dfl.
+- "Running" wasn't accented in tables.
+- The model page had no narrow layout.
+- Narrow gutters were 24 px.
+- New run was available before datasets loaded.
+- Broken labels weren't emphasised.
+- Export size estimates were unconditional.
+- Light-mode primary buttons and class swatches were missing their edges.
+- LR ticks needed a shared power of ten.
+
+Round 18 changes:
+- **PR legend:**
+  - Line keys are `flex_none`.
+  - At rest the precision column shows the conf 0.25 operating point ("P @ 0.25"); while inspecting it shows "P @ R 0.62".
+  - An "All classes" row with a hairline sits under the classes.
+- **Run charts:**
+  - Every linked chart shades the remaining epochs (the ETA label stays on mAP).
+  - Precision is magenta and recall teal dashed, hues no loss part uses.
+  - LR ticks read "0 5 10" with "× 10⁻³", and the legend reads "6.58 × 10⁻³".
+- **Validation samples:** score chips; boxes under 20 px show labels only when selected (design/README).
+- **Shared design rules:**
+  - "Running" uses accent text.
+  - Class swatches get a `chart.swatch_edge` inset.
+  - Light-mode primary buttons get a neutral 1 px edge.
+- **Layout:** below 1120 px, model detail stacks PR over the confusion matrix and page gutters are 16 px.
+- **Guards and copy:**
+  - New run is disabled ("Loading datasets…") until datasets load, and Ctrl+N waits too.
+  - A non-zero broken-label count reads as a warning.
+  - Export sizes are "≈" estimates from the parameter count (f16 2 B and ONNX f32 4 B per weight).
+- **Overview:** the hero KPIs spread to the chart's height.

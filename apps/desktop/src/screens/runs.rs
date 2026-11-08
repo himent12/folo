@@ -37,13 +37,17 @@ impl FoloApp {
         } else {
             format!("{} · {} active · {} failed", plural(runs.len(), "run"), active, count(RunFilter::Failed))
         };
-        let new = if self.store.datasets.ready().is_some_and(|d| d.is_empty()) {
+        let new = if self.store.datasets.ready().is_none_or(|d| d.is_empty()) {
             self.button_disabled(
                 "runs-new",
                 "New run",
                 Btn::Primary,
                 Some("icons/plus.svg"),
-                "Add a dataset first",
+                if self.store.datasets.ready().is_none() {
+                    "Loading datasets…"
+                } else {
+                    "Add a dataset first"
+                },
                 window,
                 cx,
             )
@@ -737,6 +741,9 @@ impl FoloApp {
             // Same x ticks in all four charts.
             c.x_ticks = Some(6);
             c.ease_key = crate::charts::ease_key(&r.id);
+            if live {
+                c.future = Some((r.epoch as f32, SharedString::default()));
+            }
             c
         };
         // Short windows keep both primary charts on screen.
@@ -794,7 +801,7 @@ impl FoloApp {
             "run-pr",
             vec![
                 // One hue for the pair, told apart by dash: no other chart here uses slot 5.
-                Series::new("precision", t.chart_series[5], d.precision.clone()).live(live),
+                Series::new("precision", t.chart_series[2], d.precision.clone()).live(live),
                 Series::new("recall", t.chart_series[3], d.recall.clone()).dashed().live(live),
             ],
             secondary_h,
@@ -927,11 +934,11 @@ impl FoloApp {
             .flex()
             .items_center()
             .gap(px(12.))
-            .child(crate::ui::legend_value(&t, "precision", t.chart_series[5], false, v(&d.precision, f3v)))
+            .child(crate::ui::legend_value(&t, "precision", t.chart_series[2], false, v(&d.precision, f3v)))
             .child(crate::ui::legend_value(&t, "recall", t.chart_series[3], true, v(&d.recall, f3v)))
             .into_any_element();
         let lr_legend =
-            crate::ui::legend_value(&t, "lr", t.text_tertiary, false, v(&d.lr, |x| format!("{x:.5}")))
+            crate::ui::legend_value(&t, "lr", t.text_tertiary, false, v(&d.lr, crate::charts::sci3))
                 .into_any_element();
         let _ = chart_block;
         // The mAP chart is the focal point: wider and first. Narrow windows stack each row.
@@ -985,8 +992,6 @@ impl FoloApp {
             cx,
             Rc::new(move |this, i, _, _| this.sample_view = views[i]),
         );
-        let classes =
-            self.store.dataset_summary(&r.config.dataset_id).map(|d| d.classes.clone()).unwrap_or_default();
         let body = match self.store.samples.get(&r.id) {
             _ if r.epoch == 0 => div()
                 .child(empty_state(
@@ -1014,7 +1019,8 @@ impl FoloApp {
                         }
                         if view != SampleView::Truth {
                             boxes.extend(smp.pred.iter().filter(|p| p.score >= 0.3).map(|p| DrawBox {
-                                label: classes.get(p.class as usize).cloned().map(Into::into),
+                                // Score only: at thumbnail size the class colour names the class.
+                                label: None,
                                 score: Some(p.score),
                                 ..DrawBox::new(p.class, p.x1, p.y1, p.x2, p.y2)
                             }));
@@ -1027,7 +1033,7 @@ impl FoloApp {
                             .rounded(px(radius::MD))
                             .overflow_hidden()
                             .bg(t.bg_inset)
-                            .child(image_canvas(&t, img, dims, boxes, Fit::Cover, false));
+                            .child(image_canvas(&t, img, dims, boxes, Fit::Cover, true));
                         square.style().aspect_ratio = Some(1.0);
                         div().flex_1().min_w(px(0.)).child(square).into_any_element()
                     })
