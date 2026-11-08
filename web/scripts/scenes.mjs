@@ -35,6 +35,7 @@ export const scenes = [
   { name: 'run-loading', path: '/runs/run_7d1e', search: 'scenario=loading', themes: ['dark'], viewports: ['desktop'] },
   {
     name: 'palette-open',
+    fullPage: false,
     path: '/',
     viewports: ['desktop', 'mobile'],
     setup: async (page) => {
@@ -44,6 +45,7 @@ export const scenes = [
   },
   {
     name: 'shortcuts-open',
+    fullPage: false,
     path: '/runs',
     themes: ['dark'],
     viewports: ['desktop'],
@@ -53,6 +55,7 @@ export const scenes = [
   },
   {
     name: 'run-stop-dialog',
+    fullPage: false,
     path: '/runs/run_7d1e',
     themes: ['light'],
     viewports: ['desktop'],
