@@ -299,8 +299,8 @@ fn binary_backward(
                 &|| {
                     // d/db a^b = a^b ln a, taken as 0 where a <= 0.
                     let pos = a.gt_scalar(0.0)?;
-                    let ln =
-                        pos.where_cond(&a.maximum_scalar(f32::MIN_POSITIVE)?.log()?, &a.scalar_like(0.0)?)?;
+                    let safe = pos.where_cond(a, &a.scalar_like(1.0)?)?;
+                    let ln = pos.where_cond(&safe.log()?, &a.scalar_like(0.0)?)?;
                     g.mul(&a.pow(b)?)?.mul(&ln)
                 },
                 sb

@@ -64,3 +64,12 @@ fn custom_op_semantics() -> Result<()> {
     assert!(matches!(loss.backward(), Err(Error::ModifiedInPlace { .. })));
     Ok(())
 }
+
+#[test]
+fn custom_op_gradient_dtype_must_match() -> Result<()> {
+    let x = Tensor::ones([1]).requires_grad_();
+    let out = x.detach();
+    let bad = Tensor::custom_op("u8_grad", &[&x], out, |_| Ok(vec![Some(Tensor::from_slice(&[1u8], [1])?)]))?;
+    assert!(matches!(bad.sum_all()?.backward(), Err(Error::Autograd(_))));
+    Ok(())
+}

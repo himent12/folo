@@ -258,3 +258,20 @@ fn reciprocal_gradients_do_not_square() -> Result<()> {
     assert_eq!((Tensor::scalar(1e-39) / 1e-39)?.item::<f32>()?, 1.0);
     Ok(())
 }
+
+#[test]
+fn sigmoid_tail_and_pow_subnormal_base() -> Result<()> {
+    let x = Tensor::full([1], -90.0).requires_grad_();
+    let y = x.silu()?;
+    let v = y.item::<f32>()?;
+    assert!(v < 0.0 && ((v as f64) / (-90.0 * (-90f64).exp()) - 1.0).abs() < 1e-3, "{v}");
+    let g = y.backward_with(&Tensor::full([1], 1e38))?.get(&x).unwrap().item::<f32>()?;
+    let want = 1e38 * (-89.0f64) * (-90f64).exp();
+    assert!(((g as f64) / want - 1.0).abs() < 1e-3, "{g} vs {want}");
+    // d/db a^b = a^b ln a must keep subnormal positive bases exact.
+    let a = Tensor::full([1], 1e-40);
+    let b = Tensor::zeros([1]).requires_grad_();
+    let g = a.pow(&b)?.sum_all()?.backward()?.get(&b).unwrap().item::<f32>()?;
+    assert!((g - (1e-40f64).ln() as f32).abs() < 1e-2, "{g}");
+    Ok(())
+}

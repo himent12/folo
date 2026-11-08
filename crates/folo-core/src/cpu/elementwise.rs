@@ -314,7 +314,10 @@ pub fn fast_exp(x: f32) -> f32 {
 
 #[inline(always)]
 fn sigmoid(x: f32) -> f32 {
-    1.0 / (1.0 + fast_exp(-x))
+    // Stable in both tails: e = exp(-|x|) never overflows, and e / (1 + e) keeps tiny values for x << 0.
+    let e = fast_exp(-x.abs());
+    let r = 1.0 / (1.0 + e);
+    if x >= 0.0 { r } else { e * r }
 }
 
 #[inline(always)]

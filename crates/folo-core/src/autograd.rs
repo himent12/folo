@@ -193,12 +193,16 @@ pub(crate) fn backward(root: &Tensor, seed: Tensor) -> Result<Grads> {
             if !inp.requires_grad() {
                 continue;
             }
-            if gi.shape() != inp.shape() {
+            if gi.shape() != inp.shape() || gi.dtype() != inp.dtype() || gi.device() != inp.device() {
                 return Err(Error::Autograd(format!(
-                    "backward of `{}` produced a gradient of shape {} for an input of shape {}",
+                    "backward of `{}` produced a gradient [{} {} {}] for an input [{} {} {}]",
                     node.op,
                     gi.shape(),
-                    inp.shape()
+                    gi.dtype(),
+                    gi.device(),
+                    inp.shape(),
+                    inp.dtype(),
+                    inp.device()
                 )));
             }
             match pending.remove(&inp.id()) {
