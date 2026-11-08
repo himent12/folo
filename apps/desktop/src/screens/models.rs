@@ -639,6 +639,7 @@ impl FoloApp {
                     .when(on && !pinned, |d| d.bg(t.bg_hover))
                     .when(pinned, |d| d.bg(t.bg_selected))
                     .hover(|s| s.bg(t.bg_hover))
+                    .active(|s| s.bg(t.bg_active))
                     .on_hover(cx.listener(move |this, h: &bool, _, cx| {
                         let next = if *h { Some(class) } else { None };
                         if this.pr_focus != next && (*h || this.pr_focus == Some(class)) {
@@ -648,19 +649,21 @@ impl FoloApp {
                     }))
                     .child(div().w(px(10.)).h(px(2.)).rounded_full().bg(t.class_stroke(class)))
                     .child(
+                        // A known width, so long class names end in "…" (GPUI truncates against
+                        // the pre-shrink width).
                         text(ty::SM, t.text_secondary)
-                            .flex_1()
-                            .min_w_0()
+                            .w(px(84.))
+                            .flex_none()
                             .truncate()
                             .child(m.classes.get(class as usize).cloned().unwrap_or_default()),
                     )
                     .child(
                         text(ty::SM, t.text_secondary)
                             .tnum()
-                            .w(px(40.))
+                            .w(px(64.))
                             .flex_none()
                             .text_right()
-                            .child(at_cursor(class).map_or(String::new(), |p| format!("{p:.2}"))),
+                            .child(at_cursor(class).map_or("–".to_string(), |p| format!("{p:.3}"))),
                     )
                     .child(
                         text(ty::SM, t.text_primary)
@@ -720,7 +723,7 @@ impl FoloApp {
                     )))
                     .child(
                         div()
-                            .w(px(208.))
+                            .w(px(244.))
                             .flex_none()
                             .p(px(8.))
                             .pt(px(12.))
@@ -735,14 +738,14 @@ impl FoloApp {
                                     .items_center()
                                     .gap(px(8.))
                                     .child(th(&t, "Class").flex_1())
-                                    // Precision at the recall under the cursor, while inspecting.
+                                    // Precision at the recall under the cursor ("–" until inspecting).
                                     .child(
                                         div()
-                                            .w(px(40.))
+                                            .w(px(64.))
                                             .flex_none()
                                             .flex()
                                             .justify_end()
-                                            .child(th(&t, if hover.is_some() { "P" } else { "" })),
+                                            .child(th(&t, "Precision")),
                                     )
                                     .child(
                                         div()
@@ -1010,8 +1013,8 @@ impl FoloApp {
                             .child(swatch(color, 8.))
                             .child(
                                 text(ty::BASE, t.text_primary)
-                                    .flex_1()
-                                    .min_w_0()
+                                    .w(px(if pinned { 120. } else { 168. }))
+                                    .flex_none()
                                     .truncate()
                                     .child(m.classes.get(c.class as usize).cloned().unwrap_or_default()),
                             )

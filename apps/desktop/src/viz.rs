@@ -159,8 +159,14 @@ pub fn paint_image_with_boxes(
                     let fs = ty::XS.size;
                     let name = b.label.clone().unwrap_or_default();
                     // The selected box's chip takes the selection colour, like its outline.
-                    let (chip_bg, ink) =
-                        if b.highlight { (t.accent_solid, t.accent_on) } else { (color, chip_text) };
+                    let (chip_bg, ink) = if b.highlight {
+                        (t.accent_solid, t.accent_on)
+                    } else if b.dim {
+                        // Faded with their boxes, so the selection is the brightest thing.
+                        (alpha(color, 0.45), alpha(chip_text, 0.7))
+                    } else {
+                        (color, chip_text)
+                    };
                     let score = b.score.map(|s| format!("{s:.2}")).unwrap_or_default();
                     let name_line = window.text_system().shape_line(
                         name.clone(),

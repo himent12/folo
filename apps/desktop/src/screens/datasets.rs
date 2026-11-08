@@ -432,7 +432,7 @@ impl FoloApp {
                             div()
                                 .flex()
                                 .items_center()
-                                .gap(px(2.))
+                                .gap(px(4.))
                                 .min_w_0()
                                 .child(text(ty::XS, t.text_secondary).whitespace_nowrap().child(if narrow_strip {
                                     "Copy command"

@@ -278,7 +278,22 @@ impl FoloApp {
                                     )
                                     .child(text(ty::SM, t.text_tertiary).flex_none().child("/"))
                                 })
-                                .child(text(ty::SM, t.text_primary).flex_none().child(file)),
+                                .child({
+                                    // A file-name budget per breakpoint: a long name ends in "…" (at a
+                                    // known width, as GPUI needs) and the full name is on hover.
+                                    let budget = if compact { 200. } else { 320. };
+                                    let long = file.chars().count() as f32 * 8. > budget;
+                                    let full = file.clone();
+                                    div()
+                                        .id("play-file-name")
+                                        .flex_none()
+                                        .when(long, |d| d.tooltip(crate::controls::tip(full, None)))
+                                        .child(
+                                            text(ty::SM, t.text_primary)
+                                                .when(long, |d| d.w(px(budget)).truncate())
+                                                .child(file),
+                                        )
+                                }),
                         )
                     })
                     .when(true, |d| {

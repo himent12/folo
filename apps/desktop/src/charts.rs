@@ -892,7 +892,14 @@ fn paint_line_chart(
         window.paint_quad(fill(Bounds::new(point(x, plot.bottom()), size(px(1.), px(4.))), t.chart_axis));
         let l = (spec.x_fmt)(*v);
         let w = text_width(window, &l, label_size);
-        let lx = (x - w / 2.).clamp(plot.left() - px(4.), plot.right() - w);
+        // The first and last labels sit flush with their ticks instead of being centred and clamped.
+        let lx = if Some(v) == xt.first() && xt.len() > 1 {
+            x - px(1.)
+        } else if Some(v) == xt.last() && xt.len() > 1 {
+            x - w + px(1.)
+        } else {
+            (x - w / 2.).clamp(plot.left() - px(4.), plot.right() - w)
+        };
         if chip_x.is_some_and(|c| (lx + w / 2. - c).abs() < w / 2. + px(22.)) {
             continue;
         }
@@ -925,6 +932,8 @@ fn paint_line_chart(
             ),
         }),
         |window| {
+            // Live endpoint dots already drawn: one closer than 6 px to another is skipped.
+            let mut live_dots: Vec<Point<Pixels>> = Vec::new();
             for s in &spec.series {
                 if s.points.is_empty() {
                     continue;
@@ -974,8 +983,13 @@ fn paint_line_chart(
                 }
                 if s.live
                     && let Some(&(x, y)) = main.last()
+                    && !live_dots.iter().any(|d| {
+                        let c = point(sx(x), sy(y));
+                        (d.x - c.x).abs() < px(6.) && (d.y - c.y).abs() < px(6.)
+                    })
                 {
                     let c = point(sx(x), sy(y));
+                    live_dots.push(c);
                     window.paint_quad(
                         fill(Bounds::centered_at(c, size(px(10.), px(10.))), alpha(s.color, 0.22))
                             .corner_radii(px(5.)),
@@ -1049,7 +1063,9 @@ fn paint_line_chart(
     ));
     if !spec.readout {
         // The values are in the header legend; the axis says where the cursor is.
-        let l = (spec.x_fmt)(snap);
+        // Named ("epoch 36"), so a linked cursor's unit is explicit.
+        let v = (spec.x_fmt)(snap);
+        let l = if spec.x_name.is_empty() { v } else { format!("{} {v}", spec.x_name) };
         let w = text_width(window, &l, label_size) + px(10.);
         let chip = Bounds::new(
             point((cx_px - w / 2.).clamp(plot.left() - px(4.), plot.right() - w), plot.bottom() + px(3.)),
