@@ -89,8 +89,13 @@ export interface Api {
   runEvents(id: string, handlers: RunEventHandlers): () => void;
 
   predict(input: PredictInput, opts: PredictOptions, signal?: AbortSignal): Promise<Prediction>;
-  /** A model's `.folo` file, for running it in the browser (GET /api/models/{id}/weights). */
+  /**
+   * A model's `.folo` file for running it in the browser: the f16 export (GET /api/models/{id}/weights?format=f16,
+   * a fraction of a checkpoint's size). The browser's HTTP cache revalidates it by ETag.
+   */
   modelWeights(id: string, signal?: AbortSignal): Promise<ArrayBuffer>;
+  /** The weights' current ETag (a HEAD request): it changes when the model's file does. Null when unknown. */
+  modelWeightsTag(id: string, signal?: AbortSignal): Promise<string | null>;
 }
 
 /** Builds a query string from defined values only. */
@@ -225,7 +230,7 @@ export class HttpApi implements Api {
   async modelWeights(id: string, signal?: AbortSignal) {
     let res: Response;
     try {
-      res = await fetch(`${this.base}/api/models/${encodeURIComponent(id)}/weights`, { signal });
+      res = await fetch(`${this.base}/api/models/${encodeURIComponent(id)}/weights?format=f16`, { signal });
     } catch (e) {
       if (e instanceof DOMException && e.name === 'AbortError') throw e;
       throw new ApiError(0, 'network', 'Cannot reach the FOLO server.', 'Is folo serve running? Check the server URL in Settings.');
@@ -233,6 +238,15 @@ export class HttpApi implements Api {
     if (res.ok) return res.arrayBuffer();
     const err = ((await res.json().catch(() => undefined)) as { error?: { code?: string; message?: string; hint?: string } } | undefined)?.error;
     throw new ApiError(res.status, err?.code ?? `http_${res.status}`, err?.message ?? `Could not download the model (HTTP ${res.status}).`, err?.hint);
+  }
+
+  async modelWeightsTag(id: string, signal?: AbortSignal) {
+    try {
+      const res = await fetch(`${this.base}/api/models/${encodeURIComponent(id)}/weights?format=f16`, { method: 'HEAD', signal });
+      return res.ok ? res.headers.get('etag') : null;
+    } catch {
+      return null;
+    }
   }
 
   predict(input: PredictInput, opts: PredictOptions, signal?: AbortSignal) {
