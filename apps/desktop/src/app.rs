@@ -160,6 +160,8 @@ pub struct NewRunForm {
     pub mosaic: f32,
     pub mixup: f32,
     pub fliplr: f32,
+    /// Epochs at the end trained without mosaic.
+    pub close_mosaic: f32,
     pub submitting: bool,
     pub error: Option<ApiError>,
 }
@@ -182,6 +184,7 @@ pub struct Palette {
     pub input: Entity<TextInput>,
     pub query: String,
     pub selected: usize,
+    pub scroll: ScrollHandle,
     _sub: Subscription,
 }
 
@@ -783,7 +786,13 @@ impl FoloApp {
         });
         let fh = input.read(cx).focus_handle(cx);
         window.focus(&fh);
-        self.palette = Some(Palette { input, query: String::new(), selected: 0, _sub: sub });
+        self.palette = Some(Palette {
+            input,
+            query: String::new(),
+            selected: 0,
+            scroll: ScrollHandle::new(),
+            _sub: sub,
+        });
         cx.notify();
     }
 
@@ -822,6 +831,7 @@ impl FoloApp {
             mosaic: 1.0,
             mixup: 0.0,
             fliplr: 0.5,
+            close_mosaic: 10.0,
             submitting: false,
             error: None,
         });
@@ -857,6 +867,7 @@ impl FoloApp {
                 mosaic: form.mosaic,
                 mixup: form.mixup,
                 fliplr: form.fliplr,
+                close_mosaic: form.close_mosaic.round() as u32,
                 ..Augment::default()
             },
             seed: 0,
@@ -1169,31 +1180,31 @@ impl FoloApp {
                     .window_control_area(WindowControlArea::Drag)
                     .children(crumbs.into_iter().enumerate().map(|(i, (label, route))| {
                         let last = route.is_none();
+                        let crumb = div().id(("crumb", i)).px(px(4.)).py(px(2.)).rounded(px(4.)).child(
+                            text(ty::BASE, if last { t.text_primary } else { t.text_tertiary })
+                                .when(last, |d| d.font_weight(FontWeight::MEDIUM))
+                                .whitespace_nowrap()
+                                .child(label),
+                        );
+                        let crumb = match route {
+                            Some(r) => self
+                                .bind(
+                                    crumb.cursor_pointer().hover(|s| s.bg(t.bg_hover)),
+                                    &format!("crumb-{i}"),
+                                    4.,
+                                    window,
+                                    cx,
+                                    act(move |this, w, cx| this.navigate(r.clone(), w, cx)),
+                                )
+                                .into_any_element(),
+                            None => crumb.into_any_element(),
+                        };
                         div()
                             .flex()
                             .items_center()
                             .gap(px(6.))
                             .when(i > 0, |d| d.child(icon("icons/chevron-right.svg", 12., t.text_disabled)))
-                            .child(
-                                div()
-                                    .id(("crumb", i))
-                                    .px(px(4.))
-                                    .py(px(2.))
-                                    .rounded(px(4.))
-                                    .child(
-                                        text(ty::BASE, if last { t.text_primary } else { t.text_tertiary })
-                                            .when(last, |d| d.font_weight(FontWeight::MEDIUM))
-                                            .whitespace_nowrap()
-                                            .child(label),
-                                    )
-                                    .when_some(route, |d, r| {
-                                        d.cursor_pointer().hover(|s| s.bg(t.bg_hover)).on_click(
-                                            cx.listener(move |this, _, w, cx| {
-                                                this.navigate(r.clone(), w, cx)
-                                            }),
-                                        )
-                                    }),
-                            )
+                            .child(crumb)
                     })),
             )
             .child(
@@ -1296,7 +1307,8 @@ impl FoloApp {
             cx,
         );
         let mut live_card = None;
-        if let Some(r) = live {
+        // On Overview the live run is already the hero; don't repeat it in the sidebar.
+        if let Some(r) = live.filter(|_| self.route != Route::Overview) {
             live_card =
                 Some(if compact { self.live_rail(&r, window, cx) } else { self.live_mini(&r, window, cx) });
         }
@@ -1388,7 +1400,7 @@ impl FoloApp {
             .child(icon(icon_path, 16., if active { t.text_primary } else { t.text_tertiary }))
             .when(compact && badge.is_some(), |d| {
                 d.child(div().absolute().top(px(6.)).right(px(8.)).child(dot(
-                    t.accent_solid,
+                    t.accent_fill(),
                     6.,
                     true,
                     "nav-live-c",
@@ -1407,7 +1419,7 @@ impl FoloApp {
                             .flex()
                             .items_center()
                             .gap(px(5.))
-                            .child(dot(t.accent_solid, 6., true, "nav-live"))
+                            .child(dot(t.accent_fill(), 6., true, "nav-live"))
                             .child(
                                 text(ty::XS, t.accent_text)
                                     .tnum()
@@ -1457,7 +1469,7 @@ impl FoloApp {
                     .flex()
                     .items_center()
                     .gap(px(8.))
-                    .child(dot(t.accent_solid, 6., true, "mini"))
+                    .child(dot(t.accent_fill(), 6., true, "mini"))
                     .child(text(ty::XS, t.accent_text).font_weight(FontWeight::MEDIUM).child("TRAINING"))
                     .child(div().flex_1())
                     .child(
@@ -1470,7 +1482,7 @@ impl FoloApp {
                     .truncate()
                     .child(r.name.clone()),
             )
-            .child(progress(&t, r.progress(), t.accent_solid, 3.))
+            .child(progress(&t, r.progress(), t.accent_fill(), 3.))
             .child(
                 div()
                     .flex()
@@ -1506,8 +1518,8 @@ impl FoloApp {
             .cursor_pointer()
             .hover(|s| s.border_color(t.line_default))
             .tooltip(crate::controls::tip(format!("{} · epoch {} / {}", r.name, r.epoch, r.epochs), None))
-            .child(dot(t.accent_solid, 6., true, "rail"))
-            .child(div().w(px(20.)).child(progress(&t, r.progress(), t.accent_solid, 2.)));
+            .child(dot(t.accent_fill(), 6., true, "rail"))
+            .child(div().w(px(20.)).child(progress(&t, r.progress(), t.accent_fill(), 2.)));
         self.bind(
             el,
             "live-rail",
@@ -1523,7 +1535,7 @@ impl FoloApp {
         let t = theme(cx);
         let (color, label) = match &self.store.health {
             Load::Ready(h) if h.mock => {
-                (t.accent_solid, format!("{} · v{}", self.store.api.describe(), h.version))
+                (t.accent_fill(), format!("{} · v{}", self.store.api.describe(), h.version))
             }
             Load::Ready(h) => (t.success_solid, format!("{} · v{}", self.store.api.describe(), h.version)),
             Load::Failed(_) => (t.danger_solid, "Server unreachable".to_string()),
@@ -1622,15 +1634,19 @@ impl Render for FoloApp {
             .bg(t.bg_app)
             .on_action(cx.listener(|this, _: &OpenPalette, w, cx| this.open_palette(w, cx)))
             .on_action(cx.listener(|this, _: &NewRunAction, w, cx| {
-                this.palette = None;
-                this.open_new_run(None, w, cx)
+                if !this.modal_open() {
+                    this.palette = None;
+                    this.open_new_run(None, w, cx)
+                }
             }))
-            .on_action(cx.listener(|this, _: &GoOverview, w, cx| this.navigate(Route::Overview, w, cx)))
-            .on_action(cx.listener(|this, _: &GoDatasets, w, cx| this.navigate(Route::Datasets, w, cx)))
-            .on_action(cx.listener(|this, _: &GoRuns, w, cx| this.navigate(Route::Runs, w, cx)))
-            .on_action(cx.listener(|this, _: &GoModels, w, cx| this.navigate(Route::Models, w, cx)))
-            .on_action(cx.listener(|this, _: &GoPlayground, w, cx| this.navigate(Route::Playground, w, cx)))
-            .on_action(cx.listener(|this, _: &GoSettings, w, cx| this.navigate(Route::Settings, w, cx)))
+            .on_action(cx.listener(|this, _: &GoOverview, w, cx| this.nav_shortcut(Route::Overview, w, cx)))
+            .on_action(cx.listener(|this, _: &GoDatasets, w, cx| this.nav_shortcut(Route::Datasets, w, cx)))
+            .on_action(cx.listener(|this, _: &GoRuns, w, cx| this.nav_shortcut(Route::Runs, w, cx)))
+            .on_action(cx.listener(|this, _: &GoModels, w, cx| this.nav_shortcut(Route::Models, w, cx)))
+            .on_action(
+                cx.listener(|this, _: &GoPlayground, w, cx| this.nav_shortcut(Route::Playground, w, cx)),
+            )
+            .on_action(cx.listener(|this, _: &GoSettings, w, cx| this.nav_shortcut(Route::Settings, w, cx)))
             .on_action(cx.listener(|this, _: &ToggleTheme, _, cx| this.toggle_theme(cx)))
             .on_action(cx.listener(|this, _: &Back, w, cx| this.back(w, cx)))
             .on_action(cx.listener(|this, _: &OpenImage, _, cx| this.pick_image(cx)))
@@ -1641,12 +1657,12 @@ impl Render for FoloApp {
             }))
             .on_action(cx.listener(|this, _: &FocusNext, w, cx| {
                 this.kb = true;
-                w.focus_next();
+                this.cycle_focus(true, w, cx);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &FocusPrev, w, cx| {
                 this.kb = true;
-                w.focus_prev();
+                this.cycle_focus(false, w, cx);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &Dismiss, w, cx| this.dismiss(w, cx)))
@@ -1690,6 +1706,69 @@ impl Render for FoloApp {
 }
 
 impl FoloApp {
+    /// A dialog, the stop confirmation or the inspector is up: the page behind is inert.
+    pub fn modal_open(&self) -> bool {
+        self.new_run.is_some() || self.confirm_stop.is_some() || self.inspector.is_some()
+    }
+
+    fn nav_shortcut(&mut self, route: Route, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.modal_open() {
+            self.palette = None;
+            self.navigate(route, window, cx);
+        }
+    }
+
+    /// Whether the focused element belongs to the topmost overlay (always true without one).
+    fn focus_in_scope(&self, window: &Window, cx: &App) -> bool {
+        let prefixes: &[&str] = if self.confirm_stop.is_some() {
+            &["stop-", "dialog-close"]
+        } else if self.new_run.is_some() {
+            &["nr-", "dialog-close"]
+        } else if self.inspector.is_some() {
+            &["insp-"]
+        } else if self.palette.is_some() {
+            &[]
+        } else {
+            return true;
+        };
+        let focus = self.focus.borrow();
+        if focus.iter().any(|(k, fh)| prefixes.iter().any(|p| k.starts_with(p)) && fh.is_focused(window)) {
+            return true;
+        }
+        if let Some(f) = &self.new_run
+            && self.confirm_stop.is_none()
+            && f.name.read(cx).focus_handle(cx).is_focused(window)
+        {
+            return true;
+        }
+        if let Some(p) = &self.palette {
+            return p.input.read(cx).focus_handle(cx).is_focused(window);
+        }
+        self.inspector.is_some() && self.inspector_focus.is_focused(window)
+    }
+
+    /// Tab / Shift-Tab, trapped inside the topmost overlay.
+    fn cycle_focus(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        for _ in 0..512 {
+            if forward {
+                window.focus_next()
+            } else {
+                window.focus_prev()
+            }
+            if self.focus_in_scope(window, cx) {
+                return;
+            }
+        }
+    }
+
+    /// Ask before stopping a run; the safe choice has focus.
+    pub fn ask_stop(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.confirm_stop = Some(id);
+        let fh = self.fh("stop-cancel", cx);
+        window.focus(&fh);
+        cx.notify();
+    }
+
     pub fn open_inspector(
         &mut self,
         dataset: String,
@@ -1721,6 +1800,7 @@ impl FoloApp {
             self.close_palette(window, cx);
         } else if self.confirm_stop.is_some() {
             self.confirm_stop = None;
+            window.focus(&self.root_focus);
         } else if self.new_run.is_some() {
             self.new_run = None;
             window.focus(&self.root_focus);

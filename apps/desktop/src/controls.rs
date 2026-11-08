@@ -11,6 +11,7 @@ use gpui::{
 use crate::app::{Action, Drag, FoloApp, focus_ring};
 use crate::theme::{Theme, radius, size as tsize, theme, ty};
 use crate::ui::*;
+use gpui::AnimationExt;
 
 /// Called with the chosen option index.
 pub type OnSelect = std::rc::Rc<dyn Fn(&mut FoloApp, usize, &mut Window, &mut Context<FoloApp>)>;
@@ -230,7 +231,9 @@ impl FoloApp {
                     .justify_center()
                     .rounded(px(radius::SM))
                     .cursor_pointer()
-                    .when(on, |d| d.bg(t.bg_raised).border_1().border_color(t.line_strong))
+                    .border_1()
+                    .border_color(gpui::transparent_black())
+                    .when(on, |d| d.bg(t.bg_raised).border_color(t.line_strong))
                     .when(!on, |d| d.hover(|s| s.bg(t.bg_hover)))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         f(this, i, window, cx);
@@ -300,16 +303,32 @@ impl FoloApp {
             .flex_none()
             .rounded_full()
             .cursor_pointer()
-            .bg(if on { t.accent_solid } else { t.line_strong })
-            .child(
-                div()
-                    .absolute()
-                    .top(px(2.))
-                    .left(px(if on { 14. } else { 2. }))
-                    .size(px(14.))
-                    .rounded_full()
-                    .bg(if on { t.accent_on } else { t.text_secondary }),
-            );
+            .bg(if on { t.accent_fill() } else { t.line_strong })
+            .when(!on, |d| d.hover(|s| s.bg(t.text_disabled)))
+            .child({
+                // Dark: a dark knob on lime; light: white on olive. Off: a bright knob on grey.
+                let knob = if on && t.is_dark() {
+                    t.accent_on
+                } else if t.is_dark() {
+                    t.text_primary
+                } else {
+                    gpui::white()
+                };
+                let knob =
+                    div().absolute().top(px(2.)).size(px(14.)).rounded_full().bg(knob).shadow(t.shadow_sm());
+                let (from, to) = if on { (2., 14.) } else { (14., 2.) };
+                if reduce_motion() {
+                    knob.left(px(to)).into_any_element()
+                } else {
+                    knob.with_animation(
+                        SharedString::from(format!("{key}-knob-{on}")),
+                        gpui::Animation::new(std::time::Duration::from_millis(120))
+                            .with_easing(gpui::ease_out_quint()),
+                        move |d, p| d.left(px(from + (to - from) * p)),
+                    )
+                    .into_any_element()
+                }
+            });
         self.bind(el, key, 9., window, cx, action)
     }
 
@@ -331,7 +350,7 @@ impl FoloApp {
         let dragging = self.drag.as_ref().is_some_and(|d| d.id == key);
         let f = ((value - min) / (max - min)).clamp(0.0, 1.0);
         let store = self.slider_bounds.clone();
-        let fill_color = t.accent_solid;
+        let fill_color = t.accent_fill();
         div()
             .id(key)
             .track_focus(&fh)
@@ -403,9 +422,9 @@ impl FoloApp {
                         .top(px(3.))
                         .size(px(14.))
                         .rounded_full()
-                        .bg(if dragging { t.accent_solid_hover } else { gpui::white() })
+                        .bg(if dragging { t.accent_fill() } else { gpui::white() })
                         .border_2()
-                        .border_color(t.accent_solid)
+                        .border_color(t.accent_fill())
                         .shadow(t.shadow_sm())
                         .when(ring, |d| d.child(focus_ring(&t, 7.))),
                 ),
@@ -427,6 +446,7 @@ impl FoloApp {
                         "nr-mosaic" => f.mosaic = q(frac, 0.05),
                         "nr-mixup" => f.mixup = q(frac * 0.5, 0.05),
                         "nr-fliplr" => f.fliplr = q(frac, 0.05),
+                        "nr-close" => f.close_mosaic = q(frac * 30., 1.),
                         _ => {}
                     }
                 }
@@ -452,6 +472,7 @@ impl FoloApp {
         let fh = self.fh(key, cx);
         let ring = self.ring(&fh, window);
         let n = options.len();
+        let empty = n == 0;
         let keys = on_select.clone();
         let trigger = div()
             .id(key)
@@ -478,8 +499,8 @@ impl FoloApp {
                     "enter" | "space" => {
                         this.menu_open = if this.menu_open == Some(key) { None } else { Some(key) };
                     }
-                    "up" => keys(this, (selected + n - 1) % n, window, cx),
-                    "down" => keys(this, (selected + 1) % n, window, cx),
+                    "up" if n > 0 => keys(this, (selected + n - 1) % n, window, cx),
+                    "down" if n > 0 => keys(this, (selected + 1) % n, window, cx),
                     _ => return,
                 }
                 cx.stop_propagation();
@@ -492,7 +513,7 @@ impl FoloApp {
                 14.,
                 t.text_tertiary,
             ));
-        let menu = open.then(|| {
+        let menu = (open && !empty).then(|| {
             gpui::deferred(
                 div()
                     .absolute()

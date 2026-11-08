@@ -13,7 +13,7 @@ use super::*;
 use crate::api::time;
 use crate::api::{Run, RunStatus};
 use crate::app::{FoloApp, Route, act};
-use crate::charts::{LineChart, Series, line_chart, sparkline};
+use crate::charts::{LineChart, Series, line_chart, sparkline_in};
 use crate::controls::Btn;
 use crate::store::Load;
 use crate::theme::{radius, theme, ty};
@@ -35,6 +35,7 @@ impl FoloApp {
                 };
                 format!("{d} datasets · {m} models · {live}")
             }
+            _ if self.store.runs.error().is_some() => "Server unreachable".to_string(),
             _ => "Loading…".to_string(),
         };
         let actions = vec![
@@ -61,7 +62,13 @@ impl FoloApp {
             .tooltip(crate::controls::tip("Start training", Some("Ctrl N")))
             .into_any_element(),
         ];
-        let header = page_header(&t, "Overview", subtitle, actions);
+        let header = page_header(
+            &t,
+            "Overview",
+            text(ty::BASE, if self.store.runs.error().is_some() { t.danger_text } else { t.text_secondary })
+                .child(subtitle),
+            actions,
+        );
 
         if let Some(e) = self.store.runs.error().cloned() {
             let err = self.error_panel(&e, "ov-retry", window, cx);
@@ -156,6 +163,8 @@ impl FoloApp {
                     ],
                 );
                 loss.x_range = Some((0., total));
+                let loss_max = d.loss[3].iter().map(|p| p.1).fold(0f32, f32::max);
+                loss.y_range = Some((0., (loss_max * 1.08).max(0.1)));
                 loss.height = 132.;
                 loss.hover = hover;
                 loss.on_hover = Some(on_hover.clone());
@@ -178,8 +187,14 @@ impl FoloApp {
                 let charts = div()
                     .flex()
                     .gap(px(16.))
-                    .child(chart_block(&t, "Loss", "smoothed", line_chart(&t, loss)))
-                    .child(chart_block(&t, "Validation mAP", "per epoch", line_chart(&t, map)))
+                    .child(chart_block(&t, "Training loss", "total · smoothed", None, line_chart(&t, loss)))
+                    .child(chart_block(
+                        &t,
+                        "Validation mAP",
+                        "",
+                        Some(legend(&t, &[("mAP50-95", t.chart_series[0]), ("mAP50", t.chart_series[1])])),
+                        line_chart(&t, map),
+                    ))
                     .into_any_element();
                 (charts, step.map(|s| s.imgs_per_s), epoch.map(|e| e.val.map50_95))
             }
@@ -248,7 +263,7 @@ impl FoloApp {
                     .flex()
                     .items_center()
                     .gap(px(12.))
-                    .child(div().flex_1().child(progress(&t, r.progress(), t.accent_solid, 4.)))
+                    .child(div().flex_1().child(progress(&t, r.progress(), t.accent_fill(), 4.)))
                     .child(
                         text(ty::XS, t.text_secondary).tnum().child(format!("{:.1}%", r.progress() * 100.)),
                     ),
@@ -297,7 +312,16 @@ impl FoloApp {
             .flex()
             .items_center()
             .justify_center()
-            .child(empty_state(&t, "icons/activity.svg", title, body, Tone::Neutral).child(action))
+            .child(
+                empty_state(
+                    &t,
+                    if has_ds { "icons/activity.svg" } else { "icons/images.svg" },
+                    title,
+                    body,
+                    Tone::Neutral,
+                )
+                .child(action),
+            )
             .into_any_element()
     }
 
@@ -326,6 +350,7 @@ impl FoloApp {
                         .child(progress(&t, frac, color, 4.))
                 };
                 div()
+                    .flex_1()
                     .flex()
                     .flex_col()
                     .gap(px(14.))
@@ -351,38 +376,52 @@ impl FoloApp {
                                         )
                                         .child(badge(&t, g.backend.to_uppercase(), Tone::Neutral)),
                                 )
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_end()
-                                        .gap(px(12.))
-                                        .child(metric(
-                                            &t,
-                                            format!("{:.0}", util * 100.),
-                                            "%",
-                                            ty::X3XL,
-                                            ty::LG,
-                                        ))
-                                        .child(div().flex_1().h(px(36.)).pb(px(4.)).when(
-                                            hist.len() > 1,
-                                            |d| {
-                                                d.child(sparkline(
-                                                    &t,
-                                                    Arc::new(hist.clone()),
-                                                    t.accent_solid,
-                                                    32.,
-                                                    true,
-                                                ))
-                                            },
-                                        )),
-                                )
+                                .child(metric(&t, format!("{:.0}", util * 100.), "%", ty::X3XL, ty::LG))
                                 .child(
                                     text(ty::XS, t.text_tertiary)
                                         .tnum()
-                                        .child(format!("GPU utilisation · {vram} {vu} VRAM")),
+                                        .child(format!("GPU utilisation · {vram} {vu} memory")),
                                 ),
                         )
                     })
+                    .child(
+                        // Utilisation history fills the space the hero gives this panel.
+                        div()
+                            .flex_1()
+                            .min_h(px(56.))
+                            .flex()
+                            .flex_col()
+                            .gap(px(6.))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_h(px(40.))
+                                    .rounded(px(radius::MD))
+                                    .bg(t.bg_inset)
+                                    .p(px(6.))
+                                    .when(hist.len() > 1, |d| {
+                                        d.child(sparkline_in(
+                                            &t,
+                                            Arc::new(hist.clone()),
+                                            t.accent_fill(),
+                                            0.,
+                                            true,
+                                            Some((0., 1.)),
+                                        ))
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .justify_between()
+                                    .child(text(ty::XS, t.text_tertiary).child("Utilisation"))
+                                    .child(
+                                        text(ty::XS, t.text_tertiary)
+                                            .tnum()
+                                            .child(format!("last {} min", (hist.len() * 2).div_ceil(60))),
+                                    ),
+                            ),
+                    )
                     .child(hairline(&t))
                     .child(row(
                         &format!("CPU · {} threads", s.cpu.threads),
@@ -399,7 +438,14 @@ impl FoloApp {
                 .into_any_element(),
             _ => loading_rows(&t, "sys", 4).into_any_element(),
         };
-        panel(&t).flex_1().flex().flex_col().child(panel_header(&t, "System")).child(body).into_any_element()
+        panel(&t)
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .child(panel_header(&t, "System"))
+            .child(body)
+            .into_any_element()
     }
 
     fn recent_runs(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -435,7 +481,7 @@ impl FoloApp {
                                 .flex()
                                 .items_center()
                                 .gap(px(8.))
-                                .child(div().flex_1().child(progress(&t, r.progress(), t.accent_solid, 4.)))
+                                .child(div().flex_1().child(progress(&t, r.progress(), t.accent_fill(), 4.)))
                                 .child(
                                     text(ty::XS, t.text_secondary)
                                         .tnum()
@@ -443,7 +489,7 @@ impl FoloApp {
                                 )
                         } else {
                             div().w(px(120.)).flex().justify_end().child(r.best.as_ref().map_or(
-                                text(ty::SM, t.text_disabled).child("–"),
+                                text(ty::SM, t.text_tertiary).child("–"),
                                 |b| {
                                     div()
                                         .flex()
@@ -467,7 +513,11 @@ impl FoloApp {
                             .rounded(px(radius::MD))
                             .cursor_pointer()
                             .hover(|s| s.bg(t.bg_hover))
-                            .child(status_badge(&t, r.status, &format!("ov-{}", r.id)).w(px(92.)))
+                            .child(div().w(px(96.)).flex_none().flex().child(status_badge(
+                                &t,
+                                r.status,
+                                &format!("ov-{}", r.id),
+                            )))
                             .child(cell2(&t, r.name.clone(), format!("{ds} · {}", r.config.arch)).flex_1())
                             .child(right)
                             .child(text(ty::XS, t.text_tertiary).w(px(72.)).text_right().child(when));
@@ -538,7 +588,7 @@ impl FoloApp {
                                 )
                                 .flex_1(),
                             )
-                            .child(bar_value(&t, map, f3(map), t.accent_solid));
+                            .child(bar_value(&t, map, f3(map), t.accent_fill()));
                         self.bind(
                             row,
                             &key,
@@ -574,7 +624,23 @@ impl FoloApp {
                     .child(text(ty::SM, t.text_primary).font_weight(FontWeight::MEDIUM).child("Datasets"))
                     .child(all),
             )
-            .child(div().flex().gap(px(16.)).children(cards))
+            .map(|d| {
+                if cards.is_empty() && self.store.datasets.ready().is_some() {
+                    d.child(panel(&t).child(empty_state(
+                        &t,
+                        "icons/images.svg",
+                        "No datasets registered",
+                        "Datasets you add or generate show up here with a preview of their images.",
+                        Tone::Neutral,
+                    )))
+                } else if cards.is_empty() {
+                    d.child(div().flex().gap(px(16.)).children(
+                        (0..3).map(|i| div().flex_1().h(px(196.)).child(skeleton(&t, format!("ov-ds-{i}")))),
+                    ))
+                } else {
+                    d.child(div().flex().gap(px(16.)).children(cards))
+                }
+            })
             .into_any_element()
     }
 
@@ -685,7 +751,13 @@ impl FoloApp {
 }
 
 /// A chart with a small title row.
-pub fn chart_block(t: &crate::theme::Theme, title: &str, detail: &str, chart: AnyElement) -> gpui::Div {
+pub fn chart_block(
+    t: &crate::theme::Theme,
+    title: &str,
+    detail: &str,
+    legend: Option<AnyElement>,
+    chart: AnyElement,
+) -> gpui::Div {
     div()
         .flex_1()
         .min_w_0()
@@ -700,7 +772,8 @@ pub fn chart_block(t: &crate::theme::Theme, title: &str, detail: &str, chart: An
                 .child(
                     text(ty::SM, t.text_secondary).font_weight(FontWeight::MEDIUM).child(title.to_string()),
                 )
-                .child(text(ty::XS, t.text_tertiary).child(detail.to_string())),
+                .child(text(ty::XS, t.text_tertiary).flex_1().child(detail.to_string()))
+                .children(legend),
         )
         .child(chart)
 }

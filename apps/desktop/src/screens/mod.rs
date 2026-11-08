@@ -81,16 +81,25 @@ impl FoloApp {
         let retry = self.button(
             retry_key,
             "Retry",
-            Btn::Secondary,
+            Btn::Primary,
             Some("icons/refresh-cw.svg"),
             window,
             cx,
             act(|this, _, cx| this.retry_all(cx)),
         );
+        let settings = self.button(
+            &format!("{retry_key}-settings"),
+            "Connection settings",
+            Btn::Secondary,
+            Some("icons/settings.svg"),
+            window,
+            cx,
+            act(|this, w, cx| this.navigate(crate::app::Route::Settings, w, cx)),
+        );
         panel(&t)
             .child(
                 empty_state(&t, "icons/plug.svg", &e.message, &hint, Tone::Danger)
-                    .child(div().flex().gap(px(8.)).child(retry)),
+                    .child(div().flex().gap(px(8.)).child(settings).child(retry)),
             )
             .into_any_element()
     }
@@ -153,12 +162,17 @@ pub fn loading_rows(t: &Theme, id: &str, rows: usize) -> Div {
             .flex()
             .gap(px(12.))
             .items_center()
-            .child(div().size(px(16.)).child(skeleton(t, format!("{id}-a{i}"))))
+            .child(div().size(px(16.)).flex_none().child(skeleton(t, format!("{id}-a{i}"))))
             .child(
-                div().h(px(12.)).w(px(140. + (i % 3) as f32 * 40.)).child(skeleton(t, format!("{id}-b{i}"))),
+                // Relative widths so placeholders fit any panel.
+                div()
+                    .h(px(12.))
+                    .w(gpui::relative(0.45 + (i % 3) as f32 * 0.12))
+                    .min_w_0()
+                    .child(skeleton(t, format!("{id}-b{i}"))),
             )
             .child(div().flex_1())
-            .child(div().h(px(12.)).w(px(60.)).child(skeleton(t, format!("{id}-c{i}"))))
+            .child(div().h(px(12.)).w(gpui::relative(0.15)).child(skeleton(t, format!("{id}-c{i}"))))
     }))
 }
 

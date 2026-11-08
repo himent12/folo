@@ -61,7 +61,7 @@ impl DatasetFixture {
             );
             images.push(ImageMeta {
                 id: format!("img_{i:05}"),
-                file: format!("images/{}/{i:06}.jpg", split.label()),
+                file: format!("images/{}/img_{i:05}.jpg", split.label()),
                 split,
                 width: w,
                 height: h,
@@ -680,7 +680,8 @@ impl Backend for MockBackend {
         self.check()?;
         let t = self.started.elapsed().as_secs_f32();
         let wobble = if self.frozen { 0.0 } else { (t * 0.7).sin() * 0.02 };
-        let live = self.runs.lock().unwrap().iter().any(|f| Self::snapshot(f).status == RunStatus::Running);
+        let live = !self.empty
+            && self.runs.lock().unwrap().iter().any(|f| Self::snapshot(f).status == RunStatus::Running);
         Ok(SystemInfo {
             cpu: Cpu {
                 name: "AMD Ryzen 9 7950X".into(),

@@ -20,7 +20,7 @@ use crate::viz::{DrawBox, Fit, hit_box, paint_image_with_boxes, to_image};
 
 impl FoloApp {
     /// Boxes of the current prediction that pass the confidence threshold.
-    fn visible_boxes(&self, p: &Prediction) -> Vec<DrawBox> {
+    fn visible_boxes(&self, p: &Prediction, active: Option<usize>) -> Vec<DrawBox> {
         p.boxes
             .iter()
             .filter(|b| b.score >= self.play_conf)
@@ -28,8 +28,8 @@ impl FoloApp {
             .map(|(i, b)| DrawBox {
                 label: Some(b.name.clone().into()),
                 score: Some(b.score),
-                highlight: self.play_hover == Some(i),
-                dim: self.play_hover.is_some_and(|h| h != i),
+                highlight: active == Some(i),
+                dim: active.is_some_and(|h| h != i),
                 ..DrawBox::new(b.class, b.x1, b.y1, b.x2, b.y2)
             })
             .collect()
@@ -72,16 +72,29 @@ impl FoloApp {
 
     fn stage(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
-        let Some(img) = self.play_image.as_ref() else {
-            let pick = self.button(
-                "play-pick",
-                "Choose an image",
-                Btn::Primary,
-                Some("icons/image-up.svg"),
-                window,
-                cx,
-                act(|this, _, cx| this.pick_image(cx)),
-            );
+        let no_models = self.store.models.ready().is_some_and(|m| m.is_empty());
+        if self.play_image.is_none() {
+            let pick = if no_models {
+                self.button(
+                    "play-pick",
+                    "New run",
+                    Btn::Primary,
+                    Some("icons/plus.svg"),
+                    window,
+                    cx,
+                    act(|this, w, cx| this.open_new_run(None, w, cx)),
+                )
+            } else {
+                self.button(
+                    "play-pick",
+                    "Choose an image",
+                    Btn::Primary,
+                    Some("icons/image-up.svg"),
+                    window,
+                    cx,
+                    act(|this, _, cx| this.pick_image(cx)),
+                )
+            };
             let drop_hover = self.play_drop_hover;
             return div()
                 .id("drop-zone")
@@ -114,31 +127,38 @@ impl FoloApp {
                                 .flex_col()
                                 .items_center()
                                 .gap(px(4.))
-                                .child(text(ty::LG, t.text_primary).child("Drop an image to detect objects"))
-                                .child(
-                                    text(ty::SM, t.text_secondary)
-                                        .child("JPEG or PNG · or pick a validation sample on the right"),
-                                ),
+                                .child(text(ty::LG, t.text_primary).child(if no_models {
+                                    "Train a model to start detecting"
+                                } else {
+                                    "Drop an image to detect objects"
+                                }))
+                                .child(text(ty::SM, t.text_secondary).child(if no_models {
+                                    "The Playground runs your trained models. Start a run, then come back with an image."
+                                } else {
+                                    "JPEG or PNG · or pick a validation image on the right"
+                                })),
                         )
-                        .child(
-                            div().flex().items_center().gap(px(12.)).child(pick).child(
+                        .child(div().flex().items_center().gap(px(12.)).child(pick).when(!no_models, |d| {
+                            d.child(
                                 div()
                                     .flex()
                                     .items_center()
                                     .gap(px(6.))
                                     .child(text(ty::XS, t.text_tertiary).child("or press"))
                                     .child(shortcut(&t, &["Ctrl", "O"])),
-                            ),
-                        ),
+                            )
+                        })),
                 )
                 .into_any_element();
-        };
+        }
+        let active = self.play_active(window, cx);
+        let img = self.play_image.as_ref().unwrap();
         let dims = (img.width as f32, img.height as f32);
         let image = img.image.clone();
         let name = img.name.clone();
         let (boxes, count, loading) = match &self.play_pred {
             Load::Ready(p) => {
-                let b = self.visible_boxes(p);
+                let b = self.visible_boxes(p, active);
                 let n = b.len();
                 (b, Some(n), false)
             }
@@ -186,7 +206,7 @@ impl FoloApp {
                                 .flex()
                                 .items_center()
                                 .gap(px(6.))
-                                .child(div().size(px(6.)).rounded_full().bg(t.accent_solid))
+                                .child(div().size(px(6.)).rounded_full().bg(t.accent_fill()))
                                 .child(text(ty::XS, t.text_secondary).tnum().child(format!(
                                     "{n} {} ≥ {:.2}",
                                     if n == 1 { "object" } else { "objects" },
@@ -301,6 +321,7 @@ impl FoloApp {
                 .child(control)
                 .child(text(ty::XS, t.text_tertiary).child(help.to_string()))
         };
+        let no_models = models.is_empty() && self.store.models.ready().is_some();
         let controls = div()
             .flex()
             .flex_col()
@@ -312,21 +333,30 @@ impl FoloApp {
                     .flex_col()
                     .gap(px(8.))
                     .child(text(ty::SM, t.text_secondary).font_weight(FontWeight::MEDIUM).child("Model"))
-                    .child(select),
+                    .child(select)
+                    .when(no_models, |d| {
+                        d.child(
+                            text(ty::XS, t.text_tertiary)
+                                .child("No models yet. Finished runs add their best weights here."),
+                        )
+                    }),
             )
-            .child(field(
-                "Confidence",
-                format!("{:.2}", self.play_conf),
-                conf.into_any_element(),
-                "Hide detections scoring below this.",
-            ))
-            .child(field(
-                "IoU",
-                format!("{:.2}", self.play_iou),
-                iou.into_any_element(),
-                "Overlap at which NMS merges boxes.",
-            ));
+            .when(!no_models, |d| {
+                d.child(field(
+                    "Confidence",
+                    format!("{:.2}", self.play_conf),
+                    conf.into_any_element(),
+                    "Hide detections scoring below this.",
+                ))
+                .child(field(
+                    "IoU",
+                    format!("{:.2}", self.play_iou),
+                    iou.into_any_element(),
+                    "NMS drops weaker boxes that overlap a stronger one by more than this.",
+                ))
+            });
 
+        let active = self.play_active(window, cx);
         let detections = match &self.play_pred {
             Load::Ready(p) => {
                 let vis: Vec<crate::api::DetBox> =
@@ -335,10 +365,11 @@ impl FoloApp {
                     .iter()
                     .enumerate()
                     .map(|(i, b)| {
-                        let hot = self.play_hover == Some(i);
+                        let hot = active == Some(i);
                         let color = t.class(b.class);
-                        div()
-                            .id(("det", i))
+                        let key = format!("det-{i}");
+                        let row = div()
+                            .id(SharedString::from(key.clone()))
                             .h(px(32.))
                             .px(px(8.))
                             .flex()
@@ -365,8 +396,20 @@ impl FoloApp {
                                     .w(px(36.))
                                     .text_right()
                                     .child(format!("{:.2}", b.score)),
-                            )
-                            .into_any_element()
+                            );
+                        // Focusable so the keyboard can inspect boxes too (focus = highlight).
+                        self.bind(
+                            row,
+                            &key,
+                            radius::SM,
+                            window,
+                            cx,
+                            act(move |this, _, cx| {
+                                this.play_hover = if this.play_hover == Some(i) { None } else { Some(i) };
+                                cx.notify();
+                            }),
+                        )
+                        .into_any_element()
                     })
                     .collect();
                 let hidden = p.boxes.len() - vis.len();
@@ -377,6 +420,8 @@ impl FoloApp {
                     .flex_col()
                     .gap(px(10.))
                     .p(px(16.))
+                    .border_t_1()
+                    .border_color(t.line_subtle)
                     .child(
                         div()
                             .flex()
@@ -427,11 +472,19 @@ impl FoloApp {
                 div()
                     .flex()
                     .flex_col()
-                    .flex_1()
-                    .min_h_0()
-                    .child(panel_header(&t, "Detections").child(text(ty::XS, t.text_tertiary).tnum().child(if hidden > 0 { format!("{} · {hidden} below threshold", vis.len()) } else { vis.len().to_string() })))
-                    .child(div().id("det-list").flex_1().min_h_0().overflow_y_scroll().p(px(6.)).children(rows).when(vis.is_empty(), |d| d.child(div().p(px(10.)).child(text(ty::SM, t.text_tertiary).child("Nothing above the threshold. Lower the confidence to see weaker detections.")))))
-                    .child(hairline(&t))
+                    .flex_none()
+                    .child(panel_header(&t, "Detections").child(text(ty::XS, t.text_tertiary).tnum().child(
+                        if hidden > 0 {
+                            format!("{} shown · {hidden} below threshold", vis.len())
+                        } else {
+                            vis.len().to_string()
+                        },
+                    )))
+                    .child(div().p(px(6.)).flex().flex_col().children(rows).when(vis.is_empty(), |d| {
+                        d.child(div().p(px(10.)).child(text(ty::SM, t.text_tertiary).child(
+                            "Nothing above the threshold. Lower the confidence to see weaker detections.",
+                        )))
+                    }))
                     .child(timing)
                     .into_any_element()
             }
@@ -440,10 +493,13 @@ impl FoloApp {
                 .child(text(ty::SM, t.danger_text).child(e.message.clone()))
                 .into_any_element(),
             Load::Loading => div()
-                .child(panel_header(&t, "Detections"))
+                .flex_none()
+                .child(
+                    panel_header(&t, "Detections").child(text(ty::XS, t.text_tertiary).child("Detecting…")),
+                )
                 .child(loading_rows(&t, "det", 4))
                 .into_any_element(),
-            Load::Idle => div().flex_1().into_any_element(),
+            Load::Idle => div().into_any_element(),
         };
         // Sample picker: validation images of the model's dataset.
         let ds_id = model
@@ -451,25 +507,25 @@ impl FoloApp {
             .and_then(|m| m.run_id.as_ref())
             .and_then(|r| self.store.run(r))
             .map(|r| r.config.dataset_id.clone())
-            .unwrap_or_else(|| "ds_8f2c".into());
-        self.ensure_dataset(&ds_id, cx);
-        let samples: Vec<crate::api::ImageMeta> = self
-            .store
-            .images
-            .get(&ds_id)
-            .and_then(|l| l.ready())
-            .map(|v| {
-                v.iter()
-                    .filter(|m| m.split == Split::Val && !m.boxes.is_empty())
-                    .skip(17)
-                    .take(4)
-                    .cloned()
-                    .collect()
-            })
-            .unwrap_or_default();
-        let thumbs: Vec<AnyElement> = samples
-            .iter()
-            .map(|m| {
+            .or_else(|| self.store.datasets.ready().and_then(|d| d.first()).map(|d| d.id.clone()));
+        let mut thumbs: Vec<AnyElement> = Vec::new();
+        if let Some(ds_id) = ds_id.clone() {
+            self.ensure_dataset(&ds_id, cx);
+            let samples: Vec<crate::api::ImageMeta> = self
+                .store
+                .images
+                .get(&ds_id)
+                .and_then(|l| l.ready())
+                .map(|v| {
+                    v.iter()
+                        .filter(|m| m.split == Split::Val && !m.boxes.is_empty())
+                        .skip(17)
+                        .take(4)
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default();
+            for m in &samples {
                 let img = self.image(&ds_id, &m.id, ImgKind::Thumb, cx);
                 let key = format!("play-sample-{}", m.id);
                 let (d, i) = (ds_id.clone(), m.id.clone());
@@ -490,40 +546,62 @@ impl FoloApp {
                         Fit::Cover,
                         false,
                     ));
-                self.bind(
-                    el,
-                    &key,
-                    radius::SM,
-                    window,
-                    cx,
-                    act(move |this, _, cx| this.play_dataset_image(&d, &i, cx)),
+                thumbs.push(
+                    self.bind(
+                        el,
+                        &key,
+                        radius::SM,
+                        window,
+                        cx,
+                        act(move |this, _, cx| this.play_dataset_image(&d, &i, cx)),
+                    )
+                    .into_any_element(),
+                );
+            }
+        }
+        let picker = (!thumbs.is_empty() && !no_models).then(|| {
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(8.))
+                .p(px(16.))
+                .border_t_1()
+                .border_color(t.line_subtle)
+                .child(
+                    text(ty::SM, t.text_secondary)
+                        .font_weight(FontWeight::MEDIUM)
+                        .child("Try a validation image"),
                 )
-                .into_any_element()
-            })
-            .collect();
-        let picker = div()
-            .flex()
-            .flex_col()
-            .gap(px(8.))
-            .p(px(16.))
-            .border_t_1()
-            .border_color(t.line_subtle)
-            .child(
-                text(ty::SM, t.text_secondary)
-                    .font_weight(FontWeight::MEDIUM)
-                    .child("Try a validation image"),
-            )
-            .child(div().flex().gap(px(6.)).children(thumbs));
+                .child(div().flex().gap(px(6.)).children(thumbs))
+        });
+        // The whole panel scrolls, so short windows never squeeze a section to nothing.
         panel(&t)
             .w(px(320.))
             .flex_none()
-            .flex()
-            .flex_col()
             .overflow_hidden()
-            .child(controls)
-            .child(hairline(&t))
-            .child(div().flex_1().min_h_0().flex().flex_col().child(detections))
-            .child(picker)
+            .child(
+                div().id("play-side").size_full().overflow_y_scroll().child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .child(controls)
+                        .child(hairline(&t))
+                        .child(detections)
+                        .children(picker),
+                ),
+            )
             .into_any_element()
+    }
+
+    /// The detection being inspected: under the pointer, or a keyboard-focused row.
+    pub fn play_active(&self, window: &Window, cx: &mut Context<Self>) -> Option<usize> {
+        if self.play_hover.is_some() {
+            return self.play_hover;
+        }
+        let n = self
+            .play_pred
+            .ready()
+            .map_or(0, |p| p.boxes.iter().filter(|b| b.score >= self.play_conf).count());
+        (0..n).find(|i| self.fh(format!("det-{i}"), cx).is_focused(window))
     }
 }

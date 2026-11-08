@@ -4,6 +4,7 @@
 //! here is a pure function of the theme and its arguments.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use gpui::prelude::FluentBuilder;
@@ -14,6 +15,17 @@ use gpui::{
 
 use crate::api::RunStatus;
 use crate::theme::{Theme, TypeStep, radius, ty};
+
+static REDUCE_MOTION: AtomicBool = AtomicBool::new(false);
+
+/// Settings › Reduce motion: stops pulses and shimmers and makes transitions instant.
+pub fn set_reduce_motion(on: bool) {
+    REDUCE_MOTION.store(on, Ordering::Relaxed);
+}
+
+pub fn reduce_motion() -> bool {
+    REDUCE_MOTION.load(Ordering::Relaxed)
+}
 
 pub fn weight(w: u16) -> FontWeight {
     FontWeight(w as f32)
@@ -39,9 +51,45 @@ pub fn text(s: TypeStep, color: Hsla) -> Div {
     div().font_family(crate::theme::SANS).step(s).text_color(color)
 }
 
-/// Uppercase overline (`micro`).
+/// Uppercase overline (`micro`) for group headings. Metric labels use [`caption`], which keeps
+/// case so names like "mAP50-95" stay correct.
 pub fn overline(t: &Theme, label: &str) -> Div {
     text(ty::MICRO, t.text_tertiary).child(label.to_uppercase())
+}
+
+/// A metric or field label: `xs` medium, tertiary, in its own case.
+pub fn caption(t: &Theme, label: &str) -> Div {
+    text(ty::XS, t.text_tertiary).font_weight(FontWeight::MEDIUM).whitespace_nowrap().child(label.to_string())
+}
+
+/// Centered text where `backticked` spans render as inline code chips.
+pub fn rich(t: &Theme, s: TypeStep, color: Hsla, content: &str) -> Div {
+    let mut d = div().flex().flex_wrap().items_baseline().justify_center().text_color(color);
+    for (i, part) in content.split('`').enumerate() {
+        if part.is_empty() {
+            continue;
+        }
+        if i % 2 == 1 {
+            d = d.child(
+                div()
+                    .mx(px(1.))
+                    .px(px(4.))
+                    .rounded(px(radius::XS))
+                    .bg(t.bg_active)
+                    .font_family(crate::theme::MONO)
+                    .text_size(px(s.size - 1.))
+                    .line_height(px(s.line))
+                    .text_color(t.text_primary)
+                    .child(part.to_string()),
+            );
+        } else {
+            // One item per word so the line wraps between words, keeping the spaces.
+            for w in part.split_inclusive(' ') {
+                d = d.child(text(s, color).whitespace_nowrap().child(w.replace(' ', "\u{a0}")));
+            }
+        }
+    }
+    d
 }
 
 pub fn icon(path: &'static str, size: f32, color: Hsla) -> Svg {
@@ -90,7 +138,7 @@ impl Tone {
         // (background, text, dot)
         match self {
             Tone::Neutral => (t.bg_active, t.text_secondary, t.text_tertiary),
-            Tone::Accent => (t.accent_muted, t.accent_text, t.accent_solid),
+            Tone::Accent => (t.accent_muted, t.accent_text, t.accent_fill()),
             Tone::Success => (t.success_muted, t.success_text, t.success_solid),
             Tone::Warning => (t.warning_muted, t.warning_text, t.warning_solid),
             Tone::Danger => (t.danger_muted, t.danger_text, t.danger_solid),
@@ -118,7 +166,7 @@ pub fn dot(color: Hsla, size: f32, live: bool, id: impl Into<SharedString>) -> i
         .size(px(size))
         .flex_none()
         .child(div().absolute().size_full().rounded_full().bg(color))
-        .when(live, |d| {
+        .when(live && !reduce_motion(), |d| {
             d.child(div().absolute().size_full().rounded_full().bg(color).with_animation(
                 gpui::ElementId::Name(format!("pulse-{id}").into()),
                 Animation::new(Duration::from_millis(1600)).repeat(),
@@ -215,7 +263,7 @@ pub fn stat(t: &Theme, label: &str, value: impl Into<SharedString>, unit: &str, 
         .flex_col()
         .gap(px(6.))
         .min_w_0()
-        .child(overline(t, label))
+        .child(caption(t, label))
         .child(metric(t, value, unit, ty::X2XL, ty::SM))
         .children(detail)
 }
@@ -232,17 +280,23 @@ pub fn progress(t: &Theme, frac: f32, color: Hsla, height: f32) -> Div {
 }
 
 /// A placeholder block that shimmers while data loads.
-pub fn skeleton(t: &Theme, id: impl Into<SharedString>) -> impl IntoElement {
+pub fn skeleton(t: &Theme, id: impl Into<SharedString>) -> gpui::AnyElement {
     let base = t.bg_active;
     let id: SharedString = id.into();
-    div().rounded(px(radius::SM)).bg(base).with_animation(
-        gpui::ElementId::Name(format!("skel-{id}").into()),
-        Animation::new(Duration::from_millis(1400)).repeat(),
-        move |d, p| {
-            let w = (p * std::f32::consts::TAU).sin() * 0.5 + 0.5;
-            d.opacity(0.55 + 0.45 * w)
-        },
-    )
+    let block = div().size_full().rounded(px(radius::SM)).bg(base);
+    if reduce_motion() {
+        return block.into_any_element();
+    }
+    block
+        .with_animation(
+            gpui::ElementId::Name(format!("skel-{id}").into()),
+            Animation::new(Duration::from_millis(1400)).repeat(),
+            move |d, p| {
+                let w = (p * std::f32::consts::TAU).sin() * 0.5 + 0.5;
+                d.opacity(0.55 + 0.45 * w)
+            },
+        )
+        .into_any_element()
 }
 
 /// Centered empty / error message with an icon, a title, a line of help and optional actions.
@@ -275,8 +329,24 @@ pub fn empty_state(t: &Theme, icon_path: &'static str, title: &str, body: &str, 
                 .items_center()
                 .gap(px(4.))
                 .child(text(ty::MD, t.text_primary).font_weight(FontWeight::MEDIUM).child(title.to_string()))
-                .child(text(ty::SM, t.text_secondary).max_w(px(360.)).text_center().child(body.to_string())),
+                .child(rich(t, ty::SM, t.text_secondary, body).max_w(px(400.))),
         )
+}
+
+/// A series legend: short coloured strokes with names.
+pub fn legend(t: &Theme, items: &[(&str, Hsla)]) -> gpui::AnyElement {
+    div()
+        .flex()
+        .gap(px(12.))
+        .children(items.iter().map(|(name, color)| {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(5.))
+                .child(div().w(px(10.)).h(px(2.)).rounded_full().bg(*color))
+                .child(text(ty::XS, t.text_secondary).whitespace_nowrap().child(name.to_string()))
+        }))
+        .into_any_element()
 }
 
 /// A class swatch: a small square in the class colour.

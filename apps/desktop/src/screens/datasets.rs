@@ -36,7 +36,7 @@ impl FoloApp {
             .button(
                 "ds-add",
                 "Add dataset",
-                Btn::Secondary,
+                Btn::Primary,
                 Some("icons/folder-open.svg"),
                 window,
                 cx,
@@ -268,8 +268,8 @@ impl FoloApp {
                     div()
                         .flex()
                         .flex_col()
-                        .gap(px(8.))
-                        .child(overline(&t, "Images"))
+                        .gap(px(6.))
+                        .child(caption(&t, "Images"))
                         .child(metric(&t, int(ds.splits.total() as u64), "", ty::X2XL, ty::SM))
                         .child(split_bar)
                         .child(legend),
@@ -289,7 +289,11 @@ impl FoloApp {
                 "Classes",
                 ds.classes.len().to_string(),
                 "",
-                Some(text(ty::XS, t.text_tertiary).truncate().child(ds.classes.join(", "))),
+                Some(text(ty::XS, t.text_tertiary).truncate().child(if ds.classes.len() > 3 {
+                    format!("{} +{} more", ds.classes[..3].join(", "), ds.classes.len() - 3)
+                } else {
+                    ds.classes.join(", ")
+                })),
             )))
             .child(vline(&t))
             .child(tile(stat(
@@ -306,7 +310,7 @@ impl FoloApp {
                 broken.to_string(),
                 "",
                 Some(if broken > 0 {
-                    text(ty::XS, t.warning_text).child("boxes outside the image")
+                    text(ty::XS, t.warning_text).child("out of image bounds")
                 } else {
                     text(ty::XS, t.success_text).child("all labels valid")
                 }),

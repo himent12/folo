@@ -103,9 +103,11 @@ pub fn paint_image_with_boxes(
         // Dimmed boxes first, highlighted last, so focus sits on top.
         let mut order: Vec<&DrawBox> = boxes.iter().collect();
         order.sort_by_key(|b| (b.highlight as u8, !b.dim as u8));
+        // Label chips already placed, so later chips can step around them.
+        let mut placed: Vec<Bounds<Pixels>> = Vec::new();
         for b in order {
             let color = t.class(b.class);
-            let a = if b.dim { 0.35 } else { 1.0 };
+            let a = if b.dim { 0.6 } else { 1.0 };
             let p1 = to(b.x1, b.y1);
             let p2 = to(b.x2, b.y2);
             let r = Bounds::from_corners(p1, p2);
@@ -132,7 +134,7 @@ pub fn paint_image_with_boxes(
             if b.highlight {
                 window.paint_quad(fill(r, alpha(color, tokens::CLASS_FILL_OPACITY * 1.6)));
             }
-            let stroke = if b.highlight { 2.5 } else { 2. };
+            let stroke = if b.highlight { 3. } else { 2. };
             window.paint_quad(quad(
                 r.dilate(px(1.)),
                 px(0.),
@@ -149,7 +151,7 @@ pub fn paint_image_with_boxes(
                 alpha(color, a),
                 BorderStyle::Solid,
             ));
-            if labels && (b.label.is_some() || b.score.is_some()) && !b.dim {
+            if labels && (b.label.is_some() || b.score.is_some()) {
                 let fs = ty::XS.size;
                 let name = b.label.clone().unwrap_or_default();
                 let score = b.score.map(|s| format!("{s:.2}")).unwrap_or_default();
@@ -168,14 +170,28 @@ pub fn paint_image_with_boxes(
                 let gap = if score.is_empty() || name.is_empty() { px(0.) } else { px(5.) };
                 let cw = name_line.width + gap + score_line.width + px(10.);
                 let ch = px(16.);
-                let mut origin = point(r.left() - px(1.), r.top() - ch - px(1.));
-                if origin.y < bounds.top() || origin.y < rect.top() {
-                    origin.y = r.top() + px(1.);
-                    origin.x = r.left() + px(1.);
-                }
-                origin.x = origin.x.min(bounds.right() - cw).max(bounds.left());
+                // Preferred spots: above the top-left corner, inside it, below the bottom-left
+                // corner, inside the bottom-left. Take the first that is on the image and free.
+                let clamp_x = |x: Pixels| x.min(bounds.right() - cw).max(bounds.left());
+                let candidates = [
+                    point(clamp_x(r.left() - px(1.)), r.top() - ch - px(1.)),
+                    point(clamp_x(r.left() + px(1.)), r.top() + px(1.)),
+                    point(clamp_x(r.left() - px(1.)), r.bottom() + px(1.)),
+                    point(clamp_x(r.left() + px(1.)), r.bottom() - ch - px(1.)),
+                ];
+                let fits = |o: Point<Pixels>| {
+                    o.y >= bounds.top().max(rect.top()) && o.y + ch <= bounds.bottom().min(rect.bottom())
+                };
+                let free = |c: &Bounds<Pixels>| !placed.iter().any(|p| p.intersects(c));
+                let origin = candidates
+                    .iter()
+                    .copied()
+                    .find(|o| fits(*o) && free(&Bounds::new(*o, size(cw, ch))))
+                    .or_else(|| candidates.iter().copied().find(|o| fits(*o)))
+                    .unwrap_or(candidates[1]);
                 let chip = Bounds::new(origin, size(cw, ch));
-                window.paint_quad(fill(chip, color).corner_radii(px(tokens::radius::XS)));
+                placed.push(chip);
+                window.paint_quad(fill(chip, alpha(color, a)).corner_radii(px(tokens::radius::XS)));
                 let ty_ = origin.y + px(1.5);
                 let _ = name_line.paint(point(origin.x + px(5.), ty_), px(13.), window, cx);
                 let _ = score_line.paint(

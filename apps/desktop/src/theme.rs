@@ -71,6 +71,25 @@ impl Theme {
         self.mode == Mode::Dark
     }
 
+    /// Near-black or white text, whichever reads better on `bg` (WCAG contrast).
+    pub fn readable_on(&self, bg: Hsla) -> Hsla {
+        let lum = |c: Hsla| {
+            let c: Rgba = c.into();
+            let f = |v: f32| if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) };
+            0.2126 * f(c.r) + 0.7152 * f(c.g) + 0.0722 * f(c.b)
+        };
+        let l = lum(bg);
+        let dark = rgba32(0x0A0B0DFF);
+        let light = rgba32(0xFFFFFFFF);
+        if (l + 0.05) / (lum(dark) + 0.05) >= (lum(light) + 0.05) / (l + 0.05) { dark } else { light }
+    }
+
+    /// The accent for non-text fills on surfaces (progress, live dots, slider tracks). Lime on
+    /// white is too pale (< 3:1), so light mode uses the olive `accent.line`.
+    pub fn accent_fill(&self) -> Hsla {
+        if self.is_dark() { self.accent_solid } else { self.accent_line }
+    }
+
     /// Detection class `i` (theme independent: boxes sit on photos).
     pub fn class(&self, i: u32) -> Hsla {
         rgba32(tokens::CLASS_PALETTE[i as usize % tokens::CLASS_PALETTE.len()])

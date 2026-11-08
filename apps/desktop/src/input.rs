@@ -512,12 +512,14 @@ impl Element for TextElement {
         let line_h = window.line_height();
         let caret_h = (font_size * 1.25).min(line_h);
         let caret_top = bounds.top() + (line_h - caret_h) / 2.;
-        let (selection, cursor) = if selected_range.is_empty() || empty {
+        // Selection only shows while the field has focus.
+        let focused = input.focus_handle.is_focused(window);
+        let (selection, cursor) = if selected_range.is_empty() || empty || !focused {
             (
                 None,
                 Some(fill(
                     Bounds::new(point(bounds.left() + cursor_pos, caret_top), size(px(1.5), caret_h)),
-                    t.accent_solid,
+                    t.accent_fill(),
                 )),
             )
         } else {
@@ -527,7 +529,7 @@ impl Element for TextElement {
                         point(bounds.left() + line.x_for_index(selected_range.start), caret_top),
                         point(bounds.left() + line.x_for_index(selected_range.end), caret_top + caret_h),
                     ),
-                    alpha(t.accent_solid, 0.28),
+                    alpha(t.accent_fill(), 0.28),
                 )),
                 None,
             )

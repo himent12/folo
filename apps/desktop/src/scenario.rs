@@ -81,6 +81,17 @@ pub fn apply(app: &mut FoloApp, s: &Spec, window: &mut Window, cx: &mut Context<
         app.store.datasets = app.store.api.datasets().into();
     }
     let screen = s.parts.first().map(String::as_str).unwrap_or("overview");
+    if !s.empty && !s.fail {
+        // Two minutes of GPU utilisation history (one sample every 2 s).
+        app.store.gpu_util = (0..60)
+            .map(|i| {
+                let i = i as f32;
+                (0.93 + 0.025 * (i * 0.7).sin() + 0.012 * (i * 2.3).cos()
+                    - if i > 38.0 && i < 41.0 { 0.18 } else { 0.0 })
+                .clamp(0.0, 1.0)
+            })
+            .collect();
+    }
     match screen {
         "overview" | "toast" | "kb-focus" | "palette" => app.route = Route::Overview,
         "datasets" => app.route = Route::Datasets,
@@ -105,7 +116,7 @@ pub fn apply(app: &mut FoloApp, s: &Spec, window: &mut Window, cx: &mut Context<
                 app.chart_hover = Some(0.36);
             }
             if screen == "stop-confirm" {
-                app.confirm_stop = Some("run_a19f".into());
+                app.ask_stop("run_a19f".into(), window, cx);
             }
         }
         "run-done" => {

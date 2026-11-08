@@ -96,7 +96,7 @@ impl FoloApp {
                             }))
                             .child(cell2(&t, m.name.clone(), run).flex_1())
                             .child(div().w(px(110.)).flex().child(badge(&t, format!("{} · {}", m.arch, m.imgsz), Tone::Neutral)))
-                            .child(div().w(px(130.)).child(metrics.as_ref().map_or(text(ty::SM, t.text_disabled).child("–"), |mm| bar_value(&t, mm.map50_95, f3(mm.map50_95), t.accent_solid))))
+                            .child(div().w(px(130.)).child(metrics.as_ref().map_or(text(ty::SM, t.text_tertiary).child("–"), |mm| bar_value(&t, mm.map50_95, f3(mm.map50_95), t.accent_fill()))))
                             .child(text(ty::SM, t.text_secondary).tnum().w(px(64.)).text_right().child(metrics.as_ref().map_or("–".into(), |mm| f3(mm.map50))))
                             .child(text(ty::SM, t.text_secondary).tnum().w(px(72.)).text_right().child(format!("{p} {pu}")))
                             .child(text(ty::SM, t.text_secondary).tnum().w(px(72.)).text_right().child(format!("{b} {bu}")))
@@ -396,6 +396,7 @@ impl FoloApp {
         chart.y_range = Some((0., 1.));
         chart.x_fmt = |v| format!("{v:.2}");
         chart.x_name = "recall";
+        chart.axis_titles = Some(("Recall", "Precision"));
         chart.height = 300.;
         chart.hover = self.pr_hover;
         chart.on_hover = Some(on_hover);
@@ -448,13 +449,13 @@ impl FoloApp {
         labels.push("background".into());
         let row_sums: Vec<u32> = ev.confusion.iter().map(|r| r.iter().sum::<u32>().max(1)).collect();
         let max_count = ev.confusion.iter().flatten().copied().max().unwrap_or(1).max(1);
-        let cell = px(((380. - 80.) / n as f32).floor().min(64.));
+        let cell = px(((428. - 80.) / n as f32).floor().clamp(36., 64.));
         let base = t.chart_series[1];
         let header_row = div().flex().pl(px(80.)).children(labels.iter().enumerate().map(|(i, l)| {
             div().w(cell).flex().justify_center().child(
                 text(ty::MICRO, if i == n - 1 { t.text_tertiary } else { t.text_secondary })
                     .truncate()
-                    .child(if i == n - 1 { "bg".to_string() } else { l.chars().take(6).collect::<String>() }),
+                    .child(l.clone()),
             )
         }));
         let rows = ev.confusion.iter().enumerate().map(|(r, row)| {
@@ -488,6 +489,12 @@ impl FoloApp {
                         int(v as u64)
                     };
                     let strong = frac > 0.55;
+                    // Pick the label colour from the composited cell, not the theme.
+                    let ink = if na || v == 0 {
+                        t.text_tertiary
+                    } else {
+                        t.readable_on(crate::theme::over(t.bg_panel, fill))
+                    };
                     div().w(cell).h(cell).p(px(1.)).child(
                         div()
                             .size_full()
@@ -499,7 +506,7 @@ impl FoloApp {
                             .items_center()
                             .justify_center()
                             .child(
-                                text(ty::XS, if strong { t.text_inverse } else { t.text_secondary })
+                                text(ty::XS, ink)
                                     .tnum()
                                     .when(strong, |d| d.font_weight(FontWeight::MEDIUM))
                                     .child(label),

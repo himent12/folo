@@ -80,7 +80,7 @@ impl FoloApp {
             out.push(self.palette_view(window, cx));
         }
         if !self.toasts.is_empty() {
-            out.push(self.toasts_view(cx));
+            out.push(self.toasts_view(window, cx));
         }
         out
     }
@@ -144,8 +144,8 @@ impl FoloApp {
                 title: format!("Stop {}", live.name),
                 detail: format!("epoch {} / {}", live.epoch, live.epochs),
                 keys: &[],
-                action: act(move |this, _, cx| {
-                    this.confirm_stop = Some(id.clone());
+                action: act(move |this, w, cx| {
+                    this.ask_stop(id.clone(), w, cx);
                     cx.notify();
                 }),
             });
@@ -232,11 +232,23 @@ impl FoloApp {
         let selected = p.selected.min(n.saturating_sub(1));
         let input = p.input.clone();
         let actions: Vec<Action> = items.iter().map(|i| i.action.clone()).collect();
-        let mut list = div().flex().flex_col().p(px(6.));
+        let scroll = p.scroll.clone();
+        let mut list = div()
+            .id("palette-list")
+            .max_h(px(400.))
+            .overflow_y_scroll()
+            .track_scroll(&scroll)
+            .flex()
+            .flex_col()
+            .p(px(6.));
+        // Child index of each result row (group headings are children too).
+        let mut row_child: Vec<usize> = Vec::new();
+        let mut children = 0usize;
         let mut last_group = "";
         for (i, it) in items.into_iter().enumerate() {
             if it.group != last_group {
                 last_group = it.group;
+                children += 1;
                 list = list.child(
                     div()
                         .px(px(10.))
@@ -247,6 +259,8 @@ impl FoloApp {
             }
             let on = i == selected;
             let action = it.action.clone();
+            row_child.push(children);
+            children += 1;
             list = list.child(
                 div()
                     .id(("pal", i))
@@ -302,8 +316,24 @@ impl FoloApp {
                     .on_key_down(cx.listener(move |this, ev: &KeyDownEvent, w, cx| {
                         let Some(p) = this.palette.as_mut() else { return };
                         match ev.keystroke.key.as_str() {
-                            "down" => p.selected = (p.selected + 1).min(n.saturating_sub(1)),
-                            "up" => p.selected = p.selected.saturating_sub(1),
+                            "down" | "up" => {
+                                p.selected = if ev.keystroke.key == "down" {
+                                    (p.selected + 1).min(n.saturating_sub(1))
+                                } else {
+                                    p.selected.saturating_sub(1)
+                                };
+                                // Reveal the row; for the first row of a group, its heading too.
+                                if let Some(&ix) = row_child.get(p.selected) {
+                                    let ix = if ix > 0
+                                        && (p.selected == 0 || row_child[p.selected - 1] + 1 != ix)
+                                    {
+                                        ix - 1
+                                    } else {
+                                        ix
+                                    };
+                                    p.scroll.scroll_to_item(ix);
+                                }
+                            }
                             "enter" => {
                                 let sel = p.selected.min(n.saturating_sub(1));
                                 if let Some(a) = actions.get(sel).cloned() {
@@ -330,7 +360,7 @@ impl FoloApp {
                             .child(input)
                             .child(kbd(&t, "Esc")),
                     )
-                    .child(div().id("palette-list").max_h(px(400.)).overflow_y_scroll().child(list))
+                    .child(list)
                     .child(
                         div()
                             .h(px(36.))
@@ -380,10 +410,12 @@ impl FoloApp {
         subtitle: Option<String>,
         body: impl IntoElement,
         footer: impl IntoElement,
+        window: &Window,
         cx: &mut Context<Self>,
         on_close: Action,
     ) -> AnyElement {
-        let close = on_close.clone();
+        let close_btn =
+            self.icon_button("dialog-close", "icons/x.svg", "Close (Esc)", window, cx, on_close.clone());
         div()
             .absolute()
             .top_0()
@@ -423,22 +455,7 @@ impl FoloApp {
                                             d.child(text(ty::SM, t.text_secondary).child(s))
                                         }),
                                 )
-                                .child(
-                                    div()
-                                        .id("dialog-close")
-                                        .size(px(28.))
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .rounded(px(radius::MD))
-                                        .cursor_pointer()
-                                        .hover(|s| s.bg(t.bg_hover))
-                                        .on_click(cx.listener(move |this, _, w, cx| {
-                                            close(this, w, cx);
-                                            cx.notify();
-                                        }))
-                                        .child(icon("icons/x.svg", 16., t.text_tertiary)),
-                                ),
+                                .child(close_btn),
                         )
                         .child(div().id("dialog-body").flex_1().min_h_0().overflow_y_scroll().child(body))
                         .child(footer),
@@ -553,6 +570,8 @@ impl FoloApp {
         let mosaic_slider = self.slider("nr-mosaic", mosaic, 0., 1., 0.05, window, cx).into_any_element();
         let mixup_slider = self.slider("nr-mixup", mixup, 0., 0.5, 0.05, window, cx).into_any_element();
         let flip_slider = self.slider("nr-fliplr", fliplr, 0., 1., 0.05, window, cx).into_any_element();
+        let close_mosaic = self.new_run.as_ref().map_or(10., |f| f.close_mosaic);
+        let close_slider = self.slider("nr-close", close_mosaic, 0., 30., 1., window, cx).into_any_element();
         const PARAMS: [&str; 5] = [
             "2.63 M params · 6.6 GFLOPs",
             "9.42 M params · 21.5 GFLOPs",
@@ -653,7 +672,27 @@ impl FoloApp {
                         opt_seg,
                         Some(format!("{} · warmup 3 epochs, then cosine decay", OPTIMIZERS[opt])),
                     )))
-                    .child(div().flex_1()),
+                    .child(
+                        div().flex_1().child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(8.))
+                                .child(valued(
+                                    "Close mosaic",
+                                    if close_mosaic < 0.5 {
+                                        "off".to_string()
+                                    } else {
+                                        format!("last {close_mosaic:.0} epochs")
+                                    },
+                                    close_slider,
+                                ))
+                                .child(
+                                    text(ty::XS, t.text_tertiary)
+                                        .child("Train the final epochs on plain images"),
+                                ),
+                        ),
+                    ),
             )
             .child(section("Augmentation"))
             .child(
@@ -750,6 +789,7 @@ impl FoloApp {
             Some("Trains on this machine and streams metrics into the run dashboard.".into()),
             body,
             footer,
+            window,
             cx,
             act(|this, w, cx| {
                 this.new_run = None;
@@ -809,6 +849,7 @@ impl FoloApp {
             None,
             body,
             footer,
+            window,
             cx,
             act(|this, _, cx| {
                 this.confirm_stop = None;
@@ -817,14 +858,14 @@ impl FoloApp {
         )
     }
 
-    fn toasts_view(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn toasts_view(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
         let toasts: Vec<(u64, Tone, SharedString, Option<SharedString>)> =
             self.toasts.iter().map(|x| (x.id, x.tone, x.title.clone(), x.body.clone())).collect();
         div()
             .absolute()
-            .bottom(px(16.))
-            .right(px(16.))
+            .bottom(px(20.))
+            .right(px(24.))
             .w(px(380.))
             .flex()
             .flex_col()
@@ -868,17 +909,15 @@ impl FoloApp {
                             .when_some(body, |d, b| d.child(text(ty::SM, t.text_secondary).child(b))),
                     )
                     .child(
-                        div()
-                            .id(("toast-x", id as usize))
-                            .size(px(22.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(radius::SM))
-                            .cursor_pointer()
-                            .hover(|s| s.bg(t.bg_hover))
-                            .on_click(cx.listener(move |this, _, _, cx| this.dismiss_toast(id, cx)))
-                            .child(icon("icons/x.svg", 14., t.text_tertiary)),
+                        self.icon_button(
+                            &format!("toast-x-{id}"),
+                            "icons/x.svg",
+                            "Dismiss",
+                            window,
+                            cx,
+                            act(move |this, _, cx| this.dismiss_toast(id, cx)),
+                        )
+                        .size(px(24.)),
                     )
             }))
             .into_any_element()
@@ -899,6 +938,10 @@ impl FoloApp {
         let index = insp.index.min(n - 1);
         let (zoom, pan, hover) = (insp.zoom, insp.pan, insp.hover_box);
         let Some(meta) = self.filtered_image(&ds_id, index).cloned() else { return div().into_any_element() };
+        // A keyboard-focused label row highlights its box like the pointer does.
+        let hover = hover.or_else(|| {
+            (0..meta.boxes.len()).find(|i| self.fh(format!("insp-box-{i}"), cx).is_focused(window))
+        });
         let classes = self.store.dataset_summary(&ds_id).map(|d| d.classes.clone()).unwrap_or_default();
         let img = self
             .image(&ds_id, &meta.id, ImgKind::Full, cx)
@@ -924,167 +967,167 @@ impl FoloApp {
         let hit_boxes = boxes.clone();
         let tt = t;
         let img2 = img.clone();
-        let stage = div()
-            .id("insp-stage")
-            .relative()
-            .flex_1()
-            .min_w_0()
-            .bg(t.bg_inset)
-            .cursor(if zoom > 1.0 { gpui::CursorStyle::OpenHand } else { gpui::CursorStyle::Arrow })
-            .on_scroll_wheel(cx.listener(move |this, ev: &ScrollWheelEvent, w, cx| {
-                let Some(b) = wheel_cell.get() else { return };
-                let Some(insp) = this.inspector.as_mut() else { return };
-                let dy = f32::from(ev.delta.pixel_delta(w.line_height()).y);
-                let factor = (1.0 + dy * 0.0025).clamp(0.5, 2.0);
-                let new_zoom = (insp.zoom * factor).clamp(1.0, 12.0);
-                // Zoom about the cursor: keep the image point under it fixed.
-                let rect = image_rect(b, dims.0, dims.1, Fit::Contain, insp.zoom, insp.pan);
-                let (px_, py_) = (
-                    f32::from(ev.position.x - rect.left()) / f32::from(rect.size.width),
-                    f32::from(ev.position.y - rect.top()) / f32::from(rect.size.height),
-                );
-                let new_rect = image_rect(b, dims.0, dims.1, Fit::Contain, new_zoom, (0., 0.));
-                let want_x = f32::from(ev.position.x) - px_ * f32::from(new_rect.size.width);
-                let want_y = f32::from(ev.position.y) - py_ * f32::from(new_rect.size.height);
-                insp.pan = if new_zoom <= 1.0 {
-                    (0., 0.)
-                } else {
-                    (want_x - f32::from(new_rect.left()), want_y - f32::from(new_rect.top()))
-                };
-                insp.zoom = new_zoom;
-                cx.notify();
-            }))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
-                    let _ = down_cell.get();
-                    if let Some(insp) = this.inspector.as_mut() {
-                        insp.drag_from = Some((ev.position, insp.pan));
-                        cx.notify();
-                    }
-                }),
-            )
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    if let Some(insp) = this.inspector.as_mut() {
-                        insp.drag_from = None;
-                        cx.notify();
-                    }
-                }),
-            )
-            .on_mouse_move(cx.listener(move |this, ev: &MouseMoveEvent, _, cx| {
-                let Some(insp) = this.inspector.as_mut() else { return };
-                if let Some((from, pan0)) = insp.drag_from
-                    && ev.pressed_button == Some(MouseButton::Left)
-                {
-                    if insp.zoom > 1.0 {
-                        insp.pan = (
-                            pan0.0 + f32::from(ev.position.x - from.x),
-                            pan0.1 + f32::from(ev.position.y - from.y),
-                        );
-                        cx.notify();
-                    }
-                    return;
-                }
-                let Some(b) = bounds_cell.get() else { return };
-                let (x, y) = to_image(b, dims, Fit::Contain, insp.zoom, insp.pan, ev.position);
-                let hit = hit_box(&hit_boxes, x, y);
-                if hit != insp.hover_box {
-                    insp.hover_box = hit;
+        let stage =
+            div()
+                .id("insp-stage")
+                .relative()
+                .flex_1()
+                .min_w_0()
+                .bg(t.bg_inset)
+                .cursor(if zoom > 1.0 { gpui::CursorStyle::OpenHand } else { gpui::CursorStyle::Arrow })
+                .on_scroll_wheel(cx.listener(move |this, ev: &ScrollWheelEvent, w, cx| {
+                    let Some(b) = wheel_cell.get() else { return };
+                    let Some(insp) = this.inspector.as_mut() else { return };
+                    let dy = f32::from(ev.delta.pixel_delta(w.line_height()).y);
+                    let factor = (1.0 + dy * 0.0025).clamp(0.5, 2.0);
+                    let new_zoom = (insp.zoom * factor).clamp(1.0, 12.0);
+                    // Zoom about the cursor: keep the image point under it fixed.
+                    let rect = image_rect(b, dims.0, dims.1, Fit::Contain, insp.zoom, insp.pan);
+                    let (px_, py_) = (
+                        f32::from(ev.position.x - rect.left()) / f32::from(rect.size.width),
+                        f32::from(ev.position.y - rect.top()) / f32::from(rect.size.height),
+                    );
+                    let new_rect = image_rect(b, dims.0, dims.1, Fit::Contain, new_zoom, (0., 0.));
+                    let want_x = f32::from(ev.position.x) - px_ * f32::from(new_rect.size.width);
+                    let want_y = f32::from(ev.position.y) - py_ * f32::from(new_rect.size.height);
+                    insp.pan = if new_zoom <= 1.0 {
+                        (0., 0.)
+                    } else {
+                        (want_x - f32::from(new_rect.left()), want_y - f32::from(new_rect.top()))
+                    };
+                    insp.zoom = new_zoom;
                     cx.notify();
-                }
-            }))
-            .child(
-                canvas(
-                    |_, _, _| (),
-                    move |b, _, window, cx| {
-                        let inner = gpui::Bounds::new(
-                            b.origin + gpui::point(px(24.), px(24.)),
-                            b.size - gpui::size(px(48.), px(48.)),
-                        );
-                        paint_cell.set(Some(inner));
-                        window.with_content_mask(Some(gpui::ContentMask { bounds: b }), |window| {
-                            paint_image_with_boxes(
-                                &tt,
-                                window,
-                                cx,
-                                inner,
-                                img2.as_ref(),
-                                dims,
-                                &paint_boxes,
-                                Fit::Contain,
-                                zoom,
-                                pan,
-                                true,
-                                0.,
-                            );
-                        });
-                    },
-                )
-                .size_full(),
-            )
-            .child(
-                // Zoom controls.
-                div()
-                    .absolute()
-                    .bottom(px(16.))
-                    .left(px(16.))
-                    .flex()
-                    .items_center()
-                    .gap(px(2.))
-                    .p(px(3.))
-                    .rounded(px(radius::MD))
-                    .bg(alpha(t.bg_overlay, 0.92))
-                    .border_1()
-                    .border_color(t.line_default)
-                    .child(self.icon_button(
-                        "insp-zoom-out",
-                        "icons/zoom-out.svg",
-                        "Zoom out",
-                        window,
-                        cx,
-                        act(|this, _, cx| this.zoom_by(1.0 / 1.4, cx)),
-                    ))
-                    .child(
-                        text(ty::XS, t.text_secondary)
-                            .tnum()
-                            .w(px(44.))
-                            .text_center()
-                            .child(format!("{:.0}%", zoom * 100.)),
-                    )
-                    .child(self.icon_button(
-                        "insp-zoom-in",
-                        "icons/zoom-in.svg",
-                        "Zoom in",
-                        window,
-                        cx,
-                        act(|this, _, cx| this.zoom_by(1.4, cx)),
-                    ))
-                    .child(div().w(px(1.)).h(px(16.)).bg(t.line_subtle))
-                    .child(self.icon_button(
-                        "insp-fit",
-                        "icons/maximize.svg",
-                        "Fit (0)",
-                        window,
-                        cx,
-                        act(|this, _, cx| {
-                            if let Some(i) = this.inspector.as_mut() {
-                                i.zoom = 1.0;
-                                i.pan = (0., 0.);
-                            }
+                }))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
+                        let _ = down_cell.get();
+                        if let Some(insp) = this.inspector.as_mut() {
+                            insp.drag_from = Some((ev.position, insp.pan));
                             cx.notify();
-                        }),
-                    )),
-            );
+                        }
+                    }),
+                )
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        if let Some(insp) = this.inspector.as_mut() {
+                            insp.drag_from = None;
+                            cx.notify();
+                        }
+                    }),
+                )
+                .on_mouse_move(cx.listener(move |this, ev: &MouseMoveEvent, _, cx| {
+                    let Some(insp) = this.inspector.as_mut() else { return };
+                    if let Some((from, pan0)) = insp.drag_from
+                        && ev.pressed_button == Some(MouseButton::Left)
+                    {
+                        if insp.zoom > 1.0 {
+                            insp.pan = (
+                                pan0.0 + f32::from(ev.position.x - from.x),
+                                pan0.1 + f32::from(ev.position.y - from.y),
+                            );
+                            cx.notify();
+                        }
+                        return;
+                    }
+                    let Some(b) = bounds_cell.get() else { return };
+                    let (x, y) = to_image(b, dims, Fit::Contain, insp.zoom, insp.pan, ev.position);
+                    let hit = hit_box(&hit_boxes, x, y);
+                    if hit != insp.hover_box {
+                        insp.hover_box = hit;
+                        cx.notify();
+                    }
+                }))
+                .child(
+                    canvas(
+                        |_, _, _| (),
+                        move |b, _, window, cx| {
+                            let inner = gpui::Bounds::new(
+                                b.origin + gpui::point(px(24.), px(24.)),
+                                b.size - gpui::size(px(48.), px(48.)),
+                            );
+                            paint_cell.set(Some(inner));
+                            window.with_content_mask(Some(gpui::ContentMask { bounds: b }), |window| {
+                                paint_image_with_boxes(
+                                    &tt,
+                                    window,
+                                    cx,
+                                    inner,
+                                    img2.as_ref(),
+                                    dims,
+                                    &paint_boxes,
+                                    Fit::Contain,
+                                    zoom,
+                                    pan,
+                                    true,
+                                    0.,
+                                );
+                            });
+                        },
+                    )
+                    .size_full(),
+                )
+                .child(
+                    // Zoom controls.
+                    div()
+                        .absolute()
+                        .bottom(px(16.))
+                        .left(px(16.))
+                        .flex()
+                        .items_center()
+                        .gap(px(2.))
+                        .p(px(3.))
+                        .rounded(px(radius::MD))
+                        .bg(alpha(t.bg_overlay, 0.92))
+                        .border_1()
+                        .border_color(t.line_default)
+                        .child(self.icon_button(
+                            "insp-zoom-out",
+                            "icons/zoom-out.svg",
+                            "Zoom out",
+                            window,
+                            cx,
+                            act(|this, _, cx| this.zoom_by(1.0 / 1.4, cx)),
+                        ))
+                        .child(
+                            text(ty::XS, t.text_secondary).tnum().w(px(44.)).text_center().child(
+                                if zoom <= 1.0 { "Fit".to_string() } else { format!("{:.1}×", zoom) },
+                            ),
+                        )
+                        .child(self.icon_button(
+                            "insp-zoom-in",
+                            "icons/zoom-in.svg",
+                            "Zoom in",
+                            window,
+                            cx,
+                            act(|this, _, cx| this.zoom_by(1.4, cx)),
+                        ))
+                        .child(div().w(px(1.)).h(px(16.)).bg(t.line_subtle))
+                        .child(self.icon_button(
+                            "insp-fit",
+                            "icons/maximize.svg",
+                            "Fit (0)",
+                            window,
+                            cx,
+                            act(|this, _, cx| {
+                                if let Some(i) = this.inspector.as_mut() {
+                                    i.zoom = 1.0;
+                                    i.pan = (0., 0.);
+                                }
+                                cx.notify();
+                            }),
+                        )),
+                );
         let box_rows: Vec<AnyElement> = meta
             .boxes
             .iter()
             .enumerate()
             .map(|(i, b)| {
                 let hot = hover == Some(i);
-                div()
-                    .id(("insp-box", i))
+                let key = format!("insp-box-{i}");
+                let row = div()
+                    .id(SharedString::from(key.clone()))
                     .h(px(30.))
                     .px(px(8.))
                     .flex()
@@ -1115,8 +1158,22 @@ impl FoloApp {
                             .flex_1()
                             .text_right()
                             .child(format!("{:.0},{:.0} {:.0}×{:.0}", b.x1, b.y1, b.x2 - b.x1, b.y2 - b.y1)),
-                    )
-                    .into_any_element()
+                    );
+                // Focusable: Tab through labels to highlight each box from the keyboard.
+                self.bind(
+                    row,
+                    &key,
+                    radius::SM,
+                    window,
+                    cx,
+                    act(move |this, _, cx| {
+                        if let Some(insp) = this.inspector.as_mut() {
+                            insp.hover_box = if insp.hover_box == Some(i) { None } else { Some(i) };
+                        }
+                        cx.notify();
+                    }),
+                )
+                .into_any_element()
             })
             .collect();
         let prev = self.icon_button(

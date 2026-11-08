@@ -95,6 +95,8 @@ pub struct LineChart {
     /// y ticks to aim for.
     pub y_ticks: usize,
     pub log_y: bool,
+    /// Axis titles (x, y): y above the plot's top-left, x centred under the tick labels.
+    pub axis_titles: Option<(&'static str, &'static str)>,
 }
 
 impl LineChart {
@@ -114,6 +116,7 @@ impl LineChart {
             height: 180.,
             y_ticks: 4,
             log_y: false,
+            axis_titles: None,
         }
     }
 }
@@ -451,10 +454,24 @@ fn paint_line_chart(
     // A shared minimum gutter keeps plots in a grid aligned.
     let label_w = ylabels.iter().map(|l| text_width(window, l, label_size)).fold(px(28.), |a, b| a.max(b));
     let left = bounds.left() + label_w + px(10.);
+    let (top_pad, bottom_pad) = if spec.axis_titles.is_some() { (22., 40.) } else { (6., 22.) };
     let plot = Bounds::new(
-        point(left, bounds.top() + px(6.)),
-        size(bounds.right() - left - px(2.), bounds.size.height - px(6.) - px(22.)),
+        point(left, bounds.top() + px(top_pad)),
+        size(bounds.right() - left - px(2.), bounds.size.height - px(top_pad) - px(bottom_pad)),
     );
+    if let Some((xt, yt)) = spec.axis_titles {
+        paint_text(window, cx, yt, point(bounds.left(), bounds.top()), t.text_tertiary, ty::XS.size, false);
+        let w = text_width(window, xt, ty::XS.size);
+        paint_text(
+            window,
+            cx,
+            xt,
+            point(plot.left() + (plot.size.width - w) / 2., plot.bottom() + px(22.)),
+            t.text_tertiary,
+            ty::XS.size,
+            false,
+        );
+    }
     plot_cell.set(Some(plot));
     let sx = |x: f32| plot.left() + plot.size.width * ((x - x0) / (x1 - x0));
     let sy = |y: f32| {
@@ -498,23 +515,31 @@ fn paint_line_chart(
         let _ = spec.x_name;
     }
 
-    // Markers (vertical, dashed) under the data.
-    for m in &spec.markers {
-        if m.x < x0 || m.x > x1 {
-            continue;
-        }
+    // Markers: dashed lines under the data; their labels are laid out in lanes so they never
+    // overlap, and painted after the data on a panel-coloured pill so lines never cross text.
+    let mut labels: Vec<(Bounds<Pixels>, &Marker)> = Vec::new();
+    let mut ms: Vec<&Marker> = spec.markers.iter().filter(|m| m.x >= x0 && m.x <= x1).collect();
+    ms.sort_by(|a, b| a.x.total_cmp(&b.x));
+    for m in ms {
         let x = sx(m.x);
-        stroke_path(
-            window,
-            &[point(x, plot.top()), point(x, plot.bottom())],
-            1.0,
-            alpha(m.color, 0.55),
-            true,
-        );
-        let w = text_width(window, &m.label, label_size);
-        let lx = if x + px(4.) + w > plot.right() { x - px(4.) - w } else { x + px(4.) };
-        paint_text(window, cx, &m.label, point(lx, plot.top() + px(1.)), m.color, label_size, false);
+        stroke_path(window, &[point(x, plot.top()), point(x, plot.bottom())], 1.0, alpha(m.color, 0.5), true);
+        let w = text_width(window, &m.label, label_size) + px(8.);
+        let lx = if x + px(2.) + w > plot.right() { x - px(2.) - w } else { x + px(2.) };
+        let mut lane = 0;
+        loop {
+            let r = Bounds::new(point(lx, plot.top() + px(lane as f32 * 17.)), size(w, px(15.)));
+            let clash = labels.iter().any(|(o, _)| {
+                o.top() == r.top() && o.left() < r.right() + px(6.) && r.left() < o.right() + px(6.)
+            });
+            if !clash || lane >= 3 {
+                labels.push((r, m));
+                break;
+            }
+            lane += 1;
+        }
     }
+    let lanes_used =
+        labels.iter().map(|(r, _)| ((r.top() - plot.top()) / px(17.)) as usize + 1).max().unwrap_or(0);
 
     let columns = (plot.size.width / px(1.)).max(1.0) as usize;
     window.with_content_mask(
@@ -533,7 +558,7 @@ fn paint_line_chart(
                     // Raw data faint underneath, smoothed on top.
                     let raw = cached_envelope(&s.points, x0, x1, columns);
                     let pts: Vec<Point<Pixels>> = raw.iter().map(|&(x, y)| point(sx(x), sy(y))).collect();
-                    stroke_path(window, &pts, 1.0, alpha(s.color, 0.22), false);
+                    stroke_path(window, &pts, 1.0, alpha(s.color, 0.14), false);
                     cached_envelope(&smoothed(&s.points, s.smooth), x0, x1, columns / 2 + 1)
                 } else {
                     cached_envelope(&s.points, x0, x1, columns)
@@ -572,6 +597,19 @@ fn paint_line_chart(
             }
         },
     );
+
+    for (r, m) in &labels {
+        window.paint_quad(fill(*r, t.bg_panel).corner_radii(px(3.)));
+        paint_text(
+            window,
+            cx,
+            &m.label,
+            point(r.left() + px(4.), r.top() + px(1.)),
+            m.color,
+            label_size,
+            false,
+        );
+    }
 
     // Hover cursor + readout.
     let Some(frac) = spec.hover else { return };
@@ -618,7 +656,8 @@ fn paint_line_chart(
     let h = px(8.) + px(16.) * (rows.len() as f32 + 1.) + px(6.);
     let bx = if cx_px + px(12.) + w > plot.right() { cx_px - px(12.) - w } else { cx_px + px(12.) };
     let bx = bx.max(bounds.left());
-    let by = plot.top() + px(4.);
+    // Below the annotation lanes, so the readout never hides a marker label.
+    let by = plot.top() + px(4. + lanes_used as f32 * 17.);
     let rect = Bounds::new(point(bx, by), size(w, h));
     window.paint_quad(gpui::quad(
         rect,
@@ -642,6 +681,18 @@ fn paint_line_chart(
 
 /// A tiny axis-less trend line with an optional area and live end dot.
 pub fn sparkline(t: &Theme, values: Arc<Vec<f32>>, color: Hsla, height: f32, live: bool) -> AnyElement {
+    sparkline_in(t, values, color, height, live, None)
+}
+
+/// A sparkline over a fixed value range (e.g. 0..1 for utilisation), so small wobbles stay small.
+pub fn sparkline_in(
+    t: &Theme,
+    values: Arc<Vec<f32>>,
+    color: Hsla,
+    height: f32,
+    live: bool,
+    range: Option<(f32, f32)>,
+) -> AnyElement {
     let t = *t;
     canvas(
         |_, _, _| (),
@@ -649,8 +700,9 @@ pub fn sparkline(t: &Theme, values: Arc<Vec<f32>>, color: Hsla, height: f32, liv
             if values.len() < 2 {
                 return;
             }
-            let (lo, hi) =
-                values.iter().fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), &v| (lo.min(v), hi.max(v)));
+            let (lo, hi) = range.unwrap_or_else(|| {
+                values.iter().fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), &v| (lo.min(v), hi.max(v)))
+            });
             let span = (hi - lo).max(1e-6);
             let inset = px(3.);
             let w = b.size.width - inset * 2.;
@@ -693,7 +745,7 @@ pub fn sparkline(t: &Theme, values: Arc<Vec<f32>>, color: Hsla, height: f32, liv
         },
     )
     .w_full()
-    .h(px(height))
+    .map(|d| if height > 0. { d.h(px(height)) } else { d.h_full() })
     .into_any_element()
 }
 

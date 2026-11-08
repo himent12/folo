@@ -75,9 +75,17 @@ impl FoloApp {
             .border_color(if url_fh.is_focused(window) { t.accent_line } else { t.line_default })
             .font_family(crate::theme::MONO)
             .text_size(px(ty::SM.size))
-            .when(self.server_mode == ServerMode::Mock, |d| d.opacity(0.5))
             .when(url_ring, |d| d.child(crate::app::focus_ring(&t, radius::MD)))
-            .child(self.server_url.clone())
+            .map(|d| {
+                // With mock data the address is unused: show it read-only (not focusable).
+                if self.server_mode == ServerMode::Mock {
+                    d.bg(t.bg_inset)
+                        .border_color(t.line_subtle)
+                        .child(text(ty::SM, t.text_disabled).child(self.server_url.read(cx).text()))
+                } else {
+                    d.child(self.server_url.clone())
+                }
+            })
             .into_any_element();
         let spawn = self.switch(
             "set-spawn",
@@ -95,7 +103,7 @@ impl FoloApp {
                 .items_center()
                 .gap(px(8.))
                 .child(div().size(px(6.)).rounded_full().bg(if h.mock {
-                    t.accent_solid
+                    t.accent_fill()
                 } else {
                     t.success_solid
                 }))
@@ -143,7 +151,8 @@ impl FoloApp {
             cx,
             act(|this, _, cx| {
                 this.reduce_motion = !this.reduce_motion;
-                cx.notify();
+                set_reduce_motion(this.reduce_motion);
+                cx.refresh_windows();
             }),
         );
         let appearance = panel(&t)

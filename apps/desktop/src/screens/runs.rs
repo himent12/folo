@@ -111,7 +111,7 @@ impl FoloApp {
                             &t,
                             r.progress(),
                             if r.status == RunStatus::Running {
-                                t.accent_solid
+                                t.accent_fill()
                             } else if r.status == RunStatus::Failed {
                                 t.danger_solid
                             } else {
@@ -127,7 +127,7 @@ impl FoloApp {
                                 .child(format!("{}/{}", r.epoch, r.epochs)),
                         ),
                 };
-                let best = r.best.as_ref().map_or(text(ty::SM, t.text_disabled).child("–"), |b| {
+                let best = r.best.as_ref().map_or(text(ty::SM, t.text_tertiary).child("–"), |b| {
                     text(ty::SM, t.text_primary).tnum().child(f3(b.map50_95))
                 });
                 let id = r.id.clone();
@@ -238,16 +238,10 @@ impl FoloApp {
             .map_or(r.config.dataset_id.clone(), |d| d.name.clone());
         let started = r.started.as_deref().and_then(time::parse).map(|s| time::ago(s, now));
         let device = r.device.replace("NVIDIA GeForce ", "");
-        let subtitle = div()
-            .flex()
-            .items_center()
-            .gap(px(8.))
-            .child(
-                text(ty::BASE, t.text_secondary).child(format!("{} · {ds_name} · {device}", r.config.arch)),
-            )
-            .when_some(started, |d, s| {
-                d.child(text(ty::BASE, t.text_tertiary).child(format!("· started {s}")))
-            });
+        let subtitle = text(ty::BASE, t.text_secondary).child(match started {
+            Some(s) => format!("{} · {ds_name} · {device} · started {s}", r.config.arch),
+            None => format!("{} · {ds_name} · {device}", r.config.arch),
+        });
 
         let mut actions = Vec::new();
         match r.status {
@@ -261,8 +255,8 @@ impl FoloApp {
                         Some("icons/square.svg"),
                         window,
                         cx,
-                        act(move |this, _, cx| {
-                            this.confirm_stop = Some(rid.clone());
+                        act(move |this, w, cx| {
+                            this.ask_stop(rid.clone(), w, cx);
                             cx.notify();
                         }),
                     )
@@ -426,15 +420,23 @@ impl FoloApp {
     ) -> AnyElement {
         let t = theme(cx);
         let live = r.status == RunStatus::Running;
+        // Change since the previous epoch only means something while training.
         let delta = match (last, prev) {
-            (Some(l), Some(p)) => {
+            (Some(l), Some(p)) if live => {
                 let d = l.val.map50_95 - p;
                 let (c, s) = if d >= 0.0 {
                     (t.success_text, format!("+{d:.3}"))
                 } else {
                     (t.danger_text, format!("{d:.3}"))
                 };
-                Some(text(ty::XS, c).tnum().child(format!("{s} vs last epoch")))
+                let best = r.best.as_ref().map_or(String::new(), |b| format!(" · best {}", f3(b.map50_95)));
+                Some(
+                    div()
+                        .flex()
+                        .gap(px(4.))
+                        .child(text(ty::XS, c).tnum().child(format!("{s} vs last")))
+                        .child(text(ty::XS, t.text_tertiary).tnum().child(best)),
+                )
             }
             _ => None,
         };
@@ -480,17 +482,17 @@ impl FoloApp {
                 .flex()
                 .flex_col()
                 .gap(px(6.))
-                .child(overline(&t, "Epoch"))
+                .child(caption(&t, "Epoch"))
                 .child(metric(&t, r.epoch.to_string(), &format!("/ {}", r.epochs), ty::X2XL, ty::SM))
                 .child(div().pt(px(6.)).child(progress(
                     &t,
                     r.progress(),
-                    if live { t.accent_solid } else { t.text_tertiary },
+                    if live { t.accent_fill() } else { t.text_tertiary },
                     3.,
                 ))),
             stat(
                 &t,
-                "mAP50-95",
+                if live { "mAP50-95 · latest" } else { "mAP50-95 · final" },
                 last.map_or("–".into(), |e| f3(e.val.map50_95)),
                 "",
                 delta.or_else(|| {
@@ -514,7 +516,7 @@ impl FoloApp {
                 .flex()
                 .flex_col()
                 .gap(px(6.))
-                .child(overline(&t, "Precision / Recall"))
+                .child(caption(&t, "Precision / Recall"))
                 .child(
                     div()
                         .flex()
@@ -537,7 +539,7 @@ impl FoloApp {
                 .flex()
                 .flex_col()
                 .gap(px(6.))
-                .child(overline(&t, "Throughput"))
+                .child(caption(&t, "Throughput"))
                 .child(
                     div()
                         .flex()
@@ -712,8 +714,10 @@ impl FoloApp {
                 .child(div().px(px(12.)).pt(px(12.)).pb(px(8.)).child(chart))
         };
         let legend_row = div().flex().gap(px(2.)).children(legend).into_any_element();
-        let map_legend = legend_static(&t, &[("mAP50-95", t.chart_series[0]), ("mAP50", t.chart_series[1])]);
-        let pr_legend = legend_static(&t, &[("precision", t.chart_series[2]), ("recall", t.chart_series[3])]);
+        let map_legend =
+            crate::ui::legend(&t, &[("mAP50-95", t.chart_series[0]), ("mAP50", t.chart_series[1])]);
+        let pr_legend =
+            crate::ui::legend(&t, &[("precision", t.chart_series[2]), ("recall", t.chart_series[3])]);
         let lr_legend = text(ty::XS, t.text_tertiary).child("cosine · warmup 3 epochs").into_any_element();
         let _ = chart_block;
         div()
@@ -871,7 +875,7 @@ impl FoloApp {
                                     } else {
                                         t.text_secondary
                                     })
-                                    .child(l.message.clone()),
+                                    .child(l.message.replace(" · ", "\u{a0}·\u{a0}")),
                             )
                     }))
                     .into_any_element()
@@ -887,7 +891,7 @@ impl FoloApp {
                 .flex()
                 .items_center()
                 .gap(px(6.))
-                .child(dot(t.accent_solid, 6., true, "log-live"))
+                .child(dot(t.accent_fill(), 6., true, "log-live"))
                 .child(text(ty::XS, t.text_tertiary).child("Following"))
         } else {
             div()
@@ -949,21 +953,6 @@ impl FoloApp {
             .child(div().flex().gap(px(32.)).px(px(16.)).py(px(8.)).child(col1).child(col2).child(col3))
             .into_any_element()
     }
-}
-
-fn legend_static(t: &crate::theme::Theme, items: &[(&str, gpui::Hsla)]) -> AnyElement {
-    div()
-        .flex()
-        .gap(px(12.))
-        .children(items.iter().map(|(name, color)| {
-            div()
-                .flex()
-                .items_center()
-                .gap(px(5.))
-                .child(div().w(px(10.)).h(px(2.)).rounded_full().bg(*color))
-                .child(text(ty::XS, t.text_secondary).child(name.to_string()))
-        }))
-        .into_any_element()
 }
 
 fn matches_filter(r: &Run, f: RunFilter) -> bool {
