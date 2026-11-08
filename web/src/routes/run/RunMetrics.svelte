@@ -223,7 +223,7 @@
           data-tab={t.id}
           onclick={() => (tab = t.id)}
         >
-          <span class="label"><span class="long">{t.label}</span><span class="short">{t.short ?? t.label}</span></span>
+          <span class="label"><span class="long">{t.label}</span><span class="short" aria-hidden="true">{t.short ?? t.label}</span></span>
           <span class="val num">{t.value}{#if t.unit}<span class="unit">{t.unit}</span>{/if}</span>
           <span class="cap num">{t.caption}</span>
         </button>
@@ -526,8 +526,14 @@
       gap: 2px;
       padding: var(--space-3);
     }
+    /* The full label stays in the accessibility tree; only its visual is swapped for the short one. */
     .label .long {
-      display: none;
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip-path: inset(50%);
+      white-space: nowrap;
     }
     .label .short {
       display: inline;

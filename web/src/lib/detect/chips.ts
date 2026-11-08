@@ -11,6 +11,8 @@ export interface ChipBox {
   /** The box's own size on screen, when known: other chips then avoid covering it. */
   bw?: number;
   bh?: number;
+  /** false: place (and clamp) this chip but keep its slot free for others, e.g. a label shown only on hover. */
+  reserve?: boolean;
 }
 
 export interface ChipBounds {
@@ -34,7 +36,8 @@ export interface Placement {
  * `chipH` is the chip height (16 px, 14 px on small views).
  * Above the box by default; inside it when that leaves the image or hits an earlier chip; nudged down on further
  * collisions while it fits; otherwise the nearest free slot above. A chip that would lie over another box (when box
- * sizes are given) moves just below its own box if that slot is free. Always clamped to the visible image.
+ * sizes are given) moves just below its own box if that slot is free. Before a label is hidden, every slot in its
+ * column is tried, nearest first. Always clamped to the visible image.
  */
 export function placeChips(boxes: (ChipBox | null)[], b: ChipBounds, chipH = CHIP_H): (Placement | null)[] {
   const CHIP_H = chipH;
@@ -74,9 +77,19 @@ export function placeChips(boxes: (ChipBox | null)[], b: ChipBounds, chipH = CHI
         inside = false;
       }
     }
+    if (hits(x, y, box.w)) {
+      // Last resort: the free slot in this column nearest the box's top edge.
+      let best: number | null = null;
+      for (let t = b.minY; t <= maxY; t += 2)
+        if (!hits(x, t, box.w) && (best === null || Math.abs(t - box.y) < Math.abs(best - box.y))) best = t;
+      if (best !== null) {
+        y = best;
+        inside = y >= box.y;
+      }
+    }
     // Earlier boxes win (callers pass them highest score first); a label that would cover one waits for hover.
     if (hits(x, y, box.w)) return { dx: x - box.x, dy: y - box.y, inside, hidden: true };
-    placed.push({ x, y, w: box.w });
+    if (box.reserve !== false) placed.push({ x, y, w: box.w });
     return { dx: x - box.x, dy: y - box.y, inside, hidden: false };
   });
 }
