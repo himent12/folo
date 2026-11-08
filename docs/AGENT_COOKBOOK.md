@@ -82,7 +82,7 @@ jq -s 'map({model, map50, map50_95, precision, recall})' a.json b.json
                  "message": "...", "fix": "delete line 3" }, ...] (errors, then warnings; first 50)
 → list_dataset_issues { "dataset_id": "ds_8f21", "severity": "error" }   ← every error, paged (also by kind)
 → list_dataset_images { "dataset_id": "ds_8f21", "class": 1, "include_boxes": true, "limit": 20 }
-→ (read folo://datasets/ds_8f21/images/{image_id} to look at an image)
+→ (read folo://datasets/ds_8f21/images/{image_id} to look at it: a 512 px JPEG, ?size=original for the file)
 ```
 
 `get_dataset` lists errors first, then warnings; infos (`empty_image`, background images) are only counted in

@@ -14,10 +14,10 @@ use std::sync::{Arc, RwLock};
 
 use axum::http::StatusCode;
 use folo_api::{
-    Arch, BBox, ClassMetrics, Dataset, DatasetFormat, DatasetIssue, ExportFormat, ExportResult, GpuBackend,
-    GpuInfo, ImageInfo, ImagePage, IssuePage, IssueSeverity, LogLine, Model, ModelEval, ModelMetrics,
-    PrCurve, PredictResponse, RegisterDataset, Run, RunSamples, Sample, ScoredBox, Split, Splits,
-    SyntheticDataset, TrainConfig,
+    Arch, BBox, ClassMetrics, Dataset, DatasetFormat, DatasetIssue, ExportFormat, ExportResult, ExportSpec,
+    GpuBackend, GpuInfo, ImageInfo, ImagePage, IssuePage, IssueSeverity, LogLine, Model, ModelEval,
+    ModelMetrics, PrCurve, PredictResponse, RegisterDataset, Run, RunSamples, Sample, ScoredBox, Split,
+    Splits, SyntheticDataset, TrainConfig,
 };
 
 use crate::error::{Error, Result};
@@ -972,10 +972,12 @@ impl Store for MockStore {
         Ok(EvalBasis::new(run, ds).eval())
     }
 
-    fn export_model(&self, id: &str, format: ExportFormat) -> Result<ExportResult> {
+    fn export_model(&self, id: &str, spec: ExportSpec) -> Result<ExportResult> {
+        crate::store::check_export(&spec)?;
         let m = self.get_model(id)?;
-        let (ext, bytes) = match format {
+        let (ext, bytes) = match spec.format {
             ExportFormat::FoloF16 => ("f16.folo", model_bytes(m.params, true)),
+            ExportFormat::Onnx if spec.onnx.half => ("f16.onnx", m.params * 2 + 61_440),
             ExportFormat::Onnx => ("onnx", m.params * 4 + 61_440),
         };
         Ok(ExportResult { path: format!("mock://exports/{}.{ext}", m.name), bytes })
@@ -1051,7 +1053,10 @@ impl Store for MockStore {
     fn stop_run(&self, id: &str) -> Result<Run> {
         let (run, _) = self.run(id)?;
         if !run.stop() {
-            return Err(Error::conflict("run_not_active", format!("run '{id}' is not running")));
+            return Err(Error::run_not_active(
+                id,
+                serde_json::to_value(run.to_api().status).unwrap().as_str().unwrap_or(""),
+            ));
         }
         Ok(run.to_api())
     }

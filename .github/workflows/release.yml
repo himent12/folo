@@ -246,14 +246,14 @@ jobs:
         if: steps.desktop.outputs.present == 'true'
       - name: build
         if: steps.desktop.outputs.present == 'true'
-        run: cargo build --release --locked --manifest-path apps/desktop/Cargo.toml
+        run: cargo build --profile dist --locked --manifest-path apps/desktop/Cargo.toml
       - name: smoke test
         if: steps.desktop.outputs.present == 'true'
         env:
           VERSION: ${{ needs.plan.outputs.version }}
         run: |
           set -euo pipefail
-          exe=apps/desktop/target/release/folo-desktop.exe
+          exe=apps/desktop/target/dist/folo-desktop.exe
           test "$("$exe" --version | tr -d '\r')" = "folo-desktop $VERSION"
           "$exe" --help | grep -q 'Usage: folo-desktop'
       - name: package
@@ -262,7 +262,7 @@ jobs:
           set -euo pipefail
           archive=folo-desktop-x86_64-pc-windows-msvc.zip
           mkdir -p pkg dist
-          cp apps/desktop/target/release/folo-desktop.exe LICENSE-MIT LICENSE-APACHE pkg/
+          cp apps/desktop/target/dist/folo-desktop.exe LICENSE-MIT LICENSE-APACHE pkg/
           (cd pkg && 7z a -tzip -bso0 "../dist/$archive" ./*)
           cd dist
           sum=$(sha256sum "$archive")

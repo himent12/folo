@@ -28,7 +28,7 @@ fn weights_error(path: &Path, e: folo_nn::Error) -> CliError {
     let mut err = nn_error(e);
     if err.code == "invalid_weights" {
         err.message = folo_api::codes::cap(
-            &format!("{} is not a .folo weights file ({})", path.display(), err.message),
+            &format!("{} is not a .folo weights file ({})", folo_api::json::path(path), err.message),
             folo_api::codes::MAX_MESSAGE_CHARS,
         );
         err = err.hint(
@@ -122,7 +122,7 @@ pub fn val(args: ValArgs, out: Out) -> Result<(), CliError> {
     if let Some(gt) = &coco_gt {
         if let Some(path) = &args.save_json {
             let n = crate::coco::write_results(path, gt, part, &r.detections)?;
-            out.human(format!("wrote {n} detections to {}", path.display()));
+            out.human(format!("wrote {n} detections to {}", folo_api::json::path(path)));
         }
         if args.coco {
             let c = crate::coco::evaluate(gt, part, &r.detections)?;
@@ -133,7 +133,7 @@ pub fn val(args: ValArgs, out: Out) -> Result<(), CliError> {
                 "ar_small": c.stats.ar_small, "ar_medium": c.stats.ar_medium, "ar_large": c.stats.ar_large,
                 "images": c.stats.images, "truths": c.stats.truths, "crowd": c.stats.crowd,
                 "detections": c.stats.detections, "missing_images": c.missing_images,
-                "annotations": gt.path.display().to_string(),
+                "annotations": folo_api::json::path(&gt.path),
                 "per_class": c.stats.per_class.iter().map(|p| json!({
                     "class": p.class, "name": name(p.class), "truths": p.truths, "ap": p.ap, "ap50": p.ap50,
                 })).collect::<Vec<_>>(),
@@ -163,7 +163,7 @@ pub fn val(args: ValArgs, out: Out) -> Result<(), CliError> {
     }));
     out.human(format!(
         "{} on {} ({} images, {} boxes) at {imgsz}px on {device} ({precision}) in {:.1}s",
-        args.model.display(),
+        folo_api::json::path(&args.model),
         split.as_str(),
         r.report.num_images,
         r.report.num_truths,
@@ -212,7 +212,11 @@ fn collect_images(sources: &[PathBuf]) -> Result<Vec<(PathBuf, PathBuf)>, CliErr
         if s.is_dir() {
             let mut found = Vec::new();
             walk(s, &mut found).map_err(|e| {
-                CliError::new(ExitCode::Runtime, "io_error", format!("cannot read {}: {e}", s.display()))
+                CliError::new(
+                    ExitCode::Runtime,
+                    "io_error",
+                    format!("cannot read {}: {e}", folo_api::json::path(s)),
+                )
             })?;
             out.extend(found.into_iter().map(|p| {
                 let rel = p.strip_prefix(s).map(Path::to_path_buf).unwrap_or_else(|_| p.clone());
@@ -224,7 +228,7 @@ fn collect_images(sources: &[PathBuf]) -> Result<Vec<(PathBuf, PathBuf)>, CliErr
             return Err(CliError::new(
                 ExitCode::NotFound,
                 "path_not_found",
-                format!("{} does not exist", s.display()),
+                format!("{} does not exist", folo_api::json::path(s)),
             ));
         }
     }
@@ -264,7 +268,7 @@ fn save_paths(dir: &Path, images: &[(PathBuf, PathBuf)]) -> Result<Vec<(PathBuf,
             return Err(CliError::new(
                 ExitCode::Usage,
                 "usage",
-                format!("--save would overwrite the input image {}", path.display()),
+                format!("--save would overwrite the input image {}", folo_api::json::path(path)),
             )
             .hint("pass a --save folder outside the source folders"));
         }
@@ -317,7 +321,7 @@ pub fn predict(args: PredictArgs, out: Out) -> Result<(), CliError> {
             Err(e) => {
                 failed += 1;
                 out.record(&json!({ "event": "error", "file": folo_api::json::path(path), "error": { "code": "image_decode_failed", "message": e.to_string() } }));
-                out.human(format!("{}: {e}", path.display()));
+                out.human(format!("{}: {e}", folo_api::json::path(path)));
                 continue;
             }
         };
@@ -337,7 +341,11 @@ pub fn predict(args: PredictArgs, out: Out) -> Result<(), CliError> {
             let mut canvas = img;
             annotate(&mut canvas, &p.detections);
             let io = |e: String| {
-                CliError::new(ExitCode::Runtime, "io_error", format!("cannot write {}: {e}", dst.display()))
+                CliError::new(
+                    ExitCode::Runtime,
+                    "io_error",
+                    format!("cannot write {}: {e}", folo_api::json::path(dst)),
+                )
             };
             if let Some(parent) = dst.parent() {
                 std::fs::create_dir_all(parent).map_err(|e| io(e.to_string()))?;
@@ -365,7 +373,7 @@ pub fn predict(args: PredictArgs, out: Out) -> Result<(), CliError> {
         };
         out.human(format!(
             "{}: {} boxes ({}{more}) {:.1} ms",
-            path.display(),
+            folo_api::json::path(path),
             p.detections.len(),
             summary.join(", "),
             ti.total_ms
@@ -388,7 +396,9 @@ pub fn predict(args: PredictArgs, out: Out) -> Result<(), CliError> {
         sum[0] / n,
         sum[1] / n,
         sum[2] / n,
-        args.save.as_ref().map_or(String::new(), |d| format!("; annotated images in {}", d.display()))
+        args.save
+            .as_ref()
+            .map_or(String::new(), |d| format!("; annotated images in {}", folo_api::json::path(d)))
     ));
     if failed == images.len() {
         return Err(CliError::new(ExitCode::Runtime, "image_decode_failed", "no image could be decoded"));
@@ -435,7 +445,10 @@ pub fn export(mut args: ExportArgs, out: Out) -> Result<(), CliError> {
         return Err(CliError::new(
             ExitCode::Usage,
             "usage",
-            format!("{} is fused (Conv+BN folded): it cannot become unfused weights", args.model.display()),
+            format!(
+                "{} is fused (Conv+BN folded): it cannot become unfused weights",
+                folo_api::json::path(&args.model)
+            ),
         )
         .hint(
             "export --format weights from the training checkpoint (best.folo) or an unfused weights file",
@@ -454,7 +467,11 @@ pub fn export(mut args: ExportArgs, out: Out) -> Result<(), CliError> {
     // when taken; an existing --output is an error.
     let claim = |p: &Path| std::fs::OpenOptions::new().write(true).create_new(true).open(p).map(drop);
     let io = |p: &Path, e: std::io::Error| {
-        CliError::new(ExitCode::Runtime, "io_error", format!("cannot create {}: {e}", p.display()))
+        CliError::new(
+            ExitCode::Runtime,
+            "io_error",
+            format!("cannot create {}: {e}", folo_api::json::path(p)),
+        )
     };
     let output = match args.output.clone() {
         Some(o) => {
@@ -471,7 +488,7 @@ pub fn export(mut args: ExportArgs, out: Out) -> Result<(), CliError> {
                     return Err(CliError::new(
                         ExitCode::Runtime,
                         "output_exists",
-                        format!("{} exists; export never overwrites", o.display()),
+                        format!("{} exists; export never overwrites", folo_api::json::path(&o)),
                     )
                     .hint("pass another --output, or leave it out for a free name next to --model"));
                 }
@@ -547,8 +564,8 @@ pub fn export(mut args: ExportArgs, out: Out) -> Result<(), CliError> {
         let shape = |v: &OnnxValue| v.shape.iter().map(ToString::to_string).collect::<Vec<_>>().join("x");
         out.human(format!(
             "Exported the {source} weights of {} to {} (ONNX opset {}, {}, {:.1} MB): {} {} -> {}",
-            args.model.display(),
-            output.display(),
+            folo_api::json::path(&args.model),
+            folo_api::json::path(&output),
             onnx::OPSET,
             dtype.as_str(),
             x.bytes.len() as f64 / 1e6,
@@ -588,10 +605,10 @@ pub fn export(mut args: ExportArgs, out: Out) -> Result<(), CliError> {
     }));
     out.human(format!(
         "Exported the {source} weights of {} ({}, {}) to {} ({:.1} MB)",
-        args.model.display(),
+        folo_api::json::path(&args.model),
         if fused { "fused" } else { "unfused" },
         dtype.as_str(),
-        output.display(),
+        folo_api::json::path(&output),
         bytes as f64 / 1e6
     ));
     Ok(())

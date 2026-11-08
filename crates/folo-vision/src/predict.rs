@@ -9,8 +9,10 @@
 //! On a GPU the whole pipeline stays on the device: the decoded `u8` images are uploaded as they are and
 //! letterboxed there (`Tensor::letterbox_rgb8`, bit-exact with the CPU letterbox), and the head is decoded
 //! there into above-threshold candidates, so only those come back ([`crate::model::HeadOutput::detections`]).
-//! GPU work is queued asynchronously, so on a GPU the time of the forward pass shows up under postprocess,
-//! where the first download waits for it.
+//! GPU work is queued asynchronously, so [`Predictor::predict`] and [`Predictor::predict_batch`] wait for the
+//! device after the letterbox and after the forward pass: each stage of [`Timing`] holds its own GPU work, and
+//! the wait for the forward pass counts as inference, not postprocess (the two waits cost a few tens of
+//! microseconds of pipelining between stages).
 //!
 //! **Half precision.** [`Predictor::new_f16`] / [`Predictor::open_on`] with [`Precision::F16`] run the whole
 //! model in f16 on a GPU that computes in it (`shader-f16`): f16 weights and activations, f32 accumulation in
@@ -84,14 +86,15 @@ impl PredictConfig {
     }
 }
 
-/// Wall time of a prediction in milliseconds (docs/API.md `timing`).
+/// Wall time of a prediction in milliseconds (docs/API.md `timing`). On a GPU every stage includes the device
+/// work it queued: the predictor waits for the device at the end of each stage.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Timing {
-    /// Letterbox and conversion to the input tensor.
+    /// Letterbox and conversion to the input tensor (on a GPU: the upload and the letterbox kernel).
     pub preprocess_ms: f64,
-    /// Forward pass.
+    /// Forward pass, until the device has finished it.
     pub inference_ms: f64,
-    /// Decode, NMS and rescale.
+    /// Decode of the head outputs, readback, NMS and rescale.
     pub postprocess_ms: f64,
     /// Sum of the above.
     pub total_ms: f64,
@@ -325,10 +328,12 @@ impl Predictor {
     fn run(&self, imgs: &[Image], rect: bool) -> Result<Vec<Prediction>> {
         let t0 = Instant::now();
         let batch = self.prepare(imgs, rect)?;
+        self.wait_for_device()?;
         let pre = ms(t0);
 
         let t1 = Instant::now();
         let out = self.forward(&batch)?;
+        self.wait_for_device()?;
         let inf = ms(t1);
 
         // docs/API.md counts the decode as post-processing.
@@ -337,6 +342,16 @@ impl Predictor {
         let post = ms(t2);
         let n = imgs.len() as f64;
         Ok(batch.predictions(dets, Timing::new(pre / n, inf / n, post / n)))
+    }
+
+    /// Waits for the work queued on the model's device (a no-op on the CPU), so a stage's timer covers its
+    /// GPU work instead of the next stage's first readback.
+    fn wait_for_device(&self) -> Result<()> {
+        let device = self.model.device();
+        if !device.is_cpu() {
+            folo_core::backend::synchronize(device)?;
+        }
+        Ok(())
     }
 
     /// The first step of a prediction, for callers that drive the steps themselves (the browser, which

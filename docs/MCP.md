@@ -30,13 +30,13 @@ it:
 | `list_models` | `best` / `last` weights of finished runs, plus `.folo` files under `models/` | mock models | `/api/models` |
 | `val` | folo-vision's evaluator on the requested split, `conf` / `iou` as given | derived from the model's metrics | `POST /api/val` |
 | `predict`, `predict_batch` | the engine (on `--device`), predictors cached | deterministic mock boxes | `POST /api/predict` |
-| `export` | `folo-f16` or `onnx` (f32, batch 1, the model's imgsz, raw head outputs) to `exports/` | a `mock://` path (nothing is written) | `POST /api/models/{id}/export` |
+| `export` | `folo-f16` or `onnx` (f32, batch 1, the model's imgsz, raw head outputs; `decode`, `dynamic` and `half` switch those) to `exports/` | a `mock://` path (nothing is written) | `POST /api/models/{id}/export` |
 | run subscriptions | fired by the run's live events | fired by the mock runs' events | polled every second |
 | `folo://runs/{id}/samples/{epoch}` | the run's validation samples (first 16 val images) | rendered mock samples | `/api/runs/{id}/samples` |
 
 `get_dataset`'s `issues` and `list_dataset_issues` come from `Store::list_issues` (`/api/datasets/{id}/issues`
-in proxy mode). Real mode has no `not_implemented` tool left; ONNX options beyond the defaults (f16, a dynamic
-batch, the in-graph decode) are `folo export --format onnx` flags (docs/CLI.md).
+in proxy mode). Real mode has no `not_implemented` tool left. `export` takes the ONNX switches `half`, `dynamic` and
+`decode`; a custom imgsz or a fixed batch above 1 are `folo export --format onnx` flags only (docs/CLI.md).
 
 ## Protocol
 - **Revisions.** The server supports MCP **2026-07-28** and the previous stable revision **2025-11-25**. The two
@@ -125,7 +125,7 @@ nested objects included, has `additionalProperties: false`: **an argument the to
 ## Tools
 | tool | input | output (`structuredContent`) |
 |---|---|---|
-| `folo_info` | `{}` | `version`, `mode` (`embedded` / `mock` / `proxy`), `server`, `data_dir`, `read_only`, `confine`, `devices` (`cpu`, `gpus` with backend and memory; `memory_bytes` 0 when unknown), `scales` with params and GFLOPs at 640 and 320 |
+| `folo_info` | `{}` | `version`, `mode` (`embedded` / `mock` / `proxy`), `server`, `data_dir` (`/` separators; in proxy mode the server's, from `/api/system`), `read_only`, `confine`, `devices` (`cpu`, `gpus` with backend and memory; `memory_bytes` 0 when unknown), `scales` with params and GFLOPs at 640 and 320 |
 | `list_datasets` | paging | page of `{ id, name, format, classes, splits }` |
 | `get_dataset` | `{ dataset_id }` | `Dataset` with `stats`, plus `issues`: errors, then warnings, each `{ kind, severity, file, line, message, fix }` (first 50; infos such as `empty_image` are only counted), `issue_counts: { error, warning, info, by_kind }` and `issues_total` |
 | `list_dataset_issues` | `{ dataset_id, severity?: "error"\|"warning"\|"info", kind?: string }` + paging | page of `{ kind, severity, file, line, message, fix? }` in dataset order (the `folo dataset check --fix-dry-run` objects), plus `counts` of all issues |
@@ -140,7 +140,7 @@ nested objects included, has `additionalProperties: false`: **an argument the to
 | `val` | `{ model_id, dataset_id, split?: "val", imgsz?, conf?: 0.001, iou?: 0.7 }` | the `POST /api/val` report: `{ model_id, dataset_id, split, imgsz, images, val: Epoch.val, timing: { total_s, per_image_ms } }` |
 | `predict` | `{ model_id, image_path \| image_base64 \| (dataset_id + image_id), conf?: 0.25, iou?: 0.7, max_det?: 300 }` (flat fields; exactly one source) | the `/api/predict` response |
 | `predict_batch` | `{ model_id, paths: string[] \| glob: string, conf?, iou? }`, at most 256 images **after** glob expansion (more is a `too_many_inputs` error) | `{ batch_id, processed, failed: [{ path, code, message }] (first 50), failed_total, boxes_total, per_class_counts (by class name), timing: { total_ms, mean_ms }, details_uri }` plus a `resource_link` to `folo://predictions/{batch_id}` with the per-image boxes |
-| `export` | `{ model_id, format: "folo-f16"\|"onnx" }` | `{ path, bytes }` |
+| `export` | `{ model_id, format: "folo-f16"\|"onnx", decode?, dynamic?, half? }` (the switches: ONNX only) | `{ path, bytes }` |
 | `compare_runs` | `{ run_ids: string[] (2–8) }` | `runs`: per run `run_id, name, status, arch, epochs_done, epochs, best, best_metrics, final_train_loss, duration_s`; `config_diff`: dotted TrainConfig paths that differ, each with one value per run |
 
 Read-only mode (`--read-only`) exposes only `folo_info`, `list_*`, `get_dataset`, `run_status`, `val`, `predict`,
@@ -150,8 +150,11 @@ Read-only mode (`--read-only`) exposes only `folo_info`, `list_*`, `get_dataset`
 ## Resources
 Each resource read returns a JSON snapshot, unless stated otherwise.
 - `folo://datasets/{id}`: dataset with stats.
-- `folo://datasets/{id}/images/{image_id}`: the image itself (`image/jpeg` / `image/png`, as a blob), so a multimodal
-  agent can look at it.
+- `folo://datasets/{id}/images/{image_id}{?size}`: the image as a blob, so a multimodal agent can look at it. By
+  default a JPEG whose long side is at most 512 px (EXIF orientation applied, never upscaled; a read of a 1920×1080 frame is
+  about 55 KB instead of 430 KB); `?size=<px>` picks another long side (clamped to 16..2048), and `?size=original`
+  returns the file itself (`image/jpeg` / `image/png`). Box coordinates (`list_dataset_images`) are in original
+  pixels, so scale them by the thumbnail's size. Any other query is an invalid URI.
 - `folo://runs/{id}`: `{ run: Run, last_step, last_epoch, revision }`. `revision` increases on every change.
   **Subscribable**: the server sends the spec's resource-updated notification for this URI (coalesced, at most one
   per second), and the client re-reads the snapshot. The server follows the run's live events (the store's
@@ -166,8 +169,10 @@ Each resource read returns a JSON snapshot, unless stated otherwise.
   12 epochs of 50 batches). Subscribable, and updated after each epoch (and on status changes).
 - `folo://runs/{id}/epochs`: `{ epochs: [Epoch], last_step }`, the epoch history without per-step records (about
   1 KB per epoch); what an agent wants for the mAP and loss curves. Subscribable like `/metrics`.
-- `folo://runs/{id}/samples/{epoch}`: validation samples rendered as an annotated JPEG grid (truth outlined white,
-  predictions in class colours), for quick visual checks.
+- `folo://runs/{id}/samples/{epoch}{?tile}`: validation samples rendered as an annotated JPEG grid (truth outlined
+  white, predictions in class colours), for quick visual checks: 4 cells per row of 160 px (640 px across for the 16
+  samples; about 110 KB for 1080p frames, against 250 KB at the old 256 px); `?tile=<px>` picks the cell size
+  (clamped to 64..512).
 - `folo://predictions/{batch_id}`: per-image boxes of a `predict_batch` call (kept for the server's lifetime).
 - `folo://docs/{name}`: repository docs (`ARCHITECTURE`, `API`, `CLI`, `MODEL`, `FORMAT`, `METRICS`, `MCP`, `AGENT_COOKBOOK`) as text/markdown
   (compiled into the binary).

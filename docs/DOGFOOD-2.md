@@ -335,19 +335,19 @@ messages, `folo_info.data_dir` (proxy), and the trainer's log line about loaded 
   and `folo stop` and the dataset checks did what DOGFOOD-1 asked for.
 
 ## Top 10, ranked
-1. **D1:** make the Desktop release build survive a loaded 32 GB machine: a `dist` profile for thin LTO with one
+1. **D1** (fixed, see Status below): make the Desktop release build survive a loaded 32 GB machine: a `dist` profile for thin LTO with one
    codegen unit, and plain `release` for development.
-2. **X1:** fix the timing split so the GPU wait counts as inference, not postprocess or NMS, on all front ends.
-3. **X2:** warn when warmup takes most of a short run or `close_mosaic >= epochs`, and consider capping warmup.
-4. **S1:** show the start weights and Close mosaic in Studio's Compare, and the model's lineage on its page.
-5. **X3:** measure small-dataset 1080p throughput on an idle GPU, and break epoch time into load, train, val and
+2. **X1** (fixed in the engine): fix the timing split so the GPU wait counts as inference, not postprocess or NMS, on all front ends.
+3. **X2** (fixed): warn when warmup takes most of a short run or `close_mosaic >= epochs`, and consider capping warmup.
+4. **S1** (Studio): show the start weights and Close mosaic in Studio's Compare, and the model's lineage on its page.
+5. **X3** (deferred): measure small-dataset 1080p throughput on an idle GPU, and break epoch time into load, train, val and
    checkpoint.
-6. **M2:** thumbnails for image resources and smaller sample grids (350 KB and 250 KB today).
-7. **M1:** `folo_info` in proxy mode should report the server's data dir.
-8. **P3 / C3 / M4:** route every user-facing path through one `/`-normalising helper, and give every range error
+6. **M2** (fixed): thumbnails for image resources and smaller sample grids (350 KB and 250 KB today).
+7. **M1** (fixed): `folo_info` in proxy mode should report the server's data dir.
+8. **P3 / C3 / M4** (fixed): route every user-facing path through one `/`-normalising helper, and give every range error
    a hint.
-9. **S3:** download exports from Studio, and expose the ONNX options in Studio and MCP.
-10. **S2, M3, S5:** smaller polish: an honest latency label, class names in per-class metrics, folo-x in the
+9. **S3** (MCP and API fixed; Studio): download exports from Studio, and expose the ONNX options in Studio and MCP.
+10. **S2, M3, S5** (S2 and S5 Studio, M3 deferred, S5 log noise fixed): smaller polish: an honest latency label, class names in per-class metrics, folo-x in the
     New run picker, the effective LR in run configs.
 
 ## Fixed in this PR
@@ -357,3 +357,30 @@ messages, `folo_info.data_dir` (proxy), and the trainer's log line about loaded 
 - apps/desktop/README.md: `shoot.ps1` on real data, and its default binary.
 - `crates/folo-data/src/check.rs` and `crates/folo-cli/src/main.rs`: the two messages with runs of spaces (C1).
 - llms.txt: links this report.
+
+## Status after `fix/dogfood-2`
+The engine, CLI, MCP, server and docs items, fixed on branch `fix/dogfood-2`; Studio and Desktop items are with
+their threads.
+
+| # | status | what changed |
+|---|---|---|
+| D1 | **fixed** | apps/desktop: `release` keeps cargo's defaults (no LTO, 16 codegen units); the new `dist` profile (thin LTO, one codegen unit) builds the shipped binary, and the release workflow's desktop job uses `--profile dist`. Measured on this machine (own target dir, `-j 6`): `release` built cold in 4 min 36 s to a 33.7 MB binary; `dist` then built in 2 min 5 s (its dependencies cached) to 27.0 MB, without a crash this time |
+| X1 | **fixed** (engine); Desktop relabels its stages | the predictor waits for the GPU after the letterbox and after the forward pass, so `inference_ms` holds the forward pass and `postprocess_ms` only the decode kernel, readback, NMS and rescale. Same model (shapes-n, 320 px) and 40 val images on the GPU, two runs each: before, pre 0.8–0.9 / inference 2.1–2.3 / post 2.8–2.9 ms (total 5.6–6.1); after, pre 0.7–0.8 / inference 4.1–4.3 / post 0.32–0.35 ms (total 5.1–5.4). So CPU postprocess really is about 0.3 ms, and the waits cost nothing measurable. API.md defines each field |
+| X2 | **fixed** | MODEL.md §8.4: the 100-step warmup floor is capped at 30% of the run (`min(100, floor(0.3 · T))`), so the 12-epoch r6-200 run warms up for 10 of its 36 steps instead of 33; §8.6: `close_mosaic` is capped at half of the epochs. Every run with `T ≥ 334` and at least `2 · close_mosaic` epochs (the quickstart, the §10.6 gate, COCO) is unchanged. A run from scratch with fewer than 200 optimizer steps, or a warmup over half of it, gets a `warn` log line after the first one (CLI `warning:`, a `log` event, `config.json` `warnings`, MCP `run_status.warnings` and its summary line) |
+| X3 | deferred | needs an idle GPU to measure first; a per-epoch time split is a new `Epoch` field, which FOLO Desktop builds by hand (coordinate with it). The MCP `train` tool's `workers` field goes with it |
+| C1 | fixed in #93 | |
+| C2 | deferred | cause unconfirmed; needs the fingerprint log on a fresh branch |
+| C3 | **fixed** | CLI human output, the `--resume` hint, errors and trainer log lines use `/` (`folo_api::json::path`, `folo_data::paths::shown`); `invalid_config` from the server and MCP has a hint, and `run_not_active` too |
+| M1 | **fixed** | `GET /api/system` carries the server's `data_dir`; `folo_info` reports it in proxy mode (with `/`) |
+| M2 | **fixed** | `folo://datasets/{id}/images/{image_id}` is a 512 px JPEG by default (`?size=16..2048`, `?size=original`); sample grids use 192 px cells (`?tile=64..512`). On r6-200 (1920×1080) the read of one image is 55 KB instead of 432 KB (16 KB at `?size=256`), and a 16-sample grid 111 KB instead of 244 KB |
+| M3 | deferred | `ClassMetrics` gains `name` once FOLO Desktop (which builds it by hand) is ready for the field |
+| M4 | **fixed** | `predict` on a non-image: "<file>: not an image: The image format could not be determined"; dataset errors use `/`; the `invalid_config` prefix reads "invalid train config:" |
+| S1, S2, S4 | Studio | |
+| S3 | **fixed** for MCP and the API; Studio's UI open | `POST /api/models/{id}/export` and MCP `export` take `decode`, `dynamic` and `half`; the download button and the switches in Studio are Studio's |
+| S5 | log noise **fixed**; the rest Studio | `folo serve` logs successful reads at `debug`, changes and failures at `info` |
+| D2 | Desktop | |
+| P1 | fixed in #93 | |
+| P2 | **fixed** | QUICKSTART §6 says `pip install onnxruntime numpy` |
+| P3 | **fixed** | as C3 |
+| F15 | Studio | the effective LR is in the run's `config.json` (`optimizer.lr0`) |
+| F16 | **fixed** | the `predict` message, as M4 |

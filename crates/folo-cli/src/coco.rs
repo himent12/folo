@@ -44,7 +44,7 @@ pub fn category_ids(gt: &CocoGroundTruth, classes: &[String]) -> Result<Vec<u64>
         return Err(CliError::new(
             ExitCode::Runtime,
             "invalid_dataset",
-            format!("{}: its categories do not match the dataset's classes", gt.path.display()),
+            format!("{}: its categories do not match the dataset's classes", folo_api::json::path(&gt.path)),
         ));
     }
     Ok(gt.categories.iter().map(|c| c.0).collect())
@@ -102,7 +102,11 @@ pub fn write_results(
     let cats = category_ids(gt, part.class_names())?;
     let images = by_path(gt, part);
     let io = |e: std::io::Error| {
-        CliError::new(ExitCode::Runtime, "io_error", format!("cannot write {}: {e}", path.display()))
+        CliError::new(
+            ExitCode::Runtime,
+            "io_error",
+            format!("cannot write {}: {e}", folo_api::json::path(path)),
+        )
     };
     let mut f = std::io::BufWriter::new(std::fs::File::create(path).map_err(io)?);
     let mut n = 0usize;

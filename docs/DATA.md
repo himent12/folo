@@ -107,7 +107,7 @@ rebuilds its dataset indexes then). Nothing installs one by default; `folo mcp
 | `scale` | 0.5 | random scale `1 ± scale` |
 | `translate` | 0.1 | random translation, fraction of the output size |
 | `degrees` / `shear` | 0.0 / 0.0 | rotation and shear ranges in degrees |
-| `close_mosaic` | 10 | mosaic and mixup are off for the last N epochs (needs `LoaderConfig::epochs`) |
+| `close_mosaic` | 10 | mosaic and mixup are off for the last N epochs, at most half of the run (`min(N, floor(epochs / 2))`; needs `LoaderConfig::epochs`) |
 | `min_box_px`, `min_area_ratio`, `max_aspect` | 2, 0.1, 100 | boxes narrower than 2 px, keeping < 10 % of their area, or thinner than 1:100 after a geometric op are dropped |
 
 `TrainTransform` runs, per sample: mosaic (4 images resized to long side `s`) or letterbox to `s x s` → random affine

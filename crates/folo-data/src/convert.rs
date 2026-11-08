@@ -39,7 +39,7 @@ pub fn convert(ds: &LoadedDataset, out: &Path, to: Format) -> Result<Converted> 
     if train + val + test == 0 {
         return Err(DataError::Config(format!(
             "nothing to convert: {} has no readable images",
-            ds.root.display()
+            crate::paths::shown(&ds.root)
         )));
     }
     if to == Format::Yolo && train + val == 0 {
@@ -52,7 +52,7 @@ pub fn convert(ds: &LoadedDataset, out: &Path, to: Format) -> Result<Converted> 
     if let Ok(mut rd) = std::fs::read_dir(out)
         && rd.next().is_some()
     {
-        return Err(DataError::Config(format!("output folder {} is not empty", out.display())));
+        return Err(DataError::Config(format!("output folder {} is not empty", crate::paths::shown(out))));
     }
     let mut splits = [0usize; 3];
     let mut boxes = 0;

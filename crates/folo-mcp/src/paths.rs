@@ -35,7 +35,7 @@ impl PathPolicy {
             Error::new(
                 StatusCode::NOT_FOUND,
                 "path_not_found",
-                format!("{} does not exist", joined.display()),
+                format!("{} does not exist", folo_api::json::path(&joined)),
             )
         })?;
         self.check_inside(&canon)?;
@@ -52,7 +52,7 @@ impl PathPolicy {
     pub(crate) fn canonical_root(&self) -> Result<PathBuf, Error> {
         std::fs::create_dir_all(&self.data_dir)
             .and_then(|_| std::fs::canonicalize(&self.data_dir))
-            .map_err(|e| Error::internal(format!("data dir {}: {e}", self.data_dir.display())))
+            .map_err(|e| Error::internal(format!("data dir {}: {e}", folo_api::json::path(&self.data_dir))))
     }
 
     /// With `confine`, checks that every existing path in `files` resolves (symlinks and junctions followed) inside
@@ -94,7 +94,7 @@ impl PathPolicy {
             }
             let path = if self.confine {
                 let canon = std::fs::canonicalize(&path)
-                    .map_err(|e| Error::internal(format!("{}: {e}", path.display())))?;
+                    .map_err(|e| Error::internal(format!("{}: {e}", folo_api::json::path(&path))))?;
                 self.check_inside(&canon)?;
                 canon
             } else {

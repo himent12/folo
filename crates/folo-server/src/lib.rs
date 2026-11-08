@@ -121,6 +121,23 @@ fn is_same_origin(origin: &HeaderValue, host: Option<&HeaderValue>) -> bool {
 /// preflight. So with [`Cors::Loopback`], state-changing requests whose `Origin` is neither loopback nor this
 /// server itself are refused before they reach a handler. Requests without `Origin` (curl, agents, the desktop
 /// app) are allowed.
+/// One log line per request: at INFO for requests that change something (not GET / HEAD / OPTIONS) and for
+/// failures, at DEBUG for successful reads, so Studio's polling (`GET /api/runs` every 2 s) stays out of the
+/// default log (`RUST_LOG=folo_server=debug` shows it).
+async fn log_request(req: Request, next: Next) -> Response {
+    let (method, uri) = (req.method().clone(), req.uri().path().to_owned());
+    let t0 = std::time::Instant::now();
+    let res = next.run(req).await;
+    let (status, ms) = (res.status().as_u16(), t0.elapsed().as_secs_f64() * 1e3);
+    let read = matches!(method, Method::GET | Method::HEAD | Method::OPTIONS);
+    if read && !res.status().is_client_error() && !res.status().is_server_error() {
+        tracing::debug!(%method, uri, status, ms, "request");
+    } else {
+        tracing::info!(%method, uri, status, ms, "request");
+    }
+    res
+}
+
 async fn guard_origin(State(cors): State<Cors>, req: Request, next: Next) -> Response {
     let safe = matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS);
     if cors == Cors::Loopback
@@ -200,10 +217,11 @@ impl Server {
                 DefaultPredicate::new().and(NotForContentType::const_new("application/octet-stream")),
             ))
             .layer(cors)
+            .layer(axum::middleware::from_fn(log_request))
             .layer(
                 TraceLayer::new_for_http()
                     .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
-                    .on_response(DefaultOnResponse::new().level(Level::INFO)),
+                    .on_response(DefaultOnResponse::new().level(Level::DEBUG)),
             );
         Server { router, shutdown, store }
     }

@@ -538,10 +538,7 @@ impl Runs {
                 Ok(run)
             }
             RunStatus::Stopping => Ok(st.file.run.clone()),
-            s => Err(Error::conflict(
-                "run_not_active",
-                format!("run '{id}' is already {}", serde_json::to_value(s).unwrap().as_str().unwrap_or("")),
-            )),
+            s => Err(Error::run_not_active(id, serde_json::to_value(s).unwrap().as_str().unwrap_or(""))),
         }
     }
 

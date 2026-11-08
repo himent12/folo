@@ -52,7 +52,7 @@ pub struct TrainConfig {
     pub momentum: f64,
     /// Weight decay before the batch scaling of §8.2.
     pub weight_decay: f64,
-    /// Warmup length in epochs (converted to iterations, at least 100, by §8.4).
+    /// Warmup length in epochs (converted to iterations by §8.4: at least 100, or 30% of a short run).
     pub warmup_epochs: f64,
     /// Momentum / β1 at the start of warmup.
     pub warmup_momentum: f64,

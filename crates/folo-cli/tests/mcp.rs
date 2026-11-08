@@ -297,7 +297,7 @@ fn full_flow(c: &mut Client, data_dir: &std::path::Path) {
     }
     let templates =
         c.result("resources/templates/list", json!({}))["resourceTemplates"].as_array().unwrap().clone();
-    assert!(templates.iter().any(|t| t["uriTemplate"] == "folo://datasets/{id}/images/{image_id}"));
+    assert!(templates.iter().any(|t| t["uriTemplate"] == "folo://datasets/{id}/images/{image_id}{?size}"));
     let doc = c.result("resources/read", json!({ "uri": "folo://docs/API" }));
     assert_eq!(doc["contents"][0]["mimeType"], "text/markdown");
     assert!(doc["contents"][0]["text"].as_str().unwrap().contains("/api/datasets"));
@@ -324,10 +324,40 @@ fn full_flow(c: &mut Client, data_dir: &std::path::Path) {
     assert_eq!(blob["mimeType"], "image/jpeg");
     let jpeg = base64::engine::general_purpose::STANDARD.decode(blob["blob"].as_str().unwrap()).unwrap();
     assert_eq!(&jpeg[..2], &[0xFF, 0xD8]);
+    // The default is a thumbnail of at most 512 px; `?size` picks another size, `?size=original` the file.
+    let side = |bytes: &[u8]| {
+        let im = image::load_from_memory(bytes).unwrap();
+        im.width().max(im.height())
+    };
+    assert!(side(&jpeg) <= 512);
+    let mut read = |q: &str| {
+        let r = c.result(
+            "resources/read",
+            json!({ "uri": format!("folo://datasets/ds_5a1e/images/{image_id}{q}") }),
+        );
+        base64::engine::general_purpose::STANDARD.decode(r["contents"][0]["blob"].as_str().unwrap()).unwrap()
+    };
+    let (small, original) = (read("?size=64"), read("?size=original"));
+    assert!(side(&small) <= 64, "{}", side(&small));
+    assert!(side(&original) >= side(&small));
+    let bad = c.request(
+        "resources/read",
+        json!({ "uri": format!("folo://datasets/ds_5a1e/images/{image_id}?size=big") }),
+    );
+    assert!(bad["error"]["code"].is_i64(), "{bad}");
     let missing = c.request("resources/read", json!({ "uri": "folo://datasets/nope" }));
     assert!(missing["error"]["code"].is_i64(), "{missing}");
     let samples = c.result("resources/read", json!({ "uri": "folo://runs/run_2b02/samples/1" }));
     assert_eq!(samples["contents"][0]["mimeType"], "image/jpeg");
+    let mut grid = |uri: &str| {
+        let r = c.result("resources/read", json!({ "uri": uri }));
+        let b = base64::engine::general_purpose::STANDARD
+            .decode(r["contents"][0]["blob"].as_str().unwrap())
+            .unwrap();
+        image::load_from_memory(&b).unwrap().width()
+    };
+    assert_eq!(grid("folo://runs/run_2b02/samples/1"), 4 * 160);
+    assert_eq!(grid("folo://runs/run_2b02/samples/1?tile=256"), 4 * 256);
 
     // Prompts: retrieval returns messages only.
     let prompts = c.result("prompts/list", json!({}))["prompts"].as_array().unwrap().clone();
@@ -817,7 +847,10 @@ fn confine_checks_what_a_dataset_reads() {
     } else {
         let outside_bytes = std::fs::read(outside.join("images/train/a.jpg")).unwrap();
         for im in after["structuredContent"]["items"].as_array().unwrap() {
-            let uri = format!("folo://datasets/{mapped_id}/images/{}", im["image_id"].as_str().unwrap());
+            let uri = format!(
+                "folo://datasets/{mapped_id}/images/{}?size=original",
+                im["image_id"].as_str().unwrap()
+            );
             let r = c.request("resources/read", json!({ "uri": uri }));
             if let Some(blob) = r["result"]["contents"][0]["blob"].as_str() {
                 let bytes = base64::engine::general_purpose::STANDARD.decode(blob).unwrap();
@@ -1229,7 +1262,15 @@ fn proxy_mode_forwards_to_folo_serve() {
         json!({ "model_id": "m_31aa", "dataset_id": "ds_5a1e", "image_id": "000001" }),
     );
     assert_eq!(pred["model_id"], "m_31aa");
+    // The default read is the server's 512 px thumbnail (`?thumb=512` through the proxy); the original is 1280 wide.
     let b64 = img["contents"][0]["blob"].as_str().unwrap();
+    let up = checked(&mut c, &schemas, "predict", json!({ "model_id": "m_31aa", "image_base64": b64 }));
+    assert_eq!(up["image"]["width"], 512);
+    let full = c.result(
+        "resources/read",
+        json!({ "uri": format!("folo://datasets/ds_7c2f/images/{image_id}?size=original") }),
+    );
+    let b64 = full["contents"][0]["blob"].as_str().unwrap();
     let up = checked(&mut c, &schemas, "predict", json!({ "model_id": "m_31aa", "image_base64": b64 }));
     assert_eq!(up["image"]["width"], 1280);
     checked(&mut c, &schemas, "val", json!({ "model_id": "m_31aa", "dataset_id": "ds_5a1e" }));

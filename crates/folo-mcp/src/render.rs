@@ -9,8 +9,6 @@ use image::{Rgb, RgbImage};
 
 use crate::errors::Error;
 
-/// Cell size of the grid in pixels.
-const TILE: u32 = 256;
 /// Cells per row.
 const COLS: u32 = 4;
 /// Outline colour of ground-truth boxes.
@@ -55,18 +53,19 @@ fn outline(img: &mut RgbImage, b: &BBox, scale: f32, ox: u32, oy: u32, color: Rg
     }
 }
 
-/// Renders the grid for `run_id` at `epoch` as JPEG bytes.
-pub fn sample_grid(store: &dyn Store, run_id: &str, epoch: u32) -> Result<Vec<u8>, Error> {
+/// Renders the grid for `run_id` at `epoch` as JPEG bytes, in cells of `tile × tile` pixels
+/// (`crate::resources::TILES`; 160 by default, 640 px across for 16 samples).
+pub fn sample_grid(store: &dyn Store, run_id: &str, epoch: u32, tile: u32) -> Result<Vec<u8>, Error> {
     let samples = store.run_samples(run_id, Some(epoch))?.samples;
     let n = samples.len().max(1) as u32;
     let rows = n.div_ceil(COLS);
-    let mut grid = RgbImage::from_pixel(COLS.min(n) * TILE, rows * TILE, Rgb([18, 18, 22]));
+    let mut grid = RgbImage::from_pixel(COLS.min(n) * tile, rows * tile, Rgb([18, 18, 22]));
     for (i, s) in samples.iter().enumerate() {
-        let (cx, cy) = ((i as u32 % COLS) * TILE, (i as u32 / COLS) * TILE);
-        let scale = TILE as f32 / s.width.max(s.height).max(1) as f32;
+        let (cx, cy) = ((i as u32 % COLS) * tile, (i as u32 / COLS) * tile);
+        let scale = tile as f32 / s.width.max(s.height).max(1) as f32;
         let (tw, th) = ((s.width as f32 * scale).round() as u32, (s.height as f32 * scale).round() as u32);
-        let (ox, oy) = (cx + (TILE - tw.min(TILE)) / 2, cy + (TILE - th.min(TILE)) / 2);
-        if let Ok(data) = store.image(&s.dataset_id, &s.image_id, Some(TILE))
+        let (ox, oy) = (cx + (tile - tw.min(tile)) / 2, cy + (tile - th.min(tile)) / 2);
+        if let Ok(data) = store.image(&s.dataset_id, &s.image_id, Some(tile))
             && let Ok(img) = image::load_from_memory(&data.bytes)
         {
             let img = img.resize_exact(tw.max(1), th.max(1), image::imageops::FilterType::Triangle).to_rgb8();
@@ -82,7 +81,7 @@ pub fn sample_grid(store: &dyn Store, run_id: &str, epoch: u32) -> Result<Vec<u8
         }
     }
     let mut out = Cursor::new(Vec::new());
-    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 85)
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 80)
         .encode_image(&grid)
         .map_err(|e| Error::internal(format!("encoding the sample grid: {e}")))?;
     Ok(out.into_inner())

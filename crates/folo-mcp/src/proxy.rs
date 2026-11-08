@@ -6,9 +6,9 @@
 use std::time::Duration;
 
 use folo_api::{
-    Dataset, DatasetList, ErrorBody, ExportFormat, ExportRequest, ExportResult, GpuInfo, Health, ImagePage,
-    IssuePage, LogLine, Model, ModelEval, ModelList, PredictRequest, PredictResponse, RegisterDataset, Run,
-    RunList, RunLogs, RunMetrics, RunSamples, SyntheticDataset, SystemInfo, TrainConfig, ValReport,
+    Dataset, DatasetList, ErrorBody, ExportResult, ExportSpec, GpuInfo, Health, ImagePage, IssuePage,
+    LogLine, Model, ModelEval, ModelList, PredictRequest, PredictResponse, RegisterDataset, Run, RunList,
+    RunLogs, RunMetrics, RunSamples, SyntheticDataset, SystemInfo, SystemResponse, TrainConfig, ValReport,
     ValRequest,
 };
 use folo_server::store::{
@@ -61,7 +61,7 @@ impl HttpStore {
     }
 
     /// `GET /api/system` of the server.
-    pub fn system(&self) -> Result<SystemInfo, Error> {
+    pub fn system(&self) -> Result<SystemResponse, Error> {
         self.get("/system")
     }
 
@@ -226,8 +226,8 @@ impl Store for HttpStore {
         self.get(&format!("/models/{}/eval", encode(id)))
     }
 
-    fn export_model(&self, id: &str, format: ExportFormat) -> Result<ExportResult, Error> {
-        self.post(&format!("/models/{}/export", encode(id)), &ExportRequest { format })
+    fn export_model(&self, id: &str, spec: ExportSpec) -> Result<ExportResult, Error> {
+        self.post(&format!("/models/{}/export", encode(id)), &spec)
     }
 
     fn list_runs(&self) -> Result<Vec<Run>, Error> {

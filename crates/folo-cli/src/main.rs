@@ -191,14 +191,16 @@ fn serve(args: ServeArgs, out: Out) -> Result<(), CliError> {
         out.human(format!("  API:    {url}/api/health"));
         match &web_dir {
             None => out.human(format!("  Studio: {url}/  (embedded)")),
-            Some(dir) if web_ready => out.human(format!("  Studio: {url}/  (from {})", dir.display())),
+            Some(dir) if web_ready => {
+                out.human(format!("  Studio: {url}/  (from {})", folo_api::json::path(dir)))
+            }
             Some(dir) => out.human(format!(
                 "  Studio: not built ({} has no index.html); build web/ or use the Vite dev server on :5173",
-                dir.display()
+                folo_api::json::path(dir)
             )),
         }
         if !args.mock {
-            out.human(format!("  Data:   {}", data_dir.display()));
+            out.human(format!("  Data:   {}", folo_api::json::path(&data_dir)));
         }
         out.human("Press Ctrl+C to stop.");
         out.record(&json!({
@@ -244,7 +246,7 @@ fn mcp(args: McpArgs) -> Result<(), CliError> {
     let result = runtime.block_on(async move {
         let server = folo_mcp::build(backend.clone(), opts)
             .map_err(|e| CliError::new(ExitCode::Usage, "usage", e).hint("see `folo mcp --help`"))?;
-        tracing::info!(?backend, data_dir = %data_dir.display(), read_only = args.read_only, confine = args.confine, "folo mcp on stdio");
+        tracing::info!(?backend, data_dir = %folo_api::json::path(&data_dir), read_only = args.read_only, confine = args.confine, "folo mcp on stdio");
         folo_mcp::serve_stdio(server, folo_server::shutdown_signal())
             .await
             .map_err(|e| CliError::new(ExitCode::Runtime, "mcp_failed", e))
@@ -361,7 +363,7 @@ fn doctor(args: DoctorArgs, out: Out) -> Result<(), CliError> {
     } else {
         "not built (run `npm ci && npm run build` in web/)".to_string()
     };
-    out.human(format!("web/dist  {} — {web}", web_dir.display()));
+    out.human(format!("web/dist  {} — {web}", folo_api::json::path(&web_dir)));
     let studio = match embedded {
         Some(n) if web_source == "embedded" => format!("embedded ({n} files); `folo serve` uses it"),
         Some(n) => format!("embedded ({n} files); `folo serve --web-dir` overrides it"),
@@ -371,7 +373,7 @@ fn doctor(args: DoctorArgs, out: Out) -> Result<(), CliError> {
     let source = if web_source == "embedded" {
         "the embedded Studio".to_string()
     } else {
-        web_dir.display().to_string()
+        folo_api::json::path(&web_dir)
     };
     let wasm = if served_wasm {
         format!("folo-wasm in {source}; the Playground can run models in the browser (WebGPU or CPU)")

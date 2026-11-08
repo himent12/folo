@@ -27,7 +27,8 @@ pub fn engine_error(e: folo_vision::Error) -> Error {
     use folo_vision::Error as E;
     let msg = e.summary();
     match &e {
-        E::Config(_) => Error::new(StatusCode::BAD_REQUEST, "invalid_config", msg),
+        E::Config(_) => Error::new(StatusCode::BAD_REQUEST, "invalid_config", msg)
+            .hint("TrainConfig in docs/API.md lists every field's accepted values (over MCP: the train tool's inputSchema)"),
         E::Dataset(_) => Error::new(StatusCode::BAD_REQUEST, "invalid_dataset", msg),
         E::DeviceNotFound(_) => Error::new(StatusCode::NOT_FOUND, "device_not_found", msg).hint(format!(
             "this machine has {}; use device `auto` (the GPU when there is one) or `cpu`",

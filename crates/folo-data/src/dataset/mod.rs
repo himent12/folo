@@ -379,7 +379,7 @@ pub(crate) fn detect(path: &Path, format: Format) -> Result<Source> {
             }
             _ => Err(DataError::Format(format!(
                 "{} is not a data.yaml or a COCO .json file (format {format:?})",
-                path.display(),
+                crate::paths::shown(path),
             ))),
         };
     }
@@ -399,7 +399,7 @@ pub(crate) fn detect(path: &Path, format: Format) -> Result<Source> {
     }
     Err(DataError::Format(format!(
         "{UNDETECTED} in {}: expected a data.yaml, COCO instances JSON, or images/ + labels/ folders",
-        path.display()
+        crate::paths::shown(path)
     )))
 }
 
@@ -508,7 +508,11 @@ fn check_candidate(
         }
         LabelSource::Coco { boxes, declared, broken, label } => {
             if let Some(msg) = broken {
-                issues.push(issue(IssueKind::BrokenLabel, &label, format!("{}: {msg}", c.image.display())));
+                issues.push(issue(
+                    IssueKind::BrokenLabel,
+                    &label,
+                    format!("{}: {msg}", crate::paths::shown(&c.image)),
+                ));
                 return (None, issues);
             }
             if let (Some(d), Some(s)) = (declared, size)

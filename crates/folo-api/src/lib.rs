@@ -75,6 +75,20 @@ pub struct SystemInfo {
     pub gpus: Vec<GpuInfo>,
 }
 
+/// What `GET /api/system` sends: [`SystemInfo`] plus the server's data dir. (A separate type, so code that builds
+/// a [`SystemInfo`] is unaffected.)
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct SystemResponse {
+    /// CPU, memory and GPUs.
+    #[serde(flatten)]
+    pub system: SystemInfo,
+    /// The server's data dir (`--data-dir`) with `/` separators, where its runs, models and exports live; absent
+    /// in mock mode and from servers older than this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_dir: Option<String>,
+}
+
 /// CPU name, logical thread count and current utilisation.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -590,7 +604,48 @@ pub struct PrCurve {
     pub ap50: f32,
 }
 
-/// `POST /api/models/{id}/export`.
+/// The ONNX switches of `POST /api/models/{id}/export` (docs/CLI.md, ONNX export), all off by default. Only
+/// valid with `format: onnx`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct OnnxSwitches {
+    /// Decode inside the graph: one `detections: [B, A, 4 + nc]` output instead of the raw head.
+    #[serde(default)]
+    pub decode: bool,
+    /// Symbolic batch, height and width.
+    #[serde(default)]
+    pub dynamic: bool,
+    /// F16 weights, input, activations and outputs (the file name gets `-f16`).
+    #[serde(default)]
+    pub half: bool,
+}
+
+impl OnnxSwitches {
+    /// Whether any switch is on.
+    pub fn any(&self) -> bool {
+        self.decode || self.dynamic || self.half
+    }
+}
+
+/// The full body of `POST /api/models/{id}/export`: [`ExportRequest`]'s `format` plus the [`OnnxSwitches`]
+/// (every one optional, so an [`ExportRequest`] body is one of these).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ExportSpec {
+    /// Target format.
+    pub format: ExportFormat,
+    /// ONNX switches.
+    #[serde(flatten)]
+    pub onnx: OnnxSwitches,
+}
+
+impl From<ExportRequest> for ExportSpec {
+    fn from(r: ExportRequest) -> Self {
+        ExportSpec { format: r.format, onnx: OnnxSwitches::default() }
+    }
+}
+
+/// `POST /api/models/{id}/export` with the format only ([`ExportSpec`] adds the ONNX switches).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ExportRequest {

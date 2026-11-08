@@ -186,6 +186,7 @@ pub fn data_error(e: folo_data::DataError, path: &str) -> Error {
     use folo_data::DataError;
     match e {
         DataError::Io { source, .. } if source.kind() == std::io::ErrorKind::NotFound => {
+            let path = folo_data::paths::shown(path);
             Error::new(StatusCode::NOT_FOUND, "path_not_found", format!("'{path}' does not exist")).hint(
                 "pass the dataset root: the folder holding data.yaml, images/ + labels/, or annotations/",
             )
