@@ -30,9 +30,17 @@ python bench/baselines/render_tables.py bench/baselines/results-rtx4080s.json --
 
 `--sections params,gpu_fwd,gpu_e2e,cpu,train_step,train` picks sections; re-running one section merges it into the
 existing JSON. `--quick` is a smoke test. Weights and the synthetic dataset are not committed. The script writes only
-under `--work-dir` and `--out`: it overrides Ultralytics' settings in memory only, turns off auto-install and
-telemetry, and sends downloads and runs to the work dir. A full run is about 9 minutes of GPU work (2 training
-repeats) plus about 5 minutes of CPU benchmarks, not counting the time spent waiting for other jobs.
+under `--work-dir` and `--out`.
+- It sets `YOLO_CONFIG_DIR` to the work dir before importing Ultralytics, so the user's own `settings.json` and font
+  cache are never touched.
+- It turns off auto-install and telemetry.
+- It sends runs to the work dir.
+- It refuses to start if any checkpoint is missing, because Ultralytics would otherwise download it next to the
+  given path.
+- Each dataset size gets its own `data-<train>-<val>-seed<n>` directory.
+- `sections_meta` in the JSON records the environment and config each section was measured with.
+
+A full run is about 9 minutes of GPU work (2 training repeats) plus about 5 minutes of CPU benchmarks, not counting the time spent waiting for other jobs.
 
 ## Method
 
@@ -85,9 +93,11 @@ how many CPU cores other processes used: system busy time minus this process's t
   - `MuSGD` is what `optimizer=auto` picks for real runs of more than 10k iterations. A 64-iteration run would get
     AdamW.
 - **Timing.** Callbacks synchronise CUDA and timestamp every batch.
-  - "steady img/s" is 16 / median batch time over both epochs, minus the first 5 batches. That skips worker spawn
-    and cuDNN/allocator warm-up.
-  - "epoch-2 img/s" is 512 / epoch-2 wall time.
+  - **"epoch-2 img/s"** is 512 / epoch-2 wall time. This is the sustained throughput, data-loader stalls included, and
+    the trainer bar.
+  - "median-batch equivalent img/s" is 16 / median batch time over both epochs, minus the first 5 batches (worker
+    spawn, cuDNN/allocator warm-up). It is a per-step speed that ignores stalls, kept as a diagnostic only. For
+    example, yolo26s AMP run 1 shows 142 here but only 82 img/s sustained.
 - **Memory.** Peak memory is torch's `max_memory_allocated` / `max_memory_reserved`, read before the final
   validation.
 - **Repeats.** Each run is a fresh process. Each configuration ran 3 times.
@@ -95,12 +105,20 @@ how many CPU cores other processes used: system busy time minus this process's t
 **Contention (the GPU and CPU are shared with other agents).**
 - **GPU.** Before each section, and before each training run, the script waits until no other process is using
   more than 5% of any GPU engine. It reads the Windows "GPU Engine" performance counters per process, so an idle
-  process that merely holds a CUDA context does not count. A background sampler then tags every result row with
-  any other process's GPU load during that row (`other_gpu_load_pct`).
+  process that merely holds a CUDA context does not count. A background sampler then tags every result row with the
+  peak load of any other process, taken over the samples that overlap that row (`other_gpu_load_pct`), and with
+  how many samples that was (`contention_samples`). A row with 0 samples was not observed, which is not the same as
+  quiet.
 - **CPU.** Training runs also wait for system CPU load below 20%, and record the CPU-cores used by other processes
   during each epoch.
 
-All inference rows below ran with no other GPU load.
+**What was observed in this run.** The committed rows predate `contention_samples`. At that time the sampler took
+one sample about every 6.5 s, so a sub-second row was not necessarily sampled itself.
+- No sample taken during the `gpu_fwd`, `gpu_e2e` and `train_step` sections (74 s, 18 s and 37 s of wall time)
+  saw another process loading the GPU. The inference numbers are therefore very likely uncontended, but not proven
+  row by row.
+- During training runs, other processes were seen at 6–8% of a GPU engine in 3 of the 9 runs; the trainer table lists
+  them.
 
 **What the numbers say:**
 - **Batch-1 GPU latency is launch-bound, not compute-bound.** YOLO26n, s and m all take 5–8 ms at batch 1, even
@@ -117,8 +135,8 @@ All inference rows below ran with no other GPU load.
   cores during CPU rows (see the column), so treat CPU numbers as ±20%. Compare FOLO against them in a same-session
   A/B run.
 - **The trainer is host-bound and very sensitive to CPU load.**
-  - With about 3 cores busy elsewhere, yolo26n AMP reached 229 img/s, close to its 252 img/s compute ceiling.
-  - With about 17 cores busy elsewhere, yolo26s fell to 124 img/s.
+  - With about 3 cores busy elsewhere, yolo26n AMP sustained 224 img/s, close to its 252 img/s compute ceiling.
+  - With about 17 cores busy elsewhere, yolo26s sustained 123 img/s; its best run reached 171.
   - The best of three runs is the fair bar. The spread is real and shows how much a lean host-side loop is worth.
 - **fp32 training is only about 20% slower than AMP for yolo26n.** It is about 1.8x slower for yolo26s, and it uses
   about 1.8x the memory.
@@ -143,8 +161,8 @@ model size.
 | 7 | CPU forward latency, batch 1, f32 (best thread count) | **22.8 ms** (8 threads; 25.1 ms at 20) | f32, best thread count | | |
 | 8 | CPU end to end latency, batch 1 | **24.8 ms** (Ultralytics default, 8 threads) | f32, with NMS | | |
 | 9 | Training compute, batch 16 (step only, no data loader) | **202 img/s** fp32 (TF32) / 252 img/s AMP | f32 | | |
-| 10 | Trainer images/s, batch 16, mosaic, 8 workers (best run) | **198 img/s** fp32 / 229 img/s AMP | f32 | | |
-| 11 | Training peak GPU memory, batch 16, f32 | **4.35 GB** allocated (5.15 GB reserved); 2.4 GB AMP | f32 | | |
+| 10 | Trainer sustained images/s (epoch-2 wall), batch 16, mosaic, 8 workers, best of 3 | **199 img/s** fp32 / 224 img/s AMP | f32 | | |
+| 11 | Training peak GPU memory, batch 16, f32 | **4353 MiB** allocated (5148 MiB reserved); 2435 MiB AMP | f32 | | |
 
 For yolo26s and yolo26m, read the same bars from the tables below. Rows 1, 3, 9 and 10 are the headline targets,
 because FOLO starts in f32. Row 1 is where a native engine should win by the widest margin, since the incumbent is
@@ -176,11 +194,11 @@ against the `fp32-strict` rows. The default-fp32 rows are what users actually ge
 | yolo26s | 6.04 | 7.67 | 4.87 | 627 | 1159 | 8.59 | 446 | 42.5 (20 thr) | 51.1 (20 thr) |
 | yolo26m | 7.17 | 6.79 | 6.79 | 250 | 497 | 7.72 | 318 | 106.6 (20 thr) | 107.8 (20 thr) |
 
-| model | precision | train step img/s | trainer best img/s | trainer range | trainer peak alloc MiB |
+| model | precision | train step img/s | trainer epoch-2 img/s, best | trainer range | trainer peak alloc MiB |
 |---|---|---|---|---|---|
-| yolo26n | AMP | 252 | 229 | 136-229 (3 runs) | 2435 |
-| yolo26n | fp32 (TF32 convs) | 202 | 198 | 116-198 (3 runs) | 4353 |
-| yolo26s | AMP | 188 | 176 | 124-176 (3 runs) | 4494 |
+| yolo26n | AMP | 252 | 224 | 128-224 (3 runs) | 2435 |
+| yolo26n | fp32 (TF32 convs) | 202 | 199 | 117-199 (3 runs) | 4353 |
+| yolo26s | AMP | 188 | 171 | 82-171 (3 runs) | 4494 |
 | yolo26s | fp32 (TF32 convs) | 105 | not run |  |  |
 
 ### Model size (Ultralytics `model.info()`, 640x640)
@@ -286,7 +304,7 @@ against the `fp32-strict` rows. The default-fp32 rows are what users actually ge
 
 ### Ultralytics trainer (synthetic 512-image set, batch 16, workers 8, mosaic on, 2 epochs)
 
-| model | precision | run | steady img/s | epoch-2 img/s | epoch-2 median batch ms | other procs' CPU cores (epoch 2) | other GPU load | peak alloc MiB | peak reserved MiB |
+| model | precision | run | median-batch equivalent img/s | epoch-2 img/s | epoch-2 median batch ms | other procs' CPU cores (epoch 2) | other GPU load | peak alloc MiB | peak reserved MiB |
 |---|---|---|---|---|---|---|---|---|---|
 | yolo26n | AMP | 0 | 136 | 128 | 118.0 | n/a | pid 30860 folo_gpu-92372f1fabd58549.exe 6.6% | 2435 | 2626 |
 | yolo26s | AMP | 0 | 176 | 171 | 89.9 | n/a | pid 23720 gemm-0cbfdb0d74d93b53.exe 6.4% | 4494 | 4792 |

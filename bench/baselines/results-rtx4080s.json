@@ -1,6 +1,7 @@
 {
   "schema": 1,
   "date": "2026-11-07T23:30:44-0800",
+  "notes": "Measured 2026-11-07 on one machine with one venv and the same measurement settings; sections were run in separate invocations and merged. Between invocations the script changed only in contention bookkeeping and in the CPU forward-only path (channels_last, matching AutoBackend); the cpu section was re-run after that change. sections_meta was backfilled from the top-level environment/config. Rows predate per-row 'contention_samples' (the GPU sampler then took a sample every ~6.5 s), so an empty other_gpu_load_pct on a short row means the section's samples saw no other load, not that the row itself was sampled. Train repeats 0-1 predate per-epoch cpu_cores_busy.",
   "environment": {
     "python": "3.12.10",
     "torch": "2.11.0+cu128",
@@ -56,6 +57,368 @@
       20,
       8
     ]
+  },
+  "sections_meta": {
+    "params": {
+      "environment": {
+        "python": "3.12.10",
+        "torch": "2.11.0+cu128",
+        "torch_cuda": "12.8",
+        "cudnn": 91900,
+        "ultralytics": "8.4.198",
+        "numpy": "2.5.4",
+        "opencv": "5.0.0",
+        "os": "Windows-11-10.0.26300-SP0",
+        "cpu": "Intel(R) Core(TM) i7-14700KF",
+        "cpu_logical": 28,
+        "cpu_physical": 20,
+        "torch_default_threads": 1,
+        "OMP_NUM_THREADS": "1",
+        "gpu": "NVIDIA GeForce RTX 4080 SUPER",
+        "nvidia_smi": {
+          "name": "NVIDIA GeForce RTX 4080 SUPER",
+          "driver_version": "621.01",
+          "memory.used": "2236",
+          "memory.total": "16376",
+          "utilization.gpu": "19",
+          "clocks.sm": "240",
+          "clocks.max.sm": "3105",
+          "power.draw": "22.26",
+          "temperature.gpu": "37.48"
+        },
+        "other_gpu_load_at_start": {},
+        "tf32_defaults": {
+          "cudnn.allow_tf32": true,
+          "cuda.matmul.allow_tf32": false
+        }
+      },
+      "config": {
+        "imgsz": 640,
+        "models": [
+          "yolo26n",
+          "yolo26s",
+          "yolo26m"
+        ],
+        "train_models": [
+          "yolo26n",
+          "yolo26s"
+        ],
+        "synthetic_dataset": {
+          "train": 512,
+          "val": 64,
+          "classes": 3,
+          "path": "D:\\folo-bench\\data"
+        },
+        "quick": false,
+        "cpu_threads": [
+          28,
+          20,
+          8
+        ],
+        "epochs": 2
+      },
+      "backfilled": true
+    },
+    "gpu_fwd": {
+      "environment": {
+        "python": "3.12.10",
+        "torch": "2.11.0+cu128",
+        "torch_cuda": "12.8",
+        "cudnn": 91900,
+        "ultralytics": "8.4.198",
+        "numpy": "2.5.4",
+        "opencv": "5.0.0",
+        "os": "Windows-11-10.0.26300-SP0",
+        "cpu": "Intel(R) Core(TM) i7-14700KF",
+        "cpu_logical": 28,
+        "cpu_physical": 20,
+        "torch_default_threads": 1,
+        "OMP_NUM_THREADS": "1",
+        "gpu": "NVIDIA GeForce RTX 4080 SUPER",
+        "nvidia_smi": {
+          "name": "NVIDIA GeForce RTX 4080 SUPER",
+          "driver_version": "621.01",
+          "memory.used": "2236",
+          "memory.total": "16376",
+          "utilization.gpu": "19",
+          "clocks.sm": "240",
+          "clocks.max.sm": "3105",
+          "power.draw": "22.26",
+          "temperature.gpu": "37.48"
+        },
+        "other_gpu_load_at_start": {},
+        "tf32_defaults": {
+          "cudnn.allow_tf32": true,
+          "cuda.matmul.allow_tf32": false
+        }
+      },
+      "config": {
+        "imgsz": 640,
+        "models": [
+          "yolo26n",
+          "yolo26s",
+          "yolo26m"
+        ],
+        "train_models": [
+          "yolo26n",
+          "yolo26s"
+        ],
+        "synthetic_dataset": {
+          "train": 512,
+          "val": 64,
+          "classes": 3,
+          "path": "D:\\folo-bench\\data"
+        },
+        "quick": false,
+        "cpu_threads": [
+          28,
+          20,
+          8
+        ],
+        "epochs": 2
+      },
+      "backfilled": true
+    },
+    "gpu_e2e": {
+      "environment": {
+        "python": "3.12.10",
+        "torch": "2.11.0+cu128",
+        "torch_cuda": "12.8",
+        "cudnn": 91900,
+        "ultralytics": "8.4.198",
+        "numpy": "2.5.4",
+        "opencv": "5.0.0",
+        "os": "Windows-11-10.0.26300-SP0",
+        "cpu": "Intel(R) Core(TM) i7-14700KF",
+        "cpu_logical": 28,
+        "cpu_physical": 20,
+        "torch_default_threads": 1,
+        "OMP_NUM_THREADS": "1",
+        "gpu": "NVIDIA GeForce RTX 4080 SUPER",
+        "nvidia_smi": {
+          "name": "NVIDIA GeForce RTX 4080 SUPER",
+          "driver_version": "621.01",
+          "memory.used": "2236",
+          "memory.total": "16376",
+          "utilization.gpu": "19",
+          "clocks.sm": "240",
+          "clocks.max.sm": "3105",
+          "power.draw": "22.26",
+          "temperature.gpu": "37.48"
+        },
+        "other_gpu_load_at_start": {},
+        "tf32_defaults": {
+          "cudnn.allow_tf32": true,
+          "cuda.matmul.allow_tf32": false
+        }
+      },
+      "config": {
+        "imgsz": 640,
+        "models": [
+          "yolo26n",
+          "yolo26s",
+          "yolo26m"
+        ],
+        "train_models": [
+          "yolo26n",
+          "yolo26s"
+        ],
+        "synthetic_dataset": {
+          "train": 512,
+          "val": 64,
+          "classes": 3,
+          "path": "D:\\folo-bench\\data"
+        },
+        "quick": false,
+        "cpu_threads": [
+          28,
+          20,
+          8
+        ],
+        "epochs": 2
+      },
+      "backfilled": true
+    },
+    "cpu": {
+      "environment": {
+        "python": "3.12.10",
+        "torch": "2.11.0+cu128",
+        "torch_cuda": "12.8",
+        "cudnn": 91900,
+        "ultralytics": "8.4.198",
+        "numpy": "2.5.4",
+        "opencv": "5.0.0",
+        "os": "Windows-11-10.0.26300-SP0",
+        "cpu": "Intel(R) Core(TM) i7-14700KF",
+        "cpu_logical": 28,
+        "cpu_physical": 20,
+        "torch_default_threads": 1,
+        "OMP_NUM_THREADS": "1",
+        "gpu": "NVIDIA GeForce RTX 4080 SUPER",
+        "nvidia_smi": {
+          "name": "NVIDIA GeForce RTX 4080 SUPER",
+          "driver_version": "621.01",
+          "memory.used": "2236",
+          "memory.total": "16376",
+          "utilization.gpu": "19",
+          "clocks.sm": "240",
+          "clocks.max.sm": "3105",
+          "power.draw": "22.26",
+          "temperature.gpu": "37.48"
+        },
+        "other_gpu_load_at_start": {},
+        "tf32_defaults": {
+          "cudnn.allow_tf32": true,
+          "cuda.matmul.allow_tf32": false
+        }
+      },
+      "config": {
+        "imgsz": 640,
+        "models": [
+          "yolo26n",
+          "yolo26s",
+          "yolo26m"
+        ],
+        "train_models": [
+          "yolo26n",
+          "yolo26s"
+        ],
+        "synthetic_dataset": {
+          "train": 512,
+          "val": 64,
+          "classes": 3,
+          "path": "D:\\folo-bench\\data"
+        },
+        "quick": false,
+        "cpu_threads": [
+          28,
+          20,
+          8
+        ],
+        "epochs": 2
+      },
+      "backfilled": true
+    },
+    "train_step": {
+      "environment": {
+        "python": "3.12.10",
+        "torch": "2.11.0+cu128",
+        "torch_cuda": "12.8",
+        "cudnn": 91900,
+        "ultralytics": "8.4.198",
+        "numpy": "2.5.4",
+        "opencv": "5.0.0",
+        "os": "Windows-11-10.0.26300-SP0",
+        "cpu": "Intel(R) Core(TM) i7-14700KF",
+        "cpu_logical": 28,
+        "cpu_physical": 20,
+        "torch_default_threads": 1,
+        "OMP_NUM_THREADS": "1",
+        "gpu": "NVIDIA GeForce RTX 4080 SUPER",
+        "nvidia_smi": {
+          "name": "NVIDIA GeForce RTX 4080 SUPER",
+          "driver_version": "621.01",
+          "memory.used": "2236",
+          "memory.total": "16376",
+          "utilization.gpu": "19",
+          "clocks.sm": "240",
+          "clocks.max.sm": "3105",
+          "power.draw": "22.26",
+          "temperature.gpu": "37.48"
+        },
+        "other_gpu_load_at_start": {},
+        "tf32_defaults": {
+          "cudnn.allow_tf32": true,
+          "cuda.matmul.allow_tf32": false
+        }
+      },
+      "config": {
+        "imgsz": 640,
+        "models": [
+          "yolo26n",
+          "yolo26s",
+          "yolo26m"
+        ],
+        "train_models": [
+          "yolo26n",
+          "yolo26s"
+        ],
+        "synthetic_dataset": {
+          "train": 512,
+          "val": 64,
+          "classes": 3,
+          "path": "D:\\folo-bench\\data"
+        },
+        "quick": false,
+        "cpu_threads": [
+          28,
+          20,
+          8
+        ],
+        "epochs": 2
+      },
+      "backfilled": true
+    },
+    "train": {
+      "environment": {
+        "python": "3.12.10",
+        "torch": "2.11.0+cu128",
+        "torch_cuda": "12.8",
+        "cudnn": 91900,
+        "ultralytics": "8.4.198",
+        "numpy": "2.5.4",
+        "opencv": "5.0.0",
+        "os": "Windows-11-10.0.26300-SP0",
+        "cpu": "Intel(R) Core(TM) i7-14700KF",
+        "cpu_logical": 28,
+        "cpu_physical": 20,
+        "torch_default_threads": 1,
+        "OMP_NUM_THREADS": "1",
+        "gpu": "NVIDIA GeForce RTX 4080 SUPER",
+        "nvidia_smi": {
+          "name": "NVIDIA GeForce RTX 4080 SUPER",
+          "driver_version": "621.01",
+          "memory.used": "2236",
+          "memory.total": "16376",
+          "utilization.gpu": "19",
+          "clocks.sm": "240",
+          "clocks.max.sm": "3105",
+          "power.draw": "22.26",
+          "temperature.gpu": "37.48"
+        },
+        "other_gpu_load_at_start": {},
+        "tf32_defaults": {
+          "cudnn.allow_tf32": true,
+          "cuda.matmul.allow_tf32": false
+        }
+      },
+      "config": {
+        "imgsz": 640,
+        "models": [
+          "yolo26n",
+          "yolo26s",
+          "yolo26m"
+        ],
+        "train_models": [
+          "yolo26n",
+          "yolo26s"
+        ],
+        "synthetic_dataset": {
+          "train": 512,
+          "val": 64,
+          "classes": 3,
+          "path": "D:\\folo-bench\\data"
+        },
+        "quick": false,
+        "cpu_threads": [
+          28,
+          20,
+          8
+        ],
+        "epochs": 2
+      },
+      "backfilled": true
+    }
   },
   "gpu_state": {
     "params": {

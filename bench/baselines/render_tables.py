@@ -75,8 +75,9 @@ def headline(d: dict) -> None:
         rows = []
         for r in d.get("train_step", []):
             runs = pick(d.get("train", []), model=r["model"], amp=r["amp"])
-            best = max((x["steady_images_per_s"] for x in runs), default=None)
-            lo = min((x["steady_images_per_s"] for x in runs), default=None)
+            # sustained throughput: images / wall time of the last epoch (includes data loader stalls)
+            best = max((x["epochs"][-1]["images_per_s"] for x in runs), default=None)
+            lo = min((x["epochs"][-1]["images_per_s"] for x in runs), default=None)
             mem = max((x["max_memory_allocated_mib"] for x in runs), default="")
             rows.append(
                 [
@@ -90,7 +91,14 @@ def headline(d: dict) -> None:
             )
         print(
             table(
-                ["model", "precision", "train step img/s", "trainer best img/s", "trainer range", "trainer peak alloc MiB"],
+                [
+                    "model",
+                    "precision",
+                    "train step img/s",
+                    "trainer epoch-2 img/s, best",
+                    "trainer range",
+                    "trainer peak alloc MiB",
+                ],
                 rows,
             )
         )
@@ -232,7 +240,7 @@ def main(path: str) -> None:
                     "model",
                     "precision",
                     "run",
-                    "steady img/s",
+                    "median-batch equivalent img/s",
                     "epoch-2 img/s",
                     "epoch-2 median batch ms",
                     "other procs' CPU cores (epoch 2)",

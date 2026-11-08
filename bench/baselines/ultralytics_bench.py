@@ -32,7 +32,7 @@ import threading
 import time
 from pathlib import Path
 
-os.environ.setdefault("YOLO_AUTOINSTALL", "false")  # never pip-install into the user's env
+os.environ["YOLO_AUTOINSTALL"] = "false"  # never pip-install into the user's env, even if the caller enabled it
 
 MODELS = ["yolo26n", "yolo26s", "yolo26m"]
 TRAIN_MODELS = ["yolo26n", "yolo26s"]
@@ -44,7 +44,11 @@ IMGSZ = 640
 
 
 def isolate_ultralytics(work_dir: Path) -> None:
-    """Point Ultralytics' download/run dirs at work_dir and disable telemetry, without touching the settings file."""
+    """Keep Ultralytics inside work_dir: its config dir (settings.json, fonts) goes there, set before the first import,
+    so the user's own settings file is never read or written; downloads and runs go there too, and telemetry is off.
+    Must run before anything imports ultralytics (child and data loader processes inherit the environment)."""
+    assert "ultralytics" not in sys.modules, "isolate_ultralytics() must run before ultralytics is imported"
+    os.environ["YOLO_CONFIG_DIR"] = str(work_dir / "ultralytics-config")
     import ultralytics.utils as uu
     from ultralytics.utils import SETTINGS
 
@@ -62,7 +66,7 @@ def isolate_ultralytics(work_dir: Path) -> None:
         "wandb": False,
     }
     for k, v in overrides.items():
-        dict.__setitem__(SETTINGS, k, v)  # dict.__setitem__ skips JSONDict's save-to-disk
+        dict.__setitem__(SETTINGS, k, v)  # in memory only (the settings file is ours anyway, under work_dir)
     uu.WEIGHTS_DIR = work_dir / "weights"
     uu.RUNS_DIR = work_dir / "runs"
     try:
@@ -147,36 +151,47 @@ def foreign_gpu_load() -> dict[str, float]:
 
 
 class ContentionWatch(threading.Thread):
-    """Samples other processes' GPU load in the background; tag() records the peak seen since the previous tag()."""
+    """Samples other processes' GPU load back to back in the background (one sample spans ~2.5 s on Windows).
 
-    def __init__(self, period_s: float = 4.0):
+    tag(row) covers the window since the previous tag()/reset(): it records the peak load of every sample whose time
+    span overlaps that window (`other_gpu_load_pct`) and how many samples that was (`contention_samples`). A row with
+    0 samples was not observed, which is different from a row observed to be quiet.
+    """
+
+    def __init__(self, gap_s: float = 0.5):
         super().__init__(daemon=True)
-        self.period_s = period_s
+        self.gap_s = gap_s
         self.lock = threading.Lock()
-        self.seen: dict[str, float] = {}
+        self.samples: list[tuple[float, float, dict[str, float]]] = []  # (start, end, load)
+        self.window_start = time.perf_counter()
         self.paused = threading.Event()  # set during CPU timing: sampling spawns PowerShell, which costs CPU
-
-    def _merge(self, load: dict[str, float]) -> None:
-        for k, v in load.items():
-            self.seen[k] = max(self.seen.get(k, 0.0), v)
 
     def run(self) -> None:
         while True:
             if not self.paused.is_set():
-                load = foreign_gpu_load()  # one sample takes ~2.5 s on Windows
+                t0 = time.perf_counter()
+                load = foreign_gpu_load()
                 with self.lock:
-                    self._merge(load)
-            time.sleep(self.period_s)
+                    self.samples.append((t0, time.perf_counter(), load))
+            time.sleep(self.gap_s)
 
     def tag(self, row: dict) -> dict:
+        now = time.perf_counter()
         with self.lock:
-            row["other_gpu_load_pct"] = dict(sorted(self.seen.items()))
-            self.seen = {}
+            hits = [load for t0, t1, load in self.samples if t1 > self.window_start and t0 < now]
+            peak: dict[str, float] = {}
+            for load in hits:
+                for k, v in load.items():
+                    peak[k] = max(peak.get(k, 0.0), v)
+            row["other_gpu_load_pct"] = dict(sorted(peak.items()))
+            row["contention_samples"] = len(hits)
+            self.samples = [s for s in self.samples if s[1] > now - 60]  # keep the list short
+            self.window_start = now
         return row
 
     def reset(self) -> None:
         with self.lock:
-            self.seen = {}
+            self.window_start = time.perf_counter()
 
 
 WATCH = ContentionWatch()
@@ -467,7 +482,7 @@ def section_cpu(weights_dir: Path, data_dir: Path, threads: list[int], quick: bo
     rows = []
     default_threads = torch.get_num_threads()
     WATCH.paused.set()
-    time.sleep(WATCH.period_s)  # let an in-flight sample finish
+    time.sleep(3.0)  # let an in-flight sample finish
     for nt in threads:
         torch.set_num_threads(nt)
         for name in MODELS:
@@ -578,14 +593,19 @@ def section_train_step(weights_dir: Path, quick: bool) -> list[dict]:
 
 
 def make_dataset(data_dir: Path, n_train: int, n_val: int, seed: int = 0) -> Path:
-    """Shapes (rectangle / ellipse / triangle) on coloured noise, YOLO format. Idempotent for a given size."""
+    """Shapes (rectangle / ellipse / triangle) on coloured noise, YOLO format, in a directory used for this
+    (size, seed) only. Reuses a complete dataset; regenerates an interrupted one from scratch."""
     import cv2
     import numpy as np
 
     yaml_path = data_dir / "data.yaml"
-    marker = data_dir / f".complete-{n_train}-{n_val}-{seed}"
+    marker = data_dir / ".complete"
     if marker.exists():
         return yaml_path
+    if data_dir.exists():  # an interrupted generation: start over, including Ultralytics' label caches
+        import shutil
+
+        shutil.rmtree(data_dir)
     rng = np.random.default_rng(seed)
     for split, count in [("train", n_train), ("val", n_val)]:
         (data_dir / "images" / split).mkdir(parents=True, exist_ok=True)
@@ -730,10 +750,10 @@ def train_one(weights: Path, data_yaml: Path, work_dir: Path, amp: bool, epochs:
                 "epochs": epochs_out,
                 "steady_batches": len(all_dts),
                 "steady_median_batch_ms": round(statistics.median(all_dts), 3),
-                "steady_images_per_s": round(batch * 1000 / statistics.median(all_dts), 2),
+                "steady_images_per_s": round(batch * 1000 / statistics.median(all_dts), 2),  # median-batch equivalent
                 "total_train_call_s": round(total, 2),
                 **mem,
-                "other_gpu_load_pct": WATCH.tag({})["other_gpu_load_pct"],
+                **WATCH.tag({}),  # other_gpu_load_pct + contention_samples over the whole run
             },
             indent=2,
         )
@@ -760,6 +780,8 @@ def section_train(
             str(epochs),
             "--work-dir",
             str(work_dir),
+            "--_data-yaml",
+            str(data_yaml),
             "--_out-json",
             str(out),
         ]
@@ -774,7 +796,7 @@ def section_train(
         rows.append(r)
         last = r["epochs"][-1]
         print(
-            f"[train] {name} amp={int(amp)} r{rep_i}: steady {r['steady_images_per_s']:.0f} img/s, "
+            f"[train] {name} amp={int(amp)} r{rep_i}: median-batch equivalent {r['steady_images_per_s']:.0f} img/s, "
             f"last epoch {last['images_per_s']:.0f} img/s "
             f"(median batch {last['median_batch_ms']:.1f} ms), peak reserved {r.get('max_memory_reserved_mib')} MiB",
             flush=True,
@@ -802,16 +824,18 @@ def main() -> None:
     ap.add_argument("--amp", type=int, default=1, help=argparse.SUPPRESS)
     ap.add_argument("--_train-one", dest="train_one", type=Path, help=argparse.SUPPRESS)
     ap.add_argument("--_out-json", dest="out_json", type=Path, help=argparse.SUPPRESS)
+    ap.add_argument("--_data-yaml", dest="data_yaml", type=Path, help=argparse.SUPPRESS)
     args = ap.parse_args()
 
     work_dir = args.work_dir.resolve()
     work_dir.mkdir(parents=True, exist_ok=True)
     isolate_ultralytics(work_dir)
-    data_dir = work_dir / "data"
+    seed = 0
+    data_dir = work_dir / f"data-{args.n_train}-{args.n_val}-seed{seed}"  # one directory per dataset, never resized
 
     os.environ["FOLO_BENCH_PIDS"] = ",".join(p for p in [os.environ.get("FOLO_BENCH_PIDS"), str(os.getpid())] if p)
     if args.train_one:
-        train_one(args.train_one, data_dir / "data.yaml", work_dir, bool(args.amp), args.epochs, args.out_json)
+        train_one(args.train_one, args.data_yaml, work_dir, bool(args.amp), args.epochs, args.out_json)
         return
 
     import psutil
@@ -819,34 +843,59 @@ def main() -> None:
 
     sections = [s.strip() for s in args.sections.split(",") if s.strip()]
     weights_dir = args.weights_dir.resolve()
-    data_yaml = make_dataset(data_dir, args.n_train, args.n_val)
+    # A missing checkpoint would make Ultralytics download it next to the given path, i.e. into --weights-dir.
+    missing = [f"{m}.pt" for m in dict.fromkeys(MODELS + TRAIN_MODELS) if not (weights_dir / f"{m}.pt").is_file()]
+    if missing:
+        raise SystemExit(f"missing weights in {weights_dir}: {', '.join(missing)}")
+    if "train" in sections and args.n_train < 16 * 8:
+        raise SystemExit("--n-train must give at least 8 batches of 16 per epoch for the steady-state statistics")
+    data_yaml = make_dataset(data_dir, args.n_train, args.n_val, seed)
     threads = (
         [int(t) for t in args.cpu_threads.split(",")]
         if args.cpu_threads
         else list(dict.fromkeys([os.cpu_count(), psutil.cpu_count(logical=False), 8]))
     )
 
+    env = environment()
+    config = {
+        "imgsz": IMGSZ,
+        "models": MODELS,
+        "train_models": TRAIN_MODELS,
+        "synthetic_dataset": {"train": args.n_train, "val": args.n_val, "seed": seed, "classes": 3, "path": str(data_dir)},
+        "epochs": args.epochs,
+        "quick": args.quick,
+        "cpu_threads": threads,
+    }
+    # Top-level environment/config describe the latest invocation; sections_meta records, per section, the
+    # environment and config it was actually measured with (sections can come from different invocations).
     results: dict = {
-        "schema": 1,
+        "schema": 2,
         "date": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-        "environment": environment(),
-        "config": {
-            "imgsz": IMGSZ,
-            "models": MODELS,
-            "train_models": TRAIN_MODELS,
-            "synthetic_dataset": {"train": args.n_train, "val": args.n_val, "classes": 3, "path": str(data_dir)},
-            "quick": args.quick,
-            "cpu_threads": threads,
-        },
+        "environment": env,
+        "config": config,
+        "sections_meta": {},
         "gpu_state": {},
     }
     prev: dict = {}
     if args.out.exists():  # merge, so sections can be re-run one at a time
         prev = json.loads(args.out.read_text())
+        prev_meta = prev.get("sections_meta", {})
         for k in ("params", "gpu_fwd", "gpu_e2e", "cpu", "train_step", "train"):
+            if k in prev and (k not in sections or (k == "train" and args.train_append)):
+                results["sections_meta"][k] = prev_meta.get(
+                    k, {"environment": prev["environment"], "config": prev["config"], "backfilled": True}
+                )
             if k in prev and k not in sections:
                 results[k] = prev[k]
         results["gpu_state"] = {k: v for k, v in prev.get("gpu_state", {}).items() if k not in sections}
+        if args.train_append and "train" in sections and "train" in results["sections_meta"]:
+            def train_key(m: dict) -> tuple:
+                e, c = m["environment"], m["config"]
+                ds = c["synthetic_dataset"]
+                return (e["torch"], e["ultralytics"], e["gpu"], e["cpu"], ds["train"], ds["val"], c.get("epochs", 2), c["quick"])
+
+            if train_key(results["sections_meta"]["train"]) != train_key({"environment": env, "config": config}):
+                raise SystemExit("--train-append: the existing train runs used a different environment or config")
 
     WATCH.start()
     for s in sections:
@@ -882,6 +931,8 @@ def main() -> None:
             "section_wall_s": round(time.perf_counter() - t0, 1),
             "finished": time.strftime("%Y-%m-%dT%H:%M:%S%z"),  # sections may come from different runs
         }
+        if not (s == "train" and args.train_append and "train" in results["sections_meta"]):
+            results["sections_meta"][s] = {"environment": env, "config": config}
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         args.out.parent.mkdir(parents=True, exist_ok=True)
