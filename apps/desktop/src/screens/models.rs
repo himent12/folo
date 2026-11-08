@@ -19,7 +19,7 @@ use crate::store::Load;
 use crate::theme::{alpha, radius, size as tsize, theme, ty};
 use crate::ui::*;
 
-/// Row-label column of the confusion matrix (fits "False positives").
+/// Row-label column of the confusion matrix (fits "Share of all FP").
 const LABEL_W: f32 = 96.;
 
 impl FoloApp {
@@ -979,7 +979,9 @@ impl FoloApp {
                 .children(labels.iter().enumerate().map(|(i, l)| {
                     // The full name, else its short form, else its initial (each measured); a
                     // shortened heading shows the full name on hover.
-                    let room = |window: &mut Window, s: &str| col_w.is_none_or(|w| wide(window, s) <= w);
+                    // A heading may overhang its cell by 2 px into the 4 px gap.
+                    let room =
+                        |window: &mut Window, s: &str| col_w.is_none_or(|w| wide(window, s) <= w + px(4.));
                     let fits = i == n - 1 || room(window, l);
                     let shown = if fits {
                         l.clone()
@@ -1020,7 +1022,12 @@ impl FoloApp {
                         .pr(px(8.))
                         .text_right()
                         .truncate()
-                        .child(if r == n - 1 { "False positives".to_string() } else { labels[r].clone() }),
+                        .child(if r == n - 1 {
+                            // Its denominator differs from the class rows': all false positives.
+                            if norm { "Share of all FP".to_string() } else { "False positives".to_string() }
+                        } else {
+                            labels[r].clone()
+                        }),
                 )
                 .children(row.iter().enumerate().map(|(c, &v)| {
                     let frac = if norm { v as f32 / row_sums[r] as f32 } else { v as f32 / max_count as f32 };
@@ -1289,13 +1296,14 @@ fn num_cell(w: f32, content: impl IntoElement) -> gpui::Div {
     div().w(px(w)).flex_none().flex().justify_end().child(content)
 }
 
-/// Fill opacity of an error cell: a square-root ramp over the whole 0–100 % range.
 /// A column heading's short form: the first three letters and a full stop ("hexagon" → "hex.").
 fn short_name(name: &str) -> String {
     let short: String = name.chars().take(3).collect();
     if short.chars().count() < name.chars().count() { format!("{short}.") } else { short }
 }
 
+/// Fill opacity of an error cell: a square-root ramp over `frac`, the cell's share of the largest
+/// class-to-class confusion shown.
 fn err_alpha(frac: f32) -> f32 {
     0.8 * frac.clamp(0., 1.).sqrt()
 }

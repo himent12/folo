@@ -547,6 +547,13 @@ impl FoloApp {
             .enumerate()
             .map(|(i, name)| {
                 let on = self.ds_class == Some(i as u32);
+                // The count is boxes; the chip filters images (the tooltip says both).
+                let n = counts.get(i).copied();
+                let tip_text = if on {
+                    format!("{} {name} boxes · showing images with one; click to clear", int(n.unwrap_or(0)))
+                } else {
+                    format!("{} {name} boxes · click to show only images with one", int(n.unwrap_or(0)))
+                };
                 self.chip(
                     &format!("ds-class-{i}"),
                     name.clone(),
@@ -561,6 +568,7 @@ impl FoloApp {
                         cx.notify();
                     }),
                 )
+                .tooltip(crate::controls::tip(tip_text, None))
                 .into_any_element()
             })
             .collect();
@@ -608,7 +616,7 @@ impl FoloApp {
             .flex()
             .items_center()
             .gap(px(6.))
-            .child(text(ty::XS, t.text_tertiary).mr(px(2.)).child("Boxes by class"))
+            .child(text(ty::XS, t.text_tertiary).mr(px(2.)).child("Filter images by class"))
             .children(chips)
             .when(self.ds_empty_only, |d| {
                 d.child(self.chip(

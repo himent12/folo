@@ -133,9 +133,6 @@ impl Theme {
         Self::shadow(if self.is_dark() { tokens::shadow::DARK_SM } else { tokens::shadow::LIGHT_SM })
     }
 
-    /// Loss component colours (design/README.md: box = series 2, cls = 3, dfl = 4, total = 1).
-    /// box, cls, dfl, total. Total is the neutral sum; the parts take series slots no other
-    /// dashboard chart uses (mAP has 0 and 1, precision/recall 5).
     /// Loss components (box, cls, dfl, total), per design/README: box = series 1, cls = series 4
     /// (dashed), dfl = series 5 (dotted), total = text.primary (thicker).
     pub fn loss_colors(&self) -> [Hsla; 4] {

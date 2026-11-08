@@ -694,7 +694,7 @@ impl FoloApp {
                 .flex()
                 .flex_col()
                 .gap(px(6.))
-                .child(caption(&t, "Throughput"))
+                .child(caption(&t, if live { "Throughput" } else { "Final throughput" }))
                 .child(
                     div()
                         .flex()

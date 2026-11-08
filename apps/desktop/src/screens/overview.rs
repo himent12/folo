@@ -643,7 +643,8 @@ impl FoloApp {
         } else if wide {
             (150., 120., 96., 80.)
         } else {
-            (140., 88., 88., 64.)
+            // 112 px of progress so its bar (≥ 48 px) shows beside "42 / 100" at 1280.
+            (124., 112., 80., 64.)
         };
         let meta_w = if full { 180. } else { 130. };
         let now = self.store.api.now();

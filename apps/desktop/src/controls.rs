@@ -342,22 +342,25 @@ impl FoloApp {
             .tooltip(tip(help, None))
             .child(icon("icons/info.svg", 12., t.text_tertiary))
             .when(shown, |d| {
+                // Anchored under the icon and kept 8 px inside the window (an icon near the right
+                // edge would otherwise push it out), like `focus_tip`.
                 d.child(
-                    gpui::deferred(
-                        div()
-                            .absolute()
-                            .top(px(24.))
-                            .left(px(-8.))
-                            .w(px(260.))
-                            .p(px(8.))
-                            .rounded(px(radius::MD))
-                            .bg(t.bg_overlay)
-                            .border_1()
-                            .border_color(t.line_default)
-                            .shadow(t.shadow_md())
-                            .child(text(ty::SM, t.text_primary).child(help)),
-                    )
-                    .with_priority(1),
+                    div().absolute().top(px(24.)).left(px(-8.)).child(
+                        gpui::deferred(
+                            gpui::anchored().snap_to_window_with_margin(px(8.)).child(
+                                div()
+                                    .w(px(260.))
+                                    .p(px(8.))
+                                    .rounded(px(radius::MD))
+                                    .bg(t.bg_overlay)
+                                    .border_1()
+                                    .border_color(t.line_default)
+                                    .shadow(t.shadow_md())
+                                    .child(text(ty::SM, t.text_primary).child(help)),
+                            ),
+                        )
+                        .with_priority(1),
+                    ),
                 )
             });
         self.bind(el, key, radius::SM, window, cx, std::rc::Rc::new(|_, _, _| {})).into_any_element()
@@ -578,7 +581,24 @@ impl FoloApp {
                 d.border_color(t.line_default).hover(|s| s.bg(t.bg_hover).border_color(t.line_strong))
             })
             .active(|s| s.opacity(0.8))
-            .when_some(swatch_color, |d, c| d.child(crate::ui::class_swatch(&t, c, 8.)))
+            // Selected: a check in the class colour takes the swatch's slot, so selection isn't
+            // colour alone and nothing shifts.
+            .when_some(swatch_color, |d, c| {
+                d.child(if on {
+                    div().size(px(12.)).flex().items_center().justify_center().child(icon(
+                        "icons/check.svg",
+                        12.,
+                        c,
+                    ))
+                } else {
+                    div()
+                        .size(px(12.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(crate::ui::class_swatch(&t, c, 8.))
+                })
+            })
             .child(
                 text(ty::SM, if on { t.text_primary } else { t.text_secondary })
                     .whitespace_nowrap()
