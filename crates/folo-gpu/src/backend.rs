@@ -82,7 +82,17 @@ fn register_shared(ctx: std::result::Result<GpuContext, GpuError>) -> std::resul
 /// Fails when there is no usable adapter; tensors then stay on the CPU. In the browser, call [`init_async`]
 /// instead (afterwards `init` returns its result).
 pub fn init() -> std::result::Result<Device, GpuError> {
-    INIT.get_or_init(|| register_shared(GpuContext::shared())).clone().map_err(GpuError::NoAdapter)
+    if let Some(r) = INIT.get() {
+        return r.clone().map_err(GpuError::NoAdapter);
+    }
+    let ctx = GpuContext::shared();
+    // In the browser `shared()` fails until `shared_async()` has run; that is not a result to keep, or a later
+    // `init_async()` would return it too.
+    #[cfg(target_arch = "wasm32")]
+    if let Err(e) = ctx {
+        return Err(e);
+    }
+    INIT.get_or_init(|| register_shared(ctx)).clone().map_err(GpuError::NoAdapter)
 }
 
 /// [`init`] without blocking, over [`GpuContext::shared_async`]: the way to get a GPU device in the browser

@@ -126,8 +126,13 @@ fn js_err(msg: impl std::fmt::Display) -> JsValue {
 /// Parse a JS options object through JSON (undefined / null give the defaults).
 fn options<T: serde::de::DeserializeOwned + Default>(v: Option<&JsValue>) -> Result<T, JsValue> {
     let Some(v) = v.filter(|v| !v.is_undefined() && !v.is_null()) else { return Ok(T::default()) };
-    let s: String =
-        js_sys::JSON::stringify(v).map_err(|_| js_err("options are not JSON-serialisable"))?.into();
+    let s: String = js_sys::JSON::stringify(v)
+        .map_err(|_| js_err("options are not JSON-serialisable"))?
+        .as_string()
+        .ok_or_else(
+            // `JSON.stringify` gives `undefined` for a function, a symbol or a `toJSON` returning undefined.
+            || js_err("options must be an object"),
+        )?;
     serde_json::from_str(&s).map_err(|e| js_err(format!("invalid options: {e}")))
 }
 

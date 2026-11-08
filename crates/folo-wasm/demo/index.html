@@ -163,14 +163,24 @@ window.foloDemo = {
   hasWebGpu,
   /** Bad inputs must reject (not throw, not hang): returns `{ case: "rejected: <message>" | <problem> }`. */
   async probeErrors() {
-    const detached = () => { const b = new ArrayBuffer(16); structuredClone(b, { transfer: [b] }); return b; };
+    // A view whose buffer is transferred after the view was made (making a view of a detached buffer throws).
+    const detached = (View) => {
+      const b = new ArrayBuffer(16);
+      const v = View ? new View(b) : b;
+      structuredClone(b, { transfer: [b] });
+      return v;
+    };
     const det = detector;
     const cases = {
       "load detached ArrayBuffer": () => FoloDetector.load(detached()),
-      "load detached view": () => FoloDetector.load(new Uint8Array(detached())),
+      "load detached view": () => FoloDetector.load(detached(Uint8Array)),
       "load not bytes": () => FoloDetector.load(42),
       "load bad options": () => FoloDetector.load(modelBytes, { backend: "cuda" }),
-      "detect detached": () => det.detect(new Uint8ClampedArray(detached()), 2, 2),
+      "load function options": () => FoloDetector.load(modelBytes, () => 1),
+      "load symbol options": () => FoloDetector.load(modelBytes, Symbol("x")),
+      "load toJSON options": () => FoloDetector.load(modelBytes, { toJSON() { return undefined; } }),
+      "detect function options": () => det.detect(imageData, undefined, undefined, () => 1),
+      "detect detached": () => det.detect(detached(Uint8ClampedArray), 2, 2),
       "detect wrong size": () => det.detect(new Uint8Array(15), 2, 2),
       "detect huge": () => det.detect(new Uint8Array(0), 65536, 65536),
       "detect no size": () => det.detect(new Uint8Array(16)),
@@ -178,13 +188,17 @@ window.foloDemo = {
     };
     const out = {};
     for (const [name, f] of Object.entries(cases)) {
+      let p;
       try {
-        const p = f();
-        const r = await Promise.race([p.then(() => "resolved"), new Promise((r) => setTimeout(() => r("pending"), 5000))]);
-        out[name] = r;
+        p = f();
       } catch (e) {
-        out[name] = e instanceof Error && e.message ? `rejected: ${e.message}` : `threw a non-Error: ${e}`;
+        out[name] = `threw synchronously: ${e}`;
+        continue;
       }
+      out[name] = await Promise.race([
+        p.then(() => "resolved", (e) => (e instanceof Error && e.message ? `rejected: ${e.message}` : `rejected with a non-Error: ${e}`)),
+        new Promise((r) => setTimeout(() => r("pending"), 5000)),
+      ]);
     }
     return out;
   },
