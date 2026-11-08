@@ -42,4 +42,28 @@ describe('tooltip', () => {
     t.destroy();
     wrap.remove();
   });
+
+  it('describes one element at a time: hover the first button, focus the second, destroy', () => {
+    vi.useFakeTimers();
+    const wrap = document.createElement('span');
+    const a = document.createElement('button');
+    const b = document.createElement('button');
+    a.setAttribute('aria-describedby', 'hint-a');
+    wrap.append(a, b);
+    document.body.appendChild(wrap);
+    const t = tooltip(wrap, 'Zoom');
+    wrap.dispatchEvent(new PointerEvent('pointerenter'));
+    vi.advanceTimersByTime(500);
+    expect(a.getAttribute('aria-describedby')).toBe('hint-a folo-tooltip');
+    const visible = vi.spyOn(b, 'matches').mockImplementation((sel: string) => sel === ':focus-visible' || Element.prototype.matches.call(b, sel));
+    b.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+    vi.advanceTimersByTime(10);
+    expect(a.getAttribute('aria-describedby')).toBe('hint-a');
+    expect(b.getAttribute('aria-describedby')).toBe('folo-tooltip');
+    t.destroy();
+    expect(a.getAttribute('aria-describedby')).toBe('hint-a');
+    expect(b.hasAttribute('aria-describedby')).toBe(false);
+    visible.mockRestore();
+    wrap.remove();
+  });
 });

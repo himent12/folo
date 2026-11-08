@@ -35,6 +35,12 @@ export function tooltip(node: HTMLElement, opts: TooltipOptions) {
   const target = () => (node.matches(FOCUSABLE) ? node : (node.querySelector<HTMLElement>(FOCUSABLE) ?? node));
   // The element's own aria-describedby (if any) is kept: the tooltip id is added to it, then removed again.
   const own = (el: HTMLElement) => (el.getAttribute('aria-describedby') ?? '').split(/\s+/).filter((id) => id && id !== 'folo-tooltip');
+  /** Takes the tooltip id off an element's description, keeping its own ids. */
+  const release = (el: HTMLElement) => {
+    const rest = own(el);
+    if (rest.length) el.setAttribute('aria-describedby', rest.join(' '));
+    else el.removeAttribute('aria-describedby');
+  };
   // Escape dismisses a visible tooltip without moving focus (WCAG 1.4.13).
   const onKey = (e: KeyboardEvent) => {
     if (e.key === 'Escape') hide();
@@ -76,7 +82,10 @@ export function tooltip(node: HTMLElement, opts: TooltipOptions) {
       }
       x = Math.max(4, Math.min(window.innerWidth - t.width - 4, x));
       el.style.transform = `translate(${Math.round(x)}px, ${Math.round(y)}px)`;
-      described = focused ?? target();
+      // A new target (hover described one button, focus lands on another): the old one stops being described.
+      const next = focused ?? target();
+      if (next !== described) release(described);
+      described = next;
       described.setAttribute('aria-describedby', [...own(described), el.id].join(' '));
       document.addEventListener('keydown', onKey);
     }, delay);
@@ -89,9 +98,7 @@ export function tooltip(node: HTMLElement, opts: TooltipOptions) {
       lastHide = Date.now();
     }
     document.removeEventListener('keydown', onKey);
-    const rest = own(described);
-    if (rest.length) described.setAttribute('aria-describedby', rest.join(' '));
-    else described.removeAttribute('aria-describedby');
+    release(described);
   };
 
   const onEnter = () => show(false);
