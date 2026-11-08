@@ -11,7 +11,9 @@ that maximises the class-mean F1 at IoU 0.5. The confusion matrix follows Ultral
 
 Per image: predictions `(box xyxy, score, class)` and ground truths `(box xyxy, class)` in the same coordinates (any
 units; the evaluator only compares boxes with each other). Predictions normally come from the post-process with the
-validation settings (`NmsConfig::val()`: `conf > 0.001`, `iou 0.7`, multi-label, `max_det 300`). Images can be added
+validation settings of `docs/MODEL.md` §8.7 / §9.3 (`NmsConfig::val()`: `conf > 0.001`, `iou 0.7`, multi-label,
+class-aware, `max_det 300`); the trainer validates after every epoch in network-input pixels and uses `map50_95` as
+its fitness. Of the up to 300 detections per image, step 2 keeps at most 100 per class. Images can be added
 in any order, but score ties across images are broken by insertion order (see step 4), exactly like pycocotools
 breaks them by image id order.
 

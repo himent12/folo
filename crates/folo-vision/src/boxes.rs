@@ -242,6 +242,33 @@ pub fn iou(a: &Xyxy, b: &Xyxy, kind: IouKind) -> f32 {
     }
 }
 
+/// CIoU in the exact form of `docs/MODEL.md` §7.2 (Ultralytics' `bbox_iou(..., CIoU=True)`), with its `eps = 1e-7`
+/// terms added to both heights, the union and the squared enclosing diagonal, and inside the `alpha` denominator.
+/// The assigner and the box loss use this form. Unlike [`iou`] with [`IouKind::Ciou`], identical boxes score slightly
+/// below 1 (noticeably so for boxes of a few 1e-3 pixels). Symmetric in `a` and `b`.
+#[inline]
+pub fn ciou_eps(a: &Xyxy, b: &Xyxy) -> f32 {
+    const EPS: f32 = 1e-7;
+    let (w1, h1) = (a.x2 - a.x1, a.y2 - a.y1 + EPS);
+    let (w2, h2) = (b.x2 - b.x1, b.y2 - b.y1 + EPS);
+    let inter = (a.x2.min(b.x2) - a.x1.max(b.x1)).max(0.0) * (a.y2.min(b.y2) - a.y1.max(b.y1)).max(0.0);
+    let union = w1 * h1 + w2 * h2 - inter + EPS;
+    let iou = inter / union;
+    let cw = a.x2.max(b.x2) - a.x1.min(b.x1);
+    let ch = a.y2.max(b.y2) - a.y1.min(b.y1);
+    let c2 = cw * cw + ch * ch + EPS;
+    let dx = b.x1 + b.x2 - a.x1 - a.x2;
+    let dy = b.y1 + b.y2 - a.y1 - a.y2;
+    let rho2 = (dx * dx + dy * dy) / 4.0;
+    // atan(w / h), kept finite if a malformed box makes h exactly 0.
+    let at = |w: f32, h: f32| if h != 0.0 { (w / h).atan() } else { w.atan2(h) };
+    let d = at(w2, h2) - at(w1, h1);
+    let v = (4.0 / (std::f32::consts::PI * std::f32::consts::PI)) * d * d;
+    // Ultralytics' evaluation order of §7.2's `1 − iou + v + eps`.
+    let alpha = v / (v - iou + (1.0 + EPS));
+    iou - (rho2 / c2 + v * alpha)
+}
+
 /// Elementwise overlap: `out[i] = iou(a[i], b[i], kind)`.
 ///
 /// # Panics

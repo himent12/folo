@@ -1,30 +1,31 @@
 //! The task-aligned assigner (TAL, from TOOD; as used by YOLOv8) and the DFL target encoding, on plain arrays.
 //!
-//! For one image with `A` anchors, `C` classes and `G` ground truths:
+//! This is `docs/MODEL.md` §7.3 (assigner) and the DFL target rule of §7.4. For one image with `A` anchors, `C`
+//! classes and `G` ground truths, with every box and point in **input pixels**:
 //!
-//! 1. **Candidates.** Anchor `a` is a candidate for gt `g` when its centre lies inside the gt box by more than
-//!    [`TalConfig::eps`] on every side.
-//! 2. **Alignment.** For candidates, `overlap = max(CIoU(gt, pred_box), 0)` (CIoU with Ultralytics' `eps = 1e-7`
-//!    terms, so tiny boxes get the same overlaps as upstream) and
-//!    `align = score[a, class(g)]^alpha * overlap^beta` (`alpha = 0.5`, `beta = 6`). Non-candidates have both 0.
-//! 3. **Top-k.** Each gt keeps its `topk = 10` candidates with the largest `align` (ties: lower anchor index).
-//!    *Parity exception:* Ultralytics runs `torch.topk` over **all** anchors (non-candidates scored 0) and only then
-//!    intersects with the candidate mask, so when a gt has fewer than `topk` candidates with non-zero alignment,
-//!    which zero-alignment anchors fill the remaining slots depends on `torch.topk`'s unspecified tie order (and
-//!    differs between CPU and CUDA). FOLO ranks only the candidates, deterministically, so such a gt keeps its
-//!    zero-alignment candidates. Those anchors get a target score of exactly 0, so with Ultralytics' loss (box and
-//!    DFL terms weighted by the target score, BCE towards 0) they contribute the same as background; only
-//!    `fg_mask` / `num_fg` can differ.
-//! 4. **Conflicts.** An anchor selected by several gts goes to the gt with the largest `overlap` over *all* gts
-//!    (first on ties), exactly like Ultralytics' `select_highest_overlaps`.
-//! 5. **Targets.** Each foreground anchor gets its gt's class and box, and a soft score
-//!    `align[g, a] * max_overlap[g] / (max_align[g] + eps)`, where the maxima run over gt `g`'s final positive
-//!    anchors (Ultralytics' normalisation, so the best-aligned anchor of each gt gets that gt's best IoU).
+//! 1. **Candidates.** Each gt box is copied and every side shorter than [`TalConfig::min_box_size`] (16 px) is
+//!    widened to it about the box centre ([`candidate_box`]). Anchor `a` is a candidate of gt `g` iff its point is
+//!    inside that enlarged box by more than [`TalConfig::eps`] on all four sides. The enlarged box is used for this
+//!    step only.
+//! 2. **Metric** (candidates only). `u = max(CIoU(gt, pred_box), 0)` in the exact §7.2 form ([`ciou_eps`]) and
+//!    `m = score[a, class(g)]^alpha * u^beta` (`alpha = 0.5`, `beta = 6`). Non-candidates have `u = m = 0`.
+//! 3. **Top-k.** Each gt selects its `min(topk, #candidates)` candidates with the largest `m`, ties broken by the
+//!    smaller anchor index. Zero-metric candidates are eligible.
+//! 4. **Conflicts.** An anchor selected by several gts goes to the one with the largest `u` **among the gts that
+//!    selected it**, ties broken by the smaller gt index.
+//! 5. **Soft targets.** Over each gt's final positives `P_g`: `t[a] = m(g, a) * u_max / (m_max + eps)` with
+//!    `m_max`, `u_max` the maxima of `m` and `u` over `P_g`, so the best-aligned anchor of each gt gets (about) that
+//!    gt's best overlap.
+//! 6. **Box targets.** The original (not enlarged) gt box; [`dfl_targets`] converts it to grid units.
 //!
-//! All boxes and points must be in the same units (Ultralytics uses input-image pixels: decoded predictions and
-//! anchor points multiplied by their stride). Scores are post-sigmoid.
+//! **Differences from Ultralytics' `TaskAlignedAssigner`** (all deliberate, MODEL.md §1): it has no small-box
+//! enlargement; it runs `torch.topk` over *all* anchors and only then intersects with the candidate mask, so which
+//! zero-metric anchors fill a gt's slots depends on `torch.topk`'s unspecified tie order (FOLO ranks only the
+//! candidates, deterministically); and it resolves conflicts by the largest overlap over *all* gts, so an anchor can
+//! end up with a gt that never selected it. Zero-metric positives get a target score of exactly 0, so they contribute
+//! like background to the classification and box terms; only `fg_mask` / `num_fg` see them.
 
-use crate::boxes::Xyxy;
+use crate::boxes::{Xyxy, ciou_eps};
 use crate::decode::Anchors;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -32,7 +33,7 @@ use serde::{Deserialize, Serialize};
 /// `G * A` above which candidate scoring runs in parallel over gts.
 const PAR_WORK: usize = 1 << 17;
 
-/// Assigner hyper-parameters. Defaults are YOLOv8's.
+/// Assigner hyper-parameters. Defaults are `docs/MODEL.md` §7.3's.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TalConfig {
@@ -44,11 +45,14 @@ pub struct TalConfig {
     pub beta: f32,
     /// Margin for the anchor-inside-gt test and the normalisation denominator.
     pub eps: f32,
+    /// Candidate selection widens every gt side shorter than this (pixels) to this length about the box centre
+    /// (16, the P4 stride). `0` disables the enlargement.
+    pub min_box_size: f32,
 }
 
 impl Default for TalConfig {
     fn default() -> Self {
-        Self { topk: 10, alpha: 0.5, beta: 6.0, eps: 1e-9 }
+        Self { topk: 10, alpha: 0.5, beta: 6.0, eps: 1e-9, min_box_size: 16.0 }
     }
 }
 
@@ -62,7 +66,7 @@ pub struct Assignment {
     pub target_gt: Vec<usize>,
     /// Class of the assigned gt.
     pub target_labels: Vec<u32>,
-    /// Box of the assigned gt.
+    /// Box of the assigned gt (the original box, not the enlarged candidate box), in input pixels.
     pub target_bboxes: Vec<Xyxy>,
     /// Normalised alignment score for the target class (the soft classification target).
     pub target_scores: Vec<f32>,
@@ -83,12 +87,38 @@ impl Assignment {
     }
 }
 
+/// The box used for candidate selection (§7.3 step 1): `b` with every side shorter than `min_size` set to
+/// `min_size` about the box centre. Sides at least `min_size` long are unchanged.
+#[inline]
+pub fn candidate_box(b: &Xyxy, min_size: f32) -> Xyxy {
+    let widen = |lo: f32, hi: f32| {
+        if hi - lo < min_size {
+            let c = (lo + hi) * 0.5;
+            (c - min_size * 0.5, c + min_size * 0.5)
+        } else {
+            (lo, hi)
+        }
+    };
+    let ((x1, x2), (y1, y2)) = (widen(b.x1, b.x2), widen(b.y1, b.y2));
+    Xyxy::new(x1, y1, x2, y2)
+}
+
+/// One anchor selected by a gt, with its metric `m` and overlap `u` for that gt.
+#[derive(Clone, Copy, Debug)]
+struct Pick {
+    anchor: u32,
+    m: f32,
+    u: f32,
+}
+
 /// Run the task-aligned assigner for one image.
 ///
-/// - `pd_scores`: `[A, num_classes]` row-major, post-sigmoid.
-/// - `pd_bboxes`: `[A]` predicted boxes, `xyxy`.
-/// - `anchor_points`: `[A]` anchor centres `(x, y)`.
-/// - `gt_bboxes`, `gt_labels`: `[G]`.
+/// - `pd_scores`: `[A, num_classes]` row-major, post-sigmoid, detached.
+/// - `pd_bboxes`: `[A]` predicted boxes, `xyxy`, in input pixels (the decode times the stride).
+/// - `anchor_points`: `[A]` anchor centres `(x, y)` in input pixels ([`Anchors::points_px`]).
+/// - `gt_bboxes`, `gt_labels`: `[G]`, boxes in input pixels.
+///
+/// Everything must be in pixels because [`TalConfig::min_box_size`] is.
 ///
 /// # Panics
 /// On shape mismatches or a gt label `>= num_classes`.
@@ -118,121 +148,76 @@ pub fn assign(
         target_scores: vec![0.0; n_a],
         num_fg: 0,
     };
-    if n_g == 0 || n_a == 0 {
+    if n_g == 0 || n_a == 0 || cfg.topk == 0 {
         return out;
     }
 
-    // (align, overlap) of gt g and a candidate anchor a.
-    let metrics = |g: usize, a: usize| -> (f32, f32) {
-        let ov = ciou_ultralytics(&gt_bboxes[g], &pd_bboxes[a]).max(0.0);
-        let s = pd_scores[a * num_classes + gt_labels[g] as usize];
-        (s.powf(cfg.alpha) * ov.powf(cfg.beta), ov)
-    };
-    // The same, zero for non-candidates.
-    let pair = |g: usize, a: usize| -> (f32, f32) {
-        let p = anchor_points[a];
-        if gt_bboxes[g].contains_point(p[0], p[1], cfg.eps) { metrics(g, a) } else { (0.0, 0.0) }
-    };
-
-    // Steps 1-3: per gt, the top-k candidates by alignment.
-    let topk_for = |g: usize| -> Vec<u32> {
-        let mut cands: Vec<(f32, u32)> = Vec::new();
-        let gb = gt_bboxes[g];
+    // Steps 1-3: per gt, its candidates (against the enlarged box), their metrics, and the top-k by `m`.
+    let topk_for = |g: usize| -> Vec<Pick> {
+        let cb = candidate_box(&gt_bboxes[g], cfg.min_box_size);
+        let class = gt_labels[g] as usize;
+        let mut cands: Vec<Pick> = Vec::new();
         for (a, p) in anchor_points.iter().enumerate() {
-            if gb.contains_point(p[0], p[1], cfg.eps) {
-                cands.push((metrics(g, a).0, a as u32));
+            if cb.contains_point(p[0], p[1], cfg.eps) {
+                let u = ciou_eps(&gt_bboxes[g], &pd_bboxes[a]).max(0.0);
+                let m = pd_scores[a * num_classes + class].powf(cfg.alpha) * u.powf(cfg.beta);
+                cands.push(Pick { anchor: a as u32, m, u });
             }
         }
-        let by_rank = |x: &(f32, u32), y: &(f32, u32)| y.0.total_cmp(&x.0).then(x.1.cmp(&y.1));
         if cands.len() > cfg.topk {
-            if cfg.topk == 0 {
-                return Vec::new();
-            }
+            let by_rank = |x: &Pick, y: &Pick| y.m.total_cmp(&x.m).then(x.anchor.cmp(&y.anchor));
             cands.select_nth_unstable_by(cfg.topk - 1, by_rank);
             cands.truncate(cfg.topk);
         }
-        cands.into_iter().map(|c| c.1).collect()
+        cands
     };
-    let selected: Vec<Vec<u32>> = if n_g * n_a >= PAR_WORK {
+    let selected: Vec<Vec<Pick>> = if n_g * n_a >= PAR_WORK {
         (0..n_g).into_par_iter().map(topk_for).collect()
     } else {
         (0..n_g).map(topk_for).collect()
     };
 
-    // Step 4: resolve anchors selected by several gts by highest overlap over all gts.
-    let mut count = vec![0u32; n_a];
-    for (g, sel) in selected.iter().enumerate() {
-        for &a in sel {
-            count[a as usize] += 1;
-            out.target_gt[a as usize] = g;
-        }
-    }
-    // (anchor, gt, align) of the final positives.
-    let mut fg: Vec<(usize, usize, f32)> = Vec::new();
-    let mut max_align = vec![0.0f32; n_g];
-    let mut max_overlap = vec![0.0f32; n_g];
-    for (a, &n) in count.iter().enumerate() {
-        if n == 0 {
-            continue;
-        }
-        if n > 1 {
-            let (mut best_g, mut best) = (0, f32::NEG_INFINITY);
-            for g in 0..n_g {
-                let ov = pair(g, a).1;
-                if ov > best {
-                    best = ov;
-                    best_g = g;
-                }
+    // Step 4: an anchor selected by several gts goes to the largest `u` among them. Gts are visited in index order
+    // and only a strictly larger `u` takes over, so ties keep the smaller gt index.
+    let mut owner: Vec<Option<(u32, Pick)>> = vec![None; n_a];
+    for (g, picks) in selected.iter().enumerate() {
+        for &p in picks {
+            let slot = &mut owner[p.anchor as usize];
+            if slot.is_none_or(|(_, q)| p.u > q.u) {
+                *slot = Some((g as u32, p));
             }
-            out.target_gt[a] = best_g;
         }
-        let g = out.target_gt[a];
-        let (al, ov) = pair(g, a);
-        max_align[g] = max_align[g].max(al);
-        max_overlap[g] = max_overlap[g].max(ov);
-        fg.push((a, g, al));
     }
 
-    // Step 5: per-gt normalisation over the final positives.
-    out.num_fg = fg.len();
-    for (a, g, al) in fg {
+    // Step 5: per-gt maxima over the final positives, then the normalised soft target.
+    let mut m_max = vec![0.0f32; n_g];
+    let mut u_max = vec![0.0f32; n_g];
+    for &(g, p) in owner.iter().flatten() {
+        m_max[g as usize] = m_max[g as usize].max(p.m);
+        u_max[g as usize] = u_max[g as usize].max(p.u);
+    }
+    for (a, o) in owner.iter().enumerate() {
+        let Some((g, p)) = *o else { continue };
+        let g = g as usize;
         out.fg_mask[a] = true;
+        out.target_gt[a] = g;
         out.target_labels[a] = gt_labels[g];
         out.target_bboxes[a] = gt_bboxes[g];
-        out.target_scores[a] = al * max_overlap[g] / (max_align[g] + cfg.eps);
+        out.target_scores[a] = p.m * u_max[g] / (m_max[g] + cfg.eps);
+        out.num_fg += 1;
     }
     out
 }
 
-/// CIoU exactly as Ultralytics' `bbox_iou(box1, box2, xywh=False, CIoU=True)` computes it, including its
-/// `eps = 1e-7` terms (added to both heights, the union and the squared enclosing diagonal). Unlike
-/// [`crate::boxes::iou`], identical boxes score slightly below 1, noticeably so for boxes of a few 1e-3 pixels.
-fn ciou_ultralytics(b1: &Xyxy, b2: &Xyxy) -> f32 {
-    const EPS: f32 = 1e-7;
-    let (w1, h1) = (b1.x2 - b1.x1, b1.y2 - b1.y1 + EPS);
-    let (w2, h2) = (b2.x2 - b2.x1, b2.y2 - b2.y1 + EPS);
-    let inter =
-        (b1.x2.min(b2.x2) - b1.x1.max(b2.x1)).max(0.0) * (b1.y2.min(b2.y2) - b1.y1.max(b2.y1)).max(0.0);
-    let union = w1 * h1 + w2 * h2 - inter + EPS;
-    let iou = inter / union;
-    let cw = b1.x2.max(b2.x2) - b1.x1.min(b2.x1);
-    let ch = b1.y2.max(b2.y2) - b1.y1.min(b2.y1);
-    let c2 = cw * cw + ch * ch + EPS;
-    let dx = b2.x1 + b2.x2 - b1.x1 - b1.x2;
-    let dy = b2.y1 + b2.y2 - b1.y1 - b1.y2;
-    let rho2 = (dx * dx + dy * dy) / 4.0;
-    // atan(w / h), kept finite if a malformed box makes h exactly 0.
-    let at = |w: f32, h: f32| if h != 0.0 { (w / h).atan() } else { w.atan2(h) };
-    let d = at(w2, h2) - at(w1, h1);
-    let v = (4.0 / (std::f32::consts::PI * std::f32::consts::PI)) * d * d;
-    let alpha = v / (v - iou + (1.0 + EPS));
-    iou - (rho2 / c2 + v * alpha)
-}
-
-/// Box → `ltrb` distances from `anchor` for the DFL target, clamped to `[0, reg_max - 1 - 0.01]`. Both inputs are in
-/// stride units (grid cells), as in Ultralytics' `bbox2dist(anchor_points, target_bboxes / stride, reg_max - 1)`.
+/// Box → `ltrb` distances from `anchor` for the DFL target (MODEL.md §7.4), clamped to `[0, reg_max - 1 - 0.01]`
+/// (`[0, 14.99]` for `reg_max = 16`), so the right-hand bin `floor(d) + 1` is at most `reg_max - 1`. Both inputs are
+/// in stride units (grid cells), as in Ultralytics' `bbox2dist(anchor_points, target_bboxes / stride, reg_max - 1)`.
+///
+/// # Panics
+/// If `reg_max < 2` (DFL needs at least two bins).
 #[inline]
 pub fn bbox2dist_clamped(anchor: [f32; 2], b: &Xyxy, reg_max: usize) -> [f32; 4] {
+    assert!(reg_max >= 2, "bbox2dist_clamped: reg_max must be >= 2, got {reg_max}");
     let hi = reg_max as f32 - 1.0 - 0.01;
     crate::decode::bbox2dist(anchor, b).map(|d| d.clamp(0.0, hi))
 }
@@ -240,7 +225,8 @@ pub fn bbox2dist_clamped(anchor: [f32; 2], b: &Xyxy, reg_max: usize) -> [f32; 4]
 /// DFL targets `[A, 4]` for an assignment: for foreground anchors, the clamped `ltrb` distances (stride units) of the
 /// target box from the anchor point; zeros for background.
 ///
-/// `anchors` gives the points in grid units and the strides; `assignment.target_bboxes` are in input pixels.
+/// `anchors` gives the points in grid units and the strides; `assignment.target_bboxes` are in input pixels and are
+/// divided by each anchor's stride.
 pub fn dfl_targets(assignment: &Assignment, anchors: &Anchors, reg_max: usize) -> Vec<[f32; 4]> {
     assert_eq!(assignment.fg_mask.len(), anchors.len(), "dfl_targets: anchor count mismatch");
     (0..anchors.len())
@@ -254,8 +240,9 @@ pub fn dfl_targets(assignment: &Assignment, anchors: &Anchors, reg_max: usize) -
         .collect()
 }
 
-/// Split a continuous DFL target `t` into its two neighbouring bins and weights: `(left, w_left, w_right)` with
-/// `left = floor(t)`, `w_left = left + 1 - t`, `w_right = 1 - w_left` (bin `left + 1` gets `w_right`).
+/// Split a clamped DFL target `t` ([`bbox2dist_clamped`]) into its two neighbouring bins and weights:
+/// `(left, w_left, w_right)` with `left = floor(t)`, `w_left = left + 1 - t`, `w_right = 1 - w_left` (bin `left + 1`
+/// gets `w_right`).
 #[inline]
 pub fn dfl_bins(t: f32) -> (usize, f32, f32) {
     let left = t.max(0.0).floor();
@@ -272,14 +259,27 @@ mod tests {
         // Identical 0.001-pixel boxes: Ultralytics' eps terms give IoU = 1e-6 / (2 * 1e-3 * (1e-3 + 1e-7) - 1e-6 + 1e-7).
         let b = Xyxy::new(0.0, 0.0, 0.001, 0.001);
         let want = 1e-6 / (2.0 * 1e-3 * (1e-3 + 1e-7) - 1e-6 + 1e-7);
-        assert!((ciou_ultralytics(&b, &b) as f64 - want).abs() < 1e-4, "{}", ciou_ultralytics(&b, &b));
+        assert!((ciou_eps(&b, &b) as f64 - want).abs() < 1e-4, "{}", ciou_eps(&b, &b));
         // So the TAL target is that IoU, not 1 (score^alpha cancels in the normalisation).
         let a = assign(&[0.5], 1, &[b], &[[0.0005, 0.0005]], &[b], &[0], &TalConfig::default());
         assert!((a.target_scores[0] as f64 - want).abs() < 1e-4, "{}", a.target_scores[0]);
         // Normal-sized boxes agree with the eps-free CIoU.
         let (p, q) = (Xyxy::new(0.0, 0.0, 20.0, 10.0), Xyxy::new(5.0, 0.0, 25.0, 12.0));
         let exact = crate::boxes::iou(&p, &q, crate::boxes::IouKind::Ciou);
-        assert!((ciou_ultralytics(&p, &q) - exact).abs() < 1e-5);
+        assert!((ciou_eps(&p, &q) - exact).abs() < 1e-5);
+    }
+
+    #[test]
+    fn candidate_box_enlarges_short_sides_about_the_centre() {
+        // Both sides short: 6x6 centred at (8, 8) → 16x16 centred at (8, 8).
+        assert_eq!(candidate_box(&Xyxy::new(5.0, 5.0, 11.0, 11.0), 16.0), Xyxy::new(0.0, 0.0, 16.0, 16.0));
+        // Only the short side changes.
+        assert_eq!(candidate_box(&Xyxy::new(0.0, 0.0, 40.0, 6.0), 16.0), Xyxy::new(0.0, -5.0, 40.0, 11.0));
+        assert_eq!(candidate_box(&Xyxy::new(2.0, 1.0, 4.0, 41.0), 16.0), Xyxy::new(-5.0, 1.0, 11.0, 41.0));
+        // Exactly 16 and larger: unchanged. min_size 0: unchanged.
+        let b = Xyxy::new(3.0, 4.0, 19.0, 50.0);
+        assert_eq!(candidate_box(&b, 16.0), b);
+        assert_eq!(candidate_box(&Xyxy::new(5.0, 5.0, 6.0, 6.0), 0.0), Xyxy::new(5.0, 5.0, 6.0, 6.0));
     }
 
     #[test]
@@ -295,5 +295,27 @@ mod tests {
         let (l, wl, wr) = dfl_bins(14.99);
         assert_eq!(l, 14);
         assert!((wl - 0.01).abs() < 1e-5 && (wr - 0.99).abs() < 1e-5);
+    }
+
+    #[test]
+    fn dfl_spec_cases() {
+        // MODEL.md §10.3: δ = 3.3 puts 0.7 on bin 3 and 0.3 on bin 4.
+        let (l, wl, wr) = dfl_bins(3.3);
+        assert_eq!(l, 3);
+        assert!((wl - 0.7).abs() < 1e-6 && (wr - 0.3).abs() < 1e-6, "{wl} {wr}");
+        // δ = 15.2 clamps to 14.99: bins 14 and 15, the last bin of reg_max = 16.
+        let d = bbox2dist_clamped([0.0, 0.0], &Xyxy::new(-15.2, -1.0, 15.2, 1.0), 16);
+        assert_eq!(d, [14.99, 1.0, 14.99, 1.0]);
+        let (l, _, wr) = dfl_bins(d[0]);
+        assert_eq!(l + 1, 15);
+        assert!(wr > 0.98 && wr < 1.0);
+        // Another reg_max clamps at its own last bin.
+        assert_eq!(bbox2dist_clamped([0.0, 0.0], &Xyxy::new(-9.0, 0.0, 0.0, 0.0), 8)[0], 6.99);
+    }
+
+    #[test]
+    #[should_panic(expected = "reg_max must be >= 2")]
+    fn dfl_rejects_reg_max_1() {
+        bbox2dist_clamped([0.0, 0.0], &Xyxy::new(0.0, 0.0, 1.0, 1.0), 1);
     }
 }
