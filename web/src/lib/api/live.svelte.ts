@@ -172,7 +172,6 @@ export class LiveRun {
           if (closed) return;
           this.#statusSeq++;
           this.#lastStatus = { status, error };
-          const prev = this.run?.status;
           // Finished → active again: the run was resumed (here or elsewhere).
           if (this.run && !ACTIVE.includes(this.run.status) && ACTIVE.includes(status)) {
             this.#rewind();
@@ -181,14 +180,11 @@ export class LiveRun {
           if (this.run) this.run = { ...this.run, status, error };
           if (!ACTIVE.includes(status)) {
             // The run ended: the server's final history settles it. Requests issued before may hold a partial
-            // history (or, during a replay, the interrupted attempt): invalidate them and fetch the final one.
-            // Unknown (still loading) counts as possibly active: history requested so far may be partial.
-            const wasActive = this.#replay !== null || prev === undefined || ACTIVE.includes(prev);
+            // history (or, during a replay, the interrupted attempt), even when a snapshot already said it ended
+            // (/run and /metrics are read independently): invalidate them and fetch the final one, every time.
             this.#replay = null;
-            if (wasActive) {
-              this.#gen++;
-              sync();
-            }
+            this.#gen++;
+            sync();
             // Terminal: refresh the snapshot for finished time, best and model id (even if history is still loading).
             const seq = this.#statusSeq;
             const gen = this.#gen;

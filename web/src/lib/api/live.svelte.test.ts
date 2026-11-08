@@ -480,4 +480,26 @@ describe('LiveRun resume', () => {
     expect(live.steps.map((s) => s.step)).toEqual([1, 2, 3, 4, 5]);
     stop();
   });
+
+  it('fetches the final history even when a terminal snapshot was applied before the terminal event', async () => {
+    serverStatus = 'running';
+    let live!: LiveRun;
+    const stop = $effect.root(() => {
+      live = new LiveRun(() => 'run_7d1e');
+    });
+    flushSync();
+    await vi.advanceTimersByTimeAsync(0);
+    // A reload whose /metrics was read before the end but whose /run already says completed.
+    serverStatus = 'completed';
+    history = { steps: [at(1, 1), at(2, 1)], epochs: [ep(1)] as never };
+    handlers.reconnect?.();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.run?.status).toBe('completed');
+    // The terminal event arrives afterwards; by now the server's final history is complete.
+    history = { steps: [at(1, 1), at(2, 1), at(3, 2), at(4, 2), at(5, 3)], epochs: [ep(1), ep(2), ep(3)] as never };
+    handlers.status?.({ status: 'completed', error: null });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.steps.map((s) => s.step)).toEqual([1, 2, 3, 4, 5]);
+    stop();
+  });
 });
