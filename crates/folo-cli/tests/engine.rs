@@ -100,6 +100,7 @@ fn train_val_predict_export_with_json() {
         (Some(64), Some(4), Some("val"))
     );
     assert!(v["map50"].as_f64().unwrap() >= 0.0 && v["per_class"].is_array());
+    assert_eq!(v["device"], "cpu");
 
     // predict: one record per image plus `done`; --save writes annotated copies.
     let saved = root.join("pred");

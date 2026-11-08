@@ -41,7 +41,7 @@ folo train --data D:/data/cats --model folo-s --epochs 50 --imgsz 640 --json > t
 # one {"event":"status"|"step"|"epoch"|"log",...} record per event, then
 # {"event":"done","status":"completed","run_dir":"runs/cats-s","best":{"epoch":41,"map50_95":0.62},
 #  "weights":{"best":"runs/cats-s/weights/best.folo","last":".../last.folo"}}
-folo train --resume runs/cats-s/weights/last.folo --json   # after Ctrl+C
+folo train --resume runs/cats-s/weights/last.folo --json   # after Ctrl+C (or a killed process)
 ```
 
 ## 2. Evaluate and compare two runs
@@ -78,7 +78,9 @@ jq -s 'map({model, map50, map50_95, precision, recall})' a.json b.json
 → (read folo://datasets/ds_8f21/images/{image_id} to look at an image)
 ```
 
-Look for: errors (`broken_label`, `class_overflow`, `out_of_range_box`, `corrupt_image`, `missing_image`; the
+`get_dataset` lists issues in file order, so on a dataset with many background images the 50 it returns can
+be mostly `empty_image` infos while an error further down is left out: when `issues_total` is over 50, run
+`folo dataset check` (below) for the full list. Look for: errors (`broken_label`, `class_overflow`, `out_of_range_box`, `corrupt_image`, `missing_image`; the
 loader skips those images), warnings (`clipped_box`, `zero_size_box`, `duplicate_label`, `duplicate_image`), a
 class with far fewer boxes than the others, and many tiny boxes for a small `imgsz`. After training, `val`'s
 `per_class` and the sample grid show which classes the labels let down. FOLO never edits a dataset; fix the files
@@ -145,7 +147,9 @@ for r in folo("predict", "--model", best, "D:/photos"):
 
 `folo dataset check` is the one command that exits 1 with a useful report (issues found), so read its records
 before treating exit 1 as a failure. For a long `folo train`, read stdout line by line instead of waiting for the
-process: `step` records arrive about 10 times per second and `epoch` records after each validation.
+process: `step` records arrive once per batch (at most about 10 times per second) and `epoch` records after
+each validation. A 15-epoch run is about 150 KB of records, mostly `step`s; keep only the `epoch` and `done`
+records in an agent's context.
 
 ## 6. Run the same flow headless, then look at it in Studio
 Point the agent at a running server instead of an embedded store, so its runs show up in FOLO Studio and keep

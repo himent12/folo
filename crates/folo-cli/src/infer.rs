@@ -60,6 +60,7 @@ pub fn val(args: ValArgs, out: Out) -> Result<(), CliError> {
         workers: args.workers.unwrap_or_else(folo_vision::train::default_workers),
         ..ValConfig::new(imgsz, args.batch.max(1) as usize)
     };
+    let device = model.device().to_string();
     let r = validate(&model, Arc::new(part.clone()), &cfg).map_err(engine_error)?;
     let m = val_metrics(&r.report);
     let names = model.classes();
@@ -79,10 +80,11 @@ pub fn val(args: ValArgs, out: Out) -> Result<(), CliError> {
             "class": c.class, "name": name(c.class), "map50": c.map50, "map50_95": c.map50_95,
             "precision": c.precision, "recall": c.recall,
         })).collect::<Vec<_>>(),
+        "device": device,
         "seconds": r.seconds,
     }));
     out.human(format!(
-        "{} on {} ({} images, {} boxes) at {imgsz}px in {:.1}s",
+        "{} on {} ({} images, {} boxes) at {imgsz}px on {device} in {:.1}s",
         args.model.display(),
         split.as_str(),
         r.report.num_images,
