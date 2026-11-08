@@ -107,7 +107,7 @@
         >
           <span class="check">{#if value === i}<Check size={14} strokeWidth={2} />{/if}</span>
           <span class="sw" style:background={classInk(i)} aria-hidden="true"></span>
-          <span class="name truncate">{c}</span>
+          <span class="name truncate" title={c}>{c}</span>
           {#if counts}<span class="n num">{compact(counts[i])}</span>{/if}
         </button>
       {/each}
@@ -156,7 +156,9 @@
     top: calc(100% + 4px);
     left: 0;
     z-index: var(--z-overlay);
-    min-width: 240px;
+    min-width: min(240px, calc(100vw - 32px));
+    /* Never wider than the screen: long class names truncate inside their row instead. */
+    max-width: min(360px, calc(100vw - 32px));
     max-height: 320px;
     overflow-y: auto;
     padding: var(--space-1);
@@ -168,6 +170,7 @@
     animation: in var(--dur-fast) var(--ease-out);
   }
   [role='option'] {
+    min-width: 0;
     display: flex;
     align-items: center;
     gap: var(--space-2);
@@ -205,6 +208,9 @@
   .name {
     flex: 1;
     min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .n {
     color: var(--text-tertiary);

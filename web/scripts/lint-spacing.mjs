@@ -45,38 +45,55 @@ function dropVarMath(value) {
   return out;
 }
 
-/** Lints CSS text whose first line is line `startLine` of `file`; returns the problems found. */
-function lintCss(css, file, startLine) {
+/**
+ * Lints CSS text whose first line is line `startLine` of `file`; returns the problems found. Comments are blanked
+ * first (keeping line breaks, so locations stay right) and declarations are read whole, so a value on the next line
+ * is still checked and commented-out code is not. A declaration touching a line with `grid-ok` is exempt.
+ */
+export function lintCss(css, file, startLine = 1) {
   const problems = [];
-  css.split('\n').forEach((line, k) => {
-    if (line.includes('grid-ok')) return;
-    const code = line.replace(/\/\*.*?\*\//g, '');
-    for (const m of code.matchAll(/(?:^|[;{\s])([a-z-]+)\s*:\s*([^;{}]+)/g)) {
-      const [, prop, value] = m;
-      if (!PROP.test(prop)) continue;
-      for (const px of dropVarMath(value).matchAll(/(-?\d*\.?\d+)px\b/g)) {
-        const v = Math.abs(Number(px[1]));
-        if (!ALLOWED.has(v)) problems.push(`${relative(root, file).replaceAll('\\', '/')}:${startLine + k}  ${prop}: ${value.trim()}  (${v}px is off the grid)`);
-      }
+  const lines = css.split('\n');
+  const exempt = new Set(lines.flatMap((l, k) => (l.includes('grid-ok') ? [k] : [])));
+  const code = css.replace(/\/\*[\s\S]*?\*\//g, (c) => c.replace(/[^\n]/g, ' '));
+  const lineAt = (i) => code.slice(0, i).split('\n').length - 1;
+  for (const m of code.matchAll(/(?:^|[;{\s])([a-z-]+)\s*:\s*([^;{}]+)/g)) {
+    const [, prop, value] = m;
+    if (!PROP.test(prop)) continue;
+    const first = lineAt(m.index + m[0].indexOf(prop));
+    const last = lineAt(m.index + m[0].length);
+    let skip = false;
+    for (let k = first; k <= last; k++) if (exempt.has(k)) skip = true;
+    if (skip) continue;
+    for (const px of dropVarMath(value).matchAll(/(-?\d*\.?\d+)px\b/g)) {
+      const v = Math.abs(Number(px[1]));
+      const where = file ? `${relative(root, file).replaceAll('\\', '/')}:${startLine + first}` : `line ${startLine + first}`;
+      if (!ALLOWED.has(v)) problems.push(`${where}  ${prop}: ${value.trim().replace(/\s+/g, ' ')}  (${v}px is off the grid)`);
     }
-  });
+  }
   return problems;
 }
 
-const problems = [];
-for (const file of walk(src)) {
-  const text = readFileSync(file, 'utf8').replace(/\r\n/g, '\n');
-  for (const m of text.matchAll(/<style[^>]*>([\s\S]*?)<\/style>/g)) {
-    const startLine = text.slice(0, m.index + m[0].indexOf('>') + 1).split('\n').length;
-    problems.push(...lintCss(m[1], file, startLine));
+/** Lints every Svelte style block under src/ and base.css. */
+export function lintAll() {
+  const problems = [];
+  for (const file of walk(src)) {
+    const text = readFileSync(file, 'utf8').replace(/\r\n/g, '\n');
+    for (const m of text.matchAll(/<style[^>]*>([\s\S]*?)<\/style>/g)) {
+      const startLine = text.slice(0, m.index + m[0].indexOf('>') + 1).split('\n').length;
+      problems.push(...lintCss(m[1], file, startLine));
+    }
   }
+  const base = join(src, 'lib/design/base.css');
+  problems.push(...lintCss(readFileSync(base, 'utf8').replace(/\r\n/g, '\n'), base, 1));
+  return problems;
 }
-const base = join(src, 'lib/design/base.css');
-problems.push(...lintCss(readFileSync(base, 'utf8').replace(/\r\n/g, '\n'), base, 1));
 
-if (problems.length) {
-  console.error(`Spacing off the grid (allowed px: ${[...ALLOWED].join(', ')}; mark a deliberate exception /* grid-ok */):`);
-  for (const p of problems) console.error(`  ${p}`);
-  process.exit(1);
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const problems = lintAll();
+  if (problems.length) {
+    console.error(`Spacing off the grid (allowed px: ${[...ALLOWED].join(', ')}; mark a deliberate exception /* grid-ok */):`);
+    for (const p of problems) console.error(`  ${p}`);
+    process.exit(1);
+  }
+  console.log('spacing: every padding / margin / gap / inset px value is on the grid');
 }
-console.log('spacing: every padding / margin / gap / inset px value is on the grid');

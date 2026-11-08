@@ -5,6 +5,10 @@
    * by position, not hue), counts on hover.
    */
   import { classColor } from '$lib/design/tokens';
+  import { prefs } from '$lib/prefs.svelte';
+  // Cell labels are pure white or black, switched where the ramp's luminance crosses over (computed from the theme's
+  // ink and well colours): every label then keeps >= 4.5:1 over the whole ramp (worst 4.6:1 dark, 4.58:1 light).
+  const flip = $derived(prefs.resolvedTheme === 'light' ? 0.51 : 0.55);
 
   let {
     classes,
@@ -120,7 +124,7 @@
           onclick={() => (hovered = pinned = { r, c })}
           onkeydown={() => {}}
         >
-          {#if v >= (sparseLabels ? 0.1 : 0.005)}<span class:light={v > 0.4}>{(v * 100).toFixed(v >= 0.1 ? 0 : 1)}</span>{/if}
+          {#if v >= (sparseLabels ? 0.1 : 0.005)}<span class:hi={v > flip}>{(v * 100).toFixed(v >= 0.1 ? 0 : 1)}</span>{/if}
         </div>
       {/each}
     </div>
@@ -255,12 +259,18 @@
   .cell.hl {
     box-shadow: inset 0 0 0 1px var(--line-strong);
   }
-  .cell span {
-    color: var(--text-primary);
+  /* Low cells sit near the well, high cells near the ink; the label takes the far extreme (see `flip`). */
+  :global([data-theme='dark']) .cell span {
+    color: #ffffff;
   }
-  /* Past 40 % the cell is closer to ink than to the well: labels flip to the inverse text colour. */
-  .cell span.light {
-    color: var(--text-inverse);
+  :global([data-theme='dark']) .cell span.hi,
+  :global([data-theme='light']) .cell span {
+    color: #000000;
+  }
+  :global([data-theme='light']) .cell span.hi {
+    color: #ffffff;
+  }
+  .cell span.hi {
     font-weight: var(--weight-medium);
   }
   .readout {
