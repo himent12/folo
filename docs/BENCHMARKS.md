@@ -164,7 +164,7 @@ model size.
 | 6 | GPU end to end throughput, batch 16 | **615 img/s** fp16 / 536 img/s fp32 | best FOLO precision | 299 img/s f32 (behind) | 226 img/s (yolo26s 446 fp16: behind) |
 | 7 | CPU forward latency, batch 1, f32 (best thread count) | **22.8 ms** (8 threads; 25.1 ms at 20) | f32, best thread count | ~40 ms (fused, 8 threads, first cut; `cargo bench -p folo-vision --bench model`) | |
 | 8 | CPU end to end latency, batch 1 | **24.8 ms** (Ultralytics default, 8 threads) | f32, with NMS | ~42 ms forward + decode + NMS (`predict_raw`, no letterbox yet) | |
-| 9 | Training compute, batch 16 (step only, no data loader) | **202 img/s** fp32 (TF32) / 252 img/s AMP | f32 | **219 img/s** (73.0 ms; beats; 143 before the loss moved to the GPU) | 68 img/s before the device loss (yolo26s 105 fp32: behind; not re-measured) |
+| 9 | Training compute, batch 16 (step only, no data loader) | **202 img/s** fp32 (TF32) / 252 img/s AMP | f32 | **219 img/s** (73.0 ms; beats; 143 before the loss moved to the GPU) | **109 img/s** (146.6 ms; yolo26s 105 fp32: beats; was 68) |
 | 10 | Trainer sustained images/s (epoch-2 wall), batch 16, mosaic, 8 workers, best of 3 | **199 img/s** fp32 / 224 img/s AMP | f32 | | |
 | 11 | Training peak GPU memory, batch 16, f32 | **4353 MiB** allocated (5148 MiB reserved); 2435 MiB AMP | f32 | **3619 MiB** (train step; beats) | **6686 MiB** (yolo26s train step 8245: beats) |
 
@@ -214,7 +214,7 @@ does more work per second.
 | f32 | forward b1 median (p90, min) | forward b16 pipelined | e2e predict b1 median | e2e predict b16 | train step b16 | peak memory: infer b16 / train b16 |
 |---|---|---|---|---|---|---|
 | folo-n | **3.98 ms** (6.66, 3.10) | **1461 img/s** (10.95 ms) | 8.69 ms | 299 img/s (53.4 ms) | **219 img/s** (73.0 ms; train/gpu) | 423 MiB / **3474 MiB** |
-| folo-s | 6.67 ms (7.58, 5.05) | 634 img/s (25.2 ms) | 10.91 ms | 226 img/s (70.7 ms) | 68 img/s (234 ms) | 782 MiB / 6686 MiB |
+| folo-s | 6.67 ms (7.58, 5.05) | 634 img/s (25.2 ms) | 10.91 ms | 226 img/s (70.7 ms) | **109 img/s** (146.6 ms; train/gpu) | 782 MiB / 6541 MiB |
 
 Where the time goes (medians with each phase synchronised on its own, so the phases add up to more than the end-to-end
 row):
@@ -227,12 +227,14 @@ row):
   each phase synchronised: forward 17.2 ms, loss 0.9 ms (assigner, BCE, CIoU + DFL as kernels; the only readback is
   the 12-float `stats`), backward 48.4 ms, SGD 4.7 ms; 1 352 dispatches and 3 submissions per step, peak 3474 MiB. The
   same run with the previous host assigner (`detection_loss_host`, which downloads the raw head, 77 MB at batch 16):
-  loss 34.4 ms. Before the change the step was 112 ms (forward 18, loss 39, backward 49, SGD 5; folo-s 42, 62, 120 and
-  16 ms).
+  loss 34.4 ms. Before the change the step was 112 ms (forward 18, loss 39, backward 49, SGD 5). A second run on a quiet
+  GPU gave the same 72.95 ms (forward 19.4, loss 1.0, backward 49.6, SGD 5.3). folo-s: 146.6 ms (109 img/s; forward
+  37.8, loss 0.9, backward 105.4, SGD 8.7; peak 6541 MiB), against 234 ms (forward 42, loss 62, backward 120, SGD 16)
+  before.
 
 **Verdict.** folo-n beats the incumbent on batch-1 forward latency (3.98 vs 4.95 ms), on the training step (219 vs
 202 img/s in strict f32 against TF32 convolutions, since the loss runs on the GPU; it was 143) and on training memory
-(3.5 vs 4.4 GiB). It ties batch-16 forward throughput (1461 vs 1454 img/s) while doing 19% more FLOPs. It is behind
+(3.5 vs 4.4 GiB); folo-s also beats yolo26s on the training step (109 vs 105 img/s fp32). It ties batch-16 forward throughput (1461 vs 1454 img/s) while doing 19% more FLOPs. It is behind
 end to end (8.7 vs 6.9 ms at batch 1, 299 vs 536 img/s at batch 16). folo-s ties at batch 16 and is behind at batch
 1 (6.7 vs 4.9 ms).
 
