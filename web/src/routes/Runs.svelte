@@ -39,6 +39,9 @@
   let filter = $state<Filter>((router.route.query.get('status') as Filter | null) ?? 'all');
   let query = $state('');
   let selected = $state<string[]>([]);
+  /** Phones: checkboxes show in select mode (or once a run is selected), so rows keep their width otherwise. */
+  let picking = $state(false);
+  const choosing = $derived(picking || selected.length > 0);
 
   const count = (f: Filter) => (runs.data ?? []).filter((r) => groups[f].includes(r.status)).length;
   const shown = $derived(
@@ -106,7 +109,7 @@
       <div class="sk">{#each [0, 1, 2, 3, 4] as i (i)}<Skeleton h="22px" />{/each}</div>
     {:else if runs.data.length === 0}
       <EmptyState icon={Activity} title="No runs yet" description="Start one to watch its loss, mAP and samples stream in live.">
-        {#snippet actions()}<Button variant="primary" icon={Plus} href={href('/runs/new')}>New run</Button>{/snippet}
+        {#snippet actions()}<Button icon={Plus} href={href('/runs/new')}>New run</Button>{/snippet}
       </EmptyState>
     {:else if shown.length === 0}
       <EmptyState icon={Search} title="No runs match" description="Try another status filter or search term.">
@@ -124,7 +127,7 @@
               <th class="hide-md">Model</th>
               <th>Progress</th>
               <th class="r">Best mAP50-95</th>
-              <th class="hide-lg">mAP per epoch</th>
+              <th class="hide-lg">mAP trend</th>
               <th class="r hide-xl">Duration</th>
               <th class="r hide-sm">Created</th>
             </tr>
@@ -169,8 +172,13 @@
         </table>
       </div>
       <!-- Phones: stacked rows with the essentials (selection, name, status, score, progress). -->
-      <p class="rows-head" aria-hidden="true"><span>Run</span><span>Best mAP50-95</span></p>
-      <ul class="rows">
+      <div class="rows-head">
+        <button type="button" class="pick" aria-pressed={choosing} onclick={() => (choosing ? ((picking = false), (selected = [])) : (picking = true))}
+          >{choosing ? 'Cancel' : 'Select to compare'}</button
+        >
+        <span aria-hidden="true">Best mAP50-95</span>
+      </div>
+      <ul class="rows" class:choosing>
         {#each shown as r (r.id)}
           {@const on = selected.includes(r.id)}
           <li class:on>
@@ -224,8 +232,9 @@
     height: 40px;
   }
   /* Selected for comparison: a 2 px accent bar on the row's leading edge. */
+  /* The selection rule: neutral fill and a 2 px accent bar on the left. */
   .runs tr.on {
-    background: var(--bg-selected);
+    background: var(--bg-active);
   }
   .runs tr.on td:first-child {
     box-shadow: inset 2px 0 0 var(--accent-line);
@@ -327,9 +336,10 @@
     .rows-head {
       display: flex;
       justify-content: space-between;
-      height: 32px;
+      gap: var(--space-3);
+      height: 44px;
       align-items: center;
-      padding: 0 var(--space-4) 0 44px;
+      padding: 0 var(--space-4);
       font-size: var(--type-sm-size);
       color: var(--text-tertiary);
       border-bottom: 1px solid var(--line-subtle);
@@ -343,11 +353,30 @@
       padding-right: var(--space-4);
       border-bottom: 1px solid var(--line-subtle);
     }
+    /* Not choosing: no checkbox column, the row starts at the gutter. */
+    .rows:not(.choosing) .r-check {
+      display: none;
+    }
+    .rows:not(.choosing) li {
+      padding-left: var(--space-4);
+    }
+    .pick {
+      margin-right: auto;
+      height: 44px;
+      color: var(--text-secondary);
+      font-size: var(--type-sm-size);
+      text-decoration: underline;
+      text-decoration-color: var(--line-strong);
+      text-underline-offset: 3px;
+    }
+    .pick[aria-pressed='true'] {
+      color: var(--text-primary);
+    }
     .rows li:last-child {
       border-bottom: 0;
     }
     .rows li.on {
-      background: var(--bg-selected);
+      background: var(--bg-active);
       box-shadow: inset 2px 0 0 var(--accent-line);
     }
     .r-check {

@@ -493,9 +493,9 @@
 
 {#snippet secondarySliders(inline: boolean)}
   <div title="Non-max suppression: a lower-scoring box of the same class is dropped when it overlaps a kept one by more than this.">
-    <Slider {inline} label={inline ? 'IoU' : 'Overlap threshold (IoU)'} bind:value={iou} min={0.05} max={0.95} step={0.05} hint="Merge same-class boxes that overlap more." />
+    <Slider {inline} label={inline ? 'Overlap (IoU)' : 'Overlap threshold (IoU)'} bind:value={iou} min={0.05} max={0.95} step={0.05} hint="Merge same-class boxes that overlap more." />
   </div>
-  <Slider {inline} label={inline ? 'Max boxes' : 'Max detections'} bind:value={maxDet} min={1} max={300} step={1} format={(v) => String(Math.round(v))} hint="Keep at most this many boxes." />
+  <Slider {inline} label="Max detections" bind:value={maxDet} min={1} max={300} step={1} format={(v) => String(Math.round(v))} hint="Keep at most this many boxes." />
 {/snippet}
 
 {#snippet resetButton()}
@@ -576,7 +576,7 @@
   {:else if models.data && models.data.length === 0}
     <Panel>
       <EmptyState icon={Box} title="No models to run" description="Train a model first; its best weights show up here when the run finishes.">
-        {#snippet actions()}<Button variant="primary" icon={Plus} href={href('/runs/new')}>New run</Button>{/snippet}
+        {#snippet actions()}<Button icon={Plus} href={href('/runs/new')}>New run</Button>{/snippet}
       </EmptyState>
     </Panel>
   {:else}
@@ -1128,9 +1128,10 @@
   tbody tr.hot {
     background: var(--bg-hover);
   }
+  /* The selection rule: neutral fill and a 2 px accent bar, the same accent as the selected box in the image. */
   tbody tr.sel {
     background: var(--bg-active);
-    box-shadow: inset 2px 0 0 var(--text-primary);
+    box-shadow: inset 2px 0 0 var(--accent-line);
   }
   tbody tr:focus-visible {
     outline: 2px solid var(--focus);

@@ -31,10 +31,13 @@
     <p class="msg">{message}</p>
     {#if hint}<p class="hint">{hint}</p>{/if}
     {#if code}<details class="code"><summary>Technical details</summary>{code}</details>{/if}
-  </div>
-  <div class="acts">
-    {#if retry}<Button size="sm" icon={RotateCw} onclick={retry}>Retry</Button>{/if}
-    {#if offline}<Button size="sm" variant="ghost" icon={Settings} href={href('/settings')}>Connection settings</Button>{/if}
+    <!-- The ways out sit under the cause they answer, not at the far edge of the panel. -->
+    {#if retry || offline}
+      <div class="acts">
+        {#if retry}<Button size="sm" icon={RotateCw} onclick={retry}>Retry</Button>{/if}
+        {#if offline}<Button size="sm" variant="ghost" icon={Settings} href={href('/settings')}>Connection settings</Button>{/if}
+      </div>
+    {/if}
   </div>
 </div>
 
@@ -44,7 +47,7 @@
     display: flex;
     align-items: flex-start;
     gap: var(--space-3);
-    padding: var(--space-6) var(--space-4);
+    padding: var(--space-4);
   }
   .compact {
     padding: var(--space-3) 0;
@@ -104,8 +107,8 @@
   .acts {
     display: flex;
     flex-wrap: wrap;
-    gap: var(--space-1);
-    justify-content: flex-end;
+    gap: var(--space-2);
+    margin-top: var(--space-2);
   }
   .title {
     color: var(--danger-text);

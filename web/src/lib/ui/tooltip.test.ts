@@ -66,4 +66,25 @@ describe('tooltip', () => {
     visible.mockRestore();
     wrap.remove();
   });
+
+  it('stays while the pointer moves from the trigger onto the tooltip, and hides after it leaves both', () => {
+    vi.useFakeTimers();
+    const b = document.createElement('button');
+    document.body.appendChild(b);
+    const t = tooltip(b, 'Stop the run');
+    b.dispatchEvent(new PointerEvent('pointerenter'));
+    vi.advanceTimersByTime(500);
+    const tip = document.getElementById('folo-tooltip')!;
+    expect(tip.hasAttribute('data-show')).toBe(true);
+    b.dispatchEvent(new PointerEvent('pointerleave'));
+    vi.advanceTimersByTime(50);
+    tip.dispatchEvent(new PointerEvent('pointerenter'));
+    vi.advanceTimersByTime(500);
+    expect(tip.hasAttribute('data-show')).toBe(true);
+    tip.dispatchEvent(new PointerEvent('pointerleave'));
+    vi.advanceTimersByTime(200);
+    expect(tip.hasAttribute('data-show')).toBe(false);
+    t.destroy();
+    b.remove();
+  });
 });

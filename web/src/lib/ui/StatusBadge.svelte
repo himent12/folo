@@ -58,9 +58,11 @@
     height: 18px;
     padding: 0 6px 0 4px;
   }
+  /* Every mark sits in the same 8 px slot, so names after it line up whatever the status. */
   .dot {
     width: 6px;
     height: 6px;
+    margin: 0 1px;
     border-radius: 50%;
     background: currentColor;
     flex-shrink: 0;
@@ -86,7 +88,7 @@
   .running .dot {
     width: 4px;
     height: 4px;
-    margin: 0 1px;
+    margin: 0 2px;
     background: var(--c);
     outline: 1px solid var(--c);
     outline-offset: 1px;

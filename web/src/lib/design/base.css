@@ -204,6 +204,8 @@ table {
 }
 .folo-tooltip[data-show] {
   opacity: 1;
+  /* Hoverable while shown (WCAG 1.4.13): the pointer can move onto it to read it. */
+  pointer-events: auto;
 }
 .folo-tooltip-keys {
   display: inline-flex;
