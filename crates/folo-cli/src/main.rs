@@ -261,7 +261,8 @@ fn doctor(args: DoctorArgs, out: Out) -> Result<(), CliError> {
         _ => "dir",
     };
     // Whether the Studio `folo serve` would serve can run models in the browser (its Playground's WebGPU / CPU).
-    let served_wasm = if web_source == "embedded" { embedded_wasm } else { web_wasm };
+    // (`folo serve` does not serve a folder without index.html at all.)
+    let served_wasm = if web_source == "embedded" { embedded_wasm } else { web_ready && web_wasm };
     let options = folo_gpu::GpuOptions::from_env();
     let adapters = folo_gpu::GpuContext::enumerate(&options);
     // Creating the device proves the default adapter works and shows which one FOLO picks.

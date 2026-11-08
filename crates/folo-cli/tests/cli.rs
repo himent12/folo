@@ -49,7 +49,6 @@ fn doctor_json() {
 fn doctor_reports_folo_wasm_in_the_web_dir() {
     let dir = std::env::temp_dir().join(format!("folo-doctor-wasm-{}", std::process::id()));
     std::fs::create_dir_all(dir.join("folo-wasm")).unwrap();
-    std::fs::write(dir.join("index.html"), "<!doctype html>").unwrap();
     let report = || {
         let (code, stdout, stderr) = folo(&["doctor", "--json", "--web-dir", dir.to_str().unwrap()]);
         assert_eq!(code, 0, "{stderr}");
@@ -64,6 +63,11 @@ fn doctor_reports_folo_wasm_in_the_web_dir() {
 
     std::fs::write(dir.join("folo-wasm/folo_wasm.js"), "").unwrap();
     std::fs::write(dir.join("folo-wasm/folo_wasm_bg.wasm"), "").unwrap();
+    let (v, _) = report();
+    assert_eq!(v["web_dist"]["folo_wasm"], true);
+    assert_eq!(v["web_folo_wasm"], false, "folo serve does not serve a folder without index.html");
+
+    std::fs::write(dir.join("index.html"), "<!doctype html>").unwrap();
     let (v, stderr) = report();
     assert_eq!(v["web_dist"]["folo_wasm"], true);
     assert_eq!(v["web_folo_wasm"], true);

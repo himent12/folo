@@ -123,7 +123,7 @@ jobs:
         run: |
           set -euo pipefail
           wasm-opt --version
-          sh scripts/build-wasm.sh
+          sh scripts/build-wasm.sh --locked
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -196,7 +196,7 @@ jobs:
           type=$(curl -fsS -o folo_wasm_bg.wasm -w '%{content_type}' "$url/folo-wasm/folo_wasm_bg.wasm")
           test "$type" = application/wasm || { echo "folo_wasm_bg.wasm served as $type"; exit 1; }
           test "$(head -c 4 folo_wasm_bg.wasm | od -An -tx1 | tr -d ' \n')" = 0061736d || { echo "not a wasm module"; exit 1; }
-          curl -fsS "$url/folo-wasm/folo_wasm.js" | grep -q FoloDetector
+          curl -fsS -o folo_wasm.js "$url/folo-wasm/folo_wasm.js" && grep -q FoloDetector folo_wasm.js
       - name: package
         run: |
           set -euo pipefail

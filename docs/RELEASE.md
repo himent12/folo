@@ -92,7 +92,7 @@ at the newest published release. Every archive has a `<asset>.sha256` (`<hex>  <
 
 ## Building a release binary locally
 ```sh
-sh scripts/build-wasm.sh                 # web/public/folo-wasm (or: powershell -File scripts\build-wasm.ps1)
+sh scripts/build-wasm.sh --locked        # web/public/folo-wasm (or: powershell -File scripts\build-wasm.ps1 -Locked)
 (cd web && npm ci && npm run build)      # web/dist, with folo-wasm/ copied in
 cargo build --release --locked -p folo-cli --features embed-web
 ```
