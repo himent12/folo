@@ -14,7 +14,7 @@
   import { hub } from '$lib/api/index.svelte';
   import type { Box } from '$lib/api/types';
   import DatasetImage from '$lib/detect/DatasetImage.svelte';
-  import { classColor } from '$lib/design/tokens';
+  import { classInk } from '$lib/design/classInk.svelte';
   import { num } from '$lib/format';
   import Badge from '$lib/ui/Badge.svelte';
   import Button from '$lib/ui/Button.svelte';
@@ -338,7 +338,7 @@
                   onclick={() => zoomToBox(b)}
                   aria-label="{name(b.class)}, {Math.round(b.x2 - b.x1)} by {Math.round(b.y2 - b.y1)} pixels. Zoom to box"
                 >
-                  <span class="sw" style:background={classColor(b.class)}></span>
+                  <span class="sw" style:background={classInk(b.class)}></span>
                   <span class="cn truncate">{name(b.class)}</span>
                   <span class="sz mono">{Math.round(b.x2 - b.x1)}×{Math.round(b.y2 - b.y1)}</span>
                 </button>
@@ -355,7 +355,7 @@
         <ul class="legend">
           {#each legend as l (l.i)}
             <li class:absent={l.n === 0}>
-              <span class="sw" style:background={classColor(l.i)}></span>
+              <span class="sw" style:background={classInk(l.i)}></span>
               <span class="truncate">{l.name}</span>
               {#if l.n}<span class="num faint">{l.n}</span>{/if}
             </li>
@@ -659,6 +659,10 @@
     .head-zoom,
     .hint .fine {
       display: none;
+    }
+    /* Narrow screens show the touch hint, so the capsule is never empty. */
+    .hint .touch {
+      display: inline-flex;
     }
     /* The image sets the stage height (no empty bands); the label list takes the rest. */
     .body {

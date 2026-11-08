@@ -168,7 +168,10 @@
             <a class="c-main" href={href(`/runs/${r.id}`)}>
               <span class="c-top">
                 <span class="name">{r.name}</span>
-                <span class="c-best num">{metric(r.best?.map50_95)}</span>
+                <span class="c-best num">
+                  {metric(r.best?.map50_95)}
+                  <span class="c-cap">{r.best ? `best mAP50-95 · ep ${r.best.epoch + 1}` : 'best mAP50-95'}</span>
+                </span>
               </span>
               <span class="c-mid">
                 <StatusBadge status={r.status} size="sm" />
@@ -277,7 +280,7 @@
     .hide-lg {
       display: none;
     }
-    .sub .mono:last-child {
+    .runs .sub .mono:last-child {
       display: none;
     }
   }
@@ -304,9 +307,9 @@
     .c-check {
       display: grid;
       place-items: center;
-      width: 32px;
-      height: 32px;
-      margin: -6px 0 0 -8px;
+      width: 44px;
+      height: 44px;
+      margin: -12px 0 0 -14px;
     }
     .c-main {
       flex: 1;
@@ -326,7 +329,15 @@
       justify-content: flex-start;
     }
     .c-best {
+      display: grid;
+      justify-items: end;
       font-weight: var(--weight-medium);
+    }
+    .c-cap {
+      font-size: var(--type-micro-size);
+      line-height: var(--type-micro-line);
+      font-weight: var(--weight-regular);
+      color: var(--text-tertiary);
     }
     .c-prog {
       display: grid;

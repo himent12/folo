@@ -6,6 +6,7 @@
   import { lr as fmtLr, num } from '$lib/format';
   import Panel from '$lib/ui/Panel.svelte';
   import Segmented from '$lib/ui/Segmented.svelte';
+  import { runHorizon } from '$lib/charts/horizon';
   import Skeleton from '$lib/ui/Skeleton.svelte';
 
   let {
@@ -30,7 +31,16 @@
   let smoothing = $state<'0' | '0.6' | '0.9' | '0.97'>('0.9');
   let scale = $state<'lin' | 'log'>('lin');
 
-  const xDomain = $derived<[number, number]>([0, run.epochs]);
+  let horizon = $state<'observed' | 'full'>('observed');
+  const observed = $derived.by(() => {
+    void version;
+    const spe = Math.max(1, run.steps_per_epoch);
+    const lastStep = steps[steps.length - 1];
+    const lastEpoch = epochs[epochs.length - 1];
+    return Math.max(lastStep ? lastStep.step / spe : 0, lastEpoch ? lastEpoch.epoch + 1 : 0);
+  });
+  const live = $derived(['queued', 'running', 'stopping'].includes(run.status));
+  const xDomain = $derived(runHorizon(observed, run.epochs, live, horizon));
   const epochTitle = (x: number) => `Epoch ${x.toFixed(x % 1 === 0 ? 0 : 1)}`;
 
   const loss = $derived.by((): Series[] => {
@@ -92,6 +102,17 @@
 
 {#snippet chartSk()}<Skeleton h="180px" r="var(--radius-md)" />{/snippet}
 
+<div class="bar">
+  <Segmented
+    size="sm"
+    label="Chart range"
+    bind:value={horizon}
+    options={[
+      { value: 'observed', label: live ? 'So far' : 'Observed' },
+      { value: 'full', label: `Full run · ${run.epochs} epochs` },
+    ]}
+  />
+</div>
 <div class="grid">
   <Panel title="Loss" meta={smoothing === '0' ? 'raw per step' : `smoothed · EMA ${smoothing}`} class="span2" id="chart-loss">
     {#snippet actions()}
@@ -195,6 +216,11 @@
 </div>
 
 <style>
+  .bar {
+    display: flex;
+    justify-content: flex-end;
+    margin-bottom: calc(-1 * var(--space-2));
+  }
   .grid {
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));

@@ -181,7 +181,8 @@
       background: var(--bg-hover);
       color: var(--text-primary);
     }
-    .crumbs li:not(.last) {
+    /* The page's own title sits right below; the bar keeps only navigation and actions. */
+    .crumbs li {
       display: none;
     }
     .new-run {

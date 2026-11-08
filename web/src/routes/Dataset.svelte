@@ -9,7 +9,7 @@
   import { ApiError, hub } from '$lib/api/index.svelte';
   import { Resource } from '$lib/api/resource.svelte';
   import type { Split } from '$lib/api/types';
-  import { classColor } from '$lib/design/tokens';
+  import { classInk } from '$lib/design/classInk.svelte';
   import { ago, compact, num } from '$lib/format';
   import { href, router } from '$lib/router.svelte';
   import Page from '$lib/shell/Page.svelte';
@@ -288,7 +288,7 @@
                 aria-pressed={cls === i}
                 onclick={() => setQuery({ class: cls === i ? null : String(i), image: null })}
               >
-                <span class="sw" style:background={classColor(i)}></span>{c}
+                <span class="sw" style:background={classInk(i)}></span>{c}
                 {#if d.stats}<span class="cmeta num">{compact(d.stats.class_counts[i])}</span>{/if}
               </button>
             {/each}

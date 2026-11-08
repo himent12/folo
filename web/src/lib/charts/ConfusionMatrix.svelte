@@ -3,7 +3,7 @@
    * Confusion matrix: rows are true classes, columns predicted, plus a "background" row/column for misses and false
    * positives. Cells are row-normalised and shaded in one hue (sequential), counts on hover.
    */
-  import { classColor } from '$lib/design/tokens';
+  import { classInk } from '$lib/design/classInk.svelte';
 
   let {
     classes,
@@ -53,7 +53,7 @@
     <div class="corner" role="columnheader"><span>true ↓ / pred →</span></div>
     {#each names as name, c (c)}
       <div class="colhead" role="columnheader" title={name}>
-        <span class="dot" style:background={c < classes.length ? classColor(c) : 'var(--text-tertiary)'}></span>
+        <span class="dot" style:background={c < classes.length ? classInk(c) : 'var(--text-tertiary)'}></span>
         <span class="lbl">{name}</span>
       </div>
     {/each}
@@ -61,7 +61,7 @@
   {#each names as rname, r (r)}
     <div class="row" role="row">
       <div class="rowhead" role="rowheader" title={rname}>
-        <span class="dot" style:background={r < classes.length ? classColor(r) : 'var(--text-tertiary)'}></span>
+        <span class="dot" style:background={r < classes.length ? classInk(r) : 'var(--text-tertiary)'}></span>
         <span class="lbl">{rname}</span>
       </div>
       {#each names as cname, c (c)}

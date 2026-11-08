@@ -4,6 +4,7 @@
   import type { Dataset, Run } from '$lib/api/types';
   import { smooth } from '$lib/charts/downsample';
   import LineChart from '$lib/charts/LineChart.svelte';
+  import { runHorizon } from '$lib/charts/horizon';
   import { duration, lr, metric, num } from '$lib/format';
   import { href } from '$lib/router.svelte';
   import Button from '$lib/ui/Button.svelte';
@@ -37,6 +38,10 @@
     };
   });
 
+  const horizon = $derived.by(() => {
+    void live.version;
+    return runHorizon(Math.max(live.epochs.length, run.step / Math.max(1, run.steps_per_epoch)), run.epochs, true, 'observed');
+  });
   const progress = $derived(run.step / Math.max(1, run.steps_per_epoch * run.epochs));
 </script>
 
@@ -80,7 +85,7 @@
         <LineChart
           series={charts.map}
           height={150}
-          xDomain={[0, run.epochs]}
+          xDomain={horizon}
           yFormat={(v) => v.toFixed(2)}
           valueFormat={(v) => v.toFixed(3)}
           xTitle={(x) => `Epoch ${Math.round(x)}`}
@@ -99,7 +104,7 @@
         <LineChart
           series={charts.loss}
           height={150}
-          xDomain={[0, run.epochs]}
+          xDomain={horizon}
           yFormat={(v) => v.toFixed(1)}
           valueFormat={(v) => v.toFixed(3)}
           xTitle={(x) => `Epoch ${x.toFixed(1)}`}
@@ -225,6 +230,19 @@
     }
   }
   @media (max-width: 767px) {
+    /* Phones: progress, then the mAP chart, then the stat grid, so evidence comes before detail. */
+    .stats {
+      display: contents;
+    }
+    .epoch {
+      order: 1;
+    }
+    .chart {
+      order: 2;
+    }
+    .grid {
+      order: 3;
+    }
     header {
       padding: var(--space-4) var(--space-3) var(--space-3) var(--space-4);
     }

@@ -232,7 +232,10 @@
                   <td class="r">{compact(m.params)}</td>
                   <td class="r hide-md">{num(m.flops_g, 1)}</td>
                   <td class="r">{bytes(m.bytes, prefs.units)}</td>
-                  <td class="r"><MetricBar value={m.metrics?.map50_95} best={isBest(m)} /></td>
+                  <td class="r">
+                    {#if isBest(m)}<span class="best-tag" title="Best mAP50-95 on {evalSet(m).label}">best</span>{/if}
+                    <MetricBar value={m.metrics?.map50_95} best={isBest(m)} />
+                  </td>
                   <td class="r hide-md"><MetricBar value={m.metrics?.map50} tone="quiet" /></td>
                   <td class="hide-md">
                     {#if m.run_id}
@@ -480,5 +483,15 @@
       padding: var(--space-6);
       text-align: center;
     }
+  }
+  .best-tag {
+    margin-right: var(--space-2);
+    padding: 1px 6px;
+    border-radius: var(--radius-xs);
+    background: var(--accent-muted);
+    color: var(--accent-text);
+    font-size: var(--type-micro-size);
+    font-weight: var(--weight-medium);
+    vertical-align: middle;
   }
 </style>

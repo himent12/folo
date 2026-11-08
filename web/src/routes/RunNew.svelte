@@ -254,6 +254,7 @@
               </label>
             {/each}
           </div>
+          <p class="ref">Latency is a reference figure: RTX 4080-class GPU, 640 px input, fp32, one image.</p>
           <div class="row2">
             <Field label="Start from" for="weights" hint="Fine-tuning from a trained model converges much faster.">
               <Select
@@ -520,6 +521,11 @@
   }
   .arch.on .bar i {
     background: var(--accent-line);
+  }
+  .ref {
+    margin-top: var(--space-2);
+    font-size: var(--type-xs-size);
+    color: var(--text-tertiary);
   }
   .row2 {
     margin-top: var(--space-4);

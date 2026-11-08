@@ -8,7 +8,7 @@
   import { Resource } from '$lib/api/resource.svelte';
   import type { Dataset, Model, Run } from '$lib/api/types';
   import ConfusionMatrix from '$lib/charts/ConfusionMatrix.svelte';
-  import { classColor } from '$lib/design/tokens';
+  import { classInk } from '$lib/design/classInk.svelte';
   import { ago, bytes, compact, date, metric, num } from '$lib/format';
   import { prefs } from '$lib/prefs.svelte';
   import { href, router } from '$lib/router.svelte';
@@ -159,7 +159,7 @@
                   <tr>
                     <td>
                       <span class="cls">
-                        <span class="sw" style:background={classColor(c.class)} aria-hidden="true"></span>
+                        <span class="sw" style:background={classInk(c.class)} aria-hidden="true"></span>
                         <span class="truncate">{m.classes[c.class]}</span>
                       </span>
                     </td>
@@ -202,7 +202,7 @@
           <dt>Classes</dt>
           <dd class="classes">
             {#each m.classes.slice(0, 10) as c, i (i)}
-              <span class="chip"><span class="sw" style:background={classColor(i)} aria-hidden="true"></span>{c}</span>
+              <span class="chip"><span class="sw" style:background={classInk(i)} aria-hidden="true"></span>{c}</span>
             {/each}
             {#if m.classes.length > 10}<span class="faint">+{m.classes.length - 10} more</span>{/if}
           </dd>

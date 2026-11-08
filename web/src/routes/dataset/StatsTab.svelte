@@ -8,7 +8,7 @@
   import TriangleAlert from '@lucide/svelte/icons/triangle-alert';
   import type { Dataset, DatasetStats } from '$lib/api/types';
   import Histogram from '$lib/charts/Histogram.svelte';
-  import { classColor } from '$lib/design/tokens';
+  import { classInk } from '$lib/design/classInk.svelte';
   import { num } from '$lib/format';
   import Panel from '$lib/ui/Panel.svelte';
   import Stat from '$lib/ui/Stat.svelte';
@@ -72,9 +72,9 @@
         {#each balance as b (b.cls)}
           <li>
             <button type="button" onclick={() => onclass(b.cls)} aria-label="{b.name}: {num(b.count)} boxes, {share(b.count).toFixed(1)}%. Show images">
-              <span class="sw" style:background={classColor(b.cls)}></span>
+              <span class="sw" style:background={classInk(b.cls)}></span>
               <span class="cname truncate">{b.name}</span>
-              <span class="track"><span class="fill" style:width="{(b.count / maxCount) * 100}%" style:background={classColor(b.cls)}></span></span>
+              <span class="track"><span class="fill" style:width="{(b.count / maxCount) * 100}%" style:background={classInk(b.cls)}></span></span>
               <span class="count num">{num(b.count)}</span>
               <span class="pct num">{share(b.count).toFixed(1)}<small>%</small></span>
               <span class="go" aria-hidden="true"><ArrowRight size={12} /></span>

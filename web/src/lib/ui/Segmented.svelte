@@ -151,12 +151,13 @@
   @media (pointer: coarse) {
     button,
     .sm button {
-      height: 36px;
+      height: 40px;
+      min-width: 44px;
       padding: 0 12px;
     }
     button.icon-only,
     .sm button.icon-only {
-      width: 36px;
+      width: 44px;
     }
   }
 </style>

@@ -16,7 +16,7 @@
    * Ground truth, when given, is drawn dashed underneath the predictions.
    */
   import { classColor } from '$lib/design/tokens';
-  import { placeChips } from './chips';
+  import { CHIP_H, placeChips } from './chips';
 
   interface Props {
     src: string | null;
@@ -156,6 +156,15 @@
           >
             {#if labels && !compact}
               {@const c = chips[i]}
+              {#if c && (c.dy < -CHIP_H - 9 || (c.inside && c.dy > 8))}
+                <!-- The chip had to move away from its box: a thin leader keeps ownership readable. -->
+                <span
+                  class="leader"
+                  style:left="{Math.max(0, c.dx + 6) - 2}px"
+                  style:top="{(c.dy < 0 ? c.dy + CHIP_H : 0) - 2}px"
+                  style:height="{c.dy < 0 ? -c.dy - CHIP_H : c.dy}px"
+                ></span>
+              {/if}
               <span class="chip" class:inside={c?.inside} style:left="{(c?.dx ?? 0) - 2}px" style:top="{(c?.dy ?? -17) - 2}px">
                 {name(b.class)}{#if scores && b.score !== undefined}<span class="score">{b.score.toFixed(2)}</span>{/if}
               </span>
@@ -250,6 +259,13 @@
     font-weight: var(--weight-medium);
     white-space: nowrap;
     box-shadow: 0 0 0 1px var(--class-halo);
+  }
+  .leader {
+    position: absolute;
+    width: 1px;
+    background: var(--c);
+    box-shadow: 0 0 0 1px var(--class-halo);
+    pointer-events: none;
   }
   .chip.inside {
     border-radius: 0 0 3px 0;

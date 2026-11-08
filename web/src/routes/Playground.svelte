@@ -12,7 +12,7 @@
   import { hub } from '$lib/api/index.svelte';
   import { Resource } from '$lib/api/resource.svelte';
   import type { Dataset, DatasetImage as Img, Model, PredictInput, Prediction } from '$lib/api/types';
-  import { classColor } from '$lib/design/tokens';
+  import { classInk } from '$lib/design/classInk.svelte';
   import DetectionView from '$lib/detect/DetectionView.svelte';
   import { filterDetections } from '$lib/detect/nms';
   import { metric, num } from '$lib/format';
@@ -534,13 +534,13 @@
                           <td class="r idx faint">{i + 1}</td>
                           <td>
                             <span class="cls">
-                              <span class="sw" style:background={classColor(b.class)} aria-hidden="true"></span>
+                              <span class="sw" style:background={classInk(b.class)} aria-hidden="true"></span>
                               <span class="truncate">{b.name}</span>
                             </span>
                           </td>
                           <td>
                             <span class="score">
-                              <span class="s-track" aria-hidden="true"><span style:transform="scaleX({b.score})" style:background={classColor(b.class)}></span></span>
+                              <span class="s-track" aria-hidden="true"><span style:transform="scaleX({b.score})" style:background={classInk(b.class)}></span></span>
                               <span class="mono">{b.score.toFixed(3)}</span>
                             </span>
                           </td>
@@ -565,7 +565,7 @@
             {/snippet}
             <div class="sliders">
               <div class="conf-full" class:moved={!!source}><Slider label="Confidence" bind:value={conf} min={0.01} max={0.95} step={0.01} hint="Hide boxes scored below this." /></div>
-              <Slider label="IoU (NMS)" bind:value={iou} min={0.05} max={0.95} step={0.05} hint="Merge same-class boxes overlapping more than this." />
+              <Slider label="Overlap threshold (IoU)" bind:value={iou} min={0.05} max={0.95} step={0.05} hint="Non-max suppression: drop a lower-scoring box of the same class when it overlaps a kept one by more than this." />
               <Slider label="Max detections" bind:value={maxDet} min={1} max={300} step={1} format={(v) => String(Math.round(v))} />
             </div>
           </Panel>
@@ -586,9 +586,9 @@
                   {@const off = hidden.has(c)}
                   <li>
                     <button type="button" class:off aria-pressed={!off} onclick={() => toggleClass(c)} aria-label="{off ? 'Show' : 'Hide'} {classes[c] ?? `class ${c}`}">
-                      <span class="sw" style:background={classColor(c)} aria-hidden="true"></span>
+                      <span class="sw" style:background={classInk(c)} aria-hidden="true"></span>
                       <span class="c-name truncate">{classes[c] ?? `class ${c}`}</span>
-                      <span class="c-bar" aria-hidden="true"><span style:transform="scaleX({n / maxCount})" style:background={classColor(c)}></span></span>
+                      <span class="c-bar" aria-hidden="true"><span style:transform="scaleX({n / maxCount})" style:background={classInk(c)}></span></span>
                       <span class="c-n num">{n}</span>
                     </button>
                   </li>

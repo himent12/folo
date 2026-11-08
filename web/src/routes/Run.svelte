@@ -567,6 +567,15 @@
       align-items: stretch;
       gap: var(--space-3);
     }
+    /* Success is a one-line summary with its action; the details are in the tiles below. */
+    .banner.success {
+      flex-direction: row;
+      align-items: center;
+      padding: var(--space-2) var(--space-2) var(--space-2) var(--space-3);
+    }
+    .banner.success .b-msg {
+      display: none;
+    }
     .banner > :global(svg) {
       display: none;
     }
