@@ -11,6 +11,10 @@ authors.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Compile the built FOLO Studio into the binary so `folo serve` works without web/dist (see folo-server's build.rs).
+embed-web = ["folo-server/embed-web"]
+
 [dependencies]
 folo-server.workspace = true
 serde.workspace = true

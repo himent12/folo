@@ -8,11 +8,28 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::{CommandFactory, Parser};
-use folo_server::{Cors, MockStore, Options, RealStore, Server, Store};
+use folo_server::{Cors, MockStore, Options, RealStore, Server, Store, WebSource};
 use serde_json::json;
 
 use cli::{Cli, Command, DatasetCommand, DoctorArgs, ServeArgs};
 use output::{CliError, ExitCode, Out};
+
+/// `folo --version`: the workspace version, the commit and the build date (see build.rs).
+pub const VERSION: &str =
+    concat!(env!("CARGO_PKG_VERSION"), " (", env!("FOLO_GIT_SHA"), " ", env!("FOLO_BUILD_DATE"), ")");
+
+/// The web app folder used when `--web-dir` is not given and nothing is embedded.
+const DEFAULT_WEB_DIR: &str = "web/dist";
+
+/// What `folo serve` serves outside `/api`: an explicit `--web-dir`, else the embedded Studio (`embed-web`
+/// builds), else `web/dist`.
+fn resolve_web(web_dir: Option<PathBuf>) -> WebSource {
+    match web_dir {
+        Some(dir) => WebSource::Dir(dir),
+        None if folo_server::web::embedded().is_some() => WebSource::Embedded,
+        None => WebSource::Dir(PathBuf::from(DEFAULT_WEB_DIR)),
+    }
+}
 
 fn main() -> std::process::ExitCode {
     let json = std::env::args_os().skip(1).any(|a| a == "--json");
@@ -120,23 +137,26 @@ fn serve(args: ServeArgs, out: Out) -> Result<(), CliError> {
             .map_err(|e| CliError::new(ExitCode::Runtime, "bind_failed", e.to_string()))?;
         let store: Arc<dyn Store> =
             if args.mock { Arc::new(MockStore::new()) } else { Arc::new(RealStore::open(data_dir.clone())) };
-        let web_ready = folo_server::web_dir_ready(&args.web_dir);
+        let web = resolve_web(args.web_dir.clone());
+        let (web_dir, web_ready) = match &web {
+            WebSource::Dir(dir) => (Some(dir.clone()), folo_server::web_dir_ready(dir)),
+            _ => (None, true),
+        };
         let cors = if args.cors_any { Cors::Any } else { Cors::Loopback };
-        let server = Server::new(store, Options { web_dir: Some(args.web_dir.clone()), cors });
+        let server = Server::new(store, Options { web: web.clone(), cors });
         let url = format!("http://{addr}");
         out.human(format!(
-            "FOLO {} serving {} on {url}",
-            env!("CARGO_PKG_VERSION"),
+            "FOLO {VERSION} serving {} on {url}",
             if args.mock { "mock data" } else { "the real store" }
         ));
         out.human(format!("  API:    {url}/api/health"));
-        if web_ready {
-            out.human(format!("  Studio: {url}/  (from {})", args.web_dir.display()));
-        } else {
-            out.human(format!(
+        match &web_dir {
+            None => out.human(format!("  Studio: {url}/  (embedded)")),
+            Some(dir) if web_ready => out.human(format!("  Studio: {url}/  (from {})", dir.display())),
+            Some(dir) => out.human(format!(
                 "  Studio: not built ({} has no index.html); build web/ or use the Vite dev server on :5173",
-                args.web_dir.display()
-            ));
+                dir.display()
+            )),
         }
         if !args.mock {
             out.human(format!("  Data:   {}", data_dir.display()));
@@ -147,7 +167,8 @@ fn serve(args: ServeArgs, out: Out) -> Result<(), CliError> {
             "url": url,
             "api": format!("{url}/api"),
             "mock": args.mock,
-            "web_dir": args.web_dir,
+            "web_source": if web_dir.is_some() { "dir" } else { "embedded" },
+            "web_dir": web_dir,
             "web_ready": web_ready,
             "data_dir": if args.mock { None } else { Some(&data_dir) },
         }));
@@ -167,21 +188,31 @@ fn gib(bytes: u64) -> String {
 
 fn doctor(args: DoctorArgs, out: Out) -> Result<(), CliError> {
     let host = folo_server::system::host_info();
-    let web_exists = args.web_dir.is_dir();
-    let web_ready = folo_server::web_dir_ready(&args.web_dir);
+    let web_dir = args.web_dir.clone().unwrap_or_else(|| PathBuf::from(DEFAULT_WEB_DIR));
+    let web_exists = web_dir.is_dir();
+    let web_ready = folo_server::web_dir_ready(&web_dir);
+    let embedded = folo_server::web::embedded().map(<[_]>::len);
+    let web_source = match resolve_web(args.web_dir.clone()) {
+        WebSource::Embedded => "embedded",
+        _ => "dir",
+    };
     // TODO(gpu): enumerate wgpu adapters (name, backend, memory, shader-f16) once folo-gpu exists.
     let report = json!({
         "version": env!("CARGO_PKG_VERSION"),
+        "git_sha": env!("FOLO_GIT_SHA"),
+        "build_date": env!("FOLO_BUILD_DATE"),
         "os": host.os,
         "arch": host.arch,
         "cpu": { "name": host.cpu_name, "threads": host.cpu_threads },
         "memory": { "total_bytes": host.memory_total_bytes, "available_bytes": host.memory_available_bytes },
         "gpus": [],
         "gpu_detection": "not_implemented",
-        "web_dist": { "path": args.web_dir, "exists": web_exists, "index_html": web_ready },
+        "web_dist": { "path": web_dir, "exists": web_exists, "index_html": web_ready },
+        "web_embedded": { "present": embedded.is_some(), "files": embedded.unwrap_or(0) },
+        "web_source": web_source,
     });
     out.record(&report);
-    out.human(format!("folo      {}", env!("CARGO_PKG_VERSION")));
+    out.human(format!("folo      {VERSION}"));
     out.human(format!("os        {} ({})", host.os, host.arch));
     out.human(format!("cpu       {} ({} threads)", host.cpu_name, host.cpu_threads));
     out.human(format!(
@@ -197,7 +228,13 @@ fn doctor(args: DoctorArgs, out: Out) -> Result<(), CliError> {
     } else {
         "not built (run `npm ci && npm run build` in web/)".to_string()
     };
-    out.human(format!("web/dist  {} — {web}", args.web_dir.display()));
+    out.human(format!("web/dist  {} — {web}", web_dir.display()));
+    let studio = match embedded {
+        Some(n) if web_source == "embedded" => format!("embedded ({n} files); `folo serve` uses it"),
+        Some(n) => format!("embedded ({n} files); `folo serve --web-dir` overrides it"),
+        None => "not embedded (build with --features embed-web)".to_string(),
+    };
+    out.human(format!("studio    {studio}"));
     Ok(())
 }
 

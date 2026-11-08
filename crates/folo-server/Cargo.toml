@@ -11,6 +11,10 @@ authors.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Compile the built FOLO Studio (web/dist, or $FOLO_WEB_DIST) into the binary; see build.rs.
+embed-web = []
+
 [dependencies]
 folo-api.workspace = true
 serde.workspace = true

@@ -82,7 +82,8 @@ The exact block definitions, layer tables, parameter names, head, loss, training
 ## folo-server and folo-cli
 - `folo-server` (axum + tokio) implements `docs/API.md`: datasets, models, training runs with live SSE metrics, and
   inference. Handlers sit on a `Store` trait (`MockStore` for `--mock`, `RealStore` for the engine). The request and
-  response types live in `folo-api`, a dependency-light crate (serde only) that FOLO Desktop reuses. `folo serve` runs it and serves the built Studio from `web/dist`. `folo serve --mock` serves realistic
+  response types live in `folo-api`, a dependency-light crate (serde only) that FOLO Desktop reuses. `folo serve` runs it and serves the built Studio from `web/dist`, or from the copy compiled into the binary by
+  the `embed-web` feature (release builds, see `docs/RELEASING.md`). `folo serve --mock` serves realistic
   synthetic data for UI work before or without a trained model.
 - `folo` CLI (`docs/CLI.md`): `train`, `val`, `predict`, `export`, `bench`, `dataset check|stats|synth`, `serve`,
   `mcp` (Model Context Protocol server over stdio so agents can train and run models), `doctor`. Every command takes

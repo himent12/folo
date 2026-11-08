@@ -7,7 +7,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 
 /// FOLO: a from-scratch, very fast vision framework (YOLO-style detector, training, export, Studio).
 #[derive(Debug, Parser)]
-#[command(name = "folo", bin_name = "folo", version, propagate_version = true)]
+#[command(name = "folo", bin_name = "folo", version = crate::VERSION, propagate_version = true)]
 pub struct Cli {
     /// Machine-readable output: stdout carries one JSON object per line, human text goes to stderr.
     #[arg(long, global = true)]
@@ -55,9 +55,10 @@ pub struct ServeArgs {
     /// Port to bind (0 picks a free one).
     #[arg(long, default_value_t = 7878)]
     pub port: u16,
-    /// Built web app to serve (with SPA fallback to index.html).
-    #[arg(long, default_value = "web/dist")]
-    pub web_dir: PathBuf,
+    /// Built web app folder to serve (with SPA fallback to index.html) [default: the Studio embedded in this binary
+    /// if it was built with `embed-web`, else web/dist].
+    #[arg(long)]
+    pub web_dir: Option<PathBuf>,
     /// Where registered datasets, models and runs are kept [default: $FOLO_HOME or ~/.folo].
     #[arg(long, env = "FOLO_DATA_DIR")]
     pub data_dir: Option<PathBuf>,
@@ -69,9 +70,9 @@ pub struct ServeArgs {
 /// `folo doctor`.
 #[derive(Debug, Args)]
 pub struct DoctorArgs {
-    /// Built web app folder to check.
-    #[arg(long, default_value = "web/dist")]
-    pub web_dir: PathBuf,
+    /// Built web app folder to check [default: web/dist].
+    #[arg(long)]
+    pub web_dir: Option<PathBuf>,
 }
 
 /// Optimizer.

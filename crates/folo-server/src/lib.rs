@@ -17,6 +17,7 @@ mod stats;
 pub mod store;
 pub mod system;
 mod util;
+pub mod web;
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -24,7 +25,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::extract::{Request, State};
-use axum::http::{HeaderValue, Method, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use tokio::net::TcpListener;
@@ -51,12 +52,24 @@ pub enum Cors {
     Any,
 }
 
+/// Where FOLO Studio's static files come from. Either way they are served with an SPA fallback to `index.html`;
+/// when there is nothing to serve, non-API routes answer 404 with a hint.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum WebSource {
+    /// No web app: only the API.
+    #[default]
+    None,
+    /// A built web app on disk (`web/dist`); used when it holds an `index.html`.
+    Dir(PathBuf),
+    /// The web app compiled into the binary (the `embed-web` feature, see [`web::embedded`]).
+    Embedded,
+}
+
 /// Server options.
 #[derive(Clone, Debug, Default)]
 pub struct Options {
-    /// Folder with the built web app (`web/dist`). Served with an SPA fallback to `index.html` when it holds an
-    /// `index.html`; otherwise non-API routes answer 404 with a hint.
-    pub web_dir: Option<PathBuf>,
+    /// The web app to serve outside `/api`.
+    pub web: WebSource,
     /// CORS policy.
     pub cors: Cors,
 }
@@ -126,8 +139,8 @@ async fn web_not_built() -> impl IntoResponse {
     (
         StatusCode::NOT_FOUND,
         [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-        "FOLO Studio is not built. Run `npm ci && npm run build` in web/ (or pass --web-dir), \
-         or use the Vite dev server on :5173. The API is under /api.\n",
+        "FOLO Studio is not built. Run `npm ci && npm run build` in web/ (or pass --web-dir, or build folo with \
+         --features embed-web), or use the Vite dev server on :5173. The API is under /api.\n",
     )
 }
 
@@ -139,12 +152,18 @@ impl Server {
         let state =
             AppState { store, probe: Arc::new(system::SystemProbe::default()), shutdown: shutdown.clone() };
         let mut router = Router::new().nest("/api", routes::api()).with_state(state);
-        router = match opts.web_dir.as_deref().filter(|d| web_dir_ready(d)) {
-            Some(dir) => {
-                let spa = ServeDir::new(dir).fallback(ServeFile::new(dir.join("index.html")));
+        let embedded = if opts.web == WebSource::Embedded { web::embedded() } else { None };
+        router = match (opts.web, embedded) {
+            (WebSource::Dir(dir), _) if web_dir_ready(&dir) => {
+                let spa = ServeDir::new(&dir).fallback(ServeFile::new(dir.join("index.html")));
                 router.fallback_service(spa)
             }
-            None => router.fallback(web_not_built),
+            (_, Some(files)) => {
+                router.fallback(move |method: Method, uri: Uri, headers: HeaderMap| async move {
+                    web::respond(files, &method, &uri, &headers)
+                })
+            }
+            _ => router.fallback(web_not_built),
         };
         let cors = match opts.cors {
             Cors::Any => CorsLayer::permissive(),

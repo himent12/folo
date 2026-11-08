@@ -19,8 +19,9 @@ behaviour, and keep the Rust types in `crates/folo-api` (used by the server, the
   without a preflight, state-changing requests (`POST`, `DELETE`) whose `Origin` header is neither such a loopback
   origin nor the server itself are refused with `403 forbidden_origin`. Requests without `Origin` (curl, agents,
   FOLO Desktop) are unaffected.
-- Outside `/api`, the server serves the built web app (`web/dist`, `--web-dir`) with an SPA fallback to
-  `index.html`; without a build it answers 404 with a hint.
+- Outside `/api`, the server serves the built web app (`web/dist`, `--web-dir`, or the copy embedded in `embed-web`
+  builds) with an SPA fallback to `index.html`; without a build it answers 404 with a hint. Embedded files carry an
+  ETag; Vite's content-hashed `assets/` are `Cache-Control: immutable`, everything else `no-cache`.
 
 ## Errors
 Non-2xx responses: `{ "error": { "code": "dataset_not_found", "message": "...", "hint": "..." | null } }`.
