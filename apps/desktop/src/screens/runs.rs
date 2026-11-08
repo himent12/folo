@@ -110,13 +110,14 @@ impl FoloApp {
         }
         let ids: Vec<String> = visible.iter().map(|r| r.id.clone()).collect();
         let cols = |d: gpui::Div| d.flex().items_center().gap(px(16.)).px(px(16.));
-        // Single-line rows; secondary facts get their own columns as the window allows. Budget
-        // (content width): the core columns need ~780 px; Dataset +136 from 1240, Size · batch
-        // +120 from 1360, Created +96 from 1440.
+        // Single-line rows; secondary facts get their own columns as the window allows, age before
+        // setup (so the default 1280 window tells an hour-old run from a week-old one). Budget
+        // (content width, Run keeps its 180 px; 1000 px at 1280 with Progress at 140): Dataset +136
+        // from 1240, Created +96 from 1280, Size · batch +120 from 1440.
         let vw = window.viewport_size().width;
         let show_ds = vw >= px(1240.);
-        let wide = vw >= px(1360.);
-        let show_created = vw >= px(1440.);
+        let show_created = vw >= px(1280.);
+        let wide = vw >= px(1440.);
         let head = cols(div())
             .h(px(36.))
             .border_b_1()
@@ -126,7 +127,7 @@ impl FoloApp {
             .when(show_ds, |d| d.child(th(&t, "Dataset").w(px(120.)).flex_none()))
             .when(wide, |d| d.child(th(&t, "Size · batch").w(px(104.)).flex_none()))
             .child(th(&t, "Status").w(px(96.)).flex_none())
-            .child(th(&t, "Progress").w(px(150.)).flex_none())
+            .child(th(&t, "Progress").w(px(140.)).flex_none())
             .child(self.sort_th_on(
                 self.runs_sort,
                 |a| &mut a.runs_sort,
@@ -265,7 +266,7 @@ impl FoloApp {
                         r.status,
                         &format!("row-{}", r.id),
                     )))
-                    .child(div().w(px(150.)).flex_none().child(progress_cell))
+                    .child(div().w(px(140.)).flex_none().child(progress_cell))
                     .child(div().w(px(96.)).flex_none().flex().justify_end().child(best))
                     .child(
                         text(ty::SM, t.text_secondary).tnum().w(px(80.)).flex_none().text_right().child(dur),
@@ -894,9 +895,14 @@ impl FoloApp {
         // From a tenth under the lowest value (0 while either is still low), so a converged pair
         // spreads over the plot instead of its top half.
         let low = d.precision.iter().chain(d.recall.iter()).map(|p| p.1).fold(f32::INFINITY, f32::min);
-        pr.y_range = Some((pr_floor(low), 1.));
+        let floor = pr_floor(low);
+        pr.y_range = Some((floor, 1.));
         // Three labels (floor, middle, 1.00): the lower row's plot is under 180 px, where five crowd.
+        // A raised floor is labelled, so the axis never reads as starting at 0.
         pr.y_ticks = 2;
+        if floor > 0. {
+            pr.y_tick_values = Some(vec![floor, (floor + 1.) / 2., 1.]);
+        }
         pr.y_fmt = Some(|v| format!("{v:.2}"));
         let mut lr = base(
             "run-lr",
@@ -1044,8 +1050,9 @@ impl FoloApp {
         // In the axis's power of ten ("× 10⁻³" is printed once, on the axis).
         let lr_hi = (d.lr_max * 1.15).max(1e-4);
         let lr_pow = crate::charts::axis_pow(0., lr_hi, 3);
+        // The legend value carries its power too, so it reads on its own ("6.58×10⁻³").
         let lr_value = crate::charts::value_at(&d.lr, hover, 0., total).map(|x| match lr_pow {
-            Some(p) => format!("{:.2}", x * 10f32.powi(-p)),
+            Some(p) => format!("{:.2}×10{}", x * 10f32.powi(-p), crate::charts::superscript(p)),
             None => format!("{x:.4}"),
         });
         let lr_legend =
@@ -1273,7 +1280,7 @@ impl FoloApp {
                                     LogLevel::Warn => ("WRN", t.warning_text),
                                     LogLevel::Error => ("ERR", t.danger_text),
                                 };
-                                let clock = time::parse(&l.t).map(time::clock).unwrap_or_default();
+                                let clock = time::parse(&l.t).map(time::local_clock).unwrap_or_default();
                                 div()
                                     .flex()
                                     .gap(px(12.))
@@ -1295,7 +1302,9 @@ impl FoloApp {
                                             } else {
                                                 t.text_secondary
                                             })
-                                            .child(l.message.clone()),
+                                            // Windows paths read with `/`, as everywhere else in
+                                            // the app; other text is left as it is.
+                                            .child(slash_paths(&l.message)),
                                     )
                             })),
                     )
@@ -1468,11 +1477,35 @@ fn pr_floor(low: f32) -> f32 {
     if f < 0.2 { 0. } else { f.min(0.8) }
 }
 
+/// `D:\data\x.folo` → `D:/data/x.folo`: only whitespace-separated words that start with a drive
+/// (a letter, `:`, a separator) change, so a Unix path or escaped text with `\` keeps it.
+fn slash_paths(s: &str) -> String {
+    let drive = |w: &str| {
+        let b = w.trim_start_matches(['"', '\'', '(']).as_bytes();
+        b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/')
+    };
+    if !s.contains('\\') {
+        return s.to_string();
+    }
+    s.split_inclusive(' ').map(|w| if drive(w) { w.replace('\\', "/") } else { w.to_string() }).collect()
+}
+
 /// One log line with its padding: an arrow key's scroll step in the log.
 const LOG_LINE: f32 = 21.;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn windows_paths_only() {
+        use super::slash_paths;
+        assert_eq!(
+            slash_paths("transferred 417 of 417 tensors from D:/folo/data\\models\\n.folo"),
+            "transferred 417 of 417 tensors from D:/folo/data/models/n.folo"
+        );
+        assert_eq!(slash_paths("dataset /data/a\\b ok"), "dataset /data/a\\b ok");
+        assert_eq!(slash_paths("loaded \"C:\\x\\y\""), "loaded \"C:/x/y\"");
+    }
+
     #[test]
     fn pr_floor_steps() {
         assert_eq!(super::pr_floor(f32::INFINITY), 0.);

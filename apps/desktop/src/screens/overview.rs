@@ -331,28 +331,13 @@ impl FoloApp {
                     .flex_1()
                     .flex()
                     .child(
+                        // Progress is drawn once, as the line under the card's header; here it's a
+                        // number like the other tiles' detail lines.
                         div().flex_1().min_w_0().pl(px(0.)).child(kpi(
                             "Epoch",
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap(px(6.))
-                                .child(metric(
-                                    &t,
-                                    r.epoch.to_string(),
-                                    &format!("/ {}", r.epochs),
-                                    ty::X2XL,
-                                    ty::SM,
-                                ))
-                                // The run's progress, as on its dashboard's Epoch tile.
-                                .child(div().w(px(88.)).child(progress(
-                                    &t,
-                                    r.progress(),
-                                    t.accent_fill(),
-                                    4.,
-                                )))
+                            metric(&t, r.epoch.to_string(), &format!("/ {}", r.epochs), ty::X2XL, ty::SM)
                                 .into_any_element(),
-                            None,
+                            Some(format!("{:.0}% complete", r.progress() * 100.)),
                         )),
                     )
                     .child(
@@ -551,11 +536,15 @@ impl FoloApp {
                         .flex_col()
                         .gap(px(if hero_h < 120. { 8. } else { 16. }))
                         .p(px(if hero_h < 120. { 12. } else { 16. }))
-                        .child(div().flex().gap(px(16.)).children(
-                            (0..4).map(|c| {
-                                div().flex_1().h(px(64.)).child(skeleton(&t, format!("hero-kpi-{c}")))
-                            }),
-                        ))
+                        // One strip with 1 px dividers, as the loaded tiles sit.
+                        .child(div().flex().children((0..4).map(|c| {
+                            div()
+                                .flex_1()
+                                .h(px(64.))
+                                .pr(px(16.))
+                                .when(c > 0, |d| d.border_l_1().border_color(t.line_subtle).pl(px(16.)))
+                                .child(skeleton(&t, format!("hero-kpi-{c}")))
+                        })))
                         .child(
                             div()
                                 .flex_1()

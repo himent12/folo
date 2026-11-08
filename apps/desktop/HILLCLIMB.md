@@ -1218,3 +1218,69 @@ Round 31 changes:
   - The inspector says "top-left x, y".
   - The narrow dataset action says "Copy check".
   - The getting-started commands have copy buttons.
+
+## Round 31
+
+| Line | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | avg |
+|------|---|---|---|---|---|---|---|---|---|----|----|----|-----|
+| Opus 5.5 | 9 | 9 | 9 | 8 | 8 | 8 | 8 | 9 | 9 | 9 | 9 | 8 | 8.6 |
+| GPT-6.1 Sol | 8 | 9 | 8 | 9 | 8 | 8 | 8 | 9 | 8 | 8 | 8 | 8 | 8.3 |
+
+Opus reached its best yet, 8.6. Seven lines are at 9, including responsiveness ("minimum size now looks designed") and accessibility. Its remaining defects:
+- An unlabelled raised floor on the run P/R axis. Two ticks gave 0.50 and 1.00 only, contradicting the code's own comment.
+- A "Fit" button that did nothing while fitted.
+- The toast footer inset from the card's padding.
+- Progress drawn twice on the Overview live card.
+- No start time in the Runs list at 1280.
+- Mixed-case New run helpers.
+
+Sol dipped to 8.3 on new findings rather than regressions:
+- A stale PR hover beat keyboard focus.
+- Switch and slider tracks around 1.5:1 against panels. That needs a design token, so it went to the orchestrator.
+- The New run Schedule cut by the footer at 960 × 620.
+- Truncated PR class names with no full name.
+- No visible pin.
+- An unnamed thumbnail slider.
+- F6 missing from Settings.
+- "GPU 0" without its adapter.
+- Bars on every per-class metric.
+
+The orchestrator agreed the loss colours with Studio: dfl moves to series 3 (teal) once design/README lands it.
+
+Dogfood report 2 (#93) asked Desktop for:
+- Studio's binary sizes.
+- Local log times.
+- `/` in log paths.
+- A legend value that reads without the axis caption.
+
+Its release-build crash (D1) is the engine fix agent's.
+
+Round 32 changes:
+- **PR legend and per-class table:**
+  - In keyboard mode the focused row isolates its class, and a pointer move hands back.
+  - A pinned class shows a pin in its name slot, and the hint says how to unpin.
+  - Names cut short show whole on hover and focus.
+  - Only AP50-95 keeps a comparison bar.
+- **Run page:**
+  - The P/R chart labels a raised floor (0.30 / 0.65 / 1.00), through a new `y_tick_values`.
+  - The LR legend value carries its power ("6.58×10⁻³").
+- **Log:**
+  - Log times are local.
+  - Paths read with `/`.
+  - A late history answer only scrolls the run on screen.
+- **Overview:**
+  - Progress is drawn once (the header line); the Epoch tile says "42% complete".
+  - The loading strip has the loaded tiles' dividers.
+- **Runs:** Created shows from 1280 (Size · batch from 1440).
+- **New run:**
+  - At 960 × 620 the whole Schedule fits above the footer: the dataset summary sits on its label row, with tighter rhythm.
+  - Device names the GPU.
+  - Helpers are in sentence case.
+- **Zoom:** "Fit" is plain text while fitted; fitting moves keyboard focus to zoom-in.
+- **Toast:** one footer row, with the action on the left and the stack links ending under the close button.
+- **Sizes:** binary units (KiB, MiB, GiB), like Studio. The New run estimate is in GiB.
+- **Small items:**
+  - The Playground picker toggle hovers like other rows.
+  - The thumbnail slider names its value.
+  - The broken-labels tooltip says a click copies.
+  - Settings lists F6 / Shift F6.

@@ -454,7 +454,7 @@ impl FoloApp {
                     .when(broken > 0, |d| d.cursor_pointer().hover(|s| s.bg(t.bg_hover)).active(|s| s.bg(t.bg_active)))
                     .when(broken > 0, |d| {
                         d.tooltip(crate::controls::tip(
-                            "These label files couldn't be read, so their images are skipped. The check command lists them.",
+                            "These label files couldn't be read, so their images are skipped. Click to copy the terminal command that lists them.",
                             None,
                         ))
                     })
@@ -593,6 +593,9 @@ impl FoloApp {
             }),
         );
         let size_slider = self.slider("ds-tile", self.ds_tile, 112., 272., 8., window, cx);
+        // What the slider sets and its value, on hover and on keyboard focus.
+        let tile_tip = format!("Thumbnail size · {:.0} px", self.ds_tile);
+        let tile_ring = self.ring(&self.fh("ds-tile", cx), window);
         // Fit shows every pixel (boxes at the edge stay visible); Fill crops for a denser look.
         let fit_seg = self.segmented(
             "ds-fit",
@@ -668,7 +671,11 @@ impl FoloApp {
                     .gap(px(8.))
                     .w(px(140.))
                     .flex_none()
-                    .tooltip(crate::controls::tip("Thumbnail size", None))
+                    .relative()
+                    .tooltip(crate::controls::tip(tile_tip.clone(), Some("← →")))
+                    .when(tile_ring, |d| {
+                        d.child(crate::controls::focus_tip(&t, format!("{tile_tip} · ← → adjust"), 20.))
+                    })
                     .child(div().w(px(14.)).flex().justify_center().child(icon(
                         "icons/square.svg",
                         9.,

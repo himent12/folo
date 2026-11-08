@@ -145,7 +145,7 @@ pub fn apply(app: &mut FoloApp, s: &Spec, window: &mut Window, cx: &mut Context<
     if screen == "toast" {
         app.toast_with(
             crate::ui::Tone::Success,
-            "Exported shapes-hard-s-best · 9.4 MB",
+            "Exported shapes-hard-s-best · 9.0 MiB",
             Some("…/models/shapes-hard-s-best.f16.folo".into()),
             Some(("Show in folder".into(), std::rc::Rc::new(|_, _, _| {}))),
             cx,

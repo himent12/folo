@@ -218,6 +218,11 @@ impl FoloApp {
         let paint_cell = bounds_cell.clone();
         let wheel_cell = bounds_cell.clone();
         let (zoom, pan) = (self.play_zoom, self.play_pan);
+        // Fitted (by the readout, 0, −, or a new image), the readout is text: focus left on it
+        // moves to its neighbour instead of falling back to the window.
+        if zoom <= 1.0 && self.fh("play-fit", cx).is_focused(window) {
+            window.focus(&self.fh("play-zoom-in", cx));
+        }
         let zoom_bar = div()
             .flex()
             .items_center()
@@ -880,9 +885,13 @@ impl FoloApp {
                 .items_center()
                 .justify_between()
                 .h(px(24.))
+                // A row like the others: a hover fill, inset 4 px past the text on each side.
+                .mx(px(-4.))
+                .px(px(4.))
                 .rounded(px(radius::SM))
                 .cursor_pointer()
-                .hover(|s| s.opacity(0.85))
+                .hover(|s| s.bg(t.bg_hover))
+                .active(|s| s.bg(t.bg_active))
                 .child(heading)
                 .child(icon(
                     if picker_open { "icons/chevron-down.svg" } else { "icons/chevron-right.svg" },

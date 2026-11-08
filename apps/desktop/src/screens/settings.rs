@@ -219,13 +219,16 @@ impl FoloApp {
             ("Close / back", &["Esc"]),
             ("Start training (in the dialog)", &["Ctrl", "Enter"]),
         ];
-        let go_to: [(&str, &[&str]); 6] = [
+        let go_to: [(&str, &[&str]); 8] = [
             ("Overview", &["Ctrl", "1"]),
             ("Datasets", &["Ctrl", "2"]),
             ("Runs", &["Ctrl", "3"]),
             ("Models", &["Ctrl", "4"]),
             ("Playground", &["Ctrl", "5"]),
             ("Settings", &["Ctrl", "Comma"]),
+            // Sidebar, search, page.
+            ("Next region", &["F6"]),
+            ("Previous region", &["Shift", "F6"]),
         ];
         let col = |title: &str, items: &[(&str, &[&str])]| {
             div()

@@ -629,8 +629,11 @@ impl FoloApp {
                 .iter()
                 .any(|k| self.focus.borrow().get(k.as_str()).is_some_and(|f| f.is_focused(window)))
         });
-        // A pin from another evaluation never applies here.
-        self.pr_focus.or(focused).or(self.pr_pin).filter(|c| ev.pr.iter().any(|p| p.class == *c))
+        // In keyboard mode the focused row wins over a hover left behind by the pointer (as in
+        // Playground and the inspector); moving the pointer hands it back. A pin from another
+        // evaluation never applies here.
+        let lead = if self.kb { focused.or(self.pr_focus) } else { self.pr_focus.or(focused) };
+        lead.or(self.pr_pin).filter(|c| ev.pr.iter().any(|p| p.class == *c))
     }
 
     fn pr_panel(
@@ -707,8 +710,16 @@ impl FoloApp {
                 let key = format!("pr-chip-{class}");
                 let on = iso == Some(class);
                 let pinned = self.pr_pin == Some(class);
+                let name = m.classes.get(class as usize).cloned().unwrap_or_default();
+                // The full name (the 68 px slot, 54 beside the pin, can cut it short) and what a
+                // click does, on hover and on keyboard focus.
+                let tip_text = format!("{name} · {}", if pinned { "click to unpin" } else { "click to pin" });
+                let ring = self.ring(&self.fh(key.clone(), cx), window);
                 let el = div()
                     .id(SharedString::from(key.clone()))
+                    .relative()
+                    .tooltip(crate::controls::tip(tip_text.clone(), None))
+                    .when(ring, |d| d.child(crate::controls::focus_tip(&t, tip_text.clone(), 28.)))
                     .h(px(28.))
                     .px(px(8.))
                     .flex()
@@ -727,6 +738,15 @@ impl FoloApp {
                             cx.notify();
                         }
                     }))
+                    // A real pointer move (not a row scrolled under a still pointer) ends keyboard
+                    // mode, so the hovered class isolates again.
+                    .on_mouse_move(cx.listener(move |this, _: &gpui::MouseMoveEvent, _, cx| {
+                        if this.kb {
+                            this.kb = false;
+                            this.pr_focus = Some(class);
+                            cx.notify();
+                        }
+                    }))
                     .child(
                         div()
                             .w(px(14.))
@@ -736,12 +756,22 @@ impl FoloApp {
                     .child(
                         // A known width (the legend row is 220 px: 14 swatch, 68 name, 70 P, 44 AP50
                         // and three 8 px gaps), so long class names end in "…" (GPUI truncates against
-                        // the pre-shrink width).
-                        text(ty::SM, t.text_secondary)
+                        // the pre-shrink width). A pinned class ends its slot with a pin, the columns
+                        // after it unmoved.
+                        div()
                             .w(px(68.))
                             .flex_none()
-                            .truncate()
-                            .child(m.classes.get(class as usize).cloned().unwrap_or_default()),
+                            .flex()
+                            .items_center()
+                            .gap(px(2.))
+                            .child(
+                                text(ty::SM, if pinned { t.text_primary } else { t.text_secondary })
+                                    .w(px(if pinned { 54. } else { 68. }))
+                                    .flex_none()
+                                    .truncate()
+                                    .child(name),
+                            )
+                            .when(pinned, |d| d.child(icon("icons/pin.svg", 12., t.text_secondary))),
                     )
                     .child(
                         text(ty::SM, t.text_secondary)
@@ -819,7 +849,13 @@ impl FoloApp {
         let pr_hint = if self.kb && focused("pr-chart") {
             "← → inspect recall · Esc clears"
         } else if self.kb && row_focused() {
-            "Enter pins the class"
+            if self.pr_pin.is_some() {
+                "Enter pins the class (again to unpin)"
+            } else {
+                "Enter pins the class"
+            }
+        } else if self.pr_pin.is_some() {
+            "Pinned: click the class again to unpin."
         } else {
             "Hover a class to isolate it; click to pin."
         };
@@ -1334,6 +1370,7 @@ impl FoloApp {
             .child(th(&t, "Recall").flex_1().min_w_0().text_right());
         let focus = self.pr_isolated(ev, window);
         let pin = self.pr_pin;
+        let num = |v: String| text(ty::SM, t.text_secondary).tnum().flex_1().min_w_0().text_right().child(v);
         let mut per: Vec<_> = ev.per_class.iter().collect();
         per.sort_by(|a, b| b.map50.total_cmp(&a.map50));
         // Numbers right-aligned (bar to their left), like every other table's metric columns.
@@ -1366,6 +1403,13 @@ impl FoloApp {
                             cx.notify();
                         }
                     }))
+                    .on_mouse_move(cx.listener(move |this, _: &gpui::MouseMoveEvent, _, cx| {
+                        if this.kb {
+                            this.kb = false;
+                            this.pr_focus = Some(class);
+                            cx.notify();
+                        }
+                    }))
                     .child(
                         div()
                             .w(px(200.))
@@ -1376,39 +1420,25 @@ impl FoloApp {
                             .child(crate::ui::class_swatch(&t, color, 8.))
                             .child(
                                 text(ty::BASE, t.text_primary)
-                                    .w(px(if pinned { 120. } else { 168. }))
+                                    .w(px(if pinned { 148. } else { 168. }))
                                     .flex_none()
                                     .truncate()
                                     .child(m.classes.get(c.class as usize).cloned().unwrap_or_default()),
                             )
-                            .when(pinned, |d| {
-                                d.child(text(ty::XS, t.text_tertiary).flex_none().child("pinned"))
-                            }),
+                            // The same pin as the PR legend's pinned row.
+                            .when(pinned, |d| d.child(icon("icons/pin.svg", 12., t.text_secondary))),
                     )
-                    .child(div().flex_1().min_w_0().flex().justify_end().child(bar_value(
-                        &t,
-                        c.map50,
-                        f3(c.map50),
-                        t.text_tertiary,
-                    )))
+                    // Only the headline metric carries a comparison bar; the others are plain
+                    // numbers, so AP50-95 leads the row.
+                    .child(num(f3(c.map50)))
                     .child(div().flex_1().min_w_0().flex().justify_end().child(bar_value(
                         &t,
                         c.map50_95,
                         f3(c.map50_95),
                         t.text_tertiary,
                     )))
-                    .child(div().flex_1().min_w_0().flex().justify_end().child(bar_value(
-                        &t,
-                        c.precision,
-                        format!("{:.3}", c.precision),
-                        t.text_tertiary,
-                    )))
-                    .child(div().flex_1().min_w_0().flex().justify_end().child(bar_value(
-                        &t,
-                        c.recall,
-                        format!("{:.3}", c.recall),
-                        t.text_tertiary,
-                    )));
+                    .child(num(format!("{:.3}", c.precision)))
+                    .child(num(format!("{:.3}", c.recall)));
                 // Keyboard: Enter/Space isolates (or releases) this class on the PR chart.
                 self.bind(
                     row,
