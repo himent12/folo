@@ -514,12 +514,26 @@ async fn queue_stop_resume_and_restart() {
     let mut file: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     file["run"]["status"] = json!("running");
     file["run"]["finished"] = Value::Null;
+    // ... and that crashed after writing its checkpoint, before the epoch reached metrics.jsonl and run.json.
+    let ckpt_epochs = file["epochs_done"].as_u64().unwrap() as u32;
+    assert!(ckpt_epochs >= 1);
+    file["epochs_done"] = json!(0);
+    file["run"]["best"] = Value::Null;
+    file["last_metrics"] = Value::Null;
     std::fs::write(&path, file.to_string()).unwrap();
+    let metrics = home.join("runs").join(&b.id).join("metrics.jsonl");
+    let text = std::fs::read_to_string(&metrics).unwrap();
+    let cut = text.rfind("{\"event\":\"epoch\"").unwrap();
+    let tail = &text[cut..];
+    let rest = tail.find('\n').map_or("", |n| &tail[n + 1..]);
+    std::fs::write(&metrics, format!("{}{rest}", &text[..cut])).unwrap();
     let s = store(&home);
     let app = self::app(&s);
     let b2: Run = ok(&app, get(&format!("/api/runs/{}", b.id))).await;
     assert_eq!(b2.status, RunStatus::Stopped);
     assert!(b2.finished.is_some());
+    assert_eq!(b2.epoch, ckpt_epochs, "progress comes back from the checkpoint");
+    assert!(b2.best.is_some());
     let logs: RunLogs = ok(&app, get(&format!("/api/runs/{}/logs", b.id))).await;
     assert!(logs.lines.last().unwrap().message.contains("server stopped while the run was running"));
     let runs: RunList = ok(&app, get("/api/runs")).await;

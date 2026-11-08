@@ -305,6 +305,7 @@ impl Runs {
                     let mut st = e.state.lock().unwrap();
                     if st.file.run.status.is_active() {
                         let was = st.file.run.status;
+                        reconcile(&mut st.file, &e.dir);
                         e.finish(&mut st, RunStatus::Stopped, None);
                         drop(st);
                         e.log(
@@ -674,6 +675,43 @@ impl Runs {
             }
         }
     }
+}
+
+/// Brings the progress in `run.json` of a run a previous process left active up to its files: the trainer writes
+/// `weights/last.folo`, then the epoch's line in `metrics.jsonl`, then (through its event) `run.json`, so a crash in
+/// between leaves `run.json` behind. Epochs done and the best epoch come from the newest of the three; the last
+/// epoch's metrics only from `metrics.jsonl` (unknown when only the checkpoint has that epoch).
+fn reconcile(file: &mut RunFile, dir: &Path) {
+    let m = read_metrics(&dir.join("metrics.jsonl"));
+    let ckpt = crate::engine::read_model_file(&dir.join("weights").join("last.folo"))
+        .ok()
+        .and_then(|f| f.checkpoint().map(|c| (c.epoch, c.best)));
+    let from_metrics = m.epochs.last().map_or(0, |e| e.epoch);
+    let from_ckpt = ckpt.map_or(0, |(e, _)| e.min(u32::MAX as u64) as u32);
+    let done = file.epochs_done.max(from_metrics).max(from_ckpt);
+    if done == file.epochs_done {
+        return;
+    }
+    let mut best = file.run.best;
+    for e in &m.epochs {
+        if best.is_none_or(|b| e.val.map50_95 > b.map50_95) {
+            best = Some(BestEpoch { epoch: e.epoch, map50_95: e.val.map50_95 });
+        }
+    }
+    if let Some((_, b)) = ckpt
+        && let Some(f) = b.fitness
+        && best.is_none_or(|x| (f as f32) > x.map50_95)
+    {
+        best = Some(BestEpoch { epoch: (b.epoch + 1).max(1) as u32, map50_95: f as f32 });
+    }
+    file.run.best = best;
+    file.last_metrics = m.epochs.last().filter(|e| e.epoch == done).map(|e| ModelMetrics {
+        map50: e.val.map50,
+        map50_95: e.val.map50_95,
+        precision: e.val.precision,
+        recall: e.val.recall,
+    });
+    file.epochs_done = done;
 }
 
 /// Parses `metrics.jsonl`. A resumed run appends the steps of the epoch it repeats again: a step or epoch number
