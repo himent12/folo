@@ -95,7 +95,8 @@ Conv(c1→c2, k, s, g=1, act=SiLU):
 - **BatchNorm2d**: `eps = 1e-3`, `momentum = 0.03` (PyTorch convention:
   `running = (1 − 0.03) · running + 0.03 · batch_stat`). Training normalises with the batch mean and the *biased*
   batch variance over `N·H·W`. The running variance is updated with the *unbiased* variance (`· n / (n − 1)`).
-  Evaluation uses the running statistics. Learnable `weight` (γ) and `bias` (β) per channel.
+  Evaluation uses the running statistics. Learnable `weight` (γ) and `bias` (β) per channel. Training rejects any
+  batch where some BN layer would see `N·H·W < 2` (impossible with the `imgsz ≥ 64` rule of §8.1).
 - **SiLU**: `x · sigmoid(x)`. `act=none` means identity (BN output returned).
 - **DWConv(c→c, k)**: `Conv(c→c, k, 1, g=c)`, depthwise, with BN and SiLU.
 
@@ -553,7 +554,7 @@ L      = B · (7.5 · L_box + 0.5 · L_cls + 1.5 · L_dfl)           # B = image
 |---|---|---|
 | `epochs` | 100 | |
 | `batch` | 16 | images per forward/backward |
-| `imgsz` | 640 | square, multiple of 32 |
+| `imgsz` | 640 | square, multiple of 32, at least 64 for training (so P5 is at least 2×2 and every BN channel sees several values) |
 | `nbs` | 64 | nominal batch: gradients accumulate over `accumulate = max(round(nbs / batch), 1)` batches |
 | `optimizer` | `auto` | `sgd`, `adamw` or `auto` (§8.2) |
 | `lr0` | 0.01 | base LR (ignored by `auto`) |
@@ -565,8 +566,8 @@ L      = B · (7.5 · L_box + 0.5 · L_cls + 1.5 · L_dfl)           # B = image
 | `warmup_bias_lr` | 0.1 | 0.0 when `auto` chooses |
 | `cos_lr` | false | linear decay by default |
 | `close_mosaic` | 10 | epochs at the end with mosaic off |
-| `ema` | true | |
-| `clip_grad_norm` | 10.0 | |
+| `ema` | true | `false`: no EMA (§8.5) |
+| `clip_grad_norm` | 10.0 | max global gradient L2 norm; `0` disables clipping |
 | `patience` | 100 | early stop after this many epochs without a fitness gain |
 | `seed` | 0 | |
 
@@ -596,65 +597,105 @@ m = β1·m + (1 − β1)·g;   v = β2·v + (1 − β2)·g²
 p = p − lr · (m / (1 − β1^t)) / (sqrt(v / (1 − β2^t)) + eps)
 ```
 
-### 8.3 Step loop, accumulation and clipping
+### 8.3 Batches, accumulation and the step loop
+**Batches.** At the start of epoch `e` (0-based), the training indices `0 .. N_train` are shuffled with a permutation
+drawn from an RNG seeded by `(seed, e)`, so resuming at an epoch boundary reproduces the order. Batches are
+consecutive chunks of `batch` indices; the last one may be smaller and is kept (its `B` is its actual size).
+`nb = ceil(N_train / batch)`. Augmentation randomness for a sample comes from an RNG seeded by
+`(seed, e, sample index)`, so results do not depend on the number of loader threads.
+
+**Accumulation.** `accumulate` is fixed for the whole run. An accumulation window is `accumulate` consecutive
+batches of one epoch; the epoch's last window may be shorter. Gradients never cross an epoch boundary, so the
+checkpoints FORMAT.md writes at epoch boundaries hold the complete training state. A short window steps with the
+gradients it has (no rescaling). Optimizer steps per epoch: `spe = ceil(nb / accumulate)`.
+
 ```
-nb = batches per epoch;  ni = global batch index (0-based, counts across epochs)
-nw = min(max(round(warmup_epochs · nb), 100), max(epochs − 1, 0) · nb)     # warmup iterations
-acc0 = accumulate;  last_step = −1
-for each batch:
-  if nw > 0 and ni <= nw:  apply warmup (§8.4)        (accumulate ramps: max(1, round(interp(ni, [0, nw], [1, acc0]))))
-  loss = L(batch)                                     (§7.4)
-  if loss is not finite: skip backward for this batch, emit a warning, continue
-  backward, adding into the gradient buffers
-  if ni − last_step >= accumulate:
-      clip: n = ‖all gradients‖₂ (one global norm); if n > 10: scale every gradient by 10 / (n + 1e-6)
-      optimizer step; zero gradients; EMA update (§8.5); last_step = ni
+t = 0                                       # completed optimizer iterations (= sched.__step)
+for e in 0 .. epochs:
+  for k, batch in enumerate(batches(e)):
+    loss = L(batch)                         # §7.4
+    if loss is finite: backward, adding into the gradient buffers
+    else: skip backward, emit a warning     # the batch still occupies its slot in the window
+    if (k + 1) % accumulate == 0 or k == nb − 1:          # end of a window
+      if the window had at least one finite batch:
+        set every group's lr and momentum for iteration t (§8.4)
+        if clip_grad_norm > 0:
+          n = sqrt(Σ over all parameters of Σ g²)          # one global norm
+          if n > clip_grad_norm: scale every gradient by clip_grad_norm / (n + 1e-6)
+        optimizer step (optim.__step += 1); EMA update (§8.5)
+      zero gradients; t += 1
 ```
-Accumulated gradients carry across epoch boundaries. Leftovers at the end of training are discarded. Ten
+`t` advances once per window, even when a window is skipped, so the schedule stays a function of `t` alone. Ten
 consecutive non-finite batches abort the run with an error.
 
 ### 8.4 LR schedule and warmup
-LR factor for 0-based epoch `e` of `E`:
-- linear (default): `lf(e) = (1 − e / max(E − 1, 1)) · (1 − lrf) + lrf`
-- cosine (`cos_lr`): `lf(e) = lrf + (1 − lrf) · (1 + cos(π · e / max(E − 1, 1))) / 2`
-
-The first epoch runs at `lr0` and the last at exactly `lr0 · lrf`. Outside warmup, every group's LR during epoch `e`
-is `lr0 · lf(e)`. During warmup (`ni <= nw`), per batch:
+The schedule is a function of the iteration `t` (optimizer steps, FORMAT.md's `unit: "iteration"`), with
+`T = epochs · spe` iterations in total:
 ```
-lr_group = interp(ni, [0, nw], [start_group, lr0 · lf(e)])     start = warmup_bias_lr for `bias`, 0 otherwise
-momentum = interp(ni, [0, nw], [warmup_momentum, momentum])    SGD only; AdamW keeps β1 fixed
+warmup_iters W = 0                                                     if warmup_epochs <= 0
+               = min(max(round(warmup_epochs · spe), 100), max(epochs − 1, 0) · spe)   otherwise
+lf(t) = (1 − t / max(T − 1, 1)) · (1 − lrf) + lrf                      linear (default)
+lf(t) = lrf + (1 − lrf) · (1 + cos(π · t / max(T − 1, 1))) / 2         cosine (`cos_lr`)
+target_g = lr0 · lf(t)                                                 every group
+t <  W:  lr_g = interp(t, [0, W], [start_g, target_g]),   start_g = warmup_bias_lr for `bias`, 0 otherwise
+         momentum = interp(t, [0, W], [warmup_momentum, momentum])     (SGD μ, or AdamW β1)
+t >= W:  lr_g = target_g,  momentum = momentum
 ```
-`interp` is linear interpolation. The scheduler state is fully determined by `ni`, so a resume recomputes it.
+`interp` is linear interpolation. The first iteration's target is `lr0` and the last one's exactly `lr0 · lrf`. This
+fills FORMAT.md's `folo.sched` as `type`, `epochs`, `steps_per_epoch = spe`, `lrf`, `warmup_iters = W`,
+`warmup_bias_lr`, `warmup_momentum` and `step = t`. Compared with the reference trainer (per-batch warmup with an
+accumulation ramp, per-epoch decay), this is one clock instead of three, and the run is otherwise equivalent.
 
 ### 8.5 EMA
-An f32 copy of every parameter and BN running statistic, initialised from the model at the start of training. After
-every optimizer step: `updates += 1`, `d = 0.9999 · (1 − exp(−updates / 2000))`, then for every tracked tensor
-`ema = d · ema + (1 − d) · model`. The EMA is always in eval mode. Validation, `best`/`last` weights and export use
-it (FORMAT.md stores it as `ema.*` plus `ema.__updates`).
+With `ema = true`: an f32 copy of every parameter and BN running statistic, initialised from the model at the start
+of training. After every optimizer step: `updates += 1`, `d = 0.9999 · (1 − exp(−updates / 2000))`, then for every
+tracked tensor `ema = d · ema + (1 − d) · model`. The EMA is always in eval mode. Validation, the `best`/`last`
+weights and export use it (FORMAT.md: `ema.*`, `ema.__updates`, `folo.ema = {"decay": 0.9999, "tau": 2000}`).
+With `ema = false`, those uses take the live model in eval mode, and checkpoints carry no `ema.` tensors.
 
 ### 8.6 Data and augmentation (folo-data implements; the trainer configures)
-Training pipeline per sample, in order:
-1. **Mosaic** with probability `mosaic = 1.0`: four images (this one plus three random ones), each resized so its long
-   side is `imgsz`, placed around a random centre `(xc, yc) ~ U[imgsz/2, 3·imgsz/2]²` on a `2·imgsz` canvas filled
-   with gray (114). Without mosaic (closed, or not drawn): the image resized so its long side is `imgsz`, padded
-   centred to `imgsz × imgsz` with gray.
-2. **Random affine** (output `imgsz × imgsz`; for a mosaic it crops the central region of the `2·imgsz` canvas):
-   `degrees = 0`, `translate = 0.1`, `scale = 0.5` (gain `U[0.5, 1.5]`), `shear = 0`, `perspective = 0`, gray fill.
-   Boxes are transformed, clipped to the image, then kept only if `w > 2` px, `h > 2` px, area after/before (scaled)
-   `> 0.1` and aspect ratio `< 100`.
-3. **Mixup** `0.0` (off).
-4. **HSV jitter**: gains `h = 0.015`, `s = 0.7`, `v = 0.4`.
-5. **Vertical flip** `0.0`, **horizontal flip** `0.5`.
+`s = imgsz`. Gray means 114 in every channel. Resizing is bilinear: an `h0 × w0` image is resized by
+`r = s / max(h0, w0)` to `min(round(w0 · r), s) × min(round(h0 · r), s)` (skipped when `r = 1`). Boxes are `xyxy`
+pixels throughout. Training pipeline per sample, in order:
 
-For the last `close_mosaic = 10` epochs (`epoch >= epochs − close_mosaic`), mosaic and mixup are 0 and the other
-augmentations stay on. Validation uses no augmentation: letterbox to a square `imgsz` (§9.2) only.
+1. **Mosaic** (probability `mosaic = 1.0`). Take this image and 3 others drawn uniformly with replacement from the
+   training set, all resized as above. Canvas `2s × 2s`, gray. Centre `xc, yc = floor(U[s/2, 3s/2))`, drawn
+   independently. Image `i` of size `h × w` goes to the canvas region `a` and is cut from the source region `b`:
+   ```
+   i=0 top-left:     a = (max(xc−w,0), max(yc−h,0), xc, yc)            b = (w−(a.x2−a.x1), h−(a.y2−a.y1), w, h)
+   i=1 top-right:    a = (xc, max(yc−h,0), min(xc+w,2s), yc)           b = (0, h−(a.y2−a.y1), min(w, a.x2−a.x1), h)
+   i=2 bottom-left:  a = (max(xc−w,0), yc, xc, min(2s,yc+h))           b = (w−(a.x2−a.x1), 0, w, min(a.y2−a.y1, h))
+   i=3 bottom-right: a = (xc, yc, min(xc+w,2s), min(2s,yc+h))          b = (0, 0, min(w, a.x2−a.x1), min(a.y2−a.y1, h))
+   ```
+   Boxes shift by `(a.x1 − b.x1, a.y1 − b.y1)` and are clipped to the canvas. Without mosaic (closed, or not
+   drawn): resize as above, then pad centred to `s × s` with gray (left/top = `floor(pad / 2)`).
+2. **Random affine.** Input canvas `w_c × h_c` (`2s` for a mosaic, `s` otherwise), output `s × s`. Draw
+   `a ~ U(−degrees, degrees)`, `g ~ U(1 − scale, 1 + scale)`, `sh_x, sh_y ~ U(−shear, shear)`,
+   `t_x, t_y ~ U(0.5 − translate, 0.5 + translate)`, and form `M = T · Sh · R · C` (3×3):
+   `C` translates by `(−w_c/2, −h_c/2)`; `R` rotates by `a` degrees and scales by `g` about the origin;
+   `Sh = [[1, tan(sh_x°), 0], [tan(sh_y°), 1, 0], [0, 0, 1]]`; `T` translates by `(t_x · s, t_y · s)`. Warp the canvas
+   by `M` (bilinear, gray fill). Each box is mapped by transforming its 4 corners and taking their min/max, then
+   clipped to `[0, s]²`. A box is kept iff `w' > 2`, `h' > 2`, `w'·h' / (w·g · h·g + 1e-16) > 0.1` and
+   `max(w'/(h'+1e-16), h'/(w'+1e-16)) < 100`, where `w, h` are its size before the warp. Defaults: `degrees = 0`,
+   `translate = 0.1`, `scale = 0.5`, `shear = 0`, `perspective = 0` (no perspective term in v1).
+3. **Mixup** `0.0` (off in v1).
+4. **HSV jitter** (gains `h = 0.015`, `s = 0.7`, `v = 0.4`): draw `r_k = U(−1, 1) · gain_k + 1` for `k ∈ {h, s, v}`.
+   In 8-bit HSV (`H ∈ [0, 180)`, `S, V ∈ [0, 255]`, OpenCV's convention): `H' = trunc(H · r_h) mod 180`,
+   `S' = trunc(clamp(S · r_s, 0, 255))`, `V' = trunc(clamp(V · r_v, 0, 255))`, then back to RGB. The hue is
+   multiplicative, as in the reference. Any standard RGB↔HSV conversion with these ranges is acceptable.
+5. **Flips**: vertical with `flipud = 0.0`, horizontal with `fliplr = 0.5` (`x1' = s − x2`, `x2' = s − x1`).
+
+Finally boxes are converted to the loader's normalised `cx, cy, w, h`. For the last `close_mosaic = 10` epochs
+(`e >= epochs − close_mosaic`), mosaic and mixup are 0 and steps 2, 4 and 5 stay on. Validation uses no
+augmentation: resize as above and pad to a square `s × s` (§9.2) only.
 
 ### 8.7 Validation schedule and checkpoints
-- Validate after every epoch and always after the last, with the EMA weights, at the training `imgsz`, with batch
-  `2 · batch`, `conf = 0.001`, `iou = 0.7`, `max_det = 300`, multi-label NMS (§9.3).
+- Validate after every epoch and always after the last, with the EMA weights (or the live model if `ema = false`),
+  at the training `imgsz`, with batch `2 · batch`, `conf = 0.001`, `iou = 0.7`, `max_det = 300`, multi-label NMS
+  (§9.3).
 - Metrics: precision, recall, mAP@0.5 and mAP@0.5:0.95 (COCO-style, 101-point, folo-vision metrics). Fitness is
   mAP@0.5:0.95. `best` is written when fitness strictly improves, `last` every epoch. Early stopping uses `patience`.
-- Loss items are also computed on the validation set (EMA model, same loss) for the `Epoch` event.
+- v1 reports training losses only (API `Epoch.train_loss`). Validation loss is not computed.
 
 ## 9. Inference
 
@@ -731,11 +772,16 @@ batch 2, in train mode so BN uses batch statistics).
 - DFL target `δ = 3.3`: weights 0.7 on bin 3 and 0.3 on bin 4; `δ = 15.2` is clamped to 14.99.
 - CIoU of identical boxes ≈ 1 (exactly `1 −` the eps effects); disjoint boxes give a negative CIoU (assigner `u = 0`).
 - An empty batch: `L_box = L_dfl = 0`, `L_cls = Σ softplus(cls_raw)` (with `tss = 1`).
-- Loss scaling: duplicating a batch (B → 2B, same images) keeps the three reported items and doubles `L`.
+- Loss scaling: for a batch whose unfloored target-score sum `Σ T` is at least 1, duplicating it (B → 2B, the same
+  images) keeps the three reported items and doubles `L`. Below the floor `tss = 1` stays fixed: an all-background
+  batch duplicated doubles the reported `cls` and quadruples `L`.
 
 ### 10.4 Training-loop tests
-- Warmup and schedule: for `E = 10`, `nb = 50`, check `nw = 150`, the LR and momentum of every group at
-  `ni ∈ {0, 75, 150, 151}`, and `lf(0) = 1`, `lf(9) = lrf`.
+- Batching and schedule: for `N_train = 800`, `batch = 16`, `E = 10`: `nb = 50`, `accumulate = 4`,
+  `spe = 13` (the last window of each epoch has 2 batches), `T = 130`, `W = 100` (the 100 floor applies, since
+  `round(3 · 13) = 39`). Check the LR and momentum of every group at `t ∈ {0, 50, 99, 100, 129}`, that
+  `lf(0) = 1` and `lf(129) = lrf`, and that `warmup_epochs = 0` gives `W = 0`.
+- Accumulation never crosses an epoch boundary: after each epoch the gradient buffers are zero.
 - `auto` picks AdamW at `lr0 = 0.00125` for `nc = 4`, 2000 images and 30 epochs.
 - EMA: after one update `d = 0.9999 · (1 − e^{−1/2000}) ≈ 4.99825e-4`.
 - **Overfit** (`#[ignore]`, about 1–2 min on CPU): folo-n at 320 px, 8 synthetic images, augmentation off, AdamW
@@ -755,10 +801,12 @@ AGPL-3.0: never commit them, any derived file, or the conversion script; gate th
 - Dataset: folo-data's synthetic shapes, 4 classes (circle, square, triangle, star), 2000 train and 200 val images
   at 320×320, 1 to 8 objects per image, object size 6 to 35% of the image side, textured backgrounds, seed 0.
 - Run: `folo train --arch folo-n --imgsz 320 --epochs 30 --batch 16 --close-mosaic 5 --seed 0`, other settings at
-  default (so `auto` chooses AdamW at `lr0 = 0.00125`; accumulate 4; warmup 375 iterations).
+  default (so `auto` chooses AdamW at `lr0 = 0.00125`; `nb = 125`, accumulate 4, `spe = 32`, warmup `W = 100`
+  iterations).
 - **Pass:** EMA-model validation mAP@0.5 ≥ 0.90 and mAP@0.5:0.95 ≥ 0.75 by epoch 30, with no non-finite loss.
 - Calibration: the reference implementation (Ultralytics 8.4 YOLO11n: the same topology, AdamW auto at 0.00125,
-  trained from scratch with this exact run configuration on a generator matching this description) reached
+  trained from scratch with this run configuration on a generator matching this description; its warmup is
+  375 batches ≈ 94 optimizer steps instead of 100, with an accumulation ramp) reached
   mAP@0.5 0.854 / 0.904 / 0.933 / 0.948 at epochs 6 / 11 / 16 / 30, and mAP@0.5:0.95 0.752 at epoch 9 and 0.873 at
   epoch 30. Its losses dropped visibly when mosaic closed at epoch 26. The pass bar leaves margin for generator and
   implementation differences. A FOLO run far below it points to a bug, not to tuning.
