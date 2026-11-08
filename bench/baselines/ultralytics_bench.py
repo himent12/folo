@@ -885,7 +885,7 @@ def main() -> None:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         args.out.parent.mkdir(parents=True, exist_ok=True)
-        args.out.write_text(json.dumps(results, indent=2) + "\n")
+        args.out.write_text(json.dumps(results, indent=2) + "\n", encoding="utf-8", newline="\n")
         print(f"== {s} done in {time.perf_counter() - t0:.1f} s -> {args.out}", flush=True)
 
 
