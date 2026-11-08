@@ -44,6 +44,19 @@ export const scenes = [
   { name: 'runs', path: '/runs', viewports: ['desktop', 'laptop', 'mobile'] },
   { name: 'run-live', path: '/runs/run_7d1e', advance: 4000, viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
   {
+    // The loss chart: total in ink, box / cls / dfl in their design/README.md hues (amber, violet dashed, teal dotted).
+    name: 'run-loss',
+    path: '/runs/run_c19a',
+    viewports: ['desktop', 'laptop', 'mobile'],
+    setup: async (page) => {
+      const tab = page.locator('[data-tab="loss"]');
+      if (await tab.isVisible()) await tab.click();
+      else await page.locator('select[aria-label="Metric to chart"]:visible').selectOption('loss');
+      await page.mouse.move(0, 0);
+      await page.clock.runFor(500);
+    },
+  },
+  {
     // The phone layout below the fold: the metrics instrument, then one section at a time (here: per-class results).
     name: 'run-live-phone-classes',
     path: '/runs/run_7d1e',

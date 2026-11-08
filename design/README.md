@@ -6,9 +6,10 @@ source of truth; both apps generate their theme from it and never hard-code a co
 - Web: `cd web && npm run tokens` writes `web/src/lib/design/tokens.css` (CSS custom properties) and `tokens.ts`
   (typed values for canvas/SVG code). `npm run check` fails if the generated files are stale.
 - Contrast: `node design/contrast.mjs` measures every colour pairing documented under Colour below (WCAG 2: text
-  4.5:1, non-text marks 3:1), in both themes, with tints and overlays composited over each surface. `npm run check`
-  (CI's web job) runs it, so a token change that breaks a pairing fails CI. Add a rule there when you document a new
-  pairing here.
+  4.5:1, non-text marks 3:1), in both themes, with tints and overlays composited over each surface, and that colours
+  documented as told apart stay apart under colour-vision deficiency (OKLab ΔE ≥ 7, ×100, under normal vision and
+  simulated protan / deutan / tritan: adjacent chart series, the loss components). `npm run check` (CI's web job)
+  runs it, so a token change that breaks a pairing fails CI. Add a rule there when you document a new pairing here.
 - Desktop: a Rust generator reads `tokens.json` and writes the GPUI theme.
 
 ## Character
@@ -69,7 +70,7 @@ app: chart plots, image canvases, code/log views. In light mode panels are white
   surface), `text` (readable text; AA on every surface and on its own `muted`) and `muted` (tinted backgrounds for
   badges and banners: the solid at low alpha).
 - Charts: `chart.series[0..5]` in this fixed order (sky, amber, magenta, teal, violet, orange), never cycled; the
-  order keeps every adjacent pair apart under colour-vision deficiency (checked with an OKLab ΔE validator). The
+  order keeps every adjacent pair apart under colour-vision deficiency (checked by `contrast.mjs`). The
   series deliberately exclude the accent lime (reserved for actions, live state, focus and "best" markers). Some
   series share a hue family with status colours (amber, teal), so charts never use colour alone for status: status is
   always labelled. Light series are ≥ 3:1 on both plot surfaces (`bg.panel`, `bg.inset`). Under tritan deficiency
@@ -78,8 +79,9 @@ app: chart plots, image canvases, code/log views. In light mode panels are white
   once, "× 10⁻³"), hover cursor `chart.cursor`. Context curves (many thin lines of one kind under an emphasised one, e.g. every
   class under the mean PR curve) are 1 px `chart.context`, ≥ 3:1 on the panel in both themes and never faded with
   opacity; the emphasised line carries weight and ink, highlighted entities their hue. Area fills under a line use the series colour at `area_opacity`. Loss
-  components: total = `text.primary` (thicker), box = series 1, cls = series 4 (dashed), dfl = series 5 (dotted),
-  everywhere a loss is drawn. Two or more series always get a legend with values, and
+  components: total = `text.primary` (thicker), box = series 1 (amber), cls = series 4 (violet, dashed), dfl =
+  series 3 (teal, dotted), everywhere a loss is drawn: the three stay apart under every colour-vision type (orange,
+  series 5, next to amber did not: they merge under protanopia). Two or more series always get a legend with values, and
   run comparisons assign series slots by run, so a run keeps its colour: sky, amber, magenta, teal, with slots 3
   and 4 also dashed / dotted (no four hues stay apart for every colour-vision type).
 

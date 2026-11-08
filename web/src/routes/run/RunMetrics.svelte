@@ -94,9 +94,10 @@
         return [
           { id: 'raw', label: 'total (raw)', color: INK, ghost: true, points: a > 0 ? total : [] },
           { id: 'total', label: 'Total', color: INK, emphasis: true, points: smooth(total, a) },
-          { id: 'box', label: 'box', color: INK2, pattern: 'dash', points: smooth(perStep((s) => s.loss.box), a) },
-          { id: 'cls', label: 'cls', color: INK2, pattern: 'dot', points: smooth(perStep((s) => s.loss.cls), a) },
-          { id: 'dfl', label: 'dfl', color: INK2, pattern: 'dashdot', points: smooth(perStep((s) => s.loss.dfl), a) },
+          // The components as design/README.md maps them in both apps: box amber, cls violet dashed, dfl teal dotted.
+          { id: 'box', label: 'box', color: 'var(--chart-2)', points: smooth(perStep((s) => s.loss.box), a) },
+          { id: 'cls', label: 'cls', color: 'var(--chart-5)', pattern: 'dash', points: smooth(perStep((s) => s.loss.cls), a) },
+          { id: 'dfl', label: 'dfl', color: 'var(--chart-4)', pattern: 'dot', points: smooth(perStep((s) => s.loss.dfl), a) },
         ];
       }
       case 'lr': {
