@@ -1,6 +1,7 @@
 <script lang="ts">
   import Images from '@lucide/svelte/icons/images';
   import Plus from '@lucide/svelte/icons/plus';
+  import Search from '@lucide/svelte/icons/search';
   import Sparkles from '@lucide/svelte/icons/sparkles';
   import { hub } from '$lib/api/index.svelte';
   import { Resource } from '$lib/api/resource.svelte';
@@ -13,8 +14,11 @@
   import Button from '$lib/ui/Button.svelte';
   import EmptyState from '$lib/ui/EmptyState.svelte';
   import ErrorState from '$lib/ui/ErrorState.svelte';
+  import Input from '$lib/ui/Input.svelte';
   import Panel from '$lib/ui/Panel.svelte';
   import Skeleton from '$lib/ui/Skeleton.svelte';
+  import TableState from '$lib/ui/TableState.svelte';
+  import { rowNav } from '$lib/ui/rowNav';
   import AddDatasetDialog from './datasets/AddDatasetDialog.svelte';
   import { imageCount } from './dataset/health';
 
@@ -43,83 +47,105 @@
     };
   });
 
+  let query = $state('');
+  const shown = $derived.by(() => {
+    const q = query.trim().toLowerCase();
+    return (datasets.data ?? []).filter((d) => !q || `${d.name} ${d.path} ${d.format} ${d.id}`.toLowerCase().includes(q));
+  });
+  /** Columns of the desktop table (for state rows that span it). */
+  const COLS = 9;
+
   const classTip = (d: Dataset) => `${d.classes.length} classes: ${d.classes.join(', ')}`;
 </script>
 
 <Page title="Datasets">
-  {#snippet sub()}
-    {#if datasets.data && datasets.data.length}
-      <span class="num">{datasets.data.length} {datasets.data.length === 1 ? 'dataset' : 'datasets'} · {compact(totals.images)} images · {compact(totals.boxes)} boxes</span>
-    {:else}
-      <span>YOLO and COCO folders registered with the server.</span>
-    {/if}
-  {/snippet}
+  <!-- One fixed line: the counts live in the toolbar, so nothing here changes as the list loads. -->
+  {#snippet sub()}<span>YOLO and COCO folders registered with the server.</span>{/snippet}
   {#snippet actions()}
     <Button variant="primary" icon={Plus} onclick={() => add('folder')}>Add dataset</Button>
   {/snippet}
 
+  {#if !datasets.error && (!datasets.data || datasets.data.length > 0)}
+    <div class="toolbar">
+      <span class="count num">
+        {#if datasets.data}
+          {datasets.data.length} {datasets.data.length === 1 ? 'dataset' : 'datasets'} · {compact(totals.images)} images · {compact(totals.boxes)} boxes
+        {:else}<Skeleton inline w="200px" h="10px" />{/if}
+      </span>
+      <div class="search"><Input bind:value={query} icon={Search} placeholder="Filter by name or path" aria-label="Filter datasets" type="search" /></div>
+    </div>
+  {/if}
+
   <Panel pad="none">
-    {#if datasets.error && !datasets.data}
-      <ErrorState error={datasets.error} title="Could not load datasets" retry={() => datasets.refresh()} />
-    {:else if datasets.data?.length === 0}
-      <!-- The header already holds the primary action (and the subtitle says what a dataset is): offer the quick start. -->
-      <EmptyState icon={Images} title="No datasets yet" description="Try FOLO in a minute with a generated set of shapes.">
-        {#snippet actions()}<Button icon={Sparkles} onclick={() => add('synthetic')}>Generate synthetic</Button>{/snippet}
-      </EmptyState>
-    {:else}
-      <div class="scroll">
-        <table class="table ds" aria-busy={!datasets.data} aria-label="Datasets">
-          <thead>
-            <tr>
-              <th scope="col">Dataset</th>
-              <th scope="col" class="hide-md">Format</th>
-              <th scope="col" class="hide-lg">Path</th>
-              <th scope="col" class="r">Train</th>
-              <th scope="col" class="r">Val</th>
-              <th scope="col" class="r">Test</th>
-              <th scope="col">Class balance</th>
-              <th scope="col" class="r hide-md">Boxes</th>
-              <th scope="col" class="r hide-md">Created</th>
-            </tr>
-          </thead>
-          <tbody>
-            {#if !datasets.data}
-              {#each [0, 1, 2] as i (i)}
-                <tr aria-hidden="true">
-                  <td><Skeleton w="96px" h="12px" /></td>
-                  <td class="hide-md"><Skeleton w="32px" h="12px" /></td>
-                  <td class="hide-lg"><Skeleton w="120px" h="12px" /></td>
-                  <td class="r"><Skeleton w="36px" h="12px" /></td>
-                  <td class="r"><Skeleton w="28px" h="12px" /></td>
-                  <td class="r"><Skeleton w="28px" h="12px" /></td>
-                  <td><Skeleton w="160px" h="6px" r="999px" /></td>
-                  <td class="r hide-md"><Skeleton w="36px" h="12px" /></td>
-                  <td class="r hide-md"><Skeleton w="44px" h="12px" /></td>
-                </tr>
-              {/each}
-            {:else}
-              {#each datasets.data as d (d.id)}
-                <tr class="link" onclick={() => router.go(`/datasets/${d.id}`)}>
-                  <td><a class="name" href={href(`/datasets/${d.id}`)} onclick={(e) => e.stopPropagation()}>{d.name}</a></td>
-                  <td class="hide-md faint">{d.format}</td>
-                  <td class="hide-lg path-cell"><span class="path mono truncate" title={d.path}>{d.path}</span></td>
-                  <td class="r num">{num(d.splits.train)}</td>
-                  <td class="r num muted">{num(d.splits.val)}</td>
-                  <td class="r num muted">{num(d.splits.test)}</td>
-                  <td title={classTip(d)}>
-                    {#if d.stats}<div class="strip"><ClassStrip counts={d.stats.class_counts} classes={d.classes} /></div>{:else}<span class="faint">—</span>{/if}
-                  </td>
-                  <td class="r num hide-md">{compact(d.stats?.boxes)}</td>
-                  <td class="r faint hide-md">{ago(d.created)}</td>
-                </tr>
-              {/each}
-            {/if}
-          </tbody>
-        </table>
-      </div>
-      <!-- Phones: two-line rows (name and one meta line, the image count and class balance on the right). -->
+    <div class="scroll" class:state={(!!datasets.data && shown.length === 0) || (!!datasets.error && !datasets.data)}>
+      <table class="table ds" aria-busy={!datasets.data} aria-label="Datasets" use:rowNav>
+        <thead>
+          <tr>
+            <th scope="col">Dataset</th>
+            <th scope="col" class="hide-md">Format</th>
+            <th scope="col" class="hide-lg">Path</th>
+            <th scope="col" class="r">Train</th>
+            <th scope="col" class="r">Val</th>
+            <th scope="col" class="r">Test</th>
+            <th scope="col">Class balance</th>
+            <th scope="col" class="r hide-md">Boxes</th>
+            <th scope="col" class="r hide-md">Created</th>
+          </tr>
+        </thead>
+        <tbody>
+          {#if datasets.error && !datasets.data}
+            <TableState cols={COLS}><ErrorState error={datasets.error} title="Could not load datasets" retry={() => datasets.refresh()} /></TableState>
+          {:else if datasets.data?.length === 0}
+            <!-- The header already holds the primary action (and the subtitle says what a dataset is): offer the quick start. -->
+            <TableState cols={COLS}>
+              <EmptyState icon={Images} title="No datasets yet" description="Try FOLO in a minute with a generated set of shapes.">
+                {#snippet actions()}<Button icon={Sparkles} onclick={() => add('synthetic')}>Generate sample set</Button>{/snippet}
+              </EmptyState>
+            </TableState>
+          {:else if datasets.data && shown.length === 0}
+            <TableState cols={COLS}>
+              <EmptyState icon={Search} title="No datasets match" description="Try another name or path.">
+                {#snippet actions()}<Button size="sm" onclick={() => (query = '')}>Clear filter</Button>{/snippet}
+              </EmptyState>
+            </TableState>
+          {:else if !datasets.data}
+            {#each [0, 1, 2] as i (i)}
+              <tr aria-hidden="true">
+                <td><Skeleton w="96px" h="12px" /></td>
+                <td class="hide-md"><Skeleton w="32px" h="12px" /></td>
+                <td class="hide-lg"><Skeleton w="120px" h="12px" /></td>
+                <td class="r"><Skeleton w="36px" h="12px" /></td>
+                <td class="r"><Skeleton w="28px" h="12px" /></td>
+                <td class="r"><Skeleton w="28px" h="12px" /></td>
+                <td><Skeleton w="160px" h="6px" r="999px" /></td>
+                <td class="r hide-md"><Skeleton w="36px" h="12px" /></td>
+                <td class="r hide-md"><Skeleton w="44px" h="12px" /></td>
+              </tr>
+            {/each}
+          {:else}
+            {#each shown as d (d.id)}
+              <tr class="link" data-row aria-label={d.name} onclick={() => router.go(`/datasets/${d.id}`)}>
+                <td><a class="name" href={href(`/datasets/${d.id}`)} onclick={(e) => e.stopPropagation()}>{d.name}</a></td>
+                <td class="hide-md faint">{d.format}</td>
+                <td class="hide-lg path-cell"><span class="path mono truncate" title={d.path}>{d.path}</span></td>
+                <td class="r num">{num(d.splits.train)}</td>
+                <td class="r num muted">{num(d.splits.val)}</td>
+                <td class="r num muted">{num(d.splits.test)}</td>
+                <td title={classTip(d)}>
+                  {#if d.stats}<div class="strip"><ClassStrip counts={d.stats.class_counts} classes={d.classes} /></div>{:else}<span class="faint">—</span>{/if}
+                </td>
+                <td class="r num hide-md">{compact(d.stats?.boxes)}</td>
+                <td class="r faint hide-md">{ago(d.created)}</td>
+              </tr>
+            {/each}
+          {/if}
+        </tbody>
+      </table>
+    </div>
+    <!-- Phones: two-line rows (name and one meta line, the image count and class balance on the right). -->
+    {#if shown.length}
       <ul class="rows" aria-label="Datasets">
-        {#each datasets.data ?? [] as d (d.id)}
+        {#each shown as d (d.id)}
           <li>
             <a href={href(`/datasets/${d.id}`)}>
               <span class="m-main">
@@ -144,16 +170,20 @@
   .scroll {
     overflow-x: auto;
   }
-  .ds td {
-    height: 40px;
+  .toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+    flex-wrap: wrap;
   }
-  .name {
-    font-weight: var(--weight-medium);
+  .count {
+    font-size: var(--type-sm-size);
+    color: var(--text-tertiary);
   }
-  .name:hover {
-    text-decoration: underline;
-    text-underline-offset: 3px;
-    text-decoration-color: var(--line-strong);
+  .search {
+    width: 280px;
+    max-width: 100%;
   }
   /* The path takes what the row has left, cut with an ellipsis (the full path is in the title). */
   .path-cell {
@@ -181,8 +211,16 @@
     }
   }
   @media (max-width: 767px) {
-    .scroll {
+    /* Phones show the rows below; the table frame stays only to hold an empty or error state. */
+    .scroll:not(.state),
+    .scroll.state thead {
       display: none;
+    }
+    .search {
+      width: 100%;
+    }
+    .rows .name {
+      font-weight: var(--weight-medium);
     }
     .rows {
       display: block;

@@ -19,6 +19,7 @@
   import { router } from '$lib/router.svelte';
   import Kbd from '$lib/ui/Kbd.svelte';
   import type { IconType } from '$lib/ui/types';
+  import { rememberFocus } from '$lib/ui/focus';
   import { fuzzy, highlight } from './commands';
   import { mainNav, settingsNav } from './nav';
 
@@ -43,8 +44,11 @@
   let datasets = $state.raw<Dataset[]>([]);
   let models = $state.raw<Model[]>([]);
 
+  // Focus returns to the opener on close; a command that navigates then hands it to the new page (App).
+  let restore: (() => void) | null = null;
   $effect(() => {
     if (open && !el.open) {
+      restore = rememberFocus();
       el.showModal();
       query = '';
       index = 0;
@@ -175,7 +179,11 @@
   bind:this={el}
   class="palette"
   aria-label="Command palette"
-  onclose={() => (open = false)}
+  onclose={() => {
+    open = false;
+    restore?.();
+    restore = null;
+  }}
   onclick={(e) => {
     if (e.target === el) el.close();
   }}
@@ -353,7 +361,7 @@
     height: 36px;
     padding: 0 var(--space-4);
     border-top: 1px solid var(--line-subtle);
-    font-size: var(--type-xs-size);
+    font-size: var(--type-sm-size);
     color: var(--text-tertiary);
   }
   footer span {

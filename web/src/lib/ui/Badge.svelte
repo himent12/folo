@@ -15,7 +15,7 @@
     height: 20px;
     padding: 0 6px;
     border-radius: var(--radius-sm);
-    font-size: var(--type-xs-size);
+    font-size: var(--type-sm-size);
     font-weight: var(--weight-medium);
     line-height: 1;
     white-space: nowrap;

@@ -108,7 +108,7 @@ function profiles(t0: number): RunProfile[] {
     {
       id: 'run_7d1e',
       name: 'fasteners-s',
-      config: config('fasteners-s', 'ds_fasteners', 'folo-s', 100),
+      config: config('fasteners-s', 'ds_fasteners', 'folo-s', 100, { weights: 'm_coco_s' }),
       classes: 8,
       classEase: FASTENER_EASE,
       stepsPerEpoch: 120,
@@ -163,7 +163,7 @@ function profiles(t0: number): RunProfile[] {
     {
       id: 'run_5be3',
       name: 'shapes-hard-s',
-      config: config('shapes-hard-s', 'ds_shapes_hard', 'folo-s', 100),
+      config: config('shapes-hard-s', 'ds_shapes_hard', 'folo-s', 100, { weights: 'm_coco_s' }),
       classes: 6,
       classEase: [1.1, 1.05, 1, 0.82, 0.95, 0.75],
       stepsPerEpoch: 250,

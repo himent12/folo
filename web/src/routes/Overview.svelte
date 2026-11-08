@@ -1,5 +1,4 @@
 <script lang="ts">
-  import ChartSkeleton from '$lib/charts/ChartSkeleton.svelte';
   import ArrowRight from '@lucide/svelte/icons/arrow-right';
   import Activity from '@lucide/svelte/icons/activity';
   import Box from '@lucide/svelte/icons/box';
@@ -24,6 +23,7 @@
   import Progress from '$lib/ui/Progress.svelte';
   import Skeleton from '$lib/ui/Skeleton.svelte';
   import StatusBadge from '$lib/ui/StatusBadge.svelte';
+  import TableState from '$lib/ui/TableState.svelte';
   import LiveRunCard from './overview/LiveRunCard.svelte';
 
   setCrumbs({ label: 'Overview' });
@@ -66,11 +66,7 @@
 </script>
 
 <Page title="Overview">
-
-  {#if offline}
-    <!-- The same connection-error composition as every other screen, in the frame the page would fill. -->
-    <Panel><ErrorState error={runs.error} retry={retryAll} /></Panel>
-  {:else if fresh}
+  {#if fresh}
     <!-- A fresh install: one path forward instead of a page of empty panels. -->
     <section class="onboard" aria-labelledby="onboard-title">
       <div class="ob-head">
@@ -80,10 +76,10 @@
       <ol class="steps">
         <li class="on">
           <span class="n">1</span>
-          <div><b>Add a dataset</b><span>Register a YOLO or COCO folder, or generate a synthetic shapes set in seconds.</span></div>
+          <div><b>Add a dataset</b><span>Register a YOLO or COCO folder, or generate a sample set of shapes in seconds.</span></div>
           <div class="ob-actions">
             <Button variant="primary" icon={Plus} href={href('/datasets?add=folder')}>Add dataset</Button>
-            <Button href={href('/datasets?add=synthetic')}>Generate sample</Button>
+            <Button href={href('/datasets?add=synthetic')}>Generate sample set</Button>
           </div>
         </li>
         <li>
@@ -98,7 +94,10 @@
     </section>
   {:else}
     <div class="live">
-      {#if runs.error && !runs.data}
+      {#if offline}
+        <!-- One failure behind every request: said once, where the live run would be; the panels below keep their frames. -->
+        <Panel title="Training"><ErrorState error={runs.error} retry={retryAll} compact /></Panel>
+      {:else if runs.error && !runs.data}
         <Panel title="Training"><ErrorState error={runs.error} retry={() => runs.refresh()} compact /></Panel>
       {:else if !runs.data}
         <!-- The live card itself with placeholder values, so nothing jumps when it arrives. -->
@@ -117,45 +116,13 @@
         </Panel>
       {/if}
     </div>
-  <div class="cols">
-    <div class="col-main">
-      <Panel title="Recent runs" meta={runs.data ? `${recent.length} of ${runs.data.length}` : undefined} pad="none" id="recent-runs">
-        {#snippet actions()}<Button size="sm" variant="ghost" iconRight={ArrowRight} href={href('/runs')}>All runs</Button>{/snippet}
-        {#if runs.error && !runs.data}
-          <ErrorState error={runs.error} retry={() => runs.refresh()} />
-        {:else if !runs.data}
-          <!-- The loaded table itself (header, six 48 px rows, the same columns), with placeholder cells. -->
-          <div class="scroll" aria-busy="true" aria-label="Loading recent runs">
-            <table class="table" aria-hidden="true">
-              <thead>
-                <tr>
-                  <th>Run</th>
-                  <th>Status</th>
-                  <th class="hide-sm">Progress</th>
-                  <th class="r">mAP50-95</th>
-                  <th class="hide-sm">mAP trend</th>
-                  <th class="r hide-sm">Created</th>
-                </tr>
-              </thead>
-              <tbody>
-                {#each [0, 1, 2, 3, 4, 5] as i (i)}
-                  <tr>
-                    <td><span class="l-20"><Skeleton w="112px" h="12px" /></span><span class="l-16"><Skeleton w="88px" h="10px" /></span></td>
-                    <td><Skeleton w="72px" h="12px" /></td>
-                    <td class="hide-sm"><div class="prog"><Skeleton h="4px" /><span><Skeleton w="40px" h="10px" /></span></div></td>
-                    <td class="r"><span class="l-20 end"><Skeleton w="40px" h="12px" /></span></td>
-                    <td class="hide-sm"><Skeleton w="88px" h="12px" /></td>
-                    <td class="r hide-sm"><span class="l-20 end"><Skeleton w="56px" h="12px" /></span></td>
-                  </tr>
-                {/each}
-              </tbody>
-            </table>
-          </div>
-        {:else if recent.length === 0}
-          <EmptyState icon={Activity} title="No runs yet" description="Runs you start appear here with their progress and best mAP." />
-        {:else}
+    <div class="cols">
+      <div class="col-main">
+        <Panel title="Recent runs" meta={runs.data ? `${recent.length} of ${runs.data.length}` : undefined} pad="none" id="recent-runs">
+          {#snippet actions()}<Button size="sm" variant="ghost" iconRight={ArrowRight} href={href('/runs')}>All runs</Button>{/snippet}
+          <!-- The table frame in every state: placeholder rows while loading, the message inside it when there is nothing. -->
           <div class="scroll">
-            <table class="table">
+            <table class="table tall" aria-busy={!runs.data} aria-label="Recent runs">
               <thead>
                 <tr>
                   <th>Run</th>
@@ -167,109 +134,132 @@
                 </tr>
               </thead>
               <tbody>
-                {#each recent as r (r.id)}
-                  <tr class="link" onclick={() => router.go(`/runs/${r.id}`)}>
-                    <td>
-                      <a class="run-name" href={href(`/runs/${r.id}`)} onclick={(e) => e.stopPropagation()}>{r.name}</a>
-                      <span class="run-sub">{dsById.get(r.config.dataset_id)?.name ?? r.config.dataset_id} · {r.config.arch}</span>
-                    </td>
-                    <td use:tooltip={failureCause(r)}><StatusBadge status={r.status} plain /></td>
-                    <td class="hide-sm">
-                      <div class="prog">
-                        <Progress value={r.epoch / r.epochs} size="xs" tone={r.status === 'running' ? 'accent' : 'neutral'} label="{r.name} progress" />
-                        <span class="num faint">{r.epoch}/{r.epochs}</span>
-                      </div>
-                    </td>
-                    <td class="r num">{metric(r.best?.map50_95)}</td>
-                    <td class="hide-sm"><RunSpark run={r} /></td>
-                    <td class="r faint hide-sm">{ago(r.created)}</td>
-                  </tr>
-                {/each}
+                {#if offline}
+                  <TableState cols={6} rows={4}><p class="quiet">Recent runs show here once the server answers.</p></TableState>
+                {:else if runs.error && !runs.data}
+                  <TableState cols={6} rows={4}><ErrorState error={runs.error} retry={() => runs.refresh()} /></TableState>
+                {:else if !runs.data}
+                  {#each [0, 1, 2, 3, 4, 5] as i (i)}
+                    <tr aria-hidden="true">
+                      <td><span class="l-20"><Skeleton w="112px" h="12px" /></span><span class="l-16"><Skeleton w="88px" h="10px" /></span></td>
+                      <td><Skeleton w="72px" h="12px" /></td>
+                      <td class="hide-sm"><div class="prog"><Skeleton h="4px" /><span><Skeleton w="40px" h="10px" /></span></div></td>
+                      <td class="r"><span class="l-20 end"><Skeleton w="40px" h="12px" /></span></td>
+                      <td class="hide-sm"><Skeleton w="88px" h="12px" /></td>
+                      <td class="r hide-sm"><span class="l-20 end"><Skeleton w="56px" h="12px" /></span></td>
+                    </tr>
+                  {/each}
+                {:else if recent.length === 0}
+                  <TableState cols={6} rows={4}>
+                    <EmptyState icon={Activity} title="No runs yet" description="Runs you start appear here with their progress and best mAP." />
+                  </TableState>
+                {:else}
+                  {#each recent as r (r.id)}
+                    <tr class="link" onclick={() => router.go(`/runs/${r.id}`)}>
+                      <td>
+                        <a class="run-name" href={href(`/runs/${r.id}`)} onclick={(e) => e.stopPropagation()}>{r.name}</a>
+                        <span class="sub">{dsById.get(r.config.dataset_id)?.name ?? r.config.dataset_id} · {r.config.arch}</span>
+                      </td>
+                      <td use:tooltip={failureCause(r)}><StatusBadge status={r.status} plain /></td>
+                      <td class="hide-sm">
+                        <div class="prog">
+                          <Progress value={r.epoch / r.epochs} size="xs" tone={r.status === 'running' ? 'accent' : 'neutral'} label="{r.name} progress" />
+                          <span class="num faint">{r.epoch}/{r.epochs}</span>
+                        </div>
+                      </td>
+                      <td class="r num">{metric(r.best?.map50_95)}</td>
+                      <td class="hide-sm"><RunSpark run={r} /></td>
+                      <td class="r faint hide-sm">{ago(r.created)}</td>
+                    </tr>
+                  {/each}
+                {/if}
               </tbody>
             </table>
           </div>
-        {/if}
-      </Panel>
+        </Panel>
+      </div>
+      <div class="col-side">
+        <Panel title="Best model per dataset" pad="none" id="best-models">
+          {#snippet actions()}<Button size="sm" variant="ghost" iconRight={ArrowRight} href={href('/models')}>All models</Button>{/snippet}
+          {#if offline}
+            <p class="quiet pad">The best model of each dataset shows here.</p>
+          {:else if models.error && !models.data}
+            <ErrorState error={models.error} retry={() => models.refresh()} />
+          {:else if !models.data}
+            <!-- The loaded list's rows (dataset, name, meta; mAP on the right) at their height. -->
+            <ul class="models" aria-busy="true" aria-label="Loading models">
+              {#each [0, 1, 2, 3] as i (i)}
+                <li aria-hidden="true">
+                  <span class="m-row">
+                    <span class="m-text">
+                      <span class="l-20"><Skeleton w="64px" h="10px" /></span>
+                      <span class="l-20"><Skeleton w="128px" h="12px" /></span>
+                      <span class="l-20"><Skeleton w="152px" h="10px" /></span>
+                    </span>
+                    <span class="m-map"><span class="l-20 end"><Skeleton w="40px" h="12px" /></span><span class="l-16 end"><Skeleton w="56px" h="10px" /></span></span>
+                  </span>
+                </li>
+              {/each}
+            </ul>
+          {:else if topModels.length === 0}
+            <EmptyState icon={Box} title="No models yet" description="Finished runs save their best weights here." />
+          {:else}
+            <ul class="models">
+              {#each topModels as { m, ds } (m.id)}
+                <li>
+                  <a href={href(`/models/${m.id}`)}>
+                    <span class="m-text">
+                      <span class="m-ds truncate">{ds}</span>
+                      <span class="m-name truncate">{m.name}</span>
+                      <span class="m-sub num">{m.arch} · {m.classes.length} classes · {bytes(m.bytes, prefs.units)}</span>
+                    </span>
+                    <span class="m-map">
+                      <span class="num">{metric(m.metrics?.map50_95)}</span>
+                      <span class="m-cap">mAP50-95</span>
+                    </span>
+                  </a>
+                </li>
+              {/each}
+            </ul>
+          {/if}
+        </Panel>
+        <Panel title="Datasets" meta={datasets.data ? String(datasets.data.length) : undefined} pad="none" id="datasets">
+          {#snippet actions()}<Button size="sm" variant="ghost" iconRight={ArrowRight} href={href('/datasets')}>All datasets</Button>{/snippet}
+          {#if offline}
+            <p class="quiet pad">Registered datasets show here with their class balance.</p>
+          {:else if datasets.error && !datasets.data}
+            <ErrorState error={datasets.error} retry={() => datasets.refresh()} compact />
+          {:else if !datasets.data}
+            <ul class="dslist" aria-busy="true" aria-label="Loading datasets">
+              {#each [0, 1, 2] as i (i)}
+                <li aria-hidden="true">
+                  <span class="d-sk">
+                    <span class="d-row"><span class="l-20"><Skeleton w="96px" h="12px" /></span><span class="l-20"><Skeleton w="128px" h="10px" /></span></span>
+                    <Skeleton h="4px" r="2px" />
+                  </span>
+                </li>
+              {/each}
+            </ul>
+          {:else if datasets.data.length === 0}
+            <EmptyState icon={Images} title="No datasets registered" description="Register a YOLO or COCO folder, or generate a sample set of shapes." />
+          {:else}
+            <ul class="dslist">
+              {#each datasets.data.slice(0, 6) as d (d.id)}
+                <li>
+                  <a href={href(`/datasets/${d.id}`)}>
+                    <span class="d-row">
+                      <span class="d-name truncate">{d.name}</span>
+                      <span class="d-nums num">{compact(total(d))} images · {d.classes.length} classes</span>
+                    </span>
+                    {#if d.stats}<ClassStrip counts={d.stats.class_counts} classes={d.classes} height={4} />{/if}
+                  </a>
+                </li>
+              {/each}
+            </ul>
+          {/if}
+        </Panel>
+      </div>
     </div>
-    <div class="col-side">
-      <Panel title="Best model per dataset" pad="none" id="best-models">
-        {#snippet actions()}<Button size="sm" variant="ghost" iconRight={ArrowRight} href={href('/models')}>All models</Button>{/snippet}
-        {#if models.error && !models.data}
-          <ErrorState error={models.error} retry={() => models.refresh()} />
-        {:else if !models.data}
-          <!-- The loaded list's rows (dataset, name, meta; mAP on the right) at their height. -->
-          <ul class="models" aria-busy="true" aria-label="Loading models">
-            {#each [0, 1, 2, 3] as i (i)}
-              <li aria-hidden="true">
-                <span class="m-row">
-                  <span class="m-text">
-                    <span class="l-20"><Skeleton w="64px" h="10px" /></span>
-                    <span class="l-20"><Skeleton w="128px" h="12px" /></span>
-                    <span class="l-20"><Skeleton w="152px" h="10px" /></span>
-                  </span>
-                  <span class="m-map"><span class="l-20 end"><Skeleton w="40px" h="12px" /></span><span class="l-16 end"><Skeleton w="48px" h="8px" /></span></span>
-                </span>
-              </li>
-            {/each}
-          </ul>
-        {:else if topModels.length === 0}
-          <EmptyState icon={Box} title="No models yet" description="Finished runs save their best weights here." />
-        {:else}
-          <ul class="models">
-            {#each topModels as { m, ds } (m.id)}
-              <li>
-                <a href={href(`/models/${m.id}`)}>
-                  <span class="m-text">
-                    <span class="m-ds truncate">{ds}</span>
-                    <span class="m-name truncate">{m.name}</span>
-                    <span class="m-sub num">{m.arch} · {m.classes.length} classes · {bytes(m.bytes, prefs.units)}</span>
-                  </span>
-                  <span class="m-map">
-                    <span class="num">{metric(m.metrics?.map50_95)}</span>
-                    <span class="m-cap">mAP50-95</span>
-                  </span>
-                </a>
-              </li>
-            {/each}
-          </ul>
-        {/if}
-      </Panel>
-      <Panel title="Datasets" meta={datasets.data ? String(datasets.data.length) : undefined} pad="none" id="datasets">
-        {#snippet actions()}<Button size="sm" variant="ghost" iconRight={ArrowRight} href={href('/datasets')}>All datasets</Button>{/snippet}
-        {#if datasets.error && !datasets.data}
-          <ErrorState error={datasets.error} retry={() => datasets.refresh()} compact />
-        {:else if !datasets.data}
-          <ul class="dslist" aria-busy="true" aria-label="Loading datasets">
-            {#each [0, 1, 2] as i (i)}
-              <li aria-hidden="true">
-                <span class="d-sk">
-                  <span class="d-row"><span class="l-20"><Skeleton w="96px" h="12px" /></span><span class="l-20"><Skeleton w="128px" h="10px" /></span></span>
-                  <Skeleton h="4px" r="2px" />
-                </span>
-              </li>
-            {/each}
-          </ul>
-        {:else if datasets.data.length === 0}
-          <EmptyState icon={Images} title="No datasets registered" description="Register a YOLO or COCO folder, or generate a synthetic shapes set." />
-        {:else}
-          <ul class="dslist">
-            {#each datasets.data.slice(0, 6) as d (d.id)}
-              <li>
-                <a href={href(`/datasets/${d.id}`)}>
-                  <span class="d-row">
-                    <span class="d-name truncate">{d.name}</span>
-                    <span class="d-nums num">{compact(total(d))} images · {d.classes.length} classes</span>
-                  </span>
-                  {#if d.stats}<ClassStrip counts={d.stats.class_counts} classes={d.classes} height={4} />{/if}
-                </a>
-              </li>
-            {/each}
-          </ul>
-        {/if}
-      </Panel>
-    </div>
-  </div>
-
   {/if}
 </Page>
 
@@ -386,21 +376,14 @@
   }
   .run-name {
     display: block;
-    font-weight: var(--weight-medium);
   }
-  .run-name:hover {
-    text-decoration: underline;
-    text-underline-offset: 3px;
-    text-decoration-color: var(--line-strong);
-  }
-  .run-sub {
-    display: block;
-    font-size: var(--type-sm-size);
+  /* In place of a panel's content while the server is unreachable (the error is said once, in Training). */
+  .quiet {
+    padding: var(--space-5) var(--space-4);
     color: var(--text-tertiary);
-    line-height: var(--type-sm-line);
   }
-  .table td {
-    height: 48px;
+  .quiet.pad {
+    padding: 0 var(--space-4) var(--space-4);
   }
   .prog {
     display: flex;
@@ -455,7 +438,8 @@
     font-weight: var(--weight-medium);
   }
   .m-cap {
-    font-size: var(--type-micro-size);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
     color: var(--text-tertiary);
   }
   .dslist {
@@ -507,15 +491,19 @@
     .cols {
       grid-template-columns: minmax(0, 1fr);
     }
-    /* Laptop: the rail's two lists side by side under the main column. */
-    .col-side {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      align-items: start;
-    }
   }
-  @media (max-width: 767px) {
-    .col-side {
-      grid-template-columns: minmax(0, 1fr);
+  /* Laptop and tablet: the rail's two panels stack full width under Recent runs (as Datasets is on desktop), each
+     laying its entries out side by side, so neither panel stops halfway beside a taller one. */
+  @media (min-width: 768px) and (max-width: 1199px) {
+    .models,
+    .dslist {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      column-gap: var(--space-4);
+    }
+    /* Model entries carry three lines and a score: two columns keep them readable (and pairs even). */
+    .models {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
     }
   }
   @media (max-width: 767px) {

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, type Component } from 'svelte';
+  import { onMount, tick, type Component } from 'svelte';
   import { hub } from '$lib/api/index.svelte';
   import { prefs } from '$lib/prefs.svelte';
   import { router, type RouteName } from '$lib/router.svelte';
@@ -10,6 +10,7 @@
   import SidebarLive from '$lib/shell/SidebarLive.svelte';
   import TabBar from '$lib/shell/TabBar.svelte';
   import Topbar from '$lib/shell/Topbar.svelte';
+  import { focusRoute, isNewPage } from '$lib/shell/routeFocus';
   import { installShortcuts } from '$lib/shell/shortcuts';
   import Toaster from '$lib/ui/Toaster.svelte';
   import Dataset from './routes/Dataset.svelte';
@@ -54,6 +55,16 @@
     });
   });
 
+  // A new page takes focus (its heading) once it has rendered; a query change on the same page leaves focus alone.
+  let mainEl: HTMLElement;
+  let shownPath = router.route.path;
+  $effect(() => {
+    const path = router.route.path;
+    if (!isNewPage(shownPath, path)) return;
+    shownPath = path;
+    void tick().then(() => requestAnimationFrame(() => focusRoute(mainEl)));
+  });
+
   const Screen = $derived(router.route.name === 'not-found' ? null : screens[router.route.name]);
 </script>
 
@@ -65,7 +76,7 @@
   </Sidebar>
   <div class="main">
     <Topbar onsearch={() => (paletteOpen = true)} />
-    <main id="content" tabindex="-1">
+    <main id="content" tabindex="-1" bind:this={mainEl}>
       {#key router.route.path}
         {#if Screen}
           <Screen />

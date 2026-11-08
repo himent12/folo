@@ -12,6 +12,8 @@
     pattern?: 'dash' | 'dot' | 'dashdot';
     /** Fill the area under the line. */
     area?: boolean;
+    /** A 1 px line: a secondary series in ink beside the focal one. */
+    thin?: boolean;
     /** Thin, recessive line (e.g. raw values under a smoothed line); hidden from legend and tooltip. */
     ghost?: boolean;
     /**
@@ -517,7 +519,7 @@
             {#each paths as { s, a } (s.id)}
               {#if a}
                 <linearGradient id="{uid}-{s.id}" x1="0" x2="0" y1="0" y2="1">
-                  <stop offset="0" style:stop-color={s.color} stop-opacity="0.1" />
+                  <stop offset="0" style:stop-color={s.color} stop-opacity="0.08" />
                   <stop offset="1" style:stop-color={s.color} stop-opacity="0" />
                 </linearGradient>
               {/if}
@@ -537,6 +539,7 @@
               class="line"
               class:dashed={s.dashed}
               class:dotted={s.pattern === 'dot'}
+              class:thin={s.thin}
               class:ghost={s.ghost}
               class:context={s.context}
               class:emphasis={s.emphasis || (highlight !== null && s.id === highlight)}
@@ -707,6 +710,9 @@
   /* Dots carry less ink than a line: a heavier stroke keeps a dotted series as findable as a solid one. */
   .line.dotted {
     stroke-width: 2.25;
+  }
+  .line.thin {
+    stroke-width: 1;
   }
   .line.emphasis {
     stroke-width: 2.75;

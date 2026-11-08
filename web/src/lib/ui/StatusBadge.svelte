@@ -49,7 +49,7 @@
     border-radius: var(--radius-full);
     background: var(--bg);
     color: var(--c);
-    font-size: var(--type-xs-size);
+    font-size: var(--type-sm-size);
     font-weight: var(--weight-medium);
     line-height: 1;
     white-space: nowrap;

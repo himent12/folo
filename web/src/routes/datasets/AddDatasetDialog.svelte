@@ -131,14 +131,14 @@
   });
 </script>
 
-<Dialog bind:open title="Add dataset" description="Register a folder the server can read, or generate a synthetic set to try FOLO.">
+<Dialog bind:open title="Add dataset" description="Register a folder the server can read, or generate a sample set of shapes to try FOLO.">
   <div class="tabs">
     <Tabs
       label="How to add"
       idPrefix="{uid}-mode"
       tabs={[
         { value: 'folder', label: 'Register folder' },
-        { value: 'synthetic', label: 'Generate synthetic' },
+        { value: 'synthetic', label: 'Generate sample set' },
       ]}
       bind:value={mode}
       onchange={reset}

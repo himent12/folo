@@ -26,7 +26,7 @@
     { id: 'connection', label: 'Connection' },
     { id: 'appearance', label: 'Appearance' },
     { id: 'units', label: 'Units' },
-    { id: 'shortcuts', label: 'Keyboard' },
+    { id: 'shortcuts', label: 'Shortcuts' },
     { id: 'about', label: 'About' },
   ];
 
@@ -110,23 +110,10 @@
   }
 </script>
 
-<Page title="Settings">
+<Page title="Settings" narrow>
   {#snippet sub()}<span>Preferences are stored in this browser.</span>{/snippet}
 
   <div class="layout">
-    <nav class="toc" aria-label="Settings sections">
-      {#each sections as s (s.id)}<a
-          href="#/settings"
-          class:on={current === s.id}
-          aria-current={current === s.id ? 'location' : undefined}
-          onclick={(e) => {
-            e.preventDefault();
-            current = s.id;
-            document.getElementById(s.id)?.scrollIntoView({ block: 'start' });
-          }}>{s.label}</a
-        >{/each}
-    </nav>
-
     <div class="col">
       <Panel title="Connection" id="connection" divided>
         <div class="stack">
@@ -269,13 +256,27 @@
         </dl>
       </Panel>
     </div>
+    <nav class="toc" aria-label="Settings sections">
+      <p class="toc-title">On this page</p>
+      {#each sections as s (s.id)}<a
+          href="#/settings"
+          class:on={current === s.id}
+          aria-current={current === s.id ? 'location' : undefined}
+          onclick={(e) => {
+            e.preventDefault();
+            current = s.id;
+            document.getElementById(s.id)?.scrollIntoView({ block: 'start' });
+          }}>{s.label}</a
+        >{/each}
+    </nav>
   </div>
 </Page>
 
 <style>
+  /* The form column (720) and a sticky rail of section anchors on its right, centred as one 920 px measure. */
   .layout {
     display: grid;
-    grid-template-columns: 168px minmax(0, 720px);
+    grid-template-columns: minmax(0, 720px) 168px;
     gap: var(--space-8);
     align-items: start;
   }
@@ -284,6 +285,14 @@
     top: calc(var(--size-topbar) + var(--space-6));
     display: grid;
     gap: 2px;
+    padding-left: var(--space-3);
+    border-left: 1px solid var(--line-subtle);
+  }
+  .toc-title {
+    padding: 0 var(--space-2) var(--space-1);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--text-tertiary);
   }
   .toc a {
     display: flex;
@@ -365,9 +374,14 @@
   .url-row :global(.input) {
     flex: 1;
   }
+  /* The typed URL is an identifier (mono); the placeholder is a sentence, so it stays in Geist. */
   .url-row :global(.mono-input input) {
     font-family: var(--font-mono);
     font-size: var(--type-sm-size);
+  }
+  .url-row :global(.mono-input input::placeholder) {
+    font-family: var(--font-sans);
+    font-size: var(--type-base-size);
   }
   .test {
     display: flex;

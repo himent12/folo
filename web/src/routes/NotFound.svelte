@@ -1,37 +1,22 @@
 <script lang="ts">
   import Crosshair from '@lucide/svelte/icons/crosshair';
   import { router, href } from '$lib/router.svelte';
+  import Page from '$lib/shell/Page.svelte';
   import { setCrumbs } from '$lib/shell/crumbs.svelte';
   import Button from '$lib/ui/Button.svelte';
   import EmptyState from '$lib/ui/EmptyState.svelte';
+  import Panel from '$lib/ui/Panel.svelte';
 
   $effect(() => setCrumbs({ label: 'Not found' }));
 </script>
 
-<div class="nf">
-<EmptyState
-  centered
-  icon={Crosshair}
-  title="Nothing in frame"
-  description={`There is no page at ${router.route.path}. It may have moved, or the link is wrong.`}
->
-  {#snippet actions()}
-    <Button href={href('/')}>Go to Overview</Button>
-  {/snippet}
-</EmptyState>
-</div>
-
-<style>
-  .nf {
-    display: grid;
-    place-items: center;
-    min-height: calc(100dvh - var(--size-topbar) - var(--space-12));
-    padding: var(--space-6);
-  }
-  .nf > :global(.empty) {
-    width: min(480px, 100%);
-    background: var(--bg-panel);
-    border: 1px solid var(--line-default);
-    border-radius: var(--radius-lg);
-  }
-</style>
+<!-- The same page frame and inline empty state as every other screen: title, then the message where content would be. -->
+<Page title="Not found">
+  <Panel pad="none">
+    <EmptyState icon={Crosshair} title="Nothing in frame" description={`There is no page at ${router.route.path}. It may have moved, or the link is wrong.`}>
+      {#snippet actions()}
+        <Button href={href('/')}>Go to Overview</Button>
+      {/snippet}
+    </EmptyState>
+  </Panel>
+</Page>

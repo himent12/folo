@@ -9,6 +9,7 @@
     lead,
     children,
     wide = false,
+    narrow = false,
     inlineActions = false,
   }: {
     title: string;
@@ -19,16 +20,22 @@
     lead?: Snippet;
     children: Snippet;
     wide?: boolean;
+    /** A form page: one centred 920 px measure (column and rail), the title on the column's edge. */
+    narrow?: boolean;
     /** Phones: keep the actions beside the title block instead of wrapping them onto a row of their own. */
     inlineActions?: boolean;
   } = $props();
+
+  /** Only the title: on phones the top bar shows it, so the header takes no room and content starts at the gutter. */
+  const bare = $derived(!sub && !actions && !lead);
 </script>
 
-<div class="page" class:wide>
-  <header class:inline={inlineActions}>
+<div class="page" class:wide class:narrow>
+  <header class:inline={inlineActions} class:bare>
     <div class="titles">
       {#if lead}<div class="lead">{@render lead()}</div>{/if}
-      <h1>{title}</h1>
+      <!-- Route changes move focus here (App), so the new page is announced by its name. -->
+      <h1 tabindex="-1" data-route-focus>{title}</h1>
       {#if sub}<div class="sub">{@render sub()}</div>{/if}
     </div>
     {#if actions}<div class="actions">{@render actions()}</div>{/if}
@@ -49,6 +56,9 @@
   }
   .page.wide {
     max-width: none;
+  }
+  .page.narrow {
+    max-width: calc(920px + 2 * var(--space-6));
   }
   header {
     display: flex;
@@ -107,6 +117,11 @@
     header.inline .actions {
       flex-wrap: nowrap;
       flex-shrink: 0;
+    }
+    /* A title-only header leaves no empty slot (and no gap after it): the first content sits 16 px under the bar. */
+    header.bare,
+    header.bare .titles {
+      display: contents;
     }
     /* The top bar shows the title on phones; the heading stays for assistive tech and the outline. */
     h1 {

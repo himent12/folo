@@ -1,8 +1,7 @@
 <script lang="ts">
   /**
    * An empty state in place of the content it stands for: the small viewfinder mark inline, a one-line title, one
-   * useful sentence and one action, starting at the content's left edge. `centered` is for a page that is empty as a
-   * whole (Not found), where centring is the point.
+   * useful sentence and one action, starting at the content's left edge. Every empty state uses it, Not found too.
    */
   import type { Snippet } from 'svelte';
   import type { IconType } from './types';
@@ -12,17 +11,16 @@
     title,
     description,
     actions,
-    centered = false,
-  }: { icon?: IconType; title: string; description?: string; actions?: Snippet; centered?: boolean } = $props();
+  }: { icon?: IconType; title: string; description?: string; actions?: Snippet } = $props();
 </script>
 
-<div class="empty" class:centered class:bare={!Icon}>
+<div class="empty" class:bare={!Icon}>
   {#if Icon}
     <div class="mark" aria-hidden="true">
       <span class="corner tl"></span><span class="corner tr"></span><span class="corner bl"></span><span
         class="corner br"
       ></span>
-      <Icon size={centered ? 16 : 14} strokeWidth={1.75} />
+      <Icon size={14} strokeWidth={1.75} />
     </div>
   {/if}
   <p class="title">{title}</p>
@@ -107,34 +105,5 @@
     flex-wrap: wrap;
     gap: var(--space-2);
     margin-top: var(--space-3);
-  }
-
-  /* A whole page with nothing in it: one centred column. */
-  .centered {
-    grid-template-columns: minmax(0, 1fr);
-    justify-items: center;
-    row-gap: var(--space-1);
-    text-align: center;
-    padding: var(--space-10) var(--space-6);
-  }
-  .centered .mark {
-    width: 32px;
-    height: 32px;
-    margin-bottom: var(--space-2);
-  }
-  .centered .corner {
-    width: 7px;
-    height: 7px;
-  }
-  .centered .title {
-    font-size: var(--type-md-size);
-    line-height: var(--type-md-line);
-  }
-  .centered .desc {
-    max-width: 360px;
-    text-wrap: balance;
-  }
-  .centered .actions {
-    justify-content: center;
   }
 </style>

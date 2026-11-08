@@ -5,7 +5,7 @@
   import Search from '@lucide/svelte/icons/search';
   import { hub } from '$lib/api/index.svelte';
   import { Resource } from '$lib/api/resource.svelte';
-  import type { Run, RunStatus } from '$lib/api/types';
+  import type { Model, Run, RunStatus } from '$lib/api/types';
   import RunSpark from '$lib/charts/RunSpark.svelte';
   import { ago, duration, metric } from '$lib/format';
   import { failureCause } from '$lib/oom';
@@ -21,8 +21,11 @@
   import Progress from '$lib/ui/Progress.svelte';
   import Segmented from '$lib/ui/Segmented.svelte';
   import { runProgress } from '$lib/api/progress';
+  import { rowNav } from '$lib/ui/rowNav';
   import Skeleton from '$lib/ui/Skeleton.svelte';
   import StatusBadge from '$lib/ui/StatusBadge.svelte';
+  import TableState from '$lib/ui/TableState.svelte';
+  import { origin } from './runs/lineage';
 
   setCrumbs({ label: 'Runs' });
 
@@ -37,6 +40,11 @@
   const runs = new Resource((s) => hub.api.runs(s), { poll: 3000 });
   const datasets = new Resource((s) => hub.api.datasets(s));
   const dsName = $derived(new Map((datasets.data ?? []).map((d) => [d.id, d.name])));
+  // Only to name the model a run was fine-tuned from; the list renders without it.
+  const models = new Resource((s) => hub.api.models(s));
+  const modelById = $derived(new Map<string, Model>((models.data ?? []).map((m) => [m.id, m])));
+  /** Columns of the desktop table (for state rows that span it). */
+  const COLS = 11;
 
   let filter = $state<Filter>((router.route.query.get('status') as Filter | null) ?? 'all');
   let query = $state('');
@@ -105,39 +113,60 @@
   </div>{/if}
 
   <Panel pad="none">
-    {#if runs.error && !runs.data}
-      <ErrorState error={runs.error} retry={() => runs.refresh()} title="Could not load runs" />
-    {:else if !runs.data}
-      <div class="sk">{#each [0, 1, 2, 3, 4] as i (i)}<Skeleton h="22px" />{/each}</div>
-    {:else if runs.data.length === 0}
-      <EmptyState icon={Activity} title="No runs yet" description="Start one to watch its loss, mAP and samples stream in live.">
-        {#snippet actions()}<Button icon={Plus} href={href('/runs/new')}>New run</Button>{/snippet}
-      </EmptyState>
-    {:else if shown.length === 0}
-      <EmptyState icon={Search} title="No runs match" description="Try another status filter or search term.">
-        {#snippet actions()}<Button size="sm" onclick={() => ((filter = 'all'), (query = ''))}>Clear filters</Button>{/snippet}
-      </EmptyState>
-    {:else}
-      <div class="scroll">
-        <table class="table runs" class:selecting={selected.length > 0}>
-          <thead>
-            <tr>
-              <th class="check"><span class="sr-only">Select for comparison</span></th>
-              <th>Run</th>
-              <th>Status</th>
-              <th class="hide-md">Dataset</th>
-              <th class="hide-md">Model</th>
-              <th>Progress</th>
-              <th class="r">Best mAP50-95</th>
-              <th class="hide-lg">mAP trend</th>
-              <th class="r hide-xl">Duration</th>
-              <th class="r hide-sm">Created</th>
-            </tr>
-          </thead>
-          <tbody>
+    <!-- One table frame for every state: the header row stays, and an empty or failed list says so inside it. -->
+    <div class="scroll" class:state={!runs.data?.length || shown.length === 0}>
+      <table class="table runs" aria-label="Runs" aria-busy={!runs.data} use:rowNav={{ toggle: (row) => toggle(row.dataset.id ?? '') }}>
+        <thead>
+          <tr>
+            <th class="check"><span class="sr-only">Select for comparison</span></th>
+            <th>Run</th>
+            <th>Status</th>
+            <th class="hide-md">Dataset</th>
+            <th class="hide-md">Model</th>
+            <th class="hide-md">Started from</th>
+            <th>Progress</th>
+            <th class="r">Best mAP50-95</th>
+            <th class="hide-lg">mAP trend</th>
+            <th class="r hide-xl">Duration</th>
+            <th class="r hide-sm">Created</th>
+          </tr>
+        </thead>
+        <tbody>
+          {#if runs.error && !runs.data}
+            <TableState cols={COLS}><ErrorState error={runs.error} retry={() => runs.refresh()} title="Could not load runs" /></TableState>
+          {:else if !runs.data}
+            {#each [0, 1, 2, 3, 4] as i (i)}
+              <tr aria-hidden="true">
+                <td class="check"></td>
+                <td class="lead"><Skeleton w="112px" h="12px" /></td>
+                <td><Skeleton w="72px" h="12px" /></td>
+                <td class="hide-md"><Skeleton w="64px" h="12px" /></td>
+                <td class="hide-md"><Skeleton w="48px" h="12px" /></td>
+                <td class="hide-md"><Skeleton w="88px" h="12px" /></td>
+                <td><div class="prog"><Skeleton h="4px" /><span><Skeleton w="40px" h="10px" /></span></div></td>
+                <td class="r"><Skeleton w="72px" h="12px" /></td>
+                <td class="hide-lg"><Skeleton w="96px" h="12px" /></td>
+                <td class="r hide-xl"><Skeleton w="48px" h="12px" /></td>
+                <td class="r hide-sm"><Skeleton w="56px" h="12px" /></td>
+              </tr>
+            {/each}
+          {:else if runs.data.length === 0}
+            <TableState cols={COLS}>
+              <EmptyState icon={Activity} title="No runs yet" description="Start one to watch its loss, mAP and samples stream in live.">
+                {#snippet actions()}<Button icon={Plus} href={href('/runs/new')}>New run</Button>{/snippet}
+              </EmptyState>
+            </TableState>
+          {:else if shown.length === 0}
+            <TableState cols={COLS}>
+              <EmptyState icon={Search} title="No runs match" description="Try another status filter or search term.">
+                {#snippet actions()}<Button size="sm" onclick={() => ((filter = 'all'), (query = ''))}>Clear filters</Button>{/snippet}
+              </EmptyState>
+            </TableState>
+          {:else}
             {#each shown as r (r.id)}
               {@const on = selected.includes(r.id)}
-              <tr class="link" class:on onclick={() => router.go(`/runs/${r.id}`)}>
+              {@const from = origin(r.config.weights, modelById)}
+              <tr class="link" class:on data-row data-id={r.id} aria-label={r.name} onclick={() => router.go(`/runs/${r.id}`)}>
                 <td class="check">
                   <input
                     type="checkbox"
@@ -148,13 +177,22 @@
                     onchange={() => toggle(r.id)}
                   />
                 </td>
-                <td>
+                <td class="lead">
                   <a class="name" href={href(`/runs/${r.id}`)} onclick={(e) => e.stopPropagation()}>{r.name}</a>
-                  <span class="ctx">{dsName.get(r.config.dataset_id) ?? r.config.dataset_id} · <span class="mono">{r.config.arch}</span></span>
+                  <span class="sub ctx">{dsName.get(r.config.dataset_id) ?? r.config.dataset_id} · <span class="mono">{r.config.arch}</span> · from {from.label}</span>
                 </td>
                 <td use:tooltip={failureCause(r)}><StatusBadge status={r.status} plain /></td>
                 <td class="hide-md muted">{dsName.get(r.config.dataset_id) ?? r.config.dataset_id}</td>
                 <td class="hide-md"><span class="mono muted">{r.config.arch}</span></td>
+                <td class="hide-md from">
+                  {#if from.kind === 'model' && modelById.has(from.id)}
+                    <a href={href(`/models/${from.id}`)} onclick={(e) => e.stopPropagation()}>{from.label}</a>
+                  {:else if from.kind === 'file'}
+                    <span class="mono" title={from.path}>{from.label}</span>
+                  {:else}
+                    <span class="faint">{from.label}</span>
+                  {/if}
+                </td>
                 <td>
                   <div class="prog">
                     <Progress value={r.status === 'running' ? runProgress(r) : r.epoch / r.epochs} size="xs" tone={tone(r)} label="{r.name} progress" />
@@ -170,9 +208,11 @@
                 <td class="r faint hide-sm">{ago(r.created)}</td>
               </tr>
             {/each}
-          </tbody>
-        </table>
-      </div>
+          {/if}
+        </tbody>
+      </table>
+    </div>
+    {#if shown.length}
       <!-- Phones: stacked rows with the essentials (selection, name, status, score, progress). -->
       <div class="rows-head">
         <button type="button" class="pick" aria-pressed={choosing} onclick={() => (choosing ? ((picking = false), (selected = [])) : (picking = true))}
@@ -225,22 +265,6 @@
   .scroll {
     overflow-x: auto;
   }
-  .sk {
-    display: grid;
-    gap: var(--space-4);
-    padding: var(--space-4);
-  }
-  .runs td {
-    height: 40px;
-  }
-  /* Selected for comparison: a 2 px accent bar on the row's leading edge. */
-  /* The selection rule: neutral fill and a 2 px accent bar on the left. */
-  .runs tr.on {
-    background: var(--bg-active);
-  }
-  .runs tr.on td:first-child {
-    box-shadow: inset 2px 0 0 var(--accent-line);
-  }
   .check {
     width: 36px;
     padding-right: 0 !important;
@@ -261,12 +285,10 @@
   }
   .name {
     display: block;
-    font-weight: var(--weight-medium);
   }
-  .name:hover {
-    text-decoration: underline;
-    text-underline-offset: 3px;
-    text-decoration-color: var(--line-strong);
+  .from a,
+  .from .mono {
+    color: var(--text-secondary);
   }
   .prog {
     display: flex;
@@ -297,8 +319,6 @@
   }
   .ctx {
     display: none;
-    font-size: var(--type-sm-size);
-    color: var(--text-tertiary);
   }
   @media (max-width: 1439px) {
     .hide-xl {
@@ -317,12 +337,15 @@
     .ctx {
       display: block;
     }
+    /* The name carries dataset, model and origin on a second line: the two-line row height. */
     .runs td {
-      height: 52px;
+      height: 48px;
     }
   }
   @media (max-width: 767px) {
-    .scroll {
+    /* Phones show the stacked rows below; the table frame stays only to hold an empty or error state. */
+    .scroll:not(.state),
+    .scroll.state thead {
       display: none;
     }
     .rows {
@@ -394,6 +417,9 @@
       min-width: 0;
       display: grid;
       gap: 2px;
+    }
+    .r-name .name {
+      font-weight: var(--weight-medium);
     }
     .r-name {
       display: flex;

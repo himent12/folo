@@ -38,9 +38,10 @@
     void live.version;
     return {
       map: [
-        // One run, so ink rather than a hue (hue identifies entities): primary metric solid, secondary tertiary dashed.
+        // One run, so ink rather than a hue (hue identifies entities): the focal metric solid with the page's one area
+        // fill; the secondary a 1 px tertiary dash, so the focal series reads first.
         { id: 'm95', label: 'mAP50-95', color: 'var(--text-primary)', area: true, points: live.epochs.map((e) => ({ x: e.epoch, y: e.val.map50_95 })) },
-        { id: 'm50', label: 'mAP50', color: 'var(--text-tertiary)', pattern: 'dash' as const, points: live.epochs.map((e) => ({ x: e.epoch, y: e.val.map50 })) },
+        { id: 'm50', label: 'mAP50', color: 'var(--text-tertiary)', pattern: 'dash' as const, thin: true, points: live.epochs.map((e) => ({ x: e.epoch, y: e.val.map50 })) },
       ],
       lastStep: live.steps[live.steps.length - 1],
     };
@@ -250,21 +251,43 @@
     .grid > :global(:nth-child(n + 3)) {
       display: none;
     }
-    /* Phones: progress, then the mAP chart, then the stat grid, so evidence comes before detail. */
+    /* Phones: progress, then the mAP chart, then the stat pair, so evidence comes before detail. */
     .stats {
       display: contents;
     }
+    /* The run page's instrument: the epoch on the left, its bar and the time left beside it on the value's line. */
     .epoch {
       order: 1;
+      grid-template-columns: auto minmax(0, 1fr);
+      grid-template-rows: 1fr auto auto;
+      column-gap: var(--space-4);
+      row-gap: var(--space-1);
+    }
+    .epoch > :global(.stat) {
+      grid-row: 1 / -1;
+    }
+    .epoch > :global(.track) {
+      grid-row: 2;
+      grid-column: 2;
+    }
+    .eta {
+      grid-row: 3;
+      grid-column: 2;
+      padding-bottom: var(--space-1);
     }
     .chart {
       order: 2;
     }
+    /* The supporting pair under a hairline, values on one baseline. */
     .grid {
       order: 3;
+      grid-template-columns: 1fr 1fr;
+      gap: var(--space-3);
+      padding-top: var(--space-3);
+      border-top: 1px solid var(--line-subtle);
     }
     header {
-      padding: var(--space-4) var(--space-3) var(--space-3) var(--space-4);
+      padding: var(--space-3) var(--space-3) var(--space-2) var(--space-4);
     }
     .meta span:last-child,
     .meta .sep:nth-last-child(2) {
@@ -272,13 +295,8 @@
     }
     .body {
       grid-template-columns: 1fr;
+      gap: var(--space-4);
       padding: var(--space-1) var(--space-4) var(--space-4);
-    }
-    .stats {
-      grid-template-columns: 1fr;
-    }
-    .grid {
-      grid-template-columns: 1fr 1fr;
     }
   }
 </style>

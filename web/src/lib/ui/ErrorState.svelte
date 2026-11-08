@@ -110,7 +110,7 @@
     margin-top: 2px;
     font-family: var(--font-mono);
     color: var(--text-tertiary);
-    font-size: var(--type-xs-size);
+    font-size: var(--type-sm-size);
   }
   .code .line {
     display: block;

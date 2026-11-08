@@ -43,8 +43,8 @@
       padding: var(--space-1-5) 0 var(--space-1);
       border-radius: var(--radius-md);
       color: var(--text-tertiary);
-      font-size: var(--type-micro-size);
-      line-height: var(--type-micro-line);
+      font-size: var(--type-sm-size);
+      line-height: var(--type-sm-line);
       font-weight: var(--weight-medium);
     }
     a.active {

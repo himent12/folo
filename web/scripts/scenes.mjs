@@ -244,7 +244,7 @@ export const scenes = [
   { name: 'runs', path: '/runs' },
   { name: 'models', path: '/models', viewports: ['desktop', 'laptop', 'mobile'] },
   { name: 'models-empty', path: '/models', search: 'scenario=empty' },
-  { name: 'models-error', path: '/models', search: 'scenario=error', viewports: ['desktop'] },
+  { name: 'models-error', path: '/models', search: 'scenario=error', viewports: ['desktop', 'mobile'] },
   { name: 'models-loading', path: '/models', search: 'scenario=loading', viewports: ['desktop', 'laptop', 'mobile'] },
   {
     // Phones open on the Curves section (the matrix is behind the section picker).
@@ -406,8 +406,47 @@ export const scenes = [
   { name: 'settings', path: '/settings', viewports: ['desktop', 'laptop', 'mobile'] },
   { name: 'overview-empty', path: '/', search: 'scenario=empty', viewports: ['desktop', 'mobile'] },
   { name: 'overview-loading', path: '/', search: 'scenario=loading', viewports: ['desktop', 'laptop', 'mobile'] },
-  { name: 'overview-error', path: '/', search: 'scenario=error', viewports: ['desktop'] },
-  { name: 'runs-empty', path: '/runs', search: 'scenario=empty', themes: ['dark'], viewports: ['desktop'] },
+  { name: 'overview-error', path: '/', search: 'scenario=error', viewports: ['desktop', 'mobile'] },
+  { name: 'runs-empty', path: '/runs', search: 'scenario=empty', viewports: ['desktop', 'mobile'] },
+  // Empty and error states sit in the table frame (header row, the message inside, a few rows tall).
+  { name: 'runs-error', path: '/runs', search: 'scenario=error', viewports: ['desktop', 'mobile'] },
+  { name: 'datasets-error', path: '/datasets', search: 'scenario=error', viewports: ['desktop'] },
+  {
+    name: 'datasets-nomatch',
+    path: '/datasets',
+    themes: ['light'],
+    viewports: ['desktop'],
+    setup: async (page) => {
+      await until(page, 'input[aria-label="Filter datasets"]');
+      await page.fill('input[aria-label="Filter datasets"]', 'zebra');
+    },
+  },
+  {
+    // Keyboard rows: J moves a roving focus over the rows, X selects the focused run for Compare.
+    name: 'runs-keyboard',
+    path: '/runs',
+    fullPage: false,
+    viewports: ['desktop'],
+    setup: async (page) => {
+      await until(page, 'tr[data-row]');
+      await page.keyboard.press('j');
+      await page.keyboard.press('j');
+      await page.keyboard.press('x');
+      await page.keyboard.press('j');
+      await page.keyboard.press('x');
+    },
+  },
+  {
+    // The engine benchmarks, opened from their one-line summary under the inventory.
+    name: 'models-bench',
+    path: '/models',
+    viewports: ['desktop', 'mobile'],
+    setup: async (page) => {
+      await until(page, 'details.bench summary');
+      await page.locator('details.bench summary').click();
+      await page.mouse.move(0, 0);
+    },
+  },
   { name: 'run-loading', path: '/runs/run_7d1e', search: 'scenario=loading', themes: ['dark'], viewports: ['desktop', 'laptop'] },
   {
     name: 'palette-open',
@@ -456,5 +495,5 @@ export const scenes = [
       await page.locator('#run-chart .legend .note.at').waitFor({ state: 'visible', timeout: 3000 });
     },
   },
-  { name: 'not-found', path: '/nope', themes: ['dark'], viewports: ['desktop'] },
+  { name: 'not-found', path: '/nope', viewports: ['desktop', 'mobile'] },
 ];
