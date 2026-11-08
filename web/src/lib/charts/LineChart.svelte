@@ -240,6 +240,7 @@
     else if (e.key === 'End') i = s.points.length - 1;
     else if (e.key === 'Escape') {
       cursor = null;
+      spoken = '';
       return;
     } else return;
     e.preventDefault();

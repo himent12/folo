@@ -25,6 +25,20 @@ describe('LineChart announcements', () => {
       svg.dispatchEvent(new PointerEvent('pointermove', { clientX: 10, bubbles: true }));
       flushSync();
       expect(live.textContent).toBe('');
+      // End → Escape → End announces again (Escape clears the region, so the same text is new).
+      const key = (k: string) => svg.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true }));
+      key('End');
+      flushSync();
+      await tick();
+      await tick();
+      key('Escape');
+      flushSync();
+      expect(live.textContent).toBe('');
+      key('End');
+      flushSync();
+      await tick();
+      await tick();
+      expect(live.textContent).toContain('Epoch 3');
     }
     unmount(c);
   });
