@@ -682,6 +682,7 @@ impl FoloApp {
             c.readout = false;
             // Same x ticks in all four charts.
             c.x_ticks = Some(6);
+            c.ease_key = crate::charts::ease_key(&r.id);
             c
         };
         // Short windows keep both primary charts on screen.

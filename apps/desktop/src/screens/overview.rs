@@ -124,7 +124,7 @@ impl FoloApp {
             .when_some(strip, |d, s| d.child(s))
             // Narrow windows stack the two lists full width rather than squeeze the runs table.
             .map(|d| {
-                if window.viewport_size().width < px(1200.) {
+                if window.viewport_size().width < px(1280.) {
                     d.child(div().flex().child(recent)).child(div().flex().child(models))
                 } else {
                     d.child(
@@ -199,6 +199,7 @@ impl FoloApp {
                 );
                 map.x_range = Some((0., total));
                 map.x_int = true;
+                map.ease_key = crate::charts::ease_key(&r.id);
                 map.y_range = Some((0., 1.));
                 map.y_ticks = 4;
                 map.y_fmt = Some(|v| format!("{v:.2}"));
@@ -539,11 +540,11 @@ impl FoloApp {
     fn recent_runs(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
         // Dataset and architecture fit when the list is wide: beside Best models at 1500+, or
-        // full width when the two lists stack (below 1200).
+        // full width when the two lists stack (below 1280).
         let vw = window.viewport_size().width;
-        let wide = vw >= px(1500.) || vw < px(1200.);
+        let wide = vw >= px(1500.) || vw < px(1280.);
         // Beside Best models below 1500 the list is too narrow for Created as well.
-        let created = vw >= px(1500.) || vw < px(1200.);
+        let created = wide;
         let now = self.store.api.now();
         let all = self.view_all("ov-runs-all", Route::Runs, window, cx);
         let header = panel_header(&t, "Recent runs").child(all);

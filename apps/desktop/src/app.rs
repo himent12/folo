@@ -2076,10 +2076,17 @@ thread_local! {
 fn reveal(b: gpui::Bounds<Pixels>, window: &mut Window) {
     let Some(handles) = REVEAL.with(|r| r.borrow_mut().take()) else { return };
     let margin = px(8.);
+    // The innermost clip around the control: only a container that contains it owns the control
+    // (a dialog's fixed header and footer sit outside the scrolling body).
+    let mask = window.content_mask().bounds;
+    let tol = px(1.);
     for h in handles {
         let vp = h.bounds();
-        let cx = b.center().x;
-        if vp.size.width <= px(0.) || cx < vp.left() || cx > vp.right() {
+        let inside = mask.left() >= vp.left() - tol
+            && mask.right() <= vp.right() + tol
+            && mask.top() >= vp.top() - tol
+            && mask.bottom() <= vp.bottom() + tol;
+        if vp.size.width <= px(0.) || !inside {
             continue;
         }
         let dy = if b.top() - margin < vp.top() {

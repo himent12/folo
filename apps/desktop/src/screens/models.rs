@@ -69,7 +69,16 @@ impl FoloApp {
             .when(params_col, |d| d.child(num_cell(72., th(&t, "Params"))))
             .child(self.sort_th("size", "Size", 72., true, window, cx))
             .child(self.sort_th("created", "Created", 84., true, window, cx));
-        let src = self.store.models.ready().map_or(0, |v| v.as_ptr() as usize);
+        // Keyed by the list's content (ids and the sorted fields), so a reload or another backend
+        // with the same length never reuses a stale order.
+        let src = self.store.models.ready().map_or(0, |v| {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            for m in v {
+                (&m.id, &m.created, m.bytes, m.metrics.as_ref().map(|x| x.map50_95.to_bits())).hash(&mut h);
+            }
+            h.finish() as usize
+        });
         let models = models.map(|m| {
             let Some((k, desc)) = self.models_sort else { return m };
             let key = (src, m.len(), k, desc);
@@ -651,6 +660,7 @@ impl FoloApp {
         chart.x_name = "recall";
         chart.axis_titles = Some(("Recall", "Precision"));
         chart.x_ticks = Some(4);
+        chart.ease_key = crate::charts::ease_key(&m.id);
         // As tall as the confusion matrix beside it (its rows set the panel height).
         chart.height = (32. * ev.confusion.len() as f32 + 76.).max(220.);
         chart.hover = self.pr_hover;
