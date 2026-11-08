@@ -135,7 +135,9 @@ export class LiveRun {
         // attempt. Ask again.
         if (gen !== this.#gen) return sync();
         loadApplied = my;
-        this.#absorb(snap.claim() ? snap.run : (this.run ?? snap.run), metrics.steps, metrics.epochs, seq);
+        // Final only if the server said so in this same response (its snapshot), not because the run ended since.
+        const final = !ACTIVE.includes(snap.run.status);
+        this.#absorb(snap.claim() ? snap.run : (this.run ?? snap.run), metrics.steps, metrics.epochs, seq, final);
         // Still replaying a resumed run: ask again shortly, until its new steps have replaced the old ones.
         if (this.#replay && this.run && ACTIVE.includes(this.run.status)) {
           clearTimeout(replayTimer);
@@ -170,6 +172,7 @@ export class LiveRun {
           if (closed) return;
           this.#statusSeq++;
           this.#lastStatus = { status, error };
+          const prev = this.run?.status;
           // Finished → active again: the run was resumed (here or elsewhere).
           if (this.run && !ACTIVE.includes(this.run.status) && ACTIVE.includes(status)) {
             this.#rewind();
@@ -177,10 +180,11 @@ export class LiveRun {
           }
           if (this.run) this.run = { ...this.run, status, error };
           if (!ACTIVE.includes(status)) {
-            if (this.#replay) {
-              // A resumed attempt that ended before passing the old one: the server's final history settles it.
-              // Requests issued during the replay may still hold the interrupted attempt: invalidate them.
-              this.#replay = null;
+            // The run ended: the server's final history settles it. Requests issued before may hold a partial
+            // history (or, during a replay, the interrupted attempt): invalidate them and fetch the final one.
+            const wasActive = this.#replay !== null || (prev !== undefined && ACTIVE.includes(prev));
+            this.#replay = null;
+            if (wasActive) {
               this.#gen++;
               sync();
             }
@@ -296,7 +300,7 @@ export class LiveRun {
   }
 
   /** Merges a snapshot + history into what the stream has delivered so far, never moving backwards. */
-  #absorb(run: Run, steps: Step[], epochs: Epoch[], statusSeqAtStart: number) {
+  #absorb(run: Run, steps: Step[], epochs: Epoch[], statusSeqAtStart: number, final: boolean) {
     // During a replay the new attempt's streamed steps / epochs are certain: re-apply them over the history.
     if (this.#replay) {
       for (const r of this.#replay.steps) [steps, epochs] = replaceFrom(steps, epochs, r);
@@ -304,7 +308,7 @@ export class LiveRun {
     }
     // The history is the server's word up to its last step / epoch. Beyond it, a live run keeps what the stream
     // delivered (newer than the file); a finished run's history is final, so anything beyond it is obsolete.
-    const live = ACTIVE.includes(run.status);
+    const live = !final;
     const hs = steps[steps.length - 1]?.step ?? 0;
     const he = epochs[epochs.length - 1]?.epoch ?? 0;
     this.steps = [...steps, ...(live ? this.steps.filter((s) => s.step > hs) : [])];

@@ -375,8 +375,8 @@ describe('LiveRun resume', () => {
     expect(live.run?.status).toBe('queued');
     late.resolve({ ...snapshot, status: 'stopped', step: 4, epoch: 2 });
     await vi.advanceTimersByTimeAsync(0);
-    expect(live.run?.status).toBe('queued');
-    expect(live.run?.step).toBe(2);
+    // The late 'stopped' snapshot is ignored (progress follows the server's history, which is fetched again).
+    expect(live.run?.status).not.toBe('stopped');
     stop();
   });
 
@@ -425,6 +425,33 @@ describe('LiveRun resume', () => {
     a.resolve({ steps: [at(1, 1), at(2, 1), at(3, 2), at(4, 2)], epochs: [ep(1)] as never });
     await vi.advanceTimersByTimeAsync(0);
     expect(live.steps.map((s) => s.step)).toEqual([1, 2, 3, 4, 5]);
+    stop();
+  });
+
+  it('keeps the final steps when a partial history lands after the run completed', async () => {
+    let live!: LiveRun;
+    serverStatus = 'running';
+    const stop = $effect.root(() => {
+      live = new LiveRun(() => 'run_7d1e');
+    });
+    flushSync();
+    await vi.advanceTimersByTimeAsync(0);
+    // Request A (while running) captures a partial history and is slow.
+    const a = deferred<RunMetrics>();
+    gate = a.promise;
+    handlers.reconnect?.();
+    // The run finishes: last step, last epoch, completed; the server's final history has them.
+    handlers.step?.(at(5, 3));
+    history = { steps: [at(1, 1), at(2, 1), at(3, 2), at(4, 2), at(5, 3)], epochs: [ep(1), ep(2), ep(3)] as never };
+    serverStatus = 'completed';
+    handlers.epoch?.(ep(3) as never);
+    handlers.status?.({ status: 'completed', error: null });
+    await vi.advanceTimersByTimeAsync(0);
+    a.resolve({ steps: [at(1, 1), at(2, 1)], epochs: [] });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.steps.map((s) => s.step)).toEqual([1, 2, 3, 4, 5]);
+    expect(live.epochs.map((e) => e.epoch)).toEqual([1, 2, 3]);
+    expect(live.run?.status).toBe('completed');
     stop();
   });
 });
