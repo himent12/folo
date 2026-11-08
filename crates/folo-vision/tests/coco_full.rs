@@ -43,10 +43,9 @@ fn run(path: &Path) -> Result<(), String> {
                 let class = t[4].as_u64().unwrap() as u32;
                 if t.len() > 5 {
                     CocoTruth {
-                        bbox: b,
-                        class,
                         iscrowd: t[5].as_u64().unwrap() == 1,
                         area: t[6].as_f64().unwrap(),
+                        ..CocoTruth::from_box(b, class)
                     }
                 } else {
                     CocoTruth::from_box(b, class)

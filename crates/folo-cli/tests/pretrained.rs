@@ -115,6 +115,26 @@ fn weights_names_export_and_coco_val() {
     );
     assert!(std::fs::metadata(&exported).unwrap().len() < std::fs::metadata(&best).unwrap().len());
 
+    // A fused file cannot be exported back to (trainable) weights.
+    let fused = root.join("base-f16.folo");
+    let (code, _, stderr) = folo(&cache, &["export", "--json", "--model", s(&best), "--output", s(&fused)]);
+    assert_eq!(code, 0, "{stderr}");
+    let (code, lines, _) = folo(
+        &cache,
+        &[
+            "export",
+            "--json",
+            "--model",
+            s(&fused),
+            "--format",
+            "weights",
+            "--output",
+            s(&root.join("x.folo")),
+        ],
+    );
+    assert_eq!(code, 2);
+    assert_eq!(lines.last().unwrap()["error"]["code"], "usage");
+
     // Put it in the cache under a published name: list sees it, train / val resolve the name.
     std::fs::create_dir_all(&cache).unwrap();
     std::fs::copy(&exported, cache.join("folo-n-coco.folo")).unwrap();

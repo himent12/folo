@@ -2,7 +2,10 @@
 
 mod coco;
 
-pub use coco::{CocoAnnotation, CocoGroundTruth, CocoImage, coco_annotation_files, read_coco_ground_truth};
+pub use coco::{
+    CocoAnnotation, CocoGroundTruth, CocoImage, coco_annotation_files, open_coco_ground_truth,
+    read_coco_ground_truth,
+};
 pub(crate) mod labels;
 pub(crate) mod yolo;
 

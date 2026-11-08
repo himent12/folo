@@ -36,8 +36,9 @@ const ALL_BITS: u16 = (1 << NUM_IOU_THRESHOLDS) - 1;
 /// One ground-truth annotation.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CocoTruth {
-    /// The box, `xyxy`, in the same coordinates as the detections.
-    pub bbox: Xyxy,
+    /// The box as COCO stores it, `[x, y, w, h]` in f64 (the annotation file's numbers, not rounded to f32, so IoUs
+    /// near a threshold come out exactly as pycocotools computes them), in the same coordinates as the detections.
+    pub xywh: [f64; 4],
     /// Class index.
     pub class: u32,
     /// The annotation's `area` (COCO instances: the segmentation area), used for the area buckets.
@@ -47,9 +48,11 @@ pub struct CocoTruth {
 }
 
 impl CocoTruth {
-    /// A regular (non-crowd) truth whose area is its box area.
-    pub fn from_box(bbox: Xyxy, class: u32) -> Self {
-        CocoTruth { bbox, class, area: box_area(&bbox), iscrowd: false }
+    /// A regular (non-crowd) truth from an `xyxy` box, whose area is its box area.
+    pub fn from_box(b: Xyxy, class: u32) -> Self {
+        let (x, y) = (b.x1 as f64, b.y1 as f64);
+        let (w, h) = (b.x2 as f64 - x, b.y2 as f64 - y);
+        CocoTruth { xywh: [x, y, w, h], class, area: w * h, iscrowd: false }
     }
 }
 
@@ -268,7 +271,7 @@ impl CocoEval {
         ious.clear();
         for d in ds {
             for g in gs {
-                ious.push(iou_crowd(&d.bbox, &g.bbox, g.iscrowd));
+                ious.push(iou_crowd(&d.bbox, &g.xywh, g.iscrowd));
             }
         }
         let mut recs: Vec<Rec> = ds
@@ -458,22 +461,25 @@ fn accumulate(
     (ap, recall)
 }
 
-/// pycocotools' `bbIou` in f64: against a crowd region the union is the detection's area.
+/// pycocotools' `bbIou` in f64 on `xywh` boxes, operation for operation (`x + w` as the right edge): against a
+/// crowd region the union is the detection's area. A detection is `[x1, y1, x2 - x1, y2 - y1]` in f64, which is
+/// what a COCO results file written by `folo val --save-json` holds.
 #[inline]
-fn iou_crowd(d: &Xyxy, g: &Xyxy, crowd: bool) -> f64 {
-    let (dx1, dy1, dx2, dy2) = (d.x1 as f64, d.y1 as f64, d.x2 as f64, d.y2 as f64);
-    let (gx1, gy1, gx2, gy2) = (g.x1 as f64, g.y1 as f64, g.x2 as f64, g.y2 as f64);
-    let w = dx2.min(gx2) - dx1.max(gx1);
+fn iou_crowd(d: &Xyxy, g: &[f64; 4], crowd: bool) -> f64 {
+    let (dx, dy) = (d.x1 as f64, d.y1 as f64);
+    let (dw, dh) = (d.x2 as f64 - dx, d.y2 as f64 - dy);
+    let [gx, gy, gw, gh] = *g;
+    let w = (dw + dx).min(gw + gx) - dx.max(gx);
     if w <= 0.0 {
         return 0.0;
     }
-    let h = dy2.min(gy2) - dy1.max(gy1);
+    let h = (dh + dy).min(gh + gy) - dy.max(gy);
     if h <= 0.0 {
         return 0.0;
     }
     let inter = w * h;
-    let da = (dx2 - dx1) * (dy2 - dy1);
-    let union = if crowd { da } else { da + (gx2 - gx1) * (gy2 - gy1) - inter };
+    let da = dw * dh;
+    let union = if crowd { da } else { da + gw * gh - inter };
     inter / union
 }
 
@@ -514,7 +520,7 @@ mod tests {
     fn crowd_absorbs_detections() {
         // A crowd region with a regular truth inside it. Extra detections inside the crowd are ignored, not FPs.
         let truths = [
-            CocoTruth { bbox: Xyxy::new(0.0, 0.0, 400.0, 400.0), class: 0, area: 1e5, iscrowd: true },
+            CocoTruth { xywh: [0.0, 0.0, 400.0, 400.0], class: 0, area: 1e5, iscrowd: true },
             CocoTruth::from_box(Xyxy::new(10.0, 10.0, 60.0, 60.0), 0),
         ];
         let dets = [
@@ -531,6 +537,24 @@ mod tests {
         let mut ev = CocoEval::new(1);
         ev.add_image(1, &dets, &truths[1..]);
         assert!(ev.compute().ap < 0.6);
+    }
+
+    #[test]
+    fn truth_geometry_stays_f64() {
+        // pycocotools: IoU of [0, 0, 10, 20] with the truth [0, 0, 20.0000001, 20] is 0.4999999975 < 0.5, a FP.
+        // Rounded to f32 the truth would be 20 wide and the IoU exactly 0.5, a TP.
+        let truth =
+            CocoTruth { xywh: [0.0, 0.0, 20.0000001, 20.0], class: 0, area: 400.000002, iscrowd: false };
+        let mut ev = CocoEval::new(1);
+        ev.add_image(1, &[det(0.0, 0.0, 10.0, 20.0, 0.9, 0)], &[truth]);
+        assert_eq!(ev.compute().ap50, 0.0);
+        let mut ev = CocoEval::new(1);
+        ev.add_image(
+            1,
+            &[det(0.0, 0.0, 10.0, 20.0, 0.9, 0)],
+            &[CocoTruth::from_box(Xyxy::new(0.0, 0.0, 20.0, 20.0), 0)],
+        );
+        assert!(ev.compute().ap50 > 0.999);
     }
 
     #[test]
