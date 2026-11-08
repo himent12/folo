@@ -18,7 +18,7 @@ const st = (over: Partial<DatasetStats> = {}): DatasetStats => ({
   empty_images: 0,
   broken_labels: 0,
   class_counts: [1000, 1000, 1000],
-  box_size_hist: { edges: [0, 0.0025, 0.01, 1], counts: [10, 990, 2000] },
+  box_size_hist: { edges: [0, 0.05, 0.1, 1], counts: [10, 990, 2000] },
   boxes_per_image_hist: { edges: [0, 1, 2, 4], counts: [0, 500, 500] },
   ...over,
 });
@@ -46,7 +46,7 @@ describe('healthChecks', () => {
   });
 
   it('flags a tiny-box share above 10%', () => {
-    const h = healthChecks(ds(), st({ box_size_hist: { edges: [0, 0.0025, 0.01, 1], counts: [400, 600, 2000] } }));
+    const h = healthChecks(ds(), st({ box_size_hist: { edges: [0, 0.05, 0.1, 1], counts: [400, 600, 2000] } }));
     expect(h.find((x) => x.id === 'tiny')?.title).toBe('13% of boxes are tiny');
   });
 
@@ -61,10 +61,10 @@ describe('healthChecks', () => {
 });
 
 describe('labels', () => {
-  it('labels box-size bins in percent of image area', () => {
-    const edges = [0, 0.0025, 0.005, 0.01, 0.02, 0.16, 0.32, 1];
+  it('labels box-size bins in percent of the image side', () => {
+    const edges = [0, 0.02, 0.05, 0.1, 0.15, 0.2, 0.3, 0.5, 1];
     const labels = edges.slice(0, -1).map((lo, i) => sizeBinLabel(lo, edges[i + 1] ?? 1));
-    expect(labels).toEqual(['<0.25%', '0.25–0.5%', '0.5–1%', '1–2%', '2–16%', '16–32%', '≥32%']);
+    expect(labels).toEqual(['<2%', '2–5%', '5–10%', '10–15%', '15–20%', '20–30%', '30–50%', '≥50%']);
   });
 
   it('labels integer count bins', () => {

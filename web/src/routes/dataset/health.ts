@@ -13,8 +13,9 @@ export interface HealthItem {
 
 /** Imbalance (largest / smallest class) above which we warn. */
 export const IMBALANCE_WARN = 5;
-/** Boxes smaller than this fraction of the image area count as tiny (≈32 px square at 640). */
-export const TINY_AREA = 0.0025;
+/** Boxes whose relative size (sqrt of the area share, as in docs/API.md) is below this count as tiny: 5% of the
+ * image side, about 32 px at 640. */
+export const TINY_SIZE = 0.05;
 /** Share of tiny boxes above which we warn. */
 export const TINY_WARN = 0.1;
 /** Share of empty (background) images above which we warn. */
@@ -90,13 +91,13 @@ export function healthChecks(d: Dataset, s: DatasetStats): HealthItem[] {
     });
   }
 
-  const tiny = shareBelow(s.box_size_hist, TINY_AREA);
+  const tiny = shareBelow(s.box_size_hist, TINY_SIZE);
   if (tiny > TINY_WARN) {
     out.push({
       id: 'tiny',
       severity: 'warning',
       title: `${share(tiny)} of boxes are tiny`,
-      detail: 'They cover under 0.25% of the image (about 32 px square at 640). Train at a larger image size or tile large images.',
+      detail: 'They are under 5% of the image side (about 32 px at 640). Train at a larger image size or tile large images.',
     });
   }
 
@@ -150,7 +151,7 @@ function pctNum(x: number): string {
   return String(Number(p.toFixed(p < 1 ? 2 : p < 10 ? 1 : 0)));
 }
 
-/** Box-size bin label in % of image area: "<0.25%", "1–2%", "≥32%". */
+/** Box-size bin label in % of the image side: "<2%", "10–15%", "≥50%". */
 export function sizeBinLabel(lo: number, hi: number): string {
   if (lo <= 0) return `<${pctNum(hi)}%`;
   if (hi >= 1) return `≥${pctNum(lo)}%`;

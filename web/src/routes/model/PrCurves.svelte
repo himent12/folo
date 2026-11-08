@@ -1,6 +1,6 @@
 <script lang="ts">
   /** Precision-recall curves per class with a toggle list, plus the mean over all classes drawn emphasised. */
-  import type { Evaluation } from '$lib/api/mock/evaluation';
+  import type { Evaluation } from '$lib/api/evaluation';
   import LineChart, { type Series } from '$lib/charts/LineChart.svelte';
   import { classColor } from '$lib/design/tokens';
   import { metric } from '$lib/format';

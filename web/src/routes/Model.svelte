@@ -3,10 +3,10 @@
   import Download from '@lucide/svelte/icons/download';
   import ScanSearch from '@lucide/svelte/icons/scan-search';
   import { hub } from '$lib/api/index.svelte';
-  import { synthEvaluation } from '$lib/api/mock/evaluation';
+  import { fromModelEval } from '$lib/api/evaluation';
   import { archInfo } from '$lib/api/mock/runs';
   import { Resource } from '$lib/api/resource.svelte';
-  import type { ClassMetrics, Dataset, Model, Run } from '$lib/api/types';
+  import type { Dataset, Model, Run } from '$lib/api/types';
   import ConfusionMatrix from '$lib/charts/ConfusionMatrix.svelte';
   import { classColor } from '$lib/design/tokens';
   import { ago, bytes, compact, date, metric, ms, num } from '$lib/format';
@@ -31,50 +31,19 @@
     setCrumbs({ label: 'Models', path: '/models' }, { label: model.data?.name ?? id });
   });
 
-  // Evaluation context from the source run: per-class AP and the validation class counts of its dataset.
-  interface Context {
-    run: Run | null;
-    dataset: Dataset | null;
-    perClass: ClassMetrics[] | null;
-    instances: number[] | null;
-  }
+  // The source run and its dataset, for the provenance links.
   const runId = $derived(model.data?.run_id ?? null);
-  const target = $derived(model.data?.metrics?.map50_95 ?? null);
-  const context = new Resource<Context>(async (s) => {
+  const context = new Resource<{ run: Run | null; dataset: Dataset | null }>(async (s) => {
     const rid = runId;
-    const best = target;
-    const none: Context = { run: null, dataset: null, perClass: null, instances: null };
-    if (!rid) return none;
-    try {
-      const [run, metrics] = await Promise.all([hub.api.run(rid, s), hub.api.runMetrics(rid, s)]);
-      // The epoch these weights came from (matched by mAP), else the last one.
-      const ep = metrics.epochs.find((e) => best !== null && Math.abs(e.val.map50_95 - best) < 1e-4) ?? metrics.epochs.at(-1);
-      let dataset: Dataset | null = null;
-      try {
-        dataset = await hub.api.dataset(run.config.dataset_id, s);
-      } catch {
-        /* the dataset may have been unregistered; fall back to synthetic counts */
-      }
-      const all = dataset ? dataset.splits.train + dataset.splits.val + dataset.splits.test : 0;
-      const share = dataset && all ? dataset.splits.val / all : 0;
-      return {
-        run,
-        dataset,
-        perClass: ep?.val.per_class ?? null,
-        instances: dataset?.stats && share ? dataset.stats.class_counts.map((c) => c * share) : null,
-      };
-    } catch (e) {
-      if (e instanceof DOMException && e.name === 'AbortError') throw e;
-      return none;
-    }
+    if (!rid) return { run: null, dataset: null };
+    const run = await hub.api.run(rid, s).catch(() => null);
+    const dataset = run ? await hub.api.dataset(run.config.dataset_id, s).catch(() => null) : null;
+    return { run, dataset };
   });
 
-  const ev = $derived.by(() => {
-    const m = model.data;
-    const c = context.data;
-    if (!m || !c) return null;
-    return synthEvaluation({ seed: m.id, classes: m.classes, metrics: m.metrics, perClass: c.perClass, instances: c.instances });
-  });
+  // PR curves, confusion matrix and per-class metrics from GET /api/models/{id}/eval.
+  const evaluation = new Resource((s) => hub.api.modelEval(id, s));
+  const ev = $derived(evaluation.data ? fromModelEval(evaluation.data) : null);
 
   // Large class sets (COCO) get a readable matrix of the most frequent classes.
   const CM_MAX = 12;
@@ -158,6 +127,8 @@
       <Panel title="Precision–recall" meta="IoU 0.5" id="pr">
         {#if ev}
           <PrCurves classes={m.classes} {ev} map50={m.metrics?.map50 ?? null} />
+        {:else if evaluation.error}
+          <ErrorState error={evaluation.error} retry={() => evaluation.refresh()} compact title="Could not load the evaluation" />
         {:else}
           <Skeleton h="300px" />
         {/if}
@@ -165,6 +136,8 @@
       <Panel title="Confusion matrix" meta={cm?.partial ? `top ${CM_MAX} of ${m.classes.length} classes` : undefined} id="cm">
         {#if cm}
           <ConfusionMatrix classes={cm.classes} matrix={cm.matrix} label="Confusion matrix of {m.name}" />
+        {:else if evaluation.error}
+          <p class="foot">No evaluation available.</p>
         {:else}
           <Skeleton h="300px" />
         {/if}
@@ -206,8 +179,7 @@
             </table>
           </div>
           <p class="foot">
-            {#if context.data?.perClass}AP from the run's validation epoch.{:else}Per-class AP estimated from the model's summary metrics.{/if}
-            Curves, confusions and instances are estimated until the server exposes evaluation data.
+            Evaluated on {num(ev.images)} validation images at IoU 0.5; instances are ground-truth boxes per class.
           </p>
         {:else}
           <div class="sk">{#each [0, 1, 2, 3] as i (i)}<Skeleton h="18px" />{/each}</div>

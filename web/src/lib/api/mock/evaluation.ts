@@ -1,10 +1,8 @@
-// STAND-IN: the server does not expose evaluation data yet (PR curves, confusion matrix, per-class instances).
-// Until `GET /api/models/{id}/evaluation` (or similar) exists, the Model view synthesises plausible data here from
-// what the API does give us: the model's summary metrics, its classes and, when it came from a run, the run's
-// per-class AP. Everything is a pure function of its inputs (seeded by the model id), so screenshots are stable.
-// Replace the call site with the real endpoint once folo-server serves it; the output shape is meant to match.
+// Deterministic evaluation data for the mock's `GET /api/models/{id}/eval`: plausible PR curves and a confusion
+// matrix built from what a model has (summary metrics, classes and, when it came from a run, the run's per-class
+// AP). Everything is a pure function of its inputs (seeded by the model id), so screenshots are stable.
 
-import type { ClassMetrics, ModelMetrics } from '../types';
+import type { ClassMetrics, ModelEval, ModelMetrics } from '../types';
 import { hash, rng } from './rng';
 
 export interface ClassEvaluation {
@@ -205,5 +203,27 @@ export function synthEvaluation(input: EvaluationInput): Evaluation {
     curves,
     mean,
     confusion,
+  };
+}
+
+/** The API shape (`ModelEval`): curves resampled at 101 recall points as a non-increasing precision envelope. */
+export function toModelEval(ev: Evaluation, images: number): ModelEval {
+  const pr = ev.curves.map((curve, c) => {
+    const recall: number[] = [];
+    const precision: number[] = [];
+    for (let i = 0; i <= 100; i++) {
+      recall.push(i / 100);
+      precision.push(at(curve, i / 100));
+    }
+    // COCO interpolation: precision at recall r is the max precision at any recall >= r.
+    for (let i = 99; i >= 0; i--) precision[i] = Math.max(precision[i]!, precision[i + 1]!);
+    const rounded = precision.map(r4);
+    return { class: c, recall, precision: rounded, ap50: r4(rounded.reduce((a, b) => a + b, 0) / rounded.length) };
+  });
+  return {
+    pr,
+    confusion: ev.confusion.map((row, r) => row.map((v, c) => (r === row.length - 1 && c === row.length - 1 ? 0 : Math.round(v)))),
+    per_class: ev.perClass.map((c) => ({ class: c.class, map50: pr[c.class]?.ap50 ?? c.ap50, map50_95: c.ap50_95, precision: c.precision, recall: c.recall })),
+    images,
   };
 }

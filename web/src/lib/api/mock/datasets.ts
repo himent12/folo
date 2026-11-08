@@ -161,7 +161,8 @@ export function iou(a: Box, b: Box): number {
   return ua > 0 ? inter / ua : 0;
 }
 
-const SIZE_EDGES = [0, 0.0025, 0.005, 0.01, 0.02, 0.04, 0.08, 0.16, 0.32, 1];
+// Relative box size = sqrt(box area / image area), as in docs/API.md.
+const SIZE_EDGES = [0, 0.02, 0.05, 0.1, 0.15, 0.2, 0.3, 0.5, 1];
 const PER_IMAGE_EDGES = [0, 1, 2, 4, 8, 16, 32, 64];
 
 function bin(edges: number[], v: number): number {
@@ -188,7 +189,7 @@ export function stats(s: MockDatasetSpec): DatasetStats {
     for (const b of img.boxes) {
       boxes++;
       class_counts[b.class]!++;
-      size[bin(SIZE_EDGES, ((b.x2 - b.x1) * (b.y2 - b.y1)) / area)]!++;
+      size[bin(SIZE_EDGES, Math.sqrt(((b.x2 - b.x1) * (b.y2 - b.y1)) / area))]!++;
     }
   }
   const st: DatasetStats = {

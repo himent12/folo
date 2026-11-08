@@ -24,12 +24,16 @@ import type {
   RunMetrics,
   RunSamples,
   Sample,
-  ScoredBox,
   SystemInfo,
   TrainConfig,
   Box,
+  ClassMetrics,
+  LogLine,
+  ModelEval,
+  RunLogs,
 } from '../types';
-import { image, imageIndex, indices, specs, toDataset, total, type MockDatasetSpec } from './datasets';
+import { image, imageIndex, indices, specs, stats, toDataset, total, type MockDatasetSpec } from './datasets';
+import { synthEvaluation, toModelEval } from './evaluation';
 import { renderImage } from './render';
 import { hash, rng, smoothNoise, range } from './rng';
 import {
@@ -205,6 +209,9 @@ function profiles(t0: number): RunProfile[] {
   return list.map((p) => ({ ...p, classNames: names(p.config.dataset_id) }));
 }
 
+/** A prediction before it gets its class name. */
+type Scored = Box & { score: number };
+
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 export class MockApi implements Api {
@@ -249,7 +256,7 @@ export class MockApi implements Api {
   // ---------- system ----------
 
   health(): Promise<Health> {
-    return this.#call(() => ({ status: 'ok' as const, version: '0.1.0', mock: true }), 20);
+    return this.#call(() => ({ status: 'ok' as const, version: '0.1.0', api: 'v1', mock: true }), 20);
   }
 
   system(): Promise<SystemInfo> {
@@ -410,6 +417,28 @@ export class MockApi implements Api {
     });
   }
 
+  modelEval(id: string): Promise<ModelEval> {
+    return this.#call(() => {
+      const m = this.#models().find((x) => x.id === id);
+      if (!m) throw new ApiError(404, 'model_not_found', `No model with id ${id}.`);
+      const p = m.run_id ? this.#runs.find((r) => r.id === m.run_id) : undefined;
+      let perClass: ClassMetrics[] | null = null;
+      let instances: number[] | null = null;
+      let images = 500;
+      if (p) {
+        const best = bestOf(p, Math.floor(progressAt(p, Date.now()).done));
+        perClass = best ? epochAt(p, best.epoch).val.per_class : null;
+        const ds = this.#datasets.find((d) => d.id === p.config.dataset_id);
+        if (ds) {
+          const share = ds.splits.val / Math.max(1, total(ds));
+          instances = stats(ds).class_counts.map((c) => c * share);
+          images = ds.splits.val;
+        }
+      }
+      return toModelEval(synthEvaluation({ seed: m.id, classes: m.classes, metrics: m.metrics, perClass, instances }), images);
+    }, 180);
+  }
+
   exportModel(id: string, format: ExportFormat): Promise<ExportResult> {
     return this.#call(() => {
       const m = this.#models().find((x) => x.id === id);
@@ -485,16 +514,16 @@ export class MockApi implements Api {
     });
   }
 
-  runMetrics(id: string): Promise<RunMetrics> {
+  runMetrics(id: string, _signal?: AbortSignal, every = 4): Promise<RunMetrics> {
     return this.#call(() => {
       const p = this.#profile(id);
       const now = Date.now();
       // A looping run's history restarts with each loop.
       if (p.loop && p.startedAt !== null) {
         const shifted = { ...p, startedAt: loopStart(p, now), loop: false };
-        return history(shifted, now);
+        return history(shifted, now, every);
       }
-      return history(p, now);
+      return history(p, now, every);
     }, 220);
   }
 
@@ -517,7 +546,9 @@ export class MockApi implements Api {
           width: img.width,
           height: img.height,
           truth: img.boxes,
-          pred: predictBoxes(img.boxes, img.width, img.height, quality, hash(p.id) + i * 977 + e * 13, ds.classes.length),
+          pred: predictBoxes(img.boxes, img.width, img.height, quality, hash(p.id) + i * 977 + e * 13, ds.classes.length)
+            .filter((b) => b.score >= 0.25)
+            .map((b) => ({ ...b, name: ds.classes[b.class] ?? `class ${b.class}` })),
         });
       }
       return { epoch: e, samples };
@@ -585,8 +616,15 @@ export class MockApi implements Api {
     };
   }
 
-  /** Log lines so far for a run (the API has no log history endpoint; the mock seeds the view with these). */
-  logHistory(id: string): import('../types').LogLine[] {
+  runLogs(id: string, limit = 500): Promise<RunLogs> {
+    return this.#call(() => {
+      this.#profile(id);
+      return { lines: this.#logHistory(id).slice(-Math.max(1, Math.min(5000, Math.floor(limit)))) };
+    }, 120);
+  }
+
+  /** Log lines so far for a run, reconstructed from its profile and the clock. */
+  #logHistory(id: string): LogLine[] {
     const p = this.#runs.find((r) => r.id === id);
     if (!p || p.startedAt === null) return [];
     const now = Date.now();
@@ -608,7 +646,7 @@ export class MockApi implements Api {
       if (!m) throw new ApiError(404, 'model_not_found', `No model with id ${opts.model_id}.`);
       let width: number;
       let height: number;
-      let boxes: ScoredBox[];
+      let boxes: Scored[];
       const quality = (m.metrics?.map50_95 ?? 0.5) + 0.12;
       if (input.kind === 'dataset') {
         const s = this.#spec(input.dataset_id);
@@ -669,10 +707,10 @@ async function imageSize(file: Blob): Promise<{ width: number; height: number }>
 }
 
 /** Predictions for an image with known ground truth: misses, jitter, confusions and low-score false positives. */
-export function predictBoxes(truth: Box[], W: number, H: number, quality: number, seed: number, classes: number): ScoredBox[] {
+export function predictBoxes(truth: Box[], W: number, H: number, quality: number, seed: number, classes: number): Scored[] {
   const r = rng(seed);
   const q = Math.max(0, Math.min(1, quality));
-  const out: ScoredBox[] = [];
+  const out: Scored[] = [];
   for (const t of truth) {
     if (r() > 0.25 + 0.75 * Math.min(1, q * 1.25)) continue;
     const w = t.x2 - t.x1;
@@ -697,7 +735,7 @@ export function predictBoxes(truth: Box[], W: number, H: number, quality: number
 }
 
 /** Adds lower-scored, slightly shifted copies of some boxes (IoU ≈ 0.75–0.9 with the original). */
-function withDuplicates(boxes: ScoredBox[], W: number, H: number, seed: number): ScoredBox[] {
+function withDuplicates(boxes: Scored[], W: number, H: number, seed: number): Scored[] {
   const r = rng(seed);
   const out = [...boxes];
   for (const b of boxes) {
@@ -711,10 +749,10 @@ function withDuplicates(boxes: ScoredBox[], W: number, H: number, seed: number):
 }
 
 /** Plausible boxes for an uploaded image the mock knows nothing about. */
-function inventBoxes(W: number, H: number, seed: number, classes: number): ScoredBox[] {
+function inventBoxes(W: number, H: number, seed: number, classes: number): Scored[] {
   const r = rng(seed);
   const n = 3 + Math.floor(r() * 6);
-  const out: ScoredBox[] = [];
+  const out: Scored[] = [];
   for (let i = 0; i < n; i++) {
     const w = range(r, W * 0.08, W * 0.35);
     const h = range(r, H * 0.1, H * 0.45);
@@ -725,7 +763,7 @@ function inventBoxes(W: number, H: number, seed: number, classes: number): Score
   return out.sort((a, b) => b.score - a.score);
 }
 
-function clampBox<T extends ScoredBox>(b: T, W: number, H: number): T {
+function clampBox<T extends Scored>(b: T, W: number, H: number): T {
   const x1 = Math.max(0, Math.min(W, b.x1));
   const x2 = Math.max(0, Math.min(W, b.x2));
   const y1 = Math.max(0, Math.min(H, b.y1));

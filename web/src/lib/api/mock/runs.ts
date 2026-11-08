@@ -186,12 +186,14 @@ export function bestOf(p: RunProfile, epochsDone: number): Run['best'] {
   return best;
 }
 
-/** Full metric history up to `now`. Steps are thinned to every `stride`-th step to keep payloads small. */
+/** Full metric history up to `now`: every `stride`-th step plus the latest one, as `/metrics?every=N` does. */
 export function history(p: RunProfile, now: number, stride = 4): { steps: Step[]; epochs: Epoch[] } {
   const { done } = progressAt(p, now);
   const lastStep = Math.floor(done * p.stepsPerEpoch);
+  const every = Math.max(1, Math.floor(stride));
   const steps: Step[] = [];
-  for (let s = 0; s <= lastStep; s += stride) steps.push(stepAt(p, s));
+  for (let s = 0; s <= lastStep; s += every) steps.push(stepAt(p, s));
+  if (lastStep % every !== 0) steps.push(stepAt(p, lastStep));
   const epochs: Epoch[] = [];
   for (let e = 0; e < Math.floor(done); e++) epochs.push(epochAt(p, e));
   return { steps, epochs };

@@ -80,12 +80,12 @@
   </div>
 
   <div class="two even">
-    <Panel title="Box size" meta="% of image area" id="ds-size">
+    <Panel title="Box size" meta="% of image side, √area" id="ds-size">
       <Histogram
         edges={stats.box_size_hist.edges}
         counts={stats.box_size_hist.counts}
         binLabel={(lo, hi) => sizeBinLabel(lo, hi)}
-        label="Histogram of box sizes as a share of the image area"
+        label="Histogram of box sizes relative to the image side (square root of the area share)"
         color="var(--chart-2)"
         height={180}
       />

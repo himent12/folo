@@ -39,6 +39,7 @@ describe('LiveRun ordering', () => {
       mock: false,
       run: () => Promise.resolve({ ...snapshot, status: 'running', step: 2 }),
       runMetrics: () => metrics.promise,
+      runLogs: () => Promise.resolve({ lines: [] }),
       runEvents: (_id, h) => {
         handlers = h;
         return () => {};
