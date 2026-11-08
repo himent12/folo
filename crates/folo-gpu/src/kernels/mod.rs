@@ -7,6 +7,7 @@
 //! (pool size classes); kernels never touch the slack.
 
 pub mod conv;
+pub mod coop;
 pub mod detect;
 pub mod elementwise;
 pub mod ew;

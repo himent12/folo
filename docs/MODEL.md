@@ -787,7 +787,8 @@ Fused inference must match unfused eval-mode inference to `1e-4` relative on the
 Half precision (`Predictor::new_f16`, `folo predict --half`): the fused model is converted to f16 and runs with f16
 weights and activations on a GPU with `shader-f16`; every GEMM, convolution, reduction and softmax accumulates in
 f32, the letterbox writes the f16 input, and the head decode (DFL softmax, sigmoid, boxes) runs in f32 on the f16
-outputs. Its mAP must be within 0.002 of the f32 model's (docs/BENCHMARKS.md).
+outputs. Its mAP must be within 0.002 of the f32 model's (docs/BENCHMARKS.md), with and without tensor cores
+(`--tensor-cores`, docs/GPU.md).
 
 ### 9.2 Letterbox
 For an `h0 × w0` image and target `S` (default `imgsz = 640`): `r = min(S / h0, S / w0)` (upscaling allowed),

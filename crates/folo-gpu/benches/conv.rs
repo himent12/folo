@@ -1,14 +1,22 @@
 //! conv2d throughput at YOLO-typical shapes (N = 8, 64 -> 128 channels, 80x80).
 //!
-//! `cargo bench -p folo-gpu --bench conv`
+//! `cargo bench -p folo-gpu --bench conv`. With `FOLO_GPU_TENSOR_CORES=1` on an adapter that has them, the f16
+//! rows also run on tensor cores, plus folo-n's stem-like convs at batch 16; `FOLO_CONV_TUNE=1` then times every
+//! tensor-core tile config per case.
 
 use std::time::Instant;
 
 use folo_gpu::kernels::conv::{self, Conv2dDesc};
+use folo_gpu::kernels::coop::{self, CoopConfig};
 use folo_gpu::kernels::pooling::Window2d;
 use folo_gpu::{DType, GpuContext, UnaryOp};
 
 fn bench(ctx: &GpuContext, d: &Conv2dDesc) -> (f64, f64) {
+    bench_cfg(ctx, d, None)
+}
+
+/// `cfg`: run the tensor-core kernel explicitly with this tile config instead of `conv::conv2d`.
+fn bench_cfg(ctx: &GpuContext, d: &Conv2dDesc, cfg: Option<CoopConfig>) -> (f64, f64) {
     let (oh, ow) = d.output().unwrap();
     let (kh, kw) = d.win.kernel;
     let es = d.dtype.size() as u64;
@@ -25,7 +33,14 @@ fn bench(ctx: &GpuContext, d: &Conv2dDesc) -> (f64, f64) {
             if i % 8 == 7 {
                 ctx.flush();
             }
-            conv::conv2d(ctx, d, x.raw(), w.raw(), Some(b.raw()), y.raw()).unwrap();
+            match cfg {
+                Some(c) => {
+                    coop::conv2d(ctx, d, d.dtype, x.raw(), w.raw(), Some(b.raw()), y.raw(), Some(c)).unwrap();
+                }
+                None => {
+                    conv::conv2d(ctx, d, x.raw(), w.raw(), Some(b.raw()), y.raw()).unwrap();
+                }
+            }
         }
         ctx.sync().unwrap();
     };
@@ -76,10 +91,55 @@ fn main() {
         println!("{name:<44} {ms:>9.3} {gf:>9.0}");
     }
     if ctx.caps().shader_f16 {
+        let tc = ctx.tensor_cores();
+        ctx.set_tensor_cores(false);
         for (name, d) in &cases {
             let d = Conv2dDesc { dtype: DType::F16, ..d.clone() };
             let (ms, gf) = bench(&ctx, &d);
             println!("{:<44} {ms:>9.3} {gf:>9.0}", format!("f16 {name}"));
+        }
+        ctx.set_tensor_cores(tc);
+    }
+    if !ctx.caps().coop_f16 {
+        println!("tensor cores: {}", ctx.tensor_cores_status());
+        return;
+    }
+    let s2 = Window2d::square(3, 2, 1);
+    let stem = |c_in, h, c_out| Conv2dDesc {
+        n: 16,
+        c_in,
+        h,
+        w: h,
+        c_out,
+        win: s2,
+        dtype: DType::F16,
+        ..base.clone()
+    };
+    let mut tc_cases: Vec<(String, Conv2dDesc)> = cases
+        .iter()
+        .filter(|(_, d)| d.groups == 1)
+        .map(|(n, d)| (format!("tc f16 {n}"), Conv2dDesc { dtype: DType::F16, ..d.clone() }))
+        .collect();
+    tc_cases.push(("tc f16 3x3 s2 16x3x640x640 -> 16".into(), stem(3, 640, 16)));
+    tc_cases.push(("tc f16 3x3 s2 16x16x320x320 -> 32".into(), stem(16, 320, 32)));
+    tc_cases.push(("tc f16 3x3 s2 16x32x160x160 -> 64".into(), stem(32, 160, 64)));
+    for (name, d) in &tc_cases {
+        ctx.set_tensor_cores(false);
+        let (ms0, _) = bench(&ctx, d);
+        ctx.set_tensor_cores(true);
+        let (ms, gf) = bench(&ctx, d);
+        println!("{name:<44} {ms:>9.3} {gf:>9.0}   (regular f16 {ms0:.3} ms)");
+        if std::env::var("FOLO_CONV_TUNE").is_ok() {
+            for c in [
+                CoopConfig::C128X128,
+                CoopConfig::C64X128,
+                CoopConfig::C64X64,
+                CoopConfig::C32X128,
+                CoopConfig::C16X256,
+            ] {
+                let (ms, gf) = bench_cfg(&ctx, d, Some(c));
+                println!("{:<44} {ms:>9.3} {gf:>9.0}", format!("    {}x{}x{}", c.bm, c.bn, c.bk));
+            }
         }
     }
 }

@@ -157,11 +157,11 @@ model size.
 | # | metric (640x640) | incumbent bar (yolo26n) | FOLO config to compare | folo-n | folo-s |
 |---|---|---|---|---|---|
 | 1 | GPU forward latency, batch 1, f32 (median) | **4.95 ms** (best of TF32/strict, cudnn.benchmark on/off); 6.04 ms default | f32 | **2.99 ms** (beats) | 5.51 ms (yolo26s 4.87: behind) |
-| 2 | GPU forward latency, batch 1, f16 (median) | **6.25 ms** | f16 | no quiet measurement yet: 7.7–8.1 ms under 69–75% load from another job, against 6.6 ms f32 in the same session (f16 is neutral at batch 1; f32 is 2.99 ms quiet, so beats) | 11.5–11.7 ms under load (f32 11.7 same session; yolo26s 7.47) |
+| 2 | GPU forward latency, batch 1, f16 (median) | **6.25 ms** | f16 | no quiet measurement yet: **5.84 ms** on tensor cores under 68–85% load from another job (regular f16 8.13, f32 7.35 in the same session; f32 is 2.99 ms quiet, so beats) | **7.86 ms** on tensor cores under load (regular f16 12.98, f32 10.03 same session; yolo26s 7.47: ties under load) |
 | 3 | GPU forward throughput, batch 16, f32 | **1454 img/s** (TF32 convs); 1334 img/s strict fp32 | f32 | **1385 img/s** (1461 in the previous run: ties TF32, beats strict) | 617 img/s (yolo26s 627: ties) |
-| 4 | GPU forward throughput, batch 16, f16 | **2370 img/s** | f16 | **behind**: 723–810 img/s pipelined under 69–75% load, +4–16% over f32's 696–699 in the same session (f16 storage, no tensor cores yet, see [Half precision](#half-precision-f16)) | behind: 347–354 img/s under load, +27–37% over f32's 259–273 (yolo26s 1159) |
-| 5 | GPU end to end, batch 1 (decoded image in, boxes on host) | **6.92 ms** fp32 / 7.11 ms fp16 | f32 or f16, with NMS | **5.18 ms** f32 (beats; was 8.69); f16 ties f32 (8.5–9.4 vs 9.1–9.6 ms under load) | **7.87 ms** (yolo26s 8.59: beats; was 10.91) |
-| 6 | GPU end to end throughput, batch 16 | **615 img/s** fp16 / 536 img/s fp32 | best FOLO precision | **722 img/s** f32 (beats both; was 299); f16 +7–13% over f32 under load (427–456 vs 375–401 img/s back to back) | 394 img/s f32 (yolo26s 446 fp16: behind; beats its 317 fp32; was 226); f16 +16% under load (243–245 vs 210 img/s at the median), not measured quietly yet |
+| 4 | GPU forward throughput, batch 16, f16 | **2370 img/s** | f16 | **behind under load, no quiet measurement yet**: 1264 img/s pipelined on tensor cores under 68–85% load, against 790 regular f16 and 744 f32 in the same session (+60% over regular f16, see [Tensor cores](#tensor-cores-f16)) | behind under load: 554 img/s on tensor cores (regular f16 339; yolo26s 1159) |
+| 5 | GPU end to end, batch 1 (decoded image in, boxes on host) | **6.92 ms** fp32 / 7.11 ms fp16 | f32 or f16, with NMS | **5.18 ms** f32 (beats; was 8.69); f16 ties f32 (8.5–9.4 vs 9.1–9.6 ms under load); tensor cores 8.35 ms median, 6.95 ms back to back under load (regular f16 8.67 / 9.38) | **7.87 ms** (yolo26s 8.59: beats; was 10.91); tensor cores 9.37 ms under load (regular f16 13.69) |
+| 6 | GPU end to end throughput, batch 16 | **615 img/s** fp16 / 536 img/s fp32 | best FOLO precision | **722 img/s** f32 (beats both; was 299); f16 +7–13% over f32 under load (427–456 vs 375–401 img/s back to back); tensor cores 548 img/s back to back under 67–81% load (regular f16 436, f32 367 in the same session) | 394 img/s f32 (yolo26s 446 fp16: behind; beats its 317 fp32; was 226); tensor cores 328 img/s back to back under load (regular f16 249), not measured quietly yet |
 | 7 | CPU forward latency, batch 1, f32 (best thread count) | **22.8 ms** (8 threads; 25.1 ms at 20) | f32, best thread count | **21.4 ms** (fused, 28 threads, with 44–76% CPU load from other jobs; 35.8 ms for `main` in the same session; `cargo bench -p folo-vision --bench model`) | |
 | 8 | CPU end to end latency, batch 1 | **24.8 ms** (Ultralytics default, 8 threads) | f32, with NMS | 26.9 ms (the predictor on a `u8` image, 28 threads, same contended run as row 7: behind) | |
 | 9 | Training compute, batch 16 (step only, no data loader) | **202 img/s** fp32 (TF32) / 252 img/s AMP | f32 | **219 img/s** (73.0 ms; beats; 143 before the loss moved to the GPU) | **109 img/s** (146.6 ms; yolo26s 105 fp32: beats; was 68) |
@@ -268,6 +268,39 @@ passes:
   traffic shrinks. cuDNN's fp16 runs on tensor cores. The RTX 4080 SUPER exposes them to wgpu 30 on Vulkan
   (`EXPERIMENTAL_COOPERATIVE_MATRIX`, 16×16×16 f16 → f32): that is the next step for rows 2, 4 and 6.
 
+### Tensor cores (f16)
+
+`FOLO_GPU_TENSOR_CORES=1` with `FOLO_BENCH_PRECISION=f32,f16,f16tc` (the default list) adds an `f16tc` pass: the
+same f16 model with its GEMMs and convs on tensor cores (docs/GPU.md, *Tensor cores*; depthwise convs and the
+elementwise, pooling, concat and decode kernels are unchanged). Branch `gpu/tensor-cores`, 2026-11-08. **No quiet
+window again**: the COCO training run held the GPU at 17–86% (68–85% for most sections, `nvidia-smi` before each
+section), so absolute numbers are roughly half the quiet ones and only the same-session ratios are the result. The
+three precisions ran back to back in one process per scale:
+
+| under load | forward b1 median (pipelined) | forward b16 pipelined | e2e b1 median (back to back) | e2e b16 back to back (median) |
+|---|---|---|---|---|
+| folo-n f32 | 7.35 ms (4.42) | 744 img/s | 9.77 ms (9.62) | 367 img/s (373) |
+| folo-n f16 | 8.13 ms (4.48) | 790 img/s | 8.67 ms (9.38) | 436 img/s (427) |
+| folo-n f16, tensor cores | **5.84 ms (3.01)** | **1264 img/s** | **8.35 ms (6.95)** | **548 img/s (488)** |
+| folo-s f32 | 10.03 ms (7.90) | 41 img/s (a load spike; median 249) | 19.19 ms (16.76) | 131 img/s (196) |
+| folo-s f16 | 12.98 ms (8.95) | 339 img/s | 13.69 ms (14.67) | 249 img/s (259) |
+| folo-s f16, tensor cores | **7.86 ms (4.49)** | **554 img/s** | **9.37 ms (8.82)** | **328 img/s (336)** |
+
+- **What tensor cores buy**: +60–63% batch-16 forward throughput over the regular f16 kernels (folo-n and folo-s),
+  +26–32% end to end at batch 16 (the host-side upload, 13 ms of folo-n's 29 ms batch, is untouched), and a
+  faster batch-1 forward (folo-s 13.0 → 7.9 ms). Per kernel (`cargo bench -p folo-gpu --bench conv / gemm`, same
+  load): 3×3 convs 1.5–3.4x faster, 1×1 convs tie (memory-bound), HGEMM 4096³ 37 vs 18 TFLOPS.
+- **Against the bars**: under this load folo-n's 1264 img/s is behind yolo26n's quiet 2370 img/s fp16 forward and
+  548 img/s behind its 615 img/s end to end; folo-s's 554 / 328 img/s are behind yolo26s's 1159 / 446. The same
+  load halved the f32 rows (744 vs 1385 img/s quiet), so the bars may be close in a quiet window, but that is not
+  measured, and the table keeps them as behind until it is.
+- **Accuracy** (`folo val --half --tensor-cores`, GPU, against f32 and `--half` as in
+  [Half precision](#half-precision-f16)): shapes folo-n mAP50 0.98057 → 0.98057, mAP50-95 0.90090 → 0.90097; R6
+  folo-n 0.69663 → 0.69843 / 0.40876 → 0.40849; R6 folo-s 0.70704 → 0.70705 / 0.42228 → 0.42320. Every gap is
+  within 0.002 (largest 0.0018, R6 folo-n mAP50).
+- **Training** does not use tensor cores yet (no `--amp`): the gradient convs are f32-only. That is the follow-up
+  for row 9's AMP bar (252 img/s).
+
 **Verdict.** folo-n beats the incumbent on batch-1 forward latency (2.99 vs 4.95 ms), end to end at batch 1 (5.18
 vs 6.92 ms) and batch 16 (722 vs 615 img/s fp16 / 536 fp32), on the training step (219 vs 202 img/s in strict f32
 against TF32 convolutions) and on training memory (3.5 vs 4.4 GiB). It ties batch-16 forward throughput (1385–1461
@@ -309,9 +342,10 @@ letterbox, decode and NMS on a contended machine.
    batch's forward. Letterbox and candidate filtering already run on the GPU.
 3. **Batch-1 latency of larger models** (folo-s): GEMM tile configs and split-K for the skinny batch-1 problems of the
    deep layers, where the GPU is under-occupied.
-4. **Tensor cores for f16** (rows 2, 4 and 6): whole-model f16 inference exists (`--half`), but as f16 storage
-   with f32 arithmetic. A cooperative-matrix (wgpu `EXPERIMENTAL_COOPERATIVE_MATRIX`, 16×16×16 f16 → f32) implicit-GEMM
-   conv and GEMM, plus a quiet-GPU measurement of the current path.
+4. **Tensor cores, part two** (rows 2, 4, 6 and 9): the f16 inference GEMMs and convs run on tensor cores
+   (`--tensor-cores`, [Tensor cores](#tensor-cores-f16)); next are a quiet-GPU measurement, the f16 depthwise and
+   elementwise kernels that now take a larger share of the forward, and mixed-precision training (`--amp`: f16
+   gradient convs on tensor cores, loss scaling) for the AMP training bar.
 
 ## Results
 
