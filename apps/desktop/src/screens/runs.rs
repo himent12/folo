@@ -771,17 +771,10 @@ impl FoloApp {
             .collect();
         let loss_max = (0..4).filter(|&i| self.loss_parts[i]).map(|i| d.loss_max[i]).fold(0f32, f32::max);
         let mut loss = base("run-loss", loss_series, primary_h);
-        let loss_min = (0..4)
-            .filter(|&i| self.loss_parts[i])
-            .flat_map(|i| d.loss[i].iter().map(|p| p.1))
-            .filter(|v| *v > 0.)
-            .fold(f32::INFINITY, f32::min);
-        let loss_min = if loss_min.is_finite() { loss_min } else { 0.5 };
+        let loss_min =
+            (0..4).filter(|&i| self.loss_parts[i]).map(|i| d.loss_min[i]).fold(f32::INFINITY, f32::min);
         loss.log_y = true;
-        loss.y_range = Some((
-            2f32.powi(loss_min.max(1e-3).log2().floor() as i32),
-            2f32.powi((loss_max.max(loss_min * 2.) * 1.05).log2().ceil() as i32),
-        ));
+        loss.y_range = Some(log_range(loss_min, loss_max));
         let mut map = base(
             "run-map",
             vec![
@@ -1323,5 +1316,33 @@ fn matches_filter(r: &Run, f: RunFilter) -> bool {
         RunFilter::Active => r.status.is_active(),
         RunFilter::Completed => matches!(r.status, RunStatus::Completed | RunStatus::Stopped),
         RunFilter::Failed => r.status == RunStatus::Failed,
+    }
+}
+
+/// A log axis over positive values `lo..=hi`, from the power of two at or below `lo` to the one at
+/// or above `hi` (5 % headroom), at least one doubling tall. No positive data: 0.5 to 4.
+fn log_range(lo: f32, hi: f32) -> (f32, f32) {
+    if !lo.is_finite() || hi.is_nan() || hi <= 0. {
+        return (0.5, 4.);
+    }
+    // The floor the chart's log transform uses too, so nothing lands below the plot.
+    let lo = lo.max(1e-6);
+    let y0 = 2f32.powi(lo.log2().floor() as i32);
+    let y1 = 2f32.powi((hi.max(lo) * 1.05).log2().ceil() as i32).max(y0 * 2.);
+    (y0, y1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::log_range;
+
+    #[test]
+    fn the_log_loss_axis_holds_every_positive_value() {
+        // A single tiny loss sits inside the range, not under it.
+        let (a, b) = log_range(1e-4, 1e-4);
+        assert!(a <= 1e-4 && 1e-4 < b && b >= a * 2.);
+        let (a, b) = log_range(0.3, 6.);
+        assert_eq!((a, b), (0.25, 8.));
+        assert_eq!(log_range(f32::INFINITY, 0.), (0.5, 4.));
     }
 }

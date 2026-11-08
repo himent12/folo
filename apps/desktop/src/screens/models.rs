@@ -75,7 +75,13 @@ impl FoloApp {
             use std::hash::{Hash, Hasher};
             let mut h = std::collections::hash_map::DefaultHasher::new();
             for m in v {
-                (&m.id, &m.created, m.bytes, m.metrics.as_ref().map(|x| x.map50_95.to_bits())).hash(&mut h);
+                (
+                    &m.id,
+                    &m.created,
+                    m.bytes,
+                    m.metrics.as_ref().map(|x| (x.map50_95.to_bits(), x.map50.to_bits())),
+                )
+                    .hash(&mut h);
             }
             h.finish() as usize
         });

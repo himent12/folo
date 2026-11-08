@@ -76,6 +76,9 @@ pub struct Derived {
     pub lr_max: f32,
     /// Highest value of each loss part (box, cls, dfl, total), for the loss axis.
     pub loss_max: [f32; 4],
+    /// Smallest positive, finite value per loss series (infinite when there is none): the floor of
+    /// the log-scale loss axis.
+    pub loss_min: [f32; 4],
 }
 
 /// A run's full metric history, extended live by SSE events.
@@ -140,6 +143,12 @@ impl RunData {
                 steps.iter().map(|s| s.loss.dfl).fold(0f32, f32::max),
                 steps.iter().map(|s| s.loss.total).fold(0f32, f32::max),
             ],
+            loss_min: {
+                let min = |f: &dyn Fn(&Step) -> f32| {
+                    steps.iter().map(f).filter(|v| v.is_finite() && *v > 0.).fold(f32::INFINITY, f32::min)
+                };
+                [min(&|s| s.loss.box_), min(&|s| s.loss.cls), min(&|s| s.loss.dfl), min(&|s| s.loss.total)]
+            },
         };
         self.derived.replace(Some(d.clone()));
         d

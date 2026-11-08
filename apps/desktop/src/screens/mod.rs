@@ -75,15 +75,16 @@ impl FoloApp {
         let dims = (meta.width as f32, meta.height as f32);
         // On a dataset page with a class filter, the other classes drop to 30 % (the selection rule),
         // so the filter shows inside each tile.
-        let classes = self.store.dataset_summary(dataset).map(|d| d.classes.clone()).unwrap_or_default();
         let focus =
             self.ds_class.filter(|_| matches!(&self.route, crate::app::Route::Dataset(d) if d == dataset));
         let draw: Vec<DrawBox> = if boxes {
+            let classes =
+                self.store.dataset_summary(dataset).map(|d| d.classes.as_slice()).unwrap_or_default();
             meta.boxes
                 .iter()
                 .map(|b| DrawBox {
                     dim: focus.is_some_and(|c| c != b.class),
-                    label: classes.get(b.class as usize).cloned().map(Into::into),
+                    label: classes.get(b.class as usize).map(|n| SharedString::from(n.clone())),
                     ..DrawBox::new(b.class, b.x1, b.y1, b.x2, b.y2)
                 })
                 .collect()

@@ -279,14 +279,21 @@ pub fn format_step(v: f32, step: f32) -> String {
 }
 
 /// Powers of two from `y0` to `y1` (both > 0), for log axes.
-pub fn pow2_ticks(y0: f32, y1: f32) -> Vec<f32> {
-    let mut t = 2f32.powi(y0.max(1e-6).log2().ceil() as i32);
-    let mut out = Vec::new();
-    while t <= y1 * 1.0001 && out.len() < 16 {
-        out.push(t);
-        t *= 2.;
+pub fn pow2_ticks(y0: f32, y1: f32, max: usize) -> Vec<f32> {
+    let e0 = y0.max(1e-6).log2().ceil() as i32;
+    let e1 = (y1.max(1e-6) * 1.0001).log2().floor() as i32;
+    if e1 < e0 {
+        return Vec::new();
     }
-    out
+    // More powers than fit: every k-th (4, 1, 0.25 …), aligned on 1 so the ticks stay round.
+    let n = (e1 - e0 + 1) as usize;
+    let k = n.div_ceil(max.max(1)) as i32;
+    let mut es: Vec<i32> = (e0..=e1).filter(|e| e.rem_euclid(k) == 0).collect();
+    // The top of the axis keeps its label when it isn't crowded by the last one.
+    if es.last().is_none_or(|&l| e1 - l >= (k + 1) / 2) && es.last() != Some(&e1) {
+        es.push(e1);
+    }
+    es.into_iter().map(|e| 2f32.powi(e)).collect()
 }
 
 /// The power of ten a y axis over `y0..y1` with `ticks` ticks shows once, if its values are tiny
@@ -807,7 +814,9 @@ fn paint_line_chart(
     }
     let (ly0, ly1) = if spec.log_y { (y0.max(1e-6).ln(), y1.max(1e-6).ln()) } else { (y0, y1) };
     // Log axes tick at powers of two (0.5 1 2 4 8): a factor of two reads the same everywhere.
-    let yticks = if spec.log_y { pow2_ticks(y0, y1) } else { ticks(y0, y1, spec.y_ticks) };
+    // Log ticks thin out to one label per 22 px of chart height (short charts keep them apart).
+    let fit = ((f32::from(bounds.size.height) - 40.) / 22.).floor().max(2.) as usize;
+    let yticks = if spec.log_y { pow2_ticks(y0, y1, fit) } else { ticks(y0, y1, spec.y_ticks) };
     let ystep = nice_step(y1 - y0, spec.y_ticks);
     // Tiny values share one power of ten, shown once ("0 5 10" and "× 10⁻³", design/README).
     let ypow = (spec.y_fmt.is_none() && !spec.log_y).then(|| axis_pow(y0, y1, spec.y_ticks)).flatten();
@@ -1533,8 +1542,12 @@ mod tests {
 
     #[test]
     fn log_axes_tick_at_powers_of_two() {
-        assert_eq!(pow2_ticks(0.4, 9.), vec![0.5, 1., 2., 4., 8.]);
-        assert_eq!(pow2_ticks(1., 1.5), vec![1.]);
+        assert_eq!(pow2_ticks(0.4, 9., 8), vec![0.5, 1., 2., 4., 8.]);
+        assert_eq!(pow2_ticks(1., 1.5, 8), vec![1.]);
+        // 0.001..10 is 14 powers; in room for 4, every fourth, through 1.
+        assert_eq!(pow2_ticks(0.001, 10., 4), vec![2f32.powi(-8), 2f32.powi(-4), 1., 8.]);
+        // 0.001..2 is 11 powers: every third, and 2 is too close to 1 to get its own label.
+        assert_eq!(pow2_ticks(0.001, 2., 4), vec![2f32.powi(-9), 2f32.powi(-6), 2f32.powi(-3), 1.]);
     }
 
     #[test]
