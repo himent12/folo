@@ -873,8 +873,9 @@ impl FoloApp {
                 );
             }
         }
-        // Short windows fold the picker to its heading, so the detections start higher up.
-        let fold = window.viewport_size().height < px(700.);
+        // Below 900 px (the default 1280 x 800 too) the picker folds to its heading, so the
+        // detections, the screen's result, start higher up.
+        let fold = window.viewport_size().height < px(900.);
         let picker_open = !fold || self.play_picker_open;
         let heading =
             text(ty::SM, t.text_secondary).font_weight(FontWeight::MEDIUM).child("Try a validation image");

@@ -274,6 +274,7 @@ impl FoloApp {
                     .when(show_created, |d| {
                         d.child(
                             text(ty::SM, t.text_tertiary)
+                                .tnum()
                                 .w(px(80.))
                                 .flex_none()
                                 .whitespace_nowrap()
@@ -709,12 +710,13 @@ impl FoloApp {
                             ty::SM,
                         ))
                         .child(
-                            // Capped in the one-row strip (a glance, not a chart); in the wrapped
-                            // two-column tile it fills the tile, so no hole opens beside it.
+                            // A glance, not a chart: 160 px in the one-row strip; in the wrapped
+                            // two-column tile a little wider (240), so 120 steps don't spread into
+                            // a noise band.
                             div()
                                 .flex_1()
                                 .min_w(px(40.))
-                                .when(!narrow, |d| d.max_w(px(160.)))
+                                .max_w(px(if narrow { 240. } else { 160. }))
                                 .h(px(28.))
                                 .pb(px(4.))
                                 .when(smooth.len() > 2, |d| {
@@ -1131,7 +1133,7 @@ impl FoloApp {
                     &t,
                     "icons/image.svg",
                     "No validation yet",
-                    "Predictions on 16 fixed validation images appear after the first epoch.",
+                    "Predictions on 8 of the 16 fixed validation images appear after the first epoch.",
                     Tone::Neutral,
                 ))
                 .into_any_element(),
@@ -1467,13 +1469,14 @@ fn is_gpu_oom(message: &str) -> bool {
     m.contains("out of memory") || m.contains("outofmemory")
 }
 
-/// The P/R chart's lower bound: a tenth step under the lowest value, or 0 when that is under 0.2
-/// (or there is no data yet).
+/// The P/R chart's lower bound: the 0.2 step at least 0.05 under the lowest value, or 0 when that
+/// is under 0.2 (or there is no data yet).
 fn pr_floor(low: f32) -> f32 {
     if !low.is_finite() {
         return 0.;
     }
-    let f = ((low - 0.05) * 10.).floor() / 10.;
+    // Steps of 0.2, so the middle tick is round too (0.40 / 0.70 / 1.00, not 0.30 / 0.65).
+    let f = ((low - 0.05) * 5.).floor() / 5.;
     if f < 0.2 { 0. } else { f.min(0.8) }
 }
 
@@ -1511,6 +1514,7 @@ mod tests {
         assert_eq!(super::pr_floor(f32::INFINITY), 0.);
         assert_eq!(super::pr_floor(0.12), 0.);
         assert!((super::pr_floor(0.47) - 0.4).abs() < 1e-6);
+        assert!((super::pr_floor(0.36) - 0.2).abs() < 1e-6);
         assert!((super::pr_floor(0.99) - 0.8).abs() < 1e-6);
     }
 

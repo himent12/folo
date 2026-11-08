@@ -161,7 +161,7 @@ impl FoloApp {
                             .child(num_cell(72., text(ty::SM, t.text_secondary).tnum().child(metrics.as_ref().map_or("–".into(), |mm| f3(mm.map50)))))
                             .when(params_col, |d| d.child(num_cell(72., text(ty::SM, t.text_secondary).tnum().child(format!("{p} {pu}")))))
                             .child(num_cell(72., text(ty::SM, t.text_secondary).tnum().child(format!("{b} {bu}"))))
-                            .child(num_cell(84., text(ty::SM, t.text_tertiary).child(time::parse(&m.created).map_or(String::new(), |c| time::ago(c, now)))));
+                            .child(num_cell(84., text(ty::SM, t.text_tertiary).tnum().child(time::parse(&m.created).map_or(String::new(), |c| time::ago(c, now)))));
                         self.bind(row, &key, 0., window, cx, act(move |this, w, cx| this.navigate(Route::Model(id.clone()), w, cx))).into_any_element()
                     })
                     .collect();

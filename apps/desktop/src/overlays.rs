@@ -836,28 +836,26 @@ impl FoloApp {
                                 int(d.splits.val)
                             )
                         });
-                        if short {
-                            // Short windows: the summary rides on the label row, a line saved
-                            // toward keeping the Schedule above the footer.
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap(px(8.))
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_baseline()
-                                        .justify_between()
-                                        .gap(px(8.))
-                                        .child(label("Dataset"))
-                                        .children(summary.map(|s| {
+                        // The summary rides on the label row (no band under Name beside it,
+                        // and a line saved toward keeping the Schedule above the footer).
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(8.))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_baseline()
+                                    .justify_between()
+                                    .gap(px(8.))
+                                    .child(label("Dataset"))
+                                    .children(
+                                        summary.map(|s| {
                                             text(ty::XS, t.text_tertiary).tnum().truncate().child(s)
-                                        })),
-                                )
-                                .child(ds_select)
-                        } else {
-                            field("Dataset", ds_select, summary)
-                        }
+                                        }),
+                                    ),
+                            )
+                            .child(ds_select)
                     }),
                 ),
             )
