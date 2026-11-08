@@ -941,9 +941,15 @@ impl FoloApp {
             .child(crate::ui::legend_value(&t, "precision", t.chart_series[2], false, v(&d.precision, f3v)))
             .child(crate::ui::legend_value(&t, "recall", t.chart_series[3], true, v(&d.recall, f3v)))
             .into_any_element();
+        // In the axis's power of ten ("× 10⁻³" is printed once, on the axis).
+        let lr_hi = (d.lr_max * 1.15).max(1e-4);
+        let lr_pow = crate::charts::axis_pow(0., lr_hi, 3);
+        let lr_value = crate::charts::value_at(&d.lr, hover, 0., total).map(|x| match lr_pow {
+            Some(p) => format!("{:.2}", x * 10f32.powi(-p)),
+            None => format!("{x:.4}"),
+        });
         let lr_legend =
-            crate::ui::legend_value(&t, "lr", t.text_tertiary, false, v(&d.lr, crate::charts::sci3))
-                .into_any_element();
+            crate::ui::legend_value(&t, "lr", t.text_tertiary, false, lr_value).into_any_element();
         let _ = chart_block;
         // The mAP chart is the focal point: wider and first. Narrow windows stack each row.
         let stack = window.viewport_size().width < px(1120.);

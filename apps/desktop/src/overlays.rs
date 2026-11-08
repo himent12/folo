@@ -882,20 +882,32 @@ impl FoloApp {
                 if fits { t.text_tertiary } else { t.warning_solid },
             ))
             .min_w_0()
-            .child(text(ty::SM, if fits { t.text_secondary } else { t.warning_text }).tnum().min_w_0().truncate().child(
-                if cpu {
-                    "CPU selected · no time estimate; expect many times slower than a GPU".to_string()
-                } else if fits {
-                    format!(
-                        "≈ {} · reference estimate, not measured on {gpu_name} · ≈ {vram:.1} GB",
-                        crate::api::time::duration(secs)
+            .child(
+                // Time and memory lead (short enough for the minimum width); what they are sits below.
+                div()
+                    .flex()
+                    .flex_col()
+                    .min_w_0()
+                    .child(
+                        text(ty::SM, if fits { t.text_secondary } else { t.warning_text })
+                            .tnum()
+                            .whitespace_nowrap()
+                            .child(if cpu {
+                                "CPU selected · no time estimate".to_string()
+                            } else if fits {
+                                format!("≈ {} · ≈ {vram:.1} GB GPU memory", crate::api::time::duration(secs))
+                            } else {
+                                format!("≈ {vram:.0} GB needed, {gpu_gb:.0} GB on {gpu_name}")
+                            }),
                     )
-                } else {
-                    format!(
-                        "≈ {vram:.0} GB of GPU memory needed, {gpu_gb:.0} GB on {gpu_name} · lower the batch or image size"
-                    )
-                },
-            ));
+                    .child(text(ty::XS, t.text_tertiary).whitespace_nowrap().child(if cpu {
+                        "Expect many times slower than a GPU"
+                    } else if fits {
+                        "Reference estimate, not measured on this GPU"
+                    } else {
+                        "Lower the batch or image size"
+                    })),
+            );
         let cancel = self.button(
             "nr-cancel",
             "Cancel",
