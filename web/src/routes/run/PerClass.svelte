@@ -29,7 +29,7 @@
   });
   const epochNo = $derived.by(() => {
     void version;
-    return epochs.length ? epochs[epochs.length - 1]!.epoch + 1 : null;
+    return epochs.length ? epochs[epochs.length - 1]!.epoch : null;
   });
 </script>
 

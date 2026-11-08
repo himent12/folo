@@ -383,7 +383,7 @@ export class MockApi implements Api {
       const run = toRun(p, now);
       if (!run.model_id) continue;
       const best = bestOf(p, Math.floor(progressAt(p, now).done));
-      const ep = best ? epochAt(p, best.epoch) : null;
+      const ep = best ? epochAt(p, best.epoch - 1) : null;
       const info = archInfo[p.config.arch];
       out.push({
         id: run.model_id,
@@ -439,7 +439,7 @@ export class MockApi implements Api {
       let images = 500;
       if (p) {
         const best = bestOf(p, Math.floor(progressAt(p, Date.now()).done));
-        perClass = best ? epochAt(p, best.epoch).val.per_class : null;
+        perClass = best ? epochAt(p, best.epoch - 1).val.per_class : null;
         const ds = this.#datasets.find((d) => d.id === p.config.dataset_id);
         if (ds) {
           const share = ds.splits.val / Math.max(1, total(ds));
@@ -551,7 +551,8 @@ export class MockApi implements Api {
     return this.#call(() => {
       const p = this.#profile(id);
       const done = Math.floor(progressAt(p, Date.now()).done);
-      const e = Math.max(0, Math.min(done - 1, epoch ?? done - 1));
+      // `epoch` is 1-based like the API; `e` indexes the run model (0-based).
+      const e = Math.max(0, Math.min(done - 1, (epoch ?? done) - 1));
       const ds = this.#spec(p.config.dataset_id);
       const quality = done > 0 ? epochAt(p, e).val.map50_95 : 0;
       const samples: Sample[] = [];
@@ -571,7 +572,7 @@ export class MockApi implements Api {
             .map((b) => ({ ...b, name: ds.classes[b.class] ?? `class ${b.class}` })),
         });
       }
-      return { epoch: e, samples };
+      return { epoch: e + 1, samples };
     }, 260);
   }
 

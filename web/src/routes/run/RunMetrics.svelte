@@ -55,14 +55,14 @@
   const observed = $derived.by(() => {
     void version;
     const spe = Math.max(1, run.steps_per_epoch);
-    return Math.max(lastStep ? lastStep.step / spe : 0, lastEpoch ? lastEpoch.epoch + 1 : 0);
+    return Math.max(lastStep ? lastStep.step / spe : 0, lastEpoch ? lastEpoch.epoch : 0);
   });
   const xDomain = $derived(runHorizon(observed, run.epochs, live, horizon));
   const epochTitle = (x: number) => `Epoch ${x.toFixed(x % 1 === 0 ? 0 : 1)}`;
 
   const INK = 'var(--text-primary)';
   const INK2 = 'var(--text-tertiary)';
-  const ep = (f: (e: Epoch) => number): Pt[] => epochs.map((e) => ({ x: e.epoch + 1, y: f(e) }));
+  const ep = (f: (e: Epoch) => number): Pt[] => epochs.map((e) => ({ x: e.epoch, y: f(e) }));
   const perStep = (f: (s: Step) => number): Pt[] => {
     const spe = Math.max(1, run.steps_per_epoch);
     return steps.map((s) => ({ x: s.step / spe, y: f(s) }));
@@ -121,7 +121,7 @@
 
   const best = $derived<Marker[]>(
     run.best && (tab === 'map' || tab === 'map50')
-      ? [{ x: run.best.epoch + 1, y: tab === 'map' ? run.best.map50_95 : (epochs.find((e) => e.epoch === run.best!.epoch)?.val.map50 ?? 0), label: 'best', color: 'var(--accent-line)', quiet: true }]
+      ? [{ x: run.best.epoch, y: tab === 'map' ? run.best.map50_95 : (epochs.find((e) => e.epoch === run.best!.epoch)?.val.map50 ?? 0), label: 'best', color: 'var(--accent-line)', quiet: true }]
       : [],
   );
 
@@ -139,9 +139,9 @@
       id: 'map',
       label: 'mAP50-95',
       value: metric(lastEpoch?.val.map50_95),
-      caption: run.best ? `best ${metric(run.best.map50_95)} · ep ${run.best.epoch + 1}` : 'after the first epoch',
+      caption: run.best ? `best ${metric(run.best.map50_95)} · ep ${run.best.epoch}` : 'after the first epoch',
       title: 'Validation mAP50-95',
-      qualifier: run.best ? `by epoch · best ${metric(run.best.map50_95)} at epoch ${run.best.epoch + 1} (ring)` : 'by epoch',
+      qualifier: run.best ? `by epoch · best ${metric(run.best.map50_95)} at epoch ${run.best.epoch} (ring)` : 'by epoch',
     },
     { id: 'map50', label: 'mAP50', value: metric(lastEpoch?.val.map50), caption: 'last epoch', title: 'Validation mAP50', qualifier: 'by epoch' },
     {

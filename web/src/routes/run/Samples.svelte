@@ -30,14 +30,15 @@
   // step, and an unmemoised prop read would refetch on each one.
   const rid = $derived(runId);
   const done = $derived(epochsDone);
-  const epoch = $derived(pick === 'latest' ? done - 1 : Number(pick));
+  // Epochs are 1-based (docs/API.md); 'latest' is the last finished one.
+  const epoch = $derived(pick === 'latest' ? done : Number(pick));
   const samples = new Resource((s) => (done > 0 ? hub.api.runSamples(rid, epoch, s) : Promise.resolve(null)));
 
   const options = $derived([
     { value: 'latest', label: `Latest (epoch ${Math.max(1, epochsDone)})` },
-    ...Array.from({ length: epochsDone }, (_, i) => epochsDone - 1 - i)
-      .filter((e) => e === 0 || (e + 1) % 5 === 0)
-      .map((e) => ({ value: String(e), label: `Epoch ${e + 1}` })),
+    ...Array.from({ length: epochsDone }, (_, i) => epochsDone - i)
+      .filter((e) => e === 1 || e % 5 === 0)
+      .map((e) => ({ value: String(e), label: `Epoch ${e}` })),
   ]);
 
   const preds = (s: Sample) => (show === 'truth' ? [] : s.pred.filter((p) => p.score >= conf));
@@ -45,7 +46,7 @@
   const hits = (s: Sample) => s.pred.filter((p) => p.score >= conf).length;
 </script>
 
-<Panel title="Validation samples" meta={samples.data ? `epoch ${samples.data.epoch + 1}` : undefined} id="samples">
+<Panel title="Validation samples" meta={samples.data ? `epoch ${samples.data.epoch}` : undefined} id="samples">
   {#snippet actions()}
     <div class="ctl">
       <Segmented

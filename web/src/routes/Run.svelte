@@ -195,7 +195,7 @@
         <CircleCheck size={16} />
         <div class="b-text">
           <p class="b-title">Completed in {duration(elapsed)}</p>
-          <p class="b-msg">Best mAP50-95 {metric(run.best?.map50_95)} at epoch {(run.best?.epoch ?? 0) + 1}. The best weights are saved as a model.</p>
+          <p class="b-msg">Best mAP50-95 {metric(run.best?.map50_95)} at epoch {run.best?.epoch ?? 0}. The best weights are saved as a model.</p>
         </div>
         {#if run.model_id}<Button size="sm" icon={ScanSearch} href={href(`/playground?model=${run.model_id}`)}>Try in Playground</Button>{/if}
       </div>

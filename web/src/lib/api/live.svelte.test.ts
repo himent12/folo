@@ -154,11 +154,12 @@ describe('LiveRun resume', () => {
     serverStatus = 'stopped';
     hold = false;
     snapshot = await new MockApi('normal', 0).run('run_7d1e');
-    // Stopped mid-epoch 1: epoch 0 finished (steps 1-2), epoch 1 had steps 3-4 when it stopped.
-    const history: RunMetrics = { steps: [at(1, 0), at(2, 0), at(3, 1), at(4, 1)], epochs: [ep(0)] as never };
+    // Epochs are 1-based (folo-api). Stopped in epoch 2: epoch 1 finished (steps 1-2), epoch 2 had steps 3-4. The
+    // server keeps those interrupted steps in /metrics until the resumed run writes their replacements.
+    const history: RunMetrics = { steps: [at(1, 1), at(2, 1), at(3, 2), at(4, 2)], epochs: [ep(1)] as never };
     const fake: Partial<Api> = {
       mock: false,
-      run: () => (hold ? new Promise<Run>(() => {}) : Promise.resolve({ ...snapshot, status: serverStatus, step: 4, epoch: 2 })),
+      run: () => (hold ? new Promise<Run>(() => {}) : Promise.resolve({ ...snapshot, status: serverStatus, step: 4, epoch: 2, best: { epoch: 1, map50_95: 0.3 } })),
       runMetrics: () => Promise.resolve(history),
       runLogs: () => Promise.resolve({ lines: [] }),
       runEvents: (_id, h) => {
@@ -183,10 +184,16 @@ describe('LiveRun resume', () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(live.steps.map((s) => s.step)).toEqual([1, 2, 3, 4]);
     serverStatus = 'queued';
-    await live.resume(() => Promise.resolve({ ...snapshot, status: 'queued', step: 2, epoch: 1 }));
+    // The response still carries the interrupted step count; the rewound progress wins.
+    await live.resume(() => Promise.resolve({ ...snapshot, status: 'queued', step: 4, epoch: 2 }));
+    expect(live.steps.map((s) => s.step)).toEqual([1, 2]);
+    expect(live.run?.epoch).toBe(1);
+    expect(live.run?.step).toBe(2);
+    // The resync after resuming returns the interrupted steps 3-4 again: they stay out.
+    await vi.advanceTimersByTimeAsync(0);
     expect(live.steps.map((s) => s.step)).toEqual([1, 2]);
     // The resumed epoch repeats step 3 with new values: it is shown, not dropped as old.
-    handlers.step?.(at(3, 1, 90));
+    handlers.step?.(at(3, 2, 90));
     expect(live.steps.at(-1)?.loss.total).toBe(90);
     stop();
   });
@@ -205,7 +212,7 @@ describe('LiveRun resume', () => {
     serverStatus = 'running';
     handlers.status?.({ status: 'running', error: null });
     expect(live.steps.map((s) => s.step)).toEqual([1, 2]);
-    response.resolve({ ...snapshot, status: 'queued', step: 2, epoch: 1 });
+    response.resolve({ ...snapshot, status: 'queued', step: 4, epoch: 2 });
     await pending;
     expect(live.run?.status).toBe('running');
     await vi.advanceTimersByTimeAsync(0);

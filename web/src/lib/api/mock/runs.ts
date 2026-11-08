@@ -123,7 +123,7 @@ export function epochAt(p: RunProfile, e: number): Epoch {
     };
   });
   return {
-    epoch: e,
+    epoch: e + 1,
     train_loss: lossAt(p, e + 1, false),
     val: { map50: r4(map50), map50_95: r4(m), precision: r4(precision), recall: r4(recall), per_class },
     duration_s: Math.round((p.epochSeconds + gauss(r) * 0.25) * 10) / 10,
@@ -136,7 +136,7 @@ export function stepAt(p: RunProfile, globalStep: number): Step {
   const total = p.config.epochs * p.stepsPerEpoch;
   const ips = p.imgsPerS * (1 + 0.04 * smoothNoise(seedOf(p) + 5, epochF * 3) + (r() - 0.5) * 0.03);
   return {
-    epoch: Math.min(p.config.epochs - 1, Math.floor(epochF)),
+    epoch: Math.min(p.config.epochs - 1, Math.floor(epochF)) + 1,
     step: globalStep,
     lr: r6(lrAt(p, epochF)),
     loss: lossAt(p, epochF, true),
@@ -181,7 +181,7 @@ export function bestOf(p: RunProfile, epochsDone: number): Run['best'] {
   let best: Run['best'] = null;
   for (let e = 0; e < epochsDone; e++) {
     const m = mapCurve(p, e);
-    if (!best || m > best.map50_95) best = { epoch: e, map50_95: r4(m) };
+    if (!best || m > best.map50_95) best = { epoch: e + 1, map50_95: r4(m) };
   }
   return best;
 }
@@ -203,19 +203,19 @@ export function history(p: RunProfile, now: number, stride = 4): { steps: Step[]
 // ---------- logs ----------
 
 export function epochLog(p: RunProfile, ep: Epoch, startedAt: number): LogLine[] {
-  const t = new Date(startedAt + (ep.epoch + 1) * p.epochSeconds * 1000).toISOString();
+  const t = new Date(startedAt + ep.epoch * p.epochSeconds * 1000).toISOString();
   const lines: LogLine[] = [
     {
       t,
       level: 'info',
-      message: `epoch ${ep.epoch + 1}/${p.config.epochs}  loss ${ep.train_loss.total.toFixed(3)}  mAP50 ${ep.val.map50.toFixed(3)}  mAP50-95 ${ep.val.map50_95.toFixed(3)}  ${ep.duration_s.toFixed(1)}s`,
+      message: `epoch ${ep.epoch}/${p.config.epochs}  loss ${ep.train_loss.total.toFixed(3)}  mAP50 ${ep.val.map50.toFixed(3)}  mAP50-95 ${ep.val.map50_95.toFixed(3)}  ${ep.duration_s.toFixed(1)}s`,
     },
   ];
-  const best = bestOf(p, ep.epoch + 1);
+  const best = bestOf(p, ep.epoch);
   if (best && best.epoch === ep.epoch) lines.push({ t, level: 'info', message: `new best mAP50-95 ${best.map50_95.toFixed(4)}, saved best.folo` });
-  if (ep.epoch + 1 === p.config.epochs - p.config.augment.close_mosaic)
+  if (ep.epoch === p.config.epochs - p.config.augment.close_mosaic)
     lines.push({ t, level: 'info', message: `closing mosaic: augmentation off for the last ${p.config.augment.close_mosaic} epochs` });
-  if (ep.epoch % 17 === 9) lines.push({ t, level: 'warn', message: `data loader stalled 140 ms waiting for decode workers (8 threads); consider --workers 12` });
+  if ((ep.epoch - 1) % 17 === 9) lines.push({ t, level: 'warn', message: `data loader stalled 140 ms waiting for decode workers (8 threads); consider --workers 12` });
   return lines;
 }
 

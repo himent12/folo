@@ -102,8 +102,9 @@ describe('mock runs', () => {
     const off = api.runEvents(run.id, { epoch: (e) => events.push(`epoch ${e.epoch}`), status: (s) => events.push(s.status) });
     vi.advanceTimersByTime(1500 + 2 * 300 * 1000 + 500);
     off();
-    expect(events.filter((e) => e.startsWith('epoch'))).toEqual(['epoch 0', 'epoch 1']);
-    expect(events.indexOf('epoch 1')).toBeLessThan(events.indexOf('completed'));
+    // Epochs are 1-based, as in folo-api.
+    expect(events.filter((e) => e.startsWith('epoch'))).toEqual(['epoch 1', 'epoch 2']);
+    expect(events.indexOf('epoch 2')).toBeLessThan(events.indexOf('completed'));
     const model = (await api.models()).find((m) => m.run_id === run.id);
     expect(model?.classes).toEqual(['a', 'b']);
   });

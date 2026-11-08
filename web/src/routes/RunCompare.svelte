@@ -79,7 +79,7 @@
         label: r.name,
         color: color(r.id),
         pattern: SLOT_PATTERN[slotOf(r.id)],
-        points: eps.map((e) => ({ x: x === 'epoch' ? e.epoch + 1 : ((e.epoch + 1) / r.epochs) * 100, y: f(e) })),
+        points: eps.map((e) => ({ x: x === 'epoch' ? e.epoch : (e.epoch / r.epochs) * 100, y: f(e) })),
       };
     });
 
