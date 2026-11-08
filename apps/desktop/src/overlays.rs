@@ -898,7 +898,7 @@ impl FoloApp {
                                 .flex_col()
                                 .gap(px(8.))
                                 .child(typed(
-                                    "Close mosaic (epochs)",
+                                    "Final epochs without mosaic",
                                     close_box,
                                     close_slider,
                                     close_bad.then_some("Enter a whole number up to the epoch count"),

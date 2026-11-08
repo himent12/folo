@@ -677,7 +677,7 @@ impl FoloApp {
                 };
                 // A line pattern per class as well as a colour (five distinct ones), matched by the
                 // legend's swatch: the curves read apart without colour.
-                let s = Series::new(name, color, pts).width(width).live(true);
+                let s = Series::new(name, color, pts).width(width);
                 match pr_pattern(c.class) {
                     1 => s.dashed(),
                     2 => s.dotted(),
@@ -786,6 +786,17 @@ impl FoloApp {
         chart.x_name = "recall";
         chart.axis_titles = Some(("Recall", "Precision"));
         chart.x_ticks = Some(4);
+        // Each class's operating point: recall and precision at its best-F1 threshold, the values
+        // the legend's "P @ best F1" column and the KPI strip report.
+        for c in &ev.per_class {
+            let shown = match iso {
+                Some(f) => f == c.class,
+                None => true,
+            };
+            if shown && ev.pr.iter().any(|p| p.class == c.class) {
+                chart.dots.push((c.recall, c.precision, t.class_stroke(c.class)));
+            }
+        }
         chart.ease_key = crate::charts::ease_key(&m.id);
         // As tall as the confusion matrix beside it (its rows set the panel height).
         chart.height = (32. * ev.confusion.len() as f32 + 136.).max(240.);
@@ -911,6 +922,14 @@ impl FoloApp {
                                 div()
                                     .mt(px(10.))
                                     .px(px(8.))
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(4.))
+                                    .child(
+                                        text(ty::XS, t.text_tertiary)
+                                            .whitespace_normal()
+                                            .child("Dots mark each class's best-F1 point (its P and R)."),
+                                    )
                                     .child(text(ty::XS, t.text_tertiary).whitespace_normal().child(pr_hint)),
                             ),
                     ),
@@ -1179,7 +1198,11 @@ impl FoloApp {
                     .border_color(alpha(base, 0.9)),
             )
             .child(text(ty::XS, t.text_tertiary).mr(px(6.)).child("correct"))
-            .child(text(ty::XS, t.text_tertiary).child("errors 0"))
+            .child(text(ty::XS, t.text_tertiary).ml(px(2.)).child(if norm {
+                "Error share 0%"
+            } else {
+                "Errors 0"
+            }))
             .child(div().flex().h(px(8.)).w(px(96.)).rounded(px(2.)).overflow_hidden().children((0..12).map(
                 |i| {
                     let f = i as f32 / 11.;
@@ -1190,9 +1213,9 @@ impl FoloApp {
                 },
             )))
             .child(text(ty::XS, t.text_tertiary).tnum().child(if norm {
-                format!("{:.0}% (max)", max_err * 100.)
+                format!("{:.0}% max", max_err * 100.)
             } else {
-                format!("{} (max)", int((max_err * max_count as f32).round() as u64))
+                format!("{} max", int((max_err * max_count as f32).round() as u64))
             }));
         // The cells are one Tab stop: arrows move a cursor cell (the readout follows), Esc clears.
         let rows: Vec<AnyElement> = rows.map(|r| r.into_any_element()).collect();
