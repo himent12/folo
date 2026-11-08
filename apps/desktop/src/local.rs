@@ -4,7 +4,8 @@
 //! before each run, so a retrained model is picked up and an unreachable server still runs the
 //! copy already loaded.
 
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Instant;
 
 use folo_core::Device;
@@ -37,6 +38,17 @@ struct Loaded {
 
 /// Most recently used last.
 static CACHE: Mutex<Vec<Loaded>> = Mutex::new(Vec::new());
+/// Held while weights are revalidated and a model is built: loads happen one at a time, so at most
+/// one model beyond the cached ones is ever being built (RAM / VRAM stay bounded), and the cache
+/// sees revalidations in order (an older download can't replace newer weights).
+static LOAD: Mutex<()> = Mutex::new(());
+/// Bumped by [`forget_all`]: a load that started before can't publish into the new backend's cache.
+static GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// A lock that survives a panic elsewhere (the data under it stays consistent: whole entries).
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 /// The GPU local inference uses (its folo-core device and adapter name), or why there is none. The
 /// first call sets up folo-gpu, which blocks for a moment: call it off the UI thread.
@@ -83,13 +95,16 @@ fn predictor_with(
     target: Target,
     fetch: impl FnOnce(Option<&str>) -> ApiResult<Option<Weights>>,
 ) -> ApiResult<Arc<Mutex<Predictor>>> {
+    let generation = GENERATION.load(Ordering::SeqCst);
+    let _loading = lock(&LOAD);
     let is = |l: &Loaded| l.server == server && l.model_id == model_id && l.target == target;
-    let held = CACHE.lock().unwrap().iter().find(|l| is(l)).map(|l| (l.etag.clone(), l.predictor.clone()));
+    let held = lock(&CACHE).iter().find(|l| is(l)).map(|l| (l.etag.clone(), l.predictor.clone()));
     let fresh = match (fetch(held.as_ref().map(|h| h.0.as_str())), held) {
         (Ok(Some(w)), _) => w,
-        // Unchanged, or the server is out of reach: the copy already here still runs.
-        (Ok(None), Some(h)) => return Ok(touch(&is).unwrap_or(h.1)),
-        (Err(e), Some(h)) if e.code == "server_unreachable" => return Ok(touch(&is).unwrap_or(h.1)),
+        // Unchanged, or the server is out of reach: the copy whose ETag was sent still runs (that
+        // one exactly; nothing else can have replaced it while LOAD is held).
+        (Ok(None), Some(h)) => return Ok(touch(&h.1)),
+        (Err(e), Some(h)) if e.code == "server_unreachable" => return Ok(touch(&h.1)),
         (Ok(None), None) => return Err(ApiError::new("bad_response", "The server sent no weights")),
         (Err(e), _) => return Err(e),
     };
@@ -107,7 +122,11 @@ fn predictor_with(
         predictor.predict(&folo_data::Image::new(s, s, [114; 3])).map_err(engine_error)?;
     }
     let predictor = Arc::new(Mutex::new(predictor));
-    let mut cache = CACHE.lock().unwrap();
+    let mut cache = lock(&CACHE);
+    // The backend changed while this loaded: use it for this answer, but don't keep it.
+    if GENERATION.load(Ordering::SeqCst) != generation {
+        return Ok(predictor);
+    }
     cache.retain(|l| !is(l));
     cache.push(Loaded {
         server: server.into(),
@@ -122,19 +141,21 @@ fn predictor_with(
     Ok(predictor)
 }
 
-/// Mark a cached predictor most recently used and return it.
-fn touch(is: &dyn Fn(&Loaded) -> bool) -> Option<Arc<Mutex<Predictor>>> {
-    let mut cache = CACHE.lock().unwrap();
-    let i = cache.iter().position(is)?;
-    let l = cache.remove(i);
-    let p = l.predictor.clone();
-    cache.push(l);
-    Some(p)
+/// Mark `p` most recently used (if it's still cached) and return it.
+fn touch(p: &Arc<Mutex<Predictor>>) -> Arc<Mutex<Predictor>> {
+    let mut cache = lock(&CACHE);
+    if let Some(i) = cache.iter().position(|l| Arc::ptr_eq(&l.predictor, p)) {
+        let l = cache.remove(i);
+        cache.push(l);
+    }
+    p.clone()
 }
 
-/// Drop every loaded model (the backend changed: its model ids mean something else now).
+/// Drop every loaded model (the backend changed: its model ids mean something else now), and
+/// keep loads already under way from publishing theirs.
 pub fn forget_all() {
-    CACHE.lock().unwrap().clear();
+    GENERATION.fetch_add(1, Ordering::SeqCst);
+    lock(&CACHE).clear();
 }
 
 /// `POST /api/predict`, answered in this process. `device` reads "local:<name>".
@@ -163,7 +184,7 @@ fn run(
     req: &PredictRequest,
     name: &str,
 ) -> ApiResult<PredictResponse> {
-    let mut p = predictor.lock().unwrap();
+    let mut p = lock(predictor);
     // Decoding counts as preprocessing, as it does on the server.
     let t = Instant::now();
     let img = folo_data::decode(bytes)
@@ -195,6 +216,9 @@ fn run(
 mod tests {
     use super::*;
 
+    /// The cache is process-wide: tests that touch it run one at a time.
+    static SERIAL: Mutex<()> = Mutex::new(());
+
     /// A fresh, untrained folo-n with two classes as f16 `.folo` bytes (what the server sends).
     fn weights() -> Vec<u8> {
         let mut m = FoloModel::new(folo_vision::ModelConfig::new("n", 2).unwrap()).unwrap();
@@ -215,6 +239,7 @@ mod tests {
 
     #[test]
     fn weights_load_once_and_revalidate_by_etag() {
+        let _serial = lock(&SERIAL);
         let bytes = weights();
         let fresh = |etag: &str| Ok(Some(Weights { bytes: bytes.clone(), etag: etag.into() }));
         let srv = "test-local";
@@ -265,6 +290,52 @@ mod tests {
     /// Against a real `folo serve` with a trained model: `FOLO_SERVER=http://127.0.0.1:7879 cargo
     /// test real_server -- --ignored --nocapture`. Local CPU and GPU find what the server finds.
     #[test]
+    fn concurrent_requests_build_the_model_once() {
+        let _serial = lock(&SERIAL);
+        let bytes = weights();
+        let fresh_loads = std::sync::atomic::AtomicUsize::new(0);
+        let started = std::sync::Barrier::new(2);
+        let srv = "test-race";
+        let (a, b) = std::thread::scope(|s| {
+            let load = || {
+                started.wait();
+                predictor_with(srv, "m_r", Target::Cpu, |held| match held {
+                    None => {
+                        fresh_loads.fetch_add(1, Ordering::SeqCst);
+                        // A slow download: the other request must wait for it, then revalidate.
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                        Ok(Some(Weights { bytes: bytes.clone(), etag: "\"r\"".into() }))
+                    }
+                    Some(e) => {
+                        assert_eq!(e, "\"r\"");
+                        Ok(None)
+                    }
+                })
+                .unwrap()
+            };
+            let a = s.spawn(load);
+            let b = s.spawn(load);
+            (a.join().unwrap(), b.join().unwrap())
+        });
+        assert_eq!(fresh_loads.load(Ordering::SeqCst), 1, "one download, one model");
+        assert!(Arc::ptr_eq(&a, &b));
+    }
+
+    #[test]
+    fn a_load_across_a_backend_switch_is_not_kept() {
+        let _serial = lock(&SERIAL);
+        let bytes = weights();
+        let srv = "test-switch";
+        let p = predictor_with(srv, "m_s", Target::Cpu, |_| {
+            // The user switches servers while this download is under way.
+            forget_all();
+            Ok(Some(Weights { bytes: bytes.clone(), etag: "\"s\"".into() }))
+        });
+        assert!(p.is_ok(), "the request still gets its answer");
+        assert!(!lock(&CACHE).iter().any(|l| l.server == srv), "but the old server's model isn't cached");
+    }
+
+    #[test]
     #[ignore]
     fn real_server_local_matches_the_server() {
         use crate::api::{Backend, ImageQuery, http::HttpBackend};
@@ -309,15 +380,13 @@ mod tests {
                     (local.image.width, local.image.height),
                     (server.image.width, server.image.height)
                 );
-                // f16 weights against the server's f32 checkpoint: the confident boxes agree.
-                let n = top(&server).max(1) as i64;
-                assert!(
-                    (top(&local) as i64 - top(&server) as i64).abs() <= (n / 5).max(1),
-                    "{} vs {}",
-                    top(&local),
-                    top(&server)
-                );
-                if let (Some(a), Some(b)) = (server.boxes.first(), local.boxes.first()) {
+                // f16 weights against the server's f32 checkpoint: the same boxes, give or take
+                // one near the threshold, and the top box matches.
+                let n = top(&server) as i64;
+                assert!((top(&local) as i64 - n).abs() <= (n / 5).max(1), "{} vs {n}", top(&local));
+                assert_eq!(local.boxes.is_empty(), server.boxes.is_empty());
+                if let Some(a) = server.boxes.first() {
+                    let b = &local.boxes[0];
                     assert_eq!(a.class, b.class);
                     assert!(
                         (a.score - b.score).abs() < 0.05

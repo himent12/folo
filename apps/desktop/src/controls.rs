@@ -477,13 +477,12 @@ impl FoloApp {
             .border_1()
             .border_color(t.line_default)
             .on_key_down(cx.listener(move |this, ev: &KeyDownEvent, window, cx| {
-                // Steps through the options that can be chosen, wrapping.
-                let at = usable.iter().position(|&i| i == selected);
-                let m = usable.len();
+                // Steps to the next option that can be chosen in that direction, wrapping (also from
+                // a selection that is itself disabled).
+                let ok = |i: &usize| usable.contains(i);
                 let next = match ev.keystroke.key.as_str() {
-                    _ if m == 0 => None,
-                    "left" | "up" => Some(usable[at.map_or(m - 1, |a| (a + m - 1) % m)]),
-                    "right" | "down" => Some(usable[at.map_or(0, |a| (a + 1) % m)]),
+                    "left" | "up" => (1..=n).map(|k| (selected + n - k) % n).find(ok),
+                    "right" | "down" => (1..=n).map(|k| (selected + k) % n).find(ok),
                     "home" => usable.first().copied(),
                     "end" => usable.last().copied(),
                     _ => None,
