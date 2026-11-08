@@ -454,4 +454,30 @@ describe('LiveRun resume', () => {
     expect(live.run?.status).toBe('completed');
     stop();
   });
+
+  it('fetches the final history when the run ends while the first history loads are still pending', async () => {
+    serverStatus = 'running';
+    // Both the initial load and the load on stream open capture a partial history and are slow.
+    const first = deferred<RunMetrics>();
+    gate = first.promise;
+    let live!: LiveRun;
+    const stop = $effect.root(() => {
+      live = new LiveRun(() => 'run_7d1e');
+    });
+    flushSync();
+    const second = deferred<RunMetrics>();
+    gate = second.promise;
+    handlers.connection?.('open');
+    // The stream is rate-limited: it delivers step 5 but never 3-4, then the run completes.
+    handlers.step?.(at(5, 3));
+    history = { steps: [at(1, 1), at(2, 1), at(3, 2), at(4, 2), at(5, 3)], epochs: [ep(1), ep(2), ep(3)] as never };
+    serverStatus = 'completed';
+    handlers.status?.({ status: 'completed', error: null });
+    const partial = { steps: [at(1, 1), at(2, 1)], epochs: [ep(1)] as never };
+    first.resolve(partial);
+    second.resolve(partial);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.steps.map((s) => s.step)).toEqual([1, 2, 3, 4, 5]);
+    stop();
+  });
 });

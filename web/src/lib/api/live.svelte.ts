@@ -182,7 +182,8 @@ export class LiveRun {
           if (!ACTIVE.includes(status)) {
             // The run ended: the server's final history settles it. Requests issued before may hold a partial
             // history (or, during a replay, the interrupted attempt): invalidate them and fetch the final one.
-            const wasActive = this.#replay !== null || (prev !== undefined && ACTIVE.includes(prev));
+            // Unknown (still loading) counts as possibly active: history requested so far may be partial.
+            const wasActive = this.#replay !== null || prev === undefined || ACTIVE.includes(prev);
             this.#replay = null;
             if (wasActive) {
               this.#gen++;
