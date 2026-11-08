@@ -12,8 +12,8 @@ Status keys: `[ ]` todo, `[~]` in progress, `[x]` merged. The orchestrator keeps
 - [x] vision-post: box ops, IoU family, NMS, mAP / PR metrics, confusion matrix, TAL assigner (#5, #15); pycocotools parity (#20)
 - [x] server + CLI skeleton with `--mock` (#7); real dataset commands and store (#29)
 - [x] gpu: wgpu device, buffer pool, WGSL kernels (SGEMM ~31 TFLOPS on RTX 4080 SUPER) (#10)
-- [~] Studio (web/): all screens merged (#3, #6, #13, #19, #24, #34, #37, #40, #41, #44, #48); hill-climb round 9 (~7–8)
-- [~] Desktop (apps/desktop, GPUI): #9, #26, #32, #35, #43, #45, #47, #52; hill-climb round 15 (8.3 / 8.3)
+- [~] Studio (web/): all screens, in-browser Playground, real-server smoke; hill-climb round 15 (r12: min 8 from both reviewers); contrast + CVD token checks in CI (#84)
+- [~] Desktop (apps/desktop, GPUI): all screens, real server, local GPU inference (#73); hill-climb round 32 (r31: Opus 8.6 / Sol 8.3)
 
 ## M2 — learning end to end
 - [x] nn: layers, init, SGD/AdamW, schedules, EMA, .folo IO (#21)
@@ -22,18 +22,21 @@ Status keys: `[ ]` todo, `[~]` in progress, `[x]` merged. The orchestrator keeps
 
 ## M3 — fast
 - [x] gpu backend implements core Backend (#31); whole models on the GPU, fused Conv+BN+SiLU / BN / optimizer kernels (#38)
-- [x] benchmarks: Ultralytics baselines (#14); folo-n GPU forward b1 3.98 ms vs yolo26n 4.95 ms (docs/BENCHMARKS.md)
-- [~] GPU training end to end with the loss and assigner on the device; R6 real-data run (#46)
-- [~] inference round 2: CPU forward ≤ 22.8 ms, GPU end-to-end predict (perf/inference-2)
-- [x] f16 whole-model inference (`--half`; tensor-core GEMMs next)
+- [x] benchmarks: Ultralytics baselines (#14); folo-n beats yolo26n on GPU fwd b1 (2.99 vs 4.95 ms), GPU e2e b1/b16 and CPU fwd (#55; docs/BENCHMARKS.md)
+- [x] GPU training end to end with the loss and assigner on the device: 219 img/s vs yolo26n 202 (#46); R6 runs (#46, #67)
+- [x] inference round 2: pack-free CPU conv, GPU letterbox and candidate decode (#55)
+- [x] f16 whole-model inference (#80); tensor-core f16 GEMM/conv, opt-in (#89)
+- [~] AMP training on tensor cores (train/amp)
 
 ## M4 — real use
 - [x] real datasets from disk (YOLO, COCO), export folo-f16
 - [x] server runs real training + inference (#42); `folo mcp` (#36) driving real training (#49); agent cookbook
-- [x] in-browser inference (wasm + WebGPU, ~14 ms folo-n @640 in Chrome) (#51); Studio Playground integration pending
+- [x] in-browser inference (wasm + WebGPU, ~14 ms folo-n @640 in Chrome) (#51), in Studio's Playground (#57, #70), shipped in release builds (#78)
 - [x] release pipeline: tagged binaries with embedded Studio, install scripts (#22)
-- [~] dogfooding: a fresh agent uses FOLO via MCP + CLI and reports friction (dogfood/report-1)
-- [ ] ONNX export; pretrained weights
+- [x] dogfooding: reports 1 (#59, fixed in #69) and 2 (#93; fixes in flight on fix/dogfood-2)
+- [x] ONNX export with onnxruntime parity in CI (#87)
+- [~] COCO-pretrained folo-n: loader + COCOeval + `folo weights` (#72); 50-epoch run in progress (epoch 29: mAP50-95 0.273)
 
 ## M5 — polish
-- [ ] docs site, more examples, R6 example recipe (in #46)
+- [x] README showcase, QUICKSTART, screenshots, llms.txt (#71); R6 example (examples/r6)
+- [ ] docs site
