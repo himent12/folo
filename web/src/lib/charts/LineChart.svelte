@@ -189,6 +189,13 @@
       .filter((e): e is NonNullable<typeof e> => e !== null)
       .sort((a, b) => a.y - b.y);
     for (let i = 1; i < out.length; i++) if (out[i]!.y - out[i - 1]!.y < 12) out[i]!.y = out[i - 1]!.y + 12;
+    // Keep the stack inside the plot: if it runs past the bottom, push it back up (still 12 px apart).
+    const bottom = height - margin.bottom - 4;
+    for (let i = out.length - 1; i >= 0; i--) {
+      const limit = i === out.length - 1 ? bottom : out[i + 1]!.y - 12;
+      if (out[i]!.y > limit) out[i]!.y = limit;
+    }
+    for (const e of out) e.y = Math.max(margin.top + 4, e.y);
     return out;
   });
 
