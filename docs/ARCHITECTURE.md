@@ -104,7 +104,9 @@ The exact block definitions, layer tables, parameter names, head, loss, training
   C3k2 blocks with split + bottlenecks + concat), SPPF, one C2PSA attention block at P5, a PAN-FPN neck, and an
   anchor-free decoupled head on three scales (strides 8 / 16 / 32). Box regression uses distribution focal loss bins
   (`reg_max`, default 16). An NMS-free one-to-one head (dual assignment during training, as in YOLOv10) is specified
-  in MODEL.md but reserved for a later milestone.
+  in MODEL.md but reserved for a later milestone. Implemented in `folo_vision::model`: `FoloModel::new(config)` for
+  any scale and class count, `forward` → `HeadOutput { box_raw [B, 64, A], cls_raw [B, nc, A], anchors }`, `fuse()`,
+  `predict_raw` (forward + CPU decode + NMS), and `.folo` save / load / transfer through folo-nn.
 - **Loss**: task-aligned assigner (TAL: `score^alpha * IoU^beta`, top-k), BCE classification on aligned targets,
   CIoU box loss and DFL, weighted 7.5 / 0.5 / 1.5 by default. `folo_vision::loss` runs the assigner on host copies of the detached
   head outputs, then builds the terms from folo-core tensor ops (fused custom ops for the full-size BCE and gather on
