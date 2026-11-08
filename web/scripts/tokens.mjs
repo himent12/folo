@@ -16,7 +16,7 @@ const t = JSON.parse(readFileSync(resolve(designDir, 'tokens.json'), 'utf8'));
 const HEX = /^#([0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$/;
 
 const isMeta = (k) => k.startsWith('$');
-const kebab = (s) => String(s).replace(/_/g, '-').replace(/\./g, '_');
+const kebab = (s) => String(s).replace(/[_.]/g, '-');
 const px = (n) => (n === 0 ? '0' : `${n}px`);
 
 function hex(v, where) {

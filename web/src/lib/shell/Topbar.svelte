@@ -5,6 +5,7 @@
   import Monitor from '@lucide/svelte/icons/monitor';
   import Plus from '@lucide/svelte/icons/plus';
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
+  import Settings from '@lucide/svelte/icons/settings';
   import { prefs } from '$lib/prefs.svelte';
   import { href } from '$lib/router.svelte';
   import Button from '$lib/ui/Button.svelte';
@@ -41,6 +42,7 @@
       <span class="search-keys"><Kbd keys="Mod+K" subtle /></span>
     </button>
     <Button variant="ghost" icon={themeIcon} aria-label={themeLabel} title={themeLabel} onclick={() => prefs.cycleTheme()} />
+    <span class="mobile-only"><Button variant="ghost" icon={Settings} href={href('/settings')} aria-label="Settings" /></span>
     <span class="new-run"><Button variant="primary" icon={Plus} href={href('/runs/new')}>New run</Button></span>
   </div>
 </header>
@@ -60,7 +62,8 @@
     -webkit-backdrop-filter: blur(12px) saturate(1.4);
     border-bottom: 1px solid var(--line-subtle);
   }
-  .mobile-logo {
+  .mobile-logo,
+  .mobile-only {
     display: none;
   }
   .crumbs {
@@ -151,7 +154,8 @@
       padding: 0 var(--space-2) 0 var(--space-4);
       gap: var(--space-3);
     }
-    .mobile-logo {
+    .mobile-logo,
+    .mobile-only {
       display: inline-flex;
     }
     .crumbs li:not(.last) {

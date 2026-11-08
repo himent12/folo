@@ -44,7 +44,7 @@
   {#if IconRight}<IconRight size={iconSize} strokeWidth={1.75} aria-hidden="true" />{/if}
 {/snippet}
 
-{#if href && !disabled}
+{#if href && !disabled && !loading}
   <a {href} class={cls} {...rest as Record<string, unknown>}>{@render inner()}</a>
 {:else}
   <button {type} class={cls} disabled={disabled || loading} aria-busy={loading || undefined} {...rest}>

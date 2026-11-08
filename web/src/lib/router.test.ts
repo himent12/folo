@@ -25,6 +25,10 @@ describe('router.parse', () => {
     expect(r.query.get('class')).toBe('2');
   });
 
+  it('treats malformed percent-encoding as not found', () => {
+    expect(parse('#/datasets/%ZZ').name).toBe('not-found');
+  });
+
   it('reports unknown paths', () => {
     expect(parse('#/nope/nope').name).toBe('not-found');
   });

@@ -44,6 +44,9 @@ app: chart plots, image canvases, code/log views. In light mode panels are white
 `bg.hover` / `bg.active` are translucent overlays that work on any surface.
 
 ## Colour
+- Text: `text.primary` for content, `text.secondary` for supporting text, `text.tertiary` for labels, captions and
+  metadata. All three meet WCAG AA (4.5:1) on every surface in both themes; `text.disabled` is for disabled controls
+  only.
 - **Accent "signal" lime** (`accent.solid` #C5F82A): the focus-confirm green of a viewfinder. Used for the primary
   button, focus rings, the live/running state, selection and the first chart series. Text on a lime fill is
   `accent.on` (near black). On light backgrounds lime is too pale for text and strokes, so use `accent.text` /

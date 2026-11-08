@@ -45,7 +45,12 @@ export function parse(hash: string): Route {
     const m = re.exec(path);
     if (m) {
       const params: Record<string, string> = {};
-      keys.forEach((k, i) => (params[k] = decodeURIComponent(m[i + 1] ?? '')));
+      try {
+        keys.forEach((k, i) => (params[k] = decodeURIComponent(m[i + 1] ?? '')));
+      } catch {
+        // Malformed percent-encoding (e.g. `%ZZ`): treat as an unknown page rather than crash.
+        return { name: 'not-found', params: {}, query, path };
+      }
       return { name, params, query, path };
     }
   }

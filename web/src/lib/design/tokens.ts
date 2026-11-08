@@ -37,7 +37,7 @@ export const chart = {
     ],
     "grid": "#FFFFFF0F",
     "axis": "#FFFFFF24",
-    "label": "#6E747E",
+    "label": "#80868F",
     "areaOpacity": 0.14
   },
   "light": {
@@ -51,7 +51,7 @@ export const chart = {
     ],
     "grid": "#0A0E140F",
     "axis": "#0A0E1429",
-    "label": "#7A818B",
+    "label": "#646B75",
     "areaOpacity": 0.12
   }
 } as const;

@@ -101,8 +101,8 @@
   --space-12: 48px;
   --space-16: 64px;
   --space-px: 1px;
-  --space-0_5: 2px;
-  --space-1_5: 6px;
+  --space-0-5: 2px;
+  --space-1-5: 6px;
   --radius-xs: 3px;
   --radius-sm: 4px;
   --radius-md: 6px;
@@ -183,7 +183,7 @@
   --line-strong: #ffffff29;
   --text-primary: #edeff2;
   --text-secondary: #a1a7b0;
-  --text-tertiary: #6e747e;
+  --text-tertiary: #80868f;
   --text-disabled: #484d55;
   --text-inverse: #0a0b0d;
   --accent-solid: #c5f82a;
@@ -213,7 +213,7 @@
   --chart-6: #2dd4bf;
   --chart-grid: #ffffff0f;
   --chart-axis: #ffffff24;
-  --chart-label: #6e747e;
+  --chart-label: #80868f;
   --chart-cursor: #ffffff4d;
   --chart-area-opacity: 0.14;
   --shadow-sm: 0 1px 2px 0 #00000066;
@@ -237,7 +237,7 @@
   --line-strong: #0a0e1430;
   --text-primary: #0c0e12;
   --text-secondary: #4f5661;
-  --text-tertiary: #7a818b;
+  --text-tertiary: #646b75;
   --text-disabled: #b3b8bf;
   --text-inverse: #ffffff;
   --accent-solid: #bef01e;
@@ -267,7 +267,7 @@
   --chart-6: #0f9f8c;
   --chart-grid: #0a0e140f;
   --chart-axis: #0a0e1429;
-  --chart-label: #7a818b;
+  --chart-label: #646b75;
   --chart-cursor: #0a0e1440;
   --chart-area-opacity: 0.12;
   --shadow-sm: 0 1px 2px 0 #0a0e140f;
