@@ -46,7 +46,7 @@
       : classes
           .map((_, i) => i)
           .filter((i) => !lit.includes(i))
-          .map((i) => ({ id: `c${i}`, label: name(i), color: 'var(--text-tertiary)', ghost: true, points: trimPrTail(ev.curves[i] ?? []) }))),
+          .map((i) => ({ id: `c${i}`, label: name(i), color: 'var(--text-secondary)', ghost: true, points: trimPrTail(ev.curves[i] ?? []) }))),
     { id: 'mean', label: 'All classes', color: 'var(--text-primary)', points: trimPrTail(ev.mean), emphasis: true },
     ...lit.map((i) => ({ id: `c${i}`, label: name(i), color: classStroke(i), points: trimPrTail(ev.curves[i] ?? []), emphasis: true })),
   ]);

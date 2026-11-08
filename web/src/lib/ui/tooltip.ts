@@ -26,6 +26,12 @@ function norm(o: TooltipOptions) {
 
 export function tooltip(node: HTMLElement, opts: TooltipOptions) {
   let o = norm(opts);
+  // The element's own aria-describedby (if any) is kept: the tooltip id is added to it, then removed again.
+  const own = () => (node.getAttribute('aria-describedby') ?? '').split(/\s+/).filter((id) => id && id !== 'folo-tooltip');
+  // Escape dismisses a visible tooltip without moving focus (WCAG 1.4.13).
+  const onKey = (e: KeyboardEvent) => {
+    if (e.key === 'Escape') hide();
+  };
 
   const show = (immediate: boolean) => {
     if (!o) return;
@@ -63,7 +69,8 @@ export function tooltip(node: HTMLElement, opts: TooltipOptions) {
       }
       x = Math.max(4, Math.min(window.innerWidth - t.width - 4, x));
       el.style.transform = `translate(${Math.round(x)}px, ${Math.round(y)}px)`;
-      node.setAttribute('aria-describedby', el.id);
+      node.setAttribute('aria-describedby', [...own(), el.id].join(' '));
+      document.addEventListener('keydown', onKey);
     }, delay);
   };
 
@@ -73,7 +80,10 @@ export function tooltip(node: HTMLElement, opts: TooltipOptions) {
       delete tip.dataset.show;
       lastHide = Date.now();
     }
-    node.removeAttribute('aria-describedby');
+    document.removeEventListener('keydown', onKey);
+    const rest = own();
+    if (rest.length) node.setAttribute('aria-describedby', rest.join(' '));
+    else node.removeAttribute('aria-describedby');
   };
 
   const onEnter = () => show(false);

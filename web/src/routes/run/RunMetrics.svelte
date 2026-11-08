@@ -209,7 +209,7 @@
       </div>
       {#if closeFrom < 1 && live}<span class="sr-only">The hatched end of the bar marks the last {run.config.augment.close_mosaic} epochs, trained without mosaic.</span>{/if}
       <span class="cap num">
-        {#if live}{(progress * 100).toFixed(1)}% · {run.eta_s !== null ? `${duration(run.eta_s)} left` : 'estimating…'}{#if closeFrom < 1}<span class="hatch-key"> · <i aria-hidden="true"></i>no mosaic</span>{/if}{:else}{elapsed !== null ? `${duration(elapsed)} total` : '—'}{/if}
+        {#if live}{(progress * 100).toFixed(1)}% · {run.eta_s !== null ? `${duration(run.eta_s)} left` : 'estimating…'}{#if closeFrom < 1}<span class="hatch-key">&nbsp;· <i aria-hidden="true"></i>no mosaic</span>{/if}{:else}{elapsed !== null ? `${duration(elapsed)} total` : '—'}{/if}
       </span>
     </div>
     <!-- Phones: one picker instead of six cells; the chart below shows what it names. -->
@@ -273,17 +273,17 @@
       </div>
     </header>
     {#if loading}
-      <ChartSkeleton height={narrow ? 220 : 320} />
+      <ChartSkeleton height={narrow ? 180 : 320} />
     {:else}
       {#key tab}
         <LineChart
           {series}
-          height={narrow ? 220 : 320}
+          height={narrow ? 180 : 320}
           {xDomain}
           yDomain={tab === 'map' || tab === 'map50' || tab === 'pr' ? [0, 1] : tab === 'ips' ? [0, ipsMax * 1.15] : undefined}
           yLog={tab === 'loss' && scale === 'log'}
           yFormat={tab === 'lr' ? (v) => String(+(v / 10 ** lrExp).toFixed(2)) : undefined}
-          valueFormat={tab === 'lr' ? (v) => fmtLr(v) : tab === 'ips' ? (v) => `${num(v, 0)} img/s` : (v) => v.toFixed(3)}
+          valueFormat={tab === 'lr' ? (v) => fmtLr(v) : tab === 'ips' ? (v) => `${num(v, 0)} img/s` : (v) => metric(v)}
           xTitle={epochTitle}
           curve={tab === 'map' || tab === 'map50' || tab === 'pr' ? 'monotone' : 'linear'}
           markers={best}
@@ -516,14 +516,15 @@
       font-size: var(--type-2xl-size);
       line-height: 32px;
     }
+    /* Up to 1199 px six large tiles would push the chart down: one compact metric picker instead. */
     .tabs {
-      grid-template-columns: repeat(3, minmax(0, 1fr));
+      display: none;
     }
-    .tab:nth-child(4) {
-      border-left: 0;
-    }
-    .tab:nth-child(n + 4) {
-      border-top: 1px solid var(--line-subtle);
+    .phone-metric {
+      display: grid;
+      gap: var(--space-1);
+      max-width: 400px;
+      padding: var(--space-3) var(--space-4);
     }
   }
   @media (max-width: 767px) {
@@ -541,12 +542,7 @@
     .big {
       grid-row: 1 / span 2;
     }
-    .tabs {
-      display: none;
-    }
     .phone-metric {
-      display: grid;
-      gap: var(--space-1);
       padding: var(--space-3);
     }
     .val {

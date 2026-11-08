@@ -22,6 +22,14 @@
   const run = $derived(live.run ?? initial);
 
   let cursor = $state<number | null>(null);
+  // Phones: a shorter plot, so the recent runs below start on the first screen.
+  let narrow = $state(typeof matchMedia !== 'undefined' && matchMedia('(max-width: 767px)').matches);
+  $effect(() => {
+    const mq = matchMedia('(max-width: 767px)');
+    const on = () => (narrow = mq.matches);
+    mq.addEventListener('change', on);
+    return () => mq.removeEventListener('change', on);
+  });
 
   const charts = $derived.by(() => {
     void live.version;
@@ -81,14 +89,14 @@
     <div class="chart">
       <p class="chart-title">Validation mAP <span class="faint">by epoch</span></p>
       {#if live.loading}
-        <ChartSkeleton height={200} />
+        <ChartSkeleton height={narrow ? 140 : 200} />
       {:else}
         <LineChart
           series={charts.map}
-          height={200}
+          height={narrow ? 140 : 200}
           xDomain={horizon}
           yDomain={[0, 1]}
-          valueFormat={(v) => v.toFixed(3)}
+          valueFormat={(v) => metric(v)}
           xTitle={(x) => `Epoch ${Math.round(x)}`}
           curve="monotone"
           legendNote="Latest"
@@ -216,6 +224,10 @@
     }
   }
   @media (max-width: 767px) {
+    /* Phones: the two stats that matter while watching (best mAP, throughput); the run page has the rest. */
+    .grid > :global(:nth-child(n + 3)) {
+      display: none;
+    }
     /* Phones: progress, then the mAP chart, then the stat grid, so evidence comes before detail. */
     .stats {
       display: contents;
