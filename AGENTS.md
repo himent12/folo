@@ -53,6 +53,7 @@ crates/folo-gpu      wgpu device, buffer pool, WGSL kernels; implements the core
 crates/folo-nn       modules (Conv2d, BatchNorm2d, ...), init, optimizers, LR schedules, .folo weight files
 crates/folo-data     image IO, YOLO/COCO dataset formats, augmentation, batching data loader, synthetic datasets
 crates/folo-vision   FOLO detector (n/s/m/l), loss, task-aligned assigner, box ops, NMS, mAP, trainer, predictor
+crates/folo-api      serde types of docs/API.md, shared by the server, the CLI and FOLO Desktop
 crates/folo-server   axum HTTP + SSE API used by Studio and by agents; serves the built web app
 crates/folo-cli      the `folo` binary (train / val / predict / export / serve / mcp / doctor)
 web/                 FOLO Studio (Svelte 5 + TypeScript + Vite, custom design system, no UI kit)

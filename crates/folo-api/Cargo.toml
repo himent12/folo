@@ -1,0 +1,16 @@
+[package]
+name = "folo-api"
+description = "FOLO HTTP API types (docs/API.md), shared by folo-server, the CLI and FOLO Desktop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

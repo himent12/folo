@@ -7,4 +7,5 @@
 - [Detector spec: model, loss, training recipe](docs/MODEL.md)
 - [HTTP API](docs/API.md)
 - [MCP server for agents](docs/MCP.md)
+- [CLI conventions, `folo describe --json`](docs/CLI.md)
 - [Roadmap](docs/ROADMAP.md)
