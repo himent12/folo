@@ -28,7 +28,9 @@ Lines: 1 hierarchy & layout · 2 typography · 3 colour & theming · 4 spacing r
 | r7 | Claude Opus 5.5 (78 of 134 shots seen) | 8 | 7.5 | 8 | 7.5 | 8 | 8 | 8.5 | 7.5 | 8.5 | 7.5 | 8 | 8 | 7.5 |
 | r8 | GPT-6.1 Sol | 8 | 8 | 8 | 8.5 | 8 | 7 | 7.5 | 8 | 8.5 | 8 | 8 | 8 | 7 |
 | r9 | GPT-6.1 Sol | 8 | 8 | 8 | 8 | 8 | 7.5 | 7.5 | 8 | 8.5 | 8 | 7 | 7.5 | 7 |
+| r9 | Claude Opus 5.5 (81 of 151 shots seen) | 8 | 8 | 7.5 | 8 | 8.5 | 8 | 8.5 | 8 | 8 | 7.5 | 8 | 8 | 7.5 |
 | r10 | GPT-6.1 Sol | 8.5 | 8.5 | 8.5 | 9 | 8.5 | 8 | 8.5 | 8.5 | 9 | 8.5 | 8 | 8.5 | 8 |
+| r10 | Claude Opus 5.5 (82 of 172 shots seen) | 8.5 | 8 | 8.5 | 8 | 8.5 | 8.5 | 8.5 | 8 | 8.5 | 8.5 | 8 | 8.5 | 8 |
 
 ## Per-line minimum (lower of the two reviewers)
 
@@ -45,8 +47,8 @@ Rounds with one reviewer are marked; their minimum is that reviewer's row.
 | r6 (Sol only) | 7.5 | 8 | 8 | 8 | 7.5 | 7 | 7.5 | 7.5 | 8 | 7.5 | 7 | 7.5 | 7 |
 | r7 | 7.5 | 7.5 | 8 | 7.5 | 7.5 | 7.5 | 8 | 7.5 | 8 | 7.5 | 7 | 8 | 7 |
 | r8 (Sol only) | 8 | 8 | 8 | 8.5 | 8 | 7 | 7.5 | 8 | 8.5 | 8 | 8 | 8 | 7 |
-| r9 (Sol only) | 8 | 8 | 8 | 8 | 8 | 7.5 | 7.5 | 8 | 8.5 | 8 | 7 | 7.5 | 7 |
-| r10 (Sol; Opus pending) | 8.5 | 8.5 | 8.5 | 9 | 8.5 | 8 | 8.5 | 8.5 | 9 | 8.5 | 8 | 8.5 | 8 |
+| r9 | 8 | 8 | 7.5 | 8 | 8 | 7.5 | 7.5 | 8 | 8 | 7.5 | 7 | 7.5 | 7 |
+| r10 | 8.5 ↑ | 8 | 8.5 ↑ | 8 | 8.5 ↑ | 8 ↑ | 8.5 ↑ | 8 | 8.5 | 8.5 ↑ | 8 ↑ | 8.5 ↑ | 8 |
 
 r4 lowest lines: 6 data visualisation (5.5), 2 typography, 3 colour, 8 consistency (6). Diagnosis: 2, 3 and 8 are
 structural (no single rule for mono vs sans, class colours that changed between legend and box, two accents in light),
@@ -56,3 +58,8 @@ comparison and dense COCO evaluation screens need a different layout, not tweaks
 r5 (after the design-director pass, `DESIGN_DIRECTION.md`): every line up, no line below 7 for the first time. Lowest:
 11 responsiveness (7 from both). Opus could open only 71 of 132 shots (image request limit), so its r5 row is partial;
 from r6 reviewers pace image loading and retry.
+
+r10: no line below 8 from either reviewer for the first time (min 8, up from 7). Both reviewers converge on what is
+left: phone-width loose ends (truncated names, the long phone model page, row heights), drift between screens (two
+run-list patterns, four device names, desktop banners vs phone callouts) and type sizes off the scale. Rounds 11–12
+take these as system rules where possible (one end-label placement, one ETA formatter, status marks by shape).

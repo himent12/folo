@@ -251,7 +251,7 @@
           <EmptyState icon={Images} title="No datasets registered" description="Register a YOLO or COCO folder, or generate a synthetic shapes set." />
         {:else}
           <ul class="dslist">
-            {#each datasets.data.slice(0, 4) as d (d.id)}
+            {#each datasets.data.slice(0, 6) as d (d.id)}
               <li>
                 <a href={href(`/datasets/${d.id}`)}>
                   <span class="d-row">
@@ -484,6 +484,22 @@
     flex-shrink: 0;
     font-size: var(--type-sm-size);
     color: var(--text-tertiary);
+  }
+  /* Wide screens: Recent runs and Best model share a row (they end together), and Datasets runs across the full
+     width under both, its datasets side by side, instead of hanging below the side column alone. */
+  @media (min-width: 1200px) {
+    .col-main,
+    .col-side {
+      display: contents;
+    }
+    .cols > .col-side > :global(#datasets) {
+      grid-column: 1 / -1;
+    }
+    .dslist {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      column-gap: var(--space-4);
+    }
   }
   @media (max-width: 1199px) {
     .cols {

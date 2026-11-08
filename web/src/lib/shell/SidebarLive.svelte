@@ -3,7 +3,7 @@
   import { hub } from '$lib/api/index.svelte';
   import { Resource } from '$lib/api/resource.svelte';
   import { href } from '$lib/router.svelte';
-  import { duration } from '$lib/format';
+  import { eta } from '$lib/format';
   import { runProgress } from '$lib/api/progress';
   import Progress from '$lib/ui/Progress.svelte';
   import { tooltip } from '$lib/ui/tooltip';
@@ -35,7 +35,7 @@
       <span class="top">
         <span class="pulse" aria-hidden="true"></span>
         <span class="label">Training</span>
-        <span class="eta num">{duration(live.eta_s)} left</span>
+        <span class="eta num">{eta(live.eta_s)} left</span>
       </span>
       <span class="name truncate">{live.name}</span>
       <Progress value={progress} size="xs" label="Training progress" />

@@ -11,12 +11,12 @@ const run = (device: string, label: string) => ({ device: label, config: { devic
 describe('runGpu / deviceLine', () => {
   it('never attaches GPU load to a CPU run', () => {
     expect(runGpu(run('cpu', 'AMD Ryzen 9 7950X (cpu)'), gpus)).toBeNull();
-    expect(deviceLine(run('cpu', 'AMD Ryzen 9 7950X (cpu)'), gpus)).toBe('AMD Ryzen 9 7950X (cpu)');
+    expect(deviceLine(run('cpu', 'AMD Ryzen 9 7950X (cpu)'), gpus)).toBe('Ryzen 9 7950X (CPU)');
   });
 
   it('uses the GPU with the requested ordinal', () => {
     expect(runGpu(run('gpu:1', 'NVIDIA GeForce RTX 3060 (vulkan)'), gpus)?.ordinal).toBe(1);
-    expect(deviceLine(run('gpu:1', 'NVIDIA GeForce RTX 3060 (vulkan)'), gpus)).toBe('RTX 3060 (vulkan) · 12 % busy');
+    expect(deviceLine(run('gpu:1', 'NVIDIA GeForce RTX 3060 (vulkan)'), gpus)).toBe('RTX 3060 · 12 % busy');
   });
 
   it('matches auto runs by adapter name, and stays silent when unsure', () => {

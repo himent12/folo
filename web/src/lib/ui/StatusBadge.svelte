@@ -26,7 +26,15 @@
 </script>
 
 <span class="badge {status} {size}" class:plain>
-  <span class="dot" aria-hidden="true"></span>{#if dotOnly}<span class="sr-only">{labels[status]}</span>{:else}{labels[status]}{/if}
+  <!-- Each status has its own mark as well as its hue (running and completed are both green-ish): a ringed dot
+       while running, a check when completed, a cross when failed, hollow while queued, a square when stopped. -->
+  {#if status === 'completed'}
+    <svg class="mark" viewBox="0 0 8 8" aria-hidden="true"><path d="M1.2 4.3 3.2 6.2 6.8 1.9" /></svg>
+  {:else if status === 'failed'}
+    <svg class="mark" viewBox="0 0 8 8" aria-hidden="true"><path d="M1.8 1.8 6.2 6.2M6.2 1.8 1.8 6.2" /></svg>
+  {:else}
+    <span class="dot" aria-hidden="true"></span>
+  {/if}{#if dotOnly}<span class="sr-only">{labels[status]}</span>{:else}{labels[status]}{/if}
 </span>
 
 <style>
@@ -61,7 +69,27 @@
     --c: var(--accent-text);
     --bg: var(--accent-muted);
   }
+  .mark {
+    width: 8px;
+    height: 8px;
+    flex-shrink: 0;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.6;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+  .plain .mark {
+    stroke: var(--c);
+  }
+  /* Running: a dot in a ring (it reads "live" even when the pulse is off for reduced motion). */
   .running .dot {
+    width: 4px;
+    height: 4px;
+    margin: 0 1px;
+    background: var(--c);
+    outline: 1px solid var(--c);
+    outline-offset: 1px;
     animation: pulse 1.6s var(--ease-out) infinite;
   }
   .completed {
@@ -109,7 +137,7 @@
   }
   @keyframes pulse {
     0% {
-      box-shadow: 0 0 0 0 color-mix(in srgb, currentColor 65%, transparent);
+      box-shadow: 0 0 0 0 color-mix(in srgb, var(--c) 65%, transparent);
     }
     100% {
       box-shadow: 0 0 0 5px transparent;

@@ -208,13 +208,8 @@
     {/snippet}
     {#snippet actions()}
       {#if phone}
-        <Button
-          variant="primary"
-          icon={Play}
-          aria-label="Train on this dataset"
-          title="Train on this dataset"
-          href={href(`/runs/new?dataset=${encodeURIComponent(d.id)}`)}
-        />
+        <!-- Phones: the page's main action keeps a word (an icon-only lime square does not say what it does). -->
+        <Button variant="primary" icon={Play} aria-label="Train on this dataset" href={href(`/runs/new?dataset=${encodeURIComponent(d.id)}`)}>Train</Button>
       {:else}
         <Button variant="primary" icon={Play} href={href(`/runs/new?dataset=${encodeURIComponent(d.id)}`)}>Train on this dataset</Button>
       {/if}

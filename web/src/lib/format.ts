@@ -68,6 +68,18 @@ export function duration(s: number | null | undefined): string {
   return `${sec}s`;
 }
 
+/**
+ * Time left (an estimate): to the second under two minutes, then whole minutes rounded up. Estimates taken a moment
+ * apart (the sidebar's poll, the run's stream) then read the same, and the figure does not flicker every step.
+ */
+export function eta(s: number | null | undefined): string {
+  if (!ok(s)) return '—';
+  const t = Math.max(0, Math.round(s));
+  if (t < 120) return duration(t);
+  const m = Math.ceil(t / 60);
+  return m < 60 ? `${m}m` : `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m`;
+}
+
 /** Milliseconds with sensible precision: 3.14159 → "3.14 ms", 12.34 → "12.3 ms". */
 export function ms(x: number | null | undefined): string {
   if (!ok(x)) return '—';
@@ -118,4 +130,20 @@ export function lr(x: number | null | undefined): string {
   if (x === 0) return '0';
   const e = Math.floor(Math.log10(Math.abs(x)));
   return `${(x / 10 ** e).toFixed(2)} × ${pow10(e)}`;
+}
+
+/**
+ * A device for display, the same on every screen: the GPU's model without the vendor's brand prefix or the graphics
+ * backend ("NVIDIA GeForce RTX 4080 SUPER (vulkan)" → "RTX 4080 SUPER"); a CPU keeps saying so ("AMD Ryzen 9 7950X
+ * (cpu)" → "Ryzen 9 7950X (CPU)", a bare "cpu" → "CPU"). The raw label and the config's device id ("auto", "gpu:0")
+ * stay available as secondary text.
+ */
+export function deviceName(label: string): string {
+  const cpu = /\s*\(cpu\)$/i.test(label);
+  const s = label
+    .trim()
+    .replace(/\s*\((?:cpu|vulkan|dx12|metal|gl|cuda|webgpu)\)$/i, '')
+    .replace(/^(?:NVIDIA GeForce|NVIDIA|AMD Radeon|AMD|Intel\(R\)|Intel|Apple)\s+/i, '');
+  if (/^cpu\b/i.test(s)) return 'CPU';
+  return cpu ? `${s} (CPU)` : s || label;
 }
