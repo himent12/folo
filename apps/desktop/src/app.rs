@@ -440,6 +440,8 @@ pub struct FoloApp {
     pub menu_scroll: ScrollHandle,
     /// Bounds of the open select's trigger, so a click on it toggles rather than counting as outside.
     pub menu_trigger: Rc<std::cell::Cell<Option<gpui::Bounds<Pixels>>>>,
+    /// The confusion matrix's column area as last laid out (its headings fit names to it).
+    pub cm_cols: Rc<std::cell::Cell<Option<Pixels>>>,
     /// The inspector's and the Playground's image views as last laid out (for pan clamping).
     pub insp_view: Rc<std::cell::Cell<Option<gpui::Bounds<Pixels>>>>,
     /// The inspector's label list (focus reveal scrolls it).
@@ -560,6 +562,7 @@ impl FoloApp {
             menu_hl: 0,
             menu_scroll: ScrollHandle::new(),
             menu_trigger: Rc::new(std::cell::Cell::new(None)),
+            cm_cols: Rc::new(std::cell::Cell::new(None)),
             insp_view: Rc::new(std::cell::Cell::new(None)),
             insp_list_scroll: ScrollHandle::new(),
             play_view: Rc::new(std::cell::Cell::new(None)),

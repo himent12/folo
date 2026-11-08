@@ -656,9 +656,19 @@ impl FoloApp {
                             ty::SM,
                         ))
                         .child(
-                            div().flex_1().min_w(px(40.)).h(px(28.)).pb(px(4.)).when(smooth.len() > 2, |d| {
-                                d.child(sparkline(&t, Arc::new(smooth.clone()), t.text_secondary, 24., live))
-                            }),
+                            // Capped: in a wrapped (wide) tile the trend stays a glance, not a chart.
+                            div().flex_1().min_w(px(40.)).max_w(px(160.)).h(px(28.)).pb(px(4.)).when(
+                                smooth.len() > 2,
+                                |d| {
+                                    d.child(sparkline(
+                                        &t,
+                                        Arc::new(smooth.clone()),
+                                        t.text_secondary,
+                                        24.,
+                                        live,
+                                    ))
+                                },
+                            ),
                         ),
                 )
                 .child(text(ty::XS, t.text_tertiary).tnum().child(
@@ -995,7 +1005,7 @@ impl FoloApp {
             .gap(px(16.))
             .child(row(
                 card("Validation mAP", "per epoch", map_legend, line_chart(&t, map)).into_any_element(),
-                card("Training loss", "smoothed · EMA 0.94", loss_legend, line_chart(&t, loss))
+                card("Training loss", "log scale · EMA 0.94", loss_legend, line_chart(&t, loss))
                     .into_any_element(),
                 if pair_a { -0.5 } else { -0.6 },
                 if pair_a { 0.5 } else { 0.4 },

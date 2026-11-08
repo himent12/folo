@@ -528,7 +528,11 @@ impl FoloApp {
             .rounded(px(radius::SM))
             .border_1()
             .cursor_pointer()
-            .when(on, |d| d.bg(t.bg_selected).border_color(t.accent_line))
+            // Selected chips answer the pointer too: the hover tint over the selected fill.
+            .when(on, |d| {
+                let hot = crate::theme::over(t.bg_selected, t.bg_hover);
+                d.bg(t.bg_selected).border_color(t.accent_line).hover(move |s| s.bg(hot))
+            })
             .when(!on, |d| {
                 d.border_color(t.line_default).hover(|s| s.bg(t.bg_hover).border_color(t.line_strong))
             })

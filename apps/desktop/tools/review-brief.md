@@ -34,6 +34,11 @@ PR chart and the dataset histograms are one Tab stop each through `chart_group` 
 Shift = ×10, Home / End, Esc clears, same cursor and legend values as the mouse); every row, chip and button goes
 through `bind` / `bind_ring` (Enter / Space, focus ring).
 
+Settled decisions (reviewers have argued both ways; the current choice stays unless it causes a defect, so spend
+your issues elsewhere): Settings is capped at 880 px, left-aligned; the run KPI strip keeps fixed gaps rather than
+spreading tiles; "close mosaic" is named on the top-row charts only; the learning-rate power of ten sits in the card
+caption.
+
 ## Scoring
 Use `REVIEW_RUBRIC.md` (path in your task): 12 lines, 1–10, where **9 means "would ship as-is at Linear / Raycast / Zed
 quality"**. Be calibrated and strict: no 9 unless you would genuinely ship that line unchanged. Return the exact

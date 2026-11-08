@@ -274,8 +274,10 @@ impl FoloApp {
             .flex()
             .flex_col()
             .gap(px(16.))
-            // Full content width like every other page; rows keep labels left and controls right.
+            // Capped at 880 px: wide enough not to read as a narrow form, close enough that a label
+            // and its control (right edge) stay one glance apart on big windows.
             .w_full()
+            .max_w(px(880.))
             .child(connection)
             .child(appearance)
             .child(keys)

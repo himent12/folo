@@ -662,7 +662,7 @@ pub fn paint_text(
     w
 }
 
-fn text_width(window: &mut Window, text: &str, size_px: f32) -> Pixels {
+pub fn text_width(window: &mut Window, text: &str, size_px: f32) -> Pixels {
     let run = TextRun {
         len: text.len(),
         font: gpui::Font {
@@ -1025,7 +1025,8 @@ fn paint_line_chart(
                     // Raw data faint underneath, smoothed on top.
                     let raw = cached_envelope(&s.points, x0, x1, columns);
                     let pts: Vec<Point<Pixels>> = raw.iter().map(|&(x, y)| point(sx(x), sy(y))).collect();
-                    stroke_path(window, &pts, 1.0, alpha(s.color, 0.09), &[]);
+                    // Quiet enough that the smoothed lines' dash patterns carry identity.
+                    stroke_path(window, &pts, 1.0, alpha(s.color, 0.05), &[]);
                     cached_envelope(&smoothed(&s.points, s.smooth), x0, x1, columns / 2 + 1)
                 } else {
                     cached_envelope(&s.points, x0, x1, columns)

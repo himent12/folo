@@ -274,11 +274,14 @@ impl FoloApp {
                 .child(value)
                 .when_some(detail, |d, s| d.child(text(ty::XS, t.text_tertiary).tnum().child(s)))
         };
+        // The two KPI rows span the chart's height (top row level with its top, bottom row with
+        // its baseline), so no dead band opens under them.
         let kpis = div()
             .w(px(220.))
             .flex_none()
             .flex()
             .flex_col()
+            .justify_between()
             .gap(px(24.))
             .child(
                 div()
@@ -287,7 +290,24 @@ impl FoloApp {
                     .child(
                         div().flex_1().child(kpi(
                             "Epoch",
-                            metric(&t, r.epoch.to_string(), &format!("/ {}", r.epochs), ty::X2XL, ty::SM)
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(6.))
+                                .child(metric(
+                                    &t,
+                                    r.epoch.to_string(),
+                                    &format!("/ {}", r.epochs),
+                                    ty::X2XL,
+                                    ty::SM,
+                                ))
+                                // The run's progress, as on its dashboard's Epoch tile.
+                                .child(div().w(px(88.)).child(progress(
+                                    &t,
+                                    r.progress(),
+                                    t.accent_fill(),
+                                    4.,
+                                )))
                                 .into_any_element(),
                             None,
                         )),
@@ -656,7 +676,12 @@ impl FoloApp {
                             let progress_el =
                                 div().w(px(prog_w)).flex_none().flex().items_center().gap(px(8.)).map(|d| {
                                     if r.status == crate::api::RunStatus::Queued {
-                                        return d.child(text(ty::XS, t.text_tertiary).child("waiting"));
+                                        // The Runs table's phrase, so a queued run reads the same everywhere.
+                                        return d.child(
+                                            text(ty::XS, t.text_tertiary)
+                                                .whitespace_nowrap()
+                                                .child("Waiting for GPU"),
+                                        );
                                     }
                                     let fill = match r.status {
                                         _ if training => t.accent_fill(),
@@ -666,11 +691,11 @@ impl FoloApp {
                                     d.child(div().flex_1().child(progress(&t, r.progress(), fill, 4.))).child(
                                         text(ty::XS, t.text_secondary)
                                             .tnum()
-                                            .w(px(48.))
+                                            .w(px(56.))
                                             .flex_none()
                                             .whitespace_nowrap()
                                             .text_right()
-                                            .child(format!("{}/{}", r.epoch, r.epochs)),
+                                            .child(format!("{} / {}", r.epoch, r.epochs)),
                                     )
                                 });
                             let best = div().w(px(best_w)).flex_none().flex().justify_end().child(
@@ -1057,7 +1082,8 @@ impl FoloApp {
         let tiles: Vec<AnyElement> = (0..4)
             .map(|i| match metas.get(i) {
                 Some(m) => {
-                    let tile = self.tile(&d.id, m, true, crate::viz::Fit::Cover, cx);
+                    // Outlines only: the card previews the data, its page names every box.
+                    let tile = self.tile(&d.id, m, true, false, crate::viz::Fit::Cover, cx);
                     div().flex_1().h_full().overflow_hidden().child(tile).into_any_element()
                 }
                 None => div().flex_1().h_full().bg(t.bg_raised).into_any_element(),
