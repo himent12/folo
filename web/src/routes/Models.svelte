@@ -17,6 +17,7 @@
   import ErrorState from '$lib/ui/ErrorState.svelte';
   import Input from '$lib/ui/Input.svelte';
   import Panel from '$lib/ui/Panel.svelte';
+  import Versus from './models/Versus.svelte';
   import Segmented from '$lib/ui/Segmented.svelte';
   import Select from '$lib/ui/Select.svelte';
   import Skeleton from '$lib/ui/Skeleton.svelte';
@@ -282,6 +283,9 @@
       </div>
     {/if}
   </Panel>
+
+  <!-- Only with models to look at: the empty / error states stay about getting a model. -->
+  {#if models.data?.length}<Versus />{/if}
 </Page>
 
 <style>

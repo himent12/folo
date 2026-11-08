@@ -425,12 +425,12 @@
                 <span class="a-bars">
                   <span class="a-row"><span class="faint">Params</span><span class="num">{compact(a.params)}</span></span>
                   <span class="a-row"><span class="faint">GFLOPs</span><span class="num">{num(a.flops, 1)}</span></span>
-                  <span class="a-row"><span class="faint">Latency</span><span class="num">{num(a.ms, 1)} ms</span></span>
+                  <span class="a-row"><span class="faint">Latency</span>{#if a.ms !== undefined}<span class="num">{num(a.ms, 2)} ms</span>{:else}<span class="faint">not measured</span>{/if}</span>
                 </span>
               </label>
             {/each}
           </div>
-          <p class="ref">Latency is a reference figure: RTX 4080-class GPU, 640 px input, fp32, one image.</p>
+          <p class="ref">Latency is measured end to end on an RTX 4080 SUPER: one decoded 640 px image in, boxes out, NMS included (fp32).</p>
           <div class="row2">
             <Field label="Start from" for="weights" hint="Fine-tuning from a trained model converges much faster.">
               <Select
