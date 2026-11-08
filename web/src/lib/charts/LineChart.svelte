@@ -23,6 +23,8 @@
     y: number;
     label: string;
     color?: string;
+    /** Ring only: the label is stated elsewhere (e.g. the panel header), not floated over the data. */
+    quiet?: boolean;
   }
 </script>
 
@@ -60,6 +62,8 @@
     xLabel?: string;
     /** Leading legend caption saying which value the legend shows, e.g. "Last". Replaced by the x title on hover. */
     legendNote?: string;
+    /** A floating tooltip at the cursor. Off by default: the legend is the readout (cursor values on hover). */
+    tooltip?: boolean;
   }
 
   let {
@@ -83,6 +87,7 @@
     endLabels = false,
     xLabel,
     legendNote,
+    tooltip = false,
   }: Props = $props();
 
   const uid = $props.id();
@@ -147,8 +152,9 @@
 
   const margin = $derived.by(() => {
     const longest = Math.max(...yTickValues.map((v) => yFormat(v).length), 1);
+    // ~7 px per character at 11 px Geist (tabular digits).
     const labelW = endLabels && width >= 560 ? Math.min(120, Math.max(0, ...series.map((s) => s.label.length)) * 6.2 + 10) : 0;
-    const left = Math.max(Math.ceil(longest * 6.4) + 14, xLabel ? Math.ceil(xLabel.length * 5.6) + 12 : 0);
+    const left = Math.max(Math.ceil(longest * 7) + 14, xLabel ? Math.ceil(xLabel.length * 6.2) + 12 : 0);
     return { top: 8, right: 12 + labelW, bottom: 22, left };
   });
 
@@ -332,7 +338,7 @@
 <div class="chart">
   {#if legend && keyed.length > 0}
     <ul class="legend" aria-hidden="true">
-      {#if legendNote}<li class="note">{hover ? hover.title : legendNote}</li>{/if}
+      {#if legendNote || hover}<li class="note" class:at={!!hover}>{hover ? hover.title : legendNote}</li>{/if}
       {#each keyed as s (s.id)}
         {@const v = hover ? hover.rows.find((r) => r.s.id === s.id)?.p.y : latest(s)}
         <li>
@@ -399,7 +405,7 @@
             {#each paths as { s, a } (s.id)}
               {#if a}
                 <linearGradient id="{uid}-{s.id}" x1="0" x2="0" y1="0" y2="1">
-                  <stop offset="0" style:stop-color={s.color} stop-opacity="0.28" />
+                  <stop offset="0" style:stop-color={s.color} stop-opacity="0.1" />
                   <stop offset="1" style:stop-color={s.color} stop-opacity="0" />
                 </linearGradient>
               {/if}
@@ -423,11 +429,13 @@
             {#if m.x >= xExtent[0] && m.x <= xExtent[1]}
               <g class="marker" transform="translate({x(m.x)},{y(m.y)})">
                 <circle r="4.5" style:stroke={m.color ?? 'var(--chart-1)'} />
-                <text
-                  y="-10"
-                  text-anchor={x(m.x) > width - margin.right - 40 ? 'end' : x(m.x) < margin.left + 40 ? 'start' : 'middle'}
-                  dx={x(m.x) > width - margin.right - 40 ? 6 : x(m.x) < margin.left + 40 ? -6 : 0}>{m.label}</text
-                >
+                {#if !m.quiet}
+                  <text
+                    y="-10"
+                    text-anchor={x(m.x) > width - margin.right - 40 ? 'end' : x(m.x) < margin.left + 40 ? 'start' : 'middle'}
+                    dx={x(m.x) > width - margin.right - 40 ? 6 : x(m.x) < margin.left + 40 ? -6 : 0}>{m.label}</text
+                  >
+                {/if}
               </g>
             {/if}
           {/each}
@@ -447,7 +455,7 @@
         <p class="empty">{empty}</p>
       {/if}
 
-      {#if hover}
+      {#if hover && tooltip}
         <div class="tip" class:left={tipLeft} style:--x="{hover.px}px" role="presentation" bind:clientWidth={tipWidth}>
           <p class="tip-title">{hover.title}</p>
           {#each hover.rows as r (r.s.id)}
@@ -474,8 +482,8 @@
     display: flex;
     flex-wrap: wrap;
     gap: var(--space-1) var(--space-4);
-    font-size: var(--type-xs-size);
-    line-height: var(--type-xs-line);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
   }
   .legend li {
     display: inline-flex;
@@ -483,7 +491,13 @@
     gap: 6px;
   }
   .legend .note {
+    /* Fixed width so the readout does not shift the legend as the cursor moves. */
+    min-width: 6.5em;
     color: var(--text-tertiary);
+    font-variant-numeric: tabular-nums;
+  }
+  .legend .note.at {
+    color: var(--text-secondary);
   }
   .x-label {
     fill: var(--text-tertiary);
@@ -528,8 +542,7 @@
   }
   .ticks text {
     fill: var(--chart-label);
-    font-variant-numeric: tabular-nums;
-    font-size: 10px;
+    font-size: 11px;
     font-variant-numeric: tabular-nums;
   }
   .line {

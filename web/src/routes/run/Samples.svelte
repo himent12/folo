@@ -122,14 +122,16 @@
   }
   .legend {
     display: flex;
-    gap: var(--space-4);
-    font-size: var(--type-xs-size);
+    flex-wrap: wrap;
+    gap: var(--space-1) var(--space-4);
+    font-size: var(--type-sm-size);
     color: var(--text-tertiary);
   }
   .legend span {
     display: inline-flex;
     align-items: center;
     gap: 6px;
+    white-space: nowrap;
   }
   .legend i {
     width: 14px;

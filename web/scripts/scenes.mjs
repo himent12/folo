@@ -186,12 +186,13 @@ export const scenes = [
     fullPage: false,
     setup: async (page) => {
       // Scroll the chart into view first: the pointer cannot hover outside the viewport. Then require the tooltip.
-      const svg = page.locator('#chart-map svg[role="img"]').first();
+      const svg = page.locator('#run-chart svg[role="img"]').first();
       await svg.scrollIntoViewIfNeeded();
       const box = await svg.boundingBox();
       if (!box) throw new Error('chart-hover: no chart');
       await page.mouse.move(box.x + box.width * 0.55, box.y + box.height * 0.45);
-      await page.locator('#chart-map .tip').waitFor({ state: 'visible', timeout: 3000 });
+      // The legend is the readout: it switches to the hovered epoch.
+      await page.locator('#run-chart .legend .note.at').waitFor({ state: 'visible', timeout: 3000 });
     },
   },
   { name: 'not-found', path: '/nope', themes: ['dark'], viewports: ['desktop'] },

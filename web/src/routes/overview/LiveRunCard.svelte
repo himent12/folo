@@ -27,8 +27,9 @@
     const raw = live.steps.map((s) => ({ x: s.step / spe, y: s.loss.total }));
     return {
       map: [
-        { id: 'm95', label: 'mAP50-95', color: 'var(--chart-1)', area: true, points: live.epochs.map((e) => ({ x: e.epoch + 1, y: e.val.map50_95 })) },
-        { id: 'm50', label: 'mAP50', color: 'var(--chart-1)', pattern: 'dash' as const, points: live.epochs.map((e) => ({ x: e.epoch + 1, y: e.val.map50 })) },
+        // One run, so ink rather than a hue (hue identifies entities): primary metric solid, secondary tertiary dashed.
+        { id: 'm95', label: 'mAP50-95', color: 'var(--text-primary)', area: true, points: live.epochs.map((e) => ({ x: e.epoch + 1, y: e.val.map50_95 })) },
+        { id: 'm50', label: 'mAP50', color: 'var(--text-tertiary)', pattern: 'dash' as const, points: live.epochs.map((e) => ({ x: e.epoch + 1, y: e.val.map50 })) },
       ],
       loss: [
         // Same mapping as the run page: total loss is the primary ink, components get the series hues.

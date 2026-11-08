@@ -13,7 +13,7 @@
   import { hub } from '$lib/api/index.svelte';
   import { LiveRun } from '$lib/api/live.svelte';
   import { Resource } from '$lib/api/resource.svelte';
-  import { ago, duration, lr, metric, num } from '$lib/format';
+  import { ago, duration, metric } from '$lib/format';
   import { href, router } from '$lib/router.svelte';
   import { setCrumbs } from '$lib/shell/crumbs.svelte';
   import Page from '$lib/shell/Page.svelte';
@@ -29,7 +29,7 @@
   import ConfigPanel from './run/ConfigPanel.svelte';
   import Logs from './run/Logs.svelte';
   import PerClass from './run/PerClass.svelte';
-  import RunCharts from './run/RunCharts.svelte';
+  import RunMetrics from './run/RunMetrics.svelte';
   import Samples from './run/Samples.svelte';
 
   const id = $derived(router.route.params.id ?? '');
@@ -46,21 +46,11 @@
   const queuedOnly = $derived(run?.status === 'queued' && live.steps.length === 0);
   const ahead = $derived(others.data?.find((r) => r.status === 'running' || r.status === 'stopping'));
   const active = $derived(run ? ['queued', 'running', 'stopping'].includes(run.status) : false);
-  const lastStep = $derived.by(() => {
-    void live.version;
-    return live.steps[live.steps.length - 1];
-  });
-  const lastEpoch = $derived.by(() => {
-    void live.version;
-    return live.epochs[live.epochs.length - 1];
-  });
   const epochsDone = $derived.by(() => {
     void live.version;
     return live.epochs.length;
   });
-  const progress = $derived(run ? Math.min(1, run.step / Math.max(1, run.steps_per_epoch * run.epochs)) : 0);
   const elapsed = $derived(run?.started ? ((run.finished ? Date.parse(run.finished) : Date.now()) - Date.parse(run.started)) / 1000 : null);
-  const closeFrom = $derived(run ? 1 - run.config.augment.close_mosaic / run.epochs : 1);
 
   let stopOpen = $state(false);
   let deleteOpen = $state(false);
@@ -211,57 +201,21 @@
         </div>
       </section>
     {:else}
-    <section class="cluster" aria-label="Run summary">
-      <div class="cell main">
-        <span class="label">Epoch</span>
-        <span class="big num">{run.epoch}<span class="of">/ {run.epochs}</span></span>
-        <div class="track" aria-hidden="true">
-          <div class="fill" class:done={run.status === 'completed'} class:bad={run.status === 'failed'} style:transform="scaleX({run.status === 'completed' ? 1 : progress})"></div>
-          {#if closeFrom < 1 && active}<div class="close" style:left="{closeFrom * 100}%"></div>{/if}
-        </div>
-        {#if closeFrom < 1 && active}<span class="sr-only">The hatched end of the bar marks the last {run.config.augment.close_mosaic} epochs, trained without mosaic.</span>{/if}
-        <span class="small num">
-          {#if active}{(progress * 100).toFixed(1)}% · {run.eta_s !== null ? `${duration(run.eta_s)} left` : 'estimating…'}{:else}{duration(elapsed)} total{/if}
-        </span>
-      </div>
-      <div class="cell">
-        <span class="label">Best mAP50-95</span>
-        <span class="val num">{metric(run.best?.map50_95)}</span>
-        <span class="small">{run.best ? `epoch ${run.best.epoch + 1}` : '—'}</span>
-      </div>
-      <div class="cell tablet-up">
-        <span class="label">mAP50</span>
-        <span class="val num">{metric(lastEpoch?.val.map50)}</span>
-        <span class="small">last epoch</span>
-      </div>
-      <div class="cell tablet-up">
-        <span class="label">Precision · Recall</span>
-        <span class="val num">{num(lastEpoch?.val.precision, 2)} <span class="dim">·</span> {num(lastEpoch?.val.recall, 2)}</span>
-        <span class="small">last epoch</span>
-      </div>
-      <div class="cell">
-        <span class="label">Loss · last step (raw)</span>
-        <span class="val num">{num(lastStep?.loss.total, 3)}</span>
-        <span class="small num">box {num(lastStep?.loss.box, 2)} · cls {num(lastStep?.loss.cls, 2)}</span>
-      </div>
-      <div class="cell secondary">
-        <span class="label">Throughput</span>
-        <span class="val num">{num(lastStep?.imgs_per_s, 0)}<span class="unit">img/s</span></span>
-        <span class="small num">lr {lr(lastStep?.lr)}</span>
-      </div>
-    </section>
+    <RunMetrics {run} steps={live.steps} epochs={live.epochs} version={live.version} loading={live.loading} />
 
-    <RunCharts {run} steps={live.steps} epochs={live.epochs} version={live.version} loading={live.loading} />
-
-    <div class="two">
-      <PerClass classes={dataset?.classes ?? []} epochs={live.epochs} version={live.version} loading={live.loading} />
-      <Logs logs={live.logs} version={live.version} live={active} />
+    <!-- Evidence on the left (what the model sees, what the trainer says); reference in a sticky rail on the right. -->
+    <div class="detail">
+      <div class="main-col">
+        <Samples runId={run.id} classes={dataset?.classes ?? []} {epochsDone} />
+        <Logs logs={live.logs} version={live.version} live={active} />
+      </div>
+      <aside class="rail" aria-label="Per-class results and config">
+        <PerClass classes={dataset?.classes ?? []} epochs={live.epochs} version={live.version} loading={live.loading} compact />
+        <ConfigPanel config={run.config} datasetName={dataset?.name} compact />
+      </aside>
     </div>
-
-    <Samples runId={run.id} classes={dataset?.classes ?? []} {epochsDone} />
     {/if}
-
-    <ConfigPanel config={run.config} datasetName={dataset?.name} />
+    {#if queuedOnly}<ConfigPanel config={run.config} datasetName={dataset?.name} />{/if}
   </Page>
 
   <Dialog
@@ -429,192 +383,31 @@
     color: var(--text-primary);
     font-weight: var(--weight-medium);
   }
-  .cluster {
+  .detail {
     display: grid;
-    grid-template-columns: 1.6fr repeat(5, minmax(0, 1fr));
-    background: var(--bg-panel);
-    border: 1px solid var(--line-subtle);
-    border-radius: var(--radius-lg);
-  }
-  :global([data-theme='light']) .cluster {
-    border-color: var(--line-default);
-  }
-  /* One rhythm for every tile: label row, value row (values sit on a shared baseline), caption. */
-  .cell {
-    display: grid;
-    grid-template-rows: 16px 40px auto;
-    gap: 4px;
-    align-content: start;
-    padding: var(--space-4);
-    min-width: 0;
-    border-left: 1px solid var(--line-subtle);
-  }
-  .cell.main {
-    border-left: 0;
-    gap: 6px;
-  }
-  .label {
-    font-size: var(--type-xs-size);
-    color: var(--text-tertiary);
-    white-space: nowrap;
-  }
-  .big {
-    font-size: var(--type-3xl-size);
-    line-height: var(--type-3xl-line);
-    letter-spacing: var(--type-3xl-tracking);
-    font-weight: var(--weight-semibold);
-  }
-  .of {
-    line-height: 1;
-    margin-left: 6px;
-    font-size: var(--type-lg-size);
-    font-weight: var(--weight-regular);
-    color: var(--text-tertiary);
-    letter-spacing: 0;
-  }
-  .val {
-    align-self: end;
-    padding-bottom: 2px;
-    font-size: var(--type-xl-size);
-    line-height: var(--type-xl-line);
-    letter-spacing: var(--type-xl-tracking);
-    font-weight: var(--weight-medium);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  .dim {
-    color: var(--text-disabled);
-  }
-  .unit {
-    line-height: 1;
-    margin-left: 3px;
-    font-size: var(--type-sm-size);
-    color: var(--text-tertiary);
-    font-weight: var(--weight-regular);
-    letter-spacing: 0;
-  }
-  .small {
-    font-size: var(--type-xs-size);
-    color: var(--text-tertiary);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  .track {
-    position: relative;
-    height: 6px;
-    border-radius: 3px;
-    background: var(--bg-active);
-    overflow: hidden;
-  }
-  .fill {
-    position: absolute;
-    inset: 0;
-    transform-origin: left;
-    background: var(--accent-line);
-    border-radius: 3px;
-    transition: transform var(--dur-slow) var(--ease-standard);
-  }
-  .fill.done {
-    background: var(--success-solid);
-  }
-  .fill.bad {
-    background: var(--danger-solid);
-  }
-  .close {
-    position: absolute;
-    top: 0;
-    bottom: 0;
-    right: 0;
-    background: repeating-linear-gradient(135deg, transparent 0 3px, var(--line-strong) 3px 4px);
-    border-left: 1px solid var(--line-strong);
-  }
-  .two {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
     gap: var(--space-4);
-    align-items: stretch;
+    align-items: start;
+  }
+  .main-col,
+  .rail {
+    display: grid;
+    gap: var(--space-4);
+    min-width: 0;
+  }
+  .rail {
+    position: sticky;
+    top: calc(var(--size-topbar) + var(--space-4));
   }
   @media (max-width: 1199px) {
-    /* Six cells as a clean 3 × 2. */
-    .cluster {
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-    }
-    .cell:nth-child(4) {
-      border-left: 0;
-    }
-    .cell:nth-child(n + 4) {
-      border-top: 1px solid var(--line-subtle);
-    }
-    .two {
+    .detail {
       grid-template-columns: minmax(0, 1fr);
+    }
+    .rail {
+      position: static;
     }
   }
   @media (max-width: 767px) {
-    /* Phones: a compact progress row and four essential metrics, so the first chart starts high on the page. */
-    .cluster {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
-    .cell {
-      grid-template-rows: auto;
-      padding: var(--space-2) var(--space-3);
-      gap: 0;
-    }
-    .val {
-      padding-bottom: 0;
-    }
-    .cell:nth-child(n) {
-      border-left: 0;
-      border-top: 1px solid var(--line-subtle);
-    }
-    .cell.main {
-      grid-column: 1 / -1;
-      border-top: 0;
-      border-bottom: 0;
-      gap: 6px;
-    }
-    .cell:nth-child(odd):not(.main) {
-      border-left: 1px solid var(--line-subtle);
-    }
-    .cell.secondary,
-    .cell.tablet-up {
-      display: none;
-    }
-    /* One compact progress row: count on the left, bar and status on the right. */
-    .cell.main {
-      grid-template-columns: auto minmax(0, 1fr);
-      grid-template-rows: auto auto;
-      align-items: center;
-      column-gap: var(--space-4);
-      row-gap: 4px;
-    }
-    .cell.main .label {
-      display: none;
-    }
-    .cell.main .big {
-      grid-row: 1 / span 2;
-    }
-    .cell.main .track {
-      align-self: end;
-    }
-    .cell.main .small {
-      align-self: start;
-    }
-    .big {
-      font-size: var(--type-xl-size);
-      line-height: var(--type-xl-line);
-    }
-    .of {
-      font-size: var(--type-sm-size);
-    }
-    .val {
-      font-size: var(--type-md-size);
-      line-height: var(--type-md-line);
-    }
-    .cell.main {
-      padding: var(--space-3);
-    }
     .b-msg {
       font-size: var(--type-sm-size);
     }
