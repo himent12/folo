@@ -49,6 +49,7 @@
   "per_class": []
  },
  "ultralytics": null,
+ "ultralytics_legacy": null,
  "images": [
   {"truths":[],"preds":[]},
   {"truths":[],"preds":[[116.25,109.5,126,127.25,0.487,0],[357,392.25,515.5,409.5,0.557,1],[550.25,248.25,572,404.25,0.148,1]]},

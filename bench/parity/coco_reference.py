@@ -2,8 +2,8 @@
 
 Generates seeded random detection scenarios, evaluates each with pycocotools' COCOeval (bbox, area range "all",
 maxDets 100) and writes the inputs plus the reference numbers to crates/folo-vision/tests/fixtures/coco/<name>.json.
-It also computes Ultralytics' AP (a faithful numpy port of `ap_per_class` / `match_predictions`, see the bottom of
-this file) so docs/METRICS.md can say how far that method is from COCO's; the Rust test does not check those.
+It also computes Ultralytics' AP (a numpy port of ultralytics 8.4.198 and of the older 8.x algorithm, see below) so
+docs/METRICS.md can say how far that method is from COCO's; the Rust test does not check those.
 
 Setup (once, outside the repo):
 
@@ -28,6 +28,9 @@ import sys
 import numpy as np
 from pycocotools.coco import COCO
 from pycocotools.cocoeval import COCOeval
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from ultralytics_port import ULTRALYTICS_VERSION, run_ultralytics  # noqa: E402
 
 OUT_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "crates", "folo-vision", "tests", "fixtures", "coco")
 
@@ -441,85 +444,6 @@ def run_cocoeval(images, nc):
 
 
 # --------------------------------------------------------------------------------------------------------------------
-# Ultralytics' AP (port of ultralytics/utils/metrics.py `ap_per_class` / `compute_ap` and
-# ultralytics/models/yolo/detect/val.py `match_predictions`, in float32 like the torch originals)
-# --------------------------------------------------------------------------------------------------------------------
-
-
-def ul_box_iou(a, b, eps=1e-7):
-    a = np.asarray(a, np.float32).reshape(-1, 4)
-    b = np.asarray(b, np.float32).reshape(-1, 4)
-    lt = np.maximum(a[:, None, :2], b[None, :, :2])
-    rb = np.minimum(a[:, None, 2:], b[None, :, 2:])
-    inter = np.clip(rb - lt, 0, None).prod(2)
-    area_a = (a[:, 2:] - a[:, :2]).prod(1)
-    area_b = (b[:, 2:] - b[:, :2]).prod(1)
-    return inter / (area_a[:, None] + area_b[None, :] - inter + np.float32(eps))
-
-
-def ul_match(pred_cls, true_cls, iou, iouv):
-    correct = np.zeros((len(pred_cls), len(iouv)), bool)
-    iou = iou * (true_cls[:, None] == pred_cls)
-    for i, thr in enumerate(iouv.tolist()):
-        matches = np.array(np.nonzero(iou >= thr)).T
-        if matches.shape[0]:
-            if matches.shape[0] > 1:
-                matches = matches[iou[matches[:, 0], matches[:, 1]].argsort()[::-1]]
-                matches = matches[np.unique(matches[:, 1], return_index=True)[1]]
-                matches = matches[np.unique(matches[:, 0], return_index=True)[1]]
-            correct[matches[:, 1].astype(int), i] = True
-    return correct
-
-
-def ul_compute_ap(recall, precision):
-    mrec = np.concatenate(([0.0], recall, [1.0]))
-    mpre = np.concatenate(([1.0], precision, [0.0]))
-    mpre = np.flip(np.maximum.accumulate(np.flip(mpre)))
-    x = np.linspace(0, 1, 101)
-    return np.trapezoid(np.interp(x, mrec, mpre), x)
-
-
-def run_ultralytics(images):
-    iouv = np.linspace(0.5, 0.95, 10, dtype=np.float32)
-    tps, confs, pcls, tcls = [], [], [], []
-    for im in images:
-        t = np.array([x[4] for x in im["truths"]], np.int64)
-        p = np.array([x[5] for x in im["preds"]], np.int64)
-        tcls.append(t)
-        if not len(p):
-            continue
-        conf = np.array([x[4] for x in im["preds"]], np.float32)
-        if len(t):
-            iou = ul_box_iou([x[:4] for x in im["truths"]], [x[:4] for x in im["preds"]])
-            tps.append(ul_match(p, t, iou, iouv))
-        else:
-            tps.append(np.zeros((len(p), 10), bool))
-        confs.append(conf)
-        pcls.append(p)
-    tp = np.concatenate(tps) if tps else np.zeros((0, 10), bool)
-    conf = np.concatenate(confs) if confs else np.zeros(0, np.float32)
-    pred_cls = np.concatenate(pcls) if pcls else np.zeros(0, np.int64)
-    target_cls = np.concatenate(tcls)
-    if not len(target_cls):
-        return None
-    i = np.argsort(-conf)
-    tp, conf, pred_cls = tp[i], conf[i], pred_cls[i]
-    unique_classes, nt = np.unique(target_cls, return_counts=True)
-    ap = np.zeros((len(unique_classes), 10))
-    for ci, c in enumerate(unique_classes):
-        sel = pred_cls == c
-        if sel.sum() == 0:
-            continue
-        fpc = (1 - tp[sel]).cumsum(0)
-        tpc = tp[sel].cumsum(0)
-        recall = tpc / (nt[ci] + 1e-16)
-        precision = tpc / (tpc + fpc)
-        for j in range(10):
-            ap[ci, j] = ul_compute_ap(recall[:, j], precision[:, j])
-    return {"map50": float(ap[:, 0].mean()), "map50_95": float(ap.mean())}
-
-
-# --------------------------------------------------------------------------------------------------------------------
 # Output
 # --------------------------------------------------------------------------------------------------------------------
 
@@ -551,13 +475,15 @@ def main():
         nc = 1 + max([b[4] for im in images for b in im["truths"]] + [b[5] for im in images for b in im["preds"]])
         coco = run_cocoeval(images, nc)
         ul = run_ultralytics(images)
+        ul_legacy = run_ultralytics(images, legacy=True)
         fx = {
             "name": name,
             "description": desc,
             "num_classes": nc,
             "coco_compatible_only": name in NEEDS_COCO_COMPATIBLE,
             "coco": {"stat_names": STAT_NAMES, **coco},
-            "ultralytics": ul,
+            "ultralytics": ul and {"version": ULTRALYTICS_VERSION, **ul},
+            "ultralytics_legacy": ul_legacy,
             "images": images,
         }
         path = os.path.join(OUT_DIR, name + ".json")
@@ -567,13 +493,12 @@ def main():
         n_t = sum(len(im["truths"]) for im in images)
         n_p = sum(len(im["preds"]) for im in images)
         rows.append((name, len(images), nc, n_t, n_p, coco["map50_95"], coco["map50"],
-                     ul["map50_95"] if ul else None, ul["map50"] if ul else None, size))
+                     *(u[k] if u else None for u in (ul, ul_legacy) for k in ("map50_95", "map50")), size))
     print(f"{'scenario':22} {'imgs':>4} {'nc':>3} {'gts':>5} {'preds':>5} {'AP':>8} {'AP50':>8} {'UL AP':>8} "
-          f"{'UL AP50':>8} {'bytes':>7}")
+          f"{'UL AP50':>8} {'old AP':>8} {'old AP50':>8} {'bytes':>7}")
     for r in rows:
         fmt = lambda v: f"{v:8.4f}" if v is not None else "       -"
-        print(f"{r[0]:22} {r[1]:4} {r[2]:3} {r[3]:5} {r[4]:5} {fmt(r[5])} {fmt(r[6])} {fmt(r[7])} {fmt(r[8])} "
-              f"{r[9]:7}")
+        print(f"{r[0]:22} {r[1]:4} {r[2]:3} {r[3]:5} {r[4]:5} " + " ".join(fmt(v) for v in r[5:11]) + f" {r[11]:7}")
     print(f"total {total} bytes in {len(rows)} fixtures", file=sys.stderr)
 
 

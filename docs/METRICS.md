@@ -126,8 +126,10 @@ background:
 - An unmatched ground truth adds 1 at `[background][true class]` (a miss); an unmatched prediction adds 1 at
   `[pred class][background]` (a false alarm).
 
-(Ultralytics removes duplicate matches with two `np.unique` passes rather than a true greedy assignment; the result
-is the same except in rare chains of overlaps.)
+(Ultralytics 8.4.198 matches in a different order: predictions in descending confidence order each claim their best
+unclaimed truth with IoU `> 0.45`. Earlier 8.x releases removed duplicate matches with two `np.unique` passes. Both
+agree with FOLO's descending-IoU order whenever each prediction overlaps at most one truth above 0.45 and vice
+versa; they can differ in crowded scenes.)
 
 ## Parity with pycocotools
 
@@ -151,33 +153,47 @@ costs at most 3e-8. Result: the largest difference in any scenario is **3.0e-8**
 
 ## Differences from Ultralytics' mAP
 
-Ultralytics' `ap_per_class` differs from pycocotools, and so from FOLO, in these ways, so the two usually give
-different numbers on the same predictions:
+Measured against **ultralytics 8.4.198**. `bench/parity/ultralytics_port.py` is a numpy port of its `box_iou`,
+`match_predictions`, `ap_per_class` and `compute_ap`, and `bench/parity/check_ultralytics_port.py` checks it against
+the real package on every fixture: identical TP matrices and identical mAP. Since 8.4 the method is close to
+pycocotools. Each image's detections are matched greedily in descending confidence order, each one to the best
+unclaimed truth of its class, as COCO does. The integration also stops at the last recall reached: `compute_ap`
+appends a zero-precision point there. What still differs:
 
-1. **Matching** is by IoU, not by score: all (prediction, truth) pairs of the same class above `t` are taken in
-   descending IoU order, so a lower-scored but tighter box can take an object from a higher-scored loose one.
-2. **AP integration** is the trapezoidal integral of the precision envelope interpolated at 101 recall points
-   (`np.trapz(np.interp(x, mrec, mpre), x)`), with the recall curve extended by `(0, 1)` and `(1, 0)`, instead of
-   the mean of 101 left-searched samples. Two side effects follow. First, past the highest recall the curve falls
-   linearly to `(1, 0)`, so a class that tops out at recall `r` with precision `p` gets about `p · (1 - r) / 2` of
-   extra area that COCO scores as 0. Second, a perfect detector scores 0.995, not 1, because the last trapezoid
-   averages 1 and 0.
-3. **No per-image cap**: all predictions count (Ultralytics' `max_det = 300` per image applies before evaluation).
-   Set `EvalConfig::max_dets_per_class = None` to match that part.
+1. **AP integration** is the trapezoidal integral of the precision envelope at 101 recall points
+   (`np.trapezoid(np.interp(x, mrec, mpre), x)`), not the mean of 101 left-searched samples. So a perfect detector
+   scores 0.995, because the last trapezoid averages 1 and 0, and other values move by about ±0.003.
+2. **No per-image cap**: every prediction counts (Ultralytics' `max_det = 300` applies earlier, in NMS). Set
+   `EvalConfig::max_dets_per_class = None` to match that part.
+3. **No area range**, so huge and inverted boxes count normally, like FOLO's default.
 4. **Precision details**: IoU is computed in f32 with `+1e-7` in the denominator, and the thresholds are f32, so an
-   IoU exactly on a threshold falls just below it. Score ties are ordered by an unstable `np.argsort`.
+   IoU exactly on a threshold can fall just below it. For sub-pixel boxes the `1e-7` itself is noticeable. Score
+   ties across images are ordered by an unstable `np.argsort`, not by image order, and a detection that ties
+   between two truths takes the first one, where COCO takes the last.
 
-How close it is, measured on the 23 parity scenarios that have truths. The reference script includes a numpy port
-of `ap_per_class` and `match_predictions`. Ultralytics minus COCO:
+Ultralytics minus COCO on the 23 parity scenarios that have truths:
 
-| | median | mean | range |
-|---|---|---|---|
-| mAP50-95 | +0.026 | +0.017 | −0.183 … +0.054 |
-| mAP50 | +0.012 | +0.000 | −0.340 … +0.079 |
+| | median | mean | mean \|Δ\| | range |
+|---|---|---|---|---|
+| mAP50-95 (8.4.198) | −0.0006 | −0.0003 | 0.005 | −0.027 … +0.045 |
+| mAP50 (8.4.198) | +0.0002 | +0.0001 | 0.009 | −0.048 … +0.071 |
+| mAP50-95 (legacy) | +0.035 | +0.029 | 0.029 | −0.005 … +0.059 |
+| mAP50 (legacy) | +0.034 | +0.030 | 0.035 | −0.031 … +0.094 |
 
-On ordinary detector output (`five_classes`, `eighty_classes`, `mixed_scales`, `crowded`) Ultralytics' mAP50-95 is
-0.02–0.04 higher, mostly from the triangle in (2). The gap grows when recall is low (`empty_pred_images` +0.054)
-and flips sign when duplicates' scores don't track their IoU (`duplicates` −0.18 / −0.34 at AP50), because of (1).
-So Ultralytics and COCO numbers are not interchangeable, even on identical predictions.
+On ordinary detector output (`five_classes`, `eighty_classes`, `mixed_scales`, `crowded`, `low_conf_tail`), 8.4.198
+is within 0.003 of COCO on mAP50-95. The larger gaps each have a cause from the list above:
+
+- over 100 predictions per image (2): `max_dets_tie_cut` +0.045, `over_max_dets` +0.009;
+- boxes outside COCO's area range (3): `outside_area_range` −0.027;
+- exact duplicates tied on score (4): `exact_duplicates` −0.011;
+- sub-pixel boxes (4): `tiny_boxes` −0.007;
+- a perfect detector (1): `perfect` −0.005.
+
+"Legacy" is the algorithm of earlier 8.x releases, still in the port for comparison. Matching used two `np.unique`
+passes over the pairs above the threshold: each prediction kept its best-IoU truth, then each truth kept the
+lowest-index (highest-confidence) prediction. The PR curve was extended straight from the last recall to `(1, 0)`,
+which credits a class that tops out at recall `r` with precision `p` with about `p · (1 - r) / 2` of extra area. So
+mAP50-95 numbers from those releases run about 0.03 above COCO's on the same predictions, and more when recall is
+low (`empty_pred_images` +0.056).
 
 COCO numbers (what papers report) are the pycocotools ones, which is why FOLO matches pycocotools.

@@ -101,6 +101,11 @@
   ]
  },
  "ultralytics": {
+  "version": "8.4.198",
+  "map50": 0.0,
+  "map50_95": 0.0
+ },
+ "ultralytics_legacy": {
   "map50": 0.0,
   "map50_95": 0.0
  },
