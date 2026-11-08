@@ -207,6 +207,21 @@ describe('New run: image size', () => {
     expect(target.querySelector('#imgsz')!.closest('.field')!.textContent).toContain('images are all 320 px');
   });
 
+  it("drops the size fitted to one dataset when another is picked whose sizes cannot be read", async () => {
+    const real = api.datasetImages.bind(api);
+    vi.spyOn(api, 'datasetImages').mockImplementation(async (id, q) => {
+      if (id !== 'ds_shapes') throw new Error('listing failed');
+      const r = await real(id, q);
+      return { ...r, images: r.images.map((i) => ({ ...i, width: 320, height: 320 })) };
+    });
+    await open('?dataset=ds_shapes');
+    await until(() => target.querySelector('#imgsz [aria-checked="true"]')?.textContent?.trim() === '320', 'image size 320');
+    const other = target.querySelector<HTMLInputElement>('input[name="dataset"]:not([value="ds_shapes"])')!;
+    other.click();
+    flushSync();
+    await until(() => target.querySelector('#imgsz [aria-checked="true"]')?.textContent?.trim() === '640', 'back to 640');
+  });
+
   it('keeps 640 for larger images', async () => {
     await open('?dataset=ds_shapes');
     await new Promise((r) => setTimeout(r, 400));

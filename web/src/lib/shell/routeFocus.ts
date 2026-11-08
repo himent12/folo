@@ -20,3 +20,35 @@ export function focusRoute(main: HTMLElement): HTMLElement {
   return target;
 }
 
+/**
+ * `focusRoute`, then keeps the focus on the page while it settles: a detail page swaps its loading heading for the
+ * loaded one (the focused element is removed, focus falls to the body), so the new heading takes focus, as long as
+ * the user has not moved focus anywhere else. Stops on the user's own focus, after `ms`, or when the returned
+ * cleanup runs (the next navigation).
+ */
+export function holdRouteFocus(main: HTMLElement, ms = 15000): () => void {
+  let target = focusRoute(main);
+  const lost = () => {
+    const a = document.activeElement;
+    return !target.isConnected && (a === null || a === document.body || a === main);
+  };
+  const observer = new MutationObserver(() => {
+    if (!lost()) return;
+    target = routeFocusTarget(main);
+    target.focus({ preventScroll: true });
+  });
+  observer.observe(main, { childList: true, subtree: true });
+  // Focus the user moves elsewhere ends the hold; focus we set on the page's heading does not.
+  const onFocus = (e: FocusEvent) => {
+    if (e.target !== target && e.target !== main) stop();
+  };
+  document.addEventListener('focusin', onFocus);
+  const timer = setTimeout(() => stop(), ms);
+  function stop() {
+    observer.disconnect();
+    document.removeEventListener('focusin', onFocus);
+    clearTimeout(timer);
+  }
+  return stop;
+}
+

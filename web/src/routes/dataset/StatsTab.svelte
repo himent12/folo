@@ -4,6 +4,7 @@
    * its findings, each opening to the evidence. Then four numbers, the class balance as the focal chart, the two
    * histograms in ink, and last the `folo dataset check` issues in their own section with severity and kind filters.
    */
+  import { tick } from 'svelte';
   import IssueList from './IssueList.svelte';
   import ArrowDown from '@lucide/svelte/icons/arrow-down';
   import ArrowRight from '@lucide/svelte/icons/arrow-right';
@@ -48,8 +49,13 @@
   const listSeverity = $derived<IssueSeverity>(
     listed ?? (stats.broken_labels > 0 || (counts?.error ?? 0) > 0 ? 'error' : (counts?.warning ?? 0) > 0 ? 'warning' : 'info'),
   );
-  function showIssues(sev: IssueSeverity) {
+  /** Moves the list to `sev`, then takes the reader there: the section scrolls in and its heading takes focus. */
+  async function showIssues(sev: IssueSeverity) {
     listed = sev;
+    await tick();
+    const heading = document.getElementById('ds-check-title');
+    heading?.setAttribute('tabindex', '-1');
+    heading?.focus({ preventScroll: true });
     document.getElementById('ds-check')?.scrollIntoView({ block: 'start', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
   }
   const sizeEdges = $derived(stats.box_size_hist.edges);

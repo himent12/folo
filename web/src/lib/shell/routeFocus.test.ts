@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import { afterEach, describe, expect, it } from 'vitest';
-import { focusRoute, isNewPage, routeFocusTarget } from './routeFocus';
+import { focusRoute, holdRouteFocus, isNewPage, routeFocusTarget } from './routeFocus';
 
 afterEach(() => {
   document.body.innerHTML = '';
@@ -32,5 +32,26 @@ describe('route focus', () => {
     const m = main('<div aria-busy="true">Loading run</div>');
     focusRoute(m);
     expect(document.activeElement).toBe(m);
+  });
+
+  it("moves to the loaded page's heading when the loading one is replaced", async () => {
+    const m = main('<h1 tabindex="-1" data-route-focus>Model</h1>');
+    const stop = holdRouteFocus(m);
+    expect(document.activeElement?.textContent).toBe('Model');
+    m.innerHTML = '<h1 tabindex="-1" data-route-focus>fasteners-n-best</h1>';
+    await new Promise((r) => setTimeout(r, 0));
+    expect(document.activeElement?.textContent).toBe('fasteners-n-best');
+    stop();
+  });
+
+  it('leaves focus the user moved alone', async () => {
+    const m = main('<h1 tabindex="-1" data-route-focus>Model</h1><button>Retry</button>');
+    const stop = holdRouteFocus(m);
+    const button = m.querySelector('button')!;
+    button.focus();
+    m.querySelector('h1')!.replaceWith(Object.assign(document.createElement('h1'), { textContent: 'loaded', tabIndex: -1 }));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(document.activeElement).toBe(button);
+    stop();
   });
 });

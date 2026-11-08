@@ -183,9 +183,11 @@
     return { id, sizes: sizes.length === total ? sizes : null };
   });
   const datasetImgsz = $derived(trainSizes.data && trainSizes.data.id === datasetId ? defaultImgsz(trainSizes.data.sizes) : null);
+  // Until the current dataset's sizes are known (or when they cannot be read), an unchosen size is the 640 default:
+  // never the size fitted to the dataset picked before.
   $effect(() => {
     const d = datasetImgsz;
-    if (d !== null && !untrack(() => imgszChosen)) imgsz = String(d);
+    if (!untrack(() => imgszChosen)) imgsz = String(d ?? 640);
   });
 
   // Estimates are rough (architecture constants, a reference GPU): show them with matching precision.
