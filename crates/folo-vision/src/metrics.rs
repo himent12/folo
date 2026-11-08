@@ -8,9 +8,11 @@
 //! and class, detections in descending score order (capped at [`EvalConfig::max_dets_per_class`], COCO's
 //! `maxDets = 100`) are greedily matched to the unmatched ground truth with the highest IoU `>= t`, for each `t` in
 //! `0.50:0.05:0.95`; AP is the mean over 101 recall points `0:0.01:1` of the interpolated precision (the precision
-//! envelope sampled with a left-sided search). Precision / recall / F1 are taken at the single confidence threshold
-//! that maximises the class-mean F1 at IoU 0.5 (as Ultralytics reports them). `docs/METRICS.md` spells out every step
-//! and how this differs from Ultralytics' own AP.
+//! envelope sampled with a left-sided search). pycocotools' area-range ignores are applied only with
+//! [`EvalConfig::coco_compatible`] (they never fire for valid pixel boxes); `tests/coco_parity.rs` checks the result
+//! against pycocotools itself. Precision / recall / F1 are taken at the single confidence threshold that maximises the
+//! class-mean F1 at IoU 0.5 (as Ultralytics reports them). `docs/METRICS.md` spells out every step and how this
+//! differs from Ultralytics' own AP.
 
 use crate::boxes::Xyxy;
 use crate::nms::Detection;
@@ -64,19 +66,51 @@ pub struct EvalConfig {
     pub confusion_conf: f32,
     /// Confusion matrix: a prediction matches a ground truth when IoU `> confusion_iou` (Ultralytics: 0.45).
     pub confusion_iou: f32,
+    /// Apply pycocotools' area range "all", `[0, 1e5²]`, to box areas `(x2 - x1) * (y2 - y1)`: ground truths
+    /// outside it are ignored (not counted, and a prediction matched to one is neither a TP nor a FP), and so are
+    /// unmatched predictions outside it (an inverted box has negative area). Off by default because FOLO's
+    /// coordinates can be in any unit; for boxes with area in `[0, 1e10]` (any pixel box on an image under 100,000
+    /// px) both settings give identical results. On, AP equals pycocotools' for every input (`docs/METRICS.md`).
+    pub coco_compatible: bool,
 }
 
 impl Default for EvalConfig {
     fn default() -> Self {
-        Self { max_dets_per_class: Some(100), confusion_conf: 0.25, confusion_iou: 0.45 }
+        Self {
+            max_dets_per_class: Some(100),
+            confusion_conf: 0.25,
+            confusion_iou: 0.45,
+            coco_compatible: false,
+        }
     }
 }
 
-/// A detection as stored for AP: its score and, per IoU threshold, whether it was a true positive (bit `t`).
+impl EvalConfig {
+    /// The defaults with [`EvalConfig::coco_compatible`] on: AP exactly as pycocotools' `COCOeval` (bbox, area
+    /// range "all", `maxDets = 100`, no crowd boxes) computes it.
+    pub fn coco() -> Self {
+        Self { coco_compatible: true, ..Self::default() }
+    }
+}
+
+/// Upper bound of pycocotools' area range "all" (`1e5 ** 2`; the lower bound is 0).
+const COCO_MAX_AREA: f64 = 1e10;
+
+/// Whether a box's area, `w * h` in f64 as pycocotools computes it from `xywh` (negative for a box inverted in one
+/// axis), lies outside pycocotools' area range "all".
+#[inline]
+fn outside_coco_area(b: &Xyxy) -> bool {
+    let a = (b.x2 as f64 - b.x1 as f64) * (b.y2 as f64 - b.y1 as f64);
+    !(0.0..=COCO_MAX_AREA).contains(&a)
+}
+
+/// A detection as stored for AP: its score and, per IoU threshold, whether it was a true positive (bit `t` of `tp`)
+/// or is ignored (bit `t` of `ig`, only with [`EvalConfig::coco_compatible`]). Neither means a false positive.
 #[derive(Clone, Copy, Debug)]
 struct DetRecord {
     score: f32,
     tp: u16,
+    ig: u16,
 }
 
 /// Accumulates per-image matches; see the module docs.
@@ -99,6 +133,7 @@ pub struct Evaluator {
     ious: Vec<f64>,
     gt_matched: Vec<bool>,
     tp_bits: Vec<u16>,
+    ig_bits: Vec<u16>,
     pairs: Vec<(f32, u32, u32)>,
     pred_used: Vec<bool>,
 }
@@ -125,6 +160,7 @@ impl Evaluator {
             ious: Vec::new(),
             gt_matched: Vec::new(),
             tp_bits: Vec::new(),
+            ig_bits: Vec::new(),
             pairs: Vec::new(),
             pred_used: Vec::new(),
         }
@@ -156,7 +192,9 @@ impl Evaluator {
         self.num_images += 1;
         self.update_confusion(preds, truths);
 
-        // One sort per image: predictions by (class, score desc, input order); truths by (class, input order).
+        // One sort per image: predictions by (class, score desc, input order); truths by (class, input order), with
+        // COCO-ignored truths last within their class (pycocotools' stable sort on `_ignore`).
+        let coco = self.cfg.coco_compatible;
         let pred_order = &mut self.pred_order;
         pred_order.clear();
         pred_order.extend((0..preds.len() as u32).filter(|&i| !preds[i as usize].score.is_nan()));
@@ -167,9 +205,16 @@ impl Evaluator {
         let gt_order = &mut self.gt_order;
         gt_order.clear();
         gt_order.extend(0..truths.len() as u32);
-        gt_order.sort_by_key(|&i| truths[i as usize].class);
+        if coco {
+            gt_order
+                .sort_by_key(|&i| (truths[i as usize].class, outside_coco_area(&truths[i as usize].bbox)));
+        } else {
+            gt_order.sort_by_key(|&i| truths[i as usize].class);
+        }
         for t in truths {
-            self.gt_counts[t.class as usize] += 1;
+            if !(coco && outside_coco_area(&t.bbox)) {
+                self.gt_counts[t.class as usize] += 1;
+            }
         }
 
         let (mut pi, mut gi) = (0, 0);
@@ -180,11 +225,18 @@ impl Evaluator {
                 gi += 1;
             }
             let g_end = gi + self.gt_order[gi..].partition_point(|&i| truths[i as usize].class == class);
+            // Regular (not ignored) truths come first: `gt_order[gi..g_reg]`.
+            let g_reg = if coco {
+                gi + self.gt_order[gi..g_end]
+                    .partition_point(|&i| !outside_coco_area(&truths[i as usize].bbox))
+            } else {
+                g_end
+            };
             let n_p = match self.cfg.max_dets_per_class {
                 Some(m) => (p_end - pi).min(m),
                 None => p_end - pi,
             };
-            self.match_class(preds, truths, pi, pi + n_p, gi, g_end, class as usize);
+            self.match_class(preds, truths, pi, pi + n_p, gi, g_reg, g_end, class as usize);
             self.num_preds += n_p as u64;
             pi = p_end;
             gi = g_end;
@@ -192,7 +244,7 @@ impl Evaluator {
     }
 
     /// COCO greedy matching for one (image, class): detections `pred_order[p0..p1]` (descending score) against
-    /// truths `gt_order[g0..g1]`.
+    /// truths `gt_order[g0..g1]`, of which `gt_order[g_reg..g1]` are COCO-ignored (none unless `coco_compatible`).
     #[allow(clippy::too_many_arguments)]
     fn match_class(
         &mut self,
@@ -201,10 +253,11 @@ impl Evaluator {
         p0: usize,
         p1: usize,
         g0: usize,
+        g_reg: usize,
         g1: usize,
         class: usize,
     ) {
-        let (np, ng) = (p1 - p0, g1 - g0);
+        let (np, ng, n_reg) = (p1 - p0, g1 - g0, g_reg - g0);
         self.ious.clear();
         for &pi in &self.pred_order[p0..p1] {
             let pb = &preds[pi as usize].bbox;
@@ -215,16 +268,23 @@ impl Evaluator {
         let mut tp = std::mem::take(&mut self.tp_bits);
         tp.clear();
         tp.resize(np, 0);
+        let mut ig = std::mem::take(&mut self.ig_bits);
+        ig.clear();
+        ig.resize(np, 0);
         if ng > 0 {
             for (t, &thr) in self.thresholds.iter().enumerate() {
                 self.gt_matched.clear();
                 self.gt_matched.resize(ng, false);
-                for (d, tp) in tp.iter_mut().enumerate() {
+                for (d, (tp, ig)) in tp.iter_mut().zip(ig.iter_mut()).enumerate() {
                     let mut best = thr.min(1.0 - 1e-10);
                     let mut m = usize::MAX;
                     for g in 0..ng {
                         if self.gt_matched[g] {
                             continue;
+                        }
+                        // pycocotools: once matched to a regular truth, stop at the ignored ones (sorted last).
+                        if m < n_reg && g >= n_reg {
+                            break;
                         }
                         let v = self.ious[d * ng + g];
                         if v < best {
@@ -235,16 +295,29 @@ impl Evaluator {
                     }
                     if m != usize::MAX {
                         self.gt_matched[m] = true;
-                        *tp |= 1 << t;
+                        // A match to an ignored truth is neither a TP nor a FP.
+                        if m < n_reg {
+                            *tp |= 1 << t;
+                        } else {
+                            *ig |= 1 << t;
+                        }
                     }
                 }
             }
         }
+        let coco = self.cfg.coco_compatible;
         let out = &mut self.dets[class];
         for (k, &pi) in self.pred_order[p0..p1].iter().enumerate() {
-            out.push(DetRecord { score: preds[pi as usize].score, tp: tp[k] });
+            let p = &preds[pi as usize];
+            let mut ig_k = ig[k];
+            if coco && outside_coco_area(&p.bbox) {
+                // Unmatched detections outside the area range are ignored too.
+                ig_k |= !(tp[k] | ig_k) & ((1 << NUM_IOU_THRESHOLDS) - 1);
+            }
+            out.push(DetRecord { score: p.score, tp: tp[k], ig: ig_k });
         }
         self.tp_bits = tp;
+        self.ig_bits = ig;
     }
 
     /// Ultralytics-style confusion matrix update with greedy one-to-one class-agnostic matching.
@@ -486,7 +559,7 @@ fn class_eval(recs: &[DetRecord], n_gt: u64, recall_pts: &[f64; NUM_RECALL_POINT
         for (i, d) in sorted.iter().enumerate() {
             if d.tp >> t & 1 == 1 {
                 tp += 1;
-            } else {
+            } else if d.ig >> t & 1 == 0 {
                 fp += 1;
             }
             rc[i] = tp as f64 / n_gt_f;
@@ -525,7 +598,7 @@ fn class_eval(recs: &[DetRecord], n_gt: u64, recall_pts: &[f64; NUM_RECALL_POINT
         let c = conf_grid(i);
         while j < nd && sorted[j].score >= c {
             tp += (sorted[j].tp & 1) as u64;
-            n += 1;
+            n += u64::from(sorted[j].ig & 1 == 0);
             j += 1;
         }
         let prec = if n > 0 { tp as f64 / n as f64 } else { 0.0 };
@@ -554,7 +627,7 @@ pub struct ClassReport {
     pub f1: f32,
     /// AP at each IoU threshold (`EvalReport::iou_thresholds`).
     pub ap: Vec<f32>,
-    /// Number of ground truths.
+    /// Number of ground truths (with [`EvalConfig::coco_compatible`], not counting the ignored ones).
     pub truths: u64,
     /// Number of predictions that entered AP (after the per-image cap).
     pub preds: u64,
@@ -624,7 +697,7 @@ pub struct EvalReport {
     pub iou_thresholds: Vec<f32>,
     /// Images evaluated.
     pub num_images: u64,
-    /// Ground-truth boxes.
+    /// Ground-truth boxes (with [`EvalConfig::coco_compatible`], not counting the ignored ones).
     pub num_truths: u64,
     /// Predictions that entered AP (after the per-image cap).
     pub num_preds: u64,

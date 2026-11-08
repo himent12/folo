@@ -12,7 +12,7 @@ use common::Rng;
 use folo_vision::assign::{TalConfig, assign};
 use folo_vision::decode::{decode_head, make_anchors};
 use folo_vision::nms::{batched_nms, non_max_suppression};
-use folo_vision::{Detection, Evaluator, NmsConfig, Truth, Xyxy};
+use folo_vision::{Detection, EvalConfig, Evaluator, NmsConfig, Truth, Xyxy};
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 
@@ -129,6 +129,13 @@ fn main() {
     println!("evaluator data: 5000 images, {total_preds} preds, {total_truths} truths");
     bench("evaluator add_image x 5000", 10, || {
         let mut ev = Evaluator::new(nc);
+        for (p, t) in &images {
+            ev.add_image(p, t);
+        }
+        ev
+    });
+    bench("evaluator add_image x 5000 (coco_compatible)", 10, || {
+        let mut ev = Evaluator::with_config(nc, EvalConfig::coco());
         for (p, t) in &images {
             ev.add_image(p, t);
         }

@@ -1,11 +1,15 @@
 # How FOLO computes detection metrics
 
 Implementation: `crates/folo-vision/src/metrics.rs` (`Evaluator`). Tests with hand-computed answers:
-`crates/folo-vision/tests/metrics_known.rs`.
+`crates/folo-vision/tests/metrics_known.rs`; parity with pycocotools on 24 seeded scenarios:
+`crates/folo-vision/tests/coco_parity.rs` (see [Parity with pycocotools](#parity-with-pycocotools)).
 
 **Short version:** mAP follows **pycocotools** (`COCOeval`, `iouType="bbox"`, area range `all`, `maxDets=100`, no
-crowd boxes). Precision, recall and F1 are reported the way Ultralytics reports them: at the one confidence threshold
-that maximises the class-mean F1 at IoU 0.5. The confusion matrix follows Ultralytics' conventions.
+crowd boxes), and matches it to f32 rounding (≤ 3e-8) for every box with area in `[0, 1e10]`. The one intentional
+difference, pycocotools' upper area bound, is switched on by `EvalConfig::coco()` (`coco_compatible`), which then
+matches it for every input. Precision, recall and F1 are reported the way Ultralytics reports them: at the one
+confidence threshold that maximises the class-mean F1 at IoU 0.5. The confusion matrix follows Ultralytics'
+conventions.
 
 ## Inputs
 
@@ -38,13 +42,32 @@ For one image and one class `k`:
 
 Consequences: a duplicate detection of an already matched object is a FP; a prediction of the wrong class is a FP for
 its class and the object is a miss for its own class; there is no "ignore" region (FOLO datasets have no crowd
-boxes), so every unmatched prediction is a FP.
+boxes), so every unmatched prediction is a FP. (Except with `coco_compatible`, below.)
+
+### Area range and `coco_compatible`
+
+pycocotools' area range `all` is `[0, 1e5²]`, inclusive, so even "all" ignores some boxes:
+
+- a ground truth whose `area` is outside it is *ignored*: it does not count in `npig`, ignored truths are scanned
+  after the regular ones (a prediction that already has a regular match stops there, even if an ignored truth
+  overlaps it better), and a prediction matched to an ignored truth is neither a TP nor a FP;
+- an *unmatched* prediction whose area (`w * h`) is outside it is ignored rather than a FP. That includes a box
+  inverted in exactly one axis (negative area).
+
+FOLO's default leaves this out on purpose: its boxes can be in any unit (`Inputs` above), and a cut-off at a box area
+of 10¹⁰ only means something in pixels. For pixel boxes the rule never fires (it needs a side over 100,000 px, or an
+inverted box, which FOLO's post-process never makes), so both settings give identical reports.
+`EvalConfig::coco()` (`coco_compatible: true`) applies the rule exactly as pycocotools does, using the box area
+`(x2 - x1) * (y2 - y1)` in f64. (The original COCO annotation files store the *segment* area as `area`; FOLO only
+has boxes, and for the "all" range the difference does not matter in practice.) `ClassReport::truths` then counts
+only the regular truths, and a class whose truths are all ignored is not evaluated.
 
 ## 3. Counts
 
 For class `k`, `npig` is the number of ground truths of class `k` over all images. Classes with `npig = 0` are
 **excluded** from every average (pycocotools gives them AP `-1` and skips them); their predictions still appear in
-the confusion matrix. A class with ground truth but no predictions has AP 0.
+the confusion matrix. A class with ground truth but no predictions has AP 0. If *no* class has ground truth,
+pycocotools reports `-1` for every stat; FOLO reports `0` with an empty `per_class`.
 
 ## 4. AP: 101-point interpolation (pycocotools)
 
@@ -105,20 +128,74 @@ background:
 - An unmatched ground truth adds 1 at `[background][true class]` (a miss); an unmatched prediction adds 1 at
   `[pred class][background]` (a false alarm).
 
-(Ultralytics removes duplicate matches with two `np.unique` passes rather than a true greedy assignment; the result
-is the same except in rare chains of overlaps.)
+(Ultralytics 8.4.198 matches in a different order: predictions in descending confidence order each claim their best
+unclaimed truth with IoU `> 0.45`. Earlier 8.x releases removed duplicate matches with two `np.unique` passes. Both
+agree with FOLO's descending-IoU order whenever each prediction overlaps at most one truth above 0.45 and vice
+versa; they can differ in crowded scenes.)
+
+## Parity with pycocotools
+
+`bench/parity/coco_reference.py` generates 24 seeded scenarios and runs pycocotools 2.0.11 `COCOeval` (bbox, area
+`all`, `maxDets` 100) on each. It writes the inputs, the 12 `stats`, mAP per IoU threshold and per-class AP (per
+threshold, AP50, AP50-95) to `crates/folo-vision/tests/fixtures/coco/*.json`. The scenarios: 1, 3, 5 and 80 classes;
+a long low-confidence tail; images with no truths; images with no predictions; near and exact duplicates; tiny
+(1/16 px) and huge (90,000 px) boxes; scores tied on 1 or 3 levels; a class with truths and no predictions and the
+reverse; over 100 predictions per image, including a cap that cuts through a score tie; IoUs exactly on the
+thresholds; crowded overlapping truths; perfect and all-wrong predictions; zero-area boxes; no truths at all; and
+boxes outside the area range. Coordinates are multiples of a power of two and scores have three decimals, so both
+sides see bit-identical inputs.
+
+`coco_parity.rs` evaluates every fixture in both modes and compares mAP50-95, mAP50, AP75, mAP at each threshold and
+every class's APs with a tolerance of 1e-7. The report's fields are f32, and rounding a value in `[0, 1]` to f32
+costs at most 3e-8. Result: the largest difference in any scenario is **3.0e-8**, in both modes, except
+`outside_area_range`, where the default is 0.07 off (as intended) and `coco_compatible` is again within 2e-8.
+`no_truths_at_all` checks the `-1` / empty convention from step 3. FOLO does not compute the area-split stats
+(`APs/m/l`) or AR, so those are only stored in the fixtures. Regenerate the fixtures with
+`D:/folo-venvs/parity/Scripts/python bench/parity/coco_reference.py` (a venv with `pycocotools` and `numpy`).
 
 ## Differences from Ultralytics' mAP
 
-Ultralytics' `ap_per_class` differs from pycocotools, and so from FOLO, in three ways, so the two usually give
-slightly different numbers on the same predictions:
+Measured against **ultralytics 8.4.198**. `bench/parity/ultralytics_port.py` is a numpy port of its `box_iou`,
+`match_predictions`, `ap_per_class` and `compute_ap`, and `bench/parity/check_ultralytics_port.py` checks it against
+the real package on every fixture: identical TP matrices and identical mAP. Since 8.4 the method is close to
+pycocotools. Each image's detections are matched greedily in descending confidence order, each one to the best
+unclaimed truth of its class, as COCO does. The integration also stops at the last recall reached: `compute_ap`
+appends a zero-precision point there. What still differs:
 
-1. **Matching** is by IoU, not by score: all (prediction, truth) pairs of the same class above `t` are taken in
-   descending IoU order, so a lower-scored but tighter box can take an object from a higher-scored loose one.
-2. **AP integration** is the trapezoidal integral of the precision envelope interpolated at 101 recall points
-   (`np.trapz(np.interp(x, mrec, mpre), x)`), with the recall curve extended by `(0, 1)` and `(1, 0)`, instead of
-   the mean of 101 left-searched samples.
-3. **No per-image cap**: all predictions count (Ultralytics' `max_det = 300` per image applies before evaluation).
-   Set `EvalConfig::max_dets_per_class = None` to match that part.
+1. **AP integration** is the trapezoidal integral of the precision envelope at 101 recall points
+   (`np.trapezoid(np.interp(x, mrec, mpre), x)`), not the mean of 101 left-searched samples. So a perfect detector
+   scores 0.995, because the last trapezoid averages 1 and 0, and other values move by about ±0.003.
+2. **No per-image cap**: every prediction counts (Ultralytics' `max_det = 300` applies earlier, in NMS). Set
+   `EvalConfig::max_dets_per_class = None` to match that part.
+3. **No area range**, so huge and inverted boxes count normally, like FOLO's default.
+4. **Precision details**: IoU is computed in f32 with `+1e-7` in the denominator, and the thresholds are f32, so an
+   IoU exactly on a threshold can fall just below it. For sub-pixel boxes the `1e-7` itself is noticeable. Score
+   ties across images are ordered by an unstable `np.argsort`, not by image order, and a detection that ties
+   between two truths takes the first one, where COCO takes the last.
+
+Ultralytics minus COCO on the 23 parity scenarios that have truths:
+
+| | median | mean | mean \|Δ\| | range |
+|---|---|---|---|---|
+| mAP50-95 (8.4.198) | −0.0006 | −0.0003 | 0.005 | −0.027 … +0.045 |
+| mAP50 (8.4.198) | +0.0002 | +0.0001 | 0.009 | −0.048 … +0.071 |
+| mAP50-95 (legacy) | +0.035 | +0.029 | 0.029 | −0.005 … +0.059 |
+| mAP50 (legacy) | +0.034 | +0.030 | 0.035 | −0.031 … +0.094 |
+
+On ordinary detector output (`five_classes`, `eighty_classes`, `mixed_scales`, `crowded`, `low_conf_tail`), 8.4.198
+is within 0.003 of COCO on mAP50-95. The larger gaps each have a cause from the list above:
+
+- over 100 predictions per image (2): `max_dets_tie_cut` +0.045, `over_max_dets` +0.009;
+- boxes outside COCO's area range (3): `outside_area_range` −0.027;
+- exact duplicates tied on score (4): `exact_duplicates` −0.011;
+- sub-pixel boxes (4): `tiny_boxes` −0.007;
+- a perfect detector (1): `perfect` −0.005.
+
+"Legacy" is the algorithm of earlier 8.x releases, still in the port for comparison. Matching used two `np.unique`
+passes over the pairs above the threshold: each prediction kept its best-IoU truth, then each truth kept the
+lowest-index (highest-confidence) prediction. The PR curve was extended straight from the last recall to `(1, 0)`,
+which credits a class that tops out at recall `r` with precision `p` with about `p · (1 - r) / 2` of extra area. So
+mAP50-95 numbers from those releases run about 0.03 above COCO's on the same predictions, and more when recall is
+low (`empty_pred_images` +0.056).
 
 COCO numbers (what papers report) are the pycocotools ones, which is why FOLO matches pycocotools.
