@@ -2274,7 +2274,7 @@ impl FoloApp {
             live_card =
                 Some(if compact { self.live_rail(&r, window, cx) } else { self.live_mini(&r, window, cx) });
         }
-        let health = self.connection_line(compact, cx);
+        let health = self.connection_line(compact, window, cx);
         div()
             .w(px(if compact { tsize::SIDEBAR_COLLAPSED } else { tsize::SIDEBAR }))
             .flex_none()
@@ -2483,7 +2483,7 @@ impl FoloApp {
         .into_any_element()
     }
 
-    fn connection_line(&self, compact: bool, cx: &mut Context<Self>) -> impl IntoElement {
+    fn connection_line(&self, compact: bool, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let (color, glyph, label) = match &self.store.health {
             _ if self.connecting.is_some() => (
@@ -2499,8 +2499,13 @@ impl FoloApp {
             Load::Failed(_) => (t.danger_solid, "icons/circle-x.svg", "Server unreachable".to_string()),
             _ => (t.text_disabled, "icons/refresh-cw.svg", "Connecting…".to_string()),
         };
-        div()
+        // A control, by pointer and keyboard: it opens Connection settings, and the collapsed rail's
+        // glyph (a shape, not colour alone) shows the full status on hover and on focus.
+        let tip = format!("Connection: {label}");
+        let ring = self.ring(&self.fh("connection", cx), window);
+        let el = div()
             .id("connection")
+            .relative()
             .h(px(36.))
             .flex_none()
             .flex()
@@ -2509,17 +2514,21 @@ impl FoloApp {
             .px(px(16.))
             .border_t_1()
             .border_color(t.line_subtle)
-            // Collapsed rail: a shaped glyph (not colour alone) with the full status on hover.
+            .cursor_pointer()
+            .hover(|s| s.bg(t.bg_hover))
+            .active(|s| s.bg(t.bg_active))
+            .tooltip(crate::controls::tip(tip.clone(), None))
             .when(compact, |d| {
                 d.justify_center()
                     .px(px(0.))
-                    .tooltip(crate::controls::tip(format!("Connection: {label}"), None))
                     .child(icon(glyph, 14., color))
+                    .when(ring, |d| d.child(crate::controls::focus_tip(&t, tip.clone(), 30.)))
             })
             .when(!compact, |d| {
                 d.child(div().size(px(6.)).rounded_full().bg(color))
                     .child(text(ty::XS, t.text_tertiary).truncate().child(label))
-            })
+            });
+        self.bind(el, "connection", 0., window, cx, act(|this, w, cx| this.navigate(Route::Settings, w, cx)))
     }
 
     fn page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
