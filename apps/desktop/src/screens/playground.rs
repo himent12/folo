@@ -546,7 +546,7 @@ impl FoloApp {
                             .items_center()
                             .gap(px(8.))
                             .rounded(px(radius::SM))
-                            .when(hot, |d| d.bg(t.bg_active))
+                            .when(hot, |d| d.bg(t.bg_active).child(crate::ui::select_bar(&t)))
                             .hover(|s| s.bg(t.bg_hover))
                             .on_hover(cx.listener(move |this, h: &bool, _, cx| {
                                 let next = if *h { Some(i) } else { None };

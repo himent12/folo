@@ -11,7 +11,7 @@ use gpui::{
     TextRun, Window, fill, point, px, quad, size, transparent_black,
 };
 
-use crate::theme::{MONO, SANS, Theme, alpha, tokens, ty};
+use crate::theme::{SANS, Theme, alpha, tokens, ty};
 
 #[derive(Clone, Debug)]
 pub struct DrawBox {
@@ -109,7 +109,7 @@ pub fn paint_image_with_boxes(
         for pass in 0..2 {
             for &b in &order {
                 let color = t.class(b.class);
-                let a = if b.dim { 0.6 } else { 1.0 };
+                let a = if b.dim { 0.3 } else { 1.0 };
                 let p1 = to(b.x1, b.y1);
                 let p2 = to(b.x2, b.y2);
                 let r = Bounds::from_corners(p1, p2);
@@ -137,7 +137,7 @@ pub fn paint_image_with_boxes(
                     if b.highlight {
                         window.paint_quad(fill(r, alpha(color, tokens::CLASS_FILL_OPACITY * 1.6)));
                     }
-                    let stroke = if b.highlight { 3. } else { 2. };
+                    let (stroke, ink) = if b.highlight { (3., t.accent_solid) } else { (2., color) };
                     window.paint_quad(quad(
                         r.dilate(px(1.)),
                         px(0.),
@@ -151,7 +151,7 @@ pub fn paint_image_with_boxes(
                         px(0.),
                         transparent_black(),
                         Edges::all(px(stroke)),
-                        alpha(color, a),
+                        alpha(ink, a),
                         BorderStyle::Solid,
                     ));
                 }
@@ -168,7 +168,7 @@ pub fn paint_image_with_boxes(
                     let score_line = window.text_system().shape_line(
                         score.clone().into(),
                         px(fs),
-                        &[run(&score, MONO, FontWeight::MEDIUM, alpha(chip_text, 0.72))],
+                        &[run(&score, SANS, FontWeight::MEDIUM, alpha(chip_text, 0.72))],
                         None,
                     );
                     let gap = if score.is_empty() || name.is_empty() { px(0.) } else { px(5.) };

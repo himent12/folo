@@ -31,6 +31,8 @@ pub struct Series {
     pub area: bool,
     pub width: f32,
     pub dashed: bool,
+    /// Dotted (wins over dashed).
+    pub dotted: bool,
     /// Draw a live dot with a halo on the last point.
     pub live: bool,
 }
@@ -38,6 +40,11 @@ pub struct Series {
 impl Series {
     pub fn dashed(mut self) -> Self {
         self.dashed = true;
+        self
+    }
+
+    pub fn dotted(mut self) -> Self {
+        self.dotted = true;
         self
     }
 
@@ -50,6 +57,7 @@ impl Series {
             area: false,
             width: 1.5,
             dashed: false,
+            dotted: false,
             live: false,
         }
     }
@@ -379,6 +387,93 @@ fn cached_envelope(points: &Arc<Vec<(f32, f32)>>, x0: f32, x1: f32, columns: usi
     memo(points, [1, x0.to_bits(), x1.to_bits(), columns as u32], |p| envelope(p, x0, x1, columns))
 }
 
+/// How long live points take to move into place (DIRECTION: motion).
+const EASE_MS: f32 = 240.;
+
+/// A chart's last data and the move from the previous data to it.
+struct Ease {
+    from: Vec<Arc<Vec<(f32, f32)>>>,
+    to: Vec<Arc<Vec<(f32, f32)>>>,
+    start: std::time::Instant,
+}
+
+thread_local! {
+    static EASES: std::cell::RefCell<std::collections::HashMap<SharedString, Ease>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Points between two revisions of a series at progress `e`: shared points move vertically, new
+/// points slide out from the old last point.
+pub fn tween(from: &[(f32, f32)], to: &[(f32, f32)], e: f32) -> Vec<(f32, f32)> {
+    let lerp = |a: f32, b: f32| a + (b - a) * e;
+    to.iter()
+        .enumerate()
+        .map(|(i, &(x, y))| match from.get(i) {
+            Some(&(_, fy)) => (x, lerp(fy, y)),
+            None => from.last().map_or((x, y), |&(lx, ly)| (lerp(lx, x), lerp(ly, y))),
+        })
+        .collect()
+}
+
+/// An update that only appends or revises the tail of the same series (a live run), as opposed
+/// to different data (another run, a toggled series), which should jump.
+fn is_append(from: &[(f32, f32)], to: &[(f32, f32)]) -> bool {
+    !from.is_empty()
+        && to.len() >= from.len()
+        && to.len() - from.len() <= 8.max(from.len() / 20)
+        && to[0].0 == from[0].0
+        && to[from.len() - 1].0 == from[from.len() - 1].0
+}
+
+/// Ease new live data in over 240 ms (instant under Reduce motion). Numbers elsewhere are not
+/// animated; only this chart's geometry is.
+fn ease(spec: &mut LineChart, window: &mut Window) {
+    let now = std::time::Instant::now();
+    let to: Vec<Arc<Vec<(f32, f32)>>> = spec.series.iter().map(|s| s.points.clone()).collect();
+    let progress = |start: std::time::Instant| (now - start).as_secs_f32() * 1000. / EASE_MS;
+    let shown = EASES.with(|m| {
+        let mut m = m.borrow_mut();
+        let e = m.entry(spec.id.clone()).or_insert_with(|| Ease {
+            from: to.clone(),
+            to: to.clone(),
+            start: now - std::time::Duration::from_secs(1),
+        });
+        let same = e.to.len() == to.len() && e.to.iter().zip(&to).all(|(a, b)| Arc::ptr_eq(a, b));
+        if !same {
+            // Start from what is on screen now (mid-move if a move was running).
+            let p = progress(e.start).min(1.);
+            let current: Vec<Arc<Vec<(f32, f32)>>> = if p < 1. {
+                e.from.iter().zip(&e.to).map(|(f, t)| Arc::new(tween(f, t, ease_out(p)))).collect()
+            } else {
+                e.to.clone()
+            };
+            let animate = !crate::ui::reduce_motion()
+                && current.len() == to.len()
+                && current.iter().zip(&to).all(|(f, t)| is_append(f, t));
+            *e = Ease {
+                from: if animate { current } else { to.clone() },
+                to: to.clone(),
+                start: if animate { now } else { now - std::time::Duration::from_secs(1) },
+            };
+        }
+        let p = progress(e.start);
+        (p < 1.).then(|| {
+            let k = ease_out(p);
+            e.from.iter().zip(&e.to).map(|(f, t)| Arc::new(tween(f, t, k))).collect::<Vec<_>>()
+        })
+    });
+    if let Some(pts) = shown {
+        for (s, p) in spec.series.iter_mut().zip(pts) {
+            s.points = p;
+        }
+        window.request_animation_frame();
+    }
+}
+
+fn ease_out(p: f32) -> f32 {
+    1. - (1. - p.clamp(0., 1.)).powi(3)
+}
+
 /// Index of the point nearest to `x` in a sorted series.
 /// The value a legend shows: at the shared cursor when there is one, else the latest point.
 pub fn value_at(points: &[(f32, f32)], hover: Option<f32>, x0: f32, x1: f32) -> Option<f32> {
@@ -457,13 +552,18 @@ fn text_width(window: &mut Window, text: &str, size_px: f32) -> Pixels {
     window.text_system().shape_line(SharedString::from(text.to_string()), px(size_px), &[run], None).width
 }
 
-fn stroke_path(window: &mut Window, pts: &[Point<Pixels>], width: f32, color: Hsla, dashed: bool) {
+/// Dash patterns (on, off) in px.
+const DASHED: &[f32] = &[4., 3.];
+const DOTTED: &[f32] = &[1.5, 2.5];
+
+fn stroke_path(window: &mut Window, pts: &[Point<Pixels>], width: f32, color: Hsla, dash: &[f32]) {
     if pts.len() < 2 {
         return;
     }
     let mut b = PathBuilder::stroke(px(width));
-    if dashed {
-        b = b.dash_array(&[px(4.), px(3.)]);
+    if !dash.is_empty() {
+        let d: Vec<Pixels> = dash.iter().map(|v| px(*v)).collect();
+        b = b.dash_array(&d);
     }
     b.move_to(pts[0]);
     for p in &pts[1..] {
@@ -512,7 +612,11 @@ pub fn line_chart(t: &Theme, spec: LineChart) -> AnyElement {
         .child(
             canvas(
                 |_, _, _| (),
-                move |bounds, _, window, cx| paint_line_chart(&t, &spec, bounds, &cell_paint, window, cx),
+                move |bounds, _, window, cx| {
+                    let mut spec = spec;
+                    ease(&mut spec, window);
+                    paint_line_chart(&t, &spec, bounds, &cell_paint, window, cx)
+                },
             )
             .size_full(),
         )
@@ -719,7 +823,13 @@ fn paint_line_chart(
     let mut labels: Vec<(Bounds<Pixels>, &Marker)> = Vec::new();
     for (lx, w, lane, m) in &marker_layout {
         let x = sx(m.x);
-        stroke_path(window, &[point(x, plot.top()), point(x, plot.bottom())], 1.0, alpha(m.color, 0.5), true);
+        stroke_path(
+            window,
+            &[point(x, plot.top()), point(x, plot.bottom())],
+            1.0,
+            alpha(m.color, 0.5),
+            DASHED,
+        );
         let r = Bounds::new(
             point(*lx, plot.top() - px(band) - px(1.) + px(*lane as f32 * LANE)),
             size(*w, px(15.)),
@@ -743,7 +853,7 @@ fn paint_line_chart(
                     // Raw data faint underneath, smoothed on top.
                     let raw = cached_envelope(&s.points, x0, x1, columns);
                     let pts: Vec<Point<Pixels>> = raw.iter().map(|&(x, y)| point(sx(x), sy(y))).collect();
-                    stroke_path(window, &pts, 1.0, alpha(s.color, 0.09), false);
+                    stroke_path(window, &pts, 1.0, alpha(s.color, 0.09), &[]);
                     cached_envelope(&smoothed(&s.points, s.smooth), x0, x1, columns / 2 + 1)
                 } else {
                     cached_envelope(&s.points, x0, x1, columns)
@@ -766,7 +876,14 @@ fn paint_line_chart(
                         );
                     }
                 }
-                stroke_path(window, &pts, s.width, s.color, s.dashed);
+                let dash = if s.dotted {
+                    DOTTED
+                } else if s.dashed {
+                    DASHED
+                } else {
+                    &[]
+                };
+                stroke_path(window, &pts, s.width, s.color, dash);
                 if s.points.len() < 5 {
                     for &(x, y) in s.points.iter() {
                         let c = point(sx(x), sy(y));
@@ -1004,7 +1121,7 @@ pub fn sparkline_in(
                     ),
                 );
             }
-            stroke_path(window, &pts, 1.25, color, false);
+            stroke_path(window, &pts, 1.25, color, &[]);
             if live {
                 let c = pts[n - 1];
                 window.paint_quad(
@@ -1181,6 +1298,19 @@ mod tests {
         // Epoch 100 of 120 with data through 40: no snap, so no tick is hidden.
         assert_eq!(cursor_x(&s, 100., 120.), None);
         assert_eq!(cursor_x(&s, 39.6, 120.), Some(40.));
+    }
+
+    #[test]
+    fn tween_moves_shared_points_and_slides_new_ones() {
+        let from = [(0.0, 0.0), (1.0, 1.0)];
+        let to = [(0.0, 0.0), (1.0, 3.0), (2.0, 5.0)];
+        assert_eq!(tween(&from, &to, 0.0), vec![(0.0, 0.0), (1.0, 1.0), (1.0, 1.0)]);
+        assert_eq!(tween(&from, &to, 0.5), vec![(0.0, 0.0), (1.0, 2.0), (1.5, 3.0)]);
+        assert_eq!(tween(&from, &to, 1.0), to.to_vec());
+        // Appending to the same series eases; different data jumps.
+        assert!(is_append(&from, &to));
+        assert!(!is_append(&from, &[(5.0, 0.0), (6.0, 1.0)]));
+        assert!(!is_append(&from, &[(0.0, 0.0)]));
     }
 
     #[test]

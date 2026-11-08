@@ -27,7 +27,7 @@ impl FoloApp {
         let t = theme(cx);
         let models = self.store.models.ready().cloned();
         let subtitle = models.as_ref().map_or("Loading…".to_string(), |m| {
-            format!("{} models · best weights from finished runs and exports", m.len())
+            format!("{} models · best and last checkpoints, plus exports", m.len())
         });
         let open = self
             .button(
@@ -640,6 +640,7 @@ impl FoloApp {
         chart.y_range = Some((0., 1.));
         chart.x_fmt = |v| format!("{v:.2}");
         chart.x_name = "recall";
+        chart.axis_titles = Some(("Recall", "Precision"));
         // As tall as the confusion matrix beside it (its rows set the panel height).
         chart.height = (32. * ev.confusion.len() as f32 + 76.).max(220.);
         chart.hover = self.pr_hover;

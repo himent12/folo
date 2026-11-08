@@ -1039,8 +1039,10 @@ impl FoloApp {
             footer,
             window,
             cx,
-            act(|this, _, cx| {
+            // X, scrim and Esc dismiss like Keep training: focus goes back to what opened it.
+            act(|this, w, cx| {
                 this.confirm_stop = None;
+                this.restore_focus(w);
                 cx.notify();
             }),
         )
@@ -1402,10 +1404,14 @@ impl FoloApp {
                             }),
                         )),
                 );
-        let box_rows: Vec<AnyElement> = meta
-            .boxes
-            .iter()
-            .enumerate()
+        // By class, then largest first, like the PR legend; indices stay the image's.
+        let mut box_order: Vec<(usize, &crate::api::BBox)> = meta.boxes.iter().enumerate().collect();
+        box_order.sort_by(|(_, a), (_, b)| {
+            let area = |x: &crate::api::BBox| (x.x2 - x.x1) * (x.y2 - x.y1);
+            a.class.cmp(&b.class).then(area(b).total_cmp(&area(a)))
+        });
+        let box_rows: Vec<AnyElement> = box_order
+            .into_iter()
             .map(|(i, b)| {
                 let hot = hover == Some(i);
                 let key = format!("insp-box-{i}");
@@ -1417,7 +1423,7 @@ impl FoloApp {
                     .items_center()
                     .gap(px(8.))
                     .rounded(px(radius::SM))
-                    .when(hot, |d| d.bg(t.bg_active))
+                    .when(hot, |d| d.bg(t.bg_active).child(crate::ui::select_bar(&t)))
                     .hover(|s| s.bg(t.bg_hover))
                     .on_hover(cx.listener(move |this, h: &bool, _, cx| {
                         if let Some(insp) = this.inspector.as_mut() {

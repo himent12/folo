@@ -2058,6 +2058,40 @@ pub fn logo(t: &Theme, size: f32) -> impl IntoElement {
         )
 }
 
+thread_local! {
+    /// Scroll containers to search after a keyboard focus move, innermost first. The focus ring
+    /// that paints next scrolls its control into view in the first container that holds it.
+    static REVEAL: RefCell<Option<Vec<ScrollHandle>>> = const { RefCell::new(None) };
+}
+
+/// Scroll the first candidate container holding `b` (horizontally) so `b` is fully visible
+/// with an 8 px margin. Runs once per request.
+fn reveal(b: gpui::Bounds<Pixels>, window: &mut Window) {
+    let Some(handles) = REVEAL.with(|r| r.borrow_mut().take()) else { return };
+    let margin = px(8.);
+    for h in handles {
+        let vp = h.bounds();
+        let cx = b.center().x;
+        if vp.size.width <= px(0.) || cx < vp.left() || cx > vp.right() {
+            continue;
+        }
+        let dy = if b.top() - margin < vp.top() {
+            b.top() - margin - vp.top()
+        } else if b.bottom() + margin > vp.bottom() {
+            b.bottom() + margin - vp.bottom()
+        } else {
+            px(0.)
+        };
+        if dy != px(0.) {
+            let off = h.offset();
+            let y = (off.y - dy).clamp(-h.max_offset().height, px(0.));
+            h.set_offset(gpui::point(off.x, y));
+            window.refresh();
+        }
+        return;
+    }
+}
+
 /// Keyboard focus ring: 2 px in the focus colour, 2 px outside the control.
 pub fn focus_ring(t: &Theme, radius: f32) -> gpui::Div {
     let off = tsize::FOCUS_OFFSET + tsize::FOCUS_RING;
@@ -2070,6 +2104,8 @@ pub fn focus_ring(t: &Theme, radius: f32) -> gpui::Div {
         .rounded(px(radius + off))
         .border_2()
         .border_color(t.focus)
+        // Keyboard focus moved here: make sure the control (and its ring) is on screen.
+        .child(gpui::canvas(|b, window, _| reveal(b, window), |_, _, _, _| {}).size_full())
 }
 
 impl Render for FoloApp {
@@ -2245,6 +2281,16 @@ impl FoloApp {
 
     /// Tab / Shift-Tab, trapped inside the topmost overlay.
     fn cycle_focus(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        // The newly focused control scrolls into view inside whichever of these holds it.
+        let containers = if self.new_run.is_some() {
+            vec![self.dialog_scroll.clone()]
+        } else if matches!(self.route, Route::Playground) {
+            vec![self.play_side_scroll.clone(), self.page_scroll.clone()]
+        } else {
+            vec![self.page_scroll.clone()]
+        };
+        REVEAL.with(|r| *r.borrow_mut() = Some(containers));
+        cx.notify();
         for _ in 0..512 {
             if forward {
                 window.focus_next()

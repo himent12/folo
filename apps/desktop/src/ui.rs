@@ -172,7 +172,8 @@ pub fn status_tone(s: RunStatus) -> Tone {
         RunStatus::Completed => Tone::Success,
         RunStatus::Failed => Tone::Danger,
         RunStatus::Stopping => Tone::Warning,
-        RunStatus::Queued => Tone::Info,
+        // Waiting is not a status hue (design/README): neutral grey.
+        RunStatus::Queued => Tone::Neutral,
         RunStatus::Stopped => Tone::Neutral,
     }
 }
@@ -425,12 +426,23 @@ pub fn empty_state(t: &Theme, icon_path: &'static str, title: &str, body: &str, 
 }
 
 /// One legend entry with its value: swatch, name, number (tabular).
-pub fn legend_value(t: &Theme, name: &str, color: Hsla, dashed: bool, value: Option<String>) -> Div {
-    let swatch = if dashed {
-        div().w(px(10.)).flex().gap(px(2.)).children((0..3).map(move |_| div().w(px(2.)).h(px(2.)).bg(color)))
+/// A 10 px line sample matching a series stroke: solid, dashed (two dashes) or dotted (three dots).
+pub fn line_swatch(color: Hsla, dashed: bool, dotted: bool, weight: f32) -> Div {
+    if dotted {
+        div()
+            .w(px(10.))
+            .flex()
+            .gap(px(2.))
+            .children((0..3).map(move |_| div().w(px(2.)).h(px(2.)).rounded_full().bg(color)))
+    } else if dashed {
+        div().w(px(10.)).flex().gap(px(2.)).children((0..2).map(move |_| div().w(px(4.)).h(px(2.)).bg(color)))
     } else {
-        div().w(px(10.)).h(px(2.)).rounded_full().bg(color)
-    };
+        div().w(px(10.)).h(px(weight)).rounded_full().bg(color)
+    }
+}
+
+pub fn legend_value(t: &Theme, name: &str, color: Hsla, dashed: bool, value: Option<String>) -> Div {
+    let swatch = line_swatch(color, dashed, false, 2.);
     div()
         .flex()
         .items_center()
@@ -591,4 +603,9 @@ pub fn appear<E: IntoElement + Styled + 'static>(el: E, id: &str) -> gpui::AnyEl
         |d, p| d.opacity(p),
     )
     .into_any_element()
+}
+
+/// The 2 px accent bar on the selected row of a box list (design/README).
+pub fn select_bar(t: &Theme) -> Div {
+    div().absolute().left_0().top(px(4.)).bottom(px(4.)).w(px(2.)).rounded_full().bg(t.accent_fill())
 }

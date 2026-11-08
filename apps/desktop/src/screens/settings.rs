@@ -26,7 +26,9 @@ impl FoloApp {
                 .justify_between()
                 .gap(px(24.))
                 .px(px(16.))
-                .py(px(16.))
+                // 56 px rows (DIRECTION); a row whose description wraps grows.
+                .min_h(px(56.))
+                .py(px(8.))
                 .border_b_1()
                 .border_color(t.line_subtle)
                 // Label and description take the slack (and wrap); every control ends on the same edge.

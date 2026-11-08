@@ -698,7 +698,12 @@ impl FoloApp {
             .filter(|&i| self.loss_parts[i])
             .map(|i| {
                 let s = Series::new(names[i], colors[i], d.loss[i].clone()).smooth(0.94).live(live);
-                if i == 2 { s.dashed() } else { s }
+                match i {
+                    1 => s.dashed(),
+                    2 => s.dotted(),
+                    3 => s.width(2.25),
+                    _ => s,
+                }
             })
             .collect();
         let loss_max = (0..4).filter(|&i| self.loss_parts[i]).map(|i| d.loss_max[i]).fold(0f32, f32::max);
@@ -773,12 +778,8 @@ impl FoloApp {
                 .cursor_pointer()
                 .hover(|s| s.bg(t.bg_hover))
                 .tooltip(crate::controls::tip(if on { "Hide this series" } else { "Show this series" }, None))
-                .child(if on && i == 2 {
-                    div()
-                        .w(px(10.))
-                        .flex()
-                        .gap(px(2.))
-                        .children((0..3).map(move |_| div().w(px(2.)).h(px(2.)).bg(color)))
+                .child(if on {
+                    crate::ui::line_swatch(color, i == 1, i == 2, if i == 3 { 3. } else { 2. })
                 } else {
                     div()
                         .w(px(10.))
