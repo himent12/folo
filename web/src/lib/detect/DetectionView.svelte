@@ -154,7 +154,7 @@
             onpointerleave={onhover ? () => onhover(null) : undefined}
             onclick={onselect ? () => onselect(i) : undefined}
           >
-            {#if labels && !compact}
+            {#if labels && !compact && (!chips[i]?.hidden || active === i || selected === i)}
               {@const c = chips[i]}
               {#if c && (c.dy < -CHIP_H - 9 || (c.inside && c.dy > 8))}
                 <!-- The chip had to move away from its box: a thin leader keeps ownership readable. -->

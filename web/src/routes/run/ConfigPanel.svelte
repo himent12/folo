@@ -44,6 +44,7 @@
   {#snippet actions()}<Button size="sm" variant="ghost" icon={Copy} onclick={copy}>Copy JSON</Button>{/snippet}
   <div class="cols">
     <dl>
+      <p class="overline">Training</p>
       {#each rows as [k, v] (k)}<dt>{k}</dt><dd class="mono">{v}</dd>{/each}
     </dl>
     <dl>

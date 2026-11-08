@@ -113,7 +113,7 @@
       <Skeleton w="240px" h="28px" />
       <Skeleton w="min(420px, 100%)" h="16px" />
     </div>
-    <Skeleton h="118px" r="var(--radius-lg)" />
+    <Skeleton h="132px" r="var(--radius-lg)" />
     <div class="sk-row2"><Skeleton h="300px" r="var(--radius-lg)" /><Skeleton h="300px" r="var(--radius-lg)" /></div>
     <div class="sk-row3"><Skeleton h="260px" r="var(--radius-lg)" /><Skeleton h="260px" r="var(--radius-lg)" /><Skeleton h="260px" r="var(--radius-lg)" /></div>
   </div>
@@ -210,7 +210,7 @@
       </div>
       <div class="cell">
         <span class="label">Best mAP50-95</span>
-        <span class="val num accent">{metric(run.best?.map50_95)}</span>
+        <span class="val num">{metric(run.best?.map50_95)}</span>
         <span class="small">{run.best ? `epoch ${run.best.epoch + 1}` : '—'}</span>
       </div>
       <div class="cell">
@@ -448,9 +448,6 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-  }
-  .val.accent {
-    color: var(--accent-text);
   }
   .dim {
     color: var(--text-disabled);

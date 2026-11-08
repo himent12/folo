@@ -53,6 +53,8 @@
     cursor?: number | null;
     label: string;
     empty?: string;
+    /** Label each line where it ends (direct labels), for comparisons where colour alone is not enough. */
+    endLabels?: boolean;
   }
 
   let {
@@ -73,6 +75,7 @@
     cursor = $bindable(null),
     label,
     empty = 'No data yet',
+    endLabels = false,
   }: Props = $props();
 
   const uid = $props.id();
@@ -128,7 +131,8 @@
 
   const margin = $derived.by(() => {
     const longest = Math.max(...yTickValues.map((v) => yFormat(v).length), 1);
-    return { top: 8, right: 12, bottom: 22, left: Math.ceil(longest * 6.4) + 14 };
+    const labelW = endLabels ? Math.min(120, Math.max(0, ...series.map((s) => s.label.length)) * 6.2 + 10) : 0;
+    return { top: 8, right: 12 + labelW, bottom: 22, left: Math.ceil(longest * 6.4) + 14 };
   });
 
   const x = $derived(scaleLinear().domain(xExtent).range([margin.left, Math.max(margin.left + 1, width - margin.right)]));
@@ -171,6 +175,21 @@
       const pts = downsample(s.points, buckets);
       return { s, d: ln(pts) ?? '', a: s.area ? (ar(pts) ?? '') : '' };
     });
+  });
+
+  /** Direct labels at each line's last point, nudged apart vertically so they never overlap. */
+  const ends = $derived.by(() => {
+    if (!endLabels) return [];
+    const out = visible
+      .filter((s) => !s.ghost)
+      .map((s) => {
+        const p = s.points[s.points.length - 1];
+        return p && Number.isFinite(p.y) ? { id: s.id, label: s.label.length > 18 ? `${s.label.slice(0, 17)}…` : s.label, color: s.color, x: x(p.x), y: y(p.y) } : null;
+      })
+      .filter((e): e is NonNullable<typeof e> => e !== null)
+      .sort((a, b) => a.y - b.y);
+    for (let i = 1; i < out.length; i++) if (out[i]!.y - out[i - 1]!.y < 12) out[i]!.y = out[i - 1]!.y + 12;
+    return out;
   });
 
   // ---- hover / keyboard cursor ----
@@ -361,6 +380,11 @@
             <path class="line" class:dashed={s.dashed} class:ghost={s.ghost} class:emphasis={s.emphasis} {d} style:stroke={s.color} style:stroke-dasharray={dashOf(s)} />
           {/each}
 
+          {#if endLabels}
+            {#each ends as e (e.id)}
+              <text class="end-label" x={e.x + 6} y={e.y} dy="0.32em" style:fill={e.color}>{e.label}</text>
+            {/each}
+          {/if}
           {#each markers as m (m.label + m.x)}
             {#if m.x >= xExtent[0] && m.x <= xExtent[1]}
               <g class="marker" transform="translate({x(m.x)},{y(m.y)})">
@@ -497,6 +521,13 @@
   .dot {
     stroke: var(--bg-panel);
     stroke-width: 2;
+  }
+  .end-label {
+    font-size: 10px;
+    font-weight: var(--weight-medium);
+    paint-order: stroke;
+    stroke: var(--bg-panel);
+    stroke-width: 3px;
   }
   .marker circle {
     fill: var(--bg-panel);

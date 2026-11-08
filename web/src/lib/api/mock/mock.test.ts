@@ -155,7 +155,7 @@ describe('mock runs', () => {
 
   it('fails every call in the error scenario', async () => {
     const api = new MockApi('error', 0);
-    await expect(api.runs()).rejects.toMatchObject({ code: 'server_unavailable' });
+    await expect(api.runs()).rejects.toMatchObject({ code: 'network' });
   });
 
   it('produces plausible curves', () => {

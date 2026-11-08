@@ -66,13 +66,17 @@
 <Page title="Runs">
   {#snippet sub()}<span>Training runs, newest first. Select up to four to compare their curves.</span>{/snippet}
   {#snippet actions()}
-    <Button icon={GitCompare} disabled={selected.length < 2} href={href(`/runs/compare?ids=${selected.join(',')}`)}>
-      Compare{#if selected.length}<span class="num faint">{selected.length}</span>{/if}
-    </Button>
-    <Button variant="primary" icon={Plus} href={href('/runs/new')}>New run</Button>
+    {#if runs.data?.length !== 0}
+      <span title={selected.length < 2 ? 'Select 2–4 runs to compare' : undefined}>
+        <Button icon={GitCompare} disabled={selected.length < 2} href={href(`/runs/compare?ids=${selected.join(',')}`)}>
+          Compare{#if selected.length}<span class="num faint">{selected.length}</span>{/if}
+        </Button>
+      </span>
+      <Button variant="primary" icon={Plus} href={href('/runs/new')}>New run</Button>
+    {/if}
   {/snippet}
 
-  <div class="toolbar">
+  {#if !runs.data || runs.data.length > 0}<div class="toolbar">
     <Segmented
       label="Filter runs by status"
       bind:value={filter}
@@ -84,7 +88,7 @@
       ]}
     />
     <div class="search"><Input icon={Search} bind:value={query} placeholder="Filter by name, model or dataset" aria-label="Filter runs" /></div>
-  </div>
+  </div>{/if}
 
   <Panel pad="none">
     {#if runs.error && !runs.data}
@@ -264,9 +268,13 @@
     font-weight: var(--weight-medium);
   }
   .best span {
+    /* A fixed slot so 'ep 36' and 'ep 150' never shift the decimals. */
+    display: inline-block;
+    width: 6ch;
+    text-align: left;
     font-weight: var(--weight-regular);
     font-size: var(--type-xs-size);
-    margin-left: 4px;
+    margin-left: 6px;
   }
   .cards {
     display: none;

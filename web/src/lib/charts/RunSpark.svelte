@@ -23,7 +23,7 @@
   });
 
   const color = $derived(
-    run.status === 'failed' ? 'var(--danger-solid)' : run.status === 'running' ? 'var(--chart-1)' : 'var(--text-tertiary)',
+    run.status === 'failed' ? 'var(--danger-solid)' : run.status === 'running' ? 'var(--accent-line)' : 'var(--text-tertiary)',
   );
 </script>
 

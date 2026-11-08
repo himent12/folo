@@ -71,7 +71,7 @@
         </p>
       </div>
       <div class="grid">
-        <Stat label="Best mAP50-95" value={metric(run.best?.map50_95)} sub={run.best ? `epoch ${run.best.epoch + 1}` : 'after first epoch'} tone="accent" />
+        <Stat label="Best mAP50-95" value={metric(run.best?.map50_95)} sub={run.best ? `epoch ${run.best.epoch + 1}` : 'after first epoch'} />
         <Stat label="Throughput" value={num(charts.lastStep?.imgs_per_s, 0)} unit="img/s" />
         <Stat label="Learning rate" value={lr(charts.lastStep?.lr)} />
         <Stat label="Loss" value={num(charts.lastStep?.loss.total, 3)} />

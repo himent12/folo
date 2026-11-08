@@ -50,11 +50,11 @@
     const pts = (f: (s: Step) => number): Pt[] => steps.map((s) => ({ x: s.step / spe, y: f(s) }));
     const total = pts((s) => s.loss.total);
     return [
-      { id: 'raw', label: 'total (raw)', color: 'var(--chart-1)', ghost: true, points: a > 0 ? total : [] },
-      { id: 'total', label: 'total', color: 'var(--chart-1)', points: smooth(total, a) },
-      { id: 'box', label: 'box', color: 'var(--chart-1)', pattern: 'dash', points: smooth(pts((s) => s.loss.box), a) },
-      { id: 'cls', label: 'cls', color: 'var(--chart-1)', pattern: 'dot', points: smooth(pts((s) => s.loss.cls), a) },
-      { id: 'dfl', label: 'dfl', color: 'var(--chart-1)', pattern: 'dashdot', points: smooth(pts((s) => s.loss.dfl), a) },
+      { id: 'raw', label: 'total (raw)', color: 'var(--text-primary)', ghost: true, points: a > 0 ? total : [] },
+      { id: 'total', label: 'total', color: 'var(--text-primary)', emphasis: true, points: smooth(total, a) },
+      { id: 'box', label: 'box', color: 'var(--chart-1)', points: smooth(pts((s) => s.loss.box), a) },
+      { id: 'cls', label: 'cls', color: 'var(--chart-4)', pattern: 'dash', points: smooth(pts((s) => s.loss.cls), a) },
+      { id: 'dfl', label: 'dfl', color: 'var(--chart-5)', pattern: 'dot', points: smooth(pts((s) => s.loss.dfl), a) },
     ];
   });
 
