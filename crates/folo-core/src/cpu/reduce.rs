@@ -2,8 +2,8 @@
 
 use rayon::prelude::*;
 
-use super::PAR_MIN;
 use super::elementwise::fast_exp;
+use super::{CHUNK, PAR_MIN};
 use crate::backend::ReduceOp;
 
 /// Sum with 16 independent accumulators: vectorises and loses less precision than a serial sum.
@@ -31,19 +31,26 @@ pub(crate) fn split3(dims: &[usize], dim: usize) -> (usize, usize, usize) {
     (dims[..dim].iter().product(), dims[dim], dims[dim + 1..].iter().product())
 }
 
-pub(crate) fn reduce_f32(op: ReduceOp, x: &[f32], (outer, d, inner): (usize, usize, usize)) -> Vec<f32> {
-    let mut out = vec![0f32; outer * inner];
-    if outer * inner == 0 {
-        return out;
+/// Rows longer than this are reduced as fixed blocks of this many elements whose partial results are combined
+/// by [`tree_combine`]. The blocking depends only on the row length, so the result is bitwise the same for any
+/// thread count and from run to run.
+pub(crate) const REDUCE_BLOCK: usize = 1 << 13;
+
+/// Combine `v` pairwise in a fixed order: `((v0 ∘ v1) ∘ (v2 ∘ v3)) ∘ ...`. Precision degrades with the log of
+/// the length instead of the length.
+pub(crate) fn tree_combine(mut v: Vec<f32>, comb: impl Fn(f32, f32) -> f32) -> Option<f32> {
+    while v.len() > 1 {
+        let half = v.len().div_ceil(2);
+        for i in 0..half {
+            v[i] = if 2 * i + 1 < v.len() { comb(v[2 * i], v[2 * i + 1]) } else { v[2 * i] };
+        }
+        v.truncate(half);
     }
-    let par = outer * d * inner >= PAR_MIN;
-    let init = match op {
-        ReduceOp::Sum => 0.0,
-        ReduceOp::Max => f32::NEG_INFINITY,
-        ReduceOp::Min => f32::INFINITY,
-        _ => unreachable!("arg reductions use reduce_arg"),
-    };
-    let comb = |a: f32, b: f32| match op {
+    v.pop()
+}
+
+fn combine(op: ReduceOp, a: f32, b: f32) -> f32 {
+    match op {
         ReduceOp::Sum => a + b,
         ReduceOp::Max => {
             if b > a || b.is_nan() {
@@ -59,36 +66,85 @@ pub(crate) fn reduce_f32(op: ReduceOp, x: &[f32], (outer, d, inner): (usize, usi
                 a
             }
         }
+    }
+}
+
+fn identity(op: ReduceOp) -> f32 {
+    match op {
+        ReduceOp::Sum => 0.0,
+        ReduceOp::Max => f32::NEG_INFINITY,
+        ReduceOp::Min => f32::INFINITY,
+        _ => unreachable!("arg reductions use reduce_arg"),
+    }
+}
+
+/// One block (at most [`REDUCE_BLOCK`] long) reduced serially.
+fn reduce_block(op: ReduceOp, x: &[f32]) -> f32 {
+    match op {
+        ReduceOp::Sum => sum_slice(x),
+        _ => x.iter().fold(identity(op), |a, &b| combine(op, a, b)),
+    }
+}
+
+/// Reduce a contiguous row with the fixed blocking described at [`REDUCE_BLOCK`].
+fn reduce_row(op: ReduceOp, x: &[f32]) -> f32 {
+    if x.len() <= REDUCE_BLOCK {
+        return reduce_block(op, x);
+    }
+    let parts: Vec<f32> = if x.len() >= PAR_MIN {
+        x.par_chunks(REDUCE_BLOCK).map(|c| reduce_block(op, c)).collect()
+    } else {
+        x.chunks(REDUCE_BLOCK).map(|c| reduce_block(op, c)).collect()
     };
-    let row = |(o, dst): (usize, &mut [f32])| {
-        let src = &x[o * d * inner..(o + 1) * d * inner];
-        if inner == 1 {
-            dst[0] = match op {
-                ReduceOp::Sum => sum_slice(src),
-                _ => src.iter().fold(init, |a, &b| comb(a, b)),
-            };
+    tree_combine(parts, |a, b| combine(op, a, b)).unwrap_or(identity(op))
+}
+
+/// Reduce the middle dimension of `[outer, d, inner]`. Every output element is computed by one task in an order
+/// that depends only on the shape, so results are bitwise reproducible across runs and thread counts.
+pub(crate) fn reduce_f32(op: ReduceOp, x: &[f32], (outer, d, inner): (usize, usize, usize)) -> Vec<f32> {
+    let mut out = super::alloc_uninit(outer * inner);
+    if outer * inner == 0 {
+        return out;
+    }
+    let par = outer * d * inner >= PAR_MIN;
+    if inner == 1 {
+        let row = |(o, dst): (usize, &mut f32)| *dst = reduce_row(op, &x[o * d..(o + 1) * d]);
+        if par && outer > 1 {
+            out.par_iter_mut().enumerate().with_min_len((CHUNK / d.max(1)).max(1)).for_each(row);
         } else {
-            dst.fill(init);
-            for r in 0..d {
-                for (acc, &v) in dst.iter_mut().zip(&src[r * inner..(r + 1) * inner]) {
-                    *acc = comb(*acc, v);
+            out.iter_mut().enumerate().for_each(row);
+        }
+        return out;
+    }
+    // Columns: each task owns a run of output columns of one outer block and walks the d rows in order.
+    let cols = if par { (CHUNK / d.max(1)).clamp(64.min(inner), inner) } else { inner };
+    let per = inner.div_ceil(cols);
+    let task = |(t, dst): (usize, &mut [f32])| {
+        let (o, c0) = (t / per, (t % per) * cols);
+        let src = &x[o * d * inner..(o + 1) * d * inner];
+        dst.fill(identity(op));
+        for r in 0..d {
+            let row = &src[r * inner + c0..r * inner + c0 + dst.len()];
+            match op {
+                ReduceOp::Sum => {
+                    for (acc, &v) in dst.iter_mut().zip(row) {
+                        *acc += v;
+                    }
+                }
+                _ => {
+                    for (acc, &v) in dst.iter_mut().zip(row) {
+                        *acc = combine(op, *acc, v);
+                    }
                 }
             }
         }
     };
-    if par && outer > 1 {
-        out.par_chunks_mut(inner).enumerate().for_each(row);
-    } else if par && inner == 1 {
-        // A single long row: split it, then combine the partial results.
-        out[0] = x
-            .par_chunks(1 << 14)
-            .map(|c| match op {
-                ReduceOp::Sum => sum_slice(c),
-                _ => c.iter().fold(init, |a, &b| comb(a, b)),
-            })
-            .reduce(|| init, comb);
+    // Chunks of `cols` within each block of `inner` outputs (the last chunk of a block may be shorter).
+    let chunks = out.chunks_mut(inner).flat_map(|b| b.chunks_mut(cols));
+    if par {
+        chunks.enumerate().collect::<Vec<_>>().into_par_iter().for_each(task);
     } else {
-        out.chunks_mut(inner).enumerate().for_each(row);
+        chunks.enumerate().for_each(task);
     }
     out
 }

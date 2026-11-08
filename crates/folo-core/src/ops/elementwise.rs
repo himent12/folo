@@ -40,6 +40,14 @@ unary_fns! {
     cos => UnaryOp::Cos;
     /// Hyperbolic tangent.
     tanh => UnaryOp::Tanh;
+    /// Arctangent.
+    atan => UnaryOp::Atan;
+    /// Arcsine (NaN outside `[-1, 1]`; the gradient is infinite at `+-1`).
+    asin => UnaryOp::Asin;
+    /// Arccosine (NaN outside `[-1, 1]`; the gradient is infinite at `+-1`).
+    acos => UnaryOp::Acos;
+    /// The error function.
+    erf => UnaryOp::Erf;
     /// `1 / (1 + e^-x)`.
     sigmoid => UnaryOp::Sigmoid;
     /// `x * sigmoid(x)` (a.k.a. swish).
@@ -204,6 +212,12 @@ impl Tensor {
         self.binary(BinaryOp::Minimum, other)
     }
 
+    /// `atan2(self, other)` with broadcasting: the angle of the point `(x = other, y = self)` in `[-pi, pi]`.
+    /// The gradient at the origin is taken as 0.
+    pub fn atan2(&self, other: &Tensor) -> Result<Tensor> {
+        self.binary(BinaryOp::Atan2, other)
+    }
+
     /// `self == other` as a 0/1 `F32` mask.
     pub fn eq(&self, other: &Tensor) -> Result<Tensor> {
         self.binary(BinaryOp::Eq, other)
@@ -306,6 +320,14 @@ fn binary_backward(
                 sb
             )?
         ],
+        BinaryOp::Atan2 => {
+            // d/dy atan2(y, x) = x / r^2, d/dx = -y / r^2, with r^2 = x^2 + y^2; 0 at the origin.
+            let r2 = a.square()?.add(&b.square()?)?;
+            let zero = r2.eq_scalar(0.0)?;
+            let safe = zero.where_cond(&a.scalar_like(1.0)?, &r2)?;
+            let k = zero.where_cond(&a.scalar_like(0.0)?, &g.div(&safe)?)?;
+            grads![side(need_a, &|| k.mul(b), sa)?, side(need_b, &|| k.mul(a)?.neg(), sb)?]
+        }
         BinaryOp::Maximum | BinaryOp::Minimum => {
             let wins = if op == BinaryOp::Maximum { a.gt(b)? } else { a.lt(b)? };
             let ties = a.eq(b)?.mul_scalar(0.5)?;
@@ -383,6 +405,34 @@ mod tests {
         close(x.maximum(&t(&[0.25], &[])).unwrap().to_vec().unwrap(), vec![0.25, 0.25, 0.25, 0.5, 2.0]);
         close(x.square().unwrap().to_vec().unwrap(), vec![4.0, 0.25, 0.0, 0.25, 4.0]);
         close(x.exp().unwrap().log().unwrap().to_vec().unwrap(), vec![-2.0, -0.5, 0.0, 0.5, 2.0]);
+        let v = [-2.0f32, -0.5, 0.0, 0.5, 2.0];
+        close(x.atan().unwrap().to_vec().unwrap(), v.iter().map(|v| v.atan()).collect());
+        close(
+            x.mul_scalar(0.4).unwrap().asin().unwrap().to_vec().unwrap(),
+            v.iter().map(|v| (v * 0.4).asin()).collect(),
+        );
+        close(
+            x.mul_scalar(0.4).unwrap().acos().unwrap().to_vec().unwrap(),
+            v.iter().map(|v| (v * 0.4).acos()).collect(),
+        );
+        close(x.floor().unwrap().to_vec().unwrap(), vec![-2.0, -1.0, 0.0, 0.0, 2.0]);
+        close(x.ceil().unwrap().to_vec().unwrap(), vec![-2.0, -0.0, 0.0, 1.0, 2.0]);
+        close(x.round().unwrap().to_vec().unwrap(), vec![-2.0, -1.0, 0.0, 1.0, 2.0]);
+        close(x.sign().unwrap().to_vec().unwrap(), vec![-1.0, -1.0, 0.0, 1.0, 1.0]);
+        // erf(0.5) and erf(2) to 7 digits (Abramowitz & Stegun table 7.1).
+        close(
+            x.erf().unwrap().to_vec().unwrap(),
+            vec![-0.995_322_3, -0.520_499_9, 0.0, 0.520_499_9, 0.995_322_3],
+        );
+        // atan2(y, x) over the four quadrants and the axes.
+        let y = t(&[1.0, 1.0, -1.0, -1.0, 0.0, 2.0], &[6]);
+        let xx = t(&[1.0, -1.0, -1.0, 1.0, -3.0, 0.0], &[6]);
+        let want: Vec<f32> =
+            [(1.0f32, 1.0f32), (1.0, -1.0), (-1.0, -1.0), (-1.0, 1.0), (0.0, -3.0), (2.0, 0.0)]
+                .iter()
+                .map(|(y, x)| y.atan2(*x))
+                .collect();
+        close(y.atan2(&xx).unwrap().to_vec().unwrap(), want);
         assert!(Tensor::from_slice(&[1u8], [1]).unwrap().exp().is_err());
     }
 

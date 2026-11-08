@@ -283,3 +283,136 @@ fn constructors() {
     assert_eq!(Tensor::ones([2]).ones_like().unwrap().to_vec::<f32>().unwrap(), vec![1.0, 1.0]);
     assert!(format!("{:?}", Tensor::ones([2])).contains("Tensor[2] f32 cpu"));
 }
+
+/// Naive gradients of `sum(conv2d(x, w) * r)` with respect to `x` and `w`.
+fn naive_conv_grads(x: &Tensor, w: &Tensor, r: &Tensor, p: &Conv2dParams) -> (Vec<f32>, Vec<f32>) {
+    let (n, c, h, wd) = x.dims4().unwrap();
+    let (o, cg, kh, kw) = w.dims4().unwrap();
+    let (_, _, oh, ow) = r.dims4().unwrap();
+    let (xv, wv, rv) = (x.to_vec::<f32>().unwrap(), w.to_vec::<f32>().unwrap(), r.to_vec::<f32>().unwrap());
+    let og = o / p.groups;
+    let mut gx = vec![0f64; xv.len()];
+    let mut gw = vec![0f64; wv.len()];
+    for img in 0..n {
+        for oc in 0..o {
+            let grp = oc / og;
+            for oy in 0..oh {
+                for ox in 0..ow {
+                    let gr = rv[((img * o + oc) * oh + oy) * ow + ox] as f64;
+                    for ci in 0..cg {
+                        let ic = grp * cg + ci;
+                        for ky in 0..kh {
+                            for kx in 0..kw {
+                                let iy =
+                                    (oy * p.stride[0] + ky * p.dilation[0]) as isize - p.padding[0] as isize;
+                                let ix =
+                                    (ox * p.stride[1] + kx * p.dilation[1]) as isize - p.padding[1] as isize;
+                                if iy < 0 || ix < 0 || iy >= h as isize || ix >= wd as isize {
+                                    continue;
+                                }
+                                let xi = ((img * c + ic) * h + iy as usize) * wd + ix as usize;
+                                let wi = ((oc * cg + ci) * kh + ky) * kw + kx;
+                                gx[xi] += gr * wv[wi] as f64;
+                                gw[wi] += gr * xv[xi] as f64;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    (gx.iter().map(|&v| v as f32).collect(), gw.iter().map(|&v| v as f32).collect())
+}
+
+#[test]
+fn conv2d_backward_matches_naive_over_geometries() {
+    let p = |s: [usize; 2], pad: [usize; 2], d: [usize; 2], g: usize| Conv2dParams {
+        stride: s,
+        padding: pad,
+        dilation: d,
+        groups: g,
+    };
+    // Strides 1-3 with kernels smaller than, equal to and larger than the stride, odd sizes, asymmetric
+    // parameters, dilation, groups and padding beyond the kernel's reach (the col2im fallback).
+    let cases: Vec<ConvCase> = vec![
+        (2, 3, 4, [9, 7], [3, 3], p([1, 1], [1, 1], [1, 1], 1), false),
+        (2, 4, 6, [9, 8], [3, 3], p([2, 2], [1, 1], [1, 1], 2), false),
+        (1, 3, 5, [11, 10], [5, 5], p([3, 3], [2, 2], [1, 1], 1), false),
+        (1, 3, 4, [10, 9], [3, 3], p([2, 2], [0, 0], [1, 1], 1), false),
+        (1, 2, 3, [9, 9], [4, 4], p([2, 2], [1, 1], [1, 1], 1), false),
+        (1, 2, 3, [10, 11], [2, 2], p([3, 3], [0, 0], [1, 1], 1), false),
+        (1, 3, 5, [10, 9], [3, 2], p([1, 2], [2, 0], [2, 1], 1), false),
+        (1, 2, 3, [9, 9], [3, 3], p([1, 1], [2, 2], [2, 2], 1), false),
+        (1, 2, 3, [9, 9], [3, 3], p([2, 2], [2, 2], [2, 2], 1), false),
+        (1, 4, 4, [6, 6], [1, 1], p([2, 2], [1, 1], [1, 1], 1), false),
+        (1, 4, 4, [7, 7], [1, 1], p([2, 2], [0, 0], [1, 1], 1), false),
+        (1, 2, 3, [4, 4], [3, 3], p([1, 1], [3, 3], [1, 1], 1), false),
+        (2, 6, 6, [7, 7], [3, 3], p([2, 2], [1, 1], [1, 1], 6), false),
+        // Large enough for the parallel GEMM paths and a batch smaller than the pool.
+        (3, 32, 40, [20, 20], [3, 3], p([1, 1], [1, 1], [1, 1], 1), false),
+        (3, 16, 24, [21, 21], [3, 3], p([2, 2], [1, 1], [1, 1], 1), false),
+        (1, 48, 64, [16, 16], [1, 1], p([1, 1], [0, 0], [1, 1], 1), false),
+    ];
+    for (i, (n, c, o, hw, k, prm, _)) in cases.into_iter().enumerate() {
+        let x = randn(&[n, c, hw[0], hw[1]], 500 + i as u64).requires_grad_();
+        let w = randn(&[o, c / prm.groups, k[0], k[1]], 600 + i as u64).requires_grad_();
+        let y = x.conv2d_with(&w, None, &prm).unwrap();
+        let r = randn(y.dims(), 700 + i as u64);
+        let g = y.mul(&r).unwrap().sum_all().unwrap().backward().unwrap();
+        let (ex, ew) = naive_conv_grads(&x, &w, &r, &prm);
+        assert_close(
+            &g.get(&x).unwrap().to_vec::<f32>().unwrap(),
+            &ex,
+            1e-4,
+            &format!("case {i} grad input"),
+        );
+        assert_close(
+            &g.get(&w).unwrap().to_vec::<f32>().unwrap(),
+            &ew,
+            1e-4,
+            &format!("case {i} grad weight"),
+        );
+    }
+}
+
+#[test]
+fn fused_conv_act_matches_composite() {
+    use folo_core::{UnaryOp, no_grad};
+    let _g = no_grad();
+    let p = |s: usize, pad: usize, g: usize| Conv2dParams {
+        stride: [s; 2],
+        padding: [pad; 2],
+        dilation: [1; 2],
+        groups: g,
+    };
+    let cases = [
+        (2, 8, 16, 12, 3, p(1, 1, 1)),
+        (1, 16, 16, 20, 3, p(2, 1, 16)), // depthwise
+        (2, 12, 24, 9, 1, p(1, 0, 1)),   // pointwise
+        (1, 32, 48, 40, 3, p(1, 1, 2)),  // parallel GEMM, groups
+        (3, 64, 64, 10, 3, p(1, 1, 1)),
+    ];
+    let acts = [None, Some(UnaryOp::Silu), Some(UnaryOp::Relu), Some(UnaryOp::Sigmoid), Some(UnaryOp::Tanh)];
+    for (i, &(n, c, o, hw, k, prm)) in cases.iter().enumerate() {
+        let x = randn(&[n, c, hw, hw], 800 + i as u64);
+        let w = randn(&[o, c / prm.groups, k, k], 900 + i as u64).mul_scalar(0.2).unwrap();
+        let b = randn(&[o], 1000 + i as u64);
+        for act in acts {
+            for bias in [None, Some(&b)] {
+                let want = x.conv2d_with(&w, bias, &prm).unwrap();
+                let want = match act {
+                    Some(op) => want.unary(op).unwrap(),
+                    None => want,
+                };
+                let got = x.conv2d_act(&w, bias, &prm, act).unwrap();
+                assert_eq!(got.dims(), want.dims());
+                assert_close(
+                    &got.to_vec::<f32>().unwrap(),
+                    &want.to_vec::<f32>().unwrap(),
+                    1e-5,
+                    &format!("case {i} {act:?} bias {}", bias.is_some()),
+                );
+            }
+        }
+    }
+}

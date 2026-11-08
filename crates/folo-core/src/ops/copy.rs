@@ -34,7 +34,8 @@ impl Tensor {
             return Ok(first.clone());
         }
         let shape = first.shape().with_dim(d, total);
-        let out = Tensor::zeros_with(&shape, first.dtype(), first.device())?;
+        // The pieces tile the output exactly, so it needs no initialisation.
+        let out = Tensor::uninit_with(&shape, first.dtype(), first.device())?;
         let b = first.backend()?;
         let full = Layout::contiguous(shape);
         let mut sizes = Vec::with_capacity(tensors.len());
@@ -136,8 +137,11 @@ impl Tensor {
         let out = Tensor::wrap(s, self.shape().with_dim(d, indices.numel()), "index_select")?;
         let (idx, in_shape) = (indices.clone(), self.shape().clone());
         Ok(out.track_saved("index_select", &[self], &[indices], move |g| {
-            let z = Tensor::zeros_with(&in_shape, g.dtype(), g.device())?;
-            Ok(grads![Some(z.index_add(d, &idx, g)?)])
+            let b = g.backend()?;
+            let s = super::with_views([g, &idx], [g.layout(), idx.layout()], |[gv, iv]| {
+                b.index_select_backward(gv, d, iv, &in_shape)
+            })?;
+            Ok(grads![Some(Tensor::wrap(s, in_shape.clone(), "index_select_backward")?)])
         }))
     }
 
@@ -191,9 +195,18 @@ impl Tensor {
         let out = Tensor::wrap(s, index.shape().clone(), "gather")?;
         let (idx, in_shape) = (index.clone(), self.shape().clone());
         Ok(out.track_saved("gather", &[self], &[index], move |g| {
-            let z = Tensor::zeros_with(&in_shape, g.dtype(), g.device())?;
-            Ok(grads![Some(z.scatter_add(d, &idx, g)?)])
+            Ok(grads![Some(g.gather_backward(d, &idx, &in_shape)?)])
         }))
+    }
+
+    /// Zeros of `in_shape` with `out[.., index[.., i, ..], ..] += self[.., i, ..]` along `dim`, without autograd:
+    /// the gradient of [`Tensor::gather`] (and of [`Tensor::topk`]).
+    pub(crate) fn gather_backward(&self, d: usize, index: &Tensor, in_shape: &Shape) -> Result<Tensor> {
+        let b = self.backend()?;
+        let s = super::with_views([self, index], [self.layout(), index.layout()], |[gv, iv]| {
+            b.gather_backward(gv, d, iv, in_shape)
+        })?;
+        Tensor::wrap(s, in_shape.clone(), "gather_backward")
     }
 
     /// A copy of `self` with `out[.., index[.., i, ..], ..] += src[.., i, ..]` along `dim`. `index` and `src`
