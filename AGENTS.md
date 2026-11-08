@@ -27,7 +27,7 @@ easy for agents to drive (`--json` everywhere, an MCP server, stable exit codes)
   in `docs/` in the same PR.
 - **No secrets in the repo, ever.** Keys live outside the repo (for example `~/.folo/boat.key`). Never print them.
 
-## Workflow (every change is a PR)
+## Workflow (every change is a PR) — details in docs/PROCESS.md
 1. Work in your own git worktree on a branch named `<area>/<short-topic>` (e.g. `core/autograd`, `ui/run-view`).
 2. Keep PRs focused and reviewable; a big feature can be a stack of PRs.
 3. Commit messages and PR titles: `area: imperative summary` (e.g. `core: add broadcasting binary ops`).
