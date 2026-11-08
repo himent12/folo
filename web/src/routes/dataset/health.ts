@@ -9,7 +9,17 @@ export interface HealthItem {
   severity: Severity;
   title: string;
   detail: string;
+  /** A concrete next step where the data allows one: a label and an app path (without the leading #). */
+  action?: { label: string; path: string };
 }
+
+/** Findings that need attention (errors and warnings): the "N to review" count, everywhere it is shown. */
+export function reviewCount(items: readonly HealthItem[]): number {
+  return items.filter((h) => h.severity === 'danger' || h.severity === 'warning').length;
+}
+
+/** Image size suggested for datasets with many tiny boxes (1.5× the 640 default). */
+export const TINY_IMGSZ = 960;
 
 /** Imbalance (largest / smallest class) above which we warn. */
 export const IMBALANCE_WARN = 5;
@@ -45,6 +55,8 @@ export function shareBelow(h: Histogram, limit: number): number {
 export function healthChecks(d: Dataset, s: DatasetStats): HealthItem[] {
   const out: HealthItem[] = [];
   const images = imageCount(d);
+  const id = encodeURIComponent(d.id);
+  const showClass = (i: number) => ({ label: `Show ${d.classes[i] ?? `class ${i}`} images`, path: `/datasets/${id}?class=${i}` });
 
   if (s.broken_labels > 0) {
     out.push({
@@ -77,6 +89,7 @@ export function healthChecks(d: Dataset, s: DatasetStats): HealthItem[] {
         severity: 'warning',
         title: `Class imbalance ${ratio.toFixed(1)}×`,
         detail: `${d.classes[hi.i]} has ${int(hi.c)} boxes, ${d.classes[lo.i]} only ${int(lo.c)}. Rare classes usually score lower; add examples or oversample them.`,
+        action: showClass(lo.i),
       });
     }
   }
@@ -88,6 +101,7 @@ export function healthChecks(d: Dataset, s: DatasetStats): HealthItem[] {
       severity: 'warning',
       title: `${few.length === 1 ? 'A class has' : `${few.length} classes have`} fewer than ${FEW_BOXES} boxes`,
       detail: `${few.map((x) => `${d.classes[x.i]} (${int(x.c)})`).join(', ')}. Aim for a few hundred boxes per class or more.`,
+      ...(few.length === 1 ? { action: showClass(few[0]!.i) } : {}),
     });
   }
 
@@ -98,6 +112,7 @@ export function healthChecks(d: Dataset, s: DatasetStats): HealthItem[] {
       severity: 'warning',
       title: `${share(tiny)} of boxes are tiny`,
       detail: 'They are under 5% of the image side (about 32 px at 640). Train at a larger image size or tile large images.',
+      action: { label: `Train at ${TINY_IMGSZ} px`, path: `/runs/new?dataset=${id}&imgsz=${TINY_IMGSZ}` },
     });
   }
 

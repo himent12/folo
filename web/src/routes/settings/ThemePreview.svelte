@@ -17,7 +17,7 @@
   style:--line={c.line.default}
   style:--t1={c.text.primary}
   style:--t3={c.text.tertiary}
-  style:--acc={c.accent.solid}
+  style:--s1={c.chart.series[0]}
   style:--s2={c.chart.series[1]}
 >
   <span class="side">
@@ -30,7 +30,7 @@
     <span class="title"></span>
     <span class="card">
       <svg viewBox="0 0 60 24" preserveAspectRatio="none">
-        <polyline points="0,22 10,15 20,11 30,8 40,6 50,5 60,4" fill="none" stroke="var(--acc)" stroke-width="1.5" vector-effect="non-scaling-stroke" />
+        <polyline points="0,22 10,15 20,11 30,8 40,6 50,5 60,4" fill="none" stroke="var(--s1)" stroke-width="1.5" vector-effect="non-scaling-stroke" />
         <polyline points="0,23 10,19 20,16 30,14 40,13 50,12 60,11" fill="none" stroke="var(--s2)" stroke-width="1.5" vector-effect="non-scaling-stroke" />
       </svg>
     </span>

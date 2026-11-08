@@ -330,7 +330,7 @@
               {m.classes.length} classes · {m.imgsz}px · {compact(m.params)} params · {bytes(m.bytes, prefs.units)}
             </span>
             <span class="c-meta">
-              {#if m.run_id}on <b>{evalSet(m).label}</b>{#if isBest(m)}{' · '}<span class="c-best">best</span>{/if}{' · '}from {sourceName(m)}{:else}imported{/if} · {ago(m.created)}
+              {#if m.run_id}{#if isBest(m)}<span class="c-best">Best on {evalSet(m).label}</span>{:else}on <b>{evalSet(m).label}</b>{/if}{' · '}from {sourceName(m)}{:else}imported{/if} · {ago(m.created)}
             </span>
           </a>
         </li>
@@ -535,6 +535,7 @@
     }
     .c-best {
       color: var(--accent-text);
+      font-weight: var(--weight-medium);
     }
     .none {
       padding: var(--space-6);

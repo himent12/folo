@@ -8,7 +8,7 @@
   import { Resource } from '$lib/api/resource.svelte';
   import type { Dataset, Model, Run } from '$lib/api/types';
   import ConfusionMatrix from '$lib/charts/ConfusionMatrix.svelte';
-  import { classInk } from '$lib/design/classInk.svelte';
+  import { classColor } from '$lib/design/tokens';
   import { ago, bytes, compact, date, metric, num } from '$lib/format';
   import { prefs } from '$lib/prefs.svelte';
   import { href, router } from '$lib/router.svelte';
@@ -50,25 +50,56 @@
     const m = model.data;
     if (!m || !ev) return null;
     const n = m.classes.length;
-    if (n <= CM_MAX) return { classes: m.classes, matrix: ev.confusion, partial: false };
+    if (n <= CM_MAX) return { classes: m.classes, ids: undefined, matrix: ev.confusion, partial: false };
     const keep = ev.perClass
       .map((c) => c)
       .sort((a, b) => b.instances - a.instances)
       .slice(0, CM_MAX)
       .map((c) => c.class)
       .sort((a, b) => a - b);
-    return { classes: [...keep.map((i) => m.classes[i] ?? `class ${i}`), 'other classes'], matrix: reduceConfusion(ev.confusion, keep), partial: true };
+    return {
+      classes: [...keep.map((i) => m.classes[i] ?? `class ${i}`), 'Other'],
+      ids: [...keep, -1],
+      matrix: reduceConfusion(ev.confusion, keep),
+      partial: true,
+    };
   });
+
+  /**
+   * The largest off-diagonal confusion between two real classes (background excluded), row-normalised over the full
+   * matrix. Rows with very few instances are skipped so one stray box can't top the list.
+   */
+  const confused = $derived.by(() => {
+    if (!ev) return null;
+    const conf = ev.confusion;
+    const k = conf.length - 1;
+    let best: { r: number; c: number; v: number } | null = null;
+    for (let r = 0; r < k; r++) {
+      const row = conf[r] ?? [];
+      const sum = row.reduce((a, b) => a + b, 0);
+      if (sum < 20) continue;
+      for (let c = 0; c < k; c++) {
+        if (c === r) continue;
+        const v = (row[c] ?? 0) / sum;
+        if (v > 0 && (!best || v > best.v)) best = { r, c, v };
+      }
+    }
+    return best;
+  });
+
+  // Large class sets: 16 rows until the reader asks for all of them.
+  const PER_CLASS_MAX = 16;
+  let allClasses = $state(false);
 
   let exportOpen = $state(false);
 
   /** The architecture's published 640 px reference time, scaled by input area. */
   const latency = (m: Model) => archInfo[m.arch].ms * (m.imgsz / 640) ** 2;
   const tiles = (m: Model) => [
-    { label: 'mAP50-95', value: m.metrics?.map50_95, sub: 'IoU 0.50:0.95', hero: true },
-    { label: 'mAP50', value: m.metrics?.map50, sub: 'IoU 0.50', hero: false },
-    { label: 'Precision', value: m.metrics?.precision, sub: 'boxes, all classes', hero: false },
-    { label: 'Recall', value: m.metrics?.recall, sub: 'boxes, all classes', hero: false },
+    { label: 'mAP50-95', value: m.metrics?.map50_95, sub: 'IoU 0.50:0.95' },
+    { label: 'mAP50', value: m.metrics?.map50, sub: 'IoU 0.50' },
+    { label: 'Precision', value: m.metrics?.precision, sub: 'boxes, all classes' },
+    { label: 'Recall', value: m.metrics?.recall, sub: 'boxes, all classes' },
   ];
 </script>
 
@@ -109,7 +140,7 @@
 
     <div class="tiles">
       {#each tiles(m) as t (t.label)}
-        <div class="tile" class:hero={t.hero}>
+        <div class="tile">
           <span class="t-label">{t.label}</span>
           <span class="t-value num">{metric(t.value)}</span>
           <div class="t-bar" aria-hidden="true"><span style:transform="scaleX({t.value ?? 0})"></span></div>
@@ -118,7 +149,8 @@
       {/each}
     </div>
 
-    <div class="row">
+    <!-- The charts keep their own heights (the matrix scrolls and grows with notes), so neither panel gapes. -->
+    <div class="row charts">
       <Panel title="Precision–recall" meta="IoU 0.5" id="pr">
         {#if ev}
           <PrCurves classes={m.classes} {ev} map50={m.metrics?.map50 ?? null} />
@@ -130,7 +162,20 @@
       </Panel>
       <Panel title="Confusion matrix" meta={cm?.partial ? `top ${CM_MAX} of ${m.classes.length} classes` : undefined} id="cm">
         {#if cm}
-          <ConfusionMatrix classes={cm.classes} matrix={cm.matrix} label="Confusion matrix of {m.name}" sparseLabels />
+          {#if cm.partial || confused}
+            <div class="cm-notes">
+              {#if cm.partial}
+                <p>Top {CM_MAX} classes by instances; the other {m.classes.length - CM_MAX} are folded into Other.</p>
+              {/if}
+              {#if confused}
+                <p class="confused">
+                  Most confused: <b>{m.classes[confused.r]}</b> → <b>{m.classes[confused.c]}</b>
+                  <span class="num">{num(confused.v * 100, 1)} %</span>
+                </p>
+              {/if}
+            </div>
+          {/if}
+          <ConfusionMatrix classes={cm.classes} classIds={cm.ids} matrix={cm.matrix} label="Confusion matrix of {m.name}" sparseLabels minCell={32} scale />
         {:else if evaluation.error}
           <p class="foot">No evaluation available.</p>
         {:else}
@@ -142,7 +187,8 @@
     <div class="row">
       <Panel title="Per class" meta={String(m.classes.length)} pad="none" id="per-class">
         {#if ev}
-          <div class="scroll" class:tall={m.classes.length > 14}>
+          {@const rows = allClasses ? ev.perClass : ev.perClass.slice(0, PER_CLASS_MAX)}
+          <div class="scroll">
             <table class="table dense">
               <thead>
                 <tr>
@@ -155,11 +201,11 @@
                 </tr>
               </thead>
               <tbody>
-                {#each ev.perClass as c (c.class)}
+                {#each rows as c (c.class)}
                   <tr>
                     <td>
                       <span class="cls">
-                        <span class="sw" style:background={classInk(c.class)} aria-hidden="true"></span>
+                        <span class="sw" style:background={classColor(c.class)} aria-hidden="true"></span>
                         <span class="truncate">{m.classes[c.class]}</span>
                       </span>
                     </td>
@@ -173,6 +219,11 @@
               </tbody>
             </table>
           </div>
+          {#if ev.perClass.length > PER_CLASS_MAX}
+            <button type="button" class="more" aria-expanded={allClasses} onclick={() => (allClasses = !allClasses)}>
+              {allClasses ? `Show the first ${PER_CLASS_MAX}` : `Show all ${ev.perClass.length}`}
+            </button>
+          {/if}
           <p class="foot">
             Evaluated on {num(ev.images)} validation images at IoU 0.5; instances are ground-truth boxes per class.
           </p>
@@ -202,7 +253,7 @@
           <dt>Classes</dt>
           <dd class="classes">
             {#each m.classes.slice(0, 10) as c, i (i)}
-              <span class="chip"><span class="sw" style:background={classInk(i)} aria-hidden="true"></span>{c}</span>
+              <span class="chip"><span class="sw" style:background={classColor(i)} aria-hidden="true"></span>{c}</span>
             {/each}
             {#if m.classes.length > 10}<span class="faint">+{m.classes.length - 10} more</span>{/if}
           </dd>
@@ -266,9 +317,6 @@
     letter-spacing: var(--type-3xl-tracking);
     font-weight: var(--weight-semibold);
   }
-  .hero .t-value {
-    color: var(--accent-text);
-  }
   .t-bar {
     position: relative;
     height: 2px;
@@ -284,8 +332,8 @@
     background: var(--text-tertiary);
     transition: transform var(--dur-chart) var(--ease-out);
   }
-  .hero .t-bar span {
-    background: var(--accent-line);
+  .tile:first-child .t-bar span {
+    background: var(--text-primary);
   }
   .t-sub {
     font-size: var(--type-xs-size);
@@ -297,18 +345,48 @@
     gap: var(--space-4);
     align-items: stretch;
   }
+  .row.charts {
+    align-items: start;
+  }
   .scroll {
     overflow-x: auto;
   }
-  .scroll.tall {
-    max-height: 480px;
-    overflow-y: auto;
+  .more {
+    display: block;
+    width: 100%;
+    height: var(--control-lg);
+    border-top: 1px solid var(--line-subtle);
+    font-size: var(--type-sm-size);
+    font-weight: var(--weight-medium);
+    color: var(--text-secondary);
+    transition:
+      background-color var(--dur-fast) var(--ease-standard),
+      color var(--dur-fast) var(--ease-standard);
   }
-  .scroll.tall thead th {
-    position: sticky;
-    top: 0;
-    background: var(--bg-panel);
-    z-index: 1;
+  .more:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+  }
+  .more:focus-visible {
+    outline-offset: -2px;
+  }
+  .cm-notes {
+    display: grid;
+    gap: 2px;
+    margin-bottom: var(--space-3);
+    font-size: var(--type-xs-size);
+    line-height: var(--type-xs-line);
+    color: var(--text-tertiary);
+  }
+  .confused {
+    color: var(--text-secondary);
+  }
+  .confused b {
+    color: var(--text-primary);
+    font-weight: var(--weight-medium);
+  }
+  .confused .num {
+    color: var(--text-primary);
   }
   .cls {
     display: flex;
@@ -321,6 +399,9 @@
     height: 8px;
     border-radius: 2px;
     flex-shrink: 0;
+  }
+  :global([data-theme='light']) .sw {
+    box-shadow: inset 0 0 0 1px #0a0e1433;
   }
   .foot {
     margin-top: auto;
@@ -376,6 +457,11 @@
   @media (max-width: 1199px) {
     .row {
       grid-template-columns: minmax(0, 1fr);
+    }
+  }
+  @media (pointer: coarse) {
+    .more {
+      height: 44px;
     }
   }
   @media (max-width: 767px) {
