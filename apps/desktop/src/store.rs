@@ -97,12 +97,12 @@ impl RunData {
         }
     }
 
-    /// A resumed run restarts at `first` (its first new step): drop the steps from there on and
-    /// the epochs from its epoch on, which the interrupted attempt left behind (the server's
-    /// history does the same: repeated steps replace earlier ones).
-    pub fn truncate_from(&mut self, first: &Step) {
-        self.metrics.steps.retain(|s| s.step < first.step);
-        self.metrics.epochs.retain(|e| e.epoch < first.epoch);
+    /// A resumed run restarts after its last finished (validated) epoch, so steps past that epoch
+    /// may be the interrupted attempt's: keep history only up to the boundary; live steps refill
+    /// the rest. (The server's history may still list the old tail until the new one is flushed.)
+    pub fn cut_to_last_epoch(&mut self) {
+        let last = self.metrics.epochs.last().map_or(0, |e| e.epoch);
+        self.metrics.steps.retain(|s| s.epoch <= last);
         self.derived.replace(None);
     }
 
@@ -271,7 +271,7 @@ pub struct Store {
     pub log_rev: u64,
     /// Live events that arrived while a run's history was loading, merged in when it lands.
     pending: HashMap<String, Vec<RunEvent>>,
-    /// Runs resumed since their history was last fixed up: their first new step truncates it.
+    /// Runs resumed and still active: every history load is cut back to the last finished epoch.
     resumed: std::collections::HashSet<String>,
     pub images_px: ImageCache,
     /// Throughput history for the system card (GPU util samples), newest last.
@@ -321,15 +321,8 @@ impl Store {
     pub fn install_run_data(&mut self, run_id: &str, data: ApiResult<RunData>) {
         let mut load: Load<RunData> = data.into();
         if let Load::Ready(d) = &mut load {
-            // Resumed: the first step buffered since says where training restarted.
-            if self.resumed.contains(run_id)
-                && let Some(first) = self.pending.get(run_id).into_iter().flatten().find_map(|ev| match ev {
-                    RunEvent::Step(s) => Some(*s),
-                    _ => None,
-                })
-            {
-                d.truncate_from(&first);
-                self.resumed.remove(run_id);
+            if self.resumed.contains(run_id) {
+                d.cut_to_last_epoch();
             }
             for ev in self.pending.get(run_id).into_iter().flatten() {
                 match ev {
@@ -409,9 +402,6 @@ impl Store {
                     r.eta_s = Some(s.eta_s);
                 }
                 if let Some(Load::Ready(d)) = self.run_data.get_mut(run_id) {
-                    if self.resumed.remove(run_id) {
-                        d.truncate_from(&s);
-                    }
                     d.push_step(s);
                 }
             }
@@ -452,6 +442,10 @@ impl Store {
                     if !st.status.is_active() {
                         r.eta_s = None;
                     }
+                }
+                // Finished: the server's history is complete again.
+                if !st.status.is_active() {
+                    self.resumed.remove(run_id);
                 }
             }
         }
@@ -508,7 +502,7 @@ mod tests {
     }
 
     #[test]
-    fn resumed_steps_replace_the_interrupted_epoch() {
+    fn resumed_history_is_cut_to_the_last_finished_epoch() {
         // Two finished epochs of 10 steps, then 4 steps of epoch 3 before the stop.
         let loss = || crate::api::Loss { box_: 1., cls: 1., dfl: 1., total: 3. };
         let step = |n: u64| Step {
@@ -531,20 +525,27 @@ mod tests {
             },
             duration_s: 1.,
         };
-        let metrics = RunMetrics { steps: (1..=24).map(step).collect(), epochs: vec![epoch(1), epoch(2)] };
+        let stale = || RunMetrics { steps: (1..=24).map(step).collect(), epochs: vec![epoch(1), epoch(2)] };
         let mut store = Store::new(Arc::new(MockBackend::new(4200, true)));
         let id = "run_r";
-        store.run_data.insert(id.into(), Load::Ready(RunData::new(metrics, 10)));
-        store.resumed.insert(id.into());
-        // Resumed from the end of epoch 2: step 21 again.
-        store.apply(id, RunEvent::Step(step(21)));
+        store.reset_for_resume(id);
+        // The new stream missed steps 21-22; the server still lists the old 21-24.
+        store.run_data.insert(id.into(), Load::Loading);
+        store.apply(id, RunEvent::Step(step(23)));
+        store.install_run_data(id, Ok(RunData::new(stale(), 10)));
         let d = store.run_data[id].ready().unwrap();
-        assert_eq!(d.metrics.steps.last().unwrap().step, 21);
+        assert_eq!(d.metrics.steps.iter().map(|s| s.step).collect::<Vec<_>>().last(), Some(&23));
+        assert!(!d.metrics.steps.iter().any(|s| s.step == 24), "old tail kept");
         assert_eq!(d.metrics.steps.len(), 21);
-        assert_eq!(d.metrics.epochs.len(), 2);
-        // Later steps append normally (no more truncation).
-        store.apply(id, RunEvent::Step(step(22)));
-        assert_eq!(store.run_data[id].ready().unwrap().metrics.steps.len(), 22);
+        // A reconnect mid-epoch reloads the stale history again: still cut.
+        store.run_data.insert(id.into(), Load::Loading);
+        store.install_run_data(id, Ok(RunData::new(stale(), 10)));
+        assert_eq!(store.run_data[id].ready().unwrap().metrics.steps.len(), 20);
+        // Once the run ends, histories are taken as they are.
+        store.apply(id, RunEvent::Status(StatusEvent { status: RunStatus::Completed, error: None }));
+        store.run_data.insert(id.into(), Load::Loading);
+        store.install_run_data(id, Ok(RunData::new(stale(), 10)));
+        assert_eq!(store.run_data[id].ready().unwrap().metrics.steps.len(), 24);
     }
 
     #[test]

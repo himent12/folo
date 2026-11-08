@@ -445,6 +445,8 @@ pub struct FoloApp {
     subscriptions: HashMap<String, crate::api::Subscription>,
     /// Runs whose event stream is being opened (off the UI thread).
     subscribing: std::collections::HashSet<String>,
+    /// Per run: which subscription attempt is current (a resume supersedes one in flight).
+    sub_attempt: HashMap<String, u64>,
     /// Bumped on every data-source switch; async results from an older source are discarded.
     backend_gen: u64,
     /// Bumped on every connection attempt; only the latest one may install its result.
@@ -553,6 +555,7 @@ impl FoloApp {
             slider_bounds: Rc::new(RefCell::new(HashMap::new())),
             subscriptions: HashMap::new(),
             subscribing: Default::default(),
+            sub_attempt: HashMap::new(),
             backend_gen: 0,
             connect_seq: 0,
             history_tickets: HashMap::new(),
@@ -755,11 +758,15 @@ impl FoloApp {
     pub fn ensure_samples(&mut self, id: &str, cx: &mut Context<Self>) {
         if self.store.samples.get(id).is_none_or(|l| l.needs_fetch()) {
             self.store.samples.insert(id.to_string(), Load::Loading);
+            let ticket = self.history_ticket(id, "samples");
             let (rid, key, epoch) = (id.to_string(), id.to_string(), self.sample_epoch);
             self.fetch(
                 cx,
                 move |api| api.samples(&rid, epoch),
                 move |this, r, _| {
+                    if this.history_tickets.get(&(key.clone(), "samples")) != Some(&ticket) {
+                        return;
+                    }
                     this.store.samples.insert(key, r.into());
                 },
             );
@@ -902,11 +909,15 @@ impl FoloApp {
         }
         let api = self.store.api.clone();
         let generation = self.backend_gen;
+        let attempt = self.sub_attempt.get(&id).copied().unwrap_or(0);
         cx.spawn(async move |this, cx| {
             let rid = id.clone();
             let sub = cx.background_executor().spawn(async move { api.events(&rid) }).await;
             this.update(cx, |this, cx| {
-                if this.backend_gen != generation {
+                // Superseded (a new source, or the run was resumed): the newer attempt owns it.
+                if this.backend_gen != generation
+                    || this.sub_attempt.get(&id).copied().unwrap_or(0) != attempt
+                {
                     return;
                 }
                 this.subscribing.remove(&id);
@@ -1329,6 +1340,8 @@ impl FoloApp {
                     // attempt (stream, in-flight history, buffered events), then open a fresh
                     // stream; the dashboard reloads history once it is open.
                     this.subscriptions.remove(&rid);
+                    *this.sub_attempt.entry(rid.clone()).or_default() += 1;
+                    this.subscribing.remove(&rid);
                     this.store.reset_for_resume(&rid);
                     this.history_ticket(&rid, "metrics");
                     this.history_ticket(&rid, "logs");
