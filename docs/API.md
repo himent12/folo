@@ -38,7 +38,7 @@ Non-2xx responses: `{ "error": { "code": "dataset_not_found", "message": "...", 
 | 415 | `unsupported_media_type` | JSON endpoint called without `Content-Type: application/json` |
 | 422 | `invalid_body`, `image_decode_failed` | well-formed JSON with wrong types / missing required fields; an upload that is not an image |
 | 500 | `internal` | a bug or an IO failure |
-| 501 | `not_implemented` | the feature exists in the API but not yet in the engine (real mode: training, inference, export, synthetic datasets, COCO) |
+| 501 | `not_implemented` | the feature exists in the API but not yet in the engine (real mode: training, inference and export) |
 
 ## System
 - `GET /api/health` → `{ "status": "ok", "version": "0.1.0", "api": "v1", "mock": false }`
@@ -49,21 +49,46 @@ Non-2xx responses: `{ "error": { "code": "dataset_not_found", "message": "...", 
 ## Datasets
 - `GET /api/datasets` → `{ "datasets": [Dataset] }` (oldest first, without `stats`)
 - `POST /api/datasets` body `{ "name"?, "path", "format": "auto|yolo|coco" }` → `201 Dataset` with `stats`.
-  Registers a folder on disk; `name` defaults to the folder name, `format` to `auto`. YOLO folders are read from
-  `data.yaml` (`path`, `train`, `val`, `test`, `names`) or `images/{train,val,test}` + `labels/…`. Errors:
-  `path_not_found`, `unknown_format`, `invalid_dataset`, `not_implemented` (COCO for now). Without `names` / `nc`,
-  classes are named `class0..` up to the largest label index; indices of 4096 or more count as broken labels.
+  Registers a dataset on disk: a folder, a `data.yaml` or a COCO instances `.json` (relative paths are resolved
+  against the server's working directory and stored absolute in `path`); `name` defaults to the folder name,
+  `format` to `auto`. Datasets are read with folo-data, exactly as for training (formats and detection rules:
+  `docs/DATA.md`): YOLO from `data.yaml` (`path`, `train`, `val`, `test`, `names`; a YAML with only `names` uses the
+  folder layout) or `images/{train,val,test}` + `labels/…`; COCO from `annotations/instances_*.json` (Roboflow
+  layouts too). Corrupt or missing images and images with broken labels are left out (`stats.broken_labels` counts
+  the latter; `folo dataset check` lists them all). Without `names` / `nc`, classes are named `class0..` up to the
+  largest label index. Errors: `path_not_found`, `unknown_format` (nothing there looks like a dataset),
+  `invalid_dataset` (malformed `data.yaml` / JSON, `nc` disagreeing with `names`, more than 4096 classes). The
+  request returns once the dataset is indexed (every image header is read, in parallel).
 - `POST /api/datasets/synthetic` body `{ "name", "images": 1000, "classes": ["circle","square","triangle"], "imgsz": 640, "seed": 0 }`
-  → `201 Dataset` with `stats`. Only `name` is required. Images are split 80 / 20 into train / val.
+  → `201 Dataset` with `stats`. Only `name` is required. Generates square JPEG images (folo-data's shapes
+  generator, deterministic in `images`, `classes`, `imgsz` and `seed`) into `<data dir>/datasets/<name>` (the name
+  lowercased to `a-z0-9-`, with `-2`, `-3`, ... when taken) and registers them. Images are split 80 / 20 into
+  train / val. `classes`: 1 to 8 distinct names; `circle`, `square`, `triangle`, `star`, `ring`, `cross`,
+  `hexagon` and `heart` get that shape, every other name the next shape no name has claimed. `400 invalid_body`
+  when `name` is blank, `images` is outside `1..=100000`, `imgsz` outside `32..=4096`, or `classes` breaks those
+  rules (the message says which).
 - `GET /api/datasets/{id}` → `Dataset` with `stats`
 - `GET /api/datasets/{id}/images?split=train|val|test&offset=0&limit=100&class=<id>` →
   `{ "total", "images": [{ "id", "file", "split", "width", "height", "boxes": [Box] }] }`.
   Every parameter is optional: no `split` means all splits; `limit` defaults to 100 and is capped at 1000; `class`
   keeps images with at least one box of that class. `total` counts all matches before `offset` / `limit`. `file` is
-  relative to the dataset root.
+  relative to the dataset root (the registered folder, or the root folo-data resolves from it: a `data.yaml`'s
+  `path:`, the folder above `annotations/`), absolute for images outside it. Image ids are the position in the dataset (train, then val, then test, each
+  in path order): stable while the files do not change.
+- `GET /api/datasets/{id}/issues?kind=<kind>&offset=0&limit=100` →
+  `{ "total", "issues": [{ "kind", "severity": "error|warning|info", "file", "line": null | 1.., "message" }] }`:
+  what `folo dataset check` finds in the dataset (the same objects as its `--json` `issues`, without `fix`; kinds
+  and severities are listed in docs/CLI.md), in dataset order. Computed together with the stats and cached with
+  them (re-computed when the files change); in real mode image headers are read but images are not fully decoded
+  (`folo dataset check` without `--headers-only` also catches truncated image data). `kind` keeps one kind
+  (`broken_label`, `class_overflow`, `out_of_range_box`, `clipped_box`, `zero_size_box`, `duplicate_label`,
+  `corrupt_image`, `missing_image`, `duplicate_image`, `empty_image`, `other`; anything else is `400
+  invalid_query`); `limit` defaults to 100 and is capped at 1000; `total` counts all matches before `offset` /
+  `limit`. `file` is relative to the dataset root like image files (and exactly as `folo dataset check --json` names it). Issues of images the loader skipped
+  name files that `/images` does not list.
 - `GET /api/datasets/{id}/images/{image_id}` → original image bytes (`Content-Type` from the file); `?thumb=256`
-  returns a JPEG whose long side is 256 (clamped to 16..2048, never upscaled). Mock images are immutable and sent
-  with a long `Cache-Control`.
+  returns a JPEG whose long side is 256 (clamped to 16..2048, never upscaled; EXIF orientation applied, so boxes
+  line up). Mock images are immutable and sent with a long `Cache-Control`; real ones with `no-cache`.
 - `DELETE /api/datasets/{id}` → `204` (unregisters; never deletes files)
 
 ```jsonc
@@ -190,12 +215,37 @@ Non-2xx responses: `{ "error": { "code": "dataset_not_found", "message": "...", 
   answers each with the same JSON as `/api/predict` (for webcam / screen demos). Later milestone; answers
   `501 not_implemented` for now.
 
+## Real mode
+`folo serve` without `--mock` keeps its state in the data dir (`--data-dir`, default `$FOLO_HOME` or `~/.folo`):
+- `datasets.json`: the registry (`id`, `name`, `path`, `format`, `created`, and a snapshot of `classes` and
+  `splits`), rewritten atomically (temporary file + rename) on every change, so registrations survive restarts.
+  A malformed registry is never overwritten: registering and unregistering fail with `500 internal` until it is
+  fixed.
+- `cache/datasets/<id>.json`: each dataset's index (images, sizes, boxes, stats, issues) plus a fingerprint of the files it
+  was built from (relative path, size and modification time of every file under the dataset folder and under
+  everything outside it that folo-data read: split folders and image lists a `data.yaml` points to, folders of
+  every candidate image and label, also skipped ones, and split paths or a `path:` that do not exist yet; the data dir's own `cache/` and
+  `datasets.json` are left out, so a data dir inside a dataset folder does not invalidate it). On start the
+  registry is listed immediately and every dataset is checked on a background thread: a fresh cache is loaded, a
+  stale or missing one rebuilt; requests for a dataset that is still being indexed wait for it. While running,
+  `GET /api/datasets/{id}` and image listings re-check the fingerprint at most every 5 s and re-index when files
+  were added, removed or edited. Datasets whose folder no longer exists are left out of the list (but stay in the
+  registry).
+- `cache/thumbs/<id>/`: thumbnails, keyed by the image's path, size, modification time and the requested side.
+- `datasets/<name>/`: synthetic datasets. `DELETE /api/datasets/{id}` removes the dataset's caches, never its files.
+
+Models, runs and inference are not wired to the engine yet: `/api/models` and `/api/runs` are empty, `POST
+/api/runs` and `POST /api/predict` answer `501 not_implemented` (after checking that the dataset exists).
+
 ## Mock mode
 `folo serve --mock` answers every endpoint with deterministic, realistic data (the same ids and values on every
 start, except live-run timestamps):
 - Datasets: `ds_5a1e` **shapes-1k** (circle / square / triangle, 640², 800 / 200), `ds_7c2f` **traffic-cams** (car /
   truck / bus / person / bicycle, 1280×720, 1900 / 400 / 100, 3 broken labels), `ds_3b9d` **r6-operators** (body /
   Head, 1920×1080, 700 / 160). Images are rendered procedurally on request; their boxes match the labels exactly.
+  `/issues` is consistent with the stats: one error per broken label file (`broken_label`, `class_overflow` or
+  `out_of_range_box`, for the 3 of traffic-cams), an `empty_image` per image without boxes, and a few
+  deterministic `clipped_box` / `duplicate_image` warnings.
 - Models: six (`m_31aa`, `m_31ab`, `m_42c1`, `m_42c2`, `m_53d1`, `m_53d2`), each linked to its run, with
   deterministic `/eval` results consistent with its metrics (smooth PR curves, a mostly diagonal confusion matrix).
 - Runs: four completed, one stopped (`run_2b02`), one failed with an out-of-memory error (`run_2b03`), all with full

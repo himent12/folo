@@ -488,6 +488,7 @@ async fn sse_finished_run_and_errors() {
 
 #[tokio::test]
 async fn real_store_disk_dataset_and_not_implemented() {
+    // More real-store dataset tests: tests/real_datasets.rs.
     let root = std::env::temp_dir().join(format!("folo-real-store-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     let ds_dir = root.join("ds");
@@ -526,13 +527,6 @@ async fn real_store_disk_dataset_and_not_implemented() {
     let p = json!({ "model_id": "m_1", "dataset_id": ds.id, "image_id": "0" });
     let e = err(&app, post_json("/api/predict", p), StatusCode::NOT_IMPLEMENTED, "not_implemented").await;
     assert!(e.hint.is_some());
-    err(
-        &app,
-        post_json("/api/datasets/synthetic", json!({ "name": "s" })),
-        StatusCode::NOT_IMPLEMENTED,
-        "not_implemented",
-    )
-    .await;
     let runs: RunList = ok(&app, get("/api/runs")).await;
     assert!(runs.runs.is_empty());
     let models: ModelList = ok(&app, get("/api/models")).await;
@@ -760,6 +754,7 @@ async fn datasets_without_classes_cannot_train() {
     let dir = std::env::temp_dir().join(format!("folo-empty-ds-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("images")).unwrap();
+    std::fs::create_dir_all(dir.join("labels")).unwrap();
     let (server, _) = mock();
     let app = server.router();
     let ds: Dataset = ok(&app, post_json("/api/datasets", json!({ "path": dir.to_str().unwrap() }))).await;
@@ -780,6 +775,7 @@ async fn malformed_registry_is_never_overwritten() {
     let root = std::env::temp_dir().join(format!("folo-bad-registry-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(root.join("ds/images")).unwrap();
+    std::fs::create_dir_all(root.join("ds/labels")).unwrap();
     std::fs::write(root.join("datasets.json"), "{ not json").unwrap();
     let app = Server::new(Arc::new(RealStore::open(root.clone())), Options::default()).router();
     let body = json!({ "path": root.join("ds").to_str().unwrap() });

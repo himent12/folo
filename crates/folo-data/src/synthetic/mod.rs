@@ -55,6 +55,9 @@ pub struct SyntheticConfig {
     pub val_fraction: f32,
     /// Sensor grain amplitude in 8-bit levels.
     pub grain: f32,
+    /// Display names written to `data.yaml` and returned by [`Dataset::class_names`], one per entry of `classes`
+    /// (empty: the shape names themselves). [`shapes_for`] picks shapes for arbitrary names.
+    pub names: Vec<String>,
 }
 
 impl Default for SyntheticConfig {
@@ -73,6 +76,7 @@ impl Default for SyntheticConfig {
             vary_aspect: true,
             val_fraction: 0.2,
             grain: 5.0,
+            names: Vec::new(),
         }
     }
 }
@@ -114,7 +118,22 @@ impl SyntheticConfig {
             }
             kinds.push(k);
         }
+        if !self.names.is_empty() {
+            if self.names.len() != self.classes.len() {
+                return Err(DataError::Config(format!(
+                    "{} names for {} classes",
+                    self.names.len(),
+                    self.classes.len()
+                )));
+            }
+            check_names(&self.names)?;
+        }
         Ok(kinds)
+    }
+
+    /// The class names of the dataset: `names`, or the shape names when it is empty.
+    pub fn class_names(&self) -> &[String] {
+        if self.names.is_empty() { &self.classes } else { &self.names }
     }
 
     /// Number of training images; the rest are validation.
@@ -131,6 +150,55 @@ impl SyntheticConfig {
             Split::Test => self.images..self.images,
         }
     }
+}
+
+fn check_names(names: &[impl AsRef<str>]) -> Result<()> {
+    for (i, n) in names.iter().enumerate() {
+        let n = n.as_ref();
+        if n.trim().is_empty() {
+            return Err(DataError::Config("class names must not be empty".into()));
+        }
+        if names[..i].iter().any(|m| m.as_ref() == n) {
+            return Err(DataError::Config(format!("class {n:?} is listed twice")));
+        }
+    }
+    Ok(())
+}
+
+/// Shapes for arbitrary class names, for [`SyntheticConfig::classes`] (with the names in
+/// [`SyntheticConfig::names`]): a name that is a shape (any case) gets that shape, every other name the first shape
+/// in [`SHAPES`] order that no name has claimed. At most `SHAPES.len()` distinct, non-empty names.
+pub fn shapes_for(names: &[impl AsRef<str>]) -> Result<Vec<String>> {
+    if names.is_empty() {
+        return Err(DataError::Config("synthetic dataset needs at least one class".into()));
+    }
+    if names.len() > SHAPES.len() {
+        return Err(DataError::Config(format!(
+            "a synthetic dataset has at most {} classes (one per shape), got {}",
+            SHAPES.len(),
+            names.len()
+        )));
+    }
+    check_names(names)?;
+    let shape_of = |n: &str| SHAPES.iter().position(|s| s.eq_ignore_ascii_case(n.trim()));
+    let mut taken = [false; SHAPES.len()];
+    for k in names.iter().filter_map(|n| shape_of(n.as_ref())) {
+        if taken[k] {
+            return Err(DataError::Config(format!("two classes name the shape {:?}", SHAPES[k])));
+        }
+        taken[k] = true;
+    }
+    Ok(names
+        .iter()
+        .map(|n| {
+            let k = shape_of(n.as_ref()).unwrap_or_else(|| {
+                let k = taken.iter().position(|t| !t).expect("at most SHAPES.len() names");
+                taken[k] = true;
+                k
+            });
+            SHAPES[k].to_string()
+        })
+        .collect())
 }
 
 struct Object {
@@ -383,7 +451,7 @@ impl Dataset for SyntheticDataset {
     }
 
     fn class_names(&self) -> &[String] {
-        &self.cfg.classes
+        self.cfg.class_names()
     }
 
     fn split(&self) -> Split {
@@ -411,6 +479,18 @@ pub struct WrittenDataset {
 /// Writes a YOLO-format dataset to `dir`: `images/{train,val}/NNNNNN.jpg|png`, `labels/{train,val}/NNNNNN.txt` and
 /// a `data.yaml` with the class names. Images are rendered and encoded in parallel; output is deterministic.
 pub fn write_yolo(cfg: &SyntheticConfig, dir: &Path, format: ImageFormat) -> Result<WrittenDataset> {
+    write_yolo_with_progress(cfg, dir, format, |_| {})
+}
+
+/// [`write_yolo`] that calls `progress(done)` after each image is written. Calls come from worker threads and
+/// `done` counts up to `cfg.images`.
+pub fn write_yolo_with_progress(
+    cfg: &SyntheticConfig,
+    dir: &Path,
+    format: ImageFormat,
+    progress: impl Fn(usize) + Sync,
+) -> Result<WrittenDataset> {
+    let done = std::sync::atomic::AtomicUsize::new(0);
     let kinds = cfg.kinds()?;
     for split in ["train", "val"] {
         for kind in ["images", "labels"] {
@@ -434,6 +514,7 @@ pub fn write_yolo(cfg: &SyntheticConfig, dir: &Path, format: ImageFormat) -> Res
             }
             let lbl = dir.join("labels").join(split).join(format!("{name}.txt"));
             std::fs::write(&lbl, text).map_err(|e| DataError::io(&lbl, e))?;
+            progress(done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1);
             Ok(s.boxes.len())
         })
         .collect::<Result<_>>()?;
@@ -441,8 +522,9 @@ pub fn write_yolo(cfg: &SyntheticConfig, dir: &Path, format: ImageFormat) -> Res
         "# FOLO synthetic shapes dataset: {} images, seed {}, imgsz {}\ntrain: images/train\nval: images/val\nnames:\n",
         cfg.images, cfg.seed, cfg.imgsz
     );
-    for (i, c) in cfg.classes.iter().enumerate() {
-        yaml.push_str(&format!("  {i}: {c}\n"));
+    for (i, c) in cfg.class_names().iter().enumerate() {
+        // JSON strings are valid YAML double-quoted scalars, so any name reads back unchanged.
+        yaml.push_str(&format!("  {i}: {}\n", serde_json::to_string(c).expect("strings serialize")));
     }
     let yaml_path = dir.join("data.yaml");
     std::fs::write(&yaml_path, yaml).map_err(|e| DataError::io(&yaml_path, e))?;

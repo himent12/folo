@@ -53,9 +53,6 @@ fn stubs_exit_4_with_error_envelope() {
         &["predict", "--model", "m.folo", "a.jpg", "--json"],
         &["export", "--model", "m.folo", "--json"],
         &["bench", "--json"],
-        &["dataset", "check", "d", "--json"],
-        &["dataset", "stats", "d", "--json"],
-        &["dataset", "synth", "s", "--json"],
         &["mcp", "--json"],
     ] {
         let (code, stdout, stderr) = folo(args);

@@ -13,6 +13,7 @@
 //! - **Loading** ([`DataLoader`]): worker threads decode and augment ahead; batches are identical for a given seed
 //!   and epoch whatever the number of workers.
 //! - **Synthetic data** ([`synthetic`]): procedural shapes datasets for tests, demos and benchmarks.
+//! - **Tools** ([`check`], [`convert`]): line-level dataset validation and YOLO / COCO conversion.
 //!
 //! See `docs/DATA.md` for formats, augmentation parameters and the determinism rules.
 //!
@@ -50,12 +51,15 @@
 
 pub mod augment;
 mod bbox;
+pub mod check;
+pub mod convert;
 pub mod dataset;
 mod error;
 mod image;
 mod letterbox;
 mod loader;
 pub mod par;
+pub mod paths;
 pub mod resize;
 mod rng;
 mod stats;
@@ -66,7 +70,7 @@ pub use augment::{AugmentConfig, TrainTransform, Transformed};
 pub use bbox::BBox;
 pub use dataset::{
     Dataset, FileDataset, Format, ImageEntry, InMemoryDataset, Issue, IssueKind, LoadReport, LoadedDataset,
-    OpenOptions, Split, label_path_for, open, open_with,
+    OpenOptions, Split, UNDETECTED, detect_format, label_path_for, open, open_with,
 };
 pub use error::{DataError, Result};
 pub use image::{

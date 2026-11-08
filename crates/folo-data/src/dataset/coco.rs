@@ -175,8 +175,10 @@ pub(crate) fn open_jsons(
     let remap: HashMap<u64, u32> = categories.keys().enumerate().map(|(i, &id)| (id, i as u32)).collect();
     let classes: Vec<String> = categories.into_values().collect();
 
+    let mut deps: std::collections::BTreeSet<PathBuf> = std::iter::once(root.to_path_buf()).collect();
     let mut by_split: BTreeMap<Split, Vec<Candidate>> = BTreeMap::new();
     for p in parsed {
+        deps.insert(p.path.clone());
         let base = image_base(root, &p);
         let mut per_image: HashMap<&str, ImageAnns> = HashMap::new();
         let known: HashMap<&str, ()> = p.images.iter().map(|(id, _, _)| (id.as_str(), ())).collect();
@@ -209,8 +211,10 @@ pub(crate) fn open_jsons(
         let list = by_split.entry(p.split).or_default();
         for (id, file, declared) in &p.images {
             let (boxes, broken) = per_image.remove(id.as_str()).unwrap_or_default();
+            let image = base.join(file);
+            deps.extend(image.parent().map(Path::to_path_buf));
             list.push(Candidate {
-                image: base.join(file),
+                image,
                 labels: LabelSource::Coco { boxes, declared: *declared, broken, label: p.path.clone() },
             });
         }
@@ -222,7 +226,17 @@ pub(crate) fn open_jsons(
     }
     let mut take = |s: Split| FileDataset::new(s, classes.clone(), built.remove(&s).unwrap_or_default());
     let (train, val, test) = (take(Split::Train), take(Split::Val), take(Split::Test));
-    Ok(LoadedDataset { format: Format::Coco, root: root.to_path_buf(), classes, train, val, test, report })
+    let sources = deps.into_iter().collect();
+    Ok(LoadedDataset {
+        format: Format::Coco,
+        root: root.to_path_buf(),
+        classes,
+        train,
+        val,
+        test,
+        report,
+        sources,
+    })
 }
 
 /// Picks the folder the JSON's `file_name`s are relative to by probing a few images.

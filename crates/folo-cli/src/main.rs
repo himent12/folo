@@ -1,6 +1,7 @@
 //! The `folo` command-line tool. See `docs/CLI.md`.
 
 mod cli;
+mod dataset;
 mod describe;
 mod output;
 
@@ -11,7 +12,7 @@ use clap::{CommandFactory, Parser};
 use folo_server::{Cors, MockStore, Options, RealStore, Server, Store, WebSource};
 use serde_json::json;
 
-use cli::{Cli, Command, DatasetCommand, DoctorArgs, ServeArgs};
+use cli::{Cli, Command, DoctorArgs, ServeArgs};
 use output::{CliError, ExitCode, Out};
 
 /// `folo --version`: the workspace version, the commit and the build date (see build.rs).
@@ -85,9 +86,7 @@ fn run(cli: Cli, out: Out) -> Result<(), CliError> {
         Command::Predict(_) => Err(not_implemented("predict", "the predictor (folo-vision)")),
         Command::Export(_) => Err(not_implemented("export", "weight export (folo-nn / folo-vision)")),
         Command::Bench(_) => Err(not_implemented("bench", "the engine")),
-        Command::Dataset(DatasetCommand::Check(_)) => Err(not_implemented("dataset check", "folo-data")),
-        Command::Dataset(DatasetCommand::Stats(_)) => Err(not_implemented("dataset stats", "folo-data")),
-        Command::Dataset(DatasetCommand::Synth(_)) => Err(not_implemented("dataset synth", "folo-data")),
+        Command::Dataset(cmd) => dataset::run(cmd, out),
         Command::Mcp(_) => Err(not_implemented("mcp", "the MCP server")),
     }
 }

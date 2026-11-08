@@ -11,8 +11,9 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use folo_api::{
-    API_VERSION, DatasetList, ExportRequest, Health, ImagePage, LogLevel, LogLine, ModelList, PredictRequest,
-    RegisterDataset, RunEvent, RunList, RunLogs, Split, SyntheticDataset, SystemInfo, TrainConfig,
+    API_VERSION, DatasetList, ExportRequest, Health, ImagePage, IssuePage, LogLevel, LogLine, ModelList,
+    PredictRequest, RegisterDataset, RunEvent, RunList, RunLogs, Split, SyntheticDataset, SystemInfo,
+    TrainConfig,
 };
 use futures_util::{Stream, StreamExt, stream};
 use serde::Deserialize;
@@ -21,7 +22,7 @@ use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 use crate::AppState;
 use crate::error::{ApiJson, ApiPath, ApiQuery, Error, Result};
-use crate::store::{ImageQuery, PredictInput, PredictSource, Store};
+use crate::store::{ImageQuery, IssueQuery, PredictInput, PredictSource, Store};
 use crate::util::{rfc3339, unix_now};
 
 /// Largest accepted request body for `POST /api/predict` uploads.
@@ -42,6 +43,7 @@ pub fn api() -> Router<AppState> {
         .route("/datasets/synthetic", post(create_synthetic))
         .route("/datasets/{id}", get(get_dataset).delete(delete_dataset))
         .route("/datasets/{id}/images", get(list_images))
+        .route("/datasets/{id}/issues", get(list_issues))
         .route("/datasets/{id}/images/{image_id}", get(image))
         .route("/models", get(list_models))
         .route("/models/{id}", get(get_model))
@@ -131,7 +133,7 @@ async fn create_synthetic(
 }
 
 async fn get_dataset(State(st): State<AppState>, ApiPath(id): ApiPath<String>) -> Result<Response> {
-    Ok(Json(st.store.get_dataset(&id)?).into_response())
+    Ok(Json(blocking(&st, move |s| s.get_dataset(&id)).await?).into_response())
 }
 
 async fn delete_dataset(State(st): State<AppState>, ApiPath(id): ApiPath<String>) -> Result<StatusCode> {
@@ -160,6 +162,34 @@ async fn list_images(
         class: p.class,
     };
     Ok(Json(blocking(&st, move |s| s.list_images(&id, &q)).await?))
+}
+
+#[derive(Deserialize)]
+struct IssuesParams {
+    kind: Option<String>,
+    #[serde(default)]
+    offset: u64,
+    limit: Option<u64>,
+}
+
+async fn list_issues(
+    State(st): State<AppState>,
+    ApiPath(id): ApiPath<String>,
+    ApiQuery(p): ApiQuery<IssuesParams>,
+) -> Result<Json<IssuePage>> {
+    if let Some(k) = &p.kind
+        && !folo_api::ISSUE_KINDS.contains(&k.as_str())
+    {
+        return Err(Error::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_query",
+            format!("unknown issue kind '{k}'"),
+        )
+        .hint(format!("kind is one of {}", folo_api::ISSUE_KINDS.join(", "))));
+    }
+    let q =
+        IssueQuery { kind: p.kind, offset: p.offset, limit: p.limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT) };
+    Ok(Json(blocking(&st, move |s| s.list_issues(&id, &q)).await?))
 }
 
 #[derive(Deserialize)]

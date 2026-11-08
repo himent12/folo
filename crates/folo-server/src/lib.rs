@@ -1,14 +1,15 @@
 //! FOLO Studio server: HTTP + SSE API for datasets, training runs and inference.
 //!
 //! Implements the contract in `docs/API.md` on axum. Handlers sit on a [`Store`]: [`MockStore`] serves deterministic
-//! synthetic data (`folo serve --mock`), [`RealStore`] serves datasets from disk and answers `501 not_implemented`
-//! for training and inference until the engine is wired in. The request / response types live in the `folo-api`
+//! synthetic data (`folo serve --mock`), [`RealStore`] serves datasets from disk (read with folo-data, indexed and
+//! cached under the data dir) and answers `501 not_implemented` for training and inference until the engine is wired
+//! in. The request / response types live in the `folo-api`
 //! crate (re-exported as [`api`]) so the CLI and FOLO Desktop share them.
 //!
 //! See `docs/ARCHITECTURE.md` for how this crate fits into FOLO.
 
-mod disk;
 pub mod error;
+mod index;
 pub mod mock;
 mod raster;
 pub mod real;

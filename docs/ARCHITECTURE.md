@@ -97,7 +97,8 @@ training and evaluation pipeline, a server, a CLI and a web studio.
 
 ## folo-data — data pipeline
 - Formats: YOLO txt (`images/` + `labels/`, `data.yaml`), COCO JSON; auto-detected. Dataset statistics (class counts,
-  box-size distribution, empty images, broken labels) for Studio and `folo dataset check`.
+  box-size distribution, empty images, broken labels) for Studio and `folo dataset stats`; a line-level checker
+  (`check`) for `folo dataset check` and YOLO / COCO conversion (`convert`).
 - Image IO through `image` / `zune-jpeg`, decoded straight to `u8` RGB. Letterbox resize with exact box remapping.
 - Augmentation (all box-aware, seeded): mosaic (4-image), random affine (scale / translate / shear / rotate), HSV
   jitter, horizontal flip, mixup, copy-paste later. Closing-mosaic for the last N epochs.
@@ -132,11 +133,12 @@ The exact block definitions, layer tables, parameter names, head, loss, training
 
 ## folo-server and folo-cli
 - `folo-server` (axum + tokio) implements `docs/API.md`: datasets, models, training runs with live SSE metrics, and
-  inference. Handlers sit on a `Store` trait (`MockStore` for `--mock`, `RealStore` for the engine). The request and
+  inference. Handlers sit on a `Store` trait (`MockStore` for `--mock`, `RealStore` for the engine; its datasets
+  are read with folo-data and indexed into a JSON cache under the data dir, invalidated by file mtimes). The request and
   response types live in `folo-api`, a dependency-light crate (serde only) that FOLO Desktop reuses. `folo serve` runs it and serves the built Studio from `web/dist`, or from the copy compiled into the binary by
   the `embed-web` feature (release builds, see `docs/RELEASING.md`). `folo serve --mock` serves realistic
   synthetic data for UI work before or without a trained model.
-- `folo` CLI (`docs/CLI.md`): `train`, `val`, `predict`, `export`, `bench`, `dataset check|stats|synth`, `serve`,
+- `folo` CLI (`docs/CLI.md`): `train`, `val`, `predict`, `export`, `bench`, `dataset check|stats|synth|convert`, `serve`,
   `mcp` (Model Context Protocol server over stdio so agents can train and run models), `doctor`. Every command takes
   `--json` (one JSON object per line on stdout, human text on stderr) and uses stable exit codes.
 
