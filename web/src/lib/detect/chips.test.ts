@@ -43,4 +43,17 @@ describe('placeChips', () => {
     expect(ps[0]!.hidden).toBe(false);
     expect(ps.some((p) => p!.hidden)).toBe(true);
   });
+
+  it('moves a chip below its box rather than over a neighbouring box', () => {
+    // A small box right below a tall neighbour: its chip would sit on the neighbour, so it goes under its own box.
+    const ps = placeChips(
+      [
+        { x: 60, y: 10, w: 40, bw: 30, bh: 40 },
+        { x: 30, y: 52, w: 60, bw: 20, bh: 20 },
+      ],
+      { minX: 4, maxX: 196, minY: 2, maxY: 198 },
+    );
+    expect(ps[1]!.dy).toBe(20 + 1);
+    expect(ps[1]!.hidden).toBe(false);
+  });
 });

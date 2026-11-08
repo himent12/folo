@@ -258,11 +258,11 @@
     <div class="title">
       {#if img}
         <span class="file mono truncate" title={img.file}>{stem(img.file)}</span>
-        <span class="split">{img.split}</span>
+        <span class="split" title="Split">{img.split} split</span>
       {:else}
         <span class="file faint">Loading…</span>
       {/if}
-      {#if idx >= 0}<span class="pos num" aria-label="Image {num(idx + 1)} of {num(total)}">{num(idx + 1)} <i>/</i> {num(total)}</span>{/if}
+      {#if idx >= 0}<span class="pos num" aria-label="Image {num(idx + 1)} of {num(total)}">{num(idx + 1)} <i>of</i> {num(total)}</span>{/if}
     </div>
     <div class="tools">
       <div class="head-zoom">{@render zoomTools()}</div>

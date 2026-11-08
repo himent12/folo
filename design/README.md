@@ -89,8 +89,8 @@ hues hold on light surfaces. Only thin strokes (1-2 px curves) on light surfaces
   images alike. Optional fill at `fill_opacity` on hover/selection.
 - Selected box: 3 px `accent.solid` stroke inside the halo, drawn (with its chip) above everything; the other boxes
   drop to 30 % opacity. Lists of the same boxes mark the selected row with a 2 px accent bar.
-- Small views (< 480 px): chips 14 px high with 10 px text; boxes under 20 px on screen show their label only on
-  hover or selection.
+- Small views (< 480 px): chips 14 px high with 10 px text. At any size, boxes under 20 px on screen show their label
+  only on hover or selection.
 - Label chip: class colour fill, `chip_text` (near black) text, `xs` medium, radius `xs`, sitting on the box's top-left
   corner outside the box (inside when it would leave the image). Score in tabular Geist after the name.
 
