@@ -175,7 +175,7 @@ pub struct NewRunForm {
     pub error: Option<ApiError>,
 }
 
-pub const ARCHS: [&str; 5] = ["folo-n", "folo-s", "folo-m", "folo-l", "folo-x"];
+pub const ARCHS: [Arch; 5] = Arch::ALL;
 pub const BATCHES: [u32; 7] = [2, 4, 8, 16, 32, 64, 128];
 
 /// The offered batch size closest to `v` without exceeding it (the smallest if `v` is below all).
@@ -200,7 +200,7 @@ pub fn carry_over(base: Option<&TrainConfig>, mut c: TrainConfig) -> TrainConfig
 }
 pub const IMGSZ: [u32; 5] = [320, 480, 640, 800, 1024];
 pub const DEVICES: [&str; 3] = ["auto", "gpu:0", "cpu"];
-pub const OPTIMIZERS: [&str; 3] = ["auto", "sgd", "adamw"];
+pub const OPTIMIZERS: [Optimizer; 3] = [Optimizer::Auto, Optimizer::Sgd, Optimizer::Adamw];
 
 pub struct PlayImage {
     pub name: SharedString,
@@ -285,7 +285,7 @@ pub struct FoloApp {
     pub play_conf: f32,
     pub play_iou: f32,
     pub play_image: Option<PlayImage>,
-    pub play_pred: Load<Prediction>,
+    pub play_pred: Load<PredictResponse>,
     pub play_hover: Option<usize>,
     pub play_drop_hover: bool,
     /// Stage zoom (1 = fit) and pan in px, like the inspector.
@@ -979,12 +979,12 @@ impl FoloApp {
             TrainConfig {
                 name,
                 dataset_id: ds.id.clone(),
-                arch: ARCHS[form.arch].into(),
+                arch: ARCHS[form.arch],
                 epochs: form.epochs.round() as u32,
                 batch: BATCHES[form.batch],
                 imgsz: IMGSZ[form.imgsz],
                 device: DEVICES[form.device].into(),
-                optimizer: OPTIMIZERS[form.optimizer].into(),
+                optimizer: OPTIMIZERS[form.optimizer],
                 lr0: form.lr0,
                 weights: None,
                 augment: Augment {
@@ -2025,12 +2025,12 @@ mod retry_tests {
         let base = TrainConfig {
             name: "a".into(),
             dataset_id: "ds".into(),
-            arch: "folo-s".into(),
+            arch: crate::api::Arch::S,
             epochs: 50,
             batch: 8,
             imgsz: 640,
             device: "auto".into(),
-            optimizer: "auto".into(),
+            optimizer: crate::api::Optimizer::Auto,
             lr0: 0.01,
             weights: Some("runs/a/best.folo".into()),
             augment: Augment { hsv: [0.1, 0.2, 0.3], translate: 0.25, ..Augment::default() },

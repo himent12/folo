@@ -13,7 +13,7 @@ use gpui::{
     Styled, Svg, div, px, relative, svg,
 };
 
-use crate::api::RunStatus;
+use crate::api::{Label, RunStatus};
 use crate::theme::{Theme, TypeStep, radius, ty};
 
 static REDUCE_MOTION: AtomicBool = AtomicBool::new(false);

@@ -73,26 +73,6 @@ pub struct PredictRequest {
     pub max_det: u32,
 }
 
-/// Per-class precision–recall curve sampled at fixed recall points.
-#[derive(Clone, Debug, PartialEq)]
-pub struct PrCurve {
-    pub class: u32,
-    pub recall: Vec<f32>,
-    pub precision: Vec<f32>,
-    pub ap50: f32,
-}
-
-/// Validation-set evaluation of a model. Not in API v1 yet (proposed as
-/// `GET /api/models/{id}/eval`); backends without it return `not_supported`.
-#[derive(Clone, Debug, PartialEq)]
-pub struct ModelEval {
-    pub pr: Vec<PrCurve>,
-    /// `confusion[truth][pred]`, with a trailing "background" row and column.
-    pub confusion: Vec<Vec<u32>>,
-    pub per_class: Vec<ClassMetrics>,
-    pub images: u32,
-}
-
 pub trait Backend: Send + Sync + 'static {
     /// Where the data comes from, for the status bar ("Mock data", "127.0.0.1:7878").
     fn describe(&self) -> String;
@@ -116,13 +96,13 @@ pub trait Backend: Send + Sync + 'static {
     fn run(&self, id: &str) -> ApiResult<Run>;
     fn create_run(&self, config: TrainConfig) -> ApiResult<Run>;
     fn stop_run(&self, id: &str) -> ApiResult<Run>;
-    fn metrics(&self, id: &str) -> ApiResult<Metrics>;
-    fn samples(&self, id: &str, epoch: Option<u32>) -> ApiResult<Samples>;
+    fn metrics(&self, id: &str) -> ApiResult<RunMetrics>;
+    fn samples(&self, id: &str, epoch: Option<u32>) -> ApiResult<RunSamples>;
     /// Log history of a run. Not in API v1 yet (proposed as `GET /api/runs/{id}/logs`); the SSE
     /// stream only carries new lines.
     fn logs(&self, id: &str) -> ApiResult<Vec<LogLine>>;
     /// Live events for a run; the stream ends when the receiver is dropped or the run finishes.
     fn events(&self, id: &str) -> ApiResult<Receiver<RunEvent>>;
 
-    fn predict(&self, req: &PredictRequest) -> ApiResult<Prediction>;
+    fn predict(&self, req: &PredictRequest) -> ApiResult<PredictResponse>;
 }

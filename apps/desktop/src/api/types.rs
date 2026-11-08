@@ -1,241 +1,23 @@
-//! Wire types for `docs/API.md` (v1).
+//! Wire types for `docs/API.md`: the shared `folo-api` crate, plus small client-side helpers.
 //!
-//! A complete mirror of the contract; a few items (the error body, SSE parsing) are only used by
-//! the HTTP client.
-#![allow(dead_code)]
-//!
-//! Interim copy until the shared API types crate lands on main; field names and shapes follow the
-//! contract exactly so the swap is mechanical.
+//! The desktop app uses the same serde types as `folo-server`, so a contract change is a compile
+//! error here rather than a runtime surprise.
 
-use serde::{Deserialize, Serialize};
+pub use folo_api::{
+    Arch, Augment, BBox, BestEpoch, ClassMetrics, CpuInfo, Dataset, DatasetFormat, DatasetStats, Epoch,
+    ExportResult, GpuBackend, GpuInfo, Health, Histogram, ImageInfo, ImagePage, ImageSize, LogLevel, LogLine,
+    Loss, MemoryInfo, Model, ModelEval, ModelMetrics, Optimizer, PrCurve, PredictResponse, Run, RunEvent,
+    RunMetrics, RunSamples, RunStatus, Sample, ScoredBox, Split, Splits, StatusEvent, Step, SystemInfo,
+    Timing, TrainConfig, ValMetrics,
+};
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct ApiErrorBody {
-    pub code: String,
-    pub message: String,
-    #[serde(default)]
-    pub hint: Option<String>,
+/// Display helpers for wire enums.
+pub trait Label {
+    fn label(&self) -> &'static str;
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct Health {
-    pub status: String,
-    pub version: String,
-    #[serde(default)]
-    pub mock: bool,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct Cpu {
-    pub name: String,
-    pub threads: u32,
-    pub util: f32,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct Memory {
-    pub used_bytes: u64,
-    pub total_bytes: u64,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct Gpu {
-    pub ordinal: u32,
-    pub name: String,
-    pub backend: String,
-    pub memory_bytes: u64,
-    #[serde(default)]
-    pub util: Option<f32>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct SystemInfo {
-    pub cpu: Cpu,
-    pub memory: Memory,
-    pub gpus: Vec<Gpu>,
-}
-
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "lowercase")]
-pub enum Split {
-    Train,
-    Val,
-    Test,
-}
-
-impl Split {
-    pub fn label(self) -> &'static str {
-        match self {
-            Split::Train => "train",
-            Split::Val => "val",
-            Split::Test => "test",
-        }
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct Splits {
-    pub train: u32,
-    pub val: u32,
-    pub test: u32,
-}
-
-impl Splits {
-    pub fn total(&self) -> u32 {
-        self.train + self.val + self.test
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct Hist {
-    pub edges: Vec<f32>,
-    pub counts: Vec<u32>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct DatasetStats {
-    pub boxes: u32,
-    pub empty_images: u32,
-    pub broken_labels: u32,
-    pub class_counts: Vec<u32>,
-    pub box_size_hist: Hist,
-    pub boxes_per_image_hist: Hist,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct Dataset {
-    pub id: String,
-    pub name: String,
-    pub path: String,
-    pub format: String,
-    pub classes: Vec<String>,
-    pub created: String,
-    pub splits: Splits,
-    #[serde(default)]
-    pub stats: Option<DatasetStats>,
-}
-
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
-pub struct LabelBox {
-    pub class: u32,
-    pub x1: f32,
-    pub y1: f32,
-    pub x2: f32,
-    pub y2: f32,
-}
-
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
-pub struct ScoredBox {
-    pub class: u32,
-    pub score: f32,
-    pub x1: f32,
-    pub y1: f32,
-    pub x2: f32,
-    pub y2: f32,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct ImageMeta {
-    pub id: String,
-    pub file: String,
-    pub split: Split,
-    pub width: u32,
-    pub height: u32,
-    pub boxes: Vec<LabelBox>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct ImagePage {
-    pub total: u32,
-    pub images: Vec<ImageMeta>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct ModelMetrics {
-    pub map50: f32,
-    pub map50_95: f32,
-    pub precision: f32,
-    pub recall: f32,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct Model {
-    pub id: String,
-    pub name: String,
-    pub arch: String,
-    pub imgsz: u32,
-    pub classes: Vec<String>,
-    pub params: u64,
-    pub flops_g: f32,
-    pub bytes: u64,
-    pub created: String,
-    #[serde(default)]
-    pub run_id: Option<String>,
-    #[serde(default)]
-    pub metrics: Option<ModelMetrics>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct ExportResult {
-    pub path: String,
-    pub bytes: u64,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct Augment {
-    pub mosaic: f32,
-    pub mixup: f32,
-    pub hsv: [f32; 3],
-    pub fliplr: f32,
-    pub scale: f32,
-    pub translate: f32,
-    pub close_mosaic: u32,
-}
-
-impl Default for Augment {
-    fn default() -> Self {
-        Self {
-            mosaic: 1.0,
-            mixup: 0.0,
-            hsv: [0.015, 0.7, 0.4],
-            fliplr: 0.5,
-            scale: 0.5,
-            translate: 0.1,
-            close_mosaic: 10,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct TrainConfig {
-    pub name: String,
-    pub dataset_id: String,
-    pub arch: String,
-    pub epochs: u32,
-    pub batch: u32,
-    pub imgsz: u32,
-    pub device: String,
-    pub optimizer: String,
-    pub lr0: f32,
-    #[serde(default)]
-    pub weights: Option<String>,
-    pub augment: Augment,
-    pub seed: u64,
-}
-
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "lowercase")]
-pub enum RunStatus {
-    Queued,
-    Running,
-    Stopping,
-    Stopped,
-    Completed,
-    Failed,
-}
-
-impl RunStatus {
-    pub fn label(self) -> &'static str {
+impl Label for RunStatus {
+    fn label(&self) -> &'static str {
         match self {
             RunStatus::Queued => "Queued",
             RunStatus::Running => "Running",
@@ -245,198 +27,65 @@ impl RunStatus {
             RunStatus::Failed => "Failed",
         }
     }
+}
 
-    pub fn is_active(self) -> bool {
-        matches!(self, RunStatus::Queued | RunStatus::Running | RunStatus::Stopping)
+impl Label for Split {
+    fn label(&self) -> &'static str {
+        self.as_str()
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct Best {
-    pub epoch: u32,
-    pub map50_95: f32,
+impl Label for DatasetFormat {
+    fn label(&self) -> &'static str {
+        match self {
+            DatasetFormat::Auto => "Auto",
+            DatasetFormat::Yolo => "YOLO",
+            DatasetFormat::Coco => "COCO",
+        }
+    }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct Run {
-    pub id: String,
-    pub name: String,
-    pub status: RunStatus,
-    pub config: TrainConfig,
-    pub created: String,
-    #[serde(default)]
-    pub started: Option<String>,
-    #[serde(default)]
-    pub finished: Option<String>,
-    pub epoch: u32,
-    pub epochs: u32,
-    pub step: u32,
-    pub steps_per_epoch: u32,
-    #[serde(default)]
-    pub eta_s: Option<f64>,
-    #[serde(default)]
-    pub best: Option<Best>,
-    pub device: String,
-    #[serde(default)]
-    pub model_id: Option<String>,
-    #[serde(default)]
-    pub error: Option<String>,
+impl Label for GpuBackend {
+    fn label(&self) -> &'static str {
+        match self {
+            GpuBackend::Vulkan => "Vulkan",
+            GpuBackend::Dx12 => "DX12",
+            GpuBackend::Metal => "Metal",
+        }
+    }
 }
 
-impl Run {
+impl Label for Optimizer {
+    fn label(&self) -> &'static str {
+        match self {
+            Optimizer::Auto => "auto",
+            Optimizer::Sgd => "sgd",
+            Optimizer::Adamw => "adamw",
+        }
+    }
+}
+
+/// Derived values of a run.
+pub trait RunExt {
     /// Fraction of all training steps done, 0..=1.
-    pub fn progress(&self) -> f32 {
-        let total = (self.epochs * self.steps_per_epoch).max(1);
-        (self.step as f32 / total as f32).clamp(0.0, 1.0)
+    fn progress(&self) -> f32;
+}
+
+impl RunExt for Run {
+    fn progress(&self) -> f32 {
+        let total = (self.epochs as u64 * self.steps_per_epoch).max(1);
+        (self.step as f64 / total as f64).clamp(0.0, 1.0) as f32
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Default)]
-pub struct Loss {
-    #[serde(rename = "box")]
-    pub box_: f32,
-    pub cls: f32,
-    pub dfl: f32,
-    pub total: f32,
+pub trait SplitsExt {
+    fn total(&self) -> u64;
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct Step {
-    pub epoch: u32,
-    pub step: u32,
-    pub lr: f32,
-    pub loss: Loss,
-    pub imgs_per_s: f32,
-    #[serde(default)]
-    pub eta_s: Option<f64>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct ClassMetrics {
-    pub class: u32,
-    pub map50: f32,
-    pub map50_95: f32,
-    pub precision: f32,
-    pub recall: f32,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct ValMetrics {
-    pub map50: f32,
-    pub map50_95: f32,
-    pub precision: f32,
-    pub recall: f32,
-    #[serde(default)]
-    pub per_class: Vec<ClassMetrics>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct Epoch {
-    pub epoch: u32,
-    pub train_loss: Loss,
-    pub val: ValMetrics,
-    pub duration_s: f32,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
-pub struct Metrics {
-    pub steps: Vec<Step>,
-    pub epochs: Vec<Epoch>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct Sample {
-    pub image_id: String,
-    pub dataset_id: String,
-    pub width: u32,
-    pub height: u32,
-    pub truth: Vec<LabelBox>,
-    pub pred: Vec<ScoredBox>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct Samples {
-    pub epoch: u32,
-    pub samples: Vec<Sample>,
-}
-
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum LogLevel {
-    Debug,
-    Info,
-    Warn,
-    Error,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct LogLine {
-    pub t: String,
-    pub level: LogLevel,
-    pub message: String,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct StatusEvent {
-    pub status: RunStatus,
-    #[serde(default)]
-    pub error: Option<String>,
-}
-
-/// One SSE event from `GET /api/runs/{id}/events`, keyed by its `event:` name.
-#[derive(Clone, Debug, PartialEq)]
-pub enum RunEvent {
-    Status(StatusEvent),
-    Step(Step),
-    Epoch(Epoch),
-    Log(LogLine),
-}
-
-impl RunEvent {
-    /// Parse one SSE event from its name and `data:` payload.
-    pub fn parse(event: &str, data: &str) -> Option<Self> {
-        Some(match event {
-            "status" => RunEvent::Status(serde_json::from_str(data).ok()?),
-            "step" => RunEvent::Step(serde_json::from_str(data).ok()?),
-            "epoch" => RunEvent::Epoch(serde_json::from_str(data).ok()?),
-            "log" => RunEvent::Log(serde_json::from_str(data).ok()?),
-            _ => return None,
-        })
+impl SplitsExt for Splits {
+    fn total(&self) -> u64 {
+        self.train + self.val + self.test
     }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct DetBox {
-    pub class: u32,
-    pub name: String,
-    pub score: f32,
-    pub x1: f32,
-    pub y1: f32,
-    pub x2: f32,
-    pub y2: f32,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct ImageSize {
-    pub width: u32,
-    pub height: u32,
-}
-
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Default)]
-pub struct Timing {
-    pub preprocess_ms: f32,
-    pub inference_ms: f32,
-    pub postprocess_ms: f32,
-    pub total_ms: f32,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct Prediction {
-    pub model_id: String,
-    pub image: ImageSize,
-    pub boxes: Vec<DetBox>,
-    pub timing: Timing,
-    pub device: String,
 }
 
 #[cfg(test)]
@@ -458,6 +107,7 @@ mod tests {
         assert_eq!(run.status, RunStatus::Running);
         assert_eq!(run.best.as_ref().unwrap().epoch, 11);
         assert!((run.progress() - 340.0 / 5000.0).abs() < 1e-6);
+        assert_eq!(run.status.label(), "Running");
     }
 
     #[test]
@@ -465,14 +115,10 @@ mod tests {
         let step = r#"{ "epoch": 12, "step": 340, "lr": 0.0098,
           "loss": { "box": 1.21, "cls": 0.83, "dfl": 1.02, "total": 3.06 },
           "imgs_per_s": 412.5, "eta_s": 1840 }"#;
-        match RunEvent::parse("step", step) {
-            Some(RunEvent::Step(s)) => assert_eq!(s.loss.box_, 1.21),
+        match RunEvent::from_sse("step", step) {
+            Some(Ok(RunEvent::Step(s))) => assert_eq!(s.loss.box_, 1.21),
             other => panic!("unexpected {other:?}"),
         }
-        assert!(matches!(
-            RunEvent::parse("status", r#"{ "status": "completed", "error": null }"#),
-            Some(RunEvent::Status(StatusEvent { status: RunStatus::Completed, .. }))
-        ));
-        assert_eq!(RunEvent::parse("nope", "{}"), None);
+        assert!(RunEvent::from_sse("nope", "{}").is_none());
     }
 }

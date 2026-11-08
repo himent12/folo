@@ -275,7 +275,7 @@ impl FoloApp {
         label: impl Into<SharedString>,
         on: bool,
         swatch_color: Option<Hsla>,
-        count: Option<u32>,
+        count: Option<u64>,
         window: &Window,
         cx: &mut Context<Self>,
         action: Action,
@@ -303,7 +303,7 @@ impl FoloApp {
                     .whitespace_nowrap()
                     .child(label.into()),
             )
-            .when_some(count, |d, c| d.child(text(ty::XS, t.text_tertiary).tnum().child(int(c as u64))));
+            .when_some(count, |d, c| d.child(text(ty::XS, t.text_tertiary).tnum().child(int(c))));
         self.bind(el, key, radius::SM, window, cx, action)
     }
 

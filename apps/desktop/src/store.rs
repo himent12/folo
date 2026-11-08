@@ -4,6 +4,8 @@ use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
+#[allow(unused_imports)]
+use crate::api::{Label, RunExt, SplitsExt};
 use gpui::RenderImage;
 
 use crate::api::*;
@@ -75,15 +77,14 @@ pub struct Derived {
 }
 
 /// A run's full metric history, extended live by SSE events.
-#[derive(Default)]
 pub struct RunData {
-    pub metrics: Metrics,
-    pub spe: u32,
+    pub metrics: RunMetrics,
+    pub spe: u64,
     derived: RefCell<Option<Derived>>,
 }
 
 impl RunData {
-    pub fn new(metrics: Metrics, spe: u32) -> Self {
+    pub fn new(metrics: RunMetrics, spe: u64) -> Self {
         Self { metrics, spe: spe.max(1), derived: RefCell::new(None) }
     }
 
@@ -230,12 +231,12 @@ pub struct Store {
     pub datasets: Load<Vec<Dataset>>,
     pub dataset: HashMap<String, Load<Dataset>>,
     /// All image metadata of a dataset (cheap: boxes only), for filtering and the grid.
-    pub images: HashMap<String, Load<Vec<ImageMeta>>>,
+    pub images: HashMap<String, Load<Vec<ImageInfo>>>,
     pub models: Load<Vec<Model>>,
     pub evals: HashMap<String, Load<ModelEval>>,
     pub runs: Load<Vec<Run>>,
     pub run_data: HashMap<String, Load<RunData>>,
-    pub samples: HashMap<String, Load<Samples>>,
+    pub samples: HashMap<String, Load<RunSamples>>,
     pub logs: HashMap<String, Load<Vec<LogLine>>>,
     /// Live events that arrived while a run's history was loading, merged in when it lands.
     pending: HashMap<String, Vec<RunEvent>>,
@@ -287,7 +288,7 @@ impl Store {
         if let Load::Ready(d) = &mut load {
             for ev in self.pending.get(run_id).into_iter().flatten() {
                 match ev {
-                    RunEvent::Step(s) => d.push_step(s.clone()),
+                    RunEvent::Step(s) => d.push_step(*s),
                     RunEvent::Epoch(e) => d.push_epoch(e.clone()),
                     _ => {}
                 }
@@ -344,7 +345,7 @@ impl Store {
                 {
                     r.step = s.step;
                     r.epoch = s.epoch.min(r.epochs);
-                    r.eta_s = s.eta_s;
+                    r.eta_s = Some(s.eta_s);
                 }
                 if let Some(Load::Ready(d)) = self.run_data.get_mut(run_id) {
                     d.push_step(s);
@@ -355,7 +356,7 @@ impl Store {
                     && let Some(r) = runs.iter_mut().find(|r| r.id == run_id)
                     && r.best.as_ref().is_none_or(|b| e.val.map50_95 > b.map50_95)
                 {
-                    r.best = Some(Best { epoch: e.epoch, map50_95: e.val.map50_95 });
+                    r.best = Some(BestEpoch { epoch: e.epoch, map50_95: e.val.map50_95 });
                 }
                 if let Some(Load::Ready(d)) = self.run_data.get_mut(run_id) {
                     d.push_epoch(e);
@@ -406,14 +407,14 @@ mod tests {
         let id = "run_a19f";
         store.run_data.insert(id.into(), Load::Ready(RunData::new(api.metrics(id).unwrap(), 100)));
         let before = store.run_data[id].ready().unwrap().derived().loss[3].len();
-        let mut next = api.metrics(id).unwrap().steps.last().unwrap().clone();
+        let mut next = *api.metrics(id).unwrap().steps.last().unwrap();
         next.step += 1;
         store.apply(id, RunEvent::Step(next));
         let d = store.run_data[id].ready().unwrap().derived();
         assert_eq!(d.loss[3].len(), before + 1);
         assert_eq!(store.run(id).unwrap().step, 4201);
         // Stale or duplicate steps are ignored.
-        let mut stale = api.metrics(id).unwrap().steps[10].clone();
+        let mut stale = api.metrics(id).unwrap().steps[10];
         stale.step = 5;
         store.apply(id, RunEvent::Step(stale));
         assert_eq!(store.run_data[id].ready().unwrap().derived().loss[3].len(), before + 1);
@@ -430,9 +431,9 @@ mod tests {
         store.run_data.insert(id.into(), Load::Loading);
         store.logs.insert(id.into(), Load::Loading);
         let history = api.metrics(id).unwrap();
-        let mut late = history.steps.last().unwrap().clone();
+        let mut late = *history.steps.last().unwrap();
         late.step += 1;
-        store.apply(id, RunEvent::Step(late.clone()));
+        store.apply(id, RunEvent::Step(late));
         let line =
             LogLine { t: "2026-11-08T07:30:00Z".into(), level: LogLevel::Info, message: "late".into() };
         store.apply(id, RunEvent::Log(line.clone()));
@@ -444,7 +445,7 @@ mod tests {
         // Duplicates of events already in the snapshot are ignored.
         let mut store2 = Store::new(Arc::new(MockBackend::new(4200, true)));
         store2.run_data.insert(id.into(), Load::Loading);
-        store2.apply(id, RunEvent::Step(history.steps[100].clone()));
+        store2.apply(id, RunEvent::Step(history.steps[100]));
         store2.install_run_data(id, Ok(RunData::new(history.clone(), 100)));
         assert_eq!(store2.run_data[id].ready().unwrap().metrics.steps.len(), history.steps.len());
     }

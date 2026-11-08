@@ -10,7 +10,7 @@ use gpui::{
 };
 
 use super::*;
-use crate::api::{Prediction, Split};
+use crate::api::{PredictResponse, Split};
 use crate::app::{FoloApp, act};
 use crate::controls::Btn;
 use crate::store::{ImgKind, Load};
@@ -20,7 +20,7 @@ use crate::viz::{DrawBox, Fit, hit_box, paint_image_with_boxes, to_image};
 
 impl FoloApp {
     /// Boxes of the current prediction that pass the confidence threshold.
-    fn visible_boxes(&self, p: &Prediction, active: Option<usize>) -> Vec<DrawBox> {
+    fn visible_boxes(&self, p: &PredictResponse, active: Option<usize>) -> Vec<DrawBox> {
         p.boxes
             .iter()
             .filter(|b| b.score >= self.play_conf)
@@ -367,7 +367,7 @@ impl FoloApp {
                         SharedString::from(m.name.clone()),
                         m.metrics
                             .as_ref()
-                            .map(|x| SharedString::from(format!("{} · {:.3}", m.arch, x.map50_95))),
+                            .map(|x| SharedString::from(format!("{} · {:.3}", m.arch.as_str(), x.map50_95))),
                     )
                 })
                 .collect(),
@@ -442,7 +442,7 @@ impl FoloApp {
         let mut timing: Option<AnyElement> = None;
         let detections = match &self.play_pred {
             Load::Ready(p) => {
-                let vis: Vec<crate::api::DetBox> =
+                let vis: Vec<crate::api::ScoredBox> =
                     p.boxes.iter().filter(|b| b.score >= self.play_conf).cloned().collect();
                 let rows: Vec<AnyElement> = vis
                     .iter()
@@ -497,7 +497,7 @@ impl FoloApp {
                     .collect();
                 let hidden = p.boxes.len() - vis.len();
                 let total = p.timing.total_ms.max(0.001);
-                let seg = |v: f32, c| div().h_full().w(relative(v / total)).bg(c);
+                let seg = |v: f64, c| div().h_full().w(relative((v / total) as f32)).bg(c);
                 let timing_el = div()
                     .flex()
                     .flex_col()
@@ -594,7 +594,7 @@ impl FoloApp {
         let mut thumbs: Vec<AnyElement> = Vec::new();
         if let Some(ds_id) = ds_id.clone() {
             self.ensure_dataset(&ds_id, cx);
-            let samples: Vec<crate::api::ImageMeta> = self
+            let samples: Vec<crate::api::ImageInfo> = self
                 .store
                 .images
                 .get(&ds_id)

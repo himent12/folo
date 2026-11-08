@@ -14,32 +14,14 @@ use gpui::{
     Window, canvas, div, px,
 };
 
-use crate::api::{ApiError, ImageMeta};
+use crate::api::{ApiError, ImageInfo};
+pub use crate::api::{Label, RunExt, SplitsExt};
 use crate::app::{FoloApp, act};
 use crate::controls::Btn;
 use crate::store::ImgKind;
 use crate::theme::{Theme, theme, ty};
 use crate::ui::*;
 use crate::viz::{DrawBox, Fit, paint_image_with_boxes};
-
-/// Display names for dataset formats ("YOLO", "COCO").
-pub fn format_label(f: &str) -> String {
-    match f {
-        "yolo" => "YOLO".into(),
-        "coco" => "COCO".into(),
-        other => other.to_string(),
-    }
-}
-
-/// Display names for GPU backends, in one casing everywhere ("Vulkan", "DX12", "Metal").
-pub fn backend_label(b: &str) -> String {
-    match b {
-        "vulkan" => "Vulkan".into(),
-        "dx12" => "DX12".into(),
-        "metal" => "Metal".into(),
-        other => other.to_string(),
-    }
-}
 
 /// Title, one line of context, and actions on the right.
 pub fn page_header(
@@ -71,7 +53,7 @@ impl FoloApp {
     pub fn tile(
         &mut self,
         dataset: &str,
-        meta: &ImageMeta,
+        meta: &ImageInfo,
         boxes: bool,
         fit: Fit,
         cx: &mut Context<Self>,

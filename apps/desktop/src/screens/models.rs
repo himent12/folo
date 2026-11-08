@@ -70,7 +70,7 @@ impl FoloApp {
                     .iter()
                     .enumerate()
                     .map(|(i, m)| {
-                        let metrics = m.metrics.clone();
+                        let metrics = m.metrics;
                         let (p, pu) = count_si(m.params);
                         let (b, bu) = bytes(m.bytes);
                         let run = m.run_id.as_ref().and_then(|r| self.store.run(r)).map_or("imported".to_string(), |r| format!("from {}", r.name));
@@ -95,7 +95,7 @@ impl FoloApp {
                                 }
                             }))
                             .child(cell2(&t, m.name.clone(), run).flex_1())
-                            .child(div().w(px(110.)).flex().child(badge(&t, format!("{} · {}", m.arch, m.imgsz), Tone::Neutral)))
+                            .child(div().w(px(110.)).flex().child(badge(&t, format!("{} · {}", m.arch.as_str(), m.imgsz), Tone::Neutral)))
                             .child(div().w(px(130.)).child(metrics.as_ref().map_or(text(ty::SM, t.text_tertiary).child("–"), |mm| bar_value(&t, mm.map50_95, f3(mm.map50_95), t.text_tertiary))))
                             .child(text(ty::SM, t.text_secondary).tnum().w(px(64.)).text_right().child(metrics.as_ref().map_or("–".into(), |mm| f3(mm.map50))))
                             .child(text(ty::SM, t.text_secondary).tnum().w(px(72.)).text_right().child(format!("{p} {pu}")))
@@ -157,7 +157,7 @@ impl FoloApp {
             .items_center()
             .gap(px(10.))
             .child(text(ty::XL, t.text_primary).child(m.name.clone()))
-            .child(badge(&t, m.arch.clone(), Tone::Neutral));
+            .child(badge(&t, m.arch.as_str(), Tone::Neutral));
         let mut subtitle =
             div().flex().items_center().gap(px(6.)).child(text(ty::BASE, t.text_secondary).child(format!(
                 "{} px · {} classes · created {created}",
@@ -196,7 +196,7 @@ impl FoloApp {
             .child(div().flex().flex_col().gap(px(4.)).min_w_0().child(title).child(subtitle))
             .child(div().flex().gap(px(8.)).child(export_btn).child(try_btn));
 
-        let mm = m.metrics.clone();
+        let mm = m.metrics;
         let tile = |content: gpui::Div| div().flex_1().min_w_0().px(px(16.)).py(px(14.)).child(content);
         let (p, pu) = count_si(m.params);
         let (b, bu) = bytes(m.bytes);

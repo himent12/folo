@@ -142,7 +142,7 @@ impl FoloApp {
             .get(&r.id)
             .and_then(|l| l.ready())
             .map(|d| (d.derived(), d.last_step().cloned(), d.last_epoch().cloned()));
-        let best = r.best.clone();
+        let best = r.best;
         let (charts, ips, map_now) = match data {
             Some((d, step, epoch)) => {
                 let hover = self.chart_hover;
@@ -236,9 +236,10 @@ impl FoloApp {
                                     .child(text(ty::LG, t.text_primary).truncate().child(r.name.clone())),
                             )
                             .child(
-                                text(ty::SM, t.text_tertiary)
-                                    .truncate()
-                                    .child(format!("{ds} · {} · {device} · {started}", r.config.arch)),
+                                text(ty::SM, t.text_tertiary).truncate().child(format!(
+                                    "{ds} · {} · {device} · {started}",
+                                    r.config.arch.as_str()
+                                )),
                             ),
                     )
                     .child(open),
@@ -419,11 +420,7 @@ impl FoloApp {
                                                 .truncate()
                                                 .child(g.name.replace("NVIDIA GeForce ", "")),
                                         )
-                                        .child(badge(
-                                            &t,
-                                            crate::screens::backend_label(&g.backend),
-                                            Tone::Neutral,
-                                        )),
+                                        .child(badge(&t, g.backend.label(), Tone::Neutral)),
                                 )
                                 .child(metric(&t, format!("{:.0}", util * 100.), "%", ty::X3XL, ty::LG))
                                 .child(
@@ -613,7 +610,10 @@ impl FoloApp {
                                 r.status,
                                 &format!("ov-{}", r.id),
                             )))
-                            .child(cell2(&t, r.name.clone(), format!("{ds} · {}", r.config.arch)).flex_1())
+                            .child(
+                                cell2(&t, r.name.clone(), format!("{ds} · {}", r.config.arch.as_str()))
+                                    .flex_1(),
+                            )
                             .child(right)
                             .child(text(ty::XS, t.text_tertiary).w(px(72.)).text_right().child(when));
                         self.bind(
@@ -679,7 +679,7 @@ impl FoloApp {
                                 cell2(
                                     &t,
                                     m.name.clone(),
-                                    format!("{} · {}px · {p} {pu} params", m.arch, m.imgsz),
+                                    format!("{} · {}px · {p} {pu} params", m.arch.as_str(), m.imgsz),
                                 )
                                 .flex_1(),
                             )
@@ -748,7 +748,7 @@ impl FoloApp {
     ) -> AnyElement {
         let t = theme(cx);
         self.ensure_dataset(&d.id, cx);
-        let metas: Vec<crate::api::ImageMeta> = self
+        let metas: Vec<crate::api::ImageInfo> = self
             .store
             .images
             .get(&d.id)
@@ -804,9 +804,9 @@ impl FoloApp {
                     .child(cell2(
                         &t,
                         d.name.clone(),
-                        format!("{} images · {} classes", int(d.splits.total() as u64), d.classes.len()),
+                        format!("{} images · {} classes", int(d.splits.total()), d.classes.len()),
                     ))
-                    .child(badge(&t, crate::screens::format_label(&d.format), Tone::Neutral)),
+                    .child(badge(&t, d.format.label(), Tone::Neutral)),
             );
         self.bind(
             card,
