@@ -31,6 +31,8 @@ Lines: 1 hierarchy & layout · 2 typography · 3 colour & theming · 4 spacing r
 | r9 | Claude Opus 5.5 (81 of 151 shots seen) | 8 | 8 | 7.5 | 8 | 8.5 | 8 | 8.5 | 8 | 8 | 7.5 | 8 | 8 | 7.5 |
 | r10 | GPT-6.1 Sol | 8.5 | 8.5 | 8.5 | 9 | 8.5 | 8 | 8.5 | 8.5 | 9 | 8.5 | 8 | 8.5 | 8 |
 | r10 | Claude Opus 5.5 (82 of 172 shots seen) | 8.5 | 8 | 8.5 | 8 | 8.5 | 8.5 | 8.5 | 8 | 8.5 | 8.5 | 8 | 8.5 | 8 |
+| r12 | GPT-6.1 Sol | 8.5 | 8.5 | 9 | 9 | 8.5 | 8.5 | 8 | 8.5 | 8.5 | 8.5 | 8 | 8.5 | 8 |
+| r12 | Claude Opus 5.5 (all 184 via contact sheets) | 8 | 8.5 | 8.5 | 8.5 | 8.5 | 8.5 | 8.5 | 8.5 | 8.5 | 8.5 | 8 | 8.5 | 8 |
 
 ## Per-line minimum (lower of the two reviewers)
 
@@ -49,6 +51,7 @@ Rounds with one reviewer are marked; their minimum is that reviewer's row.
 | r8 (Sol only) | 8 | 8 | 8 | 8.5 | 8 | 7 | 7.5 | 8 | 8.5 | 8 | 8 | 8 | 7 |
 | r9 | 8 | 8 | 7.5 | 8 | 8 | 7.5 | 7.5 | 8 | 8 | 7.5 | 7 | 7.5 | 7 |
 | r10 | 8.5 ↑ | 8 | 8.5 ↑ | 8 | 8.5 ↑ | 8 ↑ | 8.5 ↑ | 8 | 8.5 | 8.5 ↑ | 8 ↑ | 8.5 ↑ | 8 |
+| r12 | 8 ↓ | 8.5 ↑ | 8.5 | 8.5 ↑ | 8.5 | 8.5 ↑ | 8 ↓ | 8.5 ↑ | 8.5 | 8.5 | 8 | 8.5 | 8 |
 
 r4 lowest lines: 6 data visualisation (5.5), 2 typography, 3 colour, 8 consistency (6). Diagnosis: 2, 3 and 8 are
 structural (no single rule for mono vs sans, class colours that changed between legend and box, two accents in light),
@@ -63,3 +66,9 @@ r10: no line below 8 from either reviewer for the first time (min 8, up from 7).
 left: phone-width loose ends (truncated names, the long phone model page, row heights), drift between screens (two
 run-list patterns, four device names, desktop banners vs phone callouts) and type sizes off the scale. Rounds 11–12
 take these as system rules where possible (one end-label placement, one ETA formatter, status marks by shape).
+
+r11 was not reviewed separately (its fixes shipped with r12's screenshots). r12: the first round where Opus saw every
+screenshot (four-up contact sheets, 46 images). Lines 2, 4, 6, 8 rose to 8.5; 1 and 7 dropped half a point on
+issues the r12 shots expose rather than regressions in code: the 1024 px tier collapsing to phone patterns (Model
+rail, New run summary, run KPI select) and mobile model choice without guidance. Both name the same weakest areas:
+the laptop tier, mobile Compare and the mobile confusion matrix.
