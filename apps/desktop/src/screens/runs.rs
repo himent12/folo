@@ -741,16 +741,25 @@ impl FoloApp {
         let mut it = tiles.into_iter().peekable();
         let mut first = true;
         while it.peek().is_some() {
-            let mut row = div().flex();
+            // Full width, so the two-column span below has a width to take a fraction of.
+            let mut row = div().w_full().flex();
             if !first {
                 row = row.border_t_1().border_color(t.line_subtle);
             }
+            let wrapped = !first;
             first = false;
             for (i, c) in it.by_ref().take(per_row).enumerate() {
                 if i > 0 {
                     row = row.child(vline(&t));
                 }
-                row = row.child(tile(c));
+                // On a 3-column grid: the second row's first tile spans two columns, so its
+                // divider lines up with the first row's second one.
+                row = row.child(if wrapped && per_row == 3 && i == 0 {
+                    // (flex_1's 0 basis would win over a width: set the basis itself.)
+                    tile(c).flex_none().flex_basis(gpui::relative(2. / 3.))
+                } else {
+                    tile(c)
+                });
             }
             rows.push(row);
         }

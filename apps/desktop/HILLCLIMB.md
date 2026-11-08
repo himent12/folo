@@ -887,3 +887,57 @@ Round 24 changes:
   - A shorter stop dialog.
 - **Cleanup:** dead leftovers removed (`chart_block`, `let _ =` placeholders); the disabled-button comment now matches its behaviour.
 - **Review brief:** the selection colour is now a settled decision.
+
+## Round 24
+
+| Line | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | avg |
+|------|---|---|---|---|---|---|---|---|---|----|----|----|-----|
+| Opus 5.5 | 9 | 9 | 8 | 8 | 8 | 8 | 8 | 8 | 9 | 9 | 8 | 8 | 8.3 |
+| GPT-6.1 Sol | 8 | 9 | 8 | 9 | 8 | 8 | 8 | 9 | 8 | 8 | 8 | 8 | 8.3 |
+
+Both reviewers are at 8.3 with seven lines at 9 between them. Opus found a real bug: `alpha()` replaces a translucent token's alpha, so the toast peek edge (`line.default` at alpha 1) drew opaque white. Other items:
+- Pages and breadcrumbs disagreed on the narrow gutter.
+- Chart legends were outdented 6 px from their titles.
+- The false-positive row set the top of the error ramp.
+- 24 px progress stubs.
+- Misaligned KPI-wrap dividers.
+- Uneven short log ticks (8 4 1 0.25).
+- Missing end dots (mAP50, recall).
+- A contradictory empty Playground.
+- Overview's legend placed unlike the run screen's.
+
+Sol asked for:
+- grayscale-safe series (mAP50 dashed);
+- surface-safe confidence bars in light mode;
+- hover on the selected segment;
+- help where short windows drop helper rows;
+- "last validated" for stopped and failed runs;
+- a keyboard caption on the PR panel;
+- a shorter compact hero.
+
+Sol's dimmed-outline opacity (0.55) contradicts design/README's 30 % rule, so the brief now lists it as settled. Grid-tile chips stay as they are: an earlier round asked for class names on grid boxes.
+
+Round 25 changes:
+- **`theme::fade`** scales a token's own alpha; the toast edge uses it.
+- **Gutter:** one `gutter()` (16 / 24) for every page, the dataset detail, Playground and the breadcrumbs.
+- **Charts:**
+  - Run chart legends start at 16 px, under their titles.
+  - Log axes raise their top to the next power on the tick stride (`pow2_top`), so steps stay even: 16 4 1 0.25.
+  - mAP50 is dashed (charts and legends) and gets an end dot.
+  - Near end dots both show (only a dot within 3 px of another is dropped).
+- **Confusion matrix:** the false-positive row is off the error ramp, on its own neutral ramp, 8 px below. The key's max is now the largest class-to-class confusion. The n/a cell is plain text.
+- **Overview:**
+  - Progress shows the number only where a bar would be under 48 px.
+  - The hero legend is a left-aligned row under its title (skeleton too).
+  - The short-window hero is lower (76 px plot, 12 px padding).
+- **Run page:**
+  - The KPI wrap is on a 3-column grid: Throughput spans two columns, so the dividers line up.
+  - The mAP KPI reads "last validated" for stopped and failed runs.
+- **Playground:**
+  - The empty state's headline, body and button agree; the drop zone is dashed only when a drop works.
+  - Confidence bars use `class_stroke`.
+- **Controls:**
+  - Selected segments get a hover tint.
+  - Short windows keep Batch size and Device help as icons.
+- **PR panel:** the caption shows keys while the chart or a class row has keyboard focus.
+- **Empty Overview cards:** 16 px padding.
