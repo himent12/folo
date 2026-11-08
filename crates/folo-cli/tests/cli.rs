@@ -46,6 +46,32 @@ fn doctor_json() {
 }
 
 #[test]
+fn doctor_reports_folo_wasm_in_the_web_dir() {
+    let dir = std::env::temp_dir().join(format!("folo-doctor-wasm-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("folo-wasm")).unwrap();
+    std::fs::write(dir.join("index.html"), "<!doctype html>").unwrap();
+    let report = || {
+        let (code, stdout, stderr) = folo(&["doctor", "--json", "--web-dir", dir.to_str().unwrap()]);
+        assert_eq!(code, 0, "{stderr}");
+        (json_lines(&stdout).remove(0), stderr)
+    };
+    let (v, stderr) = report();
+    assert_eq!(v["web_source"], "dir", "--web-dir wins over an embedded Studio");
+    assert_eq!(v["web_dist"]["folo_wasm"], false);
+    assert_eq!(v["web_folo_wasm"], false);
+    assert!(v["web_embedded"]["folo_wasm"].is_boolean());
+    assert!(stderr.contains("no folo-wasm"), "{stderr}");
+
+    std::fs::write(dir.join("folo-wasm/folo_wasm.js"), "").unwrap();
+    std::fs::write(dir.join("folo-wasm/folo_wasm_bg.wasm"), "").unwrap();
+    let (v, stderr) = report();
+    assert_eq!(v["web_dist"]["folo_wasm"], true);
+    assert_eq!(v["web_folo_wasm"], true);
+    assert!(stderr.contains("can run models in the browser"), "{stderr}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
 fn stubs_exit_4_with_error_envelope() {
     let args = ["bench", "--json"];
     let (code, stdout, stderr) = folo(&args);

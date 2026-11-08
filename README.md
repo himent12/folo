@@ -88,7 +88,7 @@ so they need a token: `GH_TOKEN` / `GITHUB_TOKEN`, or a logged-in [`gh`](https:/
 `--version` / `-Version`, `--dir` / `-InstallDir`, `--repo` / `-Repo` and `--base-url` / `-BaseUrl`, or the
 environment variables `FOLO_VERSION`, `FOLO_INSTALL_DIR`, `FOLO_REPO` and `FOLO_BASE_URL`. To install from a checkout
 instead: `cargo install --path crates/folo-cli` (add `--features embed-web` after building `web/`). See
-[docs/RELEASING.md](docs/RELEASING.md).
+[docs/RELEASE.md](docs/RELEASE.md).
 
 ## FOLO Studio
 
@@ -225,7 +225,7 @@ The live checklist is [docs/ROADMAP.md](docs/ROADMAP.md).
 | [FORMAT](docs/FORMAT.md) | The `.folo` weights and checkpoint format |
 | [METRICS](docs/METRICS.md) | How mAP, precision and recall are computed |
 | [ROADMAP](docs/ROADMAP.md) | What is done, in progress and next |
-| [RELEASING](docs/RELEASING.md) · [CI](docs/CI.md) · [PROCESS](docs/PROCESS.md) · [AGENTS](AGENTS.md) | Releases, CI runners, how changes land, rules for contributors |
+| [RELEASE](docs/RELEASE.md) · [CI](docs/CI.md) · [PROCESS](docs/PROCESS.md) · [AGENTS](AGENTS.md) | Releases, CI runners, how changes land, rules for contributors |
 
 Examples: [shapes](examples/shapes/README.md) (the convergence gate, on CPU and GPU) and
 [r6](examples/r6/README.md) (a real dataset trained from scratch).

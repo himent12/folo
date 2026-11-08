@@ -1,6 +1,7 @@
 //! FOLO Desktop: the native GPUI front end for FOLO.
 //!
-//! `folo-desktop [--server URL | --mock] [--scenario NAME] [--width W --height H] [--theme dark|light]`
+//! `folo-desktop [--server URL | --mock] [--open SCREEN] [--scenario NAME] [--width W --height H]
+//! [--theme dark|light]`; `--help` and `--version` print and exit (see [`USAGE`]).
 //!
 //! Scenarios put the app into a fixed, deterministic state (frozen mock clock, a screen, an
 //! overlay, a hover) for screenshots; see `scenario.rs` and `tools/shoot-all.ps1`.
@@ -57,12 +58,56 @@ const FONTS: &[&[u8]] = &[
     include_bytes!("../../../design/fonts/GeistMono-SemiBold.ttf"),
 ];
 
+/// `folo-desktop --help`.
+const USAGE: &str = "FOLO Desktop: datasets, training runs and live inference for FOLO, natively.
+
+Usage: folo-desktop [OPTIONS]
+
+By default it connects to a running `folo serve` ($FOLO_SERVER, else http://127.0.0.1:7878);
+when none answers it starts `folo serve --mock`, and without `folo` it uses built-in demo data.
+
+Options:
+  --server URL          Connect to the folo serve at URL
+  --mock                Use the built-in demo data
+  --open SCREEN         Start on a screen: overview, datasets, dataset:ID, runs, run:ID, models,
+                        model:ID, playground or settings
+  --theme dark|light    Colour theme [default: dark]
+  --width W             Window width in px [default: 1280]
+  --height H            Window height in px [default: 800]
+  --scenario NAME       A fixed, deterministic state for screenshots (implies demo data)
+  --list-scenarios      Print the scenario names and exit
+  -h, --help            Print this help and exit
+  -V, --version         Print the version and exit
+";
+
+/// What to print instead of opening the app (`--help`, `--version`), if `args` (without the program name) ask
+/// for it.
+fn info_text<S: AsRef<str>>(args: &[S]) -> Option<String> {
+    let has = |flags: &[&str]| args.iter().any(|a| flags.contains(&a.as_ref()));
+    if has(&["-h", "--help"]) {
+        Some(USAGE.to_string())
+    } else if has(&["-V", "--version"]) {
+        Some(format!(
+            "folo-desktop {}
+",
+            env!("CARGO_PKG_VERSION")
+        ))
+    } else {
+        None
+    }
+}
+
 fn arg(name: &str) -> Option<String> {
     let args: Vec<String> = std::env::args().collect();
     args.iter().position(|a| a == name).and_then(|i| args.get(i + 1).cloned())
 }
 
 fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(text) = info_text(&args) {
+        print!("{text}");
+        return;
+    }
     if std::env::args().any(|a| a == "--list-scenarios") {
         for s in scenario::ALL {
             println!("{s}");
@@ -171,5 +216,31 @@ mod source_tests {
         let mut bad = Vec::new();
         walk(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut bad);
         assert!(bad.is_empty(), "mojibake or BOM in {bad:?}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn help_and_version_print_instead_of_opening() {
+        for flag in ["--help", "-h"] {
+            let text = info_text(&["--mock", flag]).unwrap();
+            assert!(text.starts_with("FOLO Desktop") && text.contains("--server URL"), "{text}");
+        }
+        for flag in ["--version", "-V"] {
+            assert_eq!(
+                info_text(&[flag]).unwrap(),
+                format!(
+                    "folo-desktop {}
+",
+                    env!("CARGO_PKG_VERSION")
+                )
+            );
+        }
+        assert!(info_text(&["--help", "--version"]).unwrap().contains("Usage:"), "help wins");
+        assert_eq!(info_text(&["--mock", "--open", "runs"]), None);
+        assert_eq!(info_text::<&str>(&[]), None);
     }
 }
