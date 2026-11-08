@@ -237,7 +237,7 @@ type PixelCache = Mutex<HashMap<(String, String, u32), Arc<Vec<u8>>>>;
 pub struct MockBackend {
     datasets: Vec<DatasetFixture>,
     models: Vec<Model>,
-    runs: Mutex<Vec<RunFixture>>,
+    runs: Arc<Mutex<Vec<RunFixture>>>,
     frozen: bool,
     started: Instant,
     image_cache: PixelCache,
@@ -534,7 +534,7 @@ impl MockBackend {
         Self {
             datasets,
             models,
-            runs: Mutex::new(runs),
+            runs: Arc::new(Mutex::new(runs)),
             frozen,
             started: now,
             image_cache: Mutex::new(HashMap::new()),
@@ -1028,10 +1028,20 @@ impl Backend for MockBackend {
         let Some((base, at)) = live else { return Ok(rx) };
         let total = epochs * spe;
         let start_secs = self.sim_now();
+        let runs = self.runs.clone();
+        let run_id = id.to_string();
         std::thread::spawn(move || {
             let mut sent = (base + (at.elapsed().as_secs_f64() / STEP_DT) as u32).min(total);
             loop {
                 std::thread::sleep(Duration::from_millis(100));
+                // Stopped through the API: report it and end the stream.
+                let stopped =
+                    runs.lock().unwrap().iter().find(|f| f.run.id == run_id).is_none_or(|f| f.live.is_none());
+                if stopped {
+                    let _ =
+                        tx.send(RunEvent::Status(StatusEvent { status: RunStatus::Stopped, error: None }));
+                    return;
+                }
                 let now = (base + (at.elapsed().as_secs_f64() / STEP_DT) as u32).min(total);
                 while sent < now {
                     sent += 1;

@@ -185,6 +185,11 @@ impl ImageCache {
 
     /// Store a result; returns images evicted to stay within budget (free them on the GPU).
     pub fn finish(&mut self, k: ImgKey, img: Option<Arc<RenderImage>>) -> Vec<Arc<RenderImage>> {
+        // A request evicted while it was still loading has no slot (and no place in `order`) any
+        // more: drop its result instead of resurrecting an untracked entry.
+        if !matches!(self.slots.get(&k), Some(ImgSlot::Loading)) {
+            return img.into_iter().collect();
+        }
         self.slots.insert(k, img.map_or(ImgSlot::Failed, ImgSlot::Ready));
         let mut evicted = Vec::new();
         while self.order.len() > Self::BUDGET {
@@ -229,6 +234,8 @@ pub struct Store {
     pub run_data: HashMap<String, Load<RunData>>,
     pub samples: HashMap<String, Load<Samples>>,
     pub logs: HashMap<String, Load<Vec<LogLine>>>,
+    /// Live events that arrived while a run's history was loading, merged in when it lands.
+    pending: HashMap<String, Vec<RunEvent>>,
     pub images_px: ImageCache,
     /// Throughput history for the system card (GPU util samples), newest last.
     pub gpu_util: VecDeque<f32>,
@@ -249,6 +256,7 @@ impl Store {
             run_data: HashMap::new(),
             samples: HashMap::new(),
             logs: HashMap::new(),
+            pending: HashMap::new(),
             images_px: ImageCache::default(),
             gpu_util: VecDeque::new(),
         }
@@ -270,8 +278,57 @@ impl Store {
         self.datasets.ready()?.iter().find(|d| d.id == id)
     }
 
+    /// Install a run's metric history, merging live events that arrived while it loaded.
+    pub fn install_run_data(&mut self, run_id: &str, data: ApiResult<RunData>) {
+        let mut load: Load<RunData> = data.into();
+        if let Load::Ready(d) = &mut load {
+            for ev in self.pending.get(run_id).into_iter().flatten() {
+                match ev {
+                    RunEvent::Step(s) => d.push_step(s.clone()),
+                    RunEvent::Epoch(e) => d.push_epoch(e.clone()),
+                    _ => {}
+                }
+            }
+        }
+        self.run_data.insert(run_id.to_string(), load);
+        self.prune_pending(run_id);
+    }
+
+    /// Install a run's log history, appending live lines that arrived while it loaded.
+    pub fn install_logs(&mut self, run_id: &str, lines: ApiResult<Vec<LogLine>>) {
+        let mut load: Load<Vec<LogLine>> = lines.into();
+        if let Load::Ready(lines) = &mut load {
+            for ev in self.pending.get(run_id).into_iter().flatten() {
+                if let RunEvent::Log(l) = ev
+                    && !lines.iter().rev().take(50).any(|x| x == l)
+                {
+                    lines.push(l.clone());
+                }
+            }
+        }
+        self.logs.insert(run_id.to_string(), load);
+        self.prune_pending(run_id);
+    }
+
+    fn prune_pending(&mut self, run_id: &str) {
+        let waiting = |l: Option<bool>| l.unwrap_or(false);
+        let data_loading = waiting(self.run_data.get(run_id).map(|l| matches!(l, Load::Loading)));
+        let logs_loading = waiting(self.logs.get(run_id).map(|l| matches!(l, Load::Loading)));
+        if !data_loading && !logs_loading {
+            self.pending.remove(run_id);
+        }
+    }
+
     /// Apply one live event to the run list and its metric history.
     pub fn apply(&mut self, run_id: &str, ev: RunEvent) {
+        let loading = matches!(self.run_data.get(run_id), Some(Load::Loading))
+            || matches!(self.logs.get(run_id), Some(Load::Loading));
+        if loading && matches!(ev, RunEvent::Step(_) | RunEvent::Epoch(_) | RunEvent::Log(_)) {
+            let buf = self.pending.entry(run_id.to_string()).or_default();
+            if buf.len() < 20_000 {
+                buf.push(ev.clone());
+            }
+        }
         let spe = self.run(run_id).map_or(1, |r| r.steps_per_epoch.max(1));
         match ev {
             RunEvent::Step(s) => {
@@ -355,6 +412,50 @@ mod tests {
         assert_eq!(store.run_data[id].ready().unwrap().derived().loss[3].len(), before + 1);
         store.apply(id, RunEvent::Status(StatusEvent { status: RunStatus::Completed, error: None }));
         assert_eq!(store.run(id).unwrap().status, RunStatus::Completed);
+    }
+
+    #[test]
+    fn events_during_load_are_merged() {
+        let api = MockBackend::new(4200, true);
+        let mut store = Store::new(Arc::new(MockBackend::new(4200, true)));
+        store.runs = api.runs().into();
+        let id = "run_a19f";
+        store.run_data.insert(id.into(), Load::Loading);
+        store.logs.insert(id.into(), Load::Loading);
+        let history = api.metrics(id).unwrap();
+        let mut late = history.steps.last().unwrap().clone();
+        late.step += 1;
+        store.apply(id, RunEvent::Step(late.clone()));
+        let line =
+            LogLine { t: "2026-11-08T07:30:00Z".into(), level: LogLevel::Info, message: "late".into() };
+        store.apply(id, RunEvent::Log(line.clone()));
+        // The snapshot was taken before the event: the event must not be lost.
+        store.install_run_data(id, Ok(RunData::new(history.clone(), 100)));
+        assert_eq!(store.run_data[id].ready().unwrap().last_step().unwrap().step, late.step);
+        store.install_logs(id, Ok(vec![]));
+        assert_eq!(store.logs[id].ready().unwrap(), &vec![line]);
+        // Duplicates of events already in the snapshot are ignored.
+        let mut store2 = Store::new(Arc::new(MockBackend::new(4200, true)));
+        store2.run_data.insert(id.into(), Load::Loading);
+        store2.apply(id, RunEvent::Step(history.steps[100].clone()));
+        store2.install_run_data(id, Ok(RunData::new(history.clone(), 100)));
+        assert_eq!(store2.run_data[id].ready().unwrap().metrics.steps.len(), history.steps.len());
+    }
+
+    #[test]
+    fn late_completion_of_evicted_request_is_dropped() {
+        let mut c = ImageCache::default();
+        let key = |i: usize| ImgKey { dataset: "d".into(), image: i.to_string(), kind: ImgKind::Thumb };
+        for i in 0..=ImageCache::BUDGET {
+            assert!(c.begin(&key(i)));
+        }
+        // A newer request finishes first and evicts the oldest, still-loading one.
+        c.finish(key(ImageCache::BUDGET), None);
+        assert!(c.get(&key(0)).is_none());
+        // Its late completion must not reappear outside the eviction order.
+        c.finish(key(0), None);
+        assert!(c.get(&key(0)).is_none());
+        assert!(c.slots.len() <= ImageCache::BUDGET);
     }
 
     #[test]

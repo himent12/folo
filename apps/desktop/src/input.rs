@@ -256,16 +256,7 @@ impl TextInput {
     }
 
     fn offset_from_utf16(&self, offset: usize) -> usize {
-        let mut utf8_offset = 0;
-        let mut utf16_count = 0;
-        for ch in self.content.chars() {
-            if utf16_count >= offset {
-                break;
-            }
-            utf16_count += ch.len_utf16();
-            utf8_offset += ch.len_utf8();
-        }
-        utf8_offset
+        utf16_to_utf8(&self.content, offset)
     }
 
     fn offset_to_utf16(&self, offset: usize) -> usize {
@@ -386,10 +377,12 @@ impl EntityInputHandler for TextInput {
         self.content =
             (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..]).into();
         self.marked_range = (!new_text.is_empty()).then(|| range.start..range.start + new_text.len());
+        // The IME's selection is relative to the composed text, so convert it against `new_text`.
         self.selected_range = new_selected_range_utf16
             .as_ref()
-            .map(|r| self.range_from_utf16(r))
-            .map(|r| r.start + range.start..r.end + range.start)
+            .map(|r| {
+                range.start + utf16_to_utf8(new_text, r.start)..range.start + utf16_to_utf8(new_text, r.end)
+            })
             .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len());
         self.changed(cx);
     }
@@ -607,5 +600,40 @@ impl Render for TextInput {
 impl Focusable for TextInput {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_handle.clone()
+    }
+}
+
+/// Byte offset in `s` of UTF-16 offset `offset`, clamped to the end and to char boundaries.
+fn utf16_to_utf8(s: &str, offset: usize) -> usize {
+    let mut utf8 = 0;
+    let mut utf16 = 0;
+    for ch in s.chars() {
+        if utf16 >= offset {
+            break;
+        }
+        utf16 += ch.len_utf16();
+        utf8 += ch.len_utf8();
+    }
+    utf8
+}
+
+#[cfg(test)]
+mod tests {
+    use super::utf16_to_utf8;
+
+    #[test]
+    fn utf16_offsets_land_on_char_boundaries() {
+        let s = "ab中d";
+        assert_eq!(utf16_to_utf8(s, 0), 0);
+        assert_eq!(utf16_to_utf8(s, 2), 2);
+        assert_eq!(utf16_to_utf8(s, 3), 5);
+        assert_eq!(utf16_to_utf8(s, 99), s.len());
+        // An IME selection of 1..1 inside "中" composed after "ab" maps to the end of "中".
+        let composed = "中";
+        let start = 2 + utf16_to_utf8(composed, 1);
+        assert!("ab中".is_char_boundary(start));
+        assert_eq!(start, 5);
+        // Surrogate pairs count as two UTF-16 units.
+        assert_eq!(utf16_to_utf8("😀x", 2), 4);
     }
 }

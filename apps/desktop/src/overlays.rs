@@ -888,8 +888,7 @@ impl FoloApp {
         let t = theme(cx);
         let insp = self.inspector.as_ref().unwrap();
         let ds_id = insp.dataset.clone();
-        let list = self.filtered_images(&ds_id);
-        let n = list.len();
+        let n = self.filtered_indices(&ds_id).len();
         if n == 0 {
             // Still loading the image list (or the filter emptied it): keep the scrim up.
             if self.store.images.get(&ds_id).is_some_and(|l| !l.is_loading()) {
@@ -899,7 +898,7 @@ impl FoloApp {
         }
         let index = insp.index.min(n - 1);
         let (zoom, pan, hover) = (insp.zoom, insp.pan, insp.hover_box);
-        let meta = list[index].clone();
+        let Some(meta) = self.filtered_image(&ds_id, index).cloned() else { return div().into_any_element() };
         let classes = self.store.dataset_summary(&ds_id).map(|d| d.classes.clone()).unwrap_or_default();
         let img = self
             .image(&ds_id, &meta.id, ImgKind::Full, cx)
@@ -1142,10 +1141,7 @@ impl FoloApp {
             "Close (Esc)",
             window,
             cx,
-            act(|this, _, cx| {
-                this.inspector = None;
-                cx.notify();
-            }),
+            act(|this, w, cx| this.close_inspector(w, cx)),
         );
         let side = div()
             .w(px(300.))
@@ -1253,18 +1249,11 @@ impl FoloApp {
             .top_0()
             .left_0()
             .size_full()
-            .child(self.scrim(
-                &t,
-                "insp-scrim",
-                cx,
-                act(|this, _, cx| {
-                    this.inspector = None;
-                    cx.notify();
-                }),
-            ))
+            .child(self.scrim(&t, "insp-scrim", cx, act(|this, w, cx| this.close_inspector(w, cx))))
             .child(
                 div()
                     .id("inspector")
+                    .track_focus(&self.inspector_focus)
                     .absolute()
                     .top(px(24.))
                     .left(px(24.))
@@ -1302,7 +1291,7 @@ impl FoloApp {
     }
 
     pub fn step_inspector(&mut self, d: i32, cx: &mut Context<Self>) {
-        let n = self.inspector.as_ref().map_or(0, |i| self.filtered_images(&i.dataset).len());
+        let n = self.inspector.as_ref().map_or(0, |i| self.filtered_indices(&i.dataset).len());
         if let Some(i) = self.inspector.as_mut()
             && n > 0
         {

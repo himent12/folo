@@ -234,6 +234,46 @@ fn envelope(points: &[(f32, f32)], x0: f32, x1: f32, columns: usize) -> Vec<(f32
     out
 }
 
+type Memo = Vec<(std::sync::Weak<Vec<(f32, f32)>>, [u32; 4], Arc<Vec<(f32, f32)>>)>;
+
+thread_local! {
+    /// Derived series keyed by their source allocation (held weakly, so a freed and reused
+    /// allocation can never alias) plus the derivation parameters.
+    static MEMO: std::cell::RefCell<Memo> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn memo(
+    src: &Arc<Vec<(f32, f32)>>,
+    params: [u32; 4],
+    f: impl FnOnce(&[(f32, f32)]) -> Vec<(f32, f32)>,
+) -> Arc<Vec<(f32, f32)>> {
+    MEMO.with(|m| {
+        let mut m = m.borrow_mut();
+        m.retain(|(w, _, _)| w.strong_count() > 0);
+        if let Some((_, _, v)) =
+            m.iter().find(|(w, p, _)| *p == params && w.upgrade().is_some_and(|a| Arc::ptr_eq(&a, src)))
+        {
+            return v.clone();
+        }
+        let v = Arc::new(f(src));
+        if m.len() > 256 {
+            m.remove(0);
+        }
+        m.push((Arc::downgrade(src), params, v.clone()));
+        v
+    })
+}
+
+/// The EMA of a series, computed once per data revision and weight.
+pub fn smoothed(points: &Arc<Vec<(f32, f32)>>, w: f32) -> Arc<Vec<(f32, f32)>> {
+    memo(points, [0, w.to_bits(), 0, 0], |p| ema(p, w))
+}
+
+/// The per-column envelope of a series for a plot width and x range, cached likewise.
+fn cached_envelope(points: &Arc<Vec<(f32, f32)>>, x0: f32, x1: f32, columns: usize) -> Arc<Vec<(f32, f32)>> {
+    memo(points, [1, x0.to_bits(), x1.to_bits(), columns as u32], |p| envelope(p, x0, x1, columns))
+}
+
 /// Index of the point nearest to `x` in a sorted series.
 pub fn nearest(points: &[(f32, f32)], x: f32) -> Option<usize> {
     if points.is_empty() {
@@ -489,15 +529,14 @@ fn paint_line_chart(
                 if s.points.is_empty() {
                     continue;
                 }
-                let main: Vec<(f32, f32)> = if s.smooth > 0.0 {
+                let main = if s.smooth > 0.0 {
                     // Raw data faint underneath, smoothed on top.
-                    let raw = envelope(&s.points, x0, x1, columns);
+                    let raw = cached_envelope(&s.points, x0, x1, columns);
                     let pts: Vec<Point<Pixels>> = raw.iter().map(|&(x, y)| point(sx(x), sy(y))).collect();
                     stroke_path(window, &pts, 1.0, alpha(s.color, 0.22), false);
-                    let sm = ema(&s.points, s.smooth);
-                    envelope(&sm, x0, x1, columns / 2 + 1)
+                    cached_envelope(&smoothed(&s.points, s.smooth), x0, x1, columns / 2 + 1)
                 } else {
-                    envelope(&s.points, x0, x1, columns)
+                    cached_envelope(&s.points, x0, x1, columns)
                 };
                 let pts: Vec<Point<Pixels>> = main.iter().map(|&(x, y)| point(sx(x), sy(y))).collect();
                 if s.area && pts.len() > 1 {
@@ -543,7 +582,7 @@ fn paint_line_chart(
     let mut rows: Vec<(Hsla, String, String)> = Vec::new();
     let mut snap_x = None;
     for s in &spec.series {
-        let data: Vec<(f32, f32)> = if s.smooth > 0.0 { ema(&s.points, s.smooth) } else { s.points.to_vec() };
+        let data = if s.smooth > 0.0 { smoothed(&s.points, s.smooth) } else { s.points.clone() };
         if let Some(i) = nearest(&data, hx) {
             let (x, y) = data[i];
             if (x - hx).abs() > (x1 - x0) * 0.06 && s.points.len() > 1 {
@@ -791,6 +830,16 @@ mod tests {
         let e = envelope(&pts, 0.0, 999.0, 50);
         assert!(e.len() <= 100);
         assert!(e.iter().any(|p| p.1 == 9.0));
+    }
+
+    #[test]
+    fn memo_follows_the_allocation() {
+        let a = Arc::new(vec![(0.0, 1.0), (1.0, 3.0)]);
+        let s1 = smoothed(&a, 0.5);
+        assert!(Arc::ptr_eq(&s1, &smoothed(&a, 0.5)));
+        let b = Arc::new(vec![(0.0, 1.0), (1.0, 3.0)]);
+        assert!(!Arc::ptr_eq(&s1, &smoothed(&b, 0.5)));
+        assert!(!Arc::ptr_eq(&s1, &smoothed(&a, 0.9)));
     }
 
     #[test]

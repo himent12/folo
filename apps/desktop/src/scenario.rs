@@ -93,14 +93,10 @@ pub fn apply(app: &mut FoloApp, s: &Spec, window: &mut Window, cx: &mut Context<
         }
         "inspector" => {
             app.route = Route::Dataset("ds_3b91".into());
-            app.inspector = Some(crate::app::Inspector {
-                dataset: "ds_3b91".into(),
-                index: 6,
-                zoom: 1.0,
-                pan: (0., 0.),
-                drag_from: None,
-                hover_box: Some(1),
-            });
+            app.open_inspector("ds_3b91".into(), 6, window, cx);
+            if let Some(i) = app.inspector.as_mut() {
+                i.hover_box = Some(1);
+            }
         }
         "runs" => app.route = Route::Runs,
         "run-live" | "stop-confirm" => {

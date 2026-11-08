@@ -102,6 +102,8 @@ impl Route {
 
 pub type Action = Rc<dyn Fn(&mut FoloApp, &mut Window, &mut Context<FoloApp>)>;
 
+pub type FilterCache = ((String, Option<Split>, Option<u32>, usize), Rc<Vec<usize>>);
+
 pub fn act(f: impl Fn(&mut FoloApp, &mut Window, &mut Context<FoloApp>) + 'static) -> Action {
     Rc::new(f)
 }
@@ -215,9 +217,15 @@ pub struct FoloApp {
     pub ds_class: Option<u32>,
     pub ds_boxes: bool,
     pub ds_tile: f32,
+    /// Filtered image indices keyed by (dataset, split, class, list length).
+    pub ds_filter_cache: RefCell<Option<FilterCache>>,
     pub grid_scroll: gpui::UniformListScrollHandle,
     pub grid_width: Rc<std::cell::Cell<Pixels>>,
     pub inspector: Option<Inspector>,
+    /// Focus target of the inspector so its keys (arrows, +/-, 0, Esc) work as soon as it opens.
+    pub inspector_focus: FocusHandle,
+    /// Where focus was before the inspector opened, restored on close.
+    inspector_return: Option<FocusHandle>,
     pub hist_hover: HashMap<&'static str, f32>,
     /// Grid view controls built by the image browser, placed on the tab row.
     pub ds_view_controls: Option<AnyElement>,
@@ -243,7 +251,14 @@ pub struct FoloApp {
     pub play_pred: Load<Prediction>,
     pub play_hover: Option<usize>,
     pub play_drop_hover: bool,
-    play_seq: u64,
+    /// Generation of the latest image load request (older completions are dropped).
+    play_load_seq: u64,
+    /// Generation of the image on stage; predictions are tagged with it.
+    play_image_gen: u64,
+    /// Generation of the latest prediction request.
+    play_pred_seq: u64,
+    /// Image generation and model the current `play_pred` belongs to.
+    play_pred_for: Option<(u64, String)>,
 
     // Settings
     pub server_mode: ServerMode,
@@ -292,9 +307,12 @@ impl FoloApp {
             ds_class: None,
             ds_boxes: true,
             ds_tile: 168.,
+            ds_filter_cache: RefCell::new(None),
             grid_scroll: gpui::UniformListScrollHandle::new(),
             grid_width: Rc::new(std::cell::Cell::new(px(900.))),
             inspector: None,
+            inspector_focus: cx.focus_handle(),
+            inspector_return: None,
             hist_hover: HashMap::new(),
             ds_view_controls: None,
             run_filter: RunFilter::All,
@@ -313,7 +331,10 @@ impl FoloApp {
             play_pred: Load::Idle,
             play_hover: None,
             play_drop_hover: false,
-            play_seq: 0,
+            play_load_seq: 0,
+            play_image_gen: 0,
+            play_pred_seq: 0,
+            play_pred_for: None,
             server_mode: ServerMode::Mock,
             server_url,
             spawn_server: true,
@@ -488,7 +509,7 @@ impl FoloApp {
                 cx,
                 move |api| api.metrics(&rid),
                 move |this, r, _| {
-                    this.store.run_data.insert(key, r.map(|m| RunData::new(m, spe)).into());
+                    this.store.install_run_data(&key, r.map(|m| RunData::new(m, spe)));
                 },
             );
         }
@@ -516,7 +537,7 @@ impl FoloApp {
                 cx,
                 move |api| api.logs(&rid),
                 move |this, r, _| {
-                    this.store.logs.insert(key, r.into());
+                    this.store.install_logs(&key, r);
                     this.log_scroll.scroll_to_bottom();
                 },
             );
@@ -886,21 +907,25 @@ impl FoloApp {
             move |api| api.stop_run(&rid),
             move |this, r, cx| match r {
                 Ok(run) => {
+                    // Keep the event subscription: the server may answer `stopping` and still send
+                    // the last steps, a final validation and the terminal status.
                     let name = run.name.clone();
                     let epoch = run.epoch;
+                    let stopping = run.status == RunStatus::Stopping;
                     if let Some(runs) = this.store.runs.ready_mut()
                         && let Some(slot) = runs.iter_mut().find(|r| r.id == run.id)
                     {
                         *slot = run;
                     }
-                    this.subscriptions.remove(&id);
-                    this.store.logs.insert(id.clone(), Load::Idle);
-                    this.toast(
-                        Tone::Neutral,
-                        format!("Stopped {name}"),
-                        Some(format!("Last checkpoint kept (epoch {epoch}).").into()),
-                        cx,
-                    );
+                    let (title, body) = if stopping {
+                        (
+                            format!("Stopping {name}"),
+                            "Finishing the current step; the last checkpoint is kept.".to_string(),
+                        )
+                    } else {
+                        (format!("Stopped {name}"), format!("Last checkpoint kept (epoch {epoch})."))
+                    };
+                    this.toast(Tone::Neutral, title, Some(body.into()), cx);
                 }
                 Err(e) => this.toast(Tone::Danger, "Could not stop the run", Some(e.message.into()), cx),
             },
@@ -939,8 +964,8 @@ impl FoloApp {
             image_id
         )
         .into();
-        self.play_seq += 1;
-        let seq = self.play_seq;
+        self.play_load_seq += 1;
+        let seq = self.play_load_seq;
         self.fetch(
             cx,
             move |api| {
@@ -956,13 +981,12 @@ impl FoloApp {
                     .ok_or_else(|| ApiError::new("decode_failed", "Could not decode the image"))
             },
             move |this, r, cx| {
-                if seq != this.play_seq {
+                if seq != this.play_load_seq {
                     return;
                 }
                 match r {
                     Ok((image, width, height)) => {
-                        this.play_image = Some(PlayImage { name, input, image, width, height });
-                        this.run_predict(cx);
+                        this.set_play_image(PlayImage { name, input, image, width, height }, cx);
                     }
                     Err(e) => {
                         this.toast(Tone::Danger, "Could not open the image", Some(e.message.into()), cx)
@@ -976,8 +1000,8 @@ impl FoloApp {
         let name: SharedString =
             path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default().into();
         let n2 = name.to_string();
-        self.play_seq += 1;
-        let seq = self.play_seq;
+        self.play_load_seq += 1;
+        let seq = self.play_load_seq;
         self.fetch(
             cx,
             move |_| {
@@ -997,19 +1021,16 @@ impl FoloApp {
                 Ok((Arc::new(bytes), render, w, h))
             },
             move |this, r, cx| {
-                if seq != this.play_seq {
+                if seq != this.play_load_seq {
                     return;
                 }
                 match r {
                     Ok((bytes, image, width, height)) => {
-                        this.play_image = Some(PlayImage {
-                            name: name.clone(),
-                            input: PredictInput::File { name: name.to_string(), bytes },
-                            image,
-                            width,
-                            height,
-                        });
-                        this.run_predict(cx);
+                        let input = PredictInput::File { name: name.to_string(), bytes };
+                        this.set_play_image(
+                            PlayImage { name: name.clone(), input, image, width, height },
+                            cx,
+                        );
                     }
                     Err(e) => this.toast(Tone::Danger, e.message.clone(), e.hint.map(Into::into), cx),
                 }
@@ -1017,27 +1038,41 @@ impl FoloApp {
         );
     }
 
+    /// Put a new image on the Playground stage; its old detections never paint over it.
+    fn set_play_image(&mut self, img: PlayImage, cx: &mut Context<Self>) {
+        self.play_image_gen += 1;
+        self.play_image = Some(img);
+        self.play_pred = Load::Idle;
+        self.play_pred_for = None;
+        self.play_hover = None;
+        self.run_predict(cx);
+    }
+
     pub fn run_predict(&mut self, cx: &mut Context<Self>) {
         let (Some(model), Some(img)) = (self.play_model.clone(), self.play_image.as_ref()) else { return };
         // Fetch everything above the lowest threshold once; the conf slider filters locally.
         let req = PredictRequest {
-            model_id: model,
+            model_id: model.clone(),
             input: img.input.clone(),
             conf: 0.05,
             iou: self.play_iou,
             max_det: 300,
         };
-        if !matches!(self.play_pred, Load::Ready(_)) {
+        let key = (self.play_image_gen, model);
+        // Same image and model (an IoU change): keep showing the old boxes until the new ones land.
+        if self.play_pred_for.as_ref() != Some(&key) {
             self.play_pred = Load::Loading;
+            self.play_hover = None;
         }
-        self.play_seq += 1;
-        let seq = self.play_seq;
+        self.play_pred_seq += 1;
+        let seq = self.play_pred_seq;
         self.fetch(
             cx,
             move |api| api.predict(&req),
             move |this, r, _| {
-                if seq == this.play_seq {
+                if seq == this.play_pred_seq {
                     this.play_pred = r.into();
+                    this.play_pred_for = Some(key);
                 }
             },
         );
@@ -1655,6 +1690,29 @@ impl Render for FoloApp {
 }
 
 impl FoloApp {
+    pub fn open_inspector(
+        &mut self,
+        dataset: String,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.inspector =
+            Some(Inspector { dataset, index, zoom: 1.0, pan: (0., 0.), drag_from: None, hover_box: None });
+        self.inspector_return = window.focused(cx);
+        window.focus(&self.inspector_focus);
+        cx.notify();
+    }
+
+    pub fn close_inspector(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.inspector = None;
+        match self.inspector_return.take() {
+            Some(fh) => window.focus(&fh),
+            None => window.focus(&self.root_focus),
+        }
+        cx.notify();
+    }
+
     pub fn dismiss(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.menu_open.is_some() || self.export_open {
             self.menu_open = None;
@@ -1667,7 +1725,7 @@ impl FoloApp {
             self.new_run = None;
             window.focus(&self.root_focus);
         } else if self.inspector.is_some() {
-            self.inspector = None;
+            self.close_inspector(window, cx);
         } else if let Some(p) = self.parent_route() {
             self.navigate(p, window, cx);
         }

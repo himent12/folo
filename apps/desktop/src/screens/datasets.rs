@@ -11,7 +11,7 @@ use gpui::{
 
 use super::*;
 use crate::api::{Dataset, ImageMeta, Split};
-use crate::app::{DsTab, FoloApp, Inspector, act};
+use crate::app::{DsTab, FoloApp, act};
 use crate::charts::{HoverFn, histogram};
 use crate::controls::Btn;
 use crate::store::Load;
@@ -96,13 +96,32 @@ impl FoloApp {
     }
 
     /// Images of the open dataset after the split and class filters.
-    pub fn filtered_images(&self, id: &str) -> Vec<ImageMeta> {
-        let Some(all) = self.store.images.get(id).and_then(|l| l.ready()) else { return Vec::new() };
-        all.iter()
-            .filter(|m| self.ds_split.is_none_or(|s| m.split == s))
-            .filter(|m| self.ds_class.is_none_or(|c| m.boxes.iter().any(|b| b.class == c)))
-            .cloned()
-            .collect()
+    /// Indices (into the dataset's image list) that pass the split and class filters. Cached
+    /// until the dataset, its image list or a filter changes, so scrolling never rescans it.
+    pub fn filtered_indices(&self, id: &str) -> Rc<Vec<usize>> {
+        let Some(all) = self.store.images.get(id).and_then(|l| l.ready()) else { return Rc::new(Vec::new()) };
+        let key = (id.to_string(), self.ds_split, self.ds_class, all.len());
+        if let Some((k, v)) = self.ds_filter_cache.borrow().as_ref()
+            && *k == key
+        {
+            return v.clone();
+        }
+        let v: Rc<Vec<usize>> = Rc::new(
+            all.iter()
+                .enumerate()
+                .filter(|(_, m)| self.ds_split.is_none_or(|s| m.split == s))
+                .filter(|(_, m)| self.ds_class.is_none_or(|c| m.boxes.iter().any(|b| b.class == c)))
+                .map(|(i, _)| i)
+                .collect(),
+        );
+        *self.ds_filter_cache.borrow_mut() = Some((key, v.clone()));
+        v
+    }
+
+    /// The `n`th filtered image of a dataset.
+    pub fn filtered_image(&self, id: &str, n: usize) -> Option<&ImageMeta> {
+        let i = *self.filtered_indices(id).get(n)?;
+        self.store.images.get(id)?.ready()?.get(i)
     }
 
     pub fn dataset(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -299,8 +318,7 @@ impl FoloApp {
         let t = theme(cx);
         let id = ds.id.clone();
         let total = self.store.images.get(&id).and_then(|l| l.ready()).map_or(0, |v| v.len());
-        let filtered = self.filtered_images(&id);
-        let count = filtered.len();
+        let count = self.filtered_indices(&id).len();
         let splits = [None, Some(Split::Train), Some(Split::Val), Some(Split::Test)];
         let labels: Vec<String> = ["All", "Train", "Val", "Test"].iter().map(|s| s.to_string()).collect();
         let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
@@ -429,13 +447,17 @@ impl FoloApp {
             rows,
             cx.processor(move |this, range: std::ops::Range<usize>, window, cx| {
                 let t = theme(cx);
-                let filtered = this.filtered_images(&ds_id);
+                // Clone only the visible rows' metadata.
+                let visible: Vec<Option<ImageMeta>> = (range.start * cols..range.end * cols)
+                    .map(|i| this.filtered_image(&ds_id, i).cloned())
+                    .collect();
+                let first = range.start * cols;
                 let mut out = Vec::new();
                 for r in range {
                     let mut row = div().flex().gap(px(GAP)).h(px(row_h)).pb(px(GAP));
                     for c in 0..cols {
                         let idx = r * cols + c;
-                        let Some(meta) = filtered.get(idx) else {
+                        let Some(meta) = visible.get(idx - first).and_then(|m| m.as_ref()) else {
                             row = row.child(div().w(px(cell_w)).flex_none());
                             continue;
                         };
@@ -489,17 +511,7 @@ impl FoloApp {
                             radius::MD,
                             window,
                             cx,
-                            act(move |this, _, cx| {
-                                this.inspector = Some(Inspector {
-                                    dataset: dsid.clone(),
-                                    index: idx,
-                                    zoom: 1.0,
-                                    pan: (0., 0.),
-                                    drag_from: None,
-                                    hover_box: None,
-                                });
-                                cx.notify();
-                            }),
+                            act(move |this, w, cx| this.open_inspector(dsid.clone(), idx, w, cx)),
                         );
                         row = row.child(el);
                     }
