@@ -123,7 +123,7 @@
 {#if live.error && !run}
   <Page title="Run">
     <ErrorState error={live.error} title="Could not load this run" retry={() => live.retry()} />
-    <EmptyState compact title="Check the run id" description="It may have been deleted. All runs are listed on the Runs page.">
+    <EmptyState title="Check the run id" description="It may have been deleted; every run is listed on the Runs page.">
       {#snippet actions()}<Button href={href('/runs')}>All runs</Button>{/snippet}
     </EmptyState>
   </Page>

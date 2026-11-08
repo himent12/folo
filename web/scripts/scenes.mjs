@@ -147,6 +147,17 @@ export const scenes = [
     setup: (page) => until(page, '#cm .cell'),
   },
   {
+    // Up to 1199 px the details fold into one line above the matrix; opened here, they list in two columns.
+    name: 'model-detail-details',
+    path: '/models/m_fast_n',
+    viewports: ['laptop', 'mobile'],
+    fullPage: true,
+    setup: async (page) => {
+      await until(page, '#cm .cell');
+      await page.locator('.d-line').click();
+    },
+  },
+  {
     name: 'model-coco',
     path: '/models/m_coco_s',
     themes: ['dark'],
@@ -176,15 +187,26 @@ export const scenes = [
     },
   },
   {
-    // Phones: IoU, max detections, display toggles, classes and timing open in place under the Confidence slider.
+    // Phones: IoU, max boxes and the display toggles open in a non-modal bottom sheet over the lower screen; the image
+    // stays visible above it. A first-screen shot, since the sheet is fixed to the viewport.
     name: 'playground-thresholds',
+    path: '/playground?model=m_hard_s',
+    viewports: ['mobile'],
+    setup: async (page) => {
+      await playgroundResult(page);
+      await page.getByRole('button', { name: 'Thresholds' }).click();
+      await page.locator('#pg-more').waitFor();
+    },
+  },
+  {
+    // Phones: classes and timing as two disclosures under the detections (both opened here).
+    name: 'playground-discs',
     path: '/playground?model=m_hard_s',
     viewports: ['mobile'],
     fullPage: true,
     setup: async (page) => {
       await playgroundResult(page);
-      await page.getByRole('button', { name: 'Thresholds' }).click();
-      await page.locator('#pg-more').waitFor();
+      for (const s of await page.locator('details.disc > summary').all()) await s.click();
     },
   },
   {

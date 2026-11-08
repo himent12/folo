@@ -195,8 +195,8 @@ table {
   border-radius: var(--radius-sm);
   background: var(--text-primary);
   color: var(--bg-app);
-  font-size: var(--type-xs-size);
-  line-height: var(--type-xs-line);
+  font-size: var(--type-sm-size);
+  line-height: var(--type-sm-line);
   font-weight: var(--weight-medium);
   pointer-events: none;
   opacity: 0;

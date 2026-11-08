@@ -1,7 +1,9 @@
 <script lang="ts">
   import ArrowLeft from '@lucide/svelte/icons/arrow-left';
+  import ChevronRight from '@lucide/svelte/icons/chevron-right';
   import Download from '@lucide/svelte/icons/download';
   import ScanSearch from '@lucide/svelte/icons/scan-search';
+  import { MediaQuery } from 'svelte/reactivity';
   import { hub } from '$lib/api/index.svelte';
   import { fromModelEval, reduceConfusion } from '$lib/api/evaluation';
   import { archInfo } from '$lib/api/mock/runs';
@@ -86,6 +88,9 @@
   });
 
   let exportOpen = $state(false);
+  // Up to 1199 px the rail stacks under the PR panel: the details fold into one line so the matrix follows soon.
+  const narrow = new MediaQuery('max-width: 1199px', false);
+  let detailsOpen = $state(false);
 
   /** The architecture's published 640 px reference time, scaled by input area. */
   const latency = (m: Model) => archInfo[m.arch].ms * (m.imgsz / 640) ** 2;
@@ -153,46 +158,83 @@
       </div>
 
       <aside class="rail" aria-label="Model details">
-        <Panel title="Details" id="details">
-          <dl class="details">
-            <dt>Architecture</dt>
-            <dd class="mono">{m.arch}</dd>
-            <dt>Input size</dt>
-            <dd class="num">{m.imgsz} × {m.imgsz} px</dd>
-            <dt>Parameters</dt>
-            <dd class="num">{compact(m.params)} <span class="faint">({m.params.toLocaleString('en-US')})</span></dd>
-            <dt>Compute</dt>
-            <dd class="num">{num(m.flops_g, 1)} GFLOPs</dd>
-            <dt>File size</dt>
-            <dd class="num">{bytes(m.bytes, prefs.units)}</dd>
-            <dt>Latency</dt>
-            <dd class="latency">
-              <span class="num">Reference ~{latency(m).toFixed(1)} ms</span>
-              <!-- A scaled hint, not a measurement: say exactly what it assumes. -->
-              <span class="faint">RTX 4080-class GPU · {m.imgsz} px · fp32</span>
-            </dd>
-            <dt>Classes</dt>
-            <dd class="classes">
-              {#each m.classes.slice(0, 10) as c, i (i)}
-                <span class="chip"><span class="sw" style:background={classInk(i)} aria-hidden="true"></span>{c}</span>
-              {/each}
-              {#if m.classes.length > 10}<span class="faint">+{m.classes.length - 10} more</span>{/if}
-            </dd>
-            <dt>Source</dt>
-            <dd>
-              {#if m.run_id}
-                <a class="link" href={href(`/runs/${m.run_id}`)}>{run?.name ?? m.run_id}</a>
-                {#if context.data?.dataset}<span class="faint">{' on '}</span><a class="link" href={href(`/datasets/${context.data.dataset.id}`)}>{context.data.dataset.name}</a>{/if}
-              {:else}
-                <span class="muted">Imported .folo file</span>
-              {/if}
-            </dd>
-            <dt>Model id</dt>
-            <dd class="mono muted">{m.id}</dd>
-            <dt>Created</dt>
-            <dd>{date(m.created)}</dd>
+        {#snippet detailList(two: boolean)}
+          <dl class="details" class:two id="model-details">
+            <div class="kv">
+              <dt>Architecture</dt>
+              <dd class="mono">{m.arch}</dd>
+            </div>
+            <div class="kv">
+              <dt>Input size</dt>
+              <dd class="num">{m.imgsz} × {m.imgsz} px</dd>
+            </div>
+            <div class="kv">
+              <dt>Parameters</dt>
+              <dd class="num">{compact(m.params)} <span class="faint">({m.params.toLocaleString('en-US')})</span></dd>
+            </div>
+            <div class="kv">
+              <dt>Compute</dt>
+              <dd class="num">{num(m.flops_g, 1)} GFLOPs</dd>
+            </div>
+            <div class="kv">
+              <dt>File size</dt>
+              <dd class="num">{bytes(m.bytes, prefs.units)}</dd>
+            </div>
+            <div class="kv">
+              <dt>Latency</dt>
+              <dd class="latency">
+                <span class="num">Reference ~{latency(m).toFixed(1)} ms</span>
+                <!-- A scaled hint, not a measurement: say exactly what it assumes. -->
+                <span class="faint">RTX 4080-class GPU · {m.imgsz} px · fp32</span>
+              </dd>
+            </div>
+            <div class="kv wide">
+              <dt>Classes</dt>
+              <dd class="classes">
+                {#each m.classes.slice(0, 10) as c, i (i)}
+                  <span class="chip"><span class="sw" style:background={classInk(i)} aria-hidden="true"></span>{c}</span>
+                {/each}
+                {#if m.classes.length > 10}<span class="faint">+{m.classes.length - 10} more</span>{/if}
+              </dd>
+            </div>
+            <div class="kv">
+              <dt>Source</dt>
+              <dd>
+                {#if m.run_id}
+                  <a class="link" href={href(`/runs/${m.run_id}`)}>{run?.name ?? m.run_id}</a>
+                  {#if context.data?.dataset}<span class="faint">{' on '}</span><a class="link" href={href(`/datasets/${context.data.dataset.id}`)}>{context.data.dataset.name}</a>{/if}
+                {:else}
+                  <span class="muted">Imported .folo file</span>
+                {/if}
+              </dd>
+            </div>
+            <div class="kv">
+              <dt>Model id</dt>
+              <dd class="mono muted">{m.id}</dd>
+            </div>
+            <div class="kv">
+              <dt>Created</dt>
+              <dd>{date(m.created)}</dd>
+            </div>
           </dl>
-        </Panel>
+        {/snippet}
+        {#if narrow.current}
+          <Panel pad="none" id="details">
+            <button type="button" class="d-line" aria-expanded={detailsOpen} aria-controls="model-details" onclick={() => (detailsOpen = !detailsOpen)}>
+              <span class="d-sum num truncate">
+                <span class="mono">{m.arch}</span><span class="sep" aria-hidden="true">·</span>{m.imgsz} px<span class="d-lat"
+                  ><span class="sep" aria-hidden="true">·</span><span title="Reference latency: RTX 4080-class GPU, {m.imgsz} px, fp32"
+                    >~{latency(m).toFixed(1)} ms ref.</span
+                  ></span
+                ><span class="sep" aria-hidden="true">·</span>{bytes(m.bytes, prefs.units)}
+              </span>
+              <span class="d-verb">Details <ChevronRight size={14} aria-hidden="true" /></span>
+            </button>
+            {#if detailsOpen}<div class="d-body">{@render detailList(true)}</div>{/if}
+          </Panel>
+        {:else}
+          <Panel title="Details" id="details">{@render detailList(false)}</Panel>
+        {/if}
       </aside>
     </div>
     <!-- Full width: the matrix grows with the class count, and the rail beside it would sit empty. -->
@@ -348,9 +390,78 @@
   }
   .details {
     display: grid;
-    grid-template-columns: auto minmax(0, 1fr);
-    gap: var(--space-3) var(--space-4);
+    gap: var(--space-3);
+  }
+  .kv {
+    display: flex;
+    justify-content: space-between;
     align-items: baseline;
+    gap: var(--space-4);
+  }
+  /* Folded rail (up to 1199 px): labels beside their values, in two columns. */
+  .details.two {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--space-2) var(--space-8);
+  }
+  .two .kv {
+    display: grid;
+    grid-template-columns: 112px minmax(0, 1fr);
+    gap: var(--space-3);
+  }
+  .two .kv.wide {
+    grid-column: 1 / -1;
+  }
+  .two dd {
+    text-align: left;
+  }
+  .two .classes {
+    justify-content: flex-start;
+  }
+  .d-line {
+    display: flex;
+    align-items: center;
+    gap: var(--space-4);
+    width: 100%;
+    min-height: 44px;
+    padding: 0 var(--space-4);
+    border-radius: inherit;
+    text-align: left;
+  }
+  .d-line:hover {
+    background: var(--bg-hover);
+  }
+  .d-line:focus-visible {
+    outline-offset: -2px;
+  }
+  .d-sum {
+    flex: 1;
+    min-width: 0;
+    color: var(--text-secondary);
+  }
+  .d-sum .mono {
+    color: var(--text-primary);
+  }
+  .sep {
+    margin-inline: var(--space-2);
+    color: var(--text-tertiary);
+  }
+  .d-verb {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    flex-shrink: 0;
+    color: var(--text-tertiary);
+    font-size: var(--type-sm-size);
+  }
+  .d-verb :global(svg) {
+    transition: transform var(--dur-fast) var(--ease-standard);
+  }
+  .d-line[aria-expanded='true'] .d-verb :global(svg) {
+    transform: rotate(90deg);
+  }
+  .d-body {
+    padding: var(--space-3) var(--space-4) var(--space-4);
+    border-top: 1px solid var(--line-subtle);
   }
   dt {
     color: var(--text-tertiary);
@@ -395,6 +506,16 @@
     }
   }
   @media (max-width: 767px) {
+    /* The reference latency stays in the opened list; the line keeps what fits. */
+    .d-lat {
+      display: none;
+    }
+    .details.two {
+      grid-template-columns: minmax(0, 1fr);
+    }
+    .two .kv {
+      grid-template-columns: 96px minmax(0, 1fr);
+    }
     .kpis {
       grid-template-columns: repeat(2, minmax(0, 1fr));
     }

@@ -85,7 +85,7 @@
     color: var(--text-primary);
   }
   .hint {
-    font-size: var(--type-xs-size);
+    font-size: var(--type-sm-size);
     color: var(--text-tertiary);
   }
   input {

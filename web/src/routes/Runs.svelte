@@ -104,11 +104,11 @@
     {:else if !runs.data}
       <div class="sk">{#each [0, 1, 2, 3, 4] as i (i)}<Skeleton h="22px" />{/each}</div>
     {:else if runs.data.length === 0}
-      <EmptyState icon={Activity} title="No runs yet" description="Train a detector on one of your datasets. Progress, curves and samples stream in live.">
+      <EmptyState icon={Activity} title="No runs yet" description="Start one to watch its loss, mAP and samples stream in live.">
         {#snippet actions()}<Button variant="primary" icon={Plus} href={href('/runs/new')}>New run</Button>{/snippet}
       </EmptyState>
     {:else if shown.length === 0}
-      <EmptyState compact icon={Search} title="No runs match" description="Try another status filter or search term.">
+      <EmptyState icon={Search} title="No runs match" description="Try another status filter or search term.">
         {#snippet actions()}<Button size="sm" onclick={() => ((filter = 'all'), (query = ''))}>Clear filters</Button>{/snippet}
       </EmptyState>
     {:else}
@@ -270,7 +270,7 @@
     width: 140px;
   }
   .prog span {
-    font-size: var(--type-xs-size);
+    font-size: var(--type-sm-size);
     min-width: 50px;
     text-align: right;
   }
@@ -283,7 +283,7 @@
     width: 6ch;
     text-align: left;
     font-weight: var(--weight-regular);
-    font-size: var(--type-xs-size);
+    font-size: var(--type-sm-size);
     margin-left: 6px;
   }
   .rows,

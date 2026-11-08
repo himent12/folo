@@ -1,4 +1,9 @@
 <script lang="ts">
+  /**
+   * An empty state in place of the content it stands for: the small viewfinder mark inline, a one-line title, one
+   * useful sentence and one action, starting at the content's left edge. `centered` is for a page that is empty as a
+   * whole (Not found), where centring is the point.
+   */
   import type { Snippet } from 'svelte';
   import type { IconType } from './types';
 
@@ -7,52 +12,56 @@
     title,
     description,
     actions,
-    compact = false,
-  }: { icon?: IconType; title: string; description?: string; actions?: Snippet; compact?: boolean } = $props();
+    centered = false,
+  }: { icon?: IconType; title: string; description?: string; actions?: Snippet; centered?: boolean } = $props();
 </script>
 
-<div class="empty" class:compact>
+<div class="empty" class:centered class:bare={!Icon}>
   {#if Icon}
     <div class="mark" aria-hidden="true">
       <span class="corner tl"></span><span class="corner tr"></span><span class="corner bl"></span><span
         class="corner br"
       ></span>
-      <Icon size={16} strokeWidth={1.75} />
+      <Icon size={centered ? 16 : 14} strokeWidth={1.75} />
     </div>
   {/if}
-  <div class="text">
-    <p class="title">{title}</p>
-    {#if description}<p class="desc">{description}</p>{/if}
-  </div>
+  <p class="title">{title}</p>
+  {#if description}<p class="desc">{description}</p>{/if}
   {#if actions}<div class="actions">{@render actions()}</div>{/if}
 </div>
 
 <style>
+  /* Mark in a 24 px column, the text and the action aligned to the title. */
   .empty {
-    display: flex;
-    flex-direction: column;
+    display: grid;
+    grid-template-columns: 24px minmax(0, 1fr);
+    column-gap: var(--space-3);
     align-items: center;
-    justify-content: center;
-    text-align: center;
-    gap: var(--space-3);
-    padding: var(--space-10) var(--space-6);
+    padding: var(--space-5) var(--space-4);
   }
-  .compact {
-    padding: var(--space-8) var(--space-4);
-    gap: var(--space-3);
+  .empty.bare {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .empty > :not(.mark) {
+    grid-column: -2;
+  }
+  /* Inside a padded panel the panel's own padding is the edge. */
+  :global(.pad-md > .body) > .empty,
+  :global(.pad-sm > .body) > .empty {
+    padding: var(--space-1) 0;
   }
   .mark {
     position: relative;
     display: grid;
     place-items: center;
-    width: 32px;
-    height: 32px;
+    width: 24px;
+    height: 24px;
     color: var(--text-tertiary);
   }
   .corner {
     position: absolute;
-    width: 7px;
-    height: 7px;
+    width: 6px;
+    height: 6px;
     border-color: var(--line-strong);
     border-style: solid;
     border-width: 0;
@@ -62,47 +71,70 @@
     left: 0;
     border-top-width: 1.5px;
     border-left-width: 1.5px;
-    border-top-left-radius: 3px;
+    border-top-left-radius: 2px;
   }
   .tr {
     top: 0;
     right: 0;
     border-top-width: 1.5px;
     border-right-width: 1.5px;
-    border-top-right-radius: 3px;
+    border-top-right-radius: 2px;
   }
   .bl {
     bottom: 0;
     left: 0;
     border-bottom-width: 1.5px;
     border-left-width: 1.5px;
-    border-bottom-left-radius: 3px;
+    border-bottom-left-radius: 2px;
   }
   .br {
     bottom: 0;
     right: 0;
     border-bottom-width: 1.5px;
     border-right-width: 1.5px;
-    border-bottom-right-radius: 3px;
-  }
-  .text {
-    display: grid;
-    gap: var(--space-1);
-    max-width: 360px;
+    border-bottom-right-radius: 2px;
   }
   .title {
-    font-size: var(--type-md-size);
     font-weight: var(--weight-medium);
     color: var(--text-primary);
   }
   .desc {
+    max-width: 60ch;
     color: var(--text-secondary);
-    text-wrap: balance;
   }
   .actions {
     display: flex;
-    gap: var(--space-2);
     flex-wrap: wrap;
+    gap: var(--space-2);
+    margin-top: var(--space-3);
+  }
+
+  /* A whole page with nothing in it: one centred column. */
+  .centered {
+    grid-template-columns: minmax(0, 1fr);
+    justify-items: center;
+    row-gap: var(--space-1);
+    text-align: center;
+    padding: var(--space-10) var(--space-6);
+  }
+  .centered .mark {
+    width: 32px;
+    height: 32px;
+    margin-bottom: var(--space-2);
+  }
+  .centered .corner {
+    width: 7px;
+    height: 7px;
+  }
+  .centered .title {
+    font-size: var(--type-md-size);
+    line-height: var(--type-md-line);
+  }
+  .centered .desc {
+    max-width: 360px;
+    text-wrap: balance;
+  }
+  .centered .actions {
     justify-content: center;
   }
 </style>

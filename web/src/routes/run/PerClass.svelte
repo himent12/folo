@@ -109,7 +109,7 @@
     width: 52px;
     text-align: left;
     padding-left: 6px;
-    font-size: var(--type-xs-size);
+    font-size: var(--type-sm-size);
     color: var(--text-disabled);
   }
   .delta.up {
