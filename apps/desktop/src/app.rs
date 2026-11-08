@@ -1136,15 +1136,15 @@ impl FoloApp {
         let expires = action.is_none();
         self.toasts.push(Toast { id, tone, title: title.into(), body, action });
         // Over three, the oldest passive toast goes first: one with an action waits for its action
-        // or a dismissal (the stack folds them) unless five are waiting. The focused toast stays.
+        // or a dismissal (the stack folds them) unless five are waiting. The focused toast stays,
+        // and so does the one just added (it would vanish unseen).
         while self.toasts.len() > 3 {
-            let focus = self.toast_focus;
-            let gone =
-                self.toasts.iter().position(|t| t.action.is_none() && Some(t.id) != focus).or_else(|| {
-                    (self.toasts.len() > 5)
-                        .then(|| self.toasts.iter().position(|t| Some(t.id) != focus))
-                        .flatten()
-                });
+            let keep = |t: &Toast| t.id != id && Some(t.id) != self.toast_focus;
+            let gone = self
+                .toasts
+                .iter()
+                .position(|t| t.action.is_none() && keep(t))
+                .or_else(|| (self.toasts.len() > 5).then(|| self.toasts.iter().position(keep)).flatten());
             let Some(i) = gone else { break };
             self.toasts.remove(i);
         }

@@ -1123,13 +1123,18 @@ fn paint_line_chart(
     for &(x, y, c) in &spec.dots {
         if x >= x0 && x <= x1 {
             let mut p = point(sx(x), sy(y));
-            for q in &placed {
+            // A move can land on a dot already checked: repeat until clear (a few passes at most).
+            for _ in 0..8 {
+                let Some(q) = placed.iter().find(|q| {
+                    let (dx, dy) = (f32::from(p.x - q.x), f32::from(p.y - q.y));
+                    dx * dx + dy * dy < 63.9
+                }) else {
+                    break;
+                };
                 let (dx, dy) = (f32::from(p.x - q.x), f32::from(p.y - q.y));
                 let d = (dx * dx + dy * dy).sqrt();
-                if d < 8. {
-                    let (ux, uy) = if d < 0.5 { (1., 0.) } else { (dx / d, dy / d) };
-                    p = point(q.x + px(ux * 8.), q.y + px(uy * 8.));
-                }
+                let (ux, uy) = if d < 0.5 { (1., 0.) } else { (dx / d, dy / d) };
+                p = point(q.x + px(ux * 8.), q.y + px(uy * 8.));
             }
             placed.push(p);
             window.paint_quad(

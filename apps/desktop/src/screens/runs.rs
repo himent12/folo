@@ -1311,7 +1311,8 @@ impl FoloApp {
         // Follow the tail while the view is at the bottom; scrolling up pauses it.
         let at_bottom = {
             let max = self.log_scroll.max_offset().height;
-            max - (-self.log_scroll.offset().y) < px(24.)
+            // Tighter than one keyboard line (21 px), so a single Up press pauses following.
+            max - (-self.log_scroll.offset().y) < px(8.)
         };
         let rev = self.store.log_rev;
         if at_bottom && rev != self.log_seen {
