@@ -15,8 +15,10 @@ writes `web/public/folo-wasm/` (git-ignored): `folo_wasm.js` (an ES module), `fo
 0.75 MB gzipped) and TypeScript declarations (`folo_wasm.d.ts`). Requirements: the `wasm32-unknown-unknown` target
 (the script adds it with rustup) and `wasm-bindgen-cli` at exactly the version of `wasm-bindgen` in `Cargo.lock`
 (`cargo install wasm-bindgen-cli --version <v> --locked`; the script looks on `PATH` and in `$FOLO_TOOLS/bin`).
-`--dev` builds unoptimised, `--out DIR` writes elsewhere; `wasm-opt` is applied when it is on `PATH`. CI's `wasm` job
-runs the same script on every PR. Vite serves `web/public/` as is, so Studio imports it as
+`--dev` builds unoptimised, `--out DIR` writes elsewhere, `--locked` (`-Locked`) refuses to update `Cargo.lock`; `wasm-opt` is applied when it is on `PATH`. CI's `wasm` job
+runs the same script on every PR, and the release workflow runs it (with a pinned `wasm-opt`) before `vite build`,
+so `web/dist/folo-wasm/` and the Studio embedded in release binaries include it (`folo doctor` reports
+`web_folo_wasm`; docs/RELEASE.md). Vite serves `web/public/` as is, so Studio imports it as
 `/folo-wasm/folo_wasm.js`.
 
 ## JS API

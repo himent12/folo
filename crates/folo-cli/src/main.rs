@@ -252,11 +252,17 @@ fn doctor(args: DoctorArgs, out: Out) -> Result<(), CliError> {
     let web_dir = args.web_dir.clone().unwrap_or_else(|| PathBuf::from(DEFAULT_WEB_DIR));
     let web_exists = web_dir.is_dir();
     let web_ready = folo_server::web_dir_ready(&web_dir);
-    let embedded = folo_server::web::embedded().map(<[_]>::len);
+    let web_wasm = folo_server::web::dir_has_folo_wasm(&web_dir);
+    let embedded = folo_server::web::embedded();
+    let embedded_wasm = embedded.is_some_and(folo_server::web::has_folo_wasm);
+    let embedded = embedded.map(<[_]>::len);
     let web_source = match resolve_web(args.web_dir.clone()) {
         WebSource::Embedded => "embedded",
         _ => "dir",
     };
+    // Whether the Studio `folo serve` would serve can run models in the browser (its Playground's WebGPU / CPU).
+    // (`folo serve` does not serve a folder without index.html at all.)
+    let served_wasm = if web_source == "embedded" { embedded_wasm } else { web_ready && web_wasm };
     let options = folo_gpu::GpuOptions::from_env();
     let adapters = folo_gpu::GpuContext::enumerate(&options);
     // Creating the device proves the default adapter works and shows which one FOLO picks.
@@ -297,9 +303,10 @@ fn doctor(args: DoctorArgs, out: Out) -> Result<(), CliError> {
         "gpus": gpus,
         "gpu_detection": "wgpu",
         "gpu_selected": selected_json,
-        "web_dist": { "path": web_dir, "exists": web_exists, "index_html": web_ready },
-        "web_embedded": { "present": embedded.is_some(), "files": embedded.unwrap_or(0) },
+        "web_dist": { "path": web_dir, "exists": web_exists, "index_html": web_ready, "folo_wasm": web_wasm },
+        "web_embedded": { "present": embedded.is_some(), "files": embedded.unwrap_or(0), "folo_wasm": embedded_wasm },
         "web_source": web_source,
+        "web_folo_wasm": served_wasm,
     });
     out.record(&report);
     out.human(format!("folo      {VERSION}"));
@@ -340,6 +347,19 @@ fn doctor(args: DoctorArgs, out: Out) -> Result<(), CliError> {
         None => "not embedded (build with --features embed-web)".to_string(),
     };
     out.human(format!("studio    {studio}"));
+    let source = if web_source == "embedded" {
+        "the embedded Studio".to_string()
+    } else {
+        web_dir.display().to_string()
+    };
+    let wasm = if served_wasm {
+        format!("folo-wasm in {source}; the Playground can run models in the browser (WebGPU or CPU)")
+    } else {
+        format!(
+            "no folo-wasm in {source}; the Playground runs models on the server only (build it with              scripts/build-wasm before `npm run build`)"
+        )
+    };
+    out.human(format!("browser   {wasm}"));
     Ok(())
 }
 

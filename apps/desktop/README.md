@@ -16,6 +16,7 @@ cargo run -- --server http://127.0.0.1:7878        # a specific server
 cargo run -- --mock                                # built-in demo data
 cargo run -- --theme light
 cargo run -- --scenario run-live+hover             # a fixed, deterministic state (see below)
+cargo run -- --help                                # every option (`--version`: the version); prints and exits
 ```
 
 Keyboard: `Ctrl K` palette · `Ctrl N` new run · `Ctrl O` open image · `Ctrl 1–5` screens · `Ctrl ,` settings ·

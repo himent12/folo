@@ -25,7 +25,7 @@ command below works as `cargo folo` from the checkout. You can also put the buil
 `FOLO_GPU_BACKEND=vulkan,dx12,metal` ([GPU.md](GPU.md)).
 
 Prebuilt binaries with Studio embedded are planned for tagged releases (`scripts/install.sh`, `scripts/install.ps1`,
-[RELEASING.md](RELEASING.md)). No release has been published yet.
+[RELEASE.md](RELEASE.md)). No release has been published yet.
 
 ## 2. A first model on synthetic data
 

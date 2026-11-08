@@ -22,6 +22,13 @@ fn main() {
             dist.display()
         );
     }
+    // The Studio still works without folo-wasm, but its Playground can then only run models on the server.
+    if !["folo_wasm.js", "folo_wasm_bg.wasm"].iter().all(|f| dist.join("folo-wasm").join(f).is_file()) {
+        println!(
+            "cargo:warning={} has no folo-wasm/: the embedded Studio cannot run models in the browser. Run              scripts/build-wasm.sh (or .ps1) before `npm run build`.",
+            dist.display()
+        );
+    }
     // A directory makes cargo rescan every file under it for changes.
     println!("cargo:rerun-if-changed={}", dist.display());
 

@@ -1,6 +1,8 @@
 //! FOLO Studio compiled into the binary (the `embed-web` feature), served like `web/dist` on disk: an SPA fallback
 //! to `index.html`, long-lived caching for Vite's hashed `assets/`, `no-cache` plus an ETag for everything else.
 
+use std::path::Path;
+
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 
@@ -25,6 +27,21 @@ pub fn embedded() -> Option<&'static [EmbeddedFile]> {
     return Some(FILES);
     #[cfg(not(feature = "embed-web"))]
     None
+}
+
+/// The files of folo-wasm (FOLO in the browser, docs/WASM.md) inside a Studio build, relative to the dist folder:
+/// scripts/build-wasm writes them to `web/public/folo-wasm/` and `vite build` copies them to `dist/folo-wasm/`.
+/// Without them the Playground can only run models on the server.
+pub const FOLO_WASM_FILES: [&str; 2] = ["folo-wasm/folo_wasm.js", "folo-wasm/folo_wasm_bg.wasm"];
+
+/// Whether `files` (sorted by path, like [`embedded`]) include folo-wasm.
+pub fn has_folo_wasm(files: &[EmbeddedFile]) -> bool {
+    FOLO_WASM_FILES.iter().all(|p| find(files, p).is_some())
+}
+
+/// Whether the web app folder `dir` (e.g. `web/dist`) includes folo-wasm.
+pub fn dir_has_folo_wasm(dir: &Path) -> bool {
+    FOLO_WASM_FILES.iter().all(|p| dir.join(p).is_file())
 }
 
 /// `Content-Type` for the file types a Vite build emits.
@@ -67,7 +84,7 @@ pub(crate) fn if_none_match(headers: &HeaderMap, etag: &str) -> Option<bool> {
     )
 }
 
-fn find(files: &'static [EmbeddedFile], path: &str) -> Option<&'static EmbeddedFile> {
+fn find<'a>(files: &'a [EmbeddedFile], path: &str) -> Option<&'a EmbeddedFile> {
     files.binary_search_by(|f| f.path.cmp(path)).ok().map(|i| &files[i])
 }
 
@@ -177,6 +194,27 @@ mod tests {
         let res = respond(FILES, &Method::POST, &uri, &HeaderMap::new());
         assert_eq!(res.status(), StatusCode::METHOD_NOT_ALLOWED);
         assert_eq!(res.headers()[header::ALLOW], "GET, HEAD");
+    }
+
+    #[test]
+    fn folo_wasm_presence() {
+        assert!(!has_folo_wasm(FILES));
+        let with: &[EmbeddedFile] = &[
+            EmbeddedFile { path: "folo-wasm/folo_wasm.js", bytes: b"", etag: "W/\"j\"" },
+            EmbeddedFile { path: "folo-wasm/folo_wasm_bg.wasm", bytes: b"", etag: "W/\"w\"" },
+            EmbeddedFile { path: "index.html", bytes: b"", etag: "W/\"i\"" },
+        ];
+        assert!(has_folo_wasm(with));
+        assert!(!has_folo_wasm(&with[1..]), "the module needs its JS glue");
+
+        let dir = std::env::temp_dir().join(format!("folo-web-wasm-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("folo-wasm")).unwrap();
+        assert!(!dir_has_folo_wasm(&dir));
+        std::fs::write(dir.join(FOLO_WASM_FILES[0]), b"").unwrap();
+        assert!(!dir_has_folo_wasm(&dir));
+        std::fs::write(dir.join(FOLO_WASM_FILES[1]), b"").unwrap();
+        assert!(dir_has_folo_wasm(&dir));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

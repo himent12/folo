@@ -5,7 +5,9 @@ name: release
 # - Push a tag `vX.Y.Z` equal to `[workspace.package] version` in Cargo.toml: builds everything and creates a
 #   *draft* GitHub Release with generated notes, the archives, a `.sha256` per archive and `SHA256SUMS`.
 #   Review the draft and publish it by hand; the install scripts only see published releases.
-# - Run it by hand (workflow_dispatch) for a dry run: the same builds, uploaded as run artifacts, no release.
+# - Run it by hand (workflow_dispatch) for a dry run: the same builds, uploaded as run artifacts, no release. With
+#   the `tag` input it also rehearses that tag: the version check and a preview of the release notes, still without
+#   creating anything (docs/RELEASE.md).
 # - Pull requests that touch the release machinery get the same dry run (without macOS) plus an install-script test.
 #
 # Assets (names carry no version so `releases/latest/download/<asset>` URLs stay stable):
@@ -21,6 +23,7 @@ on:
       - .github/workflows/release.yml
       - scripts/install.sh
       - scripts/install.ps1
+      - scripts/build-wasm.sh
       - crates/folo-cli/build.rs
       - crates/folo-server/build.rs
       - crates/folo-server/src/web.rs
@@ -30,6 +33,10 @@ on:
         description: Also build aarch64-apple-darwin (macOS runner minutes are billed at 10x on private repos)
         type: boolean
         default: true
+      tag:
+        description: Rehearse this tag (vX.Y.Z) - check it against the version and preview its notes; creates nothing
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -48,12 +55,14 @@ jobs:
       version: ${{ steps.plan.outputs.version }}
       prerelease: ${{ steps.plan.outputs.prerelease }}
       matrix: ${{ steps.plan.outputs.matrix }}
+      tag: ${{ steps.plan.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
       - id: plan
         env:
           EVENT: ${{ github.event_name }}
-          REF_NAME: ${{ github.ref_name }}
+          # The tag being released (push) or rehearsed (workflow_dispatch's `tag`, may be empty).
+          TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
           # Tag builds include macOS unless the repository variable FOLO_RELEASE_MACOS is "false"; PRs never do.
           MACOS: ${{ github.event_name == 'workflow_dispatch' && inputs.macos || github.event_name == 'push' && vars.FOLO_RELEASE_MACOS != 'false' }}
         run: |
@@ -61,8 +70,8 @@ jobs:
           # The single source of truth: [workspace.package] version in the root Cargo.toml.
           version=$(sed -n '/^\[workspace\.package\]/,/^\[/s/^version *= *"\([^"]*\)".*/\1/p' Cargo.toml)
           test -n "$version" || { echo "::error::no [workspace.package] version in Cargo.toml"; exit 1; }
-          if [ "$EVENT" = push ] && [ "$REF_NAME" != "v$version" ]; then
-            echo "::error::tag $REF_NAME does not match the workspace version $version (expected v$version)"
+          if [ -n "$TAG" ] && [ "$TAG" != "v$version" ]; then
+            echo "::error::tag $TAG does not match the workspace version $version (expected v$version)"
             exit 1
           fi
           case "$version" in *-*) prerelease=true ;; *) prerelease=false ;; esac
@@ -77,13 +86,44 @@ jobs:
             echo "version=$version"
             echo "prerelease=$prerelease"
             echo "matrix=$(jq -c '{include: .}' <<<"$include")"
+            echo "tag=$TAG"
           } >> "$GITHUB_OUTPUT"
-          echo "FOLO $version ($EVENT, macOS: $MACOS)" >> "$GITHUB_STEP_SUMMARY"
+          echo "FOLO $version ($EVENT, tag: ${TAG:-none}, macOS: $MACOS)" >> "$GITHUB_STEP_SUMMARY"
 
+  # FOLO Studio with folo-wasm (docs/WASM.md) in it, so the embedded Playground can run models in the browser:
+  # scripts/build-wasm.sh writes web/public/folo-wasm/ (SIMD128, wasm-opt -O3) and `vite build` copies it to dist/.
   web:
     runs-on: ubuntu-latest
+    env:
+      # Pinned: binaryen's wasm-opt, verified against the release's published checksum.
+      BINARYEN_VERSION: "133"
+      BINARYEN_SHA256: 2dc9c7813f5375db93d96ead4b78222fcc3e2677bbb832297af4797782a37489
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: wasm-bindgen CLI matching Cargo.lock
+        run: echo "WASM_BINDGEN_VERSION=$(sed -n '/^name = "wasm-bindgen"$/{n;s/^version = "\(.*\)"$/\1/p;}' Cargo.lock)" >> "$GITHUB_ENV"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen@${{ env.WASM_BINDGEN_VERSION }}
+      - name: wasm-opt (binaryen)
+        run: |
+          set -euo pipefail
+          name="binaryen-version_${BINARYEN_VERSION}"
+          curl -fsSL -o binaryen.tar.gz \
+            "https://github.com/WebAssembly/binaryen/releases/download/version_${BINARYEN_VERSION}/${name}-x86_64-linux.tar.gz"
+          echo "${BINARYEN_SHA256}  binaryen.tar.gz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/binaryen"
+          tar -xzf binaryen.tar.gz -C "$RUNNER_TEMP/binaryen"
+          rm binaryen.tar.gz
+          echo "$RUNNER_TEMP/binaryen/$name/bin" >> "$GITHUB_PATH"
+      - name: folo-wasm
+        run: |
+          set -euo pipefail
+          wasm-opt --version
+          sh scripts/build-wasm.sh --locked
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -91,6 +131,15 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - working-directory: web
         run: npm ci && npm run build
+      - name: check web/dist
+        run: |
+          set -euo pipefail
+          test -f web/dist/index.html
+          test -f web/dist/folo-wasm/folo_wasm.js
+          test -f web/dist/folo-wasm/folo_wasm_bg.wasm
+          # Exactly the module built above (vite copies public/ as is).
+          cmp web/public/folo-wasm/folo_wasm_bg.wasm web/dist/folo-wasm/folo_wasm_bg.wasm
+          wc -c web/dist/folo-wasm/* | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         with:
           name: web-dist
@@ -132,6 +181,7 @@ jobs:
           "$exe" --version
           "$exe" doctor --json > doctor.json
           grep -q '"web_source":"embedded"' doctor.json || { cat doctor.json; exit 1; }
+          grep -q '"web_folo_wasm":true' doctor.json || { echo "no folo-wasm in the embedded Studio"; cat doctor.json; exit 1; }
           # Without --web-dir the embedded Studio wins over the web/dist checked out here.
           "$exe" serve --mock --port 0 --json > serve.log &
           pid=$!
@@ -142,6 +192,11 @@ jobs:
           curl -fsS "$url/api/health"
           curl -fsS -o index.html "$url/" && grep -qi '<!doctype html>' index.html
           curl -fsS -o spa.html "$url/runs/some-run" && grep -qi '<!doctype html>' spa.html
+          # folo-wasm, as the Playground loads it: a real module (not the SPA fallback) with the wasm MIME type.
+          type=$(curl -fsS -o folo_wasm_bg.wasm -w '%{content_type}' "$url/folo-wasm/folo_wasm_bg.wasm")
+          test "$type" = application/wasm || { echo "folo_wasm_bg.wasm served as $type"; exit 1; }
+          test "$(head -c 4 folo_wasm_bg.wasm | od -An -tx1 | tr -d ' \n')" = 0061736d || { echo "not a wasm module"; exit 1; }
+          curl -fsS -o folo_wasm.js "$url/folo-wasm/folo_wasm.js" && grep -q FoloDetector folo_wasm.js
       - name: package
         run: |
           set -euo pipefail
@@ -192,6 +247,15 @@ jobs:
       - name: build
         if: steps.desktop.outputs.present == 'true'
         run: cargo build --release --locked --manifest-path apps/desktop/Cargo.toml
+      - name: smoke test
+        if: steps.desktop.outputs.present == 'true'
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          exe=apps/desktop/target/release/folo-desktop.exe
+          test "$("$exe" --version | tr -d '\r')" = "folo-desktop $VERSION"
+          "$exe" --help | grep -q 'Usage: folo-desktop'
       - name: package
         if: steps.desktop.outputs.present == 'true'
         run: |
@@ -250,6 +314,34 @@ jobs:
         with:
           name: release-${{ needs.plan.outputs.version }}
           path: dist/*
+      # workflow_dispatch with `tag`: what the tag build would do, without doing it.
+      - name: rehearse the draft release
+        if: github.event_name == 'workflow_dispatch' && needs.plan.outputs.tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.plan.outputs.tag }}
+          VERSION: ${{ needs.plan.outputs.version }}
+          PRERELEASE: ${{ needs.plan.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          if draft=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null); then
+            if [ "$draft" = true ]; then
+              echo "A draft $TAG exists: the tag build would replace its assets."
+            else
+              echo "::warning::release $TAG is already published: the tag build would refuse to run; bump the version"
+            fi
+          else
+            echo "No release $TAG yet: the tag build would create a draft \"FOLO $VERSION\" (prerelease: $PRERELEASE)."
+          fi
+          # The notes the draft would get (GitHub's generated notes, nothing is saved).
+          notes=$(gh api "repos/$GH_REPO/releases/generate-notes" -f tag_name="$TAG" -f target_commitish="$GITHUB_SHA" --jq .body)
+          {
+            echo "### Release notes preview for $TAG (dry run, nothing created)"
+            echo
+            echo "$notes"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "$notes"
       - name: draft release
         if: github.event_name == 'push'
         env:
@@ -295,6 +387,7 @@ jobs:
           sh scripts/install.sh --base-url "$PWD/assets" --dir "$RUNNER_TEMP/bin"
           "$RUNNER_TEMP/bin/folo" --version
           "$RUNNER_TEMP/bin/folo" doctor --json | grep -q '"web_source":"embedded"'
+          "$RUNNER_TEMP/bin/folo" doctor --json | grep -q '"web_folo_wasm":true'
           # A tampered archive must be refused.
           cp -r assets bad && echo junk >> bad/folo-x86_64-unknown-linux-gnu.tar.gz
           if sh scripts/install.sh --base-url "$PWD/bad" --dir "$RUNNER_TEMP/bad"; then exit 1; fi
@@ -309,5 +402,9 @@ jobs:
           $withDesktop = Test-Path (Join-Path $assets 'folo-desktop-x86_64-pc-windows-msvc.zip')
           ./scripts/install.ps1 -BaseUrl $assets -InstallDir $dir -NoModifyPath -Desktop:$withDesktop
           if ($withDesktop -and -not (Test-Path (Join-Path $dir 'folo-desktop.exe'))) { throw 'folo-desktop.exe was not installed' }
+          if ($withDesktop) {
+            & (Join-Path $dir 'folo-desktop.exe') --version
+            if ($LASTEXITCODE -ne 0) { throw 'folo-desktop --version failed' }
+          }
           & (Join-Path $dir 'folo.exe') --version
           if ($LASTEXITCODE -ne 0) { throw 'folo --version failed' }

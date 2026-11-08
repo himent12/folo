@@ -20,7 +20,9 @@ param(
     # Output directory [default: web\public\folo-wasm].
     [string]$Out,
     # Unoptimised build (faster to compile).
-    [switch]$Dev
+    [switch]$Dev,
+    # Fail instead of updating Cargo.lock (release builds).
+    [switch]$Locked
 )
 $ErrorActionPreference = 'Stop'
 
@@ -57,11 +59,12 @@ if ($have -ne $want) {
 $env:RUSTFLAGS = (($env:RUSTFLAGS, '-C target-feature=+simd128') -join ' ').Trim()
 $targetDir = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path $root 'target' }
 $manifest = Join-Path $root 'Cargo.toml'
+$lockedArg = @(if ($Locked) { '--locked' })
 if ($Dev) {
-    & cargo build --manifest-path $manifest --target $target -p folo-wasm
+    & cargo build --manifest-path $manifest @lockedArg --target $target -p folo-wasm
     $wasm = Join-Path $targetDir "$target\debug\folo_wasm.wasm"
 } else {
-    & cargo build --manifest-path $manifest --release --target $target -p folo-wasm
+    & cargo build --manifest-path $manifest @lockedArg --release --target $target -p folo-wasm
     $wasm = Join-Path $targetDir "$target\release\folo_wasm.wasm"
 }
 if ($LASTEXITCODE) { exit $LASTEXITCODE }
