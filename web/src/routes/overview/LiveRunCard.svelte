@@ -27,7 +27,7 @@
     return {
       map: [
         { id: 'm95', label: 'mAP50-95', color: 'var(--chart-1)', area: true, points: live.epochs.map((e) => ({ x: e.epoch + 1, y: e.val.map50_95 })) },
-        { id: 'm50', label: 'mAP50', color: 'var(--chart-2)', points: live.epochs.map((e) => ({ x: e.epoch + 1, y: e.val.map50 })) },
+        { id: 'm50', label: 'mAP50', color: 'var(--chart-5)', points: live.epochs.map((e) => ({ x: e.epoch + 1, y: e.val.map50 })) },
       ],
       loss: [
         { id: 'raw', label: 'raw', color: 'var(--chart-1)', ghost: true, points: raw },

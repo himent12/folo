@@ -418,18 +418,14 @@
     align-items: start;
   }
   @media (max-width: 1199px) {
+    /* Six cells as a clean 3 × 2. */
     .cluster {
       grid-template-columns: repeat(3, minmax(0, 1fr));
     }
-    .cell.main {
-      grid-column: 1 / -1;
-      border-bottom: 1px solid var(--line-subtle);
-    }
-    .cell:nth-child(2),
-    .cell:nth-child(5) {
+    .cell:nth-child(4) {
       border-left: 0;
     }
-    .cell:nth-child(n + 5) {
+    .cell:nth-child(n + 4) {
       border-top: 1px solid var(--line-subtle);
     }
     .two {
@@ -450,6 +446,7 @@
       border-top: 1px solid var(--line-subtle);
     }
     .cell.main {
+      grid-column: 1 / -1;
       border-top: 0;
       border-bottom: 0;
       gap: 6px;

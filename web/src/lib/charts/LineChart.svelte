@@ -132,7 +132,17 @@
   const y = $derived(
     (yLog ? scaleLog().domain(yExtent) : scaleLinear().domain(yExtent)).range([height - margin.bottom, margin.top]),
   );
-  const xTickValues = $derived(niceTicks(xExtent[0], xExtent[1], Math.max(2, Math.min(xTicks, Math.floor(width / 70)))));
+  // When the x domain is fixed (e.g. 0..epochs), prefer a tick step that lands exactly on the end.
+  const xTickValues = $derived.by(() => {
+    const want = Math.max(2, Math.min(xTicks, Math.floor(width / 70)));
+    const [lo, hi] = xExtent;
+    if (!xDomain) return niceTicks(lo, hi, want);
+    for (let c = want; c >= 2; c--) {
+      const t = niceTicks(lo, hi, c);
+      if (t[t.length - 1] === hi) return t;
+    }
+    return niceTicks(lo, hi, want);
+  });
 
   const paths = $derived.by(() => {
     const c = curve === 'monotone' ? curveMonotoneX : curveLinear;
@@ -232,7 +242,8 @@
     return null;
   };
 
-  const tipLeft = $derived(hover ? hover.px > width * 0.6 : false);
+  let tipWidth = $state(160);
+  const tipLeft = $derived(hover ? hover.px + 12 + tipWidth > width - 4 : false);
 </script>
 
 <div class="chart">
@@ -317,7 +328,11 @@
             {#if m.x >= xExtent[0] && m.x <= xExtent[1]}
               <g class="marker" transform="translate({x(m.x)},{y(m.y)})">
                 <circle r="4.5" style:stroke={m.color ?? 'var(--chart-1)'} />
-                <text y="-10" text-anchor="middle">{m.label}</text>
+                <text
+                  y="-10"
+                  text-anchor={x(m.x) > width - margin.right - 40 ? 'end' : x(m.x) < margin.left + 40 ? 'start' : 'middle'}
+                  dx={x(m.x) > width - margin.right - 40 ? 6 : x(m.x) < margin.left + 40 ? -6 : 0}>{m.label}</text
+                >
               </g>
             {/if}
           {/each}
@@ -338,7 +353,7 @@
       {/if}
 
       {#if hover}
-        <div class="tip" class:left={tipLeft} style:--x="{hover.px}px" role="presentation">
+        <div class="tip" class:left={tipLeft} style:--x="{hover.px}px" role="presentation" bind:clientWidth={tipWidth}>
           <p class="tip-title">{xTitle ? xTitle(hover.xv) : xFormat(hover.xv)}</p>
           {#each hover.rows as r (r.s.id)}
             <p class="tip-row">
