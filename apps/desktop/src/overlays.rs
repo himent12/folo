@@ -620,8 +620,14 @@ impl FoloApp {
         let device_seg =
             seg(self, "nr-device", &["Auto", "GPU 0", "CPU"], device, window, cx, |f, i| f.device = i);
         let opt_seg = seg(self, "nr-opt", &["Auto", "SGD", "AdamW"], opt, window, cx, |f, i| f.optimizer = i);
-        let epochs_slider = self.slider("nr-epochs", epochs, 10., 300., 5., window, cx).into_any_element();
-        let lr_slider = self.slider("nr-lr0", lr0, 0.001, 0.05, 0.001, window, cx).into_any_element();
+        // A typed value outside a slider's preset range widens it (rather than pinning the thumb at
+        // an end, where one arrow press would jump to the end value).
+        let epochs_slider = self
+            .slider("nr-epochs", epochs, 10f32.min(epochs), 300f32.max(epochs), 5., window, cx)
+            .into_any_element();
+        let lr_slider = self
+            .slider("nr-lr0", lr0, 0.001f32.min(lr0), 0.05f32.max(lr0), 0.001, window, cx)
+            .into_any_element();
         let mosaic_slider = self.slider("nr-mosaic", mosaic, 0., 1., 0.05, window, cx).into_any_element();
         let mixup_slider = self.slider("nr-mixup", mixup, 0., 0.5, 0.05, window, cx).into_any_element();
         let scale = self.new_run.as_ref().map_or(0.5, |f| f.scale);
@@ -629,7 +635,9 @@ impl FoloApp {
         let note = self.new_run.as_ref().and_then(|f| f.note.clone());
         let flip_slider = self.slider("nr-fliplr", fliplr, 0., 1., 0.05, window, cx).into_any_element();
         let close_mosaic = self.new_run.as_ref().map_or(10., |f| f.close_mosaic);
-        let close_slider = self.slider("nr-close", close_mosaic, 0., 30., 1., window, cx).into_any_element();
+        let close_slider = self
+            .slider("nr-close", close_mosaic, 0., 30f32.max(close_mosaic), 1., window, cx)
+            .into_any_element();
         const PARAMS: [&str; 5] = [
             "2.63 M params · 6.6 GFLOPs",
             "9.42 M params · 21.5 GFLOPs",
@@ -749,7 +757,34 @@ impl FoloApp {
             .flex_col()
             .gap(px(if short { 10. } else { 14. }))
             .px(px(20.))
-            .pb(px(20.))
+            // 16 px past the last control for the footer's fade, so it never dims a control.
+            .pb(px(36.))
+            // Errors lead the form, where a failed submit is seen (the dialog scrolls to the top).
+            .when_some(error.clone(), |d, e| {
+                d.child(
+                    div()
+                        .flex()
+                        .items_start()
+                        .gap(px(8.))
+                        .p(px(10.))
+                        .rounded(px(radius::MD))
+                        .bg(t.danger_muted)
+                        .child(icon("icons/circle-alert.svg", 14., t.danger_solid))
+                        // The server's hint says what to change (device_not_found lists the
+                        // adapters there are; gpu_out_of_memory names batch, imgsz and arch).
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(2.))
+                                .min_w_0()
+                                .child(text(ty::SM, t.danger_text).whitespace_normal().child(e.message))
+                                .when_some(e.hint, |d, h| {
+                                    d.child(text(ty::XS, t.text_secondary).whitespace_normal().child(h))
+                                }),
+                        ),
+                )
+            })
             .child(
                 div().flex().gap(px(16.)).child(div().flex_1().child(field("Name", name_box, None))).child(
                     div().flex_1().child(field(
@@ -889,31 +924,6 @@ impl FoloApp {
                         .bg(t.info_muted)
                         .child(icon("icons/info.svg", 14., t.info_solid))
                         .child(text(ty::SM, t.text_primary).child(n)),
-                )
-            })
-            .when_some(error.clone(), |d, e| {
-                d.child(
-                    div()
-                        .flex()
-                        .items_start()
-                        .gap(px(8.))
-                        .p(px(10.))
-                        .rounded(px(radius::MD))
-                        .bg(t.danger_muted)
-                        .child(icon("icons/circle-alert.svg", 14., t.danger_solid))
-                        // The server's hint says what to change (device_not_found lists the
-                        // adapters there are; gpu_out_of_memory names batch, imgsz and arch).
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap(px(2.))
-                                .min_w_0()
-                                .child(text(ty::SM, t.danger_text).whitespace_normal().child(e.message))
-                                .when_some(e.hint, |d, h| {
-                                    d.child(text(ty::XS, t.text_secondary).whitespace_normal().child(h))
-                                }),
-                        ),
                 )
             });
         let images = ds.as_ref().map_or(0, |d| d.splits.train);
@@ -1355,52 +1365,31 @@ impl FoloApp {
                     cx.notify();
                 }),
             );
-            // Quiet links over the stack (no card of their own), and while folded the edges of the
-            // earlier toasts peeking out behind the latest one.
-            div()
-                .flex()
-                .flex_col()
-                .child(
-                    // Docked on the stack's edges (no gap for the page to show through).
-                    div().flex().justify_end().child(
-                        // A compact pill, right-aligned: clearly controls, not another notification.
-                        div()
-                            // The pill, edges and cards stop pointer events; the space beside the
-                            // pill stays the page's.
-                            .occlude()
-                            .flex()
-                            .gap(px(2.))
-                            .p(px(2.))
-                            .rounded(px(radius::MD))
-                            .bg(t.bg_raised)
-                            .border_1()
-                            .border_color(t.line_default)
-                            .shadow(t.shadow_sm())
-                            .child(show)
-                            .child(dismiss),
-                    ),
-                )
-                .when(!expanded, |d| {
-                    let edge = |inset: f32, a: f32| {
-                        div()
-                            .occlude()
-                            .mx(px(inset))
-                            .h(px(6.))
-                            .rounded_t(px(radius::LG))
-                            // Opaque: the edges are cards behind the latest one, not tints the
-                            // page shows through. line.default, so the toast's top edge isn't doubled.
-                            .bg(if a < 1. {
-                                crate::theme::over(t.bg_raised, crate::theme::fade(t.bg_app, 1. - a))
-                            } else {
-                                t.bg_raised
-                            })
-                            .border_1()
-                            .border_b_0()
-                            .border_color(t.line_default)
-                    };
-                    d.when(older > 1, |d| d.child(edge(16., 0.6))).child(edge(8., 1.))
-                })
+            (show.into_any_element(), dismiss.into_any_element())
         });
+        // While folded, the earlier toasts' edges peek out behind the latest one: opaque cards (not
+        // tints the page shows through), line.default so the toast's own top edge isn't doubled.
+        let peeks = (older > 0 && !expanded).then(|| {
+            let edge = |inset: f32, a: f32| {
+                div()
+                    .occlude()
+                    .mx(px(inset))
+                    .h(px(6.))
+                    .rounded_t(px(radius::LG))
+                    .bg(if a < 1. {
+                        crate::theme::over(t.bg_raised, crate::theme::fade(t.bg_app, 1. - a))
+                    } else {
+                        t.bg_raised
+                    })
+                    .border_1()
+                    .border_b_0()
+                    .border_color(t.line_default)
+            };
+            div().flex().flex_col().when(older > 1, |d| d.child(edge(16., 0.6))).child(edge(8., 1.))
+        });
+        // The stack's controls live in the newest card's action row (no floating pill).
+        let mut stack_ctrls = folded;
+        let newest = toasts.len().saturating_sub(1);
         div()
             .absolute()
             .bottom(px(24.))
@@ -1408,9 +1397,10 @@ impl FoloApp {
             .w(px(360.))
             .flex()
             .flex_col()
-            .gap(px(if folded.is_some() { 0. } else { 8. }))
-            .children(folded)
-            .children(toasts.into_iter().map(|(id, tone, title, body, action)| {
+            .gap(px(if peeks.is_some() { 0. } else { 8. }))
+            .children(peeks)
+            .children(toasts.into_iter().enumerate().map(|(i, (id, tone, title, body, action))| {
+                let ctrls = if i == newest { stack_ctrls.take() } else { None };
                 let action_btn = action.map(|(label, a)| {
                     self.button(
                         &format!("toast-act-{id}"),
@@ -1468,7 +1458,18 @@ impl FoloApp {
                                 text(ty::BASE, t.text_primary).font_weight(FontWeight::MEDIUM).child(title),
                             )
                             .when_some(body, |d, b| d.child(text(ty::SM, t.text_secondary).child(b)))
-                            .when_some(action_btn, |d, b| d.child(div().pt(px(8.)).flex().child(b))),
+                            .when(action_btn.is_some() || ctrls.is_some(), |d| {
+                                d.child(
+                                    div()
+                                        .pt(px(8.))
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(4.))
+                                        .children(action_btn)
+                                        .child(div().flex_1())
+                                        .when_some(ctrls, |d, (show, dismiss)| d.child(show).child(dismiss)),
+                                )
+                            }),
                     )
                     .child(
                         self.icon_button(
@@ -1500,10 +1501,10 @@ impl FoloApp {
         let index = insp.index.min(n - 1);
         let (zoom, pan, hover) = (insp.zoom, insp.pan, insp.hover_box);
         let Some(meta) = self.filtered_image(&ds_id, index).cloned() else { return div().into_any_element() };
-        // A keyboard-focused label row highlights its box like the pointer does.
-        let hover = hover.or_else(|| {
-            (0..meta.boxes.len()).find(|i| self.fh(format!("insp-box-{i}"), cx).is_focused(window))
-        });
+        // A keyboard-focused label row highlights its box like the pointer does; while the keyboard
+        // is in use it wins over a pointer hover left behind on the image.
+        let focused = (0..meta.boxes.len()).find(|i| self.fh(format!("insp-box-{i}"), cx).is_focused(window));
+        let hover = if self.kb { focused.or(hover) } else { hover.or(focused) };
         let classes = self.store.dataset_summary(&ds_id).map(|d| d.classes.clone()).unwrap_or_default();
         let img = self
             .image(&ds_id, &meta.id, ImgKind::Full, cx)
@@ -1836,54 +1837,39 @@ impl FoloApp {
                     }),
             )
             .child(
-                div()
-                    .p(px(12.))
-                    .flex()
-                    .flex_wrap()
-                    .gap(px(10.))
-                    .border_t_1()
-                    .border_color(t.line_subtle)
-                    .child(
+                // One action per row on a fixed key column, so the keys line up and nothing wraps.
+                {
+                    let row = |keys: AnyElement, what: &'static str| {
                         div()
                             .flex()
                             .items_center()
-                            .gap(px(5.))
-                            .child(shortcut(&t, &["←", "→"]))
-                            .child(text(ty::XS, t.text_tertiary).child("browse · pan when zoomed")),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(5.))
-                            .child(shortcut(&t, &["PgUp", "PgDn"]))
-                            .child(text(ty::XS, t.text_tertiary).child("browse")),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(5.))
-                            .child(kbd(&t, "Scroll"))
-                            .child(shortcut(&t, &["+", "−"]))
-                            .child(text(ty::XS, t.text_tertiary).child("zoom")),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(5.))
-                            .child(kbd(&t, "0"))
-                            .child(text(ty::XS, t.text_tertiary).child("fit")),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(5.))
-                            .child(kbd(&t, "Drag"))
-                            .child(text(ty::XS, t.text_tertiary).child("pan")),
-                    ),
+                            .child(div().w(px(96.)).flex_none().flex().items_center().gap(px(4.)).child(keys))
+                            .child(text(ty::XS, t.text_tertiary).child(what))
+                    };
+                    div()
+                        .p(px(12.))
+                        .flex()
+                        .flex_col()
+                        .gap(px(6.))
+                        .border_t_1()
+                        .border_color(t.line_subtle)
+                        .child(row(
+                            shortcut(&t, &["←", "→"]).into_any_element(),
+                            "previous / next · pan when zoomed",
+                        ))
+                        .child(row(shortcut(&t, &["PgUp", "PgDn"]).into_any_element(), "previous / next"))
+                        .child(row(
+                            div()
+                                .flex()
+                                .gap(px(4.))
+                                .child(kbd(&t, "Scroll"))
+                                .child(shortcut(&t, &["+", "−"]))
+                                .into_any_element(),
+                            "zoom",
+                        ))
+                        .child(row(kbd(&t, "0").into_any_element(), "fit"))
+                        .child(row(kbd(&t, "Drag").into_any_element(), "pan"))
+                },
             );
         let header = div()
             .h(px(48.))

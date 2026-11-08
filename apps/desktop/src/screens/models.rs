@@ -675,7 +675,14 @@ impl FoloApp {
                     Some(_) => (alpha(t.class_stroke(c.class), 0.25), 1.25),
                     None => (t.class_stroke(c.class), 2.),
                 };
-                Series::new(name, color, pts).width(width).live(true)
+                // A line pattern per class as well as a colour (solid, dashed, dotted, repeating),
+                // matched by the legend's swatch: the curves read apart without colour.
+                let s = Series::new(name, color, pts).width(width).live(true);
+                match pr_pattern(c.class) {
+                    1 => s.dashed(),
+                    2 => s.dotted(),
+                    _ => s,
+                }
             })
             .collect();
         let view = cx.entity().downgrade();
@@ -718,7 +725,12 @@ impl FoloApp {
                             cx.notify();
                         }
                     }))
-                    .child(div().w(px(12.)).h(px(2.)).flex_none().rounded_full().bg(t.class_stroke(class)))
+                    .child(div().w(px(12.)).flex_none().child(crate::ui::line_swatch(
+                        t.class_stroke(class),
+                        pr_pattern(class) == 1,
+                        pr_pattern(class) == 2,
+                        2.,
+                    )))
                     .child(
                         // A known width, so long class names end in "…" (GPUI truncates against
                         // the pre-shrink width).
@@ -1305,6 +1317,12 @@ impl FoloApp {
 /// line up to the pixel).
 fn num_cell(w: f32, content: impl IntoElement) -> gpui::Div {
     div().w(px(w)).flex_none().flex().justify_end().child(content)
+}
+
+/// A PR class curve's line pattern: 0 solid, 1 dashed, 2 dotted (by class, so it never changes
+/// with sort order or isolation).
+fn pr_pattern(class: u32) -> u32 {
+    class % 3
 }
 
 /// A column heading's short form: the first three letters and a full stop ("hexagon" → "hex.").

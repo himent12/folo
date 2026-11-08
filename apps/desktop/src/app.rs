@@ -461,6 +461,9 @@ pub struct FoloApp {
 
     pub drag: Option<Drag>,
     pub slider_bounds: Rc<RefCell<HashMap<&'static str, Bounds<Pixels>>>>,
+    /// Each slider's value range as last rendered (a range can widen to hold a typed value), so
+    /// drags and keys map a position back to the value the slider shows.
+    pub slider_ranges: RefCell<HashMap<&'static str, (f32, f32)>>,
 
     subscriptions: HashMap<String, crate::api::Subscription>,
     /// Runs whose event stream is being opened (off the UI thread).
@@ -582,6 +585,7 @@ impl FoloApp {
             play_view: Rc::new(std::cell::Cell::new(None)),
             drag: None,
             slider_bounds: Rc::new(RefCell::new(HashMap::new())),
+            slider_ranges: RefCell::new(HashMap::new()),
             subscriptions: HashMap::new(),
             subscribing: Default::default(),
             sub_attempt: HashMap::new(),
@@ -1576,6 +1580,10 @@ impl FoloApp {
         let name = form.name.read(cx).text().trim().to_string();
         if name.is_empty() {
             form.error = Some(ApiError::new("invalid_name", "Give the run a name."));
+            // The error shows at the top of the form, by the Name field: go there.
+            let name_fh = form.name.read(cx).focus_handle(cx);
+            window.focus(&name_fh);
+            self.dialog_scroll.set_offset(point(px(0.), px(0.)));
             cx.notify();
             return;
         }
@@ -1621,15 +1629,16 @@ impl FoloApp {
                     let queued =
                         this.store.run(&id).is_some_and(|r| r.status == crate::api::RunStatus::Queued);
                     if queued {
-                        let rid = id.clone();
+                        // The run's page opens next, so the action is the queue it waits in.
                         this.toast_with(
                             Tone::Info,
                             format!("Queued {name}"),
                             Some("It starts when the GPU is free.".into()),
                             Some((
-                                "Open run".into(),
+                                "View queue".into(),
                                 Rc::new(move |this: &mut Self, w: &mut Window, cx: &mut Context<Self>| {
-                                    this.navigate(Route::Run(rid.clone()), w, cx)
+                                    this.run_filter = RunFilter::Active;
+                                    this.navigate(Route::Runs, w, cx)
                                 }),
                             )),
                             cx,
@@ -1650,6 +1659,8 @@ impl FoloApp {
                         f.submitting = false;
                         f.error = Some(e);
                     }
+                    // The error leads the form: scroll it into view.
+                    this.dialog_scroll.set_offset(point(px(0.), px(0.)));
                 }
             },
         );

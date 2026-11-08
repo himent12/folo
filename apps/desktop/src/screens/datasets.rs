@@ -429,6 +429,10 @@ impl FoloApp {
                         cx,
                         act(|this, _, cx| {
                             this.ds_empty_only = !this.ds_empty_only;
+                            // Empty images have no class: the two filters can't both apply.
+                            if this.ds_empty_only {
+                                this.ds_class = None;
+                            }
                             this.ds_tab = DsTab::Images;
                             this.grid_scroll.scroll_to_item(0, gpui::ScrollStrategy::Top);
                             cx.notify();
@@ -475,10 +479,12 @@ impl FoloApp {
                             )
                             .child(metric(&t, broken.to_string(), "", step, ty::SM))
                             // Split by severity when the server reports it, then the copy action.
-                            .child(match self.store.issues.get(&ds.id).and_then(|l| l.ready()) {
-                                Some(c) if c.error + c.warning > 0 => severity_detail(&t, c),
-                                _ => broken_detail(&t, narrow_strip),
-                            })
+                            .when_some(
+                                self.store.issues.get(&ds.id).and_then(|l| l.ready()).filter(|c| c.error + c.warning > 0),
+                                |d, c| d.child(severity_detail(&t, c)),
+                            )
+                            // The action, named (the tile copies `folo dataset check`).
+                            .child(broken_detail(&t, narrow_strip))
                     } else {
                         stat(
                             &t,
@@ -564,6 +570,9 @@ impl FoloApp {
                     cx,
                     act(move |this, _, cx| {
                         this.ds_class = if this.ds_class == Some(i as u32) { None } else { Some(i as u32) };
+                        if this.ds_class.is_some() {
+                            this.ds_empty_only = false;
+                        }
                         this.grid_scroll.scroll_to_item(0, gpui::ScrollStrategy::Top);
                         cx.notify();
                     }),
@@ -616,7 +625,9 @@ impl FoloApp {
             .flex()
             .items_center()
             .gap(px(6.))
-            .child(text(ty::XS, t.text_tertiary).mr(px(2.)).child("Filter images by class"))
+            .child(
+                text(ty::XS, t.text_tertiary).mr(px(2.)).child("Filter images by class · counts are boxes"),
+            )
             .children(chips)
             .when(self.ds_empty_only, |d| {
                 d.child(self.chip(
@@ -1084,8 +1095,7 @@ fn broken_detail(t: &crate::theme::Theme, narrow: bool) -> gpui::Div {
     if narrow { copy_cmd(t, "Copy command") } else { copy_cmd(t, "Copy check command") }
 }
 
-/// "2 errors · 1 warning" in their severity colours, then the copy icon (the tile copies the
-/// check command).
+/// "2 errors · 1 warning" in their severity colours.
 fn severity_detail(t: &crate::theme::Theme, c: &crate::api::IssueCounts) -> gpui::Div {
     let n = |k: u64, one: &str, many: &str| format!("{k} {}", if k == 1 { one } else { many });
     div()
@@ -1107,7 +1117,6 @@ fn severity_detail(t: &crate::theme::Theme, c: &crate::api::IssueCounts) -> gpui
                     .child(n(c.warning, "warning", "warnings")),
             )
         })
-        .child(div().flex_none().ml(px(2.)).child(icon("icons/copy.svg", 12., t.text_secondary)))
 }
 
 fn copy_cmd(t: &crate::theme::Theme, label: &'static str) -> gpui::Div {

@@ -529,11 +529,14 @@ impl FoloApp {
         };
         let no_models = models.is_empty() && self.store.models.ready().is_some();
         let run_on = self.run_on(window, cx);
+        // Short windows: a tighter control block, so more detection rows show without scrolling.
+        let tight = window.viewport_size().height < px(700.);
         let controls = div()
             .flex()
             .flex_col()
-            .gap(px(14.))
-            .p(px(16.))
+            .gap(px(if tight { 8. } else { 14. }))
+            .px(px(16.))
+            .py(px(if tight { 10. } else { 16. }))
             .child(
                 div()
                     .flex()
