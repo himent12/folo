@@ -51,7 +51,7 @@ export function mergeBy<T>(a: T[], b: T[], key: (x: T) => number): T[] {
  * Steps per epoch is fixed for a run once the trainer has counted it (0 before): a snapshot taken earlier, even one
  * applied later, never takes a learned figure back.
  */
-function keepStepsPerEpoch(next: Run, cur: Run | null | undefined): Run {
+export function keepStepsPerEpoch(next: Run, cur: Run | null | undefined): Run {
   return !(next.steps_per_epoch > 0) && cur?.id === next.id && cur.steps_per_epoch > 0 ? { ...next, steps_per_epoch: cur.steps_per_epoch } : next;
 }
 

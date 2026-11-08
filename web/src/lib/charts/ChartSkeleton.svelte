@@ -5,12 +5,21 @@
    */
   import Skeleton from '$lib/ui/Skeleton.svelte';
 
-  let { height = 200, legend = true }: { height?: number; legend?: boolean } = $props();
+  let {
+    height = 200,
+    legend = true,
+    legendRows = 1,
+  }: {
+    height?: number;
+    legend?: boolean;
+    /** Rows the loaded legend takes (it wraps on narrow cards). */
+    legendRows?: number;
+  } = $props();
 </script>
 
 <div class="cs" aria-hidden="true">
   {#if legend}
-    <div class="legend"><Skeleton w="48px" h="12px" /><Skeleton w="96px" h="12px" /><Skeleton w="80px" h="12px" /></div>
+    <div class="legend" style:height="{legendRows * 16 + (legendRows - 1) * 4}px"><Skeleton w="48px" h="12px" /><Skeleton w="96px" h="12px" /><Skeleton w="80px" h="12px" /></div>
   {/if}
   <div class="plot" style:height="{height}px">
     <div class="ticks">{#each [0, 1, 2, 3, 4] as i (i)}<Skeleton w="20px" h="10px" />{/each}</div>

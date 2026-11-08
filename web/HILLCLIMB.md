@@ -32,6 +32,7 @@ Lines: 1 hierarchy & layout · 2 typography · 3 colour & theming · 4 spacing r
 ## Per-line minimum (lower of the two reviewers)
 
 Regressions show up here first: any line that drops from the previous round is fixed or reverted before new work.
+Rounds with one reviewer are marked; their minimum is that reviewer's row.
 
 | Round | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | min |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
@@ -40,6 +41,10 @@ Regressions show up here first: any line that drops from the previous round is f
 | r3 | 7 | 7 | 6 | 7 | 7 | 6 | 7 | 7 | 8 | 7 | 7 | 7 | 6 |
 | r4 | 7 | 6 ↓ | 6 | 6.5 ↓ | 6.5 ↓ | 5.5 ↓ | 7 | 6 ↓ | 7.5 ↓ | 7 | 6.5 ↓ | 6.5 ↓ | 5.5 |
 | r5 | 7.5 ↑ | 7.5 ↑ | 8 ↑ | 7.5 ↑ | 8 ↑ | 7.5 ↑ | 7.5 ↑ | 7.5 ↑ | 8 ↑ | 7.5 ↑ | 7 ↑ | 7.5 ↑ | 7 |
+| r6 (Sol only) | 7.5 | 8 | 8 | 8 | 7.5 | 7 | 7.5 | 7.5 | 8 | 7.5 | 7 | 7.5 | 7 |
+| r7 | 7.5 | 7.5 | 8 | 7.5 | 7.5 | 7.5 | 8 | 7.5 | 8 | 7.5 | 7 | 8 | 7 |
+| r8 (Sol only) | 8 | 8 | 8 | 8.5 | 8 | 7 | 7.5 | 8 | 8.5 | 8 | 8 | 8 | 7 |
+| r9 (Sol only) | 8 | 8 | 8 | 8 | 8 | 7.5 | 7.5 | 8 | 8.5 | 8 | 7 | 7.5 | 7 |
 
 r4 lowest lines: 6 data visualisation (5.5), 2 typography, 3 colour, 8 consistency (6). Diagnosis: 2, 3 and 8 are
 structural (no single rule for mono vs sans, class colours that changed between legend and box, two accents in light),
@@ -49,4 +54,3 @@ comparison and dense COCO evaluation screens need a different layout, not tweaks
 r5 (after the design-director pass, `DESIGN_DIRECTION.md`): every line up, no line below 7 for the first time. Lowest:
 11 responsiveness (7 from both). Opus could open only 71 of 132 shots (image request limit), so its r5 row is partial;
 from r6 reviewers pace image loading and retry.
-

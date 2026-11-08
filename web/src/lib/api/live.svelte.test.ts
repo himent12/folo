@@ -3,7 +3,7 @@ import { flushSync } from 'svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Api, RunEventHandlers } from './client';
 import { hub } from './index.svelte';
-import { LiveRun, mergeBy } from './live.svelte';
+import { keepStepsPerEpoch, LiveRun, mergeBy } from './live.svelte';
 import { MockApi } from './mock';
 import type { Run, RunMetrics, Step } from './types';
 
@@ -22,6 +22,20 @@ describe('mergeBy', () => {
     const m = mergeBy(a, b, (s) => s.step);
     expect(m.map((s) => s.step)).toEqual([1, 2, 3, 4]);
     expect(m[2]!.lr).toBe(9);
+  });
+});
+
+describe('keepStepsPerEpoch', () => {
+  const run = (id: string, spe: number) => ({ id, steps_per_epoch: spe }) as Run;
+  it('keeps a learned figure over a snapshot that still says 0', () => {
+    expect(keepStepsPerEpoch(run('a', 0), run('a', 12)).steps_per_epoch).toBe(12);
+  });
+  it("takes the snapshot's own figure when it has one", () => {
+    expect(keepStepsPerEpoch(run('a', 10), run('a', 12)).steps_per_epoch).toBe(10);
+  });
+  it("never carries one run's figure to another", () => {
+    expect(keepStepsPerEpoch(run('b', 0), run('a', 12)).steps_per_epoch).toBe(0);
+    expect(keepStepsPerEpoch(run('b', 0), null).steps_per_epoch).toBe(0);
   });
 });
 
