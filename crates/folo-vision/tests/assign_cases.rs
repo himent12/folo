@@ -83,6 +83,22 @@ fn conflicts_go_to_highest_overlap() {
 }
 
 #[test]
+fn zero_alignment_candidates_are_kept_with_zero_score() {
+    // 12 disjoint gts with one anchor each; every prediction misses every gt, so all alignments are 0. FOLO ranks
+    // only candidates (documented parity exception), so each gt keeps its single anchor, with target score 0.
+    let gts: Vec<Xyxy> =
+        (0..12).map(|i| Xyxy::new(10.0 * i as f32, 0.0, 10.0 * i as f32 + 10.0, 10.0)).collect();
+    let anchors: Vec<[f32; 2]> = (0..12).map(|i| [10.0 * i as f32 + 5.0, 5.0]).collect();
+    let preds = vec![Xyxy::new(500.0, 500.0, 510.0, 510.0); 12];
+    let labels = vec![0u32; 12];
+    let a = assign(&[0.9; 12], 1, &preds, &anchors, &gts, &labels, &TalConfig::default());
+    assert_eq!(a.num_fg, 12);
+    assert_eq!(a.target_gt, (0..12).collect::<Vec<_>>());
+    assert!(a.target_scores.iter().all(|&s| s == 0.0));
+    assert!(a.dense_scores(1).iter().all(|&s| s == 0.0));
+}
+
+#[test]
 fn no_gts_is_all_background() {
     let a = assign(
         &[0.9; 6],

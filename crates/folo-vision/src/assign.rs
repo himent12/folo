@@ -8,6 +8,13 @@
 //!    terms, so tiny boxes get the same overlaps as upstream) and
 //!    `align = score[a, class(g)]^alpha * overlap^beta` (`alpha = 0.5`, `beta = 6`). Non-candidates have both 0.
 //! 3. **Top-k.** Each gt keeps its `topk = 10` candidates with the largest `align` (ties: lower anchor index).
+//!    *Parity exception:* Ultralytics runs `torch.topk` over **all** anchors (non-candidates scored 0) and only then
+//!    intersects with the candidate mask, so when a gt has fewer than `topk` candidates with non-zero alignment,
+//!    which zero-alignment anchors fill the remaining slots depends on `torch.topk`'s unspecified tie order (and
+//!    differs between CPU and CUDA). FOLO ranks only the candidates, deterministically, so such a gt keeps its
+//!    zero-alignment candidates. Those anchors get a target score of exactly 0, so with Ultralytics' loss (box and
+//!    DFL terms weighted by the target score, BCE towards 0) they contribute the same as background; only
+//!    `fg_mask` / `num_fg` can differ.
 //! 4. **Conflicts.** An anchor selected by several gts goes to the gt with the largest `overlap` over *all* gts
 //!    (first on ties), exactly like Ultralytics' `select_highest_overlaps`.
 //! 5. **Targets.** Each foreground anchor gets its gt's class and box, and a soft score
