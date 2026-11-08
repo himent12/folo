@@ -61,5 +61,6 @@ crates/folo-wasm     FOLO detectors in the browser (wasm-bindgen; WebGPU or the 
 web/                 FOLO Studio (Svelte 5 + TypeScript + Vite, custom design system, no UI kit)
 apps/desktop/        FOLO Desktop (Rust + GPUI, its own cargo workspace; talks to folo-server over docs/API.md)
 bench/baselines/     incumbent (Ultralytics) benchmark scripts + raw results; numbers and FOLO targets in docs/BENCHMARKS.md
-docs/                ARCHITECTURE, MODEL (detector spec), API (HTTP contract), CLI, FORMAT (.folo), ROADMAP, BOAT, BENCHMARKS, WASM
+docs/                QUICKSTART, ARCHITECTURE, MODEL (detector spec), API (HTTP contract), CLI, MCP, FORMAT (.folo), ROADMAP, BOAT,
+                     BENCHMARKS, WASM, ...; docs/img holds the README screenshots
 ```

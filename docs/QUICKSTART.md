@@ -1,0 +1,222 @@
+# FOLO quickstart
+
+This walkthrough takes you from a fresh checkout to a trained detector: on synthetic data first, then on your own
+YOLO or COCO folder. After that it covers fine-tuning, evaluation, export, FOLO Studio, and running the model in a
+browser. Every command here was run on the dev machine (Windows 11, RTX 4080 SUPER); the timings come from it. For
+the full flag lists, see [CLI.md](CLI.md) or `folo describe --json`.
+
+## 1. Get `folo`
+
+You need Rust stable and, for training at speed, a GPU with Vulkan, DX12 or Metal. The GPU kernels are FOLO's own
+WGSL on wgpu, so there is no CUDA or PyTorch to install (`folo doctor` shows whether your adapter qualifies). Without a usable GPU, `--device auto` falls back to the
+CPU, which is about 25× slower to train.
+
+```sh
+git clone https://github.com/himent12/folo && cd folo
+cargo folo doctor        # builds the CLI on first use (a few minutes), then prints the machine report
+```
+
+`cargo folo ...` is an alias for `cargo run --release -p folo-cli -- ...` (`.cargo/config.toml`). Every `folo`
+command below works as `cargo folo` from the checkout. You can also put the built binary on your `PATH`
+(`target/release/folo`, or `cargo install --path crates/folo-cli`).
+
+`folo doctor` lists your GPU adapters and the one FOLO picks (`FOLO uses [0] NVIDIA GeForce RTX 4080 SUPER
+(Vulkan)`). To choose a different one, set `FOLO_GPU_ADAPTER=<index or name substring>`, or limit the backends with
+`FOLO_GPU_BACKEND=vulkan,dx12,metal` ([GPU.md](GPU.md)).
+
+Prebuilt binaries with Studio embedded are planned for tagged releases (`scripts/install.sh`, `scripts/install.ps1`,
+[RELEASING.md](RELEASING.md)). No release has been published yet.
+
+## 2. A first model on synthetic data
+
+```sh
+folo dataset synth datasets/shapes --images 1000 --imgsz 320
+folo dataset stats datasets/shapes
+folo train --data datasets/shapes --model folo-n --imgsz 320 --epochs 30
+```
+
+- `dataset synth` writes a labelled YOLO dataset of circles, squares and triangles: 800 train and 200 val images,
+  in about 1 s. `--classes` takes up to 8 names, and `circle`, `square`, `triangle`, `star`, `ring`, `cross`,
+  `hexagon` and `heart` each get their own shape.
+- `train` uses the GPU when it finds one. Each epoch shows a progress bar (losses, img/s, ETA) and then one row of
+  validation metrics. On the dev machine this run took 137 s and ended at **mAP50 0.948, mAP50-95 0.814**. The GPU
+  was shared with other jobs, which slowed some epochs.
+
+The run folder is `runs/<dataset>-<size>/`, here `runs/shapes-n/`. If that folder already exists, a numeric suffix
+is added (`--project` and `--name` override both parts). It contains:
+
+| file | what |
+|---|---|
+| `weights/best.folo` | the checkpoint with the best validation mAP50-95: EMA weights, optimizer and schedule |
+| `weights/last.folo` | the latest epoch's checkpoint, for `--resume` |
+| `metrics.jsonl` | every event of the run: each step's losses, each epoch's metrics, the logs |
+| `config.json`, `samples/` | the resolved settings, and validation predictions per epoch |
+
+If you stop a run with Ctrl+C, it stops after the current batch and keeps the last finished epoch. Continue it,
+bit-exactly, with `folo train --resume runs/shapes-n/weights/last.folo`.
+
+## 3. Predict and evaluate
+
+```sh
+folo predict --model runs/shapes-n/weights/best.folo datasets/shapes/images/val --save runs/shapes-n/pred
+folo val --model runs/shapes-n/weights/best.folo --data datasets/shapes
+```
+
+`predict` takes images or folders (it searches folders recursively) and prints the boxes for each image.
+`--save DIR` writes copies of the images with the boxes drawn on them. The defaults are `--conf 0.25 --iou 0.7
+--max-det 300`. On the 200 val images above, the mean was 9.2 ms per image end to end.
+
+`val` reports mAP50, mAP50-95, precision and recall, overall and per class, computed as pycocotools does
+([METRICS.md](METRICS.md)). Add `--split test` to evaluate on a test split.
+
+## 4. Train on your own data
+
+FOLO reads YOLO and COCO datasets as they are, including Roboflow exports. You can pass a folder, a `data.yaml` or a
+COCO instances `.json` ([DATA.md](DATA.md) has the detection rules).
+
+**YOLO**: images, plus one `.txt` per image holding `class cx cy w h` lines (normalised to 0–1):
+
+```
+my-data/
+  data.yaml            # names: [cat, dog]   (optional: path, train, val, test)
+  images/train/*.jpg   images/val/*.jpg
+  labels/train/*.txt   labels/val/*.txt     # same file stems as the images; a missing file = background image
+```
+
+**COCO**: `annotations/instances_<split>.json` with the images under `images/<split>/`, next to the JSON, or in a
+folder named after the split:
+
+```
+my-coco/
+  annotations/instances_train.json   annotations/instances_val.json
+  images/train/*.jpg                 images/val/*.jpg
+```
+
+Check the data before you spend GPU time on it:
+
+```sh
+folo dataset check my-data --fix-dry-run   # every broken label, corrupt image, duplicate, out-of-range box; exit 1 if any
+folo dataset stats my-data                 # class balance, box sizes, boxes per image
+folo dataset convert my-coco my-yolo --to yolo   # convert between YOLO and COCO (images are copied unchanged)
+```
+
+Then train. The defaults follow [MODEL.md](MODEL.md) §8: 100 epochs, batch 16, 640 px, `--optimizer auto`, mosaic
+with the last 10 epochs mosaic-free, HSV, flips, scale and translate jitter, and early stopping after
+`--patience 100` epochs:
+
+```sh
+folo train --data my-data --model folo-s --epochs 100 --imgsz 640
+```
+
+Things to know:
+- **Sizes**: the sizes are `folo-n`, `folo-s`, `folo-m`, `folo-l` and `folo-x`. folo-n is 2.6 M parameters and
+  6.5 GFLOPs at 640; folo-s is 9.5 M and 21.6 GFLOPs.
+- **Small objects**: use a larger `--imgsz` (a multiple of 32). [examples/r6](../examples/r6/README.md) shows what
+  640 px costs on far-away targets.
+- **Data loading**: with large JPEGs and mosaic, the data loader can set the pace. `--workers N` (default
+  `min(cores, 8)`) adds decode threads.
+- **Device**: `--device cpu` or `--device gpu:<n>` pins the device. `gpu:<n>` exits with code 4 when no usable
+  adapter is found.
+- **Watching a run**: add `--json` and read stdout line by line. Each `epoch` record carries the validation metrics,
+  and the run ends with a `done` record that names the weights.
+
+Two complete recipes with their results: [examples/shapes](../examples/shapes/README.md) (the convergence gate, CPU
+vs GPU) and [examples/r6](../examples/r6/README.md) (2,030 real gameplay frames, from scratch).
+
+## 5. Fine-tune
+
+Pass a `.folo` file instead of an architecture name to start from those weights:
+
+```sh
+folo train --data my-data --model runs/shapes-n/weights/best.folo --epochs 30 --imgsz 320
+```
+
+The tensors that match are loaded. If your dataset's class list differs from the weights' classes, the class outputs
+are re-initialised, and everything else is kept. As a check: fine-tuning the shapes model above on a new
+`star, ring, heart` dataset reached mAP50 0.32 after 2 epochs, while a from-scratch model is near 0 at that point.
+FOLO ships **no pretrained weights yet**, so for now you fine-tune from your own runs.
+
+`--resume` is different: it continues an *interrupted* run with its stored settings. To train further after a run
+**completed**, start a new run with `--model .../best.folo`.
+
+## 6. Export
+
+```sh
+folo export --model runs/shapes-n/weights/best.folo                  # → runs/shapes-n/weights/best-f16.folo
+folo export --model runs/shapes-n/weights/best.folo --format folo    # → best-fused.folo (f32)
+```
+
+Export fuses BatchNorm into the convolutions and keeps only the EMA weights. The default `folo-f16` stores them as
+f16: 5.2 MB for folo-n, against 42 MB for the full checkpoint. Exports load anywhere a model is expected:
+`folo predict`, `folo val`, `folo serve`'s model list and the browser. `.folo` files are valid safetensors files
+([FORMAT.md](FORMAT.md)). ONNX export is not implemented yet: `--format onnx` exits with code 4.
+
+## 7. FOLO Studio
+
+Studio is the web app for datasets, runs, models and the Playground. Build it once, then serve it:
+
+```sh
+sh scripts/build-wasm.sh        # optional: the in-browser runtime for the Playground (PowerShell: scripts\build-wasm.ps1)
+cd web && npm ci && npm run build && cd ..
+folo serve                      # http://127.0.0.1:7878
+```
+
+- **Data dir.** `folo serve` keeps its datasets, runs, models and exports in the data dir: `--data-dir`, or
+  `FOLO_DATA_DIR`, default `$FOLO_HOME` or `~/.folo`.
+- **In Studio.** Register a dataset folder, or generate a synthetic one. Start a run and follow it live, with
+  metrics, validation samples, per-class mAP and logs.
+- **Models.** Models are the finished runs' weights, plus every `.folo` file under `<data dir>/models/`. To bring in
+  a model you trained with the CLI, copy it there: `mkdir -p ~/.folo/models && cp runs/shapes-n/weights/best.folo
+  ~/.folo/models/shapes-n.folo` (with `--data-dir D`, use `D/models/`).
+- **Mock mode.** `folo serve --mock` serves deterministic demo data instead, which is handy for a look around.
+- **Ports.** If port 7878 is taken, `--port 0` picks a free one. The first `listening` line (or the `--json`
+  record) shows the URL.
+
+The desktop app (`apps/desktop`, `cargo run --release` there) shows the same screens natively and connects to the
+same server ([apps/desktop/README.md](../apps/desktop/README.md)).
+
+## 8. Run the model in a browser
+
+`crates/folo-wasm` compiles the predictor to wasm. It runs on **WebGPU** (folo-n at 640 in about 14 ms in Chrome)
+or, without WebGPU, on the wasm CPU (single-threaded, about 0.5 s) ([WASM.md](WASM.md)).
+
+- **In Studio**: build the wasm module (`sh scripts/build-wasm.sh`) *before* `npm run build`. Then the
+  Playground's "Run on" switch offers **WebGPU** and **CPU** next to **Server**. Studio downloads the model's f16
+  export from `GET /api/models/{id}/weights?format=f16` once and runs every image in the page.
+- **In your own page**:
+
+  ```js
+  import init, { FoloDetector } from "/folo-wasm/folo_wasm.js";
+  await init();
+  const bytes = new Uint8Array(await (await fetch("shapes-n-f16.folo")).arrayBuffer());   // any .folo file
+  const det = await FoloDetector.load(bytes, { backend: "auto" });                       // WebGPU, else CPU
+  const res = await det.detect(imageData, undefined, undefined, { conf: 0.25 });          // /api/predict's shape
+  ```
+
+- **Check it against the native predictor.** The page should find the same boxes as `folo predict`:
+
+  ```sh
+  folo predict --model runs/shapes-n/weights/best.folo img.jpg --imgsz 640 --device cpu --json > native.json
+  node crates/folo-wasm/demo/test.mjs --model runs/shapes-n/weights/best.folo --image img.jpg --imgsz 640 --expect native.json
+  ```
+
+  `test.mjs` uses `playwright-core` from `web/node_modules`, so run `npm ci` in `web/` first.
+
+## 9. From an agent
+
+Everything above is also available to agents in two ways:
+- **MCP**: `folo mcp --data-dir D:/folo-data`, with 16 tools, `folo://` resources and prompts. To register it:
+  `claude mcp add folo -- folo mcp --data-dir D:/folo-data`.
+- **CLI**: any command with `--json`. stdout then carries JSON Lines only, and the exit codes are stable.
+
+[AGENT_COOKBOOK.md](AGENT_COOKBOOK.md) has the recipes in both forms. [MCP.md](MCP.md) is the contract.
+
+## Troubleshooting
+
+| symptom | fix |
+|---|---|
+| `folo serve` says the web app is not built | `(cd web && npm ci && npm run build)` from the repo root, or pass `--web-dir` |
+| `folo serve` cannot bind its port | another server holds port 7878: `--port 0` picks a free port |
+| Playground shows "does not include the in-browser runtime" | run `scripts/build-wasm.sh`, then rebuild Studio |
+| training is on the CPU | `folo doctor`: is a GPU listed? Try `FOLO_GPU_BACKEND=dx12` or `vulkan` |
+| a command failed in a script | the last stdout line of `--json` is `{"error":{"code","message","hint"}}`; exit codes are 1 runtime, 2 usage, 3 not found, 4 not implemented |
