@@ -33,6 +33,8 @@ Lines: 1 hierarchy & layout · 2 typography · 3 colour & theming · 4 spacing r
 | r10 | Claude Opus 5.5 (82 of 172 shots seen) | 8.5 | 8 | 8.5 | 8 | 8.5 | 8.5 | 8.5 | 8 | 8.5 | 8.5 | 8 | 8.5 | 8 |
 | r12 | GPT-6.1 Sol | 8.5 | 8.5 | 9 | 9 | 8.5 | 8.5 | 8 | 8.5 | 8.5 | 8.5 | 8 | 8.5 | 8 |
 | r12 | Claude Opus 5.5 (all 184 via contact sheets) | 8 | 8.5 | 8.5 | 8.5 | 8.5 | 8.5 | 8.5 | 8.5 | 8.5 | 8.5 | 8 | 8.5 | 8 |
+| r15 | GPT-6.1 Sol (57 sheets, 26 full-size) | 8 | 8.5 | 9 | 8.5 | 8.5 | 8 | 7.5 | 8.5 | 8 | 8.5 | 8 | 8.5 | 7.5 |
+| r15 | Claude Opus 5.5 (57 sheets, 6 full-size) | 8 | 7.5 | 8 | 8 | 8 | 7.5 | 8 | 7.5 | 8 | 8 | 8 | 8 | 7.5 |
 
 ## Per-line minimum (lower of the two reviewers)
 
@@ -52,6 +54,7 @@ Rounds with one reviewer are marked; their minimum is that reviewer's row.
 | r9 | 8 | 8 | 7.5 | 8 | 8 | 7.5 | 7.5 | 8 | 8 | 7.5 | 7 | 7.5 | 7 |
 | r10 | 8.5 ↑ | 8 | 8.5 ↑ | 8 | 8.5 ↑ | 8 ↑ | 8.5 ↑ | 8 | 8.5 | 8.5 ↑ | 8 ↑ | 8.5 ↑ | 8 |
 | r12 | 8 ↓ | 8.5 ↑ | 8.5 | 8.5 ↑ | 8.5 | 8.5 ↑ | 8 ↓ | 8.5 ↑ | 8.5 | 8.5 | 8 | 8.5 | 8 |
+| r15 | 8 | 7.5 ↓ | 8 ↓ | 8 ↓ | 8 ↓ | 7.5 ↓ | 7.5 ↓ | 7.5 ↓ | 8 ↓ | 8 ↓ | 8 | 8 ↓ | 7.5 |
 
 r4 lowest lines: 6 data visualisation (5.5), 2 typography, 3 colour, 8 consistency (6). Diagnosis: 2, 3 and 8 are
 structural (no single rule for mono vs sans, class colours that changed between legend and box, two accents in light),
@@ -72,3 +75,13 @@ screenshot (four-up contact sheets, 46 images). Lines 2, 4, 6, 8 rose to 8.5; 1 
 issues the r12 shots expose rather than regressions in code: the 1024 px tier collapsing to phone patterns (Model
 rail, New run summary, run KPI select) and mobile model choice without guidance. Both name the same weakest areas:
 the laptop tier, mobile Compare and the mobile confusion matrix.
+
+r13 and r14 were reviewed for code (Sol), not scored. r15 is the first round scored against the "what exactly would
+make this a 9" brief: every reviewer lists, per line below 9, the concrete changes that would make it a 9. The drop
+from r12 is partly calibration (227 shots now, including r14's new error states: device not found, out of memory,
+the Playground error card) and partly real: those new states are where much of the r15 criticism lands (a technical
+red paragraph at Device, an error card over the image). Lowest (7.5): 2 typography (10–11 px supporting labels,
+mixed decimals), 6 data visualisation (a 0–1 y domain everywhere, a 170 px Compare chart, unlabelled histogram
+density), 7 information design (the issue browser living inside the "broken label files" finding) and 8 consistency
+(nine hand-written tables). The structural moves for r15 → r16: one shared table component, fitted chart domains,
+the dataset check as its own section, route focus, and the compact phone preamble on Model and Dataset pages.
