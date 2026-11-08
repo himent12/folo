@@ -35,7 +35,11 @@ impl RealStore {
     /// gone are kept out of the list (and logged) but stay in the registry file.
     pub fn open(data_dir: PathBuf) -> RealStore {
         let mut datasets = Vec::new();
-        for r in Self::read_registry(&data_dir) {
+        let regs = Self::read_registry(&data_dir).unwrap_or_else(|e| {
+            tracing::error!("{e}; registering and unregistering datasets is disabled until it is fixed");
+            Vec::new()
+        });
+        for r in regs {
             match DiskDataset::scan(r.id.clone(), Some(r.name), &r.path, r.format, r.created) {
                 Ok(d) => datasets.push(Arc::new(d)),
                 Err(e) => tracing::warn!(id = %r.id, path = %r.path, "skipping registered dataset: {e}"),
@@ -48,11 +52,19 @@ impl RealStore {
         dir.join("datasets.json")
     }
 
-    fn read_registry(dir: &std::path::Path) -> Vec<Registration> {
-        std::fs::read_to_string(Self::registry_path(dir))
-            .ok()
-            .and_then(|t| serde_json::from_str(&t).ok())
-            .unwrap_or_default()
+    /// The registry. A missing file is an empty registry; an unreadable or malformed one is an error, so it is
+    /// never overwritten (and its registrations lost) by the next write.
+    fn read_registry(dir: &std::path::Path) -> Result<Vec<Registration>> {
+        let path = Self::registry_path(dir);
+        let text = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(Error::internal(format!("reading {}: {e}", path.display()))),
+        };
+        serde_json::from_str(&text).map_err(|e| {
+            Error::internal(format!("{} is malformed: {e}", path.display()))
+                .hint("fix the JSON by hand or move the file away; FOLO will not overwrite it")
+        })
     }
 
     fn write_registry(&self, regs: &[Registration]) -> Result<()> {
@@ -95,7 +107,7 @@ impl Store for RealStore {
     fn register_dataset(&self, req: RegisterDataset) -> Result<Dataset> {
         let mut ds = DiskDataset::scan(String::new(), req.name, &req.path, req.format, rfc3339(unix_now()))?;
         let mut list = self.datasets.write().unwrap();
-        let mut regs = Self::read_registry(&self.data_dir);
+        let mut regs = Self::read_registry(&self.data_dir)?;
         // Unique against loaded datasets and registrations whose folder is currently missing.
         ds.meta.id = unique_id("ds", fnv1a(req.path.as_bytes()) ^ unix_now().to_bits(), |id| {
             list.iter().any(|d| d.meta.id == id) || regs.iter().any(|r| r.id == id)
@@ -132,7 +144,7 @@ impl Store for RealStore {
 
     fn delete_dataset(&self, id: &str) -> Result<()> {
         let mut list = self.datasets.write().unwrap();
-        let mut regs = Self::read_registry(&self.data_dir);
+        let mut regs = Self::read_registry(&self.data_dir)?;
         let found = list.iter().any(|d| d.meta.id == id) || regs.iter().any(|r| r.id == id);
         if !found {
             return Err(Error::not_found("dataset", id));

@@ -15,6 +15,9 @@ use crate::store::{ImageData, ImageQuery};
 
 const IMAGE_EXTS: [&str; 5] = ["jpg", "jpeg", "png", "bmp", "webp"];
 
+/// Most classes a dataset may have. Label lines with a larger class index count as broken.
+pub const MAX_CLASSES: usize = 4096;
+
 /// A YOLO label in normalised `cx, cy, w, h`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct YoloBox {
@@ -291,9 +294,16 @@ impl DiskDataset {
             }
         }
 
+        if yaml.nc.is_some_and(|n| n > MAX_CLASSES) || yaml.names.len() > MAX_CLASSES {
+            return Err(Error::new(
+                StatusCode::BAD_REQUEST,
+                "invalid_dataset",
+                format!("data.yaml declares more than {MAX_CLASSES} classes"),
+            ));
+        }
         let mut images = Vec::new();
         let mut max_class = 0usize;
-        let mut nc = if yaml.names.is_empty() { yaml.nc.unwrap_or(usize::MAX) } else { yaml.names.len() };
+        let mut nc = if yaml.names.is_empty() { yaml.nc.unwrap_or(MAX_CLASSES) } else { yaml.names.len() };
         let mut builder_labels = Vec::new();
         let mut broken_total = 0;
         for (split, paths) in by_split {
@@ -461,6 +471,36 @@ mod tests {
         assert_eq!(broken, 2);
         assert!((b[1].w - 0.2).abs() < 1e-6);
         assert_eq!(label_path(Path::new("d/images/train/a.jpg")), Path::new("d/labels/train/a.txt"));
+    }
+
+    #[test]
+    fn class_counts_are_bounded() {
+        let dir = std::env::temp_dir().join(format!("folo-disk-bounds-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("images/train")).unwrap();
+        std::fs::create_dir_all(dir.join("labels/train")).unwrap();
+        image::RgbImage::new(8, 8).save(dir.join("images/train/a.png")).unwrap();
+        // No names / nc: a huge class index is a broken label, not a 4-billion-entry class list.
+        std::fs::write(
+            dir.join("labels/train/a.txt"),
+            "4294967295 0.5 0.5 0.1 0.1
+2 0.5 0.5 0.1 0.1
+",
+        )
+        .unwrap();
+        let path = dir.to_str().unwrap();
+        let ds = DiskDataset::scan("d".into(), None, path, DatasetFormat::Auto, "t".into()).unwrap();
+        assert_eq!(ds.meta.classes.len(), 3);
+        assert_eq!(ds.stats.broken_labels, 1);
+        std::fs::write(
+            dir.join("data.yaml"),
+            "nc: 1000000000
+",
+        )
+        .unwrap();
+        let e = DiskDataset::scan("d".into(), None, path, DatasetFormat::Auto, "t".into()).unwrap_err();
+        assert_eq!(e.body.code, "invalid_dataset");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

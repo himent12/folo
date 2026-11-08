@@ -28,7 +28,7 @@ Non-2xx responses: `{ "error": { "code": "dataset_not_found", "message": "...", 
 
 | status | code | when |
 |---|---|---|
-| 400 | `bad_request`, `invalid_path`, `invalid_query`, `invalid_body`, `invalid_config`, `unknown_format` | malformed input (`invalid_config`: a `TrainConfig` field is out of range; the message names it) |
+| 400 | `bad_request`, `invalid_path`, `invalid_query`, `invalid_body`, `invalid_config`, `unknown_format`, `invalid_dataset` | malformed input (`invalid_config`: a `TrainConfig` field is out of range, or the dataset has no classes / training images; the message names it. `invalid_dataset`: e.g. more than 4096 classes) |
 | 403 | `forbidden_origin` | a state-changing request from a disallowed browser origin (see Conventions) |
 | 404 | `dataset_not_found`, `image_not_found`, `model_not_found`, `run_not_found`, `path_not_found`, `epoch_not_available`, `route_not_found` | something named does not exist |
 | 405 | `method_not_allowed` | wrong HTTP method on a known path |
@@ -50,7 +50,8 @@ Non-2xx responses: `{ "error": { "code": "dataset_not_found", "message": "...", 
 - `POST /api/datasets` body `{ "name"?, "path", "format": "auto|yolo|coco" }` → `201 Dataset` with `stats`.
   Registers a folder on disk; `name` defaults to the folder name, `format` to `auto`. YOLO folders are read from
   `data.yaml` (`path`, `train`, `val`, `test`, `names`) or `images/{train,val,test}` + `labels/…`. Errors:
-  `path_not_found`, `unknown_format`, `not_implemented` (COCO for now).
+  `path_not_found`, `unknown_format`, `invalid_dataset`, `not_implemented` (COCO for now). Without `names` / `nc`,
+  classes are named `class0..` up to the largest label index; indices of 4096 or more count as broken labels.
 - `POST /api/datasets/synthetic` body `{ "name", "images": 1000, "classes": ["circle","square","triangle"], "imgsz": 640, "seed": 0 }`
   → `201 Dataset` with `stats`. Only `name` is required. Images are split 80 / 20 into train / val.
 - `GET /api/datasets/{id}` → `Dataset` with `stats`
@@ -142,7 +143,8 @@ Non-2xx responses: `{ "error": { "code": "dataset_not_found", "message": "...", 
   "steps_per_epoch": 50,
   "eta_s": 1840 | null,    // null unless queued / running / stopping
   "best": { "epoch": 11, "map50_95": 0.61 } | null, "device": "NVIDIA GeForce RTX 4080 SUPER (vulkan)",
-  "model_id": null | "m_31aa", "error": null | "..." }
+  "model_id": null | "m_31aa",  // set once the run completed, or stopped after at least one validated epoch
+  "error": null | "..." }
 // Step
 { "epoch": 12, "step": 575, "lr": 0.0098, "loss": { "box": 1.21, "cls": 0.83, "dfl": 1.02, "total": 3.06 },
   "imgs_per_s": 412.5, "eta_s": 1840 }      // step is the global, 1-based step number

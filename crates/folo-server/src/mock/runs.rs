@@ -430,8 +430,16 @@ impl SimRun {
     }
 
     /// The model id if it exists now.
+    ///
+    /// A simulated run writes a checkpoint after each validated epoch, so its model exists once the run completed,
+    /// or was stopped after at least one finished epoch.
     pub fn current_model(&self, snap: &Snap) -> Option<String> {
-        if self.user && snap.status != RunStatus::Completed { None } else { self.model_id.clone() }
+        let saved = match snap.status {
+            RunStatus::Completed => true,
+            RunStatus::Stopped => self.epochs_done(snap) >= 1,
+            _ => false,
+        };
+        if self.user && !saved { None } else { self.model_id.clone() }
     }
 
     /// API view.
@@ -649,6 +657,43 @@ mod tests {
 
     fn config(epochs: u32) -> TrainConfig {
         serde_json::from_value(serde_json::json!({ "dataset_id": "ds", "epochs": epochs })).unwrap()
+    }
+
+    fn user_run(offset_s: f64) -> SimRun {
+        let cfg = config(10);
+        let curve = Curve::new(3, 0.5, 1, &cfg, 10);
+        let clock = LiveClock::new(1.0, 0.0, 0.0, false, offset_s);
+        let t = Timeline::Live(Mutex::new(clock));
+        SimRun::new(
+            "run_x".into(),
+            cfg,
+            vec!["a".into()],
+            10,
+            curve,
+            "cpu".into(),
+            Some("m_x".into()),
+            true,
+            t,
+        )
+    }
+
+    #[test]
+    fn stopped_runs_keep_a_checkpoint_after_an_epoch() {
+        // Stopped mid-epoch 1: nothing validated, no model.
+        let early = user_run(0.5);
+        assert!(early.stop());
+        std::thread::sleep(Duration::from_millis(1600));
+        let snap = early.snap();
+        assert_eq!(snap.status, RunStatus::Stopped);
+        assert_eq!(early.current_model(&snap), None);
+        // Stopped in epoch 3: the last checkpoint is a model.
+        let later = user_run(2.5);
+        assert_eq!(later.current_model(&later.snap()), None, "running runs expose no model yet");
+        assert!(later.stop());
+        std::thread::sleep(Duration::from_millis(1600));
+        let snap = later.snap();
+        assert_eq!(snap.status, RunStatus::Stopped);
+        assert_eq!(later.to_api().model_id.as_deref(), Some("m_x"));
     }
 
     #[test]

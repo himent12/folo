@@ -735,3 +735,36 @@ async fn sse_first_subscriber_sees_queued_to_running() {
         "every transition is reported before steps"
     );
 }
+
+#[tokio::test]
+async fn datasets_without_classes_cannot_train() {
+    let dir = std::env::temp_dir().join(format!("folo-empty-ds-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("images")).unwrap();
+    let (server, _) = mock();
+    let app = server.router();
+    let ds: Dataset = ok(&app, post_json("/api/datasets", json!({ "path": dir.to_str().unwrap() }))).await;
+    assert!(ds.classes.is_empty());
+    let e = err(
+        &app,
+        post_json("/api/runs", json!({ "dataset_id": ds.id })),
+        StatusCode::BAD_REQUEST,
+        "invalid_config",
+    )
+    .await;
+    assert!(e.message.contains("no classes"));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[tokio::test]
+async fn malformed_registry_is_never_overwritten() {
+    let root = std::env::temp_dir().join(format!("folo-bad-registry-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("ds/images")).unwrap();
+    std::fs::write(root.join("datasets.json"), "{ not json").unwrap();
+    let app = Server::new(Arc::new(RealStore::open(root.clone())), Options::default()).router();
+    let body = json!({ "path": root.join("ds").to_str().unwrap() });
+    err(&app, post_json("/api/datasets", body), StatusCode::INTERNAL_SERVER_ERROR, "internal").await;
+    assert_eq!(std::fs::read_to_string(root.join("datasets.json")).unwrap(), "{ not json");
+    std::fs::remove_dir_all(&root).unwrap();
+}

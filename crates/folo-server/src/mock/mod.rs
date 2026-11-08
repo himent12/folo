@@ -206,6 +206,9 @@ fn fake_detections(
     quality: f32,
     seed: u64,
 ) -> Vec<ScoredBox> {
+    if classes.is_empty() {
+        return Vec::new();
+    }
     let mut r = Rng::new(seed);
     let (wf, hf) = (w as f32, h as f32);
     let name = |c: u32| classes.get(c as usize).cloned().unwrap_or_else(|| format!("class{c}"));
@@ -725,6 +728,13 @@ impl Store for MockStore {
         let ds = self.dataset(&config.dataset_id)?;
         self.validate(&config)?;
         let meta = ds.meta();
+        if meta.classes.is_empty() || meta.splits.train == 0 {
+            return Err(Error::new(
+                StatusCode::BAD_REQUEST,
+                "invalid_config",
+                format!("dataset_id: '{}' has no classes or no training images", meta.id),
+            ));
+        }
         if config.name.trim().is_empty() {
             config.name = format!("{}-{}", meta.name, &config.arch.as_str()[5..]);
         }
