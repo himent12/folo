@@ -153,7 +153,7 @@ pub fn apply(app: &mut FoloApp, s: &Spec, window: &mut Window, cx: &mut Context<
         app.toast_with(
             crate::ui::Tone::Info,
             "Queued shapes-mini-s",
-            Some("It starts when the GPU is free.".into()),
+            Some("It starts when the current run finishes.".into()),
             // What the app shows for a queued run (its page opens anyway).
             Some(("View queue".into(), std::rc::Rc::new(|_, _, _| {}))),
             cx,

@@ -1723,7 +1723,7 @@ impl FoloApp {
                             this.toast_with(
                                 Tone::Info,
                                 format!("Queued {name}"),
-                                Some("It starts when the GPU is free.".into()),
+                                Some("It starts when the current run finishes.".into()),
                                 Some((
                                     "View queue".into(),
                                     Rc::new(
