@@ -184,6 +184,28 @@
     cursor = x.invert(px);
   }
 
+  // Keyboard scrubbing announces the values under the cursor; pointer hover stays silent.
+  let announce = $state(false);
+  const spoken = $derived(
+    announce && hover
+      ? `${xTitle ? xTitle(hover.xv) : xFormat(hover.xv)}: ${hover.rows.map((r) => `${r.s.label} ${fmtValue(r.p.y)}`).join(', ')}`
+      : '',
+  );
+
+  /** Per-series summary for assistive tech: latest, minimum and maximum. */
+  const summary = $derived(
+    keyed.map((s) => {
+      let lo = Infinity;
+      let hi = -Infinity;
+      for (const p of s.points) {
+        if (!Number.isFinite(p.y)) continue;
+        if (p.y < lo) lo = p.y;
+        if (p.y > hi) hi = p.y;
+      }
+      return { s, last: latest(s), lo: Number.isFinite(lo) ? lo : null, hi: Number.isFinite(hi) ? hi : null };
+    }),
+  );
+
   function onkeydown(e: KeyboardEvent) {
     const s = longestSeries;
     if (!s || !s.points.length) return;
@@ -198,6 +220,7 @@
       return;
     } else return;
     e.preventDefault();
+    announce = true;
     cursor = s.points[i]!.x;
   }
 
@@ -226,6 +249,24 @@
     </ul>
   {/if}
 
+  <p class="sr-only" aria-live="polite">{spoken}</p>
+  {#if keyed.length}
+    <table class="sr-only">
+      <caption>{label}: summary by series. Focus the chart and use the arrow keys to read values point by point.</caption>
+      <thead><tr><th scope="col">Series</th><th scope="col">Latest</th><th scope="col">Minimum</th><th scope="col">Maximum</th></tr></thead>
+      <tbody>
+        {#each summary as row (row.s.id)}
+          <tr>
+            <th scope="row">{row.s.label}</th>
+            <td>{row.last === null ? '—' : fmtValue(row.last)}</td>
+            <td>{row.lo === null ? '—' : fmtValue(row.lo)}</td>
+            <td>{row.hi === null ? '—' : fmtValue(row.hi)}</td>
+          </tr>
+        {/each}
+      </tbody>
+    </table>
+  {/if}
+
   <div class="plot" bind:clientWidth={width} style:height="{height}px">
     {#if width > 0}
       <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
@@ -237,6 +278,7 @@
         tabindex={hasData ? 0 : -1}
         {onpointermove}
         onpointerleave={() => (cursor = null)}
+        onpointerdown={() => (announce = false)}
         {onkeydown}
         onblur={() => (cursor = null)}
       >

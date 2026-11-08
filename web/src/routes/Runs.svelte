@@ -107,10 +107,10 @@
               <th class="check"><span class="sr-only">Select for comparison</span></th>
               <th>Run</th>
               <th>Status</th>
-              <th class="hide-md">Progress</th>
+              <th>Progress</th>
               <th class="r">Best mAP50-95</th>
-              <th class="hide-md">mAP per epoch</th>
-              <th class="r hide-lg">Duration</th>
+              <th class="hide-lg">mAP per epoch</th>
+              <th class="r hide-xl">Duration</th>
               <th class="r hide-sm">Created</th>
             </tr>
           </thead>
@@ -133,7 +133,7 @@
                   <span class="sub"><span>{dsName.get(r.config.dataset_id) ?? r.config.dataset_id}</span><span class="mono">{r.config.arch}</span><span class="mono">{r.id}</span></span>
                 </td>
                 <td><StatusBadge status={r.status} size="sm" /></td>
-                <td class="hide-md">
+                <td>
                   <div class="prog">
                     <Progress value={r.status === 'running' ? r.step / Math.max(1, r.steps_per_epoch * r.epochs) : r.epoch / r.epochs} size="xs" tone={tone(r)} label="{r.name} progress" />
                     <span class="num faint">{r.epoch}/{r.epochs}</span>
@@ -143,14 +143,45 @@
                   {metric(r.best?.map50_95)}
                   {#if r.best}<span class="faint">e{r.best.epoch + 1}</span>{/if}
                 </td>
-                <td class="hide-md"><RunSpark run={r} width={96} /></td>
-                <td class="r num faint hide-lg">{r.status === 'queued' ? '—' : duration(elapsed(r))}</td>
+                <td class="hide-lg"><RunSpark run={r} width={96} /></td>
+                <td class="r num faint hide-xl">{r.status === 'queued' ? '—' : duration(elapsed(r))}</td>
                 <td class="r faint hide-sm">{ago(r.created)}</td>
               </tr>
             {/each}
           </tbody>
         </table>
       </div>
+      <!-- Phones: stacked rows with the essentials (selection, name, status, score, progress). -->
+      <ul class="cards">
+        {#each shown as r (r.id)}
+          {@const on = selected.includes(r.id)}
+          <li class:on>
+            <label class="c-check">
+              <input
+                type="checkbox"
+                checked={on}
+                disabled={!on && selected.length >= 4}
+                aria-label="Select {r.name} for comparison"
+                onchange={() => toggle(r.id)}
+              />
+            </label>
+            <a class="c-main" href={href(`/runs/${r.id}`)}>
+              <span class="c-top">
+                <span class="name">{r.name}</span>
+                <span class="c-best num">{metric(r.best?.map50_95)}</span>
+              </span>
+              <span class="c-mid">
+                <StatusBadge status={r.status} size="sm" />
+                <span class="sub"><span>{dsName.get(r.config.dataset_id) ?? r.config.dataset_id}</span><span class="mono">{r.config.arch}</span></span>
+              </span>
+              <span class="c-prog">
+                <Progress value={r.status === 'running' ? r.step / Math.max(1, r.steps_per_epoch * r.epochs) : r.epoch / r.epochs} size="xs" tone={tone(r)} label="{r.name} progress" />
+                <span class="num faint">{r.epoch}/{r.epochs} · {ago(r.created)}</span>
+              </span>
+            </a>
+          </li>
+        {/each}
+      </ul>
     {/if}
   </Panel>
 </Page>
@@ -226,20 +257,75 @@
     font-size: var(--type-xs-size);
     margin-left: 4px;
   }
-  @media (max-width: 1199px) {
-    .hide-lg {
+  .cards {
+    display: none;
+  }
+  @media (max-width: 1439px) {
+    .hide-xl {
       display: none;
     }
   }
-  @media (max-width: 1023px) {
-    .hide-md {
+  @media (max-width: 1279px) {
+    .hide-lg {
+      display: none;
+    }
+    .sub .mono:last-child {
       display: none;
     }
   }
   @media (max-width: 767px) {
-    .hide-sm,
-    .sub .mono:last-child {
+    .scroll {
       display: none;
+    }
+    .cards {
+      display: block;
+    }
+    .cards li {
+      display: flex;
+      align-items: flex-start;
+      gap: var(--space-3);
+      padding: var(--space-3) var(--space-4);
+      border-bottom: 1px solid var(--line-subtle);
+    }
+    .cards li:last-child {
+      border-bottom: 0;
+    }
+    .cards li.on {
+      background: var(--bg-selected);
+    }
+    .c-check {
+      display: grid;
+      place-items: center;
+      width: 32px;
+      height: 32px;
+      margin: -6px 0 0 -8px;
+    }
+    .c-main {
+      flex: 1;
+      min-width: 0;
+      display: grid;
+      gap: 6px;
+    }
+    .c-top,
+    .c-mid {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: var(--space-2);
+      min-width: 0;
+    }
+    .c-mid {
+      justify-content: flex-start;
+    }
+    .c-best {
+      font-weight: var(--weight-medium);
+    }
+    .c-prog {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      align-items: center;
+      gap: var(--space-3);
+      font-size: var(--type-xs-size);
     }
     .search {
       width: 100%;

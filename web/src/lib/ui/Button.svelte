@@ -144,6 +144,17 @@
   .btn:disabled {
     opacity: 0.45;
   }
+  /* Touch: grow the hit area to at least 44 px without changing the visual size. */
+  @media (pointer: coarse) {
+    .btn {
+      position: relative;
+    }
+    .btn::after {
+      content: '';
+      position: absolute;
+      inset: min(0px, calc((var(--h) - 44px) / 2)) min(0px, calc((var(--h) - 44px) / 4));
+    }
+  }
   .label {
     display: inline-flex;
     align-items: center;

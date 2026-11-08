@@ -125,7 +125,7 @@
     {#snippet actions()}
       <Button icon={GitCompare} href={href(`/runs/compare?ids=${run.id}`)}>Compare</Button>
       {#if run.model_id}
-        <Button icon={ScanSearch} href={href(`/playground?model=${run.model_id}`)}>Try model</Button>
+        {#if run.status !== 'completed'}<Button icon={ScanSearch} href={href(`/playground?model=${run.model_id}`)}>Try model</Button>{/if}
         <Button icon={Box} href={href(`/models/${run.model_id}`)}>Model</Button>
       {/if}
       {#if run.status === 'running' || run.status === 'queued'}
@@ -203,7 +203,7 @@
         <span class="val num">{num(lastStep?.loss.total, 3)}</span>
         <span class="small num">box {num(lastStep?.loss.box, 2)} · cls {num(lastStep?.loss.cls, 2)}</span>
       </div>
-      <div class="cell">
+      <div class="cell secondary">
         <span class="label">Throughput</span>
         <span class="val num">{num(lastStep?.imgs_per_s, 0)}<span class="unit">img/s</span></span>
         <span class="small num">lr {lr(lastStep?.lr)}</span>
@@ -437,11 +437,13 @@
     }
   }
   @media (max-width: 767px) {
+    /* Phones: a compact progress row and four essential metrics, so the first chart starts high on the page. */
     .cluster {
       grid-template-columns: repeat(2, minmax(0, 1fr));
     }
     .cell {
       padding: var(--space-3);
+      gap: 2px;
     }
     .cell:nth-child(n) {
       border-left: 0;
@@ -450,15 +452,29 @@
     .cell.main {
       border-top: 0;
       border-bottom: 0;
+      gap: 6px;
     }
     .cell:nth-child(odd):not(.main) {
       border-left: 1px solid var(--line-subtle);
     }
+    .cell.secondary {
+      display: none;
+    }
+    .big {
+      font-size: var(--type-2xl-size);
+      line-height: var(--type-2xl-line);
+    }
     .val {
       font-size: var(--type-lg-size);
+      line-height: var(--type-lg-line);
     }
     .banner {
-      flex-wrap: wrap;
+      flex-direction: column;
+      align-items: stretch;
+      gap: var(--space-3);
+    }
+    .banner > :global(svg) {
+      display: none;
     }
     .dev {
       display: none;

@@ -1,7 +1,9 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import GitCompare from '@lucide/svelte/icons/git-compare-arrows';
   import X from '@lucide/svelte/icons/x';
   import Plus from '@lucide/svelte/icons/plus';
+  import Info from '@lucide/svelte/icons/info';
   import { hub } from '$lib/api/index.svelte';
   import { Resource } from '$lib/api/resource.svelte';
   import type { Epoch, Run, RunMetrics } from '$lib/api/types';
@@ -34,7 +36,23 @@
   let cursor = $state<number | null>(null);
 
   const chosen = $derived(ids.map((id) => runs.data?.find((r) => r.id === id)).filter((r): r is Run => !!r));
-  const color = (i: number) => `var(--chart-${i + 1})`;
+  // Colours follow the run, not its position: removing one run never repaints the others.
+  let slots = $state<Record<string, number>>({});
+  $effect(() => {
+    const cur = ids;
+    untrack(() => {
+      const next: Record<string, number> = {};
+      for (const id of cur) if (slots[id] !== undefined) next[id] = slots[id];
+      for (const id of cur) {
+        if (next[id] !== undefined) continue;
+        let k = 0;
+        while (Object.values(next).includes(k)) k++;
+        next[id] = k;
+      }
+      slots = next;
+    });
+  });
+  const color = (id: string) => `var(--chart-${(slots[id] ?? ids.indexOf(id)) + 1})`;
 
   function setIds(next: string[]) {
     router.go(`/runs/compare${next.length ? `?ids=${next.join(',')}` : ''}`, { replace: true });
@@ -46,7 +64,7 @@
       return {
         id: r.id,
         label: r.name,
-        color: color(i),
+        color: color(r.id),
         points: eps.map((e) => ({ x: x === 'epoch' ? e.epoch + 1 : ((e.epoch + 1) / r.epochs) * 100, y: f(e) })),
       };
     });
@@ -59,6 +77,8 @@
   ]);
   const xDomain = $derived<[number, number]>(x === 'epoch' ? [0, Math.max(1, ...chosen.map((r) => r.epochs))] : [0, 100]);
 
+  // mAP is only comparable on the same data: no winner across datasets.
+  const sameData = $derived(new Set(chosen.map((r) => r.config.dataset_id)).size <= 1);
   const bestIdx = $derived(chosen.reduce((b, r, i) => ((r.best?.map50_95 ?? -1) > (chosen[b]?.best?.map50_95 ?? -1) ? i : b), 0));
 
   const rows = $derived<[string, (r: Run) => string][]>([
@@ -86,7 +106,7 @@
 
   <div class="picker" role="group" aria-label="Runs being compared">
     {#each chosen as r, i (r.id)}
-      <span class="chip" style:--c={color(i)}>
+      <span class="chip" style:--c={color(r.id)}>
         <i aria-hidden="true"></i>
         <a href={href(`/runs/${r.id}`)}>{r.name}</a>
         <button aria-label="Remove {r.name}" onclick={() => setIds(ids.filter((id) => id !== r.id))}><X size={12} /></button>
@@ -119,6 +139,12 @@
       </EmptyState>
     </Panel>
   {:else}
+    {#if !sameData && chosen.length > 1}
+      <p class="notice" role="note">
+        <Info size={14} />
+        <span>These runs use different datasets, so their mAP is not directly comparable. Compare the shape of the curves, not the values.</span>
+      </p>
+    {/if}
     <div class="charts">
       {#each charts as c (c.id)}
         <Panel title={c.title} id="cmp-{c.id}">
@@ -153,7 +179,7 @@
               <tr>
                 <th></th>
                 {#each chosen as r, i (r.id)}
-                  <th><span class="th"><i style:background={color(i)}></i>{r.name}</span></th>
+                  <th><span class="th"><i style:background={color(r.id)}></i>{r.name}</span></th>
                 {/each}
               </tr>
             </thead>
@@ -165,7 +191,7 @@
               <tr>
                 <td class="k">Best mAP50-95</td>
                 {#each chosen as r, i (r.id)}
-                  <td class="num" class:winner={i === bestIdx && chosen.length > 1}>{metric(r.best?.map50_95)}{#if i === bestIdx && chosen.length > 1}<span class="tag">best</span>{/if}</td>
+                  <td class="num" class:winner={sameData && i === bestIdx && chosen.length > 1}>{metric(r.best?.map50_95)}{#if sameData && i === bestIdx && chosen.length > 1}<span class="tag">best</span>{/if}</td>
                 {/each}
               </tr>
               {#each rows as [k, f] (k)}
@@ -219,6 +245,16 @@
     border-radius: 50%;
     color: var(--text-tertiary);
   }
+  @media (pointer: coarse) {
+    .chip button {
+      position: relative;
+    }
+    .chip button::after {
+      content: '';
+      position: absolute;
+      inset: -12px;
+    }
+  }
   .chip button:hover {
     background: var(--bg-hover);
     color: var(--text-primary);
@@ -251,6 +287,20 @@
   }
   .add option {
     background: var(--bg-overlay);
+  }
+  .notice {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    border-radius: var(--radius-md);
+    background: var(--info-muted);
+    color: var(--text-secondary);
+  }
+  .notice :global(svg) {
+    flex-shrink: 0;
+    margin-top: 3px;
+    color: var(--info-text);
   }
   .charts {
     display: grid;

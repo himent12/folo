@@ -4,10 +4,13 @@
   import Box from '@lucide/svelte/icons/box';
   import Images from '@lucide/svelte/icons/images';
   import Plus from '@lucide/svelte/icons/plus';
+  import RotateCw from '@lucide/svelte/icons/rotate-cw';
+  import Settings from '@lucide/svelte/icons/settings';
+  import WifiOff from '@lucide/svelte/icons/wifi-off';
   import ScanSearch from '@lucide/svelte/icons/scan-search';
   import { hub } from '$lib/api/index.svelte';
   import { Resource } from '$lib/api/resource.svelte';
-  import type { Dataset } from '$lib/api/types';
+  import type { Dataset, Model } from '$lib/api/types';
   import RunSpark from '$lib/charts/RunSpark.svelte';
   import ClassStrip from '$lib/detect/ClassStrip.svelte';
   import { ago, bytes, compact, metric } from '$lib/format';
@@ -38,10 +41,28 @@
 
   const live = $derived(runs.data?.find((r) => r.status === 'running' || r.status === 'stopping'));
   const recent = $derived((runs.data ?? []).filter((r) => r.id !== live?.id).slice(0, 6));
-  const topModels = $derived(
-    [...(models.data ?? [])].sort((a, b) => (b.metrics?.map50_95 ?? 0) - (a.metrics?.map50_95 ?? 0)).slice(0, 5),
-  );
+  // One failure behind every request is a connection problem: say it once instead of in every panel.
+  const offline = $derived(!!runs.error && !runs.data && !!models.error && !models.data && !!datasets.error && !datasets.data);
+  const errDetail = $derived(runs.error instanceof Error ? runs.error.message : null);
+  function retryAll() {
+    void runs.refresh();
+    void models.refresh();
+    void datasets.refresh();
+  }
   const dsById = $derived(new Map<string, Dataset>((datasets.data ?? []).map((d) => [d.id, d])));
+  // mAP is only comparable on the same data, so rank within each dataset and show the best of each.
+  const topModels = $derived.by(() => {
+    const runDs = new Map((runs.data ?? []).map((r) => [r.id, r.config.dataset_id]));
+    const best = new Map<string, { m: Model; ds: string }>();
+    for (const m of models.data ?? []) {
+      const dsId = m.run_id ? runDs.get(m.run_id) : undefined;
+      const key = dsId ?? 'imported';
+      const ds = dsId ? (dsById.get(dsId)?.name ?? dsId) : 'Imported';
+      const cur = best.get(key);
+      if (!cur || (m.metrics?.map50_95 ?? -1) > (cur.m.metrics?.map50_95 ?? -1)) best.set(key, { m, ds });
+    }
+    return [...best.values()].sort((a, b) => (b.m.created > a.m.created ? 1 : -1)).slice(0, 5);
+  });
   const total = (d: Dataset) => d.splits.train + d.splits.val + d.splits.test;
 </script>
 
@@ -56,6 +77,21 @@
     <Button icon={ScanSearch} href={href('/playground')}>Playground</Button>
   {/snippet}
 
+  {#if offline}
+    <section class="offline" role="alert">
+      <div class="off-mark" aria-hidden="true"><WifiOff size={20} strokeWidth={1.5} /></div>
+      <h2>Studio can't reach the FOLO server</h2>
+      <p>
+        Runs, models and datasets all failed to load{hub.mode === 'live' ? ` from ${hub.serverUrl}` : ''}. Check that
+        <span class="mono">folo serve</span> is running, then retry.
+      </p>
+      {#if errDetail}<p class="off-detail mono">{errDetail}</p>{/if}
+      <div class="off-actions">
+        <Button variant="primary" icon={RotateCw} onclick={retryAll}>Retry</Button>
+        <Button icon={Settings} href={href('/settings')}>Connection settings</Button>
+      </div>
+    </section>
+  {:else}
   <div class="top">
     <div class="live">
       {#if runs.error && !runs.data}
@@ -126,7 +162,7 @@
       {/if}
     </Panel>
 
-    <Panel title="Best models" pad="none" id="best-models">
+    <Panel title="Best model per dataset" pad="none" id="best-models">
       {#snippet actions()}<Button size="sm" variant="ghost" iconRight={ArrowRight} href={href('/models')}>All models</Button>{/snippet}
       {#if models.error && !models.data}
         <ErrorState error={models.error} retry={() => models.refresh()} />
@@ -136,11 +172,11 @@
         <EmptyState compact icon={Box} title="No models yet" description="Finished runs save their best weights here." />
       {:else}
         <ul class="models">
-          {#each topModels as m, i (m.id)}
+          {#each topModels as { m, ds } (m.id)}
             <li>
               <a href={href(`/models/${m.id}`)}>
-                <span class="rank num">{i + 1}</span>
                 <span class="m-text">
+                  <span class="m-ds truncate">{ds}</span>
                   <span class="m-name truncate">{m.name}</span>
                   <span class="m-sub num">{m.arch} · {m.classes.length} classes · {bytes(m.bytes, prefs.units)}</span>
                 </span>
@@ -191,9 +227,45 @@
       </div>
     {/if}
   </section>
+  {/if}
 </Page>
 
 <style>
+  .offline {
+    display: grid;
+    justify-items: center;
+    gap: var(--space-3);
+    padding: var(--space-16) var(--space-6);
+    text-align: center;
+    border: 1px dashed var(--line-strong);
+    border-radius: var(--radius-lg);
+  }
+  .off-mark {
+    display: grid;
+    place-items: center;
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    background: var(--danger-muted);
+    color: var(--danger-text);
+  }
+  .offline h2 {
+    font-size: var(--type-lg-size);
+    line-height: var(--type-lg-line);
+  }
+  .offline p {
+    max-width: 440px;
+    color: var(--text-secondary);
+  }
+  .offline .off-detail {
+    color: var(--text-tertiary);
+    font-size: var(--type-xs-size);
+  }
+  .off-actions {
+    display: flex;
+    gap: var(--space-2);
+    margin-top: var(--space-2);
+  }
   .top {
     display: grid;
     grid-template-columns: minmax(0, 1fr) 340px;
@@ -254,28 +326,15 @@
     display: flex;
     align-items: center;
     gap: var(--space-3);
-    height: 52px;
+    min-height: 64px;
+    padding-top: var(--space-2) !important;
+    padding-bottom: var(--space-2) !important;
     padding: 0 var(--space-2);
     border-radius: var(--radius-md);
     transition: background-color var(--dur-fast) var(--ease-standard);
   }
   .models a:hover {
     background: var(--bg-hover);
-  }
-  .rank {
-    width: 20px;
-    height: 20px;
-    display: grid;
-    place-items: center;
-    border-radius: var(--radius-sm);
-    background: var(--bg-active);
-    font-size: var(--type-xs-size);
-    color: var(--text-secondary);
-    flex-shrink: 0;
-  }
-  .models li:first-child .rank {
-    background: var(--accent-muted);
-    color: var(--accent-text);
   }
   .m-text {
     flex: 1;
@@ -284,6 +343,14 @@
   }
   .m-name {
     font-weight: var(--weight-medium);
+  }
+  .m-ds {
+    font-size: var(--type-micro-size);
+    line-height: var(--type-micro-line);
+    letter-spacing: var(--type-micro-tracking);
+    text-transform: uppercase;
+    font-weight: var(--weight-medium);
+    color: var(--text-tertiary);
   }
   .m-sub {
     font-size: var(--type-xs-size);
