@@ -201,9 +201,12 @@ pub fn box_iou(a: &Xyxy, b: &Xyxy) -> f32 {
     if union > 0.0 { inter / union } else { 0.0 }
 }
 
-/// The overlap measure `kind` between two boxes. Symmetric in `a` and `b`, always finite.
+/// The overlap measure `kind` between two boxes. Symmetric in `a` and `b`, always finite and within the range
+/// documented on [`IouKind`]. Inverted boxes are first collapsed to zero extent at their `(x1, y1)` corner.
 #[inline]
 pub fn iou(a: &Xyxy, b: &Xyxy, kind: IouKind) -> f32 {
+    let collapse = |b: &Xyxy| Xyxy { x1: b.x1, y1: b.y1, x2: b.x2.max(b.x1), y2: b.y2.max(b.y1) };
+    let (a, b) = (&collapse(a), &collapse(b));
     let inter = a.intersection(b);
     let union = a.area() + b.area() - inter;
     let iou = if union > 0.0 { inter / union } else { 0.0 };
@@ -310,27 +313,34 @@ pub struct Letterbox {
     pub pad_x: f32,
     /// Top padding in letterboxed pixels.
     pub pad_y: f32,
+    /// Width of the resized (unpadded) image inside the letterbox.
+    pub resized_w: u32,
+    /// Height of the resized (unpadded) image inside the letterbox.
+    pub resized_h: u32,
 }
 
 impl Letterbox {
     /// The letterbox that fits a `src_w x src_h` image into `dst_w x dst_h`, keeping the aspect ratio and centring
     /// it, with the same rounding as Ultralytics' `LetterBox` (`scaleup = true`, `center = true`): the resized image
-    /// is `round(src * gain)` pixels and the left/top pads are `round(d / 2 - 0.1)` where `d` is the leftover.
+    /// is `round(src * gain)` pixels and the left/top pads are `round(d / 2 - 0.1)` where `d` is the leftover. Like
+    /// Python, the arithmetic is in `f64` and `round` is ties-to-even.
     ///
     /// # Panics
     /// If any size is zero.
     pub fn fit(src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) -> Self {
         assert!(src_w > 0 && src_h > 0 && dst_w > 0 && dst_h > 0, "Letterbox::fit: zero-sized image");
-        let gain = (dst_w as f32 / src_w as f32).min(dst_h as f32 / src_h as f32);
-        let (new_w, new_h) = ((src_w as f32 * gain).round(), (src_h as f32 * gain).round());
-        let dw = (dst_w as f32 - new_w) * 0.5;
-        let dh = (dst_h as f32 - new_h) * 0.5;
-        Self { gain, pad_x: (dw - 0.1).round().max(0.0), pad_y: (dh - 0.1).round().max(0.0) }
-    }
-
-    /// The size `(w, h)` of the resized (unpadded) image inside the letterbox, for a `src_w x src_h` original.
-    pub fn resized_size(&self, src_w: u32, src_h: u32) -> (u32, u32) {
-        ((src_w as f32 * self.gain).round() as u32, (src_h as f32 * self.gain).round() as u32)
+        let gain = (dst_h as f64 / src_h as f64).min(dst_w as f64 / src_w as f64);
+        let new_w = (src_w as f64 * gain).round_ties_even();
+        let new_h = (src_h as f64 * gain).round_ties_even();
+        let dw = (dst_w as f64 - new_w) / 2.0;
+        let dh = (dst_h as f64 - new_h) / 2.0;
+        Self {
+            gain: gain as f32,
+            pad_x: (dw - 0.1).round_ties_even().max(0.0) as f32,
+            pad_y: (dh - 0.1).round_ties_even().max(0.0) as f32,
+            resized_w: new_w as u32,
+            resized_h: new_h as u32,
+        }
     }
 
     /// Map a box from original-image pixels into letterboxed pixels.
@@ -431,13 +441,28 @@ mod tests {
         let point = Xyxy::new(5.0, 5.0, 5.0, 5.0);
         let line = Xyxy::new(0.0, 5.0, 10.0, 5.0);
         let inverted = Xyxy::new(10.0, 10.0, 0.0, 0.0);
-        let cases =
-            [(point, point), (point, line), (line, a), (inverted, a), (inverted, inverted), (point, a)];
+        let cases = [
+            (point, point),
+            (point, line),
+            (line, a),
+            (inverted, a),
+            (inverted, inverted),
+            (point, a),
+            // Asymmetric inverted boxes far from each other used to give unbounded distance terms.
+            (Xyxy::new(100.0, 0.0, 0.0, 10.0), Xyxy::new(0.0, 0.0, 1.0, 10.0)),
+            (Xyxy::new(0.0, 0.0, 1.0, 10.0), Xyxy::new(5.0, 500.0, -300.0, 0.0)),
+        ];
         for (x, y) in cases {
             for kind in [IouKind::Iou, IouKind::Giou, IouKind::Diou, IouKind::Ciou] {
                 let v = iou(&x, &y, kind);
                 assert!(v.is_finite(), "{kind:?}({x:?}, {y:?}) = {v}");
-                assert!((-1.5..=1.0).contains(&v), "{kind:?}({x:?}, {y:?}) = {v} out of range");
+                let lo = match kind {
+                    IouKind::Iou => 0.0,
+                    IouKind::Giou | IouKind::Diou => -1.0,
+                    IouKind::Ciou => -1.5,
+                };
+                assert!((lo..=1.0).contains(&v), "{kind:?}({x:?}, {y:?}) = {v} out of range");
+                assert_eq!(v, iou(&y, &x, kind), "{kind:?} must be symmetric");
             }
             assert_eq!(box_iou(&x, &y), 0.0);
         }
@@ -478,7 +503,7 @@ mod tests {
         let lb = Letterbox::fit(1280, 720, 640, 640);
         assert_eq!(lb.gain, 0.5);
         assert_eq!((lb.pad_x, lb.pad_y), (0.0, 140.0));
-        assert_eq!(lb.resized_size(1280, 720), (640, 360));
+        assert_eq!((lb.resized_w, lb.resized_h), (640, 360));
         let b = Xyxy::new(100.0, 200.0, 300.0, 400.0);
         let f = lb.forward(b);
         assert_eq!(f, Xyxy::new(50.0, 240.0, 150.0, 340.0));
@@ -487,5 +512,8 @@ mod tests {
         let lb = Letterbox::fit(1280, 854, 640, 640);
         assert_eq!(lb.pad_y, 106.0);
         assert_eq!(lb.inverse_clipped(Xyxy::new(-10.0, 0.0, 700.0, 640.0), 1280, 854).x2, 1280.0);
+        // Exact half: 853 * 0.5 = 426.5 rounds to even (426, as Python does), leftover 214 → pad 107.
+        let lb = Letterbox::fit(1280, 853, 640, 640);
+        assert_eq!((lb.resized_w, lb.resized_h, lb.pad_y), (640, 426, 107.0));
     }
 }
