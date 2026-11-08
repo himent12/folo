@@ -2,6 +2,7 @@
   /** Pick an image from a registered dataset: dataset + split, then a page of thumbnails. */
   import ChevronLeft from '@lucide/svelte/icons/chevron-left';
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
+  import { untrack } from 'svelte';
   import { hub } from '$lib/api/index.svelte';
   import { Resource } from '$lib/api/resource.svelte';
   import type { Dataset, DatasetImage as Img, Split } from '$lib/api/types';
@@ -42,6 +43,16 @@
   const ds = $derived(list.find((d) => d.id === chosen) ?? list.find((d) => d.classes.join('|') === preferKey) ?? list[0] ?? null);
   const dsId = $derived(ds?.id ?? null);
   const splitN = $derived(ds ? ds.splits[split] : 0);
+
+  // When the dataset changes, start at its first page and on a split it actually has (val, else train, else test).
+  $effect(() => {
+    const d = ds;
+    if (!d) return;
+    untrack(() => {
+      offset = 0;
+      if (d.splits[split] === 0) split = (['val', 'train', 'test'] as Split[]).find((x) => d.splits[x] > 0) ?? 'train';
+    });
+  });
 
   const images = new Resource((s) => {
     const id = dsId;

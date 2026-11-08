@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { fromModelEval } from './evaluation';
+import { fromModelEval, reduceConfusion } from './evaluation';
 import { MockApi } from './mock';
 
 describe('model evaluation (contract of GET /api/models/{id}/eval)', () => {
@@ -39,5 +39,25 @@ describe('model evaluation (contract of GET /api/models/{id}/eval)', () => {
     const logs = await api.runLogs('run_7d1e', 5);
     expect(logs.lines.length).toBeLessThanOrEqual(5);
     expect(logs.lines.map((l) => l.t)).toEqual([...logs.lines.map((l) => l.t)].sort());
+  });
+});
+
+describe('reduceConfusion', () => {
+  it('keeps row totals by folding omitted classes into "other"', () => {
+    // 3 classes + background; keep class 0 only.
+    const m = [
+      [50, 30, 20, 5],
+      [1, 40, 0, 2],
+      [2, 0, 60, 3],
+      [4, 6, 7, 0],
+    ];
+    const r = reduceConfusion(m, [0]);
+    expect(r).toEqual([
+      [50, 50, 5],
+      [3, 100, 5],
+      [4, 13, 0],
+    ]);
+    // Class 0 is 50 / 105 correct before and after.
+    expect(r[0]!.reduce((a, b) => a + b, 0)).toBe(105);
   });
 });

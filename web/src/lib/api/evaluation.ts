@@ -42,3 +42,19 @@ export function fromModelEval(e: ModelEval): Evaluation {
   }));
   return { perClass, curves, mean, confusion: e.confusion, images: e.images };
 }
+
+/**
+ * Shrinks an (n+1)² confusion matrix to the classes in `keep` plus an "other classes" row/column that aggregates the
+ * rest, keeping background last. Every count stays in the matrix, so row-normalised percentages are unchanged for
+ * the kept classes (confusions with omitted classes land in "other" instead of disappearing).
+ */
+export function reduceConfusion(confusion: number[][], keep: number[]): number[][] {
+  const n = confusion.length - 1;
+  const kept = new Set(keep);
+  const k = keep.length;
+  // Output index of each input index: kept classes in order, then other (k), then background (k + 1).
+  const map = (i: number) => (i === n ? k + 1 : kept.has(i) ? keep.indexOf(i) : k);
+  const out = Array.from({ length: k + 2 }, () => new Array<number>(k + 2).fill(0));
+  for (let r = 0; r <= n; r++) for (let c = 0; c <= n; c++) out[map(r)]![map(c)]! += confusion[r]?.[c] ?? 0;
+  return out;
+}

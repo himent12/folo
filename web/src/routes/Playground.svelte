@@ -37,8 +37,9 @@
 
   setCrumbs({ label: 'Playground' });
 
-  // The server is asked once with these loose settings; the controls below re-filter its answer in the browser.
-  const FETCH = { conf: 0.01, iou: 0.95, max_det: 1000 };
+  // The server is asked once with loose settings and no suppression (IoU 1 keeps every candidate); the controls below
+  // re-filter and run NMS in the browser. Suppressing on the server first would lose boxes a looser IoU should keep.
+  const FETCH = { conf: 0.01, iou: 1, max_det: 1000 };
   const DEFAULTS = { conf: 0.25, iou: 0.7, maxDet: 300 };
 
   // ---------- model ----------
@@ -91,6 +92,7 @@
   });
 
   function setSource(s: Source) {
+    decodeSeq++;
     if (source?.kind === 'file') URL.revokeObjectURL(source.url);
     source = s;
     seg = s.kind;
@@ -100,7 +102,12 @@
     hidden = new Set();
   }
 
+  // Decodes finish asynchronously: only the latest request may commit, and nothing commits after destroy.
+  let decodeSeq = 0;
+  let destroyed = false;
+
   async function setFile(file: File | Blob, name = file instanceof File ? file.name : 'pasted image') {
+    const seq = ++decodeSeq;
     if (file.type && !file.type.startsWith('image/')) {
       toast.error(new Error(`${name} is not an image.`), 'Unsupported file');
       return;
@@ -113,13 +120,15 @@
       height = bmp.height;
       bmp.close();
     } catch {
-      toast.error(new Error('That file could not be decoded. Use a JPEG, PNG or WebP.'), 'Unsupported image');
+      if (seq === decodeSeq && !destroyed) toast.error(new Error('That file could not be decoded. Use a JPEG, PNG or WebP.'), 'Unsupported image');
       return;
     }
+    if (seq !== decodeSeq || destroyed) return;
     setSource({ kind: 'file', file, name, url: URL.createObjectURL(file), width, height });
   }
 
   function clear() {
+    decodeSeq++;
     if (source?.kind === 'file') URL.revokeObjectURL(source.url);
     source = null;
     pred = null;
@@ -128,6 +137,8 @@
   }
 
   onDestroy(() => {
+    destroyed = true;
+    decodeSeq++;
     if (source?.kind === 'file') URL.revokeObjectURL(source.url);
   });
 

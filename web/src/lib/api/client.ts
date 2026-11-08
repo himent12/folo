@@ -213,7 +213,7 @@ export class HttpApi implements Api {
     return this.#req<Prediction>(
       'POST',
       '/predict',
-      { model_id: opts.model_id, dataset_id: input.dataset_id, image_id: input.image_id, conf: opts.conf, iou: opts.iou },
+      { model_id: opts.model_id, dataset_id: input.dataset_id, image_id: input.image_id, conf: opts.conf, iou: opts.iou, max_det: opts.max_det },
       signal,
     );
   }

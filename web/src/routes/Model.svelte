@@ -3,7 +3,7 @@
   import Download from '@lucide/svelte/icons/download';
   import ScanSearch from '@lucide/svelte/icons/scan-search';
   import { hub } from '$lib/api/index.svelte';
-  import { fromModelEval } from '$lib/api/evaluation';
+  import { fromModelEval, reduceConfusion } from '$lib/api/evaluation';
   import { archInfo } from '$lib/api/mock/runs';
   import { Resource } from '$lib/api/resource.svelte';
   import type { Dataset, Model, Run } from '$lib/api/types';
@@ -58,12 +58,7 @@
       .slice(0, CM_MAX)
       .map((c) => c.class)
       .sort((a, b) => a - b);
-    const idx = [...keep, n];
-    return {
-      classes: keep.map((i) => m.classes[i] ?? `class ${i}`),
-      matrix: idx.map((r) => idx.map((c) => ev.confusion[r]?.[c] ?? 0)),
-      partial: true,
-    };
+    return { classes: [...keep.map((i) => m.classes[i] ?? `class ${i}`), 'other classes'], matrix: reduceConfusion(ev.confusion, keep), partial: true };
   });
 
   let exportOpen = $state(false);

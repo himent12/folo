@@ -272,6 +272,10 @@
           </div>
         </div>
 
+        {#if pager?.error && pager.total !== null}
+          <!-- Later pages failed: keep what loaded and offer a retry for the rest. -->
+          <ErrorState error={pager.error} title="Some images could not be loaded" retry={() => pager?.retry()} compact />
+        {/if}
         {#if pager?.error && pager.total === null}
           <Panel><ErrorState error={pager.error} title="Could not load images" retry={() => pager?.retry()} /></Panel>
         {:else if pager && pager.total === 0}

@@ -17,6 +17,8 @@ export class ImagePager {
   #pages = new Map<number, DatasetImage[]>();
   #inflight = new Map<number, Promise<void>>();
   #index = new Map<string, number>();
+  /** Pages whose last request failed; `retry()` loads them again. */
+  #failed = new Set<number>();
   #ctrl = new AbortController();
 
   constructor(
@@ -105,11 +107,13 @@ export class ImagePager {
       .datasetImages(this.datasetId, this.#query(p * PAGE, PAGE), this.#ctrl.signal)
       .then(
         (res) => {
-          this.error = undefined;
+          this.#failed.delete(p);
+          if (this.#failed.size === 0) this.error = undefined;
           this.#store(p, res.images, res.total);
         },
         (e: unknown) => {
           if (e instanceof DOMException && e.name === 'AbortError') return;
+          this.#failed.add(p);
           this.error = e;
         },
       )
@@ -118,9 +122,11 @@ export class ImagePager {
     return req;
   }
 
-  /** Clears the error and loads the first page again. */
+  /** Clears the error and loads every page that failed (the first page when nothing has loaded yet). */
   retry() {
     this.error = undefined;
-    void this.#load(0);
+    const pages = this.#failed.size ? [...this.#failed] : [0];
+    this.#failed.clear();
+    for (const p of pages) void this.#load(p);
   }
 }
