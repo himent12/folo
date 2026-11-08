@@ -41,6 +41,29 @@ describe('Resource', () => {
     stop();
   });
 
+  it('does not poll while the hub reconnects, and aborts on destroy', async () => {
+    let calls = 0;
+    let lastSignal: AbortSignal | undefined;
+    let r!: Resource<number>;
+    const stop = $effect.root(() => {
+      r = new Resource((signal) => {
+        calls++;
+        lastSignal = signal;
+        return Promise.resolve(calls);
+      }, { poll: 100 });
+    });
+    flushSync();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(r.data).toBe(1);
+    hub.mode = 'connecting';
+    flushSync();
+    await vi.advanceTimersByTimeAsync(500);
+    expect(calls).toBe(1);
+    hub.mode = 'mock';
+    stop();
+    expect(lastSignal?.aborted).toBe(true);
+  });
+
   it('ignores results that arrive after cleanup', async () => {
     const d = deferred<number>();
     let r!: Resource<number>;

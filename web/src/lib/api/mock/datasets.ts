@@ -27,6 +27,13 @@ export interface MockDatasetSpec {
   brokenLabels: number;
   createdAgoS: number;
   style: 'shapes' | 'fasteners';
+  /** Generation seed for synthetic datasets; built-in datasets derive theirs from the id. */
+  seed?: number;
+}
+
+/** Base seed of a dataset's randomness: the requested seed for synthetic sets, else the id. */
+export function seedOf(s: MockDatasetSpec): number {
+  return s.seed !== undefined ? hash(`seed:${s.seed}`) : hash(s.id);
 }
 
 export const specs: MockDatasetSpec[] = [
@@ -101,7 +108,7 @@ export const imageIndex = (id: string) => Number.parseInt(id.replace(/^img_/, ''
 
 /** The image at `index`: boxes are placed with light overlap avoidance so labels stay readable. */
 export function image(s: MockDatasetSpec, index: number): DatasetImage {
-  const r = rng(hash(s.id) ^ Math.imul(index + 1, 2654435761));
+  const r = rng(seedOf(s) ^ Math.imul(index + 1, 2654435761));
   const split = splitOf(s, index);
   const sub = split === 'train' ? index : split === 'val' ? index - s.splits.train : index - s.splits.train - s.splits.val;
   const ext = s.format === 'coco' ? 'jpg' : 'png';

@@ -10,6 +10,8 @@ export interface RunProfile {
   name: string;
   config: TrainConfig;
   classes: number;
+  /** Class names, snapshotted at creation so models keep them if the dataset is unregistered. */
+  classNames: string[];
   /** Per-class difficulty multipliers (1 = average). */
   classEase: number[];
   stepsPerEpoch: number;

@@ -79,7 +79,8 @@ const FASTENER_EASE = [1.05, 1.1, 1.12, 0.92, 0.78, 1.0, 0.85, 0.7];
 
 function profiles(t0: number): RunProfile[] {
   const live = t0 - 222_000;
-  return [
+  const names = (id: string) => [...(specs.find((s) => s.id === id)?.classes ?? [])];
+  const list: Omit<RunProfile, 'classNames'>[] = [
     {
       id: 'run_q4n2',
       name: 'shapes-hard-l',
@@ -201,6 +202,7 @@ function profiles(t0: number): RunProfile[] {
       device: 'cpu (AMD Ryzen 9 7950X)',
     },
   ];
+  return list.map((p) => ({ ...p, classNames: names(p.config.dataset_id) }));
 }
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -302,6 +304,7 @@ export class MockApi implements Api {
         splits: { train, val: n - train, test: 0 },
         width: body.imgsz,
         height: body.imgsz,
+        seed: body.seed,
         createdAgoS: (this.#t0 - Date.now()) / 1000,
       };
       this.#datasets.unshift(spec);
@@ -363,13 +366,12 @@ export class MockApi implements Api {
       const best = bestOf(p, Math.floor(progressAt(p, now).done));
       const ep = best ? epochAt(p, best.epoch) : null;
       const info = archInfo[p.config.arch];
-      const ds = this.#datasets.find((s) => s.id === p.config.dataset_id);
       out.push({
         id: run.model_id,
         name: `${p.name}-${p.terminal?.status === 'stopped' ? 'last' : 'best'}`,
         arch: p.config.arch,
         imgsz: p.config.imgsz,
-        classes: ds ? [...ds.classes] : [],
+        classes: [...p.classNames],
         params: info.params,
         flops_g: info.flops,
         bytes: Math.round(info.params * 2.06),
@@ -441,6 +443,7 @@ export class MockApi implements Api {
         name: c.name,
         config: c,
         classes: ds.classes.length,
+        classNames: [...ds.classes],
         classEase: ds.classes.map((_, i) => 0.85 + 0.3 * rng(hash(id) + i)()),
         stepsPerEpoch: Math.max(1, Math.ceil(ds.splits.train / c.batch)),
         epochSeconds: 600 / Math.max(1, c.epochs),
@@ -612,7 +615,14 @@ export class MockApi implements Api {
         const img = image(s, imageIndex(input.image_id));
         width = img.width;
         height = img.height;
-        boxes = predictBoxes(img.boxes, width, height, quality, hash(input.image_id + m.id), m.classes.length);
+        // Map dataset classes into the model's class space by name; objects of classes the model does not know
+        // get a stable but arbitrary model class (as a real model would mislabel them).
+        const toModel = s.classes.map((n, i) => {
+          const j = m.classes.indexOf(n);
+          return j >= 0 ? j : hash(`${n}:${i}`) % Math.max(1, m.classes.length);
+        });
+        const truth = img.boxes.map((b) => ({ ...b, class: toModel[b.class] ?? 0 }));
+        boxes = predictBoxes(truth, width, height, quality, hash(input.image_id + m.id), m.classes.length);
       } else {
         const dims = await imageSize(input.file);
         width = dims.width;

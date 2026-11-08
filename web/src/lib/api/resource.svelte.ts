@@ -39,11 +39,17 @@ export class Resource<T> {
       const every = opts.poll;
       $effect(() => {
         const t = setInterval(() => {
-          if (!untrack(() => this.loading || this.refreshing) && document.visibilityState === 'visible') void this.refresh();
+          if (hub.mode === 'connecting' || untrack(() => this.loading || this.refreshing)) return;
+          if (document.visibilityState === 'visible') void this.refresh();
         }, every);
         return () => clearInterval(t);
       });
     }
+    // Lifetime cleanup, independent of the fetch effect (which returns early while the hub reconnects).
+    $effect(() => () => {
+      this.#seq++;
+      this.#ctrl?.abort();
+    });
   }
 
   /** Refetch, keeping the current data visible. */

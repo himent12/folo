@@ -122,6 +122,37 @@ describe('mock runs', () => {
     for (const x of s.samples) expect(Number(x.image_id.slice(4))).toBeLessThan(10);
   });
 
+  it('keeps model classes when the dataset is unregistered', async () => {
+    const api = new MockApi('normal', 0);
+    await api.deleteDataset('ds_shapes');
+    const m = await api.model('m_shapes_n');
+    expect(m.classes).toEqual(['circle', 'square', 'triangle']);
+  });
+
+  it('predicts in the model class space', async () => {
+    const api = new MockApi('normal', 0);
+    const p = await api.predict({ kind: 'dataset', dataset_id: 'ds_fasteners', image_id: 'img_000000' }, { model_id: 'm_shapes_n', conf: 0 });
+    for (const b of p.boxes) {
+      expect(b.class).toBeLessThan(3);
+      expect(['circle', 'square', 'triangle']).toContain(b.name);
+    }
+  });
+
+  it('derives synthetic images from the requested seed', async () => {
+    const body = { name: 'seeded', images: 20, classes: ['a', 'b'], imgsz: 320 };
+    const a1 = await new MockApi('normal', 0).createSyntheticDataset({ ...body, seed: 1 });
+    const a2 = new MockApi('normal', 0);
+    await a2.createSyntheticDataset({ ...body, name: 'other', seed: 2 });
+    const b1 = await a2.createSyntheticDataset({ ...body, seed: 1 });
+    const imgs = async (api: MockApi, id: string) => (await api.datasetImages(id, { limit: 5 })).images;
+    const api1 = new MockApi('normal', 0);
+    const c1 = await api1.createSyntheticDataset({ ...body, seed: 1 });
+    const c9 = await api1.createSyntheticDataset({ ...body, name: 'nine', seed: 999 });
+    expect(await imgs(api1, c1.id)).not.toEqual(await imgs(api1, c9.id));
+    expect((await imgs(a2, b1.id)).map((i) => i.boxes)).toEqual((await imgs(api1, c1.id)).map((i) => i.boxes));
+    void a1;
+  });
+
   it('fails every call in the error scenario', async () => {
     const api = new MockApi('error', 0);
     await expect(api.runs()).rejects.toMatchObject({ code: 'server_unavailable' });
@@ -138,7 +169,7 @@ describe('mock runs', () => {
         optimizer: 'auto' as const, lr0: 0.01, weights: null, seed: 0,
         augment: { mosaic: 1, mixup: 0, hsv: [0.015, 0.7, 0.4] as [number, number, number], fliplr: 0.5, scale: 0.5, translate: 0.1, close_mosaic: 10 },
       },
-      classes: 3, classEase: [1, 1, 1], stepsPerEpoch: 10, epochSeconds: 1, mapMax: 0.7, tau: 8, imgsPerS: 300,
+      classes: 3, classNames: ['a', 'b', 'c'], classEase: [1, 1, 1], stepsPerEpoch: 10, epochSeconds: 1, mapMax: 0.7, tau: 8, imgsPerS: 300,
       createdAt: NOW, startedAt: NOW, device: 'cpu',
     };
     expect(epochAt(prof, 49).val.map50_95).toBeGreaterThan(epochAt(prof, 2).val.map50_95);

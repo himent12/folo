@@ -2,8 +2,8 @@
 // The objects fill exactly the boxes from ./datasets, so ground truth overlays line up.
 
 import type { Box, DatasetImage } from '../types';
-import type { MockDatasetSpec } from './datasets';
-import { hash, range, rng } from './rng';
+import { seedOf, type MockDatasetSpec } from './datasets';
+import { range, rng } from './rng';
 
 type Ctx = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
 
@@ -25,7 +25,7 @@ export async function renderImage(spec: MockDatasetSpec, img: DatasetImage, inde
   const h = Math.max(1, Math.round(img.height * scale));
   const { canvas, ctx } = makeCanvas(w, h);
   ctx.scale(scale, scale);
-  const r = rng(hash(spec.id) ^ Math.imul(index + 7, 40503));
+  const r = rng(seedOf(spec) ^ Math.imul(index + 7, 40503));
   if (spec.style === 'fasteners') drawConveyor(ctx, img, r);
   else drawBackdrop(ctx, img, r, spec.id === 'ds_shapes_hard');
   for (const b of img.boxes) {
