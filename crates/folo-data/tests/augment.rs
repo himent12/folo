@@ -10,8 +10,7 @@ use folo_data::augment::{
 };
 use folo_data::warp::Affine;
 use folo_data::{
-    AugmentConfig, BBox, Dataset, InMemoryDataset, LetterboxOptions, Rng, Split, TrainTransform,
-    letterbox_sample,
+    AugmentConfig, BBox, InMemoryDataset, LetterboxOptions, Rng, Split, TrainTransform, letterbox_sample,
 };
 
 /// Keep every visible sliver so "every coloured pixel is inside a box" holds exactly.
