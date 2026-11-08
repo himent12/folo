@@ -2,7 +2,8 @@
 
 use std::collections::HashMap;
 
-use folo_core::{DType, Tensor};
+use folo_core::backend::OptimStep;
+use folo_core::{DType, Device, Tensor};
 
 use super::{
     GradSource, OptimKind, Optimizer, ParamGroup, cpu_fast, for_each_param, take_state, validate_groups,
@@ -88,8 +89,16 @@ fn update(
             Ok(())
         })?;
     }
-    // Any device: the same arithmetic, op by op.
     let g = g.to_dtype(DType::F32)?;
+    // A device with a fused kernel: one dispatch, same arithmetic.
+    if !p.device().is_cpu() {
+        let state: Vec<&Tensor> = buf.filter(|_| mu != 0.0).into_iter().collect();
+        let step = OptimStep::Sgd { lr, momentum: mu, weight_decay: wd, nesterov };
+        if p.optimizer_step_(&g, &state, &step)? {
+            return Ok(());
+        }
+    }
+    // Any device: the same arithmetic, op by op.
     let mut d = if wd != 0.0 { g.add(&p.mul_scalar(wd)?)? } else { g };
     if let Some(b) = buf
         && mu != 0.0
@@ -158,6 +167,18 @@ impl Optimizer for Sgd {
             }
         }
         Ok(out)
+    }
+
+    fn to_device(&mut self, device: Device) -> Result<()> {
+        for (g, bufs) in self.groups.iter().zip(&self.bufs) {
+            for ((_, p), b) in g.params.iter().zip(bufs) {
+                p.to_device_(device)?;
+                if let Some(b) = b {
+                    b.to_device_(device)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     fn load_state(&mut self, step: u64, state: &HashMap<String, Tensor>) -> Result<()> {

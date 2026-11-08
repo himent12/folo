@@ -11,6 +11,8 @@ pub mod elementwise;
 pub mod ew;
 pub mod gemm;
 pub mod layout;
+pub mod norm;
+pub mod optim;
 pub mod pool_grad;
 pub mod pooling;
 pub mod reduce;

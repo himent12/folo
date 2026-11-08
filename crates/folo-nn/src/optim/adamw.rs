@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 
+use folo_core::backend::OptimStep;
 use folo_core::{DType, Tensor};
 
 use super::{
@@ -88,6 +89,21 @@ fn update(p: &Tensor, g: &Tensor, m: &Tensor, v: &Tensor, c: &Coef) -> Result<()
         })?;
     }
     let g = g.to_dtype(DType::F32)?;
+    if !p.device().is_cpu() {
+        let step = OptimStep::AdamW {
+            decay: c.decay,
+            beta1: c.b1,
+            one_minus_beta1: c.one_minus_b1,
+            beta2: c.b2,
+            one_minus_beta2: c.one_minus_b2,
+            step_size: c.step_size,
+            bc2_sqrt: c.bc2_sqrt,
+            eps: c.eps,
+        };
+        if p.optimizer_step_(&g, &[m, v], &step)? {
+            return Ok(());
+        }
+    }
     if let Some(d) = c.decay {
         p.mul_scalar_assign(d)?;
     }

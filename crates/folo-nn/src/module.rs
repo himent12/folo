@@ -11,7 +11,7 @@
 use std::any::Any;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use folo_core::Tensor;
+use folo_core::{Device, Tensor};
 
 use crate::Result;
 
@@ -171,6 +171,33 @@ pub trait Module: Any + Send + Sync {
     /// Evaluation mode (`set_training(false)`).
     fn eval(&self) {
         self.set_training(false);
+    }
+
+    /// Move every parameter and buffer of this module and its descendants to `device`, in place
+    /// ([`Tensor::to_device_`]). Each tensor keeps its identity, name, dtype and `requires_grad` flag, and
+    /// the train/eval mode is unchanged, so handles taken earlier stay valid: optimizer parameter groups,
+    /// [`crate::optim::GradAccumulator`] slots and a [`crate::ModelEma`] source all follow. Move the
+    /// optimizer's own state with [`crate::optim::Optimizer::to_device`] and the EMA copy with
+    /// [`crate::ModelEma::to_device`].
+    ///
+    /// ```
+    /// use folo_core::{rng::Rng, Device};
+    /// use folo_nn::{Conv2d, Conv2dConfig, Module};
+    ///
+    /// let mut conv = Conv2d::new(Conv2dConfig::new(3, 8, 3), &mut Rng::seed(0));
+    /// let id = conv.weight.id();
+    /// conv.to_device(Device::Cpu).unwrap(); // a no-op; `Device::Gpu(0)` after `folo_gpu::init()`
+    /// assert_eq!(conv.weight.id(), id);
+    /// assert!(conv.weight.requires_grad());
+    /// ```
+    ///
+    /// Modules holding tensors outside [`Module::visit_tensors`] (caches, constants) override this and
+    /// move those too.
+    fn to_device(&mut self, device: Device) -> Result<()> {
+        for t in self.named_tensors() {
+            t.tensor.to_device_(device)?;
+        }
+        Ok(())
     }
 
     /// The mode of this module, or of its first descendant that has one; `true` if none does.

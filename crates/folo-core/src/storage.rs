@@ -219,14 +219,51 @@ impl Storage {
 
 /// Shared, lockable storage with a version counter bumped on every in-place write. Autograd records the
 /// version when an op saves its inputs and refuses to run backward if it changed.
+///
+/// The device is kept next to the data (not in each tensor) so [`crate::Tensor::to_device_`] can move a
+/// storage in place: every tensor and view sharing it follows. It is an atomic so `Tensor::device()` never
+/// takes the lock.
 pub(crate) struct StorageCell {
     data: RwLock<Storage>,
     version: AtomicU64,
+    device: AtomicU64,
+}
+
+/// `Cpu` as 0, `Gpu(i)` as `i + 1`.
+fn encode_device(d: Device) -> u64 {
+    match d {
+        Device::Cpu => 0,
+        Device::Gpu(i) => i as u64 + 1,
+    }
+}
+
+fn decode_device(v: u64) -> Device {
+    match v {
+        0 => Device::Cpu,
+        i => Device::Gpu((i - 1) as usize),
+    }
 }
 
 impl StorageCell {
     pub fn new(s: Storage) -> Self {
-        StorageCell { data: RwLock::new(s), version: AtomicU64::new(0) }
+        let device = AtomicU64::new(encode_device(s.device()));
+        StorageCell { data: RwLock::new(s), version: AtomicU64::new(0), device }
+    }
+
+    /// The device of the data.
+    #[inline]
+    pub fn device(&self) -> Device {
+        decode_device(self.device.load(Ordering::Acquire))
+    }
+
+    /// Replace the data with `new` (same dtype and length, any device) through an already-held write guard.
+    pub fn replace(&self, guard: &mut RwLockWriteGuard<'_, Storage>, new: Storage) {
+        let device = new.device();
+        let old = std::mem::replace(&mut **guard, new);
+        self.device.store(encode_device(device), Ordering::Release);
+        if let Storage::Cpu(CpuStorage::F32(v)) = old {
+            crate::cpu::recycle(v);
+        }
     }
 
     pub fn read(&self) -> RwLockReadGuard<'_, Storage> {

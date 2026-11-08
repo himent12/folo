@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+use folo_core::Device;
 use folo_nn::io::{
     FileKind, FloatDType, LoadOptions, LoadReport, Metadata, ModelFile, Purpose, export_module, save_weights,
 };
@@ -52,6 +53,19 @@ impl FoloModel {
     /// Open a `.folo` file for inference ([`FoloModel::from_file`] with [`Purpose::Inference`]).
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         Ok(Self::from_file(&ModelFile::open(path)?, Purpose::Inference)?.0)
+    }
+
+    /// [`FoloModel::from_file`], then move the model to `device` (the tensors are read on the CPU and
+    /// uploaded once each).
+    pub fn from_file_on(file: &ModelFile, purpose: Purpose, device: Device) -> Result<(Self, LoadReport)> {
+        let (mut model, report) = Self::from_file(file, purpose)?;
+        model.to_device(device)?;
+        Ok((model, report))
+    }
+
+    /// [`FoloModel::open`] straight onto `device` (for example `folo_gpu::init()?`).
+    pub fn open_on(path: impl AsRef<Path>, device: Device) -> Result<Self> {
+        Ok(Self::from_file_on(&ModelFile::open(path)?, Purpose::Inference, device)?.0)
     }
 
     /// Load `file` into this model with `opts` (FORMAT.md loading rules). When `opts.classes` is unset it is

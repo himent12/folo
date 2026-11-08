@@ -450,6 +450,26 @@ impl FoloModel {
     pub fn device(&self) -> Device {
         self.backbone.stem.conv.weight.device()
     }
+
+    /// Move every weight and BatchNorm buffer to `device` in place (folo-nn's [`Module::to_device`]): tensor
+    /// identities, names, `requires_grad` and the train/eval and fused state are kept, so an optimizer or
+    /// EMA built over this model stays valid (move their own state with `Optimizer::to_device` /
+    /// `ModelEma::to_device`). Inputs must be on the same device; [`FoloModel::forward`] then runs entirely
+    /// there, and the outputs ([`HeadOutput`]) live there too.
+    ///
+    /// ```no_run
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// use folo_vision::model::{FoloModel, ModelConfig};
+    /// let dev = folo_gpu::init()?; // Device::Gpu(0)
+    /// let mut model = FoloModel::new(ModelConfig::new("n", 80)?)?;
+    /// model.to_device(dev)?;
+    /// model.fuse()?; // fused Conv + bias + SiLU kernels on the GPU
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn to_device(&mut self, device: Device) -> Result<()> {
+        Module::to_device(self, device)
+    }
 }
 
 impl Module for FoloModel {

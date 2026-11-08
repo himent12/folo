@@ -51,6 +51,9 @@ pub struct PoolStats {
     pub live_bytes: u64,
     /// Total bytes ever allocated from the driver.
     pub allocated_bytes: u64,
+    /// The largest `live_bytes` seen since the pool was created or [`BufferPool::reset_peak`] ran (the
+    /// equivalent of PyTorch's `max_memory_allocated`, in size-class bytes).
+    pub peak_live_bytes: u64,
 }
 
 type Key = (u64, wgpu::BufferUsages);
@@ -95,6 +98,11 @@ impl BufferPool {
         self.stats
     }
 
+    /// Restart [`PoolStats::peak_live_bytes`] from the current live bytes.
+    pub fn reset_peak(&mut self) {
+        self.stats.peak_live_bytes = self.stats.live_bytes;
+    }
+
     /// Drops every cached buffer.
     pub fn clear(&mut self) {
         self.free.clear();
@@ -113,6 +121,7 @@ impl BufferPool {
     ) -> wgpu::Buffer {
         self.stats.live_bytes += class;
         self.high_water = self.high_water.max(self.stats.live_bytes);
+        self.stats.peak_live_bytes = self.stats.peak_live_bytes.max(self.stats.live_bytes);
         if let Some((_, buf)) = self.free.get_mut(&(class, usage)).and_then(VecDeque::pop_back) {
             self.stats.hits += 1;
             self.stats.cached_bytes -= class;

@@ -73,3 +73,18 @@ fn custom_op_gradient_dtype_must_match() -> Result<()> {
     assert!(matches!(bad.sum_all()?.backward(), Err(Error::Autograd(_))));
     Ok(())
 }
+
+/// `to_device_` without a GPU: a no-op on the same device, a clear error (and an untouched tensor) for an
+/// unregistered one, and a refusal for results of recorded ops.
+#[test]
+fn to_device_in_place_on_the_cpu() {
+    use folo_core::Device;
+    let t = Tensor::from_slice(&[1.0f32, 2.0, 3.0], [3]).unwrap().requires_grad_();
+    let id = t.id();
+    t.to_device_(Device::Cpu).unwrap();
+    assert!(matches!(t.to_device_(Device::Gpu(31)), Err(Error::BackendNotRegistered(Device::Gpu(31)))));
+    assert_eq!((t.id(), t.device()), (id, Device::Cpu));
+    assert_eq!(t.to_vec::<f32>().unwrap(), [1.0, 2.0, 3.0]);
+    assert!(t.mul_scalar(2.0).unwrap().to_device_(Device::Cpu).is_ok(), "same device: nothing to move");
+    assert!(matches!(t.mul_scalar(2.0).unwrap().to_device_(Device::Gpu(31)), Err(Error::Autograd(_))));
+}

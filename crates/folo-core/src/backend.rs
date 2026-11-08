@@ -397,6 +397,123 @@ pub trait Backend: Send + Sync + 'static {
     fn topk(&self, x: View<'_>, k: usize, largest: bool) -> Result<(Storage, Storage)> {
         unsupported!(self, "topk")
     }
+
+    // ----- Fused (optional; default NotSupported, and callers fall back to the composite ops) -----
+
+    /// `act(conv2d(x, w) + bias)` in one kernel (the conv epilogue applies bias and activation). `act` is
+    /// `None` for the identity. Same shapes as [`Backend::conv2d`]; no gradient is ever needed (callers use it
+    /// only when nothing is recorded). Reached through `Tensor::conv2d_act`.
+    fn conv2d_act(
+        &self,
+        x: View<'_>,
+        w: View<'_>,
+        bias: Option<View<'_>>,
+        p: &Conv2dParams,
+        act: Option<UnaryOp>,
+    ) -> Result<Storage> {
+        unsupported!(self, "conv2d_act")
+    }
+    /// Train-mode batch normalisation of `x` `[N, C, H, W]` over `N·H·W` per channel, then `act` (`None` is
+    /// the identity): `y = act((x − mean) · invstd · weight + bias)` with the batch mean and
+    /// `invstd = 1 / sqrt(var + eps)` of the *biased* variance. Returns `(y, mean [C], invstd [C])`.
+    /// With `running`, also updates the running statistics in place:
+    /// `mean ← (1 − m) · mean + m · batch_mean`, `var ← (1 − m) · var + m · batch_var · n / (n − 1)`. Their
+    /// storages hold `[C]` contiguously from element 0. Reached through `Tensor::batch_norm_act_train`.
+    fn batch_norm_act(
+        &self,
+        x: View<'_>,
+        weight: View<'_>,
+        bias: View<'_>,
+        eps: f32,
+        act: Option<UnaryOp>,
+        running: Option<RunningUpdate<'_>>,
+    ) -> Result<(Storage, Storage, Storage)> {
+        unsupported!(self, "batch_norm_act")
+    }
+    /// The gradients `(dx, dweight, dbias)` of [`Backend::batch_norm_act`] given the output gradient `grad`
+    /// and the forward's `mean` / `invstd`; `act` is differentiated at its recomputed input.
+    #[allow(clippy::too_many_arguments)]
+    fn batch_norm_act_backward(
+        &self,
+        x: View<'_>,
+        grad: View<'_>,
+        weight: View<'_>,
+        bias: View<'_>,
+        mean: View<'_>,
+        invstd: View<'_>,
+        act: Option<UnaryOp>,
+    ) -> Result<(Storage, Storage, Storage)> {
+        unsupported!(self, "batch_norm_act_backward")
+    }
+    /// One in-place optimizer update of `param` from `grad` (see [`OptimStep`] for the formulas, which are
+    /// folo-nn's optimizers' and EMA's, op for op). `param` and `state` hold their `n = grad.numel()` elements
+    /// contiguously from element 0; `state` is the momentum buffer (SGD with momentum), `[exp_avg,
+    /// exp_avg_sq]` (AdamW) or empty. Reached through `Tensor::optimizer_step_`.
+    fn optimizer_step(
+        &self,
+        param: &mut Storage,
+        grad: View<'_>,
+        state: &mut [&mut Storage],
+        step: &OptimStep,
+    ) -> Result<()> {
+        unsupported!(self, "optimizer_step")
+    }
+}
+
+/// The update [`Backend::optimizer_step`] applies, per element, in `f32`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
+pub enum OptimStep {
+    /// SGD: `d = g + wd · p` (when `wd ≠ 0`); with a momentum buffer `b = μ · b + d` and
+    /// `d = nesterov ? d + μ · b : b`; then `p = p + (−lr) · d`.
+    Sgd {
+        /// Learning rate.
+        lr: f32,
+        /// `μ` (used only with a momentum buffer).
+        momentum: f32,
+        /// Coupled L2 weight decay.
+        weight_decay: f32,
+        /// Nesterov momentum.
+        nesterov: bool,
+    },
+    /// AdamW: `p = p · decay` (when set); `m = β1 · m + (1 − β1) · g`; `v = β2 · v + (1 − β2) · g²`;
+    /// `p = p + (−step_size) · m / (sqrt(v) / bc2_sqrt + eps)`.
+    AdamW {
+        /// Decoupled weight decay factor `1 − lr · wd`.
+        decay: Option<f32>,
+        /// β1.
+        beta1: f32,
+        /// `1 − β1`.
+        one_minus_beta1: f32,
+        /// β2.
+        beta2: f32,
+        /// `1 − β2`.
+        one_minus_beta2: f32,
+        /// `lr / (1 − β1^t)`.
+        step_size: f32,
+        /// `sqrt(1 − β2^t)`.
+        bc2_sqrt: f32,
+        /// ε.
+        eps: f32,
+    },
+    /// `p = p · a + g · b` (the EMA update with `a = d`, `b = 1 − d`).
+    Axpby {
+        /// Weight of the old value.
+        a: f32,
+        /// Weight of the new value.
+        b: f32,
+    },
+}
+
+/// The running statistics [`Backend::batch_norm_act`] updates in place.
+#[derive(Debug)]
+pub struct RunningUpdate<'a> {
+    /// Running mean, `[C]` contiguous.
+    pub mean: &'a mut Storage,
+    /// Running (unbiased) variance, `[C]` contiguous.
+    pub var: &'a mut Storage,
+    /// Weight of the batch statistic.
+    pub momentum: f32,
 }
 
 static GPU_BACKENDS: RwLock<Vec<Option<Arc<dyn Backend>>>> = RwLock::new(Vec::new());

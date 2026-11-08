@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use folo_core::{DType, Grads, Tensor, TensorId, no_grad};
+use folo_core::{DType, Device, Grads, Tensor, TensorId, no_grad};
 
 use super::GradSource;
 use crate::Result;
@@ -61,6 +61,18 @@ impl GradAccumulator {
             }
         }
         self.passes += 1;
+        Ok(())
+    }
+
+    /// Move the tracked parameters and the accumulation buffers to `device`, in place (see
+    /// [`crate::Module::to_device`]).
+    pub fn to_device(&mut self, device: Device) -> Result<()> {
+        for s in &self.slots {
+            s.param.to_device_(device)?;
+            if let Some(b) = &s.buf {
+                b.to_device_(device)?;
+            }
+        }
         Ok(())
     }
 

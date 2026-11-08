@@ -95,12 +95,30 @@ impl Module for ConvBnAct {
 }
 
 impl Forward for ConvBnAct {
+    /// - Fused (no BatchNorm): `act(conv2d(x) + bias)` through [`Tensor::conv2d_act`], one kernel with bias and
+    ///   activation in the epilogue on the GPU when nothing is recorded.
+    /// - Training: the conv, then [`BatchNorm2d::forward_act`] (BatchNorm + activation fused on the GPU).
+    /// - Evaluation on a device other than the CPU: the BatchNorm is folded into the conv weights on the fly
+    ///   (`W · k`, `β − mean · k`, small per-channel ops, differentiable) and the conv runs fused as above.
+    /// - Evaluation on the CPU: conv, BatchNorm, activation.
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let mut y = self.conv.forward(x)?;
-        if let Some(bn) = &self.bn {
-            y = bn.forward(&y)?;
+        let p = self.conv.config().params();
+        let act = self.act.unary_op();
+        match &self.bn {
+            None => Ok(x.conv2d_act(&self.conv.weight, self.conv.bias.as_ref(), &p, act)?),
+            Some(bn) if bn.is_training() => bn.forward_act(&self.conv.forward(x)?, self.act),
+            Some(bn) if !x.device().is_cpu() => {
+                let (scale, shift) = bn.eval_scale_shift()?;
+                let o = scale.numel();
+                let w = self.conv.weight.mul(&scale.reshape([o, 1, 1, 1])?)?;
+                let b = match &self.conv.bias {
+                    Some(cb) => cb.mul(&scale)?.add(&shift)?,
+                    None => shift,
+                };
+                Ok(x.conv2d_act(&w, Some(&b), &p, act)?)
+            }
+            Some(bn) => self.act.forward(&bn.forward(&self.conv.forward(x)?)?),
         }
-        self.act.forward(&y)
     }
 }
 
