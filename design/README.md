@@ -59,11 +59,13 @@ app: chart plots, image canvases, code/log views. In light mode panels are white
 - Status: `success` (completed, healthy), `warning` (degraded, stopping), `danger` (failed, errors), `info`
   (queued, neutral notices). Each has `solid` (dots, icons, bars), `text` (readable text) and `muted` (tinted
   backgrounds for badges and banners).
-- Charts: `chart.series[0..5]` in this fixed order (lime, sky, pink, amber, violet, teal), never cycled; the order
-  keeps every adjacent pair apart under colour-vision deficiency (checked with an OKLab ΔE validator). Grid lines
-  `chart.grid`, axis lines `chart.axis`, tick labels `chart.label` (xs / mono), hover cursor `chart.cursor`. Area
-  fills under a line use the series colour at `area_opacity`. Loss components: total = series 1, box = 2, cls = 3,
-  dfl = 4. Two or more series always get a legend, and lines are direct-labelled where they end.
+- Charts: `chart.series[0..5]` in this fixed order (sky, amber, magenta, teal, violet, orange), never cycled; the
+  order keeps every adjacent pair apart under colour-vision deficiency (checked with an OKLab ΔE validator). The
+  series deliberately exclude the accent lime (reserved for actions, live state, focus and "best" markers) and avoid
+  the status hues' exact values. Grid lines `chart.grid`, axis lines `chart.axis`, tick labels `chart.label` (xs /
+  mono), hover cursor `chart.cursor`. Area fills under a line use the series colour at `area_opacity`. Loss
+  components: total = series 1, box = 2, cls = 3, dfl = 4. Two or more series always get a legend with values, and
+  run comparisons assign series slots by run, so a run keeps its colour.
 
 ## Detection classes
 `classes.palette`: 16 saturated, mid-to-high-lightness colours chosen to stay distinct from each other and legible on
