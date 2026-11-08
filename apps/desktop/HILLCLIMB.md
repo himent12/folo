@@ -490,3 +490,54 @@ Round 14 changes:
   - Close mosaic revalidates when the epochs change.
   - Tick labels give way only to a chip that is actually drawn.
   - Log following tracks a revision, so it keeps following at the 2,000-line cap.
+
+## Round 14
+
+| Line | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | avg |
+|------|---|---|---|---|---|---|---|---|---|----|----|----|-----|
+| Opus 5.5 | 8 | 8 | 8 | 8 | 8 | 8 | 8 | 8 | 8 | 8 | 8 | 8 | 8.0 |
+| GPT-6.1 Sol | 9 | 8 | 8 | 8 | 8 | 8 | 8 | 8 | 8 | 7 | 9 | 8 | 8.1 |
+
+Sol gave its first 9s on hierarchy and responsiveness. Remaining items:
+- Divergences from the shared design rules:
+  - The loss encoding.
+  - The selected-box treatment.
+  - Queued shown in a status hue.
+  - Mono scores on the detection chips.
+- Keyboard: Tab didn't reveal off-screen controls in scrolling forms. The stop dialog's X and scrim didn't restore focus. Disabled buttons weren't Tab stops.
+- Live charts jumped instead of easing.
+- Measurable slips:
+  - Near-black "<1%" cells.
+  - Precision–recall axes and ticks.
+  - Header and column alignment in Recent runs.
+  - The datasets skeleton's padding.
+  - Orphan-row card widths.
+  - Run KPIs at minimum size.
+
+Round 15 changes:
+- **Shared rules:**
+  - Loss: box = series 1, cls = series 4 dashed, dfl = series 5 dotted, total = text.primary and thicker; the legend samples match.
+  - Selected box: 3 px accent stroke, the others at 30 %, and a 2 px accent bar on its list row (inspector and Playground). The inspector's list is sorted by class, then area.
+  - Queued is neutral.
+  - Chip scores use tabular Geist.
+- **Keyboard:**
+  - A keyboard focus move scrolls the focused control and its ring into view, with an 8 px margin, in the dialog, the Playground rail or the page.
+  - Every stop-dialog dismissal restores focus.
+  - Disabled buttons are Tab stops that show their reason while focused.
+- **Live charts:** new data eases in over 240 ms. Shared points move and new points slide out. It applies only to appends and is instant under Reduce motion.
+- **Model page:**
+  - Precision–recall has axis titles and 0.25 ticks on both axes.
+  - The legend's hint moves to the panel header.
+  - Confusion cells and the ramp sit on the panel surface, and the key gains a "correct" swatch.
+- **Run dashboard:** the mAP chart has the future span with its ETA, like the Overview. P&R uses 0.25 ticks. KPI tiles keep their detail lines at every size, and the headline value uses the row's size.
+- **Overview:** Recent runs gains a column-head row on the row grid, with Progress right after Status. Dataset · arch shows whenever there's room; Created drops when the list sits beside Best models. The datasets skeleton has its padding.
+- **Other:**
+  - Equal-third dataset cards.
+  - The empty Playground drop zone is capped at 420 px and centred.
+  - 56 px Settings rows.
+  - Copy: the Models subtitle and the server-address help.
+- **Code review of #45:**
+  - Tab closes Export.
+  - The Export trigger only toggles; Enter commits the highlighted option.
+  - Pins reset between models and are validated.
+  - The Models order is cached per data revision and column.

@@ -186,6 +186,8 @@ impl NewRunForm {
     }
 }
 
+pub type ModelsOrderKey = (usize, usize, &'static str, bool);
+
 pub struct NewRunForm {
     pub name: Entity<TextInput>,
     pub dataset: usize,
@@ -354,6 +356,8 @@ pub struct FoloApp {
     pub export_hl: usize,
     /// Models table order: column key and descending; None keeps the server's order.
     pub models_sort: Option<(&'static str, bool)>,
+    /// The sorted order of the models list, for (list allocation, length, column, descending).
+    pub models_order: RefCell<Option<(ModelsOrderKey, Vec<usize>)>>,
     pub confusion_norm: bool,
 
     // Playground
@@ -478,6 +482,7 @@ impl FoloApp {
             pr_pin: None,
             export_hl: 0,
             models_sort: None,
+            models_order: RefCell::new(None),
             confusion_norm: true,
             play_model: None,
             play_conf: 0.25,
@@ -588,6 +593,8 @@ impl FoloApp {
         self.page_scroll.set_offset(gpui::point(px(0.), px(0.)));
         self.chart_hover = None;
         self.export_open = false;
+        self.pr_pin = None;
+        self.pr_focus = None;
         self.menu_open = None;
         self.sample_epoch = None;
         if !self.focus_within_page(window) {
@@ -2058,6 +2065,47 @@ pub fn logo(t: &Theme, size: f32) -> impl IntoElement {
         )
 }
 
+thread_local! {
+    /// Scroll containers to search after a keyboard focus move, innermost first. The focus ring
+    /// that paints next scrolls its control into view in the first container that holds it.
+    static REVEAL: RefCell<Option<Vec<ScrollHandle>>> = const { RefCell::new(None) };
+}
+
+/// Scroll the first candidate container holding `b` (horizontally) so `b` is fully visible
+/// with an 8 px margin. Runs once per request.
+fn reveal(b: gpui::Bounds<Pixels>, window: &mut Window) {
+    let Some(handles) = REVEAL.with(|r| r.borrow_mut().take()) else { return };
+    let margin = px(8.);
+    // The innermost clip around the control: only a container that contains it owns the control
+    // (a dialog's fixed header and footer sit outside the scrolling body).
+    let mask = window.content_mask().bounds;
+    let tol = px(1.);
+    for h in handles {
+        let vp = h.bounds();
+        let inside = mask.left() >= vp.left() - tol
+            && mask.right() <= vp.right() + tol
+            && mask.top() >= vp.top() - tol
+            && mask.bottom() <= vp.bottom() + tol;
+        if vp.size.width <= px(0.) || !inside {
+            continue;
+        }
+        let dy = if b.top() - margin < vp.top() {
+            b.top() - margin - vp.top()
+        } else if b.bottom() + margin > vp.bottom() {
+            b.bottom() + margin - vp.bottom()
+        } else {
+            px(0.)
+        };
+        if dy != px(0.) {
+            let off = h.offset();
+            let y = (off.y - dy).clamp(-h.max_offset().height, px(0.));
+            h.set_offset(gpui::point(off.x, y));
+            window.refresh();
+        }
+        return;
+    }
+}
+
 /// Keyboard focus ring: 2 px in the focus colour, 2 px outside the control.
 pub fn focus_ring(t: &Theme, radius: f32) -> gpui::Div {
     let off = tsize::FOCUS_OFFSET + tsize::FOCUS_RING;
@@ -2070,6 +2118,8 @@ pub fn focus_ring(t: &Theme, radius: f32) -> gpui::Div {
         .rounded(px(radius + off))
         .border_2()
         .border_color(t.focus)
+        // Keyboard focus moved here: make sure the control (and its ring) is on screen.
+        .child(gpui::canvas(|b, window, _| reveal(b, window), |_, _, _, _| {}).size_full())
 }
 
 impl Render for FoloApp {
@@ -2124,12 +2174,14 @@ impl Render for FoloApp {
             }))
             .on_action(cx.listener(|this, _: &FocusNext, w, cx| {
                 this.menu_open = None;
+                this.export_open = false;
                 this.kb = true;
                 this.cycle_focus(true, w, cx);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &FocusPrev, w, cx| {
                 this.menu_open = None;
+                this.export_open = false;
                 this.kb = true;
                 this.cycle_focus(false, w, cx);
                 cx.notify();
@@ -2245,6 +2297,16 @@ impl FoloApp {
 
     /// Tab / Shift-Tab, trapped inside the topmost overlay.
     fn cycle_focus(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        // The newly focused control scrolls into view inside whichever of these holds it.
+        let containers = if self.new_run.is_some() {
+            vec![self.dialog_scroll.clone()]
+        } else if matches!(self.route, Route::Playground) {
+            vec![self.play_side_scroll.clone(), self.page_scroll.clone()]
+        } else {
+            vec![self.page_scroll.clone()]
+        };
+        REVEAL.with(|r| *r.borrow_mut() = Some(containers));
+        cx.notify();
         for _ in 0..512 {
             if forward {
                 window.focus_next()

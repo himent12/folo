@@ -26,7 +26,9 @@ impl FoloApp {
                 .justify_between()
                 .gap(px(24.))
                 .px(px(16.))
-                .py(px(16.))
+                // 56 px rows (DIRECTION); a row whose description wraps grows.
+                .min_h(px(56.))
+                .py(px(8.))
                 .border_b_1()
                 .border_color(t.line_subtle)
                 // Label and description take the slack (and wrap); every control ends on the same edge.
@@ -138,7 +140,7 @@ impl FoloApp {
             .child(row(
                 "Server address",
                 help(if self.server_mode == ServerMode::Mock {
-                    "Used when the data source is folo serve. Connect switches to it and uses this address."
+                    "Address of folo serve. Connect switches the data source to it."
                 } else {
                     "Where folo serve listens. Press Enter or Connect to connect again."
                 }),
