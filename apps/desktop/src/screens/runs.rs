@@ -9,7 +9,6 @@ use gpui::{
     SharedString, StatefulInteractiveElement, Styled, Window, div, px,
 };
 
-use super::overview::chart_block;
 use super::*;
 use crate::api::{LogLevel, Run, RunStatus, time};
 use crate::app::{FoloApp, Route, RunFilter, SampleView, act};
@@ -826,7 +825,8 @@ impl FoloApp {
             secondary_h,
         );
         pr.y_range = Some((0., 1.));
-        pr.y_ticks = if short { 2 } else { 4 };
+        // 0 / 0.50 / 1.00: the lower row's plot is under 180 px, where five labels crowd.
+        pr.y_ticks = 2;
         pr.y_fmt = Some(|v| format!("{v:.2}"));
         let mut lr = base(
             "run-lr",
@@ -981,7 +981,6 @@ impl FoloApp {
             Some(p) => format!("per step · by epoch · × 10{}", crate::charts::superscript(p)),
             None => "per step · by epoch".to_string(),
         };
-        let _ = chart_block;
         // The mAP chart is the focal point: wider and first. Narrow windows stack each row.
         let stack = window.viewport_size().width < px(1120.);
         // Narrow and short: the primary pair stays side by side (half each), so Training loss is
@@ -1011,7 +1010,7 @@ impl FoloApp {
                 if pair_a { 0.5 } else { 0.4 },
             ))
             .child(row(
-                card("Precision and recall", "best-F1 · validation", pr_legend, line_chart(&t, pr))
+                card("Precision and recall", "best-F1 · IoU 0.50 · val", pr_legend, line_chart(&t, pr))
                     .into_any_element(),
                 card("Learning rate", &lr_caption, lr_legend, line_chart(&t, lr)).into_any_element(),
                 0.6,

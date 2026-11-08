@@ -16,7 +16,7 @@ use crate::app::{FoloApp, Route, act};
 use crate::charts::{HoverFn, LineChart, Series, line_chart};
 use crate::controls::Btn;
 use crate::store::Load;
-use crate::theme::{alpha, radius, theme, ty};
+use crate::theme::{alpha, radius, size as tsize, theme, ty};
 use crate::ui::*;
 
 /// Row-label column of the confusion matrix (fits "False positives").
@@ -53,6 +53,19 @@ impl FoloApp {
         let wide = vw >= px(1240.);
         let params_col = vw >= px(1360.);
         let cols = |d: gpui::Stateful<gpui::Div>| d.flex().items_center().gap(px(16.)).px(px(16.));
+        // The name takes what the other columns leave (GPUI truncates against a known width, so
+        // it's computed: content width less the fixed columns, their 16 px gaps, row padding).
+        let name_w = {
+            let side = if vw < px(1120.) { tsize::SIDEBAR_COLLAPSED } else { tsize::SIDEBAR };
+            let pad = if self.narrow { 16. } else { 24. };
+            let content = (f32::from(vw) - side - 2. * pad).min(tsize::CONTENT_MAX);
+            let fixed = [110., 130., 72., 72., 84.].iter().sum::<f32>()
+                + if wide { 150. } else { 0. }
+                + if params_col { 72. } else { 0. };
+            let columns = 6. + f32::from(u8::from(wide)) + f32::from(u8::from(params_col));
+            // Row padding, panel borders, and a few px of slack for rounding.
+            (content - fixed - (columns - 1.) * 16. - 32. - 2. - 8.).clamp(200., 520.)
+        };
         let head = div()
             .flex()
             .items_center()
@@ -141,7 +154,7 @@ impl FoloApp {
                                     cx.stop_propagation();
                                 }
                             }))
-                            .child(div().flex_1().min_w(px(200.)).child(text(ty::SM, t.text_primary).font_weight(FontWeight::MEDIUM).w(px(200.)).truncate().child(m.name.clone())))
+                            .child(div().id(SharedString::from(format!("m-name-{}", m.id))).flex_1().min_w(px(200.)).tooltip(crate::controls::tip(m.name.clone(), None)).child(text(ty::SM, t.text_primary).font_weight(FontWeight::MEDIUM).w(px(name_w)).truncate().child(m.name.clone())))
                             .child(text(ty::SM, t.text_secondary).w(px(110.)).flex_none().tnum().child(format!("{} · {} px", m.arch.as_str(), m.imgsz)))
                             .when(wide, |d| d.child(text(ty::SM, t.text_tertiary).w(px(150.)).flex_none().truncate().child(run.trim_start_matches("from ").to_string())))
                             .child(num_cell(130., metrics.as_ref().map_or(text(ty::SM, t.text_tertiary).child("–"), |mm| bar_value(&t, mm.map50_95, f3(mm.map50_95), t.text_tertiary))))
@@ -697,7 +710,7 @@ impl FoloApp {
                     .child(
                         text(ty::SM, t.text_secondary)
                             .tnum()
-                            .w(px(64.))
+                            .w(px(76.))
                             .flex_none()
                             .text_right()
                             // At rest: precision at the best-F1 threshold (as the KPI reports it);
@@ -782,10 +795,11 @@ impl FoloApp {
                                     .items_center()
                                     .gap(px(8.))
                                     .child(th(&t, "Class").flex_1())
-                                    // Precision at the recall under the cursor ("–" until inspecting).
-                                    .child(div().w(px(64.)).flex_none().flex().justify_end().child(th(
+                                    // At rest precision at the best-F1 threshold (the KPI's operating
+                                    // point); while inspecting, precision at the recall under the cursor.
+                                    .child(div().w(px(76.)).flex_none().flex().justify_end().child(th(
                                         &t,
-                                        &hover.map_or("Precision".to_string(), |r| format!("P @ R {r:.2}")),
+                                        &hover.map_or("P @ best F1".to_string(), |r| format!("P @ R {r:.2}")),
                                     )))
                                     .child(
                                         div()
@@ -820,7 +834,7 @@ impl FoloApp {
                                         .child(
                                             text(ty::SM, t.text_secondary)
                                                 .tnum()
-                                                .w(px(64.))
+                                                .w(px(76.))
                                                 .flex_none()
                                                 .text_right()
                                                 // No aggregate value at the cursor: a dash while inspecting.
@@ -886,8 +900,9 @@ impl FoloApp {
             .fold(0f32, f32::max)
             .max(1e-6);
         let cell_h = px(32.);
-        // A cool sequential ramp: amber stays reserved for warnings.
-        let base = t.chart_series[0];
+        // Correct cells on the success hue: a series or class colour would read as "that class"
+        // (series 1 is also the circle class's cyan).
+        let base = t.success_solid;
         // Column headings get a measured width (the column area as last laid out, split evenly):
         // a name that doesn't fit shows a short form, in full on hover.
         let cols = self.cm_cols.clone();
@@ -981,7 +996,7 @@ impl FoloApp {
                     } else if v == 0 || tiny {
                         crate::theme::over(t.bg_panel, t.bg_hover)
                     } else {
-                        // Correct cells in the series blue; errors on a danger ramp (square root up
+                        // Correct cells on the success ramp; errors on a danger ramp (square root up
                         // to the largest error), so small and large confusions stay apart.
                         if diag {
                             crate::theme::over(t.bg_inset, alpha(base, (0.35 + 0.6 * frac).min(0.95)))
@@ -1096,15 +1111,17 @@ impl FoloApp {
                     .child(div().pt(px(10.)).child(key))
                     .child(div().pt(px(4.)).w_full().min_w_0().child(
                         text(ty::XS, t.text_tertiary).whitespace_normal().child(if norm {
-                            "Rows: actual objects; the bottom row shows how all false positives split by class."
+                            "Rows are actual objects; the bottom row splits false positives by class."
                         } else {
                             "Counts of objects and unmatched detections."
                         }),
                     ))
                     .child(
-                        div()
-                            .pt(px(4.))
-                            .child(text(ty::XS, t.text_tertiary).tnum().child(format!("Validation split · {} images", int(ev.images as u64)))),
+                        div().pt(px(4.)).child(
+                            text(ty::XS, t.text_tertiary)
+                                .tnum()
+                                .child(format!("Validation split · {} images", int(ev.images as u64))),
+                        ),
                     ),
             )
             .into_any_element()
@@ -1128,14 +1145,15 @@ impl FoloApp {
             .border_b_1()
             .border_color(t.line_subtle)
             .child(th(&t, "Class").w(px(200.)).flex_none())
-            .child(th(&t, "AP50").flex_1().min_w_0())
-            .child(th(&t, "AP50-95").flex_1().min_w_0())
-            .child(th(&t, "Precision").flex_1().min_w_0())
-            .child(th(&t, "Recall").flex_1().min_w_0());
+            .child(th(&t, "AP50").flex_1().min_w_0().text_right())
+            .child(th(&t, "AP50-95").flex_1().min_w_0().text_right())
+            .child(th(&t, "Precision").flex_1().min_w_0().text_right())
+            .child(th(&t, "Recall").flex_1().min_w_0().text_right());
         let focus = self.pr_isolated(ev, window);
         let pin = self.pr_pin;
         let mut per: Vec<_> = ev.per_class.iter().collect();
         per.sort_by(|a, b| b.map50.total_cmp(&a.map50));
+        // Numbers right-aligned (bar to their left), like every other table's metric columns.
         let rows: Vec<AnyElement> = per
             .into_iter()
             .map(|c| {
@@ -1184,25 +1202,25 @@ impl FoloApp {
                                 d.child(text(ty::XS, t.text_tertiary).flex_none().child("pinned"))
                             }),
                     )
-                    .child(div().flex_1().min_w_0().child(bar_value(
+                    .child(div().flex_1().min_w_0().flex().justify_end().child(bar_value(
                         &t,
                         c.map50,
                         f3(c.map50),
                         t.text_tertiary,
                     )))
-                    .child(div().flex_1().min_w_0().child(bar_value(
+                    .child(div().flex_1().min_w_0().flex().justify_end().child(bar_value(
                         &t,
                         c.map50_95,
                         f3(c.map50_95),
                         t.text_tertiary,
                     )))
-                    .child(div().flex_1().min_w_0().child(bar_value(
+                    .child(div().flex_1().min_w_0().flex().justify_end().child(bar_value(
                         &t,
                         c.precision,
                         format!("{:.3}", c.precision),
                         t.text_tertiary,
                     )))
-                    .child(div().flex_1().min_w_0().child(bar_value(
+                    .child(div().flex_1().min_w_0().flex().justify_end().child(bar_value(
                         &t,
                         c.recall,
                         format!("{:.3}", c.recall),

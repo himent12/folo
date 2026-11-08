@@ -1935,6 +1935,7 @@ impl FoloApp {
                 .justify_center()
                 .window_control_area(area)
                 .hover(move |s| if close { s.bg(gpui::rgb(0xC42B1C)) } else { s.bg(t.bg_hover) })
+                .active(|s| s.opacity(0.8))
                 .child(
                     gpui::svg()
                         .path(icon_path)
@@ -1978,7 +1979,10 @@ impl FoloApp {
                         let crumb = match route {
                             Some(r) => self
                                 .bind(
-                                    crumb.cursor_pointer().hover(|s| s.bg(t.bg_hover)),
+                                    crumb
+                                        .cursor_pointer()
+                                        .hover(|s| s.bg(t.bg_hover))
+                                        .active(|s| s.bg(t.bg_active)),
                                     &format!("crumb-{i}"),
                                     4.,
                                     window,
@@ -2014,6 +2018,7 @@ impl FoloApp {
                     .border_color(t.line_default)
                     .cursor_pointer()
                     .hover(|s| s.border_color(t.line_strong))
+                    .active(|s| s.bg(t.bg_active))
                     .on_click(cx.listener(|this, _, w, cx| this.open_palette(w, cx)))
                     .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, w, cx| {
                         if matches!(ev.keystroke.key.as_str(), "enter" | "space") {
@@ -2180,6 +2185,7 @@ impl FoloApp {
             .cursor_pointer()
             .when(active, |d| d.bg(t.bg_active))
             .when(!active, |d| d.hover(|s| s.bg(t.bg_hover)))
+            .active(|s| s.bg(t.bg_active))
             .on_click(cx.listener(move |this, _, w, cx| this.navigate(route.clone(), w, cx)))
             .on_key_down(cx.listener(move |this, ev: &gpui::KeyDownEvent, w, cx| {
                 if matches!(ev.keystroke.key.as_str(), "enter" | "space") {
@@ -2232,10 +2238,8 @@ impl FoloApp {
         let id = r.id.clone();
         let fh = self.fh("live-mini", cx);
         let ring = self.ring(&fh, window);
-        let map = r.best.as_ref().map_or("–".to_string(), |b| f3(b.map50_95));
         let id2 = id.clone();
         // A single footer row: the nav badge already says a run is live, so this only names it.
-        let _ = map;
         div()
             .id("live-mini")
             .track_focus(&fh)
@@ -2251,6 +2255,7 @@ impl FoloApp {
             .rounded(px(crate::theme::radius::MD))
             .cursor_pointer()
             .hover(|s| s.bg(t.bg_hover))
+            .active(|s| s.bg(t.bg_active))
             .tooltip(crate::controls::tip(format!("{} · epoch {} / {}", r.name, r.epoch, r.epochs), None))
             .on_click(cx.listener(move |this, _, w, cx| this.navigate(Route::Run(id.clone()), w, cx)))
             .on_key_down(cx.listener(move |this, ev: &gpui::KeyDownEvent, w, cx| {
@@ -2296,6 +2301,7 @@ impl FoloApp {
             .border_color(t.line_subtle)
             .cursor_pointer()
             .hover(|s| s.border_color(t.line_default))
+            .active(|s| s.bg(t.bg_active))
             .tooltip(crate::controls::tip(format!("{} · epoch {} / {}", r.name, r.epoch, r.epochs), None))
             .child(dot(t.accent_fill(), 6., true, "rail"))
             .child(text(ty::MICRO, t.text_secondary).tnum().child(format!("{:.0}%", r.progress() * 100.)));
@@ -2312,18 +2318,22 @@ impl FoloApp {
 
     fn connection_line(&self, compact: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
-        let (color, label) = match &self.store.health {
-            _ if self.connecting.is_some() => {
-                (t.warning_solid, self.connecting.clone().unwrap_or_default().to_string())
-            }
-            Load::Ready(h) if h.mock => {
-                (t.success_solid, format!("{} · v{}", self.store.api.describe(), h.version))
-            }
-            Load::Ready(h) => (t.success_solid, format!("{} · v{}", self.store.api.describe(), h.version)),
-            Load::Failed(_) => (t.danger_solid, "Server unreachable".to_string()),
-            _ => (t.text_disabled, "Connecting…".to_string()),
+        let (color, glyph, label) = match &self.store.health {
+            _ if self.connecting.is_some() => (
+                t.warning_solid,
+                "icons/refresh-cw.svg",
+                self.connecting.clone().unwrap_or_default().to_string(),
+            ),
+            Load::Ready(h) => (
+                t.success_solid,
+                "icons/circle-check.svg",
+                format!("{} · v{}", self.store.api.describe(), h.version),
+            ),
+            Load::Failed(_) => (t.danger_solid, "icons/circle-x.svg", "Server unreachable".to_string()),
+            _ => (t.text_disabled, "icons/refresh-cw.svg", "Connecting…".to_string()),
         };
         div()
+            .id("connection")
             .h(px(36.))
             .flex_none()
             .flex()
@@ -2332,9 +2342,17 @@ impl FoloApp {
             .px(px(16.))
             .border_t_1()
             .border_color(t.line_subtle)
-            .when(compact, |d| d.justify_center().px(px(0.)))
-            .child(div().size(px(6.)).rounded_full().bg(color))
-            .when(!compact, |d| d.child(text(ty::XS, t.text_tertiary).truncate().child(label)))
+            // Collapsed rail: a shaped glyph (not colour alone) with the full status on hover.
+            .when(compact, |d| {
+                d.justify_center()
+                    .px(px(0.))
+                    .tooltip(crate::controls::tip(format!("Connection: {label}"), None))
+                    .child(icon(glyph, 14., color))
+            })
+            .when(!compact, |d| {
+                d.child(div().size(px(6.)).rounded_full().bg(color))
+                    .child(text(ty::XS, t.text_tertiary).truncate().child(label))
+            })
     }
 
     fn page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {

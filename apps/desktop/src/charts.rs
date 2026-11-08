@@ -937,10 +937,19 @@ fn paint_line_chart(
     if let Some((from, label)) = &spec.future
         && *from < x1
     {
-        let fx = sx(*from).max(plot.left());
+        // "Now" is the latest point drawn (the epoch in progress has no point yet): the tint starts
+        // there, behind a 1 px rule, so no dark band opens between the data and the plan.
+        let now =
+            spec.series.iter().filter_map(|s| s.points.last()).map(|p| p.0).fold(f32::NEG_INFINITY, f32::max);
+        let from = if now.is_finite() { now.min(*from).max(x0) } else { *from };
+        let fx = sx(from).max(plot.left());
         window.paint_quad(fill(
             Bounds::new(point(fx, plot.top()), size(plot.right() - fx, plot.size.height)),
             alpha(t.text_primary, 0.025),
+        ));
+        window.paint_quad(fill(
+            Bounds::new(point(fx, plot.top()), size(px(1.), plot.size.height)),
+            t.line_default,
         ));
         if !label.is_empty() {
             let w = text_width(window, label, label_size);
