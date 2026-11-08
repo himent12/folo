@@ -941,7 +941,9 @@ fn paint_line_chart(
         // there, behind a 1 px rule, so no dark band opens between the data and the plan.
         let now =
             spec.series.iter().filter_map(|s| s.points.last()).map(|p| p.0).fold(f32::NEG_INFINITY, f32::max);
-        let from = if now.is_finite() { now.min(*from).max(x0) } else { *from };
+        // The data can run ahead of `from` (a history fetched after the run snapshot): the rule
+        // follows the data, within the plot.
+        let from = if now.is_finite() { now.clamp(x0, x1) } else { *from };
         let fx = sx(from).max(plot.left());
         window.paint_quad(fill(
             Bounds::new(point(fx, plot.top()), size(plot.right() - fx, plot.size.height)),

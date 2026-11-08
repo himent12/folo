@@ -2682,9 +2682,9 @@ impl FoloApp {
 
     /// Tab / Shift-Tab, trapped inside the topmost overlay.
     /// F6 / Shift+F6: the sidebar (the current section's item), the search field, then the page
-    /// (its first control). Dialogs keep focus to themselves.
+    /// (its first control). Dialogs and the palette keep focus to themselves.
     fn cycle_region(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if self.modal_open() {
+        if self.modal_open() || self.palette.is_some() {
             return;
         }
         let nav = format!(
