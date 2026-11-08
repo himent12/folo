@@ -224,8 +224,9 @@ pub fn iou(a: &Xyxy, b: &Xyxy, kind: IouKind) -> f32 {
         }
         IouKind::Diou | IouKind::Ciou => {
             let c2 = cw * cw + ch * ch;
-            let dx = (b.x1 + b.x2 - a.x1 - a.x2) * 0.5;
-            let dy = (b.y1 + b.y2 - a.y1 - a.y2) * 0.5;
+            // Pairwise differences first: each term negates exactly when a and b swap, so the result is symmetric.
+            let dx = ((b.x1 - a.x1) + (b.x2 - a.x2)) * 0.5;
+            let dy = ((b.y1 - a.y1) + (b.y2 - a.y2)) * 0.5;
             let rho2 = dx * dx + dy * dy;
             let dist = if c2 > 0.0 { rho2 / c2 } else { 0.0 };
             if kind == IouKind::Diou {
@@ -451,6 +452,8 @@ mod tests {
             // Asymmetric inverted boxes far from each other used to give unbounded distance terms.
             (Xyxy::new(100.0, 0.0, 0.0, 10.0), Xyxy::new(0.0, 0.0, 1.0, 10.0)),
             (Xyxy::new(0.0, 0.0, 1.0, 10.0), Xyxy::new(5.0, 500.0, -300.0, 0.0)),
+            // Nearly coincident points: the centre delta must not depend on argument order through rounding.
+            (Xyxy::new(100.0, 0.0, 100.0, 0.0), Xyxy::new(100.0, 0.0, 100.000_01, 0.0)),
         ];
         for (x, y) in cases {
             for kind in [IouKind::Iou, IouKind::Giou, IouKind::Diou, IouKind::Ciou] {
