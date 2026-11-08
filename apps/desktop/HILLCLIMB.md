@@ -1125,3 +1125,40 @@ Round 29 changes:
   - Palette rows have a pressed state, and Stop is in danger text.
 - **Inspector:** the zoom controls sit in the top bar before Close, as in Playground.
 - **Review brief:** the toolbar latency in Playground is a settled decision (both reviewers asked for it in round 25).
+
+## Round 29
+
+| Line | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | avg |
+|------|---|---|---|---|---|---|---|---|---|----|----|----|-----|
+| Opus 5.5 | 9 | 8 | 9 | 8 | 8 | 8 | 8 | 9 | 9 | 9 | 8 | 8 | 8.4 |
+| GPT-6.1 Sol | 9 | 8 | 8 | 9 | 8 | 8 | 8 | 9 | 9 | 8 | 8 | 8 | 8.3 |
+
+Opus fell from 8.8 to 8.4, mostly over one new defect: Playground's "Run on" caption was hard-clipped mid-word at the rail edge, which cost typography, copy and polish. Both reviewers also flagged:
+- The PR curves' end-dots, which matched no number in the legend.
+- The confusion matrix key ("errors 0 … (max)"), which named neither its measure nor its unit.
+
+Opus also flagged the Overview live-run KPI row, whose four tiles left 40–50 % of the card empty, and the Overview chart squashed to about 63 px at minimum size.
+
+Sol flagged:
+- `<1%` matrix labels below AA on their cells.
+- "Start folo serve automatically" hiding that it starts a mock server.
+- The "Close mosaic (epochs)" label.
+- "Add a dataset" in the empty Playground not launching the picker.
+- Focus resetting to the page on every navigation.
+- Fewer than three detection rows visible in Playground at minimum size.
+
+The caption (it wraps now) and the matrix ink (every nonzero cell picks its ink from its fill) were fixed on #90 after review.
+
+Round 30 changes:
+- **Model page:**
+  - The PR chart marks each class's best-F1 operating point (its recall and precision, the "P @ best F1" column) instead of the curve ends. A footnote says so; isolating a class keeps only its dot.
+  - The matrix key reads "Error share 0% … N% max" (or "Errors 0 … N max" when unnormalised).
+- **Overview:**
+  - The live run's KPI tiles share the row equally, with dividers, as on the run page.
+  - The short-window chart is 108 px (was 76), with compact card padding below 120 px.
+  - The loading skeleton's tiles match.
+  - With no server, Open image is disabled with "Not connected", like New run.
+- **Copy:**
+  - Settings: "Start a demo server automatically", with help that names `folo serve --mock`.
+  - New run: "Final epochs without mosaic".
+- **Empty states:** "Add a dataset" (Overview, getting started, Playground) opens the folder picker on the Datasets page, as its label says, rather than only navigating there.

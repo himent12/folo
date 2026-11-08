@@ -609,7 +609,11 @@ impl FoloApp {
                 Some("icons/plus.svg"),
                 window,
                 cx,
-                act(|this, w, cx| this.navigate(Route::Datasets, w, cx)),
+                act(|this, w, cx| {
+                    // The label promises the picker: land on Datasets with it open.
+                    this.navigate(Route::Datasets, w, cx);
+                    this.add_dataset_folder(cx);
+                }),
             )
         };
         panel(&t)
@@ -1010,7 +1014,11 @@ impl FoloApp {
                 Some("icons/plus.svg"),
                 window,
                 cx,
-                act(|this, w, cx| this.navigate(Route::Datasets, w, cx)),
+                act(|this, w, cx| {
+                    // The label promises the picker: land on Datasets with it open.
+                    this.navigate(Route::Datasets, w, cx);
+                    this.add_dataset_folder(cx);
+                }),
             )
             .into_any_element();
         let step = |n: &str, title: &str, body: &str, active: bool| {
