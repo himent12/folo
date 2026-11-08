@@ -40,6 +40,8 @@
     white-space: nowrap;
   }
   .value {
+    display: flex;
+    align-items: baseline;
     font-size: var(--type-lg-size);
     line-height: var(--type-lg-line);
     letter-spacing: var(--type-lg-tracking);

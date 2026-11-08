@@ -142,7 +142,13 @@
   }
 
   .btn:disabled {
-    opacity: 0.45;
+    opacity: 0.55;
+  }
+  /* Light theme: lime on white needs an edge to read as a control. */
+  :global([data-theme='light']) .primary {
+    box-shadow:
+      inset 0 0 0 1px var(--accent-line),
+      inset 0 1px 0 #ffffff40;
   }
   /* Touch: grow the hit area to at least 44 px without changing the visual size. */
   @media (pointer: coarse) {

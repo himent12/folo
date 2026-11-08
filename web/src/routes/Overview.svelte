@@ -90,8 +90,8 @@
       <div class="off-mark" aria-hidden="true"><WifiOff size={20} strokeWidth={1.5} /></div>
       <h2>Studio can't reach the FOLO server</h2>
       <p>
-        Runs, models and datasets all failed to load{hub.mode === 'live' ? ` from ${hub.serverUrl}` : ''}. Check that
-        <span class="mono">folo serve</span> is running, then retry.
+        Nothing answered at <span class="mono">{hub.serverUrl}</span>. Start <span class="mono">folo serve</span> (or check
+        the server URL in Settings), then retry.
       </p>
       {#if errDetail}<p class="off-detail mono">{errDetail}</p>{/if}
       <div class="off-actions">
@@ -132,7 +132,7 @@
         {#if runs.error && !runs.data}
           <Panel title="Training"><ErrorState error={runs.error} retry={() => runs.refresh()} compact /></Panel>
         {:else if !runs.data}
-          <div class="live-sk"><Skeleton h="260px" r="var(--radius-lg)" /></div>
+          <div class="live-sk"><Skeleton h="344px" r="var(--radius-lg)" /></div>
         {:else if live}
           {#key live.id}<LiveRunCard run={live} dataset={dsById.get(live.config.dataset_id)} />{/key}
         {:else}
@@ -147,7 +147,7 @@
           </Panel>
         {/if}
       </div>
-      <Panel title="Recent runs" meta={runs.data ? String(runs.data.length) : undefined} pad="none" id="recent-runs">
+      <Panel title="Recent runs" meta={runs.data ? `${recent.length} of ${runs.data.length}` : undefined} pad="none" id="recent-runs">
         {#snippet actions()}<Button size="sm" variant="ghost" iconRight={ArrowRight} href={href('/runs')}>All runs</Button>{/snippet}
         {#if runs.error && !runs.data}
           <ErrorState error={runs.error} retry={() => runs.refresh()} />
@@ -250,7 +250,7 @@
               {#if d.stats}<span><b>{compact(d.stats.boxes)}</b> boxes</span>{/if}
             </span>
             {#if d.stats}<ClassStrip counts={d.stats.class_counts} classes={d.classes} />{/if}
-            <span class="ds-classes truncate">{d.classes.join(', ')}</span>
+            <span class="ds-classes">{d.classes.slice(0, 5).join(', ')}{#if d.classes.length > 5}<span class="more"> +{d.classes.length - 5}</span>{/if}</span>
           </a>
         {/each}
       </div>
@@ -293,8 +293,8 @@
     color: var(--text-tertiary);
   }
   .steps li.on {
-    border-color: var(--accent-line);
-    background: var(--bg-selected);
+    border-color: var(--line-strong);
+    background: var(--bg-raised);
     color: var(--text-secondary);
   }
   .steps li div:not(.ob-actions) {
@@ -317,9 +317,9 @@
     color: var(--text-secondary);
   }
   .on .n {
-    border-color: var(--accent-line);
-    background: var(--accent-line);
-    color: var(--accent-on);
+    border-color: var(--text-primary);
+    background: var(--text-primary);
+    color: var(--bg-panel);
   }
   .ob-actions {
     display: flex;
@@ -514,6 +514,9 @@
   .ds-nums b {
     color: var(--text-primary);
     font-weight: var(--weight-medium);
+  }
+  .ds-classes .more {
+    color: var(--text-secondary);
   }
   .ds-classes {
     font-size: var(--type-xs-size);

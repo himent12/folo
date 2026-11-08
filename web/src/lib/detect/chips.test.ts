@@ -29,4 +29,18 @@ describe('placeChips', () => {
     // The second chip found a free slot instead of overlapping the first.
     expect(ps[1]!.dy).not.toBe(ps[0]!.dy);
   });
+
+  it('hides a label that has no free slot instead of covering another', () => {
+    const tight = { minX: 4, maxX: 60, minY: 2, maxY: 40 };
+    const ps = placeChips(
+      [
+        { x: 5, y: 20, w: 50 },
+        { x: 6, y: 20, w: 50 },
+        { x: 7, y: 20, w: 50 },
+      ],
+      tight,
+    );
+    expect(ps[0]!.hidden).toBe(false);
+    expect(ps.some((p) => p!.hidden)).toBe(true);
+  });
 });

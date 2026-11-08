@@ -6,9 +6,11 @@
 
   let { collapsed }: { collapsed: boolean } = $props();
 
-  const label = $derived(hub.mode === 'live' ? 'Connected' : hub.mode === 'mock' ? 'Demo data' : 'Connecting…');
+  const label = $derived(hub.offline ? 'Offline' : hub.mode === 'live' ? 'Connected' : hub.mode === 'mock' ? 'Demo data' : 'Connecting…');
   const detail = $derived(
-    hub.mode === 'live'
+    hub.offline
+      ? `No answer from ${hub.serverUrl}`
+      : hub.mode === 'live'
       ? `folo serve ${hub.version ?? ''} at ${hub.serverUrl}`
       : hub.mode === 'mock'
         ? hub.reason === 'unreachable'
@@ -18,7 +20,7 @@
   );
 </script>
 
-<a href={href('/settings')} class="conn {hub.mode}" class:collapsed use:tooltip={{ text: detail, side: collapsed ? 'right' : 'top' }}>
+<a href={href('/settings')} class="conn {hub.offline ? 'offline' : hub.mode}" class:collapsed use:tooltip={{ text: detail, side: collapsed ? 'right' : 'top' }}>
   <span class="dot" aria-hidden="true"></span>
   {#if !collapsed}<span class="label">{label}</span>{/if}
   <span class="sr-only">{detail}</span>
@@ -57,6 +59,10 @@
   .live .dot {
     background: var(--success-solid);
     box-shadow: 0 0 0 3px var(--success-muted);
+  }
+  .offline .dot {
+    background: var(--danger-solid);
+    box-shadow: 0 0 0 3px var(--danger-muted);
   }
   .mock .dot {
     background: var(--warning-solid);

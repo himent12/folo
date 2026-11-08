@@ -52,8 +52,8 @@
       slots = next;
     });
   });
-  // Run slots use the four most distinct series hues: sky, orange, magenta, amber.
-  const RUN_SLOTS = [1, 6, 3, 2];
+  // Run slots use four well-separated series hues: sky, magenta, teal, amber.
+  const RUN_SLOTS = [1, 3, 4, 2];
   const color = (id: string) => `var(--chart-${RUN_SLOTS[slots[id] ?? Math.max(0, ids.indexOf(id))] ?? 1})`;
 
   function setIds(next: string[]) {
@@ -166,6 +166,7 @@
               xFormat={(v) => (x === 'epoch' ? String(Math.round(v)) : `${Math.round(v)}%`)}
               xTitle={(v) => (x === 'epoch' ? `Epoch ${Math.round(v)}` : `${v.toFixed(0)}% through`)}
               bind:cursor
+              endLabels
               label="{c.title} for the compared runs"
             />
           {/if}

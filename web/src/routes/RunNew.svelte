@@ -441,10 +441,31 @@
   .arch:hover {
     border-color: var(--line-strong);
   }
+  /* Selection is neutral (a strong border and a small check); lime stays for the Start button and focus. */
+  .card,
+  .arch {
+    position: relative;
+  }
   .card.on,
   .arch.on {
-    border-color: var(--accent-line);
-    background: var(--bg-selected);
+    border-color: var(--text-secondary);
+    box-shadow: inset 0 0 0 0.5px var(--text-secondary);
+  }
+  .card.on::after,
+  .arch.on::after {
+    content: '';
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--accent-line);
+    box-shadow: 0 0 0 2px var(--bg-raised);
+  }
+  .card.on .c-fmt,
+  .arch.on .a-name {
+    visibility: hidden;
   }
   .card:has(:focus-visible),
   .arch:has(:focus-visible) {
@@ -482,7 +503,7 @@
     letter-spacing: var(--type-2xl-tracking);
   }
   .arch.on .a-size {
-    color: var(--accent-text);
+    color: var(--text-primary);
   }
   .a-note {
     font-size: var(--type-xs-size);
@@ -520,7 +541,7 @@
     border-radius: 2px;
   }
   .arch.on .bar i {
-    background: var(--accent-line);
+    background: var(--text-secondary);
   }
   .ref {
     margin-top: var(--space-2);

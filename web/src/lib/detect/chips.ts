@@ -23,6 +23,8 @@ export interface Placement {
   dx: number;
   dy: number;
   inside: boolean;
+  /** No free slot: show this label only when its box is hovered or selected. */
+  hidden: boolean;
 }
 
 /**
@@ -54,7 +56,9 @@ export function placeChips(boxes: (ChipBox | null)[], b: ChipBounds): (Placement
       }
     }
     y = Math.max(b.minY, Math.min(maxY, y));
+    // Earlier boxes win (callers pass them highest score first); a label that would cover one waits for hover.
+    if (hits(x, y, box.w)) return { dx: x - box.x, dy: y - box.y, inside, hidden: true };
     placed.push({ x, y, w: box.w });
-    return { dx: x - box.x, dy: y - box.y, inside };
+    return { dx: x - box.x, dy: y - box.y, inside, hidden: false };
   });
 }

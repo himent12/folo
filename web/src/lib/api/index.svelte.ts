@@ -17,6 +17,8 @@ class Hub {
   reason = $state<'forced' | 'unreachable' | null>(null);
   version = $state<string | null>(null);
   api = $state.raw<Api>(new MockApi(scenario));
+  /** The demo's `?scenario=error`: behave like a server that stopped answering. */
+  readonly offline = scenario === 'error';
   /** Bumps on every (re)connect so data views refetch. */
   epoch = $state(0);
 
