@@ -1302,20 +1302,40 @@ impl FoloApp {
                     cx.notify();
                 }),
             );
-            // A slim header strip that belongs to the stack, not another card.
+            // Quiet links over the stack (no card of their own), and while folded the edges of the
+            // earlier toasts peeking out behind the latest one.
             div()
                 .flex()
-                .items_center()
-                .justify_between()
-                .pl(px(12.))
-                .pr(px(4.))
-                .h(px(28.))
-                .rounded_t(px(radius::LG))
-                .bg(t.bg_raised)
-                .border_1()
-                .border_color(t.line_strong)
-                .child(show)
-                .child(dismiss)
+                .flex_col()
+                .child(
+                    div().flex().justify_end().pb(px(6.)).child(
+                        // A compact pill, right-aligned: clearly controls, not another notification.
+                        div()
+                            .flex()
+                            .gap(px(2.))
+                            .p(px(2.))
+                            .rounded(px(radius::MD))
+                            .bg(t.bg_raised)
+                            .border_1()
+                            .border_color(t.line_default)
+                            .shadow(t.shadow_sm())
+                            .child(show)
+                            .child(dismiss),
+                    ),
+                )
+                .when(!expanded, |d| {
+                    let edge = |inset: f32, a: f32| {
+                        div()
+                            .mx(px(inset))
+                            .h(px(6.))
+                            .rounded_t(px(radius::LG))
+                            .bg(crate::theme::alpha(t.bg_raised, a))
+                            .border_1()
+                            .border_b_0()
+                            .border_color(crate::theme::alpha(t.line_strong, a))
+                    };
+                    d.when(older > 1, |d| d.child(edge(16., 0.6))).child(edge(8., 1.))
+                })
         });
         div()
             .absolute()
