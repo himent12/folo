@@ -32,6 +32,17 @@ const base = (server.resolvedUrls?.local[0] ?? 'http://127.0.0.1:5199/').replace
 if (!only) rmSync(outDir, { recursive: true, force: true });
 mkdirSync(outDir, { recursive: true });
 
+/** Waits (in real time; the page clock is frozen) until every image has decoded, then a beat for layout. */
+async function settle(page) {
+  for (let i = 0; i < 40; i++) {
+    const pending = await page.evaluate(() => [...document.images].filter((im) => !im.complete).length);
+    if (!pending) break;
+    await page.waitForTimeout(100);
+  }
+  await page.clock.runFor(50);
+  await page.waitForTimeout(150);
+}
+
 const browser = await chromium.launch({ channel: 'chrome', headless: true });
 let count = 0;
 const failures = [];
@@ -60,7 +71,7 @@ try {
           // Let the mock's live run advance a little, deterministically.
           await page.clock.runFor(scene.advance ?? 2000);
           if (scene.setup) await scene.setup(page, { vp, theme });
-          await page.waitForTimeout(150);
+          await settle(page);
           await page.screenshot({ path: resolve(outDir, `${name}.png`), fullPage: scene.fullPage ?? vp !== 'mobile' });
           count++;
         } catch (e) {
