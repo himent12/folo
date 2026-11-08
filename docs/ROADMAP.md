@@ -6,22 +6,24 @@ Status keys: `[ ]` todo, `[~]` in progress, `[x]` merged. The orchestrator keeps
 - [x] Cargo workspace, crate skeletons, AGENTS.md, ARCHITECTURE.md, API.md, CI
 
 ## M1 — foundations (parallel)
-- [ ] core: tensor, views, dtypes, CPU kernels (elementwise, broadcast, reduce, GEMM, conv2d, pool), autograd, grad checks
-- [ ] data: image IO, YOLO + COCO formats, stats, letterbox, augmentation, DataLoader, synthetic shapes datasets
-- [ ] vision-post: box ops, IoU family, NMS, mAP / PR metrics, confusion matrix (plain slices)
-- [ ] server + CLI skeleton: API.md endpoints with `--mock`, `folo serve`, `folo describe`, `--json` conventions
-- [ ] gpu: wgpu device, buffer pool, WGSL GEMM / elementwise / reduce kernels with CPU-parity tests
-- [ ] Studio v1 (web/) against the mock server, UI hill-climb loop to 9/10
-- [ ] Desktop v1 (apps/desktop, GPUI) against the mock server, UI hill-climb loop to 9/10
+- [x] core: tensor, views, dtypes, CPU kernels (elementwise, broadcast, reduce, GEMM ~1 TFLOPS, conv2d, pool), autograd, grad checks, custom ops (#11)
+- [x] data: image IO, YOLO + COCO formats, stats, letterbox, augmentation, DataLoader, synthetic shapes datasets (#8)
+- [x] vision-post: box ops, IoU family, NMS, mAP / PR metrics, confusion matrix, TAL assigner (#5, #15)
+- [x] server + CLI skeleton: API.md endpoints with `--mock`, `folo serve`, `folo describe`, `--json` conventions (#7)
+- [x] gpu: wgpu device, buffer pool, WGSL kernels (SGEMM ~31 TFLOPS on RTX 4080 SUPER), CPU-parity tests (#10)
+- [~] Studio v1 (web/): all screens merged (#3, #6, #13, #19); UI hill-climb in progress (round 1: 5–8)
+- [~] Desktop v1 (apps/desktop, GPUI): PR #9; UI hill-climb in progress (round 1: ~6.5)
+
+- [x] specs: .folo format (#1), MCP (#2), detector + training recipe (#4); CI on self-hosted runners (#17)
 
 ## M2 — learning end to end (CPU)
-- [ ] nn: Module, Conv2d, BatchNorm2d, activations, pooling, upsample, concat, init, SGD/AdamW, schedules, EMA, .folo IO
-- [ ] vision: FOLO-n/s/m model, TAL assigner, CIoU + DFL + BCE loss, decode, trainer, predictor
+- [x] nn: Module, Conv2d, BatchNorm2d, activations, pooling, upsample, concat, init, SGD/AdamW, schedules, EMA, .folo IO (#21)
+- [~] vision: FOLO-n/s/m/l/x model, CIoU + DFL + BCE loss (in progress), trainer, predictor
 - [ ] `folo train` on synthetic shapes converges (mAP50 > 0.9 on a small shapes set)
 
 ## M3 — fast
-- [ ] gpu backend implements core Backend; training on GPU; fused conv+bn+silu; f16 inference
-- [ ] benchmarks vs PyTorch/Ultralytics on the same model size (inference latency, train imgs/s)
+- [~] gpu backend implements core Backend; training on GPU (in progress); fused conv+bn+silu; f16 inference
+- [~] benchmarks: Ultralytics baselines measured (#14, docs/BENCHMARKS.md); FOLO columns pending
 
 ## M4 — real use
 - [ ] real datasets (YOLO format from disk, COCO), pretrained weights path, export (folo-f16, ONNX)
