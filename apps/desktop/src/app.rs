@@ -257,6 +257,12 @@ pub fn parse_epochs(s: &str) -> Option<u32> {
 }
 
 /// Learning rate as typed, scientific notation allowed (`1e-3`): 0 < lr < 10.
+/// A learning rate for its input field: three decimals in the slider's range (0.010), and as
+/// many digits as it needs below it (0.0001 doesn't round to 0.000).
+pub fn format_lr(v: f32) -> String {
+    if v >= 0.001 { format!("{v:.3}") } else { format!("{v}") }
+}
+
 pub fn parse_lr(s: &str) -> Option<f32> {
     s.trim().parse::<f32>().ok().filter(|v| v.is_finite() && *v > 0.0 && *v < 10.0)
 }
@@ -444,6 +450,8 @@ pub struct FoloApp {
     pub toasts_expanded: bool,
     /// The toast whose action or close button has keyboard focus (its expiry waits too).
     pub toast_focus: Option<u64>,
+    /// Keyboard focus is on the stack's own controls (Show earlier, Dismiss all): no toast expires.
+    pub toast_stack_focus: bool,
     toast_seq: u64,
     pub menu_open: Option<&'static str>,
     /// Highlighted option in the open select (committed with Enter).
@@ -574,6 +582,7 @@ impl FoloApp {
             toast_hover: None,
             toasts_expanded: false,
             toast_focus: None,
+            toast_stack_focus: false,
             toast_seq: 0,
             menu_open: None,
             menu_hl: 0,
@@ -1116,7 +1125,11 @@ impl FoloApp {
                 cx.background_executor().timer(Duration::from_millis(4200)).await;
                 loop {
                     let hovered = this
-                        .update(cx, |this, _| this.toast_hover == Some(id) || this.toast_focus == Some(id))
+                        .update(cx, |this, _| {
+                            this.toast_hover == Some(id)
+                                || this.toast_focus == Some(id)
+                                || this.toast_stack_focus
+                        })
                         .unwrap_or(false);
                     if !hovered {
                         break;
@@ -3021,6 +3034,13 @@ impl FoloApp {
 mod retry_tests {
     use super::{BATCHES, batch_index, carry_over, retry_batch};
     use crate::api::{Augment, TrainConfig};
+
+    #[test]
+    fn small_learning_rates_keep_their_digits() {
+        assert_eq!(crate::app::format_lr(0.01), "0.010");
+        assert_eq!(crate::app::format_lr(0.0001), "0.0001");
+        assert!(crate::app::parse_lr(&crate::app::format_lr(0.0001)).is_some());
+    }
 
     #[test]
     fn oom_retries_halve_to_offered_sizes() {

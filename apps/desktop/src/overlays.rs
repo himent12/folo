@@ -1317,6 +1317,10 @@ impl FoloApp {
                 .iter()
                 .any(|k| self.focus.borrow().get(k.as_str()).is_some_and(|f| f.is_focused(window)))
         });
+        // Focus on the stack's own controls holds every toast (none expires under the keyboard).
+        self.toast_stack_focus = ["toast-expand", "toast-dismiss-all"]
+            .iter()
+            .any(|k| self.focus.borrow().get(*k).is_some_and(|f| f.is_focused(window)));
         let older = toasts.len().saturating_sub(1);
         let expanded = self.toasts_expanded;
         let toasts: Vec<ToastRow> = toasts.into_iter().skip(if expanded { 0 } else { older }).collect();
@@ -1458,16 +1462,18 @@ impl FoloApp {
                                 text(ty::BASE, t.text_primary).font_weight(FontWeight::MEDIUM).child(title),
                             )
                             .when_some(body, |d, b| d.child(text(ty::SM, t.text_secondary).child(b)))
-                            .when(action_btn.is_some() || ctrls.is_some(), |d| {
+                            // The card's action, then the stack's controls on their own right-aligned
+                            // row (an action and both controls don't fit one 274 px row).
+                            .when_some(action_btn, |d, b| d.child(div().pt(px(8.)).flex().child(b)))
+                            .when_some(ctrls, |d, (show, dismiss)| {
                                 d.child(
                                     div()
-                                        .pt(px(8.))
+                                        .pt(px(6.))
                                         .flex()
-                                        .items_center()
+                                        .justify_end()
                                         .gap(px(4.))
-                                        .children(action_btn)
-                                        .child(div().flex_1())
-                                        .when_some(ctrls, |d, (show, dismiss)| d.child(show).child(dismiss)),
+                                        .child(show)
+                                        .child(dismiss),
                                 )
                             }),
                     )
@@ -1602,6 +1608,9 @@ impl FoloApp {
                     let hit = hit_box(&hit_boxes, x, y);
                     if hit != insp.hover_box {
                         insp.hover_box = hit;
+                        // The pointer moved over the image: hover leads again (not a keyboard
+                        // focus left on a label row).
+                        this.kb = false;
                         cx.notify();
                     }
                 }))

@@ -421,6 +421,8 @@ impl FoloApp {
                         let hit = hit_box(&hover_boxes, x, y);
                         if hit != this.play_hover {
                             this.play_hover = hit;
+                            // The pointer moved over the image: hover leads again.
+                            this.kb = false;
                             cx.notify();
                         }
                     }))
@@ -988,15 +990,15 @@ impl FoloApp {
     }
 
     /// The detection being inspected: under the pointer, or a keyboard-focused row.
+    /// While the keyboard is in use the focused row leads (a pointer hover left on another row
+    /// doesn't win); otherwise the hover does, as in the inspector.
     pub fn play_active(&self, window: &Window, cx: &mut Context<Self>) -> Option<usize> {
-        if self.play_hover.is_some() {
-            return self.play_hover;
-        }
         let n = self
             .play_pred
             .ready()
             .map_or(0, |p| p.boxes.iter().filter(|b| b.score >= self.play_conf).count());
-        (0..n).find(|i| self.fh(format!("det-{i}"), cx).is_focused(window))
+        let focused = (0..n).find(|i| self.fh(format!("det-{i}"), cx).is_focused(window));
+        if self.kb { focused.or(self.play_hover) } else { self.play_hover.or(focused) }
     }
 }
 
