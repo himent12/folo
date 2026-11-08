@@ -1,19 +1,19 @@
 # folo-gpu: GPU compute on wgpu
 
 `crates/folo-gpu` is FOLO's GPU layer. It runs on [wgpu](https://wgpu.rs) 30: Vulkan, DX12 and Metal natively,
-WebGPU in the browser later. It is standalone for now: it does not depend on folo-core. A later PR plugs it into
-folo-core's `Backend` trait (see [Backend integration](#planned-folo-core-backend-integration)).
+WebGPU in the browser later. It implements folo-core's `Backend` trait, so folo-core tensors train and infer on
+the GPU (see [folo-core backend](#folo-core-backend)).
 
 ```
-GpuTensor (tensor.rs)          shape + dtype + pooled buffer; validates, allocates, calls kernels
+GpuBackend (backend.rs)        folo-core's Backend: Storage::Device(GpuStorage) for every dtype, views → kernels
+GpuTensor (tensor.rs)          standalone shape + dtype + pooled buffer handle for kernel-level work
    │
 kernels/* (kernels/mod.rs)     one Rust entry point per WGSL kernel; raw wgpu::Buffer + explicit sizes
    │
 GpuContext (context.rs)        adapter, device, queue, buffer pool, pipeline cache, command batch
 ```
 
-The kernel layer never sees a `GpuTensor`. The future folo-core backend calls it directly with its own storage
-type.
+The kernel layer sees neither a `GpuTensor` nor a folo-core tensor: both front ends call it with raw buffers.
 
 ## Device: `GpuContext`
 
@@ -31,17 +31,21 @@ type.
 - **`folo doctor`.** `GpuContext::enumerate()` lists every adapter as an `AdapterSummary` (name, backend, type,
   driver, `shader-f16`, key limits, subgroup size); `ctx.summary()` describes the one in use.
 - **Shared context.** `GpuContext::shared()` is a process-wide context created once from the environment. Tests
-  use it, and the folo-core backend will too.
+  and the folo-core backend (`folo_gpu::init()`) use it.
 - **Errors.** Validation and out-of-memory errors are captured, not panicked on. `sync()` and readbacks return
   them as `GpuError::Wgpu`. A kernel that fails to compile returns an error from the call that needed it.
 
 ### Buffer pool
 
-`ctx.alloc(bytes)` rounds the request up to a size class and takes a buffer from that class's free list, or
-creates one. Size classes are quarter steps between powers of two, with a 256-byte floor (…, 1 MiB, 1.25 MiB,
+`ctx.alloc(bytes)` rounds the request up to a size class and takes the most recently freed buffer of that class,
+or creates one. Size classes are quarter steps between powers of two, with a 256-byte floor (…, 1 MiB, 1.25 MiB,
 1.5 MiB, 1.75 MiB, 2 MiB, …), so at most 25% of a buffer is slack. A dropped `GpuBuffer` goes back to its free
-list. The free lists hold at most 2 GiB; `trim_pool()` empties them and `pool_stats()` reports hits, misses and
-bytes.
+list. The free lists hold at most the larger of 2 GiB and the high-water mark of live bytes, so a training step
+whose working set is bigger than 2 GiB still reuses every buffer on the next step (as PyTorch's caching allocator
+does); when a returned buffer does not fit, the least recently freed buffers are evicted first. `trim_pool()`
+empties the lists and `pool_stats()` reports hits, misses and bytes. With a fixed 2 GiB cap that dropped the
+buffer being returned, batch-16 training thrashed the driver allocator (171 GB allocated in one benchmark run,
+batch-1 inference after it 3.5x slower).
 
 Reusing a buffer while earlier, unsubmitted work still reads it is safe. All work runs on one queue in encoding
 order, and wgpu puts barriers between dispatches that touch the same buffer. The one exception is
@@ -58,7 +62,8 @@ The batch is submitted when:
 - you call `ctx.flush()` (submit without waiting) or `ctx.sync()` (submit, wait, report errors).
 
 A forward pass is therefore a handful of submissions. Each dispatch's parameters take a 256-byte slot in a
-64 KiB uniform arena, which is written once per submission.
+64 KiB uniform arena, which is written once per submission. `ctx.work_stats()` counts dispatches and submissions
+(the backend benchmark prints them per pass).
 
 ### Pipeline cache and specialisation constants
 
@@ -101,6 +106,18 @@ on every backend, including browser WebGPU; pipeline-overridable constants canno
 | concat | `kernels::layout::copy_rows` | f32, f16 | any dim, via row-blocked copies; a single block becomes a buffer copy; f16 blocks need even lengths and offsets |
 | permute / transpose | `kernels::layout::permute` | f32, f16 | dims are coalesced; batched 2-D transposes (NCHW ↔ NHWC) go through a padded 32×32 tile, everything else through a generic strided copy |
 | cast | `kernels::layout::cast` | f32 ↔ f16 | packed words; needs no `shader-f16` |
+| strided gather | `kernels::strided::gather_strided` | any (1/2/4/8-byte) | make-contiguous of any view (offset, strides, stride-0 broadcast); dims coalesced; contiguous views become a buffer copy; sub-word elements assembled one output word per thread |
+| strided scatter | `kernels::strided::scatter_strided` | any | `copy_into` (cat, pad, view gradients, `copy_from`); sub-word elements written with `atomicAnd` / `atomicOr` on their own bits |
+| fill / cast | `kernels::strided::{fill_words, cast}` | any | `full` with a two-word pattern (i64) or `clear_buffer` for zeros; casts between all five dtypes with Rust `as` semantics (truncate, saturate, NaN → 0) |
+| index_select / gather | `kernels::strided::{index_select, gather}` | any | `i64` or `u32` indices; out-of-range indices give zeros |
+| index_add / scatter_add | `kernels::strided::{index_add, scatter_add}` | f32 | compare-and-swap float atomics; out-of-range indices skipped |
+| strided elementwise | `kernels::ew::elementwise` | f32 | folo-core's unary ops and their gradients, binary ops and comparisons, `where` (f32 or u8 mask); every operand a strided view read in place, linear + vec4 path when all are contiguous |
+| arg-reduce | `kernels::reduce::arg_reduce` | f32 → i64 | first max / min, NaN wins |
+| split reduce | `kernels::reduce::reduce_split` | f32 | long reductions over few outputs (BatchNorm statistics) in two passes |
+| softmax (any dim) | `kernels::reduce::softmax_dim` | f32 | rows kernel for the last dim, a column kernel otherwise |
+| top-k | `kernels::reduce::topk` | f32 → (f32, i64) | sorted, ties by index, `total_cmp` order; one thread per row |
+| pooling + gradients | `kernels::pool_grad::*` | f32 | max pooling with indices and its gather backward, avg / adaptive avg pooling and backward, upsample backward |
+| conv2d gradients | `kernels::conv::{conv2d_backward_input, conv2d_backward_weight}` | f32 | implicit GEMM (`CONV_MODE` 2 / 3) with split-K for the weight gradient, a transposed-A GEMM for 1×1 input gradients, direct depthwise kernels |
 
 The f16 kernels need `shader-f16`; without it they return `GpuError::Unsupported`. Everything not listed as f16
 is f32-only.
@@ -123,9 +140,18 @@ is f32-only.
 - Tile configs: `LARGE` 128×128×8 with 8×8 per thread, `MEDIUM` 64×128×16 with 4×8, `SMALL` 64×64×16 with 4×4.
   `pick_config` takes the largest config that still yields at least 64 workgroups and wastes no more than 25% of
   its rows.
-- `CONV = true` turns the same generator into implicit-GEMM conv. The B tile is gathered straight from the NCHW
+- `CONV_MODE = 1` turns the same generator into implicit-GEMM conv. The B tile is gathered straight from the NCHW
   image. Each thread keeps one output pixel for the whole K loop, so the per-element index math is a few
   divisions by constants. No im2col buffer is ever written.
+- `CONV_MODE = 2` is the input gradient as a transposed conv: each thread owns one input pixel and, for
+  `k = (c_out, kh, kw)`, reads the output-gradient pixel `((ih + PH - kh·DH) / SH, (iw + PW - kw·DW) / SW)` when
+  the divisions are exact and in range (a strided conv leaves the rest zero). `A` is the weight permuted once to
+  `[groups, C_in/g, C_out/g, KH·KW]`.
+- `CONV_MODE = 3` is the weight gradient: `K = N·OH·OW` folds the batch into the reduction, `A` rows are output-
+  gradient planes read across images, and `B` is the image gathered as a transposed im2col (each thread owns one
+  `(c_in, kh, kw)` column). `SPLIT = true` splits `K` into chunks, one per extra workgroup layer, each writing a
+  partial weight slab that a column reduction sums: early layers have only a few output tiles but hundreds of
+  thousands of `K` steps.
 
 #### What was tried (RTX 4080 SUPER, Vulkan, square SGEMM, GFLOPS)
 
@@ -226,23 +252,72 @@ about 5 s on the RTX 4080 SUPER, most of it compiling pipelines.
 - To cross-check another backend locally, run with `FOLO_GPU_BACKEND=dx12` (passes) or
   `FOLO_GPU_ADAPTER=<name>`.
 
-## Planned folo-core Backend integration
+## folo-core backend
 
-folo-core is being written alongside this crate. The plan for the follow-up PR:
+`folo_gpu::init()` registers `GpuBackend` over `GpuContext::shared()` as `Device::Gpu(0)`; custom setups build
+`GpuBackend::new(ctx, device)` and call `folo_core::backend::register_backend` themselves.
 
-- folo-gpu depends on folo-core (never the other way round) and implements its `Backend` trait for a
-  `GpuBackend { ctx: GpuContext }`. At runtime it registers itself for `Device::Gpu(ordinal)`.
-- GPU tensor storage in folo-core is an opaque handle around `Arc<GpuBuffer>` plus dtype. The backend's kernel
-  methods take folo-core's (shape, strides, offset) views. Contiguous views map directly onto the kernel layer's
-  dense-buffer convention. Strided views are made contiguous first with `kernels::layout::permute` (one copy),
-  except for GEMM, which takes leading dimensions, transposes and batch strides natively.
-- Elementwise / broadcast / reduce / softmax / conv / pool / upsample / concat map one-to-one onto the
-  `kernels::*` entry points. Fused bias + activation and the conv and GEMM epilogues let folo-nn fuse
-  Conv-BN-SiLU for inference.
-- Autograd stays in folo-core. Backward kernels (conv weight/input gradients via the transposed GEMM variants,
-  activation gradients, pooling argmax) come in the same PR or right after it.
-- Host ↔ device transfers go through `GpuContext::upload` / `read`. Batching means a whole forward pass encodes
-  into a few submissions. folo-core calls `sync()` only at readback or explicit synchronisation points.
+```rust
+let dev = folo_gpu::init()?;                          // Device::Gpu(0)
+let x = Tensor::randn([16, 3, 640, 640], 0.0, 1.0, &mut rng).to_device(dev)?;
+let w = w_cpu.to_device(dev)?.detach().requires_grad_();
+let loss = x.conv2d(&w, None, 1, 1, 1, 1)?.silu()?.square()?.mean_all()?;
+let grads = loss.backward()?;                         // every gradient op runs on the GPU too
+println!("{}", loss.item::<f32>()?);                  // the only wait for the GPU
+```
+
+- **Storage.** `Storage::Device(DeviceStorage)` holds a `GpuStorage` (one pooled `GpuBuffer`) for every folo-core
+  dtype: `f32` / `u32` one word per element, `f16` two and `u8` four per word (little-endian), `i64` two words.
+  Elements start at byte 0; views add offsets and strides.
+- **Views.** Elementwise ops (`unary`, `unary_backward`, `binary`, `where_cond`), `copy_strided`, `copy_into`,
+  casts and `matmul` read strided and broadcast layouts in place: the shape is coalesced across all operands and a
+  kernel walks up to 8 dims (a linear, vec4 path when everything is contiguous). `matmul` maps each operand to the
+  GEMM's leading dimension / transpose / two-level batch strides (transposed views cost nothing; a shared right
+  operand folds the batch into `M`) and copies an operand only when no such mapping exists. Every other kernel
+  takes dense data, so a strided input is copied once first.
+- **Op mapping.** Reductions: sum / max / min through the reduce kernels (split into two passes when long rows
+  meet few outputs), arg-reductions to `i64`. Softmax over any dim. conv2d forward is the existing kernel; its
+  gradients are the `CONV_MODE` 2 / 3 GEMMs or the depthwise kernels. Pooling, upsampling, index ops and top-k use
+  the kernels in the table above.
+- **No round trips.** Kernels only encode; nothing waits until a download (`to_vec`, `item`, `to_device(Cpu)`)
+  or `folo_core::backend::synchronize(dev)`. Uploads flush the open batch; they do not wait. A YOLOv8n-shaped
+  forward at batch 1 is 131 dispatches in one submission; forward + backward is about 2 200 dispatches in 3
+  submissions.
+- **Semantics.** The CPU backend is the reference and every op is tested against it (`src/tests/backend.rs`, with
+  the tolerances stated there): stable sigmoid / softplus, Rust's NaN-ignoring `max` / `min`, C `powf`, rounding
+  half away from zero, NaN-aware comparisons, first-index ties for max pooling, arg-reductions and top-k. Two
+  documented differences: index ops cannot report out-of-range indices without a host round trip, so
+  `index_select` / `gather` return zeros and `index_add` / `scatter_add` skip such entries; and the two
+  scatter-adds use float atomics, so their summation order is unspecified (results agree to rounding).
+- **Autograd** is folo-core's, unchanged: `src/tests/backend_net.rs` runs a small conv net (conv, BatchNorm from
+  composite ops, SiLU, max pooling, upsample, concat) on both devices and compares every gradient, and runs
+  folo-core's finite-difference `grad_check` through the GPU.
+
+### Benchmark: a YOLOv8n-shaped network
+
+`cargo bench -p folo-gpu --bench backend` builds a YOLOv8n-shaped network from plain folo-core ops (Conv-BN-SiLU,
+C2f, SPPF, PAN neck with upsample + concat, a decoupled 3-scale head; 3.16 M parameters, 8.7 conv GFLOPs per
+640×640 image) and times it, synchronised every iteration; medians of 30 runs on the GPU, 5 (batch 1) or 2
+(batch 16) on the CPU:
+
+- *infer*: inference forward with BatchNorm folded into the conv bias (conv + bias, then SiLU), `no_grad`;
+- *train fwd*: forward with BatchNorm from batch statistics as composite ops, graph recorded;
+- *train fwd+bwd*: the same plus `backward()` of a scalar loss over the three head outputs.
+
+| 640×640 | device | infer | train fwd | train fwd+bwd |
+|---|---|---|---|---|
+| batch 1 | RTX 4080 SUPER (wgpu, Vulkan) | **4.3 ms** | 9.9 ms | **17.8 ms** |
+| batch 1 | i7-14700KF (folo-core CPU, 28 threads) | 43.7 ms | 112 ms | 355 ms |
+| batch 16 | RTX 4080 SUPER | **17.7 ms** (906 img/s) | 37.5 ms | **113 ms** (142 img/s) |
+| batch 16 | i7-14700KF | 1 007 ms | 2 340 ms | 9 139 ms |
+
+The GPU is 10x the CPU at batch 1 and 57x (inference) to 81x (training) at batch 16. Batch-1 inference spends
+about 0.4 ms encoding on the CPU; repeated runs vary by about ±15% (GPU clocks on a shared desktop). Most of the
+training time is memory-bound elementwise work: BatchNorm as composite ops is about ten full passes over each
+activation forward and twice that backward, and SiLU is a separate pass. Fused Conv-BN-SiLU custom ops (folo-nn)
+and elementwise fusion are the next wins. `FOLO_BENCH_CPU=0` skips the CPU rows; `FOLO_BENCH_PROFILE=1` prints the
+encode / submit / wait split of batch-1 inference. The folo-n detector itself, and the comparison with the
+Ultralytics numbers in [BENCHMARKS.md](BENCHMARKS.md), come once folo-vision's model lands.
 
 ## Known limitations / follow-ups
 
@@ -251,3 +326,13 @@ folo-core is being written alongside this crate. The plan for the follow-up PR:
 - The f16 depthwise conv is slower than the f32 one (2-byte scalar loads); vectorising it is a follow-up.
 - Timings are wall-clock; GPU timestamp queries would make small-kernel numbers more precise.
 - `max_pool2d` has no `ceil_mode`; upsampling is nearest-only.
+- Backend: no elementwise fusion yet, so composite BatchNorm and every activation are separate memory passes; the
+  conv epilogue's fused bias + activation is not reachable from folo-core ops (a fused Conv-BN-SiLU custom op in
+  folo-nn can call the kernel layer directly).
+- Backend: strided convolution input gradients run the transposed-conv GEMM over every `(kh, kw)` tap and skip
+  the positions the stride never touched (3/4 of the B tile is zero at stride 2); a stride-phase decomposition
+  would remove that waste.
+- Backend: index ops do not report out-of-range indices (see [folo-core backend](#folo-core-backend)), and top-k
+  is one thread per row (`O(k · d)`), sized for assigner-style `k`.
+- Backend: `Device::Gpu(0)` only; registering further adapters as `Gpu(1..)` is a few lines with
+  `GpuBackend::new` but untested.

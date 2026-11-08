@@ -2,16 +2,19 @@
 //!
 //! Sizes are rounded up to a *size class*: the next quarter step between powers of two (…, 1 MiB, 1.25 MiB,
 //! 1.5 MiB, 1.75 MiB, 2 MiB, …) with a 256-byte floor, so at most 25% of a buffer is slack. Freed buffers go
-//! back to a free list keyed by `(size class, usage)`; a later request for the same class pops one instead of
-//! asking the driver. The free lists are capped at [`BufferPool::max_cached_bytes`]; beyond that the buffer is
-//! dropped (the driver frees it once in-flight work is done).
+//! back to a free list keyed by `(size class, usage)`; a later request for the same class pops the most recently
+//! freed one instead of asking the driver. The free lists hold at most the larger of
+//! [`BufferPool::max_cached_bytes`] and the high-water mark of live bytes, so a training loop whose working set
+//! exceeds the configured cap still reuses every buffer from one step to the next (like PyTorch's caching
+//! allocator). When a returned buffer does not fit, the least recently freed buffers are evicted first (the
+//! driver frees them once in-flight work is done); [`crate::GpuContext::trim_pool`] empties the cache.
 //!
 //! Reusing a buffer while earlier encoded work still reads it is safe: every dispatch and copy goes through
 //! one queue in encoding order, and wgpu inserts the barriers between dispatches that touch the same buffer.
 //! The one ordering hazard, `Queue::write_buffer` jumping ahead of not-yet-submitted work, is handled by
 //! [`crate::GpuContext`], which flushes the open batch before every upload.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 /// Smallest size class in bytes.
@@ -50,11 +53,20 @@ pub struct PoolStats {
     pub allocated_bytes: u64,
 }
 
+type Key = (u64, wgpu::BufferUsages);
+
 /// Free lists of buffers keyed by `(size class, usage)`.
 pub struct BufferPool {
-    free: HashMap<(u64, wgpu::BufferUsages), Vec<wgpu::Buffer>>,
+    /// Per key, `(free stamp, buffer)` oldest first; reuse pops the newest.
+    free: HashMap<Key, VecDeque<(u64, wgpu::Buffer)>>,
+    /// Every free event in stamp order, for least-recently-freed eviction. Entries whose buffer was reused
+    /// since are stale and skipped.
+    order: VecDeque<(u64, Key)>,
+    stamp: u64,
+    cached_buffers: usize,
+    high_water: u64,
     stats: PoolStats,
-    /// Upper bound on bytes kept in free lists.
+    /// Bytes the free lists may always hold (they may hold up to the live-bytes high-water mark).
     pub max_cached_bytes: u64,
 }
 
@@ -67,7 +79,15 @@ impl Default for BufferPool {
 impl BufferPool {
     /// Creates an empty pool that caches at most `max_cached_bytes`.
     pub fn new(max_cached_bytes: u64) -> Self {
-        Self { free: HashMap::new(), stats: PoolStats::default(), max_cached_bytes }
+        Self {
+            free: HashMap::new(),
+            order: VecDeque::new(),
+            stamp: 0,
+            cached_buffers: 0,
+            high_water: 0,
+            stats: PoolStats::default(),
+            max_cached_bytes,
+        }
     }
 
     /// Current counters.
@@ -78,7 +98,10 @@ impl BufferPool {
     /// Drops every cached buffer.
     pub fn clear(&mut self) {
         self.free.clear();
+        self.order.clear();
+        self.cached_buffers = 0;
         self.stats.cached_bytes = 0;
+        self.high_water = self.stats.live_bytes;
     }
 
     /// Pops a cached buffer of class `class` and usage `usage`, or creates one with `device`.
@@ -89,9 +112,11 @@ impl BufferPool {
         usage: wgpu::BufferUsages,
     ) -> wgpu::Buffer {
         self.stats.live_bytes += class;
-        if let Some(buf) = self.free.get_mut(&(class, usage)).and_then(Vec::pop) {
+        self.high_water = self.high_water.max(self.stats.live_bytes);
+        if let Some((_, buf)) = self.free.get_mut(&(class, usage)).and_then(VecDeque::pop_back) {
             self.stats.hits += 1;
             self.stats.cached_bytes -= class;
+            self.cached_buffers -= 1;
             return buf;
         }
         self.stats.misses += 1;
@@ -104,14 +129,35 @@ impl BufferPool {
         })
     }
 
-    /// Returns a buffer to its free list (or drops it if the cache is full).
+    /// Returns a buffer to its free list, evicting the least recently freed buffers if the cache is full.
     pub(crate) fn give(&mut self, buf: wgpu::Buffer, class: u64) {
         self.stats.live_bytes = self.stats.live_bytes.saturating_sub(class);
-        if self.stats.cached_bytes + class > self.max_cached_bytes {
+        let cap = self.max_cached_bytes.max(self.high_water);
+        if class > cap {
             return;
         }
+        while self.stats.cached_bytes + class > cap {
+            let Some((stamp, key)) = self.order.pop_front() else { break };
+            let Some(list) = self.free.get_mut(&key) else { continue };
+            if list.front().is_some_and(|(s, _)| *s == stamp) {
+                list.pop_front();
+                self.stats.cached_bytes -= key.0;
+                self.cached_buffers -= 1;
+            }
+        }
+        let key = (class, buf.usage());
+        self.stamp += 1;
+        self.free.entry(key).or_default().push_back((self.stamp, buf));
+        self.order.push_back((self.stamp, key));
         self.stats.cached_bytes += class;
-        self.free.entry((class, buf.usage())).or_default().push(buf);
+        self.cached_buffers += 1;
+        // Drop stale order entries (buffers reused since they were freed) once they dominate.
+        if self.order.len() > 2 * self.cached_buffers + 1024 {
+            let mut live: Vec<(u64, Key)> =
+                self.free.iter().flat_map(|(k, l)| l.iter().map(move |(s, _)| (*s, *k))).collect();
+            live.sort_unstable_by_key(|e| e.0);
+            self.order = live.into();
+        }
     }
 }
 

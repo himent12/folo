@@ -186,11 +186,11 @@ impl Tensor {
         let (n, c) = (self.dims()[0], self.dims()[1]);
         let out = Tensor::wrap(vs, Shape::new(&[n, c, oh, ow]), "max_pool2d")?;
         let idx = Tensor::wrap(is, Shape::new(&[n, c, oh, ow]), "max_pool2d")?;
-        let in_shape = self.shape().clone();
+        let (in_shape, p) = (self.shape().clone(), *p);
         Ok(out.track_saved("max_pool2d", &[self], &[&idx.clone()], move |g| {
             let b = g.backend()?;
             let s = super::with_views([g, &idx], [g.layout(), idx.layout()], |[gv, iv]| {
-                b.max_pool2d_backward(gv, iv, &in_shape)
+                b.max_pool2d_backward(gv, iv, &in_shape, &p)
             })?;
             Ok(grads![Some(Tensor::wrap(s, in_shape.clone(), "max_pool2d_backward")?)])
         }))

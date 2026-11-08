@@ -196,7 +196,35 @@ fn doctor(args: DoctorArgs, out: Out) -> Result<(), CliError> {
         WebSource::Embedded => "embedded",
         _ => "dir",
     };
-    // TODO(gpu): enumerate wgpu adapters (name, backend, memory, shader-f16) once folo-gpu exists.
+    let options = folo_gpu::GpuOptions::from_env();
+    let adapters = folo_gpu::GpuContext::enumerate(&options);
+    // Creating the device proves the default adapter works and shows which one FOLO picks.
+    let selected = folo_gpu::GpuContext::with_options(&options).map(|c| c.summary().clone());
+    let gpus: Vec<_> = adapters
+        .iter()
+        .map(|a| {
+            json!({
+                "index": a.index,
+                "name": a.name,
+                "backend": a.backend.to_ascii_lowercase(),
+                "device_type": a.device_type,
+                "vendor": a.vendor,
+                "device": a.device,
+                "driver": a.driver,
+                "driver_info": a.driver_info,
+                "shader_f16": a.shader_f16,
+                "max_buffer_bytes": a.max_buffer_size,
+                "max_storage_binding_bytes": a.max_storage_buffer_binding_size,
+                "workgroup_storage_bytes": a.max_compute_workgroup_storage_size,
+                "max_invocations_per_workgroup": a.max_compute_invocations_per_workgroup,
+                "subgroup_size": [a.subgroup_size.0, a.subgroup_size.1],
+            })
+        })
+        .collect();
+    let selected_json = match &selected {
+        Ok(s) => json!({ "index": s.index, "name": s.name, "backend": s.backend.to_ascii_lowercase() }),
+        Err(e) => json!({ "error": e.to_string() }),
+    };
     let report = json!({
         "version": env!("CARGO_PKG_VERSION"),
         "git_sha": env!("FOLO_GIT_SHA"),
@@ -205,8 +233,9 @@ fn doctor(args: DoctorArgs, out: Out) -> Result<(), CliError> {
         "arch": host.arch,
         "cpu": { "name": host.cpu_name, "threads": host.cpu_threads },
         "memory": { "total_bytes": host.memory_total_bytes, "available_bytes": host.memory_available_bytes },
-        "gpus": [],
-        "gpu_detection": "not_implemented",
+        "gpus": gpus,
+        "gpu_detection": "wgpu",
+        "gpu_selected": selected_json,
         "web_dist": { "path": web_dir, "exists": web_exists, "index_html": web_ready },
         "web_embedded": { "present": embedded.is_some(), "files": embedded.unwrap_or(0) },
         "web_source": web_source,
@@ -220,7 +249,22 @@ fn doctor(args: DoctorArgs, out: Out) -> Result<(), CliError> {
         gib(host.memory_total_bytes),
         gib(host.memory_available_bytes)
     ));
-    out.human("gpu       detection not implemented yet (waits on folo-gpu)");
+    if adapters.is_empty() {
+        out.human("gpu       no adapters found (Vulkan / DX12 / Metal); FOLO runs on the CPU");
+    }
+    for a in &adapters {
+        out.human(format!("gpu       {a}"));
+    }
+    match &selected {
+        Ok(s) => out.human(format!(
+            "gpu       FOLO uses [{}] {} ({}); set {} to pick another",
+            s.index,
+            s.name,
+            s.backend,
+            folo_gpu::context::ENV_ADAPTER
+        )),
+        Err(e) => out.human(format!("gpu       no usable adapter: {e}")),
+    }
     let web = if web_ready {
         "built".to_string()
     } else if web_exists {

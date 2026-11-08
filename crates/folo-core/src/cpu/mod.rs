@@ -334,7 +334,13 @@ impl Backend for CpuBackend {
         Ok((f32_storage(v), Storage::Cpu(CpuStorage::I64(i))))
     }
 
-    fn max_pool2d_backward(&self, grad: View<'_>, indices: View<'_>, input_shape: &Shape) -> Result<Storage> {
+    fn max_pool2d_backward(
+        &self,
+        grad: View<'_>,
+        indices: View<'_>,
+        input_shape: &Shape,
+        _p: &Pool2dParams,
+    ) -> Result<Storage> {
         let gd = contiguous_f32(&grad, "max_pool2d_backward")?;
         let idx = match cpu(&indices, "max_pool2d_backward")? {
             CpuStorage::I64(v) => elementwise::copy_strided(v, indices.layout),

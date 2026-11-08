@@ -8,10 +8,13 @@
 
 pub mod conv;
 pub mod elementwise;
+pub mod ew;
 pub mod gemm;
 pub mod layout;
+pub mod pool_grad;
 pub mod pooling;
 pub mod reduce;
+pub mod strided;
 
 use crate::DType;
 use crate::error::{GpuError, Result};

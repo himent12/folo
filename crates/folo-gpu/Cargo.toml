@@ -12,6 +12,7 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
+folo-core.workspace = true
 wgpu.workspace = true
 pollster.workspace = true
 bytemuck.workspace = true
@@ -28,4 +29,8 @@ harness = false
 
 [[bench]]
 name = "elementwise"
+harness = false
+
+[[bench]]
+name = "backend"
 harness = false

@@ -60,6 +60,12 @@ training and evaluation pipeline, a server, a CLI and a web studio.
   upsampling with their backwards, `index_select`/`index_add`/`gather`/`scatter_add`, `topk`) defaults to
   `Error::NotSupported { op, backend }`, so a backend can grow op by op. Gradients are composed from the same methods,
   so an op is trainable on a device once its forward and `*_backward` methods exist.
+- `max_pool2d_backward` also receives the pooling window (`Pool2dParams`), so a backend can compute the gradient as a
+  gather (each input element visits only the windows that cover it) instead of a scatter with float atomics; the
+  CPU backend ignores it.
+- `synchronize` (default no-op) waits for queued device work and reports asynchronous errors;
+  `folo_core::backend::synchronize(device)` calls it. Backends may queue work lazily: only `download` (`to_vec`,
+  `to_device(Cpu)`, `item`) and `synchronize` have to wait.
 - Tensors move between devices with `to_device` (autograd flows back across the transfer). The CPU backend is the
   reference: each GPU kernel should be tested against it within a stated tolerance.
 
@@ -69,8 +75,13 @@ training and evaluation pipeline, a server, a CLI and a web studio.
 - Kernels in WGSL: tiled GEMM (shared-memory tiles, vec4 loads), im2col / direct conv, elementwise + fused activations,
   reductions, softmax, pooling, upsample, concat. Each kernel is tested against the CPU reference.
 - f16 storage/compute when the adapter supports `shader-f16`, with f32 accumulation.
-- Standalone for now: its own `GpuTensor` over a kernel layer that takes raw buffers; the folo-core `Backend`
-  implementation comes next. Kernel list, layout conventions, GEMM tuning notes and benchmarks: `docs/GPU.md`.
+- Implements folo-core's `Backend` (`folo_gpu::GpuBackend`): `folo_gpu::init()` registers the default adapter as
+  `Device::Gpu(0)`, after which `tensor.to_device(Device::Gpu(0))` keeps data and every op (forward and the gradient
+  ops autograd records) on the GPU. Work is encoded into the context's open batch and only waits on readback, so
+  a forward + backward pass is a handful of queue submissions. Every dtype is stored (`u8` / `f16` packed into
+  words, `i64` as word pairs); strided views are read in place by elementwise ops, copies and matmul.
+- A standalone `GpuTensor` over the same kernel layer stays for kernel-level work. Kernel list, layout
+  conventions, the backend's op mapping, GEMM tuning notes and benchmarks: `docs/GPU.md`.
 
 ## folo-nn — layers and training utilities
 - `Module` trait: `parameters()`/`named_parameters()`/`named_buffers()` (stable, dotted names like

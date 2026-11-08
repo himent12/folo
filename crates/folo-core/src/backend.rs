@@ -258,6 +258,14 @@ pub trait Backend: Send + Sync + 'static {
     /// Short name used in errors (`"cpu"`, `"wgpu"`).
     fn name(&self) -> &'static str;
 
+    /// Block until all work queued on this backend has finished, and report any asynchronous error it hit.
+    /// Backends that run synchronously (the CPU) keep the default no-op. Reading data back
+    /// ([`Backend::download`]) synchronises implicitly; call this to time device work or to surface errors
+    /// early.
+    fn synchronize(&self) -> Result<()> {
+        Ok(())
+    }
+
     // ----- Memory (required) -----
 
     /// A contiguous buffer of `len` elements of `dtype`, every element set to `value`.
@@ -333,8 +341,16 @@ pub trait Backend: Send + Sync + 'static {
     fn max_pool2d(&self, x: View<'_>, p: &Pool2dParams) -> Result<(Storage, Storage)> {
         unsupported!(self, "max_pool2d")
     }
-    /// Scatter `grad` back to the positions in `indices` (from [`Backend::max_pool2d`]), summing collisions.
-    fn max_pool2d_backward(&self, grad: View<'_>, indices: View<'_>, input_shape: &Shape) -> Result<Storage> {
+    /// Scatter `grad` back to the positions in `indices` (from [`Backend::max_pool2d`] with window `p`),
+    /// summing collisions. `p` lets a backend gather instead of scatter (each input element visits only the
+    /// windows that cover it); the CPU backend scatters and ignores it.
+    fn max_pool2d_backward(
+        &self,
+        grad: View<'_>,
+        indices: View<'_>,
+        input_shape: &Shape,
+        p: &Pool2dParams,
+    ) -> Result<Storage> {
         unsupported!(self, "max_pool2d_backward")
     }
     /// Average pooling (padding zeros count toward the divisor).
@@ -415,6 +431,11 @@ pub fn backend(device: Device) -> Result<Arc<dyn Backend>> {
             .flatten()
             .ok_or(Error::BackendNotRegistered(device)),
     }
+}
+
+/// Wait for all queued work on `device` to finish (see [`Backend::synchronize`]).
+pub fn synchronize(device: Device) -> Result<()> {
+    backend(device)?.synchronize()
 }
 
 /// Every device with a backend: `Cpu` first, then registered GPUs.
