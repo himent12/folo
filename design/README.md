@@ -5,6 +5,10 @@ source of truth; both apps generate their theme from it and never hard-code a co
 
 - Web: `cd web && npm run tokens` writes `web/src/lib/design/tokens.css` (CSS custom properties) and `tokens.ts`
   (typed values for canvas/SVG code). `npm run check` fails if the generated files are stale.
+- Contrast: `node design/contrast.mjs` measures every colour pairing documented under Colour below (WCAG 2: text
+  4.5:1, non-text marks 3:1), in both themes, with tints and overlays composited over each surface. `npm run check`
+  (CI's web job) runs it, so a token change that breaks a pairing fails CI. Add a rule there when you document a new
+  pairing here.
 - Desktop: a Rust generator reads `tokens.json` and writes the GPUI theme.
 
 ## Character
@@ -61,8 +65,9 @@ app: chart plots, image canvases, code/log views. In light mode panels are white
   series line carries the data.
 - Status: `success` (completed, healthy), `warning` (degraded, stopping), `danger` (failed, errors; never
   for navigation such as a link to findings), `info` (informational notices). Waiting states (queued) are neutral
-  grey (`text.secondary` on `bg.active`), not a status hue. Each has `solid` (dots, icons, bars), `text` (readable text) and `muted` (tinted
-  backgrounds for badges and banners).
+  grey (`text.secondary` on `bg.active`), not a status hue. Each has `solid` (dots, icons, bars; ≥ 3:1 on every
+  surface), `text` (readable text; AA on every surface and on its own `muted`) and `muted` (tinted backgrounds for
+  badges and banners: the solid at low alpha).
 - Charts: `chart.series[0..5]` in this fixed order (sky, amber, magenta, teal, violet, orange), never cycled; the
   order keeps every adjacent pair apart under colour-vision deficiency (checked with an OKLab ΔE validator). The
   series deliberately exclude the accent lime (reserved for actions, live state, focus and "best" markers). Some
