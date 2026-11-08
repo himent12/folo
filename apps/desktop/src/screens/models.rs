@@ -533,6 +533,10 @@ impl FoloApp {
         let chevron = |desc: bool| {
             icon(if desc { "icons/chevron-down.svg" } else { "icons/chevron-up.svg" }, 12., t.text_secondary)
         };
+        let mark = |on: Option<(&'static str, bool)>| match on {
+            Some((_, desc)) => chevron(desc),
+            None => icon("icons/chevron-down.svg", 12., alpha(t.text_tertiary, 0.45)),
+        };
         let el = div()
             .id(SharedString::from(format!("sort-{key}")))
             .w(px(w))
@@ -546,15 +550,17 @@ impl FoloApp {
             .cursor_pointer()
             .hover(|s| s.bg(t.bg_hover))
             .active(|s| s.bg(t.bg_active))
+            .tooltip(crate::controls::tip(format!("Sort by {label}"), None))
             // The chevron sits on the side away from the values, so the label stays aligned with them.
-            .when_some(on.filter(|_| right), |d, (_, desc)| d.child(chevron(desc)))
+            // Unsorted columns show a faint one, so they read as sortable before the first click.
+            .when(right, |d| d.child(mark(on)))
             .child(
                 text(ty::XS, if on.is_some() { t.text_secondary } else { t.text_tertiary })
                     .font_weight(FontWeight::MEDIUM)
                     .whitespace_nowrap()
                     .child(label),
             )
-            .when_some(on.filter(|_| !right), |d, (_, desc)| d.child(chevron(desc)));
+            .when(!right, |d| d.child(mark(on)));
         self.bind(
             el,
             &format!("sort-{key}"),

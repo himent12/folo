@@ -442,6 +442,8 @@ pub struct FoloApp {
     pub menu_trigger: Rc<std::cell::Cell<Option<gpui::Bounds<Pixels>>>>,
     /// The inspector's and the Playground's image views as last laid out (for pan clamping).
     pub insp_view: Rc<std::cell::Cell<Option<gpui::Bounds<Pixels>>>>,
+    /// The inspector's label list (focus reveal scrolls it).
+    pub insp_list_scroll: ScrollHandle,
     pub play_view: Rc<std::cell::Cell<Option<gpui::Bounds<Pixels>>>>,
 
     pub drag: Option<Drag>,
@@ -558,6 +560,7 @@ impl FoloApp {
             menu_scroll: ScrollHandle::new(),
             menu_trigger: Rc::new(std::cell::Cell::new(None)),
             insp_view: Rc::new(std::cell::Cell::new(None)),
+            insp_list_scroll: ScrollHandle::new(),
             play_view: Rc::new(std::cell::Cell::new(None)),
             drag: None,
             slider_bounds: Rc::new(RefCell::new(HashMap::new())),
@@ -2599,7 +2602,9 @@ impl FoloApp {
     /// Tab / Shift-Tab, trapped inside the topmost overlay.
     fn cycle_focus(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
         // The newly focused control scrolls into view inside whichever of these holds it.
-        let containers = if self.new_run.is_some() || self.synth.is_some() {
+        let containers = if self.inspector.is_some() {
+            vec![self.insp_list_scroll.clone()]
+        } else if self.new_run.is_some() || self.synth.is_some() {
             vec![self.dialog_scroll.clone()]
         } else if matches!(self.route, Route::Playground) {
             vec![self.play_side_scroll.clone(), self.page_scroll.clone()]

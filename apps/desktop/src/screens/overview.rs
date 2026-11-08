@@ -948,7 +948,7 @@ impl FoloApp {
                         .child(rich(&t, ty::SM, t.text_tertiary, body).justify_start()),
                 )
         };
-        panel(&t)
+        let steps = panel(&t)
             .p(px(24.))
             .flex()
             .flex_col()
@@ -989,8 +989,48 @@ impl FoloApp {
                         false,
                     ))),
             )
-            .child(div().flex().child(add))
-            .into_any_element()
+            .child(div().flex().child(add));
+        // The same path from a terminal, for people who live there (docs/CLI.md).
+        let cmd = |c: &str, what: &str| {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(16.))
+                .child(
+                    div()
+                        .w(px(420.))
+                        .flex_none()
+                        .px(px(10.))
+                        .py(px(6.))
+                        .rounded(px(radius::SM))
+                        .bg(t.bg_inset)
+                        .child(
+                            text(ty::SM, t.text_primary)
+                                .font_family(crate::theme::MONO)
+                                .truncate()
+                                .child(c.to_string()),
+                        ),
+                )
+                .child(text(ty::SM, t.text_tertiary).child(what.to_string()))
+        };
+        let terminal = panel(&t)
+            .p(px(24.))
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .child(text(ty::BASE, t.text_primary).font_weight(FontWeight::MEDIUM).child("Or from a terminal"))
+            // Honest about what reaches this app: the server and the datasets registered with it;
+            // `folo train` runs on its own (runs/ in the working folder).
+            .child(cmd("folo serve", "start the server this app connects to"))
+            .child(cmd(
+                "folo dataset synth shapes --images 1000",
+                "then Add dataset and pick the shapes folder",
+            ))
+            .child(cmd(
+                "folo train --data shapes --epochs 50",
+                "or train in the terminal, separate from this app",
+            ));
+        div().flex().flex_col().gap(px(16.)).child(steps).child(terminal).into_any_element()
     }
 
     /// Dataset card: a 2×2 mosaic of its first images, name and counts.

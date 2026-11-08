@@ -29,6 +29,11 @@ paths (`src/controls.rs`, `src/app.rs`, `src/overlays.rs`), motion, resizing log
 Known platform limits (don't score these against the app): GPUI has no letter-spacing; the window's own caption buttons
 are drawn by the app.
 
+Keyboard paths that live outside the screen files (check before reporting one missing): the linked run charts, the
+PR chart and the dataset histograms are one Tab stop each through `chart_group` in `src/controls.rs` (← / → step,
+Shift = ×10, Home / End, Esc clears, same cursor and legend values as the mouse); every row, chip and button goes
+through `bind` / `bind_ring` (Enter / Space, focus ring).
+
 ## Scoring
 Use `REVIEW_RUBRIC.md` (path in your task): 12 lines, 1–10, where **9 means "would ship as-is at Linear / Raycast / Zed
 quality"**. Be calibrated and strict: no 9 unless you would genuinely ship that line unchanged. Return the exact

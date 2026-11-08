@@ -715,3 +715,39 @@ Round 19 changes:
   - Long detection names show in full on hover and on keyboard focus.
 - **Datasets:** a class filter drops the other classes' boxes to 30 % in each tile.
 - **Copy:** New run calls its time a reference estimate.
+
+## Round 20
+
+| Line | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | avg |
+|------|---|---|---|---|---|---|---|---|---|----|----|----|-----|
+| Opus 5.5 | 8 | 8 | 8 | 8 | 8 | 8 | 8 | 8 | 8 | 7 | 8 | 8 | 7.9 |
+| GPT-6.1 Sol | 8 | 9 | 8 | 8 | 8 | 8 | 8 | 9 | 8 | 8 | 8 | 8 | 8.2 |
+
+Opus's accessibility 7 rests partly on "run charts have no keyboard path". That's wrong: `chart_group` in `controls.rs` gives each chart group a Tab stop with ← / → / Shift / Home / End / Esc. The review brief now points reviewers at it.
+
+Real items:
+- Score-only sample chips.
+- The LR multiplier floated on its own line, and the legend read "lr 6.58".
+- P/R was labelled differently on the run and model pages.
+- Log timestamps used the disabled token.
+- The inspector label list had no focus-reveal path, and its key hints were pinned far below.
+- Sortable headers looked static.
+- Latest-point halos competed with the cursor.
+- The New run shortcut read as a third control.
+- Dimmed chip text was hard to read.
+- The empty Overview had a void.
+
+Round 21 changes:
+- **Run dashboard:**
+  - Sample chips show "circle 0.86" where the view is at least 140 px wide.
+  - The LR caption carries "× 10⁻³"; the legend and axis are in that power (`LineChart.pow_caption`).
+  - P/R reads "best-F1 · IoU 0.50 · val" and "best-F1 · validation".
+  - Latest-point halos hide while the cursor inspects.
+  - "close mosaic" is labelled on the top row.
+  - Log timestamps and debug tags use `text.tertiary`.
+  - dfl dots are spaced 1.5 / 3.
+- **Inspector:** the label list has its own scroll handle for focus reveal, and the key hints follow the list.
+- **Models table:** sortable headers show a faint chevron and a "Sort by …" tooltip.
+- **New run:** the shortcut is quiet text before Cancel.
+- **Overview:** the first-run page gets an "Or from a terminal" panel (synth, train, serve).
+- **Copy:** "Boxes by class" on dataset chips; "failed during epoch N"; dimmed chip text at 85 %.
