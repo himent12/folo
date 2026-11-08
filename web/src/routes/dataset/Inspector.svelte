@@ -605,7 +605,7 @@
     flex-shrink: 0;
   }
   .sz {
-    font-size: var(--type-xs-size);
+    font-size: var(--type-sm-size);
     color: var(--text-tertiary);
   }
   .none {

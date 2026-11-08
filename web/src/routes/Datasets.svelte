@@ -62,8 +62,8 @@
     {#if datasets.error && !datasets.data}
       <ErrorState error={datasets.error} title="Could not load datasets" retry={() => datasets.refresh()} />
     {:else if datasets.data?.length === 0}
-      <!-- The header already holds the primary action; the empty state offers the quick start. -->
-      <EmptyState icon={Images} title="No datasets yet" description="Register a YOLO or COCO folder the server can read, or generate a synthetic shapes set to try FOLO in a minute.">
+      <!-- The header already holds the primary action (and the subtitle says what a dataset is): offer the quick start. -->
+      <EmptyState icon={Images} title="No datasets yet" description="Try FOLO in a minute with a generated set of shapes.">
         {#snippet actions()}<Button icon={Sparkles} onclick={() => add('synthetic')}>Generate synthetic</Button>{/snippet}
       </EmptyState>
     {:else}

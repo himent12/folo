@@ -302,7 +302,7 @@
     color: var(--text-primary);
   }
   .note {
-    font-size: var(--type-xs-size);
+    font-size: var(--type-sm-size);
     color: var(--text-tertiary);
   }
 </style>

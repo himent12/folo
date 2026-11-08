@@ -53,7 +53,7 @@
     background: var(--bg-inset);
     border: 1px solid var(--line-subtle);
     font-family: var(--font-mono);
-    font-size: var(--type-xs-size);
+    font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
     color: var(--text-secondary);
     tab-size: 2;

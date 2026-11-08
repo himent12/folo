@@ -42,12 +42,12 @@
     font-weight: var(--weight-medium);
   }
   .aside {
-    font-size: var(--type-xs-size);
+    font-size: var(--type-sm-size);
     color: var(--text-tertiary);
   }
   .msg {
-    font-size: var(--type-xs-size);
-    line-height: var(--type-xs-line);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
     color: var(--text-tertiary);
   }
   .msg.error {

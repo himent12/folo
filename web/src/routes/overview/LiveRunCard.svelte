@@ -180,7 +180,7 @@
   .eta {
     display: flex;
     justify-content: space-between;
-    font-size: var(--type-xs-size);
+    font-size: var(--type-sm-size);
     color: var(--text-tertiary);
   }
   .grid {

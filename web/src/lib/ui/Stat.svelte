@@ -34,8 +34,8 @@
     min-width: 0;
   }
   .label {
-    font-size: var(--type-xs-size);
-    line-height: var(--type-xs-line);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
     color: var(--text-tertiary);
     white-space: nowrap;
   }
@@ -85,8 +85,8 @@
     font-size: 0.5em;
   }
   .sub {
-    font-size: var(--type-xs-size);
-    line-height: var(--type-xs-line);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
     color: var(--text-secondary);
     font-variant-numeric: tabular-nums;
     white-space: nowrap;

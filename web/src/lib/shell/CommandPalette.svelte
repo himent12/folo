@@ -290,7 +290,7 @@
   }
   .group {
     padding: var(--space-2) var(--space-2) var(--space-1);
-    font-size: var(--type-xs-size);
+    font-size: var(--type-sm-size);
     color: var(--text-tertiary);
     font-weight: var(--weight-medium);
   }
@@ -331,7 +331,7 @@
     flex: 1;
     min-width: 0;
     text-align: right;
-    font-size: var(--type-xs-size);
+    font-size: var(--type-sm-size);
     color: var(--text-tertiary);
     white-space: nowrap;
     overflow: hidden;

@@ -79,7 +79,7 @@
   {#if datasets.error && !datasets.data}
     <ErrorState error={datasets.error} retry={() => datasets.refresh()} compact />
   {:else if datasets.data && list.length === 0}
-    <EmptyState compact icon={Images} title="No datasets registered" description="Register a dataset first, or drop an image file instead." />
+    <EmptyState icon={Images} title="No datasets registered" description="Register a dataset first, or drop an image file instead." />
   {:else}
     <div class="bar">
       <div class="ds-select">
