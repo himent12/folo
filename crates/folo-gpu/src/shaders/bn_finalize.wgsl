@@ -20,7 +20,12 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) 
     for (var k = lid; k < chunks; k += 256u) {
         let o = (c * chunks + k) * 3u;
         let nb = PART[o];
-        if (nb > 0.0) {
+        if (cnt == 0.0) {
+            // The first non-empty partial is copied (see bn_tree_merge).
+            cnt = nb;
+            mean = PART[o + 1u];
+            m2 = PART[o + 2u];
+        } else if (nb > 0.0) {
             let n = cnt + nb;
             let d = PART[o + 1u] - mean;
             mean += d * (nb / n);

@@ -9,7 +9,12 @@ fn bn_tree_merge(lid: u32) {
         if (lid < s) {
             let na = wn[lid];
             let nb = wn[lid + s];
-            if (nb > 0.0) {
+            if (na == 0.0) {
+                // Copy instead of merging into nothing: `d · d · 0` overflows to NaN for huge means.
+                wn[lid] = nb;
+                wm[lid] = wm[lid + s];
+                wq[lid] = wq[lid + s];
+            } else if (nb > 0.0) {
                 let n = na + nb;
                 let d = wm[lid + s] - wm[lid];
                 wm[lid] += d * (nb / n);

@@ -491,3 +491,41 @@ fn fused_batch_norm_large_mean() {
         assert_eq!(out.y.to_vec::<f32>().unwrap(), vec![0.0; 8], "constant {v}");
     }
 }
+
+/// A non-constant plane around a huge mean (1e20 ± 1e15): the Welford merges must not square the mean (an empty
+/// accumulator merged as `d · d · 0` overflows to NaN), so the statistics, outputs, running variance and
+/// gradients are those of a ±1e15 spread.
+#[test]
+fn fused_batch_norm_huge_mean() {
+    let dev = gpu!();
+    let v: Vec<f32> = (0..8).map(|i| if i % 2 == 0 { 1e20 + 1e15 } else { 1e20 - 1e15 }).collect();
+    let xs = v;
+    let mean = xs.iter().map(|&a| a as f64).sum::<f64>() / 8.0;
+    let var = xs.iter().map(|&a| (a as f64 - mean).powi(2)).sum::<f64>() / 8.0;
+    let x = Tensor::from_vec(xs.clone(), [2, 1, 2, 2]).unwrap().to_device(dev).unwrap().requires_grad_();
+    let (g, b) = (
+        Tensor::ones([1]).to_device(dev).unwrap().detach().requires_grad_(),
+        Tensor::zeros([1]).to_device(dev).unwrap().detach().requires_grad_(),
+    );
+    let (rm, rv) = (Tensor::zeros([1]).to_device(dev).unwrap(), Tensor::ones([1]).to_device(dev).unwrap());
+    let bn = BatchNorm2d::from_tensors(g.clone(), b.clone(), rm, rv.clone(), 1e-3, 0.5).unwrap();
+    let y = bn.forward_act(&x, Activation::Identity).unwrap();
+    let ys = y.to_vec::<f32>().unwrap();
+    for (i, (&yv, &xv)) in ys.iter().zip(&xs).enumerate() {
+        let want = (xv as f64 - mean) / (var + 1e-3).sqrt();
+        assert!((yv as f64 - want).abs() <= 1e-3, "y[{i}]: {yv} vs {want}");
+    }
+    let rv_want = 0.5 + 0.5 * var * 8.0 / 7.0;
+    let rv_got = rv.to_vec::<f32>().unwrap()[0] as f64;
+    assert!((rv_got - rv_want).abs() <= 1e-3 * rv_want, "running_var {rv_got} vs {rv_want}");
+    let w = Tensor::from_slice(&[1.0f32, -2.0, 0.5, 3.0, -1.0, 2.0, 0.25, -0.5], [2, 1, 2, 2]).unwrap();
+    let grads = y.mul(&w.to_device(dev).unwrap()).unwrap().sum_all().unwrap().backward().unwrap();
+    // dβ = Σw, dγ = Σ w · x̂; dx is finite and of order 1 / σ.
+    let db = grads.get(&b).unwrap().to_vec::<f32>().unwrap()[0];
+    let dg = grads.get(&g).unwrap().to_vec::<f32>().unwrap()[0] as f64;
+    let dg_want: f64 = ys.iter().zip(w.to_vec::<f32>().unwrap()).map(|(&a, b)| a as f64 * b as f64).sum();
+    let db_want: f32 = w.to_vec::<f32>().unwrap().iter().sum();
+    assert!((db - db_want).abs() <= 1e-5, "dbias {db} vs {db_want}");
+    assert!((dg - dg_want).abs() <= 1e-3 * (1.0 + dg_want.abs()), "dweight {dg} vs {dg_want}");
+    assert!(grads.get(&x).unwrap().to_vec::<f32>().unwrap().iter().all(|d| d.is_finite() && d.abs() < 1e-13));
+}
