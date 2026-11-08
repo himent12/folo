@@ -123,8 +123,7 @@
           <div class="lsk-head"><Skeleton w="72px" h="20px" r="var(--radius-full)" /><Skeleton w="180px" h="20px" /><Skeleton w="min(360px, 70%)" h="14px" /></div>
           <div class="lsk-body">
             <div class="lsk-stats"><Skeleton w="96px" h="40px" /><Skeleton h="4px" /><div class="lsk-grid">{#each [0, 1, 2, 3] as i (i)}<Skeleton h="44px" />{/each}</div></div>
-            <Skeleton h="174px" r="var(--radius-md)" />
-            <Skeleton h="174px" r="var(--radius-md)" />
+            <Skeleton h="232px" r="var(--radius-md)" />
           </div>
         </div>
       {:else if live}
@@ -399,7 +398,7 @@
   }
   .lsk-body {
     display: grid;
-    grid-template-columns: 220px minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr) minmax(0, 2fr);
     gap: var(--space-4);
   }
   .lsk-stats {
@@ -430,9 +429,6 @@
   @media (max-width: 1023px) {
     .lsk-body {
       grid-template-columns: minmax(0, 1fr);
-    }
-    .lsk-body > :global(:nth-child(3)) {
-      display: none;
     }
   }
   .run-name {

@@ -103,6 +103,10 @@
     if (cursor < first.x - 0.5 || cursor > last.x + 0.5) return null;
     return pts[nearest(pts, cursor)]?.y ?? null;
   }
+  // Hover, focus or tap a run chip to bring its line forward (the others fade).
+  let hovered = $state<string | null>(null);
+  let pinned = $state<string | null>(null);
+  const highlight = $derived(hovered ?? pinned);
   const readoutAt = $derived(cursor === null ? 'Latest' : x === 'epoch' ? `Epoch ${Math.round(cursor)}` : `${Math.round(cursor)}% through`);
   const xDomain = $derived<[number, number]>(x === 'epoch' ? [0, Math.max(1, ...chosen.map((r) => r.epochs))] : [0, 100]);
 
@@ -152,7 +156,21 @@
         <span class="at num" aria-hidden="true">{readoutAt}</span>
         {#each chosen as r (r.id)}
           {@const v = valueOf(r.id)}
-          <span class="chip" style:--c={color(r.id)}>
+          <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+          <span
+            class="chip"
+            class:pinned={pinned === r.id}
+            style:--c={color(r.id)}
+            onpointerenter={() => (hovered = r.id)}
+            onpointerleave={() => (hovered = null)}
+            onfocusin={() => (hovered = r.id)}
+            onfocusout={() => (hovered = null)}
+            onclick={(e) => {
+              // Tap / click on the chip (not its link or remove button) pins the run's line forward.
+              if ((e.target as HTMLElement).closest('a, button')) return;
+              pinned = pinned === r.id ? null : r.id;
+            }}
+          >
             <i aria-hidden="true" data-pattern={SLOT_PATTERN[slotOf(r.id)]}></i>
             <a href={href(`/runs/${r.id}`)}>{r.name}</a>
             <span class="v num">{v === null ? '—' : v.toFixed(3)}</span>
@@ -185,6 +203,8 @@
           xLabel={x === 'epoch' ? 'epoch' : undefined}
           bind:cursor
           legend={false}
+          {highlight}
+          endDots
           label="{metricDef.label} for the compared runs"
         />
       {/if}
@@ -284,6 +304,14 @@
     min-width: 6.5em;
     font-size: var(--type-sm-size);
     color: var(--text-tertiary);
+  }
+  .chip {
+    cursor: pointer;
+    transition: border-color var(--dur-fast) var(--ease-standard);
+  }
+  .chip:hover,
+  .chip.pinned {
+    border-color: var(--line-strong);
   }
   .chip .v {
     min-width: 3.2em;

@@ -185,9 +185,9 @@
             <a class="r-main" href={href(`/runs/${r.id}`)}>
               <span class="r-text">
                 <span class="r-name"><StatusBadge status={r.status} plain dotOnly /><span class="name truncate">{r.name}</span></span>
-                <span class="r-meta num truncate">{STATUS[r.status]} · {dsName.get(r.config.dataset_id) ?? r.config.dataset_id} · {r.config.arch} · {r.epoch}/{r.epochs} · {ago(r.created)}</span>
+                <span class="r-meta num truncate">{STATUS[r.status]} · {r.epoch}/{r.epochs} · {dsName.get(r.config.dataset_id) ?? r.config.dataset_id}</span>
               </span>
-              <span class="r-val num">{metric(r.best?.map50_95)}</span>
+              <span class="r-end"><span class="r-val num">{metric(r.best?.map50_95)}</span><span class="r-age">{ago(r.created)}</span></span>
             </a>
             {#if r.status === 'running'}
               <span class="r-prog" aria-hidden="true" style:transform="scaleX({r.step / Math.max(1, r.steps_per_epoch * r.epochs)})"></span>
@@ -379,9 +379,18 @@
       font-size: var(--type-sm-size);
       color: var(--text-tertiary);
     }
-    .r-val {
+    .r-end {
       flex-shrink: 0;
+      display: grid;
+      justify-items: end;
+      gap: 2px;
+    }
+    .r-val {
       font-weight: var(--weight-medium);
+    }
+    .r-age {
+      font-size: var(--type-sm-size);
+      color: var(--text-tertiary);
     }
     /* A live run shows its progress as a hairline along the row's bottom edge. */
     .r-prog {

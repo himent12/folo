@@ -117,9 +117,9 @@
       <Skeleton w="240px" h="28px" />
       <Skeleton w="min(420px, 100%)" h="16px" />
     </div>
-    <Skeleton h="132px" r="var(--radius-lg)" />
+    <!-- The metrics instrument (strip + one chart), then samples beside the rail. -->
+    <Skeleton h="520px" r="var(--radius-lg)" />
     <div class="sk-row2"><Skeleton h="300px" r="var(--radius-lg)" /><Skeleton h="300px" r="var(--radius-lg)" /></div>
-    <div class="sk-row3"><Skeleton h="260px" r="var(--radius-lg)" /><Skeleton h="260px" r="var(--radius-lg)" /><Skeleton h="260px" r="var(--radius-lg)" /></div>
   </div>
 {:else}
   <Page title={run.name}>
@@ -272,17 +272,11 @@
     grid-template-columns: 2fr 1fr;
     gap: var(--space-4);
   }
-  .sk-row3 {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: var(--space-4);
-  }
   @media (max-width: 767px) {
     .loading {
       padding: var(--space-4);
     }
-    .sk-row2,
-    .sk-row3 {
+    .sk-row2 {
       grid-template-columns: minmax(0, 1fr);
     }
   }
