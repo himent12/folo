@@ -430,7 +430,7 @@
   .hitems {
     display: grid;
     gap: var(--space-3);
-    padding: var(--space-1) var(--space-4) var(--space-4) 128px;
+    padding: var(--space-1) var(--space-4) var(--space-4) calc(var(--space-16) * 2);
   }
   .hitems li {
     display: grid;

@@ -159,8 +159,8 @@
    */
   const latency = (m: Model): number | undefined => e2eMs[m.arch];
   const kpis = (m: Model) => [
-    { label: 'mAP50-95', value: m.metrics?.map50_95, sub: 'class mean · IoU 0.50:0.95' },
-    { label: 'mAP50', value: m.metrics?.map50, sub: 'class mean · IoU 0.50' },
+    { label: 'mAP50-95', value: m.metrics?.map50_95, sub: 'IoU 0.50:0.95' },
+    { label: 'mAP50', value: m.metrics?.map50, sub: 'IoU 0.50' },
     { label: 'Precision', value: m.metrics?.precision, sub: 'at the best-F1 confidence' },
     { label: 'Recall', value: m.metrics?.recall, sub: 'at the best-F1 confidence' },
   ];
@@ -872,6 +872,9 @@
     color: var(--text-secondary);
   }
   @media (max-width: 1199px) {
+    .k-body {
+      grid-template-columns: minmax(0, 1fr);
+    }
     .detail {
       grid-template-columns: minmax(0, 1fr);
       align-items: start;

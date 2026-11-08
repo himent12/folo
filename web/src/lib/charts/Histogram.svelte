@@ -263,17 +263,18 @@
       {/if}
       <line class="axis" x1={m.left} x2={width - m.right} y1={height - m.bottom} y2={height - m.bottom} />
     </svg>
-    <p class="sr-only" aria-live="polite">{readout}</p>
-    <div class="sr-only">
-      <table>
-        <caption>{label}</caption>
-        <thead><tr><th scope="col">Bin</th><th scope="col">{unit}</th><th scope="col">Share</th></tr></thead>
-        <tbody>
-          {#each counts as c, i (i)}<tr><th scope="row">{name(i)}</th><td>{c.toLocaleString('en-US')}</td><td>{shareOf(c)}%</td></tr>{/each}
-        </tbody>
-      </table>
-    </div>
   {/if}
+</div>
+<!-- Read by assistive tech whether or not the plot has laid out yet. -->
+<p class="sr-only" aria-live="polite">{readout}</p>
+<div class="sr-only">
+  <table>
+    <caption>{label}</caption>
+    <thead><tr><th scope="col">Bin</th><th scope="col">{unit}</th><th scope="col">Share</th></tr></thead>
+    <tbody>
+      {#each counts as c, i (i)}<tr><th scope="row">{name(i)}</th><td>{c.toLocaleString('en-US')}</td><td>{shareOf(c)}%</td></tr>{/each}
+    </tbody>
+  </table>
 </div>
 
 <style>

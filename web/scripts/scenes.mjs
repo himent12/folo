@@ -171,7 +171,7 @@ export const scenes = [
     name: 'dataset-health-open',
     path: '/datasets/ds_shapes_hard?tab=stats',
     fullPage: false,
-    viewports: ['desktop', 'laptop', 'mobile'],
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
     setup: async (page) => {
       await until(page, '#ds-health summary');
       for (const s of await page.locator('#ds-health summary').all()) await s.click();
@@ -410,7 +410,7 @@ export const scenes = [
     name: 'model-metric-help',
     path: '/models/m_fast_n',
     fullPage: false,
-    viewports: ['desktop', 'laptop', 'mobile'],
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
     setup: async (page, { vp }) => {
       await until(page, '#pr svg');
       if (vp === 'mobile') await page.locator('button.meta-line').click();
