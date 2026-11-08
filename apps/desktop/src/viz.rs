@@ -155,7 +155,9 @@ pub fn paint_image_with_boxes(
                         BorderStyle::Solid,
                     ));
                 }
-                if pass == 1 && !b.truth && labels && (b.label.is_some() || b.score.is_some()) {
+                // Boxes under 20 px on screen show their label only when selected (design/README).
+                let small = r.size.height < px(20.) && !b.highlight;
+                if pass == 1 && !b.truth && labels && !small && (b.label.is_some() || b.score.is_some()) {
                     let fs = ty::XS.size;
                     let name = b.label.clone().unwrap_or_default();
                     // The selected box's chip takes the selection colour, like its outline.

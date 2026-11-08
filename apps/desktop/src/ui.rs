@@ -225,7 +225,7 @@ pub fn status_dot(t: &Theme, s: RunStatus, id: &str) -> Div {
         .gap(px(6.))
         .child(dot(dotc, 6., s == RunStatus::Running, format!("sd-{id}")))
         .child(
-            text(ty::XS, if s == RunStatus::Running { t.text_primary } else { fg })
+            text(ty::XS, if s == RunStatus::Running { t.accent_text } else { fg })
                 .whitespace_nowrap()
                 .child(s.label()),
         )
@@ -473,6 +473,12 @@ pub fn legend_value(t: &Theme, name: &str, color: Hsla, dashed: bool, value: Opt
 /// A class swatch: a small square in the class colour.
 pub fn swatch(color: Hsla, size: f32) -> Div {
     div().size(px(size)).flex_none().rounded(px(2.)).bg(color)
+}
+
+/// A class swatch: the exact palette hue with a 1 px inset `chart.swatch_edge`, so pale classes
+/// hold on light surfaces (design/README).
+pub fn class_swatch(t: &Theme, color: Hsla, size: f32) -> Div {
+    swatch(color, size).border_1().border_color(t.chart_swatch_edge)
 }
 
 /// A row of key/value pairs for detail panes.

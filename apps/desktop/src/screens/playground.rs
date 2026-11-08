@@ -582,7 +582,7 @@ impl FoloApp {
                                     cx.notify();
                                 }
                             }))
-                            .child(swatch(color, 8.))
+                            .child(crate::ui::class_swatch(&t, color, 8.))
                             .child(text(ty::SM, t.text_primary).w(px(68.)).truncate().child(b.name.clone()))
                             // Size tells apart two boxes of the same class.
                             .child(

@@ -331,13 +331,21 @@ impl FoloApp {
                     .flex_col()
                     .gap(px(16.))
                     .child(kpis)
-                    .child(
+                    .child(if window.viewport_size().width < px(1120.) {
+                        // Narrow: one above the other, each full width.
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(16.))
+                            .child(div().flex().child(pr))
+                            .child(div().flex().child(cm))
+                    } else {
                         div()
                             .flex()
                             .gap(px(16.))
                             .child(div().flex_1().min_w_0().flex().child(pr))
-                            .child(div().flex_1().min_w(px(380.)).flex().child(cm)),
-                    )
+                            .child(div().flex_1().min_w(px(380.)).flex().child(cm))
+                    })
                     .child(table)
                     .into_any_element()
             }
@@ -378,11 +386,12 @@ impl FoloApp {
     fn export_menu(&mut self, m: &Model, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
         let open = self.export_open;
-        let (half, hu) = bytes(m.bytes / 2);
-        let (onnx, ou) = bytes(m.bytes + 120_000);
+        // Estimates from the parameter count: 2 bytes per weight in f16, 4 in ONNX (f32).
+        let (half, hu) = bytes(m.params * 2);
+        let (onnx, ou) = bytes(m.params * 4);
         let options = [
-            ("folo-f16", "FOLO · f16", format!("{half} {hu} · half-precision weights for GPU inference")),
-            ("onnx", "ONNX", format!("{onnx} {ou} · opset 17, for other runtimes")),
+            ("folo-f16", "FOLO · f16", format!("≈ {half} {hu} · half-precision weights for GPU inference")),
+            ("onnx", "ONNX", format!("≈ {onnx} {ou} · f32, opset 17, for other runtimes")),
         ];
         let n = options.len();
         let fmts: Vec<&'static str> = options.iter().map(|o| o.0).collect();
@@ -592,6 +601,7 @@ impl FoloApp {
             curves.iter().filter_map(|(c, pts)| Some((*c, crate::charts::value_near(pts, hx, 1.)?))).collect()
         });
         let at_cursor = |class: u32| at_cursor.get(&class).copied();
+        let rest_precision = |class: u32| ev.per_class.iter().find(|c| c.class == class).map(|c| c.precision);
         let series: Vec<Series> = ev
             .pr
             .iter()
@@ -647,7 +657,7 @@ impl FoloApp {
                             cx.notify();
                         }
                     }))
-                    .child(div().w(px(10.)).h(px(2.)).rounded_full().bg(t.class_stroke(class)))
+                    .child(div().w(px(12.)).h(px(2.)).flex_none().rounded_full().bg(t.class_stroke(class)))
                     .child(
                         // A known width, so long class names end in "…" (GPUI truncates against
                         // the pre-shrink width).
@@ -663,7 +673,13 @@ impl FoloApp {
                             .w(px(64.))
                             .flex_none()
                             .text_right()
-                            .child(at_cursor(class).map_or("–".to_string(), |p| format!("{p:.3}"))),
+                            // At rest: precision at the operating point (conf 0.25, like the KPI);
+                            // while inspecting: precision at the cursor's recall.
+                            .child(
+                                at_cursor(class)
+                                    .or_else(|| (hover.is_none()).then(|| rest_precision(class)).flatten())
+                                    .map_or("–".to_string(), |p| format!("{p:.3}")),
+                            ),
                     )
                     .child(
                         text(ty::SM, t.text_primary)
@@ -739,14 +755,10 @@ impl FoloApp {
                                     .gap(px(8.))
                                     .child(th(&t, "Class").flex_1())
                                     // Precision at the recall under the cursor ("–" until inspecting).
-                                    .child(
-                                        div()
-                                            .w(px(64.))
-                                            .flex_none()
-                                            .flex()
-                                            .justify_end()
-                                            .child(th(&t, "Precision")),
-                                    )
+                                    .child(div().w(px(64.)).flex_none().flex().justify_end().child(th(
+                                        &t,
+                                        &hover.map_or("P @ 0.25".to_string(), |r| format!("P @ R {r:.2}")),
+                                    )))
                                     .child(
                                         div()
                                             .w(px(44.))
@@ -756,7 +768,46 @@ impl FoloApp {
                                             .child(th(&t, "AP50")),
                                     ),
                             )
-                            .children(chips),
+                            .children(chips)
+                            // Every class together, as the KPI strip reports it.
+                            .when_some(m.metrics.as_ref(), |d, mm| {
+                                d.child(
+                                    div()
+                                        .mt(px(4.))
+                                        .pt(px(6.))
+                                        .h(px(30.))
+                                        .px(px(8.))
+                                        .border_t_1()
+                                        .border_color(t.line_subtle)
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(8.))
+                                        .child(div().w(px(12.)).flex_none())
+                                        .child(
+                                            text(ty::SM, t.text_secondary)
+                                                .w(px(84.))
+                                                .flex_none()
+                                                .child("All classes"),
+                                        )
+                                        .child(
+                                            text(ty::SM, t.text_secondary)
+                                                .tnum()
+                                                .w(px(64.))
+                                                .flex_none()
+                                                .text_right()
+                                                .child(format!("{:.3}", mm.precision)),
+                                        )
+                                        .child(
+                                            text(ty::SM, t.text_primary)
+                                                .tnum()
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .w(px(44.))
+                                                .flex_none()
+                                                .text_right()
+                                                .child(format!("{:.3}", mm.map50)),
+                                        ),
+                                )
+                            }),
                     ),
             )
             .into_any_element()
@@ -1010,7 +1061,7 @@ impl FoloApp {
                             .flex()
                             .items_center()
                             .gap(px(8.))
-                            .child(swatch(color, 8.))
+                            .child(crate::ui::class_swatch(&t, color, 8.))
                             .child(
                                 text(ty::BASE, t.text_primary)
                                     .w(px(if pinned { 120. } else { 168. }))

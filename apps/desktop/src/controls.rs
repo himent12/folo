@@ -526,7 +526,7 @@ impl FoloApp {
                 d.border_color(t.line_default).hover(|s| s.bg(t.bg_hover).border_color(t.line_strong))
             })
             .active(|s| s.opacity(0.8))
-            .when_some(swatch_color, |d, c| d.child(swatch(c, 8.)))
+            .when_some(swatch_color, |d, c| d.child(crate::ui::class_swatch(&t, c, 8.)))
             .child(
                 text(ty::SM, if on { t.text_primary } else { t.text_secondary })
                     .whitespace_nowrap()
@@ -902,7 +902,10 @@ impl FoloApp {
 
 pub fn btn_colors(t: &Theme, kind: Btn) -> (Hsla, Hsla, Option<Hsla>, Hsla) {
     match kind {
-        Btn::Primary => (t.accent_solid, t.accent_on, None, t.accent_solid_hover),
+        // Light surfaces: a neutral 1 px edge, not a lime one (design/README).
+        Btn::Primary => {
+            (t.accent_solid, t.accent_on, (!t.is_dark()).then_some(t.line_default), t.accent_solid_hover)
+        }
         Btn::Secondary => {
             (t.bg_raised, t.text_primary, Some(t.line_default), crate::theme::over(t.bg_raised, t.bg_hover))
         }
