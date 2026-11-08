@@ -229,8 +229,8 @@ Non-2xx responses: `{ "error": { "code": "dataset_not_found", "message": "...", 
   "error": null | "..." }
 // Step
 { "epoch": 12, "step": 575, "lr": 0.0098, "loss": { "box": 1.21, "cls": 0.83, "dfl": 1.02, "total": 3.06 },
-  "imgs_per_s": 412.5, "eta_s": 1840 }      // step is the global, 1-based step number
-// Epoch
+  "imgs_per_s": 412.5, "eta_s": 1840 }      // epoch is 1-based; step is the global, 1-based step number
+// Epoch (epoch is 1-based, as everywhere in this API: Run.epoch, Run.best.epoch, Step.epoch, ?epoch= queries)
 { "epoch": 12, "train_loss": { "box": 1.18, "cls": 0.80, "dfl": 1.00, "total": 2.98 },
   "val": { "map50": 0.82, "map50_95": 0.61, "precision": 0.84, "recall": 0.77,
            "per_class": [{ "class": 0, "map50": 0.85, "map50_95": 0.64, "precision": 0.86, "recall": 0.80 }] },
