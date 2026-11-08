@@ -129,7 +129,7 @@
     gap: var(--space-2);
     height: var(--control-md);
     width: 240px;
-    padding: 0 var(--space-1) 0 10px;
+    padding: 0 var(--space-1) 0 var(--space-2);
     border-radius: var(--radius-md);
     border: 1px solid var(--line-default);
     background: var(--bg-panel);

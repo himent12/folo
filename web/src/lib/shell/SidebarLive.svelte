@@ -52,7 +52,7 @@
     display: grid;
     gap: 6px;
     margin: 0 var(--space-1);
-    padding: 10px 12px 12px;
+    padding: 12px;
     border-radius: var(--radius-lg);
     background: var(--bg-panel);
     border: 1px solid var(--line-subtle);

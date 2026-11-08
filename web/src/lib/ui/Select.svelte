@@ -48,7 +48,7 @@
     appearance: none;
     width: 100%;
     height: var(--control-md);
-    padding: 0 30px 0 10px;
+    padding: 0 28px 0 12px;
     border-radius: var(--radius-md);
     background: var(--bg-raised);
     border: 1px solid var(--line-default);
@@ -59,7 +59,7 @@
   }
   .sm select {
     height: var(--control-sm);
-    padding: 0 26px 0 8px;
+    padding: 0 28px 0 8px;
     border-radius: var(--radius-sm);
     font-size: var(--type-sm-size);
   }

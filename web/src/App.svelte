@@ -102,7 +102,7 @@
     top: 8px;
     left: 8px;
     z-index: var(--z-toast);
-    padding: 6px 10px;
+    padding: 6px 12px;
     border-radius: var(--radius-md);
     background: var(--accent-solid);
     color: var(--accent-on);

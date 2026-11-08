@@ -122,7 +122,7 @@
     -webkit-appearance: none;
     width: 14px;
     height: 14px;
-    margin-top: -5px;
+    margin-top: -5px; /* grid-ok: centres the 14 px thumb on the 4 px track */
     border-radius: 50%;
     background: var(--text-primary);
     border: 3px solid var(--bg-panel);

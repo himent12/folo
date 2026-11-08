@@ -27,7 +27,7 @@
   } = $props();
 
   const MIN = { s: 112, m: 172, l: 248 } as const;
-  const GAP = { s: 4, m: 8, l: 8 } as const;
+  const GAP = { s: 8, m: 8, l: 8 } as const;
   const OVERSCAN = 2;
 
   let el = $state<HTMLDivElement>();
@@ -266,7 +266,7 @@
     height: 18px;
     display: inline-flex;
     align-items: center;
-    padding: 0 5px;
+    padding: 0 4px;
     border-radius: var(--radius-xs);
     background: var(--bg-scrim);
     color: var(--text-primary);

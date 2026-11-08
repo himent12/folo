@@ -75,7 +75,33 @@ try {
           // Horizontal document overflow is always a layout bug (wide content must scroll inside its own box).
           const over = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
           if (over > 0) failures.push(`${name}: page overflows horizontally by ${over}px`);
-          await page.screenshot({ path: resolve(outDir, `${name}.png`), fullPage: scene.fullPage ?? vp !== 'mobile' });
+          const full = scene.fullPage ?? vp !== 'mobile';
+          // Capture what a user sees: from the top, with no stray focus ring on the skip link. For full-page shots the
+          // viewport grows to the document's height, so sticky and fixed bars (top bar, tab bar, docks) sit where they
+          // belong instead of wherever the viewport happened to be when the image was stitched.
+          await page.evaluate(() => {
+            window.scrollTo(0, 0);
+            const a = document.activeElement;
+            if (a instanceof HTMLElement && a.classList.contains('skip')) a.blur();
+          });
+          // Only pages with a visible fixed bar need it; others keep their real viewport (some size to 100dvh).
+          const hasFixedBar = await page.evaluate(() =>
+            [...document.querySelectorAll('body *')].some((el) => {
+              const cs = getComputedStyle(el);
+              const r = el.getBoundingClientRect();
+              return cs.position === 'fixed' && cs.display !== 'none' && cs.visibility !== 'hidden' && r.height > 24 && r.width > 200;
+            }),
+          );
+          if (full && hasFixedBar) {
+            for (let k = 0; k < 2; k++) {
+              const h = await page.evaluate(() => document.documentElement.scrollHeight);
+              const cur = page.viewportSize();
+              if (!cur || cur.height >= h) break;
+              await page.setViewportSize({ width: cur.width, height: Math.min(h, 8000) });
+              await settle(page);
+            }
+          }
+          await page.screenshot({ path: resolve(outDir, `${name}.png`), fullPage: full });
           count++;
         } catch (e) {
           failures.push(`${name}: ${e instanceof Error ? e.message : e}`);

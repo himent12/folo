@@ -583,8 +583,10 @@
             {/snippet}
             <div class="sliders">
               <div class="conf-full" class:moved={!!source}><Slider label="Confidence" bind:value={conf} min={0.01} max={0.95} step={0.01} hint="Hide boxes scored below this." /></div>
-              <Slider label="Overlap threshold (IoU)" bind:value={iou} min={0.05} max={0.95} step={0.05} hint="Non-max suppression: drop a lower-scoring box of the same class when it overlaps a kept one by more than this." />
-              <Slider label="Max detections" bind:value={maxDet} min={1} max={300} step={1} format={(v) => String(Math.round(v))} />
+              <div title="Non-max suppression: a lower-scoring box of the same class is dropped when it overlaps a kept one by more than this.">
+                <Slider label="Overlap threshold (IoU)" bind:value={iou} min={0.05} max={0.95} step={0.05} hint="Merge same-class boxes that overlap more." />
+              </div>
+              <Slider label="Max detections" bind:value={maxDet} min={1} max={300} step={1} format={(v) => String(Math.round(v))} hint="Keep at most this many boxes." />
             </div>
           </Panel>
         </div>
@@ -726,16 +728,17 @@
     color: var(--text-inverse);
     box-shadow: none;
   }
+  /* The canvas takes the viewport minus the chrome above and below it. */
   .stage {
     position: relative;
-    height: clamp(380px, 62vh, 660px);
+    height: max(360px, calc(100dvh - 220px));
     background: var(--bg-inset);
   }
   .stage.empty {
     border-radius: 0 0 calc(var(--radius-lg) - 1px) calc(var(--radius-lg) - 1px);
     overflow: hidden;
     height: auto;
-    min-height: clamp(380px, 62vh, 660px);
+    min-height: max(360px, calc(100dvh - 220px));
     display: flex;
     flex-direction: column;
   }

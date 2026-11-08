@@ -215,8 +215,8 @@
   }
   .tag {
     position: absolute;
-    left: 3px;
-    bottom: 3px;
+    left: 4px;
+    bottom: 4px;
     padding: 0 4px;
     border-radius: var(--radius-xs);
     background: var(--bg-overlay);

@@ -181,7 +181,7 @@
     flex-shrink: 0;
     width: 14px;
     height: 14px;
-    margin-top: 3px;
+    margin-top: 4px;
     border-radius: 50%;
     /* text.tertiary keeps the empty ring at ≥ 3:1 on both themes' panels. */
     border: 1px solid var(--text-tertiary);

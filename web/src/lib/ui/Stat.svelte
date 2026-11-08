@@ -71,7 +71,7 @@
   .unit {
     /* line-height 1 keeps a smaller unit from growing the line box, so values with and without units share a baseline. */
     line-height: 1;
-    margin-left: 3px;
+    margin-left: 4px;
     font-size: 0.7em;
     font-weight: var(--weight-regular);
     color: var(--text-tertiary);

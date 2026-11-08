@@ -173,7 +173,7 @@
     position: absolute;
     right: 4px;
     bottom: 4px;
-    padding: 1px 5px;
+    padding: 1px 6px;
     border-radius: var(--radius-xs);
     background: #000000b3;
     color: #fff;

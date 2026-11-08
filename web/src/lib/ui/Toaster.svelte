@@ -59,7 +59,7 @@
     pointer-events: auto;
     display: flex;
     align-items: flex-start;
-    gap: 10px;
+    gap: 12px;
     padding: var(--space-3) var(--space-2) var(--space-3) var(--space-3);
     border-radius: var(--radius-lg);
     background: var(--bg-overlay);
@@ -119,7 +119,7 @@
       right: var(--space-4);
       left: var(--space-4);
       width: auto;
-      bottom: calc(72px + env(safe-area-inset-bottom));
+      bottom: calc(var(--tabbar-h) + var(--space-4) + env(safe-area-inset-bottom));
     }
   }
 </style>

@@ -330,7 +330,7 @@
     align-items: center;
     gap: 8px;
     height: var(--control-md);
-    padding: 0 4px 0 10px;
+    padding: 0 4px 0 8px;
     border-radius: var(--radius-full);
     background: var(--bg-panel);
     border: 1px solid var(--line-default);
@@ -374,7 +374,7 @@
     align-items: center;
     gap: 6px;
     height: var(--control-md);
-    padding: 0 10px;
+    padding: 0 12px;
     border-radius: var(--radius-full);
     border: 1px solid var(--line-default);
     color: var(--text-secondary);
@@ -442,7 +442,7 @@
   }
   .tag {
     margin-left: 6px;
-    padding: 1px 5px;
+    padding: 1px 6px;
     border-radius: var(--radius-xs);
     background: var(--accent-muted);
     font-size: var(--type-micro-size);

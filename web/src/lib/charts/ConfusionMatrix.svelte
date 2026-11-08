@@ -1,9 +1,14 @@
 <script lang="ts">
   /**
    * Confusion matrix: rows are true classes, columns predicted, plus a "background" row/column for misses and false
-   * positives. Cells are row-normalised and shaded in one hue (sequential), counts on hover.
+   * positives. Cells are row-normalised and shaded on one sequential luminance ramp in ink (the diagonal is told apart
+   * by position, not hue), counts on hover.
    */
   import { classColor } from '$lib/design/tokens';
+  import { prefs } from '$lib/prefs.svelte';
+  import { CONFUSION_FLIP } from './confusionInk';
+  // Cell labels are pure white or black, switched near the ramp's luminance crossover (see ./confusionInk).
+  const flip = $derived(CONFUSION_FLIP[prefs.resolvedTheme]);
 
   let {
     classes,
@@ -105,7 +110,6 @@
         {@const v = norm(r, c)}
         <div
           class="cell"
-          class:diag={r === c && r < classes.length}
           class:hl={hovered && (hovered.r === r || hovered.c === c)}
           role="gridcell"
           tabindex={focus.r === r && focus.c === c ? 0 : -1}
@@ -120,7 +124,7 @@
           onclick={() => (hovered = pinned = { r, c })}
           onkeydown={() => {}}
         >
-          {#if v >= (sparseLabels ? 0.1 : 0.005)}<span class:light={v > 0.55}>{(v * 100).toFixed(v >= 0.1 ? 0 : 1)}</span>{/if}
+          {#if v >= (sparseLabels ? 0.1 : 0.005)}<span class:hi={v > flip}>{(v * 100).toFixed(v >= 0.1 ? 0 : 1)}</span>{/if}
         </div>
       {/each}
     </div>
@@ -128,10 +132,8 @@
 </div>
 {#if scale}
   <div class="scale" aria-hidden="true">
-    <span>Correct</span>
-    <span class="ramp diag"></span>
-    <span>Confused</span>
-    <span class="ramp off"></span>
+    <span>Share of row</span>
+    <span class="ramp"></span>
     <span class="ticks"><span>0 %</span><span>50 %</span><span>100 %</span></span>
   </div>
 {/if}
@@ -160,7 +162,8 @@
   }
   /* Fixed minimum cells: the matrix scrolls sideways under pinned row labels. */
   .cm.fixed {
-    grid-template-columns: 96px repeat(var(--n), minmax(var(--min-cell), 1fr));
+    /* Cells grow with the panel up to 56 px, so a wide panel does not turn the matrix into a wall. */
+    grid-template-columns: 96px repeat(var(--n), minmax(var(--min-cell), 56px));
     overscroll-behavior-x: contain;
   }
   .cm.more-r {
@@ -236,7 +239,8 @@
     display: grid;
     place-items: center;
     border-radius: 3px;
-    background: color-mix(in srgb, var(--chart-2) calc(var(--v) * 92% + 4%), var(--bg-inset));
+    /* One ramp from the plot well to full ink, perceptually even (oklab). */
+    background: color-mix(in oklab, var(--text-primary) calc(var(--v) * 90% + 4%), var(--bg-inset));
     font-size: var(--type-xs-size);
     font-variant-numeric: tabular-nums;
     color: var(--text-secondary);
@@ -255,17 +259,18 @@
   .cell.hl {
     box-shadow: inset 0 0 0 1px var(--line-strong);
   }
-  .cell.diag {
-    background: color-mix(in srgb, var(--chart-1) calc(var(--v) * 92% + 4%), var(--bg-inset));
+  /* Low cells sit near the well, high cells near the ink; the label takes the far extreme (see `flip`). */
+  :global([data-theme='dark']) .cell span {
+    color: #ffffff;
   }
-  .cell span.light {
-    color: var(--text-inverse);
-    font-weight: var(--weight-medium);
+  :global([data-theme='dark']) .cell span.hi,
+  :global([data-theme='light']) .cell span {
+    color: #000000;
   }
-  /* Light theme: cells darken towards the series colour, which keeps dark text above 4.5:1 throughout. */
-  :global([data-theme='light']) .cell span,
-  :global([data-theme='light']) .cell span.light {
-    color: var(--text-primary);
+  :global([data-theme='light']) .cell span.hi {
+    color: #ffffff;
+  }
+  .cell span.hi {
     font-weight: var(--weight-medium);
   }
   .readout {
@@ -294,12 +299,11 @@
   .ramp {
     height: 8px;
     border-radius: 2px;
-  }
-  .ramp.diag {
-    background: linear-gradient(to right, color-mix(in srgb, var(--chart-1) 4%, var(--bg-inset)), color-mix(in srgb, var(--chart-1) 96%, var(--bg-inset)));
-  }
-  .ramp.off {
-    background: linear-gradient(to right, color-mix(in srgb, var(--chart-2) 4%, var(--bg-inset)), color-mix(in srgb, var(--chart-2) 96%, var(--bg-inset)));
+    background: linear-gradient(
+      to right in oklab,
+      color-mix(in oklab, var(--text-primary) 4%, var(--bg-inset)),
+      color-mix(in oklab, var(--text-primary) 94%, var(--bg-inset))
+    );
   }
   .ticks {
     grid-column: 2;

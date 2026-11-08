@@ -8,13 +8,12 @@
   import { HttpApi } from '$lib/api/client';
   import { hub } from '$lib/api/index.svelte';
   import { bytes } from '$lib/format';
-  import { formatKeys } from '$lib/keys';
   import { prefs, type ThemePref, type Units } from '$lib/prefs.svelte';
   import Page from '$lib/shell/Page.svelte';
   import { setCrumbs } from '$lib/shell/crumbs.svelte';
-  import { shortcutList } from '$lib/shell/shortcuts';
   import Button from '$lib/ui/Button.svelte';
   import Field from '$lib/ui/Field.svelte';
+  import Kbd from '$lib/ui/Kbd.svelte';
   import Input from '$lib/ui/Input.svelte';
   import Panel from '$lib/ui/Panel.svelte';
   import Segmented from '$lib/ui/Segmented.svelte';
@@ -105,14 +104,9 @@
   const sample = 5_600_000_000;
 
   // ---- shortcuts ----
-  /**
-   * How a shortcut is pressed: a chord ("Ctrl K", held together), a sequence ("G then O", one after the other) or
-   * alternatives ("J / K", either key).
-   */
-  function keyKind(keys: string): 'chord' | 'sequence' | 'either' | 'single' {
-    if (/[^\s+]\+[^\s+]/.test(keys)) return 'chord';
-    if (/^G \S$/.test(keys)) return 'sequence';
-    return keys.includes(' ') ? 'either' : 'single';
+  /** Opens the shortcuts dialog the way the shell does: the `?` key. */
+  function showShortcuts() {
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: '?', bubbles: true }));
   }
 </script>
 
@@ -198,7 +192,8 @@
           {/if}
 
           <div class="row-actions">
-            <Button variant="primary" disabled={invalid} onclick={save}>{dirty ? 'Save and reconnect' : 'Reconnect'}</Button>
+            <!-- The primary action only once there is something to save; reconnecting as is stays secondary. -->
+            <Button variant={dirty ? 'primary' : 'secondary'} disabled={invalid} onclick={save}>{dirty ? 'Save and reconnect' : 'Reconnect'}</Button>
           </div>
         </div>
       </Panel>
@@ -248,28 +243,12 @@
       </Panel>
 
       <Panel title="Keyboard shortcuts" id="shortcuts" divided>
-        <div class="keys">
-          {#each [...new Set(shortcutList.map((s) => s.group))] as g (g)}
-            <section>
-              <h3 class="overline">{g}</h3>
-              <ul>
-                {#each shortcutList.filter((s) => s.group === g) as s (s.keys + s.label)}
-                  {@const kind = keyKind(s.keys)}
-                  {@const caps = formatKeys(s.keys)}
-                  <li>
-                    <span>{s.label}</span>
-                    <span class="caps {kind}" aria-label={kind === 'sequence' ? caps.join(' then ') : kind === 'either' ? caps.join(' or ') : caps.join(' ')}>
-                      {#each caps as k, i (i)}
-                        {#if i > 0 && kind === 'sequence'}<span class="join" aria-hidden="true">then</span>{/if}
-                        {#if i > 0 && kind === 'either'}<span class="join" aria-hidden="true">/</span>{/if}
-                        <kbd aria-hidden="true">{k}</kbd>
-                      {/each}
-                    </span>
-                  </li>
-                {/each}
-              </ul>
-            </section>
-          {/each}
+        <div class="setting">
+          <div class="setting-text">
+            <p>Press <Kbd keys="?" /> anywhere for all shortcuts</p>
+            <p class="note">Navigation, the command palette and actions on the current screen.</p>
+          </div>
+          <Button onclick={showShortcuts}>Show shortcuts</Button>
         </div>
       </Panel>
 
@@ -296,7 +275,7 @@
 <style>
   .layout {
     display: grid;
-    grid-template-columns: 168px minmax(0, 780px);
+    grid-template-columns: 168px minmax(0, 720px);
     gap: var(--space-8);
     align-items: start;
   }
@@ -487,56 +466,6 @@
   .setting-text .note {
     margin-top: 2px;
   }
-  .keys {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: var(--space-5) var(--space-6);
-  }
-  .keys h3 {
-    margin-bottom: var(--space-1);
-  }
-  .keys li {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--space-3);
-    min-height: 32px;
-    border-bottom: 1px solid var(--line-subtle);
-    color: var(--text-secondary);
-  }
-  .keys li:last-child {
-    border-bottom: 0;
-  }
-  .caps {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    flex-shrink: 0;
-  }
-  /* A chord's keys are held together: caps touch. */
-  .caps.chord {
-    gap: 2px;
-  }
-  .join {
-    font-size: var(--type-xs-size);
-    color: var(--text-tertiary);
-  }
-  kbd {
-    display: inline-grid;
-    place-items: center;
-    min-width: 18px;
-    height: 18px;
-    padding: 0 4px;
-    border-radius: var(--radius-xs);
-    border: 1px solid var(--line-default);
-    border-bottom-color: var(--line-strong);
-    background: var(--bg-raised);
-    color: var(--text-secondary);
-    font-family: var(--font-sans);
-    font-size: var(--type-xs-size);
-    line-height: 1;
-    font-weight: var(--weight-medium);
-  }
   .about {
     display: grid;
     grid-template-columns: auto minmax(0, 1fr);
@@ -560,9 +489,6 @@
   @media (max-width: 767px) {
     .themes {
       gap: var(--space-2);
-    }
-    .keys {
-      grid-template-columns: minmax(0, 1fr);
     }
     .row-actions :global(.btn) {
       width: 100%;

@@ -5,7 +5,15 @@
     status,
     size = 'md',
     plain = false,
-  }: { status: RunStatus; size?: 'sm' | 'md'; /** Dot and word without the pill, for table cells. */ plain?: boolean } = $props();
+    dotOnly = false,
+  }: {
+    status: RunStatus;
+    size?: 'sm' | 'md';
+    /** Dot and word without the pill, for table cells. */
+    plain?: boolean;
+    /** The dot alone, where the word is written next to it (still announced to assistive tech). */
+    dotOnly?: boolean;
+  } = $props();
 
   const labels: Record<RunStatus, string> = {
     queued: 'Queued',
@@ -18,7 +26,7 @@
 </script>
 
 <span class="badge {status} {size}" class:plain>
-  <span class="dot" aria-hidden="true"></span>{labels[status]}
+  <span class="dot" aria-hidden="true"></span>{#if dotOnly}<span class="sr-only">{labels[status]}</span>{:else}{labels[status]}{/if}
 </span>
 
 <style>
@@ -29,7 +37,7 @@
     align-items: center;
     gap: 6px;
     height: 20px;
-    padding: 0 8px 0 7px;
+    padding: 0 8px 0 6px;
     border-radius: var(--radius-full);
     background: var(--bg);
     color: var(--c);
@@ -40,7 +48,7 @@
   }
   .sm {
     height: 18px;
-    padding: 0 6px 0 5px;
+    padding: 0 6px 0 4px;
   }
   .dot {
     width: 6px;

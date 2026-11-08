@@ -137,9 +137,9 @@
       id: 'map',
       label: 'mAP50-95',
       value: metric(lastEpoch?.val.map50_95),
-      caption: run.best ? `best ${metric(run.best.map50_95)} · epoch ${run.best.epoch + 1}` : 'after the first epoch',
+      caption: run.best ? `best ${metric(run.best.map50_95)} · ep ${run.best.epoch + 1}` : 'after the first epoch',
       title: 'Validation mAP50-95',
-      qualifier: run.best ? `by epoch · ring marks the best, ${metric(run.best.map50_95)} at epoch ${run.best.epoch + 1}` : 'by epoch',
+      qualifier: run.best ? `by epoch · best ${metric(run.best.map50_95)} at epoch ${run.best.epoch + 1} (ring)` : 'by epoch',
     },
     { id: 'map50', label: 'mAP50', value: metric(lastEpoch?.val.map50), caption: 'last epoch', title: 'Validation mAP50', qualifier: 'by epoch' },
     {
@@ -540,12 +540,19 @@
     .chart {
       padding: 0 var(--space-3) var(--space-3);
     }
-    /* The tab above already names the metric; keep the header to one line. */
-    .q {
-      display: none;
-    }
+    /* Title on one line, its qualifier (with the best value and epoch) on the next. */
     h2 {
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 0;
       white-space: nowrap;
+    }
+    .q {
+      white-space: normal;
+    }
+    /* The tab row scrolls sideways: fade its right edge so the cut-off tab reads as "more". */
+    .tabs {
+      mask-image: linear-gradient(90deg, #000 calc(100% - 32px), transparent);
     }
   }
 </style>

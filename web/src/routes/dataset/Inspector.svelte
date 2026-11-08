@@ -16,7 +16,6 @@
   import DatasetImage from '$lib/detect/DatasetImage.svelte';
   import { classColor } from '$lib/design/tokens';
   import { num } from '$lib/format';
-  import Badge from '$lib/ui/Badge.svelte';
   import Button from '$lib/ui/Button.svelte';
   import Kbd from '$lib/ui/Kbd.svelte';
   import Spinner from '$lib/ui/Spinner.svelte';
@@ -259,7 +258,7 @@
     <div class="title">
       {#if img}
         <span class="file mono truncate" title={img.file}>{stem(img.file)}</span>
-        <Badge tone="outline" mono>{img.split}</Badge>
+        <span class="split">{img.split}</span>
       {:else}
         <span class="file faint">Loading…</span>
       {/if}
@@ -431,6 +430,9 @@
   .file {
     font-weight: var(--weight-medium);
   }
+  .split {
+    color: var(--text-tertiary);
+  }
   .pos {
     font-size: var(--type-sm-size);
     color: var(--text-tertiary);
@@ -552,26 +554,24 @@
     padding: var(--space-2) 0 var(--space-4);
   }
   section {
-    padding: var(--space-3) var(--space-4);
+    padding: var(--space-2) var(--space-4);
   }
   section + section {
     border-top: 1px solid var(--line-subtle);
   }
   h3 {
     display: flex;
-    align-items: baseline;
+    align-items: center;
     gap: 6px;
-    margin-bottom: var(--space-2);
-    font-size: var(--type-micro-size);
-    line-height: var(--type-micro-line);
-    letter-spacing: var(--type-micro-tracking);
-    font-weight: var(--type-micro-weight);
-    text-transform: uppercase;
-    color: var(--text-tertiary);
+    height: 28px;
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    font-weight: var(--weight-medium);
+    color: var(--text-secondary);
   }
   h3 .meta {
-    color: var(--text-secondary);
-    letter-spacing: 0;
+    color: var(--text-tertiary);
+    font-weight: var(--weight-regular);
   }
   .labels {
     margin: 0 calc(var(--space-2) * -1);
@@ -604,10 +604,6 @@
     border-radius: 2px;
     flex-shrink: 0;
   }
-  /* Class swatches keep the palette hue in both themes; a hairline edge holds pale hues on light surfaces. */
-  :global([data-theme='light']) .sw {
-    box-shadow: inset 0 0 0 1px #0a0e1433;
-  }
   .sz {
     font-size: var(--type-xs-size);
     color: var(--text-tertiary);
@@ -619,12 +615,13 @@
   .legend {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 6px var(--space-3);
+    column-gap: var(--space-3);
   }
   .legend li {
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: var(--space-2);
+    height: 28px;
     min-width: 0;
     font-size: var(--type-sm-size);
   }
@@ -637,7 +634,9 @@
   dl {
     display: grid;
     grid-template-columns: 48px minmax(0, 1fr);
-    gap: 6px var(--space-3);
+    grid-auto-rows: minmax(28px, auto);
+    align-items: center;
+    column-gap: var(--space-3);
     font-size: var(--type-sm-size);
   }
   dt {

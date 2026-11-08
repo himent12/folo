@@ -1,6 +1,5 @@
 <script lang="ts">
   import ArrowLeft from '@lucide/svelte/icons/arrow-left';
-  import Check from '@lucide/svelte/icons/check';
   import Copy from '@lucide/svelte/icons/copy';
   import ImageOff from '@lucide/svelte/icons/image-off';
   import Play from '@lucide/svelte/icons/play';
@@ -10,22 +9,21 @@
   import { ApiError, hub } from '$lib/api/index.svelte';
   import { Resource } from '$lib/api/resource.svelte';
   import type { Split } from '$lib/api/types';
-  import { classColor } from '$lib/design/tokens';
   import { ago, compact, num } from '$lib/format';
   import { href, router } from '$lib/router.svelte';
   import Page from '$lib/shell/Page.svelte';
   import { setCrumbs } from '$lib/shell/crumbs.svelte';
-  import Badge from '$lib/ui/Badge.svelte';
   import Button from '$lib/ui/Button.svelte';
   import Dialog from '$lib/ui/Dialog.svelte';
   import EmptyState from '$lib/ui/EmptyState.svelte';
+  import Menu, { type MenuItem } from '$lib/ui/Menu.svelte';
   import ErrorState from '$lib/ui/ErrorState.svelte';
   import Panel from '$lib/ui/Panel.svelte';
   import Segmented from '$lib/ui/Segmented.svelte';
   import Skeleton from '$lib/ui/Skeleton.svelte';
   import Tabs from '$lib/ui/Tabs.svelte';
   import { toast } from '$lib/ui/toast.svelte';
-  import { tooltip } from '$lib/ui/tooltip';
+  import ClassPicker from './dataset/ClassPicker.svelte';
   import { healthChecks, imageCount, reviewCount } from './dataset/health';
   import ImageGrid, { type Density } from './dataset/ImageGrid.svelte';
   import Inspector from './dataset/Inspector.svelte';
@@ -104,13 +102,11 @@
   let boxes = $state(readPref('folo.datasets.boxes', ['on', 'off'] as const, 'on') === 'on');
 
   // ---------- header actions ----------
-  let copied = $state(false);
   async function copyPath() {
     if (!d) return;
     try {
       await navigator.clipboard.writeText(d.path);
-      copied = true;
-      setTimeout(() => (copied = false), 1500);
+      toast.success('Path copied', d.path);
     } catch {
       toast.error(new Error('The browser blocked clipboard access.'), 'Could not copy the path');
     }
@@ -145,32 +141,14 @@
     return opts;
   });
 
-  /**
-   * Fades a horizontally scrolling rail's edges (24 px) on the sides that have more to scroll to. The rail always
-   * starts at its beginning: the filter summary names the active class, so it never has to be scrolled into view.
-   */
-  function edgeFade(el: HTMLElement) {
-    const update = () => {
-      const max = el.scrollWidth - el.clientWidth;
-      el.style.setProperty('--fade-l', el.scrollLeft > 1 ? '24px' : '0px');
-      el.style.setProperty('--fade-r', el.scrollLeft < max - 1 ? '24px' : '0px');
-    };
-    el.scrollLeft = 0;
-    update();
-    el.addEventListener('scroll', update, { passive: true });
-    const ro = new ResizeObserver(update);
-    ro.observe(el);
-    return {
-      destroy() {
-        el.removeEventListener('scroll', update);
-        ro.disconnect();
-      },
-    };
-  }
-
   function openImage(_i: number, imageId: string) {
     setQuery({ image: imageId });
   }
+
+  const moreItems: MenuItem[] = [
+    { label: 'Copy path', icon: Copy, onclick: copyPath },
+    { label: 'Delete dataset', icon: Trash, danger: true, onclick: () => (confirmDelete = true) },
+  ];
 </script>
 
 {#if ds.error && !d}
@@ -196,30 +174,16 @@
   </div>
 {:else}
   <Page title={d.name}>
-    {#snippet lead()}
-      <Badge tone="outline" mono>{d.format}</Badge>
-      <span class="id mono">{d.id}</span>
-    {/snippet}
     {#snippet sub()}
-      <span class="path">
-        <span class="mono truncate" title={d.path}>{d.path}</span>
-        <span use:tooltip={copied ? 'Copied' : 'Copy path'}>
-          <Button variant="ghost" size="sm" icon={copied ? Check : Copy} aria-label="Copy path" onclick={copyPath} />
-        </span>
-      </span>
-      <span class="facts num">
-        <span><b>{num(d.splits.train)}</b> train</span>
-        <span><b>{num(d.splits.val)}</b> val</span>
-        <span><b>{num(d.splits.test)}</b> test</span>
-        <span class="dot" aria-hidden="true">·</span>
-        <span><b>{d.classes.length}</b> classes</span>
-        <span class="dot hide-sm" aria-hidden="true">·</span>
-        <span class="hide-sm">added {ago(d.created)}</span>
-      </span>
+      <span class="faint">{d.format}</span>
+      <span class="path mono truncate" title={d.path}>{d.path}</span>
+      <span class="num">{num(d.splits.train)} train · {num(d.splits.val)} val · {num(d.splits.test)} test</span>
+      <span class="num">{d.classes.length} classes</span>
+      <span class="faint hide-sm">added {ago(d.created)}</span>
     {/snippet}
     {#snippet actions()}
-      <Button icon={Trash} onclick={() => (confirmDelete = true)}>Delete</Button>
       <Button variant="primary" icon={Play} href={href(`/runs/new?dataset=${encodeURIComponent(d.id)}`)}>Train on this dataset</Button>
+      <Menu label="More dataset actions" items={moreItems} />
     {/snippet}
 
     <div class="tabs">
@@ -243,77 +207,51 @@
           <Panel><EmptyState icon={ImageOff} title="No statistics" description="The server did not return statistics for this dataset." /></Panel>
         {/if}
       {:else}
+        <!-- One toolbar: what to show on the left, how to show it on the right. -->
         <div class="ds-toolbar">
-          <div class="tb-row">
-            <Segmented
-              label="Split"
-              size="sm"
-              options={splitOptions}
-              value={split}
-              onchange={(s) => setQuery({ split: s === 'all' ? null : s, image: null })}
-            />
-            <span class="spacer"></span>
-            <button
-              type="button"
-              class="toggle"
-              aria-pressed={boxes}
-              onclick={() => {
-                boxes = !boxes;
-                writePref('folo.datasets.boxes', boxes ? 'on' : 'off');
-              }}
-            >
-              <Scan size={14} strokeWidth={1.75} aria-hidden="true" />Boxes
-            </button>
-            <Segmented
-              label="Thumbnail size"
-              size="sm"
-              options={[
-                { value: 's', label: 'S' },
-                { value: 'm', label: 'M' },
-                { value: 'l', label: 'L' },
-              ]}
-              bind:value={density}
-              onchange={(v) => writePref('folo.datasets.density', v)}
-            />
-          </div>
-          <div class="class-row" role="group" aria-label="Filter by class">
-            <!-- "All classes" stays put; only the class chips scroll. -->
-            <button type="button" class="chip" aria-pressed={cls === undefined} onclick={() => setQuery({ class: null, image: null })}>
-              {#if cls === undefined}<Check size={12} strokeWidth={2.25} aria-hidden="true" />{/if}All classes
-            </button>
-            <div class="chips" use:edgeFade>
-              {#each d.classes as c, i (i)}
-                <button
-                  type="button"
-                  class="chip"
-                  class:absent={d.stats?.class_counts[i] === 0}
-                  aria-pressed={cls === i}
-                  onclick={() => setQuery({ class: cls === i ? null : String(i), image: null })}
-                >
-                  {#if cls === i}<Check size={12} strokeWidth={2.25} aria-hidden="true" />{/if}
-                  <span class="sw" style:background={classColor(i)}></span>{c}
-                  {#if d.stats}<span class="cmeta num">{compact(d.stats.class_counts[i])}</span>{/if}
-                </button>
-              {/each}
-            </div>
-          </div>
-          <!-- What the grid shows, always: the active filters and how many of the dataset's images match. -->
-          <div class="summary">
-            <span class="sum-text num" aria-live="polite">
-              {#if cls !== undefined}<b>{d.classes[cls]}</b><span class="sep" aria-hidden="true">·</span>{/if}
-              {#if split !== 'all'}<b>{split[0]!.toUpperCase() + split.slice(1)}</b><span class="sep" aria-hidden="true">·</span>{/if}
-              {#if filtered}
-                <b>{pager?.total != null ? num(pager.total) : '…'}</b> of {num(total)} images
-              {:else}
-                <b>{num(total)}</b> images
-              {/if}
-            </span>
+          <Segmented
+            label="Split"
+            size="sm"
+            options={splitOptions}
+            value={split}
+            onchange={(s) => setQuery({ split: s === 'all' ? null : s, image: null })}
+          />
+          <ClassPicker classes={d.classes} counts={d.stats?.class_counts} value={cls} onchange={(c) => setQuery({ class: c === undefined ? null : String(c), image: null })} />
+          <span class="count num" aria-live="polite">
             {#if filtered}
-              <button type="button" class="clear" onclick={() => setQuery({ split: null, class: null, image: null })}>
-                <X size={12} strokeWidth={2} aria-hidden="true" />Clear filters
-              </button>
+              {pager?.total != null ? num(pager.total) : '…'} of {num(total)} images
+            {:else}
+              {num(total)} images
             {/if}
-          </div>
+          </span>
+          {#if filtered}
+            <button type="button" class="clear" onclick={() => setQuery({ split: null, class: null, image: null })}>
+              <X size={12} strokeWidth={2} aria-hidden="true" />Clear
+            </button>
+          {/if}
+          <span class="spacer"></span>
+          <button
+            type="button"
+            class="toggle"
+            aria-pressed={boxes}
+            onclick={() => {
+              boxes = !boxes;
+              writePref('folo.datasets.boxes', boxes ? 'on' : 'off');
+            }}
+          >
+            <Scan size={14} strokeWidth={1.75} aria-hidden="true" />Boxes
+          </button>
+          <Segmented
+            label="Thumbnail size"
+            size="sm"
+            options={[
+              { value: 's', label: 'S' },
+              { value: 'm', label: 'M' },
+              { value: 'l', label: 'L' },
+            ]}
+            bind:value={density}
+            onchange={(v) => writePref('folo.datasets.density', v)}
+          />
         </div>
 
         {#if pager?.error && pager.total !== null}
@@ -368,32 +306,8 @@
 {/if}
 
 <style>
-  .id {
-    font-size: var(--type-xs-size);
-    color: var(--text-tertiary);
-  }
   .path {
-    display: inline-flex;
-    align-items: center;
-    gap: 2px;
-    min-width: 0;
-    max-width: 100%;
-  }
-  .path .mono {
-    color: var(--text-secondary);
-  }
-  .facts {
-    display: inline-flex;
-    flex-wrap: wrap;
-    gap: var(--space-1) var(--space-3);
-    color: var(--text-tertiary);
-  }
-  .facts b {
-    color: var(--text-primary);
-    font-weight: var(--weight-medium);
-  }
-  .dot {
-    color: var(--text-disabled);
+    max-width: 360px;
   }
   .tabs {
     margin-bottom: calc(var(--space-1) * -1);
@@ -410,45 +324,29 @@
     position: sticky;
     top: var(--size-topbar);
     z-index: calc(var(--z-sticky) - 1);
-    display: grid;
-    gap: var(--space-2);
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--space-2) var(--space-3);
     margin: calc(var(--space-2) * -1) calc(var(--space-6) * -1) 0;
-    padding: var(--space-2) var(--space-6) var(--space-3);
+    padding: var(--space-2) var(--space-6);
     background: color-mix(in srgb, var(--bg-app) 92%, transparent);
     backdrop-filter: blur(8px);
   }
-  .tb-row {
-    display: flex;
-    align-items: center;
-    gap: var(--space-3);
-    flex-wrap: wrap;
-  }
-  .summary {
-    display: flex;
-    align-items: center;
-    gap: var(--space-3);
-    min-height: var(--control-sm);
+  .count {
     font-size: var(--type-sm-size);
     color: var(--text-tertiary);
-  }
-  .sum-text {
-    min-width: 0;
-  }
-  .sum-text b {
-    color: var(--text-primary);
-    font-weight: var(--weight-medium);
-  }
-  .sep {
-    margin: 0 6px;
-    color: var(--text-disabled);
+    white-space: nowrap;
   }
   .clear {
     display: inline-flex;
     align-items: center;
     gap: 4px;
     height: var(--control-sm);
+    margin-left: calc(var(--space-2) * -1);
     padding: 0 var(--space-2);
     border-radius: var(--radius-sm);
+    font-size: var(--type-sm-size);
     color: var(--text-secondary);
     font-weight: var(--weight-medium);
     white-space: nowrap;
@@ -460,8 +358,7 @@
   .spacer {
     flex: 1;
   }
-  .toggle,
-  .chip {
+  .toggle {
     display: inline-flex;
     align-items: center;
     gap: 6px;
@@ -474,73 +371,23 @@
     font-weight: var(--weight-medium);
     white-space: nowrap;
     transition:
-      background-color var(--dur-fast) var(--ease-standard),
       border-color var(--dur-fast) var(--ease-standard),
       color var(--dur-fast) var(--ease-standard);
   }
-  .toggle:hover,
-  .chip:hover {
+  .toggle:hover {
     color: var(--text-primary);
     border-color: var(--line-strong);
   }
-  /* Selected is neutral (lime is for the primary action, focus and live state): a strong edge (1.5 px via the inset
-     ring, so the chip doesn't change size), a check mark on chips, and primary text. */
-  .toggle[aria-pressed='true'],
-  .chip[aria-pressed='true'] {
+  /* Pressed is neutral (lime is for the primary action, focus and live state): a stronger edge and primary text. */
+  .toggle[aria-pressed='true'] {
     border-color: var(--text-tertiary);
-    box-shadow: inset 0 0 0 0.5px var(--text-tertiary);
     color: var(--text-primary);
-  }
-  .class-row {
-    display: flex;
-    align-items: flex-start;
-    gap: var(--space-1-5);
-    min-width: 0;
-  }
-  .class-row > .chip {
-    flex-shrink: 0;
-  }
-  .chips {
-    flex: 1;
-    min-width: 0;
-    display: flex;
-    flex-wrap: wrap;
-    gap: var(--space-1-5);
-  }
-  /* Chips never shrink in the scrolling strip (that would squeeze out the check mark). */
-  .chip {
-    flex-shrink: 0;
-    border-radius: var(--radius-full);
-    padding: 0 10px;
-  }
-  .chip :global(svg) {
-    flex-shrink: 0;
   }
   @media (pointer: coarse) {
     .toggle,
-    .chip,
     .clear {
       height: 44px;
     }
-    .chip {
-      padding: 0 var(--space-3);
-    }
-  }
-  .sw {
-    width: 8px;
-    height: 8px;
-    border-radius: 2px;
-    flex-shrink: 0;
-  }
-  :global([data-theme='light']) .sw {
-    box-shadow: inset 0 0 0 1px #0a0e1433;
-  }
-  .absent .sw {
-    opacity: 0.4;
-  }
-  .cmeta {
-    color: var(--text-tertiary);
-    font-weight: var(--weight-regular);
   }
   .confirm {
     color: var(--text-secondary);
@@ -577,21 +424,8 @@
       margin-inline: calc(var(--space-4) * -1);
       padding-inline: var(--space-4);
     }
-    /* The class chips scroll from just after "All classes" to the screen edge; the strip's end keeps the 16 px gutter. */
-    .chips {
-      flex-wrap: nowrap;
-      overflow-x: auto;
-      scrollbar-width: none;
-      margin-right: calc(var(--space-4) * -1);
-      padding-right: var(--space-4);
-      /* Clipped chips read as scrollable: the edges with more to scroll to fade out. */
-      mask-image: linear-gradient(
-        to right,
-        transparent,
-        #000 var(--fade-l, 0px),
-        #000 calc(100% - var(--fade-r, 0px)),
-        transparent
-      );
+    .path {
+      max-width: 100%;
     }
     .hide-sm {
       display: none;

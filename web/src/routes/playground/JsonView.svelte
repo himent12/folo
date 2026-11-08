@@ -48,7 +48,7 @@
     max-height: 420px;
     overflow: auto;
     padding: var(--space-3) var(--space-4);
-    padding-right: 96px;
+    padding-right: 96px; /* grid-ok: room for the copy and wrap buttons */
     border-radius: var(--radius-md);
     background: var(--bg-inset);
     border: 1px solid var(--line-subtle);

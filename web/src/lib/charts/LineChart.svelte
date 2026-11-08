@@ -600,7 +600,7 @@
   }
   .empty {
     position: absolute;
-    inset: 0 0 22px 0;
+    inset: 0 0 24px 0;
     display: grid;
     place-items: center;
     color: var(--text-tertiary);

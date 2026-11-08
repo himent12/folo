@@ -302,7 +302,7 @@
     align-items: center;
     gap: var(--space-3);
     height: 36px;
-    padding: 0 10px;
+    padding: 0 12px;
     border-radius: var(--radius-md);
     color: var(--text-secondary);
     cursor: pointer;
