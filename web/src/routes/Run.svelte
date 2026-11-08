@@ -15,7 +15,7 @@
   import { hub } from '$lib/api/index.svelte';
   import { LiveRun } from '$lib/api/live.svelte';
   import { Resource } from '$lib/api/resource.svelte';
-  import { ago, duration, eta, metric } from '$lib/format';
+  import { ago, deviceName, duration, eta, metric } from '$lib/format';
   import { href, router } from '$lib/router.svelte';
   import { setCrumbs } from '$lib/shell/crumbs.svelte';
   import Page from '$lib/shell/Page.svelte';
@@ -158,7 +158,7 @@
       <span class="mono">{run.config.arch}</span>
       <!-- Phones: size, batch and device are in the Config section; the id is in the URL. -->
       <span class="cfg">{run.config.imgsz} px · batch {run.config.batch}</span>
-      <span class="truncate dev">{run.device}</span>
+      <span class="truncate dev" title={run.device}>{deviceName(run.device)}</span>
       <span class="faint when">{run.started ? `started ${ago(run.started)}` : `created ${ago(run.created)}`}</span>
     {/snippet}
     {#snippet actions()}

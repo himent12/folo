@@ -143,7 +143,7 @@
       value: metric(lastEpoch?.val.map50_95),
       caption: run.best ? `best ${metric(run.best.map50_95)} · ep ${run.best.epoch}` : 'after the first epoch',
       title: 'Validation mAP50-95',
-      qualifier: run.best ? `by epoch · best ${metric(run.best.map50_95)} at epoch ${run.best.epoch} (ring)` : 'by epoch',
+      qualifier: run.best ? `by epoch · ○ best ${metric(run.best.map50_95)} at epoch ${run.best.epoch}` : 'by epoch',
     },
     { id: 'map50', label: 'mAP50', value: metric(lastEpoch?.val.map50), caption: 'last epoch', title: 'Validation mAP50', qualifier: 'by epoch' },
     {
@@ -158,7 +158,7 @@
       id: 'loss',
       label: 'Loss',
       value: num(lastStep?.loss.total, 3),
-      caption: 'last step, raw',
+      caption: 'last step',
       title: 'Training loss',
       qualifier: smoothing === '0' ? 'by epoch · raw per step' : `by epoch · EMA ${smoothing}`,
     },

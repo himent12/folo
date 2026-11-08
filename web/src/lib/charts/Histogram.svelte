@@ -219,7 +219,7 @@
   }
   .tick {
     fill: var(--chart-label);
-    font-size: 11px;
+    font-size: var(--type-xs-size);
     font-variant-numeric: tabular-nums;
   }
   .marker {

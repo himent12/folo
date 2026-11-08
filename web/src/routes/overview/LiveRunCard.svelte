@@ -103,7 +103,7 @@
         <Stat label="Best mAP50-95" value={metric(run?.best?.map50_95)} sub={run?.best ? `epoch ${run.best.epoch}` : 'after first epoch'} loading={!run} />
         <Stat label="Throughput" value={num(charts.lastStep?.imgs_per_s, 0)} unit="img/s" loading={!run} />
         <Stat label="Learning rate" value={lr(charts.lastStep?.lr)} loading={!run} />
-        <Stat label="Loss" value={num(charts.lastStep?.loss.total, 3)} sub="last step, raw" loading={!run} />
+        <Stat label="Loss" value={num(charts.lastStep?.loss.total, 3)} sub="last step, unsmoothed" loading={!run} />
       </div>
     </div>
     <div class="chart">

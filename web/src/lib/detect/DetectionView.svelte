@@ -291,7 +291,7 @@
     border-radius: 3px 3px 3px 0;
     background: var(--c);
     color: var(--class-chip-text);
-    font-size: 11px;
+    font-size: var(--type-xs-size);
     line-height: 1;
     font-weight: var(--weight-medium);
     white-space: nowrap;
@@ -314,14 +314,14 @@
     height: 14px;
     padding: 0 4px;
     gap: 4px;
-    font-size: 10px;
+    font-size: var(--type-micro-size);
   }
   .small .score {
-    font-size: 9px;
+    font-size: var(--type-micro-size);
   }
   .score {
     font-variant-numeric: tabular-nums;
-    font-size: 10px;
+    font-size: var(--type-micro-size);
     opacity: 0.8;
   }
 </style>

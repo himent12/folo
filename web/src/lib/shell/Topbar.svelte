@@ -207,7 +207,7 @@
     .crumbs.single li.last {
       display: flex;
       visibility: visible;
-      font-size: 15px;
+      font-size: var(--type-lg-size);
       line-height: 20px;
       font-weight: var(--weight-semibold);
       letter-spacing: -0.005em;

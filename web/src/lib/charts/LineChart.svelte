@@ -599,7 +599,7 @@
   }
   .ticks text {
     fill: var(--chart-label);
-    font-size: 11px;
+    font-size: var(--type-xs-size);
     font-variant-numeric: tabular-nums;
   }
   .line {
@@ -656,7 +656,7 @@
     stroke-width: 2;
   }
   .end-label {
-    font-size: 10px;
+    font-size: var(--type-micro-size);
     font-weight: var(--weight-medium);
     paint-order: stroke;
     stroke: var(--bg-panel);
@@ -668,7 +668,7 @@
   }
   .marker text {
     fill: var(--text-secondary);
-    font-size: 10px;
+    font-size: var(--type-micro-size);
     font-variant-numeric: tabular-nums;
     paint-order: stroke;
     stroke: var(--bg-panel);

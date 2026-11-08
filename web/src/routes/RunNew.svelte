@@ -13,7 +13,7 @@
   import { Resource } from '$lib/api/resource.svelte';
   import type { Arch, Augment, DatasetImage, Device, Optimizer, TrainConfig } from '$lib/api/types';
   import ClassStrip from '$lib/detect/ClassStrip.svelte';
-  import { bytes, compact, duration, num } from '$lib/format';
+  import { bytes, compact, deviceName, duration, num } from '$lib/format';
   import { prefs } from '$lib/prefs.svelte';
   import { href, router } from '$lib/router.svelte';
   import { setCrumbs } from '$lib/shell/crumbs.svelte';
@@ -270,7 +270,7 @@
   const pct2 = (v: number) => `${Math.round(v * 100)}%`;
 
   // ---------- review ----------
-  const shortGpu = (n: string) => n.replace('NVIDIA GeForce ', '');
+  const shortGpu = deviceName;
   const deviceLabel = $derived.by(() => {
     if (device === 'auto') return `Auto${gpu ? ` · ${shortGpu(gpu.name)}` : ''}`;
     if (device === 'cpu') return 'CPU';
@@ -458,8 +458,8 @@
                 id="device"
                 bind:value={device}
                 options={[
-                  { value: 'auto', label: `Auto${gpu ? ` (${gpu.name.replace('NVIDIA GeForce ', '')})` : ''}` },
-                  ...(system.data?.gpus ?? []).map((g) => ({ value: `gpu:${g.ordinal}`, label: `gpu:${g.ordinal} · ${g.name.replace('NVIDIA GeForce ', '')}` })),
+                  { value: 'auto', label: `Auto${gpu ? ` · ${deviceName(gpu.name)}` : ''}` },
+                  ...(system.data?.gpus ?? []).map((g) => ({ value: `gpu:${g.ordinal}`, label: `gpu:${g.ordinal} · ${deviceName(g.name)}` })),
                   { value: 'cpu', label: `CPU${system.data ? ` · ${system.data.cpu.threads} threads` : ''}` },
                 ]}
               />

@@ -131,3 +131,19 @@ export function lr(x: number | null | undefined): string {
   const e = Math.floor(Math.log10(Math.abs(x)));
   return `${(x / 10 ** e).toFixed(2)} × ${pow10(e)}`;
 }
+
+/**
+ * A device for display, the same on every screen: the GPU's model without the vendor's brand prefix or the graphics
+ * backend ("NVIDIA GeForce RTX 4080 SUPER (vulkan)" → "RTX 4080 SUPER"); a CPU keeps saying so ("AMD Ryzen 9 7950X
+ * (cpu)" → "Ryzen 9 7950X (CPU)", a bare "cpu" → "CPU"). The raw label and the config's device id ("auto", "gpu:0")
+ * stay available as secondary text.
+ */
+export function deviceName(label: string): string {
+  const cpu = /\s*\(cpu\)$/i.test(label);
+  const s = label
+    .trim()
+    .replace(/\s*\((?:cpu|vulkan|dx12|metal|gl|cuda|webgpu)\)$/i, '')
+    .replace(/^(?:NVIDIA GeForce|NVIDIA|AMD Radeon|AMD|Intel\(R\)|Intel|Apple)\s+/i, '');
+  if (/^cpu\b/i.test(s)) return 'CPU';
+  return cpu ? `${s} (CPU)` : s || label;
+}

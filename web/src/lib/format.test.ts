@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ago, bytes, compact, duration, eta, lr, metric, ms, pct } from './format';
+import { ago, bytes, compact, deviceName, duration, eta, lr, metric, ms, pct } from './format';
 
 describe('format', () => {
   it('formats metrics and percents', () => {
@@ -48,5 +48,16 @@ describe('eta', () => {
     expect(eta(3600)).toBe('1h 00m');
     expect(eta(3661)).toBe('1h 02m');
     expect(eta(null)).toBe('—');
+  });
+});
+
+describe('deviceName', () => {
+  it('names a device the same way everywhere', () => {
+    expect(deviceName('NVIDIA GeForce RTX 4080 SUPER (vulkan)')).toBe('RTX 4080 SUPER');
+    expect(deviceName('NVIDIA GeForce RTX 4080 SUPER')).toBe('RTX 4080 SUPER');
+    expect(deviceName('AMD Radeon RX 7900 XTX (dx12)')).toBe('RX 7900 XTX');
+    expect(deviceName('cpu')).toBe('CPU');
+    expect(deviceName('CPU (24 threads)')).toBe('CPU');
+    expect(deviceName('AMD Ryzen 9 7950X (cpu)')).toBe('Ryzen 9 7950X (CPU)');
   });
 });

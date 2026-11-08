@@ -21,4 +21,11 @@ describe('lintCss', () => {
     expect(lintCss('a { top: calc(var(--x) - 3px); }')).toEqual([]);
     expect(lintCss('a { margin: 7px; /* grid-ok */ }')).toEqual([]);
   });
+
+  it('flags px type sizes and accepts tokens and em', () => {
+    expect(lintCss('a { font-size: 15px; }')[0]).toContain('--type-*-size');
+    expect(lintCss('a { font-size: var(--type-sm-size); }')).toEqual([]);
+    expect(lintCss('a { font-size: 0.7em; }')).toEqual([]);
+    expect(lintCss('a { font-size: 9px; /* grid-ok */ }')).toEqual([]);
+  });
 });

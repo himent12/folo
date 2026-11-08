@@ -3,7 +3,8 @@
 // Scans the <style> blocks of src/**/*.svelte and src/lib/design/base.css for padding / margin / gap / inset /
 // top / right / bottom / left declarations whose px values are off the allowed set below. The sign is ignored, and so
 // are px values inside calc() / min() / max() / clamp() that combine with a var() (e.g. `calc(var(--space-4) - 1px)`).
-// A deliberate exception carries `/* grid-ok */` on its line.
+// Type sizes come from the scale: a `font-size` in px is flagged (use var(--type-*-size), or em for a size relative to
+// its text). A deliberate exception carries `/* grid-ok */` on its line.
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -58,12 +59,20 @@ export function lintCss(css, file, startLine = 1) {
   const lineAt = (i) => code.slice(0, i).split('\n').length - 1;
   for (const m of code.matchAll(/(?:^|[;{\s])([a-z-]+)\s*:\s*([^;{}]+)/g)) {
     const [, prop, value] = m;
-    if (!PROP.test(prop)) continue;
+    const size = prop === 'font-size';
+    if (!PROP.test(prop) && !size) continue;
     const first = lineAt(m.index + m[0].indexOf(prop));
     const last = lineAt(m.index + m[0].length);
     let skip = false;
     for (let k = first; k <= last; k++) if (exempt.has(k)) skip = true;
     if (skip) continue;
+    if (size) {
+      if (/\d*\.?\d+px\b/.test(dropVarMath(value))) {
+        const where = file ? `${relative(root, file).replaceAll('\\', '/')}:${startLine + first}` : `line ${startLine + first}`;
+        problems.push(`${where}  font-size: ${value.trim()}  (use a --type-*-size token)`);
+      }
+      continue;
+    }
     for (const px of dropVarMath(value).matchAll(/(-?\d*\.?\d+)px\b/g)) {
       const v = Math.abs(Number(px[1]));
       const where = file ? `${relative(root, file).replaceAll('\\', '/')}:${startLine + first}` : `line ${startLine + first}`;
@@ -91,9 +100,9 @@ export function lintAll() {
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const problems = lintAll();
   if (problems.length) {
-    console.error(`Spacing off the grid (allowed px: ${[...ALLOWED].join(', ')}; mark a deliberate exception /* grid-ok */):`);
+    console.error(`Spacing or type off the scale (spacing px: ${[...ALLOWED].join(', ')}; mark a deliberate exception /* grid-ok */):`);
     for (const p of problems) console.error(`  ${p}`);
     process.exit(1);
   }
-  console.log('spacing: every padding / margin / gap / inset px value is on the grid');
+  console.log('spacing and type: every padding / margin / gap / inset px value is on the grid, every font-size a token');
 }

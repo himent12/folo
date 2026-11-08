@@ -10,7 +10,7 @@
   import type { Epoch, Run, RunMetrics } from '$lib/api/types';
   import LineChart, { type Series } from '$lib/charts/LineChart.svelte';
   import { nearest } from '$lib/charts/downsample';
-  import { duration, metric } from '$lib/format';
+  import { deviceName, duration, metric } from '$lib/format';
   import { href, router } from '$lib/router.svelte';
   import { setCrumbs } from '$lib/shell/crumbs.svelte';
   import Page from '$lib/shell/Page.svelte';
@@ -125,7 +125,7 @@
     ['Optimizer', (r) => r.config.optimizer],
     ['LR', (r) => String(r.config.lr0)],
     ['Mosaic / mixup', (r) => `${r.config.augment.mosaic} / ${r.config.augment.mixup}`],
-    ['Device', (r) => r.device.replace('NVIDIA GeForce ', '')],
+    ['Device', (r) => deviceName(r.device)],
     ['Duration', (r) => (r.started ? duration(((r.finished ? Date.parse(r.finished) : Date.now()) - Date.parse(r.started)) / 1000) : '—')],
   ]);
   const differs = (f: (r: Run) => string) => new Set(chosen.map(f)).size > 1;
@@ -245,7 +245,6 @@
           valueFormat={(v) => metric(v)}
           xFormat={(v) => (x === 'epoch' ? String(Math.round(v)) : `${Math.round(v)}%`)}
           xTitle={(v) => (x === 'epoch' ? `Epoch ${Math.round(v)}` : `${v.toFixed(0)}% through`)}
-          xLabel={x === 'epoch' ? 'epoch' : undefined}
           bind:cursor
           legend={false}
           {highlight}
