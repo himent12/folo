@@ -261,22 +261,19 @@ impl FoloApp {
     }
 
     /// Resume a stopped or failed run where it left off (its last finished epoch).
-    /// The last finished (validated) epoch: where a resume continues from (`weights/last.folo`).
-    fn last_finished_epoch(&self, r: &Run) -> u32 {
-        self.store
-            .run_data
-            .get(&r.id)
-            .and_then(|l| l.ready())
-            .and_then(|d| d.metrics.epochs.last().map(|e| e.epoch))
-            .unwrap_or_else(|| r.epoch.saturating_sub(1))
+    /// The last finished (validated) epoch, from the loaded history: where a resume continues from
+    /// (`weights/last.folo`). None until the history is in (the run's own fields don't say).
+    fn last_finished_epoch(&self, r: &Run) -> Option<u32> {
+        let d = self.store.run_data.get(&r.id)?.ready()?;
+        Some(d.metrics.epochs.last().map_or(0, |e| e.epoch))
     }
 
     fn resume_button(&self, r: &Run, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let rid = r.id.clone();
-        let from = self.last_finished_epoch(r) + 1;
+        let from = self.last_finished_epoch(r).map(|e| e + 1);
         self.button(
             "run-resume",
-            format!("Resume from epoch {from}"),
+            from.map_or("Resume".to_string(), |f| format!("Resume from epoch {f}")),
             Btn::Secondary,
             Some("icons/play.svg"),
             window,
@@ -284,7 +281,7 @@ impl FoloApp {
             act(move |this, _, cx| this.resume_run(rid.clone(), cx)),
         )
         .tooltip(crate::controls::tip(
-            if from == 1 {
+            if from == Some(1) {
                 "No epoch finished: starts over with the same config"
             } else {
                 "Continues from the last saved checkpoint"
@@ -471,9 +468,14 @@ impl FoloApp {
         let t = theme(cx);
         let msg = r.error.clone().unwrap_or_else(|| "The run failed.".into());
         let hint = if msg.contains("out of memory") {
-            "The batch didn't fit in GPU memory. New run from this config starts with the batch halved; a smaller image size or architecture also helps."
+            match crate::app::retry_batch(r.config.batch) {
+                Some(to) => format!(
+                    "The batch didn't fit in GPU memory. New run from this config starts with batch {to}; a smaller image size or architecture also helps."
+                ),
+                None => "The batch didn't fit in GPU memory and can't go lower: lower the image size or pick a smaller architecture in New run from this config.".to_string(),
+            }
         } else {
-            "See the log below for details."
+            "See the log below for details.".to_string()
         };
         div()
             .flex()

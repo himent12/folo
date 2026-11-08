@@ -723,7 +723,7 @@ impl FoloApp {
                     )))
                     .child(
                         div()
-                            .w(px(244.))
+                            .w(px(260.))
                             .flex_none()
                             .p(px(8.))
                             .pt(px(12.))
