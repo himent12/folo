@@ -292,6 +292,49 @@ impl Backend for HttpBackend {
         self.post_slow("/datasets/synthetic", req)
     }
 
+    fn local_inference(&self) -> bool {
+        true
+    }
+
+    fn model_weights(&self, id: &str, etag: Option<&str>) -> ApiResult<Option<Weights>> {
+        let url = self.url(&format!("/models/{}/weights?format=f16", seg(id)));
+        // The first request of a checkpoint makes its f16 export on the server: allow for it. A
+        // revalidation (a copy is already loaded) gives up on a silent server after 15 s, so the
+        // copy runs instead of every local prediction waiting on it.
+        let headers = if etag.is_some() { 15 } else { 300 };
+        let mut req = ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .timeout_connect(Some(Duration::from_secs(2)))
+            .timeout_recv_response(Some(Duration::from_secs(headers)))
+            .timeout_global(Some(Duration::from_secs(600)))
+            .build()
+            .new_agent()
+            .get(&url);
+        if let Some(e) = etag {
+            req = req.header("If-None-Match", e);
+        }
+        let mut resp = req.call().map_err(|e| self.unreachable(&e))?;
+        match resp.status().as_u16() {
+            304 => return Ok(None),
+            s if s >= 400 => {
+                return Err(self.decode::<serde_json::Value>(resp).err().unwrap_or_else(|| {
+                    ApiError::new("http_error", format!("folo serve answered HTTP {s}"))
+                }));
+            }
+            _ => {}
+        }
+        let etag = resp.headers().get("etag").and_then(|v| v.to_str().ok()).unwrap_or_default().to_string();
+        let bytes = resp.body_mut().with_config().limit(2 << 30).read_to_vec().map_err(|e| match e {
+            // The connection dropped or stalled mid-download: the server is out of reach (callers
+            // holding older weights fall back to them), not a malformed answer.
+            ureq::Error::Io(_) | ureq::Error::Timeout(_) | ureq::Error::ConnectionFailed => {
+                self.unreachable(&e)
+            }
+            _ => ApiError::new("bad_response", e.to_string()),
+        })?;
+        Ok(Some(Weights { bytes, etag }))
+    }
+
     fn metrics(&self, id: &str) -> ApiResult<RunMetrics> {
         self.get(&format!("/runs/{}/metrics", seg(id)))
     }
@@ -549,6 +592,63 @@ mod tests {
         // Still subscribed, yet the reader is done: the socket closes and the server's writes fail.
         assert!(failed.recv_timeout(Duration::from_secs(5)).is_ok(), "reader kept a finished stream open");
         drop(sub);
+    }
+
+    /// A server answering each connection with the next canned response (and recording requests).
+    fn canned_server(responses: Vec<Vec<u8>>) -> (String, std::sync::mpsc::Receiver<String>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for resp in responses {
+                let Ok((mut sock, _)) = listener.accept() else { return };
+                let mut buf = [0u8; 4096];
+                let n = sock.read(&mut buf).unwrap_or(0);
+                let _ = tx.send(String::from_utf8_lossy(&buf[..n]).into_owned());
+                let _ = sock.write_all(&resp);
+                let _ = sock.flush();
+                // Dropping the socket closes the connection (cutting a short body).
+            }
+        });
+        (format!("http://{addr}"), rx)
+    }
+
+    #[test]
+    fn weights_revalidate_by_etag_and_a_cut_download_is_unreachable() {
+        let (url, requests) = canned_server(vec![
+            b"HTTP/1.1 200 OK
+etag: \"w1\"
+content-length: 4
+connection: close
+
+FOLO"
+                .to_vec(),
+            b"HTTP/1.1 304 Not Modified
+etag: \"w1\"
+connection: close
+
+"
+            .to_vec(),
+            // Announces 100 bytes, sends 4, hangs up.
+            b"HTTP/1.1 200 OK
+etag: \"w2\"
+content-length: 100
+connection: close
+
+FOLO"
+                .to_vec(),
+        ]);
+        let api = HttpBackend::new(&url);
+        let w = api.model_weights("m_1", None).unwrap().expect("weights");
+        assert_eq!((w.bytes.as_slice(), w.etag.as_str()), (&b"FOLO"[..], "\"w1\""));
+        let first = requests.recv().unwrap();
+        assert!(first.starts_with("GET /api/models/m_1/weights?format=f16 "), "{first}");
+        assert!(!first.to_ascii_lowercase().contains("if-none-match"));
+        assert!(api.model_weights("m_1", Some("\"w1\"")).unwrap().is_none(), "304 is unchanged");
+        assert!(requests.recv().unwrap().to_ascii_lowercase().contains("if-none-match: \"w1\""));
+        let cut = api.model_weights("m_1", Some("\"w1\"")).err().expect("a cut body fails");
+        assert_eq!(cut.code, "server_unreachable");
     }
 
     #[test]

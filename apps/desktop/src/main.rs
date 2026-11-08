@@ -10,6 +10,7 @@ mod app;
 mod charts;
 mod controls;
 mod input;
+mod local;
 mod overlays;
 mod scenario;
 mod screens;

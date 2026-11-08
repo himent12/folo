@@ -126,6 +126,22 @@ pub trait Backend: Send + Sync + 'static {
     fn resume_run(&self, _id: &str) -> ApiResult<Run> {
         Err(ApiError::new("not_supported", "Resuming runs needs folo serve"))
     }
+    /// Whether models can be downloaded and run in this process ([`Backend::model_weights`]).
+    fn local_inference(&self) -> bool {
+        false
+    }
+    /// A model's f16 weights for local inference (`GET /api/models/{id}/weights?format=f16`),
+    /// revalidated against `etag`: `None` when the copy the caller holds is still current.
+    fn model_weights(&self, _id: &str, _etag: Option<&str>) -> ApiResult<Option<Weights>> {
+        Err(ApiError::new("not_supported", "The built-in demo has no weights to run here")
+            .with_hint("Connect to folo serve in Settings to run models in this app."))
+    }
+}
+
+/// A `.folo` file and its ETag.
+pub struct Weights {
+    pub bytes: Vec<u8>,
+    pub etag: String,
 }
 
 /// A live event stream. Dropping it tells the producer to stop: the mock's worker at its next tick,

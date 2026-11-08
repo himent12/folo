@@ -221,7 +221,9 @@ The exact block definitions, layer tables, parameter names, head, loss, training
   Talks only to `docs/API.md`; `web/src/lib/api/` holds the typed client and a dev mock.
 - **FOLO Desktop** (`apps/desktop/`): native Rust app on GPUI (Zed's GPU-accelerated UI framework). Same screens and
   design language as Studio. It talks to a local `folo serve` over the same API (it can spawn one), so the engine and
-  the UI stay decoupled. It is a separate cargo workspace so the main workspace and its CI stay GPUI-free.
+  the UI stay decoupled. Its Playground can also run a model in process ("Run on: Local GPU / Local CPU"): it fetches
+  the f16 weights from `GET /api/models/{id}/weights` (revalidated by ETag) and runs folo-vision's `Predictor` on
+  folo-gpu or the CPU. It is a separate cargo workspace so the main workspace and its CI stay GPUI-free.
 
 ## Agent-first design
 - Machine-readable everything: `--json`, JSON Schemas for configs, `folo describe` prints the CLI surface as JSON.

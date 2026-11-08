@@ -72,6 +72,7 @@ impl FoloApp {
             vec![open],
         );
         let stage = self.stage(window, cx);
+        self.probe_local_gpu(cx);
         // Without models the side panel has nothing to offer: the empty state gets the full width.
         let no_models = self.store.models.ready().is_some_and(|m| m.is_empty());
         let side = (!no_models).then(|| self.play_side(window, cx));
@@ -502,6 +503,7 @@ impl FoloApp {
                 .child(control)
         };
         let no_models = models.is_empty() && self.store.models.ready().is_some();
+        let run_on = self.run_on(window, cx);
         let controls = div()
             .flex()
             .flex_col()
@@ -540,18 +542,14 @@ impl FoloApp {
                     }),
             )
             .when(!no_models, |d| {
-                d.child(field(
-                    "Confidence",
-                    format!("{:.2}", self.play_conf),
-                    conf.into_any_element(),
-                    conf_help,
-                ))
-                .child(field(
-                    "IoU",
-                    format!("{:.2}", self.play_iou),
-                    iou.into_any_element(),
-                    iou_help,
-                ))
+                d.child(run_on)
+                    .child(field(
+                        "Confidence",
+                        format!("{:.2}", self.play_conf),
+                        conf.into_any_element(),
+                        conf_help,
+                    ))
+                    .child(field("IoU", format!("{:.2}", self.play_iou), iou.into_any_element(), iou_help))
             });
 
         let active = self.play_active(window, cx);
@@ -853,6 +851,71 @@ impl FoloApp {
             .into_any_element()
     }
 
+    /// Server / Local GPU / Local CPU, with what each means here.
+    fn run_on(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        use crate::local::Target;
+        let t = theme(cx);
+        let local = self.store.api.local_inference();
+        let no_local: Option<SharedString> =
+            (!local).then(|| "Needs folo serve: the built-in demo has no weights to run here".into());
+        let gpu_why = no_local.clone().or_else(|| match &self.local_gpu {
+            Load::Ready(_) => None,
+            Load::Failed(_) => Some("No GPU this app can use was found".into()),
+            _ => Some("Looking for a GPU…".into()),
+        });
+        let selected = match self.play_target {
+            None => 0,
+            Some(Target::Gpu) => 1,
+            Some(Target::Cpu) => 2,
+        };
+        let control = self.segmented_fill_with(
+            "play-target",
+            &["Server", "Local GPU", "Local CPU"],
+            selected,
+            &[None, gpu_why, no_local],
+            window,
+            cx,
+            Rc::new(|this, i, _, cx| {
+                let target = match i {
+                    1 => Some(Target::Gpu),
+                    2 => Some(Target::Cpu),
+                    _ => None,
+                };
+                this.set_play_target(target, cx);
+            }),
+        );
+        let help = self.help_icon(
+            "help-run-on",
+            "Local runs download the model's weights once (f16, checked for changes before each run) and run them in this app, leaving the server's GPU to training.",
+            window,
+            cx,
+        );
+        let note = match (self.play_target, &self.local_gpu) {
+            (None, _) if !local => "Built-in demo · local runs need folo serve".into(),
+            (None, _) => format!("On folo serve at {}", self.store.api.describe()),
+            (Some(Target::Gpu), Load::Ready(name)) => {
+                format!("In this app, on {}", crate::ui::short_gpu(name))
+            }
+            (Some(Target::Gpu), _) => "In this app, on this PC's GPU".into(),
+            (Some(Target::Cpu), _) => "In this app, on the CPU".into(),
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(4.))
+                    .child(text(ty::SM, t.text_secondary).font_weight(FontWeight::MEDIUM).child("Run on"))
+                    .child(help),
+            )
+            .child(control)
+            .child(text(ty::XS, t.text_tertiary).w_full().truncate().child(note))
+            .into_any_element()
+    }
+
     /// The detection being inspected: under the pointer, or a keyboard-focused row.
     pub fn play_active(&self, window: &Window, cx: &mut Context<Self>) -> Option<usize> {
         if self.play_hover.is_some() {
@@ -868,6 +931,10 @@ impl FoloApp {
 
 /// "gpu:0" as the adapter's name ("RTX 4080 SUPER"), "cpu" as "CPU"; anything else as given.
 fn device_name(device: &str, system: Option<&crate::api::SystemInfo>) -> String {
+    // Local inference names its device itself.
+    if let Some(name) = device.strip_prefix("local:") {
+        return format!("{name} in this app");
+    }
     if device == "cpu" {
         return "CPU".into();
     }

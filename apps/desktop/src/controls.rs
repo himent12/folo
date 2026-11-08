@@ -410,7 +410,7 @@ impl FoloApp {
         cx: &mut Context<Self>,
         on_select: OnSelect,
     ) -> Stateful<Div> {
-        self.segmented_ext(key, options, selected, false, window, cx, on_select)
+        self.segmented_ext(key, options, selected, false, &[], window, cx, on_select)
     }
 
     /// A segmented control that fills its container with equal-width segments (forms).
@@ -423,7 +423,23 @@ impl FoloApp {
         cx: &mut Context<Self>,
         on_select: OnSelect,
     ) -> Stateful<Div> {
-        self.segmented_ext(key, options, selected, true, window, cx, on_select)
+        self.segmented_ext(key, options, selected, true, &[], window, cx, on_select)
+    }
+
+    /// [`Self::segmented_fill`] with unavailable options: `disabled[i]` is why option `i` can't be
+    /// chosen (shown as its tooltip); arrow keys skip it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn segmented_fill_with(
+        &self,
+        key: &str,
+        options: &[&str],
+        selected: usize,
+        disabled: &[Option<SharedString>],
+        window: &Window,
+        cx: &mut Context<Self>,
+        on_select: OnSelect,
+    ) -> Stateful<Div> {
+        self.segmented_ext(key, options, selected, true, disabled, window, cx, on_select)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -433,6 +449,7 @@ impl FoloApp {
         options: &[&str],
         selected: usize,
         fill: bool,
+        disabled: &[Option<SharedString>],
         window: &Window,
         cx: &mut Context<Self>,
         on_select: OnSelect,
@@ -442,6 +459,8 @@ impl FoloApp {
         let ring = self.ring(&fh, window);
         let n = options.len();
         let keys = on_select.clone();
+        let off: Vec<Option<SharedString>> = (0..n).map(|i| disabled.get(i).cloned().flatten()).collect();
+        let usable: Vec<usize> = (0..n).filter(|&i| off[i].is_none()).collect();
         div()
             .id(SharedString::from(key.to_string()))
             .track_focus(&fh)
@@ -458,14 +477,17 @@ impl FoloApp {
             .border_1()
             .border_color(t.line_default)
             .on_key_down(cx.listener(move |this, ev: &KeyDownEvent, window, cx| {
+                // Steps to the next option that can be chosen in that direction, wrapping (also from
+                // a selection that is itself disabled).
+                let ok = |i: &usize| usable.contains(i);
                 let next = match ev.keystroke.key.as_str() {
-                    "left" | "up" => Some((selected + n - 1) % n),
-                    "right" | "down" => Some((selected + 1) % n),
-                    "home" => Some(0),
-                    "end" => Some(n - 1),
+                    "left" | "up" => (1..=n).map(|k| (selected + n - k) % n).find(ok),
+                    "right" | "down" => (1..=n).map(|k| (selected + k) % n).find(ok),
+                    "home" => usable.first().copied(),
+                    "end" => usable.last().copied(),
                     _ => None,
                 };
-                if let Some(i) = next {
+                if let Some(i) = next.filter(|&i| i != selected) {
                     keys(this, i, window, cx);
                     cx.stop_propagation();
                     cx.notify();
@@ -475,8 +497,11 @@ impl FoloApp {
             .children(options.iter().enumerate().map(|(i, label)| {
                 let on = i == selected;
                 let f = on_select.clone();
+                let why = off[i].clone();
+                let dead = why.is_some();
                 div()
                     .id(SharedString::from(format!("{key}-{i}")))
+                    .when_some(why, |d, why| d.tooltip(tip(why, None)))
                     .h_full()
                     .px(px(10.))
                     .when(fill, |d| d.flex_1())
@@ -484,22 +509,33 @@ impl FoloApp {
                     .items_center()
                     .justify_center()
                     .rounded(px(radius::SM))
-                    .cursor_pointer()
+                    .when(!dead, |d| d.cursor_pointer())
                     .border_1()
                     .border_color(gpui::transparent_black())
                     .when(on, |d| d.bg(t.bg_raised).border_color(t.line_strong))
-                    .when(!on, |d| d.hover(|s| s.bg(t.bg_hover)))
-                    .active(|s| s.bg(t.bg_active))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        f(this, i, window, cx);
-                        cx.notify();
-                    }))
+                    .when(!on && !dead, |d| d.hover(|s| s.bg(t.bg_hover)))
+                    .when(!dead, |d| d.active(|s| s.bg(t.bg_active)))
+                    .when(!dead, |d| {
+                        d.on_click(cx.listener(move |this, _, window, cx| {
+                            f(this, i, window, cx);
+                            cx.notify();
+                        }))
+                    })
                     .child(
-                        text(ty::SM, if on { t.text_primary } else { t.text_secondary })
-                            .font_weight(if on { FontWeight::MEDIUM } else { FontWeight::NORMAL })
-                            .whitespace_nowrap()
-                            .tnum()
-                            .child(label.to_string()),
+                        text(
+                            ty::SM,
+                            if on {
+                                t.text_primary
+                            } else if dead {
+                                t.text_disabled
+                            } else {
+                                t.text_secondary
+                            },
+                        )
+                        .font_weight(if on { FontWeight::MEDIUM } else { FontWeight::NORMAL })
+                        .whitespace_nowrap()
+                        .tnum()
+                        .child(label.to_string()),
                     )
             }))
     }

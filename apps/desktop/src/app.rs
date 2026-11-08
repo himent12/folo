@@ -388,6 +388,10 @@ pub struct FoloApp {
     pub play_model: Option<String>,
     pub play_conf: f32,
     pub play_iou: f32,
+    /// Where Playground runs the model: on the server (`None`), or in this process.
+    pub play_target: Option<crate::local::Target>,
+    /// This machine's GPU for local inference (its adapter name), probed once off the UI thread.
+    pub local_gpu: Load<String>,
     pub play_image: Option<PlayImage>,
     pub play_pred: Load<PredictResponse>,
     pub play_hover: Option<usize>,
@@ -528,6 +532,8 @@ impl FoloApp {
             play_model: None,
             play_conf: 0.25,
             play_iou: 0.7,
+            play_target: None,
+            local_gpu: Load::Idle,
             play_image: None,
             play_pred: Load::Idle,
             play_hover: None,
@@ -1786,6 +1792,34 @@ impl FoloApp {
         self.run_predict(cx);
     }
 
+    /// Choose where Playground runs the model, and rerun it there.
+    pub fn set_play_target(&mut self, target: Option<crate::local::Target>, cx: &mut Context<Self>) {
+        if self.play_target != target {
+            self.play_target = target;
+            self.run_predict(cx);
+        }
+    }
+
+    /// Look for a GPU for local inference (once; setting up folo-gpu blocks for a moment).
+    pub fn probe_local_gpu(&mut self, cx: &mut Context<Self>) {
+        if !matches!(self.local_gpu, Load::Idle) || !self.store.api.local_inference() {
+            return;
+        }
+        self.local_gpu = Load::Loading;
+        cx.spawn(async move |this, cx| {
+            let r = cx.background_executor().spawn(async { crate::local::gpu() }).await;
+            this.update(cx, |this, cx| {
+                this.local_gpu = match r {
+                    Ok((_, name)) => Load::Ready(name),
+                    Err(e) => Load::Failed(crate::api::ApiError::new("no_gpu", e)),
+                };
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     pub fn run_predict(&mut self, cx: &mut Context<Self>) {
         let (Some(model), Some(img)) = (self.play_model.clone(), self.play_image.as_ref()) else { return };
         // Fetch everything above the lowest threshold once; the conf slider filters locally.
@@ -1804,9 +1838,15 @@ impl FoloApp {
         }
         self.play_pred_seq += 1;
         let seq = self.play_pred_seq;
+        let target = self.play_target;
+        // Taken with the backend handle: a switch after this makes the load's model throwaway.
+        let generation = crate::local::generation();
         self.fetch(
             cx,
-            move |api| api.predict(&req),
+            move |api| match target {
+                Some(t) => crate::local::predict(api, &req, t, generation),
+                None => api.predict(&req),
+            },
             move |this, r, _| {
                 if seq == this.play_pred_seq {
                     this.play_pred = r.into();
@@ -2664,6 +2704,11 @@ impl FoloApp {
     /// Swap the data source; everything reloads from the new backend.
     pub fn set_backend(&mut self, api: Arc<dyn Backend>, mode: ServerMode, cx: &mut Context<Self>) {
         self.backend_gen += 1;
+        // Model ids are per server: loaded local models belong to the old one.
+        crate::local::forget_all();
+        if !api.local_inference() {
+            self.play_target = None;
+        }
         self.store.api = api;
         self.server_mode = mode;
         self.subscriptions.clear();
