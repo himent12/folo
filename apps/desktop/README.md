@@ -11,7 +11,9 @@ It is a separate cargo workspace, so the root workspace and its CI stay GPUI-fre
 
 ```powershell
 $env:CARGO_TARGET_DIR = "D:\folo-build\desktop"   # keep build output off C:
-cargo run                                          # live mock data, dark theme
+cargo run                                          # finds or starts folo serve, else demo data
+cargo run -- --server http://127.0.0.1:7878        # a specific server
+cargo run -- --mock                                # built-in demo data
 cargo run -- --theme light
 cargo run -- --scenario run-live+hover             # a fixed, deterministic state (see below)
 ```
@@ -41,11 +43,17 @@ tools/            shoot.ps1 / shoot-all.ps1 (screenshots)
 
 ## Data
 
-Everything comes through `api::Backend`. Until `folo serve` lands, the app runs on `MockBackend`: three synthetic
-datasets, four models, and six runs (one live, one queued, completed, stopped and failed ones) whose metrics are pure
-functions of seeds and a clock, so a frozen clock gives pixel-identical screenshots. Two endpoints the screens need are
-not in API v1 yet and are proposed: `GET /api/models/{id}/eval` (PR curves, confusion matrix) and
-`GET /api/runs/{id}/logs` (log history; the SSE stream only carries new lines).
+Everything comes through `api::Backend`, typed with the shared `crates/folo-api` wire types:
+
+- **`HttpBackend`** talks to `folo serve` (docs/API.md): JSON over HTTP with `ureq`, live runs over SSE on a
+  background thread, image bytes for the grid, multipart uploads for the Playground.
+- **`MockBackend`** is built-in demo data (procedural shapes datasets, models and runs with a live simulator) used
+  for screenshots, tests and when no server is available.
+
+By default the app looks for `folo serve` at `$FOLO_SERVER` (or `http://127.0.0.1:7878`); if none answers it starts
+`folo serve --mock` on a free port (`$FOLO_BIN`, next to the executable, or on `PATH`) and stops it on exit; if that
+fails it falls back to the built-in demo data and says so. `--server URL` and `--mock` pick a source explicitly;
+Settings › Connection switches at runtime. `--open run:<id>` (or `dataset:`, `model:`, `runs`, …) starts on a screen.
 
 ## Design tokens
 

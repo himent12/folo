@@ -1,8 +1,10 @@
 //! The data seam: everything the UI knows about FOLO comes through [`Backend`].
 //!
-//! Two implementations: [`mock::MockBackend`] (in-process fixtures with a live training simulator,
-//! for development and deterministic screenshots) and, later, an HTTP client for `folo serve`.
+//! Two implementations: [`http::HttpBackend`] (`folo serve` over HTTP + SSE) and
+//! [`mock::MockBackend`] (in-process fixtures with a live training simulator, for development,
+//! deterministic screenshots and running without a server).
 
+pub mod http;
 pub mod mock;
 pub mod time;
 pub mod types;

@@ -541,7 +541,7 @@ impl FoloApp {
                     )
                     .child(header_row)
                     .children(rows)
-                    .child(div().pt(px(8.)).child(text(ty::XS, t.text_tertiary).tnum().child(format!(
+                    .child(div().pt(px(8.)).w_full().min_w_0().child(text(ty::XS, t.text_tertiary).tnum().whitespace_normal().child(format!(
                         "Rows sum to 100% of each class · background = missed or extra detections · {} images",
                         int(ev.images as u64)
                     )))),

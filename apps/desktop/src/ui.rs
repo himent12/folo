@@ -289,7 +289,21 @@ pub fn duration_metric(t: &Theme, secs: Option<f64>, s: TypeStep, unit_step: Typ
 
 /// A filesystem path as the platform writes it (backslashes on Windows).
 pub fn display_path(p: &str) -> String {
-    if cfg!(windows) { p.replace('/', "\\") } else { p.to_string() }
+    // URLs and pseudo paths (`mock://shapes`) keep their slashes.
+    if cfg!(windows) && !p.contains("://") { p.replace('/', "\\") } else { p.to_string() }
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::display_path;
+
+    #[test]
+    fn urls_keep_slashes() {
+        assert_eq!(display_path("mock://traffic-cams"), "mock://traffic-cams");
+        if cfg!(windows) {
+            assert_eq!(display_path("D:/data/shapes"), r"D:\data\shapes");
+        }
+    }
 }
 
 /// A thin progress track with a filled part.

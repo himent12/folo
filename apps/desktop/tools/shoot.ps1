@@ -6,7 +6,10 @@ param(
     [int]$Width = 1280,
     [int]$Height = 800,
     [string]$Exe = "",
-    [int]$DelayMs = 2200
+    [int]$DelayMs = 2200,
+    # Extra arguments for the app, e.g. "--server http://127.0.0.1:7878". With -Scenario none, no
+    # scenario is passed and the app connects to real data.
+    [string]$ExtraArgs = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -33,7 +36,10 @@ public static class FoloWin {
 # Park the cursor in the screen corner so no hover state leaks into the capture.
 [FoloWin]::SetCursorPos(0, 0) | Out-Null
 
-$p = Start-Process -FilePath $Exe -ArgumentList @("--scenario", $Scenario, "--width", $Width, "--height", $Height) -PassThru
+$argList = @("--width", $Width, "--height", $Height)
+if ($Scenario -ne "none") { $argList = @("--scenario", $Scenario) + $argList }
+if ($ExtraArgs) { $argList += $ExtraArgs.Split(" ") }
+$p = Start-Process -FilePath $Exe -ArgumentList $argList -PassThru
 try {
     $deadline = (Get-Date).AddSeconds(25)
     while ($p.MainWindowHandle -eq 0 -and (Get-Date) -lt $deadline) {
