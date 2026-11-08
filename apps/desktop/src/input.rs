@@ -17,7 +17,23 @@ use crate::theme::{alpha, theme};
 
 actions!(
     text_input,
-    [Backspace, Delete, Left, Right, SelectLeft, SelectRight, SelectAll, Home, End, Paste, Cut, Copy, WordLeft, WordRight, DeleteWordLeft]
+    [
+        Backspace,
+        Delete,
+        Left,
+        Right,
+        SelectLeft,
+        SelectRight,
+        SelectAll,
+        Home,
+        End,
+        Paste,
+        Cut,
+        Copy,
+        WordLeft,
+        WordRight,
+        DeleteWordLeft
+    ]
 );
 
 pub fn bind_keys(cx: &mut App) {
@@ -86,11 +102,6 @@ impl TextInput {
         self.selection_reversed = false;
         self.marked_range = None;
         cx.emit(InputEvent::Changed(self.content.clone()));
-        cx.notify();
-    }
-
-    pub fn select_all_text(&mut self, cx: &mut Context<Self>) {
-        self.selected_range = 0..self.content.len();
         cx.notify();
     }
 
@@ -191,13 +202,17 @@ impl TextInput {
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
         if !self.selected_range.is_empty() {
-            cx.write_to_clipboard(ClipboardItem::new_string(self.content[self.selected_range.clone()].to_string()));
+            cx.write_to_clipboard(ClipboardItem::new_string(
+                self.content[self.selected_range.clone()].to_string(),
+            ));
         }
     }
 
     fn cut(&mut self, _: &Cut, window: &mut Window, cx: &mut Context<Self>) {
         if !self.selected_range.is_empty() {
-            cx.write_to_clipboard(ClipboardItem::new_string(self.content[self.selected_range.clone()].to_string()));
+            cx.write_to_clipboard(ClipboardItem::new_string(
+                self.content[self.selected_range.clone()].to_string(),
+            ));
             self.replace_text_in_range(None, "", window, cx)
         }
     }
@@ -285,7 +300,9 @@ impl TextInput {
     fn previous_word(&self, offset: usize) -> usize {
         let s = &self.content[..offset];
         let trimmed = s.trim_end_matches(|c: char| !c.is_alphanumeric());
-        trimmed.rfind(|c: char| !c.is_alphanumeric()).map_or(0, |i| i + trimmed[i..].chars().next().map_or(1, |c| c.len_utf8()))
+        trimmed
+            .rfind(|c: char| !c.is_alphanumeric())
+            .map_or(0, |i| i + trimmed[i..].chars().next().map_or(1, |c| c.len_utf8()))
     }
 
     fn next_word(&self, offset: usize) -> usize {
@@ -302,14 +319,28 @@ impl TextInput {
 }
 
 impl EntityInputHandler for TextInput {
-    fn text_for_range(&mut self, range_utf16: Range<usize>, actual_range: &mut Option<Range<usize>>, _: &mut Window, _: &mut Context<Self>) -> Option<String> {
+    fn text_for_range(
+        &mut self,
+        range_utf16: Range<usize>,
+        actual_range: &mut Option<Range<usize>>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<String> {
         let range = self.range_from_utf16(&range_utf16);
         actual_range.replace(self.range_to_utf16(&range));
         Some(self.content[range].to_string())
     }
 
-    fn selected_text_range(&mut self, _ignore_disabled_input: bool, _: &mut Window, _: &mut Context<Self>) -> Option<UTF16Selection> {
-        Some(UTF16Selection { range: self.range_to_utf16(&self.selected_range), reversed: self.selection_reversed })
+    fn selected_text_range(
+        &mut self,
+        _ignore_disabled_input: bool,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<UTF16Selection> {
+        Some(UTF16Selection {
+            range: self.range_to_utf16(&self.selected_range),
+            reversed: self.selection_reversed,
+        })
     }
 
     fn marked_text_range(&self, _: &mut Window, _: &mut Context<Self>) -> Option<Range<usize>> {
@@ -320,13 +351,20 @@ impl EntityInputHandler for TextInput {
         self.marked_range = None;
     }
 
-    fn replace_text_in_range(&mut self, range_utf16: Option<Range<usize>>, new_text: &str, _: &mut Window, cx: &mut Context<Self>) {
+    fn replace_text_in_range(
+        &mut self,
+        range_utf16: Option<Range<usize>>,
+        new_text: &str,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let range = range_utf16
             .as_ref()
             .map(|r| self.range_from_utf16(r))
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
-        self.content = (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..]).into();
+        self.content =
+            (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..]).into();
         self.selected_range = range.start + new_text.len()..range.start + new_text.len();
         self.marked_range.take();
         self.changed(cx);
@@ -345,7 +383,8 @@ impl EntityInputHandler for TextInput {
             .map(|r| self.range_from_utf16(r))
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
-        self.content = (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..]).into();
+        self.content =
+            (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..]).into();
         self.marked_range = (!new_text.is_empty()).then(|| range.start..range.start + new_text.len());
         self.selected_range = new_selected_range_utf16
             .as_ref()
@@ -355,7 +394,13 @@ impl EntityInputHandler for TextInput {
         self.changed(cx);
     }
 
-    fn bounds_for_range(&mut self, range_utf16: Range<usize>, bounds: Bounds<Pixels>, _: &mut Window, _: &mut Context<Self>) -> Option<Bounds<Pixels>> {
+    fn bounds_for_range(
+        &mut self,
+        range_utf16: Range<usize>,
+        bounds: Bounds<Pixels>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<Bounds<Pixels>> {
         let last_layout = self.last_layout.as_ref()?;
         let range = self.range_from_utf16(&range_utf16);
         Some(Bounds::from_corners(
@@ -364,7 +409,12 @@ impl EntityInputHandler for TextInput {
         ))
     }
 
-    fn character_index_for_point(&mut self, point: Point<Pixels>, _: &mut Window, _: &mut Context<Self>) -> Option<usize> {
+    fn character_index_for_point(
+        &mut self,
+        point: Point<Pixels>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<usize> {
         let line_point = self.last_bounds?.localize(&point)?;
         let last_layout = self.last_layout.as_ref()?;
         let utf8_index = last_layout.index_for_x(point.x - line_point.x)?;
@@ -401,7 +451,13 @@ impl Element for TextElement {
         None
     }
 
-    fn request_layout(&mut self, _: Option<&GlobalElementId>, _: Option<&gpui::InspectorElementId>, window: &mut Window, cx: &mut App) -> (LayoutId, ()) {
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, ()) {
         let mut style = Style::default();
         style.size.width = relative(1.).into();
         style.size.height = window.line_height().into();
@@ -428,13 +484,24 @@ impl Element for TextElement {
         } else {
             (content, style.color)
         };
-        let run = TextRun { len: display_text.len(), font: style.font(), color: text_color, background_color: None, underline: None, strikethrough: None };
+        let run = TextRun {
+            len: display_text.len(),
+            font: style.font(),
+            color: text_color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
         let runs = if let Some(marked) = input.marked_range.as_ref() {
             vec![
                 TextRun { len: marked.start, ..run.clone() },
                 TextRun {
                     len: marked.end - marked.start,
-                    underline: Some(UnderlineStyle { color: Some(run.color), thickness: px(1.0), wavy: false }),
+                    underline: Some(UnderlineStyle {
+                        color: Some(run.color),
+                        thickness: px(1.0),
+                        wavy: false,
+                    }),
                     ..run.clone()
                 },
                 TextRun { len: display_text.len() - marked.end, ..run },
@@ -453,7 +520,13 @@ impl Element for TextElement {
         let caret_h = (font_size * 1.25).min(line_h);
         let caret_top = bounds.top() + (line_h - caret_h) / 2.;
         let (selection, cursor) = if selected_range.is_empty() || empty {
-            (None, Some(fill(Bounds::new(point(bounds.left() + cursor_pos, caret_top), size(px(1.5), caret_h)), t.accent_solid)))
+            (
+                None,
+                Some(fill(
+                    Bounds::new(point(bounds.left() + cursor_pos, caret_top), size(px(1.5), caret_h)),
+                    t.accent_solid,
+                )),
+            )
         } else {
             (
                 Some(fill(

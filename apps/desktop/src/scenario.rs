@@ -55,7 +55,13 @@ impl Spec {
         let parts: Vec<String> = name.split('+').map(|s| s.trim().to_string()).collect();
         let has = |p: &str| parts.iter().any(|x| x == p);
         Spec {
-            mode: if has("light") { Some(Mode::Light) } else if has("dark") { Some(Mode::Dark) } else { None },
+            mode: if has("light") {
+                Some(Mode::Light)
+            } else if has("dark") {
+                Some(Mode::Dark)
+            } else {
+                None
+            },
             live_step: 4180,
             fail: has("error"),
             empty: has("empty"),
@@ -70,6 +76,10 @@ impl Spec {
 
 pub fn apply(app: &mut FoloApp, s: &Spec, window: &mut Window, cx: &mut Context<FoloApp>) {
     app.hold_loading = s.has("loading");
+    if !app.hold_loading && !s.fail {
+        // Names in titles resolve from the dataset list; load it up front for stable captures.
+        app.store.datasets = app.store.api.datasets().into();
+    }
     let screen = s.parts.first().map(String::as_str).unwrap_or("overview");
     match screen {
         "overview" | "toast" | "kb-focus" | "palette" => app.route = Route::Overview,
@@ -83,7 +93,14 @@ pub fn apply(app: &mut FoloApp, s: &Spec, window: &mut Window, cx: &mut Context<
         }
         "inspector" => {
             app.route = Route::Dataset("ds_3b91".into());
-            app.inspector = Some(crate::app::Inspector { dataset: "ds_3b91".into(), index: 6, zoom: 1.0, pan: (0., 0.), drag_from: None, hover_box: Some(1) });
+            app.inspector = Some(crate::app::Inspector {
+                dataset: "ds_3b91".into(),
+                index: 6,
+                zoom: 1.0,
+                pan: (0., 0.),
+                drag_from: None,
+                hover_box: Some(1),
+            });
         }
         "runs" => app.route = Route::Runs,
         "run-live" | "stop-confirm" => {
@@ -119,8 +136,18 @@ pub fn apply(app: &mut FoloApp, s: &Spec, window: &mut Window, cx: &mut Context<
         app.open_new_run(Some("ds_3b91"), window, cx);
     }
     if screen == "toast" {
-        app.toast(crate::ui::Tone::Success, "Export complete", Some("D:/folo/models/shapes-hard-s-best.f16.folo · 9.4 MB".into()), cx);
-        app.toast(crate::ui::Tone::Accent, "Training shapes-mini-s", Some("Live metrics stream into the dashboard.".into()), cx);
+        app.toast(
+            crate::ui::Tone::Success,
+            "Export complete",
+            Some("D:/folo/models/shapes-hard-s-best.f16.folo · 9.4 MB".into()),
+            cx,
+        );
+        app.toast(
+            crate::ui::Tone::Accent,
+            "Training shapes-mini-s",
+            Some("Live metrics stream into the dashboard.".into()),
+            cx,
+        );
     }
     if screen == "playground" && !s.has("empty") {
         app.store.models = app.store.api.models().into();

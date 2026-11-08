@@ -66,12 +66,10 @@ pub type Pts = Arc<Vec<(f32, f32)>>;
 pub struct Derived {
     pub loss: [Pts; 4],
     pub lr: Pts,
-    pub ips: Pts,
     pub map50: Pts,
     pub map50_95: Pts,
     pub precision: Pts,
     pub recall: Pts,
-    pub val_loss: Pts,
 }
 
 /// A run's full metric history, extended live by SSE events.
@@ -107,18 +105,20 @@ impl RunData {
         }
         let spe = self.spe as f32;
         let steps = &self.metrics.steps;
-        let pts = |f: &dyn Fn(&Step) -> f32| -> Pts { Arc::new(steps.iter().map(|s| (s.step as f32 / spe, f(s))).collect()) };
+        let pts = |f: &dyn Fn(&Step) -> f32| -> Pts {
+            Arc::new(steps.iter().map(|s| (s.step as f32 / spe, f(s))).collect())
+        };
         let eps = &self.metrics.epochs;
-        let epts = |f: &dyn Fn(&Epoch) -> f32| -> Pts { Arc::new(eps.iter().map(|e| (e.epoch as f32, f(e))).collect()) };
+        let epts = |f: &dyn Fn(&Epoch) -> f32| -> Pts {
+            Arc::new(eps.iter().map(|e| (e.epoch as f32, f(e))).collect())
+        };
         let d = Derived {
             loss: [pts(&|s| s.loss.box_), pts(&|s| s.loss.cls), pts(&|s| s.loss.dfl), pts(&|s| s.loss.total)],
             lr: pts(&|s| s.lr),
-            ips: pts(&|s| s.imgs_per_s),
             map50: epts(&|e| e.val.map50),
             map50_95: epts(&|e| e.val.map50_95),
             precision: epts(&|e| e.val.precision),
             recall: epts(&|e| e.val.recall),
-            val_loss: epts(&|e| e.train_loss.total),
         };
         self.derived.replace(Some(d.clone()));
         d
@@ -208,7 +208,7 @@ pub fn to_render_image(data: ImageData) -> Option<Arc<RenderImage>> {
             (w, h, img.into_raw())
         }
     };
-    for p in px.chunks_exact_mut(4) {
+    for p in px.as_chunks_mut::<4>().0 {
         p.swap(0, 2);
     }
     let buf = image::RgbaImage::from_raw(w, h, px)?;
@@ -372,7 +372,8 @@ mod tests {
 
     #[test]
     fn rgba_converts_to_bgra() {
-        let img = to_render_image(ImageData::Rgba { width: 1, height: 1, pixels: vec![10, 20, 30, 255] }).unwrap();
+        let img =
+            to_render_image(ImageData::Rgba { width: 1, height: 1, pixels: vec![10, 20, 30, 255] }).unwrap();
         assert_eq!(img.as_bytes(0).unwrap(), &[30, 20, 10, 255]);
     }
 }

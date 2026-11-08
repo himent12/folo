@@ -10,10 +10,10 @@ use std::time::Duration;
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, App, AppContext, Bounds, Context, Entity, FocusHandle, Focusable, FontWeight, InteractiveElement,
-    IntoElement, KeyBinding, MouseButton, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Render,
-    ScrollHandle, SharedString, StatefulInteractiveElement, Styled, Subscription, Task, Window,
-    WindowControlArea, actions, div, px,
+    AnyElement, App, AppContext, Bounds, Context, Entity, FocusHandle, Focusable, FontWeight,
+    InteractiveElement, IntoElement, KeyBinding, MouseButton, MouseMoveEvent, MouseUpEvent, ParentElement,
+    Pixels, Render, ScrollHandle, SharedString, StatefulInteractiveElement, Styled, Subscription, Task,
+    Window, WindowControlArea, actions, div, px,
 };
 
 use crate::api::*;
@@ -115,6 +115,12 @@ pub enum RunFilter {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DsTab {
+    Images,
+    Statistics,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SampleView {
     Predictions,
     Truth,
@@ -204,6 +210,7 @@ pub struct FoloApp {
     pub page_scroll: ScrollHandle,
 
     // Datasets
+    pub ds_tab: DsTab,
     pub ds_split: Option<Split>,
     pub ds_class: Option<u32>,
     pub ds_boxes: bool,
@@ -212,6 +219,8 @@ pub struct FoloApp {
     pub grid_width: Rc<std::cell::Cell<Pixels>>,
     pub inspector: Option<Inspector>,
     pub hist_hover: HashMap<&'static str, f32>,
+    /// Grid view controls built by the image browser, placed on the tab row.
+    pub ds_view_controls: Option<AnyElement>,
 
     // Runs
     pub run_filter: RunFilter,
@@ -278,6 +287,7 @@ impl FoloApp {
             focus: RefCell::new(HashMap::new()),
             kb: false,
             page_scroll: ScrollHandle::new(),
+            ds_tab: DsTab::Images,
             ds_split: None,
             ds_class: None,
             ds_boxes: true,
@@ -286,6 +296,7 @@ impl FoloApp {
             grid_width: Rc::new(std::cell::Cell::new(px(900.))),
             inspector: None,
             hist_hover: HashMap::new(),
+            ds_view_controls: None,
             run_filter: RunFilter::All,
             chart_hover: None,
             sample_view: SampleView::Predictions,
@@ -330,11 +341,7 @@ impl FoloApp {
     /// A stable focus handle for a control key; tab order follows paint order.
     pub fn fh(&self, key: impl Into<SharedString>, cx: &mut Context<Self>) -> FocusHandle {
         let key = key.into();
-        self.focus
-            .borrow_mut()
-            .entry(key)
-            .or_insert_with(|| cx.focus_handle().tab_stop(true))
-            .clone()
+        self.focus.borrow_mut().entry(key).or_insert_with(|| cx.focus_handle().tab_stop(true)).clone()
     }
 
     /// Keyboard focus is on this handle and should show a ring.
@@ -423,10 +430,14 @@ impl FoloApp {
     pub fn ensure_core(&mut self, cx: &mut Context<Self>) {
         if self.store.runs.needs_fetch() {
             self.store.runs = Load::Loading;
-            self.fetch(cx, |api| api.runs(), |this, r, cx| {
-                this.store.runs = r.into();
-                this.subscribe_active(cx);
-            });
+            self.fetch(
+                cx,
+                |api| api.runs(),
+                |this, r, cx| {
+                    this.store.runs = r.into();
+                    this.subscribe_active(cx);
+                },
+            );
         }
         if self.store.datasets.needs_fetch() {
             self.store.datasets = Load::Loading;
@@ -434,23 +445,32 @@ impl FoloApp {
         }
         if self.store.models.needs_fetch() {
             self.store.models = Load::Loading;
-            self.fetch(cx, |api| api.models(), |this, r, _| {
-                this.store.models = r.into();
-                if this.play_model.is_none() {
-                    this.play_model = this.store.models.ready().and_then(|m| m.first()).map(|m| m.id.clone());
-                }
-            });
+            self.fetch(
+                cx,
+                |api| api.models(),
+                |this, r, _| {
+                    this.store.models = r.into();
+                    if this.play_model.is_none() {
+                        this.play_model =
+                            this.store.models.ready().and_then(|m| m.first()).map(|m| m.id.clone());
+                    }
+                },
+            );
         }
         if self.store.system.needs_fetch() {
             self.store.system = Load::Loading;
-            self.fetch(cx, |api| api.system(), |this, r, _| {
-                if let Ok(s) = &r
-                    && let Some(g) = s.gpus.first().and_then(|g| g.util)
-                {
-                    this.store.gpu_util.push_back(g);
-                }
-                this.store.system = r.into();
-            });
+            self.fetch(
+                cx,
+                |api| api.system(),
+                |this, r, _| {
+                    if let Ok(s) = &r
+                        && let Some(g) = s.gpus.first().and_then(|g| g.util)
+                    {
+                        this.store.gpu_util.push_back(g);
+                    }
+                    this.store.system = r.into();
+                },
+            );
         }
         if self.store.health.needs_fetch() {
             self.store.health = Load::Loading;
@@ -464,9 +484,13 @@ impl FoloApp {
             self.store.run_data.insert(id.to_string(), Load::Loading);
             let rid = id.to_string();
             let key = id.to_string();
-            self.fetch(cx, move |api| api.metrics(&rid), move |this, r, _| {
-                this.store.run_data.insert(key, r.map(|m| RunData::new(m, spe)).into());
-            });
+            self.fetch(
+                cx,
+                move |api| api.metrics(&rid),
+                move |this, r, _| {
+                    this.store.run_data.insert(key, r.map(|m| RunData::new(m, spe)).into());
+                },
+            );
         }
     }
 
@@ -474,9 +498,13 @@ impl FoloApp {
         if self.store.samples.get(id).is_none_or(|l| l.needs_fetch()) {
             self.store.samples.insert(id.to_string(), Load::Loading);
             let (rid, key, epoch) = (id.to_string(), id.to_string(), self.sample_epoch);
-            self.fetch(cx, move |api| api.samples(&rid, epoch), move |this, r, _| {
-                this.store.samples.insert(key, r.into());
-            });
+            self.fetch(
+                cx,
+                move |api| api.samples(&rid, epoch),
+                move |this, r, _| {
+                    this.store.samples.insert(key, r.into());
+                },
+            );
         }
     }
 
@@ -484,10 +512,14 @@ impl FoloApp {
         if self.store.logs.get(id).is_none_or(|l| l.needs_fetch()) {
             self.store.logs.insert(id.to_string(), Load::Loading);
             let (rid, key) = (id.to_string(), id.to_string());
-            self.fetch(cx, move |api| api.logs(&rid), move |this, r, _| {
-                this.store.logs.insert(key, r.into());
-                this.log_scroll.scroll_to_bottom();
-            });
+            self.fetch(
+                cx,
+                move |api| api.logs(&rid),
+                move |this, r, _| {
+                    this.store.logs.insert(key, r.into());
+                    this.log_scroll.scroll_to_bottom();
+                },
+            );
         }
     }
 
@@ -495,16 +527,22 @@ impl FoloApp {
         if self.store.dataset.get(id).is_none_or(|l| l.needs_fetch()) {
             self.store.dataset.insert(id.to_string(), Load::Loading);
             let (a, b) = (id.to_string(), id.to_string());
-            self.fetch(cx, move |api| api.dataset(&a), move |this, r, _| {
-                this.store.dataset.insert(b, r.into());
-            });
+            self.fetch(
+                cx,
+                move |api| api.dataset(&a),
+                move |this, r, _| {
+                    this.store.dataset.insert(b, r.into());
+                },
+            );
         }
         if self.store.images.get(id).is_none_or(|l| l.needs_fetch()) {
             self.store.images.insert(id.to_string(), Load::Loading);
             let (a, b) = (id.to_string(), id.to_string());
             self.fetch(
                 cx,
-                move |api| api.images(&a, &ImageQuery { limit: 100_000, ..Default::default() }).map(|p| p.images),
+                move |api| {
+                    api.images(&a, &ImageQuery { limit: 100_000, ..Default::default() }).map(|p| p.images)
+                },
                 move |this, r, _| {
                     this.store.images.insert(b, r.into());
                 },
@@ -516,14 +554,24 @@ impl FoloApp {
         if self.store.evals.get(id).is_none_or(|l| l.needs_fetch()) {
             self.store.evals.insert(id.to_string(), Load::Loading);
             let (a, b) = (id.to_string(), id.to_string());
-            self.fetch(cx, move |api| api.model_eval(&a), move |this, r, _| {
-                this.store.evals.insert(b, r.into());
-            });
+            self.fetch(
+                cx,
+                move |api| api.model_eval(&a),
+                move |this, r, _| {
+                    this.store.evals.insert(b, r.into());
+                },
+            );
         }
     }
 
     /// A decoded image, requesting it if needed.
-    pub fn image(&mut self, dataset: &str, image: &str, kind: ImgKind, cx: &mut Context<Self>) -> Option<Arc<gpui::RenderImage>> {
+    pub fn image(
+        &mut self,
+        dataset: &str,
+        image: &str,
+        kind: ImgKind,
+        cx: &mut Context<Self>,
+    ) -> Option<Arc<gpui::RenderImage>> {
         let key = ImgKey { dataset: dataset.to_string(), image: image.to_string(), kind };
         match self.store.images_px.get(&key) {
             Some(ImgSlot::Ready(img)) => return Some(img.clone()),
@@ -613,23 +661,32 @@ impl FoloApp {
                         for (id, status) in finished {
                             let name = this.store.run(&id).map(|r| r.name.clone()).unwrap_or(id.clone());
                             if status == RunStatus::Completed {
-                                this.toast(Tone::Success, format!("{name} finished"), Some("Best weights saved to Models.".into()), cx);
+                                this.toast(
+                                    Tone::Success,
+                                    format!("{name} finished"),
+                                    Some("Best weights saved to Models.".into()),
+                                    cx,
+                                );
                                 this.store.models = Load::Idle;
                             } else {
                                 this.toast(Tone::Danger, format!("{name} failed"), None, cx);
                             }
                         }
-                        if tick % 20 == 0 {
+                        if tick.is_multiple_of(20) {
                             this.store.system = Load::Idle;
                             this.ensure_core(cx);
                         }
-                        if tick % 50 == 0 && matches!(this.store.runs, Load::Ready(_)) {
-                            this.fetch(cx, |api| api.runs(), |this, r, cx| {
-                                if let Ok(runs) = r {
-                                    this.store.runs = Load::Ready(runs);
-                                    this.subscribe_active(cx);
-                                }
-                            });
+                        if tick.is_multiple_of(50) && matches!(this.store.runs, Load::Ready(_)) {
+                            this.fetch(
+                                cx,
+                                |api| api.runs(),
+                                |this, r, cx| {
+                                    if let Ok(runs) = r {
+                                        this.store.runs = Load::Ready(runs);
+                                        this.subscribe_active(cx);
+                                    }
+                                },
+                            );
                         }
                         if changed {
                             cx.notify();
@@ -646,7 +703,13 @@ impl FoloApp {
 
     // ---------- actions ----------
 
-    pub fn toast(&mut self, tone: Tone, title: impl Into<SharedString>, body: Option<SharedString>, cx: &mut Context<Self>) {
+    pub fn toast(
+        &mut self,
+        tone: Tone,
+        title: impl Into<SharedString>,
+        body: Option<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
         self.toast_seq += 1;
         let id = self.toast_seq;
         self.toasts.push(Toast { id, tone, title: title.into(), body });
@@ -710,11 +773,15 @@ impl FoloApp {
     }
 
     pub fn open_new_run(&mut self, dataset: Option<&str>, window: &mut Window, cx: &mut Context<Self>) {
-        let idx = dataset
-            .and_then(|id| self.store.datasets.ready()?.iter().position(|d| d.id == id))
-            .unwrap_or(0);
+        let idx =
+            dataset.and_then(|id| self.store.datasets.ready()?.iter().position(|d| d.id == id)).unwrap_or(0);
         let n = self.store.runs.ready().map_or(0, |r| r.len()) + 1;
-        let ds_name = self.store.datasets.ready().and_then(|d| d.get(idx)).map_or("shapes".to_string(), |d| d.name.clone());
+        let ds_name = self
+            .store
+            .datasets
+            .ready()
+            .and_then(|d| d.get(idx))
+            .map_or("shapes".to_string(), |d| d.name.clone());
         let name = cx.new(|cx| {
             let mut i = TextInput::new("run name", cx);
             i.set_text(format!("{ds_name}-s-{n}"), cx);
@@ -765,30 +832,44 @@ impl FoloApp {
             optimizer: OPTIMIZERS[form.optimizer].into(),
             lr0: form.lr0,
             weights: None,
-            augment: Augment { mosaic: form.mosaic, mixup: form.mixup, fliplr: form.fliplr, ..Augment::default() },
+            augment: Augment {
+                mosaic: form.mosaic,
+                mixup: form.mixup,
+                fliplr: form.fliplr,
+                ..Augment::default()
+            },
             seed: 0,
         };
         let _ = window;
-        self.fetch(cx, move |api| api.create_run(config), |this, r, cx| match r {
-            Ok(run) => {
-                this.new_run = None;
-                let id = run.id.clone();
-                let name = run.name.clone();
-                if let Some(runs) = this.store.runs.ready_mut() {
-                    runs.insert(0, run);
+        self.fetch(
+            cx,
+            move |api| api.create_run(config),
+            |this, r, cx| match r {
+                Ok(run) => {
+                    this.new_run = None;
+                    let id = run.id.clone();
+                    let name = run.name.clone();
+                    if let Some(runs) = this.store.runs.ready_mut() {
+                        runs.insert(0, run);
+                    }
+                    this.subscribe_active(cx);
+                    this.toast(
+                        Tone::Accent,
+                        format!("Training {name}"),
+                        Some("Live metrics stream into the dashboard.".into()),
+                        cx,
+                    );
+                    let prev = std::mem::replace(&mut this.route, Route::Run(id));
+                    this.history.push(prev);
                 }
-                this.subscribe_active(cx);
-                this.toast(Tone::Accent, format!("Training {name}"), Some("Live metrics stream into the dashboard.".into()), cx);
-                let prev = std::mem::replace(&mut this.route, Route::Run(id));
-                this.history.push(prev);
-            }
-            Err(e) => {
-                if let Some(f) = this.new_run.as_mut() {
-                    f.submitting = false;
-                    f.error = Some(e);
+                Err(e) => {
+                    if let Some(f) = this.new_run.as_mut() {
+                        f.submitting = false;
+                        f.error = Some(e);
+                    }
                 }
-            }
-        });
+            },
+        );
         cx.notify();
     }
 
@@ -800,33 +881,51 @@ impl FoloApp {
         {
             r.status = RunStatus::Stopping;
         }
-        self.fetch(cx, move |api| api.stop_run(&rid), move |this, r, cx| match r {
-            Ok(run) => {
-                let name = run.name.clone();
-                let epoch = run.epoch;
-                if let Some(runs) = this.store.runs.ready_mut()
-                    && let Some(slot) = runs.iter_mut().find(|r| r.id == run.id)
-                {
-                    *slot = run;
+        self.fetch(
+            cx,
+            move |api| api.stop_run(&rid),
+            move |this, r, cx| match r {
+                Ok(run) => {
+                    let name = run.name.clone();
+                    let epoch = run.epoch;
+                    if let Some(runs) = this.store.runs.ready_mut()
+                        && let Some(slot) = runs.iter_mut().find(|r| r.id == run.id)
+                    {
+                        *slot = run;
+                    }
+                    this.subscriptions.remove(&id);
+                    this.store.logs.insert(id.clone(), Load::Idle);
+                    this.toast(
+                        Tone::Neutral,
+                        format!("Stopped {name}"),
+                        Some(format!("Last checkpoint kept (epoch {epoch}).").into()),
+                        cx,
+                    );
                 }
-                this.subscriptions.remove(&id);
-                this.store.logs.insert(id.clone(), Load::Idle);
-                this.toast(Tone::Neutral, format!("Stopped {name}"), Some(format!("Last checkpoint kept (epoch {epoch}).").into()), cx);
-            }
-            Err(e) => this.toast(Tone::Danger, "Could not stop the run", Some(e.message.into()), cx),
-        });
+                Err(e) => this.toast(Tone::Danger, "Could not stop the run", Some(e.message.into()), cx),
+            },
+        );
         cx.notify();
     }
 
     pub fn export_model(&mut self, id: String, format: &'static str, cx: &mut Context<Self>) {
         self.export_open = false;
-        self.fetch(cx, move |api| api.export_model(&id, format), |this, r, cx| match r {
-            Ok(res) => {
-                let (v, u) = bytes(res.bytes);
-                this.toast(Tone::Success, "Export complete", Some(format!("{} · {v} {u}", res.path).into()), cx);
-            }
-            Err(e) => this.toast(Tone::Danger, "Export failed", Some(e.message.into()), cx),
-        });
+        self.fetch(
+            cx,
+            move |api| api.export_model(&id, format),
+            |this, r, cx| match r {
+                Ok(res) => {
+                    let (v, u) = bytes(res.bytes);
+                    this.toast(
+                        Tone::Success,
+                        "Export complete",
+                        Some(format!("{} · {v} {u}", res.path).into()),
+                        cx,
+                    );
+                }
+                Err(e) => this.toast(Tone::Danger, "Export failed", Some(e.message.into()), cx),
+            },
+        );
     }
 
     // ---------- playground ----------
@@ -834,7 +933,12 @@ impl FoloApp {
     pub fn play_dataset_image(&mut self, dataset: &str, image_id: &str, cx: &mut Context<Self>) {
         let input = PredictInput::Dataset { dataset_id: dataset.to_string(), image_id: image_id.to_string() };
         let (d, i) = (dataset.to_string(), image_id.to_string());
-        let name: SharedString = format!("{} / {}", self.store.dataset_summary(dataset).map_or(dataset, |d| d.name.as_str()), image_id).into();
+        let name: SharedString = format!(
+            "{} / {}",
+            self.store.dataset_summary(dataset).map_or(dataset, |d| d.name.as_str()),
+            image_id
+        )
+        .into();
         self.play_seq += 1;
         let seq = self.play_seq;
         self.fetch(
@@ -843,9 +947,13 @@ impl FoloApp {
                 let data = api.image(&d, &i, None)?;
                 let (w, h) = match &data {
                     ImageData::Rgba { width, height, .. } => (*width, *height),
-                    ImageData::Encoded(b) => image::load_from_memory(b).map(|i| (i.width(), i.height())).unwrap_or((0, 0)),
+                    ImageData::Encoded(b) => {
+                        image::load_from_memory(b).map(|i| (i.width(), i.height())).unwrap_or((0, 0))
+                    }
                 };
-                to_render_image(data).map(|img| (img, w, h)).ok_or_else(|| ApiError::new("decode_failed", "Could not decode the image"))
+                to_render_image(data)
+                    .map(|img| (img, w, h))
+                    .ok_or_else(|| ApiError::new("decode_failed", "Could not decode the image"))
             },
             move |this, r, cx| {
                 if seq != this.play_seq {
@@ -856,26 +964,36 @@ impl FoloApp {
                         this.play_image = Some(PlayImage { name, input, image, width, height });
                         this.run_predict(cx);
                     }
-                    Err(e) => this.toast(Tone::Danger, "Could not open the image", Some(e.message.into()), cx),
+                    Err(e) => {
+                        this.toast(Tone::Danger, "Could not open the image", Some(e.message.into()), cx)
+                    }
                 }
             },
         );
     }
 
     pub fn play_file(&mut self, path: std::path::PathBuf, cx: &mut Context<Self>) {
-        let name: SharedString = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default().into();
+        let name: SharedString =
+            path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default().into();
         let n2 = name.to_string();
         self.play_seq += 1;
         let seq = self.play_seq;
         self.fetch(
             cx,
             move |_| {
-                let bytes = std::fs::read(&path).map_err(|e| ApiError::new("read_failed", format!("Could not read {n2}: {e}")))?;
-                let img = image::load_from_memory(&bytes)
-                    .map_err(|_| ApiError::new("unsupported_image", format!("{n2} is not an image FOLO can read")).with_hint("Use a JPEG or PNG."))?;
+                let bytes = std::fs::read(&path)
+                    .map_err(|e| ApiError::new("read_failed", format!("Could not read {n2}: {e}")))?;
+                let img = image::load_from_memory(&bytes).map_err(|_| {
+                    ApiError::new("unsupported_image", format!("{n2} is not an image FOLO can read"))
+                        .with_hint("Use a JPEG or PNG.")
+                })?;
                 let (w, h) = (img.width(), img.height());
-                let render = to_render_image(ImageData::Rgba { width: w, height: h, pixels: img.to_rgba8().into_raw() })
-                    .ok_or_else(|| ApiError::new("decode_failed", "Could not decode the image"))?;
+                let render = to_render_image(ImageData::Rgba {
+                    width: w,
+                    height: h,
+                    pixels: img.to_rgba8().into_raw(),
+                })
+                .ok_or_else(|| ApiError::new("decode_failed", "Could not decode the image"))?;
                 Ok((Arc::new(bytes), render, w, h))
             },
             move |this, r, cx| {
@@ -884,7 +1002,13 @@ impl FoloApp {
                 }
                 match r {
                     Ok((bytes, image, width, height)) => {
-                        this.play_image = Some(PlayImage { name: name.clone(), input: PredictInput::File { name: name.to_string(), bytes }, image, width, height });
+                        this.play_image = Some(PlayImage {
+                            name: name.clone(),
+                            input: PredictInput::File { name: name.to_string(), bytes },
+                            image,
+                            width,
+                            height,
+                        });
                         this.run_predict(cx);
                     }
                     Err(e) => this.toast(Tone::Danger, e.message.clone(), e.hint.map(Into::into), cx),
@@ -896,21 +1020,36 @@ impl FoloApp {
     pub fn run_predict(&mut self, cx: &mut Context<Self>) {
         let (Some(model), Some(img)) = (self.play_model.clone(), self.play_image.as_ref()) else { return };
         // Fetch everything above the lowest threshold once; the conf slider filters locally.
-        let req = PredictRequest { model_id: model, input: img.input.clone(), conf: 0.05, iou: self.play_iou, max_det: 300 };
+        let req = PredictRequest {
+            model_id: model,
+            input: img.input.clone(),
+            conf: 0.05,
+            iou: self.play_iou,
+            max_det: 300,
+        };
         if !matches!(self.play_pred, Load::Ready(_)) {
             self.play_pred = Load::Loading;
         }
         self.play_seq += 1;
         let seq = self.play_seq;
-        self.fetch(cx, move |api| api.predict(&req), move |this, r, _| {
-            if seq == this.play_seq {
-                this.play_pred = r.into();
-            }
-        });
+        self.fetch(
+            cx,
+            move |api| api.predict(&req),
+            move |this, r, _| {
+                if seq == this.play_seq {
+                    this.play_pred = r.into();
+                }
+            },
+        );
     }
 
     pub fn pick_image(&mut self, cx: &mut Context<Self>) {
-        let rx = cx.prompt_for_paths(gpui::PathPromptOptions { files: true, directories: false, multiple: false, prompt: Some("Open image".into()) });
+        let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Open image".into()),
+        });
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(paths))) = rx.await
                 && let Some(p) = paths.into_iter().next()
@@ -967,7 +1106,9 @@ impl FoloApp {
                         .size(px(10.))
                         .flex_none()
                         .text_color(t.text_secondary)
-                        .group_hover(id, move |s| s.text_color(if close { gpui::white() } else { t.text_primary })),
+                        .group_hover(id, move |s| {
+                            s.text_color(if close { gpui::white() } else { t.text_primary })
+                        }),
                 )
         };
         let search_fh = self.fh("titlebar-search", cx);
@@ -1011,7 +1152,11 @@ impl FoloApp {
                                             .child(label),
                                     )
                                     .when_some(route, |d, r| {
-                                        d.cursor_pointer().hover(|s| s.bg(t.bg_hover)).on_click(cx.listener(move |this, _, w, cx| this.navigate(r.clone(), w, cx)))
+                                        d.cursor_pointer().hover(|s| s.bg(t.bg_hover)).on_click(
+                                            cx.listener(move |this, _, w, cx| {
+                                                this.navigate(r.clone(), w, cx)
+                                            }),
+                                        )
                                     }),
                             )
                     })),
@@ -1065,9 +1210,15 @@ impl FoloApp {
                 (self.store.dataset_summary(id).map_or(id.clone(), |d| d.name.clone()).into(), None),
             ],
             Route::Runs => vec![("Runs".into(), None)],
-            Route::Run(id) => vec![("Runs".into(), Some(Route::Runs)), (self.store.run(id).map_or(id.clone(), |r| r.name.clone()).into(), None)],
+            Route::Run(id) => vec![
+                ("Runs".into(), Some(Route::Runs)),
+                (self.store.run(id).map_or(id.clone(), |r| r.name.clone()).into(), None),
+            ],
             Route::Models => vec![("Models".into(), None)],
-            Route::Model(id) => vec![("Models".into(), Some(Route::Models)), (self.store.model(id).map_or(id.clone(), |m| m.name.clone()).into(), None)],
+            Route::Model(id) => vec![
+                ("Models".into(), Some(Route::Models)),
+                (self.store.model(id).map_or(id.clone(), |m| m.name.clone()).into(), None),
+            ],
             Route::Playground => vec![("Playground".into(), None)],
             Route::Settings => vec![("Settings".into(), None)],
         }
@@ -1075,9 +1226,15 @@ impl FoloApp {
 
     fn sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
+        // Narrow windows collapse the sidebar to an icon rail.
+        let compact = window.viewport_size().width < px(1120.);
         let section = self.route.section();
         let live = self.store.live_run().cloned();
-        let active_count = self.store.runs.ready().map_or(0, |r| r.iter().filter(|r| r.status.is_active()).count());
+        let active_count = self
+            .store
+            .runs
+            .ready()
+            .map_or(0, |r| r.iter().filter(|r| r.status == RunStatus::Running).count());
         let nav = [
             (Section::Overview, "Overview", "icons/layout-dashboard.svg", Route::Overview, "1"),
             (Section::Datasets, "Datasets", "icons/images.svg", Route::Datasets, "2"),
@@ -1089,17 +1246,28 @@ impl FoloApp {
             .into_iter()
             .map(|(sec, label, icon_path, route, key)| {
                 let badge = (sec == Section::Runs && active_count > 0).then_some(active_count);
-                self.nav_item(label, icon_path, section == sec, route, key, badge, window, cx)
+                self.nav_item(label, icon_path, section == sec, route, key, badge, compact, window, cx)
             })
             .collect();
-        let settings = self.nav_item("Settings", "icons/settings.svg", section == Section::Settings, Route::Settings, ",", None, window, cx);
+        let settings = self.nav_item(
+            "Settings",
+            "icons/settings.svg",
+            section == Section::Settings,
+            Route::Settings,
+            ",",
+            None,
+            compact,
+            window,
+            cx,
+        );
         let mut live_card = None;
         if let Some(r) = live {
-            live_card = Some(self.live_mini(&r, window, cx));
+            live_card =
+                Some(if compact { self.live_rail(&r, window, cx) } else { self.live_mini(&r, window, cx) });
         }
-        let health = self.connection_line(cx);
+        let health = self.connection_line(compact, cx);
         div()
-            .w(px(tsize::SIDEBAR))
+            .w(px(if compact { tsize::SIDEBAR_COLLAPSED } else { tsize::SIDEBAR }))
             .flex_none()
             .h_full()
             .flex()
@@ -1116,17 +1284,23 @@ impl FoloApp {
                     .flex()
                     .items_center()
                     .gap(px(10.))
-                    .px(px(16.))
+                    .px(px(if compact { 18. } else { 16. }))
                     .window_control_area(WindowControlArea::Drag)
                     .child(logo(&t, 20.))
-                    .child(
-                        div()
-                            .flex()
-                            .items_baseline()
-                            .gap(px(6.))
-                            .child(text(ty::MD, t.text_primary).font_weight(FontWeight::SEMIBOLD).child("FOLO"))
-                            .child(text(ty::MD, t.text_tertiary).child("Desktop")),
-                    ),
+                    .when(!compact, |d| {
+                        d.child(
+                            div()
+                                .flex()
+                                .items_baseline()
+                                .gap(px(6.))
+                                .child(
+                                    text(ty::MD, t.text_primary)
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .child("FOLO"),
+                                )
+                                .child(text(ty::MD, t.text_tertiary).child("Desktop")),
+                        )
+                    }),
             )
             .child(div().flex().flex_col().gap(px(2.)).px(px(8.)).pt(px(8.)).children(items))
             .child(div().flex_1())
@@ -1136,7 +1310,18 @@ impl FoloApp {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn nav_item(&mut self, label: &'static str, icon_path: &'static str, active: bool, route: Route, key: &'static str, badge: Option<usize>, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn nav_item(
+        &mut self,
+        label: &'static str,
+        icon_path: &'static str,
+        active: bool,
+        route: Route,
+        key: &'static str,
+        badge: Option<usize>,
+        compact: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let t = theme(cx);
         let fh = self.fh(format!("nav-{label}"), cx);
         let ring = self.ring(&fh, window);
@@ -1162,24 +1347,42 @@ impl FoloApp {
                 }
             }))
             .when(ring, |d| d.child(focus_ring(&t, 6.)))
-            .child(icon(icon_path, 16., if active { t.text_primary } else { t.text_tertiary }))
-            .child(
-                text(ty::BASE, if active { t.text_primary } else { t.text_secondary })
-                    .when(active, |d| d.font_weight(FontWeight::MEDIUM))
-                    .flex_1()
-                    .child(label),
-            )
-            .when_some(badge, |d, n| {
-                d.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(5.))
-                        .child(dot(t.accent_solid, 6., true, "nav-live"))
-                        .child(text(ty::XS, t.accent_text).tnum().font_weight(FontWeight::MEDIUM).child(format!("{n} live"))),
-                )
+            .when(compact, |d| {
+                d.justify_center().px(px(0.)).tooltip(crate::controls::tip(label, Some(shortcut_label(key))))
             })
-            .when(badge.is_none(), |d| d.child(div().opacity(if active { 0.0 } else { 0.0 }).child(shortcut(&t, &["Ctrl", key]))))
+            .child(icon(icon_path, 16., if active { t.text_primary } else { t.text_tertiary }))
+            .when(compact && badge.is_some(), |d| {
+                d.child(div().absolute().top(px(6.)).right(px(8.)).child(dot(
+                    t.accent_solid,
+                    6.,
+                    true,
+                    "nav-live-c",
+                )))
+            })
+            .when(!compact, |d| {
+                d.child(
+                    text(ty::BASE, if active { t.text_primary } else { t.text_secondary })
+                        .when(active, |d| d.font_weight(FontWeight::MEDIUM))
+                        .flex_1()
+                        .child(label),
+                )
+                .when_some(badge, |d, n| {
+                    d.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(5.))
+                            .child(dot(t.accent_solid, 6., true, "nav-live"))
+                            .child(
+                                text(ty::XS, t.accent_text)
+                                    .tnum()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child(format!("{n} live")),
+                            ),
+                    )
+                })
+                .tooltip(crate::controls::tip(label, Some(shortcut_label(key))))
+            })
             .into_any_element()
     }
 
@@ -1222,24 +1425,71 @@ impl FoloApp {
                     .child(dot(t.accent_solid, 6., true, "mini"))
                     .child(text(ty::XS, t.accent_text).font_weight(FontWeight::MEDIUM).child("TRAINING"))
                     .child(div().flex_1())
-                    .child(text(ty::XS, t.text_tertiary).tnum().child(format!("{:.0}%", r.progress() * 100.0))),
+                    .child(
+                        text(ty::XS, t.text_tertiary).tnum().child(format!("{:.0}%", r.progress() * 100.0)),
+                    ),
             )
-            .child(text(ty::BASE, t.text_primary).font_weight(FontWeight::MEDIUM).truncate().child(r.name.clone()))
+            .child(
+                text(ty::BASE, t.text_primary)
+                    .font_weight(FontWeight::MEDIUM)
+                    .truncate()
+                    .child(r.name.clone()),
+            )
             .child(progress(&t, r.progress(), t.accent_solid, 3.))
             .child(
                 div()
                     .flex()
                     .justify_between()
-                    .child(text(ty::XS, t.text_tertiary).tnum().child(format!("Epoch {} / {}", r.epoch, r.epochs)))
+                    .child(
+                        text(ty::XS, t.text_tertiary)
+                            .tnum()
+                            .child(format!("Epoch {} / {}", r.epoch, r.epochs)),
+                    )
                     .child(text(ty::XS, t.text_secondary).tnum().child(format!("mAP {map}"))),
             )
             .into_any_element()
     }
 
-    fn connection_line(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The live run as a rail button: a progress ring around a pulsing dot.
+    fn live_rail(&mut self, r: &Run, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let t = theme(cx);
+        let id = r.id.clone();
+        let el = div()
+            .id("live-rail")
+            .mx(px(10.))
+            .mb(px(8.))
+            .h(px(36.))
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap(px(5.))
+            .rounded(px(8.))
+            .bg(t.bg_raised)
+            .border_1()
+            .border_color(t.line_subtle)
+            .cursor_pointer()
+            .hover(|s| s.border_color(t.line_default))
+            .tooltip(crate::controls::tip(format!("{} · epoch {} / {}", r.name, r.epoch, r.epochs), None))
+            .child(dot(t.accent_solid, 6., true, "rail"))
+            .child(div().w(px(20.)).child(progress(&t, r.progress(), t.accent_solid, 2.)));
+        self.bind(
+            el,
+            "live-rail",
+            8.,
+            window,
+            cx,
+            act(move |this, w, cx| this.navigate(Route::Run(id.clone()), w, cx)),
+        )
+        .into_any_element()
+    }
+
+    fn connection_line(&self, compact: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let (color, label) = match &self.store.health {
-            Load::Ready(h) if h.mock => (t.accent_solid, format!("{} · v{}", self.store.api.describe(), h.version)),
+            Load::Ready(h) if h.mock => {
+                (t.accent_solid, format!("{} · v{}", self.store.api.describe(), h.version))
+            }
             Load::Ready(h) => (t.success_solid, format!("{} · v{}", self.store.api.describe(), h.version)),
             Load::Failed(_) => (t.danger_solid, "Server unreachable".to_string()),
             _ => (t.text_disabled, "Connecting…".to_string()),
@@ -1253,8 +1503,9 @@ impl FoloApp {
             .px(px(16.))
             .border_t_1()
             .border_color(t.line_subtle)
+            .when(compact, |d| d.justify_center().px(px(0.)))
             .child(div().size(px(6.)).rounded_full().bg(color))
-            .child(text(ty::XS, t.text_tertiary).truncate().child(label))
+            .when(!compact, |d| d.child(text(ty::XS, t.text_tertiary).truncate().child(label)))
     }
 
     fn page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -1269,6 +1520,17 @@ impl FoloApp {
             Route::Playground => self.playground(window, cx),
             Route::Settings => self.settings(window, cx),
         }
+    }
+}
+
+fn shortcut_label(key: &str) -> &'static str {
+    match key {
+        "1" => "Ctrl 1",
+        "2" => "Ctrl 2",
+        "3" => "Ctrl 3",
+        "4" => "Ctrl 4",
+        "5" => "Ctrl 5",
+        _ => "Ctrl ,",
     }
 }
 
@@ -1354,7 +1616,9 @@ impl Render for FoloApp {
             }))
             .on_action(cx.listener(|this, _: &Dismiss, w, cx| this.dismiss(w, cx)))
             .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _, cx| {
-                if matches!(ev.keystroke.key.as_str(), "up" | "down" | "left" | "right" | "enter" | "space") && !this.kb {
+                if matches!(ev.keystroke.key.as_str(), "up" | "down" | "left" | "right" | "enter" | "space")
+                    && !this.kb
+                {
                     this.kb = true;
                     cx.notify();
                 }
@@ -1404,10 +1668,8 @@ impl FoloApp {
             window.focus(&self.root_focus);
         } else if self.inspector.is_some() {
             self.inspector = None;
-        } else if self.parent_route().is_some() {
-            if let Some(p) = self.parent_route() {
-                self.navigate(p, window, cx);
-            }
+        } else if let Some(p) = self.parent_route() {
+            self.navigate(p, window, cx);
         }
         cx.notify();
     }

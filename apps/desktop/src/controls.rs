@@ -12,6 +12,9 @@ use crate::app::{Action, Drag, FoloApp, focus_ring};
 use crate::theme::{Theme, radius, size as tsize, theme, ty};
 use crate::ui::*;
 
+/// Called with the chosen option index.
+pub type OnSelect = std::rc::Rc<dyn Fn(&mut FoloApp, usize, &mut Window, &mut Context<FoloApp>)>;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Btn {
     Primary,
@@ -44,14 +47,25 @@ impl Render for Tip {
     }
 }
 
-pub fn tip(text: impl Into<SharedString>, keys: Option<&'static str>) -> impl Fn(&mut Window, &mut gpui::App) -> AnyView + 'static {
+pub fn tip(
+    text: impl Into<SharedString>,
+    keys: Option<&'static str>,
+) -> impl Fn(&mut Window, &mut gpui::App) -> AnyView + 'static {
     let text: SharedString = text.into();
     move |_, cx| cx.new(|_| Tip(text.clone(), keys.map(Into::into))).into()
 }
 
 impl FoloApp {
     /// Make `el` focusable and activatable by click, Enter and Space.
-    pub fn bind(&self, el: Stateful<Div>, key: &str, radius_px: f32, window: &Window, cx: &mut Context<Self>, action: Action) -> Stateful<Div> {
+    pub fn bind(
+        &self,
+        el: Stateful<Div>,
+        key: &str,
+        radius_px: f32,
+        window: &Window,
+        cx: &mut Context<Self>,
+        action: Action,
+    ) -> Stateful<Div> {
         let fh = self.fh(key.to_string(), cx);
         let ring = self.ring(&fh, window);
         let t = theme(cx);
@@ -72,7 +86,16 @@ impl FoloApp {
             .when(ring, |d| d.child(focus_ring(&t, radius_px)))
     }
 
-    pub fn button(&self, key: &str, label: impl Into<SharedString>, kind: Btn, icon_path: Option<&'static str>, window: &Window, cx: &mut Context<Self>, action: Action) -> Stateful<Div> {
+    pub fn button(
+        &self,
+        key: &str,
+        label: impl Into<SharedString>,
+        kind: Btn,
+        icon_path: Option<&'static str>,
+        window: &Window,
+        cx: &mut Context<Self>,
+        action: Action,
+    ) -> Stateful<Div> {
         let t = theme(cx);
         let (bg, fg, border, hover) = btn_colors(&t, kind);
         let label: SharedString = label.into();
@@ -96,7 +119,15 @@ impl FoloApp {
         self.bind(el, key, radius::MD, window, cx, action)
     }
 
-    pub fn icon_button(&self, key: &str, icon_path: &'static str, tooltip: &'static str, window: &Window, cx: &mut Context<Self>, action: Action) -> Stateful<Div> {
+    pub fn icon_button(
+        &self,
+        key: &str,
+        icon_path: &'static str,
+        tooltip: &'static str,
+        window: &Window,
+        cx: &mut Context<Self>,
+        action: Action,
+    ) -> Stateful<Div> {
         let t = theme(cx);
         let el = div()
             .id(SharedString::from(key.to_string()))
@@ -115,7 +146,42 @@ impl FoloApp {
     }
 
     /// A segmented control. Arrow keys move the selection while it has focus.
-    pub fn segmented(&self, key: &str, options: &[&str], selected: usize, window: &Window, cx: &mut Context<Self>, on_select: std::rc::Rc<dyn Fn(&mut FoloApp, usize, &mut Window, &mut Context<FoloApp>)>) -> Stateful<Div> {
+    pub fn segmented(
+        &self,
+        key: &str,
+        options: &[&str],
+        selected: usize,
+        window: &Window,
+        cx: &mut Context<Self>,
+        on_select: OnSelect,
+    ) -> Stateful<Div> {
+        self.segmented_ext(key, options, selected, false, window, cx, on_select)
+    }
+
+    /// A segmented control that fills its container with equal-width segments (forms).
+    pub fn segmented_fill(
+        &self,
+        key: &str,
+        options: &[&str],
+        selected: usize,
+        window: &Window,
+        cx: &mut Context<Self>,
+        on_select: OnSelect,
+    ) -> Stateful<Div> {
+        self.segmented_ext(key, options, selected, true, window, cx, on_select)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn segmented_ext(
+        &self,
+        key: &str,
+        options: &[&str],
+        selected: usize,
+        fill: bool,
+        window: &Window,
+        cx: &mut Context<Self>,
+        on_select: OnSelect,
+    ) -> Stateful<Div> {
         let t = theme(cx);
         let fh = self.fh(key.to_string(), cx);
         let ring = self.ring(&fh, window);
@@ -128,7 +194,8 @@ impl FoloApp {
             .h(px(tsize::CONTROL_MD))
             .p(px(2.))
             .flex()
-            .flex_none()
+            .when(fill, |d| d.w_full())
+            .when(!fill, |d| d.flex_none())
             .items_center()
             .gap(px(2.))
             .rounded(px(radius::MD))
@@ -157,6 +224,7 @@ impl FoloApp {
                     .id(SharedString::from(format!("{key}-{i}")))
                     .h_full()
                     .px(px(10.))
+                    .when(fill, |d| d.flex_1())
                     .flex()
                     .items_center()
                     .justify_center()
@@ -179,7 +247,17 @@ impl FoloApp {
     }
 
     /// Filter chip (toggle).
-    pub fn chip(&self, key: &str, label: impl Into<SharedString>, on: bool, swatch_color: Option<Hsla>, count: Option<u32>, window: &Window, cx: &mut Context<Self>, action: Action) -> Stateful<Div> {
+    pub fn chip(
+        &self,
+        key: &str,
+        label: impl Into<SharedString>,
+        on: bool,
+        swatch_color: Option<Hsla>,
+        count: Option<u32>,
+        window: &Window,
+        cx: &mut Context<Self>,
+        action: Action,
+    ) -> Stateful<Div> {
         let t = theme(cx);
         let el = div()
             .id(SharedString::from(key.to_string()))
@@ -193,14 +271,27 @@ impl FoloApp {
             .border_1()
             .cursor_pointer()
             .when(on, |d| d.bg(t.bg_selected).border_color(t.accent_line))
-            .when(!on, |d| d.border_color(t.line_default).hover(|s| s.bg(t.bg_hover).border_color(t.line_strong)))
+            .when(!on, |d| {
+                d.border_color(t.line_default).hover(|s| s.bg(t.bg_hover).border_color(t.line_strong))
+            })
             .when_some(swatch_color, |d, c| d.child(swatch(c, 8.)))
-            .child(text(ty::SM, if on { t.text_primary } else { t.text_secondary }).whitespace_nowrap().child(label.into()))
+            .child(
+                text(ty::SM, if on { t.text_primary } else { t.text_secondary })
+                    .whitespace_nowrap()
+                    .child(label.into()),
+            )
             .when_some(count, |d, c| d.child(text(ty::XS, t.text_tertiary).tnum().child(int(c as u64))));
         self.bind(el, key, radius::SM, window, cx, action)
     }
 
-    pub fn switch(&self, key: &str, on: bool, window: &Window, cx: &mut Context<Self>, action: Action) -> Stateful<Div> {
+    pub fn switch(
+        &self,
+        key: &str,
+        on: bool,
+        window: &Window,
+        cx: &mut Context<Self>,
+        action: Action,
+    ) -> Stateful<Div> {
         let t = theme(cx);
         let el = div()
             .id(SharedString::from(key.to_string()))
@@ -224,7 +315,16 @@ impl FoloApp {
 
     /// A horizontal slider over `[min, max]`. Drag, click, or use arrows / Home / End.
     #[allow(clippy::too_many_arguments)]
-    pub fn slider(&self, key: &'static str, value: f32, min: f32, max: f32, step: f32, window: &Window, cx: &mut Context<Self>) -> Stateful<Div> {
+    pub fn slider(
+        &self,
+        key: &'static str,
+        value: f32,
+        min: f32,
+        max: f32,
+        step: f32,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
         let t = theme(cx);
         let fh = self.fh(key, cx);
         let ring = self.ring(&fh, window);
@@ -270,9 +370,19 @@ impl FoloApp {
                     cx.stop_propagation();
                 }
             }))
-            .child(canvas(move |b, _, _| {
-                store.borrow_mut().insert(key, b);
-            }, |_, _, _, _| {}).absolute().left(px(7.)).right(px(7.)).top_0().bottom_0())
+            .child(
+                canvas(
+                    move |b, _, _| {
+                        store.borrow_mut().insert(key, b);
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .left(px(7.))
+                .right(px(7.))
+                .top_0()
+                .bottom_0(),
+            )
             .child(
                 div()
                     .absolute()
@@ -327,7 +437,16 @@ impl FoloApp {
 
     /// Dropdown trigger that opens a listbox under itself.
     #[allow(clippy::too_many_arguments)]
-    pub fn select(&self, key: &'static str, current: SharedString, options: Vec<(SharedString, Option<SharedString>)>, selected: usize, window: &Window, cx: &mut Context<Self>, on_select: std::rc::Rc<dyn Fn(&mut FoloApp, usize, &mut Window, &mut Context<FoloApp>)>) -> AnyElement {
+    pub fn select(
+        &self,
+        key: &'static str,
+        current: SharedString,
+        options: Vec<(SharedString, Option<SharedString>)>,
+        selected: usize,
+        window: &Window,
+        cx: &mut Context<Self>,
+        on_select: OnSelect,
+    ) -> AnyElement {
         let t = theme(cx);
         let open = self.menu_open == Some(key);
         let fh = self.fh(key, cx);
@@ -368,7 +487,11 @@ impl FoloApp {
             }))
             .when(ring, |d| d.child(focus_ring(&t, radius::MD)))
             .child(text(ty::BASE, t.text_primary).flex_1().truncate().child(current))
-            .child(icon(if open { "icons/chevron-up.svg" } else { "icons/chevron-down.svg" }, 14., t.text_tertiary));
+            .child(icon(
+                if open { "icons/chevron-up.svg" } else { "icons/chevron-down.svg" },
+                14.,
+                t.text_tertiary,
+            ));
         let menu = open.then(|| {
             gpui::deferred(
                 div()
@@ -407,7 +530,11 @@ impl FoloApp {
                             }))
                             .child(text(ty::BASE, t.text_primary).flex_1().truncate().child(label))
                             .when_some(detail, |d, s| d.child(text(ty::XS, t.text_tertiary).tnum().child(s)))
-                            .child(div().w(px(14.)).when(on, |d| d.child(icon("icons/check.svg", 14., t.accent_text))))
+                            .child(
+                                div()
+                                    .w(px(14.))
+                                    .when(on, |d| d.child(icon("icons/check.svg", 14., t.accent_text))),
+                            )
                     })),
             )
             .with_priority(2)
@@ -419,7 +546,9 @@ impl FoloApp {
 pub fn btn_colors(t: &Theme, kind: Btn) -> (Hsla, Hsla, Option<Hsla>, Hsla) {
     match kind {
         Btn::Primary => (t.accent_solid, t.accent_on, None, t.accent_solid_hover),
-        Btn::Secondary => (t.bg_raised, t.text_primary, Some(t.line_default), crate::theme::over(t.bg_raised, t.bg_hover)),
+        Btn::Secondary => {
+            (t.bg_raised, t.text_primary, Some(t.line_default), crate::theme::over(t.bg_raised, t.bg_hover))
+        }
         Btn::Ghost => (gpui::transparent_black(), t.text_secondary, None, t.bg_hover),
         Btn::Danger => (t.danger_muted, t.danger_text, None, crate::theme::alpha(t.danger_solid, 0.2)),
     }

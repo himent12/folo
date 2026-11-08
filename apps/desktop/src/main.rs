@@ -22,7 +22,10 @@ mod viz;
 use std::borrow::Cow;
 use std::sync::Arc;
 
-use gpui::{App, AppContext, Application, AssetSource, Bounds, SharedString, TitlebarOptions, WindowBounds, WindowOptions, point, px, size};
+use gpui::{
+    App, AppContext, Application, AssetSource, Bounds, SharedString, TitlebarOptions, WindowBounds,
+    WindowOptions, point, px, size,
+};
 
 use crate::api::mock::MockBackend;
 use crate::theme::{Mode, Theme};
@@ -75,7 +78,9 @@ fn main() {
     let spec = scenario.as_deref().map(scenario::Spec::parse);
 
     Application::new().with_assets(Assets).run(move |cx: &mut App| {
-        cx.text_system().add_fonts(FONTS.iter().map(|f| Cow::Borrowed(*f)).collect()).expect("bundled fonts load");
+        cx.text_system()
+            .add_fonts(FONTS.iter().map(|f| Cow::Borrowed(*f)).collect())
+            .expect("bundled fonts load");
         let mode = spec.as_ref().and_then(|s| s.mode).unwrap_or(mode);
         cx.set_global(Theme::new(mode));
         app::bind_keys(cx);

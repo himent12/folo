@@ -7,8 +7,8 @@
 use std::sync::Arc;
 
 use gpui::{
-    App, BorderStyle, Bounds, Corners, Edges, FontWeight, Hsla, Pixels, Point, RenderImage, SharedString, TextRun, Window,
-    fill, point, px, quad, size, transparent_black,
+    App, BorderStyle, Bounds, Corners, Edges, FontWeight, Hsla, Pixels, Point, RenderImage, SharedString,
+    TextRun, Window, fill, point, px, quad, size, transparent_black,
 };
 
 use crate::theme::{MONO, SANS, Theme, alpha, tokens, ty};
@@ -111,15 +111,36 @@ pub fn paint_image_with_boxes(
             let r = Bounds::from_corners(p1, p2);
             if b.truth {
                 // Ground truth: thin outline in the class colour over a halo, no label chip.
-                window.paint_quad(quad(r.dilate(px(1.)), px(0.), transparent_black(), px(1.), alpha(halo, 0.6 * a), BorderStyle::Solid));
-                window.paint_quad(quad(r, px(0.), transparent_black(), px(1.), alpha(color, 0.9 * a), BorderStyle::Dashed));
+                window.paint_quad(quad(
+                    r.dilate(px(1.)),
+                    px(0.),
+                    transparent_black(),
+                    px(1.),
+                    alpha(halo, 0.6 * a),
+                    BorderStyle::Solid,
+                ));
+                window.paint_quad(quad(
+                    r,
+                    px(0.),
+                    transparent_black(),
+                    px(1.),
+                    alpha(color, 0.9 * a),
+                    BorderStyle::Dashed,
+                ));
                 continue;
             }
             if b.highlight {
                 window.paint_quad(fill(r, alpha(color, tokens::CLASS_FILL_OPACITY * 1.6)));
             }
             let stroke = if b.highlight { 2.5 } else { 2. };
-            window.paint_quad(quad(r.dilate(px(1.)), px(0.), transparent_black(), px(1.), alpha(halo, a * 0.8), BorderStyle::Solid));
+            window.paint_quad(quad(
+                r.dilate(px(1.)),
+                px(0.),
+                transparent_black(),
+                px(1.),
+                alpha(halo, a * 0.8),
+                BorderStyle::Solid,
+            ));
             window.paint_quad(quad(
                 r,
                 px(0.),
@@ -132,8 +153,18 @@ pub fn paint_image_with_boxes(
                 let fs = ty::XS.size;
                 let name = b.label.clone().unwrap_or_default();
                 let score = b.score.map(|s| format!("{s:.2}")).unwrap_or_default();
-                let name_line = window.text_system().shape_line(name.clone(), px(fs), &[run(&name, SANS, FontWeight::MEDIUM, chip_text)], None);
-                let score_line = window.text_system().shape_line(score.clone().into(), px(fs), &[run(&score, MONO, FontWeight::MEDIUM, alpha(chip_text, 0.72))], None);
+                let name_line = window.text_system().shape_line(
+                    name.clone(),
+                    px(fs),
+                    &[run(&name, SANS, FontWeight::MEDIUM, chip_text)],
+                    None,
+                );
+                let score_line = window.text_system().shape_line(
+                    score.clone().into(),
+                    px(fs),
+                    &[run(&score, MONO, FontWeight::MEDIUM, alpha(chip_text, 0.72))],
+                    None,
+                );
                 let gap = if score.is_empty() || name.is_empty() { px(0.) } else { px(5.) };
                 let cw = name_line.width + gap + score_line.width + px(10.);
                 let ch = px(16.);
@@ -147,7 +178,12 @@ pub fn paint_image_with_boxes(
                 window.paint_quad(fill(chip, color).corner_radii(px(tokens::radius::XS)));
                 let ty_ = origin.y + px(1.5);
                 let _ = name_line.paint(point(origin.x + px(5.), ty_), px(13.), window, cx);
-                let _ = score_line.paint(point(origin.x + px(5.) + name_line.width + gap, ty_), px(13.), window, cx);
+                let _ = score_line.paint(
+                    point(origin.x + px(5.) + name_line.width + gap, ty_),
+                    px(13.),
+                    window,
+                    cx,
+                );
             }
         }
     });
@@ -158,7 +194,14 @@ fn rgba(v: u32) -> Hsla {
 }
 
 /// Map a window point to image pixel coordinates (for hover hit-testing).
-pub fn to_image(bounds: Bounds<Pixels>, (w, h): (f32, f32), fit: Fit, zoom: f32, pan: (f32, f32), p: Point<Pixels>) -> (f32, f32) {
+pub fn to_image(
+    bounds: Bounds<Pixels>,
+    (w, h): (f32, f32),
+    fit: Fit,
+    zoom: f32,
+    pan: (f32, f32),
+    p: Point<Pixels>,
+) -> (f32, f32) {
     let rect = image_rect(bounds, w, h, fit, zoom, pan);
     let x = f32::from(p.x - rect.left()) / f32::from(rect.size.width) * w;
     let y = f32::from(p.y - rect.top()) / f32::from(rect.size.height) * h;
@@ -171,7 +214,9 @@ pub fn hit_box(boxes: &[DrawBox], x: f32, y: f32) -> Option<usize> {
         .iter()
         .enumerate()
         .filter(|(_, b)| x >= b.x1 && x <= b.x2 && y >= b.y1 && y <= b.y2)
-        .min_by(|a, b| ((a.1.x2 - a.1.x1) * (a.1.y2 - a.1.y1)).total_cmp(&((b.1.x2 - b.1.x1) * (b.1.y2 - b.1.y1))))
+        .min_by(|a, b| {
+            ((a.1.x2 - a.1.x1) * (a.1.y2 - a.1.y1)).total_cmp(&((b.1.x2 - b.1.x1) * (b.1.y2 - b.1.y1)))
+        })
         .map(|(i, _)| i)
 }
 

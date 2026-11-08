@@ -40,8 +40,14 @@ pub type ApiResult<T> = Result<T, ApiError>;
 
 /// Image pixels as delivered by a backend: encoded bytes from HTTP, raw RGBA from the mock.
 pub enum ImageData {
+    /// Encoded bytes (JPEG/PNG), as `folo serve` sends them.
+    #[allow(dead_code)]
     Encoded(Vec<u8>),
-    Rgba { width: u32, height: u32, pixels: Vec<u8> },
+    Rgba {
+        width: u32,
+        height: u32,
+        pixels: Vec<u8>,
+    },
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -106,6 +112,7 @@ pub trait Backend: Send + Sync + 'static {
     fn export_model(&self, id: &str, format: &str) -> ApiResult<ExportResult>;
 
     fn runs(&self) -> ApiResult<Vec<Run>>;
+    #[allow(dead_code)]
     fn run(&self, id: &str) -> ApiResult<Run>;
     fn create_run(&self, config: TrainConfig) -> ApiResult<Run>;
     fn stop_run(&self, id: &str) -> ApiResult<Run>;

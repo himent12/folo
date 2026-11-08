@@ -24,7 +24,6 @@ struct DatasetFixture {
     seed: u64,
     max_objects: u32,
     small: bool,
-    sizes: &'static [(u32, u32)],
     /// Per-image boxes, computed once from the scenes.
     images: Vec<ImageMeta>,
 }
@@ -54,7 +53,12 @@ impl DatasetFixture {
                 Split::Test
             };
             let (w, h) = sizes[(i as usize * 7 + 3) % sizes.len()];
-            let scene = Scene::generate(seed ^ (i as u64).wrapping_mul(0x9E37), classes.len() as u32, max_objects, small);
+            let scene = Scene::generate(
+                seed ^ (i as u64).wrapping_mul(0x9E37),
+                classes.len() as u32,
+                max_objects,
+                small,
+            );
             images.push(ImageMeta {
                 id: format!("img_{i:05}"),
                 file: format!("images/{}/{i:06}.jpg", split.label()),
@@ -77,12 +81,16 @@ impl DatasetFixture {
                 empty += 1;
             }
             let n = im.boxes.len() as f32;
-            let slot = per_edges.windows(2).position(|w| n >= w[0] && n < w[1]).unwrap_or(per_counts.len() - 1);
+            let slot =
+                per_edges.windows(2).position(|w| n >= w[0] && n < w[1]).unwrap_or(per_counts.len() - 1);
             per_counts[slot] += 1;
             for b in &im.boxes {
                 class_counts[b.class as usize] += 1;
                 let area = (b.x2 - b.x1) * (b.y2 - b.y1) / (im.width * im.height) as f32;
-                let slot = size_edges.windows(2).position(|w| area >= w[0] && area < w[1]).unwrap_or(size_counts.len() - 1);
+                let slot = size_edges
+                    .windows(2)
+                    .position(|w| area >= w[0] && area < w[1])
+                    .unwrap_or(size_counts.len() - 1);
                 size_counts[slot] += 1;
             }
         }
@@ -103,7 +111,7 @@ impl DatasetFixture {
                 boxes_per_image_hist: Hist { edges: per_edges, counts: per_counts },
             }),
         };
-        Self { ds, seed, max_objects, small, sizes, images }
+        Self { ds, seed, max_objects, small, images }
     }
 
     fn scene(&self, index: u32) -> Scene {
@@ -177,7 +185,8 @@ impl Curve {
     fn quality(&self, epoch: u32) -> f32 {
         let e = epoch as f32;
         let n = self.epochs as f32;
-        let closing = (e - (n - self.close_mosaic as f32)).clamp(0.0, self.close_mosaic as f32) / self.close_mosaic as f32;
+        let closing = (e - (n - self.close_mosaic as f32)).clamp(0.0, self.close_mosaic as f32)
+            / self.close_mosaic as f32;
         ((1.0 - (-e / (n * 0.17)).exp()) * (1.0 + 0.012 * self.noise(epoch, 9)) + 0.025 * closing).min(1.02)
     }
 
@@ -223,13 +232,15 @@ struct RunFixture {
     logs: Vec<LogLine>,
 }
 
+type PixelCache = Mutex<HashMap<(String, String, u32), Arc<Vec<u8>>>>;
+
 pub struct MockBackend {
     datasets: Vec<DatasetFixture>,
     models: Vec<Model>,
     runs: Mutex<Vec<RunFixture>>,
     frozen: bool,
     started: Instant,
-    image_cache: Mutex<HashMap<(String, String, u32), Arc<Vec<u8>>>>,
+    image_cache: PixelCache,
     /// Inject an error into every list call (error-state screenshots).
     fail: bool,
     /// Pretend there is nothing on disk yet (empty-state screenshots).
@@ -281,7 +292,17 @@ impl MockBackend {
             ),
         ];
         let classes = |i: usize| datasets[i].ds.classes.clone();
-        let model = |id: &str, name: &str, arch: &str, imgsz, ds: usize, params, flops_g, bytes, hours, run: &str, m: [f32; 4]| Model {
+        let model = |id: &str,
+                     name: &str,
+                     arch: &str,
+                     imgsz,
+                     ds: usize,
+                     params,
+                     flops_g,
+                     bytes,
+                     hours,
+                     run: &str,
+                     m: [f32; 4]| Model {
             id: id.into(),
             name: name.into(),
             arch: arch.into(),
@@ -295,10 +316,58 @@ impl MockBackend {
             metrics: Some(ModelMetrics { map50: m[0], map50_95: m[1], precision: m[2], recall: m[3] }),
         };
         let models = vec![
-            model("m_44c0", "shapes-hard-s-best", "folo-s", 640, 1, 9_420_000, 21.5, 18_900_000, 6.5, "run_52e8", [0.874, 0.612, 0.861, 0.792]),
-            model("m_31aa", "shapes-n-best", "folo-n", 640, 0, 2_630_000, 6.6, 5_400_000, 52.0, "run_7d1e", [0.952, 0.781, 0.928, 0.903]),
-            model("m_31ab", "shapes-n-f16", "folo-n", 640, 0, 2_630_000, 6.6, 2_700_000, 51.5, "run_7d1e", [0.951, 0.780, 0.927, 0.903]),
-            model("m_90d2", "shapes-mini-n-last", "folo-n", 320, 2, 2_630_000, 1.7, 5_400_000, 3.2, "run_1a2b", [0.803, 0.544, 0.817, 0.716]),
+            model(
+                "m_44c0",
+                "shapes-hard-s-best",
+                "folo-s",
+                640,
+                1,
+                9_420_000,
+                21.5,
+                18_900_000,
+                6.5,
+                "run_52e8",
+                [0.874, 0.612, 0.861, 0.792],
+            ),
+            model(
+                "m_31aa",
+                "shapes-n-best",
+                "folo-n",
+                640,
+                0,
+                2_630_000,
+                6.6,
+                5_400_000,
+                52.0,
+                "run_7d1e",
+                [0.952, 0.781, 0.928, 0.903],
+            ),
+            model(
+                "m_31ab",
+                "shapes-n-f16",
+                "folo-n",
+                640,
+                0,
+                2_630_000,
+                6.6,
+                2_700_000,
+                51.5,
+                "run_7d1e",
+                [0.951, 0.780, 0.927, 0.903],
+            ),
+            model(
+                "m_90d2",
+                "shapes-mini-n-last",
+                "folo-n",
+                320,
+                2,
+                2_630_000,
+                1.7,
+                5_400_000,
+                3.2,
+                "run_1a2b",
+                [0.803, 0.544, 0.817, 0.716],
+            ),
         ];
 
         let cfg = |name: &str, ds: &str, arch: &str, epochs, batch, imgsz, device: &str, lr0| TrainConfig {
@@ -329,12 +398,80 @@ impl MockBackend {
             error: Option<&'static str>,
         }
         let specs = vec![
-            Spec { id: LIVE_ID, config: cfg("shapes-hard-m", "ds_3b91", "folo-m", 100, 32, 640, "gpu:0", 0.01), status: RunStatus::Running, step: live_step, spe: 100, created_h: 0.25, map_max: 0.71, ips: 268.0, model: None, error: None },
-            Spec { id: "run_b7e2", config: cfg("shapes-mini-s", "ds_c07a", "folo-s", 60, 16, 320, "gpu:0", 0.01), status: RunStatus::Queued, step: 0, spe: 19, created_h: 0.1, map_max: 0.6, ips: 900.0, model: None, error: None },
-            Spec { id: "run_52e8", config: cfg("shapes-hard-s", "ds_3b91", "folo-s", 120, 32, 640, "gpu:0", 0.01), status: RunStatus::Completed, step: 120 * 100, spe: 100, created_h: 9.0, map_max: 0.612, ips: 412.0, model: Some("m_44c0"), error: None },
-            Spec { id: "run_e4f0", config: cfg("shapes-hard-l", "ds_3b91", "folo-l", 100, 64, 1024, "gpu:0", 0.01), status: RunStatus::Failed, step: 112, spe: 50, created_h: 10.5, map_max: 0.7, ips: 96.0, model: None, error: Some("GPU out of memory: tried to allocate 2.1 GiB with 0.6 GiB free (batch 64, imgsz 1024)") },
-            Spec { id: "run_1a2b", config: cfg("shapes-mini-n", "ds_c07a", "folo-n", 100, 16, 320, "cpu", 0.01), status: RunStatus::Stopped, step: 37 * 15, spe: 15, created_h: 4.0, map_max: 0.58, ips: 140.0, model: Some("m_90d2"), error: None },
-            Spec { id: "run_7d1e", config: cfg("shapes-n", "ds_8f2c", "folo-n", 100, 16, 640, "gpu:0", 0.01), status: RunStatus::Completed, step: 100 * 50, spe: 50, created_h: 55.0, map_max: 0.781, ips: 610.0, model: Some("m_31aa"), error: None },
+            Spec {
+                id: LIVE_ID,
+                config: cfg("shapes-hard-m", "ds_3b91", "folo-m", 100, 32, 640, "gpu:0", 0.01),
+                status: RunStatus::Running,
+                step: live_step,
+                spe: 100,
+                created_h: 0.25,
+                map_max: 0.71,
+                ips: 268.0,
+                model: None,
+                error: None,
+            },
+            Spec {
+                id: "run_b7e2",
+                config: cfg("shapes-mini-s", "ds_c07a", "folo-s", 60, 16, 320, "gpu:0", 0.01),
+                status: RunStatus::Queued,
+                step: 0,
+                spe: 19,
+                created_h: 0.1,
+                map_max: 0.6,
+                ips: 900.0,
+                model: None,
+                error: None,
+            },
+            Spec {
+                id: "run_52e8",
+                config: cfg("shapes-hard-s", "ds_3b91", "folo-s", 120, 32, 640, "gpu:0", 0.01),
+                status: RunStatus::Completed,
+                step: 120 * 100,
+                spe: 100,
+                created_h: 9.0,
+                map_max: 0.612,
+                ips: 412.0,
+                model: Some("m_44c0"),
+                error: None,
+            },
+            Spec {
+                id: "run_e4f0",
+                config: cfg("shapes-hard-l", "ds_3b91", "folo-l", 100, 64, 1024, "gpu:0", 0.01),
+                status: RunStatus::Failed,
+                step: 112,
+                spe: 50,
+                created_h: 10.5,
+                map_max: 0.7,
+                ips: 96.0,
+                model: None,
+                error: Some(
+                    "GPU out of memory: tried to allocate 2.1 GiB with 0.6 GiB free (batch 64, imgsz 1024)",
+                ),
+            },
+            Spec {
+                id: "run_1a2b",
+                config: cfg("shapes-mini-n", "ds_c07a", "folo-n", 100, 16, 320, "cpu", 0.01),
+                status: RunStatus::Stopped,
+                step: 37 * 15,
+                spe: 15,
+                created_h: 4.0,
+                map_max: 0.58,
+                ips: 140.0,
+                model: Some("m_90d2"),
+                error: None,
+            },
+            Spec {
+                id: "run_7d1e",
+                config: cfg("shapes-n", "ds_8f2c", "folo-n", 100, 16, 640, "gpu:0", 0.01),
+                status: RunStatus::Completed,
+                step: 100 * 50,
+                spe: 50,
+                created_h: 55.0,
+                map_max: 0.781,
+                ips: 610.0,
+                model: Some("m_31aa"),
+                error: None,
+            },
         ];
         let now = Instant::now();
         let runs = specs
@@ -348,14 +485,19 @@ impl MockBackend {
                     batch: s.config.batch,
                     map_max: s.map_max,
                     ips: s.ips,
-                    classes: datasets.iter().find(|d| d.ds.id == s.config.dataset_id).map_or(3, |d| d.ds.classes.len() as u32),
+                    classes: datasets
+                        .iter()
+                        .find(|d| d.ds.id == s.config.dataset_id)
+                        .map_or(3, |d| d.ds.classes.len() as u32),
                     close_mosaic: s.config.augment.close_mosaic,
                 };
                 let created = h(s.created_h);
                 let total = s.config.epochs * s.spe;
                 let run_secs = |steps: u32| (steps as f64 * (s.config.batch as f64 / s.ips as f64)) as i64;
-                let finished = matches!(s.status, RunStatus::Completed | RunStatus::Stopped | RunStatus::Failed)
-                    .then(|| time::format(created + 5 + run_secs(s.step) + s.step as i64 / s.spe as i64 * 3));
+                let finished =
+                    matches!(s.status, RunStatus::Completed | RunStatus::Stopped | RunStatus::Failed).then(
+                        || time::format(created + 5 + run_secs(s.step) + s.step as i64 / s.spe as i64 * 3),
+                    );
                 let started = (s.status != RunStatus::Queued).then(|| time::format(created + 5));
                 let mut fixture = RunFixture {
                     run: Run {
@@ -371,7 +513,11 @@ impl MockBackend {
                         steps_per_epoch: s.spe,
                         eta_s: None,
                         best: None,
-                        device: if s.config.device == "cpu" { "AMD Ryzen 9 7950X (32 threads)".into() } else { gpu.clone() },
+                        device: if s.config.device == "cpu" {
+                            "AMD Ryzen 9 7950X (32 threads)".into()
+                        } else {
+                            gpu.clone()
+                        },
                         model_id: s.model.map(Into::into),
                         error: s.error.map(Into::into),
                         config: s.config,
@@ -470,11 +616,35 @@ impl MockBackend {
 fn initial_logs(f: &RunFixture, created: i64) -> Vec<LogLine> {
     let c = &f.run.config;
     let mut logs = vec![
-        (0, LogLevel::Info, format!("folo train {} on {} ({} epochs, batch {}, imgsz {})", c.arch, c.dataset_id, c.epochs, c.batch, c.imgsz)),
+        (
+            0,
+            LogLevel::Info,
+            format!(
+                "folo train {} on {} ({} epochs, batch {}, imgsz {})",
+                c.arch, c.dataset_id, c.epochs, c.batch, c.imgsz
+            ),
+        ),
         (1, LogLevel::Info, format!("device: {}", f.run.device)),
         (2, LogLevel::Debug, "dataloader: 8 workers, prefetch 4 batches, mosaic 1.0".to_string()),
-        (3, LogLevel::Info, format!("model: {} · {} params · fused BN off (training)", c.arch, match c.arch.as_str() { "folo-n" => "2.63 M", "folo-s" => "9.42 M", "folo-m" => "20.1 M", _ => "43.7 M" })),
-        (4, LogLevel::Info, "optimizer: AdamW(lr=0.01, wd=5e-4), cosine schedule, warmup 3 epochs".to_string()),
+        (
+            3,
+            LogLevel::Info,
+            format!(
+                "model: {} · {} params · fused BN off (training)",
+                c.arch,
+                match c.arch.as_str() {
+                    "folo-n" => "2.63 M",
+                    "folo-s" => "9.42 M",
+                    "folo-m" => "20.1 M",
+                    _ => "43.7 M",
+                }
+            ),
+        ),
+        (
+            4,
+            LogLevel::Info,
+            "optimizer: AdamW(lr=0.01, wd=5e-4), cosine schedule, warmup 3 epochs".to_string(),
+        ),
     ];
     if f.run.status == RunStatus::Failed {
         logs.push((40, LogLevel::Warn, "GPU memory at 97% after epoch 2 (15.5 / 16.0 GiB)".into()));
@@ -512,7 +682,11 @@ impl Backend for MockBackend {
         let wobble = if self.frozen { 0.0 } else { (t * 0.7).sin() * 0.02 };
         let live = self.runs.lock().unwrap().iter().any(|f| Self::snapshot(f).status == RunStatus::Running);
         Ok(SystemInfo {
-            cpu: Cpu { name: "AMD Ryzen 9 7950X".into(), threads: 32, util: if live { 0.31 + wobble } else { 0.04 } },
+            cpu: Cpu {
+                name: "AMD Ryzen 9 7950X".into(),
+                threads: 32,
+                util: if live { 0.31 + wobble } else { 0.04 },
+            },
             memory: Memory { used_bytes: 23_100_000_000, total_bytes: 68_719_476_736 },
             gpus: vec![Gpu {
                 ordinal: 0,
@@ -597,7 +771,12 @@ impl Backend for MockBackend {
             .iter()
             .find(|m| m.id == id)
             .ok_or_else(|| ApiError::new("model_not_found", format!("No model {id}")))?;
-        let metrics = m.metrics.clone().unwrap_or(ModelMetrics { map50: 0.5, map50_95: 0.3, precision: 0.5, recall: 0.5 });
+        let metrics = m.metrics.clone().unwrap_or(ModelMetrics {
+            map50: 0.5,
+            map50_95: 0.3,
+            precision: 0.5,
+            recall: 0.5,
+        });
         let n = m.classes.len();
         let mut rng = Rng::new(hash(id));
         let per_class: Vec<ClassMetrics> = (0..n as u32)
@@ -618,7 +797,8 @@ impl Backend for MockBackend {
                 // A smooth monotone PR curve whose area matches the class's AP50.
                 let k = (cm.map50 / (1.0 - cm.map50).max(0.02)).powf(0.9) * 1.6;
                 let recall: Vec<f32> = (0..=50).map(|i| i as f32 / 50.0).collect();
-                let precision: Vec<f32> = recall.iter().map(|&r| (1.0 - r.powf(k.max(0.3))).max(0.0).powf(0.35)).collect();
+                let precision: Vec<f32> =
+                    recall.iter().map(|&r| (1.0 - r.powf(k.max(0.3))).max(0.0).powf(0.35)).collect();
                 PrCurve { class: cm.class, recall, precision, ap50: cm.map50 }
             })
             .collect();
@@ -708,7 +888,11 @@ impl Backend for MockBackend {
                 steps_per_epoch: spe,
                 eta_s: None,
                 best: None,
-                device: if config.device == "cpu" { "AMD Ryzen 9 7950X (32 threads)".into() } else { "NVIDIA GeForce RTX 4080 SUPER (vulkan)".into() },
+                device: if config.device == "cpu" {
+                    "AMD Ryzen 9 7950X (32 threads)".into()
+                } else {
+                    "NVIDIA GeForce RTX 4080 SUPER (vulkan)".into()
+                },
                 model_id: None,
                 error: None,
                 config,
@@ -739,8 +923,16 @@ impl Backend for MockBackend {
         f.run.status = RunStatus::Stopped;
         f.run.finished = Some(time::format(self.sim_now()));
         let epoch = f.step / f.run.steps_per_epoch;
-        f.logs.push(LogLine { t: time::format(self.sim_now()), level: LogLevel::Warn, message: "stop requested; finishing current step".into() });
-        f.logs.push(LogLine { t: time::format(self.sim_now()), level: LogLevel::Info, message: format!("saved last checkpoint (epoch {epoch})") });
+        f.logs.push(LogLine {
+            t: time::format(self.sim_now()),
+            level: LogLevel::Warn,
+            message: "stop requested; finishing current step".into(),
+        });
+        f.logs.push(LogLine {
+            t: time::format(self.sim_now()),
+            level: LogLevel::Info,
+            message: format!("saved last checkpoint (epoch {epoch})"),
+        });
         Ok(Self::snapshot(f))
     }
 
@@ -780,7 +972,14 @@ impl Backend for MockBackend {
                 width: im.width,
                 height: im.height,
                 truth: im.boxes.clone(),
-                pred: fake_predictions(&im.boxes, im.width, im.height, q, curve.classes, hash(id) ^ i as u64 ^ (epoch as u64) << 20),
+                pred: fake_predictions(
+                    &im.boxes,
+                    im.width,
+                    im.height,
+                    q,
+                    curve.classes,
+                    hash(id) ^ i as u64 ^ (epoch as u64) << 20,
+                ),
             })
             .collect();
         Ok(Samples { epoch, samples })
@@ -848,14 +1047,17 @@ impl Backend for MockBackend {
                             ep.val.map50_95, ep.val.map50, ep.duration_s
                         );
                         if tx.send(RunEvent::Epoch(ep)).is_err()
-                            || tx.send(RunEvent::Log(LogLine { t, level: LogLevel::Info, message: msg })).is_err()
+                            || tx
+                                .send(RunEvent::Log(LogLine { t, level: LogLevel::Info, message: msg }))
+                                .is_err()
                         {
                             return;
                         }
                     }
                 }
                 if sent >= total {
-                    let _ = tx.send(RunEvent::Status(StatusEvent { status: RunStatus::Completed, error: None }));
+                    let _ =
+                        tx.send(RunEvent::Status(StatusEvent { status: RunStatus::Completed, error: None }));
                     return;
                 }
             }
@@ -879,7 +1081,14 @@ impl Backend for MockBackend {
                     .iter()
                     .find(|im| &im.id == image_id)
                     .ok_or_else(|| ApiError::new("image_not_found", format!("No image {image_id}")))?;
-                let p = fake_predictions(&im.boxes, im.width, im.height, q, m.classes.len() as u32, hash(image_id) ^ hash(&m.id));
+                let p = fake_predictions(
+                    &im.boxes,
+                    im.width,
+                    im.height,
+                    q,
+                    m.classes.len() as u32,
+                    hash(image_id) ^ hash(&m.id),
+                );
                 (im.width, im.height, p, hash(image_id))
             }
             PredictInput::File { name, bytes } => {
@@ -901,7 +1110,14 @@ impl Backend for MockBackend {
                         let bh = bw * rng.range(0.7, 1.4);
                         let x1 = rng.range(0.0, w as f32 - bw);
                         let y1 = rng.range(0.0, (h as f32 - bh).max(1.0));
-                        ScoredBox { class: rng.below(m.classes.len() as u32), score: rng.range(0.3, 0.92), x1, y1, x2: x1 + bw, y2: (y1 + bh).min(h as f32) }
+                        ScoredBox {
+                            class: rng.below(m.classes.len() as u32),
+                            score: rng.range(0.3, 0.92),
+                            x1,
+                            y1,
+                            x2: x1 + bw,
+                            y2: (y1 + bh).min(h as f32),
+                        }
                     })
                     .collect();
                 (w, h, p, seed)
@@ -936,7 +1152,12 @@ impl Backend for MockBackend {
             model_id: m.id.clone(),
             image: ImageSize { width: w, height: h },
             boxes,
-            timing: Timing { preprocess_ms: pre, inference_ms: inf, postprocess_ms: post, total_ms: pre + inf + post },
+            timing: Timing {
+                preprocess_ms: pre,
+                inference_ms: inf,
+                postprocess_ms: post,
+                total_ms: pre + inf + post,
+            },
             device: "gpu:0".into(),
         })
     }
@@ -958,14 +1179,28 @@ fn fake_predictions(truth: &[BBoxT], w: u32, h: u32, q: f32, classes: u32, seed:
         let x2 = (b.x2 + rng.normal() * j * bw).clamp(x1 + 1.0, w as f32);
         let y2 = (b.y2 + rng.normal() * j * bh).clamp(y1 + 1.0, h as f32);
         let class = if rng.f32() < (1.0 - q) * 0.18 { rng.below(classes) } else { b.class };
-        out.push(ScoredBox { class, score: (0.45 + 0.5 * q * rng.range(0.75, 1.0) + 0.04 * rng.normal()).clamp(0.26, 0.99), x1, y1, x2, y2 });
+        out.push(ScoredBox {
+            class,
+            score: (0.45 + 0.5 * q * rng.range(0.75, 1.0) + 0.04 * rng.normal()).clamp(0.26, 0.99),
+            x1,
+            y1,
+            x2,
+            y2,
+        });
     }
     let fps = if rng.f32() < (1.0 - q) * 0.9 { 1 + rng.below(2) } else { 0 };
     for _ in 0..fps {
         let s = w.min(h) as f32 * rng.range(0.05, 0.15);
         let x1 = rng.range(0.0, w as f32 - s);
         let y1 = rng.range(0.0, h as f32 - s);
-        out.push(ScoredBox { class: rng.below(classes), score: rng.range(0.26, 0.48), x1, y1, x2: x1 + s, y2: y1 + s });
+        out.push(ScoredBox {
+            class: rng.below(classes),
+            score: rng.range(0.26, 0.48),
+            x1,
+            y1,
+            x2: x1 + s,
+            y2: y1 + s,
+        });
     }
     out
 }
@@ -1005,9 +1240,12 @@ mod tests {
         let all = m.images("ds_8f2c", &ImageQuery { limit: 10, ..Default::default() }).unwrap();
         assert_eq!(all.total, 1000);
         assert_eq!(all.images.len(), 10);
-        let val = m.images("ds_8f2c", &ImageQuery { split: Some(Split::Val), limit: 500, ..Default::default() }).unwrap();
+        let val = m
+            .images("ds_8f2c", &ImageQuery { split: Some(Split::Val), limit: 500, ..Default::default() })
+            .unwrap();
         assert_eq!(val.total, 200);
-        let squares = m.images("ds_8f2c", &ImageQuery { class: Some(1), limit: 5, ..Default::default() }).unwrap();
+        let squares =
+            m.images("ds_8f2c", &ImageQuery { class: Some(1), limit: 5, ..Default::default() }).unwrap();
         assert!(squares.images.iter().all(|im| im.boxes.iter().any(|b| b.class == 1)));
         match m.image("ds_8f2c", "img_00003", Some(128)).unwrap() {
             ImageData::Rgba { width, height, pixels } => {

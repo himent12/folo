@@ -1,5 +1,9 @@
 //! Wire types for `docs/API.md` (v1).
 //!
+//! A complete mirror of the contract; a few items (the error body, SSE parsing) are only used by
+//! the HTTP client.
+#![allow(dead_code)]
+//!
 //! Interim copy until the shared API types crate lands on main; field names and shapes follow the
 //! contract exactly so the swap is mechanical.
 

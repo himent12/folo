@@ -170,8 +170,8 @@ impl Scene {
                     + (l(ix, iy + 1) * (1.0 - sx) + l(ix + 1, iy + 1) * sx) * sy;
                 let g = (n - 0.5) * 0.16;
                 let p = &mut px[(y * w + x) as usize];
-                for c in 0..3 {
-                    p[c] = self.bg_a[c] + (self.bg_b[c] - self.bg_a[c]) * t + g;
+                for ((v, a), b) in p.iter_mut().zip(self.bg_a).zip(self.bg_b) {
+                    *v = a + (b - a) * t + g;
                 }
             }
         }
@@ -207,8 +207,8 @@ impl Scene {
                     if cover > 0.0 {
                         // Light from the top-left for a little depth.
                         let lit = 1.0 + 0.12 * ((cx - x as f32) + (cy - y as f32)) / (2.0 * r);
-                        for c in 0..3 {
-                            p[c] = p[c] * (1.0 - cover) + (sh.color[c] * lit) * cover;
+                        for (v, c) in p.iter_mut().zip(sh.color) {
+                            *v = *v * (1.0 - cover) + (c * lit) * cover;
                         }
                     }
                 }

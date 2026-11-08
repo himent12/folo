@@ -8,12 +8,12 @@ use std::time::Duration;
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    Animation, AnimationExt, Div, FontFeatures, FontWeight, Hsla, IntoElement, ParentElement,
-    SharedString, Styled, Svg, div, px, relative, svg,
+    Animation, AnimationExt, Div, FontFeatures, FontWeight, Hsla, IntoElement, ParentElement, SharedString,
+    Styled, Svg, div, px, relative, svg,
 };
 
 use crate::api::RunStatus;
-use crate::theme::{Theme, TypeStep, alpha, radius, ty};
+use crate::theme::{Theme, TypeStep, radius, ty};
 
 pub fn weight(w: u16) -> FontWeight {
     FontWeight(w as f32)
@@ -22,9 +22,8 @@ pub fn weight(w: u16) -> FontWeight {
 pub trait StyledExt: Styled + Sized {
     /// Tabular numerals, so live counters and table columns don't jitter.
     fn tnum(mut self) -> Self {
-        self.text_style()
-            .get_or_insert_with(Default::default)
-            .font_features = Some(FontFeatures(Arc::new(vec![("tnum".into(), 1)])));
+        self.text_style().get_or_insert_with(Default::default).font_features =
+            Some(FontFeatures(Arc::new(vec![("tnum".into(), 1)])));
         self
     }
 
@@ -38,11 +37,6 @@ impl<T: Styled> StyledExt for T {}
 /// Sans text at a type step.
 pub fn text(s: TypeStep, color: Hsla) -> Div {
     div().font_family(crate::theme::SANS).step(s).text_color(color)
-}
-
-/// Mono text at a type step (IDs, paths, logs, code, numbers in tables).
-pub fn mono(s: TypeStep, color: Hsla) -> Div {
-    div().font_family(crate::theme::MONO).step(s).text_color(color).tnum()
 }
 
 /// Uppercase overline (`micro`).
@@ -125,24 +119,14 @@ pub fn dot(color: Hsla, size: f32, live: bool, id: impl Into<SharedString>) -> i
         .flex_none()
         .child(div().absolute().size_full().rounded_full().bg(color))
         .when(live, |d| {
-            d.child(
-                div()
-                    .absolute()
-                    .size_full()
-                    .rounded_full()
-                    .bg(color)
-                    .with_animation(
-                        gpui::ElementId::Name(format!("pulse-{id}").into()),
-                        Animation::new(Duration::from_millis(1600)).repeat(),
-                        move |d, p| {
-                            let grow = size * 1.6 * p;
-                            d.top(px(-grow / 2.))
-                                .left(px(-grow / 2.))
-                                .size(px(size + grow))
-                                .opacity(0.45 * (1.0 - p))
-                        },
-                    ),
-            )
+            d.child(div().absolute().size_full().rounded_full().bg(color).with_animation(
+                gpui::ElementId::Name(format!("pulse-{id}").into()),
+                Animation::new(Duration::from_millis(1600)).repeat(),
+                move |d, p| {
+                    let grow = size * 1.6 * p;
+                    d.top(px(-grow / 2.)).left(px(-grow / 2.)).size(px(size + grow)).opacity(0.45 * (1.0 - p))
+                },
+            ))
         })
 }
 
@@ -208,7 +192,13 @@ pub fn shortcut(t: &Theme, keys: &[&str]) -> Div {
 }
 
 /// A number with its unit one step smaller in tertiary ("0.612", "ms").
-pub fn metric(t: &Theme, value: impl Into<SharedString>, unit: &str, s: TypeStep, unit_step: TypeStep) -> Div {
+pub fn metric(
+    t: &Theme,
+    value: impl Into<SharedString>,
+    unit: &str,
+    s: TypeStep,
+    unit_step: TypeStep,
+) -> Div {
     div()
         .flex()
         .items_baseline()
@@ -306,15 +296,6 @@ pub fn kv(t: &Theme, key: &str, value: impl IntoElement) -> Div {
         .child(div().min_w_0().flex().justify_end().child(value))
 }
 
-/// Soft tinted backdrop for a selected/active row.
-pub fn selected_bg(t: &Theme) -> Hsla {
-    t.bg_selected
-}
-
-pub fn tint(c: Hsla, a: f32) -> Hsla {
-    alpha(c, a)
-}
-
 // ---------- number formatting ----------
 
 /// 4210 → "4,210".
@@ -322,7 +303,7 @@ pub fn int(n: u64) -> String {
     let s = n.to_string();
     let mut out = String::new();
     for (i, ch) in s.chars().enumerate() {
-        if i > 0 && (s.len() - i) % 3 == 0 {
+        if i > 0 && (s.len() - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(ch);
@@ -360,10 +341,6 @@ pub fn count_si(n: u64) -> (String, &'static str) {
 
 pub fn f3(v: f32) -> String {
     format!("{v:.3}")
-}
-
-pub fn pct(v: f32) -> String {
-    format!("{:.0}", v * 100.0)
 }
 
 #[cfg(test)]

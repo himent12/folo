@@ -11,9 +11,9 @@ use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, App, Bounds, Hsla, InteractiveElement, IntoElement, StatefulInteractiveElement, MouseMoveEvent, ParentElement,
-    PathBuilder, Pixels, Point, SharedString, Styled, TextRun, Window, canvas, div, fill,
-    linear_color_stop, linear_gradient, point, px, size,
+    AnyElement, App, Bounds, Hsla, InteractiveElement, IntoElement, MouseMoveEvent, ParentElement,
+    PathBuilder, Pixels, Point, SharedString, StatefulInteractiveElement, Styled, TextRun, Window, canvas,
+    div, fill, linear_color_stop, linear_gradient, point, px, size,
 };
 
 use crate::theme::{MONO, Theme, alpha, ty};
@@ -37,7 +37,16 @@ pub struct Series {
 
 impl Series {
     pub fn new(name: impl Into<SharedString>, color: Hsla, points: Arc<Vec<(f32, f32)>>) -> Self {
-        Self { name: name.into(), color, points, smooth: 0.0, area: false, width: 1.5, dashed: false, live: false }
+        Self {
+            name: name.into(),
+            color,
+            points,
+            smooth: 0.0,
+            area: false,
+            width: 1.5,
+            dashed: false,
+            live: false,
+        }
     }
 
     pub fn smooth(mut self, w: f32) -> Self {
@@ -47,11 +56,6 @@ impl Series {
 
     pub fn area(mut self) -> Self {
         self.area = true;
-        self
-    }
-
-    pub fn dashed(mut self) -> Self {
-        self.dashed = true;
         self
     }
 
@@ -78,7 +82,8 @@ pub struct LineChart {
     pub series: Vec<Series>,
     pub x_range: Option<(f32, f32)>,
     pub y_range: Option<(f32, f32)>,
-    pub y_fmt: fn(f32) -> String,
+    /// Tick label format; `None` picks decimals from the tick step so labels line up.
+    pub y_fmt: Option<fn(f32) -> String>,
     pub x_fmt: fn(f32) -> String,
     /// Readout values use this format (defaults to `y_fmt`).
     pub value_fmt: Option<fn(f32) -> String>,
@@ -99,7 +104,7 @@ impl LineChart {
             series,
             x_range: None,
             y_range: None,
-            y_fmt: |v| format_tick(v),
+            y_fmt: None,
             x_fmt: |v| format_tick(v),
             value_fmt: None,
             x_name: "",
@@ -144,6 +149,20 @@ pub fn ticks(lo: f32, hi: f32, n: usize) -> Vec<f32> {
         v += step;
     }
     out
+}
+
+/// Format `v` with the decimals a tick step of `step` needs (0.25 → 2, 0.5 → 1, 10 → 0).
+pub fn format_step(v: f32, step: f32) -> String {
+    if step.abs() >= 1000.0 && v.abs() >= 1000.0 {
+        return format_tick(v);
+    }
+    let mut d = 0usize;
+    let mut s = step.abs();
+    while d < 6 && (s - s.round()).abs() > 1e-3 * s.max(1e-9) {
+        s *= 10.0;
+        d += 1;
+    }
+    format!("{v:.d$}")
 }
 
 pub fn format_tick(v: f32) -> String {
@@ -232,7 +251,15 @@ pub fn nearest(points: &[(f32, f32)], x: f32) -> Option<usize> {
     }
 }
 
-pub fn paint_text(window: &mut Window, cx: &mut App, text: &str, origin: Point<Pixels>, color: Hsla, size_px: f32, align_right: bool) -> Pixels {
+pub fn paint_text(
+    window: &mut Window,
+    cx: &mut App,
+    text: &str,
+    origin: Point<Pixels>,
+    color: Hsla,
+    size_px: f32,
+    align_right: bool,
+) -> Pixels {
     let run = TextRun {
         len: text.len(),
         font: gpui::Font {
@@ -244,7 +271,8 @@ pub fn paint_text(window: &mut Window, cx: &mut App, text: &str, origin: Point<P
         underline: None,
         strikethrough: None,
     };
-    let line = window.text_system().shape_line(SharedString::from(text.to_string()), px(size_px), &[run], None);
+    let line =
+        window.text_system().shape_line(SharedString::from(text.to_string()), px(size_px), &[run], None);
     let w = line.width;
     let o = if align_right { point(origin.x - w, origin.y) } else { origin };
     let _ = line.paint(o, px(size_px + 4.), window, cx);
@@ -252,7 +280,14 @@ pub fn paint_text(window: &mut Window, cx: &mut App, text: &str, origin: Point<P
 }
 
 fn text_width(window: &mut Window, text: &str, size_px: f32) -> Pixels {
-    let run = TextRun { len: text.len(), font: gpui::font(MONO), color: gpui::black(), background_color: None, underline: None, strikethrough: None };
+    let run = TextRun {
+        len: text.len(),
+        font: gpui::font(MONO),
+        color: gpui::black(),
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
     window.text_system().shape_line(SharedString::from(text.to_string()), px(size_px), &[run], None).width
 }
 
@@ -292,22 +327,40 @@ pub fn line_chart(t: &Theme, spec: LineChart) -> AnyElement {
             d.on_mouse_move(move |ev: &MouseMoveEvent, window, cx| {
                 if let Some(b) = cell.get() {
                     let inside = b.contains(&ev.position)
-                        || (ev.position.y >= b.top() && ev.position.y <= b.bottom() + px(20.)
-                            && ev.position.x >= b.left() - px(4.) && ev.position.x <= b.right() + px(4.));
+                        || (ev.position.y >= b.top()
+                            && ev.position.y <= b.bottom() + px(20.)
+                            && ev.position.x >= b.left() - px(4.)
+                            && ev.position.x <= b.right() + px(4.));
                     let frac = ((ev.position.x - b.left()) / b.size.width).clamp(0.0, 1.0);
                     f(inside.then_some(frac), window, cx);
                 }
             })
         })
-        .when_some(on_leave, |d, f| d.on_hover(move |hovered, window, cx| if !hovered { f(None, window, cx) }))
+        .when_some(on_leave, |d, f| {
+            d.on_hover(move |hovered, window, cx| {
+                if !hovered {
+                    f(None, window, cx)
+                }
+            })
+        })
         .child(
-            canvas(|_, _, _| (), move |bounds, _, window, cx| paint_line_chart(&t, &spec, bounds, &cell_paint, window, cx))
-                .size_full(),
+            canvas(
+                |_, _, _| (),
+                move |bounds, _, window, cx| paint_line_chart(&t, &spec, bounds, &cell_paint, window, cx),
+            )
+            .size_full(),
         )
         .into_any_element()
 }
 
-fn paint_line_chart(t: &Theme, spec: &LineChart, bounds: Bounds<Pixels>, plot_cell: &Cell<Option<Bounds<Pixels>>>, window: &mut Window, cx: &mut App) {
+fn paint_line_chart(
+    t: &Theme,
+    spec: &LineChart,
+    bounds: Bounds<Pixels>,
+    plot_cell: &Cell<Option<Bounds<Pixels>>>,
+    window: &mut Window,
+    cx: &mut App,
+) {
     let label_size = ty::XS.size - 0.5;
     // Data extents.
     let mut x0 = f32::INFINITY;
@@ -352,8 +405,11 @@ fn paint_line_chart(t: &Theme, spec: &LineChart, bounds: Bounds<Pixels>, plot_ce
     }
     let (ly0, ly1) = if spec.log_y { (y0.max(1e-6).ln(), y1.max(1e-6).ln()) } else { (y0, y1) };
     let yticks = if spec.log_y { Vec::new() } else { ticks(y0, y1, spec.y_ticks) };
-    let ylabels: Vec<String> = yticks.iter().map(|v| (spec.y_fmt)(*v)).collect();
-    let label_w = ylabels.iter().map(|l| text_width(window, l, label_size)).fold(px(0.), |a, b| a.max(b));
+    let ystep = nice_step(y1 - y0, spec.y_ticks);
+    let ylabels: Vec<String> =
+        yticks.iter().map(|v| spec.y_fmt.map_or_else(|| format_step(*v, ystep), |f| f(*v))).collect();
+    // A shared minimum gutter keeps plots in a grid aligned.
+    let label_w = ylabels.iter().map(|l| text_width(window, l, label_size)).fold(px(28.), |a, b| a.max(b));
     let left = bounds.left() + label_w + px(10.);
     let plot = Bounds::new(
         point(left, bounds.top() + px(6.)),
@@ -369,11 +425,25 @@ fn paint_line_chart(t: &Theme, spec: &LineChart, bounds: Bounds<Pixels>, plot_ce
     // Grid + y labels.
     for (v, l) in yticks.iter().zip(&ylabels) {
         let y = sy(*v);
-        window.paint_quad(fill(Bounds::new(point(plot.left(), y), size(plot.size.width, px(1.))), t.chart_grid));
-        paint_text(window, cx, l, point(plot.left() - px(8.), y - px(label_size / 2. + 2.)), t.chart_label, label_size, true);
+        window.paint_quad(fill(
+            Bounds::new(point(plot.left(), y), size(plot.size.width, px(1.))),
+            t.chart_grid,
+        ));
+        paint_text(
+            window,
+            cx,
+            l,
+            point(plot.left() - px(8.), y - px(label_size / 2. + 2.)),
+            t.chart_label,
+            label_size,
+            true,
+        );
     }
     // Baseline axis.
-    window.paint_quad(fill(Bounds::new(point(plot.left(), plot.bottom()), size(plot.size.width, px(1.))), t.chart_axis));
+    window.paint_quad(fill(
+        Bounds::new(point(plot.left(), plot.bottom()), size(plot.size.width, px(1.))),
+        t.chart_axis,
+    ));
     // X ticks.
     let xt = ticks(x0, x1, ((plot.size.width / px(90.)) as usize).clamp(2, 8));
     for v in &xt {
@@ -394,53 +464,75 @@ fn paint_line_chart(t: &Theme, spec: &LineChart, bounds: Bounds<Pixels>, plot_ce
             continue;
         }
         let x = sx(m.x);
-        stroke_path(window, &[point(x, plot.top()), point(x, plot.bottom())], 1.0, alpha(m.color, 0.55), true);
+        stroke_path(
+            window,
+            &[point(x, plot.top()), point(x, plot.bottom())],
+            1.0,
+            alpha(m.color, 0.55),
+            true,
+        );
         let w = text_width(window, &m.label, label_size);
         let lx = if x + px(4.) + w > plot.right() { x - px(4.) - w } else { x + px(4.) };
         paint_text(window, cx, &m.label, point(lx, plot.top() + px(1.)), m.color, label_size, false);
     }
 
     let columns = (plot.size.width / px(1.)).max(1.0) as usize;
-    window.with_content_mask(Some(gpui::ContentMask { bounds: Bounds::new(point(plot.left() - px(4.), plot.top() - px(4.)), size(plot.size.width + px(8.), plot.size.height + px(5.))) }), |window| {
-        for s in &spec.series {
-            if s.points.is_empty() {
-                continue;
-            }
-            let main: Vec<(f32, f32)> = if s.smooth > 0.0 {
-                // Raw data faint underneath, smoothed on top.
-                let raw = envelope(&s.points, x0, x1, columns);
-                let pts: Vec<Point<Pixels>> = raw.iter().map(|&(x, y)| point(sx(x), sy(y))).collect();
-                stroke_path(window, &pts, 1.0, alpha(s.color, 0.22), false);
-                let sm = ema(&s.points, s.smooth);
-                envelope(&sm, x0, x1, columns / 2 + 1)
-            } else {
-                envelope(&s.points, x0, x1, columns)
-            };
-            let pts: Vec<Point<Pixels>> = main.iter().map(|&(x, y)| point(sx(x), sy(y))).collect();
-            if s.area && pts.len() > 1 {
-                let mut b = PathBuilder::fill();
-                b.move_to(point(pts[0].x, plot.bottom()));
-                for p in &pts {
-                    b.line_to(*p);
+    window.with_content_mask(
+        Some(gpui::ContentMask {
+            bounds: Bounds::new(
+                point(plot.left() - px(4.), plot.top() - px(4.)),
+                size(plot.size.width + px(8.), plot.size.height + px(5.)),
+            ),
+        }),
+        |window| {
+            for s in &spec.series {
+                if s.points.is_empty() {
+                    continue;
                 }
-                b.line_to(point(pts[pts.len() - 1].x, plot.bottom()));
-                b.close();
-                if let Ok(path) = b.build() {
-                    let top = alpha(s.color, t.chart_area_opacity * 1.6);
-                    let bottom = alpha(s.color, 0.0);
-                    window.paint_path(path, linear_gradient(180., linear_color_stop(top, 0.), linear_color_stop(bottom, 1.)));
+                let main: Vec<(f32, f32)> = if s.smooth > 0.0 {
+                    // Raw data faint underneath, smoothed on top.
+                    let raw = envelope(&s.points, x0, x1, columns);
+                    let pts: Vec<Point<Pixels>> = raw.iter().map(|&(x, y)| point(sx(x), sy(y))).collect();
+                    stroke_path(window, &pts, 1.0, alpha(s.color, 0.22), false);
+                    let sm = ema(&s.points, s.smooth);
+                    envelope(&sm, x0, x1, columns / 2 + 1)
+                } else {
+                    envelope(&s.points, x0, x1, columns)
+                };
+                let pts: Vec<Point<Pixels>> = main.iter().map(|&(x, y)| point(sx(x), sy(y))).collect();
+                if s.area && pts.len() > 1 {
+                    let mut b = PathBuilder::fill();
+                    b.move_to(point(pts[0].x, plot.bottom()));
+                    for p in &pts {
+                        b.line_to(*p);
+                    }
+                    b.line_to(point(pts[pts.len() - 1].x, plot.bottom()));
+                    b.close();
+                    if let Ok(path) = b.build() {
+                        let top = alpha(s.color, t.chart_area_opacity * 1.6);
+                        let bottom = alpha(s.color, 0.0);
+                        window.paint_path(
+                            path,
+                            linear_gradient(180., linear_color_stop(top, 0.), linear_color_stop(bottom, 1.)),
+                        );
+                    }
+                }
+                stroke_path(window, &pts, s.width, s.color, s.dashed);
+                if s.live
+                    && let Some(&(x, y)) = main.last()
+                {
+                    let c = point(sx(x), sy(y));
+                    window.paint_quad(
+                        fill(Bounds::centered_at(c, size(px(10.), px(10.))), alpha(s.color, 0.22))
+                            .corner_radii(px(5.)),
+                    );
+                    window.paint_quad(
+                        fill(Bounds::centered_at(c, size(px(5.), px(5.))), s.color).corner_radii(px(2.5)),
+                    );
                 }
             }
-            stroke_path(window, &pts, s.width, s.color, s.dashed);
-            if s.live
-                && let Some(&(x, y)) = main.last()
-            {
-                let c = point(sx(x), sy(y));
-                window.paint_quad(fill(Bounds::centered_at(c, size(px(10.), px(10.))), alpha(s.color, 0.22)).corner_radii(px(5.)));
-                window.paint_quad(fill(Bounds::centered_at(c, size(px(5.), px(5.))), s.color).corner_radii(px(2.5)));
-            }
-        }
-    });
+        },
+    );
 
     // Hover cursor + readout.
     let Some(frac) = spec.hover else { return };
@@ -459,14 +551,24 @@ fn paint_line_chart(t: &Theme, spec: &LineChart, bounds: Bounds<Pixels>, plot_ce
             }
             snap_x.get_or_insert(x);
             let c = point(sx(x), sy(y));
-            window.paint_quad(fill(Bounds::centered_at(c, size(px(9.), px(9.))), t.bg_overlay).corner_radii(px(4.5)));
-            window.paint_quad(fill(Bounds::centered_at(c, size(px(6.), px(6.))), s.color).corner_radii(px(3.)));
-            rows.push((s.color, s.name.to_string(), (spec.value_fmt.unwrap_or(spec.y_fmt))(y)));
+            window.paint_quad(
+                fill(Bounds::centered_at(c, size(px(9.), px(9.))), t.bg_overlay).corner_radii(px(4.5)),
+            );
+            window
+                .paint_quad(fill(Bounds::centered_at(c, size(px(6.), px(6.))), s.color).corner_radii(px(3.)));
+            rows.push((
+                s.color,
+                s.name.to_string(),
+                spec.value_fmt.map_or_else(|| format_step(y, ystep / 10.), |f| f(y)),
+            ));
         }
     }
     let Some(snap) = snap_x else { return };
     let cx_px = sx(snap);
-    window.paint_quad(fill(Bounds::new(point(cx_px, plot.top()), size(px(1.), plot.size.height)), t.chart_cursor));
+    window.paint_quad(fill(
+        Bounds::new(point(cx_px, plot.top()), size(px(1.), plot.size.height)),
+        t.chart_cursor,
+    ));
     // Readout box.
     let title = format!("{} {}", spec.x_name, (spec.x_fmt)(snap)).trim().to_string();
     let fs = ty::XS.size;
@@ -479,11 +581,21 @@ fn paint_line_chart(t: &Theme, spec: &LineChart, bounds: Bounds<Pixels>, plot_ce
     let bx = bx.max(bounds.left());
     let by = plot.top() + px(4.);
     let rect = Bounds::new(point(bx, by), size(w, h));
-    window.paint_quad(gpui::quad(rect, px(6.), t.bg_overlay, px(1.), t.line_strong, gpui::BorderStyle::Solid));
+    window.paint_quad(gpui::quad(
+        rect,
+        px(6.),
+        t.bg_overlay,
+        px(1.),
+        t.line_strong,
+        gpui::BorderStyle::Solid,
+    ));
     paint_text(window, cx, &title, point(bx + px(10.), by + px(6.)), t.text_tertiary, fs, false);
     for (i, (color, name, value)) in rows.iter().enumerate() {
         let y = by + px(6.) + px(16.) * (i as f32 + 1.);
-        window.paint_quad(fill(Bounds::new(point(bx + px(10.), y + px(4.)), size(px(8.), px(8.))), *color).corner_radii(px(2.)));
+        window.paint_quad(
+            fill(Bounds::new(point(bx + px(10.), y + px(4.)), size(px(8.), px(8.))), *color)
+                .corner_radii(px(2.)),
+        );
         paint_text(window, cx, name, point(bx + px(24.), y), t.text_secondary, fs, false);
         paint_text(window, cx, value, point(bx + w - px(10.), y), t.text_primary, fs, true);
     }
@@ -492,44 +604,71 @@ fn paint_line_chart(t: &Theme, spec: &LineChart, bounds: Bounds<Pixels>, plot_ce
 /// A tiny axis-less trend line with an optional area and live end dot.
 pub fn sparkline(t: &Theme, values: Arc<Vec<f32>>, color: Hsla, height: f32, live: bool) -> AnyElement {
     let t = *t;
-    canvas(|_, _, _| (), move |b, _, window, _| {
-        if values.len() < 2 {
-            return;
-        }
-        let (lo, hi) = values.iter().fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), &v| (lo.min(v), hi.max(v)));
-        let span = (hi - lo).max(1e-6);
-        let inset = px(3.);
-        let w = b.size.width - inset * 2.;
-        let h = b.size.height - inset * 2.;
-        let n = values.len();
-        let pts: Vec<Point<Pixels>> = values
-            .iter()
-            .enumerate()
-            .map(|(i, &v)| point(b.left() + inset + w * (i as f32 / (n - 1) as f32), b.top() + inset + h * (1.0 - (v - lo) / span)))
-            .collect();
-        let mut a = PathBuilder::fill();
-        a.move_to(point(pts[0].x, b.bottom()));
-        for p in &pts {
-            a.line_to(*p);
-        }
-        a.line_to(point(pts[n - 1].x, b.bottom()));
-        a.close();
-        if let Ok(path) = a.build() {
-            window.paint_path(path, linear_gradient(180., linear_color_stop(alpha(color, t.chart_area_opacity * 1.4), 0.), linear_color_stop(alpha(color, 0.), 1.)));
-        }
-        stroke_path(window, &pts, 1.25, color, false);
-        if live {
-            let c = pts[n - 1];
-            window.paint_quad(fill(Bounds::centered_at(c, size(px(4.), px(4.))), color).corner_radii(px(2.)));
-        }
-    })
+    canvas(
+        |_, _, _| (),
+        move |b, _, window, _| {
+            if values.len() < 2 {
+                return;
+            }
+            let (lo, hi) =
+                values.iter().fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), &v| (lo.min(v), hi.max(v)));
+            let span = (hi - lo).max(1e-6);
+            let inset = px(3.);
+            let w = b.size.width - inset * 2.;
+            let h = b.size.height - inset * 2.;
+            let n = values.len();
+            let pts: Vec<Point<Pixels>> = values
+                .iter()
+                .enumerate()
+                .map(|(i, &v)| {
+                    point(
+                        b.left() + inset + w * (i as f32 / (n - 1) as f32),
+                        b.top() + inset + h * (1.0 - (v - lo) / span),
+                    )
+                })
+                .collect();
+            let mut a = PathBuilder::fill();
+            a.move_to(point(pts[0].x, b.bottom()));
+            for p in &pts {
+                a.line_to(*p);
+            }
+            a.line_to(point(pts[n - 1].x, b.bottom()));
+            a.close();
+            if let Ok(path) = a.build() {
+                window.paint_path(
+                    path,
+                    linear_gradient(
+                        180.,
+                        linear_color_stop(alpha(color, t.chart_area_opacity * 1.4), 0.),
+                        linear_color_stop(alpha(color, 0.), 1.),
+                    ),
+                );
+            }
+            stroke_path(window, &pts, 1.25, color, false);
+            if live {
+                let c = pts[n - 1];
+                window.paint_quad(
+                    fill(Bounds::centered_at(c, size(px(4.), px(4.))), color).corner_radii(px(2.)),
+                );
+            }
+        },
+    )
     .w_full()
     .h(px(height))
     .into_any_element()
 }
 
 /// Vertical bars for a histogram; `labels` sit under the bars (one per bin).
-pub fn histogram(t: &Theme, id: impl Into<SharedString>, counts: Arc<Vec<u32>>, labels: Arc<Vec<String>>, color: Hsla, height: f32, hover: Option<f32>, on_hover: Option<HoverFn>) -> AnyElement {
+pub fn histogram(
+    t: &Theme,
+    id: impl Into<SharedString>,
+    counts: Arc<Vec<u32>>,
+    labels: Arc<Vec<String>>,
+    color: Hsla,
+    height: f32,
+    hover: Option<f32>,
+    on_hover: Option<HoverFn>,
+) -> AnyElement {
     let t = *t;
     let cell: Rc<Cell<Option<Bounds<Pixels>>>> = Rc::new(Cell::new(None));
     let paint_cell = cell.clone();
@@ -547,39 +686,76 @@ pub fn histogram(t: &Theme, id: impl Into<SharedString>, counts: Arc<Vec<u32>>, 
                 }
             })
         })
-        .when_some(leave, |d, f| d.on_hover(move |h, window, cx| if !h { f(None, window, cx) }))
-        .child(
-            canvas(|_, _, _| (), move |b, _, window, cx| {
-                let n = counts.len().max(1);
-                let max = counts.iter().copied().max().unwrap_or(1).max(1) as f32;
-                let label_h = px(18.);
-                let plot = Bounds::new(b.origin, size(b.size.width, b.size.height - label_h));
-                paint_cell.set(Some(plot));
-                let gap = px(4.);
-                let bw = (plot.size.width - gap * (n as f32 - 1.)) / n as f32;
-                let hovered = hover.map(|f| (f * n as f32) as usize);
-                window.paint_quad(fill(Bounds::new(point(plot.left(), plot.bottom()), size(plot.size.width, px(1.))), t.chart_axis));
-                for (i, &c) in counts.iter().enumerate() {
-                    let x = plot.left() + (bw + gap) * i as f32;
-                    let h = (plot.size.height - px(16.)) * (c as f32 / max);
-                    let h = if c > 0 { h.max(px(2.)) } else { px(0.) };
-                    let hot = hovered == Some(i);
-                    let col = if hovered.is_some() && !hot { alpha(color, 0.45) } else { color };
-                    window.paint_quad(fill(Bounds::new(point(x, plot.bottom() - h), size(bw, h)), col).corner_radii(gpui::Corners { top_left: px(2.), top_right: px(2.), bottom_left: px(0.), bottom_right: px(0.) }));
-                    if let Some(l) = labels.get(i) {
-                        let fs = ty::XS.size - 0.5;
-                        let w = text_width(window, l, fs);
-                        if w < bw + gap * 2. || i % 2 == 0 {
-                            paint_text(window, cx, l, point(x + bw / 2. - w / 2., plot.bottom() + px(5.)), t.chart_label, fs, false);
-                        }
-                    }
-                    if hot {
-                        let s = crate::ui::int(c as u64);
-                        let w = text_width(window, &s, ty::XS.size);
-                        paint_text(window, cx, &s, point(x + bw / 2. - w / 2., plot.bottom() - h - px(15.)), t.text_primary, ty::XS.size, false);
-                    }
+        .when_some(leave, |d, f| {
+            d.on_hover(move |h, window, cx| {
+                if !h {
+                    f(None, window, cx)
                 }
             })
+        })
+        .child(
+            canvas(
+                |_, _, _| (),
+                move |b, _, window, cx| {
+                    let n = counts.len().max(1);
+                    let max = counts.iter().copied().max().unwrap_or(1).max(1) as f32;
+                    let label_h = px(18.);
+                    let plot = Bounds::new(b.origin, size(b.size.width, b.size.height - label_h));
+                    paint_cell.set(Some(plot));
+                    let gap = px(4.);
+                    let bw = (plot.size.width - gap * (n as f32 - 1.)) / n as f32;
+                    let hovered = hover.map(|f| (f * n as f32) as usize);
+                    window.paint_quad(fill(
+                        Bounds::new(point(plot.left(), plot.bottom()), size(plot.size.width, px(1.))),
+                        t.chart_axis,
+                    ));
+                    for (i, &c) in counts.iter().enumerate() {
+                        let x = plot.left() + (bw + gap) * i as f32;
+                        let h = (plot.size.height - px(16.)) * (c as f32 / max);
+                        let h = if c > 0 { h.max(px(2.)) } else { px(0.) };
+                        let hot = hovered == Some(i);
+                        let col = if hovered.is_some() && !hot { alpha(color, 0.45) } else { color };
+                        window.paint_quad(
+                            fill(Bounds::new(point(x, plot.bottom() - h), size(bw, h)), col).corner_radii(
+                                gpui::Corners {
+                                    top_left: px(2.),
+                                    top_right: px(2.),
+                                    bottom_left: px(0.),
+                                    bottom_right: px(0.),
+                                },
+                            ),
+                        );
+                        if let Some(l) = labels.get(i) {
+                            let fs = ty::XS.size - 0.5;
+                            let w = text_width(window, l, fs);
+                            if w < bw + gap * 2. || i % 2 == 0 {
+                                paint_text(
+                                    window,
+                                    cx,
+                                    l,
+                                    point(x + bw / 2. - w / 2., plot.bottom() + px(5.)),
+                                    t.chart_label,
+                                    fs,
+                                    false,
+                                );
+                            }
+                        }
+                        if hot {
+                            let s = crate::ui::int(c as u64);
+                            let w = text_width(window, &s, ty::XS.size);
+                            paint_text(
+                                window,
+                                cx,
+                                &s,
+                                point(x + bw / 2. - w / 2., plot.bottom() - h - px(15.)),
+                                t.text_primary,
+                                ty::XS.size,
+                                false,
+                            );
+                        }
+                    }
+                },
+            )
             .size_full(),
         )
         .into_any_element()
@@ -596,6 +772,10 @@ mod tests {
         assert_eq!(nice_step(7.0, 4), 2.0);
         let t = ticks(0.0, 1.0, 4);
         assert_eq!(t, vec![0.0, 0.25, 0.5, 0.75, 1.0]);
+        assert_eq!(format_step(0.5, 0.25), "0.50");
+        assert_eq!(format_step(2.0, 1.0), "2");
+        assert_eq!(format_step(0.004, 0.002), "0.004");
+        assert_eq!(format_step(1.5, 0.5), "1.5");
     }
 
     #[test]

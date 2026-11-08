@@ -9,19 +9,26 @@ pub mod settings;
 
 use std::sync::Arc;
 
-use gpui::prelude::FluentBuilder;
-use gpui::{AnyElement, Context, Div, FontWeight, IntoElement, ParentElement, RenderImage, SharedString, Styled, Window, canvas, div, px};
+use gpui::{
+    AnyElement, Context, Div, FontWeight, IntoElement, ParentElement, RenderImage, SharedString, Styled,
+    Window, canvas, div, px,
+};
 
 use crate::api::{ApiError, ImageMeta};
 use crate::app::{FoloApp, act};
 use crate::controls::Btn;
 use crate::store::ImgKind;
-use crate::theme::{Theme, radius, theme, ty};
+use crate::theme::{Theme, theme, ty};
 use crate::ui::*;
 use crate::viz::{DrawBox, Fit, paint_image_with_boxes};
 
 /// Title, one line of context, and actions on the right.
-pub fn page_header(t: &Theme, title: impl Into<SharedString>, subtitle: impl IntoElement, actions: Vec<AnyElement>) -> Div {
+pub fn page_header(
+    t: &Theme,
+    title: impl Into<SharedString>,
+    subtitle: impl IntoElement,
+    actions: Vec<AnyElement>,
+) -> Div {
     div()
         .flex()
         .items_end()
@@ -42,7 +49,14 @@ pub fn page_header(t: &Theme, title: impl Into<SharedString>, subtitle: impl Int
 
 impl FoloApp {
     /// A dataset image painted with optional boxes, at a fixed tile size.
-    pub fn tile(&mut self, dataset: &str, meta: &ImageMeta, boxes: bool, cx: &mut Context<Self>) -> AnyElement {
+    pub fn tile(
+        &mut self,
+        dataset: &str,
+        meta: &ImageMeta,
+        boxes: bool,
+        fit: Fit,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let t = theme(cx);
         let img = self.image(dataset, &meta.id, ImgKind::Thumb, cx);
         let dims = (meta.width as f32, meta.height as f32);
@@ -51,14 +65,28 @@ impl FoloApp {
         } else {
             Vec::new()
         };
-        image_canvas(&t, img, dims, draw, Fit::Cover, false)
+        image_canvas(&t, img, dims, draw, fit, false)
     }
 
     /// A centred error panel with retry.
-    pub fn error_panel(&self, e: &ApiError, retry_key: &str, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+    pub fn error_panel(
+        &self,
+        e: &ApiError,
+        retry_key: &str,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let t = theme(cx);
         let hint = e.hint.clone().unwrap_or_else(|| format!("Error code {}", e.code));
-        let retry = self.button(retry_key, "Retry", Btn::Secondary, Some("icons/refresh-cw.svg"), window, cx, act(|this, _, cx| this.retry_all(cx)));
+        let retry = self.button(
+            retry_key,
+            "Retry",
+            Btn::Secondary,
+            Some("icons/refresh-cw.svg"),
+            window,
+            cx,
+            act(|this, _, cx| this.retry_all(cx)),
+        );
         panel(&t)
             .child(
                 empty_state(&t, "icons/plug.svg", &e.message, &hint, Tone::Danger)
@@ -86,11 +114,34 @@ impl FoloApp {
 }
 
 /// Paint an image with boxes filling its parent.
-pub fn image_canvas(t: &Theme, img: Option<Arc<RenderImage>>, dims: (f32, f32), boxes: Vec<DrawBox>, fit: Fit, labels: bool) -> AnyElement {
+pub fn image_canvas(
+    t: &Theme,
+    img: Option<Arc<RenderImage>>,
+    dims: (f32, f32),
+    boxes: Vec<DrawBox>,
+    fit: Fit,
+    labels: bool,
+) -> AnyElement {
     let t = *t;
-    canvas(|_, _, _| (), move |b, _, window, cx| {
-        paint_image_with_boxes(&t, window, cx, b, img.as_ref(), dims, &boxes, fit, 1.0, (0., 0.), labels, 0.);
-    })
+    canvas(
+        |_, _, _| (),
+        move |b, _, window, cx| {
+            paint_image_with_boxes(
+                &t,
+                window,
+                cx,
+                b,
+                img.as_ref(),
+                dims,
+                &boxes,
+                fit,
+                1.0,
+                (0., 0.),
+                labels,
+                0.,
+            );
+        },
+    )
     .size_full()
     .into_any_element()
 }
@@ -103,7 +154,9 @@ pub fn loading_rows(t: &Theme, id: &str, rows: usize) -> Div {
             .gap(px(12.))
             .items_center()
             .child(div().size(px(16.)).child(skeleton(t, format!("{id}-a{i}"))))
-            .child(div().h(px(12.)).w(px(140. + (i % 3) as f32 * 40.)).child(skeleton(t, format!("{id}-b{i}"))))
+            .child(
+                div().h(px(12.)).w(px(140. + (i % 3) as f32 * 40.)).child(skeleton(t, format!("{id}-b{i}"))),
+            )
             .child(div().flex_1())
             .child(div().h(px(12.)).w(px(60.)).child(skeleton(t, format!("{id}-c{i}"))))
     }))
@@ -115,7 +168,9 @@ pub fn cell2(t: &Theme, primary: impl Into<SharedString>, secondary: impl Into<S
         .flex()
         .flex_col()
         .min_w_0()
-        .child(text(ty::BASE, t.text_primary).font_weight(FontWeight::MEDIUM).truncate().child(primary.into()))
+        .child(
+            text(ty::BASE, t.text_primary).font_weight(FontWeight::MEDIUM).truncate().child(primary.into()),
+        )
         .child(text(ty::XS, t.text_tertiary).truncate().child(secondary.into()))
 }
 
@@ -132,8 +187,4 @@ pub fn bar_value(t: &Theme, v: f32, label: impl Into<SharedString>, color: gpui:
         .gap(px(8.))
         .child(div().w(px(48.)).child(progress(t, v, color, 4.)))
         .child(text(ty::SM, t.text_primary).tnum().child(label.into()))
-}
-
-pub fn well(t: &Theme) -> Div {
-    div().bg(t.bg_inset).rounded(px(radius::MD)).overflow_hidden().when(true, |d| d)
 }

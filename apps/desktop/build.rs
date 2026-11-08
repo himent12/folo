@@ -14,8 +14,9 @@ fn main() {
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let path = manifest.join("../../design/tokens.json");
     println!("cargo:rerun-if-changed={}", path.display());
-    let text = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("reading {}: {e} (FOLO Desktop builds from the repo checkout)", path.display()));
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+        panic!("reading {}: {e} (FOLO Desktop builds from the repo checkout)", path.display())
+    });
     let tokens: Value = serde_json::from_str(&text).expect("design/tokens.json is valid JSON");
     let out = generate(&tokens);
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
@@ -30,16 +31,20 @@ fn main() {
         .filter(|n| n.ends_with(".svg"))
         .collect();
     names.sort();
-    let mut table = String::from("pub const ICONS: &[(&str, &[u8])] = &[
-");
+    let mut table = String::from(
+        "pub const ICONS: &[(&str, &[u8])] = &[
+",
+    );
     for n in names {
         table.push_str(&format!(
             "    (\"icons/{n}\", include_bytes!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/assets/icons/{n}\"))),
 "
         ));
     }
-    table.push_str("];
-");
+    table.push_str(
+        "];
+",
+    );
     std::fs::write(out_dir.join("icons.rs"), table).unwrap();
 }
 
@@ -55,10 +60,8 @@ fn color(v: &Value, at: &str) -> u32 {
 }
 
 fn ident(key: &str) -> String {
-    let mut s: String = key
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
-        .collect();
+    let mut s: String =
+        key.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '_' }).collect();
     if s.starts_with(|c: char| c.is_ascii_digit()) {
         s.insert(0, '_');
     }
@@ -146,7 +149,8 @@ fn generate(t: &Value) -> String {
         .map(|c| format!("0x{:08X}", color(c, "classes.palette")))
         .collect();
     writeln!(s, "pub const CLASS_PALETTE: [u32; {}] = [{}];", palette.len(), palette.join(", ")).unwrap();
-    writeln!(s, "pub const CLASS_CHIP_TEXT: u32 = 0x{:08X};", color(&classes["chip_text"], "chip_text")).unwrap();
+    writeln!(s, "pub const CLASS_CHIP_TEXT: u32 = 0x{:08X};", color(&classes["chip_text"], "chip_text"))
+        .unwrap();
     writeln!(s, "pub const CLASS_HALO: u32 = 0x{:08X};", color(&classes["halo"], "halo")).unwrap();
     writeln!(s, "pub const CLASS_FILL_OPACITY: f32 = {:?};\n", num(&classes["fill_opacity"])).unwrap();
 
@@ -159,7 +163,10 @@ fn generate(t: &Value) -> String {
             continue;
         }
         let name = ident(k).to_uppercase();
-        let name = if name.starts_with('_') { format!("X{}", &name[1..]) } else { name };
+        let name = match name.strip_prefix('_') {
+            Some(rest) => format!("X{rest}"),
+            None => name,
+        };
         writeln!(
             s,
             "    pub const {name}: TypeStep = TypeStep {{ size: {:?}, line: {:?}, tracking: {:?}, weight: {} }};",

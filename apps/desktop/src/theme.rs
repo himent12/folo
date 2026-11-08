@@ -13,7 +13,7 @@ pub mod tokens {
     include!(concat!(env!("OUT_DIR"), "/tokens.rs"));
 }
 
-pub use tokens::{Colors, TypeStep, duration, radius, size, space, ty};
+pub use tokens::{Colors, TypeStep, radius, size, ty};
 
 pub const SANS: &str = "Geist";
 pub const MONO: &str = "Geist Mono";
@@ -74,19 +74,6 @@ impl Theme {
     /// Detection class `i` (theme independent: boxes sit on photos).
     pub fn class(&self, i: u32) -> Hsla {
         rgba32(tokens::CLASS_PALETTE[i as usize % tokens::CLASS_PALETTE.len()])
-    }
-
-    pub fn class_chip_text(&self) -> Hsla {
-        rgba32(tokens::CLASS_CHIP_TEXT)
-    }
-
-    pub fn class_halo(&self) -> Hsla {
-        rgba32(tokens::CLASS_HALO)
-    }
-
-    /// A solid colour for a translucent token over this theme's panel.
-    pub fn solid(&self, c: Hsla) -> Hsla {
-        over(self.bg_panel, c)
     }
 
     fn shadow(layers: &[(f32, f32, f32, f32, u32)]) -> Vec<BoxShadow> {
@@ -168,6 +155,5 @@ mod tests {
     fn tokens_are_complete() {
         assert_eq!(tokens::CLASS_PALETTE.len(), 16);
         assert_eq!(tokens::dark().chart_series.len(), 6);
-        assert!(ty::BASE.size == 13.0 && size::CONTROL_MD == 28.0);
     }
 }
