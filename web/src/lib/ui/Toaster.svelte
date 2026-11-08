@@ -1,0 +1,125 @@
+<script lang="ts">
+  import CircleCheck from '@lucide/svelte/icons/circle-check';
+  import CircleAlert from '@lucide/svelte/icons/circle-alert';
+  import Info from '@lucide/svelte/icons/info';
+  import X from '@lucide/svelte/icons/x';
+  import { fly } from 'svelte/transition';
+  import { cubicOut } from 'svelte/easing';
+  import { toast } from './toast.svelte';
+
+  const icons = { success: CircleCheck, error: CircleAlert, info: Info };
+</script>
+
+<section
+  class="toaster"
+  aria-label="Notifications"
+  onpointerenter={() => toast.hold(true)}
+  onpointerleave={() => toast.hold(false)}
+>
+  <ol aria-live="polite">
+    {#each toast.items as t (t.id)}
+      {@const Icon = icons[t.tone]}
+      <li class="toast {t.tone}" role={t.tone === 'error' ? 'alert' : 'status'} transition:fly={{ y: 8, duration: 160, easing: cubicOut }}>
+        <span class="icon"><Icon size={16} strokeWidth={1.75} /></span>
+        <div class="text">
+          <p class="title">{t.title}</p>
+          {#if t.detail}<p class="detail">{t.detail}</p>{/if}
+        </div>
+        {#if t.action}
+          {@const a = t.action}
+          <button
+            class="action"
+            onclick={() => {
+              a.run();
+              toast.dismiss(t.id);
+            }}>{a.label}</button
+          >
+        {/if}
+        <button class="close" aria-label="Dismiss" onclick={() => toast.dismiss(t.id)}><X size={14} /></button>
+      </li>
+    {/each}
+  </ol>
+</section>
+
+<style>
+  .toaster {
+    position: fixed;
+    right: var(--space-4);
+    bottom: var(--space-4);
+    z-index: var(--z-toast);
+    width: min(380px, calc(100vw - 32px));
+    pointer-events: none;
+  }
+  ol {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+  .toast {
+    pointer-events: auto;
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: var(--space-3) var(--space-2) var(--space-3) var(--space-3);
+    border-radius: var(--radius-lg);
+    background: var(--bg-overlay);
+    box-shadow: var(--shadow-lg);
+  }
+  .icon {
+    display: flex;
+    padding-top: 2px;
+    color: var(--text-secondary);
+  }
+  .success .icon {
+    color: var(--success-text);
+  }
+  .error .icon {
+    color: var(--danger-text);
+  }
+  .info .icon {
+    color: var(--info-text);
+  }
+  .text {
+    flex: 1;
+    min-width: 0;
+    display: grid;
+    gap: 2px;
+  }
+  .title {
+    font-weight: var(--weight-medium);
+  }
+  .detail {
+    color: var(--text-secondary);
+    overflow-wrap: anywhere;
+  }
+  .action {
+    height: var(--control-sm);
+    padding: 0 var(--space-2);
+    border-radius: var(--radius-sm);
+    font-weight: var(--weight-medium);
+    color: var(--accent-text);
+  }
+  .action:hover {
+    background: var(--bg-hover);
+  }
+  .close {
+    display: grid;
+    place-items: center;
+    width: var(--control-sm);
+    height: var(--control-sm);
+    border-radius: var(--radius-sm);
+    color: var(--text-tertiary);
+  }
+  .close:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+  }
+  @media (max-width: 767px) {
+    .toaster {
+      right: var(--space-4);
+      left: var(--space-4);
+      width: auto;
+      bottom: calc(72px + env(safe-area-inset-bottom));
+    }
+  }
+</style>

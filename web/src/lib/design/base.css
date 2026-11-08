@@ -176,3 +176,85 @@ table {
     scroll-behavior: auto !important;
   }
 }
+
+/* Tooltip (see ui/tooltip.ts) */
+.folo-tooltip {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: var(--z-tooltip);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 280px;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--text-primary);
+  color: var(--bg-app);
+  font-size: var(--type-xs-size);
+  line-height: var(--type-xs-line);
+  font-weight: var(--weight-medium);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity var(--dur-instant) var(--ease-standard);
+}
+.folo-tooltip[data-show] {
+  opacity: 1;
+}
+.folo-tooltip-keys {
+  display: inline-flex;
+  gap: 2px;
+}
+.folo-tooltip kbd {
+  font-family: var(--font-sans);
+  font-size: var(--type-micro-size);
+  padding: 0 4px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--bg-app) 14%, transparent);
+}
+
+/* Data tables */
+.table {
+  width: 100%;
+  font-variant-numeric: tabular-nums;
+}
+.table th {
+  height: 32px;
+  padding: 0 var(--space-3);
+  text-align: left;
+  font-size: var(--type-xs-size);
+  font-weight: var(--weight-medium);
+  color: var(--text-tertiary);
+  white-space: nowrap;
+  border-bottom: 1px solid var(--line-subtle);
+}
+.table td {
+  height: var(--size-row);
+  padding: 0 var(--space-3);
+  border-bottom: 1px solid var(--line-subtle);
+  white-space: nowrap;
+}
+.table th:first-child,
+.table td:first-child {
+  padding-left: var(--space-4);
+}
+.table th:last-child,
+.table td:last-child {
+  padding-right: var(--space-4);
+}
+.table tr:last-child td {
+  border-bottom: 0;
+}
+.table .r {
+  text-align: right;
+}
+.table.dense td {
+  height: var(--size-row-dense);
+}
+.table tbody tr.link {
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease-standard);
+}
+.table tbody tr.link:hover {
+  background: var(--bg-hover);
+}
