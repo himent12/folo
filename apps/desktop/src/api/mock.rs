@@ -650,7 +650,7 @@ impl MockBackend {
     fn check(&self) -> ApiResult<()> {
         if self.fail {
             Err(ApiError::new("server_unreachable", "Could not reach folo serve at 127.0.0.1:7878")
-                .with_hint("Start it with `folo serve`, or switch to mock data in Settings."))
+                .with_hint("Start it with `folo serve`, or choose Built-in demo in Settings."))
         } else {
             Ok(())
         }

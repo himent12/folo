@@ -122,6 +122,7 @@ impl FoloApp {
                             .border_color(t.line_subtle)
                             .cursor_pointer()
                             .hover(|s| s.bg(t.bg_hover))
+                            .active(|s| s.bg(t.bg_active))
                             .on_key_down(cx.listener(move |this, ev: &gpui::KeyDownEvent, w, cx| {
                                 let next = match ev.keystroke.key.as_str() {
                                     "down" => i + 1,
@@ -216,6 +217,7 @@ impl FoloApp {
                 .rounded(px(radius::SM))
                 .cursor_pointer()
                 .hover(|s| s.bg(t.bg_hover))
+                .active(|s| s.bg(t.bg_active))
                 .child(text(ty::BASE, t.text_tertiary).child("· from"))
                 .child(text(ty::BASE, t.text_primary).child(r.name.clone()))
                 .child(icon("icons/arrow-up-right.svg", 12., t.text_tertiary));
@@ -749,6 +751,7 @@ impl FoloApp {
                     .child(div().flex_1().min_w_0().child(self.chart_group(
                         "pr-chart",
                         0.01,
+                        1.0,
                         crate::controls::Cursor::Pr,
                         div().pl(px(12.)).pt(px(12.)).pb(px(8.)).child(line_chart(&t, chart)),
                         window,
@@ -1086,6 +1089,7 @@ impl FoloApp {
                     .when(hot && !pinned, |d| d.bg(t.bg_hover))
                     .when(pinned, |d| d.bg(t.bg_selected))
                     .hover(|s| s.bg(t.bg_hover))
+                    .active(|s| s.bg(t.bg_active))
                     .on_hover(cx.listener(move |this, h: &bool, _, cx| {
                         let next = if *h { Some(class) } else { None };
                         if this.pr_focus != next && (*h || this.pr_focus == Some(class)) {

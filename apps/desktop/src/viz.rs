@@ -200,6 +200,10 @@ pub fn paint_image_with_boxes(
                         (color, chip_text)
                     };
                     let score = b.score.map(|s| format!("{s:.2}")).unwrap_or_default();
+                    // Nothing left to say (a name-only chip in a narrow view): no empty chip.
+                    if name.is_empty() && score.is_empty() {
+                        continue;
+                    }
                     let mut name_line = window.text_system().shape_line(
                         name.clone(),
                         px(fs),
@@ -251,12 +255,23 @@ pub fn paint_image_with_boxes(
                         o.y >= bounds.top().max(rect.top()) && o.y + ch <= bounds.bottom().min(rect.bottom())
                     };
                     let free = |c: &Bounds<Pixels>| !placed.iter().any(|p| p.dilate(px(2.)).intersects(c));
-                    let origin = candidates
+                    // More spots down the inside of the box, one chip height (+2 px) apart.
+                    let inside = (1..4).map(|k| {
+                        point(clamp_x(r.left() + px(1.)), r.top() + px(1.) + (ch + px(2.)) * k as f32)
+                    });
+                    let free_spot = candidates
                         .iter()
                         .copied()
-                        .find(|o| fits(*o) && free(&Bounds::new(*o, size(cw, ch))))
-                        .or_else(|| candidates.iter().copied().find(|o| fits(*o)))
-                        .unwrap_or(candidates[1]);
+                        .chain(inside)
+                        .find(|o| fits(*o) && free(&Bounds::new(*o, size(cw, ch))));
+                    // Nowhere free: skip this chip (the selected box's chip always shows), so two
+                    // chips never paint over each other.
+                    let Some(origin) = free_spot.or_else(|| {
+                        b.highlight
+                            .then(|| candidates.iter().copied().find(|o| fits(*o)).unwrap_or(candidates[1]))
+                    }) else {
+                        continue;
+                    };
                     let chip = Bounds::new(origin, size(cw, ch));
                     placed.push(chip);
                     // Dimmed chips fade their fill with the box; the text stays readable.

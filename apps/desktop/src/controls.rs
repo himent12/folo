@@ -244,11 +244,15 @@ impl FoloApp {
     }
 
     /// Make a group of charts one Tab stop: ←/→ step the shared cursor by `step` (a fraction of the
-    /// x range), Shift steps ×10, Home/End jump, Esc clears. The readouts follow the cursor.
+    /// x range), Shift steps ×10, Home/End jump, Esc clears. The readouts follow the cursor. `end` is
+    /// where recorded data stops (a live run's latest epoch): the cursor starts there and never
+    /// steps past it into the epochs still to come.
+    #[allow(clippy::too_many_arguments)]
     pub fn chart_group(
         &self,
         key: &str,
         step: f32,
+        end: f32,
         cursor: Cursor,
         content: Div,
         window: &Window,
@@ -275,12 +279,15 @@ impl FoloApp {
             .on_key_down(cx.listener(move |this, ev: &KeyDownEvent, _, cx| {
                 let big = if ev.keystroke.modifiers.shift { 10. } else { 1. };
                 let cur = this.cursor_mut(cursor);
-                let at = cur.unwrap_or(1.0);
+                let end = end.clamp(0.0, 1.0);
+                let at = cur.map_or(end, |c| c.min(end));
                 let next = match ev.keystroke.key.as_str() {
+                    // The first press inspects the latest point itself, then steps from there.
+                    "left" if cur.is_none() => Some(end),
                     "left" => Some((at - step * big).max(0.0)),
-                    "right" => Some((at + step * big).min(1.0)),
+                    "right" => Some((at + step * big).min(end)),
                     "home" => Some(0.0),
-                    "end" => Some(1.0),
+                    "end" => Some(end),
                     "escape" if cur.is_some() => None,
                     _ => return,
                 };

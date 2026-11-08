@@ -75,6 +75,7 @@ impl FoloApp {
         let dims = (meta.width as f32, meta.height as f32);
         // On a dataset page with a class filter, the other classes drop to 30 % (the selection rule),
         // so the filter shows inside each tile.
+        let classes = self.store.dataset_summary(dataset).map(|d| d.classes.clone()).unwrap_or_default();
         let focus =
             self.ds_class.filter(|_| matches!(&self.route, crate::app::Route::Dataset(d) if d == dataset));
         let draw: Vec<DrawBox> = if boxes {
@@ -82,13 +83,16 @@ impl FoloApp {
                 .iter()
                 .map(|b| DrawBox {
                     dim: focus.is_some_and(|c| c != b.class),
+                    label: classes.get(b.class as usize).cloned().map(Into::into),
                     ..DrawBox::new(b.class, b.x1, b.y1, b.x2, b.y2)
                 })
                 .collect()
         } else {
             Vec::new()
         };
-        image_canvas(&t, img, dims, draw, fit, false)
+        // Class names on the boxes (14 px chips in small views; none on boxes under 20 px), so a
+        // class never has to be matched by colour alone.
+        image_canvas(&t, img, dims, draw, fit, true)
     }
 
     /// A centred error panel with retry.

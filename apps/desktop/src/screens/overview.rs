@@ -687,6 +687,7 @@ impl FoloApp {
                                 .rounded(px(radius::MD))
                                 .cursor_pointer()
                                 .hover(|s| s.bg(t.bg_hover))
+                                .active(|s| s.bg(t.bg_active))
                                 // Same order as the Runs table: name, then status.
                                 // One line per run: name, then dataset and architecture, then status as a dot.
                                 .child(
@@ -803,6 +804,7 @@ impl FoloApp {
                             .rounded(px(radius::MD))
                             .cursor_pointer()
                             .hover(|s| s.bg(t.bg_hover))
+                            .active(|s| s.bg(t.bg_active))
                             .child(
                                 text(ty::SM, t.text_primary)
                                     .font_weight(FontWeight::MEDIUM)
@@ -1126,6 +1128,7 @@ impl FoloApp {
             .rounded(px(radius::SM))
             .cursor_pointer()
             .hover(|s| s.bg(t.bg_hover))
+            .active(|s| s.bg(t.bg_active))
             .child(text(ty::XS, t.text_secondary).child("View all"))
             .child(icon("icons/chevron-right.svg", 12., t.text_tertiary));
         self.bind(

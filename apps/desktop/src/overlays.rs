@@ -1197,7 +1197,12 @@ impl FoloApp {
                     .w_full()
                     .min_w_0()
                     .whitespace_normal()
-                    .child(format!("Training stops after this step. The epoch {epoch} checkpoint is kept, so you can export it or train on from it.")),
+                    // The epoch in progress is discarded; last.folo is the last finished epoch's.
+                    .child(if epoch > 1 {
+                        format!("Training stops after the current batch. The epoch {} checkpoint (the last finished) is kept, so you can export it or resume from it; progress in epoch {epoch} is discarded.", epoch - 1)
+                    } else {
+                        "Training stops after the current batch. No epoch has finished yet, so there is no checkpoint to keep.".to_string()
+                    }),
             );
         let footer = div()
             .flex()
