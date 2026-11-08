@@ -70,7 +70,7 @@ app: chart plots, image canvases, code/log views. In light mode panels are white
   run comparisons assign series slots by run, so a run keeps its colour.
 
 ## Detection classes
-`classes.palette`: 16 saturated, mid-to-high-lightness colours chosen to stay distinct from each other and legible on
+`classes.palette`: 15 saturated, mid-to-high-lightness colours plus one neutral near-white (class 8), chosen to stay distinct from each other and legible on
 arbitrary photos. Class `i` → `palette[i % 16]`, in both themes. Adjacent entries stay distinguishable under
 colour-vision deficiency, and every box also carries its class name, so colour is never the only cue. The palette
 avoids the accent's lime and yellows near it (class 8 is a neutral near-white, separated from the accent and from class
