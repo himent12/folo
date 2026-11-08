@@ -501,6 +501,14 @@ export class MockApi implements Api {
     }, 300);
   }
 
+  /** Like `folo serve --mock`: resuming needs real checkpoints. */
+  resumeRun(id: string): Promise<Run> {
+    return this.#call(() => {
+      this.#profile(id);
+      throw new ApiError(501, 'not_implemented', 'Resuming runs needs a real server.', 'Start folo serve without --mock to resume from checkpoints.');
+    }, 200);
+  }
+
   stopRun(id: string): Promise<Run> {
     return this.#call(() => {
       const p = this.#profile(id);

@@ -74,6 +74,11 @@ export interface Api {
   run(id: string, signal?: AbortSignal): Promise<Run>;
   createRun(config: TrainConfig): Promise<Run>;
   stopRun(id: string): Promise<Run>;
+  /**
+   * `POST /api/runs` with `resume_run_id`: continues a `stopped` or `failed` run from its last checkpoint (200, same
+   * id). Only `device` may differ from the run's config. Errors: `run_not_resumable` (completed), `run_active`.
+   */
+  resumeRun(id: string, device?: string): Promise<Run>;
   deleteRun(id: string): Promise<void>;
   /** Full history; `every` keeps every N-th step (plus the latest) to thin long runs. */
   runMetrics(id: string, signal?: AbortSignal, every?: number): Promise<RunMetrics>;
@@ -195,6 +200,9 @@ export class HttpApi implements Api {
   }
   stopRun(id: string) {
     return this.#req<Run>('POST', `/runs/${encodeURIComponent(id)}/stop`);
+  }
+  resumeRun(id: string, device?: string) {
+    return this.#req<Run>('POST', '/runs', device ? { resume_run_id: id, device } : { resume_run_id: id });
   }
   deleteRun(id: string) {
     return this.#req<void>('DELETE', `/runs/${encodeURIComponent(id)}`);

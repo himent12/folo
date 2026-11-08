@@ -151,7 +151,9 @@
   const imgszN = $derived(Number(imgsz) || 640);
   const onCpu = $derived(device === 'cpu' || (device === 'auto' && !gpu));
   const est = $derived(estimate(arch, dataset?.splits.train ?? 0, epochs, batchN, imgszN, onCpu));
-  const vramPct = $derived(gpu ? est.vramBytes / gpu.memory_bytes : 0);
+  // wgpu cannot report adapter memory (real servers send 0): then there is no meter and no out-of-memory guess.
+  const gpuMem = $derived(gpu && gpu.memory_bytes > 0 ? gpu.memory_bytes : null);
+  const vramPct = $derived(gpuMem ? est.vramBytes / gpuMem : 0);
 
   const errors = $derived({
     name: !name.trim() ? 'Give the run a name.' : /[^\w.-]/.test(name.trim()) ? 'Letters, digits, dot, dash and underscore only.' : null,
@@ -248,10 +250,10 @@
     <dt>Est. time</dt><dd class="num">{roughDuration(est.totalSeconds)} <span class="faint">(~{num(Math.round(est.imgsPerS / 10) * 10, 0)} img/s)</span></dd>
     {#if !onCpu && gpu}
       <dt>Est. GPU memory</dt>
-      <dd class="num" class:warn={vramPct > 0.9}>{roughBytes(est.vramBytes)} <span class="faint">/ {bytes(gpu.memory_bytes, prefs.units)}</span></dd>
+      <dd class="num" class:warn={vramPct > 0.9}>{roughBytes(est.vramBytes)} <span class="faint">/ {gpuMem ? bytes(gpuMem, prefs.units) : 'GPU memory unknown'}</span></dd>
     {/if}
   </dl>
-  {#if !onCpu && gpu}
+  {#if !onCpu && gpuMem}
     <div class="vram" aria-hidden="true"><i class:warn={vramPct > 0.9} style:width={pct2(Math.min(1, vramPct))}></i></div>
   {/if}
   {#if vramPct > 1}
