@@ -245,6 +245,18 @@
     border-color: color-mix(in srgb, var(--c) 55%, transparent);
     box-shadow: 0 0 0 1px color-mix(in srgb, var(--class-halo) 50%, transparent);
   }
+  /* Touch: a box smaller than a fingertip still gets a 32 px target, centred on it. */
+  @media (pointer: coarse) {
+    .box:not(.truth)::before {
+      content: '';
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      width: max(100%, 32px);
+      height: max(100%, 32px);
+      transform: translate(-50%, -50%);
+    }
+  }
   .box.truth {
     border: 1.5px dashed var(--c);
     box-shadow: none;

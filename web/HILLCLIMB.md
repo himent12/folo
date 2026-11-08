@@ -21,6 +21,7 @@ Lines: 1 hierarchy & layout · 2 typography · 3 colour & theming · 4 spacing r
 | r3 | Claude Opus 5.5 | 7 | 7 | 6 | 7 | 7 | 6 | 8 | 7 | 8 | 7 | 7 | 7 | 6 |
 | r4 | GPT-6.1 Sol | 7 | 8 | 8 | 8 | 8 | 7 | 7 | 8 | 8 | 7 | 7 | 7 | 7 |
 | r4 | Claude Opus 5.5 | 7 | 6 | 6 | 6.5 | 6.5 | 5.5 | 7 | 6 | 7.5 | 7 | 6.5 | 6.5 | 5.5 |
+| r5 | GPT-6.1 Sol | 7.5 | 8 | 8 | 8 | 8 | 7.5 | 7.5 | 8 | 8 | 7.5 | 7 | 7.5 | 7 |
 
 ## Per-line minimum (lower of the two reviewers)
 

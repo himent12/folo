@@ -105,7 +105,7 @@
   </Panel>
 
   <div class="two">
-    <Panel title="Box size" meta="√area as % of image side" id="ds-size">
+    <Panel title="Box size" meta="boxes per 1 % step of √area / image side · bar area = count" id="ds-size">
       <Histogram
         edges={sizeEdges}
         counts={stats.box_size_hist.counts}

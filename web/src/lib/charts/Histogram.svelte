@@ -78,15 +78,38 @@
   const name = (i: number) =>
     binLabel ? binLabel(edges[i] ?? 0, edges[i + 1] ?? 0, i) : `${edges[i]}–${edges[i + 1]}`;
   const total = $derived(counts.reduce((a, b) => a + b, 0));
+  const firstBin = $derived(Math.max(0, counts.findIndex((c) => c > 0)));
+  const readout = $derived(
+    hovered === null ? '' : `${name(hovered)}: ${(counts[hovered] ?? 0).toLocaleString('en-US')} ${unit}, ${total ? (((counts[hovered] ?? 0) / total) * 100).toFixed(1) : '0'} %`,
+  );
+  function onkeydown(e: KeyboardEvent) {
+    const n = counts.length;
+    if (!n) return;
+    const i = hovered ?? firstBin;
+    let j = i;
+    if (e.key === 'ArrowRight') j = Math.min(n - 1, i + 1);
+    else if (e.key === 'ArrowLeft') j = Math.max(0, i - 1);
+    else if (e.key === 'Home') j = 0;
+    else if (e.key === 'End') j = n - 1;
+    else if (e.key === 'Escape') {
+      hovered = null;
+      return;
+    } else return;
+    e.preventDefault();
+    hovered = j;
+  }
   // One notation per axis: all ticks in thousands once the axis reaches 1,000; zero is always plain "0".
   const tickFmt = (v: number) => (v !== 0 && (y.domain()[1] ?? 0) >= 1000 ? `${+(v / 1000).toFixed(1)}k` : String(+v.toFixed(2)));
   // Proportional mode labels the edges, skipping any closer than 28 px to the previous label.
+  const lastLo = $derived(edges[edges.length - 2] ?? 0);
+  const tailClipped = $derived(proportional && (edges[edges.length - 1] ?? 0) > hiN && lastLo < hiN);
   const edgeTicks = $derived.by(() => {
     if (!proportional) return [];
     const out: number[] = [];
     let last = -Infinity;
     for (const e of edges) {
       if (e > hiN) break;
+      if (tailClipped && e === lastLo) break;
       const px = xv(e);
       if (px - last >= 28) {
         out.push(e);
@@ -99,7 +122,17 @@
 
 <div class="hist" bind:clientWidth={width} style:height="{height}px">
   {#if width > 0}
-    <svg {width} {height} role="img" aria-label={label}>
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+    <svg
+      {width}
+      {height}
+      role="img"
+      aria-label="{label}. Focus and use the arrow keys to read each bin."
+      tabindex="0"
+      {onkeydown}
+      onfocus={() => (hovered ??= firstBin)}
+      onblur={() => (hovered = null)}
+    >
       {#each yt as t (t)}
         <line class="grid" x1={m.left} x2={width - m.right} y1={y(t)} y2={y(t)} />
         <text class="tick" x={m.left - 8} y={y(t)} dy="0.32em" text-anchor="end">{tickFmt(t)}</text>
@@ -123,6 +156,9 @@
           <text class="tick" x={m.left + i * bw + bw / 2} y={height - 6} text-anchor="middle">{name(i)}</text>
         {/if}
       {/each}
+      {#if tailClipped}
+        <text class="tick" x={(xv(lastLo) + xv(hiN)) / 2} y={height - 6} text-anchor="middle">≥{edgeLabel ? edgeLabel(lastLo) : lastLo}</text>
+      {/if}
       {#each edgeTicks as e (e)}
         <text class="tick" x={xv(e)} y={height - 6} text-anchor={e === lo0 ? 'start' : 'middle'}>{edgeLabel ? edgeLabel(e) : e}</text>
       {/each}
@@ -134,6 +170,16 @@
       {/if}
       <line class="axis" x1={m.left} x2={width - m.right} y1={height - m.bottom} y2={height - m.bottom} />
     </svg>
+    <p class="sr-only" aria-live="polite">{readout}</p>
+    <div class="sr-only">
+      <table>
+        <caption>{label}</caption>
+        <thead><tr><th scope="col">Bin</th><th scope="col">{unit}</th><th scope="col">Share</th></tr></thead>
+        <tbody>
+          {#each counts as c, i (i)}<tr><th scope="row">{name(i)}</th><td>{c.toLocaleString('en-US')}</td><td>{total ? ((c / total) * 100).toFixed(1) : '0'} %</td></tr>{/each}
+        </tbody>
+      </table>
+    </div>
     {#if hovered !== null}
       {@const c = counts[hovered] ?? 0}
       {@const b = bar(hovered)}
@@ -154,6 +200,14 @@
   svg {
     display: block;
     overflow: visible;
+    border-radius: var(--radius-sm);
+  }
+  svg:focus {
+    outline: none;
+  }
+  svg:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 4px;
   }
   .grid {
     stroke: var(--chart-grid);

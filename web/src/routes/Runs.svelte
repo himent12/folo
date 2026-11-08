@@ -60,6 +60,14 @@
   }
 
   // Progress bars stay neutral; only a live run's bar carries the accent ("now"). Status is the dot beside it.
+  const STATUS: Record<Run['status'], string> = {
+    queued: 'Queued',
+    running: 'Running',
+    stopping: 'Stopping',
+    stopped: 'Stopped',
+    completed: 'Completed',
+    failed: 'Failed',
+  };
   const tone = (r: Run) => (r.status === 'running' ? 'accent' : 'neutral');
 </script>
 
@@ -136,6 +144,7 @@
                 </td>
                 <td>
                   <a class="name" href={href(`/runs/${r.id}`)} onclick={(e) => e.stopPropagation()}>{r.name}</a>
+                  <span class="ctx">{dsName.get(r.config.dataset_id) ?? r.config.dataset_id} · <span class="mono">{r.config.arch}</span></span>
                 </td>
                 <td><StatusBadge status={r.status} plain /></td>
                 <td class="hide-md muted">{dsName.get(r.config.dataset_id) ?? r.config.dataset_id}</td>
@@ -159,6 +168,7 @@
         </table>
       </div>
       <!-- Phones: stacked rows with the essentials (selection, name, status, score, progress). -->
+      <p class="rows-head" aria-hidden="true"><span>Run</span><span>Best mAP50-95</span></p>
       <ul class="rows">
         {#each shown as r (r.id)}
           {@const on = selected.includes(r.id)}
@@ -174,8 +184,8 @@
             </label>
             <a class="r-main" href={href(`/runs/${r.id}`)}>
               <span class="r-text">
-                <span class="r-name"><StatusBadge status={r.status} plain /><span class="name truncate">{r.name}</span></span>
-                <span class="r-meta num truncate">{dsName.get(r.config.dataset_id) ?? r.config.dataset_id} · {r.config.arch} · {r.epoch}/{r.epochs} · {ago(r.created)}</span>
+                <span class="r-name"><StatusBadge status={r.status} plain dotOnly /><span class="name truncate">{r.name}</span></span>
+                <span class="r-meta num truncate">{STATUS[r.status]} · {dsName.get(r.config.dataset_id) ?? r.config.dataset_id} · {r.config.arch} · {r.epoch}/{r.epochs} · {ago(r.created)}</span>
               </span>
               <span class="r-val num">{metric(r.best?.map50_95)}</span>
             </a>
@@ -275,8 +285,14 @@
     font-size: var(--type-xs-size);
     margin-left: 6px;
   }
-  .rows {
+  .rows,
+  .rows-head {
     display: none;
+  }
+  .ctx {
+    display: none;
+    font-size: var(--type-sm-size);
+    color: var(--text-tertiary);
   }
   @media (max-width: 1439px) {
     .hide-xl {
@@ -292,6 +308,12 @@
     .hide-md {
       display: none;
     }
+    .ctx {
+      display: block;
+    }
+    .runs td {
+      height: 52px;
+    }
   }
   @media (max-width: 767px) {
     .scroll {
@@ -299,6 +321,16 @@
     }
     .rows {
       display: block;
+    }
+    .rows-head {
+      display: flex;
+      justify-content: space-between;
+      height: 32px;
+      align-items: center;
+      padding: 0 var(--space-4) 0 44px;
+      font-size: var(--type-sm-size);
+      color: var(--text-tertiary);
+      border-bottom: 1px solid var(--line-subtle);
     }
     /* Phones: 56 px rows (status and name, one meta line, the score on the right), like the desktop table's essentials. */
     .rows li {
@@ -342,11 +374,6 @@
       align-items: center;
       gap: var(--space-2);
       min-width: 0;
-    }
-    /* In a row the word "Running" is redundant next to the name: keep the dot only. */
-    .r-name :global(.badge) {
-      font-size: 0;
-      gap: 0;
     }
     .r-meta {
       font-size: var(--type-sm-size);

@@ -1,6 +1,6 @@
 <script lang="ts">
   /**
-   * Precision-recall curves with the per-class table as their legend. Every class is drawn as a thin tertiary line and
+   * Precision-recall curves with the per-class table as their legend. Every class is drawn as a faint tertiary line (ghost) and
    * the mean over all classes in ink, so 80 classes read as one shape instead of spaghetti; hovering a table row
    * gives its curve the class hue, clicking keeps it highlighted. The legend row above the plot is the readout.
    */
@@ -39,7 +39,7 @@
     ...classes
       .map((_, i) => i)
       .filter((i) => !lit.includes(i))
-      .map((i) => ({ id: `c${i}`, label: name(i), color: 'var(--text-tertiary)', points: trimPrTail(ev.curves[i] ?? []) })),
+      .map((i) => ({ id: `c${i}`, label: name(i), color: 'var(--text-tertiary)', ghost: true, points: trimPrTail(ev.curves[i] ?? []) })),
     { id: 'mean', label: 'All classes', color: 'var(--text-primary)', points: trimPrTail(ev.mean), emphasis: true },
     ...lit.map((i) => ({ id: `c${i}`, label: name(i), color: classStroke(i), points: trimPrTail(ev.curves[i] ?? []), emphasis: true })),
   ]);

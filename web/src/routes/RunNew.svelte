@@ -37,6 +37,16 @@
   const defaults: Augment = { mosaic: 1, mixup: 0, hsv: [0.015, 0.7, 0.4], fliplr: 0.5, scale: 0.5, translate: 0.1, close_mosaic: 10 };
 
   let datasetId = $state<string>(q.get('dataset') ?? '');
+  // The dock repeats the summary's Start button for narrow screens; it steps aside while that button is on screen.
+  let startEl = $state<HTMLElement>();
+  let startVisible = $state(false);
+  $effect(() => {
+    const el = startEl;
+    if (!el || typeof IntersectionObserver === 'undefined') return;
+    const io = new IntersectionObserver(([e]) => (startVisible = !!e?.isIntersecting));
+    io.observe(el);
+    return () => io.disconnect();
+  });
   let arch = $state<Arch>('folo-s');
   let epochs = $state(100);
   let batch = $state('16');
@@ -398,7 +408,9 @@
             {:else if onCpu}
               <p class="warning soft"><TriangleAlert size={14} /> Training on the CPU is roughly 14× slower than on a GPU.</p>
             {/if}
-            <Button type="submit" variant="primary" size="lg" icon={Play} block loading={submitting} disabled={!valid}>Start training</Button>
+            <div class="start" bind:this={startEl}>
+              <Button type="submit" variant="primary" size="lg" icon={Play} block loading={submitting} disabled={!valid}>Start training</Button>
+            </div>
             <details class="cli">
               <summary><ChevronRight size={14} aria-hidden="true" />CLI command <span class="faint">the same run from a terminal</span></summary>
               <div class="cli-body">
@@ -411,7 +423,7 @@
       </aside>
 
       <!-- Narrow screens: the summary sits below the form, so keep the essentials and the action in reach. -->
-      <div class="dock" role="region" aria-label="Start training">
+      <div class="dock" class:away={startVisible} role="region" aria-label="Start training" inert={startVisible}>
         <span class="dock-est num">
           <span>{roughDuration(est.totalSeconds)}</span>
           {#if !onCpu && gpu}<span class:warn={vramPct > 0.9}>{roughBytes(est.vramBytes)} VRAM</span>{/if}
@@ -786,6 +798,13 @@
       backdrop-filter: blur(12px) saturate(1.4);
       -webkit-backdrop-filter: blur(12px) saturate(1.4);
       border-top: 1px solid var(--line-subtle);
+      transition:
+        transform var(--dur-base) var(--ease-out),
+        opacity var(--dur-base) var(--ease-out);
+    }
+    .dock.away {
+      transform: translateY(100%);
+      opacity: 0;
     }
     .dock-est {
       display: flex;

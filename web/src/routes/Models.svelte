@@ -154,7 +154,7 @@
   {#if !models.error && (!models.data || models.data.length > 0)}
     <div class="toolbar">
       {#if models.data}
-        <Segmented label="Evaluation dataset" bind:value={dsFilter} options={dsOptions} />
+        <div class="seg-scroll"><Segmented label="Evaluation dataset" bind:value={dsFilter} options={dsOptions} /></div>
       {:else}
         <Skeleton w="320px" h="var(--control-md)" r="var(--radius-md)" />
       {/if}
@@ -286,6 +286,18 @@
   .search {
     width: 280px;
     max-width: 100%;
+  }
+  .seg-scroll {
+    max-width: 100%;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  /* Phones: the dataset filters scroll sideways; the faded edge says there is more. */
+  @media (max-width: 767px) {
+    .seg-scroll {
+      mask-image: linear-gradient(90deg, #000 calc(100% - 32px), transparent);
+      padding-right: var(--space-6);
+    }
   }
   .scroll {
     overflow-x: auto;
