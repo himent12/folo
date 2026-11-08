@@ -20,7 +20,8 @@ pre-release.
 4. The workflow creates the draft release with generated notes. Check the assets and notes, then publish it. The
    install scripts (`scripts/install.sh`, `scripts/install.ps1`) only see published releases.
 
-Re-running the workflow for a tag whose draft already exists replaces that draft's assets.
+Re-running the workflow for a tag whose draft already exists replaces that draft's assets; it refuses to touch a
+release that is already published.
 
 ## What the workflow builds
 | job | runner | output |

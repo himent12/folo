@@ -260,8 +260,12 @@ jobs:
           PRERELEASE: ${{ needs.plan.outputs.prerelease }}
         run: |
           set -euo pipefail
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            # A re-run: refresh the assets of the existing (draft) release.
+          if draft=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null); then
+            # A re-run: refresh the assets of the existing draft, but never touch a published release.
+            if [ "$draft" != true ]; then
+              echo "::error::release $TAG is already published; delete it or tag a new version instead of re-running"
+              exit 1
+            fi
             gh release upload "$TAG" dist/* --clobber
           else
             flags=()

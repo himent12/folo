@@ -147,12 +147,21 @@ async fn web_not_built() -> impl IntoResponse {
 impl Server {
     /// Builds the router around `store`.
     pub fn new(store: Arc<dyn Store>, opts: Options) -> Server {
+        let embedded = if opts.web == WebSource::Embedded { web::embedded() } else { None };
+        Server::with_embedded(store, opts, embedded)
+    }
+
+    /// [`Server::new`] with the embedded web app passed in (tests use a fixture table).
+    fn with_embedded(
+        store: Arc<dyn Store>,
+        opts: Options,
+        embedded: Option<&'static [web::EmbeddedFile]>,
+    ) -> Server {
         let (tx, _) = watch::channel(false);
         let shutdown = Arc::new(tx);
         let state =
             AppState { store, probe: Arc::new(system::SystemProbe::default()), shutdown: shutdown.clone() };
         let mut router = Router::new().nest("/api", routes::api()).with_state(state);
-        let embedded = if opts.web == WebSource::Embedded { web::embedded() } else { None };
         router = match (opts.web, embedded) {
             (WebSource::Dir(dir), _) if web_dir_ready(&dir) => {
                 let spa = ServeDir::new(&dir).fallback(ServeFile::new(dir.join("index.html")));
@@ -236,6 +245,47 @@ pub async fn shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    static WEB: &[web::EmbeddedFile] = &[web::EmbeddedFile {
+        path: "index.html",
+        bytes: b"<!doctype html><html><head><title>FOLO Studio</title></head><body><div id=app></div></body></html>",
+        etag: "W/\"i1\"",
+    }];
+
+    async fn web_request(method: Method, headers: &[(header::HeaderName, &str)]) -> Response {
+        let server = Server::with_embedded(Arc::new(MockStore::new()), Options::default(), Some(WEB));
+        let mut req = Request::builder().method(method).uri("/runs/x");
+        for (k, v) in headers {
+            req = req.header(k, *v);
+        }
+        server.router().oneshot(req.body(Body::empty()).unwrap()).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn embedded_head_matches_compressed_get() {
+        let gzip = [(header::ACCEPT_ENCODING, "gzip")];
+        let get = web_request(Method::GET, &gzip).await;
+        let head = web_request(Method::HEAD, &gzip).await;
+        for res in [&get, &head] {
+            assert_eq!(res.status(), StatusCode::OK);
+            assert_eq!(res.headers()[header::CONTENT_ENCODING], "gzip");
+            assert_eq!(res.headers()[header::ETAG], "W/\"i1\"");
+            assert!(res.headers().get_all(header::VARY).iter().any(|v| v == "accept-encoding"));
+        }
+        let plain = web_request(Method::HEAD, &[]).await;
+        assert!(plain.headers().get(header::CONTENT_ENCODING).is_none());
+        assert_eq!(plain.headers()[header::CONTENT_LENGTH], WEB[0].bytes.len().to_string());
+
+        let not_modified = web_request(
+            Method::GET,
+            &[(header::IF_NONE_MATCH, "W/\"i1\""), (header::ACCEPT_ENCODING, "gzip")],
+        )
+        .await;
+        assert_eq!(not_modified.status(), StatusCode::NOT_MODIFIED);
+        assert!(not_modified.headers().get_all(header::VARY).iter().any(|v| v == "accept-encoding"));
+    }
 
     #[test]
     fn loopback_origins() {

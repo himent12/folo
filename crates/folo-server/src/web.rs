@@ -11,7 +11,8 @@ pub struct EmbeddedFile {
     pub path: &'static str,
     /// File contents.
     pub bytes: &'static [u8],
-    /// Quoted strong ETag derived from the contents.
+    /// Weak ETag derived from the contents (`W/"..."`): weak because the compression layer may re-encode the body,
+    /// and a strong validator must differ between encodings.
     pub etag: &'static str,
 }
 
@@ -57,7 +58,8 @@ fn find(files: &'static [EmbeddedFile], path: &str) -> Option<&'static EmbeddedF
     files.binary_search_by(|f| f.path.cmp(path)).ok().map(|i| &files[i])
 }
 
-/// Answers a non-API request from `files` (sorted by path).
+/// Answers a non-API request from `files` (sorted by path). HEAD gets the full GET response so the compression
+/// layer picks the same encoding and headers; hyper drops the body on the wire.
 pub(crate) fn respond(
     files: &'static [EmbeddedFile],
     method: &Method,
@@ -78,18 +80,19 @@ pub(crate) fn respond(
     let common = [
         (header::ETAG, HeaderValue::from_static(file.etag)),
         (header::CACHE_CONTROL, HeaderValue::from_static(cache)),
+        // The body may be gzip-encoded by the compression layer; caches must key on the request's encoding.
+        (header::VARY, HeaderValue::from_static("accept-encoding")),
     ];
-    let fresh = headers.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok()).is_some_and(|v| {
-        v.split(',').map(|t| t.trim()).any(|t| t == "*" || t.trim_start_matches("W/") == file.etag)
-    });
+    // If-None-Match uses the weak comparison: opaque tags match regardless of `W/`.
+    let opaque = |t: &str| t.trim().trim_start_matches("W/").to_string();
+    let fresh = headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.split(',').any(|t| t.trim() == "*" || opaque(t) == opaque(file.etag)));
     if fresh {
         return (StatusCode::NOT_MODIFIED, common).into_response();
     }
-    let body = if method == Method::HEAD { &[][..] } else { file.bytes };
-    let mut res =
-        (StatusCode::OK, common, [(header::CONTENT_TYPE, content_type(file.path))], body).into_response();
-    res.headers_mut().insert(header::CONTENT_LENGTH, HeaderValue::from(file.bytes.len()));
-    res
+    (StatusCode::OK, common, [(header::CONTENT_TYPE, content_type(file.path))], file.bytes).into_response()
 }
 
 #[cfg(test)]
@@ -97,9 +100,9 @@ mod tests {
     use super::*;
 
     static FILES: &[EmbeddedFile] = &[
-        EmbeddedFile { path: "assets/app-1a2b.js", bytes: b"console.log(1)", etag: "\"a1\"" },
-        EmbeddedFile { path: "favicon.svg", bytes: b"<svg/>", etag: "\"f1\"" },
-        EmbeddedFile { path: "index.html", bytes: b"<!doctype html>Studio", etag: "\"i1\"" },
+        EmbeddedFile { path: "assets/app-1a2b.js", bytes: b"console.log(1)", etag: "W/\"a1\"" },
+        EmbeddedFile { path: "favicon.svg", bytes: b"<svg/>", etag: "W/\"f1\"" },
+        EmbeddedFile { path: "index.html", bytes: b"<!doctype html>Studio", etag: "W/\"i1\"" },
     ];
 
     fn get(path: &str, headers: &[(header::HeaderName, &str)]) -> Response {
@@ -117,7 +120,7 @@ mod tests {
     #[test]
     fn table_lookup_matches_a_sorted_slice() {
         assert!(FILES.windows(2).all(|w| w[0].path < w[1].path));
-        assert_eq!(find(FILES, "favicon.svg").unwrap().etag, "\"f1\"");
+        assert_eq!(find(FILES, "favicon.svg").unwrap().etag, "W/\"f1\"");
         assert!(find(FILES, "missing").is_none());
     }
 
@@ -127,13 +130,13 @@ mod tests {
         assert_eq!(res.status(), StatusCode::OK);
         assert_eq!(res.headers()[header::CONTENT_TYPE], "text/javascript; charset=utf-8");
         assert_eq!(res.headers()[header::CACHE_CONTROL], "public, max-age=31536000, immutable");
-        assert_eq!(res.headers()[header::CONTENT_LENGTH], "14");
+        assert_eq!(res.headers()[header::VARY], "accept-encoding");
         assert_eq!(body(res).await, b"console.log(1)");
 
         let res = get("/", &[]);
         assert_eq!(res.headers()[header::CONTENT_TYPE], "text/html; charset=utf-8");
         assert_eq!(res.headers()[header::CACHE_CONTROL], "no-cache");
-        assert_eq!(res.headers()[header::ETAG], "\"i1\"");
+        assert_eq!(res.headers()[header::ETAG], "W/\"i1\"");
         assert_eq!(body(res).await, b"<!doctype html>Studio");
     }
 
@@ -143,17 +146,26 @@ mod tests {
         assert_eq!(res.status(), StatusCode::OK);
         assert_eq!(body(res).await, b"<!doctype html>Studio", "unknown paths get index.html");
 
-        let res = get("/favicon.svg", &[(header::IF_NONE_MATCH, "\"x\", W/\"f1\"")]);
+        for tag in ["\"x\", W/\"f1\"", "\"f1\"", "*"] {
+            assert_eq!(
+                get("/favicon.svg", &[(header::IF_NONE_MATCH, tag)]).status(),
+                StatusCode::NOT_MODIFIED,
+                "{tag}"
+            );
+        }
+        let res = get("/favicon.svg", &[(header::IF_NONE_MATCH, "W/\"f1\"")]);
         assert_eq!(res.status(), StatusCode::NOT_MODIFIED);
-        assert_eq!(res.headers()[header::ETAG], "\"f1\"");
+        assert_eq!(res.headers()[header::ETAG], "W/\"f1\"");
+        assert_eq!(res.headers()[header::VARY], "accept-encoding");
         assert!(body(res).await.is_empty());
         assert_eq!(get("/favicon.svg", &[(header::IF_NONE_MATCH, "\"old\"")]).status(), StatusCode::OK);
 
         let uri: Uri = "/favicon.svg".parse().unwrap();
+        // HEAD answers like GET (hyper strips the body), so compression sees the same representation.
         let res = respond(FILES, &Method::HEAD, &uri, &HeaderMap::new());
         assert_eq!(res.status(), StatusCode::OK);
-        assert_eq!(res.headers()[header::CONTENT_LENGTH], "6");
-        assert!(body(res).await.is_empty());
+        assert_eq!(res.headers()[header::CONTENT_TYPE], "image/svg+xml");
+        assert_eq!(body(res).await, b"<svg/>");
 
         let res = respond(FILES, &Method::POST, &uri, &HeaderMap::new());
         assert_eq!(res.status(), StatusCode::METHOD_NOT_ALLOWED);

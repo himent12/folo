@@ -1,5 +1,5 @@
 //! With the `embed-web` feature, compiles the built FOLO Studio (`web/dist`, or `$FOLO_WEB_DIST`) into the binary:
-//! writes `$OUT_DIR/web_files.rs`, a path-sorted table of `include_bytes!` entries with precomputed ETags.
+//! writes `$OUT_DIR/web_files.rs`, a path-sorted table of `include_bytes!` entries with precomputed weak ETags.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -34,7 +34,7 @@ fn main() {
         let abs = abs.to_str().unwrap_or_else(|| panic!("non UTF-8 path {}", abs.display()));
         writeln!(
             out,
-            "    EmbeddedFile {{ path: {rel:?}, bytes: include_bytes!({abs:?}), etag: \"\\\"{:016x}\\\"\" }},",
+            "    EmbeddedFile {{ path: {rel:?}, bytes: include_bytes!({abs:?}), etag: \"W/\\\"{:016x}\\\"\" }},",
             fnv1a(&bytes)
         )
         .unwrap();
