@@ -402,6 +402,8 @@ pub struct FoloApp {
     // Playground
     pub play_model: Option<String>,
     pub play_conf: f32,
+    /// Short windows fold the validation-image picker to one line; this opens it.
+    pub play_picker_open: bool,
     pub play_iou: f32,
     /// Where Playground runs the model: on the server (`None`), or in this process.
     pub play_target: Option<crate::local::Target>,
@@ -559,6 +561,7 @@ impl FoloApp {
             cm_cell: None,
             play_model: None,
             play_conf: 0.25,
+            play_picker_open: false,
             play_iou: 0.7,
             play_target: None,
             local_gpu: Load::Idle,
