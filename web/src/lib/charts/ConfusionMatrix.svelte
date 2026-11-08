@@ -51,8 +51,28 @@
   let root: HTMLDivElement;
   /** A scrolling matrix fades its right edge while there are more columns to scroll to. */
   let moreRight = $state(false);
+  /** Fully visible prediction columns (1-based) while the matrix scrolls sideways; null when every column fits. */
+  let range = $state<{ first: number; last: number } | null>(null);
   const fixed = $derived(minCell !== undefined);
-  const onscroll = () => (moreRight = root.scrollLeft + root.clientWidth < root.scrollWidth - 1);
+  function onscroll() {
+    moreRight = root.scrollLeft + root.clientWidth < root.scrollWidth - 1;
+    const head = root.querySelector<HTMLElement>('.rowhead');
+    const cell = root.querySelector<HTMLElement>('.cell');
+    if (!head || !cell || root.scrollWidth <= root.clientWidth + 1) {
+      range = null;
+      return;
+    }
+    // Columns start after the pinned row labels; each is one cell plus the 2 px grid gap. The faded right edge
+    // (24 px) does not count as visible.
+    const step = cell.offsetWidth + 2;
+    const left = root.scrollLeft;
+    const end = left + root.clientWidth - head.offsetWidth - (moreRight ? 12 : 0);
+    const first = Math.min(n, Math.ceil(left / step - 0.05) + 1);
+    const last = Math.max(first, Math.min(n, Math.floor(end / step + 0.05)));
+    range = { first, last };
+  }
+  const scrollEnd = () =>
+    root.scrollTo({ left: root.scrollWidth, behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
   $effect(() => {
     if (!fixed) return;
     onscroll();
@@ -89,6 +109,14 @@
   };
 </script>
 
+{#if range}
+  <!-- What the sideways scroll hides: the columns in view, and a way to the last ones (background = missed objects). -->
+  <p class="range num">
+    Columns {range.first}–{range.last} of {n}{#if range.last < n}<span class="sep" aria-hidden="true">·</span><button type="button" class="more" onclick={scrollEnd}
+        >Scroll for {n - range.last} more, incl. background →</button
+      >{/if}
+  </p>
+{/if}
 <!-- svelte-ignore a11y_interactive_supports_focus -->
 <div class="cm" class:sparse={sparseLabels} class:fixed class:more-r={moreRight} style:--n={n} style:--min-cell={minCell !== undefined ? `${minCell}px` : undefined} role="grid" aria-label={label} aria-describedby="{uid}-readout" bind:this={root} {onkeydown} {onscroll}>
   <div class="row" role="row">
@@ -272,6 +300,28 @@
   }
   .cell span.hi {
     font-weight: var(--weight-medium);
+  }
+  .range {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    min-height: 24px;
+    margin-bottom: var(--space-2);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--text-tertiary);
+  }
+  .range .sep {
+    margin-inline: var(--space-2);
+  }
+  .more {
+    color: var(--text-secondary);
+    text-decoration: underline;
+    text-decoration-color: var(--line-strong);
+    text-underline-offset: 3px;
+  }
+  .more:hover {
+    color: var(--text-primary);
   }
   .readout {
     margin-top: var(--space-3);
