@@ -81,3 +81,41 @@ fn net_gradients_match_finite_differences() {
     };
     grad_check_with(f, &params(), &opts).unwrap();
 }
+
+/// A few optimizer steps of folo-nn's SGD (Nesterov, weight decay) and AdamW on GPU parameters, through the
+/// device-generic tensor-op paths, match the same steps on the CPU (`1e-5` relative).
+#[test]
+fn optimizer_steps_match_cpu() {
+    use folo_nn::optim::{AdamW, Optimizer, ParamGroup, Sgd};
+    let dev = dev!();
+    let run = |d: Device, adam: bool| -> Vec<Tensor> {
+        let p = params();
+        let (x, w, b) =
+            (p[0].to_device(d).unwrap(), p[1].to_device(d).unwrap().detach(), p[8].to_device(d).unwrap());
+        let w = w.requires_grad_();
+        let head = randn(&[4, 8, 3, 3], 11).to_device(d).unwrap().detach().requires_grad_();
+        let group = ParamGroup::new("decay", vec![("w".into(), w.clone()), ("head".into(), head.clone())])
+            .lr(0.05)
+            .momentum(0.9)
+            .weight_decay(5e-4);
+        let mut opt: Box<dyn Optimizer> = if adam {
+            Box::new(AdamW::new(vec![group.adam(0.999, 1e-8)]).unwrap())
+        } else {
+            Box::new(Sgd::new(vec![group]).unwrap())
+        };
+        for _ in 0..3 {
+            let y = x.conv2d(&w, None, 1, 1, 1, 1).unwrap().silu().unwrap();
+            let z = y.conv2d(&head, Some(&b), 2, 1, 1, 1).unwrap();
+            let grads = z.square().unwrap().mean_all().unwrap().backward().unwrap();
+            opt.step(&grads).unwrap();
+        }
+        vec![w, head]
+    };
+    for adam in [false, true] {
+        let (c, g) = (run(Device::Cpu, adam), run(dev, adam));
+        for (i, (g, c)) in g.iter().zip(&c).enumerate() {
+            assert!(g.device().is_gpu());
+            assert_close_t(g, c, 1e-5, 1e-5, &format!("{} param {i}", if adam { "adamw" } else { "sgd" }));
+        }
+    }
+}

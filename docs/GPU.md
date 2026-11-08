@@ -290,8 +290,9 @@ println!("{}", loss.item::<f32>()?);                  // the only wait for the G
   `index_select` / `gather` return zeros and `index_add` / `scatter_add` skip such entries; and the two
   scatter-adds use float atomics, so their summation order is unspecified (results agree to rounding).
 - **Autograd** is folo-core's, unchanged: `src/tests/backend_net.rs` runs a small conv net (conv, BatchNorm from
-  composite ops, SiLU, max pooling, upsample, concat) on both devices and compares every gradient, and runs
-  folo-core's finite-difference `grad_check` through the GPU.
+  composite ops, SiLU, max pooling, upsample, concat) on both devices and compares every gradient, runs
+  folo-core's finite-difference `grad_check` through the GPU, and checks that folo-nn's SGD and AdamW steps on GPU
+  parameters (their device-generic tensor-op paths) match the CPU.
 
 ### Benchmark: a YOLOv8n-shaped network
 
@@ -334,5 +335,8 @@ Ultralytics numbers in [BENCHMARKS.md](BENCHMARKS.md), come once folo-vision's m
   would remove that waste.
 - Backend: index ops do not report out-of-range indices (see [folo-core backend](#folo-core-backend)), and top-k
   is one thread per row (`O(k · d)`), sized for assigner-style `k`.
+- folo-nn modules build their parameters on the CPU and have no `to_device` yet, so a whole model cannot move to
+  the GPU in one call; folo-nn needs a mutable tensor visitor for that. Its optimizers work on GPU parameters
+  (tested above).
 - Backend: `Device::Gpu(0)` only; registering further adapters as `Gpu(1..)` is a few lines with
   `GpuBackend::new` but untested.

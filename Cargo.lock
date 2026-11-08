@@ -529,6 +529,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "folo-core",
+ "folo-nn",
  "half",
  "pollster",
  "thiserror",
