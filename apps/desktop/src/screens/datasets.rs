@@ -672,7 +672,7 @@ impl FoloApp {
                     .w(px(140.))
                     .flex_none()
                     .relative()
-                    .tooltip(crate::controls::tip(tile_tip.clone(), Some("← →".into())))
+                    .tooltip(crate::controls::tip(tile_tip.clone(), Some("← →")))
                     .when(tile_ring, |d| {
                         d.child(crate::controls::focus_tip(&t, format!("{tile_tip} · ← → adjust"), 20.))
                     })
