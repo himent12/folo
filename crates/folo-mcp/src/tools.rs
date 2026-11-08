@@ -54,6 +54,20 @@ fn input<T: JsonSchema + 'static>() -> Arc<JsonObject> {
     schema_for_input::<T>().expect("tool inputs are objects")
 }
 
+/// `train`'s input: TrainConfig plus `resume_run_id`, where `dataset_id` is required unless `resume_run_id` is
+/// given (a resume may leave every other field out).
+fn train_input() -> Arc<JsonObject> {
+    let mut s = (*input::<TrainArgs>()).clone();
+    if let Some(Value::Array(required)) = s.get_mut("required") {
+        required.retain(|r| r != "dataset_id");
+        if required.is_empty() {
+            s.remove("required");
+        }
+    }
+    s.insert("anyOf".into(), json!([{ "required": ["dataset_id"] }, { "required": ["resume_run_id"] }]));
+    Arc::new(s)
+}
+
 fn output<T: JsonSchema + 'static>() -> Arc<JsonObject> {
     schema_for_output::<T>()
 }
@@ -119,7 +133,7 @@ pub const TOOLS: &[ToolDef] = &[
         description: "Starts a training run (TrainConfig of docs/API.md; only dataset_id is required) and returns \
                       at once. Follow it with run_status or by subscribing to folo://runs/{run_id}.",
         mutating: true,
-        input: input::<TrainArgs>,
+        input: train_input,
         output: output::<TrainResult>,
     },
     ToolDef {

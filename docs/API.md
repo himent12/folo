@@ -160,7 +160,8 @@ Non-2xx responses: `{ "error": { "code": "dataset_not_found", "message": "...", 
 - `POST /api/runs` body `TrainConfig` → `201 Run` (status `queued`, then `running`). Errors: `dataset_not_found`,
   `model_not_found` (bad `weights`), `invalid_config` (checked before anything is queued: the limits below, the
   trainer's (real mode: `imgsz >= 64`), a dataset without classes or training images), `not_implemented` (a
-  `gpu:<n>` device the engine cannot train on). Runs train one at a time, first come first served; the others wait
+  `gpu:<n>` device the engine cannot train on), `503 shutting_down` (real mode: the server is shutting down; also
+  for resuming). Runs train one at a time, first come first served; the others wait
   `queued` (their log says how many runs are ahead).
   With `"resume_run_id": "<run id>"` in the body, the request **resumes** that `stopped` or `failed` run instead →
   `200 Run` (same id, status `queued` again): from its `weights/last.folo` with the full checkpoint state

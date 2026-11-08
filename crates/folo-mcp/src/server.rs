@@ -116,16 +116,22 @@ impl Inner {
     /// re-reading it every second. URIs without an event stream (stores without one, like the `folo serve`
     /// proxy, or once a stream closes) are polled.
     async fn follow(&self, uris: &[FoloUri]) -> Follow {
-        let wake = Arc::new(tokio::sync::Notify::new());
-        let changed: Arc<Vec<AtomicBool>> = Arc::new(uris.iter().map(|_| AtomicBool::new(false)).collect());
-        let streamed: Arc<Vec<AtomicBool>> = Arc::new(uris.iter().map(|_| AtomicBool::new(false)).collect());
-        let mut tasks = Vec::new();
+        let flags = || Arc::new(uris.iter().map(|_| AtomicBool::new(false)).collect::<Vec<_>>());
+        // The guard exists before the first await, so a watcher cancelled while it subscribes still aborts the
+        // forwarders started so far.
+        let mut follow = Follow {
+            wake: Arc::new(tokio::sync::Notify::new()),
+            changed: flags(),
+            streamed: flags(),
+            tasks: Vec::new(),
+        };
         for (i, uri) in uris.iter().enumerate() {
             let (FoloUri::Run(id) | FoloUri::Metrics(id)) = uri else { continue };
             let id = id.clone();
             let Ok(sub) = self.blocking(move |s| s.subscribe(&id)).await else { continue };
-            streamed[i].store(true, Ordering::Relaxed);
-            let (wake, changed, streamed) = (wake.clone(), changed.clone(), streamed.clone());
+            follow.streamed[i].store(true, Ordering::Relaxed);
+            let (wake, changed, streamed) =
+                (follow.wake.clone(), follow.changed.clone(), follow.streamed.clone());
             let mut events = sub.events;
             let task = tokio::spawn(async move {
                 loop {
@@ -142,9 +148,9 @@ impl Inner {
                     }
                 }
             });
-            tasks.push(task.abort_handle());
+            follow.tasks.push(task.abort_handle());
         }
-        Follow { wake, changed, streamed, tasks }
+        follow
     }
 
     /// Calls `notify` whenever one of `uris` changes, until it returns false: when the store reports one of
@@ -598,5 +604,37 @@ impl ServerHandler for FoloMcp {
         _context: RequestContext<RoleServer>,
     ) -> Result<GetPromptResponse, McpError> {
         prompts::get(&self.inner, request).await.map(Into::into)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use folo_server::MockStore;
+
+    #[tokio::test]
+    async fn dropped_watchers_release_their_event_streams() {
+        let store = Arc::new(MockStore::new());
+        let opts = Options {
+            data_dir: std::env::temp_dir(),
+            read_only: false,
+            confine: false,
+            device: "cpu".into(),
+        };
+        let server = FoloMcp::new(store.clone(), None, opts);
+        let uris = vec![FoloUri::Run("run_3c02".into()), FoloUri::Metrics("run_3c02".into())];
+        let watch = tokio::spawn(server.inner.clone().watch(uris, |_| async { true }));
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while store.hub_state("run_3c02").0 < 2 {
+            assert!(tokio::time::Instant::now() < deadline, "the watcher never subscribed");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        watch.abort();
+        let _ = watch.await;
+        // Aborted forwarders drop their receivers once the runtime has polled them.
+        while store.hub_state("run_3c02").0 > 0 {
+            assert!(tokio::time::Instant::now() < deadline, "event streams leaked");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 }

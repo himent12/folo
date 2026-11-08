@@ -108,7 +108,7 @@ fn default_imgsz() -> u32 {
 /// `train`: a `TrainConfig` (docs/API.md) plus `resume_run_id`.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct TrainArgs {
-    /// The training configuration; only `dataset_id` is required.
+    /// The training configuration; only `dataset_id` is required (and not even that when resuming).
     #[serde(flatten)]
     pub config: TrainConfig,
     /// Resume this `stopped` or `failed` run (same id) from its last checkpoint instead of starting a new one. The

@@ -618,3 +618,21 @@ async fn auto_trains_and_predicts_on_the_gpu() {
     let system: SystemInfo = ok(&app, get("/api/system")).await;
     assert_eq!(system.gpus.first().map(|g| g.name.as_str()), Some(gpu.as_str()));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn no_runs_start_after_shutdown() {
+    let t = TempDir::new("shutdown");
+    let s = store(&t.0.join("home"));
+    let app = app(&s);
+    let ds = dataset(&app, "tiny", 4).await;
+    let stopped: Run = ok(&app, post_json("/api/runs", tiny(&ds, 1))).await;
+    ok::<Run>(&app, post(&format!("/api/runs/{}/stop", stopped.id))).await;
+    let s2 = s.clone();
+    tokio::task::spawn_blocking(move || s2.shutdown()).await.unwrap();
+    let e = err(&app, post_json("/api/runs", tiny(&ds, 1)), StatusCode::SERVICE_UNAVAILABLE, "shutting_down")
+        .await;
+    assert!(e.hint.is_some());
+    let resume = json!({ "resume_run_id": stopped.id });
+    err(&app, post_json("/api/runs", resume), StatusCode::SERVICE_UNAVAILABLE, "shutting_down").await;
+    assert_eq!(s.list_runs().unwrap().len(), 1, "a refused run is not created");
+}

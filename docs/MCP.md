@@ -116,7 +116,7 @@ meanings.
 | `register_dataset` | `{ name, path, format?: "auto"\|"yolo"\|"coco" }` | `Dataset` |
 | `create_synthetic_dataset` | `{ name, images?: 1000 (max 100000), classes?: string[], imgsz?: 640, seed?: 0 }` | `Dataset` |
 | `list_models` | paging | page of `{ id, name, arch, imgsz, classes, metrics }` |
-| `train` | `TrainConfig` (docs/API.md), plus optional `resume_run_id` | `{ run_id, status }` |
+| `train` | `TrainConfig` (docs/API.md; `dataset_id` required), or `{ resume_run_id }` (other fields optional and must match the run) | `{ run_id, status }` |
 | `run_status` | `{ run_id, log_lines?: 20 (max 200) }` | `Run`, plus `last_step`, `last_epoch` and `log` (the last `log_lines` log lines; older ones are dropped first if the result would exceed 32 KB) |
 | `list_runs` | `{ status?: string }` + paging | page of `Run` summaries |
 | `stop_run` | `{ run_id }` | `Run` |
@@ -196,7 +196,8 @@ In read-only mode, `train_on_folder` is not listed.
   `--data-dir/runs/<id>/` (config, metrics, checkpoints at every epoch). When the MCP client disconnects (stdin
   closes) or the process receives a shutdown signal, the runs this session started are stopped (`stop_run` on
   each), then the store is shut down (`Store::shutdown`: queued runs become `stopped`, and the process waits, at
-  most a minute, for the active run to stop after its current batch), then the process exits. The current epoch
+  most a minute, for the active run to stop after its current batch), then the process exits. A `train` still
+  in flight at that point fails with `shutting_down` instead of queueing a run nobody would train. The current epoch
   is abandoned, the last epoch's checkpoint is kept, and the status becomes `stopped`. In proxy mode runs belong
   to `folo serve` and are left running. On the next start, persisted runs are listed again (a run a crashed
   process left active is `stopped`, with a warning in its log). `train` with `resume_run_id` resumes that

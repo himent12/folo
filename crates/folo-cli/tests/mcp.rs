@@ -246,7 +246,11 @@ fn check_tools(c: &mut Client, expected: &[&str]) -> std::collections::HashMap<S
         out.insert(t["name"].as_str().unwrap().to_string(), t["outputSchema"].clone());
     }
     if let Some(train) = tools.iter().find(|t| t["name"] == "train") {
-        assert_eq!(train["inputSchema"]["required"], json!(["dataset_id"]));
+        // `dataset_id` is required unless `resume_run_id` is given.
+        let input = jsonschema::validator_for(&train["inputSchema"]).unwrap();
+        assert!(input.is_valid(&json!({ "dataset_id": "ds_1", "epochs": 2 })));
+        assert!(input.is_valid(&json!({ "resume_run_id": "run_1" })));
+        assert!(!input.is_valid(&json!({ "epochs": 2 })));
         assert!(train["inputSchema"]["properties"]["resume_run_id"].is_object());
         assert_eq!(train["annotations"]["readOnlyHint"], false);
     }
