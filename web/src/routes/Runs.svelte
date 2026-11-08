@@ -219,7 +219,7 @@
   input[type='checkbox'] {
     width: 14px;
     height: 14px;
-    accent-color: var(--accent-solid);
+    accent-color: var(--accent-line);
     cursor: pointer;
   }
   .name {

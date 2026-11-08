@@ -152,7 +152,7 @@
     height: 10px;
     margin-bottom: var(--space-3);
     border-radius: 50%;
-    background: var(--accent-solid);
+    background: var(--accent-line);
     box-shadow: 0 0 0 6px var(--accent-muted);
   }
   .title {

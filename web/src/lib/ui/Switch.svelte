@@ -65,7 +65,7 @@
       background-color var(--dur-fast) var(--ease-standard);
   }
   input:checked + .track {
-    background: var(--accent-solid);
+    background: var(--accent-line);
     box-shadow: none;
   }
   input:checked + .track .thumb {
