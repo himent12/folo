@@ -691,7 +691,7 @@ impl FoloApp {
                 |api| api.runs(),
                 |this, r, cx| {
                     this.store.runs = r.map(newest_first_runs).into();
-                    this.store.sync_resumed();
+                    this.store.sync_run_list();
                     this.subscribe_active(cx);
                 },
             );
@@ -959,7 +959,7 @@ impl FoloApp {
             |this, r, cx| {
                 if let Ok(runs) = r {
                     this.store.runs = Load::Ready(newest_first_runs(runs));
-                    this.store.sync_resumed();
+                    this.store.sync_run_list();
                     this.subscribe_active(cx);
                 }
             },
