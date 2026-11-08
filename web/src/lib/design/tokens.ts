@@ -8,11 +8,11 @@ export const classPalette = [
   "#9D7CFF",
   "#FF7B39",
   "#2EC4B6",
-  "#FF5D8F",
+  "#E45CFF",
   "#C6F432",
   "#5B8CFF",
   "#FFD166",
-  "#E45CFF",
+  "#FF5D8F",
   "#3DDC97",
   "#FF4D4D",
   "#A0C4FF",
@@ -30,9 +30,9 @@ export const chart = {
     "series": [
       "#C5F82A",
       "#5CC8FF",
-      "#A78BFA",
-      "#FFB547",
       "#FF6FA5",
+      "#FFB547",
+      "#A78BFA",
       "#2DD4BF"
     ],
     "grid": "#FFFFFF0F",
@@ -44,9 +44,9 @@ export const chart = {
     "series": [
       "#5E9400",
       "#0A8FD6",
-      "#7C5CE6",
-      "#D98A00",
       "#E0457E",
+      "#C27A00",
+      "#7C5CE6",
       "#0F9F8C"
     ],
     "grid": "#0A0E140F",

@@ -51,13 +51,16 @@ app: chart plots, image canvases, code/log views. In light mode panels are white
 - Status: `success` (completed, healthy), `warning` (degraded, stopping), `danger` (failed, errors), `info`
   (queued, neutral notices). Each has `solid` (dots, icons, bars), `text` (readable text) and `muted` (tinted
   backgrounds for badges and banners).
-- Charts: `chart.series[0..5]` in order (lime, sky, violet, amber, pink, teal); grid lines `chart.grid`, axis lines
-  `chart.axis`, tick labels `chart.label` (xs / mono), hover cursor `chart.cursor`. Area fills under a line use the
-  series colour at `area_opacity`. Loss components: box = series 2, cls = series 3, dfl = series 4, total = series 1.
+- Charts: `chart.series[0..5]` in this fixed order (lime, sky, pink, amber, violet, teal), never cycled; the order
+  keeps every adjacent pair apart under colour-vision deficiency (checked with an OKLab ΔE validator). Grid lines
+  `chart.grid`, axis lines `chart.axis`, tick labels `chart.label` (xs / mono), hover cursor `chart.cursor`. Area
+  fills under a line use the series colour at `area_opacity`. Loss components: total = series 1, box = 2, cls = 3,
+  dfl = 4. Two or more series always get a legend, and lines are direct-labelled where they end.
 
 ## Detection classes
 `classes.palette`: 16 saturated, mid-to-high-lightness colours chosen to stay distinct from each other and legible on
-arbitrary photos. Class `i` → `palette[i % 16]`, in both themes.
+arbitrary photos. Class `i` → `palette[i % 16]`, in both themes. Adjacent entries stay distinguishable under
+colour-vision deficiency, and every box also carries its class name, so colour is never the only cue.
 - Box: 2 px stroke in the class colour, wrapped by a 1 px outer halo in `classes.halo` so it reads on bright and dark
   images alike. Optional fill at `fill_opacity` on hover/selection.
 - Label chip: class colour fill, `chip_text` (near black) text, `xs` medium, radius `xs`, sitting on the box's top-left
