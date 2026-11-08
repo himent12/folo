@@ -9,29 +9,49 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
+# Runners: repo variables RUNS_ON_LINUX / RUNS_ON_WINDOWS hold a JSON runs-on value. They point at FOLO's self-hosted
+# runners (a boat.dev sandbox and the dev PC, see docs/CI.md); delete a variable to fall back to GitHub-hosted runners.
 jobs:
   rust:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+        include:
+          - os: linux
+            runs-on: ${{ vars.RUNS_ON_LINUX || '"ubuntu-latest"' }}
+          - os: windows
+            runs-on: ${{ vars.RUNS_ON_WINDOWS || '"windows-latest"' }}
+    name: rust (${{ matrix.os }})
+    runs-on: ${{ fromJSON(matrix.runs-on) }}
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      # Self-hosted runners keep a persistent target dir outside the checkout (checkout cleans ignored files).
+      - name: persistent target dir (self-hosted, linux)
+        if: runner.environment == 'self-hosted' && runner.os == 'Linux'
+        shell: bash
+        run: echo "CARGO_TARGET_DIR=$HOME/gha/folo-target" >> "$GITHUB_ENV"
+      - name: persistent target dir (self-hosted, windows)
+        if: runner.environment == 'self-hosted' && runner.os == 'Windows'
+        shell: powershell
+        run: Add-Content -Path $env:GITHUB_ENV -Value "CARGO_TARGET_DIR=D:\gha\folo-target-ci"
       - uses: Swatinem/rust-cache@v2
+        if: runner.environment == 'github-hosted'
       - run: cargo fmt --all -- --check
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'linux'
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
   web:
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(vars.RUNS_ON_LINUX || '"ubuntu-latest"') }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - name: check for web app
         id: web
+        shell: bash
         run: test -f web/package.json && echo "present=true" >> "$GITHUB_OUTPUT" || echo "present=false" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-node@v4
         if: steps.web.outputs.present == 'true'
