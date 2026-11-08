@@ -797,7 +797,7 @@ impl FoloApp {
                     cx,
                     // Show "Detecting…" again (the failure would otherwise stay up, and its
                     // button live, while the retry runs).
-                    act(|this, _, cx| this.retry_predict(cx)),
+                    act(|this, _, cx| this.rerun_predict(cx)),
                 );
                 // Out of GPU memory locally: the CPU is one click away.
                 let to_cpu = (e.code == "gpu_out_of_memory"

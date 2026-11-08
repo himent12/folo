@@ -1964,7 +1964,9 @@ impl FoloApp {
     pub fn set_play_target(&mut self, target: Option<crate::local::Target>, cx: &mut Context<Self>) {
         if self.play_target != target {
             self.play_target = target;
-            self.run_predict(cx);
+            // Another device's answer (and timing): "Detecting…" while it runs, not the previous
+            // result, or an OOM error and its Retry still live during the CPU fallback.
+            self.rerun_predict(cx);
         }
     }
 
@@ -1988,9 +1990,9 @@ impl FoloApp {
         .detach();
     }
 
-    /// Run the failed prediction again, showing "Detecting…" meanwhile (a plain rerun of the same
-    /// image and model keeps the old result up, which here is the error and its Retry button).
-    pub fn retry_predict(&mut self, cx: &mut Context<Self>) {
+    /// Predict again from scratch, showing "Detecting…" meanwhile (Retry, or another device). A plain
+    /// rerun of the same image and model, an IoU change, keeps the old result up instead.
+    pub fn rerun_predict(&mut self, cx: &mut Context<Self>) {
         self.play_pred_for = None;
         self.run_predict(cx);
     }
