@@ -133,7 +133,8 @@ impl FoloApp {
                 .flex_1()
                 .min_w_0()
                 .rounded(px(radius::LG))
-                .bg(t.bg_inset)
+                // The panel surface, like every other empty state.
+                .bg(t.bg_panel)
                 .border_1()
                 // Dashed only where a drop works (a model to run it).
                 .when(!no_models, |d| d.border_dashed())
@@ -882,7 +883,7 @@ impl FoloApp {
                 )
                 .child(div().flex().gap(px(6.)).children(thumbs))
         });
-        // One scrolling column: controls, detections, samples, then latency right after them (no
+        // One scrolling column: controls, detections and their latency, then sample images (no
         // pinned footer, so no dead band and nothing hidden on short windows).
         let rail = if window.viewport_size().width < px(1100.) { 280. } else { 320. };
         panel(&t)
@@ -906,8 +907,9 @@ impl FoloApp {
                             .child(controls)
                             .child(hairline(&t))
                             .child(detections)
-                            .children(picker)
+                            // The run's latency next to its results; sample images after.
                             .children(timing)
+                            .children(picker)
                             // Room to scroll the last row clear of the fade below.
                             .child(div().h(px(12.))),
                     ),

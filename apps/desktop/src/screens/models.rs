@@ -675,12 +675,14 @@ impl FoloApp {
                     Some(_) => (alpha(t.class_stroke(c.class), 0.25), 1.25),
                     None => (t.class_stroke(c.class), 2.),
                 };
-                // A line pattern per class as well as a colour (solid, dashed, dotted, repeating),
-                // matched by the legend's swatch: the curves read apart without colour.
+                // A line pattern per class as well as a colour (five distinct ones), matched by the
+                // legend's swatch: the curves read apart without colour.
                 let s = Series::new(name, color, pts).width(width).live(true);
                 match pr_pattern(c.class) {
                     1 => s.dashed(),
                     2 => s.dotted(),
+                    3 => s.pattern(crate::charts::LONG_DASH),
+                    4 => s.pattern(crate::charts::DASH_DOT),
                     _ => s,
                 }
             })
@@ -725,12 +727,12 @@ impl FoloApp {
                             cx.notify();
                         }
                     }))
-                    .child(div().w(px(12.)).flex_none().child(crate::ui::line_swatch(
-                        t.class_stroke(class),
-                        pr_pattern(class) == 1,
-                        pr_pattern(class) == 2,
-                        2.,
-                    )))
+                    .child(
+                        div()
+                            .w(px(14.))
+                            .flex_none()
+                            .child(pattern_swatch(t.class_stroke(class), pr_pattern(class))),
+                    )
                     .child(
                         // A known width, so long class names end in "…" (GPUI truncates against
                         // the pre-shrink width).
@@ -1319,10 +1321,24 @@ fn num_cell(w: f32, content: impl IntoElement) -> gpui::Div {
     div().w(px(w)).flex_none().flex().justify_end().child(content)
 }
 
-/// A PR class curve's line pattern: 0 solid, 1 dashed, 2 dotted (by class, so it never changes
-/// with sort order or isolation).
+/// A PR class curve's line pattern: 0 solid, 1 dashed, 2 dotted, 3 long dash, 4 dash-dot (by
+/// class, so it never changes with sort order or isolation).
 fn pr_pattern(class: u32) -> u32 {
-    class % 3
+    class % 5
+}
+
+/// A 14 px legend swatch drawing `pattern` (see [`pr_pattern`]) in `color`.
+fn pattern_swatch(color: gpui::Hsla, pattern: u32) -> gpui::Div {
+    let bar = |w: f32| div().w(px(w)).h(px(2.)).flex_none().bg(color);
+    let dot = || div().size(px(2.)).flex_none().rounded_full().bg(color);
+    let row = div().w(px(14.)).h(px(2.)).flex().items_center().overflow_hidden();
+    match pattern {
+        1 => row.gap(px(2.)).child(bar(4.)).child(bar(4.)).child(bar(2.)),
+        2 => row.gap(px(2.)).child(dot()).child(dot()).child(dot()).child(dot()),
+        3 => row.gap(px(3.)).child(bar(9.)).child(bar(2.)),
+        4 => row.gap(px(2.)).child(bar(6.)).child(dot()).child(bar(2.)),
+        _ => row.child(bar(14.)),
+    }
 }
 
 /// A column heading's short form: the first three letters and a full stop ("hexagon" → "hex.").

@@ -497,6 +497,15 @@ impl FoloApp {
                 }
             }))
             .when(ring, |d| d.child(focus_ring(&t, radius::MD)))
+            // Keyboard focus shows why the disabled options are off (their tooltips need a pointer).
+            .when(ring && off.iter().any(Option::is_some), |d| {
+                let why: Vec<String> = options
+                    .iter()
+                    .zip(&off)
+                    .filter_map(|(label, w)| w.as_ref().map(|w| format!("{label}: {w}")))
+                    .collect();
+                d.child(focus_tip(&t, why.join(" · "), tsize::CONTROL_MD))
+            })
             .children(options.iter().enumerate().map(|(i, label)| {
                 let on = i == selected;
                 let f = on_select.clone();

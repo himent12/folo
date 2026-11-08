@@ -1070,7 +1070,7 @@ impl FoloApp {
                 if pair_a { 0.5 } else { 0.4 },
             ))
             .child(row(
-                card("Precision and recall", "best-F1 · IoU 0.50 · val", pr_legend, line_chart(&t, pr))
+                card("Precision / Recall", "best-F1 · IoU 0.50 · val", pr_legend, line_chart(&t, pr))
                     .into_any_element(),
                 card("Learning rate", &lr_caption, lr_legend, line_chart(&t, lr)).into_any_element(),
                 0.6,

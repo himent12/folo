@@ -1825,7 +1825,7 @@ impl FoloApp {
                     .flex()
                     .justify_between()
                     .child(overline(&t, "Labels"))
-                    .child(text(ty::XS, t.text_tertiary).child("x, y · w × h (px)")),
+                    .child(text(ty::XS, t.text_tertiary).child("x, y · w×h (px)")),
             )
             .child(
                 div()
