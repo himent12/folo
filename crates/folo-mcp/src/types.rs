@@ -108,10 +108,11 @@ fn default_imgsz() -> u32 {
 /// `train`: a `TrainConfig` (docs/API.md) plus `resume_run_id`.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct TrainArgs {
-    /// The training configuration; only `dataset_id` is required.
+    /// The training configuration; only `dataset_id` is required (and not even that when resuming).
     #[serde(flatten)]
     pub config: TrainConfig,
-    /// Resume this stopped run from its last checkpoint instead of starting a new one.
+    /// Resume this `stopped` or `failed` run (same id) from its last checkpoint instead of starting a new one. The
+    /// other fields must then match the run's config or be omitted (`device` may change).
     #[serde(default)]
     pub resume_run_id: Option<String>,
 }
@@ -119,9 +120,9 @@ pub struct TrainArgs {
 /// `train` result.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct TrainResult {
-    /// The new run.
+    /// The new (or resumed) run.
     pub run_id: String,
-    /// Its status (`queued` right after creation).
+    /// Its status (`queued` right after creation or resuming).
     pub status: RunStatus,
 }
 

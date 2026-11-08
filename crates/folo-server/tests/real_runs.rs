@@ -297,6 +297,42 @@ async fn train_evaluate_predict_and_reload() {
     let again: ModelEval = ok(&app, get(&format!("/api/models/{model_id}/eval"))).await;
     assert_eq!(again, eval);
     assert!(home.join("cache/eval").join(format!("{model_id}.json")).is_file());
+    // POST /api/val: the same split and thresholds as /eval give the same numbers; other splits and errors.
+    let v: ValReport =
+        ok(&app, post_json("/api/val", json!({ "model_id": model_id, "dataset_id": ds.id }))).await;
+    assert_eq!((v.split, v.images, v.imgsz), (Split::Val, 2, 64));
+    assert_eq!(v.val.per_class, eval.per_class);
+    assert!(v.timing.total_s > 0.0 && v.timing.per_image_ms > 0.0);
+    let body =
+        json!({ "model_id": model_id, "dataset_id": ds.id, "split": "train", "imgsz": 96, "conf": 0.25 });
+    let t: ValReport = ok(&app, post_json("/api/val", body)).await;
+    assert_eq!((t.split, t.images, t.imgsz), (Split::Train, 10, 96));
+    for (body, status, code) in [
+        (
+            json!({ "model_id": model_id, "dataset_id": ds.id, "split": "test" }),
+            StatusCode::BAD_REQUEST,
+            "invalid_body",
+        ),
+        (
+            json!({ "model_id": model_id, "dataset_id": ds.id, "imgsz": 100 }),
+            StatusCode::BAD_REQUEST,
+            "invalid_body",
+        ),
+        (
+            json!({ "model_id": model_id, "dataset_id": ds.id, "iou": 1.5 }),
+            StatusCode::BAD_REQUEST,
+            "invalid_body",
+        ),
+        (json!({ "model_id": "m_none", "dataset_id": ds.id }), StatusCode::NOT_FOUND, "model_not_found"),
+        (
+            json!({ "model_id": model_id, "dataset_id": "ds_none" }),
+            StatusCode::NOT_FOUND,
+            "dataset_not_found",
+        ),
+    ] {
+        err(&app, post_json("/api/val", body), status, code).await;
+    }
+
     let x: ExportResult =
         ok(&app, post_json(&format!("/api/models/{model_id}/export"), json!({ "format": "folo-f16" }))).await;
     assert_eq!(Path::new(&x.path), home.join("exports").join("tiny-n-best-f16.folo"));
@@ -581,4 +617,22 @@ async fn auto_trains_and_predicts_on_the_gpu() {
     assert!(!r.boxes.is_empty());
     let system: SystemInfo = ok(&app, get("/api/system")).await;
     assert_eq!(system.gpus.first().map(|g| g.name.as_str()), Some(gpu.as_str()));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn no_runs_start_after_shutdown() {
+    let t = TempDir::new("shutdown");
+    let s = store(&t.0.join("home"));
+    let app = app(&s);
+    let ds = dataset(&app, "tiny", 4).await;
+    let stopped: Run = ok(&app, post_json("/api/runs", tiny(&ds, 1))).await;
+    ok::<Run>(&app, post(&format!("/api/runs/{}/stop", stopped.id))).await;
+    let s2 = s.clone();
+    tokio::task::spawn_blocking(move || s2.shutdown()).await.unwrap();
+    let e = err(&app, post_json("/api/runs", tiny(&ds, 1)), StatusCode::SERVICE_UNAVAILABLE, "shutting_down")
+        .await;
+    assert!(e.hint.is_some());
+    let resume = json!({ "resume_run_id": stopped.id });
+    err(&app, post_json("/api/runs", resume), StatusCode::SERVICE_UNAVAILABLE, "shutting_down").await;
+    assert_eq!(s.list_runs().unwrap().len(), 1, "a refused run is not created");
 }

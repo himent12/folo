@@ -931,5 +931,5 @@ async fn val_endpoint() {
     let dir = std::env::temp_dir().join(format!("folo-val-real-{}", std::process::id()));
     let real = Server::new(Arc::new(RealStore::open(dir)), Options::default()).router();
     let req = json!({ "model_id": "m_1", "dataset_id": "ds_1" });
-    err(&real, post_json("/api/val", req), StatusCode::NOT_IMPLEMENTED, "not_implemented").await;
+    err(&real, post_json("/api/val", req), StatusCode::NOT_FOUND, "model_not_found").await;
 }

@@ -720,7 +720,6 @@ dependencies = [
  "base64",
  "folo-api",
  "folo-data",
- "folo-gpu",
  "folo-server",
  "glob",
  "http",

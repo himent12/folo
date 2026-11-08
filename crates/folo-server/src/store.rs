@@ -163,8 +163,8 @@ pub trait Store: Send + Sync + 'static {
     /// Runs inference on one image.
     fn predict(&self, input: PredictInput) -> Result<PredictResponse>;
 
-    /// Evaluates a model on a dataset split (`POST /api/val`, the MCP `val` tool). `not_implemented` until the
-    /// store has an evaluator.
+    /// Evaluates a model on a dataset split (`POST /api/val`, the MCP `val` tool). Stores without an evaluator
+    /// answer `501 not_implemented` (the default).
     fn val(&self, req: ValRequest) -> Result<ValReport> {
         let _ = req;
         Err(crate::error::Error::not_implemented("validation"))

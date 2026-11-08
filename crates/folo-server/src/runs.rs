@@ -370,6 +370,7 @@ impl Runs {
         val_offset: u64,
         device: String,
     ) -> Result<Run> {
+        self.check_open()?;
         let mut list = self.list.write().unwrap();
         let seed = fnv1a(config.name.as_bytes()) ^ unix_now().to_bits();
         let id = unique_id("run", seed, |id| list.iter().any(|e| e.id == id) || self.dir.join(id).exists());
@@ -400,13 +401,31 @@ impl Runs {
         entry.persist(&entry.state.lock().unwrap());
         list.push(entry.clone());
         drop(list);
-        self.enqueue(&entry);
+        self.enqueue(&entry)?;
         Ok(run)
     }
 
-    fn enqueue(self: &Arc<Self>, entry: &Arc<RunEntry>) {
+    /// `503 shutting_down` once [`Runs::shutdown`] has started.
+    fn check_open(&self) -> Result<()> {
+        if self.queue.lock().unwrap().shutdown { Err(shutting_down()) } else { Ok(()) }
+    }
+
+    /// Queues `entry`. After [`Runs::shutdown`] has started (checked under the queue lock, so a run is either
+    /// queued before the shutdown drains the queue or not at all) the run is marked `stopped` instead and the
+    /// result is `503 shutting_down`.
+    fn enqueue(self: &Arc<Self>, entry: &Arc<RunEntry>) -> Result<()> {
         let ahead = {
             let mut q = self.queue.lock().unwrap();
+            if q.shutdown {
+                drop(q);
+                let mut st = entry.state.lock().unwrap();
+                if !st.deleted {
+                    entry.finish(&mut st, RunStatus::Stopped, None);
+                }
+                drop(st);
+                entry.log(LogLevel::Warn, "the server is shutting down; the run was not queued");
+                return Err(shutting_down());
+            }
             q.runs.push_back(entry.clone());
             q.runs.len() - 1 + usize::from(self.active.lock().unwrap().is_some())
         };
@@ -416,6 +435,7 @@ impl Runs {
         );
         self.wake.notify_all();
         self.ensure_worker();
+        Ok(())
     }
 
     fn ensure_worker(self: &Arc<Self>) {
@@ -544,6 +564,7 @@ impl Runs {
         id: &str,
         fields: &serde_json::Map<String, serde_json::Value>,
     ) -> Result<Run> {
+        self.check_open()?;
         let e = self.get(id)?;
         let mut st = e.state.lock().unwrap();
         if st.deleted {
@@ -609,7 +630,7 @@ impl Runs {
                 "no epoch finished before; starting over".to_string()
             },
         );
-        self.enqueue(&e);
+        self.enqueue(&e)?;
         Ok(run)
     }
 
@@ -675,6 +696,11 @@ impl Runs {
             }
         }
     }
+}
+
+fn shutting_down() -> Error {
+    Error::new(StatusCode::SERVICE_UNAVAILABLE, "shutting_down", "the server is shutting down")
+        .hint("start the run again once the server has restarted")
 }
 
 /// Brings the progress in `run.json` of a run a previous process left active up to its files: the trainer writes
@@ -842,6 +868,53 @@ mod tests {
         let m = read_metrics(&p);
         assert_eq!(m.steps.iter().map(|s| s.step).collect::<Vec<_>>(), [1, 2, 3, 4]);
         assert_eq!(m.epochs.iter().map(|e| e.epoch).collect::<Vec<_>>(), [1, 2]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A create or resume that passed `check_open` before the shutdown and reaches `enqueue` after it: the run is
+    /// marked stopped instead of queued, and no worker starts.
+    #[test]
+    fn enqueue_after_shutdown_refuses_and_stops_the_run() {
+        let dir = std::env::temp_dir().join(format!("folo-runs-late-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let runs = Runs::open(dir.clone());
+        let config: TrainConfig = serde_json::from_str(r#"{"dataset_id":"ds_1","name":"late"}"#).unwrap();
+        let run = Run {
+            id: "run_late".into(),
+            name: config.name.clone(),
+            status: RunStatus::Queued,
+            epochs: config.epochs,
+            config,
+            created: now(),
+            started: None,
+            finished: None,
+            epoch: 0,
+            step: 0,
+            steps_per_epoch: 0,
+            eta_s: None,
+            best: None,
+            device: "cpu".into(),
+            model_id: None,
+            error: None,
+        };
+        let dataset = DatasetRef {
+            id: "ds_1".into(),
+            name: "d".into(),
+            path: "nowhere".into(),
+            format: DatasetFormat::Yolo,
+        };
+        let file = RunFile { run, dataset, weights: None, val_offset: 0, epochs_done: 0, last_metrics: None };
+        std::fs::create_dir_all(dir.join("run_late")).unwrap();
+        let entry = Arc::new(RunEntry::new("run_late".into(), dir.join("run_late"), file));
+        runs.list.write().unwrap().push(entry.clone());
+
+        runs.shutdown(None);
+        let e = runs.enqueue(&entry).unwrap_err();
+        assert_eq!((e.status, e.body.code.as_str()), (StatusCode::SERVICE_UNAVAILABLE, "shutting_down"));
+        assert_eq!(entry.run().status, RunStatus::Stopped);
+        assert!(runs.queue.lock().unwrap().runs.is_empty());
+        assert!(!*runs.worker.lock().unwrap(), "no worker for a refused run");
+        assert!(runs.logs("run_late", 10).unwrap().iter().any(|l| l.message.contains("not queued")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

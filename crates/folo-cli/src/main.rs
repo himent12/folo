@@ -203,8 +203,12 @@ fn mcp(args: McpArgs) -> Result<(), CliError> {
         (None, true) => folo_mcp::Backend::Mock,
         (None, false) => folo_mcp::Backend::Real,
     };
-    let opts =
-        folo_mcp::Options { data_dir: data_dir.clone(), read_only: args.read_only, confine: args.confine };
+    let opts = folo_mcp::Options {
+        data_dir: data_dir.clone(),
+        read_only: args.read_only,
+        confine: args.confine,
+        device: args.device.clone(),
+    };
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()

@@ -21,6 +21,7 @@ const DOCS: &[(&str, &str)] = &[
     ("FORMAT", include_str!("../../../docs/FORMAT.md")),
     ("METRICS", include_str!("../../../docs/METRICS.md")),
     ("MCP", include_str!("../../../docs/MCP.md")),
+    ("AGENT_COOKBOOK", include_str!("../../../docs/AGENT_COOKBOOK.md")),
 ];
 
 /// A parsed `folo://` URI. Ids are percent-decoded.

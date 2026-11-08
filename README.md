@@ -42,7 +42,7 @@ folder of release assets); each also reads `FOLO_VERSION`, `FOLO_INSTALL_DIR`, `
 
 ```sh
 cargo run -p folo-cli -- serve --mock   # mock data on http://127.0.0.1:7878 (API under /api)
-cargo run -p folo-cli -- serve          # real store: datasets from disk; training / inference answer 501 for now
+cargo run -p folo-cli -- serve          # real store: datasets from disk, training, models and inference on the engine
 ```
 
 `--mock` serves deterministic datasets, models, finished runs and one live training run whose SSE stream advances in
@@ -78,11 +78,16 @@ command = "folo"
 args = ["mcp", "--data-dir", "D:/folo-data"]
 ```
 
-Flags: `--mock` (deterministic mock data, so the whole dataset → train → predict flow works today, before the
-engine is wired into the real store), `--read-only` (only tools that do not change state), `--confine` (only read
+By default `folo mcp` runs the real engine on `--data-dir`: the agent registers or generates datasets, trains
+(runs are persisted, can be stopped and resumed, and are stopped gracefully when the client disconnects),
+evaluates, predicts and exports, all through MCP tools. Flags: `--device auto|cpu|gpu:<n>` (where inference and
+`val` run; each run has its own `device`), `--mock` (deterministic mock data and simulated runs, for trying the
+tools without training anything), `--read-only` (only tools that do not change state), `--confine` (only read
 files inside `--data-dir`), `--server http://127.0.0.1:7878` (forward to a running `folo serve`, so the agent and
 Studio share runs). From a checkout, use `"command": "cargo", "args": ["run", "-q", "--release", "-p",
-"folo-cli", "--", "mcp", "--mock"]`.
+"folo-cli", "--", "mcp", "--data-dir", "D:/folo-data"]`. [docs/AGENT_COOKBOOK.md](docs/AGENT_COOKBOOK.md) has
+short recipes (train on a folder, compare runs, find label problems, export and run, script with `--json`);
+[docs/MCP.md](docs/MCP.md) is the full contract.
 
 - Why: fast (Rust, hand-written kernels, GPU through wgpu everywhere including the browser), small, hackable, and
   built to be driven by agents (`--json`, MCP server, stable error codes).

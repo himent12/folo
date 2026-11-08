@@ -36,6 +36,8 @@ pub struct Options {
     pub read_only: bool,
     /// Only read input paths inside `data_dir`.
     pub confine: bool,
+    /// Embedded mode: the real store's inference and validation device (`auto`, `cpu`, `gpu:<n>`).
+    pub device: String,
 }
 
 /// Where tool calls go.
@@ -63,7 +65,10 @@ pub fn build(backend: Backend, opts: Options) -> Result<FoloMcp, String> {
         confine::install_read_guard(&policy).map_err(|e| e.body.message)?;
     }
     Ok(match backend {
-        Backend::Real => FoloMcp::new(Arc::new(RealStore::open(opts.data_dir.clone())), None, opts),
+        Backend::Real => {
+            let store = RealStore::open(opts.data_dir.clone()).device(opts.device.clone());
+            FoloMcp::new(Arc::new(store), None, opts)
+        }
         Backend::Mock => FoloMcp::new(Arc::new(MockStore::new()), None, opts),
         Backend::Proxy(url) => {
             if !url.starts_with("http://") {
@@ -77,7 +82,8 @@ pub fn build(backend: Backend, opts: Options) -> Result<FoloMcp, String> {
 }
 
 /// Serves MCP on stdin / stdout until the client disconnects or `shutdown` resolves, then stops the runs this
-/// session started. stdout carries protocol messages only; logs go to stderr.
+/// session started and, in embedded mode, shuts the store down ([`Store::shutdown`]: the active run stops at its
+/// next batch and keeps its last checkpoint). stdout carries protocol messages only; logs go to stderr.
 pub async fn serve_stdio(
     server: FoloMcp,
     shutdown: impl std::future::Future<Output = ()> + Send,
@@ -102,5 +108,6 @@ pub async fn serve_stdio(
         }
     }
     server.stop_session_runs().await;
+    server.shutdown_store().await;
     Ok(())
 }
