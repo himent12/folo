@@ -145,17 +145,74 @@ struct CachedEval {
     eval: ModelEval,
 }
 
-/// Metadata and eval caches.
+/// Metadata, eval and f16 weights caches.
 pub struct Models {
     data_dir: PathBuf,
     meta: Mutex<HashMap<PathBuf, (FileKey, Arc<FileMeta>)>>,
     evals: Mutex<HashMap<String, (String, ModelEval)>>,
+    /// Held while an f16 weights file is written, so concurrent first requests export once.
+    f16: Mutex<()>,
 }
 
 impl Models {
     /// Caches rooted at `data_dir`.
     pub fn new(data_dir: PathBuf) -> Models {
-        Models { data_dir, meta: Mutex::default(), evals: Mutex::default() }
+        Models { data_dir, meta: Mutex::default(), evals: Mutex::default(), f16: Mutex::default() }
+    }
+
+    fn weights_cache(&self) -> PathBuf {
+        self.data_dir.join("cache").join("weights")
+    }
+
+    /// The `folo-f16` export of `m` for `GET /api/models/{id}/weights?format=f16`:
+    /// `cache/weights/<model id>.<hash of the weights file's path, size and mtime>.f16.folo`, written by the export
+    /// code of `POST /api/models/{id}/export` the first time it is asked for (older versions of the model's file
+    /// are then removed).
+    pub fn f16_weights(&self, m: &ModelRef) -> Result<PathBuf> {
+        let missing = |e: std::io::Error| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                Error::not_found("model", &m.model.id)
+            } else {
+                Error::internal(format!("{}: {e}", m.path.display()))
+            }
+        };
+        let fk = FileKey::of(&m.path).map_err(missing)?;
+        let mtime = fk
+            .modified
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_nanos());
+        let key = fnv1a(format!("{}|{}|{mtime}", fk.path.display(), fk.len).as_bytes());
+        let dir = self.weights_cache();
+        // Model ids have no dots, so `<id>.` never prefixes another model's files.
+        let prefix = format!("{}.", m.model.id);
+        let out = dir.join(format!("{prefix}{key:016x}.f16.folo"));
+        if out.is_file() {
+            return Ok(out);
+        }
+        let _guard = self.f16.lock().unwrap();
+        if out.is_file() {
+            return Ok(out);
+        }
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| Error::internal(format!("creating {}: {e}", dir.display())))?;
+        let file = engine::read_model_file(&m.path)?;
+        // Written to a temporary file and renamed into place, so a reader never sees a partial export.
+        file.export(&out, FloatDType::F16).map_err(nn_error)?;
+        self.forget_weights(&m.model.id, Some(&out));
+        Ok(out)
+    }
+
+    /// Removes the cached f16 weights of model `id` (except `keep`).
+    pub fn forget_weights(&self, id: &str, keep: Option<&Path>) {
+        let prefix = format!("{id}.");
+        let Ok(entries) = std::fs::read_dir(self.weights_cache()) else { return };
+        for e in entries.flatten() {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with(&prefix) && name.ends_with(".f16.folo") && keep != Some(e.path().as_path()) {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
     }
 
     /// The folder scanned for `.folo` files.

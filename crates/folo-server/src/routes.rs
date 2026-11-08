@@ -5,8 +5,9 @@ use std::time::Duration;
 
 use axum::Json;
 use axum::Router;
+use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, FromRequest, Multipart, Request, State};
-use axum::http::{HeaderValue, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -22,7 +23,7 @@ use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 use crate::AppState;
 use crate::error::{ApiJson, ApiPath, ApiQuery, Error, Result};
-use crate::store::{ImageQuery, IssueQuery, PredictInput, PredictSource, Store};
+use crate::store::{ImageQuery, IssueQuery, PredictInput, PredictSource, Store, WeightsBody, WeightsFormat};
 use crate::util::{rfc3339, unix_now};
 
 /// Largest accepted request body for `POST /api/predict` uploads.
@@ -33,6 +34,8 @@ pub const DEFAULT_LIMIT: u64 = 100;
 pub const MAX_LIMIT: u64 = 1000;
 /// SSE keep-alive comment interval.
 pub const KEEP_ALIVE: Duration = Duration::from_secs(15);
+/// Chunk size of streamed weights files.
+pub const WEIGHTS_CHUNK: usize = 256 * 1024;
 
 /// The `/api` router.
 pub fn api() -> Router<AppState> {
@@ -49,6 +52,7 @@ pub fn api() -> Router<AppState> {
         .route("/models/{id}", get(get_model))
         .route("/models/{id}/eval", get(model_eval))
         .route("/models/{id}/export", post(export_model))
+        .route("/models/{id}/weights", get(model_weights))
         .route("/runs", get(list_runs).post(create_run))
         .route("/runs/{id}", get(get_run).delete(delete_run))
         .route("/runs/{id}/stop", post(stop_run))
@@ -236,6 +240,78 @@ async fn export_model(
     ApiJson(req): ApiJson<ExportRequest>,
 ) -> Result<Response> {
     Ok(Json(blocking(&st, move |s| s.export_model(&id, req.format)).await?).into_response())
+}
+
+#[derive(Deserialize)]
+struct WeightsParams {
+    format: Option<String>,
+}
+
+/// True when the conditional headers say the client's copy is current (RFC 9110 §13.2.2 for GET / HEAD):
+/// `If-None-Match` decides when present; otherwise `If-Modified-Since` (one valid HTTP-date) against
+/// `modified`, at the one-second precision of HTTP dates.
+fn not_modified(headers: &HeaderMap, etag: &str, modified: std::time::SystemTime) -> bool {
+    if let Some(m) = crate::web::if_none_match(headers, etag) {
+        return m;
+    }
+    let mut ims = headers.get_all(header::IF_MODIFIED_SINCE).iter();
+    let (Some(v), None) = (ims.next(), ims.next()) else { return false };
+    let Some(since) = v.to_str().ok().and_then(|v| httpdate::parse_http_date(v).ok()) else { return false };
+    let secs = |t: std::time::SystemTime| t.duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    secs(modified) <= secs(since)
+}
+
+/// `GET /api/models/{id}/weights[?format=f16]`: the `.folo` file, streamed, with `ETag`, `Last-Modified` and
+/// `304 Not Modified` for a current `If-None-Match` / `If-Modified-Since`. The compression layer leaves it alone
+/// (see [`crate::Server`]), so `Content-Length` and the strong ETag describe the bytes on the wire.
+async fn model_weights(
+    State(st): State<AppState>,
+    ApiPath(id): ApiPath<String>,
+    ApiQuery(p): ApiQuery<WeightsParams>,
+    headers: HeaderMap,
+) -> Result<Response> {
+    let format = match p.format.as_deref() {
+        None | Some("") => WeightsFormat::Stored,
+        Some("f16") => WeightsFormat::F16,
+        Some(f) => {
+            return Err(Error::new(
+                StatusCode::BAD_REQUEST,
+                "invalid_query",
+                format!("unknown format '{f}'"),
+            )
+            .hint("format is f16, or leave it out for the stored file"));
+        }
+    };
+    let w = blocking(&st, move |s| s.model_weights(&id, format)).await?;
+    let etag = HeaderValue::from_str(&w.etag).map_err(|e| Error::internal(format!("bad ETag: {e}")))?;
+    let validators = [
+        (header::ETAG, etag),
+        (header::LAST_MODIFIED, HeaderValue::from_str(&httpdate::fmt_http_date(w.modified)).expect("ASCII")),
+        // Models change (a run's last.folo every epoch): caches revalidate with the validators above.
+        (header::CACHE_CONTROL, HeaderValue::from_static("no-cache")),
+    ];
+    if not_modified(&headers, &w.etag, w.modified) {
+        return Ok((StatusCode::NOT_MODIFIED, validators).into_response());
+    }
+    let disposition = format!("attachment; filename=\"{}\"", w.file_name);
+    let body = match w.body {
+        WeightsBody::Bytes(b) => Body::from(b),
+        WeightsBody::File(f) => {
+            // At most `len` bytes, the length announced in Content-Length even if the file grew meanwhile.
+            let file = tokio::io::AsyncReadExt::take(tokio::fs::File::from_std(f), w.len);
+            Body::from_stream(tokio_util::io::ReaderStream::with_capacity(file, WEIGHTS_CHUNK))
+        }
+    };
+    Ok((
+        validators,
+        [
+            (header::CONTENT_TYPE, HeaderValue::from_static("application/octet-stream")),
+            (header::CONTENT_LENGTH, HeaderValue::from(w.len)),
+            (header::CONTENT_DISPOSITION, HeaderValue::from_str(&disposition).expect("sanitised name")),
+        ],
+        body,
+    )
+        .into_response())
 }
 
 async fn val(State(st): State<AppState>, ApiJson(req): ApiJson<ValRequest>) -> Result<Json<ValReport>> {

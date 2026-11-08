@@ -25,7 +25,8 @@ runs the same script on every PR. Vite serves `web/public/` as is, so Studio imp
 import init, { FoloDetector, hasWebGpu, version } from "/folo-wasm/folo_wasm.js";
 
 await init();                                          // fetches and instantiates folo_wasm_bg.wasm (once)
-const bytes = new Uint8Array(await (await fetch("/models/shapes-n.folo")).arrayBuffer());
+// Any .folo bytes; from folo serve: GET /api/models/{id}/weights (docs/API.md), ?format=f16 for the small export.
+const bytes = new Uint8Array(await (await fetch("/api/models/m_31aa/weights?format=f16")).arrayBuffer());
 const det = await FoloDetector.load(bytes, { backend: "auto", modelId: "m_31aa" });
 det.backend;                                           // "webgpu" | "cpu"
 det.info();                                            // see below

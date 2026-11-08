@@ -181,13 +181,13 @@ impl RunEntry {
     fn finish(&self, st: &mut RunState, status: RunStatus, error: Option<String>) {
         let r = &mut st.file.run;
         r.status = status;
-        r.error = error.clone();
+        r.error = error;
         r.eta_s = None;
         r.finished = Some(now());
         r.epoch = st.file.epochs_done;
         r.model_id = model_id_of(&self.id, &self.dir, status).or(r.model_id.take());
         self.persist(st);
-        self.send(RunEvent::Status(StatusEvent { status, error }));
+        self.send(RunEvent::Status(status_event(&st.file.run)));
     }
 
     /// The trainer's events: update the run, persist what matters, forward to subscribers.
@@ -213,6 +213,9 @@ impl RunEntry {
             }
             RunEvent::Step(s) => {
                 let r = &mut st.file.run;
+                if s.steps_per_epoch > 0 {
+                    r.steps_per_epoch = s.steps_per_epoch;
+                }
                 r.epoch = s.epoch;
                 r.step = s.step;
                 r.eta_s = Some(s.eta_s);
@@ -242,6 +245,11 @@ impl RunEntry {
         // Sent under the state lock, so subscribers see transitions in the order they happen.
         self.send(ev.clone());
     }
+}
+
+/// The `status` event of a run's current state, with its length (`steps_per_epoch` is 0 until the trainer is built).
+fn status_event(r: &Run) -> StatusEvent {
+    StatusEvent::new(r.status, r.error.clone()).with_length(r.epochs, r.steps_per_epoch)
 }
 
 /// The model id of a run's `best.folo` (or of `last.folo` when there is no best yet), for a run that ended
@@ -523,7 +531,7 @@ impl Runs {
                 e.stop.store(true, Ordering::Relaxed);
                 st.file.run.status = RunStatus::Stopping;
                 e.persist(&st);
-                e.send(RunEvent::Status(StatusEvent { status: RunStatus::Stopping, error: None }));
+                e.send(RunEvent::Status(status_event(&st.file.run)));
                 let run = st.file.run.clone();
                 drop(st);
                 e.log(LogLevel::Info, "stop requested; stopping after the current batch");
@@ -619,7 +627,7 @@ impl Runs {
         st.tail.clear();
         e.stop.store(false, Ordering::Relaxed);
         e.persist(&st);
-        e.send(RunEvent::Status(StatusEvent { status: RunStatus::Queued, error: None }));
+        e.send(RunEvent::Status(status_event(&st.file.run)));
         let run = st.file.run.clone();
         drop(st);
         e.log(
@@ -641,8 +649,7 @@ impl Runs {
         // first event received are in order.
         let st = e.state.lock().unwrap();
         let events = e.tx.subscribe();
-        let r = &st.file.run;
-        Ok(Subscription { initial: StatusEvent { status: r.status, error: r.error.clone() }, events })
+        Ok(Subscription { initial: status_event(&st.file.run), events })
     }
 
     /// The run's metric history: `metrics.jsonl` (resumed epochs replace the steps and epochs they repeat) plus the

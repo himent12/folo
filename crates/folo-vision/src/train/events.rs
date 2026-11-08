@@ -53,6 +53,8 @@ pub(crate) struct Emitter {
     file: Option<std::io::BufWriter<std::fs::File>>,
     step_interval: Duration,
     last_step: Option<Instant>,
+    /// The run's length, `(epochs, steps_per_epoch)`, carried by every `status` event.
+    length: (u32, u64),
 }
 
 impl Emitter {
@@ -60,8 +62,9 @@ impl Emitter {
         sink: Option<EventSink>,
         file: Option<std::io::BufWriter<std::fs::File>>,
         step_interval: Duration,
+        length: (u32, u64),
     ) -> Self {
-        Emitter { sink, file, step_interval, last_step: None }
+        Emitter { sink, file, step_interval, last_step: None, length }
     }
 
     fn write(&mut self, e: &RunEvent) {
@@ -98,7 +101,8 @@ impl Emitter {
     }
 
     pub(crate) fn status(&mut self, status: RunStatus, error: Option<String>) {
-        self.emit(RunEvent::Status(StatusEvent { status, error }));
+        let (epochs, spe) = self.length;
+        self.emit(RunEvent::Status(StatusEvent::new(status, error).with_length(epochs, spe)));
     }
 
     pub(crate) fn log(&mut self, level: LogLevel, message: impl Into<String>) {

@@ -507,7 +507,7 @@ mod tests {
         stale.step = 5;
         store.apply(id, RunEvent::Step(stale));
         assert_eq!(store.run_data[id].ready().unwrap().derived().loss[3].len(), before + 1);
-        store.apply(id, RunEvent::Status(StatusEvent { status: RunStatus::Completed, error: None }));
+        store.apply(id, RunEvent::Status(StatusEvent::new(RunStatus::Completed, None)));
         assert_eq!(store.run(id).unwrap().status, RunStatus::Completed);
     }
 
@@ -522,6 +522,8 @@ mod tests {
             loss: loss(),
             imgs_per_s: 1.,
             eta_s: 1.,
+            steps_per_epoch: 10,
+            epochs: 3,
         };
         let epoch = |n: u32| Epoch {
             epoch: n,
@@ -552,7 +554,7 @@ mod tests {
         store.install_run_data(id, Ok(RunData::new(stale(), 10)));
         assert_eq!(store.run_data[id].ready().unwrap().metrics.steps.len(), 20);
         // Once the run ends, histories are taken as they are.
-        store.apply(id, RunEvent::Status(StatusEvent { status: RunStatus::Completed, error: None }));
+        store.apply(id, RunEvent::Status(StatusEvent::new(RunStatus::Completed, None)));
         store.run_data.insert(id.into(), Load::Loading);
         store.install_run_data(id, Ok(RunData::new(stale(), 10)));
         assert_eq!(store.run_data[id].ready().unwrap().metrics.steps.len(), 24);

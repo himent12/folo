@@ -783,6 +783,12 @@ pub struct Step {
     pub imgs_per_s: f32,
     /// Estimated seconds remaining.
     pub eta_s: f64,
+    /// Optimizer steps per epoch (`Run.steps_per_epoch`); 0 from servers that predate the field.
+    #[serde(default)]
+    pub steps_per_epoch: u64,
+    /// Total epochs of the run (`Run.epochs`); 0 from servers that predate the field.
+    #[serde(default)]
+    pub epochs: u32,
 }
 
 /// One finished epoch with validation (SSE `epoch`, and `/metrics` history).
@@ -885,6 +891,27 @@ pub struct StatusEvent {
     pub status: RunStatus,
     /// Error message when `failed`.
     pub error: Option<String>,
+    /// Optimizer steps per epoch (`Run.steps_per_epoch`): 0 while unknown (a run that has not been built yet) and
+    /// from servers that predate the field.
+    #[serde(default)]
+    pub steps_per_epoch: u64,
+    /// Total epochs of the run (`Run.epochs`); 0 from servers that predate the field.
+    #[serde(default)]
+    pub epochs: u32,
+}
+
+impl StatusEvent {
+    /// A status event with unknown run length (`steps_per_epoch` and `epochs` 0).
+    pub fn new(status: RunStatus, error: Option<String>) -> StatusEvent {
+        StatusEvent { status, error, steps_per_epoch: 0, epochs: 0 }
+    }
+
+    /// Sets the run's length.
+    pub fn with_length(mut self, epochs: u32, steps_per_epoch: u64) -> StatusEvent {
+        self.epochs = epochs;
+        self.steps_per_epoch = steps_per_epoch;
+        self
+    }
 }
 
 /// Log level.
@@ -1139,9 +1166,22 @@ mod tests {
 
     #[test]
     fn run_event_roundtrip() {
-        let ev = RunEvent::Status(StatusEvent { status: RunStatus::Running, error: None });
+        let ev = RunEvent::Status(StatusEvent::new(RunStatus::Running, None).with_length(100, 50));
         let back = RunEvent::from_sse(ev.name(), &ev.data_json()).unwrap().unwrap();
         assert_eq!(back, ev);
         assert!(RunEvent::from_sse("future", "{}").is_none());
+    }
+
+    #[test]
+    fn run_length_fields_default_for_older_servers() {
+        let s: StatusEvent = serde_json::from_str(r#"{"status":"running","error":null}"#).unwrap();
+        assert_eq!(s, StatusEvent::new(RunStatus::Running, None));
+        let step: Step = serde_json::from_str(
+            r#"{"epoch":1,"step":1,"lr":0.01,"loss":{"box":1,"cls":1,"dfl":1,"total":3},"imgs_per_s":1,"eta_s":5}"#,
+        )
+        .unwrap();
+        assert_eq!((step.steps_per_epoch, step.epochs), (0, 0));
+        let v = serde_json::to_value(StatusEvent::new(RunStatus::Queued, None).with_length(3, 7)).unwrap();
+        assert_eq!((v["epochs"].as_u64(), v["steps_per_epoch"].as_u64()), (Some(3), Some(7)));
     }
 }

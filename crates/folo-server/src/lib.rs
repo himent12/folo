@@ -35,6 +35,7 @@ use axum::response::{IntoResponse, Response};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tower_http::compression::CompressionLayer;
+use tower_http::compression::predicate::{DefaultPredicate, NotForContentType, Predicate};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
@@ -187,11 +188,17 @@ impl Server {
             Cors::Loopback => CorsLayer::new()
                 .allow_origin(AllowOrigin::predicate(|o, _| is_loopback_origin(o)))
                 .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
-                .allow_headers(tower_http::cors::Any),
+                .allow_headers(tower_http::cors::Any)
+                // Readable by page scripts (Studio caches downloaded weights by ETag).
+                .expose_headers([header::ETAG, header::CONTENT_DISPOSITION]),
         };
         let router = router
             .layer(axum::middleware::from_fn_with_state(opts.cors, guard_origin))
-            .layer(CompressionLayer::new())
+            // Weights files (`application/octet-stream`) are sent as they are: f32 / f16 tensors barely compress,
+            // and their Content-Length and strong ETag describe the file's own bytes.
+            .layer(CompressionLayer::new().compress_when(
+                DefaultPredicate::new().and(NotForContentType::const_new("application/octet-stream")),
+            ))
             .layer(cors)
             .layer(
                 TraceLayer::new_for_http()

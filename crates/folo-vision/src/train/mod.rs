@@ -398,7 +398,7 @@ impl Trainer {
             }
             None => None,
         };
-        let emitter = Emitter::new(opts.events, file, opts.step_interval);
+        let emitter = Emitter::new(opts.events, file, opts.step_interval, (cfg.epochs, nb as u64));
         Ok(Trainer {
             cfg,
             data,
@@ -772,6 +772,8 @@ impl Trainer {
                     loss: loss_json(&items),
                     imgs_per_s: (epoch_images as f64 / elapsed) as f32,
                     eta_s: self.eta(e, k, clock),
+                    steps_per_epoch: nb as u64,
+                    epochs: self.cfg.epochs,
                 };
                 self.emitter.step(RunEvent::Step(step), k + 1 == nb);
             }

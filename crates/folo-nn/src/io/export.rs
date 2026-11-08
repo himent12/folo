@@ -1,5 +1,7 @@
 //! Weights files and export: Conv+BN fusion in `F32`, then an optional `F16` cast (docs/FORMAT.md, Export).
 
+use std::collections::BTreeMap;
+use std::io::Write;
 use std::path::Path;
 
 use folo_core::{DType, Tensor};
@@ -74,14 +76,28 @@ fn bn_prefix(name: &str) -> Option<&str> {
     name.strip_suffix("bn.weight").filter(|p| p.ends_with('.'))
 }
 
+/// A file's header metadata and its tensors, ready to write.
+type Contents = (BTreeMap<String, String>, Vec<(String, Tensor)>);
+
 /// Write a weights file: `meta` (kind forced to `weights`, checkpoint-only keys dropped) and every tensor of
 /// `model` as it is. `folo.dtype` is set from the model's floating tensors.
 pub fn save_weights(path: impl AsRef<Path>, meta: &Metadata, model: &dyn Module) -> Result<()> {
+    let (m, tensors) = weights_contents(meta, model)?;
+    safetensors::write_file(path.as_ref(), Some(&m), &tensors)
+}
+
+/// [`save_weights`] to a writer (for example a `Vec<u8>`, to hold a `.folo` file in memory).
+pub fn write_weights(w: &mut dyn Write, meta: &Metadata, model: &dyn Module) -> Result<()> {
+    let (m, tensors) = weights_contents(meta, model)?;
+    safetensors::write(w, Some(&m), &tensors)
+}
+
+fn weights_contents(meta: &Metadata, model: &dyn Module) -> Result<Contents> {
     let tensors: Vec<(String, Tensor)> =
         model.named_tensors().into_iter().map(|t| (t.name, t.tensor)).collect();
     let mut m = meta.for_weights();
     m.dtype = float_dtype(&tensors)?;
-    safetensors::write_file(path.as_ref(), Some(&m.to_map()), &tensors)
+    Ok((m.to_map(), tensors))
 }
 
 fn float_dtype(tensors: &[(String, Tensor)]) -> Result<FloatDType> {
@@ -108,6 +124,22 @@ pub fn export_tensors(
     tensors: Vec<(String, Tensor)>,
     dtype: FloatDType,
 ) -> Result<()> {
+    let (m, tensors) = export_contents(meta, tensors, dtype)?;
+    safetensors::write_file(path.as_ref(), Some(&m), &tensors)
+}
+
+/// [`export_tensors`] to a writer.
+pub fn write_export(
+    w: &mut dyn Write,
+    meta: &Metadata,
+    tensors: Vec<(String, Tensor)>,
+    dtype: FloatDType,
+) -> Result<()> {
+    let (m, tensors) = export_contents(meta, tensors, dtype)?;
+    safetensors::write(w, Some(&m), &tensors)
+}
+
+fn export_contents(meta: &Metadata, tensors: Vec<(String, Tensor)>, dtype: FloatDType) -> Result<Contents> {
     let tensors = if meta.fused { tensors } else { fuse_bn_tensors(tensors, meta.config.bn_eps)? };
     let tensors = tensors
         .into_iter()
@@ -120,7 +152,7 @@ pub fn export_tensors(
     m.kind = FileKind::Weights;
     m.fused = true;
     m.dtype = dtype;
-    safetensors::write_file(path.as_ref(), Some(&m.to_map()), &tensors)
+    Ok((m.to_map(), tensors))
 }
 
 /// Export a module's current weights (see [`export_tensors`]).
@@ -154,6 +186,11 @@ impl ModelFile {
     /// keys are dropped.
     pub fn export(&self, path: impl AsRef<Path>, dtype: FloatDType) -> Result<()> {
         export_tensors(path, self.metadata(), self.inference_tensors()?, dtype)
+    }
+
+    /// [`ModelFile::export`] to a writer.
+    pub fn export_to(&self, w: &mut dyn Write, dtype: FloatDType) -> Result<()> {
+        write_export(w, self.metadata(), self.inference_tensors()?, dtype)
     }
 
     /// [`ModelFile::load`] with strict inference options (the common case for prediction).

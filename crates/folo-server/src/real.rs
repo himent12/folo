@@ -15,6 +15,7 @@
 //! - `models/`: `.folo` files listed as models (scanned on every listing).
 //! - `exports/`: `POST /api/models/{id}/export` output.
 //! - `cache/eval/<model id>.json`: cached `/eval` results (`POST /api/val` is computed on every request).
+//! - `cache/weights/<model id>.<hash>.f16.folo`: f16 exports served by `GET /api/models/{id}/weights?format=f16`.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
@@ -34,7 +35,10 @@ use crate::error::{Error, Result};
 use crate::index::{Fingerprint, INDEX_VERSION, Index, absolute, data_error, read_image_with, write_atomic};
 use crate::models::{ModelRef, Models, model_of};
 use crate::runs::{DatasetRef, Runs, run_model_id};
-use crate::store::{ImageData, ImageQuery, IssueQuery, PredictInput, PredictSource, Store, Subscription};
+use crate::store::{
+    ImageData, ImageQuery, IssueQuery, PredictInput, PredictSource, Store, Subscription, Weights,
+    WeightsFormat, weights_file_name,
+};
 use crate::util::{fnv1a, rfc3339, unique_id, unix_now};
 
 /// How often a dataset's files are re-checked for changes (on `GET /api/datasets/{id}` and image listings).
@@ -753,6 +757,15 @@ impl Store for RealStore {
         self.models.export(&m, format)
     }
 
+    fn model_weights(&self, id: &str, format: WeightsFormat) -> Result<Weights> {
+        let m = self.model(id)?;
+        let path = match format {
+            WeightsFormat::Stored => m.path.clone(),
+            WeightsFormat::F16 => self.models.f16_weights(&m)?,
+        };
+        Weights::open(&path, id, weights_file_name(&m.model.name, format))
+    }
+
     fn list_runs(&self) -> Result<Vec<Run>> {
         Ok(self.runs.list())
     }
@@ -800,8 +813,10 @@ impl Store for RealStore {
         let dir = self.runs.delete(id)?;
         for (last, f) in [(false, "best.folo"), (true, "last.folo")] {
             self.predictors.forget(&dir.join("weights").join(f));
-            let cached = format!("{}.json", run_model_id(id, last));
-            let _ = std::fs::remove_file(self.data_dir.join("cache").join("eval").join(cached));
+            let model = run_model_id(id, last);
+            let _ =
+                std::fs::remove_file(self.data_dir.join("cache").join("eval").join(format!("{model}.json")));
+            self.models.forget_weights(&model, None);
         }
         Ok(())
     }

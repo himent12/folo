@@ -100,7 +100,9 @@ is reproducible everywhere. Head priors (MODEL.md §6.5): `BOX_BIAS_PRIOR = 2.0`
   stepping is bit-identical to never having stopped (tested).
 - Export: `ModelFile::export(path, F32 | F16)` takes the EMA (or model) tensors, fuses Conv+BN in `F32`
   (`fuse_bn_tensors`), optionally casts to `F16`, and writes a fused `weights` file. `save_weights`,
-  `export_module` and `export_tensors` do the same from in-memory modules and tensor lists.
+  `export_module` and `export_tensors` do the same from in-memory modules and tensor lists. `write_weights`,
+  `write_export` and `ModelFile::export_to` write the same bytes to any `io::Write` (a `.folo` file held in
+  memory, e.g. the mock server's weights).
 
 ## Example
 See the crate docs (`cargo doc -p folo-nn --open`): a two-block model with SGD, the schedule, gradient
