@@ -14,7 +14,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
 const onlyIdx = args.indexOf('--only');
 const only = onlyIdx >= 0 ? args[onlyIdx + 1] : undefined;
-const round = args.find((a, i) => !a.startsWith("--") && (onlyIdx < 0 || i !== onlyIdx + 1)) ?? new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-');
+const round = args.find((a, i) => !a.startsWith('--') && (onlyIdx < 0 || i !== onlyIdx + 1)) ?? new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-');
 const outDir = resolve(root, 'shots', round);
 
 const VIEWPORTS = {
@@ -44,7 +44,7 @@ try {
         const context = await browser.newContext({
           viewport: VIEWPORTS[vp],
           deviceScaleFactor: vp === 'mobile' ? 2 : 1,
-          colorScheme: theme,
+          colorScheme: theme === 'light' ? 'light' : 'dark',
           reducedMotion: 'reduce',
         });
         const page = await context.newPage();
