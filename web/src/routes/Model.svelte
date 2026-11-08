@@ -130,7 +130,7 @@
       </Panel>
       <Panel title="Confusion matrix" meta={cm?.partial ? `top ${CM_MAX} of ${m.classes.length} classes` : undefined} id="cm">
         {#if cm}
-          <ConfusionMatrix classes={cm.classes} matrix={cm.matrix} label="Confusion matrix of {m.name}" />
+          <ConfusionMatrix classes={cm.classes} matrix={cm.matrix} label="Confusion matrix of {m.name}" sparseLabels />
         {:else if evaluation.error}
           <p class="foot">No evaluation available.</p>
         {:else}

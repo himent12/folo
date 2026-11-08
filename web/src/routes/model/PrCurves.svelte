@@ -4,6 +4,9 @@
   import LineChart, { type Series } from '$lib/charts/LineChart.svelte';
   import { classInk } from '$lib/design/classInk.svelte';
   import { metric } from '$lib/format';
+  import Input from '$lib/ui/Input.svelte';
+  import Search from '@lucide/svelte/icons/search';
+  import { matchesClass, trimPrTail } from './pr';
 
   let { classes, ev, map50 }: { classes: readonly string[]; ev: Evaluation; map50: number | null } = $props();
 
@@ -33,11 +36,15 @@
     picked = next;
   }
 
+  // Curves end at their last recall point with precision > 0; the zero padding up to recall 1 is not data.
   const series = $derived<Series[]>([
-    ...[...shown]
-      .sort((a, b) => a - b)
-      .map((i) => ({ id: `c${i}`, label: classes[i] ?? `class ${i}`, color: lineColor(i), points: ev.curves[i] ?? [] })),
-    { id: 'mean', label: 'all classes', color: 'var(--text-primary)', points: ev.mean, emphasis: true },
+    ...[...shown].sort((a, b) => a - b).map((i) => ({
+      id: `c${i}`,
+      label: classes[i] ?? `class ${i}`,
+      color: lineColor(i),
+      points: trimPrTail(ev.curves[i] ?? []),
+    })),
+    { id: 'mean', label: 'all classes', color: 'var(--text-primary)', points: trimPrTail(ev.mean), emphasis: true },
   ]);
 
   const meanAp = $derived(map50 ?? ev.perClass.reduce((a, c) => a + c.ap50, 0) / Math.max(1, ev.perClass.length));
@@ -45,6 +52,10 @@
   const order = $derived(
     ev.perClass.map((c) => c).sort((a, b) => (classes.length <= 10 ? b.ap50 - a.ap50 : b.instances - a.instances)),
   );
+  // Many classes: a filter to find one in the list.
+  const many = $derived(classes.length > 10);
+  let query = $state('');
+  const listed = $derived(order.filter((c) => matchesClass(classes[c.class] ?? '', query)));
 </script>
 
 <div class="wrap">
@@ -69,20 +80,29 @@
     </div>
 
     <div class="side">
-      <div class="side-head">
-        <span class="overline">Classes</span>
-        <span class="side-actions">
-          <button type="button" onclick={() => (picked = new Set(classes.map((_, i) => i)))}>All</button>
+      <div class="side-tools">
+        <span class="count" aria-live="polite"><span class="num">{shown.size}</span> of <span class="num">{classes.length}</span> classes</span>
+        <span class="side-actions" role="group" aria-label="Show classes">
+          <button type="button" onclick={() => (picked = new Set(classes.map((_, i) => i)))}>Show all</button>
           <button type="button" onclick={() => (picked = new Set())}>None</button>
         </span>
+      </div>
+      {#if many}
+        <div class="filter">
+          <Input bind:value={query} icon={Search} size="sm" type="search" placeholder="Find a class" aria-label="Find a class" />
+        </div>
+      {/if}
+      <div class="cols" aria-hidden="true">
+        <span>Class</span>
+        <span>AP50</span>
       </div>
       <div class="mean">
         <span class="swatch mean-swatch" aria-hidden="true"></span>
         <span class="name">all classes</span>
         <span class="ap num">{metric(meanAp)}</span>
       </div>
-      <ul class="list" aria-label="Classes shown on the chart">
-        {#each order as c (c.class)}
+      <ul class="list" aria-label="Classes shown on the chart, with AP50">
+        {#each listed as c (c.class)}
           {@const on = shown.has(c.class)}
           <li>
             <button type="button" class:on aria-pressed={on} onclick={() => toggle(c.class)}>
@@ -91,6 +111,8 @@
               <span class="ap num">{metric(c.ap50)}</span>
             </button>
           </li>
+        {:else}
+          <li class="none">No class matches “{query.trim()}”</li>
         {/each}
       </ul>
     </div>
@@ -171,16 +193,40 @@
     min-width: 0;
     max-height: 350px;
   }
-  .side-head {
+  .side-tools {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    height: 24px;
-    padding: 0 var(--space-2);
+    gap: var(--space-2);
+    min-height: 24px;
+    padding-left: var(--space-2);
+    font-size: var(--type-xs-size);
+    color: var(--text-tertiary);
+  }
+  .count {
+    white-space: nowrap;
+  }
+  .count .num {
+    color: var(--text-secondary);
   }
   .side-actions {
     display: flex;
     gap: 2px;
+  }
+  .filter {
+    padding: var(--space-2) 0 var(--space-1);
+  }
+  .cols {
+    display: flex;
+    justify-content: space-between;
+    padding: var(--space-2) var(--space-2) var(--space-1);
+    font-size: var(--type-xs-size);
+    color: var(--text-tertiary);
+  }
+  .none {
+    padding: var(--space-2);
+    font-size: var(--type-sm-size);
+    color: var(--text-tertiary);
   }
   .side-actions button {
     height: 20px;

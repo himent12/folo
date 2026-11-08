@@ -9,11 +9,17 @@
     classes,
     matrix,
     label = 'Confusion matrix',
+    sparseLabels = false,
   }: {
     classes: string[];
     /** (n+1)×(n+1) counts; the last row/column is background. */
     matrix: number[][];
     label?: string;
+    /**
+     * Label only cells of at least 10 % that are at least 32 px wide, so dense matrices don't run numerals together;
+     * the readout still gives every value on hover or focus.
+     */
+    sparseLabels?: boolean;
   } = $props();
 
   const uid = $props.id();
@@ -48,7 +54,7 @@
 </script>
 
 <!-- svelte-ignore a11y_interactive_supports_focus -->
-<div class="cm" style:--n={n} role="grid" aria-label={label} aria-describedby="{uid}-readout" bind:this={root} {onkeydown}>
+<div class="cm" class:sparse={sparseLabels} style:--n={n} role="grid" aria-label={label} aria-describedby="{uid}-readout" bind:this={root} {onkeydown}>
   <div class="row" role="row">
     <div class="corner" role="columnheader"><span>true ↓ / pred →</span></div>
     {#each names as name, c (c)}
@@ -83,7 +89,7 @@
           onclick={() => (hovered = pinned = { r, c })}
           onkeydown={() => {}}
         >
-          {#if v >= 0.005}<span class:light={v > 0.55}>{(v * 100).toFixed(v >= 0.1 ? 0 : 1)}</span>{/if}
+          {#if v >= (sparseLabels ? 0.1 : 0.005)}<span class:light={v > 0.55}>{(v * 100).toFixed(v >= 0.1 ? 0 : 1)}</span>{/if}
         </div>
       {/each}
     </div>
@@ -97,7 +103,7 @@
     <span class="mono">{(rowSums[h.r] ?? 0).toLocaleString('en-US')}</span>
     (<span class="mono">{(norm(h.r, h.c) * 100).toFixed(1)}%</span>)
   {:else}
-    Row-normalised, in %. Hover, tap or arrow through the cells for counts.
+    Row-normalised, in %{sparseLabels ? '; cells under 10 % unlabelled' : ''}. Hover, tap or arrow through the cells for counts.
   {/if}
 </p>
 
@@ -167,6 +173,15 @@
     color: var(--text-secondary);
     transition: box-shadow var(--dur-fast) var(--ease-standard);
     min-width: 22px;
+  }
+  /* Each cell is a size container so a label can hide itself when its cell is too narrow to hold it. */
+  .sparse .cell {
+    container-type: inline-size;
+  }
+  @container (max-width: 31.98px) {
+    .sparse .cell span {
+      display: none;
+    }
   }
   .cell.hl {
     box-shadow: inset 0 0 0 1px var(--line-strong);

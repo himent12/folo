@@ -33,8 +33,8 @@
   const name = (i: number) =>
     binLabel ? binLabel(edges[i] ?? 0, edges[i + 1] ?? 0, i) : `${edges[i]}–${edges[i + 1]}`;
   const total = $derived(counts.reduce((a, b) => a + b, 0));
-  // One notation per axis: all ticks in thousands once the axis reaches 1,000.
-  const tickFmt = (v: number) => ((y.domain()[1] ?? 0) >= 1000 ? `${+(v / 1000).toFixed(1)}k` : String(v));
+  // One notation per axis: all ticks in thousands once the axis reaches 1,000; zero is always plain "0".
+  const tickFmt = (v: number) => (v !== 0 && (y.domain()[1] ?? 0) >= 1000 ? `${+(v / 1000).toFixed(1)}k` : String(v));
 </script>
 
 <div class="hist" bind:clientWidth={width} style:height="{height}px">

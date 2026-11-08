@@ -152,10 +152,14 @@
       el.style.setProperty('--fade-l', el.scrollLeft > 1 ? '24px' : '0px');
       el.style.setProperty('--fade-r', el.scrollLeft < max - 1 ? '24px' : '0px');
     };
-    // Start with the active chip in view (a linked ?class= can point past the fold).
+    // Start at the beginning; scroll only when the active chip (a linked ?class=) is off-screen, and then just far
+    // enough to show it clear of the right fade.
+    el.scrollLeft = 0;
     const on = el.querySelector<HTMLElement>('[aria-pressed="true"]');
-    const left = on ? on.getBoundingClientRect().left - el.getBoundingClientRect().left : 0;
-    if (on && left + on.offsetWidth > el.clientWidth) el.scrollLeft += left - el.clientWidth / 3;
+    if (on) {
+      const right = on.getBoundingClientRect().right - el.getBoundingClientRect().left;
+      if (right > el.clientWidth) el.scrollLeft = right - el.clientWidth + 32;
+    }
     update();
     el.addEventListener('scroll', update, { passive: true });
     const ro = new ResizeObserver(update);
@@ -437,10 +441,13 @@
     color: var(--text-primary);
     border-color: var(--line-strong);
   }
+  /* Selected is neutral (lime is for the primary action, focus and live state): a raised fill and a stronger
+     edge (1.5 px via the inset ring, so the chip doesn't change size). */
   .toggle[aria-pressed='true'],
   .chip[aria-pressed='true'] {
-    background: var(--bg-selected);
-    border-color: var(--accent-line);
+    background: var(--bg-raised);
+    border-color: var(--line-strong);
+    box-shadow: inset 0 0 0 0.5px var(--line-strong);
     color: var(--text-primary);
   }
   .chips {
