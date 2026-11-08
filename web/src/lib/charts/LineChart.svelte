@@ -491,8 +491,8 @@
     gap: 6px;
   }
   .legend .note {
-    /* Fixed width so the readout does not shift the legend as the cursor moves. */
-    min-width: 6.5em;
+    /* Fixed width so the readout does not shift the legend as the cursor moves (phones wrap instead). */
+    min-width: min(6.5em, 100%);
     color: var(--text-tertiary);
     font-variant-numeric: tabular-nums;
   }

@@ -7,7 +7,6 @@
   import RotateCw from '@lucide/svelte/icons/rotate-cw';
   import Settings from '@lucide/svelte/icons/settings';
   import WifiOff from '@lucide/svelte/icons/wifi-off';
-  import ScanSearch from '@lucide/svelte/icons/scan-search';
   import { ApiError } from '$lib/api/client';
   import { hub } from '$lib/api/index.svelte';
   import { Resource } from '$lib/api/resource.svelte';
@@ -19,7 +18,6 @@
   import { href, router } from '$lib/router.svelte';
   import Page from '$lib/shell/Page.svelte';
   import { setCrumbs } from '$lib/shell/crumbs.svelte';
-  import Badge from '$lib/ui/Badge.svelte';
   import Button from '$lib/ui/Button.svelte';
   import EmptyState from '$lib/ui/EmptyState.svelte';
   import ErrorState from '$lib/ui/ErrorState.svelte';
@@ -28,7 +26,6 @@
   import Skeleton from '$lib/ui/Skeleton.svelte';
   import StatusBadge from '$lib/ui/StatusBadge.svelte';
   import LiveRunCard from './overview/LiveRunCard.svelte';
-  import SystemCard from './overview/SystemCard.svelte';
 
   setCrumbs({ label: 'Overview' });
 
@@ -75,15 +72,6 @@
 </script>
 
 <Page title="Overview">
-  {#snippet sub()}
-    {#if !offline}<span>
-      {#if hub.mode === 'live'}Connected to <span class="mono">folo serve {hub.version}</span>{:else if hub.mode === 'mock'}{#if runs.data && !fresh}Showing built-in demo data{/if}{:else}Connecting…{/if}
-    </span>{/if}
-  {/snippet}
-  {#snippet actions()}
-    <Button icon={Images} href={href('/datasets')}>Datasets</Button>
-    <Button icon={ScanSearch} href={href('/playground')}>Playground</Button>
-  {/snippet}
 
   {#if offline}
     <section class="offline" role="alert">
@@ -126,35 +114,35 @@
       </ol>
     </section>
   {:else}
+    <div class="live">
+      {#if runs.error && !runs.data}
+        <Panel title="Training"><ErrorState error={runs.error} retry={() => runs.refresh()} compact /></Panel>
+      {:else if !runs.data}
+        <!-- The live card's frame (header, stat column, two charts), so nothing jumps when it arrives. -->
+        <div class="live-sk" aria-busy="true" aria-label="Loading training">
+          <div class="lsk-head"><Skeleton w="72px" h="20px" r="var(--radius-full)" /><Skeleton w="180px" h="20px" /><Skeleton w="min(360px, 70%)" h="14px" /></div>
+          <div class="lsk-body">
+            <div class="lsk-stats"><Skeleton w="96px" h="40px" /><Skeleton h="4px" /><div class="lsk-grid">{#each [0, 1, 2, 3] as i (i)}<Skeleton h="44px" />{/each}</div></div>
+            <Skeleton h="174px" r="var(--radius-md)" />
+            <Skeleton h="174px" r="var(--radius-md)" />
+          </div>
+        </div>
+      {:else if live}
+        {#key live.id}<LiveRunCard run={live} dataset={dsById.get(live.config.dataset_id)} />{/key}
+      {:else}
+        <Panel title="Training">
+          <EmptyState
+            icon={Activity}
+            title="Nothing is training"
+            description={runs.data.length ? 'Start a run to watch its loss, mAP and samples update live here.' : 'Train your first detector: pick a dataset, a model size and go.'}
+          >
+            {#snippet actions()}<Button variant="primary" icon={Plus} href={href('/runs/new')}>New run</Button>{/snippet}
+          </EmptyState>
+        </Panel>
+      {/if}
+    </div>
   <div class="cols">
     <div class="col-main">
-      <div class="live">
-        {#if runs.error && !runs.data}
-          <Panel title="Training"><ErrorState error={runs.error} retry={() => runs.refresh()} compact /></Panel>
-        {:else if !runs.data}
-          <!-- The live card's frame (header, stat column, two charts), so nothing jumps when it arrives. -->
-          <div class="live-sk" aria-busy="true" aria-label="Loading training">
-            <div class="lsk-head"><Skeleton w="72px" h="20px" r="var(--radius-full)" /><Skeleton w="180px" h="20px" /><Skeleton w="min(360px, 70%)" h="14px" /></div>
-            <div class="lsk-body">
-              <div class="lsk-stats"><Skeleton w="96px" h="40px" /><Skeleton h="4px" /><div class="lsk-grid">{#each [0, 1, 2, 3] as i (i)}<Skeleton h="44px" />{/each}</div></div>
-              <Skeleton h="174px" r="var(--radius-md)" />
-              <Skeleton h="174px" r="var(--radius-md)" />
-            </div>
-          </div>
-        {:else if live}
-          {#key live.id}<LiveRunCard run={live} dataset={dsById.get(live.config.dataset_id)} />{/key}
-        {:else}
-          <Panel title="Training">
-            <EmptyState
-              icon={Activity}
-              title="Nothing is training"
-              description={runs.data.length ? 'Start a run to watch its loss, mAP and samples update live here.' : 'Train your first detector: pick a dataset, a model size and go.'}
-            >
-              {#snippet actions()}<Button variant="primary" icon={Plus} href={href('/runs/new')}>New run</Button>{/snippet}
-            </EmptyState>
-          </Panel>
-        {/if}
-      </div>
       <Panel title="Recent runs" meta={runs.data ? `${recent.length} of ${runs.data.length}` : undefined} pad="none" id="recent-runs">
         {#snippet actions()}<Button size="sm" variant="ghost" iconRight={ArrowRight} href={href('/runs')}>All runs</Button>{/snippet}
         {#if runs.error && !runs.data}
@@ -205,7 +193,6 @@
       </Panel>
     </div>
     <div class="col-side">
-      <SystemCard />
       <Panel title="Best model per dataset" pad="none" id="best-models">
         {#snippet actions()}<Button size="sm" variant="ghost" iconRight={ArrowRight} href={href('/models')}>All models</Button>{/snippet}
         {#if models.error && !models.data}
@@ -234,39 +221,33 @@
           </ul>
         {/if}
       </Panel>
+      <Panel title="Datasets" meta={datasets.data ? String(datasets.data.length) : undefined} pad="none" id="datasets">
+        {#snippet actions()}<Button size="sm" variant="ghost" iconRight={ArrowRight} href={href('/datasets')}>All datasets</Button>{/snippet}
+        {#if datasets.error && !datasets.data}
+          <ErrorState error={datasets.error} retry={() => datasets.refresh()} compact />
+        {:else if !datasets.data}
+          <div class="list-sk">{#each [0, 1, 2] as i (i)}<Skeleton h="20px" />{/each}</div>
+        {:else if datasets.data.length === 0}
+          <EmptyState compact icon={Images} title="No datasets registered" description="Register a YOLO or COCO folder, or generate a synthetic shapes set." />
+        {:else}
+          <ul class="dslist">
+            {#each datasets.data.slice(0, 4) as d (d.id)}
+              <li>
+                <a href={href(`/datasets/${d.id}`)}>
+                  <span class="d-row">
+                    <span class="d-name truncate">{d.name}</span>
+                    <span class="d-nums num">{compact(total(d))} images · {d.classes.length} classes</span>
+                  </span>
+                  {#if d.stats}<ClassStrip counts={d.stats.class_counts} classes={d.classes} height={4} />{/if}
+                </a>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      </Panel>
     </div>
   </div>
 
-  <Panel title="Datasets" meta={datasets.data ? String(datasets.data.length) : undefined} id="datasets">
-    {#snippet actions()}<Button size="sm" variant="ghost" iconRight={ArrowRight} href={href('/datasets')}>All datasets</Button>{/snippet}
-    {#if datasets.error && !datasets.data}
-      <ErrorState error={datasets.error} retry={() => datasets.refresh()} compact />
-    {:else if !datasets.data}
-      <div class="ds-grid">{#each [0, 1, 2] as i (i)}<Skeleton h="118px" r="var(--radius-lg)" />{/each}</div>
-    {:else if datasets.data.length === 0}
-      <EmptyState compact icon={Images} title="No datasets registered" description="Register a YOLO or COCO folder, or generate a synthetic shapes set to try FOLO in a minute.">
-        {#snippet actions()}<Button icon={Plus} href={href('/datasets')}>Add dataset</Button>{/snippet}
-      </EmptyState>
-    {:else}
-      <div class="ds-grid">
-        {#each datasets.data.slice(0, 3) as d (d.id)}
-          <a class="ds" href={href(`/datasets/${d.id}`)}>
-            <span class="ds-top">
-              <span class="ds-name">{d.name}</span>
-              <Badge tone="outline" mono>{d.format}</Badge>
-            </span>
-            <span class="ds-nums num">
-              <span><b>{compact(total(d))}</b> images</span>
-              <span><b>{d.classes.length}</b> classes</span>
-              {#if d.stats}<span><b>{compact(d.stats.boxes)}</b> boxes</span>{/if}
-            </span>
-            {#if d.stats}<ClassStrip counts={d.stats.class_counts} classes={d.classes} />{/if}
-            <span class="ds-classes">{d.classes.slice(0, 5).join(', ')}{#if d.classes.length > 5}<span class="more"> +{d.classes.length - 5}</span>{/if}</span>
-          </a>
-        {/each}
-      </div>
-    {/if}
-  </Panel>
   {/if}
 </Page>
 
@@ -509,11 +490,7 @@
     font-weight: var(--weight-medium);
   }
   .m-ds {
-    font-size: var(--type-micro-size);
-    line-height: var(--type-micro-line);
-    letter-spacing: var(--type-micro-tracking);
-    text-transform: uppercase;
-    font-weight: var(--weight-medium);
+    font-size: var(--type-sm-size);
     color: var(--text-tertiary);
   }
   .m-sub {
@@ -531,58 +508,39 @@
     font-size: var(--type-micro-size);
     color: var(--text-tertiary);
   }
-  .ds-grid {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: var(--space-4);
+  .dslist {
+    padding: 0 var(--space-2) var(--space-2);
   }
-  .ds {
+  .dslist a {
     display: grid;
-    gap: var(--space-3);
-    padding: var(--space-4);
+    gap: 6px;
+    padding: var(--space-2);
     border-radius: var(--radius-md);
-    background: var(--bg-raised);
-    border: 1px solid var(--line-subtle);
-    transition: border-color var(--dur-fast) var(--ease-standard);
+    transition: background-color var(--dur-fast) var(--ease-standard);
   }
-  :global([data-theme='light']) .ds {
-    border-color: var(--line-default);
+  .dslist a:hover {
+    background: var(--bg-hover);
   }
-  .ds:hover {
-    border-color: var(--line-strong);
-  }
-  .ds-top {
+  .d-row {
     display: flex;
-    align-items: center;
+    align-items: baseline;
     justify-content: space-between;
-    gap: var(--space-2);
+    gap: var(--space-3);
+    min-width: 0;
   }
-  .ds-name {
+  .d-name {
     font-weight: var(--weight-medium);
-    font-size: var(--type-md-size);
   }
-  .ds-nums {
-    display: flex;
-    gap: var(--space-4);
-    color: var(--text-tertiary);
+  .d-nums {
+    flex-shrink: 0;
     font-size: var(--type-sm-size);
-  }
-  .ds-nums b {
-    color: var(--text-primary);
-    font-weight: var(--weight-medium);
-  }
-  .ds-classes .more {
-    color: var(--text-secondary);
-  }
-  .ds-classes {
-    font-size: var(--type-xs-size);
     color: var(--text-tertiary);
   }
   @media (max-width: 1199px) {
     .cols {
       grid-template-columns: minmax(0, 1fr);
     }
-    /* Laptop: System and Best models side by side under the main column. */
+    /* Laptop: the rail's two lists side by side under the main column. */
     .col-side {
       grid-template-columns: repeat(2, minmax(0, 1fr));
       align-items: start;
@@ -593,15 +551,7 @@
       grid-template-columns: minmax(0, 1fr);
     }
   }
-  @media (max-width: 1023px) {
-    .ds-grid {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
-  }
   @media (max-width: 767px) {
-    .ds-grid {
-      grid-template-columns: minmax(0, 1fr);
-    }
     .hide-sm {
       display: none;
     }

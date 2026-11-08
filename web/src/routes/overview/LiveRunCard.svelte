@@ -2,10 +2,12 @@
   import ArrowRight from '@lucide/svelte/icons/arrow-right';
   import { LiveRun } from '$lib/api/live.svelte';
   import type { Dataset, Run } from '$lib/api/types';
-  import { smooth } from '$lib/charts/downsample';
   import LineChart from '$lib/charts/LineChart.svelte';
   import { runHorizon } from '$lib/charts/horizon';
-  import { duration, lr, metric, num } from '$lib/format';
+  import { hub } from '$lib/api/index.svelte';
+  import { Resource } from '$lib/api/resource.svelte';
+  import { bytes, duration, lr, metric, num, pct } from '$lib/format';
+  import { prefs } from '$lib/prefs.svelte';
   import { href } from '$lib/router.svelte';
   import Button from '$lib/ui/Button.svelte';
   import Progress from '$lib/ui/Progress.svelte';
@@ -23,18 +25,11 @@
 
   const charts = $derived.by(() => {
     void live.version;
-    const spe = Math.max(1, run.steps_per_epoch);
-    const raw = live.steps.map((s) => ({ x: s.step / spe, y: s.loss.total }));
     return {
       map: [
         // One run, so ink rather than a hue (hue identifies entities): primary metric solid, secondary tertiary dashed.
         { id: 'm95', label: 'mAP50-95', color: 'var(--text-primary)', area: true, points: live.epochs.map((e) => ({ x: e.epoch + 1, y: e.val.map50_95 })) },
         { id: 'm50', label: 'mAP50', color: 'var(--text-tertiary)', pattern: 'dash' as const, points: live.epochs.map((e) => ({ x: e.epoch + 1, y: e.val.map50 })) },
-      ],
-      loss: [
-        // Same mapping as the run page: total loss is the primary ink, components get the series hues.
-        { id: 'raw', label: 'raw', color: 'var(--text-primary)', ghost: true, points: raw },
-        { id: 'loss', label: 'Total loss (EMA 0.9)', color: 'var(--text-primary)', points: smooth(raw, 0.9) },
       ],
       lastStep: live.steps[live.steps.length - 1],
     };
@@ -45,6 +40,17 @@
     return runHorizon(Math.max(live.epochs.length, run.step / Math.max(1, run.steps_per_epoch)), run.epochs, true, 'observed');
   });
   const progress = $derived(run.step / Math.max(1, run.steps_per_epoch * run.epochs));
+
+  // The device this run is using, live: one meta line instead of a separate system panel.
+  const sys = new Resource((s) => hub.api.system(s), { poll: 2000 });
+  const gpu = $derived(sys.data?.gpus[0]);
+  const deviceLine = $derived.by(() => {
+    const name = (gpu?.name ?? run.device).replace('NVIDIA GeForce ', '');
+    if (!gpu || !sys.data) return name;
+    const util = gpu.util === null ? null : `${pct(gpu.util, 0)} busy`;
+    const mem = `${bytes(sys.data.memory.used_bytes, prefs.units)} / ${bytes(sys.data.memory.total_bytes, prefs.units)} RAM`;
+    return [name, util, mem].filter(Boolean).join(' · ');
+  });
 </script>
 
 <section class="card" aria-labelledby="live-title">
@@ -57,7 +63,7 @@
       <span>{dataset?.name ?? run.config.dataset_id}</span><span class="sep">·</span>
       <span class="mono">{run.config.arch}</span><span class="sep">·</span>
       <span>{run.config.imgsz} px · batch {run.config.batch}</span><span class="sep">·</span>
-      <span class="truncate">{run.device}</span>
+      <span class="truncate num">{deviceLine}</span>
     </p>
     <div class="cta"><Button size="sm" variant="ghost" iconRight={ArrowRight} href={href(`/runs/${run.id}`)}>Open run</Button></div>
   </header>
@@ -80,37 +86,20 @@
       </div>
     </div>
     <div class="chart">
-      <p class="chart-title">Validation mAP</p>
+      <p class="chart-title">Validation mAP <span class="faint">by epoch</span></p>
       {#if live.loading}
-        <Skeleton h="150px" r="var(--radius-md)" />
+        <Skeleton h="200px" r="var(--radius-md)" />
       {:else}
         <LineChart
           series={charts.map}
-          height={150}
+          height={200}
           xDomain={horizon}
           valueFormat={(v) => v.toFixed(3)}
           xTitle={(x) => `Epoch ${Math.round(x)}`}
           curve="monotone"
-          bind:cursor
+          legendNote="Latest"
           label="Validation mAP by epoch"
           empty="Waiting for the first validation…"
-        />
-      {/if}
-    </div>
-    <div class="chart">
-      <p class="chart-title">Training loss <span class="faint">· EMA 0.9</span></p>
-      {#if live.loading}
-        <Skeleton h="150px" r="var(--radius-md)" />
-      {:else}
-        <LineChart
-          series={charts.loss}
-          height={150}
-          xDomain={horizon}
-          valueFormat={(v) => v.toFixed(3)}
-          xTitle={(x) => `Epoch ${x.toFixed(1)}`}
-          bind:cursor
-          label="Training loss by epoch"
-          legend={false}
         />
       {/if}
     </div>
@@ -181,7 +170,7 @@
   }
   .body {
     display: grid;
-    grid-template-columns: minmax(220px, 260px) 1fr 1fr;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 2fr);
     gap: var(--space-5);
     padding: var(--space-2) var(--space-5) var(--space-5);
   }
@@ -212,16 +201,19 @@
     align-content: start;
   }
   .chart-title {
-    font-size: var(--type-xs-size);
-    color: var(--text-tertiary);
+    font-size: var(--type-md-size);
+    line-height: var(--type-md-line);
     font-weight: var(--weight-medium);
   }
-  @media (max-width: 1199px) {
+  .chart-title .faint {
+    font-size: var(--type-sm-size);
+    font-weight: var(--weight-regular);
+  }
+  @media (max-width: 1023px) {
     .body {
-      grid-template-columns: 1fr 1fr;
+      grid-template-columns: minmax(0, 1fr);
     }
     .stats {
-      grid-column: 1 / -1;
       grid-template-columns: minmax(200px, 1fr) 2fr;
       align-items: start;
     }
