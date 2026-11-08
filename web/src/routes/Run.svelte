@@ -213,12 +213,12 @@
         <span class="val num">{metric(run.best?.map50_95)}</span>
         <span class="small">{run.best ? `epoch ${run.best.epoch + 1}` : '—'}</span>
       </div>
-      <div class="cell">
+      <div class="cell tablet-up">
         <span class="label">mAP50</span>
         <span class="val num">{metric(lastEpoch?.val.map50)}</span>
         <span class="small">last epoch</span>
       </div>
-      <div class="cell">
+      <div class="cell tablet-up">
         <span class="label">Precision · Recall</span>
         <span class="val num">{num(lastEpoch?.val.precision, 2)} <span class="dim">·</span> {num(lastEpoch?.val.recall, 2)}</span>
         <span class="small">last epoch</span>
@@ -539,8 +539,29 @@
     .cell:nth-child(odd):not(.main) {
       border-left: 1px solid var(--line-subtle);
     }
-    .cell.secondary {
+    .cell.secondary,
+    .cell.tablet-up {
       display: none;
+    }
+    /* One compact progress row: count on the left, bar and status on the right. */
+    .cell.main {
+      grid-template-columns: auto minmax(0, 1fr);
+      grid-template-rows: auto auto;
+      align-items: center;
+      column-gap: var(--space-4);
+      row-gap: 4px;
+    }
+    .cell.main .label {
+      display: none;
+    }
+    .cell.main .big {
+      grid-row: 1 / span 2;
+    }
+    .cell.main .track {
+      align-self: end;
+    }
+    .cell.main .small {
+      align-self: start;
     }
     .big {
       font-size: var(--type-xl-size);
