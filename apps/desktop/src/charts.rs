@@ -281,6 +281,13 @@ pub fn format_step(v: f32, step: f32) -> String {
     format!("{v:.d$}")
 }
 
+/// The power of ten a y axis over `y0..y1` with `ticks` ticks shows once, if its values are tiny
+/// (tick step under 0.01). Legends of that chart format their values in the same power.
+pub fn axis_pow(y0: f32, y1: f32, ticks: usize) -> Option<i32> {
+    let step = nice_step(y1 - y0, ticks);
+    (step > 0. && step < 0.01).then(|| step.log10().floor() as i32)
+}
+
 /// An exponent in superscript digits ("-3" → "⁻³").
 pub fn superscript(p: i32) -> String {
     p.to_string()
@@ -299,15 +306,6 @@ pub fn superscript(p: i32) -> String {
             _ => '⁹',
         })
         .collect()
-}
-
-/// A small value with three significant figures and a power of ten ("6.58 × 10⁻³").
-pub fn sci3(v: f32) -> String {
-    if v == 0. || !v.is_finite() {
-        return format!("{v}");
-    }
-    let p = v.abs().log10().floor() as i32;
-    format!("{:.2} × 10{}", v / 10f32.powi(p), superscript(p))
 }
 
 pub fn format_tick(v: f32) -> String {
@@ -803,8 +801,7 @@ fn paint_line_chart(
     let yticks = if spec.log_y { Vec::new() } else { ticks(y0, y1, spec.y_ticks) };
     let ystep = nice_step(y1 - y0, spec.y_ticks);
     // Tiny values share one power of ten, shown once ("0 5 10" and "× 10⁻³", design/README).
-    let ypow = (spec.y_fmt.is_none() && !spec.log_y && ystep > 0. && ystep < 0.01)
-        .then(|| ystep.log10().floor() as i32);
+    let ypow = (spec.y_fmt.is_none() && !spec.log_y).then(|| axis_pow(y0, y1, spec.y_ticks)).flatten();
     let ylabels: Vec<String> = yticks
         .iter()
         .map(|v| match (spec.y_fmt, ypow) {
@@ -1524,8 +1521,8 @@ mod tests {
     #[test]
     fn small_values_share_a_power_of_ten() {
         assert_eq!(superscript(-3), "⁻³");
-        assert_eq!(sci3(0.00658), "6.58 × 10⁻³");
-        assert_eq!(sci3(0.0001), "1.00 × 10⁻⁴");
+        assert_eq!(axis_pow(0., 0.012, 3), Some(-3));
+        assert_eq!(axis_pow(0., 1., 4), None);
     }
 
     #[test]

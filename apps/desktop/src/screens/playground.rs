@@ -706,7 +706,8 @@ impl FoloApp {
                     )))
                     .child(
                         div()
-                            .p(px(6.))
+                            .px(px(8.))
+                            .py(px(6.))
                             .flex()
                             .flex_col()
                             .gap(px(1.))

@@ -94,8 +94,34 @@ impl FoloApp {
         let nothing_yet = no_ds
             && self.store.runs.ready().is_some_and(|r| r.is_empty())
             && self.store.models.ready().is_some_and(|m| m.is_empty());
-        // First run: the getting-started panel owns the only call to action.
-        let actions = if nothing_yet { Vec::new() } else { actions };
+        // First run: the getting-started panel owns the call to action; the header keeps its
+        // buttons in place, disabled with the reason (the same rule as every other non-ready state).
+        let actions = if nothing_yet {
+            vec![
+                self.button_disabled(
+                    "ov-open",
+                    "Open image",
+                    Btn::Secondary,
+                    Some("icons/image-up.svg"),
+                    "Train a model first",
+                    window,
+                    cx,
+                )
+                .into_any_element(),
+                self.button_disabled(
+                    "ov-new",
+                    "New run",
+                    Btn::Primary,
+                    Some("icons/plus.svg"),
+                    "Add a dataset first",
+                    window,
+                    cx,
+                )
+                .into_any_element(),
+            ]
+        } else {
+            actions
+        };
         let header = page_header(&t, "Overview", text(ty::BASE, t.text_secondary).child(subtitle), actions);
 
         if let Some(e) = self.store.runs.error().cloned() {
@@ -568,8 +594,17 @@ impl FoloApp {
         // Created fits beside Best models too, with an 88 px progress track (584 px available at 1280).
         let created = true;
         // Beside Best models (584 px at 1280) every column tightens so all six fit.
-        let (name_w, prog_w, best_w, when_w) =
-            if wide { (150., 120., 96., 80.) } else { (140., 88., 88., 64.) };
+        // From 1680 (where the content cap gives the list ~976 px) the name and dataset columns
+        // take the room instead of a dead band; 1500–1680 keeps the narrower set (~776 px).
+        let full = vw >= px(1680.);
+        let (name_w, prog_w, best_w, when_w) = if full {
+            (200., 160., 96., 80.)
+        } else if wide {
+            (150., 120., 96., 80.)
+        } else {
+            (140., 88., 88., 64.)
+        };
+        let meta_w = if full { 180. } else { 130. };
         let now = self.store.api.now();
         let all = self.view_all("ov-runs-all", Route::Runs, window, cx);
         let header = panel_header(&t, "Recent runs").child(all);
@@ -584,7 +619,7 @@ impl FoloApp {
             .border_b_1()
             .border_color(t.line_subtle)
             .child(th(&t, "Run").w(px(name_w)).flex_none())
-            .when(wide, |d| d.child(th(&t, "Dataset · arch").w(px(130.)).flex_none()))
+            .when(wide, |d| d.child(th(&t, "Dataset · arch").w(px(meta_w)).flex_none()))
             .child(th(&t, "Status").w(px(96.)).flex_none())
             .child(th(&t, "Progress").w(px(prog_w)).flex_none())
             .child(div().flex_1())
@@ -666,7 +701,7 @@ impl FoloApp {
                                 .when(wide, |d| {
                                     d.child(
                                         text(ty::XS, t.text_tertiary)
-                                            .w(px(130.))
+                                            .w(px(meta_w))
                                             .flex_none()
                                             .truncate()
                                             .child(format!("{ds} · {}", r.config.arch.as_str())),

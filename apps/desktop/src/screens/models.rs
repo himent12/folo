@@ -720,10 +720,10 @@ impl FoloApp {
         chart.x_fmt = |v| format!("{v:.2}");
         chart.x_name = "recall";
         chart.axis_titles = Some(("Recall", "Precision"));
-        chart.x_ticks = Some(2);
+        chart.x_ticks = Some(4);
         chart.ease_key = crate::charts::ease_key(&m.id);
         // As tall as the confusion matrix beside it (its rows set the panel height).
-        chart.height = (32. * ev.confusion.len() as f32 + 76.).max(220.);
+        chart.height = (32. * ev.confusion.len() as f32 + 136.).max(240.);
         chart.hover = self.pr_hover;
         chart.on_hover = Some(on_hover);
         // Values live in the legend beside the plot; the cursor shows a recall chip on the axis.
@@ -1018,18 +1018,17 @@ impl FoloApp {
                     // The key sits under the matrix, away from the column labels.
                     .child(div().pt(px(10.)).child(key))
                     .child(div().pt(px(4.)).w_full().min_w_0().child(
-                        text(ty::XS, t.text_tertiary).tnum().whitespace_normal().child(if norm {
-                            format!(
-                                "Rows: actual objects · bottom row: how all false positives split by class · {} images",
-                                int(ev.images as u64)
-                            )
+                        text(ty::XS, t.text_tertiary).whitespace_normal().child(if norm {
+                            "Rows: actual objects; the bottom row shows how all false positives split by class."
                         } else {
-                            format!(
-                                "Counts of objects and unmatched detections · {} images",
-                                int(ev.images as u64)
-                            )
+                            "Counts of objects and unmatched detections."
                         }),
-                    )),
+                    ))
+                    .child(
+                        div()
+                            .pt(px(4.))
+                            .child(text(ty::XS, t.text_tertiary).tnum().child(format!("Validation split · {} images", int(ev.images as u64)))),
+                    ),
             )
             .into_any_element()
     }

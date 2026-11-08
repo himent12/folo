@@ -1854,6 +1854,15 @@ impl FoloApp {
         if self.scroll_drag.take().is_some() {
             cx.notify();
         }
+        // An image pan ends wherever the button comes up (also outside its canvas).
+        if self.play_drag.take().is_some() {
+            cx.notify();
+        }
+        if let Some(i) = self.inspector.as_mut()
+            && i.drag_from.take().is_some()
+        {
+            cx.notify();
+        }
         if let Some(d) = self.drag.take() {
             if d.id == "play-iou" {
                 self.run_predict(cx);
@@ -2503,6 +2512,16 @@ impl Render for FoloApp {
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_drag_end))
             .on_drop(cx.listener(|this, paths: &gpui::ExternalPaths, w, cx| {
                 this.play_drop_hover = false;
+                // A dialog or the inspector is up: don't navigate out from under it.
+                if this.modal_open() {
+                    this.toast(
+                        Tone::Info,
+                        "Close the dialog first",
+                        Some("Then drop the image again.".into()),
+                        cx,
+                    );
+                    return;
+                }
                 if let Some(p) = paths.paths().first().cloned() {
                     this.navigate(Route::Playground, w, cx);
                     this.play_file(p, cx);
