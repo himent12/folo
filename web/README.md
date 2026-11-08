@@ -1,0 +1,18 @@
+# FOLO Studio
+
+The web app of FOLO: datasets, training runs, models and a detection playground. Svelte 5 (runes) + TypeScript +
+Vite, with our own design system (no UI kit, no CSS framework). It talks only to the HTTP API in `docs/API.md`.
+
+```sh
+npm ci
+npm run dev       # http://localhost:5173, proxies /api to FOLO_API (default http://127.0.0.1:7878)
+npm run check     # generated tokens are fresh + svelte-check + tsc
+npm test          # vitest (logic)
+npm run build     # -> dist/, served by `folo serve`
+npm run shoot r1  # screenshots of every screen/state -> shots/r1/ (uses the installed Chrome)
+```
+
+- Design tokens come from `../design/tokens.json` (see `../design/README.md`). After editing it, run `npm run tokens`.
+- `src/lib/design/` generated tokens + base CSS · `src/lib/ui/` components · `src/lib/shell/` app chrome ·
+  `src/lib/charts/` SVG/canvas charts · `src/lib/api/` typed client + dev mock · `src/routes/` screens.
+- Routing is hash based (`#/runs/run_7d1e`) so any static server works.
