@@ -170,14 +170,7 @@ impl FoloApp {
                         })),
                 )
                 .max_h(px(420.));
-            return div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .justify_center()
-                .child(zone)
-                .into_any_element();
+            return div().flex_1().min_w_0().flex().flex_col().child(zone).into_any_element();
         }
         let active = self.play_active(window, cx);
         let img = self.play_image.as_ref().unwrap();
@@ -575,15 +568,9 @@ impl FoloApp {
                                     b.y2 - b.y1
                                 )),
                             )
-                            .child(
-                                div().flex_1().h(px(4.)).rounded_full().bg(t.bg_inset).child(
-                                    div()
-                                        .h_full()
-                                        .w(relative(b.score))
-                                        .rounded_full()
-                                        .bg(t.class_stroke(b.class)),
-                                ),
-                            )
+                            .child(div().flex_1().h(px(4.)).rounded_full().bg(t.bg_inset).child(
+                                div().h_full().w(relative(b.score)).rounded_full().bg(t.class(b.class)),
+                            ))
                             .child(
                                 text(ty::SM, t.text_primary)
                                     .tnum()

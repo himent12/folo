@@ -230,6 +230,9 @@ impl FoloApp {
             .active(move |s| s.bg(t.bg_active))
             .tooltip(tip(tooltip, None))
             .child(icon(icon_path, 16., t.text_secondary));
+        // Keyboard focus shows the same text the pointer gets from the tooltip.
+        let ring = self.ring(&self.fh(key.to_string(), cx), window);
+        let el = el.when(ring, |d| d.child(focus_tip(&t, tooltip, tsize::CONTROL_MD)));
         self.bind(el, key, radius::MD, window, cx, action)
     }
 
@@ -551,6 +554,7 @@ impl FoloApp {
             .cursor_pointer()
             .bg(if on { t.accent_fill() } else { t.line_strong })
             .when(!on, |d| d.hover(|s| s.bg(t.text_disabled)))
+            .when(on, |d| d.hover(|s| s.opacity(0.88)))
             .active(|s| s.opacity(0.8))
             .child({
                 // Dark: a dark knob on lime; light: white on olive. Off: a bright knob on grey.
@@ -904,4 +908,24 @@ pub fn btn_colors(t: &Theme, kind: Btn) -> (Hsla, Hsla, Option<Hsla>, Hsla) {
         }
         Btn::Danger => (t.danger_muted, t.danger_text, None, crate::theme::alpha(t.danger_solid, 0.2)),
     }
+}
+
+/// A tooltip shown while a control has keyboard focus, below it and kept inside the window.
+pub fn focus_tip(t: &Theme, text_: &'static str, below: f32) -> Div {
+    div().absolute().top(px(below + 6.)).left_0().child(
+        gpui::deferred(
+            gpui::anchored().snap_to_window_with_margin(px(8.)).child(
+                div()
+                    .px(px(8.))
+                    .py(px(4.))
+                    .rounded(px(radius::SM))
+                    .bg(t.bg_overlay)
+                    .border_1()
+                    .border_color(t.line_default)
+                    .shadow(t.shadow_lg())
+                    .child(text(ty::XS, t.text_secondary).whitespace_nowrap().child(text_)),
+            ),
+        )
+        .with_priority(3),
+    )
 }

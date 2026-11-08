@@ -397,7 +397,9 @@ const EASE_MS: f32 = 240.;
 /// pixel, and re-deriving a long history every frame isn't worth it.
 const EASE_MAX_POINTS: usize = 512;
 
-type Pts = Arc<Vec<(f32, f32)>>;
+/// A series's points, shared between renders.
+pub type Points = Arc<Vec<(f32, f32)>>;
+type Pts = Points;
 
 /// A chart's last data and the move from the previous data to it.
 struct Ease {
@@ -855,17 +857,19 @@ fn paint_line_chart(
             Bounds::new(point(fx, plot.top()), size(plot.right() - fx, plot.size.height)),
             alpha(t.text_primary, 0.025),
         ));
-        let w = text_width(window, label, label_size);
-        paint_text(
-            window,
-            cx,
-            label,
-            // At the start of the span (where "now" is), clear of event markers further right.
-            point((fx + px(6.)).min(plot.right() - w - px(6.)), plot.top() + px(4.)),
-            t.text_tertiary,
-            label_size,
-            false,
-        );
+        if !label.is_empty() {
+            let w = text_width(window, label, label_size);
+            paint_text(
+                window,
+                cx,
+                label,
+                // At the start of the span (where "now" is), clear of event markers further right.
+                point((fx + px(6.)).min(plot.right() - w - px(6.)), plot.top() + px(4.)),
+                t.text_tertiary,
+                label_size,
+                false,
+            );
+        }
     }
     // Linked charts pass one tick count, so every chart in a group shows the same x ticks.
     let max_x = spec.x_ticks.unwrap_or(((plot.size.width / px(90.)) as usize).clamp(2, 8));

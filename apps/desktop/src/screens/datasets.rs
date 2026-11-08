@@ -598,16 +598,23 @@ impl FoloApp {
                     .child(text(ty::SM, t.text_secondary).child("Boxes"))
                     .child(boxes_switch),
             )
+            // Thumbnail size, not image zoom: a small and a large tile at the ends.
             .child(
                 div()
+                    .id("ds-tile-size")
                     .flex()
                     .items_center()
                     .gap(px(8.))
                     .w(px(140.))
                     .flex_none()
-                    .child(icon("icons/zoom-out.svg", 14., t.text_tertiary))
+                    .tooltip(crate::controls::tip("Thumbnail size", None))
+                    .child(div().w(px(14.)).flex().justify_center().child(icon(
+                        "icons/square.svg",
+                        9.,
+                        t.text_tertiary,
+                    )))
                     .child(size_slider)
-                    .child(icon("icons/zoom-in.svg", 14., t.text_tertiary)),
+                    .child(icon("icons/square.svg", 14., t.text_tertiary)),
             );
         self.ds_view_controls = Some(view_controls.into_any_element());
         if self.store.images.get(&id).is_none_or(|l| l.is_loading()) {

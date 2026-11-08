@@ -158,17 +158,20 @@ pub fn paint_image_with_boxes(
                 if pass == 1 && !b.truth && labels && (b.label.is_some() || b.score.is_some()) {
                     let fs = ty::XS.size;
                     let name = b.label.clone().unwrap_or_default();
+                    // The selected box's chip takes the selection colour, like its outline.
+                    let (chip_bg, ink) =
+                        if b.highlight { (t.accent_solid, t.accent_on) } else { (color, chip_text) };
                     let score = b.score.map(|s| format!("{s:.2}")).unwrap_or_default();
                     let name_line = window.text_system().shape_line(
                         name.clone(),
                         px(fs),
-                        &[run(&name, SANS, FontWeight::MEDIUM, chip_text)],
+                        &[run(&name, SANS, FontWeight::MEDIUM, ink)],
                         None,
                     );
                     let score_line = window.text_system().shape_line(
                         score.clone().into(),
                         px(fs),
-                        &[run(&score, SANS, FontWeight::MEDIUM, alpha(chip_text, 0.72))],
+                        &[run(&score, SANS, FontWeight::NORMAL, ink)],
                         None,
                     );
                     let gap = if score.is_empty() || name.is_empty() { px(0.) } else { px(5.) };
@@ -196,7 +199,7 @@ pub fn paint_image_with_boxes(
                     let chip = Bounds::new(origin, size(cw, ch));
                     placed.push(chip);
                     // Dimming applies to strokes only: chip text keeps its contrast.
-                    window.paint_quad(fill(chip, color).corner_radii(px(tokens::radius::XS)));
+                    window.paint_quad(fill(chip, chip_bg).corner_radii(px(tokens::radius::XS)));
                     let ty_ = origin.y + px(1.5);
                     let _ = name_line.paint(point(origin.x + px(5.), ty_), px(13.), window, cx);
                     let _ = score_line.paint(

@@ -572,23 +572,37 @@ impl FoloApp {
     ) -> AnyElement {
         let t = theme(cx);
         let iso = self.pr_isolated(ev, window);
-        let series: Vec<Series> = ev
+        // End each curve at its highest recall (with a dot) instead of a drop to zero.
+        let curves: Vec<(u32, crate::charts::Points)> = ev
             .pr
             .iter()
             .map(|c| {
-                // End each curve at its highest recall (with a dot) instead of a drop to zero.
                 let mut pts: Vec<(f32, f32)> =
                     c.recall.iter().zip(&c.precision).map(|(r, p)| (*r, *p)).collect();
                 if let Some(last) = pts.iter().rposition(|p| p.1 > 0.0) {
                     pts.truncate(last + 1);
                 }
+                (c.class, Arc::new(pts))
+            })
+            .collect();
+        let hover = self.pr_hover;
+        let at_cursor = |class: u32| {
+            let pts = &curves.iter().find(|(c, _)| *c == class)?.1;
+            hover.and_then(|_| crate::charts::value_at(pts, hover, 0., 1.))
+        };
+        let series: Vec<Series> = ev
+            .pr
+            .iter()
+            .zip(&curves)
+            .map(|(c, (_, pts))| {
+                let pts = pts.clone();
                 let name = m.classes.get(c.class as usize).cloned().unwrap_or_default();
                 let (color, width) = match iso {
                     Some(f) if f == c.class => (t.class_stroke(c.class), 2.75),
                     Some(_) => (alpha(t.class_stroke(c.class), 0.25), 1.25),
                     None => (t.class_stroke(c.class), 2.),
                 };
-                Series::new(name, color, Arc::new(pts)).width(width).live(true)
+                Series::new(name, color, pts).width(width).live(true)
             })
             .collect();
         let view = cx.entity().downgrade();
@@ -638,7 +652,22 @@ impl FoloApp {
                             .truncate()
                             .child(m.classes.get(class as usize).cloned().unwrap_or_default()),
                     )
-                    .child(text(ty::SM, t.text_primary).tnum().child(format!("{:.3}", c.ap50)));
+                    .child(
+                        text(ty::SM, t.text_secondary)
+                            .tnum()
+                            .w(px(40.))
+                            .flex_none()
+                            .text_right()
+                            .child(at_cursor(class).map_or(String::new(), |p| format!("{p:.2}"))),
+                    )
+                    .child(
+                        text(ty::SM, t.text_primary)
+                            .tnum()
+                            .w(px(44.))
+                            .flex_none()
+                            .text_right()
+                            .child(format!("{:.3}", c.ap50)),
+                    );
                 self.bind(
                     el,
                     &key,
@@ -665,7 +694,8 @@ impl FoloApp {
         chart.height = (32. * ev.confusion.len() as f32 + 76.).max(220.);
         chart.hover = self.pr_hover;
         chart.on_hover = Some(on_hover);
-        chart.value_fmt = Some(|v| format!("P {v:.3}"));
+        // Values live in the legend beside the plot; the cursor shows a recall chip on the axis.
+        chart.readout = false;
 
         panel(&t)
             .flex_1()
@@ -688,7 +718,7 @@ impl FoloApp {
                     )))
                     .child(
                         div()
-                            .w(px(156.))
+                            .w(px(208.))
                             .flex_none()
                             .p(px(8.))
                             .pt(px(12.))
@@ -701,9 +731,25 @@ impl FoloApp {
                                     .px(px(8.))
                                     .flex()
                                     .items_center()
-                                    .justify_between()
-                                    .child(th(&t, "Class"))
-                                    .child(th(&t, "AP50")),
+                                    .gap(px(8.))
+                                    .child(th(&t, "Class").flex_1())
+                                    // Precision at the recall under the cursor, while inspecting.
+                                    .child(
+                                        div()
+                                            .w(px(40.))
+                                            .flex_none()
+                                            .flex()
+                                            .justify_end()
+                                            .child(th(&t, if hover.is_some() { "P" } else { "" })),
+                                    )
+                                    .child(
+                                        div()
+                                            .w(px(44.))
+                                            .flex_none()
+                                            .flex()
+                                            .justify_end()
+                                            .child(th(&t, "AP50")),
+                                    ),
                             )
                             .children(chips),
                     ),
@@ -875,12 +921,13 @@ impl FoloApp {
                                     .text_right()
                                     .child("Actual ↓"),
                             )
-                            .child(text(ty::XS, t.text_tertiary).flex_1().child("Predicted →"))
-                            .child(key),
+                            .child(text(ty::XS, t.text_tertiary).flex_1().child("Predicted →")),
                     )
                     .child(header_row)
                     .children(rows)
-                    .child(div().pt(px(8.)).w_full().min_w_0().child(
+                    // The key sits under the matrix, away from the column labels.
+                    .child(div().pt(px(10.)).child(key))
+                    .child(div().pt(px(4.)).w_full().min_w_0().child(
                         text(ty::XS, t.text_tertiary).tnum().whitespace_normal().child(if norm {
                             format!(
                                 "Rows: actual objects · bottom row: how all false positives split by class · {} images",
@@ -914,16 +961,17 @@ impl FoloApp {
             .h(px(36.))
             .border_b_1()
             .border_color(t.line_subtle)
-            .child(th(&t, "Class").flex_1())
-            .child(th(&t, "AP50").w(px(140.)))
-            .child(th(&t, "AP50-95").w(px(140.)))
-            .child(th(&t, "Precision").w(px(140.)))
-            .child(th(&t, "Recall").w(px(140.)));
+            .child(th(&t, "Class").w(px(200.)).flex_none())
+            .child(th(&t, "AP50").flex_1().min_w_0())
+            .child(th(&t, "AP50-95").flex_1().min_w_0())
+            .child(th(&t, "Precision").flex_1().min_w_0())
+            .child(th(&t, "Recall").flex_1().min_w_0());
         let focus = self.pr_isolated(ev, window);
         let pin = self.pr_pin;
-        let rows: Vec<AnyElement> = ev
-            .per_class
-            .iter()
+        let mut per: Vec<_> = ev.per_class.iter().collect();
+        per.sort_by(|a, b| b.map50.total_cmp(&a.map50));
+        let rows: Vec<AnyElement> = per
+            .into_iter()
             .map(|c| {
                 let color = t.class(c.class);
                 let class = c.class;
@@ -952,7 +1000,8 @@ impl FoloApp {
                     }))
                     .child(
                         div()
-                            .flex_1()
+                            .w(px(200.))
+                            .flex_none()
                             .flex()
                             .items_center()
                             .gap(px(8.))
@@ -963,15 +1012,15 @@ impl FoloApp {
                             )
                             .when(pinned, |d| d.child(text(ty::XS, t.text_tertiary).child("pinned"))),
                     )
-                    .child(div().w(px(140.)).child(bar_value(&t, c.map50, f3(c.map50), color)))
-                    .child(div().w(px(140.)).child(bar_value(&t, c.map50_95, f3(c.map50_95), color)))
-                    .child(div().w(px(140.)).child(bar_value(
+                    .child(div().flex_1().min_w_0().child(bar_value(&t, c.map50, f3(c.map50), color)))
+                    .child(div().flex_1().min_w_0().child(bar_value(&t, c.map50_95, f3(c.map50_95), color)))
+                    .child(div().flex_1().min_w_0().child(bar_value(
                         &t,
                         c.precision,
                         format!("{:.3}", c.precision),
                         t.text_tertiary,
                     )))
-                    .child(div().w(px(140.)).child(bar_value(
+                    .child(div().flex_1().min_w_0().child(bar_value(
                         &t,
                         c.recall,
                         format!("{:.3}", c.recall),
