@@ -11,10 +11,12 @@ fn unsupported(e: &Error) -> bool {
 }
 
 impl Tensor {
-    /// Letterbox `U8` RGB images (`images[i]` is `[H_i, W_i, 3]`, all on one device) into an `F32
-    /// [B, 3, OH, OW]` network input (see [`crate::backend::Backend::letterbox_rgb8`] for the exact sampling).
-    /// `taps` (`U32`, same device) holds the tap arrays `geoms[i].taps` points at. `Ok(None)` when the
-    /// device has no kernel for it. Not recorded by autograd.
+    /// Letterbox `U8` RGB images (`images[i]` is `[H_i, W_i, 3]`, all on one device) into a `[B, 3, OH, OW]`
+    /// network input of `dtype` (`F32`, or `F16` on backends that compute in it; see
+    /// [`crate::backend::Backend::letterbox_rgb8`] for the exact sampling). `taps` (`U32`, same device) holds
+    /// the tap arrays `geoms[i].taps` points at. `Ok(None)` when the device has no kernel for it. Not recorded
+    /// by autograd.
+    #[allow(clippy::too_many_arguments)]
     pub fn letterbox_rgb8(
         images: &[&Tensor],
         taps: &Tensor,
@@ -22,6 +24,7 @@ impl Tensor {
         out_hw: [usize; 2],
         pad_value: u8,
         scale: f32,
+        dtype: DType,
     ) -> Result<Option<Tensor>> {
         const OP: &str = "letterbox_rgb8";
         let first = *images.first().ok_or_else(|| Error::invalid_arg(OP, "no images given"))?;
@@ -60,10 +63,14 @@ impl Tensor {
         }
         first.check_same_device(taps, OP)?;
         let b = first.backend()?;
+        if !(dtype == DType::F32 || dtype == DType::F16 && b.computes_f16()) {
+            return Err(Error::UnsupportedDType { op: OP, dtype });
+        }
         let mut ts: Vec<&Tensor> = images.to_vec();
         ts.push(taps);
         let k = images.len();
-        match with_views_dyn(&ts, |v| b.letterbox_rgb8(&v[..k], v[k], geoms, out_hw, pad_value, scale)) {
+        match with_views_dyn(&ts, |v| b.letterbox_rgb8(&v[..k], v[k], geoms, out_hw, pad_value, scale, dtype))
+        {
             Ok(s) => Ok(Some(Tensor::wrap(s, Shape::new(&[k, 3, oh, ow]), OP)?)),
             Err(e) if unsupported(&e) => Ok(None),
             Err(e) => Err(e),
@@ -81,8 +88,10 @@ impl Tensor {
         p: &DetectDecode,
     ) -> Result<Option<Tensor>> {
         const OP: &str = "detect_candidates";
-        for t in [box_raw, cls_raw, anchors] {
-            t.check_f32(OP)?;
+        box_raw.check_float(OP)?;
+        cls_raw.check_float_like(box_raw, OP)?;
+        anchors.check_f32(OP)?;
+        for t in [cls_raw, anchors] {
             box_raw.check_same_device(t, OP)?;
         }
         let bad = |t: &Tensor| Error::invalid_shape(OP, t.shape(), format!("does not match {p:?}"));

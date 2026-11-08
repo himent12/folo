@@ -2,7 +2,7 @@
 //! [`crate::decode`], or as tensor ops on the outputs' device), then NMS on the host.
 
 use folo_core::backend::DETECT_RECORD_WORDS;
-use folo_core::{DetectDecode, Device, Tensor, no_grad};
+use folo_core::{DType, DetectDecode, Device, Tensor, no_grad};
 use folo_nn::{Error, Module, Result};
 use rayon::prelude::*;
 
@@ -39,7 +39,7 @@ pub struct RawPrediction {
 /// transposed view in logical order, so this is one copy.
 fn anchor_major(t: &Tensor) -> Result<Vec<f32>> {
     let t = if t.device() == Device::Cpu { t.clone() } else { t.to_device(Device::Cpu)? };
-    Ok(t.transpose(1, 2)?.to_vec::<f32>()?)
+    Ok(t.to_dtype(DType::F32)?.transpose(1, 2)?.to_vec::<f32>()?)
 }
 
 impl HeadOutput {
@@ -71,7 +71,8 @@ impl HeadOutput {
     /// [`HeadOutput::decode_images`] as device tensor ops: the DFL softmax expectation, `ltrb` → `xyxy`
     /// around the anchor points times the stride, and the class sigmoid, assembled anchor-major as
     /// `[B, A, 4 + nc]` on the device so that only the decoded values are downloaded (about 60% of the raw
-    /// head) and the host does no transpose. Same formulas as the CPU path (max-subtracted softmax).
+    /// head) and the host does no transpose. Same formulas as the CPU path (max-subtracted softmax). `F16`
+    /// outputs (half-precision inference) are decoded in `F32`.
     pub fn decode_on_device(&self) -> Result<Vec<(Vec<Xyxy>, Vec<f32>)>> {
         let all = self.decoded_on_device()?.to_vec::<f32>()?;
         Ok(Self::split_decoded(&all, self.num_anchors(), self.num_classes))
@@ -91,6 +92,7 @@ impl HeadOutput {
             )));
         }
         let dev = self.box_raw.device();
+        let (box_raw, cls_raw) = (self.box_raw.to_dtype(DType::F32)?, self.cls_raw.to_dtype(DType::F32)?);
         // One upload: anchor x, anchor y (grid units), stride, then the bin indices 0..reg_max.
         let mut consts = Vec::with_capacity(3 * a + rm);
         consts.extend(self.anchors.points.iter().map(|p| p[0]));
@@ -101,11 +103,11 @@ impl HeadOutput {
         let points = consts.narrow(0, 0, 2 * a)?.reshape([1, 2, a])?;
         let stride = consts.narrow(0, 2 * a, a)?.reshape([1, 1, a])?;
         let bins = consts.narrow(0, 3 * a, rm)?.reshape([1, 1, rm, 1])?;
-        let dist = self.box_raw.reshape([b, 4, rm, a])?.softmax(2)?.mul(&bins)?.sum(2, false)?; // [B, 4, A]
+        let dist = box_raw.reshape([b, 4, rm, a])?.softmax(2)?.mul(&bins)?.sum(2, false)?; // [B, 4, A]
         let xy1 = points.sub(&dist.narrow(1, 0, 2)?)?;
         let xy2 = points.add(&dist.narrow(1, 2, 2)?)?;
         let boxes = Tensor::cat(&[&xy1, &xy2], 1)?.mul(&stride)?;
-        let scores = self.cls_raw.sigmoid()?;
+        let scores = cls_raw.sigmoid()?;
         Ok(Tensor::cat(&[&boxes, &scores], 1)?.transpose(1, 2)?) // [B, A, 4 + nc]
     }
 
@@ -129,7 +131,8 @@ impl HeadOutput {
     /// pixels, highest score first.
     ///
     /// On a device with the candidate kernel (the GPU) and without `multi_label`, the decode runs there in
-    /// one kernel ([`Tensor::detect_candidates`]) and only the anchors whose best class scores `> conf` are
+    /// one kernel ([`Tensor::detect_candidates`], which reads `F16` outputs as they are and decodes in `F32`)
+    /// and only the anchors whose best class scores `> conf` are
     /// downloaded: one readback of the counts plus up to [`CANDIDATE_READBACK`] records per image, a second
     /// one only for an image with more. On the CPU (single-label) the anchors are prefiltered by their largest
     /// logit and only the candidates are decoded, with the same functions as [`HeadOutput::decode_images`], so

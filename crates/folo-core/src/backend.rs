@@ -10,7 +10,11 @@
 //!   non-contiguous and can broadcast (stride 0). Unless a method says otherwise, outputs are fresh, contiguous
 //!   (row-major, offset 0) storages on the same device as the inputs.
 //! - folo-core has already checked shapes, dtypes and devices; backends may assume valid arguments. All compute
-//!   ops take `F32` data unless the method says otherwise; index tensors are `I64` or `U32`.
+//!   ops take `F32` data unless the method says otherwise; index tensors are `I64` or `U32`. A backend whose
+//!   [`Backend::computes_f16`] is true also gets `F16` data (every float operand of a call has the same dtype)
+//!   in the forward ops folo-core lets through (unary, binary, `where_cond`, reductions, softmax, matmul,
+//!   conv2d and the fused conv, pooling, upsampling, `detect_candidates`) and returns results of that dtype;
+//!   it may refuse `F16` elsewhere with [`Error::UnsupportedDType`].
 //! - Methods under "Compute" have a default implementation returning [`Error::NotSupported`], so a new backend
 //!   can start with the memory methods and grow. The user sees a clear "op X is not supported by backend Y"
 //!   and can move the tensor to the CPU with [`crate::Tensor::to_device`].
@@ -281,6 +285,12 @@ pub trait Backend: Send + Sync + 'static {
         Ok(())
     }
 
+    /// Whether the compute ops accept `F16` data (half-precision inference; see the module docs). The CPU
+    /// keeps `F16` for storage only.
+    fn computes_f16(&self) -> bool {
+        false
+    }
+
     // ----- Memory (required) -----
 
     /// A contiguous buffer of `len` elements of `dtype`, every element set to `value`.
@@ -518,11 +528,13 @@ pub trait Backend: Send + Sync + 'static {
 
     // ----- Detector pre- and post-processing (optional; callers fall back to host code) -----
 
-    /// Letterbox `U8` RGB images (`images[i]` is `[H_i, W_i, 3]`) onto one `F32 [B, 3, OH, OW]` canvas
+    /// Letterbox `U8` RGB images (`images[i]` is `[H_i, W_i, 3]`) onto one `[B, 3, OH, OW]` canvas of `dtype`
+    /// (`F32`, or `F16` when [`Backend::computes_f16`]; the values are formed in `f32` and rounded once)
     /// (`out_hw = [OH, OW]`), scaled by `scale` (`1 / 255` for network input): every pixel is `pad_value`
     /// except the resized image at `geoms[i].pad`, which is sampled exactly as folo-data's bilinear resize
     /// (integer box prefilter, then 11-bit fixed-point bilinear taps; see [`LetterboxImage`]). `taps` is `U32`.
     /// Reached through `Tensor::letterbox_rgb8`.
+    #[allow(clippy::too_many_arguments)]
     fn letterbox_rgb8(
         &self,
         images: &[View<'_>],
@@ -531,13 +543,15 @@ pub trait Backend: Send + Sync + 'static {
         out_hw: [usize; 2],
         pad_value: u8,
         scale: f32,
+        dtype: DType,
     ) -> Result<Storage> {
         unsupported!(self, "letterbox_rgb8")
     }
     /// Decode an anchor-free detection head and keep only the candidates: for every image `b` and anchor `a`,
     /// the best class `c` (the first maximum of the `nc` sigmoid scores) when its score is `> conf`, with the
     /// anchor's box (DFL softmax expectation of each side's `reg_max` bins, `ltrb` around the anchor point,
-    /// times the stride). `box_raw` is `F32 [B, 4·reg_max, A]`, `cls_raw` `F32 [B, nc, A]`, `anchors` `F32
+    /// times the stride). `box_raw` is `F32 [B, 4·reg_max, A]` (or `F16`, with `cls_raw` alike, when
+    /// [`Backend::computes_f16`]; the decode runs in `f32`), `cls_raw` `F32 [B, nc, A]`, `anchors` `F32
     /// [3, A]` (point x, point y in grid units, stride). Returns `U32 [B, 1 + 7·A]`: per image the candidate
     /// count `n`, then `n` records `(a, c, score, x1, y1, x2, y2)` (floats as their bits) in unspecified order.
     /// Reached through `Tensor::detect_candidates`.
@@ -671,6 +685,11 @@ pub fn backend(device: Device) -> Result<Arc<dyn Backend>> {
             .flatten()
             .ok_or(Error::BackendNotRegistered(device)),
     }
+}
+
+/// Whether `device`'s backend computes in `F16` ([`Backend::computes_f16`]); `false` for an unregistered device.
+pub fn computes_f16(device: Device) -> bool {
+    backend(device).is_ok_and(|b| b.computes_f16())
 }
 
 /// Wait for all queued work on `device` to finish (see [`Backend::synchronize`]).

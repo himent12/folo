@@ -15,7 +15,7 @@ use web_time::Instant;
 use folo_data::Image;
 use folo_gpu::GpuContext;
 use folo_nn::io::{ModelFile, Purpose};
-use folo_vision::{FoloModel, HeadOutput, PredictConfig, Predictor, Timing};
+use folo_vision::{FoloModel, HeadOutput, Precision, PredictConfig, Predictor, Timing};
 use serde::{Deserialize, Serialize};
 
 /// Which backend [`Detector::load`] should use.
@@ -61,6 +61,9 @@ pub struct LoadOptions {
     pub model_id: Option<String>,
     /// Letterbox size; defaults to the file's `folo.imgsz`.
     pub imgsz: Option<u32>,
+    /// `f32` (default) or `f16`: half precision on WebGPU with `shader-f16`; f32 elsewhere (the CPU, an adapter
+    /// without it), with the reason in [`DetectorInfo::precision_fallback`].
+    pub precision: Precision,
 }
 
 /// Per-call options (the JS `detect` options object), with docs/API.md's `/api/predict` defaults.
@@ -93,6 +96,10 @@ pub struct DetectorInfo {
     pub adapter: Option<String>,
     /// Why `auto` fell back to the CPU, if it did.
     pub fallback: Option<String>,
+    /// The precision the model runs in: `f32` or `f16`.
+    pub precision: Precision,
+    /// Why a requested `f16` runs in `f32`, if it does.
+    pub precision_fallback: Option<String>,
     /// Whether the CPU kernels were built with wasm SIMD128.
     pub simd128: bool,
     /// CPU threads (1: the wasm build is single-threaded).
@@ -152,13 +159,13 @@ impl Detector {
         let model_id = opts.model_id.unwrap_or_default();
         let mut fallback = None;
         if opts.backend != BackendChoice::Cpu {
-            match Self::load_gpu(&file, &cfg, &model_id).await {
+            match Self::load_gpu(&file, &cfg, &model_id, opts.precision).await {
                 Ok(d) => return Ok(d),
                 Err(e) if opts.backend == BackendChoice::Auto => fallback = Some(e),
                 Err(e) => return Err(format!("WebGPU backend unavailable: {e}")),
             }
         }
-        let predictor = Predictor::new(cpu_model(&file)?, cfg).map_err(err)?;
+        let predictor = Predictor::with_precision(cpu_model(&file)?, cfg, opts.precision).map_err(err)?;
         Ok(Detector {
             predictor: RefCell::new(predictor),
             backend: Backend::Cpu,
@@ -168,12 +175,17 @@ impl Detector {
         })
     }
 
-    async fn load_gpu(file: &ModelFile, cfg: &PredictConfig, model_id: &str) -> Result<Self, String> {
+    async fn load_gpu(
+        file: &ModelFile,
+        cfg: &PredictConfig,
+        model_id: &str,
+        precision: Precision,
+    ) -> Result<Self, String> {
         let device = folo_gpu::init_async().await.map_err(err)?;
         let ctx = GpuContext::shared().map_err(err)?;
         let mut model = cpu_model(file)?;
         model.to_device(device).map_err(err)?;
-        let predictor = Predictor::new(model, cfg.clone()).map_err(err)?;
+        let predictor = Predictor::with_precision(model, cfg.clone(), precision).map_err(err)?;
         let d = Detector {
             predictor: RefCell::new(predictor),
             backend: Backend::Webgpu,
@@ -204,6 +216,8 @@ impl Detector {
             device: p.device().to_string(),
             adapter: self.gpu.as_ref().map(|g| g.summary().name.clone()).filter(|n| !n.is_empty()),
             fallback: self.fallback.clone(),
+            precision: p.precision(),
+            precision_fallback: p.fallback().map(str::to_string),
             simd128: folo_core::cpu::gemm::uses_simd128(),
             // The wasm build has no threads (rayon runs on the calling thread there).
             threads: if cfg!(target_arch = "wasm32") {

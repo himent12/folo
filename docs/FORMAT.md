@@ -138,7 +138,10 @@ object and the optimizer groups, the LR and momentum of every group at any itera
    target model's classes (in count **or** order), the classification output layers of the head (named in
    docs/MODEL.md) are always skipped, even when the shapes happen to match, so weights for the wrong class order are
    never loaded silently.
-5. Dtype conversion on load: `F16 → F32` is allowed (the model computes in F32). `F32 → F16` happens only in export.
+5. Dtype conversion on load: `F16 → F32` is allowed (the model computes in F32), and identical dtypes load as they
+   are. `F32 → F16` happens only in export. Half-precision inference (`folo predict --half`, folo-vision's
+   `FoloModel::from_file_for_inference`) converts the model, not the file: a fused `F16` file loads into an `F16`
+   model with no `F32` copy; any other file loads in `F32`, is fused in `F32`, and the model is then converted.
 6. Files with `folo.fused = "true"` contain a different tensor set (no BatchNorm). They can be loaded for inference
    only; loading them for training is an error that says so.
 

@@ -10,8 +10,8 @@ impl Tensor {
     /// dims broadcast (so `[B, m, k] @ [k, n]` works and runs as one large GEMM).
     pub fn matmul(&self, other: &Tensor) -> Result<Tensor> {
         self.check_same_device(other, "matmul")?;
-        self.check_f32("matmul")?;
-        other.check_f32("matmul")?;
+        self.check_float("matmul")?;
+        other.check_float_like(self, "matmul")?;
         let mismatch =
             || Error::ShapeMismatch { op: "matmul", lhs: self.shape().clone(), rhs: other.shape().clone() };
         if self.rank() < 2 || other.rank() < 2 {
@@ -72,8 +72,8 @@ impl Tensor {
     /// Validate a conv2d call; returns the output shape.
     fn check_conv2d(&self, weight: &Tensor, bias: Option<&Tensor>, p: &Conv2dParams) -> Result<Shape> {
         const OP: &str = "conv2d";
-        self.check_f32(OP)?;
-        weight.check_f32(OP)?;
+        self.check_float(OP)?;
+        weight.check_float_like(self, OP)?;
         self.check_same_device(weight, OP)?;
         let (n, c, h, w) =
             self.dims4().map_err(|_| Error::invalid_shape(OP, self.shape(), "input must be NCHW"))?;
@@ -93,7 +93,7 @@ impl Tensor {
             });
         }
         if let Some(b) = bias {
-            b.check_f32(OP)?;
+            b.check_float_like(self, OP)?;
             self.check_same_device(b, OP)?;
             if b.dims() != [o] {
                 return Err(Error::ShapeMismatch {
@@ -164,7 +164,7 @@ impl Tensor {
     }
 
     fn check_pool(&self, op: &'static str, p: &Pool2dParams) -> Result<[usize; 2]> {
-        self.check_f32(op)?;
+        self.check_float(op)?;
         let (_, _, h, w) =
             self.dims4().map_err(|_| Error::invalid_shape(op, self.shape(), "input must be NCHW"))?;
         if h == 0 || w == 0 {
@@ -235,7 +235,7 @@ impl Tensor {
     /// Adaptive average pooling to `[oh, ow]` (`[1, 1]` is global average pooling).
     pub fn adaptive_avg_pool2d(&self, out_hw: [usize; 2]) -> Result<Tensor> {
         const OP: &str = "adaptive_avg_pool2d";
-        self.check_f32(OP)?;
+        self.check_float(OP)?;
         let (n, c, h, w) =
             self.dims4().map_err(|_| Error::invalid_shape(OP, self.shape(), "input must be NCHW"))?;
         if out_hw.contains(&0) || h == 0 || w == 0 {
@@ -260,7 +260,7 @@ impl Tensor {
     /// Nearest-neighbour upsampling by integer factors `[sh, sw]`.
     pub fn upsample_nearest2d_hw(&self, scale: [usize; 2]) -> Result<Tensor> {
         const OP: &str = "upsample_nearest2d";
-        self.check_f32(OP)?;
+        self.check_float(OP)?;
         let (n, c, h, w) =
             self.dims4().map_err(|_| Error::invalid_shape(OP, self.shape(), "input must be NCHW"))?;
         if scale.contains(&0) {

@@ -143,6 +143,10 @@ fn init_tracing() {
 
 fn serve(args: ServeArgs, out: Out) -> Result<(), CliError> {
     init_tracing();
+    let precision: folo_vision::Precision = args
+        .precision
+        .parse()
+        .map_err(|e: folo_vision::Error| CliError::new(ExitCode::Usage, "usage", e.to_string()))?;
     let data_dir = args.data_dir.clone().unwrap_or_else(default_data_dir);
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -163,7 +167,7 @@ fn serve(args: ServeArgs, out: Out) -> Result<(), CliError> {
         let store: Arc<dyn Store> = if args.mock {
             Arc::new(MockStore::new())
         } else {
-            Arc::new(RealStore::open(data_dir.clone()).device(args.device.clone()))
+            Arc::new(RealStore::open(data_dir.clone()).device(args.device.clone()).precision(precision))
         };
         let web = resolve_web(args.web_dir.clone());
         let (web_dir, web_ready) = match &web {

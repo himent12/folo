@@ -42,5 +42,5 @@ pub use loss::{ImageTargets, LossConfig, LossItems, LossOutput, detection_loss};
 pub use metrics::{EvalConfig, EvalReport, Evaluator, Truth};
 pub use model::{FoloModel, HeadOutput, ModelConfig};
 pub use nms::{Detection, NmsConfig};
-pub use predict::{PredictConfig, Prediction, Predictor, PreparedBatch, Timing};
+pub use predict::{Precision, PredictConfig, Prediction, Predictor, PreparedBatch, Timing};
 pub use train::{TrainConfig, TrainData, TrainOptions, Trainer};

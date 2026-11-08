@@ -1,7 +1,8 @@
 // Softmax / log-softmax over the contiguous last axis, one workgroup per row.
-// Spec: LOG (log_softmax). Params: 0 = rows, 1 = row length.
-@group(0) @binding(1) var<storage, read> X: array<f32>;
-@group(0) @binding(2) var<storage, read_write> Y: array<f32>;
+// Spec: LOG (log_softmax). Params: 0 = rows, 1 = row length. XT / YT are the storage types of X and Y (f32 or
+// f16); the arithmetic is f32.
+@group(0) @binding(1) var<storage, read> X: array<XT>;
+@group(0) @binding(2) var<storage, read_write> Y: array<YT>;
 
 var<workgroup> partial: array<f32, 256>;
 
@@ -41,20 +42,20 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
     // -f32::MAX by its bits: Tint (browser WebGPU) rejects the decimal literal as out of range.
     var m = bitcast<f32>(0xff7fffffu);
     if (valid) {
-        for (var i = lid; i < n; i += 256u) { m = max(m, X[base + i]); }
+        for (var i = lid; i < n; i += 256u) { m = max(m, f32(X[base + i])); }
     }
     m = reduce_max(lid, m);
     var s = 0.0;
     if (valid) {
-        for (var i = lid; i < n; i += 256u) { s += exp(X[base + i] - m); }
+        for (var i = lid; i < n; i += 256u) { s += exp(f32(X[base + i]) - m); }
     }
     s = reduce_sum(lid, s);
     if (!valid) { return; }
     if (LOG) {
         let ls = log(s);
-        for (var i = lid; i < n; i += 256u) { Y[base + i] = X[base + i] - m - ls; }
+        for (var i = lid; i < n; i += 256u) { Y[base + i] = YT(f32(X[base + i]) - m - ls); }
     } else {
         let inv = 1.0 / s;
-        for (var i = lid; i < n; i += 256u) { Y[base + i] = exp(X[base + i] - m) * inv; }
+        for (var i = lid; i < n; i += 256u) { Y[base + i] = YT(exp(f32(X[base + i]) - m) * inv); }
     }
 }

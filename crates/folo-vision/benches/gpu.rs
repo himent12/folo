@@ -1,7 +1,10 @@
 //! The FOLO detector on the GPU, the numbers in docs/BENCHMARKS.md's FOLO columns. Run with
-//! `cargo bench -p folo-vision --bench gpu` (`FOLO_BENCH_SCALES=n,s` picks scales, default `n,s`).
+//! `cargo bench -p folo-vision --bench gpu` (`FOLO_BENCH_SCALES=n,s` picks scales, default `n,s`;
+//! `FOLO_BENCH_PRECISION=f32,f16` the inference precisions, default both, f16 only where the GPU computes in it;
+//! `FOLO_BENCH_SECTIONS=forward,predict,train` the sections, default all).
 //!
-//! Per scale, 80 classes, 640×640, f32, untrained (seed-0) weights:
+//! Per scale, 80 classes, 640×640, untrained (seed-0) weights, inference in f32 and f16 (half precision: f16
+//! weights and activations, f32 accumulation; the input is f16 too, and the predictor letterboxes into f16):
 //! - **forward**: the fused model (`fuse()`: Conv+BN folded, Conv + bias + SiLU in one kernel), eval mode,
 //!   `no_grad`, input already on the GPU. Latency: every call synchronised, 25 warm-up calls, median / p90 of
 //!   100 (batch 1) or 30 (batch 16). Throughput: the same calls back to back with one synchronise at the end.
@@ -34,7 +37,7 @@ use folo_nn::optim::{Optimizer, Sgd, StandardGroups};
 use folo_vision::boxes::Xyxy;
 use folo_vision::loss::{ImageTargets, LossConfig, detection_loss, detection_loss_host};
 use folo_vision::model::{FoloModel, ModelConfig};
-use folo_vision::predict::{PredictConfig, Predictor, letterbox_on_device};
+use folo_vision::predict::{Precision, PredictConfig, Predictor, f16_unavailable, letterbox_on_device_as};
 
 struct Stats {
     median: f64,
@@ -107,47 +110,59 @@ fn mib(b: u64) -> f64 {
     b as f64 / (1 << 20) as f64
 }
 
-fn bench_scale(scale: &str, dev: Device, ctx: &GpuContext) {
+/// The inference sections (forward, end-to-end predict) of folo-`scale` at `prec`.
+fn bench_infer(scale: &str, dev: Device, ctx: &GpuContext, prec: Precision, sections: &str) {
     let cfg = ModelConfig::new(scale, 80).expect("config");
-    let mut model = FoloModel::new(cfg.clone()).expect("model");
-    println!("\nfolo-{scale}: {} parameters (unfused)", model.num_parameters());
+    let mut model = FoloModel::new(cfg).expect("model");
+    println!("\nfolo-{scale} {prec}: {} parameters (unfused)", model.num_parameters());
     model.to_device(dev).expect("to_device");
     model.fuse().expect("fuse");
+    model.to_dtype(prec.dtype()).expect("to_dtype");
     println!("  fused: {} parameters", model.num_parameters());
     let rng = &mut Rng::seed(0);
     let _g = no_grad();
 
     // Forward.
-    println!("  [gpu load before forward: {}]", gpu_load());
-    for batch in [1usize, 16] {
-        let x = Tensor::rand_uniform([batch, 3, 640, 640], 0.0, 1.0, rng).to_device(dev).expect("upload");
-        let w0 = ctx.work_stats();
-        black_box(model.forward(&x).expect("forward"));
-        synchronize(dev).expect("sync");
-        let w1 = ctx.work_stats();
-        ctx.reset_peak_memory();
-        let base = ctx.pool_stats().live_bytes;
-        let iters = if batch == 1 { 100 } else { 30 };
-        let s = latency(dev, 25, iters, || drop(black_box(model.forward(&x).expect("forward"))));
-        let peak = ctx.pool_stats().peak_live_bytes;
-        row(&format!("forward b{batch} (fused, f32)"), &s, batch);
-        let t = throughput(dev, iters, || drop(black_box(model.forward(&x).expect("forward"))));
-        println!(
-            "    pipelined {:.2} ms/call = {:.0} img/s; {} dispatches, {} submissions per call; peak {:.0} MiB \
+    if sections.contains("forward") {
+        println!("  [gpu load before forward: {}]", gpu_load());
+        for batch in [1usize, 16] {
+            let x = Tensor::rand_uniform([batch, 3, 640, 640], 0.0, 1.0, rng)
+                .to_device(dev)
+                .expect("upload")
+                .to_dtype(prec.dtype())
+                .expect("dtype");
+            let w0 = ctx.work_stats();
+            black_box(model.forward(&x).expect("forward"));
+            synchronize(dev).expect("sync");
+            let w1 = ctx.work_stats();
+            ctx.reset_peak_memory();
+            let base = ctx.pool_stats().live_bytes;
+            let iters = if batch == 1 { 100 } else { 30 };
+            let s = latency(dev, 25, iters, || drop(black_box(model.forward(&x).expect("forward"))));
+            let peak = ctx.pool_stats().peak_live_bytes;
+            row(&format!("forward b{batch} (fused, {prec})"), &s, batch);
+            let t = throughput(dev, iters, || drop(black_box(model.forward(&x).expect("forward"))));
+            println!(
+                "    pipelined {:.2} ms/call = {:.0} img/s; {} dispatches, {} submissions per call; peak {:.0} MiB \
              (activations {:.0} MiB above weights + input)",
-            t,
-            batch as f64 * 1e3 / t,
-            w1.dispatches - w0.dispatches,
-            w1.submissions - w0.submissions,
-            mib(peak),
-            mib(peak.saturating_sub(base)),
-        );
+                t,
+                batch as f64 * 1e3 / t,
+                w1.dispatches - w0.dispatches,
+                w1.submissions - w0.submissions,
+                mib(peak),
+                mib(peak.saturating_sub(base)),
+            );
+        }
+    }
+    if !sections.contains("predict") {
+        return;
     }
 
     // End-to-end predict, through the predictor (rect letterbox for one image, square for a batch; a
     // 640×640 image is the identity either way).
     println!("  [gpu load before predict: {}]", gpu_load());
-    let pred = Predictor::new(model, PredictConfig::default()).expect("predictor");
+    let pred = Predictor::with_precision(model, PredictConfig::default(), prec).expect("predictor");
+    assert_eq!(pred.precision(), prec);
     let model = pred.model();
     let nms = folo_vision::nms::NmsConfig::default();
     for batch in [1usize, 16] {
@@ -170,7 +185,7 @@ fn bench_scale(scale: &str, dev: Device, ctx: &GpuContext) {
         };
         let iters = if batch == 1 { 50 } else { 15 };
         let s = latency(dev, 10, iters, &mut run);
-        row(&format!("predict b{batch} (e2e, f32)"), &s, batch);
+        row(&format!("predict b{batch} (e2e, {prec})"), &s, batch);
         let t = throughput(dev, iters, &mut run);
         println!("    back to back {:.2} ms/call = {:.0} img/s", t, batch as f64 * 1e3 / t);
         // Where the time goes: each phase synchronised on its own.
@@ -180,7 +195,9 @@ fn bench_scale(scale: &str, dev: Device, ctx: &GpuContext) {
         let (mut pre, mut fwd, mut post) = (Vec::new(), Vec::new(), Vec::new());
         for _ in 0..iters {
             let t0 = Instant::now();
-            let x = letterbox_on_device(&images, &boxes, dev).expect("letterbox").expect("GPU letterbox");
+            let x = letterbox_on_device_as(&images, &boxes, dev, prec.dtype())
+                .expect("letterbox")
+                .expect("GPU letterbox");
             synchronize(dev).expect("sync");
             let t1 = Instant::now();
             let out = model.forward(&x).expect("forward");
@@ -198,10 +215,13 @@ fn bench_scale(scale: &str, dev: Device, ctx: &GpuContext) {
             a.median, b.median, c.median
         );
     }
-    drop(pred);
-    drop(_g);
+}
 
-    // Training step.
+/// The training step of folo-`scale` (f32).
+fn bench_train(scale: &str, dev: Device, ctx: &GpuContext) {
+    let cfg = ModelConfig::new(scale, 80).expect("config");
+    let rng = &mut Rng::seed(1);
+    println!("\nfolo-{scale} training");
     println!("  [gpu load before train: {}]", gpu_load());
     let mut model = FoloModel::new(cfg).expect("model");
     model.to_device(dev).expect("to_device");
@@ -293,7 +313,25 @@ fn main() {
     let s = ctx.summary();
     println!("folo-vision GPU bench on {} ({}, driver {})", s.name, s.backend, s.driver);
     let scales = std::env::var("FOLO_BENCH_SCALES").unwrap_or_else(|_| "n,s".into());
+    let sections = std::env::var("FOLO_BENCH_SECTIONS").unwrap_or_else(|_| "forward,predict,train".into());
+    let precisions: Vec<Precision> = std::env::var("FOLO_BENCH_PRECISION")
+        .unwrap_or_else(|_| "f32,f16".into())
+        .split(',')
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.parse().expect("FOLO_BENCH_PRECISION: f32 and / or f16"))
+        .collect();
     for scale in scales.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-        bench_scale(scale, dev, &ctx);
+        for &prec in &precisions {
+            if prec == Precision::F16
+                && let Some(why) = f16_unavailable(dev)
+            {
+                println!("\nfolo-{scale} f16: skipped ({why})");
+                continue;
+            }
+            bench_infer(scale, dev, &ctx, prec, &sections);
+        }
+        if sections.contains("train") {
+            bench_train(scale, dev, &ctx);
+        }
     }
 }

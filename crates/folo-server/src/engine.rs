@@ -9,8 +9,9 @@ use axum::http::StatusCode;
 use folo_api::{GpuBackend, GpuInfo};
 use folo_core::Device;
 use folo_nn::io::{ModelFile, Purpose};
+use folo_vision::predict::f16_unavailable;
 use folo_vision::train::{can_place, place_model, resolve_device};
-use folo_vision::{FoloModel, PredictConfig, Predictor};
+use folo_vision::{FoloModel, Precision, PredictConfig, Predictor};
 
 use crate::error::{Error, Result};
 
@@ -170,12 +171,30 @@ pub fn read_model_file(path: &Path) -> Result<ModelFile> {
     ModelFile::from_bytes(bytes).map_err(nn_error)
 }
 
-/// Opens `.folo` weights for inference (EMA when present, fused, eval mode) on `device`.
-pub fn open_model(path: &Path, device: Device) -> Result<FoloModel> {
+/// Opens `.folo` weights for inference (EMA when present, fused, eval mode) on `device` at `precision`
+/// ([`effective_precision`]: f16 only where the device computes in it).
+pub fn open_model(path: &Path, device: Device, precision: Precision) -> Result<FoloModel> {
     let file = read_model_file(path)?;
-    let mut model = FoloModel::from_file(&file, Purpose::Inference).map_err(nn_error)?.0;
-    model.fuse().map_err(nn_error)?;
-    place_model(model, device).map_err(engine_error)
+    if precision == Precision::F32 {
+        let mut model = FoloModel::from_file(&file, Purpose::Inference).map_err(nn_error)?.0;
+        model.fuse().map_err(nn_error)?;
+        return place_model(model, device).map_err(engine_error);
+    }
+    can_place(device).map_err(engine_error)?;
+    let dtype = effective_precision(device, precision).dtype();
+    FoloModel::from_file_for_inference(&file, device, dtype).map_err(nn_error)
+}
+
+/// The precision a model runs in on `device` when `wanted` is asked for: f16 falls back to f32 (with a warning
+/// in the log) where the device has no f16 compute (the CPU, an adapter without `shader-f16`).
+pub fn effective_precision(device: Device, wanted: Precision) -> Precision {
+    match (wanted, f16_unavailable(device)) {
+        (Precision::F16, Some(why)) => {
+            tracing::warn!("precision f16: {why}");
+            Precision::F32
+        }
+        (p, _) => p,
+    }
 }
 
 /// The identity of a weights file on disk: path, size and modification time. A changed file is a new key.
@@ -197,37 +216,39 @@ impl FileKey {
     }
 }
 
-type Cached = (FileKey, Device, Arc<Mutex<Predictor>>);
+type Cached = (FileKey, Device, Precision, Arc<Mutex<Predictor>>);
 
-/// An LRU cache of loaded predictors keyed by weights file and device, so repeated predictions skip loading and
-/// fusing. A predictor serves one request at a time (its thresholds are set per call).
+/// An LRU cache of loaded predictors keyed by weights file, device and precision, so repeated predictions skip
+/// loading and fusing. A predictor serves one request at a time (its thresholds are set per call).
 #[derive(Default)]
 pub struct Predictors {
     entries: Mutex<Vec<Cached>>,
 }
 
 impl Predictors {
-    /// The predictor of `path` on `device`, loaded on a miss (evicting the least recently used beyond
-    /// [`PREDICTOR_CACHE`]).
-    pub fn get(&self, path: &Path, device: Device) -> Result<Arc<Mutex<Predictor>>> {
+    /// The predictor of `path` on `device` at `precision`, loaded on a miss (evicting the least recently used
+    /// beyond [`PREDICTOR_CACHE`]).
+    pub fn get(&self, path: &Path, device: Device, precision: Precision) -> Result<Arc<Mutex<Predictor>>> {
         let key =
             FileKey::of(path).map_err(|e| Error::internal(format!("reading {}: {e}", path.display())))?;
         {
             let mut entries = self.entries.lock().unwrap();
-            if let Some(i) = entries.iter().position(|(k, d, _)| *k == key && *d == device) {
+            if let Some(i) =
+                entries.iter().position(|(k, d, q, _)| *k == key && *d == device && *q == precision)
+            {
                 let hit = entries.remove(i);
-                let p = hit.2.clone();
+                let p = hit.3.clone();
                 entries.push(hit);
                 return Ok(p);
             }
         }
         // Loaded outside the lock: other models keep serving meanwhile (two misses on one file both load it).
-        let model = open_model(path, device)?;
+        let model = open_model(path, device, precision)?;
         let cfg = PredictConfig { imgsz: model.imgsz(), ..PredictConfig::default() };
         let p = Arc::new(Mutex::new(Predictor::new(model, cfg).map_err(engine_error)?));
         let mut entries = self.entries.lock().unwrap();
-        entries.retain(|(k, d, _)| !(k.path == key.path && *d == device));
-        entries.push((key, device, p.clone()));
+        entries.retain(|(k, d, q, _)| !(k.path == key.path && *d == device && *q == precision));
+        entries.push((key, device, precision, p.clone()));
         while entries.len() > PREDICTOR_CACHE {
             entries.remove(0);
         }
@@ -236,6 +257,6 @@ impl Predictors {
 
     /// Drops every cached predictor of `path` (its file was replaced or deleted).
     pub fn forget(&self, path: &Path) {
-        self.entries.lock().unwrap().retain(|(k, _, _)| k.path != path);
+        self.entries.lock().unwrap().retain(|(k, _, _, _)| k.path != path);
     }
 }

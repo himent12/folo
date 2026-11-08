@@ -34,6 +34,8 @@ export interface FoloLoadOptions {
   modelId?: string;
   /** Letterbox size (a multiple of 32); defaults to the file's training size. */
   imgsz?: number;
+  /** "f32" (the default) or "f16": half precision on WebGPU with shader-f16, f32 elsewhere (see info()). */
+  precision?: "f32" | "f16";
 }
 
 /** Options of `FoloDetector.detect`, with /api/predict's defaults. */
@@ -70,6 +72,10 @@ export interface FoloDetectorInfo {
   device: string;
   adapter: string | null;
   fallback: string | null;
+  /** The precision the model runs in. */
+  precision: "f32" | "f16";
+  /** Why a requested "f16" runs in f32 (no WebGPU, or no shader-f16), else null. */
+  precisionFallback: string | null;
   simd128: boolean;
   threads: number;
   arch: string;

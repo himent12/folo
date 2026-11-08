@@ -6,9 +6,10 @@ use std::time::Instant;
 
 use folo_data::{Dataset, ImageFormat, Split};
 use folo_nn::io::{FloatDType, ModelFile};
-use folo_vision::train::{place_model, resolve_device};
+use folo_vision::predict::f16_unavailable;
+use folo_vision::train::{can_place, resolve_device};
 use folo_vision::val::{ValConfig, val_metrics, validate};
-use folo_vision::{FoloModel, NmsConfig, PredictConfig, Predictor};
+use folo_vision::{FoloModel, NmsConfig, Precision, PredictConfig, Predictor};
 use serde_json::json;
 
 use crate::cli::{ExportArgs, ExportFormatArg, PredictArgs, SplitArg, ValArgs};
@@ -36,18 +37,29 @@ fn weights_error(path: &Path, e: folo_nn::Error) -> CliError {
     err
 }
 
-/// Open weights for inference (EMA when present, fused) on `device`.
-fn open_model(path: &Path, device: &str) -> Result<FoloModel, CliError> {
+/// Open weights for inference (EMA when present, fused) on `device`, in f16 with `half` where the device computes
+/// in it (an f16 export is uploaded as it is); otherwise in f32, with a note on stderr when `half` asked for f16.
+fn open_model(path: &Path, device: &str, half: bool) -> Result<FoloModel, CliError> {
     require_file(path, "model_not_found")?;
     crate::engine::init_device(device);
     let device = resolve_device(device).map_err(engine_error)?;
-    let mut model = FoloModel::open(path).map_err(|e| weights_error(path, e))?;
-    model.fuse().map_err(nn_error)?;
-    place_model(model, device).map_err(engine_error)
+    can_place(device).map_err(engine_error)?;
+    let fallback = if half { f16_unavailable(device) } else { None };
+    if let Some(why) = &fallback {
+        eprintln!("note: --half: {why}");
+    }
+    let precision = if half && fallback.is_none() { Precision::F16 } else { Precision::F32 };
+    let file = ModelFile::open(path).map_err(|e| weights_error(path, e))?;
+    FoloModel::from_file_for_inference(&file, device, precision.dtype()).map_err(nn_error)
+}
+
+/// The precision a model runs in.
+fn precision_of(model: &FoloModel) -> Precision {
+    if model.dtype() == Precision::F16.dtype() { Precision::F16 } else { Precision::F32 }
 }
 
 pub fn val(args: ValArgs, out: Out) -> Result<(), CliError> {
-    let model = open_model(&args.model, &args.device)?;
+    let model = open_model(&args.model, &args.device, args.half)?;
     let (ds, _) = open_dataset(&args.data)?;
     let split = match args.split {
         SplitArg::Train => Split::Train,
@@ -77,6 +89,7 @@ pub fn val(args: ValArgs, out: Out) -> Result<(), CliError> {
         ..ValConfig::new(imgsz, args.batch.max(1) as usize)
     };
     let device = model.device().to_string();
+    let precision = precision_of(&model);
     let r = validate(&model, Arc::new(part.clone()), &cfg).map_err(engine_error)?;
     let m = val_metrics(&r.report);
     let names = model.classes();
@@ -97,10 +110,11 @@ pub fn val(args: ValArgs, out: Out) -> Result<(), CliError> {
             "precision": c.precision, "recall": c.recall,
         })).collect::<Vec<_>>(),
         "device": device,
+        "dtype": precision,
         "seconds": r.seconds,
     }));
     out.human(format!(
-        "{} on {} ({} images, {} boxes) at {imgsz}px on {device} in {:.1}s",
+        "{} on {} ({} images, {} boxes) at {imgsz}px on {device} ({precision}) in {:.1}s",
         args.model.display(),
         split.as_str(),
         r.report.num_images,
@@ -224,7 +238,7 @@ fn write_new(dst: &Path, bytes: &[u8]) -> Result<(), String> {
 }
 
 pub fn predict(args: PredictArgs, out: Out) -> Result<(), CliError> {
-    let model = open_model(&args.model, &args.device)?;
+    let model = open_model(&args.model, &args.device, args.half)?;
     let images = collect_images(&args.sources)?;
     let cfg = PredictConfig {
         imgsz: args.imgsz.unwrap_or(model.imgsz()),
@@ -240,6 +254,7 @@ pub fn predict(args: PredictArgs, out: Out) -> Result<(), CliError> {
     };
     let classes = predictor.classes().to_vec();
     let device = predictor.device().to_string();
+    let precision = predictor.precision();
     let (mut boxes, mut failed) = (0usize, 0usize);
     let mut sum = [0f64; 4];
     let t_all = Instant::now();
@@ -286,6 +301,7 @@ pub fn predict(args: PredictArgs, out: Out) -> Result<(), CliError> {
             "boxes": p.scored_boxes(&classes),
             "timing": ti.to_api(),
             "device": device,
+            "dtype": precision,
             "saved": saved.as_ref().map(folo_api::json::path),
         }));
         let summary: Vec<String> =

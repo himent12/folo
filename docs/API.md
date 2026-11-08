@@ -286,8 +286,11 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   Boxes only use the model's classes: on a dataset image, ground-truth classes the model does not know (by name) are
   never predicted.
   Real mode runs folo-vision's `Predictor` (docs/MODEL.md §9: EMA weights, fused, letterboxed `rect` at the model's
-  `imgsz`) on the server's `--device` (`device` is `cpu` or `gpu:<n>`). Loaded models stay in an LRU of 4 (keyed by
-  the weights file's path, size and modification time, so retrained weights are reloaded); `timing` is measured:
+  `imgsz`) on the server's `--device` (`device` is `cpu` or `gpu:<n>`) at the server's `--precision` (`f32`, the
+  default; `f16` runs the model in half precision, f16 weights and activations with f32 accumulation, on a GPU with
+  `shader-f16`, and falls back to f32 with a logged warning elsewhere; so `device: gpu:0` plus `precision: f16`).
+  Loaded models stay in an LRU of 4 (keyed by the weights file's path, size and modification time, and the precision,
+  so retrained weights are reloaded); `timing` is measured:
   `preprocess_ms` includes decoding the image, `postprocess_ms` covers decoding the head outputs, NMS and rescaling.
 - `GET /api/predict/stream?model_id=..&conf=..` — WebSocket: the client sends JPEG frames (binary), the server
   answers each with the same JSON as `/api/predict` (for webcam / screen demos). Later milestone; answers
@@ -330,7 +333,8 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   Only `model_id` and `dataset_id` are required; `imgsz: null` uses the model's size. Errors: `model_not_found`,
   `dataset_not_found`, `invalid_body` (`conf` / `iou` outside `0..=1`, an `imgsz` that is not a multiple of 32
   in `32..=4096`), `invalid_dataset` (an empty split, as `folo val` reports it; real mode: the dataset's classes
-  are not the model's, in the same order). Real mode runs folo-vision's evaluator (docs/METRICS.md) on the server's `--device` with the
+  are not the model's, in the same order). Real mode runs folo-vision's evaluator (docs/METRICS.md) on the server's `--device`
+  (at its `--precision`, as `/api/predict`; the cached `/eval` metrics are always f32) with the
   request's `conf` / `iou` (the other NMS settings as in validation during training: multi-label, `max_det` 300), so
   the defaults on the validation split reproduce `/eval`'s per-class numbers; it is computed on every request (not
   cached). `timing.total_s` includes loading the model and the dataset; `per_image_ms` is the evaluation loop

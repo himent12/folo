@@ -138,6 +138,35 @@ pub fn coalesce(dims: &[usize], strides: &[&[usize]]) -> (Vec<usize>, Vec<Vec<us
     (d, s)
 }
 
+/// The same copy over whole words: when the innermost coalesced run of a sub-word view (f16, u8) is contiguous in
+/// every operand and word-aligned (its length, every offset and every outer stride a multiple of the elements per
+/// word), the views read as `u32` views with that run shortened accordingly. A sub-word gather then moves one word
+/// per element instead of assembling it, and a sub-word scatter stores words instead of two atomics per element
+/// (concatenating f16 tensors). Returns one word view per operand.
+fn as_words(elem: Elem, dims: &[usize], strides: &[&[usize]], offsets: &[usize]) -> Option<Vec<Strided>> {
+    let per = match elem {
+        Elem::F16 => 2,
+        Elem::U8 => 4,
+        _ => return None,
+    };
+    let last = dims.len().checked_sub(1)?;
+    let aligned = dims[last].is_multiple_of(per)
+        && strides.iter().zip(offsets).all(|(st, &off)| {
+            st[last] == 1 && off.is_multiple_of(per) && st[..last].iter().all(|s| s.is_multiple_of(per))
+        });
+    if !aligned {
+        return None;
+    }
+    let mut d = dims.to_vec();
+    d[last] /= per;
+    let view = |st: &[usize], off: usize| Strided {
+        offset: off / per,
+        dims: d.clone(),
+        strides: st.iter().enumerate().map(|(i, &x)| if i == last { 1 } else { x / per }).collect(),
+    };
+    Some(strides.iter().zip(offsets).map(|(st, &off)| view(st, off)).collect())
+}
+
 // ----- WGSL generators ------------------------------------------------------------------------------------------
 
 /// `fn rd(s: u32) -> u32`: element `s` (1, 2 or 4 bytes) of the word array `X`, in the low bits.
@@ -590,6 +619,9 @@ pub fn gather_strided(
             return Ok(());
         }
     }
+    if let Some(w) = as_words(elem, &dims, &[st.as_slice()], &[view.offset]) {
+        return gather_strided(ctx, Elem::U32, src, &w[0], dst);
+    }
     check_rank("gather_strided", dims.len())?;
     let spec =
         Spec::new().u32("EB", eb_of(elem)).u32("MODE", 0).u32("RANK", dims.len() as u32).bool("IDX64", false);
@@ -628,6 +660,11 @@ pub fn scatter_strided(
             ctx.copy(src, so as u64, dst, dof as u64, len as u64);
             return Ok(());
         }
+    }
+    if let Some(w) =
+        as_words(elem, &dims, &[ss.as_slice(), ds.as_slice()], &[src_view.offset, dst_view.offset])
+    {
+        return scatter_strided(ctx, Elem::U32, src, &w[0], dst, &w[1]);
     }
     check_rank("scatter_strided", dims.len())?;
     let k = ctx.kernel(&SCATTER, Spec::new().u32("EB", eb_of(elem)).u32("RANK", dims.len() as u32))?;

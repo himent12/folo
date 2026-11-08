@@ -85,6 +85,24 @@ impl Tensor {
         Ok(())
     }
 
+    /// The dtype check of compute ops: `F32` on every backend, `F16` on backends that compute in it
+    /// ([`crate::backend::Backend::computes_f16`], the GPU with `shader-f16`).
+    pub(crate) fn check_float(&self, op: &'static str) -> Result<()> {
+        match self.dtype() {
+            DType::F32 => Ok(()),
+            DType::F16 if self.backend()?.computes_f16() => Ok(()),
+            got => Err(Error::DTypeMismatch { op, expected: DType::F32, got }),
+        }
+    }
+
+    /// [`Tensor::check_float`] for a further operand of an op whose first operand is `first`: same dtype.
+    pub(crate) fn check_float_like(&self, first: &Tensor, op: &'static str) -> Result<()> {
+        if self.dtype() != first.dtype() {
+            return Err(Error::DTypeMismatch { op, expected: first.dtype(), got: self.dtype() });
+        }
+        Ok(())
+    }
+
     pub(crate) fn check_index_dtype(&self, op: &'static str) -> Result<()> {
         match self.dtype() {
             DType::I64 | DType::U32 => Ok(()),

@@ -140,6 +140,7 @@ pub struct RealStore {
     models: Models,
     predictors: Predictors,
     device: String,
+    precision: folo_vision::Precision,
 }
 
 impl RealStore {
@@ -184,7 +185,16 @@ impl RealStore {
             models,
             predictors: Predictors::default(),
             device: "auto".into(),
+            precision: folo_vision::Precision::F32,
         }
+    }
+
+    /// The precision of `/api/predict` and `/api/val` (f32, the default; f16 runs in half precision on a GPU with
+    /// `shader-f16` and falls back to f32, with a warning in the log, elsewhere). The cached `/eval` metrics stay
+    /// f32.
+    pub fn precision(mut self, precision: folo_vision::Precision) -> RealStore {
+        self.precision = precision;
+        self
     }
 
     /// The device of inference and `/eval` (`auto`, the default: the GPU when one can hold the model, else the
@@ -884,7 +894,7 @@ impl Store for RealStore {
             _ => unreachable!("dataset sources have a path"),
         };
         let decode_ms = t0.elapsed().as_secs_f64() * 1e3;
-        let predictor = self.predictors.get(&m.path, device)?;
+        let predictor = self.predictors.get(&m.path, device, self.precision)?;
         let mut p = predictor.lock().unwrap();
         let cfg = PredictConfig {
             imgsz: p.model().imgsz(),
@@ -913,7 +923,8 @@ impl Store for RealStore {
         // Waits for an index still being built, so a dataset that cannot be read fails here.
         self.fresh_index(&e)?;
         let device = engine::resolve(&self.device)?;
-        crate::models::val(&m, &self.dataset_ref(&e), req.split, req.imgsz, req.conf, req.iou, device)
+        let (ds, p) = (self.dataset_ref(&e), self.precision);
+        crate::models::val(&m, &ds, req.split, req.imgsz, req.conf, req.iou, device, p)
     }
 
     fn shutdown(&self) {

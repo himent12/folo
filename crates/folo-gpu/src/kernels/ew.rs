@@ -6,6 +6,10 @@
 //! operands; when every input is contiguous the kernel indexes linearly (with `vec4` loads when sizes and
 //! offsets allow), otherwise it walks up to [`MAX_RANK`] dims. Semantics follow folo-core's CPU kernels: stable
 //! sigmoid / softplus, NaN-ignoring `max` / `min` (Rust's `f32::max`), C `powf`, rounding half away from zero.
+//!
+//! Values are stored as f32 or (with `shader-f16`) f16: every value operand and the output share one storage
+//! type, the arithmetic is f32 either way (an f16 input is widened on load and the result rounded once on the
+//! store). A `where` condition is f32 or `u8` whatever the values are.
 
 use std::fmt::Write as _;
 
@@ -13,9 +17,11 @@ use folo_core::backend::{BinaryOp, UnaryOp};
 
 use super::shape_numel;
 use super::strided::{Strided, coalesce};
+use crate::DType;
 use crate::context::GpuContext;
 use crate::error::{GpuError, Result, shape_err};
 use crate::kernels::elementwise::MAX_RANK;
+use crate::kernels::gemm::check_dtype;
 use crate::pipeline::{Access, KernelDef, Params, Source, Spec};
 
 /// What an elementwise dispatch computes.
@@ -244,7 +250,8 @@ const POW_SCALAR: &str = "fn powv(x: f32, y: f32) -> f32 { return pow1(x, y); }\
 const POW_VEC: &str = "fn powv(x: vec4<f32>, y: vec4<f32>) -> vec4<f32> {\n\
     \x20 return vec4<f32>(pow1(x.x, y.x), pow1(x.y, y.y), pow1(x.z, y.z), pow1(x.w, y.w));\n}\n";
 
-/// Spec: KIND (1 unary, 2 unary backward, 3 binary, 4 where), OP, RANK (0 = linear), VEC4, COND_U8.
+/// Spec: KIND (1 unary, 2 unary backward, 3 binary, 4 where), OP, RANK (0 = linear), VEC4, COND_U8, and the
+/// f16 switch (value storage `S` is f16 / `vec4<f16>`, the arithmetic type `V` stays f32 / `vec4<f32>`).
 /// Params: 0 = output units, 2 = a, 3 = b, 4.. dims, 12.. / 20.. / 28.. strides of inputs 0 / 1 / 2,
 /// 36 / 37 / 38 = input offsets (in units), 62 = NaN, 63 = +inf.
 fn gen_ew(spec: &Spec) -> String {
@@ -252,6 +259,7 @@ fn gen_ew(spec: &Spec) -> String {
     let rank = spec.get_u32("RANK", 0);
     let vec = spec.get_bool("VEC4");
     let cond_u8 = spec.get_bool("COND_U8");
+    let half = spec.is_f16();
     let nin = match kind {
         1 => 1,
         2 | 3 => 2,
@@ -263,13 +271,27 @@ fn gen_ew(spec: &Spec) -> String {
     } else {
         s.push_str("alias V = f32;\nalias UV = u32;\nalias BV = bool;\n");
     }
+    let _ = writeln!(
+        s,
+        "alias S = {};",
+        match (half, vec) {
+            (true, true) => "vec4<f16>",
+            (true, false) => "f16",
+            (false, true) => "vec4<f32>",
+            (false, false) => "f32",
+        }
+    );
     s.push_str(EW_FNS);
     s.push_str(if vec { POW_VEC } else { POW_SCALAR });
     for i in 0..nin {
-        let ty = if i == 0 && kind == 4 && cond_u8 { "u32" } else { "V" };
+        let ty = match (i == 0 && kind == 4, cond_u8) {
+            (true, true) => "u32",
+            (true, false) => "V",
+            _ => "S",
+        };
         let _ = writeln!(s, "@group(0) @binding({}) var<storage, read> X{i}: array<{ty}>;", i + 1);
     }
-    let _ = writeln!(s, "@group(0) @binding({}) var<storage, read_write> Y: array<V>;", nin + 1);
+    let _ = writeln!(s, "@group(0) @binding({}) var<storage, read_write> Y: array<S>;", nin + 1);
     s.push_str(
         "@compute @workgroup_size(256)\n\
          fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,\n\
@@ -301,9 +323,9 @@ fn gen_ew(spec: &Spec) -> String {
         }
     }
     match kind {
-        1 => s.push_str("  Y[i] = un(X0[o0], a, b);\n"),
-        2 => s.push_str("  Y[i] = unb(X0[o0], X1[o1], a, b);\n"),
-        3 => s.push_str("  Y[i] = bin(X0[o0], X1[o1]);\n"),
+        1 => s.push_str("  Y[i] = S(un(V(X0[o0]), a, b));\n"),
+        2 => s.push_str("  Y[i] = S(unb(V(X0[o0]), V(X1[o1]), a, b));\n"),
+        3 => s.push_str("  Y[i] = S(bin(V(X0[o0]), V(X1[o1])));\n"),
         _ => {
             if cond_u8 {
                 s.push_str("  let c = ((X0[o0 >> 2u] >> ((o0 & 3u) * 8u)) & 0xffu) != 0u;\n");
@@ -331,15 +353,17 @@ static EW3: KernelDef = KernelDef {
     source: Source::Generated(gen_ew),
 };
 
-/// Computes `op` over `dims` into the dense f32 `out`. `inputs` are the op's operands (see [`EwOp`]), each a
-/// strided view with the output's dims.
+/// Computes `op` over `dims` into the dense `out`. `inputs` are the op's operands (see [`EwOp`]), each a
+/// strided view with the output's dims; the value operands and `out` are stored as `dtype` (f32 or f16).
 pub fn elementwise(
     ctx: &GpuContext,
     op: EwOp,
     dims: &[usize],
     inputs: &[EwInput<'_>],
     out: &wgpu::Buffer,
+    dtype: DType,
 ) -> Result<()> {
+    check_dtype(ctx, dtype, "elementwise")?;
     let (kind, code, a, b, nin, cond_u8) = match op {
         EwOp::Unary(u) => {
             let (c, a, b) = unary_code(u)?;
@@ -356,7 +380,7 @@ pub fn elementwise(
         return Err(shape_err(format!("elementwise: {op:?} takes {nin} inputs, got {}", inputs.len())));
     }
     let n = shape_numel(dims)?;
-    super::check_buf(out, n, crate::DType::F32, "elementwise output")?;
+    super::check_buf(out, n, dtype, "elementwise output")?;
     for (i, inp) in inputs.iter().enumerate() {
         if inp.view.dims != dims {
             return Err(shape_err(format!(
@@ -370,7 +394,8 @@ pub fn elementwise(
                 return Err(shape_err("elementwise: condition buffer too small"));
             }
         } else {
-            super::check_buf(inp.buf, elems, crate::DType::F32, "elementwise input")?;
+            let dt = if i == 0 && kind == 4 { DType::F32 } else { dtype };
+            super::check_buf(inp.buf, elems, dt, "elementwise input")?;
         }
     }
     if n == 0 {
@@ -391,7 +416,8 @@ pub fn elementwise(
         .u32("OP", code)
         .u32("RANK", if linear { 0 } else { cd.len() as u32 })
         .bool("VEC4", vec)
-        .bool("COND_U8", cond_u8);
+        .bool("COND_U8", cond_u8)
+        .f16(dtype == DType::F16);
     let def = match nin {
         1 => &EW1,
         2 => &EW2,

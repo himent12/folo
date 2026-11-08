@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use folo_core::Device;
+use folo_core::{DType, Device};
 use folo_nn::io::{
     FileKind, FloatDType, LoadOptions, LoadReport, Metadata, ModelFile, Purpose, export_module, save_weights,
 };
@@ -66,6 +66,33 @@ impl FoloModel {
     /// [`FoloModel::open`] straight onto `device` (for example `folo_gpu::init()?`).
     pub fn open_on(path: impl AsRef<Path>, device: Device) -> Result<Self> {
         Ok(Self::from_file_on(&ModelFile::open(path)?, Purpose::Inference, device)?.0)
+    }
+
+    /// A fused, eval-mode model for inference on `device` in `dtype` (`F32`, or `F16` on a device that computes
+    /// in it, `folo_core::backend::computes_f16`).
+    ///
+    /// A fused `F16` file (`folo export --format folo-f16`) loaded as `F16` never goes through `F32`: the
+    /// fused model is converted and moved first, and each file tensor is uploaded as the `F16` it is. Any other
+    /// file is loaded in `F32` (FORMAT.md's `F16 → F32` rule), fused in `F32`, then converted.
+    pub fn from_file_for_inference(file: &ModelFile, device: Device, dtype: DType) -> Result<Self> {
+        if !matches!(dtype, DType::F32 | DType::F16) {
+            return Err(Error::Invalid(format!("inference dtype must be f32 or f16, got {dtype}")));
+        }
+        let meta = file.metadata();
+        if dtype == DType::F16 && meta.fused && meta.dtype == FloatDType::F16 {
+            let mut model = FoloModel::new(meta.config.clone())?;
+            model.set_classes(meta.classes.clone())?;
+            model.set_imgsz(meta.imgsz);
+            model.fuse()?;
+            model.to_dtype(DType::F16)?;
+            model.to_device(device)?;
+            model.load(file, LoadOptions::strict(Purpose::Inference))?;
+            return Ok(model);
+        }
+        let (mut model, _) = Self::from_file_on(file, Purpose::Inference, device)?;
+        model.fuse()?;
+        model.to_dtype(dtype)?;
+        Ok(model)
     }
 
     /// Load `file` into this model with `opts` (FORMAT.md loading rules). When `opts.classes` is unset it is

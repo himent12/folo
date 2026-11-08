@@ -3,12 +3,12 @@
 use super::grads;
 use crate::backend::ReduceOp;
 use crate::shape::DimVec;
-use crate::{AllDims, Dim, Dims, Error, Layout, Result, Shape, Tensor};
+use crate::{AllDims, DType, Dim, Dims, Error, Layout, Result, Shape, Tensor};
 
 impl Tensor {
     /// Reduce `dims` (sorted, unique) without autograd. Output keeps the reduced dims as size 1.
     fn reduce_keepdim(&self, op: ReduceOp, dims: &[usize], name: &'static str) -> Result<Tensor> {
-        self.check_f32(name)?;
+        self.check_float(name)?;
         let b = self.backend()?;
         let mut keep_shape: DimVec = self.dims().iter().copied().collect();
         for &d in dims {
@@ -74,9 +74,14 @@ impl Tensor {
         self.sum(AllDims, false)
     }
 
-    /// Mean over `dims`.
+    /// Mean over `dims`. An `F16` input is averaged in `F32` (its sum could overflow `F16` before the division)
+    /// and the result rounded back to `F16`.
     pub fn mean(&self, dims: impl Dims, keepdim: bool) -> Result<Tensor> {
         let d = dims.to_indices(self.rank(), "mean")?;
+        if self.dtype() == DType::F16 {
+            self.check_float("mean")?;
+            return self.to_dtype(DType::F32)?.mean(d.to_vec(), keepdim)?.to_dtype(DType::F16);
+        }
         let n: usize = d.iter().map(|&i| self.dims()[i]).product();
         self.sum(d.to_vec(), keepdim)?.mul_scalar(1.0 / n.max(1) as f32)
     }
@@ -86,9 +91,14 @@ impl Tensor {
         self.mean(AllDims, false)
     }
 
-    /// Variance over `dims`; `unbiased` divides by `n - 1` (Bessel's correction).
+    /// Variance over `dims`; `unbiased` divides by `n - 1` (Bessel's correction). `F16` inputs are computed in
+    /// `F32`, like [`Tensor::mean`].
     pub fn var(&self, dims: impl Dims, unbiased: bool, keepdim: bool) -> Result<Tensor> {
         let d = dims.to_indices(self.rank(), "var")?;
+        if self.dtype() == DType::F16 {
+            self.check_float("var")?;
+            return self.to_dtype(DType::F32)?.var(d.to_vec(), unbiased, keepdim)?.to_dtype(DType::F16);
+        }
         let n: usize = d.iter().map(|&i| self.dims()[i]).product();
         let denom = if unbiased { n.saturating_sub(1) } else { n };
         let mean = self.mean(d.to_vec(), true)?;
@@ -133,7 +143,7 @@ impl Tensor {
     }
 
     fn arg_extreme(&self, op: ReduceOp, dim: impl Dim, keepdim: bool, name: &'static str) -> Result<Tensor> {
-        self.check_f32(name)?;
+        self.check_float(name)?;
         let d = dim.to_index(self.rank(), name)?;
         if self.dims()[d] == 0 {
             return Err(Error::invalid_shape(name, self.shape(), "cannot reduce an empty dimension"));
@@ -166,7 +176,7 @@ impl Tensor {
 
     fn softmax_impl(&self, dim: impl Dim, log: bool) -> Result<Tensor> {
         let name = if log { "log_softmax" } else { "softmax" };
-        self.check_f32(name)?;
+        self.check_float(name)?;
         let d = dim.to_index(self.rank(), name)?;
         let b = self.backend()?;
         let s = self.with_view(|v| b.softmax(v, d, log))?;

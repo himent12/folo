@@ -9,7 +9,7 @@ use folo_core::rng::Rng;
 use folo_data::Image;
 use folo_nn::Module;
 use folo_nn::io::{ModelFile, Purpose};
-use folo_vision::{FoloModel, ModelConfig, PredictConfig, Predictor};
+use folo_vision::{FoloModel, ModelConfig, Precision, PredictConfig, Predictor};
 use folo_wasm::detector::rgba_to_image;
 use folo_wasm::{Backend, BackendChoice, DetectOptions, Detector, LoadOptions};
 
@@ -56,10 +56,30 @@ fn rgba(w: u32, h: u32) -> Vec<u8> {
 const OPTS: DetectOptions = DetectOptions { conf: 0.3, iou: 0.7, max_det: 40 };
 
 fn load(bytes: Vec<u8>, backend: BackendChoice) -> Result<Detector, String> {
+    load_at(bytes, backend, Precision::F32)
+}
+
+fn load_at(bytes: Vec<u8>, backend: BackendChoice, precision: Precision) -> Result<Detector, String> {
     pollster::block_on(Detector::load(
         bytes,
-        LoadOptions { backend, model_id: Some("m_test".into()), imgsz: Some(256) },
+        LoadOptions { backend, model_id: Some("m_test".into()), imgsz: Some(256), precision },
     ))
+}
+
+fn has_gpu() -> bool {
+    match folo_gpu::GpuContext::shared() {
+        Ok(ctx) if ctx.summary().device_type != "Cpu" || std::env::var("FOLO_GPU_TEST_SOFTWARE").is_ok() => {
+            true
+        }
+        Ok(ctx) => {
+            eprintln!("note: skipping GPU test on software adapter {}", ctx.summary().name);
+            false
+        }
+        Err(e) => {
+            eprintln!("note: skipping GPU test, no adapter: {e}");
+            false
+        }
+    }
 }
 
 #[test]
@@ -99,10 +119,8 @@ fn cpu_matches_predictor() {
 
 #[test]
 fn gpu_matches_cpu() {
-    match folo_gpu::GpuContext::shared() {
-        Ok(ctx) if ctx.summary().device_type != "Cpu" || std::env::var("FOLO_GPU_TEST_SOFTWARE").is_ok() => {}
-        Ok(ctx) => return eprintln!("note: skipping GPU test on software adapter {}", ctx.summary().name),
-        Err(e) => return eprintln!("note: skipping GPU test, no adapter: {e}"),
+    if !has_gpu() {
+        return;
     }
     let bytes = model_bytes();
     let gpu = load(bytes.clone(), BackendChoice::Webgpu).unwrap();
@@ -130,6 +148,43 @@ fn gpu_matches_cpu() {
     }
 }
 
+/// `precision: "f16"` on WebGPU runs the model in f16 (with shader-f16) and still matches the f32 CPU boxes, to
+/// f16's rounding; on the CPU it runs in f32 and says why.
+#[test]
+fn f16_precision_option() {
+    let bytes = model_bytes();
+    let cpu = load_at(bytes.clone(), BackendChoice::Cpu, Precision::F16).unwrap();
+    let info = cpu.info();
+    assert_eq!(info.precision, Precision::F32);
+    assert!(info.precision_fallback.as_deref().is_some_and(|w| w.contains("GPU")), "{info:?}");
+    if !has_gpu() {
+        return;
+    }
+    let gpu = load_at(bytes, BackendChoice::Webgpu, Precision::F16).unwrap();
+    let info = gpu.info();
+    if let Some(why) = &info.precision_fallback {
+        return eprintln!("note: {why}");
+    }
+    assert_eq!(info.precision, Precision::F16);
+    let (w, h) = (160, 224);
+    let img = rgba(w, h);
+    let g = pollster::block_on(gpu.detect(&img, w, h, OPTS)).unwrap();
+    let c = pollster::block_on(cpu.detect(&img, w, h, OPTS)).unwrap();
+    assert!(!c.response.boxes.is_empty());
+    // f16 activations: scores agree to ~1e-2, boxes to a fraction of a pixel. Near the threshold a box can
+    // appear on one side only, so match the CPU boxes clearly above it.
+    for want in c.response.boxes.iter().filter(|b| b.score > OPTS.conf + 0.02) {
+        let close = g.response.boxes.iter().any(|b| {
+            b.class == want.class
+                && (b.score - want.score).abs() < 2e-2
+                && [b.x1 - want.x1, b.y1 - want.y1, b.x2 - want.x2, b.y2 - want.y2]
+                    .iter()
+                    .all(|d| d.abs() < 1.0)
+        });
+        assert!(close, "no f16 GPU box matches CPU box {want:?}");
+    }
+}
+
 #[test]
 fn rejects_bad_images() {
     assert!(rgba_to_image(&[0; 16], 2, 2).is_ok());
@@ -153,6 +208,9 @@ fn options_parse_from_js_json() {
     assert_eq!(l.backend, BackendChoice::Webgpu);
     assert_eq!((l.model_id.as_deref(), l.imgsz), (Some("m_1"), Some(320)));
     let l: LoadOptions = serde_json::from_str("{}").unwrap();
-    assert_eq!(l.backend, BackendChoice::Auto);
+    assert_eq!((l.backend, l.precision), (BackendChoice::Auto, Precision::F32));
+    let l: LoadOptions = serde_json::from_str(r#"{"precision":"f16"}"#).unwrap();
+    assert_eq!(l.precision, Precision::F16);
+    assert!(serde_json::from_str::<LoadOptions>(r#"{"precision":"f8"}"#).is_err());
     assert!(serde_json::from_str::<LoadOptions>(r#"{"backend":"cuda"}"#).is_err());
 }
