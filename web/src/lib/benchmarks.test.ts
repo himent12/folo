@@ -9,9 +9,14 @@ describe('benchmarks (docs/BENCHMARKS.md, 2026-11-08)', () => {
     expect(advantage(tput)).toBeCloseTo(722 / 615);
   });
 
-  it('keeps the row FOLO loses (CPU end to end), and only that one', () => {
+  it('keeps the rows FOLO trails (GPU forward throughput, CPU end to end)', () => {
     const behind = versusYolo26n.filter((v) => advantage(v) < 1).map((v) => v.metric);
-    expect(behind).toEqual(['CPU end to end, batch 1']);
+    expect(behind).toEqual(['GPU forward throughput, batch 16', 'CPU end to end, batch 1']);
+  });
+
+  it('uses the document figures for training memory', () => {
+    const mem = versusYolo26n.find((v) => v.unit === 'MiB')!;
+    expect([mem.folo, mem.yolo]).toEqual([3474, 4353]);
   });
 
   it('has measured latency only for the sizes the document measured', () => {

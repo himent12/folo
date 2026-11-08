@@ -121,7 +121,8 @@
   }
   .bar-col {
     width: 30%;
-    min-width: 80px;
+    /* Low enough that the table fits the rail at 960 px (about 278 px wide). */
+    min-width: 48px;
   }
   .bar {
     display: block;

@@ -87,4 +87,19 @@ describe('tooltip', () => {
     t.destroy();
     b.remove();
   });
+
+  it('never opens when the pointer leaves before the delay is up', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.now() + 60_000); // well past the quick re-show window after the tests above
+    const b = document.createElement('button');
+    document.body.appendChild(b);
+    const t = tooltip(b, 'Compare runs');
+    b.dispatchEvent(new PointerEvent('pointerenter'));
+    vi.advanceTimersByTime(50);
+    b.dispatchEvent(new PointerEvent('pointerleave'));
+    vi.advanceTimersByTime(550);
+    expect(document.getElementById('folo-tooltip')?.hasAttribute('data-show') ?? false).toBe(false);
+    t.destroy();
+    b.remove();
+  });
 });

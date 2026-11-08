@@ -122,12 +122,17 @@ export function tooltip(node: HTMLElement, opts: TooltipOptions) {
     clearTimeout(hideTimer);
     show(false);
   };
+  // Leaving before the delay is up cancels the pending show; a shown tooltip gets the grace period.
+  const onLeave = () => {
+    if (hideCurrent !== hide) clearTimeout(showTimer);
+    leave();
+  };
   // focusin / focusout bubble: focus on the node or anything inside it (a wrapped button) counts.
   const onFocus = (e: FocusEvent) => {
     if (e.target instanceof HTMLElement && e.target.matches(':focus-visible')) show(true, e.target);
   };
   node.addEventListener('pointerenter', onEnter);
-  node.addEventListener('pointerleave', leave);
+  node.addEventListener('pointerleave', onLeave);
   node.addEventListener('focusin', onFocus);
   node.addEventListener('focusout', hide);
   node.addEventListener('pointerdown', hide);
@@ -140,7 +145,7 @@ export function tooltip(node: HTMLElement, opts: TooltipOptions) {
     destroy() {
       hide();
       node.removeEventListener('pointerenter', onEnter);
-      node.removeEventListener('pointerleave', leave);
+      node.removeEventListener('pointerleave', onLeave);
       node.removeEventListener('focusin', onFocus);
       node.removeEventListener('focusout', hide);
       node.removeEventListener('pointerdown', hide);

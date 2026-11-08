@@ -300,7 +300,7 @@
               <span class="d-sum num truncate">
                 <span class="mono">{m.arch}</span><span class="sep" aria-hidden="true">·</span>{m.imgsz} px{#if latency(m) !== undefined}<span class="d-lat"
                     ><span class="sep" aria-hidden="true">·</span><span title="Measured end to end at 640 px: RTX 4080 SUPER, fp32, one image"
-                      >{latency(m)!.toFixed(2)} ms</span
+                      >{latency(m)!.toFixed(2)} ms{m.imgsz !== 640 ? ' at 640 px' : ''}</span
                     ></span
                   >{/if}<span class="sep" aria-hidden="true">·</span>{bytes(m.bytes, prefs.units)}
               </span>

@@ -4,8 +4,8 @@
    * positives. Cells are row-normalised and shaded on one sequential luminance ramp in ink (the diagonal is told apart
    * by position, not hue), counts on hover. `reveal(r, c)` lets a summary elsewhere point at one cell: it scrolls the
    * cell into view and makes it the active cell, whose counts the readout states. A matrix that scrolls sideways
-   * (phones) also gets a whole-matrix overview: every cell as a small square, a band over the columns in view, and a
-   * tap on it jumps to that cell.
+   * (phones) also gets a whole-matrix overview: every cell as a small square and a band over the columns in view. A tap
+   * on it brings those columns into view; cells are picked in the full matrix, whose cells are large enough to hit.
    */
   import { classColor } from '$lib/design/tokens';
   import { prefs } from '$lib/prefs.svelte';
@@ -129,11 +129,18 @@
 
   const geo = $derived(overviewGeometry(n));
   const band = $derived(range ? overviewWindow(range.first, range.last, geo) : null);
-  /** A tap on the overview: the full matrix scrolls to that cell (without jumping the page) and makes it active. */
+  /**
+   * A tap on the overview centres the tapped column in the full matrix (sideways only, so the page does not jump).
+   * Coarse on purpose: the map's squares are far below a touch target, so a near miss only moves the view a column.
+   */
   function onmap(e: MouseEvent) {
     const rect = (e.currentTarget as SVGElement).getBoundingClientRect();
     const hit = overviewHit(e.clientX - rect.left, e.clientY - rect.top, geo, n);
-    if (hit) reveal(hit.r, hit.c, 'nearest');
+    const cell = hit && root?.querySelector<HTMLElement>(`[data-r="0"][data-c="${hit.c}"]`);
+    if (!cell) return;
+    const box = root.getBoundingClientRect();
+    const at = cell.getBoundingClientRect();
+    root.scrollTo({ left: root.scrollLeft + at.left - box.left - (box.width - at.width) / 2, behavior: behavior() });
   }
 </script>
 
@@ -146,7 +153,7 @@
       <span class="num">{(rowSums[h.r] ?? 0).toLocaleString('en-US')}</span>
       (<span class="num">{(norm(h.r, h.c) * 100).toFixed(1)}%</span>)
     {:else if range}
-      Tap the map to jump to a cell, or a cell for its counts.
+      Tap the map to move to those columns, or a cell for its counts.
     {:else}
       Hover, tap or arrow through the cells for counts.
     {/if}

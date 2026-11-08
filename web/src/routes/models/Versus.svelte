@@ -1,7 +1,7 @@
 <script lang="ts">
   /**
    * How fast the engine is, against the incumbent of the same size on the same machine: every row of
-   * docs/BENCHMARKS.md's summary where both have a number, including the one FOLO loses. Values in ink; the lead is a
+   * docs/BENCHMARKS.md's summary where both have a number, including the ones FOLO trails. Values in ink; the lead is a
    * word ("1.66× faster"), never a colour, and a row where FOLO is behind says so plainly.
    */
   import { advantage, BENCH_SOURCE, versusYolo26n, type Versus } from '$lib/benchmarks';
@@ -46,8 +46,10 @@
   </table>
   <!-- The conditions every row shares, said once. -->
   <p class="src">
-    Both on the same RTX 4080 SUPER (and i7-14700KF for the CPU rows), untrained weights, 640 × 640 input. Times and
-    memory: lower is better; images per second: higher. Source: {BENCH_SOURCE.split(' · ')[0]}.
+    Both on the same RTX 4080 SUPER (and i7-14700KF for the CPU rows), 640 × 640 input. folo-n has untrained
+    weights and YOLO26n its COCO-pretrained ones, so almost no FOLO candidates pass the confidence threshold and its
+    end-to-end times include less NMS work than a trained model's (about 0.1–0.3 ms per image). Times and memory:
+    lower is better; images per second: higher. Source: {BENCH_SOURCE.split(' · ')[0]}.
   </p>
 </Panel>
 

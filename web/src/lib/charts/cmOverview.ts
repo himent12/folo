@@ -1,5 +1,6 @@
 // The whole-matrix overview shown beside a confusion matrix that scrolls sideways (phones): every cell as a small
-// square, so the pattern stays visible while the full matrix shows a few columns at a time. A tap on it jumps there.
+// square, so the pattern stays visible while the full matrix shows a few columns at a time. A tap brings those columns
+// into view.
 
 export interface OverviewGeometry {
   /** Cell side and gap between cells, in px. */

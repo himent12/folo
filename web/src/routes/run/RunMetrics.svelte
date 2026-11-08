@@ -526,7 +526,7 @@
       font-size: var(--type-2xl-size);
       line-height: 32px;
     }
-    /* 152 px holds the widest value ("7.16 × 10⁻³") unclipped; below ~1010 px the row scrolls instead. */
+    /* 152 px holds the widest value ("7.16 × 10⁻³") unclipped; below 1100 px the tabs go compact (next block). */
     .tabs {
       grid-template-columns: repeat(6, minmax(152px, 1fr));
       overflow-x: auto;
@@ -539,6 +539,21 @@
     }
     .tab::after {
       bottom: 0;
+    }
+  }
+  @media (max-width: 1099px) {
+    /* The low end of the tier: values a step smaller and tighter sides, so all six tabs fit at 960 px (128 px each
+       holds "7.16 × 10⁻³") without scrolling. */
+    .tabs {
+      grid-template-columns: repeat(6, minmax(128px, 1fr));
+    }
+    .tab {
+      padding: var(--space-3);
+    }
+    .val {
+      font-size: var(--type-xl-size);
+      line-height: 32px;
+      letter-spacing: var(--type-xl-tracking);
     }
   }
   @media (max-width: 959px) {
