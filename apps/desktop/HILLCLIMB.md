@@ -669,3 +669,49 @@ Round 18 changes:
   - A non-zero broken-label count reads as a warning.
   - Export sizes are "≈" estimates from the parameter count (f16 2 B and ONNX f32 4 B per weight).
 - **Overview:** the hero KPIs spread to the chart's height.
+
+## Round 18
+
+| Line | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | avg |
+|------|---|---|---|---|---|---|---|---|---|----|----|----|-----|
+| Opus 5.5 | 8 | 8 | 8 | 8 | 8 | 7 | 8 | 8 | 9 | 8 | 8 | 8 | 8.0 |
+| GPT-6.1 Sol | 8 | 8 | 9 | 8 | 8 | 8 | 8 | 9 | 8 | 8 | 8 | 8 | 8.3 |
+
+Both reviews centred on the model page's cramped PR plot (~175 px beside its legend) and on box labels:
+- A chip floated over a cropped box.
+- Score-only chips had no class key.
+- Small-image chips used the full size.
+- Dimmed chips were brighter than their boxes.
+- Labels were suppressed by height only.
+
+Other items:
+- The confusion error ramp started with a jump and peaked at α 0.45.
+- The Overview KPI column had a void, Best models had no heads, and the loading meter band was empty.
+- P&R had 3 ticks (a leftover override) and "close mosaic" was printed four times.
+- A class filter didn't show inside tiles.
+- Select menus never flipped; pan was unbounded.
+- Training estimates were attributed to the detected GPU.
+
+Round 19 changes:
+- **Model page:**
+  - PR gets 62 % of the row, so the plot is ~280 px; the matrix keeps 400 px and the label column is 96 px. The legend is 252 px and the x ticks read 0 / 0.5 / 1.
+  - Confusion errors use α = 0.8·√(v / max error), and the key reads "errors 0 → 25% (max)".
+  - Precision / Recall detail reads "best-F1 · IoU 0.50".
+- **Box labels:**
+  - No chip for boxes cropped out of view; chips clamp to the visible part of their box.
+  - Chips keep a 2 px gap from each other.
+  - Views under 480 px use 14 px chips with 10 px text.
+  - Dimmed chips are at 30 %, like their boxes.
+  - The small-box rule tests width or height.
+  - Validation samples get a class key.
+- **Run charts:** P&R uses the 0.25 grid. "close mosaic" is named on the mAP chart only; the others keep the line.
+- **Overview:**
+  - KPIs have a fixed 24 px gap.
+  - Best models gets column heads that share row lines with Recent runs.
+  - The loading hero has meter skeletons.
+- **Controls:**
+  - Select menus open above the trigger when there's no room below, capped to the space available with an 8 px margin.
+  - Image pan keeps at least a 48 px strip in view.
+  - Long detection names show in full on hover and on keyboard focus.
+- **Datasets:** a class filter drops the other classes' boxes to 30 % in each tile.
+- **Copy:** New run calls its time a reference estimate.

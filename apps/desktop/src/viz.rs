@@ -43,6 +43,19 @@ pub enum Fit {
 }
 
 /// Where an image of `w` × `h` lands inside `b` for a fit, zoom (1 = fit) and pan (px).
+/// `pan` held so at least a 48 px strip of the image stays in view. Viewers store the clamped
+/// value back, so reversing a pan never has a dead zone.
+pub fn clamp_pan(b: Bounds<Pixels>, w: f32, h: f32, fit: Fit, zoom: f32, pan: (f32, f32)) -> (f32, f32) {
+    let (bw, bh) = (f32::from(b.size.width), f32::from(b.size.height));
+    let s = match fit {
+        Fit::Cover => (bw / w).max(bh / h),
+        Fit::Contain => (bw / w).min(bh / h),
+    } * zoom;
+    let (dw, dh) = (w * s, h * s);
+    let keep = |view: f32, drawn: f32| ((view + drawn) / 2. - 48.).max(0.);
+    (pan.0.clamp(-keep(bw, dw), keep(bw, dw)), pan.1.clamp(-keep(bh, dh), keep(bh, dh)))
+}
+
 pub fn image_rect(b: Bounds<Pixels>, w: f32, h: f32, fit: Fit, zoom: f32, pan: (f32, f32)) -> Bounds<Pixels> {
     let (bw, bh) = (f32::from(b.size.width), f32::from(b.size.height));
     let s = match fit {
@@ -50,6 +63,7 @@ pub fn image_rect(b: Bounds<Pixels>, w: f32, h: f32, fit: Fit, zoom: f32, pan: (
         Fit::Contain => (bw / w).min(bh / h),
     } * zoom;
     let (dw, dh) = (w * s, h * s);
+    let pan = clamp_pan(b, w, h, fit, zoom, pan);
     let x = f32::from(b.left()) + (bw - dw) / 2. + pan.0;
     let y = f32::from(b.top()) + (bh - dh) / 2. + pan.1;
     Bounds::new(point(px(x), px(y)), size(px(dw), px(dh)))
@@ -156,16 +170,27 @@ pub fn paint_image_with_boxes(
                     ));
                 }
                 // Boxes under 20 px on screen show their label only when selected (design/README).
-                let small = r.size.height < px(20.) && !b.highlight;
-                if pass == 1 && !b.truth && labels && !small && (b.label.is_some() || b.score.is_some()) {
-                    let fs = ty::XS.size;
+                let small = (r.size.height < px(20.) || r.size.width < px(20.)) && !b.highlight;
+                // Cropped out of view (Fill): no chip floating over someone else's pixels.
+                let visible = r.intersect(&bounds);
+                let off_view = visible.size.width < px(4.) || visible.size.height < px(4.);
+                if pass == 1
+                    && !b.truth
+                    && labels
+                    && !small
+                    && !off_view
+                    && (b.label.is_some() || b.score.is_some())
+                {
+                    // Small views (< 480 px): 14 px chips with 10 px text (design/README).
+                    let compact = bounds.size.width < px(480.);
+                    let fs = if compact { 10. } else { ty::XS.size };
                     let name = b.label.clone().unwrap_or_default();
                     // The selected box's chip takes the selection colour, like its outline.
                     let (chip_bg, ink) = if b.highlight {
                         (t.accent_solid, t.accent_on)
                     } else if b.dim {
                         // Faded with their boxes, so the selection is the brightest thing.
-                        (alpha(color, 0.45), alpha(chip_text, 0.7))
+                        (alpha(color, 0.3), alpha(chip_text, 0.6))
                     } else {
                         (color, chip_text)
                     };
@@ -184,10 +209,19 @@ pub fn paint_image_with_boxes(
                     );
                     let gap = if score.is_empty() || name.is_empty() { px(0.) } else { px(5.) };
                     let cw = name_line.width + gap + score_line.width + px(10.);
-                    let ch = px(16.);
+                    let ch = px(if compact { 14. } else { 16. });
                     // Preferred spots: above the top-left corner, inside it, below the bottom-left
                     // corner, inside the bottom-left. Take the first that is on the image and free.
-                    let clamp_x = |x: Pixels| x.min(bounds.right() - cw).max(bounds.left());
+                    // Inside the visible part of the box when the chip fits there, else inside the view.
+                    let clamp_x = |x: Pixels| {
+                        let lo = visible.left().max(bounds.left());
+                        let hi = visible.right().min(bounds.right()) - cw;
+                        if hi >= lo {
+                            x.max(lo).min(hi)
+                        } else {
+                            x.min(bounds.right() - cw).max(bounds.left())
+                        }
+                    };
                     let candidates = [
                         point(clamp_x(r.left() - px(1.)), r.top() - ch - px(1.)),
                         point(clamp_x(r.left() + px(1.)), r.top() + px(1.)),
@@ -197,7 +231,7 @@ pub fn paint_image_with_boxes(
                     let fits = |o: Point<Pixels>| {
                         o.y >= bounds.top().max(rect.top()) && o.y + ch <= bounds.bottom().min(rect.bottom())
                     };
-                    let free = |c: &Bounds<Pixels>| !placed.iter().any(|p| p.intersects(c));
+                    let free = |c: &Bounds<Pixels>| !placed.iter().any(|p| p.dilate(px(2.)).intersects(c));
                     let origin = candidates
                         .iter()
                         .copied()
@@ -208,11 +242,12 @@ pub fn paint_image_with_boxes(
                     placed.push(chip);
                     // Dimming applies to strokes only: chip text keeps its contrast.
                     window.paint_quad(fill(chip, chip_bg).corner_radii(px(tokens::radius::XS)));
-                    let ty_ = origin.y + px(1.5);
-                    let _ = name_line.paint(point(origin.x + px(5.), ty_), px(13.), window, cx);
+                    let (ty_, lh) =
+                        if compact { (origin.y + px(1.), px(12.)) } else { (origin.y + px(1.5), px(13.)) };
+                    let _ = name_line.paint(point(origin.x + px(5.), ty_), lh, window, cx);
                     let _ = score_line.paint(
                         point(origin.x + px(5.) + name_line.width + gap, ty_),
-                        px(13.),
+                        lh,
                         window,
                         cx,
                     );

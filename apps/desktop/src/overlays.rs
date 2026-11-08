@@ -887,7 +887,7 @@ impl FoloApp {
                     "CPU selected · no time estimate; expect many times slower than a GPU".to_string()
                 } else if fits {
                     format!(
-                        "≈ {} on {gpu_name} · ≈ {vram:.1} GB of GPU memory",
+                        "≈ {} · reference estimate, not measured on {gpu_name} · ≈ {vram:.1} GB",
                         crate::api::time::duration(secs)
                     )
                 } else {
@@ -1412,8 +1412,11 @@ impl FoloApp {
                 ..DrawBox::new(b.class, b.x1, b.y1, b.x2, b.y2)
             })
             .collect();
-        let bounds_cell: Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>> =
-            Rc::new(std::cell::Cell::new(None));
+        let bounds_cell = self.insp_view.clone();
+        // A pan pushed past the edge is stored clamped, so reversing it responds at once.
+        if let (Some(b), Some(i)) = (bounds_cell.get(), self.inspector.as_mut()) {
+            i.pan = crate::viz::clamp_pan(b, dims.0, dims.1, Fit::Contain, i.zoom, i.pan);
+        }
         let paint_cell = bounds_cell.clone();
         let wheel_cell = bounds_cell.clone();
         let down_cell = bounds_cell.clone();

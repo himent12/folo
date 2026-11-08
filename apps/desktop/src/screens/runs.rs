@@ -735,7 +735,12 @@ impl FoloApp {
             c.x_int = true;
             c.x_name = "epoch";
             c.x_fmt = |v| format!("{v:.0}");
-            c.markers = vec![close_marker.clone()];
+            // Named on the first chart only; the others keep the line.
+            c.markers = vec![if id == "run-map" {
+                close_marker.clone()
+            } else {
+                Marker { label: SharedString::default(), ..close_marker.clone() }
+            }];
             // Values live in each panel's legend; the plot keeps only the cursor and dots.
             c.readout = false;
             // Same x ticks in all four charts.
@@ -809,7 +814,6 @@ impl FoloApp {
         pr.y_range = Some((0., 1.));
         pr.y_ticks = if short { 2 } else { 4 };
         pr.y_fmt = Some(|v| format!("{v:.2}"));
-        pr.y_ticks = 3;
         let mut lr = base(
             "run-lr",
             vec![Series::new("lr", t.text_tertiary, d.lr.clone()).area().live(live)],
@@ -1073,6 +1077,24 @@ impl FoloApp {
             .flex()
             .flex_col()
             .child(panel_header(&t, "Validation samples").child(seg))
+            .child(
+                div().px(px(16.)).pt(px(10.)).flex().flex_wrap().gap(px(12.)).children(
+                    self.store
+                        .dataset_summary(&r.config.dataset_id)
+                        .map(|d| d.classes.clone())
+                        .unwrap_or_default()
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, name)| {
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(6.))
+                                .child(crate::ui::class_swatch(&t, t.class(i as u32), 8.))
+                                .child(text(ty::XS, t.text_secondary).child(name))
+                        }),
+                ),
+            )
             .child(body)
             .into_any_element()
     }
