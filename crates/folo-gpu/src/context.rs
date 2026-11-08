@@ -437,6 +437,11 @@ impl GpuContext {
         self.inner.pool.lock().expect("pool lock").stats()
     }
 
+    /// Restart the pool's peak-memory counter ([`PoolStats::peak_live_bytes`]) from the current live bytes.
+    pub fn reset_peak_memory(&self) {
+        self.inner.pool.lock().expect("pool lock").reset_peak();
+    }
+
     /// Drops every cached (free) buffer in the pool.
     pub fn trim_pool(&self) {
         self.inner.pool.lock().expect("pool lock").clear();
@@ -517,8 +522,20 @@ impl GpuContext {
 
     /// Reads `len` bytes at `offset` of `buf` back to the host (flushes and waits).
     pub fn read(&self, buf: &wgpu::Buffer, offset: u64, len: u64) -> Result<Vec<u8>> {
+        self.read_with(buf, offset, len, <[u8]>::to_vec)
+    }
+
+    /// [`GpuContext::read`] that hands the mapped bytes to `f` instead of copying them into a `Vec` first,
+    /// so a caller converting them (to typed host storage) copies once.
+    pub fn read_with<R>(
+        &self,
+        buf: &wgpu::Buffer,
+        offset: u64,
+        len: u64,
+        f: impl FnOnce(&[u8]) -> R,
+    ) -> Result<R> {
         if len == 0 {
-            return Ok(Vec::new());
+            return Ok(f(&[]));
         }
         if !offset.is_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT) {
             return Err(GpuError::Shape(format!("read offset {offset} is not 4-byte aligned")));
@@ -551,7 +568,7 @@ impl GpuContext {
             .raw()
             .slice(..len4)
             .get_mapped_range()
-            .map(|view| view[..len as usize].to_vec())
+            .map(|view| f(&view[..len as usize]))
             .map_err(|e| GpuError::Map(e.to_string()));
         // Unmap on every path so the staging buffer goes back to the pool usable.
         staging.raw().unmap();

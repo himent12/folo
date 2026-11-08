@@ -27,7 +27,6 @@ pub(crate) struct TensorInner {
     storage: Arc<StorageCell>,
     layout: Layout,
     dtype: DType,
-    device: Device,
     requires_grad: AtomicBool,
     node: Option<Node>,
 }
@@ -62,18 +61,12 @@ pub struct Tensor(pub(crate) Arc<TensorInner>);
 impl Tensor {
     // ----- construction -----
 
-    pub(crate) fn from_cell(
-        storage: Arc<StorageCell>,
-        layout: Layout,
-        dtype: DType,
-        device: Device,
-    ) -> Tensor {
+    pub(crate) fn from_cell(storage: Arc<StorageCell>, layout: Layout, dtype: DType) -> Tensor {
         Tensor(Arc::new(TensorInner {
             id: TensorId::next(),
             storage,
             layout,
             dtype,
-            device,
             requires_grad: AtomicBool::new(false),
             node: None,
         }))
@@ -96,13 +89,13 @@ impl Tensor {
     /// Wrap a storage whose length is known to match.
     pub(crate) fn make(storage: Storage, shape: Shape) -> Tensor {
         debug_assert_eq!(storage.len(), shape.numel());
-        let (dtype, device) = (storage.dtype(), storage.device());
-        Self::from_cell(Arc::new(StorageCell::new(storage)), Layout::contiguous(shape), dtype, device)
+        let dtype = storage.dtype();
+        Self::from_cell(Arc::new(StorageCell::new(storage)), Layout::contiguous(shape), dtype)
     }
 
     /// A new tensor (new identity, no graph) over the same storage with `layout`.
     pub(crate) fn with_layout(&self, layout: Layout) -> Tensor {
-        Self::from_cell(self.0.storage.clone(), layout, self.0.dtype, self.0.device)
+        Self::from_cell(self.0.storage.clone(), layout, self.0.dtype)
     }
 
     /// A tensor from host data.
@@ -270,7 +263,7 @@ impl Tensor {
     /// The device.
     #[inline]
     pub fn device(&self) -> Device {
-        self.0.device
+        self.0.storage.device()
     }
 
     /// The strided layout over the storage.
@@ -450,7 +443,6 @@ impl Tensor {
             storage: inner.storage.clone(),
             layout: inner.layout.clone(),
             dtype: inner.dtype,
-            device: inner.device,
             requires_grad: AtomicBool::new(false),
             node: Some(node),
         }))
@@ -488,8 +480,7 @@ impl Tensor {
             let data = T::slice(s.as_cpu("to_vec")?).expect("dtype checked");
             return Ok(crate::cpu::elementwise::copy_strided(data, &self.0.layout));
         }
-        let mut cs = self.to_cpu_storage()?;
-        Ok(T::slice_mut(&mut cs).expect("dtype checked").to_vec())
+        Ok(T::from_storage(self.to_cpu_storage()?).expect("dtype checked"))
     }
 
     /// The rows of a rank-2 tensor.

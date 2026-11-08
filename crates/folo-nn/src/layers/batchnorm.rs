@@ -1,8 +1,9 @@
 //! 2-D batch normalisation, and the running-statistics guard for non-finite batches.
 
-use folo_core::{DType, Tensor, no_grad};
+use folo_core::{DType, Tensor, UnaryOp, no_grad};
 use rayon::prelude::*;
 
+use super::simple::Activation;
 use crate::module::{Forward, Mode, Module, TensorKind};
 use crate::{Error, Result};
 
@@ -16,7 +17,10 @@ pub const BN_MOMENTUM: f64 = 0.03;
 /// - **Training**: normalise with the batch mean and the *biased* batch variance over `N·H·W`, then update
 ///   the running statistics under `no_grad`: `running = (1 − momentum) · running + momentum · stat`, with the
 ///   *unbiased* variance (`· n / (n − 1)`). A batch with `N·H·W < 2` is an error. On the CPU this is one fused
-///   kernel with a hand-written backward (statistics accumulated in `f64`); other devices compose tensor ops.
+///   kernel with a hand-written backward (statistics accumulated in `f64`). On a device whose backend has
+///   the fused BatchNorm kernels (folo-gpu) it is those, with the running update inside the kernel and the
+///   following activation fused in when called through [`BatchNorm2d::forward_act`]; other devices compose
+///   tensor ops.
 /// - **Evaluation**: normalise with the running statistics.
 ///
 /// Tensor names: `weight` (γ), `bias` (β), `running_mean`, `running_var` (buffers). `num_batches_tracked` is
@@ -124,20 +128,52 @@ impl Module for BatchNorm2d {
     }
 }
 
-impl Forward for BatchNorm2d {
-    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+impl BatchNorm2d {
+    /// `act(BatchNorm(x))`. In training mode on a device with fused kernels (see the type docs) the
+    /// normalisation, the running-statistics update and `act` (SiLU, ReLU or none; others run separately)
+    /// are one kernel set, recorded as one [`Tensor::custom_op`] whose hand-written backward also runs fused.
+    /// Everywhere else it is the BatchNorm forward followed by `act`.
+    pub fn forward_act(&self, x: &Tensor, act: Activation) -> Result<Tensor> {
+        if self.mode.is_training() && !x.device().is_cpu() {
+            let (_, n) = self.check_input(x)?;
+            check_train_count(n, x)?;
+            if let Some(y) = self.train_fused(x, act.unary_op())? {
+                return Ok(y);
+            }
+            if act.unary_op().is_some()
+                && let Some(y) = self.train_fused(x, None)?
+            {
+                return act.forward(&y);
+            }
+        }
+        act.forward(&self.forward_plain(x)?)
+    }
+
+    /// The fused device kernels, or `None` when the backend lacks them (or this activation).
+    fn train_fused(&self, x: &Tensor, act: Option<UnaryOp>) -> Result<Option<Tensor>> {
+        let running = Some((&self.running_mean, &self.running_var, self.momentum));
+        let Some(out) = x.batch_norm_act_train(&self.weight, &self.bias, self.eps, act, running)? else {
+            return Ok(None);
+        };
+        let (xd, w, b) = (x.detach(), self.weight.detach(), self.bias.detach());
+        let (mean, invstd) = (out.mean, out.invstd);
+        let y = Tensor::custom_op("batch_norm2d_act", &[x, &self.weight, &self.bias], out.y, move |g| {
+            let (dx, dw, db) = xd.batch_norm_act_train_backward(g, &w, &b, &mean, &invstd, act)?.ok_or(
+                folo_core::Error::NotSupported { op: "batch_norm_act_train_backward", backend: "?" },
+            )?;
+            Ok(vec![Some(dx), Some(dw), Some(db)])
+        })?;
+        Ok(Some(y))
+    }
+
+    fn forward_plain(&self, x: &Tensor) -> Result<Tensor> {
         let (c, n) = self.check_input(x)?;
         let bshape = [1, c, 1, 1];
         if !self.mode.is_training() {
             let (scale, shift) = self.eval_scale_shift()?;
             return Ok(x.mul(&scale.reshape(bshape)?)?.add(&shift.reshape(bshape)?)?);
         }
-        if n < 2 {
-            return Err(Error::Invalid(format!(
-                "BatchNorm2d: training needs at least 2 values per channel, got N·H·W = {n} (input {:?})",
-                x.dims()
-            )));
-        }
+        check_train_count(n, x)?;
         let fused =
             [x, &self.weight, &self.bias].iter().all(|t| t.device().is_cpu() && t.dtype() == DType::F32);
         let (y, mean, var) = if fused {
@@ -161,6 +197,22 @@ impl Forward for BatchNorm2d {
         self.running_var.add_scaled_assign(&var, m * unbias)?;
         Ok(y)
     }
+}
+
+impl Forward for BatchNorm2d {
+    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        self.forward_act(x, Activation::Identity)
+    }
+}
+
+fn check_train_count(n: usize, x: &Tensor) -> Result<()> {
+    if n < 2 {
+        return Err(Error::Invalid(format!(
+            "BatchNorm2d: training needs at least 2 values per channel, got N·H·W = {n} (input {:?})",
+            x.dims()
+        )));
+    }
+    Ok(())
 }
 
 /// Train-mode BatchNorm on the CPU: per-channel statistics in `f64` (two passes), then the output, with a

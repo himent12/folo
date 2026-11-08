@@ -1,4 +1,5 @@
-//! Decoding and the raw prediction path (docs/MODEL.md §6.4, §9.3): forward, then decode + NMS on CPU copies.
+//! Decoding and the raw prediction path (docs/MODEL.md §6.4, §9.3): forward, decode (on the CPU with
+//! [`crate::decode`], or as tensor ops on the outputs' device), then NMS on the host.
 
 use folo_core::{Device, Tensor, no_grad};
 use folo_nn::{Error, Module, Result};
@@ -37,9 +38,14 @@ fn anchor_major(t: &Tensor) -> Result<Vec<f32>> {
 }
 
 impl HeadOutput {
-    /// Decode every image (MODEL.md §6.4) on the CPU: `(boxes [A], scores [A, nc])` in input pixels.
+    /// Decode every image (MODEL.md §6.4): `(boxes [A], scores [A, nc])` in input pixels. CPU outputs are
+    /// decoded on the CPU; outputs on another device are decoded there ([`HeadOutput::decode_on_device`])
+    /// and downloaded once.
     pub fn decode_images(&self) -> Result<Vec<(Vec<Xyxy>, Vec<f32>)>> {
         let _g = no_grad();
+        if !self.box_raw.device().is_cpu() {
+            return self.decode_on_device();
+        }
         let (a, nc, rm) = (self.num_anchors(), self.num_classes, self.reg_max);
         let reg = anchor_major(&self.box_raw)?;
         let cls = anchor_major(&self.cls_raw)?;
@@ -54,6 +60,51 @@ impl HeadOutput {
             .chunks_exact(a * 4 * rm)
             .zip(cls.chunks_exact(a * nc))
             .map(|(r, c)| decode_head(r, c, &self.anchors, rm, nc))
+            .collect())
+    }
+
+    /// [`HeadOutput::decode_images`] as device tensor ops: the DFL softmax expectation, `ltrb` → `xyxy`
+    /// around the anchor points times the stride, and the class sigmoid, assembled anchor-major as
+    /// `[B, A, 4 + nc]` on the device so that only the decoded values are downloaded (about 60% of the raw
+    /// head) and the host does no transpose. Same formulas as the CPU path (max-subtracted softmax).
+    pub fn decode_on_device(&self) -> Result<Vec<(Vec<Xyxy>, Vec<f32>)>> {
+        let _g = no_grad();
+        let (b, a, nc, rm) = (self.batch(), self.num_anchors(), self.num_classes, self.reg_max);
+        if self.box_raw.dims() != [b, 4 * rm, a] || self.cls_raw.dims() != [b, nc, a] {
+            return Err(Error::Invalid(format!(
+                "HeadOutput: box_raw {:?} / cls_raw {:?} do not match {a} anchors",
+                self.box_raw.dims(),
+                self.cls_raw.dims()
+            )));
+        }
+        let dev = self.box_raw.device();
+        // One upload: anchor x, anchor y (grid units), stride, then the bin indices 0..reg_max.
+        let mut consts = Vec::with_capacity(3 * a + rm);
+        consts.extend(self.anchors.points.iter().map(|p| p[0]));
+        consts.extend(self.anchors.points.iter().map(|p| p[1]));
+        consts.extend_from_slice(&self.anchors.strides);
+        consts.extend((0..rm).map(|i| i as f32));
+        let consts = Tensor::from_vec(consts, [3 * a + rm])?.to_device(dev)?;
+        let points = consts.narrow(0, 0, 2 * a)?.reshape([1, 2, a])?;
+        let stride = consts.narrow(0, 2 * a, a)?.reshape([1, 1, a])?;
+        let bins = consts.narrow(0, 3 * a, rm)?.reshape([1, 1, rm, 1])?;
+        let dist = self.box_raw.reshape([b, 4, rm, a])?.softmax(2)?.mul(&bins)?.sum(2, false)?; // [B, 4, A]
+        let xy1 = points.sub(&dist.narrow(1, 0, 2)?)?;
+        let xy2 = points.add(&dist.narrow(1, 2, 2)?)?;
+        let boxes = Tensor::cat(&[&xy1, &xy2], 1)?.mul(&stride)?;
+        let scores = self.cls_raw.sigmoid()?;
+        let all = Tensor::cat(&[&boxes, &scores], 1)?.transpose(1, 2)?.to_vec::<f32>()?; // [B, A, 4 + nc]
+        let row = 4 + nc;
+        Ok(all
+            .par_chunks_exact(a * row)
+            .map(|img| {
+                let boxes = img.chunks_exact(row).map(|r| Xyxy::new(r[0], r[1], r[2], r[3])).collect();
+                let mut scores = Vec::with_capacity(a * nc);
+                for r in img.chunks_exact(row) {
+                    scores.extend_from_slice(&r[4..]);
+                }
+                (boxes, scores)
+            })
             .collect())
     }
 
@@ -75,7 +126,8 @@ impl HeadOutput {
 
 impl FoloModel {
     /// The predictor's model step: an eval-mode forward under `no_grad`, then decode and class-aware NMS
-    /// (`nms`, MODEL.md §9.3) of CPU copies of the outputs, images in parallel. Boxes are in network-input
+    /// (`nms`, MODEL.md §9.3) on the host, images in parallel; outputs on a GPU are decoded there and downloaded
+    /// once ([`HeadOutput::decode_on_device`]). Boxes are in network-input
     /// pixels; mapping back through the letterbox is the caller's job. Fails in training mode, where the
     /// forward would update the BatchNorm statistics.
     pub fn predict_raw(&self, x: &Tensor, nms: &NmsConfig) -> Result<RawPrediction> {

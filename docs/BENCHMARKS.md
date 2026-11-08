@@ -1,8 +1,9 @@
 # Benchmarks: the incumbent and what FOLO must beat
 
 FOLO is meant to be faster than Ultralytics YOLO on the same hardware. This page records the incumbent's numbers on
-the dev machine, explains how they were measured, and sets the targets FOLO has to hit. The FOLO columns are left empty
-for now; fill them in as `folo bench` lands (ROADMAP M3).
+the dev machine, explains how they were measured, and sets the targets FOLO has to hit. The GPU rows of the target
+table have FOLO numbers (measured as described in [FOLO on the GPU](#folo-on-the-gpu)); the generated result tables
+further down keep their FOLO columns empty, because `render_tables.py` only reads the incumbent's JSON.
 
 - Script: [`bench/baselines/ultralytics_bench.py`](../bench/baselines/ultralytics_bench.py)
 - Raw results: [`bench/baselines/results-rtx4080s.json`](../bench/baselines/results-rtx4080s.json) (every number below,
@@ -155,17 +156,17 @@ model size.
 
 | # | metric (640x640) | incumbent bar (yolo26n) | FOLO config to compare | folo-n | folo-s |
 |---|---|---|---|---|---|
-| 1 | GPU forward latency, batch 1, f32 (median) | **4.95 ms** (best of TF32/strict, cudnn.benchmark on/off); 6.04 ms default | f32 | | |
-| 2 | GPU forward latency, batch 1, f16 (median) | **6.25 ms** | f16 | | |
-| 3 | GPU forward throughput, batch 16, f32 | **1454 img/s** (TF32 convs); 1334 img/s strict fp32 | f32 | | |
-| 4 | GPU forward throughput, batch 16, f16 | **2370 img/s** | f16 | | |
-| 5 | GPU end to end, batch 1 (decoded image in, boxes on host) | **6.92 ms** fp32 / 7.11 ms fp16 | f32 or f16, with NMS | | |
-| 6 | GPU end to end throughput, batch 16 | **615 img/s** fp16 / 536 img/s fp32 | best FOLO precision | | |
+| 1 | GPU forward latency, batch 1, f32 (median) | **4.95 ms** (best of TF32/strict, cudnn.benchmark on/off); 6.04 ms default | f32 | **3.98 ms** (beats) | 6.67 ms (yolo26s 4.87: behind) |
+| 2 | GPU forward latency, batch 1, f16 (median) | **6.25 ms** | f16 | not yet (no f16 elementwise / attention kernels) | not yet |
+| 3 | GPU forward throughput, batch 16, f32 | **1454 img/s** (TF32 convs); 1334 img/s strict fp32 | f32 | **1461 img/s** (ties TF32, beats strict) | 634 img/s (yolo26s 627: ties) |
+| 4 | GPU forward throughput, batch 16, f16 | **2370 img/s** | f16 | not yet | not yet |
+| 5 | GPU end to end, batch 1 (decoded image in, boxes on host) | **6.92 ms** fp32 / 7.11 ms fp16 | f32 or f16, with NMS | 8.69 ms f32 (behind) | 10.91 ms (yolo26s 8.59: behind) |
+| 6 | GPU end to end throughput, batch 16 | **615 img/s** fp16 / 536 img/s fp32 | best FOLO precision | 299 img/s f32 (behind) | 226 img/s (yolo26s 446 fp16: behind) |
 | 7 | CPU forward latency, batch 1, f32 (best thread count) | **22.8 ms** (8 threads; 25.1 ms at 20) | f32, best thread count | ~40 ms (fused, 8 threads, first cut; `cargo bench -p folo-vision --bench model`) | |
 | 8 | CPU end to end latency, batch 1 | **24.8 ms** (Ultralytics default, 8 threads) | f32, with NMS | ~42 ms forward + decode + NMS (`predict_raw`, no letterbox yet) | |
-| 9 | Training compute, batch 16 (step only, no data loader) | **202 img/s** fp32 (TF32) / 252 img/s AMP | f32 | | |
+| 9 | Training compute, batch 16 (step only, no data loader) | **202 img/s** fp32 (TF32) / 252 img/s AMP | f32 | 143 img/s (behind) | 68 img/s (yolo26s 105 fp32: behind) |
 | 10 | Trainer sustained images/s (epoch-2 wall), batch 16, mosaic, 8 workers, best of 3 | **199 img/s** fp32 / 224 img/s AMP | f32 | | |
-| 11 | Training peak GPU memory, batch 16, f32 | **4353 MiB** allocated (5148 MiB reserved); 2435 MiB AMP | f32 | | |
+| 11 | Training peak GPU memory, batch 16, f32 | **4353 MiB** allocated (5148 MiB reserved); 2435 MiB AMP | f32 | **3619 MiB** (train step; beats) | **6686 MiB** (yolo26s train step 8245: beats) |
 
 For yolo26s and yolo26m, read the same bars from the tables below. Rows 1, 3, 9 and 10 are the headline targets,
 because FOLO starts in f32. Row 1 is where a native engine should win by the widest margin, since the incumbent is
@@ -173,6 +174,78 @@ launch-bound there.
 
 Note on f32: PyTorch's default fp32 lets cuDNN use TF32 for convolutions. A strict-f32 FOLO kernel should be compared
 against the `fp32-strict` rows. The default-fp32 rows are what users actually get from the incumbent.
+
+## FOLO on the GPU
+
+`cargo bench -p folo-vision --bench gpu` ([`crates/folo-vision/benches/gpu.rs`](../crates/folo-vision/benches/gpu.rs);
+`FOLO_BENCH_SCALES=n,s` is the default). Same machine, wgpu 30 on Vulkan, release build, 2026-11-08. FOLO computes in
+strict f32 everywhere (no TF32, no tensor cores), so rows 1 and 3 are also comparable with the incumbent's
+`fp32-strict` rows.
+
+**Model size.** folo-n has 2,624,064 parameters and 6.54 GFLOPs at 640 (docs/MODEL.md §4; 2,616,232 parameters
+fused), folo-s 9,458,736 and 21.59 GFLOPs. That is about 19% (n) and 3% (s) more compute than fused yolo26n /
+yolo26s (5.5 / 20.9 GFLOPs by Ultralytics' count, which counts slightly more than ours), so equal speed means FOLO
+does more work per second.
+
+**Method** (it mirrors the incumbent's, see [Method](#method)):
+- Weights are untrained (seed 0), 80 classes, 640×640, f32. Inference uses the fused model (`FoloModel::fuse()`:
+  BatchNorm folded into the conv, then Conv + bias + SiLU as one kernel per conv), eval mode, `no_grad`, with the
+  input already on the GPU.
+- **Latency**: every call synchronised (`folo_core::backend::synchronize`), 25 warm-up calls, median of 100 (batch
+  1) or 30 (batch 16). **Throughput**: the same calls back to back with one synchronise at the end.
+- **End to end**: decoded `u8` RGB 640×640 images go in. The steps are letterbox on the CPU (folo-data), upload of the
+  `u8` pixels, cast + HWC→CHW + `÷255` on the GPU, forward, decode on the GPU (DFL expectation, boxes, sigmoid), one
+  download of the decoded `[B, 8400, 84]`, class-aware NMS on the CPU (predict defaults), and the boxes mapped back
+  through the letterbox. The timing ends with the boxes on the host. With untrained weights almost nothing passes
+  `conf = 0.25`, so NMS is cheaper than it would be with a trained model (by about 0.1–0.3 ms per image, see
+  `benches/post.rs`); the decode always covers every anchor.
+- **Training step**: one fixed batch of 16 random images with 8 random boxes each, on the GPU. A step is the
+  train-mode forward (fused BatchNorm + SiLU kernels), the detection loss (task-aligned assigner on host copies of
+  the head outputs), backward, and SGD (momentum 0.937, Nesterov, weight decay 5e-4 on the decay group, fused update
+  kernel). 3 warm-up steps, median of 10. No AMP, no EMA and no data loader, like the incumbent's `train_step`.
+- **Peak memory**: the buffer pool's peak live bytes over the measured calls (`PoolStats::peak_live_bytes`, the
+  counterpart of torch's `max_memory_allocated`). Pool size classes round each buffer up by at most 25%.
+- **Noise.** The GPU and CPU are shared with other agents. Before each section the bench idles for 1 s and prints
+  `nvidia-smi`'s utilisation: other processes used 2–9% of the GPU before the forward rows of this run. The CPU was
+  at 76–99% load from other jobs during the run, which inflates every host-side phase (letterbox, decode, NMS and the
+  loss's assigner). Repeated runs move the GPU-bound rows by about ±10% and the host-bound ones by up to ±30%, so
+  treat single-digit differences as ties.
+
+| f32 | forward b1 median (p90, min) | forward b16 pipelined | e2e predict b1 median | e2e predict b16 | train step b16 | peak memory: infer b16 / train b16 |
+|---|---|---|---|---|---|---|
+| folo-n | **3.98 ms** (6.66, 3.10) | **1461 img/s** (10.95 ms) | 8.69 ms | 299 img/s (53.4 ms) | 143 img/s (112 ms) | 423 MiB / **3619 MiB** |
+| folo-s | 6.67 ms (7.58, 5.05) | 634 img/s (25.2 ms) | 10.91 ms | 226 img/s (70.7 ms) | 68 img/s (234 ms) | 782 MiB / 6686 MiB |
+
+Where the time goes (medians with each phase synchronised on its own, so the phases add up to more than the end-to-end
+row):
+- **Forward**: 117 dispatches in one queue submission at batch 1 (173 at batch 16, where more convolutions take the
+  split-K path). Pipelined, batch-1 folo-n is about 2.1 ms of GPU work; the rest of the 4 ms synchronised latency is
+  submission and readback overhead.
+- **End to end, folo-n**: batch 1 is 1.8 ms preprocess, 4.5 ms forward and 2.7 ms download, decode and NMS. Batch 16 is
+  17.7, 15.4 and 21.8 ms: the host side is two thirds of it.
+- **Training step, folo-n**: forward 18 ms, loss 39 ms (downloading the raw head, 77 MB at batch 16, and running the
+  assigner on the CPU), backward 49 ms, SGD 5 ms; about 1 600 dispatches and 16 submissions per step. folo-s: 42, 62,
+  120 and 16 ms.
+
+**Verdict.** folo-n beats the incumbent on batch-1 forward latency (3.98 vs 4.95 ms) and on training memory (3.6 vs
+4.4 GiB). It ties batch-16 forward throughput (1461 vs 1454 img/s) in strict f32 against TF32 convolutions, while
+doing 19% more FLOPs. It is behind end to end (8.7 vs 6.9 ms at batch 1, 299 vs 536 img/s at batch 16) and on the
+training step (143 vs 202 img/s). folo-s ties at batch 16 and is behind at batch 1 (6.7 vs 4.9 ms).
+
+**Next optimisations**, by expected gain:
+1. **Loss on the device** (about a third of the training step): decode the predicted boxes on the GPU and download
+   4 + k channels instead of the raw head's 64 + 80, or run the task-aligned assigner on the GPU, so a step has no
+   77 MB readback.
+2. **Backward kernels** (about 45% of the step): a stride-phase decomposition for strided-conv input gradients (3/4
+   of the transposed-conv tile is zeros at stride 2, see docs/GPU.md), fewer copies for concat / split / chunk
+   gradients, and fused elementwise gradient chains in C2PSA and the head.
+3. **Host side of predict** (end to end): letterbox and normalise on the GPU (upload the original `u8` image and
+   resize there), filter candidates above `conf` on the GPU so only candidates are downloaded, and overlap the next
+   batch's upload with this batch's NMS.
+4. **Batch-1 latency of larger models** (folo-s): GEMM tile configs and split-K for the skinny batch-1 problems of the
+   deep layers, where the GPU is under-occupied.
+5. **f16 inference** (rows 2 and 4): f16 elementwise, softmax and attention kernels so a whole model can keep f16
+   storage; the GEMM and conv f16 paths already exist.
 
 ## Results
 

@@ -5,7 +5,8 @@
 //!   raw training outputs of MODEL.md §6.3 as a [`HeadOutput`], with the anchors of the input size.
 //! - [`blocks`] and [`head`]: the blocks of MODEL.md §2 and §6.1, with MODEL.md §5's tensor names.
 //! - Inference: [`FoloModel::fuse`] folds every BatchNorm into its conv; [`FoloModel::predict_raw`] runs the
-//!   forward pass and decodes + NMSes CPU copies of the outputs with [`crate::decode`] and [`crate::nms`].
+//!   forward pass, decodes the outputs (on their device) and runs [`crate::nms`] on the host.
+//! - Devices: [`FoloModel::to_device`] moves the whole model in place; [`FoloModel::open_on`] loads onto a device.
 //! - Weights: [`FoloModel::save`], [`FoloModel::export`], [`FoloModel::from_file`] /
 //!   [`FoloModel::open`] and [`FoloModel::transfer_from`] (partial loading for a new class list) go through
 //!   folo-nn's `.folo` format (docs/FORMAT.md).
@@ -449,6 +450,26 @@ impl FoloModel {
     /// The device of the weights.
     pub fn device(&self) -> Device {
         self.backbone.stem.conv.weight.device()
+    }
+
+    /// Move every weight and BatchNorm buffer to `device` in place (folo-nn's [`Module::to_device`]): tensor
+    /// identities, names, `requires_grad` and the train/eval and fused state are kept, so an optimizer or
+    /// EMA built over this model stays valid (move their own state with `Optimizer::to_device` /
+    /// `ModelEma::to_device`). Inputs must be on the same device; [`FoloModel::forward`] then runs entirely
+    /// there, and the outputs ([`HeadOutput`]) live there too.
+    ///
+    /// ```no_run
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// use folo_vision::model::{FoloModel, ModelConfig};
+    /// let dev = folo_gpu::init()?; // Device::Gpu(0)
+    /// let mut model = FoloModel::new(ModelConfig::new("n", 80)?)?;
+    /// model.to_device(dev)?;
+    /// model.fuse()?; // fused Conv + bias + SiLU kernels on the GPU
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn to_device(&mut self, device: Device) -> Result<()> {
+        Module::to_device(self, device)
     }
 }
 

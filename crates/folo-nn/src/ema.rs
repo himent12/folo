@@ -2,7 +2,8 @@
 
 use std::collections::HashMap;
 
-use folo_core::{DType, Tensor, no_grad};
+use folo_core::backend::OptimStep;
+use folo_core::{DType, Device, Tensor, no_grad};
 use serde::{Deserialize, Serialize};
 
 use crate::module::{Module, TensorKind};
@@ -48,8 +49,8 @@ pub struct ModelEma<M: Module> {
 
 impl<M: Module> ModelEma<M> {
     /// Track `source` in `module` (a fresh instance of the same architecture) with docs/MODEL.md's decay
-    /// 0.9999 and tau 2000. Copies `source`'s tensors into `module`, puts it in eval mode and turns its
-    /// gradients off.
+    /// 0.9999 and tau 2000. Moves `module` to `source`'s device, copies `source`'s tensors into it, puts it
+    /// in eval mode and turns its gradients off.
     pub fn new(module: M, source: &dyn Module) -> Result<Self> {
         Self::with_params(module, source, EMA_DECAY, EMA_TAU)
     }
@@ -59,7 +60,10 @@ impl<M: Module> ModelEma<M> {
         if !(0.0..=1.0).contains(&decay) || !(tau.is_finite() && tau > 0.0) {
             return Err(Error::Invalid(format!("ModelEma: invalid decay {decay} / tau {tau}")));
         }
-        let ema = ModelEma { module, decay, tau, updates: 0 };
+        let mut ema = ModelEma { module, decay, tau, updates: 0 };
+        if let Some(t) = source.named_tensors().first() {
+            ema.module.to_device(t.tensor.device())?;
+        }
         for t in ema.module.named_tensors() {
             t.tensor.set_requires_grad(false);
         }
@@ -73,6 +77,11 @@ impl<M: Module> ModelEma<M> {
         self.zip(source, |e, m| Ok(e.copy_from(m)?))?;
         self.updates = 0;
         Ok(())
+    }
+
+    /// Move the averaged model to `device`, in place (call it when the source model moves).
+    pub fn to_device(&mut self, device: Device) -> Result<()> {
+        self.module.to_device(device)
     }
 
     /// The EMA model (eval mode).
@@ -110,6 +119,9 @@ impl<M: Module> ModelEma<M> {
                         })
                     })?
                     .map_err(Into::into);
+            }
+            if !e.device().is_cpu() && e.optimizer_step_(m, &[], &OptimStep::Axpby { a: d32, b: w })? {
+                return Ok(());
             }
             e.mul_scalar_assign(d32)?;
             e.add_scaled_assign(m, w)?;

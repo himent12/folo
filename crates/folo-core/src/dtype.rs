@@ -76,6 +76,8 @@ pub trait Element:
     fn slice(s: &CpuStorage) -> Option<&[Self]>;
     #[doc(hidden)]
     fn slice_mut(s: &mut CpuStorage) -> Option<&mut [Self]>;
+    #[doc(hidden)]
+    fn from_storage(s: CpuStorage) -> Option<Vec<Self>>;
 }
 
 macro_rules! element {
@@ -101,6 +103,12 @@ macro_rules! element {
                 }
             }
             fn slice_mut(s: &mut CpuStorage) -> Option<&mut [Self]> {
+                match s {
+                    CpuStorage::$variant(v) => Some(v),
+                    _ => None,
+                }
+            }
+            fn from_storage(s: CpuStorage) -> Option<Vec<Self>> {
                 match s {
                     CpuStorage::$variant(v) => Some(v),
                     _ => None,

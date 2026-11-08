@@ -19,6 +19,10 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 
+[dev-dependencies]
+# GPU tests (tests/gpu.rs) and benchmarks; they skip when there is no adapter.
+folo-gpu.workspace = true
+
 [[bench]]
 name = "nn"
 harness = false

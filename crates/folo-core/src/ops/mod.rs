@@ -2,6 +2,7 @@
 
 mod copy;
 mod elementwise;
+mod fused;
 mod inplace;
 mod nn;
 mod overload;
@@ -11,6 +12,8 @@ mod view;
 use std::sync::Arc;
 
 use smallvec::SmallVec;
+
+pub use fused::BatchNormTrain;
 
 use crate::backend::View;
 use crate::storage::StorageCell;

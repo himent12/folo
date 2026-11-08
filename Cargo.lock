@@ -545,6 +545,7 @@ name = "folo-nn"
 version = "0.1.0"
 dependencies = [
  "folo-core",
+ "folo-gpu",
  "memmap2",
  "rayon",
  "serde",
@@ -580,6 +581,7 @@ dependencies = [
  "folo-api",
  "folo-core",
  "folo-data",
+ "folo-gpu",
  "folo-nn",
  "rayon",
  "serde",

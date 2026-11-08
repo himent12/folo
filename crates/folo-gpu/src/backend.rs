@@ -17,7 +17,9 @@
 
 use std::sync::{Arc, OnceLock};
 
-use folo_core::backend::{Backend, BinaryOp, Conv2dParams, Pool2dParams, ReduceOp, UnaryOp, View};
+use folo_core::backend::{
+    Backend, BinaryOp, Conv2dParams, OptimStep, Pool2dParams, ReduceOp, RunningUpdate, UnaryOp, View,
+};
 use folo_core::{
     CpuStorage, DType as CoreDType, Device, DeviceStorage, Error, Layout, Result, Shape, Storage,
 };
@@ -29,6 +31,8 @@ use crate::kernels::elementwise::UnaryOp as GpuUnary;
 use crate::kernels::ew::{self, EwInput, EwOp};
 use crate::kernels::gemm::{self, BatchStrides, GemmDesc};
 use crate::kernels::layout;
+use crate::kernels::norm::{self, BnAct, BnDesc, BnRunning};
+use crate::kernels::optim::{self, OptimUpdate};
 use crate::kernels::pool_grad::{self, Pool2d};
 use crate::kernels::pooling::Window2d;
 use crate::kernels::reduce::{self, ReduceOp as GpuReduce};
@@ -123,6 +127,30 @@ fn pool2d(p: &Pool2dParams) -> Pool2d {
     }
 }
 
+/// The conv epilogue's form of a fused activation, if it has one.
+fn conv_act(act: Option<UnaryOp>) -> Option<GpuUnary> {
+    Some(match act {
+        None => GpuUnary::Identity,
+        Some(UnaryOp::Silu) => GpuUnary::Silu,
+        Some(UnaryOp::Relu) => GpuUnary::Relu,
+        Some(UnaryOp::Sigmoid) => GpuUnary::Sigmoid,
+        Some(UnaryOp::Tanh) => GpuUnary::Tanh,
+        Some(UnaryOp::Hardswish) => GpuUnary::Hardswish,
+        Some(UnaryOp::LeakyRelu(a)) => GpuUnary::LeakyRelu(a),
+        Some(_) => return None,
+    })
+}
+
+/// The BatchNorm kernels' form of a fused activation, if they have one.
+fn bn_act(act: Option<UnaryOp>) -> Option<BnAct> {
+    Some(match act {
+        None => BnAct::Identity,
+        Some(UnaryOp::Silu) => BnAct::Silu,
+        Some(UnaryOp::Relu) => BnAct::Relu,
+        Some(_) => return None,
+    })
+}
+
 /// A dense (contiguous, offset 0) f32-or-other buffer for a view: borrowed when it already is, else a copy.
 enum Dense<'a> {
     Borrowed(&'a wgpu::Buffer),
@@ -171,6 +199,23 @@ impl GpuBackend {
                 .ok_or_else(|| core_err(GpuError::Shape("device storage is not a wgpu buffer".into()))),
             s => Err(Error::DeviceMismatch { op: "wgpu", lhs: self.device, rhs: s.device() }),
         }
+    }
+
+    /// The wgpu buffer of a whole storage on this device.
+    fn storage_buf<'a>(&self, s: &'a Storage) -> Result<&'a wgpu::Buffer> {
+        match s {
+            Storage::Device(ds) if ds.device() == self.device => ds
+                .downcast_ref::<GpuStorage>()
+                .map(|s| s.buf.raw())
+                .ok_or_else(|| core_err(GpuError::Shape("device storage is not a wgpu buffer".into()))),
+            s => Err(Error::DeviceMismatch { op: "wgpu", lhs: self.device, rhs: s.device() }),
+        }
+    }
+
+    fn bn_desc(&self, x: &Shape, act: Option<UnaryOp>, op: &'static str) -> Result<BnDesc> {
+        let act = bn_act(act).ok_or(Error::NotSupported { op, backend: BACKEND_NAME })?;
+        let (n, c, h, w) = nchw(x);
+        Ok(BnDesc { n, c, hw: h * w, act })
     }
 
     fn alloc(&self, dtype: CoreDType, len: usize) -> Result<GpuBuffer> {
@@ -340,13 +385,13 @@ impl Backend for GpuBackend {
         let eb = dtype.size_in_bytes();
         let b = self.buf(&src)?;
         let off = src.layout.offset() * eb;
-        let bytes = if src.layout.is_contiguous() && off.is_multiple_of(4) {
-            self.ctx.read(b, off as u64, (n * eb) as u64).core()?
+        let decode = |bytes: &[u8]| CpuStorage::from_bytes(bytes, dtype);
+        if src.layout.is_contiguous() && off.is_multiple_of(4) {
+            self.ctx.read_with(b, off as u64, (n * eb) as u64, decode).core()?
         } else {
             let d = self.dense(&src)?;
-            self.ctx.read(d.raw(), 0, (n * eb) as u64).core()?
-        };
-        CpuStorage::from_bytes(&bytes, dtype)
+            self.ctx.read_with(d.raw(), 0, (n * eb) as u64, decode).core()?
+        }
     }
 
     fn copy_strided(&self, src: View<'_>) -> Result<Storage> {
@@ -724,5 +769,151 @@ impl Backend for GpuBackend {
             reduce::topk(&self.ctx, xd.raw(), vals.raw(), idx.raw(), rows, d, k, largest).core()?;
         }
         Ok((self.wrap(CoreDType::F32, len, vals), self.wrap(CoreDType::I64, len, idx)))
+    }
+
+    fn conv2d_act(
+        &self,
+        x: View<'_>,
+        w: View<'_>,
+        bias: Option<View<'_>>,
+        p: &Conv2dParams,
+        act: Option<UnaryOp>,
+    ) -> Result<Storage> {
+        let mut d = self.conv_desc(x.shape(), w.shape(), p);
+        d.act = conv_act(act).ok_or(Error::NotSupported { op: "conv2d_act", backend: BACKEND_NAME })?;
+        let (oh, ow) = d.output().core()?;
+        let len = d.n * d.c_out * oh * ow;
+        let out = self.alloc(CoreDType::F32, len)?;
+        let (xd, wd) = (self.dense(&x)?, self.dense(&w)?);
+        let bd = bias.as_ref().map(|b| self.dense(b)).transpose()?;
+        conv::conv2d(&self.ctx, &d, xd.raw(), wd.raw(), bd.as_ref().map(|b| b.raw()), out.raw()).core()?;
+        Ok(self.wrap(CoreDType::F32, len, out))
+    }
+
+    fn batch_norm_act(
+        &self,
+        x: View<'_>,
+        weight: View<'_>,
+        bias: View<'_>,
+        eps: f32,
+        act: Option<UnaryOp>,
+        running: Option<RunningUpdate<'_>>,
+    ) -> Result<(Storage, Storage, Storage)> {
+        let d = self.bn_desc(x.shape(), act, "batch_norm_act")?;
+        let len = x.layout.numel();
+        let (y, mean, invstd) = (
+            self.alloc(CoreDType::F32, len)?,
+            self.alloc(CoreDType::F32, d.c)?,
+            self.alloc(CoreDType::F32, d.c)?,
+        );
+        let (xd, wd, bd) = (self.dense(&x)?, self.dense(&weight)?, self.dense(&bias)?);
+        let run = match &running {
+            Some(r) => Some(BnRunning {
+                mean: self.storage_buf(r.mean)?,
+                var: self.storage_buf(r.var)?,
+                momentum: r.momentum,
+            }),
+            None => None,
+        };
+        norm::batch_norm_forward(
+            &self.ctx,
+            &d,
+            xd.raw(),
+            wd.raw(),
+            bd.raw(),
+            eps,
+            run,
+            y.raw(),
+            mean.raw(),
+            invstd.raw(),
+        )
+        .core()?;
+        Ok((
+            self.wrap(CoreDType::F32, len, y),
+            self.wrap(CoreDType::F32, d.c, mean),
+            self.wrap(CoreDType::F32, d.c, invstd),
+        ))
+    }
+
+    fn batch_norm_act_backward(
+        &self,
+        x: View<'_>,
+        grad: View<'_>,
+        weight: View<'_>,
+        bias: View<'_>,
+        mean: View<'_>,
+        invstd: View<'_>,
+        act: Option<UnaryOp>,
+    ) -> Result<(Storage, Storage, Storage)> {
+        let d = self.bn_desc(x.shape(), act, "batch_norm_act_backward")?;
+        let len = x.layout.numel();
+        let (dx, dw, db) = (
+            self.alloc(CoreDType::F32, len)?,
+            self.alloc(CoreDType::F32, d.c)?,
+            self.alloc(CoreDType::F32, d.c)?,
+        );
+        let (xd, gd) = (self.dense(&x)?, self.dense(&grad)?);
+        let (wd, bd, md, id) =
+            (self.dense(&weight)?, self.dense(&bias)?, self.dense(&mean)?, self.dense(&invstd)?);
+        norm::batch_norm_backward(
+            &self.ctx,
+            &d,
+            xd.raw(),
+            gd.raw(),
+            wd.raw(),
+            bd.raw(),
+            md.raw(),
+            id.raw(),
+            dx.raw(),
+            dw.raw(),
+            db.raw(),
+        )
+        .core()?;
+        Ok((
+            self.wrap(CoreDType::F32, len, dx),
+            self.wrap(CoreDType::F32, d.c, dw),
+            self.wrap(CoreDType::F32, d.c, db),
+        ))
+    }
+
+    fn optimizer_step(
+        &self,
+        param: &mut Storage,
+        grad: View<'_>,
+        state: &mut [&mut Storage],
+        step: &OptimStep,
+    ) -> Result<()> {
+        let n = grad.layout.numel();
+        let u = match *step {
+            OptimStep::Sgd { lr, momentum, weight_decay, nesterov } => {
+                OptimUpdate::Sgd { lr, momentum, weight_decay, nesterov }
+            }
+            OptimStep::AdamW {
+                decay,
+                beta1,
+                one_minus_beta1,
+                beta2,
+                one_minus_beta2,
+                step_size,
+                bc2_sqrt,
+                eps,
+            } => OptimUpdate::AdamW {
+                decay,
+                beta1,
+                one_minus_beta1,
+                beta2,
+                one_minus_beta2,
+                step_size,
+                bc2_sqrt,
+                eps,
+            },
+            OptimStep::Axpby { a, b } => OptimUpdate::Axpby { a, b },
+            _ => return Err(Error::NotSupported { op: "optimizer_step", backend: BACKEND_NAME }),
+        };
+        let gd = self.dense(&grad)?;
+        let p = self.storage_buf(param)?;
+        let s0 = state.first().map(|s| self.storage_buf(s)).transpose()?;
+        let s1 = state.get(1).map(|s| self.storage_buf(s)).transpose()?;
+        optim::optimizer_step(&self.ctx, &u, p, gd.raw(), s0, s1, n).core()
     }
 }

@@ -30,7 +30,7 @@ mod sgd;
 
 use std::collections::HashMap;
 
-use folo_core::{Grads, Tensor};
+use folo_core::{Device, Grads, Tensor};
 use serde::{Deserialize, Serialize};
 
 pub use adamw::AdamW;
@@ -197,6 +197,22 @@ pub trait Optimizer: Send {
     /// Missing or mismatched state is an error unless `step == 0`, where missing state stays zero
     /// (docs/FORMAT.md, optimizer contract).
     fn load_state(&mut self, step: u64, state: &HashMap<String, Tensor>) -> Result<()>;
+
+    /// Move every group's parameters and the optimizer state (SGD momentum buffers, AdamW moments) to
+    /// `device`, in place ([`Tensor::to_device_`]): identities are kept, so gradients from a model moved with
+    /// [`crate::Module::to_device`] still match. State created later (a momentum buffer that warmup turns
+    /// on) is allocated on its parameter's device.
+    fn to_device(&mut self, device: Device) -> Result<()> {
+        for g in self.groups() {
+            for (_, p) in &g.params {
+                p.to_device_(device)?;
+            }
+        }
+        for (_, t) in self.state_tensors()? {
+            t.to_device_(device)?;
+        }
+        Ok(())
+    }
 
     /// The `folo.optim` contract.
     fn contract(&self) -> OptimContract {

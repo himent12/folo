@@ -100,7 +100,8 @@ impl Conv2dConfig {
         Ok(())
     }
 
-    fn params(&self) -> Conv2dParams {
+    /// The folo-core convolution geometry.
+    pub fn params(&self) -> Conv2dParams {
         Conv2dParams {
             stride: [self.stride; 2],
             padding: [self.padding; 2],

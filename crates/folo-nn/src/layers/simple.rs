@@ -2,8 +2,8 @@
 
 use std::borrow::Borrow;
 
-use folo_core::Tensor;
 use folo_core::rng::Rng;
+use folo_core::{Tensor, UnaryOp};
 
 use crate::init;
 use crate::module::{Forward, Module, TensorKind};
@@ -88,6 +88,22 @@ pub enum Activation {
     Tanh,
     /// `x · relu6(x + 3) / 6`.
     Hardswish,
+}
+
+impl Activation {
+    /// The folo-core op this activation applies (`None` for the identity), for fused kernels
+    /// ([`Tensor::conv2d_act`], [`Tensor::batch_norm_act_train`]).
+    pub fn unary_op(self) -> Option<UnaryOp> {
+        Some(match self {
+            Activation::Identity => return None,
+            Activation::Silu => UnaryOp::Silu,
+            Activation::Relu => UnaryOp::Relu,
+            Activation::LeakyRelu(s) => UnaryOp::LeakyRelu(s),
+            Activation::Sigmoid => UnaryOp::Sigmoid,
+            Activation::Tanh => UnaryOp::Tanh,
+            Activation::Hardswish => UnaryOp::Hardswish,
+        })
+    }
 }
 
 impl Module for Activation {}

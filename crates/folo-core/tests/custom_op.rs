@@ -73,3 +73,40 @@ fn custom_op_gradient_dtype_must_match() -> Result<()> {
     assert!(matches!(bad.sum_all()?.backward(), Err(Error::Autograd(_))));
     Ok(())
 }
+
+/// `to_device_` without a GPU: a no-op on the same device, a clear error (and an untouched tensor) for an
+/// unregistered one, and a refusal for results of recorded ops.
+#[test]
+fn to_device_in_place_on_the_cpu() {
+    use folo_core::Device;
+    let t = Tensor::from_slice(&[1.0f32, 2.0, 3.0], [3]).unwrap().requires_grad_();
+    let id = t.id();
+    t.to_device_(Device::Cpu).unwrap();
+    assert!(matches!(t.to_device_(Device::Gpu(31)), Err(Error::BackendNotRegistered(Device::Gpu(31)))));
+    assert_eq!((t.id(), t.device()), (id, Device::Cpu));
+    assert_eq!(t.to_vec::<f32>().unwrap(), [1.0, 2.0, 3.0]);
+    assert!(t.mul_scalar(2.0).unwrap().to_device_(Device::Cpu).is_ok(), "same device: nothing to move");
+    assert!(matches!(t.mul_scalar(2.0).unwrap().to_device_(Device::Gpu(31)), Err(Error::Autograd(_))));
+}
+
+/// Fused entry points the CPU backend does not implement report "not available" without touching anything:
+/// a graph recorded before the call still runs backward (no storage version was bumped).
+#[test]
+fn unsupported_fused_calls_keep_graphs_valid() {
+    use folo_core::backend::OptimStep;
+    let p = Tensor::from_slice(&[1.0f32, 2.0], [2]).unwrap().requires_grad_();
+    let y = p.square().unwrap().sum_all().unwrap();
+    {
+        let _g = no_grad();
+        let g = Tensor::ones([2]);
+        let step = OptimStep::Sgd { lr: 0.1, momentum: 0.0, weight_decay: 0.0, nesterov: false };
+        assert!(!p.optimizer_step_(&g, &[], &step).unwrap());
+    }
+    assert!(y.backward().is_ok());
+    let x = Tensor::ones([2, 1, 2, 2]).requires_grad_();
+    let (rm, rv) = (Tensor::zeros([1]), Tensor::ones([1]));
+    let z = rm.add(&x).unwrap().sum_all().unwrap();
+    let (w, b) = (Tensor::ones([1]), Tensor::zeros([1]));
+    assert!(x.batch_norm_act_train(&w, &b, 1e-3, None, Some((&rm, &rv, 0.1))).unwrap().is_none());
+    assert!(z.backward().is_ok());
+}

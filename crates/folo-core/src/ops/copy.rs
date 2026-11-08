@@ -351,6 +351,40 @@ impl Tensor {
         let src = self.device();
         Ok(out.track("to_device", &[self], move |g| Ok(grads![Some(g.to_device(src)?)])))
     }
+
+    /// Move this tensor's storage to `device` **in place** (a no-op if it is already there): PyTorch's
+    /// `param.data = param.data.to(device)`. The tensor keeps its identity ([`Tensor::id`], so [`crate::Grads`]
+    /// keys and optimizer state still match), its `requires_grad` flag and its layout; every clone and view
+    /// sharing the storage moves with it. This is how folo-nn moves a whole model (`Module::to_device`).
+    ///
+    /// Not an autograd op. The storage version is bumped, so a graph recorded before the move that saved
+    /// this tensor fails `backward()` with [`Error::ModifiedInPlace`]. Only leaves can move (a tensor
+    /// produced by a recorded op would send its gradient to the wrong device). Do not call it while another
+    /// thread uses the tensor.
+    pub fn to_device_(&self, device: Device) -> Result<()> {
+        if device == self.device() {
+            return Ok(());
+        }
+        if !self.is_leaf() {
+            return Err(Error::Autograd(format!(
+                "to_device_: {} is the result of a recorded op; detach it or use to_device",
+                self.grad_fn_name().unwrap_or("?")
+            )));
+        }
+        let dst = backend::backend(device)?;
+        let cell = self.cell();
+        let mut guard = cell.write();
+        let new = match &*guard {
+            crate::Storage::Cpu(host) => dst.upload(device, host)?,
+            s => {
+                let whole = Layout::contiguous(Shape::new(&[s.len()]));
+                let host = backend::backend(s.device())?.download(backend::View::new(s, &whole))?;
+                if device.is_cpu() { crate::Storage::Cpu(host) } else { dst.upload(device, &host)? }
+            }
+        };
+        cell.replace(&mut guard, new);
+        Ok(())
+    }
 }
 
 #[cfg(test)]
