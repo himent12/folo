@@ -88,9 +88,12 @@ export function lossAt(p: RunProfile, epochF: number, noisy: boolean): Loss {
   const closing = Math.max(0, epochF - (p.config.epochs - p.config.augment.close_mosaic));
   const close = closing > 0 ? 1 - 0.12 * Math.min(1, closing / 2) : 1;
   const n = (k: number, amp: number) => (noisy ? 1 + amp * smoothNoise(s + k, epochF * 9) + amp * 0.6 * (rng(s + k + Math.floor(epochF * 997))() - 0.5) : 1);
-  const box = (0.92 + 1.55 * Math.exp(-epochF / 16)) * close * n(1, 0.05);
-  const cls = (0.42 + 2.6 * Math.exp(-epochF / 9)) * close * n(2, 0.07);
-  const dfl = (0.9 + 0.62 * Math.exp(-epochF / 22)) * close * n(3, 0.035);
+  // Harder runs (lower ceiling) plateau higher; slower runs (larger tau) decay slower.
+  const k = 0.7 + (0.8 - p.mapMax) * 1.6;
+  const t = p.tau / 14;
+  const box = (0.92 * k + 1.55 * Math.exp(-epochF / (16 * t))) * close * n(1, 0.05);
+  const cls = (0.42 * k + 2.6 * Math.exp(-epochF / (9 * t))) * close * n(2, 0.07);
+  const dfl = (0.9 * k + 0.62 * Math.exp(-epochF / (22 * t))) * close * n(3, 0.035);
   return { box: r4(box), cls: r4(cls), dfl: r4(dfl), total: r4(box + cls + dfl) };
 }
 
