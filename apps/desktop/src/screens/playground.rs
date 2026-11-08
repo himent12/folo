@@ -377,7 +377,7 @@ impl FoloApp {
                         d.child(div().flex_none().flex().items_center().gap(px(6.)).child(
                             text(ty::XS, t.text_secondary).tnum().child(format!(
                                 "{n} {} ≥ {:.2}",
-                                if n == 1 { "object" } else { "objects" },
+                                if n == 1 { "detection" } else { "detections" },
                                 self.play_conf
                             )),
                         ))
@@ -851,7 +851,6 @@ impl FoloApp {
                 .map(|v| {
                     v.iter()
                         .filter(|m| m.split == Split::Val && !m.boxes.is_empty())
-                        .skip(17)
                         .take(4)
                         .cloned()
                         .collect()

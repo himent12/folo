@@ -236,6 +236,8 @@ impl FoloApp {
         let items = self.filtered_palette();
         let n = items.len();
         let p = self.palette.as_ref().unwrap();
+        // With no query the list is every command; with one it is matches.
+        let searching = !p.query.trim().is_empty();
         let selected = p.selected.min(n.saturating_sub(1));
         let input = p.input.clone();
         let actions: Vec<Action> = items.iter().map(|i| i.action.clone()).collect();
@@ -424,7 +426,11 @@ impl FoloApp {
                                     .child(text(ty::XS, t.text_tertiary).child("open")),
                             )
                             .child(div().flex_1())
-                            .child(text(ty::XS, t.text_tertiary).tnum().child(format!("{n} results"))),
+                            .child(text(ty::XS, t.text_tertiary).tnum().child(if searching {
+                                format!("{n} results")
+                            } else {
+                                format!("{n} commands")
+                            })),
                     ),
             );
         div()
@@ -706,7 +712,9 @@ impl FoloApp {
                 ("SGD", "0.01".to_string())
             } else {
                 let lr = (0.01 / (4. + d.classes.len() as f64) * 1e6).round() / 1e6;
-                ("AdamW", format!("{lr:.6}").trim_end_matches('0').to_string())
+                // Its six decimals, shown to three significant figures (0.00111, 0.000119).
+                let digits = (2 - lr.log10().floor() as i32).clamp(0, 6) as usize;
+                ("AdamW", format!("{lr:.digits$}"))
             }
         });
         // The adapter behind "GPU 0", named as the other screens name it.
@@ -726,7 +734,7 @@ impl FoloApp {
         };
         let (epochs_input, lr_input, epochs_bad, lr_bad) = {
             let f = self.new_run.as_ref().unwrap();
-            (f.epochs_input.clone(), f.lr_input.clone(), f.epochs_invalid, f.lr_invalid)
+            (f.epochs_input.clone(), f.lr_input.clone(), f.epochs_invalid, f.lr_invalid && f.optimizer != 0)
         };
         let (close_input, close_bad) = {
             let f = self.new_run.as_ref().unwrap();
@@ -933,20 +941,46 @@ impl FoloApp {
                             .flex()
                             .flex_col()
                             .gap(px(8.))
-                            .child(typed(
-                                "Initial learning rate",
-                                lr_box,
-                                lr_slider,
-                                lr_bad.then_some("Enter a number above 0 and below 10, e.g. 0.01 or 1e-3"),
-                            ))
-                            // The schedule, and under Auto the rate it uses instead (short windows keep
-                            // the Schedule above the footer; the Optimizer helper still says it).
+                            // Under Auto the engine sets the rate itself: the field shows that rate,
+                            // read-only, instead of an editable value it would ignore.
+                            .child(if opt == 0 {
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(8.))
+                                    .child(label("Initial learning rate"))
+                                    .child(
+                                        div()
+                                            .h(px(crate::theme::size::CONTROL_MD))
+                                            .px(px(8.))
+                                            .flex()
+                                            .items_center()
+                                            .rounded(px(radius::MD))
+                                            .bg(t.bg_inset)
+                                            .child(text(ty::SM, t.text_tertiary).tnum().child(
+                                                match &auto_pick {
+                                                    Some((_, lr)) => format!("Auto · {lr}"),
+                                                    None => "Auto".to_string(),
+                                                },
+                                            )),
+                                    )
+                                    .into_any_element()
+                            } else {
+                                typed(
+                                    "Initial learning rate",
+                                    lr_box,
+                                    lr_slider,
+                                    lr_bad
+                                        .then_some("Enter a number above 0 and below 10, e.g. 0.01 or 1e-3"),
+                                )
+                                .into_any_element()
+                            })
+                            // The schedule (short windows keep the Schedule above the footer).
                             .when(!short && !lr_bad, |d| {
-                                d.child(text(ty::XS, t.text_tertiary).tnum().child(match &auto_pick {
-                                    Some((_, lr)) => {
-                                        format!("Auto uses {lr}; 3-epoch warmup, then linear decay")
-                                    }
-                                    None => "3-epoch warmup, then linear decay to 1%".to_string(),
+                                d.child(text(ty::XS, t.text_tertiary).child(if opt == 0 {
+                                    "Set by Auto; pick SGD or AdamW to choose your own"
+                                } else {
+                                    "3-epoch warmup, then linear decay to 1%"
                                 }))
                             }),
                     ),
@@ -1089,10 +1123,12 @@ impl FoloApp {
             .and_then(|rs| rs.iter().find(|r| r.status.is_active() && r.status != RunStatus::Queued))
             .map(|r| r.name.clone());
         let busy = busy_with.is_some();
+        let (go, going) =
+            if busy { ("Queue training", "Queuing…") } else { ("Start training", "Starting…") };
         let start = if submitting {
             self.button_disabled(
                 "nr-start",
-                "Starting…",
+                going,
                 Btn::Primary,
                 Some("icons/play.svg"),
                 "Creating the run…",
@@ -1102,7 +1138,7 @@ impl FoloApp {
         } else if epochs_bad || lr_bad || close_bad {
             self.button_disabled(
                 "nr-start",
-                "Start training",
+                go,
                 Btn::Primary,
                 Some("icons/play.svg"),
                 "Fix the highlighted fields first",
@@ -1112,7 +1148,7 @@ impl FoloApp {
         } else {
             self.button(
                 "nr-start",
-                if busy { "Queue training" } else { "Start training" },
+                go,
                 Btn::Primary,
                 Some("icons/play.svg"),
                 window,

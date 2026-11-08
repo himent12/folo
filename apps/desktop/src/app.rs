@@ -1664,7 +1664,9 @@ impl FoloApp {
 
     pub fn submit_new_run(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(form) = self.new_run.as_mut() else { return };
-        if form.submitting || form.epochs_invalid || form.lr_invalid || form.close_invalid {
+        // Auto sets its own rate, so an unparsed rate entry doesn't block it.
+        let lr_invalid = form.lr_invalid && form.optimizer != 0;
+        if form.submitting || form.epochs_invalid || lr_invalid || form.close_invalid {
             return;
         }
         let Some(ds) = self.store.datasets.ready().and_then(|d| d.get(form.dataset)).cloned() else { return };
