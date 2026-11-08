@@ -205,7 +205,21 @@ impl FoloApp {
             .items_center()
             .gap(px(10.))
             .min_w_0()
-            .child(text(ty::XL, t.text_primary).flex_none().child(ds.name.clone()))
+            // A long name gives way (ellipsis, full name on hover) before the actions do; GPUI
+            // truncates against a known width, so it's capped by the window's.
+            .child(
+                div()
+                    .id("ds-title")
+                    .min_w_0()
+                    .flex_shrink()
+                    .tooltip(crate::controls::tip(ds.name.clone(), None))
+                    .child(
+                        text(ty::XL, t.text_primary)
+                            .max_w(px(if window.viewport_size().width < px(1280.) { 300. } else { 560. }))
+                            .truncate()
+                            .child(ds.name.clone()),
+                    ),
+            )
             .child(div().flex_none().child(badge(&t, ds.format.label(), Tone::Neutral)))
             .when(short, |d| d.child(div().flex_1().min_w_0().ml(px(4.)).child(path_el())));
         let header = detail_header(

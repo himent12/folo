@@ -893,7 +893,16 @@ impl FoloApp {
         let cols = self.cm_cols.clone();
         // A heading may use its whole cell less a 2 px gap to the next one (medium weight measures
         // ~4 % wider than the regular face `text_width` sets).
-        let col_w = cols.get().map(|w| (w - px(6.)) / n.max(1) as f32 - px(2.));
+        let wide = |window: &mut Window, s: &str| crate::charts::text_width(window, s, ty::XS.size) * 1.04;
+        // "Missed" is never shortened: when an even share can't hold it, it takes the width it needs
+        // and the class columns share the rest.
+        let missed_need = wide(window, "Missed") + px(4.);
+        let missed_w =
+            cols.get().filter(|w| (*w - px(6.)) / n.max(1) as f32 <= missed_need).map(|_| missed_need);
+        let col_w = cols.get().map(|w| {
+            let k = if missed_w.is_some() { n.saturating_sub(1) } else { n };
+            (w - px(6.) - missed_w.unwrap_or_default()) / k.max(1) as f32 - px(2.)
+        });
         let header_row = div().flex().pl(px(LABEL_W)).child(
             div()
                 .relative()
@@ -916,17 +925,24 @@ impl FoloApp {
                     .size_full(),
                 )
                 .children(labels.iter().enumerate().map(|(i, l)| {
-                    // "Missed" is never shortened (a class name's short form needs its tooltip).
-                    let fits = i == n - 1
-                        || col_w
-                            .is_none_or(|w| crate::charts::text_width(window, l, ty::XS.size) * 1.04 <= w);
-                    let shown = if fits { l.clone() } else { short_name(l) };
+                    // The full name, else its short form, else its initial (each measured); a
+                    // shortened heading shows the full name on hover.
+                    let room = |window: &mut Window, s: &str| col_w.is_none_or(|w| wide(window, s) <= w);
+                    let fits = i == n - 1 || room(window, l);
+                    let shown = if fits {
+                        l.clone()
+                    } else if room(window, &short_name(l)) {
+                        short_name(l)
+                    } else {
+                        l.chars().next().map(String::from).unwrap_or_default()
+                    };
                     div()
                         .id(SharedString::from(format!("cm-col-{i}")))
                         .flex_1()
                         .min_w_0()
                         .px(px(2.))
                         .when(i == n - 1, |d| d.ml(px(6.)))
+                        .when(i == n - 1, |d| d.when_some(missed_w, |d, w| d.flex_none().w(w)))
                         .flex()
                         .justify_center()
                         .when(!fits, |d| d.tooltip(crate::controls::tip(l.clone(), None)))
@@ -934,7 +950,7 @@ impl FoloApp {
                             text(ty::XS, if i == n - 1 { t.text_tertiary } else { t.text_secondary })
                                 .font_weight(FontWeight::MEDIUM)
                                 .whitespace_nowrap()
-                                .when_some(col_w, |d, w| d.max_w(w).overflow_hidden())
+                                .when(i != n - 1, |d| d.when_some(col_w, |d, w| d.max_w(w).overflow_hidden()))
                                 .child(shown),
                         )
                 })),
@@ -993,23 +1009,29 @@ impl FoloApp {
                     } else {
                         t.readable_on(crate::theme::over(t.bg_panel, fill))
                     };
-                    div().flex_1().min_w_0().h(cell_h).p(px(1.)).when(c == n - 1, |d| d.ml(px(6.))).child(
-                        div()
-                            .size_full()
-                            .rounded(px(3.))
-                            .bg(fill)
-                            .when(diag && !na, |d| d.border_1().border_color(alpha(base, 0.9)))
-                            .when(na, |d| d.border_1().border_color(t.line_subtle))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(
-                                text(ty::XS, ink)
-                                    .tnum()
-                                    .when(strong, |d| d.font_weight(FontWeight::MEDIUM))
-                                    .child(label),
-                            ),
-                    )
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .h(cell_h)
+                        .p(px(1.))
+                        .when(c == n - 1, |d| d.ml(px(6.)).when_some(missed_w, |d, w| d.flex_none().w(w)))
+                        .child(
+                            div()
+                                .size_full()
+                                .rounded(px(3.))
+                                .bg(fill)
+                                .when(diag && !na, |d| d.border_1().border_color(alpha(base, 0.9)))
+                                .when(na, |d| d.border_1().border_color(t.line_subtle))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(
+                                    text(ty::XS, ink)
+                                        .tnum()
+                                        .when(strong, |d| d.font_weight(FontWeight::MEDIUM))
+                                        .child(label),
+                                ),
+                        )
                 }))
         });
         // Scale key for the error ramp: a continuous strip from 0 to 100 %.
