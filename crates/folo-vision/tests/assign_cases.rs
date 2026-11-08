@@ -24,6 +24,10 @@ fn rule1_strict_inside_with_eps() {
     let preds = vec![gt; anchors.len()];
     let a = assign(&[0.5; 7], 1, &preds, &anchors, &[gt], &[0], &TalConfig::default());
     assert_eq!(a.fg_mask.iter().positions(), vec![4, 5, 6]);
+    // The margin is eps = 1e-9 itself, not 0: from the edge x1 = 0, only the point 2·eps inside qualifies.
+    let anchors = [[5e-10, 8.0], [1e-9, 8.0], [2e-9, 8.0]];
+    let a = assign(&[0.5; 3], 1, &[gt; 3], &anchors, &[gt], &[0], &TalConfig::default());
+    assert_eq!(a.fg_mask.iter().positions(), vec![2]);
 }
 
 #[test]
@@ -295,6 +299,22 @@ fn rule5_normalises_over_final_positives() {
     assert!(close(a.target_scores[1], 0.374517, 1e-5), "{}", a.target_scores[1]);
     assert!(close(a.target_scores[0], 0.052752, 1e-5), "{}", a.target_scores[0]);
     assert!(close(a.target_scores[2], 1.0, 1e-5));
+}
+
+#[test]
+fn rule5_m_max_and_u_max_come_from_different_anchors() {
+    // One gt (0,0)-(40,40), two positives:
+    //   P (10, 20) predicts the gt exactly, u = 1, score 0.01:  m = 0.1.
+    //   Q (30, 20) predicts (2,0)-(42,40), u = 1520/1680 - 4/3364 = 0.903573, score 0.81:  m = 0.9 · u^6 = 0.489803.
+    // m_max = m(Q) but u_max = u(P) = 1, so t(Q) = 1 and t(P) = 0.1 / 0.489803 = 0.204164. (Taking u_max from the
+    // best-metric anchor would give t(Q) = 0.903573.)
+    let gt = Xyxy::new(0.0, 0.0, 40.0, 40.0);
+    let anchors = [[10.0, 20.0], [30.0, 20.0]];
+    let preds = [gt, Xyxy::new(2.0, 0.0, 42.0, 40.0)];
+    let a = assign(&[0.01, 0.81], 1, &preds, &anchors, &[gt], &[0], &TalConfig::default());
+    assert_eq!(a.fg_mask, [true, true]);
+    assert!(close(a.target_scores[1], 1.0, 1e-5), "{}", a.target_scores[1]);
+    assert!(close(a.target_scores[0], 0.204164, 1e-5), "{}", a.target_scores[0]);
 }
 
 // ---- Empty inputs and the grid --------------------------------------------------------------------------------
