@@ -3,7 +3,10 @@
 `.github/workflows/ci.yml` runs on every PR and on pushes to `main`: `cargo fmt --check` (Linux), `cargo clippy -D
 warnings` and `cargo test --workspace` on Linux and Windows, the web app's `npm ci && npm run check && npm run build`, and
 the browser build (`wasm`, Linux: `cargo clippy --target wasm32-unknown-unknown -p folo-wasm` and
-`scripts/build-wasm.sh` with the wasm-bindgen CLI matching `Cargo.lock`, docs/WASM.md).
+`scripts/build-wasm.sh` with the wasm-bindgen CLI matching `Cargo.lock`, docs/WASM.md), and ONNX export parity
+(`onnx`, Linux: a Python 3.12 venv with pinned `onnx`, `onnxruntime` and `numpy`, then `cargo test -p folo-cli --test
+onnx` with `FOLO_ONNX_REQUIRED=1`, so the test fails instead of skipping when the venv is broken; docs/CLI.md, ONNX
+export).
 
 ## Runners
 The repository is private, so GitHub-hosted minutes are limited (Windows counts double). FOLO therefore runs CI on its

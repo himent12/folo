@@ -129,7 +129,7 @@ also runs `onnx.checker.check_model` with `full_check`) and compares with FOLO's
 `|onnx − folo| ≤ tol · max(|onnx|, |folo|, 1)`: f32 within `1e-4` (max) and `1e-5` (mean), f16 within `1e-1` (max)
 and `5e-3` (mean), since an f16 graph rounds every activation to half precision while FOLO computes in f32. The test
 needs a Python with `onnx`, `onnxruntime` and `numpy` (`FOLO_ONNX_PYTHON`, or the venv at `FOLO_ONNX_VENV`, default
-`D:/folo-venvs/onnx`) and skips without one.
+`D:/folo-venvs/onnx`) and skips without one, unless `FOLO_ONNX_REQUIRED=1`, which CI's `onnx` job sets (docs/CI.md).
 
 ```sh
 folo export --model best.folo --format onnx                            # best.onnx: f32, 1x3x640x640, box_raw + cls_raw

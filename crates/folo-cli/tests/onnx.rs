@@ -4,7 +4,8 @@
 //! runs on every file.
 //!
 //! Needs a Python with `onnx`, `onnxruntime` and `numpy`: `FOLO_ONNX_PYTHON`, else the venv at `FOLO_ONNX_VENV`
-//! (default `D:/folo-venvs/onnx`). Without one the test prints why and passes (CI has none).
+//! (default `D:/folo-venvs/onnx`). Without one the test prints why and passes, unless `FOLO_ONNX_REQUIRED=1`
+//! (CI's `onnx` job sets it, so a broken Python setup fails there instead of skipping).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -31,6 +32,11 @@ fn python() -> Option<PathBuf> {
     let venv =
         std::env::var_os("FOLO_ONNX_VENV").map_or_else(|| PathBuf::from("D:/folo-venvs/onnx"), PathBuf::from);
     ["Scripts/python.exe", "bin/python"].iter().map(|p| venv.join(p)).find(|p| p.is_file())
+}
+
+/// `FOLO_ONNX_REQUIRED` set to anything but `0` or empty: a missing Python fails the test instead of skipping it.
+fn required() -> bool {
+    std::env::var("FOLO_ONNX_REQUIRED").is_ok_and(|v| !v.is_empty() && v != "0")
 }
 
 fn s(p: &Path) -> &str {
@@ -114,7 +120,9 @@ fn export(model: &Path, out: &Path, flags: &[&str]) -> Value {
 #[test]
 fn onnx_matches_folo_in_onnxruntime() {
     let Some(py) = python() else {
-        eprintln!("skipped: no ONNX Python (set FOLO_ONNX_PYTHON or create the venv at D:/folo-venvs/onnx)");
+        let why = "no ONNX Python (set FOLO_ONNX_PYTHON or create the venv at D:/folo-venvs/onnx)";
+        assert!(!required(), "FOLO_ONNX_REQUIRED is set but there is {why}");
+        eprintln!("skipped: {why}");
         return;
     };
     let dir = std::env::temp_dir().join(format!("folo-cli-onnx-{}", std::process::id()));
