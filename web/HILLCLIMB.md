@@ -13,3 +13,4 @@ Lines: 1 hierarchy & layout · 2 typography · 3 colour & theming · 4 spacing r
 
 | Round | Reviewer | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | min |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| r1 | GPT-6.1 Sol | 7 | 8 | 7 | 7 | 7 | 5 | 6 | 7 | 7 | 6 | 5 | 7 | 5 |

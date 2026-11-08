@@ -148,4 +148,15 @@
   button:focus-visible {
     outline-offset: 0;
   }
+  @media (pointer: coarse) {
+    button,
+    .sm button {
+      height: 36px;
+      padding: 0 12px;
+    }
+    button.icon-only,
+    .sm button.icon-only {
+      width: 36px;
+    }
+  }
 </style>

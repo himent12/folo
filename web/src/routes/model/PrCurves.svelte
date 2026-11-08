@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { prefs } from '$lib/prefs.svelte';
   /** Precision-recall curves per class with a toggle list, plus the mean over all classes drawn emphasised. */
   import type { Evaluation } from '$lib/api/evaluation';
   import LineChart, { type Series } from '$lib/charts/LineChart.svelte';
@@ -6,6 +7,11 @@
   import { metric } from '$lib/format';
 
   let { classes, ev, map50 }: { classes: readonly string[]; ev: Evaluation; map50: number | null } = $props();
+
+  // The class palette is tuned for boxes on photos; as thin lines on a white plot some hues are too pale, so the
+  // light theme draws them darker (same hue, ≥3:1 against the plot).
+  const lineColor = (i: number) =>
+    prefs.resolvedTheme === 'light' ? `color-mix(in oklab, ${classColor(i)} 68%, #000)` : classColor(i);
 
   // Few classes: show them all. Many (COCO): start with the eight most frequent.
   const defaults = $derived.by(() => {
@@ -26,7 +32,7 @@
   const series = $derived<Series[]>([
     ...[...shown]
       .sort((a, b) => a - b)
-      .map((i) => ({ id: `c${i}`, label: classes[i] ?? `class ${i}`, color: classColor(i), points: ev.curves[i] ?? [] })),
+      .map((i) => ({ id: `c${i}`, label: classes[i] ?? `class ${i}`, color: lineColor(i), points: ev.curves[i] ?? [] })),
     { id: 'mean', label: 'all classes', color: 'var(--text-primary)', points: ev.mean, emphasis: true },
   ]);
 
@@ -76,7 +82,7 @@
           {@const on = shown.has(c.class)}
           <li>
             <button type="button" class:on aria-pressed={on} onclick={() => toggle(c.class)}>
-              <span class="swatch" style:--c={classColor(c.class)} aria-hidden="true"></span>
+              <span class="swatch" style:--c={lineColor(c.class)} aria-hidden="true"></span>
               <span class="name truncate">{classes[c.class]}</span>
               <span class="ap num">{metric(c.ap50)}</span>
             </button>

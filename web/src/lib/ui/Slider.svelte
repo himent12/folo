@@ -125,6 +125,16 @@
   input:focus-visible {
     outline: none;
   }
+  @media (pointer: coarse) {
+    input {
+      height: 44px;
+    }
+    input::-webkit-slider-thumb {
+      width: 20px;
+      height: 20px;
+      margin-top: -8px;
+    }
+  }
   input:focus-visible::-webkit-slider-thumb {
     box-shadow: 0 0 0 2px var(--focus);
   }

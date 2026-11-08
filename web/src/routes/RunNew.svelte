@@ -1,4 +1,5 @@
 <script lang="ts">
+  import ChevronRight from '@lucide/svelte/icons/chevron-right';
   import Copy from '@lucide/svelte/icons/copy';
   import Images from '@lucide/svelte/icons/images';
   import Play from '@lucide/svelte/icons/play';
@@ -50,6 +51,7 @@
   let focus = $state<AugKey | null>(null);
   let shuffle = $state(1);
   let submitting = $state(false);
+  let advancedOpen = $state(false);
 
   const datasets = new Resource(async (s) => {
     const list = await hub.api.datasets(s);
@@ -279,6 +281,10 @@
                 ]}
               />
             </Field>
+          </div>
+          <details class="advanced" open={advancedOpen} ontoggle={(e) => (advancedOpen = (e.currentTarget as HTMLDetailsElement).open)}>
+            <summary><ChevronRight size={14} /> Advanced <span class="faint">optimizer, learning rate, seed</span></summary>
+            <div class="fields">
             <Field label="Optimizer" for="opt">
               <Select id="opt" bind:value={optimizer} options={[{ value: 'auto', label: 'Auto (AdamW for short runs, else SGD)' }, { value: 'sgd', label: 'SGD + momentum' }, { value: 'adamw', label: 'AdamW' }]} />
             </Field>
@@ -288,7 +294,8 @@
             <Field label="Seed" for="seed" hint="Same seed, same run." error={errors.seed}>
               <Input id="seed" type="number" min="0" step="1" bind:value={seed} invalid={!!errors.seed} />
             </Field>
-          </div>
+            </div>
+          </details>
         </Panel>
 
         <Panel title="4 · Augmentation" id="sec-aug">
@@ -374,6 +381,15 @@
           </div>
         </Panel>
       </aside>
+
+      <!-- Narrow screens: the summary sits below the form, so keep the essentials and the action in reach. -->
+      <div class="dock" role="region" aria-label="Start training">
+        <span class="dock-est num">
+          <span>≈ {duration(est.totalSeconds)}</span>
+          {#if !onCpu && gpu}<span class:warn={vramPct > 0.9}>{bytes(est.vramBytes, prefs.units)} VRAM</span>{/if}
+        </span>
+        <Button type="submit" variant="primary" size="lg" icon={Play} loading={submitting} disabled={!valid}>Start training</Button>
+      </div>
     </form>
   {/if}
 </Page>
@@ -615,7 +631,72 @@
     white-space: pre-wrap;
     overflow-wrap: anywhere;
   }
+  .advanced {
+    margin-top: var(--space-4);
+    border-top: 1px solid var(--line-subtle);
+    padding-top: var(--space-3);
+  }
+  .advanced summary {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    height: var(--control-md);
+    color: var(--text-secondary);
+    font-weight: var(--weight-medium);
+    cursor: pointer;
+    list-style: none;
+    border-radius: var(--radius-sm);
+  }
+  .advanced summary::-webkit-details-marker {
+    display: none;
+  }
+  .advanced summary :global(svg) {
+    transition: transform var(--dur-fast) var(--ease-standard);
+  }
+  .advanced[open] summary :global(svg) {
+    transform: rotate(90deg);
+  }
+  .advanced summary:hover {
+    color: var(--text-primary);
+  }
+  .advanced summary .faint {
+    font-weight: var(--weight-regular);
+  }
+  .advanced[open] .fields {
+    margin-top: var(--space-3);
+  }
+  .dock {
+    display: none;
+  }
   @media (max-width: 1199px) {
+    .layout {
+      padding-bottom: 72px;
+    }
+    .dock {
+      position: fixed;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      z-index: var(--z-sticky);
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: var(--space-4);
+      padding: var(--space-3) var(--space-4);
+      background: color-mix(in srgb, var(--bg-app) 90%, transparent);
+      backdrop-filter: blur(12px) saturate(1.4);
+      -webkit-backdrop-filter: blur(12px) saturate(1.4);
+      border-top: 1px solid var(--line-subtle);
+    }
+    .dock-est {
+      display: flex;
+      gap: var(--space-3);
+      color: var(--text-secondary);
+      font-size: var(--type-sm-size);
+    }
+    .dock-est .warn {
+      color: var(--danger-text);
+    }
     .layout {
       grid-template-columns: minmax(0, 1fr);
     }
@@ -627,6 +708,10 @@
     }
   }
   @media (max-width: 767px) {
+    .dock {
+      bottom: calc(60px + env(safe-area-inset-bottom));
+      justify-content: space-between;
+    }
     .cards,
     .fields,
     .aug {

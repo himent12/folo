@@ -70,6 +70,39 @@
   const shown = (b: ViewBox) => !only || only.has(b.class);
   const name = (c: number) => classes[c] ?? `class ${c}`;
 
+  /**
+   * Chip placement in screen pixels, relative to each box's top-left: above the box by default, inside it when
+   * that would leave the image or hit an earlier chip, nudged down 18 px on further collisions, and clamped
+   * horizontally to the visible image with a 4 px inset. Widths are estimated from the text (11 px Geist).
+   */
+  const CHIP_H = 16;
+  const chips = $derived.by(() => {
+    const g = geo;
+    if (!g || !labels || compact) return [];
+    const minX = Math.max(0, g.ox) + 4;
+    const maxX = Math.min(cw, g.ox + width * g.s) - 4;
+    const minY = Math.max(0, g.oy) + 2;
+    const placed: { x: number; y: number; w: number }[] = [];
+    const hits = (x: number, y: number, w: number) =>
+      placed.some((p) => x < p.x + p.w && x + w > p.x && y < p.y + CHIP_H && y + CHIP_H > p.y);
+    return boxes.map((b) => {
+      if (!shown(b)) return null;
+      const bx = g.ox + b.x1 * g.s;
+      const by = g.oy + b.y1 * g.s;
+      const w = Math.ceil(name(b.class).length * 6.4 + 12 + (scores && b.score !== undefined ? 32 : 0));
+      const x = Math.max(minX, Math.min(maxX - w, bx - 2));
+      let y = by - CHIP_H - 1;
+      let inside = false;
+      if (y < minY || hits(x, y, w)) {
+        y = by;
+        inside = true;
+        for (let k = 0; k < 3 && hits(x, y, w); k++) y += CHIP_H + 2;
+      }
+      placed.push({ x, y, w });
+      return { dx: x - bx, dy: y - by, inside };
+    });
+  });
+
   $effect(() => {
     void src;
     loaded = false;
@@ -122,7 +155,8 @@
             onpointerleave={onhover ? () => onhover(null) : undefined}
           >
             {#if labels && !compact}
-              <span class="chip" class:inside={top < 18}>
+              {@const c = chips[i]}
+              <span class="chip" class:inside={c?.inside} style:left="{(c?.dx ?? 0) - 2}px" style:top="{(c?.dy ?? -17) - 2}px">
                 {name(b.class)}{#if scores && b.score !== undefined}<span class="score">{b.score.toFixed(2)}</span>{/if}
               </span>
             {/if}
@@ -175,7 +209,9 @@
     z-index: 2;
   }
   .box.dim {
-    opacity: 0.35;
+    /* Keep context readable: fade the stroke, never the label. */
+    border-color: color-mix(in srgb, var(--c) 55%, transparent);
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--class-halo) 50%, transparent);
   }
   .box.truth {
     border: 1.5px dashed var(--c);
@@ -191,10 +227,9 @@
     border-width: 1px;
   }
   .chip {
+    /* left/top come from the placement pass (offsets include the 2 px border). */
     position: absolute;
-    left: -2px;
-    bottom: 100%;
-    margin-bottom: 1px;
+    z-index: 1;
     display: inline-flex;
     align-items: center;
     gap: 5px;
@@ -210,9 +245,6 @@
     box-shadow: 0 0 0 1px var(--class-halo);
   }
   .chip.inside {
-    bottom: auto;
-    top: -2px;
-    margin: 0;
     border-radius: 0 0 3px 0;
   }
   .score {

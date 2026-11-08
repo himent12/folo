@@ -192,6 +192,7 @@ export function history(p: RunProfile, now: number, stride = 4): { steps: Step[]
   const lastStep = Math.floor(done * p.stepsPerEpoch);
   const every = Math.max(1, Math.floor(stride));
   const steps: Step[] = [];
+  if (done <= 0) return { steps, epochs: [] };
   for (let s = 0; s <= lastStep; s += every) steps.push(stepAt(p, s));
   if (lastStep % every !== 0) steps.push(stepAt(p, lastStep));
   const epochs: Epoch[] = [];
