@@ -343,39 +343,55 @@ pub fn export(args: ExportArgs, out: Out) -> Result<(), CliError> {
         }
     };
     let file = ModelFile::open(&args.model).map_err(|e| weights_error(&args.model, e))?;
-    // Like MCP `export`, never overwrite: the default name gets `-2`, `-3`, ... when taken, and an existing
-    // --output is an error.
+    // Like MCP `export`, never overwrite: the output is claimed with `create_new` (so concurrent exports never
+    // share a file; the export then replaces the empty claim atomically). The default name gets `-2`, `-3`, ...
+    // when taken; an existing --output is an error.
+    let claim = |p: &Path| std::fs::OpenOptions::new().write(true).create_new(true).open(p).map(drop);
+    let io = |p: &Path, e: std::io::Error| {
+        CliError::new(ExitCode::Runtime, "io_error", format!("cannot create {}: {e}", p.display()))
+    };
     let output = match args.output.clone() {
-        Some(o) => o,
+        Some(o) => {
+            let same = |a: &Path, b: &Path| match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+                (Ok(a), Ok(b)) => a == b,
+                _ => a == b,
+            };
+            if same(&o, &args.model) {
+                return Err(CliError::new(ExitCode::Usage, "usage", "--output must differ from --model"));
+            }
+            match claim(&o) {
+                Ok(()) => o,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    return Err(CliError::new(
+                        ExitCode::Runtime,
+                        "output_exists",
+                        format!("{} exists; export never overwrites", o.display()),
+                    )
+                    .hint("pass another --output, or leave it out for a free name next to --model"));
+                }
+                Err(e) => return Err(io(&o, e)),
+            }
+        }
         None => {
             let stem =
                 args.model.file_stem().map_or_else(|| "model".into(), |s| s.to_string_lossy().into_owned());
-            (1..)
-                .map(|n| {
-                    let tag = if n == 1 { String::new() } else { format!("-{n}") };
-                    args.model.with_file_name(format!("{stem}-{suffix}{tag}.folo"))
-                })
-                .find(|p| !p.exists())
-                .expect("some suffix is free")
+            let mut n = 1;
+            loop {
+                let tag = if n == 1 { String::new() } else { format!("-{n}") };
+                let p = args.model.with_file_name(format!("{stem}-{suffix}{tag}.folo"));
+                match claim(&p) {
+                    Ok(()) => break p,
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => n += 1,
+                    Err(e) => return Err(io(&p, e)),
+                }
+            }
         }
     };
-    let same = |a: &Path, b: &Path| match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => a == b,
-    };
-    if same(&output, &args.model) {
-        return Err(CliError::new(ExitCode::Usage, "usage", "--output must differ from --model"));
-    }
-    if output.exists() {
-        return Err(CliError::new(
-            ExitCode::Runtime,
-            "output_exists",
-            format!("{} exists; export never overwrites", output.display()),
-        )
-        .hint("pass another --output, or leave it out for a free name next to --model"));
-    }
     let t = Instant::now();
-    file.export(&output, dtype).map_err(nn_error)?;
+    if let Err(e) = file.export(&output, dtype) {
+        let _ = std::fs::remove_file(&output); // only the file claimed above
+        return Err(nn_error(e));
+    }
     let bytes = std::fs::metadata(&output).map(|m| m.len()).unwrap_or(0);
     let source = if file.has_ema() { "ema" } else { "model" };
     out.record(&json!({

@@ -173,6 +173,24 @@ fn train_val_predict_export_with_json() {
     assert!(second[0]["path"].as_str().unwrap().ends_with("weights/best-f16-2.folo"), "{}", second[0]);
     let (code, lines, _) = folo(&["export", "--json", "--model", s(&best), "--output", s(&out)]);
     assert_eq!((code, lines[0]["error"]["code"].as_str()), (1, Some("output_exists")));
+    // Concurrent exports claim distinct files.
+    let racers: Vec<_> = (0..4)
+        .map(|_| {
+            let best = best.clone();
+            std::thread::spawn(move || folo(&["export", "--json", "--model", s(&best)]))
+        })
+        .collect();
+    let mut paths: Vec<String> = racers
+        .into_iter()
+        .map(|h| {
+            let (code, lines, stderr) = h.join().unwrap();
+            assert_eq!(code, 0, "{stderr}");
+            lines[0]["path"].as_str().unwrap().to_string()
+        })
+        .collect();
+    paths.sort();
+    paths.dedup();
+    assert_eq!(paths.len(), 4, "{paths:?}");
     // Something that is not a weights file says so.
     let (code, lines, _) = folo(&["export", "--json", "--model", s(&data.join("data.yaml"))]);
     assert_eq!(code, 1);
