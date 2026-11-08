@@ -1034,6 +1034,37 @@ impl FoloApp {
                         )
                 })),
         );
+        // One cell at a time can be read out: under the pointer, or the matrix's keyboard cursor.
+        let sel = self.cm_cell.filter(|&(r, c)| r < n && c < n);
+        let readout = sel.map(|(r, c)| {
+            let v = ev.confusion[r][c];
+            let pct = |d: u32| format!("{:.0}%", v as f32 / d.max(1) as f32 * 100.);
+            let name = |i: usize| labels.get(i).cloned().unwrap_or_default();
+            let count = int(v as u64);
+            match (r == n - 1, c == n - 1) {
+                (true, true) => "No value: there is no unmatched detection of no object".to_string(),
+                (true, false) => {
+                    format!(
+                        "False positives predicted as {}: {count} · {} of all false positives",
+                        name(c),
+                        pct(row_sums[r])
+                    )
+                }
+                (false, true) => {
+                    format!("{} missed: {count} · {} of {} objects", name(r), pct(row_sums[r]), name(r))
+                }
+                (false, false) if r == c => {
+                    format!("{} found: {count} · {} of {} objects", name(r), pct(row_sums[r]), name(r))
+                }
+                (false, false) => format!(
+                    "{} predicted as {}: {count} · {} of {} objects",
+                    name(r),
+                    name(c),
+                    pct(row_sums[r]),
+                    name(r)
+                ),
+            }
+        });
         let rows = ev.confusion.iter().enumerate().map(|(r, row)| {
             div()
                 .flex()
@@ -1095,18 +1126,31 @@ impl FoloApp {
                     } else {
                         t.readable_on(crate::theme::over(t.bg_panel, fill))
                     };
+                    let picked = sel == Some((r, c));
                     div()
+                        .id(SharedString::from(format!("cm-{r}-{c}")))
                         .flex_1()
                         .min_w_0()
                         .h(cell_h)
                         .p(px(1.))
                         .when(c == n - 1, |d| d.ml(px(6.)).when_some(missed_w, |d, w| d.flex_none().w(w)))
+                        .on_hover(cx.listener(move |this, h: &bool, _, cx| {
+                            if *h {
+                                this.cm_cell = Some((r, c));
+                                cx.notify();
+                            } else if this.cm_cell == Some((r, c)) {
+                                this.cm_cell = None;
+                                cx.notify();
+                            }
+                        }))
                         .child(
                             div()
                                 .size_full()
                                 .rounded(px(3.))
                                 .bg(fill)
                                 .when(diag && !na, |d| d.border_1().border_color(alpha(base, 0.9)))
+                                // The cell being read out.
+                                .when(picked, |d| d.border_2().border_color(t.text_primary))
                                 .flex()
                                 .items_center()
                                 .justify_center()
@@ -1149,6 +1193,46 @@ impl FoloApp {
             } else {
                 format!("{} (max)", int((max_err * max_count as f32).round() as u64))
             }));
+        // The cells are one Tab stop: arrows move a cursor cell (the readout follows), Esc clears.
+        let rows: Vec<AnyElement> = rows.map(|r| r.into_any_element()).collect();
+        let fh = self.fh("cm-grid", cx);
+        let ring = self.ring(&fh, window);
+        let grid = div()
+            .id("cm-grid")
+            .track_focus(&fh)
+            .relative()
+            .flex()
+            .flex_col()
+            .gap(px(2.))
+            .when(ring, |d| d.child(crate::app::focus_ring(&t, radius::MD)))
+            .on_action(cx.listener(|this, _: &crate::app::Dismiss, _, cx| {
+                if this.cm_cell.take().is_some() {
+                    cx.notify();
+                } else {
+                    cx.propagate();
+                }
+            }))
+            .on_key_down(cx.listener(move |this, ev: &gpui::KeyDownEvent, _, cx| {
+                let key = ev.keystroke.key.as_str();
+                let arrows = matches!(key, "left" | "right" | "up" | "down" | "home" | "end");
+                let next = match (this.cm_cell, key) {
+                    // The first press lands on the top-left cell.
+                    (None, _) if arrows => Some((0, 0)),
+                    (Some((r, c)), "left") => Some((r, c.saturating_sub(1))),
+                    (Some((r, c)), "right") => Some((r, (c + 1).min(n - 1))),
+                    (Some((r, c)), "up") => Some((r.saturating_sub(1), c)),
+                    (Some((r, c)), "down") => Some(((r + 1).min(n - 1), c)),
+                    (Some((r, _)), "home") => Some((r, 0)),
+                    (Some((r, _)), "end") => Some((r, n - 1)),
+                    _ => None,
+                };
+                if let Some(cell) = next {
+                    this.cm_cell = Some(cell);
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }))
+            .children(rows);
         panel(&t)
             .flex_1()
             .min_w_0()
@@ -1176,16 +1260,18 @@ impl FoloApp {
                             .child(text(ty::XS, t.text_tertiary).flex_1().child("Predicted →")),
                     )
                     .child(header_row)
-                    .children(rows)
+                    .child(grid)
                     // The key sits under the matrix, away from the column labels.
                     .child(div().pt(px(10.)).child(key))
-                    .child(div().pt(px(4.)).w_full().min_w_0().child(
-                        text(ty::XS, t.text_tertiary).whitespace_normal().child(if norm {
-                            "Rows are actual objects; the bottom row splits false positives by class."
+                    // The selected cell in words, else what the rows mean.
+                    .child(div().pt(px(4.)).w_full().min_w_0().child(match readout {
+                        Some(r) => text(ty::XS, t.text_primary).tnum().whitespace_normal().child(r),
+                        None => text(ty::XS, t.text_tertiary).whitespace_normal().child(if norm {
+                            "Rows are actual objects; the bottom row splits false positives by class. Hover or focus a cell to read it."
                         } else {
-                            "Counts of objects and unmatched detections."
+                            "Counts of objects and unmatched detections. Hover or focus a cell to read it."
                         }),
-                    ))
+                    }))
                     .child(
                         div().pt(px(4.)).child(
                             text(ty::XS, t.text_tertiary)

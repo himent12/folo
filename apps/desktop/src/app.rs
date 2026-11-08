@@ -396,6 +396,8 @@ pub struct FoloApp {
     /// The sorted order of the models list, for (list allocation, length, column, descending).
     pub models_order: RefCell<Option<(ModelsOrderKey, Vec<usize>)>>,
     pub confusion_norm: bool,
+    /// The confusion-matrix cell (row, column) under the pointer or the keyboard cursor.
+    pub cm_cell: Option<(usize, usize)>,
 
     // Playground
     pub play_model: Option<String>,
@@ -548,6 +550,7 @@ impl FoloApp {
             runs_sort: Some(("created", true)),
             models_order: RefCell::new(None),
             confusion_norm: true,
+            cm_cell: None,
             play_model: None,
             play_conf: 0.25,
             play_iou: 0.7,
