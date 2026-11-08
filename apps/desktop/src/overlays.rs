@@ -810,7 +810,7 @@ impl FoloApp {
                                 .child(text(ty::XS, t.text_tertiary).child(if close_mosaic < 0.5 {
                                     "Off: mosaic all the way through".to_string()
                                 } else {
-                                    format!("The last {close_mosaic:.0} epochs train on plain images")
+                                    format!("last {close_mosaic:.0} epochs train without mosaic")
                                 })),
                         ),
                     ),
@@ -972,7 +972,7 @@ impl FoloApp {
                     .flex_none()
                     .items_center()
                     .gap(px(8.))
-                    .child(text(ty::XS, t.text_tertiary).whitespace_nowrap().mr(px(4.)).child("Ctrl Enter"))
+                    .child(div().mr(px(4.)).child(shortcut(&t, &["Ctrl", "Enter"])))
                     .child(cancel)
                     .child(start),
             );
@@ -1162,7 +1162,14 @@ impl FoloApp {
         let t = theme(cx);
         let run = self.store.run(id).cloned();
         let name = run.as_ref().map_or(id.to_string(), |r| r.name.clone());
-        let epoch = run.as_ref().map_or(0, |r| r.epoch);
+        // The checkpoint kept is the last validated epoch's: name it from the history when it's
+        // loaded (Run.epoch alone can't tell "epoch 12 finished" from "epoch 12 under way").
+        let finished = self
+            .store
+            .run_data
+            .get(id)
+            .and_then(|d| d.ready())
+            .map(|d| d.metrics.epochs.last().map(|e| e.epoch));
         let rid = id.to_string();
         let cancel = self.button(
             "stop-cancel",
@@ -1197,7 +1204,12 @@ impl FoloApp {
                     .w_full()
                     .min_w_0()
                     .whitespace_normal()
-                    .child(format!("Training stops after this step. The epoch {epoch} checkpoint is kept, so you can export it or train on from it.")),
+                    // The epoch in progress is discarded; last.folo is the last finished epoch's.
+                    .child(match finished {
+                        Some(Some(e)) => format!("Training stops after the current batch. The epoch {e} checkpoint (the last finished) is kept, so you can export it or resume from it; progress since is discarded."),
+                        Some(None) => "Training stops after the current batch. No epoch has finished yet, so there is no checkpoint to keep.".to_string(),
+                        None => "Training stops after the current batch. The last finished epoch's checkpoint is kept, so you can export it or resume from it; progress since is discarded.".to_string(),
+                    }),
             );
         let footer = div()
             .flex()

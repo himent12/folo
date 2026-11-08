@@ -519,7 +519,8 @@ impl FoloApp {
             pr_focus: None,
             pr_pin: None,
             export_hl: 0,
-            models_sort: None,
+            // Newest first, shown on the Created header, which is also how the server lists them.
+            models_sort: Some(("created", true)),
             models_order: RefCell::new(None),
             confusion_norm: true,
             play_model: None,

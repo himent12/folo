@@ -584,6 +584,7 @@ impl FoloApp {
                             .rounded(px(radius::SM))
                             .when(hot, |d| d.bg(t.bg_active).child(crate::ui::select_bar(&t)))
                             .hover(|s| s.bg(t.bg_hover))
+                            .active(|s| s.bg(t.bg_active))
                             .on_hover(cx.listener(move |this, h: &bool, _, cx| {
                                 let next = if *h { Some(i) } else { None };
                                 if this.play_hover != next {

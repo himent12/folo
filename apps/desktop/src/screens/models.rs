@@ -65,7 +65,7 @@ impl FoloApp {
             .child(th(&t, "Architecture").w(px(110.)).flex_none())
             .when(wide, |d| d.child(th(&t, "From run").w(px(150.)).flex_none()))
             .child(self.sort_th("map", "mAP50-95", 130., true, window, cx))
-            .child(num_cell(64., th(&t, "mAP50")))
+            .child(self.sort_th("map50", "mAP50", 72., true, window, cx))
             .when(params_col, |d| d.child(num_cell(72., th(&t, "Params"))))
             .child(self.sort_th("size", "Size", 72., true, window, cx))
             .child(self.sort_th("created", "Created", 84., true, window, cx));
@@ -75,7 +75,13 @@ impl FoloApp {
             use std::hash::{Hash, Hasher};
             let mut h = std::collections::hash_map::DefaultHasher::new();
             for m in v {
-                (&m.id, &m.created, m.bytes, m.metrics.as_ref().map(|x| x.map50_95.to_bits())).hash(&mut h);
+                (
+                    &m.id,
+                    &m.created,
+                    m.bytes,
+                    m.metrics.as_ref().map(|x| (x.map50_95.to_bits(), x.map50.to_bits())),
+                )
+                    .hash(&mut h);
             }
             h.finish() as usize
         });
@@ -87,6 +93,7 @@ impl FoloApp {
                 let score = |m: &Model| -> i64 {
                     let v = match k {
                         "map" => m.metrics.as_ref().map_or(-1, |x| (x.map50_95 * 1e6) as i64),
+                        "map50" => m.metrics.as_ref().map_or(-1, |x| (x.map50 * 1e6) as i64),
                         "size" => m.bytes as i64,
                         _ => time::parse(&m.created).unwrap_or(0),
                     };
@@ -122,6 +129,7 @@ impl FoloApp {
                             .border_color(t.line_subtle)
                             .cursor_pointer()
                             .hover(|s| s.bg(t.bg_hover))
+                            .active(|s| s.bg(t.bg_active))
                             .on_key_down(cx.listener(move |this, ev: &gpui::KeyDownEvent, w, cx| {
                                 let next = match ev.keystroke.key.as_str() {
                                     "down" => i + 1,
@@ -137,7 +145,7 @@ impl FoloApp {
                             .child(text(ty::SM, t.text_secondary).w(px(110.)).flex_none().tnum().child(format!("{} · {} px", m.arch.as_str(), m.imgsz)))
                             .when(wide, |d| d.child(text(ty::SM, t.text_tertiary).w(px(150.)).flex_none().truncate().child(run.trim_start_matches("from ").to_string())))
                             .child(num_cell(130., metrics.as_ref().map_or(text(ty::SM, t.text_tertiary).child("–"), |mm| bar_value(&t, mm.map50_95, f3(mm.map50_95), t.text_tertiary))))
-                            .child(num_cell(64., text(ty::SM, t.text_secondary).tnum().child(metrics.as_ref().map_or("–".into(), |mm| f3(mm.map50)))))
+                            .child(num_cell(72., text(ty::SM, t.text_secondary).tnum().child(metrics.as_ref().map_or("–".into(), |mm| f3(mm.map50)))))
                             .when(params_col, |d| d.child(num_cell(72., text(ty::SM, t.text_secondary).tnum().child(format!("{p} {pu}")))))
                             .child(num_cell(72., text(ty::SM, t.text_secondary).tnum().child(format!("{b} {bu}"))))
                             .child(num_cell(84., text(ty::SM, t.text_tertiary).child(time::parse(&m.created).map_or(String::new(), |c| time::ago(c, now)))));
@@ -216,6 +224,7 @@ impl FoloApp {
                 .rounded(px(radius::SM))
                 .cursor_pointer()
                 .hover(|s| s.bg(t.bg_hover))
+                .active(|s| s.bg(t.bg_active))
                 .child(text(ty::BASE, t.text_tertiary).child("· from"))
                 .child(text(ty::BASE, t.text_primary).child(r.name.clone()))
                 .child(icon("icons/arrow-up-right.svg", 12., t.text_tertiary));
@@ -749,6 +758,7 @@ impl FoloApp {
                     .child(div().flex_1().min_w_0().child(self.chart_group(
                         "pr-chart",
                         0.01,
+                        1.0,
                         crate::controls::Cursor::Pr,
                         div().pl(px(12.)).pt(px(12.)).pb(px(8.)).child(line_chart(&t, chart)),
                         window,
@@ -886,7 +896,8 @@ impl FoloApp {
                 .flex()
                 .justify_center()
                 .child(
-                    text(ty::MICRO, if i == n - 1 { t.text_tertiary } else { t.text_secondary })
+                    text(ty::XS, if i == n - 1 { t.text_tertiary } else { t.text_secondary })
+                        .font_weight(FontWeight::MEDIUM)
                         .truncate()
                         .child(l.clone()),
                 )
@@ -898,6 +909,7 @@ impl FoloApp {
                 .when(r == n - 1, |d| d.mt(px(6.)))
                 .child(
                     text(ty::XS, if r == n - 1 { t.text_tertiary } else { t.text_secondary })
+                        .font_weight(FontWeight::MEDIUM)
                         .w(px(LABEL_W))
                         .flex_none()
                         .pr(px(8.))
@@ -1086,6 +1098,7 @@ impl FoloApp {
                     .when(hot && !pinned, |d| d.bg(t.bg_hover))
                     .when(pinned, |d| d.bg(t.bg_selected))
                     .hover(|s| s.bg(t.bg_hover))
+                    .active(|s| s.bg(t.bg_active))
                     .on_hover(cx.listener(move |this, h: &bool, _, cx| {
                         let next = if *h { Some(class) } else { None };
                         if this.pr_focus != next && (*h || this.pr_focus == Some(class)) {
@@ -1112,8 +1125,18 @@ impl FoloApp {
                                 d.child(text(ty::XS, t.text_tertiary).flex_none().child("pinned"))
                             }),
                     )
-                    .child(div().flex_1().min_w_0().child(bar_value(&t, c.map50, f3(c.map50), color)))
-                    .child(div().flex_1().min_w_0().child(bar_value(&t, c.map50_95, f3(c.map50_95), color)))
+                    .child(div().flex_1().min_w_0().child(bar_value(
+                        &t,
+                        c.map50,
+                        f3(c.map50),
+                        t.text_tertiary,
+                    )))
+                    .child(div().flex_1().min_w_0().child(bar_value(
+                        &t,
+                        c.map50_95,
+                        f3(c.map50_95),
+                        t.text_tertiary,
+                    )))
                     .child(div().flex_1().min_w_0().child(bar_value(
                         &t,
                         c.precision,

@@ -751,3 +751,43 @@ Round 21 changes:
 - **New run:** the shortcut is quiet text before Cancel.
 - **Overview:** the first-run page gets an "Or from a terminal" panel (synth, train, serve).
 - **Copy:** "Boxes by class" on dataset chips; "failed during epoch N"; dimmed chip text at 85 %.
+
+## Round 21
+
+| Line | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | avg |
+|------|---|---|---|---|---|---|---|---|---|----|----|----|-----|
+| Opus 5.5 | 8 | 8 | 8 | 8 | 8 | 8 | 8 | 8 | 9 | 9 | 9 | 8 | 8.3 |
+| GPT-6.1 Sol | 9 | 8 | 9 | 8 | 8 | 8 | 8 | 8 | 8 | 8 | 8 | 8 | 8.2 |
+
+Opus now gives 9 for interaction, accessibility and responsiveness; with the review brief pointing at `chart_group`, its keyboard checks came back clean. Both reviewers flagged chips still overlapping in dense sample thumbnails (an occupied-spot fallback). Other items:
+- Squashed loss components under the total.
+- The stop dialog promised the epoch in progress as a checkpoint.
+- Keyboard chart inspection started out in the future epochs.
+- Grid boxes had no class names.
+- No visible default sort, and mAP50 wasn't sortable.
+- Recent runs showed progress only for the running row.
+- Mixed label styles on the confusion axes, and mixed bar encodings in the class table.
+- Plain-text shortcuts, sentence-case helper copy, and a narrow Settings page.
+- Missing pressed states; a silent refusal on the last loss toggle.
+- "mock data" copy.
+
+Round 22 changes:
+- **Chips:**
+  - No fallback onto an occupied spot: three more spots down inside the box are tried, then the chip is skipped (the selected box's chip always shows).
+  - Dataset tiles get class-name chips; narrow views drop names and never draw empty chips.
+- **Charts:**
+  - Training loss is on a log axis (powers of two: 8 4 2 1 0.5).
+  - Keyboard chart inspection starts at the latest recorded point and never steps into unrecorded epochs (`chart_group` takes `end`).
+- **Copy:**
+  - The stop dialog names the last finished epoch's checkpoint and says the epoch in progress is discarded.
+  - "choose Built-in demo in Settings".
+- **Models:** the default sort is Created, descending (shown); mAP50 is sortable.
+- **Overview:** every Recent runs row has a progress cell ("37/100").
+- **Model page:**
+  - Both confusion axes use XS 500.
+  - Per-class bars are neutral.
+- **New run:** the shortcut is keycaps again (left of Cancel); helper copy is fragments ("last 10 epochs train without mosaic").
+- **Settings:** full content width.
+- **Pressed states:**
+  - `bg.active` on hoverable rows, tiles and toggles.
+  - The last visible loss toggle explains "Keep at least one series visible".

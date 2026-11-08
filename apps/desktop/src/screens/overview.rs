@@ -627,115 +627,119 @@ impl FoloApp {
             .when(created, |d| {
                 d.child(div().w(px(when_w)).flex_none().flex().justify_end().child(th(&t, "Created")))
             });
-        let body = match &self.store.runs {
-            Load::Ready(runs) if runs.is_empty() => div()
-                .child(empty_state(
-                    &t,
-                    "icons/activity.svg",
-                    "No runs yet",
-                    "Training runs appear here with their status and best mAP.",
-                    Tone::Neutral,
-                ))
-                .into_any_element(),
-            Load::Ready(runs) => {
-                let runs: Vec<Run> = runs.iter().take(5).cloned().collect();
-                div()
-                    .flex()
-                    .flex_col()
-                    .pb(px(4.))
-                    .child(heads)
-                    .children(runs.into_iter().map(|r| {
-                        let ds = self
-                            .store
-                            .dataset_summary(&r.config.dataset_id)
-                            .map_or(r.config.dataset_id.clone(), |d| d.name.clone());
-                        let when = time::parse(&r.created).map_or(String::new(), |c| time::ago(c, now));
-                        // Progress (training runs only) right after Status; best mAP50-95 at the end.
-                        let training = r.status.is_active() && r.status != crate::api::RunStatus::Queued;
-                        let progress_el = div()
-                            .w(px(prog_w))
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .gap(px(8.))
-                            .when(training, |d| {
-                                d.child(div().flex_1().child(progress(&t, r.progress(), t.accent_fill(), 4.)))
-                                    .child(
+        let body =
+            match &self.store.runs {
+                Load::Ready(runs) if runs.is_empty() => div()
+                    .child(empty_state(
+                        &t,
+                        "icons/activity.svg",
+                        "No runs yet",
+                        "Training runs appear here with their status and best mAP.",
+                        Tone::Neutral,
+                    ))
+                    .into_any_element(),
+                Load::Ready(runs) => {
+                    let runs: Vec<Run> = runs.iter().take(5).cloned().collect();
+                    div()
+                        .flex()
+                        .flex_col()
+                        .pb(px(4.))
+                        .child(heads)
+                        .children(runs.into_iter().map(|r| {
+                            let ds = self
+                                .store
+                                .dataset_summary(&r.config.dataset_id)
+                                .map_or(r.config.dataset_id.clone(), |d| d.name.clone());
+                            let when = time::parse(&r.created).map_or(String::new(), |c| time::ago(c, now));
+                            // Progress (training runs only) right after Status; best mAP50-95 at the end.
+                            let training = r.status.is_active() && r.status != crate::api::RunStatus::Queued;
+                            let progress_el =
+                                div().w(px(prog_w)).flex_none().flex().items_center().gap(px(8.)).map(|d| {
+                                    if r.status == crate::api::RunStatus::Queued {
+                                        return d.child(text(ty::XS, t.text_tertiary).child("waiting"));
+                                    }
+                                    let fill = match r.status {
+                                        _ if training => t.accent_fill(),
+                                        crate::api::RunStatus::Failed => t.danger_solid,
+                                        _ => t.text_tertiary,
+                                    };
+                                    d.child(div().flex_1().child(progress(&t, r.progress(), fill, 4.))).child(
                                         text(ty::XS, t.text_secondary)
                                             .tnum()
-                                            .w(px(30.))
-                                            .text_right()
-                                            .child(format!("{:.0}%", r.progress() * 100.)),
-                                    )
-                            });
-                        let best = div().w(px(best_w)).flex_none().flex().justify_end().child(
-                            text(ty::SM, if r.best.is_some() { t.text_primary } else { t.text_tertiary })
-                                .tnum()
-                                .child(r.best.as_ref().map_or("–".to_string(), |b| f3(b.map50_95))),
-                        );
-                        let id = r.id.clone();
-                        let key = format!("ov-run-{}", r.id);
-                        let row =
-                            div()
-                                .id(SharedString::from(key.clone()))
-                                .h(px(36.))
-                                .mx(px(4.))
-                                .px(px(12.))
-                                .flex()
-                                .items_center()
-                                .gap(px(12.))
-                                .rounded(px(radius::MD))
-                                .cursor_pointer()
-                                .hover(|s| s.bg(t.bg_hover))
-                                // Same order as the Runs table: name, then status.
-                                // One line per run: name, then dataset and architecture, then status as a dot.
-                                .child(
-                                    text(ty::SM, t.text_primary)
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .w(px(name_w))
-                                        .flex_none()
-                                        .truncate()
-                                        .child(r.name.clone()),
-                                )
-                                // Room for the dataset and architecture only on wide windows.
-                                .when(wide, |d| {
-                                    d.child(
-                                        text(ty::XS, t.text_tertiary)
-                                            .w(px(meta_w))
+                                            .w(px(48.))
                                             .flex_none()
-                                            .truncate()
-                                            .child(format!("{ds} · {}", r.config.arch.as_str())),
-                                    )
-                                })
-                                .child(div().w(px(96.)).flex_none().child(status_dot(
-                                    &t,
-                                    r.status,
-                                    &format!("ov-{}", r.id),
-                                )))
-                                .child(progress_el)
-                                .child(div().flex_1())
-                                .child(best)
-                                .when(created, |d| {
-                                    d.child(
-                                        div().w(px(when_w)).flex_none().flex().justify_end().child(
-                                            text(ty::XS, t.text_tertiary).whitespace_nowrap().child(when),
-                                        ),
+                                            .whitespace_nowrap()
+                                            .text_right()
+                                            .child(format!("{}/{}", r.epoch, r.epochs)),
                                     )
                                 });
-                        self.bind(
-                            row,
-                            &key,
-                            radius::MD,
-                            window,
-                            cx,
-                            act(move |this, w, cx| this.navigate(Route::Run(id.clone()), w, cx)),
-                        )
+                            let best = div().w(px(best_w)).flex_none().flex().justify_end().child(
+                                text(ty::SM, if r.best.is_some() { t.text_primary } else { t.text_tertiary })
+                                    .tnum()
+                                    .child(r.best.as_ref().map_or("–".to_string(), |b| f3(b.map50_95))),
+                            );
+                            let id = r.id.clone();
+                            let key = format!("ov-run-{}", r.id);
+                            let row =
+                                div()
+                                    .id(SharedString::from(key.clone()))
+                                    .h(px(36.))
+                                    .mx(px(4.))
+                                    .px(px(12.))
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(12.))
+                                    .rounded(px(radius::MD))
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(t.bg_hover))
+                                    .active(|s| s.bg(t.bg_active))
+                                    // Same order as the Runs table: name, then status.
+                                    // One line per run: name, then dataset and architecture, then status as a dot.
+                                    .child(
+                                        text(ty::SM, t.text_primary)
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .w(px(name_w))
+                                            .flex_none()
+                                            .truncate()
+                                            .child(r.name.clone()),
+                                    )
+                                    // Room for the dataset and architecture only on wide windows.
+                                    .when(wide, |d| {
+                                        d.child(
+                                            text(ty::XS, t.text_tertiary)
+                                                .w(px(meta_w))
+                                                .flex_none()
+                                                .truncate()
+                                                .child(format!("{ds} · {}", r.config.arch.as_str())),
+                                        )
+                                    })
+                                    .child(div().w(px(96.)).flex_none().child(status_dot(
+                                        &t,
+                                        r.status,
+                                        &format!("ov-{}", r.id),
+                                    )))
+                                    .child(progress_el)
+                                    .child(div().flex_1())
+                                    .child(best)
+                                    .when(created, |d| {
+                                        d.child(div().w(px(when_w)).flex_none().flex().justify_end().child(
+                                            text(ty::XS, t.text_tertiary).whitespace_nowrap().child(when),
+                                        ))
+                                    });
+                            self.bind(
+                                row,
+                                &key,
+                                radius::MD,
+                                window,
+                                cx,
+                                act(move |this, w, cx| this.navigate(Route::Run(id.clone()), w, cx)),
+                            )
+                            .into_any_element()
+                        }))
                         .into_any_element()
-                    }))
-                    .into_any_element()
-            }
-            _ => loading_rows(&t, "ov-runs", 5).into_any_element(),
-        };
+                }
+                _ => loading_rows(&t, "ov-runs", 5).into_any_element(),
+            };
         panel(&t)
             .flex_1()
             .min_w_0()
@@ -803,6 +807,7 @@ impl FoloApp {
                             .rounded(px(radius::MD))
                             .cursor_pointer()
                             .hover(|s| s.bg(t.bg_hover))
+                            .active(|s| s.bg(t.bg_active))
                             .child(
                                 text(ty::SM, t.text_primary)
                                     .font_weight(FontWeight::MEDIUM)
@@ -1126,6 +1131,7 @@ impl FoloApp {
             .rounded(px(radius::SM))
             .cursor_pointer()
             .hover(|s| s.bg(t.bg_hover))
+            .active(|s| s.bg(t.bg_active))
             .child(text(ty::XS, t.text_secondary).child("View all"))
             .child(icon("icons/chevron-right.svg", 12., t.text_tertiary));
         self.bind(

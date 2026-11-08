@@ -172,6 +172,7 @@ impl FoloApp {
                     .border_color(t.line_subtle)
                     .cursor_pointer()
                     .hover(|s| s.bg(t.bg_hover))
+                    .active(|s| s.bg(t.bg_active))
                     .on_key_down(cx.listener(move |this, ev: &KeyDownEvent, w, cx| {
                         let next = match ev.keystroke.key.as_str() {
                             "down" => i + 1,
@@ -770,7 +771,10 @@ impl FoloApp {
             .collect();
         let loss_max = (0..4).filter(|&i| self.loss_parts[i]).map(|i| d.loss_max[i]).fold(0f32, f32::max);
         let mut loss = base("run-loss", loss_series, primary_h);
-        loss.y_range = Some((0., crate::charts::nice_ceil((loss_max * 1.05).max(0.1), 4)));
+        let loss_min =
+            (0..4).filter(|&i| self.loss_parts[i]).map(|i| d.loss_min[i]).fold(f32::INFINITY, f32::min);
+        loss.log_y = true;
+        loss.y_range = Some(log_range(loss_min, loss_max));
         let mut map = base(
             "run-map",
             vec![
@@ -831,6 +835,7 @@ impl FoloApp {
         let f3v: fn(f32) -> String = |x| format!("{x:.3}");
         // Loss parts are toggles; their values are the smoothed curve's, like the lines.
         let mut legend = Vec::new();
+        let shown = self.loss_parts.iter().filter(|b| **b).count();
         for (i, name) in names.iter().enumerate() {
             let on = self.loss_parts[i];
             let key = format!("loss-part-{name}");
@@ -846,7 +851,17 @@ impl FoloApp {
                 .rounded(px(radius::SM))
                 .cursor_pointer()
                 .hover(|s| s.bg(t.bg_hover))
-                .tooltip(crate::controls::tip(if on { "Hide this series" } else { "Show this series" }, None))
+                .active(|s| s.bg(t.bg_active))
+                .tooltip(crate::controls::tip(
+                    if on && shown == 1 {
+                        "Keep at least one series visible"
+                    } else if on {
+                        "Hide this series"
+                    } else {
+                        "Show this series"
+                    },
+                    None,
+                ))
                 .child(if on {
                     crate::ui::line_swatch(color, i == 1, i == 2, if i == 3 { 3. } else { 2. })
                 } else {
@@ -993,7 +1008,18 @@ impl FoloApp {
                 0.4,
             ));
         // One Tab stop for the linked charts: arrows walk the epochs.
-        self.chart_group("run-charts", 1.0 / total.max(1.0), crate::controls::Cursor::Run, grid, window, cx)
+        // Recorded data ends at the latest step or epoch; the rest of the x range is the schedule.
+        let recorded = d.loss[3].last().map_or(0., |p| p.0).max(d.map50_95.last().map_or(0., |p| p.0));
+        let end = (recorded / total.max(1.0)).clamp(0., 1.);
+        self.chart_group(
+            "run-charts",
+            1.0 / total.max(1.0),
+            end,
+            crate::controls::Cursor::Run,
+            grid,
+            window,
+            cx,
+        )
     }
 
     fn samples_panel(&mut self, r: &Run, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -1209,6 +1235,7 @@ impl FoloApp {
                 .rounded(px(radius::SM))
                 .cursor_pointer()
                 .hover(|s| s.bg(t.bg_hover))
+                .active(|s| s.bg(t.bg_active))
                 .child(text(ty::XS, t.text_secondary).child("Resume following"))
                 .child(icon("icons/chevron-down.svg", 12., t.text_secondary));
             self.bind(
@@ -1289,5 +1316,33 @@ fn matches_filter(r: &Run, f: RunFilter) -> bool {
         RunFilter::Active => r.status.is_active(),
         RunFilter::Completed => matches!(r.status, RunStatus::Completed | RunStatus::Stopped),
         RunFilter::Failed => r.status == RunStatus::Failed,
+    }
+}
+
+/// A log axis over positive values `lo..=hi`, from the power of two at or below `lo` to the one at
+/// or above `hi` (5 % headroom), at least one doubling tall. No positive data: 0.5 to 4.
+fn log_range(lo: f32, hi: f32) -> (f32, f32) {
+    if !lo.is_finite() || hi.is_nan() || hi <= 0. {
+        return (0.5, 4.);
+    }
+    // The floor the chart's log transform uses too, so nothing lands below the plot.
+    let lo = lo.max(1e-6);
+    let y0 = 2f32.powi(lo.log2().floor() as i32);
+    let y1 = 2f32.powi((hi.max(lo) * 1.05).log2().ceil() as i32).max(y0 * 2.);
+    (y0, y1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::log_range;
+
+    #[test]
+    fn the_log_loss_axis_holds_every_positive_value() {
+        // A single tiny loss sits inside the range, not under it.
+        let (a, b) = log_range(1e-4, 1e-4);
+        assert!(a <= 1e-4 && 1e-4 < b && b >= a * 2.);
+        let (a, b) = log_range(0.3, 6.);
+        assert_eq!((a, b), (0.25, 8.));
+        assert_eq!(log_range(f32::INFINITY, 0.), (0.5, 4.));
     }
 }
