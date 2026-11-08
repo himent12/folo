@@ -7,7 +7,6 @@
   import Plus from '@lucide/svelte/icons/plus';
   import RotateCcw from '@lucide/svelte/icons/rotate-ccw';
   import Upload from '@lucide/svelte/icons/upload';
-  import Video from '@lucide/svelte/icons/video';
   import X from '@lucide/svelte/icons/x';
   import { onDestroy, untrack } from 'svelte';
   import { hub } from '$lib/api/index.svelte';
@@ -367,7 +366,6 @@
                   options={[
                     { value: 'file', label: 'Image', icon: ImageIcon },
                     { value: 'dataset', label: 'Dataset', icon: Images },
-                    { value: 'webcam', label: 'Webcam', icon: Video, meta: 'soon', disabled: true },
                   ]}
                 />
               </span>

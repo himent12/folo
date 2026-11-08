@@ -141,7 +141,7 @@
                 </td>
                 <td class="r num best">
                   {metric(r.best?.map50_95)}
-                  {#if r.best}<span class="faint">e{r.best.epoch + 1}</span>{/if}
+                  {#if r.best}<span class="faint" title="Best epoch">ep {r.best.epoch + 1}</span>{/if}
                 </td>
                 <td class="hide-lg"><RunSpark run={r} width={96} /></td>
                 <td class="r num faint hide-xl">{r.status === 'queued' ? '—' : duration(elapsed(r))}</td>
