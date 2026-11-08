@@ -6,7 +6,8 @@ plus training, evaluation and export. You drive it from one `folo` binary, an HT
 **FOLO Studio** (a web app) or **FOLO Desktop** (a native GPUI app).
 
 - **One binary, no Python.** `folo train`, `val`, `predict`, `export`, `serve` and `mcp` run on the same Rust engine.
-  No PyTorch or CUDA toolkit is needed: the GPU kernels are our own WGSL, so any Vulkan, DX12 or Metal GPU works.
+  No PyTorch or CUDA toolkit is needed: the GPU kernels are our own WGSL, so a Vulkan, DX12 or Metal GPU that meets
+  wgpu's compute limits works (`folo doctor` tells you which one FOLO picks).
 - **Built for agents.** `--json` on every command, stable exit codes and error codes, `folo describe --json` for the
   whole CLI surface, and `folo mcp` for Claude Code, Codex or any MCP client.
 - **Runs in the browser.** The same detector compiles to wasm and runs on WebGPU in the page (about 14 ms for folo-n
@@ -27,15 +28,15 @@ the method, the raw JSON and how much noise to expect.
 | GPU forward, batch 1, f32 (median latency) | **3.98 ms** | 4.95 ms (6.04 ms default) | FOLO 1.24× faster |
 | GPU forward, batch 16, f32 (throughput) | **1461 img/s** | 1454 img/s (TF32) | tie |
 | Training step, batch 16, f32 (fwd + loss + bwd + SGD) | **219 img/s** | 202 img/s (fp32 with TF32) / 252 img/s (AMP) | FOLO faster than fp32; AMP still ahead |
-| Training peak GPU memory, batch 16, f32 | **3474 MiB** | 4353 MiB (2435 MiB AMP) | FOLO uses 20% less in f32 |
+| Training step peak GPU memory, batch 16, f32 | **3474 MiB** | 4517 MiB (2646 MiB AMP) | FOLO uses 23% less in f32 |
 | GPU end to end, batch 1 (decoded image in, boxes out) | 8.69 ms | **6.92 ms** | FOLO behind |
 | GPU end to end, batch 16 | 299 img/s | **615 img/s** (fp16) / 536 (fp32) | FOLO behind |
 | CPU forward, batch 1, f32 | ~40 ms | **22.8 ms** (8 threads) | FOLO behind |
 
 <!-- TODO(#55): when perf/inference-2 merges, update the three "FOLO behind" rows from docs/BENCHMARKS.md.
      PR #55 reports GPU e2e b1 5.18 ms, GPU e2e b16 722 img/s and CPU forward b1 21.4 ms (28 threads). -->
-FOLO is not ahead everywhere yet. The end-to-end path (letterbox, decode and NMS on the host) and the CPU forward are
-behind. An inference PR in review (#55) works on both; this table only lists merged code.
+FOLO is not ahead everywhere yet. The end-to-end path (letterbox and NMS on the CPU, plus downloading every
+decoded anchor from the GPU) and the CPU forward are behind. An inference PR in review (#55) works on both; this table only lists merged code.
 f16 inference and the full trainer loop (data loader included) have not been benchmarked against the incumbent yet.
 
 With the whole trainer (data loader, augmentation, validation), folo-n trains the shapes gate set (2,000 images
@@ -54,6 +55,7 @@ cargo folo doctor                                                         # the 
 cargo folo dataset synth datasets/shapes --images 1000 --imgsz 320        # a labelled YOLO dataset, ~1 s
 cargo folo train --data datasets/shapes --model folo-n --imgsz 320 --epochs 30   # ~2 min on the GPU
 cargo folo predict --model runs/shapes-n/weights/best.folo datasets/shapes/images/val --save runs/shapes-n/pred
+(cd web && npm ci && npm run build)                                       # build Studio's web app, once
 cargo folo serve --mock                                                   # Studio on http://127.0.0.1:7878, demo data
 ```
 
@@ -61,10 +63,10 @@ cargo folo serve --mock                                                   # Stud
 `metrics.jsonl`. On the dev machine this run ended at mAP50 0.948 / mAP50-95 0.814 after 137 s. `predict --save`
 writes copies of the images with the boxes drawn on them.
 
-`folo serve` serves Studio only once it is built, so run this first: `cd web && npm ci && npm run build`. To see
-real runs in Studio, drop `--mock`. `folo serve` keeps datasets, runs and models in `~/.folo` (`--data-dir`), and
-lists every `.folo` file under `<data dir>/models/` as a model. To try your model in the Playground, copy it there:
-`cp runs/shapes-n/weights/best.folo ~/.folo/models/shapes-n.folo`.
+To see real runs in Studio, drop `--mock`. `folo serve` keeps datasets, runs and models in its data dir
+(`--data-dir`, default `~/.folo`), and lists every `.folo` file under `<data dir>/models/` as a model. To try your
+model in the Playground, copy it there: `mkdir -p ~/.folo/models && cp runs/shapes-n/weights/best.folo
+~/.folo/models/shapes-n.folo`.
 
 **[docs/QUICKSTART.md](docs/QUICKSTART.md)** goes further: training on your own YOLO or COCO folder, fine-tuning,
 evaluation, export, and running a model in the browser.

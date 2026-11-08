@@ -73,6 +73,7 @@ Fastest path for an agent:
     [log](apps/desktop/HILLCLIMB.md), [review brief](apps/desktop/tools/review-brief.md)
 
 ## Project
+- [CLAUDE.md](CLAUDE.md): the entry point for Claude Code; it points at AGENTS.md and docs/ARCHITECTURE.md
 - [Agent rules](AGENTS.md): the ground rules for contributors (stable Rust, no ML frameworks, tests, docs), build
   hygiene and the layout
 - [Process](docs/PROCESS.md): implement → PR → review → fix → merge, and the reviewer setup

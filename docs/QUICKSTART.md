@@ -8,7 +8,7 @@ the full flag lists, see [CLI.md](CLI.md) or `folo describe --json`.
 ## 1. Get `folo`
 
 You need Rust stable and, for training at speed, a GPU with Vulkan, DX12 or Metal. The GPU kernels are FOLO's own
-WGSL on wgpu, so there is no CUDA or PyTorch to install. Without a usable GPU, `--device auto` falls back to the
+WGSL on wgpu, so there is no CUDA or PyTorch to install (`folo doctor` shows whether your adapter qualifies). Without a usable GPU, `--device auto` falls back to the
 CPU, which is about 25× slower to train.
 
 ```sh
@@ -166,7 +166,8 @@ folo serve                      # http://127.0.0.1:7878
 - **In Studio.** Register a dataset folder, or generate a synthetic one. Start a run and follow it live, with
   metrics, validation samples, per-class mAP and logs.
 - **Models.** Models are the finished runs' weights, plus every `.folo` file under `<data dir>/models/`. To bring in
-  a model you trained with the CLI, copy it there (`cp runs/shapes-n/weights/best.folo ~/.folo/models/shapes-n.folo`).
+  a model you trained with the CLI, copy it there: `mkdir -p ~/.folo/models && cp runs/shapes-n/weights/best.folo
+  ~/.folo/models/shapes-n.folo` (with `--data-dir D`, use `D/models/`).
 - **Mock mode.** `folo serve --mock` serves deterministic demo data instead, which is handy for a look around.
 - **Ports.** If port 7878 is taken, `--port 0` picks a free one. The first `listening` line (or the `--json`
   record) shows the URL.
@@ -214,7 +215,7 @@ Everything above is also available to agents in two ways:
 
 | symptom | fix |
 |---|---|
-| `folo serve` says the web app is not built | `cd web && npm ci && npm run build`, or pass `--web-dir` |
+| `folo serve` says the web app is not built | `(cd web && npm ci && npm run build)` from the repo root, or pass `--web-dir` |
 | `folo serve` cannot bind its port | another server holds port 7878: `--port 0` picks a free port |
 | Playground shows "does not include the in-browser runtime" | run `scripts/build-wasm.sh`, then rebuild Studio |
 | training is on the CPU | `folo doctor`: is a GPU listed? Try `FOLO_GPU_BACKEND=dx12` or `vulkan` |
