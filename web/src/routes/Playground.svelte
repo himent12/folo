@@ -662,7 +662,13 @@
                 {:else if error && !pred}
                   <div class="stage-err">
                     <div class="need-file err-card">
-                      <ErrorState {error} title="Prediction failed" retry={() => retryTick++} compact>
+                      <ErrorState
+                        {error}
+                        title="Prediction failed"
+                        retry={() => retryTick++}
+                        compact
+                        hint={oom ? (smaller ? 'Run it in this browser, or use a smaller model.' : 'Run it in this browser instead.') : undefined}
+                      >
                         {#snippet actions()}
                           {#if oom}
                             <Button size="sm" variant="primary" onclick={() => (runOn = localBackend)}>Run in this browser</Button>

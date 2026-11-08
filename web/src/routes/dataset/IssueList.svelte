@@ -69,12 +69,13 @@
     severity = v;
   }
   const where = (i: DatasetIssue) => (i.line !== null ? `${i.file}:${i.line}` : i.file);
-  const cli = $derived(`folo dataset check ${/\s/.test(path) ? `"${path}"` : path}`);
+  // --json lists every issue (the plain report stops at 200), --fix-dry-run adds each one's fix; nothing is modified.
+  const cli = $derived(`folo dataset check ${/\s/.test(path) ? `"${path}"` : path} --fix-dry-run --json`);
 
   async function copyCli() {
     try {
       await navigator.clipboard.writeText(cli);
-      toast.success('Command copied', 'It lists every issue with a suggested fix.');
+      toast.success('Command copied', 'It prints every issue with its fix as JSON, and changes nothing.');
     } catch (e) {
       toast.error(e, 'Could not copy');
     }

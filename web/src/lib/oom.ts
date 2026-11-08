@@ -15,13 +15,17 @@ export const IMGSZ_STEPS = [320, 480, 640, 960, 1280];
 const ARCHES: Arch[] = ['folo-n', 'folo-s', 'folo-m', 'folo-l', 'folo-x'];
 
 const PREFIX = /^the GPU ran out of memory\s*/i;
-const WORDING = /out of (gpu )?memory|outofmemory/i;
+/**
+ * The GPU wordings, and only those: the server's summary, the older servers' "gpu:0 out of memory: ...", and wgpu's
+ * own report. A message that merely mentions memory (a config error, the host running out) is not one.
+ */
+const GPU_WORDINGS = [PREFIX, /^gpu(:\d+)? out of memory\b/i, /\bwgpu backend: out ?of ?memory\b/i];
 
 /** A failed run's `error`, or an API error, that says the GPU ran out of memory. */
 export function isOom(e: unknown): boolean {
   if (e instanceof ApiError && e.code === OOM_CODE) return true;
-  const msg = typeof e === 'string' ? e : e instanceof Error ? e.message : null;
-  return !!msg && WORDING.test(msg);
+  const msg = (typeof e === 'string' ? e : e instanceof Error ? e.message : '').trim();
+  return GPU_WORDINGS.some((re) => re.test(msg));
 }
 
 /** The driver's report inside an OOM message ("wgpu backend: Out of Memory"), or the older message whole. */

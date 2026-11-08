@@ -88,9 +88,17 @@ describe('New run: a device the server cannot use', () => {
     expect(target.querySelector<HTMLInputElement>('input#name')!.value).toBe(name);
     // Start says why it is off, briefly, until another device is picked.
     expect([...target.querySelectorAll<HTMLButtonElement>('button[type="submit"]')].every((b) => b.disabled)).toBe(true);
-    expect(target.querySelector('.why')?.textContent).toBe('Device: gpu:1 is not on this machine; pick another.');
+    expect(target.querySelector('#start-why')?.textContent).toBe('Device: gpu:1 is not on this machine; pick another.');
+    // Both Start buttons (summary and phone dock) carry the reason, and the select is tied to its error.
+    expect(target.querySelector('#dock-why')?.textContent).toBe('Device: gpu:1 is not on this machine; pick another.');
+    const starts = [...target.querySelectorAll<HTMLButtonElement>('.start button[type="submit"], .dock button[type="submit"]')];
+    expect(starts.map((b) => b.getAttribute('aria-describedby'))).toEqual(['start-why', 'dock-why']);
+    const sel = target.querySelector('select#device')!;
+    expect(sel.getAttribute('aria-invalid')).toBe('true');
+    expect(sel.getAttribute('aria-describedby')).toBe('device-error');
     pick('auto');
     expect(target.querySelector('#device-error')).toBeNull();
+    expect(target.querySelector('select#device')!.hasAttribute('aria-invalid')).toBe(false);
   });
 
   it('treats a 501 for a GPU from servers before device_not_found the same way', async () => {
@@ -114,6 +122,12 @@ describe('New run after running out of GPU memory', () => {
     const batchField = target.querySelector('#batch')!.closest('.field')!;
     expect(batchField.querySelector('.was')?.textContent).toBe('was 32');
     // 960 px is kept from the failed run; the image size field is not marked.
+    expect(target.querySelector('#imgsz [aria-checked="true"]')?.textContent?.trim()).toBe('960');
+    expect(target.querySelector('#imgsz')!.closest('.field')!.querySelector('.was')).toBeNull();
+  });
+  it("ignores an image size the trainer would reject and keeps the run's", async () => {
+    await open('?from=run_a2f0&imgsz=333');
+    await until(() => target.querySelector('.oom-note'));
     expect(target.querySelector('#imgsz [aria-checked="true"]')?.textContent?.trim()).toBe('960');
     expect(target.querySelector('#imgsz')!.closest('.field')!.querySelector('.was')).toBeNull();
   });

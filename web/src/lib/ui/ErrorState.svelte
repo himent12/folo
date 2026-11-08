@@ -16,7 +16,16 @@
     title = 'Could not load this',
     compact = false,
     actions,
-  }: { error: unknown; retry?: () => void; title?: string; compact?: boolean; actions?: Snippet } = $props();
+    hint: ownHint,
+  }: {
+    error: unknown;
+    retry?: () => void;
+    title?: string;
+    compact?: boolean;
+    actions?: Snippet;
+    /** What to do, in this screen's terms, instead of the server's hint (which then goes with the technical details). */
+    hint?: string;
+  } = $props();
 
   // Connection failures look the same everywhere: what was tried, and both ways out (retry, settings).
   const offline = $derived(error instanceof ApiError && error.code === 'network');
@@ -27,11 +36,14 @@
   const message = $derived(
     offline ? `Nothing answered at ${hub.serverUrl}.` : oom ? 'The GPU ran out of memory.' : error instanceof ApiError ? sentence(raw) : raw,
   );
-  const hint = $derived(offline ? 'Start folo serve, or check the server URL.' : error instanceof ApiError && error.hint ? sentence(error.hint) : undefined);
+  const serverHint = $derived(error instanceof ApiError && error.hint ? sentence(error.hint) : undefined);
+  const hint = $derived(offline ? 'Start folo serve, or check the server URL.' : (ownHint ?? serverHint));
   /** The hint in parts, identifiers (in backticks, as the server writes them) set in mono. */
   const hintParts = $derived((hint ?? '').split('`').map((text, i) => ({ text, code: i % 2 === 1 })));
   const code = $derived(error instanceof ApiError ? `${error.code}${error.status ? ` · HTTP ${error.status}` : ''}` : undefined);
   const detail = $derived(oom ? oomDetail(raw) : null);
+  /** The server's own hint, kept with the details when the screen says what applies here. */
+  const hiddenHint = $derived(!offline && ownHint && serverHint ? serverHint.replaceAll('`', '') : null);
 </script>
 
 <div class="err" class:compact role="alert">
@@ -40,10 +52,11 @@
     <p class="title">{heading}</p>
     <p class="msg">{message}</p>
     {#if hint}<p class="hint">{#each hintParts as p, i (i)}{#if p.code}<code>{p.text}</code>{:else}{p.text}{/if}{/each}</p>{/if}
-    {#if code || detail}
+    {#if code || detail || hiddenHint}
       <details class="code">
         <summary>Technical details</summary>
         {#if detail}<span class="line">{detail}</span>{/if}
+        {#if hiddenHint}<span class="line">Server hint: {hiddenHint}</span>{/if}
         {#if code}<span class="line">{code}</span>{/if}
       </details>
     {/if}
@@ -128,6 +141,12 @@
   }
   .code[open] summary::before {
     transform: rotate(45deg);
+  }
+  /* Touch: the disclosure is a 44 px target, as Outcome's driver report is. */
+  @media (pointer: coarse) {
+    .code summary {
+      min-height: 44px;
+    }
   }
   .acts {
     display: flex;

@@ -16,6 +16,11 @@ describe('isOom', () => {
 
   it('leaves other failures alone', () => {
     expect(isOom('dataset folder is gone')).toBe(false);
+    // Mentioning memory is not enough: a config error, the host running out, a training failure.
+    expect(isOom('invalid config: out of memory? no')).toBe(false);
+    expect(isOom(new ApiError(400, 'invalid_config', 'batch 4096 would run out of memory'))).toBe(false);
+    expect(isOom('io error: failed to decode image: out of memory (host)')).toBe(false);
+    expect(isOom('training failed: the loader ran out of memory')).toBe(false);
     expect(isOom(new ApiError(404, 'device_not_found', 'device gpu:3 is not available'))).toBe(false);
     expect(isOom(null)).toBe(false);
     expect(isOom(undefined)).toBe(false);

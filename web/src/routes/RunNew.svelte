@@ -101,15 +101,16 @@
     if (!r || untrack(() => prefilled)) return;
     const c = r.config;
     // A retry's fix comes in the query (?batch=, ?imgsz=, ?arch=, ?device=; see $lib/oom) and wins over the run's.
-    const whole = (k: string, lo: number, hi: number) => {
+    // A value the trainer would reject is ignored (the run's own stays), never offered with Start enabled.
+    const whole = (k: string, lo: number, hi: number, step = 1) => {
       const v = Number(q.get(k));
-      return Number.isInteger(v) && v >= lo && v <= hi ? String(v) : null;
+      return Number.isInteger(v) && v >= lo && v <= hi && v % step === 0 ? String(v) : null;
     };
     datasetId = c.dataset_id;
     arch = arches.find((a) => a.arch === q.get('arch'))?.arch ?? c.arch;
     epochs = c.epochs;
     batch = whole('batch', 1, 1024) ?? String(c.batch);
-    imgsz = whole('imgsz', 32, 4096) ?? String(c.imgsz);
+    imgsz = whole('imgsz', 64, 4096, 32) ?? String(c.imgsz); // the trainer's limits (docs/API.md, runs)
     device = q.get('device') === 'cpu' ? 'cpu' : c.device;
     optimizer = c.optimizer;
     lr0 = c.lr0;
@@ -232,6 +233,7 @@
     for (const [k, v] of Object.entries(errors)) if (v) return `${FIELD[k as keyof typeof errors]}: ${v}`;
     return null;
   });
+  const showWhy = $derived(!valid && !!why && prefilled);
   // A folded section must not hide its own error: while one is shown the section stays open whatever was toggled.
   const augShown = $derived(augOpen || errors.close !== null);
 
@@ -522,6 +524,8 @@
               <Select
                 id="device"
                 bind:value={device}
+                invalid={!!deviceMsg}
+                describedby={deviceMsg ? 'device-error' : undefined}
                 options={[
                   { value: 'auto', label: `Auto${gpu ? ` · ${deviceName(gpu.name)}` : ''}` },
                   ...(system.data?.gpus ?? []).map((g) => ({ value: `gpu:${g.ordinal}`, label: `gpu:${g.ordinal} · ${deviceName(g.name)}` })),
@@ -620,9 +624,18 @@
             <div class="sum-col">
             {@render figures()}
             <div class="start" bind:this={startEl}>
-              <Button type="submit" variant="primary" size="lg" icon={Play} block loading={submitting} disabled={!valid}>Start training</Button>
+              <Button
+                type="submit"
+                variant="primary"
+                size="lg"
+                icon={Play}
+                block
+                loading={submitting}
+                disabled={!valid}
+                aria-describedby={showWhy ? 'start-why' : undefined}>Start training</Button
+              >
               <!-- A disabled Start always says why, next to it (the field may be far away). -->
-              {#if !valid && why && prefilled}<p class="why" role="status">{why}</p>{/if}
+              {#if showWhy}<p class="why" id="start-why" role="status">{why}</p>{/if}
             </div>
             <details class="cli">
               <summary><ChevronRight size={14} aria-hidden="true" />CLI command <span class="faint">the same run from a terminal</span></summary>
@@ -638,13 +651,17 @@
 
       <!-- Narrow screens: the summary sits below the form, so keep the essentials and the action in reach. -->
       <div class="dock" class:away={startVisible} role="region" aria-label="Start training" inert={startVisible}>
+        <!-- The reason Start is off travels with it (the Summary's line is out of view here). -->
+        {#if showWhy}<p class="why dock-why" id="dock-why">{why}</p>{/if}
         <button type="button" class="dock-est num" aria-haspopup="dialog" aria-label="Show the run summary" onclick={() => (sumOpen = true)}>
           <span>{roughDuration(est.totalSeconds)}</span>
           {#if !onCpu && gpu}<span class:warn={vramPct > 0.9}>{roughBytes(vram)} VRAM</span>{/if}
           {#if dataset}<span class="faint">{dataset.name} · {arch}</span>{/if}
           <span class="dock-more"><ChevronUp size={14} strokeWidth={1.75} aria-hidden="true" /></span>
         </button>
-        <Button type="submit" variant="primary" size="lg" icon={Play} loading={submitting} disabled={!valid}>Start training</Button>
+        <Button type="submit" variant="primary" size="lg" icon={Play} loading={submitting} disabled={!valid} aria-describedby={showWhy ? 'dock-why' : undefined}
+          >Start training</Button
+        >
       </div>
 
       <!-- Inside the form, so its Start button submits it. -->
@@ -1186,6 +1203,15 @@
       transition:
         transform var(--dur-base) var(--ease-out),
         opacity var(--dur-base) var(--ease-out);
+    }
+    .dock:has(.dock-why) {
+      flex-wrap: wrap;
+      row-gap: var(--space-2);
+    }
+    .dock-why {
+      flex-basis: 100%;
+      margin-top: 0;
+      text-align: right;
     }
     .dock.away {
       transform: translateY(100%);

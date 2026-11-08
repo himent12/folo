@@ -44,6 +44,18 @@ describe('ErrorState', () => {
     r.done();
   });
 
+  it("says what applies on this screen, keeping the server's hint with the details", () => {
+    const r = render({
+      error: new ApiError(507, 'gpu_out_of_memory', 'the GPU ran out of memory (wgpu backend: Out of Memory)', 'lower `batch` or `imgsz`'),
+      title: 'Prediction failed',
+      hint: 'Run it in this browser instead.',
+    });
+    expect(r.text('.hint')).toBe('Run it in this browser instead.');
+    const lines = [...r.target.querySelectorAll('.code .line')].map((e) => e.textContent);
+    expect(lines).toContain('Server hint: Lower batch or imgsz.');
+    r.done();
+  });
+
   it('shows no hint when the server had none', () => {
     const r = render({ error: new ApiError(500, 'internal', 'boom', null) });
     expect(r.target.querySelector('.hint')).toBeNull();
