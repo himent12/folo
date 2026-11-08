@@ -605,7 +605,12 @@ impl FoloApp {
             )
             .into_any_element()
         };
-        let arch_seg = seg(self, "nr-arch", &["n", "s", "m", "l", "x"], arch, window, cx, |f, i| f.arch = i);
+        // Geist Mono, so "l" can't read as "1" or "|".
+        let arch_seg = div()
+            .w_full()
+            .font_family(crate::theme::MONO)
+            .child(seg(self, "nr-arch", &["n", "s", "m", "l", "x"], arch, window, cx, |f, i| f.arch = i))
+            .into_any_element();
         let batch_labels: Vec<String> = BATCHES.iter().map(|b| b.to_string()).collect();
         let batch_refs: Vec<&str> = batch_labels.iter().map(String::as_str).collect();
         let batch_seg = seg(self, "nr-batch", &batch_refs, batch, window, cx, |f, i| f.batch = i);
@@ -1216,9 +1221,9 @@ impl FoloApp {
                     .whitespace_normal()
                     // The epoch in progress is discarded; last.folo is the last finished epoch's.
                     .child(match finished {
-                        Some(Some(e)) => format!("Training stops after the current batch. The epoch {e} checkpoint (the last finished) is kept, so you can export it or resume from it; progress since is discarded."),
-                        Some(None) => "Training stops after the current batch. No epoch has finished yet, so there is no checkpoint to keep.".to_string(),
-                        None => "Training stops after the current batch. The last finished epoch's checkpoint is kept, so you can export it or resume from it; progress since is discarded.".to_string(),
+                        Some(Some(e)) => format!("Stops after the current batch. The epoch {e} checkpoint is kept for export or resume; progress since is lost."),
+                        Some(None) => "Stops after the current batch. No epoch has finished yet, so there is no checkpoint to keep.".to_string(),
+                        None => "Stops after the current batch. The last finished epoch's checkpoint is kept for export or resume; progress since is lost.".to_string(),
                     }),
             );
         let footer = div()
@@ -1279,6 +1284,7 @@ impl FoloApp {
                     .rounded(px(radius::SM))
                     .cursor_pointer()
                     .hover(|s| s.bg(t.bg_hover))
+                    .active(|s| s.bg(t.bg_active))
                     .child(text(ty::XS, t.text_secondary).child(label));
                 this.bind(el, key, radius::SM, window, cx, a)
             };
@@ -1318,7 +1324,8 @@ impl FoloApp {
                 .flex()
                 .flex_col()
                 .child(
-                    div().flex().justify_end().pb(px(6.)).child(
+                    // Docked to the stack (2 px above its edges), not floating over the page.
+                    div().flex().justify_end().pb(px(2.)).child(
                         // A compact pill, right-aligned: clearly controls, not another notification.
                         div()
                             .flex()
@@ -1342,7 +1349,8 @@ impl FoloApp {
                             .bg(crate::theme::alpha(t.bg_raised, a))
                             .border_1()
                             .border_b_0()
-                            .border_color(crate::theme::alpha(t.line_strong, a))
+                            // line.default: on line.strong it would double the toast's own top edge.
+                            .border_color(crate::theme::alpha(t.line_default, a))
                     };
                     d.when(older > 1, |d| d.child(edge(16., 0.6))).child(edge(8., 1.))
                 })
@@ -1651,6 +1659,7 @@ impl FoloApp {
                     .rounded(px(radius::SM))
                     .when(hot, |d| d.bg(t.bg_active).child(crate::ui::select_bar(&t)))
                     .hover(|s| s.bg(t.bg_hover))
+                    .active(|s| s.bg(t.bg_active))
                     .on_hover(cx.listener(move |this, h: &bool, _, cx| {
                         if let Some(insp) = this.inspector.as_mut() {
                             let next = if *h { Some(i) } else { None };

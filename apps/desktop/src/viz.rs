@@ -194,8 +194,10 @@ pub fn paint_image_with_boxes(
                     let (chip_bg, ink) = if b.highlight {
                         (t.accent_solid, t.accent_on)
                     } else if b.dim {
-                        // Faded with their boxes, so the selection is the brightest thing.
-                        (alpha(color, 0.3), alpha(chip_text, 0.85))
+                        // Muted but opaque (a translucent chip over a photo can't be read): the
+                        // class tint on the panel colour, text picked for contrast on it.
+                        let muted = crate::theme::over(t.bg_panel, alpha(color, 0.4));
+                        (muted, t.readable_on(muted))
                     } else {
                         (color, chip_text)
                     };

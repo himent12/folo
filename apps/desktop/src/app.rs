@@ -41,6 +41,8 @@ actions!(
         FocusNext,
         FocusPrev,
         Submit,
+        NextRegion,
+        PrevRegion,
     ]
 );
 
@@ -61,6 +63,9 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-o", OpenImage, None),
         KeyBinding::new("tab", FocusNext, None),
         KeyBinding::new("shift-tab", FocusPrev, None),
+        // Jump between the sidebar, the search field and the page without tabbing through each.
+        KeyBinding::new("f6", NextRegion, None),
+        KeyBinding::new("shift-f6", PrevRegion, None),
         KeyBinding::new("ctrl-enter", Submit, None),
     ]);
 }
@@ -380,6 +385,8 @@ pub struct FoloApp {
     pub export_hl: usize,
     /// Models table order: column key and descending; None keeps the server's order.
     pub models_sort: Option<(&'static str, bool)>,
+    /// The Runs table's sort: column key and descending.
+    pub runs_sort: Option<(&'static str, bool)>,
     /// The sorted order of the models list, for (list allocation, length, column, descending).
     pub models_order: RefCell<Option<(ModelsOrderKey, Vec<usize>)>>,
     pub confusion_norm: bool,
@@ -527,6 +534,7 @@ impl FoloApp {
             export_hl: 0,
             // Newest first, shown on the Created header, which is also how the server lists them.
             models_sort: Some(("created", true)),
+            runs_sort: Some(("created", true)),
             models_order: RefCell::new(None),
             confusion_norm: true,
             play_model: None,
@@ -1935,6 +1943,7 @@ impl FoloApp {
                 .justify_center()
                 .window_control_area(area)
                 .hover(move |s| if close { s.bg(gpui::rgb(0xC42B1C)) } else { s.bg(t.bg_hover) })
+                .active(|s| s.opacity(0.8))
                 .child(
                     gpui::svg()
                         .path(icon_path)
@@ -1978,7 +1987,10 @@ impl FoloApp {
                         let crumb = match route {
                             Some(r) => self
                                 .bind(
-                                    crumb.cursor_pointer().hover(|s| s.bg(t.bg_hover)),
+                                    crumb
+                                        .cursor_pointer()
+                                        .hover(|s| s.bg(t.bg_hover))
+                                        .active(|s| s.bg(t.bg_active)),
                                     &format!("crumb-{i}"),
                                     4.,
                                     window,
@@ -2014,6 +2026,7 @@ impl FoloApp {
                     .border_color(t.line_default)
                     .cursor_pointer()
                     .hover(|s| s.border_color(t.line_strong))
+                    .active(|s| s.bg(t.bg_active))
                     .on_click(cx.listener(|this, _, w, cx| this.open_palette(w, cx)))
                     .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, w, cx| {
                         if matches!(ev.keystroke.key.as_str(), "enter" | "space") {
@@ -2180,6 +2193,7 @@ impl FoloApp {
             .cursor_pointer()
             .when(active, |d| d.bg(t.bg_active))
             .when(!active, |d| d.hover(|s| s.bg(t.bg_hover)))
+            .active(|s| s.bg(t.bg_active))
             .on_click(cx.listener(move |this, _, w, cx| this.navigate(route.clone(), w, cx)))
             .on_key_down(cx.listener(move |this, ev: &gpui::KeyDownEvent, w, cx| {
                 if matches!(ev.keystroke.key.as_str(), "enter" | "space") {
@@ -2232,10 +2246,8 @@ impl FoloApp {
         let id = r.id.clone();
         let fh = self.fh("live-mini", cx);
         let ring = self.ring(&fh, window);
-        let map = r.best.as_ref().map_or("–".to_string(), |b| f3(b.map50_95));
         let id2 = id.clone();
         // A single footer row: the nav badge already says a run is live, so this only names it.
-        let _ = map;
         div()
             .id("live-mini")
             .track_focus(&fh)
@@ -2251,6 +2263,7 @@ impl FoloApp {
             .rounded(px(crate::theme::radius::MD))
             .cursor_pointer()
             .hover(|s| s.bg(t.bg_hover))
+            .active(|s| s.bg(t.bg_active))
             .tooltip(crate::controls::tip(format!("{} · epoch {} / {}", r.name, r.epoch, r.epochs), None))
             .on_click(cx.listener(move |this, _, w, cx| this.navigate(Route::Run(id.clone()), w, cx)))
             .on_key_down(cx.listener(move |this, ev: &gpui::KeyDownEvent, w, cx| {
@@ -2296,6 +2309,7 @@ impl FoloApp {
             .border_color(t.line_subtle)
             .cursor_pointer()
             .hover(|s| s.border_color(t.line_default))
+            .active(|s| s.bg(t.bg_active))
             .tooltip(crate::controls::tip(format!("{} · epoch {} / {}", r.name, r.epoch, r.epochs), None))
             .child(dot(t.accent_fill(), 6., true, "rail"))
             .child(text(ty::MICRO, t.text_secondary).tnum().child(format!("{:.0}%", r.progress() * 100.)));
@@ -2312,18 +2326,22 @@ impl FoloApp {
 
     fn connection_line(&self, compact: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
-        let (color, label) = match &self.store.health {
-            _ if self.connecting.is_some() => {
-                (t.warning_solid, self.connecting.clone().unwrap_or_default().to_string())
-            }
-            Load::Ready(h) if h.mock => {
-                (t.success_solid, format!("{} · v{}", self.store.api.describe(), h.version))
-            }
-            Load::Ready(h) => (t.success_solid, format!("{} · v{}", self.store.api.describe(), h.version)),
-            Load::Failed(_) => (t.danger_solid, "Server unreachable".to_string()),
-            _ => (t.text_disabled, "Connecting…".to_string()),
+        let (color, glyph, label) = match &self.store.health {
+            _ if self.connecting.is_some() => (
+                t.warning_solid,
+                "icons/refresh-cw.svg",
+                self.connecting.clone().unwrap_or_default().to_string(),
+            ),
+            Load::Ready(h) => (
+                t.success_solid,
+                "icons/circle-check.svg",
+                format!("{} · v{}", self.store.api.describe(), h.version),
+            ),
+            Load::Failed(_) => (t.danger_solid, "icons/circle-x.svg", "Server unreachable".to_string()),
+            _ => (t.text_disabled, "icons/refresh-cw.svg", "Connecting…".to_string()),
         };
         div()
+            .id("connection")
             .h(px(36.))
             .flex_none()
             .flex()
@@ -2332,9 +2350,17 @@ impl FoloApp {
             .px(px(16.))
             .border_t_1()
             .border_color(t.line_subtle)
-            .when(compact, |d| d.justify_center().px(px(0.)))
-            .child(div().size(px(6.)).rounded_full().bg(color))
-            .when(!compact, |d| d.child(text(ty::XS, t.text_tertiary).truncate().child(label)))
+            // Collapsed rail: a shaped glyph (not colour alone) with the full status on hover.
+            .when(compact, |d| {
+                d.justify_center()
+                    .px(px(0.))
+                    .tooltip(crate::controls::tip(format!("Connection: {label}"), None))
+                    .child(icon(glyph, 14., color))
+            })
+            .when(!compact, |d| {
+                d.child(div().size(px(6.)).rounded_full().bg(color))
+                    .child(text(ty::XS, t.text_tertiary).truncate().child(label))
+            })
     }
 
     fn page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -2514,6 +2540,8 @@ impl Render for FoloApp {
                 this.cycle_focus(false, w, cx);
                 cx.notify();
             }))
+            .on_action(cx.listener(|this, _: &NextRegion, w, cx| this.cycle_region(true, w, cx)))
+            .on_action(cx.listener(|this, _: &PrevRegion, w, cx| this.cycle_region(false, w, cx)))
             .on_action(cx.listener(|this, _: &Dismiss, w, cx| this.dismiss(w, cx)))
             .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _, cx| {
                 if matches!(ev.keystroke.key.as_str(), "up" | "down" | "left" | "right" | "enter" | "space")
@@ -2583,7 +2611,16 @@ impl Render for FoloApp {
                     .flex()
                     .flex_col()
                     .child(titlebar)
-                    .child(div().flex_1().min_h_0().relative().child(page)),
+                    // The page's region anchor for F6 (not a Tab stop itself).
+                    .child(
+                        div()
+                            .id("page-region")
+                            .track_focus(&self.fh("page-region", cx).tab_stop(false))
+                            .flex_1()
+                            .min_h_0()
+                            .relative()
+                            .child(page),
+                    ),
             )
             .children(overlays)
     }
@@ -2644,6 +2681,45 @@ impl FoloApp {
     }
 
     /// Tab / Shift-Tab, trapped inside the topmost overlay.
+    /// F6 / Shift+F6: the sidebar (the current section's item), the search field, then the page
+    /// (its first control). Dialogs and the palette keep focus to themselves.
+    fn cycle_region(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.modal_open() || self.palette.is_some() {
+            return;
+        }
+        let nav = format!(
+            "nav-{}",
+            match self.route.section() {
+                Section::Overview => "Overview",
+                Section::Datasets => "Datasets",
+                Section::Runs => "Runs",
+                Section::Models => "Models",
+                Section::Playground => "Playground",
+                Section::Settings => "Settings",
+            }
+        );
+        let in_nav = self.focus.borrow().iter().any(|(k, f)| k.starts_with("nav-") && f.is_focused(window));
+        let in_search = self.fh("titlebar-search", cx).is_focused(window);
+        let at = if in_nav {
+            0
+        } else if in_search {
+            1
+        } else {
+            2
+        };
+        let next = if forward { (at + 1) % 3 } else { (at + 2) % 3 };
+        self.kb = true;
+        match next {
+            0 => window.focus(&self.fh(nav, cx)),
+            1 => window.focus(&self.fh("titlebar-search", cx)),
+            _ => {
+                window.focus(&self.fh("page-region", cx));
+                self.cycle_focus(true, window, cx);
+            }
+        }
+        cx.notify();
+    }
+
     fn cycle_focus(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
         // The newly focused control scrolls into view inside whichever of these holds it.
         let containers = if self.inspector.is_some() {

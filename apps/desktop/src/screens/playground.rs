@@ -93,7 +93,19 @@ impl FoloApp {
         let t = theme(cx);
         let no_models = self.store.models.ready().is_some_and(|m| m.is_empty());
         if self.play_image.is_none() {
-            let pick = if no_models {
+            // Every enabled action does something: with no datasets either, the first step is one.
+            let no_datasets = self.store.datasets.ready().is_some_and(|d| d.is_empty());
+            let pick = if no_models && no_datasets {
+                self.button(
+                    "play-pick",
+                    "Add a dataset",
+                    Btn::Primary,
+                    Some("icons/plus.svg"),
+                    window,
+                    cx,
+                    act(|this, w, cx| this.navigate(crate::app::Route::Datasets, w, cx)),
+                )
+            } else if no_models {
                 self.button(
                     "play-pick",
                     "New run",
@@ -774,22 +786,24 @@ impl FoloApp {
                 let img = self.image(&ds_id, &m.id, ImgKind::Thumb, cx);
                 let key = format!("play-sample-{}", m.id);
                 let (d, i) = (ds_id.clone(), m.id.clone());
+                // The image clips inside; the control itself doesn't, so its focus ring shows whole.
                 let el = div()
                     .id(SharedString::from(key.clone()))
                     .flex_1()
                     .h(px(48.))
                     .rounded(px(radius::SM))
-                    .overflow_hidden()
-                    .bg(t.bg_inset)
                     .cursor_pointer()
                     .hover(|s| s.opacity(0.85))
-                    .child(image_canvas(
-                        &t,
-                        img,
-                        (m.width as f32, m.height as f32),
-                        Vec::new(),
-                        Fit::Cover,
-                        false,
+                    .active(|s| s.opacity(0.7))
+                    .child(div().size_full().rounded(px(radius::SM)).overflow_hidden().bg(t.bg_inset).child(
+                        image_canvas(
+                            &t,
+                            img,
+                            (m.width as f32, m.height as f32),
+                            Vec::new(),
+                            Fit::Cover,
+                            false,
+                        ),
                     ));
                 thumbs.push(
                     self.bind(

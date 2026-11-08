@@ -160,7 +160,8 @@ impl FoloApp {
             ))
             .child(row(
                 "Start folo serve automatically",
-                help("Launch a local server when the app opens and none is running."),
+                // Read at startup, whatever the current source.
+                help("At startup, launch folo serve when none is running (else the built-in demo)."),
                 spawn.into_any_element(),
             ));
 

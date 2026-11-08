@@ -231,9 +231,10 @@ impl FoloApp {
                 // Epochs are whole numbers ("5", not "5.0").
                 map.x_fmt = |v| format!("{v:.0}");
                 map.y_range = Some((0., 1.));
-                map.y_ticks = 4;
+                // Short windows: 0 / 0.50 / 1.00, so labels keep their distance in the lower plot.
+                map.y_ticks = if hero_h < 120. { 2 } else { 4 };
                 map.y_fmt = Some(|v| format!("{v:.2}"));
-                map.height = hero_h + 48.;
+                map.height = hero_h + 16.;
                 map.hover = hover;
                 map.on_hover = Some(on_hover);
                 map.x_name = "epoch";
@@ -253,10 +254,22 @@ impl FoloApp {
                     .child(crate::ui::legend_value(&t, "mAP50-95", t.chart_series[0], false, v(&d.map50_95)))
                     .child(crate::ui::legend_value(&t, "mAP50", t.chart_series[1], false, v(&d.map50)))
                     .into_any_element();
-                (line_chart(&t, map), legend_el, step.map(|s| s.imgs_per_s), epoch.map(|e| e.val.map50_95))
+                // One Tab stop with the dashboard's keyboard cursor (← / →, Home / End, Esc), ending
+                // at the latest validated epoch.
+                let last = d.map50_95.last().map_or(0., |p| p.0);
+                let chart = self.chart_group(
+                    "ov-chart",
+                    1. / total.max(1.),
+                    (last / total.max(1.)).clamp(0., 1.),
+                    crate::controls::Cursor::Run,
+                    div().child(line_chart(&t, map)),
+                    window,
+                    cx,
+                );
+                (chart, legend_el, step.map(|s| s.imgs_per_s), epoch.map(|e| e.val.map50_95))
             }
             None => (
-                div().h(px(hero_h + 48.)).child(skeleton(&t, "ov-charts")).into_any_element(),
+                div().h(px(hero_h + 16.)).child(skeleton(&t, "ov-charts")).into_any_element(),
                 div().into_any_element(),
                 None,
                 None,
@@ -274,21 +287,18 @@ impl FoloApp {
                 .child(value)
                 .when_some(detail, |d, s| d.child(text(ty::XS, t.text_tertiary).tnum().child(s)))
         };
-        // The two KPI rows span the chart's height (top row level with its top, bottom row with
-        // its baseline), so no dead band opens under them.
+        // One row of four KPIs above a full-width chart: no column beside the chart to leave a
+        // gap in, whatever the chart's height.
         let kpis = div()
-            .w(px(220.))
-            .flex_none()
             .flex()
-            .flex_col()
-            .justify_between()
-            .gap(px(24.))
+            .flex_wrap()
+            .gap(px(40.))
             .child(
                 div()
                     .flex()
-                    .gap(px(16.))
+                    .gap(px(40.))
                     .child(
-                        div().flex_1().child(kpi(
+                        div().flex_none().min_w(px(120.)).child(kpi(
                             "Epoch",
                             div()
                                 .flex()
@@ -313,7 +323,7 @@ impl FoloApp {
                         )),
                     )
                     .child(
-                        div().flex_1().child(kpi(
+                        div().flex_none().min_w(px(120.)).child(kpi(
                             "mAP50-95",
                             text(ty::X2XL, t.text_primary)
                                 .tnum()
@@ -326,9 +336,9 @@ impl FoloApp {
             .child(
                 div()
                     .flex()
-                    .gap(px(16.))
+                    .gap(px(40.))
                     .child(
-                        div().flex_1().child(kpi(
+                        div().flex_none().min_w(px(120.)).child(kpi(
                             "Throughput",
                             metric(
                                 &t,
@@ -341,7 +351,7 @@ impl FoloApp {
                             None,
                         )),
                     )
-                    .child(div().flex_1().child(kpi(
+                    .child(div().flex_none().min_w(px(120.)).child(kpi(
                         "Time left",
                         duration_metric(&t, eta_s, ty::X2XL, ty::SM).into_any_element(),
                         None,
@@ -381,7 +391,7 @@ impl FoloApp {
                     .child(div().h_full().w(gpui::relative(r.progress().clamp(0., 1.))).bg(t.accent_fill())),
             )
             .child(
-                div().flex().gap(px(24.)).p(px(16.)).child(kpis).child(
+                div().flex().flex_col().gap(px(16.)).p(px(16.)).child(kpis).child(
                     div()
                         .flex_1()
                         .min_w_0()
@@ -461,8 +471,8 @@ impl FoloApp {
     fn idle_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
         if self.store.runs.is_loading() {
-            // Same anatomy and heights as the live panel: header, rail, 2×2 KPIs beside the chart
-            // (its title row, then the plot), meter footer. Nothing below moves when data lands.
+            // Same anatomy and heights as the live panel: header, rail, a row of four KPIs above the
+            // chart (its title row, then the plot), meter footer. Nothing moves when data lands.
             let hero_h = if window.viewport_size().height < px(700.) { 100. } else { 132. };
             let sk = |id: &str| skeleton(&t, id.to_string());
             return panel(&t)
@@ -481,15 +491,12 @@ impl FoloApp {
                 .child(
                     div()
                         .flex()
-                        .gap(px(24.))
+                        .flex_col()
+                        .gap(px(16.))
                         .p(px(16.))
-                        .child(div().w(px(220.)).flex_none().flex().flex_col().gap(px(16.)).children(
-                            (0..2).map(|r| {
-                                div().flex().gap(px(16.)).children((0..2).map(move |c| {
-                                    div().flex_1().h(px(52.)).child(skeleton(&t, format!("hero-kpi-{r}{c}")))
-                                }))
-                            }),
-                        ))
+                        .child(div().flex().gap(px(40.)).children((0..4).map(|c| {
+                            div().w(px(120.)).h(px(64.)).child(skeleton(&t, format!("hero-kpi-{c}")))
+                        })))
                         .child(
                             div()
                                 .flex_1()
@@ -497,7 +504,7 @@ impl FoloApp {
                                 .flex_col()
                                 .gap(px(4.))
                                 .child(div().h(px(20.)).w(px(120.)).child(sk("hero-chart-title")))
-                                .child(div().h(px(hero_h + 48.)).child(sk("hero-chart"))),
+                                .child(div().h(px(hero_h + 16.)).child(sk("hero-chart"))),
                         ),
                 )
                 .child(
@@ -779,8 +786,8 @@ impl FoloApp {
     fn top_models(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
         let all = self.view_all("ov-models-all", Route::Models, window, cx);
-        let header = panel_header(&t, "Best models")
-            .child(div().flex().items_center().gap(px(8.)).child(caption(&t, "by mAP50-95")).child(all));
+        // The mAP50-95 column head says what ranks them.
+        let header = panel_header(&t, "Best models").child(all);
         let body = match &self.store.models {
             Load::Ready(models) if models.is_empty() => div()
                 .child(empty_state(
@@ -1052,10 +1059,7 @@ impl FoloApp {
             // Honest about what reaches this app: the server and the datasets registered with it;
             // `folo train` runs on its own (runs/ in the working folder).
             .child(cmd("folo serve", "start the server this app connects to"))
-            .child(cmd(
-                "folo dataset synth shapes --images 1000",
-                "then Add dataset and pick the shapes folder",
-            ))
+            .child(cmd("folo dataset synth shapes --images 1000", "then Add dataset → choose ./shapes"))
             .child(cmd(
                 "folo train --data shapes --epochs 50",
                 "or train in the terminal, separate from this app",
@@ -1107,6 +1111,7 @@ impl FoloApp {
             .overflow_hidden()
             .cursor_pointer()
             .hover(|s| s.border_color(t.line_strong))
+            .active(|s| s.opacity(0.9))
             .child(
                 div()
                     .h(px(136.))
@@ -1170,32 +1175,4 @@ impl FoloApp {
         )
         .into_any_element()
     }
-}
-
-/// A chart with a small title row.
-pub fn chart_block(
-    t: &crate::theme::Theme,
-    title: &str,
-    detail: &str,
-    legend: Option<AnyElement>,
-    chart: AnyElement,
-) -> gpui::Div {
-    div()
-        .flex_1()
-        .min_w_0()
-        .flex()
-        .flex_col()
-        .gap(px(8.))
-        .child(
-            div()
-                .flex()
-                .items_baseline()
-                .gap(px(6.))
-                .child(
-                    text(ty::SM, t.text_secondary).font_weight(FontWeight::MEDIUM).child(title.to_string()),
-                )
-                .child(text(ty::XS, t.text_tertiary).flex_1().child(detail.to_string()))
-                .children(legend),
-        )
-        .child(chart)
 }

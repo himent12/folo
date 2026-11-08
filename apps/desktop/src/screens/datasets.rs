@@ -395,7 +395,7 @@ impl FoloApp {
                     .min_w_0()
                     .px(px(16.))
                     .py(px(pad))
-                    .when(empty > 0, |d| d.cursor_pointer().hover(|s| s.bg(t.bg_hover)))
+                    .when(empty > 0, |d| d.cursor_pointer().hover(|s| s.bg(t.bg_hover)).active(|s| s.bg(t.bg_active)))
                     .when(on, |d| d.bg(t.bg_selected))
                     .child(stat(
                         &t,
@@ -444,7 +444,7 @@ impl FoloApp {
                     .min_w_0()
                     .px(px(16.))
                     .py(px(pad))
-                    .when(broken > 0, |d| d.cursor_pointer().hover(|s| s.bg(t.bg_hover)))
+                    .when(broken > 0, |d| d.cursor_pointer().hover(|s| s.bg(t.bg_hover)).active(|s| s.bg(t.bg_active)))
                     .when(broken > 0, |d| {
                         d.tooltip(crate::controls::tip(
                             "These label files couldn't be read, so their images are skipped. The check command lists them.",
@@ -722,6 +722,7 @@ impl FoloApp {
                             .border_1()
                             .border_color(gpui::transparent_black())
                             .hover(|s| s.border_color(t.line_strong))
+                            .active(|s| s.opacity(0.85))
                             .child(
                                 div()
                                     .absolute()

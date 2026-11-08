@@ -937,10 +937,21 @@ fn paint_line_chart(
     if let Some((from, label)) = &spec.future
         && *from < x1
     {
-        let fx = sx(*from).max(plot.left());
+        // "Now" is the latest point drawn (the epoch in progress has no point yet): the tint starts
+        // there, behind a 1 px rule, so no dark band opens between the data and the plan.
+        let now =
+            spec.series.iter().filter_map(|s| s.points.last()).map(|p| p.0).fold(f32::NEG_INFINITY, f32::max);
+        // The data can run ahead of `from` (a history fetched after the run snapshot): the rule
+        // follows the data, within the plot.
+        let from = if now.is_finite() { now.clamp(x0, x1) } else { *from };
+        let fx = sx(from).max(plot.left());
         window.paint_quad(fill(
             Bounds::new(point(fx, plot.top()), size(plot.right() - fx, plot.size.height)),
             alpha(t.text_primary, 0.025),
+        ));
+        window.paint_quad(fill(
+            Bounds::new(point(fx, plot.top()), size(px(1.), plot.size.height)),
+            t.line_default,
         ));
         if !label.is_empty() {
             let w = text_width(window, label, label_size);
@@ -975,14 +986,9 @@ fn paint_line_chart(
         window.paint_quad(fill(Bounds::new(point(x, plot.bottom()), size(px(1.), px(4.))), t.chart_axis));
         let l = (spec.x_fmt)(*v);
         let w = text_width(window, &l, label_size);
-        // The first and last labels sit flush with their ticks instead of being centred and clamped.
-        let lx = if Some(v) == xt.first() && xt.len() > 1 {
-            x - px(1.)
-        } else if Some(v) == xt.last() && xt.len() > 1 {
-            x - w + px(1.)
-        } else {
-            (x - w / 2.).clamp(plot.left() - px(4.), plot.right() - w)
-        };
+        // Centred on its tick (the end labels too: "0.00" / "1.00" flush with the tick read as
+        // belonging beside it); only the chart's own edges push a label inward.
+        let lx = (x - w / 2.).clamp(bounds.left(), bounds.right() - w);
         if chip_span.is_some_and(|(cl, cr)| lx < cr + px(4.) && lx + w > cl - px(4.)) {
             continue;
         }

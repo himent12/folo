@@ -152,20 +152,20 @@ impl FoloApp {
         self.bind_ring(el, key, radius::MD, ring_color, window, cx, action)
     }
 
-    /// A button that can't be used right now: dimmed, inert, not a Tab stop, and its tooltip says why.
+    /// A button that can't be used right now: dimmed and inert, but a Tab stop, so keyboard users
+    /// reach it and its reason shows on focus (and as its tooltip).
     pub fn button_disabled(
         &self,
         key: &str,
         label: impl Into<SharedString>,
-        kind: Btn,
+        _kind: Btn,
         icon_path: Option<&'static str>,
         reason: &'static str,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let t = theme(cx);
-        // Disabled drops the kind's colour entirely, so it never reads as a dimmed hover.
-        let _ = kind;
+        // Disabled drops the kind's colour entirely (`_kind`), so it never reads as a dimmed hover.
         let (bg, fg, border) = (t.bg_inset, t.text_disabled, Some(t.line_default));
         let label: SharedString = label.into();
         let fh = self.fh(format!("{key}-disabled"), cx);
@@ -811,6 +811,7 @@ impl FoloApp {
             .border_color(if open { t.accent_line } else { t.line_default })
             .cursor_pointer()
             .hover(|s| s.border_color(t.line_strong))
+            .active(|s| s.bg(t.bg_active))
             .when(open, |d| {
                 let cell = self.menu_trigger.clone();
                 // Where the trigger is decides where the menu fits; a move redraws once.
@@ -950,6 +951,7 @@ impl FoloApp {
                                     .when(lit && !on, |d| d.bg(t.bg_hover))
                                     .when(lit && on, |d| d.bg(crate::theme::over(t.bg_selected, t.bg_hover)))
                                     .hover(|s| s.bg(t.bg_hover))
+                                    .active(|s| s.bg(t.bg_active))
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         f(this, i, window, cx);
                                         this.menu_open = None;

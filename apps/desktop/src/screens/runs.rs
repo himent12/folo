@@ -9,7 +9,6 @@ use gpui::{
     SharedString, StatefulInteractiveElement, Styled, Window, div, px,
 };
 
-use super::overview::chart_block;
 use super::*;
 use crate::api::{LogLevel, Run, RunStatus, time};
 use crate::app::{FoloApp, Route, RunFilter, SampleView, act};
@@ -94,7 +93,21 @@ impl FoloApp {
             Rc::new(move |this, i, _, _| this.run_filter = filters[i]),
         );
         let now = self.store.api.now();
-        let visible: Vec<Run> = runs.into_iter().filter(|r| matches_filter(r, self.run_filter)).collect();
+        let mut visible: Vec<Run> = runs.into_iter().filter(|r| matches_filter(r, self.run_filter)).collect();
+        // Sorted like Models (stable, so ties keep the server's newest-first order).
+        if let Some((k, desc)) = self.runs_sort {
+            let score = |r: &Run| -> f64 {
+                match k {
+                    "best" => r.best.as_ref().map_or(-1., |b| b.map50_95 as f64),
+                    "duration" => duration_of(r, now).unwrap_or(-1.),
+                    _ => time::parse(&r.created).unwrap_or(0) as f64,
+                }
+            };
+            visible.sort_by(|a, b| {
+                let o = score(a).total_cmp(&score(b));
+                if desc { o.reverse() } else { o }
+            });
+        }
         let ids: Vec<String> = visible.iter().map(|r| r.id.clone()).collect();
         let cols = |d: gpui::Div| d.flex().items_center().gap(px(16.)).px(px(16.));
         // Single-line rows; secondary facts get their own columns as the window allows. Budget
@@ -114,9 +127,41 @@ impl FoloApp {
             .when(wide, |d| d.child(th(&t, "Size · batch").w(px(104.)).flex_none()))
             .child(th(&t, "Status").w(px(96.)).flex_none())
             .child(th(&t, "Progress").w(px(150.)).flex_none())
-            .child(th(&t, "Best mAP50-95").w(px(96.)).flex_none().text_right())
-            .child(th(&t, "Duration").w(px(80.)).flex_none().text_right())
-            .when(show_created, |d| d.child(th(&t, "Created").w(px(80.)).flex_none().text_right()));
+            .child(self.sort_th_on(
+                self.runs_sort,
+                |a| &mut a.runs_sort,
+                "rsort",
+                "best",
+                "Best mAP50-95",
+                96.,
+                true,
+                window,
+                cx,
+            ))
+            .child(self.sort_th_on(
+                self.runs_sort,
+                |a| &mut a.runs_sort,
+                "rsort",
+                "duration",
+                "Duration",
+                80.,
+                true,
+                window,
+                cx,
+            ))
+            .when(show_created, |d| {
+                d.child(self.sort_th_on(
+                    self.runs_sort,
+                    |a| &mut a.runs_sort,
+                    "rsort",
+                    "created",
+                    "Created",
+                    80.,
+                    true,
+                    window,
+                    cx,
+                ))
+            });
         let rows: Vec<AnyElement> = visible
             .iter()
             .enumerate()
@@ -826,7 +871,8 @@ impl FoloApp {
             secondary_h,
         );
         pr.y_range = Some((0., 1.));
-        pr.y_ticks = if short { 2 } else { 4 };
+        // 0 / 0.50 / 1.00: the lower row's plot is under 180 px, where five labels crowd.
+        pr.y_ticks = 2;
         pr.y_fmt = Some(|v| format!("{v:.2}"));
         let mut lr = base(
             "run-lr",
@@ -981,7 +1027,6 @@ impl FoloApp {
             Some(p) => format!("per step · by epoch · × 10{}", crate::charts::superscript(p)),
             None => "per step · by epoch".to_string(),
         };
-        let _ = chart_block;
         // The mAP chart is the focal point: wider and first. Narrow windows stack each row.
         let stack = window.viewport_size().width < px(1120.);
         // Narrow and short: the primary pair stays side by side (half each), so Training loss is
@@ -1011,7 +1056,7 @@ impl FoloApp {
                 if pair_a { 0.5 } else { 0.4 },
             ))
             .child(row(
-                card("Precision and recall", "best-F1 · validation", pr_legend, line_chart(&t, pr))
+                card("Precision and recall", "best-F1 · IoU 0.50 · val", pr_legend, line_chart(&t, pr))
                     .into_any_element(),
                 card("Learning rate", &lr_caption, lr_legend, line_chart(&t, lr)).into_any_element(),
                 0.6,
