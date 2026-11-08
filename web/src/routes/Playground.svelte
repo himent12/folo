@@ -623,7 +623,7 @@
     box-shadow: inset 0 0 0 1px var(--line-strong);
   }
   .tog.on .tog-box {
-    background: var(--accent-solid);
+    background: var(--accent-line);
     color: var(--accent-on);
     box-shadow: none;
   }
@@ -654,8 +654,8 @@
     left: 0;
     right: 0;
     height: 2px;
-    background: var(--accent-solid);
-    box-shadow: 0 0 12px var(--accent-solid);
+    background: var(--accent-line);
+    box-shadow: 0 0 12px var(--accent-line);
     opacity: 0.7;
     animation: scan 1.2s var(--ease-standard) infinite alternate;
   }
