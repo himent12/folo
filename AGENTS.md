@@ -5,7 +5,8 @@ FOLO is built almost entirely by AI agents coordinated from one orchestrator thr
 
 ## What FOLO is
 A from-scratch, very fast vision framework in Rust (a YOLO-style object detector, plus training, evaluation and export)
-with a web app, **FOLO Studio**, for datasets, training runs and live inference. It is meant to be pleasant for people and
+with two front ends with one design language: **FOLO Studio**, a web app (`web/`), and **FOLO Desktop**, a native
+GPUI app (`apps/desktop/`), for datasets, training runs and live inference. It is meant to be pleasant for people and
 easy for agents to drive (`--json` everywhere, an MCP server, stable exit codes).
 
 ## Ground rules
@@ -55,5 +56,6 @@ crates/folo-vision   FOLO detector (n/s/m/l), loss, task-aligned assigner, box o
 crates/folo-server   axum HTTP + SSE API used by Studio and by agents; serves the built web app
 crates/folo-cli      the `folo` binary (train / val / predict / export / serve / mcp / doctor)
 web/                 FOLO Studio (Svelte 5 + TypeScript + Vite, custom design system, no UI kit)
+apps/desktop/        FOLO Desktop (Rust + GPUI, its own cargo workspace; talks to folo-server over docs/API.md)
 docs/                ARCHITECTURE, API (HTTP contract), CLI, FORMAT (.folo), ROADMAP, BOAT
 ```
