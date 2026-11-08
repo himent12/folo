@@ -52,7 +52,7 @@
                 {c.map50_95.toFixed(3)}
                 {#if Math.abs(c.delta) >= 0.0005}
                   <span class="delta" class:up={c.delta > 0} class:down={c.delta < 0} aria-label="{c.delta > 0 ? 'up' : 'down'} {Math.abs(c.delta).toFixed(3)} since the previous epoch"
-                    >{c.delta > 0 ? '↑' : '↓'}{Math.abs(c.delta * 1000).toFixed(0)}</span
+                    >{c.delta > 0 ? '+' : '−'}{Math.abs(c.delta).toFixed(3)}</span
                   >
                 {:else}<span class="delta">·</span>{/if}
               </td>
@@ -95,7 +95,7 @@
   }
   .delta {
     display: inline-block;
-    width: 34px;
+    width: 52px;
     text-align: left;
     padding-left: 6px;
     font-size: var(--type-xs-size);

@@ -119,6 +119,12 @@
     return (await hub.api.datasetImages(id, { split: 'train', offset: 0, limit: 12 }, s)).images.filter((i) => i.boxes.length > 0);
   });
 
+  // Estimates are rough (architecture constants, a reference GPU): show them with matching precision.
+  const roughDuration = (s: number) =>
+    s < 3600 ? `~${Math.max(1, Math.round(s / 60))} min` : `~${(s / 3600).toFixed(s < 36000 ? 1 : 0)} h`;
+  const roughBytes = (b: number) =>
+    prefs.units === 'binary' ? `~${(b / 2 ** 30).toFixed(1)} GiB` : `~${(b / 1e9).toFixed(1)} GB`;
+
   /** Number inputs bind `null` when cleared; accept only finite whole numbers in range. */
   const isInt = (v: unknown, lo: number, hi: number) => typeof v === 'number' && Number.isInteger(v) && v >= lo && v <= hi;
 
@@ -357,10 +363,10 @@
               <dt>Data</dt><dd>{dataset ? `${dataset.name} · ${compact(dataset.splits.train)} images` : '—'}</dd>
               <dt>Model</dt><dd class="mono">{arch}</dd>
               <dt>Steps / epoch</dt><dd class="num">{num(est.stepsPerEpoch)}</dd>
-              <dt>Time</dt><dd class="num">≈ {duration(est.totalSeconds)} <span class="faint">({num(est.imgsPerS, 0)} img/s)</span></dd>
+              <dt>Est. time</dt><dd class="num">{roughDuration(est.totalSeconds)} <span class="faint">(~{num(Math.round(est.imgsPerS / 10) * 10, 0)} img/s)</span></dd>
               {#if !onCpu && gpu}
-                <dt>GPU memory</dt>
-                <dd class="num" class:warn={vramPct > 0.9}>≈ {bytes(est.vramBytes, prefs.units)} <span class="faint">/ {bytes(gpu.memory_bytes, prefs.units)}</span></dd>
+                <dt>Est. GPU memory</dt>
+                <dd class="num" class:warn={vramPct > 0.9}>{roughBytes(est.vramBytes)} <span class="faint">/ {bytes(gpu.memory_bytes, prefs.units)}</span></dd>
               {/if}
             </dl>
             {#if !onCpu && gpu}
@@ -385,8 +391,8 @@
       <!-- Narrow screens: the summary sits below the form, so keep the essentials and the action in reach. -->
       <div class="dock" role="region" aria-label="Start training">
         <span class="dock-est num">
-          <span>≈ {duration(est.totalSeconds)}</span>
-          {#if !onCpu && gpu}<span class:warn={vramPct > 0.9}>{bytes(est.vramBytes, prefs.units)} VRAM</span>{/if}
+          <span>{roughDuration(est.totalSeconds)}</span>
+          {#if !onCpu && gpu}<span class:warn={vramPct > 0.9}>{roughBytes(est.vramBytes)} VRAM</span>{/if}
         </span>
         <Button type="submit" variant="primary" size="lg" icon={Play} loading={submitting} disabled={!valid}>Start training</Button>
       </div>

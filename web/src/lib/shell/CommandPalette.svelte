@@ -187,6 +187,7 @@
         {onkeydown}
         placeholder="Search runs, datasets, models, or type a command…"
         role="combobox"
+        aria-label="Search commands, runs, datasets and models"
         aria-expanded="true"
         aria-controls="palette-list"
         aria-activedescendant={flat[index] ? `pi-${flat[index]?.id}` : undefined}
@@ -371,6 +372,11 @@
   }
   .close {
     display: none;
+  }
+  @media (pointer: coarse) {
+    .item {
+      height: 44px;
+    }
   }
   @media (max-width: 767px) {
     .esc {

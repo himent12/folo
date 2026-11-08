@@ -172,16 +172,29 @@
   const hover = $derived.by(() => {
     if (cursor === null || cursor === undefined || !hasData) return null;
     if (cursor < xExtent[0] || cursor > xExtent[1]) return null;
+    const c = cursor as number;
     const rows = keyed
       .map((s) => {
-        const i = nearest(s.points, cursor as number);
-        const p = s.points[i];
+        const pts = s.points;
+        const first = pts[0];
+        const last = pts[pts.length - 1];
+        if (!first || !last) return null;
+        // A series only reads out where it has data: never its last value under a cursor past its end.
+        const tol = pts.length > 1 ? (last.x - first.x) / (pts.length - 1) / 2 : 0.5;
+        if (c < first.x - tol || c > last.x + tol) return null;
+        const p = pts[nearest(pts, c)];
         return p ? { s, p } : null;
       })
       .filter((r): r is { s: Series; p: Pt } => r !== null);
     if (!rows.length) return null;
-    const px = x(rows[0]!.p.x);
-    return { rows, px, xv: rows[0]!.p.x };
+    // Title at the series with the densest sampling (closest to the cursor); rows sampled elsewhere say where.
+    const ref = rows.reduce((a, b) => (Math.abs(b.p.x - c) < Math.abs(a.p.x - c) ? b : a));
+    const title = xTitle ? xTitle(ref.p.x) : xFormat(ref.p.x);
+    const labelled = rows.map((r) => {
+      const t = xTitle ? xTitle(r.p.x) : xFormat(r.p.x);
+      return { ...r, at: t === title ? null : t };
+    });
+    return { rows: labelled, px: x(ref.p.x), xv: ref.p.x, title };
   });
 
   function onpointermove(e: PointerEvent) {
@@ -355,11 +368,11 @@
 
       {#if hover}
         <div class="tip" class:left={tipLeft} style:--x="{hover.px}px" role="presentation" bind:clientWidth={tipWidth}>
-          <p class="tip-title">{xTitle ? xTitle(hover.xv) : xFormat(hover.xv)}</p>
+          <p class="tip-title">{hover.title}</p>
           {#each hover.rows as r (r.s.id)}
             <p class="tip-row">
               <span class="swatch" class:dashed={r.s.dashed} style:--c={r.s.color}></span>
-              <span class="name">{r.s.label}</span>
+              <span class="name">{r.s.label}{#if r.at}<span class="at">{r.at}</span>{/if}</span>
               <span class="val">{fmtValue(r.p.y)}</span>
             </p>
           {/each}
@@ -513,6 +526,12 @@
     display: flex;
     align-items: center;
     gap: 6px;
+  }
+  .tip-row .at {
+    margin-left: 6px;
+    color: var(--text-tertiary);
+    font-family: var(--font-mono);
+    font-size: var(--type-micro-size);
   }
   .tip-row .name {
     flex: 1;

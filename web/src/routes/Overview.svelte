@@ -43,6 +43,7 @@
   const recent = $derived((runs.data ?? []).filter((r) => r.id !== live?.id).slice(0, 6));
   // One failure behind every request is a connection problem: say it once instead of in every panel.
   const offline = $derived(!!runs.error && !runs.data && !!models.error && !models.data && !!datasets.error && !datasets.data);
+  const fresh = $derived(datasets.data?.length === 0 && runs.data?.length === 0 && models.data?.length === 0);
   const errDetail = $derived(runs.error instanceof Error ? runs.error.message : null);
   function retryAll() {
     void runs.refresh();
@@ -90,6 +91,32 @@
         <Button variant="primary" icon={RotateCw} onclick={retryAll}>Retry</Button>
         <Button icon={Settings} href={href('/settings')}>Connection settings</Button>
       </div>
+    </section>
+  {:else if fresh}
+    <!-- A fresh install: one path forward instead of a page of empty panels. -->
+    <section class="onboard" aria-labelledby="onboard-title">
+      <div class="ob-head">
+        <h2 id="onboard-title">Train your first detector</h2>
+        <p>Three steps from a folder of images to boxes on new ones.</p>
+      </div>
+      <ol class="steps">
+        <li class="on">
+          <span class="n">1</span>
+          <div><b>Add a dataset</b><span>Register a YOLO or COCO folder, or generate a synthetic shapes set in seconds.</span></div>
+          <div class="ob-actions">
+            <Button variant="primary" icon={Plus} href={href('/datasets?add=folder')}>Add dataset</Button>
+            <Button href={href('/datasets?add=synthetic')}>Generate sample</Button>
+          </div>
+        </li>
+        <li>
+          <span class="n">2</span>
+          <div><b>Train</b><span>Pick a model size; loss, mAP and validation samples stream in live.</span></div>
+        </li>
+        <li>
+          <span class="n">3</span>
+          <div><b>Inspect predictions</b><span>Drop any image into the Playground and tune confidence and IoU instantly.</span></div>
+        </li>
+      </ol>
     </section>
   {:else}
   <div class="top">
@@ -231,6 +258,83 @@
 </Page>
 
 <style>
+  .onboard {
+    display: grid;
+    gap: var(--space-5);
+    padding: var(--space-6);
+    border-radius: var(--radius-lg);
+    background: var(--bg-panel);
+    border: 1px solid var(--line-subtle);
+  }
+  :global([data-theme='light']) .onboard {
+    border-color: var(--line-default);
+  }
+  .ob-head h2 {
+    font-size: var(--type-lg-size);
+    line-height: var(--type-lg-line);
+  }
+  .ob-head p {
+    color: var(--text-secondary);
+  }
+  .steps {
+    display: grid;
+    gap: var(--space-2);
+  }
+  .steps li {
+    display: grid;
+    grid-template-columns: 28px 1fr auto;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-4) var(--space-3) var(--space-3);
+    border-radius: var(--radius-md);
+    border: 1px solid var(--line-subtle);
+    color: var(--text-tertiary);
+  }
+  .steps li.on {
+    border-color: var(--accent-line);
+    background: var(--bg-selected);
+    color: var(--text-secondary);
+  }
+  .steps li div:not(.ob-actions) {
+    display: grid;
+    gap: 2px;
+  }
+  .steps b {
+    color: var(--text-primary);
+    font-weight: var(--weight-medium);
+  }
+  .n {
+    display: grid;
+    place-items: center;
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    border: 1px solid var(--line-strong);
+    font-family: var(--font-mono);
+    font-size: var(--type-sm-size);
+    color: var(--text-secondary);
+  }
+  .on .n {
+    border-color: var(--accent-line);
+    background: var(--accent-line);
+    color: var(--accent-on);
+  }
+  .ob-actions {
+    display: flex;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+  }
+  @media (max-width: 767px) {
+    .onboard {
+      padding: var(--space-4);
+    }
+    .steps li {
+      grid-template-columns: 28px 1fr;
+    }
+    .ob-actions {
+      grid-column: 2;
+    }
+  }
   .offline {
     display: grid;
     justify-items: center;
