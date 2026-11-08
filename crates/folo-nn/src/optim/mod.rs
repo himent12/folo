@@ -1,0 +1,521 @@
+//! Optimizers (SGD with Nesterov momentum, AdamW), parameter groups, gradient accumulation and clipping.
+//!
+//! Update rules are exactly docs/MODEL.md §8.2. Hyperparameters are `f64`; the per-element arithmetic is
+//! `f32`, like the tensors. A parameter with no gradient in a step is skipped entirely (no decay, no state
+//! change), as in PyTorch.
+//!
+//! ```
+//! use folo_core::{rng::Rng, Tensor};
+//! use folo_nn::optim::{GradAccumulator, Optimizer, Sgd, StandardGroups};
+//! use folo_nn::{Conv2d, Conv2dConfig, Forward, Module};
+//!
+//! let mut rng = Rng::seed(0);
+//! let conv = Conv2d::new(Conv2dConfig::new(3, 4, 3), &mut rng);
+//! let groups = StandardGroups::from_module(&conv).into_groups(0.01, 0.937, 5e-4);
+//! let mut opt = Sgd::new(groups).unwrap();
+//! let mut acc = GradAccumulator::new(&conv.parameters());
+//!
+//! let x = Tensor::randn([2, 3, 8, 8], 0.0, 1.0, &mut rng);
+//! let loss = conv.forward(&x).unwrap().square().unwrap().mean_all().unwrap();
+//! acc.add(&loss.backward().unwrap()).unwrap();
+//! acc.clip_grad_norm(10.0).unwrap();
+//! opt.step(&acc).unwrap();
+//! acc.zero();
+//! assert_eq!(opt.step_count(), 1);
+//! ```
+
+mod adamw;
+mod grads;
+mod sgd;
+
+use std::collections::HashMap;
+
+use folo_core::{Grads, Tensor};
+use serde::{Deserialize, Serialize};
+
+pub use adamw::AdamW;
+pub use grads::{GradAccumulator, global_grad_norm};
+pub use sgd::Sgd;
+
+use crate::module::Module;
+use crate::{BatchNorm2d, Error, Result};
+
+/// The optimizer family, as written in `folo.optim.type`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OptimKind {
+    /// SGD with (Nesterov) momentum and L2 weight decay.
+    Sgd,
+    /// Adam with decoupled weight decay.
+    AdamW,
+}
+
+impl OptimKind {
+    /// `"sgd"` or `"adamw"`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OptimKind::Sgd => "sgd",
+            OptimKind::AdamW => "adamw",
+        }
+    }
+}
+
+/// The name of the bias group, which docs/MODEL.md §8.4 warms up from `warmup_bias_lr`.
+pub const BIAS_GROUP: &str = "bias";
+
+/// A named set of parameters sharing hyperparameters.
+///
+/// `base_lr` / `base_momentum` are the configured values (written to `folo.optim`); `lr` / `momentum` are
+/// the values the next step uses, set by the schedule ([`crate::LrSchedule::apply`]) and initially equal to
+/// the base values.
+#[derive(Debug, Clone)]
+pub struct ParamGroup {
+    /// Group name (`decay`, `bn`, `bias` for the standard groups).
+    pub name: String,
+    /// `(name, tensor)` of every parameter, in canonical order.
+    pub params: Vec<(String, Tensor)>,
+    /// Base learning rate (before the schedule multiplier).
+    pub base_lr: f64,
+    /// Base SGD momentum μ / AdamW β1.
+    pub base_momentum: f64,
+    /// Weight decay (L2 for SGD, decoupled for AdamW).
+    pub weight_decay: f64,
+    /// SGD: Nesterov momentum.
+    pub nesterov: bool,
+    /// AdamW: β2.
+    pub beta2: f64,
+    /// AdamW: ε.
+    pub eps: f64,
+    /// Current learning rate.
+    pub lr: f64,
+    /// Current momentum / β1.
+    pub momentum: f64,
+}
+
+impl ParamGroup {
+    /// A group with `lr = 0.01`, momentum 0.937, Nesterov on, no weight decay, `β2 = 0.999`, `ε = 1e-8`
+    /// (docs/MODEL.md §8.1–8.2 defaults). Adjust with the builder methods.
+    pub fn new(name: impl Into<String>, params: Vec<(String, Tensor)>) -> Self {
+        ParamGroup {
+            name: name.into(),
+            params,
+            base_lr: 0.01,
+            base_momentum: 0.937,
+            weight_decay: 0.0,
+            nesterov: true,
+            beta2: 0.999,
+            eps: 1e-8,
+            lr: 0.01,
+            momentum: 0.937,
+        }
+    }
+
+    /// Set the base (and current) learning rate.
+    pub fn lr(mut self, lr: f64) -> Self {
+        self.base_lr = lr;
+        self.lr = lr;
+        self
+    }
+
+    /// Set the base (and current) momentum / β1.
+    pub fn momentum(mut self, m: f64) -> Self {
+        self.base_momentum = m;
+        self.momentum = m;
+        self
+    }
+
+    /// Set the weight decay.
+    pub fn weight_decay(mut self, wd: f64) -> Self {
+        self.weight_decay = wd;
+        self
+    }
+
+    /// Enable or disable Nesterov momentum (SGD).
+    pub fn nesterov(mut self, on: bool) -> Self {
+        self.nesterov = on;
+        self
+    }
+
+    /// Set AdamW's β2 and ε.
+    pub fn adam(mut self, beta2: f64, eps: f64) -> Self {
+        self.beta2 = beta2;
+        self.eps = eps;
+        self
+    }
+
+    fn validate(&self) -> Result<()> {
+        let ok = self.base_lr.is_finite()
+            && self.base_lr >= 0.0
+            && (0.0..1.0).contains(&self.base_momentum)
+            && self.weight_decay.is_finite()
+            && self.weight_decay >= 0.0
+            && (0.0..1.0).contains(&self.beta2)
+            && self.eps.is_finite()
+            && self.eps > 0.0;
+        if !ok {
+            return Err(Error::Invalid(format!("optimizer group `{}`: invalid hyperparameters", self.name)));
+        }
+        Ok(())
+    }
+}
+
+/// Anything that maps a parameter to its gradient: [`Grads`] from one backward pass, or a
+/// [`GradAccumulator`].
+pub trait GradSource: Sync {
+    /// The gradient of `param`, if it has one.
+    fn grad(&self, param: &Tensor) -> Option<&Tensor>;
+}
+
+impl GradSource for Grads {
+    fn grad(&self, param: &Tensor) -> Option<&Tensor> {
+        self.get(param)
+    }
+}
+
+/// An optimizer over [`ParamGroup`]s.
+pub trait Optimizer: Send {
+    /// SGD or AdamW.
+    fn kind(&self) -> OptimKind;
+
+    /// The groups.
+    fn groups(&self) -> &[ParamGroup];
+
+    /// The groups, mutable (the schedule sets `lr` and `momentum` through this).
+    fn groups_mut(&mut self) -> &mut [ParamGroup];
+
+    /// Update every parameter that has a gradient in `grads`, under `no_grad`, then count the step.
+    fn step(&mut self, grads: &dyn GradSource) -> Result<()>;
+
+    /// Number of completed `step()` calls (`optim.__step`).
+    fn step_count(&self) -> u64;
+
+    /// The state tensors as `(<param name>.<state>, tensor)`: `momentum_buffer` (SGD with momentum > 0),
+    /// `exp_avg` and `exp_avg_sq` (AdamW). Complete: every parameter of every group that uses a state has it.
+    fn state_tensors(&self) -> Result<Vec<(String, Tensor)>>;
+
+    /// Restore from a checkpoint: the step count and the state tensors (keyed `<param name>.<state>`).
+    /// Missing or mismatched state is an error unless `step == 0`, where missing state stays zero
+    /// (docs/FORMAT.md, optimizer contract).
+    fn load_state(&mut self, step: u64, state: &HashMap<String, Tensor>) -> Result<()>;
+
+    /// The `folo.optim` contract.
+    fn contract(&self) -> OptimContract {
+        let kind = self.kind();
+        OptimContract {
+            kind,
+            groups: self.groups().iter().map(|g| GroupContract::from_group(g, kind)).collect(),
+            step: self.step_count(),
+        }
+    }
+
+    /// Check that `c` describes this optimizer (type, group names, parameter sets) and adopt its group
+    /// hyperparameters. Used on resume before [`Optimizer::load_state`].
+    fn apply_contract(&mut self, c: &OptimContract) -> Result<()> {
+        let kind = self.kind();
+        if c.kind != kind {
+            return Err(Error::Load(format!(
+                "checkpoint optimizer is {}, but the run uses {}",
+                c.kind.as_str(),
+                kind.as_str()
+            )));
+        }
+        check_param_sets(self.groups(), &c.groups)?;
+        for (g, gc) in self.groups_mut().iter_mut().zip(&c.groups) {
+            gc.apply_to(g, kind)?;
+        }
+        Ok(())
+    }
+}
+
+/// `folo.optim` (docs/FORMAT.md).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OptimContract {
+    /// `"sgd"` or `"adamw"`.
+    #[serde(rename = "type")]
+    pub kind: OptimKind,
+    /// The groups, in order.
+    pub groups: Vec<GroupContract>,
+    /// Completed optimizer steps; equals `optim.__step`.
+    pub step: u64,
+}
+
+/// One group of `folo.optim`. Only the fields that apply to the optimizer type are present.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GroupContract {
+    /// Group name.
+    pub name: String,
+    /// Parameter names, in canonical order.
+    pub params: Vec<String>,
+    /// Base learning rate.
+    pub lr: f64,
+    /// SGD momentum.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub momentum: Option<f64>,
+    /// SGD Nesterov flag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nesterov: Option<bool>,
+    /// Weight decay.
+    pub weight_decay: f64,
+    /// AdamW `[β1, β2]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub betas: Option<[f64; 2]>,
+    /// AdamW ε.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eps: Option<f64>,
+}
+
+impl GroupContract {
+    fn from_group(g: &ParamGroup, kind: OptimKind) -> Self {
+        let sgd = kind == OptimKind::Sgd;
+        GroupContract {
+            name: g.name.clone(),
+            params: g.params.iter().map(|(n, _)| n.clone()).collect(),
+            lr: g.base_lr,
+            momentum: sgd.then_some(g.base_momentum),
+            nesterov: sgd.then_some(g.nesterov),
+            weight_decay: g.weight_decay,
+            betas: (!sgd).then_some([g.base_momentum, g.beta2]),
+            eps: (!sgd).then_some(g.eps),
+        }
+    }
+
+    fn apply_to(&self, g: &mut ParamGroup, kind: OptimKind) -> Result<()> {
+        let missing = |f: &str| Error::Load(format!("folo.optim group `{}` has no `{f}`", self.name));
+        g.base_lr = self.lr;
+        g.weight_decay = self.weight_decay;
+        match kind {
+            OptimKind::Sgd => {
+                g.base_momentum = self.momentum.ok_or_else(|| missing("momentum"))?;
+                g.nesterov = self.nesterov.ok_or_else(|| missing("nesterov"))?;
+            }
+            OptimKind::AdamW => {
+                let [b1, b2] = self.betas.ok_or_else(|| missing("betas"))?;
+                g.base_momentum = b1;
+                g.beta2 = b2;
+                g.eps = self.eps.ok_or_else(|| missing("eps"))?;
+            }
+        }
+        g.lr = g.base_lr;
+        g.momentum = g.base_momentum;
+        g.validate().map_err(|e| Error::Load(e.to_string()))
+    }
+}
+
+fn check_param_sets(groups: &[ParamGroup], file: &[GroupContract]) -> Result<()> {
+    let mut problems = Vec::new();
+    let names = |gs: Vec<&str>| gs.join(", ");
+    if groups.len() != file.len() || groups.iter().zip(file).any(|(g, f)| g.name != f.name) {
+        problems.push(format!(
+            "groups differ: run has [{}], checkpoint has [{}]",
+            names(groups.iter().map(|g| g.name.as_str()).collect()),
+            names(file.iter().map(|g| g.name.as_str()).collect())
+        ));
+    } else {
+        for (g, f) in groups.iter().zip(file) {
+            let ours: std::collections::BTreeSet<&str> = g.params.iter().map(|(n, _)| n.as_str()).collect();
+            let theirs: std::collections::BTreeSet<&str> = f.params.iter().map(String::as_str).collect();
+            if theirs.len() != f.params.len() {
+                problems.push(format!("group `{}` lists a parameter twice", g.name));
+            }
+            for n in ours.difference(&theirs) {
+                problems.push(format!("`{n}` (group `{}`) is missing from the checkpoint", g.name));
+            }
+            for n in theirs.difference(&ours) {
+                problems.push(format!("`{n}` (group `{}`) is not a parameter of this run", g.name));
+            }
+        }
+    }
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(Error::Load(format!("optimizer parameter set mismatch: {}", problems.join("; "))))
+    }
+}
+
+/// Check that no parameter is in two groups, and validate hyperparameters.
+fn validate_groups(groups: &[ParamGroup]) -> Result<()> {
+    let mut seen = std::collections::HashSet::new();
+    let mut names = std::collections::HashSet::new();
+    for g in groups {
+        g.validate()?;
+        if !names.insert(g.name.as_str()) {
+            return Err(Error::Invalid(format!("optimizer: two groups are named `{}`", g.name)));
+        }
+        for (n, t) in &g.params {
+            if !seen.insert(n.as_str()) {
+                return Err(Error::Invalid(format!("optimizer: parameter `{n}` is in more than one group")));
+            }
+            if t.dtype() != folo_core::DType::F32 {
+                return Err(Error::Invalid(format!(
+                    "optimizer: parameter `{n}` is {}, expected f32",
+                    t.dtype()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Look up a state tensor in a checkpoint map and check it (shape of the parameter, `F32`).
+fn take_state(
+    state: &HashMap<String, Tensor>,
+    pname: &str,
+    param: &Tensor,
+    what: &str,
+    required: bool,
+    problems: &mut Vec<String>,
+) -> Option<Tensor> {
+    let key = format!("{pname}.{what}");
+    match state.get(&key) {
+        Some(t) if t.shape() == param.shape() && t.dtype() == folo_core::DType::F32 => Some(t.clone()),
+        Some(t) => {
+            problems.push(format!(
+                "`optim.{key}` is {:?} {}, expected {:?} f32",
+                t.dims(),
+                t.dtype(),
+                param.dims()
+            ));
+            None
+        }
+        None => {
+            if required {
+                problems.push(format!("`optim.{key}` is missing"));
+            }
+            None
+        }
+    }
+}
+
+/// docs/MODEL.md §8.2's three groups, assigned by role: `decay` (conv / linear weights), `bn` (BatchNorm
+/// weights), `bias` (every tensor named `bias`: BatchNorm biases and conv / linear biases).
+#[derive(Debug, Clone, Default)]
+pub struct StandardGroups {
+    /// Weights that get weight decay.
+    pub decay: Vec<(String, Tensor)>,
+    /// BatchNorm γ.
+    pub bn: Vec<(String, Tensor)>,
+    /// Biases (BatchNorm β and layer biases).
+    pub bias: Vec<(String, Tensor)>,
+}
+
+impl StandardGroups {
+    /// Split `model`'s parameters. A parameter is `bn` if it is the `weight` of a [`BatchNorm2d`], `bias`
+    /// if its last name segment is `bias`, and `decay` otherwise. For the FOLO detector this is exactly
+    /// the name rule of §8.2 (`*.bn.weight` / `*.bn.bias`, `*.out.bias` / every other weight).
+    pub fn from_module(model: &dyn Module) -> Self {
+        let mut bn_ids = std::collections::HashSet::new();
+        let mut note = |m: &dyn Module| {
+            if let Some(bn) = (m as &dyn std::any::Any).downcast_ref::<BatchNorm2d>() {
+                bn_ids.insert(bn.weight.id());
+            }
+        };
+        note(model);
+        model.for_each_module(&mut |_, m| note(m));
+        let mut out = StandardGroups::default();
+        for (name, t) in model.named_parameters() {
+            if bn_ids.contains(&t.id()) {
+                out.bn.push((name, t));
+            } else if name == "bias" || name.ends_with(".bias") {
+                out.bias.push((name, t));
+            } else {
+                out.decay.push((name, t));
+            }
+        }
+        out
+    }
+
+    /// The three groups `decay`, `bn`, `bias` (in that order) with the same `lr` and `momentum` (μ or β1),
+    /// Nesterov on, and `weight_decay` on `decay` only.
+    pub fn into_groups(self, lr: f64, momentum: f64, weight_decay: f64) -> Vec<ParamGroup> {
+        vec![
+            ParamGroup::new("decay", self.decay).lr(lr).momentum(momentum).weight_decay(weight_decay),
+            ParamGroup::new("bn", self.bn).lr(lr).momentum(momentum),
+            ParamGroup::new(BIAS_GROUP, self.bias).lr(lr).momentum(momentum),
+        ]
+    }
+}
+
+/// Gradient accumulation length, docs/MODEL.md §8.1: `max(round(nbs / batch), 1)`.
+pub fn accumulate_steps(nbs: usize, batch: usize) -> usize {
+    ((nbs as f64 / batch.max(1) as f64).round() as usize).max(1)
+}
+
+/// Effective weight decay, docs/MODEL.md §8.2: `weight_decay · batch · accumulate / nbs`.
+pub fn effective_weight_decay(weight_decay: f64, batch: usize, accumulate: usize, nbs: usize) -> f64 {
+    weight_decay * batch as f64 * accumulate as f64 / nbs.max(1) as f64
+}
+
+/// What `optimizer: auto` chooses (docs/MODEL.md §8.2).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AutoChoice {
+    /// SGD for long runs (> 10000 iterations), AdamW otherwise.
+    pub kind: OptimKind,
+    /// The base LR.
+    pub lr0: f64,
+    /// SGD momentum / AdamW β1 (0.9 in both cases).
+    pub momentum: f64,
+    /// Always 0.0 under `auto`.
+    pub warmup_bias_lr: f64,
+}
+
+/// docs/MODEL.md §8.2 `auto`: `iterations = ceil(n_train / max(batch, nbs)) · epochs`; above 10000, SGD at
+/// `lr0 = 0.01`, else AdamW at `round(0.002 · 5 / (4 + nc), 6)`; momentum 0.9 and `warmup_bias_lr = 0`.
+pub fn auto_optimizer(
+    n_train: usize,
+    batch: usize,
+    nbs: usize,
+    epochs: usize,
+    num_classes: usize,
+) -> AutoChoice {
+    let iterations = n_train.div_ceil(batch.max(nbs).max(1)) * epochs;
+    if iterations > 10_000 {
+        AutoChoice { kind: OptimKind::Sgd, lr0: 0.01, momentum: 0.9, warmup_bias_lr: 0.0 }
+    } else {
+        let lr0 = (0.002 * 5.0 / (4.0 + num_classes as f64) * 1e6).round() / 1e6;
+        AutoChoice { kind: OptimKind::AdamW, lr0, momentum: 0.9, warmup_bias_lr: 0.0 }
+    }
+}
+
+/// Above this many parameter elements in one step, parameters are updated in parallel.
+const PAR_THRESHOLD: usize = 1 << 16;
+
+/// Run `f` for every `(group index, param index)`, in parallel when the step is large. `f` runs under
+/// `no_grad` on whichever thread executes it.
+fn for_each_param<F>(groups: &[ParamGroup], f: F) -> Result<()>
+where
+    F: Fn(usize, usize) -> Result<()> + Sync,
+{
+    use rayon::prelude::*;
+    let items: Vec<(usize, usize)> =
+        groups.iter().enumerate().flat_map(|(gi, g)| (0..g.params.len()).map(move |pi| (gi, pi))).collect();
+    let total: usize = groups.iter().flat_map(|g| &g.params).map(|(_, t)| t.numel()).sum();
+    let run = |&(gi, pi): &(usize, usize)| {
+        let _g = folo_core::no_grad();
+        f(gi, pi)
+    };
+    if total >= PAR_THRESHOLD { items.par_iter().try_for_each(run) } else { items.iter().try_for_each(run) }
+}
+
+/// True if every tensor is a contiguous CPU `F32` tensor (the fused-kernel fast path applies).
+fn cpu_fast(ts: &[&Tensor]) -> bool {
+    ts.iter().all(|t| t.device().is_cpu() && t.dtype() == folo_core::DType::F32 && t.is_contiguous())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recipe_helpers() {
+        // docs/MODEL.md §10.4: N = 800, batch 16, nbs 64.
+        assert_eq!(accumulate_steps(64, 16), 4);
+        assert_eq!(accumulate_steps(64, 128), 1);
+        assert_eq!(effective_weight_decay(0.0005, 16, 4, 64), 0.0005);
+        let a = auto_optimizer(2000, 16, 64, 30, 4);
+        assert_eq!((a.kind, a.lr0, a.momentum, a.warmup_bias_lr), (OptimKind::AdamW, 0.00125, 0.9, 0.0));
+        assert_eq!(auto_optimizer(2000, 16, 64, 30, 80).lr0, 0.000119);
+        assert_eq!(auto_optimizer(118_287, 16, 64, 100, 80).kind, OptimKind::Sgd);
+    }
+}

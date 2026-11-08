@@ -71,8 +71,9 @@ training and evaluation pipeline, a server, a CLI and a web studio.
 - f16 storage/compute when the adapter supports `shader-f16`, with f32 accumulation.
 
 ## folo-nn — layers and training utilities
-- `Module` trait: `forward`, `parameters()`/`named_parameters()` (stable, dotted names like `backbone.stem.conv.weight`),
-  `train()`/`eval()` mode. Layers: `Conv2d` (groups, stride, padding, dilation), `BatchNorm2d` (running stats,
+- `Module` trait: `parameters()`/`named_parameters()`/`named_buffers()` (stable, dotted names like
+  `backbone.stem.conv.weight`), `train()`/`eval()` mode, submodule visitor; `Forward` adds `forward` for one-in,
+  one-out layers. Overview: [docs/NN.md](NN.md). Layers: `Conv2d` (groups, stride, padding, dilation), `BatchNorm2d` (running stats,
   momentum; fused into the conv for inference), `Linear`, activations (SiLU, ReLU, LeakyReLU, Sigmoid, Hardswish),
   `MaxPool2d`, `Upsample` (nearest), `Concat`, `Sequential`.
 - Init: Kaiming / Xavier uniform/normal, seeded. Optimizers: SGD (momentum, Nesterov, weight decay) and AdamW, with

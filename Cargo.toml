@@ -22,6 +22,7 @@ bytemuck = { version = "1", features = ["extern_crate_alloc"] }
 crossbeam-channel = "0.5"
 half = { version = "2", features = ["bytemuck"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "bmp", "webp"] }
+memmap2 = "0.9"
 rayon = "1.11"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
