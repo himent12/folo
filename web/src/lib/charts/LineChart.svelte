@@ -70,6 +70,7 @@
     empty = 'No data yet',
   }: Props = $props();
 
+  const uid = $props.id();
   let width = $state(0);
   const fmtValue = $derived(valueFormat ?? yFormat);
 
@@ -253,8 +254,18 @@
         </g>
 
         {#if hasData}
+          <defs>
+            {#each paths as { s, a } (s.id)}
+              {#if a}
+                <linearGradient id="{uid}-{s.id}" x1="0" x2="0" y1="0" y2="1">
+                  <stop offset="0" style:stop-color={s.color} stop-opacity="0.28" />
+                  <stop offset="1" style:stop-color={s.color} stop-opacity="0" />
+                </linearGradient>
+              {/if}
+            {/each}
+          </defs>
           {#each paths as { s, d, a } (s.id)}
-            {#if a}<path class="area" d={a} style:fill={s.color} />{/if}
+            {#if a}<path class="area" d={a} fill="url(#{uid}-{s.id})" />{/if}
             <path class="line" class:dashed={s.dashed} class:ghost={s.ghost} {d} style:stroke={s.color} />
           {/each}
 
@@ -379,7 +390,6 @@
     opacity: 0.28;
   }
   .area {
-    opacity: var(--chart-area-opacity);
     stroke: none;
   }
   .cursor {

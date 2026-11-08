@@ -1,7 +1,7 @@
 <script lang="ts">
   import Crosshair from '@lucide/svelte/icons/crosshair';
   import { router, href } from '$lib/router.svelte';
-  import { setCrumbs } from '$lib/shell/page.svelte';
+  import { setCrumbs } from '$lib/shell/crumbs.svelte';
   import Button from '$lib/ui/Button.svelte';
   import EmptyState from '$lib/ui/EmptyState.svelte';
 
