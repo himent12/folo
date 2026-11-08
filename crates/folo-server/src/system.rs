@@ -1,0 +1,87 @@
+//! Host CPU and memory information (shared with `folo doctor`).
+
+use std::sync::Mutex;
+
+use folo_api::{CpuInfo, MemoryInfo};
+use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
+
+/// Static facts about the host.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct HostInfo {
+    /// OS name and version, e.g. `Windows 11 (26300)`.
+    pub os: String,
+    /// CPU architecture, e.g. `x86_64`.
+    pub arch: String,
+    /// CPU name.
+    pub cpu_name: String,
+    /// Logical threads.
+    pub cpu_threads: u32,
+    /// Total physical memory in bytes.
+    pub memory_total_bytes: u64,
+    /// Available memory in bytes.
+    pub memory_available_bytes: u64,
+}
+
+/// One-shot host information.
+pub fn host_info() -> HostInfo {
+    let sys = System::new_with_specifics(
+        RefreshKind::nothing()
+            .with_cpu(CpuRefreshKind::nothing())
+            .with_memory(MemoryRefreshKind::everything()),
+    );
+    let os = match (System::long_os_version(), System::kernel_version()) {
+        (Some(v), Some(k)) => format!("{v} (kernel {k})"),
+        (Some(v), None) => v,
+        _ => std::env::consts::OS.to_string(),
+    };
+    HostInfo {
+        os,
+        arch: std::env::consts::ARCH.to_string(),
+        cpu_name: cpu_name(&sys),
+        cpu_threads: sys.cpus().len().max(1) as u32,
+        memory_total_bytes: sys.total_memory(),
+        memory_available_bytes: sys.available_memory(),
+    }
+}
+
+fn cpu_name(sys: &System) -> String {
+    sys.cpus()
+        .first()
+        .map(|c| c.brand().trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "unknown".into())
+}
+
+/// Keeps a [`System`] between calls so CPU utilisation is measured over the interval since the last call.
+pub struct SystemProbe {
+    sys: Mutex<System>,
+}
+
+impl Default for SystemProbe {
+    fn default() -> Self {
+        let sys = System::new_with_specifics(
+            RefreshKind::nothing()
+                .with_cpu(CpuRefreshKind::nothing().with_cpu_usage())
+                .with_memory(MemoryRefreshKind::nothing().with_ram()),
+        );
+        SystemProbe { sys: Mutex::new(sys) }
+    }
+}
+
+impl SystemProbe {
+    /// Current CPU and memory.
+    pub fn sample(&self) -> (CpuInfo, MemoryInfo) {
+        let mut sys = self.sys.lock().unwrap();
+        sys.refresh_cpu_usage();
+        sys.refresh_memory_specifics(MemoryRefreshKind::nothing().with_ram());
+        let util = (sys.global_cpu_usage() / 100.0).clamp(0.0, 1.0);
+        let cpu = CpuInfo {
+            name: cpu_name(&sys),
+            threads: sys.cpus().len().max(1) as u32,
+            util: (util * 100.0).round() / 100.0,
+        };
+        let total = sys.total_memory();
+        let mem = MemoryInfo { used_bytes: total.saturating_sub(sys.available_memory()), total_bytes: total };
+        (cpu, mem)
+    }
+}
