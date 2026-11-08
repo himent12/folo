@@ -625,9 +625,7 @@ impl FoloApp {
             .flex()
             .items_center()
             .gap(px(6.))
-            .child(
-                text(ty::XS, t.text_tertiary).mr(px(2.)).child("Filter images by class · counts are boxes"),
-            )
+            .child(text(ty::XS, t.text_tertiary).mr(px(2.)).child("Classes · box counts"))
             .children(chips)
             .when(self.ds_empty_only, |d| {
                 d.child(self.chip(

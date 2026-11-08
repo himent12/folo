@@ -741,16 +741,29 @@ impl FoloApp {
                 .top_0()
                 .bottom_0(),
             )
+            // The track spans the full column (aligned with the fields above); the thumb's centre
+            // travels 7 px inside it, so the fill is a 7 px lead plus its share of the travel.
             .child(
                 div()
                     .absolute()
-                    .left(px(7.))
-                    .right(px(7.))
+                    .left_0()
+                    .right_0()
                     .top(px(8.5))
                     .h(px(3.))
                     .rounded_full()
                     .bg(t.line_strong)
-                    .child(div().h_full().w(relative(f)).rounded_full().bg(fill_color)),
+                    .child(
+                        div().absolute().left_0().top_0().h_full().w(px(7.)).rounded_l_full().bg(fill_color),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .left(px(7.))
+                            .right(px(7.))
+                            .top_0()
+                            .h_full()
+                            .child(div().h_full().w(relative(f)).bg(fill_color)),
+                    ),
             )
             .child(
                 div().absolute().left(px(7.)).right(px(7.)).top_0().bottom_0().child(

@@ -38,7 +38,9 @@ Settled decisions (reviewers have argued both ways; the current choice stays unl
 your issues elsewhere): Settings is capped at 880 px, left-aligned; the run KPI strip keeps fixed gaps rather than
 spreading tiles; "close mosaic" is named on the top-row charts only; the learning-rate power of ten sits in the card
 caption; the selected detection box and its chip take accent.solid (design/README's selection rule), not a class colour
-with an extra ring, and the other boxes' outlines drop to 30 % (the same rule; their chips stay opaque and readable).
+with an extra ring, and the other boxes' outlines drop to 30 % (the same rule; their chips stay opaque and readable); the chart
+cursor's chip sits on the x axis and the tick labels under it give way (it names the cursor's epoch where the axis
+would).
 
 ## Scoring
 Use `REVIEW_RUBRIC.md` (path in your task): 12 lines, 1–10, where **9 means "would ship as-is at Linear / Raycast / Zed
