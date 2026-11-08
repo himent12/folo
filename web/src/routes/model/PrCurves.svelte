@@ -160,6 +160,10 @@
     flex-direction: column;
     min-width: 0;
   }
+  /* Per-class context lines: lighter than the mean, but still traceable (the generic ghost is too faint here). */
+  .plot :global(.line.ghost) {
+    opacity: 0.5;
+  }
   .what {
     min-width: 11em;
     color: var(--text-tertiary);

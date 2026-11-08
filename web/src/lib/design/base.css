@@ -226,7 +226,7 @@ table {
   height: 32px;
   padding: 0 var(--space-3);
   text-align: left;
-  font-size: var(--type-xs-size);
+  font-size: var(--type-sm-size);
   font-weight: var(--weight-medium);
   color: var(--text-tertiary);
   white-space: nowrap;

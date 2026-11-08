@@ -1,4 +1,5 @@
 <script lang="ts">
+  import ChartSkeleton from '$lib/charts/ChartSkeleton.svelte';
   import Box from '@lucide/svelte/icons/box';
   import CircleCheck from '@lucide/svelte/icons/circle-check';
   import Clock from '@lucide/svelte/icons/clock';
@@ -118,7 +119,12 @@
       <Skeleton w="min(420px, 100%)" h="16px" />
     </div>
     <!-- The metrics instrument (strip + one chart), then samples beside the rail. -->
-    <Skeleton h="520px" r="var(--radius-lg)" />
+    <div class="sk-metrics">
+      <div class="sk-strip">
+        {#each [0, 1, 2, 3, 4, 5, 6] as i (i)}<div class="sk-cell"><Skeleton w="56%" h="12px" /><Skeleton w="48%" h="28px" /><Skeleton w="68%" h="10px" /></div>{/each}
+      </div>
+      <div class="sk-chart"><ChartSkeleton height={320} /></div>
+    </div>
     <div class="sk-row2"><Skeleton h="300px" r="var(--radius-lg)" /><Skeleton h="300px" r="var(--radius-lg)" /></div>
   </div>
 {:else}
@@ -206,7 +212,7 @@
     <RunMetrics {run} steps={live.steps} epochs={live.epochs} version={live.version} loading={live.loading} />
 
     <!-- Evidence on the left (what the model sees, what the trainer says); reference in a sticky rail on the right. -->
-    <!-- Phones show one of these at a time, chosen here; wider screens show them all. -->
+    <!-- Up to 1199 px one of these shows at a time, chosen here; wider screens show them all beside a rail. -->
     <div class="phone-pick">
       <Segmented
         label="Show"
@@ -266,6 +272,37 @@
     display: grid;
     gap: var(--space-2);
     max-width: 100%;
+  }
+  .sk-metrics {
+    background: var(--bg-panel);
+    border: 1px solid var(--line-subtle);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+  }
+  .sk-strip {
+    display: grid;
+    grid-template-columns: 240px repeat(6, minmax(0, 1fr));
+    border-bottom: 1px solid var(--line-subtle);
+  }
+  .sk-cell {
+    display: grid;
+    gap: var(--space-2);
+    padding: var(--space-4);
+    border-left: 1px solid var(--line-subtle);
+  }
+  .sk-cell:first-child {
+    border-left: 0;
+  }
+  .sk-chart {
+    padding: var(--space-4);
+  }
+  @media (max-width: 1199px) {
+    .sk-strip {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+    .sk-cell:first-child {
+      display: none;
+    }
   }
   .sk-row2 {
     display: grid;
@@ -417,25 +454,10 @@
     display: none;
   }
   @media (max-width: 1199px) {
-    .detail {
-      grid-template-columns: minmax(0, 1fr);
-    }
-    .rail {
-      position: static;
-    }
-  }
-  @media (max-width: 767px) {
+    /* Up to 1199 px the rail no longer fits beside the samples: one section at a time, picked above. */
     .phone-pick {
       display: block;
       margin-bottom: calc(-1 * var(--space-1));
-    }
-    .phone-pick :global(.seg) {
-      display: flex;
-      width: 100%;
-    }
-    .phone-pick :global(.seg > *) {
-      flex: 1;
-      justify-content: center;
     }
     /* One part is visible at a time, so the empty columns must not add gaps. */
     .detail,
@@ -448,6 +470,22 @@
     .detail:not([data-show='logs']) [data-part='logs'],
     .detail:not([data-show='config']) [data-part='config'] {
       display: none;
+    }
+    .detail {
+      grid-template-columns: minmax(0, 1fr);
+    }
+    .rail {
+      position: static;
+    }
+  }
+  @media (max-width: 767px) {
+    .phone-pick :global(.seg) {
+      display: flex;
+      width: 100%;
+    }
+    .phone-pick :global(.seg > *) {
+      flex: 1;
+      justify-content: center;
     }
     .b-msg {
       font-size: var(--type-sm-size);

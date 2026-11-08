@@ -607,7 +607,7 @@
                         <th scope="col" class="r hide-sm coord" title="Box top edge, in image pixels">y1</th>
                         <th scope="col" class="r hide-sm coord" title="Box right edge, in image pixels">x2</th>
                         <th scope="col" class="r hide-sm coord" title="Box bottom edge, in image pixels">y2</th>
-                        <th scope="col" class="r">Size</th>
+                        <th scope="col" class="r">Size (px)</th>
                       </tr>
                     </thead>
                     <tbody bind:this={tbody}>

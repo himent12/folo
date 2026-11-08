@@ -44,7 +44,7 @@
         <thead>
           <tr>
             <th>Class</th>
-            <th class="r">mAP50-95</th>
+            <th class="r" title="mAP50-95 of the latest epoch; the small number is the change since the previous epoch">mAP50-95 <span class="delta-h">Δ prev</span></th>
             <th class="bar-col"><span class="sr-only">mAP50-95 bar</span></th>
             {#if !compact}
               <th class="r">mAP50</th>
@@ -128,6 +128,10 @@
     border-radius: 2px;
     background: var(--bg-active);
     overflow: hidden;
+  }
+  .delta-h {
+    font-weight: var(--weight-regular);
+    color: var(--text-tertiary);
   }
   .bar span {
     display: block;

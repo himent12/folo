@@ -4,6 +4,7 @@
    * chart the selected tab names. A single run is drawn in ink (primary metric in text.primary, secondary ones
    * tertiary with dash patterns); hue is reserved for entities (runs in Compare, classes).
    */
+  import ChartSkeleton from '$lib/charts/ChartSkeleton.svelte';
   import { smooth, type Pt } from '$lib/charts/downsample';
   import LineChart, { type Marker, type Series } from '$lib/charts/LineChart.svelte';
   import { runHorizon } from '$lib/charts/horizon';
@@ -11,7 +12,6 @@
   import { duration, lr as fmtLr, metric, num, pow10 } from '$lib/format';
   import Segmented from '$lib/ui/Segmented.svelte';
   import Select from '$lib/ui/Select.svelte';
-  import Skeleton from '$lib/ui/Skeleton.svelte';
 
   let {
     run,
@@ -238,7 +238,7 @@
 
   <div class="chart" id="run-chart" role="tabpanel" aria-label={current.title}>
     <header>
-      <h2>{current.title}<span class="q">{current.qualifier}</span></h2>
+      <h2><span class="t">{current.title}</span><span class="q">{current.qualifier}</span></h2>
       <div class="ctl">
         {#if tab === 'loss'}
           <Segmented
@@ -268,7 +268,7 @@
       </div>
     </header>
     {#if loading}
-      <Skeleton h="{narrow ? 220 : 320}px" r="var(--radius-md)" />
+      <ChartSkeleton height={narrow ? 220 : 320} />
     {:else}
       {#key tab}
         <LineChart
@@ -540,12 +540,18 @@
     .chart {
       padding: 0 var(--space-3) var(--space-3);
     }
-    /* Title on one line, its qualifier (with the best value and epoch) on the next. */
-    h2 {
-      flex-direction: column;
-      align-items: flex-start;
-      gap: 0;
+    /* The picker above already names the metric: the header keeps only its qualifier (best value and epoch). */
+    h2 .t {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip-path: inset(50%);
       white-space: nowrap;
+    }
+    h2 {
+      font-size: var(--type-sm-size);
+      font-weight: var(--weight-regular);
     }
     .q {
       white-space: normal;

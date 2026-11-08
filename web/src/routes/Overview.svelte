@@ -1,13 +1,10 @@
 <script lang="ts">
+  import ChartSkeleton from '$lib/charts/ChartSkeleton.svelte';
   import ArrowRight from '@lucide/svelte/icons/arrow-right';
   import Activity from '@lucide/svelte/icons/activity';
   import Box from '@lucide/svelte/icons/box';
   import Images from '@lucide/svelte/icons/images';
   import Plus from '@lucide/svelte/icons/plus';
-  import RotateCw from '@lucide/svelte/icons/rotate-cw';
-  import Settings from '@lucide/svelte/icons/settings';
-  import WifiOff from '@lucide/svelte/icons/wifi-off';
-  import { ApiError } from '$lib/api/client';
   import { hub } from '$lib/api/index.svelte';
   import { Resource } from '$lib/api/resource.svelte';
   import type { Dataset, Model } from '$lib/api/types';
@@ -42,13 +39,6 @@
   // One failure behind every request is a connection problem: say it once instead of in every panel.
   const offline = $derived(!!runs.error && !runs.data && !!models.error && !models.data && !!datasets.error && !datasets.data);
   const fresh = $derived(datasets.data?.length === 0 && runs.data?.length === 0 && models.data?.length === 0);
-  // A specific line beats a generic message: code, status and when it happened.
-  const errDetail = $derived.by(() => {
-    const e = runs.error;
-    if (!(e instanceof ApiError)) return e instanceof Error ? e.message : null;
-    const at = new Date().toLocaleTimeString('en-US', { hour12: false });
-    return `GET /api/runs → ${e.status ? `HTTP ${e.status}` : 'no response'} · ${e.code} · ${at}`;
-  });
   function retryAll() {
     void runs.refresh();
     void models.refresh();
@@ -74,19 +64,8 @@
 <Page title="Overview">
 
   {#if offline}
-    <section class="offline" role="alert">
-      <div class="off-mark" aria-hidden="true"><WifiOff size={20} strokeWidth={1.5} /></div>
-      <h2>Studio can't reach the FOLO server</h2>
-      <p>
-        Nothing answered at <span class="mono">{hub.serverUrl}</span>. Start <span class="mono">folo serve</span> (or check
-        the server URL in Settings), then retry.
-      </p>
-      {#if errDetail}<p class="off-detail mono">{errDetail}</p>{/if}
-      <div class="off-actions">
-        <Button variant="primary" icon={RotateCw} onclick={retryAll}>Retry</Button>
-        <Button icon={Settings} href={href('/settings')}>Connection settings</Button>
-      </div>
-    </section>
+    <!-- The same connection-error composition as every other screen, in the frame the page would fill. -->
+    <Panel><ErrorState error={runs.error} retry={retryAll} /></Panel>
   {:else if fresh}
     <!-- A fresh install: one path forward instead of a page of empty panels. -->
     <section class="onboard" aria-labelledby="onboard-title">
@@ -123,7 +102,7 @@
           <div class="lsk-head"><Skeleton w="72px" h="20px" r="var(--radius-full)" /><Skeleton w="180px" h="20px" /><Skeleton w="min(360px, 70%)" h="14px" /></div>
           <div class="lsk-body">
             <div class="lsk-stats"><Skeleton w="96px" h="40px" /><Skeleton h="4px" /><div class="lsk-grid">{#each [0, 1, 2, 3] as i (i)}<Skeleton h="44px" />{/each}</div></div>
-            <Skeleton h="232px" r="var(--radius-md)" />
+            <ChartSkeleton height={200} />
           </div>
         </div>
       {:else if live}
@@ -327,42 +306,6 @@
     .ob-actions {
       grid-column: 2;
     }
-  }
-  .offline {
-    display: grid;
-    justify-items: center;
-    gap: var(--space-3);
-    padding: var(--space-16) var(--space-6);
-    text-align: center;
-    background: var(--bg-panel);
-    border: 1px solid color-mix(in srgb, var(--danger-solid) 35%, transparent);
-    border-radius: var(--radius-lg);
-  }
-  .off-mark {
-    display: grid;
-    place-items: center;
-    width: 44px;
-    height: 44px;
-    border-radius: 50%;
-    background: var(--danger-muted);
-    color: var(--danger-text);
-  }
-  .offline h2 {
-    font-size: var(--type-lg-size);
-    line-height: var(--type-lg-line);
-  }
-  .offline p {
-    max-width: 440px;
-    color: var(--text-secondary);
-  }
-  .offline .off-detail {
-    color: var(--text-tertiary);
-    font-size: var(--type-xs-size);
-  }
-  .off-actions {
-    display: flex;
-    gap: var(--space-2);
-    margin-top: var(--space-2);
   }
   /* Two independent stacks, so a short side panel never leaves a hole in a shared row. */
   .cols {
