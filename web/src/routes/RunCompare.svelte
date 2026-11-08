@@ -122,10 +122,10 @@
     <div class="charts">
       {#each charts as c (c.id)}
         <Panel title={c.title} id="cmp-{c.id}">
-          {#if !metrics.data || !runs.data}
+          {#if metrics.error && !metrics.data}
+            <ErrorState error={metrics.error} compact retry={() => metrics.refresh()} title="Could not load these runs' metrics" />
+          {:else if !metrics.data || !runs.data}
             <Skeleton h="200px" r="var(--radius-md)" />
-          {:else if metrics.error}
-            <ErrorState error={metrics.error} compact retry={() => metrics.refresh()} />
           {:else}
             <LineChart
               series={c.series}

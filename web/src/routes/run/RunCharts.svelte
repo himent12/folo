@@ -71,7 +71,11 @@
     return [{ id: 'ips', label: 'images/s', color: 'var(--chart-6)', area: true, points: smooth(pts, 0.9) }];
   });
   // Throughput reads best against zero: a steady line near the top, dips stand out.
-  const ipsMax = $derived(Math.max(1, ...(ips[0]?.points.map((p) => p.y) ?? [1])));
+  const ipsMax = $derived.by(() => {
+    let m = 1;
+    for (const p of ips[0]?.points ?? []) if (p.y > m) m = p.y;
+    return m;
+  });
 
   const best = $derived(run.best ? [{ x: run.best.epoch + 1, y: run.best.map50_95, label: `best ${run.best.map50_95.toFixed(3)}` }] : []);
 </script>

@@ -58,28 +58,36 @@
   const system = new Resource((s) => hub.api.system(s));
   const models = new Resource((s) => hub.api.models(s));
 
-  // Prefill from an earlier run (?from=run_x, e.g. "Retry with batch 32").
+  // Prefill from an earlier run (?from=run_x, e.g. "Retry with batch 32"). Loaded through the hub, so it waits for
+  // the real server instead of asking the mock that answers before the connection settles.
   const fromId = q.get('from');
-  if (fromId) {
-    hub.api.run(fromId).then(
-      (r) => {
-        const c = r.config;
-        datasetId = c.dataset_id;
-        arch = c.arch;
-        epochs = c.epochs;
-        batch = q.get('batch') ?? String(c.batch);
-        imgsz = String(c.imgsz);
-        device = c.device;
-        optimizer = c.optimizer;
-        lr0 = c.lr0;
-        seed = c.seed;
-        augment = structuredClone(c.augment);
-        name = `${c.name}-retry`;
-        nameEdited = true;
-      },
-      (e) => toast.error(e, 'Could not load the run to copy'),
-    );
-  }
+  const source = new Resource((s) => (fromId ? hub.api.run(fromId, s) : Promise.resolve(null)));
+  let prefilled = $state(!fromId);
+  $effect(() => {
+    const r = source.data;
+    if (!r || untrack(() => prefilled)) return;
+    const c = r.config;
+    datasetId = c.dataset_id;
+    arch = c.arch;
+    epochs = c.epochs;
+    batch = q.get('batch') ?? String(c.batch);
+    imgsz = String(c.imgsz);
+    device = c.device;
+    optimizer = c.optimizer;
+    lr0 = c.lr0;
+    seed = c.seed;
+    weights = c.weights ?? 'none';
+    augment = structuredClone(c.augment);
+    name = `${c.name}-retry`;
+    nameEdited = true;
+    prefilled = true;
+  });
+  $effect(() => {
+    if (source.error && !untrack(() => prefilled)) {
+      toast.error(source.error, 'Could not load the run to copy');
+      prefilled = true;
+    }
+  });
 
   $effect(() => {
     const list = datasets.data;
@@ -101,6 +109,9 @@
     return (await hub.api.datasetImages(id, { split: 'train', offset: 0, limit: 12 }, s)).images.filter((i) => i.boxes.length > 0);
   });
 
+  /** Number inputs bind `null` when cleared; accept only finite whole numbers in range. */
+  const isInt = (v: unknown, lo: number, hi: number) => typeof v === 'number' && Number.isInteger(v) && v >= lo && v <= hi;
+
   const batchN = $derived(Math.max(1, Math.round(Number(batch) || 16)));
   const imgszN = $derived(Number(imgsz) || 640);
   const onCpu = $derived(device === 'cpu' || (device === 'auto' && !gpu));
@@ -109,11 +120,13 @@
 
   const errors = $derived({
     name: !name.trim() ? 'Give the run a name.' : /[^\w.-]/.test(name.trim()) ? 'Letters, digits, dot, dash and underscore only.' : null,
-    epochs: !(epochs >= 1 && epochs <= 3000) ? 'Between 1 and 3000.' : null,
-    lr0: !(lr0 > 0 && lr0 <= 1) ? 'Between 0 and 1.' : null,
+    epochs: !isInt(epochs, 1, 10000) ? 'A whole number from 1 to 10,000.' : null,
+    lr0: !(typeof lr0 === 'number' && lr0 > 0 && lr0 < 10) ? 'Greater than 0 and below 10.' : null,
+    seed: !isInt(seed, 0, 2 ** 32 - 1) ? 'A whole number, 0 or more.' : null,
+    close: !isInt(augment.close_mosaic, 0, Number.isFinite(epochs) ? epochs : 0) ? 'A whole number up to the epoch count.' : null,
     dataset: !dataset ? 'Pick a dataset.' : null,
   });
-  const valid = $derived(Object.values(errors).every((e) => e === null));
+  const valid = $derived(prefilled && Object.values(errors).every((e) => e === null));
 
   const config = $derived<TrainConfig>({
     name: name.trim(),
@@ -238,7 +251,7 @@
         <Panel title="3 · Training" id="sec-train">
           <div class="fields">
             <Field label="Epochs" for="epochs" error={errors.epochs}>
-              <Input id="epochs" type="number" min="1" max="3000" bind:value={epochs} invalid={!!errors.epochs} />
+              <Input id="epochs" type="number" min="1" max="10000" step="1" bind:value={epochs} invalid={!!errors.epochs} />
             </Field>
             <Field label="Batch size" for="batch" hint="Per step. Lower it if you run out of GPU memory.">
               <Segmented label="Batch size" bind:value={batch} options={['8', '16', '32', '64'].map((v) => ({ value: v, label: v }))} />
@@ -263,8 +276,8 @@
             <Field label="Initial learning rate" for="lr0" error={errors.lr0} hint="Warmup 3 epochs, then cosine to 1%.">
               <Input id="lr0" type="number" step="0.001" min="0" bind:value={lr0} invalid={!!errors.lr0} />
             </Field>
-            <Field label="Seed" for="seed" hint="Same seed, same run.">
-              <Input id="seed" type="number" min="0" bind:value={seed} />
+            <Field label="Seed" for="seed" hint="Same seed, same run." error={errors.seed}>
+              <Input id="seed" type="number" min="0" step="1" bind:value={seed} invalid={!!errors.seed} />
             </Field>
           </div>
         </Panel>
@@ -302,8 +315,8 @@
               {@render ctl('translate', translateCtl)}
               {@render ctl('hsv', hsvCtl)}
               <div class="aug-row">
-                <Field label="Close mosaic" for="close" hint="Train the last N epochs on plain images to settle the boxes.">
-                  <Input id="close" type="number" min="0" max={epochs} bind:value={augment.close_mosaic} suffix="epochs" />
+                <Field label="Close mosaic" for="close" hint="Train the last N epochs on plain images to settle the boxes." error={errors.close}>
+                  <Input id="close" type="number" min="0" step="1" max={epochs} bind:value={augment.close_mosaic} suffix="epochs" invalid={!!errors.close} />
                 </Field>
               </div>
             </div>
