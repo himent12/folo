@@ -101,17 +101,17 @@ fn box_downsample(src: &Image, fx: u32, fy: u32) -> Image {
     for_rows(&mut out, ow * 3, |oy, row| {
         let y0 = oy * fy;
         let y1 = (y0 + fy).min(h);
-        let mut acc = vec![0u32; ow * 3];
+        let mut acc = vec![0u64; ow * 3];
         for y in y0..y1 {
             let srow = &src.data[y * stride..(y + 1) * stride];
             for ox in 0..ow {
                 let x0 = ox * fx;
                 let x1 = (x0 + fx).min(w);
-                let (mut r, mut g, mut b) = (0u32, 0u32, 0u32);
+                let (mut r, mut g, mut b) = (0u64, 0u64, 0u64);
                 for p in srow[x0 * 3..x1 * 3].as_chunks::<3>().0.iter() {
-                    r += p[0] as u32;
-                    g += p[1] as u32;
-                    b += p[2] as u32;
+                    r += p[0] as u64;
+                    g += p[1] as u64;
+                    b += p[2] as u64;
                 }
                 acc[ox * 3] += r;
                 acc[ox * 3 + 1] += g;
@@ -119,7 +119,7 @@ fn box_downsample(src: &Image, fx: u32, fy: u32) -> Image {
             }
         }
         for ox in 0..ow {
-            let n = (((ox * fx + fx).min(w) - ox * fx) * (y1 - y0)) as u32;
+            let n = (((ox * fx + fx).min(w) - ox * fx) * (y1 - y0)) as u64;
             for c in 0..3 {
                 row[ox * 3 + c] = ((acc[ox * 3 + c] + n / 2) / n) as u8;
             }
@@ -166,6 +166,13 @@ mod tests {
         }
         let r = resize(&img, 8, 8);
         assert!(r.data.iter().all(|&v| (120..=135).contains(&v)), "{:?}", &r.data[..12]);
+    }
+
+    #[test]
+    fn huge_reduction_does_not_overflow() {
+        let img = Image::new(4096, 4113, [255, 255, 255]);
+        assert_eq!(resize(&img, 1, 1).data, vec![255, 255, 255]);
+        assert!(resize(&img, 3, 2).data.iter().all(|&v| v == 255));
     }
 
     #[test]

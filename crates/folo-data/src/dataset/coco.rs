@@ -190,10 +190,15 @@ pub(crate) fn open_jsons(
                 entry.1.get_or_insert_with(|| format!("unknown category id {cat}"));
                 continue;
             };
+            // Exactly four numbers; anything else (null, strings, extra values) makes the annotation broken.
             let nums: Option<Vec<f64>> =
-                bbox.as_array().map(|a| a.iter().filter_map(Value::as_f64).collect());
+                bbox.as_array().filter(|a| a.len() == 4).and_then(|a| a.iter().map(Value::as_f64).collect());
             match nums.as_deref() {
-                Some(&[x, y, w, h]) if [x, y, w, h].iter().all(|v| v.is_finite()) && w >= 0.0 && h >= 0.0 => {
+                Some(&[x, y, w, h])
+                    if [x, y, x + w, y + h].iter().all(|v| v.is_finite() && v.abs() < 1e9)
+                        && w >= 0.0
+                        && h >= 0.0 =>
+                {
                     entry.0.push((class, [x as f32, y as f32, (x + w) as f32, (y + h) as f32]));
                 }
                 _ => {
@@ -238,7 +243,11 @@ fn image_base(root: &Path, p: &Parsed) -> PathBuf {
     }
     cands.push(root.join("images"));
     cands.push(root.to_path_buf());
-    let probe: Vec<&str> = p.images.iter().take(8).map(|(_, f, _)| f.as_str()).collect();
+    // Probe the first few images and an even spread over the rest, so a run of missing files at the start
+    // does not hide the right folder.
+    let step = (p.images.len() / 32).max(1);
+    let mut probe: Vec<&str> = p.images.iter().take(8).map(|(_, f, _)| f.as_str()).collect();
+    probe.extend(p.images.iter().step_by(step).take(32).map(|(_, f, _)| f.as_str()));
     cands
         .iter()
         .map(|c| (c, probe.iter().filter(|f| c.join(f).is_file()).count()))

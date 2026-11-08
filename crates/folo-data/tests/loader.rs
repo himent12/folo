@@ -157,6 +157,13 @@ fn unreadable_samples_are_substituted_deterministically() {
     assert_eq!(collect(&b, 0), ba);
     let failed: Vec<String> = a.failures().iter().map(|i| i.path.display().to_string()).collect();
     assert_eq!(failed, ["#3", "#4", "#9"]);
+    // Metadata names the image that was actually used.
+    let v = DataLoader::new(ds.clone(), LoaderConfig { augment: None, shuffle: false, ..cfg(3) }).unwrap();
+    let used: Vec<usize> = collect(&v, 0).iter().flat_map(|b| b.meta.iter().map(|m| m.index)).collect();
+    assert_eq!(used, [0, 1, 2, 5, 5, 5, 6, 7, 8, 10, 10, 11]);
+    let batches = collect(&v, 0);
+    let m = batches[0].meta[3];
+    assert_eq!(m.orig_size, [90 + (5 % 5) * 13, 70], "size of sample 5, not 3");
     // Everything broken: the batch is an error, not a panic or a hang.
     let all_bad: Arc<dyn Dataset> = Arc::new(Flaky { inner: rect_dataset(3), bad: vec![0, 1, 2] });
     let l = DataLoader::new(all_bad, LoaderConfig { augment: None, ..cfg(2) }).unwrap();

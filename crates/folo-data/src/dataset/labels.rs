@@ -10,6 +10,10 @@ pub(crate) struct ParsedLabels {
     pub warnings: Vec<String>,
 }
 
+/// Class ids at or above this are rejected, so a malformed label cannot make the reader allocate names for
+/// billions of classes.
+pub(crate) const MAX_CLASSES: usize = 65_536;
+
 /// Coordinates may exceed `[0, 1]` by this much (rounding in exporters) before the file counts as broken.
 const COORD_TOLERANCE: f32 = 0.01;
 /// Overshoot below this is treated as print rounding: kept as written, no warning.
@@ -42,6 +46,9 @@ pub(crate) fn parse_yolo(text: &str, num_classes: Option<usize>) -> Result<Parse
         let c = vals[0];
         if c < 0.0 || c.fract() != 0.0 || c > u32::MAX as f32 {
             return Err((line_no, format!("class id must be a non-negative integer, got {c}")));
+        }
+        if c as usize >= MAX_CLASSES {
+            return Err((line_no, format!("class id {c} is implausibly large (limit {MAX_CLASSES})")));
         }
         let class = c as u32;
         if let Some(nc) = num_classes
@@ -127,6 +134,7 @@ mod tests {
         assert!(parse_yolo("-1 0.5 0.5 0.2 0.2\n", None).is_err());
         assert!(parse_yolo("1.5 0.5 0.5 0.2 0.2\n", None).is_err());
         assert!(parse_yolo("3 0.5 0.5 0.2 0.2\n", Some(3)).is_err());
+        assert!(parse_yolo("1000000000 0.5 0.5 0.2 0.2", None).is_err());
         assert!(parse_yolo("0 50 60 20 20\n", None).is_err(), "pixel coordinates are rejected");
         assert!(parse_yolo("0 0.1 0.1 0.2 0.2 0.3\n", None).is_err());
         let p =

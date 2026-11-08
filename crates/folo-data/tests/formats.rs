@@ -124,13 +124,15 @@ fn coco_instances_with_category_remap() {
     write_png(&r.join("images/train2017/2.png"), 64, 64, [5, 5, 5]);
     write_png(&r.join("images/train2017/3.png"), 64, 64, [5, 5, 5]);
     write_png(&r.join("images/train2017/4.png"), 64, 64, [5, 5, 5]);
+    write_png(&r.join("images/train2017/5.png"), 64, 64, [5, 5, 5]);
     write_png(&r.join("images/val2017/9.png"), 20, 20, [5, 5, 5]);
     let train = serde_json::json!({
         "images": [
             {"id": 1, "file_name": "1.png", "width": 100, "height": 50},
             {"id": 2, "file_name": "2.png", "width": 64, "height": 64},
             {"id": 3, "file_name": "3.png", "width": 64, "height": 64},
-            {"id": 4, "file_name": "4.png"}
+            {"id": 4, "file_name": "4.png"},
+            {"id": 5, "file_name": "5.png", "width": 64, "height": 64}
         ],
         "annotations": [
             {"id": 1, "image_id": 1, "category_id": 7, "bbox": [10, 5, 20, 10], "iscrowd": 0},
@@ -138,7 +140,8 @@ fn coco_instances_with_category_remap() {
             {"id": 3, "image_id": 1, "category_id": 3, "bbox": [0, 0, 100, 50], "iscrowd": 1},
             {"id": 4, "image_id": 2, "category_id": 3, "bbox": [1, 2, 3]},
             {"id": 5, "image_id": 3, "category_id": 99, "bbox": [1, 2, 3, 4]},
-            {"id": 6, "image_id": 4, "category_id": 3, "bbox": [0, 0, 32, 16]}
+            {"id": 6, "image_id": 4, "category_id": 3, "bbox": [0, 0, 32, 16]},
+            {"id": 7, "image_id": 5, "category_id": 3, "bbox": [10, null, 20, 30, 40]}
         ],
         "categories": [{"id": 7, "name": "dog"}, {"id": 1, "name": "cat"}, {"id": 3, "name": "bird"}]
     });
@@ -154,7 +157,7 @@ fn coco_instances_with_category_remap() {
     assert_eq!(ds.format, Format::Coco);
     assert_eq!(ds.classes, ["cat", "bird", "dog"]);
     assert_eq!(ds.split_sizes(), [2, 1, 0], "{:#?}", ds.report);
-    assert_eq!(ds.report.broken_labels(), 2);
+    assert_eq!(ds.report.broken_labels(), 3, "bad bbox, unknown category, bbox with null");
     let b = ds.train.boxes(0);
     assert_eq!(b.len(), 2, "crowd box skipped");
     assert_eq!(b[0].class, 2);
@@ -270,4 +273,37 @@ fn split_and_format_serde() {
     assert_eq!(serde_json::to_string(&Split::Val).unwrap(), "\"val\"");
     assert_eq!(serde_json::from_str::<Format>("\"auto\"").unwrap(), Format::Auto);
     assert_eq!(serde_json::to_string(&IssueKind::BrokenLabel).unwrap(), "\"broken_label\"");
+}
+
+#[test]
+fn coco_image_dir_found_past_missing_files() {
+    let t = TempDir::new("coco-missing");
+    let r = t.path();
+    let images: Vec<_> = (0..12)
+        .map(|i| serde_json::json!({"id": i, "file_name": format!("{i}.png"), "width": 8, "height": 8}))
+        .collect();
+    // The first eight files are missing; the rest exist under images/train2017.
+    for i in 8..12 {
+        write_png(&r.join(format!("images/train2017/{i}.png")), 8, 8, [0; 3]);
+    }
+    let j = serde_json::json!({"images": images, "annotations": [], "categories": [{"id": 1, "name": "x"}]});
+    write(&r.join("annotations/instances_train2017.json"), serde_json::to_vec(&j).unwrap());
+    let ds = open(r).unwrap();
+    assert_eq!(ds.train.len(), 4);
+    assert_eq!(ds.report.count(IssueKind::MissingImage), 8);
+}
+
+#[test]
+fn absurd_class_counts_are_rejected_not_allocated() {
+    let t = TempDir::new("yolo-huge");
+    let r = t.path();
+    write_png(&r.join("images/train/a.png"), 8, 8, [0; 3]);
+    write(&r.join("labels/train/a.txt"), "1000000000 0.5 0.5 0.2 0.2\n");
+    write_png(&r.join("images/train/b.png"), 8, 8, [0; 3]);
+    write(&r.join("labels/train/b.txt"), "1 0.5 0.5 0.2 0.2\n");
+    let ds = open(r).unwrap();
+    assert_eq!(ds.classes.len(), 2);
+    assert_eq!(ds.report.broken_labels(), 1);
+    write(&r.join("data.yaml"), "train: images/train\nnc: 4000000000\n");
+    assert!(open(r).is_err());
 }

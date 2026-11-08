@@ -1,5 +1,6 @@
 //! YOLO format: `data.yaml`, `images/` + `labels/`.
 
+use super::labels::MAX_CLASSES;
 use super::{
     Candidate, FileDataset, Format, IssueKind, LabelSource, LoadReport, LoadedDataset, OpenOptions, Split,
     build_entries, default_names,
@@ -178,6 +179,11 @@ fn scalar_string(v: &Value) -> Option<String> {
 /// `names` as a list or an `{id: name}` map, falling back to `nc`.
 fn parse_names(v: &Value, yaml: &Path) -> Result<Option<Vec<String>>> {
     let nc = v.get("nc").and_then(Value::as_u64).map(|n| n as usize);
+    if let Some(n) = nc
+        && n > MAX_CLASSES
+    {
+        return Err(DataError::Format(format!("{}: nc {n} is implausibly large", yaml.display())));
+    }
     let names = match v.get("names") {
         Some(Value::Sequence(seq)) => {
             Some(seq.iter().map(|x| scalar_string(x).unwrap_or_default()).collect::<Vec<_>>())
@@ -188,7 +194,7 @@ fn parse_names(v: &Value, yaml: &Path) -> Result<Option<Vec<String>>> {
                 let id = k.as_u64().or_else(|| k.as_str().and_then(|s| s.trim().parse().ok())).ok_or_else(
                     || DataError::Format(format!("{}: names key {k:?} is not a class id", yaml.display())),
                 )?;
-                if id > 100_000 {
+                if id as usize >= MAX_CLASSES {
                     return Err(DataError::Format(format!(
                         "{}: class id {id} is implausibly large",
                         yaml.display()

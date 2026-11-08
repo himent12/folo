@@ -173,10 +173,9 @@ fn train_transform_end_to_end() {
     let aug =
         permissive(AugmentConfig { hsv: [0.0; 3], degrees: 10.0, flipud: 0.5, ..AugmentConfig::default() });
     let t = TrainTransform::train(160, aug, 0, 0);
-    let fetch = |i: usize| ds.get(i);
     let mut mosaics = 0;
     for seed in 0..12 {
-        let out = t.apply(seed as usize % 8, ds.len(), &fetch, &mut Rng::new(seed)).unwrap();
+        let out = t.apply_dataset(&ds, seed as usize % 8, &mut Rng::new(seed)).unwrap();
         assert_eq!((out.sample.image.width, out.sample.image.height), (160, 160));
         assert_consistent(&out.sample, 1.5, 0.3, &format!("pipeline seed {seed}"));
         mosaics += (out.letterbox.ratio == [1.0, 1.0]) as usize;
@@ -185,10 +184,10 @@ fn train_transform_end_to_end() {
     // Without mosaic (closed): letterbox + affine.
     let t = TrainTransform::train(160, aug, 95, 100);
     assert!(!t.mosaic);
-    let out = t.apply(3, ds.len(), &fetch, &mut Rng::new(1)).unwrap();
+    let out = t.apply_dataset(&ds, 3, &mut Rng::new(1)).unwrap();
     assert_consistent(&out.sample, 1.5, 0.3, "closed mosaic");
     // Validation: letterbox only, geometry recorded.
-    let v = TrainTransform::val(160).apply(2, ds.len(), &fetch, &mut Rng::new(0)).unwrap();
+    let v = TrainTransform::val(160).apply_dataset(&ds, 2, &mut Rng::new(0)).unwrap();
     assert_eq!(v.orig_size, [220, 140]);
     assert_eq!(v.letterbox.out, [160, 160]);
     assert_consistent(&v.sample, 1.5, 0.85, "val");
@@ -200,10 +199,22 @@ fn same_seed_same_result() {
     let ds = InMemoryDataset { samples, classes: vec!["a".into(); 4], split: Split::Train };
     let aug = AugmentConfig { degrees: 5.0, shear: 2.0, mixup: 0.5, ..AugmentConfig::default() };
     let t = TrainTransform::train(96, aug, 0, 0);
-    let fetch = |i: usize| ds.get(i);
-    let a = t.apply(1, 4, &fetch, &mut Rng::new(42)).unwrap();
-    let b = t.apply(1, 4, &fetch, &mut Rng::new(42)).unwrap();
+    let a = t.apply_dataset(&ds, 1, &mut Rng::new(42)).unwrap();
+    let b = t.apply_dataset(&ds, 1, &mut Rng::new(42)).unwrap();
     assert_eq!(a.sample, b.sample);
-    let c = t.apply(1, 4, &fetch, &mut Rng::new(43)).unwrap();
+    let c = t.apply_dataset(&ds, 1, &mut Rng::new(43)).unwrap();
     assert_ne!(a.sample, c.sample);
+}
+
+#[test]
+fn no_augmentation_matches_validation() {
+    let mut s = rect_sample(120, 80, &[(0, [10, 10, 60, 50])]);
+    s.boxes.push(BBox::from_pixel_xyxy(1, [80.0, 30.0, 81.0, 31.0], 120, 80)); // a 1 px box
+    let ds = InMemoryDataset { samples: vec![s], classes: vec!["a".into(), "b".into()], split: Split::Train };
+    let val = TrainTransform::val(96).apply_dataset(&ds, 0, &mut Rng::new(0)).unwrap();
+    let none = TrainTransform::train(96, AugmentConfig::none(), 0, 0)
+        .apply_dataset(&ds, 0, &mut Rng::new(0))
+        .unwrap();
+    assert_eq!(none.sample, val.sample);
+    assert_eq!(none.sample.boxes.len(), 2);
 }

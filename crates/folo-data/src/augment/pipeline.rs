@@ -1,6 +1,7 @@
 //! The training transform: mosaic → affine → mixup → HSV → flips, ending at `imgsz x imgsz`.
 
 use super::{AugmentConfig, flip_lr, flip_ud, mixup, mosaic4, random_affine, random_hsv, resize_long_side};
+use crate::dataset::Dataset;
 use crate::error::Result;
 use crate::image::Sample;
 use crate::letterbox::{Letterbox, LetterboxOptions, letterbox_sample};
@@ -9,6 +10,9 @@ use crate::rng::Rng;
 /// A transformed sample plus the letterbox geometry of its primary image.
 #[derive(Clone, Debug)]
 pub struct Transformed {
+    /// Dataset index of the primary image actually used (differs from the requested one when the loader
+    /// substituted an unreadable image).
+    pub index: usize,
     /// The `imgsz x imgsz` result.
     pub sample: Sample,
     /// Size `[width, height]` of the primary source image as decoded.
@@ -40,18 +44,24 @@ impl TrainTransform {
         TrainTransform { imgsz, augment: None, mosaic: false }
     }
 
+    /// Produces the transformed sample for `index` of `ds`.
+    pub fn apply_dataset(&self, ds: &dyn Dataset, index: usize, rng: &mut Rng) -> Result<Transformed> {
+        self.apply(index, ds.len(), &|i| ds.get(i).map(|s| (i, s)), rng)
+    }
+
     /// Produces the transformed sample for dataset `index`. `fetch(i)` loads sample `i` of a dataset with `len`
-    /// samples (the loader passes a fetch that substitutes unreadable images deterministically).
+    /// samples and returns the index it actually loaded with it (the loader passes a fetch that substitutes
+    /// unreadable images deterministically).
     pub fn apply<F>(&self, index: usize, len: usize, fetch: &F, rng: &mut Rng) -> Result<Transformed>
     where
-        F: Fn(usize) -> Result<Sample>,
+        F: Fn(usize) -> Result<(usize, Sample)>,
     {
         let Some(cfg) = &self.augment else {
-            let s = fetch(index)?;
+            let (index, s) = fetch(index)?;
             let orig_size = [s.image.width, s.image.height];
             let (sample, letterbox) =
                 letterbox_sample(&s, self.imgsz, self.imgsz, &LetterboxOptions::default());
-            return Ok(Transformed { sample, orig_size, letterbox });
+            return Ok(Transformed { index, sample, orig_size, letterbox });
         };
         let mut out = self.one(cfg, index, len, fetch, rng)?;
         if self.mosaic && rng.chance(cfg.mixup) {
@@ -77,29 +87,29 @@ impl TrainTransform {
         rng: &mut Rng,
     ) -> Result<Transformed>
     where
-        F: Fn(usize) -> Result<Sample>,
+        F: Fn(usize) -> Result<(usize, Sample)>,
     {
         let s = self.imgsz;
         if self.mosaic && rng.chance(cfg.mosaic) {
             let ids = [index, rng.below(len), rng.below(len), rng.below(len)];
             let mut parts = Vec::with_capacity(4);
-            let mut orig_size = [0, 0];
+            let (mut primary, mut orig_size) = (index, [0, 0]);
             for (k, &i) in ids.iter().enumerate() {
-                let p = fetch(i)?;
+                let (got, p) = fetch(i)?;
                 if k == 0 {
-                    orig_size = [p.image.width, p.image.height];
+                    (primary, orig_size) = (got, [p.image.width, p.image.height]);
                 }
                 parts.push(resize_long_side(p, s));
             }
             let canvas = mosaic4([&parts[0], &parts[1], &parts[2], &parts[3]], s, rng);
             let sample = random_affine(&canvas, s, s, cfg, rng);
-            Ok(Transformed { sample, orig_size, letterbox: Letterbox::identity(s, s) })
+            Ok(Transformed { index: primary, sample, orig_size, letterbox: Letterbox::identity(s, s) })
         } else {
-            let p = fetch(index)?;
+            let (index, p) = fetch(index)?;
             let orig_size = [p.image.width, p.image.height];
             let (lb_sample, letterbox) = letterbox_sample(&p, s, s, &LetterboxOptions::default());
             let sample = random_affine(&lb_sample, s, s, cfg, rng);
-            Ok(Transformed { sample, orig_size, letterbox })
+            Ok(Transformed { index, sample, orig_size, letterbox })
         }
     }
 }

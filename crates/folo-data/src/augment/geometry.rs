@@ -36,12 +36,12 @@ impl BoxFilter {
 
 /// Warps a sample by `m` (source pixels → output pixels) into `width x height`, transforming every box by its four
 /// corners, clipping to the output and dropping boxes that fail `filter`.
+/// The identity at the same size returns the sample unchanged (no filtering: nothing was transformed).
 pub fn affine_sample(s: &Sample, m: &Affine, width: u32, height: u32, filter: &BoxFilter) -> Sample {
-    let image = if m.is_identity() && s.image.width == width && s.image.height == height {
-        s.image.clone()
-    } else {
-        warp_affine(&s.image, m, width, height, [PAD_VALUE; 3])
-    };
+    if m.is_identity() && s.image.width == width && s.image.height == height {
+        return s.clone();
+    }
+    let image = warp_affine(&s.image, m, width, height, [PAD_VALUE; 3]);
     Sample {
         image,
         boxes: transform_boxes(&s.boxes, s.image.width, s.image.height, m, width, height, filter),

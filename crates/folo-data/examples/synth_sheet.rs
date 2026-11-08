@@ -38,7 +38,7 @@ fn main() -> folo_data::Result<()> {
     for i in 0..16 {
         let mut s = if augment {
             let mut rng = Rng::new(seed ^ i as u64);
-            transform.apply(i, ds.len(), &|j| ds.get(j), &mut rng)?.sample
+            transform.apply_dataset(&ds, i, &mut rng)?.sample
         } else {
             letterbox_sample(&ds.get(i)?, cell, cell, &Default::default()).0
         };

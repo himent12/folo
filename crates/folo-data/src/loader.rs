@@ -69,7 +69,7 @@ impl LoaderConfig {
 /// Where an image in a batch came from and how it was letterboxed.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ImageMeta {
-    /// Index in the dataset.
+    /// Index in the dataset of the image actually used (an unreadable image is replaced by the next readable one).
     pub index: usize,
     /// Original `[width, height]` as decoded (after EXIF orientation).
     pub orig_size: [u32; 2],
@@ -142,13 +142,13 @@ const MAX_SUBSTITUTES: usize = 64;
 
 impl Shared {
     /// Loads sample `i`; if it cannot be read, records the failure and deterministically tries `i + 1`, `i + 2`, ...
-    fn fetch(&self, i: usize) -> Result<Sample> {
+    fn fetch(&self, i: usize) -> Result<(usize, Sample)> {
         let n = self.ds.len();
         let mut last = None;
         for k in 0..MAX_SUBSTITUTES.min(n) {
             let j = (i + k) % n;
             match self.ds.get(j) {
-                Ok(s) => return Ok(s),
+                Ok(s) => return Ok((j, s)),
                 Err(e) => {
                     self.failures
                         .lock()
@@ -375,9 +375,9 @@ fn spawn(
                     let items: Vec<Result<Transformed>> =
                         (lo..hi).map(|p| pending.remove(&p).unwrap()).collect();
                     let batch = if collate_serial {
-                        par::serial(|| collate(items, &order[lo..hi], shared.cfg.imgsz))
+                        par::serial(|| collate(items, shared.cfg.imgsz))
                     } else {
-                        collate(items, &order[lo..hi], shared.cfg.imgsz)
+                        collate(items, shared.cfg.imgsz)
                     };
                     gate.advance(hi);
                     if batch_tx.send(batch).is_err() {
@@ -392,7 +392,7 @@ fn spawn(
 }
 
 /// Converts transformed samples into a [`Batch`].
-fn collate(items: Vec<Result<Transformed>>, indices: &[usize], imgsz: u32) -> Result<Batch> {
+fn collate(items: Vec<Result<Transformed>>, imgsz: u32) -> Result<Batch> {
     let items: Vec<Transformed> = items.into_iter().collect::<Result<_>>()?;
     let s = imgsz as usize;
     let plane = s * s;
@@ -423,7 +423,7 @@ fn collate(items: Vec<Result<Transformed>>, indices: &[usize], imgsz: u32) -> Re
             targets.push([k as f32, b.class as f32, b.cx, b.cy, b.w, b.h]);
         }
         meta.push(ImageMeta {
-            index: indices[k],
+            index: t.index,
             orig_size: t.orig_size,
             ratio: t.letterbox.ratio,
             pad: t.letterbox.pad,
@@ -471,7 +471,7 @@ impl Iterator for EpochIter {
                 let bs = shared.cfg.batch_size;
                 let (lo, hi) = (self.batches * bs, ((self.batches + 1) * bs).min(order.len()));
                 let items = (lo..hi).map(|p| shared.produce(transform, *epoch, p, order[p])).collect();
-                collate(items, &order[lo..hi], shared.cfg.imgsz)
+                collate(items, shared.cfg.imgsz)
             }
             Inner::Threads { rx, .. } => match rx.as_ref()?.recv() {
                 Ok(b) => b,

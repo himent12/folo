@@ -42,7 +42,8 @@ Nothing in a dataset panics the loader. While opening, every image header is rea
 default on): missing and undecodable images are skipped and recorded in `LoadedDataset::report` with an `IssueKind`
 (`corrupt_image`, `missing_image`, `broken_label`, `label_warning`, `other`). JPEG EXIF orientation is applied on
 decode (and when probing sizes), so boxes refer to the upright image. If an image still fails to decode during
-training, the loader records it (`DataLoader::failures`) and uses the next readable sample in its place.
+training, the loader records it (`DataLoader::failures`) and uses the next readable sample in its place
+(`ImageMeta::index` names the image actually used).
 
 ### Statistics
 `LoadedDataset::stats()` / `Dataset::stats()` return the `stats` object of `docs/API.md`: `boxes`, `empty_images`,
