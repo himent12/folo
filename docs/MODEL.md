@@ -429,6 +429,11 @@ the shape check of partial loading skips them.
 **Fused files** (`folo.fused = "true"`): every Conv becomes `<p>.conv.weight` and `<p>.conv.bias` and has no `bn.*`
 tensors. Head `Conv2d`s are unchanged.
 
+Implementation: `folo_vision::model` (`FoloModel`, the blocks in `model::blocks`, the head in `model::head`).
+`crates/folo-vision/tests/model.rs` checks §4's per-layer parameter counts and output shapes for every scale and the
+§10.1 / §10.2 cases; `tests/golden/folo-n-names.txt` is the reviewed `(name, shape)` list of folo-n (`nc = 80`),
+regenerated with `FOLO_BLESS=1` when a rename is intended.
+
 ## 6. Head
 
 ### 6.1 Branches

@@ -12,6 +12,9 @@
 //! - [`loss`]: the detection loss (BCE + CIoU + DFL) on folo-core tensors, with autograd. The assigner runs on
 //!   host copies of the detached head outputs; that read is the loss's only full-size device-to-host transfer.
 //!
+//! On top of folo-core / folo-nn, [`model`] defines the detector family itself (`folo-n/s/m/l/x`, docs/MODEL.md):
+//! blocks, head, forward pass, fusion, raw prediction and `.folo` weight IO.
+//!
 //! See `docs/ARCHITECTURE.md` for how this crate fits into FOLO.
 
 pub mod assign;
@@ -19,6 +22,7 @@ pub mod boxes;
 pub mod decode;
 pub mod loss;
 pub mod metrics;
+pub mod model;
 pub mod nms;
 
 pub use assign::{Assignment, TalConfig};
@@ -26,4 +30,5 @@ pub use boxes::{Cxcywh, IouKind, Letterbox, Xyxy};
 pub use decode::Anchors;
 pub use loss::{ImageTargets, LossConfig, LossItems, LossOutput, detection_loss};
 pub use metrics::{EvalConfig, EvalReport, Evaluator, Truth};
+pub use model::{FoloModel, HeadOutput, ModelConfig};
 pub use nms::{Detection, NmsConfig};
