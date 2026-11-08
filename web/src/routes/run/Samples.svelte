@@ -1,6 +1,7 @@
 <script lang="ts">
   /**
-   * Validation samples: the same 16 images every epoch, predictions (solid) over ground truth (dashed). Follows the
+   * Validation samples: the same 16 images every epoch, predictions (solid, class colour) over ground truth (dashed,
+   * neutral in the thumbnails). Follows the
    * latest epoch while the run is live; pick any earlier epoch to see how detections improved.
    */
   import { hub } from '$lib/api/index.svelte';
@@ -163,11 +164,14 @@
     height: 10px;
     border-radius: 1px;
   }
+  /* The keys mirror the thumbnails: predictions are solid in their class colour (three palette hues stand for "any
+     class"), truth is a neutral dashed ring. */
   .solid {
-    border: 2px solid var(--text-secondary);
+    border: 2px solid;
+    border-image: linear-gradient(90deg, var(--class-0), var(--class-1), var(--class-2)) 1;
   }
   .dashed {
-    border: 1.5px dashed var(--text-secondary);
+    border: 1px dashed var(--text-secondary);
   }
   .conf {
     width: 220px;

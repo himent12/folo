@@ -4,7 +4,9 @@
    * (`--chart-context`, >= 3:1 on the panel) and the mean over all classes a heavier line in ink; many classes are a
    * percentile band instead, so 80 classes read as one shape instead of spaghetti. Hovering a table row gives its curve
    * the class hue, clicking keeps it highlighted. The legend row above the plot is the readout. Phones hide the
-   * precision and recall columns; tapping a row opens a details row with every metric of that class.
+   * precision and recall columns; tapping a row opens a details row with every metric of that class. `view` shows
+   * only the curves or only the table (the phone model page puts them in separate sections); both stay mounted, so a
+   * class picked in the table is still traced when the curves come back.
    */
   import type { Evaluation } from '$lib/api/evaluation';
   import LineChart, { type Series } from '$lib/charts/LineChart.svelte';
@@ -15,7 +17,12 @@
   import Search from '@lucide/svelte/icons/search';
   import { classMetrics, matchesClass, prEnvelope, trimPrTail } from './pr';
 
-  let { classes, ev, map50 }: { classes: readonly string[]; ev: Evaluation; map50: number | null } = $props();
+  let {
+    classes,
+    ev,
+    map50,
+    view = 'all',
+  }: { classes: readonly string[]; ev: Evaluation; map50: number | null; view?: 'all' | 'curves' | 'classes' } = $props();
 
   // Phones get a shorter plot so the table (the legend) starts on the first screen.
   let narrow = $state(typeof matchMedia !== 'undefined' && matchMedia('(max-width: 767px)').matches);
@@ -82,116 +89,120 @@
 </script>
 
 <div class="pr">
-  <!-- At rest the legend states each curve's AP50; under the cursor it reads precision at that recall. -->
-  <div class="legend">
-    <span class="what num">{cursor === null ? 'AP50' : `Precision at recall ${cursor.toFixed(2)}`}</span>
-    <span class="item"><span class="line mean" aria-hidden="true"></span>All classes <span class="num">{cursor === null ? metric(meanAp) : at(ev.mean)}</span></span>
-    {#each lit as i (i)}
-      <span class="item"><span class="line" style:background={classStroke(i)} aria-hidden="true"></span>{name(i)} <span class="num">{cursor === null ? metric(apOf.get(i)) : at(ev.curves[i] ?? [])}</span></span>
-    {/each}
-    {#if banded}<span class="item band-key"><span class="swatch-band" aria-hidden="true"></span>10th–90th percentile of classes</span>{/if}
-    {#if selected.length}
-      <button type="button" class="clear" onclick={() => (selected = [])}>Clear</button>
-    {:else if hovered === null}
-      <span class="hint">Pick a class below to trace its curve</span>
-    {/if}
-    {#if many}
-      <button type="button" class="clear mode" aria-pressed={allCurves} onclick={() => (allCurves = !allCurves)}>{allCurves ? 'Show the band' : `All ${classes.length} curves`}</button>
-    {/if}
-  </div>
-  <div class="plot">
-    <LineChart
-      {series}
-      height={narrow ? 220 : 300}
-      xDomain={[0, 1]}
-      yDomain={[0, 1]}
-      xFormat={(x) => x.toFixed(1)}
-      yFormat={(y) => y.toFixed(1)}
-      valueFormat={(y) => y.toFixed(3)}
-      xTicks={6}
-      yTicks={5}
-      legend={false}
-      bind:cursor
-      empty="No correct detections yet: precision is 0 at every recall."
-      label="Precision-recall curves at IoU 0.5 for {classes.length} classes and the mean over all classes"
-    />
+  <div class="part" class:off={view === 'classes'}>
+    <!-- At rest the legend states each curve's AP50; under the cursor it reads precision at that recall. -->
+    <div class="legend">
+      <span class="what num">{cursor === null ? 'AP50' : `Precision at recall ${cursor.toFixed(2)}`}</span>
+      <span class="item"><span class="line mean" aria-hidden="true"></span>All classes <span class="num">{cursor === null ? metric(meanAp) : at(ev.mean)}</span></span>
+      {#each lit as i (i)}
+        <span class="item"><span class="line" style:background={classStroke(i)} aria-hidden="true"></span>{name(i)} <span class="num">{cursor === null ? metric(apOf.get(i)) : at(ev.curves[i] ?? [])}</span></span>
+      {/each}
+      {#if banded}<span class="item band-key"><span class="swatch-band" aria-hidden="true"></span>10th–90th percentile of classes</span>{/if}
+      {#if selected.length}
+        <button type="button" class="clear" onclick={() => (selected = [])}>Clear</button>
+      {:else if hovered === null}
+        <span class="hint">{view === 'curves' ? 'Pick a class under Classes to trace its curve' : 'Pick a class below to trace its curve'}</span>
+      {/if}
+      {#if many}
+        <button type="button" class="clear mode" aria-pressed={allCurves} onclick={() => (allCurves = !allCurves)}>{allCurves ? 'Show the band' : `All ${classes.length} curves`}</button>
+      {/if}
+    </div>
+    <div class="plot">
+      <LineChart
+        {series}
+        height={narrow ? 220 : 300}
+        xDomain={[0, 1]}
+        yDomain={[0, 1]}
+        xFormat={(x) => x.toFixed(1)}
+        yFormat={(y) => y.toFixed(1)}
+        valueFormat={(y) => y.toFixed(3)}
+        xTicks={6}
+        yTicks={5}
+        legend={false}
+        bind:cursor
+        empty="No correct detections yet: precision is 0 at every recall."
+        label="Precision-recall curves at IoU 0.5 for {classes.length} classes and the mean over all classes"
+      />
+    </div>
   </div>
 
-  {#if many}
-    <div class="filter">
-      <Input bind:value={query} icon={Search} size="sm" type="search" placeholder="Find a class" aria-label="Find a class" />
-    </div>
-  {/if}
-  <div class="scroll">
-    <table class="table dense">
-      <thead>
-        <tr>
-          <th scope="col">Class</th>
-          <th scope="col" class="r">AP50</th>
-          <th scope="col" class="r">AP50-95</th>
-          <th scope="col" class="r hide-sm">Precision</th>
-          <th scope="col" class="r hide-sm">Recall</th>
-          <th scope="col" class="r">Instances</th>
-        </tr>
-      </thead>
-      <tbody>
-        {#each rows as c (c.class)}
-          {@const on = selected.includes(c.class)}
-          {@const open = narrow && on}
-          <tr
-            class="link"
-            class:on
-            class:hot={hovered === c.class}
-            onpointerenter={() => (hovered = c.class)}
-            onpointerleave={() => (hovered = null)}
-            onclick={() => toggle(c.class)}
-          >
-            <td>
-              <!-- Wide: a toggle that traces the curve. Phones: it also discloses the details row. -->
-              <button
-                type="button"
-                class="cls"
-                aria-pressed={narrow ? undefined : on}
-                aria-expanded={narrow ? open : undefined}
-                aria-controls={narrow ? `pr-detail-${c.class}` : undefined}
-                onclick={(e) => (e.stopPropagation(), toggle(c.class))}
-                onfocus={() => (hovered = c.class)}
-                onblur={() => (hovered = null)}
-              >
-                <span class="sw" style:background={classInk(c.class)} aria-hidden="true"></span>
-                <span class="truncate">{name(c.class)}</span>
-                {#if narrow}<span class="chev" class:open aria-hidden="true"><ChevronDown size={14} /></span>{/if}
-              </button>
-            </td>
-            <td class="r">{metric(c.ap50)}</td>
-            <td class="r muted">{metric(c.ap50_95)}</td>
-            <td class="r hide-sm muted">{metric(c.precision)}</td>
-            <td class="r hide-sm muted">{metric(c.recall)}</td>
-            <td class="r muted">{num(c.instances)}</td>
+  <div class="part" class:off={view === 'curves'}>
+    {#if many}
+      <div class="filter">
+        <Input bind:value={query} icon={Search} size="sm" type="search" placeholder="Find a class" aria-label="Find a class" />
+      </div>
+    {/if}
+    <div class="scroll">
+      <table class="table dense">
+        <thead>
+          <tr>
+            <th scope="col">Class</th>
+            <th scope="col" class="r">AP50</th>
+            <th scope="col" class="r">AP50-95</th>
+            <th scope="col" class="r hide-sm">Precision</th>
+            <th scope="col" class="r hide-sm">Recall</th>
+            <th scope="col" class="r">Instances</th>
           </tr>
-          {#if open}
-            <tr class="detail" id="pr-detail-{c.class}">
-              <td colspan={COLS_NARROW}>
-                <dl>
-                  {#each classMetrics(c) as d (d.label)}
-                    <div><dt>{d.label}</dt><dd class="num">{d.value}</dd></div>
-                  {/each}
-                </dl>
+        </thead>
+        <tbody>
+          {#each rows as c (c.class)}
+            {@const on = selected.includes(c.class)}
+            {@const open = narrow && on}
+            <tr
+              class="link"
+              class:on
+              class:hot={hovered === c.class}
+              onpointerenter={() => (hovered = c.class)}
+              onpointerleave={() => (hovered = null)}
+              onclick={() => toggle(c.class)}
+            >
+              <td>
+                <!-- Wide: a toggle that traces the curve. Phones: it also discloses the details row. -->
+                <button
+                  type="button"
+                  class="cls"
+                  aria-pressed={narrow ? undefined : on}
+                  aria-expanded={narrow ? open : undefined}
+                  aria-controls={narrow ? `pr-detail-${c.class}` : undefined}
+                  onclick={(e) => (e.stopPropagation(), toggle(c.class))}
+                  onfocus={() => (hovered = c.class)}
+                  onblur={() => (hovered = null)}
+                >
+                  <span class="sw" style:background={classInk(c.class)} aria-hidden="true"></span>
+                  <span class="truncate">{name(c.class)}</span>
+                  {#if narrow}<span class="chev" class:open aria-hidden="true"><ChevronDown size={14} /></span>{/if}
+                </button>
               </td>
+              <td class="r">{metric(c.ap50)}</td>
+              <td class="r muted">{metric(c.ap50_95)}</td>
+              <td class="r hide-sm muted">{metric(c.precision)}</td>
+              <td class="r hide-sm muted">{metric(c.recall)}</td>
+              <td class="r muted">{num(c.instances)}</td>
             </tr>
-          {/if}
-        {:else}
-          <tr><td colspan="6" class="none">No class matches “{query.trim()}”</td></tr>
-        {/each}
-      </tbody>
-    </table>
+            {#if open}
+              <tr class="detail" id="pr-detail-{c.class}">
+                <td colspan={COLS_NARROW}>
+                  <dl>
+                    {#each classMetrics(c) as d (d.label)}
+                      <div><dt>{d.label}</dt><dd class="num">{d.value}</dd></div>
+                    {/each}
+                  </dl>
+                </td>
+              </tr>
+            {/if}
+          {:else}
+            <tr><td colspan="6" class="none">No class matches “{query.trim()}”</td></tr>
+          {/each}
+        </tbody>
+      </table>
+    </div>
+    {#if !query && listed.length > ROWS_MAX}
+      <button type="button" class="more" aria-expanded={all} onclick={() => (all = !all)}>
+        {all ? `Show the first ${ROWS_MAX}` : `Show all ${listed.length}`}
+      </button>
+    {/if}
+    <p class="foot">Evaluated on {num(ev.images)} validation images at IoU 0.5; instances are ground-truth boxes per class.</p>
   </div>
-  {#if !query && listed.length > ROWS_MAX}
-    <button type="button" class="more" aria-expanded={all} onclick={() => (all = !all)}>
-      {all ? `Show the first ${ROWS_MAX}` : `Show all ${listed.length}`}
-    </button>
-  {/if}
-  <p class="foot">Evaluated on {num(ev.images)} validation images at IoU 0.5; instances are ground-truth boxes per class.</p>
 </div>
 
 <style>
@@ -200,6 +211,13 @@
     display: flex;
     flex-direction: column;
     min-width: 0;
+  }
+  /* The two halves lay out as direct children of .pr (the foot keeps pinning to the bottom); `view` hides one. */
+  .part {
+    display: contents;
+  }
+  .part.off {
+    display: none;
   }
   .swatch-band {
     width: 14px;

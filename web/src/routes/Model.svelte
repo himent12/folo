@@ -3,6 +3,7 @@
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
   import Download from '@lucide/svelte/icons/download';
   import ScanSearch from '@lucide/svelte/icons/scan-search';
+  import { tick } from 'svelte';
   import { MediaQuery } from 'svelte/reactivity';
   import { hub } from '$lib/api/index.svelte';
   import { fromModelEval, reduceConfusion } from '$lib/api/evaluation';
@@ -19,10 +20,12 @@
   import Button from '$lib/ui/Button.svelte';
   import ErrorState from '$lib/ui/ErrorState.svelte';
   import Panel from '$lib/ui/Panel.svelte';
+  import Segmented from '$lib/ui/Segmented.svelte';
   import Skeleton from '$lib/ui/Skeleton.svelte';
   import { cmIndex } from './model/confusion';
   import ExportDialog from './model/ExportDialog.svelte';
   import PrCurves from './model/PrCurves.svelte';
+  import { MODEL_SECTIONS, prView, sectionShown, type ModelSection } from './model/sections';
 
   const id = $derived(router.route.params.id ?? '');
   const model = new Resource((s) => hub.api.model(id, s));
@@ -129,6 +132,19 @@
   // Up to 1199 px the rail stacks under the PR panel: the details fold into one line so the matrix follows soon.
   const narrow = new MediaQuery('max-width: 1199px', false);
   let detailsOpen = $state(false);
+  // Phones: after the headline metrics, one section at a time (as on the run page) instead of a 4,000 px column.
+  const phone = new MediaQuery('max-width: 767px', false);
+  let section = $state<ModelSection>('curves');
+  const showing = (part: ModelSection) => sectionShown(phone.current, section, part);
+
+  /** Points the matrix at a cell, first bringing the Confusion section up on a phone. */
+  async function reveal(at: { r: number; c: number }) {
+    if (phone.current && section !== 'confusion') {
+      section = 'confusion';
+      await tick();
+    }
+    matrixView?.reveal(at.r, at.c);
+  }
 
   /** The architecture's published 640 px reference time, scaled by input area. */
   const latency = (m: Model) => archInfo[m.arch].ms * (m.imgsz / 640) ** 2;
@@ -183,12 +199,24 @@
       <p class="k-note">All four over all classes · mAP50 at IoU 0.50</p>
     </section>
 
+    {#if phone.current}
+      <!-- Stays reachable under the top bar while a section scrolls. -->
+      <div class="phone-pick">
+        <Segmented label="Show" bind:value={section} options={MODEL_SECTIONS} />
+      </div>
+    {/if}
+
     <!-- Evidence in the main column, reference in a sticky rail. -->
-    <div class="detail">
-      <div class="main-col">
-        <Panel title="Precision–recall" meta="precision by recall · IoU 0.5" pad="none" id="pr">
+    <div class="detail" class:off={!showing('curves') && !showing('classes') && !showing('details')}>
+      <div class="main-col" class:off={!showing('curves') && !showing('classes')}>
+        <Panel
+          title={phone.current && section === 'classes' ? 'Per-class AP' : 'Precision–recall'}
+          meta={phone.current && section === 'classes' ? `${m.classes.length} classes · IoU 0.5` : 'precision by recall · IoU 0.5'}
+          pad="none"
+          id="pr"
+        >
           {#if ev}
-            <PrCurves classes={m.classes} {ev} map50={m.metrics?.map50 ?? null} />
+            <PrCurves classes={m.classes} {ev} map50={m.metrics?.map50 ?? null} view={prView(phone.current, section)} />
           {:else if evaluation.error}
             <ErrorState error={evaluation.error} retry={() => evaluation.refresh()} compact title="Could not load the evaluation" />
           {:else}
@@ -197,7 +225,7 @@
         </Panel>
       </div>
 
-      <aside class="rail" aria-label="Model details">
+      <aside class="rail" class:off={!showing('details')} aria-label="Model details">
         {#snippet detailList(two: boolean)}
           <dl class="details" class:two id="model-details">
             <div class="kv">
@@ -258,7 +286,10 @@
             </div>
           </dl>
         {/snippet}
-        {#if narrow.current}
+        {#if phone.current}
+          <!-- Its own section on phones: the whole list, no fold. -->
+          <Panel title="Details" id="details">{@render detailList(true)}</Panel>
+        {:else if narrow.current}
           <Panel pad="none" id="details">
             <button type="button" class="d-line" aria-expanded={detailsOpen} aria-controls="model-details" onclick={() => (detailsOpen = !detailsOpen)}>
               <span class="d-sum num truncate">
@@ -278,59 +309,61 @@
       </aside>
     </div>
     <!-- Full width: the matrix grows with the class count, and the rail beside it would sit empty. -->
-    <Panel title="Confusion matrix" meta={cm?.partial ? `top ${CM_MAX} of ${m.classes.length} classes` : 'row-normalised'} id="cm">
-      {#if cm}
-        <!-- Matrix left (square, so it stays compact), what to read from it on the right. Up to 1199 px the two
-             consequential cells lead (a phone's matrix scrolls sideways, hiding the background column), and the
-             reading notes follow the matrix. -->
-        <div class="cm-layout">
-          <div class="cm-main"><ConfusionMatrix bind:this={matrixView} classes={cm.classes} classIds={cm.ids} matrix={cm.matrix} label="Confusion matrix of {m.name}" sparseLabels minCell={32} scale /></div>
-          {#if confused || missed}
-            <dl class="cm-sum">
-              {#if confused}
-                <div>
-                  <dt>Most confused</dt>
-                  <dd>
-                    {#snippet pair()}<b>{m.classes[confused.r]}</b> → <b>{m.classes[confused.c]}</b> <span class="num">{num(confused.v * 100, 1)}%</span>{/snippet}
-                    {#if confusedCell}
-                      {@const at = confusedCell}
-                      <button type="button" class="go" title="Show in the matrix" onclick={() => matrixView?.reveal(at.r, at.c)}>{@render pair()}</button>
-                    {:else}{@render pair()}{/if}
-                  </dd>
-                </div>
-              {/if}
-              {#if missed}
-                <div>
-                  <dt>Missed (background)</dt>
-                  <dd>
-                    {#if missed.worst}
-                      {@const w = missed.worst}
-                      {#snippet worst()}<b>{m.classes[w.r]}</b> <span class="num">{num(w.v * 100, 1)}%</span>{/snippet}
-                      {#if missedCell}
-                        {@const at = missedCell}
-                        <button type="button" class="go" title="Show in the matrix" onclick={() => matrixView?.reveal(at.r, at.c)}>{@render worst()}</button>
-                      {:else}{@render worst()}{/if}<span class="sep" aria-hidden="true">·</span>
-                    {/if}<span
-                      class="num">{num(missed.v * 100, 1)}%</span> overall
-                  </dd>
-                </div>
-              {/if}
-            </dl>
-          {/if}
-          <div class="cm-notes">
-            <p>Rows are the true class, columns the prediction; each row sums to 100%. The diagonal is correct; the last
-              column is missed objects and the last row false detections on background.</p>
-            {#if cm.partial}
-              <p>Top {CM_MAX} classes by instances; the other {m.classes.length - CM_MAX} are folded into Other.</p>
+    <div class="cm-part" class:off={!showing('confusion')}>
+      <Panel title="Confusion matrix" meta={cm?.partial ? `top ${CM_MAX} of ${m.classes.length} classes` : 'row-normalised'} id="cm">
+        {#if cm}
+          <!-- Matrix left (square, so it stays compact), what to read from it on the right. Up to 1199 px the two
+               consequential cells lead (a phone's matrix scrolls sideways, hiding the background column), and the
+               reading notes follow the matrix. -->
+          <div class="cm-layout">
+            <div class="cm-main"><ConfusionMatrix bind:this={matrixView} classes={cm.classes} classIds={cm.ids} matrix={cm.matrix} label="Confusion matrix of {m.name}" sparseLabels minCell={32} scale /></div>
+            {#if confused || missed}
+              <dl class="cm-sum">
+                {#if confused}
+                  <div>
+                    <dt>Most confused</dt>
+                    <dd>
+                      {#snippet pair()}<b>{m.classes[confused.r]}</b> → <b>{m.classes[confused.c]}</b> <span class="num">{num(confused.v * 100, 1)}%</span>{/snippet}
+                      {#if confusedCell}
+                        {@const at = confusedCell}
+                        <button type="button" class="go" title="Show in the matrix" onclick={() => reveal(at)}>{@render pair()}</button>
+                      {:else}{@render pair()}{/if}
+                    </dd>
+                  </div>
+                {/if}
+                {#if missed}
+                  <div>
+                    <dt>Missed (background)</dt>
+                    <dd>
+                      {#if missed.worst}
+                        {@const w = missed.worst}
+                        {#snippet worst()}<b>{m.classes[w.r]}</b> <span class="num">{num(w.v * 100, 1)}%</span>{/snippet}
+                        {#if missedCell}
+                          {@const at = missedCell}
+                          <button type="button" class="go" title="Show in the matrix" onclick={() => reveal(at)}>{@render worst()}</button>
+                        {:else}{@render worst()}{/if}<span class="sep" aria-hidden="true">·</span>
+                      {/if}<span
+                        class="num">{num(missed.v * 100, 1)}%</span> overall
+                    </dd>
+                  </div>
+                {/if}
+              </dl>
             {/if}
+            <div class="cm-notes">
+              <p>Rows are the true class, columns the prediction; each row sums to 100%. The diagonal is correct; the last
+                column is missed objects and the last row false detections on background.</p>
+              {#if cm.partial}
+                <p>Top {CM_MAX} classes by instances; the other {m.classes.length - CM_MAX} are folded into Other.</p>
+              {/if}
+            </div>
           </div>
-        </div>
-      {:else if evaluation.error}
-        <p class="none">No evaluation available.</p>
-      {:else}
-        <Skeleton h="300px" />
-      {/if}
-    </Panel>
+        {:else if evaluation.error}
+          <p class="none">No evaluation available.</p>
+        {:else}
+          <Skeleton h="300px" />
+        {/if}
+      </Panel>
+    </div>
   </Page>
   <ExportDialog model={m} bind:open={exportOpen} />
 {/if}
@@ -408,6 +441,30 @@
   .rail {
     position: sticky;
     top: calc(var(--size-topbar) + var(--space-4));
+  }
+  /* Phones: the sections the picker is not showing. */
+  .cm-part {
+    display: grid;
+    min-width: 0;
+  }
+  /* After every display rule of the parts it hides. */
+  .off {
+    display: none;
+  }
+  /* As on the run page: full width, just under the top bar, segments sharing the width. */
+  .phone-pick {
+    position: sticky;
+    top: calc(var(--size-topbar) + var(--space-2));
+    z-index: var(--z-sticky);
+    margin-bottom: calc(-1 * var(--space-1));
+  }
+  .phone-pick :global(.seg) {
+    display: flex;
+    width: 100%;
+  }
+  .phone-pick :global(.seg > *) {
+    flex: 1;
+    justify-content: center;
   }
   .sk {
     display: grid;
