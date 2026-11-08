@@ -733,6 +733,12 @@
     display: grid;
     margin: calc(-1 * var(--space-1)) calc(-1 * var(--space-2)) 0;
   }
+  /* Touch: each review row is a full 44 px target. */
+  @media (pointer: coarse) {
+    .rv {
+      height: 44px;
+    }
+  }
   .rv {
     display: flex;
     align-items: center;

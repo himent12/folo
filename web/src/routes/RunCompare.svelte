@@ -161,8 +161,8 @@
     <Panel>
       <EmptyState icon={GitCompare} title="Pick runs to compare" description="Add two to four runs, or select them on the Runs page.">
         {#snippet actions()}
-          {#if candidates.length}{@render adder()}{/if}
-          <Button href={href('/runs')}>Go to Runs</Button>
+          <!-- One action: pick runs here when there are any, else go and make some. -->
+          {#if candidates.length}{@render adder()}{:else}<Button href={href('/runs')}>Go to Runs</Button>{/if}
         {/snippet}
       </EmptyState>
     </Panel>

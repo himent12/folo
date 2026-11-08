@@ -165,7 +165,7 @@
               <Input
                 id="server-url"
                 bind:value={url}
-                placeholder={origin ? `${origin} (this page)` : 'This page'}
+                placeholder="Same as this page"
                 spellcheck={false}
                 autocomplete="off"
                 {invalid}

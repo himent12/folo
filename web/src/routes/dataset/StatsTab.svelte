@@ -109,7 +109,6 @@
     </div>
   </section>
   <!-- Phones: the split counts get a full line of their own instead of truncating inside the Images cell. -->
-  <p class="splits num">{splitLine}</p>
 
   <Panel title="Class balance" meta="boxes per class · {ratio.toFixed(1)}× largest / smallest" pad="none" id="ds-balance">
     <ul class="bars">
@@ -375,7 +374,6 @@
     text-underline-offset: 3px;
     text-decoration-color: var(--line-strong);
   }
-  .splits,
   .narrow {
     display: none;
   }
@@ -409,19 +407,15 @@
     .haction {
       flex-basis: 100%;
     }
-    .wide {
+    /* Phones: Images spans the grid so the split counts stay inside their tile; the other three share one row. */
+    .kpis {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+    .kpi:first-child {
+      grid-column: 1 / -1;
+    }
+    .kpi:not(:first-child) .wide {
       display: none;
-    }
-    .narrow {
-      display: inline;
-    }
-    /* A caption right under the KPI grid. */
-    .splits {
-      display: block;
-      margin-top: calc(-1 * var(--space-2));
-      font-size: var(--type-sm-size);
-      line-height: var(--type-sm-line);
-      color: var(--text-tertiary);
     }
     .hide-sm {
       display: none;
