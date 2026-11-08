@@ -119,7 +119,8 @@ impl Route {
 
 pub type Action = Rc<dyn Fn(&mut FoloApp, &mut Window, &mut Context<FoloApp>)>;
 
-pub type FilterCache = ((String, Option<Split>, Option<u32>, bool, usize), Rc<Vec<usize>>);
+/// Keyed by the image list's address too: a reload or a new source replaces the list.
+pub type FilterCache = ((String, Option<Split>, Option<u32>, bool, usize, usize), Rc<Vec<usize>>);
 
 pub fn act(f: impl Fn(&mut FoloApp, &mut Window, &mut Context<FoloApp>) + 'static) -> Action {
     Rc::new(f)
@@ -188,8 +189,24 @@ pub struct NewRunForm {
     /// The run this form was prefilled from: settings the form doesn't show (weights, seed, colour and
     /// translate jitter) carry over unchanged.
     pub base: Option<TrainConfig>,
+    /// Exact entry next to the sliders; invalid text keeps the last good value and shows a hint.
+    pub epochs_input: Entity<TextInput>,
+    pub lr_input: Entity<TextInput>,
+    pub epochs_invalid: bool,
+    pub lr_invalid: bool,
+    _subs: Vec<Subscription>,
     pub submitting: bool,
     pub error: Option<ApiError>,
+}
+
+/// Epochs as typed: a whole number in 1..=10000 (the server's limit).
+pub fn parse_epochs(s: &str) -> Option<u32> {
+    s.trim().parse::<u32>().ok().filter(|v| (1..=10_000).contains(v))
+}
+
+/// Learning rate as typed, scientific notation allowed (`1e-3`): 0 < lr < 10.
+pub fn parse_lr(s: &str) -> Option<f32> {
+    s.trim().parse::<f32>().ok().filter(|v| v.is_finite() && *v > 0.0 && *v < 10.0)
 }
 
 pub const ARCHS: [Arch; 5] = Arch::ALL;
@@ -246,6 +263,9 @@ pub struct Drag {
     pub id: &'static str,
 }
 
+/// Per-class box counts of one split, keyed by (dataset, split, image count).
+pub type SplitCounts = ((String, crate::api::Split, usize, usize, usize), Vec<u64>);
+
 pub struct FoloApp {
     pub store: Store,
     pub route: Route,
@@ -260,6 +280,8 @@ pub struct FoloApp {
     /// The last input came from the keyboard, so focus rings are shown.
     pub kb: bool,
     pub page_scroll: ScrollHandle,
+    pub play_side_scroll: ScrollHandle,
+    pub dialog_scroll: ScrollHandle,
 
     // Datasets
     pub ds_tab: DsTab,
@@ -268,6 +290,10 @@ pub struct FoloApp {
     /// Show only images without labels (from the Empty images tile).
     pub ds_empty_only: bool,
     pub ds_boxes: bool,
+    /// Grid tiles crop to fill the cell instead of showing the whole image.
+    pub ds_fill: bool,
+    /// Per-class box counts of one split, keyed by (dataset, split, image count).
+    pub ds_split_counts: RefCell<Option<SplitCounts>>,
     pub ds_tile: f32,
     /// Filtered image indices keyed by (dataset, split, class, list length).
     pub ds_filter_cache: RefCell<Option<FilterCache>>,
@@ -333,8 +359,15 @@ pub struct FoloApp {
     pub new_run: Option<NewRunForm>,
     pub confirm_stop: Option<String>,
     pub toasts: Vec<Toast>,
+    /// The toast under the pointer (its expiry waits).
+    pub toast_hover: Option<u64>,
     toast_seq: u64,
     pub menu_open: Option<&'static str>,
+    /// Highlighted option in the open select (committed with Enter).
+    pub menu_hl: usize,
+    pub menu_scroll: ScrollHandle,
+    /// Bounds of the open select's trigger, so a click on it toggles rather than counting as outside.
+    pub menu_trigger: Rc<std::cell::Cell<Option<gpui::Bounds<Pixels>>>>,
 
     pub drag: Option<Drag>,
     pub slider_bounds: Rc<RefCell<HashMap<&'static str, Bounds<Pixels>>>>,
@@ -373,11 +406,15 @@ impl FoloApp {
             focus: RefCell::new(HashMap::new()),
             kb: false,
             page_scroll: ScrollHandle::new(),
+            play_side_scroll: ScrollHandle::new(),
+            dialog_scroll: ScrollHandle::new(),
             ds_tab: DsTab::Images,
             ds_split: None,
             ds_class: None,
             ds_empty_only: false,
             ds_boxes: true,
+            ds_fill: false,
+            ds_split_counts: RefCell::new(None),
             ds_tile: 168.,
             ds_filter_cache: RefCell::new(None),
             grid_scroll: gpui::UniformListScrollHandle::new(),
@@ -391,7 +428,7 @@ impl FoloApp {
             run_filter: RunFilter::All,
             chart_hover: None,
             sample_view: SampleView::Predictions,
-            loss_parts: [true, true, true, false],
+            loss_parts: [true, true, true, true],
             log_scroll: ScrollHandle::new(),
             sample_epoch: None,
             export_open: false,
@@ -421,8 +458,12 @@ impl FoloApp {
             new_run: None,
             confirm_stop: None,
             toasts: Vec::new(),
+            toast_hover: None,
             toast_seq: 0,
             menu_open: None,
+            menu_hl: 0,
+            menu_scroll: ScrollHandle::new(),
+            menu_trigger: Rc::new(std::cell::Cell::new(None)),
             drag: None,
             slider_bounds: Rc::new(RefCell::new(HashMap::new())),
             subscriptions: HashMap::new(),
@@ -679,6 +720,9 @@ impl FoloApp {
                 },
                 move |this, r, _| {
                     this.store.images.insert(b, r.into());
+                    // New list, new truth: nothing derived from the old one may survive.
+                    *this.ds_filter_cache.borrow_mut() = None;
+                    *this.ds_split_counts.borrow_mut() = None;
                 },
             );
         }
@@ -913,14 +957,22 @@ impl FoloApp {
     ) {
         self.toast_seq += 1;
         let id = self.toast_seq;
-        let linger = if action.is_some() { 7000 } else { 4200 };
+        // Toasts with an action stay until used or dismissed; others expire, but not while hovered.
+        let expires = action.is_none();
         self.toasts.push(Toast { id, tone, title: title.into(), body, action });
         if self.toasts.len() > 3 {
             self.toasts.remove(0);
         }
-        if !self.frozen {
+        if !self.frozen && expires {
             cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(Duration::from_millis(linger)).await;
+                cx.background_executor().timer(Duration::from_millis(4200)).await;
+                loop {
+                    let hovered = this.update(cx, |this, _| this.toast_hover == Some(id)).unwrap_or(false);
+                    if !hovered {
+                        break;
+                    }
+                    cx.background_executor().timer(Duration::from_millis(800)).await;
+                }
                 this.update(cx, |this, cx| {
                     this.toasts.retain(|t| t.id != id);
                     cx.notify();
@@ -1023,6 +1075,10 @@ impl FoloApp {
             f.device = DEVICES.iter().position(|d| *d == config.device).unwrap_or(0);
             f.optimizer = OPTIMIZERS.iter().position(|o| *o == config.optimizer).unwrap_or(0);
             f.lr0 = config.lr0;
+            let (ei, li) = (f.epochs_input.clone(), f.lr_input.clone());
+            let (ev, lv) = (config.epochs.to_string(), format!("{}", config.lr0));
+            ei.update(cx, |i, cx| i.set_text(ev, cx));
+            li.update(cx, |i, cx| i.set_text(lv, cx));
             f.mosaic = config.augment.mosaic;
             f.mixup = config.augment.mixup;
             f.fliplr = config.augment.fliplr;
@@ -1055,6 +1111,44 @@ impl FoloApp {
             i
         });
         let fh = name.read(cx).focus_handle(cx);
+        let epochs_input = cx.new(|cx| {
+            let mut i = TextInput::new("100", cx);
+            i.set_text("100", cx);
+            i
+        });
+        let lr_input = cx.new(|cx| {
+            let mut i = TextInput::new("0.01", cx);
+            i.set_text("0.010", cx);
+            i
+        });
+        let subs = vec![
+            cx.subscribe(&epochs_input, |this: &mut Self, _, ev: &InputEvent, cx| {
+                let InputEvent::Changed(s) = ev;
+                if let Some(f) = this.new_run.as_mut() {
+                    match parse_epochs(s) {
+                        Some(v) => {
+                            f.epochs = v as f32;
+                            f.epochs_invalid = false;
+                        }
+                        None => f.epochs_invalid = true,
+                    }
+                    cx.notify();
+                }
+            }),
+            cx.subscribe(&lr_input, |this: &mut Self, _, ev: &InputEvent, cx| {
+                let InputEvent::Changed(s) = ev;
+                if let Some(f) = this.new_run.as_mut() {
+                    match parse_lr(s) {
+                        Some(v) => {
+                            f.lr0 = v;
+                            f.lr_invalid = false;
+                        }
+                        None => f.lr_invalid = true,
+                    }
+                    cx.notify();
+                }
+            }),
+        ];
         self.new_run = Some(NewRunForm {
             name,
             dataset: idx,
@@ -1072,6 +1166,11 @@ impl FoloApp {
             scale: 0.5,
             note: None,
             base: None,
+            epochs_input,
+            lr_input,
+            epochs_invalid: false,
+            lr_invalid: false,
+            _subs: subs,
             submitting: false,
             error: None,
         });
@@ -1081,7 +1180,7 @@ impl FoloApp {
 
     pub fn submit_new_run(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(form) = self.new_run.as_mut() else { return };
-        if form.submitting {
+        if form.submitting || form.epochs_invalid || form.lr_invalid {
             return;
         }
         let Some(ds) = self.store.datasets.ready().and_then(|d| d.get(form.dataset)).cloned() else { return };
@@ -1130,12 +1229,30 @@ impl FoloApp {
                         runs.insert(0, run);
                     }
                     this.subscribe_active(cx);
-                    this.toast(
-                        Tone::Accent,
-                        format!("Training {name}"),
-                        Some("Live metrics stream into the dashboard.".into()),
-                        cx,
-                    );
+                    let queued =
+                        this.store.run(&id).is_some_and(|r| r.status == crate::api::RunStatus::Queued);
+                    if queued {
+                        let rid = id.clone();
+                        this.toast_with(
+                            Tone::Info,
+                            format!("Queued {name}"),
+                            Some("It starts when the GPU is free.".into()),
+                            Some((
+                                "Open run".into(),
+                                Rc::new(move |this: &mut Self, w: &mut Window, cx: &mut Context<Self>| {
+                                    this.navigate(Route::Run(rid.clone()), w, cx)
+                                }),
+                            )),
+                            cx,
+                        );
+                    } else {
+                        this.toast(
+                            Tone::Accent,
+                            format!("Training {name}"),
+                            Some("Live metrics stream into the dashboard.".into()),
+                            cx,
+                        );
+                    }
                     let prev = std::mem::replace(&mut this.route, Route::Run(id));
                     this.history.push(prev);
                 }
@@ -1510,24 +1627,27 @@ impl FoloApp {
 
     fn breadcrumbs(&self) -> Vec<(SharedString, Option<Route>)> {
         match &self.route {
-            Route::Overview => vec![("Overview".into(), None)],
-            Route::Datasets => vec![("Datasets".into(), None)],
+            // Top-level pages carry their own title; the titlebar stays quiet.
+            Route::Overview
+            | Route::Datasets
+            | Route::Runs
+            | Route::Models
+            | Route::Playground
+            | Route::Settings => {
+                vec![]
+            }
             Route::Dataset(id) => vec![
                 ("Datasets".into(), Some(Route::Datasets)),
                 (self.store.dataset_summary(id).map_or(id.clone(), |d| d.name.clone()).into(), None),
             ],
-            Route::Runs => vec![("Runs".into(), None)],
             Route::Run(id) => vec![
                 ("Runs".into(), Some(Route::Runs)),
                 (self.store.run(id).map_or(id.clone(), |r| r.name.clone()).into(), None),
             ],
-            Route::Models => vec![("Models".into(), None)],
             Route::Model(id) => vec![
                 ("Models".into(), Some(Route::Models)),
                 (self.store.model(id).map_or(id.clone(), |m| m.name.clone()).into(), None),
             ],
-            Route::Playground => vec![("Playground".into(), None)],
-            Route::Settings => vec![("Settings".into(), None)],
         }
     }
 
@@ -1755,7 +1875,7 @@ impl FoloApp {
                             .tnum()
                             .child(format!("Epoch {} / {}", r.epoch, r.epochs)),
                     )
-                    .child(text(ty::XS, t.text_secondary).tnum().child(format!("mAP {map}"))),
+                    .child(text(ty::XS, t.text_secondary).tnum().child(format!("mAP50-95 {map}"))),
             )
             .into_any_element()
     }
@@ -1801,7 +1921,7 @@ impl FoloApp {
                 (t.warning_solid, self.connecting.clone().unwrap_or_default().to_string())
             }
             Load::Ready(h) if h.mock => {
-                (t.accent_fill(), format!("{} · v{}", self.store.api.describe(), h.version))
+                (t.success_solid, format!("{} · v{}", self.store.api.describe(), h.version))
             }
             Load::Ready(h) => (t.success_solid, format!("{} · v{}", self.store.api.describe(), h.version)),
             Load::Failed(_) => (t.danger_solid, "Server unreachable".to_string()),
@@ -1936,11 +2056,13 @@ impl Render for FoloApp {
                 }
             }))
             .on_action(cx.listener(|this, _: &FocusNext, w, cx| {
+                this.menu_open = None;
                 this.kb = true;
                 this.cycle_focus(true, w, cx);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &FocusPrev, w, cx| {
+                this.menu_open = None;
                 this.kb = true;
                 this.cycle_focus(false, w, cx);
                 cx.notify();
@@ -1951,6 +2073,31 @@ impl Render for FoloApp {
                     && !this.kb
                 {
                     this.kb = true;
+                    cx.notify();
+                }
+                let m = &ev.keystroke.modifiers;
+                if this.route == Route::Playground
+                    && this.play_image.is_some()
+                    && !this.modal_open()
+                    && this.palette.is_none()
+                    && !(m.control || m.alt || m.platform)
+                {
+                    let d = if m.shift { 128. } else { 32. };
+                    let zoomed = this.play_zoom > 1.0;
+                    match ev.keystroke.key.as_str() {
+                        // Arrows reach here only when no focused control used them.
+                        "left" if zoomed => this.play_pan.0 += d,
+                        "right" if zoomed => this.play_pan.0 -= d,
+                        "up" if zoomed => this.play_pan.1 += d,
+                        "down" if zoomed => this.play_pan.1 -= d,
+                        "+" | "=" => this.play_zoom_by(1.4, cx),
+                        "-" => this.play_zoom_by(1.0 / 1.4, cx),
+                        "0" => {
+                            this.play_zoom = 1.0;
+                            this.play_pan = (0., 0.);
+                        }
+                        _ => return,
+                    }
                     cx.notify();
                 }
             }))
@@ -2017,7 +2164,9 @@ impl FoloApp {
         }
         if let Some(f) = &self.new_run
             && self.confirm_stop.is_none()
-            && f.name.read(cx).focus_handle(cx).is_focused(window)
+            && [&f.name, &f.epochs_input, &f.lr_input]
+                .iter()
+                .any(|i| i.read(cx).focus_handle(cx).is_focused(window))
         {
             return true;
         }
@@ -2081,6 +2230,8 @@ impl FoloApp {
         self.subscriptions.clear();
         self.subscribing.clear();
         self.store.clear_pending();
+        *self.ds_filter_cache.borrow_mut() = None;
+        *self.ds_split_counts.borrow_mut() = None;
         // Ids are only unique per server: cached pixels (and failures) belong to the old one. The
         // textures are freed after this update, when no window is mid-draw, so every window's atlas
         // is reached (this often runs inside a click handler).
@@ -2224,25 +2375,31 @@ impl FoloApp {
     /// A page frame: scrollable column with the standard gutter and an optional header.
     pub fn page_frame(&self, t: &Theme, header: impl IntoElement, body: impl IntoElement) -> AnyElement {
         div()
-            .id("page")
+            .relative()
             .size_full()
-            .overflow_y_scroll()
-            .track_scroll(&self.page_scroll)
             .child(
                 div()
-                    .w_full()
-                    .max_w(px(tsize::CONTENT_MAX))
-                    .mx_auto()
-                    .flex()
-                    .flex_col()
-                    .gap(px(16.))
-                    .px(px(24.))
-                    .pt(px(20.))
-                    .pb(px(32.))
-                    .child(header)
-                    .child(body),
+                    .id("page")
+                    .size_full()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.page_scroll)
+                    .child(
+                        div()
+                            .w_full()
+                            .max_w(px(tsize::CONTENT_MAX))
+                            .mx_auto()
+                            .flex()
+                            .flex_col()
+                            .gap(px(16.))
+                            .px(px(24.))
+                            .pt(px(20.))
+                            .pb(px(32.))
+                            .child(header)
+                            .child(body),
+                    )
+                    .child(div().absolute().top_0().left_0().right_0().h(px(1.)).bg(alpha(t.bg_app, 0.0))),
             )
-            .child(div().absolute().top_0().left_0().right_0().h(px(1.)).bg(alpha(t.bg_app, 0.0)))
+            .child(crate::ui::scrollbar(t, self.page_scroll.clone()))
             .into_any_element()
     }
 }
@@ -2300,5 +2457,23 @@ mod retry_tests {
         assert_eq!(out.name, "a-2");
         // A fresh form keeps its own values.
         assert_eq!(carry_over(None, edited.clone()), edited);
+    }
+}
+
+#[cfg(test)]
+mod form_tests {
+    use super::{parse_epochs, parse_lr};
+
+    #[test]
+    fn typed_numbers_validate() {
+        assert_eq!(parse_epochs(" 250 "), Some(250));
+        assert_eq!(parse_epochs("0"), None);
+        assert_eq!(parse_epochs("10001"), None);
+        assert_eq!(parse_epochs("12.5"), None);
+        assert_eq!(parse_lr("1e-3"), Some(0.001));
+        assert_eq!(parse_lr("0.01"), Some(0.01));
+        assert_eq!(parse_lr("0"), None);
+        assert_eq!(parse_lr("abc"), None);
+        assert_eq!(parse_lr("NaN"), None);
     }
 }

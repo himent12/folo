@@ -19,6 +19,9 @@ use crate::store::Load;
 use crate::theme::{radius, theme, ty};
 use crate::ui::*;
 
+/// Width of the right-hand column on both Overview rows, so their gutters line up.
+const SIDE_W: f32 = 360.;
+
 impl FoloApp {
     pub fn overview(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
@@ -38,6 +41,32 @@ impl FoloApp {
             _ if self.store.runs.error().is_some() => "Server unreachable".to_string(),
             _ => "Loading…".to_string(),
         };
+        // Training needs a server and a dataset; until then the action explains itself instead.
+        let no_ds = self.store.datasets.ready().is_some_and(|d| d.is_empty());
+        let blocked = if self.store.runs.error().is_some() {
+            Some("Connect to folo serve first")
+        } else if no_ds {
+            Some("Add a dataset first")
+        } else {
+            None
+        };
+        let new_run = match blocked {
+            Some(reason) => self
+                .button_disabled("ov-new", "New run", Btn::Primary, Some("icons/plus.svg"), reason, cx)
+                .into_any_element(),
+            None => self
+                .button(
+                    "ov-new",
+                    "New run",
+                    Btn::Primary,
+                    Some("icons/plus.svg"),
+                    window,
+                    cx,
+                    act(|this, w, cx| this.open_new_run(None, w, cx)),
+                )
+                .tooltip(crate::controls::tip("Start training", Some("Ctrl N")))
+                .into_any_element(),
+        };
         let actions = vec![
             self.button(
                 "ov-open",
@@ -50,18 +79,13 @@ impl FoloApp {
             )
             .tooltip(crate::controls::tip("Run a model on an image", Some("Ctrl O")))
             .into_any_element(),
-            self.button(
-                "ov-new",
-                "New run",
-                Btn::Primary,
-                Some("icons/plus.svg"),
-                window,
-                cx,
-                act(|this, w, cx| this.open_new_run(None, w, cx)),
-            )
-            .tooltip(crate::controls::tip("Start training", Some("Ctrl N")))
-            .into_any_element(),
+            new_run,
         ];
+        let nothing_yet = no_ds
+            && self.store.runs.ready().is_some_and(|r| r.is_empty())
+            && self.store.models.ready().is_some_and(|m| m.is_empty());
+        // First run: the getting-started panel owns the only call to action.
+        let actions = if nothing_yet { Vec::new() } else { actions };
         let header = page_header(
             &t,
             "Overview",
@@ -75,12 +99,17 @@ impl FoloApp {
             return self.page_frame(&t, header, err);
         }
 
+        if nothing_yet {
+            let body = self.getting_started(window, cx);
+            return self.page_frame(&t, header, body);
+        }
         let live = self.store.live_run().cloned();
         let hero = match &live {
             Some(r) => self.live_panel(r, window, cx),
             None => self.idle_panel(window, cx),
         };
-        let narrow = window.viewport_size().width < px(1200.);
+        // Below this the System column would squeeze the training charts; it becomes a strip.
+        let narrow = window.viewport_size().width < px(1360.);
         let (system, strip) = if narrow {
             (div().into_any_element(), Some(self.system_strip(cx)))
         } else {
@@ -98,21 +127,28 @@ impl FoloApp {
                     .flex()
                     .gap(px(16.))
                     .child(div().flex_1().min_w_0().flex().child(hero))
-                    .when(!narrow, |d| d.child(div().w(px(312.)).flex_none().flex().child(system))),
+                    .when(!narrow, |d| d.child(div().w(px(SIDE_W)).flex_none().flex().child(system))),
             )
             .when_some(strip, |d, s| d.child(s))
-            .child(
-                div()
-                    .flex()
-                    .gap(px(16.))
-                    .child(div().flex_1().min_w_0().flex().child(recent))
-                    .child(div().w(px(380.)).flex_none().flex().child(models)),
-            )
+            // Narrow windows stack the two lists full width rather than squeeze the runs table.
+            .map(|d| {
+                if window.viewport_size().width < px(1200.) {
+                    d.child(div().flex().child(recent)).child(div().flex().child(models))
+                } else {
+                    d.child(
+                        div().flex().gap(px(16.)).child(div().flex_1().min_w_0().flex().child(recent)).child(
+                            div().w(px(if narrow { 380. } else { SIDE_W })).flex_none().flex().child(models),
+                        ),
+                    )
+                }
+            })
             .child(datasets);
         self.page_frame(&t, header, body)
     }
 
     fn live_panel(&mut self, r: &Run, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        // Short windows trade chart height for the sections below.
+        let hero_h = if window.viewport_size().height < px(700.) { 100. } else { 132. };
         let t = theme(cx);
         self.ensure_run_data(&r.id, cx);
         let ds = self
@@ -125,7 +161,7 @@ impl FoloApp {
             .as_deref()
             .and_then(time::parse)
             .map_or(String::new(), |s| format!("started {}", time::ago(s, now)));
-        let device = r.device.split(" (").next().unwrap_or(&r.device).replace("NVIDIA GeForce ", "");
+        let device = crate::ui::short_gpu(r.device.split(" (").next().unwrap_or(&r.device));
         let id = r.id.clone();
         let open = self.button(
             "ov-dash",
@@ -169,9 +205,10 @@ impl FoloApp {
                     ],
                 );
                 loss.x_range = Some((0., total));
+                loss.x_int = true;
                 let loss_max = d.loss[3].iter().map(|p| p.1).fold(0f32, f32::max);
-                loss.y_range = Some((0., (loss_max * 1.08).max(0.1)));
-                loss.height = 132.;
+                loss.y_range = Some((0., crate::charts::nice_ceil((loss_max * 1.05).max(0.1), 3)));
+                loss.height = hero_h;
                 loss.hover = hover;
                 loss.on_hover = Some(on_hover.clone());
                 loss.x_name = "epoch";
@@ -184,8 +221,9 @@ impl FoloApp {
                     ],
                 );
                 map.x_range = Some((0., total));
+                map.x_int = true;
                 map.y_range = Some((0., 1.));
-                map.height = 132.;
+                map.height = hero_h;
                 map.hover = hover;
                 map.on_hover = Some(on_hover);
                 map.x_name = "epoch";
@@ -290,7 +328,7 @@ impl FoloApp {
                     .gap(px(12.))
                     .child(div().flex_1().child(progress(&t, r.progress(), t.accent_fill(), 4.)))
                     .child(
-                        text(ty::XS, t.text_secondary).tnum().child(format!("{:.1}%", r.progress() * 100.)),
+                        text(ty::XS, t.text_secondary).tnum().child(format!("{:.0}%", r.progress() * 100.)),
                     ),
             )
             .child(charts)
@@ -418,7 +456,7 @@ impl FoloApp {
                                             text(ty::BASE, t.text_primary)
                                                 .font_weight(FontWeight::MEDIUM)
                                                 .truncate()
-                                                .child(g.name.replace("NVIDIA GeForce ", "")),
+                                                .child(crate::ui::short_gpu(&g.name)),
                                         )
                                         .child(badge(&t, g.backend.label(), Tone::Neutral)),
                                 )
@@ -426,7 +464,7 @@ impl FoloApp {
                                 .child(
                                     text(ty::XS, t.text_tertiary)
                                         .tnum()
-                                        .child(format!("GPU utilisation · {vram} {vu} memory")),
+                                        .child(format!("GPU utilisation · {vram} {vu} GPU memory")),
                                 ),
                         )
                     })
@@ -455,7 +493,7 @@ impl FoloApp {
                                         d.child(sparkline_in(
                                             &t,
                                             Arc::new(hist.clone()),
-                                            t.accent_fill(),
+                                            t.text_secondary,
                                             0.,
                                             true,
                                             Some((0., 1.)),
@@ -479,9 +517,9 @@ impl FoloApp {
                         &format!("CPU · {} threads", s.cpu.threads),
                         format!("{:.0}%", s.cpu.util * 100.),
                         s.cpu.util,
-                        t.chart_series[1],
+                        t.text_tertiary,
                     ))
-                    .child(row("Memory", format!("{used} / {total} {unit}"), mem, t.chart_series[2]))
+                    .child(row("Memory", format!("{used} / {total} {unit}"), mem, t.text_tertiary))
                     .into_any_element()
             }
             Load::Failed(e) => div()
@@ -523,10 +561,11 @@ impl FoloApp {
             let util = g.util.unwrap_or(0.0);
             row = row
                 .child(cell(
-                    g.name.replace("NVIDIA GeForce ", ""),
+                    crate::ui::short_gpu(&g.name),
                     format!("{:.0}%", util * 100.),
                     util,
-                    t.accent_fill(),
+                    // A meter, not an action: neutral like CPU and memory, amber when saturated.
+                    if util > 0.95 { t.warning_solid } else { t.text_tertiary },
                 ))
                 .child(vline(&t));
         }
@@ -534,9 +573,9 @@ impl FoloApp {
         let (used, _) = bytes(s.memory.used_bytes);
         let (total, unit) = bytes(s.memory.total_bytes);
         row = row
-            .child(cell("CPU".into(), format!("{:.0}%", s.cpu.util * 100.), s.cpu.util, t.chart_series[1]))
+            .child(cell("CPU".into(), format!("{:.0}%", s.cpu.util * 100.), s.cpu.util, t.text_tertiary))
             .child(vline(&t))
-            .child(cell("Memory".into(), format!("{used} / {total} {unit}"), mem, t.chart_series[2]));
+            .child(cell("Memory".into(), format!("{used} / {total} {unit}"), mem, t.text_tertiary));
         panel(&t).child(row).into_any_element()
     }
 
@@ -544,7 +583,8 @@ impl FoloApp {
         let t = theme(cx);
         let now = self.store.api.now();
         let all = self.view_all("ov-runs-all", Route::Runs, window, cx);
-        let header = panel_header(&t, "Recent runs").child(all);
+        let header = panel_header(&t, "Recent runs")
+            .child(div().flex().items_center().gap(px(8.)).child(caption(&t, "best mAP50-95")).child(all));
         let body = match &self.store.runs {
             Load::Ready(runs) if runs.is_empty() => div()
                 .child(empty_state(
@@ -567,31 +607,29 @@ impl FoloApp {
                             .dataset_summary(&r.config.dataset_id)
                             .map_or(r.config.dataset_id.clone(), |d| d.name.clone());
                         let when = time::parse(&r.created).map_or(String::new(), |c| time::ago(c, now));
-                        let right = if r.status.is_active() && r.status != crate::api::RunStatus::Queued {
-                            div()
-                                .w(px(120.))
-                                .flex()
-                                .items_center()
-                                .gap(px(8.))
-                                .child(div().flex_1().child(progress(&t, r.progress(), t.accent_fill(), 4.)))
-                                .child(
-                                    text(ty::XS, t.text_secondary)
-                                        .tnum()
-                                        .child(format!("{:.0}%", r.progress() * 100.)),
-                                )
-                        } else {
-                            div().w(px(120.)).flex().justify_end().child(r.best.as_ref().map_or(
-                                text(ty::SM, t.text_tertiary).child("–"),
-                                |b| {
-                                    div()
-                                        .flex()
-                                        .items_baseline()
-                                        .gap(px(4.))
-                                        .child(text(ty::XS, t.text_tertiary).child("mAP"))
-                                        .child(text(ty::SM, t.text_primary).tnum().child(f3(b.map50_95)))
-                                },
-                            ))
-                        };
+                        // Two fixed columns: progress (training runs only) and best mAP50-95.
+                        let training = r.status.is_active() && r.status != crate::api::RunStatus::Queued;
+                        let right = div()
+                            .flex()
+                            .items_center()
+                            .gap(px(16.))
+                            .child(div().w(px(120.)).flex().items_center().gap(px(8.)).when(training, |d| {
+                                d.child(div().flex_1().child(progress(&t, r.progress(), t.accent_fill(), 4.)))
+                                    .child(
+                                        text(ty::XS, t.text_secondary)
+                                            .tnum()
+                                            .w(px(30.))
+                                            .text_right()
+                                            .child(format!("{:.0}%", r.progress() * 100.)),
+                                    )
+                            }))
+                            .child(
+                                text(ty::SM, if r.best.is_some() { t.text_primary } else { t.text_tertiary })
+                                    .tnum()
+                                    .w(px(48.))
+                                    .text_right()
+                                    .child(r.best.as_ref().map_or("–".to_string(), |b| f3(b.map50_95))),
+                            );
                         let id = r.id.clone();
                         let key = format!("ov-run-{}", r.id);
                         let row = div()
@@ -605,15 +643,17 @@ impl FoloApp {
                             .rounded(px(radius::MD))
                             .cursor_pointer()
                             .hover(|s| s.bg(t.bg_hover))
+                            // Same order as the Runs table: name, then status.
+                            .child(
+                                cell2(&t, r.name.clone(), format!("{ds} · {}", r.config.arch.as_str()))
+                                    .flex_1()
+                                    .min_w_0(),
+                            )
                             .child(div().w(px(96.)).flex_none().flex().child(status_badge(
                                 &t,
                                 r.status,
                                 &format!("ov-{}", r.id),
                             )))
-                            .child(
-                                cell2(&t, r.name.clone(), format!("{ds} · {}", r.config.arch.as_str()))
-                                    .flex_1(),
-                            )
                             .child(right)
                             .child(text(ty::XS, t.text_tertiary).w(px(72.)).text_right().child(when));
                         self.bind(
@@ -630,13 +670,22 @@ impl FoloApp {
             }
             _ => loading_rows(&t, "ov-runs", 5).into_any_element(),
         };
-        panel(&t).flex_1().flex().flex_col().child(header).child(body).into_any_element()
+        panel(&t)
+            .flex_1()
+            .min_w_0()
+            .overflow_hidden()
+            .flex()
+            .flex_col()
+            .child(header)
+            .child(body)
+            .into_any_element()
     }
 
     fn top_models(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
         let all = self.view_all("ov-models-all", Route::Models, window, cx);
-        let header = panel_header(&t, "Best models").child(all);
+        let header = panel_header(&t, "Best models")
+            .child(div().flex().items_center().gap(px(8.)).child(caption(&t, "by mAP50-95")).child(all));
         let body = match &self.store.models {
             Load::Ready(models) if models.is_empty() => div()
                 .child(empty_state(
@@ -679,7 +728,7 @@ impl FoloApp {
                                 cell2(
                                     &t,
                                     m.name.clone(),
-                                    format!("{} · {}px · {p} {pu} params", m.arch.as_str(), m.imgsz),
+                                    format!("{} · {} px · {p} {pu} params", m.arch.as_str(), m.imgsz),
                                 )
                                 .flex_1(),
                             )
@@ -707,35 +756,123 @@ impl FoloApp {
         let datasets = self.store.datasets.ready().cloned().unwrap_or_default();
         let cards: Vec<AnyElement> =
             datasets.iter().take(3).map(|d| self.dataset_card(d, window, cx)).collect();
-        div()
+        panel(&t)
             .flex()
             .flex_col()
-            .gap(px(10.))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(text(ty::SM, t.text_primary).font_weight(FontWeight::MEDIUM).child("Datasets"))
-                    .child(all),
-            )
+            .child(panel_header(&t, "Datasets").child(all))
             .map(|d| {
                 if cards.is_empty() && self.store.datasets.ready().is_some() {
-                    d.child(panel(&t).child(empty_state(
+                    d.child(empty_state(
                         &t,
                         "icons/images.svg",
                         "No datasets registered",
                         "Datasets you add or generate show up here with a preview of their images.",
                         Tone::Neutral,
-                    )))
+                    ))
                 } else if cards.is_empty() {
                     d.child(div().flex().gap(px(16.)).children(
                         (0..3).map(|i| div().flex_1().h(px(196.)).child(skeleton(&t, format!("ov-ds-{i}")))),
                     ))
                 } else {
-                    d.child(div().flex().gap(px(16.)).children(cards))
+                    d.child(div().p(px(16.)).flex().gap(px(16.)).children(cards))
                 }
             })
+            .into_any_element()
+    }
+
+    /// First run: what FOLO needs, in order, with the next step as the one primary action.
+    fn getting_started(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let t = theme(cx);
+        let add = self
+            .button(
+                "gs-add",
+                "Add a dataset",
+                Btn::Primary,
+                Some("icons/plus.svg"),
+                window,
+                cx,
+                act(|this, w, cx| this.navigate(Route::Datasets, w, cx)),
+            )
+            .into_any_element();
+        let step = |n: &str, title: &str, body: &str, active: bool| {
+            div()
+                .flex()
+                .gap(px(14.))
+                .p(px(16.))
+                .rounded(px(radius::LG))
+                .border_1()
+                .border_color(if active { t.line_strong } else { t.line_subtle })
+                .when(active, |d| d.bg(t.bg_raised))
+                .child(
+                    div()
+                        .size(px(24.))
+                        .flex_none()
+                        .rounded_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(if active { t.accent_fill() } else { t.bg_active })
+                        .child(
+                            text(ty::XS, if active { t.accent_on } else { t.text_tertiary })
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(n.to_string()),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.))
+                        .child(
+                            text(ty::BASE, if active { t.text_primary } else { t.text_secondary })
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(title.to_string()),
+                        )
+                        .child(rich(&t, ty::SM, t.text_tertiary, body).justify_start()),
+                )
+        };
+        panel(&t)
+            .p(px(24.))
+            .flex()
+            .flex_col()
+            .gap(px(20.))
+            .child(
+                div().flex().items_center().gap(px(14.)).child(crate::app::logo(&t, 32.)).child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.))
+                        .child(text(ty::LG, t.text_primary).child("Get started with FOLO"))
+                        .child(
+                            text(ty::SM, t.text_secondary)
+                                .child("Three steps from images to a model you can run."),
+                        ),
+                ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap(px(12.))
+                    .child(div().flex_1().child(step(
+                        "1",
+                        "Add a dataset",
+                        "Point FOLO at a YOLO folder, or generate one with `folo dataset synth`",
+                        true,
+                    )))
+                    .child(div().flex_1().child(step(
+                        "2",
+                        "Train a model",
+                        "Start a run; loss, mAP and throughput stream in live.",
+                        false,
+                    )))
+                    .child(div().flex_1().child(step(
+                        "3",
+                        "Try it",
+                        "Open any image in the Playground and tune the thresholds.",
+                        false,
+                    ))),
+            )
+            .child(div().flex().child(add))
             .into_any_element()
     }
 
@@ -827,6 +964,7 @@ impl FoloApp {
             .items_center()
             .gap(px(4.))
             .px(px(6.))
+            .mr(px(-6.))
             .h(px(22.))
             .rounded(px(radius::SM))
             .cursor_pointer()

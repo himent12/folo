@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, Context, InteractiveElement, IntoElement, ParentElement, SharedString,
+    AnyElement, Context, InteractiveElement, IntoElement, KeyDownEvent, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, Window, canvas, div, px, uniform_list,
 };
 
@@ -42,7 +42,7 @@ impl FoloApp {
                     this.toast(
                         Tone::Info,
                         "Registering folders needs folo serve",
-                        Some("Mock data has three built-in datasets.".into()),
+                        Some("The built-in demo has three datasets.".into()),
                         cx,
                     );
                 }),
@@ -98,7 +98,14 @@ impl FoloApp {
     /// until the dataset, its image list or a filter changes, so scrolling never rescans it.
     pub fn filtered_indices(&self, id: &str) -> Rc<Vec<usize>> {
         let Some(all) = self.store.images.get(id).and_then(|l| l.ready()) else { return Rc::new(Vec::new()) };
-        let key = (id.to_string(), self.ds_split, self.ds_class, self.ds_empty_only, all.len());
+        let key = (
+            id.to_string(),
+            self.ds_split,
+            self.ds_class,
+            self.ds_empty_only,
+            all.len(),
+            all.as_ptr() as usize,
+        );
         if let Some((k, v)) = self.ds_filter_cache.borrow().as_ref()
             && *k == key
         {
@@ -114,6 +121,27 @@ impl FoloApp {
                 .collect(),
         );
         *self.ds_filter_cache.borrow_mut() = Some((key, v.clone()));
+        v
+    }
+
+    /// Boxes per class among a split's images (cached per dataset and split).
+    pub fn split_class_counts(&self, id: &str, split: Split, classes: usize) -> Vec<u64> {
+        let Some(all) = self.store.images.get(id).and_then(|l| l.ready()) else { return vec![0; classes] };
+        let key = (id.to_string(), split, all.len(), all.as_ptr() as usize, classes);
+        if let Some((k, v)) = self.ds_split_counts.borrow().as_ref()
+            && *k == key
+        {
+            return v.clone();
+        }
+        let mut v = vec![0u64; classes];
+        for m in all.iter().filter(|m| m.split == split) {
+            for b in &m.boxes {
+                if let Some(c) = v.get_mut(b.class as usize) {
+                    *c += 1;
+                }
+            }
+        }
+        *self.ds_split_counts.borrow_mut() = Some((key, v.clone()));
         v
     }
 
@@ -174,20 +202,15 @@ impl FoloApp {
             .gap(px(10.))
             .child(text(ty::XL, t.text_primary).child(ds.name.clone()))
             .child(badge(&t, ds.format.label(), Tone::Neutral));
-        let header = div()
-            .flex()
-            .items_end()
-            .justify_between()
-            .gap(px(16.))
-            .child(
-                div().flex().flex_col().gap(px(4.)).min_w_0().child(title).child(
-                    text(ty::SM, t.text_tertiary)
-                        .font_family(crate::theme::MONO)
-                        .truncate()
-                        .child(display_path(&ds.path)),
-                ),
-            )
-            .child(div().flex().gap(px(8.)).child(reveal).child(train));
+        let header = detail_header(
+            &t,
+            title,
+            text(ty::SM, t.text_tertiary)
+                .font_family(crate::theme::MONO)
+                .truncate()
+                .child(display_path(&ds.path)),
+            vec![reveal.into_any_element(), train.into_any_element()],
+        );
 
         let strip = self.dataset_strip_stats(&ds, window, cx);
         let tabs = self.segmented(
@@ -229,6 +252,11 @@ impl FoloApp {
         let t = theme(cx);
         let total = ds.splits.total().max(1) as f32;
         let s = ds.stats.as_ref();
+        let split_c = [
+            t.text_tertiary,
+            crate::theme::alpha(t.text_tertiary, 0.6),
+            crate::theme::alpha(t.text_tertiary, 0.35),
+        ];
         let split_bar = div()
             .flex()
             .h(px(4.))
@@ -236,14 +264,14 @@ impl FoloApp {
             .rounded_full()
             .overflow_hidden()
             .gap(px(2.))
-            .child(div().h_full().w(gpui::relative(ds.splits.train as f32 / total)).bg(t.chart_series[0]))
-            .child(div().h_full().w(gpui::relative(ds.splits.val as f32 / total)).bg(t.chart_series[1]))
-            .when(ds.splits.test > 0, |d| d.child(div().h_full().flex_1().bg(t.chart_series[2])));
+            .child(div().h_full().w(gpui::relative(ds.splits.train as f32 / total)).bg(split_c[0]))
+            .child(div().h_full().w(gpui::relative(ds.splits.val as f32 / total)).bg(split_c[1]))
+            .when(ds.splits.test > 0, |d| d.child(div().h_full().flex_1().bg(split_c[2])));
         let legend = div().flex().gap(px(10.)).children(
             [
-                ("train", ds.splits.train, t.chart_series[0]),
-                ("val", ds.splits.val, t.chart_series[1]),
-                ("test", ds.splits.test, t.chart_series[2]),
+                ("train", ds.splits.train, split_c[0]),
+                ("val", ds.splits.val, split_c[1]),
+                ("test", ds.splits.test, split_c[2]),
             ]
             .into_iter()
             .filter(|x| x.1 > 0)
@@ -260,10 +288,11 @@ impl FoloApp {
         let boxes = s.map_or(0, |s| s.boxes);
         let per = boxes as f32 / total;
         let broken = s.map_or(0, |s| s.broken_labels);
+        let narrow_strip = window.viewport_size().width < px(1120.);
         panel(&t)
             .flex()
             .child(
-                div().flex_none().w(px(300.)).px(px(16.)).py(px(12.)).child(
+                div().flex_none().w(px(if narrow_strip { 220. } else { 300. })).px(px(16.)).py(px(12.)).child(
                     div()
                         .flex()
                         .flex_col()
@@ -309,11 +338,16 @@ impl FoloApp {
                         int(empty),
                         "",
                         Some(if empty > 0 {
-                            text(ty::XS, if on { t.accent_text } else { t.text_secondary }).child(if on {
-                                "Showing them · clear"
-                            } else {
-                                "Show them"
-                            })
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(2.))
+                                .child(text(ty::XS, if on { t.accent_text } else { t.text_secondary }).child(if on {
+                                    "Showing them · clear"
+                                } else {
+                                    "Show them"
+                                }))
+                                .when(!on, |d| d.child(icon("icons/chevron-right.svg", 12., t.text_secondary)))
                         } else {
                             text(ty::XS, t.text_tertiary).child("every image has labels")
                         }),
@@ -338,17 +372,64 @@ impl FoloApp {
                 }
             })
             .child(vline(&t))
-            .child(tile(stat(
-                &t,
-                "Broken labels",
-                broken.to_string(),
-                "",
-                Some(if broken > 0 {
-                    text(ty::XS, t.warning_text).child("out of image bounds")
+            .child({
+                let el = div()
+                    .id("ds-broken-tile")
+                    .flex_1()
+                    .min_w_0()
+                    .px(px(16.))
+                    .py(px(12.))
+                    .when(broken > 0, |d| d.cursor_pointer().hover(|s| s.bg(t.bg_hover)))
+                    .when(broken > 0, |d| {
+                        d.tooltip(crate::controls::tip(
+                            "These label files couldn't be read, so their images are skipped. The check command lists them.",
+                            None,
+                        ))
+                    })
+                    .child(stat(
+                        &t,
+                        "Broken labels",
+                        broken.to_string(),
+                        "",
+                        Some(if broken > 0 {
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(2.))
+                                .min_w_0()
+                                .child(text(ty::XS, t.text_secondary).whitespace_nowrap().child(if narrow_strip {
+                                    "Copy command"
+                                } else {
+                                    "Copy check command"
+                                }))
+                                .child(div().flex_none().child(icon("icons/copy.svg", 12., t.text_secondary)))
+                        } else {
+                            div().child(text(ty::XS, t.success_text).child("all labels valid"))
+                        }),
+                    ));
+                if broken > 0 {
+                    let cmd = format!("folo dataset check \"{}\"", ds.path);
+                    self.bind(
+                        el,
+                        "ds-broken-tile",
+                        0.,
+                        window,
+                        cx,
+                        act(move |this, _, cx| {
+                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(cmd.clone()));
+                            this.toast(
+                                Tone::Neutral,
+                                "Copied the check command",
+                                Some(format!("Run `{cmd}` in a terminal to list the broken label files.").into()),
+                                cx,
+                            );
+                        }),
+                    )
+                    .into_any_element()
                 } else {
-                    text(ty::XS, t.success_text).child("all labels valid")
-                }),
-            )))
+                    el.into_any_element()
+                }
+            })
             .into_any_element()
     }
 
@@ -374,7 +455,11 @@ impl FoloApp {
                 this.grid_scroll.scroll_to_item(0, gpui::ScrollStrategy::Top);
             }),
         );
-        let counts = ds.stats.as_ref().map(|s| s.class_counts.clone()).unwrap_or_default();
+        // Counts follow the split filter: boxes per class among the images shown.
+        let counts = match self.ds_split {
+            None => ds.stats.as_ref().map(|s| s.class_counts.clone()).unwrap_or_default(),
+            Some(split) => self.split_class_counts(&ds.id, split, ds.classes.len()),
+        };
         let chips: Vec<AnyElement> = ds
             .classes
             .iter()
@@ -410,10 +495,22 @@ impl FoloApp {
             }),
         );
         let size_slider = self.slider("ds-tile", self.ds_tile, 112., 272., 8., window, cx);
+        // Fit shows every pixel (boxes at the edge stay visible); Fill crops for a denser look.
+        let fit_seg = self.segmented(
+            "ds-fit",
+            &["Fit", "Fill"],
+            usize::from(self.ds_fill),
+            window,
+            cx,
+            Rc::new(|this, i, _, cx| {
+                this.ds_fill = i == 1;
+                cx.notify();
+            }),
+        );
         let count_label = if count == total {
             format!("{} images", int(total as u64))
         } else {
-            format!("{} of {} images", int(count as u64), int(total as u64))
+            format!("{} of {} images match", int(count as u64), int(total as u64))
         };
         let toolbar = div()
             .flex()
@@ -443,6 +540,7 @@ impl FoloApp {
             .flex()
             .items_center()
             .gap(px(16.))
+            .child(fit_seg)
             .child(
                 div()
                     .flex()
@@ -495,6 +593,7 @@ impl FoloApp {
         let row_h = cell_w * 0.75 + GAP + 1.;
         let width_cell = self.grid_width.clone();
         let ds_id: SharedString = id.clone().into();
+        let fit = if self.ds_fill { crate::viz::Fit::Cover } else { crate::viz::Fit::Contain };
         let grid = uniform_list(
             "ds-grid",
             rows,
@@ -514,10 +613,11 @@ impl FoloApp {
                             row = row.child(div().w(px(cell_w)).flex_none());
                             continue;
                         };
-                        let tile_el = this.tile(&ds_id, meta, this.ds_boxes, crate::viz::Fit::Cover, cx);
+                        let tile_el = this.tile(&ds_id, meta, this.ds_boxes, fit, cx);
                         let key = format!("tile-{}", meta.id);
                         let n = meta.boxes.len();
                         let dsid = ds_id.to_string();
+                        let focused = this.fh(key.clone(), cx).is_focused(window);
                         let el = div()
                             .id(SharedString::from(key.clone()))
                             .group(SharedString::from(key.clone()))
@@ -525,39 +625,71 @@ impl FoloApp {
                             .h_full()
                             .flex_none()
                             .rounded(px(radius::MD))
-                            .overflow_hidden()
-                            .bg(t.bg_inset)
                             .cursor_pointer()
-                            .child(tile_el)
                             .child(
                                 div()
                                     .absolute()
-                                    .bottom_0()
-                                    .left_0()
-                                    .right_0()
-                                    .h(px(28.))
-                                    .px(px(8.))
-                                    .flex()
-                                    .items_center()
-                                    .justify_between()
-                                    .bg(gpui::linear_gradient(
-                                        180.,
-                                        gpui::linear_color_stop(gpui::hsla(0., 0., 0., 0.), 0.),
-                                        gpui::linear_color_stop(gpui::hsla(0., 0., 0., 0.7), 1.),
-                                    ))
-                                    .invisible()
-                                    .group_hover(SharedString::from(key.clone()), |s| s.visible())
+                                    .inset_0()
+                                    .rounded(px(radius::MD))
+                                    .overflow_hidden()
+                                    .bg(if this.ds_fill { t.bg_inset } else { t.bg_raised })
+                                    .child(tile_el)
                                     .child(
-                                        text(ty::XS, gpui::white())
-                                            .font_family(crate::theme::MONO)
-                                            .child(meta.id.clone()),
-                                    )
-                                    .child(
-                                        text(ty::XS, gpui::hsla(0., 0., 1., 0.75))
-                                            .tnum()
-                                            .child(format!("{n} boxes")),
+                                        div()
+                                            .absolute()
+                                            .bottom_0()
+                                            .left_0()
+                                            .right_0()
+                                            .h(px(28.))
+                                            .px(px(8.))
+                                            .flex()
+                                            .items_center()
+                                            .justify_between()
+                                            .bg(gpui::linear_gradient(
+                                                180.,
+                                                gpui::linear_color_stop(gpui::hsla(0., 0., 0., 0.), 0.),
+                                                gpui::linear_color_stop(gpui::hsla(0., 0., 0., 0.7), 1.),
+                                            ))
+                                            .when(!focused, |d| d.invisible())
+                                            .group_hover(SharedString::from(key.clone()), |s| s.visible())
+                                            .child(
+                                                text(ty::XS, gpui::white())
+                                                    .font_family(crate::theme::MONO)
+                                                    .child(meta.id.clone()),
+                                            )
+                                            .child(
+                                                text(ty::XS, gpui::hsla(0., 0., 1., 0.75))
+                                                    .tnum()
+                                                    .child(format!("{n} boxes")),
+                                            ),
                                     ),
                             );
+                        // Arrow keys walk the grid; the list scrolls the target row into view.
+                        let nav_ds = ds_id.clone();
+                        let el = el.on_key_down(cx.listener(move |this, ev: &KeyDownEvent, w, cx| {
+                            let target = match ev.keystroke.key.as_str() {
+                                "left" => idx.checked_sub(1),
+                                "right" => Some(idx + 1),
+                                "up" => idx.checked_sub(cols),
+                                "down" => Some(idx + cols),
+                                _ => return,
+                            };
+                            cx.stop_propagation();
+                            let Some(j) = target.filter(|&j| j < count) else { return };
+                            let Some(next) = this.filtered_image(&nav_ds, j).map(|m| m.id.clone()) else {
+                                return;
+                            };
+                            let strategy = if j < idx {
+                                gpui::ScrollStrategy::Top
+                            } else {
+                                gpui::ScrollStrategy::Bottom
+                            };
+                            this.grid_scroll.scroll_to_item(j / cols, strategy);
+                            this.kb = true;
+                            let fh = this.fh(format!("tile-{next}"), cx);
+                            w.focus(&fh);
+                            cx.notify();
+                        }));
                         let el = this.bind(
                             el,
                             &key,
@@ -601,7 +733,7 @@ impl FoloApp {
             .into_any_element()
     }
 
-    fn dataset_stats(&mut self, ds: &Dataset, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn dataset_stats(&mut self, ds: &Dataset, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
         let Some(s) = ds.stats.clone() else {
             return panel(&t)
@@ -666,7 +798,9 @@ impl FoloApp {
             })
         };
         let size_labels: Vec<String> =
-            s.box_size_hist.edges.windows(2).map(|w| format!("<{}%", (w[1] * 100.0).round())).collect();
+            s.box_size_hist.edges.windows(2).map(|w| format!("{}–{}%", pct(w[0]), pct(w[1]))).collect();
+        let size_n = s.box_size_hist.counts.len();
+        let per_n = s.boxes_per_image_hist.counts.len();
         let per_labels: Vec<String> =
             s.boxes_per_image_hist
                 .edges
@@ -684,7 +818,7 @@ impl FoloApp {
             "hist-size",
             Arc::new(s.box_size_hist.counts.clone()),
             Arc::new(size_labels),
-            t.chart_series[1],
+            t.chart_series[0],
             200.,
             self.hist_hover.get("size").copied(),
             Some(hover_fn("size")),
@@ -694,7 +828,7 @@ impl FoloApp {
             "hist-per",
             Arc::new(s.boxes_per_image_hist.counts.clone()),
             Arc::new(per_labels),
-            t.chart_series[2],
+            t.chart_series[0],
             200.,
             self.hist_hover.get("per").copied(),
             Some(hover_fn("per")),
@@ -723,12 +857,17 @@ impl FoloApp {
                                 panel(&t)
                                     .flex_1()
                                     .min_w_0()
-                                    .child(
-                                        panel_header(&t, "Box size").child(
-                                            text(ty::XS, t.text_tertiary).child("share of image area"),
-                                        ),
-                                    )
-                                    .child(div().p(px(16.)).child(size_hist)),
+                                    .child(panel_header(&t, "Box size").child(
+                                        text(ty::XS, t.text_tertiary).child("√(box area ÷ image area)"),
+                                    ))
+                                    .child(self.hist_group(
+                                        "hist-size-kb",
+                                        "size",
+                                        size_n,
+                                        div().p(px(16.)).child(size_hist),
+                                        window,
+                                        cx,
+                                    )),
                             )
                             .child(
                                 panel(&t)
@@ -738,7 +877,14 @@ impl FoloApp {
                                         panel_header(&t, "Boxes per image")
                                             .child(text(ty::XS, t.text_tertiary).child("images")),
                                     )
-                                    .child(div().p(px(16.)).child(per_hist)),
+                                    .child(self.hist_group(
+                                        "hist-per-kb",
+                                        "per",
+                                        per_n,
+                                        div().p(px(16.)).child(per_hist),
+                                        window,
+                                        cx,
+                                    )),
                             ),
                     ),
             )
@@ -762,8 +908,70 @@ pub fn names_summary(names: &[String], budget: usize) -> String {
     out
 }
 
+/// A fraction as a short percentage: one decimal under 10 % when it matters ("2.5", "10").
+fn pct(v: f64) -> String {
+    let p = v * 100.0;
+    if p >= 10.0 || (p - p.round()).abs() < 0.05 { format!("{}", p.round()) } else { format!("{p:.1}") }
+}
+
+impl FoloApp {
+    /// Make a histogram one Tab stop: ←/→ select bins, Home/End jump, Esc clears; the hover readout
+    /// follows the selection.
+    fn hist_group(
+        &self,
+        key: &str,
+        hover_key: &'static str,
+        bins: usize,
+        content: gpui::Div,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = theme(cx);
+        let fh = self.fh(key.to_string(), cx);
+        let ring = self.ring(&fh, window);
+        let n = bins.max(1);
+        content
+            .id(SharedString::from(key.to_string()))
+            .track_focus(&fh)
+            .relative()
+            .on_action(cx.listener(move |this, _: &crate::app::Dismiss, _, cx| {
+                if this.hist_hover.remove(hover_key).is_some() {
+                    cx.notify();
+                } else {
+                    cx.propagate();
+                }
+            }))
+            .on_key_down(cx.listener(move |this, ev: &KeyDownEvent, _, cx| {
+                let bin = this.hist_hover.get(hover_key).map(|f| ((f * n as f32) as usize).min(n - 1));
+                let next = match ev.keystroke.key.as_str() {
+                    "left" => Some(bin.map_or(0, |b| b.saturating_sub(1))),
+                    "right" => Some(bin.map_or(0, |b| (b + 1).min(n - 1))),
+                    "home" => Some(0),
+                    "end" => Some(n - 1),
+                    "escape" if bin.is_some() => None,
+                    _ => return,
+                };
+                match next {
+                    Some(b) => this.hist_hover.insert(hover_key, (b as f32 + 0.5) / n as f32),
+                    None => this.hist_hover.remove(hover_key),
+                };
+                cx.stop_propagation();
+                cx.notify();
+            }))
+            .when(ring, |d| d.child(crate::app::focus_ring(&t, radius::LG)))
+            .into_any_element()
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pct_labels() {
+        assert_eq!(super::pct(0.025), "2.5");
+        assert_eq!(super::pct(0.1), "10");
+        assert_eq!(super::pct(0.0), "0");
+    }
+
     use super::names_summary;
 
     #[test]

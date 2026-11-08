@@ -14,7 +14,7 @@ use crate::api::{PredictResponse, Split};
 use crate::app::{FoloApp, act};
 use crate::controls::Btn;
 use crate::store::{ImgKind, Load};
-use crate::theme::{alpha, radius, theme, ty};
+use crate::theme::{radius, theme, ty};
 use crate::ui::*;
 use crate::viz::{DrawBox, Fit, hit_box, paint_image_with_boxes, to_image};
 
@@ -37,8 +37,19 @@ impl FoloApp {
 
     pub fn playground(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
-        let open = self
-            .button(
+        let no_models_hdr = self.store.models.ready().is_some_and(|m| m.is_empty());
+        let open = if self.store.models.ready().is_some_and(|m| m.is_empty()) {
+            self.button_disabled(
+                "play-open",
+                "Open image",
+                Btn::Secondary,
+                Some("icons/image-up.svg"),
+                "Train a model first",
+                cx,
+            )
+            .into_any_element()
+        } else {
+            self.button(
                 "play-open",
                 "Open image",
                 Btn::Secondary,
@@ -48,15 +59,22 @@ impl FoloApp {
                 act(|this, _, cx| this.pick_image(cx)),
             )
             .tooltip(crate::controls::tip("Open an image", Some("Ctrl O")))
-            .into_any_element();
+            .into_any_element()
+        };
         let header = page_header(
             &t,
             "Playground",
-            "Run a model on any image. Drop a file anywhere in the window.",
+            if no_models_hdr {
+                "No models yet: train one to start detecting."
+            } else {
+                "Run a model on any image. Drop a file anywhere in the window."
+            },
             vec![open],
         );
         let stage = self.stage(window, cx);
-        let side = self.play_side(window, cx);
+        // Without models the side panel has nothing to offer: the empty state gets the full width.
+        let no_models = self.store.models.ready().is_some_and(|m| m.is_empty());
+        let side = (!no_models).then(|| self.play_side(window, cx));
         div()
             .size_full()
             .flex()
@@ -66,7 +84,7 @@ impl FoloApp {
             .pt(px(20.))
             .pb(px(20.))
             .child(header)
-            .child(div().flex_1().min_h_0().flex().gap(px(16.)).child(stage).child(side))
+            .child(div().flex_1().min_h_0().flex().gap(px(16.)).child(stage).children(side))
             .into_any_element()
     }
 
@@ -231,35 +249,63 @@ impl FoloApp {
                     .bg(t.bg_panel)
                     .border_b_1()
                     .border_color(t.line_subtle)
-                    .child(icon("icons/image.svg", 14., t.text_tertiary))
-                    .child(
-                        text(ty::SM, t.text_primary).font_family(crate::theme::MONO).truncate().child(name),
-                    )
-                    .child(
-                        text(ty::XS, t.text_tertiary).tnum().child(format!("{} × {}", img.width, img.height)),
-                    )
-                    .child(div().flex_1())
-                    .when(loading, |d| d.child(text(ty::XS, t.text_tertiary).child("Detecting…")))
-                    .when_some(latency, |d, ms| {
-                        d.child(text(ty::XS, t.text_secondary).tnum().child(format!("{ms:.1} ms")))
-                            .child(div().w(px(1.)).h(px(16.)).bg(t.line_subtle))
-                    })
-                    .when_some(count, |d, n| {
+                    .child(div().flex_none().child(icon("icons/image.svg", 14., t.text_tertiary)))
+                    // "dataset / file": the dataset part gives way first, the file name never.
+                    .map(|d| {
+                        let compact = window.viewport_size().width < px(1150.);
+                        let (prefix, file) = match name.rsplit_once(" / ") {
+                            Some((p, f)) if !compact => (Some(p.to_string()), f.to_string()),
+                            Some((_, f)) => (None, f.to_string()),
+                            None => (None, name.to_string()),
+                        };
                         d.child(
                             div()
                                 .flex()
                                 .items_center()
                                 .gap(px(6.))
-                                .child(div().size(px(6.)).rounded_full().bg(t.accent_fill()))
-                                .child(text(ty::XS, t.text_secondary).tnum().child(format!(
-                                    "{n} {} ≥ {:.2}",
-                                    if n == 1 { "object" } else { "objects" },
-                                    self.play_conf
-                                ))),
+                                .min_w_0()
+                                .flex_shrink()
+                                .font_family(crate::theme::MONO)
+                                .when_some(prefix, |d, p| {
+                                    d.child(
+                                        text(ty::SM, t.text_tertiary)
+                                            .min_w_0()
+                                            .flex_shrink()
+                                            .truncate()
+                                            .child(p),
+                                    )
+                                    .child(text(ty::SM, t.text_tertiary).flex_none().child("/"))
+                                })
+                                .child(text(ty::SM, t.text_primary).flex_none().child(file)),
                         )
                     })
-                    .child(div().w(px(1.)).h(px(16.)).bg(t.line_subtle))
-                    .child(zoom_bar),
+                    .when(true, |d| {
+                        d.child(
+                            text(ty::XS, t.text_tertiary)
+                                .flex_none()
+                                .tnum()
+                                .child(format!("{} × {}", img.width, img.height)),
+                        )
+                    })
+                    .child(div().flex_1().min_w(px(8.)))
+                    .when(loading, |d| d.child(text(ty::XS, t.text_tertiary).flex_none().child("Detecting…")))
+                    .when_some(latency, |d, ms| {
+                        d.child(
+                            text(ty::XS, t.text_secondary).flex_none().tnum().child(format!("{ms:.1} ms")),
+                        )
+                        .child(div().flex_none().w(px(1.)).h(px(16.)).bg(t.line_subtle))
+                    })
+                    .when_some(count, |d, n| {
+                        d.child(div().flex_none().flex().items_center().gap(px(6.)).child(
+                            text(ty::XS, t.text_secondary).tnum().child(format!(
+                                "{n} {} ≥ {:.2}",
+                                if n == 1 { "object" } else { "objects" },
+                                self.play_conf
+                            )),
+                        ))
+                    })
+                    .child(div().flex_none().w(px(1.)).h(px(16.)).bg(t.line_subtle))
+                    .child(zoom_bar.flex_none()),
             )
             .child(
                 div()
@@ -383,31 +429,44 @@ impl FoloApp {
         );
         let conf = self.slider("play-conf", self.play_conf, 0.05, 0.95, 0.01, window, cx);
         let iou = self.slider("play-iou", self.play_iou, 0.3, 0.95, 0.01, window, cx);
-        let field = |label: &str, value: String, control: AnyElement, help: &str| {
+        let field = |label: &str, value: String, control: AnyElement, help: &'static str| {
             div()
                 .flex()
                 .flex_col()
-                .gap(px(8.))
+                .gap(px(6.))
                 .child(
                     div()
                         .flex()
                         .justify_between()
-                        .items_baseline()
+                        .items_center()
                         .child(
-                            text(ty::SM, t.text_secondary)
-                                .font_weight(FontWeight::MEDIUM)
-                                .child(label.to_string()),
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(4.))
+                                .child(
+                                    text(ty::SM, t.text_secondary)
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .child(label.to_string()),
+                                )
+                                .child(
+                                    div()
+                                        .id(SharedString::from(format!("help-{label}")))
+                                        .p(px(2.))
+                                        .cursor_default()
+                                        .tooltip(crate::controls::tip(help, None))
+                                        .child(icon("icons/info.svg", 12., t.text_tertiary)),
+                                ),
                         )
                         .child(text(ty::SM, t.text_primary).tnum().child(value)),
                 )
                 .child(control)
-                .child(text(ty::XS, t.text_tertiary).child(help.to_string()))
         };
         let no_models = models.is_empty() && self.store.models.ready().is_some();
         let controls = div()
             .flex()
             .flex_col()
-            .gap(px(18.))
+            .gap(px(14.))
             .p(px(16.))
             .child(
                 div()
@@ -415,7 +474,25 @@ impl FoloApp {
                     .flex_col()
                     .gap(px(8.))
                     .child(text(ty::SM, t.text_secondary).font_weight(FontWeight::MEDIUM).child("Model"))
-                    .child(select)
+                    .map(|d| {
+                        if no_models {
+                            // Nothing to choose: a quiet, inert field instead of a dropdown.
+                            d.child(
+                                div()
+                                    .h(px(32.))
+                                    .px(px(10.))
+                                    .flex()
+                                    .items_center()
+                                    .rounded(px(radius::MD))
+                                    .bg(t.bg_inset)
+                                    .border_1()
+                                    .border_color(t.line_subtle)
+                                    .child(text(ty::SM, t.text_disabled).child("No trained models")),
+                            )
+                        } else {
+                            d.child(select)
+                        }
+                    })
                     .when(no_models, |d| {
                         d.child(
                             text(ty::XS, t.text_tertiary)
@@ -428,13 +505,13 @@ impl FoloApp {
                     "Confidence",
                     format!("{:.2}", self.play_conf),
                     conf.into_any_element(),
-                    "Hide detections scoring below this.",
+                    "Hide detections scoring below this. Filtering is instant; it doesn't rerun the model.",
                 ))
                 .child(field(
                     "IoU",
                     format!("{:.2}", self.play_iou),
                     iou.into_any_element(),
-                    "NMS drops weaker boxes that overlap a stronger one by more than this.",
+                    "Non-max suppression drops a weaker box that overlaps a stronger one by more than this. Changing it reruns the model.",
                 ))
             });
 
@@ -453,7 +530,8 @@ impl FoloApp {
                         let key = format!("det-{i}");
                         let row = div()
                             .id(SharedString::from(key.clone()))
-                            .h(px(32.))
+                            .flex_none()
+                            .h(px(28.))
                             .px(px(8.))
                             .flex()
                             .items_center()
@@ -469,10 +547,24 @@ impl FoloApp {
                                 }
                             }))
                             .child(swatch(color, 8.))
-                            .child(text(ty::SM, t.text_primary).w(px(72.)).truncate().child(b.name.clone()))
-                            .child(div().flex_1().h(px(4.)).rounded_full().bg(t.bg_inset).child(
-                                div().h_full().w(relative(b.score)).rounded_full().bg(alpha(color, 0.9)),
-                            ))
+                            .child(text(ty::SM, t.text_primary).w(px(68.)).truncate().child(b.name.clone()))
+                            // Size tells apart two boxes of the same class.
+                            .child(
+                                text(ty::XS, t.text_tertiary).tnum().w(px(52.)).flex_none().child(format!(
+                                    "{:.0}×{:.0}",
+                                    b.x2 - b.x1,
+                                    b.y2 - b.y1
+                                )),
+                            )
+                            .child(
+                                div().flex_1().h(px(4.)).rounded_full().bg(t.bg_inset).child(
+                                    div()
+                                        .h_full()
+                                        .w(relative(b.score))
+                                        .rounded_full()
+                                        .bg(t.class_stroke(b.class)),
+                                ),
+                            )
                             .child(
                                 text(ty::SM, t.text_primary)
                                     .tnum()
@@ -498,11 +590,20 @@ impl FoloApp {
                 let hidden = p.boxes.len() - vis.len();
                 let total = p.timing.total_ms.max(0.001);
                 let seg = |v: f64, c| div().h_full().w(relative((v / total) as f32)).bg(c);
+                // One neutral ramp: the model step darkest, the cheap steps lighter.
+                // One neutral ramp; the model step strongest without shouting.
+                let (c_pre, c_model, c_nms) = (
+                    crate::theme::alpha(t.text_tertiary, 0.4),
+                    t.text_tertiary,
+                    crate::theme::alpha(t.text_tertiary, 0.65),
+                );
                 let timing_el = div()
+                    .w_full()
                     .flex()
                     .flex_col()
-                    .gap(px(10.))
-                    .p(px(16.))
+                    .gap(px(8.))
+                    .px(px(16.))
+                    .py(px(12.))
                     .border_t_1()
                     .border_color(t.line_subtle)
                     .child(
@@ -524,16 +625,16 @@ impl FoloApp {
                             .gap(px(2.))
                             .rounded_full()
                             .overflow_hidden()
-                            .child(seg(p.timing.preprocess_ms, t.chart_series[1]))
-                            .child(seg(p.timing.inference_ms, t.chart_series[0]))
-                            .child(seg(p.timing.postprocess_ms, t.chart_series[2])),
+                            .child(seg(p.timing.preprocess_ms, c_pre))
+                            .child(seg(p.timing.inference_ms, c_model))
+                            .child(seg(p.timing.postprocess_ms, c_nms)),
                     )
                     .child(
-                        div().flex().justify_between().children(
+                        div().flex().gap(px(12.)).justify_between().children(
                             [
-                                ("pre", p.timing.preprocess_ms, t.chart_series[1]),
-                                ("model", p.timing.inference_ms, t.chart_series[0]),
-                                ("NMS", p.timing.postprocess_ms, t.chart_series[2]),
+                                ("pre", p.timing.preprocess_ms, c_pre),
+                                ("model", p.timing.inference_ms, c_model),
+                                ("NMS", p.timing.postprocess_ms, c_nms),
                             ]
                             .into_iter()
                             .map(|(n, v, c)| {
@@ -564,11 +665,14 @@ impl FoloApp {
                             vis.len().to_string()
                         },
                     )))
-                    .child(div().p(px(6.)).flex().flex_col().children(rows).when(vis.is_empty(), |d| {
-                        d.child(div().p(px(10.)).child(text(ty::SM, t.text_tertiary).child(
-                            "Nothing above the threshold. Lower the confidence to see weaker detections.",
-                        )))
-                    }))
+                    .child(div().p(px(6.)).flex().flex_col().gap(px(1.)).children(rows).when(
+                        vis.is_empty(),
+                        |d| {
+                            d.child(div().p(px(10.)).child(text(ty::SM, t.text_tertiary).child(
+                                "Nothing above the threshold. Lower the confidence to see weaker detections.",
+                            )))
+                        },
+                    ))
                     .into_any_element()
             }
             Load::Failed(e) => div()
@@ -615,7 +719,7 @@ impl FoloApp {
                 let el = div()
                     .id(SharedString::from(key.clone()))
                     .flex_1()
-                    .h(px(56.))
+                    .h(px(48.))
                     .rounded(px(radius::SM))
                     .overflow_hidden()
                     .bg(t.bg_inset)
@@ -657,26 +761,41 @@ impl FoloApp {
                 )
                 .child(div().flex().gap(px(6.)).children(thumbs))
         });
+        // Short windows scroll the latency with the rest instead of pinning it over the detections.
+        let pinned = window.viewport_size().height >= px(700.);
         // The panel scrolls, so short windows never squeeze a section to nothing; latency stays
         // pinned at the bottom because it is the number people look for.
         panel(&t)
+            .relative()
             .w(px(320.))
             .flex_none()
             .overflow_hidden()
             .flex()
             .flex_col()
             .child(
-                div().id("play-side").flex_1().min_h_0().overflow_y_scroll().child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .child(controls)
-                        .child(hairline(&t))
-                        .child(detections)
-                        .children(picker),
-                ),
+                div()
+                    .id("play-side")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.play_side_scroll)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .child(controls)
+                            .child(hairline(&t))
+                            .child(detections)
+                            .children(picker)
+                            .when(!pinned, |d| d.children(timing.take())),
+                    ),
             )
-            .children(timing.map(|el| div().flex_none().bg(t.bg_panel).child(el)))
+            .when(pinned, |d| {
+                d.children(
+                    timing.take().map(|el| div().flex_none().flex().flex_col().bg(t.bg_panel).child(el)),
+                )
+            })
+            .child(crate::ui::scrollbar(&t, self.play_side_scroll.clone()))
             .into_any_element()
     }
 

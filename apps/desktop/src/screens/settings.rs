@@ -18,7 +18,7 @@ impl FoloApp {
     pub fn settings(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
         let header = page_header(&t, "Settings", "Connection, appearance and keyboard shortcuts.", vec![]);
-        let row = |title: &str, help: &str, control: AnyElement| {
+        let row = |title: &str, help: AnyElement, control: AnyElement| {
             div()
                 .flex()
                 .items_center()
@@ -39,10 +39,11 @@ impl FoloApp {
                                 .font_weight(FontWeight::MEDIUM)
                                 .child(title.to_string()),
                         )
-                        .child(text(ty::SM, t.text_tertiary).child(help.to_string())),
+                        .child(help),
                 )
                 .child(div().flex_none().child(control))
         };
+        let help = |s: &str| text(ty::SM, t.text_tertiary).child(s.to_string()).into_any_element();
         let mode_sel = if self.server_mode == ServerMode::Mock { 0 } else { 1 };
         let mode_seg = self.segmented(
             "set-server",
@@ -104,11 +105,7 @@ impl FoloApp {
                 .flex()
                 .items_center()
                 .gap(px(8.))
-                .child(div().size(px(6.)).rounded_full().bg(if h.mock {
-                    t.accent_fill()
-                } else {
-                    t.success_solid
-                }))
+                .child(div().size(px(6.)).rounded_full().bg(t.success_solid))
                 .child(text(ty::SM, t.text_secondary).child(format!(
                     "Connected · {} · v{}",
                     self.store.api.describe(),
@@ -130,12 +127,16 @@ impl FoloApp {
             .child(panel_header(&t, "Connection").child(status))
             .child(row(
                 "Data source",
-                "Built-in demo data runs inside the app; folo serve is the FOLO engine over HTTP (docs/API.md).",
+                help("Built-in demo data runs inside the app; folo serve is the FOLO engine over HTTP."),
                 mode_seg.into_any_element(),
             ))
             .child(row(
                 "Server address",
-                "Where folo serve listens. Enter or Connect switches to it.",
+                help(if self.server_mode == ServerMode::Mock {
+                    "Used when the data source is folo serve. Connect switches to it and uses this address."
+                } else {
+                    "Where folo serve listens. Press Enter or Connect to connect again."
+                }),
                 div()
                     .flex()
                     .items_center()
@@ -152,7 +153,7 @@ impl FoloApp {
             ))
             .child(row(
                 "Start folo serve automatically",
-                "Launch a local server when the app opens and none is running.",
+                help("Launch a local server when the app opens and none is running."),
                 spawn.into_any_element(),
             ));
 
@@ -181,12 +182,18 @@ impl FoloApp {
             .child(panel_header(&t, "Appearance"))
             .child(row(
                 "Theme",
-                "Ctrl Shift L switches between dark and light.",
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(shortcut(&t, &["Ctrl", "Shift", "L"]))
+                    .child(text(ty::SM, t.text_tertiary).child("switches anywhere"))
+                    .into_any_element(),
                 theme_seg.into_any_element(),
             ))
             .child(row(
                 "Reduce motion",
-                "Turn off pulsing live indicators and transitions.",
+                help("Turn off pulsing live indicators and transitions."),
                 motion.into_any_element(),
             ));
 
@@ -245,15 +252,35 @@ impl FoloApp {
                     ),
             ),
         );
-        let body = div()
-            .flex()
-            .flex_col()
-            .gap(px(16.))
-            .w_full()
-            .child(connection)
-            .child(appearance)
-            .child(keys)
-            .child(about);
+        let wide = f32::from(window.viewport_size().width) >= 1400.;
+        let body = if wide {
+            div()
+                .flex()
+                .items_start()
+                .gap(px(16.))
+                .w_full()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap(px(16.))
+                        .child(connection)
+                        .child(appearance),
+                )
+                .child(div().w(px(440.)).flex_none().flex().flex_col().gap(px(16.)).child(keys).child(about))
+        } else {
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(16.))
+                .w_full()
+                .child(connection)
+                .child(appearance)
+                .child(keys)
+                .child(about)
+        };
         self.page_frame(&t, header, body)
     }
 }

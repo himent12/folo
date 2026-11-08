@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    Animation, AnimationExt, Div, FontFeatures, FontWeight, Hsla, IntoElement, ParentElement, SharedString,
-    Styled, Svg, div, px, relative, svg,
+    Animation, AnimationExt, Bounds, Div, FontFeatures, FontWeight, Hsla, IntoElement, ParentElement,
+    ScrollHandle, SharedString, Styled, Svg, canvas, div, fill, point, px, relative, size, svg,
 };
 
 use crate::api::{Label, RunStatus};
@@ -387,6 +387,27 @@ pub fn legend(t: &Theme, items: &[(&str, Hsla)]) -> gpui::AnyElement {
         .into_any_element()
 }
 
+/// A legend whose items can be dashed (two series sharing a hue).
+pub fn legend_styled(t: &Theme, items: &[(&str, Hsla, bool)]) -> gpui::AnyElement {
+    div()
+        .flex()
+        .gap(px(12.))
+        .children(items.iter().map(|(name, color, dashed)| {
+            let swatch = if *dashed {
+                div().flex().gap(px(2.)).children((0..3).map(|_| div().w(px(2.)).h(px(2.)).bg(*color)))
+            } else {
+                div().w(px(10.)).h(px(2.)).rounded_full().bg(*color)
+            };
+            div()
+                .flex()
+                .items_center()
+                .gap(px(5.))
+                .child(swatch)
+                .child(text(ty::XS, t.text_secondary).whitespace_nowrap().child(name.to_string()))
+        }))
+        .into_any_element()
+}
+
 /// A class swatch: a small square in the class colour.
 pub fn swatch(color: Hsla, size: f32) -> Div {
     div().size(px(size)).flex_none().rounded(px(2.)).bg(color)
@@ -463,4 +484,59 @@ mod tests {
         assert_eq!(bytes(5_400_000), ("5.4".into(), "MB"));
         assert_eq!(count_si(2_630_000), ("2.63".into(), "M"));
     }
+}
+
+/// A thin scroll thumb for a scroll container (GPUI draws none), so overflow is visible. Place it
+/// after the container inside a relative parent; it reads the container's handle when painting.
+pub fn scrollbar(t: &Theme, handle: ScrollHandle) -> impl IntoElement {
+    let color = crate::theme::alpha(t.text_tertiary, 0.45);
+    canvas(
+        |_, _, _| (),
+        move |_, _, window, _| {
+            let b = handle.bounds();
+            let max = handle.max_offset().height;
+            let h = b.size.height;
+            if max <= px(0.5) || h <= px(8.) {
+                return;
+            }
+            let thumb = (h * (h / (h + max))).max(px(28.)).min(h);
+            let off = (-handle.offset().y).clamp(px(0.), max);
+            let y = b.top() + (h - thumb) * (off / max);
+            window.paint_quad(
+                fill(Bounds::new(point(b.right() - px(6.), y + px(2.)), size(px(4.), thumb - px(4.))), color)
+                    .corner_radii(px(2.)),
+            );
+        },
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
+}
+
+/// A run's device as shown: "RTX 4080 SUPER · Vulkan" from "NVIDIA GeForce RTX 4080 SUPER (vulkan)".
+pub fn device_label(device: &str) -> String {
+    match device.split_once(" (") {
+        Some((name, rest)) => {
+            let api = rest.trim_end_matches(')');
+            let api = match api {
+                "vulkan" => "Vulkan",
+                "metal" => "Metal",
+                "dx12" => "DirectX 12",
+                "cuda" => "CUDA",
+                other => other,
+            };
+            format!("{} · {api}", short_gpu(name))
+        }
+        None => short_gpu(device),
+    }
+}
+
+/// A GPU name as people say it: vendor marketing prefixes dropped ("NVIDIA GeForce RTX 4080" → "RTX 4080").
+pub fn short_gpu(name: &str) -> String {
+    let mut n = name.trim();
+    for p in ["NVIDIA GeForce ", "NVIDIA ", "AMD ", "Intel(R) "] {
+        n = n.strip_prefix(p).unwrap_or(n);
+    }
+    n.to_string()
 }

@@ -19,6 +19,9 @@ use crate::store::Load;
 use crate::theme::{alpha, radius, theme, ty};
 use crate::ui::*;
 
+/// Row-label column of the confusion matrix (fits "False positives").
+const LABEL_W: f32 = 100.;
+
 impl FoloApp {
     pub fn models(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
@@ -172,6 +175,7 @@ impl FoloApp {
                 .items_center()
                 .gap(px(4.))
                 .px(px(4.))
+                .ml(px(-6.))
                 .rounded(px(radius::SM))
                 .cursor_pointer()
                 .hover(|s| s.bg(t.bg_hover))
@@ -187,14 +191,12 @@ impl FoloApp {
                 act(move |this, w, cx| this.navigate(Route::Run(rid.clone()), w, cx)),
             ));
         }
-        let header = div()
-            .flex()
-            .items_end()
-            .justify_between()
-            .gap(px(16.))
-            .pb(px(4.))
-            .child(div().flex().flex_col().gap(px(4.)).min_w_0().child(title).child(subtitle))
-            .child(div().flex().gap(px(8.)).child(export_btn).child(try_btn));
+        let header = detail_header(
+            &t,
+            title,
+            subtitle,
+            vec![export_btn.into_any_element(), try_btn.into_any_element()],
+        );
 
         let mm = m.metrics;
         let tile = |content: gpui::Div| div().flex_1().min_w_0().px(px(16.)).py(px(14.)).child(content);
@@ -241,13 +243,16 @@ impl FoloApp {
                 "File size",
                 b,
                 bu,
-                Some(text(ty::XS, t.text_tertiary).child(".folo · f32")),
+                Some(
+                    text(ty::XS, t.text_tertiary)
+                        .child(format!(".folo · {}", weight_dtype(m.bytes, m.params))),
+                ),
             )));
 
         let body = match self.store.evals.get(id) {
             Some(Load::Ready(ev)) => {
                 let ev = ev.clone();
-                let pr = self.pr_panel(&m, &ev, cx);
+                let pr = self.pr_panel(&m, &ev, window, cx);
                 let cm = self.confusion_panel(&m, &ev, window, cx);
                 let table = self.class_table(&m, &ev, cx);
                 div()
@@ -260,8 +265,7 @@ impl FoloApp {
                             .flex()
                             .gap(px(16.))
                             .child(div().flex_1().min_w_0().flex().child(pr))
-                            .child(div().w(px(460.)).flex_none().flex().child(cm))
-                            .items_start(),
+                            .child(div().flex_1().min_w(px(380.)).flex().child(cm)),
                     )
                     .child(table)
                     .into_any_element()
@@ -371,15 +375,26 @@ impl FoloApp {
         div().relative().child(trigger).children(menu).into_any_element()
     }
 
-    fn pr_panel(&mut self, m: &Model, ev: &ModelEval, cx: &mut Context<Self>) -> AnyElement {
+    fn pr_panel(
+        &mut self,
+        m: &Model,
+        ev: &ModelEval,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let t = theme(cx);
         let series: Vec<Series> = ev
             .pr
             .iter()
             .map(|c| {
-                let pts: Vec<(f32, f32)> = c.recall.iter().zip(&c.precision).map(|(r, p)| (*r, *p)).collect();
+                // End each curve at its highest recall (with a dot) instead of a drop to zero.
+                let mut pts: Vec<(f32, f32)> =
+                    c.recall.iter().zip(&c.precision).map(|(r, p)| (*r, *p)).collect();
+                if let Some(last) = pts.iter().rposition(|p| p.1 > 0.0) {
+                    pts.truncate(last + 1);
+                }
                 let name = m.classes.get(c.class as usize).cloned().unwrap_or_default();
-                Series::new(name, t.class(c.class), Arc::new(pts)).width(1.5)
+                Series::new(name, t.class_stroke(c.class), Arc::new(pts)).width(2.).live(true)
             })
             .collect();
         let view = cx.entity().downgrade();
@@ -398,25 +413,36 @@ impl FoloApp {
         chart.x_fmt = |v| format!("{v:.2}");
         chart.x_name = "recall";
         chart.axis_titles = Some(("Recall", "Precision"));
-        chart.height = 300.;
+        // As tall as the confusion matrix beside it, so the two panels line up.
+        chart.height = (44. * ev.confusion.len() as f32 + 34.).max(240.);
         chart.hover = self.pr_hover;
         chart.on_hover = Some(on_hover);
         chart.value_fmt = Some(|v| format!("P {v:.3}"));
-        let legend =
-            div().flex().flex_wrap().items_center().gap(px(12.)).child(caption(&t, "AP50")).children(
-                ev.pr.iter().map(|c| {
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(5.))
-                        .child(div().w(px(10.)).h(px(2.)).rounded_full().bg(t.class(c.class)))
-                        .child(
-                            text(ty::XS, t.text_secondary)
-                                .child(m.classes.get(c.class as usize).cloned().unwrap_or_default()),
-                        )
-                        .child(text(ty::XS, t.text_tertiary).tnum().child(format!("{:.3}", c.ap50)))
-                }),
-            );
+        // Heading on its own line, then a three-column grid of whole entries.
+        let item = |c: &crate::api::PrCurve| {
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .child(div().flex_none().w(px(12.)).h(px(2.)).rounded_full().bg(t.class_stroke(c.class)))
+                .child(
+                    text(ty::XS, t.text_secondary)
+                        .truncate()
+                        .child(m.classes.get(c.class as usize).cloned().unwrap_or_default()),
+                )
+                .child(text(ty::XS, t.text_tertiary).flex_none().tnum().child(format!("{:.3}", c.ap50)))
+        };
+        let legend = div().flex().flex_col().gap(px(6.)).child(caption(&t, "AP50 per class")).children(
+            ev.pr.chunks(3).map(|row| {
+                div()
+                    .flex()
+                    .gap(px(16.))
+                    .children(row.iter().map(item))
+                    .children((row.len()..3).map(|_| div().flex_1()))
+            }),
+        );
         panel(&t)
             .flex_1()
             .flex()
@@ -425,7 +451,14 @@ impl FoloApp {
                 panel_header(&t, "Precision–recall")
                     .child(text(ty::XS, t.text_tertiary).child("per class · IoU 0.50")),
             )
-            .child(div().px(px(12.)).pt(px(12.)).child(line_chart(&t, chart)))
+            .child(self.chart_group(
+                "pr-chart",
+                0.01,
+                crate::controls::Cursor::Pr,
+                div().px(px(12.)).pt(px(12.)).child(line_chart(&t, chart)),
+                window,
+                cx,
+            ))
             .child(div().px(px(16.)).pb(px(14.)).pt(px(4.)).child(legend))
             .into_any_element()
     }
@@ -450,46 +483,63 @@ impl FoloApp {
         let n = ev.confusion.len();
         let mut labels: Vec<String> = m.classes.clone();
         labels.truncate(n.saturating_sub(1));
-        labels.push("background".into());
+        labels.push("Missed".into());
+        // Rows are what was there, columns what was predicted: the last column is objects nothing
+        // detected, the last row detections with no object.
         let row_sums: Vec<u32> = ev.confusion.iter().map(|r| r.iter().sum::<u32>().max(1)).collect();
         let max_count = ev.confusion.iter().flatten().copied().max().unwrap_or(1).max(1);
-        let cell = px(((460. - 34. - 80.) / n as f32).floor().clamp(36., 64.));
-        let base = t.chart_series[1];
-        let header_row = div().flex().pl(px(80.)).children(labels.iter().enumerate().map(|(i, l)| {
-            div().w(cell).flex().justify_center().child(
-                text(ty::MICRO, if i == n - 1 { t.text_tertiary } else { t.text_secondary })
-                    .truncate()
-                    .child(l.clone()),
-            )
+        let cell_h = px(44.);
+        // A cool sequential ramp: amber stays reserved for warnings.
+        let base = t.chart_series[0];
+        let header_row = div().flex().pl(px(LABEL_W)).children(labels.iter().enumerate().map(|(i, l)| {
+            div()
+                .flex_1()
+                .min_w_0()
+                .px(px(2.))
+                .when(i == n - 1, |d| d.ml(px(6.)))
+                .flex()
+                .justify_center()
+                .child(
+                    text(ty::MICRO, if i == n - 1 { t.text_tertiary } else { t.text_secondary })
+                        .truncate()
+                        .child(l.clone()),
+                )
         }));
         let rows = ev.confusion.iter().enumerate().map(|(r, row)| {
             div()
                 .flex()
                 .items_center()
+                .when(r == n - 1, |d| d.mt(px(6.)))
                 .child(
                     text(ty::XS, if r == n - 1 { t.text_tertiary } else { t.text_secondary })
-                        .w(px(80.))
+                        .w(px(LABEL_W))
+                        .flex_none()
                         .pr(px(8.))
                         .text_right()
                         .truncate()
-                        .child(labels[r].clone()),
+                        .child(if r == n - 1 { "False positives".to_string() } else { labels[r].clone() }),
                 )
                 .children(row.iter().enumerate().map(|(c, &v)| {
                     let frac = if norm { v as f32 / row_sums[r] as f32 } else { v as f32 / max_count as f32 };
                     let diag = r == c;
                     let na = r == n - 1 && c == n - 1;
+                    // Under 1 % reads as noise: leave those cells blank, like zero.
+                    let tiny = norm && frac < 0.01;
                     let fill = if na {
                         gpui::transparent_black()
-                    } else if v == 0 {
-                        t.bg_inset
+                    } else if v == 0 || tiny {
+                        crate::theme::over(t.bg_inset, alpha(base, 0.05))
                     } else {
-                        crate::theme::over(t.bg_inset, alpha(base, (0.08 + 0.85 * frac).min(0.93)))
+                        // Square-root ramp: 2 %, 10 % and 25 % stay visibly apart.
+                        crate::theme::over(t.bg_inset, alpha(base, (0.9 * frac.sqrt()).clamp(0.06, 0.92)))
                     };
                     let label = if na {
                         "–".to_string()
                     } else if norm {
                         if v == 0 {
-                            String::new()
+                            "·".to_string()
+                        } else if tiny {
+                            "<1%".to_string()
                         } else {
                             format!("{:.0}%", v as f32 / row_sums[r] as f32 * 100.)
                         }
@@ -498,12 +548,12 @@ impl FoloApp {
                     };
                     let strong = frac > 0.55;
                     // Pick the label colour from the composited cell, not the theme.
-                    let ink = if na || v == 0 {
+                    let ink = if na || v == 0 || tiny {
                         t.text_tertiary
                     } else {
                         t.readable_on(crate::theme::over(t.bg_panel, fill))
                     };
-                    div().w(cell).h(cell).p(px(1.)).child(
+                    div().flex_1().min_w_0().h(cell_h).p(px(1.)).when(c == n - 1, |d| d.ml(px(6.))).child(
                         div()
                             .size_full()
                             .rounded(px(3.))
@@ -524,6 +574,7 @@ impl FoloApp {
         });
         panel(&t)
             .flex_1()
+            .min_w_0()
             .flex()
             .flex_col()
             .child(panel_header(&t, "Confusion matrix").child(seg))
@@ -536,15 +587,30 @@ impl FoloApp {
                     .child(
                         div()
                             .flex()
-                            .child(text(ty::XS, t.text_tertiary).w(px(80.)).pr(px(8.)).text_right().child("Actual ↓"))
+                            .child(
+                                text(ty::XS, t.text_tertiary)
+                                    .w(px(LABEL_W))
+                                    .pr(px(8.))
+                                    .text_right()
+                                    .child("Actual ↓"),
+                            )
                             .child(text(ty::XS, t.text_tertiary).flex_1().child("Predicted →")),
                     )
                     .child(header_row)
                     .children(rows)
-                    .child(div().pt(px(8.)).w_full().min_w_0().child(text(ty::XS, t.text_tertiary).tnum().whitespace_normal().child(format!(
-                        "Rows sum to 100% of each class · background = missed or extra detections · {} images",
-                        int(ev.images as u64)
-                    )))),
+                    .child(div().pt(px(8.)).w_full().min_w_0().child(
+                        text(ty::XS, t.text_tertiary).tnum().whitespace_normal().child(if norm {
+                            format!(
+                                "Rows: actual objects · last row: share of unmatched detections · {} images",
+                                int(ev.images as u64)
+                            )
+                        } else {
+                            format!(
+                                "Counts of objects and unmatched detections · {} images",
+                                int(ev.images as u64)
+                            )
+                        }),
+                    )),
             )
             .into_any_element()
     }
@@ -585,13 +651,13 @@ impl FoloApp {
                 .child(div().w(px(140.)).child(bar_value(
                     &t,
                     c.precision,
-                    format!("{:.2}", c.precision),
+                    format!("{:.3}", c.precision),
                     t.text_tertiary,
                 )))
                 .child(div().w(px(140.)).child(bar_value(
                     &t,
                     c.recall,
-                    format!("{:.2}", c.recall),
+                    format!("{:.3}", c.recall),
                     t.text_tertiary,
                 )))
         });
@@ -601,5 +667,14 @@ impl FoloApp {
             .child(head)
             .children(rows)
             .into_any_element()
+    }
+}
+
+/// Weight precision inferred from file size per parameter (the API doesn't report it).
+fn weight_dtype(bytes: u64, params: u64) -> &'static str {
+    match bytes as f64 / params.max(1) as f64 {
+        b if b < 1.5 => "int8",
+        b if b < 3.0 => "f16",
+        _ => "f32",
     }
 }

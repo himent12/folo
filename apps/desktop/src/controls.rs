@@ -13,6 +13,15 @@ use crate::theme::{Theme, radius, size as tsize, theme, ty};
 use crate::ui::*;
 use gpui::AnimationExt;
 
+/// Which shared chart cursor a chart group drives.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Cursor {
+    /// The linked cursor of the run dashboard and the Overview hero.
+    Run,
+    /// The PR curve on a model page.
+    Pr,
+}
+
 /// Called with the chosen option index.
 pub type OnSelect = std::rc::Rc<dyn Fn(&mut FoloApp, usize, &mut Window, &mut Context<FoloApp>)>;
 
@@ -20,7 +29,6 @@ pub type OnSelect = std::rc::Rc<dyn Fn(&mut FoloApp, usize, &mut Window, &mut Co
 pub enum Btn {
     Primary,
     Secondary,
-    Ghost,
     Danger,
 }
 
@@ -42,7 +50,7 @@ impl Render for Tip {
                 .border_1()
                 .border_color(t.line_default)
                 .shadow(t.shadow_md())
-                .child(text(ty::SM, t.text_primary).child(self.0.clone()))
+                .child(text(ty::SM, t.text_primary).max_w(px(280.)).child(self.0.clone()))
                 .when_some(self.1.clone(), |d, k| d.child(text(ty::XS, t.text_tertiary).child(k))),
         )
     }
@@ -116,6 +124,12 @@ impl FoloApp {
     ) -> Stateful<Div> {
         let t = theme(cx);
         let (bg, fg, border, hover) = btn_colors(&t, kind);
+        // Pressed is a real step past hover, not a fade.
+        let pressed = match kind {
+            Btn::Primary => crate::theme::over(t.accent_solid, gpui::hsla(0., 0., 0., 0.14)),
+            Btn::Secondary => crate::theme::over(t.bg_raised, t.bg_active),
+            Btn::Danger => crate::theme::alpha(t.danger_solid, 0.28),
+        };
         let label: SharedString = label.into();
         let el = div()
             .id(SharedString::from(key.to_string()))
@@ -131,11 +145,44 @@ impl FoloApp {
             .when_some(border, |d, b| d.border_1().border_color(b))
             .cursor_pointer()
             .hover(move |s| s.bg(hover))
-            .active(move |s| s.opacity(0.85))
+            .active(move |s| s.bg(pressed))
             .when_some(icon_path, |d, p| d.child(icon(p, 14., fg)))
             .child(text(ty::BASE, fg).font_weight(FontWeight::MEDIUM).whitespace_nowrap().child(label));
         let ring_color = if kind == Btn::Primary { t.text_primary } else { t.focus };
         self.bind_ring(el, key, radius::MD, ring_color, window, cx, action)
+    }
+
+    /// A button that can't be used right now: dimmed, inert, not a Tab stop, and its tooltip says why.
+    pub fn button_disabled(
+        &self,
+        key: &str,
+        label: impl Into<SharedString>,
+        kind: Btn,
+        icon_path: Option<&'static str>,
+        reason: &'static str,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let t = theme(cx);
+        // Disabled drops the kind's colour entirely, so it never reads as a dimmed hover.
+        let _ = kind;
+        let (bg, fg, border) = (t.bg_inset, t.text_disabled, Some(t.line_default));
+        let label: SharedString = label.into();
+        div()
+            .id(SharedString::from(format!("{key}-disabled")))
+            .h(px(tsize::CONTROL_MD))
+            .px(px(if icon_path.is_some() { 10. } else { 12. }))
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .gap(px(6.))
+            .rounded(px(radius::MD))
+            .bg(bg)
+            .when_some(border, |d, b| d.border_1().border_color(b))
+            .cursor_not_allowed()
+            .tooltip(tip(reason, None))
+            .when_some(icon_path, |d, p| d.child(icon(p, 14., fg)))
+            .child(text(ty::BASE, fg).font_weight(FontWeight::MEDIUM).whitespace_nowrap().child(label))
     }
 
     pub fn icon_button(
@@ -162,6 +209,80 @@ impl FoloApp {
             .tooltip(tip(tooltip, None))
             .child(icon(icon_path, 16., t.text_secondary));
         self.bind(el, key, radius::MD, window, cx, action)
+    }
+
+    fn cursor_mut(&mut self, c: Cursor) -> &mut Option<f32> {
+        match c {
+            Cursor::Run => &mut self.chart_hover,
+            Cursor::Pr => &mut self.pr_hover,
+        }
+    }
+
+    /// Make a group of charts one Tab stop: ←/→ step the shared cursor by `step` (a fraction of the
+    /// x range), Shift steps ×10, Home/End jump, Esc clears. The readouts follow the cursor.
+    pub fn chart_group(
+        &self,
+        key: &str,
+        step: f32,
+        cursor: Cursor,
+        content: Div,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = theme(cx);
+        let fh = self.fh(key.to_string(), cx);
+        let ring = self.ring(&fh, window);
+        content
+            .id(SharedString::from(key.to_string()))
+            .track_focus(&fh)
+            .relative()
+            // Esc is bound globally to Dismiss (go back), and actions run before key handlers: with
+            // a cursor showing, Esc clears it here instead; otherwise it passes on.
+            .on_action(cx.listener(move |this, _: &crate::app::Dismiss, _, cx| {
+                let cur = this.cursor_mut(cursor);
+                if cur.is_some() {
+                    *cur = None;
+                    cx.notify();
+                } else {
+                    cx.propagate();
+                }
+            }))
+            .on_key_down(cx.listener(move |this, ev: &KeyDownEvent, _, cx| {
+                let big = if ev.keystroke.modifiers.shift { 10. } else { 1. };
+                let cur = this.cursor_mut(cursor);
+                let at = cur.unwrap_or(1.0);
+                let next = match ev.keystroke.key.as_str() {
+                    "left" => Some((at - step * big).max(0.0)),
+                    "right" => Some((at + step * big).min(1.0)),
+                    "home" => Some(0.0),
+                    "end" => Some(1.0),
+                    "escape" if cur.is_some() => None,
+                    _ => return,
+                };
+                *cur = next;
+                cx.stop_propagation();
+                cx.notify();
+            }))
+            .when(ring, |d| {
+                d.child(focus_ring(&t, radius::LG)).child(
+                    div()
+                        .absolute()
+                        .top(gpui::relative(1.))
+                        .right_0()
+                        .mt(px(6.))
+                        .px(px(8.))
+                        .py(px(3.))
+                        .rounded(px(radius::SM))
+                        .bg(t.bg_overlay)
+                        .border_1()
+                        .border_color(t.line_default)
+                        .child(
+                            text(ty::XS, t.text_secondary)
+                                .child("← → inspect · Shift ×10 · Home / End · Esc clears"),
+                        ),
+                )
+            })
+            .into_any_element()
     }
 
     /// A segmented control. Arrow keys move the selection while it has focus.
@@ -462,8 +583,16 @@ impl FoloApp {
             _ => {
                 if let Some(f) = self.new_run.as_mut() {
                     match key {
-                        "nr-epochs" => f.epochs = q(10. + frac * 290., 5.),
-                        "nr-lr0" => f.lr0 = q(0.001 + frac * 0.049, 0.001),
+                        "nr-epochs" => {
+                            f.epochs = q(10. + frac * 290., 5.);
+                            let (input, v) = (f.epochs_input.clone(), format!("{:.0}", f.epochs));
+                            input.update(cx, |i, cx| i.set_text(v, cx));
+                        }
+                        "nr-lr0" => {
+                            f.lr0 = q(0.001 + frac * 0.049, 0.001);
+                            let (input, v) = (f.lr_input.clone(), format!("{:.3}", f.lr0));
+                            input.update(cx, |i, cx| i.set_text(v, cx));
+                        }
                         "nr-mosaic" => f.mosaic = q(frac, 0.05),
                         "nr-mixup" => f.mixup = q(frac * 0.5, 0.05),
                         "nr-fliplr" => f.fliplr = q(frac, 0.05),
@@ -496,6 +625,9 @@ impl FoloApp {
         let n = options.len();
         let empty = n == 0;
         let keys = on_select.clone();
+        // While open, arrows move a highlight; Enter commits it, Esc closes without a change.
+        let hl = if open { self.menu_hl.min(n.saturating_sub(1)) } else { selected };
+        let menu_scroll = self.menu_scroll.clone();
         let trigger = div()
             .id(key)
             .track_focus(&fh)
@@ -512,17 +644,59 @@ impl FoloApp {
             .border_color(if open { t.accent_line } else { t.line_default })
             .cursor_pointer()
             .hover(|s| s.border_color(t.line_strong))
+            .when(open, |d| {
+                let cell = self.menu_trigger.clone();
+                d.child(
+                    gpui::canvas(move |b, _, _| cell.set(Some(b)), |_, _, _, _| {})
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full(),
+                )
+            })
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.menu_open = if this.menu_open == Some(key) { None } else { Some(key) };
+                this.menu_hl = selected;
+                this.menu_scroll.scroll_to_item(selected);
                 cx.notify();
             }))
             .on_key_down(cx.listener(move |this, ev: &KeyDownEvent, window, cx| {
+                let is_open = this.menu_open == Some(key);
                 match ev.keystroke.key.as_str() {
-                    "enter" | "space" => {
-                        this.menu_open = if this.menu_open == Some(key) { None } else { Some(key) };
+                    _ if n == 0 => return,
+                    "enter" | "space" if is_open => {
+                        let pick = this.menu_hl.min(n - 1);
+                        this.menu_open = None;
+                        if pick != selected {
+                            keys(this, pick, window, cx);
+                        }
                     }
-                    "up" if n > 0 => keys(this, (selected + n - 1) % n, window, cx),
-                    "down" if n > 0 => keys(this, (selected + 1) % n, window, cx),
+                    "enter" | "space" | "down" | "up" if !is_open => {
+                        this.menu_open = Some(key);
+                        this.menu_hl = selected;
+                        this.menu_scroll.scroll_to_item(selected);
+                    }
+                    "down" => {
+                        this.menu_hl = (this.menu_hl + 1).min(n - 1);
+                        this.menu_scroll.scroll_to_item(this.menu_hl);
+                    }
+                    "up" => {
+                        this.menu_hl = this.menu_hl.saturating_sub(1);
+                        this.menu_scroll.scroll_to_item(this.menu_hl);
+                    }
+                    "home" if is_open => {
+                        this.menu_hl = 0;
+                        this.menu_scroll.scroll_to_item(0);
+                    }
+                    "end" if is_open => {
+                        this.menu_hl = n - 1;
+                        this.menu_scroll.scroll_to_item(n - 1);
+                    }
+                    "escape" if is_open => this.menu_open = None,
+                    "tab" if is_open => {
+                        this.menu_open = None;
+                        return;
+                    }
                     _ => return,
                 }
                 cx.stop_propagation();
@@ -543,42 +717,62 @@ impl FoloApp {
                     .left_0()
                     .right_0()
                     .occlude()
-                    .p(px(4.))
-                    .flex()
-                    .flex_col()
-                    .gap(px(1.))
+                    .on_mouse_down_out(cx.listener(move |this, ev: &gpui::MouseDownEvent, _, cx| {
+                        let on_trigger = this.menu_trigger.get().is_some_and(|b| b.contains(&ev.position));
+                        if this.menu_open == Some(key) && !on_trigger {
+                            this.menu_open = None;
+                            cx.notify();
+                        }
+                    }))
                     .rounded(px(radius::LG))
                     .bg(t.bg_overlay)
                     .border_1()
                     .border_color(t.line_default)
                     .shadow(t.shadow_lg())
-                    .children(options.into_iter().enumerate().map(|(i, (label, detail))| {
-                        let f = on_select.clone();
-                        let on = i == selected;
+                    .child(
                         div()
-                            .id(SharedString::from(format!("{key}-opt-{i}")))
-                            .h(px(32.))
-                            .px(px(8.))
+                            .id(SharedString::from(format!("{key}-menu")))
+                            .max_h(px(288.))
+                            .overflow_y_scroll()
+                            .track_scroll(&menu_scroll)
+                            .p(px(4.))
                             .flex()
-                            .items_center()
-                            .gap(px(8.))
-                            .rounded(px(radius::SM))
-                            .cursor_pointer()
-                            .when(on, |d| d.bg(t.bg_selected))
-                            .hover(|s| s.bg(t.bg_hover))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                f(this, i, window, cx);
-                                this.menu_open = None;
-                                cx.notify();
-                            }))
-                            .child(text(ty::BASE, t.text_primary).flex_1().truncate().child(label))
-                            .when_some(detail, |d, s| d.child(text(ty::XS, t.text_tertiary).tnum().child(s)))
-                            .child(
+                            .flex_col()
+                            .gap(px(1.))
+                            .children(options.into_iter().enumerate().map(|(i, (label, detail))| {
+                                let f = on_select.clone();
+                                let on = i == selected;
+                                let lit = i == hl;
                                 div()
-                                    .w(px(14.))
-                                    .when(on, |d| d.child(icon("icons/check.svg", 14., t.accent_text))),
-                            )
-                    })),
+                                    .id(SharedString::from(format!("{key}-opt-{i}")))
+                                    .flex_none()
+                                    .h(px(32.))
+                                    .px(px(8.))
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(8.))
+                                    .rounded(px(radius::SM))
+                                    .cursor_pointer()
+                                    .when(on, |d| d.bg(t.bg_selected))
+                                    .when(lit && !on, |d| d.bg(t.bg_hover))
+                                    .when(lit && on, |d| d.bg(crate::theme::over(t.bg_selected, t.bg_hover)))
+                                    .hover(|s| s.bg(t.bg_hover))
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        f(this, i, window, cx);
+                                        this.menu_open = None;
+                                        cx.notify();
+                                    }))
+                                    .child(text(ty::BASE, t.text_primary).flex_1().truncate().child(label))
+                                    .when_some(detail, |d, s| {
+                                        d.child(text(ty::XS, t.text_tertiary).tnum().child(s))
+                                    })
+                                    .child(
+                                        div().w(px(14.)).when(on, |d| {
+                                            d.child(icon("icons/check.svg", 14., t.accent_text))
+                                        }),
+                                    )
+                            })),
+                    ),
             )
             .with_priority(2)
         });
@@ -592,7 +786,6 @@ pub fn btn_colors(t: &Theme, kind: Btn) -> (Hsla, Hsla, Option<Hsla>, Hsla) {
         Btn::Secondary => {
             (t.bg_raised, t.text_primary, Some(t.line_default), crate::theme::over(t.bg_raised, t.bg_hover))
         }
-        Btn::Ghost => (gpui::transparent_black(), t.text_secondary, None, t.bg_hover),
         Btn::Danger => (t.danger_muted, t.danger_text, None, crate::theme::alpha(t.danger_solid, 0.2)),
     }
 }

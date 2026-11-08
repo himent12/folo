@@ -72,6 +72,8 @@ pub struct TextInput {
     last_layout: Option<ShapedLine>,
     last_bounds: Option<Bounds<Pixels>>,
     is_selecting: bool,
+    /// Horizontal scroll of the text, so the caret stays visible in long values.
+    scroll_x: Pixels,
 }
 
 impl EventEmitter<InputEvent> for TextInput {}
@@ -88,6 +90,7 @@ impl TextInput {
             last_layout: None,
             last_bounds: None,
             is_selecting: false,
+            scroll_x: px(0.),
         }
     }
 
@@ -239,7 +242,7 @@ impl TextInput {
         if position.y > bounds.bottom() {
             return self.content.len();
         }
-        line.closest_index_for_x(position.x - bounds.left())
+        line.closest_index_for_x(position.x - bounds.left() + self.scroll_x)
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
@@ -397,8 +400,8 @@ impl EntityInputHandler for TextInput {
         let last_layout = self.last_layout.as_ref()?;
         let range = self.range_from_utf16(&range_utf16);
         Some(Bounds::from_corners(
-            point(bounds.left() + last_layout.x_for_index(range.start), bounds.top()),
-            point(bounds.left() + last_layout.x_for_index(range.end), bounds.bottom()),
+            point(bounds.left() + last_layout.x_for_index(range.start) - self.scroll_x, bounds.top()),
+            point(bounds.left() + last_layout.x_for_index(range.end) - self.scroll_x, bounds.bottom()),
         ))
     }
 
@@ -423,6 +426,23 @@ struct PrepaintState {
     line: Option<ShapedLine>,
     cursor: Option<PaintQuad>,
     selection: Option<PaintQuad>,
+    scroll_x: Pixels,
+    /// Placeholder text starts just right of the caret.
+    text_dx: Pixels,
+}
+
+/// Keep the caret at least `margin` inside a field of `width`, scrolling no further than the text.
+fn follow_caret(scroll: Pixels, caret: Pixels, text_w: Pixels, width: Pixels, margin: Pixels) -> Pixels {
+    let mut s = scroll;
+    if caret - s > width - margin {
+        s = caret - width + margin;
+    }
+    if caret - s < px(0.) {
+        s = caret;
+    }
+    // Don't leave empty space after the text once it fits again.
+    let max = (text_w - width + margin).max(px(0.));
+    s.min(max).max(px(0.))
 }
 
 impl IntoElement for TextElement {
@@ -508,7 +528,13 @@ impl Element for TextElement {
         let font_size = style.font_size.to_pixels(window.rem_size());
         let line = window.text_system().shape_line(display_text, font_size, &runs, None);
         let empty = input.content.is_empty();
-        let cursor_pos = if empty { px(0.) } else { line.x_for_index(cursor) };
+        let caret_x = if empty { px(0.) } else { line.x_for_index(cursor) };
+        let scroll_x = if empty {
+            px(0.)
+        } else {
+            follow_caret(input.scroll_x, caret_x, line.width, bounds.size.width, px(8.))
+        };
+        let cursor_pos = caret_x - scroll_x;
         let line_h = window.line_height();
         let caret_h = (font_size * 1.25).min(line_h);
         let caret_top = bounds.top() + (line_h - caret_h) / 2.;
@@ -526,15 +552,19 @@ impl Element for TextElement {
             (
                 Some(fill(
                     Bounds::from_corners(
-                        point(bounds.left() + line.x_for_index(selected_range.start), caret_top),
-                        point(bounds.left() + line.x_for_index(selected_range.end), caret_top + caret_h),
+                        point(bounds.left() + line.x_for_index(selected_range.start) - scroll_x, caret_top),
+                        point(
+                            bounds.left() + line.x_for_index(selected_range.end) - scroll_x,
+                            caret_top + caret_h,
+                        ),
                     ),
                     alpha(t.accent_fill(), 0.28),
                 )),
                 None,
             )
         };
-        PrepaintState { line: Some(line), cursor, selection }
+        let text_dx = if empty { px(4.) } else { px(0.) };
+        PrepaintState { line: Some(line), cursor, selection, scroll_x, text_dx }
     }
 
     fn paint(
@@ -549,11 +579,21 @@ impl Element for TextElement {
     ) {
         let focus_handle = self.input.read(cx).focus_handle.clone();
         window.handle_input(&focus_handle, ElementInputHandler::new(bounds, self.input.clone()), cx);
-        if let Some(selection) = prepaint.selection.take() {
-            window.paint_quad(selection)
-        }
         let line = prepaint.line.take().unwrap();
-        line.paint(bounds.origin, window.line_height(), window, cx).unwrap();
+        let scroll_x = prepaint.scroll_x;
+        let selection = prepaint.selection.take();
+        window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
+            if let Some(selection) = selection {
+                window.paint_quad(selection)
+            }
+            line.paint(
+                point(bounds.origin.x - scroll_x + prepaint.text_dx, bounds.origin.y),
+                window.line_height(),
+                window,
+                cx,
+            )
+            .unwrap();
+        });
         if focus_handle.is_focused(window)
             && let Some(cursor) = prepaint.cursor.take()
         {
@@ -562,6 +602,7 @@ impl Element for TextElement {
         self.input.update(cx, |input, _| {
             input.last_layout = Some(line);
             input.last_bounds = Some(bounds);
+            input.scroll_x = scroll_x;
         });
     }
 }
@@ -622,6 +663,18 @@ fn utf16_to_utf8(s: &str, offset: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::utf16_to_utf8;
+
+    #[test]
+    fn caret_stays_in_view() {
+        use super::follow_caret;
+        use gpui::px;
+        // Typing past the right edge scrolls so the caret sits 8 px inside.
+        assert_eq!(follow_caret(px(0.), px(300.), px(300.), px(200.), px(8.)), px(108.));
+        // Moving home scrolls back to the start.
+        assert_eq!(follow_caret(px(108.), px(0.), px(300.), px(200.), px(8.)), px(0.));
+        // Short text never scrolls.
+        assert_eq!(follow_caret(px(40.), px(50.), px(60.), px(200.), px(8.)), px(0.));
+    }
 
     #[test]
     fn utf16_offsets_land_on_char_boundaries() {

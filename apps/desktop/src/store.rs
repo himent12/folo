@@ -74,6 +74,8 @@ pub struct Derived {
     pub recall: Pts,
     /// Highest learning rate in the history (for the LR chart's scale).
     pub lr_max: f32,
+    /// Highest value of each loss part (box, cls, dfl, total), for the loss axis.
+    pub loss_max: [f32; 4],
 }
 
 /// A run's full metric history, extended live by SSE events.
@@ -123,6 +125,12 @@ impl RunData {
             precision: epts(&|e| e.val.precision),
             recall: epts(&|e| e.val.recall),
             lr_max: steps.iter().map(|s| s.lr).fold(0f32, f32::max),
+            loss_max: [
+                steps.iter().map(|s| s.loss.box_).fold(0f32, f32::max),
+                steps.iter().map(|s| s.loss.cls).fold(0f32, f32::max),
+                steps.iter().map(|s| s.loss.dfl).fold(0f32, f32::max),
+                steps.iter().map(|s| s.loss.total).fold(0f32, f32::max),
+            ],
         };
         self.derived.replace(Some(d.clone()));
         d
@@ -457,6 +465,20 @@ mod tests {
         assert_eq!(store.run_data[id].ready().unwrap().derived().loss[3].len(), before + 1);
         store.apply(id, RunEvent::Status(StatusEvent { status: RunStatus::Completed, error: None }));
         assert_eq!(store.run(id).unwrap().status, RunStatus::Completed);
+    }
+
+    #[test]
+    fn derived_loss_maxima_match_the_history_and_follow_new_steps() {
+        let api = MockBackend::new(4200, true);
+        let m = api.metrics("run_a19f").unwrap();
+        let expect = m.steps.iter().map(|s| s.loss.total).fold(0f32, f32::max);
+        let mut d = RunData::new(m.clone(), 100);
+        assert_eq!(d.derived().loss_max[3], expect);
+        let mut big = *m.steps.last().unwrap();
+        big.step += 1;
+        big.loss.total = expect + 10.0;
+        d.push_step(big);
+        assert_eq!(d.derived().loss_max[3], expect + 10.0, "a new step invalidates the cached maxima");
     }
 
     #[test]

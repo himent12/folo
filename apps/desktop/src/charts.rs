@@ -36,6 +36,11 @@ pub struct Series {
 }
 
 impl Series {
+    pub fn dashed(mut self) -> Self {
+        self.dashed = true;
+        self
+    }
+
     pub fn new(name: impl Into<SharedString>, color: Hsla, points: Arc<Vec<(f32, f32)>>) -> Self {
         Self {
             name: name.into(),
@@ -97,6 +102,10 @@ pub struct LineChart {
     pub log_y: bool,
     /// Axis titles (x, y): y above the plot's top-left, x centred under the tick labels.
     pub axis_titles: Option<(&'static str, &'static str)>,
+    /// Marker label lanes to reserve even when fewer are used, so charts in a row share a plot top.
+    pub min_lanes: usize,
+    /// X is a count (epochs): ticks land on whole numbers and the last one labels the end.
+    pub x_int: bool,
 }
 
 impl LineChart {
@@ -117,11 +126,22 @@ impl LineChart {
             y_ticks: 4,
             log_y: false,
             axis_titles: None,
+            min_lanes: 0,
+            x_int: false,
         }
     }
 }
 
 /// Round tick spacing near `range / n`: 1, 2, 2.5 or 5 × 10^k.
+/// `v` rounded up to the next tick of a nice step (axis tops that land on a label).
+pub fn nice_ceil(v: f32, n: usize) -> f32 {
+    let step = nice_step(v, n);
+    (v / step).ceil() * step
+}
+
+/// Height of one marker-label lane above a plot.
+const LANE: f32 = 14.;
+
 pub fn nice_step(range: f32, n: usize) -> f32 {
     if range <= 0.0 || !range.is_finite() {
         return 1.0;
@@ -155,6 +175,74 @@ pub fn ticks(lo: f32, hi: f32, n: usize) -> Vec<f32> {
 }
 
 /// Format `v` with the decimals a tick step of `step` needs (0.25 → 2, 0.5 → 1, 10 → 0).
+/// X-axis ticks that end exactly on the range when a round step divides it (0–120 → every 20),
+/// otherwise the usual nice ticks.
+pub fn even_ticks(lo: f32, hi: f32, max_n: usize) -> Vec<f32> {
+    let range = hi - lo;
+    if range > 0.0 && range.is_finite() {
+        let mag = 10f32.powf((range / max_n as f32).log10().floor());
+        for k in [1.0, 10.0, 100.0] {
+            for m in [1.0, 2.0, 2.5, 5.0] {
+                let step = m * mag * k;
+                let n = range / step;
+                if n <= max_n as f32
+                    && n >= 2.0
+                    && (n - n.round()).abs() < 1e-3
+                    && (lo / step - (lo / step).round()).abs() < 1e-3
+                {
+                    return (0..=n.round() as usize).map(|i| lo + step * i as f32).collect();
+                }
+            }
+        }
+    }
+    ticks(lo, hi, max_n)
+}
+
+/// Whole-number ticks for count axes: a 1-2-5 step that fits `max_n` labels, always ending on `hi`
+/// (0–3 → 0 1 2 3; 0–120 → every 20; 0–7 → 0 5 7).
+pub fn int_ticks(lo: f32, hi: f32, max_n: usize) -> Vec<f32> {
+    let (lo, hi) = (lo.round(), hi.round().max(lo.round() + 1.0));
+    let even = even_ticks(lo, hi, max_n);
+    if even.iter().all(|v| v.fract() == 0.0) && even.last() == Some(&hi) {
+        return even;
+    }
+    let range = hi - lo;
+    // A step that divides the range exactly keeps every gap equal (0–120 → 0 40 80 120).
+    for mag in [1.0f32, 10.0, 100.0, 1000.0, 10000.0] {
+        for m in [1.0f32, 2.0, 3.0, 4.0, 5.0] {
+            let step = m * mag;
+            let n = range / step;
+            if n.fract() == 0.0 && n >= 2.0 && n <= max_n.max(2) as f32 && (lo / step).fract() == 0.0 {
+                return (0..=n as usize).map(|i| lo + step * i as f32).collect();
+            }
+        }
+    }
+    let mut step = 1.0f32;
+    'find: for mag in [1.0f32, 10.0, 100.0, 1000.0, 10000.0] {
+        for m in [1.0f32, 2.0, 5.0] {
+            step = m * mag;
+            if range / step <= max_n.max(1) as f32 {
+                break 'find;
+            }
+        }
+    }
+    let mut out: Vec<f32> = Vec::new();
+    let mut v = (lo / step).ceil() * step;
+    while v < hi - 1e-3 {
+        out.push(v);
+        v += step;
+    }
+    // End on the range; drop the previous tick when the end would crowd it.
+    if let Some(&last) = out.last()
+        && hi - last < step * 0.6
+        && out.len() > 1
+    {
+        out.pop();
+    }
+    out.push(hi);
+    out
+}
+
 pub fn format_step(v: f32, step: f32) -> String {
     if step.abs() >= 1000.0 && v.abs() >= 1000.0 {
         return format_tick(v);
@@ -446,6 +534,13 @@ fn paint_line_chart(
         let pad = ((y1 - y0) * 0.08).max(1e-6);
         y0 = if y0 >= 0.0 && y0 - pad < 0.0 { 0.0 } else { y0 - pad };
         y1 += pad;
+        if !spec.log_y {
+            let step = nice_step(y1 - y0, spec.y_ticks);
+            y1 = (y1 / step).ceil() * step;
+            if y0 != 0.0 {
+                y0 = (y0 / step).floor() * step;
+            }
+        }
     }
     if x1 <= x0 {
         x1 = x0 + 1.0;
@@ -466,23 +561,30 @@ fn paint_line_chart(
     // Marker labels live in a band above the plot, in lanes so they never overlap each other, and
     // the data never runs through them.
     let mut marker_layout: Vec<(Pixels, Pixels, usize, &Marker)> = Vec::new();
-    let mut ms: Vec<&Marker> = spec.markers.iter().filter(|m| m.x >= x0 && m.x <= x1).collect();
-    ms.sort_by(|a, b| a.x.total_cmp(&b.x));
+    let ms: Vec<&Marker> = spec.markers.iter().filter(|m| m.x >= x0 && m.x <= x1).collect();
+    // Placed in the order given: the first marker takes the top lane.
     for m in ms {
         let x = sx0(m.x);
         let w = text_width(window, &m.label, label_size) + px(8.);
-        // Flip to the left of the line near the right edge.
-        let lx = if x + px(2.) + w > left + plot_w { x - px(2.) - w } else { x + px(2.) };
-        let lane = (0..3)
-            .find(|&lane| {
-                !marker_layout
+        // Right of the line, or left of it near the right edge; on a collision try the other side
+        // before opening a second lane.
+        let right = x + px(2.);
+        let left_side = x - px(2.) - w;
+        let sides = if right + w > left + plot_w { [left_side, right] } else { [right, left_side] };
+        let free = |lx: Pixels, lane: usize| {
+            lx >= left - px(4.)
+                && lx + w <= left + plot_w + px(4.)
+                && !marker_layout
                     .iter()
                     .any(|(ox, ow, ol, _)| *ol == lane && *ox < lx + w + px(6.) && lx < *ox + *ow + px(6.))
-            })
-            .unwrap_or(2);
+        };
+        // Labels stay on their line: the next lane down before drifting away from it.
+        let spots: Vec<(Pixels, usize)> =
+            (0..3).flat_map(|lane| sides.into_iter().map(move |lx| (lx, lane))).collect();
+        let (lx, lane) = spots.into_iter().find(|&(lx, lane)| free(lx, lane)).unwrap_or((sides[0], 2));
         marker_layout.push((lx, w, lane, m));
     }
-    let band = marker_layout.iter().map(|l| l.2 + 1).max().unwrap_or(0) as f32 * 16.;
+    let band = marker_layout.iter().map(|l| l.2 + 1).max().unwrap_or(0).max(spec.min_lanes) as f32 * LANE;
     let (top_pad, bottom_pad) = if spec.axis_titles.is_some() { (26. + band, 40.) } else { (6. + band, 22.) };
     let plot = Bounds::new(
         point(left, bounds.top() + px(top_pad)),
@@ -531,12 +633,8 @@ fn paint_line_chart(
         t.chart_axis,
     ));
     // X ticks.
-    let mut xt = ticks(x0, x1, ((plot.size.width / px(90.)) as usize).clamp(2, 8));
-    if let (Some(&last), Some(step)) = (xt.last(), (xt.len() > 1).then(|| xt[1] - xt[0]))
-        && x1 - last > step * 0.35
-    {
-        xt.push(x1);
-    }
+    let max_x = ((plot.size.width / px(90.)) as usize).clamp(2, 8);
+    let xt = if spec.x_int { int_ticks(x0, x1, max_x) } else { even_ticks(x0, x1, max_x) };
     for v in &xt {
         let x = sx(*v);
         window.paint_quad(fill(Bounds::new(point(x, plot.bottom()), size(px(1.), px(4.))), t.chart_axis));
@@ -545,8 +643,19 @@ fn paint_line_chart(
         let lx = (x - w / 2.).clamp(plot.left() - px(4.), plot.right() - w);
         paint_text(window, cx, &l, point(lx, plot.bottom() + px(6.)), t.chart_label, label_size, false);
     }
-    if !spec.x_name.is_empty() {
-        let _ = spec.x_name;
+    // The x unit sits in the corner under the y labels, where no tick label goes.
+    if !spec.x_name.is_empty() && spec.axis_titles.is_none() {
+        let w = text_width(window, spec.x_name, label_size);
+        let lx = (plot.left() - px(8.) - w).max(bounds.left());
+        paint_text(
+            window,
+            cx,
+            spec.x_name,
+            point(lx, plot.bottom() + px(6.)),
+            t.text_tertiary,
+            label_size,
+            false,
+        );
     }
 
     // Markers: dashed lines under the data, labels in the band above the plot.
@@ -555,7 +664,7 @@ fn paint_line_chart(
         let x = sx(m.x);
         stroke_path(window, &[point(x, plot.top()), point(x, plot.bottom())], 1.0, alpha(m.color, 0.5), true);
         let r = Bounds::new(
-            point(*lx, plot.top() - px(band) - px(2.) + px(*lane as f32 * 16.)),
+            point(*lx, plot.top() - px(band) - px(1.) + px(*lane as f32 * LANE)),
             size(*w, px(15.)),
         );
         labels.push((r, m));
@@ -601,6 +710,14 @@ fn paint_line_chart(
                     }
                 }
                 stroke_path(window, &pts, s.width, s.color, s.dashed);
+                if s.points.len() < 5 {
+                    for &(x, y) in s.points.iter() {
+                        let c = point(sx(x), sy(y));
+                        window.paint_quad(
+                            fill(Bounds::centered_at(c, size(px(5.), px(5.))), s.color).corner_radii(px(2.5)),
+                        );
+                    }
+                }
                 if s.live
                     && let Some(&(x, y)) = main.last()
                 {
@@ -637,6 +754,7 @@ fn paint_line_chart(
     }
     let hx = x0 + (x1 - x0) * frac;
     let mut rows: Vec<(Hsla, String, String)> = Vec::new();
+    let mut point_ys: Vec<Pixels> = Vec::new();
     let mut snap_x = None;
     for s in &spec.series {
         let data = if s.smooth > 0.0 { smoothed(&s.points, s.smooth) } else { s.points.clone() };
@@ -647,6 +765,7 @@ fn paint_line_chart(
             }
             snap_x.get_or_insert(x);
             let c = point(sx(x), sy(y));
+            point_ys.push(c.y);
             window.paint_quad(
                 fill(Bounds::centered_at(c, size(px(9.), px(9.))), t.bg_overlay).corner_radii(px(4.5)),
             );
@@ -666,16 +785,62 @@ fn paint_line_chart(
         t.chart_cursor,
     ));
     // Readout box.
-    let title = format!("{} {}", spec.x_name, (spec.x_fmt)(snap)).trim().to_string();
+    let smoothed_any = spec.series.iter().any(|s| s.smooth > 0.0);
+    let title =
+        format!("{} {}{}", spec.x_name, (spec.x_fmt)(snap), if smoothed_any { " · smoothed" } else { "" })
+            .trim()
+            .to_string();
     let fs = ty::XS.size;
     let title_w = text_width(window, &title, fs);
     let name_w = rows.iter().map(|r| text_width(window, &r.1, fs)).fold(title_w, |a, b| a.max(b));
     let val_w = rows.iter().map(|r| text_width(window, &r.2, fs)).fold(px(0.), |a, b| a.max(b));
     let w = px(10.) + px(12.) + name_w + px(16.) + val_w + px(10.);
     let h = px(8.) + px(16.) * (rows.len() as f32 + 1.) + px(6.);
-    let bx = if cx_px + px(12.) + w > plot.right() { cx_px - px(12.) - w } else { cx_px + px(12.) };
-    let bx = bx.max(bounds.left());
-    let by = plot.top() + px(4.);
+    // Right of the cursor in the left part of the plot, left of it beyond 60 %, so the readout never
+    // covers the newest data at the series' end.
+    let data_end =
+        spec.series.iter().filter_map(|s| s.points.last().map(|p| p.0)).fold(f32::NEG_INFINITY, f32::max);
+    let extent_right = if data_end.is_finite() { sx(data_end).min(plot.right()) } else { plot.right() };
+    let flip = (cx_px > plot.left() + (extent_right - plot.left()) * 0.6
+        && cx_px - px(12.) - w >= bounds.left())
+        || cx_px + px(12.) + w > plot.right();
+    // Beside the cursor (preferred side first), at the top or bottom of the plot: whichever spot
+    // covers the least data, and isn't level with the highlighted points.
+    let left_x = (cx_px - px(12.) - w).max(bounds.left());
+    let right_x = cx_px + px(12.);
+    let fits_right = right_x + w <= plot.right();
+    let fits_left = cx_px - px(12.) - w >= bounds.left();
+    let sides: Vec<Pixels> = match (flip, fits_left, fits_right) {
+        (true, _, true) | (false, true, true) => {
+            if flip {
+                vec![left_x, right_x]
+            } else {
+                vec![right_x, left_x]
+            }
+        }
+        (_, true, false) => vec![left_x],
+        _ => vec![if flip { left_x } else { right_x }],
+    };
+    let covered = |bx: Pixels, by: Pixels| {
+        let r = Bounds::new(point(bx - px(4.), by - px(4.)), size(w + px(8.), h + px(8.)));
+        spec.series
+            .iter()
+            .map(|s| {
+                cached_envelope(&s.points, x0, x1, columns)
+                    .iter()
+                    .filter(|&&(x, y)| r.contains(&point(sx(x), sy(y))))
+                    .count()
+            })
+            .sum::<usize>()
+            + point_ys.iter().filter(|&&y| y > r.top() && y < r.bottom()).count() * 50
+    };
+    let top_y = plot.top() + px(4.);
+    let bottom_y = plot.bottom() - h - px(4.);
+    let (bx, by) = sides
+        .iter()
+        .flat_map(|&x| [(x, top_y), (x, bottom_y)])
+        .min_by_key(|&(x, y)| covered(x, y))
+        .unwrap_or((sides[0], top_y));
     let rect = Bounds::new(point(bx, by), size(w, h));
     window.paint_quad(gpui::quad(
         rect,
@@ -885,6 +1050,17 @@ mod tests {
         assert_eq!(format_step(2.0, 1.0), "2");
         assert_eq!(format_step(0.004, 0.002), "0.004");
         assert_eq!(format_step(1.5, 0.5), "1.5");
+        assert_eq!(even_ticks(0.0, 120.0, 8), vec![0.0, 20.0, 40.0, 60.0, 80.0, 100.0, 120.0]);
+        assert_eq!(int_ticks(0.0, 3.0, 3), vec![0.0, 1.0, 2.0, 3.0]);
+        assert_eq!(int_ticks(0.0, 120.0, 8), vec![0.0, 20.0, 40.0, 60.0, 80.0, 100.0, 120.0]);
+        assert_eq!(int_ticks(0.0, 7.0, 3), vec![0.0, 7.0]);
+        assert_eq!(int_ticks(0.0, 120.0, 3), vec![0.0, 40.0, 80.0, 120.0]);
+        assert_eq!(int_ticks(0.0, 100.0, 3), vec![0.0, 50.0, 100.0]);
+        assert_eq!(int_ticks(0.0, 103.0, 6), vec![0.0, 20.0, 40.0, 60.0, 80.0, 103.0]);
+        assert!(int_ticks(0.0, 5.0, 2).iter().all(|v| v.fract() == 0.0));
+        assert_eq!(even_ticks(0.0, 100.0, 5), vec![0.0, 20.0, 40.0, 60.0, 80.0, 100.0]);
+        assert_eq!(even_ticks(0.0, 5.0, 8), vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0]);
+        assert_eq!(even_ticks(0.0, 1.0, 5), vec![0.0, 0.2, 0.4, 0.6, 0.8, 1.0]);
     }
 
     #[test]

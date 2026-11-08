@@ -143,16 +143,18 @@ pub fn apply(app: &mut FoloApp, s: &Spec, window: &mut Window, cx: &mut Context<
         app.open_new_run(Some("ds_3b91"), window, cx);
     }
     if screen == "toast" {
-        app.toast(
+        app.toast_with(
             crate::ui::Tone::Success,
-            "Export complete",
-            Some("D:/folo/models/shapes-hard-s-best.f16.folo · 9.4 MB".into()),
+            "Exported shapes-hard-s-best · 9.4 MB",
+            Some("…/models/shapes-hard-s-best.f16.folo".into()),
+            Some(("Show in folder".into(), std::rc::Rc::new(|_, _, _| {}))),
             cx,
         );
-        app.toast(
-            crate::ui::Tone::Accent,
-            "Training shapes-mini-s",
-            Some("Live metrics stream into the dashboard.".into()),
+        app.toast_with(
+            crate::ui::Tone::Info,
+            "Queued shapes-mini-s",
+            Some("It starts when the GPU is free.".into()),
+            Some(("Open run".into(), std::rc::Rc::new(|_, _, _| {}))),
             cx,
         );
     }

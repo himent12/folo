@@ -30,9 +30,21 @@ pub fn page_header(
     subtitle: impl IntoElement,
     actions: Vec<AnyElement>,
 ) -> Div {
+    let title: SharedString = title.into();
+    detail_header(t, text(ty::XL, t.text_primary).child(title), subtitle, actions)
+}
+
+/// The page header with any title row (a name plus badges): every page shares its geometry, and the
+/// actions sit centred on the title line whatever the subtitle below holds.
+pub fn detail_header(
+    t: &Theme,
+    title: impl IntoElement,
+    subtitle: impl IntoElement,
+    actions: Vec<AnyElement>,
+) -> Div {
     div()
         .flex()
-        .items_end()
+        .items_start()
         .justify_between()
         .gap(px(16.))
         .pb(px(4.))
@@ -42,10 +54,10 @@ pub fn page_header(
                 .flex_col()
                 .gap(px(4.))
                 .min_w_0()
-                .child(text(ty::XL, t.text_primary).child(title.into()))
+                .child(div().h(px(ty::XL.line)).flex().items_center().child(title))
                 .child(div().text_color(t.text_secondary).text_size(px(ty::BASE.size)).child(subtitle)),
         )
-        .child(div().flex().items_center().gap(px(8.)).flex_none().children(actions))
+        .child(div().h(px(ty::XL.line)).flex().items_center().gap(px(8.)).flex_none().children(actions))
 }
 
 impl FoloApp {
@@ -107,6 +119,8 @@ impl FoloApp {
 
     pub fn retry_all(&mut self, cx: &mut Context<Self>) {
         use crate::store::Load;
+        *self.ds_filter_cache.borrow_mut() = None;
+        *self.ds_split_counts.borrow_mut() = None;
         let s = &mut self.store;
         s.health = Load::Idle;
         s.system = Load::Idle;

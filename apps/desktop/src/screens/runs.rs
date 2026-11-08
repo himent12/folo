@@ -37,8 +37,18 @@ impl FoloApp {
         } else {
             format!("{} runs · {} active · {} failed", runs.len(), active, count(RunFilter::Failed))
         };
-        let new = self
-            .button(
+        let new = if self.store.datasets.ready().is_some_and(|d| d.is_empty()) {
+            self.button_disabled(
+                "runs-new",
+                "New run",
+                Btn::Primary,
+                Some("icons/plus.svg"),
+                "Add a dataset first",
+                cx,
+            )
+            .into_any_element()
+        } else {
+            self.button(
                 "runs-new",
                 "New run",
                 Btn::Primary,
@@ -48,7 +58,8 @@ impl FoloApp {
                 act(|this, w, cx| this.open_new_run(None, w, cx)),
             )
             .tooltip(crate::controls::tip("Start training", Some("Ctrl N")))
-            .into_any_element();
+            .into_any_element()
+        };
         let header = page_header(&t, "Runs", subtitle, vec![new]);
         if let Some(e) = self.store.runs.error().cloned() {
             let err = self.error_panel(&e, "runs-retry", window, cx);
@@ -124,7 +135,7 @@ impl FoloApp {
                                 .tnum()
                                 .w(px(46.))
                                 .text_right()
-                                .child(format!("{}/{}", r.epoch, r.epochs)),
+                                .child(format!("{} / {}", r.epoch, r.epochs)),
                         ),
                 };
                 let best = r.best.as_ref().map_or(text(ty::SM, t.text_tertiary).child("–"), |b| {
@@ -239,7 +250,7 @@ impl FoloApp {
             .dataset_summary(&r.config.dataset_id)
             .map_or(r.config.dataset_id.clone(), |d| d.name.clone());
         let started = r.started.as_deref().and_then(time::parse).map(|s| time::ago(s, now));
-        let device = r.device.replace("NVIDIA GeForce ", "");
+        let device = crate::ui::device_label(&r.device);
         let subtitle = text(ty::BASE, t.text_secondary).child(match started {
             Some(s) => format!("{} · {ds_name} · {device} · started {s}", r.config.arch.as_str()),
             None => format!("{} · {ds_name} · {device}", r.config.arch.as_str()),
@@ -254,7 +265,7 @@ impl FoloApp {
                         "run-stop",
                         "Stop run",
                         Btn::Danger,
-                        Some("icons/square.svg"),
+                        Some("icons/stop.svg"),
                         window,
                         cx,
                         act(move |this, w, cx| {
@@ -329,14 +340,7 @@ impl FoloApp {
             .gap(px(12.))
             .child(text(ty::XL, t.text_primary).child(r.name.clone()))
             .child(status_badge(&t, r.status, &format!("hdr-{}", r.id)));
-        let header = div()
-            .flex()
-            .items_end()
-            .justify_between()
-            .gap(px(16.))
-            .pb(px(4.))
-            .child(div().flex().flex_col().gap(px(4.)).min_w_0().child(title).child(subtitle))
-            .child(div().flex().gap(px(8.)).children(actions));
+        let header = detail_header(&t, title, subtitle, actions);
 
         let mut body = div().flex().flex_col().gap(px(16.));
         if r.status == RunStatus::Failed {
@@ -371,7 +375,15 @@ impl FoloApp {
                 .flex()
                 .gap(px(16.))
                 .child(div().flex_1().min_w_0().flex().child(samples))
-                .child(div().w(px(440.)).flex_none().flex().child(logs)),
+                // Wide windows split evenly, so log lines fit on one row; otherwise a fixed column
+                // wide enough for an epoch summary line.
+                .map(|d| {
+                    if window.viewport_size().width >= px(1500.) {
+                        d.child(div().flex_1().min_w_0().flex().child(logs))
+                    } else {
+                        d.child(div().w(px(500.)).flex_none().flex().child(logs))
+                    }
+                }),
         );
         body = body.child(self.config_panel(&r, &ds_name, cx));
         self.page_frame(&t, header, body)
@@ -438,7 +450,7 @@ impl FoloApp {
                 } else {
                     (t.danger_text, format!("{d:.3}"))
                 };
-                let best = r.best.as_ref().map_or(String::new(), |b| format!(" · best {}", f3(b.map50_95)));
+                let best = r.best.as_ref().map_or(String::new(), |b| format!("· best {}", f3(b.map50_95)));
                 Some(
                     div()
                         .flex()
@@ -565,19 +577,20 @@ impl FoloApp {
                             ty::X2XL,
                             ty::SM,
                         ))
-                        .child(div().flex_1().min_w(px(40.)).h(px(28.)).pb(px(4.)).when(
-                            smooth.len() > 2 && live,
-                            |d| {
-                                d.child(sparkline(&t, Arc::new(smooth.clone()), t.chart_series[1], 24., live))
-                            },
-                        )),
+                        .child(
+                            div().flex_1().min_w(px(40.)).h(px(28.)).pb(px(4.)).when(smooth.len() > 2, |d| {
+                                d.child(sparkline(&t, Arc::new(smooth.clone()), t.text_secondary, 24., live))
+                            }),
+                        ),
                 )
                 .child(text(ty::XS, t.text_tertiary).tnum().child(
                     ips_avg.map_or(String::new(), |a| format!("avg {a:.0} · last {} steps", ips.len())),
                 )),
             time_tile,
         ];
-        let tile = |content: gpui::Div| div().flex_1().min_w_0().px(px(16.)).py(px(14.)).child(content);
+        let tile = |content: gpui::Div| {
+            div().flex_1().min_w_0().px(px(16.)).py(px(if narrow { 10. } else { 14. })).child(content)
+        };
         let per_row = if narrow { 3 } else { 6 };
         let mut rows = Vec::new();
         let mut it = tiles.into_iter().peekable();
@@ -623,16 +636,21 @@ impl FoloApp {
         let total = if r.status.is_active() || r.status == RunStatus::Completed {
             r.epochs as f32
         } else {
-            (r.epoch as f32 * 1.15).max(5.)
+            r.epoch.max(1) as f32
         };
         let closing = (r.epochs.saturating_sub(r.config.augment.close_mosaic)) as f32;
         let close_marker = Marker { x: closing, label: "close mosaic".into(), color: t.text_tertiary };
+        // Every chart in the grid reserves the same two label lanes, so plot tops always line up.
+        let lanes = 2;
         let base = |id: &str, series: Vec<Series>| {
             let mut c = LineChart::new(id.to_string(), series);
             c.x_range = Some((0., total));
             c.hover = hover;
             c.on_hover = Some(on_hover.clone());
             c.height = 200.;
+            // All four charts reserve the same marker band, so plot tops line up across a row.
+            c.min_lanes = lanes;
+            c.x_int = true;
             c.x_name = "epoch";
             c.x_fmt = |v| format!("{v:.0}");
             c.markers = vec![close_marker.clone()];
@@ -644,7 +662,9 @@ impl FoloApp {
             .filter(|&i| self.loss_parts[i])
             .map(|i| Series::new(names[i], colors[i], d.loss[i].clone()).smooth(0.94).live(live))
             .collect();
+        let loss_max = (0..4).filter(|&i| self.loss_parts[i]).map(|i| d.loss_max[i]).fold(0f32, f32::max);
         let mut loss = base("run-loss", loss_series);
+        loss.y_range = Some((0., crate::charts::nice_ceil((loss_max * 1.05).max(0.1), 4)));
         loss.value_fmt = Some(|v| format!("{v:.3}"));
         let mut map = base(
             "run-map",
@@ -657,23 +677,36 @@ impl FoloApp {
         map.y_range = Some((0., 1.));
         map.value_fmt = Some(|v| format!("{v:.3}"));
         if let Some(b) = &r.best {
-            map.markers.push(Marker {
-                x: b.epoch as f32,
-                label: format!("best {}", f3(b.map50_95)).into(),
-                color: t.accent_text,
-            });
+            map.markers.insert(
+                0,
+                Marker {
+                    x: b.epoch as f32,
+                    label: format!("best {} · epoch {}", f3(b.map50_95), b.epoch).into(),
+                    color: t.accent_text,
+                },
+            );
+        }
+        // A failed run marks where it stopped, on the charts that tell the story.
+        if r.status == RunStatus::Failed {
+            let fail = Marker {
+                x: r.epoch as f32,
+                label: format!("failed · epoch {}", r.epoch).into(),
+                color: t.danger_text,
+            };
+            loss.markers.insert(0, fail.clone());
+            map.markers.insert(0, fail);
         }
         let mut pr = base(
             "run-pr",
             vec![
-                Series::new("precision", t.chart_series[2], d.precision.clone()).live(live),
-                Series::new("recall", t.chart_series[3], d.recall.clone()).live(live),
+                // One hue for the pair, told apart by dash: no other chart here uses slot 5.
+                Series::new("precision", t.chart_series[5], d.precision.clone()).live(live),
+                Series::new("recall", t.chart_series[5], d.recall.clone()).dashed().live(live),
             ],
         );
         pr.y_range = Some((0., 1.));
         pr.value_fmt = Some(|v| format!("{v:.3}"));
-        let mut lr =
-            base("run-lr", vec![Series::new("lr", t.chart_series[5], d.lr.clone()).area().live(live)]);
+        let mut lr = base("run-lr", vec![Series::new("lr", t.text_tertiary, d.lr.clone()).area().live(live)]);
         lr.value_fmt = Some(|v| format!("{v:.5}"));
         let lr_max = d.lr_max;
         lr.y_range = Some((0., (lr_max * 1.15).max(1e-4)));
@@ -696,9 +729,16 @@ impl FoloApp {
                 .rounded(px(radius::SM))
                 .cursor_pointer()
                 .hover(|s| s.bg(t.bg_hover))
-                .child(div().w(px(10.)).h(px(2.)).rounded_full().bg(if on { color } else { t.line_strong }))
+                .tooltip(crate::controls::tip(if on { "Hide this series" } else { "Show this series" }, None))
                 .child(
-                    text(ty::XS, if on { t.text_secondary } else { t.text_disabled }).child(name.to_string()),
+                    div()
+                        .w(px(10.))
+                        .h(px(if on { 2. } else { 6. }))
+                        .rounded(px(2.))
+                        .map(|d| if on { d.bg(color) } else { d.border_1().border_color(color) }),
+                )
+                .child(
+                    text(ty::XS, if on { t.text_secondary } else { t.text_tertiary }).child(name.to_string()),
                 );
             legend.push(
                 self.bind(
@@ -727,14 +767,31 @@ impl FoloApp {
                 .child(panel_header(&t, title).child(extra))
                 .child(div().px(px(12.)).pt(px(12.)).pb(px(8.)).child(chart))
         };
-        let legend_row = div().flex().gap(px(2.)).children(legend).into_any_element();
+        let legend_row = div()
+            .flex()
+            .items_center()
+            .gap(px(2.))
+            .child(
+                div()
+                    .id("loss-ema")
+                    .mr(px(6.))
+                    .tooltip(crate::controls::tip(
+                        "Lines are an exponential moving average (0.94) of per-step loss; the faint trace is raw",
+                        None,
+                    ))
+                    .child(text(ty::XS, t.text_tertiary).child("smoothed · EMA 0.94")),
+            )
+            .children(legend)
+            .into_any_element();
         let map_legend =
             crate::ui::legend(&t, &[("mAP50-95", t.chart_series[0]), ("mAP50", t.chart_series[1])]);
-        let pr_legend =
-            crate::ui::legend(&t, &[("precision", t.chart_series[2]), ("recall", t.chart_series[3])]);
+        let pr_legend = crate::ui::legend_styled(
+            &t,
+            &[("precision", t.chart_series[5], false), ("recall", t.chart_series[5], true)],
+        );
         let lr_legend = text(ty::XS, t.text_tertiary).child("cosine · warmup 3 epochs").into_any_element();
         let _ = chart_block;
-        div()
+        let grid = div()
             .flex()
             .flex_col()
             .gap(px(16.))
@@ -751,8 +808,9 @@ impl FoloApp {
                     .gap(px(16.))
                     .child(card("Precision and recall", pr_legend, line_chart(&t, pr)))
                     .child(card("Learning rate", lr_legend, line_chart(&t, lr))),
-            )
-            .into_any_element()
+            );
+        // One Tab stop for the linked charts: arrows walk the epochs.
+        self.chart_group("run-charts", 1.0 / total.max(1.0), crate::controls::Cursor::Run, grid, window, cx)
     }
 
     fn samples_panel(&mut self, r: &Run, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -802,15 +860,16 @@ impl FoloApp {
                             }));
                         }
                         let dims = (smp.width as f32, smp.height as f32);
-                        div()
-                            .flex_1()
-                            .min_w(px(0.))
-                            .h(px(150.))
+                        // Square cells: every sample gets the same frame whatever its aspect. The
+                        // ratio sits on an inner full-width box, whose width is definite.
+                        let mut square = div()
+                            .w_full()
                             .rounded(px(radius::MD))
                             .overflow_hidden()
                             .bg(t.bg_inset)
-                            .child(image_canvas(&t, img, dims, boxes, Fit::Contain, false))
-                            .into_any_element()
+                            .child(image_canvas(&t, img, dims, boxes, Fit::Contain, false));
+                        square.style().aspect_ratio = Some(1.0);
+                        div().flex_1().min_w(px(0.)).child(square).into_any_element()
                     })
                     .collect();
                 let mut it = tiles.into_iter();
@@ -820,9 +879,9 @@ impl FoloApp {
                     .flex()
                     .flex_col()
                     .gap(px(8.))
-                    .p(px(12.))
-                    .child(div().flex().gap(px(8.)).children(row1))
-                    .child(div().flex().gap(px(8.)).children(row2))
+                    .p(px(16.))
+                    .child(div().flex().items_start().gap(px(8.)).children(row1))
+                    .child(div().flex().items_start().gap(px(8.)).children(row2))
                     .child(text(ty::XS, t.text_tertiary).tnum().child(format!(
                         "Epoch {epoch} · 8 of 16 fixed validation images · predictions with score ≥ 0.30"
                     )))
@@ -836,7 +895,11 @@ impl FoloApp {
                 .p(px(12.))
                 .flex()
                 .gap(px(8.))
-                .children((0..4).map(|i| div().flex_1().h(px(150.)).child(skeleton(&t, format!("smp{i}")))))
+                .children((0..4).map(|i| {
+                    let mut sq = div().w_full().child(skeleton(&t, format!("smp{i}")));
+                    sq.style().aspect_ratio = Some(1.0);
+                    div().flex_1().min_w(px(0.)).child(sq)
+                }))
                 .into_any_element(),
         };
         panel(&t)
@@ -854,46 +917,57 @@ impl FoloApp {
             Some(Load::Ready(lines)) => {
                 let start = lines.len().saturating_sub(300);
                 div()
-                    .id("log-scroll")
+                    .relative()
                     .flex_1()
-                    .h(px(372.))
-                    .overflow_y_scroll()
-                    .track_scroll(&self.log_scroll)
-                    .bg(t.bg_inset)
-                    .py(px(8.))
-                    .children(lines[start..].iter().map(|l| {
-                        let (tag, color) = match l.level {
-                            LogLevel::Debug => ("DBG", t.text_disabled),
-                            LogLevel::Info => ("INF", t.text_tertiary),
-                            LogLevel::Warn => ("WRN", t.warning_text),
-                            LogLevel::Error => ("ERR", t.danger_text),
-                        };
-                        let clock = time::parse(&l.t).map(time::clock).unwrap_or_default();
+                    .flex()
+                    .flex_col()
+                    .child(
                         div()
-                            .flex()
-                            .gap(px(10.))
-                            .px(px(12.))
-                            .py(px(2.))
-                            .font_family(crate::theme::MONO)
-                            .text_size(px(ty::XS.size))
-                            .line_height(px(17.))
-                            .when(l.level == LogLevel::Error, |d| d.bg(t.danger_muted))
-                            .child(div().flex_none().text_color(t.text_disabled).child(clock))
-                            .child(div().flex_none().w(px(24.)).text_color(color).child(tag))
-                            .child(
-                                // One line per entry, like a terminal; long lines end in an ellipsis.
+                            .id("log-scroll")
+                            .flex_1()
+                            .h(px(372.))
+                            .overflow_y_scroll()
+                            .track_scroll(&self.log_scroll)
+                            .bg(t.bg_inset)
+                            .py(px(10.))
+                            .children(lines[start..].iter().map(|l| {
+                                let (tag, color) = match l.level {
+                                    LogLevel::Debug => ("DBG", t.text_disabled),
+                                    LogLevel::Info => ("INF", t.text_tertiary),
+                                    LogLevel::Warn => ("WRN", t.warning_text),
+                                    LogLevel::Error => ("ERR", t.danger_text),
+                                };
+                                let clock = time::parse(&l.t).map(time::clock).unwrap_or_default();
                                 div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_color(if l.level == LogLevel::Debug {
-                                        t.text_tertiary
-                                    } else {
-                                        t.text_secondary
-                                    })
-                                    .child(l.message.clone()),
-                            )
-                    }))
+                                    .flex()
+                                    .gap(px(12.))
+                                    .px(px(16.))
+                                    .py(px(2.))
+                                    .font_family(crate::theme::MONO)
+                                    .text_size(px(ty::XS.size))
+                                    .line_height(px(17.))
+                                    .when(l.level == LogLevel::Error, |d| d.bg(t.danger_muted))
+                                    .child(div().flex_none().text_color(t.text_disabled).child(clock))
+                                    .child(div().flex_none().w(px(24.)).text_color(color).child(tag))
+                                    .child(
+                                        // Long entries wrap under the message column, so nothing is clipped.
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .text_color(if l.level == LogLevel::Debug {
+                                                t.text_tertiary
+                                            } else {
+                                                t.text_secondary
+                                            })
+                                            .child(l.message.clone()),
+                                    )
+                            })),
+                    )
+                    .child(div().absolute().top_0().left_0().right_0().h(px(12.)).bg(gpui::linear_gradient(
+                        180.,
+                        gpui::linear_color_stop(t.bg_inset, 0.),
+                        gpui::linear_color_stop(crate::theme::alpha(t.bg_inset, 0.), 1.),
+                    )))
                     .into_any_element()
             }
             Some(Load::Failed(e)) => div()
