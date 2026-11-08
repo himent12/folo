@@ -72,8 +72,23 @@ pub struct DataYaml {
 }
 
 fn unquote(s: &str) -> String {
-    let s = s.split(" #").next().unwrap_or(s).trim();
-    s.trim_matches(|c| c == '"' || c == '\'').to_string()
+    s.trim().trim_matches(|c| c == '"' || c == '\'').to_string()
+}
+
+/// Removes a YAML comment: a `#` at the start of the line or after whitespace, outside quotes.
+fn strip_comment(line: &str) -> &str {
+    let mut quote = None;
+    let mut prev_ws = true;
+    for (i, c) in line.char_indices() {
+        match (quote, c) {
+            (None, '"' | '\'') => quote = Some(c),
+            (Some(q), _) if c == q => quote = None,
+            (None, '#') if prev_ws => return &line[..i],
+            _ => {}
+        }
+        prev_ws = c.is_whitespace();
+    }
+    line
 }
 
 /// Parses the subset of YAML that YOLO `data.yaml` files use: top-level `key: value` pairs, `names` as a flow list
@@ -83,7 +98,7 @@ pub fn parse_data_yaml(text: &str) -> DataYaml {
     let mut in_names = false;
     let mut indexed: Vec<(usize, String)> = Vec::new();
     for raw in text.lines() {
-        let line = raw.trim_end();
+        let line = strip_comment(raw).trim_end();
         let trimmed = line.trim_start();
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
@@ -190,6 +205,12 @@ pub fn parse_labels(text: &str, nc: usize) -> (Vec<YoloBox>, u64) {
             None
         };
         let in_range = |v: f32| v.is_finite() && (-0.01..=1.01).contains(&v);
+        // The part of the box inside the image must have an area.
+        let visible = |b: &YoloBox| {
+            let (x1, x2) = ((b.cx - b.w / 2.0).max(0.0), (b.cx + b.w / 2.0).min(1.0));
+            let (y1, y2) = ((b.cy - b.h / 2.0).max(0.0), (b.cy + b.h / 2.0).min(1.0));
+            x2 > x1 && y2 > y1
+        };
         match b {
             Some(b)
                 if (b.class as usize) < nc
@@ -198,7 +219,8 @@ pub fn parse_labels(text: &str, nc: usize) -> (Vec<YoloBox>, u64) {
                     && in_range(b.w)
                     && in_range(b.h)
                     && b.w > 0.0
-                    && b.h > 0.0 =>
+                    && b.h > 0.0
+                    && visible(&b) =>
             {
                 boxes.push(b)
             }
@@ -380,10 +402,10 @@ impl DiskDataset {
                     .iter()
                     .map(|b| BBox {
                         class: b.class,
-                        x1: ((b.cx - b.w / 2.0) * wf).max(0.0),
-                        y1: ((b.cy - b.h / 2.0) * hf).max(0.0),
-                        x2: ((b.cx + b.w / 2.0) * wf).min(wf),
-                        y2: ((b.cy + b.h / 2.0) * hf).min(hf),
+                        x1: ((b.cx - b.w / 2.0) * wf).clamp(0.0, wf),
+                        y1: ((b.cy - b.h / 2.0) * hf).clamp(0.0, hf),
+                        x2: ((b.cx + b.w / 2.0) * wf).clamp(0.0, wf),
+                        y2: ((b.cy + b.h / 2.0) * hf).clamp(0.0, hf),
                     })
                     .collect();
                 ImageInfo {
@@ -458,6 +480,11 @@ mod tests {
         let y = parse_data_yaml("names:\n  0: person\n  1: car # comment\nnc: 2\n");
         assert_eq!(y.names, vec!["person", "car"]);
         assert_eq!(y.nc, Some(2));
+        let y = parse_data_yaml("nc: 5000 # classes\nnames: # the classes\n  0: a#1 # first\n  1: 'b # c'\n");
+        assert_eq!(y.nc, Some(5000));
+        assert_eq!(y.names, vec!["a#1", "b # c"]);
+        let y = parse_data_yaml("# header\nnames: ['x', \"y#z\"] # trailing\n");
+        assert_eq!(y.names, vec!["x", "y#z"]);
         let y = parse_data_yaml("names:\n- body\n- Head\ntrain: x\n");
         assert_eq!(y.names, vec!["body", "Head"]);
         assert_eq!(y.splits, vec![(Split::Train, "x".to_string())]);
@@ -471,6 +498,16 @@ mod tests {
         assert_eq!(broken, 2);
         assert!((b[1].w - 0.2).abs() < 1e-6);
         assert_eq!(label_path(Path::new("d/images/train/a.jpg")), Path::new("d/labels/train/a.txt"));
+        // Inside the parse tolerance but entirely outside the image on one edge: broken, never an inverted box.
+        for line in [
+            "0 -0.005 0.5 0.002 0.2",
+            "0 1.005 0.5 0.002 0.2",
+            "0 0.5 -0.005 0.2 0.002",
+            "0 0.5 1.005 0.2 0.002",
+        ] {
+            assert_eq!(parse_labels(line, 1), (vec![], 1), "{line}");
+        }
+        assert_eq!(parse_labels("0 0.995 0.5 0.02 0.2", 1).0.len(), 1);
     }
 
     #[test]
@@ -516,18 +553,21 @@ mod tests {
         let img = image::RgbImage::from_pixel(40, 20, image::Rgb([200, 10, 10]));
         img.save(dir.join("images/train/a.png")).unwrap();
         img.save(dir.join("images/val/b.png")).unwrap();
-        std::fs::write(dir.join("labels/train/a.txt"), "1 0.5 0.5 0.5 0.5\n").unwrap();
+        std::fs::write(dir.join("labels/train/a.txt"), "1 0.5 0.5 0.5 0.5\n0 0.995 0.5 0.02 0.2\n").unwrap();
         let ds =
             DiskDataset::scan("ds_1".into(), None, dir.to_str().unwrap(), DatasetFormat::Auto, "t".into())
                 .unwrap();
         assert_eq!(ds.meta.classes, vec!["cat", "dog"]);
         assert_eq!(ds.meta.splits, Splits { train: 1, val: 1, test: 0 });
-        assert_eq!(ds.stats.class_counts, vec![0, 1]);
+        assert_eq!(ds.stats.class_counts, vec![1, 1]);
         assert_eq!(ds.stats.empty_images, 1);
         let page = ds.list_images(&ImageQuery { limit: 10, ..Default::default() });
         assert_eq!(page.total, 2);
         assert_eq!(page.images[0].width, 40);
         assert_eq!(page.images[0].boxes[0].x1, 10.0);
+        // A box poking out of the right edge is clipped, never inverted.
+        let edge = page.images[0].boxes[1];
+        assert!(edge.x1 < edge.x2 && edge.x2 == 40.0, "{edge:?}");
         let th = ds.image("0", Some(10)).unwrap();
         assert_eq!(image::load_from_memory(&th.bytes).unwrap().width(), 10);
         std::fs::remove_dir_all(&dir).unwrap();
