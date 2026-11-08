@@ -107,8 +107,8 @@
     if (!run) return;
     resuming = true;
     try {
-      const r = await hub.api.resumeRun(run.id);
-      live.run = r;
+      const id = run.id;
+      const r = await live.resume(() => hub.api.resumeRun(id));
       toast.success(`Resuming ${r.name}`, r.epoch > 0 ? `From the checkpoint of epoch ${r.epoch}.` : 'No epoch had finished, so it starts from scratch.');
     } catch (e) {
       toast.error(e, 'Could not resume the run');

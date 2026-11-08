@@ -138,3 +138,78 @@ describe('LiveRun ordering', () => {
     stop();
   });
 });
+
+describe('LiveRun resume', () => {
+  let handlers: RunEventHandlers = {};
+  let snapshot: Run;
+  let serverStatus: Run['status'] = 'stopped';
+  /** When set, snapshots never answer: the test sees only what events and the resume response did. */
+  let hold = false;
+  const saved = hub.api;
+  const at = (n: number, epoch: number, total = 3): Step => ({ ...step(n), epoch, loss: { box: 1, cls: 1, dfl: 1, total } });
+  const ep = (epoch: number) => ({ epoch, train_loss: { box: 1, cls: 1, dfl: 1, total: 3 }, val: { map50: 0.5, map50_95: 0.3, precision: 0.5, recall: 0.5, per_class: [] }, lr: 0.01, seconds: 1 });
+
+  beforeEach(async () => {
+    vi.useFakeTimers();
+    serverStatus = 'stopped';
+    hold = false;
+    snapshot = await new MockApi('normal', 0).run('run_7d1e');
+    // Stopped mid-epoch 1: epoch 0 finished (steps 1-2), epoch 1 had steps 3-4 when it stopped.
+    const history: RunMetrics = { steps: [at(1, 0), at(2, 0), at(3, 1), at(4, 1)], epochs: [ep(0)] as never };
+    const fake: Partial<Api> = {
+      mock: false,
+      run: () => (hold ? new Promise<Run>(() => {}) : Promise.resolve({ ...snapshot, status: serverStatus, step: 4, epoch: 2 })),
+      runMetrics: () => Promise.resolve(history),
+      runLogs: () => Promise.resolve({ lines: [] }),
+      runEvents: (_id, h) => {
+        handlers = h;
+        return () => {};
+      },
+    };
+    hub.api = fake as Api;
+    hub.mode = 'live';
+  });
+  afterEach(() => {
+    hub.api = saved;
+    vi.useRealTimers();
+  });
+
+  it('rewinds to the last finished epoch so repeated steps are shown', async () => {
+    let live!: LiveRun;
+    const stop = $effect.root(() => {
+      live = new LiveRun(() => 'run_7d1e');
+    });
+    flushSync();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.steps.map((s) => s.step)).toEqual([1, 2, 3, 4]);
+    serverStatus = 'queued';
+    await live.resume(() => Promise.resolve({ ...snapshot, status: 'queued', step: 2, epoch: 1 }));
+    expect(live.steps.map((s) => s.step)).toEqual([1, 2]);
+    // The resumed epoch repeats step 3 with new values: it is shown, not dropped as old.
+    handlers.step?.(at(3, 1, 90));
+    expect(live.steps.at(-1)?.loss.total).toBe(90);
+    stop();
+  });
+
+  it('keeps a status event that arrives before the resume response', async () => {
+    let live!: LiveRun;
+    const stop = $effect.root(() => {
+      live = new LiveRun(() => 'run_7d1e');
+    });
+    flushSync();
+    await vi.advanceTimersByTimeAsync(0);
+    hold = true;
+    const response = deferred<Run>();
+    const pending = live.resume(() => response.promise);
+    // The worker starts first: the stream says running before the HTTP response (queued) lands.
+    serverStatus = 'running';
+    handlers.status?.({ status: 'running', error: null });
+    expect(live.steps.map((s) => s.step)).toEqual([1, 2]);
+    response.resolve({ ...snapshot, status: 'queued', step: 2, epoch: 1 });
+    await pending;
+    expect(live.run?.status).toBe('running');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.run?.status).toBe('running');
+    stop();
+  });
+});

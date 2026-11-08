@@ -733,9 +733,9 @@
     display: grid;
     margin: calc(-1 * var(--space-1)) calc(-1 * var(--space-2)) 0;
   }
-  /* Touch: each review row is a full 44 px target. */
+  /* Touch: each review row is a full 44 px target (after the base rule, so it wins). */
   @media (pointer: coarse) {
-    .rv {
+    .rv.rv {
       height: 44px;
     }
   }

@@ -5,12 +5,17 @@
 // Ordering: the stream replays nothing, so we subscribe *before* fetching history and merge the two by step /
 // epoch number. A history response never removes newer events, and a snapshot never overrides a status that an
 // event reported after the request was sent.
+//
+// Resume: a stopped / failed run that becomes active again continues from its last finished epoch and repeats the
+// steps after it, so the history from that epoch on is dropped (rewound) and refetched; the server's history already
+// has the repeated steps replacing the earlier ones.
 
 import { untrack } from 'svelte';
 import { hub } from './index.svelte';
 import type { Epoch, LogLine, Run, Step } from './types';
 
 const MAX_LOGS = 2000;
+const ACTIVE = ['queued', 'running', 'stopping'];
 
 /** Union of two lists sorted by `key`, preferring `b` (newer) on equal keys. Exported for tests. */
 export function mergeBy<T>(a: T[], b: T[], key: (x: T) => number): T[] {
@@ -59,6 +64,8 @@ export class LiveRun {
   /** Increments with every status event, so a snapshot can tell whether one arrived while it was in flight. */
   #statusSeq = 0;
   #lastStatus: Pick<Run, 'status' | 'error'> | null = null;
+  /** Re-synchronises history with the server (set while subscribed). */
+  #resync: (() => void) | null = null;
 
   constructor(id: () => string | null) {
     $effect(() => {
@@ -134,6 +141,11 @@ export class LiveRun {
           if (closed) return;
           this.#statusSeq++;
           this.#lastStatus = { status, error };
+          // Finished → active again: the run was resumed (here or elsewhere).
+          if (this.run && !ACTIVE.includes(this.run.status) && ACTIVE.includes(status)) {
+            this.#rewind();
+            sync();
+          }
           if (this.run) this.run = { ...this.run, status, error };
           if (!['queued', 'running', 'stopping'].includes(status)) {
             // Terminal: refresh the snapshot for finished time, best and model id (even if history is still loading).
@@ -179,9 +191,11 @@ export class LiveRun {
         this.error = e;
         this.loading = false;
       });
+      this.#resync = () => sync();
 
       return () => {
         closed = true;
+        this.#resync = null;
         clearTimeout(syncTimer);
         unsub();
         cancelAnimationFrame(this.#raf);
@@ -193,6 +207,34 @@ export class LiveRun {
   /** Reloads from scratch (after a load error). */
   retry() {
     this.#retry++;
+  }
+
+  /**
+   * Resumes the run through `call` (POST /api/runs with resume_run_id). The worker can start before the response
+   * arrives: a status event received meanwhile is newer than the response and wins, and the history is rewound once
+   * whichever of the two comes first.
+   */
+  async resume(call: () => Promise<Run>): Promise<Run> {
+    const seq = this.#statusSeq;
+    const r = await call();
+    if (this.#statusSeq === seq) {
+      if (this.run && !ACTIVE.includes(this.run.status)) this.#rewind();
+      this.run = r;
+    } else if (this.#lastStatus) {
+      this.run = { ...r, ...this.#lastStatus };
+    }
+    this.#resync?.();
+    return r;
+  }
+
+  /** Drops the steps after the last finished epoch (a resumed run repeats them) and moves the run back there. */
+  #rewind() {
+    const lastEpoch = this.epochs[this.epochs.length - 1];
+    const done = lastEpoch ? lastEpoch.epoch + 1 : 0;
+    this.steps = this.steps.filter((s) => s.epoch < done);
+    const last = this.steps[this.steps.length - 1];
+    if (this.run) this.run = { ...this.run, step: last?.step ?? 0, epoch: done };
+    this.#bump();
   }
 
   /** Merges a snapshot + history into what the stream has delivered so far, never moving backwards. */
