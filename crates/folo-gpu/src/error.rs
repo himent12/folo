@@ -18,6 +18,10 @@ pub enum GpuError {
     /// Waiting on the device failed (device lost or timeout).
     #[error("device poll failed: {0}")]
     Poll(String),
+    /// The device is gone (a driver reset / TDR, the GPU removed, or `destroy`); nothing on it can be used any
+    /// more. Restart the process and resume from a checkpoint.
+    #[error("GPU device lost: {0}")]
+    DeviceLost(String),
     /// wgpu reported a validation or out-of-memory error for previously encoded work.
     #[error("wgpu error: {0}")]
     Wgpu(String),

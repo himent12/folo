@@ -171,3 +171,46 @@ fn staged_upload_from_another_thread() {
         assert_eq!(back, data, "length {len}");
     }
 }
+
+/// A lost device (here: destroyed on purpose) makes waits and readbacks return `DeviceLost` instead of panicking
+/// inside wgpu, and stays lost. Uses a private context so the shared one other tests use is untouched.
+#[test]
+fn lost_device_is_an_error_not_a_panic() {
+    let _shared = gpu!();
+    let is_lost = |r: crate::Result<()>| matches!(r, Err(crate::GpuError::DeviceLost(_)));
+    // Each first call after the loss reports it (a fresh context per case, so no earlier call found it first).
+    let fresh = || {
+        let ctx = crate::GpuContext::new().unwrap();
+        let buf = ctx.upload(&[1, 2, 3, 4]).unwrap();
+        ctx.sync().unwrap();
+        ctx.device().destroy();
+        (ctx, buf)
+    };
+    let (ctx, _buf) = fresh();
+    assert!(is_lost(ctx.sync()), "first sync");
+    assert!(ctx.lost_reason().is_some());
+    assert!(is_lost(ctx.sync()), "and every later one");
+    let (ctx, buf) = fresh();
+    assert!(is_lost(ctx.read(buf.raw(), 0, 4).map(|_| ())), "first readback");
+    let (ctx, _buf) = fresh();
+    assert!(is_lost(ctx.stage(&[7; 64]).map(|_| ())), "staging (the trainer's feeder thread)");
+    // As folo-core sees it through the backend: recognisable, unlike other backend errors.
+    let err = ctx.sync().unwrap_err();
+    assert!(crate::is_device_lost(&folo_core::Error::from(err)));
+    assert!(!crate::is_device_lost(&folo_core::Error::from(crate::GpuError::Wgpu("validation".into()))));
+}
+
+/// A readback's map outcome is loss-aware (the check the browser's async readback relies on, since it cannot
+/// poll): once the loss is recorded, a failed and a succeeded map both report `DeviceLost`; on a healthy device a
+/// failed map stays a `Map` error.
+#[test]
+fn map_outcome_prefers_a_recorded_loss() {
+    let _shared = gpu!();
+    let ctx = crate::GpuContext::new().unwrap();
+    assert!(matches!(ctx.map_outcome(Err("rejected".into())), Err(crate::GpuError::Map(_))));
+    assert!(ctx.map_outcome(Ok(())).is_ok());
+    ctx.device().destroy();
+    assert!(ctx.sync().is_err());
+    assert!(matches!(ctx.map_outcome(Err("rejected".into())), Err(crate::GpuError::DeviceLost(_))));
+    assert!(matches!(ctx.map_outcome(Ok(())), Err(crate::GpuError::DeviceLost(_))));
+}

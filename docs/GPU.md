@@ -34,6 +34,9 @@ The kernel layer sees neither a `GpuTensor` nor a folo-core tensor: both front e
   and the folo-core backend (`folo_gpu::init()`) use it.
 - **Errors.** Validation and out-of-memory errors are captured, not panicked on. `sync()` and readbacks return
   them as `GpuError::Wgpu`. A kernel that fails to compile returns an error from the call that needed it.
+  A lost device (driver reset / TDR, `destroy`) is `GpuError::DeviceLost`: wgpu panics inside `Device::poll` then, so
+  FOLO polls under `catch_unwind`, remembers the loss (`lost_reason()`) and fails every later wait; folo-core sees it
+  as a backend error that `folo_gpu::is_device_lost` recognises.
 
 ### Buffer pool
 

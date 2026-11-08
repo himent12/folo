@@ -206,6 +206,8 @@ struct Inner {
     kernels: Mutex<HashMap<KernelKey, Arc<Kernel>>>,
     batch: Mutex<Batch>,
     errors: Arc<Mutex<Vec<String>>>,
+    /// Set once the device is lost (by wgpu's device-lost callback, or by a poll that failed fatally).
+    lost: Arc<Mutex<Option<String>>>,
     dummy: wgpu::Buffer,
     dispatches: AtomicU64,
     submissions: AtomicU64,
@@ -437,6 +439,13 @@ impl GpuContext {
                 v.push(e.to_string());
             }
         }));
+        let lost: Arc<Mutex<Option<String>>> = Arc::default();
+        let flag = lost.clone();
+        device.set_device_lost_callback(move |reason, msg| {
+            if let Ok(mut l) = flag.lock() {
+                l.get_or_insert_with(|| format!("{reason:?}: {msg}"));
+            }
+        });
         let dl = device.limits();
         let caps = Capabilities {
             shader_f16: device.features().contains(wgpu::Features::SHADER_F16),
@@ -463,6 +472,7 @@ impl GpuContext {
                 kernels: Mutex::default(),
                 batch: Mutex::default(),
                 errors,
+                lost,
                 dummy,
                 dispatches: AtomicU64::new(0),
                 submissions: AtomicU64::new(0),
@@ -585,7 +595,7 @@ impl GpuContext {
             .slice(..)
             .get_mapped_range_mut()
             .map(|mut view| view.slice(..data.len()).copy_from_slice(data))
-            .map_err(|e| GpuError::Map(e.to_string()));
+            .map_err(|e| self.or_lost(GpuError::Map(e.to_string())));
         buf.unmap();
         copied?;
         Ok(Staged { buf, len })
@@ -753,12 +763,63 @@ impl GpuContext {
     }
 
     /// Blocks until the device is idle (returns at once in the browser, where WebGPU's `poll` cannot wait).
+    ///
+    /// A lost device is [`GpuError::DeviceLost`], not a panic: wgpu treats a failed poll on a lost device as fatal
+    /// and panics inside `Device::poll` (its message still reaches stderr through the panic hook), so the poll
+    /// runs under `catch_unwind` and the loss is remembered, failing every later wait at once.
     fn wait_idle(&self) -> Result<()> {
-        self.inner
-            .device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .map(|_| ())
-            .map_err(|e| GpuError::Poll(e.to_string()))
+        self.poll_checked(wgpu::PollType::wait_indefinitely())
+    }
+
+    /// One `Device::poll` that turns a lost device into [`GpuError::DeviceLost`]: before the poll if the loss is
+    /// already known, if wgpu panics inside the poll (it treats a poll on a lost device as fatal), and after a
+    /// successful poll if the device-lost callback fired during it. A loss found here is remembered.
+    fn poll_checked(&self, how: wgpu::PollType) -> Result<()> {
+        if let Some(why) = self.lost_reason() {
+            return Err(GpuError::DeviceLost(why));
+        }
+        let polled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.inner.device.poll(how)));
+        let res = match polled {
+            Ok(r) => r.map(|_| ()).map_err(|e| GpuError::Poll(e.to_string())),
+            Err(panic) => {
+                let msg = panic
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string()))
+                    .unwrap_or_else(|| "Device::poll panicked".into());
+                let mut lost = self.inner.lost.lock().unwrap_or_else(|p| p.into_inner());
+                return Err(GpuError::DeviceLost(lost.get_or_insert(msg).clone()));
+            }
+        };
+        match self.lost_reason() {
+            Some(why) => Err(GpuError::DeviceLost(why)),
+            None => res,
+        }
+    }
+
+    /// Why the device was lost (wgpu's reason and message), if it was. Every wait then fails with
+    /// [`GpuError::DeviceLost`].
+    pub fn lost_reason(&self) -> Option<String> {
+        self.inner.lost.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
+    /// `e`, or [`GpuError::DeviceLost`] if the device turns out to be lost (checked with a non-blocking poll): wgpu
+    /// reports work on a lost device as ordinary validation or map errors.
+    fn or_lost(&self, e: GpuError) -> GpuError {
+        match self.poll_checked(wgpu::PollType::Poll) {
+            Err(lost @ GpuError::DeviceLost(_)) => lost,
+            _ => e,
+        }
+    }
+
+    /// The result of a readback's buffer map, loss-aware: a recorded device loss wins over both a map failure and
+    /// a map that succeeded meanwhile. This is the only loss check the browser gets, where waits cannot poll and
+    /// the device-lost callback runs from the event loop.
+    pub(crate) fn map_outcome(&self, r: std::result::Result<(), String>) -> Result<()> {
+        if let Some(why) = self.lost_reason() {
+            return Err(GpuError::DeviceLost(why));
+        }
+        r.map_err(GpuError::Map)
     }
 
     fn take_error(&self) -> Result<()> {
@@ -945,7 +1006,7 @@ impl PendingRead {
         let mut s = self.state.state.lock().expect("map state lock");
         loop {
             if let Some(r) = s.result.take() {
-                return r.map_err(GpuError::Map);
+                return self.ctx.map_outcome(r);
             }
             let (guard, timeout) = self
                 .state
@@ -966,7 +1027,7 @@ impl PendingRead {
     #[cfg(target_arch = "wasm32")]
     fn wait_blocking(&self) -> Result<()> {
         match self.state.state.lock().expect("map state lock").result.take() {
-            Some(r) => r.map_err(GpuError::Map),
+            Some(r) => self.ctx.map_outcome(r),
             None => Err(GpuError::Unsupported(NO_BLOCKING)),
         }
     }
@@ -976,7 +1037,8 @@ impl PendingRead {
     pub(crate) async fn wait(&self) -> Result<()> {
         #[cfg(not(target_arch = "wasm32"))]
         self.ctx.wait_idle()?;
-        MapWait { state: &self.state.state }.await.map_err(GpuError::Map)
+        let r = MapWait { state: &self.state.state }.await;
+        self.ctx.map_outcome(r)
     }
 
     /// Hands the mapped bytes to `f`, unmaps, and reports the errors wgpu captured meanwhile.
