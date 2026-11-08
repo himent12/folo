@@ -24,3 +24,19 @@ describe('matchesClass', () => {
     expect(matchesClass('person', 'car')).toBe(false);
   });
 });
+
+describe('prEnvelope', () => {
+  it('takes per-recall quantiles of interpolated precision', async () => {
+    const { prEnvelope, precisionAt } = await import('./pr');
+    const flat = (p: number, end: number) => [
+      { x: 0, y: p },
+      { x: end, y: p },
+    ];
+    expect(precisionAt(flat(0.8, 0.5), 0.6)).toBe(0);
+    expect(precisionAt(flat(0.8, 0.5), 0.2)).toBe(0.8);
+    const curves = Array.from({ length: 11 }, (_, i) => flat(i / 10, 1));
+    const env = prEnvelope(curves, 0.1, 0.9, 3);
+    expect(env.lower.map((p) => p.y)).toEqual([0.1, 0.1, 0.1]);
+    expect(env.upper.map((p) => p.y)).toEqual([0.9, 0.9, 0.9]);
+  });
+});

@@ -22,6 +22,9 @@
   let conf = $state(0.25);
   let open = $state<Sample | null>(null);
   let dialogOpen = $state(false);
+  // The first eight samples show by default; the rest are one click away.
+  const FIRST = 8;
+  let showAll = $state(false);
 
   // Memoise the props the fetcher reads: the parent passes values derived from a run object that changes every
   // step, and an unmemoised prop read would refetch on each one.
@@ -71,10 +74,10 @@
   {:else if samples.error && !samples.data}
     <ErrorState error={samples.error} retry={() => samples.refresh()} compact />
   {:else if !samples.data}
-    <div class="grid">{#each Array(16) as _, i (i)}<Skeleton h="auto" class="cell-sk" r="var(--radius-md)" />{/each}</div>
+    <div class="grid">{#each Array(8) as _, i (i)}<Skeleton h="auto" class="cell-sk" r="var(--radius-md)" />{/each}</div>
   {:else}
     <div class="grid">
-      {#each samples.data.samples as s (s.image_id)}
+      {#each showAll ? samples.data.samples : samples.data.samples.slice(0, FIRST) as s (s.image_id)}
         <button
           class="cell"
           style:aspect-ratio="{s.width} / {s.height}"
@@ -96,6 +99,11 @@
         </button>
       {/each}
     </div>
+    {#if samples.data.samples.length > FIRST}
+      <button type="button" class="more" aria-expanded={showAll} onclick={() => (showAll = !showAll)}>
+        {showAll ? 'Show fewer' : `Show all ${samples.data.samples.length} samples`}
+      </button>
+    {/if}
   {/if}
 </Panel>
 
@@ -147,10 +155,26 @@
   .conf {
     width: 220px;
   }
+  /* Thumbnails at least ~150 px wide, so boxes and prediction / truth outlines stay readable. */
   .grid {
     display: grid;
-    grid-template-columns: repeat(8, minmax(0, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(152px, 1fr));
     gap: var(--space-2);
+  }
+  .more {
+    align-self: flex-start;
+    margin-top: var(--space-3);
+    height: 28px;
+    font-size: var(--type-sm-size);
+    color: var(--text-secondary);
+  }
+  .more:hover {
+    color: var(--text-primary);
+  }
+  @media (pointer: coarse) {
+    .more {
+      height: 44px;
+    }
   }
   .grid :global(.cell-sk) {
     aspect-ratio: 4 / 3;
@@ -192,11 +216,6 @@
     width: 100%;
     border-radius: var(--radius-md);
     overflow: hidden;
-  }
-  @media (max-width: 1199px) {
-    .grid {
-      grid-template-columns: repeat(4, minmax(0, 1fr));
-    }
   }
   @media (max-width: 767px) {
     .grid {
