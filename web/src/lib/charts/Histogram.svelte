@@ -6,6 +6,7 @@
    */
   import { scaleLinear } from 'd3-scale';
   import { ticks as niceTicks } from './downsample';
+  import { binDensities } from './histogram';
 
   let {
     edges,
@@ -49,9 +50,10 @@
   const hiN = $derived(Math.min(edges[edges.length - 1] ?? 1, xMax ?? Infinity));
   /** Bin i's value span (the true one, also for an open-ended last bin). */
   const span = (i: number) => Math.max(1e-12, (edges[i + 1] ?? 0) - (edges[i] ?? 0));
-  // Proportional bars show density (count per `densityPer`), so wide bins don't look bigger than they are.
-  const unitSpan = $derived(densityPer ?? Math.min(...counts.map((_, i) => span(i))));
-  const heightOf = (i: number) => (proportional ? (counts[i] ?? 0) / (span(i) / unitSpan) : (counts[i] ?? 0));
+  // Proportional bars show density over the displayed width (count per `densityPer`), so every bar's area is its
+  // count, including a tail bin clipped at `xMax`.
+  const densities = $derived(proportional ? binDensities(edges, counts, xMax, densityPer) : counts);
+  const heightOf = (i: number) => densities[i] ?? 0;
   const max = $derived(Math.max(1e-9, ...counts.map((_, i) => heightOf(i))));
   const y = $derived(scaleLinear().domain([0, max]).nice(4).range([height - m.bottom, m.top]));
   const yt = $derived(niceTicks(0, y.domain()[1] ?? max, 3));

@@ -85,7 +85,8 @@
             tabindex="-1"
             class:danger={it.danger}
             onclick={() => {
-              hide(false);
+              // Focus goes back to the trigger first, so a dialog opened by the action returns focus there on close.
+              hide(true);
               it.onclick?.();
             }}
           >

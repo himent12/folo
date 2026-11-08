@@ -6,8 +6,8 @@
   import { runHorizon } from '$lib/charts/horizon';
   import { hub } from '$lib/api/index.svelte';
   import { Resource } from '$lib/api/resource.svelte';
-  import { bytes, duration, lr, metric, num, pct } from '$lib/format';
-  import { prefs } from '$lib/prefs.svelte';
+  import { duration, lr, metric, num } from '$lib/format';
+  import { deviceLine } from './device';
   import { href } from '$lib/router.svelte';
   import Button from '$lib/ui/Button.svelte';
   import Progress from '$lib/ui/Progress.svelte';
@@ -41,16 +41,9 @@
   });
   const progress = $derived(run.step / Math.max(1, run.steps_per_epoch * run.epochs));
 
-  // The device this run is using, live: one meta line instead of a separate system panel.
+  // The device this run is using, live: its own label, plus load only from the GPU it actually trains on.
   const sys = new Resource((s) => hub.api.system(s), { poll: 2000 });
-  const gpu = $derived(sys.data?.gpus[0]);
-  const deviceLine = $derived.by(() => {
-    const name = (gpu?.name ?? run.device).replace('NVIDIA GeForce ', '');
-    if (!gpu || !sys.data) return name;
-    const util = gpu.util === null ? null : `${pct(gpu.util, 0)} busy`;
-    const mem = `${bytes(sys.data.memory.used_bytes, prefs.units)} / ${bytes(sys.data.memory.total_bytes, prefs.units)} RAM`;
-    return [name, util, mem].filter(Boolean).join(' · ');
-  });
+  const deviceText = $derived(deviceLine(run, sys.data?.gpus ?? []));
 </script>
 
 <section class="card" aria-labelledby="live-title">
@@ -63,7 +56,7 @@
       <span>{dataset?.name ?? run.config.dataset_id}</span><span class="sep">·</span>
       <span class="mono">{run.config.arch}</span><span class="sep">·</span>
       <span>{run.config.imgsz} px · batch {run.config.batch}</span><span class="sep">·</span>
-      <span class="truncate num">{deviceLine}</span>
+      <span class="truncate num">{deviceText}</span>
     </p>
     <div class="cta"><Button size="sm" variant="ghost" iconRight={ArrowRight} href={href(`/runs/${run.id}`)}>Open run</Button></div>
   </header>
