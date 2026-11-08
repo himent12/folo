@@ -390,55 +390,6 @@ impl EvalBasis {
     }
 }
 
-#[cfg(test)]
-mod eval_tests {
-    use super::*;
-
-    fn basis(per_class: &[(f32, f32)], counts: &[u64]) -> EvalBasis {
-        let per_class = per_class
-            .iter()
-            .enumerate()
-            .map(|(c, &(precision, recall))| ClassMetrics {
-                class: c as u32,
-                map50: 0.7,
-                map50_95: 0.5,
-                precision,
-                recall,
-            })
-            .collect();
-        EvalBasis { per_class, counts: counts.to_vec(), images: 10, seed: 1 }
-    }
-
-    /// Row sums equal instance counts and `per_class` precision / recall match the matrix.
-    fn check(b: &EvalBasis) {
-        let ev = b.eval();
-        let n = b.per_class.len();
-        for c in 0..n {
-            assert_eq!(ev.confusion[c].iter().map(|&v| v as u64).sum::<u64>(), b.counts[c], "row {c}");
-            let row: u32 = ev.confusion[c].iter().sum();
-            let col: u32 = (0..=n).map(|r| ev.confusion[r][c]).sum();
-            let tp = ev.confusion[c][c] as f32;
-            if row > 0 {
-                assert!((ev.per_class[c].recall - tp / row as f32).abs() < 1e-3);
-            }
-            if col > 0 {
-                assert!((ev.per_class[c].precision - tp / col as f32).abs() < 1e-3);
-            }
-        }
-        assert_eq!(ev.confusion[n][n], 0);
-    }
-
-    #[test]
-    fn confusion_is_consistent() {
-        // Balanced, imbalanced (a rare class that receives many confusions), zero-count and single-class cases.
-        check(&basis(&[(0.9, 0.85), (0.8, 0.7), (0.7, 0.6)], &[400, 380, 390]));
-        check(&basis(&[(0.6, 0.4), (0.95, 0.9), (0.5, 0.3)], &[5000, 3, 1200]));
-        check(&basis(&[(0.9, 0.8), (0.9, 0.8)], &[100, 0]));
-        check(&basis(&[(0.05, 0.02)], &[50]));
-        check(&basis(&[(1.0, 1.0), (0.01, 0.01)], &[1, 1]));
-    }
-}
-
 /// The mock store. See the module docs.
 pub struct MockStore {
     datasets: RwLock<Vec<Arc<DatasetEntry>>>,
@@ -1104,5 +1055,54 @@ impl MockStore {
     pub fn hub_state(&self, id: &str) -> (usize, bool) {
         let (run, _) = self.run(id).unwrap();
         (run.subscribers(), run.ticking())
+    }
+}
+
+#[cfg(test)]
+mod eval_tests {
+    use super::*;
+
+    fn basis(per_class: &[(f32, f32)], counts: &[u64]) -> EvalBasis {
+        let per_class = per_class
+            .iter()
+            .enumerate()
+            .map(|(c, &(precision, recall))| ClassMetrics {
+                class: c as u32,
+                map50: 0.7,
+                map50_95: 0.5,
+                precision,
+                recall,
+            })
+            .collect();
+        EvalBasis { per_class, counts: counts.to_vec(), images: 10, seed: 1 }
+    }
+
+    /// Row sums equal instance counts and `per_class` precision / recall match the matrix.
+    fn check(b: &EvalBasis) {
+        let ev = b.eval();
+        let n = b.per_class.len();
+        for c in 0..n {
+            assert_eq!(ev.confusion[c].iter().map(|&v| v as u64).sum::<u64>(), b.counts[c], "row {c}");
+            let row: u32 = ev.confusion[c].iter().sum();
+            let col: u32 = (0..=n).map(|r| ev.confusion[r][c]).sum();
+            let tp = ev.confusion[c][c] as f32;
+            if row > 0 {
+                assert!((ev.per_class[c].recall - tp / row as f32).abs() < 1e-3);
+            }
+            if col > 0 {
+                assert!((ev.per_class[c].precision - tp / col as f32).abs() < 1e-3);
+            }
+        }
+        assert_eq!(ev.confusion[n][n], 0);
+    }
+
+    #[test]
+    fn confusion_is_consistent() {
+        // Balanced, imbalanced (a rare class that receives many confusions), zero-count and single-class cases.
+        check(&basis(&[(0.9, 0.85), (0.8, 0.7), (0.7, 0.6)], &[400, 380, 390]));
+        check(&basis(&[(0.6, 0.4), (0.95, 0.9), (0.5, 0.3)], &[5000, 3, 1200]));
+        check(&basis(&[(0.9, 0.8), (0.9, 0.8)], &[100, 0]));
+        check(&basis(&[(0.05, 0.02)], &[50]));
+        check(&basis(&[(1.0, 1.0), (0.01, 0.01)], &[1, 1]));
     }
 }
