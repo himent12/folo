@@ -298,8 +298,18 @@ impl Backend for HttpBackend {
 
     fn model_weights(&self, id: &str, etag: Option<&str>) -> ApiResult<Option<Weights>> {
         let url = self.url(&format!("/models/{}/weights?format=f16", seg(id)));
-        // The first request of a checkpoint makes its f16 export on the server: allow for it.
-        let mut req = agent(Some(Duration::from_secs(300))).get(&url);
+        // The first request of a checkpoint makes its f16 export on the server: allow for it. A
+        // revalidation (a copy is already loaded) gives up on a silent server after 15 s, so the
+        // copy runs instead of every local prediction waiting on it.
+        let headers = if etag.is_some() { 15 } else { 300 };
+        let mut req = ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .timeout_connect(Some(Duration::from_secs(2)))
+            .timeout_recv_response(Some(Duration::from_secs(headers)))
+            .timeout_global(Some(Duration::from_secs(600)))
+            .build()
+            .new_agent()
+            .get(&url);
         if let Some(e) = etag {
             req = req.header("If-None-Match", e);
         }
