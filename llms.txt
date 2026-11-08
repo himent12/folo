@@ -5,4 +5,5 @@
 - [Agent rules](AGENTS.md)
 - [Architecture](docs/ARCHITECTURE.md)
 - [HTTP API](docs/API.md)
+- [MCP server for agents](docs/MCP.md)
 - [Roadmap](docs/ROADMAP.md)
