@@ -449,6 +449,11 @@ impl FoloApp {
     ) -> AnyElement {
         let close_btn =
             self.icon_button("dialog-close", "icons/x.svg", "Close (Esc)", window, cx, on_close.clone());
+        // From the last layout, as the run log's follow state is.
+        let more_below = {
+            let s = &self.dialog_scroll;
+            s.max_offset().height + s.offset().y > px(1.)
+        };
         crate::ui::appear(
             div()
                 .absolute()
@@ -516,16 +521,22 @@ impl FoloApp {
                                                 .child(body),
                                         )
                                         .child(self.scrollbar(self.dialog_scroll.clone(), cx))
-                                        .child(div().absolute().bottom_0().left_0().right_0().h(px(16.)).bg(
-                                            gpui::linear_gradient(
-                                                0.,
-                                                gpui::linear_color_stop(t.bg_overlay, 0.),
-                                                gpui::linear_color_stop(
-                                                    crate::theme::alpha(t.bg_overlay, 0.),
-                                                    1.,
+                                        // Only while more of the form lies below: at the end, the last
+                                        // row's controls show undimmed.
+                                        .when(more_below, |d| {
+                                            d.child(
+                                                div().absolute().bottom_0().left_0().right_0().h(px(16.)).bg(
+                                                    gpui::linear_gradient(
+                                                        0.,
+                                                        gpui::linear_color_stop(t.bg_overlay, 0.),
+                                                        gpui::linear_color_stop(
+                                                            crate::theme::alpha(t.bg_overlay, 0.),
+                                                            1.,
+                                                        ),
+                                                    ),
                                                 ),
-                                            ),
-                                        )),
+                                            )
+                                        }),
                                 )
                                 .child(footer),
                         ),
