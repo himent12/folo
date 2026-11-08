@@ -23,8 +23,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use axum::Router;
+use axum::extract::{Request, State};
 use axum::http::{HeaderValue, Method, StatusCode, header};
-use axum::response::IntoResponse;
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tower_http::compression::CompressionLayer;
@@ -89,6 +91,37 @@ fn is_loopback_origin(origin: &HeaderValue) -> bool {
     matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
 
+/// True when `origin` names the same host and port the request was sent to (a page served by this server).
+fn is_same_origin(origin: &HeaderValue, host: Option<&HeaderValue>) -> bool {
+    let (Ok(o), Some(Ok(h))) = (origin.to_str(), host.map(|h| h.to_str())) else { return false };
+    let authority = o.strip_prefix("http://").or_else(|| o.strip_prefix("https://")).unwrap_or("");
+    !authority.is_empty() && authority.eq_ignore_ascii_case(h)
+}
+
+/// CORS only hides responses; a browser still *sends* "simple" cross-origin POSTs (form posts) without a
+/// preflight. So with [`Cors::Loopback`], state-changing requests whose `Origin` is neither loopback nor this
+/// server itself are refused before they reach a handler. Requests without `Origin` (curl, agents, the desktop
+/// app) are allowed.
+async fn guard_origin(State(cors): State<Cors>, req: Request, next: Next) -> Response {
+    let safe = matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS);
+    if cors == Cors::Loopback
+        && !safe
+        && let Some(origin) = req.headers().get(header::ORIGIN)
+        && !is_loopback_origin(origin)
+        && !is_same_origin(origin, req.headers().get(header::HOST))
+    {
+        let o = origin.to_str().unwrap_or("?");
+        return error::Error::new(
+            StatusCode::FORBIDDEN,
+            "forbidden_origin",
+            format!("requests from origin '{o}' are not allowed"),
+        )
+        .hint("only localhost pages may change state; start the server with --cors-any to allow every origin")
+        .into_response();
+    }
+    next.run(req).await
+}
+
 async fn web_not_built() -> impl IntoResponse {
     (
         StatusCode::NOT_FOUND,
@@ -120,11 +153,15 @@ impl Server {
                 .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
                 .allow_headers(tower_http::cors::Any),
         };
-        let router = router.layer(CompressionLayer::new()).layer(cors).layer(
-            TraceLayer::new_for_http()
-                .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
-                .on_response(DefaultOnResponse::new().level(Level::INFO)),
-        );
+        let router = router
+            .layer(axum::middleware::from_fn_with_state(opts.cors, guard_origin))
+            .layer(CompressionLayer::new())
+            .layer(cors)
+            .layer(
+                TraceLayer::new_for_http()
+                    .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
+                    .on_response(DefaultOnResponse::new().level(Level::INFO)),
+            );
         Server { router, shutdown }
     }
 

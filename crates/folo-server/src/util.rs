@@ -119,6 +119,19 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
+/// The first [`short_id`] derived from `seed` for which `taken` is false. Ids have only 16 bits, so callers must
+/// check every id that exists (and decide under the same lock that inserts the new one).
+pub fn unique_id(prefix: &str, seed: u64, taken: impl Fn(&str) -> bool) -> String {
+    let mut h = seed;
+    loop {
+        let id = short_id(prefix, h);
+        if !taken(&id) {
+            return id;
+        }
+        h = mix64(h);
+    }
+}
+
 /// Short lowercase hex id with a prefix, e.g. `id("ds", h) == "ds_8f2c"`.
 pub fn short_id(prefix: &str, h: u64) -> String {
     format!("{prefix}_{:04x}", (mix64(h) >> 48) as u16)
@@ -138,6 +151,14 @@ mod tests {
             Some("2024-02-29T23:59:59Z")
         );
         assert_eq!(parse_rfc3339("nope"), None);
+    }
+
+    #[test]
+    fn unique_id_skips_taken_ids() {
+        let first = unique_id("m", 42, |_| false);
+        let second = unique_id("m", 42, |id| id == first);
+        assert_ne!(first, second);
+        assert!(second.starts_with("m_") && second.len() == 6);
     }
 
     #[test]

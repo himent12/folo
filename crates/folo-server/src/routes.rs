@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use axum::Json;
 use axum::Router;
-use axum::extract::{DefaultBodyLimit, FromRequest, Multipart, Path, Request, State};
+use axum::extract::{DefaultBodyLimit, FromRequest, Multipart, Request, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -20,7 +20,7 @@ use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 use crate::AppState;
-use crate::error::{ApiJson, ApiQuery, Error, Result};
+use crate::error::{ApiJson, ApiPath, ApiQuery, Error, Result};
 use crate::store::{ImageQuery, PredictInput, PredictSource, Store};
 use crate::util::{rfc3339, unix_now};
 
@@ -128,11 +128,11 @@ async fn create_synthetic(
     Ok((StatusCode::CREATED, Json(ds)).into_response())
 }
 
-async fn get_dataset(State(st): State<AppState>, Path(id): Path<String>) -> Result<Response> {
+async fn get_dataset(State(st): State<AppState>, ApiPath(id): ApiPath<String>) -> Result<Response> {
     Ok(Json(st.store.get_dataset(&id)?).into_response())
 }
 
-async fn delete_dataset(State(st): State<AppState>, Path(id): Path<String>) -> Result<StatusCode> {
+async fn delete_dataset(State(st): State<AppState>, ApiPath(id): ApiPath<String>) -> Result<StatusCode> {
     blocking(&st, move |s| s.delete_dataset(&id)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -148,7 +148,7 @@ struct ImagesParams {
 
 async fn list_images(
     State(st): State<AppState>,
-    Path(id): Path<String>,
+    ApiPath(id): ApiPath<String>,
     ApiQuery(p): ApiQuery<ImagesParams>,
 ) -> Result<Json<ImagePage>> {
     let q = ImageQuery {
@@ -167,7 +167,7 @@ struct ThumbParams {
 
 async fn image(
     State(st): State<AppState>,
-    Path((id, image_id)): Path<(String, String)>,
+    ApiPath((id, image_id)): ApiPath<(String, String)>,
     ApiQuery(p): ApiQuery<ThumbParams>,
 ) -> Result<Response> {
     let thumb = p.thumb.map(|t| t.clamp(16, 2048));
@@ -189,13 +189,13 @@ async fn list_models(State(st): State<AppState>) -> Result<Json<ModelList>> {
     Ok(Json(ModelList { models: st.store.list_models()? }))
 }
 
-async fn get_model(State(st): State<AppState>, Path(id): Path<String>) -> Result<Response> {
+async fn get_model(State(st): State<AppState>, ApiPath(id): ApiPath<String>) -> Result<Response> {
     Ok(Json(st.store.get_model(&id)?).into_response())
 }
 
 async fn export_model(
     State(st): State<AppState>,
-    Path(id): Path<String>,
+    ApiPath(id): ApiPath<String>,
     ApiJson(req): ApiJson<ExportRequest>,
 ) -> Result<Response> {
     Ok(Json(blocking(&st, move |s| s.export_model(&id, req.format)).await?).into_response())
@@ -212,15 +212,15 @@ async fn create_run(State(st): State<AppState>, ApiJson(config): ApiJson<TrainCo
     Ok((StatusCode::CREATED, Json(run)).into_response())
 }
 
-async fn get_run(State(st): State<AppState>, Path(id): Path<String>) -> Result<Response> {
+async fn get_run(State(st): State<AppState>, ApiPath(id): ApiPath<String>) -> Result<Response> {
     Ok(Json(st.store.get_run(&id)?).into_response())
 }
 
-async fn stop_run(State(st): State<AppState>, Path(id): Path<String>) -> Result<Response> {
+async fn stop_run(State(st): State<AppState>, ApiPath(id): ApiPath<String>) -> Result<Response> {
     Ok(Json(st.store.stop_run(&id)?).into_response())
 }
 
-async fn delete_run(State(st): State<AppState>, Path(id): Path<String>) -> Result<StatusCode> {
+async fn delete_run(State(st): State<AppState>, ApiPath(id): ApiPath<String>) -> Result<StatusCode> {
     st.store.delete_run(&id)?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -232,7 +232,7 @@ struct MetricsParams {
 
 async fn run_metrics(
     State(st): State<AppState>,
-    Path(id): Path<String>,
+    ApiPath(id): ApiPath<String>,
     ApiQuery(p): ApiQuery<MetricsParams>,
 ) -> Result<Response> {
     let every = p.every.unwrap_or(1).max(1);
@@ -246,7 +246,7 @@ struct SamplesParams {
 
 async fn run_samples(
     State(st): State<AppState>,
-    Path(id): Path<String>,
+    ApiPath(id): ApiPath<String>,
     ApiQuery(p): ApiQuery<SamplesParams>,
 ) -> Result<Response> {
     Ok(Json(blocking(&st, move |s| s.run_samples(&id, p.epoch)).await?).into_response())
@@ -261,7 +261,7 @@ fn sse_event(ev: &RunEvent) -> Event {
 /// it, and the run's event pump stops by itself once no receivers are left.
 async fn run_events(
     State(st): State<AppState>,
-    Path(id): Path<String>,
+    ApiPath(id): ApiPath<String>,
 ) -> Result<Sse<impl Stream<Item = std::result::Result<Event, Infallible>>>> {
     let sub = st.store.subscribe(&id)?;
     let mut shutdown = st.shutdown.subscribe();
@@ -292,13 +292,13 @@ async fn parse_multipart(mut mp: Multipart) -> Result<PredictInput> {
     let (mut model_id, mut dataset_id, mut image_id) = (None, None, None);
     let (mut conf, mut iou, mut max_det) =
         (folo_api::default_conf(), folo_api::default_iou(), folo_api::default_max_det());
-    while let Some(field) = mp.next_field().await.map_err(|e| field_err("multipart", e.body_text()))? {
+    while let Some(field) = mp.next_field().await.map_err(|e| Error::multipart("multipart", e))? {
         let name = field.name().unwrap_or("").to_string();
         if name == "image" {
-            image = Some(field.bytes().await.map_err(|e| field_err("image", e.body_text()))?.to_vec());
+            image = Some(field.bytes().await.map_err(|e| Error::multipart("image", e))?.to_vec());
             continue;
         }
-        let text = field.text().await.map_err(|e| field_err(&name, e.body_text()))?;
+        let text = field.text().await.map_err(|e| Error::multipart(&name, e))?;
         let text = text.trim().to_string();
         match name.as_str() {
             "model_id" => model_id = Some(text),
@@ -340,8 +340,7 @@ async fn predict(State(st): State<AppState>, req: Request) -> Result<Response> {
         .unwrap_or("")
         .to_ascii_lowercase();
     let input = if ct.starts_with("multipart/form-data") {
-        let mp =
-            Multipart::from_request(req, &st).await.map_err(|e| field_err("multipart", e.body_text()))?;
+        let mp = Multipart::from_request(req, &st).await?;
         parse_multipart(mp).await?
     } else {
         let ApiJson(r) = ApiJson::<PredictRequest>::from_request(req, &st).await?;

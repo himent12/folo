@@ -15,7 +15,10 @@ behaviour, and keep the Rust types in `crates/folo-api` (used by the server, the
   fields are ignored; missing optional fields take the defaults listed here.
 - Responses are gzip-compressed when the client sends `Accept-Encoding: gzip` (never images or SSE).
 - CORS: by default only browser origins on `localhost`, `127.0.0.1` or `[::1]` (any port, e.g. the Vite dev server
-  on :5173) may call the API; `folo serve --cors-any` allows every origin.
+  on :5173) may call the API; `folo serve --cors-any` allows every origin. Because browsers send simple form POSTs
+  without a preflight, state-changing requests (`POST`, `DELETE`) whose `Origin` header is neither such a loopback
+  origin nor the server itself are refused with `403 forbidden_origin`. Requests without `Origin` (curl, agents,
+  FOLO Desktop) are unaffected.
 - Outside `/api`, the server serves the built web app (`web/dist`, `--web-dir`) with an SPA fallback to
   `index.html`; without a build it answers 404 with a hint.
 
@@ -25,7 +28,8 @@ Non-2xx responses: `{ "error": { "code": "dataset_not_found", "message": "...", 
 
 | status | code | when |
 |---|---|---|
-| 400 | `bad_request`, `invalid_query`, `invalid_body`, `invalid_config`, `unknown_format` | malformed input (`invalid_config`: a `TrainConfig` field is out of range; the message names it) |
+| 400 | `bad_request`, `invalid_path`, `invalid_query`, `invalid_body`, `invalid_config`, `unknown_format` | malformed input (`invalid_config`: a `TrainConfig` field is out of range; the message names it) |
+| 403 | `forbidden_origin` | a state-changing request from a disallowed browser origin (see Conventions) |
 | 404 | `dataset_not_found`, `image_not_found`, `model_not_found`, `run_not_found`, `path_not_found`, `epoch_not_available`, `route_not_found` | something named does not exist |
 | 405 | `method_not_allowed` | wrong HTTP method on a known path |
 | 409 | `run_active`, `run_not_active` | deleting a run that is still active; stopping one that is not |
@@ -160,6 +164,8 @@ Non-2xx responses: `{ "error": { "code": "dataset_not_found", "message": "...", 
     "device": "gpu:0" }
   ```
   `conf` and `iou` must be in `0..=1`, `max_det >= 1`. Uploads up to 64 MiB; JPEG, PNG, BMP and WebP are accepted.
+  Boxes only use the model's classes: on a dataset image, ground-truth classes the model does not know (by name) are
+  never predicted.
 - `GET /api/predict/stream?model_id=..&conf=..` — WebSocket: the client sends JPEG frames (binary), the server
   answers each with the same JSON as `/api/predict` (for webcam / screen demos). Later milestone; answers
   `501 not_implemented` for now.

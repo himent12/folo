@@ -502,25 +502,22 @@ impl SimRun {
     }
 
     /// Subscribes to events, starting the ticker if this is the first subscriber of a live run.
+    ///
+    /// The receiver is created before the initial snapshot, and a newly started ticker diffs from that same
+    /// snapshot, so the first subscriber never misses a transition (later subscribers may see one event twice).
     pub fn subscribe(self: &Arc<Self>) -> Subscription {
-        let rx = {
-            let mut hub = self.hub.lock().unwrap();
-            let tx = hub.tx.get_or_insert_with(|| broadcast::channel(256).0);
-            let rx = tx.subscribe();
-            if !hub.ticking
-                && matches!(self.timeline, Timeline::Live(_))
-                && !self.deleted.load(Ordering::SeqCst)
-            {
-                hub.ticking = true;
-                tokio::spawn(ticker(Arc::clone(self)));
-            }
-            rx
-        };
+        let mut hub = self.hub.lock().unwrap();
+        let tx = hub.tx.get_or_insert_with(|| broadcast::channel(256).0);
+        let rx = tx.subscribe();
         let snap = self.snap();
-        Subscription {
-            initial: StatusEvent { status: snap.status, error: self.error(snap.status) },
-            events: rx,
+        if !hub.ticking && matches!(self.timeline, Timeline::Live(_)) && !self.deleted.load(Ordering::SeqCst)
+        {
+            hub.ticking = true;
+            tokio::spawn(ticker(Arc::clone(self), snap));
         }
+        drop(hub);
+        let events = rx;
+        Subscription { initial: StatusEvent { status: snap.status, error: self.error(snap.status) }, events }
     }
 
     /// Number of live subscribers (for tests).
@@ -622,10 +619,9 @@ impl SimRun {
 }
 
 /// Publishes a live run's events while it has subscribers; exits when the last one disconnects.
-async fn ticker(run: Arc<SimRun>) {
+async fn ticker(run: Arc<SimRun>, mut last: Snap) {
     let mut interval = tokio::time::interval(TICK);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut last = run.snap();
     loop {
         interval.tick().await;
         let now = run.snap();

@@ -614,3 +614,124 @@ async fn cors_and_gzip() {
     let res = app.clone().oneshot(req).await.unwrap();
     assert!(res.headers().get(header::CONTENT_ENCODING).is_none());
 }
+
+#[tokio::test]
+async fn cross_origin_mutations_are_refused() {
+    let (server, _) = mock();
+    let app = server.router();
+    let list: RunList = ok(&app, get("/api/runs")).await;
+    let live = list.runs.iter().find(|r| r.status == RunStatus::Running).unwrap().id.clone();
+    // A "simple" form POST needs no preflight, so CORS alone would let it through.
+    let form_post = |origin: &str, host: &str| {
+        Request::post(format!("/api/runs/{live}/stop"))
+            .header(header::ORIGIN, origin)
+            .header(header::HOST, host)
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from("a=b"))
+            .unwrap()
+    };
+    err(&app, form_post("https://evil.example", "127.0.0.1:7878"), StatusCode::FORBIDDEN, "forbidden_origin")
+        .await;
+    err(&app, form_post("null", "127.0.0.1:7878"), StatusCode::FORBIDDEN, "forbidden_origin").await;
+    let r: Run = ok(&app, get(&format!("/api/runs/{live}"))).await;
+    assert_eq!(r.status, RunStatus::Running, "the refused request had no effect");
+    // Reads are fine from anywhere (CORS hides the response).
+    let req = Request::get("/api/health")
+        .header(header::ORIGIN, "https://evil.example")
+        .body(Body::empty())
+        .unwrap();
+    let (s, _, _) = send(&app, req).await;
+    assert_eq!(s, StatusCode::OK);
+    // Same origin (Studio served by this server on a LAN address) and loopback origins may mutate.
+    let ds: DatasetList = ok(&app, get("/api/datasets")).await;
+    let create = |origin: &str, host: &str| {
+        Request::post("/api/runs")
+            .header(header::ORIGIN, origin)
+            .header(header::HOST, host)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(json!({ "dataset_id": ds.datasets[0].id }).to_string()))
+            .unwrap()
+    };
+    let (s, _, _) = send(&app, create("http://192.168.1.5:7878", "192.168.1.5:7878")).await;
+    assert_eq!(s, StatusCode::CREATED);
+    let (s, _, _) = send(&app, create("http://localhost:5173", "127.0.0.1:7878")).await;
+    assert_eq!(s, StatusCode::CREATED);
+    // --cors-any turns the guard off.
+    let any = Server::new(Arc::new(MockStore::new()), Options { web_dir: None, cors: Cors::Any }).router();
+    let (s, _, _) = send(&any, create("https://elsewhere.example", "127.0.0.1:7878")).await;
+    assert_eq!(s, StatusCode::CREATED);
+}
+
+#[tokio::test]
+async fn malformed_paths_and_oversized_uploads_use_the_envelope() {
+    let (server, _) = mock();
+    let app = server.router();
+    err(&app, get("/api/datasets/%FF"), StatusCode::BAD_REQUEST, "invalid_path").await;
+    err(&app, get("/api/runs/%FF/metrics"), StatusCode::BAD_REQUEST, "invalid_path").await;
+
+    let boundary = "XfoloBoundary";
+    let mut body = format!(
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"model_id\"\r\n\r\nm_31aa\r\n--{boundary}\r\n\
+         Content-Disposition: form-data; name=\"image\"; filename=\"big.jpg\"\r\nContent-Type: image/jpeg\r\n\r\n"
+    )
+    .into_bytes();
+    body.resize(body.len() + 65 * 1024 * 1024, 0);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    let req = Request::post("/api/predict")
+        .header(header::CONTENT_TYPE, format!("multipart/form-data; boundary={boundary}"))
+        .body(Body::from(body))
+        .unwrap();
+    err(&app, req, StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large").await;
+}
+
+#[tokio::test]
+async fn predictions_stay_within_the_model_classes() {
+    let (server, _) = mock();
+    let app = server.router();
+    // A shapes model (circle / square / triangle) on traffic images: it may only answer with its own classes.
+    let model: Model = ok(&app, get("/api/models/m_31aa")).await;
+    assert_eq!(model.classes.len(), 3);
+    for i in 0..20 {
+        let req = json!({ "model_id": "m_31aa", "dataset_id": "ds_7c2f", "image_id": format!("{i:06}"), "conf": 0.0 });
+        let p: PredictResponse = ok(&app, post_json("/api/predict", req)).await;
+        for b in &p.boxes {
+            assert!((b.class as usize) < model.classes.len(), "{b:?}");
+            assert_eq!(b.name, model.classes[b.class as usize]);
+        }
+    }
+    // A matching model keeps the dataset's classes.
+    let req = json!({ "model_id": "m_53d1", "dataset_id": "ds_3b9d", "image_id": "000700", "conf": 0.0 });
+    let p: PredictResponse = ok(&app, post_json("/api/predict", req)).await;
+    assert!(p.boxes.iter().any(|b| b.name == "body"));
+}
+
+#[tokio::test]
+async fn sse_first_subscriber_sees_queued_to_running() {
+    let (server, _) = mock();
+    let app = server.router();
+    let ds: DatasetList = ok(&app, get("/api/datasets")).await;
+    let run: Run =
+        ok(&app, post_json("/api/runs", json!({ "dataset_id": ds.datasets[0].id, "epochs": 3 }))).await;
+    assert_eq!(run.status, RunStatus::Queued);
+    let res = app.clone().oneshot(get(&format!("/api/runs/{}/events", run.id))).await.unwrap();
+    let mut body = res.into_body();
+    let mut statuses = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    'outer: loop {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let evs = read_events(&mut body, 1, left).await;
+        assert!(!evs.is_empty(), "no step within 8 s; statuses {statuses:?}");
+        for (name, data) in evs {
+            match name.as_str() {
+                "status" => statuses.push(serde_json::from_str::<StatusEvent>(&data).unwrap().status),
+                "step" => break 'outer,
+                _ => {}
+            }
+        }
+    }
+    assert_eq!(
+        statuses,
+        [RunStatus::Queued, RunStatus::Running],
+        "every transition is reported before steps"
+    );
+}

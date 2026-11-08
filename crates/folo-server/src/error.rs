@@ -1,7 +1,8 @@
 //! The error envelope (`{ "error": { code, message, hint } }`) and extractors that use it for rejections.
 
 use axum::Json;
-use axum::extract::rejection::{JsonRejection, QueryRejection};
+use axum::extract::multipart::{MultipartError, MultipartRejection};
+use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
 use axum::extract::{FromRequest, FromRequestParts};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -93,10 +94,45 @@ impl From<QueryRejection> for Error {
     }
 }
 
+impl From<PathRejection> for Error {
+    fn from(r: PathRejection) -> Error {
+        Error::new(StatusCode::BAD_REQUEST, "invalid_path", r.body_text())
+    }
+}
+
+/// Maps a multipart failure, keeping its status (`413 payload_too_large` when the body is over the limit).
+fn multipart_error(status: StatusCode, what: &str, text: String) -> Error {
+    if status == StatusCode::PAYLOAD_TOO_LARGE {
+        Error::new(status, "payload_too_large", format!("{what}: {text}"))
+            .hint("uploads are limited to 64 MiB")
+    } else {
+        let status = if status.is_client_error() { status } else { StatusCode::BAD_REQUEST };
+        Error::new(status, "invalid_body", format!("{what}: {text}"))
+    }
+}
+
+impl From<MultipartRejection> for Error {
+    fn from(r: MultipartRejection) -> Error {
+        multipart_error(r.status(), "multipart", r.body_text())
+    }
+}
+
+impl Error {
+    /// A multipart field failure.
+    pub fn multipart(field: &str, e: MultipartError) -> Error {
+        multipart_error(e.status(), &format!("field `{field}`"), e.body_text())
+    }
+}
+
 /// `Json<T>` whose rejection is our error envelope.
 #[derive(FromRequest)]
 #[from_request(via(axum::Json), rejection(Error))]
 pub struct ApiJson<T>(pub T);
+
+/// `Path<T>` whose rejection is our error envelope.
+#[derive(FromRequestParts)]
+#[from_request(via(axum::extract::Path), rejection(Error))]
+pub struct ApiPath<T>(pub T);
 
 /// `Query<T>` whose rejection is our error envelope.
 #[derive(FromRequestParts)]

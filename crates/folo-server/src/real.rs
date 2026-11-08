@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::disk::DiskDataset;
 use crate::error::{Error, Result};
 use crate::store::{ImageData, ImageQuery, PredictInput, PredictSource, Store, Subscription};
-use crate::util::{fnv1a, mix64, rfc3339, short_id, unix_now};
+use crate::util::{fnv1a, rfc3339, unique_id, unix_now};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Registration {
@@ -93,18 +93,14 @@ impl Store for RealStore {
     }
 
     fn register_dataset(&self, req: RegisterDataset) -> Result<Dataset> {
-        let mut h = fnv1a(req.path.as_bytes()) ^ unix_now().to_bits();
-        let id = loop {
-            let id = short_id("ds", h);
-            if self.dataset(&id).is_err() {
-                break id;
-            }
-            h = mix64(h);
-        };
-        let ds = DiskDataset::scan(id, req.name, &req.path, req.format, rfc3339(unix_now()))?;
-        let out = Dataset { stats: Some(ds.stats.clone()), ..ds.meta.clone() };
+        let mut ds = DiskDataset::scan(String::new(), req.name, &req.path, req.format, rfc3339(unix_now()))?;
         let mut list = self.datasets.write().unwrap();
         let mut regs = Self::read_registry(&self.data_dir);
+        // Unique against loaded datasets and registrations whose folder is currently missing.
+        ds.meta.id = unique_id("ds", fnv1a(req.path.as_bytes()) ^ unix_now().to_bits(), |id| {
+            list.iter().any(|d| d.meta.id == id) || regs.iter().any(|r| r.id == id)
+        });
+        let out = Dataset { stats: Some(ds.stats.clone()), ..ds.meta.clone() };
         regs.push(Registration {
             id: out.id.clone(),
             name: out.name.clone(),

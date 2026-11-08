@@ -21,7 +21,7 @@ use crate::disk::DiskDataset;
 use crate::error::{Error, Result};
 use crate::stats::StatsBuilder;
 use crate::store::{ImageData, ImageQuery, PredictInput, PredictSource, Store, Subscription};
-use crate::util::{Rng, fnv1a, mix64, noise, parse_rfc3339, rfc3339, short_id, unix_now};
+use crate::util::{Rng, fnv1a, mix64, noise, parse_rfc3339, rfc3339, unique_id, unix_now};
 use runs::{Curve, LiveClock, SimRun, Timeline, arch_spec};
 use scene::{Scene, Theme};
 
@@ -545,17 +545,6 @@ impl MockStore {
             .ok_or_else(|| Error::not_found("run", id))
     }
 
-    fn unique_id(&self, prefix: &str, seed: u64, taken: impl Fn(&str) -> bool) -> String {
-        let mut h = seed;
-        loop {
-            let id = short_id(prefix, h);
-            if !taken(&id) {
-                return id;
-            }
-            h = mix64(h);
-        }
-    }
-
     fn all_models(&self) -> Vec<Model> {
         let mut out: Vec<Model> = self.models.read().unwrap().iter().map(|m| m.model.clone()).collect();
         for (run, ds) in self.runs.read().unwrap().iter().filter(|r| r.0.user) {
@@ -642,12 +631,13 @@ impl Store for MockStore {
     }
 
     fn register_dataset(&self, req: RegisterDataset) -> Result<Dataset> {
-        let id = self.unique_id("ds", fnv1a(req.path.as_bytes()) ^ unix_now().to_bits(), |id| {
-            self.dataset(id).is_ok()
+        let mut ds = DiskDataset::scan(String::new(), req.name, &req.path, req.format, rfc3339(unix_now()))?;
+        let mut list = self.datasets.write().unwrap();
+        ds.meta.id = unique_id("ds", fnv1a(req.path.as_bytes()) ^ unix_now().to_bits(), |id| {
+            list.iter().any(|d| d.meta().id == id)
         });
-        let ds = DiskDataset::scan(id, req.name, &req.path, req.format, rfc3339(unix_now()))?;
         let out = Dataset { stats: Some(ds.stats.clone()), ..ds.meta.clone() };
-        self.datasets.write().unwrap().push(Arc::new(DatasetEntry::Disk(ds)));
+        list.push(Arc::new(DatasetEntry::Disk(ds)));
         Ok(out)
     }
 
@@ -666,13 +656,11 @@ impl Store for MockStore {
         if !(32..=4096).contains(&req.imgsz) {
             return bad("imgsz must be in 32..=4096");
         }
-        let id = self.unique_id("ds", fnv1a(req.name.as_bytes()) ^ req.seed ^ unix_now().to_bits(), |id| {
-            self.dataset(id).is_ok()
-        });
+        let seed = fnv1a(req.name.as_bytes()) ^ req.seed ^ unix_now().to_bits();
         let train = (req.images as f64 * 0.8).round() as u64;
         let splits = Splits { train, val: req.images - train, test: 0 };
-        let ds = ProcDataset::build(
-            id,
+        let mut ds = ProcDataset::build(
+            String::new(),
             req.name,
             Theme::Shapes,
             req.classes,
@@ -683,9 +671,11 @@ impl Store for MockStore {
             rfc3339(unix_now()),
             0,
         );
+        let mut list = self.datasets.write().unwrap();
+        ds.meta.id = unique_id("ds", seed, |id| list.iter().any(|d| d.meta().id == id));
         let entry = Arc::new(DatasetEntry::Proc(ds));
         let out = entry.with_stats();
-        self.datasets.write().unwrap().push(entry);
+        list.push(entry);
         Ok(out)
     }
 
@@ -738,10 +728,21 @@ impl Store for MockStore {
         if config.name.trim().is_empty() {
             config.name = format!("{}-{}", meta.name, &config.arch.as_str()[5..]);
         }
-        let id = self.unique_id("run", fnv1a(config.name.as_bytes()) ^ unix_now().to_bits(), |id| {
-            self.run(id).is_ok()
+        // Ids are allocated under the runs write lock so concurrent creates cannot pick the same one, and model
+        // ids are checked against every model that exists or will exist when a run completes.
+        let mut runs = self.runs.write().unwrap();
+        let id = unique_id("run", fnv1a(config.name.as_bytes()) ^ unix_now().to_bits(), |id| {
+            runs.iter().any(|r| r.0.id == id)
         });
-        let model_id = short_id("m", fnv1a(id.as_bytes()));
+        let models_taken: std::collections::HashSet<String> = self
+            .models
+            .read()
+            .unwrap()
+            .iter()
+            .map(|m| m.model.id.clone())
+            .chain(runs.iter().filter_map(|r| r.0.model_id.clone()))
+            .collect();
+        let model_id = unique_id("m", fnv1a(id.as_bytes()), |m| models_taken.contains(m));
         let spe = steps_per_epoch(meta.splits.train, config.batch);
         let quality = 0.45 + 0.4 * (fnv1a(meta.id.as_bytes()) % 100) as f32 / 100.0;
         let curve = Curve::new(fnv1a(id.as_bytes()), quality, meta.classes.len(), &config, spe);
@@ -762,7 +763,7 @@ impl Store for MockStore {
             Timeline::Live(std::sync::Mutex::new(clock)),
         ));
         let api = run.to_api();
-        self.runs.write().unwrap().push((run, Arc::clone(&ds)));
+        runs.push((run, Arc::clone(&ds)));
         Ok(api)
     }
 
@@ -829,7 +830,18 @@ impl Store for MockStore {
         let model = self.get_model(&input.model_id)?;
         let (w, h, truth, seed) = match &input.source {
             PredictSource::Dataset { dataset_id, image_id } => {
-                let (w, h, truth) = self.dataset(dataset_id)?.truth(image_id)?;
+                let ds = self.dataset(dataset_id)?;
+                let (w, h, truth) = ds.truth(image_id)?;
+                // The model only knows its own classes: map the truth by class name and drop the rest.
+                let names = &ds.meta().classes;
+                let truth: Vec<BBox> = truth
+                    .into_iter()
+                    .filter_map(|b| {
+                        let name = names.get(b.class as usize)?;
+                        let k = model.classes.iter().position(|c| c == name)?;
+                        Some(BBox { class: k as u32, ..b })
+                    })
+                    .collect();
                 (w, h, truth, fnv1a(format!("{dataset_id}/{image_id}").as_bytes()))
             }
             PredictSource::Upload(bytes) => {
