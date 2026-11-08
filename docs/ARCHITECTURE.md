@@ -59,6 +59,7 @@ training and evaluation pipeline, a server, a CLI and a web studio.
   trainer wraps the buffers in tensors.
 - `synthetic` module: procedurally generated shapes datasets (circles / squares / triangles / stars on textured
   backgrounds, random colour, scale, occlusion) for tests, demos and benchmarks with no downloads.
+- Details (formats, augmentation parameters, determinism): `docs/DATA.md`.
 
 ## folo-vision — the detector
 - **Architecture** (per scale `n/s/m/l/x` via depth and width multipliers): a CSP-style backbone (Conv-BN-SiLU stem,
