@@ -163,6 +163,8 @@
   const pointers = new Map<number, { x: number; y: number }>();
   let pinch: { d: number; mx: number; my: number } | null = null;
   let dragging = $state(false);
+  /** The touch gesture hint fades once someone has touched the image. */
+  let touched = $state(false);
 
   function pinchState() {
     const [a, b] = [...pointers.values()];
@@ -172,6 +174,7 @@
 
   function onpointerdown(e: PointerEvent) {
     if (e.button !== 0) return;
+    if (e.pointerType === 'touch') touched = true;
     viewport!.setPointerCapture(e.pointerId);
     const [px, py] = local(e);
     pointers.set(e.pointerId, { x: px, y: py });
@@ -233,6 +236,15 @@
   const stem = (f: string) => f.split('/').pop() ?? f;
 </script>
 
+{#snippet zoomTools()}
+  <div class="group" role="group" aria-label="Zoom">
+    <span use:tooltip={{ text: 'Zoom out', keys: '-' }}><Button variant="ghost" size="sm" icon={Minus} aria-label="Zoom out" disabled={z <= 1} onclick={() => zoomAt(1 / 1.5)} /></span>
+    <button type="button" class="zoom num" onclick={fit} use:tooltip={{ text: 'Fit to view', keys: '0' }} aria-label="Zoom {zoomPct}%. Fit to view">{zoomPct}%</button>
+    <span use:tooltip={{ text: 'Zoom in', keys: '+' }}><Button variant="ghost" size="sm" icon={Plus} aria-label="Zoom in" disabled={z >= maxZ} onclick={() => zoomAt(1.5)} /></span>
+    <span use:tooltip={{ text: 'Fit', keys: '0' }}><Button variant="ghost" size="sm" icon={Maximize} aria-label="Fit to view" onclick={fit} /></span>
+  </div>
+{/snippet}
+
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 <dialog
   bind:this={dialog}
@@ -249,16 +261,11 @@
       {:else}
         <span class="file faint">Loading…</span>
       {/if}
-      {#if idx >= 0}<span class="pos num">{num(idx + 1)} <i>/</i> {num(total)}</span>{/if}
+      {#if idx >= 0}<span class="pos num" aria-label="Image {num(idx + 1)} of {num(total)}">{num(idx + 1)} <i>/</i> {num(total)}</span>{/if}
     </div>
     <div class="tools">
-      <div class="group" role="group" aria-label="Zoom">
-        <span class="hide-sm" use:tooltip={{ text: 'Zoom out', keys: '-' }}><Button variant="ghost" size="sm" icon={Minus} aria-label="Zoom out" disabled={z <= 1} onclick={() => zoomAt(1 / 1.5)} /></span>
-        <button type="button" class="zoom num" onclick={fit} use:tooltip={{ text: 'Fit to view', keys: '0' }} aria-label="Zoom {zoomPct}%. Fit to view">{zoomPct}%</button>
-        <span class="hide-sm" use:tooltip={{ text: 'Zoom in', keys: '+' }}><Button variant="ghost" size="sm" icon={Plus} aria-label="Zoom in" disabled={z >= maxZ} onclick={() => zoomAt(1.5)} /></span>
-        <span class="hide-sm" use:tooltip={{ text: 'Fit', keys: '0' }}><Button variant="ghost" size="sm" icon={Maximize} aria-label="Fit to view" onclick={fit} /></span>
-      </div>
-      <span class="sep" aria-hidden="true"></span>
+      <div class="head-zoom">{@render zoomTools()}</div>
+      <span class="sep head-zoom" aria-hidden="true"></span>
       <div class="group" role="group" aria-label="Navigate">
         <span use:tooltip={{ text: 'Previous', keys: 'K' }}><Button variant="ghost" size="sm" icon={ChevronLeft} aria-label="Previous image" disabled={idx <= 0} onclick={() => step(-1)} /></span>
         <span use:tooltip={{ text: 'Next', keys: 'J' }}><Button variant="ghost" size="sm" icon={ChevronRight} aria-label="Next image" disabled={idx < 0 || idx >= total - 1} onclick={() => step(1)} /></span>
@@ -276,6 +283,7 @@
       bind:this={viewport}
       bind:clientWidth={vw}
       bind:clientHeight={vh}
+      style:--ar={img ? `${img.width} / ${img.height}` : undefined}
       role="img"
       aria-label={img ? `${stem(img.file)} with ${img.boxes.length} labelled boxes` : 'Loading image'}
       {onpointerdown}
@@ -304,11 +312,14 @@
       {:else}
         <div class="loading"><Spinner /></div>
       {/if}
-      <div class="hint" aria-hidden="true">
-        <span><Kbd keys="J" subtle /><Kbd keys="K" subtle /> step</span>
-        <span>scroll to zoom · drag to pan</span>
+      <div class="hint" class:touched aria-hidden="true">
+        <span class="fine"><Kbd keys="J" subtle /><Kbd keys="K" subtle /> step</span>
+        <span class="fine">scroll to zoom · drag to pan</span>
+        <span class="touch">Pinch to zoom · drag to pan</span>
       </div>
     </div>
+    <!-- Narrow screens: the zoom controls float over the image instead of crowding the header. -->
+    <div class="float-zoom">{@render zoomTools()}</div>
 
     <aside>
       <section>
@@ -433,8 +444,15 @@
     align-items: center;
     gap: 2px;
   }
-  .tools span {
+  .tools span,
+  .float-zoom span {
     display: inline-flex;
+  }
+  .head-zoom {
+    display: contents;
+  }
+  .float-zoom {
+    display: none;
   }
   .sep {
     width: 1px;
@@ -504,6 +522,26 @@
     display: inline-flex;
     align-items: center;
     gap: 4px;
+  }
+  .hint .touch {
+    display: none;
+  }
+  @media (pointer: coarse) {
+    .hint .fine {
+      display: none;
+    }
+    .hint .touch {
+      display: inline-flex;
+    }
+    .hint {
+      transition: opacity var(--dur-slow) var(--ease-in);
+    }
+    .hint.touched {
+      opacity: 0;
+    }
+    .labels button {
+      height: 44px;
+    }
   }
   aside {
     border-left: 1px solid var(--line-subtle);
@@ -621,16 +659,36 @@
     header {
       padding-left: var(--space-3);
     }
-    .tools .hide-sm,
-    .pos,
-    .hint {
+    .head-zoom,
+    .hint .fine {
       display: none;
     }
+    /* The image sets the stage height (no empty bands); the label list takes the rest. */
     .body {
-      grid-template-columns: minmax(0, 1fr);
-      grid-template-rows: minmax(0, 58fr) minmax(0, 42fr);
+      position: relative;
+      display: flex;
+      flex-direction: column;
+    }
+    .viewport {
+      flex: none;
+      width: 100%;
+      aspect-ratio: var(--ar, 4 / 3);
+      max-height: 70vh;
+    }
+    .float-zoom {
+      position: absolute;
+      top: var(--space-2);
+      right: var(--space-2);
+      display: flex;
+      padding: 2px;
+      border-radius: var(--radius-md);
+      background: color-mix(in srgb, var(--bg-overlay) 82%, transparent);
+      backdrop-filter: blur(6px);
+      box-shadow: var(--shadow-sm);
     }
     aside {
+      flex: 1;
+      min-height: 0;
       border-left: 0;
       border-top: 1px solid var(--line-subtle);
       padding-bottom: calc(var(--space-4) + env(safe-area-inset-bottom));

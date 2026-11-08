@@ -10,6 +10,7 @@
     format = (v: number) => v.toFixed(2),
     hint,
     oninput,
+    inline = false,
     id = `slider-${uid}`,
   }: {
     label: string;
@@ -20,13 +21,15 @@
     format?: (v: number) => string;
     hint?: string;
     oninput?: (v: number) => void;
+    /** Label, track and value on one row (compact toolbars). */
+    inline?: boolean;
     id?: string;
   } = $props();
 
   const pct = $derived(((value - min) / (max - min || 1)) * 100);
 </script>
 
-<div class="slider">
+<div class="slider" class:inline>
   <div class="top">
     <label for={id}>{label}</label>
     <output for={id} class="val">{format(value)}</output>
@@ -49,6 +52,22 @@
   .slider {
     display: grid;
     gap: 6px;
+  }
+  .inline {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: var(--space-3);
+  }
+  .inline .top {
+    display: contents;
+  }
+  .inline .val {
+    order: 2;
+    min-width: 4ch;
+    text-align: right;
+  }
+  .inline .hint {
+    display: none;
   }
   .top {
     display: flex;

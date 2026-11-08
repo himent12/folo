@@ -31,6 +31,10 @@
     /** Index into `boxes` to emphasise (e.g. hovered in a list). */
     active?: number | null;
     onhover?: (i: number | null) => void;
+    /** Index into `boxes` that is selected (persistent): drawn with a selection outline and a class-colour fill. */
+    selected?: number | null;
+    /** Click / tap on a box. Pointer only: keyboard users select from a list of the same boxes. */
+    onselect?: (i: number) => void;
     fit?: 'contain' | 'cover';
     /** Thin strokes and no chips, for thumbnails. */
     compact?: boolean;
@@ -51,6 +55,8 @@
     only = null,
     active = null,
     onhover,
+    selected = null,
+    onselect,
     fit = 'contain',
     compact = false,
     alt = '',
@@ -141,11 +147,13 @@
       {#each boxes as b, i (i)}
         {#if shown(b)}
           {@const top = geo.oy + b.y1 * geo.s}
-          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
           <div
             class="box"
             class:active={active === i}
+            class:selected={selected === i}
             class:dim={active !== null && active !== i}
+            data-box={i}
             style:--c={classColor(b.class)}
             style:left="{geo.ox + b.x1 * geo.s}px"
             style:top="{top}px"
@@ -153,6 +161,7 @@
             style:height="{(b.y2 - b.y1) * geo.s}px"
             onpointerenter={onhover ? () => onhover(i) : undefined}
             onpointerleave={onhover ? () => onhover(null) : undefined}
+            onclick={onselect ? () => onselect(i) : undefined}
           >
             {#if labels && !compact}
               {@const c = chips[i]}
@@ -204,9 +213,16 @@
       opacity var(--dur-fast) var(--ease-standard),
       background-color var(--dur-fast) var(--ease-standard);
   }
-  .box.active {
-    background: color-mix(in srgb, var(--c) 18%, transparent);
+  .box.active,
+  .box.selected {
+    background: color-mix(in srgb, var(--c) calc(var(--class-fill-opacity) * 100%), transparent);
     z-index: 2;
+  }
+  .box.selected {
+    /* Selection ring outside the halo: 2 px in the accent, the same mark as focus and selection elsewhere. */
+    outline: 2px solid var(--accent-line);
+    outline-offset: 1px;
+    z-index: 3;
   }
   .box.dim {
     /* Keep context readable: fade the stroke, never the label. */

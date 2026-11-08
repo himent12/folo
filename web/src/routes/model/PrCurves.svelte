@@ -256,12 +256,21 @@
   .on .ap {
     color: var(--text-primary);
   }
+  @media (pointer: coarse) {
+    .list button {
+      height: 44px;
+    }
+    .side-actions button {
+      height: 36px;
+      padding: 0 var(--space-3);
+    }
+  }
   @media (max-width: 767px) {
     .pr {
       grid-template-columns: minmax(0, 1fr);
     }
     .side {
-      max-height: 240px;
+      max-height: 320px;
     }
   }
 </style>
