@@ -151,7 +151,7 @@
   @media (pointer: coarse) {
     button,
     .sm button {
-      height: 40px;
+      height: 44px;
       min-width: 44px;
       padding: 0 12px;
     }

@@ -43,3 +43,19 @@ describe('LineChart announcements', () => {
     unmount(c);
   });
 });
+
+describe('LineChart x ticks', () => {
+  it('labels a short domain with decimals instead of repeating integers', () => {
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    const series = [{ id: 'a', label: 'loss', color: 'red', points: [0, 0.25, 0.5].map((x) => ({ x, y: 1 - x })) }];
+    const c = mount(LineChart, { target, props: { series, label: 'short', xDomain: [0, 1] as [number, number] } });
+    Object.defineProperty(target.querySelector('.plot')!, 'clientWidth', { value: 600 });
+    target.querySelector('.plot')!.dispatchEvent(new Event('resize'));
+    flushSync();
+    const labels = [...target.querySelectorAll('.ticks text')].map((t) => t.textContent);
+    const xs = labels.slice(-6);
+    expect(new Set(xs).size).toBe(xs.length);
+    unmount(c);
+  });
+});

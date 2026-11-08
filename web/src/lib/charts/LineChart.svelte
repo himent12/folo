@@ -62,7 +62,7 @@
     yDomain,
     yLog = false,
     curve = 'linear',
-    xFormat = (x) => String(Math.round(x)),
+    xFormat: xFormatProp,
     yFormat = (y) => String(+y.toFixed(3)),
     valueFormat,
     xTitle,
@@ -136,6 +136,11 @@
     (yLog ? scaleLog().domain(yExtent) : scaleLinear().domain(yExtent)).range([height - margin.bottom, margin.top]),
   );
   // When the x domain is fixed (e.g. 0..epochs), prefer a tick step that lands exactly on the end.
+  // Default x labels: integers, or one decimal when the domain is too short for distinct integers.
+  const xFormat = $derived(
+    xFormatProp ?? ((v: number) => (xExtent[1] - xExtent[0] < 5 ? String(+v.toFixed(1)) : String(Math.round(v)))),
+  );
+
   const xTickValues = $derived.by(() => {
     const want = Math.max(2, Math.min(xTicks, Math.floor(width / 70)));
     const [lo, hi] = xExtent;
