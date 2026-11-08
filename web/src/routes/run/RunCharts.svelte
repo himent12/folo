@@ -44,7 +44,7 @@
     void version;
     return [
       { id: 'm95', label: 'mAP50-95', color: 'var(--chart-1)', area: true, points: ep((e) => e.val.map50_95) },
-      { id: 'm50', label: 'mAP50', color: 'var(--chart-2)', points: ep((e) => e.val.map50) },
+      { id: 'm50', label: 'mAP50', color: 'var(--chart-5)', points: ep((e) => e.val.map50) },
     ];
   });
 
