@@ -622,11 +622,17 @@ for e in 0 .. epochs:
         if clip_grad_norm > 0:
           n = sqrt(Σ over all parameters of Σ g²)          # one global norm
           if n > clip_grad_norm: scale every gradient by clip_grad_norm / (n + 1e-6)
-        optimizer step (optim.__step += 1); EMA update (§8.5)
-      zero gradients; t += 1
+        optimizer step; EMA update (§8.5); t += 1         # optim.__step = sched.__step = t
+      zero gradients
 ```
-`t` advances once per window, even when a window is skipped, so the schedule stays a function of `t` alone. Ten
-consecutive non-finite batches abort the run with an error.
+`t` advances only with an optimizer step, as FORMAT.md requires. A window made only of non-finite batches is
+skipped without a step, so the run can end with `t < T` (the remaining iterations are not made up). Ten consecutive
+non-finite batches abort the run with an error.
+
+**Progress reporting (API `Run` / `Step`).** `Run.step` and `Step.step` count training **batches** completed in the
+run (`e · nb + k + 1`), and `Run.steps_per_epoch = nb`. The optimizer iteration `t` is internal (checkpoints only).
+`Step.lr` is the current LR of the `decay` group. `Step.loss` holds the batch's reported items (§7.4), and
+`Epoch.train_loss` their mean over the epoch's finite batches.
 
 ### 8.4 LR schedule and warmup
 The schedule is a function of the iteration `t` (optimizer steps, FORMAT.md's `unit: "iteration"`), with
@@ -641,7 +647,8 @@ t <  W:  lr_g = interp(t, [0, W], [start_g, target_g]),   start_g = warmup_bias_
          momentum = interp(t, [0, W], [warmup_momentum, momentum])     (SGD μ, or AdamW β1)
 t >= W:  lr_g = target_g,  momentum = momentum
 ```
-`interp` is linear interpolation. The first iteration's target is `lr0` and the last one's exactly `lr0 · lrf`. This
+`interp` is linear interpolation. When `T ≥ 2`, the first iteration's target is `lr0` and the last one's exactly
+`lr0 · lrf`. A run with `T = 1` takes its single step at `lr0` (and `W = 0`, since `epochs − 1 = 0`). This
 fills FORMAT.md's `folo.sched` as `type`, `epochs`, `steps_per_epoch = spe`, `lrf`, `warmup_iters = W`,
 `warmup_bias_lr`, `warmup_momentum` and `step = t`. Compared with the reference trainer (per-batch warmup with an
 accumulation ramp, per-epoch decay), this is one clock instead of three, and the run is otherwise equivalent.
@@ -654,9 +661,15 @@ weights and export use it (FORMAT.md: `ema.*`, `ema.__updates`, `folo.ema = {"de
 With `ema = false`, those uses take the live model in eval mode, and checkpoints carry no `ema.` tensors.
 
 ### 8.6 Data and augmentation (folo-data implements; the trainer configures)
-`s = imgsz`. Gray means 114 in every channel. Resizing is bilinear: an `h0 × w0` image is resized by
-`r = s / max(h0, w0)` to `min(round(w0 · r), s) × min(round(h0 · r), s)` (skipped when `r = 1`). Boxes are `xyxy`
-pixels throughout. Training pipeline per sample, in order:
+`s = imgsz`. Gray means 114 in every channel. Boxes are `xyxy` pixels throughout, and every geometric step below
+applies the same map to the boxes as to the pixels.
+- **Resize** (bilinear): an `h0 × w0` image with `r = s / max(h0, w0)` becomes `h1 × w1` with
+  `w1 = clamp(round(w0 · r), 1, s)` and `h1 = clamp(round(h0 · r), 1, s)` (skipped when `r = 1`). Boxes scale by the
+  actual per-axis ratios: `x · w1 / w0` and `y · h1 / h0`.
+- **Pad** to `S_w × S_h`: `left = floor((S_w − w1) / 2)`, `top = floor((S_h − h1) / 2)`, gray. Boxes shift by
+  `(left, top)`.
+
+Training pipeline per sample, in order:
 
 1. **Mosaic** (probability `mosaic = 1.0`). Take this image and 3 others drawn uniformly with replacement from the
    training set, all resized as above. Canvas `2s × 2s`, gray. Centre `xc, yc = floor(U[s/2, 3s/2))`, drawn
@@ -667,8 +680,8 @@ pixels throughout. Training pipeline per sample, in order:
    i=2 bottom-left:  a = (max(xc−w,0), yc, xc, min(2s,yc+h))           b = (w−(a.x2−a.x1), 0, w, min(a.y2−a.y1, h))
    i=3 bottom-right: a = (xc, yc, min(xc+w,2s), min(2s,yc+h))          b = (0, 0, min(w, a.x2−a.x1), min(a.y2−a.y1, h))
    ```
-   Boxes shift by `(a.x1 − b.x1, a.y1 − b.y1)` and are clipped to the canvas. Without mosaic (closed, or not
-   drawn): resize as above, then pad centred to `s × s` with gray (left/top = `floor(pad / 2)`).
+   Boxes (already resized) shift by `(a.x1 − b.x1, a.y1 − b.y1)` and are clipped to the canvas. Without mosaic
+   (closed, or not drawn): resize, then pad to `s × s`, both as above.
 2. **Random affine.** Input canvas `w_c × h_c` (`2s` for a mosaic, `s` otherwise), output `s × s`. Draw
    `a ~ U(−degrees, degrees)`, `g ~ U(1 − scale, 1 + scale)`, `sh_x, sh_y ~ U(−shear, shear)`,
    `t_x, t_y ~ U(0.5 − translate, 0.5 + translate)`, and form `M = T · Sh · R · C` (3×3):
@@ -679,10 +692,11 @@ pixels throughout. Training pipeline per sample, in order:
    `max(w'/(h'+1e-16), h'/(w'+1e-16)) < 100`, where `w, h` are its size before the warp. Defaults: `degrees = 0`,
    `translate = 0.1`, `scale = 0.5`, `shear = 0`, `perspective = 0` (no perspective term in v1).
 3. **Mixup** `0.0` (off in v1).
-4. **HSV jitter** (gains `h = 0.015`, `s = 0.7`, `v = 0.4`): draw `r_k = U(−1, 1) · gain_k + 1` for `k ∈ {h, s, v}`.
-   In 8-bit HSV (`H ∈ [0, 180)`, `S, V ∈ [0, 255]`, OpenCV's convention): `H' = trunc(H · r_h) mod 180`,
-   `S' = trunc(clamp(S · r_s, 0, 255))`, `V' = trunc(clamp(V · r_v, 0, 255))`, then back to RGB. The hue is
-   multiplicative, as in the reference. Any standard RGB↔HSV conversion with these ranges is acceptable.
+4. **HSV jitter** (gains `h = 0.015`, `s = 0.7`, `v = 0.4`): draw `d_k = U(−1, 1) · gain_k` for `k ∈ {h, s, v}`.
+   In 8-bit HSV (`H ∈ [0, 180)`, `S, V ∈ [0, 255]`, OpenCV's convention):
+   `H' = trunc((H + d_h · 180) mod 180)` (`mod` with a non-negative result), `S' = trunc(clamp(S · (1 + d_s), 0, 255))`,
+   `V' = trunc(clamp(V · (1 + d_v), 0, 255))`, then back to RGB. The hue shift is additive, as in the reference
+   (Ultralytics ≥ 8.3.79). Any standard RGB↔HSV conversion with these ranges is acceptable.
 5. **Flips**: vertical with `flipud = 0.0`, horizontal with `fliplr = 0.5` (`x1' = s − x2`, `x2' = s − x1`).
 
 Finally boxes are converted to the loader's normalised `cx, cy, w, h`. For the last `close_mosaic = 10` epochs
@@ -693,8 +707,13 @@ augmentation: resize as above and pad to a square `s × s` (§9.2) only.
 - Validate after every epoch and always after the last, with the EMA weights (or the live model if `ema = false`),
   at the training `imgsz`, with batch `2 · batch`, `conf = 0.001`, `iou = 0.7`, `max_det = 300`, multi-label NMS
   (§9.3).
-- Metrics: precision, recall, mAP@0.5 and mAP@0.5:0.95 (COCO-style, 101-point, folo-vision metrics). Fitness is
-  mAP@0.5:0.95. `best` is written when fitness strictly improves, `last` every epoch. Early stopping uses `patience`.
+- Metrics: precision, recall, mAP@0.5 and mAP@0.5:0.95 (COCO-style, 101-point, folo-vision metrics), computed in
+  the network input space: ground-truth boxes go through the same resize and pad as the image, so predictions need
+  no inverse map. Fitness is mAP@0.5:0.95.
+- Best and early stopping: `best_fitness` starts at −∞ and `best_epoch` at −1. After validating epoch `e`, if
+  `fitness > best_fitness`, set both and write `best`. Write `last` every epoch. Stop after epoch `e` when
+  `e − best_epoch >= patience`. Checkpoints persist `{ "epoch": best_epoch, "fitness": best_fitness }` as
+  `folo.best` (FORMAT.md), so a resume continues the same patience count.
 - v1 reports training losses only (API `Epoch.train_loss`). Validation loss is not computed.
 
 ## 9. Inference
@@ -705,14 +724,15 @@ Fuse each Conv's BN into its conv, in f32: `k = γ / sqrt(running_var + eps)`, `
 Fused inference must match unfused eval-mode inference to `1e-4` relative on the decoded output (f32).
 
 ### 9.2 Letterbox
-For an `h0 × w0` image and target `S` (default `imgsz = 640`): `r = min(S / h0, S / w0)` (upscaling allowed for
-prediction), `nw = round(w0 · r)`, `nh = round(h0 · r)`, bilinear resize, then pad with gray `114` to:
+For an `h0 × w0` image and target `S` (default `imgsz = 640`): `r = min(S / h0, S / w0)` (upscaling allowed),
+`nw = clamp(round(w0 · r), 1, S)`, `nh = clamp(round(h0 · r), 1, S)`, bilinear resize, then pad with gray `114` to:
 - **square** (validation, batched prediction): `S × S`;
 - **rect** (single-image prediction, the default for `predict`): the smallest size `≥ (nh, nw)` whose sides are
   multiples of 32 (`dw = (S − nw) mod 32`, `dh = (S − nh) mod 32`).
 
-Padding is split `left = floor(dw / 2)`, `right = dw − left` (same for top/bottom). Boxes map back with
-`x = (x' − left) / r` and `y = (y' − top) / r`, then are clipped to `[0, w0] × [0, h0]`.
+Padding is split `left = floor(dw / 2)`, `right = dw − left` (same for top/bottom). This is the same resize and
+pad as §8.6. Predicted boxes map back with the per-axis ratios, `x = (x' − left) · w0 / nw` and
+`y = (y' − top) · h0 / nh`, then are clipped to `[0, w0] × [0, h0]`.
 
 ### 9.3 Post-processing (NMS)
 | | predict | val |
@@ -782,6 +802,11 @@ batch 2, in train mode so BN uses batch statistics).
   `round(3 · 13) = 39`). Check the LR and momentum of every group at `t ∈ {0, 50, 99, 100, 129}`, that
   `lf(0) = 1` and `lf(129) = lrf`, and that `warmup_epochs = 0` gives `W = 0`.
 - Accumulation never crosses an epoch boundary: after each epoch the gradient buffers are zero.
+- A window whose batches are all non-finite (inject NaN) takes no optimizer step and leaves `t`, `optim.__step`,
+  `sched.__step` and `ema.__updates` unchanged. A checkpoint written after it resumes to the same state as an
+  uninterrupted run.
+- Early stopping: with `patience = 2` and fitness `[0.1, 0.3, 0.2, 0.2]`, training stops after epoch 3
+  (`best_epoch = 1`). A resume from the epoch-2 checkpoint stops at the same epoch.
 - `auto` picks AdamW at `lr0 = 0.00125` for `nc = 4`, 2000 images and 30 epochs.
 - EMA: after one update `d = 0.9999 · (1 − e^{−1/2000}) ≈ 4.99825e-4`.
 - **Overfit** (`#[ignore]`, about 1–2 min on CPU): folo-n at 320 px, 8 synthetic images, augmentation off, AdamW
