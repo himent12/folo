@@ -27,7 +27,7 @@
   } = $props();
 
   const MIN = { s: 112, m: 172, l: 248 } as const;
-  const GAP = { s: 4, m: 8, l: 8 } as const;
+  const GAP = { s: 8, m: 8, l: 8 } as const;
   const OVERSCAN = 2;
 
   let el = $state<HTMLDivElement>();

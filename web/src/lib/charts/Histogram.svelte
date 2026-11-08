@@ -13,6 +13,7 @@
     counts,
     height = 160,
     color = 'var(--chart-2)',
+    hoverColor,
     binLabel,
     label,
     unit = 'boxes',
@@ -26,6 +27,8 @@
     counts: number[];
     height?: number;
     color?: string;
+    /** Fill of the hovered bar. Without it, hovering dims the other bars instead. */
+    hoverColor?: string;
     /** Label for bin i (defaults to "a–b"). */
     binLabel?: (lo: number, hi: number, i: number) => string;
     label: string;
@@ -111,8 +114,8 @@
           <rect class="hit" x={b.x} y={m.top} width={b.w} height={height - m.top - m.bottom} />
           <path
             class="bar"
-            class:dim={hovered !== null && hovered !== i}
-            style:fill={color}
+            class:dim={!hoverColor && hovered !== null && hovered !== i}
+            style:fill={hoverColor && hovered === i ? hoverColor : color}
             d="M{b.x + gap},{height - m.bottom} v{-Math.max(0, h - r)} q0,-{r} {r},-{r} h{Math.max(0, b.w - 2 * gap - 2 * r)} q{r},0 {r},{r} v{Math.max(0, h - r)} z"
           />
         </g>
@@ -162,7 +165,7 @@
   }
   .tick {
     fill: var(--chart-label);
-    font-size: 10px;
+    font-size: 11px;
     font-variant-numeric: tabular-nums;
   }
   .marker {
@@ -179,7 +182,9 @@
     fill: transparent;
   }
   .bar {
-    transition: opacity var(--dur-fast) var(--ease-standard);
+    transition:
+      opacity var(--dur-fast) var(--ease-standard),
+      fill var(--dur-fast) var(--ease-standard);
   }
   .bar.dim {
     opacity: 0.45;
