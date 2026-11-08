@@ -25,7 +25,7 @@
   import Skeleton from '$lib/ui/Skeleton.svelte';
   import StatusBadge from '$lib/ui/StatusBadge.svelte';
   import TableState from '$lib/ui/TableState.svelte';
-  import { origin } from './runs/lineage';
+  import { origin } from '$lib/lineage';
 
   setCrumbs({ label: 'Runs' });
 

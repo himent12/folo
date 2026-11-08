@@ -27,7 +27,7 @@
   import Skeleton from '$lib/ui/Skeleton.svelte';
   import { cmIndex } from './model/confusion';
   import ExportDialog from './model/ExportDialog.svelte';
-  import { lineageOf } from './model/lineage';
+  import { origin } from '$lib/lineage';
   import PrCurves from './model/PrCurves.svelte';
   import { MODEL_SECTIONS, prView, sectionShown, type ModelSection } from './model/sections';
 
@@ -45,11 +45,11 @@
     if (!rid) return { run: null, dataset: null, parent: null };
     const run = await hub.api.run(rid, s).catch(() => null);
     const dataset = run ? await hub.api.dataset(run.config.dataset_id, s).catch(() => null) : null;
-    const from = lineageOf(run?.config.weights);
+    const from = origin(run?.config.weights);
     const parent = from.kind === 'model' ? await hub.api.model(from.id, s).catch(() => null) : null;
     return { run, dataset, parent };
   });
-  const lineage = $derived(context.data?.run ? lineageOf(context.data.run.config.weights) : null);
+  const lineage = $derived(context.data?.run ? origin(context.data.run.config.weights, context.data.parent ? [context.data.parent] : []) : null);
 
   // PR curves, confusion matrix and per-class metrics from GET /api/models/{id}/eval.
   const evaluation = new Resource((s) => hub.api.modelEval(id, s));
@@ -190,7 +190,7 @@
       {@const lid = lineage.id}
       <span>fine-tuned from <a class="link" href={href(`/models/${encodeURIComponent(lid)}`)}>{context.data?.parent?.name ?? lid}</a></span>
     {:else if lineage?.kind === 'file'}
-      <span>fine-tuned from <span class="mono" title={lineage.path}>{lineage.name}</span></span>
+      <span>fine-tuned from <span class="mono" title={lineage.path}>{lineage.label}</span></span>
     {:else if lineage?.kind === 'scratch'}
       <span>trained from scratch</span>
     {/if}
@@ -360,7 +360,7 @@
                   {#if lineage.kind === 'model'}
                     <a class="link" href={href(`/models/${encodeURIComponent(lineage.id)}`)}>{context.data?.parent?.name ?? lineage.id}</a>
                   {:else if lineage.kind === 'file'}
-                    <span class="mono" title={lineage.path}>{lineage.name}</span>
+                    <span class="mono" title={lineage.path}>{lineage.label}</span>
                   {:else}
                     <span class="muted">Random weights (from scratch)</span>
                   {/if}

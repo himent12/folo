@@ -85,6 +85,7 @@
   /* One 12 px tertiary line per row (qualifiers are ≤ 60 characters, tested). */
   .note {
     display: block;
+    font-weight: var(--weight-regular);
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
     color: var(--text-tertiary);

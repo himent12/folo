@@ -855,7 +855,7 @@
                           data-det={i}
                           tabindex={i === tabRow ? 0 : -1}
                           class:hot={activeIdx === i}
-                          class:sel={selectedIdx === i}
+                          class:on={selectedIdx === i}
                           aria-current={selectedIdx === i ? 'true' : undefined}
                           aria-label="{b.name}, score {score(b.score)}, {px(b.x2 - b.x1)} by {px(b.y2 - b.y1)} pixels"
                           onpointerenter={() => (hover = b)}
@@ -865,7 +865,7 @@
                           onkeydown={(e) => onrowkey(e, k)}
                         >
                           <td class="r idx faint">{i + 1}</td>
-                          <td>
+                          <td class="lead">
                             <span class="cls">
                               <span class="sw" style:background={classColor(b.class)} aria-hidden="true"></span>
                               <span class="truncate">{b.name}</span>
@@ -1270,11 +1270,6 @@
   tbody tr:hover,
   tbody tr.hot {
     background: var(--bg-hover);
-  }
-  /* The selection rule: neutral fill and a 2 px accent bar, the same accent as the selected box in the image. */
-  tbody tr.sel {
-    background: var(--bg-active);
-    box-shadow: inset 2px 0 0 var(--accent-line);
   }
   tbody tr:focus-visible {
     outline: 2px solid var(--focus);

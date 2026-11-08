@@ -23,7 +23,7 @@
   import TableState from '$lib/ui/TableState.svelte';
   import { rowNav } from '$lib/ui/rowNav';
   import { advantage, versusYolo26n } from '$lib/benchmarks';
-  import { origin } from './runs/lineage';
+  import { origin } from '$lib/lineage';
 
   setCrumbs({ label: 'Models' });
 

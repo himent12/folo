@@ -1,11 +1,13 @@
 <script lang="ts" module>
+  import { origin } from '$lib/lineage';
+
   /**
    * The weights a run started from, by name: a model id resolves through the models list, a path shows its file name,
    * none is null ("from scratch"). Fine-tuned vs from scratch often explains most of a gap between two runs.
    */
   export function startFrom(weights: string | null, models: readonly { id: string; name: string }[] | undefined): string | null {
-    if (!weights) return null;
-    return models?.find((m) => m.id === weights)?.name ?? weights.split(/[\\/]/).pop() ?? weights;
+    const o = origin(weights, models ?? []);
+    return o.kind === 'scratch' ? null : o.label;
   }
 </script>
 

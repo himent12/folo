@@ -17,8 +17,9 @@ describe('origin', () => {
   });
 
   it('names a weights file by its base name', () => {
-    expect(origin('/data/weights/folo-l-coco.folo', models)).toEqual({ kind: 'file', path: '/data/weights/folo-l-coco.folo', label: 'folo-l-coco' });
-    expect(origin('C:\\w\\last.folo', models).label).toBe('last');
+    expect(origin('/data/weights/folo-l-coco.folo', models)).toEqual({ kind: 'file', path: '/data/weights/folo-l-coco.folo', label: 'folo-l-coco.folo' });
+    expect(origin('C:\\w\\last.folo', models).label).toBe('last.folo');
+    expect(origin('m_shapes_n').kind).toBe('model'); // no list: still an id
   });
 
   it('keeps an unknown id (the models list may not have loaded yet)', () => {
