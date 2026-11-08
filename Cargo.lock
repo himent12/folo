@@ -719,6 +719,7 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "folo-api",
+ "folo-data",
  "folo-gpu",
  "folo-server",
  "glob",

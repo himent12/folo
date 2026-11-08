@@ -56,6 +56,12 @@ pub fn describe_tools() -> serde_json::Value {
 
 /// Builds the server for `backend`.
 pub fn build(backend: Backend, opts: Options) -> Result<FoloMcp, String> {
+    // With --confine, the dataset reader refuses files outside the data dir (embedded mode; in proxy mode
+    // `folo serve` reads the datasets).
+    if opts.confine && !matches!(backend, Backend::Proxy(_)) {
+        let policy = paths::PathPolicy { data_dir: opts.data_dir.clone(), confine: true };
+        confine::install_read_guard(&policy).map_err(|e| e.body.message)?;
+    }
     Ok(match backend {
         Backend::Real => FoloMcp::new(Arc::new(RealStore::open(opts.data_dir.clone())), None, opts),
         Backend::Mock => FoloMcp::new(Arc::new(MockStore::new()), None, opts),

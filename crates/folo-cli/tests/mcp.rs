@@ -673,16 +673,30 @@ fn confine_checks_what_a_dataset_reads() {
     let indented = data.join("indented");
     std::fs::create_dir_all(&indented).unwrap();
     std::fs::write(indented.join("data.yaml"), "  train: ../../list.txt\nnames: [thing]\n").unwrap();
-    c.tool_error("register_dataset", json!({ "path": "indented" }), "path_outside_data_dir");
+    // (For the reader this one is not valid YAML at all; either way nothing outside is read.)
+    c.tool_error("register_dataset", json!({ "path": "indented" }), "invalid_dataset");
     // A folder inside the root that is a link (a junction on Windows) to an outside folder.
     let linked = data.join("linked");
-    std::fs::create_dir_all(&linked).unwrap();
+    std::fs::create_dir_all(linked.join("labels/train")).unwrap();
     if make_dir_link(&outside.join("images"), &linked.join("images")) {
         c.tool_error("register_dataset", json!({ "path": "linked" }), "path_outside_data_dir");
-        // While that link exists, the whole data dir fails the check; remove it for the cases below.
-        c.tool_error("register_dataset", json!({ "path": "honest" }), "path_outside_data_dir");
         remove_dir_link(&linked.join("images"));
     }
+    // YAML forms a hand-written parser might miss: a tab after the colon, an escaped scalar, another manifest name.
+    // The reader itself refuses the outside list, so the exact syntax does not matter.
+    for (name, yaml) in [
+        ("tabbed", "train:\t../../list.txt\nnames: [thing]\n"),
+        ("escaped", "train: \"../../l\\u0069st.txt\"\nnames: [thing]\n"),
+    ] {
+        let d = data.join(name);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("data.yaml"), yaml).unwrap();
+        c.tool_error("register_dataset", json!({ "path": name }), "path_outside_data_dir");
+    }
+    let alt = data.join("alt");
+    std::fs::create_dir_all(&alt).unwrap();
+    std::fs::write(alt.join("dataset.yml"), "train: ../../list.txt\nnames: [thing]\n").unwrap();
+    c.tool_error("register_dataset", json!({ "path": "alt" }), "path_outside_data_dir");
     assert_eq!(c.ok("list_datasets", json!({}))["total"], 0);
     // Class names as a flow map are not paths (and are not valid file names on Windows).
     let mapped = data.join("mapped");
@@ -694,6 +708,31 @@ fn confine_checks_what_a_dataset_reads() {
     .unwrap();
     let m = c.ok("register_dataset", json!({ "path": "mapped" }));
     assert_eq!(m["classes"], json!(["cat", "dog"]));
+    // Edited after registration to read outside: the re-index (on the next request after ~5 s) cannot read it.
+    let mapped_id = m["id"].as_str().unwrap().to_string();
+    let outside_dir = outside.join("images/train").to_string_lossy().replace('\\', "/");
+    std::fs::write(
+        mapped.join("data.yaml"),
+        format!("train: {outside_dir}\nval: {outside_dir}\nnames: [cat]\n"),
+    )
+    .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(5500));
+    let after = c.call("list_dataset_images", json!({ "dataset_id": mapped_id }));
+    if after["isError"] == true {
+        // The re-index refused the outside folder and failed.
+        let e: Value = serde_json::from_str(after["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(e["code"], "path_outside_data_dir", "{e}");
+    } else {
+        let outside_bytes = std::fs::read(outside.join("images/train/a.jpg")).unwrap();
+        for im in after["structuredContent"]["items"].as_array().unwrap() {
+            let uri = format!("folo://datasets/{mapped_id}/images/{}", im["image_id"].as_str().unwrap());
+            let r = c.request("resources/read", json!({ "uri": uri }));
+            if let Some(blob) = r["result"]["contents"][0]["blob"].as_str() {
+                let bytes = base64::engine::general_purpose::STANDARD.decode(blob).unwrap();
+                assert_ne!(bytes, outside_bytes, "an outside image was served: {im}");
+            }
+        }
+    }
     let ds = c.ok("register_dataset", json!({ "path": "honest" }));
     let id = ds["id"].as_str().unwrap().to_string();
     let imgs = c.ok("list_dataset_images", json!({ "dataset_id": id }));
@@ -713,8 +752,8 @@ fn confine_checks_what_a_dataset_reads() {
     let list = c.ok("list_datasets", json!({}));
     let ids: Vec<&str> =
         list["items"].as_array().unwrap().iter().map(|d| d["id"].as_str().unwrap()).collect();
-    assert_eq!(ids.len(), 2);
-    assert!(ids.contains(&id.as_str()) && !ids.contains(&out_id.as_str()));
+    // `mapped` now reads outside (edited above) and is hidden too.
+    assert_eq!(ids, [id.as_str()]);
     c.tool_error("get_dataset", json!({ "dataset_id": out_id }), "path_outside_data_dir");
     c.tool_error("list_dataset_images", json!({ "dataset_id": out_id }), "path_outside_data_dir");
     let read = c.request("resources/read", json!({ "uri": format!("folo://datasets/{out_id}/images/0") }));

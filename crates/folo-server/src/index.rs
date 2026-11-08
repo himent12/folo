@@ -421,6 +421,7 @@ pub fn read_image_with(
             Error::internal(format!("reading {}: {e}", path.display()))
         }
     };
+    folo_data::guard::check(path).map_err(missing)?;
     let Some(side) = thumb else {
         let bytes = std::fs::read(path).map_err(missing)?;
         return Ok(ImageData { content_type: content_type(path), bytes, immutable: false });

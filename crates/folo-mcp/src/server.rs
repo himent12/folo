@@ -231,6 +231,7 @@ fn tool_error(e: &Error) -> CallToolResult {
 
 /// Maps a store error on a resource read: missing things are the spec's resource-not-found error.
 fn resource_error(uri: &str, e: Error) -> McpError {
+    let e = crate::confine::map_denied(e);
     let data = Some(json!({ "uri": uri, "error": e.body }));
     if e.status == http::StatusCode::NOT_FOUND {
         McpError::resource_not_found(format!("resource not found: {uri} ({})", e.body.message), data)

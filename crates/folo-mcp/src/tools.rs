@@ -426,6 +426,7 @@ impl Inner {
             other => Err(Error::internal(format!("tool `{other}` has no handler"))),
         };
         res.map_err(|e| if e.body.code == "not_implemented" { e.hint(NOT_IMPLEMENTED_HINT) } else { e })
+            .map_err(crate::confine::map_denied)
     }
 
     /// With `--confine`, fails unless dataset `id` reads only files inside the data dir.
@@ -544,10 +545,6 @@ impl Inner {
             check_name("name", n)?;
         }
         let path = self.resolve(a.path).await?;
-        if self.confinement.active() {
-            let (c, p) = (self.confinement.clone(), path.clone());
-            tokio::task::spawn_blocking(move || c.precheck_root(&p)).await.map_err(join)??;
-        }
         let req =
             RegisterDataset { name: a.name, path: path.to_string_lossy().into_owned(), format: a.format };
         let d = self.blocking(move |s| s.register_dataset(req)).await?;

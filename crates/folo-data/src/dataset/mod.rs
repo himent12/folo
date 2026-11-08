@@ -467,7 +467,7 @@ fn check_candidate(
     match c.labels {
         LabelSource::Yolo(label) => {
             let (boxes, label) = if label.is_file() {
-                let text = match std::fs::read(&label) {
+                let text = match crate::guard::check(&label).and_then(|_| std::fs::read(&label)) {
                     Ok(bytes) => match String::from_utf8(bytes) {
                         Ok(t) => t,
                         Err(_) => {

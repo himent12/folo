@@ -28,7 +28,7 @@ pub(crate) fn guess_split(path: &Path) -> Split {
 }
 
 fn json_files(dir: &Path) -> Vec<PathBuf> {
-    let Ok(rd) = std::fs::read_dir(dir) else { return Vec::new() };
+    let Ok(rd) = crate::guard::check(dir).and_then(|_| std::fs::read_dir(dir)) else { return Vec::new() };
     let mut v: Vec<PathBuf> = rd
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.is_file() && p.extension().is_some_and(|e| e.eq_ignore_ascii_case("json")))
@@ -71,7 +71,7 @@ fn looks_like_coco(p: &Path) -> bool {
     if name.contains("coco") || name.starts_with("instances") || name.contains("annotations") {
         return true;
     }
-    let Ok(f) = std::fs::File::open(p) else { return false };
+    let Ok(f) = crate::guard::check(p).and_then(|_| std::fs::File::open(p)) else { return false };
     let mut head = Vec::new();
     if f.take(1 << 20).read_to_end(&mut head).is_err() {
         return false;
@@ -110,7 +110,9 @@ pub(crate) fn open_jsons(
     let mut categories: BTreeMap<u64, String> = BTreeMap::new();
     let mut parsed = Vec::new();
     for (split, path) in jsons {
-        let bytes = std::fs::read(&path).map_err(|e| DataError::io(&path, e))?;
+        let bytes = crate::guard::check(&path)
+            .and_then(|_| std::fs::read(&path))
+            .map_err(|e| DataError::io(&path, e))?;
         let v: Value = match serde_json::from_slice(&bytes) {
             Ok(v) => v,
             Err(e) => {

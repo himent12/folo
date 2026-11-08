@@ -14,6 +14,7 @@ workspace = true
 [dependencies]
 folo-api = { workspace = true, features = ["schema"] }
 folo-server.workspace = true
+folo-data.workspace = true
 folo-gpu.workspace = true
 rmcp.workspace = true
 schemars.workspace = true

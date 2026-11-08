@@ -163,20 +163,21 @@ In read-only mode, `train_on_folder` is not listed.
 - Input paths (`register_dataset.path`, `predict.image_path`, `predict_batch.paths/glob`) may be absolute or relative
   to `--data-dir`, and are resolved on the machine running `folo mcp`. `--data-dir` is where FOLO **writes**; it is not
   a read sandbox. `--confine` restricts reads to `--data-dir` as well, using canonicalised paths with symlinks and
-  junctions resolved, and rejects anything outside it with `path_outside_data_dir`. Datasets are checked as a whole:
-  a dataset root inside the data dir can still read elsewhere (a `data.yaml` `path:`, image lists, linked folders).
-  Before `register_dataset` lets the store open anything, three over-approximating checks run, independent of how
-  the store parses the dataset: no link or junction anywhere in the data dir may point outside it; every token of
-  the root's manifests (any key, any indentation; whole values and their comma-separated parts, with and without
-  comments), taken as a path relative to the root and to every other folder-like token,
-  must not exist or must resolve inside, and so must every line of every image-list file such a token names; and
-  the data dir's own path must not have a component named `images` (YOLO labels replace the last `images` component
-  with `labels`, which would then leave it). Before any tool or resource reads a dataset, its root, every image
-  file the store reports and each image's label are checked as well (results cached per dataset). `register_dataset` unregisters a dataset that fails the check again, and
+  junctions resolved, and rejects anything outside it with `path_outside_data_dir`. Datasets are confined where they are read:
+  a dataset root inside the data dir can still reference files elsewhere (a `data.yaml` `path:`, image lists, linked
+  folders, YOLO labels derived from image paths), so `folo mcp --confine` installs folo-data's process-wide read
+  guard (`folo_data::guard`). Every manifest, image list, split folder, COCO JSON, image and label the dataset
+  reader opens, and every image the server sends, is resolved canonically first and refused outside the data dir,
+  whatever the manifest syntax, at registration and at every later re-index. A refused read fails like an
+  unreadable file and shows up as a dataset issue or error that names it. On top of that, before any tool or
+  resource reads a dataset, its root, every image the store reports, each image's label, and its issues are
+  checked, so the agent gets a clear `path_outside_data_dir` error (results cached per dataset; the guard keeps
+  enforcing if the dataset changes later). `register_dataset` unregisters a dataset that fails the check, and
   datasets registered earlier without `--confine` that fail it are left out of `list_datasets` and
-  `resources/list` and rejected everywhere else (the real store still scans its registry at startup, but nothing it
-  read reaches the agent). The checks guard what is reachable through FOLO's tools; they do not defend against
-  another process re-pointing links inside the data dir after a check (FOLO never creates links).
+  `resources/list` and rejected everywhere else. In proxy mode `folo serve` reads the datasets, so `--confine`
+  covers only the files the MCP process reads itself (`predict.image_path`, `predict_batch`). The checks guard
+  what is reachable through FOLO's tools; they do not defend against another process re-pointing links inside the
+  data dir between a check and the open (FOLO never creates links).
 
 ## Run lifetime
 - **Embedded mode** (default): runs execute inside the `folo mcp` process. Run state is persisted under

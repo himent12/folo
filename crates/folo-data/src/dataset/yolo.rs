@@ -38,6 +38,7 @@ pub(crate) fn find_yaml(dir: &Path) -> Option<PathBuf> {
             return Some(p);
         }
     }
+    crate::guard::check(dir).ok()?;
     let mut yamls: Vec<PathBuf> = std::fs::read_dir(dir)
         .ok()?
         .filter_map(|e| e.ok().map(|e| e.path()))
@@ -45,7 +46,8 @@ pub(crate) fn find_yaml(dir: &Path) -> Option<PathBuf> {
         .collect();
     yamls.sort();
     yamls.into_iter().find(|p| {
-        std::fs::read_to_string(p)
+        crate::guard::check(p)
+            .and_then(|_| std::fs::read_to_string(p))
             .ok()
             .and_then(|t| serde_yaml::from_str::<Value>(&t).ok())
             .is_some_and(|v| v.get("train").is_some())
@@ -75,7 +77,9 @@ pub(crate) fn open_yaml(yaml: &Path, opts: &OpenOptions) -> Result<LoadedDataset
 }
 
 pub(crate) fn scan_yaml(yaml: &Path) -> Result<YoloScan> {
-    let text = std::fs::read_to_string(yaml).map_err(|e| DataError::io(yaml, e))?;
+    let text = crate::guard::check(yaml)
+        .and_then(|_| std::fs::read_to_string(yaml))
+        .map_err(|e| DataError::io(yaml, e))?;
     let v: Value = serde_yaml::from_str(&text)
         .map_err(|e| DataError::Format(format!("{}: invalid YAML: {e}", yaml.display())))?;
     if !v.is_mapping() {
@@ -144,7 +148,17 @@ pub(crate) fn scan_yaml(yaml: &Path) -> Result<YoloScan> {
     if splits.get(&Split::Train).is_none_or(|v| v.is_empty())
         && splits.get(&Split::Val).is_none_or(|v| v.is_empty())
     {
-        return Err(DataError::Format(format!("{}: no train or val images found", yaml.display())));
+        // Name a read the process guard refused, if that is why nothing was found.
+        let why = report
+            .issues
+            .iter()
+            .find(|i| i.message.contains(crate::guard::DENIED))
+            .map(|i| format!(" ({})", i.message));
+        return Err(DataError::Format(format!(
+            "{}: no train or val images found{}",
+            yaml.display(),
+            why.unwrap_or_default()
+        )));
     }
     Ok(YoloScan { root, names, splits, report, sources: deps })
 }
@@ -175,7 +189,7 @@ pub(crate) fn scan_dir(root: &Path) -> YoloScan {
         .iter()
         .map(|n| root.join(n))
         .find(|p| p.is_file())
-        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|p| crate::guard::check(&p).and_then(|_| std::fs::read_to_string(p)).ok())
         .map(|t| t.lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect::<Vec<_>>());
     YoloScan { root: root.to_path_buf(), names, splits, report, sources: vec![root.to_path_buf()] }
 }
@@ -282,14 +296,23 @@ fn resolve(root: &Path, yaml_dir: &Path, src: &str) -> Option<PathBuf> {
 
 /// Adds images from a directory (recursively), a `.txt` list, or a single image file.
 fn collect_images(src: &Path, root: &Path, out: &mut Vec<PathBuf>, report: &mut LoadReport) {
+    if let Err(e) = crate::guard::check(src) {
+        report.push(IssueKind::Other, src, format!("cannot read image source: {e}"));
+        return;
+    }
     if src.is_dir() {
-        let mut found: Vec<PathBuf> = walkdir::WalkDir::new(src)
+        let mut found: Vec<PathBuf> = Vec::new();
+        let files = walkdir::WalkDir::new(src)
             .follow_links(true)
             .into_iter()
             .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().is_file() && is_image_path(e.path()))
-            .map(|e| e.into_path())
-            .collect();
+            .filter(|e| e.file_type().is_file() && is_image_path(e.path()));
+        for e in files {
+            match crate::guard::check(e.path()) {
+                Ok(()) => found.push(e.into_path()),
+                Err(err) => report.push(IssueKind::Other, e.path(), format!("cannot read image: {err}")),
+            }
+        }
         found.sort();
         out.extend(found);
     } else if src.extension().is_some_and(|e| e.eq_ignore_ascii_case("txt")) {
