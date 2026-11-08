@@ -12,6 +12,8 @@ import type {
   Dataset,
   DatasetImages,
   DatasetImagesQuery,
+  DatasetIssues,
+  DatasetIssuesQuery,
   ExportFormat,
   ExportResult,
   Health,
@@ -32,7 +34,7 @@ import type {
   ModelEval,
   RunLogs,
 } from '../types';
-import { image, imageIndex, indices, specs, stats, toDataset, total, type MockDatasetSpec } from './datasets';
+import { image, imageIndex, indices, issues, specs, stats, toDataset, total, type MockDatasetSpec } from './datasets';
 import { synthEvaluation, toModelEval } from './evaluation';
 import { renderImage } from './render';
 import { hash, rng, smoothNoise, range } from './rng';
@@ -330,6 +332,16 @@ export class MockApi implements Api {
       for (let i = offset; i < Math.min(count, offset + limit); i++) images.push(image(s, idx ? (idx[i] as number) : i));
       return { total: count, images };
     }, 90);
+  }
+
+  datasetIssues(id: string, q: DatasetIssuesQuery): Promise<DatasetIssues> {
+    return this.#call(() => {
+      const all = issues(this.#spec(id));
+      const matching = q.kind ? all.filter((i) => i.kind === q.kind) : all;
+      const offset = Math.max(0, q.offset ?? 0);
+      const limit = Math.max(0, Math.min(1000, q.limit ?? 100));
+      return { total: matching.length, issues: matching.slice(offset, offset + limit) };
+    }, 120);
   }
 
   imageUrl(datasetId: string, imageId: string, thumb?: number): Promise<string> {

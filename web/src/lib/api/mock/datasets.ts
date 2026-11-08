@@ -1,7 +1,7 @@
 // Mock datasets: three procedurally generated detection datasets. Every image (size, boxes, classes) is a pure
 // function of (dataset, index), so the grid, stats, samples and predictions agree with each other.
 
-import type { Box, Dataset, DatasetImage, DatasetStats, Split } from '../types';
+import type { Box, Dataset, DatasetImage, DatasetIssue, DatasetStats, Split } from '../types';
 import { gauss, hash, range, rng, weighted } from './rng';
 
 export type Shape = 'round' | 'square' | 'long';
@@ -237,3 +237,46 @@ export function indices(s: MockDatasetSpec, split: Split | undefined, cls: numbe
   return out;
 }
 
+
+const issuesCache = new WeakMap<MockDatasetSpec, DatasetIssue[]>();
+
+/**
+ * `folo dataset check` findings for a mock dataset, consistent with its stats: one error per broken label file, an
+ * `empty_image` info per image without boxes, and a few deterministic warnings. Dataset order (train, val, test).
+ */
+export function issues(s: MockDatasetSpec): DatasetIssue[] {
+  const hit = issuesCache.get(s);
+  if (hit) return hit;
+  const r = rng(seedOf(s) ^ 0x51ed);
+  const n = total(s);
+  const labelOf = (file: string) => file.replace(/^images\//, 'labels/').replace(/\.[a-z]+$/, '.txt');
+  const out: { i: number; issue: DatasetIssue }[] = [];
+  const BROKEN: [DatasetIssue['kind'], (line: number) => string][] = [
+    ['broken_label', (l) => `line ${l}: expected 5 values (class cx cy w h), found 4`],
+    ['class_overflow', () => `class id ${s.classes.length + 2} is out of range (${s.classes.length} classes)`],
+    ['out_of_range_box', () => 'cx 412.0 is outside [0, 1]: pixel coordinates instead of normalised'],
+  ];
+  for (let k = 0; k < s.brokenLabels; k++) {
+    const i = Math.floor(r() * s.splits.train);
+    const [kind, msg] = BROKEN[k % BROKEN.length]!;
+    const line = 1 + Math.floor(r() * 9);
+    out.push({ i, issue: { kind, severity: 'error', file: labelOf(image(s, i).file), line, message: msg(line) } });
+  }
+  for (let k = 0; k < 2 && n > 0; k++) {
+    const i = Math.floor(r() * n);
+    const line = 1 + Math.floor(r() * 6);
+    out.push({ i, issue: { kind: 'clipped_box', severity: 'warning', file: labelOf(image(s, i).file), line, message: 'box extends 0.004 past the right edge; clipped on load' } });
+  }
+  if (n > 2) {
+    const a = Math.floor(r() * (n - 1));
+    const b = Math.min(n - 1, a + 1 + Math.floor(r() * (n - a - 1)));
+    out.push({ i: b, issue: { kind: 'duplicate_image', severity: 'warning', file: image(s, b).file, line: null, message: `same bytes as ${image(s, a).file}` } });
+  }
+  for (let i = 0; i < n; i++) {
+    const img = image(s, i);
+    if (img.boxes.length === 0) out.push({ i, issue: { kind: 'empty_image', severity: 'info', file: img.file, line: null, message: 'no boxes (a background image)' } });
+  }
+  const list = out.sort((x, y) => x.i - y.i).map((o) => o.issue);
+  issuesCache.set(s, list);
+  return list;
+}

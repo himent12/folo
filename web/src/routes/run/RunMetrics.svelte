@@ -10,6 +10,7 @@
   import type { Epoch, Run, Step } from '$lib/api/types';
   import { duration, lr as fmtLr, metric, num, pow10 } from '$lib/format';
   import Segmented from '$lib/ui/Segmented.svelte';
+  import Select from '$lib/ui/Select.svelte';
   import Skeleton from '$lib/ui/Skeleton.svelte';
 
   let {
@@ -126,8 +127,6 @@
   interface TabDef {
     id: Tab;
     label: string;
-    /** Label on phones, where a cell is a third of the screen. */
-    short?: string;
     value: string;
     unit?: string;
     caption: string;
@@ -147,7 +146,6 @@
     {
       id: 'pr',
       label: 'Precision · Recall',
-      short: 'P · R',
       value: lastEpoch ? `${num(lastEpoch.val.precision, 2)} · ${num(lastEpoch.val.recall, 2)}` : '—',
       caption: 'last epoch',
       title: 'Precision and recall',
@@ -164,7 +162,6 @@
     {
       id: 'lr',
       label: 'Learning rate',
-      short: 'LR',
       value: fmtLr(lastStep?.lr),
       caption: 'warmup 3 · cosine',
       title: 'Learning rate',
@@ -210,6 +207,14 @@
         {#if live}{(progress * 100).toFixed(1)}% · {run.eta_s !== null ? `${duration(run.eta_s)} left` : 'estimating…'}{:else}{elapsed !== null ? `${duration(elapsed)} total` : '—'}{/if}
       </span>
     </div>
+    <!-- Phones: one picker instead of six cells; the chart below shows what it names. -->
+    <div class="phone-metric">
+      <Select
+        label="Metric to chart"
+        bind:value={tab}
+        options={tabs.map((t) => ({ value: t.id, label: `${t.label} · ${t.value}${t.unit ? ` ${t.unit}` : ''}` }))}
+      />
+    </div>
     <!-- svelte-ignore a11y_interactive_supports_focus -->
     <div class="tabs" role="tablist" aria-label="Metric to chart" {onkeydown}>
       {#each tabs as t (t.id)}
@@ -223,7 +228,7 @@
           data-tab={t.id}
           onclick={() => (tab = t.id)}
         >
-          <span class="label"><span class="long">{t.label}</span><span class="short" aria-hidden="true">{t.short ?? t.label}</span></span>
+          <span class="label">{t.label}</span>
           <span class="val num">{t.value}{#if t.unit}<span class="unit">{t.unit}</span>{/if}</span>
           <span class="cap num">{t.caption}</span>
         </button>
@@ -358,7 +363,7 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .label .short {
+  .phone-metric {
     display: none;
   }
   .tab.on .label {
@@ -520,23 +525,13 @@
     .big {
       grid-row: 1 / span 2;
     }
-    /* Phones keep the 3 × 2 grid of wider screens (no sideways scrolling), with compact cells. */
-    .tab {
-      grid-template-rows: 16px 28px 16px;
-      gap: 2px;
+    .tabs {
+      display: none;
+    }
+    .phone-metric {
+      display: grid;
+      gap: var(--space-1);
       padding: var(--space-3);
-    }
-    /* The full label stays in the accessibility tree; only its visual is swapped for the short one. */
-    .label .long {
-      position: absolute;
-      width: 1px;
-      height: 1px;
-      overflow: hidden;
-      clip-path: inset(50%);
-      white-space: nowrap;
-    }
-    .label .short {
-      display: inline;
     }
     .val {
       font-size: var(--type-lg-size);

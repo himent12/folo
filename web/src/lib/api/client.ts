@@ -7,6 +7,8 @@ import type {
   Dataset,
   DatasetImages,
   DatasetImagesQuery,
+  DatasetIssues,
+  DatasetIssuesQuery,
   ExportFormat,
   ExportResult,
   Health,
@@ -56,6 +58,8 @@ export interface Api {
   createDataset(body: CreateDataset): Promise<Dataset>;
   createSyntheticDataset(body: CreateSyntheticDataset): Promise<Dataset>;
   datasetImages(id: string, q: DatasetImagesQuery, signal?: AbortSignal): Promise<DatasetImages>;
+  /** `GET /api/datasets/{id}/issues`: what `folo dataset check` finds, in dataset order. */
+  datasetIssues(id: string, q: DatasetIssuesQuery, signal?: AbortSignal): Promise<DatasetIssues>;
   /** URL of an image (thumbnail when `thumb` is set). The mock renders images on demand, hence async. */
   imageUrl(datasetId: string, imageId: string, thumb?: number): Promise<string>;
   deleteDataset(id: string): Promise<void>;
@@ -148,6 +152,14 @@ export class HttpApi implements Api {
     return this.#req<DatasetImages>(
       'GET',
       `/datasets/${encodeURIComponent(id)}/images${qs({ split: q.split, offset: q.offset, limit: q.limit, class: q.class })}`,
+      undefined,
+      signal,
+    );
+  }
+  datasetIssues(id: string, q: DatasetIssuesQuery, signal?: AbortSignal) {
+    return this.#req<DatasetIssues>(
+      'GET',
+      `/datasets/${encodeURIComponent(id)}/issues${qs({ kind: q.kind, offset: q.offset, limit: q.limit })}`,
       undefined,
       signal,
     );

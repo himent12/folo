@@ -44,6 +44,19 @@
     ...lit.map((i) => ({ id: `c${i}`, label: name(i), color: classStroke(i), points: trimPrTail(ev.curves[i] ?? []), emphasis: true })),
   ]);
 
+  // Cursor on the shared recall axis (bound to the chart); the legend reads each curve's precision there.
+  let cursor = $state<number | null>(null);
+  function at(points: { x: number; y: number }[]): string {
+    const pts = trimPrTail(points);
+    const c = cursor;
+    if (c === null || !pts.length) return '—';
+    const last = pts[pts.length - 1]!;
+    if (c > last.x + 1e-9) return '—';
+    let best = pts[0]!;
+    for (const p of pts) if (Math.abs(p.x - c) < Math.abs(best.x - c)) best = p;
+    return metric(best.y);
+  }
+
   const meanAp = $derived(map50 ?? ev.perClass.reduce((a, c) => a + c.ap50, 0) / Math.max(1, ev.perClass.length));
   const apOf = $derived(new Map(ev.perClass.map((c) => [c.class, c.ap50])));
 
@@ -56,10 +69,12 @@
 </script>
 
 <div class="pr">
-  <div class="legend" aria-live="polite">
-    <span class="item"><span class="line mean" aria-hidden="true"></span>All classes <span class="num">{metric(meanAp)}</span></span>
+  <!-- At rest the legend states each curve's AP50; under the cursor it reads precision at that recall. -->
+  <div class="legend">
+    <span class="what num">{cursor === null ? 'AP50' : `Precision at recall ${cursor.toFixed(2)}`}</span>
+    <span class="item"><span class="line mean" aria-hidden="true"></span>All classes <span class="num">{cursor === null ? metric(meanAp) : at(ev.mean)}</span></span>
     {#each lit as i (i)}
-      <span class="item"><span class="line" style:background={classStroke(i)} aria-hidden="true"></span>{name(i)} <span class="num">{metric(apOf.get(i))}</span></span>
+      <span class="item"><span class="line" style:background={classStroke(i)} aria-hidden="true"></span>{name(i)} <span class="num">{cursor === null ? metric(apOf.get(i)) : at(ev.curves[i] ?? [])}</span></span>
     {/each}
     {#if selected.length}
       <button type="button" class="clear" onclick={() => (selected = [])}>Clear</button>
@@ -79,6 +94,7 @@
       xTicks={6}
       yTicks={5}
       legend={false}
+      bind:cursor
       label="Precision-recall curves at IoU 0.5 for {classes.length} classes and the mean over all classes"
     />
   </div>
@@ -143,6 +159,10 @@
     display: flex;
     flex-direction: column;
     min-width: 0;
+  }
+  .what {
+    min-width: 11em;
+    color: var(--text-tertiary);
   }
   .legend {
     display: flex;
@@ -264,6 +284,13 @@
   @media (pointer: coarse) {
     .more {
       height: 44px;
+    }
+    /* Touch: every class row is a 44 px target (fine pointers keep the dense 28 px rows). */
+    tbody td {
+      height: 44px;
+    }
+    .cls {
+      min-height: 44px;
     }
   }
   @media (max-width: 767px) {

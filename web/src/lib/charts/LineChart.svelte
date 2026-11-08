@@ -64,6 +64,10 @@
     legendNote?: string;
     /** A floating tooltip at the cursor. Off by default: the legend is the readout (cursor values on hover). */
     tooltip?: boolean;
+    /** Series id to bring forward; the others fade (e.g. while its legend entry is hovered). */
+    highlight?: string | null;
+    /** A small dot at each line's last point, so every series stays findable where lines overlap. */
+    endDots?: boolean;
   }
 
   let {
@@ -88,6 +92,8 @@
     xLabel,
     legendNote,
     tooltip = false,
+    highlight = null,
+    endDots = false,
   }: Props = $props();
 
   const uid = $props.id();
@@ -413,8 +419,31 @@
           </defs>
           {#each paths as { s, d, a } (s.id)}
             {#if a}<path class="area" d={a} fill="url(#{uid}-{s.id})" />{/if}
-            <path class="line" class:dashed={s.dashed} class:ghost={s.ghost} class:emphasis={s.emphasis} {d} style:stroke={s.color} style:stroke-dasharray={dashOf(s)} />
+            <path
+              class="line"
+              class:dashed={s.dashed}
+              class:ghost={s.ghost}
+              class:emphasis={s.emphasis || (highlight !== null && s.id === highlight)}
+              class:faded={highlight !== null && s.id !== highlight && !s.ghost}
+              {d}
+              style:stroke={s.color}
+              style:stroke-dasharray={dashOf(s)}
+            />
           {/each}
+          {#if highlight !== null}
+            <!-- The highlighted line is drawn again on top, so overlapping lines cannot hide it. -->
+            {#each paths.filter((p) => p.s.id === highlight) as { s, d } (s.id)}
+              <path class="line emphasis" {d} style:stroke={s.color} style:stroke-dasharray={dashOf(s)} />
+            {/each}
+          {/if}
+          {#if endDots}
+            {#each keyed as s (s.id)}
+              {@const p = s.points[s.points.length - 1]}
+              {#if p && Number.isFinite(p.y)}
+                <circle class="end-dot" class:faded={highlight !== null && s.id !== highlight} cx={x(p.x)} cy={y(p.y)} r="3" style:fill={s.color} />
+              {/if}
+            {/each}
+          {/if}
 
           {#if showEnds}
             {#each ends as e (e.id)}
@@ -556,6 +585,18 @@
   }
   .line.emphasis {
     stroke-width: 2.75;
+  }
+  .line.faded,
+  .end-dot.faded {
+    opacity: 0.2;
+  }
+  .line,
+  .end-dot {
+    transition: opacity var(--dur-fast) var(--ease-standard);
+  }
+  .end-dot {
+    stroke: var(--bg-panel);
+    stroke-width: 1.5;
   }
   .line.ghost {
     stroke-width: 1;

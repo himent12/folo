@@ -1,9 +1,13 @@
 <script lang="ts">
   /**
    * Dataset statistics. Findings to review come first, and only when there are any; then four numbers, the class
-   * balance as the focal chart, and the two histograms in ink.
+   * balance as the focal chart, and the two histograms in ink. On phones the findings start collapsed under a one-line
+   * summary, so the class balance stays on the first screen.
    */
+  import IssueList from './IssueList.svelte';
+  import { MediaQuery } from 'svelte/reactivity';
   import ArrowRight from '@lucide/svelte/icons/arrow-right';
+  import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import CircleAlert from '@lucide/svelte/icons/circle-alert';
   import CircleCheck from '@lucide/svelte/icons/circle-check';
   import Info from '@lucide/svelte/icons/info';
@@ -22,6 +26,10 @@
   const health = $derived(healthChecks(dataset, stats));
   const issues = $derived(reviewCount(health));
   const findings = $derived(health.filter((h) => h.severity !== 'ok'));
+  const notes = $derived(findings.length - issues);
+  // Findings start open on wide screens and collapsed on phones; once toggled, a finding keeps its own state.
+  const phone = new MediaQuery('max-width: 767px', false);
+  let toggled = $state<Record<string, boolean>>({});
   const sizeEdges = $derived(stats.box_size_hist.edges);
   // Unequal size bins keep their true widths up to 60 % of the side; the open last bin (≥ 50 %) is drawn up to there.
   const sizeMax = $derived(Math.min(0.6, sizeEdges[sizeEdges.length - 1] ?? 1));
@@ -39,24 +47,38 @@
   const share = (x: number) => (stats.boxes ? (x / stats.boxes) * 100 : 0);
   const icons = { danger: CircleAlert, warning: TriangleAlert, info: Info, ok: CircleCheck } satisfies Record<Severity, unknown>;
   const perLast = $derived(stats.boxes_per_image_hist.counts.length - 1);
+  const splitLine = $derived(`${num(dataset.splits.train)} train · ${num(dataset.splits.val)} val · ${num(dataset.splits.test)} test`);
+  const classCount = $derived(`${dataset.classes.length} ${dataset.classes.length === 1 ? 'class' : 'classes'}`);
   const pct = (x: number) => (images ? `${((x / images) * 100).toFixed(1)}% of images` : '');
 </script>
 
 <div class="stats">
   {#if issues > 0}
-    <Panel title="To review" meta={String(issues)} pad="none" id="ds-health">
+    <Panel pad="none" id="ds-health">
+      <h2 class="hsum num">
+        {issues} to review{#if notes > 0}<span class="hnotes"><span aria-hidden="true">·</span> {notes} {notes === 1 ? 'note' : 'notes'}</span>{/if}
+      </h2>
       <ul class="health">
         {#each findings as h (h.id)}
           {@const Icon = icons[h.severity]}
           <li class={h.severity}>
-            <span class="hicon"><Icon size={16} strokeWidth={1.75} aria-label={h.severity} /></span>
-            <span class="htext">
-              <span class="htitle">{h.title}</span>
-              <span class="hdetail">{h.detail}</span>
-            </span>
-            {#if h.action}
-              <a class="haction" href={href(h.action.path)}>{h.action.label}<ArrowRight size={12} strokeWidth={2} aria-hidden="true" /></a>
-            {/if}
+            <details open={toggled[h.id] ?? !phone.current} ontoggle={(e) => (toggled[h.id] = e.currentTarget.open)}>
+              <summary>
+                <span class="hicon"><Icon size={16} strokeWidth={1.75} aria-label={h.severity} /></span>
+                <span class="htitle">{h.title}</span>
+                <span class="hchev" aria-hidden="true"><ChevronDown size={14} strokeWidth={1.75} /></span>
+              </summary>
+              <div class="hbody">
+                <p class="hdetail">{h.detail}</p>
+                {#if h.id === 'broken'}
+                  <!-- The evidence: each file and line with the parser's message. -->
+                  <IssueList datasetId={dataset.id} path={dataset.path} severity="error" />
+                {/if}
+                {#if h.action}
+                  <a class="haction" href={href(h.action.path)}>{h.action.label}<ArrowRight size={12} strokeWidth={2} aria-hidden="true" /></a>
+                {/if}
+              </div>
+            </details>
           </li>
         {/each}
       </ul>
@@ -68,12 +90,12 @@
     <div class="kpi">
       <span class="k-label">Images</span>
       <span class="k-value num">{num(images)}</span>
-      <span class="k-sub num">{num(dataset.splits.train)} train · {num(dataset.splits.val)} val · {num(dataset.splits.test)} test</span>
+      <span class="k-sub num"><span class="wide">{splitLine}</span><span class="narrow">{classCount}</span></span>
     </div>
     <div class="kpi">
       <span class="k-label">Boxes</span>
       <span class="k-value num">{num(stats.boxes)}</span>
-      <span class="k-sub num">{images ? (stats.boxes / images).toFixed(1) : '—'} per image · {dataset.classes.length} classes</span>
+      <span class="k-sub num">{images ? (stats.boxes / images).toFixed(1) : '—'} per image<span class="wide">{` · ${classCount}`}</span></span>
     </div>
     <div class="kpi">
       <span class="k-label">Empty images</span>
@@ -86,6 +108,8 @@
       <span class="k-sub">{stats.broken_labels > 0 ? 'skipped in training' : 'all labels parse'}</span>
     </div>
   </section>
+  <!-- Phones: the split counts get a full line of their own instead of truncating inside the Images cell. -->
+  <p class="splits num">{splitLine}</p>
 
   <Panel title="Class balance" meta="boxes per class · {ratio.toFixed(1)}× largest / smallest" pad="none" id="ds-balance">
     <ul class="bars">
@@ -248,15 +272,65 @@
   .bars button:focus-visible .go {
     opacity: 1;
   }
+  /* The panel header is the severity summary: a 40 px row like every panel title. */
+  .hsum {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    min-height: 40px;
+    padding: 0 var(--space-4);
+    font-size: var(--type-md-size);
+    line-height: var(--type-md-line);
+    letter-spacing: var(--type-md-tracking);
+    font-weight: var(--weight-medium);
+  }
+  .hnotes {
+    font-weight: var(--weight-regular);
+    color: var(--text-tertiary);
+  }
   .health {
     display: grid;
   }
   .health li {
+    border-top: 1px solid var(--line-subtle);
+  }
+  summary {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    min-height: 40px;
+    padding: 0 var(--space-4);
+    cursor: pointer;
+    list-style: none;
+    transition: background-color var(--dur-fast) var(--ease-standard);
+  }
+  summary::-webkit-details-marker {
+    display: none;
+  }
+  summary:hover {
+    background: var(--bg-hover);
+  }
+  summary:focus-visible {
+    outline-offset: -2px;
+  }
+  .health li:last-child details:not([open]) summary {
+    border-radius: 0 0 calc(var(--radius-lg) - 1px) calc(var(--radius-lg) - 1px);
+  }
+  .hchev {
+    display: flex;
+    margin-left: auto;
+    color: var(--text-tertiary);
+    transition: transform var(--dur-fast) var(--ease-standard);
+  }
+  details[open] .hchev {
+    transform: rotate(180deg);
+  }
+  /* The detail lines up under the title: 16 px padding + 16 px icon + 12 px gap. */
+  .hbody {
     display: flex;
     align-items: flex-start;
     gap: var(--space-3);
-    padding: var(--space-3) var(--space-4);
-    border-top: 1px solid var(--line-subtle);
+    padding: 0 var(--space-4) var(--space-3) 44px;
   }
   .hicon {
     flex-shrink: 0;
@@ -273,16 +347,14 @@
   .info .hicon {
     color: var(--text-tertiary);
   }
-  .htext {
-    flex: 1;
-    display: grid;
-    gap: 2px;
-    min-width: 0;
-  }
   .htitle {
+    min-width: 0;
+    padding: var(--space-2) 0;
     font-weight: var(--weight-medium);
   }
   .hdetail {
+    flex: 1;
+    min-width: 0;
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
     color: var(--text-secondary);
@@ -303,9 +375,16 @@
     text-underline-offset: 3px;
     text-decoration-color: var(--line-strong);
   }
+  .splits,
+  .narrow {
+    display: none;
+  }
   @media (pointer: coarse) {
     .bars button {
       height: 44px;
+    }
+    summary {
+      min-height: 44px;
     }
     .haction {
       min-height: 44px;
@@ -324,12 +403,25 @@
     .two {
       grid-template-columns: minmax(0, 1fr);
     }
-    .health li {
+    .hbody {
       flex-wrap: wrap;
     }
     .haction {
       flex-basis: 100%;
-      margin-left: 28px;
+    }
+    .wide {
+      display: none;
+    }
+    .narrow {
+      display: inline;
+    }
+    /* A caption right under the KPI grid. */
+    .splits {
+      display: block;
+      margin-top: calc(-1 * var(--space-2));
+      font-size: var(--type-sm-size);
+      line-height: var(--type-sm-line);
+      color: var(--text-tertiary);
     }
     .hide-sm {
       display: none;
