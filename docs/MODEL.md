@@ -552,6 +552,25 @@ L      = B · (7.5 · L_box + 0.5 · L_cls + 1.5 · L_dfl)           # B = image
 - Reported loss items (CLI, API `Step.loss`): `box = 7.5·L_box`, `cls = 0.5·L_cls`, `dfl = 1.5·L_dfl`,
   `total = box + cls + dfl`. These are not multiplied by `B`. Epoch values are running means over the epoch's batches.
 
+Implementation: `folo_vision::loss` (`detection_loss`, `LossConfig` with these weights and `reg_max = 16`).
+- `targets_from_normalized` turns the loader's `[batch_idx, class, cx, cy, w, h]` rows into per-image `xyxy` pixel
+  boxes (`ImageTargets`).
+- `assign_batch` is §7.1 and §7.3: it reads `box_raw` / `cls_raw` once on the host (borrowed on the CPU, downloaded
+  from a device; the loss's only device-to-host transfer), decodes boxes to pixels, takes the sigmoid of the score
+  columns of the classes present, and runs `assign::assign` per image, images in parallel. The result
+  (`BatchAssignment`) lists the foreground anchors in image-then-anchor order with `t[a]`, class and gt box.
+- `loss_with_assignment` is §7.4 for that fixed assignment. `Σ BCE(cls_raw, T)` is computed as
+  `Σ softplus(cls_raw) − Σ_fg cls_raw[class] · t` (`T` is zero elsewhere). The foreground box logits are gathered
+  once by flat index into `[N_fg, 4, reg_max]`; `pd_box` is the softmax expectation in grid units, `loss::ciou` is
+  `boxes::ciou_eps` in tensor ops (α under `no_grad`), and DFL gathers `log_softmax` at bins `j, j + 1` with weights
+  `t[a] · w / 4`. On the CPU the BCE sum and the gather are fused custom ops with hand-written backwards; other
+  devices use the equivalent tensor-op composite. Large sums are fixed trees of row sums, so results are bitwise
+  reproducible.
+- If any head output is NaN or infinite, `detection_loss` skips the assigner and returns a non-finite loss
+  (`LossOutput::is_finite() == false`, `total` a detached NaN), which the trainer skips (§8.3).
+- `crates/folo-vision/tests/loss_cases.rs` checks the terms against an `f64` reference, the loss cases of §10.3, a
+  finite-difference gradient check of the whole loss, CIoU against `ciou_eps`, and determinism.
+
 ## 8. Training recipe
 
 ### 8.1 Defaults

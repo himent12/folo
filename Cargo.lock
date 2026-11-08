@@ -463,6 +463,7 @@ dependencies = [
 name = "folo-vision"
 version = "0.1.0"
 dependencies = [
+ "folo-core",
  "rayon",
  "serde",
  "serde_json",
