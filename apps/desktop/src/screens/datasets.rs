@@ -191,19 +191,27 @@ impl FoloApp {
                 act(move |_, _, cx| cx.reveal_path(std::path::Path::new(&path))),
             )
             .into_any_element();
+        // Short windows (the 620 px minimum): the path joins the title line, gaps tighten and the
+        // stats strip compacts, so the first image row starts near 300 px.
+        let short = window.viewport_size().height < px(700.);
+        let path_el = || {
+            text(ty::SM, t.text_tertiary)
+                .font_family(crate::theme::MONO)
+                .truncate()
+                .child(display_path(&ds.path))
+        };
         let title = div()
             .flex()
             .items_center()
             .gap(px(10.))
-            .child(text(ty::XL, t.text_primary).child(ds.name.clone()))
-            .child(badge(&t, ds.format.label(), Tone::Neutral));
+            .min_w_0()
+            .child(text(ty::XL, t.text_primary).flex_none().child(ds.name.clone()))
+            .child(div().flex_none().child(badge(&t, ds.format.label(), Tone::Neutral)))
+            .when(short, |d| d.child(div().flex_1().min_w_0().ml(px(4.)).child(path_el())));
         let header = detail_header(
             &t,
             title,
-            text(ty::SM, t.text_tertiary)
-                .font_family(crate::theme::MONO)
-                .truncate()
-                .child(display_path(&ds.path)),
+            if short { div() } else { path_el() },
             vec![reveal.into_any_element(), train.into_any_element()],
         );
 
@@ -266,9 +274,9 @@ impl FoloApp {
             .size_full()
             .flex()
             .flex_col()
-            .gap(px(16.))
+            .gap(px(if short { 12. } else { 16. }))
             .px(px(24.))
-            .pt(px(20.))
+            .pt(px(if short { 16. } else { 20. }))
             .pb(px(16.))
             .child(header)
             .child(strip)
@@ -287,6 +295,12 @@ impl FoloApp {
 
     fn dataset_strip_stats(&self, ds: &Dataset, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
+        // Short windows: XL values and 8 px padding (see `dataset`).
+        let short = window.viewport_size().height < px(700.);
+        let (step, pad) = if short { (ty::XL, 8.) } else { (ty::X2XL, 12.) };
+        let stat = |t: &Theme, label: &str, value: String, unit: &str, detail: Option<Div>| {
+            stat_at(t, label, value, unit, detail, step)
+        };
         let total = ds.splits.total().max(1) as f32;
         let s = ds.stats.as_ref();
         let split_c = [
@@ -321,7 +335,7 @@ impl FoloApp {
                     .child(text(ty::XS, t.text_tertiary).tnum().child(format!("{n} {}", int(c))))
             }),
         );
-        let tile = |content: gpui::Div| div().flex_1().min_w_0().px(px(16.)).py(px(12.)).child(content);
+        let tile = |content: gpui::Div| div().flex_1().min_w_0().px(px(16.)).py(px(pad)).child(content);
         let boxes = s.map_or(0, |s| s.boxes);
         let per = boxes as f32 / total;
         let broken = s.map_or(0, |s| s.broken_labels);
@@ -329,13 +343,13 @@ impl FoloApp {
         panel(&t)
             .flex()
             .child(
-                div().flex_none().w(px(if narrow_strip { 220. } else { 300. })).px(px(16.)).py(px(12.)).child(
+                div().flex_none().w(px(if narrow_strip { 220. } else { 300. })).px(px(16.)).py(px(pad)).child(
                     div()
                         .flex()
                         .flex_col()
                         .gap(px(6.))
                         .child(caption(&t, "Images"))
-                        .child(metric(&t, int(ds.splits.total()), "", ty::X2XL, ty::SM))
+                        .child(metric(&t, int(ds.splits.total()), "", step, ty::SM))
                         .child(split_bar)
                         .child(legend),
                 ),
@@ -366,7 +380,7 @@ impl FoloApp {
                     .flex_1()
                     .min_w_0()
                     .px(px(16.))
-                    .py(px(12.))
+                    .py(px(pad))
                     .when(empty > 0, |d| d.cursor_pointer().hover(|s| s.bg(t.bg_hover)))
                     .when(on, |d| d.bg(t.bg_selected))
                     .child(stat(
@@ -415,7 +429,7 @@ impl FoloApp {
                     .flex_1()
                     .min_w_0()
                     .px(px(16.))
-                    .py(px(12.))
+                    .py(px(pad))
                     .when(broken > 0, |d| d.cursor_pointer().hover(|s| s.bg(t.bg_hover)))
                     .when(broken > 0, |d| {
                         d.tooltip(crate::controls::tip(
@@ -428,7 +442,7 @@ impl FoloApp {
                         div()
                             .flex()
                             .flex_col()
-                            .gap(px(6.))
+                            .gap(px(if short { 4. } else { 6. }))
                             .min_w_0()
                             .child(
                                 div()
@@ -442,7 +456,7 @@ impl FoloApp {
                                             .child("Broken labels"),
                                     ),
                             )
-                            .child(metric(&t, broken.to_string(), "", ty::X2XL, ty::SM))
+                            .child(metric(&t, broken.to_string(), "", step, ty::SM))
                             .child(broken_detail(&t, narrow_strip))
                     } else {
                         stat(

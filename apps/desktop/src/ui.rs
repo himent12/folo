@@ -319,14 +319,22 @@ pub fn stat_sized(
         .children(detail)
 }
 
-pub fn stat(t: &Theme, label: &str, value: impl Into<SharedString>, unit: &str, detail: Option<Div>) -> Div {
+/// A labelled stat with its value at `step` (X2XL; compact strips on short windows use XL).
+pub fn stat_at(
+    t: &Theme,
+    label: &str,
+    value: impl Into<SharedString>,
+    unit: &str,
+    detail: Option<Div>,
+    step: TypeStep,
+) -> Div {
     div()
         .flex()
         .flex_col()
-        .gap(px(6.))
+        .gap(px(if step.size < ty::X2XL.size { 4. } else { 6. }))
         .min_w_0()
         .child(caption(t, label))
-        .child(metric(t, value, unit, ty::X2XL, ty::SM))
+        .child(metric(t, value, unit, step, ty::SM))
         .children(detail)
 }
 

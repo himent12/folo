@@ -646,11 +646,19 @@ impl FoloApp {
                 )
                 .child(control)
         };
+        // Short windows (the 620 px minimum): tighter rhythm and no restating helpers in the Model
+        // rows, so the Schedule's controls are in view without scrolling.
+        let short = window.viewport_size().height < px(700.);
         // Section headings sit above a hairline and lead their group (stronger than field labels).
         let section = |title: &str| {
-            div().mt(px(6.)).pt(px(14.)).border_t_1().border_color(t.line_subtle).child(
-                text(ty::SM, t.text_primary).font_weight(FontWeight::SEMIBOLD).child(title.to_string()),
-            )
+            div()
+                .mt(px(if short { 2. } else { 6. }))
+                .pt(px(if short { 10. } else { 14. }))
+                .border_t_1()
+                .border_color(t.line_subtle)
+                .child(
+                    text(ty::SM, t.text_primary).font_weight(FontWeight::SEMIBOLD).child(title.to_string()),
+                )
         };
         let (epochs_input, lr_input, epochs_bad, lr_bad) = {
             let f = self.new_run.as_ref().unwrap();
@@ -714,7 +722,7 @@ impl FoloApp {
         let body = div()
             .flex()
             .flex_col()
-            .gap(px(14.))
+            .gap(px(if short { 10. } else { 14. }))
             .px(px(20.))
             .pb(px(20.))
             .child(
@@ -746,7 +754,7 @@ impl FoloApp {
                     .child(div().flex_1().child(field(
                         "Image size",
                         size_seg,
-                        Some("pixels · images are letterboxed to a square".into()),
+                        (!short).then(|| "pixels · images are letterboxed to a square".into()),
                     ))),
             )
             .child(
@@ -756,15 +764,17 @@ impl FoloApp {
                     .child(div().flex_1().child(field(
                         "Batch size",
                         batch_seg,
-                        Some("images per step".into()),
+                        (!short).then(|| "images per step".into()),
                     )))
                     .child(div().flex_1().child(field(
                         "Device",
                         device_seg,
-                        Some(if DEVICES[device] == "auto" {
-                            "GPU when available, else CPU".into()
-                        } else {
-                            DEVICES[device].to_string()
+                        (!short).then(|| {
+                            if DEVICES[device] == "auto" {
+                                "GPU when available, else CPU".into()
+                            } else {
+                                DEVICES[device].to_string()
+                            }
                         }),
                     ))),
             )

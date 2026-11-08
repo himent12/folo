@@ -791,3 +791,45 @@ Round 22 changes:
 - **Pressed states:**
   - `bg.active` on hoverable rows, tiles and toggles.
   - The last visible loss toggle explains "Keep at least one series visible".
+
+## Round 22
+
+| Line | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | avg |
+|------|---|---|---|---|---|---|---|---|---|----|----|----|-----|
+| Opus 5.5 | 9 | 8 | 9 | 8 | 8 | 8 | 8 | 8 | 9 | 9 | 8 | 8 | 8.3 |
+| GPT-6.1 Sol | 8 | 8 | 9 | 8 | 8 | 8 | 8 | 9 | 8 | 8 | 8 | 8 | 8.3 |
+
+Both reviewers found the confusion-matrix heading "hexagon" hard-clipped (flex cells truncated without a known width), and both found the chip piles on the dataset-card montages too dense. Other items:
+- The log loss axis wasn't disclosed.
+- Unsorted columns used the sorted glyph.
+- Progress read "42/100" in one place and "42 / 100" in another; queued runs read "waiting" in one place and "Waiting for GPU" in another.
+- A dead band under the hero KPIs.
+- A toast-stack header that read as a second toast.
+- No hover on selected chips.
+- Keyboard zoom wasn't disclosed in the inspector.
+- A wide sparkline in the wrapped KPI tile.
+- Loud raw-loss underlays.
+- Tall chrome at the minimum size: the first dataset image row started at 349 px, and New run hid Schedule.
+- Settings width: one reviewer wants the 760 px column back. This is now a settled decision in the brief, capped at 880 px.
+
+Round 23 changes:
+- **Confusion matrix:**
+  - Headings are fitted to the measured column width; a name that doesn't fit shows a short form ("hex.") with a tooltip. "Missed" stays whole.
+  - The matrix takes 42 % of the row (PR 58 %).
+- **Dataset cards:** box outlines only, no chips (the dataset page names every box).
+- **Models table:** unsorted columns show a faint up-down mark; the active column's label and arrow are text.primary.
+- **Copy:**
+  - "42 / 100" everywhere, and "Waiting for GPU" on Overview too.
+  - The loss caption reads "log scale · EMA 0.94".
+- **Charts:**
+  - Raw underlays at 5 %.
+  - The throughput sparkline is capped at 160 px.
+- **Overview hero:** the KPI rows span the chart's height; Epoch gets its progress bar.
+- **Toasts:** "Show N earlier · Dismiss all" is a compact right-aligned pill; the earlier toasts' edges peek out behind the latest.
+- **Selected chips:** a hover tint over the selected fill.
+- **Inspector hints:** add "+ − zoom" and "0 fit".
+- **Short windows (< 700 px tall):**
+  - The dataset path joins the title line; page gaps are 12 px; the stats strip uses XL values. The first image row moved from 349 to 305 px.
+  - New run tightens its rhythm and drops restating helpers, so Epochs, the learning rate, Optimizer and Close mosaic are all in view.
+- **Settings:** capped at 880 px, left-aligned.
+- **Review brief:** a "settled decisions" paragraph (Settings width, KPI gaps, "close mosaic" labelling, LR exponent placement).
