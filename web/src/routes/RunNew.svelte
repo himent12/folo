@@ -164,10 +164,8 @@
   });
   const valid = $derived(prefilled && Object.values(errors).every((e) => e === null));
   const firstError = $derived(Object.values(errors).find((e) => e !== null) ?? null);
-  // A folded section must not hide its own error.
-  $effect(() => {
-    if (errors.close) augOpen = true;
-  });
+  // A folded section must not hide its own error: while one is shown the section stays open whatever was toggled.
+  const augShown = $derived(augOpen || errors.close !== null);
 
   const trim = (v: number) => String(+v.toFixed(3));
   /** The augmentation settings as one line; values that differ from the defaults are emphasised. */
@@ -379,19 +377,19 @@
 
         <Panel title="4 · Augmentation" id="sec-aug">
           {#snippet actions()}
-            <span class="aug-actions" class:shut={!augOpen}>
+            <span class="aug-actions" class:shut={!augShown}>
               <Button size="sm" variant="ghost" icon={Shuffle} onclick={() => shuffle++}>New samples</Button>
               <Button size="sm" variant="ghost" icon={RotateCcw} onclick={() => (augment = structuredClone(defaults))}>Defaults</Button>
             </span>
           {/snippet}
-          <button type="button" class="aug-toggle" aria-expanded={augOpen} aria-controls="aug-body" onclick={() => (augOpen = !augOpen)}>
+          <button type="button" class="aug-toggle" aria-expanded={augShown} aria-controls="aug-body" onclick={() => (augOpen = !augShown)}>
             <ChevronRight size={14} aria-hidden="true" />
             <span class="aug-line num">
               {#each augLine as it, i (it.k)}{#if i > 0}<span class="sep" aria-hidden="true">·</span>{/if}<span class:changed={it.changed}>{it.k} {it.v}</span>{/each}
             </span>
-            <span class="aug-verb">{augOpen ? 'Hide' : 'Edit'}</span>
+            <span class="aug-verb">{augShown ? 'Hide' : 'Edit'}</span>
           </button>
-          <div class="aug" id="aug-body" class:shut={!augOpen}>
+          <div class="aug" id="aug-body" class:shut={!augShown}>
             <div class="aug-controls">
               {#snippet ctl(k: AugKey, children: import('svelte').Snippet)}
                 <!-- svelte-ignore a11y_no_static_element_interactions -->

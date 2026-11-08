@@ -53,7 +53,14 @@
   });
 </script>
 
-<div class="display" bind:this={root}>
+<!-- Focus leaving the control (Tab past its last field) closes the popover; moving between its fields does not. -->
+<div
+  class="display"
+  bind:this={root}
+  onfocusout={(e) => {
+    if (open && !(root && e.relatedTarget instanceof Node && root.contains(e.relatedTarget))) hide(false);
+  }}
+>
   <button
     type="button"
     class="trigger"
