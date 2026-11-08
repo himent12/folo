@@ -216,6 +216,7 @@
   --chart-label: #80868f;
   --chart-cursor: #ffffff4d;
   --chart-swatch-edge: #ffffff1f;
+  --chart-context: #646a73;
   --chart-area-opacity: 0.14;
   --shadow-sm: 0 1px 2px 0 #00000066;
   --shadow-md: 0 4px 12px -2px #00000080, 0 0 0 1px #ffffff0f;
@@ -271,6 +272,7 @@
   --chart-label: #646b75;
   --chart-cursor: #0a0e1440;
   --chart-swatch-edge: #0a0e1438;
+  --chart-context: #80868f;
   --chart-area-opacity: 0.12;
   --shadow-sm: 0 1px 2px 0 #0a0e140f;
   --shadow-md: 0 4px 12px -2px #0a0e141a, 0 0 0 1px #0a0e140f;

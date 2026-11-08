@@ -1,16 +1,19 @@
 <script lang="ts">
   /**
-   * Precision-recall curves with the per-class table as their legend. Every class is drawn as a faint tertiary line (ghost) and
-   * the mean over all classes in ink, so 80 classes read as one shape instead of spaghetti; hovering a table row
-   * gives its curve the class hue, clicking keeps it highlighted. The legend row above the plot is the readout.
+   * Precision-recall curves with the per-class table as their legend. Every class is a 1 px context line
+   * (`--chart-context`, >= 3:1 on the panel) and the mean over all classes a heavier line in ink; many classes are a
+   * percentile band instead, so 80 classes read as one shape instead of spaghetti. Hovering a table row gives its curve
+   * the class hue, clicking keeps it highlighted. The legend row above the plot is the readout. Phones hide the
+   * precision and recall columns; tapping a row opens a details row with every metric of that class.
    */
   import type { Evaluation } from '$lib/api/evaluation';
   import LineChart, { type Series } from '$lib/charts/LineChart.svelte';
   import { classInk, classStroke } from '$lib/design/classInk.svelte';
   import { metric, num } from '$lib/format';
   import Input from '$lib/ui/Input.svelte';
+  import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import Search from '@lucide/svelte/icons/search';
-  import { matchesClass, prEnvelope, trimPrTail } from './pr';
+  import { classMetrics, matchesClass, prEnvelope, trimPrTail } from './pr';
 
   let { classes, ev, map50 }: { classes: readonly string[]; ev: Evaluation; map50: number | null } = $props();
 
@@ -46,7 +49,7 @@
       : classes
           .map((_, i) => i)
           .filter((i) => !lit.includes(i))
-          .map((i) => ({ id: `c${i}`, label: name(i), color: 'var(--text-secondary)', ghost: true, points: trimPrTail(ev.curves[i] ?? []) }))),
+          .map((i) => ({ id: `c${i}`, label: name(i), color: 'var(--chart-context)', context: true, points: trimPrTail(ev.curves[i] ?? []) }))),
     { id: 'mean', label: 'All classes', color: 'var(--text-primary)', points: trimPrTail(ev.mean), emphasis: true },
     ...lit.map((i) => ({ id: `c${i}`, label: name(i), color: classStroke(i), points: trimPrTail(ev.curves[i] ?? []), emphasis: true })),
   ]);
@@ -66,6 +69,9 @@
 
   const meanAp = $derived(map50 ?? ev.perClass.reduce((a, c) => a + c.ap50, 0) / Math.max(1, ev.perClass.length));
   const apOf = $derived(new Map(ev.perClass.map((c) => [c.class, c.ap50])));
+
+  // Phones show four columns: a selected (highlighted) class also opens a details row with all five metrics.
+  const COLS_NARROW = 4;
 
   // Large class sets: a filter and 16 rows until the reader asks for all of them.
   const ROWS_MAX = 16;
@@ -131,6 +137,7 @@
       <tbody>
         {#each rows as c (c.class)}
           {@const on = selected.includes(c.class)}
+          {@const open = narrow && on}
           <tr
             class="link"
             class:on
@@ -140,9 +147,20 @@
             onclick={() => toggle(c.class)}
           >
             <td>
-              <button type="button" class="cls" aria-pressed={on} onclick={(e) => (e.stopPropagation(), toggle(c.class))} onfocus={() => (hovered = c.class)} onblur={() => (hovered = null)}>
+              <!-- Wide: a toggle that traces the curve. Phones: it also discloses the details row. -->
+              <button
+                type="button"
+                class="cls"
+                aria-pressed={narrow ? undefined : on}
+                aria-expanded={narrow ? open : undefined}
+                aria-controls={narrow ? `pr-detail-${c.class}` : undefined}
+                onclick={(e) => (e.stopPropagation(), toggle(c.class))}
+                onfocus={() => (hovered = c.class)}
+                onblur={() => (hovered = null)}
+              >
                 <span class="sw" style:background={classInk(c.class)} aria-hidden="true"></span>
                 <span class="truncate">{name(c.class)}</span>
+                {#if narrow}<span class="chev" class:open aria-hidden="true"><ChevronDown size={14} /></span>{/if}
               </button>
             </td>
             <td class="r">{metric(c.ap50)}</td>
@@ -151,6 +169,17 @@
             <td class="r hide-sm muted">{metric(c.recall)}</td>
             <td class="r muted">{num(c.instances)}</td>
           </tr>
+          {#if open}
+            <tr class="detail" id="pr-detail-{c.class}">
+              <td colspan={COLS_NARROW}>
+                <dl>
+                  {#each classMetrics(c) as d (d.label)}
+                    <div><dt>{d.label}</dt><dd class="num">{d.value}</dd></div>
+                  {/each}
+                </dl>
+              </td>
+            </tr>
+          {/if}
         {:else}
           <tr><td colspan="6" class="none">No class matches “{query.trim()}”</td></tr>
         {/each}
@@ -171,10 +200,6 @@
     display: flex;
     flex-direction: column;
     min-width: 0;
-  }
-  /* Per-class context lines: lighter than the mean, but still traceable (the generic ghost is too faint here). */
-  .plot :global(.line.ghost) {
-    opacity: 0.5;
   }
   .swatch-band {
     width: 14px;
@@ -271,6 +296,39 @@
   .cls:focus-visible {
     outline-offset: 2px;
   }
+  .chev {
+    display: inline-flex;
+    margin-left: auto;
+    padding-left: var(--space-1);
+    color: var(--text-tertiary);
+    transition: transform var(--dur-fast) var(--ease-standard);
+  }
+  .chev.open {
+    transform: rotate(180deg);
+  }
+  /* Phones: every metric of a selected class, under its row (precision and recall have no column there). */
+  tr.detail td {
+    height: auto;
+    padding: var(--space-2) var(--space-4) var(--space-3);
+    background: var(--bg-selected);
+    box-shadow: inset 2px 0 0 var(--accent-line);
+  }
+  .detail dl {
+    display: grid;
+    /* Five on one row at 390 px (326 px inside the cell padding). */
+    grid-template-columns: repeat(auto-fit, minmax(56px, 1fr));
+    gap: var(--space-2);
+  }
+  .detail dt {
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--text-tertiary);
+  }
+  .detail dd {
+    font-size: var(--type-base-size);
+    line-height: var(--type-base-line);
+    color: var(--text-primary);
+  }
   .sw {
     width: 8px;
     height: 8px;
@@ -322,6 +380,10 @@
   @media (max-width: 767px) {
     .hide-sm {
       display: none;
+    }
+    /* The button fills the class cell, so every row's chevron sits on one edge. */
+    .cls {
+      width: 100%;
     }
     .legend,
     .plot {

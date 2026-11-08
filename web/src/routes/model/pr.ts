@@ -1,5 +1,8 @@
 // Precision-recall curve helpers for the Model view.
 
+import type { ClassEvaluation } from '$lib/api/evaluation';
+import { metric, num } from '$lib/format';
+
 /**
  * Drops the tail of a PR curve past its maximum recall: evaluators pad the curve with precision 0 up to recall 1,
  * which would draw a line along the x-axis that no detector reached. Keeps everything up to the last point with
@@ -44,4 +47,18 @@ export function prEnvelope(
     upper.push({ x: r, y: q(v, hi) });
   }
   return { lower, upper };
+}
+
+/**
+ * Every metric of one class, in the table's column order: the phone details row lists them all, since the narrow
+ * table has no room for precision and recall.
+ */
+export function classMetrics(c: ClassEvaluation): { label: string; value: string }[] {
+  return [
+    { label: 'AP50', value: metric(c.ap50) },
+    { label: 'AP50-95', value: metric(c.ap50_95) },
+    { label: 'Precision', value: metric(c.precision) },
+    { label: 'Recall', value: metric(c.recall) },
+    { label: 'Instances', value: num(c.instances) },
+  ];
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { matchesClass, trimPrTail } from './pr';
+import { classMetrics, matchesClass, trimPrTail } from './pr';
 
 const pts = (ys: number[]) => ys.map((y, i) => ({ x: i / Math.max(1, ys.length - 1), y }));
 
@@ -38,5 +38,18 @@ describe('prEnvelope', () => {
     const env = prEnvelope(curves, 0.1, 0.9, 3);
     expect(env.lower.map((p) => p.y)).toEqual([0.1, 0.1, 0.1]);
     expect(env.upper.map((p) => p.y)).toEqual([0.9, 0.9, 0.9]);
+  });
+});
+
+describe('classMetrics', () => {
+  it('lists all five metrics of a class in column order, formatted', () => {
+    const c = { class: 3, ap50: 0.8971, ap50_95: 0.678, precision: 0.9174, recall: 0.8449, instances: 2793 };
+    expect(classMetrics(c)).toEqual([
+      { label: 'AP50', value: '0.897' },
+      { label: 'AP50-95', value: '0.678' },
+      { label: 'Precision', value: '0.917' },
+      { label: 'Recall', value: '0.845' },
+      { label: 'Instances', value: '2,793' },
+    ]);
   });
 });
