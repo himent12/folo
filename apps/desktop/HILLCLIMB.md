@@ -375,3 +375,38 @@ Round 11 changes:
   - A bottom fade on the palette.
   - Toasts wait while their buttons have keyboard focus.
   - Reduce motion starts from Windows' animation setting (`SPI_GETCLIENTAREAANIMATION`).
+
+## Round 11
+
+| Line | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | avg |
+|------|---|---|---|---|---|---|---|---|---|----|----|----|-----|
+| Opus 5.5 | 8 | 8 | 8 | 8 | 8 | 7 | 8 | 8 | 8 | 8 | 8 | 8 | 7.9 |
+| GPT-6.1 Sol | 8 | 8 | 9 | 8 | 8 | 8 | 8 | 9 | 8 | 7 | 8 | 8 | 8.1 |
+
+Rounds 5–11 held at 7.8–8.2. Per-issue fixes had reached diminishing returns, so round 12 is a structural redesign
+against `DIRECTION.md`, written by a design-director pass. The review brief now also requires a "To make it a 9:" for
+every line below 9.
+
+Round 12 changes (structural):
+- **Chart anatomy:** value legends instead of the floating readout; a cursor x-chip on the axis; Geist tabular ticks;
+  one annotation band; the best epoch as a lime dot on its series; no "epoch" corner caption.
+- **Run dashboard:**
+  - Five KPIs in one row.
+  - Validation mAP (3) beside Training loss (2) at 220 px, with loss toggles and values on their own row.
+  - Precision / recall beside the learning rate at 140 px.
+  - Rows stack below 1120 px.
+- **Overview and sidebar:**
+  - The sidebar live card becomes a 36 px row with a 2 px rail.
+  - The Overview hero has a 48 px header with a progress rail, a 2×2 KPI column, one mAP chart with a value legend,
+    and a system-meter footer.
+  - Lists are single-line 36 px rows with dot statuses; meta columns appear only at 1500 px and up.
+- **Runs and model detail:**
+  - The Runs table is single-line 36 px rows with Model, Dataset and Size · batch columns (wide only).
+  - Durations read "14m 55s".
+  - Model detail has a double-width 32 px mAP50-95 tile; the per-class table isolates PR curves on hover or focus.
+- **Dataset, Settings and New run:**
+  - Dataset detail puts tabs, split, Fit/Fill, Boxes and size on one line; class chips go on a row with the count.
+  - Settings is one 760 px column.
+  - New run puts each slider and its exact field on one row.
+- **Header meta:** a 12 px line.
+- **Richer demo data:** 5 datasets, 9 runs, 6 models.

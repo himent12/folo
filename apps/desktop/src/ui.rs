@@ -215,6 +215,21 @@ pub fn badge(t: &Theme, label: impl Into<SharedString>, tone: Tone) -> Div {
 }
 
 /// Status chip for a run: a dot (pulsing while running) and the status word.
+/// Status for dense rows: a dot and a word, no tinted pill.
+pub fn status_dot(t: &Theme, s: RunStatus, id: &str) -> Div {
+    let (_, fg, dotc) = status_tone(s).colors(t);
+    div()
+        .flex()
+        .items_center()
+        .gap(px(6.))
+        .child(dot(dotc, 6., s == RunStatus::Running, format!("sd-{id}")))
+        .child(
+            text(ty::XS, if s == RunStatus::Running { t.text_primary } else { fg })
+                .whitespace_nowrap()
+                .child(s.label()),
+        )
+}
+
 pub fn status_badge(t: &Theme, s: RunStatus, id: &str) -> Div {
     let tone = status_tone(s);
     let (_, _, dotc) = tone.colors(t);
@@ -269,7 +284,7 @@ pub fn metric(
     div()
         .flex()
         .items_baseline()
-        .gap(px(3.))
+        .gap(px(2.))
         .whitespace_nowrap()
         .child(text(s, t.text_primary).tnum().child(value.into()))
         .when(!unit.is_empty(), |d| d.child(text(unit_step, t.text_tertiary).tnum().child(unit.to_string())))
@@ -298,12 +313,15 @@ pub fn duration_metric(t: &Theme, secs: Option<f64>, s: TypeStep, unit_step: Typ
     } else {
         vec![((total / 3600).to_string(), "h"), (format!("{:02}", total / 60 % 60), "m")]
     };
-    div()
-        .flex()
-        .items_baseline()
-        .gap(px(6.))
-        .whitespace_nowrap()
-        .children(parts.into_iter().map(|(v, u)| metric(t, v, u, s, unit_step)))
+    // "14m 55s": each unit hugs its number; the pair is one reading.
+    div().flex().items_baseline().gap(px(5.)).whitespace_nowrap().children(parts.into_iter().map(|(v, u)| {
+        div()
+            .flex()
+            .items_baseline()
+            .gap(px(1.))
+            .child(text(s, t.text_primary).tnum().child(v))
+            .child(text(unit_step, t.text_tertiary).child(u))
+    }))
 }
 
 /// A filesystem path as the platform writes it (backslashes on Windows).
@@ -390,41 +408,20 @@ pub fn empty_state(t: &Theme, icon_path: &'static str, title: &str, body: &str, 
         )
 }
 
-/// A series legend: short coloured strokes with names.
-pub fn legend(t: &Theme, items: &[(&str, Hsla)]) -> gpui::AnyElement {
+/// One legend entry with its value: swatch, name, number (tabular).
+pub fn legend_value(t: &Theme, name: &str, color: Hsla, dashed: bool, value: Option<String>) -> Div {
+    let swatch = if dashed {
+        div().w(px(10.)).flex().gap(px(2.)).children((0..3).map(move |_| div().w(px(2.)).h(px(2.)).bg(color)))
+    } else {
+        div().w(px(10.)).h(px(2.)).rounded_full().bg(color)
+    };
     div()
         .flex()
-        .gap(px(12.))
-        .children(items.iter().map(|(name, color)| {
-            div()
-                .flex()
-                .items_center()
-                .gap(px(5.))
-                .child(div().w(px(10.)).h(px(2.)).rounded_full().bg(*color))
-                .child(text(ty::XS, t.text_secondary).whitespace_nowrap().child(name.to_string()))
-        }))
-        .into_any_element()
-}
-
-/// A legend whose items can be dashed (two series sharing a hue).
-pub fn legend_styled(t: &Theme, items: &[(&str, Hsla, bool)]) -> gpui::AnyElement {
-    div()
-        .flex()
-        .gap(px(12.))
-        .children(items.iter().map(|(name, color, dashed)| {
-            let swatch = if *dashed {
-                div().flex().gap(px(2.)).children((0..3).map(|_| div().w(px(2.)).h(px(2.)).bg(*color)))
-            } else {
-                div().w(px(10.)).h(px(2.)).rounded_full().bg(*color)
-            };
-            div()
-                .flex()
-                .items_center()
-                .gap(px(5.))
-                .child(swatch)
-                .child(text(ty::XS, t.text_secondary).whitespace_nowrap().child(name.to_string()))
-        }))
-        .into_any_element()
+        .items_center()
+        .gap(px(5.))
+        .child(swatch)
+        .child(text(ty::XS, t.text_secondary).whitespace_nowrap().child(name.to_string()))
+        .when_some(value, |d, v| d.child(text(ty::XS, t.text_primary).tnum().whitespace_nowrap().child(v)))
 }
 
 /// A class swatch: a small square in the class colour.

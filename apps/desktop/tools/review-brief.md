@@ -34,4 +34,8 @@ Use `REVIEW_RUBRIC.md` (path in your task): 12 lines, 1–10, where **9 means "w
 quality"**. Be calibrated and strict: no 9 unless you would genuinely ship that line unchanged. Return the exact
 output format at the end of the rubric: a score and one-line reason per line, then the **top 10 concrete issues
 ranked by impact** (screenshot + region, problem, specific fix with px / token / copy), then bugs and rendering
-artifacts. Keep it under ~1200 words.
+artifacts.
+
+**For every line you score below 9, add "To make it a 9:"** — the specific, verifiable change(s) that would earn the 9
+(what to change, where, by how much), not a general direction like "tighten spacing". If nothing short of a redesign
+of a screen would do it, say which screen and what the new structure should be. Keep it under ~1500 words.

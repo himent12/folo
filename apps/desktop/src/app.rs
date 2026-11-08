@@ -328,6 +328,8 @@ pub struct FoloApp {
     // Models
     pub export_open: bool,
     pub pr_hover: Option<f32>,
+    /// The class isolated on the PR chart (hovered or focused in the per-class table).
+    pub pr_focus: Option<u32>,
     pub confusion_norm: bool,
 
     // Playground
@@ -448,6 +450,7 @@ impl FoloApp {
             sample_epoch: None,
             export_open: false,
             pr_hover: None,
+            pr_focus: None,
             confusion_norm: true,
             play_model: None,
             play_conf: 0.25,
@@ -1878,22 +1881,24 @@ impl FoloApp {
         let ring = self.ring(&fh, window);
         let map = r.best.as_ref().map_or("–".to_string(), |b| f3(b.map50_95));
         let id2 = id.clone();
+        // A single footer row: the nav badge already says a run is live, so this only names it.
+        let _ = map;
         div()
             .id("live-mini")
             .track_focus(&fh)
             .relative()
             .mx(px(8.))
-            .mb(px(8.))
-            .p(px(12.))
+            .mb(px(6.))
+            .h(px(36.))
+            .px(px(10.))
             .flex()
             .flex_col()
-            .gap(px(10.))
-            .rounded(px(8.))
-            .bg(t.bg_raised)
-            .border_1()
-            .border_color(t.line_subtle)
+            .justify_center()
+            .gap(px(6.))
+            .rounded(px(crate::theme::radius::MD))
             .cursor_pointer()
-            .hover(|s| s.border_color(t.line_default))
+            .hover(|s| s.bg(t.bg_hover))
+            .tooltip(crate::controls::tip(format!("{} · epoch {} / {}", r.name, r.epoch, r.epochs), None))
             .on_click(cx.listener(move |this, _, w, cx| this.navigate(Route::Run(id.clone()), w, cx)))
             .on_key_down(cx.listener(move |this, ev: &gpui::KeyDownEvent, w, cx| {
                 if matches!(ev.keystroke.key.as_str(), "enter" | "space") {
@@ -1901,37 +1906,20 @@ impl FoloApp {
                     cx.stop_propagation();
                 }
             }))
-            .when(ring, |d| d.child(focus_ring(&t, 8.)))
+            .when(ring, |d| d.child(focus_ring(&t, crate::theme::radius::MD)))
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap(px(8.))
                     .child(dot(t.accent_fill(), 6., true, "mini"))
-                    .child(text(ty::XS, t.accent_text).font_weight(FontWeight::MEDIUM).child("Training"))
+                    .child(text(ty::SM, t.text_primary).w(px(140.)).truncate().child(r.name.clone()))
                     .child(div().flex_1())
                     .child(
-                        text(ty::XS, t.text_tertiary).tnum().child(format!("{:.0}%", r.progress() * 100.0)),
+                        text(ty::XS, t.text_secondary).tnum().child(format!("{:.0}%", r.progress() * 100.0)),
                     ),
             )
-            .child(
-                text(ty::BASE, t.text_primary)
-                    .font_weight(FontWeight::MEDIUM)
-                    .truncate()
-                    .child(r.name.clone()),
-            )
-            .child(progress(&t, r.progress(), t.accent_fill(), 3.))
-            .child(
-                div()
-                    .flex()
-                    .justify_between()
-                    .child(
-                        text(ty::XS, t.text_tertiary)
-                            .tnum()
-                            .child(format!("Epoch {} / {}", r.epoch, r.epochs)),
-                    )
-                    .child(text(ty::XS, t.text_secondary).tnum().child(format!("mAP50-95 {map}"))),
-            )
+            .child(progress(&t, r.progress(), t.accent_fill(), 2.))
             .into_any_element()
     }
 

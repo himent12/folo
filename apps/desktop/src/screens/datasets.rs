@@ -544,28 +544,17 @@ impl FoloApp {
         } else {
             format!("{} of {} images match", int(count as u64), int(total as u64))
         };
-        // Narrow windows give the class chips their own row; wide ones keep a single toolbar line.
-        let stack_chips = window.viewport_size().width < px(1100.);
-        let mut chip_row = Some(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(6.))
-                .flex_1()
-                .min_w_0()
-                .flex_wrap()
-                .child(text(ty::XS, t.text_tertiary).child("Boxes"))
-                .children(chips),
-        );
+        // The split filter joins the view controls on the tab line; the class chips get one row
+        // below it, with the result count at its end.
         let toolbar = div()
+            .min_h(px(32.))
+            .flex_wrap()
+            .mb(px(12.))
             .flex()
             .items_center()
-            .gap(px(12.))
-            .pb(px(if stack_chips { 0. } else { 12. }))
-            .child(seg)
-            .when(!stack_chips, |d| {
-                d.child(div().w(px(1.)).h(px(20.)).bg(t.line_subtle)).children(chip_row.take())
-            })
+            .gap(px(6.))
+            .child(text(ty::XS, t.text_tertiary).mr(px(2.)).child("Classes"))
+            .children(chips)
             .when(self.ds_empty_only, |d| {
                 d.child(self.chip(
                     "ds-empty-chip",
@@ -581,19 +570,14 @@ impl FoloApp {
                     }),
                 ))
             })
-            .when(stack_chips, |d| d.child(div().flex_1()))
+            .child(div().flex_1())
             .child(text(ty::SM, t.text_tertiary).tnum().whitespace_nowrap().child(count_label));
-        let toolbar = div()
-            .flex()
-            .flex_col()
-            .gap(px(8.))
-            .pb(px(if stack_chips { 12. } else { 0. }))
-            .child(toolbar)
-            .when(stack_chips, |d| d.children(chip_row.take()));
         let view_controls = div()
             .flex()
             .items_center()
             .gap(px(16.))
+            .child(seg)
+            .child(div().w(px(1.)).h(px(20.)).bg(t.line_subtle))
             .child(fit_seg)
             .child(
                 div()

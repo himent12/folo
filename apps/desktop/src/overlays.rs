@@ -683,14 +683,22 @@ impl FoloApp {
                 .flex()
                 .flex_col()
                 .gap(px(8.))
-                .child(div().flex().justify_between().items_center().child(label(name)).child(field))
-                .child(control)
+                .child(label(name))
+                // Slider and exact value on one row.
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(12.))
+                        .child(div().flex_1().min_w_0().child(control))
+                        .child(field),
+                )
                 .when_some(bad, |d, msg| d.child(text(ty::XS, t.danger_text).child(msg.to_string())))
         };
         let body = div()
             .flex()
             .flex_col()
-            .gap(px(18.))
+            .gap(px(14.))
             .px(px(20.))
             .pb(px(20.))
             .child(

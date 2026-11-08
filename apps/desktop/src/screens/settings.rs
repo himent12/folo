@@ -260,35 +260,17 @@ impl FoloApp {
                     ),
             ),
         );
-        let wide = f32::from(window.viewport_size().width) >= 1400.;
-        let body = if wide {
-            div()
-                .flex()
-                .items_start()
-                .gap(px(16.))
-                .w_full()
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .gap(px(16.))
-                        .child(connection)
-                        .child(appearance),
-                )
-                .child(div().w(px(440.)).flex_none().flex().flex_col().gap(px(16.)).child(keys).child(about))
-        } else {
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(16.))
-                .w_full()
-                .child(connection)
-                .child(appearance)
-                .child(keys)
-                .child(about)
-        };
+        // A readable column, left-aligned: labels stay near their controls at any window width.
+        let body = div()
+            .flex()
+            .flex_col()
+            .gap(px(16.))
+            .w_full()
+            .max_w(px(760.))
+            .child(connection)
+            .child(appearance)
+            .child(keys)
+            .child(about);
         self.page_frame(&t, header, body, cx)
     }
 }
