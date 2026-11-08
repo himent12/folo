@@ -127,7 +127,7 @@
                 <span class="m-meta num truncate">{d.format} · {num(d.splits.train)} / {num(d.splits.val)} / {num(d.splits.test)} · {d.classes.length} classes</span>
               </span>
               <span class="m-side">
-                <span class="num">{compact(imageCount(d))}<span class="faint"> img</span></span>
+                <span class="num">{compact(imageCount(d))}<span class="faint">&nbsp;img</span></span>
                 {#if d.stats}<span class="m-strip"><ClassStrip counts={d.stats.class_counts} classes={d.classes} height={4} /></span>{/if}
               </span>
             </a>

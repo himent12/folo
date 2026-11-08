@@ -68,7 +68,7 @@
     <div class="kpi">
       <span class="k-label">Images</span>
       <span class="k-value num">{num(images)}</span>
-      <span class="k-sub num">{num(dataset.splits.train)} / {num(dataset.splits.val)} / {num(dataset.splits.test)} train / val / test</span>
+      <span class="k-sub num" title="train / val / test">{num(dataset.splits.train)} / {num(dataset.splits.val)} / {num(dataset.splits.test)}<span class="hide-sm"> train / val / test</span></span>
     </div>
     <div class="kpi">
       <span class="k-label">Boxes</span>
@@ -328,7 +328,11 @@
       flex-wrap: wrap;
     }
     .haction {
+      flex-basis: 100%;
       margin-left: 28px;
+    }
+    .hide-sm {
+      display: none;
     }
     .bars button {
       grid-template-columns: 10px minmax(56px, 88px) minmax(0, 1fr) 48px 44px;

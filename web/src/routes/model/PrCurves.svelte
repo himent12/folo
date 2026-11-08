@@ -64,7 +64,7 @@
     {#if selected.length}
       <button type="button" class="clear" onclick={() => (selected = [])}>Clear</button>
     {:else if hovered === null}
-      <span class="hint">Point at a class below to trace its curve</span>
+      <span class="hint">Pick a class below to trace its curve</span>
     {/if}
   </div>
   <div class="plot">
