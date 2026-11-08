@@ -29,7 +29,7 @@ export const chart = {
   "dark": {
     "series": [
       "#5CC8FF",
-      "#FFB547",
+      "#F2C14E",
       "#E879F9",
       "#2DD4BF",
       "#A78BFA",
@@ -43,9 +43,9 @@ export const chart = {
   "light": {
     "series": [
       "#0A8FD6",
-      "#C27A00",
+      "#AD6C00",
       "#C026D3",
-      "#0F9F8C",
+      "#0B8A7B",
       "#7C5CE6",
       "#D9620B"
     ],
