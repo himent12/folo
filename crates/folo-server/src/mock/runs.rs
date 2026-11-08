@@ -31,7 +31,7 @@ pub fn arch_spec(arch: Arch) -> (u64, f64, f32, f64) {
 }
 
 /// Rounds to 4 decimals (keeps the JSON short; metrics are not more precise than that anyway).
-fn r4(v: f32) -> f32 {
+pub(super) fn r4(v: f32) -> f32 {
     (v * 10_000.0).round() / 10_000.0
 }
 
@@ -222,6 +222,8 @@ pub struct Snap {
     pub eta_s: Option<f64>,
     /// Incremented each time a looping run restarts.
     pub cycle: u64,
+    /// Unix seconds of the stop request, if one was made in this cycle.
+    pub stop_requested: Option<f64>,
 }
 
 /// Wall-clock driven timeline of a live run.
@@ -270,6 +272,7 @@ impl LiveClock {
                 finished: None,
                 eta_s: None,
                 cycle: self.cycle,
+                stop_requested: self.stop_at.map(|sa| self.origin_wall + sa),
             };
             let started = (t >= self.queue_s).then_some(self.origin_wall + self.queue_s);
             if let Some(sa) = self.stop_at {
@@ -393,6 +396,7 @@ impl SimRun {
                     finished: Some(finished),
                     eta_s: None,
                     cycle: 0,
+                    stop_requested: None,
                 }
             }
             Timeline::Live(clock) => clock.lock().unwrap().snap(&self.curve, Instant::now()),
@@ -538,8 +542,96 @@ impl SimRun {
         self.hub.lock().unwrap().ticking
     }
 
-    fn log(&self, level: LogLevel, message: String) -> RunEvent {
+    fn log(&self, (level, message): (LogLevel, String)) -> RunEvent {
         RunEvent::Log(LogLine { t: rfc3339(unix_now()), level, message })
+    }
+
+    fn msg_start(&self) -> (LogLevel, String) {
+        let c = &self.config;
+        let message = format!(
+            "training {} on {}: {} epochs, batch {}, imgsz {}, {} steps/epoch",
+            c.arch.as_str(),
+            self.device,
+            c.epochs,
+            c.batch,
+            c.imgsz,
+            self.spe
+        );
+        (LogLevel::Info, message)
+    }
+
+    fn msg_stopping() -> (LogLevel, String) {
+        (LogLevel::Warn, "stop requested; finishing the current step".into())
+    }
+
+    fn msg_epoch(&self, ep: &Epoch) -> Vec<(LogLevel, String)> {
+        let e = ep.epoch;
+        let l = &ep.train_loss;
+        let mut out = vec![(
+            LogLevel::Info,
+            format!(
+                "epoch {e}/{}  box {:.3}  cls {:.3}  dfl {:.3}  mAP50 {:.3}  mAP50-95 {:.3}",
+                self.config.epochs, l.box_, l.cls, l.dfl, ep.val.map50, ep.val.map50_95
+            ),
+        )];
+        if self.curve.best(e).is_some_and(|b| b.epoch == e) {
+            out.push((LogLevel::Debug, format!("saved best.folo (mAP50-95 {:.3})", ep.val.map50_95)));
+        }
+        if e > 0 && e == self.config.epochs.saturating_sub(self.config.augment.close_mosaic) {
+            out.push((LogLevel::Info, "closing mosaic augmentation for the final epochs".into()));
+        }
+        out
+    }
+
+    fn msg_end(&self, snap: &Snap) -> Option<(LogLevel, String)> {
+        match snap.status {
+            RunStatus::Completed => {
+                let best = self.curve.best(self.epochs_done(snap));
+                let message = format!(
+                    "training complete: best epoch {} (mAP50-95 {:.3})",
+                    best.map_or(0, |b| b.epoch),
+                    best.map_or(0.0, |b| b.map50_95)
+                );
+                Some((LogLevel::Info, message))
+            }
+            RunStatus::Stopped => {
+                Some((LogLevel::Info, format!("stopped at step {}; last checkpoint kept", snap.step)))
+            }
+            RunStatus::Failed => Some((
+                LogLevel::Error,
+                format!(
+                    "training failed at step {}: {}",
+                    snap.step,
+                    self.error(snap.status).unwrap_or_default()
+                ),
+            )),
+            _ => None,
+        }
+    }
+
+    /// Log history of the current cycle, oldest first: the same lines the event stream sends, stamped with the
+    /// simulated times they happened at.
+    pub fn logs(&self) -> Vec<LogLine> {
+        let snap = self.snap();
+        let Some(started) = snap.started else { return Vec::new() };
+        let per_epoch = match &self.timeline {
+            Timeline::Static { .. } => self.curve.real_epoch_s(),
+            Timeline::Live(c) => c.lock().unwrap().epoch_s,
+        };
+        let line = |t: f64, (level, message): (LogLevel, String)| LogLine { t: rfc3339(t), level, message };
+        let mut out = vec![line(started, self.msg_start())];
+        for e in 1..=self.epochs_done(&snap) {
+            let t = started + e as f64 * per_epoch;
+            let ep = self.curve.epoch(e, self.epoch_duration(e));
+            out.extend(self.msg_epoch(&ep).into_iter().map(|m| line(t, m)));
+        }
+        if let Some(t) = snap.stop_requested {
+            out.push(line(t, Self::msg_stopping()));
+        }
+        if let (Some(m), Some(t)) = (self.msg_end(&snap), snap.finished) {
+            out.push(line(t, m));
+        }
+        out
     }
 
     /// Events describing the change from `prev` to `now`.
@@ -549,7 +641,9 @@ impl SimRun {
             |s: &Snap| RunEvent::Status(StatusEvent { status: s.status, error: self.error(s.status) });
         let mut prev = *prev;
         if now.cycle != prev.cycle {
-            out.push(self.log(LogLevel::Info, "mock run finished its loop; restarting from epoch 1".into()));
+            out.push(
+                self.log((LogLevel::Info, "mock run finished its loop; restarting from epoch 1".into())),
+            );
             prev = Snap { status: RunStatus::Queued, step: 0, ..*now };
             out.push(status(&prev));
         }
@@ -558,21 +652,8 @@ impl SimRun {
         if entering {
             out.push(status(now));
             match now.status {
-                RunStatus::Running => out.push(self.log(
-                    LogLevel::Info,
-                    format!(
-                        "training {} on {}: {} epochs, batch {}, imgsz {}, {} steps/epoch",
-                        self.config.arch.as_str(),
-                        self.device,
-                        self.config.epochs,
-                        self.config.batch,
-                        self.config.imgsz,
-                        self.spe
-                    ),
-                )),
-                RunStatus::Stopping => {
-                    out.push(self.log(LogLevel::Warn, "stop requested; finishing the current step".into()))
-                }
+                RunStatus::Running => out.push(self.log(self.msg_start())),
+                RunStatus::Stopping => out.push(self.log(Self::msg_stopping())),
                 _ => {}
             }
         }
@@ -582,44 +663,11 @@ impl SimRun {
         let (done_prev, done_now) = (self.epochs_done(&prev), self.epochs_done(now));
         for e in done_prev + 1..=done_now {
             let ep = self.curve.epoch(e, self.epoch_duration(e));
-            out.push(self.log(
-                LogLevel::Info,
-                format!(
-                    "epoch {e}/{}  box {:.3}  cls {:.3}  dfl {:.3}  mAP50 {:.3}  mAP50-95 {:.3}",
-                    self.config.epochs,
-                    ep.train_loss.box_,
-                    ep.train_loss.cls,
-                    ep.train_loss.dfl,
-                    ep.val.map50,
-                    ep.val.map50_95
-                ),
-            ));
-            if self.curve.best(e).is_some_and(|b| b.epoch == e) {
-                out.push(
-                    self.log(LogLevel::Debug, format!("saved best.folo (mAP50-95 {:.3})", ep.val.map50_95)),
-                );
-            }
-            if e == self.config.epochs.saturating_sub(self.config.augment.close_mosaic) && e > 0 {
-                out.push(self.log(LogLevel::Info, "closing mosaic augmentation for the final epochs".into()));
-            }
+            out.extend(self.msg_epoch(&ep).into_iter().map(|m| self.log(m)));
             out.push(RunEvent::Epoch(ep));
         }
         if now.status != prev.status && !entering {
-            if now.status == RunStatus::Completed {
-                let best = self.curve.best(done_now);
-                out.push(self.log(
-                    LogLevel::Info,
-                    format!(
-                        "training complete: best epoch {} (mAP50-95 {:.3})",
-                        best.map_or(0, |b| b.epoch),
-                        best.map_or(0.0, |b| b.map50_95)
-                    ),
-                ));
-            } else {
-                out.push(
-                    self.log(LogLevel::Info, format!("stopped at step {}; last checkpoint kept", now.step)),
-                );
-            }
+            out.extend(self.msg_end(now).map(|m| self.log(m)));
             out.push(status(now));
         }
         out

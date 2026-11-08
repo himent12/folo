@@ -12,7 +12,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use folo_api::{
     API_VERSION, DatasetList, ExportRequest, Health, ImagePage, LogLevel, LogLine, ModelList, PredictRequest,
-    RegisterDataset, RunEvent, RunList, Split, SyntheticDataset, SystemInfo, TrainConfig,
+    RegisterDataset, RunEvent, RunList, RunLogs, Split, SyntheticDataset, SystemInfo, TrainConfig,
 };
 use futures_util::{Stream, StreamExt, stream};
 use serde::Deserialize;
@@ -45,12 +45,14 @@ pub fn api() -> Router<AppState> {
         .route("/datasets/{id}/images/{image_id}", get(image))
         .route("/models", get(list_models))
         .route("/models/{id}", get(get_model))
+        .route("/models/{id}/eval", get(model_eval))
         .route("/models/{id}/export", post(export_model))
         .route("/runs", get(list_runs).post(create_run))
         .route("/runs/{id}", get(get_run).delete(delete_run))
         .route("/runs/{id}/stop", post(stop_run))
         .route("/runs/{id}/metrics", get(run_metrics))
         .route("/runs/{id}/samples", get(run_samples))
+        .route("/runs/{id}/logs", get(run_logs))
         .route("/runs/{id}/events", get(run_events))
         .route("/predict", post(predict).layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)))
         .route("/predict/stream", get(predict_stream))
@@ -193,6 +195,10 @@ async fn get_model(State(st): State<AppState>, ApiPath(id): ApiPath<String>) -> 
     Ok(Json(st.store.get_model(&id)?).into_response())
 }
 
+async fn model_eval(State(st): State<AppState>, ApiPath(id): ApiPath<String>) -> Result<Response> {
+    Ok(Json(blocking(&st, move |s| s.model_eval(&id)).await?).into_response())
+}
+
 async fn export_model(
     State(st): State<AppState>,
     ApiPath(id): ApiPath<String>,
@@ -250,6 +256,25 @@ async fn run_samples(
     ApiQuery(p): ApiQuery<SamplesParams>,
 ) -> Result<Response> {
     Ok(Json(blocking(&st, move |s| s.run_samples(&id, p.epoch)).await?).into_response())
+}
+
+/// Default number of lines of `GET /api/runs/{id}/logs`.
+pub const DEFAULT_LOG_LINES: usize = 500;
+/// Maximum number of lines of `GET /api/runs/{id}/logs`.
+pub const MAX_LOG_LINES: usize = 5000;
+
+#[derive(Deserialize)]
+struct LogsParams {
+    limit: Option<usize>,
+}
+
+async fn run_logs(
+    State(st): State<AppState>,
+    ApiPath(id): ApiPath<String>,
+    ApiQuery(p): ApiQuery<LogsParams>,
+) -> Result<Json<RunLogs>> {
+    let limit = p.limit.unwrap_or(DEFAULT_LOG_LINES).clamp(1, MAX_LOG_LINES);
+    Ok(Json(RunLogs { lines: blocking(&st, move |s| s.run_logs(&id, limit)).await? }))
 }
 
 fn sse_event(ev: &RunEvent) -> Event {

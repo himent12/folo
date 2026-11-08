@@ -6,8 +6,9 @@
 //! blocking pool.
 
 use folo_api::{
-    Dataset, ExportFormat, ExportResult, GpuInfo, Model, PredictResponse, RegisterDataset, Run, RunEvent,
-    RunMetrics, RunSamples, Split, StatusEvent, SyntheticDataset, TrainConfig,
+    Dataset, ExportFormat, ExportResult, GpuInfo, LogLine, Model, ModelEval, PredictResponse,
+    RegisterDataset, Run, RunEvent, RunMetrics, RunSamples, Split, StatusEvent, SyntheticDataset,
+    TrainConfig,
 };
 use tokio::sync::broadcast;
 
@@ -100,6 +101,8 @@ pub trait Store: Send + Sync + 'static {
     fn list_models(&self) -> Result<Vec<Model>>;
     /// One model.
     fn get_model(&self, id: &str) -> Result<Model>;
+    /// Validation results of a model.
+    fn model_eval(&self, id: &str) -> Result<ModelEval>;
     /// Exports a model.
     fn export_model(&self, id: &str, format: ExportFormat) -> Result<ExportResult>;
 
@@ -117,6 +120,8 @@ pub trait Store: Send + Sync + 'static {
     fn run_metrics(&self, id: &str, every: u64) -> Result<RunMetrics>;
     /// Validation samples of an epoch (latest finished epoch when `None`).
     fn run_samples(&self, id: &str, epoch: Option<u32>) -> Result<RunSamples>;
+    /// The last `limit` log lines of a run, oldest first.
+    fn run_logs(&self, id: &str, limit: usize) -> Result<Vec<LogLine>>;
     /// Subscribes to a run's live events. Must be called inside a tokio runtime.
     fn subscribe(&self, id: &str) -> Result<Subscription>;
 

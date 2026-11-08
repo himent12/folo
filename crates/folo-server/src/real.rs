@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 use folo_api::{
-    Dataset, DatasetFormat, ExportFormat, ExportResult, GpuInfo, ImagePage, Model, PredictResponse,
-    RegisterDataset, Run, RunMetrics, RunSamples, SyntheticDataset, TrainConfig,
+    Dataset, DatasetFormat, ExportFormat, ExportResult, GpuInfo, ImagePage, LogLine, Model, ModelEval,
+    PredictResponse, RegisterDataset, Run, RunMetrics, RunSamples, SyntheticDataset, TrainConfig,
 };
 use serde::{Deserialize, Serialize};
 
@@ -164,6 +164,10 @@ impl Store for RealStore {
         Err(Error::not_found("model", id))
     }
 
+    fn model_eval(&self, id: &str) -> Result<ModelEval> {
+        Err(Error::not_found("model", id))
+    }
+
     fn export_model(&self, id: &str, _format: ExportFormat) -> Result<ExportResult> {
         Err(Error::not_found("model", id))
     }
@@ -194,6 +198,10 @@ impl Store for RealStore {
     }
 
     fn run_samples(&self, id: &str, _epoch: Option<u32>) -> Result<RunSamples> {
+        Err(Error::not_found("run", id))
+    }
+
+    fn run_logs(&self, id: &str, _limit: usize) -> Result<Vec<LogLine>> {
         Err(Error::not_found("run", id))
     }
 

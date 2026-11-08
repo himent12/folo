@@ -71,32 +71,71 @@ pub struct DataYaml {
     pub nc: Option<usize>,
 }
 
+/// A YAML scalar: trimmed, with one pair of surrounding quotes removed and their escapes resolved (`\"` and `\\`
+/// in double quotes, `''` in single quotes).
 fn unquote(s: &str) -> String {
-    s.trim().trim_matches(|c| c == '"' || c == '\'').to_string()
+    let s = s.trim();
+    if s.len() >= 2 && s.starts_with('"') && s.ends_with('"') {
+        s[1..s.len() - 1].replace("\\\\", "\u{0}").replace("\\\"", "\"").replace('\u{0}', "\\")
+    } else if s.len() >= 2 && s.starts_with('\'') && s.ends_with('\'') {
+        s[1..s.len() - 1].replace("''", "'")
+    } else {
+        s.to_string()
+    }
 }
 
-/// Removes a YAML comment: a `#` at the start of the line or after whitespace, outside quotes.
+/// Removes a YAML comment: a `#` at the start of the line or after whitespace, outside quoted scalars. A quote only
+/// opens a scalar at a token boundary (line start, or after `:`, `-`, `[`, `{`, `,` and whitespace), so the
+/// apostrophe in `person's` is plain text; `\"` inside double quotes does not close them.
 fn strip_comment(line: &str) -> &str {
-    let mut quote = None;
-    let mut prev_ws = true;
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    let mut prev: Option<char> = None;
+    let mut boundary = true;
     for (i, c) in line.char_indices() {
-        match (quote, c) {
-            (None, '"' | '\'') => quote = Some(c),
-            (Some(q), _) if c == q => quote = None,
-            (None, '#') if prev_ws => return &line[..i],
-            _ => {}
+        if let Some(q) = quote {
+            if escaped {
+                escaped = false;
+            } else if q == '"' && c == '\\' {
+                escaped = true;
+            } else if c == q {
+                quote = None;
+            }
+        } else {
+            match c {
+                '#' if prev.is_none_or(char::is_whitespace) => return &line[..i],
+                '"' | '\'' if boundary => quote = Some(c),
+                _ => {}
+            }
+            boundary = match c {
+                ':' | '-' | '[' | '{' | ',' => true,
+                c if c.is_whitespace() => boundary,
+                _ => false,
+            };
         }
-        prev_ws = c.is_whitespace();
+        prev = Some(c);
     }
     line
 }
 
+/// `{0: a, 1: b}` → index / name pairs.
+fn flow_map(body: &str) -> Vec<(Option<usize>, String)> {
+    body.split(',')
+        .filter(|kv| !kv.trim().is_empty())
+        .map(|kv| match kv.split_once(':') {
+            Some((k, v)) => (k.trim().parse().ok(), unquote(v)),
+            None => (None, unquote(kv)),
+        })
+        .collect()
+}
+
 /// Parses the subset of YAML that YOLO `data.yaml` files use: top-level `key: value` pairs, `names` as a flow list
-/// (`[a, b]`), a block list (`- a`) or an index map (`0: a`).
-pub fn parse_data_yaml(text: &str) -> DataYaml {
+/// (`[a, b]`), a block list (`- a`), or an index map (`0: a` lines or `{0: a, 1: b}`). Index maps must use each
+/// index `0..n` exactly once; anything else is an error (it would silently shift class names).
+pub fn parse_data_yaml(text: &str) -> Result<DataYaml, String> {
     let mut y = DataYaml::default();
     let mut in_names = false;
-    let mut indexed: Vec<(usize, String)> = Vec::new();
+    let mut indexed: Vec<(Option<usize>, String)> = Vec::new();
     for raw in text.lines() {
         let line = strip_comment(raw).trim_end();
         let trimmed = line.trim_start();
@@ -107,10 +146,8 @@ pub fn parse_data_yaml(text: &str) -> DataYaml {
         if in_names && (indented || trimmed.starts_with("- ")) {
             if let Some(item) = trimmed.strip_prefix("- ") {
                 y.names.push(unquote(item));
-            } else if let Some((k, v)) = trimmed.split_once(':')
-                && let Ok(i) = k.trim().parse::<usize>()
-            {
-                indexed.push((i, unquote(v)));
+            } else if let Some((k, v)) = trimmed.split_once(':') {
+                indexed.push((k.trim().parse().ok(), unquote(v)));
             }
             continue;
         }
@@ -127,6 +164,8 @@ pub fn parse_data_yaml(text: &str) -> DataYaml {
                 if let Some(list) = value.strip_prefix('[') {
                     let list = list.split(']').next().unwrap_or("");
                     y.names = list.split(',').map(unquote).filter(|s| !s.is_empty()).collect();
+                } else if let Some(map) = value.strip_prefix('{') {
+                    indexed = flow_map(map.split('}').next().unwrap_or(""));
                 } else if value.is_empty() {
                     in_names = true;
                 }
@@ -135,10 +174,19 @@ pub fn parse_data_yaml(text: &str) -> DataYaml {
         }
     }
     if y.names.is_empty() && !indexed.is_empty() {
-        indexed.sort_by_key(|p| p.0);
-        y.names = indexed.into_iter().map(|p| p.1).collect();
+        let mut slots: Vec<Option<String>> = vec![None; indexed.len()];
+        for (k, name) in indexed {
+            let i = k.ok_or_else(|| "names: map keys must be class indices".to_string())?;
+            let slot = slots
+                .get_mut(i)
+                .ok_or_else(|| format!("names: index {i} leaves a gap (indices must be 0..n, each once)"))?;
+            if slot.replace(name).is_some() {
+                return Err(format!("names: index {i} appears twice"));
+            }
+        }
+        y.names = slots.into_iter().map(|s| s.expect("n keys in 0..n, no duplicates: all filled")).collect();
     }
-    y
+    Ok(y)
 }
 
 fn is_image(p: &Path) -> bool {
@@ -189,6 +237,8 @@ pub fn parse_labels(text: &str, nc: usize) -> (Vec<YoloBox>, u64) {
         let mut it = line.split_whitespace();
         let class = it.next().and_then(|c| c.parse::<u32>().ok());
         let vals: Option<Vec<f32>> = it.map(|v| v.parse::<f32>().ok()).collect();
+        // Non-finite values are broken before any min / max (which would silently drop a NaN).
+        let vals = vals.filter(|v| v.iter().all(|x| x.is_finite()));
         let (Some(class), Some(vals)) = (class, vals) else {
             broken += 1;
             continue;
@@ -290,7 +340,10 @@ impl DiskDataset {
         }
         let yaml = match &yaml_path {
             Some(p) => {
-                parse_data_yaml(&std::fs::read_to_string(p).map_err(|e| Error::internal(e.to_string()))?)
+                let text = std::fs::read_to_string(p).map_err(|e| Error::internal(e.to_string()))?;
+                parse_data_yaml(&text).map_err(|e| {
+                    Error::new(StatusCode::BAD_REQUEST, "invalid_dataset", format!("{}: {e}", p.display()))
+                })?
             }
             None => DataYaml::default(),
         };
@@ -472,22 +525,30 @@ mod tests {
 
     #[test]
     fn yaml_forms() {
-        let y =
-            parse_data_yaml("path: ../d\ntrain: images/train\nval: images/val\ntest:\nnames: ['a', \"b\"]\n");
+        let p = |t: &str| parse_data_yaml(t).unwrap();
+        let y = p("path: ../d\ntrain: images/train\nval: images/val\ntest:\nnames: ['a', \"b\"]\n");
         assert_eq!(y.path.as_deref(), Some("../d"));
         assert_eq!(y.splits.len(), 2);
         assert_eq!(y.names, vec!["a", "b"]);
-        let y = parse_data_yaml("names:\n  0: person\n  1: car # comment\nnc: 2\n");
+        let y = p("names:\n  0: person\n  1: car # comment\nnc: 2\n");
         assert_eq!(y.names, vec!["person", "car"]);
         assert_eq!(y.nc, Some(2));
-        let y = parse_data_yaml("nc: 5000 # classes\nnames: # the classes\n  0: a#1 # first\n  1: 'b # c'\n");
+        let y = p("nc: 5000 # classes\nnames: # the classes\n  0: a#1 # first\n  1: 'b # c'\n");
         assert_eq!(y.nc, Some(5000));
         assert_eq!(y.names, vec!["a#1", "b # c"]);
-        let y = parse_data_yaml("# header\nnames: ['x', \"y#z\"] # trailing\n");
+        let y = p("# header\nnames: ['x', \"y#z\"] # trailing\n");
         assert_eq!(y.names, vec!["x", "y#z"]);
-        let y = parse_data_yaml("names:\n- body\n- Head\ntrain: x\n");
+        let y = p("names:\n- body\n- Head\ntrain: x\n");
         assert_eq!(y.names, vec!["body", "Head"]);
         assert_eq!(y.splits, vec![(Split::Train, "x".to_string())]);
+        // Apostrophes inside plain scalars, escapes inside quoted ones.
+        let y = p("names:\n  0: person's # comment\n  1: \"a \\\" # b\"\n  2: 'it''s'\n");
+        assert_eq!(y.names, vec!["person's", "a \" # b", "it's"]);
+        // Flow index maps; gaps and duplicates are errors, never shifted names.
+        assert_eq!(p("names: {0: cat, 1: dog}\n").names, vec!["cat", "dog"]);
+        assert!(parse_data_yaml("names: {0: cat, 2: dog}\n").unwrap_err().contains("gap"));
+        assert!(parse_data_yaml("names:\n  0: cat\n  2: dog\n").unwrap_err().contains("gap"));
+        assert!(parse_data_yaml("names:\n  0: cat\n  0: dog\n").unwrap_err().contains("twice"));
     }
 
     #[test]
@@ -505,6 +566,10 @@ mod tests {
             "0 0.5 -0.005 0.2 0.002",
             "0 0.5 1.005 0.2 0.002",
         ] {
+            assert_eq!(parse_labels(line, 1), (vec![], 1), "{line}");
+        }
+        // NaN / inf anywhere (boxes or polygons) is broken.
+        for line in ["0 NaN 0.2 0.4 0.4 0.6 0.6", "0 0.5 0.5 inf 0.1", "0 0.2 0.2 0.4 0.4 0.6 NaN"] {
             assert_eq!(parse_labels(line, 1), (vec![], 1), "{line}");
         }
         assert_eq!(parse_labels("0 0.995 0.5 0.02 0.2", 1).0.len(), 1);

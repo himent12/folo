@@ -87,6 +87,19 @@ Non-2xx responses: `{ "error": { "code": "dataset_not_found", "message": "...", 
 ## Models
 - `GET /api/models` → `{ "models": [Model] }` (newest first; `.folo` files under the models directory and run outputs)
 - `GET /api/models/{id}` → `Model`
+- `GET /api/models/{id}/eval` → validation results of the model on its dataset's `val` split (`train` when there is
+  none), for the PR curves and confusion matrix of the Models view:
+  ```jsonc
+  { "pr": [{ "class": 0, "recall": [0.0, 0.01, ..., 1.0], "precision": [1.0, ..., 0.0], "ap50": 0.91 }],
+    "confusion": [[412, 3, 1, 21], [2, 398, 4, 30], [0, 6, 405, 25], [9, 14, 7, 0]],
+    "per_class": [ClassMetrics],   // as in Epoch.val.per_class; map50 equals pr[class].ap50
+    "images": 200 }
+  ```
+  `pr` has one curve per class, in class order, sampled at 101 recall points (`0.00` to `1.00`, IoU 0.5).
+  `precision` is the COCO-interpolated envelope (it never rises with recall), and `ap50` is its mean.
+  `confusion` is `(classes + 1) × (classes + 1)`: rows are the true class, columns the predicted class, and the
+  last row and column are background. `confusion[c][n]` counts missed objects of class `c`, `confusion[n][c]`
+  counts false positives predicted as `c`, and `confusion[n][n]` is always 0.
 - `POST /api/models/{id}/export` body `{ "format": "folo-f16|onnx" }` → `{ "path", "bytes" }`
 
 ```jsonc
@@ -111,13 +124,17 @@ Non-2xx responses: `{ "error": { "code": "dataset_not_found", "message": "...", 
   "truth": [Box], "pred": [ScoredBox] }] }` (validation predictions at `conf >= 0.25` on a fixed set of 16 images;
   `epoch` defaults to the latest finished epoch; `404 epoch_not_available` before the first validation or for a
   future epoch)
+- `GET /api/runs/{id}/logs?limit=500` → `{ "lines": [{ "t", "level": "debug|info|warn|error", "message" }] }`:
+  the run's log history, most recent `limit` lines (default 500, clamped to 1..5000), oldest first. The lines are
+  the same as the SSE `log` events, so a dashboard opened mid-run loads this and then appends live events. The
+  shape is stable (the MCP proxy uses it, docs/MCP.md).
 - `GET /api/runs/{id}/events` → SSE stream. Each SSE `event:` name is the payload type, `data:` is its JSON:
   - `status` `{ "status": "queued|running|stopping|stopped|completed|failed", "error": null | "..." }`
   - `step` `Step` (at most ~10 per second; steps in between are skipped, `/metrics` has them all)
   - `epoch` `Epoch` (after each validation)
   - `log` `{ "t", "level": "debug|info|warn|error", "message" }`
 
-  The stream starts with a `status` event and replays nothing else (use `/metrics` for history). A `: keep-alive`
+  The stream starts with a `status` event and replays nothing else (use `/metrics` and `/logs` for history). A `: keep-alive`
   comment is sent every 15 s. The stream stays open after the run finishes (so `EventSource` does not reconnect in a
   loop) and ends when the run is deleted or the server shuts down. Any number of clients may subscribe. A client too
   slow to keep up gets a `warn` `log` event saying how many events it missed. Clients must ignore unknown event
@@ -178,7 +195,8 @@ start, except live-run timestamps):
 - Datasets: `ds_5a1e` **shapes-1k** (circle / square / triangle, 640², 800 / 200), `ds_7c2f` **traffic-cams** (car /
   truck / bus / person / bicycle, 1280×720, 1900 / 400 / 100, 3 broken labels), `ds_3b9d` **r6-operators** (body /
   Head, 1920×1080, 700 / 160). Images are rendered procedurally on request; their boxes match the labels exactly.
-- Models: six (`m_31aa`, `m_31ab`, `m_42c1`, `m_42c2`, `m_53d1`, `m_53d2`), each linked to its run.
+- Models: six (`m_31aa`, `m_31ab`, `m_42c1`, `m_42c2`, `m_53d1`, `m_53d2`), each linked to its run, with
+  deterministic `/eval` results consistent with its metrics (smooth PR curves, a mostly diagonal confusion matrix).
 - Runs: four completed, one stopped (`run_2b02`), one failed with an out-of-memory error (`run_2b03`), all with full
   metric histories; and one live run (`run_3c02`, r6-operators / folo-s) whose SSE stream advances in real time: a
   100-epoch run compressed into ~10 minutes (6 s per epoch, ~7 steps per second), starting around epoch 12, then it

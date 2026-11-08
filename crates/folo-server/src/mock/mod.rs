@@ -12,9 +12,9 @@ use std::sync::{Arc, RwLock};
 
 use axum::http::StatusCode;
 use folo_api::{
-    Arch, BBox, Dataset, DatasetFormat, ExportFormat, ExportResult, GpuBackend, GpuInfo, ImageInfo,
-    ImagePage, Model, ModelMetrics, PredictResponse, RegisterDataset, Run, RunSamples, Sample, ScoredBox,
-    Split, Splits, SyntheticDataset, TrainConfig,
+    Arch, BBox, ClassMetrics, Dataset, DatasetFormat, ExportFormat, ExportResult, GpuBackend, GpuInfo,
+    ImageInfo, ImagePage, LogLine, Model, ModelEval, ModelMetrics, PrCurve, PredictResponse, RegisterDataset,
+    Run, RunSamples, Sample, ScoredBox, Split, Splits, SyntheticDataset, TrainConfig,
 };
 
 use crate::disk::DiskDataset;
@@ -267,6 +267,106 @@ fn fake_detections(
 
 struct StaticModel {
     model: Model,
+    basis: EvalBasis,
+}
+
+/// What a model's mock evaluation is derived from.
+#[derive(Clone)]
+struct EvalBasis {
+    per_class: Vec<ClassMetrics>,
+    /// Validation instances per class.
+    counts: Vec<u64>,
+    images: u32,
+    seed: u64,
+}
+
+impl EvalBasis {
+    /// From a run's best epoch and its dataset's validation split (train when there is none).
+    fn new(run: &SimRun, ds: &DatasetEntry) -> EvalBasis {
+        let best = run.curve.best(run.epochs_done(&run.snap())).map_or(1, |b| b.epoch);
+        let split = if ds.meta().splits.val > 0 { Split::Val } else { Split::Train };
+        let page =
+            ds.list_images(&ImageQuery { split: Some(split), offset: 0, limit: u64::MAX, class: None });
+        let mut counts = vec![0u64; run.classes.len()];
+        for b in page.images.iter().flat_map(|im| &im.boxes) {
+            if let Some(c) = counts.get_mut(b.class as usize) {
+                *c += 1;
+            }
+        }
+        EvalBasis {
+            per_class: run.curve.val(best).per_class,
+            counts,
+            images: page.total as u32,
+            seed: fnv1a(run.id.as_bytes()),
+        }
+    }
+
+    /// PR curves, confusion matrix and per-class metrics, consistent with each other.
+    fn eval(&self) -> ModelEval {
+        let n = self.per_class.len();
+        let recall: Vec<f32> = (0..=100).map(|i| i as f32 / 100.0).collect();
+        let mut per_class = self.per_class.clone();
+        let pr = per_class
+            .iter_mut()
+            .map(|m| {
+                // 1 - r^k has mean k / (k + 1) over [0, 1]: pick k so the curve's AP lands near the class mAP50.
+                let a = m.map50.clamp(0.02, 0.98);
+                let k = a / (1.0 - a);
+                let mut precision: Vec<f32> = recall
+                    .iter()
+                    .enumerate()
+                    .map(|(i, r)| {
+                        let wiggle = 1.0 + 0.04 * noise(&[self.seed, m.class as u64, i as u64]);
+                        ((1.0 - r.powf(k)) * wiggle).clamp(0.0, 1.0)
+                    })
+                    .collect();
+                for i in (0..precision.len() - 1).rev() {
+                    precision[i] = precision[i].max(precision[i + 1]);
+                }
+                let precision: Vec<f32> = precision.into_iter().map(runs::r4).collect();
+                let ap50 = runs::r4(precision.iter().sum::<f32>() / precision.len() as f32);
+                m.map50 = ap50;
+                PrCurve { class: m.class, recall: recall.clone(), precision, ap50 }
+            })
+            .collect();
+        // Rows: truth (+ background), columns: prediction (+ background).
+        let mut confusion = vec![vec![0u32; n + 1]; n + 1];
+        for (c, m) in self.per_class.iter().enumerate() {
+            let total = self.counts.get(c).copied().unwrap_or(0) as f32;
+            let tp = (total * m.recall).round();
+            let wrong = ((total - tp) * 0.3).round();
+            confusion[c][c] = tp as u32;
+            if n > 1 && wrong > 0.0 {
+                // Spread the confusions over the other classes with deterministic weights.
+                let others: Vec<usize> = (0..n).filter(|&j| j != c).collect();
+                let w: Vec<f32> =
+                    others.iter().map(|&j| 1.2 + noise(&[self.seed, c as u64, j as u64, 7])).collect();
+                let sum: f32 = w.iter().sum();
+                let mut left = wrong as u32;
+                for (idx, &j) in others.iter().enumerate() {
+                    let share = if idx + 1 == others.len() {
+                        left
+                    } else {
+                        ((wrong * w[idx] / sum).round() as u32).min(left)
+                    };
+                    confusion[c][j] += share;
+                    left -= share;
+                }
+            }
+            let assigned: u32 = confusion[c][..n].iter().sum();
+            confusion[c][n] = (total as u32).saturating_sub(assigned);
+        }
+        for (j, m) in self.per_class.iter().enumerate() {
+            // precision = tp / (all predictions of j): the rest of the predictions are background.
+            let predicted: u32 = (0..n).map(|c| confusion[c][j]).sum();
+            let p = m.precision.clamp(0.05, 1.0);
+            let fp_total = (predicted as f32 / p - predicted as f32).round() as u32;
+            let tp = confusion[j][j];
+            let from_others = predicted - tp;
+            confusion[n][j] = fp_total.saturating_sub(from_others);
+        }
+        ModelEval { pr, confusion, per_class, images: self.images }
+    }
 }
 
 /// The mock store. See the module docs.
@@ -484,8 +584,10 @@ impl MockStore {
                     run_id: Some(d.id.into()),
                     metrics: Some(metrics),
                 };
+                let basis = EvalBasis::new(&run, entry);
                 if mid == "m_53d1" {
                     models.push(StaticModel {
+                        basis: basis.clone(),
                         model: Model {
                             id: "m_53d2".into(),
                             name: "r6-n-best-f16".into(),
@@ -495,7 +597,7 @@ impl MockStore {
                         },
                     });
                 }
-                models.push(StaticModel { model: base });
+                models.push(StaticModel { model: base, basis });
             }
             runs.push((Arc::new(run), Arc::clone(entry)));
         }
@@ -709,6 +811,18 @@ impl Store for MockStore {
         self.all_models().into_iter().find(|m| m.id == id).ok_or_else(|| Error::not_found("model", id))
     }
 
+    fn model_eval(&self, id: &str) -> Result<ModelEval> {
+        if let Some(m) = self.models.read().unwrap().iter().find(|m| m.model.id == id) {
+            return Ok(m.basis.eval());
+        }
+        let runs = self.runs.read().unwrap();
+        let (run, ds) = runs
+            .iter()
+            .find(|(r, _)| r.user && r.current_model(&r.snap()).as_deref() == Some(id))
+            .ok_or_else(|| Error::not_found("model", id))?;
+        Ok(EvalBasis::new(run, ds).eval())
+    }
+
     fn export_model(&self, id: &str, format: ExportFormat) -> Result<ExportResult> {
         let m = self.get_model(id)?;
         let (ext, bytes) = match format {
@@ -830,6 +944,13 @@ impl Store for MockStore {
             })
             .collect();
         Ok(RunSamples { epoch, samples })
+    }
+
+    fn run_logs(&self, id: &str, limit: usize) -> Result<Vec<LogLine>> {
+        let mut lines = self.run(id)?.0.logs();
+        let skip = lines.len().saturating_sub(limit);
+        lines.drain(..skip);
+        Ok(lines)
     }
 
     fn subscribe(&self, id: &str) -> Result<Subscription> {

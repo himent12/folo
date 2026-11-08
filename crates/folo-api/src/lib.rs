@@ -418,6 +418,35 @@ impl Arch {
     }
 }
 
+/// `GET /api/models/{id}/eval`: validation results of a model (PR curves, confusion matrix, per-class metrics).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ModelEval {
+    /// One precision-recall curve per class, in class order.
+    pub pr: Vec<PrCurve>,
+    /// `(classes + 1) x (classes + 1)` counts: rows are the true class, columns the predicted class; the last row and
+    /// column are background (`confusion[c][n]` = missed objects of class `c`, `confusion[n][c]` = false positives
+    /// predicted as `c`, `confusion[n][n]` = 0).
+    pub confusion: Vec<Vec<u32>>,
+    /// Per-class metrics (`map50` equals the curve's `ap50`).
+    pub per_class: Vec<ClassMetrics>,
+    /// Validation images evaluated.
+    pub images: u32,
+}
+
+/// A precision-recall curve at IoU 0.5, sampled at 101 recall points (`0.00, 0.01, ..., 1.00`). Precision is the
+/// COCO-interpolated envelope, so it never increases with recall.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PrCurve {
+    /// Class index.
+    pub class: u32,
+    /// Recall points.
+    pub recall: Vec<f32>,
+    /// Precision at each recall point.
+    pub precision: Vec<f32>,
+    /// AP at IoU 0.5: the mean of `precision`.
+    pub ap50: f32,
+}
+
 /// `POST /api/models/{id}/export`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ExportRequest {
@@ -737,6 +766,13 @@ pub struct Sample {
     pub truth: Vec<BBox>,
     /// Predictions after NMS.
     pub pred: Vec<ScoredBox>,
+}
+
+/// `GET /api/runs/{id}/logs`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RunLogs {
+    /// The most recent log lines, oldest first.
+    pub lines: Vec<LogLine>,
 }
 
 /// SSE `status` payload.

@@ -768,3 +768,82 @@ async fn malformed_registry_is_never_overwritten() {
     assert_eq!(std::fs::read_to_string(root.join("datasets.json")).unwrap(), "{ not json");
     std::fs::remove_dir_all(&root).unwrap();
 }
+
+#[tokio::test]
+async fn model_eval_curves_and_confusion() {
+    let (server, _) = mock();
+    let app = server.router();
+    let models: ModelList = ok(&app, get("/api/models")).await;
+    for m in &models.models {
+        let ev: ModelEval = ok(&app, get(&format!("/api/models/{}/eval", m.id))).await;
+        let n = m.classes.len();
+        assert!(ev.images > 0, "{}", m.id);
+        assert_eq!((ev.pr.len(), ev.per_class.len()), (n, n));
+        for (c, curve) in ev.pr.iter().enumerate() {
+            assert_eq!(curve.class as usize, c);
+            assert_eq!((curve.recall.len(), curve.precision.len()), (101, 101));
+            assert_eq!((curve.recall[0], curve.recall[100]), (0.0, 1.0));
+            assert!(curve.precision.iter().all(|p| (0.0..=1.0).contains(p)));
+            assert!(curve.precision.windows(2).all(|w| w[0] >= w[1]), "interpolated precision never rises");
+            let mean = curve.precision.iter().sum::<f32>() / 101.0;
+            assert!((curve.ap50 - mean).abs() < 1e-3);
+            assert_eq!(ev.per_class[c].map50, curve.ap50);
+            assert!(curve.ap50 > 0.2 && curve.ap50 < 1.0, "{} class {c}: {}", m.id, curve.ap50);
+        }
+        assert_eq!(ev.confusion.len(), n + 1);
+        assert!(ev.confusion.iter().all(|row| row.len() == n + 1));
+        assert_eq!(ev.confusion[n][n], 0);
+        let truth: u32 = ev.confusion[..n].iter().flatten().sum();
+        let diag: u32 = (0..n).map(|c| ev.confusion[c][c]).sum();
+        assert!(truth > 0 && diag as f32 > 0.5 * truth as f32, "{}: mostly diagonal", m.id);
+        for c in 0..n {
+            let row = &ev.confusion[c];
+            assert!((0..n).filter(|&j| j != c).all(|j| row[c] >= row[j]), "{} row {c}: {row:?}", m.id);
+        }
+        let again: ModelEval = ok(&app, get(&format!("/api/models/{}/eval", m.id))).await;
+        assert_eq!(again, ev, "deterministic");
+    }
+    err(&app, get("/api/models/m_none/eval"), StatusCode::NOT_FOUND, "model_not_found").await;
+}
+
+#[tokio::test]
+async fn run_logs_history() {
+    let (server, _) = mock();
+    let app = server.router();
+    let list: RunList = ok(&app, get("/api/runs")).await;
+    let by = |s: RunStatus| list.runs.iter().find(|r| r.status == s).unwrap().clone();
+
+    let done = by(RunStatus::Completed);
+    let all: RunLogs = ok(&app, get(&format!("/api/runs/{}/logs?limit=5000", done.id))).await;
+    let msgs: Vec<&str> = all.lines.iter().map(|l| l.message.as_str()).collect();
+    assert!(msgs[0].starts_with("training "));
+    assert!(msgs.last().unwrap().starts_with("training complete"));
+    let epochs = msgs.iter().filter(|m| m.starts_with("epoch ")).count();
+    assert_eq!(epochs as u32, done.epochs);
+    assert!(all.lines.windows(2).all(|w| w[0].t <= w[1].t), "chronological");
+    let tail: RunLogs = ok(&app, get(&format!("/api/runs/{}/logs?limit=5", done.id))).await;
+    assert_eq!(tail.lines.as_slice(), &all.lines[all.lines.len() - 5..]);
+    let default: RunLogs = ok(&app, get(&format!("/api/runs/{}/logs", done.id))).await;
+    assert_eq!(default.lines.len(), all.lines.len().min(500));
+
+    let failed: RunLogs = ok(&app, get(&format!("/api/runs/{}/logs", by(RunStatus::Failed).id))).await;
+    let last = failed.lines.last().unwrap();
+    assert_eq!(last.level, LogLevel::Error);
+    assert!(last.message.contains("out of memory"));
+    let stopped: RunLogs = ok(&app, get(&format!("/api/runs/{}/logs", by(RunStatus::Stopped).id))).await;
+    assert!(stopped.lines.last().unwrap().message.starts_with("stopped at step"));
+
+    // The live run: history up to now, in the same format as the SSE `log` events.
+    let live = by(RunStatus::Running);
+    let hist: RunLogs = ok(&app, get(&format!("/api/runs/{}/logs", live.id))).await;
+    let n = hist.lines.iter().filter(|l| l.message.starts_with("epoch ")).count() as u32;
+    assert!(
+        n + 1 >= live.epoch.saturating_sub(1) && n <= live.epoch,
+        "{n} epochs logged, run at {}",
+        live.epoch
+    );
+
+    err(&app, get(&format!("/api/runs/{}/logs?limit=x", done.id)), StatusCode::BAD_REQUEST, "invalid_query")
+        .await;
+    err(&app, get("/api/runs/run_none/logs"), StatusCode::NOT_FOUND, "run_not_found").await;
+}

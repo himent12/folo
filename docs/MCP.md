@@ -130,10 +130,10 @@ In read-only mode, `train_on_folder` is not listed.
   `folo serve`, so Studio and the agent share runs that outlive the MCP process:
   `list_*`/`get_dataset` → `GET` list/detail endpoints (paging is applied by the MCP layer), `list_dataset_images` →
   `GET /api/datasets/{id}/images`, `train` → `POST /api/runs`, `run_status` → `GET /api/runs/{id}`, `stop_run` → `POST /api/runs/{id}/stop`, `predict` → `POST /api/predict` (local `image_path` files are
-  read by the MCP process and uploaded as multipart), `export` → `POST /api/models/{id}/export`. `val`, `predict_batch`
-  and `compare_runs` need server endpoints that docs/API.md does not have yet (`POST /api/val`,
-  `POST /api/predict/batch`, `GET /api/runs/{id}/logs`). Until they exist, those tools return `not_implemented` in
-  proxy mode, and `run_status` returns `log: null` with `log_unavailable: true` (never a misleading empty list). The
+  read by the MCP process and uploaded as multipart), `export` → `POST /api/models/{id}/export`. `run_status`
+  takes its `log` from `GET /api/runs/{id}/logs`. `val`, `predict_batch` and `compare_runs` need server endpoints
+  that docs/API.md does not have yet (`POST /api/val`, `POST /api/predict/batch`). Until they exist, those tools
+  return `not_implemented` in proxy mode. The
   PR that implements proxy mode adds these endpoints to docs/API.md.
 
 ## Example agent session
