@@ -32,7 +32,7 @@
     align-items: center;
     gap: 8px;
     height: var(--control-md);
-    padding: 0 10px;
+    padding: 0 8px;
     border-radius: var(--radius-md);
     color: var(--text-tertiary);
     font-size: var(--type-sm-size);

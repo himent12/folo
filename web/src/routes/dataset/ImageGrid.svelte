@@ -266,7 +266,7 @@
     height: 18px;
     display: inline-flex;
     align-items: center;
-    padding: 0 5px;
+    padding: 0 4px;
     border-radius: var(--radius-xs);
     background: var(--bg-scrim);
     color: var(--text-primary);

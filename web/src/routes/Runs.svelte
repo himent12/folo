@@ -332,7 +332,7 @@
       place-items: center;
       width: 44px;
       height: 44px;
-      margin: -12px 0 0 -14px;
+      margin: -12px 0 0 -12px;
     }
     .c-main {
       flex: 1;

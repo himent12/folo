@@ -266,9 +266,9 @@
     z-index: 1;
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     height: 16px;
-    padding: 0 5px;
+    padding: 0 4px;
     border-radius: 3px 3px 3px 0;
     background: var(--c);
     color: var(--class-chip-text);

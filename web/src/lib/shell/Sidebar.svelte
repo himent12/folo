@@ -89,7 +89,7 @@
     margin-bottom: var(--space-2);
   }
   .collapsed .head {
-    padding: 0 0 0 10px;
+    padding: 0 0 0 8px;
   }
   .brand {
     display: inline-flex;
@@ -104,9 +104,9 @@
     position: relative;
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: 8px;
     height: var(--control-md);
-    padding: 0 var(--space-2) 0 10px;
+    padding: 0 var(--space-2);
     border-radius: var(--radius-md);
     color: var(--text-secondary);
     font-weight: var(--weight-medium);

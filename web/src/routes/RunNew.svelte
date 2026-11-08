@@ -475,8 +475,8 @@
   }
   .tick {
     position: absolute;
-    top: 10px;
-    right: 10px;
+    top: 12px;
+    right: 12px;
     display: grid;
     color: var(--text-primary);
   }
@@ -675,7 +675,7 @@
   }
   .warning :global(svg) {
     flex-shrink: 0;
-    margin-top: 3px;
+    margin-top: 4px;
   }
   .cli {
     margin-top: calc(-1 * var(--space-1));
@@ -769,7 +769,7 @@
   }
   @media (max-width: 1199px) {
     .layout {
-      padding-bottom: 72px;
+      padding-bottom: 64px;
     }
     .dock {
       position: fixed;

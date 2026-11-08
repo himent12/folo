@@ -95,7 +95,7 @@
   }
   dt,
   dd {
-    padding: 4px 0 3px;
+    padding: 4px 0;
     border-bottom: 1px solid var(--line-subtle);
   }
   details {

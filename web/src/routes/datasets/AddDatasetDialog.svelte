@@ -245,7 +245,7 @@
     align-items: center;
     gap: var(--space-1);
     min-height: var(--control-md);
-    padding: 3px;
+    padding: 4px;
     border-radius: var(--radius-md);
     background: var(--bg-inset);
     border: 1px solid var(--line-default);
@@ -305,7 +305,7 @@
     .chip button::after {
       content: '';
       position: absolute;
-      inset: -14px;
+      inset: -12px;
     }
   }
   .chips input {

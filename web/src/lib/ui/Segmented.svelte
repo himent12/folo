@@ -102,7 +102,7 @@
     justify-content: center;
     gap: 6px;
     height: calc(var(--control-md) - 6px);
-    padding: 0 10px;
+    padding: 0 8px;
     border-radius: var(--radius-sm);
     color: var(--text-secondary);
     font-weight: var(--weight-medium);

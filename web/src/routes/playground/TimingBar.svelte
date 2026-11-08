@@ -62,7 +62,7 @@
     font-weight: var(--weight-semibold);
   }
   .unit {
-    margin-left: 3px;
+    margin-left: 4px;
     font-size: var(--type-sm-size);
     font-weight: var(--weight-regular);
     color: var(--text-tertiary);
