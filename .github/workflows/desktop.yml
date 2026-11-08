@@ -57,39 +57,19 @@ jobs:
         shell: bash
         env:
           ATTEMPTS: ${{ runner.environment == 'self-hosted' && '2' || '1' }}
-        run: |
-          for i in $(seq 1 "$ATTEMPTS"); do
-            cargo fmt --all -- --check && exit 0
-            [ "$i" -lt "$ATTEMPTS" ] && echo "::warning::fmt failed on attempt $i; retrying (unstable self-hosted host, docs/CI.md)"
-          done
-          exit 1
+        run: bash ../../tools/ci-retry.sh cargo fmt --all -- --check
       - name: clippy
         shell: bash
         env:
           ATTEMPTS: ${{ runner.environment == 'self-hosted' && '2' || '1' }}
-        run: |
-          for i in $(seq 1 "$ATTEMPTS"); do
-            cargo clippy --all-targets -- -D warnings && exit 0
-            [ "$i" -lt "$ATTEMPTS" ] && echo "::warning::clippy failed on attempt $i; retrying (unstable self-hosted host, docs/CI.md)"
-          done
-          exit 1
+        run: bash ../../tools/ci-retry.sh cargo clippy --all-targets -- -D warnings
       - name: build
         shell: bash
         env:
           ATTEMPTS: ${{ runner.environment == 'self-hosted' && '2' || '1' }}
-        run: |
-          for i in $(seq 1 "$ATTEMPTS"); do
-            cargo build && exit 0
-            [ "$i" -lt "$ATTEMPTS" ] && echo "::warning::build failed on attempt $i; retrying (unstable self-hosted host, docs/CI.md)"
-          done
-          exit 1
+        run: bash ../../tools/ci-retry.sh cargo build
       - name: test
         shell: bash
         env:
           ATTEMPTS: ${{ runner.environment == 'self-hosted' && '2' || '1' }}
-        run: |
-          for i in $(seq 1 "$ATTEMPTS"); do
-            cargo test && exit 0
-            [ "$i" -lt "$ATTEMPTS" ] && echo "::warning::test failed on attempt $i; retrying (unstable self-hosted host, docs/CI.md)"
-          done
-          exit 1
+        run: bash ../../tools/ci-retry.sh cargo test

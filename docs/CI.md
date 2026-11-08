@@ -48,5 +48,6 @@ so incremental builds stay warm.
 The dev PC (an i7-14700KF) occasionally crashes rustc or rustfmt under heavy parallel load (`STATUS_ACCESS_VIOLATION`
 0xc0000005, `STATUS_ILLEGAL_INSTRUCTION` 0xc000001d, `STATUS_STACK_BUFFER_OVERRUN` 0xc0000409), a pattern consistent
 with the Intel 13th/14th-gen instability issue. Until the host is fixed (BIOS / microcode update), the Windows steps in
-`ci.yml` and `desktop.yml` retry once on self-hosted runners and log a warning. A genuine compile error or test failure
-fails both attempts, so the retry cannot hide one; it only absorbs a crashed compiler.
+`ci.yml` and `desktop.yml` run through `tools/ci-retry.sh`, which on self-hosted runners retries a step once **only
+when its output shows one of those crash codes**, and logs a warning. Compile errors and failing (including flaky)
+tests are never retried.

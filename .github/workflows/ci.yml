@@ -43,28 +43,18 @@ jobs:
       - run: cargo fmt --all -- --check
         if: matrix.os == 'linux'
       # The self-hosted Windows host (the dev PC) has an unstable CPU that occasionally crashes rustc
-      # (0xc0000005 / 0xc000001d / 0xc0000409); docs/CI.md. There, each step gets one retry. A real compile error or
-      # test failure fails again on the second attempt, so a retry never turns a red build green by itself.
+      # (0xc0000005 / 0xc000001d / 0xc0000409); docs/CI.md. tools/ci-retry.sh retries a step once there, and only when
+      # its output shows one of those crash codes: compile errors and failing or flaky tests are never retried.
       - name: clippy
         shell: bash
         env:
           ATTEMPTS: ${{ runner.environment == 'self-hosted' && runner.os == 'Windows' && '2' || '1' }}
-        run: |
-          for i in $(seq 1 "$ATTEMPTS"); do
-            cargo clippy --workspace --all-targets -- -D warnings && exit 0
-            [ "$i" -lt "$ATTEMPTS" ] && echo "::warning::clippy failed on attempt $i; retrying (unstable self-hosted host)"
-          done
-          exit 1
+        run: bash tools/ci-retry.sh cargo clippy --workspace --all-targets -- -D warnings
       - name: test
         shell: bash
         env:
           ATTEMPTS: ${{ runner.environment == 'self-hosted' && runner.os == 'Windows' && '2' || '1' }}
-        run: |
-          for i in $(seq 1 "$ATTEMPTS"); do
-            cargo test --workspace && exit 0
-            [ "$i" -lt "$ATTEMPTS" ] && echo "::warning::tests failed on attempt $i; retrying (unstable self-hosted host)"
-          done
-          exit 1
+        run: bash tools/ci-retry.sh cargo test --workspace
   onnx:
     # ONNX export parity (docs/CLI.md, ONNX export): crates/folo-cli/tests/onnx.rs runs the exported graphs in
     # onnxruntime through bench/parity/onnx_check.py. The test skips without a Python; FOLO_ONNX_REQUIRED makes a
