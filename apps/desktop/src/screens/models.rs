@@ -720,7 +720,7 @@ impl FoloApp {
         chart.x_fmt = |v| format!("{v:.2}");
         chart.x_name = "recall";
         chart.axis_titles = Some(("Recall", "Precision"));
-        chart.x_ticks = Some(4);
+        chart.x_ticks = Some(2);
         chart.ease_key = crate::charts::ease_key(&m.id);
         // As tall as the confusion matrix beside it (its rows set the panel height).
         chart.height = (32. * ev.confusion.len() as f32 + 76.).max(220.);
@@ -854,6 +854,20 @@ impl FoloApp {
         // detected, the last row detections with no object.
         let row_sums: Vec<u32> = ev.confusion.iter().map(|r| r.iter().sum::<u32>().max(1)).collect();
         let max_count = ev.confusion.iter().flatten().copied().max().unwrap_or(1).max(1);
+        // The error ramp spans 0 to the largest error on screen, so the worst confusion is the
+        // darkest cell and small ones stay apart (the key states that maximum).
+        let frac_of =
+            |r: usize, v: u32| if norm { v as f32 / row_sums[r] as f32 } else { v as f32 / max_count as f32 };
+        let last = ev.confusion.len().saturating_sub(1);
+        let max_err = ev
+            .confusion
+            .iter()
+            .enumerate()
+            .flat_map(|(r, row)| row.iter().enumerate().map(move |(c, &v)| (r, c, v)))
+            .filter(|&(r, c, _)| r != c && !(r == last && c == last))
+            .map(|(r, _, v)| frac_of(r, v))
+            .fold(0f32, f32::max)
+            .max(1e-6);
         let cell_h = px(32.);
         // A cool sequential ramp: amber stays reserved for warnings.
         let base = t.chart_series[0];
@@ -896,12 +910,12 @@ impl FoloApp {
                     } else if v == 0 || tiny {
                         crate::theme::over(t.bg_panel, t.bg_hover)
                     } else {
-                        // Correct cells in the series blue; errors on a danger ramp (square root over
-                        // 0–100 %), so 2 %, 10 %, 22 % and 25 % stay visibly apart.
+                        // Correct cells in the series blue; errors on a danger ramp (square root up
+                        // to the largest error), so small and large confusions stay apart.
                         if diag {
                             crate::theme::over(t.bg_inset, alpha(base, (0.35 + 0.6 * frac).min(0.95)))
                         } else {
-                            crate::theme::over(t.bg_panel, alpha(t.danger_solid, err_alpha(frac)))
+                            crate::theme::over(t.bg_panel, alpha(t.danger_solid, err_alpha(frac / max_err)))
                         }
                     };
                     let label = if na {
@@ -958,7 +972,7 @@ impl FoloApp {
                     .border_color(alpha(base, 0.9)),
             )
             .child(text(ty::XS, t.text_tertiary).mr(px(6.)).child("correct"))
-            .child(text(ty::XS, t.text_tertiary).child("errors 0%"))
+            .child(text(ty::XS, t.text_tertiary).child("errors 0"))
             .child(div().flex().h(px(8.)).w(px(96.)).rounded(px(2.)).overflow_hidden().children((0..12).map(
                 |i| {
                     let f = i as f32 / 11.;
@@ -968,7 +982,11 @@ impl FoloApp {
                         .bg(crate::theme::over(t.bg_inset, alpha(t.danger_solid, err_alpha(f))))
                 },
             )))
-            .child(text(ty::XS, t.text_tertiary).child("100%"));
+            .child(text(ty::XS, t.text_tertiary).tnum().child(if norm {
+                format!("{:.0}% (max)", max_err * 100.)
+            } else {
+                format!("{} (max)", int((max_err * max_count as f32).round() as u64))
+            }));
         panel(&t)
             .flex_1()
             .min_w_0()
@@ -1130,7 +1148,7 @@ fn num_cell(w: f32, content: impl IntoElement) -> gpui::Div {
 
 /// Fill opacity of an error cell: a square-root ramp over the whole 0–100 % range.
 fn err_alpha(frac: f32) -> f32 {
-    0.1 + 0.7 * frac.clamp(0., 1.).sqrt()
+    0.8 * frac.clamp(0., 1.).sqrt()
 }
 
 /// Weight precision inferred from file size per parameter (the API doesn't report it).

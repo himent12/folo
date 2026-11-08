@@ -454,7 +454,20 @@ impl FoloApp {
                                 .child(div().h(px(hero_h + 48.)).child(sk("hero-chart"))),
                         ),
                 )
-                .child(div().h(px(36.)).border_t_1().border_color(t.line_subtle))
+                .child(
+                    // The machine footer's meters, as placeholders.
+                    div()
+                        .h(px(36.))
+                        .px(px(16.))
+                        .flex()
+                        .items_center()
+                        .gap(px(24.))
+                        .border_t_1()
+                        .border_color(t.line_subtle)
+                        .children((0..3).map(|i| {
+                            div().w(px(150.)).h(px(10.)).child(skeleton(&t, format!("hero-meter-{i}")))
+                        })),
+                )
                 .into_any_element();
         }
         let has_ds = self.store.datasets.ready().is_some_and(|d| !d.is_empty());
@@ -722,10 +735,24 @@ impl FoloApp {
                         .map_or(0., |m| m.map50_95)
                         .total_cmp(&a.metrics.as_ref().map_or(0., |m| m.map50_95))
                 });
+                // Column heads like Recent runs beside it, so the two lists share row lines.
+                let heads = div()
+                    .h(px(28.))
+                    .mx(px(4.))
+                    .px(px(12.))
+                    .flex()
+                    .items_center()
+                    .gap(px(12.))
+                    .border_b_1()
+                    .border_color(t.line_subtle)
+                    .child(th(&t, "Model").w(px(150.)).flex_none())
+                    .child(th(&t, "Arch").flex_1())
+                    .child(div().w(px(96.)).flex_none().flex().justify_end().child(th(&t, "mAP50-95")));
                 div()
                     .flex()
                     .flex_col()
-                    .py(px(4.))
+                    .pb(px(4.))
+                    .child(heads)
                     .children(models.into_iter().take(5).map(|m| {
                         let id = m.id.clone();
                         let key = format!("ov-model-{}", m.id);
@@ -758,7 +785,12 @@ impl FoloApp {
                                     m.imgsz
                                 )),
                             ))
-                            .child(bar_value(&t, map, f3(map), t.text_tertiary));
+                            .child(div().w(px(96.)).flex_none().flex().justify_end().child(bar_value(
+                                &t,
+                                map,
+                                f3(map),
+                                t.text_tertiary,
+                            )));
                         self.bind(
                             row,
                             &key,

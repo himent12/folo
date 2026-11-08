@@ -73,8 +73,18 @@ impl FoloApp {
         let t = theme(cx);
         let img = self.image(dataset, &meta.id, ImgKind::Thumb, cx);
         let dims = (meta.width as f32, meta.height as f32);
+        // On a dataset page with a class filter, the other classes drop to 30 % (the selection rule),
+        // so the filter shows inside each tile.
+        let focus =
+            self.ds_class.filter(|_| matches!(&self.route, crate::app::Route::Dataset(d) if d == dataset));
         let draw: Vec<DrawBox> = if boxes {
-            meta.boxes.iter().map(|b| DrawBox::new(b.class, b.x1, b.y1, b.x2, b.y2)).collect()
+            meta.boxes
+                .iter()
+                .map(|b| DrawBox {
+                    dim: focus.is_some_and(|c| c != b.class),
+                    ..DrawBox::new(b.class, b.x1, b.y1, b.x2, b.y2)
+                })
+                .collect()
         } else {
             Vec::new()
         };

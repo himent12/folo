@@ -160,7 +160,16 @@ pub fn paint_image_with_boxes(
                 }
                 // Boxes under 20 px on screen show their label only when selected (design/README).
                 let small = (r.size.height < px(20.) || r.size.width < px(20.)) && !b.highlight;
-                if pass == 1 && !b.truth && labels && !small && (b.label.is_some() || b.score.is_some()) {
+                // Cropped out of view (Fill): no chip floating over someone else's pixels.
+                let visible = r.intersect(&bounds);
+                let off_view = visible.size.width < px(4.) || visible.size.height < px(4.);
+                if pass == 1
+                    && !b.truth
+                    && labels
+                    && !small
+                    && !off_view
+                    && (b.label.is_some() || b.score.is_some())
+                {
                     // Small views (< 480 px): 14 px chips with 10 px text (design/README).
                     let compact = rect.size.width < px(480.);
                     let fs = if compact { 10. } else { ty::XS.size };
@@ -192,7 +201,13 @@ pub fn paint_image_with_boxes(
                     let ch = px(if compact { 14. } else { 16. });
                     // Preferred spots: above the top-left corner, inside it, below the bottom-left
                     // corner, inside the bottom-left. Take the first that is on the image and free.
-                    let clamp_x = |x: Pixels| x.min(bounds.right() - cw).max(bounds.left());
+                    // Within the visible part of its box (and the view).
+                    let clamp_x = |x: Pixels| {
+                        x.min(visible.right() - cw)
+                            .min(bounds.right() - cw)
+                            .max(visible.left())
+                            .max(bounds.left())
+                    };
                     let candidates = [
                         point(clamp_x(r.left() - px(1.)), r.top() - ch - px(1.)),
                         point(clamp_x(r.left() + px(1.)), r.top() + px(1.)),
@@ -202,7 +217,7 @@ pub fn paint_image_with_boxes(
                     let fits = |o: Point<Pixels>| {
                         o.y >= bounds.top().max(rect.top()) && o.y + ch <= bounds.bottom().min(rect.bottom())
                     };
-                    let free = |c: &Bounds<Pixels>| !placed.iter().any(|p| p.intersects(c));
+                    let free = |c: &Bounds<Pixels>| !placed.iter().any(|p| p.dilate(px(2.)).intersects(c));
                     let origin = candidates
                         .iter()
                         .copied()
