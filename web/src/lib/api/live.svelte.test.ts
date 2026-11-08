@@ -147,6 +147,8 @@ describe('LiveRun resume', () => {
   /** When set, the next history request waits for it (to deliver an old response late). */
   let gate: Promise<RunMetrics> | null = null;
   let serverStep = 4;
+  /** When set, the next snapshot request waits for it. */
+  let snapGate: Promise<Run> | null = null;
   /** When set, snapshots never answer: the test sees only what events and the resume response did. */
   let hold = false;
   const saved = hub.api;
@@ -158,6 +160,7 @@ describe('LiveRun resume', () => {
     serverStatus = 'stopped';
     hold = false;
     gate = null;
+    snapGate = null;
     serverStep = 4;
     snapshot = await new MockApi('normal', 0).run('run_7d1e');
     // Epochs are 1-based (folo-api). Stopped in epoch 2: epoch 1 finished (steps 1-2), epoch 2 had steps 3-4. The
@@ -165,7 +168,12 @@ describe('LiveRun resume', () => {
     history = { steps: [at(1, 1), at(2, 1), at(3, 2), at(4, 2)], epochs: [ep(1)] as never };
     const fake: Partial<Api> = {
       mock: false,
-      run: () => (hold ? new Promise<Run>(() => {}) : Promise.resolve({ ...snapshot, status: serverStatus, step: serverStep, epoch: 2, best: { epoch: 1, map50_95: 0.3 } })),
+      run: () => {
+        if (hold) return new Promise<Run>(() => {});
+        const g = snapGate;
+        snapGate = null;
+        return g ?? Promise.resolve({ ...snapshot, status: serverStatus, step: serverStep, epoch: 2, best: { epoch: 1, map50_95: 0.3 } });
+      },
       runMetrics: () => {
         const g = gate;
         gate = null;
@@ -296,6 +304,79 @@ describe('LiveRun resume', () => {
     expect(live.steps.map((s) => [s.step, s.loss.total])).toEqual([[1, 3], [2, 3], [3, 80]]);
     expect(live.run?.step).toBe(3);
     expect(live.run?.status).toBe('stopped');
+    stop();
+  });
+
+  it('keeps the steps the new attempt streamed over history that still holds the interrupted attempt', async () => {
+    let live!: LiveRun;
+    const stop = $effect.root(() => {
+      live = new LiveRun(() => 'run_7d1e');
+    });
+    flushSync();
+    await vi.advanceTimersByTimeAsync(0);
+    serverStatus = 'running';
+    // History requested after the resume is slow, and the server has not written replacements yet.
+    const slow = deferred<RunMetrics>();
+    gate = slow.promise;
+    await live.resume(() => Promise.resolve({ ...snapshot, status: 'queued', step: 4, epoch: 2 }));
+    handlers.reconnect?.();
+    handlers.step?.(at(3, 2, 70));
+    slow.resolve({ steps: [at(1, 1), at(2, 1), at(3, 2), at(4, 2)], epochs: [ep(1)] as never });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.steps.map((s) => [s.step, s.loss.total])).toEqual([[1, 3], [2, 3], [3, 70]]);
+    stop();
+  });
+
+  it('never removes data for a late or duplicate step in an ordinary run', async () => {
+    let live!: LiveRun;
+    serverStatus = 'running';
+    const stop = $effect.root(() => {
+      live = new LiveRun(() => 'run_7d1e');
+    });
+    flushSync();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.steps.map((s) => s.step)).toEqual([1, 2, 3, 4]);
+    handlers.step?.(at(3, 2));
+    expect(live.steps.map((s) => s.step)).toEqual([1, 2, 3, 4]);
+    expect(live.epochs.map((e) => e.epoch)).toEqual([1]);
+    stop();
+  });
+
+  it('drops a cached interrupted suffix when a resume happened elsewhere while disconnected', async () => {
+    let live!: LiveRun;
+    const stop = $effect.root(() => {
+      live = new LiveRun(() => 'run_7d1e');
+    });
+    flushSync();
+    await vi.advanceTimersByTimeAsync(0);
+    // Another client resumed it; the resumed run repeated step 3 and was stopped again. We saw none of it.
+    history = { steps: [at(1, 1), at(2, 1), at(3, 2, 80)], epochs: [ep(1)] as never };
+    serverStep = 3;
+    handlers.reconnect?.();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.steps.map((s) => [s.step, s.loss.total])).toEqual([[1, 3], [2, 3], [3, 80]]);
+    expect(live.run?.step).toBe(3);
+    stop();
+  });
+
+  it('ignores a terminal snapshot requested before the resume response rewound the view', async () => {
+    let live!: LiveRun;
+    serverStatus = 'running';
+    const stop = $effect.root(() => {
+      live = new LiveRun(() => 'run_7d1e');
+    });
+    flushSync();
+    await vi.advanceTimersByTimeAsync(0);
+    // The run stops; its terminal snapshot is slow.
+    const late = deferred<Run>();
+    snapGate = late.promise;
+    handlers.status?.({ status: 'stopped', error: null });
+    await live.resume(() => Promise.resolve({ ...snapshot, status: 'queued', step: 4, epoch: 2 }));
+    expect(live.run?.status).toBe('queued');
+    late.resolve({ ...snapshot, status: 'stopped', step: 4, epoch: 2 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.run?.status).toBe('queued');
+    expect(live.run?.step).toBe(2);
     stop();
   });
 });
