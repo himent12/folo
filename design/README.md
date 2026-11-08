@@ -1,0 +1,80 @@
+# FOLO design system
+
+One design language for **FOLO Studio** (`web/`) and **FOLO Desktop** (`apps/desktop/`). `tokens.json` is the single
+source of truth; both apps generate their theme from it and never hard-code a colour, size or duration.
+
+- Web: `cd web && npm run tokens` writes `web/src/lib/design/tokens.css` (CSS custom properties) and `tokens.ts`
+  (typed values for canvas/SVG code). `npm run check` fails if the generated files are stale.
+- Desktop: a Rust generator reads `tokens.json` and writes the GPUI theme.
+
+## Character
+Precise, fast, instrument-grade: Linear × Vercel × a camera viewfinder. Dense but calm. The content (detection boxes,
+charts, images) is the star; chrome stays quiet, neutral and thin. Colour is spent on meaning: the accent for focus,
+live state and the primary action; status colours for status; the class palette for classes; nothing decorative.
+
+## Format rules (so any language can read the file)
+- Colours: `#RRGGBB` or `#RRGGBBAA` strings, both themes complete. No CSS functions.
+- Sizes: plain numbers in px. Tracking: em (multiply by the font size). Durations: ms.
+- Easing: cubic-bezier control points `[x1, y1, x2, y2]`.
+- Keys starting with `$` are comments; skip them.
+
+## Type
+- **Geist** (UI) and **Geist Mono** (numbers in tables, IDs, paths, logs, code), weights 400 / 500 / 600 only.
+  Files (OFL, `fonts/OFL.txt`): `fonts/<Name>-<Weight>.ttf` for desktop and `.woff2` for web.
+- Base UI text is `base` (13 / 20). The scale: `micro` 10 (uppercase overlines, +0.06 em), `xs` 11, `sm` 12, `base`
+  13, `md` 14, `lg` 16, `xl` 20 (page titles), `2xl` 24, `3xl` 32 (headline metrics), `4xl` 44 (hero metric).
+  Larger steps tighten tracking.
+- Every metric uses tabular numerals (`font-variant-numeric: tabular-nums`, OpenType `tnum`), so counters that tick
+  live never jitter. Units and secondary parts of a number (`%`, `ms`, `/100`) are set one step smaller in
+  `text.tertiary`.
+
+## Space and shape
+- 4 px grid (`space`): 2 / 4 / 6 / 8 / 12 / 16 / 20 / 24 / 32 / 40 / 48 / 64. Paddings inside panels are 16 (12 when
+  dense); gaps between panels are 12 or 16.
+- Radii: `xs` 3 (chips), `sm` 4 (small controls), `md` 6 (controls, inputs), `lg` 8 (panels, cards), `xl` 12
+  (dialogs, palette). Detection boxes are square (radius 0): they are measurements.
+- Controls: heights 20 / 24 / 28 / 32 / 40 (`size.control`). Default 28. Table rows 36, dense 28.
+- Lines are 1 px hairlines (`line.subtle` inside panels, `line.default` for panel edges and inputs, `line.strong` for
+  hover / emphasis). Never 2 px borders, except the focus ring.
+
+## Surfaces (elevation by lightness, not by shadow)
+`bg.app` (window) → `bg.panel` (panels, sidebar) → `bg.raised` (inputs, hovered cards, table headers) →
+`bg.overlay` (menus, popovers, palette, dialogs; these also get `shadow.lg`). `bg.inset` is a well darker than the
+app: chart plots, image canvases, code/log views. In light mode panels are white on a light-grey app background.
+`bg.hover` / `bg.active` are translucent overlays that work on any surface.
+
+## Colour
+- Text: `text.primary` for content, `text.secondary` for supporting text, `text.tertiary` for labels, captions and
+  metadata. All three meet WCAG AA (4.5:1) on every surface in both themes; `text.disabled` is for disabled controls
+  only.
+- **Accent "signal" lime** (`accent.solid` #C5F82A): the focus-confirm green of a viewfinder. Used for the primary
+  button, focus rings, the live/running state, selection and the first chart series. Text on a lime fill is
+  `accent.on` (near black). On light backgrounds lime is too pale for text and strokes, so use `accent.text` /
+  `accent.line` (deeper olive) there; on dark they equal the solid.
+- Status: `success` (completed, healthy), `warning` (degraded, stopping), `danger` (failed, errors), `info`
+  (queued, neutral notices). Each has `solid` (dots, icons, bars), `text` (readable text) and `muted` (tinted
+  backgrounds for badges and banners).
+- Charts: `chart.series[0..5]` in this fixed order (lime, sky, pink, amber, violet, teal), never cycled; the order
+  keeps every adjacent pair apart under colour-vision deficiency (checked with an OKLab ΔE validator). Grid lines
+  `chart.grid`, axis lines `chart.axis`, tick labels `chart.label` (xs / mono), hover cursor `chart.cursor`. Area
+  fills under a line use the series colour at `area_opacity`. Loss components: total = series 1, box = 2, cls = 3,
+  dfl = 4. Two or more series always get a legend, and lines are direct-labelled where they end.
+
+## Detection classes
+`classes.palette`: 16 saturated, mid-to-high-lightness colours chosen to stay distinct from each other and legible on
+arbitrary photos. Class `i` → `palette[i % 16]`, in both themes. Adjacent entries stay distinguishable under
+colour-vision deficiency, and every box also carries its class name, so colour is never the only cue.
+- Box: 2 px stroke in the class colour, wrapped by a 1 px outer halo in `classes.halo` so it reads on bright and dark
+  images alike. Optional fill at `fill_opacity` on hover/selection.
+- Label chip: class colour fill, `chip_text` (near black) text, `xs` medium, radius `xs`, sitting on the box's top-left
+  corner outside the box (inside when it would leave the image). Score in mono after the name.
+
+## Motion
+Fast and quiet. `fast` 120 ms for hovers and presses, `base` 160 ms for popovers and tabs, `slow` 200 ms for dialogs
+and panels, `chart` 240 ms for data transitions. Enter with `easing.out`, move with `standard`, leave with `in`. No
+bounce, no overshoot, no spring. With reduced motion, durations are 0.
+
+## Logo
+`logo.svg`: a viewfinder (four corner brackets) around a single dot, the one look. The brackets use `text.primary`;
+the dot is `accent.solid`. Wordmark: "FOLO" in Geist SemiBold, tracking −0.02 em, followed by the product name
+("Studio" / "Desktop") in `text.tertiary` regular.
