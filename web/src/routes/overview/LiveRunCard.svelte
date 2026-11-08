@@ -31,8 +31,9 @@
         { id: 'm50', label: 'mAP50', color: 'var(--chart-1)', pattern: 'dash' as const, points: live.epochs.map((e) => ({ x: e.epoch + 1, y: e.val.map50 })) },
       ],
       loss: [
-        { id: 'raw', label: 'raw', color: 'var(--chart-1)', ghost: true, points: raw },
-        { id: 'loss', label: 'Train loss', color: 'var(--chart-1)', points: smooth(raw, 0.9) },
+        // Same mapping as the run page: total loss is the primary ink, components get the series hues.
+        { id: 'raw', label: 'raw', color: 'var(--text-primary)', ghost: true, points: raw },
+        { id: 'loss', label: 'Total loss (EMA 0.9)', color: 'var(--text-primary)', points: smooth(raw, 0.9) },
       ],
       lastStep: live.steps[live.steps.length - 1],
     };
@@ -74,7 +75,7 @@
         <Stat label="Best mAP50-95" value={metric(run.best?.map50_95)} sub={run.best ? `epoch ${run.best.epoch + 1}` : 'after first epoch'} />
         <Stat label="Throughput" value={num(charts.lastStep?.imgs_per_s, 0)} unit="img/s" />
         <Stat label="Learning rate" value={lr(charts.lastStep?.lr)} />
-        <Stat label="Loss" value={num(charts.lastStep?.loss.total, 3)} />
+        <Stat label="Loss" value={num(charts.lastStep?.loss.total, 3)} sub="last step, raw" />
       </div>
     </div>
     <div class="chart">
@@ -86,7 +87,6 @@
           series={charts.map}
           height={150}
           xDomain={horizon}
-          yFormat={(v) => v.toFixed(2)}
           valueFormat={(v) => v.toFixed(3)}
           xTitle={(x) => `Epoch ${Math.round(x)}`}
           curve="monotone"
@@ -97,7 +97,7 @@
       {/if}
     </div>
     <div class="chart">
-      <p class="chart-title">Training loss</p>
+      <p class="chart-title">Training loss <span class="faint">· EMA 0.9</span></p>
       {#if live.loading}
         <Skeleton h="150px" r="var(--radius-md)" />
       {:else}
@@ -105,7 +105,6 @@
           series={charts.loss}
           height={150}
           xDomain={horizon}
-          yFormat={(v) => v.toFixed(1)}
           valueFormat={(v) => v.toFixed(3)}
           xTitle={(x) => `Epoch ${x.toFixed(1)}`}
           bind:cursor

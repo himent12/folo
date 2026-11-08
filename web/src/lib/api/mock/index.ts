@@ -237,7 +237,7 @@ export class MockApi implements Api {
     if (this.scenario === 'loading') return new Promise<T>(() => {});
     if (this.latency > 0 && (latency ?? this.latency) > 0) await sleep((latency ?? this.latency) * (0.7 + 0.6 * Math.random()));
     if (this.scenario === 'error')
-      throw new ApiError(0, 'network', 'Cannot reach the FOLO server.', 'Is `folo serve` running? Check the server URL in Settings.');
+      throw new ApiError(0, 'network', 'Cannot reach the FOLO server.', 'Is folo serve running? Check the server URL in Settings.');
     return fn();
   }
 
@@ -291,7 +291,7 @@ export class MockApi implements Api {
 
   createDataset(body: CreateDataset): Promise<Dataset> {
     return this.#call(() => {
-      throw new ApiError(400, 'dataset_not_found_on_disk', `No YOLO or COCO dataset found at ${body.path}.`, 'The mock server cannot read your disk; connect to `folo serve` to register folders.');
+      throw new ApiError(400, 'dataset_not_found_on_disk', `No YOLO or COCO dataset found at ${body.path}.`, 'The mock server cannot read your disk; connect to folo serve to register folders.');
     }, 400);
   }
 

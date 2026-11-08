@@ -347,12 +347,19 @@
       font-weight: var(--weight-regular);
       color: var(--text-tertiary);
     }
+    /* A fixed caption column, so every card's bar has the same length and progress compares down the list. */
     .c-prog {
       display: grid;
-      grid-template-columns: 1fr auto;
+      grid-template-columns: minmax(0, 1fr) 128px;
       align-items: center;
       gap: var(--space-3);
       font-size: var(--type-xs-size);
+    }
+    .c-prog > span {
+      text-align: right;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
     .search {
       width: 100%;

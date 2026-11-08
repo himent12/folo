@@ -79,7 +79,7 @@
     font-weight: var(--weight-medium);
   }
   .val {
-    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
     font-size: var(--type-sm-size);
     font-variant-numeric: tabular-nums;
     color: var(--text-primary);

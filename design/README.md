@@ -19,7 +19,9 @@ live state and the primary action; status colours for status; the class palette 
 - Keys starting with `$` are comments; skip them.
 
 ## Type
-- **Geist** (UI) and **Geist Mono** (numbers in tables, IDs, paths, logs, code), weights 400 / 500 / 600 only.
+- **Geist** (UI, and every number: metrics, scores, counts, coordinates, axis ticks, legends) and **Geist Mono**
+  (only identifiers, paths, filenames, logs, CLI and JSON), weights 400 / 500 / 600 only. A config value is mono only
+  when it is an identifier (`folo-s`, a weights path); prose values ("from scratch", "auto") stay in Geist.
   Files (OFL, `fonts/OFL.txt`): `fonts/<Name>-<Weight>.ttf` for desktop and `.woff2` for web.
 - Base UI text is `base` (13 / 20). The scale: `micro` 10 (uppercase overlines, +0.06 em), `xs` 11, `sm` 12, `base`
   13, `md` 14, `lg` 16, `xl` 20 (page titles), `2xl` 24, `3xl` 32 (headline metrics), `4xl` 44 (hero metric).
@@ -48,7 +50,8 @@ app: chart plots, image canvases, code/log views. In light mode panels are white
   metadata. All three meet WCAG AA (4.5:1) on every surface in both themes; `text.disabled` is for disabled controls
   only.
 - **Accent "signal" lime** (`accent.solid` #C5F82A): the focus-confirm green of a viewfinder. Used for the primary
-  button, focus rings, the live/running state, selection and "best" markers. Text on a lime fill is
+  button, focus rings, the live/running state, the selected detection and "best" markers. Never for hero numbers,
+  meters, links or decorative fills. On light surfaces the primary button carries a neutral 1 px edge, not a lime one. Text on a lime fill is
   `accent.on` (near black). On light backgrounds lime is too pale for text and strokes, so use `accent.text` /
   `accent.line` (deeper olive) there; on dark they equal the solid. The same applies to **non-text marks that must be
   seen against the surface** (progress bars, live/status dots, slider and switch fills, checkmarks, selection strokes,
@@ -56,31 +59,40 @@ app: chart plots, image canvases, code/log views. In light mode panels are white
   `accent.solid` stays for the primary button, whose `accent.on` label carries the contrast; don't use a pale lime fill
   as the only cue for a state. Chart areas are not covered here: they use `chart.series` at `area_opacity`, and the
   series line carries the data.
-- Status: `success` (completed, healthy), `warning` (degraded, stopping), `danger` (failed, errors), `info`
-  (queued, neutral notices). Each has `solid` (dots, icons, bars), `text` (readable text) and `muted` (tinted
+- Status: `success` (completed, healthy), `warning` (degraded, stopping), `danger` (failed, errors; never
+  for navigation such as a link to findings), `info` (informational notices). Waiting states (queued) are neutral
+  grey (`text.secondary` on `bg.active`), not a status hue. Each has `solid` (dots, icons, bars), `text` (readable text) and `muted` (tinted
   backgrounds for badges and banners).
 - Charts: `chart.series[0..5]` in this fixed order (sky, amber, magenta, teal, violet, orange), never cycled; the
   order keeps every adjacent pair apart under colour-vision deficiency (checked with an OKLab ΔE validator). The
   series deliberately exclude the accent lime (reserved for actions, live state, focus and "best" markers). Some
   series share a hue family with status colours (amber, teal), so charts never use colour alone for status: status is
   always labelled. Light series are ≥ 3:1 on both plot surfaces (`bg.panel`, `bg.inset`). Under tritan deficiency
-  amber and magenta are the closest pair, which is why lines also carry legends with values. Grid lines `chart.grid`, axis lines `chart.axis`, tick labels `chart.label` (xs /
-  mono), hover cursor `chart.cursor`. Area fills under a line use the series colour at `area_opacity`. Loss
-  components: total = series 1, box = 2, cls = 3, dfl = 4. Two or more series always get a legend with values, and
-  run comparisons assign series slots by run, so a run keeps its colour.
+  amber and magenta are the closest pair, which is why lines also carry legends with values. Grid lines `chart.grid`, axis lines `chart.axis`, tick labels `chart.label` (10 px
+  Geist, tabular; decimals follow the tick step: "0 2 4 6", "0 0.2 0.4"; tiny values share one power of ten shown
+  once, "× 10⁻³"), hover cursor `chart.cursor`. Area fills under a line use the series colour at `area_opacity`. Loss
+  components: total = `text.primary` (thicker), box = series 1, cls = series 4 (dashed), dfl = series 5 (dotted),
+  everywhere a loss is drawn. Two or more series always get a legend with values, and
+  run comparisons assign series slots by run, so a run keeps its colour: sky, amber, magenta, teal, with slots 3
+  and 4 also dashed / dotted (no four hues stay apart for every colour-vision type).
 
 ## Detection classes
 `classes.palette`: 15 saturated, mid-to-high-lightness colours plus one neutral near-white (class 8), chosen to stay distinct from each other and legible on
 arbitrary photos. Class `i` → `palette[i % 16]`, in both themes. Adjacent entries stay distinguishable under
 colour-vision deficiency, and every box also carries its class name, so colour is never the only cue. The palette
 avoids the accent's lime and yellows near it (class 8 is a neutral near-white, separated from the accent and from class
-10 under normal and protan/deutan/tritan simulation). Light page surfaces need darker class marks: draw swatches, bars
-and curves with a light-theme class ink (Studio: `classInk`, the palette mixed toward black until ≥ 3:1); boxes on
-photos use the palette as is.
+10 under normal and protan/deutan/tritan simulation). A class looks the same everywhere: swatches, chips, legend
+dots and class bars use the exact palette hue in both themes, with a 1 px inset edge in `chart.swatch_edge` so pale
+hues hold on light surfaces. Only thin strokes (1-2 px curves) on light surfaces use a darker ink of the same hue
+(Studio: `classStroke`, mixed toward black until ≥ 3:1). Absent classes show their swatch at 40 % opacity.
 - Box: 2 px stroke in the class colour, wrapped by a 1 px outer halo in `classes.halo` so it reads on bright and dark
   images alike. Optional fill at `fill_opacity` on hover/selection.
+- Selected box: 3 px `accent.solid` stroke inside the halo, drawn (with its chip) above everything; the other boxes
+  drop to 30 % opacity. Lists of the same boxes mark the selected row with a 2 px accent bar.
+- Small views (< 480 px): chips 14 px high with 10 px text; boxes under 20 px on screen show their label only on
+  hover or selection.
 - Label chip: class colour fill, `chip_text` (near black) text, `xs` medium, radius `xs`, sitting on the box's top-left
-  corner outside the box (inside when it would leave the image). Score in mono after the name.
+  corner outside the box (inside when it would leave the image). Score in tabular Geist after the name.
 
 ## Motion
 Fast and quiet. `fast` 120 ms for hovers and presses, `base` 160 ms for popovers and tabs, `slow` 200 ms for dialogs

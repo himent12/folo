@@ -105,8 +105,17 @@ export function clock(iso: string | null | undefined): string {
 }
 
 /** Learning rates: 0.0098 → "9.80e-3". */
+const SUP: Record<string, string> = { '-': '⁻', '0': '⁰', '1': '¹', '2': '²', '3': '³', '4': '⁴', '5': '⁵', '6': '⁶', '7': '⁷', '8': '⁸', '9': '⁹' };
+
+/** 10 to the power `e` with a superscript exponent: "10⁻³". */
+export function pow10(e: number): string {
+  return `10${[...String(e)].map((c) => SUP[c] ?? c).join('')}`;
+}
+
+/** Learning rates in scientific notation as people write it: 0.0098 → "9.80 × 10⁻³". */
 export function lr(x: number | null | undefined): string {
   if (!ok(x)) return '—';
   if (x === 0) return '0';
-  return x.toExponential(2).replace('e+', 'e');
+  const e = Math.floor(Math.log10(Math.abs(x)));
+  return `${(x / 10 ** e).toFixed(2)} × ${pow10(e)}`;
 }

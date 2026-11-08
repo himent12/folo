@@ -77,7 +77,7 @@
 <Page title="Overview">
   {#snippet sub()}
     {#if !offline}<span>
-      {#if hub.mode === 'live'}Connected to <span class="mono">folo serve {hub.version}</span>{:else if hub.mode === 'mock'}Showing built-in demo data{:else}Connecting…{/if}
+      {#if hub.mode === 'live'}Connected to <span class="mono">folo serve {hub.version}</span>{:else if hub.mode === 'mock'}{#if runs.data && !fresh}Showing built-in demo data{/if}{:else}Connecting…{/if}
     </span>{/if}
   {/snippet}
   {#snippet actions()}
@@ -312,7 +312,7 @@
     height: 28px;
     border-radius: 50%;
     border: 1px solid var(--line-strong);
-    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
     font-size: var(--type-sm-size);
     color: var(--text-secondary);
   }

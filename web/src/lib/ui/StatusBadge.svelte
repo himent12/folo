@@ -64,9 +64,10 @@
     --c: var(--warning-text);
     --bg: var(--warning-muted);
   }
+  /* Waiting is not a signal: neutral grey, with a hollow dot. */
   .queued {
-    --c: var(--info-text);
-    --bg: var(--info-muted);
+    --c: var(--text-secondary);
+    --bg: var(--bg-active);
   }
   .queued .dot {
     background: none;

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { sidebar } from './sidebarState.svelte';
   /** Ctrl/Cmd+K: jump anywhere, run any action, find any run, dataset or model. */
   import Search from '@lucide/svelte/icons/search';
   import X from '@lucide/svelte/icons/x';
@@ -78,10 +79,10 @@
       {
         id: 'sidebar',
         group: 'Actions',
-        label: prefs.sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar',
+        label: sidebar.collapsed ? 'Expand sidebar' : 'Collapse sidebar',
         keys: '[',
         icon: PanelLeft,
-        run: () => (prefs.sidebarCollapsed = !prefs.sidebarCollapsed),
+        run: () => sidebar.toggle(),
       },
       { id: 'shortcuts', group: 'Actions', label: 'Keyboard shortcuts', keys: '?', icon: Keyboard, run: onshortcuts },
     ];

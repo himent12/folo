@@ -122,6 +122,7 @@
     display: block;
     height: 100%;
     border-radius: 2px;
+    box-shadow: inset 0 0 0 1px var(--chart-swatch-edge);
     transition: width var(--dur-chart) var(--ease-standard);
   }
 </style>

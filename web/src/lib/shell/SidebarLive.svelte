@@ -100,7 +100,7 @@
   }
   .queued {
     font-size: var(--type-xs-size);
-    color: var(--info-text);
+    color: var(--text-tertiary);
   }
   .mini {
     display: grid;

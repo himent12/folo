@@ -98,6 +98,11 @@
   button.on::after {
     transform: scaleX(1);
   }
+  @media (pointer: coarse) {
+    button {
+      height: 44px;
+    }
+  }
   .meta {
     color: var(--text-tertiary);
     font-weight: var(--weight-regular);

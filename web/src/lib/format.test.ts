@@ -27,7 +27,7 @@ describe('format', () => {
   it('formats milliseconds and learning rates', () => {
     expect(ms(3.14159)).toBe('3.14 ms');
     expect(ms(12.34)).toBe('12.3 ms');
-    expect(lr(0.0098)).toBe('9.80e-3');
+    expect(lr(0.0098)).toBe('9.80 × 10⁻³');
   });
   it('formats relative times', () => {
     const now = Date.parse('2026-11-08T14:30:00Z');

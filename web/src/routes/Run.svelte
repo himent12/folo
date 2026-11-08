@@ -21,6 +21,7 @@
   import Button from '$lib/ui/Button.svelte';
   import Dialog from '$lib/ui/Dialog.svelte';
   import EmptyState from '$lib/ui/EmptyState.svelte';
+  import Menu, { type MenuItem } from '$lib/ui/Menu.svelte';
   import ErrorState from '$lib/ui/ErrorState.svelte';
   import Skeleton from '$lib/ui/Skeleton.svelte';
   import StatusBadge from '$lib/ui/StatusBadge.svelte';
@@ -95,6 +96,17 @@
     }
   }
 
+  const moreItems = $derived.by((): MenuItem[] => {
+    if (!run) return [];
+    const out: MenuItem[] = [{ label: 'Compare', icon: GitCompare, href: href(`/runs/compare?ids=${run.id}`) }];
+    if (run.model_id) {
+      if (run.status !== 'completed') out.push({ label: 'Try model', icon: ScanSearch, href: href(`/playground?model=${run.model_id}`) });
+      out.push({ label: 'Open model', icon: Box, href: href(`/models/${run.model_id}`) });
+    }
+    if (!active) out.push({ label: 'Delete run', icon: Trash, danger: true, onclick: () => (deleteOpen = true) });
+    return out;
+  });
+
   const retryHref = $derived(run ? href(`/runs/new?from=${run.id}${run.error?.includes('memory') ? `&batch=${Math.max(1, run.config.batch / 2)}` : ''}`) : '#');
 </script>
 
@@ -132,18 +144,22 @@
       <span class="faint">{run.started ? `started ${ago(run.started)}` : `created ${ago(run.created)}`}</span>
     {/snippet}
     {#snippet actions()}
-      <Button icon={GitCompare} href={href(`/runs/compare?ids=${run.id}`)}>Compare</Button>
-      {#if run.model_id}
-        {#if run.status !== 'completed'}<Button icon={ScanSearch} href={href(`/playground?model=${run.model_id}`)}>Try model</Button>{/if}
-        <Button icon={Box} href={href(`/models/${run.model_id}`)}>Model</Button>
-      {/if}
+      <span class="wide-only">
+        <Button icon={GitCompare} href={href(`/runs/compare?ids=${run.id}`)}>Compare</Button>
+        {#if run.model_id}
+          {#if run.status !== 'completed'}<Button icon={ScanSearch} href={href(`/playground?model=${run.model_id}`)}>Try model</Button>{/if}
+          <Button icon={Box} href={href(`/models/${run.model_id}`)}>Model</Button>
+        {/if}
+      </span>
       {#if run.status === 'running'}
         <Button variant="danger" icon={Square} onclick={() => (stopOpen = true)}>Stop</Button>
       {:else if run.status === 'queued'}
         <Button variant="ghost" icon={X} onclick={() => (stopOpen = true)}>Remove from queue</Button>
       {:else if !active}
-        <Button variant="ghost" icon={Trash} aria-label="Delete run" title="Delete run" onclick={() => (deleteOpen = true)} />
+        <span class="wide-only"><Button variant="ghost" icon={Trash} aria-label="Delete run" title="Delete run" onclick={() => (deleteOpen = true)} /></span>
       {/if}
+      <!-- Phones: the state action stays visible, everything else goes behind one overflow button. -->
+      <span class="phone-only"><Menu label="More run actions" items={moreItems} /></span>
     {/snippet}
 
     {#if run.status === 'failed'}
@@ -224,7 +240,7 @@
         <span class="small">last epoch</span>
       </div>
       <div class="cell">
-        <span class="label">Loss · last step</span>
+        <span class="label">Loss · last step (raw)</span>
         <span class="val num">{num(lastStep?.loss.total, 3)}</span>
         <span class="small num">box {num(lastStep?.loss.box, 2)} · cls {num(lastStep?.loss.cls, 2)}</span>
       </div>
@@ -258,13 +274,13 @@
   >
     {#snippet footer()}
       <Button onclick={() => (stopOpen = false)}>{run.status === 'queued' ? 'Keep it queued' : 'Keep training'}</Button>
-      <Button variant="danger" icon={run.status === 'queued' ? X : Square} loading={busy} onclick={stop}>{run.status === 'queued' ? 'Remove' : 'Stop run'}</Button>
+      <Button variant="destructive" icon={run.status === 'queued' ? X : Square} loading={busy} onclick={stop}>{run.status === 'queued' ? 'Remove' : 'Stop run'}</Button>
     {/snippet}
   </Dialog>
   <Dialog bind:open={deleteOpen} title="Delete {run.name}?" description="Removes the run and its metric history from Studio. Checkpoint files on disk are not touched." size="sm">
     {#snippet footer()}
       <Button onclick={() => (deleteOpen = false)}>Cancel</Button>
-      <Button variant="danger" icon={Trash} loading={busy} onclick={remove}>Delete run</Button>
+      <Button variant="destructive" icon={Trash} loading={busy} onclick={remove}>Delete run</Button>
     {/snippet}
   </Dialog>
 {/if}
@@ -303,6 +319,20 @@
   }
   .id {
     font-size: var(--type-xs-size);
+  }
+  .wide-only {
+    display: contents;
+  }
+  .phone-only {
+    display: none;
+  }
+  @media (max-width: 767px) {
+    .wide-only {
+      display: none;
+    }
+    .phone-only {
+      display: contents;
+    }
   }
   .link {
     color: var(--text-primary);
@@ -409,8 +439,10 @@
   :global([data-theme='light']) .cluster {
     border-color: var(--line-default);
   }
+  /* One rhythm for every tile: label row, value row (values sit on a shared baseline), caption. */
   .cell {
     display: grid;
+    grid-template-rows: 16px 40px auto;
     gap: 4px;
     align-content: start;
     padding: var(--space-4);
@@ -441,6 +473,8 @@
     letter-spacing: 0;
   }
   .val {
+    align-self: end;
+    padding-bottom: 2px;
     font-size: var(--type-xl-size);
     line-height: var(--type-xl-line);
     letter-spacing: var(--type-xl-tracking);
@@ -523,8 +557,12 @@
       grid-template-columns: repeat(2, minmax(0, 1fr));
     }
     .cell {
+      grid-template-rows: auto;
       padding: var(--space-2) var(--space-3);
       gap: 0;
+    }
+    .val {
+      padding-bottom: 0;
     }
     .cell:nth-child(n) {
       border-left: 0;

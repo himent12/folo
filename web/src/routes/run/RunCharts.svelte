@@ -3,7 +3,7 @@
   import { smooth, type Pt } from '$lib/charts/downsample';
   import LineChart, { type Series } from '$lib/charts/LineChart.svelte';
   import type { Epoch, Run, Step } from '$lib/api/types';
-  import { lr as fmtLr, num } from '$lib/format';
+  import { lr as fmtLr, num, pow10 } from '$lib/format';
   import Panel from '$lib/ui/Panel.svelte';
   import Segmented from '$lib/ui/Segmented.svelte';
   import { runHorizon } from '$lib/charts/horizon';
@@ -97,21 +97,34 @@
     return m;
   });
 
+  // LR ticks share one power of ten (shown in the panel meta): "2.0" "4.0" with "× 10⁻³" instead of "2.00e-3".
+  const lrExp = $derived.by(() => {
+    let m = 0;
+    for (const p of lrS[0]?.points ?? []) if (p.y > m) m = p.y;
+    return m > 0 ? Math.floor(Math.log10(m)) : 0;
+  });
+  const lrPow = $derived(`× ${pow10(lrExp)}`);
+  const lrTick = (v: number) => String(+(v / 10 ** lrExp).toFixed(2));
+
   const best = $derived(run.best ? [{ x: run.best.epoch + 1, y: run.best.map50_95, label: `best ${run.best.map50_95.toFixed(3)}` }] : []);
 </script>
 
 {#snippet chartSk()}<Skeleton h="180px" r="var(--radius-md)" />{/snippet}
 
-<div class="bar">
-  <Segmented
-    size="sm"
-    label="Chart range"
-    bind:value={horizon}
-    options={[
-      { value: 'observed', label: live ? 'So far' : 'Observed' },
-      { value: 'full', label: `Full run · ${run.epochs} epochs` },
-    ]}
-  />
+<div class="head">
+  <h2 class="overline" id="curves-title">Training curves</h2>
+  <!-- Only a live run has a future to show: a finished run's curves already span its whole history. -->
+  {#if live}
+    <Segmented
+      size="sm"
+      label="Chart range"
+      bind:value={horizon}
+      options={[
+        { value: 'observed', label: 'So far' },
+        { value: 'full', label: `Full run · ${run.epochs} epochs` },
+      ]}
+    />
+  {/if}
 </div>
 <div class="grid">
   <Panel title="Loss" meta={smoothing === '0' ? 'raw per step' : `smoothed · EMA ${smoothing}`} class="span2" id="chart-loss">
@@ -136,8 +149,8 @@
         height={hBig}
         {xDomain}
         yLog={scale === 'log'}
-        yFormat={(v) => (v >= 10 ? v.toFixed(0) : v.toFixed(1))}
         valueFormat={(v) => v.toFixed(3)}
+        xLabel="epoch"
         xTitle={epochTitle}
         bind:cursor
         label="Training loss components by epoch"
@@ -153,8 +166,8 @@
         height={hBig}
         {xDomain}
         yDomain={[0, 1]}
-        yFormat={(v) => v.toFixed(1)}
         valueFormat={(v) => v.toFixed(3)}
+        xLabel="epoch"
         xTitle={epochTitle}
         curve="monotone"
         markers={best}
@@ -172,8 +185,8 @@
         height={hSmall}
         {xDomain}
         yDomain={[0, 1]}
-        yFormat={(v) => v.toFixed(1)}
         valueFormat={(v) => v.toFixed(3)}
+        xLabel="epoch"
         xTitle={epochTitle}
         curve="monotone"
         bind:cursor
@@ -183,13 +196,15 @@
     {/if}
   </Panel>
 
-  <Panel title="Learning rate" meta="warmup 3 · cosine" id="chart-lr">
+  <Panel title="Learning rate" meta="{lrPow} · warmup 3 · cosine" id="chart-lr">
     {#if loading}{@render chartSk()}{:else}
       <LineChart
         series={lrS}
         height={hSmall}
         {xDomain}
-        yFormat={(v) => fmtLr(v)}
+        yFormat={lrTick}
+        valueFormat={(v) => fmtLr(v)}
+        xLabel="epoch"
         xTitle={epochTitle}
         bind:cursor
         label="Learning rate by epoch"
@@ -207,6 +222,7 @@
         yDomain={[0, ipsMax * 1.2]}
         yFormat={(v) => num(v, 0)}
         valueFormat={(v) => `${num(v, 0)} img/s`}
+        xLabel="epoch"
         xTitle={epochTitle}
         bind:cursor
         label="Training throughput in images per second"
@@ -222,10 +238,13 @@
     color: var(--text-tertiary);
     margin-right: 2px;
   }
-  .bar {
+  .head {
     display: flex;
-    justify-content: flex-end;
-    margin-bottom: calc(-1 * var(--space-2));
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+    min-height: 28px;
+    margin-bottom: calc(-1 * var(--space-1));
   }
   .grid {
     display: grid;

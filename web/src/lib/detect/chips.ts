@@ -28,10 +28,12 @@ export interface Placement {
 }
 
 /**
+ * `chipH` is the chip height (16 px, 14 px on small views).
  * Above the box by default; inside it when that leaves the image or hits an earlier chip; nudged down on further
  * collisions while it fits; otherwise the nearest free slot above. Always clamped to the visible image.
  */
-export function placeChips(boxes: (ChipBox | null)[], b: ChipBounds): (Placement | null)[] {
+export function placeChips(boxes: (ChipBox | null)[], b: ChipBounds, chipH = CHIP_H): (Placement | null)[] {
+  const CHIP_H = chipH;
   const maxY = b.maxY - CHIP_H;
   const placed: { x: number; y: number; w: number }[] = [];
   const hits = (x: number, y: number, w: number) =>

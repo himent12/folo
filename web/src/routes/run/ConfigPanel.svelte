@@ -8,6 +8,8 @@
   let { config, datasetName }: { config: TrainConfig; datasetName?: string } = $props();
 
   const a = $derived(config.augment);
+  // Identifiers (model names, weight paths, devices) are mono; numbers and prose are sans with tabular numerals.
+  const MONO = new Set(['Model', 'Weights', 'Device', 'Optimizer']);
   const rows = $derived<[string, string][]>([
     ['Dataset', datasetName ?? config.dataset_id],
     ['Model', config.arch],
@@ -33,7 +35,7 @@
   async function copy() {
     try {
       await navigator.clipboard.writeText(JSON.stringify(config, null, 2));
-      toast.success('Config copied', 'Paste it into `folo train --config` or a new run.');
+      toast.success('Config copied', 'Paste it into folo train --config or a new run.');
     } catch (e) {
       toast.error(e, 'Could not copy');
     }
@@ -45,11 +47,11 @@
   <div class="cols">
     <dl>
       <p class="overline">Training</p>
-      {#each rows as [k, v] (k)}<dt>{k}</dt><dd class="mono">{v}</dd>{/each}
+      {#each rows as [k, v] (k)}<dt>{k}</dt><dd class="num" class:mono={MONO.has(k) && !(k === 'Weights' && !config.weights)}>{v}</dd>{/each}
     </dl>
     <dl>
       <p class="overline">Augmentation</p>
-      {#each aug as [k, v] (k)}<dt>{k}</dt><dd class="mono">{v}</dd>{/each}
+      {#each aug as [k, v] (k)}<dt>{k}</dt><dd class="num">{v}</dd>{/each}
     </dl>
   </div>
 </Panel>

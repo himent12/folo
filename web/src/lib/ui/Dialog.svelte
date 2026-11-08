@@ -38,9 +38,15 @@
     onclose?.();
   }
 
+  // A click whose target is the <dialog> itself landed on the backdrop. It must also have started there: a text
+  // selection or slider drag that begins inside and is released outside is not a request to close.
+  let downOnBackdrop = false;
+  function onpointerdown(e: PointerEvent) {
+    downOnBackdrop = e.target === el;
+  }
   function onclick(e: MouseEvent) {
-    // A click whose target is the <dialog> itself landed on the backdrop.
-    if (e.target === el) el.close();
+    if (e.target === el && downOnBackdrop) el.close();
+    downOnBackdrop = false;
   }
 </script>
 
@@ -50,6 +56,7 @@
   aria-labelledby="{uid}-title"
   aria-describedby={description ? `${uid}-desc` : undefined}
   onclose={onDialogClose}
+  {onpointerdown}
   {onclick}
 >
   <div class="frame">

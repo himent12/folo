@@ -52,9 +52,12 @@
       slots = next;
     });
   });
-  // Run slots use four well-separated series hues: sky, magenta, teal, amber.
-  const RUN_SLOTS = [1, 3, 4, 2];
-  const color = (id: string) => `var(--chart-${RUN_SLOTS[slots[id] ?? Math.max(0, ids.indexOf(id))] ?? 1})`;
+  // Run slots: sky and amber first (the most distinct pair, for the common two-run comparison), then magenta and teal.
+  // No four hues stay apart for every colour-vision type, so slots 3 and 4 also get a line pattern.
+  const RUN_SLOTS = [1, 2, 3, 4];
+  const SLOT_PATTERN = [undefined, undefined, 'dash', 'dot'] as const;
+  const slotOf = (id: string) => slots[id] ?? Math.max(0, ids.indexOf(id));
+  const color = (id: string) => `var(--chart-${RUN_SLOTS[slotOf(id)] ?? 1})`;
 
   function setIds(next: string[]) {
     router.go(`/runs/compare${next.length ? `?ids=${next.join(',')}` : ''}`, { replace: true });
@@ -67,6 +70,7 @@
         id: r.id,
         label: r.name,
         color: color(r.id),
+        pattern: SLOT_PATTERN[slotOf(r.id)],
         points: eps.map((e) => ({ x: x === 'epoch' ? e.epoch + 1 : ((e.epoch + 1) / r.epochs) * 100, y: f(e) })),
       };
     });
@@ -109,7 +113,7 @@
   <div class="picker" role="group" aria-label="Runs being compared">
     {#each chosen as r, i (r.id)}
       <span class="chip" style:--c={color(r.id)}>
-        <i aria-hidden="true"></i>
+        <i aria-hidden="true" data-pattern={SLOT_PATTERN[slotOf(r.id)]}></i>
         <a href={href(`/runs/${r.id}`)}>{r.name}</a>
         <button aria-label="Remove {r.name}" onclick={() => setIds(ids.filter((id) => id !== r.id))}><X size={12} /></button>
       </span>
@@ -161,12 +165,12 @@
               {xDomain}
               yDomain={c.y}
               curve="monotone"
-              yFormat={(v) => v.toFixed(1)}
               valueFormat={(v) => v.toFixed(3)}
               xFormat={(v) => (x === 'epoch' ? String(Math.round(v)) : `${Math.round(v)}%`)}
               xTitle={(v) => (x === 'epoch' ? `Epoch ${Math.round(v)}` : `${v.toFixed(0)}% through`)}
               bind:cursor
-              endLabels
+              legendNote={chosen.some((r) => r.status === 'running') ? 'Latest' : 'Last epoch'}
+              xLabel={x === 'epoch' ? 'epoch' : undefined}
               label="{c.title} for the compared runs"
             />
           {/if}
@@ -182,7 +186,7 @@
               <tr>
                 <th></th>
                 {#each chosen as r, i (r.id)}
-                  <th><span class="th"><i style:background={color(r.id)}></i>{r.name}</span></th>
+                  <th><span class="th" style:--c={color(r.id)}><i data-pattern={SLOT_PATTERN[slotOf(r.id)]}></i>{r.name}</span></th>
                 {/each}
               </tr>
             </thead>
@@ -201,7 +205,7 @@
                 {@const diff = differs(f)}
                 <tr>
                   <td class="k">{k}{#if diff}<span class="dot" title="Differs between runs"></span>{/if}</td>
-                  {#each chosen as r (r.id)}<td class="mono" class:diff>{f(r)}</td>{/each}
+                  {#each chosen as r (r.id)}<td class="num cfg" class:diff>{f(r)}</td>{/each}
                 </tr>
               {/each}
             </tbody>
@@ -324,6 +328,20 @@
     width: 10px;
     height: 3px;
     border-radius: 2px;
+    background: var(--c);
+  }
+  /* Same patterns as the lines, so a run's key matches its curve without relying on colour. */
+  .chip i,
+  .th i {
+    width: 14px;
+  }
+  i[data-pattern='dash'] {
+    background: repeating-linear-gradient(90deg, var(--c) 0 5px, transparent 5px 7px);
+    border-radius: 0;
+  }
+  i[data-pattern='dot'] {
+    background: repeating-linear-gradient(90deg, var(--c) 0 2px, transparent 2px 4px);
+    border-radius: 0;
   }
   .k {
     color: var(--text-tertiary);
@@ -334,13 +352,13 @@
     height: 5px;
     margin-left: 6px;
     border-radius: 50%;
-    background: var(--warning-solid);
+    background: var(--text-secondary);
     vertical-align: middle;
   }
   td.diff {
     color: var(--text-primary);
   }
-  td.mono:not(.diff) {
+  td.cfg:not(.diff) {
     color: var(--text-tertiary);
   }
   .winner {

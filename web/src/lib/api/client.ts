@@ -108,7 +108,7 @@ export class HttpApi implements Api {
       res = await fetch(`${this.base}/api${path}`, init);
     } catch (e) {
       if (e instanceof DOMException && e.name === 'AbortError') throw e;
-      throw new ApiError(0, 'network', 'Cannot reach the FOLO server.', 'Is `folo serve` running? Check the server URL in Settings.');
+      throw new ApiError(0, 'network', 'Cannot reach the FOLO server.', 'Is folo serve running? Check the server URL in Settings.');
     }
     if (res.status === 204) return undefined as T;
     const text = await res.text();

@@ -40,6 +40,7 @@
     yLog?: boolean;
     curve?: 'linear' | 'monotone';
     xFormat?: (x: number) => string;
+    /** Tick labels on y. Default: as many decimals as the tick step needs ("6", "0.5", "0.25"). */
     yFormat?: (y: number) => string;
     /** Formats values in the tooltip and legend (defaults to yFormat). */
     valueFormat?: (y: number) => string;
@@ -55,6 +56,10 @@
     empty?: string;
     /** Label each line where it ends (direct labels), for comparisons where colour alone is not enough. */
     endLabels?: boolean;
+    /** Short x-axis caption drawn under the y labels, e.g. "epoch". */
+    xLabel?: string;
+    /** Leading legend caption saying which value the legend shows, e.g. "Last". Replaced by the x title on hover. */
+    legendNote?: string;
   }
 
   let {
@@ -65,7 +70,7 @@
     yLog = false,
     curve = 'linear',
     xFormat: xFormatProp,
-    yFormat = (y) => String(+y.toFixed(3)),
+    yFormat: yFormatProp,
     valueFormat,
     xTitle,
     markers = [],
@@ -76,11 +81,12 @@
     label,
     empty = 'No data yet',
     endLabels = false,
+    xLabel,
+    legendNote,
   }: Props = $props();
 
   const uid = $props.id();
   let width = $state(0);
-  const fmtValue = $derived(valueFormat ?? yFormat);
 
   const visible = $derived(series.filter((s) => s.points.length > 0));
   const hasData = $derived(visible.length > 0);
@@ -129,10 +135,21 @@
     return niceTicks(yExtent[0], yExtent[1], yTicks);
   });
 
+  // Decimals follow the tick step, so a 0..6 axis reads "0 2 4 6" and a 0..1 axis "0 0.5 1"; log ticks use 3 digits.
+  const yFormat = $derived.by(() => {
+    if (yFormatProp) return yFormatProp;
+    if (yLog) return (v: number) => String(+v.toPrecision(3));
+    const step = yTickValues.length > 1 ? Math.abs(yTickValues[1]! - yTickValues[0]!) : 1;
+    const d = Math.max(0, Math.min(6, Math.ceil(-Math.log10(step) - 1e-9)));
+    return (v: number) => v.toFixed(d);
+  });
+  const fmtValue = $derived(valueFormat ?? yFormatProp ?? ((v: number) => String(+v.toFixed(3))));
+
   const margin = $derived.by(() => {
     const longest = Math.max(...yTickValues.map((v) => yFormat(v).length), 1);
     const labelW = endLabels && width >= 560 ? Math.min(120, Math.max(0, ...series.map((s) => s.label.length)) * 6.2 + 10) : 0;
-    return { top: 8, right: 12 + labelW, bottom: 22, left: Math.ceil(longest * 6.4) + 14 };
+    const left = Math.max(Math.ceil(longest * 6.4) + 14, xLabel ? Math.ceil(xLabel.length * 5.6) + 12 : 0);
+    return { top: 8, right: 12 + labelW, bottom: 22, left };
   });
 
   const x = $derived(scaleLinear().domain(xExtent).range([margin.left, Math.max(margin.left + 1, width - margin.right)]));
@@ -315,6 +332,7 @@
 <div class="chart">
   {#if legend && keyed.length > 0}
     <ul class="legend" aria-hidden="true">
+      {#if legendNote}<li class="note">{hover ? hover.title : legendNote}</li>{/if}
       {#each keyed as s (s.id)}
         {@const v = hover ? hover.rows.find((r) => r.s.id === s.id)?.p.y : latest(s)}
         <li>
@@ -373,6 +391,7 @@
           {#each xTickValues as t (t)}
             <text x={x(t)} y={height - 6} text-anchor="middle">{xFormat(t)}</text>
           {/each}
+          {#if xLabel}<text class="x-label" x={margin.left - 8} y={height - 6} text-anchor="end">{xLabel}</text>{/if}
         </g>
 
         {#if hasData}
@@ -463,6 +482,12 @@
     align-items: center;
     gap: 6px;
   }
+  .legend .note {
+    color: var(--text-tertiary);
+  }
+  .x-label {
+    fill: var(--text-tertiary);
+  }
   .swatch {
     flex-shrink: 0;
     overflow: visible;
@@ -476,7 +501,6 @@
   }
   .val {
     color: var(--text-primary);
-    font-family: var(--font-mono);
     font-variant-numeric: tabular-nums;
   }
   .plot {
@@ -504,7 +528,7 @@
   }
   .ticks text {
     fill: var(--chart-label);
-    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
     font-size: 10px;
     font-variant-numeric: tabular-nums;
   }
@@ -556,7 +580,7 @@
   .marker text {
     fill: var(--text-secondary);
     font-size: 10px;
-    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
     paint-order: stroke;
     stroke: var(--bg-panel);
     stroke-width: 3px;
@@ -591,7 +615,7 @@
   .tip-title {
     color: var(--text-tertiary);
     margin-bottom: 2px;
-    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
   }
   .tip-row {
     display: flex;
@@ -601,7 +625,7 @@
   .tip-row .at {
     margin-left: 6px;
     color: var(--text-tertiary);
-    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
     font-size: var(--type-micro-size);
   }
   .tip-row .name {
