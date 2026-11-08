@@ -437,6 +437,9 @@ pub struct FoloApp {
     // Overlays
     pub palette: Option<Palette>,
     pub new_run: Option<NewRunForm>,
+    /// A New run form closed without starting (Esc, the scrim, Cancel): the next plain New run
+    /// reopens it as it was, so a stray click doesn't lose a configured run.
+    pub new_run_draft: Option<NewRunForm>,
     /// The Generate synthetic dataset dialog.
     pub synth: Option<SynthForm>,
     pub synth_seq: u64,
@@ -576,6 +579,7 @@ impl FoloApp {
             reduce_motion: calm,
             palette: None,
             new_run: None,
+            new_run_draft: None,
             synth: None,
             synth_seq: 0,
             restore_pending: false,
@@ -1441,7 +1445,11 @@ impl FoloApp {
     }
 
     pub fn close_new_run(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.new_run = None;
+        self.new_run_draft = self.new_run.take().map(|mut f| {
+            f.submitting = false;
+            f.error = None;
+            f
+        });
         self.restore_focus(window);
         cx.notify();
     }
@@ -1491,6 +1499,18 @@ impl FoloApp {
         }
         if self.new_run.is_none() {
             self.remember_focus(window, cx);
+        }
+        // A plain New run picks up a draft left by Esc or Cancel; one for a specific dataset (or
+        // prefilled from a run) starts fresh.
+        if let Some(draft) = self.new_run_draft.take()
+            && self.new_run.is_none()
+            && dataset.is_none()
+        {
+            let fh = draft.name.read(cx).focus_handle(cx);
+            self.new_run = Some(draft);
+            window.focus(&fh);
+            cx.notify();
+            return;
         }
         let idx =
             dataset.and_then(|id| self.store.datasets.ready()?.iter().position(|d| d.id == id)).unwrap_or(0);
@@ -2260,6 +2280,10 @@ impl FoloApp {
                 }
             }))
             .when(ring, |d| d.child(focus_ring(&t, 6.)))
+            // The icon rail names the focused item, as its tooltip does for the pointer.
+            .when(compact && ring, |d| {
+                d.child(crate::controls::focus_tip(&t, format!("{label} · {}", shortcut_label(key)), 34.))
+            })
             .when(compact, |d| {
                 d.justify_center().px(px(0.)).tooltip(crate::controls::tip(label, Some(shortcut_label(key))))
             })
@@ -2838,6 +2862,8 @@ impl FoloApp {
     /// Swap the data source; everything reloads from the new backend.
     pub fn set_backend(&mut self, api: Arc<dyn Backend>, mode: ServerMode, cx: &mut Context<Self>) {
         self.backend_gen += 1;
+        // A draft's dataset index belongs to the old server's list.
+        self.new_run_draft = None;
         // Model ids are per server: loaded local models belong to the old one.
         crate::local::forget_all();
         if !api.local_inference() {
@@ -2980,7 +3006,12 @@ impl FoloApp {
             self.confirm_stop = None;
             self.restore_focus(window);
         } else if self.new_run.is_some() {
-            self.new_run = None;
+            // Kept as a draft, like Cancel.
+            self.new_run_draft = self.new_run.take().map(|mut f| {
+                f.submitting = false;
+                f.error = None;
+                f
+            });
             self.restore_focus(window);
         } else if self.synth.is_some() {
             self.synth = None;

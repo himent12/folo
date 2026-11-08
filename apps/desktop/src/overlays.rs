@@ -279,6 +279,8 @@ impl FoloApp {
                     .rounded(px(radius::MD))
                     .cursor_pointer()
                     .when(on, |d| d.bg(t.bg_active))
+                    // Pressed reads stronger than the pointer-selected row.
+                    .active(|s| s.bg(crate::theme::over(t.bg_active, t.bg_hover)))
                     .on_mouse_move(cx.listener(move |this, _: &MouseMoveEvent, _, cx| {
                         if let Some(p) = this.palette.as_mut()
                             && p.selected != i
@@ -734,10 +736,11 @@ impl FoloApp {
         };
         // Short windows drop the helper rows; the two that explain a choice stay one hover or
         // focus away.
-        let batch_help = short.then(|| self.help_icon("help-batch", "Images per training step.", window, cx));
+        let batch_help =
+            short.then(|| self.help_icon("nr-help-batch", "Images per training step.", window, cx));
         let device_help = short.then(|| {
             self.help_icon(
-                "help-device",
+                "nr-help-device",
                 "Auto uses the GPU when one is available, else the CPU.",
                 window,
                 cx,

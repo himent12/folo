@@ -883,7 +883,7 @@ impl FoloApp {
                 )
                 .child(div().flex().gap(px(6.)).children(thumbs))
         });
-        // One scrolling column: controls, detections and their latency, then sample images (no
+        // One scrolling column: controls and sample images, then detections and their latency (no
         // pinned footer, so no dead band and nothing hidden on short windows).
         let rail = if window.viewport_size().width < px(1100.) { 280. } else { 320. };
         panel(&t)
@@ -905,11 +905,12 @@ impl FoloApp {
                             .flex()
                             .flex_col()
                             .child(controls)
+                            // Inputs first (the model, its settings, an image to try), then the
+                            // results and their latency.
+                            .children(picker)
                             .child(hairline(&t))
                             .child(detections)
-                            // The run's latency next to its results; sample images after.
                             .children(timing)
-                            .children(picker)
                             // Room to scroll the last row clear of the fade below.
                             .child(div().h(px(12.))),
                     ),
@@ -945,7 +946,8 @@ impl FoloApp {
         };
         let control = self.segmented_fill_with(
             "play-target",
-            &["Server", "Local GPU", "Local CPU"],
+            // The built-in demo isn't a server: say what actually runs.
+            &[if local { "Server" } else { "Demo" }, "Local GPU", "Local CPU"],
             selected,
             &[None, gpu_why, no_local],
             window,
@@ -966,7 +968,7 @@ impl FoloApp {
             cx,
         );
         let note = match (self.play_target, &self.local_gpu) {
-            (None, _) if !local => "Local GPU / CPU need a model from folo serve".into(),
+            (None, _) if !local => "Built-in demo · simulated inference (local runs need folo serve)".into(),
             (None, _) => format!("On folo serve at {}", self.store.api.describe()),
             (Some(Target::Gpu), Load::Ready(name)) => {
                 format!("In this app, on {}", crate::ui::short_gpu(name))
