@@ -1,6 +1,7 @@
 <script lang="ts">
   /** Ctrl/Cmd+K: jump anywhere, run any action, find any run, dataset or model. */
   import Search from '@lucide/svelte/icons/search';
+  import X from '@lucide/svelte/icons/x';
   import Plus from '@lucide/svelte/icons/plus';
   import SunMoon from '@lucide/svelte/icons/sun-moon';
   import PanelLeft from '@lucide/svelte/icons/panel-left';
@@ -186,6 +187,7 @@
         {onkeydown}
         placeholder="Search runs, datasets, models, or type a command…"
         role="combobox"
+        aria-label="Search commands, runs, datasets and models"
         aria-expanded="true"
         aria-controls="palette-list"
         aria-activedescendant={flat[index] ? `pi-${flat[index]?.id}` : undefined}
@@ -193,7 +195,8 @@
         spellcheck="false"
         autocomplete="off"
       />
-      <Kbd keys="Escape" subtle />
+      <span class="esc"><Kbd keys="Escape" subtle /></span>
+      <button class="close" type="button" aria-label="Close" onclick={() => el.close()}><X size={18} /></button>
     </div>
     <ul id="palette-list" role="listbox" bind:this={list} aria-label="Results">
       {#each grouped as g (g.group)}
@@ -367,7 +370,27 @@
       transform: translateY(-6px) scale(0.985);
     }
   }
+  .close {
+    display: none;
+  }
+  @media (pointer: coarse) {
+    .item {
+      height: 44px;
+    }
+  }
   @media (max-width: 767px) {
+    .esc {
+      display: none;
+    }
+    .close {
+      display: grid;
+      place-items: center;
+      width: 44px;
+      height: 44px;
+      margin-right: calc(-1 * var(--space-3));
+      border-radius: var(--radius-md);
+      color: var(--text-secondary);
+    }
     .palette {
       margin-top: var(--space-3);
     }

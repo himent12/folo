@@ -7,6 +7,7 @@
   import ScanSearch from '@lucide/svelte/icons/scan-search';
   import Square from '@lucide/svelte/icons/square';
   import Trash from '@lucide/svelte/icons/trash-2';
+  import X from '@lucide/svelte/icons/x';
   import TriangleAlert from '@lucide/svelte/icons/triangle-alert';
   import WifiOff from '@lucide/svelte/icons/wifi-off';
   import { hub } from '$lib/api/index.svelte';
@@ -40,6 +41,9 @@
     setCrumbs({ label: 'Runs', path: '/runs' }, { label: run?.name ?? id });
   });
 
+  const others = new Resource((s) => hub.api.runs(s), { poll: 5000 });
+  const queuedOnly = $derived(run?.status === 'queued' && live.steps.length === 0);
+  const ahead = $derived(others.data?.find((r) => r.status === 'running' || r.status === 'stopping'));
   const active = $derived(run ? ['queued', 'running', 'stopping'].includes(run.status) : false);
   const lastStep = $derived.by(() => {
     void live.version;
@@ -102,11 +106,16 @@
     </EmptyState>
   </Page>
 {:else if !run}
+  <!-- Mirrors the real layout (header, summary strip, chart rows) so nothing jumps when data arrives. -->
   <div class="loading" aria-busy="true" aria-label="Loading run">
-    <Skeleton w="120px" h="20px" />
-    <Skeleton w="280px" h="28px" />
-    <Skeleton h="96px" r="var(--radius-lg)" />
-    <div class="sk-grid"><Skeleton h="260px" r="var(--radius-lg)" /><Skeleton h="260px" r="var(--radius-lg)" /></div>
+    <div class="sk-head">
+      <Skeleton w="140px" h="20px" r="var(--radius-full)" />
+      <Skeleton w="240px" h="28px" />
+      <Skeleton w="min(420px, 100%)" h="16px" />
+    </div>
+    <Skeleton h="118px" r="var(--radius-lg)" />
+    <div class="sk-row2"><Skeleton h="300px" r="var(--radius-lg)" /><Skeleton h="300px" r="var(--radius-lg)" /></div>
+    <div class="sk-row3"><Skeleton h="260px" r="var(--radius-lg)" /><Skeleton h="260px" r="var(--radius-lg)" /><Skeleton h="260px" r="var(--radius-lg)" /></div>
   </div>
 {:else}
   <Page title={run.name}>
@@ -125,11 +134,13 @@
     {#snippet actions()}
       <Button icon={GitCompare} href={href(`/runs/compare?ids=${run.id}`)}>Compare</Button>
       {#if run.model_id}
-        <Button icon={ScanSearch} href={href(`/playground?model=${run.model_id}`)}>Try model</Button>
+        {#if run.status !== 'completed'}<Button icon={ScanSearch} href={href(`/playground?model=${run.model_id}`)}>Try model</Button>{/if}
         <Button icon={Box} href={href(`/models/${run.model_id}`)}>Model</Button>
       {/if}
-      {#if run.status === 'running' || run.status === 'queued'}
+      {#if run.status === 'running'}
         <Button variant="danger" icon={Square} onclick={() => (stopOpen = true)}>Stop</Button>
+      {:else if run.status === 'queued'}
+        <Button variant="ghost" icon={X} onclick={() => (stopOpen = true)}>Remove from queue</Button>
       {:else if !active}
         <Button variant="ghost" icon={Trash} aria-label="Delete run" title="Delete run" onclick={() => (deleteOpen = true)} />
       {/if}
@@ -153,14 +164,6 @@
         </div>
         {#if run.model_id}<Button size="sm" icon={ScanSearch} href={href(`/playground?model=${run.model_id}`)}>Try in Playground</Button>{/if}
       </div>
-    {:else if run.status === 'queued'}
-      <div class="banner info">
-        <Clock size={16} />
-        <div class="b-text">
-          <p class="b-title">Queued</p>
-          <p class="b-msg">Waiting for the device. It starts when the run ahead of it finishes.</p>
-        </div>
-      </div>
     {:else if run.status === 'stopped'}
       <div class="banner neutral">
         <Square size={16} />
@@ -171,14 +174,36 @@
       </div>
     {/if}
 
+    {#if queuedOnly}
+      <!-- Nothing has run yet: one clear waiting state instead of empty charts. -->
+      <section class="queued" aria-label="Queued">
+        <div class="q-mark" aria-hidden="true"><Clock size={20} strokeWidth={1.5} /></div>
+        <h2>Queued{#if ahead}<span class="faint">&nbsp;· next in line</span>{/if}</h2>
+        <p>
+          {#if ahead}
+            Starts when <a class="link" href={href(`/runs/${ahead.id}`)}>{ahead.name}</a> finishes{#if ahead.eta_s !== null}, in about {duration(ahead.eta_s)}{/if}.
+          {:else}
+            Waiting for the device. It starts as soon as it is free.
+          {/if}
+          Charts, samples and logs appear with the first training step.
+        </p>
+        <div class="q-facts num">
+          <span><b>{run.epochs}</b> epochs</span>
+          <span><b>{run.config.batch}</b> batch</span>
+          <span><b>{run.config.imgsz}</b> px</span>
+          <span class="mono">{run.config.arch}</span>
+        </div>
+      </section>
+    {:else}
     <section class="cluster" aria-label="Run summary">
       <div class="cell main">
         <span class="label">Epoch</span>
         <span class="big num">{run.epoch}<span class="of">/ {run.epochs}</span></span>
         <div class="track" aria-hidden="true">
           <div class="fill" class:done={run.status === 'completed'} class:bad={run.status === 'failed'} style:transform="scaleX({run.status === 'completed' ? 1 : progress})"></div>
-          {#if closeFrom < 1}<div class="close" style:left="{closeFrom * 100}%" title="Mosaic off for the last {run.config.augment.close_mosaic} epochs"></div>{/if}
+          {#if closeFrom < 1 && active}<div class="close" style:left="{closeFrom * 100}%"></div>{/if}
         </div>
+        {#if closeFrom < 1 && active}<span class="sr-only">The hatched end of the bar marks the last {run.config.augment.close_mosaic} epochs, trained without mosaic.</span>{/if}
         <span class="small num">
           {#if active}{(progress * 100).toFixed(1)}% · {run.eta_s !== null ? `${duration(run.eta_s)} left` : 'estimating…'}{:else}{duration(elapsed)} total{/if}
         </span>
@@ -199,11 +224,11 @@
         <span class="small">last epoch</span>
       </div>
       <div class="cell">
-        <span class="label">Loss</span>
+        <span class="label">Loss · last step</span>
         <span class="val num">{num(lastStep?.loss.total, 3)}</span>
         <span class="small num">box {num(lastStep?.loss.box, 2)} · cls {num(lastStep?.loss.cls, 2)}</span>
       </div>
-      <div class="cell">
+      <div class="cell secondary">
         <span class="label">Throughput</span>
         <span class="val num">{num(lastStep?.imgs_per_s, 0)}<span class="unit">img/s</span></span>
         <span class="small num">lr {lr(lastStep?.lr)}</span>
@@ -218,14 +243,22 @@
     </div>
 
     <Samples runId={run.id} classes={dataset?.classes ?? []} {epochsDone} />
+    {/if}
 
     <ConfigPanel config={run.config} datasetName={dataset?.name} />
   </Page>
 
-  <Dialog bind:open={stopOpen} title="Stop {run.name}?" description="Training stops after the current step. The last checkpoint is kept and saved as a model." size="sm">
+  <Dialog
+    bind:open={stopOpen}
+    title={run.status === 'queued' ? `Remove ${run.name} from the queue?` : `Stop ${run.name}?`}
+    description={run.status === 'queued'
+      ? 'It has not started yet, so nothing is lost. You can start it again from New run.'
+      : 'Training stops after the current step. The last checkpoint is kept and saved as a model.'}
+    size="sm"
+  >
     {#snippet footer()}
-      <Button onclick={() => (stopOpen = false)}>Keep training</Button>
-      <Button variant="danger" icon={Square} loading={busy} onclick={stop}>Stop run</Button>
+      <Button onclick={() => (stopOpen = false)}>{run.status === 'queued' ? 'Keep it queued' : 'Keep training'}</Button>
+      <Button variant="danger" icon={run.status === 'queued' ? X : Square} loading={busy} onclick={stop}>{run.status === 'queued' ? 'Remove' : 'Stop run'}</Button>
     {/snippet}
   </Dialog>
   <Dialog bind:open={deleteOpen} title="Delete {run.name}?" description="Removes the run and its metric history from Studio. Checkpoint files on disk are not touched." size="sm">
@@ -244,10 +277,29 @@
     margin: 0 auto;
     padding: var(--space-6);
   }
-  .sk-grid {
+  .sk-head {
+    display: grid;
+    gap: var(--space-2);
+    max-width: 100%;
+  }
+  .sk-row2 {
     display: grid;
     grid-template-columns: 2fr 1fr;
     gap: var(--space-4);
+  }
+  .sk-row3 {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: var(--space-4);
+  }
+  @media (max-width: 767px) {
+    .loading {
+      padding: var(--space-4);
+    }
+    .sk-row2,
+    .sk-row3 {
+      grid-template-columns: minmax(0, 1fr);
+    }
   }
   .id {
     font-size: var(--type-xs-size);
@@ -299,11 +351,6 @@
     border-color: color-mix(in srgb, var(--success-solid) 25%, transparent);
     color: var(--success-text);
   }
-  .info {
-    background: var(--info-muted);
-    border-color: color-mix(in srgb, var(--info-solid) 25%, transparent);
-    color: var(--info-text);
-  }
   .neutral {
     background: var(--bg-panel);
     border-color: var(--line-default);
@@ -313,6 +360,45 @@
     color: var(--text-primary);
   }
 
+  .queued {
+    display: grid;
+    justify-items: center;
+    gap: var(--space-3);
+    padding: var(--space-12) var(--space-6);
+    text-align: center;
+    border: 1px dashed var(--line-strong);
+    border-radius: var(--radius-lg);
+  }
+  .q-mark {
+    display: grid;
+    place-items: center;
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    background: var(--info-muted);
+    color: var(--info-text);
+  }
+  .queued h2 {
+    font-size: var(--type-lg-size);
+    line-height: var(--type-lg-line);
+  }
+  .queued p {
+    max-width: 460px;
+    color: var(--text-secondary);
+    text-wrap: balance;
+  }
+  .q-facts {
+    display: flex;
+    gap: var(--space-4);
+    flex-wrap: wrap;
+    justify-content: center;
+    color: var(--text-tertiary);
+    font-size: var(--type-sm-size);
+  }
+  .q-facts b {
+    color: var(--text-primary);
+    font-weight: var(--weight-medium);
+  }
   .cluster {
     display: grid;
     grid-template-columns: 1.6fr repeat(5, minmax(0, 1fr));
@@ -347,6 +433,7 @@
     font-weight: var(--weight-semibold);
   }
   .of {
+    line-height: 1;
     margin-left: 6px;
     font-size: var(--type-lg-size);
     font-weight: var(--weight-regular);
@@ -369,6 +456,7 @@
     color: var(--text-disabled);
   }
   .unit {
+    line-height: 1;
     margin-left: 3px;
     font-size: var(--type-sm-size);
     color: var(--text-tertiary);
@@ -415,21 +503,17 @@
     display: grid;
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
     gap: var(--space-4);
-    align-items: start;
+    align-items: stretch;
   }
   @media (max-width: 1199px) {
+    /* Six cells as a clean 3 × 2. */
     .cluster {
       grid-template-columns: repeat(3, minmax(0, 1fr));
     }
-    .cell.main {
-      grid-column: 1 / -1;
-      border-bottom: 1px solid var(--line-subtle);
-    }
-    .cell:nth-child(2),
-    .cell:nth-child(5) {
+    .cell:nth-child(4) {
       border-left: 0;
     }
-    .cell:nth-child(n + 5) {
+    .cell:nth-child(n + 4) {
       border-top: 1px solid var(--line-subtle);
     }
     .two {
@@ -437,28 +521,63 @@
     }
   }
   @media (max-width: 767px) {
+    /* Phones: a compact progress row and four essential metrics, so the first chart starts high on the page. */
     .cluster {
       grid-template-columns: repeat(2, minmax(0, 1fr));
     }
     .cell {
-      padding: var(--space-3);
+      padding: var(--space-2) var(--space-3);
+      gap: 0;
     }
     .cell:nth-child(n) {
       border-left: 0;
       border-top: 1px solid var(--line-subtle);
     }
     .cell.main {
+      grid-column: 1 / -1;
       border-top: 0;
       border-bottom: 0;
+      gap: 6px;
     }
     .cell:nth-child(odd):not(.main) {
       border-left: 1px solid var(--line-subtle);
     }
+    .cell.secondary {
+      display: none;
+    }
+    .big {
+      font-size: var(--type-xl-size);
+      line-height: var(--type-xl-line);
+    }
+    .of {
+      font-size: var(--type-sm-size);
+    }
     .val {
-      font-size: var(--type-lg-size);
+      font-size: var(--type-md-size);
+      line-height: var(--type-md-line);
+    }
+    .cell.main {
+      padding: var(--space-3);
+    }
+    .b-msg {
+      font-size: var(--type-sm-size);
     }
     .banner {
-      flex-wrap: wrap;
+      flex-direction: column;
+      align-items: stretch;
+      gap: var(--space-3);
+    }
+    /* Success is a one-line summary with its action; the details are in the tiles below. */
+    .banner.success {
+      flex-direction: row;
+      align-items: center;
+      padding: var(--space-2) var(--space-2) var(--space-2) var(--space-3);
+    }
+    .banner.success .b-msg {
+      display: none;
+    }
+    .banner > :global(svg) {
+      display: none;
     }
     .dev {
       display: none;

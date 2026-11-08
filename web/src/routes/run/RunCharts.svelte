@@ -6,6 +6,7 @@
   import { lr as fmtLr, num } from '$lib/format';
   import Panel from '$lib/ui/Panel.svelte';
   import Segmented from '$lib/ui/Segmented.svelte';
+  import { runHorizon } from '$lib/charts/horizon';
   import Skeleton from '$lib/ui/Skeleton.svelte';
 
   let {
@@ -17,10 +18,29 @@
   }: { run: Run; steps: Step[]; epochs: Epoch[]; version: number; loading: boolean } = $props();
 
   let cursor = $state<number | null>(null);
+  // Phones get shorter plots so more evidence fits above the fold.
+  let narrow = $state(typeof matchMedia !== 'undefined' && matchMedia('(max-width: 767px)').matches);
+  $effect(() => {
+    const mq = matchMedia('(max-width: 767px)');
+    const on = () => (narrow = mq.matches);
+    mq.addEventListener('change', on);
+    return () => mq.removeEventListener('change', on);
+  });
+  const hBig = $derived(narrow ? 180 : 220);
+  const hSmall = $derived(narrow ? 160 : 180);
   let smoothing = $state<'0' | '0.6' | '0.9' | '0.97'>('0.9');
   let scale = $state<'lin' | 'log'>('lin');
 
-  const xDomain = $derived<[number, number]>([0, run.epochs]);
+  let horizon = $state<'observed' | 'full'>('observed');
+  const observed = $derived.by(() => {
+    void version;
+    const spe = Math.max(1, run.steps_per_epoch);
+    const lastStep = steps[steps.length - 1];
+    const lastEpoch = epochs[epochs.length - 1];
+    return Math.max(lastStep ? lastStep.step / spe : 0, lastEpoch ? lastEpoch.epoch + 1 : 0);
+  });
+  const live = $derived(['queued', 'running', 'stopping'].includes(run.status));
+  const xDomain = $derived(runHorizon(observed, run.epochs, live, horizon));
   const epochTitle = (x: number) => `Epoch ${x.toFixed(x % 1 === 0 ? 0 : 1)}`;
 
   const loss = $derived.by((): Series[] => {
@@ -32,9 +52,9 @@
     return [
       { id: 'raw', label: 'total (raw)', color: 'var(--chart-1)', ghost: true, points: a > 0 ? total : [] },
       { id: 'total', label: 'total', color: 'var(--chart-1)', points: smooth(total, a) },
-      { id: 'box', label: 'box', color: 'var(--chart-2)', points: smooth(pts((s) => s.loss.box), a) },
-      { id: 'cls', label: 'cls', color: 'var(--chart-3)', points: smooth(pts((s) => s.loss.cls), a) },
-      { id: 'dfl', label: 'dfl', color: 'var(--chart-4)', points: smooth(pts((s) => s.loss.dfl), a) },
+      { id: 'box', label: 'box', color: 'var(--chart-1)', pattern: 'dash', points: smooth(pts((s) => s.loss.box), a) },
+      { id: 'cls', label: 'cls', color: 'var(--chart-1)', pattern: 'dot', points: smooth(pts((s) => s.loss.cls), a) },
+      { id: 'dfl', label: 'dfl', color: 'var(--chart-1)', pattern: 'dashdot', points: smooth(pts((s) => s.loss.dfl), a) },
     ];
   });
 
@@ -44,15 +64,15 @@
     void version;
     return [
       { id: 'm95', label: 'mAP50-95', color: 'var(--chart-1)', area: true, points: ep((e) => e.val.map50_95) },
-      { id: 'm50', label: 'mAP50', color: 'var(--chart-2)', points: ep((e) => e.val.map50) },
+      { id: 'm50', label: 'mAP50', color: 'var(--chart-1)', pattern: 'dash', points: ep((e) => e.val.map50) },
     ];
   });
 
   const pr = $derived.by((): Series[] => {
     void version;
     return [
-      { id: 'p', label: 'precision', color: 'var(--chart-3)', points: ep((e) => e.val.precision) },
-      { id: 'r', label: 'recall', color: 'var(--chart-4)', points: ep((e) => e.val.recall) },
+      { id: 'p', label: 'precision', color: 'var(--chart-1)', points: ep((e) => e.val.precision) },
+      { id: 'r', label: 'recall', color: 'var(--chart-1)', pattern: 'dash', points: ep((e) => e.val.recall) },
     ];
   });
 
@@ -61,14 +81,14 @@
     void version;
     const spe = Math.max(1, run.steps_per_epoch);
     const k = thin(600);
-    return [{ id: 'lr', label: 'learning rate', color: 'var(--chart-5)', points: steps.filter((_, i) => i % k === 0).map((s) => ({ x: s.step / spe, y: s.lr })) }];
+    return [{ id: 'lr', label: 'learning rate', color: 'var(--text-secondary)', points: steps.filter((_, i) => i % k === 0).map((s) => ({ x: s.step / spe, y: s.lr })) }];
   });
 
   const ips = $derived.by((): Series[] => {
     void version;
     const spe = Math.max(1, run.steps_per_epoch);
     const pts = steps.map((s) => ({ x: s.step / spe, y: s.imgs_per_s }));
-    return [{ id: 'ips', label: 'images/s', color: 'var(--chart-6)', area: true, points: smooth(pts, 0.9) }];
+    return [{ id: 'ips', label: 'images/s', color: 'var(--chart-1)', area: true, points: smooth(pts, 0.9) }];
   });
   // Throughput reads best against zero: a steady line near the top, dips stand out.
   const ipsMax = $derived.by(() => {
@@ -82,8 +102,19 @@
 
 {#snippet chartSk()}<Skeleton h="180px" r="var(--radius-md)" />{/snippet}
 
+<div class="bar">
+  <Segmented
+    size="sm"
+    label="Chart range"
+    bind:value={horizon}
+    options={[
+      { value: 'observed', label: live ? 'So far' : 'Observed' },
+      { value: 'full', label: `Full run · ${run.epochs} epochs` },
+    ]}
+  />
+</div>
 <div class="grid">
-  <Panel title="Loss" class="span2" id="chart-loss">
+  <Panel title="Loss" meta={smoothing === '0' ? 'raw per step' : `smoothed · EMA ${smoothing}`} class="span2" id="chart-loss">
     {#snippet actions()}
       <Segmented
         size="sm"
@@ -101,7 +132,7 @@
     {#if loading}{@render chartSk()}{:else}
       <LineChart
         series={loss}
-        height={220}
+        height={hBig}
         {xDomain}
         yLog={scale === 'log'}
         yFormat={(v) => (v >= 10 ? v.toFixed(0) : v.toFixed(1))}
@@ -118,7 +149,7 @@
     {#if loading}{@render chartSk()}{:else}
       <LineChart
         series={map}
-        height={220}
+        height={hBig}
         {xDomain}
         yDomain={[0, 1]}
         yFormat={(v) => v.toFixed(1)}
@@ -137,7 +168,7 @@
     {#if loading}{@render chartSk()}{:else}
       <LineChart
         series={pr}
-        height={180}
+        height={hSmall}
         {xDomain}
         yDomain={[0, 1]}
         yFormat={(v) => v.toFixed(1)}
@@ -155,7 +186,7 @@
     {#if loading}{@render chartSk()}{:else}
       <LineChart
         series={lrS}
-        height={180}
+        height={hSmall}
         {xDomain}
         yFormat={(v) => fmtLr(v)}
         xTitle={epochTitle}
@@ -170,7 +201,7 @@
     {#if loading}{@render chartSk()}{:else}
       <LineChart
         series={ips}
-        height={180}
+        height={hSmall}
         {xDomain}
         yDomain={[0, ipsMax * 1.2]}
         yFormat={(v) => num(v, 0)}
@@ -185,6 +216,11 @@
 </div>
 
 <style>
+  .bar {
+    display: flex;
+    justify-content: flex-end;
+    margin-bottom: calc(-1 * var(--space-2));
+  }
   .grid {
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));

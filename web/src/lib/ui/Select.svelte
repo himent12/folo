@@ -91,4 +91,11 @@
   .sm .chev {
     right: 6px;
   }
+  /* Touch: 44 px controls. */
+  @media (pointer: coarse) {
+    select,
+    .sm select {
+      height: 44px;
+    }
+  }
 </style>

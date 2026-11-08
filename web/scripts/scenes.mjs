@@ -38,6 +38,7 @@ export const scenes = [
   { name: 'run-new', path: '/runs/new', viewports: ['desktop', 'laptop', 'mobile'] },
   {
     name: 'run-new-focus-mosaic',
+    fullPage: false,
     path: '/runs/new',
     themes: ['dark'],
     viewports: ['desktop'],
@@ -109,6 +110,16 @@ export const scenes = [
   },
   { name: 'playground-empty', path: '/playground', setup: (page) => until(page, 'button.sample') },
   { name: 'playground-result', path: '/playground?model=m_hard_s', setup: playgroundResult },
+  {
+    name: 'playground-selected',
+    path: '/playground?model=m_hard_s',
+    setup: async (page) => {
+      await playgroundResult(page);
+      await page.locator('#pg-panel tbody tr').nth(2).click();
+      await page.mouse.move(0, 0);
+      await page.evaluate(() => window.scrollTo(0, 0));
+    },
+  },
   {
     name: 'playground-json',
     path: '/playground?model=m_hard_s',

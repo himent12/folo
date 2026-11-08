@@ -108,4 +108,11 @@
     font-size: var(--type-sm-size);
     white-space: nowrap;
   }
+  /* Touch: 44 px controls. */
+  @media (pointer: coarse) {
+    .input,
+    .sm {
+      height: 44px;
+    }
+  }
 </style>

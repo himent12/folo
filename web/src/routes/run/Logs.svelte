@@ -19,6 +19,11 @@
     const min = level === 'all' ? 0 : order[level];
     return logs.filter((l) => order[l.level] >= min).slice(-500);
   });
+  // `logs` changes in place; `version` is the signal that it did.
+  const total = $derived.by(() => {
+    void version;
+    return logs.length;
+  });
   const counts = $derived.by(() => {
     void version;
     return { warn: logs.filter((l) => l.level === 'warn').length, error: logs.filter((l) => l.level === 'error').length };
@@ -35,7 +40,7 @@
   }
 </script>
 
-<Panel title="Logs" meta={String(logs.length)} pad="none" id="logs">
+<Panel title="Logs" meta={String(total)} pad="none" id="logs">
   {#snippet actions()}
     <Segmented
       size="sm"
@@ -96,7 +101,7 @@
     background: var(--bg-hover);
   }
   .t {
-    color: var(--text-disabled);
+    color: var(--text-tertiary);
     flex-shrink: 0;
   }
   .lv {

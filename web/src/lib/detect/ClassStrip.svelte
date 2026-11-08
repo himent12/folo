@@ -1,6 +1,6 @@
 <script lang="ts">
   /** A stacked bar of class shares in class colours, with 1 px surface gaps between segments. */
-  import { classColor } from '$lib/design/tokens';
+  import { classInk } from '$lib/design/classInk.svelte';
 
   let { counts, classes, height = 6 }: { counts: number[]; classes: readonly string[]; height?: number } = $props();
   const total = $derived(counts.reduce((a, b) => a + b, 0));
@@ -11,7 +11,7 @@
 
 <div class="strip" style:height="{height}px" role="img" aria-label="Class balance: {label}">
   {#each counts as c, i (i)}
-    {#if c > 0}<span style:flex-grow={c} style:background={classColor(i)} title="{classes[i]}: {c.toLocaleString('en-US')}"></span>{/if}
+    {#if c > 0}<span style:flex-grow={c} style:background={classInk(i)} title="{classes[i]}: {c.toLocaleString('en-US')}"></span>{/if}
   {/each}
 </div>
 

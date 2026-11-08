@@ -8,6 +8,8 @@
     color: string;
     points: Pt[];
     dashed?: boolean;
+    /** Line pattern for secondary series of the same hue: dashed, dotted or dash-dot. */
+    pattern?: 'dash' | 'dot' | 'dashdot';
     /** Fill the area under the line. */
     area?: boolean;
     /** Thin, recessive line (e.g. raw values under a smoothed line); hidden from legend and tooltip. */
@@ -25,6 +27,7 @@
 </script>
 
 <script lang="ts">
+  import { tick } from 'svelte';
   import { scaleLinear, scaleLog } from 'd3-scale';
   import { area as d3area, curveLinear, curveMonotoneX, line as d3line } from 'd3-shape';
   import { downsample, nearest, ticks as niceTicks } from './downsample';
@@ -59,7 +62,7 @@
     yDomain,
     yLog = false,
     curve = 'linear',
-    xFormat = (x) => String(Math.round(x)),
+    xFormat: xFormatProp,
     yFormat = (y) => String(+y.toFixed(3)),
     valueFormat,
     xTitle,
@@ -132,7 +135,22 @@
   const y = $derived(
     (yLog ? scaleLog().domain(yExtent) : scaleLinear().domain(yExtent)).range([height - margin.bottom, margin.top]),
   );
-  const xTickValues = $derived(niceTicks(xExtent[0], xExtent[1], Math.max(2, Math.min(xTicks, Math.floor(width / 70)))));
+  // When the x domain is fixed (e.g. 0..epochs), prefer a tick step that lands exactly on the end.
+  // Default x labels: integers, or one decimal when the domain is too short for distinct integers.
+  const xFormat = $derived(
+    xFormatProp ?? ((v: number) => (xExtent[1] - xExtent[0] < 5 ? String(+v.toFixed(1)) : String(Math.round(v)))),
+  );
+
+  const xTickValues = $derived.by(() => {
+    const want = Math.max(2, Math.min(xTicks, Math.floor(width / 70)));
+    const [lo, hi] = xExtent;
+    if (!xDomain) return niceTicks(lo, hi, want);
+    for (let c = want; c >= 2; c--) {
+      const t = niceTicks(lo, hi, c);
+      if (t[t.length - 1] === hi) return t;
+    }
+    return niceTicks(lo, hi, want);
+  });
 
   const paths = $derived.by(() => {
     const c = curve === 'monotone' ? curveMonotoneX : curveLinear;
@@ -162,19 +180,33 @@
   const hover = $derived.by(() => {
     if (cursor === null || cursor === undefined || !hasData) return null;
     if (cursor < xExtent[0] || cursor > xExtent[1]) return null;
+    const c = cursor as number;
     const rows = keyed
       .map((s) => {
-        const i = nearest(s.points, cursor as number);
-        const p = s.points[i];
+        const pts = s.points;
+        const first = pts[0];
+        const last = pts[pts.length - 1];
+        if (!first || !last) return null;
+        // A series only reads out where it has data: never its last value under a cursor past its end.
+        const tol = pts.length > 1 ? (last.x - first.x) / (pts.length - 1) / 2 : 0.5;
+        if (c < first.x - tol || c > last.x + tol) return null;
+        const p = pts[nearest(pts, c)];
         return p ? { s, p } : null;
       })
       .filter((r): r is { s: Series; p: Pt } => r !== null);
     if (!rows.length) return null;
-    const px = x(rows[0]!.p.x);
-    return { rows, px, xv: rows[0]!.p.x };
+    // Title at the series with the densest sampling (closest to the cursor); rows sampled elsewhere say where.
+    const ref = rows.reduce((a, b) => (Math.abs(b.p.x - c) < Math.abs(a.p.x - c) ? b : a));
+    const title = xTitle ? xTitle(ref.p.x) : xFormat(ref.p.x);
+    const labelled = rows.map((r) => {
+      const t = xTitle ? xTitle(r.p.x) : xFormat(r.p.x);
+      return { ...r, at: t === title ? null : t };
+    });
+    return { rows: labelled, px: x(ref.p.x), xv: ref.p.x, title };
   });
 
   function onpointermove(e: PointerEvent) {
+    spoken = '';
     const rect = (e.currentTarget as SVGElement).getBoundingClientRect();
     const px = e.clientX - rect.left;
     if (px < margin.left - 4 || px > width - margin.right + 4) {
@@ -183,6 +215,24 @@
     }
     cursor = x.invert(px);
   }
+
+  // Keyboard scrubbing announces the values under the cursor. The text is written from the key handler itself, so
+  // pointer movement here or on a linked chart never produces announcements.
+  let spoken = $state('');
+
+  /** Per-series summary for assistive tech: latest, minimum and maximum. */
+  const summary = $derived(
+    keyed.map((s) => {
+      let lo = Infinity;
+      let hi = -Infinity;
+      for (const p of s.points) {
+        if (!Number.isFinite(p.y)) continue;
+        if (p.y < lo) lo = p.y;
+        if (p.y > hi) hi = p.y;
+      }
+      return { s, last: latest(s), lo: Number.isFinite(lo) ? lo : null, hi: Number.isFinite(hi) ? hi : null };
+    }),
+  );
 
   function onkeydown(e: KeyboardEvent) {
     const s = longestSeries;
@@ -195,10 +245,23 @@
     else if (e.key === 'End') i = s.points.length - 1;
     else if (e.key === 'Escape') {
       cursor = null;
+      spoken = '';
       return;
     } else return;
     e.preventDefault();
     cursor = s.points[i]!.x;
+    // `hover` derives from the cursor; read it once the update has settled.
+    void tick().then(() => {
+      const h = hover;
+      spoken = h ? `${h.title}: ${h.rows.map((r) => `${r.s.label} ${fmtValue(r.p.y)}`).join(', ')}` : '';
+    });
+  }
+
+  const PATTERNS = { dash: [6, 3], dot: [1.5, 3], dashdot: [7, 3, 1.5, 3] } as const;
+  /** stroke-dasharray for a series (scaled for the small legend swatch). */
+  function dashOf(s: Series, k = 1): string | undefined {
+    const p = s.pattern ? PATTERNS[s.pattern] : s.dashed ? PATTERNS.dash : null;
+    return p ? p.map((v) => v * k).join(' ') : undefined;
   }
 
   const latest = (s: Series) => {
@@ -209,8 +272,15 @@
     return null;
   };
 
-  const tipLeft = $derived(hover ? hover.px > width * 0.6 : false);
+  let tipWidth = $state(160);
+  const tipLeft = $derived(hover ? hover.px + 12 + tipWidth > width - 4 : false);
 </script>
+
+{#snippet swatch(s: Series)}
+  <svg class="swatch" width="14" height="6" viewBox="0 0 14 6" aria-hidden="true">
+    <line x1="1" x2="13" y1="3" y2="3" style:stroke={s.color} style:stroke-dasharray={dashOf(s, 0.6)} />
+  </svg>
+{/snippet}
 
 <div class="chart">
   {#if legend && keyed.length > 0}
@@ -218,12 +288,31 @@
       {#each keyed as s (s.id)}
         {@const v = hover ? hover.rows.find((r) => r.s.id === s.id)?.p.y : latest(s)}
         <li>
-          <span class="swatch" class:dashed={s.dashed} style:--c={s.color}></span>
+          {@render swatch(s)}
           <span class="name">{s.label}</span>
           <span class="val">{v === null || v === undefined ? '—' : fmtValue(v)}</span>
         </li>
       {/each}
     </ul>
+  {/if}
+
+  <p class="sr-only" aria-live="polite">{spoken}</p>
+  {#if keyed.length}
+    <!-- A table ignores width: 1px, so the visually-hidden box is a wrapper that clips it. -->
+    <div class="sr-only"><table>
+      <caption>{label}: summary by series. Focus the chart and use the arrow keys to read values point by point.</caption>
+      <thead><tr><th scope="col">Series</th><th scope="col">Latest</th><th scope="col">Minimum</th><th scope="col">Maximum</th></tr></thead>
+      <tbody>
+        {#each summary as row (row.s.id)}
+          <tr>
+            <th scope="row">{row.s.label}</th>
+            <td>{row.last === null ? '—' : fmtValue(row.last)}</td>
+            <td>{row.lo === null ? '—' : fmtValue(row.lo)}</td>
+            <td>{row.hi === null ? '—' : fmtValue(row.hi)}</td>
+          </tr>
+        {/each}
+      </tbody>
+    </table></div>
   {/if}
 
   <div class="plot" bind:clientWidth={width} style:height="{height}px">
@@ -237,8 +326,9 @@
         tabindex={hasData ? 0 : -1}
         {onpointermove}
         onpointerleave={() => (cursor = null)}
+        onpointerdown={() => (spoken = '')}
         {onkeydown}
-        onblur={() => (cursor = null)}
+        onblur={() => ((cursor = null), (spoken = ''))}
       >
         <g class="grid">
           {#each yTickValues as t (t)}
@@ -268,14 +358,18 @@
           </defs>
           {#each paths as { s, d, a } (s.id)}
             {#if a}<path class="area" d={a} fill="url(#{uid}-{s.id})" />{/if}
-            <path class="line" class:dashed={s.dashed} class:ghost={s.ghost} class:emphasis={s.emphasis} {d} style:stroke={s.color} />
+            <path class="line" class:dashed={s.dashed} class:ghost={s.ghost} class:emphasis={s.emphasis} {d} style:stroke={s.color} style:stroke-dasharray={dashOf(s)} />
           {/each}
 
           {#each markers as m (m.label + m.x)}
             {#if m.x >= xExtent[0] && m.x <= xExtent[1]}
               <g class="marker" transform="translate({x(m.x)},{y(m.y)})">
                 <circle r="4.5" style:stroke={m.color ?? 'var(--chart-1)'} />
-                <text y="-10" text-anchor="middle">{m.label}</text>
+                <text
+                  y="-10"
+                  text-anchor={x(m.x) > width - margin.right - 40 ? 'end' : x(m.x) < margin.left + 40 ? 'start' : 'middle'}
+                  dx={x(m.x) > width - margin.right - 40 ? 6 : x(m.x) < margin.left + 40 ? -6 : 0}>{m.label}</text
+                >
               </g>
             {/if}
           {/each}
@@ -296,12 +390,12 @@
       {/if}
 
       {#if hover}
-        <div class="tip" class:left={tipLeft} style:--x="{hover.px}px" role="presentation">
-          <p class="tip-title">{xTitle ? xTitle(hover.xv) : xFormat(hover.xv)}</p>
+        <div class="tip" class:left={tipLeft} style:--x="{hover.px}px" role="presentation" bind:clientWidth={tipWidth}>
+          <p class="tip-title">{hover.title}</p>
           {#each hover.rows as r (r.s.id)}
             <p class="tip-row">
-              <span class="swatch" class:dashed={r.s.dashed} style:--c={r.s.color}></span>
-              <span class="name">{r.s.label}</span>
+              {@render swatch(r.s)}
+              <span class="name">{r.s.label}{#if r.at}<span class="at">{r.at}</span>{/if}</span>
               <span class="val">{fmtValue(r.p.y)}</span>
             </p>
           {/each}
@@ -331,14 +425,12 @@
     gap: 6px;
   }
   .swatch {
-    width: 12px;
-    height: 2px;
-    border-radius: 1px;
-    background: var(--c);
     flex-shrink: 0;
+    overflow: visible;
   }
-  .swatch.dashed {
-    background: repeating-linear-gradient(90deg, var(--c) 0 4px, transparent 4px 6px);
+  .swatch line {
+    stroke-width: 2;
+    stroke-linecap: round;
   }
   .name {
     color: var(--text-secondary);
@@ -384,7 +476,6 @@
     stroke-linecap: round;
   }
   .line.dashed {
-    stroke-dasharray: 4 3;
     stroke-width: 1.5;
   }
   .line.emphasis {
@@ -455,6 +546,12 @@
     display: flex;
     align-items: center;
     gap: 6px;
+  }
+  .tip-row .at {
+    margin-left: 6px;
+    color: var(--text-tertiary);
+    font-family: var(--font-mono);
+    font-size: var(--type-micro-size);
   }
   .tip-row .name {
     flex: 1;

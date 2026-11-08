@@ -2,6 +2,7 @@
   /** The Playground's empty state: a viewfinder to drop an image into, plus sample images to try. */
   import Images from '@lucide/svelte/icons/images';
   import Upload from '@lucide/svelte/icons/upload';
+  import { MediaQuery } from 'svelte/reactivity';
   import type { Dataset, DatasetImage as Img } from '$lib/api/types';
   import DatasetImage from '$lib/detect/DatasetImage.svelte';
   import Button from '$lib/ui/Button.svelte';
@@ -22,6 +23,9 @@
     onpick: () => void;
     onsample: (ds: Dataset, img: Img) => void;
   } = $props();
+
+  // Touch screens have no drag and drop or Ctrl+V: offer the picker instead of promising either.
+  const touch = new MediaQuery('pointer: coarse', false);
 </script>
 
 <div class="zone" class:dragging>
@@ -32,10 +36,15 @@
   <span class="cross" aria-hidden="true"></span>
 
   <div class="center">
-    <p class="title">{dragging ? 'Release to detect' : 'Drop an image to detect objects'}</p>
-    <p class="desc">JPEG, PNG or WebP. You can also paste from the clipboard with <Kbd keys="Mod+V" />.</p>
+    {#if touch.current}
+      <p class="title">Choose an image to detect objects</p>
+      <p class="desc">JPEG, PNG or WebP, from your photos, camera or files.</p>
+    {:else}
+      <p class="title">{dragging ? 'Release to detect' : 'Drop an image to detect objects'}</p>
+      <p class="desc">JPEG, PNG or WebP. You can also paste from the clipboard with <Kbd keys="Mod+V" />.</p>
+    {/if}
     <div class="actions">
-      <Button variant="primary" icon={Upload} onclick={onbrowse}>Browse files</Button>
+      <Button variant="primary" icon={Upload} onclick={onbrowse}>{touch.current ? 'Choose an image' : 'Browse files'}</Button>
       <Button icon={Images} onclick={onpick}>Pick from a dataset</Button>
     </div>
   </div>
@@ -152,7 +161,7 @@
     height: 10px;
     margin-bottom: var(--space-3);
     border-radius: 50%;
-    background: var(--accent-solid);
+    background: var(--accent-line);
     box-shadow: 0 0 0 6px var(--accent-muted);
   }
   .title {

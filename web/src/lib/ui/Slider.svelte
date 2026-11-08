@@ -10,6 +10,7 @@
     format = (v: number) => v.toFixed(2),
     hint,
     oninput,
+    inline = false,
     id = `slider-${uid}`,
   }: {
     label: string;
@@ -20,13 +21,15 @@
     format?: (v: number) => string;
     hint?: string;
     oninput?: (v: number) => void;
+    /** Label, track and value on one row (compact toolbars). */
+    inline?: boolean;
     id?: string;
   } = $props();
 
   const pct = $derived(((value - min) / (max - min || 1)) * 100);
 </script>
 
-<div class="slider">
+<div class="slider" class:inline>
   <div class="top">
     <label for={id}>{label}</label>
     <output for={id} class="val">{format(value)}</output>
@@ -49,6 +52,22 @@
   .slider {
     display: grid;
     gap: 6px;
+  }
+  .inline {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: var(--space-3);
+  }
+  .inline .top {
+    display: contents;
+  }
+  .inline .val {
+    order: 2;
+    min-width: 4ch;
+    text-align: right;
+  }
+  .inline .hint {
+    display: none;
   }
   .top {
     display: flex;
@@ -83,8 +102,8 @@
     border-radius: 999px;
     background: linear-gradient(
       to right,
-      var(--accent-line) 0,
-      var(--accent-line) var(--pct),
+      var(--text-secondary) 0,
+      var(--text-secondary) var(--pct),
       var(--bg-active) var(--pct),
       var(--bg-active) 100%
     );
@@ -97,7 +116,7 @@
   input::-moz-range-progress {
     height: 4px;
     border-radius: 999px;
-    background: var(--accent-line);
+    background: var(--text-secondary);
   }
   input::-webkit-slider-thumb {
     -webkit-appearance: none;
@@ -124,6 +143,16 @@
   }
   input:focus-visible {
     outline: none;
+  }
+  @media (pointer: coarse) {
+    input {
+      height: 44px;
+    }
+    input::-webkit-slider-thumb {
+      width: 20px;
+      height: 20px;
+      margin-top: -8px;
+    }
   }
   input:focus-visible::-webkit-slider-thumb {
     box-shadow: 0 0 0 2px var(--focus);

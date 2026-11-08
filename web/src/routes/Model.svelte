@@ -8,8 +8,8 @@
   import { Resource } from '$lib/api/resource.svelte';
   import type { Dataset, Model, Run } from '$lib/api/types';
   import ConfusionMatrix from '$lib/charts/ConfusionMatrix.svelte';
-  import { classColor } from '$lib/design/tokens';
-  import { ago, bytes, compact, date, metric, ms, num } from '$lib/format';
+  import { classInk } from '$lib/design/classInk.svelte';
+  import { ago, bytes, compact, date, metric, num } from '$lib/format';
   import { prefs } from '$lib/prefs.svelte';
   import { href, router } from '$lib/router.svelte';
   import Page from '$lib/shell/Page.svelte';
@@ -19,7 +19,6 @@
   import ErrorState from '$lib/ui/ErrorState.svelte';
   import Panel from '$lib/ui/Panel.svelte';
   import Skeleton from '$lib/ui/Skeleton.svelte';
-  import { tooltip } from '$lib/ui/tooltip';
   import MetricBar from './models/MetricBar.svelte';
   import ExportDialog from './model/ExportDialog.svelte';
   import PrCurves from './model/PrCurves.svelte';
@@ -63,6 +62,7 @@
 
   let exportOpen = $state(false);
 
+  /** The architecture's published 640 px reference time, scaled by input area. */
   const latency = (m: Model) => archInfo[m.arch].ms * (m.imgsz / 640) ** 2;
   const tiles = (m: Model) => [
     { label: 'mAP50-95', value: m.metrics?.map50_95, sub: 'IoU 0.50:0.95', hero: true },
@@ -159,7 +159,7 @@
                   <tr>
                     <td>
                       <span class="cls">
-                        <span class="sw" style:background={classColor(c.class)} aria-hidden="true"></span>
+                        <span class="sw" style:background={classInk(c.class)} aria-hidden="true"></span>
                         <span class="truncate">{m.classes[c.class]}</span>
                       </span>
                     </td>
@@ -193,14 +193,16 @@
           <dd class="num">{num(m.flops_g, 1)} GFLOPs</dd>
           <dt>File size</dt>
           <dd class="num">{bytes(m.bytes, prefs.units)}</dd>
-          <dt>Typical latency</dt>
-          <dd class="num">
-            <span use:tooltip={'Published hint for this architecture on a desktop GPU; measure yours in the Playground.'}>≈ {ms(latency(m))}</span>
+          <dt>Latency</dt>
+          <dd class="latency">
+            <span class="num">Reference ~{latency(m).toFixed(1)} ms</span>
+            <!-- A scaled hint, not a measurement: say exactly what it assumes. -->
+            <span class="faint">RTX 4080-class GPU · {m.imgsz} px · fp32</span>
           </dd>
           <dt>Classes</dt>
           <dd class="classes">
             {#each m.classes.slice(0, 10) as c, i (i)}
-              <span class="chip"><span class="sw" style:background={classColor(i)} aria-hidden="true"></span>{c}</span>
+              <span class="chip"><span class="sw" style:background={classInk(i)} aria-hidden="true"></span>{c}</span>
             {/each}
             {#if m.classes.length > 10}<span class="faint">+{m.classes.length - 10} more</span>{/if}
           </dd>
@@ -345,6 +347,14 @@
   dd {
     min-width: 0;
     text-align: right;
+  }
+  .latency {
+    display: grid;
+    gap: 2px;
+  }
+  .latency .faint {
+    font-size: var(--type-xs-size);
+    line-height: var(--type-xs-line);
   }
   .classes {
     display: flex;

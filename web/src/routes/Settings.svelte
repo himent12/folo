@@ -31,6 +31,33 @@
     { id: 'about', label: 'About' },
   ];
 
+  // Scroll-spy from geometry: the current section is the last one whose top has passed just below the top bar
+  // (the first while nothing has; the last once the page is scrolled to the bottom).
+  let current = $state<string>('connection');
+  $effect(() => {
+    let raf = 0;
+    const update = () => {
+      raf = 0;
+      const line = 56 + 24;
+      const els = sections.map((x) => document.getElementById(x.id)).filter((e): e is HTMLElement => !!e);
+      let id = els[0]?.id ?? 'connection';
+      for (const e of els) if (e.getBoundingClientRect().top <= line) id = e.id;
+      if (window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 2) id = els[els.length - 1]?.id ?? id;
+      current = id;
+    };
+    const onscroll = () => {
+      if (!raf) raf = requestAnimationFrame(update);
+    };
+    update();
+    window.addEventListener('scroll', onscroll, { passive: true });
+    window.addEventListener('resize', onscroll);
+    return () => {
+      cancelAnimationFrame(raf);
+      window.removeEventListener('scroll', onscroll);
+      window.removeEventListener('resize', onscroll);
+    };
+  });
+
   // ---- connection ----
   const origin = typeof location === 'undefined' ? '' : location.origin;
   let url = $state(prefs.serverUrl);
@@ -83,7 +110,16 @@
 
   <div class="layout">
     <nav class="toc" aria-label="Settings sections">
-      {#each sections as s (s.id)}<a href="#/settings" onclick={(e) => { e.preventDefault(); document.getElementById(s.id)?.scrollIntoView({ block: 'start' }); }}>{s.label}</a>{/each}
+      {#each sections as s (s.id)}<a
+          href="#/settings"
+          class:on={current === s.id}
+          aria-current={current === s.id ? 'location' : undefined}
+          onclick={(e) => {
+            e.preventDefault();
+            current = s.id;
+            document.getElementById(s.id)?.scrollIntoView({ block: 'start' });
+          }}>{s.label}</a
+        >{/each}
     </nav>
 
     <div class="col">
@@ -256,6 +292,10 @@
     transition:
       background-color var(--dur-fast) var(--ease-standard),
       color var(--dur-fast) var(--ease-standard);
+  }
+  .toc a.on {
+    background: var(--bg-active);
+    color: var(--text-primary);
   }
   .toc a:hover {
     background: var(--bg-hover);

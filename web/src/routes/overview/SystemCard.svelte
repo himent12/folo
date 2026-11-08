@@ -49,18 +49,18 @@
             <p class="name truncate">{g.name}</p>
             <p class="sub num">GPU {g.ordinal} · {bytes(g.memory_bytes, prefs.units)} · {g.util === null ? 'util n/a' : `${pct(g.util, 0)} busy`}</p>
           </div>
-          <Sparkline values={gpuHist} width={64} height={24} domain={[0, 1]} length={60} color="var(--chart-1)" />
+          {#if gpuHist.length >= 5}<Sparkline values={gpuHist} width={72} height={24} domain={[0, 1]} length={60} color="var(--text-secondary)" />{/if}
         </div>
       {:else}
         <p class="nogpu">No GPU adapter found; training runs on the CPU.</p>
       {/each}
       <div class="row">
-        <Ring value={d.cpu.util} label="CPU utilisation" color="var(--chart-2)" />
+        <Ring value={d.cpu.util} label="CPU utilisation" />
         <div class="text">
           <p class="name truncate"><Cpu size={12} class="ico" />{d.cpu.name}</p>
           <p class="sub num">{d.cpu.threads} threads · {pct(d.cpu.util, 0)} busy</p>
         </div>
-        <Sparkline values={cpuHist} width={64} height={24} domain={[0, 1]} length={60} color="var(--chart-2)" />
+        {#if cpuHist.length >= 5}<Sparkline values={cpuHist} width={72} height={24} domain={[0, 1]} length={60} color="var(--text-secondary)" />{/if}
       </div>
       <div class="mem">
         <div class="mem-top">

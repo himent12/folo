@@ -5,7 +5,7 @@
   import X from '@lucide/svelte/icons/x';
   import { hub } from '$lib/api/index.svelte';
   import type { CreateDataset } from '$lib/api/types';
-  import { classColor } from '$lib/design/tokens';
+  import { classInk } from '$lib/design/classInk.svelte';
   import { router } from '$lib/router.svelte';
   import Button from '$lib/ui/Button.svelte';
   import Dialog from '$lib/ui/Dialog.svelte';
@@ -161,7 +161,7 @@
           <div class="chips" class:invalid={!!show(errs.classes)} onclick={(e) => (e.currentTarget.querySelector('input') as HTMLInputElement | null)?.focus()}>
             {#each classes as c, i (c)}
               <span class="chip">
-                <span class="sw" style:background={classColor(i)}></span>
+                <span class="sw" style:background={classInk(i)}></span>
                 {c}
                 <button type="button" aria-label="Remove {c}" onclick={() => (classes = classes.filter((x) => x !== c))}><X size={12} /></button>
               </span>

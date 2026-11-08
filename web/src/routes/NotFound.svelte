@@ -8,6 +8,7 @@
   $effect(() => setCrumbs({ label: 'Not found' }));
 </script>
 
+<div class="nf">
 <EmptyState
   icon={Crosshair}
   title="Nothing in frame"
@@ -17,3 +18,18 @@
     <Button href={href('/')}>Go to Overview</Button>
   {/snippet}
 </EmptyState>
+</div>
+
+<style>
+  .nf {
+    display: grid;
+    place-items: center;
+    min-height: calc(100dvh - var(--size-topbar) - var(--space-12));
+    padding: var(--space-6);
+  }
+  .nf > :global(.empty) {
+    width: min(480px, 100%);
+    border: 1px dashed var(--line-strong);
+    border-radius: var(--radius-lg);
+  }
+</style>

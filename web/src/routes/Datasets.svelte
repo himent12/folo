@@ -8,7 +8,7 @@
   import type { Dataset } from '$lib/api/types';
   import ClassStrip from '$lib/detect/ClassStrip.svelte';
   import { ago, compact, num } from '$lib/format';
-  import { href } from '$lib/router.svelte';
+  import { href, router } from '$lib/router.svelte';
   import Page from '$lib/shell/Page.svelte';
   import { setCrumbs } from '$lib/shell/crumbs.svelte';
   import Badge from '$lib/ui/Badge.svelte';
@@ -29,8 +29,10 @@
     return Promise.all(list.map((d) => hub.api.dataset(d.id, s).catch(() => d)));
   });
 
-  let adding = $state(false);
-  let addMode = $state<'folder' | 'synthetic'>('folder');
+  // `#/datasets?add=folder|synthetic` opens the dialog (used by the onboarding on an empty Overview).
+  const addParam = router.route.query.get('add');
+  let adding = $state(addParam === 'folder' || addParam === 'synthetic');
+  let addMode = $state<'folder' | 'synthetic'>(addParam === 'synthetic' ? 'synthetic' : 'folder');
   function add(m: 'folder' | 'synthetic') {
     addMode = m;
     adding = true;

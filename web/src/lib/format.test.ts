@@ -11,11 +11,12 @@ describe('format', () => {
     expect(compact(940)).toBe('940');
     expect(compact(12_400)).toBe('12.4k');
     expect(compact(2_630_000)).toBe('2.63M');
-    expect(compact(56_970_000)).toBe('57.0M');
+    expect(compact(56_970_000)).toBe('57M');
+    expect(compact(20_000)).toBe('20k');
   });
   it('formats bytes in both unit systems', () => {
-    expect(bytes(16 * 2 ** 30)).toBe('16.0 GiB');
-    expect(bytes(5_400_000, 'metric')).toBe('5.40 MB');
+    expect(bytes(16 * 2 ** 30)).toBe('16 GiB');
+    expect(bytes(5_400_000, 'metric')).toBe('5.4 MB');
     expect(bytes(512)).toBe('512 B');
   });
   it('formats durations', () => {

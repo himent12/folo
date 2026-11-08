@@ -258,3 +258,8 @@ table {
 .table tbody tr.link:hover {
   background: var(--bg-hover);
 }
+
+/* Shell metrics shared by fixed bars (mobile tab bar and docks that sit on it). */
+:root {
+  --tabbar-h: 56px;
+}

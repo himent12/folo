@@ -1,7 +1,7 @@
 <script lang="ts">
   /** Per-class validation metrics of the latest epoch, with the change since the previous epoch. */
   import type { Epoch } from '$lib/api/types';
-  import { classColor } from '$lib/design/tokens';
+  import { classInk } from '$lib/design/classInk.svelte';
   import Panel from '$lib/ui/Panel.svelte';
   import Skeleton from '$lib/ui/Skeleton.svelte';
 
@@ -47,16 +47,16 @@
         <tbody>
           {#each rows as c (c.class)}
             <tr>
-              <td><span class="cls"><span class="sw" style:background={classColor(c.class)}></span>{c.name}</span></td>
+              <td><span class="cls"><span class="sw" style:background={classInk(c.class)}></span>{c.name}</span></td>
               <td class="r num">
                 {c.map50_95.toFixed(3)}
                 {#if Math.abs(c.delta) >= 0.0005}
                   <span class="delta" class:up={c.delta > 0} class:down={c.delta < 0} aria-label="{c.delta > 0 ? 'up' : 'down'} {Math.abs(c.delta).toFixed(3)} since the previous epoch"
-                    >{c.delta > 0 ? '↑' : '↓'}{Math.abs(c.delta * 1000).toFixed(0)}</span
+                    >{c.delta > 0 ? '+' : '−'}{Math.abs(c.delta).toFixed(3)}</span
                   >
                 {:else}<span class="delta">·</span>{/if}
               </td>
-              <td class="bar-col"><span class="bar"><span style:width="{c.map50_95 * 100}%" style:background={classColor(c.class)}></span></span></td>
+              <td class="bar-col"><span class="bar"><span style:width="{c.map50_95 * 100}%" style:background={classInk(c.class)}></span></span></td>
               <td class="r num">{c.map50.toFixed(3)}</td>
               <td class="r num faint">{c.precision.toFixed(2)}</td>
               <td class="r num faint">{c.recall.toFixed(2)}</td>
@@ -95,7 +95,7 @@
   }
   .delta {
     display: inline-block;
-    width: 34px;
+    width: 52px;
     text-align: left;
     padding-left: 6px;
     font-size: var(--type-xs-size);

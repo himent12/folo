@@ -1,5 +1,6 @@
 <script lang="ts">
   /** Dataset statistics: summary numbers, class balance, health findings and the two histograms. */
+  import ArrowDown from '@lucide/svelte/icons/arrow-down';
   import ArrowRight from '@lucide/svelte/icons/arrow-right';
   import CircleAlert from '@lucide/svelte/icons/circle-alert';
   import CircleCheck from '@lucide/svelte/icons/circle-check';
@@ -7,7 +8,7 @@
   import TriangleAlert from '@lucide/svelte/icons/triangle-alert';
   import type { Dataset, DatasetStats } from '$lib/api/types';
   import Histogram from '$lib/charts/Histogram.svelte';
-  import { classColor } from '$lib/design/tokens';
+  import { classInk } from '$lib/design/classInk.svelte';
   import { num } from '$lib/format';
   import Panel from '$lib/ui/Panel.svelte';
   import Stat from '$lib/ui/Stat.svelte';
@@ -31,6 +32,17 @@
   const share = (x: number) => (stats.boxes ? (x / stats.boxes) * 100 : 0);
   const icons = { danger: CircleAlert, warning: TriangleAlert, info: Info, ok: CircleCheck } satisfies Record<Severity, unknown>;
   const perLast = $derived(stats.boxes_per_image_hist.counts.length - 1);
+
+  function toHealth() {
+    const el = document.getElementById('ds-health');
+    if (!el) return;
+    const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+    el.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'center' });
+    // Move focus to the panel's heading so keyboard and screen-reader users land there too.
+    const title = document.getElementById('ds-health-title');
+    title?.setAttribute('tabindex', '-1');
+    title?.focus({ preventScroll: true });
+  }
 </script>
 
 <div class="stats">
@@ -40,20 +52,29 @@
       <Stat label="Boxes" value={num(stats.boxes)} sub="{dataset.classes.length} classes" />
       <Stat label="Boxes per image" value={images ? (stats.boxes / images).toFixed(1) : '—'} unit="mean" sub="over all images" />
       <Stat label="Empty images" value={num(stats.empty_images)} sub={images ? `${((stats.empty_images / images) * 100).toFixed(1)}% of images` : undefined} />
-      <Stat label="Broken labels" value={num(stats.broken_labels)} tone={stats.broken_labels > 0 ? 'danger' : undefined} sub={stats.broken_labels ? 'skipped in training' : 'all labels parse'} />
+      {#if stats.broken_labels > 0}
+        <!-- Points at the Health finding that explains what to do about them; the whole tile is the hit area. -->
+        <div class="tile-link">
+          <Stat label="Broken labels" value={num(stats.broken_labels)} tone="danger">
+            {#snippet sub()}<span class="sr-only">Skipped in training.</span><button type="button" class="see" onclick={toHealth}>See Health<ArrowDown size={12} strokeWidth={2} aria-hidden="true" /></button>{/snippet}
+          </Stat>
+        </div>
+      {:else}
+        <Stat label="Broken labels" value="0" sub="all labels parse" />
+      {/if}
       <Stat label="Imbalance" value={ratio.toFixed(1)} unit="×" sub="largest / smallest class" />
     </div>
   </Panel>
 
-  <div class="two">
+  <div class="two" class:issues>
     <Panel title="Class balance" meta="{dataset.classes.length} classes · by boxes" pad="none" id="ds-balance">
       <ul class="bars">
         {#each balance as b (b.cls)}
           <li>
             <button type="button" onclick={() => onclass(b.cls)} aria-label="{b.name}: {num(b.count)} boxes, {share(b.count).toFixed(1)}%. Show images">
-              <span class="sw" style:background={classColor(b.cls)}></span>
+              <span class="sw" style:background={classInk(b.cls)}></span>
               <span class="cname truncate">{b.name}</span>
-              <span class="track"><span class="fill" style:width="{(b.count / maxCount) * 100}%" style:background={classColor(b.cls)}></span></span>
+              <span class="track"><span class="fill" style:width="{(b.count / maxCount) * 100}%" style:background={classInk(b.cls)}></span></span>
               <span class="count num">{num(b.count)}</span>
               <span class="pct num">{share(b.count).toFixed(1)}<small>%</small></span>
               <span class="go" aria-hidden="true"><ArrowRight size={12} /></span>
@@ -128,8 +149,45 @@
     grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr);
     gap: var(--space-4);
   }
+  /* With findings to review, Health comes straight after the summary (first in the row, and first when stacked). */
+  .two.issues {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+  .two.issues > :global(#ds-health) {
+    order: -1;
+  }
   .two.even {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .tile-link {
+    position: relative;
+    transition: background-color var(--dur-fast) var(--ease-standard);
+  }
+  .tiles > .tile-link:hover {
+    background: linear-gradient(var(--bg-hover), var(--bg-hover)), var(--bg-panel);
+  }
+  .see {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    color: var(--danger-text);
+    font-weight: var(--weight-medium);
+  }
+  .see::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+  }
+  .see:focus-visible {
+    outline: none;
+  }
+  .tile-link:has(.see:focus-visible) {
+    outline: 2px solid var(--focus);
+    outline-offset: -2px;
+  }
+  .tile-link:hover .see {
+    text-decoration: underline;
+    text-underline-offset: 3px;
   }
   .bars {
     padding: 0 var(--space-2) var(--space-2);
@@ -247,7 +305,8 @@
     .tiles {
       grid-template-columns: repeat(3, minmax(0, 1fr));
     }
-    .two {
+    .two,
+    .two.issues {
       grid-template-columns: minmax(0, 1fr);
     }
   }
