@@ -818,6 +818,23 @@ impl Backend for MockBackend {
         Ok(self.fixture(id)?.ds.clone())
     }
 
+    fn dataset_issues(&self, id: &str) -> ApiResult<IssuePage> {
+        self.check()?;
+        // The broken labels split as folo dataset check would: most are errors (lines the loader
+        // skips), a third warnings (boxes clipped to the image).
+        let broken = self.fixture(id)?.ds.stats.as_ref().map_or(0, |s| s.broken_labels);
+        let warning = broken / 3;
+        let error = broken - warning;
+        let mut counts = IssueCounts { error, warning, info: 0, by_kind: Default::default() };
+        if error > 0 {
+            counts.by_kind.insert("class_out_of_range".into(), error);
+        }
+        if warning > 0 {
+            counts.by_kind.insert("box_out_of_bounds".into(), warning);
+        }
+        Ok(IssuePage { total: broken, issues: Vec::new(), counts })
+    }
+
     fn images(&self, id: &str, q: &ImageQuery) -> ApiResult<ImagePage> {
         self.check()?;
         let f = self.fixture(id)?;

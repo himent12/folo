@@ -292,6 +292,10 @@ impl Backend for HttpBackend {
         self.post_slow("/datasets/synthetic", req)
     }
 
+    fn dataset_issues(&self, id: &str) -> ApiResult<IssuePage> {
+        self.get(&format!("/datasets/{}/issues?limit=1", seg(id)))
+    }
+
     fn local_inference(&self) -> bool {
         true
     }

@@ -822,6 +822,21 @@ impl FoloApp {
         }
     }
 
+    /// A dataset's issue counts, once (the Broken labels tile splits its count by severity).
+    pub fn ensure_issues(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.store.issues.get(id).is_none_or(|l| l.needs_fetch()) {
+            self.store.issues.insert(id.to_string(), Load::Loading);
+            let (a, b) = (id.to_string(), id.to_string());
+            self.fetch(
+                cx,
+                move |api| api.dataset_issues(&a).map(|p| p.counts),
+                move |this, r, _| {
+                    this.store.issues.insert(b, r.into());
+                },
+            );
+        }
+    }
+
     pub fn ensure_dataset(&mut self, id: &str, cx: &mut Context<Self>) {
         if self.store.dataset.get(id).is_none_or(|l| l.needs_fetch()) {
             self.store.dataset.insert(id.to_string(), Load::Loading);

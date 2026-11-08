@@ -126,6 +126,11 @@ pub trait Backend: Send + Sync + 'static {
     fn resume_run(&self, _id: &str) -> ApiResult<Run> {
         Err(ApiError::new("not_supported", "Resuming runs needs folo serve"))
     }
+    /// A dataset's issue counts by severity (`GET /api/datasets/{id}/issues`, one issue per page:
+    /// `counts` covers them all).
+    fn dataset_issues(&self, _id: &str) -> ApiResult<IssuePage> {
+        Err(ApiError::new("not_supported", "Issue counts need folo serve"))
+    }
     /// Whether models can be downloaded and run in this process ([`Backend::model_weights`]).
     fn local_inference(&self) -> bool {
         false
