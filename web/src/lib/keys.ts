@@ -14,9 +14,13 @@ const glyphs: Record<string, string> = {
   ArrowRight: '→',
 };
 
-/** "Mod+Shift+K" → ["⌘", "⇧", "K"]; "G R" (a sequence) → ["G", "R"]. */
+/** "Mod+Shift+K" → ["⌘", "⇧", "K"]; "G R" (a sequence) → ["G", "R"]; "+ -" → ["+", "-"]. */
 export function formatKeys(keys: string): string[] {
-  return keys.split(/[+ ]/).filter(Boolean).map((k) => glyphs[k] ?? (k.length === 1 ? k.toUpperCase() : k));
+  return keys
+    .split(' ')
+    .flatMap((t) => (t === '+' ? [t] : t.split('+')))
+    .filter(Boolean)
+    .map((k) => glyphs[k] ?? (k.length === 1 ? k.toUpperCase() : k));
 }
 
 /** True when the event comes from a text field, where single-key shortcuts must not fire. */
