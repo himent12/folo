@@ -239,3 +239,21 @@ fn returned_stats_do_not_feed_the_backward() {
     assert!(b0.iter().any(|v| *v != 0.0) && c0.iter().any(|v| *v != 0.0));
     assert_eq!((b0, c0), (b1, c1));
 }
+
+/// Settings the kernels do not take (`reg_max` above 32) fall back to the host assigner on GPU tensors instead of
+/// failing.
+#[test]
+fn unsupported_settings_fall_back_to_the_host() {
+    let dev = gpu!();
+    let anchors = make_anchors(64, 64, &[8, 16, 32], 0.5);
+    let mut rng = Rng::seed(51);
+    let cfg = LossConfig { reg_max: 33, ..LossConfig::default() };
+    let box_raw = Tensor::randn([1, 4 * 33, anchors.len()], 0.0, 1.0, &mut rng).to_device(dev).unwrap();
+    let cls_raw = Tensor::rand_uniform([1, 2, anchors.len()], -4.0, 1.0, &mut rng).to_device(dev).unwrap();
+    let targets = vec![ImageTargets { boxes: vec![Xyxy::new(8.0, 10.0, 40.0, 50.0)], labels: vec![1] }];
+    assert!(!folo_vision::loss::device_loss_supported(&box_raw, &cfg));
+    let got = detection_loss(&box_raw, &cls_raw, &anchors, &targets, &cfg).unwrap();
+    let want = detection_loss_host(&box_raw, &cls_raw, &anchors, &targets, &cfg).unwrap();
+    assert!(got.is_finite() && got.num_fg > 0);
+    assert_eq!(got.total_value, want.total_value);
+}

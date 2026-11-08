@@ -132,7 +132,7 @@ impl GradAccumulator {
 
     /// [`GradAccumulator::clip_grad_norm`] for gradients on a device, without a host round trip: the norm (in
     /// `f32`) and the factor `max_norm / (n + 1e-6)` (or 1) are device scalars and every gradient is scaled by it.
-    /// The squares are summed after dividing by the largest magnitude `s` (`n = s · sqrt(Σ (g / s)²)`), so finite
+    /// The squares are summed in units of the largest magnitude `s` (`n = s · sqrt(Σ (g / s)²)`), so finite
     /// gradients whose squares overflow `f32` still give their norm, as the CPU's `f64` sum does.
     fn clip_grad_norm_device(&mut self, max_norm: f64) -> Result<()> {
         if max_norm <= 0.0 {
@@ -148,16 +148,26 @@ impl GradAccumulator {
         let peaks = bufs.iter().map(|b| Ok(b.abs()?.max_all()?.reshape([1])?)).collect::<Result<Vec<_>>>()?;
         let peak = cat(peaks)?.max_all()?;
         let scale = peak.gt_scalar(0.0)?.where_cond(&peak, &peak.ones_like()?)?;
+        // Work in units of s = the largest magnitude, through h = 1 / sqrt(s): every intermediate (g·h, g·h², max·h,
+        // r·sqrt(s)) stays a normal f32 for any finite s, where 1 / s or max / s could be subnormal (and flushed to
+        // zero by the GPU's division) and n = s·r could overflow.
+        let root = scale.sqrt()?;
+        let h = root.recip()?;
         let sq = bufs
             .iter()
-            .map(|b| Ok(b.div(&scale)?.square()?.sum_all()?.reshape([1])?))
+            .map(|b| Ok(b.mul(&h)?.mul(&h)?.square()?.sum_all()?.reshape([1])?))
             .collect::<Result<Vec<_>>>()?;
-        let n = cat(sq)?.sum_all()?.sqrt()?.mul(&scale)?;
+        let r = cat(sq)?.sum_all()?.sqrt()?; // n / s
+        // n > max ⇔ r·sqrt(s) > max·h, and max / (n + 1e-6) = h · (max·h / (r + 1e-6·h²)), applied as two factors.
         let max = max_norm as f32;
-        let factor =
-            n.gt_scalar(max)?.where_cond(&n.add_scalar(1e-6)?.recip()?.mul_scalar(max)?, &n.ones_like()?)?;
+        let clip = r.mul(&root)?.gt(&h.mul_scalar(max)?)?;
+        let one = r.ones_like()?;
+        let k = h.mul_scalar(max)?.div(&r.add(&h.mul(&h)?.mul_scalar(1e-6)?)?)?;
+        let (f1, f2) = (clip.where_cond(&h, &one)?, clip.where_cond(&k, &one)?);
         for s in self.slots.iter().filter(|s| s.valid) {
-            s.buf.as_ref().expect("valid").mul_assign(&factor)?;
+            let b = s.buf.as_ref().expect("valid");
+            b.mul_assign(&f1)?;
+            b.mul_assign(&f2)?;
         }
         Ok(())
     }

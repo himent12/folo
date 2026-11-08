@@ -59,7 +59,7 @@ fn epochs_of(log: &Mutex<Vec<RunEvent>>) -> Vec<folo_api::Epoch> {
 /// 16 train images at 128 px, batch 4 (no accumulation), AdamW without warmup or augmentation, on `gpu:0`: the
 /// whole run stays on the device and the epoch loss falls (as `train.rs`'s CPU micro run).
 #[test]
-fn tiny_gpu_run_learns_and_resumes() {
+fn tiny_gpu_run_learns() {
     let Some(dev) = gpu() else { return };
     let dir = std::env::temp_dir().join(format!("folo-gpu-train-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -102,23 +102,83 @@ fn tiny_gpu_run_learns_and_resumes() {
     assert!(epochs.iter().all(|e| e.val.map50.is_finite()));
     assert!(t.nonfinite_streak() == 0);
 
-    // The checkpoint reloads on the CPU, and resumes onto the device.
+    // The checkpoint reloads on the CPU.
     let last = dir.join("weights/last.folo");
-    let file = ModelFile::open(&last).unwrap();
-    assert_eq!(file.checkpoint().unwrap().epoch, 10);
+    assert_eq!(ModelFile::open(&last).unwrap().checkpoint().unwrap().epoch, 10);
     let cpu = folo_vision::model::FoloModel::open(&last).unwrap();
     assert!(cpu.named_tensors().iter().all(|n| n.tensor.device().is_cpu()));
-    drop(t);
-    let opts = TrainOptions { run_dir: Some(dir.clone()), ..TrainOptions::default() };
-    let mut r = Trainer::resume(
-        &last,
-        data(),
-        opts,
-        ResumeOverrides { device: Some("gpu:0".into()), ..Default::default() },
-    )
-    .unwrap();
-    assert_eq!((r.device(), r.epochs_completed()), (dev, 10));
-    // All epochs are done: the resumed run completes without training.
-    assert_eq!(r.run().unwrap().epochs_completed, 10);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Every tensor of a `.folo` file (weights, EMA, optimizer state) as raw `f32` / `i64` bytes, by name.
+fn tensors(path: &std::path::Path) -> Vec<(String, Vec<u8>)> {
+    let f = ModelFile::open(path).unwrap();
+    let mut names: Vec<String> = f.tensor_infos().iter().map(|i| i.name.clone()).collect();
+    names.sort();
+    names
+        .into_iter()
+        .map(|n| {
+            let t = f.tensor(&n).unwrap();
+            let bytes = match t.dtype() {
+                folo_core::DType::I64 => {
+                    t.to_vec::<i64>().unwrap().iter().flat_map(|v| v.to_le_bytes()).collect()
+                }
+                _ => t.to_vec::<f32>().unwrap().iter().flat_map(|v| v.to_le_bytes()).collect(),
+            };
+            (n, bytes)
+        })
+        .collect()
+}
+
+/// A GPU run stopped at an epoch boundary and resumed onto the GPU ends in the same state as an uninterrupted GPU
+/// run, bit for bit: the resumed optimizer, EMA, schedule and BatchNorm statistics continue exactly (the device
+/// kernels are deterministic: fixed reduction orders, integer atomics only).
+#[test]
+fn stopped_gpu_run_resumes_bit_exactly() {
+    let Some(dev) = gpu() else { return };
+    let root = std::env::temp_dir().join(format!("folo-gpu-resume-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let cfg = TrainConfig {
+        epochs: 4,
+        batch: 4,
+        nbs: 8,
+        imgsz: 128,
+        optimizer: OptimizerChoice::Adamw,
+        lr0: 0.002,
+        momentum: 0.9,
+        warmup_epochs: 1.0,
+        workers: 2,
+        augment: AugmentConfig { close_mosaic: 1, ..AugmentConfig::default() },
+        device: "gpu:0".into(),
+        ..TrainConfig::default()
+    };
+    let opts =
+        |dir: &std::path::Path| TrainOptions { run_dir: Some(dir.to_path_buf()), ..TrainOptions::default() };
+    let (dir_a, dir_b) = (root.join("a"), root.join("b"));
+    let sa = Trainer::new(cfg.clone(), data(), opts(&dir_a)).unwrap().run().unwrap();
+    assert_eq!(sa.epochs_completed, 4);
+
+    // B: stopped after epoch 2 (the stop flag set on its epoch event), then resumed onto the GPU.
+    let mut ob = opts(&dir_b);
+    let stop = ob.stop.clone();
+    ob.events = Some(Box::new(move |e| {
+        if matches!(e, RunEvent::Epoch(x) if x.epoch == 2) {
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }));
+    let sb = Trainer::new(cfg, data(), ob).unwrap().run().unwrap();
+    assert_eq!((sb.status, sb.epochs_completed), (RunStatus::Stopped, 2));
+    let last_b = dir_b.join("weights/last.folo");
+    let over = ResumeOverrides { device: Some("gpu:0".into()), ..Default::default() };
+    let mut r = Trainer::resume(&last_b, data(), opts(&dir_b), over).unwrap();
+    assert_eq!((r.device(), r.epochs_completed()), (dev, 2));
+    assert_eq!(r.run().unwrap().epochs_completed, 4);
+
+    let (ta, tb) = (tensors(&dir_a.join("weights/last.folo")), tensors(&last_b));
+    assert_eq!(ta.len(), tb.len());
+    for ((na, va), (nb, vb)) in ta.iter().zip(&tb) {
+        assert_eq!(na, nb);
+        assert!(va == vb, "tensor {na} differs after resume");
+    }
+    let _ = std::fs::remove_dir_all(&root);
 }

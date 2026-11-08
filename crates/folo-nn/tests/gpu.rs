@@ -589,21 +589,25 @@ fn running_stats_all_finite_on_gpu() {
     }
 }
 
-/// Finite gradients whose squares overflow `f32` (1e20) still get the CPU's (`f64`) norm on the device, so they are
-/// clipped, not zeroed.
+/// Finite gradients whose squares (1e20) or norm (near f32::MAX) overflow `f32` still get the CPU's (`f64`) clip on
+/// the device: clipped to the norm, not zeroed or left alone.
 #[test]
 fn device_clip_survives_huge_finite_gradients() {
     let dev = gpu!();
-    let p = Tensor::zeros([4]).requires_grad_();
-    let dp = p.to_device(dev).unwrap().detach().requires_grad_();
-    let g = Tensor::from_vec(vec![1e20f32, -2e20, 3e19, 0.0], [4]).unwrap();
-    let (mut cpu, mut gpu) =
-        (GradAccumulator::new(std::slice::from_ref(&p)), GradAccumulator::new(std::slice::from_ref(&dp)));
-    cpu.add(&p.mul(&g).unwrap().sum_all().unwrap().backward().unwrap()).unwrap();
-    gpu.add(&dp.mul(&g.to_device(dev).unwrap()).unwrap().sum_all().unwrap().backward().unwrap()).unwrap();
-    cpu.clip_grad_norm(10.0).unwrap();
-    gpu.clip_grad_norm(10.0).unwrap();
-    let (c, d) = (cpu.grad(&p).unwrap(), gpu.grad(&dp).unwrap());
-    close(d, c, 1e-5, 1e-5, "clipped huge gradient");
-    assert!(d.to_vec::<f32>().unwrap()[1] < -5.0, "clipped to norm 10, not zeroed");
+    for vals in [vec![1e20f32, -2e20, 3e19, 0.0], vec![1e38, -1e38, 3e38, 2e38]] {
+        let p = Tensor::zeros([4]).requires_grad_();
+        let dp = p.to_device(dev).unwrap().detach().requires_grad_();
+        let g = Tensor::from_vec(vals, [4]).unwrap();
+        let (mut cpu, mut gpu) =
+            (GradAccumulator::new(std::slice::from_ref(&p)), GradAccumulator::new(std::slice::from_ref(&dp)));
+        cpu.add(&p.mul(&g).unwrap().sum_all().unwrap().backward().unwrap()).unwrap();
+        gpu.add(&dp.mul(&g.to_device(dev).unwrap()).unwrap().sum_all().unwrap().backward().unwrap()).unwrap();
+        cpu.clip_grad_norm(10.0).unwrap();
+        gpu.clip_grad_norm(10.0).unwrap();
+        let (c, d) = (cpu.grad(&p).unwrap(), gpu.grad(&dp).unwrap());
+        close(d, c, 1e-5, 1e-5, "clipped huge gradient");
+        let v = d.to_vec::<f32>().unwrap();
+        let n = v.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
+        assert!((n - 10.0).abs() < 1e-3, "clipped to norm 10, got {v:?}");
+    }
 }

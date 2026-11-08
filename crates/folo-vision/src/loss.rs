@@ -717,9 +717,11 @@ pub fn detection_loss(
 }
 
 /// Whether [`detection_loss`] runs on the device for these outputs: they live on a folo-gpu device and `topk`
-/// fits its kernels.
+/// and `reg_max` fit its kernels (`1..=64`, `2..=32`); other settings take the host path.
 pub fn device_loss_supported(box_raw: &Tensor, cfg: &LossConfig) -> bool {
-    folo_gpu::detect::supported(box_raw.device()) && (1..=folo_gpu::detect::MAX_TOPK).contains(&cfg.tal.topk)
+    folo_gpu::detect::supported(box_raw.device())
+        && (1..=folo_gpu::detect::MAX_TOPK).contains(&cfg.tal.topk)
+        && (2..=folo_gpu::detect::MAX_REG_MAX).contains(&cfg.reg_max)
 }
 
 /// [`detection_loss`] with the assigner on the host, whatever the device (the reference the device path is

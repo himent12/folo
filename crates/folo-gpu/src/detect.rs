@@ -22,7 +22,7 @@ use crate::context::GpuContext;
 use crate::kernels::detect::{self as k, DetectDesc};
 use crate::pool::GpuBuffer;
 
-pub use crate::kernels::detect::MAX_TOPK;
+pub use crate::kernels::detect::{MAX_REG_MAX, MAX_TOPK};
 
 /// Assigner settings (folo-vision's `TalConfig`).
 #[derive(Clone, Copy, Debug, PartialEq)]

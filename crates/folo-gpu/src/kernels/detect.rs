@@ -42,6 +42,9 @@ detect_kernel!(BCE_BWD, "det_bce_bwd", "det_bce_bwd.wgsl", [Read, Read, Read, Re
 detect_kernel!(BOX, "det_box", "det_box.wgsl", [Read, Read, Read, Read, ReadWrite, Read, Read]);
 detect_kernel!(COMBINE, "det_combine", "det_combine.wgsl", [Read, Read, Read, Read, ReadWrite, ReadWrite]);
 
+/// Largest `reg_max` (DFL bins per side) the loss kernels take.
+pub const MAX_REG_MAX: usize = 32;
+
 /// Largest `topk` the assigner kernels take.
 pub const MAX_TOPK: usize = 64;
 
@@ -113,8 +116,8 @@ impl DetectDesc {
         if self.k == 0 || self.k > MAX_TOPK {
             return Err(shape_err(format!("detect: topk {} must be in 1..={MAX_TOPK}", self.k)));
         }
-        if self.reg_max < 2 || self.reg_max > 32 {
-            return Err(shape_err(format!("detect: reg_max {} must be in 2..=32", self.reg_max)));
+        if !(2..=MAX_REG_MAX).contains(&self.reg_max) {
+            return Err(shape_err(format!("detect: reg_max {} must be in 2..={MAX_REG_MAX}", self.reg_max)));
         }
         if self.g > 65535 || self.b > 65535 || self.b * self.nc > 65535 {
             return Err(shape_err(format!(

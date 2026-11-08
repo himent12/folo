@@ -576,7 +576,7 @@ Implementation: `folo_vision::loss` (`detection_loss`, `LossConfig` with these w
   reproducible.
 - If any head output is NaN or infinite, `detection_loss` skips the assigner and returns a non-finite loss
   (`LossOutput::is_finite() == false`, `total` a detached NaN), which the trainer skips (§8.3).
-- **On a GPU** (head outputs on a folo-gpu device, `topk <= 64`) `detection_loss` runs all of the above as kernels
+- **On a GPU** (head outputs on a folo-gpu device, `topk <= 64`, `reg_max <= 32`) `detection_loss` runs all of the above as kernels
   (`folo_gpu::detect`, docs/GPU.md) and downloads nothing but the reported items: the decode, §7.3 step by step (each
   gt's candidates scored and ranked in one workgroup, conflicts by atomics, then the soft targets and a dense
   per-anchor target map), the BCE over every logit (each element formed whole), CIoU + DFL per positive with the
