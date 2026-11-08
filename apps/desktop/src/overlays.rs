@@ -142,7 +142,7 @@ impl FoloApp {
             let id = live.id.clone();
             items.push(PaletteItem {
                 group: "Actions",
-                icon: "icons/square.svg",
+                icon: "icons/stop.svg",
                 title: format!("Stop {}", live.name),
                 detail: format!("epoch {} / {}", live.epoch, live.epochs),
                 keys: &[],
@@ -234,6 +234,7 @@ impl FoloApp {
         let input = p.input.clone();
         let actions: Vec<Action> = items.iter().map(|i| i.action.clone()).collect();
         let scroll = p.scroll.clone();
+        let scroll_bar = p.scroll.clone();
         let mut list = div()
             .id("palette-list")
             .max_h(px(400.))
@@ -252,6 +253,7 @@ impl FoloApp {
                 children += 1;
                 list = list.child(
                     div()
+                        .flex_none()
                         .px(px(10.))
                         .pt(px(if i == 0 { 4. } else { 10. }))
                         .pb(px(4.))
@@ -265,6 +267,7 @@ impl FoloApp {
             list = list.child(
                 div()
                     .id(("pal", i))
+                    .flex_none()
                     .h(px(36.))
                     .px(px(10.))
                     .flex()
@@ -361,7 +364,7 @@ impl FoloApp {
                             .child(input)
                             .child(kbd(&t, "Esc")),
                     )
-                    .child(list)
+                    .child(div().relative().child(list).child(crate::ui::scrollbar(&t, scroll_bar)))
                     .child(
                         div()
                             .h(px(36.))
@@ -458,7 +461,24 @@ impl FoloApp {
                                 )
                                 .child(close_btn),
                         )
-                        .child(div().id("dialog-body").flex_1().min_h_0().overflow_y_scroll().child(body))
+                        .child(
+                            div()
+                                .relative()
+                                .flex_1()
+                                .min_h_0()
+                                .flex()
+                                .flex_col()
+                                .child(
+                                    div()
+                                        .id("dialog-body")
+                                        .flex_1()
+                                        .min_h_0()
+                                        .overflow_y_scroll()
+                                        .track_scroll(&self.dialog_scroll)
+                                        .child(body),
+                                )
+                                .child(crate::ui::scrollbar(t, self.dialog_scroll.clone())),
+                        )
                         .child(footer),
                 ),
             )
@@ -597,7 +617,58 @@ impl FoloApp {
                 )
                 .child(control)
         };
-        let section = |title: &str| div().pt(px(4.)).child(overline(&t, title));
+        // Section headings sit above a hairline and lead their group (stronger than field labels).
+        let section = |title: &str| {
+            div().mt(px(6.)).pt(px(14.)).border_t_1().border_color(t.line_subtle).child(
+                text(ty::SM, t.text_primary).font_weight(FontWeight::SEMIBOLD).child(title.to_string()),
+            )
+        };
+        let (epochs_input, lr_input, epochs_bad, lr_bad) = {
+            let f = self.new_run.as_ref().unwrap();
+            (f.epochs_input.clone(), f.lr_input.clone(), f.epochs_invalid, f.lr_invalid)
+        };
+        let number_box = |this: &Self,
+                          input: gpui::Entity<crate::input::TextInput>,
+                          bad: bool,
+                          window: &Window,
+                          cx: &mut Context<Self>| {
+            let fh = input.read(cx).focus_handle(cx);
+            let ring = this.ring(&fh, window);
+            let focused = fh.is_focused(window);
+            div()
+                .relative()
+                .w(px(84.))
+                .h(px(26.))
+                .px(px(8.))
+                .flex()
+                .items_center()
+                .rounded(px(radius::MD))
+                .bg(t.bg_raised)
+                .border_1()
+                .border_color(if bad {
+                    t.danger_solid
+                } else if focused {
+                    t.accent_line
+                } else {
+                    t.line_default
+                })
+                .font_family(crate::theme::MONO)
+                .text_size(px(ty::SM.size))
+                .when(ring, |d| d.child(crate::app::focus_ring(&t, radius::MD)))
+                .child(input)
+                .into_any_element()
+        };
+        let epochs_box = number_box(self, epochs_input, epochs_bad, window, cx);
+        let lr_box = number_box(self, lr_input, lr_bad, window, cx);
+        let typed = |name: &str, field: AnyElement, control: AnyElement, bad: Option<&str>| {
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(8.))
+                .child(div().flex().justify_between().items_center().child(label(name)).child(field))
+                .child(control)
+                .when_some(bad, |d, msg| d.child(text(ty::XS, t.danger_text).child(msg.to_string())))
+        };
         let body = div()
             .flex()
             .flex_col()
@@ -660,11 +731,17 @@ impl FoloApp {
                 div()
                     .flex()
                     .gap(px(16.))
-                    .child(div().flex_1().child(valued("Epochs", format!("{epochs:.0}"), epochs_slider)))
-                    .child(div().flex_1().child(valued(
+                    .child(div().flex_1().child(typed(
+                        "Epochs",
+                        epochs_box,
+                        epochs_slider,
+                        epochs_bad.then_some("Enter a whole number from 1 to 10,000"),
+                    )))
+                    .child(div().flex_1().child(typed(
                         "Initial learning rate",
-                        format!("{lr0:.3}"),
+                        lr_box,
                         lr_slider,
+                        lr_bad.then_some("Enter a number above 0 and below 10, e.g. 0.01 or 1e-3"),
                     ))),
             )
             .child(
@@ -749,7 +826,11 @@ impl FoloApp {
             });
         let images = ds.as_ref().map_or(0, |d| d.splits.train);
         let (secs, vram) = estimate(arch, epochs, BATCHES[batch], IMGSZ[imgsz], images as u32);
-        let fits = vram <= 15.5 || DEVICES[device] == "cpu";
+        let cpu = DEVICES[device] == "cpu";
+        let gpu = self.store.system.ready().and_then(|s| s.gpus.first().cloned());
+        let gpu_gb = gpu.as_ref().map_or(16.0, |g| g.memory_bytes as f32 / 1e9);
+        let gpu_name = gpu.as_ref().map_or("the GPU".to_string(), |g| crate::ui::short_gpu(&g.name));
+        let fits = cpu || vram <= gpu_gb * 0.97;
         let estimate_line = div()
             .flex()
             .items_center()
@@ -759,36 +840,66 @@ impl FoloApp {
                 14.,
                 if fits { t.text_tertiary } else { t.warning_solid },
             ))
-            .child(text(ty::SM, if fits { t.text_secondary } else { t.warning_text }).tnum().child(
-                if fits {
+            .min_w_0()
+            .child(text(ty::SM, if fits { t.text_secondary } else { t.warning_text }).tnum().min_w_0().truncate().child(
+                if cpu {
+                    "CPU selected · no time estimate; expect many times slower than a GPU".to_string()
+                } else if fits {
                     format!(
-                        "≈ {} on RTX 4080 SUPER · ≈ {vram:.1} GB of GPU memory",
+                        "≈ {} on {gpu_name} · ≈ {vram:.1} GB of GPU memory",
                         crate::api::time::duration(secs)
                     )
                 } else {
                     format!(
-                        "≈ {vram:.0} GB of GPU memory needed, 16 GB available · lower the batch or image size"
+                        "≈ {vram:.0} GB of GPU memory needed, {gpu_gb:.0} GB on {gpu_name} · lower the batch or image size"
                     )
                 },
             ));
         let cancel = self.button(
             "nr-cancel",
             "Cancel",
-            Btn::Ghost,
+            Btn::Secondary,
             None,
             window,
             cx,
             act(|this, w, cx| this.close_new_run(w, cx)),
         );
-        let start = self.button(
-            "nr-start",
-            if submitting { "Starting…" } else { "Start training" },
-            Btn::Primary,
-            Some("icons/play.svg"),
-            window,
-            cx,
-            act(|this, w, cx| this.submit_new_run(w, cx)),
-        );
+        let busy_with = self
+            .store
+            .runs
+            .ready()
+            .and_then(|rs| rs.iter().find(|r| r.status.is_active() && r.status != RunStatus::Queued))
+            .map(|r| r.name.clone());
+        let busy = busy_with.is_some();
+        let start = if submitting {
+            self.button_disabled(
+                "nr-start",
+                "Starting…",
+                Btn::Primary,
+                Some("icons/play.svg"),
+                "Creating the run…",
+                cx,
+            )
+        } else if epochs_bad || lr_bad {
+            self.button_disabled(
+                "nr-start",
+                "Start training",
+                Btn::Primary,
+                Some("icons/play.svg"),
+                "Fix the highlighted fields first",
+                cx,
+            )
+        } else {
+            self.button(
+                "nr-start",
+                if busy { "Queue training" } else { "Start training" },
+                Btn::Primary,
+                Some("icons/play.svg"),
+                window,
+                cx,
+                act(|this, w, cx| this.submit_new_run(w, cx)),
+            )
+        };
         let footer = div()
             .flex()
             .items_center()
@@ -799,10 +910,11 @@ impl FoloApp {
             .border_t_1()
             .border_color(t.line_subtle)
             .bg(t.bg_raised)
-            .child(estimate_line)
+            .child(estimate_line.flex_1())
             .child(
                 div()
                     .flex()
+                    .flex_none()
                     .items_center()
                     .gap(px(8.))
                     .child(cancel)
@@ -814,7 +926,12 @@ impl FoloApp {
             "new-run",
             720.,
             "New training run",
-            Some("Trains on this machine and streams metrics into the run dashboard.".into()),
+            Some(match &busy_with {
+                Some(n) => {
+                    format!("{n} is training; this run queues and starts when the GPU is free.")
+                }
+                None => "Trains on this machine and streams metrics into the run dashboard.".into(),
+            }),
             body,
             footer,
             window,
@@ -846,7 +963,7 @@ impl FoloApp {
             "stop-confirm",
             "Stop run",
             Btn::Danger,
-            Some("icons/square.svg"),
+            Some("icons/stop.svg"),
             window,
             cx,
             act(move |this, w, cx| {
@@ -900,14 +1017,49 @@ impl FoloApp {
             .iter()
             .map(|x| (x.id, x.tone, x.title.clone(), x.body.clone(), x.action.clone()))
             .collect();
+        // One card at a time: older notifications fold into a single row above it.
+        let older = toasts.len().saturating_sub(1);
+        let toasts: Vec<ToastRow> = toasts.into_iter().skip(older).collect();
+        let folded = (older > 0).then(|| {
+            let dismiss = self.button(
+                "toast-dismiss-all",
+                "Dismiss all",
+                Btn::Secondary,
+                None,
+                window,
+                cx,
+                act(|this, _, cx| {
+                    this.toasts.clear();
+                    cx.notify();
+                }),
+            );
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .px(px(12.))
+                .py(px(6.))
+                .rounded(px(radius::LG))
+                .bg(t.bg_overlay)
+                .border_1()
+                .border_color(t.line_strong)
+                .shadow(t.shadow_md())
+                .child(text(ty::SM, t.text_secondary).child(if older == 1 {
+                    "1 more notification".to_string()
+                } else {
+                    format!("{older} more notifications")
+                }))
+                .child(dismiss)
+        });
         div()
             .absolute()
-            .bottom(px(20.))
+            .bottom(px(24.))
             .right(px(24.))
-            .w(px(380.))
+            .w(px(360.))
             .flex()
             .flex_col()
             .gap(px(8.))
+            .children(folded)
             .children(toasts.into_iter().map(|(id, tone, title, body, action)| {
                 let action_btn = action.map(|(label, a)| {
                     self.button(
@@ -934,6 +1086,13 @@ impl FoloApp {
                 div()
                     .id(("toast", id as usize))
                     .occlude()
+                    .on_hover(cx.listener(move |this, h: &bool, _, _| {
+                        if *h {
+                            this.toast_hover = Some(id);
+                        } else if this.toast_hover == Some(id) {
+                            this.toast_hover = None;
+                        }
+                    }))
                     .flex()
                     .items_start()
                     .gap(px(10.))
@@ -941,7 +1100,7 @@ impl FoloApp {
                     .rounded(px(radius::LG))
                     .bg(t.bg_overlay)
                     .border_1()
-                    .border_color(t.line_default)
+                    .border_color(t.line_strong)
                     .shadow(t.shadow_lg())
                     .child(div().pt(px(2.)).child(icon(
                         icon_path,
@@ -1206,11 +1365,17 @@ impl FoloApp {
                             .child(classes.get(b.class as usize).cloned().unwrap_or_default()),
                     )
                     .child(
-                        text(ty::XS, t.text_tertiary)
+                        text(ty::XS, if hot { t.text_secondary } else { t.text_tertiary })
                             .font_family(crate::theme::MONO)
                             .flex_1()
                             .text_right()
-                            .child(format!("{:.0},{:.0} {:.0}×{:.0}", b.x1, b.y1, b.x2 - b.x1, b.y2 - b.y1)),
+                            .child(format!(
+                                "{:.0}, {:.0} · {:.0}×{:.0}",
+                                b.x1,
+                                b.y1,
+                                b.x2 - b.x1,
+                                b.y2 - b.y1
+                            )),
                     );
                 // Focusable: Tab through labels to highlight each box from the keyboard.
                 self.bind(
@@ -1284,7 +1449,16 @@ impl FoloApp {
                             .child(badge(&t, format!("{} boxes", meta.boxes.len()), Tone::Neutral)),
                     ),
             )
-            .child(div().px(px(16.)).pt(px(12.)).pb(px(4.)).child(overline(&t, "Labels")))
+            .child(
+                div()
+                    .px(px(16.))
+                    .pt(px(12.))
+                    .pb(px(4.))
+                    .flex()
+                    .justify_between()
+                    .child(overline(&t, "Labels"))
+                    .child(text(ty::XS, t.text_tertiary).child("x, y · w × h (px)")),
+            )
             .child(
                 div()
                     .id("insp-boxes")
@@ -1315,6 +1489,14 @@ impl FoloApp {
                             .items_center()
                             .gap(px(5.))
                             .child(shortcut(&t, &["←", "→"]))
+                            .child(text(ty::XS, t.text_tertiary).child("browse · pan when zoomed")),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(5.))
+                            .child(shortcut(&t, &["PgUp", "PgDn"]))
                             .child(text(ty::XS, t.text_tertiary).child("browse")),
                     )
                     .child(
@@ -1352,7 +1534,6 @@ impl FoloApp {
                 int(n as u64)
             )))
             .child(div().flex_1())
-            .child(text(ty::SM, t.text_tertiary).font_family(crate::theme::MONO).child(meta.id.clone()))
             .child(close);
         div()
             .absolute()
@@ -1378,9 +1559,22 @@ impl FoloApp {
                     .shadow(t.shadow_lg())
                     .overflow_hidden()
                     .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| {
+                        // Zoomed in, arrows pan (Shift: further); otherwise ←/→ browse. Page Up/Down
+                        // always browse.
+                        let zoomed = this.inspector.as_ref().is_some_and(|i| i.zoom > 1.0);
+                        let d = if ev.keystroke.modifiers.shift { 128. } else { 32. };
+                        let pan = |this: &mut Self, dx: f32, dy: f32| {
+                            if let Some(i) = this.inspector.as_mut() {
+                                i.pan = (i.pan.0 + dx, i.pan.1 + dy);
+                            }
+                        };
                         match ev.keystroke.key.as_str() {
-                            "left" => this.step_inspector(-1, cx),
-                            "right" => this.step_inspector(1, cx),
+                            "left" if zoomed => pan(this, d, 0.),
+                            "right" if zoomed => pan(this, -d, 0.),
+                            "up" if zoomed => pan(this, 0., d),
+                            "down" if zoomed => pan(this, 0., -d),
+                            "left" | "pageup" => this.step_inspector(-1, cx),
+                            "right" | "pagedown" => this.step_inspector(1, cx),
                             "+" | "=" => this.zoom_by(1.4, cx),
                             "-" => this.zoom_by(1.0 / 1.4, cx),
                             "0" => {

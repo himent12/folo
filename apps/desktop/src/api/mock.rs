@@ -677,7 +677,7 @@ fn initial_logs(f: &RunFixture, created: i64) -> Vec<LogLine> {
 
 impl Backend for MockBackend {
     fn describe(&self) -> String {
-        "Mock data".into()
+        "Built-in demo".into()
     }
 
     fn now(&self) -> i64 {

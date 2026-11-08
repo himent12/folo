@@ -148,3 +148,27 @@ fn main() {
         cx.activate(true);
     });
 }
+
+#[cfg(test)]
+mod source_tests {
+    /// Catches text double-encoded by an editor or shell (UTF-8 read as Windows-1252) and stray BOMs.
+    #[test]
+    fn sources_are_clean_utf8() {
+        fn walk(dir: &std::path::Path, bad: &mut Vec<String>) {
+            for e in std::fs::read_dir(dir).unwrap().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(&p, bad);
+                } else if p.extension().is_some_and(|x| x == "rs") {
+                    let s = std::fs::read_to_string(&p).unwrap();
+                    if s.contains(['\u{00C3}', '\u{00C2}', '\u{00E2}', '\u{FEFF}']) {
+                        bad.push(p.display().to_string());
+                    }
+                }
+            }
+        }
+        let mut bad = Vec::new();
+        walk(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut bad);
+        assert!(bad.is_empty(), "mojibake or BOM in {bad:?}");
+    }
+}

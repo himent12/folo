@@ -71,6 +71,13 @@ impl Theme {
         self.mode == Mode::Dark
     }
 
+    /// A class colour for thin strokes on a panel: the photo palette as is in dark mode, darkened
+    /// in light mode so lines keep ≥ 3:1 against white.
+    pub fn class_stroke(&self, i: u32) -> Hsla {
+        let c = self.class(i);
+        if self.is_dark() { c } else { over(c, alpha(rgba32(0x000000FF), 0.38)) }
+    }
+
     /// Near-black or white text, whichever reads better on `bg` (WCAG contrast).
     pub fn readable_on(&self, bg: Hsla) -> Hsla {
         let lum = |c: Hsla| {
@@ -121,9 +128,11 @@ impl Theme {
     }
 
     /// Loss component colours (design/README.md: box = series 2, cls = 3, dfl = 4, total = 1).
+    /// box, cls, dfl, total. Total is the neutral sum; the parts take series slots no other
+    /// dashboard chart uses (mAP has 0 and 1, precision/recall 5).
     pub fn loss_colors(&self) -> [Hsla; 4] {
         let s = self.chart_series;
-        [s[1], s[2], s[3], s[0]]
+        [s[2], s[3], s[4], self.text_secondary]
     }
 }
 
