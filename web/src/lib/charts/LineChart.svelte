@@ -27,6 +27,7 @@
 </script>
 
 <script lang="ts">
+  import { tick } from 'svelte';
   import { scaleLinear, scaleLog } from 'd3-scale';
   import { area as d3area, curveLinear, curveMonotoneX, line as d3line } from 'd3-shape';
   import { downsample, nearest, ticks as niceTicks } from './downsample';
@@ -200,25 +201,19 @@
   });
 
   function onpointermove(e: PointerEvent) {
+    spoken = '';
     const rect = (e.currentTarget as SVGElement).getBoundingClientRect();
     const px = e.clientX - rect.left;
     if (px < margin.left - 4 || px > width - margin.right + 4) {
       cursor = null;
       return;
     }
-    announce = false;
     cursor = x.invert(px);
   }
 
-  // Keyboard scrubbing announces the values under the cursor; pointer hover stays silent.
-  let announce = $state(false);
-  /** The cursor this chart set from the keyboard; a linked chart moving the shared cursor never makes it speak. */
-  let kbdCursor = $state<number | null>(null);
-  const spoken = $derived(
-    announce && hover && cursor === kbdCursor
-      ? `${xTitle ? xTitle(hover.xv) : xFormat(hover.xv)}: ${hover.rows.map((r) => `${r.s.label} ${fmtValue(r.p.y)}`).join(', ')}`
-      : '',
-  );
+  // Keyboard scrubbing announces the values under the cursor. The text is written from the key handler itself, so
+  // pointer movement here or on a linked chart never produces announcements.
+  let spoken = $state('');
 
   /** Per-series summary for assistive tech: latest, minimum and maximum. */
   const summary = $derived(
@@ -248,9 +243,12 @@
       return;
     } else return;
     e.preventDefault();
-    announce = true;
-    kbdCursor = s.points[i]!.x;
-    cursor = kbdCursor;
+    cursor = s.points[i]!.x;
+    // `hover` derives from the cursor; read it once the update has settled.
+    void tick().then(() => {
+      const h = hover;
+      spoken = h ? `${h.title}: ${h.rows.map((r) => `${r.s.label} ${fmtValue(r.p.y)}`).join(', ')}` : '';
+    });
   }
 
   const PATTERNS = { dash: [6, 3], dot: [1.5, 3], dashdot: [7, 3, 1.5, 3] } as const;
@@ -322,9 +320,9 @@
         tabindex={hasData ? 0 : -1}
         {onpointermove}
         onpointerleave={() => (cursor = null)}
-        onpointerdown={() => (announce = false)}
+        onpointerdown={() => (spoken = '')}
         {onkeydown}
-        onblur={() => ((cursor = null), (announce = false))}
+        onblur={() => ((cursor = null), (spoken = ''))}
       >
         <g class="grid">
           {#each yTickValues as t (t)}

@@ -539,9 +539,6 @@
     .hint.touched {
       opacity: 0;
     }
-    .labels button {
-      height: 44px;
-    }
   }
   aside {
     border-left: 1px solid var(--line-subtle);
@@ -692,6 +689,12 @@
       border-left: 0;
       border-top: 1px solid var(--line-subtle);
       padding-bottom: calc(var(--space-4) + env(safe-area-inset-bottom));
+    }
+  }
+  /* After the base .labels rule so it wins on touch screens. */
+  @media (pointer: coarse) {
+    .labels button {
+      height: 44px;
     }
   }
 </style>
