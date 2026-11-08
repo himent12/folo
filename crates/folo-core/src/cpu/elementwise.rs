@@ -460,8 +460,10 @@ pub(crate) fn unary_backward(op: UnaryOp, x: &[f32], lx: &Layout, g: &[f32], lg:
             let t = x.tanh();
             g * (1.0 - t * t)
         }),
-        // 1 / (1 + x^2) underflows to 0 (the right limit) when x^2 overflows.
-        Atan => map2(x, lx, g, lg, |x, g| g / (1.0 + x * x)),
+        // g / (1 + x^2), written as (g / x) / (x + 1 / x) for |x| > 1 so that x^2 never overflows.
+        Atan => {
+            map2(x, lx, g, lg, |x, g| if x.abs() > 1.0 { (g / x) / (x + 1.0 / x) } else { g / (1.0 + x * x) })
+        }
         // (1 - x)(1 + x) keeps precision near |x| = 1, where 1 - x^2 cancels.
         Asin => map2(x, lx, g, lg, |x, g| g / ((1.0 - x) * (1.0 + x)).sqrt()),
         Acos => map2(x, lx, g, lg, |x, g| -g / ((1.0 - x) * (1.0 + x)).sqrt()),

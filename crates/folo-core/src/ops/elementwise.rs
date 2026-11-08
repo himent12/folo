@@ -321,17 +321,17 @@ fn binary_backward(
             )?
         ],
         BinaryOp::Atan2 => {
-            // d/dy atan2(y, x) = x / r^2, d/dx = -y / r^2 (r^2 = x^2 + y^2), 0 at the origin. Computed on inputs
-            // scaled by m = max(|x|, |y|) so that squaring neither underflows nor overflows:
-            // x / r^2 = (x/m) / ((x/m)^2 + (y/m)^2) / m, with the scaled r^2 in [1, 2].
+            // d/dy atan2(y, x) = x / r^2, d/dx = -y / r^2 (r^2 = x^2 + y^2), 0 at the origin. On inputs scaled by
+            // m = max(|x|, |y|): g x / r^2 = ((g (x/m)) / r2s) / m with r2s = (x/m)^2 + (y/m)^2 in [1, 2]. Each
+            // step shrinks the magnitude except the last, so a component overflows only if its true value does.
             let m = a.abs()?.maximum(&b.abs()?)?;
             let origin = m.eq_scalar(0.0)?;
             let m = origin.where_cond(&a.scalar_like(1.0)?, &m)?;
             let (ys, xs) = (a.div(&m)?, b.div(&m)?);
             let r2 = ys.square()?.add(&xs.square()?)?;
             let r2 = origin.where_cond(&a.scalar_like(1.0)?, &r2)?;
-            let k = origin.where_cond(&a.scalar_like(0.0)?, &g.div(&r2)?.div(&m)?)?;
-            grads![side(need_a, &|| k.mul(&xs), sa)?, side(need_b, &|| k.mul(&ys)?.neg(), sb)?]
+            let part = |s: &Tensor| g.mul(s)?.div(&r2)?.div(&m);
+            grads![side(need_a, &|| part(&xs), sa)?, side(need_b, &|| part(&ys)?.neg(), sb)?]
         }
         BinaryOp::Maximum | BinaryOp::Minimum => {
             let wins = if op == BinaryOp::Maximum { a.gt(b)? } else { a.lt(b)? };
@@ -448,6 +448,27 @@ mod tests {
                 assert!((got - sign * want).abs() <= 1e-6 * want, "atan2 grad at {v}: {got}");
             }
         }
+        // Unequal magnitudes, a large upstream gradient, a subnormal input on an axis (reference in f64).
+        for (yv, xv, gv) in
+            [(1e-30f32, 1e-20f32, 1e20f32), (1e-39, 0.0, 1.0), (3.0, -4e30, 1e-10), (-2e-38, 5e-39, 1.0)]
+        {
+            let (y, x) = (t(&[yv], &[1]).requires_grad_(), t(&[xv], &[1]).requires_grad_());
+            let g = y.atan2(&x).unwrap().backward_with(&t(&[gv], &[1])).unwrap();
+            let (y64, x64, g64) = (yv as f64, xv as f64, gv as f64);
+            let r2 = y64 * y64 + x64 * x64;
+            for (got, want) in [(g.get(&y).unwrap(), g64 * x64 / r2), (g.get(&x).unwrap(), -g64 * y64 / r2)] {
+                let got = got.item::<f32>().unwrap() as f64;
+                let want32 = want as f32 as f64; // the f32-representable answer (0, subnormal or inf included)
+                let ok = got == want32 || (got - want).abs() <= 1e-6 * want.abs() + 1e-44;
+                assert!(ok, "atan2 grad at ({yv}, {xv}) * {gv}: {got} vs {want}");
+            }
+        }
+        // atan's 1 / (1 + x^2) must not overflow for large |x| (true value g / x^2).
+        let xa = t(&[1e20, -3e15, 0.5], &[3]).requires_grad_();
+        let g = xa.atan().unwrap().backward_with(&t(&[1e20, 1.0, 2.0], &[3])).unwrap();
+        close(g.get(&xa).unwrap().to_vec().unwrap(), vec![1e-20, (1.0 / 9e30f64) as f32, 1.6]);
+        let gv = g.get(&xa).unwrap().to_vec::<f32>().unwrap();
+        assert!((gv[0] / 1e-20 - 1.0).abs() < 1e-6 && (gv[1] as f64 * 9e30 - 1.0).abs() < 1e-5, "{gv:?}");
         let (yv, xv) = (t(&[0.0], &[1]).requires_grad_(), t(&[0.0], &[1]).requires_grad_());
         let g = yv.atan2(&xv).unwrap().sum_all().unwrap().backward().unwrap();
         assert_eq!(g.get(&yv).unwrap().item::<f32>().unwrap(), 0.0);
