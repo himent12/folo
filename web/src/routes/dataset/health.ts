@@ -63,7 +63,7 @@ export function healthChecks(d: Dataset, s: DatasetStats): HealthItem[] {
       id: 'broken',
       severity: 'danger',
       title: `${int(s.broken_labels)} broken label ${s.broken_labels === 1 ? 'file' : 'files'}`,
-      detail: 'They could not be parsed and are skipped during training. Fix or delete them, then re-register the dataset.',
+      detail: 'These labels could not be parsed, so their images are skipped in training. Fix or delete them, then re-register the dataset.',
     });
   }
 

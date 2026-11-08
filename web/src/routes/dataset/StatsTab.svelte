@@ -4,6 +4,7 @@
    * balance as the focal chart, and the two histograms in ink. On phones the findings start collapsed under a one-line
    * summary, so the class balance stays on the first screen.
    */
+  import IssueList from './IssueList.svelte';
   import { MediaQuery } from 'svelte/reactivity';
   import ArrowRight from '@lucide/svelte/icons/arrow-right';
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
@@ -69,6 +70,10 @@
               </summary>
               <div class="hbody">
                 <p class="hdetail">{h.detail}</p>
+                {#if h.id === 'broken'}
+                  <!-- The evidence: each file and line with the parser's message. -->
+                  <IssueList datasetId={dataset.id} path={dataset.path} severity="error" />
+                {/if}
                 {#if h.action}
                   <a class="haction" href={href(h.action.path)}>{h.action.label}<ArrowRight size={12} strokeWidth={2} aria-hidden="true" /></a>
                 {/if}
