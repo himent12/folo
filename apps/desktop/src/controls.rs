@@ -902,10 +902,14 @@ impl FoloApp {
 
 pub fn btn_colors(t: &Theme, kind: Btn) -> (Hsla, Hsla, Option<Hsla>, Hsla) {
     match kind {
-        // Light surfaces: a neutral 1 px edge, not a lime one (design/README).
-        Btn::Primary => {
-            (t.accent_solid, t.accent_on, (!t.is_dark()).then_some(t.line_default), t.accent_solid_hover)
-        }
+        // Light surfaces: a neutral 1 px edge, not a lime one (design/README). Dark keeps the same
+        // 1 px as a transparent edge, so a theme switch never changes a button's width.
+        Btn::Primary => (
+            t.accent_solid,
+            t.accent_on,
+            Some(if t.is_dark() { gpui::transparent_black() } else { t.line_default }),
+            t.accent_solid_hover,
+        ),
         Btn::Secondary => {
             (t.bg_raised, t.text_primary, Some(t.line_default), crate::theme::over(t.bg_raised, t.bg_hover))
         }

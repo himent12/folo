@@ -293,14 +293,14 @@ impl FoloApp {
                 "Precision",
                 mm.as_ref().map_or("–".into(), |x| format!("{:.3}", x.precision)),
                 "",
-                Some(text(ty::XS, t.text_tertiary).child("conf 0.25 · IoU 0.50")),
+                Some(text(ty::XS, t.text_tertiary).child("best-F1 threshold · IoU 0.50")),
             )))
             .child(vline(&t))
             .child(tile(small(
                 "Recall",
                 mm.as_ref().map_or("–".into(), |x| format!("{:.3}", x.recall)),
                 "",
-                Some(text(ty::XS, t.text_tertiary).child("conf 0.25 · IoU 0.50")),
+                Some(text(ty::XS, t.text_tertiary).child("best-F1 threshold · IoU 0.50")),
             )))
             .child(vline(&t))
             .child(tile(small(
@@ -673,7 +673,7 @@ impl FoloApp {
                             .w(px(64.))
                             .flex_none()
                             .text_right()
-                            // At rest: precision at the operating point (conf 0.25, like the KPI);
+                            // At rest: precision at the best-F1 threshold (as the KPI reports it);
                             // while inspecting: precision at the cursor's recall.
                             .child(
                                 at_cursor(class)
@@ -757,7 +757,7 @@ impl FoloApp {
                                     // Precision at the recall under the cursor ("–" until inspecting).
                                     .child(div().w(px(64.)).flex_none().flex().justify_end().child(th(
                                         &t,
-                                        &hover.map_or("P @ 0.25".to_string(), |r| format!("P @ R {r:.2}")),
+                                        &hover.map_or("Precision".to_string(), |r| format!("P @ R {r:.2}")),
                                     )))
                                     .child(
                                         div()
@@ -795,7 +795,12 @@ impl FoloApp {
                                                 .w(px(64.))
                                                 .flex_none()
                                                 .text_right()
-                                                .child(format!("{:.3}", mm.precision)),
+                                                // No aggregate value at the cursor: a dash while inspecting.
+                                                .child(if hover.is_some() {
+                                                    "–".to_string()
+                                                } else {
+                                                    format!("{:.3}", mm.precision)
+                                                }),
                                         )
                                         .child(
                                             text(ty::SM, t.text_primary)
