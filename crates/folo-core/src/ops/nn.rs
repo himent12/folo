@@ -1,0 +1,263 @@
+//! Matrix products, convolution, pooling and upsampling.
+
+use super::grads;
+use crate::backend::{Conv2dParams, Pool2dParams, View};
+use crate::shape::DimVec;
+use crate::{Error, Result, Shape, Tensor};
+
+impl Tensor {
+    /// Matrix product. Both operands need rank >= 2: `[.., m, k] @ [.., k, n] -> [.., m, n]`, with the batch
+    /// dims broadcast (so `[B, m, k] @ [k, n]` works and runs as one large GEMM).
+    pub fn matmul(&self, other: &Tensor) -> Result<Tensor> {
+        self.check_same_device(other, "matmul")?;
+        self.check_f32("matmul")?;
+        other.check_f32("matmul")?;
+        let mismatch =
+            || Error::ShapeMismatch { op: "matmul", lhs: self.shape().clone(), rhs: other.shape().clone() };
+        if self.rank() < 2 || other.rank() < 2 {
+            return Err(mismatch());
+        }
+        let (ra, rb) = (self.rank(), other.rank());
+        let (m, k) = (self.dims()[ra - 2], self.dims()[ra - 1]);
+        let (k2, n) = (other.dims()[rb - 2], other.dims()[rb - 1]);
+        if k != k2 {
+            return Err(mismatch());
+        }
+        let ba = Shape::new(&self.dims()[..ra - 2]);
+        let bb = Shape::new(&other.dims()[..rb - 2]);
+        let batch = ba.broadcast(&bb, "matmul").map_err(|_| mismatch())?;
+        let shape_of = |r: usize, c: usize| {
+            let mut d: DimVec = batch.dims().iter().copied().collect();
+            d.extend([r, c]);
+            Shape::from(d)
+        };
+        let la = self.layout().broadcast_to(&shape_of(m, k), "matmul")?;
+        let lb = other.layout().broadcast_to(&shape_of(k, n), "matmul")?;
+        let b = self.backend()?;
+        let s = super::with_views([self, other], [&la, &lb], |[a, bv]| b.matmul(a, bv))?;
+        let out = Tensor::wrap(s, shape_of(m, n), "matmul")?;
+        let (x, y) = (self.clone(), other.clone());
+        Ok(out.track("matmul", &[self, other], move |g| {
+            let ga = if x.requires_grad() { Some(g.matmul(&y.t()?)?.sum_to(x.shape())?) } else { None };
+            let gb = if !y.requires_grad() {
+                None
+            } else if y.rank() == 2 && x.rank() > 2 {
+                // Shared weight: fold the batch into one GEMM instead of summing B products.
+                let xk = x.reshape([-1, k as i64])?;
+                let gn = g.reshape([-1, n as i64])?;
+                Some(xk.t()?.matmul(&gn)?)
+            } else {
+                Some(x.t()?.matmul(g)?.sum_to(y.shape())?)
+            };
+            Ok(grads![ga, gb])
+        }))
+    }
+
+    /// 2-D convolution of an NCHW input with an OIHW weight (`[C_out, C_in / groups, KH, KW]`) and optional
+    /// bias `[C_out]`. `stride`, `padding` and `dilation` apply to both spatial dims.
+    pub fn conv2d(
+        &self,
+        weight: &Tensor,
+        bias: Option<&Tensor>,
+        stride: usize,
+        padding: usize,
+        dilation: usize,
+        groups: usize,
+    ) -> Result<Tensor> {
+        let p = Conv2dParams { stride: [stride; 2], padding: [padding; 2], dilation: [dilation; 2], groups };
+        self.conv2d_with(weight, bias, &p)
+    }
+
+    /// [`Tensor::conv2d`] with per-axis parameters.
+    pub fn conv2d_with(&self, weight: &Tensor, bias: Option<&Tensor>, p: &Conv2dParams) -> Result<Tensor> {
+        const OP: &str = "conv2d";
+        self.check_f32(OP)?;
+        weight.check_f32(OP)?;
+        self.check_same_device(weight, OP)?;
+        let (n, c, h, w) =
+            self.dims4().map_err(|_| Error::invalid_shape(OP, self.shape(), "input must be NCHW"))?;
+        let (o, cg, kh, kw) =
+            weight.dims4().map_err(|_| Error::invalid_shape(OP, weight.shape(), "weight must be OIHW"))?;
+        if p.groups == 0 || p.stride.contains(&0) || p.dilation.contains(&0) {
+            return Err(Error::invalid_arg(
+                OP,
+                format!("stride, dilation and groups must be positive: {p:?}"),
+            ));
+        }
+        if c % p.groups != 0 || o % p.groups != 0 || cg * p.groups != c || kh == 0 || kw == 0 {
+            return Err(Error::ShapeMismatch {
+                op: OP,
+                lhs: self.shape().clone(),
+                rhs: weight.shape().clone(),
+            });
+        }
+        if let Some(b) = bias {
+            b.check_f32(OP)?;
+            self.check_same_device(b, OP)?;
+            if b.dims() != [o] {
+                return Err(Error::ShapeMismatch {
+                    op: OP,
+                    lhs: weight.shape().clone(),
+                    rhs: b.shape().clone(),
+                });
+            }
+        }
+        let [oh, ow] = p.output_hw(h, w, kh, kw).ok_or_else(|| {
+            Error::invalid_arg(OP, format!("kernel {kh}x{kw} with {p:?} does not fit input {}", self.shape()))
+        })?;
+        let backend = self.backend()?;
+        let s = match bias {
+            Some(bt) => super::with_views(
+                [self, weight, bt],
+                [self.layout(), weight.layout(), bt.layout()],
+                |[x, wv, bv]| backend.conv2d(x, wv, Some(bv), p),
+            )?,
+            None => super::with_views([self, weight], [self.layout(), weight.layout()], |[x, wv]| {
+                backend.conv2d(x, wv, None, p)
+            })?,
+        };
+        let out = Tensor::wrap(s, Shape::new(&[n, o, oh, ow]), OP)?;
+        let (x, wt, has_bias, p) = (self.clone(), weight.clone(), bias.is_some(), *p);
+        let mut inputs = vec![self, weight];
+        if let Some(b) = bias {
+            inputs.push(b);
+        }
+        Ok(out.track(OP, &inputs, move |g| {
+            // Both kernels read the gradient densely; materialise a broadcast/strided one once.
+            let g = &g.contiguous()?;
+            let backend = g.backend()?;
+            let gx = if x.requires_grad() {
+                let s = super::with_views([g, &wt], [g.layout(), wt.layout()], |[gv, wv]| {
+                    backend.conv2d_backward_input(gv, wv, x.shape(), &p)
+                })?;
+                Some(Tensor::wrap(s, x.shape().clone(), "conv2d_backward_input")?)
+            } else {
+                None
+            };
+            let gw = if wt.requires_grad() {
+                let s = super::with_views([&x, g], [x.layout(), g.layout()], |[xv, gv]| {
+                    backend.conv2d_backward_weight(xv, gv, wt.shape(), &p)
+                })?;
+                Some(Tensor::wrap(s, wt.shape().clone(), "conv2d_backward_weight")?)
+            } else {
+                None
+            };
+            let mut gs = grads![gx, gw];
+            if has_bias {
+                gs.push(Some(g.sum([0, 2, 3], false)?));
+            }
+            Ok(gs)
+        }))
+    }
+
+    fn check_pool(&self, op: &'static str, p: &Pool2dParams) -> Result<[usize; 2]> {
+        self.check_f32(op)?;
+        let (_, _, h, w) =
+            self.dims4().map_err(|_| Error::invalid_shape(op, self.shape(), "input must be NCHW"))?;
+        if p.kernel.contains(&0) || p.stride.contains(&0) {
+            return Err(Error::invalid_arg(op, format!("kernel and stride must be positive: {p:?}")));
+        }
+        if 2 * p.padding[0] > p.kernel[0] || 2 * p.padding[1] > p.kernel[1] {
+            return Err(Error::invalid_arg(op, format!("padding must be at most half the kernel: {p:?}")));
+        }
+        p.output_hw(h, w).ok_or_else(|| {
+            Error::invalid_arg(op, format!("window {p:?} does not fit input {}", self.shape()))
+        })
+    }
+
+    /// Max pooling with a square `kernel`, `stride` and `padding` (padding never wins).
+    pub fn max_pool2d(&self, kernel: usize, stride: usize, padding: usize) -> Result<Tensor> {
+        self.max_pool2d_with(&Pool2dParams {
+            kernel: [kernel; 2],
+            stride: [stride; 2],
+            padding: [padding; 2],
+        })
+    }
+
+    /// [`Tensor::max_pool2d`] with per-axis parameters.
+    pub fn max_pool2d_with(&self, p: &Pool2dParams) -> Result<Tensor> {
+        let [oh, ow] = self.check_pool("max_pool2d", p)?;
+        let b = self.backend()?;
+        let (vs, is) = self.with_view(|v| b.max_pool2d(v, p))?;
+        let (n, c) = (self.dims()[0], self.dims()[1]);
+        let out = Tensor::wrap(vs, Shape::new(&[n, c, oh, ow]), "max_pool2d")?;
+        let idx = Tensor::wrap(is, Shape::new(&[n, c, oh, ow]), "max_pool2d")?;
+        let in_shape = self.shape().clone();
+        Ok(out.track("max_pool2d", &[self], move |g| {
+            let b = g.backend()?;
+            let s = super::with_views([g, &idx], [g.layout(), idx.layout()], |[gv, iv]| {
+                b.max_pool2d_backward(gv, iv, &in_shape)
+            })?;
+            Ok(grads![Some(Tensor::wrap(s, in_shape.clone(), "max_pool2d_backward")?)])
+        }))
+    }
+
+    /// Average pooling with a square `kernel`, `stride` and zero `padding` (padding counts in the divisor).
+    pub fn avg_pool2d(&self, kernel: usize, stride: usize, padding: usize) -> Result<Tensor> {
+        self.avg_pool2d_with(&Pool2dParams {
+            kernel: [kernel; 2],
+            stride: [stride; 2],
+            padding: [padding; 2],
+        })
+    }
+
+    /// [`Tensor::avg_pool2d`] with per-axis parameters.
+    pub fn avg_pool2d_with(&self, p: &Pool2dParams) -> Result<Tensor> {
+        let [oh, ow] = self.check_pool("avg_pool2d", p)?;
+        let b = self.backend()?;
+        let s = self.with_view(|v| b.avg_pool2d(v, p))?;
+        let (n, c) = (self.dims()[0], self.dims()[1]);
+        let out = Tensor::wrap(s, Shape::new(&[n, c, oh, ow]), "avg_pool2d")?;
+        let (in_shape, p) = (self.shape().clone(), *p);
+        Ok(out.track("avg_pool2d", &[self], move |g| {
+            let b = g.backend()?;
+            let s = g.with_view(|gv| b.avg_pool2d_backward(gv, &in_shape, &p))?;
+            Ok(grads![Some(Tensor::wrap(s, in_shape.clone(), "avg_pool2d_backward")?)])
+        }))
+    }
+
+    /// Adaptive average pooling to `[oh, ow]` (`[1, 1]` is global average pooling).
+    pub fn adaptive_avg_pool2d(&self, out_hw: [usize; 2]) -> Result<Tensor> {
+        const OP: &str = "adaptive_avg_pool2d";
+        self.check_f32(OP)?;
+        let (n, c, h, w) =
+            self.dims4().map_err(|_| Error::invalid_shape(OP, self.shape(), "input must be NCHW"))?;
+        if out_hw.contains(&0) || h == 0 || w == 0 {
+            return Err(Error::invalid_arg(OP, format!("output size {out_hw:?} for input {}", self.shape())));
+        }
+        let b = self.backend()?;
+        let s = self.with_view(|v| b.adaptive_avg_pool2d(v, out_hw))?;
+        let out = Tensor::wrap(s, Shape::new(&[n, c, out_hw[0], out_hw[1]]), OP)?;
+        let in_shape = self.shape().clone();
+        Ok(out.track(OP, &[self], move |g| {
+            let b = g.backend()?;
+            let s = g.with_view(|gv| b.adaptive_avg_pool2d_backward(gv, &in_shape))?;
+            Ok(grads![Some(Tensor::wrap(s, in_shape.clone(), "adaptive_avg_pool2d_backward")?)])
+        }))
+    }
+
+    /// Nearest-neighbour upsampling of NCHW by an integer factor on both axes.
+    pub fn upsample_nearest2d(&self, scale: usize) -> Result<Tensor> {
+        self.upsample_nearest2d_hw([scale, scale])
+    }
+
+    /// Nearest-neighbour upsampling by integer factors `[sh, sw]`.
+    pub fn upsample_nearest2d_hw(&self, scale: [usize; 2]) -> Result<Tensor> {
+        const OP: &str = "upsample_nearest2d";
+        self.check_f32(OP)?;
+        let (n, c, h, w) =
+            self.dims4().map_err(|_| Error::invalid_shape(OP, self.shape(), "input must be NCHW"))?;
+        if scale.contains(&0) {
+            return Err(Error::invalid_arg(OP, "scale must be positive"));
+        }
+        let b = self.backend()?;
+        let s = self.with_view(|v| b.upsample_nearest2d(v, scale))?;
+        let out = Tensor::wrap(s, Shape::new(&[n, c, h * scale[0], w * scale[1]]), OP)?;
+        let in_shape = self.shape().clone();
+        Ok(out.track(OP, &[self], move |g| {
+            let b = g.backend()?;
+            let s = g.with_view(|gv: View<'_>| b.upsample_nearest2d_backward(gv, scale))?;
+            Ok(grads![Some(Tensor::wrap(s, in_shape.clone(), "upsample_nearest2d_backward")?)])
+        }))
+    }
+}
