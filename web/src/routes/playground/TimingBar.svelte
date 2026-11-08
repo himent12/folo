@@ -1,14 +1,17 @@
 <script lang="ts">
-  /** Where the time of one prediction went: preprocess / inference / postprocess as a stacked bar. */
+  /**
+   * Where the time of one prediction went: preprocess / inference / postprocess as a stacked bar in neutral shades
+   * (the phases are not entities, so they get no hue; inference, the part that matters, is the darkest ink).
+   */
   import type { Timing } from '$lib/api/types';
   import { ms, num } from '$lib/format';
 
   let { timing, device }: { timing: Timing; device: string } = $props();
 
   const parts = $derived([
-    { key: 'pre', label: 'Preprocess', v: timing.preprocess_ms, color: 'var(--chart-2)' },
-    { key: 'inf', label: 'Inference', v: timing.inference_ms, color: 'var(--chart-1)' },
-    { key: 'post', label: 'Postprocess', v: timing.postprocess_ms, color: 'var(--chart-4)' },
+    { key: 'pre', label: 'Preprocess', v: timing.preprocess_ms, color: 'var(--text-tertiary)' },
+    { key: 'inf', label: 'Inference', v: timing.inference_ms, color: 'var(--text-primary)' },
+    { key: 'post', label: 'Postprocess', v: timing.postprocess_ms, color: 'var(--line-strong)' },
   ]);
   const sum = $derived(parts.reduce((a, p) => a + p.v, 0) || 1);
   const total = $derived(timing.total_ms || sum);
