@@ -272,7 +272,8 @@ impl RealStore {
         Dataset {
             id: reg.id.clone(),
             name: reg.name.clone(),
-            path: reg.path.clone(),
+            // Reported with `/` separators (registrations keep the path as stored).
+            path: folo_api::json::path(&reg.path),
             format: idx.map_or(reg.format, |i| i.format),
             classes: idx.map_or_else(|| reg.classes.clone(), |i| i.classes.clone()),
             created: reg.created.clone(),
@@ -285,19 +286,27 @@ impl RealStore {
     fn register(&self, name: Option<String>, path: String, format: DatasetFormat) -> Result<Dataset> {
         // Registered absolute, so the registry works whatever the working directory of the next start.
         let path = absolute(Path::new(&path)).to_string_lossy().into_owned();
-        // Registering a folder again (by its canonical path) returns the dataset it already is.
-        if let Ok(want) = std::fs::canonicalize(&path) {
-            let existing = self.entries.read().unwrap().iter().find_map(|e| {
+        // Registering a folder again (by its canonical path) returns the dataset it already is. Checked before
+        // indexing (cheap) and again under the write lock (two requests for one folder may index at once).
+        let want = std::fs::canonicalize(&path).ok();
+        let same = |list: &[Arc<Entry>]| {
+            let want = want.as_ref()?;
+            list.iter().find_map(|e| {
                 let r = e.reg();
                 let same_format = format == DatasetFormat::Auto || format == r.format;
-                (same_format && std::fs::canonicalize(&r.path).ok().as_ref() == Some(&want)).then_some(r.id)
-            });
-            if let Some(id) = existing {
-                return self.get_dataset(&id);
-            }
+                (same_format && std::fs::canonicalize(&r.path).ok().as_ref() == Some(want)).then_some(r.id)
+            })
+        };
+        let existing = same(&self.entries.read().unwrap());
+        if let Some(id) = existing {
+            return self.get_dataset(&id);
         }
         let idx = Arc::new(Index::build(&path, format, &own_state(&self.data_dir))?);
         let mut list = self.entries.write().unwrap();
+        if let Some(id) = same(&list) {
+            drop(list);
+            return self.get_dataset(&id);
+        }
         let mut regs = read_registry(&self.data_dir)?;
         // Unique against loaded datasets and registrations whose folder is currently missing.
         let id = unique_id("ds", fnv1a(path.as_bytes()) ^ unix_now().to_bits(), |id| {

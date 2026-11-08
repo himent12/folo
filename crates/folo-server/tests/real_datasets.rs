@@ -459,3 +459,37 @@ async fn an_empty_root_folder_created_later_counts_as_a_change() {
     std::fs::remove_dir(ds_dir.join("later")).unwrap();
     assert_eq!(first_file(ok(&app, get(&uri)).await), "images/train/000000.png");
 }
+
+/// Registering a folder again, under any spelling, also from requests racing each other and after a restart,
+/// returns the one dataset it is; its path is reported with `/` separators.
+#[tokio::test]
+async fn registering_a_folder_again_returns_the_same_dataset() {
+    let t = TempDir::new("idem");
+    let (home, data) = (t.join("home"), t.join("shapes"));
+    write_shapes(&data, 6);
+    let store = Arc::new(RealStore::open(home.clone()).recheck_every(Duration::ZERO));
+    let racers: Vec<_> = (0..4)
+        .map(|i| {
+            let (store, path) = (store.clone(), data.clone());
+            std::thread::spawn(move || {
+                use folo_server::Store;
+                let path = if i % 2 == 0 { path } else { path.join("..").join("shapes") };
+                let req = RegisterDataset {
+                    name: Some(format!("n{i}")),
+                    path: path.to_string_lossy().into_owned(),
+                    format: DatasetFormat::Auto,
+                };
+                store.register_dataset(req).unwrap()
+            })
+        })
+        .collect();
+    let ids: Vec<Dataset> = racers.into_iter().map(|h| h.join().unwrap()).collect();
+    assert!(ids.iter().all(|d| d.id == ids[0].id), "{:?}", ids.iter().map(|d| &d.id).collect::<Vec<_>>());
+    assert!(!ids[0].path.contains('\\'), "{}", ids[0].path);
+    drop(store);
+    let a = app(&home);
+    let again: Dataset = ok(&a, post_json("/api/datasets", json!({ "path": data.to_str().unwrap() }))).await;
+    assert_eq!(again.id, ids[0].id);
+    let list: DatasetList = ok(&a, get("/api/datasets")).await;
+    assert_eq!(list.datasets.len(), 1);
+}

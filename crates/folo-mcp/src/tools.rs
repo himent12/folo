@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
+use folo_api::IssuePage;
 use folo_api::{
     Arch, Dataset, ExportResult, IssueSeverity, Model, PredictResponse, RegisterDataset, Run, RunMetrics,
     SyntheticDataset, ValReport, ValRequest,
@@ -493,6 +494,30 @@ fn summary_classes(classes: &[String]) -> Vec<String> {
     classes.iter().take(SUMMARY_CLASSES).map(|c| short(c, 64)).collect()
 }
 
+/// `Store::list_issues` for `q`, also against a `folo serve` from before severity filters and counts (proxy
+/// mode): it ignores `severity` and leaves `counts` out, so the page is rebuilt from all its issues.
+fn list_issues_compat(
+    fetch: impl Fn(&IssueQuery) -> Result<IssuePage, Error>,
+    q: &IssueQuery,
+) -> Result<IssuePage, Error> {
+    let page = fetch(q)?;
+    let c = &page.counts;
+    if c.error + c.warning + c.info > 0 || (page.total == 0 && page.issues.is_empty()) {
+        return Ok(page);
+    }
+    let mut all = Vec::new();
+    loop {
+        let q = IssueQuery { offset: all.len() as u64, limit: 1000, ..IssueQuery::default() };
+        let p = fetch(&q)?;
+        let n = p.issues.len();
+        all.extend(p.issues);
+        if n == 0 || all.len() as u64 >= p.total {
+            break;
+        }
+    }
+    Ok(q.page(all.iter()))
+}
+
 /// An issue with its file, message and fix cut to 300 characters, so a page always makes progress.
 fn short_issue(mut i: folo_api::DatasetIssue) -> folo_api::DatasetIssue {
     i.file = short(&i.file, 300);
@@ -724,8 +749,7 @@ impl Inner {
                 for severity in [IssueSeverity::Error, IssueSeverity::Warning] {
                     let limit = (MAX_ISSUES - issues.len()) as u64;
                     let q = IssueQuery { severity: Some(severity), limit, ..IssueQuery::default() };
-                    let page = s.list_issues(&id, &q)?;
-                    // A `folo serve` without the severity filter returns every issue.
+                    let page = list_issues_compat(|q| s.list_issues(&id, q), &q)?;
                     issues.extend(
                         page.issues.into_iter().filter(|i| i.severity == severity).take(limit as usize),
                     );
@@ -772,7 +796,7 @@ impl Inner {
         self.ensure_dataset(&a.dataset_id).await?;
         let q = IssueQuery { kind: a.kind.clone(), severity: a.severity, offset, limit };
         let id = a.dataset_id.clone();
-        let page = self.blocking(move |s| s.list_issues(&id, &q)).await?;
+        let page = self.blocking(move |s| list_issues_compat(|q| s.list_issues(&id, q), &q)).await?;
         let counts = page.counts;
         let page = fit_page(page.issues.into_iter().map(short_issue), offset, limit, page.total);
         let filter: Vec<&str> = a.severity.map(|s| s.as_str()).into_iter().chain(a.kind.as_deref()).collect();
@@ -1446,6 +1470,37 @@ mod tests {
             assert_eq!(s.get("additionalProperties"), Some(&json!(false)), "{}", t.name);
             assert!(unknown_argument(t.name, &s, &args(json!({ "zzz_bogus": 1 }))).is_some(), "{}", t.name);
         }
+    }
+
+    #[test]
+    fn issues_from_an_older_server_are_filtered_and_counted_here() {
+        use folo_api::{DatasetIssue, IssueCounts};
+        let issue = |kind: &str, severity| DatasetIssue {
+            kind: kind.into(),
+            severity,
+            file: "f".into(),
+            line: None,
+            message: "m".into(),
+            fix: None,
+        };
+        // 60 background images, then one error: an old server ignores `severity` and sends no counts.
+        let mut all: Vec<DatasetIssue> = (0..60).map(|_| issue("empty_image", IssueSeverity::Info)).collect();
+        all.push(issue("class_overflow", IssueSeverity::Error));
+        let old = |q: &IssueQuery| -> Result<IssuePage, Error> {
+            let page = all.iter().skip(q.offset as usize).take(q.limit as usize).cloned().collect();
+            Ok(IssuePage { total: all.len() as u64, issues: page, counts: IssueCounts::default() })
+        };
+        let q = IssueQuery { severity: Some(IssueSeverity::Error), limit: 50, ..IssueQuery::default() };
+        let page = list_issues_compat(old, &q).unwrap();
+        assert_eq!((page.total, page.issues.len()), (1, 1));
+        assert_eq!(page.issues[0].kind, "class_overflow");
+        assert_eq!((page.counts.error, page.counts.info), (1, 60));
+        // A new server's answer is used as is, also an empty one.
+        let new = |q: &IssueQuery| Ok(q.page(all.iter()));
+        assert_eq!(list_issues_compat(new, &q).unwrap(), q.page(all.iter()));
+        let none =
+            |_: &IssueQuery| Ok(IssuePage { total: 0, issues: vec![], counts: IssueCounts::default() });
+        assert_eq!(list_issues_compat(none, &q).unwrap().total, 0);
     }
 
     #[test]

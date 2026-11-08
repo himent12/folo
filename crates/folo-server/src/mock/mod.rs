@@ -842,23 +842,29 @@ impl Store for MockStore {
     }
 
     fn register_dataset(&self, req: RegisterDataset) -> Result<Dataset> {
-        // Registering a folder again (by its canonical path) returns the dataset it already is.
-        if let Ok(want) = std::fs::canonicalize(&req.path) {
-            let existing = self.datasets.read().unwrap().iter().find_map(|d| match &**d {
+        // Registering a folder again (by its canonical path) returns the dataset it already is: checked before
+        // indexing and again under the write lock.
+        let want = std::fs::canonicalize(&req.path).ok();
+        let same = |list: &[Arc<DatasetEntry>]| {
+            let want = want.as_ref()?;
+            list.iter().find_map(|d| match &**d {
                 DatasetEntry::Disk(meta, _)
-                    if std::fs::canonicalize(&meta.path).ok().as_ref() == Some(&want)
+                    if std::fs::canonicalize(&meta.path).ok().as_ref() == Some(want)
                         && (req.format == DatasetFormat::Auto || req.format == meta.format) =>
                 {
                     Some(d.with_stats())
                 }
                 _ => None,
-            });
-            if let Some(d) = existing {
-                return Ok(d);
-            }
+            })
+        };
+        if let Some(d) = same(&self.datasets.read().unwrap()) {
+            return Ok(d);
         }
         let index = Index::build(&req.path, req.format, &[])?;
         let mut list = self.datasets.write().unwrap();
+        if let Some(d) = same(&list) {
+            return Ok(d);
+        }
         let id = unique_id("ds", fnv1a(req.path.as_bytes()) ^ unix_now().to_bits(), |id| {
             list.iter().any(|d| d.meta().id == id)
         });

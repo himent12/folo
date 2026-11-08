@@ -317,10 +317,12 @@ fn check_resume_flags(args: &TrainArgs, stored: &TrainConfig) -> Result<(), CliE
     Ok(())
 }
 
-/// Equal JSON values, numbers compared within f32 precision (the run stores f32 settings widened to f64).
+/// Equal JSON values: integers exactly, other numbers within f32 precision (the run stores f32 settings widened
+/// to f64).
 fn same(a: &serde_json::Value, b: &serde_json::Value) -> bool {
     use serde_json::Value;
     match (a, b) {
+        (Value::Number(x), Value::Number(y)) if !x.is_f64() && !y.is_f64() => x == y,
         (Value::Number(x), Value::Number(y)) => {
             let (x, y) = (x.as_f64().unwrap_or(f64::NAN), y.as_f64().unwrap_or(f64::NAN));
             (x - y).abs() <= 1e-6 * x.abs().max(y.abs()).max(1.0)
@@ -572,4 +574,21 @@ fn read_classes(run_dir: &Path) -> Vec<String> {
         .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
         .and_then(|v| serde_json::from_value(v["classes"].clone()).ok())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::same;
+    use serde_json::json;
+
+    #[test]
+    fn resume_settings_compare_integers_exactly() {
+        assert!(!same(&json!(20_261_108u64), &json!(20_261_109u64)));
+        assert!(!same(&json!(u64::MAX), &json!(u64::MAX - 1)));
+        assert!(same(&json!(16), &json!(16u32)));
+        // f32 settings widened to f64 still match what the flag parses to.
+        assert!(same(&json!(0.015f32 as f64), &json!(0.015f32)));
+        assert!(same(&json!([0.015f32 as f64, 0.7]), &json!([0.015f32, 0.7f32])));
+        assert!(!same(&json!(0.5), &json!(0.6)));
+    }
 }
