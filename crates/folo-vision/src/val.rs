@@ -34,6 +34,9 @@ pub struct ValConfig {
     pub samples: usize,
     /// Score threshold of the sample predictions (docs/API.md: 0.25).
     pub sample_conf: f32,
+    /// Also return every image's detections in original-image pixels ([`ValResult::detections`]), e.g. for
+    /// [`crate::cocoeval::CocoEval`] or a COCO results file.
+    pub keep_detections: bool,
 }
 
 impl ValConfig {
@@ -46,6 +49,7 @@ impl ValConfig {
             nms: NmsConfig::val(),
             samples: 16,
             sample_conf: 0.25,
+            keep_detections: false,
         }
     }
 }
@@ -74,6 +78,9 @@ pub struct ValResult {
     pub report: EvalReport,
     /// The sample images.
     pub samples: Vec<ValSample>,
+    /// With [`ValConfig::keep_detections`]: per image, in loader order, its dataset index and its detections (all
+    /// that NMS kept) in original-image pixels, clipped to the image.
+    pub detections: Vec<(usize, Vec<Detection>)>,
     /// Wall time in seconds.
     pub seconds: f64,
 }
@@ -138,7 +145,12 @@ pub fn validate(model: &FoloModel, ds: Arc<dyn Dataset>, cfg: &ValConfig) -> Res
     let mut ev = Evaluator::new(nc);
     let mut samples = Vec::new();
     if ds.is_empty() {
-        return Ok(ValResult { report: ev.compute(), samples, seconds: t0.elapsed().as_secs_f64() });
+        return Ok(ValResult {
+            report: ev.compute(),
+            samples,
+            detections: Vec::new(),
+            seconds: t0.elapsed().as_secs_f64(),
+        });
     }
     let device = model.device();
     // A device gets the pixels as bytes (a quarter of the upload) and converts them itself.
@@ -151,6 +163,7 @@ pub fn validate(model: &FoloModel, ds: Arc<dyn Dataset>, cfg: &ValConfig) -> Res
         },
     )?;
     let mut index = 0usize;
+    let mut kept = Vec::new();
     for batch in loader.epoch(0) {
         let mut batch = batch?;
         let truths = batch_truths(&batch);
@@ -158,12 +171,18 @@ pub fn validate(model: &FoloModel, ds: Arc<dyn Dataset>, cfg: &ValConfig) -> Res
         let pred = model.predict_raw(&x, &cfg.nms)?;
         for (i, img) in pred.images.iter().enumerate() {
             ev.add_image(&img.detections, &truths[i]);
+            let meta = &batch.meta[i];
+            let unmap = |b: &Xyxy| {
+                let [x1, y1, x2, y2] = meta.unmap_xyxy([b.x1, b.y1, b.x2, b.y2]);
+                Xyxy::new(x1, y1, x2, y2)
+            };
+            if cfg.keep_detections {
+                kept.push((
+                    meta.index,
+                    img.detections.iter().map(|d| Detection { bbox: unmap(&d.bbox), ..*d }).collect(),
+                ));
+            }
             if index < cfg.samples {
-                let meta = &batch.meta[i];
-                let unmap = |b: &Xyxy| {
-                    let [x1, y1, x2, y2] = meta.unmap_xyxy([b.x1, b.y1, b.x2, b.y2]);
-                    Xyxy::new(x1, y1, x2, y2)
-                };
                 samples.push(ValSample {
                     index: meta.index,
                     file: ds.image_path(meta.index).map(|p| p.display().to_string()),
@@ -181,7 +200,7 @@ pub fn validate(model: &FoloModel, ds: Arc<dyn Dataset>, cfg: &ValConfig) -> Res
             index += 1;
         }
     }
-    Ok(ValResult { report: ev.compute(), samples, seconds: t0.elapsed().as_secs_f64() })
+    Ok(ValResult { report: ev.compute(), samples, detections: kept, seconds: t0.elapsed().as_secs_f64() })
 }
 
 /// docs/API.md's `ValMetrics` of a report.

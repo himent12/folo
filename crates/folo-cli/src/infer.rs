@@ -15,7 +15,7 @@ use serde_json::json;
 
 use crate::cli::{ExportArgs, ExportFormatArg, PredictArgs, SplitArg, ValArgs};
 use crate::draw::annotate;
-use crate::engine::{engine_error, open_dataset, require_file};
+use crate::engine::{engine_error, open_dataset};
 use crate::output::{CliError, ExitCode, Out};
 
 fn nn_error(e: folo_nn::Error) -> CliError {
@@ -41,7 +41,7 @@ fn weights_error(path: &Path, e: folo_nn::Error) -> CliError {
 /// Open weights for inference (EMA when present, fused) on `device`, in f16 with `half` where the device computes
 /// in it (an f16 export is uploaded as it is); otherwise in f32, with a note on stderr when `half` asked for f16.
 fn open_model(path: &Path, device: &str, half: bool) -> Result<FoloModel, CliError> {
-    require_file(path, "model_not_found")?;
+    let path = &crate::weights::resolve(path)?;
     crate::engine::init_device(device);
     let device = resolve_device(device).map_err(engine_error)?;
     can_place(device).map_err(engine_error)?;
@@ -83,10 +83,17 @@ pub fn val(args: ValArgs, out: Out) -> Result<(), CliError> {
         ));
     }
     let imgsz = args.imgsz.unwrap_or(model.imgsz());
+    // Read the COCO ground truth first, so a non-COCO dataset fails before the (long) evaluation.
+    let coco_gt = if args.coco || args.save_json.is_some() {
+        Some(crate::coco::ground_truth(&args.data, split)?)
+    } else {
+        None
+    };
     let cfg = ValConfig {
         nms: NmsConfig { conf: args.conf, iou: args.iou, ..NmsConfig::val() },
         samples: 0,
         workers: args.workers.unwrap_or_else(folo_vision::train::default_workers),
+        keep_detections: coco_gt.is_some(),
         ..ValConfig::new(imgsz, args.batch.max(1) as usize)
     };
     let device = model.device().to_string();
@@ -95,6 +102,30 @@ pub fn val(args: ValArgs, out: Out) -> Result<(), CliError> {
     let m = val_metrics(&r.report);
     let names = model.classes();
     let name = |c: u32| names.get(c as usize).cloned().unwrap_or_else(|| c.to_string());
+    let mut coco = serde_json::Value::Null;
+    let mut coco_text = None;
+    if let Some(gt) = &coco_gt {
+        if let Some(path) = &args.save_json {
+            let n = crate::coco::write_results(path, gt, part, &r.detections)?;
+            out.human(format!("wrote {n} detections to {}", path.display()));
+        }
+        if args.coco {
+            let c = crate::coco::evaluate(gt, part, &r.detections)?;
+            coco = json!({
+                "ap": c.stats.ap, "ap50": c.stats.ap50, "ap75": c.stats.ap75,
+                "ap_small": c.stats.ap_small, "ap_medium": c.stats.ap_medium, "ap_large": c.stats.ap_large,
+                "ar1": c.stats.ar1, "ar10": c.stats.ar10, "ar100": c.stats.ar100,
+                "ar_small": c.stats.ar_small, "ar_medium": c.stats.ar_medium, "ar_large": c.stats.ar_large,
+                "images": c.stats.images, "truths": c.stats.truths, "crowd": c.stats.crowd,
+                "detections": c.stats.detections, "missing_images": c.missing_images,
+                "annotations": gt.path.display().to_string(),
+                "per_class": c.stats.per_class.iter().map(|p| json!({
+                    "class": p.class, "name": name(p.class), "truths": p.truths, "ap": p.ap, "ap50": p.ap50,
+                })).collect::<Vec<_>>(),
+            });
+            coco_text = Some(c.stats.summary());
+        }
+    }
     out.record(&json!({
         "model": folo_api::json::path(&args.model),
         "data": folo_api::json::path(&args.data),
@@ -113,6 +144,7 @@ pub fn val(args: ValArgs, out: Out) -> Result<(), CliError> {
         "device": device,
         "dtype": precision,
         "seconds": r.seconds,
+        "coco": coco,
     }));
     out.human(format!(
         "{} on {} ({} images, {} boxes) at {imgsz}px on {device} ({precision}) in {:.1}s",
@@ -136,6 +168,10 @@ pub fn val(args: ValArgs, out: Out) -> Result<(), CliError> {
             c.precision,
             c.recall
         ));
+    }
+    if let Some(text) = coco_text {
+        out.human("COCOeval (pycocotools-exact, original-image boxes):");
+        out.human(text.trim_end());
     }
     Ok(())
 }
@@ -345,8 +381,8 @@ pub fn predict(args: PredictArgs, out: Out) -> Result<(), CliError> {
     Ok(())
 }
 
-pub fn export(args: ExportArgs, out: Out) -> Result<(), CliError> {
-    require_file(&args.model, "model_not_found")?;
+pub fn export(mut args: ExportArgs, out: Out) -> Result<(), CliError> {
+    args.model = crate::weights::resolve(&args.model)?;
     let onnx = args.format == ExportFormatArg::Onnx;
     if !onnx {
         let given = [
@@ -375,10 +411,21 @@ pub fn export(args: ExportArgs, out: Out) -> Result<(), CliError> {
     let (dtype, suffix, ext) = match args.format {
         ExportFormatArg::FoloF16 => (FloatDType::F16, "-f16", "folo"),
         ExportFormatArg::Folo => (FloatDType::F32, "-fused", "folo"),
+        ExportFormatArg::Weights => (FloatDType::F32, "-weights", "folo"),
         ExportFormatArg::Onnx if args.half => (FloatDType::F16, "-f16", "onnx"),
         ExportFormatArg::Onnx => (FloatDType::F32, "", "onnx"),
     };
     let file = ModelFile::open(&args.model).map_err(|e| weights_error(&args.model, e))?;
+    if args.format == ExportFormatArg::Weights && file.metadata().fused {
+        return Err(CliError::new(
+            ExitCode::Usage,
+            "usage",
+            format!("{} is fused (Conv+BN folded): it cannot become unfused weights", args.model.display()),
+        )
+        .hint(
+            "export --format weights from the training checkpoint (best.folo) or an unfused weights file",
+        ));
+    }
     let imgsz = args.imgsz.unwrap_or(file.metadata().imgsz);
     if onnx && (imgsz == 0 || !imgsz.is_multiple_of(32) || imgsz > 8192) {
         return Err(CliError::new(
@@ -496,7 +543,15 @@ pub fn export(args: ExportArgs, out: Out) -> Result<(), CliError> {
         ));
         return Ok(());
     }
-    if let Err(e) = file.export(&output, dtype) {
+    let fused = args.format != ExportFormatArg::Weights;
+    let written = if fused {
+        file.export(&output, dtype)
+    } else {
+        // The inference tensor set (EMA when present), unfused, written as a plain weights file.
+        FoloModel::from_file(&file, folo_nn::io::Purpose::Inference)
+            .and_then(|(model, _)| model.save(&output))
+    };
+    if let Err(e) = written {
         let _ = std::fs::remove_file(&output); // only the file claimed above
         return Err(nn_error(e));
     }
@@ -504,17 +559,22 @@ pub fn export(args: ExportArgs, out: Out) -> Result<(), CliError> {
     out.record(&json!({
         "path": folo_api::json::path(&output),
         "bytes": bytes,
-        "format": match args.format { ExportFormatArg::FoloF16 => "folo-f16", _ => "folo" },
+        "format": match args.format {
+            ExportFormatArg::FoloF16 => "folo-f16",
+            ExportFormatArg::Weights => "weights",
+            _ => "folo",
+        },
         "dtype": dtype.as_str(),
-        "fused": true,
+        "fused": fused,
         "source": source,
         "arch": meta.arch,
         "classes": meta.classes,
         "seconds": t.elapsed().as_secs_f64(),
     }));
     out.human(format!(
-        "Exported the {source} weights of {} (fused, {}) to {} ({:.1} MB)",
+        "Exported the {source} weights of {} ({}, {}) to {} ({:.1} MB)",
         args.model.display(),
+        if fused { "fused" } else { "unfused" },
         dtype.as_str(),
         output.display(),
         bytes as f64 / 1e6

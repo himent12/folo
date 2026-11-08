@@ -47,21 +47,6 @@ pub fn engine_error(e: folo_vision::Error) -> CliError {
     }
 }
 
-/// Fail with `not_found` unless `path` is an existing file.
-pub fn require_file(path: &Path, code: &str) -> Result<(), CliError> {
-    if path.is_file() {
-        Ok(())
-    } else {
-        let err = CliError::new(ExitCode::NotFound, code, format!("{} does not exist", path.display()));
-        Err(match code {
-            "model_not_found" => {
-                err.hint("pass a .folo file, e.g. runs/<name>/weights/best.folo from `folo train`")
-            }
-            _ => err,
-        })
-    }
-}
-
 /// Register the GPU backend when `--device` may use a GPU (`auto`, `gpu`, `gpu:<n>`), so the engine can resolve
 /// it. Without an adapter, `auto` runs on the CPU quietly and an explicit GPU fails in the engine.
 pub fn init_device(device: &str) {

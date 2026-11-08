@@ -1,6 +1,7 @@
 //! The `folo` command-line tool. See `docs/CLI.md`.
 
 mod cli;
+mod coco;
 mod dataset;
 mod describe;
 mod draw;
@@ -8,6 +9,7 @@ mod engine;
 mod infer;
 mod output;
 mod train;
+mod weights;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -108,6 +110,7 @@ fn run(cli: Cli, out: Out) -> Result<(), CliError> {
         Command::Export(args) => infer::export(args, out),
         Command::Bench(_) => Err(not_implemented("bench", "the engine")),
         Command::Dataset(cmd) => dataset::run(cmd, out),
+        Command::Weights(cmd) => weights::run(cmd, out),
         Command::Mcp(args) => mcp(args),
     }
 }
@@ -121,7 +124,7 @@ fn not_implemented(cmd: &str, waits_on: &str) -> CliError {
 }
 
 /// `$FOLO_HOME`, else `~/.folo`, else `./.folo`.
-fn default_data_dir() -> PathBuf {
+pub(crate) fn default_data_dir() -> PathBuf {
     if let Some(h) = std::env::var_os("FOLO_HOME") {
         return PathBuf::from(h);
     }

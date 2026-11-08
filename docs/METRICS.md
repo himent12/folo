@@ -1,6 +1,8 @@
 # How FOLO computes detection metrics
 
-Implementation: `crates/folo-vision/src/metrics.rs` (`Evaluator`). Tests with hand-computed answers:
+Implementation: `crates/folo-vision/src/metrics.rs` (`Evaluator`; the full COCOeval with crowd regions, area
+buckets and AR is `CocoEval`, [below](#full-cocoeval-crowd-regions-area-buckets-ar)). Tests with hand-computed
+answers:
 `crates/folo-vision/tests/metrics_known.rs`; parity with pycocotools on 24 seeded scenarios:
 `crates/folo-vision/tests/coco_parity.rs` (see [Parity with pycocotools](#parity-with-pycocotools)).
 
@@ -149,9 +151,37 @@ sides see bit-identical inputs.
 every class's APs with a tolerance of 1e-7. The report's fields are f32, and rounding a value in `[0, 1]` to f32
 costs at most 3e-8. Result: the largest difference in any scenario is **3.0e-8**, in both modes, except
 `outside_area_range`, where the default is 0.07 off (as intended) and `coco_compatible` is again within 2e-8.
-`no_truths_at_all` checks the `-1` / empty convention from step 3. FOLO does not compute the area-split stats
-(`APs/m/l`) or AR, so those are only stored in the fixtures. Regenerate the fixtures with
-`D:/folo-venvs/parity/Scripts/python bench/parity/coco_reference.py` (a venv with `pycocotools` and `numpy`).
+`no_truths_at_all` checks the `-1` / empty convention from step 3. The `Evaluator` does not compute the area-split
+stats (`APs/m/l`) or AR; [`CocoEval`](#full-cocoeval-crowd-regions-area-buckets-ar) below does. Regenerate the
+fixtures with `D:/folo-venvs/parity/Scripts/python -I bench/parity/coco_reference.py` (a venv with `pycocotools` and
+`numpy`).
+
+## Full COCOeval: crowd regions, area buckets, AR
+
+`crates/folo-vision/src/cocoeval.rs` (`CocoEval`) is a line-by-line port of pycocotools' `evaluateImg`, `accumulate`
+and `summarize` for `iouType="bbox"`, for reporting on real COCO splits (`folo val --coco`, docs/CLI.md). It differs
+from the `Evaluator` above in exactly the places COCO's own numbers depend on:
+
+- **Crowd regions** (`iscrowd: 1`) are ground truths that are always ignored. A detection's IoU with a crowd is
+  `intersection / area(detection)`, a crowd can be matched by any number of detections, and a detection matched to
+  one is neither a TP nor a FP. (The dataset loader drops crowd annotations, so the `Evaluator` counts detections on
+  crowds as FPs, which costs a little mAP on COCO.)
+- **Area buckets** use the annotation's `area` field (the segmentation area for COCO instances, not the box area):
+  all `[0, 1e10]`, small `[0, 32²]`, medium `[32², 96²]`, large `[96², 1e10]`, bounds inclusive. A truth outside the
+  bucket is ignored, and so is an unmatched detection whose box area `w·h` is outside it.
+- **AR@1/10/100**: matching runs once with the top 100 detections per image and class; `maxDets = m` then keeps each
+  image's first `m` of them. AR is the final recall averaged over thresholds and classes.
+- **Coordinates**: boxes are in original-image pixels (the predictions are mapped back from the letterbox and clipped
+  to the image), as in a COCO results file; the `Evaluator` in the trainer compares in network-input pixels.
+- Score ties across images are broken by image id (pass the COCO image id to `add_image`), then by rank in the image.
+
+It returns the twelve `COCOeval.stats` (`AP`, `AP50`, `AP75`, `APs`, `APm`, `APl`, `AR1`, `AR10`, `AR100`, `ARs`,
+`ARm`, `ARl`; `-1` when nothing qualifies) and per-class AP. `crates/folo-vision/tests/coco_full.rs` checks all
+twelve against pycocotools to **1e-12** on the 24 fixtures above and on three more in `tests/fixtures/coco_full/`
+that have crowd regions and segmentation-like areas (`crowd_regions`, `bucket_edges` with areas exactly on 32² and
+96², `crowd_only_class`), written by the same script. On a real split, `folo val --coco --save-json dets.json` also
+writes the detections as a COCO results file, so pycocotools can be run on exactly the same boxes (examples/coco
+does that cross-check on val2017).
 
 ## Differences from Ultralytics' mAP
 

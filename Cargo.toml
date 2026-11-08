@@ -27,7 +27,7 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 memmap2 = "0.9"
 rayon = "1.11"
 serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["preserve_order"] }
+serde_json = { version = "1", features = ["preserve_order", "raw_value"] }
 serde_yaml = "0.9"
 smallvec = { version = "1", features = ["union", "const_generics"] }
 thiserror = "2"
@@ -58,6 +58,8 @@ glob = "0.3"
 http = "1"
 # Plain-HTTP client for `folo mcp --server` (loopback `folo serve`; no TLS).
 ureq = { version = "3", default-features = false }
+# `folo weights pull` verifies downloads against the release's SHA256SUMS.
+sha2 = "0.11"
 # Test-only: validates MCP tool results against their outputSchema.
 jsonschema = { version = "0.60", default-features = false }
 # folo-wasm. wasm-bindgen must match the wasm-bindgen CLI exactly (scripts/build-wasm.sh checks that).
