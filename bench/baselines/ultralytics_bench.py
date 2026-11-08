@@ -110,8 +110,9 @@ def proc_label(pid: int) -> str:
         return f"pid {pid}"
 
 
-def foreign_gpu_load() -> dict[str, float]:
-    """GPU engine utilisation (%) of every other process using the GPU right now, {"pid <n> <name>": pct}.
+def foreign_gpu_load() -> dict[str, float] | None:
+    """GPU engine utilisation (%) of every other process using the GPU right now, {"pid <n> <name>": pct}, or None
+    when the query failed (unknown, which is not the same as quiet).
 
     Windows: per-process "GPU Engine" performance counters (summed over engines), so an idle process that merely
     holds a CUDA context is not counted. Elsewhere: nvidia-smi compute processes, reported as 100 (load unknown).
@@ -124,27 +125,29 @@ def foreign_gpu_load() -> dict[str, float]:
             "Where-Object CookedValue -gt 0.5 | ForEach-Object { $_.InstanceName + ' ' + $_.CookedValue }"
         )
         try:
-            out = subprocess.run(
-                ["powershell", "-NoProfile", "-Command", ps], capture_output=True, text=True, timeout=30
-            ).stdout
-        except Exception:
-            return {}
-        for line in out.splitlines():
-            m = re.match(r"pid_(\d+)_\S+\s+([\d.]+)", line.strip())
+            res = subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if res.returncode != 0:
+            return None
+        for line in res.stdout.splitlines():
+            m = re.match(r"pid_(\d+)_\S+\s+([\d.,]+)$", line.strip())  # the decimal mark follows the locale
             if m and int(m.group(1)) not in ours:
                 pid = int(m.group(1))
-                load[pid] = load.get(pid, 0.0) + float(m.group(2))
+                load[pid] = load.get(pid, 0.0) + float(m.group(2).replace(",", "."))
     else:
         try:
-            out = subprocess.run(
+            res = subprocess.run(
                 ["nvidia-smi", "--query-compute-apps=pid", "--format=csv,noheader"],
                 capture_output=True,
                 text=True,
                 timeout=10,
-            ).stdout
-        except Exception:
-            return {}
-        for line in out.split():
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if res.returncode != 0:
+            return None
+        for line in res.stdout.split():
             if line.strip().isdigit() and int(line) not in ours:
                 load[int(line)] = 100.0
     return {proc_label(pid): round(v, 1) for pid, v in load.items() if v > BUSY_PCT}
@@ -154,15 +157,16 @@ class ContentionWatch(threading.Thread):
     """Samples other processes' GPU load back to back in the background (one sample spans ~2.5 s on Windows).
 
     tag(row) covers the window since the previous tag()/reset(): it records the peak load of every sample whose time
-    span overlaps that window (`other_gpu_load_pct`) and how many samples that was (`contention_samples`). A row with
-    0 samples was not observed, which is different from a row observed to be quiet.
+    span overlaps that window (`other_gpu_load_pct`), how many successful samples that was (`contention_samples`)
+    and how many queries failed (`contention_errors`). A row with 0 successful samples was not observed, which is
+    different from a row observed to be quiet.
     """
 
     def __init__(self, gap_s: float = 0.5):
         super().__init__(daemon=True)
         self.gap_s = gap_s
         self.lock = threading.Lock()
-        self.samples: list[tuple[float, float, dict[str, float]]] = []  # (start, end, load)
+        self.samples: list[tuple[float, float, dict[str, float] | None]] = []  # (start, end, load or None = failed)
         self.window_start = time.perf_counter()
         self.paused = threading.Event()  # set during CPU timing: sampling spawns PowerShell, which costs CPU
 
@@ -179,12 +183,14 @@ class ContentionWatch(threading.Thread):
         now = time.perf_counter()
         with self.lock:
             hits = [load for t0, t1, load in self.samples if t1 > self.window_start and t0 < now]
+            ok = [h for h in hits if h is not None]
             peak: dict[str, float] = {}
-            for load in hits:
+            for load in ok:
                 for k, v in load.items():
                     peak[k] = max(peak.get(k, 0.0), v)
             row["other_gpu_load_pct"] = dict(sorted(peak.items()))
-            row["contention_samples"] = len(hits)
+            row["contention_samples"] = len(ok)
+            row["contention_errors"] = len(hits) - len(ok)
             self.samples = [s for s in self.samples if s[1] > now - 60]  # keep the list short
             self.window_start = now
         return row
@@ -197,12 +203,24 @@ class ContentionWatch(threading.Thread):
 WATCH = ContentionWatch()
 
 
-def wait_for_quiet_gpu(max_wait_s: float) -> dict[str, float]:
-    """Block until no other process loads the GPU (or max_wait_s passes). Returns the load still there."""
+def wait_for_quiet_gpu(max_wait_s: float, max_failures: int = 3) -> dict[str, float] | None:
+    """Block until no other process loads the GPU (or max_wait_s passes). Returns the load still there, or None if
+    the load could not be queried (after max_failures consecutive failures the run proceeds, recorded as unknown)."""
     t0 = time.perf_counter()
-    while (load := foreign_gpu_load()) and time.perf_counter() - t0 < max_wait_s:
-        print(f"[wait] GPU busy: {load} (% engine use); waited {time.perf_counter() - t0:.0f} s", flush=True)
-        time.sleep(20)
+    failures = 0
+    load = foreign_gpu_load()
+    while load != {} and time.perf_counter() - t0 < max_wait_s:
+        if load is None:
+            failures += 1
+            if failures >= max_failures:
+                print("[wait] cannot query GPU load; proceeding with contention unknown", flush=True)
+                break
+            time.sleep(5)
+        else:
+            failures = 0
+            print(f"[wait] GPU busy: {load} (% engine use); waited {time.perf_counter() - t0:.0f} s", flush=True)
+            time.sleep(20)
+        load = foreign_gpu_load()
     if load:
         print(f"[wait] giving up after {max_wait_s:.0f} s, measuring under contention: {load}", flush=True)
     WATCH.reset()
@@ -260,15 +278,19 @@ def environment() -> dict:
 # timing helpers
 
 
+def percentile(values: list[float], q: float) -> float:
+    """The sorted value at index round(q * (n - 1)), q in [0, 1]."""
+    v = sorted(values)
+    return v[min(len(v) - 1, int(round(q * (len(v) - 1))))]
+
+
 def summarize(ms: list[float], batch: int) -> dict:
-    ms_sorted = sorted(ms)
-    p90 = ms_sorted[min(len(ms_sorted) - 1, int(round(0.9 * (len(ms_sorted) - 1))))]
     med = statistics.median(ms)
     return {
         "iters": len(ms),
         "median_ms": round(med, 4),
-        "p90_ms": round(p90, 4),
-        "min_ms": round(ms_sorted[0], 4),
+        "p90_ms": round(percentile(ms, 0.9), 4),
+        "min_ms": round(min(ms), 4),
         "mean_ms": round(statistics.fmean(ms), 4),
         "images_per_s_at_median": round(batch * 1000.0 / med, 2),
     }
@@ -662,6 +684,53 @@ def cpu_cores_busy(a: tuple[float, float, float], b: tuple[float, float, float])
     }
 
 
+def summarize_training(
+    stamps: dict[int, list[float]],
+    counts: dict[int, list[int]],
+    epoch_wall: dict[int, list[float]],
+    epoch_cpu: dict[int, list[tuple[float, float, float]]],
+) -> dict:
+    """Per-epoch and steady-state statistics from batch-end timestamps (s) and per-batch image counts.
+
+    stamps[e] is [epoch start, end of batch 1, ..., end of batch n]; counts[e] has the n batch sizes.
+    images_per_s (per epoch) is images actually processed / epoch wall time: sustained throughput, stalls included.
+    The *_at_median_batch / steady_* figures are the median of per-batch images/s, a diagnostic that ignores stalls.
+    """
+    epochs_out = []
+    all_rates: list[float] = []
+    all_dts: list[float] = []
+    for e in sorted(stamps):
+        s, n = stamps[e], counts[e]
+        if len(n) != len(s) - 1:
+            raise ValueError(f"epoch {e}: {len(s) - 1} batch timestamps but {len(n)} batch sizes")
+        dts = [(b - a) * 1e3 for a, b in zip(s, s[1:])]
+        rates = [k * 1000 / dt for k, dt in zip(n, dts)]
+        wall = epoch_wall[e][1] - epoch_wall[e][0]
+        steady = slice(2, None)  # the first batches of an epoch wait on the data loader's first prefetch
+        first = slice(5, None) if e == min(stamps) else slice(None)  # run start: worker spawn, cudnn/allocator warm-up
+        all_rates += rates[first]
+        all_dts += dts[first]
+        epochs_out.append(
+            {
+                "epoch": e,
+                "batches": len(dts),
+                "images": sum(n),
+                "wall_s": round(wall, 3),
+                "images_per_s": round(sum(n) / wall, 2),
+                "median_batch_ms": round(statistics.median(dts[steady]), 3),
+                "p90_batch_ms": round(percentile(dts[steady], 0.9), 3),
+                "images_per_s_at_median_batch": round(statistics.median(rates[steady]), 2),
+                "cpu_cores_busy": cpu_cores_busy(*epoch_cpu[e]),
+            }
+        )
+    return {
+        "epochs": epochs_out,
+        "steady_batches": len(all_dts),
+        "steady_median_batch_ms": round(statistics.median(all_dts), 3),
+        "steady_images_per_s": round(statistics.median(all_rates), 2),  # median-batch equivalent
+    }
+
+
 def train_one(weights: Path, data_yaml: Path, work_dir: Path, amp: bool, epochs: int, out_json: Path) -> None:
     """Runs in its own process. Times every training batch (CUDA-synchronised) via trainer callbacks."""
     import torch
@@ -671,28 +740,43 @@ def train_one(weights: Path, data_yaml: Path, work_dir: Path, amp: bool, epochs:
     torch.cuda.reset_peak_memory_stats()
     model = YOLO(str(weights))
     stamps: dict[int, list[float]] = {}
+    counts: dict[int, list[int]] = {}  # images in each completed batch (the last batch of an epoch can be partial)
     epoch_wall: dict[int, list[float]] = {}
     epoch_cpu: dict[int, list[tuple[float, float, float]]] = {}  # data loading is CPU-bound: record who used the CPU
     mem = {}
+    trainer_state = {"pending": 0}
+
+    def on_train_start(tr):
+        orig = tr.preprocess_batch
+
+        def counted(b):  # a batch that hits OOM is dropped by the trainer; it only counts once it reaches batch end
+            trainer_state["pending"] = int(b["img"].shape[0])
+            return orig(b)
+
+        tr.preprocess_batch = counted
 
     def on_epoch_start(tr):
         torch.cuda.synchronize()
         epoch_wall[tr.epoch] = [time.perf_counter()]
         epoch_cpu[tr.epoch] = [cpu_snapshot()]
         stamps[tr.epoch] = [time.perf_counter()]
+        counts[tr.epoch] = []
 
     def on_batch_end(tr):
         torch.cuda.synchronize()
         stamps[tr.epoch].append(time.perf_counter())
+        counts[tr.epoch].append(trainer_state["pending"])
 
     def on_epoch_end(tr):  # runs before validation
         torch.cuda.synchronize()
         epoch_wall[tr.epoch].append(time.perf_counter())
         epoch_cpu[tr.epoch].append(cpu_snapshot())
+        trainer_state["batch_size"] = tr.batch_size
         mem["max_memory_allocated_mib"] = round(torch.cuda.max_memory_allocated() / 2**20)
         mem["max_memory_reserved_mib"] = round(torch.cuda.max_memory_reserved() / 2**20)
         mem["nvidia_smi_memory_used_mib"] = nvidia_smi().get("memory.used")
 
+    model.add_callback("on_train_start", on_train_start)
     model.add_callback("on_train_epoch_start", on_epoch_start)
     model.add_callback("on_train_batch_end", on_batch_end)
     model.add_callback("on_train_epoch_end", on_epoch_end)
@@ -718,39 +802,16 @@ def train_one(weights: Path, data_yaml: Path, work_dir: Path, amp: bool, epochs:
         seed=0,
     )
     total = time.perf_counter() - t0
-    epochs_out = []
-    all_dts: list[float] = []
-    for e in sorted(stamps):
-        s = stamps[e]
-        dts = [(b - a) * 1e3 for a, b in zip(s, s[1:])]
-        nb = len(dts)
-        wall = epoch_wall[e][1] - epoch_wall[e][0]
-        steady = dts[2:]  # first batches of an epoch wait on the data loader's first prefetch
-        all_dts += dts[5:] if e == min(stamps) else dts  # run start: worker spawn, cudnn and allocator warm-up
-        epochs_out.append(
-            {
-                "epoch": e,
-                "batches": nb,
-                "wall_s": round(wall, 3),
-                "images_per_s": round(nb * batch / wall, 2),
-                "median_batch_ms": round(statistics.median(steady), 3),
-                "p90_batch_ms": round(sorted(steady)[int(round(0.9 * (len(steady) - 1)))], 3),
-                "images_per_s_at_median_batch": round(batch * 1000 / statistics.median(steady), 2),
-                "cpu_cores_busy": cpu_cores_busy(*epoch_cpu[e]),
-            }
-        )
     out_json.write_text(
         json.dumps(
             {
                 "model": weights.stem,
                 "amp": amp,
                 "batch": batch,
+                "effective_batch": trainer_state.get("batch_size", batch),  # Ultralytics halves it on OOM
                 "imgsz": IMGSZ,
                 "workers": 8,
-                "epochs": epochs_out,
-                "steady_batches": len(all_dts),
-                "steady_median_batch_ms": round(statistics.median(all_dts), 3),
-                "steady_images_per_s": round(batch * 1000 / statistics.median(all_dts), 2),  # median-batch equivalent
+                **summarize_training(stamps, counts, epoch_wall, epoch_cpu),
                 "total_train_call_s": round(total, 2),
                 **mem,
                 **WATCH.tag({}),  # other_gpu_load_pct + contention_samples over the whole run
@@ -921,13 +982,13 @@ def main() -> None:
             results[s] = prev_runs + new
         else:
             raise SystemExit(f"unknown section {s!r}")
+        rows = results[s] if isinstance(results[s], list) else []
         results["gpu_state"][s] = {
             "before": before,
             "after": nvidia_smi(),
             "other_gpu_load_at_start": still_busy,
-            "rows_with_other_gpu_load": sum(bool(r.get("other_gpu_load_pct")) for r in results[s])
-            if isinstance(results[s], list)
-            else 0,
+            "rows_with_other_gpu_load": sum(bool(r.get("other_gpu_load_pct")) for r in rows),
+            "rows_unobserved": sum(r.get("contention_samples") == 0 for r in rows),
             "section_wall_s": round(time.perf_counter() - t0, 1),
             "finished": time.strftime("%Y-%m-%dT%H:%M:%S%z"),  # sections may come from different runs
         }

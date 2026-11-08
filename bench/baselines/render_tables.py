@@ -95,7 +95,7 @@ def headline(d: dict) -> None:
                     "model",
                     "precision",
                     "train step img/s",
-                    "trainer epoch-2 img/s, best",
+                    "trainer last-epoch img/s, best",
                     "trainer range",
                     "trainer peak alloc MiB",
                 ],
@@ -104,25 +104,39 @@ def headline(d: dict) -> None:
         )
 
 
+SECTIONS = ("params", "gpu_fwd", "gpu_e2e", "cpu", "train_step", "train")
+
+
+def section_meta(d: dict, section: str) -> tuple[dict, dict]:
+    """(environment, config) a section was measured with; schema 1 files only have the top-level ones."""
+    m = d.get("sections_meta", {}).get(section)
+    return (m["environment"], m["config"]) if m else (d["environment"], d["config"])
+
+
+def env_rows(env: dict) -> list[list[str]]:
+    smi = env.get("nvidia_smi", {})
+    return [
+        ["GPU", f"{env['gpu']} ({smi.get('memory.total', '?')} MiB), driver {smi.get('driver_version', '?')}"],
+        ["CPU", f"{env['cpu']} ({env['cpu_physical']} cores / {env['cpu_logical']} threads)"],
+        ["OS", env["os"]],
+        ["Python", env["python"]],
+        ["torch", f"{env['torch']} (CUDA {env['torch_cuda']}, cuDNN {env['cudnn']})"],
+        ["ultralytics", env["ultralytics"]],
+    ]
+
+
 def main(path: str) -> None:
     d = json.load(open(path, encoding="utf-8"))
-    env = d["environment"]
-    smi = env.get("nvidia_smi", {})
+    present = [s for s in SECTIONS if s in d]
+    envs = {s: env_rows(section_meta(d, s)[0]) for s in present}
     print("### Machine\n")
-    print(
-        table(
-            ["item", "value"],
-            [
-                ["GPU", f"{env['gpu']} ({smi.get('memory.total', '?')} MiB), driver {smi.get('driver_version', '?')}"],
-                ["CPU", f"{env['cpu']} ({env['cpu_physical']} cores / {env['cpu_logical']} threads)"],
-                ["OS", env["os"]],
-                ["Python", env["python"]],
-                ["torch", f"{env['torch']} (CUDA {env['torch_cuda']}, cuDNN {env['cudnn']})"],
-                ["ultralytics", env["ultralytics"]],
-                ["date", d["date"]],
-            ],
-        )
-    )
+    if len({json.dumps(v) for v in envs.values()}) <= 1:
+        rows = next(iter(envs.values()), env_rows(d["environment"]))
+        print(table(["item", "value"], [*rows, ["sections", ", ".join(present)], ["date", d["date"]]]))
+    else:  # sections measured on different machines or software versions: never present them as one
+        for s in present:
+            print(f"\n`{s}`:\n")
+            print(table(["item", "value"], envs[s]))
 
     if "params" in d:
         headline(d)
@@ -214,7 +228,12 @@ def main(path: str) -> None:
         print(table(["model", "precision", "median ms/step", "p90", "img/s", "peak alloc MiB", "FOLO img/s"], rows))
 
     if "train" in d:
-        print("\n### Ultralytics trainer (synthetic 512-image set, batch 16, workers 8, mosaic on, 2 epochs)\n")
+        cfg = section_meta(d, "train")[1]
+        n_epochs = cfg.get("epochs", 2)
+        n_img = cfg["synthetic_dataset"]["train"]
+        print(
+            f"\n### Ultralytics trainer (synthetic {n_img}-image set, batch 16, workers 8, mosaic on, {n_epochs} epochs)\n"
+        )
         rows = []
         for r in d["train"]:
             e = r["epochs"][-1]
@@ -241,9 +260,9 @@ def main(path: str) -> None:
                     "precision",
                     "run",
                     "median-batch equivalent img/s",
-                    "epoch-2 img/s",
-                    "epoch-2 median batch ms",
-                    "other procs' CPU cores (epoch 2)",
+                    f"epoch-{n_epochs} img/s",
+                    f"epoch-{n_epochs} median batch ms",
+                    f"other procs' CPU cores (epoch {n_epochs})",
                     "other GPU load",
                     "peak alloc MiB",
                     "peak reserved MiB",

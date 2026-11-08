@@ -1,5 +1,5 @@
 {
-  "schema": 1,
+  "schema": 2,
   "date": "2026-11-07T23:30:44-0800",
   "notes": "Measured 2026-11-07 on one machine with one venv and the same measurement settings; sections were run in separate invocations and merged. Between invocations the script changed only in contention bookkeeping and in the CPU forward-only path (channels_last, matching AutoBackend); the cpu section was re-run after that change. sections_meta was backfilled from the top-level environment/config. Rows predate per-row 'contention_samples' (the GPU sampler then took a sample every ~6.5 s), so an empty other_gpu_load_pct on a short row means the section's samples saw no other load, not that the row itself was sampled. Train repeats 0-1 predate per-epoch cpu_cores_busy.",
   "environment": {
