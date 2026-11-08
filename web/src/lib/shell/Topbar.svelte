@@ -11,7 +11,7 @@
   import Button from '$lib/ui/Button.svelte';
   import Kbd from '$lib/ui/Kbd.svelte';
   import Logo from './Logo.svelte';
-  import { page } from './page.svelte';
+  import { page } from './crumbs.svelte';
 
   let { onsearch }: { onsearch: () => void } = $props();
 

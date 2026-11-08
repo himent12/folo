@@ -1,0 +1,248 @@
+<script lang="ts">
+  import Activity from '@lucide/svelte/icons/activity';
+  import GitCompare from '@lucide/svelte/icons/git-compare-arrows';
+  import Plus from '@lucide/svelte/icons/plus';
+  import Search from '@lucide/svelte/icons/search';
+  import { hub } from '$lib/api/index.svelte';
+  import { Resource } from '$lib/api/resource.svelte';
+  import type { Run, RunStatus } from '$lib/api/types';
+  import RunSpark from '$lib/charts/RunSpark.svelte';
+  import { ago, duration, metric } from '$lib/format';
+  import { href, router } from '$lib/router.svelte';
+  import { setCrumbs } from '$lib/shell/crumbs.svelte';
+  import Page from '$lib/shell/Page.svelte';
+  import Button from '$lib/ui/Button.svelte';
+  import EmptyState from '$lib/ui/EmptyState.svelte';
+  import ErrorState from '$lib/ui/ErrorState.svelte';
+  import Input from '$lib/ui/Input.svelte';
+  import Panel from '$lib/ui/Panel.svelte';
+  import Progress from '$lib/ui/Progress.svelte';
+  import Segmented from '$lib/ui/Segmented.svelte';
+  import Skeleton from '$lib/ui/Skeleton.svelte';
+  import StatusBadge from '$lib/ui/StatusBadge.svelte';
+
+  setCrumbs({ label: 'Runs' });
+
+  type Filter = 'all' | 'active' | 'completed' | 'failed';
+  const groups: Record<Filter, RunStatus[]> = {
+    all: ['queued', 'running', 'stopping', 'stopped', 'completed', 'failed'],
+    active: ['queued', 'running', 'stopping'],
+    completed: ['completed', 'stopped'],
+    failed: ['failed'],
+  };
+
+  const runs = new Resource((s) => hub.api.runs(s), { poll: 3000 });
+  const datasets = new Resource((s) => hub.api.datasets(s));
+  const dsName = $derived(new Map((datasets.data ?? []).map((d) => [d.id, d.name])));
+
+  let filter = $state<Filter>((router.route.query.get('status') as Filter | null) ?? 'all');
+  let query = $state('');
+  let selected = $state<string[]>([]);
+
+  const count = (f: Filter) => (runs.data ?? []).filter((r) => groups[f].includes(r.status)).length;
+  const shown = $derived(
+    (runs.data ?? []).filter((r) => {
+      if (!groups[filter].includes(r.status)) return false;
+      const q = query.trim().toLowerCase();
+      if (!q) return true;
+      return `${r.name} ${r.config.arch} ${dsName.get(r.config.dataset_id) ?? ''} ${r.id}`.toLowerCase().includes(q);
+    }),
+  );
+
+  function toggle(id: string) {
+    selected = selected.includes(id) ? selected.filter((x) => x !== id) : selected.length >= 4 ? selected : [...selected, id];
+  }
+
+  function elapsed(r: Run): number | null {
+    if (!r.started) return null;
+    const end = r.finished ? Date.parse(r.finished) : Date.now();
+    return (end - Date.parse(r.started)) / 1000;
+  }
+
+  const tone = (r: Run) =>
+    r.status === 'failed' ? 'danger' : r.status === 'completed' ? 'success' : r.status === 'running' ? 'accent' : 'neutral';
+</script>
+
+<Page title="Runs">
+  {#snippet sub()}<span>Training runs, newest first. Select up to four to compare their curves.</span>{/snippet}
+  {#snippet actions()}
+    <Button icon={GitCompare} disabled={selected.length < 2} href={href(`/runs/compare?ids=${selected.join(',')}`)}>
+      Compare{#if selected.length}<span class="num faint">{selected.length}</span>{/if}
+    </Button>
+    <Button variant="primary" icon={Plus} href={href('/runs/new')}>New run</Button>
+  {/snippet}
+
+  <div class="toolbar">
+    <Segmented
+      label="Filter runs by status"
+      bind:value={filter}
+      options={[
+        { value: 'all', label: 'All', meta: runs.data ? String(count('all')) : undefined },
+        { value: 'active', label: 'Active', meta: runs.data ? String(count('active')) : undefined },
+        { value: 'completed', label: 'Finished', meta: runs.data ? String(count('completed')) : undefined },
+        { value: 'failed', label: 'Failed', meta: runs.data ? String(count('failed')) : undefined },
+      ]}
+    />
+    <div class="search"><Input icon={Search} bind:value={query} placeholder="Filter by name, model or dataset" aria-label="Filter runs" /></div>
+  </div>
+
+  <Panel pad="none">
+    {#if runs.error && !runs.data}
+      <ErrorState error={runs.error} retry={() => runs.refresh()} title="Could not load runs" />
+    {:else if !runs.data}
+      <div class="sk">{#each [0, 1, 2, 3, 4] as i (i)}<Skeleton h="22px" />{/each}</div>
+    {:else if runs.data.length === 0}
+      <EmptyState icon={Activity} title="No runs yet" description="Train a detector on one of your datasets. Progress, curves and samples stream in live.">
+        {#snippet actions()}<Button variant="primary" icon={Plus} href={href('/runs/new')}>New run</Button>{/snippet}
+      </EmptyState>
+    {:else if shown.length === 0}
+      <EmptyState compact icon={Search} title="No runs match" description="Try another status filter or search term.">
+        {#snippet actions()}<Button size="sm" onclick={() => ((filter = 'all'), (query = ''))}>Clear filters</Button>{/snippet}
+      </EmptyState>
+    {:else}
+      <div class="scroll">
+        <table class="table runs">
+          <thead>
+            <tr>
+              <th class="check"><span class="sr-only">Select for comparison</span></th>
+              <th>Run</th>
+              <th>Status</th>
+              <th class="hide-md">Progress</th>
+              <th class="r">Best mAP50-95</th>
+              <th class="hide-md">mAP per epoch</th>
+              <th class="r hide-lg">Duration</th>
+              <th class="r hide-sm">Created</th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each shown as r (r.id)}
+              {@const on = selected.includes(r.id)}
+              <tr class="link" class:on onclick={() => router.go(`/runs/${r.id}`)}>
+                <td class="check">
+                  <input
+                    type="checkbox"
+                    checked={on}
+                    disabled={!on && selected.length >= 4}
+                    aria-label="Select {r.name} for comparison"
+                    onclick={(e) => e.stopPropagation()}
+                    onchange={() => toggle(r.id)}
+                  />
+                </td>
+                <td>
+                  <a class="name" href={href(`/runs/${r.id}`)} onclick={(e) => e.stopPropagation()}>{r.name}</a>
+                  <span class="sub"><span>{dsName.get(r.config.dataset_id) ?? r.config.dataset_id}</span><span class="mono">{r.config.arch}</span><span class="mono">{r.id}</span></span>
+                </td>
+                <td><StatusBadge status={r.status} size="sm" /></td>
+                <td class="hide-md">
+                  <div class="prog">
+                    <Progress value={r.status === 'running' ? r.step / Math.max(1, r.steps_per_epoch * r.epochs) : r.epoch / r.epochs} size="xs" tone={tone(r)} label="{r.name} progress" />
+                    <span class="num faint">{r.epoch}/{r.epochs}</span>
+                  </div>
+                </td>
+                <td class="r num best">
+                  {metric(r.best?.map50_95)}
+                  {#if r.best}<span class="faint">e{r.best.epoch + 1}</span>{/if}
+                </td>
+                <td class="hide-md"><RunSpark run={r} width={96} /></td>
+                <td class="r num faint hide-lg">{r.status === 'queued' ? '—' : duration(elapsed(r))}</td>
+                <td class="r faint hide-sm">{ago(r.created)}</td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      </div>
+    {/if}
+  </Panel>
+</Page>
+
+<style>
+  .toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+    flex-wrap: wrap;
+  }
+  .search {
+    width: 280px;
+    max-width: 100%;
+  }
+  .scroll {
+    overflow-x: auto;
+  }
+  .sk {
+    display: grid;
+    gap: var(--space-4);
+    padding: var(--space-4);
+  }
+  .runs td {
+    height: 52px;
+  }
+  .runs tr.on {
+    background: var(--bg-selected);
+  }
+  .check {
+    width: 36px;
+    padding-right: 0 !important;
+  }
+  input[type='checkbox'] {
+    width: 14px;
+    height: 14px;
+    accent-color: var(--accent-solid);
+    cursor: pointer;
+  }
+  .name {
+    display: block;
+    font-weight: var(--weight-medium);
+  }
+  .name:hover {
+    text-decoration: underline;
+    text-underline-offset: 3px;
+    text-decoration-color: var(--line-strong);
+  }
+  .sub {
+    display: flex;
+    gap: var(--space-2);
+    font-size: var(--type-xs-size);
+    line-height: var(--type-xs-line);
+    color: var(--text-tertiary);
+  }
+  .prog {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    width: 140px;
+  }
+  .prog span {
+    font-size: var(--type-xs-size);
+    min-width: 50px;
+    text-align: right;
+  }
+  .best {
+    font-weight: var(--weight-medium);
+  }
+  .best span {
+    font-weight: var(--weight-regular);
+    font-size: var(--type-xs-size);
+    margin-left: 4px;
+  }
+  @media (max-width: 1199px) {
+    .hide-lg {
+      display: none;
+    }
+  }
+  @media (max-width: 1023px) {
+    .hide-md {
+      display: none;
+    }
+  }
+  @media (max-width: 767px) {
+    .hide-sm,
+    .sub .mono:last-child {
+      display: none;
+    }
+    .search {
+      width: 100%;
+    }
+  }
+</style>
