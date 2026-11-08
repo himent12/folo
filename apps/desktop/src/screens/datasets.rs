@@ -625,9 +625,7 @@ impl FoloApp {
             .flex()
             .items_center()
             .gap(px(6.))
-            .child(
-                text(ty::XS, t.text_tertiary).mr(px(2.)).child("Filter images by class · counts are boxes"),
-            )
+            .child(text(ty::XS, t.text_tertiary).mr(px(2.)).child("Classes · box counts"))
             .children(chips)
             .when(self.ds_empty_only, |d| {
                 d.child(self.chip(
@@ -1070,9 +1068,11 @@ impl FoloApp {
             }))
             .on_key_down(cx.listener(move |this, ev: &KeyDownEvent, _, cx| {
                 let bin = this.hist_hover.get(hover_key).map(|f| ((f * n as f32) as usize).min(n - 1));
+                let stride = if ev.keystroke.modifiers.shift { 10 } else { 1 };
                 let next = match ev.keystroke.key.as_str() {
-                    "left" => Some(bin.map_or(0, |b| b.saturating_sub(1))),
-                    "right" => Some(bin.map_or(0, |b| (b + 1).min(n - 1))),
+                    // Shift steps ten bins, as the brief's chart keys do (clamped to the ends).
+                    "left" => Some(bin.map_or(0, |b| b.saturating_sub(stride))),
+                    "right" => Some(bin.map_or(0, |b| (b + stride).min(n - 1))),
                     "home" => Some(0),
                     "end" => Some(n - 1),
                     "escape" if bin.is_some() => None,

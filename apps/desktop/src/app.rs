@@ -396,6 +396,8 @@ pub struct FoloApp {
     /// The sorted order of the models list, for (list allocation, length, column, descending).
     pub models_order: RefCell<Option<(ModelsOrderKey, Vec<usize>)>>,
     pub confusion_norm: bool,
+    /// The confusion-matrix cell (row, column) under the pointer or the keyboard cursor.
+    pub cm_cell: Option<(usize, usize)>,
 
     // Playground
     pub play_model: Option<String>,
@@ -548,6 +550,7 @@ impl FoloApp {
             runs_sort: Some(("created", true)),
             models_order: RefCell::new(None),
             confusion_norm: true,
+            cm_cell: None,
             play_model: None,
             play_conf: 0.25,
             play_iou: 0.7,
@@ -636,6 +639,10 @@ impl FoloApp {
     // ---------- navigation ----------
 
     pub fn navigate(&mut self, route: Route, window: &mut Window, cx: &mut Context<Self>) {
+        // The confusion-matrix cursor belongs to the model page it was set on.
+        if matches!(route, Route::Model(_)) {
+            self.cm_cell = None;
+        }
         if route == self.route {
             return;
         }

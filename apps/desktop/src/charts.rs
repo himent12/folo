@@ -33,6 +33,8 @@ pub struct Series {
     pub dashed: bool,
     /// Dotted (wins over dashed).
     pub dotted: bool,
+    /// Any other dash pattern (wins over both), for sets of more than three lines.
+    pub pattern: Option<&'static [f32]>,
     /// Draw a live dot with a halo on the last point.
     pub live: bool,
 }
@@ -48,6 +50,11 @@ impl Series {
         self
     }
 
+    pub fn pattern(mut self, dash: &'static [f32]) -> Self {
+        self.pattern = Some(dash);
+        self
+    }
+
     pub fn new(name: impl Into<SharedString>, color: Hsla, points: Arc<Vec<(f32, f32)>>) -> Self {
         Self {
             name: name.into(),
@@ -58,6 +65,7 @@ impl Series {
             width: 1.5,
             dashed: false,
             dotted: false,
+            pattern: None,
             live: false,
         }
     }
@@ -689,6 +697,9 @@ pub fn text_width(window: &mut Window, text: &str, size_px: f32) -> Pixels {
 /// Dash patterns (on, off) in px.
 const DASHED: &[f32] = &[4., 3.];
 const DOTTED: &[f32] = &[1.5, 3.];
+/// Long dashes and dash-dot, for line sets beyond solid / dashed / dotted (the PR curves).
+pub const LONG_DASH: &[f32] = &[9., 3.];
+pub const DASH_DOT: &[f32] = &[6., 2.5, 1.5, 2.5];
 
 fn stroke_path(window: &mut Window, pts: &[Point<Pixels>], width: f32, color: Hsla, dash: &[f32]) {
     if pts.len() < 2 {
@@ -1065,7 +1076,9 @@ fn paint_line_chart(
                         );
                     }
                 }
-                let dash = if s.dotted {
+                let dash = if let Some(p) = s.pattern {
+                    p
+                } else if s.dotted {
                     DOTTED
                 } else if s.dashed {
                     DASHED

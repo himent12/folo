@@ -1038,3 +1038,44 @@ Round 27 changes:
   - The error state keeps a subtitle ("Not connected · <server>").
 - **Run page:** the wrapped KPI row splits evenly (no stretched sparkline tile).
 - **Short windows:** a tighter Playground control block.
+
+## Round 27
+
+| Line | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | avg |
+|------|---|---|---|---|---|---|---|---|---|----|----|----|-----|
+| Opus 5.5 | 9 | 9 | 9 | 8 | 8 | 8 | 8 | 8 | 9 | 9 | 8 | 8 | 8.4 |
+| GPT-6.1 Sol | 9 | 9 | 9 | 8 | 8 | 8 | 8 | 9 | 8 | 8 | 8 | 8 | 8.3 |
+
+Both reviewers asked for confusion-matrix cells to be readable (hover and keyboard) and for PR patterns that don't repeat (three patterns for five classes). Sol found:
+- Slider ends quantised into invalid values.
+- Playground's hover outranking keyboard focus.
+- Toast controls not holding expiry.
+- Disabled-option reasons that were pointer-only.
+- Histograms without Shift stepping.
+- Latency placed below the sample picker.
+
+Opus found:
+- Slider tracks inset from the column.
+- The chip-row label too long.
+- Precision named three ways.
+- The inspector header's "w × h" against its values' "w×h".
+- Two empty-state surfaces.
+- The cursor chip hiding the tick under it. That is by design, and now a settled decision in the brief.
+
+#85's code review fixes (slider ranges frozen mid-drag and exact ends, pointer precedence, separate toast-control rows) shipped with round 27.
+
+Round 28 changes:
+- **Confusion matrix:**
+  - Cells read out on hover, or via one keyboard Tab stop (arrows move a cursor cell; Esc clears).
+  - The readout spells out counts and denominators ("circle predicted as square: 41 · 4% of circle objects").
+  - The selected cell gets a text.primary border.
+- **PR curves:** five patterns: solid, dashed, dotted, long dash (`LONG_DASH`), dash-dot (`DASH_DOT`; `Series::pattern`). The legend swatches draw the same patterns.
+- **Histograms:** Shift+arrow steps ten bins.
+- **Playground:** latency follows Detections, before the sample images.
+- **Segmented controls:** with keyboard focus, they show their disabled options' reasons.
+- **Slider tracks:** span the column, aligned with the fields above; the thumb travels inset by its radius.
+- **Copy:**
+  - The run chart is "Precision / Recall".
+  - The inspector header is "x, y · w×h (px)".
+  - The chip row is "Classes · box counts".
+- **Empty Playground drop zone:** uses the panel surface.

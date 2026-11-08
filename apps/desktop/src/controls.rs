@@ -497,6 +497,15 @@ impl FoloApp {
                 }
             }))
             .when(ring, |d| d.child(focus_ring(&t, radius::MD)))
+            // Keyboard focus shows why the disabled options are off (their tooltips need a pointer).
+            .when(ring && off.iter().any(Option::is_some), |d| {
+                let why: Vec<String> = options
+                    .iter()
+                    .zip(&off)
+                    .filter_map(|(label, w)| w.as_ref().map(|w| format!("{label}: {w}")))
+                    .collect();
+                d.child(focus_tip(&t, why.join(" · "), tsize::CONTROL_MD))
+            })
             .children(options.iter().enumerate().map(|(i, label)| {
                 let on = i == selected;
                 let f = on_select.clone();
@@ -732,16 +741,29 @@ impl FoloApp {
                 .top_0()
                 .bottom_0(),
             )
+            // The track spans the full column (aligned with the fields above); the thumb's centre
+            // travels 7 px inside it, so the fill is a 7 px lead plus its share of the travel.
             .child(
                 div()
                     .absolute()
-                    .left(px(7.))
-                    .right(px(7.))
+                    .left_0()
+                    .right_0()
                     .top(px(8.5))
                     .h(px(3.))
                     .rounded_full()
                     .bg(t.line_strong)
-                    .child(div().h_full().w(relative(f)).rounded_full().bg(fill_color)),
+                    .child(
+                        div().absolute().left_0().top_0().h_full().w(px(7.)).rounded_l_full().bg(fill_color),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .left(px(7.))
+                            .right(px(7.))
+                            .top_0()
+                            .h_full()
+                            .child(div().h_full().w(relative(f)).bg(fill_color)),
+                    ),
             )
             .child(
                 div().absolute().left(px(7.)).right(px(7.)).top_0().bottom_0().child(
