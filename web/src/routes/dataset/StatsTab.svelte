@@ -31,7 +31,7 @@
   const phone = new MediaQuery('max-width: 767px', false);
   let toggled = $state<Record<string, boolean>>({});
   const sizeEdges = $derived(stats.box_size_hist.edges);
-  // Unequal size bins keep their true widths up to 60 % of the side; the open last bin (≥ 50 %) is drawn up to there.
+  // Unequal size bins keep their true widths up to 60% of the side; the open last bin (≥ 50%) is drawn up to there.
   const sizeMax = $derived(Math.min(0.6, sizeEdges[sizeEdges.length - 1] ?? 1));
   const pctEdge = (v: number) => `${+(v * 100).toFixed(1)}%`;
   const balance = $derived(
@@ -109,7 +109,6 @@
     </div>
   </section>
   <!-- Phones: the split counts get a full line of their own instead of truncating inside the Images cell. -->
-  <p class="splits num">{splitLine}</p>
 
   <Panel title="Class balance" meta="boxes per class · {ratio.toFixed(1)}× largest / smallest" pad="none" id="ds-balance">
     <ul class="bars">
@@ -129,12 +128,12 @@
   </Panel>
 
   <div class="two">
-    <Panel title="Box size" meta="boxes per 1 % step of √area / image side · bar area = count" id="ds-size">
+    <Panel title="Box size" meta="boxes per 1% step of √area / image side · bar area = count" id="ds-size">
       <Histogram
         edges={sizeEdges}
         counts={stats.box_size_hist.counts}
         binLabel={(lo, hi) => sizeBinLabel(lo, hi)}
-        label="Histogram of box sizes relative to the image side (square root of the area share), with bins drawn at their true widths and a marker at the 5 % tiny-box threshold"
+        label="Histogram of box sizes relative to the image side (square root of the area share), with bins drawn at their true widths and a marker at the 5% tiny-box threshold"
         color="var(--text-tertiary)"
         hoverColor="var(--text-primary)"
         height={180}
@@ -375,7 +374,6 @@
     text-underline-offset: 3px;
     text-decoration-color: var(--line-strong);
   }
-  .splits,
   .narrow {
     display: none;
   }
@@ -409,19 +407,15 @@
     .haction {
       flex-basis: 100%;
     }
-    .wide {
+    /* Phones: Images spans the grid so the split counts stay inside their tile; the other three share one row. */
+    .kpis {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+    .kpi:first-child {
+      grid-column: 1 / -1;
+    }
+    .kpi:not(:first-child) .wide {
       display: none;
-    }
-    .narrow {
-      display: inline;
-    }
-    /* A caption right under the KPI grid. */
-    .splits {
-      display: block;
-      margin-top: calc(-1 * var(--space-2));
-      font-size: var(--type-sm-size);
-      line-height: var(--type-sm-line);
-      color: var(--text-tertiary);
     }
     .hide-sm {
       display: none;

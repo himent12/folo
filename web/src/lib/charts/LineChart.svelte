@@ -16,6 +16,11 @@
     ghost?: boolean;
     /** Thicker line drawn above the others (e.g. a mean over many thin per-class lines). */
     emphasis?: boolean;
+    /**
+     * A band instead of a line: `points` is the upper edge, `lower` the lower edge at the same x positions (e.g. the
+     * spread of many curves). Drawn as a soft fill under the lines; not in the legend or the readout.
+     */
+    lower?: Pt[];
   }
 
   export interface Marker {
@@ -201,8 +206,19 @@
       .y1((p) => y(p.y))
       .curve(c);
     return visible.map((s) => {
+      if (s.lower) {
+        const lo = s.lower;
+        const zipped = s.points.map((p, i) => ({ x: p.x, y: p.y, y0: lo[i]?.y ?? p.y }));
+        const band = d3area<{ x: number; y: number; y0: number }>()
+          .defined((p) => Number.isFinite(p.y) && Number.isFinite(p.y0))
+          .x((p) => x(p.x))
+          .y0((p) => y(p.y0))
+          .y1((p) => y(p.y))
+          .curve(c);
+        return { s, d: '', a: '', b: band(zipped) ?? '' };
+      }
       const pts = downsample(s.points, buckets);
-      return { s, d: ln(pts) ?? '', a: s.area ? (ar(pts) ?? '') : '' };
+      return { s, d: ln(pts) ?? '', a: s.area ? (ar(pts) ?? '') : '', b: '' };
     });
   });
 
@@ -233,7 +249,7 @@
   });
 
   // ---- hover / keyboard cursor ----
-  const keyed = $derived(visible.filter((s) => !s.ghost));
+  const keyed = $derived(visible.filter((s) => !s.ghost && !s.lower));
   const longestSeries = $derived(keyed.reduce<Series | undefined>((m, s) => (!m || s.points.length > m.points.length ? s : m), undefined));
 
   const hover = $derived.by(() => {
@@ -418,11 +434,15 @@
               {/if}
             {/each}
           </defs>
-          {#each paths as { s, d, a } (s.id)}
+          {#each paths.filter((p) => p.b) as { s, b } (s.id)}
+            <path class="band" d={b} style:fill={s.color} />
+          {/each}
+          {#each paths.filter((p) => !p.b) as { s, d, a } (s.id)}
             {#if a}<path class="area" d={a} fill="url(#{uid}-{s.id})" />{/if}
             <path
               class="line"
               class:dashed={s.dashed}
+              class:dotted={s.pattern === 'dot'}
               class:ghost={s.ghost}
               class:emphasis={s.emphasis || (highlight !== null && s.id === highlight)}
               class:faded={highlight !== null && s.id !== highlight && !s.ghost}
@@ -584,6 +604,10 @@
   .line.dashed {
     stroke-width: 1.5;
   }
+  /* Dots carry less ink than a line: a heavier stroke keeps a dotted series as findable as a solid one. */
+  .line.dotted {
+    stroke-width: 2.25;
+  }
   .line.emphasis {
     stroke-width: 2.75;
   }
@@ -602,6 +626,10 @@
   .line.ghost {
     stroke-width: 1;
     opacity: 0.28;
+  }
+  .band {
+    stroke: none;
+    opacity: 0.16;
   }
   .area {
     stroke: none;

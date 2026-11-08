@@ -10,6 +10,7 @@
 
 <div class="nf">
 <EmptyState
+  centered
   icon={Crosshair}
   title="Nothing in frame"
   description={`There is no page at ${router.route.path}. It may have moved, or the link is wrong.`}

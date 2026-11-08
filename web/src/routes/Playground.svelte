@@ -2,7 +2,8 @@
   import ArrowUpRight from '@lucide/svelte/icons/arrow-up-right';
   import Box from '@lucide/svelte/icons/box';
   import Check from '@lucide/svelte/icons/check';
-  import ChevronDown from '@lucide/svelte/icons/chevron-down';
+  import ChevronRight from '@lucide/svelte/icons/chevron-right';
+  import ChevronUp from '@lucide/svelte/icons/chevron-up';
   import ImageIcon from '@lucide/svelte/icons/image';
   import Images from '@lucide/svelte/icons/images';
   import Plus from '@lucide/svelte/icons/plus';
@@ -17,7 +18,7 @@
   import { classColor } from '$lib/design/tokens';
   import DetectionView from '$lib/detect/DetectionView.svelte';
   import { filterDetections } from '$lib/detect/nms';
-  import { metric, num } from '$lib/format';
+  import { metric, ms, num } from '$lib/format';
   import { href, router } from '$lib/router.svelte';
   import Page from '$lib/shell/Page.svelte';
   import { setCrumbs } from '$lib/shell/crumbs.svelte';
@@ -43,11 +44,41 @@
   const FETCH = { conf: 0.01, iou: 1, max_det: 1000 };
   const DEFAULTS = { conf: 0.25, iou: 0.7, maxDet: 300 };
 
-  // Phones with an image loaded: no intro line, the image full-bleed with Confidence under it, and everything else
-  // (IoU, max detections, display toggles, classes, timing) behind one disclosure right below, so tuning never
-  // scrolls or covers the result.
+  // Phones with an image loaded: no intro line, the image full-bleed with Confidence under it. IoU, max detections
+  // and the display toggles open in a non-modal bottom sheet, so the image stays in view (and live) while tuning;
+  // classes and timing fold into two disclosures under the detections.
   const phone = new MediaQuery('max-width: 767px', false);
   let moreOpen = $state(false);
+  let sheetEl = $state<HTMLElement>();
+  let moreBtn = $state<HTMLElement>();
+
+  // Focus moves into the sheet as it opens and back to its button as it closes.
+  $effect(() => {
+    if (sheetShown) sheetEl?.focus();
+  });
+  function closeSheet() {
+    moreOpen = false;
+    sheetDy = 0;
+    moreBtn?.querySelector('button')?.focus();
+  }
+
+  // Dragging the sheet's header down by more than its height closes it; a shorter drag springs back.
+  let sheetDy = $state(0);
+  let dragFrom: number | null = null;
+  function ondragdown(e: PointerEvent) {
+    if ((e.target as Element).closest('button')) return;
+    dragFrom = e.clientY;
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+  }
+  function ondragmove(e: PointerEvent) {
+    if (dragFrom !== null) sheetDy = Math.max(0, e.clientY - dragFrom);
+  }
+  function ondragup() {
+    if (dragFrom === null) return;
+    dragFrom = null;
+    if (sheetDy > 48) closeSheet();
+    else sheetDy = 0;
+  }
 
   // ---------- model ----------
   const models = new Resource((s) => hub.api.models(s));
@@ -69,6 +100,7 @@
   // ---------- image source ----------
   type Source = { kind: 'file'; file: Blob; name: string; url: string; width: number; height: number } | { kind: 'dataset'; ds: Dataset; img: Img };
   let source = $state.raw<Source | null>(null);
+  const sheetShown = $derived(moreOpen && phone.current && !!source);
   let src = $state<string | null>(null);
   let seg = $state<'file' | 'dataset' | 'webcam'>('file');
   let pickerOpen = $state(false);
@@ -310,7 +342,9 @@
   }
 
   function onwindowkey(e: KeyboardEvent) {
-    if (e.key === 'Escape' && picked && !pickerOpen) picked = null;
+    if (e.key !== 'Escape' || pickerOpen) return;
+    if (sheetShown) closeSheet();
+    else if (picked) picked = null;
   }
 
   function onwindowdown(e: PointerEvent) {
@@ -546,26 +580,33 @@
                   <span class="faint">{predicting ? 'Running inference…' : 'Waiting for a model'}</span>
                   <span class="grow"></span>
                 {/if}
-                <Button size="sm" variant="ghost" class="more-btn" iconRight={ChevronDown} aria-expanded={moreOpen} aria-controls="pg-more" onclick={() => (moreOpen = !moreOpen)}>Thresholds</Button>
+                <span class="more-btn" bind:this={moreBtn}>
+                  <Button size="sm" variant="ghost" iconRight={ChevronUp} aria-expanded={sheetShown} aria-controls="pg-more" onclick={() => (sheetShown ? closeSheet() : (moreOpen = true))}>Thresholds</Button>
+                </span>
               </div>
-              {#if moreOpen && phone.current}
-                <div class="more" id="pg-more">
-                  <div class="more-sliders">{@render secondarySliders(true)}</div>
-                  <div class="more-row">
-                    <span class="more-toggles">{@render displayToggles()}</span>
+              {#if sheetShown}
+                <!-- Non-modal: no backdrop, the image above stays visible and keeps re-filtering as the sliders move. -->
+                <div
+                  class="sheet"
+                  id="pg-more"
+                  role="dialog"
+                  aria-modal="false"
+                  aria-labelledby="pg-more-title"
+                  tabindex="-1"
+                  bind:this={sheetEl}
+                  style:transform={sheetDy ? `translateY(${sheetDy}px)` : undefined}
+                >
+                  <!-- svelte-ignore a11y_no_static_element_interactions -->
+                  <div class="sheet-head" onpointerdown={ondragdown} onpointermove={ondragmove} onpointerup={ondragup} onpointercancel={ondragup}>
+                    <span class="handle" aria-hidden="true"></span>
+                    <h2 id="pg-more-title">Thresholds</h2>
                     {@render resetButton()}
+                    <Button size="sm" variant="ghost" icon={X} aria-label="Close thresholds" onclick={closeSheet} />
                   </div>
-                  <section class="more-sec" aria-labelledby="pg-more-cls">
-                    <div class="more-head">
-                      <h2 id="pg-more-cls">Classes{#if result}<span class="more-meta num">{counts.length} found</span>{/if}</h2>
-                      {@render showAllButton()}
-                    </div>
-                    {@render classList()}
-                  </section>
-                  <section class="more-sec" aria-labelledby="pg-more-time">
-                    <div class="more-head"><h2 id="pg-more-time">Timing{#if pred}<span class="more-meta">server</span>{/if}</h2></div>
-                    {@render timingBody()}
-                  </section>
+                  <div class="sheet-body">
+                    <div class="more-sliders">{@render secondarySliders(true)}</div>
+                    <div class="more-toggles">{@render displayToggles()}</div>
+                  </div>
                 </div>
               {/if}
             {/if}
@@ -652,9 +693,34 @@
             </div>
           </Panel>
         </div>
+
+        {#if source && phone.current}
+          <!-- Phones: classes and timing as two disclosures under the detections, folded until asked for. -->
+          <div class="discs">
+            <details class="disc">
+              <summary>
+                <ChevronRight size={14} aria-hidden="true" />
+                <span class="disc-title">Classes</span>
+                {#if result}<span class="disc-meta num">{counts.length} found{hidden.size ? ` · ${hidden.size} hidden` : ''}</span>{/if}
+              </summary>
+              <div class="disc-body">
+                {#if hidden.size}<div class="disc-act">{@render showAllButton()}</div>{/if}
+                {@render classList()}
+              </div>
+            </details>
+            <details class="disc">
+              <summary>
+                <ChevronRight size={14} aria-hidden="true" />
+                <span class="disc-title">Timing</span>
+                {#if pred}<span class="disc-meta num">{ms(pred.timing.total_ms)} · server</span>{/if}
+              </summary>
+              <div class="disc-body">{@render timingBody()}</div>
+            </details>
+          </div>
+        {/if}
       </div>
 
-      <!-- Phones with an image: these move into the disclosure under the image. -->
+      <!-- Phones with an image: Thresholds open as a sheet from the image's footer, the rest folds under the detections. -->
       <div class="aside" class:tucked={!!source}>
         <div class="thresholds">
           <Panel title="Thresholds" divided>
@@ -728,11 +794,11 @@
   .src-name {
     min-width: 0;
     color: var(--text-secondary);
-    font-size: var(--type-xs-size);
+    font-size: var(--type-sm-size);
   }
   .src-dims {
     color: var(--text-tertiary);
-    font-size: var(--type-xs-size);
+    font-size: var(--type-sm-size);
     flex-shrink: 0;
   }
   .vbar-gap {
@@ -832,7 +898,7 @@
     border-radius: var(--radius-sm);
     background: var(--bg-overlay);
     box-shadow: var(--shadow-md);
-    font-size: var(--type-xs-size);
+    font-size: var(--type-sm-size);
     color: var(--text-secondary);
   }
   .stage-err {
@@ -858,7 +924,7 @@
     height: 32px;
     padding: 0 var(--space-3);
     border-top: 1px solid var(--line-subtle);
-    font-size: var(--type-xs-size);
+    font-size: var(--type-sm-size);
     color: var(--text-secondary);
     white-space: nowrap;
     overflow: hidden;
@@ -1035,16 +1101,117 @@
   .c-n {
     min-width: 24px;
     text-align: right;
-    font-size: var(--type-xs-size);
+    font-size: var(--type-sm-size);
   }
   .t-sk {
     display: grid;
     gap: var(--space-3);
   }
-  /* Phones: the disclosure under the image. Slider labels share one width so the tracks line up with Confidence. */
-  .more {
+  /* Phones: the threshold sheet. Slider labels share one width so the tracks line up with Confidence. */
+  .sheet {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom));
+    z-index: var(--z-overlay);
+    display: flex;
+    flex-direction: column;
+    max-height: 45dvh;
+    background: var(--bg-overlay);
+    border-top: 1px solid var(--line-default);
+    border-radius: var(--radius-xl) var(--radius-xl) 0 0;
+    box-shadow: var(--shadow-lg);
+    animation: sheet-in var(--dur-slow) var(--ease-out);
+    transition: transform var(--dur-fast) var(--ease-standard);
+  }
+  .sheet:focus {
+    outline: none;
+  }
+  @keyframes sheet-in {
+    from {
+      transform: translateY(100%);
+    }
+  }
+  .sheet-head {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    min-height: 48px;
+    padding: var(--space-2) var(--space-2) 0 var(--space-4);
+    touch-action: none;
+  }
+  .handle {
+    position: absolute;
+    top: 6px;
+    left: 50%;
+    width: 32px;
+    height: 4px;
+    margin-left: -16px;
+    border-radius: var(--radius-full);
+    background: var(--line-strong);
+  }
+  .sheet-head h2 {
+    flex: 1;
+    font-size: var(--type-md-size);
+    line-height: var(--type-md-line);
+    letter-spacing: var(--type-md-tracking);
+    font-weight: var(--weight-medium);
+  }
+  .sheet-body {
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: 0 var(--space-4) var(--space-3);
+  }
+  .discs {
+    display: grid;
+    gap: var(--space-2);
+    order: 3;
+  }
+  .disc {
+    border: 1px solid var(--line-default);
+    border-radius: var(--radius-lg);
+    background: var(--bg-panel);
+  }
+  .disc summary {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    min-height: 44px;
+    padding: 0 var(--space-4);
+    list-style: none;
+    cursor: pointer;
+    border-radius: inherit;
+  }
+  .disc summary::-webkit-details-marker {
+    display: none;
+  }
+  .disc summary :global(svg) {
+    flex-shrink: 0;
+    color: var(--text-tertiary);
+    transition: transform var(--dur-fast) var(--ease-standard);
+  }
+  .disc[open] summary :global(svg) {
+    transform: rotate(90deg);
+  }
+  .disc summary:focus-visible {
+    outline-offset: -2px;
+  }
+  .disc-title {
+    font-weight: var(--weight-medium);
+  }
+  .disc-meta {
+    margin-left: auto;
+    font-size: var(--type-sm-size);
+    color: var(--text-tertiary);
+  }
+  .disc-body {
     padding: 0 var(--space-4) var(--space-4);
-    border-top: 1px solid var(--line-subtle);
+  }
+  .disc-act {
+    display: flex;
+    justify-content: flex-end;
+    margin-bottom: var(--space-1);
   }
   .qconf :global(.slider.inline label),
   .more-sliders :global(.slider.inline label) {
@@ -1053,55 +1220,22 @@
   .more-sliders :global(.slider.inline) {
     min-height: 44px;
   }
-  .more-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--space-2);
-    min-height: 44px;
-    margin-left: calc(-1 * var(--space-2));
-  }
   .more-toggles {
     display: flex;
     flex-wrap: wrap;
-    gap: 2px;
-  }
-  .more-sec {
-    margin-top: var(--space-2);
-    padding-top: var(--space-3);
-    border-top: 1px solid var(--line-subtle);
-  }
-  .more-head {
-    display: flex;
     align-items: center;
-    justify-content: space-between;
-    gap: var(--space-3);
-    min-height: var(--control-sm);
-    margin-bottom: var(--space-2);
+    gap: 2px;
+    min-height: 44px;
+    margin-left: calc(-1 * var(--space-2));
   }
-  .more-head h2 {
-    display: flex;
-    align-items: baseline;
-    gap: var(--space-2);
-    font-size: var(--type-md-size);
-    line-height: var(--type-md-line);
-    letter-spacing: var(--type-md-tracking);
-    font-weight: var(--weight-medium);
-  }
-  .more-meta {
-    font-size: var(--type-sm-size);
-    letter-spacing: 0;
-    font-weight: var(--weight-regular);
-    color: var(--text-tertiary);
-  }
-  .vfoot :global(.more-btn) {
+  .more-btn {
     display: none;
     flex-shrink: 0;
   }
-  .vfoot :global(.more-btn svg) {
+  .more-btn :global(svg) {
     transition: transform var(--dur-fast) var(--ease-standard);
   }
-  .vfoot :global(.more-btn[aria-expanded='true'] svg) {
+  .more-btn :global([aria-expanded='true'] svg) {
     transform: rotate(180deg);
   }
   @media (pointer: coarse) {
@@ -1180,8 +1314,12 @@
       min-height: 40px;
       padding-right: var(--space-2);
     }
-    .vfoot :global(.more-btn) {
+    .more-btn {
       display: inline-flex;
+    }
+    /* The open sheet covers the lower part of the screen: leave room to scroll the detections above it. */
+    .layout:has(.sheet) {
+      padding-bottom: 45dvh;
     }
     .aside.tucked,
     .vbar .toggles {

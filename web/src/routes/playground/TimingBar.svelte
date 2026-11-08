@@ -105,12 +105,12 @@
     color: var(--text-secondary);
   }
   .v {
-    font-size: var(--type-xs-size);
+    font-size: var(--type-sm-size);
     font-variant-numeric: tabular-nums;
   }
   .pct {
     text-align: right;
-    font-size: var(--type-xs-size);
+    font-size: var(--type-sm-size);
     color: var(--text-tertiary);
   }
   .device {

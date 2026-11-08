@@ -28,8 +28,8 @@
     return {
       map: [
         // One run, so ink rather than a hue (hue identifies entities): primary metric solid, secondary tertiary dashed.
-        { id: 'm95', label: 'mAP50-95', color: 'var(--text-primary)', area: true, points: live.epochs.map((e) => ({ x: e.epoch + 1, y: e.val.map50_95 })) },
-        { id: 'm50', label: 'mAP50', color: 'var(--text-tertiary)', pattern: 'dash' as const, points: live.epochs.map((e) => ({ x: e.epoch + 1, y: e.val.map50 })) },
+        { id: 'm95', label: 'mAP50-95', color: 'var(--text-primary)', area: true, points: live.epochs.map((e) => ({ x: e.epoch, y: e.val.map50_95 })) },
+        { id: 'm50', label: 'mAP50', color: 'var(--text-tertiary)', pattern: 'dash' as const, points: live.epochs.map((e) => ({ x: e.epoch, y: e.val.map50 })) },
       ],
       lastStep: live.steps[live.steps.length - 1],
     };
@@ -72,7 +72,7 @@
         </p>
       </div>
       <div class="grid">
-        <Stat label="Best mAP50-95" value={metric(run.best?.map50_95)} sub={run.best ? `epoch ${run.best.epoch + 1}` : 'after first epoch'} />
+        <Stat label="Best mAP50-95" value={metric(run.best?.map50_95)} sub={run.best ? `epoch ${run.best.epoch}` : 'after first epoch'} />
         <Stat label="Throughput" value={num(charts.lastStep?.imgs_per_s, 0)} unit="img/s" />
         <Stat label="Learning rate" value={lr(charts.lastStep?.lr)} />
         <Stat label="Loss" value={num(charts.lastStep?.loss.total, 3)} sub="last step, raw" />
@@ -180,7 +180,7 @@
   .eta {
     display: flex;
     justify-content: space-between;
-    font-size: var(--type-xs-size);
+    font-size: var(--type-sm-size);
     color: var(--text-tertiary);
   }
   .grid {

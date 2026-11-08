@@ -213,12 +213,14 @@
     inset: 0;
     pointer-events: none;
   }
+  /* Strokes sit outside the box (content-box plus a negative margin of the border width), so the object inside stays
+     fully visible: a small circle no longer reads as a filled square under a 2 px border. */
   .box {
     position: absolute;
+    box-sizing: content-box;
+    margin: -2px;
     border: 2px solid var(--c);
-    box-shadow:
-      0 0 0 1px var(--class-halo),
-      inset 0 0 0 1px var(--class-halo);
+    box-shadow: 0 0 0 1px var(--class-halo);
     pointer-events: auto;
     transition:
       opacity var(--dur-fast) var(--ease-standard),
@@ -231,11 +233,11 @@
   }
   .box.selected {
     /* Selected: a 3 px accent stroke (lime reads on any photo inside its dark halo), drawn above everything else. */
+    margin: -3px; /* grid-ok: equals the stroke width */
     border: 3px solid var(--accent-solid);
     box-shadow:
       0 0 0 1px var(--class-halo),
-      0 0 0 3px color-mix(in srgb, var(--class-halo) 50%, transparent),
-      inset 0 0 0 1px var(--class-halo);
+      0 0 0 3px color-mix(in srgb, var(--class-halo) 50%, transparent);
     z-index: 5;
   }
   .box.selected .chip {
@@ -263,6 +265,7 @@
     }
   }
   .box.truth {
+    margin: -1.5px; /* grid-ok: equals the stroke width */
     border: 1.5px dashed var(--c);
     box-shadow: none;
     /* A dark halo that follows the dashes keeps light classes (near-white) visible on bright photos. */
@@ -271,14 +274,16 @@
     pointer-events: none;
   }
   .compact .box {
+    margin: -1.5px; /* grid-ok: equals the stroke width */
     border-width: 1.5px;
     box-shadow: 0 0 0 1px var(--class-halo);
   }
   .compact .box.truth {
+    margin: -1px;
     border-width: 1px;
   }
   .chip {
-    /* left/top come from the placement pass (offsets include the 2 px border). */
+    /* left/top come from the placement pass, relative to the box's own top-left (its stroke lies just outside). */
     position: absolute;
     z-index: 1;
     display: inline-flex;

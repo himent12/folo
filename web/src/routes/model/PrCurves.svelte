@@ -10,7 +10,7 @@
   import { metric, num } from '$lib/format';
   import Input from '$lib/ui/Input.svelte';
   import Search from '@lucide/svelte/icons/search';
-  import { matchesClass, trimPrTail } from './pr';
+  import { matchesClass, prEnvelope, trimPrTail } from './pr';
 
   let { classes, ev, map50 }: { classes: readonly string[]; ev: Evaluation; map50: number | null } = $props();
 
@@ -35,11 +35,18 @@
 
   const name = (i: number) => classes[i] ?? `class ${i}`;
   // Curves end at their last recall point with precision > 0; the zero padding up to recall 1 is not data.
+  // Many classes: by default a band (10th–90th percentile of the classes' precision) instead of 80 lines; every
+  // curve is one click away. Few classes: every curve, as context lines.
+  let allCurves = $state(false);
+  const banded = $derived(many && !allCurves);
+  const envelope = $derived(many ? prEnvelope(classes.map((_, i) => trimPrTail(ev.curves[i] ?? []))) : null);
   const series = $derived<Series[]>([
-    ...classes
-      .map((_, i) => i)
-      .filter((i) => !lit.includes(i))
-      .map((i) => ({ id: `c${i}`, label: name(i), color: 'var(--text-tertiary)', ghost: true, points: trimPrTail(ev.curves[i] ?? []) })),
+    ...(banded && envelope
+      ? [{ id: 'band', label: 'P10–P90 of classes', color: 'var(--text-tertiary)', points: envelope.upper, lower: envelope.lower }]
+      : classes
+          .map((_, i) => i)
+          .filter((i) => !lit.includes(i))
+          .map((i) => ({ id: `c${i}`, label: name(i), color: 'var(--text-tertiary)', ghost: true, points: trimPrTail(ev.curves[i] ?? []) }))),
     { id: 'mean', label: 'All classes', color: 'var(--text-primary)', points: trimPrTail(ev.mean), emphasis: true },
     ...lit.map((i) => ({ id: `c${i}`, label: name(i), color: classStroke(i), points: trimPrTail(ev.curves[i] ?? []), emphasis: true })),
   ]);
@@ -76,10 +83,14 @@
     {#each lit as i (i)}
       <span class="item"><span class="line" style:background={classStroke(i)} aria-hidden="true"></span>{name(i)} <span class="num">{cursor === null ? metric(apOf.get(i)) : at(ev.curves[i] ?? [])}</span></span>
     {/each}
+    {#if banded}<span class="item band-key"><span class="swatch-band" aria-hidden="true"></span>10th–90th percentile of classes</span>{/if}
     {#if selected.length}
       <button type="button" class="clear" onclick={() => (selected = [])}>Clear</button>
     {:else if hovered === null}
       <span class="hint">Pick a class below to trace its curve</span>
+    {/if}
+    {#if many}
+      <button type="button" class="clear mode" aria-pressed={allCurves} onclick={() => (allCurves = !allCurves)}>{allCurves ? 'Show the band' : `All ${classes.length} curves`}</button>
     {/if}
   </div>
   <div class="plot">
@@ -163,6 +174,16 @@
   /* Per-class context lines: lighter than the mean, but still traceable (the generic ghost is too faint here). */
   .plot :global(.line.ghost) {
     opacity: 0.5;
+  }
+  .swatch-band {
+    width: 14px;
+    height: 8px;
+    border-radius: 2px;
+    background: var(--text-tertiary);
+    opacity: 0.35;
+  }
+  .mode {
+    margin-left: auto;
   }
   .what {
     min-width: 11em;

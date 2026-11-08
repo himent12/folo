@@ -5,6 +5,7 @@
   import Clock from '@lucide/svelte/icons/clock';
   import GitCompare from '@lucide/svelte/icons/git-compare-arrows';
   import RotateCcw from '@lucide/svelte/icons/rotate-ccw';
+  import Play from '@lucide/svelte/icons/play';
   import ScanSearch from '@lucide/svelte/icons/scan-search';
   import Square from '@lucide/svelte/icons/square';
   import Trash from '@lucide/svelte/icons/trash-2';
@@ -100,13 +101,29 @@
     return out;
   });
 
+  // Resume: the same run continues from weights/last.folo (POST /api/runs with resume_run_id, docs/API.md).
+  let resuming = $state(false);
+  async function resume() {
+    if (!run) return;
+    resuming = true;
+    try {
+      const id = run.id;
+      const r = await live.resume(() => hub.api.resumeRun(id));
+      toast.success(`Resuming ${r.name}`, r.epoch > 0 ? `From the checkpoint of epoch ${r.epoch}.` : 'No epoch had finished, so it starts from scratch.');
+    } catch (e) {
+      toast.error(e, 'Could not resume the run');
+    } finally {
+      resuming = false;
+    }
+  }
+
   const retryHref = $derived(run ? href(`/runs/new?from=${run.id}${run.error?.includes('memory') ? `&batch=${Math.max(1, run.config.batch / 2)}` : ''}`) : '#');
 </script>
 
 {#if live.error && !run}
   <Page title="Run">
     <ErrorState error={live.error} title="Could not load this run" retry={() => live.retry()} />
-    <EmptyState compact title="Check the run id" description="It may have been deleted. All runs are listed on the Runs page.">
+    <EmptyState title="Check the run id" description="It may have been deleted; every run is listed on the Runs page.">
       {#snippet actions()}<Button href={href('/runs')}>All runs</Button>{/snippet}
     </EmptyState>
   </Page>
@@ -128,7 +145,7 @@
     <div class="sk-row2"><Skeleton h="300px" r="var(--radius-lg)" /><Skeleton h="300px" r="var(--radius-lg)" /></div>
   </div>
 {:else}
-  <Page title={run.name}>
+  <Page title={run.name} inlineActions>
     {#snippet lead()}
       <StatusBadge status={run.status} />
       <span class="mono faint id">{run.id}</span>
@@ -167,14 +184,18 @@
           <p class="b-title">Failed at epoch {run.epoch}</p>
           <p class="b-msg">{run.error}</p>
         </div>
-        <Button size="sm" icon={RotateCcw} href={retryHref}>{run.error?.includes('memory') ? `Retry with batch ${Math.max(1, run.config.batch / 2)}` : 'Retry'}</Button>
+        <div class="b-acts">
+          <!-- Out of memory needs a smaller batch (a new run); anything else can continue from the last checkpoint. -->
+          {#if !run.error?.includes('memory')}<Button size="sm" icon={Play} loading={resuming} onclick={resume}>Resume</Button>{/if}
+          <Button size="sm" icon={RotateCcw} href={retryHref}>{run.error?.includes('memory') ? `Retry with batch ${Math.max(1, run.config.batch / 2)}` : 'New run like this'}</Button>
+        </div>
       </div>
     {:else if run.status === 'completed'}
       <div class="banner success">
         <CircleCheck size={16} />
         <div class="b-text">
           <p class="b-title">Completed in {duration(elapsed)}</p>
-          <p class="b-msg">Best mAP50-95 {metric(run.best?.map50_95)} at epoch {(run.best?.epoch ?? 0) + 1}. The best weights are saved as a model.</p>
+          <p class="b-msg">Best mAP50-95 {metric(run.best?.map50_95)} at epoch {run.best?.epoch ?? 0}. The best weights are saved as a model.</p>
         </div>
         {#if run.model_id}<Button size="sm" icon={ScanSearch} href={href(`/playground?model=${run.model_id}`)}>Try in Playground</Button>{/if}
       </div>
@@ -183,8 +204,9 @@
         <Square size={16} />
         <div class="b-text">
           <p class="b-title">Stopped at epoch {run.epoch}</p>
-          <p class="b-msg">The last checkpoint was kept{run.model_id ? ' and saved as a model' : ''}.</p>
+          <p class="b-msg">The last checkpoint was kept{run.model_id ? ' and saved as a model' : ''}. Resume continues from it.</p>
         </div>
+        <Button size="sm" icon={Play} loading={resuming} onclick={resume}>Resume</Button>
       </div>
     {/if}
 
@@ -358,6 +380,11 @@
     flex-shrink: 0;
     align-self: flex-start;
     margin-top: 2px;
+  }
+  .b-acts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
   }
   .b-text {
     flex: 1;

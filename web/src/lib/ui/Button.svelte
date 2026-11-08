@@ -157,7 +157,7 @@
   /* Light theme: lime on white needs an edge to read as a control; a neutral one, so lime stays a single accent. */
   :global([data-theme='light']) .primary {
     box-shadow:
-      inset 0 0 0 1px #0b0e0326,
+      inset 0 0 0 1px #0b0e031a,
       0 1px 2px #0a0e1414;
   }
   /* Touch: grow the hit area to at least 44 px without changing the visual size. */

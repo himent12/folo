@@ -3,6 +3,7 @@
   import { untrack } from 'svelte';
   import GitCompare from '@lucide/svelte/icons/git-compare-arrows';
   import X from '@lucide/svelte/icons/x';
+  import ArrowUpRight from '@lucide/svelte/icons/arrow-up-right';
   import Plus from '@lucide/svelte/icons/plus';
   import { hub } from '$lib/api/index.svelte';
   import { Resource } from '$lib/api/resource.svelte';
@@ -78,7 +79,7 @@
         label: r.name,
         color: color(r.id),
         pattern: SLOT_PATTERN[slotOf(r.id)],
-        points: eps.map((e) => ({ x: x === 'epoch' ? e.epoch + 1 : ((e.epoch + 1) / r.epochs) * 100, y: f(e) })),
+        points: eps.map((e) => ({ x: x === 'epoch' ? e.epoch : (e.epoch / r.epochs) * 100, y: f(e) })),
       };
     });
 
@@ -132,6 +133,21 @@
   const diffRows = $derived(chosen.length > 1 ? rows.filter(([, f]) => differs(f)) : rows);
   const sameRows = $derived(chosen.length > 1 ? rows.filter(([, f]) => !differs(f)) : []);
   let showSame = $state(false);
+  let tableEl = $state<HTMLElement>();
+  let tableMore = $state(false);
+  function measureTable() {
+    const el = tableEl;
+    tableMore = !!el && el.scrollLeft + el.clientWidth < el.scrollWidth - 1;
+  }
+  $effect(() => {
+    const el = tableEl;
+    if (!el) return;
+    void chosen.length;
+    measureTable();
+    const ro = new ResizeObserver(measureTable);
+    ro.observe(el);
+    return () => ro.disconnect();
+  });
 
   const candidates = $derived((runs.data ?? []).filter((r) => !ids.includes(r.id) && r.status !== 'queued'));
 </script>
@@ -145,8 +161,8 @@
     <Panel>
       <EmptyState icon={GitCompare} title="Pick runs to compare" description="Add two to four runs, or select them on the Runs page.">
         {#snippet actions()}
-          {#if candidates.length}{@render adder()}{/if}
-          <Button href={href('/runs')}>Go to Runs</Button>
+          <!-- One action: pick runs here when there are any, else go and make some. -->
+          {#if candidates.length}{@render adder()}{:else}<Button href={href('/runs')}>Go to Runs</Button>{/if}
         {/snippet}
       </EmptyState>
     </Panel>
@@ -167,23 +183,23 @@
             onfocusin={() => (hovered = r.id)}
             onfocusout={() => (hovered = null)}
           >
-            <!-- The colour key is the toggle: it keeps the run's line in front (click, tap, Enter or Space). -->
+            <!-- The legend entry (key and name) is the toggle: it keeps the run's line in front. -->
             <button
               type="button"
               class="key"
               aria-pressed={pinned === r.id}
-              aria-label="Keep {r.name} in front"
+              title={pinned === r.id ? 'Let the line fall back' : 'Keep this line in front'}
               onclick={() => (pinned = pinned === r.id ? null : r.id)}
-            ><i aria-hidden="true" data-pattern={SLOT_PATTERN[slotOf(r.id)]}></i></button>
-            <a href={href(`/runs/${r.id}`)}>{r.name}</a>
+            ><i aria-hidden="true" data-pattern={SLOT_PATTERN[slotOf(r.id)]}></i><span class="nm">{r.name}</span></button>
             <span class="v num">{v === null ? '—' : v.toFixed(3)}</span>
-            <button aria-label="Remove {r.name}" onclick={() => setIds(ids.filter((id) => id !== r.id))}><X size={12} /></button>
+            <a class="open" href={href(`/runs/${r.id}`)} aria-label="Open {r.name}" title="Open run"><ArrowUpRight size={12} /></a>
+            <button class="rm" aria-label="Remove {r.name}" onclick={() => setIds(ids.filter((id) => id !== r.id))}><X size={12} /></button>
           </span>
         {/each}
         {#if ids.length < MAX && candidates.length}{@render adder()}{/if}
       </div>
       <p class="note">
-        Press a run's colour key to keep its line in front.{#if !sameData && chosen.length > 1}{' '}Different datasets:
+        Press a run to keep its line in front.{#if !sameData && chosen.length > 1}{' '}Different datasets:
           compare the shape of the curves, not their values.{/if}
       </p>
       <header class="c-head">
@@ -209,6 +225,7 @@
           legend={false}
           {highlight}
           endDots
+          endLabels
           label="{metricDef.label} for the compared runs"
         />
       {/if}
@@ -216,7 +233,7 @@
 
     {#if chosen.length}
       <Panel title="Side by side" meta={sameRows.length ? `${diffRows.length} settings differ` : undefined} pad="none" id="cmp-table">
-        <div class="scroll">
+        <div class="scroll" class:more={tableMore} bind:this={tableEl} onscroll={measureTable}>
           <table class="table">
             <thead>
               <tr>
@@ -314,12 +331,32 @@
   }
   .key {
     position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    height: 24px;
+    padding: 0 var(--space-1);
+    margin-left: calc(-1 * var(--space-1));
+    border-radius: var(--radius-sm);
+    font-weight: var(--weight-medium);
+    min-width: 0;
+  }
+  .nm {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .open {
     display: grid;
     place-items: center;
     width: 20px;
     height: 20px;
-    margin-left: calc(-1 * var(--space-1));
     border-radius: var(--radius-sm);
+    color: var(--text-tertiary);
+  }
+  .open:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
   }
   .key:hover {
     background: var(--bg-hover);
@@ -357,21 +394,38 @@
     }
     .chips .chip {
       display: grid;
-      grid-template-columns: auto minmax(0, 1fr) auto auto;
+      grid-template-columns: minmax(0, 1fr) auto 44px 44px;
       border-radius: 0;
       border-width: 0 0 1px;
       background: none;
       padding: 0;
-      height: 40px;
+      height: 48px;
     }
-    .chips .chip a {
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
+    .chips .chip .key {
+      height: 44px;
+      margin-left: 0;
+      padding-left: 0;
     }
-    /* The side-by-side table scrolls sideways on phones: the faded edge says there are more runs. */
-    .scroll {
+    .chips .chip .open,
+    .chips .chip .rm {
+      width: 44px;
+      height: 44px;
+    }
+    .chips .chip .rm::after,
+    .chips .chip .key::after {
+      content: none;
+    }
+    /* The side-by-side table scrolls sideways on phones: setting names stay pinned, and the right edge fades only
+       while more runs lie beyond it. */
+    .scroll.more {
       mask-image: linear-gradient(90deg, #000 calc(100% - 32px), transparent);
+    }
+    .scroll :global(th:first-child),
+    .scroll :global(td.k) {
+      position: sticky;
+      left: 0;
+      z-index: 1;
+      background: var(--bg-panel);
     }
     .compare {
       padding: var(--space-3);
@@ -422,7 +476,7 @@
     text-decoration: underline;
     text-underline-offset: 3px;
   }
-  .chip button {
+  .chip .rm {
     display: grid;
     place-items: center;
     width: 20px;
@@ -431,16 +485,16 @@
     color: var(--text-tertiary);
   }
   @media (pointer: coarse) {
-    .chip button {
+    .chip .rm {
       position: relative;
     }
-    .chip button::after {
+    .chip .rm::after {
       content: '';
       position: absolute;
       inset: -12px;
     }
   }
-  .chip button:hover {
+  .chip .rm:hover {
     background: var(--bg-hover);
     color: var(--text-primary);
   }

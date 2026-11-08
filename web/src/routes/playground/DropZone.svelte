@@ -41,7 +41,7 @@
       <p class="desc">JPEG, PNG or WebP, from your photos, camera or files.</p>
     {:else}
       <p class="title">{dragging ? 'Release to detect' : 'Drop an image to detect objects'}</p>
-      <p class="desc">JPEG, PNG or WebP. You can also paste from the clipboard with <Kbd keys="Mod+V" />.</p>
+      <p class="desc">JPEG, PNG or WebP. You can also paste from the clipboard with <span class="nowrap"><Kbd keys="Mod+V" />.</span></p>
     {/if}
     <div class="actions">
       <Button variant="primary" icon={Upload} onclick={onbrowse}>{touch.current ? 'Choose an image' : 'Browse files'}</Button>
@@ -252,5 +252,8 @@
     .br {
       right: var(--space-3);
     }
+  }
+  .nowrap {
+    white-space: nowrap;
   }
 </style>

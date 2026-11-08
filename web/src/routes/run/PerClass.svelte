@@ -29,7 +29,7 @@
   });
   const epochNo = $derived.by(() => {
     void version;
-    return epochs.length ? epochs[epochs.length - 1]!.epoch + 1 : null;
+    return epochs.length ? epochs[epochs.length - 1]!.epoch : null;
   });
 </script>
 
@@ -109,7 +109,7 @@
     width: 52px;
     text-align: left;
     padding-left: 6px;
-    font-size: var(--type-xs-size);
+    font-size: var(--type-sm-size);
     color: var(--text-disabled);
   }
   .delta.up {

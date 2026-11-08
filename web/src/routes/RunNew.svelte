@@ -8,7 +8,7 @@
   import Shuffle from '@lucide/svelte/icons/shuffle';
   import RotateCcw from '@lucide/svelte/icons/rotate-ccw';
   import TriangleAlert from '@lucide/svelte/icons/triangle-alert';
-  import { untrack } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import { hub } from '$lib/api/index.svelte';
   import { Resource } from '$lib/api/resource.svelte';
   import type { Arch, Augment, DatasetImage, Device, Optimizer, TrainConfig } from '$lib/api/types';
@@ -151,7 +151,9 @@
   const imgszN = $derived(Number(imgsz) || 640);
   const onCpu = $derived(device === 'cpu' || (device === 'auto' && !gpu));
   const est = $derived(estimate(arch, dataset?.splits.train ?? 0, epochs, batchN, imgszN, onCpu));
-  const vramPct = $derived(gpu ? est.vramBytes / gpu.memory_bytes : 0);
+  // wgpu cannot report adapter memory (real servers send 0): then there is no meter and no out-of-memory guess.
+  const gpuMem = $derived(gpu && gpu.memory_bytes > 0 ? gpu.memory_bytes : null);
+  const vramPct = $derived(gpuMem ? est.vramBytes / gpuMem : 0);
 
   const errors = $derived({
     name: !name.trim() ? 'Give the run a name.' : /[^\w.-]/.test(name.trim()) ? 'Letters, digits, dot, dash and underscore only.' : null,
@@ -237,21 +239,96 @@
   }
 
   const pct2 = (v: number) => `${Math.round(v * 100)}%`;
+
+  // ---------- review ----------
+  const shortGpu = (n: string) => n.replace('NVIDIA GeForce ', '');
+  const deviceLabel = $derived.by(() => {
+    if (device === 'auto') return `Auto${gpu ? ` · ${shortGpu(gpu.name)}` : ''}`;
+    if (device === 'cpu') return 'CPU';
+    const g = system.data?.gpus.find((x) => `gpu:${x.ordinal}` === device);
+    return g ? `${device} · ${shortGpu(g.name)}` : device;
+  });
+  type Jump = 'name' | 'data' | 'model' | 'epochs' | 'batch' | 'imgsz' | 'device' | 'weights' | 'opt';
+  /** The settings that shape the run, each a way back to its control. Optimizer only once it is not the default. */
+  const review = $derived<{ key: Jump; label: string; value: string; mono?: boolean; warn?: boolean }[]>([
+    { key: 'data', label: 'Data', value: dataset ? `${dataset.name} · ${compact(dataset.splits.train)} images` : '—', warn: !!errors.dataset },
+    { key: 'model', label: 'Model', value: arch, mono: true },
+    { key: 'epochs', label: 'Epochs', value: errors.epochs ? '—' : num(epochs), warn: !!errors.epochs },
+    { key: 'batch', label: 'Batch', value: String(batchN) },
+    { key: 'imgsz', label: 'Image size', value: `${imgszN} px` },
+    { key: 'device', label: 'Device', value: deviceLabel },
+    {
+      key: 'weights',
+      label: 'Start from',
+      value: weights === 'none' ? 'Random init' : (weightOptions.find((m) => m.id === weights)?.name ?? weights),
+      mono: weights !== 'none',
+      warn: !!errors.weights,
+    },
+    ...(optimizer !== 'auto' ? [{ key: 'opt' as const, label: 'Optimizer', value: optimizer === 'sgd' ? 'SGD + momentum' : 'AdamW' }] : []),
+  ]);
+
+  /** The control a review row returns to; the picker that is on screen (cards or the phone select). */
+  function jumpTarget(key: Jump): HTMLElement | null {
+    const visible = (el: HTMLElement | null) => (el && el.getClientRects().length ? el : null);
+    switch (key) {
+      case 'data':
+        return visible(document.getElementById('dataset-pick')) ?? document.querySelector<HTMLElement>('input[name="dataset"]:checked');
+      case 'model':
+        return document.querySelector<HTMLElement>('input[name="arch"]:checked');
+      case 'batch':
+      case 'imgsz':
+        return document.querySelector<HTMLElement>(`#${key} [aria-checked="true"]`);
+      default:
+        return document.getElementById(key);
+    }
+  }
+
+  async function jump(key: Jump) {
+    sumOpen = false;
+    if (key === 'opt') advancedOpen = true;
+    await tick();
+    // A closing dialog hands focus back to its opener; move on after that.
+    requestAnimationFrame(() => {
+      const el = jumpTarget(key);
+      if (!el) return;
+      const box = el.closest<HTMLElement>('.field, .card, .arch, .ds-pick') ?? el;
+      const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+      box.scrollIntoView({ block: 'center', behavior: reduce ? 'auto' : 'smooth' });
+      el.focus({ preventScroll: true, focusVisible: true } as FocusOptions);
+      // Where the browser keeps the focus ring hidden after a mouse click, mark the landing spot until focus leaves.
+      if (el.matches(':focus-visible')) return;
+      box.dataset.jumped = '';
+      el.addEventListener('blur', () => delete box.dataset.jumped, { once: true });
+    });
+  }
 </script>
 
+{#snippet reviewList(withName: boolean)}
+  <ul class="review" aria-label="Settings">
+    {#if withName}
+      <li><button type="button" class="rv" class:warn={!!errors.name} onclick={() => jump('name')}><span class="rv-k">Run name</span><span class="rv-v mono">{name.trim() || '—'}</span></button></li>
+    {/if}
+    {#each review as r (r.key)}
+      <li>
+        <button type="button" class="rv" class:warn={r.warn} onclick={() => jump(r.key)} aria-label="{r.label}: {r.value}. Edit">
+          <span class="rv-k">{r.label}</span><span class="rv-v" class:mono={r.mono}>{r.value}</span>
+        </button>
+      </li>
+    {/each}
+  </ul>
+{/snippet}
+
 {#snippet estimates(withName: boolean)}
+  {@render reviewList(withName)}
   <dl class="est">
-    {#if withName}<dt>Run name</dt><dd class="mono">{name.trim() || '—'}</dd>{/if}
-    <dt>Data</dt><dd>{dataset ? `${dataset.name} · ${compact(dataset.splits.train)} images` : '—'}</dd>
-    <dt>Model</dt><dd class="mono">{arch}</dd>
     <dt>Steps / epoch</dt><dd class="num">{num(est.stepsPerEpoch)}</dd>
     <dt>Est. time</dt><dd class="num">{roughDuration(est.totalSeconds)} <span class="faint">(~{num(Math.round(est.imgsPerS / 10) * 10, 0)} img/s)</span></dd>
     {#if !onCpu && gpu}
       <dt>Est. GPU memory</dt>
-      <dd class="num" class:warn={vramPct > 0.9}>{roughBytes(est.vramBytes)} <span class="faint">/ {bytes(gpu.memory_bytes, prefs.units)}</span></dd>
+      <dd class="num" class:warn={vramPct > 0.9}>{roughBytes(est.vramBytes)} <span class="faint">/ {gpuMem ? bytes(gpuMem, prefs.units) : 'GPU memory unknown'}</span></dd>
     {/if}
   </dl>
-  {#if !onCpu && gpu}
+  {#if !onCpu && gpuMem}
     <div class="vram" aria-hidden="true"><i class:warn={vramPct > 0.9} style:width={pct2(Math.min(1, vramPct))}></i></div>
   {/if}
   {#if vramPct > 1}
@@ -270,7 +347,7 @@
     <ErrorState error={datasets.error} retry={() => datasets.refresh()} title="Could not load datasets" />
   {:else if datasets.data && datasets.data.length === 0}
     <Panel>
-      <EmptyState icon={Images} title="Add a dataset first" description="Runs train on a registered dataset. Register a YOLO or COCO folder, or generate synthetic shapes.">
+      <EmptyState icon={Images} title="Add a dataset first" description="Runs train on a registered dataset: add a folder or generate a synthetic one.">
         {#snippet actions()}<Button variant="primary" href={href('/datasets')}>Go to Datasets</Button>{/snippet}
       </EmptyState>
     </Panel>
@@ -342,10 +419,10 @@
               <Input id="epochs" type="number" min="1" max="10000" step="1" bind:value={epochs} invalid={!!errors.epochs} suffix="epochs" />
             </Field>
             <Field label="Batch size" for="batch" hint="Per step. Lower it if you run out of GPU memory.">
-              <Segmented label="Batch size" bind:value={batch} options={['8', '16', '32', '64'].map((v) => ({ value: v, label: v }))} />
+              <Segmented id="batch" label="Batch size" bind:value={batch} options={['8', '16', '32', '64'].map((v) => ({ value: v, label: v }))} />
             </Field>
             <Field label="Image size" for="imgsz" hint="Longer side in pixels, letterboxed.">
-              <Segmented label="Image size" bind:value={imgsz} options={IMGSZ.map((v) => ({ value: v, label: v }))} />
+              <Segmented id="imgsz" label="Image size" bind:value={imgsz} options={IMGSZ.map((v) => ({ value: v, label: v }))} />
             </Field>
             <Field label="Device" for="device">
               <Select
@@ -562,7 +639,7 @@
     color: var(--text-tertiary);
   }
   .c-meta {
-    font-size: var(--type-xs-size);
+    font-size: var(--type-sm-size);
     color: var(--text-secondary);
   }
   .arches {
@@ -580,8 +657,8 @@
     color: var(--text-primary);
   }
   .a-note {
-    font-size: var(--type-xs-size);
-    line-height: var(--type-xs-line);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
     color: var(--text-secondary);
     min-height: 32px;
   }
@@ -605,7 +682,7 @@
   }
   .ref {
     margin-top: var(--space-2);
-    font-size: var(--type-xs-size);
+    font-size: var(--type-sm-size);
     color: var(--text-tertiary);
   }
   .row2 {
@@ -644,14 +721,65 @@
     top: calc(var(--size-topbar) + var(--space-4));
   }
   .aug-hint {
-    font-size: var(--type-xs-size);
+    font-size: var(--type-sm-size);
     color: var(--text-tertiary);
   }
   .sum {
     display: grid;
     gap: var(--space-4);
   }
+  /* Settings to review: 28 px rows, each a way back to its control. */
+  .review {
+    display: grid;
+    margin: calc(-1 * var(--space-1)) calc(-1 * var(--space-2)) 0;
+  }
+  /* Touch: each review row is a full 44 px target (after the base rule, so it wins). */
+  @media (pointer: coarse) {
+    .rv.rv {
+      height: 44px;
+    }
+  }
+  .rv {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+    width: 100%;
+    height: 28px;
+    padding: 0 var(--space-2);
+    border-radius: var(--radius-sm);
+    font-size: var(--type-sm-size);
+    text-align: left;
+    transition: background-color var(--dur-fast) var(--ease-standard);
+  }
+  .rv:hover {
+    background: var(--bg-hover);
+  }
+  .rv:focus-visible {
+    outline-offset: -2px;
+  }
+  .rv-k {
+    flex-shrink: 0;
+    color: var(--text-tertiary);
+  }
+  .rv-v {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text-primary);
+  }
+  .rv.warn .rv-v {
+    color: var(--danger-text);
+  }
+  .layout :global([data-jumped]) {
+    outline: 2px solid var(--focus);
+    outline-offset: 4px;
+    border-radius: var(--radius-md);
+  }
   .est {
+    padding-top: var(--space-3);
+    border-top: 1px solid var(--line-subtle);
     display: grid;
     grid-template-columns: auto 1fr;
     gap: 6px var(--space-3);
@@ -693,8 +821,8 @@
   }
   .ds-line {
     margin-top: var(--space-2);
-    font-size: var(--type-xs-size);
-    line-height: var(--type-xs-line);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
     color: var(--text-secondary);
   }
   .ds-line .mono {
@@ -810,7 +938,7 @@
     border-radius: var(--radius-md);
     background: var(--bg-inset);
     font-family: var(--font-mono);
-    font-size: var(--type-xs-size);
+    font-size: var(--type-sm-size);
     line-height: 18px;
     color: var(--text-secondary);
     white-space: pre-wrap;
@@ -907,6 +1035,10 @@
     }
     .summary {
       position: static;
+    }
+    /* Stacked under the form, the summary keeps the rail's measure so labels stay next to their values. */
+    .summary .sum {
+      max-width: 480px;
     }
     /* Model sizes as single-line rows: letter, name, note, then the three specs in columns. */
     .arches {
@@ -1012,7 +1144,7 @@
     .dock-est .faint {
       display: block;
       flex-basis: 100%;
-      font-size: var(--type-xs-size);
+      font-size: var(--type-sm-size);
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;

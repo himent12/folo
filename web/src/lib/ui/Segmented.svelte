@@ -19,7 +19,8 @@
     size = 'md',
     iconOnly = false,
     onchange,
-  }: { options: Option[]; value: T; label: string; size?: 'sm' | 'md'; iconOnly?: boolean; onchange?: (v: T) => void } =
+    id,
+  }: { options: Option[]; value: T; label: string; size?: 'sm' | 'md'; iconOnly?: boolean; onchange?: (v: T) => void; id?: string } =
     $props();
 
   let root: HTMLDivElement;
@@ -54,7 +55,7 @@
   }
 </script>
 
-<div class="seg {size}" role="radiogroup" aria-label={label} bind:this={root} {onkeydown} tabindex="-1">
+<div class="seg {size}" {id} role="radiogroup" aria-label={label} bind:this={root} {onkeydown} tabindex="-1">
   {#each options as o (o.value)}
     {@const on = o.value === value}
     <button

@@ -25,6 +25,8 @@ Lines: 1 hierarchy & layout · 2 typography · 3 colour & theming · 4 spacing r
 | r5 | Claude Opus 5.5 (71 of 132 shots seen) | 7.5 | 7.5 | 8 | 7.5 | 8 | 8 | 8 | 7.5 | 8 | 7.5 | 7 | 7.5 | 7 |
 | r6 | GPT-6.1 Sol | 7.5 | 8 | 8 | 8 | 7.5 | 7 | 7.5 | 7.5 | 8 | 7.5 | 7 | 7.5 | 7 |
 | r7 | GPT-6.1 Sol | 7.5 | 8 | 8 | 8 | 7.5 | 7.5 | 8 | 7.5 | 8 | 8 | 7 | 8 | 7 |
+| r7 | Claude Opus 5.5 (78 of 134 shots seen) | 8 | 7.5 | 8 | 7.5 | 8 | 8 | 8.5 | 7.5 | 8.5 | 7.5 | 8 | 8 | 7.5 |
+| r8 | GPT-6.1 Sol | 8 | 8 | 8 | 8.5 | 8 | 7 | 7.5 | 8 | 8.5 | 8 | 8 | 8 | 7 |
 
 ## Per-line minimum (lower of the two reviewers)
 

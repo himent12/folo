@@ -161,12 +161,12 @@
       <EmptyState
         icon={Box}
         title="No models yet"
-        description="A training run saves its best weights here when it finishes. You can also drop .folo files into the models directory of folo serve."
+        description="A training run saves its best weights here when it finishes."
       >
         {#snippet actions()}<Button variant="primary" icon={Plus} href={href('/runs/new')}>New run</Button>{/snippet}
       </EmptyState>
     {:else if models.data && shownCount === 0}
-      <EmptyState compact icon={Search} title="No models match" description="Try another dataset or search term.">
+      <EmptyState icon={Search} title="No models match" description="Try another dataset or search term.">
         {#snippet actions()}<Button size="sm" onclick={() => ((dsFilter = 'all'), (query = ''))}>Clear filters</Button>{/snippet}
       </EmptyState>
     {:else}

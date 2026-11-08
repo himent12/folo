@@ -131,7 +131,7 @@
             {#each [0, 1, 2, 3] as i (i)}<div class="rsk"><span class="rsk-name"><Skeleton w="60%" h="14px" /><Skeleton w="40%" h="10px" /></span><Skeleton w="64px" h="18px" r="var(--radius-full)" /><Skeleton h="4px" /><Skeleton w="40px" h="14px" /></div>{/each}
           </div>
         {:else if recent.length === 0}
-          <EmptyState compact icon={Activity} title="No runs yet" description="Runs you start appear here with their progress and best mAP." />
+          <EmptyState icon={Activity} title="No runs yet" description="Runs you start appear here with their progress and best mAP." />
         {:else}
           <div class="scroll">
             <table class="table">
@@ -178,7 +178,7 @@
         {:else if !models.data}
           <div class="list-sk">{#each [0, 1, 2] as i (i)}<Skeleton h="20px" />{/each}</div>
         {:else if topModels.length === 0}
-          <EmptyState compact icon={Box} title="No models yet" description="Finished runs save their best weights here." />
+          <EmptyState icon={Box} title="No models yet" description="Finished runs save their best weights here." />
         {:else}
           <ul class="models">
             {#each topModels as { m, ds } (m.id)}
@@ -206,7 +206,7 @@
         {:else if !datasets.data}
           <div class="list-sk">{#each [0, 1, 2] as i (i)}<Skeleton h="20px" />{/each}</div>
         {:else if datasets.data.length === 0}
-          <EmptyState compact icon={Images} title="No datasets registered" description="Register a YOLO or COCO folder, or generate a synthetic shapes set." />
+          <EmptyState icon={Images} title="No datasets registered" description="Register a YOLO or COCO folder, or generate a synthetic shapes set." />
         {:else}
           <ul class="dslist">
             {#each datasets.data.slice(0, 4) as d (d.id)}
@@ -385,9 +385,9 @@
   }
   .run-sub {
     display: block;
-    font-size: var(--type-xs-size);
+    font-size: var(--type-sm-size);
     color: var(--text-tertiary);
-    line-height: var(--type-xs-line);
+    line-height: var(--type-sm-line);
   }
   .table td {
     height: 48px;
@@ -399,7 +399,7 @@
     width: 120px;
   }
   .prog span {
-    font-size: var(--type-xs-size);
+    font-size: var(--type-sm-size);
     min-width: 46px;
     text-align: right;
   }
@@ -433,7 +433,7 @@
     color: var(--text-tertiary);
   }
   .m-sub {
-    font-size: var(--type-xs-size);
+    font-size: var(--type-sm-size);
     color: var(--text-tertiary);
   }
   .m-map {

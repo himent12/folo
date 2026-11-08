@@ -82,7 +82,7 @@
     border-top: 1px solid var(--line-subtle);
     border-radius: 0 0 var(--radius-lg) var(--radius-lg);
     font-family: var(--font-mono);
-    font-size: var(--type-xs-size);
+    font-size: var(--type-sm-size);
     line-height: 18px;
   }
   .log:focus-visible {
@@ -90,6 +90,7 @@
   }
   .line {
     display: flex;
+    align-items: baseline;
     gap: var(--space-3);
     padding: 0 var(--space-4);
   }
@@ -100,8 +101,10 @@
   .line:hover {
     background: var(--bg-hover);
   }
+  /* Timestamps are the one incidental part of a line: they keep the 11 px step. */
   .t {
     color: var(--text-tertiary);
+    font-size: var(--type-xs-size);
     flex-shrink: 0;
   }
   .lv {
