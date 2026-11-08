@@ -42,14 +42,11 @@ describe('prEnvelope', () => {
 });
 
 describe('classMetrics', () => {
-  it('lists all five metrics of a class in column order, formatted', () => {
+  it('reveals only precision and recall, which the narrow row has no column for, at 3 decimals', () => {
     const c = { class: 3, ap50: 0.8971, ap50_95: 0.678, precision: 0.9174, recall: 0.8449, instances: 2793 };
     expect(classMetrics(c)).toEqual([
-      { label: 'AP50', value: '0.897' },
-      { label: 'AP50-95', value: '0.678' },
       { label: 'Precision', value: '0.917' },
       { label: 'Recall', value: '0.845' },
-      { label: 'Instances', value: '2,793' },
     ]);
   });
 });

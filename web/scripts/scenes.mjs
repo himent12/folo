@@ -356,10 +356,92 @@ export const scenes = [
     name: 'model-export',
     path: '/models/m_shapes_s',
     fullPage: false,
+    setup: async (page, { vp }) => {
+      // Phones keep Export in the header's ⋯ menu.
+      if (vp === 'mobile') {
+        await until(page, 'button[aria-label="More model actions"]');
+        await page.locator('button[aria-label="More model actions"]').click();
+        await page.getByRole('menuitem', { name: 'Export' }).click();
+      } else {
+        await until(page, 'button:has-text("Export")');
+        await page.locator('button:has-text("Export")').first().click();
+      }
+      await until(page, 'dialog[open] fieldset');
+    },
+  },
+  {
+    // The f16 export finished: a Download button for the file, and where it sits on the server.
+    name: 'model-export-done',
+    path: '/models/m_shapes_s',
+    fullPage: false,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page, { vp }) => {
+      if (vp === 'mobile') {
+        await until(page, 'button[aria-label="More model actions"]');
+        await page.locator('button[aria-label="More model actions"]').click();
+        await page.getByRole('menuitem', { name: 'Export' }).click();
+      } else {
+        await until(page, 'button:has-text("Export")');
+        await page.locator('button:has-text("Export")').first().click();
+      }
+      await until(page, 'dialog[open] fieldset');
+      await page.locator('dialog[open] footer button:has-text("Export")').click();
+      await until(page, 'dialog[open] .where');
+    },
+  },
+  {
+    // ONNX has no download endpoint: the dialog says so next to the server path.
+    name: 'model-export-onnx',
+    path: '/models/m_shapes_s',
+    fullPage: false,
+    viewports: ['desktop'],
     setup: async (page) => {
       await until(page, 'button:has-text("Export")');
       await page.locator('button:has-text("Export")').first().click();
       await until(page, 'dialog[open] fieldset');
+      await page.locator('dialog[open] label:has-text("ONNX")').click();
+      await page.locator('dialog[open] footer button:has-text("Export")').click();
+      await until(page, 'dialog[open] .where');
+    },
+  },
+  {
+    // The metric help under the KPI strip (AP vs mAP, IoU, the precision / recall operating point), and the header's
+    // lineage: fasteners-n was fine-tuned from shapes-n. Phones: the summary line opened too.
+    name: 'model-metric-help',
+    path: '/models/m_fast_n',
+    fullPage: false,
+    viewports: ['desktop', 'laptop', 'mobile'],
+    setup: async (page, { vp }) => {
+      await until(page, '#pr svg');
+      if (vp === 'mobile') await page.locator('button.meta-line').click();
+      await page.getByRole('button', { name: 'What these metrics mean' }).click();
+      await page.clock.runFor(1500);
+    },
+  },
+  {
+    // Per-class rows trace curves: the hint above the table, two classes selected (bg.active + accent bar) and Clear.
+    name: 'model-classes-selected',
+    path: '/models/m_fast_n',
+    fullPage: true,
+    viewports: ['desktop', 'laptop'],
+    setup: async (page) => {
+      await until(page, '#cm .cell');
+      await page.locator('#pr button.cls').nth(1).click();
+      await page.locator('#pr button.cls').nth(4).click();
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // The engine benchmark with its "How this was measured" fold open.
+    name: 'models-engine-how',
+    path: '/models',
+    fullPage: true,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page) => {
+      await until(page, '#engine-speed');
+      const how = page.locator('#engine-speed summary', { hasText: 'How this was measured' });
+      if (!(await how.isVisible())) await page.locator('summary', { hasText: /Engine benchmarks/ }).first().click();
+      await how.click();
     },
   },
   { name: 'playground-empty', path: '/playground', setup: (page) => until(page, 'button.sample') },
