@@ -1220,6 +1220,9 @@ impl FoloApp {
 
     fn logs_panel(&mut self, r: &Run, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
+        // The scrollback is one Tab stop: arrows step a line, Page Up/Down a screen, Home/End the ends.
+        let log_fh = self.fh("log-scroll", cx);
+        let log_ring = self.ring(&log_fh, window);
         let body = match self.store.logs.get(&r.id) {
             Some(Load::Ready(lines)) => {
                 let start = lines.len().saturating_sub(300);
@@ -1231,6 +1234,24 @@ impl FoloApp {
                     .child(
                         div()
                             .id("log-scroll")
+                            .track_focus(&log_fh)
+                            .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _, cx| {
+                                let s = &this.log_scroll;
+                                let (y, max) = (-s.offset().y, s.max_offset().height);
+                                let page = (s.bounds().size.height - px(LOG_LINE)).max(px(LOG_LINE));
+                                let to = match ev.keystroke.key.as_str() {
+                                    "up" => y - px(LOG_LINE),
+                                    "down" => y + px(LOG_LINE),
+                                    "pageup" => y - page,
+                                    "pagedown" => y + page,
+                                    "home" => px(0.),
+                                    "end" => max,
+                                    _ => return,
+                                };
+                                s.set_offset(gpui::point(s.offset().x, -to.clamp(px(0.), max)));
+                                cx.stop_propagation();
+                                cx.notify();
+                            }))
                             .flex_1()
                             .h(px(372.))
                             .overflow_y_scroll()
@@ -1275,6 +1296,7 @@ impl FoloApp {
                         gpui::linear_color_stop(t.bg_inset, 0.),
                         gpui::linear_color_stop(crate::theme::alpha(t.bg_inset, 0.), 1.),
                     )))
+                    .when(log_ring, |d| d.child(crate::app::focus_ring(&t, radius::SM)))
                     .into_any_element()
             }
             Some(Load::Failed(e)) => div()
@@ -1417,6 +1439,9 @@ fn is_gpu_oom(message: &str) -> bool {
     let m = message.to_ascii_lowercase();
     m.contains("out of memory") || m.contains("outofmemory")
 }
+
+/// One log line with its padding: an arrow key's scroll step in the log.
+const LOG_LINE: f32 = 21.;
 
 #[cfg(test)]
 mod tests {
