@@ -695,9 +695,6 @@ impl FoloApp {
 
     fn top_models(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
-        // The column is 400 px wherever it sits beside Recent runs (and full width when stacked),
-        // so the architecture always fits.
-        let wide = true;
         let all = self.view_all("ov-models-all", Route::Models, window, cx);
         let header = panel_header(&t, "Best models")
             .child(div().flex().items_center().gap(px(8.)).child(caption(&t, "by mAP50-95")).child(all));
@@ -746,14 +743,15 @@ impl FoloApp {
                                     .truncate()
                                     .child(m.name.clone()),
                             )
-                            .child(div().flex_1().min_w_0().when(wide, |d| {
-                                // Architecture and size only: the parameter count didn't fit the column.
-                                d.child(text(ty::XS, t.text_tertiary).w(px(88.)).truncate().child(format!(
+                            // Architecture and size (400 px column at every width; the parameter
+                            // count didn't fit).
+                            .child(div().flex_1().min_w_0().child(
+                                text(ty::XS, t.text_tertiary).w(px(88.)).truncate().child(format!(
                                     "{} · {} px",
                                     m.arch.as_str(),
                                     m.imgsz
-                                )))
-                            }))
+                                )),
+                            ))
                             .child(bar_value(&t, map, f3(map), t.text_tertiary));
                         self.bind(
                             row,

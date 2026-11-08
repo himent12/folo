@@ -586,10 +586,12 @@ impl FoloApp {
             })
             .collect();
         let hover = self.pr_hover;
-        let at_cursor = |class: u32| {
-            let pts = &curves.iter().find(|(c, _)| *c == class)?.1;
-            hover.and_then(|_| crate::charts::value_at(pts, hover, 0., 1.))
-        };
+        // Precision at the inspected recall, only where a class's curve reaches (the same 6 %
+        // tolerance as the cursor dots); nothing while the cursor is away.
+        let at_cursor: std::collections::HashMap<u32, f32> = hover.map_or_else(Default::default, |hx| {
+            curves.iter().filter_map(|(c, pts)| Some((*c, crate::charts::value_near(pts, hx, 1.)?))).collect()
+        });
+        let at_cursor = |class: u32| at_cursor.get(&class).copied();
         let series: Vec<Series> = ev
             .pr
             .iter()
@@ -1008,9 +1010,14 @@ impl FoloApp {
                             .child(swatch(color, 8.))
                             .child(
                                 text(ty::BASE, t.text_primary)
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
                                     .child(m.classes.get(c.class as usize).cloned().unwrap_or_default()),
                             )
-                            .when(pinned, |d| d.child(text(ty::XS, t.text_tertiary).child("pinned"))),
+                            .when(pinned, |d| {
+                                d.child(text(ty::XS, t.text_tertiary).flex_none().child("pinned"))
+                            }),
                     )
                     .child(div().flex_1().min_w_0().child(bar_value(&t, c.map50, f3(c.map50), color)))
                     .child(div().flex_1().min_w_0().child(bar_value(&t, c.map50_95, f3(c.map50_95), color)))

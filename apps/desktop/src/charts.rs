@@ -544,6 +544,13 @@ fn ease_out(p: f32) -> f32 {
     1. - (1. - p.clamp(0., 1.)).powi(3)
 }
 
+/// The y at `x` if the series has a point within 6 % of `span` of it (the cursor-dot rule), else
+/// None: past a curve's end there is no value to show.
+pub fn value_near(points: &[(f32, f32)], x: f32, span: f32) -> Option<f32> {
+    let (px_, py) = points[nearest(points, x)?];
+    ((px_ - x).abs() <= span * 0.06).then_some(py)
+}
+
 /// Index of the point nearest to `x` in a sorted series.
 /// The value a legend shows: at the shared cursor when there is one, else the latest point.
 pub fn value_at(points: &[(f32, f32)], hover: Option<f32>, x0: f32, x1: f32) -> Option<f32> {
@@ -1425,6 +1432,13 @@ mod tests {
         let mid = t0 + std::time::Duration::from_millis(100);
         assert!(ease_frame(&id, names(2), &[pts(11), pts(11)], mid, true).is_none());
         assert!(ease_frame(&id, names(2), &[pts(11), pts(11)], mid, false).is_none());
+    }
+
+    #[test]
+    fn no_value_past_a_curves_end() {
+        let pts = [(0.0, 1.0), (0.2, 0.9), (0.4, 0.5)];
+        assert_eq!(value_near(&pts, 0.41, 1.), Some(0.5));
+        assert_eq!(value_near(&pts, 0.9, 1.), None);
     }
 
     #[test]
