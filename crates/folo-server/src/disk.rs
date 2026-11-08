@@ -88,40 +88,71 @@ fn unquote(s: &str) -> String {
 /// opens a scalar at a token boundary (line start, or after `:`, `-`, `[`, `{`, `,` and whitespace), so the
 /// apostrophe in `person's` is plain text; `\"` inside double quotes does not close them.
 fn strip_comment(line: &str) -> &str {
+    for (i, c) in unquoted_chars(line) {
+        if c == '#' && line[..i].chars().next_back().is_none_or(char::is_whitespace) {
+            return &line[..i];
+        }
+    }
+    line
+}
+
+/// The characters of `s` (with byte offsets) that are outside quoted scalars. A quote opens a scalar only at a
+/// token boundary (start, or after `:` `-` `[` `{` `,` and whitespace); inside double quotes `\x` is an escape,
+/// inside single quotes `''` is a literal quote.
+fn unquoted_chars(s: &str) -> Vec<(usize, char)> {
+    let mut out = Vec::new();
     let mut quote: Option<char> = None;
     let mut escaped = false;
-    let mut prev: Option<char> = None;
     let mut boundary = true;
-    for (i, c) in line.char_indices() {
+    let mut it = s.char_indices().peekable();
+    while let Some((i, c)) = it.next() {
         if let Some(q) = quote {
             if escaped {
                 escaped = false;
             } else if q == '"' && c == '\\' {
                 escaped = true;
             } else if c == q {
-                quote = None;
+                if q == '\'' && it.peek().is_some_and(|&(_, n)| n == '\'') {
+                    it.next();
+                } else {
+                    quote = None;
+                    boundary = false;
+                }
             }
-        } else {
-            match c {
-                '#' if prev.is_none_or(char::is_whitespace) => return &line[..i],
-                '"' | '\'' if boundary => quote = Some(c),
-                _ => {}
-            }
-            boundary = match c {
-                ':' | '-' | '[' | '{' | ',' => true,
-                c if c.is_whitespace() => boundary,
-                _ => false,
-            };
+            continue;
         }
-        prev = Some(c);
+        if matches!(c, '"' | '\'') && boundary {
+            quote = Some(c);
+            continue;
+        }
+        out.push((i, c));
+        boundary = matches!(c, ':' | '-' | '[' | '{' | ',') || (c.is_whitespace() && boundary);
     }
-    line
+    out
 }
 
-/// `{0: a, 1: b}` → index / name pairs.
+/// Splits the inside of a flow collection (`body` starts right after `[` or `{`) at top-level commas, up to the
+/// closing `close` bracket; quoted commas and brackets are part of their scalar.
+fn split_flow(body: &str, close: char) -> Vec<&str> {
+    let mut items = Vec::new();
+    let mut start = 0;
+    for (i, c) in unquoted_chars(body) {
+        if c == ',' || c == close {
+            items.push(&body[start..i]);
+            start = i + 1;
+            if c == close {
+                return items.into_iter().filter(|s| !s.trim().is_empty()).collect();
+            }
+        }
+    }
+    items.push(&body[start..]);
+    items.into_iter().filter(|s| !s.trim().is_empty()).collect()
+}
+
+/// `{0: a, 1: b}` (the part after `{`) → index / name pairs.
 fn flow_map(body: &str) -> Vec<(Option<usize>, String)> {
-    body.split(',')
-        .filter(|kv| !kv.trim().is_empty())
+    split_flow(body, '}')
+        .into_iter()
         .map(|kv| match kv.split_once(':') {
             Some((k, v)) => (k.trim().parse().ok(), unquote(v)),
             None => (None, unquote(kv)),
@@ -162,10 +193,9 @@ pub fn parse_data_yaml(text: &str) -> Result<DataYaml, String> {
             "nc" => y.nc = value.parse().ok(),
             "names" => {
                 if let Some(list) = value.strip_prefix('[') {
-                    let list = list.split(']').next().unwrap_or("");
-                    y.names = list.split(',').map(unquote).filter(|s| !s.is_empty()).collect();
+                    y.names = split_flow(list, ']').into_iter().map(unquote).collect();
                 } else if let Some(map) = value.strip_prefix('{') {
-                    indexed = flow_map(map.split('}').next().unwrap_or(""));
+                    indexed = flow_map(map);
                 } else if value.is_empty() {
                     in_names = true;
                 }
@@ -549,6 +579,12 @@ mod tests {
         assert!(parse_data_yaml("names: {0: cat, 2: dog}\n").unwrap_err().contains("gap"));
         assert!(parse_data_yaml("names:\n  0: cat\n  2: dog\n").unwrap_err().contains("gap"));
         assert!(parse_data_yaml("names:\n  0: cat\n  0: dog\n").unwrap_err().contains("twice"));
+        // Doubled single quotes stay inside the scalar, so a `#` after them is not a comment.
+        assert_eq!(p("names:\n  0: 'it''s # fine' # comment\n").names, vec!["it's # fine"]);
+        // Quoted commas and brackets in flow collections belong to their scalar.
+        assert_eq!(p("names: {0: \"cat,dog\", 1: bird}\n").names, vec!["cat,dog", "bird"]);
+        assert_eq!(p("names: {0: \"cat}dog\", 1: bird}\n").names, vec!["cat}dog", "bird"]);
+        assert_eq!(p("names: ['a,b', \"c]d\", e] # x\n").names, vec!["a,b", "c]d", "e"]);
     }
 
     #[test]

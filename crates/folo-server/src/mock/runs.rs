@@ -613,17 +613,20 @@ impl SimRun {
     /// simulated times they happened at.
     pub fn logs(&self) -> Vec<LogLine> {
         let snap = self.snap();
-        let Some(started) = snap.started else { return Vec::new() };
         let per_epoch = match &self.timeline {
             Timeline::Static { .. } => self.curve.real_epoch_s(),
             Timeline::Live(c) => c.lock().unwrap().epoch_s,
         };
         let line = |t: f64, (level, message): (LogLevel, String)| LogLine { t: rfc3339(t), level, message };
-        let mut out = vec![line(started, self.msg_start())];
-        for e in 1..=self.epochs_done(&snap) {
-            let t = started + e as f64 * per_epoch;
-            let ep = self.curve.epoch(e, self.epoch_duration(e));
-            out.extend(self.msg_epoch(&ep).into_iter().map(|m| line(t, m)));
+        let mut out = Vec::new();
+        // Training lines only exist once it started; a stop (even while queued) and the end are logged regardless.
+        if let Some(started) = snap.started {
+            out.push(line(started, self.msg_start()));
+            for e in 1..=self.epochs_done(&snap) {
+                let t = started + e as f64 * per_epoch;
+                let ep = self.curve.epoch(e, self.epoch_duration(e));
+                out.extend(self.msg_epoch(&ep).into_iter().map(|m| line(t, m)));
+            }
         }
         if let Some(t) = snap.stop_requested {
             out.push(line(t, Self::msg_stopping()));

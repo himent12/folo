@@ -357,15 +357,85 @@ impl EvalBasis {
             confusion[c][n] = (total as u32).saturating_sub(assigned);
         }
         for (j, m) in self.per_class.iter().enumerate() {
-            // precision = tp / (all predictions of j): the rest of the predictions are background.
-            let predicted: u32 = (0..n).map(|c| confusion[c][j]).sum();
-            let p = m.precision.clamp(0.05, 1.0);
-            let fp_total = (predicted as f32 / p - predicted as f32).round() as u32;
+            // precision = tp / column total, so the column holds tp / p predictions: tp, the confusions from other
+            // classes, and false positives on background. Confusions beyond that budget move back to "missed".
             let tp = confusion[j][j];
-            let from_others = predicted - tp;
-            confusion[n][j] = fp_total.saturating_sub(from_others);
+            let p = m.precision.clamp(0.05, 1.0);
+            let budget = ((tp as f32 / p).round() as u32).saturating_sub(tp);
+            let from_others: u32 = (0..n).filter(|&c| c != j).map(|c| confusion[c][j]).sum();
+            if from_others > budget {
+                let mut excess = from_others - budget;
+                for c in (0..n).filter(|&c| c != j) {
+                    let take = confusion[c][j].min(excess);
+                    confusion[c][j] -= take;
+                    confusion[c][n] += take;
+                    excess -= take;
+                }
+            }
+            let from_others: u32 = (0..n).filter(|&c| c != j).map(|c| confusion[c][j]).sum();
+            confusion[n][j] = budget - from_others;
+        }
+        // Report the precision / recall the matrix actually implies, so every view of the eval agrees.
+        for (c, m) in per_class.iter_mut().enumerate() {
+            let row: u32 = confusion[c].iter().sum();
+            let col: u32 = (0..=n).map(|r| confusion[r][c]).sum();
+            if row > 0 {
+                m.recall = runs::r4(confusion[c][c] as f32 / row as f32);
+            }
+            if col > 0 {
+                m.precision = runs::r4(confusion[c][c] as f32 / col as f32);
+            }
         }
         ModelEval { pr, confusion, per_class, images: self.images }
+    }
+}
+
+#[cfg(test)]
+mod eval_tests {
+    use super::*;
+
+    fn basis(per_class: &[(f32, f32)], counts: &[u64]) -> EvalBasis {
+        let per_class = per_class
+            .iter()
+            .enumerate()
+            .map(|(c, &(precision, recall))| ClassMetrics {
+                class: c as u32,
+                map50: 0.7,
+                map50_95: 0.5,
+                precision,
+                recall,
+            })
+            .collect();
+        EvalBasis { per_class, counts: counts.to_vec(), images: 10, seed: 1 }
+    }
+
+    /// Row sums equal instance counts and `per_class` precision / recall match the matrix.
+    fn check(b: &EvalBasis) {
+        let ev = b.eval();
+        let n = b.per_class.len();
+        for c in 0..n {
+            assert_eq!(ev.confusion[c].iter().map(|&v| v as u64).sum::<u64>(), b.counts[c], "row {c}");
+            let row: u32 = ev.confusion[c].iter().sum();
+            let col: u32 = (0..=n).map(|r| ev.confusion[r][c]).sum();
+            let tp = ev.confusion[c][c] as f32;
+            if row > 0 {
+                assert!((ev.per_class[c].recall - tp / row as f32).abs() < 1e-3);
+            }
+            if col > 0 {
+                assert!((ev.per_class[c].precision - tp / col as f32).abs() < 1e-3);
+            }
+        }
+        assert_eq!(ev.confusion[n][n], 0);
+    }
+
+    #[test]
+    fn confusion_is_consistent() {
+        // Balanced, imbalanced (a rare class that receives many confusions), zero-count and single-class cases.
+        check(&basis(&[(0.9, 0.85), (0.8, 0.7), (0.7, 0.6)], &[400, 380, 390]));
+        check(&basis(&[(0.6, 0.4), (0.95, 0.9), (0.5, 0.3)], &[5000, 3, 1200]));
+        check(&basis(&[(0.9, 0.8), (0.9, 0.8)], &[100, 0]));
+        check(&basis(&[(0.05, 0.02)], &[50]));
+        check(&basis(&[(1.0, 1.0), (0.01, 0.01)], &[1, 1]));
     }
 }
 

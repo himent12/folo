@@ -847,3 +847,40 @@ async fn run_logs_history() {
         .await;
     err(&app, get("/api/runs/run_none/logs"), StatusCode::NOT_FOUND, "run_not_found").await;
 }
+
+#[tokio::test]
+async fn logs_of_a_run_stopped_while_queued_match_sse() {
+    let (server, _) = mock();
+    let app = server.router();
+    let ds: DatasetList = ok(&app, get("/api/datasets")).await;
+    let run: Run = ok(&app, post_json("/api/runs", json!({ "dataset_id": ds.datasets[0].id }))).await;
+    let res = app.clone().oneshot(get(&format!("/api/runs/{}/events", run.id))).await.unwrap();
+    let mut body = res.into_body();
+    let stop = Request::post(format!("/api/runs/{}/stop", run.id)).body(Body::empty()).unwrap();
+    let r: Run = ok(&app, stop).await;
+    assert_eq!(r.status, RunStatus::Stopping);
+    // Collect SSE log lines until the final `stopped` status.
+    let mut sse_logs = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(6);
+    'outer: loop {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let evs = read_events(&mut body, 1, left).await;
+        assert!(!evs.is_empty(), "no stopped status; logs so far {sse_logs:?}");
+        for (name, data) in evs {
+            match name.as_str() {
+                "log" => sse_logs.push(serde_json::from_str::<LogLine>(&data).unwrap().message),
+                "status"
+                    if serde_json::from_str::<StatusEvent>(&data).unwrap().status == RunStatus::Stopped =>
+                {
+                    break 'outer;
+                }
+                _ => {}
+            }
+        }
+    }
+    let hist: RunLogs = ok(&app, get(&format!("/api/runs/{}/logs", run.id))).await;
+    let hist: Vec<String> = hist.lines.into_iter().map(|l| l.message).collect();
+    assert_eq!(hist.len(), 2, "{hist:?}");
+    assert!(hist[0].starts_with("stop requested") && hist[1].starts_with("stopped at step 0"));
+    assert_eq!(hist, sse_logs, "history matches what the stream sent");
+}
