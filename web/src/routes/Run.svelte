@@ -15,7 +15,7 @@
   import { hub } from '$lib/api/index.svelte';
   import { LiveRun } from '$lib/api/live.svelte';
   import { Resource } from '$lib/api/resource.svelte';
-  import { ago, duration, metric } from '$lib/format';
+  import { ago, duration, eta, metric } from '$lib/format';
   import { href, router } from '$lib/router.svelte';
   import { setCrumbs } from '$lib/shell/crumbs.svelte';
   import Page from '$lib/shell/Page.svelte';
@@ -220,7 +220,7 @@
         <h2>Queued{#if ahead}<span class="faint">&nbsp;· next in line</span>{/if}</h2>
         <p>
           {#if ahead}
-            Starts when <a class="link" href={href(`/runs/${ahead.id}`)}>{ahead.name}</a> finishes{#if ahead.eta_s !== null}, in about {duration(ahead.eta_s)}{/if}.
+            Starts when <a class="link" href={href(`/runs/${ahead.id}`)}>{ahead.name}</a> finishes{#if ahead.eta_s !== null}, in about {eta(ahead.eta_s)}{/if}.
           {:else}
             Waiting for the device. It starts as soon as it is free.
           {/if}

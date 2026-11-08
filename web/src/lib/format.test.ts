@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ago, bytes, compact, duration, lr, metric, ms, pct } from './format';
+import { ago, bytes, compact, duration, eta, lr, metric, ms, pct } from './format';
 
 describe('format', () => {
   it('formats metrics and percents', () => {
@@ -36,5 +36,17 @@ describe('format', () => {
     expect(ago('2026-11-08T12:30:00Z', now)).toBe('2h ago');
     expect(ago('2026-11-07T10:00:00Z', now)).toBe('yesterday');
     expect(ago('2026-11-03T14:30:00Z', now)).toBe('5d ago');
+  });
+});
+
+describe('eta', () => {
+  it('shows seconds under two minutes, then whole minutes rounded up', () => {
+    expect(eta(45)).toBe('45s');
+    expect(eta(119)).toBe('1m 59s');
+    expect(eta(373)).toBe('7m');
+    expect(eta(376)).toBe('7m');
+    expect(eta(3600)).toBe('1h 00m');
+    expect(eta(3661)).toBe('1h 02m');
+    expect(eta(null)).toBe('—');
   });
 });

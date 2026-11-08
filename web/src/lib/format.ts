@@ -68,6 +68,18 @@ export function duration(s: number | null | undefined): string {
   return `${sec}s`;
 }
 
+/**
+ * Time left (an estimate): to the second under two minutes, then whole minutes rounded up. Estimates taken a moment
+ * apart (the sidebar's poll, the run's stream) then read the same, and the figure does not flicker every step.
+ */
+export function eta(s: number | null | undefined): string {
+  if (!ok(s)) return '—';
+  const t = Math.max(0, Math.round(s));
+  if (t < 120) return duration(t);
+  const m = Math.ceil(t / 60);
+  return m < 60 ? `${m}m` : `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m`;
+}
+
 /** Milliseconds with sensible precision: 3.14159 → "3.14 ms", 12.34 → "12.3 ms". */
 export function ms(x: number | null | undefined): string {
   if (!ok(x)) return '—';
