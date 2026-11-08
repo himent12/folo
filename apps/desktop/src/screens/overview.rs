@@ -1019,9 +1019,17 @@ impl FoloApp {
             .flex_col()
             .gap(px(10.))
             .child(text(ty::BASE, t.text_primary).font_weight(FontWeight::MEDIUM).child("Or from a terminal"))
-            .child(cmd("folo dataset synth shapes --images 1000", "a synthetic dataset to try"))
-            .child(cmd("folo train --data shapes --epochs 50", "train; this app shows it live once served"))
-            .child(cmd("folo serve --data-dir ~/.folo", "the server this app connects to"));
+            // Honest about what reaches this app: the server and the datasets registered with it;
+            // `folo train` runs on its own (runs/ in the working folder).
+            .child(cmd("folo serve", "start the server this app connects to"))
+            .child(cmd(
+                "folo dataset synth shapes --images 1000",
+                "then Add dataset and pick the shapes folder",
+            ))
+            .child(cmd(
+                "folo train --data shapes --epochs 50",
+                "or train in the terminal, separate from this app",
+            ));
         div().flex().flex_col().gap(px(16.)).child(steps).child(terminal).into_any_element()
     }
 

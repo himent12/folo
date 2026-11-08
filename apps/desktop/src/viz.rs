@@ -200,7 +200,7 @@ pub fn paint_image_with_boxes(
                         (color, chip_text)
                     };
                     let score = b.score.map(|s| format!("{s:.2}")).unwrap_or_default();
-                    let name_line = window.text_system().shape_line(
+                    let mut name_line = window.text_system().shape_line(
                         name.clone(),
                         px(fs),
                         &[run(&name, SANS, FontWeight::MEDIUM, ink)],
@@ -212,6 +212,20 @@ pub fn paint_image_with_boxes(
                         &[run(&score, SANS, FontWeight::NORMAL, ink)],
                         None,
                     );
+                    // A name too long for the view gives way, so the score is never clipped.
+                    let mut name = name;
+                    if !score.is_empty()
+                        && !name.is_empty()
+                        && name_line.width + px(5.) + score_line.width + px(10.) > bounds.size.width - px(4.)
+                    {
+                        name = Default::default();
+                        name_line = window.text_system().shape_line(
+                            name.clone(),
+                            px(fs),
+                            &[run("", SANS, FontWeight::MEDIUM, ink)],
+                            None,
+                        );
+                    }
                     let gap = if score.is_empty() || name.is_empty() { px(0.) } else { px(5.) };
                     let cw = name_line.width + gap + score_line.width + px(10.);
                     let ch = px(if compact { 14. } else { 16. });
