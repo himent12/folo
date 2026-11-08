@@ -198,8 +198,8 @@ describe('New run: short runs', () => {
 describe('New run: image size', () => {
   it("defaults to a small dataset's own size when every training image shares it", async () => {
     const real = api.datasetImages.bind(api);
-    vi.spyOn(api, 'datasetImages').mockImplementation(async (id, q, s) => {
-      const r = await real(id, q, s);
+    vi.spyOn(api, 'datasetImages').mockImplementation(async (id, q) => {
+      const r = await real(id, q);
       return { ...r, images: r.images.map((i) => ({ ...i, width: 320, height: 320 })) };
     });
     await open('?dataset=ds_shapes');

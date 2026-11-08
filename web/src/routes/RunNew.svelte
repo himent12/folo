@@ -576,7 +576,10 @@
           </div>
           <!-- Phones: the rows have no room for the notes, so the chosen size's purpose sits under them. -->
           <p class="a-sel"><span class="mono">{arch}</span> {archNote}</p>
-          <p class="ref">Latency is measured end to end on an RTX 4080 SUPER: one decoded 640 px image in, boxes out, NMS included (fp32).</p>
+          <p class="ref">
+            Latency is measured end to end on an RTX 4080 SUPER: one decoded 640 px image in, boxes out, NMS included (fp32).
+            <span class="nm-note">Sizes with a dash are not measured yet.</span>
+          </p>
           <div class="row2">
             <Field label="Start from" for="weights" hint="Fine-tuning from a trained model converges much faster.">
               <Select
@@ -878,13 +881,15 @@
   .c-meta > span {
     white-space: nowrap;
   }
-  .nm-short {
+  .nm-short,
+  .nm-note {
     display: none;
   }
-  /* Model sizes: single-line rows (letter, name, note, the three specs, the check) on one grid with their header. */
+  /* Model sizes: single-line rows (letter, name, note, the three specs, the check) on one grid with their header.
+     A subgrid's edge tracks hold its border and padding, so the first and last are 12 + 1 px wider than their content. */
   .arches {
     display: grid;
-    grid-template-columns: 16px auto minmax(0, 1fr) repeat(2, 64px) 88px 14px;
+    grid-template-columns: 28px auto minmax(0, 1fr) repeat(2, 64px) 88px 28px;
     column-gap: var(--space-3);
     row-gap: var(--space-1);
   }
@@ -1431,6 +1436,17 @@
     .layout {
       grid-template-columns: minmax(0, 1fr) 300px;
     }
+    /* The notes keep their room: an unmeasured latency is a dash, explained under the rows. */
+    .arches {
+      grid-template-columns: 28px auto minmax(0, 1fr) repeat(3, 64px) 28px;
+    }
+    .nm-long {
+      display: none;
+    }
+    .nm-short,
+    .nm-note {
+      display: inline;
+    }
     /* The preview takes a little more of the narrower form, so its frames stay large enough to read. */
     .aug {
       grid-template-columns: minmax(0, 5fr) minmax(0, 6fr);
@@ -1580,7 +1596,7 @@
     }
     /* Model rows: the note gives way (it sits under the rows) so the three specs keep their columns; 44 px rows. */
     .arches {
-      grid-template-columns: 16px minmax(0, 1fr) repeat(3, 52px) 14px;
+      grid-template-columns: 28px minmax(0, 1fr) repeat(3, 52px) 28px;
       column-gap: var(--space-2);
     }
     .a-head-lead {
@@ -1591,12 +1607,6 @@
     }
     .a-note {
       display: none;
-    }
-    .nm-long {
-      display: none;
-    }
-    .nm-short {
-      display: inline;
     }
     .a-sel {
       display: block;
