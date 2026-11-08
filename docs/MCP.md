@@ -10,15 +10,22 @@ scraping. It exposes the same operations as the CLI and `docs/API.md`, with the 
 ```
 
 ## Protocol
-- **Revisions.** The server supports MCP revision **2026-07-28** and the previous stable revision **2025-11-25**, and
-  negotiates per the spec: the client's discovery or handshake (`server/discover` in 2026-07-28, `initialize` in
-  2025-11-25) selects the revision. Use the official Rust SDK (`rmcp`), pinned in Cargo.toml. If the SDK lacks one of
-  these revisions, implement the one it supports and document that here. Never claim a revision the server does not pass
-  the tests for.
+- **Revisions.** The server supports MCP **2026-07-28** and the previous stable revision **2025-11-25**. The two
+  wire contracts differ, and both are implemented as the spec defines them:
+  - *2026-07-28*: there is no connection-wide negotiation. Every request carries its protocol version and client
+    capabilities in its metadata; `server/discover` is optional, and clients may call tools directly. Requests with an
+    unsupported version get the spec's unsupported-version error. Resource subscriptions use `subscriptions/listen`
+    (acknowledged, with update notifications correlated by subscription id).
+  - *2025-11-25*: the `initialize` handshake fixes the revision for the connection; subscriptions use
+    `resources/subscribe` / `resources/unsubscribe` with `notifications/resources/updated`.
+  Use the official Rust SDK (`rmcp`), pinned in Cargo.toml. If the SDK lacks one of these revisions, implement the one it
+  supports and say so here. Never claim a revision the server does not pass the tests for.
 - **Capabilities.** `tools` (with `listChanged: false`), `resources` (with subscriptions), `prompts`, and `logging`.
 - **stdio framing.** UTF-8, one JSON-RPC message per line (newline-delimited, never pretty-printed), writes serialised
   through a single writer so concurrent responses and notifications never interleave. **stdout carries protocol messages
-  only.** Every log line, including from embedded training, goes to stderr (or to MCP `logging` notifications).
+  only.** Background work (training after `train` has returned) logs to stderr and to the run's persisted log
+  (`run_status.log`). MCP logging notifications are only used for messages scoped to an in-flight request, per the rules
+  of the negotiated revision.
 - **Progress.** Only when the request carries `_meta.progressToken`: the server echoes it in
   `notifications/progress`, with monotonically increasing `progress` (and `total` when known), at most ~4 per second,
   and stops when the request completes. `val`, `predict_batch` and `create_synthetic_dataset` report progress. `train`
@@ -31,11 +38,12 @@ HTTP API (`schemars`), so `folo describe --json` prints identical schemas, and d
 meanings.
 - **Success:** `structuredContent` validates against the tool's `outputSchema`, plus one short `text` content item
   summarising it (one or two lines, for transcripts).
-- **Tool failure** (bad input values, missing dataset, GPU unavailable, ...): a normal result with `isError: true`, no
+- **Tool failure** (tool arguments that fail the `inputSchema` (missing or wrongly typed fields), bad values, missing
+  dataset, GPU unavailable, ...): a normal result with `isError: true`, no
   `structuredContent`, and a single `text` item containing the JSON error object
   `{ "code": "dataset_not_found", "message": "...", "hint": "..." }`. Codes are the ones in docs/CLI.md.
-- **Protocol errors** (unknown tool, malformed JSON-RPC, schema-invalid arguments the SDK rejects): JSON-RPC errors per
-  the spec, never `isError` results.
+- **Protocol errors** (malformed JSON-RPC, a malformed `tools/call` envelope, unknown tool or method, unsupported
+  protocol version): JSON-RPC errors per the spec, never `isError` results.
 - Resource reads for unknown URIs return the spec's resource-not-found JSON-RPC error.
 
 ## Paging and size limits
@@ -43,8 +51,12 @@ meanings.
   `{ items: [...], next_cursor: string | null, total: integer }`.
 - List items are **summaries** (id, name, status and key numbers). Detail comes from the matching `get`/status tool
   or resource.
-- No tool result exceeds ~32 KB of JSON. Anything bigger (per-image predictions for a batch, full metric histories,
-  sample grids) is written as a resource and returned as a `resource_link` content item with its URI.
+- No tool result exceeds ~32 KB of JSON, and every result still validates against its `outputSchema`. Limits are
+  part of each schema: list pages shrink below `limit` to fit (the `next_cursor` continues from the last item
+  returned), `predict` returns at most `max_det` boxes, `get_dataset` caps `issues` at 50 (with `issues_total`), and
+  `predict_batch` always returns summaries plus a resource link. Bulk data with no bounded inline form (per-image
+  batch predictions, full metric histories, sample grids) exists only as resources, and the outputs that refer to it
+  carry a `details_uri` field plus a `resource_link` content item.
 
 ## Tools
 | tool | input | output (`structuredContent`) |
@@ -52,11 +64,11 @@ meanings.
 | `folo_info` | `{}` | version, devices (CPU, GPUs with backend and memory), data dir, read-only flag, model scales with params / GFLOPs |
 | `list_datasets` | paging | page of `{ id, name, format, classes, splits }` |
 | `get_dataset` | `{ dataset_id }` | `Dataset` with `stats`, plus `issues: [{ kind, file, message }]` (first 50, with `issues_total`) |
-| `list_dataset_images` | `{ dataset_id, split?: "train"\|"val"\|"test", class?: integer }` + paging | page of `{ image_id, file, split, width, height, boxes? }` (`boxes` only with `include_boxes: true`) |
+| `list_dataset_images` | `{ dataset_id, split?: "train"\|"val"\|"test", class?: integer, include_boxes?: boolean (default false) }` + paging | page of `{ image_id, file, split, width, height, boxes? }` (`boxes` only with `include_boxes: true`) |
 | `register_dataset` | `{ name, path, format?: "auto"\|"yolo"\|"coco" }` | `Dataset` |
 | `create_synthetic_dataset` | `{ name, images?: 1000 (max 100000), classes?: string[], imgsz?: 640, seed?: 0 }` | `Dataset` |
 | `list_models` | paging | page of `{ id, name, arch, imgsz, classes, metrics }` |
-| `train` | `TrainConfig` (docs/API.md) | `{ run_id, status }` |
+| `train` | `TrainConfig` (docs/API.md), plus optional `resume_run_id` | `{ run_id, status }` |
 | `run_status` | `{ run_id, log_lines?: 20 (max 200) }` | `Run`, plus `last_step`, `last_epoch` and the last `log_lines` log lines |
 | `list_runs` | `{ status?: string }` + paging | page of `Run` summaries |
 | `stop_run` | `{ run_id }` | `Run` |
@@ -109,18 +121,20 @@ In read-only mode, `train_on_folder` is not listed.
 - **Embedded mode** (default): runs execute inside the `folo mcp` process. Run state is persisted under
   `--data-dir/runs/<id>/` (config, metrics, checkpoints at every epoch). When the MCP client disconnects or the process
   receives a shutdown signal, running jobs are stopped gracefully: the current epoch is abandoned, the last checkpoint
-  is kept, and the status becomes `stopped`. On the next start, persisted runs are listed again, and `train` with
-  `weights` set to a checkpoint resumes. Cancelling the `train` request itself (MCP cancellation) after it has returned
+  is kept, and the status becomes `stopped`. On the next start, persisted runs are listed again. `train` with
+  `resume_run_id` resumes that run from its `last` checkpoint, with the full state of docs/FORMAT.md (epoch, optimizer,
+  scheduler, EMA, RNG): same run id, and the other TrainConfig fields must match or be omitted. `train` with
+  `weights: <model_id>` instead starts a **new** run initialised from those weights (no optimizer state). Cancelling the `train` request itself (MCP cancellation) after it has returned
   has no effect on the run. Use `stop_run`.
 - **Proxy mode** (`folo mcp --server http://127.0.0.1:7878`): every tool maps to the HTTP API of a running
   `folo serve`, so Studio and the agent share runs that outlive the MCP process:
   `list_*`/`get_dataset` → `GET` list/detail endpoints (paging is applied by the MCP layer), `list_dataset_images` →
-  `GET /api/datasets/{id}/images`, `train` → `POST /api/runs`, `run_status` → `GET /api/runs/{id}` (plus the server's
-  log history), `stop_run` → `POST /api/runs/{id}/stop`, `predict` → `POST /api/predict` (local `image_path` files are
+  `GET /api/datasets/{id}/images`, `train` → `POST /api/runs`, `run_status` → `GET /api/runs/{id}`, `stop_run` → `POST /api/runs/{id}/stop`, `predict` → `POST /api/predict` (local `image_path` files are
   read by the MCP process and uploaded as multipart), `export` → `POST /api/models/{id}/export`. `val`, `predict_batch`
   and `compare_runs` need server endpoints that docs/API.md does not have yet (`POST /api/val`,
-  `POST /api/predict/batch`, a run log history endpoint). Until they exist, those tools return `not_implemented` in
-  proxy mode, and the PR that implements proxy mode adds them to docs/API.md.
+  `POST /api/predict/batch`, `GET /api/runs/{id}/logs`). Until they exist, those tools return `not_implemented` in
+  proxy mode, and `run_status` returns `log: null` with `log_unavailable: true` (never a misleading empty list). The
+  PR that implements proxy mode adds these endpoints to docs/API.md.
 
 ## Example agent session
 ```
@@ -132,7 +146,8 @@ In read-only mode, `train_on_folder` is not listed.
 ```
 
 ## Tests
-An integration test spawns `folo mcp` and, for **each supported revision**, runs the handshake/discovery, `tools/list`
+An integration test spawns `folo mcp` and, for **each supported revision**, runs the handshake or discovery (plus,
+for 2026-07-28, a direct tool call without discovery and an unsupported-version request), both subscription flows, `tools/list`
 (checking the schemas), `resources/list`, `prompts/list`, a `create_synthetic_dataset` → `train` (2 epochs on a tiny
 set) → subscribe / `run_status` → `predict` flow, an `isError` case, a JSON-RPC error case, and a read-only-mode
 dispatch rejection. It asserts that nothing but valid JSON-RPC lines appears on stdout.
