@@ -91,3 +91,21 @@ export async function loadIssues(
   list.sort((a, b) => (a.file === b.file ? (a.line ?? 0) - (b.line ?? 0) : a.file < b.file ? -1 : 1));
   return out;
 }
+
+const NOUN: Record<IssueSeverity, [string, string]> = { error: ['error', 'errors'], warning: ['warning', 'warnings'], info: ['note', 'notes'] };
+const MEANS: Record<IssueSeverity, string> = {
+  error: 'these files are left out of training until fixed',
+  warning: 'training still uses these files',
+  info: 'nothing to fix',
+};
+
+/**
+ * The line above the issue list, saying exactly what its rows are: "3 warnings: training still uses these files",
+ * "2 clipped box warnings: …" with a kind picked. Null when there are none (the list says so itself).
+ */
+export function issueCaption(severity: IssueSeverity, total: number, kind?: IssueKind): string | null {
+  if (total <= 0) return null;
+  const noun = NOUN[severity][total === 1 ? 0 : 1];
+  const what = kind ? `${KIND_LABEL[kind].toLowerCase()} ${noun}` : noun;
+  return `${total.toLocaleString('en-US')} ${what}: ${MEANS[severity]}.`;
+}

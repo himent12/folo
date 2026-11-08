@@ -1,7 +1,7 @@
 // Precision-recall curve helpers for the Model view.
 
 import type { ClassEvaluation } from '$lib/api/evaluation';
-import { metric, num } from '$lib/format';
+import { metric } from '$lib/format';
 
 /**
  * Drops the tail of a PR curve past its maximum recall: evaluators pad the curve with precision 0 up to recall 1,
@@ -50,15 +50,15 @@ export function prEnvelope(
 }
 
 /**
- * Every metric of one class, in the table's column order: the phone details row lists them all, since the narrow
- * table has no room for precision and recall.
+ * What the phone details row of a class reveals: only the metrics the narrow table has no column for (precision and
+ * recall), since AP50, AP50-95 and instances are already in the row above it.
  */
 export function classMetrics(c: ClassEvaluation): { label: string; value: string }[] {
   return [
-    { label: 'AP50', value: metric(c.ap50) },
-    { label: 'AP50-95', value: metric(c.ap50_95) },
     { label: 'Precision', value: metric(c.precision) },
     { label: 'Recall', value: metric(c.recall) },
-    { label: 'Instances', value: num(c.instances) },
   ];
 }
+
+/** The operating point precision and recall are read at (folo-vision's metrics: one threshold for all classes). */
+export const PR_CONTEXT = 'at the confidence that maximises mean F1, IoU 0.50';

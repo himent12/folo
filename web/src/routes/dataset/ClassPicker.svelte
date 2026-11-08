@@ -8,6 +8,7 @@
   import { tick } from 'svelte';
   import { classInk } from '$lib/design/classInk.svelte';
   import { compact } from '$lib/format';
+  import { swatchStyle } from './swatch';
 
   let {
     classes,
@@ -106,7 +107,7 @@
           onclick={() => pick(i)}
         >
           <span class="check">{#if value === i}<Check size={14} strokeWidth={2} />{/if}</span>
-          <span class="sw" style:background={classInk(i)} aria-hidden="true"></span>
+          <span class="sw" style={swatchStyle(i, counts?.[i] === 0)} aria-hidden="true"></span>
           <span class="name truncate" title={c}>{c}</span>
           {#if counts}<span class="n num">{compact(counts[i])}</span>{/if}
         </button>
@@ -201,9 +202,6 @@
   }
   .absent {
     color: var(--text-tertiary);
-  }
-  .absent .sw {
-    opacity: 0.4;
   }
   .name {
     flex: 1;

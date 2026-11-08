@@ -240,6 +240,11 @@ export class HttpApi implements Api {
     throw new ApiError(res.status, err?.code ?? `http_${res.status}`, err?.message ?? `Could not download the model (HTTP ${res.status}).`, err?.hint);
   }
 
+  /** The f16 `.folo` file's URL (GET /api/models/{id}/weights?format=f16), for a browser download link. */
+  weightsUrl(id: string): string {
+    return `${this.base}/api/models/${encodeURIComponent(id)}/weights?format=f16`;
+  }
+
   async modelWeightsTag(id: string, signal?: AbortSignal) {
     try {
       const res = await fetch(`${this.base}/api/models/${encodeURIComponent(id)}/weights?format=f16`, { method: 'HEAD', signal });

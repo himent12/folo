@@ -21,6 +21,7 @@
   import Spinner from '$lib/ui/Spinner.svelte';
   import { tooltip } from '$lib/ui/tooltip';
   import type { ImagePager } from './pager.svelte';
+  import { swatchStyle } from './swatch';
 
   let {
     pager,
@@ -360,7 +361,7 @@
         <ul class="legend">
           {#each legend as l (l.i)}
             <li class:absent={l.n === 0}>
-              <span class="sw" style:background={classColor(l.i)}></span>
+              <span class="sw" style={swatchStyle(l.i, l.n === 0)}></span>
               <span class="truncate">{l.name}</span>
               {#if l.n}<span class="num faint">{l.n}</span>{/if}
             </li>
@@ -627,9 +628,6 @@
   }
   .legend li.absent {
     color: var(--text-tertiary);
-  }
-  .legend li.absent .sw {
-    opacity: 0.4;
   }
   dl {
     display: grid;

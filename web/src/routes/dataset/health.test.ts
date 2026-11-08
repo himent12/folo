@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Dataset, DatasetStats } from '$lib/api/types';
-import { countBinLabel, healthChecks, reviewCount, shareBelow, sizeBinLabel } from './health';
+import { bySeverity, countBinLabel, healthChecks, reviewCount, shareBelow, sizeBinLabel } from './health';
 
 const ds = (over: Partial<Dataset> = {}): Dataset => ({
   id: 'ds_x',
@@ -80,7 +80,7 @@ describe('healthChecks with the check counts', () => {
   it('adds the check warnings, with their issues to list', () => {
     const h = healthChecks(ds(), st(), counts(0, 4));
     const w = h.find((x) => x.id === 'check-warnings');
-    expect(w?.title).toBe('4 warnings from the dataset check');
+    expect(w?.title).toBe('4 dataset check warnings');
     expect(w?.issues).toBe('warning');
     expect(reviewCount(h)).toBe(1);
   });
@@ -113,5 +113,18 @@ describe('labels', () => {
 
   it('computes the share below a limit', () => {
     expect(shareBelow({ edges: [0, 1, 2, 3], counts: [1, 1, 2] }, 2)).toBe(0.5);
+  });
+});
+
+describe('bySeverity', () => {
+  it('groups findings into errors, warnings and notes, skipping empty groups and ok', () => {
+    const h = healthChecks(ds(), st({ broken_labels: 3, empty_images: 20, box_size_hist: { edges: [0, 0.05, 1], counts: [500, 2500] } }));
+    const g = bySeverity(h);
+    expect(g.map((x) => [x.label, x.items.map((i) => i.id)])).toEqual([
+      ['Errors', ['broken']],
+      ['Warnings', ['tiny']],
+      ['Notes', ['empty']],
+    ]);
+    expect(bySeverity(healthChecks(ds(), st()))).toEqual([]);
   });
 });
