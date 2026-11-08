@@ -206,8 +206,6 @@
     }
   }
 
-  const maxParams = Math.max(...arches.map((a) => a.params));
-  const maxMs = Math.max(...arches.map((a) => a.ms));
   const pct2 = (v: number) => `${Math.round(v * 100)}%`;
 </script>
 
@@ -263,9 +261,9 @@
                 {#if on}<span class="tick" aria-hidden="true"><Check size={14} strokeWidth={2.25} /></span>{/if}
                 <span class="a-note">{a.note}</span>
                 <span class="a-bars">
-                  <span class="a-row"><span class="faint">Params</span><span class="bar"><i style:width={pct2(a.params / maxParams)}></i></span><span class="num">{compact(a.params)}</span></span>
-                  <span class="a-row"><span class="faint">GFLOPs</span><span class="bar"><i style:width={pct2(a.flops / 86.9)}></i></span><span class="num">{num(a.flops, 1)}</span></span>
-                  <span class="a-row"><span class="faint">Latency</span><span class="bar"><i style:width={pct2(a.ms / maxMs)}></i></span><span class="num">{num(a.ms, 1)} ms</span></span>
+                  <span class="a-row"><span class="faint">Params</span><span class="num">{compact(a.params)}</span></span>
+                  <span class="a-row"><span class="faint">GFLOPs</span><span class="num">{num(a.flops, 1)}</span></span>
+                  <span class="a-row"><span class="faint">Latency</span><span class="num">{num(a.ms, 1)} ms</span></span>
                 </span>
               </label>
             {/each}
@@ -401,10 +399,13 @@
               <p class="warning soft"><TriangleAlert size={14} /> Training on the CPU is roughly 14× slower than on a GPU.</p>
             {/if}
             <Button type="submit" variant="primary" size="lg" icon={Play} block loading={submitting} disabled={!valid}>Start training</Button>
-            <div class="cli">
-              <div class="cli-top"><span class="overline">Or from the CLI</span><Button size="sm" variant="ghost" icon={Copy} aria-label="Copy command" onclick={copyCli} /></div>
-              <code>{cliParts.join(CONT)}</code>
-            </div>
+            <details class="cli">
+              <summary><ChevronRight size={14} aria-hidden="true" />CLI command <span class="faint">the same run from a terminal</span></summary>
+              <div class="cli-body">
+                <code>{cliParts.join(CONT)}</code>
+                <span class="cli-copy"><Button size="sm" variant="ghost" icon={Copy} aria-label="Copy command" title="Copy command" onclick={copyCli} /></span>
+              </div>
+            </details>
           </div>
         </Panel>
       </aside>
@@ -462,15 +463,15 @@
   .arch:hover {
     border-color: var(--line-strong);
   }
-  /* Selection is neutral (a strong border and a small check); lime stays for the Start button and focus. */
+  /* Selection: a strong edge on the selection tint and a small ink check; lime stays for the Start button and focus. */
   .card,
   .arch {
     position: relative;
   }
   .card.on,
   .arch.on {
-    border-color: var(--text-secondary);
-    box-shadow: inset 0 0 0 0.5px var(--text-secondary);
+    border-color: var(--line-strong);
+    background: var(--bg-selected);
   }
   .tick {
     position: absolute;
@@ -533,31 +534,17 @@
     margin-top: 2px;
   }
   .a-row {
-    display: grid;
-    grid-template-columns: 48px 1fr 52px;
-    align-items: center;
-    gap: 6px;
-    font-size: var(--type-micro-size);
+    display: flex;
+    justify-content: space-between;
+    gap: var(--space-2);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
   }
   .a-row .num {
-    text-align: right;
     color: var(--text-secondary);
-    font-size: var(--type-xs-size);
   }
-  .bar {
-    height: 3px;
-    border-radius: 2px;
-    background: var(--bg-active);
-    overflow: hidden;
-  }
-  .bar i {
-    display: block;
-    height: 100%;
-    background: var(--text-tertiary);
-    border-radius: 2px;
-  }
-  .arch.on .bar i {
-    background: var(--text-secondary);
+  .arch.on .a-row .num {
+    color: var(--text-primary);
   }
   .ref {
     margin-top: var(--space-2);
@@ -595,6 +582,7 @@
     display: grid;
     gap: var(--space-2);
     align-content: start;
+    align-self: start;
     position: sticky;
     top: calc(var(--size-topbar) + var(--space-4));
   }
@@ -690,19 +678,49 @@
     margin-top: 3px;
   }
   .cli {
-    display: grid;
-    gap: var(--space-1);
-    padding-top: var(--space-3);
+    margin-top: calc(-1 * var(--space-1));
+    padding-top: var(--space-2);
     border-top: 1px solid var(--line-subtle);
   }
-  .cli-top {
+  .cli summary {
     display: flex;
     align-items: center;
-    justify-content: space-between;
+    gap: var(--space-2);
+    height: var(--control-md);
+    color: var(--text-secondary);
+    font-size: var(--type-sm-size);
+    font-weight: var(--weight-medium);
+    cursor: pointer;
+    list-style: none;
+    border-radius: var(--radius-sm);
+  }
+  .cli summary::-webkit-details-marker {
+    display: none;
+  }
+  .cli summary :global(svg) {
+    transition: transform var(--dur-fast) var(--ease-standard);
+  }
+  .cli[open] summary :global(svg) {
+    transform: rotate(90deg);
+  }
+  .cli summary:hover {
+    color: var(--text-primary);
+  }
+  .cli summary .faint {
+    font-weight: var(--weight-regular);
+  }
+  .cli-body {
+    position: relative;
+    margin-top: var(--space-2);
+  }
+  .cli-copy {
+    position: absolute;
+    top: var(--space-1);
+    right: var(--space-1);
   }
   code {
     display: block;
-    padding: var(--space-2) var(--space-3);
+    padding: var(--space-2) var(--space-8) var(--space-2) var(--space-3);
     border-radius: var(--radius-md);
     background: var(--bg-inset);
     font-family: var(--font-mono);
