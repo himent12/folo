@@ -313,8 +313,10 @@
         ? hub.api.predict(input, { model_id: id, ...FETCH }, ctrl.signal)
         : hub.api.mock
           ? hub.api.predict(input, { model_id: id, ...FETCH }, ctrl.signal).then((p) => simulate(p, on))
-          : (file ? Promise.resolve(null) : hub.api.modelWeightsTag(id, ctrl.signal)).then((tag) =>
-              engine.predict({
+          : (file ? Promise.resolve(null) : hub.api.modelWeightsTag(id, ctrl.signal)).then((tag) => {
+              // Superseded while asking for the ETag: do not start loading or running a model nobody waits for.
+              if (ctrl.signal.aborted) throw new DOMException('Superseded', 'AbortError');
+              return engine.predict({
                 modelId: id,
                 file: file ?? null,
                 download: () => hub.api.modelWeights(id),
@@ -322,8 +324,8 @@
                 backend: on,
                 image: () => imageBlob(s, ctrl.signal),
                 options: { conf: FETCH.conf, iou: FETCH.iou, maxDet: FETCH.max_det },
-              }),
-            );
+              });
+            });
     run.then(
       (p) => {
         if (ctrl.signal.aborted) return;

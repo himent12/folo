@@ -130,8 +130,10 @@ export class BrowserEngine {
     // One detector per model, weights source (and version) and backend: the same file picked for two models loads
     // twice, since a detector stamps its model id on every result; retrained weights (a run's last.folo changes
     // every epoch) load again.
+    // Server weights without an ETag cannot be known to be unchanged: they load for this request only (not cached).
+    const cacheable = !!req.file || !!req.tag;
     const key = `${req.modelId}|${req.file ? `file#${fileId(req.file)}` : `server:${req.tag ?? ''}`}|${req.backend}`;
-    const hit = this.#detectors.get(key);
+    const hit = cacheable ? this.#detectors.get(key) : undefined;
     if (hit) {
       // Most recently used last.
       this.#detectors.delete(key);
@@ -147,7 +149,9 @@ export class BrowserEngine {
       this.phase = 'compile';
       return m.FoloDetector.load(bytes, { backend: req.backend, modelId: req.modelId });
     })();
-    const entry: Entry = { detector, users: 0, evicted: false };
+    // Uncached: born evicted, so it is freed as soon as its request is done.
+    const entry: Entry = { detector, users: 0, evicted: !cacheable };
+    if (!cacheable) return entry;
     this.#detectors.set(key, entry);
     detector.catch(() => {
       if (this.#detectors.get(key) === entry) this.#detectors.delete(key);

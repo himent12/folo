@@ -39,6 +39,8 @@ const req = (modelId: string, file: File | null, backend: Backend = 'cpu', byte 
   modelId,
   file,
   download: async () => new Uint8Array([byte]).buffer,
+  // A server that names its weights' version (an ETag), as current ones do.
+  tag: '"v1"' as string | null,
   backend,
   image: async () => new Blob(),
   options: { conf: 0.01, iou: 1, maxDet: 1000 },
@@ -139,5 +141,18 @@ describe('BrowserEngine', () => {
     await e.predict(r('webgpu'));
     expect(downloads).toBe(1);
     expect(w.loads).toEqual(['m1:1:cpu', 'm1:1:webgpu']);
+  });
+
+  it('never reuses server weights without an ETag (they may have changed), and frees them after the request', async () => {
+    const w = fakeWasm();
+    const e = new BrowserEngine(async () => w.mod, pixels);
+    let downloads = 0;
+    const r = () => ({ ...req('m1', null), tag: null, download: async () => (downloads++, new Uint8Array([1]).buffer) });
+    await e.predict(r());
+    await e.predict(r());
+    expect(downloads).toBe(2);
+    expect(w.loads).toEqual(['m1:1:cpu', 'm1:1:cpu']);
+    await new Promise((res) => setTimeout(res, 0));
+    expect(w.freed).toEqual(['m1:1:cpu', 'm1:1:cpu']);
   });
 });
