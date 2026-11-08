@@ -857,7 +857,11 @@ impl FoloApp {
                         return;
                     }
                     this.store.install_logs(&key, r);
-                    this.log_scroll.scroll_to_bottom();
+                    // Only the log on screen, and only while it follows (a late answer for another
+                    // run mustn't move, or resume, the one being read).
+                    if matches!(&this.route, Route::Run(id) if *id == key) && this.log_follow {
+                        this.log_scroll.scroll_to_bottom();
+                    }
                 },
             );
         }
