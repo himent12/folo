@@ -223,7 +223,8 @@ Non-2xx responses: `{ "error": { "code": "dataset_not_found", "message": "...", 
   "epoch": 12,             // epoch in progress, 1-based (0 before the first step; the last epoch once finished)
   "epochs": 100,
   "step": 575,             // optimizer steps completed over all epochs
-  "steps_per_epoch": 50,
+  "steps_per_epoch": 50,  // 0 until the trainer has loaded the dataset (the first seconds of a real run); step and
+                         // status events don't carry it, so re-read GET /api/runs/{id} once the first step arrives
   "eta_s": 1840 | null,    // null unless queued / running / stopping
   "best": { "epoch": 11, "map50_95": 0.61 } | null, "device": "NVIDIA GeForce RTX 4080 SUPER (vulkan)",
   "model_id": null | "m_31aa",  // set once the run completed, or stopped after at least one validated epoch
