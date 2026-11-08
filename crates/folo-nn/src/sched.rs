@@ -75,7 +75,7 @@ pub fn warmup_iters(warmup_epochs: f64, epochs: u64, steps_per_epoch: u64) -> u6
         return 0;
     }
     let w = (warmup_epochs * steps_per_epoch as f64).round().max(100.0) as u64;
-    w.min(epochs.saturating_sub(1) * steps_per_epoch)
+    w.min(epochs.saturating_sub(1).saturating_mul(steps_per_epoch))
 }
 
 /// `interp(t, [0, w], [a, b])` for `t < w`.
@@ -108,21 +108,26 @@ impl LrSchedule {
         })
     }
 
-    /// A schedule from a `folo.sched` contract (resume). Rejects non-finite values and a counter past the end.
+    /// A schedule from a `folo.sched` contract (resume). Rejects non-finite values, a length `T` that does not
+    /// fit a `u64`, a warmup longer than the run, and a counter past the end.
     pub fn from_contract(c: SchedContract) -> Result<Self> {
         let finite = [c.lrf, c.warmup_bias_lr, c.warmup_momentum].iter().all(|v| v.is_finite());
         if !finite || c.steps_per_epoch == 0 || c.epochs == 0 {
             return Err(Error::Invalid(format!("schedule: invalid parameters {c:?}")));
         }
-        let s = LrSchedule { c };
-        if s.c.step > s.total_iters() {
+        let total = c.epochs.checked_mul(c.steps_per_epoch).ok_or_else(|| {
+            Error::Invalid(format!("schedule: {} epochs × {} steps overflows", c.epochs, c.steps_per_epoch))
+        })?;
+        if c.warmup_iters > total {
             return Err(Error::Invalid(format!(
-                "schedule: step {} is past the end ({})",
-                s.c.step,
-                s.total_iters()
+                "schedule: warmup {} is longer than the run ({total})",
+                c.warmup_iters
             )));
         }
-        Ok(s)
+        if c.step > total {
+            return Err(Error::Invalid(format!("schedule: step {} is past the end ({total})", c.step)));
+        }
+        Ok(LrSchedule { c })
     }
 
     /// The `folo.sched` contract (with the current step).
@@ -130,7 +135,7 @@ impl LrSchedule {
         &self.c
     }
 
-    /// `T = epochs · steps_per_epoch`.
+    /// `T = epochs · steps_per_epoch` (checked not to overflow when the schedule was built).
     pub fn total_iters(&self) -> u64 {
         self.c.epochs * self.c.steps_per_epoch
     }
@@ -243,5 +248,24 @@ mod tests {
         // T = 1: the single step runs at lr0.
         let one = LrSchedule::new(DecayKind::Linear, 1, 1, 0.01, 3.0, 0.1, 0.8).unwrap();
         assert_eq!((one.warmup_iters(), one.lr_at(0, &decay)), (0, lr0));
+    }
+
+    #[test]
+    fn malformed_contracts_are_errors() {
+        let good =
+            LrSchedule::new(DecayKind::Linear, 10, 13, 0.01, 3.0, 0.1, 0.8).unwrap().contract().clone();
+        let bad = |f: &dyn Fn(&mut SchedContract)| {
+            let mut c = good.clone();
+            f(&mut c);
+            LrSchedule::from_contract(c).unwrap_err().to_string()
+        };
+        assert!(bad(&|c| (c.epochs, c.steps_per_epoch) = (u64::MAX, 2)).contains("overflows"));
+        assert!(bad(&|c| c.warmup_iters = 131).contains("warmup"));
+        assert!(bad(&|c| c.step = 131).contains("past the end"));
+        assert!(bad(&|c| c.steps_per_epoch = 0).contains("invalid"));
+        assert!(bad(&|c| c.lrf = f64::NAN).contains("invalid"));
+        // The config path saturates instead of overflowing; from_contract then reports the overflow.
+        assert_eq!(warmup_iters(3.0, u64::MAX, u64::MAX), u64::MAX); // no overflow panic
+        assert!(LrSchedule::new(DecayKind::Linear, u64::MAX, 2, 0.01, 3.0, 0.1, 0.8).is_err());
     }
 }

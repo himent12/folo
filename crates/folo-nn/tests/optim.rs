@@ -224,3 +224,19 @@ fn ema_values() {
     let rm = 0.03 * 3.0;
     close(&e2.module().running_mean.to_vec::<f32>().unwrap(), &[(1.0 - d(1.0)) * rm; 2], 1e-6);
 }
+
+#[test]
+fn accumulator_with_duplicate_handles() {
+    let (p, q) = (param(&[1.0]), param(&[1.0]));
+    let mut acc = GradAccumulator::new(&[p.clone(), p.clone(), q.clone()]);
+    let mut grads = grads_for(&p, &[2.0]);
+    grads.insert(&q, Tensor::from_slice(&[7.0f32], [1]).unwrap());
+    acc.add(&grads).unwrap();
+    assert_eq!(acc.grad(&p).unwrap().to_vec::<f32>().unwrap(), [2.0]);
+    assert_eq!(acc.grad(&q).unwrap().to_vec::<f32>().unwrap(), [7.0]);
+    // Only repeats: one slot, no out-of-range index.
+    let mut acc = GradAccumulator::new(&[p.clone(), p.clone()]);
+    acc.add(&grads_for(&p, &[3.0])).unwrap();
+    assert_eq!(acc.grad(&p).unwrap().to_vec::<f32>().unwrap(), [3.0]);
+    assert!(acc.grad(&q).is_none());
+}

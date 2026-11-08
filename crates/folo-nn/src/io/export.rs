@@ -13,7 +13,8 @@ use crate::{Error, Result, fuse_conv_bn};
 /// Fold every BatchNorm of a named tensor set into its conv: each `<p>.bn.{weight, bias, running_mean,
 /// running_var}` with `<p>.conv.weight` (and an optional `<p>.conv.bias`) becomes `<p>.conv.weight` and
 /// `<p>.conv.bias` (docs/MODEL.md §5, fused files). Other tensors pass through. Order is preserved, with the
-/// fused bias right after its weight. An incomplete BatchNorm set is an error.
+/// fused bias right after its weight. The prefix may be empty (a standalone block's `bn.*` / `conv.*`). An
+/// incomplete BatchNorm set is an error.
 pub fn fuse_bn_tensors(tensors: Vec<(String, Tensor)>, eps: f64) -> Result<Vec<(String, Tensor)>> {
     let index: std::collections::HashMap<&str, usize> =
         tensors.iter().enumerate().map(|(i, (n, _))| (n.as_str(), i)).collect();
@@ -21,13 +22,14 @@ pub fn fuse_bn_tensors(tensors: Vec<(String, Tensor)>, eps: f64) -> Result<Vec<(
     let mut fused = std::collections::HashMap::new();
     let mut consumed = std::collections::HashSet::new();
     for (name, _) in &tensors {
-        let Some(p) = name.strip_suffix(".bn.weight") else { continue };
+        // `p` is the block prefix including its trailing dot, or empty for a root block.
+        let Some(p) = bn_prefix(name) else { continue };
         let need = |s: &str| -> Result<&Tensor> {
-            get(&format!("{p}.{s}"))
-                .ok_or_else(|| Error::Invalid(format!("fuse: `{p}` has a BatchNorm but no `{p}.{s}`")))
+            get(&format!("{p}{s}"))
+                .ok_or_else(|| Error::Invalid(format!("fuse: `{name}` has a BatchNorm but no `{p}{s}`")))
         };
         let w = need("conv.weight")?;
-        let cb = get(&format!("{p}.conv.bias"));
+        let cb = get(&format!("{p}conv.bias"));
         let (fw, fb) = fuse_conv_bn(
             w,
             cb,
@@ -38,12 +40,12 @@ pub fn fuse_bn_tensors(tensors: Vec<(String, Tensor)>, eps: f64) -> Result<Vec<(
             eps,
         )?;
         for s in ["bn.weight", "bn.bias", "bn.running_mean", "bn.running_var", "conv.bias"] {
-            consumed.insert(format!("{p}.{s}"));
+            consumed.insert(format!("{p}{s}"));
         }
-        fused.insert(format!("{p}.conv.weight"), (fw, fb));
+        fused.insert(format!("{p}conv.weight"), (fw, fb));
     }
     for (name, _) in &tensors {
-        if name.contains(".bn.") && !consumed.contains(name) {
+        if (name.starts_with("bn.") || name.contains(".bn.")) && !consumed.contains(name) {
             return Err(Error::Invalid(format!("fuse: `{name}` has no matching `.bn.weight`")));
         }
     }
@@ -54,7 +56,7 @@ pub fn fuse_bn_tensors(tensors: Vec<(String, Tensor)>, eps: f64) -> Result<Vec<(
         }
         match fused.remove(&name) {
             Some((w, b)) => {
-                let bias = format!("{}.bias", name.strip_suffix(".weight").expect("conv.weight"));
+                let bias = format!("{}bias", name.strip_suffix("weight").expect("conv.weight"));
                 out.push((name, w));
                 out.push((bias, b));
             }
@@ -62,6 +64,14 @@ pub fn fuse_bn_tensors(tensors: Vec<(String, Tensor)>, eps: f64) -> Result<Vec<(
         }
     }
     Ok(out)
+}
+
+/// The prefix (with its trailing dot, possibly empty) of a `bn.weight` tensor name.
+fn bn_prefix(name: &str) -> Option<&str> {
+    if name == "bn.weight" {
+        return Some("");
+    }
+    name.strip_suffix("bn.weight").filter(|p| p.ends_with('.'))
 }
 
 /// Write a weights file: `meta` (kind forced to `weights`, checkpoint-only keys dropped) and every tensor of

@@ -545,3 +545,30 @@ fn invalid_checkpoints_and_resume_mismatches() {
     let e = f.resume(&e2.model, e2.opt.as_mut(), Some(&mut e2.ema), None).unwrap_err().to_string();
     assert!(e.contains("parameter set"), "{e}");
 }
+
+#[test]
+fn root_block_export_fuses_and_loads_into_new_fused() {
+    let mut rng = Rng::seed(8);
+    let blk = ConvBnAct::new(3, 4, 3, 1, 1, Activation::Silu, &mut rng);
+    for _ in 0..2 {
+        blk.forward(&Tensor::randn([2, 3, 6, 6], 0.5, 2.0, &mut rng)).unwrap();
+    }
+    blk.eval();
+    let x = Tensor::randn([1, 3, 6, 6], 0.0, 1.0, &mut rng);
+    let want = blk.forward(&x).unwrap().to_vec::<f32>().unwrap();
+    let path = tmp("root-block.folo");
+    export_module(&path, &meta(FileKind::Weights, 3), &blk, FloatDType::F32).unwrap();
+    let f = ModelFile::open(&path).unwrap();
+    assert_eq!(f.names(Namespace::Model), ["conv.bias", "conv.weight"]);
+    let fused = ConvBnAct::new_fused(3, 4, 3, 1, 1, Activation::Silu, &mut Rng::seed(9));
+    f.load_for_inference(&fused).unwrap();
+    let got = fused.forward(&x).unwrap().to_vec::<f32>().unwrap();
+    let worst = got.iter().zip(&want).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+    assert!(worst <= 1e-5, "{worst}");
+    // A stray root BatchNorm tensor without its weight is an error, not a silent pass-through.
+    let stray = vec![
+        ("conv.weight".to_string(), Tensor::ones([1, 1, 1, 1])),
+        ("bn.running_mean".to_string(), Tensor::zeros([1])),
+    ];
+    assert!(fuse_bn_tensors(stray, BN_EPS).is_err());
+}

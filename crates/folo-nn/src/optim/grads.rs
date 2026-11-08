@@ -31,7 +31,9 @@ impl GradAccumulator {
         let mut index = HashMap::with_capacity(params.len());
         let mut slots = Vec::with_capacity(params.len());
         for p in params {
-            if index.insert(p.id(), slots.len()).is_none() {
+            // A repeated handle keeps its first slot: one parameter, one gradient buffer.
+            if let std::collections::hash_map::Entry::Vacant(e) = index.entry(p.id()) {
+                e.insert(slots.len());
                 slots.push(Slot { param: p.clone(), buf: None, valid: false });
             }
         }
