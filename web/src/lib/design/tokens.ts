@@ -28,12 +28,12 @@ export const classFillOpacity = 0.12 as const;
 export const chart = {
   "dark": {
     "series": [
-      "#C5F82A",
       "#5CC8FF",
-      "#FF6FA5",
       "#FFB547",
+      "#E879F9",
+      "#2DD4BF",
       "#A78BFA",
-      "#2DD4BF"
+      "#FB923C"
     ],
     "grid": "#FFFFFF0F",
     "axis": "#FFFFFF24",
@@ -42,12 +42,12 @@ export const chart = {
   },
   "light": {
     "series": [
-      "#5E9400",
       "#0A8FD6",
-      "#E0457E",
       "#C27A00",
+      "#C026D3",
+      "#0F9F8C",
       "#7C5CE6",
-      "#0F9F8C"
+      "#D9620B"
     ],
     "grid": "#0A0E140F",
     "axis": "#0A0E1429",
