@@ -8,18 +8,16 @@
   import { Resource } from '$lib/api/resource.svelte';
   import type { Dataset, Model, Run } from '$lib/api/types';
   import ConfusionMatrix from '$lib/charts/ConfusionMatrix.svelte';
-  import { classColor } from '$lib/design/tokens';
+  import { classInk } from '$lib/design/classInk.svelte';
   import { ago, bytes, compact, date, metric, num } from '$lib/format';
   import { prefs } from '$lib/prefs.svelte';
   import { href, router } from '$lib/router.svelte';
   import Page from '$lib/shell/Page.svelte';
   import { setCrumbs } from '$lib/shell/crumbs.svelte';
-  import Badge from '$lib/ui/Badge.svelte';
   import Button from '$lib/ui/Button.svelte';
   import ErrorState from '$lib/ui/ErrorState.svelte';
   import Panel from '$lib/ui/Panel.svelte';
   import Skeleton from '$lib/ui/Skeleton.svelte';
-  import MetricBar from './models/MetricBar.svelte';
   import ExportDialog from './model/ExportDialog.svelte';
   import PrCurves from './model/PrCurves.svelte';
 
@@ -87,16 +85,12 @@
     return best;
   });
 
-  // Large class sets: 16 rows until the reader asks for all of them.
-  const PER_CLASS_MAX = 16;
-  let allClasses = $state(false);
-
   let exportOpen = $state(false);
 
   /** The architecture's published 640 px reference time, scaled by input area. */
   const latency = (m: Model) => archInfo[m.arch].ms * (m.imgsz / 640) ** 2;
-  const tiles = (m: Model) => [
-    { label: 'mAP50-95', value: m.metrics?.map50_95, sub: 'IoU 0.50:0.95' },
+  const kpis = (m: Model) => [
+    { label: 'mAP50-95', value: m.metrics?.map50_95, sub: 'IoU 0.50:0.95, all classes' },
     { label: 'mAP50', value: m.metrics?.map50, sub: 'IoU 0.50' },
     { label: 'Precision', value: m.metrics?.precision, sub: 'boxes, all classes' },
     { label: 'Recall', value: m.metrics?.recall, sub: 'boxes, all classes' },
@@ -110,178 +104,124 @@
   </Page>
 {:else if !model.data}
   <Page title="Model">
-    {#snippet lead()}<Skeleton w="180px" h="20px" />{/snippet}
-    <div class="tiles">{#each [0, 1, 2, 3] as i (i)}<Skeleton h="104px" r="var(--radius-lg)" />{/each}</div>
-    <div class="row"><Skeleton h="380px" r="var(--radius-lg)" /><Skeleton h="380px" r="var(--radius-lg)" /></div>
+    {#snippet sub()}<Skeleton w="320px" h="14px" />{/snippet}
+    <Skeleton h="106px" r="var(--radius-lg)" />
+    <div class="detail"><Skeleton h="560px" r="var(--radius-lg)" /><Skeleton h="380px" r="var(--radius-lg)" /></div>
   </Page>
 {:else}
   {@const m = model.data}
   {@const run = context.data?.run}
   <Page title={m.name}>
-    {#snippet lead()}
-      <Badge tone="outline" mono>{m.arch}</Badge>
-      {#if !m.run_id}<Badge>imported</Badge>{/if}
-    {/snippet}
     {#snippet sub()}
-      <span class="mono faint">{m.id}</span>
-      <span class="dot" aria-hidden="true"></span>
-      <span class="num">{m.classes.length} classes · {m.imgsz}px · {bytes(m.bytes, prefs.units)}</span>
-      <span class="dot" aria-hidden="true"></span>
+      <span class="mono">{m.arch}</span>
+      <span class="num">{m.classes.length} classes · {m.imgsz} px · {bytes(m.bytes, prefs.units)}</span>
       {#if m.run_id}
         <span>trained by <a class="link" href={href(`/runs/${m.run_id}`)}>{run?.name ?? m.run_id}</a></span>
-        <span class="dot" aria-hidden="true"></span>
+      {:else}
+        <span>imported</span>
       {/if}
-      <span title={date(m.created)}>created {ago(m.created)}</span>
+      <span class="faint" title={date(m.created)}>created {ago(m.created)}</span>
     {/snippet}
     {#snippet actions()}
       <Button icon={Download} onclick={() => (exportOpen = true)}>Export</Button>
       <Button variant="primary" icon={ScanSearch} href={href(`/playground?model=${encodeURIComponent(m.id)}`)}>Try in Playground</Button>
     {/snippet}
 
-    <div class="tiles">
-      {#each tiles(m) as t (t.label)}
-        <div class="tile">
-          <span class="t-label">{t.label}</span>
-          <span class="t-value num">{metric(t.value)}</span>
-          <div class="t-bar" aria-hidden="true"><span style:transform="scaleX({t.value ?? 0})"></span></div>
-          <span class="t-sub">{t.sub}</span>
+    <!-- One strip of numbers in ink: the headline metric, then the ones that support it. -->
+    <section class="kpis" aria-label="Validation metrics">
+      {#each kpis(m) as k, i (k.label)}
+        <div class="kpi" class:hero={i === 0}>
+          <span class="k-label">{k.label}</span>
+          <span class="k-value num">{metric(k.value)}</span>
+          <span class="k-sub">{k.sub}</span>
         </div>
       {/each}
-    </div>
+    </section>
 
-    <!-- The charts keep their own heights (the matrix scrolls and grows with notes), so neither panel gapes. -->
-    <div class="row charts">
-      <Panel title="Precision–recall" meta="IoU 0.5" id="pr">
-        {#if ev}
-          <PrCurves classes={m.classes} {ev} map50={m.metrics?.map50 ?? null} />
-        {:else if evaluation.error}
-          <ErrorState error={evaluation.error} retry={() => evaluation.refresh()} compact title="Could not load the evaluation" />
-        {:else}
-          <Skeleton h="300px" />
-        {/if}
-      </Panel>
-      <Panel title="Confusion matrix" meta={cm?.partial ? `top ${CM_MAX} of ${m.classes.length} classes` : undefined} id="cm">
-        {#if cm}
-          {#if cm.partial || confused}
-            <div class="cm-notes">
-              {#if cm.partial}
-                <p>Top {CM_MAX} classes by instances; the other {m.classes.length - CM_MAX} are folded into Other.</p>
-              {/if}
-              {#if confused}
-                <p class="confused">
-                  Most confused: <b>{m.classes[confused.r]}</b> → <b>{m.classes[confused.c]}</b>
-                  <span class="num">{num(confused.v * 100, 1)} %</span>
-                </p>
-              {/if}
-            </div>
+    <!-- Evidence in the main column, reference in a sticky rail. -->
+    <div class="detail">
+      <div class="main-col">
+        <Panel title="Precision–recall" meta="precision by recall · IoU 0.5" pad="none" id="pr">
+          {#if ev}
+            <PrCurves classes={m.classes} {ev} map50={m.metrics?.map50 ?? null} />
+          {:else if evaluation.error}
+            <ErrorState error={evaluation.error} retry={() => evaluation.refresh()} compact title="Could not load the evaluation" />
+          {:else}
+            <div class="sk"><Skeleton h="24px" w="200px" /><Skeleton h="300px" /></div>
           {/if}
-          <ConfusionMatrix classes={cm.classes} classIds={cm.ids} matrix={cm.matrix} label="Confusion matrix of {m.name}" sparseLabels minCell={32} scale />
-        {:else if evaluation.error}
-          <p class="foot">No evaluation available.</p>
-        {:else}
-          <Skeleton h="300px" />
-        {/if}
-      </Panel>
-    </div>
-
-    <div class="row">
-      <Panel title="Per class" meta={String(m.classes.length)} pad="none" id="per-class">
-        {#if ev}
-          {@const rows = allClasses ? ev.perClass : ev.perClass.slice(0, PER_CLASS_MAX)}
-          <div class="scroll">
-            <table class="table dense">
-              <thead>
-                <tr>
-                  <th scope="col">Class</th>
-                  <th scope="col" class="r">AP50</th>
-                  <th scope="col" class="r">AP50-95</th>
-                  <th scope="col" class="r hide-sm">Precision</th>
-                  <th scope="col" class="r hide-sm">Recall</th>
-                  <th scope="col" class="r">Instances</th>
-                </tr>
-              </thead>
-              <tbody>
-                {#each rows as c (c.class)}
-                  <tr>
-                    <td>
-                      <span class="cls">
-                        <span class="sw" style:background={classColor(c.class)} aria-hidden="true"></span>
-                        <span class="truncate">{m.classes[c.class]}</span>
-                      </span>
-                    </td>
-                    <td class="r"><MetricBar value={c.ap50} /></td>
-                    <td class="r">{metric(c.ap50_95)}</td>
-                    <td class="r hide-sm muted">{metric(c.precision)}</td>
-                    <td class="r hide-sm muted">{metric(c.recall)}</td>
-                    <td class="r muted">{num(c.instances)}</td>
-                  </tr>
-                {/each}
-              </tbody>
-            </table>
-          </div>
-          {#if ev.perClass.length > PER_CLASS_MAX}
-            <button type="button" class="more" aria-expanded={allClasses} onclick={() => (allClasses = !allClasses)}>
-              {allClasses ? `Show the first ${PER_CLASS_MAX}` : `Show all ${ev.perClass.length}`}
-            </button>
-          {/if}
-          <p class="foot">
-            Evaluated on {num(ev.images)} validation images at IoU 0.5; instances are ground-truth boxes per class.
-          </p>
-        {:else}
-          <div class="sk">{#each [0, 1, 2, 3] as i (i)}<Skeleton h="18px" />{/each}</div>
-        {/if}
-      </Panel>
-
-      <Panel title="Details" id="details">
-        <dl class="details">
-          <dt>Architecture</dt>
-          <dd class="mono">{m.arch}</dd>
-          <dt>Input size</dt>
-          <dd class="num">{m.imgsz} × {m.imgsz}px</dd>
-          <dt>Parameters</dt>
-          <dd class="num">{compact(m.params)} <span class="faint">({m.params.toLocaleString('en-US')})</span></dd>
-          <dt>Compute</dt>
-          <dd class="num">{num(m.flops_g, 1)} GFLOPs</dd>
-          <dt>File size</dt>
-          <dd class="num">{bytes(m.bytes, prefs.units)}</dd>
-          <dt>Latency</dt>
-          <dd class="latency">
-            <span class="num">Reference ~{latency(m).toFixed(1)} ms</span>
-            <!-- A scaled hint, not a measurement: say exactly what it assumes. -->
-            <span class="faint">RTX 4080-class GPU · {m.imgsz} px · fp32</span>
-          </dd>
-          <dt>Classes</dt>
-          <dd class="classes">
-            {#each m.classes.slice(0, 10) as c, i (i)}
-              <span class="chip"><span class="sw" style:background={classColor(i)} aria-hidden="true"></span>{c}</span>
-            {/each}
-            {#if m.classes.length > 10}<span class="faint">+{m.classes.length - 10} more</span>{/if}
-          </dd>
-          <dt>Source</dt>
-          <dd>
-            {#if m.run_id}
-              <a class="link" href={href(`/runs/${m.run_id}`)}>{run?.name ?? m.run_id}</a>
-              {#if context.data?.dataset}<span class="faint">{' on '}</span><a class="link" href={href(`/datasets/${context.data.dataset.id}`)}>{context.data.dataset.name}</a>{/if}
-            {:else}
-              <span class="muted">Imported .folo file</span>
+        </Panel>
+        <Panel title="Confusion matrix" meta={cm?.partial ? `top ${CM_MAX} of ${m.classes.length} classes` : 'row-normalised'} id="cm">
+          {#if cm}
+            {#if cm.partial || confused}
+              <div class="cm-notes">
+                {#if confused}
+                  <p class="confused">
+                    Most confused: <b>{m.classes[confused.r]}</b> → <b>{m.classes[confused.c]}</b>
+                    <span class="num">{num(confused.v * 100, 1)} %</span>
+                  </p>
+                {/if}
+                {#if cm.partial}
+                  <p>Top {CM_MAX} classes by instances; the other {m.classes.length - CM_MAX} are folded into Other.</p>
+                {/if}
+              </div>
             {/if}
-          </dd>
-          <dt>Created</dt>
-          <dd>{date(m.created)}</dd>
-        </dl>
-      </Panel>
+            <ConfusionMatrix classes={cm.classes} classIds={cm.ids} matrix={cm.matrix} label="Confusion matrix of {m.name}" sparseLabels minCell={32} scale />
+          {:else if evaluation.error}
+            <p class="none">No evaluation available.</p>
+          {:else}
+            <Skeleton h="300px" />
+          {/if}
+        </Panel>
+      </div>
+
+      <aside class="rail" aria-label="Model details">
+        <Panel title="Details" id="details">
+          <dl class="details">
+            <dt>Architecture</dt>
+            <dd class="mono">{m.arch}</dd>
+            <dt>Input size</dt>
+            <dd class="num">{m.imgsz} × {m.imgsz} px</dd>
+            <dt>Parameters</dt>
+            <dd class="num">{compact(m.params)} <span class="faint">({m.params.toLocaleString('en-US')})</span></dd>
+            <dt>Compute</dt>
+            <dd class="num">{num(m.flops_g, 1)} GFLOPs</dd>
+            <dt>File size</dt>
+            <dd class="num">{bytes(m.bytes, prefs.units)}</dd>
+            <dt>Latency</dt>
+            <dd class="latency">
+              <span class="num">Reference ~{latency(m).toFixed(1)} ms</span>
+              <!-- A scaled hint, not a measurement: say exactly what it assumes. -->
+              <span class="faint">RTX 4080-class GPU · {m.imgsz} px · fp32</span>
+            </dd>
+            <dt>Classes</dt>
+            <dd class="classes">
+              {#each m.classes.slice(0, 10) as c, i (i)}
+                <span class="chip"><span class="sw" style:background={classInk(i)} aria-hidden="true"></span>{c}</span>
+              {/each}
+              {#if m.classes.length > 10}<span class="faint">+{m.classes.length - 10} more</span>{/if}
+            </dd>
+            <dt>Source</dt>
+            <dd>
+              {#if m.run_id}
+                <a class="link" href={href(`/runs/${m.run_id}`)}>{run?.name ?? m.run_id}</a>
+                {#if context.data?.dataset}<span class="faint">{' on '}</span><a class="link" href={href(`/datasets/${context.data.dataset.id}`)}>{context.data.dataset.name}</a>{/if}
+              {:else}
+                <span class="muted">Imported .folo file</span>
+              {/if}
+            </dd>
+            <dt>Model id</dt>
+            <dd class="mono muted">{m.id}</dd>
+            <dt>Created</dt>
+            <dd>{date(m.created)}</dd>
+          </dl>
+        </Panel>
+      </aside>
     </div>
   </Page>
   <ExportDialog model={m} bind:open={exportOpen} />
 {/if}
 
 <style>
-  .dot {
-    width: 3px;
-    height: 3px;
-    border-radius: 50%;
-    background: var(--text-tertiary);
-  }
   .link {
     color: var(--text-primary);
   }
@@ -290,92 +230,79 @@
     text-underline-offset: 3px;
     text-decoration-color: var(--line-strong);
   }
-  .tiles {
+  /* 1 px gaps over a hairline-coloured background draw the dividers in any column count. */
+  .kpis {
     display: grid;
     grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: var(--space-4);
-  }
-  .tile {
-    display: grid;
-    gap: var(--space-1);
-    padding: var(--space-4);
+    gap: 1px;
+    background: var(--line-subtle);
+    border: 1px solid var(--line-default);
     border-radius: var(--radius-lg);
-    background: var(--bg-panel);
-    border: 1px solid var(--line-subtle);
-    min-width: 0;
-  }
-  :global([data-theme='light']) .tile {
-    border-color: var(--line-default);
-  }
-  .t-label {
-    font-size: var(--type-xs-size);
-    color: var(--text-tertiary);
-  }
-  .t-value {
-    font-size: var(--type-3xl-size);
-    line-height: var(--type-3xl-line);
-    letter-spacing: var(--type-3xl-tracking);
-    font-weight: var(--weight-semibold);
-  }
-  .t-bar {
-    position: relative;
-    height: 2px;
-    margin: var(--space-1) 0 2px;
-    border-radius: var(--radius-full);
-    background: var(--bg-active);
     overflow: hidden;
   }
-  .t-bar span {
-    position: absolute;
-    inset: 0;
-    transform-origin: left;
-    background: var(--text-tertiary);
-    transition: transform var(--dur-chart) var(--ease-out);
+  :global([data-theme='dark']) .kpis {
+    border-color: var(--line-subtle);
   }
-  .tile:first-child .t-bar span {
-    background: var(--text-primary);
-  }
-  .t-sub {
-    font-size: var(--type-xs-size);
-    color: var(--text-tertiary);
-  }
-  .row {
+  .kpi {
     display: grid;
-    grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr);
-    gap: var(--space-4);
-    align-items: stretch;
+    grid-template-rows: 16px 40px 16px;
+    gap: 6px;
+    align-content: start;
+    padding: var(--space-4);
+    background: var(--bg-panel);
+    min-width: 0;
   }
-  .row.charts {
+  .k-label,
+  .k-sub {
+    font-size: var(--type-sm-size);
+    line-height: 16px;
+    color: var(--text-tertiary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .k-value {
+    align-self: end;
+    font-size: var(--type-2xl-size);
+    line-height: 32px;
+    letter-spacing: var(--type-2xl-tracking);
+    font-weight: var(--weight-semibold);
+  }
+  .hero .k-label {
+    color: var(--text-secondary);
+  }
+  .hero .k-value {
+    font-size: var(--type-3xl-size);
+    line-height: 40px;
+    letter-spacing: var(--type-3xl-tracking);
+  }
+  .detail {
+    display: grid;
+    grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+    gap: var(--space-4);
     align-items: start;
   }
-  .scroll {
-    overflow-x: auto;
+  .main-col,
+  .rail {
+    display: grid;
+    gap: var(--space-4);
+    min-width: 0;
   }
-  .more {
-    display: block;
-    width: 100%;
-    height: var(--control-lg);
-    border-top: 1px solid var(--line-subtle);
-    font-size: var(--type-sm-size);
-    font-weight: var(--weight-medium);
-    color: var(--text-secondary);
-    transition:
-      background-color var(--dur-fast) var(--ease-standard),
-      color var(--dur-fast) var(--ease-standard);
+  .rail {
+    position: sticky;
+    top: calc(var(--size-topbar) + var(--space-4));
   }
-  .more:hover {
-    background: var(--bg-hover);
-    color: var(--text-primary);
-  }
-  .more:focus-visible {
-    outline-offset: -2px;
+  .sk {
+    display: grid;
+    gap: var(--space-2);
+    padding: 0 var(--space-4) var(--space-4);
   }
   .cm-notes {
     display: grid;
     gap: 2px;
     margin-bottom: var(--space-3);
-    font-size: var(--type-xs-size);
-    line-height: var(--type-xs-line);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
     color: var(--text-tertiary);
   }
   .confused {
@@ -388,32 +315,14 @@
   .confused .num {
     color: var(--text-primary);
   }
-  .cls {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    max-width: 200px;
+  .none {
+    color: var(--text-tertiary);
   }
   .sw {
     width: 8px;
     height: 8px;
     border-radius: 2px;
     flex-shrink: 0;
-  }
-  :global([data-theme='light']) .sw {
-    box-shadow: inset 0 0 0 1px #0a0e1433;
-  }
-  .foot {
-    margin-top: auto;
-    padding: var(--space-3) var(--space-4);
-    border-top: 1px solid var(--line-subtle);
-    font-size: var(--type-xs-size);
-    color: var(--text-tertiary);
-  }
-  .sk {
-    display: grid;
-    gap: var(--space-3);
-    padding: var(--space-4);
   }
   .details {
     display: grid;
@@ -428,14 +337,15 @@
   dd {
     min-width: 0;
     text-align: right;
+    overflow-wrap: anywhere;
   }
   .latency {
     display: grid;
     gap: 2px;
   }
   .latency .faint {
-    font-size: var(--type-xs-size);
-    line-height: var(--type-xs-line);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
   }
   .classes {
     display: flex;
@@ -446,38 +356,35 @@
   .chip {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 6px;
     height: 20px;
     padding: 0 6px;
     border-radius: var(--radius-xs);
     background: var(--bg-active);
-    font-size: var(--type-xs-size);
+    font-size: var(--type-sm-size);
     color: var(--text-secondary);
   }
   @media (max-width: 1199px) {
-    .row {
+    .detail {
       grid-template-columns: minmax(0, 1fr);
     }
-  }
-  @media (pointer: coarse) {
-    .more {
-      height: 44px;
+    .rail {
+      position: static;
     }
   }
   @media (max-width: 767px) {
-    .tiles {
+    .kpis {
       grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: var(--space-2);
     }
-    .tile {
+    .kpi {
+      grid-template-rows: 16px 32px 16px;
+      gap: 2px;
       padding: var(--space-3);
     }
-    .t-value {
+    .k-value,
+    .hero .k-value {
       font-size: var(--type-2xl-size);
-      line-height: var(--type-2xl-line);
-    }
-    .hide-sm {
-      display: none;
+      line-height: 32px;
     }
   }
 </style>
