@@ -153,13 +153,14 @@ fn gen_pool(spec: &Spec) -> String {
                       \x20 }\n"
                 }
                 3 => {
+                    // Scale each term before summing, as the CPU does (summing first can overflow).
                     "  let yb = last_out(iy, sh, ph, oh); let xb = last_out(ix, sw, pw, ow);\n\
+                      \x20 let inv = 1.0 / f32(kh * kw);\n\
                       \x20 for (var oy = i32(first_out(iy, kh, sh, ph)); oy <= yb; oy++) {\n\
                       \x20   for (var ox = i32(first_out(ix, kw, sw, pw)); ox <= xb; ox++) {\n\
-                      \x20     acc += X[gbase + u32(oy) * ow + u32(ox)];\n\
+                      \x20     acc += X[gbase + u32(oy) * ow + u32(ox)] * inv;\n\
                       \x20   }\n\
-                      \x20 }\n\
-                      \x20 acc *= 1.0 / f32(kh * kw);\n"
+                      \x20 }\n"
                 }
                 5 => {
                     "  var ya = (iy * oh) / h; var yb = ya;\n\
