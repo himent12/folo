@@ -4,6 +4,7 @@
    * chart the selected tab names. A single run is drawn in ink (primary metric in text.primary, secondary ones
    * tertiary with dash patterns); hue is reserved for entities (runs in Compare, classes).
    */
+  import { tooltip } from '$lib/ui/tooltip';
   import ChartSkeleton from '$lib/charts/ChartSkeleton.svelte';
   import { smooth, type Pt } from '$lib/charts/downsample';
   import LineChart, { type Marker, type Series } from '$lib/charts/LineChart.svelte';
@@ -198,13 +199,17 @@
     <div class="epoch">
       <span class="label">Epoch</span>
       <span class="big num">{run.epoch}<span class="of">/ {run.epochs}</span></span>
-      <div class="track" aria-hidden="true">
+      <div
+        class="track"
+        aria-hidden="true"
+        use:tooltip={closeFrom < 1 && live ? `Hatched: the last ${run.config.augment.close_mosaic} epochs train without mosaic` : ''}
+      >
         <div class="fill" class:done={run.status === 'completed'} class:bad={run.status === 'failed'} style:transform="scaleX({run.status === 'completed' ? 1 : progress})"></div>
         {#if closeFrom < 1 && live}<div class="close" style:left="{closeFrom * 100}%"></div>{/if}
       </div>
       {#if closeFrom < 1 && live}<span class="sr-only">The hatched end of the bar marks the last {run.config.augment.close_mosaic} epochs, trained without mosaic.</span>{/if}
       <span class="cap num">
-        {#if live}{(progress * 100).toFixed(1)}% · {run.eta_s !== null ? `${duration(run.eta_s)} left` : 'estimating…'}{:else}{elapsed !== null ? `${duration(elapsed)} total` : '—'}{/if}
+        {#if live}{(progress * 100).toFixed(1)}% · {run.eta_s !== null ? `${duration(run.eta_s)} left` : 'estimating…'}{#if closeFrom < 1}<span class="hatch-key"> · <i aria-hidden="true"></i>no mosaic</span>{/if}{:else}{elapsed !== null ? `${duration(elapsed)} total` : '—'}{/if}
       </span>
     </div>
     <!-- Phones: one picker instead of six cells; the chart below shows what it names. -->
@@ -433,6 +438,17 @@
   }
   .fill.bad {
     background: var(--danger-solid);
+  }
+  /* A key for the hatched end of the bar, in the caption beside it. */
+  .hatch-key i {
+    display: inline-block;
+    width: 10px;
+    height: 6px;
+    margin: 0 4px 0 2px;
+    vertical-align: 1px;
+    border-radius: 1px;
+    background: repeating-linear-gradient(135deg, transparent 0 2px, var(--line-strong) 2px 3px);
+    box-shadow: inset 0 0 0 1px var(--line-strong);
   }
   .close {
     position: absolute;

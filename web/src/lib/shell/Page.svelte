@@ -9,6 +9,7 @@
     lead,
     children,
     wide = false,
+    inlineActions = false,
   }: {
     title: string;
     /** A meta line under the title (snippet for rich content). */
@@ -18,11 +19,13 @@
     lead?: Snippet;
     children: Snippet;
     wide?: boolean;
+    /** Phones: keep the actions beside the title block instead of wrapping them onto a row of their own. */
+    inlineActions?: boolean;
   } = $props();
 </script>
 
 <div class="page" class:wide>
-  <header>
+  <header class:inline={inlineActions}>
     <div class="titles">
       {#if lead}<div class="lead">{@render lead()}</div>{/if}
       <h1>{title}</h1>
@@ -97,6 +100,13 @@
     }
     header {
       align-items: flex-start;
+    }
+    header.inline {
+      flex-wrap: nowrap;
+    }
+    header.inline .actions {
+      flex-wrap: nowrap;
+      flex-shrink: 0;
     }
     /* The top bar shows the title on phones; the heading stays for assistive tech and the outline. */
     h1 {

@@ -80,7 +80,7 @@
   const total = $derived(counts.reduce((a, b) => a + b, 0));
   const firstBin = $derived(Math.max(0, counts.findIndex((c) => c > 0)));
   const readout = $derived(
-    hovered === null ? '' : `${name(hovered)}: ${(counts[hovered] ?? 0).toLocaleString('en-US')} ${unit}, ${total ? (((counts[hovered] ?? 0) / total) * 100).toFixed(1) : '0'} %`,
+    hovered === null ? '' : `${name(hovered)}: ${(counts[hovered] ?? 0).toLocaleString('en-US')} ${unit}, ${total ? (((counts[hovered] ?? 0) / total) * 100).toFixed(1) : '0'}%`,
   );
   function onkeydown(e: KeyboardEvent) {
     const n = counts.length;
@@ -176,7 +176,7 @@
         <caption>{label}</caption>
         <thead><tr><th scope="col">Bin</th><th scope="col">{unit}</th><th scope="col">Share</th></tr></thead>
         <tbody>
-          {#each counts as c, i (i)}<tr><th scope="row">{name(i)}</th><td>{c.toLocaleString('en-US')}</td><td>{total ? ((c / total) * 100).toFixed(1) : '0'} %</td></tr>{/each}
+          {#each counts as c, i (i)}<tr><th scope="row">{name(i)}</th><td>{c.toLocaleString('en-US')}</td><td>{total ? ((c / total) * 100).toFixed(1) : '0'}%</td></tr>{/each}
         </tbody>
       </table>
     </div>
@@ -186,7 +186,7 @@
       <div class="tip" style:left="{b.x + b.w / 2}px" style:top="{y(heightOf(hovered)) - 6}px">
         <span class="t">{name(hovered)}</span>
         <span class="v">{c.toLocaleString('en-US')} {unit}</span>
-        <span class="p">{total ? ((c / total) * 100).toFixed(1) : '0'} %</span>
+        <span class="p">{total ? ((c / total) * 100).toFixed(1) : '0'}%</span>
       </div>
     {/if}
   {/if}

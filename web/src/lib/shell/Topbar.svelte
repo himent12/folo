@@ -53,7 +53,8 @@
     <Button variant="ghost" icon={themeIcon} aria-label={themeLabel} title={themeLabel} onclick={() => prefs.cycleTheme()} />
     <span class="mobile-only"><Button variant="ghost" icon={Settings} href={href('/settings')} aria-label="Settings" /></span>
     <!-- A global shortcut, so not lime: each page keeps a single lime primary of its own. -->
-    {#if router.route.name !== 'run-new'}<span class="new-run"><Button icon={Plus} href={href('/runs/new')}>New run</Button></span>{/if}
+    <!-- On New run itself the button keeps its place (hidden), so search and the theme toggle never shift. -->
+    <span class="new-run" class:here={router.route.name === 'run-new'} inert={router.route.name === 'run-new'}><Button icon={Plus} href={href('/runs/new')}>New run</Button></span>
   </div>
 </header>
 
@@ -117,6 +118,9 @@
   }
   .crumbs li:not(.last):not(.sep) {
     flex-shrink: 0;
+  }
+  .new-run.here {
+    visibility: hidden;
   }
   .actions {
     display: flex;

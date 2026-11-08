@@ -128,7 +128,7 @@
     <div class="sk-row2"><Skeleton h="300px" r="var(--radius-lg)" /><Skeleton h="300px" r="var(--radius-lg)" /></div>
   </div>
 {:else}
-  <Page title={run.name}>
+  <Page title={run.name} inlineActions>
     {#snippet lead()}
       <StatusBadge status={run.status} />
       <span class="mono faint id">{run.id}</span>

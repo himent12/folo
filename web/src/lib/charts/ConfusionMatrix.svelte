@@ -24,7 +24,7 @@
     matrix: number[][];
     label?: string;
     /**
-     * Label only cells of at least 10 % that are at least 32 px wide, so dense matrices don't run numerals together;
+     * Label only cells of at least 10% that are at least 32 px wide, so dense matrices don't run numerals together;
      * the readout still gives every value on hover or focus.
      */
     sparseLabels?: boolean;
@@ -33,7 +33,7 @@
      * cells; on touch screens cells are at least 44 px.
      */
     minCell?: number;
-    /** Show a labelled 0–100 % colour scale under the matrix. */
+    /** Show a labelled 0–100% colour scale under the matrix. */
     scale?: boolean;
     /**
      * The palette index of each entry of `classes` (defaults to its position), for reduced matrices whose rows are a
@@ -134,7 +134,7 @@
   <div class="scale" aria-hidden="true">
     <span>Share of row</span>
     <span class="ramp"></span>
-    <span class="ticks"><span>0 %</span><span>50 %</span><span>100 %</span></span>
+    <span class="ticks"><span>0%</span><span>50%</span><span>100%</span></span>
   </div>
 {/if}
 <p class="readout" class:faint={!hovered} id="{uid}-readout">
@@ -143,9 +143,9 @@
     <b>{names[h.r]}</b> predicted as <b>{names[h.c]}</b>:
     <span class="num">{(matrix[h.r]?.[h.c] ?? 0).toLocaleString('en-US')}</span> of
     <span class="num">{(rowSums[h.r] ?? 0).toLocaleString('en-US')}</span>
-    (<span class="num">{(norm(h.r, h.c) * 100).toFixed(1)} %</span>)
+    (<span class="num">{(norm(h.r, h.c) * 100).toFixed(1)}%</span>)
   {:else}
-    Row-normalised, in %{sparseLabels ? '; cells under 10 % unlabelled' : ''}. Hover, tap or arrow through the cells for counts.
+    Row-normalised, in %{sparseLabels ? '; cells under 10% unlabelled' : ''}. Hover, tap or arrow through the cells for counts.
   {/if}
 </p>
 

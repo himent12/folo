@@ -205,10 +205,10 @@
             {#if confused}
               <p class="confused">
                 Most confused: <b>{m.classes[confused.r]}</b> → <b>{m.classes[confused.c]}</b>
-                <span class="num">{num(confused.v * 100, 1)} %</span>
+                <span class="num">{num(confused.v * 100, 1)}%</span>
               </p>
             {/if}
-            <p>Rows are the true class, columns the prediction; each row sums to 100 %. The diagonal is correct; the last
+            <p>Rows are the true class, columns the prediction; each row sums to 100%. The diagonal is correct; the last
               column is missed objects and the last row false detections on background.</p>
             {#if cm.partial}
               <p>Top {CM_MAX} classes by instances; the other {m.classes.length - CM_MAX} are folded into Other.</p>
