@@ -1339,6 +1339,14 @@ impl FoloApp {
                             "Counts of objects and unmatched detections. Hover or focus a cell to read it."
                         }),
                     }))
+                    // The grid is one Tab stop: with keyboard focus, how to move in it.
+                    .when(ring, |d| {
+                        d.child(
+                            div()
+                                .pt(px(2.))
+                                .child(text(ty::XS, t.text_tertiary).child("Arrows move · Home / End row ends · Esc clears")),
+                        )
+                    })
                     .child(
                         div().pt(px(4.)).child(
                             text(ty::XS, t.text_tertiary)

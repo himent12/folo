@@ -80,14 +80,24 @@ impl FoloApp {
                 .tooltip(crate::controls::tip("Start training", Some("Ctrl N")))
                 .into_any_element(),
         };
-        // Not connected: there's no model to run an image with (like New run beside it).
-        let open = if self.store.runs.error().is_some() {
+        // One rule for Open image: it needs a model to run (not connected, still loading or none
+        // yet, it says why, as New run beside it does).
+        let open_blocked = if self.store.runs.error().is_some() {
+            Some("Not connected")
+        } else if self.store.models.ready().is_none() {
+            Some("Loading models…")
+        } else if self.store.models.ready().is_some_and(|m| m.is_empty()) {
+            Some("Train a model first")
+        } else {
+            None
+        };
+        let open = if let Some(why) = open_blocked {
             self.button_disabled(
                 "ov-open",
                 "Open image",
                 Btn::Secondary,
                 Some("icons/image-up.svg"),
-                "Not connected",
+                why,
                 window,
                 cx,
             )
@@ -343,7 +353,8 @@ impl FoloApp {
                     .child(
                         div().flex_1().min_w_0().border_l_1().border_color(t.line_subtle).pl(px(16.)).child(
                             kpi(
-                                "mAP50-95",
+                                // Named as on the run's dashboard.
+                                "mAP50-95 · latest",
                                 text(ty::X2XL, t.text_primary)
                                     .tnum()
                                     .child(map_now.map_or("–".into(), f3))
@@ -491,7 +502,7 @@ impl FoloApp {
             };
             row = row.child(meter(
                 label,
-                g.util.map_or("–".into(), |u| format!("{:.0}%", u * 100.)),
+                g.util.map_or("–".into(), |u| format!("{:.0}% load", u * 100.)),
                 util,
                 if util > 0.95 { t.warning_solid } else { t.text_tertiary },
             ));
@@ -648,7 +659,7 @@ impl FoloApp {
             row = row
                 .child(cell(
                     crate::ui::short_gpu(&g.name),
-                    g.util.map_or("–".into(), |u| format!("{:.0}%", u * 100.)),
+                    g.util.map_or("–".into(), |u| format!("{:.0}% load", u * 100.)),
                     util,
                     // A meter, not an action: neutral like CPU and memory, amber when saturated.
                     if util > 0.95 { t.warning_solid } else { t.text_tertiary },

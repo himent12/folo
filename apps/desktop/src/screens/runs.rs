@@ -903,7 +903,10 @@ impl FoloApp {
         // A raised floor is labelled, so the axis never reads as starting at 0.
         pr.y_ticks = 2;
         if floor > 0. {
-            pr.y_tick_values = Some(vec![floor, (floor + 1.) / 2., 1.]);
+            // Every 0.2 from the floor: 0.40 / 0.60 / 0.80 / 1.00 at most (the grid the other
+            // charts' ticks sit on, not a computed middle).
+            pr.y_tick_values =
+                Some((0..).map(|k| floor + 0.2 * k as f32).take_while(|v| *v <= 1.001).collect());
         }
         pr.y_fmt = Some(|v| format!("{v:.2}"));
         let mut lr = base(
@@ -1052,10 +1055,14 @@ impl FoloApp {
         // In the axis's power of ten ("× 10⁻³" is printed once, on the axis).
         let lr_hi = (d.lr_max * 1.15).max(1e-4);
         let lr_pow = crate::charts::axis_pow(0., lr_hi, 3);
-        // The legend value carries its power too, so it reads on its own ("6.58×10⁻³").
+        // The legend value reads on its own, normalised ("6.58×10⁻³", "1.00×10⁻⁴": its own power,
+        // not the axis's, so it never shows "0.10×10⁻³").
         let lr_value = crate::charts::value_at(&d.lr, hover, 0., total).map(|x| match lr_pow {
-            Some(p) => format!("{:.2}×10{}", x * 10f32.powi(-p), crate::charts::superscript(p)),
-            None => format!("{x:.4}"),
+            Some(_) if x > 0. => {
+                let p = x.log10().floor() as i32;
+                format!("{:.2}×10{}", x * 10f32.powi(-p), crate::charts::superscript(p))
+            }
+            _ => format!("{x:.4}"),
         });
         let lr_legend =
             crate::ui::legend_value(&t, "lr", t.text_tertiary, false, lr_value).into_any_element();
@@ -1470,14 +1477,14 @@ fn is_gpu_oom(message: &str) -> bool {
 }
 
 /// The P/R chart's lower bound: the 0.2 step at least 0.05 under the lowest value, or 0 when that
-/// is under 0.2 (or there is no data yet).
+/// is under 0.4 (or there is no data yet).
 fn pr_floor(low: f32) -> f32 {
     if !low.is_finite() {
         return 0.;
     }
-    // Steps of 0.2, so the middle tick is round too (0.40 / 0.70 / 1.00, not 0.30 / 0.65).
+    // Steps of 0.2 from 0.4 (a 0.2 floor bought little and read as arbitrary).
     let f = ((low - 0.05) * 5.).floor() / 5.;
-    if f < 0.2 { 0. } else { f.min(0.8) }
+    if f < 0.4 { 0. } else { f.min(0.8) }
 }
 
 /// `D:\data\x.folo` → `D:/data/x.folo`: only whitespace-separated words that start with a drive
@@ -1514,7 +1521,8 @@ mod tests {
         assert_eq!(super::pr_floor(f32::INFINITY), 0.);
         assert_eq!(super::pr_floor(0.12), 0.);
         assert!((super::pr_floor(0.47) - 0.4).abs() < 1e-6);
-        assert!((super::pr_floor(0.36) - 0.2).abs() < 1e-6);
+        assert_eq!(super::pr_floor(0.36), 0.);
+        assert!((super::pr_floor(0.71) - 0.6).abs() < 1e-6);
         assert!((super::pr_floor(0.99) - 0.8).abs() < 1e-6);
     }
 

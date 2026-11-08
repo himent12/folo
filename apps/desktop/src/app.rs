@@ -433,6 +433,9 @@ pub struct FoloApp {
     play_image_gen: u64,
     /// Generation of the latest prediction request.
     play_pred_seq: u64,
+    /// The latest prediction hasn't answered: shown results are the previous ones (an IoU change
+    /// keeps them up meanwhile).
+    pub play_pred_pending: bool,
     /// Image generation and model the current `play_pred` belongs to.
     play_pred_for: Option<(u64, String)>,
 
@@ -589,6 +592,7 @@ impl FoloApp {
             play_load_seq: 0,
             play_image_gen: 0,
             play_pred_seq: 0,
+            play_pred_pending: false,
             play_pred_for: None,
             server_mode: ServerMode::Mock,
             server_url,
@@ -2008,6 +2012,7 @@ impl FoloApp {
             self.play_hover = None;
         }
         self.play_pred_seq += 1;
+        self.play_pred_pending = true;
         let seq = self.play_pred_seq;
         let target = self.play_target;
         // Taken with the backend handle: a switch after this makes the load's model throwaway.
@@ -2022,6 +2027,7 @@ impl FoloApp {
                 if seq == this.play_pred_seq {
                     this.play_pred = r.into();
                     this.play_pred_for = Some(key);
+                    this.play_pred_pending = false;
                 }
             },
         );

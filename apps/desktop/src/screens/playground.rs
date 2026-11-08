@@ -747,8 +747,11 @@ impl FoloApp {
                     .flex()
                     .flex_col()
                     .flex_none()
+                    // While a rerun (an IoU change) is out, the rows are the previous answer: say so.
                     .child(panel_header(&t, "Detections").child(text(ty::XS, t.text_tertiary).tnum().child(
-                        if hidden > 0 {
+                        if self.play_pred_pending {
+                            "Updating…".to_string()
+                        } else if hidden > 0 {
                             format!("{} shown · {hidden} below threshold", vis.len())
                         } else {
                             vis.len().to_string()
@@ -951,6 +954,10 @@ impl FoloApp {
         // One scrolling column: controls and sample images, then detections and their latency (no
         // pinned footer, so no dead band and nothing hidden on short windows).
         let rail = if window.viewport_size().width < px(1100.) { 280. } else { 320. };
+        let more_below = {
+            let s = &self.play_side_scroll;
+            s.max_offset().height + s.offset().y > px(1.)
+        };
         panel(&t)
             .relative()
             .w(px(rail))
@@ -978,20 +985,29 @@ impl FoloApp {
                             .child(hairline(&t))
                             .child(detections)
                             .children(timing)
-                            // Room to scroll the last row clear of the fade below.
-                            .child(div().h(px(12.))),
+                            // The panel's padding after the last row (the fade below shows only while
+                            // more lies under it).
+                            .child(div().h(px(16.))),
                     ),
             )
-            // A row cut by the rail's bottom edge fades out instead of stopping mid-glyph.
-            .child(
-                div().absolute().bottom(px(1.)).left_0().right_0().h(px(20.)).rounded_b(px(radius::LG)).bg(
-                    gpui::linear_gradient(
-                        0.,
-                        gpui::linear_color_stop(t.bg_panel, 0.),
-                        gpui::linear_color_stop(crate::theme::alpha(t.bg_panel, 0.), 1.),
-                    ),
-                ),
-            )
+            // A row cut by the rail's bottom edge fades out instead of stopping mid-glyph; at the end
+            // of the scroll there's nothing below, so no fade dims the last line.
+            .when(more_below, |d| {
+                d.child(
+                    div()
+                        .absolute()
+                        .bottom(px(1.))
+                        .left_0()
+                        .right_0()
+                        .h(px(20.))
+                        .rounded_b(px(radius::LG))
+                        .bg(gpui::linear_gradient(
+                            0.,
+                            gpui::linear_color_stop(t.bg_panel, 0.),
+                            gpui::linear_color_stop(crate::theme::alpha(t.bg_panel, 0.), 1.),
+                        )),
+                )
+            })
             .child(self.scrollbar(self.play_side_scroll.clone(), cx))
             .into_any_element()
     }
