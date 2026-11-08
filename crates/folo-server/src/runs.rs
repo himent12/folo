@@ -82,6 +82,8 @@ struct RunState {
     /// The trainer's final status, published once the worker has let go of the run (so a client that sees it may
     /// resume or delete the run right away).
     outcome: Option<(RunStatus, Option<String>)>,
+    /// Removed from the registry: every later request treats the run as unknown.
+    deleted: bool,
 }
 
 /// One run.
@@ -114,7 +116,13 @@ impl RunEntry {
         RunEntry {
             id,
             dir,
-            state: Mutex::new(RunState { file, tail: Vec::new(), claimed: false, outcome: None }),
+            state: Mutex::new(RunState {
+                file,
+                tail: Vec::new(),
+                claimed: false,
+                outcome: None,
+                deleted: false,
+            }),
             tx,
             stop: Arc::new(AtomicBool::new(false)),
         }
@@ -231,7 +239,7 @@ impl RunEntry {
             }
             RunEvent::Log(l) => self.write_log(l),
         }
-        drop(st);
+        // Sent under the state lock, so subscribers see transitions in the order they happen.
         self.send(ev.clone());
     }
 }
@@ -434,16 +442,22 @@ impl Runs {
                     q = self.wake.wait(q).unwrap();
                 };
                 let Ok(entry) = self.get(&id) else { continue };
-                let mut st = entry.state.lock().unwrap();
-                if st.file.run.status != RunStatus::Queued {
-                    continue;
-                }
-                st.claimed = true;
-                drop(st);
                 // Set before the queue lock is released, so `enqueue` counts the runs ahead exactly.
                 *self.active.lock().unwrap() = Some(entry.clone());
                 entry
             };
+            // Lock order: a run's state before the queue (as `stop` takes them), so the queue lock is released
+            // first. A run stopped or deleted between the two is skipped.
+            {
+                let mut st = entry.state.lock().unwrap();
+                if st.file.run.status != RunStatus::Queued || st.deleted {
+                    drop(st);
+                    *self.active.lock().unwrap() = None;
+                    self.idle.notify_all();
+                    continue;
+                }
+                st.claimed = true;
+            }
             let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| execute(&entry)));
             let mut st = entry.state.lock().unwrap();
             let (status, error) = match (ran, st.outcome.take()) {
@@ -472,44 +486,46 @@ impl Runs {
     pub fn stop(&self, id: &str) -> Result<Run> {
         let e = self.get(id)?;
         let mut st = e.state.lock().unwrap();
+        if st.deleted {
+            return Err(Error::not_found("run", id));
+        }
         match st.file.run.status {
             RunStatus::Queued if !st.claimed => {
                 self.queue.lock().unwrap().ids.retain(|q| q != id);
                 e.finish(&mut st, RunStatus::Stopped, None);
+                let run = st.file.run.clone();
                 drop(st);
                 e.log(LogLevel::Info, "stopped before it started");
+                Ok(run)
             }
             RunStatus::Queued | RunStatus::Running => {
                 e.stop.store(true, Ordering::Relaxed);
                 st.file.run.status = RunStatus::Stopping;
                 e.persist(&st);
-                drop(st);
                 e.send(RunEvent::Status(StatusEvent { status: RunStatus::Stopping, error: None }));
+                let run = st.file.run.clone();
+                drop(st);
                 e.log(LogLevel::Info, "stop requested; stopping after the current batch");
+                Ok(run)
             }
-            RunStatus::Stopping => {}
-            s => {
-                return Err(Error::conflict(
-                    "run_not_active",
-                    format!(
-                        "run '{id}' is already {}",
-                        serde_json::to_value(s).unwrap().as_str().unwrap_or("")
-                    ),
-                ));
-            }
+            RunStatus::Stopping => Ok(st.file.run.clone()),
+            s => Err(Error::conflict(
+                "run_not_active",
+                format!("run '{id}' is already {}", serde_json::to_value(s).unwrap().as_str().unwrap_or("")),
+            )),
         }
-        Ok(e.run())
     }
 
     /// Deletes a finished run and its folder.
     pub fn delete(&self, id: &str) -> Result<PathBuf> {
         let mut list = self.list.write().unwrap();
         let e = list.iter().find(|e| e.id == id).cloned().ok_or_else(|| Error::not_found("run", id))?;
-        let st = e.state.lock().unwrap();
+        let mut st = e.state.lock().unwrap();
         if st.file.run.status.is_active() || st.claimed {
             return Err(Error::conflict("run_active", format!("run '{id}' is still active"))
                 .hint("stop it first (POST /api/runs/{id}/stop)"));
         }
+        st.deleted = true;
         list.retain(|x| x.id != id);
         drop(st);
         drop(list);
@@ -529,6 +545,9 @@ impl Runs {
     ) -> Result<Run> {
         let e = self.get(id)?;
         let mut st = e.state.lock().unwrap();
+        if st.deleted {
+            return Err(Error::not_found("run", id));
+        }
         let status = st.file.run.status;
         if status.is_active() || st.claimed {
             return Err(Error::conflict("run_active", format!("run '{id}' is still active")));
@@ -578,9 +597,9 @@ impl Runs {
         st.tail.clear();
         e.stop.store(false, Ordering::Relaxed);
         e.persist(&st);
+        e.send(RunEvent::Status(StatusEvent { status: RunStatus::Queued, error: None }));
         let run = st.file.run.clone();
         drop(st);
-        e.send(RunEvent::Status(StatusEvent { status: RunStatus::Queued, error: None }));
         e.log(
             LogLevel::Info,
             if last.is_file() {

@@ -374,13 +374,14 @@ impl RealStore {
     }
 
     /// The dataset `/eval` validates `m` on and its index fingerprint: its run's dataset (the registered copy when
-    /// it still is), else the first registered dataset with the model's classes.
-    fn eval_dataset(&self, m: &ModelRef) -> Result<(DatasetRef, String)> {
+    /// it still is, else the path the run trained on, with no fingerprint: such results are not cached), else the
+    /// first registered dataset with the model's classes.
+    fn eval_dataset(&self, m: &ModelRef) -> Result<(DatasetRef, Option<String>)> {
         if let Some(d) = &m.dataset {
             return Ok(
                 match self.entry(&d.id).and_then(|e| Ok((self.dataset_ref(&e), self.fresh_index(&e)?))) {
-                    Ok((r, idx)) => (r, idx.fingerprint.hash.clone()),
-                    Err(_) => (d.clone(), "unregistered".into()),
+                    Ok((r, idx)) => (r, Some(idx.fingerprint.hash.clone())),
+                    Err(_) => (d.clone(), None),
                 },
             );
         }
@@ -389,7 +390,7 @@ impl RealStore {
             if let Ok(idx) = self.fresh_index(&e)
                 && idx.classes == m.model.classes
             {
-                return Ok((self.dataset_ref(&e), idx.fingerprint.hash.clone()));
+                return Ok((self.dataset_ref(&e), Some(idx.fingerprint.hash.clone())));
             }
         }
         Err(Error::not_found("dataset", "?").hint(format!(
@@ -743,7 +744,7 @@ impl Store for RealStore {
         let m = self.model(id)?;
         let (ds, key) = self.eval_dataset(&m)?;
         let device = engine::resolve(&self.device)?;
-        self.models.eval(&m, &ds, &key, device)
+        self.models.eval(&m, &ds, key.as_deref(), device)
     }
 
     fn export_model(&self, id: &str, format: ExportFormat) -> Result<ExportResult> {

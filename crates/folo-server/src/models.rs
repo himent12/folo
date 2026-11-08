@@ -200,14 +200,16 @@ impl Models {
     }
 
     /// `/eval` of `m` on the validation split (training split when there is none) of `dataset`, whose index has
-    /// fingerprint `ds_key`. Cached per (weights file version, dataset version).
+    /// fingerprint `ds_key`. Cached per (weights file version, dataset version); computed every time when the
+    /// dataset has no fingerprint (it is not registered, so a change to its files could not be noticed).
     pub fn eval(
         &self,
         m: &ModelRef,
         dataset: &DatasetRef,
-        ds_key: &str,
+        ds_key: Option<&str>,
         device: Device,
     ) -> Result<ModelEval> {
+        let Some(ds_key) = ds_key else { return evaluate(&m.path, dataset, device) };
         let fk = FileKey::of(&m.path).map_err(|e| Error::internal(format!("{}: {e}", m.path.display())))?;
         let mtime = fk
             .modified

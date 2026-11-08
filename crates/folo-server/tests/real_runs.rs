@@ -376,6 +376,8 @@ async fn train_evaluate_predict_and_reload() {
     assert_eq!(status, StatusCode::NO_CONTENT);
     assert!(!home.join("runs").join(&tuned.id).exists());
     err(&app, get(&format!("/api/runs/{}", tuned.id)), StatusCode::NOT_FOUND, "run_not_found").await;
+    let r = json!({ "resume_run_id": tuned.id });
+    err(&app, post_json("/api/runs", r), StatusCode::NOT_FOUND, "run_not_found").await;
     assert_eq!(ok::<ModelList>(&app, get("/api/models")).await.models.len(), models.models.len());
 }
 
@@ -435,6 +437,12 @@ async fn queue_stop_resume_and_restart() {
     err(&app, delete(&format!("/api/runs/{}", a.id)), StatusCode::CONFLICT, "run_active").await;
     let stopping: Run = ok(&app, post(&format!("/api/runs/{}/stop", a.id))).await;
     assert!(matches!(stopping.status, RunStatus::Stopping | RunStatus::Stopped), "{:?}", stopping.status);
+    // Stopping again while it stops answers at once (with the run, or 409 once it has stopped).
+    let again =
+        tokio::time::timeout(Duration::from_secs(10), send(&app, post(&format!("/api/runs/{}/stop", a.id))))
+            .await
+            .expect("a repeated stop answers");
+    assert!(matches!(again.0, StatusCode::OK | StatusCode::CONFLICT), "{}", again.0);
     let events = sse.until_status(&["stopped", "completed", "failed"]).await;
     assert_eq!(events.last().unwrap().1["status"], "stopped", "{events:?}");
     let a1: Run = ok(&app, get(&format!("/api/runs/{}", a.id))).await;
