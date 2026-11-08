@@ -12,6 +12,8 @@
     area?: boolean;
     /** Thin, recessive line (e.g. raw values under a smoothed line); hidden from legend and tooltip. */
     ghost?: boolean;
+    /** Thicker line drawn above the others (e.g. a mean over many thin per-class lines). */
+    emphasis?: boolean;
   }
 
   export interface Marker {
@@ -266,7 +268,7 @@
           </defs>
           {#each paths as { s, d, a } (s.id)}
             {#if a}<path class="area" d={a} fill="url(#{uid}-{s.id})" />{/if}
-            <path class="line" class:dashed={s.dashed} class:ghost={s.ghost} {d} style:stroke={s.color} />
+            <path class="line" class:dashed={s.dashed} class:ghost={s.ghost} class:emphasis={s.emphasis} {d} style:stroke={s.color} />
           {/each}
 
           {#each markers as m (m.label + m.x)}
@@ -384,6 +386,9 @@
   .line.dashed {
     stroke-dasharray: 4 3;
     stroke-width: 1.5;
+  }
+  .line.emphasis {
+    stroke-width: 2.75;
   }
   .line.ghost {
     stroke-width: 1;

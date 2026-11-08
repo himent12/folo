@@ -14,6 +14,8 @@
   import Toaster from '$lib/ui/Toaster.svelte';
   import Dataset from './routes/Dataset.svelte';
   import Datasets from './routes/Datasets.svelte';
+  import Model from './routes/Model.svelte';
+  import Models from './routes/Models.svelte';
   import NotFound from './routes/NotFound.svelte';
   import Overview from './routes/Overview.svelte';
   import Run from './routes/Run.svelte';
@@ -21,6 +23,8 @@
   import RunNew from './routes/RunNew.svelte';
   import RunCompare from './routes/RunCompare.svelte';
   import Placeholder from './routes/Placeholder.svelte';
+  import Playground from './routes/Playground.svelte';
+  import Settings from './routes/Settings.svelte';
 
   const screens: Partial<Record<RouteName, Component>> = {
     overview: Overview,
@@ -30,6 +34,10 @@
     'run-compare': RunCompare,
     datasets: Datasets,
     dataset: Dataset,
+    models: Models,
+    model: Model,
+    playground: Playground,
+    settings: Settings,
   };
 
   const titles: Record<string, string> = {

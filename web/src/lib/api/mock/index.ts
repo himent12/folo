@@ -630,6 +630,8 @@ export class MockApi implements Api {
         boxes = inventBoxes(width, height, hash(`${input.file.size}:${width}x${height}`), m.classes.length);
       }
       const conf = opts.conf ?? 0.25;
+      // A loose NMS threshold lets near-duplicate boxes through, as on the real server.
+      if ((opts.iou ?? 0.7) > 0.8) boxes = withDuplicates(boxes, width, height, hash(m.id) ^ (width * 31 + height));
       const r = rng(hash(m.id) + width + height);
       const scale = (m.imgsz / 640) ** 2;
       const inference = archInfo[m.arch].ms * scale * (1 + (r() - 0.5) * 0.08);
@@ -690,6 +692,20 @@ export function predictBoxes(truth: Box[], W: number, H: number, quality: number
     const x1 = range(r, 0, W - w);
     const y1 = range(r, 0, H - h);
     out.push(clampBox({ class: Math.floor(r() * classes), x1, y1, x2: x1 + w, y2: y1 + h, score: range(r, 0.04, 0.42) }, W, H));
+  }
+  return out.sort((a, b) => b.score - a.score);
+}
+
+/** Adds lower-scored, slightly shifted copies of some boxes (IoU ≈ 0.75–0.9 with the original). */
+function withDuplicates(boxes: ScoredBox[], W: number, H: number, seed: number): ScoredBox[] {
+  const r = rng(seed);
+  const out = [...boxes];
+  for (const b of boxes) {
+    if (b.score < 0.3 || r() > 0.55) continue;
+    const w = b.x2 - b.x1;
+    const h = b.y2 - b.y1;
+    const j = () => (r() - 0.5) * 0.08;
+    out.push(clampBox({ ...b, x1: b.x1 + w * j(), y1: b.y1 + h * j(), x2: b.x2 + w * j(), y2: b.y2 + h * j(), score: b.score * range(r, 0.45, 0.8) }, W, H));
   }
   return out.sort((a, b) => b.score - a.score);
 }
