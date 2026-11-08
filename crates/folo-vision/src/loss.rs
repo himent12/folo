@@ -11,14 +11,16 @@
 //! # Steps (map to the spec)
 //!
 //! 1. [`assign_batch`] (§7.1, §7.3), **detached, on the host**: the raw outputs are read once as `&[f32]`
-//!    (borrowed on the CPU, downloaded otherwise: the only device-to-host transfer of the loss), each image's boxes
+//!    (borrowed on the CPU, downloaded otherwise: the loss's only full-size device-to-host transfer; on a device the
+//!    CIoU `atan` also round-trips `N_fg` values and the reported items read back four scalars), each image's boxes
 //!    are DFL-decoded to pixels and its class scores of the classes present are passed through a sigmoid, and
 //!    [`assign`] runs per image (images in parallel). The result, [`BatchAssignment`], lists the foreground
 //!    anchors of the whole batch in a fixed order (image, then anchor).
 //! 2. [`loss_with_assignment`] (§7.4) builds the differentiable terms. The foreground entries are gathered once by
 //!    flat index (no per-anchor tensor work):
-//!    - `L_cls = (Σ softplus(cls_raw) − Σ_fg cls_raw[label] · t) / tss`, which equals `Σ BCE(cls_raw, T) / tss`
-//!      because `T` is zero except at the assigned class of foreground anchors.
+//!    - `L_cls = (Σ_bg softplus(x) + Σ_fg (softplus(x) − x · t)) / tss` over `x = cls_raw`, which equals
+//!      `Σ BCE(cls_raw, T) / tss` because `T` is zero except at the assigned class of foreground anchors. Each
+//!      foreground term is formed before summing, so confident positives do not cancel.
 //!    - `pd_box` (grid units) = anchor ∓ `Σ_i i · softmax(logits)_i`, and `L_box = Σ_fg t · (1 − CIoU) / tss` with
 //!      [`ciou`], the tensor form of [`crate::boxes::ciou_eps`] (α detached).
 //!    - `L_dfl = Σ_fg t · DFL / tss` from `log_softmax` gathered at the two target bins.
@@ -193,6 +195,8 @@ pub struct LossOutput {
     /// `box_raw` and `cls_raw`. When the head output was non-finite it is a detached NaN: check
     /// [`LossOutput::is_finite`] before calling `backward()`.
     pub total: Tensor,
+    /// The value of `total` (it can overflow to infinity even when every item is finite).
+    pub total_value: f32,
     /// The detached, reported items (§7.4).
     pub items: LossItems,
     /// Foreground anchors in the batch.
@@ -202,9 +206,10 @@ pub struct LossOutput {
 }
 
 impl LossOutput {
-    /// Whether the loss is finite; the trainer skips backward otherwise (§8.3).
+    /// Whether the loss is finite: the reported items and the batch-scaled `total`. The trainer skips backward
+    /// otherwise (§8.3).
     pub fn is_finite(&self) -> bool {
-        self.items.is_finite()
+        self.items.is_finite() && self.total_value.is_finite()
     }
 }
 
@@ -422,6 +427,18 @@ fn softplus(x: f32) -> f32 {
     x.max(0.0) + fast_exp(-x.abs()).ln_1p()
 }
 
+/// `Σ softplus(x)` with 8 independent accumulators (vectorises).
+fn softplus_sum(r: &[f32]) -> f32 {
+    let mut acc = [0f32; 8];
+    let (chunks, rest) = r.as_chunks::<8>();
+    for ch in chunks {
+        for (a, &x) in acc.iter_mut().zip(ch) {
+            *a += softplus(x);
+        }
+    }
+    acc.iter().sum::<f32>() + rest.iter().map(|&x| softplus(x)).sum::<f32>()
+}
+
 /// Stable sigmoid, as folo-core computes it.
 #[inline(always)]
 fn sigmoid_fast(x: f32) -> f32 {
@@ -438,25 +455,37 @@ fn sigmoid_fast(x: f32) -> f32 {
 /// summed in parallel, each serially, and combined in row order in `f64`, so the result is reproducible.
 fn bce_sum_cpu(x: &Tensor, idx: Vec<usize>, t: Vec<f32>) -> Result<Tensor> {
     let row = x.dims().last().copied().unwrap_or(1).max(1);
+    // Foreground positions sorted, so each row finds its own with a binary search. They are distinct (checked by
+    // the caller). The dense sum skips them and each gets its own `BCE(x, t)`: summing `softplus(x)` and `x · t`
+    // separately would cancel catastrophically for confident positives (large `x`, `t ≈ 1`).
+    let mut order: Vec<usize> = (0..idx.len()).collect();
+    order.sort_unstable_by_key(|&k| idx[k]);
+    let pos: Vec<usize> = order.iter().map(|&k| idx[k]).collect();
     let value = x.with_f32_slice(|v| {
         let rows: Vec<f32> = v
             .par_chunks(row * PAR_ROWS)
-            .flat_map_iter(|c| {
-                c.chunks(row).map(|r| {
-                    let mut acc = [0f32; 8];
-                    let (chunks, rest) = r.as_chunks::<8>();
-                    for ch in chunks {
-                        for (a, &x) in acc.iter_mut().zip(ch) {
-                            *a += softplus(x);
-                        }
+            .enumerate()
+            .flat_map_iter(|(ci, c)| {
+                let pos = &pos;
+                c.chunks(row).enumerate().map(move |(ri, r)| {
+                    let start = (ci * PAR_ROWS + ri) * row;
+                    let lo = pos.partition_point(|&p| p < start);
+                    let hi = pos.partition_point(|&p| p < start + r.len());
+                    let mut s = 0f32;
+                    let mut from = 0;
+                    for &p in &pos[lo..hi] {
+                        s += softplus_sum(&r[from..p - start]);
+                        from = p - start + 1;
                     }
-                    acc.iter().sum::<f32>() + rest.iter().map(|&x| softplus(x)).sum::<f32>()
+                    s + softplus_sum(&r[from..])
                 })
             })
             .collect();
-        let sp: f64 = rows.iter().map(|&r| r as f64).sum();
-        let tx: f64 = idx.iter().zip(&t).map(|(&i, &t)| v[i] as f64 * t as f64).sum();
-        (sp - tx) as f32
+        let dense: f64 = rows.iter().map(|&r| r as f64).sum();
+        // softplus(x) >= max(x, 0) and t in [0, 1], so every foreground term is >= 0.
+        let fg: f64 =
+            order.iter().map(|&k| softplus(v[idx[k]]) as f64 - v[idx[k]] as f64 * t[k] as f64).sum();
+        (dense + fg) as f32
     })?;
     let xs = x.detach();
     Tensor::custom_op("bce_with_logits_sum", &[x], Tensor::scalar(value), move |g| {
@@ -597,6 +626,12 @@ fn loss_impl(
             bin_w.extend([wl * wt, wr * wt]);
         }
     }
+    // An anchor has at most one gt (§7.3 step 4); the BCE kernels rely on distinct foreground positions.
+    let mut keys: Vec<usize> = (0..n).map(|k| asg.image[k] as usize * n_a + asg.anchor[k] as usize).collect();
+    keys.sort_unstable();
+    if keys.windows(2).any(|w| w[0] == w[1]) {
+        return Err(invalid("assignment lists an anchor of an image more than once"));
+    }
     let on_dev = |t: Tensor| t.to_device(dev);
     let index = |v: Vec<usize>| -> Result<Tensor> {
         let len = v.len();
@@ -604,18 +639,24 @@ fn loss_impl(
     };
     let t = on_dev(Tensor::from_slice(&asg.score, [n])?)?;
 
-    // Classification: Σ BCE(x, T) = Σ softplus(x) − Σ_fg x[label] · t, since T is t at the assigned class of each
-    // foreground anchor and 0 elsewhere. The composite sums per-(image, class) rows to keep a fixed order.
+    // Classification: Σ BCE(x, T) = Σ_bg softplus(x) + Σ_fg (softplus(x) − x · t), since T is t at the assigned
+    // class of each foreground anchor and 0 elsewhere. Foreground terms are formed per element before any sum, so a
+    // confident positive (large x, t ≈ 1) does not cancel against a large dense sum.
     let cls_sum = if fused {
         bce_sum_cpu(cls_raw, idx_cls, asg.score.clone())?
+    } else if n == 0 {
+        sum_fixed_order(&cls_raw.softplus()?.sum(2, false)?)?
     } else {
-        let sp = sum_fixed_order(&cls_raw.softplus()?.sum(2, false)?)?;
-        if n == 0 {
-            sp
-        } else {
-            let x_fg = cls_raw.flatten_all()?.index_select(0, &index(idx_cls)?)?;
-            sp.sub(&sum_fixed_order(&x_fg.mul(&t)?)?)?
-        }
+        // Move the foreground logits to −100 (softplus ≈ 4e-44, gradient ≈ 0) for the dense sum; the shift is
+        // detached and `index_add` passes the gradient through to `cls_raw` unchanged. Per-(image, class) row sums
+        // keep a fixed order.
+        let idx = index(idx_cls)?;
+        let flat = cls_raw.flatten_all()?;
+        let x_fg = flat.index_select(0, &idx)?;
+        let shift = x_fg.detach().neg()?.sub_scalar(100.0)?;
+        let bg = flat.index_add(0, &idx, &shift)?.reshape(cls_raw.dims())?;
+        let dense = sum_fixed_order(&bg.softplus()?.sum(2, false)?)?;
+        dense.add(&sum_fixed_order(&x_fg.softplus()?.sub(&x_fg.mul(&t)?)?)?)?
     };
 
     let (l_box, l_dfl) = if n == 0 {
@@ -649,7 +690,8 @@ fn loss_impl(
         (l_box.mul_scalar(cfg.box_gain)?, l_cls.mul_scalar(cfg.cls_gain)?, l_dfl.mul_scalar(cfg.dfl_gain)?);
     let items = LossItems { box_: wb.item::<f32>()?, cls: wc.item::<f32>()?, dfl: wd.item::<f32>()? };
     let total = wb.add(&wc)?.add(&wd)?.mul_scalar(b as f32)?;
-    Ok(LossOutput { total, items, num_fg: n, target_score_sum: tss_raw as f32 })
+    let total_value = total.item::<f32>()?;
+    Ok(LossOutput { total, total_value, items, num_fg: n, target_score_sum: tss_raw as f32 })
 }
 
 /// The full detection loss of `docs/MODEL.md` §7: [`assign_batch`] then [`loss_with_assignment`].
@@ -669,6 +711,7 @@ pub fn detection_loss(
         let nan = f32::NAN;
         return Ok(LossOutput {
             total: Tensor::scalar(nan).to_device(cls_raw.device())?,
+            total_value: nan,
             items: LossItems { box_: nan, cls: nan, dfl: nan },
             num_fg: 0,
             target_score_sum: 0.0,
@@ -712,6 +755,64 @@ mod tests {
                 assert!((x - y).abs() <= 1e-6 + 1e-5 * y.abs(), "element {i}: {x} vs {y}");
             }
         }
+    }
+
+    /// Confident positives (logit ≈ 80, t = 1) among background logits: BCE is non-negative and tiny, on both
+    /// kernel paths. Summing softplus and `x · t` separately would leave an error of about ulp(80) ≈ 8e-6, of
+    /// either sign.
+    #[test]
+    fn confident_positives_do_not_cancel() {
+        let anchors = make_anchors(64, 64, &[8], 0.5);
+        let a = anchors.len();
+        let mut cls = vec![-30.0f32; 2 * a];
+        let fg = [3usize, 17, 40, 63];
+        for (k, &an) in fg.iter().enumerate() {
+            cls[a + an] = 80.4 + 0.1 * k as f32; // class 1
+        }
+        let cls_raw = Tensor::from_vec(cls, [1, 2, a]).unwrap().requires_grad_();
+        let box_raw = Tensor::zeros([1, 64, a]);
+        let asg = BatchAssignment {
+            batch: 1,
+            num_anchors: a,
+            num_classes: 2,
+            image: vec![0; 4],
+            anchor: fg.iter().map(|&an| an as u32).collect(),
+            label: vec![1; 4],
+            score: vec![1.0; 4],
+            target: vec![Xyxy::new(0.0, 0.0, 64.0, 64.0); 4],
+            inputs_finite: true,
+        };
+        let cfg = LossConfig::default();
+        // Background: 2A − 4 logits at −30; foreground terms ≈ e^-80 ≈ 0. tss = 4.
+        let want = 0.5 * (2 * a - 4) as f64 * (-30f64).exp().ln_1p() / 4.0;
+        for fused in [true, false] {
+            let out = loss_impl(&box_raw, &cls_raw, &anchors, &asg, &cfg, fused).unwrap();
+            let got = out.items.cls as f64;
+            assert!(got >= 0.0 && (got - want).abs() <= 1e-6 * want, "fused {fused}: {got} vs {want}");
+            // d/dx = B · 0.5 · (sigmoid(x) − T) / tss ≈ 0 at the positives.
+            let g = out.total.backward().unwrap().get(&cls_raw).unwrap().to_vec::<f32>().unwrap();
+            assert!(fg.iter().all(|&an| g[a + an].abs() < 1e-9), "fused {fused}");
+        }
+    }
+
+    /// Duplicate foreground anchors are rejected (an anchor has at most one gt).
+    #[test]
+    fn rejects_duplicate_anchors() {
+        let anchors = make_anchors(32, 32, &[8], 0.5);
+        let a = anchors.len();
+        let asg = BatchAssignment {
+            batch: 1,
+            num_anchors: a,
+            num_classes: 2,
+            image: vec![0, 0],
+            anchor: vec![5, 5],
+            label: vec![0, 1],
+            score: vec![0.5, 0.5],
+            target: vec![Xyxy::new(0.0, 0.0, 32.0, 32.0); 2],
+            inputs_finite: true,
+        };
+        let (box_raw, cls_raw) = (Tensor::zeros([1, 64, a]), Tensor::zeros([1, 2, a]));
+        assert!(loss_with_assignment(&box_raw, &cls_raw, &anchors, &asg, &LossConfig::default()).is_err());
     }
 
     #[test]

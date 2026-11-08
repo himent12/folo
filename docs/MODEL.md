@@ -556,11 +556,14 @@ Implementation: `folo_vision::loss` (`detection_loss`, `LossConfig` with these w
 - `targets_from_normalized` turns the loader's `[batch_idx, class, cx, cy, w, h]` rows into per-image `xyxy` pixel
   boxes (`ImageTargets`).
 - `assign_batch` is §7.1 and §7.3: it reads `box_raw` / `cls_raw` once on the host (borrowed on the CPU, downloaded
-  from a device; the loss's only device-to-host transfer), decodes boxes to pixels, takes the sigmoid of the score
-  columns of the classes present, and runs `assign::assign` per image, images in parallel. The result
-  (`BatchAssignment`) lists the foreground anchors in image-then-anchor order with `t[a]`, class and gt box.
+  from a device: the loss's only full-size device-to-host transfer; CIoU's `atan` also round-trips `N_fg` values and
+  the items read back four scalars), decodes boxes to pixels, takes the sigmoid of the score columns of the classes
+  present, and runs `assign::assign` per image, images in parallel. The result (`BatchAssignment`) lists the
+  foreground anchors in image-then-anchor order with `t[a]`, class and gt box.
 - `loss_with_assignment` is §7.4 for that fixed assignment. `Σ BCE(cls_raw, T)` is computed as
-  `Σ softplus(cls_raw) − Σ_fg cls_raw[class] · t` (`T` is zero elsewhere). The foreground box logits are gathered
+  `Σ_bg softplus(x) + Σ_fg (softplus(x) − x · t)` (`T` is zero off the foreground), each foreground term formed
+  before summing so confident positives do not cancel against the dense sum. `LossOutput::is_finite` also checks
+  the batch-scaled total, which can overflow when the items do not. The foreground box logits are gathered
   once by flat index into `[N_fg, 4, reg_max]`; `pd_box` is the softmax expectation in grid units, `loss::ciou` is
   `boxes::ciou_eps` in tensor ops (α under `no_grad`), and DFL gathers `log_softmax` at bins `j, j + 1` with weights
   `t[a] · w / 4`. On the CPU the BCE sum and the gather are fused custom ops with hand-written backwards; other

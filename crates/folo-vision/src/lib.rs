@@ -10,7 +10,7 @@
 //! - [`metrics`]: COCO-style mAP, precision / recall / F1, PR curves and a confusion matrix (`docs/METRICS.md`).
 //! - [`assign`]: the task-aligned assigner and DFL target encoding.
 //! - [`loss`]: the detection loss (BCE + CIoU + DFL) on folo-core tensors, with autograd. The assigner runs on
-//!   host copies of the detached head outputs; that read is the loss's only device-to-host transfer.
+//!   host copies of the detached head outputs; that read is the loss's only full-size device-to-host transfer.
 //!
 //! See `docs/ARCHITECTURE.md` for how this crate fits into FOLO.
 

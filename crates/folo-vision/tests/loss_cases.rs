@@ -484,6 +484,25 @@ fn non_finite_head_output_gives_a_non_finite_loss() {
     }
 }
 
+/// Every item finite but the batch-scaled total overflows: still non-finite (§8.3 skips it).
+#[test]
+fn total_overflow_is_non_finite() {
+    let anchors = make_anchors(32, 32, &[32], 0.5);
+    assert_eq!(anchors.len(), 1);
+    let box_raw = Tensor::zeros([4, 64, 1]);
+    let cls_raw = Tensor::full([4, 1, 1], 5e37);
+    let out = detection_loss(
+        &box_raw,
+        &cls_raw,
+        &anchors,
+        &vec![ImageTargets::default(); 4],
+        &LossConfig::default(),
+    )
+    .unwrap();
+    assert!(out.items.is_finite(), "{:?}", out.items);
+    assert!(out.total_value.is_infinite() && !out.is_finite());
+}
+
 #[test]
 fn targets_from_normalized_converts_and_validates() {
     let rows =
