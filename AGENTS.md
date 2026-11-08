@@ -58,5 +58,6 @@ crates/folo-server   axum HTTP + SSE API used by Studio and by agents; serves th
 crates/folo-cli      the `folo` binary (train / val / predict / export / serve / mcp / doctor)
 web/                 FOLO Studio (Svelte 5 + TypeScript + Vite, custom design system, no UI kit)
 apps/desktop/        FOLO Desktop (Rust + GPUI, its own cargo workspace; talks to folo-server over docs/API.md)
-docs/                ARCHITECTURE, MODEL (detector spec), API (HTTP contract), CLI, FORMAT (.folo), ROADMAP, BOAT
+bench/baselines/     incumbent (Ultralytics) benchmark scripts + raw results; numbers and FOLO targets in docs/BENCHMARKS.md
+docs/                ARCHITECTURE, MODEL (detector spec), API (HTTP contract), CLI, FORMAT (.folo), ROADMAP, BOAT, BENCHMARKS
 ```

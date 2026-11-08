@@ -1,0 +1,2349 @@
+{
+  "schema": 2,
+  "date": "2026-11-07T23:30:44-0800",
+  "notes": "Measured 2026-11-07 on one machine with one venv and the same measurement settings; sections were run in separate invocations and merged. Between invocations the script changed only in contention bookkeeping and in the CPU forward-only path (channels_last, matching AutoBackend); the cpu section was re-run after that change. sections_meta was backfilled from the top-level environment/config. Rows predate per-row 'contention_samples' (the GPU sampler then took a sample every ~6.5 s), so an empty other_gpu_load_pct on a short row means the section's samples saw no other load, not that the row itself was sampled. Train repeats 0-1 predate per-epoch cpu_cores_busy.",
+  "environment": {
+    "python": "3.12.10",
+    "torch": "2.11.0+cu128",
+    "torch_cuda": "12.8",
+    "cudnn": 91900,
+    "ultralytics": "8.4.198",
+    "numpy": "2.5.4",
+    "opencv": "5.0.0",
+    "os": "Windows-11-10.0.26300-SP0",
+    "cpu": "Intel(R) Core(TM) i7-14700KF",
+    "cpu_logical": 28,
+    "cpu_physical": 20,
+    "torch_default_threads": 1,
+    "OMP_NUM_THREADS": "1",
+    "gpu": "NVIDIA GeForce RTX 4080 SUPER",
+    "nvidia_smi": {
+      "name": "NVIDIA GeForce RTX 4080 SUPER",
+      "driver_version": "621.01",
+      "memory.used": "2236",
+      "memory.total": "16376",
+      "utilization.gpu": "19",
+      "clocks.sm": "240",
+      "clocks.max.sm": "3105",
+      "power.draw": "22.26",
+      "temperature.gpu": "37.48"
+    },
+    "other_gpu_load_at_start": {},
+    "tf32_defaults": {
+      "cudnn.allow_tf32": true,
+      "cuda.matmul.allow_tf32": false
+    }
+  },
+  "config": {
+    "imgsz": 640,
+    "models": [
+      "yolo26n",
+      "yolo26s",
+      "yolo26m"
+    ],
+    "train_models": [
+      "yolo26n",
+      "yolo26s"
+    ],
+    "synthetic_dataset": {
+      "train": 512,
+      "val": 64,
+      "classes": 3,
+      "path": "D:\\folo-bench\\data"
+    },
+    "quick": false,
+    "cpu_threads": [
+      28,
+      20,
+      8
+    ]
+  },
+  "sections_meta": {
+    "params": {
+      "environment": {
+        "python": "3.12.10",
+        "torch": "2.11.0+cu128",
+        "torch_cuda": "12.8",
+        "cudnn": 91900,
+        "ultralytics": "8.4.198",
+        "numpy": "2.5.4",
+        "opencv": "5.0.0",
+        "os": "Windows-11-10.0.26300-SP0",
+        "cpu": "Intel(R) Core(TM) i7-14700KF",
+        "cpu_logical": 28,
+        "cpu_physical": 20,
+        "torch_default_threads": 1,
+        "OMP_NUM_THREADS": "1",
+        "gpu": "NVIDIA GeForce RTX 4080 SUPER",
+        "nvidia_smi": {
+          "name": "NVIDIA GeForce RTX 4080 SUPER",
+          "driver_version": "621.01",
+          "memory.used": "2236",
+          "memory.total": "16376",
+          "utilization.gpu": "19",
+          "clocks.sm": "240",
+          "clocks.max.sm": "3105",
+          "power.draw": "22.26",
+          "temperature.gpu": "37.48"
+        },
+        "other_gpu_load_at_start": {},
+        "tf32_defaults": {
+          "cudnn.allow_tf32": true,
+          "cuda.matmul.allow_tf32": false
+        }
+      },
+      "config": {
+        "imgsz": 640,
+        "models": [
+          "yolo26n",
+          "yolo26s",
+          "yolo26m"
+        ],
+        "train_models": [
+          "yolo26n",
+          "yolo26s"
+        ],
+        "synthetic_dataset": {
+          "train": 512,
+          "val": 64,
+          "classes": 3,
+          "path": "D:\\folo-bench\\data"
+        },
+        "quick": false,
+        "cpu_threads": [
+          28,
+          20,
+          8
+        ],
+        "epochs": 2
+      },
+      "backfilled": true
+    },
+    "gpu_fwd": {
+      "environment": {
+        "python": "3.12.10",
+        "torch": "2.11.0+cu128",
+        "torch_cuda": "12.8",
+        "cudnn": 91900,
+        "ultralytics": "8.4.198",
+        "numpy": "2.5.4",
+        "opencv": "5.0.0",
+        "os": "Windows-11-10.0.26300-SP0",
+        "cpu": "Intel(R) Core(TM) i7-14700KF",
+        "cpu_logical": 28,
+        "cpu_physical": 20,
+        "torch_default_threads": 1,
+        "OMP_NUM_THREADS": "1",
+        "gpu": "NVIDIA GeForce RTX 4080 SUPER",
+        "nvidia_smi": {
+          "name": "NVIDIA GeForce RTX 4080 SUPER",
+          "driver_version": "621.01",
+          "memory.used": "2236",
+          "memory.total": "16376",
+          "utilization.gpu": "19",
+          "clocks.sm": "240",
+          "clocks.max.sm": "3105",
+          "power.draw": "22.26",
+          "temperature.gpu": "37.48"
+        },
+        "other_gpu_load_at_start": {},
+        "tf32_defaults": {
+          "cudnn.allow_tf32": true,
+          "cuda.matmul.allow_tf32": false
+        }
+      },
+      "config": {
+        "imgsz": 640,
+        "models": [
+          "yolo26n",
+          "yolo26s",
+          "yolo26m"
+        ],
+        "train_models": [
+          "yolo26n",
+          "yolo26s"
+        ],
+        "synthetic_dataset": {
+          "train": 512,
+          "val": 64,
+          "classes": 3,
+          "path": "D:\\folo-bench\\data"
+        },
+        "quick": false,
+        "cpu_threads": [
+          28,
+          20,
+          8
+        ],
+        "epochs": 2
+      },
+      "backfilled": true
+    },
+    "gpu_e2e": {
+      "environment": {
+        "python": "3.12.10",
+        "torch": "2.11.0+cu128",
+        "torch_cuda": "12.8",
+        "cudnn": 91900,
+        "ultralytics": "8.4.198",
+        "numpy": "2.5.4",
+        "opencv": "5.0.0",
+        "os": "Windows-11-10.0.26300-SP0",
+        "cpu": "Intel(R) Core(TM) i7-14700KF",
+        "cpu_logical": 28,
+        "cpu_physical": 20,
+        "torch_default_threads": 1,
+        "OMP_NUM_THREADS": "1",
+        "gpu": "NVIDIA GeForce RTX 4080 SUPER",
+        "nvidia_smi": {
+          "name": "NVIDIA GeForce RTX 4080 SUPER",
+          "driver_version": "621.01",
+          "memory.used": "2236",
+          "memory.total": "16376",
+          "utilization.gpu": "19",
+          "clocks.sm": "240",
+          "clocks.max.sm": "3105",
+          "power.draw": "22.26",
+          "temperature.gpu": "37.48"
+        },
+        "other_gpu_load_at_start": {},
+        "tf32_defaults": {
+          "cudnn.allow_tf32": true,
+          "cuda.matmul.allow_tf32": false
+        }
+      },
+      "config": {
+        "imgsz": 640,
+        "models": [
+          "yolo26n",
+          "yolo26s",
+          "yolo26m"
+        ],
+        "train_models": [
+          "yolo26n",
+          "yolo26s"
+        ],
+        "synthetic_dataset": {
+          "train": 512,
+          "val": 64,
+          "classes": 3,
+          "path": "D:\\folo-bench\\data"
+        },
+        "quick": false,
+        "cpu_threads": [
+          28,
+          20,
+          8
+        ],
+        "epochs": 2
+      },
+      "backfilled": true
+    },
+    "cpu": {
+      "environment": {
+        "python": "3.12.10",
+        "torch": "2.11.0+cu128",
+        "torch_cuda": "12.8",
+        "cudnn": 91900,
+        "ultralytics": "8.4.198",
+        "numpy": "2.5.4",
+        "opencv": "5.0.0",
+        "os": "Windows-11-10.0.26300-SP0",
+        "cpu": "Intel(R) Core(TM) i7-14700KF",
+        "cpu_logical": 28,
+        "cpu_physical": 20,
+        "torch_default_threads": 1,
+        "OMP_NUM_THREADS": "1",
+        "gpu": "NVIDIA GeForce RTX 4080 SUPER",
+        "nvidia_smi": {
+          "name": "NVIDIA GeForce RTX 4080 SUPER",
+          "driver_version": "621.01",
+          "memory.used": "2236",
+          "memory.total": "16376",
+          "utilization.gpu": "19",
+          "clocks.sm": "240",
+          "clocks.max.sm": "3105",
+          "power.draw": "22.26",
+          "temperature.gpu": "37.48"
+        },
+        "other_gpu_load_at_start": {},
+        "tf32_defaults": {
+          "cudnn.allow_tf32": true,
+          "cuda.matmul.allow_tf32": false
+        }
+      },
+      "config": {
+        "imgsz": 640,
+        "models": [
+          "yolo26n",
+          "yolo26s",
+          "yolo26m"
+        ],
+        "train_models": [
+          "yolo26n",
+          "yolo26s"
+        ],
+        "synthetic_dataset": {
+          "train": 512,
+          "val": 64,
+          "classes": 3,
+          "path": "D:\\folo-bench\\data"
+        },
+        "quick": false,
+        "cpu_threads": [
+          28,
+          20,
+          8
+        ],
+        "epochs": 2
+      },
+      "backfilled": true
+    },
+    "train_step": {
+      "environment": {
+        "python": "3.12.10",
+        "torch": "2.11.0+cu128",
+        "torch_cuda": "12.8",
+        "cudnn": 91900,
+        "ultralytics": "8.4.198",
+        "numpy": "2.5.4",
+        "opencv": "5.0.0",
+        "os": "Windows-11-10.0.26300-SP0",
+        "cpu": "Intel(R) Core(TM) i7-14700KF",
+        "cpu_logical": 28,
+        "cpu_physical": 20,
+        "torch_default_threads": 1,
+        "OMP_NUM_THREADS": "1",
+        "gpu": "NVIDIA GeForce RTX 4080 SUPER",
+        "nvidia_smi": {
+          "name": "NVIDIA GeForce RTX 4080 SUPER",
+          "driver_version": "621.01",
+          "memory.used": "2236",
+          "memory.total": "16376",
+          "utilization.gpu": "19",
+          "clocks.sm": "240",
+          "clocks.max.sm": "3105",
+          "power.draw": "22.26",
+          "temperature.gpu": "37.48"
+        },
+        "other_gpu_load_at_start": {},
+        "tf32_defaults": {
+          "cudnn.allow_tf32": true,
+          "cuda.matmul.allow_tf32": false
+        }
+      },
+      "config": {
+        "imgsz": 640,
+        "models": [
+          "yolo26n",
+          "yolo26s",
+          "yolo26m"
+        ],
+        "train_models": [
+          "yolo26n",
+          "yolo26s"
+        ],
+        "synthetic_dataset": {
+          "train": 512,
+          "val": 64,
+          "classes": 3,
+          "path": "D:\\folo-bench\\data"
+        },
+        "quick": false,
+        "cpu_threads": [
+          28,
+          20,
+          8
+        ],
+        "epochs": 2
+      },
+      "backfilled": true
+    },
+    "train": {
+      "environment": {
+        "python": "3.12.10",
+        "torch": "2.11.0+cu128",
+        "torch_cuda": "12.8",
+        "cudnn": 91900,
+        "ultralytics": "8.4.198",
+        "numpy": "2.5.4",
+        "opencv": "5.0.0",
+        "os": "Windows-11-10.0.26300-SP0",
+        "cpu": "Intel(R) Core(TM) i7-14700KF",
+        "cpu_logical": 28,
+        "cpu_physical": 20,
+        "torch_default_threads": 1,
+        "OMP_NUM_THREADS": "1",
+        "gpu": "NVIDIA GeForce RTX 4080 SUPER",
+        "nvidia_smi": {
+          "name": "NVIDIA GeForce RTX 4080 SUPER",
+          "driver_version": "621.01",
+          "memory.used": "2236",
+          "memory.total": "16376",
+          "utilization.gpu": "19",
+          "clocks.sm": "240",
+          "clocks.max.sm": "3105",
+          "power.draw": "22.26",
+          "temperature.gpu": "37.48"
+        },
+        "other_gpu_load_at_start": {},
+        "tf32_defaults": {
+          "cudnn.allow_tf32": true,
+          "cuda.matmul.allow_tf32": false
+        }
+      },
+      "config": {
+        "imgsz": 640,
+        "models": [
+          "yolo26n",
+          "yolo26s",
+          "yolo26m"
+        ],
+        "train_models": [
+          "yolo26n",
+          "yolo26s"
+        ],
+        "synthetic_dataset": {
+          "train": 512,
+          "val": 64,
+          "classes": 3,
+          "path": "D:\\folo-bench\\data"
+        },
+        "quick": false,
+        "cpu_threads": [
+          28,
+          20,
+          8
+        ],
+        "epochs": 2
+      },
+      "backfilled": true
+    }
+  },
+  "gpu_state": {
+    "params": {
+      "before": {
+        "name": "NVIDIA GeForce RTX 4080 SUPER",
+        "driver_version": "621.01",
+        "memory.used": "2494",
+        "memory.total": "16376",
+        "utilization.gpu": "1",
+        "clocks.sm": "720",
+        "clocks.max.sm": "3105",
+        "power.draw": "26.00",
+        "temperature.gpu": "35.66"
+      },
+      "after": {
+        "name": "NVIDIA GeForce RTX 4080 SUPER",
+        "driver_version": "621.01",
+        "memory.used": "2489",
+        "memory.total": "16376",
+        "utilization.gpu": "2",
+        "clocks.sm": "555",
+        "clocks.max.sm": "3105",
+        "power.draw": "21.78",
+        "temperature.gpu": "35.41"
+      },
+      "other_gpu_load_at_start": {},
+      "rows_with_other_gpu_load": 0,
+      "section_wall_s": 0.8
+    },
+    "gpu_fwd": {
+      "before": {
+        "name": "NVIDIA GeForce RTX 4080 SUPER",
+        "driver_version": "621.01",
+        "memory.used": "2489",
+        "memory.total": "16376",
+        "utilization.gpu": "15",
+        "clocks.sm": "2550",
+        "clocks.max.sm": "3105",
+        "power.draw": "18.22",
+        "temperature.gpu": "36.19"
+      },
+      "after": {
+        "name": "NVIDIA GeForce RTX 4080 SUPER",
+        "driver_version": "621.01",
+        "memory.used": "3165",
+        "memory.total": "16376",
+        "utilization.gpu": "100",
+        "clocks.sm": "2715",
+        "clocks.max.sm": "3105",
+        "power.draw": "272.13",
+        "temperature.gpu": "59.66"
+      },
+      "other_gpu_load_at_start": {},
+      "rows_with_other_gpu_load": 0,
+      "section_wall_s": 74.1
+    },
+    "gpu_e2e": {
+      "before": {
+        "name": "NVIDIA GeForce RTX 4080 SUPER",
+        "driver_version": "621.01",
+        "memory.used": "3083",
+        "memory.total": "16376",
+        "utilization.gpu": "1",
+        "clocks.sm": "2550",
+        "clocks.max.sm": "3105",
+        "power.draw": "54.76",
+        "temperature.gpu": "42.25"
+      },
+      "after": {
+        "name": "NVIDIA GeForce RTX 4080 SUPER",
+        "driver_version": "621.01",
+        "memory.used": "3003",
+        "memory.total": "16376",
+        "utilization.gpu": "68",
+        "clocks.sm": "2730",
+        "clocks.max.sm": "3105",
+        "power.draw": "196.17",
+        "temperature.gpu": "49.40"
+      },
+      "other_gpu_load_at_start": {},
+      "rows_with_other_gpu_load": 0,
+      "section_wall_s": 18.2
+    },
+    "train_step": {
+      "before": {
+        "name": "NVIDIA GeForce RTX 4080 SUPER",
+        "driver_version": "621.01",
+        "memory.used": "2805",
+        "memory.total": "16376",
+        "utilization.gpu": "2",
+        "clocks.sm": "210",
+        "clocks.max.sm": "3105",
+        "power.draw": "12.63",
+        "temperature.gpu": "37.37"
+      },
+      "after": {
+        "name": "NVIDIA GeForce RTX 4080 SUPER",
+        "driver_version": "621.01",
+        "memory.used": "3046",
+        "memory.total": "16376",
+        "utilization.gpu": "79",
+        "clocks.sm": "2730",
+        "clocks.max.sm": "3105",
+        "power.draw": "194.17",
+        "temperature.gpu": "53.10"
+      },
+      "other_gpu_load_at_start": {},
+      "rows_with_other_gpu_load": 0,
+      "section_wall_s": 37.0
+    },
+    "train": {
+      "before": {
+        "name": "NVIDIA GeForce RTX 4080 SUPER",
+        "driver_version": "621.01",
+        "memory.used": "2170",
+        "memory.total": "16376",
+        "utilization.gpu": "0",
+        "clocks.sm": "675",
+        "clocks.max.sm": "3105",
+        "power.draw": "47.84",
+        "temperature.gpu": "43.94"
+      },
+      "after": {
+        "name": "NVIDIA GeForce RTX 4080 SUPER",
+        "driver_version": "621.01",
+        "memory.used": "2128",
+        "memory.total": "16376",
+        "utilization.gpu": "7",
+        "clocks.sm": "660",
+        "clocks.max.sm": "3105",
+        "power.draw": "46.29",
+        "temperature.gpu": "44.43"
+      },
+      "other_gpu_load_at_start": {},
+      "rows_with_other_gpu_load": 3,
+      "section_wall_s": 208.6
+    },
+    "cpu": {
+      "before": {
+        "name": "NVIDIA GeForce RTX 4080 SUPER",
+        "driver_version": "621.01",
+        "memory.used": "2192",
+        "memory.total": "16376",
+        "utilization.gpu": "3",
+        "clocks.sm": "2550",
+        "clocks.max.sm": "3105",
+        "power.draw": "48.61",
+        "temperature.gpu": "38.86"
+      },
+      "after": {
+        "name": "NVIDIA GeForce RTX 4080 SUPER",
+        "driver_version": "621.01",
+        "memory.used": "2043",
+        "memory.total": "16376",
+        "utilization.gpu": "3",
+        "clocks.sm": "210",
+        "clocks.max.sm": "3105",
+        "power.draw": "13.61",
+        "temperature.gpu": "35.96"
+      },
+      "other_gpu_load_at_start": {},
+      "rows_with_other_gpu_load": 0,
+      "section_wall_s": 234.6
+    }
+  },
+  "params": {
+    "yolo26n": {
+      "layers": 260,
+      "params": 2572280,
+      "gflops_640": 6.24,
+      "fused_layers": 120,
+      "fused_params": 2408932,
+      "fused_gflops_640": 5.48,
+      "nc": 80
+    },
+    "yolo26s": {
+      "layers": 260,
+      "params": 10009784,
+      "gflops_640": 23.079,
+      "fused_layers": 120,
+      "fused_params": 9496140,
+      "fused_gflops_640": 20.933,
+      "nc": 80
+    },
+    "yolo26m": {
+      "layers": 280,
+      "params": 21896248,
+      "gflops_640": 75.635,
+      "fused_layers": 130,
+      "fused_params": 20411132,
+      "fused_gflops_640": 68.426,
+      "nc": 80
+    }
+  },
+  "gpu_fwd": [
+    {
+      "iters": 100,
+      "median_ms": 6.0372,
+      "p90_ms": 7.5514,
+      "min_ms": 5.2057,
+      "mean_ms": 6.2788,
+      "images_per_s_at_median": 165.64,
+      "throughput_images_per_s": 163.48,
+      "throughput_iters": 100,
+      "model": "yolo26n",
+      "precision": "fp32",
+      "batch": 1,
+      "cudnn_benchmark": false,
+      "other_gpu_load_pct": {}
+    },
+    {
+      "iters": 30,
+      "median_ms": 10.9747,
+      "p90_ms": 11.5726,
+      "min_ms": 10.7218,
+      "mean_ms": 11.1429,
+      "images_per_s_at_median": 1457.91,
+      "throughput_images_per_s": 1444.03,
+      "throughput_iters": 30,
+      "model": "yolo26n",
+      "precision": "fp32",
+      "batch": 16,
+      "cudnn_benchmark": false,
+      "other_gpu_load_pct": {}
+    },
+    {
+      "iters": 100,
+      "median_ms": 5.9973,
+      "p90_ms": 7.4092,
+      "min_ms": 5.2922,
+      "mean_ms": 6.2148,
+      "images_per_s_at_median": 166.74,
+      "throughput_images_per_s": 151.6,
+      "throughput_iters": 100,
+      "model": "yolo26n",
+      "precision": "fp32",
+      "batch": 1,
+      "cudnn_benchmark": true,
+      "other_gpu_load_pct": {}
+    },
+    {
+      "iters": 30,
+      "median_ms": 11.0171,
+      "p90_ms": 11.5364,
+      "min_ms": 10.8283,
+      "mean_ms": 11.0792,
+      "images_per_s_at_median": 1452.29,
+      "throughput_images_per_s": 1454.49,
+      "throughput_iters": 30,
+      "model": "yolo26n",
+      "precision": "fp32",
+      "batch": 16,
+      "cudnn_benchmark": true,
+      "other_gpu_load_pct": {}
+    },
+    {
+      "iters": 100,
+      "median_ms": 5.3517,
+      "p90_ms": 6.551,
+      "min_ms": 4.8194,
+      "mean_ms": 5.6604,
+      "images_per_s_at_median": 186.86,
+      "throughput_images_per_s": 165.13,
+      "throughput_iters": 100,
+      "model": "yolo26n",
+      "precision": "fp32-strict",
+      "batch": 1,
+      "cudnn_benchmark": false,
+      "other_gpu_load_pct": {}
+    },
+    {
+      "iters": 30,
+      "median_ms": 12.0649,
+      "p90_ms": 12.6394,
+      "min_ms": 11.7827,
+      "mean_ms": 12.1307,
+      "images_per_s_at_median": 1326.16,
+      "throughput_images_per_s": 1334.31,
+      "throughput_iters": 30,
+      "model": "yolo26n",
+      "precision": "fp32-strict",
+      "batch": 16,
+      "cudnn_benchmark": false,
+      "other_gpu_load_pct": {}
+    },
+    {
+      "iters": 100,
+      "median_ms": 4.9513,
+      "p90_ms": 5.8007,
+      "min_ms": 4.3316,
+      "mean_ms": 5.0683,
+      "images_per_s_at_median": 201.97,
+      "throughput_images_per_s": 178.56,
+      "throughput_iters": 100,
+      "model": "yolo26n",
+      "precision": "fp32-strict",
+      "batch": 1,
+      "cudnn_benchmark": true,
+      "other_gpu_load_pct": {}
+    },
+    {
+      "iters": 30,
+      "median_ms": 12.0199,
+      "p90_ms": 12.6495,
+      "min_ms": 11.8219,
+      "mean_ms": 12.1439,
+      "images_per_s_at_median": 1331.13,
+      "throughput_images_per_s": 1333.28,
+      "throughput_iters": 30,
+      "model": "yolo26n",
+      "precision": "fp32-strict",
+      "batch": 16,
+      "cudnn_benchmark": true,
+      "other_gpu_load_pct": {}
+    },
+    {
+      "iters": 100,
+      "median_ms": 6.2872,
+      "p90_ms": 7.0858,
+      "min_ms": 5.6568,
+      "mean_ms": 6.4836,
+      "images_per_s_at_median": 159.05,
+      "throughput_images_per_s": 152.59,
+      "throughput_iters": 100,
+      "model": "yolo26n",
+      "precision": "fp16",
+      "batch": 1,
+      "cudnn_benchmark": false,
+      "other_gpu_load_pct": {}
+    },
+    {
+      "iters": 30,
+      "median_ms": 6.8225,
+      "p90_ms": 9.5266,
+      "min_ms": 6.5993,
+      "mean_ms": 7.5425,
+      "images_per_s_at_median": 2345.16,
+      "throughput_images_per_s": 2370.14,
+      "throughput_iters": 30,
+      "model": "yolo26n",
+      "precision": "fp16",
+      "batch": 16,
+      "cudnn_benchmark": false,
+      "other_gpu_load_pct": {}
+    },
+    {
+      "iters": 100,
+      "median_ms": 6.2452,
+      "p90_ms": 7.0031,
+      "min_ms": 5.6666,
+      "mean_ms": 6.3946,
+      "images_per_s_at_median": 160.12,
+      "throughput_images_per_s": 139.96,
+      "throughput_iters": 100,
+      "model": "yolo26n",
+      "precision": "fp16",
+      "batch": 1,
+      "cudnn_benchmark": true,
+      "other_gpu_load_pct": {}
+    },
+    {
+      "iters": 30,
+      "median_ms": 6.8059,
+      "p90_ms": 7.7169,
+      "min_ms": 6.6057,
+      "mean_ms": 7.0178,
+      "images_per_s_at_median": 2350.88,
+      "throughput_images_per_s": 2163.92,
+      "throughput_iters": 30,
+      "model": "yolo26n",
+      "precision": "fp16",
+      "batch": 16,
+      "cudnn_benchmark": true,
+      "other_gpu_load_pct": {}
+    },
+    {
+      "iters": 100,
+      "median_ms": 6.0436,
+      "p90_ms": 6.8348,
+      "min_ms": 5.1885,
+      "mean_ms": 6.2049,
+      "images_per_s_at_median": 165.46,
+      "throughput_images_per_s": 160.12,
+      "throughput_iters": 100,
+      "model": "yolo26s",
+      "precision": "fp32",
+      "batch": 1,
+      "cudnn_benchmark": false,
+      "other_gpu_load_pct": {}
+    },
+    {
+      "iters": 30,
+      "median_ms": 25.335,
+      "p90_ms": 26.0169,
+      "min_ms": 25.073,
+      "mean_ms": 25.4884,
+      "images_per_s_at_median": 631.54,
+      "throughput_images_per_s": 627.2,
+      "throughput_iters": 30,
+      "model": "yolo26s",
+      "precision": "fp32",
+      "batch": 16,
+      "cudnn_benchmark": false,
+      "other_gpu_load_pct": {}
+    },
+    {
+      "iters": 100,
+      "median_ms": 5.5932,
+      "p90_ms": 6.238,
+      "min_ms": 5.2275,
+      "mean_ms": 5.7049,
+      "images_per_s_at_median": 178.79,
+      "throughput_images_per_s": 168.55,
+      "throughput_iters": 100,
+      "model": "yolo26s",
+      "precision": "fp32",
+      "batch": 1,
+      "cudnn_benchmark": true,
+      "other_gpu_load_pct": {}
+    },
+    {
+      "iters": 30,
+      "median_ms": 25.3883,
+      "p90_ms": 26.0418,
+      "min_ms": 25.169,
+      "mean_ms": 25.5537,
+      "images_per_s_at_median": 630.21,
+      "throughput_images_per_s": 626.14,
+      "throughput_iters": 30,
+      "model": "yolo26s",
+      "precision": "fp32",
+      "batch": 16,
+      "cudnn_benchmark": true,
+      "other_gpu_load_pct": {}
+    },
+    {
+      "iters": 100,
+      "median_ms": 4.8705,
+      "p90_ms": 5.5776,
+      "min_ms": 4.4973,
+      "mean_ms": 5.0581,
+      "images_per_s_at_median": 205.32,
+      "throughput_images_per_s": 192.53,
+      "throughput_iters": 100,
+      "model": "yolo26s",
+      "precision": "fp32-strict",
+      "batch": 1,
+      "cudnn_benchmark": false,
+      "other_gpu_load_pct": {}
+    },
+    {
+      "iters": 30,
+      "median_ms": 28.4297,
+      "p90_ms": 28.9735,
+      "min_ms": 27.9926,
+      "mean_ms": 28.4903,
+      "images_per_s_at_median": 562.79,
+      "throughput_images_per_s": 563.53,
+      "throughput_iters": 30,
+      "model": "yolo26s",
+      "precision": "fp32-strict",
+      "batch": 16,
+      "cudnn_benchmark": false,
+      "other_gpu_load_pct": {}
+    },
+    {
+      "iters": 100,
+      "median_ms": 6.5722,
+      "p90_ms": 10.9772,
+      "min_ms": 4.8135,
+      "mean_ms": 7.3068,
+      "images_per_s_at_median": 152.15,
+      "throughput_images_per_s": 132.8,
+      "throughput_iters": 100,
+      "model": "yolo26s",
+      "precision": "fp32-strict",
+      "batch": 1,
+      "cudnn_benchmark": true,
+      "other_gpu_load_pct": {}
+    },
+    {
+      "iters": 30,
+      "median_ms": 28.4634,
+      "p90_ms": 29.1007,
+      "min_ms": 27.9753,
+      "mean_ms": 28.5571,
+      "images_per_s_at_median": 562.12,
+      "throughput_images_per_s": 564.35,
+      "throughput_iters": 30,
+      "model": "yolo26s",
+      "precision": "fp32-strict",
+      "batch": 16,
+      "cudnn_benchmark": true,
+      "other_gpu_load_pct": {}
+    },
+    {
+      "iters": 100,
+      "median_ms": 7.6671,
+      "p90_ms": 13.892,
+      "min_ms": 6.3603,
+      "mean_ms": 9.1911,
+      "images_per_s_at_median": 130.43,
+      "throughput_images_per_s": 99.95,
+      "throughput_iters": 100,
+      "model": "yolo26s",
+      "precision": "fp16",
+      "batch": 1,
+      "cudnn_benchmark": false,
+      "other_gpu_load_pct": {}
+    },
+    {
+      "iters": 30,
+      "median_ms": 14.0408,
+      "p90_ms": 14.7637,
+      "min_ms": 13.6266,
+      "mean_ms": 14.1579,
+      "images_per_s_at_median": 1139.53,
+      "throughput_images_per_s": 1159.29,
+      "throughput_iters": 30,
+      "model": "yolo26s",
+      "precision": "fp16",
+      "batch": 16,
+      "cudnn_benchmark": false,
+      "other_gpu_load_pct": {}
+    },
+    {
+      "iters": 100,
+      "median_ms": 7.4733,
+      "p90_ms": 11.6527,
+      "min_ms": 6.3506,
+      "mean_ms": 8.4436,
+      "images_per_s_at_median": 133.81,
+      "throughput_images_per_s": 107.8,
+      "throughput_iters": 100,
+      "model": "yolo26s",
+      "precision": "fp16",
+      "batch": 1,
+      "cudnn_benchmark": true,
+      "other_gpu_load_pct": {}
+    },
+    {
+      "iters": 30,
+      "median_ms": 14.0317,
+      "p90_ms": 14.7965,
+      "min_ms": 13.7622,
+      "mean_ms": 14.2075,
+      "images_per_s_at_median": 1140.27,
+      "throughput_images_per_s": 1148.97,
+      "throughput_iters": 30,
+      "model": "yolo26s",
+      "precision": "fp16",
+      "batch": 16,
+      "cudnn_benchmark": true,
+      "other_gpu_load_pct": {}
+    },
+    {
+      "iters": 100,
+      "median_ms": 7.1696,
+      "p90_ms": 8.9463,
+      "min_ms": 6.1082,
+      "mean_ms": 7.5138,
+      "images_per_s_at_median": 139.48,
+      "throughput_images_per_s": 145.25,
+      "throughput_iters": 100,
+      "model": "yolo26m",
+      "precision": "fp32",
+      "batch": 1,
+      "cudnn_benchmark": false,
+      "other_gpu_load_pct": {}
+    },
+    {
+      "iters": 30,
+      "median_ms": 64.1185,
+      "p90_ms": 64.5706,
+      "min_ms": 63.2491,
+      "mean_ms": 64.1176,
+      "images_per_s_at_median": 249.54,
+      "throughput_images_per_s": 250.02,
+      "throughput_iters": 30,
+      "model": "yolo26m",
+      "precision": "fp32",
+      "batch": 16,
+      "cudnn_benchmark": false,
+      "other_gpu_load_pct": {}
+    },
+    {
+      "iters": 100,
+      "median_ms": 9.0099,
+      "p90_ms": 14.5373,
+      "min_ms": 6.4119,
+      "mean_ms": 10.0183,
+      "images_per_s_at_median": 110.99,
+      "throughput_images_per_s": 110.9,
+      "throughput_iters": 100,
+      "model": "yolo26m",
+      "precision": "fp32",
+      "batch": 1,
+      "cudnn_benchmark": true,
+      "other_gpu_load_pct": {}
+    },
+    {
+      "iters": 30,
+      "median_ms": 64.1857,
+      "p90_ms": 64.501,
+      "min_ms": 63.4203,
+      "mean_ms": 64.2028,
+      "images_per_s_at_median": 249.28,
+      "throughput_images_per_s": 250.12,
+      "throughput_iters": 30,
+      "model": "yolo26m",
+      "precision": "fp32",
+      "batch": 16,
+      "cudnn_benchmark": true,
+      "other_gpu_load_pct": {}
+    },
+    {
+      "iters": 100,
+      "median_ms": 7.1092,
+      "p90_ms": 11.9926,
+      "min_ms": 6.2895,
+      "mean_ms": 8.1901,
+      "images_per_s_at_median": 140.66,
+      "throughput_images_per_s": 132.2,
+      "throughput_iters": 100,
+      "model": "yolo26m",
+      "precision": "fp32-strict",
+      "batch": 1,
+      "cudnn_benchmark": false,
+      "other_gpu_load_pct": {}
+    },
+    {
+      "iters": 30,
+      "median_ms": 71.4223,
+      "p90_ms": 72.502,
+      "min_ms": 70.851,
+      "mean_ms": 71.5815,
+      "images_per_s_at_median": 224.02,
+      "throughput_images_per_s": 223.97,
+      "throughput_iters": 30,
+      "model": "yolo26m",
+      "precision": "fp32-strict",
+      "batch": 16,
+      "cudnn_benchmark": false,
+      "other_gpu_load_pct": {}
+    },
+    {
+      "iters": 100,
+      "median_ms": 10.0211,
+      "p90_ms": 15.4033,
+      "min_ms": 6.1989,
+      "mean_ms": 10.4691,
+      "images_per_s_at_median": 99.79,
+      "throughput_images_per_s": 94.34,
+      "throughput_iters": 100,
+      "model": "yolo26m",
+      "precision": "fp32-strict",
+      "batch": 1,
+      "cudnn_benchmark": true,
+      "other_gpu_load_pct": {}
+    },
+    {
+      "iters": 30,
+      "median_ms": 71.6173,
+      "p90_ms": 72.2264,
+      "min_ms": 70.7062,
+      "mean_ms": 71.7058,
+      "images_per_s_at_median": 223.41,
+      "throughput_images_per_s": 224.07,
+      "throughput_iters": 30,
+      "model": "yolo26m",
+      "precision": "fp32-strict",
+      "batch": 16,
+      "cudnn_benchmark": true,
+      "other_gpu_load_pct": {}
+    },
+    {
+      "iters": 100,
+      "median_ms": 6.7904,
+      "p90_ms": 7.949,
+      "min_ms": 6.0542,
+      "mean_ms": 7.0353,
+      "images_per_s_at_median": 147.27,
+      "throughput_images_per_s": 150.06,
+      "throughput_iters": 100,
+      "model": "yolo26m",
+      "precision": "fp16",
+      "batch": 1,
+      "cudnn_benchmark": false,
+      "other_gpu_load_pct": {}
+    },
+    {
+      "iters": 30,
+      "median_ms": 32.3624,
+      "p90_ms": 32.7401,
+      "min_ms": 31.793,
+      "mean_ms": 32.3078,
+      "images_per_s_at_median": 494.4,
+      "throughput_images_per_s": 497.45,
+      "throughput_iters": 30,
+      "model": "yolo26m",
+      "precision": "fp16",
+      "batch": 16,
+      "cudnn_benchmark": false,
+      "other_gpu_load_pct": {}
+    },
+    {
+      "iters": 100,
+      "median_ms": 7.0002,
+      "p90_ms": 9.3903,
+      "min_ms": 6.0142,
+      "mean_ms": 7.4411,
+      "images_per_s_at_median": 142.85,
+      "throughput_images_per_s": 130.69,
+      "throughput_iters": 100,
+      "model": "yolo26m",
+      "precision": "fp16",
+      "batch": 1,
+      "cudnn_benchmark": true,
+      "other_gpu_load_pct": {}
+    },
+    {
+      "iters": 30,
+      "median_ms": 32.512,
+      "p90_ms": 32.9984,
+      "min_ms": 31.9628,
+      "mean_ms": 32.5024,
+      "images_per_s_at_median": 492.13,
+      "throughput_images_per_s": 496.52,
+      "throughput_iters": 30,
+      "model": "yolo26m",
+      "precision": "fp16",
+      "batch": 16,
+      "cudnn_benchmark": true,
+      "other_gpu_load_pct": {}
+    }
+  ],
+  "gpu_e2e": [
+    {
+      "iters": 100,
+      "median_ms": 6.9176,
+      "p90_ms": 7.726,
+      "min_ms": 6.2201,
+      "mean_ms": 6.996,
+      "images_per_s_at_median": 144.56,
+      "throughput_images_per_s": 142.93,
+      "torch_threads_seen": [
+        1
+      ],
+      "ultralytics_speed_ms_per_image": {
+        "preprocess": 0.7142,
+        "inference": 5.6865,
+        "postprocess": 0.3019
+      },
+      "model": "yolo26n",
+      "precision": "fp32",
+      "batch": 1,
+      "other_gpu_load_pct": {}
+    },
+    {
+      "iters": 30,
+      "median_ms": 29.714,
+      "p90_ms": 30.8009,
+      "min_ms": 28.5359,
+      "mean_ms": 29.841,
+      "images_per_s_at_median": 538.47,
+      "throughput_images_per_s": 536.17,
+      "torch_threads_seen": [
+        1
+      ],
+      "ultralytics_speed_ms_per_image": {
+        "preprocess": 0.8164,
+        "inference": 0.6808,
+        "postprocess": 0.313
+      },
+      "model": "yolo26n",
+      "precision": "fp32",
+      "batch": 16,
+      "other_gpu_load_pct": {}
+    },
+    {
+      "iters": 100,
+      "median_ms": 7.1105,
+      "p90_ms": 7.8489,
+      "min_ms": 6.6557,
+      "mean_ms": 7.2948,
+      "images_per_s_at_median": 140.64,
+      "throughput_images_per_s": 137.08,
+      "torch_threads_seen": [
+        1
+      ],
+      "ultralytics_speed_ms_per_image": {
+        "preprocess": 0.6874,
+        "inference": 5.9903,
+        "postprocess": 0.2748
+      },
+      "model": "yolo26n",
+      "precision": "fp16",
+      "batch": 1,
+      "other_gpu_load_pct": {}
+    },
+    {
+      "iters": 30,
+      "median_ms": 25.6061,
+      "p90_ms": 28.4789,
+      "min_ms": 24.4572,
+      "mean_ms": 26.0232,
+      "images_per_s_at_median": 624.85,
+      "throughput_images_per_s": 614.83,
+      "torch_threads_seen": [
+        1
+      ],
+      "ultralytics_speed_ms_per_image": {
+        "preprocess": 0.7977,
+        "inference": 0.4333,
+        "postprocess": 0.3232
+      },
+      "model": "yolo26n",
+      "precision": "fp16",
+      "batch": 16,
+      "other_gpu_load_pct": {}
+    },
+    {
+      "iters": 100,
+      "median_ms": 8.5948,
+      "p90_ms": 13.7667,
+      "min_ms": 6.9774,
+      "mean_ms": 9.6783,
+      "images_per_s_at_median": 116.35,
+      "throughput_images_per_s": 103.32,
+      "torch_threads_seen": [
+        1
+      ],
+      "ultralytics_speed_ms_per_image": {
+        "preprocess": 0.8203,
+        "inference": 7.1343,
+        "postprocess": 0.3914
+      },
+      "model": "yolo26s",
+      "precision": "fp32",
+      "batch": 1,
+      "other_gpu_load_pct": {}
+    },
+    {
+      "iters": 30,
+      "median_ms": 48.9698,
+      "p90_ms": 56.4007,
+      "min_ms": 44.8664,
+      "mean_ms": 50.45,
+      "images_per_s_at_median": 326.73,
+      "throughput_images_per_s": 317.14,
+      "torch_threads_seen": [
+        1
+      ],
+      "ultralytics_speed_ms_per_image": {
+        "preprocess": 0.9351,
+        "inference": 1.5928,
+        "postprocess": 0.4383
+      },
+      "model": "yolo26s",
+      "precision": "fp32",
+      "batch": 16,
+      "other_gpu_load_pct": {}
+    },
+    {
+      "iters": 100,
+      "median_ms": 8.7102,
+      "p90_ms": 11.9462,
+      "min_ms": 7.717,
+      "mean_ms": 9.4672,
+      "images_per_s_at_median": 114.81,
+      "throughput_images_per_s": 105.62,
+      "torch_threads_seen": [
+        1
+      ],
+      "ultralytics_speed_ms_per_image": {
+        "preprocess": 0.8014,
+        "inference": 7.1943,
+        "postprocess": 0.3687
+      },
+      "model": "yolo26s",
+      "precision": "fp16",
+      "batch": 1,
+      "other_gpu_load_pct": {}
+    },
+    {
+      "iters": 30,
+      "median_ms": 35.628,
+      "p90_ms": 38.0942,
+      "min_ms": 33.0619,
+      "mean_ms": 35.8944,
+      "images_per_s_at_median": 449.09,
+      "throughput_images_per_s": 445.75,
+      "torch_threads_seen": [
+        1
+      ],
+      "ultralytics_speed_ms_per_image": {
+        "preprocess": 0.8482,
+        "inference": 0.8722,
+        "postprocess": 0.4325
+      },
+      "model": "yolo26s",
+      "precision": "fp16",
+      "batch": 16,
+      "other_gpu_load_pct": {}
+    },
+    {
+      "iters": 100,
+      "median_ms": 7.7167,
+      "p90_ms": 9.172,
+      "min_ms": 7.1858,
+      "mean_ms": 8.0428,
+      "images_per_s_at_median": 129.59,
+      "throughput_images_per_s": 124.33,
+      "torch_threads_seen": [
+        1
+      ],
+      "ultralytics_speed_ms_per_image": {
+        "preprocess": 0.7481,
+        "inference": 6.4434,
+        "postprocess": 0.3259
+      },
+      "model": "yolo26m",
+      "precision": "fp32",
+      "batch": 1,
+      "other_gpu_load_pct": {}
+    },
+    {
+      "iters": 30,
+      "median_ms": 83.3848,
+      "p90_ms": 87.3143,
+      "min_ms": 81.2702,
+      "mean_ms": 84.3016,
+      "images_per_s_at_median": 191.88,
+      "throughput_images_per_s": 189.79,
+      "torch_threads_seen": [
+        1
+      ],
+      "ultralytics_speed_ms_per_image": {
+        "preprocess": 0.8428,
+        "inference": 3.9995,
+        "postprocess": 0.3069
+      },
+      "model": "yolo26m",
+      "precision": "fp32",
+      "batch": 16,
+      "other_gpu_load_pct": {}
+    },
+    {
+      "iters": 100,
+      "median_ms": 8.1507,
+      "p90_ms": 9.5882,
+      "min_ms": 7.2169,
+      "mean_ms": 8.3752,
+      "images_per_s_at_median": 122.69,
+      "throughput_images_per_s": 119.4,
+      "torch_threads_seen": [
+        1
+      ],
+      "ultralytics_speed_ms_per_image": {
+        "preprocess": 0.751,
+        "inference": 6.8597,
+        "postprocess": 0.3303
+      },
+      "model": "yolo26m",
+      "precision": "fp16",
+      "batch": 1,
+      "other_gpu_load_pct": {}
+    },
+    {
+      "iters": 30,
+      "median_ms": 50.2043,
+      "p90_ms": 51.1863,
+      "min_ms": 49.2405,
+      "mean_ms": 50.2614,
+      "images_per_s_at_median": 318.7,
+      "throughput_images_per_s": 318.33,
+      "torch_threads_seen": [
+        1
+      ],
+      "ultralytics_speed_ms_per_image": {
+        "preprocess": 0.7805,
+        "inference": 2.0071,
+        "postprocess": 0.3104
+      },
+      "model": "yolo26m",
+      "precision": "fp16",
+      "batch": 16,
+      "other_gpu_load_pct": {}
+    }
+  ],
+  "train_step": [
+    {
+      "iters": 30,
+      "median_ms": 63.3137,
+      "p90_ms": 67.6008,
+      "min_ms": 59.8911,
+      "mean_ms": 63.9127,
+      "images_per_s_at_median": 252.71,
+      "throughput_images_per_s": 252.29,
+      "throughput_iters": 30,
+      "model": "yolo26n",
+      "amp": true,
+      "batch": 16,
+      "max_memory_allocated_mib": 2646,
+      "max_memory_reserved_mib": 2830,
+      "other_gpu_load_pct": {}
+    },
+    {
+      "iters": 30,
+      "median_ms": 76.8396,
+      "p90_ms": 81.6774,
+      "min_ms": 75.0707,
+      "mean_ms": 77.9305,
+      "images_per_s_at_median": 208.23,
+      "throughput_images_per_s": 202.49,
+      "throughput_iters": 30,
+      "model": "yolo26n",
+      "amp": false,
+      "batch": 16,
+      "max_memory_allocated_mib": 4517,
+      "max_memory_reserved_mib": 5206,
+      "other_gpu_load_pct": {}
+    },
+    {
+      "iters": 30,
+      "median_ms": 85.1524,
+      "p90_ms": 90.6487,
+      "min_ms": 83.9512,
+      "mean_ms": 86.3433,
+      "images_per_s_at_median": 187.9,
+      "throughput_images_per_s": 187.79,
+      "throughput_iters": 30,
+      "model": "yolo26s",
+      "amp": true,
+      "batch": 16,
+      "max_memory_allocated_mib": 4614,
+      "max_memory_reserved_mib": 5010,
+      "other_gpu_load_pct": {}
+    },
+    {
+      "iters": 30,
+      "median_ms": 148.0742,
+      "p90_ms": 155.7092,
+      "min_ms": 138.269,
+      "mean_ms": 149.3888,
+      "images_per_s_at_median": 108.05,
+      "throughput_images_per_s": 104.86,
+      "throughput_iters": 30,
+      "model": "yolo26s",
+      "amp": false,
+      "batch": 16,
+      "max_memory_allocated_mib": 8245,
+      "max_memory_reserved_mib": 10070,
+      "other_gpu_load_pct": {}
+    }
+  ],
+  "train": [
+    {
+      "model": "yolo26n",
+      "amp": true,
+      "batch": 16,
+      "imgsz": 640,
+      "workers": 8,
+      "epochs": [
+        {
+          "epoch": 0,
+          "batches": 32,
+          "wall_s": 31.855,
+          "images_per_s": 16.07,
+          "median_batch_ms": 113.663,
+          "p90_batch_ms": 150.587,
+          "images_per_s_at_median_batch": 140.77
+        },
+        {
+          "epoch": 1,
+          "batches": 32,
+          "wall_s": 3.997,
+          "images_per_s": 128.1,
+          "median_batch_ms": 117.957,
+          "p90_batch_ms": 157.428,
+          "images_per_s_at_median_batch": 135.64
+        }
+      ],
+      "steady_batches": 59,
+      "steady_median_batch_ms": 117.461,
+      "steady_images_per_s": 136.22,
+      "total_train_call_s": 63.63,
+      "max_memory_allocated_mib": 2435,
+      "max_memory_reserved_mib": 2626,
+      "nvidia_smi_memory_used_mib": "5003",
+      "other_gpu_load_pct": {
+        "pid 30860 folo_gpu-92372f1fabd58549.exe": 6.6
+      },
+      "repeat": 0
+    },
+    {
+      "model": "yolo26s",
+      "amp": true,
+      "batch": 16,
+      "imgsz": 640,
+      "workers": 8,
+      "epochs": [
+        {
+          "epoch": 0,
+          "batches": 32,
+          "wall_s": 21.468,
+          "images_per_s": 23.85,
+          "median_batch_ms": 90.61,
+          "p90_batch_ms": 108.638,
+          "images_per_s_at_median_batch": 176.58
+        },
+        {
+          "epoch": 1,
+          "batches": 32,
+          "wall_s": 3.001,
+          "images_per_s": 170.61,
+          "median_batch_ms": 89.934,
+          "p90_batch_ms": 109.003,
+          "images_per_s_at_median_batch": 177.91
+        }
+      ],
+      "steady_batches": 59,
+      "steady_median_batch_ms": 90.986,
+      "steady_images_per_s": 175.85,
+      "total_train_call_s": 50.82,
+      "max_memory_allocated_mib": 4494,
+      "max_memory_reserved_mib": 4792,
+      "nvidia_smi_memory_used_mib": "7147",
+      "other_gpu_load_pct": {
+        "pid 23720 gemm-0cbfdb0d74d93b53.exe": 6.4
+      },
+      "repeat": 0
+    },
+    {
+      "model": "yolo26n",
+      "amp": false,
+      "batch": 16,
+      "imgsz": 640,
+      "workers": 8,
+      "epochs": [
+        {
+          "epoch": 0,
+          "batches": 32,
+          "wall_s": 19.228,
+          "images_per_s": 26.63,
+          "median_batch_ms": 85.209,
+          "p90_batch_ms": 92.249,
+          "images_per_s_at_median_batch": 187.77
+        },
+        {
+          "epoch": 1,
+          "batches": 32,
+          "wall_s": 2.576,
+          "images_per_s": 198.75,
+          "median_batch_ms": 78.77,
+          "p90_batch_ms": 84.721,
+          "images_per_s_at_median_batch": 203.12
+        }
+      ],
+      "steady_batches": 59,
+      "steady_median_batch_ms": 80.868,
+      "steady_images_per_s": 197.85,
+      "total_train_call_s": 34.63,
+      "max_memory_allocated_mib": 4353,
+      "max_memory_reserved_mib": 5148,
+      "nvidia_smi_memory_used_mib": "7557",
+      "other_gpu_load_pct": {},
+      "repeat": 0
+    },
+    {
+      "model": "yolo26n",
+      "amp": true,
+      "batch": 16,
+      "imgsz": 640,
+      "workers": 8,
+      "epochs": [
+        {
+          "epoch": 0,
+          "batches": 32,
+          "wall_s": 32.082,
+          "images_per_s": 15.96,
+          "median_batch_ms": 101.643,
+          "p90_batch_ms": 126.683,
+          "images_per_s_at_median_batch": 157.41
+        },
+        {
+          "epoch": 1,
+          "batches": 32,
+          "wall_s": 3.111,
+          "images_per_s": 164.56,
+          "median_batch_ms": 93.463,
+          "p90_batch_ms": 115.617,
+          "images_per_s_at_median_batch": 171.19
+        }
+      ],
+      "steady_batches": 59,
+      "steady_median_batch_ms": 95.483,
+      "steady_images_per_s": 167.57,
+      "total_train_call_s": 56.3,
+      "max_memory_allocated_mib": 2435,
+      "max_memory_reserved_mib": 2626,
+      "nvidia_smi_memory_used_mib": "5032",
+      "other_gpu_load_pct": {},
+      "repeat": 1
+    },
+    {
+      "model": "yolo26s",
+      "amp": true,
+      "batch": 16,
+      "imgsz": 640,
+      "workers": 8,
+      "epochs": [
+        {
+          "epoch": 0,
+          "batches": 32,
+          "wall_s": 31.386,
+          "images_per_s": 16.31,
+          "median_batch_ms": 128.771,
+          "p90_batch_ms": 149.843,
+          "images_per_s_at_median_batch": 124.25
+        },
+        {
+          "epoch": 1,
+          "batches": 32,
+          "wall_s": 6.219,
+          "images_per_s": 82.33,
+          "median_batch_ms": 107.253,
+          "p90_batch_ms": 155.639,
+          "images_per_s_at_median_batch": 149.18
+        }
+      ],
+      "steady_batches": 59,
+      "steady_median_batch_ms": 112.538,
+      "steady_images_per_s": 142.17,
+      "total_train_call_s": 76.67,
+      "max_memory_allocated_mib": 4494,
+      "max_memory_reserved_mib": 4792,
+      "nvidia_smi_memory_used_mib": "7240",
+      "other_gpu_load_pct": {},
+      "repeat": 1
+    },
+    {
+      "model": "yolo26n",
+      "amp": false,
+      "batch": 16,
+      "imgsz": 640,
+      "workers": 8,
+      "epochs": [
+        {
+          "epoch": 0,
+          "batches": 32,
+          "wall_s": 21.786,
+          "images_per_s": 23.5,
+          "median_batch_ms": 138.588,
+          "p90_batch_ms": 174.447,
+          "images_per_s_at_median_batch": 115.45
+        },
+        {
+          "epoch": 1,
+          "batches": 32,
+          "wall_s": 4.383,
+          "images_per_s": 116.8,
+          "median_batch_ms": 136.995,
+          "p90_batch_ms": 154.445,
+          "images_per_s_at_median_batch": 116.79
+        }
+      ],
+      "steady_batches": 59,
+      "steady_median_batch_ms": 137.72,
+      "steady_images_per_s": 116.18,
+      "total_train_call_s": 48.56,
+      "max_memory_allocated_mib": 4353,
+      "max_memory_reserved_mib": 5148,
+      "nvidia_smi_memory_used_mib": "7615",
+      "other_gpu_load_pct": {},
+      "repeat": 1
+    },
+    {
+      "model": "yolo26n",
+      "amp": true,
+      "batch": 16,
+      "imgsz": 640,
+      "workers": 8,
+      "epochs": [
+        {
+          "epoch": 0,
+          "batches": 32,
+          "wall_s": 23.413,
+          "images_per_s": 21.87,
+          "median_batch_ms": 78.513,
+          "p90_batch_ms": 96.511,
+          "images_per_s_at_median_batch": 203.79,
+          "cpu_cores_busy": {
+            "ours": 1.42,
+            "others": 5.68
+          }
+        },
+        {
+          "epoch": 1,
+          "batches": 32,
+          "wall_s": 2.281,
+          "images_per_s": 224.44,
+          "median_batch_ms": 67.229,
+          "p90_batch_ms": 87.492,
+          "images_per_s_at_median_batch": 237.99,
+          "cpu_cores_busy": {
+            "ours": 2.27,
+            "others": 3.14
+          }
+        }
+      ],
+      "steady_batches": 59,
+      "steady_median_batch_ms": 69.751,
+      "steady_images_per_s": 229.39,
+      "total_train_call_s": 45.64,
+      "max_memory_allocated_mib": 2435,
+      "max_memory_reserved_mib": 2626,
+      "nvidia_smi_memory_used_mib": "4991",
+      "other_gpu_load_pct": {},
+      "repeat": 2,
+      "system_cpu_pct_before": 18.1
+    },
+    {
+      "model": "yolo26s",
+      "amp": true,
+      "batch": 16,
+      "imgsz": 640,
+      "workers": 8,
+      "epochs": [
+        {
+          "epoch": 0,
+          "batches": 32,
+          "wall_s": 37.447,
+          "images_per_s": 13.67,
+          "median_batch_ms": 130.996,
+          "p90_batch_ms": 166.064,
+          "images_per_s_at_median_batch": 122.14,
+          "cpu_cores_busy": {
+            "ours": 1.36,
+            "others": 19.14
+          }
+        },
+        {
+          "epoch": 1,
+          "batches": 32,
+          "wall_s": 4.15,
+          "images_per_s": 123.38,
+          "median_batch_ms": 123.918,
+          "p90_batch_ms": 145.207,
+          "images_per_s_at_median_batch": 129.12,
+          "cpu_cores_busy": {
+            "ours": 1.64,
+            "others": 17.32
+          }
+        }
+      ],
+      "steady_batches": 59,
+      "steady_median_batch_ms": 129.32,
+      "steady_images_per_s": 123.72,
+      "total_train_call_s": 78.0,
+      "max_memory_allocated_mib": 4494,
+      "max_memory_reserved_mib": 4792,
+      "nvidia_smi_memory_used_mib": "7326",
+      "other_gpu_load_pct": {
+        "pid 31376 chrome.exe": 8.1
+      },
+      "repeat": 2,
+      "system_cpu_pct_before": 12.6
+    },
+    {
+      "model": "yolo26n",
+      "amp": false,
+      "batch": 16,
+      "imgsz": 640,
+      "workers": 8,
+      "epochs": [
+        {
+          "epoch": 0,
+          "batches": 32,
+          "wall_s": 17.039,
+          "images_per_s": 30.05,
+          "median_batch_ms": 87.368,
+          "p90_batch_ms": 100.047,
+          "images_per_s_at_median_batch": 183.13,
+          "cpu_cores_busy": {
+            "ours": 1.52,
+            "others": 6.21
+          }
+        },
+        {
+          "epoch": 1,
+          "batches": 32,
+          "wall_s": 3.411,
+          "images_per_s": 150.09,
+          "median_batch_ms": 105.014,
+          "p90_batch_ms": 121.755,
+          "images_per_s_at_median_batch": 152.36,
+          "cpu_cores_busy": {
+            "ours": 2.38,
+            "others": 11.27
+          }
+        }
+      ],
+      "steady_batches": 59,
+      "steady_median_batch_ms": 97.841,
+      "steady_images_per_s": 163.53,
+      "total_train_call_s": 35.01,
+      "max_memory_allocated_mib": 4353,
+      "max_memory_reserved_mib": 5148,
+      "nvidia_smi_memory_used_mib": "7634",
+      "other_gpu_load_pct": {},
+      "repeat": 2,
+      "system_cpu_pct_before": 14.5
+    }
+  ],
+  "cpu": [
+    {
+      "iters": 50,
+      "median_ms": 41.5988,
+      "p90_ms": 63.7734,
+      "min_ms": 27.0986,
+      "mean_ms": 44.1699,
+      "images_per_s_at_median": 24.04,
+      "throughput_images_per_s": 22.64,
+      "cpu_cores_busy": {
+        "ours": 16.74,
+        "others": 11.09
+      },
+      "model": "yolo26n",
+      "precision": "fp32",
+      "batch": 1,
+      "threads": 28,
+      "kind": "forward",
+      "system_cpu_pct_before": 14.2,
+      "memory_format": "channels_last"
+    },
+    {
+      "iters": 50,
+      "median_ms": 34.4159,
+      "p90_ms": 42.8142,
+      "min_ms": 26.0048,
+      "mean_ms": 36.3994,
+      "images_per_s_at_median": 29.06,
+      "throughput_images_per_s": 27.47,
+      "torch_threads_seen": [
+        8,
+        28
+      ],
+      "ultralytics_speed_ms_per_image": {
+        "preprocess": 1.1399,
+        "inference": 32.2692,
+        "postprocess": 0.5751
+      },
+      "cpu_cores_busy": {
+        "ours": 14.81,
+        "others": 5.31
+      },
+      "model": "yolo26n",
+      "precision": "fp32",
+      "batch": 1,
+      "threads": 28,
+      "kind": "e2e",
+      "system_cpu_pct_before": 13.6
+    },
+    {
+      "iters": 30,
+      "median_ms": 57.2228,
+      "p90_ms": 65.2029,
+      "min_ms": 39.5096,
+      "mean_ms": 54.8726,
+      "images_per_s_at_median": 17.48,
+      "throughput_images_per_s": 18.22,
+      "cpu_cores_busy": {
+        "ours": 23.01,
+        "others": 4.79
+      },
+      "model": "yolo26s",
+      "precision": "fp32",
+      "batch": 1,
+      "threads": 28,
+      "kind": "forward",
+      "system_cpu_pct_before": 6.8,
+      "memory_format": "channels_last"
+    },
+    {
+      "iters": 30,
+      "median_ms": 54.3809,
+      "p90_ms": 78.4507,
+      "min_ms": 43.5106,
+      "mean_ms": 58.0523,
+      "images_per_s_at_median": 18.39,
+      "throughput_images_per_s": 17.23,
+      "torch_threads_seen": [
+        8,
+        28
+      ],
+      "ultralytics_speed_ms_per_image": {
+        "preprocess": 1.1373,
+        "inference": 52.386,
+        "postprocess": 0.5576
+      },
+      "cpu_cores_busy": {
+        "ours": 22.26,
+        "others": 5.3
+      },
+      "model": "yolo26s",
+      "precision": "fp32",
+      "batch": 1,
+      "threads": 28,
+      "kind": "e2e",
+      "system_cpu_pct_before": 13.2
+    },
+    {
+      "iters": 20,
+      "median_ms": 133.8879,
+      "p90_ms": 154.6134,
+      "min_ms": 94.6719,
+      "mean_ms": 132.075,
+      "images_per_s_at_median": 7.47,
+      "throughput_images_per_s": 7.57,
+      "cpu_cores_busy": {
+        "ours": 22.6,
+        "others": 5.29
+      },
+      "model": "yolo26m",
+      "precision": "fp32",
+      "batch": 1,
+      "threads": 28,
+      "kind": "forward",
+      "system_cpu_pct_before": 14.4,
+      "memory_format": "channels_last"
+    },
+    {
+      "iters": 20,
+      "median_ms": 110.1671,
+      "p90_ms": 128.8864,
+      "min_ms": 91.1564,
+      "mean_ms": 112.6039,
+      "images_per_s_at_median": 9.08,
+      "throughput_images_per_s": 8.88,
+      "torch_threads_seen": [
+        8,
+        28
+      ],
+      "ultralytics_speed_ms_per_image": {
+        "preprocess": 1.1081,
+        "inference": 108.0537,
+        "postprocess": 0.5493
+      },
+      "cpu_cores_busy": {
+        "ours": 22.78,
+        "others": 4.53
+      },
+      "model": "yolo26m",
+      "precision": "fp32",
+      "batch": 1,
+      "threads": 28,
+      "kind": "e2e",
+      "system_cpu_pct_before": 9.3
+    },
+    {
+      "iters": 50,
+      "median_ms": 25.0692,
+      "p90_ms": 27.5878,
+      "min_ms": 20.5286,
+      "mean_ms": 25.2268,
+      "images_per_s_at_median": 39.89,
+      "throughput_images_per_s": 39.64,
+      "cpu_cores_busy": {
+        "ours": 19.32,
+        "others": 5.75
+      },
+      "model": "yolo26n",
+      "precision": "fp32",
+      "batch": 1,
+      "threads": 20,
+      "kind": "forward",
+      "system_cpu_pct_before": 12.2,
+      "memory_format": "channels_last"
+    },
+    {
+      "iters": 50,
+      "median_ms": 40.8803,
+      "p90_ms": 49.8599,
+      "min_ms": 32.5089,
+      "mean_ms": 42.221,
+      "images_per_s_at_median": 24.46,
+      "throughput_images_per_s": 23.68,
+      "torch_threads_seen": [
+        8,
+        20
+      ],
+      "ultralytics_speed_ms_per_image": {
+        "preprocess": 1.3204,
+        "inference": 38.5885,
+        "postprocess": 0.5971
+      },
+      "cpu_cores_busy": {
+        "ours": 15.66,
+        "others": 11.92
+      },
+      "model": "yolo26n",
+      "precision": "fp32",
+      "batch": 1,
+      "threads": 20,
+      "kind": "e2e",
+      "system_cpu_pct_before": 13.9
+    },
+    {
+      "iters": 30,
+      "median_ms": 42.5248,
+      "p90_ms": 46.6648,
+      "min_ms": 38.765,
+      "mean_ms": 42.9151,
+      "images_per_s_at_median": 23.52,
+      "throughput_images_per_s": 23.3,
+      "cpu_cores_busy": {
+        "ours": 19.79,
+        "others": 2.26
+      },
+      "model": "yolo26s",
+      "precision": "fp32",
+      "batch": 1,
+      "threads": 20,
+      "kind": "forward",
+      "system_cpu_pct_before": 6.1,
+      "memory_format": "channels_last"
+    },
+    {
+      "iters": 30,
+      "median_ms": 51.0679,
+      "p90_ms": 62.9812,
+      "min_ms": 45.3024,
+      "mean_ms": 53.1891,
+      "images_per_s_at_median": 19.58,
+      "throughput_images_per_s": 18.8,
+      "torch_threads_seen": [
+        8,
+        20
+      ],
+      "ultralytics_speed_ms_per_image": {
+        "preprocess": 1.0096,
+        "inference": 49.1161,
+        "postprocess": 0.4838
+      },
+      "cpu_cores_busy": {
+        "ours": 17.84,
+        "others": 7.68
+      },
+      "model": "yolo26s",
+      "precision": "fp32",
+      "batch": 1,
+      "threads": 20,
+      "kind": "e2e",
+      "system_cpu_pct_before": 10.4
+    },
+    {
+      "iters": 20,
+      "median_ms": 106.6012,
+      "p90_ms": 116.0145,
+      "min_ms": 101.3889,
+      "mean_ms": 108.1237,
+      "images_per_s_at_median": 9.38,
+      "throughput_images_per_s": 9.25,
+      "cpu_cores_busy": {
+        "ours": 19.71,
+        "others": 3.25
+      },
+      "model": "yolo26m",
+      "precision": "fp32",
+      "batch": 1,
+      "threads": 20,
+      "kind": "forward",
+      "system_cpu_pct_before": 12.7,
+      "memory_format": "channels_last"
+    },
+    {
+      "iters": 20,
+      "median_ms": 107.7945,
+      "p90_ms": 118.4755,
+      "min_ms": 101.8585,
+      "mean_ms": 109.9024,
+      "images_per_s_at_median": 9.28,
+      "throughput_images_per_s": 9.1,
+      "torch_threads_seen": [
+        8,
+        20
+      ],
+      "ultralytics_speed_ms_per_image": {
+        "preprocess": 1.0013,
+        "inference": 105.9572,
+        "postprocess": 0.4832
+      },
+      "cpu_cores_busy": {
+        "ours": 19.33,
+        "others": 3.55
+      },
+      "model": "yolo26m",
+      "precision": "fp32",
+      "batch": 1,
+      "threads": 20,
+      "kind": "e2e",
+      "system_cpu_pct_before": 10.2
+    },
+    {
+      "iters": 50,
+      "median_ms": 22.7504,
+      "p90_ms": 28.178,
+      "min_ms": 15.9175,
+      "mean_ms": 22.6086,
+      "images_per_s_at_median": 43.96,
+      "throughput_images_per_s": 44.23,
+      "cpu_cores_busy": {
+        "ours": 7.95,
+        "others": 3.97
+      },
+      "model": "yolo26n",
+      "precision": "fp32",
+      "batch": 1,
+      "threads": 8,
+      "kind": "forward",
+      "system_cpu_pct_before": 6.4,
+      "memory_format": "channels_last"
+    },
+    {
+      "iters": 50,
+      "median_ms": 25.4835,
+      "p90_ms": 28.2146,
+      "min_ms": 16.7752,
+      "mean_ms": 24.7893,
+      "images_per_s_at_median": 39.24,
+      "throughput_images_per_s": 40.34,
+      "torch_threads_seen": [
+        8
+      ],
+      "ultralytics_speed_ms_per_image": {
+        "preprocess": 0.947,
+        "inference": 23.6942,
+        "postprocess": 0.3053
+      },
+      "cpu_cores_busy": {
+        "ours": 7.77,
+        "others": 3.06
+      },
+      "model": "yolo26n",
+      "precision": "fp32",
+      "batch": 1,
+      "threads": 8,
+      "kind": "e2e",
+      "system_cpu_pct_before": 10.7
+    },
+    {
+      "iters": 30,
+      "median_ms": 50.1535,
+      "p90_ms": 58.0234,
+      "min_ms": 39.1393,
+      "mean_ms": 50.4286,
+      "images_per_s_at_median": 19.94,
+      "throughput_images_per_s": 19.83,
+      "cpu_cores_busy": {
+        "ours": 7.9,
+        "others": 1.4
+      },
+      "model": "yolo26s",
+      "precision": "fp32",
+      "batch": 1,
+      "threads": 8,
+      "kind": "forward",
+      "system_cpu_pct_before": 11.8,
+      "memory_format": "channels_last"
+    },
+    {
+      "iters": 30,
+      "median_ms": 52.9745,
+      "p90_ms": 61.08,
+      "min_ms": 38.1631,
+      "mean_ms": 52.9014,
+      "images_per_s_at_median": 18.88,
+      "throughput_images_per_s": 18.9,
+      "torch_threads_seen": [
+        8
+      ],
+      "ultralytics_speed_ms_per_image": {
+        "preprocess": 0.9659,
+        "inference": 51.5207,
+        "postprocess": 0.3094
+      },
+      "cpu_cores_busy": {
+        "ours": 7.84,
+        "others": 2.02
+      },
+      "model": "yolo26s",
+      "precision": "fp32",
+      "batch": 1,
+      "threads": 8,
+      "kind": "e2e",
+      "system_cpu_pct_before": 11.3
+    },
+    {
+      "iters": 20,
+      "median_ms": 143.6374,
+      "p90_ms": 161.0757,
+      "min_ms": 124.2691,
+      "mean_ms": 143.9947,
+      "images_per_s_at_median": 6.96,
+      "throughput_images_per_s": 6.94,
+      "cpu_cores_busy": {
+        "ours": 7.93,
+        "others": 3.67
+      },
+      "model": "yolo26m",
+      "precision": "fp32",
+      "batch": 1,
+      "threads": 8,
+      "kind": "forward",
+      "system_cpu_pct_before": 4.2,
+      "memory_format": "channels_last"
+    },
+    {
+      "iters": 20,
+      "median_ms": 162.6461,
+      "p90_ms": 176.1005,
+      "min_ms": 125.5945,
+      "mean_ms": 159.825,
+      "images_per_s_at_median": 6.15,
+      "throughput_images_per_s": 6.26,
+      "torch_threads_seen": [
+        8
+      ],
+      "ultralytics_speed_ms_per_image": {
+        "preprocess": 1.0939,
+        "inference": 160.6742,
+        "postprocess": 0.3536
+      },
+      "cpu_cores_busy": {
+        "ours": 7.76,
+        "others": 3.84
+      },
+      "model": "yolo26m",
+      "precision": "fp32",
+      "batch": 1,
+      "threads": 8,
+      "kind": "e2e",
+      "system_cpu_pct_before": 12.3
+    },
+    {
+      "iters": 50,
+      "median_ms": 24.8268,
+      "p90_ms": 30.6144,
+      "min_ms": 17.9965,
+      "mean_ms": 25.7077,
+      "images_per_s_at_median": 40.28,
+      "throughput_images_per_s": 38.9,
+      "torch_threads_seen": [
+        8
+      ],
+      "ultralytics_speed_ms_per_image": {
+        "preprocess": 0.9478,
+        "inference": 23.3833,
+        "postprocess": 0.3168
+      },
+      "cpu_cores_busy": {
+        "ours": 7.75,
+        "others": 4.3
+      },
+      "model": "yolo26n",
+      "precision": "fp32",
+      "batch": 1,
+      "threads": 8,
+      "kind": "e2e-ultralytics-default",
+      "system_cpu_pct_before": 13.9
+    },
+    {
+      "iters": 30,
+      "median_ms": 52.1288,
+      "p90_ms": 65.222,
+      "min_ms": 34.3316,
+      "mean_ms": 52.7929,
+      "images_per_s_at_median": 19.18,
+      "throughput_images_per_s": 18.94,
+      "torch_threads_seen": [
+        8
+      ],
+      "ultralytics_speed_ms_per_image": {
+        "preprocess": 1.0132,
+        "inference": 50.6749,
+        "postprocess": 0.3212
+      },
+      "cpu_cores_busy": {
+        "ours": 7.77,
+        "others": 3.49
+      },
+      "model": "yolo26s",
+      "precision": "fp32",
+      "batch": 1,
+      "threads": 8,
+      "kind": "e2e-ultralytics-default",
+      "system_cpu_pct_before": 8.9
+    },
+    {
+      "iters": 20,
+      "median_ms": 137.5791,
+      "p90_ms": 163.7302,
+      "min_ms": 105.8734,
+      "mean_ms": 138.7668,
+      "images_per_s_at_median": 7.27,
+      "throughput_images_per_s": 7.21,
+      "torch_threads_seen": [
+        8
+      ],
+      "ultralytics_speed_ms_per_image": {
+        "preprocess": 0.992,
+        "inference": 135.974,
+        "postprocess": 0.3217
+      },
+      "cpu_cores_busy": {
+        "ours": 7.84,
+        "others": 2.71
+      },
+      "model": "yolo26m",
+      "precision": "fp32",
+      "batch": 1,
+      "threads": 8,
+      "kind": "e2e-ultralytics-default",
+      "system_cpu_pct_before": 13.0
+    }
+  ]
+}
