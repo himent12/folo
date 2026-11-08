@@ -1,0 +1,668 @@
+//! Tiled GEMM: `C = alpha · op(A) · op(B) (+ bias) → act`, batched, with transposed variants and f16 storage.
+//!
+//! One WGSL generator covers every variant. A workgroup computes a `BM × BN` tile of `C`; each thread owns a
+//! `TM × TN` block held in registers as `vec4<f32>` accumulators. `K` is walked in steps of `BK`: the next
+//! `A` and `B` tiles are fetched from global memory into registers while the current tiles in workgroup
+//! memory are consumed (double-buffered workgroup memory, one barrier per step). Tiles are stored `k`-major
+//! (`As[k][m]`, `Bs[k][n]`) so the inner loop reads `vec4`s of both operands. Global loads are `vec4` when the
+//! leading dimension and offsets allow it; bounds checks are compiled out when `M`, `N`, `K` are tile
+//! multiples. The same generator, with `CONV = true`, gathers `B` straight from an NCHW image (implicit GEMM,
+//! see [`super::conv`]).
+
+use std::fmt::Write as _;
+
+use super::check_buf;
+use crate::DType;
+use crate::context::GpuContext;
+use crate::error::{GpuError, Result, shape_err};
+use crate::kernels::UNARY_FN;
+use crate::kernels::elementwise::UnaryOp;
+use crate::pipeline::{Access, KernelDef, Params, Source, Spec};
+
+/// Bias added in the epilogue.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GemmBias {
+    /// No bias.
+    #[default]
+    None,
+    /// `bias[row]` (one per output row, e.g. a conv output channel).
+    Row,
+    /// `bias[col]` (one per output column, e.g. a linear layer's feature).
+    Col,
+}
+
+/// Element offset plus strides for a two-level batch index `(b1, b2)`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BatchStrides {
+    /// Element offset of batch `(0, 0)`.
+    pub offset: usize,
+    /// Stride (elements) for the outer batch index.
+    pub outer: usize,
+    /// Stride (elements) for the inner batch index.
+    pub inner: usize,
+}
+
+impl BatchStrides {
+    /// Contiguous matrices of `size` elements, outer batch only.
+    pub fn packed(size: usize) -> Self {
+        Self { offset: 0, outer: size, inner: 0 }
+    }
+
+    fn at(&self, b1: usize, b2: usize) -> usize {
+        self.offset + b1 * self.outer + b2 * self.inner
+    }
+
+    fn aligned4(&self) -> bool {
+        self.offset.is_multiple_of(4) && self.outer.is_multiple_of(4) && self.inner.is_multiple_of(4)
+    }
+}
+
+/// A full GEMM description. Matrices are row-major with leading dimensions `lda`, `ldb`, `ldc`; `A` is
+/// `M × K` (`K × M` when `trans_a`), `B` is `K × N` (`N × K` when `trans_b`), `C` is `M × N`.
+#[derive(Clone, Debug)]
+pub struct GemmDesc {
+    /// Rows of `C`.
+    pub m: usize,
+    /// Columns of `C`.
+    pub n: usize,
+    /// Reduction length.
+    pub k: usize,
+    /// `A` is stored transposed (`K × M`).
+    pub trans_a: bool,
+    /// `B` is stored transposed (`N × K`).
+    pub trans_b: bool,
+    /// Leading dimension of `A` as stored.
+    pub lda: usize,
+    /// Leading dimension of `B` as stored.
+    pub ldb: usize,
+    /// Leading dimension of `C`.
+    pub ldc: usize,
+    /// Batch counts `(outer, inner)`; `(1, 1)` for a single GEMM.
+    pub batch: (usize, usize),
+    /// Batch addressing of `A`.
+    pub a: BatchStrides,
+    /// Batch addressing of `B`.
+    pub b: BatchStrides,
+    /// Batch addressing of `C`.
+    pub c: BatchStrides,
+    /// Batch addressing of the bias (offset of the first bias element per batch).
+    pub bias_strides: BatchStrides,
+    /// Scale applied to `A · B`.
+    pub alpha: f32,
+    /// Bias kind.
+    pub bias: GemmBias,
+    /// Activation applied last.
+    pub act: UnaryOp,
+    /// Storage type of `A`, `B`, bias and `C` (accumulation is always f32).
+    pub dtype: DType,
+}
+
+impl GemmDesc {
+    /// A plain packed `M × K · K × N` GEMM (optionally batched with packed matrices).
+    pub fn new(m: usize, n: usize, k: usize, trans_a: bool, trans_b: bool, batch: usize) -> Self {
+        Self {
+            m,
+            n,
+            k,
+            trans_a,
+            trans_b,
+            lda: if trans_a { m } else { k },
+            ldb: if trans_b { k } else { n },
+            ldc: n,
+            batch: (batch, 1),
+            a: BatchStrides::packed(m * k),
+            b: BatchStrides::packed(k * n),
+            c: BatchStrides::packed(m * n),
+            bias_strides: BatchStrides::default(),
+            alpha: 1.0,
+            bias: GemmBias::None,
+            act: UnaryOp::Identity,
+            dtype: DType::F32,
+        }
+    }
+
+    /// Floating-point operations (2·M·N·K per batch).
+    pub fn flops(&self) -> f64 {
+        2.0 * self.m as f64 * self.n as f64 * self.k as f64 * (self.batch.0 * self.batch.1) as f64
+    }
+}
+
+/// Tile configuration (exposed for benchmarks; [`gemm`] picks one automatically).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TileConfig {
+    /// Tile rows.
+    pub bm: u32,
+    /// Tile columns.
+    pub bn: u32,
+    /// Tile depth.
+    pub bk: u32,
+    /// Rows per thread (multiple of 4).
+    pub tm: u32,
+    /// Columns per thread (multiple of 4).
+    pub tn: u32,
+}
+
+impl TileConfig {
+    /// 128×128 tiles, depth 8, 8×8 outputs per thread, 256 threads (16 KiB of workgroup memory).
+    pub const LARGE: TileConfig = TileConfig { bm: 128, bn: 128, bk: 8, tm: 8, tn: 8 };
+    /// 64×128 tiles, depth 16, 4×8 per thread, 256 threads: mid-size problems and `M <= 64`.
+    pub const MEDIUM: TileConfig = TileConfig { bm: 64, bn: 128, bk: 16, tm: 4, tn: 8 };
+    /// 64×64 tiles, depth 16, 4×4 per thread, 256 threads: small problems that would leave SMs idle.
+    pub const SMALL: TileConfig = TileConfig { bm: 64, bn: 64, bk: 16, tm: 4, tn: 4 };
+
+    fn threads(&self) -> u32 {
+        (self.bm / self.tm) * (self.bn / self.tn)
+    }
+
+    pub(crate) fn workgroup_bytes(&self) -> u32 {
+        2 * self.bk * (self.bm + self.bn) * 4
+    }
+
+    fn valid(&self) -> bool {
+        let t = self.threads();
+        self.tm.is_multiple_of(4)
+            && self.tn.is_multiple_of(4)
+            && self.bk.is_multiple_of(4)
+            && t <= 256
+            && t.is_multiple_of(self.bk / 4)
+            && t.is_multiple_of(self.bk)
+            && t.is_multiple_of(self.bm / 4)
+            && t.is_multiple_of(self.bn / 4)
+            && t.is_multiple_of(self.bm)
+            && t.is_multiple_of(self.bn)
+            && (self.bm * self.bk / 4).is_multiple_of(t)
+            && (self.bn * self.bk / 4).is_multiple_of(t)
+    }
+}
+
+/// Picks a tile config from the problem size and the device's workgroup memory.
+///
+/// The largest tile wins as long as it still yields enough workgroups to fill the GPU (measured on an RTX
+/// 4080 SUPER: 64+ workgroups) and does not waste more than a quarter of its rows on a short `M`.
+pub fn pick_config(ctx: &GpuContext, d: &GemmDesc) -> TileConfig {
+    let batch = d.batch.0 * d.batch.1;
+    for cfg in [TileConfig::LARGE, TileConfig::MEDIUM] {
+        let (bm, bn) = (cfg.bm as usize, cfg.bn as usize);
+        let groups = d.m.div_ceil(bm) * d.n.div_ceil(bn) * batch;
+        let row_waste = (d.m.div_ceil(bm) * bm) as f64 / d.m.max(1) as f64;
+        if groups >= 64 && row_waste <= 1.25 && cfg.workgroup_bytes() <= ctx.caps().max_workgroup_storage {
+            return cfg;
+        }
+    }
+    TileConfig::SMALL
+}
+
+fn wgsl_ty(f16: bool, vec: bool) -> &'static str {
+    match (f16, vec) {
+        (false, false) => "f32",
+        (false, true) => "vec4<f32>",
+        (true, false) => "f16",
+        (true, true) => "vec4<f16>",
+    }
+}
+
+/// How one operand tile is fetched: `inner` units along the contiguous direction per `outer` line.
+struct Plan {
+    vec: bool,
+    /// Units (vec4 or scalar) along the contiguous direction of the tile.
+    inner: u32,
+    /// Units per thread.
+    count: u32,
+    /// Outer lines advanced per unit step.
+    step: u32,
+}
+
+fn plan(units_inner: u32, total_units: u32, threads: u32, vec: bool) -> Plan {
+    Plan { vec, inner: units_inner, count: total_units / threads, step: threads / units_inner }
+}
+
+pub(crate) fn gen_gemm(spec: &Spec) -> String {
+    let bm = spec.get_u32("BM", 128);
+    let bn = spec.get_u32("BN", 128);
+    let bk = spec.get_u32("BK", 16);
+    let tm = spec.get_u32("TM", 8);
+    let tn = spec.get_u32("TN", 8);
+    let (va, vb, vc) = (spec.get_bool("VEC_A"), spec.get_bool("VEC_B"), spec.get_bool("VEC_C"));
+    let (ta, tb) = (spec.get_bool("TRANS_A"), spec.get_bool("TRANS_B"));
+    let check = spec.get_bool("CHECK");
+    let conv = spec.get_bool("CONV");
+    let bias = spec.get_u32("BIAS_KIND", 0);
+    let f16 = spec.is_f16();
+    let wgx = bn / tn;
+    let wgy = bm / tm;
+    let threads = wgx * wgy;
+    let (bm4, bn4) = (bm / 4, bn / 4);
+
+    // Operand tile fetch plans (see the module docs for the layouts).
+    let pa = match (va, ta) {
+        (true, false) => plan(bk / 4, bm * bk / 4, threads, true),
+        (true, true) => plan(bm4, bm * bk / 4, threads, true),
+        (false, false) => plan(bk, bm * bk, threads, false),
+        (false, true) => plan(bm, bm * bk, threads, false),
+    };
+    let pb = match (vb, tb) {
+        (true, false) => plan(bn4, bn * bk / 4, threads, true),
+        (true, true) => plan(bk / 4, bn * bk / 4, threads, true),
+        (false, false) => plan(bn, bn * bk, threads, false),
+        (false, true) => plan(bk, bn * bk, threads, false),
+    };
+
+    let mut s = String::new();
+    s.push_str(UNARY_FN);
+    let _ = writeln!(s, "@group(0) @binding(1) var<storage, read> A: array<{}>;", wgsl_ty(f16, va));
+    let _ = writeln!(s, "@group(0) @binding(2) var<storage, read> B: array<{}>;", wgsl_ty(f16, vb && !conv));
+    s.push_str("@group(0) @binding(3) var<storage, read> BIAS: array<T>;\n");
+    let _ = writeln!(s, "@group(0) @binding(4) var<storage, read_write> C: array<{}>;", wgsl_ty(f16, vc));
+    let _ = writeln!(s, "var<workgroup> As: array<array<vec4<f32>, {bm4}>, {}>;", 2 * bk);
+    let _ = writeln!(s, "var<workgroup> Bs: array<array<vec4<f32>, {bn4}>, {}>;", 2 * bk);
+    let _ = writeln!(s, "@compute @workgroup_size({wgx}, {wgy}, 1)");
+    s.push_str(
+        "fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid3: vec3<u32>) {\n",
+    );
+    let _ = writeln!(s, "  let tx = lid3.x; let ty = lid3.y; let tid = ty * {wgx}u + tx;");
+    s.push_str(
+        "  let M = pu(0u); let N = pu(1u); let K = pu(2u);\n\
+         let lda = pu(3u); let ldb = pu(4u); let ldc = pu(5u);\n\
+         let b1 = wid.z / pu(6u); let b2 = wid.z % pu(6u);\n\
+         let offA = pu(8u) + b1 * pu(9u) + b2 * pu(10u);\n\
+         let offB = pu(11u) + b1 * pu(12u) + b2 * pu(13u);\n\
+         let offC = pu(14u) + b1 * pu(15u) + b2 * pu(16u);\n\
+         let offBias = pu(18u) + b1 * pu(19u) + b2 * pu(20u);\n",
+    );
+    let _ = writeln!(s, "  let m0 = wid.y * {bm}u; let n0 = wid.x * {bn}u;");
+    if conv {
+        // Implicit-GEMM gather: B[k][j] = X[ci][oh*SH - PH + kh*DH][ow*SW - PW + kw*DW].
+        s.push_str("  let IH = pu(24u); let IW = pu(25u); let OW = pu(27u);\n");
+    }
+    // Per-thread tile coordinates for the loads.
+    let _ = writeln!(s, "  let ai = tid % {}u; let ao = tid / {}u;", pa.inner, pa.inner);
+    let _ = writeln!(s, "  let bi = tid % {}u; let bo = tid / {}u;", pb.inner, pb.inner);
+    if conv {
+        // One output column per thread for the whole K loop.
+        s.push_str(
+            "  let cj = n0 + bi;\n  let coh = cj / OW; let cow = cj % OW;\n\
+             let cih0 = i32(coh * SH) - PH; let ciw0 = i32(cow * SW) - PW;\n\
+             let cjok = cj < N;\n",
+        );
+    }
+    let _ =
+        writeln!(s, "  var ra: array<vec4<f32>, {}>;", pa.count.div_ceil(if pa.vec { 1 } else { 4 }).max(1));
+    let _ =
+        writeln!(s, "  var rb: array<vec4<f32>, {}>;", pb.count.div_ceil(if pb.vec { 1 } else { 4 }).max(1));
+    for i in 0..tm {
+        for j in 0..tn / 4 {
+            let _ = writeln!(s, "  var acc_{i}_{j} = vec4<f32>(0.0);");
+        }
+    }
+    s.push_str("  let nt = (K + BK - 1u) / BK;\n");
+
+    // --- global → registers -------------------------------------------------------------------------------
+    let mut load = String::new();
+    for u in 0..pa.count {
+        let o = format!("(ao + {}u)", u * pa.step);
+        let (reg, comp) = if pa.vec {
+            (format!("ra[{u}]"), String::new())
+        } else {
+            (format!("ra[{}]", u / 4), format!("[{}]", u % 4))
+        };
+        let (idx, cond) = match (pa.vec, ta) {
+            (true, false) => (
+                format!("(offA / 4u) + (m0 + {o}) * (lda / 4u) + ((k0 >> 2u) + ai)"),
+                format!("m0 + {o} < M && k0 + ai * 4u < K"),
+            ),
+            (true, true) => (
+                format!("(offA / 4u) + (k0 + {o}) * (lda / 4u) + ((m0 >> 2u) + ai)"),
+                format!("k0 + {o} < K && m0 + ai * 4u < M"),
+            ),
+            (false, false) => {
+                (format!("offA + (m0 + {o}) * lda + k0 + ai"), format!("m0 + {o} < M && k0 + ai < K"))
+            }
+            (false, true) => {
+                (format!("offA + (k0 + {o}) * lda + m0 + ai"), format!("k0 + {o} < K && m0 + ai < M"))
+            }
+        };
+        let val = if pa.vec { format!("vec4<f32>(A[{idx}])") } else { format!("f32(A[{idx}])") };
+        let zero = if pa.vec { "vec4<f32>(0.0)" } else { "0.0" };
+        if check {
+            let _ =
+                writeln!(load, "    if ({cond}) {{ {reg}{comp} = {val}; }} else {{ {reg}{comp} = {zero}; }}");
+        } else {
+            let _ = writeln!(load, "    {reg}{comp} = {val};");
+        }
+    }
+    for u in 0..pb.count {
+        let o = format!("(bo + {}u)", u * pb.step);
+        let (reg, comp) = if pb.vec {
+            (format!("rb[{u}]"), String::new())
+        } else {
+            (format!("rb[{}]", u / 4), format!("[{}]", u % 4))
+        };
+        if conv {
+            // Unit (k = k0 + o, j = cj): gather from the image.
+            let _ = writeln!(
+                load,
+                "    {{ let k = k0 + {o}; let ci = k / (KH * KW); let r = k % (KH * KW);\n\
+                 \x20     let ih = cih0 + i32((r / KW) * DH); let iw = ciw0 + i32((r % KW) * DW);\n\
+                 \x20     if (cjok && k < K && ih >= 0 && ih < i32(IH) && iw >= 0 && iw < i32(IW)) {{\n\
+                 \x20       {reg}{comp} = f32(B[offB + (ci * IH + u32(ih)) * IW + u32(iw)]);\n\
+                 \x20     }} else {{ {reg}{comp} = 0.0; }} }}"
+            );
+            continue;
+        }
+        let (idx, cond) = match (pb.vec, tb) {
+            (true, false) => (
+                format!("(offB / 4u) + (k0 + {o}) * (ldb / 4u) + ((n0 >> 2u) + bi)"),
+                format!("k0 + {o} < K && n0 + bi * 4u < N"),
+            ),
+            (true, true) => (
+                format!("(offB / 4u) + (n0 + {o}) * (ldb / 4u) + ((k0 >> 2u) + bi)"),
+                format!("n0 + {o} < N && k0 + bi * 4u < K"),
+            ),
+            (false, false) => {
+                (format!("offB + (k0 + {o}) * ldb + n0 + bi"), format!("k0 + {o} < K && n0 + bi < N"))
+            }
+            (false, true) => {
+                (format!("offB + (n0 + {o}) * ldb + k0 + bi"), format!("n0 + {o} < N && k0 + bi < K"))
+            }
+        };
+        let val = if pb.vec { format!("vec4<f32>(B[{idx}])") } else { format!("f32(B[{idx}])") };
+        let zero = if pb.vec { "vec4<f32>(0.0)" } else { "0.0" };
+        if check {
+            let _ =
+                writeln!(load, "    if ({cond}) {{ {reg}{comp} = {val}; }} else {{ {reg}{comp} = {zero}; }}");
+        } else {
+            let _ = writeln!(load, "    {reg}{comp} = {val};");
+        }
+    }
+
+    // --- registers → workgroup memory (buffer `sb`, a constant) -------------------------------------------
+    // Tiles are 2-D arrays `As[k][m / 4]`: with the buffer index and `k` constant and the column index
+    // loop-invariant, the index clamps naga adds for workgroup arrays fold or hoist out of the main loop.
+    let store = |sb: u32| -> String {
+        let mut st = String::new();
+        let (ka, kb) = (sb * bk, sb * bk);
+        for u in 0..pa.count {
+            let o = format!("(ao + {}u)", u * pa.step);
+            let (x, y) = (u / 4, u % 4);
+            match (pa.vec, ta) {
+                (true, false) => {
+                    // Unit (m = o, k = 4·ai .. 4·ai+3): scatter four scalars down the k-major tile.
+                    for c in 0..4 {
+                        let _ = writeln!(
+                            st,
+                            "    As[{ka}u + ai * 4u + {c}u][{o} >> 2u][{o} & 3u] = ra[{u}][{c}];"
+                        );
+                    }
+                }
+                (true, true) => {
+                    let _ = writeln!(st, "    As[{ka}u + {o}][ai] = ra[{u}];");
+                }
+                (false, false) => {
+                    let _ = writeln!(st, "    As[{ka}u + ai][{o} >> 2u][{o} & 3u] = ra[{x}][{y}];");
+                }
+                (false, true) => {
+                    let _ = writeln!(st, "    As[{ka}u + {o}][ai >> 2u][ai & 3u] = ra[{x}][{y}];");
+                }
+            }
+        }
+        for u in 0..pb.count {
+            let o = format!("(bo + {}u)", u * pb.step);
+            let (x, y) = (u / 4, u % 4);
+            match (pb.vec, tb) {
+                (true, false) => {
+                    let _ = writeln!(st, "    Bs[{kb}u + {o}][bi] = rb[{u}];");
+                }
+                (true, true) => {
+                    for c in 0..4 {
+                        let _ = writeln!(
+                            st,
+                            "    Bs[{kb}u + bi * 4u + {c}u][{o} >> 2u][{o} & 3u] = rb[{u}][{c}];"
+                        );
+                    }
+                }
+                (false, false) => {
+                    let _ = writeln!(st, "    Bs[{kb}u + {o}][bi >> 2u][bi & 3u] = rb[{x}][{y}];");
+                }
+                (false, true) => {
+                    let _ = writeln!(st, "    Bs[{kb}u + bi][{o} >> 2u][{o} & 3u] = rb[{x}][{y}];");
+                }
+            }
+        }
+        st
+    };
+
+    // --- compute on buffer `sb` ------------------------------------------------------------------------------
+    // The k loop is unrolled here rather than left to the driver: naga guards every WGSL loop with an
+    // iteration counter (infinite-loop protection), which blocks the driver's unrolling and costs 20-70%.
+    let compute = |sb: u32| -> String {
+        let mut c = String::new();
+        for kk in 0..bk {
+            let row = sb * bk + kk;
+            c.push_str("    {\n");
+            for i in 0..tm / 4 {
+                let _ = writeln!(c, "      let a{i} = As[{row}u][ty + {}u];", i * wgy);
+            }
+            for j in 0..tn / 4 {
+                let _ = writeln!(c, "      let b{j} = Bs[{row}u][tx + {}u];", j * wgx);
+            }
+            for i in 0..tm / 4 {
+                for r in 0..4 {
+                    for j in 0..tn / 4 {
+                        let acc = format!("acc_{}_{j}", i * 4 + r);
+                        let _ = writeln!(c, "      {acc} = fma(vec4<f32>(a{i}[{r}]), b{j}, {acc});");
+                    }
+                }
+            }
+            c.push_str("    }\n");
+        }
+        c
+    };
+
+    // --- main loop: two K tiles per iteration so every workgroup-memory buffer index is a constant ----------
+    let _ = writeln!(s, "  {{\n    let k0 = 0u;\n{load}  }}");
+    let _ = writeln!(s, "  {{\n{}  }}", store(0));
+    s.push_str("  workgroupBarrier();\n");
+    s.push_str("  for (var t = 0u; t < nt; t += 2u) {\n");
+    let _ = writeln!(
+        s,
+        "   {{\n    let more = t + 1u < nt;\n    if (more) {{\n    let k0 = (t + 1u) * BK;\n{load}    }}\n{}\
+         \x20   if (more) {{\n{}    }}\n    workgroupBarrier();\n   }}",
+        compute(0),
+        store(1)
+    );
+    let _ = writeln!(
+        s,
+        "   if (t + 1u < nt) {{\n    let more = t + 2u < nt;\n    if (more) {{\n    let k0 = (t + 2u) * BK;\n{load}    }}\n{}\
+         \x20   if (more) {{\n{}    }}\n    workgroupBarrier();\n   }}",
+        compute(1),
+        store(0)
+    );
+    s.push_str("  }\n\n");
+
+    // --- epilogue --------------------------------------------------------------------------------------------
+    s.push_str("  let alpha = pf(7u); let act_alpha = pf(17u);\n");
+    for i in 0..tm / 4 {
+        for r in 0..4 {
+            let row_i = i * 4 + r;
+            let _ = writeln!(s, "  {{\n    let row = m0 + ({}u + ty) * 4u + {r}u;", i * wgy);
+            s.push_str("    if (row < M) {\n");
+            for j in 0..tn / 4 {
+                let _ = writeln!(s, "    {{\n      let col = n0 + ({}u + tx) * 4u;", j * wgx);
+                let _ = writeln!(s, "      var v = acc_{row_i}_{j} * alpha;");
+                match bias {
+                    1 => s.push_str("      v += vec4<f32>(f32(BIAS[offBias + row]));\n"),
+                    2 => s.push_str(
+                        "      v += vec4<f32>(f32(BIAS[offBias + min(col, N - 1u)]), f32(BIAS[offBias + min(col + 1u, N - 1u)]),\n\
+                         \x20                f32(BIAS[offBias + min(col + 2u, N - 1u)]), f32(BIAS[offBias + min(col + 3u, N - 1u)]));\n",
+                    ),
+                    _ => {}
+                }
+                s.push_str("      v = unary4(ACT, v, act_alpha);\n");
+                if vc {
+                    let cast = if f16 { "vec4<f16>(v)" } else { "v" };
+                    let _ =
+                        writeln!(s, "      if (col < N) {{ C[(offC + row * ldc + col) / 4u] = {cast}; }}");
+                } else {
+                    for c in 0..4 {
+                        let cast = if f16 { format!("f16(v[{c}])") } else { format!("v[{c}]") };
+                        let _ = writeln!(
+                            s,
+                            "      if (col + {c}u < N) {{ C[offC + row * ldc + col + {c}u] = {cast}; }}"
+                        );
+                    }
+                }
+                s.push_str("    }\n");
+            }
+            s.push_str("    }\n  }\n");
+        }
+    }
+    s.push_str("}\n");
+    s
+}
+
+pub(crate) static GEMM: KernelDef = KernelDef {
+    name: "gemm",
+    storage: &[Access::Read, Access::Read, Access::Read, Access::ReadWrite],
+    source: Source::Generated(gen_gemm),
+};
+
+/// Highest element index (exclusive) a strided batched matrix operand touches.
+fn extent(s: &BatchStrides, batch: (usize, usize), rows: usize, cols: usize, ld: usize) -> usize {
+    if rows == 0 || cols == 0 || batch.0 == 0 || batch.1 == 0 {
+        return 0;
+    }
+    s.at(batch.0 - 1, batch.1 - 1) + (rows - 1) * ld + cols
+}
+
+pub(crate) fn base_spec(d: &GemmDesc, cfg: TileConfig) -> Spec {
+    Spec::new()
+        .u32("BM", cfg.bm)
+        .u32("BN", cfg.bn)
+        .u32("BK", cfg.bk)
+        .u32("TM", cfg.tm)
+        .u32("TN", cfg.tn)
+        .u32("ACT", d.act.code())
+        .u32(
+            "BIAS_KIND",
+            match d.bias {
+                GemmBias::None => 0,
+                GemmBias::Row => 1,
+                GemmBias::Col => 2,
+            },
+        )
+        .f16(d.dtype == DType::F16)
+}
+
+pub(crate) fn gemm_params(d: &GemmDesc) -> Result<Params> {
+    let p = Params::new()
+        .uz(d.m)?
+        .uz(d.n)?
+        .uz(d.k)?
+        .uz(d.lda)?
+        .uz(d.ldb)?
+        .uz(d.ldc)?
+        .uz(d.batch.1)?
+        .f(d.alpha)
+        .uz(d.a.offset)?
+        .uz(d.a.outer)?
+        .uz(d.a.inner)?
+        .uz(d.b.offset)?
+        .uz(d.b.outer)?
+        .uz(d.b.inner)?
+        .uz(d.c.offset)?
+        .uz(d.c.outer)?
+        .uz(d.c.inner)?
+        .f(d.act.alpha())
+        .uz(d.bias_strides.offset)?
+        .uz(d.bias_strides.outer)?
+        .uz(d.bias_strides.inner)?;
+    Ok(p)
+}
+
+pub(crate) fn check_dtype(ctx: &GpuContext, dtype: DType, op: &'static str) -> Result<()> {
+    if dtype == DType::F16 && !ctx.caps().shader_f16 {
+        return Err(GpuError::Unsupported("shader-f16"));
+    }
+    let _ = op;
+    Ok(())
+}
+
+/// Encodes a GEMM described by `d`. `bias` is required when `d.bias != GemmBias::None`.
+pub fn gemm(
+    ctx: &GpuContext,
+    d: &GemmDesc,
+    a: &wgpu::Buffer,
+    b: &wgpu::Buffer,
+    bias: Option<&wgpu::Buffer>,
+    c: &wgpu::Buffer,
+) -> Result<()> {
+    gemm_with_config(ctx, d, a, b, bias, c, pick_config(ctx, d))
+}
+
+/// [`gemm`] with an explicit tile configuration (benchmarks and tuning).
+pub fn gemm_with_config(
+    ctx: &GpuContext,
+    d: &GemmDesc,
+    a: &wgpu::Buffer,
+    b: &wgpu::Buffer,
+    bias: Option<&wgpu::Buffer>,
+    c: &wgpu::Buffer,
+    cfg: TileConfig,
+) -> Result<()> {
+    check_dtype(ctx, d.dtype, "gemm")?;
+    if !cfg.valid() || cfg.workgroup_bytes() > ctx.caps().max_workgroup_storage {
+        return Err(shape_err(format!("gemm: invalid tile config {cfg:?} for this device")));
+    }
+    let (ar, ac) = if d.trans_a { (d.k, d.m) } else { (d.m, d.k) };
+    let (br, bc) = if d.trans_b { (d.n, d.k) } else { (d.k, d.n) };
+    if d.lda < ac || d.ldb < bc || d.ldc < d.n {
+        return Err(shape_err(format!("gemm: leading dimensions too small in {d:?}")));
+    }
+    if d.batch.1 == 0 {
+        return Err(shape_err("gemm: inner batch count must be non-zero"));
+    }
+    if d.m == 0 || d.n == 0 || d.batch.0 == 0 {
+        return Ok(());
+    }
+    check_buf(a, extent(&d.a, d.batch, ar, ac, d.lda), d.dtype, "gemm A")?;
+    check_buf(b, extent(&d.b, d.batch, br, bc, d.ldb), d.dtype, "gemm B")?;
+    check_buf(c, extent(&d.c, d.batch, d.m, d.n, d.ldc), d.dtype, "gemm C")?;
+    let bias_len = match d.bias {
+        GemmBias::None => 0,
+        GemmBias::Row => d.m,
+        GemmBias::Col => d.n,
+    };
+    let bias_buf = match (d.bias, bias) {
+        (GemmBias::None, _) => ctx.dummy(),
+        (_, Some(bb)) => {
+            check_buf(bb, extent(&d.bias_strides, d.batch, 1, bias_len, bias_len), d.dtype, "gemm bias")?;
+            bb
+        }
+        (_, None) => return Err(shape_err("gemm: bias kind set but no bias buffer")),
+    };
+    let vec_a = d.lda.is_multiple_of(4)
+        && d.a.aligned4()
+        && if d.trans_a { d.m.is_multiple_of(4) } else { d.k.is_multiple_of(4) };
+    let vec_b = d.ldb.is_multiple_of(4)
+        && d.b.aligned4()
+        && if d.trans_b { d.k.is_multiple_of(4) } else { d.n.is_multiple_of(4) };
+    let vec_c = d.ldc.is_multiple_of(4) && d.c.aligned4() && d.n.is_multiple_of(4);
+    let check = !d.m.is_multiple_of(cfg.bm as usize)
+        || !d.n.is_multiple_of(cfg.bn as usize)
+        || !d.k.is_multiple_of(cfg.bk as usize);
+    let spec = base_spec(d, cfg)
+        .bool("VEC_A", vec_a)
+        .bool("VEC_B", vec_b)
+        .bool("VEC_C", vec_c)
+        .bool("TRANS_A", d.trans_a)
+        .bool("TRANS_B", d.trans_b)
+        .bool("CHECK", check)
+        .bool("CONV", false);
+    let k = ctx.kernel(&GEMM, spec)?;
+    let groups = [
+        d.n.div_ceil(cfg.bn as usize) as u32,
+        d.m.div_ceil(cfg.bm as usize) as u32,
+        u32::try_from(d.batch.0 * d.batch.1).map_err(|_| GpuError::Limit("gemm batch too large".into()))?,
+    ];
+    ctx.dispatch(&k, &[a, b, bias_buf, c], &gemm_params(d)?, groups)
+}

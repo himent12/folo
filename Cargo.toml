@@ -41,6 +41,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 http-body-util = "0.1"
 sysinfo = "0.37"
 clap = { version = "4", features = ["derive", "env", "string"] }
+# No GL backend: FOLO targets Vulkan / DX12 / Metal natively and WebGPU in the browser.
+wgpu = { version = "30.0.1", default-features = false, features = ["std", "parking_lot", "vulkan", "dx12", "metal", "webgpu", "wgsl"] }
+pollster = "1.0.1"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
