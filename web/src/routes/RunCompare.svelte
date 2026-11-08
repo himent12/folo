@@ -5,6 +5,7 @@
   import X from '@lucide/svelte/icons/x';
   import ArrowUpRight from '@lucide/svelte/icons/arrow-up-right';
   import Plus from '@lucide/svelte/icons/plus';
+  import ChevronRight from '@lucide/svelte/icons/chevron-right';
   import { hub } from '$lib/api/index.svelte';
   import { Resource } from '$lib/api/resource.svelte';
   import type { Epoch, Run, RunMetrics } from '$lib/api/types';
@@ -19,6 +20,7 @@
   import ErrorState from '$lib/ui/ErrorState.svelte';
   import Panel from '$lib/ui/Panel.svelte';
   import Segmented from '$lib/ui/Segmented.svelte';
+  import Select from '$lib/ui/Select.svelte';
   import StatusBadge from '$lib/ui/StatusBadge.svelte';
 
   setCrumbs({ label: 'Runs', path: '/runs' }, { label: 'Compare' });
@@ -174,9 +176,10 @@
   const candidates = $derived((runs.data ?? []).filter((r) => !ids.includes(r.id) && r.status !== 'queued'));
 </script>
 
-<Page title="Compare runs">
-  {#snippet sub()}<span>Overlay the curves of up to four runs. Colours follow the run, not its rank.</span>{/snippet}
+{#snippet lede()}<span>Overlay the curves of up to four runs. Colours follow the run, not its rank.</span>{/snippet}
 
+<!-- Phones lead with the plot: the explanation sits in the disclosure under the legend. -->
+<Page title="Compare runs" sub={narrow ? undefined : lede}>
   {#if runs.error && !runs.data}
     <ErrorState error={runs.error} retry={() => runs.refresh()} />
   {:else if ids.length === 0}
@@ -190,68 +193,36 @@
     </Panel>
   {:else}
     <section class="compare" aria-label="Curves">
-      <!-- The run chips are the legend: colour key, value under the cursor, link and remove. -->
-      <div class="chips" class:managing role="group" aria-label="Runs being compared">
-        <span class="at num" aria-hidden="true">{readoutAt}</span>
-        <!-- Phones: opening and removing runs sit behind one toggle, so the legend stays compact. -->
-        <button type="button" class="manage" aria-pressed={managing} onclick={() => (managing = !managing)}>{managing ? 'Done' : 'Edit'}</button>
-        {#each chosen as r (r.id)}
-          {@const v = valueOf(r.id)}
-          <!-- svelte-ignore a11y_no_static_element_interactions -->
-          <span
-            class="chip"
-            class:pinned={pinned === r.id}
-            style:--c={color(r.id)}
-            onpointerenter={() => (hovered = r.id)}
-            onpointerleave={() => (hovered = null)}
-            onfocusin={() => (hovered = r.id)}
-            onfocusout={() => (hovered = null)}
-          >
-            <!-- The legend entry (key and name) is the toggle: it keeps the run's line in front. -->
-            <button
-              type="button"
-              class="key"
-              aria-pressed={pinned === r.id}
-              title={pinned === r.id ? 'Let the line fall back' : 'Keep this line in front'}
-              onclick={() => (pinned = pinned === r.id ? null : r.id)}
-            ><i aria-hidden="true" data-pattern={SLOT_PATTERN[slotOf(r.id)]}></i><span class="nm">{r.name}</span></button>
-            <span class="v num">{v === null ? '—' : metric(v)}</span>
-            <a class="open" href={href(`/runs/${r.id}`)} aria-label="Open {r.name}" title="Open run"><ArrowUpRight size={12} /></a>
-            <button class="rm" aria-label="Remove {r.name}" onclick={() => setIds(ids.filter((id) => id !== r.id))}><X size={12} /></button>
-          </span>
-        {/each}
-        {#if ids.length < MAX && candidates.length}{@render adder()}{/if}
-      </div>
-      <p class="note">
-        <span class="wide-note">Press a run to keep its line in front.</span>{#if !sameData && chosen.length > 1}{' '}Different
-          datasets: compare the shape of the curves, not their values.{/if}
-      </p>
-      <header class="c-head">
-        <Segmented label="Metric" bind:value={metricId} options={METRICS.map((m) => ({ value: m.id, label: m.label }))} />
-        <Segmented size="sm" label="X axis" bind:value={x} options={[{ value: 'epoch', label: 'By epoch' }, { value: 'progress', label: '% of run' }]} />
-      </header>
-      {#if metrics.error}
-        <ErrorState error={metrics.error} compact retry={() => metrics.refresh()} title="Could not load these runs' metrics" />
-      {:else if !metrics.data || !runs.data}
-        <ChartSkeleton height={narrow ? 240 : 340} legend={false} />
+      {#if narrow}
+        <!-- Phones: one control row, the plot, then the legend (its readout follows a tap or scrub on the plot). -->
+        <header class="c-row">
+          <Select label="Metric" bind:value={metricId} options={METRICS.map((m) => ({ value: m.id, label: m.label }))} />
+          <Segmented size="sm" label="X axis" bind:value={x} options={[{ value: 'epoch', label: 'By epoch' }, { value: 'progress', label: '% of run' }]} />
+        </header>
+        {@render plot()}
+        {@render chips()}
+        <details class="about">
+          <summary>
+            <ChevronRight size={14} aria-hidden="true" />
+            <span>{!sameData && chosen.length > 1 ? 'Different datasets: how to read this' : 'How to read this'}</span>
+          </summary>
+          <div class="about-body">
+            {#if !sameData && chosen.length > 1}<p>The runs use different datasets: compare the shape of the curves, not their values.</p>{/if}
+            <p>Colours follow the run, not its rank. Tap a run to keep its line in front.</p>
+            <p>Tap or drag across the chart to read every run at one point; tap it again or anywhere else to let go.</p>
+          </div>
+        </details>
       {:else}
-        <LineChart
-          {series}
-          height={narrow ? 240 : 340}
-          {xDomain}
-          xInteger={x === 'epoch'}
-          yDomain={metricDef.y}
-          curve="monotone"
-          valueFormat={(v) => metric(v)}
-          xFormat={(v) => (x === 'epoch' ? String(Math.round(v)) : `${Math.round(v)}%`)}
-          xTitle={(v) => (x === 'epoch' ? `Epoch ${Math.round(v)}` : `${v.toFixed(0)}% through`)}
-          bind:cursor
-          legend={false}
-          {highlight}
-          endDots
-          endLabels
-          label="{metricDef.label} for the compared runs"
-        />
+        {@render chips()}
+        <p class="note">
+          Press a run to keep its line in front.{#if !sameData && chosen.length > 1}{' '}Different datasets: compare the shape of the
+            curves, not their values.{/if}
+        </p>
+        <header class="c-head">
+          <Segmented label="Metric" bind:value={metricId} options={METRICS.map((m) => ({ value: m.id, label: m.label }))} />
+          <Segmented size="sm" label="X axis" bind:value={x} options={[{ value: 'epoch', label: 'By epoch' }, { value: 'progress', label: '% of run' }]} />
+        </header>
+        {@render plot()}
       {/if}
     </section>
 
@@ -318,6 +289,67 @@
     {/if}
   {/if}
 </Page>
+
+{#snippet chips()}
+  <!-- The run chips are the legend: colour key, value under the cursor, link and remove. -->
+  <div class="chips" class:managing role="group" aria-label="Runs being compared">
+    <span class="at num" aria-hidden="true">{readoutAt}</span>
+    <!-- Phones: opening and removing runs sit behind one toggle, so the legend stays compact. -->
+    <button type="button" class="manage" aria-pressed={managing} onclick={() => (managing = !managing)}>{managing ? 'Done' : 'Edit'}</button>
+    {#each chosen as r (r.id)}
+      {@const v = valueOf(r.id)}
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <span
+        class="chip"
+        class:pinned={pinned === r.id}
+        style:--c={color(r.id)}
+        onpointerenter={() => (hovered = r.id)}
+        onpointerleave={() => (hovered = null)}
+        onfocusin={() => (hovered = r.id)}
+        onfocusout={() => (hovered = null)}
+      >
+        <!-- The legend entry (key and name) is the toggle: it keeps the run's line in front. -->
+        <button
+          type="button"
+          class="key"
+          aria-pressed={pinned === r.id}
+          title={pinned === r.id ? 'Let the line fall back' : 'Keep this line in front'}
+          onclick={() => (pinned = pinned === r.id ? null : r.id)}
+        ><i aria-hidden="true" data-pattern={SLOT_PATTERN[slotOf(r.id)]}></i><span class="nm">{r.name}</span></button>
+        <span class="v num">{v === null ? '—' : metric(v)}</span>
+        <a class="open" href={href(`/runs/${r.id}`)} aria-label="Open {r.name}" title="Open run"><ArrowUpRight size={12} /></a>
+        <button class="rm" aria-label="Remove {r.name}" onclick={() => setIds(ids.filter((id) => id !== r.id))}><X size={12} /></button>
+      </span>
+    {/each}
+    {#if ids.length < MAX && candidates.length}{@render adder()}{/if}
+  </div>
+{/snippet}
+
+{#snippet plot()}
+  {#if metrics.error}
+    <ErrorState error={metrics.error} compact retry={() => metrics.refresh()} title="Could not load these runs' metrics" />
+  {:else if !metrics.data || !runs.data}
+    <ChartSkeleton height={narrow ? 240 : 340} legend={false} />
+  {:else}
+    <LineChart
+      {series}
+      height={narrow ? 240 : 340}
+      {xDomain}
+      xInteger={x === 'epoch'}
+      yDomain={metricDef.y}
+      curve="monotone"
+      valueFormat={(v) => metric(v)}
+      xFormat={(v) => (x === 'epoch' ? String(Math.round(v)) : `${Math.round(v)}%`)}
+      xTitle={(v) => (x === 'epoch' ? `Epoch ${Math.round(v)}` : `${v.toFixed(0)}% through`)}
+      bind:cursor
+      legend={false}
+      {highlight}
+      endDots
+      endLabels
+      label="{metricDef.label} for the compared runs"
+    />
+  {/if}
+{/snippet}
 
 {#snippet adder()}
   <label class="add">
@@ -494,9 +526,6 @@
       grid-column: 1;
       grid-row: 1;
     }
-    .wide-note {
-      display: none;
-    }
     .chips .chip .key {
       min-height: 44px;
       height: auto;
@@ -544,6 +573,51 @@
     .at {
       flex-basis: 100%;
     }
+  }
+  /* Phones: metric picker and x axis share one row above the plot. */
+  .c-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+  .c-row > :global(.select) {
+    flex: 1;
+  }
+  /* Directly under the legend rows, whose last hairline closes the legend. */
+  .about {
+    margin-top: calc(-1 * var(--space-2));
+  }
+  .about summary {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    min-height: 44px;
+    list-style: none;
+    cursor: pointer;
+    font-size: var(--type-sm-size);
+    color: var(--text-secondary);
+  }
+  .about summary::-webkit-details-marker {
+    display: none;
+  }
+  .about summary :global(svg) {
+    flex-shrink: 0;
+    color: var(--text-tertiary);
+    transition: transform var(--dur-fast) var(--ease-standard);
+  }
+  .about[open] summary :global(svg) {
+    transform: rotate(90deg);
+  }
+  .about summary:focus-visible {
+    outline-offset: -2px;
+  }
+  .about-body {
+    display: grid;
+    gap: var(--space-2);
+    padding-bottom: var(--space-1);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--text-tertiary);
   }
   .c-head {
     display: flex;
