@@ -175,7 +175,7 @@
       <!-- Nothing has run yet: one clear waiting state instead of empty charts. -->
       <section class="queued" aria-label="Queued">
         <div class="q-mark" aria-hidden="true"><Clock size={20} strokeWidth={1.5} /></div>
-        <h2>Queued{#if ahead}<span class="faint"> · next in line</span>{/if}</h2>
+        <h2>Queued{#if ahead}<span class="faint">&nbsp;· next in line</span>{/if}</h2>
         <p>
           {#if ahead}
             Starts when <a class="link" href={href(`/runs/${ahead.id}`)}>{ahead.name}</a> finishes{#if ahead.eta_s !== null}, in about {duration(ahead.eta_s)}{/if}.
