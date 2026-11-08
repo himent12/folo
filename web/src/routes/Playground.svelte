@@ -1,6 +1,7 @@
 <script lang="ts">
   import ArrowUpRight from '@lucide/svelte/icons/arrow-up-right';
   import Box from '@lucide/svelte/icons/box';
+  import FileUp from '@lucide/svelte/icons/file-up';
   import Check from '@lucide/svelte/icons/check';
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
   import ChevronUp from '@lucide/svelte/icons/chevron-up';
@@ -12,12 +13,14 @@
   import X from '@lucide/svelte/icons/x';
   import { onDestroy, untrack } from 'svelte';
   import { MediaQuery } from 'svelte/reactivity';
+  import { ApiError } from '$lib/api/client';
   import { hub } from '$lib/api/index.svelte';
   import { Resource } from '$lib/api/resource.svelte';
   import type { Dataset, DatasetImage as Img, Model, PredictInput, Prediction } from '$lib/api/types';
   import { classColor } from '$lib/design/tokens';
   import DetectionView from '$lib/detect/DetectionView.svelte';
   import { filterDetections } from '$lib/detect/nms';
+  import { BrowserEngine, hasWebGpu, PHASE_TEXT, type Backend } from '$lib/inference/browser.svelte';
   import { metric, ms, num } from '$lib/format';
   import { href, router } from '$lib/router.svelte';
   import Page from '$lib/shell/Page.svelte';
@@ -82,7 +85,10 @@
 
   // ---------- model ----------
   const models = new Resource((s) => hub.api.models(s));
-  const ranked = $derived([...(models.data ?? [])].sort((a, b) => (b.metrics?.map50_95 ?? -1) - (a.metrics?.map50_95 ?? -1)));
+  // Best first; on a tie the earlier checkpoint (a run's best weights are saved before its last).
+  const ranked = $derived(
+    [...(models.data ?? [])].sort((a, b) => (b.metrics?.map50_95 ?? -1) - (a.metrics?.map50_95 ?? -1) || a.created.localeCompare(b.created)),
+  );
   const queryModel = $derived(router.route.query.get('model'));
   let pickedModel = $state<string | null>(null);
   const model = $derived.by((): Model | null => {
@@ -236,8 +242,47 @@
     return groups.flat().slice(0, 6);
   });
 
-  // ---------- prediction ----------
+  // ---------- where inference runs ----------
+  // On the server (POST /api/predict), or in this browser through folo-wasm on WebGPU or the CPU (docs/WASM.md).
+  // In the browser the model's .folo comes from the server (GET /api/models/{id}/weights); a server without that
+  // route gets the file from the user instead.
   let pred = $state.raw<Prediction | null>(null);
+  type RunOn = 'server' | Backend;
+  let runOn = $state<RunOn>('server');
+  const webgpu = hasWebGpu();
+  const engine = new BrowserEngine();
+  /** .folo files the user picked, by model id. */
+  let localWeights = $state.raw(new Map<string, File>());
+  /** The server cannot send this model's file: ask for it. */
+  let weightsMissing = $state(false);
+  let weightsInput: HTMLInputElement;
+  const BACKEND_NAME: Record<Backend, string> = { webgpu: 'WebGPU', cpu: 'CPU' };
+  const where = $derived(pred?.backend ? `browser · ${BACKEND_NAME[pred.backend]}` : 'server');
+  const deviceText = $derived(
+    pred?.backend ? `${BACKEND_NAME[pred.backend]}${pred.backend === 'webgpu' && engine.info?.adapter ? ` · ${engine.info.adapter}` : ''}` : (pred?.device ?? ''),
+  );
+
+  function pickWeights(e: Event) {
+    const f = (e.currentTarget as HTMLInputElement).files?.[0];
+    (e.currentTarget as HTMLInputElement).value = '';
+    if (!f || !modelId) return;
+    localWeights = new Map(localWeights).set(modelId, f);
+  }
+
+  /** The demo has no real networks: the browser path is simulated with the documented speeds (docs/WASM.md). */
+  function simulate(p: Prediction, backend: Backend): Prediction {
+    const t = backend === 'webgpu' ? { preprocess_ms: 2.5, inference_ms: 11.1, postprocess_ms: 0.2 } : { preprocess_ms: 6, inference_ms: 477, postprocess_ms: 8 };
+    return { ...p, backend, device: backend === 'webgpu' ? 'gpu:0' : 'cpu', timing: { ...t, total_ms: t.preprocess_ms + t.inference_ms + t.postprocess_ms } };
+  }
+
+  async function imageBlob(s: Source, signal: AbortSignal): Promise<Blob> {
+    if (s.kind === 'file') return s.file;
+    const res = await fetch(await hub.api.imageUrl(s.ds.id, s.img.id), { signal });
+    if (!res.ok) throw new Error(`Could not read ${s.img.file} (HTTP ${res.status}).`);
+    return res.blob();
+  }
+
+  // ---------- prediction ----------
   let predicting = $state(false);
   let error = $state.raw<unknown>(null);
   let retryTick = $state(0);
@@ -245,6 +290,8 @@
   $effect(() => {
     const id = modelId;
     const s = source;
+    const on = runOn;
+    const file = localWeights.get(id ?? '');
     void retryTick;
     if (!id || !s) return;
     const input: PredictInput = s.kind === 'file' ? { kind: 'file', file: s.file } : { kind: 'dataset', dataset_id: s.ds.id, image_id: s.img.id };
@@ -252,6 +299,7 @@
     untrack(() => {
       predicting = true;
       error = null;
+      weightsMissing = false;
       // Results belong to a model: never show another model's boxes while (or if) this one fails.
       if (pred && pred.model_id !== id) {
         pred = null;
@@ -260,7 +308,20 @@
         picked = null;
       }
     });
-    hub.api.predict(input, { model_id: id, ...FETCH }, ctrl.signal).then(
+    const run =
+      on === 'server'
+        ? hub.api.predict(input, { model_id: id, ...FETCH }, ctrl.signal)
+        : hub.api.mock
+          ? hub.api.predict(input, { model_id: id, ...FETCH }, ctrl.signal).then((p) => simulate(p, on))
+          : engine.predict({
+              modelId: id,
+              file: file ?? null,
+              download: () => hub.api.modelWeights(id),
+              backend: on,
+              image: () => imageBlob(s, ctrl.signal),
+              options: { conf: FETCH.conf, iou: FETCH.iou, maxDet: FETCH.max_det },
+            });
+    run.then(
       (p) => {
         if (ctrl.signal.aborted) return;
         pred = p;
@@ -269,6 +330,11 @@
       (e: unknown) => {
         if (ctrl.signal.aborted) return;
         predicting = false;
+        // A server without the weights route (or one that cannot read this model's file): ask for the file.
+        if (on !== 'server' && !file && e instanceof ApiError && (e.status === 404 || e.status === 405 || e.status === 501) && e.code !== 'model_not_found') {
+          weightsMissing = true;
+          return;
+        }
         error = e;
         toast.error(e, 'Prediction failed');
       },
@@ -392,6 +458,8 @@
 
 <svelte:window {onpaste} onkeydown={onwindowkey} onpointerdown={onwindowdown} />
 
+<input bind:this={weightsInput} type="file" accept=".folo" class="sr-only" tabindex="-1" aria-hidden="true" onchange={pickWeights} />
+
 <input
   bind:this={fileInput}
   type="file"
@@ -437,7 +505,7 @@
   {#if !result}
     <p class="hint">Per-class counts, click one to hide it.</p>
   {:else if counts.length === 0}
-    <p class="hint">Nothing above the confidence threshold.</p>
+    <p class="hint">{pred?.boxes.length ? 'Nothing above the confidence threshold.' : 'The model found nothing in this image.'}</p>
   {:else}
     <ul class="counts" aria-label="Detected classes">
       {#each counts as [c, n] (c)}
@@ -457,7 +525,7 @@
 
 {#snippet timingBody()}
   {#if pred}
-    <TimingBar timing={pred.timing} device={pred.device} />
+    <TimingBar timing={pred.timing} device={deviceText} />
   {:else if predicting}
     <div class="t-sk"><Skeleton h="28px" w="50%" /><Skeleton h="8px" /><Skeleton h="14px" /><Skeleton h="14px" /></div>
   {:else}
@@ -481,6 +549,19 @@
           onchange={chooseModel}
         />
         {#if model}<Button icon={ArrowUpRight} href={href(`/models/${model.id}`)} aria-label="Open {model.name}" />{/if}
+      </div>
+      <div class="runon">
+        <span class="pick-label">Run on</span>
+        <Segmented
+          label="Run the model on"
+          size="sm"
+          bind:value={runOn}
+          options={[
+            { value: 'server', label: 'Server' },
+            { value: 'webgpu', label: 'WebGPU', disabled: !webgpu },
+            { value: 'cpu', label: 'CPU' },
+          ]}
+        />
       </div>
     {/if}
   {/snippet}
@@ -543,7 +624,21 @@
                 />
                 {#if predicting}
                   <div class="scan" aria-hidden="true"><span></span></div>
-                  <span class="busy" role="status">Detecting with {model?.name}…</span>
+                  <span class="busy" role="status">{runOn === 'server' || hub.api.mock ? `Detecting with ${model?.name}…` : PHASE_TEXT[engine.phase] || 'Starting…'}</span>
+                {:else if weightsMissing}
+                  <div class="stage-err">
+                    <div class="need-file" role="alert">
+                      <p class="nf-title">This server cannot send model files yet</p>
+                      <p class="nf-text">
+                        To run {model?.name} in the browser, choose its <span class="mono">.folo</span> file (<span class="mono">weights/best.folo</span>
+                        in the run's folder), or run it on the server.
+                      </p>
+                      <div class="nf-actions">
+                        <Button size="sm" variant="primary" icon={FileUp} onclick={() => weightsInput.click()}>Choose .folo file</Button>
+                        <Button size="sm" onclick={() => (runOn = 'server')}>Run on the server</Button>
+                      </div>
+                    </div>
+                  </div>
                 {:else if error && !pred}
                   <div class="stage-err"><ErrorState {error} title="Prediction failed" retry={() => retryTick++} compact /></div>
                 {/if}
@@ -577,7 +672,7 @@
                   {#if selectedIdx === null}<span class="tap">Tap a box to inspect</span>{/if}
                   <span class="faint">filtered in {result.ms < 0.01 ? '<0.01' : result.ms.toFixed(2)} ms</span>
                 {:else}
-                  <span class="faint">{predicting ? 'Running inference…' : 'Waiting for a model'}</span>
+                  <span class="faint">{predicting ? 'Running inference…' : weightsMissing ? 'Waiting for the model file' : 'Waiting for a model'}</span>
                   <span class="grow"></span>
                 {/if}
                 <span class="more-btn" bind:this={moreBtn}>
@@ -631,6 +726,9 @@
                 <p class="placeholder">{predicting ? 'Running inference…' : 'Detections appear here once you run the model on an image.'}</p>
               {:else if tab === 'json'}
                 <div class="json-wrap"><JsonView value={json} label="Prediction as JSON" /></div>
+              {:else if !pred?.boxes.length}
+                <!-- Candidates are fetched down to the lowest threshold (FETCH): none means no threshold would show more. -->
+                <p class="placeholder">The model found nothing in this image, even at conf ≥ {FETCH.conf}.</p>
               {:else if rows.length === 0}
                 <p class="placeholder">
                   No detections at conf ≥ {conf.toFixed(2)}{hidden.size ? ' in the visible classes' : ''}.
@@ -712,7 +810,7 @@
               <summary>
                 <ChevronRight size={14} aria-hidden="true" />
                 <span class="disc-title">Timing</span>
-                {#if pred}<span class="disc-meta num">{ms(pred.timing.total_ms)} · server</span>{/if}
+                {#if pred}<span class="disc-meta num">{ms(pred.timing.total_ms)} · {where}</span>{/if}
               </summary>
               <div class="disc-body">{@render timingBody()}</div>
             </details>
@@ -740,7 +838,7 @@
         </div>
 
         <div class="timing">
-          <Panel title="Timing" meta={pred ? 'server' : undefined} divided>
+          <Panel title="Timing" meta={pred ? where : undefined} divided>
             {@render timingBody()}
           </Panel>
         </div>
@@ -761,6 +859,11 @@
   }
   .model-pick :global(.select) {
     flex: 1;
+  }
+  .runon {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
   }
   .pick-label {
     color: var(--text-tertiary);
@@ -906,6 +1009,28 @@
     left: var(--space-4);
     right: var(--space-4);
     bottom: var(--space-4);
+  }
+  .need-file {
+    display: grid;
+    gap: var(--space-2);
+    padding: var(--space-4);
+    border: 1px solid var(--line-default);
+    border-radius: var(--radius-md);
+    background: var(--bg-overlay);
+    box-shadow: var(--shadow-md);
+  }
+  .nf-title {
+    font-weight: 600;
+  }
+  .nf-text {
+    color: var(--text-secondary);
+    font-size: var(--type-sm-size);
+  }
+  .nf-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+    margin-top: var(--space-1);
   }
   .drop-hint {
     position: absolute;
@@ -1284,6 +1409,10 @@
   @media (max-width: 767px) {
     .model-pick {
       width: calc(100vw - 2 * var(--space-4));
+    }
+    .runon {
+      width: calc(100vw - 2 * var(--space-4));
+      justify-content: space-between;
     }
     /* With an image the intro line is gone; the empty title row must not leave a gap above the model picker. */
     :global(.page > header:has(.model-pick.compact)) {

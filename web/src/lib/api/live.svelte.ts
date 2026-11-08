@@ -47,6 +47,14 @@ export function mergeBy<T>(a: T[], b: T[], key: (x: T) => number): T[] {
   return out;
 }
 
+/**
+ * Steps per epoch is fixed for a run once the trainer has counted it (0 before): a snapshot taken earlier, even one
+ * applied later, never takes a learned figure back.
+ */
+function keepStepsPerEpoch(next: Run, cur: Run | null | undefined): Run {
+  return !(next.steps_per_epoch > 0) && cur?.id === next.id && cur.steps_per_epoch > 0 ? { ...next, steps_per_epoch: cur.steps_per_epoch } : next;
+}
+
 /** The server's history rule for one new step: it replaces every step from it on, and the epochs from its epoch on. */
 function replaceFrom(steps: Step[], epochs: Epoch[], s: Step): [Step[], Epoch[]] {
   return [[...steps.filter((x) => x.step < s.step), s], epochs.filter((e) => e.epoch < s.epoch)];
@@ -151,6 +159,7 @@ export class LiveRun {
       // Re-synchronising history (on open / reconnect) must not silently give up: a gap would stay forever.
       let syncTimer: ReturnType<typeof setTimeout> | undefined;
       let replayTimer: ReturnType<typeof setTimeout> | undefined;
+      let speAsked = false;
       const sync = (attempt = 0) => {
         clearTimeout(syncTimer);
         load().catch(() => {
@@ -190,7 +199,7 @@ export class LiveRun {
             const gen = this.#gen;
             snapshot().then((snap) => {
               if (closed || seq !== this.#statusSeq || gen !== this.#gen || !snap.claim()) return;
-              this.run = snap.run;
+              this.run = keepStepsPerEpoch(snap.run, this.run);
             }, () => {});
           }
         },
@@ -214,6 +223,19 @@ export class LiveRun {
             this.steps.push(s);
           }
           if (this.run) this.run = { ...this.run, step: s.step, epoch: s.epoch, eta_s: s.eta_s };
+          // A real run reports 0 steps per epoch until its trainer has loaded the data, i.e. in the snapshot taken
+          // at start: steps are flowing now, so ask once more (only that field is taken; progress needs it).
+          if (this.run?.steps_per_epoch === 0 && !speAsked) {
+            speAsked = true;
+            api.run(runId).then(
+              (r) => {
+                if (closed || !this.run || r.steps_per_epoch <= 0) return void (speAsked = false);
+                this.run = { ...this.run, steps_per_epoch: r.steps_per_epoch };
+                this.#bump();
+              },
+              () => (speAsked = false),
+            );
+          }
           this.#bump();
         },
         epoch: (e) => {
@@ -314,6 +336,7 @@ export class LiveRun {
     const last = this.steps[this.steps.length - 1];
     if (last && last.step > next.step && ['running', 'stopping'].includes(next.status))
       next = { ...next, step: last.step, epoch: last.epoch, eta_s: last.eta_s };
+    next = keepStepsPerEpoch(next, this.run);
     // During a replay the snapshot may still count the interrupted attempt: progress follows the steps held.
     if (this.#replay && live) next = { ...next, step: last?.step ?? 0, epoch: last?.epoch ?? this.epochs[this.epochs.length - 1]?.epoch ?? 0 };
     for (const e of this.epochs)

@@ -482,8 +482,12 @@
   }
   @media (max-width: 1199px) {
     /* Up to 1199 px the rail no longer fits beside the samples: one section at a time, picked above. */
+    /* The section picker stays reachable while the section scrolls (just under the top bar). */
     .phone-pick {
       display: block;
+      position: sticky;
+      top: calc(var(--size-topbar) + var(--space-2));
+      z-index: var(--z-sticky);
       margin-bottom: calc(-1 * var(--space-1));
     }
     /* One part is visible at a time, so the empty columns must not add gaps. */

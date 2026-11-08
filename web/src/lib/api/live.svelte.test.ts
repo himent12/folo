@@ -53,6 +53,49 @@ describe('LiveRun ordering', () => {
     vi.useRealTimers();
   });
 
+  it('learns steps per epoch once steps flow when the start snapshot still said 0 (a real run loading its data)', async () => {
+    let spe = 0;
+    hub.api = { ...hub.api, run: () => Promise.resolve({ ...snapshot, status: 'running', step: 0, steps_per_epoch: spe }) } as Api;
+    let live!: LiveRun;
+    const stop = $effect.root(() => {
+      live = new LiveRun(() => 'run_7d1e');
+    });
+    flushSync();
+    metrics.resolve({ steps: [], epochs: [] });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.run?.steps_per_epoch).toBe(0);
+    spe = 12;
+    handlers.step?.(step(1));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.run?.steps_per_epoch).toBe(12);
+    expect(live.run?.step).toBe(1);
+    stop();
+  });
+
+  it('keeps a learned steps per epoch when an older snapshot (0) is applied after it', async () => {
+    let spe = 0;
+    hub.api = { ...hub.api, run: () => Promise.resolve({ ...snapshot, status: 'running', step: 0, steps_per_epoch: spe }) } as Api;
+    let live!: LiveRun;
+    const stop = $effect.root(() => {
+      live = new LiveRun(() => 'run_7d1e');
+    });
+    flushSync();
+    metrics.resolve({ steps: [], epochs: [] });
+    await vi.advanceTimersByTimeAsync(0);
+    // A resync takes its snapshot (still 0) and waits for /metrics; meanwhile steps flow and the figure is learned.
+    metrics = deferred<RunMetrics>();
+    handlers.reconnect?.();
+    await vi.advanceTimersByTimeAsync(0);
+    spe = 12;
+    handlers.step?.(step(1));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.run?.steps_per_epoch).toBe(12);
+    metrics.resolve({ steps: [], epochs: [] });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.run?.steps_per_epoch).toBe(12);
+    stop();
+  });
+
   it('keeps events that arrive while history loads, and newer status wins', async () => {
     let live!: LiveRun;
     const stop = $effect.root(() => {

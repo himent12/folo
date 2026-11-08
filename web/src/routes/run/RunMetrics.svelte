@@ -10,6 +10,7 @@
   import LineChart, { type Marker, type Series } from '$lib/charts/LineChart.svelte';
   import { runHorizon } from '$lib/charts/horizon';
   import type { Epoch, Run, Step } from '$lib/api/types';
+  import { runProgress, stepsPerEpoch } from '$lib/api/progress';
   import { duration, lr as fmtLr, metric, num, pow10 } from '$lib/format';
   import Segmented from '$lib/ui/Segmented.svelte';
   import Select from '$lib/ui/Select.svelte';
@@ -35,7 +36,7 @@
   });
 
   const live = $derived(['queued', 'running', 'stopping'].includes(run.status));
-  const progress = $derived(Math.min(1, run.step / Math.max(1, run.steps_per_epoch * run.epochs)));
+  const progress = $derived(runProgress(run));
   const closeFrom = $derived(1 - run.config.augment.close_mosaic / run.epochs);
   const elapsed = $derived(run.started ? ((run.finished ? Date.parse(run.finished) : Date.now()) - Date.parse(run.started)) / 1000 : null);
 
@@ -54,7 +55,7 @@
   let horizon = $state<'observed' | 'full'>('observed');
   const observed = $derived.by(() => {
     void version;
-    const spe = Math.max(1, run.steps_per_epoch);
+    const spe = Math.max(1, stepsPerEpoch(run, steps));
     return Math.max(lastStep ? lastStep.step / spe : 0, lastEpoch ? lastEpoch.epoch : 0);
   });
   const xDomain = $derived(runHorizon(observed, run.epochs, live, horizon));
@@ -64,7 +65,7 @@
   const INK2 = 'var(--text-tertiary)';
   const ep = (f: (e: Epoch) => number): Pt[] => epochs.map((e) => ({ x: e.epoch, y: f(e) }));
   const perStep = (f: (s: Step) => number): Pt[] => {
-    const spe = Math.max(1, run.steps_per_epoch);
+    const spe = Math.max(1, stepsPerEpoch(run, steps));
     return steps.map((s) => ({ x: s.step / spe, y: f(s) }));
   };
 
@@ -209,7 +210,7 @@
       </div>
       {#if closeFrom < 1 && live}<span class="sr-only">The hatched end of the bar marks the last {run.config.augment.close_mosaic} epochs, trained without mosaic.</span>{/if}
       <span class="cap num">
-        {#if live}{(progress * 100).toFixed(1)}% · {run.eta_s !== null ? `${duration(run.eta_s)} left` : 'estimating…'}{#if closeFrom < 1}<span class="hatch-key"> · <i aria-hidden="true"></i>no mosaic</span>{/if}{:else}{elapsed !== null ? `${duration(elapsed)} total` : '—'}{/if}
+        {#if live}{(progress * 100).toFixed(1)}% · {run.eta_s !== null ? `${duration(run.eta_s)} left` : 'estimating…'}{#if closeFrom < 1}<span class="hatch-key">&nbsp;· <i aria-hidden="true"></i>no mosaic</span>{/if}{:else}{elapsed !== null ? `${duration(elapsed)} total` : '—'}{/if}
       </span>
     </div>
     <!-- Phones: one picker instead of six cells; the chart below shows what it names. -->
@@ -273,17 +274,18 @@
       </div>
     </header>
     {#if loading}
-      <ChartSkeleton height={narrow ? 220 : 320} />
+      <ChartSkeleton height={narrow ? 180 : 320} />
     {:else}
       {#key tab}
         <LineChart
           {series}
-          height={narrow ? 220 : 320}
+          height={narrow ? 180 : 320}
           {xDomain}
+          xInteger
           yDomain={tab === 'map' || tab === 'map50' || tab === 'pr' ? [0, 1] : tab === 'ips' ? [0, ipsMax * 1.15] : undefined}
           yLog={tab === 'loss' && scale === 'log'}
           yFormat={tab === 'lr' ? (v) => String(+(v / 10 ** lrExp).toFixed(2)) : undefined}
-          valueFormat={tab === 'lr' ? (v) => fmtLr(v) : tab === 'ips' ? (v) => `${num(v, 0)} img/s` : (v) => v.toFixed(3)}
+          valueFormat={tab === 'lr' ? (v) => fmtLr(v) : tab === 'ips' ? (v) => `${num(v, 0)} img/s` : (v) => metric(v)}
           xTitle={epochTitle}
           curve={tab === 'map' || tab === 'map50' || tab === 'pr' ? 'monotone' : 'linear'}
           markers={best}
@@ -516,14 +518,15 @@
       font-size: var(--type-2xl-size);
       line-height: 32px;
     }
+    /* Up to 1199 px six large tiles would push the chart down: one compact metric picker instead. */
     .tabs {
-      grid-template-columns: repeat(3, minmax(0, 1fr));
+      display: none;
     }
-    .tab:nth-child(4) {
-      border-left: 0;
-    }
-    .tab:nth-child(n + 4) {
-      border-top: 1px solid var(--line-subtle);
+    .phone-metric {
+      display: grid;
+      gap: var(--space-1);
+      max-width: 400px;
+      padding: var(--space-3) var(--space-4);
     }
   }
   @media (max-width: 767px) {
@@ -541,12 +544,7 @@
     .big {
       grid-row: 1 / span 2;
     }
-    .tabs {
-      display: none;
-    }
     .phone-metric {
-      display: grid;
-      gap: var(--space-1);
       padding: var(--space-3);
     }
     .val {

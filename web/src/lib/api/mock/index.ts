@@ -660,6 +660,11 @@ export class MockApi implements Api {
 
   // ---------- inference ----------
 
+  modelWeights(id: string): Promise<ArrayBuffer> {
+    // The demo's models are not real networks: there is no file to run in the browser.
+    return Promise.reject(new ApiError(501, 'not_implemented', `Demo model ${id} has no weights file.`));
+  }
+
   predict(input: PredictInput, opts: PredictOptions): Promise<Prediction> {
     return (async () => {
       const models = await this.models();

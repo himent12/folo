@@ -126,6 +126,7 @@ export const scenes = [
   {
     name: 'dataset-inspector',
     path: '/datasets/ds_fasteners',
+    viewports: ['desktop', 'laptop', 'mobile'],
     fullPage: false,
     setup: async (page) => {
       await page.locator('.cell img.loaded').first().waitFor();
@@ -139,7 +140,7 @@ export const scenes = [
   { name: 'models', path: '/models', viewports: ['desktop', 'laptop', 'mobile'] },
   { name: 'models-empty', path: '/models', search: 'scenario=empty' },
   { name: 'models-error', path: '/models', search: 'scenario=error', viewports: ['desktop'] },
-  { name: 'models-loading', path: '/models', search: 'scenario=loading', themes: ['dark'], viewports: ['desktop'] },
+  { name: 'models-loading', path: '/models', search: 'scenario=loading', viewports: ['desktop', 'laptop', 'mobile'] },
   {
     name: 'model-detail',
     path: '/models/m_fast_n',
@@ -160,8 +161,23 @@ export const scenes = [
   {
     name: 'model-coco',
     path: '/models/m_coco_s',
-    themes: ['dark'],
-    viewports: ['desktop'],
+    viewports: ['desktop', 'laptop'],
+    setup: (page) => until(page, '#cm .cell'),
+  },
+  {
+    // Phones, whole page: the KPI hero row, then the confusion matrix with its column range and miss summary.
+    name: 'model-phone',
+    path: '/models/m_fast_n',
+    viewports: ['mobile'],
+    fullPage: true,
+    setup: (page) => until(page, '#cm .cell'),
+  },
+  {
+    // Phones: a reduced 13-column matrix (top 12 classes + Other) that scrolls sideways.
+    name: 'model-coco-phone',
+    path: '/models/m_coco_s',
+    viewports: ['mobile'],
+    fullPage: true,
     setup: (page) => until(page, '#cm .cell'),
   },
   {
@@ -179,6 +195,7 @@ export const scenes = [
   {
     name: 'playground-selected',
     path: '/playground?model=m_hard_s',
+    viewports: ['desktop', 'laptop', 'mobile'],
     setup: async (page) => {
       await playgroundResult(page);
       await page.locator('#pg-panel tbody tr').nth(2).click();
@@ -233,7 +250,7 @@ export const scenes = [
   },
   { name: 'settings', path: '/settings', viewports: ['desktop', 'laptop', 'mobile'] },
   { name: 'overview-empty', path: '/', search: 'scenario=empty', viewports: ['desktop', 'mobile'] },
-  { name: 'overview-loading', path: '/', search: 'scenario=loading', themes: ['dark'], viewports: ['desktop'] },
+  { name: 'overview-loading', path: '/', search: 'scenario=loading', viewports: ['desktop', 'laptop', 'mobile'] },
   { name: 'overview-error', path: '/', search: 'scenario=error', viewports: ['desktop'] },
   { name: 'runs-empty', path: '/runs', search: 'scenario=empty', themes: ['dark'], viewports: ['desktop'] },
   { name: 'run-loading', path: '/runs/run_7d1e', search: 'scenario=loading', themes: ['dark'], viewports: ['desktop'] },

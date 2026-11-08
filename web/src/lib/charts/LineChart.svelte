@@ -57,6 +57,8 @@
     legend?: boolean;
     yTicks?: number;
     xTicks?: number;
+    /** x ticks only on whole numbers (epochs): a 3-epoch run reads 0 1 2 3, not 0 0.5 1 … */
+    xInteger?: boolean;
     /** Shared crosshair position in data x (bind it across charts to sync them). */
     cursor?: number | null;
     label: string;
@@ -90,6 +92,7 @@
     legend = true,
     yTicks = 4,
     xTicks = 6,
+    xInteger = false,
     cursor = $bindable(null),
     label,
     empty = 'No data yet',
@@ -182,6 +185,11 @@
   const xTickValues = $derived.by(() => {
     const want = Math.max(2, Math.min(xTicks, Math.floor(width / 70)));
     const [lo, hi] = xExtent;
+    if (xInteger && hi - lo <= want) {
+      const out: number[] = [];
+      for (let v = Math.ceil(lo); v <= Math.floor(hi); v++) out.push(v);
+      if (out.length >= 2) return out;
+    }
     if (!xDomain) return niceTicks(lo, hi, want);
     for (let c = want; c >= 2; c--) {
       const t = niceTicks(lo, hi, c);
@@ -670,9 +678,11 @@
   }
   .empty {
     position: absolute;
-    inset: 0 0 24px 0;
+    /* Clear of the y labels, so a message that wraps on a phone never runs into them. */
+    inset: 0 var(--space-4) 24px 40px;
     display: grid;
     place-items: center;
+    text-align: center;
     color: var(--text-tertiary);
     font-size: var(--type-sm-size);
   }

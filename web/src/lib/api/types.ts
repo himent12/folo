@@ -350,6 +350,8 @@ export interface Prediction {
   boxes: PredictBox[];
   timing: Timing;
   device: string;
+  /** Set when the prediction ran in this browser (folo-wasm, docs/WASM.md) instead of on the server. */
+  backend?: 'webgpu' | 'cpu';
 }
 
 export interface PredictOptions {

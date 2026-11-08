@@ -87,6 +87,28 @@
     return best;
   });
 
+  /**
+   * Missed objects: the share of real instances whose only match was background (the matrix's last column), overall
+   * and for the class that misses most (rows with very few instances skipped, as above).
+   */
+  const missed = $derived.by(() => {
+    if (!ev) return null;
+    const conf = ev.confusion;
+    const k = conf.length - 1;
+    let total = 0;
+    let miss = 0;
+    let worst: { r: number; v: number } | null = null;
+    for (let r = 0; r < k; r++) {
+      const row = conf[r] ?? [];
+      const sum = row.reduce((a, b) => a + b, 0);
+      const m = row[k] ?? 0;
+      total += sum;
+      miss += m;
+      if (sum >= 20 && m > 0 && (!worst || m / sum > worst.v)) worst = { r, v: m / sum };
+    }
+    return total ? { v: miss / total, worst } : null;
+  });
+
   let exportOpen = $state(false);
   // Up to 1199 px the rail stacks under the PR panel: the details fold into one line so the matrix follows soon.
   const narrow = new MediaQuery('max-width: 1199px', false);
@@ -95,10 +117,10 @@
   /** The architecture's published 640 px reference time, scaled by input area. */
   const latency = (m: Model) => archInfo[m.arch].ms * (m.imgsz / 640) ** 2;
   const kpis = (m: Model) => [
-    { label: 'mAP50-95', value: m.metrics?.map50_95, sub: 'IoU 0.50:0.95, all classes' },
-    { label: 'mAP50', value: m.metrics?.map50, sub: 'IoU 0.50' },
-    { label: 'Precision', value: m.metrics?.precision, sub: 'boxes, all classes' },
-    { label: 'Recall', value: m.metrics?.recall, sub: 'boxes, all classes' },
+    { label: 'mAP50-95', value: m.metrics?.map50_95, sub: 'IoU 0.50:0.95', rest: ', all classes' },
+    { label: 'mAP50', value: m.metrics?.map50, sub: 'IoU 0.50', rest: '' },
+    { label: 'Precision', value: m.metrics?.precision, sub: 'boxes', rest: ', all classes' },
+    { label: 'Recall', value: m.metrics?.recall, sub: 'boxes', rest: ', all classes' },
   ];
 </script>
 
@@ -132,15 +154,17 @@
       <Button variant="primary" icon={ScanSearch} href={href(`/playground?model=${encodeURIComponent(m.id)}`)}>Try in Playground</Button>
     {/snippet}
 
-    <!-- One strip of numbers in ink: the headline metric, then the ones that support it. -->
+    <!-- One strip of numbers in ink: the headline metric, then the ones that support it. Phones: the headline gets
+         its own row, the other three a subordinate row sharing one qualifier line. -->
     <section class="kpis" aria-label="Validation metrics">
       {#each kpis(m) as k, i (k.label)}
         <div class="kpi" class:hero={i === 0}>
           <span class="k-label">{k.label}</span>
           <span class="k-value num">{metric(k.value)}</span>
-          <span class="k-sub">{k.sub}</span>
+          <span class="k-sub">{k.sub}<span class="k-rest">{k.rest}</span></span>
         </div>
       {/each}
+      <p class="k-note">All four over all classes · mAP50 at IoU 0.50</p>
     </section>
 
     <!-- Evidence in the main column, reference in a sticky rail. -->
@@ -240,16 +264,31 @@
     <!-- Full width: the matrix grows with the class count, and the rail beside it would sit empty. -->
     <Panel title="Confusion matrix" meta={cm?.partial ? `top ${CM_MAX} of ${m.classes.length} classes` : 'row-normalised'} id="cm">
       {#if cm}
-        <!-- Matrix left (square, so it stays compact), what to read from it on the right. -->
+        <!-- Matrix left (square, so it stays compact), what to read from it on the right. Up to 1199 px the two
+             consequential cells lead (a phone's matrix scrolls sideways, hiding the background column), and the
+             reading notes follow the matrix. -->
         <div class="cm-layout">
           <div class="cm-main"><ConfusionMatrix classes={cm.classes} classIds={cm.ids} matrix={cm.matrix} label="Confusion matrix of {m.name}" sparseLabels minCell={32} scale /></div>
+          {#if confused || missed}
+            <dl class="cm-sum">
+              {#if confused}
+                <div>
+                  <dt>Most confused</dt>
+                  <dd><b>{m.classes[confused.r]}</b> → <b>{m.classes[confused.c]}</b> <span class="num">{num(confused.v * 100, 1)}%</span></dd>
+                </div>
+              {/if}
+              {#if missed}
+                <div>
+                  <dt>Missed (background)</dt>
+                  <dd>
+                    {#if missed.worst}<b>{m.classes[missed.worst.r]}</b> <span class="num">{num(missed.worst.v * 100, 1)}%</span><span class="sep" aria-hidden="true">·</span>{/if}<span
+                      class="num">{num(missed.v * 100, 1)}%</span> overall
+                  </dd>
+                </div>
+              {/if}
+            </dl>
+          {/if}
           <div class="cm-notes">
-            {#if confused}
-              <p class="confused">
-                Most confused: <b>{m.classes[confused.r]}</b> → <b>{m.classes[confused.c]}</b>
-                <span class="num">{num(confused.v * 100, 1)}%</span>
-              </p>
-            {/if}
             <p>Rows are the true class, columns the prediction; each row sums to 100%. The diagonal is correct; the last
               column is missed objects and the last row false detections on background.</p>
             {#if cm.partial}
@@ -317,6 +356,9 @@
   .hero .k-label {
     color: var(--text-secondary);
   }
+  .k-note {
+    display: none;
+  }
   .hero .k-value {
     font-size: var(--type-3xl-size);
     line-height: 40px;
@@ -344,40 +386,58 @@
     padding: 0 var(--space-4) var(--space-4);
   }
   .cm-main {
+    grid-area: main;
     min-width: 0;
   }
   .cm-layout {
     display: grid;
     grid-template-columns: minmax(0, auto) minmax(220px, 320px);
-    gap: var(--space-8);
+    grid-template-rows: auto 1fr;
+    grid-template-areas:
+      'main sum'
+      'main notes';
+    gap: var(--space-4) var(--space-8);
     align-items: start;
     justify-content: start;
   }
   @media (max-width: 1199px) {
     .cm-layout {
       grid-template-columns: minmax(0, 1fr);
-      gap: var(--space-4);
-    }
-    .cm-layout .cm-notes {
-      order: -1;
+      grid-template-rows: none;
+      grid-template-areas: 'sum' 'main' 'notes';
     }
   }
+  .cm-sum {
+    grid-area: sum;
+    display: grid;
+    gap: var(--space-2);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+  }
+  .cm-sum > div {
+    display: grid;
+    grid-template-columns: 128px minmax(0, 1fr);
+    gap: var(--space-3);
+  }
+  .cm-sum dt {
+    color: var(--text-tertiary);
+  }
+  .cm-sum dd {
+    text-align: left;
+    color: var(--text-secondary);
+  }
+  .cm-sum b,
+  .cm-sum .num {
+    color: var(--text-primary);
+    font-weight: var(--weight-medium);
+  }
   .cm-notes {
+    grid-area: notes;
     display: grid;
     gap: var(--space-2);
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
     color: var(--text-tertiary);
-  }
-  .confused {
-    color: var(--text-secondary);
-  }
-  .confused b {
-    color: var(--text-primary);
-    font-weight: var(--weight-medium);
-  }
-  .confused .num {
-    color: var(--text-primary);
   }
   .none {
     color: var(--text-tertiary);
@@ -516,18 +576,52 @@
     .two .kv {
       grid-template-columns: 96px minmax(0, 1fr);
     }
+    /* Headline row: label, then the value with its qualifier on the same baseline. */
     .kpis {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
+      grid-template-columns: repeat(3, minmax(0, 1fr));
     }
     .kpi {
-      grid-template-rows: 16px 32px 16px;
-      gap: 2px;
+      grid-template-rows: 16px 24px;
+      gap: var(--space-1);
       padding: var(--space-3);
     }
-    .k-value,
+    .kpi.hero {
+      grid-column: 1 / -1;
+      grid-template-columns: auto minmax(0, 1fr);
+      grid-template-rows: 16px 40px;
+      column-gap: var(--space-3);
+      align-items: baseline;
+    }
+    .hero .k-label {
+      grid-column: 1 / -1;
+    }
     .hero .k-value {
-      font-size: var(--type-2xl-size);
-      line-height: 32px;
+      line-height: 40px;
+    }
+    /* On the value's baseline: 40 px line, 32 px figures; 16 px line, 12 px text. */
+    .hero .k-sub {
+      align-self: end;
+      padding-bottom: 6px;
+    }
+    .k-rest {
+      display: none;
+    }
+    .k-value {
+      font-size: var(--type-xl-size);
+      line-height: 24px;
+      letter-spacing: var(--type-xl-tracking);
+    }
+    .kpi:not(.hero) .k-sub {
+      display: none;
+    }
+    .k-note {
+      display: block;
+      grid-column: 1 / -1;
+      padding: var(--space-2) var(--space-3);
+      background: var(--bg-panel);
+      font-size: var(--type-sm-size);
+      line-height: var(--type-sm-line);
+      color: var(--text-tertiary);
     }
   }
 </style>

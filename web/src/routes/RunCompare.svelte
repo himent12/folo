@@ -133,6 +133,7 @@
   const diffRows = $derived(chosen.length > 1 ? rows.filter(([, f]) => differs(f)) : rows);
   const sameRows = $derived(chosen.length > 1 ? rows.filter(([, f]) => !differs(f)) : []);
   let showSame = $state(false);
+  let managing = $state(false);
   let tableEl = $state<HTMLElement>();
   let tableMore = $state(false);
   function measureTable() {
@@ -169,8 +170,10 @@
   {:else}
     <section class="compare" aria-label="Curves">
       <!-- The run chips are the legend: colour key, value under the cursor, link and remove. -->
-      <div class="chips" role="group" aria-label="Runs being compared">
+      <div class="chips" class:managing role="group" aria-label="Runs being compared">
         <span class="at num" aria-hidden="true">{readoutAt}</span>
+        <!-- Phones: opening and removing runs sit behind one toggle, so the legend stays compact. -->
+        <button type="button" class="manage" aria-pressed={managing} onclick={() => (managing = !managing)}>{managing ? 'Done' : 'Edit'}</button>
         {#each chosen as r (r.id)}
           {@const v = valueOf(r.id)}
           <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -191,7 +194,7 @@
               title={pinned === r.id ? 'Let the line fall back' : 'Keep this line in front'}
               onclick={() => (pinned = pinned === r.id ? null : r.id)}
             ><i aria-hidden="true" data-pattern={SLOT_PATTERN[slotOf(r.id)]}></i><span class="nm">{r.name}</span></button>
-            <span class="v num">{v === null ? '—' : v.toFixed(3)}</span>
+            <span class="v num">{v === null ? '—' : metric(v)}</span>
             <a class="open" href={href(`/runs/${r.id}`)} aria-label="Open {r.name}" title="Open run"><ArrowUpRight size={12} /></a>
             <button class="rm" aria-label="Remove {r.name}" onclick={() => setIds(ids.filter((id) => id !== r.id))}><X size={12} /></button>
           </span>
@@ -199,8 +202,8 @@
         {#if ids.length < MAX && candidates.length}{@render adder()}{/if}
       </div>
       <p class="note">
-        Press a run to keep its line in front.{#if !sameData && chosen.length > 1}{' '}Different datasets:
-          compare the shape of the curves, not their values.{/if}
+        <span class="wide-note">Press a run to keep its line in front.</span>{#if !sameData && chosen.length > 1}{' '}Different
+          datasets: compare the shape of the curves, not their values.{/if}
       </p>
       <header class="c-head">
         <Segmented label="Metric" bind:value={metricId} options={METRICS.map((m) => ({ value: m.id, label: m.label }))} />
@@ -215,9 +218,10 @@
           {series}
           height={narrow ? 240 : 340}
           {xDomain}
+          xInteger={x === 'epoch'}
           yDomain={metricDef.y}
           curve="monotone"
-          valueFormat={(v) => v.toFixed(3)}
+          valueFormat={(v) => metric(v)}
           xFormat={(v) => (x === 'epoch' ? String(Math.round(v)) : `${Math.round(v)}%`)}
           xTitle={(v) => (x === 'epoch' ? `Epoch ${Math.round(v)}` : `${v.toFixed(0)}% through`)}
           xLabel={x === 'epoch' ? 'epoch' : undefined}
@@ -386,20 +390,55 @@
     font-size: var(--type-sm-size);
     color: var(--text-tertiary);
   }
+  .manage {
+    display: none;
+  }
   @media (max-width: 767px) {
-    /* Phones: the legend is a list of aligned rows (key, name, value, remove), not wrapping chips. */
+    /* Phones: the legend is two columns of compact rows (key, name, value); open / remove appear with Edit. */
     .chips {
       display: grid;
-      gap: 0;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 0 var(--space-3);
+    }
+    .chips .at {
+      grid-column: 1;
+      align-self: center;
+    }
+    .manage {
+      display: inline-flex;
+      grid-column: 2;
+      justify-self: end;
+      align-items: center;
+      height: 44px;
+      font-size: var(--type-sm-size);
+      color: var(--text-secondary);
     }
     .chips .chip {
       display: grid;
-      grid-template-columns: minmax(0, 1fr) auto 44px 44px;
+      grid-template-columns: minmax(0, 1fr) auto;
       border-radius: 0;
       border-width: 0 0 1px;
       background: none;
       padding: 0;
+      height: 44px;
+    }
+    .chips:not(.managing) .chip .open,
+    .chips:not(.managing) .chip .rm {
+      display: none;
+    }
+    .chips.managing {
+      grid-template-columns: minmax(0, 1fr);
+    }
+    .chips.managing .chip {
+      grid-template-columns: minmax(0, 1fr) auto 44px 44px;
       height: 48px;
+    }
+    .chips.managing .manage {
+      grid-column: 1;
+      grid-row: 1;
+    }
+    .wide-note {
+      display: none;
     }
     .chips .chip .key {
       height: 44px;

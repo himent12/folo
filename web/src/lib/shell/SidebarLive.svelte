@@ -4,6 +4,7 @@
   import { Resource } from '$lib/api/resource.svelte';
   import { href } from '$lib/router.svelte';
   import { duration } from '$lib/format';
+  import { runProgress } from '$lib/api/progress';
   import Progress from '$lib/ui/Progress.svelte';
   import { tooltip } from '$lib/ui/tooltip';
 
@@ -12,7 +13,7 @@
   const runs = new Resource((s) => hub.api.runs(s), { poll: 2000 });
   const live = $derived(runs.data?.find((r) => r.status === 'running' || r.status === 'stopping'));
   const queued = $derived(runs.data?.filter((r) => r.status === 'queued').length ?? 0);
-  const progress = $derived(live ? (live.step / Math.max(1, live.steps_per_epoch * live.epochs)) : 0);
+  const progress = $derived(live ? runProgress(live) : 0);
 </script>
 
 {#if live}
