@@ -1982,6 +1982,13 @@ impl FoloApp {
         .detach();
     }
 
+    /// Run the failed prediction again, showing "Detecting…" meanwhile (a plain rerun of the same
+    /// image and model keeps the old result up, which here is the error and its Retry button).
+    pub fn retry_predict(&mut self, cx: &mut Context<Self>) {
+        self.play_pred_for = None;
+        self.run_predict(cx);
+    }
+
     pub fn run_predict(&mut self, cx: &mut Context<Self>) {
         let (Some(model), Some(img)) = (self.play_model.clone(), self.play_image.as_ref()) else { return };
         // Fetch everything above the lowest threshold once; the conf slider filters locally.
@@ -2871,7 +2878,12 @@ impl FoloApp {
                 Section::Settings => "Settings",
             }
         );
-        let in_nav = self.focus.borrow().iter().any(|(k, f)| k.starts_with("nav-") && f.is_focused(window));
+        // The sidebar region: its navigation and the connection line at its foot.
+        let in_nav = self
+            .focus
+            .borrow()
+            .iter()
+            .any(|(k, f)| (k.starts_with("nav-") || k.as_ref() == "connection") && f.is_focused(window));
         let in_search = self.fh("titlebar-search", cx).is_focused(window);
         let at = if in_nav {
             0

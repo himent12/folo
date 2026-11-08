@@ -697,7 +697,7 @@ impl FoloApp {
         // rows, so the Schedule's controls are in view without scrolling.
         let short = window.viewport_size().height < px(700.);
         // What Auto resolves to for this dataset, batch and length (the engine's rule: SGD at 0.01
-        // past 10,000 optimizer steps of a 64-image nominal batch, else AdamW at 0.01 / (4 + classes)),
+        // past 10,000 optimizer steps of a 64-image nominal batch, else AdamW at 0.01 / (4 + classes) to six decimals),
         // so the form can say which, and that the rate field is then unused.
         let auto_pick = ds.as_ref().filter(|_| opt == 0).map(|d| {
             let steps = (d.splits.train as usize).div_ceil(BATCHES[batch].max(64) as usize)
@@ -705,8 +705,8 @@ impl FoloApp {
             if steps > 10_000 {
                 ("SGD", "0.01".to_string())
             } else {
-                let lr = 0.01 / (4. + d.classes.len() as f64);
-                ("AdamW", format!("{lr:.5}").trim_end_matches('0').to_string())
+                let lr = (0.01 / (4. + d.classes.len() as f64) * 1e6).round() / 1e6;
+                ("AdamW", format!("{lr:.6}").trim_end_matches('0').to_string())
             }
         });
         // The adapter behind "GPU 0", named as the other screens name it.
@@ -944,9 +944,9 @@ impl FoloApp {
                             .when(!short && !lr_bad, |d| {
                                 d.child(text(ty::XS, t.text_tertiary).tnum().child(match &auto_pick {
                                     Some((_, lr)) => {
-                                        format!("Auto uses {lr}; 3-epoch warmup, then cosine decay")
+                                        format!("Auto uses {lr}; 3-epoch warmup, then linear decay")
                                     }
-                                    None => "3-epoch warmup, then cosine decay".to_string(),
+                                    None => "3-epoch warmup, then linear decay to 1%".to_string(),
                                 }))
                             }),
                     ),
@@ -963,7 +963,7 @@ impl FoloApp {
                                 format!("Auto: {kind} for this run, at its own learning rate")
                             }
                             (0, None) => "Auto: SGD for long runs, else AdamW".to_string(),
-                            (1, _) => "SGD with momentum 0.9".to_string(),
+                            (1, _) => "SGD with Nesterov momentum 0.937".to_string(),
                             _ => "AdamW with weight decay".to_string(),
                         }),
                     )))
