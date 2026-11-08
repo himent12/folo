@@ -13,7 +13,10 @@ use gpui::{
 };
 
 use crate::api::RunStatus;
-use crate::app::{ARCHS, Action, BATCHES, DEVICES, FoloApp, IMGSZ, OPTIMIZERS, Route, act};
+use crate::app::{ARCHS, Action, BATCHES, DEVICES, FoloApp, IMGSZ, Route, act};
+
+/// The optimizer segments' labels (the helper under them repeats the chosen one).
+const OPT_LABELS: [&str; 3] = ["Auto", "SGD", "AdamW"];
 use crate::controls::Btn;
 use crate::store::ImgKind;
 use crate::theme::{Theme, radius, theme, ty};
@@ -55,7 +58,7 @@ pub fn fuzzy(q: &str, s: &str) -> Option<i32> {
     Some(score)
 }
 
-/// Rough training cost of a configuration on this machine: (seconds, VRAM GB).
+/// Rough training cost of a configuration on this machine: (seconds, VRAM GiB).
 pub fn estimate(arch: usize, epochs: f32, batch: u32, imgsz: u32, images: u32) -> (f64, f32) {
     const GFLOPS: [f32; 5] = [6.6, 21.5, 48.0, 104.0, 165.0];
     const ACT_MB: [f32; 5] = [45., 80., 140., 210., 300.];
@@ -449,6 +452,11 @@ impl FoloApp {
     ) -> AnyElement {
         let close_btn =
             self.icon_button("dialog-close", "icons/x.svg", "Close (Esc)", window, cx, on_close.clone());
+        // From the last layout, as the run log's follow state is.
+        let more_below = {
+            let s = &self.dialog_scroll;
+            s.max_offset().height + s.offset().y > px(1.)
+        };
         crate::ui::appear(
             div()
                 .absolute()
@@ -516,16 +524,22 @@ impl FoloApp {
                                                 .child(body),
                                         )
                                         .child(self.scrollbar(self.dialog_scroll.clone(), cx))
-                                        .child(div().absolute().bottom_0().left_0().right_0().h(px(16.)).bg(
-                                            gpui::linear_gradient(
-                                                0.,
-                                                gpui::linear_color_stop(t.bg_overlay, 0.),
-                                                gpui::linear_color_stop(
-                                                    crate::theme::alpha(t.bg_overlay, 0.),
-                                                    1.,
+                                        // Only while more of the form lies below: at the end, the last
+                                        // row's controls show undimmed.
+                                        .when(more_below, |d| {
+                                            d.child(
+                                                div().absolute().bottom_0().left_0().right_0().h(px(16.)).bg(
+                                                    gpui::linear_gradient(
+                                                        0.,
+                                                        gpui::linear_color_stop(t.bg_overlay, 0.),
+                                                        gpui::linear_color_stop(
+                                                            crate::theme::alpha(t.bg_overlay, 0.),
+                                                            1.,
+                                                        ),
+                                                    ),
                                                 ),
-                                            ),
-                                        )),
+                                            )
+                                        }),
                                 )
                                 .child(footer),
                         ),
@@ -639,7 +653,7 @@ impl FoloApp {
         let size_seg = seg(self, "nr-imgsz", &size_refs, imgsz, window, cx, |f, i| f.imgsz = i);
         let device_seg =
             seg(self, "nr-device", &["Auto", "GPU 0", "CPU"], device, window, cx, |f, i| f.device = i);
-        let opt_seg = seg(self, "nr-opt", &["Auto", "SGD", "AdamW"], opt, window, cx, |f, i| f.optimizer = i);
+        let opt_seg = seg(self, "nr-opt", &OPT_LABELS, opt, window, cx, |f, i| f.optimizer = i);
         // A typed value outside a slider's preset range widens it (rather than pinning the thumb at
         // an end, where one arrow press would jump to the end value).
         let epochs_slider = self
@@ -682,15 +696,19 @@ impl FoloApp {
         // Short windows (the 620 px minimum): tighter rhythm and no restating helpers in the Model
         // rows, so the Schedule's controls are in view without scrolling.
         let short = window.viewport_size().height < px(700.);
+        // The adapter behind "GPU 0", named as the other screens name it.
+        let gpu_name =
+            self.store.system.ready().and_then(|s| s.gpus.first()).map(|g| crate::ui::short_gpu(&g.name));
         // Section headings sit above a hairline and lead their group (stronger than field labels).
         let section = |title: &str| {
             div()
-                .mt(px(if short { 2. } else { 6. }))
-                .pt(px(if short { 10. } else { 14. }))
+                .mt(px(if short { 0. } else { 6. }))
+                .pt(px(if short { 8. } else { 14. }))
                 .border_t_1()
                 .border_color(t.line_subtle)
+                // Two size steps above the 12 px field labels, not only a weight step.
                 .child(
-                    text(ty::SM, t.text_primary).font_weight(FontWeight::SEMIBOLD).child(title.to_string()),
+                    text(ty::MD, t.text_primary).font_weight(FontWeight::SEMIBOLD).child(title.to_string()),
                 )
         };
         let (epochs_input, lr_input, epochs_bad, lr_bad) = {
@@ -712,7 +730,8 @@ impl FoloApp {
             div()
                 .relative()
                 .w(px(84.))
-                .h(px(26.))
+                // As tall as the segmented controls beside it, so the two columns' helpers align.
+                .h(px(crate::theme::size::CONTROL_MD))
                 .px(px(8.))
                 .flex()
                 .items_center()
@@ -776,7 +795,7 @@ impl FoloApp {
         let body = div()
             .flex()
             .flex_col()
-            .gap(px(if short { 10. } else { 14. }))
+            .gap(px(if short { 8. } else { 14. }))
             .px(px(20.))
             // 16 px past the last control for the footer's fade, so it never dims a control.
             .pb(px(36.))
@@ -808,18 +827,38 @@ impl FoloApp {
             })
             .child(
                 div().flex().gap(px(16.)).child(div().flex_1().child(field("Name", name_box, None))).child(
-                    div().flex_1().child(field(
-                        "Dataset",
-                        ds_select,
-                        ds.as_ref().map(|d| {
+                    div().flex_1().child({
+                        let summary = ds.as_ref().map(|d| {
                             format!(
                                 "{} classes · train {} · val {}",
                                 d.classes.len(),
                                 int(d.splits.train),
                                 int(d.splits.val)
                             )
-                        }),
-                    )),
+                        });
+                        if short {
+                            // Short windows: the summary rides on the label row, a line saved
+                            // toward keeping the Schedule above the footer.
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(8.))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_baseline()
+                                        .justify_between()
+                                        .gap(px(8.))
+                                        .child(label("Dataset"))
+                                        .children(summary.map(|s| {
+                                            text(ty::XS, t.text_tertiary).tnum().truncate().child(s)
+                                        })),
+                                )
+                                .child(ds_select)
+                        } else {
+                            field("Dataset", ds_select, summary)
+                        }
+                    }),
                 ),
             )
             .child(section("Model"))
@@ -835,7 +874,7 @@ impl FoloApp {
                     .child(div().flex_1().child(field(
                         "Image size",
                         size_seg,
-                        (!short).then(|| "pixels · images are letterboxed to a square".into()),
+                        (!short).then(|| "Pixels; images are letterboxed to a square".into()),
                     ))),
             )
             .child(
@@ -845,7 +884,7 @@ impl FoloApp {
                     .child(div().flex_1().child(match batch_help {
                         Some(h) => labelled("Batch size", h, batch_seg),
                         None => {
-                            field("Batch size", batch_seg, Some("images per step".into())).into_any_element()
+                            field("Batch size", batch_seg, Some("Images per step".into())).into_any_element()
                         }
                     }))
                     .child(
@@ -854,10 +893,12 @@ impl FoloApp {
                             None => field(
                                 "Device",
                                 device_seg,
-                                Some(if DEVICES[device] == "auto" {
-                                    "GPU when available, else CPU".into()
-                                } else {
-                                    DEVICES[device].to_string()
+                                Some(match (DEVICES[device], &gpu_name) {
+                                    ("auto", Some(g)) => format!("{g} when available, else CPU"),
+                                    ("auto", None) => "GPU when available, else CPU".into(),
+                                    ("cpu", _) => "Trains on the CPU (much slower)".into(),
+                                    (_, Some(g)) => format!("GPU 0: {g}"),
+                                    (d, None) => d.to_string(),
                                 }),
                             )
                             .into_any_element(),
@@ -889,7 +930,7 @@ impl FoloApp {
                     .child(div().flex_1().child(field(
                         "Optimizer",
                         opt_seg,
-                        Some(format!("{} · warmup 3 epochs, then cosine decay", OPTIMIZERS[opt].label())),
+                        Some(format!("{}: warm up 3 epochs, then cosine decay", OPT_LABELS[opt])),
                     )))
                     .child(
                         div().flex_1().child(
@@ -903,10 +944,15 @@ impl FoloApp {
                                     close_slider,
                                     close_bad.then_some("Enter a whole number up to the epoch count"),
                                 ))
-                                .child(text(ty::XS, t.text_tertiary).child(if close_mosaic < 0.5 {
-                                    "Off: mosaic all the way through".to_string()
-                                } else {
-                                    format!("last {close_mosaic:.0} epochs train without mosaic")
+                                // Which epochs those are (the label already says what they do).
+                                .child(text(ty::XS, t.text_tertiary).child({
+                                    let last = epochs.round().max(1.) as u32;
+                                    let n = (close_mosaic.round() as u32).min(last);
+                                    match n {
+                                        0 => "Off: mosaic all the way through".to_string(),
+                                        1 => format!("Epoch {last} trains on whole images"),
+                                        _ => format!("Epochs {}–{last} train on whole images", last - n + 1),
+                                    }
                                 })),
                         ),
                     ),
@@ -952,7 +998,8 @@ impl FoloApp {
         let cpu = DEVICES[device] == "cpu";
         let gpu = self.store.system.ready().and_then(|s| s.gpus.first().cloned());
         // 0 = not reported (wgpu can't on every platform): make no claim about fitting.
-        let gpu_gb = gpu.as_ref().map_or(0.0, |g| g.memory_bytes as f32 / 1e9);
+        // GiB, like the estimate (MiB of activations / 1024) and every size the app shows.
+        let gpu_gb = gpu.as_ref().map_or(0.0, |g| g.memory_bytes as f32 / (1u64 << 30) as f32);
         let fits = cpu || gpu_gb <= 0.0 || vram <= gpu_gb * 0.97;
         let estimate_line = div()
             .flex()
@@ -977,10 +1024,10 @@ impl FoloApp {
                             .child(if cpu {
                                 "CPU selected · no time estimate".to_string()
                             } else if fits {
-                                format!("≈ {} · ≈ {vram:.1} GB GPU memory", crate::api::time::duration(secs))
+                                format!("≈ {} · ≈ {vram:.1} GiB GPU memory", crate::api::time::duration(secs))
                             } else {
                                 // No adapter name here: it can be long enough to reach the buttons.
-                                format!("≈ {vram:.0} GB needed, {gpu_gb:.0} GB on this GPU")
+                                format!("≈ {vram:.0} GiB needed, {gpu_gb:.0} GiB on this GPU")
                             }),
                     )
                     .child(text(ty::XS, t.text_tertiary).whitespace_nowrap().child(if cpu {
@@ -1459,56 +1506,66 @@ impl FoloApp {
                         }
                     }))
                     .flex()
-                    .items_start()
-                    .gap(px(10.))
+                    .flex_col()
                     .p(px(12.))
                     .rounded(px(radius::LG))
                     .bg(t.bg_overlay)
                     .border_1()
                     .border_color(t.line_strong)
                     .shadow(t.shadow_lg())
-                    .child(div().pt(px(2.)).child(icon(
-                        icon_path,
-                        16.,
-                        if tone == Tone::Neutral { t.text_secondary } else { dotc },
-                    )))
                     .child(
                         div()
-                            .flex_1()
-                            .min_w_0()
                             .flex()
-                            .flex_col()
-                            .gap(px(2.))
+                            .items_start()
+                            .gap(px(10.))
+                            .child(div().pt(px(2.)).child(icon(
+                                icon_path,
+                                16.,
+                                if tone == Tone::Neutral { t.text_secondary } else { dotc },
+                            )))
                             .child(
-                                text(ty::BASE, t.text_primary).font_weight(FontWeight::MEDIUM).child(title),
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(2.))
+                                    .child(
+                                        text(ty::BASE, t.text_primary)
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .child(title),
+                                    )
+                                    .when_some(body, |d, b| d.child(text(ty::SM, t.text_secondary).child(b))),
                             )
-                            .when_some(body, |d, b| d.child(text(ty::SM, t.text_secondary).child(b)))
-                            // The card's action, then the stack's controls on their own right-aligned
-                            // row (an action and both controls don't fit one 274 px row).
-                            .when_some(action_btn, |d, b| d.child(div().pt(px(8.)).flex().child(b)))
-                            .when_some(ctrls, |d, (show, dismiss)| {
-                                d.child(
-                                    div()
-                                        .pt(px(6.))
-                                        .flex()
-                                        .justify_end()
-                                        .gap(px(4.))
-                                        .child(show)
-                                        .child(dismiss),
+                            .child(
+                                self.icon_button(
+                                    &format!("toast-x-{id}"),
+                                    "icons/x.svg",
+                                    "Dismiss",
+                                    window,
+                                    cx,
+                                    act(move |this, _, cx| this.dismiss_toast(id, cx)),
                                 )
-                            }),
+                                .size(px(24.)),
+                            ),
                     )
-                    .child(
-                        self.icon_button(
-                            &format!("toast-x-{id}"),
-                            "icons/x.svg",
-                            "Dismiss",
-                            window,
-                            cx,
-                            act(move |this, _, cx| this.dismiss_toast(id, cx)),
+                    // One footer: the card's action under the text, the stack's controls ending at
+                    // the card's padding, under the close button.
+                    .when(action_btn.is_some() || ctrls.is_some(), |d| {
+                        d.child(
+                            div()
+                                .pt(px(8.))
+                                .pl(px(26.))
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap(px(8.))
+                                .child(div().flex().children(action_btn))
+                                .children(ctrls.map(|(show, dismiss)| {
+                                    div().flex().items_center().gap(px(4.)).child(show).child(dismiss)
+                                })),
                         )
-                        .size(px(24.)),
-                    )
+                    })
             }))
             .into_any_element()
     }
@@ -1640,7 +1697,8 @@ impl FoloApp {
                     move |b, _, window, cx| {
                         let inner = gpui::Bounds::new(
                             b.origin + gpui::point(px(24.), px(24.)),
-                            b.size - gpui::size(px(48.), px(24. + 72.)),
+                            // 24 px on every side (the zoom controls live in the header now).
+                            b.size - gpui::size(px(48.), px(48.)),
                         );
                         paint_cell.set(Some(inner));
                         window.with_content_mask(Some(gpui::ContentMask { bounds: b }), |window| {
@@ -1794,7 +1852,7 @@ impl FoloApp {
                     .flex()
                     .justify_between()
                     .child(overline(&t, "Labels"))
-                    .child(text(ty::XS, t.text_tertiary).child("x, y · w×h (px)")),
+                    .child(text(ty::XS, t.text_tertiary).child("top-left x, y · w×h (px)")),
             )
             .child(
                 div()
@@ -1849,6 +1907,11 @@ impl FoloApp {
                         .child(row(kbd(&t, "Drag").into_any_element(), "pan"))
                 },
             );
+        // Fitted by any path (the readout, 0, −, another image), focus left on the readout moves
+        // to its neighbour.
+        if zoom <= 1.0 && self.fh("insp-fit", cx).is_focused(window) {
+            self.focus_key("insp-zoom-in", window, cx);
+        }
         // Zoom in the top bar, right-aligned before Close, as Playground keeps it in its header.
         let zoom_ctrls = div()
             .flex()
@@ -1862,24 +1925,9 @@ impl FoloApp {
                 cx,
                 act(|this, _, cx| this.zoom_by(1.0 / 1.4, cx)),
             ))
-            .child(text(ty::XS, t.text_secondary).tnum().w(px(44.)).text_center().child(if zoom <= 1.0 {
-                "Fit".to_string()
-            } else {
-                format!("{:.1}×", zoom)
-            }))
-            .child(self.icon_button(
-                "insp-zoom-in",
-                "icons/zoom-in.svg",
-                "Zoom in",
-                window,
-                cx,
-                act(|this, _, cx| this.zoom_by(1.4, cx)),
-            ))
-            .child(div().w(px(1.)).h(px(16.)).bg(t.line_subtle))
-            .child(self.icon_button(
+            .child(self.zoom_readout(
                 "insp-fit",
-                "icons/maximize.svg",
-                "Fit (0)",
+                zoom,
                 window,
                 cx,
                 act(|this, _, cx| {
@@ -1889,6 +1937,14 @@ impl FoloApp {
                     }
                     cx.notify();
                 }),
+            ))
+            .child(self.icon_button(
+                "insp-zoom-in",
+                "icons/zoom-in.svg",
+                "Zoom in",
+                window,
+                cx,
+                act(|this, _, cx| this.zoom_by(1.4, cx)),
             ));
         let header = div()
             .h(px(48.))

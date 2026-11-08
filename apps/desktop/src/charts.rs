@@ -117,6 +117,8 @@ pub struct LineChart {
     pub height: f32,
     /// y ticks to aim for.
     pub y_ticks: usize,
+    /// Exact y tick values instead (e.g. an axis that starts above 0 labels its floor).
+    pub y_tick_values: Option<Vec<f32>>,
     pub log_y: bool,
     /// Axis titles (x, y): y above the plot's top-left, x centred under the tick labels.
     pub axis_titles: Option<(&'static str, &'static str)>,
@@ -145,6 +147,7 @@ impl LineChart {
             series,
             x_range: None,
             y_range: None,
+            y_tick_values: None,
             y_fmt: None,
             x_fmt: |v| format_tick(v),
             value_fmt: None,
@@ -838,7 +841,13 @@ fn paint_line_chart(
     let fit = ((f32::from(bounds.size.height) - 40.) / 22.).floor().max(2.) as usize;
     let stride = pow2_stride(y0, y1, fit);
     let (ly0, ly1) = if spec.log_y { (y0.max(1e-6).ln(), y1.max(1e-6).ln()) } else { (y0, y1) };
-    let yticks = if spec.log_y { pow2_ticks_every(y0, y1, stride) } else { ticks(y0, y1, spec.y_ticks) };
+    let yticks = if let Some(v) = &spec.y_tick_values {
+        v.clone()
+    } else if spec.log_y {
+        pow2_ticks_every(y0, y1, stride)
+    } else {
+        ticks(y0, y1, spec.y_ticks)
+    };
     let ystep = nice_step(y1 - y0, spec.y_ticks);
     // Tiny values share one power of ten, shown once ("0 5 10" and "× 10⁻³", design/README).
     let ypow = (spec.y_fmt.is_none() && !spec.log_y).then(|| axis_pow(y0, y1, spec.y_ticks)).flatten();
@@ -1118,9 +1127,29 @@ fn paint_line_chart(
         },
     );
 
+    // Dots that would overlap are nudged apart (8 px between centres), so none hides another.
+    let mut placed: Vec<Point<Pixels>> = Vec::new();
     for &(x, y, c) in &spec.dots {
         if x >= x0 && x <= x1 {
-            let p = point(sx(x), sy(y));
+            let at = point(sx(x), sy(y));
+            // Its own spot if clear, else the first clear one on rings of 8, 12 and 16 px around
+            // it (eight directions each, deterministic), else its own spot after all.
+            let clear = |p: Point<Pixels>| {
+                placed.iter().all(|q| {
+                    let (dx, dy) = (f32::from(p.x - q.x), f32::from(p.y - q.y));
+                    dx * dx + dy * dy >= 63.9
+                })
+            };
+            let p = std::iter::once(at)
+                .chain([8f32, 12., 16.].into_iter().flat_map(|r| {
+                    (0..8).map(move |k| {
+                        let a = k as f32 * std::f32::consts::FRAC_PI_4;
+                        point(at.x + px(r * a.cos()), at.y + px(r * a.sin()))
+                    })
+                }))
+                .find(|&p| clear(p))
+                .unwrap_or(at);
+            placed.push(p);
             window.paint_quad(
                 fill(Bounds::centered_at(p, size(px(10.), px(10.))), t.bg_panel).corner_radii(px(5.)),
             );

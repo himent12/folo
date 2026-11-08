@@ -48,7 +48,9 @@ impl FoloApp {
                 )
                 .child(div().flex_none().flex().justify_end().child(control))
         };
-        let help = |s: &str| text(ty::SM, t.text_tertiary).child(s.to_string()).into_any_element();
+        // Command names render as code chips, as on Overview.
+        let help =
+            |s: &str| crate::ui::rich(&t, ty::SM, t.text_tertiary, s).justify_start().into_any_element();
         let mode_sel = if self.server_mode == ServerMode::Mock { 0 } else { 1 };
         let mode_seg = self.segmented(
             "set-server",
@@ -134,15 +136,15 @@ impl FoloApp {
             .child(panel_header(&t, "Connection").child(status))
             .child(row(
                 "Data source",
-                help("Built-in demo data runs inside the app; folo serve is the FOLO engine over HTTP."),
+                help("Built-in demo data runs inside the app; `folo serve` is the FOLO engine over HTTP."),
                 mode_seg.into_any_element(),
             ))
             .child(row(
                 "Server address",
                 help(if self.server_mode == ServerMode::Mock {
-                    "Address of folo serve. Connect switches the data source to it."
+                    "Address of `folo serve`. Connect switches the data source to it."
                 } else {
-                    "Where folo serve listens. Press Enter or Connect to connect again."
+                    "Where `folo serve` listens. Press Enter or Connect to connect again."
                 }),
                 div()
                     .flex()
@@ -162,7 +164,7 @@ impl FoloApp {
                 // What autoconnect actually starts: a demo server (`folo serve --mock`), not
                 // one that trains. Read at startup, whatever the current source.
                 "Start a demo server automatically",
-                help("At startup, launch folo serve --mock when no server is running (else the built-in demo)."),
+                help("At startup, launch `folo serve --mock` when no server is running (else the built-in demo)."),
                 spawn.into_any_element(),
             ));
 
@@ -217,13 +219,16 @@ impl FoloApp {
             ("Close / back", &["Esc"]),
             ("Start training (in the dialog)", &["Ctrl", "Enter"]),
         ];
-        let go_to: [(&str, &[&str]); 6] = [
+        let go_to: [(&str, &[&str]); 8] = [
             ("Overview", &["Ctrl", "1"]),
             ("Datasets", &["Ctrl", "2"]),
             ("Runs", &["Ctrl", "3"]),
             ("Models", &["Ctrl", "4"]),
             ("Playground", &["Ctrl", "5"]),
             ("Settings", &["Ctrl", "Comma"]),
+            // Sidebar, search, page.
+            ("Next region", &["F6"]),
+            ("Previous region", &["Shift", "F6"]),
         ];
         let col = |title: &str, items: &[(&str, &[&str])]| {
             div()

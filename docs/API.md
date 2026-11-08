@@ -291,7 +291,9 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   Real mode runs folo-vision's `Predictor` (docs/MODEL.md §9: EMA weights, fused, letterboxed `rect` at the model's
   `imgsz`) on the server's `--device` (`device` is `cpu` or `gpu:<n>`) at the server's `--precision` (`f32`, the
   default; `f16` runs the model in half precision, f16 weights and activations with f32 accumulation, on a GPU with
-  `shader-f16`, and falls back to f32 with a logged warning elsewhere; so `device: gpu:0` plus `precision: f16`).
+  `shader-f16`, and falls back to f32 with a logged warning elsewhere; so `device: gpu:0` plus `precision: f16`; with
+  `folo serve --tensor-cores` the f16 convolutions and matrix products run on the GPU's tensor cores where it has
+  them).
   Loaded models stay in an LRU of 4 (keyed by the weights file's path, size and modification time, and the precision,
   so retrained weights are reloaded); `timing` is measured:
   `preprocess_ms` includes decoding the image, `postprocess_ms` covers decoding the head outputs, NMS and rescaling.

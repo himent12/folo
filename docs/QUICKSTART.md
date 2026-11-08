@@ -160,7 +160,8 @@ names are in the model's metadata (`names`). Details: [CLI.md, ONNX export](CLI.
 
 ```sh
 folo export --model runs/shapes-n/weights/best.folo --format onnx --decode --output best-decoded.onnx
-python -c "import onnxruntime as ort, numpy as np; s = ort.InferenceSession('best-decoded.onnx'); print(s.run(None, {'images': np.zeros((1, 3, 640, 640), np.float32)})[0].shape)"
+# the shapes model is 320 px and the graph is static, so the input is [1, 3, 320, 320]; this prints (1, 2100, 7)
+python -c "import onnxruntime as ort, numpy as np; s = ort.InferenceSession('best-decoded.onnx'); print(s.run(None, {'images': np.zeros((1, 3, 320, 320), np.float32)})[0].shape)"
 ```
 
 ## 7. FOLO Studio
@@ -169,6 +170,7 @@ Studio is the web app for datasets, runs, models and the Playground. Build it on
 
 ```sh
 sh scripts/build-wasm.sh        # optional: the in-browser runtime for the Playground (PowerShell: scripts\build-wasm.ps1)
+                                # it needs wasm-bindgen-cli at Cargo.lock's version; the script prints the install command
 cd web && npm ci && npm run build && cd ..
 folo serve                      # http://127.0.0.1:7878
 ```
@@ -217,7 +219,7 @@ or, without WebGPU, on the wasm CPU (single-threaded, about 0.5 s) ([WASM.md](WA
 ## 9. From an agent
 
 Everything above is also available to agents in two ways:
-- **MCP**: `folo mcp --data-dir D:/folo-data`, with 16 tools, `folo://` resources and prompts. To register it:
+- **MCP**: `folo mcp --data-dir D:/folo-data`, with 17 tools, `folo://` resources and prompts. To register it:
   `claude mcp add folo -- folo mcp --data-dir D:/folo-data`.
 - **CLI**: any command with `--json`. stdout then carries JSON Lines only, and the exit codes are stable.
 

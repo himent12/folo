@@ -331,28 +331,13 @@ impl FoloApp {
                     .flex_1()
                     .flex()
                     .child(
+                        // Progress is drawn once, as the line under the card's header; here it's a
+                        // number like the other tiles' detail lines.
                         div().flex_1().min_w_0().pl(px(0.)).child(kpi(
                             "Epoch",
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap(px(6.))
-                                .child(metric(
-                                    &t,
-                                    r.epoch.to_string(),
-                                    &format!("/ {}", r.epochs),
-                                    ty::X2XL,
-                                    ty::SM,
-                                ))
-                                // The run's progress, as on its dashboard's Epoch tile.
-                                .child(div().w(px(88.)).child(progress(
-                                    &t,
-                                    r.progress(),
-                                    t.accent_fill(),
-                                    4.,
-                                )))
+                            metric(&t, r.epoch.to_string(), &format!("/ {}", r.epochs), ty::X2XL, ty::SM)
                                 .into_any_element(),
-                            None,
+                            Some(format!("{:.0}% complete", r.progress() * 100.)),
                         )),
                     )
                     .child(
@@ -499,9 +484,10 @@ impl FoloApp {
             let util = g.util.unwrap_or(0.0);
             let label = if g.memory_bytes > 0 {
                 let (vram, vu) = bytes(g.memory_bytes);
-                format!("{} · {vram} {vu}", crate::ui::short_gpu(&g.name))
+                // Its total memory, named (the meter beside it is load, not memory use).
+                format!("{} · {vram} {vu} VRAM", crate::ui::short_gpu(&g.name))
             } else {
-                format!("{} · memory unknown", crate::ui::short_gpu(&g.name))
+                format!("{} · VRAM unknown", crate::ui::short_gpu(&g.name))
             };
             row = row.child(meter(
                 label,
@@ -550,11 +536,15 @@ impl FoloApp {
                         .flex_col()
                         .gap(px(if hero_h < 120. { 8. } else { 16. }))
                         .p(px(if hero_h < 120. { 12. } else { 16. }))
-                        .child(div().flex().gap(px(16.)).children(
-                            (0..4).map(|c| {
-                                div().flex_1().h(px(64.)).child(skeleton(&t, format!("hero-kpi-{c}")))
-                            }),
-                        ))
+                        // One strip with 1 px dividers, as the loaded tiles sit.
+                        .child(div().flex().children((0..4).map(|c| {
+                            div()
+                                .flex_1()
+                                .h(px(64.))
+                                .pr(px(16.))
+                                .when(c > 0, |d| d.border_l_1().border_color(t.line_subtle).pl(px(16.)))
+                                .child(skeleton(&t, format!("hero-kpi-{c}")))
+                        })))
                         .child(
                             div()
                                 .flex_1()
@@ -1103,7 +1093,29 @@ impl FoloApp {
             )
             .child(div().flex().child(add));
         // The same path from a terminal, for people who live there (docs/CLI.md).
-        let cmd = |c: &str, what: &str| {
+        const CMDS: [&str; 3] =
+            ["folo serve", "folo dataset synth shapes --images 1000", "folo train --data shapes --epochs 50"];
+        let mut copy: Vec<Option<AnyElement>> = CMDS
+            .iter()
+            .enumerate()
+            .map(|(i, &c)| {
+                Some(
+                    self.icon_button(
+                        &format!("gs-copy-{i}"),
+                        "icons/copy.svg",
+                        "Copy command",
+                        window,
+                        cx,
+                        act(move |this, _, cx| {
+                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(c.to_string()));
+                            this.toast(Tone::Neutral, "Copied", Some(format!("`{c}`").into()), cx);
+                        }),
+                    )
+                    .into_any_element(),
+                )
+            })
+            .collect();
+        let mut cmd = |i: usize, what: &str| {
             div()
                 .flex()
                 .items_center()
@@ -1112,16 +1124,23 @@ impl FoloApp {
                     div()
                         .w(px(420.))
                         .flex_none()
-                        .px(px(10.))
-                        .py(px(6.))
+                        .flex()
+                        .items_center()
+                        .gap(px(4.))
+                        .pl(px(10.))
+                        .pr(px(2.))
+                        .py(px(2.))
                         .rounded(px(radius::SM))
                         .bg(t.bg_inset)
                         .child(
                             text(ty::SM, t.text_primary)
                                 .font_family(crate::theme::MONO)
+                                .flex_1()
+                                .min_w_0()
                                 .truncate()
-                                .child(c.to_string()),
-                        ),
+                                .child(CMDS[i]),
+                        )
+                        .children(copy[i].take()),
                 )
                 .child(text(ty::SM, t.text_tertiary).child(what.to_string()))
         };
@@ -1133,12 +1152,9 @@ impl FoloApp {
             .child(text(ty::BASE, t.text_primary).font_weight(FontWeight::MEDIUM).child("Or from a terminal"))
             // Honest about what reaches this app: the server and the datasets registered with it;
             // `folo train` runs on its own (runs/ in the working folder).
-            .child(cmd("folo serve", "start the server this app connects to"))
-            .child(cmd("folo dataset synth shapes --images 1000", "then Add dataset → choose ./shapes"))
-            .child(cmd(
-                "folo train --data shapes --epochs 50",
-                "or train in the terminal, separate from this app",
-            ));
+            .child(cmd(0, "start the server this app connects to"))
+            .child(cmd(1, "then Add dataset → choose ./shapes"))
+            .child(cmd(2, "or train in the terminal, separate from this app"));
         div().flex().flex_col().gap(px(16.)).child(steps).child(terminal).into_any_element()
     }
 

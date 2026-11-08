@@ -40,8 +40,12 @@ fn weights_error(path: &Path, e: folo_nn::Error) -> CliError {
 
 /// Open weights for inference (EMA when present, fused) on `device`, in f16 with `half` where the device computes
 /// in it (an f16 export is uploaded as it is); otherwise in f32, with a note on stderr when `half` asked for f16.
-fn open_model(path: &Path, device: &str, half: bool) -> Result<FoloModel, CliError> {
+/// `tensor_cores` asks for the tensor-core f16 kernels (a note on stderr when they are unavailable or unused).
+fn open_model(path: &Path, device: &str, half: bool, tensor_cores: bool) -> Result<FoloModel, CliError> {
     let path = &crate::weights::resolve(path)?;
+    if tensor_cores {
+        folo_gpu::context::request_tensor_cores();
+    }
     crate::engine::init_device(device);
     let device = resolve_device(device).map_err(engine_error)?;
     can_place(device).map_err(engine_error)?;
@@ -50,6 +54,17 @@ fn open_model(path: &Path, device: &str, half: bool) -> Result<FoloModel, CliErr
         eprintln!("note: --half: {why}");
     }
     let precision = if half && fallback.is_none() { Precision::F16 } else { Precision::F32 };
+    if tensor_cores {
+        if precision != Precision::F16 {
+            eprintln!(
+                "note: --tensor-cores only affects f16 inference (--half on a GPU); running without them"
+            );
+        } else if let Some(ctx) = folo_gpu::context_for(device)
+            && !ctx.tensor_cores()
+        {
+            eprintln!("note: --tensor-cores: {}", ctx.tensor_cores_status());
+        }
+    }
     let file = ModelFile::open(path).map_err(|e| weights_error(path, e))?;
     FoloModel::from_file_for_inference(&file, device, precision.dtype()).map_err(nn_error)
 }
@@ -60,7 +75,7 @@ fn precision_of(model: &FoloModel) -> Precision {
 }
 
 pub fn val(args: ValArgs, out: Out) -> Result<(), CliError> {
-    let model = open_model(&args.model, &args.device, args.half)?;
+    let model = open_model(&args.model, &args.device, args.half, args.tensor_cores)?;
     let (ds, _) = open_dataset(&args.data)?;
     let split = match args.split {
         SplitArg::Train => Split::Train,
@@ -275,7 +290,7 @@ fn write_new(dst: &Path, bytes: &[u8]) -> Result<(), String> {
 }
 
 pub fn predict(args: PredictArgs, out: Out) -> Result<(), CliError> {
-    let model = open_model(&args.model, &args.device, args.half)?;
+    let model = open_model(&args.model, &args.device, args.half, args.tensor_cores)?;
     let images = collect_images(&args.sources)?;
     let cfg = PredictConfig {
         imgsz: args.imgsz.unwrap_or(model.imgsz()),

@@ -25,12 +25,12 @@ use super::{check_buf, prod};
 use crate::DType;
 use crate::context::GpuContext;
 use crate::error::{Result, shape_err};
-use crate::kernels::UNARY_FN;
 use crate::kernels::elementwise::UnaryOp;
 use crate::kernels::gemm::{
     self, BatchStrides, GEMM, GemmBias, GemmDesc, TileConfig, base_spec, check_dtype, gemm_params,
 };
 use crate::kernels::pooling::Window2d;
+use crate::kernels::{UNARY_FN, coop};
 use crate::pipeline::{Access, KernelDef, Params, Source, Spec};
 
 /// A conv2d problem.
@@ -83,11 +83,61 @@ impl Conv2dDesc {
         self.win.check_limits()
     }
 
-    fn is_depthwise(&self) -> bool {
+    /// Checks the operand buffers (input, weight and the `dtype` input storage; output and bias as `out`) and
+    /// returns `(OH, OW)`.
+    pub(crate) fn check_buffers(
+        &self,
+        x: &wgpu::Buffer,
+        weight: &wgpu::Buffer,
+        bias: Option<&wgpu::Buffer>,
+        y: &wgpu::Buffer,
+        out: DType,
+    ) -> Result<(usize, usize)> {
+        self.validate()?;
+        let (oh, ow) = self.output()?;
+        let (kh, kw) = self.win.kernel;
+        check_buf(x, prod(&[self.n, self.c_in, self.h, self.w])?, self.dtype, "conv2d input")?;
+        check_buf(
+            weight,
+            prod(&[self.c_out, self.c_in / self.groups, kh, kw])?,
+            self.dtype,
+            "conv2d weight",
+        )?;
+        check_buf(y, prod(&[self.n, self.c_out, oh, ow])?, out, "conv2d output")?;
+        if let Some(b) = bias {
+            check_buf(b, self.c_out, out, "conv2d bias")?;
+        }
+        Ok((oh, ow))
+    }
+
+    /// The forward conv as a batched GEMM over `(image, group)`: `M = C_out/groups`, `N = OH·OW`,
+    /// `K = C_in/groups·KH·KW`, the weight as `A`, the image as `B` (gathered for non-1×1 kernels), a row bias.
+    pub(crate) fn gemm_view(&self, oh: usize, ow: usize, bias: bool) -> GemmDesc {
+        let (kh, kw) = self.win.kernel;
+        let (cin_g, cout_g) = (self.c_in / self.groups, self.c_out / self.groups);
+        let k_dim = cin_g * kh * kw;
+        let hw_in = self.h * self.w;
+        let hw_out = oh * ow;
+        let mut g = GemmDesc::new(cout_g, hw_out, k_dim, false, false, self.n);
+        g.batch = (self.n, self.groups);
+        g.lda = k_dim;
+        g.ldb = hw_in;
+        g.ldc = hw_out;
+        g.a = BatchStrides { offset: 0, outer: 0, inner: cout_g * k_dim };
+        g.b = BatchStrides { offset: 0, outer: self.c_in * hw_in, inner: cin_g * hw_in };
+        g.c = BatchStrides { offset: 0, outer: self.c_out * hw_out, inner: cout_g * hw_out };
+        g.bias_strides = BatchStrides { offset: 0, outer: 0, inner: cout_g };
+        g.bias = if bias { GemmBias::Row } else { GemmBias::None };
+        g.act = self.act;
+        g.dtype = self.dtype;
+        g
+    }
+
+    pub(crate) fn is_depthwise(&self) -> bool {
         self.groups > 1 && self.groups == self.c_in && self.c_out.is_multiple_of(self.c_in)
     }
 
-    fn is_pointwise(&self) -> bool {
+    pub(crate) fn is_pointwise(&self) -> bool {
         self.win == Window2d::square(1, 1, 0)
     }
 }
@@ -127,17 +177,7 @@ pub fn conv2d_with_config(
     cfg: Option<TileConfig>,
 ) -> Result<(usize, usize)> {
     check_dtype(ctx, d.dtype, "conv2d")?;
-    d.validate()?;
-    let (oh, ow) = d.output()?;
-    let (kh, kw) = d.win.kernel;
-    let cin_g = d.c_in / d.groups;
-    let cout_g = d.c_out / d.groups;
-    check_buf(x, prod(&[d.n, d.c_in, d.h, d.w])?, d.dtype, "conv2d input")?;
-    check_buf(weight, prod(&[d.c_out, cin_g, kh, kw])?, d.dtype, "conv2d weight")?;
-    check_buf(y, prod(&[d.n, d.c_out, oh, ow])?, d.dtype, "conv2d output")?;
-    if let Some(b) = bias {
-        check_buf(b, d.c_out, d.dtype, "conv2d bias")?;
-    }
+    let (oh, ow) = d.check_buffers(x, weight, bias, y, d.dtype)?;
     if d.n * d.c_out * oh * ow == 0 {
         return Ok((oh, ow));
     }
@@ -157,21 +197,23 @@ pub fn conv2d_with_config(
         return Ok((oh, ow));
     }
 
-    let k_dim = cin_g * kh * kw;
-    let hw_in = d.h * d.w;
-    let hw_out = oh * ow;
-    let mut g = GemmDesc::new(cout_g, hw_out, k_dim, false, false, d.n);
-    g.batch = (d.n, d.groups);
-    g.lda = k_dim;
-    g.ldb = hw_in;
-    g.ldc = hw_out;
-    g.a = BatchStrides { offset: 0, outer: 0, inner: cout_g * k_dim };
-    g.b = BatchStrides { offset: 0, outer: d.c_in * hw_in, inner: cin_g * hw_in };
-    g.c = BatchStrides { offset: 0, outer: d.c_out * hw_out, inner: cout_g * hw_out };
-    g.bias_strides = BatchStrides { offset: 0, outer: 0, inner: cout_g };
-    g.bias = if bias.is_some() { GemmBias::Row } else { GemmBias::None };
-    g.act = d.act;
-    g.dtype = d.dtype;
+    let (kh, kw) = d.win.kernel;
+    let (k_dim, hw_out) = (d.c_in / d.groups * kh * kw, oh * ow);
+    let cout_g = d.c_out / d.groups;
+    let g = d.gemm_view(oh, ow, bias.is_some());
+
+    // Tensor cores for f16 when the context has them on (an explicit tile config means the regular kernels).
+    if cfg.is_none() && d.dtype == DType::F16 && ctx.tensor_cores() {
+        let bias_buf = bias.unwrap_or(ctx.dummy());
+        let done = if d.is_pointwise() {
+            coop::encode_gemm(ctx, &g, DType::F16, weight, x, bias_buf, y, None)?
+        } else {
+            coop::encode_conv(ctx, d, &g, DType::F16, x, weight, bias_buf, y, None)?
+        };
+        if done {
+            return Ok((oh, ow));
+        }
+    }
 
     if d.is_pointwise() {
         let cfg = cfg.unwrap_or_else(|| gemm::pick_config(ctx, &g));
