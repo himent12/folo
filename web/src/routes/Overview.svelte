@@ -132,7 +132,15 @@
         {#if runs.error && !runs.data}
           <Panel title="Training"><ErrorState error={runs.error} retry={() => runs.refresh()} compact /></Panel>
         {:else if !runs.data}
-          <div class="live-sk"><Skeleton h="344px" r="var(--radius-lg)" /></div>
+          <!-- The live card's frame (header, stat column, two charts), so nothing jumps when it arrives. -->
+          <div class="live-sk" aria-busy="true" aria-label="Loading training">
+            <div class="lsk-head"><Skeleton w="72px" h="20px" r="var(--radius-full)" /><Skeleton w="180px" h="20px" /><Skeleton w="min(360px, 70%)" h="14px" /></div>
+            <div class="lsk-body">
+              <div class="lsk-stats"><Skeleton w="96px" h="40px" /><Skeleton h="4px" /><div class="lsk-grid">{#each [0, 1, 2, 3] as i (i)}<Skeleton h="44px" />{/each}</div></div>
+              <Skeleton h="174px" r="var(--radius-md)" />
+              <Skeleton h="174px" r="var(--radius-md)" />
+            </div>
+          </div>
         {:else if live}
           {#key live.id}<LiveRunCard run={live} dataset={dsById.get(live.config.dataset_id)} />{/key}
         {:else}
@@ -152,7 +160,10 @@
         {#if runs.error && !runs.data}
           <ErrorState error={runs.error} retry={() => runs.refresh()} />
         {:else if !runs.data}
-          <div class="list-sk">{#each [0, 1, 2, 3] as i (i)}<Skeleton h="20px" />{/each}</div>
+          <!-- Rows with the table's columns: name, status, progress, score. -->
+          <div class="list-sk">
+            {#each [0, 1, 2, 3] as i (i)}<div class="rsk"><span class="rsk-name"><Skeleton w="60%" h="14px" /><Skeleton w="40%" h="10px" /></span><Skeleton w="64px" h="18px" r="var(--radius-full)" /><Skeleton h="4px" /><Skeleton w="40px" h="14px" /></div>{/each}
+          </div>
         {:else if recent.length === 0}
           <EmptyState compact icon={Activity} title="No runs yet" description="Runs you start appear here with their progress and best mAP." />
         {:else}
@@ -393,10 +404,55 @@
   .scroll {
     overflow-x: auto;
   }
-  .list-sk {
+  .live-sk {
+    display: grid;
+    gap: var(--space-4);
+    padding: var(--space-4);
+    border: 1px solid var(--line-subtle);
+    border-radius: var(--radius-lg);
+    background: var(--bg-panel);
+  }
+  .lsk-head {
+    display: grid;
+    gap: var(--space-2);
+  }
+  .lsk-body {
+    display: grid;
+    grid-template-columns: 220px minmax(0, 1fr) minmax(0, 1fr);
+    gap: var(--space-4);
+  }
+  .lsk-stats {
     display: grid;
     gap: var(--space-3);
+    align-content: start;
+  }
+  .lsk-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: var(--space-3);
+  }
+  .list-sk {
+    display: grid;
+    gap: var(--space-4);
     padding: var(--space-4);
+  }
+  .rsk {
+    display: grid;
+    grid-template-columns: minmax(0, 1.4fr) 72px minmax(0, 1fr) 48px;
+    align-items: center;
+    gap: var(--space-4);
+  }
+  .rsk-name {
+    display: grid;
+    gap: 4px;
+  }
+  @media (max-width: 1023px) {
+    .lsk-body {
+      grid-template-columns: minmax(0, 1fr);
+    }
+    .lsk-body > :global(:nth-child(3)) {
+      display: none;
+    }
   }
   .run-name {
     display: block;

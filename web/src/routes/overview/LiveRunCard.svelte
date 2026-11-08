@@ -55,7 +55,7 @@
     <p class="meta">
       <span>{dataset?.name ?? run.config.dataset_id}</span><span class="sep">·</span>
       <span class="mono">{run.config.arch}</span><span class="sep">·</span>
-      <span>{run.config.imgsz}px, batch {run.config.batch}</span><span class="sep">·</span>
+      <span>{run.config.imgsz} px · batch {run.config.batch}</span><span class="sep">·</span>
       <span class="truncate">{run.device}</span>
     </p>
     <div class="cta"><Button size="sm" variant="ghost" iconRight={ArrowRight} href={href(`/runs/${run.id}`)}>Open run</Button></div>

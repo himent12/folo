@@ -139,7 +139,7 @@
     {#snippet sub()}
       <a class="link" href={href(`/datasets/${run.config.dataset_id}`)}>{dataset?.name ?? run.config.dataset_id}</a>
       <span class="mono">{run.config.arch}</span>
-      <span>{run.config.imgsz}px · batch {run.config.batch}</span>
+      <span>{run.config.imgsz} px · batch {run.config.batch}</span>
       <span class="truncate dev">{run.device}</span>
       <span class="faint">{run.started ? `started ${ago(run.started)}` : `created ${ago(run.created)}`}</span>
     {/snippet}
