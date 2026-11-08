@@ -693,6 +693,9 @@ impl FoloApp {
         // Short windows (the 620 px minimum): tighter rhythm and no restating helpers in the Model
         // rows, so the Schedule's controls are in view without scrolling.
         let short = window.viewport_size().height < px(700.);
+        // The adapter behind "GPU 0", named as the other screens name it.
+        let gpu_name =
+            self.store.system.ready().and_then(|s| s.gpus.first()).map(|g| crate::ui::short_gpu(&g.name));
         // Section headings sit above a hairline and lead their group (stronger than field labels).
         let section = |title: &str| {
             div()
@@ -867,10 +870,12 @@ impl FoloApp {
                             None => field(
                                 "Device",
                                 device_seg,
-                                Some(if DEVICES[device] == "auto" {
-                                    "GPU when available, else CPU".into()
-                                } else {
-                                    DEVICES[device].to_string()
+                                Some(match (DEVICES[device], &gpu_name) {
+                                    ("auto", Some(g)) => format!("{g} when available, else CPU"),
+                                    ("auto", None) => "GPU when available, else CPU".into(),
+                                    ("cpu", _) => "cpu".into(),
+                                    (d, Some(g)) => format!("{d} · {g}"),
+                                    (d, None) => d.to_string(),
                                 }),
                             )
                             .into_any_element(),
