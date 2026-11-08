@@ -232,6 +232,8 @@
   .box.truth {
     border: 1.5px dashed var(--c);
     box-shadow: none;
+    /* A dark halo that follows the dashes keeps light classes (near-white) visible on bright photos. */
+    filter: drop-shadow(0 0 0.75px var(--class-halo)) drop-shadow(0 0 0.75px var(--class-halo));
     opacity: 0.85;
     pointer-events: none;
   }

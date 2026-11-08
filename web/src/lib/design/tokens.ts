@@ -9,7 +9,7 @@ export const classPalette = [
   "#FF7B39",
   "#2EC4B6",
   "#E45CFF",
-  "#C6F432",
+  "#F2F2F2",
   "#5B8CFF",
   "#FFD166",
   "#FF5D8F",
