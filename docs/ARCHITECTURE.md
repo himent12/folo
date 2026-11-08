@@ -16,19 +16,52 @@ training and evaluation pipeline, a server, a CLI and a web studio.
 ```
 
 ## folo-core — tensors and autograd
-- `Tensor` is a cheap-to-clone handle (`Arc` inside) over shared storage plus a view (shape, strides, offset). Views
-  (reshape of contiguous data, transpose, permute, narrow/slice, broadcast, squeeze/unsqueeze) do not copy.
-- `DType`: `F32` (compute), `F16` (storage / GPU inference), `U8` (images), `U32`/`I64` (indices). Most ops are `F32`.
-- `Device`: `Cpu` or `Gpu(ordinal)`. Kernels sit behind a `Backend` trait. The CPU backend lives in folo-core;
-  folo-gpu implements the same trait and registers itself at runtime, so folo-core never depends on wgpu.
-- CPU kernels: contiguous fast paths with rayon parallelism above a size threshold, a cache-blocked SIMD-friendly
-  GEMM, conv2d via im2col + GEMM (with a direct path for depthwise and 1x1), pooling, reductions, elementwise and
-  broadcasting binary ops. Strided inputs are made contiguous once, not walked per element in hot loops.
-- Autograd: define-by-run, reverse mode. Ops on tensors that require grad record a node (inputs + backward closure)
-  on the result. `loss.backward()` returns `Grads` (gradient per tensor id) via a topological sort. A thread-local
-  `no_grad` guard disables recording (inference, optimizer updates). Every differentiable op ships a
-  finite-difference gradient test.
-- Seeded RNG (`folo_core::rng`) for reproducible init, augmentation and tests.
+- `Tensor` is a cheap-to-clone handle (`Arc` inside) over shared storage plus a `Layout` (shape, strides, offset).
+  Views (reshape of compatible layouts, transpose/permute, narrow/slice with step, broadcast/expand,
+  squeeze/unsqueeze, flatten) do not copy. Ops return `Result`; `+ - * /` (on `Tensor`, `&Tensor`, `f32`) return
+  `Result<Tensor>` too. Errors name the op and both shapes.
+- `DType`: `F32` (compute), `F16` (storage / GPU inference), `U8` (images), `U32`/`I64` (indices). Arithmetic is `F32`;
+  copies, views, `cat`, `index_select`, `gather` and casts work for every dtype. Comparisons return 0/1 `F32` masks.
+- `Device`: `Cpu` or `Gpu(ordinal)`. Kernels sit behind the `Backend` trait (below); the CPU backend lives in folo-core.
+- CPU kernels: contiguous fast paths with rayon above ~32K elements; strided inputs are walked row by row after merging
+  dimensions, or made contiguous once. A BLIS-style GEMM (`cpu::gemm`, packed panels, 6x16 AVX2/FMA micro-kernel
+  chosen at runtime, tile- or K-split parallelism) backs `matmul` and conv2d. conv2d packs an implicit im2col operand
+  straight into GEMM panels (no unfolded matrix), with direct paths for 1x1 and depthwise convolutions. Large `f32`
+  buffers are recycled through a size-keyed cache (`cpu::set_buffer_cache_limit`, default 1 GiB) so training loops do
+  not pay page faults every step.
+- Autograd: define-by-run, reverse mode. An op whose input requires grad records a node (inputs, their storage
+  versions, a backward closure built from ordinary tensor ops) on the result. `loss.backward()` returns `Grads` (keyed
+  by tensor id, leaves only) via a topological sort; graphs are retained, so backward can run twice. Graph teardown is
+  iterative (deep graphs do not overflow the stack). A thread-local `no_grad()` guard disables recording.
+- In-place updates for optimizers (`sub_assign`, `add_scaled_assign`, `copy_from`, `fill_assign`, `update_f32`, ...)
+  refuse to touch a tensor that requires grad unless `no_grad` is active, and bump the storage version: backward
+  through a graph that saved the old values fails with `Error::ModifiedInPlace` instead of using stale data.
+- `testing::grad_check` compares autograd against central finite differences (f64 loss accumulation); every
+  differentiable op has a check in `crates/folo-core/tests/grad.rs`.
+- Custom ops: `Tensor::custom_op(name, inputs, output, backward)` lets downstream crates record fused kernels
+  (Conv+BN+SiLU, BatchNorm, DFL / CIoU losses) with a hand-written backward; inputs and output are version-checked
+  like built-in ops and a wrong gradient count or shape is an error at `backward()`.
+- Seeded RNG (`folo_core::rng::Rng`, xoshiro256++) for reproducible init, augmentation and tests. `Rng::ALGO`
+  (`"xoshiro256pp"`), `state()` and `from_state()` save and resume the exact stream (the `folo.rng` checkpoint entry).
+
+### Backend integration contract (for folo-gpu and other devices)
+- Implement `folo_core::backend::Backend` and call `register_backend(Device::Gpu(i), Arc::new(backend))` at startup
+  (for example from `folo_gpu::init()`). `backend(device)` looks it up; tensors on an unregistered device fail with
+  `Error::BackendNotRegistered`.
+- Device memory is `Storage::Device(DeviceStorage)`: folo-core stores the device, dtype and element count and an opaque
+  `Box<dyn Any + Send + Sync>` buffer that only the backend downcasts. Build results with `DeviceStorage::new` and
+  wrap foreign buffers into tensors with `Tensor::from_storage`.
+- Every method receives `View`s (storage + `Layout`). Layouts may be strided or broadcast (stride 0); outputs are fresh
+  contiguous storages on the same device. folo-core validates shapes, dtypes and devices before calling; binary,
+  `where_cond` and `matmul` operands arrive already broadcast to the output shape.
+- Required: `name`, `full`, `upload`, `download` (to host, logical order), `copy_strided`, `copy_into` (strided write
+  used by `cat`, `pad`, view gradients and `copy_from`), `cast`. Everything else (unary + `unary_backward`, binary,
+  `where_cond`, `reduce`, `softmax`, `matmul`, conv2d forward / backward-input / backward-weight, pooling and
+  upsampling with their backwards, `index_select`/`index_add`/`gather`/`scatter_add`, `topk`) defaults to
+  `Error::NotSupported { op, backend }`, so a backend can grow op by op. Gradients are composed from the same methods,
+  so an op is trainable on a device once its forward and `*_backward` methods exist.
+- Tensors move between devices with `to_device` (autograd flows back across the transfer). The CPU backend is the
+  reference: each GPU kernel should be tested against it within a stated tolerance.
 
 ## folo-gpu — wgpu backend
 - One `GpuDevice` per adapter (Vulkan / DX12 / Metal natively; WebGPU in the browser through wasm). Buffer pool with

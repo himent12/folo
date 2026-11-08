@@ -18,12 +18,15 @@ folo-nn = { path = "crates/folo-nn" }
 folo-data = { path = "crates/folo-data" }
 folo-vision = { path = "crates/folo-vision" }
 folo-server = { path = "crates/folo-server" }
+bytemuck = { version = "1", features = ["extern_crate_alloc"] }
 crossbeam-channel = "0.5"
+half = { version = "2", features = ["bytemuck"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "bmp", "webp"] }
 rayon = "1.11"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 serde_yaml = "0.9"
+smallvec = { version = "1", features = ["union", "const_generics"] }
 thiserror = "2"
 walkdir = "2"
 folo-api = { path = "crates/folo-api" }

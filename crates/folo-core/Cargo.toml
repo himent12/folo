@@ -12,4 +12,19 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
+bytemuck.workspace = true
+half.workspace = true
+rayon.workspace = true
+smallvec.workspace = true
+thiserror.workspace = true
 
+[dev-dependencies]
+rayon.workspace = true
+
+[[bench]]
+name = "gemm"
+harness = false
+
+[[bench]]
+name = "conv"
+harness = false
