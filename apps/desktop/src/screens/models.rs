@@ -787,10 +787,16 @@ impl FoloApp {
                 // The instruction follows the input in use: keys while the chart or a class
                 // row has keyboard focus, the pointer otherwise.
                 let focused = |k: &str| self.focus.borrow().get(k).is_some_and(|f| f.is_focused(window));
-                let row_focused = ev.pr.iter().any(|c| focused(&format!("pc-row-{}", c.class)));
+                // Class focus is either family of rows (the legend's chips, the class table's
+                // rows), as `pr_isolated` reads it; pointer mode skips the lookups.
+                let row_focused = || {
+                    ev.pr.iter().any(|c| {
+                        focused(&format!("pr-chip-{}", c.class)) || focused(&format!("pc-row-{}", c.class))
+                    })
+                };
                 if self.kb && focused("pr-chart") {
                     "IoU 0.50 · ← → inspect recall · Esc clears"
-                } else if self.kb && row_focused {
+                } else if self.kb && row_focused() {
                     "IoU 0.50 · Enter pins the class"
                 } else {
                     "IoU 0.50 · hover a class to isolate, click to pin"
