@@ -154,11 +154,11 @@ pub fn read_image(path: &Path) -> Result<Image> {
 
 /// Size `(width, height)` of an image file after EXIF orientation, read from its header only.
 pub fn probe_size(path: &Path) -> Result<(u32, u32)> {
-    let mut file = std::fs::File::open(path).map_err(|e| DataError::io(path, e))?;
-    let mut prefix = Vec::with_capacity(64 * 1024);
-    (&mut file).take(64 * 1024).read_to_end(&mut prefix).map_err(|e| DataError::io(path, e))?;
-    let orientation = jpeg_exif_orientation(&prefix).unwrap_or(1);
-    std::io::Seek::rewind(&mut file).map_err(|e| DataError::io(path, e))?;
+    let file = std::fs::File::open(path).map_err(|e| DataError::io(path, e))?;
+    let mut reader = BufReader::new(file);
+    let orientation = read_jpeg_exif_orientation(&mut reader).unwrap_or(1);
+    std::io::Seek::rewind(&mut reader).map_err(|e| DataError::io(path, e))?;
+    let file = reader.into_inner();
     let (w, h) = image::ImageReader::new(BufReader::new(file))
         .with_guessed_format()
         .map_err(|e| DataError::io(path, e))?
@@ -170,8 +170,53 @@ pub fn probe_size(path: &Path) -> Result<(u32, u32)> {
     Ok(if orientation >= 5 { (h, w) } else { (w, h) })
 }
 
+/// Streams the JPEG markers before the first scan (seeking over payloads) and returns the EXIF orientation, if any.
+/// Unlike a fixed-size prefix this finds EXIF after large ICC or other APP segments.
+fn read_jpeg_exif_orientation<R: Read + std::io::Seek>(r: &mut R) -> Option<u8> {
+    let mut b2 = [0u8; 2];
+    r.read_exact(&mut b2).ok()?;
+    if b2 != [0xFF, 0xD8] {
+        return None;
+    }
+    loop {
+        r.read_exact(&mut b2).ok()?;
+        if b2[0] != 0xFF {
+            return None;
+        }
+        let mut marker = b2[1];
+        while marker == 0xFF {
+            let mut b = [0u8; 1];
+            r.read_exact(&mut b).ok()?;
+            marker = b[0];
+        }
+        if marker == 0xD8 || (0xD0..=0xD7).contains(&marker) || marker == 0x01 {
+            continue;
+        }
+        if marker == 0xDA || marker == 0xD9 {
+            return None;
+        }
+        r.read_exact(&mut b2).ok()?;
+        let len = u16::from_be_bytes(b2) as usize;
+        if len < 2 {
+            return None;
+        }
+        if marker == 0xE1 {
+            let mut seg = vec![0u8; len - 2];
+            r.read_exact(&mut seg).ok()?;
+            if seg.len() > 6
+                && &seg[..6] == b"Exif\0\0"
+                && let Some(o) = tiff_orientation(&seg[6..])
+            {
+                return Some(o);
+            }
+        } else {
+            r.seek(std::io::SeekFrom::Current(len as i64 - 2)).ok()?;
+        }
+    }
+}
+
 /// The EXIF orientation tag (1–8) of a JPEG, if present. Only the bytes before the first scan are inspected, so a
-/// prefix of the file is enough.
+/// prefix of the file that reaches the first scan is enough.
 pub fn jpeg_exif_orientation(bytes: &[u8]) -> Option<u8> {
     if bytes.len() < 4 || bytes[0] != 0xFF || bytes[1] != 0xD8 {
         return None;

@@ -245,9 +245,15 @@ fn image_base(root: &Path, p: &Parsed) -> PathBuf {
     cands.push(root.to_path_buf());
     // Probe the first few images and an even spread over the rest, so a run of missing files at the start
     // does not hide the right folder.
-    let step = (p.images.len() / 32).max(1);
-    let mut probe: Vec<&str> = p.images.iter().take(8).map(|(_, f, _)| f.as_str()).collect();
-    probe.extend(p.images.iter().step_by(step).take(32).map(|(_, f, _)| f.as_str()));
+    let n = p.images.len();
+    let mut idx: Vec<usize> = (0..n.min(8)).collect();
+    if n > 1 {
+        // 32 points from the first to the last entry inclusive.
+        idx.extend((0..32).map(|k| k * (n - 1) / 31));
+    }
+    idx.sort_unstable();
+    idx.dedup();
+    let probe: Vec<&str> = idx.iter().map(|&i| p.images[i].1.as_str()).collect();
     cands
         .iter()
         .map(|c| (c, probe.iter().filter(|f| c.join(f).is_file()).count()))

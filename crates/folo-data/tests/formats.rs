@@ -269,6 +269,28 @@ fn jpeg_exif_orientation_is_applied() {
 }
 
 #[test]
+fn exif_after_large_app_segments() {
+    let mut img = Image::new(40, 20, [0, 0, 250]);
+    img.fill_rect(0, 0, 20, 20, [250, 0, 0]);
+    let jpeg = encode(&img, ImageFormat::Jpeg(95)).unwrap();
+    let with_exif = with_exif_orientation(&jpeg, 6, false);
+    // Three ~60 KB APP2 segments (like a big ICC profile) before the EXIF segment.
+    let mut bytes = with_exif[..2].to_vec();
+    for _ in 0..3 {
+        bytes.extend_from_slice(&[0xFF, 0xE2]);
+        bytes.extend_from_slice(&60_002u16.to_be_bytes());
+        bytes.extend(std::iter::repeat_n(0u8, 60_000));
+    }
+    bytes.extend_from_slice(&with_exif[2..]);
+    let t = TempDir::new("exif-far");
+    let p = t.join("far.jpg");
+    write(&p, &bytes);
+    assert_eq!(probe_size(&p).unwrap(), (20, 40));
+    let d = read_image(&p).unwrap();
+    assert_eq!((d.width, d.height), (20, 40));
+}
+
+#[test]
 fn split_and_format_serde() {
     assert_eq!(serde_json::to_string(&Split::Val).unwrap(), "\"val\"");
     assert_eq!(serde_json::from_str::<Format>("\"auto\"").unwrap(), Format::Auto);
@@ -279,18 +301,18 @@ fn split_and_format_serde() {
 fn coco_image_dir_found_past_missing_files() {
     let t = TempDir::new("coco-missing");
     let r = t.path();
-    let images: Vec<_> = (0..12)
+    let images: Vec<_> = (0..40)
         .map(|i| serde_json::json!({"id": i, "file_name": format!("{i}.png"), "width": 8, "height": 8}))
         .collect();
-    // The first eight files are missing; the rest exist under images/train2017.
-    for i in 8..12 {
+    // Only the last few files exist (under images/train2017); everything before them is missing.
+    for i in 36..40 {
         write_png(&r.join(format!("images/train2017/{i}.png")), 8, 8, [0; 3]);
     }
     let j = serde_json::json!({"images": images, "annotations": [], "categories": [{"id": 1, "name": "x"}]});
     write(&r.join("annotations/instances_train2017.json"), serde_json::to_vec(&j).unwrap());
     let ds = open(r).unwrap();
     assert_eq!(ds.train.len(), 4);
-    assert_eq!(ds.report.count(IssueKind::MissingImage), 8);
+    assert_eq!(ds.report.count(IssueKind::MissingImage), 36);
 }
 
 #[test]
