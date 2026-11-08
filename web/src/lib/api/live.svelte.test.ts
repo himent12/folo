@@ -86,6 +86,29 @@ describe('LiveRun ordering', () => {
     stop();
   });
 
+  it('takes the run length from step and status events, without re-reading the run', async () => {
+    let reads = 0;
+    hub.api = { ...hub.api, run: () => (reads++, Promise.resolve({ ...snapshot, status: 'running', step: 0, steps_per_epoch: 0 })) } as Api;
+    let live!: LiveRun;
+    const stop = $effect.root(() => {
+      live = new LiveRun(() => 'run_7d1e');
+    });
+    flushSync();
+    metrics.resolve({ steps: [], epochs: [] });
+    await vi.advanceTimersByTimeAsync(0);
+    const before = reads;
+    handlers.status?.({ status: 'running', error: null, steps_per_epoch: 12, epochs: 3 });
+    expect(live.run?.steps_per_epoch).toBe(12);
+    expect(live.run?.epochs).toBe(3);
+    handlers.step?.({ ...step(1), steps_per_epoch: 12, epochs: 3 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(reads).toBe(before);
+    // A status that still says 0 (the trainer not built yet) never takes the figure back.
+    handlers.status?.({ status: 'running', error: null, steps_per_epoch: 0, epochs: 3 });
+    expect(live.run?.steps_per_epoch).toBe(12);
+    stop();
+  });
+
   it('keeps a learned steps per epoch when an older snapshot (0) is applied after it', async () => {
     let spe = 0;
     hub.api = { ...hub.api, run: () => Promise.resolve({ ...snapshot, status: 'running', step: 0, steps_per_epoch: spe }) } as Api;

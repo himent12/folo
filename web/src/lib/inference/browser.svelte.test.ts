@@ -120,4 +120,13 @@ describe('BrowserEngine', () => {
     await e.predict(req('m4', null));
     expect(w.loads.filter((l) => l.startsWith('m4'))).toEqual(['m4:1:cpu']);
   });
+
+  it("loads a model again when the server's weights change (a new ETag), and only then", async () => {
+    const w = fakeWasm();
+    const e = new BrowserEngine(async () => w.mod, pixels);
+    await e.predict({ ...req('m1', null), tag: '"a"' });
+    await e.predict({ ...req('m1', null), tag: '"a"' });
+    await e.predict({ ...req('m1', null, 'cpu', 2), tag: '"b"' });
+    expect(w.loads).toEqual(['m1:1:cpu', 'm1:2:cpu']);
+  });
 });

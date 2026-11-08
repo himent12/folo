@@ -51,6 +51,13 @@ export function mergeBy<T>(a: T[], b: T[], key: (x: T) => number): T[] {
  * Steps per epoch is fixed for a run once the trainer has counted it (0 before): a snapshot taken earlier, even one
  * applied later, never takes a learned figure back.
  */
+/** The run's length from an SSE status / step event: taken when known (steps per epoch is 0 until the trainer is built). */
+function withLength(run: Run, stepsPerEpoch: number | undefined, epochs: number | undefined): Run {
+  const spe = stepsPerEpoch !== undefined && stepsPerEpoch > 0 && stepsPerEpoch !== run.steps_per_epoch ? stepsPerEpoch : null;
+  const ep = epochs !== undefined && epochs > 0 && epochs !== run.epochs ? epochs : null;
+  return spe === null && ep === null ? run : { ...run, ...(spe !== null ? { steps_per_epoch: spe } : {}), ...(ep !== null ? { epochs: ep } : {}) };
+}
+
 export function keepStepsPerEpoch(next: Run, cur: Run | null | undefined): Run {
   return !(next.steps_per_epoch > 0) && cur?.id === next.id && cur.steps_per_epoch > 0 ? { ...next, steps_per_epoch: cur.steps_per_epoch } : next;
 }
@@ -177,7 +184,7 @@ export class LiveRun {
           if (s === 'open' && this.connection === 'idle') sync();
           this.connection = s;
         },
-        status: ({ status, error }) => {
+        status: ({ status, error, steps_per_epoch, epochs }) => {
           if (closed) return;
           this.#statusSeq++;
           this.#lastStatus = { status, error };
@@ -186,7 +193,7 @@ export class LiveRun {
             this.#rewind();
             sync();
           }
-          if (this.run) this.run = { ...this.run, status, error };
+          if (this.run) this.run = withLength({ ...this.run, status, error }, steps_per_epoch, epochs);
           if (!ACTIVE.includes(status)) {
             // The run ended: the server's final history settles it. Requests issued before may hold a partial
             // history (or, during a replay, the interrupted attempt), even when a snapshot already said it ended
@@ -222,10 +229,11 @@ export class LiveRun {
             if (last && s.step <= last.step) return;
             this.steps.push(s);
           }
-          if (this.run) this.run = { ...this.run, step: s.step, epoch: s.epoch, eta_s: s.eta_s };
+          if (this.run) this.run = withLength({ ...this.run, step: s.step, epoch: s.epoch, eta_s: s.eta_s }, s.steps_per_epoch, s.epochs);
           // A real run reports 0 steps per epoch until its trainer has loaded the data, i.e. in the snapshot taken
-          // at start: steps are flowing now, so ask once more (only that field is taken; progress needs it).
-          if (this.run?.steps_per_epoch === 0 && !speAsked) {
+          // at start. Current servers put the run's length on every step (above); for older ones, whose steps lack
+          // it, ask once more (only that field is taken; progress needs it).
+          if (this.run?.steps_per_epoch === 0 && s.steps_per_epoch === undefined && !speAsked) {
             speAsked = true;
             api.run(runId).then(
               (r) => {

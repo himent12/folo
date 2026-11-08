@@ -103,6 +103,8 @@ export class BrowserEngine {
     modelId: string;
     file: File | null;
     download: () => Promise<ArrayBuffer>;
+    /** The server's version of the weights (an ETag): a new one loads them again. */
+    tag?: string | null;
     backend: Backend;
     image: () => Promise<Blob>;
     options: { conf: number; iou: number; maxDet: number };
@@ -122,10 +124,11 @@ export class BrowserEngine {
     }
   }
 
-  #detector(req: { modelId: string; file: File | null; download: () => Promise<ArrayBuffer>; backend: Backend }): Entry {
-    // One detector per model, weights source and backend: the same file picked for two models loads twice, since
-    // a detector stamps its model id on every result.
-    const key = `${req.modelId}|${req.file ? `file#${fileId(req.file)}` : 'server'}|${req.backend}`;
+  #detector(req: { modelId: string; file: File | null; download: () => Promise<ArrayBuffer>; tag?: string | null; backend: Backend }): Entry {
+    // One detector per model, weights source (and version) and backend: the same file picked for two models loads
+    // twice, since a detector stamps its model id on every result; retrained weights (a run's last.folo changes
+    // every epoch) load again.
+    const key = `${req.modelId}|${req.file ? `file#${fileId(req.file)}` : `server:${req.tag ?? ''}`}|${req.backend}`;
     const hit = this.#detectors.get(key);
     if (hit) {
       // Most recently used last.
