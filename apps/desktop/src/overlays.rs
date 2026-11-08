@@ -449,6 +449,11 @@ impl FoloApp {
     ) -> AnyElement {
         let close_btn =
             self.icon_button("dialog-close", "icons/x.svg", "Close (Esc)", window, cx, on_close.clone());
+        // From the last layout, as the run log's follow state is.
+        let more_below = {
+            let s = &self.dialog_scroll;
+            s.max_offset().height + s.offset().y > px(1.)
+        };
         crate::ui::appear(
             div()
                 .absolute()
@@ -516,16 +521,22 @@ impl FoloApp {
                                                 .child(body),
                                         )
                                         .child(self.scrollbar(self.dialog_scroll.clone(), cx))
-                                        .child(div().absolute().bottom_0().left_0().right_0().h(px(16.)).bg(
-                                            gpui::linear_gradient(
-                                                0.,
-                                                gpui::linear_color_stop(t.bg_overlay, 0.),
-                                                gpui::linear_color_stop(
-                                                    crate::theme::alpha(t.bg_overlay, 0.),
-                                                    1.,
+                                        // Only while more of the form lies below: at the end, the last
+                                        // row's controls show undimmed.
+                                        .when(more_below, |d| {
+                                            d.child(
+                                                div().absolute().bottom_0().left_0().right_0().h(px(16.)).bg(
+                                                    gpui::linear_gradient(
+                                                        0.,
+                                                        gpui::linear_color_stop(t.bg_overlay, 0.),
+                                                        gpui::linear_color_stop(
+                                                            crate::theme::alpha(t.bg_overlay, 0.),
+                                                            1.,
+                                                        ),
+                                                    ),
                                                 ),
-                                            ),
-                                        )),
+                                            )
+                                        }),
                                 )
                                 .child(footer),
                         ),
@@ -689,8 +700,9 @@ impl FoloApp {
                 .pt(px(if short { 10. } else { 14. }))
                 .border_t_1()
                 .border_color(t.line_subtle)
+                // Two size steps above the 12 px field labels, not only a weight step.
                 .child(
-                    text(ty::SM, t.text_primary).font_weight(FontWeight::SEMIBOLD).child(title.to_string()),
+                    text(ty::MD, t.text_primary).font_weight(FontWeight::SEMIBOLD).child(title.to_string()),
                 )
         };
         let (epochs_input, lr_input, epochs_bad, lr_bad) = {
@@ -712,7 +724,8 @@ impl FoloApp {
             div()
                 .relative()
                 .w(px(84.))
-                .h(px(26.))
+                // As tall as the segmented controls beside it, so the two columns' helpers align.
+                .h(px(crate::theme::size::CONTROL_MD))
                 .px(px(8.))
                 .flex()
                 .items_center()
@@ -903,10 +916,15 @@ impl FoloApp {
                                     close_slider,
                                     close_bad.then_some("Enter a whole number up to the epoch count"),
                                 ))
-                                .child(text(ty::XS, t.text_tertiary).child(if close_mosaic < 0.5 {
-                                    "Off: mosaic all the way through".to_string()
-                                } else {
-                                    format!("last {close_mosaic:.0} epochs train without mosaic")
+                                // Which epochs those are (the label already says what they do).
+                                .child(text(ty::XS, t.text_tertiary).child({
+                                    let last = epochs.round().max(1.) as u32;
+                                    let n = (close_mosaic.round() as u32).min(last);
+                                    match n {
+                                        0 => "Off: mosaic all the way through".to_string(),
+                                        1 => format!("Epoch {last} trains on whole images"),
+                                        _ => format!("Epochs {}–{last} train on whole images", last - n + 1),
+                                    }
                                 })),
                         ),
                     ),
@@ -1640,7 +1658,8 @@ impl FoloApp {
                     move |b, _, window, cx| {
                         let inner = gpui::Bounds::new(
                             b.origin + gpui::point(px(24.), px(24.)),
-                            b.size - gpui::size(px(48.), px(24. + 72.)),
+                            // 24 px on every side (the zoom controls live in the header now).
+                            b.size - gpui::size(px(48.), px(48.)),
                         );
                         paint_cell.set(Some(inner));
                         window.with_content_mask(Some(gpui::ContentMask { bounds: b }), |window| {
@@ -1794,7 +1813,7 @@ impl FoloApp {
                     .flex()
                     .justify_between()
                     .child(overline(&t, "Labels"))
-                    .child(text(ty::XS, t.text_tertiary).child("x, y · w×h (px)")),
+                    .child(text(ty::XS, t.text_tertiary).child("top-left x, y · w×h (px)")),
             )
             .child(
                 div()
@@ -1862,24 +1881,9 @@ impl FoloApp {
                 cx,
                 act(|this, _, cx| this.zoom_by(1.0 / 1.4, cx)),
             ))
-            .child(text(ty::XS, t.text_secondary).tnum().w(px(44.)).text_center().child(if zoom <= 1.0 {
-                "Fit".to_string()
-            } else {
-                format!("{:.1}×", zoom)
-            }))
-            .child(self.icon_button(
-                "insp-zoom-in",
-                "icons/zoom-in.svg",
-                "Zoom in",
-                window,
-                cx,
-                act(|this, _, cx| this.zoom_by(1.4, cx)),
-            ))
-            .child(div().w(px(1.)).h(px(16.)).bg(t.line_subtle))
-            .child(self.icon_button(
+            .child(self.zoom_readout(
                 "insp-fit",
-                "icons/maximize.svg",
-                "Fit (0)",
+                zoom,
                 window,
                 cx,
                 act(|this, _, cx| {
@@ -1889,6 +1893,14 @@ impl FoloApp {
                     }
                     cx.notify();
                 }),
+            ))
+            .child(self.icon_button(
+                "insp-zoom-in",
+                "icons/zoom-in.svg",
+                "Zoom in",
+                window,
+                cx,
+                act(|this, _, cx| this.zoom_by(1.4, cx)),
             ));
         let header = div()
             .h(px(48.))

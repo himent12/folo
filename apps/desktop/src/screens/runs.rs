@@ -891,8 +891,11 @@ impl FoloApp {
             ],
             secondary_h,
         );
-        pr.y_range = Some((0., 1.));
-        // 0 / 0.50 / 1.00: the lower row's plot is under 180 px, where five labels crowd.
+        // From a tenth under the lowest value (0 while either is still low), so a converged pair
+        // spreads over the plot instead of its top half.
+        let low = d.precision.iter().chain(d.recall.iter()).map(|p| p.1).fold(f32::INFINITY, f32::min);
+        pr.y_range = Some((pr_floor(low), 1.));
+        // Three labels (floor, middle, 1.00): the lower row's plot is under 180 px, where five crowd.
         pr.y_ticks = 2;
         pr.y_fmt = Some(|v| format!("{v:.2}"));
         let mut lr = base(
@@ -1220,6 +1223,9 @@ impl FoloApp {
 
     fn logs_panel(&mut self, r: &Run, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
+        // The scrollback is one Tab stop: arrows step a line, Page Up/Down a screen, Home/End the ends.
+        let log_fh = self.fh("log-scroll", cx);
+        let log_ring = self.ring(&log_fh, window);
         let body = match self.store.logs.get(&r.id) {
             Some(Load::Ready(lines)) => {
                 let start = lines.len().saturating_sub(300);
@@ -1231,6 +1237,29 @@ impl FoloApp {
                     .child(
                         div()
                             .id("log-scroll")
+                            .track_focus(&log_fh)
+                            .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _, cx| {
+                                let s = &this.log_scroll;
+                                let (y, max) = (-s.offset().y, s.max_offset().height);
+                                let page = (s.bounds().size.height - px(LOG_LINE)).max(px(LOG_LINE));
+                                let to = match ev.keystroke.key.as_str() {
+                                    "up" => y - px(LOG_LINE),
+                                    "down" => y + px(LOG_LINE),
+                                    "pageup" => y - page,
+                                    "pagedown" => y + page,
+                                    "home" => px(0.),
+                                    "end" => max,
+                                    _ => return,
+                                };
+                                let to = to.clamp(px(0.), max);
+                                s.set_offset(gpui::point(s.offset().x, -to));
+                                // The key decides following now (a reflow before the next frame
+                                // could otherwise hide the move).
+                                this.log_follow = max - to < px(8.);
+                                this.log_last_y = to;
+                                cx.stop_propagation();
+                                cx.notify();
+                            }))
                             .flex_1()
                             .h(px(372.))
                             .overflow_y_scroll()
@@ -1275,6 +1304,7 @@ impl FoloApp {
                         gpui::linear_color_stop(t.bg_inset, 0.),
                         gpui::linear_color_stop(crate::theme::alpha(t.bg_inset, 0.), 1.),
                     )))
+                    .when(log_ring, |d| d.child(crate::app::focus_ring(&t, radius::SM)))
                     .into_any_element()
             }
             Some(Load::Failed(e)) => div()
@@ -1283,16 +1313,25 @@ impl FoloApp {
                 .into_any_element(),
             _ => loading_rows(&t, "logs", 8).into_any_element(),
         };
-        // Follow the tail while the view is at the bottom; scrolling up pauses it.
-        let at_bottom = {
-            let max = self.log_scroll.max_offset().height;
-            max - (-self.log_scroll.offset().y) < px(24.)
-        };
+        // Follow the tail; scrolling up pauses it, scrolling back to the bottom resumes. Decided
+        // only when the offset moved, so a reflow (a wrapped line after a resize) doesn't pause it.
+        if self.log_run.as_deref() != Some(r.id.as_str()) {
+            self.log_run = Some(r.id.clone());
+            self.log_follow = true;
+            self.log_last_y = -self.log_scroll.offset().y;
+        }
+        let (y, max) = (-self.log_scroll.offset().y, self.log_scroll.max_offset().height);
+        if y != self.log_last_y {
+            // Tighter than one keyboard line (21 px), so a single Up press pauses following.
+            self.log_follow = max - y < px(8.);
+            self.log_last_y = y;
+        }
         let rev = self.store.log_rev;
-        if at_bottom && rev != self.log_seen {
+        if self.log_follow && (rev != self.log_seen || max - y >= px(8.)) {
             self.log_scroll.scroll_to_bottom();
         }
         self.log_seen = rev;
+        let at_bottom = self.log_follow;
         let follow = if r.status != RunStatus::Running {
             div().into_any_element()
         } else if at_bottom {
@@ -1324,6 +1363,7 @@ impl FoloApp {
                 window,
                 cx,
                 act(|this, _, cx| {
+                    this.log_follow = true;
                     this.log_scroll.scroll_to_bottom();
                     cx.notify();
                 }),
@@ -1418,8 +1458,29 @@ fn is_gpu_oom(message: &str) -> bool {
     m.contains("out of memory") || m.contains("outofmemory")
 }
 
+/// The P/R chart's lower bound: a tenth step under the lowest value, or 0 when that is under 0.2
+/// (or there is no data yet).
+fn pr_floor(low: f32) -> f32 {
+    if !low.is_finite() {
+        return 0.;
+    }
+    let f = ((low - 0.05) * 10.).floor() / 10.;
+    if f < 0.2 { 0. } else { f.min(0.8) }
+}
+
+/// One log line with its padding: an arrow key's scroll step in the log.
+const LOG_LINE: f32 = 21.;
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pr_floor_steps() {
+        assert_eq!(super::pr_floor(f32::INFINITY), 0.);
+        assert_eq!(super::pr_floor(0.12), 0.);
+        assert!((super::pr_floor(0.47) - 0.4).abs() < 1e-6);
+        assert!((super::pr_floor(0.99) - 0.8).abs() < 1e-6);
+    }
+
     use super::log_range;
 
     #[test]

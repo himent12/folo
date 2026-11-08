@@ -1162,3 +1162,59 @@ Round 30 changes:
   - Settings: "Start a demo server automatically", with help that names `folo serve --mock`.
   - New run: "Final epochs without mosaic".
 - **Empty states:** "Add a dataset" (Overview, getting started, Playground) opens the folder picker on the Datasets page, as its label says, rather than only navigating there.
+
+## Round 30
+
+| Line | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | avg |
+|------|---|---|---|---|---|---|---|---|---|----|----|----|-----|
+| Opus 5.5 | 9 | 8 | 9 | 8 | 8 | 8 | 9 | 9 | 9 | 9 | 8 | 8 | 8.5 |
+| GPT-6.1 Sol | 8 | 9 | 9 | 9 | 8 | 9 | 8 | 9 | 8 | 8 | 8 | 8 | 8.4 |
+
+Both reviewers moved up a notch. Sol now gives typography, colour, spacing and dataviz a 9.
+
+Opus's main defects:
+- The inspector image sat off-centre (a stale 72 px reserve for the old bottom zoom bar).
+- Best-F1 dots hid each other.
+- A "Fit" readout beside a full-screen-looking fit icon.
+- Glyphs over the Playground rail's bottom border.
+- The run P/R chart's empty lower half.
+- Flat New run section heads.
+
+Opus also asked to move the dfl loss hue away from box. That colour mapping lives in design/README, so it went to the orchestrator.
+
+Sol's main defects were behavioural:
+- A refused stop left the run "Stopping".
+- Segmented-control arrows reached the page (panning a zoomed image).
+- The log scrollback had no keyboard path.
+- A fourth toast evicted actionable ones.
+- Long focus tips ran across the window.
+- At minimum size Playground showed barely one detection row.
+
+The PR dots stay at each class's real P and R. The curves are the interpolated precision envelope, which runs at or above it, so a dot on its curve would contradict the "P @ best F1" column.
+
+Round 31 changes:
+- **Behaviour:**
+  - A refused stop restores the run's status.
+  - Navigation keys stay inside a segmented control.
+  - The log is one Tab stop (arrows, Page Up/Down, Home/End).
+  - Toasts with an action outlast passive ones; at most five wait, and the focused toast stays.
+- **Focus tips:** they wrap at 320 px, and options turned off for the same reason share a line.
+- **Playground below 700 px tall:**
+  - The sample picker folds to one line.
+  - Confidence and IoU each take one row, so four detection rows show at 960 × 620.
+  - The rail's content clips inside its border.
+- **Zoom:** the level ("Fit" / "2.4×") is the fit button in Playground and the inspector, and the fit icon is gone. The inspector image is centred.
+- **Charts:**
+  - PR dots within 8 px of each other are nudged apart, with a one-line footnote.
+  - The run P/R chart's axis starts a tenth under its lowest value (0 while either value is low).
+- **New run:**
+  - Section heads are 14 px semibold.
+  - Number boxes match the segmented controls' 28 px, so the helpers align.
+  - The close-mosaic helper names its epochs ("Epochs 91–100 train on whole images").
+  - The bottom fade shows only while more of the form lies below.
+- **Copy:**
+  - The GPU line says "VRAM".
+  - Settings shows command names as code chips.
+  - The inspector says "top-left x, y".
+  - The narrow dataset action says "Copy check".
+  - The getting-started commands have copy buttons.

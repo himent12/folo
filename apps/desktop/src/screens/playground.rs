@@ -230,23 +230,9 @@ impl FoloApp {
                 cx,
                 act(|this, _, cx| this.play_zoom_by(1.0 / 1.4, cx)),
             ))
-            .child(text(ty::XS, t.text_secondary).tnum().w(px(40.)).text_center().child(if zoom <= 1.0 {
-                "Fit".to_string()
-            } else {
-                format!("{zoom:.1}×")
-            }))
-            .child(self.icon_button(
-                "play-zoom-in",
-                "icons/zoom-in.svg",
-                "Zoom in (+)",
-                window,
-                cx,
-                act(|this, _, cx| this.play_zoom_by(1.4, cx)),
-            ))
-            .child(self.icon_button(
+            .child(self.zoom_readout(
                 "play-fit",
-                "icons/maximize.svg",
-                "Fit (0)",
+                zoom,
                 window,
                 cx,
                 act(|this, _, cx| {
@@ -254,6 +240,14 @@ impl FoloApp {
                     this.play_pan = (0., 0.);
                     cx.notify();
                 }),
+            ))
+            .child(self.icon_button(
+                "play-zoom-in",
+                "icons/zoom-in.svg",
+                "Zoom in (+)",
+                window,
+                cx,
+                act(|this, _, cx| this.play_zoom_by(1.4, cx)),
             ));
         let hover_boxes = boxes.clone();
         let paint_boxes = boxes;
@@ -509,36 +503,38 @@ impl FoloApp {
             cx,
         );
         let iou_help = self.help_icon("help-iou", "Non-max suppression drops a weaker box that overlaps a stronger one by more than this. Changing it reruns the model.", window, cx);
+        // Short windows: a tighter control block, so more detection rows show without scrolling.
+        let tight = window.viewport_size().height < px(700.);
         let field = |label: &str, value: String, control: AnyElement, help: AnyElement| {
-            div()
+            let name = div()
                 .flex()
-                .flex_col()
-                .gap(px(6.))
+                .items_center()
+                .gap(px(4.))
                 .child(
-                    div()
-                        .flex()
-                        .justify_between()
-                        .items_center()
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(4.))
-                                .child(
-                                    text(ty::SM, t.text_secondary)
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .child(label.to_string()),
-                                )
-                                .child(help),
-                        )
-                        .child(text(ty::SM, t.text_primary).tnum().child(value)),
+                    text(ty::SM, t.text_secondary).font_weight(FontWeight::MEDIUM).child(label.to_string()),
                 )
-                .child(control)
+                .child(help);
+            let value = text(ty::SM, t.text_primary).tnum().child(value);
+            if tight {
+                // One row each: name, slider, value.
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .child(name.w(px(92.)).flex_none())
+                    .child(div().flex_1().min_w_0().child(control))
+                    .child(div().w(px(32.)).flex_none().flex().justify_end().child(value))
+            } else {
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .child(div().flex().justify_between().items_center().child(name).child(value))
+                    .child(control)
+            }
         };
         let no_models = models.is_empty() && self.store.models.ready().is_some();
         let run_on = self.run_on(window, cx);
-        // Short windows: a tighter control block, so more detection rows show without scrolling.
-        let tight = window.viewport_size().height < px(700.);
         let controls = div()
             .flex()
             .flex_col()
@@ -872,20 +868,53 @@ impl FoloApp {
                 );
             }
         }
+        // Short windows fold the picker to its heading, so the detections start higher up.
+        let fold = window.viewport_size().height < px(700.);
+        let picker_open = !fold || self.play_picker_open;
+        let heading =
+            text(ty::SM, t.text_secondary).font_weight(FontWeight::MEDIUM).child("Try a validation image");
+        let heading = if fold {
+            let el = div()
+                .id("play-picker-toggle")
+                .flex()
+                .items_center()
+                .justify_between()
+                .h(px(24.))
+                .rounded(px(radius::SM))
+                .cursor_pointer()
+                .hover(|s| s.opacity(0.85))
+                .child(heading)
+                .child(icon(
+                    if picker_open { "icons/chevron-down.svg" } else { "icons/chevron-right.svg" },
+                    14.,
+                    t.text_tertiary,
+                ));
+            self.bind(
+                el,
+                "play-picker-toggle",
+                radius::SM,
+                window,
+                cx,
+                act(|this, _, cx| {
+                    this.play_picker_open = !this.play_picker_open;
+                    cx.notify();
+                }),
+            )
+            .into_any_element()
+        } else {
+            heading.into_any_element()
+        };
         let picker = (!thumbs.is_empty() && !no_models).then(|| {
             div()
                 .flex()
                 .flex_col()
                 .gap(px(8.))
-                .p(px(16.))
+                .px(px(16.))
+                .py(px(if fold { 10. } else { 16. }))
                 .border_t_1()
                 .border_color(t.line_subtle)
-                .child(
-                    text(ty::SM, t.text_secondary)
-                        .font_weight(FontWeight::MEDIUM)
-                        .child("Try a validation image"),
-                )
-                .child(div().flex().gap(px(6.)).children(thumbs))
+                .child(heading)
+                .when(picker_open, |d| d.child(div().flex().gap(px(6.)).children(thumbs)))
         });
         // One scrolling column: controls and sample images, then detections and their latency (no
         // pinned footer, so no dead band and nothing hidden on short windows).
@@ -902,6 +931,8 @@ impl FoloApp {
                     .id("play-side")
                     .flex_1()
                     .min_h_0()
+                    // Clip inside the panel's bottom border, not across it.
+                    .mb(px(1.))
                     .overflow_y_scroll()
                     .track_scroll(&self.play_side_scroll)
                     .child(
@@ -920,13 +951,15 @@ impl FoloApp {
                     ),
             )
             // A row cut by the rail's bottom edge fades out instead of stopping mid-glyph.
-            .child(div().absolute().bottom_0().left_0().right_0().h(px(20.)).rounded_b(px(radius::LG)).bg(
-                gpui::linear_gradient(
-                    0.,
-                    gpui::linear_color_stop(t.bg_panel, 0.),
-                    gpui::linear_color_stop(crate::theme::alpha(t.bg_panel, 0.), 1.),
+            .child(
+                div().absolute().bottom(px(1.)).left_0().right_0().h(px(20.)).rounded_b(px(radius::LG)).bg(
+                    gpui::linear_gradient(
+                        0.,
+                        gpui::linear_color_stop(t.bg_panel, 0.),
+                        gpui::linear_color_stop(crate::theme::alpha(t.bg_panel, 0.), 1.),
+                    ),
                 ),
-            ))
+            )
             .child(self.scrollbar(self.play_side_scroll.clone(), cx))
             .into_any_element()
     }

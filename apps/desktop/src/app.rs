@@ -378,6 +378,13 @@ pub struct FoloApp {
     pub log_scroll: ScrollHandle,
     /// Log lines on screen at the last render (new ones scroll into view while following).
     pub log_seen: u64,
+    /// The log follows its tail. Only a scroll changes this (the offset moved); a reflow that
+    /// grows the content without one keeps following.
+    pub log_follow: bool,
+    /// The log's scroll offset at the last render, to tell a scroll from a reflow.
+    pub log_last_y: Pixels,
+    /// The run whose log that state belongs to (another run's log starts following).
+    pub log_run: Option<String>,
     pub sample_epoch: Option<u32>,
 
     // Models
@@ -402,6 +409,8 @@ pub struct FoloApp {
     // Playground
     pub play_model: Option<String>,
     pub play_conf: f32,
+    /// Short windows fold the validation-image picker to one line; this opens it.
+    pub play_picker_open: bool,
     pub play_iou: f32,
     /// Where Playground runs the model: on the server (`None`), or in this process.
     pub play_target: Option<crate::local::Target>,
@@ -545,6 +554,9 @@ impl FoloApp {
             loss_parts: [true, true, true, true],
             log_scroll: ScrollHandle::new(),
             log_seen: 0,
+            log_follow: true,
+            log_last_y: px(0.),
+            log_run: None,
             sample_epoch: None,
             export_open: false,
             pr_hover: None,
@@ -559,6 +571,7 @@ impl FoloApp {
             cm_cell: None,
             play_model: None,
             play_conf: 0.25,
+            play_picker_open: false,
             play_iou: 0.7,
             play_target: None,
             local_gpu: Load::Idle,
@@ -1132,8 +1145,18 @@ impl FoloApp {
         // Toasts with an action stay until used or dismissed; others expire, but not while hovered.
         let expires = action.is_none();
         self.toasts.push(Toast { id, tone, title: title.into(), body, action });
-        if self.toasts.len() > 3 {
-            self.toasts.remove(0);
+        // Over three, the oldest passive toast goes first: one with an action waits for its action
+        // or a dismissal (the stack folds them) unless five are waiting. The focused toast stays,
+        // and so does the one just added (it would vanish unseen).
+        while self.toasts.len() > 3 {
+            let keep = |t: &Toast| t.id != id && Some(t.id) != self.toast_focus;
+            let gone = self
+                .toasts
+                .iter()
+                .position(|t| t.action.is_none() && keep(t))
+                .or_else(|| (self.toasts.len() > 5).then(|| self.toasts.iter().position(keep)).flatten());
+            let Some(i) = gone else { break };
+            self.toasts.remove(i);
         }
         if !self.frozen && expires {
             cx.spawn(async move |this, cx| {
@@ -1744,10 +1767,12 @@ impl FoloApp {
     pub fn stop_run(&mut self, id: String, cx: &mut Context<Self>) {
         self.confirm_stop = None;
         let rid = id.clone();
+        // Shown as stopping right away; the status it had comes back if the server refuses.
+        let mut prev = None;
         if let Some(runs) = self.store.runs.ready_mut()
             && let Some(r) = runs.iter_mut().find(|r| r.id == id)
         {
-            r.status = RunStatus::Stopping;
+            prev = Some(std::mem::replace(&mut r.status, RunStatus::Stopping));
         }
         self.fetch(
             cx,
@@ -1774,7 +1799,17 @@ impl FoloApp {
                     };
                     this.toast(Tone::Neutral, title, Some(body.into()), cx);
                 }
-                Err(e) => this.toast(Tone::Danger, "Could not stop the run", Some(e.message.into()), cx),
+                Err(e) => {
+                    // Unless events moved it on meanwhile, so Stop is offered again.
+                    if let Some(prev) = prev
+                        && let Some(runs) = this.store.runs.ready_mut()
+                        && let Some(r) =
+                            runs.iter_mut().find(|r| r.id == id && r.status == RunStatus::Stopping)
+                    {
+                        r.status = prev;
+                    }
+                    this.toast(Tone::Danger, "Could not stop the run", Some(e.message.into()), cx)
+                }
             },
         );
         cx.notify();

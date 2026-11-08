@@ -1118,9 +1118,29 @@ fn paint_line_chart(
         },
     );
 
+    // Dots that would overlap are nudged apart (8 px between centres), so none hides another.
+    let mut placed: Vec<Point<Pixels>> = Vec::new();
     for &(x, y, c) in &spec.dots {
         if x >= x0 && x <= x1 {
-            let p = point(sx(x), sy(y));
+            let at = point(sx(x), sy(y));
+            // Its own spot if clear, else the first clear one on rings of 8, 12 and 16 px around
+            // it (eight directions each, deterministic), else its own spot after all.
+            let clear = |p: Point<Pixels>| {
+                placed.iter().all(|q| {
+                    let (dx, dy) = (f32::from(p.x - q.x), f32::from(p.y - q.y));
+                    dx * dx + dy * dy >= 63.9
+                })
+            };
+            let p = std::iter::once(at)
+                .chain([8f32, 12., 16.].into_iter().flat_map(|r| {
+                    (0..8).map(move |k| {
+                        let a = k as f32 * std::f32::consts::FRAC_PI_4;
+                        point(at.x + px(r * a.cos()), at.y + px(r * a.sin()))
+                    })
+                }))
+                .find(|&p| clear(p))
+                .unwrap_or(at);
+            placed.push(p);
             window.paint_quad(
                 fill(Bounds::centered_at(p, size(px(10.), px(10.))), t.bg_panel).corner_radii(px(5.)),
             );

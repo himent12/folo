@@ -1092,7 +1092,7 @@ impl FoloApp {
 
 /// Under the broken-label count: the check command to copy, or that every label is valid.
 fn broken_detail(t: &crate::theme::Theme, narrow: bool) -> gpui::Div {
-    if narrow { copy_cmd(t, "Copy command") } else { copy_cmd(t, "Copy check command") }
+    if narrow { copy_cmd(t, "Copy check") } else { copy_cmd(t, "Copy check command") }
 }
 
 /// "2 errors · 1 warning" in their severity colours.
