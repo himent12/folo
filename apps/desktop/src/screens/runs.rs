@@ -713,6 +713,7 @@ impl FoloApp {
             primary_h,
         );
         map.y_range = Some((0., 1.));
+        map.y_fmt = Some(|v| format!("{v:.2}"));
         if let Some(b) = &r.best {
             map.dots.push((b.epoch as f32, b.map50_95, t.accent_fill()));
         }
@@ -733,11 +734,12 @@ impl FoloApp {
             vec![
                 // One hue for the pair, told apart by dash: no other chart here uses slot 5.
                 Series::new("precision", t.chart_series[5], d.precision.clone()).live(live),
-                Series::new("recall", t.chart_series[5], d.recall.clone()).dashed().live(live),
+                Series::new("recall", t.chart_series[3], d.recall.clone()).dashed().live(live),
             ],
             secondary_h,
         );
         pr.y_range = Some((0., 1.));
+        pr.y_fmt = Some(|v| format!("{v:.2}"));
         pr.y_ticks = 3;
         let mut lr = base(
             "run-lr",
@@ -865,7 +867,7 @@ impl FoloApp {
             .items_center()
             .gap(px(12.))
             .child(crate::ui::legend_value(&t, "precision", t.chart_series[5], false, v(&d.precision, f3v)))
-            .child(crate::ui::legend_value(&t, "recall", t.chart_series[5], true, v(&d.recall, f3v)))
+            .child(crate::ui::legend_value(&t, "recall", t.chart_series[3], true, v(&d.recall, f3v)))
             .into_any_element();
         let lr_legend =
             crate::ui::legend_value(&t, "lr", t.text_tertiary, false, v(&d.lr, |x| format!("{x:.5}")))
@@ -1077,11 +1079,11 @@ impl FoloApp {
             let max = self.log_scroll.max_offset().height;
             max - (-self.log_scroll.offset().y) < px(24.)
         };
-        let n_lines = self.store.logs.get(&r.id).and_then(|l| l.ready()).map_or(0, |l| l.len());
-        if at_bottom && n_lines != self.log_seen {
+        let rev = self.store.log_rev;
+        if at_bottom && rev != self.log_seen {
             self.log_scroll.scroll_to_bottom();
         }
-        self.log_seen = n_lines;
+        self.log_seen = rev;
         let follow = if r.status != RunStatus::Running {
             div().into_any_element()
         } else if at_bottom {

@@ -258,6 +258,8 @@ pub struct Store {
     pub run_data: HashMap<String, Load<RunData>>,
     pub samples: HashMap<String, Load<RunSamples>>,
     pub logs: HashMap<String, Load<Vec<LogLine>>>,
+    /// Bumped on every log change; the length stops changing once the 2,000-line cap is hit.
+    pub log_rev: u64,
     /// Live events that arrived while a run's history was loading, merged in when it lands.
     pending: HashMap<String, Vec<RunEvent>>,
     pub images_px: ImageCache,
@@ -280,6 +282,7 @@ impl Store {
             run_data: HashMap::new(),
             samples: HashMap::new(),
             logs: HashMap::new(),
+            log_rev: 0,
             pending: HashMap::new(),
             images_px: ImageCache::default(),
             gpu_util: VecDeque::new(),
@@ -335,6 +338,7 @@ impl Store {
             lines.sort_by(|a, b| a.t.cmp(&b.t));
         }
         self.logs.insert(run_id.to_string(), load);
+        self.log_rev += 1;
         self.prune_pending(run_id);
     }
 
@@ -399,6 +403,7 @@ impl Store {
                     if lines.len() > 2000 {
                         lines.drain(..lines.len() - 2000);
                     }
+                    self.log_rev += 1;
                 }
             }
             RunEvent::Status(st) => {

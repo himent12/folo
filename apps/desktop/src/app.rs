@@ -168,6 +168,24 @@ pub struct Inspector {
     pub hover_box: Option<usize>,
 }
 
+/// Close mosaic: a whole number of epochs, at most the run's length.
+pub fn parse_close(s: &str, epochs: f32) -> Option<u32> {
+    s.trim().parse::<u32>().ok().filter(|v| (*v as f32) <= epochs)
+}
+
+impl NewRunForm {
+    /// Validate the close-mosaic text against the current epoch count.
+    pub fn check_close(&mut self, s: &str) {
+        match parse_close(s, self.epochs) {
+            Some(v) => {
+                self.close_mosaic = v as f32;
+                self.close_invalid = false;
+            }
+            None => self.close_invalid = true,
+        }
+    }
+}
+
 pub struct NewRunForm {
     pub name: Entity<TextInput>,
     pub dataset: usize,
@@ -322,7 +340,7 @@ pub struct FoloApp {
     pub loss_parts: [bool; 4],
     pub log_scroll: ScrollHandle,
     /// Log lines on screen at the last render (new ones scroll into view while following).
-    pub log_seen: usize,
+    pub log_seen: u64,
     pub sample_epoch: Option<u32>,
 
     // Models
@@ -1164,13 +1182,7 @@ impl FoloApp {
             cx.subscribe(&close_input, |this: &mut Self, _, ev: &InputEvent, cx| {
                 let InputEvent::Changed(s) = ev;
                 if let Some(f) = this.new_run.as_mut() {
-                    match s.trim().parse::<u32>().ok().filter(|v| (*v as f32) <= f.epochs) {
-                        Some(v) => {
-                            f.close_mosaic = v as f32;
-                            f.close_invalid = false;
-                        }
-                        None => f.close_invalid = true,
-                    }
+                    f.check_close(s);
                     cx.notify();
                 }
             }),
@@ -1184,6 +1196,9 @@ impl FoloApp {
                         }
                         None => f.epochs_invalid = true,
                     }
+                    // Close mosaic is bounded by the epochs: recheck it against the new count.
+                    let close = f.close_input.read(cx).text();
+                    f.check_close(&close);
                     cx.notify();
                 }
             }),
@@ -2533,5 +2548,22 @@ mod form_tests {
         assert_eq!(parse_lr("0"), None);
         assert_eq!(parse_lr("abc"), None);
         assert_eq!(parse_lr("NaN"), None);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_close;
+
+    #[test]
+    fn close_mosaic_bounded_by_epochs() {
+        // 200 is invalid at 100 epochs and valid once epochs rise to 300 ...
+        assert_eq!(parse_close("200", 100.), None);
+        assert_eq!(parse_close("200", 300.), Some(200));
+        // ... and a valid value turns invalid when epochs drop below it.
+        assert_eq!(parse_close("20", 100.), Some(20));
+        assert_eq!(parse_close("20", 10.), None);
+        assert_eq!(parse_close(" 7 ", 10.), Some(7));
+        assert_eq!(parse_close("x", 10.), None);
     }
 }

@@ -549,10 +549,16 @@ impl FoloApp {
                 cx.notify();
             }),
         );
+        let (total, of) = match self.ds_split {
+            Some(Split::Train) => (ds.splits.train as usize, "train images"),
+            Some(Split::Val) => (ds.splits.val as usize, "val images"),
+            Some(Split::Test) => (ds.splits.test as usize, "test images"),
+            None => (total, "images"),
+        };
         let count_label = if count == total {
-            format!("{} images", int(total as u64))
+            format!("{} {of}", int(total as u64))
         } else {
-            format!("{} of {} images match", int(count as u64), int(total as u64))
+            format!("{} of {} {of} match", int(count as u64), int(total as u64))
         };
         // The split filter joins the view controls on the tab line; the class chips get one row
         // below it, with the result count at its end.
