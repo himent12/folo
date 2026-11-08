@@ -73,7 +73,7 @@ impl FoloModel {
     ///
     /// A fused `F16` file (`folo export --format folo-f16`) loaded as `F16` never goes through `F32`: the
     /// fused model is converted and moved first, and each file tensor is uploaded as the `F16` it is. Any other
-    /// file is loaded in `F32` (FORMAT.md's `F16 → F32` rule), fused in `F32`, then converted.
+    /// file is loaded in `F32` (FORMAT.md's `F16 → F32` rule), fused in `F32` and converted on the CPU, then moved.
     pub fn from_file_for_inference(file: &ModelFile, device: Device, dtype: DType) -> Result<Self> {
         if !matches!(dtype, DType::F32 | DType::F16) {
             return Err(Error::Invalid(format!("inference dtype must be f32 or f16, got {dtype}")));
@@ -89,9 +89,11 @@ impl FoloModel {
             model.load(file, LoadOptions::strict(Purpose::Inference))?;
             return Ok(model);
         }
-        let (mut model, _) = Self::from_file_on(file, Purpose::Inference, device)?;
+        // Fused and converted on the CPU, then uploaded once (fusing on the device would read every block back).
+        let (mut model, _) = Self::from_file(file, Purpose::Inference)?;
         model.fuse()?;
         model.to_dtype(dtype)?;
+        model.to_device(device)?;
         Ok(model)
     }
 

@@ -130,6 +130,13 @@ fn reductions_accumulate_in_f32() {
     // would stall at 2048; in f32 the sum of 20000 ones is exact.
     let ones = Tensor::ones([2, 20000]);
     check16(dev, std::slice::from_ref(&ones), 0.0, 1e-3, "long sum", |t| t[0].sum(1, false));
+    // A sum over separated axes (two passes) whose partials overflow f16 but cancel: f32 partials give 0.
+    let big = Tensor::from_vec(
+        vec![40000f32, 40000., 40000., 40000., -40000., -40000., -40000., -40000.],
+        [2, 2, 2],
+    )
+    .unwrap();
+    check16(dev, std::slice::from_ref(&big), 0.0, 0.0, "separated-axis sum", |t| t[0].sum([0, 2], false));
     // The mean of 100k ones: an f16 sum would overflow (65504) before the division.
     let many = Tensor::ones([100_000]);
     check16(dev, std::slice::from_ref(&many), 0.0, 1e-3, "mean of many", |t| t[0].mean_all());

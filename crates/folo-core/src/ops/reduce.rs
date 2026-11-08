@@ -35,6 +35,10 @@ impl Tensor {
             }
             merged.push(size);
         }
+        // An F16 sum over separated axes takes several passes: keep the partial sums in F32 (a partial can
+        // overflow F16 or cancel only later) and round once at the end. Max and min are exact either way.
+        let widen = op == ReduceOp::Sum && x.dtype() == DType::F16 && reduced.len() > 1;
+        let x = if widen { x.to_dtype(DType::F32)?.detach() } else { x };
         let merged = Shape::from(merged);
         let strides = merged.contiguous_strides();
         let mut cur = x.with_layout(Layout::new(merged, strides, x.layout().offset()));
@@ -43,6 +47,9 @@ impl Tensor {
             let s = cur.with_view(|v| b.reduce(op, v, d))?;
             let shape = cur.shape().with_dim(d, 1);
             cur = Tensor::wrap(s, shape, name)?;
+        }
+        if widen {
+            cur = cur.to_dtype(DType::F16)?;
         }
         Ok(cur.with_layout(Layout::contiguous(Shape::from(keep_shape))))
     }
