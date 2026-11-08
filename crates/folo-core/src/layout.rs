@@ -83,14 +83,22 @@ impl Layout {
         self.is_contiguous().then(|| self.offset..self.offset + self.numel())
     }
 
-    /// One past the largest storage index this layout touches (0 for an empty view).
-    pub fn storage_extent(&self) -> usize {
+    /// One past the largest storage index this layout touches (0 for an empty view), or `None` if that
+    /// overflows `usize` (such a layout can never be valid).
+    pub fn storage_extent(&self) -> Option<usize> {
         if self.numel() == 0 {
-            return 0;
+            return Some(0);
         }
-        self.offset
-            + self.shape.dims().iter().zip(&self.strides).map(|(&d, &s)| (d - 1) * s).sum::<usize>()
-            + 1
+        let mut end = self.offset;
+        for (&d, &s) in self.shape.dims().iter().zip(&self.strides) {
+            end = end.checked_add((d - 1).checked_mul(s)?)?;
+        }
+        end.checked_add(1)
+    }
+
+    /// True if the layout fits a storage of `len` elements.
+    pub fn fits(&self, len: usize) -> bool {
+        self.storage_extent().is_some_and(|e| e <= len)
     }
 
     /// True if no two logical elements share a storage element (a sufficient check: sorted by stride, each
@@ -104,7 +112,11 @@ impl Layout {
             if self.strides[i] <= reach {
                 return false;
             }
-            reach += (self.shape[i] - 1) * self.strides[i];
+            let Some(r) = (self.shape[i] - 1).checked_mul(self.strides[i]).and_then(|v| v.checked_add(reach))
+            else {
+                return false;
+            };
+            reach = r;
         }
         true
     }
@@ -329,7 +341,10 @@ mod tests {
         let n = l.slice(1, 1, 2, 1);
         assert_eq!(n.offset(), 4);
         assert!(!n.is_contiguous());
-        assert_eq!(n.storage_extent(), 4 + 12 + 4 + 3 + 1);
+        assert_eq!(n.storage_extent(), Some(4 + 12 + 4 + 3 + 1));
+        let huge = Layout::new(Shape::new(&[2]), smallvec::smallvec![usize::MAX], 1);
+        assert_eq!(huge.storage_extent(), None);
+        assert!(!huge.fits(1));
         let b = Layout::contiguous([3, 1]).broadcast_to(&Shape::new(&[2, 3, 5]), "b").unwrap();
         assert_eq!(b.strides(), &[0, 1, 0]);
         assert!(b.has_broadcast());

@@ -110,8 +110,8 @@ fn strided_update<T: Copy + Send + Sync>(
     f: impl Fn(T, T) -> T + Sync,
 ) {
     assert_eq!(dst_layout.shape(), src_layout.shape(), "strided write: shape mismatch");
-    assert!(dst_layout.storage_extent() <= dst.len(), "strided write: destination layout out of bounds");
-    assert!(src_layout.storage_extent() <= src.len(), "strided write: source layout out of bounds");
+    assert!(dst_layout.fits(dst.len()), "strided write: destination layout out of bounds");
+    assert!(src_layout.fits(src.len()), "strided write: source layout out of bounds");
     assert!(dst_layout.is_non_overlapping(), "strided write: destination layout overlaps itself");
     let plan = RowPlan::<2>::new(
         dst_layout.dims(),

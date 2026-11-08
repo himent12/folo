@@ -281,10 +281,19 @@ fn binary_backward(
         BinaryOp::Sub => grads![side(need_a, &|| Ok(g.clone()), sa)?, side(need_b, &|| g.neg(), sb)?],
         BinaryOp::Mul => grads![side(need_a, &|| g.mul(b), sa)?, side(need_b, &|| g.mul(a), sb)?],
         BinaryOp::Div => {
-            grads![side(need_a, &|| g.div(b), sa)?, side(need_b, &|| g.mul(a)?.div(&b.square()?)?.neg(), sb)?]
+            // d/db (a / b) = -(a / b) / b: dividing twice avoids squaring b (which under/overflows).
+            grads![side(need_a, &|| g.div(b), sa)?, side(need_b, &|| g.mul(&a.div(b)?)?.div(b)?.neg(), sb)?]
         }
         BinaryOp::Pow => grads![
-            side(need_a, &|| g.mul(b)?.mul(&a.pow(&b.sub_scalar(1.0)?)?), sa)?,
+            side(
+                need_a,
+                &|| {
+                    // d/da a^b = b a^(b-1), taken as 0 where b == 0 (a^0 is constant even at a = 0).
+                    let d = g.mul(b)?.mul(&a.pow(&b.sub_scalar(1.0)?)?)?;
+                    b.eq_scalar(0.0)?.where_cond(&a.scalar_like(0.0)?, &d)
+                },
+                sa
+            )?,
             side(
                 need_b,
                 &|| {

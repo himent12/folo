@@ -142,7 +142,7 @@ impl Backend for CpuBackend {
                 rhs: src.shape().clone(),
             });
         }
-        if dst_layout.storage_extent() > d.len() || src.layout.storage_extent() > s.len() {
+        if !dst_layout.fits(d.len()) || !src.layout.fits(s.len()) {
             return Err(Error::invalid_shape(
                 "copy_into",
                 dst_layout.shape(),

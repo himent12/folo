@@ -16,6 +16,9 @@ pub(crate) fn max_pool2d(
 ) -> (Vec<f32>, Vec<i64>) {
     let mut out = alloc_uninit(np * oh * ow);
     let mut idx = vec![0i64; np * oh * ow];
+    if out.is_empty() || h * w == 0 {
+        return (out, idx);
+    }
     let [kh, kw] = p.kernel;
     let [sh, sw] = p.stride;
     let [ph, pw] = p.padding;
@@ -48,6 +51,9 @@ pub(crate) fn max_pool2d(
 
 pub(crate) fn max_pool2d_backward(g: &[f32], idx: &[i64], (np, h, w): Planes, ohw: usize) -> Vec<f32> {
     let mut gx = alloc_zeroed(np * h * w);
+    if gx.is_empty() {
+        return gx;
+    }
     gx.par_chunks_mut(h * w).enumerate().for_each(|(pl, gp)| {
         let gs = &g[pl * ohw..(pl + 1) * ohw];
         let is = &idx[pl * ohw..(pl + 1) * ohw];
@@ -60,6 +66,9 @@ pub(crate) fn max_pool2d_backward(g: &[f32], idx: &[i64], (np, h, w): Planes, oh
 
 pub(crate) fn avg_pool2d(x: &[f32], (np, h, w): Planes, p: &Pool2dParams, [oh, ow]: [usize; 2]) -> Vec<f32> {
     let mut out = alloc_uninit(np * oh * ow);
+    if out.is_empty() || h * w == 0 {
+        return out;
+    }
     let [kh, kw] = p.kernel;
     let [sh, sw] = p.stride;
     let [ph, pw] = p.padding;
@@ -92,6 +101,9 @@ pub(crate) fn avg_pool2d_backward(
     [oh, ow]: [usize; 2],
 ) -> Vec<f32> {
     let mut gx = alloc_zeroed(np * h * w);
+    if gx.is_empty() {
+        return gx;
+    }
     let [kh, kw] = p.kernel;
     let [sh, sw] = p.stride;
     let [ph, pw] = p.padding;
@@ -123,6 +135,9 @@ fn adaptive_range(i: usize, input: usize, output: usize) -> std::ops::Range<usiz
 
 pub(crate) fn adaptive_avg_pool2d(x: &[f32], (np, h, w): Planes, [oh, ow]: [usize; 2]) -> Vec<f32> {
     let mut out = alloc_uninit(np * oh * ow);
+    if out.is_empty() || h * w == 0 {
+        return out;
+    }
     out.par_chunks_mut(oh * ow).enumerate().for_each(|(pl, o)| {
         let xp = &x[pl * h * w..(pl + 1) * h * w];
         for oy in 0..oh {
@@ -142,6 +157,9 @@ pub(crate) fn adaptive_avg_pool2d(x: &[f32], (np, h, w): Planes, [oh, ow]: [usiz
 
 pub(crate) fn adaptive_avg_pool2d_backward(g: &[f32], (np, h, w): Planes, [oh, ow]: [usize; 2]) -> Vec<f32> {
     let mut gx = alloc_zeroed(np * h * w);
+    if gx.is_empty() {
+        return gx;
+    }
     gx.par_chunks_mut(h * w).enumerate().for_each(|(pl, gp)| {
         let gs = &g[pl * oh * ow..(pl + 1) * oh * ow];
         for oy in 0..oh {
@@ -163,6 +181,9 @@ pub(crate) fn adaptive_avg_pool2d_backward(g: &[f32], (np, h, w): Planes, [oh, o
 pub(crate) fn upsample_nearest2d(x: &[f32], (np, h, w): Planes, [sh, sw]: [usize; 2]) -> Vec<f32> {
     let (oh, ow) = (h * sh, w * sw);
     let mut out = alloc_uninit(np * oh * ow);
+    if out.is_empty() || h * w == 0 {
+        return out;
+    }
     out.par_chunks_mut(oh * ow).enumerate().for_each(|(pl, o)| {
         let xp = &x[pl * h * w..(pl + 1) * h * w];
         for y in 0..h {
@@ -183,6 +204,9 @@ pub(crate) fn upsample_nearest2d(x: &[f32], (np, h, w): Planes, [sh, sw]: [usize
 pub(crate) fn upsample_nearest2d_backward(g: &[f32], (np, h, w): Planes, [sh, sw]: [usize; 2]) -> Vec<f32> {
     let (oh, ow) = (h * sh, w * sw);
     let mut gx = alloc_zeroed(np * h * w);
+    if gx.is_empty() {
+        return gx;
+    }
     gx.par_chunks_mut(h * w).enumerate().for_each(|(pl, gp)| {
         let gs = &g[pl * oh * ow..(pl + 1) * oh * ow];
         for oy in 0..oh {

@@ -43,8 +43,9 @@ impl Tensor {
                 None
             } else if y.rank() == 2 && x.rank() > 2 {
                 // Shared weight: fold the batch into one GEMM instead of summing B products.
-                let xk = x.reshape([-1, k as i64])?;
-                let gn = g.reshape([-1, n as i64])?;
+                let rows: usize = x.dims()[..x.rank() - 1].iter().product();
+                let xk = x.reshape([rows, k])?;
+                let gn = g.reshape([rows, n])?;
                 Some(xk.t()?.matmul(&gn)?)
             } else {
                 Some(x.t()?.matmul(g)?.sum_to(y.shape())?)
@@ -154,6 +155,9 @@ impl Tensor {
         self.check_f32(op)?;
         let (_, _, h, w) =
             self.dims4().map_err(|_| Error::invalid_shape(op, self.shape(), "input must be NCHW"))?;
+        if h == 0 || w == 0 {
+            return Err(Error::invalid_shape(op, self.shape(), "empty spatial dimensions"));
+        }
         if p.kernel.contains(&0) || p.stride.contains(&0) {
             return Err(Error::invalid_arg(op, format!("kernel and stride must be positive: {p:?}")));
         }

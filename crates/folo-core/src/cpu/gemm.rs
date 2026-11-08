@@ -337,7 +337,8 @@ pub fn gemm<A: Operand, B: Operand>(
     if m == 0 || n == 0 {
         return;
     }
-    assert!(ldc >= n && c.len() >= (m - 1) * ldc + n, "gemm: C buffer too small");
+    let needed = (m - 1).checked_mul(ldc).and_then(|v| v.checked_add(n));
+    assert!(ldc >= n && needed.is_some_and(|e| e <= c.len()), "gemm: C buffer too small");
     if k == 0 {
         if !accumulate {
             for i in 0..m {
@@ -550,6 +551,14 @@ mod tests {
                 assert!((x - y).abs() <= 1e-3 * (1.0 + y.abs()));
             }
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "C buffer too small")]
+    fn rejects_overflowing_ldc() {
+        let (a, b) = ([1f32], [1f32]);
+        let mut c = [0f32];
+        gemm(3, 1, 1, &Strided::lhs(&a, 0, 0, 0), &Strided::rhs(&b, 0, 0, 0), &mut c, 1 << 63, false, false);
     }
 
     #[test]

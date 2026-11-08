@@ -218,3 +218,29 @@ fn copy_into_rejects_bad_layouts() -> Result<()> {
     assert!(b.copy_into(&mut dst, &out_of_bounds, View::new(&src, &src_l)).is_err());
     Ok(())
 }
+
+#[test]
+fn edge_case_gradients() -> Result<()> {
+    // d/db (a / b) at tiny values stays finite.
+    let a = Tensor::full([1], 1e-30);
+    let b = Tensor::full([1], 1e-30).requires_grad_();
+    let g = a.div(&b)?.sum_all()?.backward()?;
+    let gb = g.get(&b).unwrap().item::<f32>()?;
+    assert!(gb.is_finite() && (gb / -1e30 - 1.0).abs() < 1e-3, "{gb}");
+    // 0^0 has a zero base gradient, not NaN.
+    let base = Tensor::zeros([1]).requires_grad_();
+    let g = base.pow(&Tensor::zeros([1]))?.sum_all()?.backward()?;
+    assert_eq!(g.get(&base).unwrap().item::<f32>()?, 0.0);
+    // Shared-weight matmul backward with an empty contraction dim.
+    let x = Tensor::zeros([2, 3, 0]);
+    let w = Tensor::zeros([0, 4]).requires_grad_();
+    let g = x.matmul(&w)?.sum_all()?.backward()?;
+    assert_eq!(g.get(&w).unwrap().dims(), &[0, 4]);
+    // Empty spatial dims: upsampling returns an empty tensor, pooling reports an error.
+    let e = Tensor::zeros([1, 1, 0, 3]).requires_grad_();
+    let u = e.upsample_nearest2d(2)?;
+    assert_eq!(u.dims(), &[1, 1, 0, 6]);
+    assert_eq!(u.sum_all()?.backward()?.get(&e).unwrap().dims(), &[1, 1, 0, 3]);
+    assert!(Tensor::zeros([1, 1, 0, 3]).max_pool2d(2, 2, 1).is_err());
+    Ok(())
+}
