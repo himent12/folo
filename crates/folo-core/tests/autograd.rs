@@ -171,3 +171,50 @@ fn backend_registry_contract() -> Result<()> {
     assert_eq!(grads.get(&x).unwrap().to_vec::<f32>()?, vec![2.0, 4.0, 6.0, 8.0]);
     Ok(())
 }
+
+#[test]
+fn saved_indices_masks_and_outputs_are_version_checked() -> Result<()> {
+    let expect_modified = |r: Result<folo_core::Grads>| match r {
+        Err(Error::ModifiedInPlace { .. }) => {}
+        other => panic!("expected ModifiedInPlace, got {other:?}"),
+    };
+    // Index tensor overwritten after index_select.
+    let x = Tensor::from_slice(&[1.0f32, 2.0], [2])?.requires_grad_();
+    let idx = Tensor::from_slice(&[0i64], [1])?;
+    let y = x.index_select(0, &idx)?.sum_all()?;
+    idx.copy_from(&Tensor::from_slice(&[1i64], [1])?)?;
+    expect_modified(y.backward());
+    // Mask overwritten after where_cond.
+    let mask = Tensor::from_slice(&[1.0f32, 0.0], [2])?;
+    let y = mask.where_cond(&x, &Tensor::scalar(0.0))?.sum_all()?;
+    mask.fill_assign(1.0)?;
+    expect_modified(y.backward());
+    // The op's own output overwritten (softmax saves it for backward).
+    let s = x.softmax(0)?;
+    let loss = s.mul(&Tensor::from_slice(&[1.0f32, 0.0], [2])?)?.sum_all()?;
+    {
+        let _g = no_grad();
+        s.detach().fill_assign(0.0)?;
+    }
+    expect_modified(loss.backward());
+    // topk indices returned to the caller.
+    let (v, i) = x.topk(1, true)?;
+    let loss = v.sum_all()?;
+    i.copy_from(&Tensor::from_slice(&[0i64], [1])?)?;
+    expect_modified(loss.backward());
+    Ok(())
+}
+
+#[test]
+fn copy_into_rejects_bad_layouts() -> Result<()> {
+    let b = folo_core::backend::backend(Device::Cpu)?;
+    let mut dst = Storage::Cpu(CpuStorage::F32(vec![0.0; 511]));
+    let src = Storage::Cpu(CpuStorage::F32(vec![1.0; 256 * 256]));
+    let src_l = Layout::contiguous([256usize, 256]);
+    let dims: folo_core::DimVec = [1usize, 1].into_iter().collect();
+    let overlapping = Layout::new(folo_core::Shape::new(&[256, 256]), dims, 0);
+    assert!(b.copy_into(&mut dst, &overlapping, View::new(&src, &src_l)).is_err());
+    let out_of_bounds = Layout::contiguous([256usize, 256]);
+    assert!(b.copy_into(&mut dst, &out_of_bounds, View::new(&src, &src_l)).is_err());
+    Ok(())
+}

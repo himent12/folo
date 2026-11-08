@@ -57,6 +57,9 @@ where
     let weights = Tensor::rand_uniform(y.shape(), -1.0, 1.0, &mut rng);
     let wv: Vec<f64> = weights.to_vec::<f32>()?.iter().map(|&v| v as f64).collect();
     let grads = y.mul(&weights)?.sum_all()?.backward()?;
+    if y.to_vec::<f32>()?.iter().any(|v| !v.is_finite()) {
+        return Err(Error::Autograd("grad_check: f(inputs) has non-finite values".into()));
+    }
 
     let loss = |xs: &[Tensor]| -> Result<f64> {
         let _g = no_grad();
@@ -89,7 +92,11 @@ where
             };
             let numeric = (probe(opts.eps)? - probe(-opts.eps)?) / (2.0 * opts.eps);
             let a = analytic[e] as f64;
-            if (a - numeric).abs() > opts.atol + opts.rtol * a.abs().max(numeric.abs()) {
+            // Written so that NaN or infinite values on either side fail the check.
+            let ok = a.is_finite()
+                && numeric.is_finite()
+                && (a - numeric).abs() <= opts.atol + opts.rtol * a.abs().max(numeric.abs());
+            if !ok {
                 return Err(Error::Autograd(format!(
                     "grad_check: input {i} (shape {}) element {e}: analytic {a:.6} vs numeric {numeric:.6}",
                     leaf.shape()
@@ -98,4 +105,19 @@ where
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_non_finite_and_wrong_gradients() {
+        assert!(grad_check(|v| v[0].log(), &[Tensor::full([1], -1.0)]).is_err());
+        assert!(grad_check(|v| v[0].recip(), &[Tensor::full([1], 0.0)]).is_err());
+        // A deliberately wrong backward: detach drops the gradient of the first term.
+        let x = Tensor::from_slice(&[0.3f32, -0.7], [2]).unwrap();
+        assert!(grad_check(|v| v[0].detach().square()?.add(&v[0]), std::slice::from_ref(&x)).is_err());
+        assert!(grad_check(|v| v[0].square()?.add(&v[0]), &[x]).is_ok());
+    }
 }

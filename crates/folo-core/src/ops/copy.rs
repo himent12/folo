@@ -135,7 +135,7 @@ impl Tensor {
         })?;
         let out = Tensor::wrap(s, self.shape().with_dim(d, indices.numel()), "index_select")?;
         let (idx, in_shape) = (indices.clone(), self.shape().clone());
-        Ok(out.track("index_select", &[self], move |g| {
+        Ok(out.track_saved("index_select", &[self], &[indices], move |g| {
             let z = Tensor::zeros_with(&in_shape, g.dtype(), g.device())?;
             Ok(grads![Some(z.index_add(d, &idx, g)?)])
         }))
@@ -164,7 +164,7 @@ impl Tensor {
         )?;
         let out = Tensor::wrap(s, self.shape().clone(), "index_add")?;
         let idx = indices.clone();
-        Ok(out.track("index_add", &[self, src], move |g| {
+        Ok(out.track_saved("index_add", &[self, src], &[indices], move |g| {
             Ok(grads![Some(g.clone()), Some(g.index_select(d, &idx)?)])
         }))
     }
@@ -190,7 +190,7 @@ impl Tensor {
             super::with_views([self, index], [self.layout(), index.layout()], |[x, i]| b.gather(x, d, i))?;
         let out = Tensor::wrap(s, index.shape().clone(), "gather")?;
         let (idx, in_shape) = (index.clone(), self.shape().clone());
-        Ok(out.track("gather", &[self], move |g| {
+        Ok(out.track_saved("gather", &[self], &[index], move |g| {
             let z = Tensor::zeros_with(&in_shape, g.dtype(), g.device())?;
             Ok(grads![Some(z.scatter_add(d, &idx, g)?)])
         }))
@@ -219,7 +219,7 @@ impl Tensor {
         )?;
         let out = Tensor::wrap(s, self.shape().clone(), "scatter_add")?;
         let idx = index.clone();
-        Ok(out.track("scatter_add", &[self, src], move |g| {
+        Ok(out.track_saved("scatter_add", &[self, src], &[index], move |g| {
             Ok(grads![Some(g.clone()), Some(g.gather(d, &idx)?)])
         }))
     }
@@ -247,7 +247,7 @@ impl Tensor {
         let out = Tensor::wrap(s, shape, "where_cond")?;
         let cond = self.clone();
         let (sa, sb) = (on_true.shape().clone(), on_false.shape().clone());
-        Ok(out.track("where_cond", &[on_true, on_false], move |g| {
+        Ok(out.track_saved("where_cond", &[on_true, on_false], &[self], move |g| {
             let zero = g.scalar_like(0.0)?;
             Ok(grads![
                 Some(cond.where_cond(g, &zero)?.sum_to(&sa)?),

@@ -135,6 +135,27 @@ impl Backend for CpuBackend {
     fn copy_into(&self, dst: &mut Storage, dst_layout: &Layout, src: View<'_>) -> Result<()> {
         let s = cpu(&src, "copy_into")?;
         let d = dst.as_cpu_mut("copy_into")?;
+        if dst_layout.shape() != src.shape() {
+            return Err(Error::ShapeMismatch {
+                op: "copy_into",
+                lhs: dst_layout.shape().clone(),
+                rhs: src.shape().clone(),
+            });
+        }
+        if dst_layout.storage_extent() > d.len() || src.layout.storage_extent() > s.len() {
+            return Err(Error::invalid_shape(
+                "copy_into",
+                dst_layout.shape(),
+                "layout reaches outside its storage",
+            ));
+        }
+        if !dst_layout.is_non_overlapping() {
+            return Err(Error::invalid_shape(
+                "copy_into",
+                dst_layout.shape(),
+                "destination layout overlaps itself",
+            ));
+        }
         macro_rules! go {
             ($($v:ident),*) => {
                 match (d, s) {

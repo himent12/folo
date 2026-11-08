@@ -20,7 +20,7 @@ impl Tensor {
                 "{op}: in-place update of a tensor that requires grad; run it under no_grad()"
             )));
         }
-        if self.layout().has_broadcast() {
+        if !self.layout().is_non_overlapping() {
             return Err(Error::invalid_shape(op, self.shape(), "cannot write into a broadcast view"));
         }
         Ok(())

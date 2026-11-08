@@ -103,7 +103,7 @@ impl Tensor {
         let kept = self.reduce_keepdim(op, &dims, name)?;
         let (x, y) = (self.clone(), kept.clone());
         let out = Self::finish_reduce(kept, &dims, keepdim)?;
-        Ok(out.track(name, &[self], move |g| {
+        Ok(out.track_saved(name, &[self], &[&y.clone()], move |g| {
             // The gradient goes to the extreme elements, split evenly between ties.
             let mask = x.eq(&y)?;
             let count = mask.sum(dims.to_vec(), true)?;
@@ -171,7 +171,7 @@ impl Tensor {
         let s = self.with_view(|v| b.softmax(v, d, log))?;
         let out = Tensor::wrap(s, self.shape().clone(), name)?;
         let y = out.detach();
-        Ok(out.track(name, &[self], move |g| {
+        Ok(out.track_saved(name, &[self], &[&y.clone()], move |g| {
             let gx = if log {
                 g.sub(&y.exp()?.mul(&g.sum(d, true)?)?)?
             } else {
@@ -206,7 +206,7 @@ impl Tensor {
         let values = Tensor::wrap(vs, shape.clone(), "topk")?;
         let indices = Tensor::wrap(is, shape, "topk")?;
         let (idx, in_shape) = (indices.clone(), self.shape().clone());
-        let values = values.track("topk", &[self], move |g| {
+        let values = values.track_saved("topk", &[self], &[&indices], move |g| {
             let z = Tensor::zeros_with(&in_shape, DType::F32, g.device())?;
             Ok(grads![Some(z.scatter_add(-1, &idx, g)?)])
         });

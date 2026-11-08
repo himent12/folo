@@ -93,6 +93,22 @@ impl Layout {
             + 1
     }
 
+    /// True if no two logical elements share a storage element (a sufficient check: sorted by stride, each
+    /// dimension's stride exceeds the reach of all smaller-strided dimensions). Every layout produced by tensor
+    /// views passes; broadcast layouts do not.
+    pub fn is_non_overlapping(&self) -> bool {
+        let mut dims: crate::shape::DimVec = (0..self.rank()).filter(|&i| self.shape[i] > 1).collect();
+        dims.sort_unstable_by_key(|&i| self.strides[i]);
+        let mut reach = 0usize;
+        for &i in &dims {
+            if self.strides[i] <= reach {
+                return false;
+            }
+            reach += (self.shape[i] - 1) * self.strides[i];
+        }
+        true
+    }
+
     /// True if some dimension of size > 1 has stride 0 (several logical elements share storage).
     pub fn has_broadcast(&self) -> bool {
         self.shape.dims().iter().zip(&self.strides).any(|(&d, &s)| d > 1 && s == 0)
@@ -317,6 +333,11 @@ mod tests {
         let b = Layout::contiguous([3, 1]).broadcast_to(&Shape::new(&[2, 3, 5]), "b").unwrap();
         assert_eq!(b.strides(), &[0, 1, 0]);
         assert!(b.has_broadcast());
+        assert!(!b.is_non_overlapping());
+        assert!(l.permute(&[2, 0, 1]).is_non_overlapping() && n.is_non_overlapping());
+        assert!(l.slice(2, 0, 2, 2).is_non_overlapping());
+        let bad = Layout::new(Shape::new(&[256, 256]), smallvec::smallvec![1, 1], 0);
+        assert!(!bad.is_non_overlapping());
     }
 
     #[test]

@@ -77,52 +77,21 @@ pub(crate) fn copy_strided_into<T: Copy + Send + Sync>(
     out
 }
 
-/// Write `src` (read through `src_layout`) into `dst` through `dst_layout`. Shapes must match and `dst_layout`
-/// must not broadcast.
+/// Write `src` (read through `src_layout`) into `dst` through `dst_layout`.
+///
+/// # Panics
+/// If the shapes differ, if either layout reaches outside its buffer, or if `dst_layout` maps two logical
+/// elements to the same storage element (the parallel writes below rely on that never happening).
 pub(crate) fn copy_into<T: Copy + Send + Sync>(
     dst: &mut [T],
     dst_layout: &Layout,
     src: &[T],
     src_layout: &Layout,
 ) {
-    debug_assert_eq!(dst_layout.shape(), src_layout.shape());
-    debug_assert!(!dst_layout.has_broadcast());
-    let plan = RowPlan::<2>::new(
-        dst_layout.dims(),
-        [dst_layout.strides(), src_layout.strides()],
-        [dst_layout.offset(), src_layout.offset()],
-    );
-    let [ds, ss] = plan.inner;
-    let len = plan.len;
-    let body = |dst: &mut [T], o: [usize; 2]| {
-        if ds == 1 && ss == 1 {
-            dst[o[0]..o[0] + len].copy_from_slice(&src[o[1]..o[1] + len]);
-        } else {
-            for i in 0..len {
-                dst[o[0] + i * ds] = src[o[1] + i * ss];
-            }
-        }
-    };
-    if plan.rows * len >= PAR_MIN && plan.rows > 1 {
-        // Rows of a non-broadcast destination are disjoint, so writing them concurrently is sound.
-        let ptr = SendPtr(dst.as_mut_ptr());
-        let dlen = dst.len();
-        let rows_per_task = (CHUNK / len.max(1)).max(1);
-        let tasks = plan.rows.div_ceil(rows_per_task);
-        (0..tasks).into_par_iter().for_each(|t| {
-            let p = &ptr;
-            // SAFETY: every task writes a disjoint set of destination rows (dst_layout does not broadcast),
-            // all within `dst` (the caller validated the layout against the storage length).
-            let dst = unsafe { std::slice::from_raw_parts_mut(p.0, dlen) };
-            let start = t * rows_per_task;
-            plan.for_rows(start..(start + rows_per_task).min(plan.rows), |_, o| body(dst, o));
-        });
-    } else {
-        plan.for_rows(0..plan.rows, |_, o| body(dst, o));
-    }
+    strided_update(dst, dst_layout, src, src_layout, |_, s| s);
 }
 
-/// `dst[i] = f(dst[i], src[i])` through two layouts of the same shape (`dst_layout` must not broadcast).
+/// `dst[i] = f(dst[i], src[i])` through two layouts of the same shape. Same panics as [`copy_into`].
 pub(crate) fn fill_rows_inplace(
     dst: &mut [f32],
     dst_layout: &Layout,
@@ -130,7 +99,20 @@ pub(crate) fn fill_rows_inplace(
     src_layout: &Layout,
     f: impl Fn(f32, f32) -> f32 + Sync,
 ) {
-    debug_assert!(!dst_layout.has_broadcast());
+    strided_update(dst, dst_layout, src, src_layout, f);
+}
+
+fn strided_update<T: Copy + Send + Sync>(
+    dst: &mut [T],
+    dst_layout: &Layout,
+    src: &[T],
+    src_layout: &Layout,
+    f: impl Fn(T, T) -> T + Sync,
+) {
+    assert_eq!(dst_layout.shape(), src_layout.shape(), "strided write: shape mismatch");
+    assert!(dst_layout.storage_extent() <= dst.len(), "strided write: destination layout out of bounds");
+    assert!(src_layout.storage_extent() <= src.len(), "strided write: source layout out of bounds");
+    assert!(dst_layout.is_non_overlapping(), "strided write: destination layout overlaps itself");
     let plan = RowPlan::<2>::new(
         dst_layout.dims(),
         [dst_layout.strides(), src_layout.strides()],
@@ -138,54 +120,35 @@ pub(crate) fn fill_rows_inplace(
     );
     let [ds, ss] = plan.inner;
     let len = plan.len;
-    let body = |dst: &mut [f32], o: [usize; 2]| {
-        if ds == 1 && ss == 1 {
-            for (d, &s) in dst[o[0]..o[0] + len].iter_mut().zip(&src[o[1]..o[1] + len]) {
+    let base = SendPtr(dst.as_mut_ptr());
+    // Writes `len` elements of one destination row starting at `o[0]`, elements `from..to` of the row.
+    let row = |o: [usize; 2], from: usize, to: usize| {
+        let p = &base;
+        for i in from..to {
+            let s = src[o[1] + i * ss];
+            // SAFETY: the destination layout lies inside `dst` (asserted above) and is injective, so every
+            // (row, i) pair addresses a distinct element; rows and row chunks are handed to exactly one task,
+            // so no two tasks write the same element and no reference to `dst` exists meanwhile.
+            unsafe {
+                let d = p.0.add(o[0] + i * ds);
                 *d = f(*d, s);
-            }
-        } else if ds == 1 && ss == 0 {
-            let s = src[o[1]];
-            for d in &mut dst[o[0]..o[0] + len] {
-                *d = f(*d, s);
-            }
-        } else {
-            for i in 0..len {
-                let j = o[0] + i * ds;
-                dst[j] = f(dst[j], src[o[1] + i * ss]);
             }
         }
     };
-    if plan.rows * len >= PAR_MIN {
-        let ptr = SendPtr(dst.as_mut_ptr());
-        let dlen = dst.len();
-        if plan.rows == 1 {
-            // One long row: split it into chunks.
-            plan.for_rows(0..1, |_, o| {
-                let tasks = len.div_ceil(CHUNK);
-                (0..tasks).into_par_iter().for_each(|t| {
-                    let p = &ptr;
-                    // SAFETY: chunks of one non-broadcast row are disjoint and inside `dst`.
-                    let dst = unsafe { std::slice::from_raw_parts_mut(p.0, dlen) };
-                    let (a, b) = (t * CHUNK, ((t + 1) * CHUNK).min(len));
-                    for i in a..b {
-                        let j = o[0] + i * ds;
-                        dst[j] = f(dst[j], src[o[1] + i * ss]);
-                    }
-                });
-            });
-            return;
-        }
-        let rows_per_task = (CHUNK / len.max(1)).max(1);
-        let tasks = plan.rows.div_ceil(rows_per_task);
-        (0..tasks).into_par_iter().for_each(|t| {
-            let p = &ptr;
-            // SAFETY: rows of a non-broadcast destination are disjoint; every task writes its own rows.
-            let dst = unsafe { std::slice::from_raw_parts_mut(p.0, dlen) };
-            let start = t * rows_per_task;
-            plan.for_rows(start..(start + rows_per_task).min(plan.rows), |_, o| body(dst, o));
+    if plan.rows * len < PAR_MIN {
+        plan.for_rows(0..plan.rows, |_, o| row(o, 0, len));
+    } else if plan.rows == 1 {
+        plan.for_rows(0..1, |_, o| {
+            (0..len.div_ceil(CHUNK))
+                .into_par_iter()
+                .for_each(|t| row(o, t * CHUNK, ((t + 1) * CHUNK).min(len)));
         });
     } else {
-        plan.for_rows(0..plan.rows, |_, o| body(dst, o));
+        let rows_per_task = (CHUNK / len.max(1)).max(1);
+        (0..plan.rows.div_ceil(rows_per_task)).into_par_iter().for_each(|t| {
+            let start = t * rows_per_task;
+            plan.for_rows(start..(start + rows_per_task).min(plan.rows), |_, o| row(o, 0, len));
+        });
     }
 }
 
@@ -321,10 +284,12 @@ pub(crate) fn where3<C: Copy + Send + Sync>(
 
 const LOG2E: f32 = std::f32::consts::LOG2_E;
 
-/// `e^x` to about 1 ulp, written so loops over it vectorise (no libm call, branch-free selects).
+/// `e^x` to about 1 ulp over the whole finite range (including subnormal results), written so loops over it
+/// vectorise: no libm call and only branch-free selects.
 #[inline(always)]
 pub fn fast_exp(x: f32) -> f32 {
-    let xc = x.clamp(-87.0, 88.0);
+    // Beyond these bounds the result is +inf / rounds to 0; clamping keeps the integer exponent in range.
+    let xc = x.clamp(-104.0, 89.0);
     // Round to nearest via the 1.5 * 2^23 trick (exact for |v| < 2^22).
     let magic = 12_582_912.0f32;
     let n = (xc * LOG2E + magic) - magic;
@@ -336,17 +301,15 @@ pub fn fast_exp(x: f32) -> f32 {
     p = p * r + 1.666_666_5e-1;
     p = p * r + 0.5;
     let y = p * r * r + r + 1.0;
-    let scale = f32::from_bits(((n as i32 + 127) as u32) << 23);
-    let v = y * scale;
-    if x > 88.72 {
-        f32::INFINITY
-    } else if x < -87.33 {
-        if x.is_nan() { x } else { 0.0 }
-    } else if x.is_nan() {
-        x
-    } else {
-        v
-    }
+    // 2^n as two normal powers of two (n is in -150..=129), so huge results overflow to inf and tiny ones
+    // underflow gradually instead of wrapping the exponent field.
+    let ni = n as i32;
+    let n1 = ni >> 1;
+    let n2 = ni - n1;
+    let s1 = f32::from_bits(((n1 + 127) as u32) << 23);
+    let s2 = f32::from_bits(((n2 + 127) as u32) << 23);
+    let v = y * s1 * s2;
+    if x.is_nan() { x } else { v }
 }
 
 #[inline(always)]
@@ -496,16 +459,27 @@ mod tests {
     #[test]
     fn fast_exp_accuracy() {
         let mut worst = 0f64;
-        let mut x = -87.0f32;
-        while x < 88.0 {
+        let mut x = -87.3f32;
+        while x < 88.72 {
             let e = fast_exp(x) as f64;
             let t = (x as f64).exp();
             worst = worst.max(((e - t) / t).abs());
             x += 0.0137;
         }
         assert!(worst < 4e-7, "worst relative error {worst}");
-        assert_eq!(fast_exp(100.0), f32::INFINITY);
-        assert_eq!(fast_exp(-100.0), 0.0);
+        // Near the top of the range and in the subnormal range (absolute error there is limited by spacing).
+        for x in [88.0f32, 88.5, 88.7, 88.72] {
+            let (e, t) = (fast_exp(x) as f64, (x as f64).exp());
+            assert!(((e - t) / t).abs() < 4e-7, "{x}: {e} vs {t}");
+        }
+        for x in [-88.0f32, -95.0, -100.0, -103.0] {
+            let (e, t) = (fast_exp(x) as f64, (x as f64).exp());
+            assert!((e - t).abs() <= 2.0 * f32::from_bits(1) as f64 + 1e-6 * t, "{x}: {e} vs {t}");
+        }
+        assert_eq!(fast_exp(88.8), f32::INFINITY);
+        assert_eq!(fast_exp(f32::INFINITY), f32::INFINITY);
+        assert_eq!(fast_exp(-110.0), 0.0);
+        assert_eq!(fast_exp(f32::NEG_INFINITY), 0.0);
         assert!(fast_exp(f32::NAN).is_nan());
         assert_eq!(fast_exp(0.0), 1.0);
     }

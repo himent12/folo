@@ -12,8 +12,11 @@ use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
 
+use std::sync::Arc;
+
 use smallvec::SmallVec;
 
+use crate::storage::StorageCell;
 use crate::tensor::TensorId;
 use crate::{Error, Result, Tensor};
 
@@ -70,6 +73,8 @@ pub(crate) struct Node {
     pub op: &'static str,
     pub inputs: SmallVec<[Tensor; 2]>,
     pub versions: SmallVec<[u64; 2]>,
+    /// Other tensors the backward closure reads (indices, masks, the op's own output), with their versions.
+    pub saved: SmallVec<[(Arc<StorageCell>, u64); 1]>,
     pub backward: BackwardFn,
 }
 
@@ -167,8 +172,9 @@ pub(crate) fn backward(root: &Tensor, seed: Tensor) -> Result<Grads> {
             out.0.insert(t.id(), g);
             continue;
         };
-        for (inp, &v) in node.inputs.iter().zip(&node.versions) {
-            let cur = inp.storage_version();
+        let recorded = node.inputs.iter().map(|t| t.cell()).zip(node.versions.iter().copied());
+        for (cell, v) in recorded.chain(node.saved.iter().map(|(c, v)| (c, *v))) {
+            let cur = cell.version();
             if cur != v {
                 return Err(Error::ModifiedInPlace { op: node.op, recorded: v, current: cur });
             }

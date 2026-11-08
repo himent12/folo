@@ -381,6 +381,21 @@ impl Tensor {
     where
         F: Fn(&Tensor) -> Result<SmallVec<[Option<Tensor>; 2]>> + Send + Sync + 'static,
     {
+        self.track_saved(op, inputs, &[], backward)
+    }
+
+    /// [`Tensor::track`] for a backward closure that also reads `saved` tensors that are not differentiable
+    /// inputs (indices, masks, the op's own output). Their storage versions are checked like the inputs'.
+    pub(crate) fn track_saved<F>(
+        self,
+        op: &'static str,
+        inputs: &[&Tensor],
+        saved: &[&Tensor],
+        backward: F,
+    ) -> Tensor
+    where
+        F: Fn(&Tensor) -> Result<SmallVec<[Option<Tensor>; 2]>> + Send + Sync + 'static,
+    {
         if !autograd::is_grad_enabled() || !inputs.iter().any(|t| t.requires_grad()) {
             return self;
         }
@@ -388,6 +403,7 @@ impl Tensor {
             op,
             inputs: inputs.iter().map(|&t| t.clone()).collect(),
             versions: inputs.iter().map(|t| t.storage_version()).collect(),
+            saved: saved.iter().map(|t| (t.cell().clone(), t.storage_version())).collect(),
             backward: Box::new(backward) as BackwardFn,
         };
         let inner = &self.0;
