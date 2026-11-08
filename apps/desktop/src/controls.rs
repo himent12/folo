@@ -490,21 +490,31 @@ impl FoloApp {
                     "end" => usable.last().copied(),
                     _ => None,
                 };
+                // A navigation key is this control's even when the selection can't move (one usable
+                // option): it mustn't fall through to the page (Playground pans a zoomed image).
+                if matches!(ev.keystroke.key.as_str(), "left" | "up" | "right" | "down" | "home" | "end") {
+                    cx.stop_propagation();
+                }
                 if let Some(i) = next.filter(|&i| i != selected) {
                     keys(this, i, window, cx);
-                    cx.stop_propagation();
                     cx.notify();
                 }
             }))
             .when(ring, |d| d.child(focus_ring(&t, radius::MD)))
             // Keyboard focus shows why the disabled options are off (their tooltips need a pointer).
             .when(ring && off.iter().any(Option::is_some), |d| {
-                let why: Vec<String> = options
-                    .iter()
-                    .zip(&off)
-                    .filter_map(|(label, w)| w.as_ref().map(|w| format!("{label}: {w}")))
-                    .collect();
-                d.child(focus_tip(&t, why.join(" · "), tsize::CONTROL_MD))
+                // Options off for the same reason share one line ("Local GPU, Local CPU: …").
+                let mut why: Vec<(Vec<&str>, &str)> = Vec::new();
+                for (label, w) in options.iter().zip(&off) {
+                    let Some(w) = w.as_ref().map(|w| -> &str { w.as_ref() }) else { continue };
+                    match why.iter_mut().find(|(_, r)| *r == w) {
+                        Some((labels, _)) => labels.push(label),
+                        None => why.push((vec![label], w)),
+                    }
+                }
+                let why: Vec<String> =
+                    why.into_iter().map(|(l, w)| format!("{}: {w}", l.join(", "))).collect();
+                d.child(focus_tip(&t, why.join("\n"), tsize::CONTROL_MD))
             })
             .children(options.iter().enumerate().map(|(i, label)| {
                 let on = i == selected;
@@ -1063,7 +1073,9 @@ pub fn btn_colors(t: &Theme, kind: Btn) -> (Hsla, Hsla, Option<Hsla>, Hsla) {
 /// A tooltip shown while a control has keyboard focus, below it and kept inside the window.
 pub fn focus_tip(t: &Theme, text_: impl Into<SharedString>, below: f32) -> Div {
     let text_: SharedString = text_.into();
-    div().absolute().top(px(below + 6.)).left_0().child(
+    // The box the tip is laid out in: it sizes to its text up to this width, then wraps (a narrow
+    // control, like a rail icon, would otherwise wrap it word by word).
+    div().absolute().top(px(below + 6.)).left_0().w(px(320.)).child(
         gpui::deferred(
             gpui::anchored().snap_to_window_with_margin(px(8.)).child(
                 div()
@@ -1074,7 +1086,9 @@ pub fn focus_tip(t: &Theme, text_: impl Into<SharedString>, below: f32) -> Div {
                     .border_1()
                     .border_color(t.line_default)
                     .shadow(t.shadow_lg())
-                    .child(text(ty::XS, t.text_secondary).whitespace_nowrap().child(text_)),
+                    // Short tips stay on one line; long ones wrap at 320 px, not across the window.
+                    .max_w(px(320.))
+                    .child(text(ty::XS, t.text_secondary).whitespace_normal().child(text_)),
             ),
         )
         .with_priority(3),

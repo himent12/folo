@@ -1744,10 +1744,12 @@ impl FoloApp {
     pub fn stop_run(&mut self, id: String, cx: &mut Context<Self>) {
         self.confirm_stop = None;
         let rid = id.clone();
+        // Shown as stopping right away; the status it had comes back if the server refuses.
+        let mut prev = None;
         if let Some(runs) = self.store.runs.ready_mut()
             && let Some(r) = runs.iter_mut().find(|r| r.id == id)
         {
-            r.status = RunStatus::Stopping;
+            prev = Some(std::mem::replace(&mut r.status, RunStatus::Stopping));
         }
         self.fetch(
             cx,
@@ -1774,7 +1776,17 @@ impl FoloApp {
                     };
                     this.toast(Tone::Neutral, title, Some(body.into()), cx);
                 }
-                Err(e) => this.toast(Tone::Danger, "Could not stop the run", Some(e.message.into()), cx),
+                Err(e) => {
+                    // Unless events moved it on meanwhile, so Stop is offered again.
+                    if let Some(prev) = prev
+                        && let Some(runs) = this.store.runs.ready_mut()
+                        && let Some(r) =
+                            runs.iter_mut().find(|r| r.id == id && r.status == RunStatus::Stopping)
+                    {
+                        r.status = prev;
+                    }
+                    this.toast(Tone::Danger, "Could not stop the run", Some(e.message.into()), cx)
+                }
             },
         );
         cx.notify();
