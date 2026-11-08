@@ -23,8 +23,20 @@
   let conf = $state(0.25);
   let open = $state<Sample | null>(null);
   let dialogOpen = $state(false);
-  // The first eight samples show by default; the rest are one click away.
-  const FIRST = 8;
+  // About eight samples show by default, always as full rows (5 columns: 10, 3 columns: 9); the rest are one click
+  // away.
+  let cols = $state(4);
+  const FIRST = $derived(cols * Math.max(1, Math.round(8 / cols)));
+  let gridEl = $state<HTMLElement>();
+  $effect(() => {
+    const el = gridEl;
+    if (!el) return;
+    const measure = () => (cols = Math.max(1, getComputedStyle(el).gridTemplateColumns.split(' ').filter(Boolean).length));
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  });
   let showAll = $state(false);
   // Phones: one row each for the header, the key and the confidence slider, so the images start on the first screen.
   const phone = new MediaQuery('max-width: 767px', false);
@@ -79,9 +91,9 @@
   {:else if samples.error && !samples.data}
     <ErrorState error={samples.error} retry={() => samples.refresh()} compact />
   {:else if !samples.data}
-    <div class="grid">{#each Array(8) as _, i (i)}<Skeleton h="auto" class="cell-sk" r="var(--radius-md)" />{/each}</div>
+    <div class="grid" bind:this={gridEl}>{#each Array(FIRST) as _, i (i)}<Skeleton h="auto" class="cell-sk" r="var(--radius-md)" />{/each}</div>
   {:else}
-    <div class="grid">
+    <div class="grid" bind:this={gridEl}>
       {#each showAll ? samples.data.samples : samples.data.samples.slice(0, FIRST) as s (s.image_id)}
         <button
           class="cell"

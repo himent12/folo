@@ -8,7 +8,7 @@
   import { hub } from '$lib/api/index.svelte';
   import { Resource } from '$lib/api/resource.svelte';
   import { runProgress, stepsPerEpoch } from '$lib/api/progress';
-  import { duration, lr, metric, num } from '$lib/format';
+  import { eta, lr, metric, num } from '$lib/format';
   import { deviceLine } from './device';
   import { href } from '$lib/router.svelte';
   import Button from '$lib/ui/Button.svelte';
@@ -93,7 +93,7 @@
         <p class="eta num">
           {#if run}
             <span>{(progress * 100).toFixed(1)}%</span>
-            <span>{run.eta_s !== null ? `${duration(run.eta_s)} left` : '—'}</span>
+            <span>{run.eta_s !== null ? `${eta(run.eta_s)} left` : '—'}</span>
           {:else}
             <span>&#8203;<Skeleton inline w="40px" h="10px" /></span><span>&#8203;<Skeleton inline w="64px" h="10px" /></span>
           {/if}
