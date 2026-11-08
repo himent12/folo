@@ -19,16 +19,18 @@
   import ErrorState from '$lib/ui/ErrorState.svelte';
   import Input from '$lib/ui/Input.svelte';
   import Panel from '$lib/ui/Panel.svelte';
+  import Select from '$lib/ui/Select.svelte';
   import Skeleton from '$lib/ui/Skeleton.svelte';
   import MetricBar from './models/MetricBar.svelte';
 
   setCrumbs({ label: 'Models' });
 
   const models = new Resource((s) => hub.api.models(s));
-  // Only for source-run names; the list still renders if this fails.
+  // Only for source-run names and evaluation datasets; the list still renders if these fail.
   const runs = new Resource((s) => hub.api.runs(s));
+  const datasets = new Resource((s) => hub.api.datasets(s));
 
-  type Key = 'name' | 'arch' | 'classes' | 'imgsz' | 'params' | 'flops' | 'bytes' | 'map50_95' | 'map50' | 'source' | 'created';
+  type Key = 'name' | 'dataset' | 'arch' | 'classes' | 'imgsz' | 'params' | 'flops' | 'bytes' | 'map50_95' | 'map50' | 'source' | 'created';
   interface Col {
     key: Key;
     label: string;
@@ -40,10 +42,24 @@
   const runById = $derived(new Map<string, Run>((runs.data ?? []).map((r) => [r.id, r])));
   const sourceName = (m: Model) => (m.run_id ? (runById.get(m.run_id)?.name ?? m.run_id) : '');
 
+  // mAP is only comparable on the same validation data: a model is evaluated on its run's dataset. Imported weights
+  // carry no dataset, so they are never ranked against anything.
+  const IMPORTED = '~imported';
+  const UNKNOWN = '~unknown';
+  const dsName = $derived(new Map((datasets.data ?? []).map((d) => [d.id, d.name])));
+  const evalSet = (m: Model): { key: string; label: string } => {
+    if (!m.run_id) return { key: IMPORTED, label: 'imported' };
+    const dsId = runById.get(m.run_id)?.config.dataset_id;
+    if (!dsId) return { key: UNKNOWN, label: '—' };
+    return { key: dsId, label: dsName.get(dsId) ?? dsId };
+  };
+
   const cols: Col[] = [
     { key: 'name', label: 'Model', get: (m) => m.name.toLowerCase() },
+    // Imported weights sort after the named datasets.
+    { key: 'dataset', label: 'Evaluation dataset', get: (m) => (m.run_id ? '0' : '1') + evalSet(m).label.toLowerCase() },
     { key: 'arch', label: 'Arch', get: (m) => m.arch },
-    { key: 'classes', label: 'Classes', num: true, get: (m) => m.classes.length },
+    { key: 'classes', label: 'Classes', num: true, get: (m) => m.classes.length, hide: 'md' },
     { key: 'imgsz', label: 'Input', num: true, get: (m) => m.imgsz, hide: 'md' },
     { key: 'params', label: 'Params', num: true, get: (m) => m.params },
     { key: 'flops', label: 'GFLOPs', num: true, get: (m) => m.flops_g, hide: 'md' },
@@ -54,9 +70,11 @@
     { key: 'created', label: 'Created', num: true, get: (m) => Date.parse(m.created) },
   ];
 
-  let sortKey = $state<Key>('map50_95');
-  let sortDir = $state<'asc' | 'desc'>('desc');
+  // Default: grouped by evaluation dataset, best first within each.
+  let sortKey = $state<Key>('dataset');
+  let sortDir = $state<'asc' | 'desc'>('asc');
   let query = $state('');
+  let dsFilter = $state('all');
 
   function sortBy(c: Col) {
     if (sortKey === c.key) sortDir = sortDir === 'asc' ? 'desc' : 'asc';
@@ -69,21 +87,56 @@
   const filtered = $derived.by(() => {
     const q = query.trim().toLowerCase();
     const list = (models.data ?? []).filter(
-      (m) => !q || m.name.toLowerCase().includes(q) || m.arch.includes(q) || m.id.includes(q) || sourceName(m).toLowerCase().includes(q),
+      (m) =>
+        (dsFilter === 'all' || evalSet(m).key === dsFilter) &&
+        (!q ||
+          m.name.toLowerCase().includes(q) ||
+          m.arch.includes(q) ||
+          m.id.includes(q) ||
+          sourceName(m).toLowerCase().includes(q) ||
+          evalSet(m).label.toLowerCase().includes(q)),
     );
     const col = cols.find((c) => c.key === sortKey) ?? cols[0]!;
     const sign = sortDir === 'asc' ? 1 : -1;
+    const map = (m: Model) => m.metrics?.map50_95 ?? -1;
     return list.sort((a, b) => {
       const x = col.get(a);
       const y = col.get(b);
       const d = typeof x === 'number' && typeof y === 'number' ? x - y : String(x).localeCompare(String(y));
-      return d * sign || a.name.localeCompare(b.name);
+      return d * sign || (sortKey === 'dataset' ? map(b) - map(a) : 0) || a.name.localeCompare(b.name);
     });
   });
 
-  const best = $derived(
-    (models.data ?? []).reduce<Model | null>((b, m) => ((m.metrics?.map50_95 ?? -1) > (b?.metrics?.map50_95 ?? -1) ? m : b), null),
-  );
+  /** The best model (mAP50-95) of each evaluation dataset that has at least two to compare. */
+  const bestByDs = $derived.by(() => {
+    const groups = new Map<string, Model[]>();
+    for (const m of models.data ?? []) {
+      const k = evalSet(m).key;
+      if (k === IMPORTED || k === UNKNOWN || !m.metrics) continue;
+      groups.set(k, [...(groups.get(k) ?? []), m]);
+    }
+    const out = new Map<string, Model>();
+    for (const [k, list] of groups)
+      if (list.length > 1) out.set(k, list.reduce((b, m) => ((m.metrics?.map50_95 ?? -1) > (b.metrics?.map50_95 ?? -1) ? m : b)));
+    return out;
+  });
+  const isBest = (m: Model) => bestByDs.get(evalSet(m).key)?.id === m.id;
+  const best = $derived(dsFilter === 'all' ? null : (bestByDs.get(dsFilter) ?? null));
+
+  const dsOptions = $derived.by(() => {
+    const keys = new Map<string, string>();
+    for (const m of models.data ?? []) {
+      const e = evalSet(m);
+      if (e.key !== UNKNOWN) keys.set(e.key, e.label);
+    }
+    const named = [...keys].filter(([k]) => k !== IMPORTED).sort((a, b) => a[1].localeCompare(b[1]));
+    return [
+      { value: 'all', label: 'All datasets' },
+      ...named.map(([value, label]) => ({ value, label })),
+      ...(keys.has(IMPORTED) ? [{ value: IMPORTED, label: 'Imported' }] : []),
+    ];
+  });
+  const dsCount = $derived(dsOptions.filter((o) => o.value !== 'all' && o.value !== IMPORTED).length);
   const totalBytes = $derived((models.data ?? []).reduce((a, m) => a + m.bytes, 0));
   const ariaSort = (k: Key) => (sortKey === k ? (sortDir === 'asc' ? 'ascending' : 'descending') : undefined);
 </script>
@@ -96,7 +149,10 @@
       <span class="num">{bytes(totalBytes, prefs.units)}</span>
       {#if best?.metrics}
         <span class="dot" aria-hidden="true"></span>
-        <span>best <a class="sub-link" href={href(`/models/${best.id}`)}>{best.name}</a> <span class="num strong">{metric(best.metrics.map50_95)}</span></span>
+        <span>best on {evalSet(best).label} <a class="sub-link" href={href(`/models/${best.id}`)}>{best.name}</a> <span class="num strong">{metric(best.metrics.map50_95)}</span></span>
+      {:else if dsCount > 1}
+        <span class="dot sub-extra" aria-hidden="true"></span>
+        <span class="sub-extra"><span class="num">{dsCount}</span> evaluation datasets, ranked separately</span>
       {/if}
     {:else}
       <span>Trained weights and imported <span class="mono">.folo</span> files</span>
@@ -104,6 +160,9 @@
   {/snippet}
   {#snippet actions()}
     {#if models.data?.length}
+      {#if dsOptions.length > 2}
+        <div class="ds-filter"><Select label="Evaluation dataset" value={dsFilter} options={dsOptions} onchange={(v) => (dsFilter = v)} /></div>
+      {/if}
       <div class="search">
         <Input bind:value={query} icon={Search} placeholder="Filter models" aria-label="Filter models" type="search" />
       </div>
@@ -158,13 +217,22 @@
                     <a class="name" href={href(`/models/${m.id}`)} onclick={(e) => e.stopPropagation()}>{m.name}</a>
                     <span class="id mono">{m.id}</span>
                   </td>
+                  <td>
+                    {#if evalSet(m).key === IMPORTED}
+                      <span class="faint">imported</span>
+                    {:else if evalSet(m).key === UNKNOWN}
+                      <span class="faint">—</span>
+                    {:else}
+                      <a class="ds" href={href(`/datasets/${evalSet(m).key}`)} onclick={(e) => e.stopPropagation()}>{evalSet(m).label}</a>
+                    {/if}
+                  </td>
                   <td><Badge tone="outline" mono>{m.arch}</Badge></td>
-                  <td class="r" title={m.classes.slice(0, 12).join(', ') + (m.classes.length > 12 ? ', …' : '')}>{m.classes.length}</td>
+                  <td class="r hide-md" title={m.classes.slice(0, 12).join(', ') + (m.classes.length > 12 ? ', …' : '')}>{m.classes.length}</td>
                   <td class="r hide-md">{m.imgsz}<span class="unit">px</span></td>
                   <td class="r">{compact(m.params)}</td>
                   <td class="r hide-md">{num(m.flops_g, 1)}</td>
                   <td class="r">{bytes(m.bytes, prefs.units)}</td>
-                  <td class="r"><MetricBar value={m.metrics?.map50_95} best={m.id === best?.id} /></td>
+                  <td class="r"><MetricBar value={m.metrics?.map50_95} best={isBest(m)} /></td>
                   <td class="r hide-md"><MetricBar value={m.metrics?.map50} tone="quiet" /></td>
                   <td class="hide-md">
                     {#if m.run_id}
@@ -201,12 +269,14 @@
                 <span class="c-val num quiet">{metric(m.metrics?.map50)}</span>
                 <span class="c-cap">mAP50</span>
               </span>
-              <span class="c-bar"><MetricBar value={m.metrics?.map50_95} best={m.id === best?.id} bare /></span>
+              <span class="c-bar"><MetricBar value={m.metrics?.map50_95} best={isBest(m)} bare /></span>
             </span>
             <span class="c-meta num">
               {m.classes.length} classes · {m.imgsz}px · {compact(m.params)} params · {bytes(m.bytes, prefs.units)}
             </span>
-            <span class="c-meta">{m.run_id ? `from ${sourceName(m)}` : 'imported'} · {ago(m.created)}</span>
+            <span class="c-meta">
+              {#if m.run_id}on <b>{evalSet(m).label}</b>{#if isBest(m)}{' · '}<span class="c-best">best</span>{/if}{' · '}from {sourceName(m)}{:else}imported{/if} · {ago(m.created)}
+            </span>
           </a>
         </li>
       {:else}
@@ -237,6 +307,18 @@
   }
   .search {
     width: 220px;
+  }
+  .ds-filter {
+    width: 200px;
+  }
+  .ds {
+    color: var(--text-secondary);
+  }
+  .ds:hover {
+    color: var(--text-primary);
+    text-decoration: underline;
+    text-underline-offset: 3px;
+    text-decoration-color: var(--line-strong);
   }
   .sk {
     display: grid;
@@ -321,8 +403,12 @@
     .desk {
       display: none;
     }
-    .search {
+    .search,
+    .ds-filter {
       width: calc(100vw - 2 * var(--space-4));
+    }
+    .sub-extra {
+      display: none;
     }
     .pg {
       display: none;
@@ -382,6 +468,13 @@
     .c-meta {
       font-size: var(--type-xs-size);
       color: var(--text-tertiary);
+    }
+    .c-meta b {
+      color: var(--text-secondary);
+      font-weight: var(--weight-medium);
+    }
+    .c-best {
+      color: var(--accent-text);
     }
     .none {
       padding: var(--space-6);

@@ -97,7 +97,8 @@
     seg = s.kind;
     pred = null;
     error = null;
-    active = null;
+    hover = null;
+    picked = null;
     hidden = new Set();
   }
 
@@ -215,7 +216,8 @@
       if (pred && pred.model_id !== id) {
         pred = null;
         hidden = new Set();
-        active = null;
+        hover = null;
+        picked = null;
       }
     });
     hub.api.predict(input, { model_id: id, ...FETCH }, ctrl.signal).then(
@@ -242,7 +244,12 @@
   let scores = $state(true);
   let truth = $state(false);
   let hidden = $state<Set<number>>(new Set());
-  let active = $state<number | null>(null);
+  // Inspection: hovering a box or row is transient; click, tap or keyboard focus picks one until Esc or a click
+  // elsewhere. Tracked by object, since filtering re-indexes the kept boxes.
+  type Det = Prediction['boxes'][number];
+  let hover = $state.raw<Det | null>(null);
+  let picked = $state.raw<Det | null>(null);
+  let tbody = $state<HTMLTableSectionElement>();
   let tab = $state<'detections' | 'json'>('detections');
 
   const result = $derived.by(() => {
@@ -261,6 +268,46 @@
     return [...m.entries()].sort((a, b) => b[1] - a[1] || a[0] - b[0]);
   });
   const maxCount = $derived(Math.max(1, ...counts.map((c) => c[1])));
+
+  const at = (b: Det | null) => {
+    const i = b && !hidden.has(b.class) ? kept.indexOf(b) : -1;
+    return i < 0 ? null : i;
+  };
+  const selectedIdx = $derived(at(picked));
+  const activeIdx = $derived(at(hover) ?? selectedIdx);
+  /** The row that takes Tab focus (roving tabindex): the selected one, else the first. */
+  const tabRow = $derived(selectedIdx ?? rows[0]?.i ?? null);
+
+  const rowEl = (i: number) => tbody?.querySelector<HTMLTableRowElement>(`tr[data-det="${i}"]`) ?? null;
+
+  /** A box picked on the image: bring its row into view inside the list without moving the page. */
+  function pickFromImage(i: number) {
+    const b = kept[i];
+    if (!b) return;
+    picked = picked === b ? null : b;
+    const row = picked && rowEl(i);
+    const box = row?.closest<HTMLElement>('.scroll');
+    if (!row || !box) return;
+    const head = box.querySelector('thead')?.offsetHeight ?? 0;
+    if (row.offsetTop - head < box.scrollTop) box.scrollTop = row.offsetTop - head;
+    else if (row.offsetTop + row.offsetHeight > box.scrollTop + box.clientHeight) box.scrollTop = row.offsetTop + row.offsetHeight - box.clientHeight;
+  }
+
+  function onrowkey(e: KeyboardEvent, k: number) {
+    const to = e.key === 'ArrowDown' ? k + 1 : e.key === 'ArrowUp' ? k - 1 : e.key === 'Home' ? 0 : e.key === 'End' ? rows.length - 1 : null;
+    if (to === null) return;
+    e.preventDefault();
+    const r = rows[Math.max(0, Math.min(rows.length - 1, to))];
+    if (r) rowEl(r.i)?.focus();
+  }
+
+  function onwindowkey(e: KeyboardEvent) {
+    if (e.key === 'Escape' && picked && !pickerOpen) picked = null;
+  }
+
+  function onwindowdown(e: PointerEvent) {
+    if (picked && !(e.target as Element | null)?.closest?.('[data-det], [data-box]')) picked = null;
+  }
 
   const dims = $derived.by(() => {
     if (pred) return pred.image;
@@ -301,7 +348,7 @@
   const px = (v: number) => Math.round(v);
 </script>
 
-<svelte:window {onpaste} />
+<svelte:window {onpaste} onkeydown={onwindowkey} onpointerdown={onwindowdown} />
 
 <input
   bind:this={fileInput}
@@ -382,6 +429,10 @@
                 <Button size="sm" variant="ghost" class="clear" icon={X} aria-label="Clear image" onclick={clear} />
               {/if}
             </div>
+            {#if source}
+              <!-- Narrow screens: the threshold tuned most sits right above the image, so the result stays in view. -->
+              <div class="qconf"><Slider inline label="Confidence" bind:value={conf} min={0.01} max={0.95} step={0.01} /></div>
+            {/if}
             <div class="stage" class:empty={!source} style:--ar={dims ? `${dims.width} / ${dims.height}` : undefined}>
               {#if !source}
                 <DropZone {dragging} {samples} onbrowse={() => fileInput.click()} onpick={() => (pickerOpen = true)} onsample={(ds, img) => setSource({ kind: 'dataset', ds, img })} />
@@ -396,8 +447,10 @@
                   {labels}
                   {scores}
                   {only}
-                  {active}
-                  onhover={(i) => (active = i)}
+                  active={activeIdx}
+                  selected={selectedIdx}
+                  onhover={(i) => (hover = i === null ? null : (kept[i] ?? null))}
+                  onselect={pickFromImage}
                   alt={sourceName}
                 />
                 {#if predicting}
@@ -412,12 +465,12 @@
             {#if source}
               <div class="vfoot mono">
                 {#if result}
-                  <span><b>{kept.length}</b> detections</span>
-                  <span class="sep">/</span>
-                  <span>{num(pred?.boxes.length)} candidates</span>
-                  <span class="sep">·</span>
-                  <span class="wide">conf ≥ {conf.toFixed(2)}</span>
-                  <span class="wide">IoU {iou.toFixed(2)}</span>
+                  <!-- Each item after the first draws its own separator, so hiding one never leaves a stray dot. -->
+                  <span class="fi"><b>{rows.length}</b> shown <span class="wide">of {num(pred?.boxes.length)} candidates</span></span>
+                  <span class="fi">conf ≥ {conf.toFixed(2)}</span>
+                  <span class="fi wide">IoU {iou.toFixed(2)}</span>
+                  {#if maxDet < DEFAULTS.maxDet}<span class="fi">max {Math.round(maxDet)}</span>{/if}
+                  {#if hidden.size}<span class="fi">{hidden.size} {hidden.size === 1 ? 'class' : 'classes'} hidden</span>{/if}
                   <span class="grow"></span>
                   <span class="faint">filtered in {result.ms < 0.01 ? '<0.01' : result.ms.toFixed(2)} ms</span>
                 {:else}
@@ -463,9 +516,21 @@
                         <th scope="col" class="r">Size</th>
                       </tr>
                     </thead>
-                    <tbody>
-                      {#each rows as { b, i } (i)}
-                        <tr class:hot={active === i} onpointerenter={() => (active = i)} onpointerleave={() => (active = null)}>
+                    <tbody bind:this={tbody}>
+                      {#each rows as { b, i }, k (i)}
+                        <tr
+                          data-det={i}
+                          tabindex={i === tabRow ? 0 : -1}
+                          class:hot={activeIdx === i}
+                          class:sel={selectedIdx === i}
+                          aria-current={selectedIdx === i ? 'true' : undefined}
+                          aria-label="{b.name}, score {b.score.toFixed(2)}, {px(b.x2 - b.x1)} by {px(b.y2 - b.y1)} pixels"
+                          onpointerenter={() => (hover = b)}
+                          onpointerleave={() => (hover = null)}
+                          onfocus={() => (picked = b)}
+                          onclick={() => (picked = b)}
+                          onkeydown={(e) => onrowkey(e, k)}
+                        >
                           <td class="r idx faint">{i + 1}</td>
                           <td>
                             <span class="cls">
@@ -499,7 +564,7 @@
               <Button size="sm" variant="ghost" icon={RotateCcw} disabled={isDefault} onclick={resetThresholds}>Reset</Button>
             {/snippet}
             <div class="sliders">
-              <Slider label="Confidence" bind:value={conf} min={0.01} max={0.95} step={0.01} hint="Hide boxes scored below this." />
+              <div class="conf-full" class:moved={!!source}><Slider label="Confidence" bind:value={conf} min={0.01} max={0.95} step={0.01} hint="Hide boxes scored below this." /></div>
               <Slider label="IoU (NMS)" bind:value={iou} min={0.05} max={0.95} step={0.05} hint="Merge same-class boxes overlapping more than this." />
               <Slider label="Max detections" bind:value={maxDet} min={1} max={300} step={1} format={(v) => String(Math.round(v))} />
             </div>
@@ -730,8 +795,15 @@
     color: var(--text-primary);
     font-weight: var(--weight-medium);
   }
-  .sep {
+  .fi + .fi::before {
+    content: '·';
+    margin-right: var(--space-2);
     color: var(--text-tertiary);
+  }
+  .qconf {
+    display: none;
+    padding: 0 var(--space-3);
+    border-bottom: 1px solid var(--line-subtle);
   }
   .grow {
     flex: 1;
@@ -771,9 +843,20 @@
   tbody tr {
     transition: background-color var(--dur-fast) var(--ease-standard);
   }
+  tbody tr {
+    cursor: pointer;
+  }
   tbody tr:hover,
   tbody tr.hot {
     background: var(--bg-hover);
+  }
+  tbody tr.sel {
+    background: var(--bg-selected);
+    box-shadow: inset 2px 0 0 var(--accent-line);
+  }
+  tbody tr:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: -2px;
   }
   .cls {
     display: flex;
@@ -862,6 +945,14 @@
     display: grid;
     gap: var(--space-3);
   }
+  @media (pointer: coarse) {
+    .table.dense td {
+      height: 44px;
+    }
+    .counts button {
+      height: 44px;
+    }
+  }
   @media (max-width: 1199px) {
     .src-name,
     .src-dims {
@@ -913,6 +1004,12 @@
       padding: 0;
     }
     .vfoot .wide {
+      display: none;
+    }
+    .qconf {
+      display: block;
+    }
+    .conf-full.moved {
       display: none;
     }
     .toggles {

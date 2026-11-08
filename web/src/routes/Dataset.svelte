@@ -145,6 +145,29 @@
     return opts;
   });
 
+  /** Fades a horizontally scrolling rail's edges (24 px) on the sides that have more to scroll to. */
+  function edgeFade(el: HTMLElement) {
+    const update = () => {
+      const max = el.scrollWidth - el.clientWidth;
+      el.style.setProperty('--fade-l', el.scrollLeft > 1 ? '24px' : '0px');
+      el.style.setProperty('--fade-r', el.scrollLeft < max - 1 ? '24px' : '0px');
+    };
+    // Start with the active chip in view (a linked ?class= can point past the fold).
+    const on = el.querySelector<HTMLElement>('[aria-pressed="true"]');
+    const left = on ? on.getBoundingClientRect().left - el.getBoundingClientRect().left : 0;
+    if (on && left + on.offsetWidth > el.clientWidth) el.scrollLeft += left - el.clientWidth / 3;
+    update();
+    el.addEventListener('scroll', update, { passive: true });
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return {
+      destroy() {
+        el.removeEventListener('scroll', update);
+        ro.disconnect();
+      },
+    };
+  }
+
   function openImage(_i: number, imageId: string) {
     setQuery({ image: imageId });
   }
@@ -256,7 +279,7 @@
               onchange={(v) => writePref('folo.datasets.density', v)}
             />
           </div>
-          <div class="chips" role="group" aria-label="Filter by class">
+          <div class="chips" role="group" aria-label="Filter by class" use:edgeFade>
             <button type="button" class="chip" aria-pressed={cls === undefined} onclick={() => setQuery({ class: null, image: null })}>All classes</button>
             {#each d.classes as c, i (i)}
               <button
@@ -429,6 +452,15 @@
     border-radius: var(--radius-full);
     padding: 0 10px;
   }
+  @media (pointer: coarse) {
+    .toggle,
+    .chip {
+      height: 36px;
+    }
+    .chip {
+      padding: 0 var(--space-3);
+    }
+  }
   .sw {
     width: 8px;
     height: 8px;
@@ -479,6 +511,14 @@
       scrollbar-width: none;
       margin-inline: calc(var(--space-4) * -1);
       padding-inline: var(--space-4);
+      /* Clipped chips read as scrollable: the edges with more to scroll to fade out. */
+      mask-image: linear-gradient(
+        to right,
+        transparent,
+        #000 var(--fade-l, 0px),
+        #000 calc(100% - var(--fade-r, 0px)),
+        transparent
+      );
     }
     .hide-sm {
       display: none;
