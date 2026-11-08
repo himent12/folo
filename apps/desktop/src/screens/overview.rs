@@ -210,10 +210,8 @@ impl FoloApp {
                 map.on_hover = Some(on_hover);
                 map.x_name = "epoch";
                 map.readout = false;
-                map.future = Some((
-                    r.epoch as f32,
-                    r.eta_s.map_or("remaining".into(), |s| format!("ETA {}", time::duration(s)).into()),
-                ));
+                // The span shows what's left; "Time left" beside it already gives the ETA.
+                map.future = Some((r.epoch as f32, SharedString::default()));
                 if let Some(b) = &best {
                     map.dots.push((b.epoch as f32, b.map50_95, t.accent_fill()));
                 }
@@ -335,7 +333,7 @@ impl FoloApp {
                     .child(div().h_full().w(gpui::relative(r.progress().clamp(0., 1.))).bg(t.accent_fill())),
             )
             .child(
-                div().flex().gap(px(24.)).p(px(16.)).child(kpis).child(
+                div().flex().items_center().gap(px(24.)).p(px(16.)).child(kpis).child(
                     div()
                         .flex_1()
                         .min_w_0()
@@ -697,7 +695,6 @@ impl FoloApp {
 
     fn top_models(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
-        let wide = window.viewport_size().width >= px(1500.);
         let all = self.view_all("ov-models-all", Route::Models, window, cx);
         let header = panel_header(&t, "Best models")
             .child(div().flex().items_center().gap(px(8.)).child(caption(&t, "by mAP50-95")).child(all));
@@ -723,7 +720,7 @@ impl FoloApp {
                     .flex()
                     .flex_col()
                     .py(px(4.))
-                    .children(models.into_iter().take(4).map(|m| {
+                    .children(models.into_iter().take(5).map(|m| {
                         let id = m.id.clone();
                         let key = format!("ov-model-{}", m.id);
                         let map = m.metrics.as_ref().map_or(0., |m| m.map50_95);
@@ -746,14 +743,15 @@ impl FoloApp {
                                     .truncate()
                                     .child(m.name.clone()),
                             )
-                            .child(div().flex_1().min_w_0().when(wide, |d| {
-                                // Architecture and size only: the parameter count didn't fit the column.
-                                d.child(text(ty::XS, t.text_tertiary).w(px(88.)).truncate().child(format!(
+                            // Architecture and size (400 px column at every width; the parameter
+                            // count didn't fit).
+                            .child(div().flex_1().min_w_0().child(
+                                text(ty::XS, t.text_tertiary).w(px(88.)).truncate().child(format!(
                                     "{} · {} px",
                                     m.arch.as_str(),
                                     m.imgsz
-                                )))
-                            }))
+                                )),
+                            ))
                             .child(bar_value(&t, map, f3(map), t.text_tertiary));
                         self.bind(
                             row,

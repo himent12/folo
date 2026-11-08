@@ -93,20 +93,26 @@ impl FoloApp {
         let visible: Vec<Run> = runs.into_iter().filter(|r| matches_filter(r, self.run_filter)).collect();
         let ids: Vec<String> = visible.iter().map(|r| r.id.clone()).collect();
         let cols = |d: gpui::Div| d.flex().items_center().gap(px(16.)).px(px(16.));
-        // Single-line rows; secondary facts get their own columns, and wide windows show more of them.
-        let wide = window.viewport_size().width >= px(1360.);
+        // Single-line rows; secondary facts get their own columns as the window allows. Budget
+        // (content width): the core columns need ~780 px; Dataset +136 from 1240, Size · batch
+        // +120 from 1360, Created +96 from 1440.
+        let vw = window.viewport_size().width;
+        let show_ds = vw >= px(1240.);
+        let wide = vw >= px(1360.);
+        let show_created = vw >= px(1440.);
         let head = cols(div())
             .h(px(36.))
             .border_b_1()
             .border_color(t.line_subtle)
             .child(th(&t, "Run").flex_1().min_w(px(180.)))
-            .child(th(&t, "Model").w(px(64.)))
-            .when(wide, |d| d.child(th(&t, "Dataset").w(px(120.))).child(th(&t, "Size · batch").w(px(104.))))
-            .child(th(&t, "Status").w(px(96.)))
-            .child(th(&t, "Progress").w(px(150.)))
-            .child(th(&t, "Best mAP50-95").w(px(96.)).text_right())
-            .child(th(&t, "Duration").w(px(80.)).text_right())
-            .child(th(&t, "Created").w(px(80.)).text_right());
+            .child(th(&t, "Model").w(px(64.)).flex_none())
+            .when(show_ds, |d| d.child(th(&t, "Dataset").w(px(120.)).flex_none()))
+            .when(wide, |d| d.child(th(&t, "Size · batch").w(px(104.)).flex_none()))
+            .child(th(&t, "Status").w(px(96.)).flex_none())
+            .child(th(&t, "Progress").w(px(150.)).flex_none())
+            .child(th(&t, "Best mAP50-95").w(px(96.)).flex_none().text_right())
+            .child(th(&t, "Duration").w(px(80.)).flex_none().text_right())
+            .when(show_created, |d| d.child(th(&t, "Created").w(px(80.)).flex_none().text_right()));
         let rows: Vec<AnyElement> = visible
             .iter()
             .enumerate()
@@ -185,7 +191,7 @@ impl FoloApp {
                     .child(
                         text(ty::SM, t.text_secondary).w(px(64.)).flex_none().child(r.config.arch.as_str()),
                     )
-                    .when(wide, |d| {
+                    .when(show_ds, |d| {
                         d.child(
                             text(ty::SM, t.text_secondary)
                                 .w(px(120.))
@@ -193,7 +199,9 @@ impl FoloApp {
                                 .truncate()
                                 .child(ds.clone()),
                         )
-                        .child(
+                    })
+                    .when(wide, |d| {
+                        d.child(
                             text(ty::SM, t.text_tertiary)
                                 .w(px(104.))
                                 .flex_none()
@@ -212,14 +220,16 @@ impl FoloApp {
                     .child(
                         text(ty::SM, t.text_secondary).tnum().w(px(80.)).flex_none().text_right().child(dur),
                     )
-                    .child(
-                        text(ty::SM, t.text_tertiary)
-                            .w(px(80.))
-                            .flex_none()
-                            .whitespace_nowrap()
-                            .text_right()
-                            .child(created),
-                    );
+                    .when(show_created, |d| {
+                        d.child(
+                            text(ty::SM, t.text_tertiary)
+                                .w(px(80.))
+                                .flex_none()
+                                .whitespace_nowrap()
+                                .text_right()
+                                .child(created),
+                        )
+                    });
                 self.bind(
                     row,
                     &key,

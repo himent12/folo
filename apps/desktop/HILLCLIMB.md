@@ -541,3 +541,38 @@ Round 15 changes:
   - The Export trigger only toggles; Enter commits the highlighted option.
   - Pins reset between models and are validated.
   - The Models order is cached per data revision and column.
+
+## Round 15
+
+| Line | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | avg |
+|------|---|---|---|---|---|---|---|---|---|----|----|----|-----|
+| Opus 5.5 | 8 | 8 | 8 | 8 | 9 | 8 | 9 | 8 | 9 | 8 | 8 | 8 | 8.3 |
+| GPT-6.1 Sol | 8 | 9 | 9 | 9 | 8 | 8 | 8 | 8 | 8 | 8 | 8 | 8 | 8.3 |
+
+Both reviewers gave their first 9s on several lines. The remaining items were mostly local:
+- Runs columns at 1280 and minimum size.
+- Icon tooltips missing on keyboard focus.
+- A selected chip still in its class colour.
+- The PR chart's floating readout.
+- Unreadable confidence on chips.
+- Best models dropping its architecture column at 1280.
+- Dead space in the Overview hero.
+- The confusion-matrix key crowding the column labels.
+- The empty Playground placement.
+- The class table's layout.
+
+Between rounds, a real-server smoke test (#52) wired up dataset creation and resume, and fixed the display of unknown GPU memory and load.
+
+Round 16 changes:
+- **Runs:** columns are budgeted per breakpoint. Dataset shows from 1240, Size · batch from 1360, Created from 1440, and header cells don't shrink.
+- **Keyboard:** icon buttons show their tooltip on keyboard focus. Switches show hover in both positions.
+- **Chips:**
+  - The selected chip takes `accent.solid` / `accent.on`, matching its outline.
+  - Confidence uses the chip ink at full strength, set apart by weight (passes AA).
+  - Detection bars use the class colour.
+- **Model page:**
+  - The PR legend shows precision at the cursor (no floating readout; an x chip on the axis).
+  - The confusion key sits under the matrix.
+  - The class table has a 200 px name column and lists the best AP50 first.
+- **Overview:** the hero KPIs are centred and the ETA label no longer repeats. Best models shows five rows with architecture.
+- **Smaller fixes:** the empty Playground drop zone is top-aligned, and the thumbnail-size control is labelled as such.

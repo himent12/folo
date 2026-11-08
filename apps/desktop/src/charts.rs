@@ -397,7 +397,9 @@ const EASE_MS: f32 = 240.;
 /// pixel, and re-deriving a long history every frame isn't worth it.
 const EASE_MAX_POINTS: usize = 512;
 
-type Pts = Arc<Vec<(f32, f32)>>;
+/// A series's points, shared between renders.
+pub type Points = Arc<Vec<(f32, f32)>>;
+type Pts = Points;
 
 /// A chart's last data and the move from the previous data to it.
 struct Ease {
@@ -540,6 +542,13 @@ fn ease(spec: &mut LineChart, window: &mut Window) {
 
 fn ease_out(p: f32) -> f32 {
     1. - (1. - p.clamp(0., 1.)).powi(3)
+}
+
+/// The y at `x` if the series has a point within 6 % of `span` of it (the cursor-dot rule), else
+/// None: past a curve's end there is no value to show.
+pub fn value_near(points: &[(f32, f32)], x: f32, span: f32) -> Option<f32> {
+    let (px_, py) = points[nearest(points, x)?];
+    ((px_ - x).abs() <= span * 0.06).then_some(py)
 }
 
 /// Index of the point nearest to `x` in a sorted series.
@@ -855,17 +864,19 @@ fn paint_line_chart(
             Bounds::new(point(fx, plot.top()), size(plot.right() - fx, plot.size.height)),
             alpha(t.text_primary, 0.025),
         ));
-        let w = text_width(window, label, label_size);
-        paint_text(
-            window,
-            cx,
-            label,
-            // At the start of the span (where "now" is), clear of event markers further right.
-            point((fx + px(6.)).min(plot.right() - w - px(6.)), plot.top() + px(4.)),
-            t.text_tertiary,
-            label_size,
-            false,
-        );
+        if !label.is_empty() {
+            let w = text_width(window, label, label_size);
+            paint_text(
+                window,
+                cx,
+                label,
+                // At the start of the span (where "now" is), clear of event markers further right.
+                point((fx + px(6.)).min(plot.right() - w - px(6.)), plot.top() + px(4.)),
+                t.text_tertiary,
+                label_size,
+                false,
+            );
+        }
     }
     // Linked charts pass one tick count, so every chart in a group shows the same x ticks.
     let max_x = spec.x_ticks.unwrap_or(((plot.size.width / px(90.)) as usize).clamp(2, 8));
@@ -1421,6 +1432,13 @@ mod tests {
         let mid = t0 + std::time::Duration::from_millis(100);
         assert!(ease_frame(&id, names(2), &[pts(11), pts(11)], mid, true).is_none());
         assert!(ease_frame(&id, names(2), &[pts(11), pts(11)], mid, false).is_none());
+    }
+
+    #[test]
+    fn no_value_past_a_curves_end() {
+        let pts = [(0.0, 1.0), (0.2, 0.9), (0.4, 0.5)];
+        assert_eq!(value_near(&pts, 0.41, 1.), Some(0.5));
+        assert_eq!(value_near(&pts, 0.9, 1.), None);
     }
 
     #[test]
