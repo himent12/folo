@@ -321,12 +321,17 @@ fn binary_backward(
             )?
         ],
         BinaryOp::Atan2 => {
-            // d/dy atan2(y, x) = x / r^2, d/dx = -y / r^2, with r^2 = x^2 + y^2; 0 at the origin.
-            let r2 = a.square()?.add(&b.square()?)?;
-            let zero = r2.eq_scalar(0.0)?;
-            let safe = zero.where_cond(&a.scalar_like(1.0)?, &r2)?;
-            let k = zero.where_cond(&a.scalar_like(0.0)?, &g.div(&safe)?)?;
-            grads![side(need_a, &|| k.mul(b), sa)?, side(need_b, &|| k.mul(a)?.neg(), sb)?]
+            // d/dy atan2(y, x) = x / r^2, d/dx = -y / r^2 (r^2 = x^2 + y^2), 0 at the origin. Computed on inputs
+            // scaled by m = max(|x|, |y|) so that squaring neither underflows nor overflows:
+            // x / r^2 = (x/m) / ((x/m)^2 + (y/m)^2) / m, with the scaled r^2 in [1, 2].
+            let m = a.abs()?.maximum(&b.abs()?)?;
+            let origin = m.eq_scalar(0.0)?;
+            let m = origin.where_cond(&a.scalar_like(1.0)?, &m)?;
+            let (ys, xs) = (a.div(&m)?, b.div(&m)?);
+            let r2 = ys.square()?.add(&xs.square()?)?;
+            let r2 = origin.where_cond(&a.scalar_like(1.0)?, &r2)?;
+            let k = origin.where_cond(&a.scalar_like(0.0)?, &g.div(&r2)?.div(&m)?)?;
+            grads![side(need_a, &|| k.mul(&xs), sa)?, side(need_b, &|| k.mul(&ys)?.neg(), sb)?]
         }
         BinaryOp::Maximum | BinaryOp::Minimum => {
             let wins = if op == BinaryOp::Maximum { a.gt(b)? } else { a.lt(b)? };
@@ -433,6 +438,20 @@ mod tests {
                 .map(|(y, x)| y.atan2(*x))
                 .collect();
         close(y.atan2(&xx).unwrap().to_vec().unwrap(), want);
+        // Gradients stay finite and accurate where x^2 + y^2 would under- or overflow, and are 0 at the origin.
+        for v in [1e-30f32, 1e-20, 1.0, 1e20, 3e38] {
+            let (yv, xv) = (t(&[v], &[1]).requires_grad_(), t(&[v], &[1]).requires_grad_());
+            let g = yv.atan2(&xv).unwrap().sum_all().unwrap().backward().unwrap();
+            let want = 0.5 / v as f64;
+            for (got, sign) in [(g.get(&yv).unwrap(), 1.0), (g.get(&xv).unwrap(), -1.0)] {
+                let got = got.item::<f32>().unwrap() as f64;
+                assert!((got - sign * want).abs() <= 1e-6 * want, "atan2 grad at {v}: {got}");
+            }
+        }
+        let (yv, xv) = (t(&[0.0], &[1]).requires_grad_(), t(&[0.0], &[1]).requires_grad_());
+        let g = yv.atan2(&xv).unwrap().sum_all().unwrap().backward().unwrap();
+        assert_eq!(g.get(&yv).unwrap().item::<f32>().unwrap(), 0.0);
+        assert_eq!(g.get(&xv).unwrap().item::<f32>().unwrap(), 0.0);
         assert!(Tensor::from_slice(&[1u8], [1]).unwrap().exp().is_err());
     }
 

@@ -200,11 +200,11 @@ pub(crate) fn scatter_add_into(
             }
             let base = SendPtr(blk.as_mut_ptr());
             runs.par_iter().with_min_len(CHUNK / 8).for_each(|(t, r)| {
-                let mut acc = 0f32;
                 let p = &base;
                 // SAFETY: `t < d * inner` and every destination is a distinct run, owned by one task.
                 let dst = unsafe { &mut *p.0.add(*t) };
-                acc += *dst;
+                // Start from the destination itself (not 0.0 + dst, which turns -0.0 into +0.0).
+                let mut acc = *dst;
                 for &e in &order[r.clone()] {
                     acc += s[e];
                 }
@@ -312,5 +312,14 @@ mod tests {
                 "{outer} {d} {inner} {di}"
             );
         }
+        // Signed zeros survive every strategy: -0.0 + -0.0 + ... stays -0.0.
+        for &(outer, d, inner, di) in &[(1, 1, 1, 40_000), (1, 2, 128, 300), (40, 1, 1, 1000)] {
+            let idx = vec![0usize; outer * di * inner];
+            let src = vec![-0.0f32; idx.len()];
+            let got = scatter_add(&vec![-0.0; outer * d * inner], (outer, d, inner), &idx, &src, di);
+            assert!(got.iter().all(|v| v.to_bits() == (-0.0f32).to_bits()), "{outer} {d} {inner} {di}");
+        }
+        let got = index_add(&vec![-0.0; 4 * 64], (1, 4, 64), &vec![1; 1000], &vec![-0.0; 1000 * 64]);
+        assert!(got.iter().all(|v| v.to_bits() == (-0.0f32).to_bits()));
     }
 }
