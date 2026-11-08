@@ -317,6 +317,11 @@ fn write_registry(dir: &Path, regs: &[Registration]) -> Result<()> {
 }
 
 fn save_index(dir: &Path, e: &Entry, idx: &Index) {
+    // An index built under a read guard may be partial (refused files skipped); never let it stand in for the
+    // ordinary cache that an unguarded process would trust.
+    if folo_data::guard::installed() {
+        return;
+    }
     let id = e.reg().id;
     let path = index_path(dir, &id);
     let bytes = serde_json::to_vec(idx).expect("indexes serialize");
@@ -333,7 +338,9 @@ fn load_or_build(dir: &Path, e: &Entry) {
     let cached = std::fs::read(index_path(dir, &reg.id))
         .ok()
         .and_then(|b| serde_json::from_slice::<Index>(&b).ok())
-        .filter(|i| i.version == INDEX_VERSION);
+        .filter(|i| i.version == INDEX_VERSION)
+        // A cache built without the read guard may hold data from files the guard refuses: rebuild under it.
+        .filter(|_| !folo_data::guard::installed());
     if let Some(idx) = cached
         && idx.is_fresh()
     {

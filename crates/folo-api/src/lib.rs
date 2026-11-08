@@ -18,6 +18,7 @@ pub const API_VERSION: &str = "v1";
 
 /// The body of every non-2xx response: `{ "error": { "code", "message", "hint" } }`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ErrorBody {
     /// The error itself.
     pub error: ApiError,
@@ -25,6 +26,7 @@ pub struct ErrorBody {
 
 /// A machine-readable error: a stable `code`, a human `message` and an optional `hint` on how to fix it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ApiError {
     /// Stable snake_case code, e.g. `dataset_not_found`. See the table in `docs/API.md`.
     pub code: String,
@@ -41,6 +43,7 @@ pub struct ApiError {
 
 /// `GET /api/health`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Health {
     /// Always `"ok"` when the server answers.
     pub status: String,
@@ -59,6 +62,7 @@ fn default_api() -> String {
 
 /// `GET /api/system`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SystemInfo {
     /// Host CPU.
     pub cpu: CpuInfo,
@@ -70,6 +74,7 @@ pub struct SystemInfo {
 
 /// CPU name, logical thread count and current utilisation.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct CpuInfo {
     /// Marketing name, e.g. `AMD Ryzen 9 7950X 16-Core Processor`.
     pub name: String,
@@ -81,6 +86,7 @@ pub struct CpuInfo {
 
 /// Host memory in bytes.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct MemoryInfo {
     /// Bytes in use.
     pub used_bytes: u64,
@@ -90,6 +96,7 @@ pub struct MemoryInfo {
 
 /// One GPU adapter.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct GpuInfo {
     /// Index used in device strings such as `gpu:0`.
     pub ordinal: u32,
@@ -105,6 +112,7 @@ pub struct GpuInfo {
 
 /// GPU graphics API.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum GpuBackend {
     /// Vulkan.
@@ -121,6 +129,7 @@ pub enum GpuBackend {
 
 /// `GET /api/datasets`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct DatasetList {
     /// Registered datasets, oldest first.
     pub datasets: Vec<Dataset>,
@@ -128,6 +137,7 @@ pub struct DatasetList {
 
 /// A registered dataset.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Dataset {
     /// Opaque id, e.g. `ds_8f2c`.
     pub id: String,
@@ -150,6 +160,7 @@ pub struct Dataset {
 
 /// Dataset format. `auto` is only valid in requests.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum DatasetFormat {
     /// Detect from the folder contents (requests only).
@@ -163,6 +174,7 @@ pub enum DatasetFormat {
 
 /// Image counts per split.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Splits {
     /// Training images.
     pub train: u64,
@@ -174,6 +186,7 @@ pub struct Splits {
 
 /// A dataset split.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum Split {
     /// Training split.
@@ -200,6 +213,7 @@ impl Split {
 
 /// Dataset statistics.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct DatasetStats {
     /// Total boxes over all splits.
     pub boxes: u64,
@@ -218,6 +232,7 @@ pub struct DatasetStats {
 /// A histogram: `counts[i]` counts values in `[edges[i], edges[i + 1])`; the last bin also takes values at or above
 /// its upper edge. `edges.len() == counts.len() + 1`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Histogram {
     /// Bin edges, ascending.
     pub edges: Vec<f64>,
@@ -227,6 +242,7 @@ pub struct Histogram {
 
 /// `POST /api/datasets`: register a folder on disk.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RegisterDataset {
     /// Display name; defaults to the folder name.
     #[serde(default)]
@@ -240,6 +256,7 @@ pub struct RegisterDataset {
 
 /// `POST /api/datasets/synthetic`: generate a synthetic shapes dataset.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SyntheticDataset {
     /// Display name.
     pub name: String,
@@ -268,6 +285,7 @@ fn default_synth_classes() -> Vec<String> {
 
 /// `GET /api/datasets/{id}/images`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ImagePage {
     /// Images matching the filter (before `offset` / `limit`).
     pub total: u64,
@@ -332,6 +350,7 @@ pub struct DatasetIssue {
 
 /// One dataset image with its ground-truth boxes.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ImageInfo {
     /// Opaque id, unique within the dataset.
     pub id: String,
@@ -349,6 +368,7 @@ pub struct ImageInfo {
 
 /// A labelled box, pixel `xyxy`.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct BBox {
     /// Class index.
     pub class: u32,
@@ -364,6 +384,7 @@ pub struct BBox {
 
 /// A predicted box, pixel `xyxy`, with class name and confidence.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ScoredBox {
     /// Class index.
     pub class: u32,
@@ -387,6 +408,7 @@ pub struct ScoredBox {
 
 /// `GET /api/models`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ModelList {
     /// Models, newest first.
     pub models: Vec<Model>,
@@ -394,6 +416,7 @@ pub struct ModelList {
 
 /// A trained model (`.folo` weights).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Model {
     /// Opaque id, e.g. `m_31aa`.
     pub id: String,
@@ -421,6 +444,7 @@ pub struct Model {
 
 /// Detection metrics.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ModelMetrics {
     /// mAP at IoU 0.5.
     pub map50: f32,
@@ -434,6 +458,7 @@ pub struct ModelMetrics {
 
 /// Detector architecture (scale).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum Arch {
     /// Nano.
     #[default]
@@ -476,6 +501,7 @@ impl Arch {
 
 /// `GET /api/models/{id}/eval`: validation results of a model (PR curves, confusion matrix, per-class metrics).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ModelEval {
     /// One precision-recall curve per class, in class order.
     pub pr: Vec<PrCurve>,
@@ -492,6 +518,7 @@ pub struct ModelEval {
 /// A precision-recall curve at IoU 0.5, sampled at 101 recall points (`0.00, 0.01, ..., 1.00`). Precision is the
 /// COCO-interpolated envelope, so it never increases with recall.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct PrCurve {
     /// Class index.
     pub class: u32,
@@ -505,6 +532,7 @@ pub struct PrCurve {
 
 /// `POST /api/models/{id}/export`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ExportRequest {
     /// Target format.
     pub format: ExportFormat,
@@ -512,6 +540,7 @@ pub struct ExportRequest {
 
 /// Export format.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum ExportFormat {
     /// `.folo` with f16 weights.
     #[serde(rename = "folo-f16")]
@@ -523,6 +552,7 @@ pub enum ExportFormat {
 
 /// Result of an export.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ExportResult {
     /// Where the file was written.
     pub path: String,
@@ -536,6 +566,7 @@ pub struct ExportResult {
 
 /// `GET /api/runs`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RunList {
     /// Runs, newest first.
     pub runs: Vec<Run>,
@@ -543,6 +574,7 @@ pub struct RunList {
 
 /// Training configuration (`POST /api/runs` body). Every field except `dataset_id` has a default.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct TrainConfig {
     /// Run name; empty means `<dataset name>-<arch suffix>` (e.g. `shapes-1k-n`).
     #[serde(default)]
@@ -599,6 +631,7 @@ fn default_lr0() -> f32 {
 
 /// Optimizer choice.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum Optimizer {
     /// SGD for long runs, AdamW for short ones.
@@ -612,6 +645,7 @@ pub enum Optimizer {
 
 /// Augmentation settings.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default)]
 pub struct Augment {
     /// Mosaic probability.
@@ -646,6 +680,7 @@ impl Default for Augment {
 
 /// Run lifecycle state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum RunStatus {
     /// Waiting for a device.
@@ -671,6 +706,7 @@ impl RunStatus {
 
 /// A training run.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Run {
     /// Opaque id, e.g. `run_7d1e`.
     pub id: String,
@@ -708,6 +744,7 @@ pub struct Run {
 
 /// The best epoch of a run.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct BestEpoch {
     /// Epoch number.
     pub epoch: u32,
@@ -717,6 +754,7 @@ pub struct BestEpoch {
 
 /// Loss components.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Loss {
     /// CIoU box loss.
     #[serde(rename = "box")]
@@ -731,6 +769,7 @@ pub struct Loss {
 
 /// One optimizer step (SSE `step`, and `/metrics` history).
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Step {
     /// Epoch the step belongs to, 1-based.
     pub epoch: u32,
@@ -748,6 +787,7 @@ pub struct Step {
 
 /// One finished epoch with validation (SSE `epoch`, and `/metrics` history).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Epoch {
     /// Epoch number, 1-based.
     pub epoch: u32,
@@ -761,6 +801,7 @@ pub struct Epoch {
 
 /// Validation metrics, overall and per class.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ValMetrics {
     /// mAP at IoU 0.5.
     pub map50: f32,
@@ -776,6 +817,7 @@ pub struct ValMetrics {
 
 /// Validation metrics of one class.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ClassMetrics {
     /// Class index.
     pub class: u32,
@@ -791,6 +833,7 @@ pub struct ClassMetrics {
 
 /// `GET /api/runs/{id}/metrics`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RunMetrics {
     /// Step history, oldest first (every `every`-th step when that query parameter is given).
     pub steps: Vec<Step>,
@@ -800,6 +843,7 @@ pub struct RunMetrics {
 
 /// `GET /api/runs/{id}/samples`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RunSamples {
     /// Epoch the predictions come from.
     pub epoch: u32,
@@ -809,6 +853,7 @@ pub struct RunSamples {
 
 /// One validation image with ground truth and predictions.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Sample {
     /// Image id (fetch it from `/api/datasets/{dataset_id}/images/{image_id}`).
     pub image_id: String,
@@ -826,6 +871,7 @@ pub struct Sample {
 
 /// `GET /api/runs/{id}/logs`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RunLogs {
     /// The most recent log lines, oldest first.
     pub lines: Vec<LogLine>,
@@ -833,6 +879,7 @@ pub struct RunLogs {
 
 /// SSE `status` payload.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct StatusEvent {
     /// New state.
     pub status: RunStatus,
@@ -842,6 +889,7 @@ pub struct StatusEvent {
 
 /// Log level.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum LogLevel {
     /// Debug.
@@ -856,6 +904,7 @@ pub enum LogLevel {
 
 /// SSE `log` payload.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct LogLine {
     /// RFC 3339 time.
     pub t: String,
@@ -921,6 +970,7 @@ impl RunEvent {
 /// JSON body of `POST /api/predict` for an image already in a dataset. (Uploads use `multipart/form-data` with the
 /// same field names plus an `image` file part.)
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct PredictRequest {
     /// Model to run.
     pub model_id: String,
@@ -954,6 +1004,7 @@ pub fn default_max_det() -> u32 {
 
 /// Response of `POST /api/predict`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct PredictResponse {
     /// Model that ran.
     pub model_id: String,
@@ -969,6 +1020,7 @@ pub struct PredictResponse {
 
 /// Image dimensions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ImageSize {
     /// Width in pixels.
     pub width: u32,
@@ -978,6 +1030,7 @@ pub struct ImageSize {
 
 /// Inference timings in milliseconds.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Timing {
     /// Decode + letterbox.
     pub preprocess_ms: f64,
@@ -987,6 +1040,71 @@ pub struct Timing {
     pub postprocess_ms: f64,
     /// Sum of the above.
     pub total_ms: f64,
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Validation
+// ---------------------------------------------------------------------------------------------------------------
+
+/// `POST /api/val`: evaluate a model on a split of a dataset.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ValRequest {
+    /// Model to evaluate.
+    pub model_id: String,
+    /// Dataset to evaluate on.
+    pub dataset_id: String,
+    /// Split to evaluate.
+    #[serde(default = "default_val_split")]
+    pub split: Split,
+    /// Square input size; `null` uses the model's training size.
+    #[serde(default)]
+    pub imgsz: Option<u32>,
+    /// Confidence threshold (low, for mAP).
+    #[serde(default = "default_val_conf")]
+    pub conf: f32,
+    /// NMS IoU threshold.
+    #[serde(default = "default_iou")]
+    pub iou: f32,
+}
+
+fn default_val_split() -> Split {
+    Split::Val
+}
+
+/// Default confidence threshold of validation.
+pub fn default_val_conf() -> f32 {
+    0.001
+}
+
+/// Response of `POST /api/val`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ValReport {
+    /// Model that was evaluated.
+    pub model_id: String,
+    /// Dataset it was evaluated on.
+    pub dataset_id: String,
+    /// Split.
+    pub split: Split,
+    /// Input size used.
+    pub imgsz: u32,
+    /// Images evaluated.
+    pub images: u64,
+    /// Metrics, as in `Epoch.val`.
+    pub val: ValMetrics,
+    /// How long it took.
+    pub timing: ValTiming,
+}
+
+/// Wall time of a validation.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ValTiming {
+    /// Whole validation, seconds.
+    pub total_s: f64,
+    /// Mean per image (preprocess + inference + postprocess), milliseconds.
+    pub per_image_ms: f64,
 }
 
 #[cfg(test)]

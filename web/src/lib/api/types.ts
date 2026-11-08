@@ -362,3 +362,24 @@ export interface PredictOptions {
 export type PredictInput =
   | { kind: 'file'; file: Blob }
   | { kind: 'dataset'; dataset_id: string; image_id: string };
+
+/** POST /api/val body. Only model_id and dataset_id are required. */
+export interface ValRequest {
+  model_id: string;
+  dataset_id: string;
+  split?: Split;
+  imgsz?: number | null;
+  conf?: number;
+  iou?: number;
+}
+
+/** POST /api/val response. */
+export interface ValReport {
+  model_id: string;
+  dataset_id: string;
+  split: Split;
+  imgsz: number;
+  images: number;
+  val: Epoch['val'];
+  timing: { total_s: number; per_image_ms: number };
+}

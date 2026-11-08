@@ -315,7 +315,7 @@ fn read_image_file(image: &Path, opts: &CheckOptions) -> ImageCheck {
         hash: None,
         size: None,
     };
-    let bytes = match std::fs::read(image) {
+    let bytes = match crate::guard::check(image).and_then(|_| std::fs::read(image)) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return ImageCheck {
@@ -360,7 +360,7 @@ fn read_image_file(image: &Path, opts: &CheckOptions) -> ImageCheck {
 /// Every problem in one YOLO label file. A missing or box-less file is an [`CheckKind::EmptyImage`] of `image`.
 fn lint_label_file(image: &Path, label: &Path, nc: Option<usize>) -> Vec<CheckIssue> {
     let mut out = Vec::new();
-    let bytes = match std::fs::read(label) {
+    let bytes = match crate::guard::check(label).and_then(|_| std::fs::read(label)) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             out.push(CheckIssue::new(

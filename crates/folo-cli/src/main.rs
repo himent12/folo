@@ -16,7 +16,7 @@ use clap::{CommandFactory, Parser};
 use folo_server::{Cors, MockStore, Options, RealStore, Server, Store, WebSource};
 use serde_json::json;
 
-use cli::{Cli, Command, DoctorArgs, ServeArgs};
+use cli::{Cli, Command, DoctorArgs, McpArgs, ServeArgs};
 use output::{CliError, ExitCode, Out};
 
 /// `folo --version`: the workspace version, the commit and the build date (see build.rs).
@@ -91,7 +91,7 @@ fn run(cli: Cli, out: Out) -> Result<(), CliError> {
         Command::Export(args) => infer::export(args, out),
         Command::Bench(_) => Err(not_implemented("bench", "the engine")),
         Command::Dataset(cmd) => dataset::run(cmd, out),
-        Command::Mcp(_) => Err(not_implemented("mcp", "the MCP server")),
+        Command::Mcp(args) => mcp(args),
     }
 }
 
@@ -116,7 +116,12 @@ fn init_tracing() {
     use tracing_subscriber::EnvFilter;
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     // Logs always go to stderr so stdout stays clean for `--json` records.
-    let _ = tracing_subscriber::fmt().with_env_filter(filter).with_writer(std::io::stderr).try_init();
+    let ansi = std::io::IsTerminal::is_terminal(&std::io::stderr());
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .with_ansi(ansi)
+        .try_init();
 }
 
 fn serve(args: ServeArgs, out: Out) -> Result<(), CliError> {
@@ -183,6 +188,35 @@ fn serve(args: ServeArgs, out: Out) -> Result<(), CliError> {
         out.human("Stopped.");
         Ok(())
     })
+}
+
+/// `folo mcp`: MCP over stdio. stdout belongs to the protocol, so nothing else is printed there (not even with
+/// `--json`); logs go to stderr.
+fn mcp(args: McpArgs) -> Result<(), CliError> {
+    init_tracing();
+    let data_dir = args.data_dir.clone().unwrap_or_else(default_data_dir);
+    let backend = match (&args.server, args.mock) {
+        (Some(url), _) => folo_mcp::Backend::Proxy(url.clone()),
+        (None, true) => folo_mcp::Backend::Mock,
+        (None, false) => folo_mcp::Backend::Real,
+    };
+    let opts =
+        folo_mcp::Options { data_dir: data_dir.clone(), read_only: args.read_only, confine: args.confine };
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| CliError::new(ExitCode::Runtime, "runtime", format!("could not start tokio: {e}")))?;
+    let result = runtime.block_on(async move {
+        let server = folo_mcp::build(backend.clone(), opts)
+            .map_err(|e| CliError::new(ExitCode::Usage, "usage", e).hint("see `folo mcp --help`"))?;
+        tracing::info!(?backend, data_dir = %data_dir.display(), read_only = args.read_only, confine = args.confine, "folo mcp on stdio");
+        folo_mcp::serve_stdio(server, folo_server::shutdown_signal())
+            .await
+            .map_err(|e| CliError::new(ExitCode::Runtime, "mcp_failed", e))
+    });
+    // tokio's stdin reader sits on a blocking thread that cannot be interrupted; do not wait for it.
+    runtime.shutdown_background();
+    result
 }
 
 fn gib(bytes: u64) -> String {

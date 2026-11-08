@@ -55,6 +55,7 @@ pub mod check;
 pub mod convert;
 pub mod dataset;
 mod error;
+pub mod guard;
 mod image;
 mod letterbox;
 mod loader;

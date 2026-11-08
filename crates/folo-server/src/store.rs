@@ -8,7 +8,7 @@
 use folo_api::{
     Dataset, ExportFormat, ExportResult, GpuInfo, LogLine, Model, ModelEval, PredictResponse,
     RegisterDataset, Run, RunEvent, RunMetrics, RunSamples, Split, StatusEvent, SyntheticDataset,
-    TrainConfig,
+    TrainConfig, ValReport, ValRequest,
 };
 use tokio::sync::broadcast;
 
@@ -155,4 +155,11 @@ pub trait Store: Send + Sync + 'static {
 
     /// Runs inference on one image.
     fn predict(&self, input: PredictInput) -> Result<PredictResponse>;
+
+    /// Evaluates a model on a dataset split (`POST /api/val`, the MCP `val` tool). `not_implemented` until the
+    /// store has an evaluator.
+    fn val(&self, req: ValRequest) -> Result<ValReport> {
+        let _ = req;
+        Err(crate::error::Error::not_implemented("validation"))
+    }
 }

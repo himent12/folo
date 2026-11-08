@@ -187,6 +187,10 @@ The exact block definitions, layer tables, parameter names, head, loss, training
 
 ## Agent-first design
 - Machine-readable everything: `--json`, JSON Schemas for configs, `folo describe` prints the CLI surface as JSON.
-- `folo mcp` exposes tools: `list_datasets`, `dataset_stats`, `train`, `run_status`, `predict`, `val`, `export`.
+- `folo mcp` (crate `folo-mcp`, on the official `rmcp` SDK) is an MCP server over stdio with tools for datasets,
+  training, runs, validation, prediction and export, `folo://` resources and prompts (`docs/MCP.md`). It sits on
+  the same `Store` trait as the HTTP handlers: the embedded `RealStore` / `MockStore`, or an HTTP-backed store that
+  forwards to a running `folo serve` (`--server`). Tool schemas come from the `folo-api` types through schemars
+  (the crate's `schema` feature), so they match the HTTP API.
 - Errors carry a stable `code`, a human message and a hint.
 - `llms.txt` at the repo root summarises the project for agents.

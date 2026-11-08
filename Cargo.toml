@@ -18,6 +18,7 @@ folo-nn = { path = "crates/folo-nn" }
 folo-data = { path = "crates/folo-data" }
 folo-vision = { path = "crates/folo-vision" }
 folo-server = { path = "crates/folo-server" }
+folo-mcp = { path = "crates/folo-mcp" }
 bytemuck = { version = "1", features = ["extern_crate_alloc"] }
 crossbeam-channel = "0.5"
 half = { version = "2", features = ["bytemuck"] }
@@ -45,6 +46,16 @@ clap = { version = "4", features = ["derive", "env", "string"] }
 # No GL backend: FOLO targets Vulkan / DX12 / Metal natively and WebGPU in the browser.
 wgpu = { version = "30.0.1", default-features = false, features = ["std", "parking_lot", "vulkan", "dx12", "metal", "webgpu", "wgsl"] }
 pollster = "1.0.1"
+# MCP server (crates/folo-mcp): the official Rust SDK, pinned (docs/MCP.md names the protocol revisions it passes).
+rmcp = { version = "=3.9.0", default-features = false, features = ["server", "transport-io"] }
+schemars = "1.2"
+base64 = "0.23"
+glob = "0.3"
+http = "1"
+# Plain-HTTP client for `folo mcp --server` (loopback `folo serve`; no TLS).
+ureq = { version = "3", default-features = false }
+# Test-only: validates MCP tool results against their outputSchema.
+jsonschema = { version = "0.60", default-features = false }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

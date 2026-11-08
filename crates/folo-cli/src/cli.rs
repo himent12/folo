@@ -415,7 +415,21 @@ pub struct ConvertArgs {
 /// `folo mcp`.
 #[derive(Debug, Args)]
 pub struct McpArgs {
-    /// Answer with mock data (like `folo serve --mock`).
-    #[arg(long)]
+    /// Where FOLO writes (datasets, runs, exports) and the base of relative input paths [default: $FOLO_HOME or
+    /// ~/.folo].
+    #[arg(long, env = "FOLO_DATA_DIR")]
+    pub data_dir: Option<PathBuf>,
+    /// Serve deterministic mock data (like `folo serve --mock`), so the whole flow works without the engine.
+    #[arg(long, conflicts_with = "server")]
     pub mock: bool,
+    /// Only expose tools that do not change state; mutating tools are hidden and rejected.
+    #[arg(long)]
+    pub read_only: bool,
+    /// Only read input paths inside --data-dir (canonical paths, symlinks and junctions resolved).
+    #[arg(long)]
+    pub confine: bool,
+    /// Forward every tool to a running `folo serve` at this URL (e.g. http://127.0.0.1:7878) instead of running
+    /// the engine in this process.
+    #[arg(long, value_name = "URL")]
+    pub server: Option<String>,
 }

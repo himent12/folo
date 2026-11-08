@@ -121,5 +121,7 @@ pub fn describe(root: &Command) -> Value {
             "docs": "docs/CLI.md",
         },
         "commands": commands,
+        // The `folo mcp` tools with the same JSON Schemas `tools/list` publishes (docs/MCP.md).
+        "mcp_tools": folo_mcp::describe_tools(),
     })
 }

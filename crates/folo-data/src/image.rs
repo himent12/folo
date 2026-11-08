@@ -148,13 +148,16 @@ pub(crate) fn decode_with_path(bytes: &[u8], path: &Path) -> Result<Image> {
 
 /// Reads and decodes an image file.
 pub fn read_image(path: &Path) -> Result<Image> {
-    let bytes = std::fs::read(path).map_err(|e| DataError::io(path, e))?;
+    let bytes =
+        crate::guard::check(path).and_then(|_| std::fs::read(path)).map_err(|e| DataError::io(path, e))?;
     decode_with_path(&bytes, path)
 }
 
 /// Size `(width, height)` of an image file after EXIF orientation, read from its header only.
 pub fn probe_size(path: &Path) -> Result<(u32, u32)> {
-    let file = std::fs::File::open(path).map_err(|e| DataError::io(path, e))?;
+    let file = crate::guard::check(path)
+        .and_then(|_| std::fs::File::open(path))
+        .map_err(|e| DataError::io(path, e))?;
     let mut reader = BufReader::new(file);
     let orientation = read_jpeg_exif_orientation(&mut reader).unwrap_or(1);
     std::io::Seek::rewind(&mut reader).map_err(|e| DataError::io(path, e))?;

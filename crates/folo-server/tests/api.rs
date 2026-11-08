@@ -899,3 +899,35 @@ async fn logs_of_a_run_stopped_while_queued_match_sse() {
     assert!(hist[0].starts_with("stop requested") && hist[1].starts_with("stopped at step 0"));
     assert_eq!(hist, sse_logs, "history matches what the stream sent");
 }
+
+#[tokio::test]
+async fn val_endpoint() {
+    let (server, _) = mock();
+    let app = server.router();
+    let req = json!({ "model_id": "m_31aa", "dataset_id": "ds_5a1e" });
+    let r: ValReport = ok(&app, post_json("/api/val", req.clone())).await;
+    assert_eq!((r.split, r.images, r.imgsz), (Split::Val, 200, 640));
+    assert_eq!(r.val.per_class.len(), 3);
+    assert!(r.val.map50 > 0.0 && r.val.map50 <= 1.0 && r.val.map50_95 <= r.val.map50);
+    assert!(r.timing.total_s > 0.0);
+    // Deterministic.
+    let again: ValReport = ok(&app, post_json("/api/val", req)).await;
+    assert_eq!(again, r);
+    let train: ValReport = ok(
+        &app,
+        post_json("/api/val", json!({ "model_id": "m_31aa", "dataset_id": "ds_5a1e", "split": "train" })),
+    )
+    .await;
+    assert_eq!(train.images, 800);
+    let req = json!({ "model_id": "m_31aa", "dataset_id": "ds_5a1e", "split": "test" });
+    err(&app, post_json("/api/val", req), StatusCode::BAD_REQUEST, "invalid_body").await;
+    let req = json!({ "model_id": "nope", "dataset_id": "ds_5a1e" });
+    err(&app, post_json("/api/val", req), StatusCode::NOT_FOUND, "model_not_found").await;
+    let req = json!({ "model_id": "m_31aa", "dataset_id": "ds_5a1e", "conf": 2.0 });
+    err(&app, post_json("/api/val", req), StatusCode::BAD_REQUEST, "invalid_body").await;
+
+    let dir = std::env::temp_dir().join(format!("folo-val-real-{}", std::process::id()));
+    let real = Server::new(Arc::new(RealStore::open(dir)), Options::default()).router();
+    let req = json!({ "model_id": "m_1", "dataset_id": "ds_1" });
+    err(&real, post_json("/api/val", req), StatusCode::NOT_IMPLEMENTED, "not_implemented").await;
+}
