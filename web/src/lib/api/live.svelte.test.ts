@@ -95,6 +95,28 @@ describe('LiveRun ordering', () => {
     stop();
   });
 
+  it('retries a failed history sync until it succeeds', async () => {
+    let live!: LiveRun;
+    const stop = $effect.root(() => {
+      live = new LiveRun(() => 'run_7d1e');
+    });
+    flushSync();
+    metrics.resolve({ steps: [step(1), step(2)], epochs: [] });
+    await vi.advanceTimersByTimeAsync(0);
+    // The reload on open fails once...
+    let fail = true;
+    (hub.api as { runMetrics: Api['runMetrics'] }).runMetrics = () =>
+      fail ? Promise.reject(new Error('flaky')) : Promise.resolve({ steps: [step(1), step(2), step(3)], epochs: [] });
+    handlers.connection?.('open');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.steps.map((s) => s.step)).toEqual([1, 2]);
+    // ...and the retry fills the gap.
+    fail = false;
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(live.steps.map((s) => s.step)).toEqual([1, 2, 3]);
+    stop();
+  });
+
   it('refreshes the snapshot on a terminal status even while history is loading', async () => {
     let calls = 0;
     (hub.api as { run: Api['run'] }).run = () => {

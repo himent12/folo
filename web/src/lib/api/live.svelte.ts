@@ -107,13 +107,23 @@ export class LiveRun {
         this.#bump();
       };
 
+      // Re-synchronising history (on open / reconnect) must not silently give up: a gap would stay forever.
+      let syncTimer: ReturnType<typeof setTimeout> | undefined;
+      const sync = (attempt = 0) => {
+        clearTimeout(syncTimer);
+        load().catch(() => {
+          if (closed) return;
+          syncTimer = setTimeout(() => sync(attempt + 1), Math.min(15_000, 1000 * 2 ** attempt));
+        });
+      };
+
       // Subscribe first: events that arrive while history loads are kept and merged, not lost.
       const unsub = api.runEvents(runId, {
         connection: (s) => {
           if (closed) return;
           // EventSource construction does not mean the subscription is live: events emitted between our first
           // history load and the stream opening would be lost, so load (and merge) again once it opens.
-          if (s === 'open' && this.connection === 'idle') load().catch(() => {});
+          if (s === 'open' && this.connection === 'idle') sync();
           this.connection = s;
         },
         status: ({ status, error }) => {
@@ -156,7 +166,7 @@ export class LiveRun {
         },
         reconnect: () => {
           // The stream replays nothing: refetch history and merge it with what arrived meanwhile.
-          load().catch(() => {});
+          sync();
         },
       });
 
@@ -168,6 +178,7 @@ export class LiveRun {
 
       return () => {
         closed = true;
+        clearTimeout(syncTimer);
         unsub();
         cancelAnimationFrame(this.#raf);
         this.#raf = 0;
