@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { DatasetIssue, DatasetIssuesQuery } from '$lib/api/types';
-import { loadIssues } from './issues';
+import { issueCaption, loadIssues } from './issues';
 
 // A server with 1,500 empty-image notes first and two errors after them, paged at most 1000 per request.
 const all: DatasetIssue[] = [
@@ -69,5 +69,15 @@ describe('loadIssues with counts', () => {
     const r = await loadIssues(api, 'ds', 'error');
     expect(r.counts).toBeUndefined();
     expect(r.byKind).toEqual({ broken_label: 1, class_overflow: 1 });
+  });
+});
+
+describe('issueCaption', () => {
+  it('names the rows shown: severity, count and what they mean for training', () => {
+    expect(issueCaption('error', 3)).toBe('3 errors: these files are left out of training until fixed.');
+    expect(issueCaption('warning', 1)).toBe('1 warning: training still uses these files.');
+    expect(issueCaption('warning', 2, 'clipped_box')).toBe('2 clipped box warnings: training still uses these files.');
+    expect(issueCaption('info', 1200)).toBe('1,200 notes: nothing to fix.');
+    expect(issueCaption('error', 0)).toBeNull();
   });
 });

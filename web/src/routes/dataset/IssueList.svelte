@@ -1,15 +1,15 @@
 <script lang="ts">
   /**
-   * The evidence behind a health finding: the `folo dataset check` issues, as `file:line`, the message and what a
-   * cleanup would do, paged 50 at a time. A severity filter (with the server's counts, where it sends them) and a kind
-   * filter narrow it. The same check from a terminal is offered as a copyable command.
+   * The `folo dataset check` issues, as `file:line`, the message and what a cleanup would do, paged 50 at a time. A
+   * severity filter (with the server's counts, where it sends them) and a kind filter narrow it; a caption above the
+   * rows says exactly which rows they are. The same check from a terminal is offered as a copyable command.
    */
   import Copy from '@lucide/svelte/icons/copy';
   import { untrack } from 'svelte';
   import { hub } from '$lib/api/index.svelte';
   import { Resource } from '$lib/api/resource.svelte';
   import type { DatasetIssue, IssueCounts, IssueKind, IssueSeverity } from '$lib/api/types';
-  import { KIND_LABEL, KINDS, loadIssues } from './issues';
+  import { issueCaption, KIND_LABEL, KINDS, loadIssues } from './issues';
   import { num } from '$lib/format';
   import Button from '$lib/ui/Button.svelte';
   import ErrorState from '$lib/ui/ErrorState.svelte';
@@ -107,6 +107,7 @@
   {:else if total === 0}
     <p class="none">No {NAMES[sev][1]} in the latest check.</p>
   {:else}
+    <p class="caption num">{issueCaption(sev, total, kind === 'all' ? undefined : kind)}</p>
     <ul>
       {#each list.slice(0, shown) as i, k (k)}
         <li>
@@ -201,6 +202,11 @@
     white-space: nowrap;
     font-size: var(--type-sm-size);
     color: var(--text-tertiary);
+  }
+  .caption {
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--text-secondary);
   }
   .none {
     font-size: var(--type-sm-size);

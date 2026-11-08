@@ -167,21 +167,53 @@ export const scenes = [
   },
   { name: 'dataset-stats', path: '/datasets/ds_shapes_hard?tab=stats', viewports: ['desktop', 'laptop', 'mobile'] },
   {
-    // The check's findings with their fixes; the severity filter moved to warnings in the first list.
-    name: 'dataset-issues',
+    // The health summary with every severity line opened: the findings, their evidence and next steps.
+    name: 'dataset-health-open',
     path: '/datasets/ds_shapes_hard?tab=stats',
     fullPage: false,
     viewports: ['desktop', 'laptop', 'mobile'],
-    setup: async (page, { vp }) => {
-      // Phones start the findings folded: open the first one.
-      if (vp === 'mobile') {
-        await until(page, '#ds-health summary');
-        await page.locator('#ds-health summary').first().click();
-      }
-      await until(page, '#ds-health .issues li');
-      await page.locator('#ds-health details[open] .issues').first().getByRole('radio', { name: /Warnings/ }).click();
-      await until(page, '#ds-health .issues .fix');
+    setup: async (page) => {
+      await until(page, '#ds-health summary');
+      for (const s of await page.locator('#ds-health summary').all()) await s.click();
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // "Dataset check findings", its own section: the severity filter moved to warnings from the Warnings line's
+    // "Show the warnings", so the caption and rows are the warnings.
+    name: 'dataset-issues',
+    path: '/datasets/ds_shapes_hard?tab=stats',
+    fullPage: true,
+    viewports: ['desktop', 'laptop', 'mobile'],
+    setup: async (page) => {
+      await until(page, '#ds-health summary');
+      await page.locator('#ds-health li.warning summary').click();
+      await page.getByRole('button', { name: 'Show the warnings' }).click();
+      await until(page, '#ds-check .issues .fix');
       await page.clock.runFor(500);
+    },
+  },
+  {
+    // The box-size histogram with a bin pinned by a tap (phones) or under the mouse: the readout row states its count.
+    name: 'dataset-histogram',
+    path: '/datasets/ds_shapes_hard?tab=stats',
+    fullPage: true,
+    viewports: ['desktop', 'laptop', 'mobile'],
+    setup: async (page, { vp }) => {
+      await until(page, '#ds-size svg');
+      const svg = page.locator('#ds-size svg[role=img]');
+      await svg.scrollIntoViewIfNeeded();
+      const box = await svg.boundingBox();
+      if (!box) return;
+      const at = { x: box.x + box.width * 0.22, y: box.y + box.height * 0.6 };
+      // The shot's context has no touch screen: a phone's tap is sent as touch pointer events.
+      if (vp === 'mobile')
+        await svg.evaluate((el, p) => {
+          for (const type of ['pointerdown', 'pointerup'])
+            el.dispatchEvent(new PointerEvent(type, { clientX: p.x, clientY: p.y, pointerType: 'touch', bubbles: true }));
+        }, at);
+      else await page.mouse.move(at.x, at.y);
+      await page.clock.runFor(300);
     },
   },
   {

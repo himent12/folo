@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { binDensities } from './histogram';
+import { binAt, binDensities } from './histogram';
 
 describe('binDensities', () => {
   it('divides each count by its bin width', () => {
@@ -15,5 +15,25 @@ describe('binDensities', () => {
     expect(d[1]).toBeCloseTo(4);
     const area = d[1]! * (0.6 - 0.5) / 0.01;
     expect(area).toBeCloseTo(40);
+  });
+});
+
+describe('binAt', () => {
+  const bars = [
+    { x: 40, w: 10 },
+    { x: 51, w: 30 },
+    { x: 82, w: 4 },
+  ];
+  it('finds the bar under the pointer', () => {
+    expect(binAt(bars, 45)).toBe(0);
+    expect(binAt(bars, 60)).toBe(1);
+    expect(binAt(bars, 84)).toBe(2);
+  });
+  it('gives a gap between bars to the nearer bar, and nothing far outside', () => {
+    expect(binAt(bars, 50.4)).toBe(0);
+    expect(binAt(bars, 50.8)).toBe(1);
+    expect(binAt(bars, 87)).toBe(2);
+    expect(binAt(bars, 10)).toBeNull();
+    expect(binAt(bars, 200)).toBeNull();
   });
 });

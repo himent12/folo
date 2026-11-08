@@ -15,6 +15,25 @@ export interface HealthItem {
   issues?: IssueSeverity;
 }
 
+/** One line of the health summary: the findings of one severity, most severe first. */
+export interface SeverityGroup {
+  severity: Exclude<Severity, 'ok'>;
+  /** "Errors", "Warnings", "Notes". */
+  label: string;
+  items: HealthItem[];
+}
+
+/** Findings grouped by severity (errors, warnings, notes), leaving out empty groups and the `ok` item. */
+export function bySeverity(items: readonly HealthItem[]): SeverityGroup[] {
+  const groups: SeverityGroup[] = [
+    { severity: 'danger', label: 'Errors', items: [] },
+    { severity: 'warning', label: 'Warnings', items: [] },
+    { severity: 'info', label: 'Notes', items: [] },
+  ];
+  for (const h of items) groups.find((g) => g.severity === h.severity)?.items.push(h);
+  return groups.filter((g) => g.items.length > 0);
+}
+
 /** Findings that need attention (errors and warnings): the "N to review" count, everywhere it is shown. */
 export function reviewCount(items: readonly HealthItem[]): number {
   return items.filter((h) => h.severity === 'danger' || h.severity === 'warning').length;
@@ -76,7 +95,7 @@ export function healthChecks(d: Dataset, s: DatasetStats, counts?: IssueCounts):
     out.push({
       id: 'check-errors',
       severity: 'danger',
-      title: `${int(counts.error)} ${counts.error === 1 ? 'error' : 'errors'} from the dataset check`,
+      title: `${int(counts.error)} dataset check ${counts.error === 1 ? 'error' : 'errors'}`,
       detail: 'Images that cannot be read and labels that cannot be parsed are left out of training. Fix or remove them.',
       issues: 'error',
     });
@@ -85,7 +104,7 @@ export function healthChecks(d: Dataset, s: DatasetStats, counts?: IssueCounts):
     out.push({
       id: 'check-warnings',
       severity: 'warning',
-      title: `${int(counts.warning)} ${counts.warning === 1 ? 'warning' : 'warnings'} from the dataset check`,
+      title: `${int(counts.warning)} dataset check ${counts.warning === 1 ? 'warning' : 'warnings'}`,
       detail: 'Training still uses these files: boxes past the image edge, duplicate labels or images. Each says what a cleanup would do.',
       issues: 'warning',
     });

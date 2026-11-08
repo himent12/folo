@@ -15,3 +15,20 @@ export function binDensities(edges: number[], counts: number[], xMax = Infinity,
   const unit = per ?? Math.min(...spans);
   return counts.map((c, i) => c / (spans[i]! / unit));
 }
+
+/**
+ * The bin whose bar spans pixel `px` (bars as `{ x, w }` in px, left to right); outside every bar, the nearest one
+ * within half a bar's width, else null. Gaps between bars belong to the nearer bar, so a scrub never flickers off.
+ */
+export function binAt(bars: readonly { x: number; w: number }[], px: number): number | null {
+  let best: number | null = null;
+  let dist = Infinity;
+  bars.forEach((b, i) => {
+    const d = px < b.x ? b.x - px : px > b.x + b.w ? px - (b.x + b.w) : 0;
+    if (d < dist && d <= Math.max(2, b.w / 2)) {
+      dist = d;
+      best = i;
+    }
+  });
+  return best;
+}
