@@ -45,6 +45,8 @@
   import { area as d3area, curveLinear, curveMonotoneX, line as d3line } from 'd3-shape';
   import { downsample, nearest, ticks as niceTicks } from './downsample';
   import { placeEndLabels } from './endLabels';
+  import { paintOrder } from './layers';
+  import { TouchGesture, type PinAction } from './pin';
 
   interface Props {
     series: Series[];
@@ -72,8 +74,10 @@
     empty?: string;
     /** Label each line where it ends (direct labels), for comparisons where colour alone is not enough. */
     endLabels?: boolean;
-    /** Short x-axis caption drawn under the y labels, e.g. "epoch". */
+    /** Short x-axis caption drawn under the x tick labels, e.g. "epoch". */
     xLabel?: string;
+    /** Short y-axis caption drawn above the y tick labels, e.g. "Precision". */
+    yLabel?: string;
     /** Leading legend caption saying which value the legend shows, e.g. "Last". Replaced by the x title on hover. */
     legendNote?: string;
     /** A floating tooltip at the cursor. Off by default: the legend is the readout (cursor values on hover). */
@@ -105,6 +109,7 @@
     empty = 'No data yet',
     endLabels = false,
     xLabel,
+    yLabel,
     legendNote,
     tooltip = false,
     highlight = null,
@@ -177,7 +182,7 @@
     const labelW = endLabels && width >= 560 ? Math.min(120, Math.max(0, ...series.map((s) => s.label.length)) * 6.2 + 10) : 0;
     const left = Math.ceil(longest * 7) + 14;
     // An x-axis title gets its own line under the tick labels.
-    return { top: 8, right: 12 + labelW, bottom: xLabel ? 36 : 22, left };
+    return { top: yLabel ? 24 : 8, right: 12 + labelW, bottom: xLabel ? 36 : 22, left };
   });
 
   const x = $derived(scaleLinear().domain(xExtent).range([margin.left, Math.max(margin.left + 1, width - margin.right)]));
@@ -251,8 +256,9 @@
         return p && Number.isFinite(p.y) ? { id: s.id, label: s.label.length > 18 ? `${s.label.slice(0, 17)}…` : s.label, x: x(p.x), y: y(p.y) } : null;
       })
       .filter((e): e is NonNullable<typeof e> => e !== null)
-      // The highlighted line is labelled first, so it never loses its spot.
-      .sort((a, b) => Number(b.id === highlight) - Number(a.id === highlight));
+      // The highlighted line is labelled first, so it never loses its spot; then the shortest lines, which are the
+      // easiest to lose among the others.
+      .sort((a, b) => Number(b.id === highlight) - Number(a.id === highlight) || a.x - b.x);
     const curves = visible.map((s) => s.points.filter((p) => Number.isFinite(p.y)).map((p) => ({ x: x(p.x), y: y(p.y) })));
     const bounds = { x0: margin.left, y0: margin.top, x1: width - 2, y1: height - margin.bottom };
     return placeEndLabels(points, curves, bounds).map((e) => ({ ...e, color: color.get(e.id) ?? 'var(--text-secondary)' }));
@@ -290,16 +296,84 @@
     return { rows: labelled, px: x(ref.p.x), xv: ref.p.x, title };
   });
 
+  const local = (e: PointerEvent) => {
+    const rect = (e.currentTarget as SVGElement).getBoundingClientRect();
+    return { px: e.clientX - rect.left, py: e.clientY - rect.top };
+  };
+  const touchy = (e: PointerEvent) => e.pointerType === 'touch' || e.pointerType === 'pen';
+  const inPlot = (px: number) => px >= margin.left - 4 && px <= width - margin.right + 4;
+
+  // Touch: a tap or a sideways scrub pins the cursor and its readout until it is tapped again, a tap lands outside
+  // the chart or Escape is pressed (./pin). A mouse reads out on hover, as before.
+  let pinned = $state(false);
+  let gesture: TouchGesture | null = null;
+  let svgEl = $state<SVGSVGElement>();
+  function apply(a: PinAction) {
+    if (a.kind === 'clear') {
+      cursor = null;
+      pinned = false;
+    } else if (a.kind === 'set' && inPlot(a.px)) {
+      cursor = x.invert(Math.min(width - margin.right, Math.max(margin.left, a.px)));
+      pinned = true;
+    }
+  }
+  // A cursor cleared elsewhere (a synced chart, blur) is no longer pinned here.
+  $effect(() => {
+    if (cursor === null) pinned = false;
+  });
+  $effect(() => {
+    if (!pinned) return;
+    const outside = (e: PointerEvent) => {
+      if (svgEl && !svgEl.contains(e.target as Node)) apply({ kind: 'clear' });
+    };
+    const esc = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') apply({ kind: 'clear' });
+    };
+    document.addEventListener('pointerdown', outside, true);
+    document.addEventListener('keydown', esc);
+    return () => {
+      document.removeEventListener('pointerdown', outside, true);
+      document.removeEventListener('keydown', esc);
+    };
+  });
+
+  function onpointerdown(e: PointerEvent) {
+    spoken = '';
+    if (!touchy(e)) return;
+    const { px, py } = local(e);
+    gesture = new TouchGesture(px, py, pinned && hover ? hover.px : null);
+  }
+  function onpointerup(e: PointerEvent) {
+    if (!touchy(e) || !gesture) return;
+    apply(gesture.up(local(e).px));
+    gesture = null;
+  }
+  function onpointercancel() {
+    if (gesture) apply(gesture.cancel());
+    gesture = null;
+  }
   function onpointermove(e: PointerEvent) {
     spoken = '';
-    const rect = (e.currentTarget as SVGElement).getBoundingClientRect();
-    const px = e.clientX - rect.left;
-    if (px < margin.left - 4 || px > width - margin.right + 4) {
-      cursor = null;
+    const { px, py } = local(e);
+    if (touchy(e)) {
+      if (gesture) apply(gesture.move(px, py));
       return;
     }
-    cursor = x.invert(px);
+    pinned = false;
+    cursor = inPlot(px) ? x.invert(px) : null;
   }
+  function onpointerleave(e: PointerEvent) {
+    if (!touchy(e) && !pinned) cursor = null;
+  }
+
+  // Narrow plots: the legend keeps one line of whole items (no leading note), and the cursor's x reads out on the axis.
+  const compact = $derived(width > 0 && width < 480);
+  const pill = $derived.by(() => {
+    if (!compact || !hover) return null;
+    const w = Math.ceil(hover.title.length * 6.2) + 12;
+    const cx = Math.min(width - w / 2 - 1, Math.max(w / 2 + 1, hover.px));
+    return { w, cx, text: hover.title };
+  });
 
   // Keyboard scrubbing announces the values under the cursor. The text is written from the key handler itself, so
   // pointer movement here or on a linked chart never produces announcements.
@@ -330,6 +404,7 @@
     else if (e.key === 'End') i = s.points.length - 1;
     else if (e.key === 'Escape') {
       cursor = null;
+      pinned = false;
       spoken = '';
       return;
     } else return;
@@ -371,7 +446,7 @@
 <div class="chart">
   {#if legend && keyed.length > 0}
     <ul class="legend" aria-hidden="true">
-      {#if legendNote || hover}<li class="note" class:at={!!hover}>{hover ? hover.title : legendNote}</li>{/if}
+      {#if (legendNote || hover) && !compact}<li class="note" class:at={!!hover}>{hover ? hover.title : legendNote}</li>{/if}
       {#each keyed as s (s.id)}
         {@const v = hover ? hover.rows.find((r) => r.s.id === s.id)?.p.y : latest(s)}
         <li>
@@ -406,14 +481,17 @@
     {#if width > 0}
       <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
       <svg
+        bind:this={svgEl}
         {width}
         {height}
         role="img"
         aria-label={label}
         tabindex={hasData ? 0 : -1}
         {onpointermove}
-        onpointerleave={() => (cursor = null)}
-        onpointerdown={() => (spoken = '')}
+        {onpointerleave}
+        {onpointerdown}
+        {onpointerup}
+        {onpointercancel}
         {onkeydown}
         onblur={() => ((cursor = null), (spoken = ''))}
       >
@@ -431,6 +509,7 @@
             <text x={x(t)} y={height - margin.bottom + 16} text-anchor="middle">{xFormat(t)}</text>
           {/each}
           {#if xLabel}<text class="x-label" x={(margin.left + width - margin.right) / 2} y={height - 4} text-anchor="middle">{xLabel}</text>{/if}
+          {#if yLabel}<text class="x-label" x="0" y="10" dy="0.32em" text-anchor="start">{yLabel}</text>{/if}
         </g>
 
         {#if hasData}
@@ -447,8 +526,13 @@
           {#each paths.filter((p) => p.b) as { s, b } (s.id)}
             <path class="band" d={b} style:fill={s.color} />
           {/each}
-          {#each paths.filter((p) => !p.b) as { s, d, a } (s.id)}
+          {#each paintOrder(paths.filter((p) => !p.b), (p) => p.s) as { s, d, a } (s.id)}
             {#if a}<path class="area" d={a} fill="url(#{uid}-{s.id})" />{/if}
+            {#if s.pattern === 'dot' && !s.ghost && !s.context}
+              <!-- A dotted line over a coincident solid one would show the other line through its gaps: a thin
+                   knockout in the panel colour underneath keeps its dots readable. -->
+              <path class="knockout" class:faded={highlight !== null && s.id !== highlight} {d} />
+            {/if}
             <path
               class="line"
               class:dashed={s.dashed}
@@ -469,7 +553,7 @@
             {/each}
           {/if}
           {#if endDots}
-            {#each keyed as s (s.id)}
+            {#each paintOrder(keyed, (s) => s) as s (s.id)}
               {@const p = s.points[s.points.length - 1]}
               {#if p && Number.isFinite(p.y)}
                 <circle class="end-dot" class:faded={highlight !== null && s.id !== highlight} cx={x(p.x)} cy={y(p.y)} r="3" style:fill={s.color} />
@@ -498,12 +582,19 @@
           {/each}
 
           {#if hover}
-            <line class="cursor" x1={hover.px} x2={hover.px} y1={margin.top} y2={height - margin.bottom} />
+            <line class="cursor" class:pinned x1={hover.px} x2={hover.px} y1={margin.top} y2={height - margin.bottom} />
             {#each hover.rows as r (r.s.id)}
               {#if Number.isFinite(r.p.y) && (!yLog || r.p.y > 0)}
                 <circle class="dot" cx={x(r.p.x)} cy={y(r.p.y)} r="3.5" style:fill={r.s.color} />
               {/if}
             {/each}
+            {#if pill}
+              <!-- Over the x ticks it covers: the cursor's x, which a wide legend states in its note. -->
+              <g class="pill" transform="translate({pill.cx},{height - margin.bottom + 4})">
+                <rect x={-pill.w / 2} y="0" width={pill.w} height="16" rx="3" />
+                <text y="8" dy="0.32em" text-anchor="middle">{pill.text}</text>
+              </g>
+            {/if}
           {/if}
         {/if}
       </svg>
@@ -542,10 +633,12 @@
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
   }
+  /* Items wrap whole: a value never ends up on a line of its own. */
   .legend li {
     display: inline-flex;
     align-items: center;
     gap: 6px;
+    white-space: nowrap;
   }
   .legend .note {
     /* Fixed width so the readout does not shift the legend as the cursor moves (phones wrap instead). */
@@ -630,6 +723,16 @@
     stroke: var(--bg-panel);
     stroke-width: 1.5;
   }
+  .knockout {
+    fill: none;
+    stroke: var(--bg-panel);
+    stroke-width: 3.5;
+    stroke-linejoin: round;
+    stroke-linecap: round;
+  }
+  .knockout.faded {
+    opacity: 0;
+  }
   .line.ghost {
     stroke-width: 1;
     opacity: 0.28;
@@ -651,9 +754,22 @@
     stroke-dasharray: 2 2;
     shape-rendering: crispEdges;
   }
+  /* A pinned (touch) cursor is solid: it stays until tapped again, a tap lands outside or Escape. */
+  .cursor.pinned {
+    stroke-dasharray: none;
+  }
   .dot {
     stroke: var(--bg-panel);
     stroke-width: 2;
+  }
+  .pill rect {
+    fill: var(--bg-overlay);
+    stroke: var(--line-default);
+  }
+  .pill text {
+    fill: var(--text-primary);
+    font-size: var(--type-xs-size);
+    font-variant-numeric: tabular-nums;
   }
   .end-label {
     font-size: var(--type-micro-size);
