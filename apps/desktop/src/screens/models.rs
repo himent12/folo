@@ -350,17 +350,17 @@ impl FoloApp {
                             .child(div().flex().child(cm))
                     } else {
                         // The PR panel holds a plot and its legend: it takes the larger share, so the
-                        // plot keeps ~280 px at 1280; the matrix keeps its 380 px minimum.
+                        // plot keeps ~260 px at 1280; the matrix (42 %, 400 px minimum) fits its headings.
                         div()
                             .flex()
                             .gap(px(16.))
                             .child(
-                                div().flex_grow().flex_basis(gpui::relative(0.62)).min_w_0().flex().child(pr),
+                                div().flex_grow().flex_basis(gpui::relative(0.58)).min_w_0().flex().child(pr),
                             )
                             .child(
                                 div()
                                     .flex_grow()
-                                    .flex_basis(gpui::relative(0.38))
+                                    .flex_basis(gpui::relative(0.42))
                                     .min_w(px(400.))
                                     .flex()
                                     .child(cm),
@@ -540,11 +540,12 @@ impl FoloApp {
         let t = theme(cx);
         let on = self.models_sort.filter(|s| s.0 == key);
         let chevron = |desc: bool| {
-            icon(if desc { "icons/chevron-down.svg" } else { "icons/chevron-up.svg" }, 12., t.text_secondary)
+            icon(if desc { "icons/chevron-down.svg" } else { "icons/chevron-up.svg" }, 12., t.text_primary)
         };
+        // Unsorted columns: a faint up-down mark, a different shape from the active direction.
         let mark = |on: Option<(&'static str, bool)>| match on {
             Some((_, desc)) => chevron(desc),
-            None => icon("icons/chevron-down.svg", 12., alpha(t.text_tertiary, 0.45)),
+            None => icon("icons/chevrons-up-down.svg", 12., t.text_disabled),
         };
         let el = div()
             .id(SharedString::from(format!("sort-{key}")))
@@ -564,7 +565,7 @@ impl FoloApp {
             // Unsorted columns show a faint one, so they read as sortable before the first click.
             .when(right, |d| d.child(mark(on)))
             .child(
-                text(ty::XS, if on.is_some() { t.text_secondary } else { t.text_tertiary })
+                text(ty::XS, if on.is_some() { t.text_primary } else { t.text_tertiary })
                     .font_weight(FontWeight::MEDIUM)
                     .whitespace_nowrap()
                     .child(label),
@@ -887,21 +888,57 @@ impl FoloApp {
         let cell_h = px(32.);
         // A cool sequential ramp: amber stays reserved for warnings.
         let base = t.chart_series[0];
-        let header_row = div().flex().pl(px(LABEL_W)).children(labels.iter().enumerate().map(|(i, l)| {
+        // Column headings get a measured width (the column area as last laid out, split evenly):
+        // a name that doesn't fit shows a short form, in full on hover.
+        let cols = self.cm_cols.clone();
+        // A heading may use its whole cell less a 2 px gap to the next one (medium weight measures
+        // ~4 % wider than the regular face `text_width` sets).
+        let col_w = cols.get().map(|w| (w - px(6.)) / n.max(1) as f32 - px(2.));
+        let header_row = div().flex().pl(px(LABEL_W)).child(
             div()
+                .relative()
                 .flex_1()
                 .min_w_0()
-                .px(px(2.))
-                .when(i == n - 1, |d| d.ml(px(6.)))
                 .flex()
-                .justify_center()
                 .child(
-                    text(ty::XS, if i == n - 1 { t.text_tertiary } else { t.text_secondary })
-                        .font_weight(FontWeight::MEDIUM)
-                        .truncate()
-                        .child(l.clone()),
+                    gpui::canvas(
+                        move |b, window, _| {
+                            if cols.get() != Some(b.size.width) {
+                                cols.set(Some(b.size.width));
+                                window.request_animation_frame();
+                            }
+                        },
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full(),
                 )
-        }));
+                .children(labels.iter().enumerate().map(|(i, l)| {
+                    // "Missed" is never shortened (a class name's short form needs its tooltip).
+                    let fits = i == n - 1
+                        || col_w
+                            .is_none_or(|w| crate::charts::text_width(window, l, ty::XS.size) * 1.04 <= w);
+                    let shown = if fits { l.clone() } else { short_name(l) };
+                    div()
+                        .id(SharedString::from(format!("cm-col-{i}")))
+                        .flex_1()
+                        .min_w_0()
+                        .px(px(2.))
+                        .when(i == n - 1, |d| d.ml(px(6.)))
+                        .flex()
+                        .justify_center()
+                        .when(!fits, |d| d.tooltip(crate::controls::tip(l.clone(), None)))
+                        .child(
+                            text(ty::XS, if i == n - 1 { t.text_tertiary } else { t.text_secondary })
+                                .font_weight(FontWeight::MEDIUM)
+                                .whitespace_nowrap()
+                                .when_some(col_w, |d, w| d.max_w(w).overflow_hidden())
+                                .child(shown),
+                        )
+                })),
+        );
         let rows = ev.confusion.iter().enumerate().map(|(r, row)| {
             div()
                 .flex()
@@ -1175,6 +1212,12 @@ fn num_cell(w: f32, content: impl IntoElement) -> gpui::Div {
 }
 
 /// Fill opacity of an error cell: a square-root ramp over the whole 0–100 % range.
+/// A column heading's short form: the first three letters and a full stop ("hexagon" → "hex.").
+fn short_name(name: &str) -> String {
+    let short: String = name.chars().take(3).collect();
+    if short.chars().count() < name.chars().count() { format!("{short}.") } else { short }
+}
+
 fn err_alpha(frac: f32) -> f32 {
     0.8 * frac.clamp(0., 1.).sqrt()
 }

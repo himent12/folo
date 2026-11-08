@@ -1780,7 +1780,16 @@ impl FoloApp {
                             .items_center()
                             .gap(px(5.))
                             .child(kbd(&t, "Scroll"))
+                            .child(shortcut(&t, &["+", "−"]))
                             .child(text(ty::XS, t.text_tertiary).child("zoom")),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(5.))
+                            .child(kbd(&t, "0"))
+                            .child(text(ty::XS, t.text_tertiary).child("fit")),
                     )
                     .child(
                         div()

@@ -61,12 +61,15 @@ pub fn detail_header(
 }
 
 impl FoloApp {
-    /// A dataset image painted with optional boxes, at a fixed tile size.
+    /// A dataset image painted with optional boxes, at a fixed tile size. `labels` puts class chips
+    /// on the boxes; catalogue previews leave them off (a montage of chips reads as a label wall).
+    #[allow(clippy::too_many_arguments)]
     pub fn tile(
         &mut self,
         dataset: &str,
         meta: &ImageInfo,
         boxes: bool,
+        labels: bool,
         fit: Fit,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -93,7 +96,7 @@ impl FoloApp {
         };
         // Class names on the boxes (14 px chips in small views; none on boxes under 20 px), so a
         // class never has to be matched by colour alone.
-        image_canvas(&t, img, dims, draw, fit, true)
+        image_canvas(&t, img, dims, draw, fit, labels)
     }
 
     /// A centred error panel with retry.

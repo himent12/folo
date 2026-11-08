@@ -678,7 +678,7 @@ impl FoloApp {
                             row = row.child(div().w(px(cell_w)).flex_none());
                             continue;
                         };
-                        let tile_el = this.tile(&ds_id, meta, this.ds_boxes, fit, cx);
+                        let tile_el = this.tile(&ds_id, meta, this.ds_boxes, true, fit, cx);
                         let key = format!("tile-{}", meta.id);
                         let n = meta.boxes.len();
                         let dsid = ds_id.to_string();
