@@ -411,15 +411,22 @@ fn paint_line_chart(
     let mut y0 = f32::INFINITY;
     let mut y1 = f32::NEG_INFINITY;
     for s in &spec.series {
-        for &(x, y) in s.points.iter() {
-            if !x.is_finite() || !y.is_finite() {
-                continue;
+        // [(min x, min y), (max x, max y)], computed once per data revision.
+        let e = memo(&s.points, [2, 0, 0, 0], |pts| {
+            let mut lo = (f32::INFINITY, f32::INFINITY);
+            let mut hi = (f32::NEG_INFINITY, f32::NEG_INFINITY);
+            for &(x, y) in pts {
+                if x.is_finite() && y.is_finite() {
+                    lo = (lo.0.min(x), lo.1.min(y));
+                    hi = (hi.0.max(x), hi.1.max(y));
+                }
             }
-            x0 = x0.min(x);
-            x1 = x1.max(x);
-            y0 = y0.min(y);
-            y1 = y1.max(y);
-        }
+            vec![lo, hi]
+        });
+        x0 = x0.min(e[0].0);
+        y0 = y0.min(e[0].1);
+        x1 = x1.max(e[1].0);
+        y1 = y1.max(e[1].1);
     }
     if let Some((a, b)) = spec.x_range {
         x0 = a;

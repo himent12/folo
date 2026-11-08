@@ -1017,13 +1017,20 @@ impl Backend for MockBackend {
     fn events(&self, id: &str) -> ApiResult<Receiver<RunEvent>> {
         self.check()?;
         let (tx, rx) = channel();
-        let (live, curve, spe, epochs, status) = {
+        let (live, curve, spe, epochs, status, log_mark) = {
             let runs = self.runs.lock().unwrap();
             let f = runs
                 .iter()
                 .find(|f| f.run.id == id)
                 .ok_or_else(|| ApiError::new("run_not_found", format!("No run {id}")))?;
-            (f.live, f.curve.clone(), f.run.steps_per_epoch, f.run.epochs, Self::snapshot(f).status)
+            (
+                f.live,
+                f.curve.clone(),
+                f.run.steps_per_epoch,
+                f.run.epochs,
+                Self::snapshot(f).status,
+                f.logs.len(),
+            )
         };
         let _ = tx.send(RunEvent::Status(StatusEvent { status, error: None }));
         let Some((base, at)) = live else { return Ok(rx) };
@@ -1035,10 +1042,26 @@ impl Backend for MockBackend {
             let mut sent = (base + (at.elapsed().as_secs_f64() / STEP_DT) as u32).min(total);
             loop {
                 std::thread::sleep(Duration::from_millis(100));
-                // Stopped through the API: report it and end the stream.
-                let stopped =
-                    runs.lock().unwrap().iter().find(|f| f.run.id == run_id).is_none_or(|f| f.live.is_none());
-                if stopped {
+                // Stopped through the API: flush the steps up to the stop point and the stop's log
+                // lines, then report the terminal status and end the stream.
+                let stop = runs
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|f| f.run.id == run_id)
+                    .filter(|f| f.live.is_none())
+                    .map(|f| (f.step, f.logs.get(log_mark..).map(<[LogLine]>::to_vec).unwrap_or_default()));
+                if let Some((stop_step, lines)) = stop {
+                    while sent < stop_step {
+                        sent += 1;
+                        let _ = tx.send(RunEvent::Step(curve.step(sent)));
+                        if sent % spe == 0 {
+                            let _ = tx.send(RunEvent::Epoch(curve.epoch(sent / spe)));
+                        }
+                    }
+                    for l in lines {
+                        let _ = tx.send(RunEvent::Log(l));
+                    }
                     let _ =
                         tx.send(RunEvent::Status(StatusEvent { status: RunStatus::Stopped, error: None }));
                     return;
@@ -1285,6 +1308,26 @@ mod tests {
         assert!(m.stop_run(LIVE_ID).is_err());
         assert!(MockBackend::new(0, true).failing().runs().is_err());
         assert!(MockBackend::new(0, true).empty().datasets().unwrap().is_empty());
+    }
+
+    #[test]
+    fn stopping_flushes_the_stream() {
+        let m = MockBackend::new(500, false);
+        let rx = m.events(LIVE_ID).unwrap();
+        std::thread::sleep(Duration::from_millis(150));
+        let stopped = m.stop_run(LIVE_ID).unwrap();
+        let mut last_step = 0;
+        let mut saw_log = false;
+        loop {
+            match rx.recv_timeout(Duration::from_secs(5)).expect("stream ends with a status") {
+                RunEvent::Step(s) => last_step = s.step,
+                RunEvent::Log(l) => saw_log |= l.message.contains("checkpoint"),
+                RunEvent::Status(s) if s.status == RunStatus::Stopped => break,
+                _ => {}
+            }
+        }
+        assert_eq!(last_step, stopped.step, "every step up to the stop point is delivered");
+        assert!(saw_log, "the stop's log lines are delivered");
     }
 
     #[test]

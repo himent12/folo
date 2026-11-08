@@ -1052,7 +1052,11 @@ impl FoloApp {
     /// Put a new image on the Playground stage; its old detections never paint over it.
     fn set_play_image(&mut self, img: PlayImage, cx: &mut Context<Self>) {
         self.play_image_gen += 1;
-        self.play_image = Some(img);
+        // Images live in the GPU sprite atlas until dropped explicitly. Called from fetch
+        // callbacks, where no window is mid-update, so every window's atlas is reached.
+        if let Some(old) = self.play_image.replace(img) {
+            cx.drop_image(old.image, None);
+        }
         self.play_pred = Load::Idle;
         self.play_pred_for = None;
         self.play_hover = None;

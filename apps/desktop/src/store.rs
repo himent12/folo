@@ -298,13 +298,17 @@ impl Store {
     pub fn install_logs(&mut self, run_id: &str, lines: ApiResult<Vec<LogLine>>) {
         let mut load: Load<Vec<LogLine>> = lines.into();
         if let Load::Ready(lines) = &mut load {
+            let mut seen: std::collections::HashSet<(String, String)> =
+                lines.iter().map(|l| (l.t.clone(), l.message.clone())).collect();
             for ev in self.pending.get(run_id).into_iter().flatten() {
                 if let RunEvent::Log(l) = ev
-                    && !lines.iter().rev().take(50).any(|x| x == l)
+                    && seen.insert((l.t.clone(), l.message.clone()))
                 {
                     lines.push(l.clone());
                 }
             }
+            // RFC 3339 UTC timestamps sort lexically; stable, so equal times keep arrival order.
+            lines.sort_by(|a, b| a.t.cmp(&b.t));
         }
         self.logs.insert(run_id.to_string(), load);
         self.prune_pending(run_id);
@@ -440,6 +444,26 @@ mod tests {
         store2.apply(id, RunEvent::Step(history.steps[100].clone()));
         store2.install_run_data(id, Ok(RunData::new(history.clone(), 100)));
         assert_eq!(store2.run_data[id].ready().unwrap().metrics.steps.len(), history.steps.len());
+    }
+
+    #[test]
+    fn log_merge_dedupes_large_overlaps_in_order() {
+        let mut store = Store::new(Arc::new(MockBackend::new(0, true)));
+        let id = "run_x";
+        store.logs.insert(id.into(), Load::Loading);
+        let line = |i: i64| LogLine {
+            t: crate::api::time::format(1_000 + i),
+            level: LogLevel::Info,
+            message: format!("line {i}"),
+        };
+        // 80 buffered lines, of which the first 60 are already in the snapshot.
+        for i in 40..120 {
+            store.apply(id, RunEvent::Log(line(i)));
+        }
+        store.install_logs(id, Ok((0..100).map(line).collect()));
+        let got = store.logs[id].ready().unwrap();
+        assert_eq!(got.len(), 120);
+        assert!(got.windows(2).all(|w| w[0].t <= w[1].t));
     }
 
     #[test]
