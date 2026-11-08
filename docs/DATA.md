@@ -11,7 +11,7 @@ produces plain buffers that the trainer wraps in tensors.
 |---|---|
 | `*.yaml` / `*.yml` file | YOLO `data.yaml` |
 | `*.json` file | COCO instances JSON (one split, guessed from the name) |
-| directory with `data.yaml` / `dataset.yaml` (or any YAML with a `train` key) | YOLO |
+| directory with `data.yaml` / `dataset.yaml` (or any YAML with a `train` key) | YOLO (a YAML without split keys, e.g. only `names`, reads the `images/` + `labels/` layout next to it) |
 | directory with `annotations/instances_*.json`, COCO JSON at the root, or `train|val|valid|test/*.json` (Roboflow) | COCO |
 | directory with `images/` + `labels/` (or `train/images`, `valid/images`, ...) and no YAML | YOLO, names from `classes.txt` or `class0..` |
 
@@ -37,6 +37,10 @@ produces plain buffers that the trainer wraps in tensors.
 - Category ids (from all JSON files) are sorted and remapped to `0..n`; names come from `categories`.
 - An image with an annotation that has a bad `bbox` or an unknown category is skipped as a broken label.
 
+`LoadedDataset::sources` lists every file and folder a dataset was read from (description files, split folders and
+image lists, folders of every candidate image and label, split paths that do not exist yet), so callers such as
+the server can detect changes.
+
 ### Robustness
 Nothing in a dataset panics the loader. While opening, every image header is read in parallel (`verify_images`,
 default on): missing and undecodable images are skipped and recorded in `LoadedDataset::report` with an `IssueKind`
@@ -50,6 +54,19 @@ training, the loader records it (`DataLoader::failures`) and uses the next reada
 `broken_labels`, `class_counts`, `box_size_hist` (size = `sqrt(w * h)` of the normalised box, edges
 `[0, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1]`) and `boxes_per_image_hist` (edges `[0, 1, 2, 4, 8, 16, 32]`). Bins are
 `[lo, hi)`; values past the last edge count in the last bin.
+
+## Validation and conversion
+- `check::check(path, &CheckOptions { format, decode })` reads every label line and every image (fully decoded
+  unless `decode: false`) and returns a `CheckReport` with one `CheckIssue { kind, file, line, message, fix }` per
+  problem: `broken_label`, `class_overflow`, `out_of_range_box`, `corrupt_image`, `missing_image` (errors: the loader
+  skips the image), `clipped_box`, `zero_size_box`, `duplicate_label`, `duplicate_image` (exact byte duplicates,
+  128-bit content hash), `other` (warnings) and `empty_image` (info). It never modifies files; `fix` says what a
+  cleanup would do. The YOLO line rules are the loader's (`dataset::labels::parse_line`), so the checker and the
+  loader cannot disagree. `folo dataset check` prints it (docs/CLI.md).
+- `convert::convert(&loaded, out, Format::Yolo | Format::Coco)` writes an opened dataset in the other format
+  (images copied unchanged, stems made unique per split, COCO category ids 1-based).
+- `detect_format(path, format)` finds the format without reading labels; a path with nothing recognisable fails with
+  a `DataError::Format` whose message starts with `UNDETECTED`.
 
 ## Geometry
 - Pixel `i` covers `[i, i + 1)`. Resize is bilinear with aligned pixel centres, so box edges scale exactly by
@@ -94,10 +111,13 @@ training, the loader records it (`DataLoader::failures`) and uses the next reada
 
 ## Synthetic shapes
 `synthetic::write_yolo(&cfg, dir, ImageFormat::Jpeg(90) | Png)` writes `images/{train,val}`, `labels/{train,val}`
-and `data.yaml`; `SyntheticDataset::new(cfg, split)` renders the same images on demand. Classes are any of
+and `data.yaml` (`write_yolo_with_progress` also reports each finished image); `SyntheticDataset::new(cfg, split)` renders the same images on demand. Classes are any of
 `circle, square, triangle, star, ring, cross, hexagon, heart`, drawn with anti-aliased signed distance fields, soft
 shadows and light shading on gradient, marbled, striped or grainy backgrounds, with small objects, partial occlusion,
 objects cut by the frame and some empty images. Output is a pure function of the config and seed.
+`SyntheticConfig::classes` are shape names; `names` (optional, same length) are the class names written to
+`data.yaml`. `shapes_for(&names)` picks shapes for arbitrary names: a shape name keeps its shape, others take the
+next unclaimed shape (at most 8 classes).
 `cargo run --release -p folo-data --example synth_sheet -- sheet.png 0 --boxes` renders a contact sheet.
 
 ## Benchmark

@@ -12,15 +12,16 @@ use std::sync::{Arc, RwLock};
 
 use axum::http::StatusCode;
 use folo_api::{
-    Arch, BBox, ClassMetrics, Dataset, DatasetFormat, ExportFormat, ExportResult, GpuBackend, GpuInfo,
-    ImageInfo, ImagePage, LogLine, Model, ModelEval, ModelMetrics, PrCurve, PredictResponse, RegisterDataset,
-    Run, RunSamples, Sample, ScoredBox, Split, Splits, SyntheticDataset, TrainConfig,
+    Arch, BBox, ClassMetrics, Dataset, DatasetFormat, DatasetIssue, ExportFormat, ExportResult, GpuBackend,
+    GpuInfo, ImageInfo, ImagePage, IssuePage, IssueSeverity, LogLine, Model, ModelEval, ModelMetrics,
+    PrCurve, PredictResponse, RegisterDataset, Run, RunSamples, Sample, ScoredBox, Split, Splits,
+    SyntheticDataset, TrainConfig,
 };
 
-use crate::disk::DiskDataset;
 use crate::error::{Error, Result};
+use crate::index::{Index, read_image};
 use crate::stats::StatsBuilder;
-use crate::store::{ImageData, ImageQuery, PredictInput, PredictSource, Store, Subscription};
+use crate::store::{ImageData, ImageQuery, IssueQuery, PredictInput, PredictSource, Store, Subscription};
 use crate::util::{Rng, fnv1a, mix64, noise, parse_rfc3339, rfc3339, unique_id, unix_now};
 use runs::{Curve, LiveClock, SimRun, Timeline, arch_spec};
 use scene::{Scene, Theme};
@@ -112,6 +113,66 @@ impl ProcDataset {
             .ok_or_else(|| Error::not_found("image", image_id))
     }
 
+    /// Deterministic `folo dataset check` findings consistent with the stats: one `broken_label` per broken label
+    /// file (those images are not listed, as the loader skips them), an `empty_image` per image without boxes, and
+    /// a sprinkle of warnings (boxes clipped at the frame, a duplicated image) chosen by the seed.
+    fn issues(&self) -> Vec<DatasetIssue> {
+        let issue = |kind: &str, severity, file: String, line: Option<u32>, message: String| DatasetIssue {
+            kind: kind.into(),
+            severity,
+            file,
+            line,
+            message,
+        };
+        let mut out = Vec::new();
+        let n = self.labels.len() as u64;
+        for k in 0..self.stats.broken_labels {
+            let message = match k % 3 {
+                0 => "expected 5 values (class cx cy w h) or a polygon, got 4 (the loader skips this image)"
+                    .into(),
+                1 => format!(
+                    "class id {} out of range for {} classes (the loader skips this image)",
+                    self.meta.classes.len() + k as usize,
+                    self.meta.classes.len()
+                ),
+                _ => "coordinates out of [0, 1]: labels must be normalised (the loader skips this image)"
+                    .into(),
+            };
+            let kind = ["broken_label", "class_overflow", "out_of_range_box"][(k % 3) as usize];
+            let file = format!("labels/train/{:06}.txt", n + k);
+            out.push(issue(kind, IssueSeverity::Error, file, Some(1 + (k % 4) as u32), message));
+        }
+        for i in 0..n {
+            let split = self.split_of(i).as_str();
+            let labels = &self.labels[i as usize];
+            if labels.is_empty() {
+                let file = format!("images/{split}/{i:06}.jpg");
+                out.push(issue(
+                    "empty_image",
+                    IssueSeverity::Info,
+                    file,
+                    None,
+                    "no label file (background image)".into(),
+                ));
+                continue;
+            }
+            let h = mix64(self.seed ^ 0x155e ^ i);
+            if h.is_multiple_of(97) {
+                let line = 1 + (h >> 8) % labels.len() as u64;
+                let file = format!("labels/{split}/{i:06}.txt");
+                let message = "box extends slightly past the image edge".into();
+                out.push(issue("clipped_box", IssueSeverity::Warning, file, Some(line as u32), message));
+            }
+            if h % 389 == 1 && i > 0 {
+                let j = (h >> 16) % i;
+                let file = format!("images/{split}/{i:06}.jpg");
+                let message = format!("same bytes as images/{}/{j:06}.jpg", self.split_of(j).as_str());
+                out.push(issue("duplicate_image", IssueSeverity::Warning, file, None, message));
+            }
+        }
+        out
+    }
+
     fn info(&self, i: u64) -> ImageInfo {
         let split = self.split_of(i);
         ImageInfo {
@@ -127,28 +188,28 @@ impl ProcDataset {
 
 enum DatasetEntry {
     Proc(ProcDataset),
-    Disk(DiskDataset),
+    Disk(Dataset, Box<Index>),
 }
 
 impl DatasetEntry {
     fn meta(&self) -> &Dataset {
         match self {
             DatasetEntry::Proc(d) => &d.meta,
-            DatasetEntry::Disk(d) => &d.meta,
+            DatasetEntry::Disk(meta, _) => meta,
         }
     }
 
     fn with_stats(&self) -> Dataset {
         let (meta, stats) = match self {
             DatasetEntry::Proc(d) => (&d.meta, &d.stats),
-            DatasetEntry::Disk(d) => (&d.meta, &d.stats),
+            DatasetEntry::Disk(meta, index) => (meta, &index.stats),
         };
         Dataset { stats: Some(stats.clone()), ..meta.clone() }
     }
 
     fn list_images(&self, q: &ImageQuery) -> ImagePage {
         match self {
-            DatasetEntry::Disk(d) => d.list_images(q),
+            DatasetEntry::Disk(_, index) => index.list_images(q),
             DatasetEntry::Proc(d) => {
                 let matches = |i: u64| {
                     q.split.is_none_or(|s| s == d.split_of(i))
@@ -164,7 +225,7 @@ impl DatasetEntry {
 
     fn image(&self, image_id: &str, thumb: Option<u32>) -> Result<ImageData> {
         match self {
-            DatasetEntry::Disk(d) => d.image(image_id, thumb),
+            DatasetEntry::Disk(_, index) => read_image(&index.image_path(image_id)?, thumb, None),
             DatasetEntry::Proc(d) => {
                 let i = d.index(image_id)?;
                 let scene = Scene::generate(d.theme, &d.meta.classes, d.w, d.h, d.seed, i);
@@ -178,11 +239,18 @@ impl DatasetEntry {
     /// `(width, height, truth)` of an image.
     fn truth(&self, image_id: &str) -> Result<(u32, u32, Vec<BBox>)> {
         match self {
-            DatasetEntry::Disk(d) => d.truth(image_id),
+            DatasetEntry::Disk(_, index) => index.truth(image_id),
             DatasetEntry::Proc(d) => {
                 let i = d.index(image_id)?;
                 Ok((d.w, d.h, d.labels[i as usize].clone()))
             }
+        }
+    }
+
+    fn list_issues(&self, q: &IssueQuery) -> IssuePage {
+        match self {
+            DatasetEntry::Disk(_, index) => index.list_issues(q),
+            DatasetEntry::Proc(d) => q.page(d.issues().iter()),
         }
     }
 
@@ -757,13 +825,31 @@ impl Store for MockStore {
     }
 
     fn register_dataset(&self, req: RegisterDataset) -> Result<Dataset> {
-        let mut ds = DiskDataset::scan(String::new(), req.name, &req.path, req.format, rfc3339(unix_now()))?;
+        let index = Index::build(&req.path, req.format, &[])?;
         let mut list = self.datasets.write().unwrap();
-        ds.meta.id = unique_id("ds", fnv1a(req.path.as_bytes()) ^ unix_now().to_bits(), |id| {
+        let id = unique_id("ds", fnv1a(req.path.as_bytes()) ^ unix_now().to_bits(), |id| {
             list.iter().any(|d| d.meta().id == id)
         });
-        let out = Dataset { stats: Some(ds.stats.clone()), ..ds.meta.clone() };
-        list.push(Arc::new(DatasetEntry::Disk(ds)));
+        let name = req.name.filter(|n| !n.trim().is_empty()).unwrap_or_else(|| {
+            index
+                .base
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "dataset".into())
+        });
+        let meta = Dataset {
+            id,
+            name,
+            path: req.path,
+            format: index.format,
+            classes: index.classes.clone(),
+            created: rfc3339(unix_now()),
+            splits: index.splits,
+            stats: None,
+        };
+        let entry = DatasetEntry::Disk(meta, Box::new(index));
+        let out = entry.with_stats();
+        list.push(Arc::new(entry));
         Ok(out)
     }
 
@@ -811,6 +897,10 @@ impl Store for MockStore {
 
     fn list_images(&self, id: &str, q: &ImageQuery) -> Result<ImagePage> {
         Ok(self.dataset(id)?.list_images(q))
+    }
+
+    fn list_issues(&self, id: &str, q: &IssueQuery) -> Result<IssuePage> {
+        Ok(self.dataset(id)?.list_issues(q))
     }
 
     fn image(&self, id: &str, image_id: &str, thumb: Option<u32>) -> Result<ImageData> {

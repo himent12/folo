@@ -27,6 +27,32 @@ pub struct ImageQuery {
     pub class: Option<u32>,
 }
 
+/// Filter and page of `GET /api/datasets/{id}/issues`.
+#[derive(Clone, Debug, Default)]
+pub struct IssueQuery {
+    /// Only issues of this kind (one of [`folo_api::ISSUE_KINDS`]).
+    pub kind: Option<String>,
+    /// Skip this many matching issues.
+    pub offset: u64,
+    /// Return at most this many.
+    pub limit: u64,
+}
+
+impl IssueQuery {
+    /// The page of `issues` this query selects.
+    pub fn page<'a>(&self, issues: impl Iterator<Item = &'a folo_api::DatasetIssue>) -> folo_api::IssuePage {
+        let mut total = 0u64;
+        let mut page = Vec::new();
+        for i in issues.filter(|i| self.kind.as_ref().is_none_or(|k| *k == i.kind)) {
+            if total >= self.offset && (page.len() as u64) < self.limit {
+                page.push(i.clone());
+            }
+            total += 1;
+        }
+        folo_api::IssuePage { total, issues: page }
+    }
+}
+
 /// Encoded image bytes with their MIME type.
 #[derive(Clone, Debug)]
 pub struct ImageData {
@@ -92,6 +118,8 @@ pub trait Store: Send + Sync + 'static {
     fn get_dataset(&self, id: &str) -> Result<Dataset>;
     /// A page of images.
     fn list_images(&self, id: &str, q: &ImageQuery) -> Result<folo_api::ImagePage>;
+    /// A page of the dataset's issues (the `folo dataset check` findings, computed with the stats).
+    fn list_issues(&self, id: &str, q: &IssueQuery) -> Result<folo_api::IssuePage>;
     /// An image (original bytes, or a JPEG thumbnail whose long side is `thumb`).
     fn image(&self, id: &str, image_id: &str, thumb: Option<u32>) -> Result<ImageData>;
     /// Unregisters a dataset (never deletes files).

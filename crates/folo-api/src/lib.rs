@@ -246,7 +246,8 @@ pub struct SyntheticDataset {
     /// Number of images (split 80 / 20 into train / val).
     #[serde(default = "default_synth_images")]
     pub images: u64,
-    /// Class names; `circle`, `square`, `triangle` and `star` get those shapes, other names cycle through them.
+    /// Class names (1 to 8, distinct); `circle`, `square`, `triangle`, `star`, `ring`, `cross`, `hexagon` and `heart`
+    /// get those shapes, other names the next shape no name has claimed.
     #[serde(default = "default_synth_classes")]
     pub classes: Vec<String>,
     /// Square image side in pixels.
@@ -272,6 +273,61 @@ pub struct ImagePage {
     pub total: u64,
     /// This page.
     pub images: Vec<ImageInfo>,
+}
+
+/// `GET /api/datasets/{id}/issues`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct IssuePage {
+    /// Issues matching the filter (before `offset` / `limit`).
+    pub total: u64,
+    /// This page.
+    pub issues: Vec<DatasetIssue>,
+}
+
+/// Every issue kind, in the order `folo dataset check` reports counts. Errors: `broken_label`, `class_overflow`,
+/// `out_of_range_box`, `corrupt_image`, `missing_image`; warnings: `clipped_box`, `zero_size_box`,
+/// `duplicate_label`, `duplicate_image`, `other`; info: `empty_image`.
+pub const ISSUE_KINDS: [&str; 11] = [
+    "broken_label",
+    "class_overflow",
+    "out_of_range_box",
+    "clipped_box",
+    "zero_size_box",
+    "duplicate_label",
+    "corrupt_image",
+    "missing_image",
+    "duplicate_image",
+    "empty_image",
+    "other",
+];
+
+/// How serious a [`DatasetIssue`] is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum IssueSeverity {
+    /// The loader skips the image.
+    Error,
+    /// Fixed up on load, or suspicious.
+    Warning,
+    /// Not a problem (a background image).
+    Info,
+}
+
+/// One problem in a dataset; the same object as an entry of `folo dataset check --json`'s `issues` (which may also
+/// carry a `fix`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DatasetIssue {
+    /// One of [`ISSUE_KINDS`].
+    pub kind: String,
+    /// Severity of the kind.
+    pub severity: IssueSeverity,
+    /// The file it is in, relative to the dataset root with `/` separators (absolute outside it): a label file
+    /// for label problems, else the image or the annotation JSON.
+    pub file: String,
+    /// 1-based line in `file` for label-line problems, else `null`.
+    pub line: Option<u32>,
+    /// Human-readable details.
+    pub message: String,
 }
 
 /// One dataset image with its ground-truth boxes.

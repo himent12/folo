@@ -1,8 +1,8 @@
 //! Datasets: the [`Dataset`] trait, YOLO and COCO readers with format auto-detection, and the load report.
 
 mod coco;
-mod labels;
-mod yolo;
+pub(crate) mod labels;
+pub(crate) mod yolo;
 
 pub use yolo::label_path_for;
 
@@ -290,6 +290,11 @@ pub struct LoadedDataset {
     pub test: FileDataset,
     /// Problems found while loading.
     pub report: LoadReport,
+    /// Every file and folder the dataset was read from, for change detection: the `data.yaml` or COCO JSON files,
+    /// split folders, image lists and images named in the YAML (also ones that do not exist yet), and the folder of
+    /// every candidate image and its label file (also of images that were skipped). A change under any of them may
+    /// change the dataset.
+    pub sources: Vec<PathBuf>,
 }
 
 impl LoadedDataset {
@@ -329,6 +334,25 @@ pub fn open(path: impl AsRef<Path>) -> Result<LoadedDataset> {
 /// COCO; `images/` + `labels/` folders without a YAML mean YOLO as well.
 pub fn open_with(path: impl AsRef<Path>, opts: &OpenOptions) -> Result<LoadedDataset> {
     let path = path.as_ref();
+    match detect(path, opts.format)? {
+        Source::Yaml(yaml) => yolo::open_yaml(&yaml, opts),
+        Source::Coco { root, jsons } => coco::open_jsons(&root, jsons, opts),
+        Source::YoloDir(root) => yolo::open_dir(&root, opts),
+    }
+}
+
+/// Where a dataset's description lives, as found by [`detect`].
+pub(crate) enum Source {
+    /// A YOLO `data.yaml`.
+    Yaml(PathBuf),
+    /// COCO instances JSON files and the dataset root they resolve images against.
+    Coco { root: PathBuf, jsons: Vec<(Split, PathBuf)> },
+    /// A YOLO `images/` + `labels/` folder without a YAML.
+    YoloDir(PathBuf),
+}
+
+/// Finds the dataset at `path` (rules of [`open_with`]) without reading any labels or images.
+pub(crate) fn detect(path: &Path, format: Format) -> Result<Source> {
     if !path.exists() {
         return Err(DataError::io(
             path,
@@ -337,39 +361,54 @@ pub fn open_with(path: impl AsRef<Path>, opts: &OpenOptions) -> Result<LoadedDat
     }
     let ext = path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase());
     if path.is_file() {
-        return match (opts.format, ext.as_deref()) {
-            (Format::Auto | Format::Yolo, Some("yaml" | "yml")) => yolo::open_yaml(path, opts),
+        return match (format, ext.as_deref()) {
+            (Format::Auto | Format::Yolo, Some("yaml" | "yml")) => Ok(Source::Yaml(path.to_path_buf())),
             (Format::Auto | Format::Coco, Some("json")) => {
                 let parent = path.parent().unwrap_or(Path::new("."));
                 let root =
                     if parent.ends_with("annotations") { parent.parent().unwrap_or(parent) } else { parent };
-                coco::open_jsons(root, vec![(coco::guess_split(path), path.to_path_buf())], opts)
+                Ok(Source::Coco {
+                    root: root.to_path_buf(),
+                    jsons: vec![(coco::guess_split(path), path.to_path_buf())],
+                })
             }
             _ => Err(DataError::Format(format!(
-                "{} is not a data.yaml or a COCO .json file (format {:?})",
+                "{} is not a data.yaml or a COCO .json file (format {format:?})",
                 path.display(),
-                opts.format
             ))),
         };
     }
-    let want_yolo = matches!(opts.format, Format::Auto | Format::Yolo);
-    let want_coco = matches!(opts.format, Format::Auto | Format::Coco);
+    let want_yolo = matches!(format, Format::Auto | Format::Yolo);
+    let want_coco = matches!(format, Format::Auto | Format::Coco);
     if want_yolo && let Some(yaml) = yolo::find_yaml(path) {
-        return yolo::open_yaml(&yaml, opts);
+        return Ok(Source::Yaml(yaml));
     }
     if want_coco {
         let jsons = coco::find_jsons(path);
         if !jsons.is_empty() {
-            return coco::open_jsons(path, jsons, opts);
+            return Ok(Source::Coco { root: path.to_path_buf(), jsons });
         }
     }
     if want_yolo && yolo::looks_like_yolo_dir(path) {
-        return yolo::open_dir(path, opts);
+        return Ok(Source::YoloDir(path.to_path_buf()));
     }
     Err(DataError::Format(format!(
-        "could not detect a dataset in {}: expected a data.yaml, COCO instances JSON, or images/ + labels/ folders",
+        "{UNDETECTED} in {}: expected a data.yaml, COCO instances JSON, or images/ + labels/ folders",
         path.display()
     )))
+}
+
+/// Start of the [`DataError::Format`] message when no dataset is found at a path (see [`detect_format`]).
+pub const UNDETECTED: &str = "could not detect a dataset";
+
+/// The format of the dataset at `path` without reading it (`format` restricts the search; `Auto` tries both).
+/// Fails with [`DataError::Io`] when `path` does not exist and with [`DataError::Format`] (message starting with
+/// [`UNDETECTED`]) when nothing there looks like a dataset.
+pub fn detect_format(path: impl AsRef<Path>, format: Format) -> Result<Format> {
+    Ok(match detect(path.as_ref(), format)? {
+        Source::Yaml(_) | Source::YoloDir(_) => Format::Yolo,
+        Source::Coco { .. } => Format::Coco,
+    })
 }
 
 /// How labels for one candidate image are obtained.

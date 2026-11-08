@@ -489,6 +489,7 @@ name = "folo-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "folo-data",
  "folo-gpu",
  "folo-server",
  "serde",
@@ -554,6 +555,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "folo-api",
+ "folo-data",
  "futures-util",
  "http-body-util",
  "image",
@@ -565,6 +567,7 @@ dependencies = [
  "tower",
  "tower-http",
  "tracing",
+ "walkdir",
 ]
 
 [[package]]

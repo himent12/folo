@@ -58,7 +58,23 @@ pub(crate) fn looks_like_yolo_dir(dir: &Path) -> bool {
         || ["train", "valid", "val"].iter().any(|s| dir.join(s).join("images").is_dir())
 }
 
+/// The image files of a YOLO dataset before their labels are read.
+pub(crate) struct YoloScan {
+    pub root: PathBuf,
+    /// Class names from the YAML or `classes.txt`, if any.
+    pub names: Option<Vec<String>>,
+    /// Image paths per split, sorted within each source.
+    pub splits: BTreeMap<Split, Vec<PathBuf>>,
+    pub report: LoadReport,
+    /// The YAML, split sources (folders, lists, images) and split paths that do not exist yet.
+    pub sources: Vec<PathBuf>,
+}
+
 pub(crate) fn open_yaml(yaml: &Path, opts: &OpenOptions) -> Result<LoadedDataset> {
+    finish(scan_yaml(yaml)?, opts)
+}
+
+pub(crate) fn scan_yaml(yaml: &Path) -> Result<YoloScan> {
     let text = std::fs::read_to_string(yaml).map_err(|e| DataError::io(yaml, e))?;
     let v: Value = serde_yaml::from_str(&text)
         .map_err(|e| DataError::Format(format!("{}: invalid YAML: {e}", yaml.display())))?;
@@ -67,6 +83,7 @@ pub(crate) fn open_yaml(yaml: &Path, opts: &OpenOptions) -> Result<LoadedDataset
     }
     let yaml_dir = yaml.parent().unwrap_or(Path::new(".")).to_path_buf();
     let mut report = LoadReport::default();
+    let mut deps = vec![yaml.to_path_buf()];
     let root = match v.get("path").and_then(scalar_string) {
         Some(p) if !p.is_empty() => {
             let p = PathBuf::from(p);
@@ -79,6 +96,8 @@ pub(crate) fn open_yaml(yaml: &Path, opts: &OpenOptions) -> Result<LoadedDataset
                     yaml,
                     format!("`path` {} does not exist; using the YAML's directory", candidate.display()),
                 );
+                // Watched anyway: creating it changes the dataset.
+                deps.push(candidate);
                 yaml_dir.clone()
             }
         }
@@ -98,21 +117,43 @@ pub(crate) fn open_yaml(yaml: &Path, opts: &OpenOptions) -> Result<LoadedDataset
         let mut images = Vec::new();
         for src in sources {
             match resolve(&root, &yaml_dir, &src) {
-                Some(p) => collect_images(&p, &root, &mut images, &mut report),
-                None => report.push(IssueKind::Other, yaml, format!("{split} path {src:?} does not exist")),
+                Some(p) => {
+                    collect_images(&p, &root, &mut images, &mut report);
+                    deps.push(p);
+                }
+                None => {
+                    report.push(IssueKind::Other, yaml, format!("{split} path {src:?} does not exist"));
+                    // Watched anyway: creating it changes the dataset.
+                    deps.push(root.join(&src));
+                }
             }
         }
         splits.insert(split, images);
+    }
+    // A YAML with no split keys at all (just `names`) describes a plain images/ + labels/ folder next to it.
+    if splits.is_empty() && looks_like_yolo_dir(&root) {
+        let mut scan = scan_dir(&root);
+        if names.is_some() {
+            scan.names = names;
+        }
+        report.issues.append(&mut scan.report.issues);
+        scan.report = report;
+        scan.sources.extend(deps);
+        return Ok(scan);
     }
     if splits.get(&Split::Train).is_none_or(|v| v.is_empty())
         && splits.get(&Split::Val).is_none_or(|v| v.is_empty())
     {
         return Err(DataError::Format(format!("{}: no train or val images found", yaml.display())));
     }
-    finish(root, names, splits, opts, report)
+    Ok(YoloScan { root, names, splits, report, sources: deps })
 }
 
 pub(crate) fn open_dir(root: &Path, opts: &OpenOptions) -> Result<LoadedDataset> {
+    finish(scan_dir(root), opts)
+}
+
+pub(crate) fn scan_dir(root: &Path) -> YoloScan {
     let mut report = LoadReport::default();
     let mut splits: BTreeMap<Split, Vec<PathBuf>> = BTreeMap::new();
     let images = root.join("images");
@@ -136,17 +177,17 @@ pub(crate) fn open_dir(root: &Path, opts: &OpenOptions) -> Result<LoadedDataset>
         .find(|p| p.is_file())
         .and_then(|p| std::fs::read_to_string(p).ok())
         .map(|t| t.lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect::<Vec<_>>());
-    finish(root.to_path_buf(), names, splits, opts, report)
+    YoloScan { root: root.to_path_buf(), names, splits, report, sources: vec![root.to_path_buf()] }
 }
 
-fn finish(
-    root: PathBuf,
-    names: Option<Vec<String>>,
-    splits: BTreeMap<Split, Vec<PathBuf>>,
-    opts: &OpenOptions,
-    mut report: LoadReport,
-) -> Result<LoadedDataset> {
+fn finish(scan: YoloScan, opts: &OpenOptions) -> Result<LoadedDataset> {
+    let YoloScan { root, names, splits, mut report, sources } = scan;
     let nc = names.as_ref().map(Vec::len);
+    let mut deps: std::collections::BTreeSet<PathBuf> = sources.into_iter().collect();
+    for image in splits.values().flatten() {
+        deps.extend(image.parent().map(Path::to_path_buf));
+        deps.extend(label_path_for(image).parent().map(Path::to_path_buf));
+    }
     let mut built: BTreeMap<Split, Vec<super::ImageEntry>> = BTreeMap::new();
     for (split, images) in splits {
         let candidates = images
@@ -164,7 +205,8 @@ fn finish(
     });
     let mut take = |s: Split| FileDataset::new(s, classes.clone(), built.remove(&s).unwrap_or_default());
     let (train, val, test) = (take(Split::Train), take(Split::Val), take(Split::Test));
-    Ok(LoadedDataset { format: Format::Yolo, root, classes, train, val, test, report })
+    let sources = deps.into_iter().collect();
+    Ok(LoadedDataset { format: Format::Yolo, root, classes, train, val, test, report, sources })
 }
 
 fn scalar_string(v: &Value) -> Option<String> {

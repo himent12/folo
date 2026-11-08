@@ -121,6 +121,43 @@ export interface DatasetImages {
   images: DatasetImage[];
 }
 
+/** `GET /api/datasets/{id}/issues` (docs/API.md): the `folo dataset check` findings. */
+export type IssueKind =
+  | 'broken_label'
+  | 'class_overflow'
+  | 'out_of_range_box'
+  | 'clipped_box'
+  | 'zero_size_box'
+  | 'duplicate_label'
+  | 'corrupt_image'
+  | 'missing_image'
+  | 'duplicate_image'
+  | 'empty_image'
+  | 'other';
+
+export type IssueSeverity = 'error' | 'warning' | 'info';
+
+export interface DatasetIssue {
+  kind: IssueKind;
+  severity: IssueSeverity;
+  /** Relative to the dataset root (absolute outside it). */
+  file: string;
+  /** 1-based label line, or null. */
+  line: number | null;
+  message: string;
+}
+
+export interface DatasetIssuesQuery {
+  kind?: IssueKind;
+  offset?: number;
+  limit?: number;
+}
+
+export interface DatasetIssues {
+  total: number;
+  issues: DatasetIssue[];
+}
+
 // ---------- Models ----------
 
 export type Arch = 'folo-n' | 'folo-s' | 'folo-m' | 'folo-l' | 'folo-x';
