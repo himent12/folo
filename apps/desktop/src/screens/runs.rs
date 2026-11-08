@@ -110,13 +110,14 @@ impl FoloApp {
         }
         let ids: Vec<String> = visible.iter().map(|r| r.id.clone()).collect();
         let cols = |d: gpui::Div| d.flex().items_center().gap(px(16.)).px(px(16.));
-        // Single-line rows; secondary facts get their own columns as the window allows. Budget
-        // (content width): the core columns need ~780 px; Dataset +136 from 1240, Size · batch
-        // +120 from 1360, Created +96 from 1440.
+        // Single-line rows; secondary facts get their own columns as the window allows, age before
+        // setup (so the default 1280 window tells an hour-old run from a week-old one). Budget
+        // (content width, Run keeps its 180 px): Dataset +136 from 1240, Created +96 from 1280,
+        // Size · batch +120 from 1440.
         let vw = window.viewport_size().width;
         let show_ds = vw >= px(1240.);
-        let wide = vw >= px(1360.);
-        let show_created = vw >= px(1440.);
+        let show_created = vw >= px(1280.);
+        let wide = vw >= px(1440.);
         let head = cols(div())
             .h(px(36.))
             .border_b_1()
