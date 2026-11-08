@@ -21,3 +21,20 @@ Lines: 1 hierarchy & layout · 2 typography · 3 colour & theming · 4 spacing r
 | r3 | Claude Opus 5.5 | 7 | 7 | 6 | 7 | 7 | 6 | 8 | 7 | 8 | 7 | 7 | 7 | 6 |
 | r4 | GPT-6.1 Sol | 7 | 8 | 8 | 8 | 8 | 7 | 7 | 8 | 8 | 7 | 7 | 7 | 7 |
 | r4 | Claude Opus 5.5 | 7 | 6 | 6 | 6.5 | 6.5 | 5.5 | 7 | 6 | 7.5 | 7 | 6.5 | 6.5 | 5.5 |
+
+## Per-line minimum (lower of the two reviewers)
+
+Regressions show up here first: any line that drops from the previous round is fixed or reverted before new work.
+
+| Round | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | min |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| r1 | 7 | 7 | 6 | 7 | 7 | 5 | 6 | 7 | 7 | 5 | 5 | 7 | 5 |
+| r2 | 7 | 7 | 7 | 7 | 7 | 7 | 6 | 7 | 7 | 6 | 5 | 7 | 5 |
+| r3 | 7 | 7 | 6 | 7 | 7 | 6 | 7 | 7 | 8 | 7 | 7 | 7 | 6 |
+| r4 | 7 | 6 ↓ | 6 | 6.5 ↓ | 6.5 ↓ | 5.5 ↓ | 7 | 6 ↓ | 7.5 ↓ | 7 | 6.5 ↓ | 6.5 ↓ | 5.5 |
+
+r4 lowest lines: 6 data visualisation (5.5), 2 typography, 3 colour, 8 consistency (6). Diagnosis: 2, 3 and 8 are
+structural (no single rule for mono vs sans, class colours that changed between legend and box, two accents in light),
+fixed in round 4 by system rules in `design/README.md` rather than per-screen patches; 6 is partly structural (run
+comparison and dense COCO evaluation screens need a different layout, not tweaks).
+
