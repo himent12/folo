@@ -2,7 +2,9 @@
 // Deterministic: everything derives from ids and the clock, so screenshots are comparable between rounds.
 //
 // Scenarios (`?scenario=`): `normal` (default), `empty` (nothing registered yet), `error` (every call fails),
-// `loading` (calls never resolve), for screenshots of those states.
+// `loading` (calls never resolve), `oom` (server inference runs out of GPU memory for every model but folo-n),
+// `gpu-unplugged` (a second GPU is listed until a run asks for it, then `404 device_not_found`), for screenshots of
+// those states.
 
 import { ApiError, type Api, type RunEventHandlers } from '../client';
 import type {
@@ -14,6 +16,7 @@ import type {
   DatasetImagesQuery,
   DatasetIssues,
   DatasetIssuesQuery,
+  IssueCounts,
   ExportFormat,
   ExportResult,
   Health,
@@ -54,7 +57,7 @@ import {
 } from './runs';
 import { COCO80 } from './coco';
 
-export type Scenario = 'normal' | 'empty' | 'error' | 'loading';
+export type Scenario = 'normal' | 'empty' | 'error' | 'loading' | 'oom' | 'gpu-unplugged';
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -139,10 +142,10 @@ function profiles(t0: number): RunProfile[] {
     {
       id: 'run_a2f0',
       name: 'shapes-hard-m',
-      config: config('shapes-hard-m', 'ds_shapes_hard', 'folo-m', 100, { batch: 64, imgsz: 1024 }),
+      config: config('shapes-hard-m', 'ds_shapes_hard', 'folo-m', 100, { batch: 32, imgsz: 960 }),
       classes: 6,
       classEase: [1.1, 1.05, 1, 0.82, 0.95, 0.75],
-      stepsPerEpoch: 63,
+      stepsPerEpoch: 125,
       epochSeconds: 41,
       mapMax: 0.68,
       tau: 15,
@@ -152,7 +155,8 @@ function profiles(t0: number): RunProfile[] {
       terminal: {
         status: 'failed',
         atEpoch: 23.4,
-        error: 'GPU out of memory: tried to allocate 1.19 GiB with 0.41 GiB free (batch 64, imgsz 1024). Try a smaller batch or image size.',
+        // As folo-vision's `Error::summary` words it: the first line of the driver's report in parentheses.
+        error: 'the GPU ran out of memory (wgpu backend: Out of Memory)',
       },
       device: DEVICE,
     },
@@ -261,22 +265,33 @@ export class MockApi implements Api {
     return this.#call(() => ({ status: 'ok' as const, version: '0.1.0', api: 'v1', mock: true }), 20);
   }
 
+  /** `gpu-unplugged`: the second adapter is gone once a run asked for it. */
+  #unplugged = false;
+
+  #gpus(): SystemInfo['gpus'] {
+    const t = Date.now() / 1000;
+    const training = this.#runs.some((p) => progressAt(p, Date.now()).status === 'running');
+    const gpus: SystemInfo['gpus'] = [
+      {
+        ordinal: 0,
+        name: GPU_NAME,
+        backend: 'vulkan' as const,
+        memory_bytes: 16 * 2 ** 30,
+        util: training ? round(0.91 + 0.04 * smoothNoise(5, t / 2), 3) : 0.02,
+      },
+    ];
+    if (this.scenario === 'gpu-unplugged' && !this.#unplugged)
+      gpus.push({ ordinal: 1, name: 'NVIDIA GeForce RTX 3060', backend: 'vulkan' as const, memory_bytes: 12 * 2 ** 30, util: 0 });
+    return gpus;
+  }
+
   system(): Promise<SystemInfo> {
     return this.#call(() => {
       const t = Date.now() / 1000;
-      const training = this.#runs.some((p) => progressAt(p, Date.now()).status === 'running');
       return {
         cpu: { name: 'AMD Ryzen 9 7950X 16-Core Processor', threads: 32, util: round(0.27 + 0.08 * smoothNoise(3, t / 4), 3) },
         memory: { used_bytes: Math.round((21.4 + 0.3 * smoothNoise(4, t / 9)) * 2 ** 30), total_bytes: 64 * 2 ** 30 },
-        gpus: [
-          {
-            ordinal: 0,
-            name: GPU_NAME,
-            backend: 'vulkan' as const,
-            memory_bytes: 16 * 2 ** 30,
-            util: training ? round(0.91 + 0.04 * smoothNoise(5, t / 2), 3) : 0.02,
-          },
-        ],
+        gpus: this.#gpus(),
       };
     }, 60);
   }
@@ -293,6 +308,11 @@ export class MockApi implements Api {
 
   createDataset(body: CreateDataset): Promise<Dataset> {
     return this.#call(() => {
+      // As on the server: a folder that is already registered (by its path, whatever the spelling) answers with the
+      // existing dataset, its name kept.
+      const key = (p: string) => p.trim().replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+      const known = this.#datasets.find((d) => key(d.path) === key(body.path));
+      if (known) return toDataset(known, this.#t0, true);
       throw new ApiError(400, 'dataset_not_found_on_disk', `No YOLO or COCO dataset found at ${body.path}.`, 'The mock server cannot read your disk; connect to folo serve to register folders.');
     }, 400);
   }
@@ -340,7 +360,13 @@ export class MockApi implements Api {
       const matching = all.filter((i) => (!q.kind || i.kind === q.kind) && (!q.severity || i.severity === q.severity));
       const offset = Math.max(0, q.offset ?? 0);
       const limit = Math.max(0, Math.min(1000, q.limit ?? 100));
-      return { total: matching.length, issues: matching.slice(offset, offset + limit) };
+      // `counts` covers the whole dataset whatever the filter, as on the server.
+      const counts: IssueCounts = { error: 0, warning: 0, info: 0, by_kind: {} };
+      for (const i of all) {
+        counts[i.severity]++;
+        counts.by_kind[i.kind] = (counts.by_kind[i.kind] ?? 0) + 1;
+      }
+      return { total: matching.length, issues: matching.slice(offset, offset + limit), counts };
     }, 120);
   }
 
@@ -476,6 +502,10 @@ export class MockApi implements Api {
   createRun(c: TrainConfig): Promise<Run> {
     return this.#call(() => {
       const ds = this.#spec(c.dataset_id);
+      // `gpu-unplugged`: the second adapter goes away as soon as a run asks for it.
+      if (this.scenario === 'gpu-unplugged' && c.device === 'gpu:1') this.#unplugged = true;
+      const gpu = /^gpu:(\d+)$/.exec(c.device);
+      if (gpu && !this.#gpus().some((g) => g.ordinal === Number(gpu[1]))) throw this.#noDevice(c.device);
       const now = Date.now();
       const id = `run_${(hash(c.name + now + this.#nextId++) & 0xffff).toString(16).padStart(4, '0')}`;
       const sizeIdx = ['folo-n', 'folo-s', 'folo-m', 'folo-l', 'folo-x'].indexOf(c.arch);
@@ -499,6 +529,17 @@ export class MockApi implements Api {
       this.#runs.unshift(p);
       return toRun(p, now);
     }, 300);
+  }
+
+  /** `404 device_not_found` in the real server's words. */
+  #noDevice(device: string): ApiError {
+    const gpus = this.#gpus();
+    return new ApiError(
+      404,
+      'device_not_found',
+      `device ${device} is not available: this machine has no such GPU; FOLO can use ${['cpu', ...gpus.map((g) => `gpu:${g.ordinal}`)].join(', ')}`,
+      `this machine has ${gpus.map((g) => `gpu:${g.ordinal} (${g.name}, ${g.backend})`).join(', ')}, cpu; use device \`auto\` (the GPU when there is one) or \`cpu\``,
+    );
   }
 
   /** Like `folo serve --mock`: resuming needs real checkpoints. */
@@ -670,10 +711,26 @@ export class MockApi implements Api {
   }
 
   predict(input: PredictInput, opts: PredictOptions): Promise<Prediction> {
+    return this.#predict(input, opts, true);
+  }
+
+  /** The demo's in-browser path (the Playground's WebGPU / CPU): the same boxes, never the server's GPU. */
+  predictInPage(input: PredictInput, opts: PredictOptions): Promise<Prediction> {
+    return this.#predict(input, opts, false);
+  }
+
+  #predict(input: PredictInput, opts: PredictOptions, server: boolean): Promise<Prediction> {
     return (async () => {
       const models = await this.models();
       const m = models.find((x) => x.id === opts.model_id);
       if (!m) throw new ApiError(404, 'model_not_found', `No model with id ${opts.model_id}.`);
+      if (server && this.scenario === 'oom' && m.arch !== 'folo-n')
+        throw new ApiError(
+          507,
+          'gpu_out_of_memory',
+          'the GPU ran out of memory (wgpu backend: Out of Memory)',
+          'lower `batch` or `imgsz`, or use a smaller `arch` (folo-n, folo-s)',
+        );
       let width: number;
       let height: number;
       let boxes: Scored[];

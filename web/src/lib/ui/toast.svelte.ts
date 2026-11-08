@@ -1,6 +1,8 @@
 // Toast notifications. `toast.success('Saved')`, `toast.error(err)`; <Toaster /> renders them.
 
 import { ApiError } from '$lib/api/client';
+import { sentence } from '$lib/format';
+import { isOom } from '$lib/oom';
 
 export type ToastTone = 'success' | 'error' | 'info';
 
@@ -37,7 +39,9 @@ class Toasts {
 
   /** Shows an error; ApiErrors contribute their message and hint. */
   error(err: unknown, title = 'Something went wrong') {
-    const detail = err instanceof ApiError ? [err.message, err.hint].filter(Boolean).join(' ') : err instanceof Error ? err.message : String(err);
+    // As ErrorState: out of GPU memory in plain words (the driver's report is for the place that shows details).
+    const message = err instanceof ApiError && isOom(err) ? 'The GPU ran out of memory.' : err instanceof Error ? err.message : String(err);
+    const detail = err instanceof ApiError ? [message, err.hint].filter((x): x is string => !!x).map((x) => sentence(x, true)).join(' ') : message;
     return this.show({ tone: 'error', title, detail });
   }
 

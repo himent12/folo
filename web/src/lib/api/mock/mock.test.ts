@@ -182,3 +182,39 @@ describe('mock runs', () => {
     expect(progressAt(prof, NOW + 60_000).status).toBe('completed');
   });
 });
+
+describe('mock API: PR #69 behaviour', () => {
+  const input = { kind: 'dataset' as const, dataset_id: 'ds_shapes', image_id: '0' };
+
+  it('runs out of GPU memory on the server in the oom scenario, never in the page or for folo-n', async () => {
+    const api = new MockApi('oom', 0);
+    await expect(api.predict(input, { model_id: 'm_shapes_s' })).rejects.toMatchObject({ status: 507, code: 'gpu_out_of_memory' });
+    await expect(api.predictInPage(input, { model_id: 'm_shapes_s' })).resolves.toMatchObject({ model_id: 'm_shapes_s' });
+    await expect(api.predict(input, { model_id: 'm_shapes_n' })).resolves.toMatchObject({ model_id: 'm_shapes_n' });
+  });
+
+  it('answers a GPU the machine does not have with device_not_found', async () => {
+    const api = new MockApi('gpu-unplugged', 0);
+    expect((await api.system()).gpus.map((g) => g.ordinal)).toEqual([0, 1]);
+    const c = (await api.run('run_c19a')).config;
+    await expect(api.createRun({ ...c, name: 'x', device: 'gpu:1' })).rejects.toMatchObject({ status: 404, code: 'device_not_found' });
+    expect((await api.system()).gpus.map((g) => g.ordinal)).toEqual([0]);
+  });
+
+  it('returns the registered dataset for a folder that is already registered', async () => {
+    const api = new MockApi('normal', 0);
+    const before = (await api.datasets()).length;
+    expect((await api.createDataset({ name: 'shapes', path: 'd:\\data\\shapes\\', format: 'auto' })).id).toBe('ds_shapes');
+    expect(await api.datasets()).toHaveLength(before);
+  });
+
+  it('counts every issue whatever the filter, and says what a cleanup would do', async () => {
+    const api = new MockApi('normal', 0);
+    const all = await api.datasetIssues('ds_shapes_hard', { limit: 1000 });
+    const one = await api.datasetIssues('ds_shapes_hard', { severity: 'error' });
+    expect(one.counts).toEqual(all.counts);
+    expect(one.counts?.error).toBe(3);
+    expect(one.issues.every((i) => i.fix?.startsWith('delete line'))).toBe(true);
+    expect(all.issues.filter((i) => i.severity === 'info').every((i) => i.fix === undefined)).toBe(true);
+  });
+});

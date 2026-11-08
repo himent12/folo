@@ -74,6 +74,30 @@ describe('healthChecks', () => {
   });
 });
 
+describe('healthChecks with the check counts', () => {
+  const counts = (error: number, warning: number) => ({ error, warning, info: 0, by_kind: {} });
+
+  it('adds the check warnings, with their issues to list', () => {
+    const h = healthChecks(ds(), st(), counts(0, 4));
+    const w = h.find((x) => x.id === 'check-warnings');
+    expect(w?.title).toBe('4 warnings from the dataset check');
+    expect(w?.issues).toBe('warning');
+    expect(reviewCount(h)).toBe(1);
+  });
+
+  it('counts errors the stats do not (unreadable images), but never twice', () => {
+    expect(healthChecks(ds(), st(), counts(2, 0)).map((x) => x.id)).toEqual(['check-errors']);
+    const broken = healthChecks(ds(), st({ broken_labels: 3 }), counts(3, 0));
+    expect(broken.map((x) => x.id)).toEqual(['broken']);
+    expect(broken[0]?.issues).toBe('error');
+  });
+
+  it('stays as before without counts (older servers)', () => {
+    expect(healthChecks(ds(), st()).map((x) => x.id)).toEqual(['ok']);
+    expect(healthChecks(ds(), st(), counts(0, 0)).map((x) => x.id)).toEqual(['ok']);
+  });
+});
+
 describe('labels', () => {
   it('labels box-size bins in percent of the image side', () => {
     const edges = [0, 0.02, 0.05, 0.1, 0.15, 0.2, 0.3, 0.5, 1];
