@@ -6,7 +6,8 @@ export type Time = string;
 // ---------- Errors ----------
 
 export interface ApiErrorBody {
-  error: { code: string; message: string; hint?: string };
+  /** `hint` is always present on the server, `null` when there is nothing to add. */
+  error: { code: string; message: string; hint: string | null };
 }
 
 // ---------- System ----------
@@ -14,6 +15,8 @@ export interface ApiErrorBody {
 export interface Health {
   status: 'ok';
   version: string;
+  /** API generation, `v1`. */
+  api: string;
   mock: boolean;
 }
 
@@ -51,7 +54,7 @@ export interface DatasetStats {
   broken_labels: number;
   /** Indexed by class id. */
   class_counts: number[];
-  /** Box area as a fraction of the image area. */
+  /** Relative box size, `sqrt(box area / image area)`; counts[i] covers [edges[i], edges[i+1]), the last bin is open. */
   box_size_hist: Histogram;
   boxes_per_image_hist: Histogram;
 }
@@ -91,7 +94,9 @@ export interface Box {
   y2: number;
 }
 
+/** A prediction: a box with its score and class name. */
 export interface ScoredBox extends Box {
+  name: string;
   score: number;
 }
 
@@ -142,6 +147,25 @@ export interface Model {
 }
 
 export type ExportFormat = 'folo-f16' | 'onnx';
+
+/** Precision–recall curve of one class at IoU 0.5, sampled at 101 recall points (0.00..1.00). */
+export interface PrCurve {
+  class: number;
+  recall: number[];
+  /** COCO-interpolated envelope: never rises with recall; its mean is `ap50`. */
+  precision: number[];
+  ap50: number;
+}
+
+/** GET /api/models/{id}/eval: validation results of the model on its dataset's val split. */
+export interface ModelEval {
+  pr: PrCurve[];
+  /** (classes + 1)² counts: rows true class, columns predicted, last row/column background; [n][n] is 0. */
+  confusion: number[][];
+  /** As in Epoch.val.per_class; map50 equals pr[class].ap50. */
+  per_class: ClassMetrics[];
+  images: number;
+}
 
 export interface ExportResult {
   path: string;
@@ -258,6 +282,11 @@ export interface LogLine {
   message: string;
 }
 
+/** GET /api/runs/{id}/logs?limit=N: the most recent lines, oldest first. */
+export interface RunLogs {
+  lines: LogLine[];
+}
+
 /** SSE events on GET /api/runs/{id}/events, keyed by the SSE `event:` name. */
 export interface RunEventMap {
   status: { status: RunStatus; error: string | null };
@@ -268,9 +297,8 @@ export interface RunEventMap {
 
 // ---------- Inference ----------
 
-export interface PredictBox extends ScoredBox {
-  name: string;
-}
+/** Prediction boxes always carry the class name. */
+export type PredictBox = ScoredBox;
 
 export interface Timing {
   preprocess_ms: number;

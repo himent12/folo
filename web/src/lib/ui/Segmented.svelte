@@ -8,6 +8,8 @@
     icon?: IconType;
     /** Extra text after the label, e.g. a count. */
     meta?: string;
+    /** Shown but not selectable (e.g. "coming soon"). */
+    disabled?: boolean;
   }
 
   let {
@@ -29,15 +31,24 @@
 
   function onkeydown(e: KeyboardEvent) {
     const i = options.findIndex((o) => o.value === value);
+    const n = options.length;
+    // Step over disabled options in the direction of travel.
+    const step = (from: number, d: number) => {
+      for (let k = 1; k <= n; k++) {
+        const j = (((from + d * k) % n) + n) % n;
+        if (!options[j]?.disabled) return j;
+      }
+      return from;
+    };
     let j = i;
-    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') j = (i + 1) % options.length;
-    else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') j = (i - 1 + options.length) % options.length;
-    else if (e.key === 'Home') j = 0;
-    else if (e.key === 'End') j = options.length - 1;
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') j = step(i, 1);
+    else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') j = step(i, -1);
+    else if (e.key === 'Home') j = step(-1, 1);
+    else if (e.key === 'End') j = step(n, -1);
     else return;
     e.preventDefault();
     const next = options[j];
-    if (!next) return;
+    if (!next || next.disabled) return;
     select(next.value);
     root.querySelectorAll<HTMLButtonElement>('button')[j]?.focus();
   }
@@ -53,6 +64,7 @@
       tabindex={on ? 0 : -1}
       class:on
       class:icon-only={iconOnly && o.icon}
+      disabled={o.disabled}
       onclick={() => select(o.value)}
       aria-label={iconOnly ? o.label : undefined}
       title={iconOnly ? o.label : undefined}
@@ -112,8 +124,11 @@
   .sm button.icon-only {
     width: calc(var(--control-sm) - 6px);
   }
-  button:hover {
+  button:hover:not(:disabled) {
     color: var(--text-primary);
+  }
+  button:disabled {
+    color: var(--text-disabled);
   }
   button.on {
     background: var(--bg-raised);

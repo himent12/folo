@@ -12,33 +12,31 @@
   import Topbar from '$lib/shell/Topbar.svelte';
   import { installShortcuts } from '$lib/shell/shortcuts';
   import Toaster from '$lib/ui/Toaster.svelte';
+  import Dataset from './routes/Dataset.svelte';
+  import Datasets from './routes/Datasets.svelte';
+  import Model from './routes/Model.svelte';
+  import Models from './routes/Models.svelte';
   import NotFound from './routes/NotFound.svelte';
   import Overview from './routes/Overview.svelte';
   import Run from './routes/Run.svelte';
   import Runs from './routes/Runs.svelte';
   import RunNew from './routes/RunNew.svelte';
   import RunCompare from './routes/RunCompare.svelte';
-  import Placeholder from './routes/Placeholder.svelte';
+  import Playground from './routes/Playground.svelte';
+  import Settings from './routes/Settings.svelte';
 
-  const screens: Partial<Record<RouteName, Component>> = {
+  const screens: Record<Exclude<RouteName, 'not-found'>, Component> = {
     overview: Overview,
     runs: Runs,
     run: Run,
     'run-new': RunNew,
     'run-compare': RunCompare,
-  };
-
-  const titles: Record<string, string> = {
-    datasets: 'Datasets',
-    dataset: 'Dataset',
-    runs: 'Runs',
-    'run-new': 'New run',
-    'run-compare': 'Compare runs',
-    run: 'Run',
-    models: 'Models',
-    model: 'Model',
-    playground: 'Playground',
-    settings: 'Settings',
+    datasets: Datasets,
+    dataset: Dataset,
+    models: Models,
+    model: Model,
+    playground: Playground,
+    settings: Settings,
   };
 
   let paletteOpen = $state(false);
@@ -56,7 +54,7 @@
     });
   });
 
-  const Screen = $derived(screens[router.route.name]);
+  const Screen = $derived(router.route.name === 'not-found' ? null : screens[router.route.name]);
 </script>
 
 <a class="skip" href="#content">Skip to content</a>
@@ -71,10 +69,8 @@
       {#key router.route.path}
         {#if Screen}
           <Screen />
-        {:else if router.route.name === 'not-found'}
-          <NotFound />
         {:else}
-          <Placeholder title={titles[router.route.name] ?? ''} />
+          <NotFound />
         {/if}
       {/key}
     </main>

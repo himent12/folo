@@ -8,7 +8,6 @@
 
 import { untrack } from 'svelte';
 import { hub } from './index.svelte';
-import { MockApi } from './mock';
 import type { Epoch, LogLine, Run, Step } from './types';
 
 const MAX_LOGS = 2000;
@@ -99,10 +98,15 @@ export class LiveRun {
 
       const load = async () => {
         const seq = this.#statusSeq;
-        const [snap, metrics] = await Promise.all([snapshot(), api.runMetrics(runId)]);
+        const [snap, metrics, logs] = await Promise.all([
+          snapshot(),
+          api.runMetrics(runId),
+          // Older servers have no /logs; the live stream still fills the view.
+          api.runLogs(runId, 500).catch(() => ({ lines: [] })),
+        ]);
         if (closed) return;
         this.#absorb(snap.claim() ? snap.run : (this.run ?? snap.run), metrics.steps, metrics.epochs, seq);
-        if (api instanceof MockApi) this.logs = mergeLogs(api.logHistory(runId), this.logs);
+        this.logs = mergeLogs(logs.lines, this.logs);
         this.loading = false;
         this.#bump();
       };

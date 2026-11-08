@@ -1,8 +1,31 @@
 // The screens and states `npm run shoot` captures. Each scene is shot in every theme × viewport listed
 // (default: dark + light, desktop + mobile). `setup(page)` drives the UI into the state before the shot.
+// `search` adds query params to the page URL (e.g. `scenario=empty` for the mock), next to `mock=1`.
 
 /** @typedef {{ name: string, path: string, themes?: ('dark' | 'light')[], viewports?: ('desktop' | 'laptop' | 'mobile')[], advance?: number, search?: string,
  *   fullPage?: boolean, setup?: (page: import('playwright-core').Page, ctx: { vp: string, theme: string }) => Promise<void> }} Scene */
+
+/**
+ * Advances the page's fake clock until `selector` is visible (the mock's latency runs on that clock).
+ * @param {import('playwright-core').Page} page
+ * @param {string} selector
+ */
+async function until(page, selector, ms = 8000) {
+  for (let t = 0; t < ms; t += 250) {
+    if (await page.locator(selector).first().isVisible().catch(() => false)) return;
+    await page.clock.runFor(250);
+  }
+  throw new Error(`timed out waiting for ${selector}`);
+}
+
+/** Runs the Playground on the first sample image and waits for the detections table. */
+async function playgroundResult(/** @type {import('playwright-core').Page} */ page) {
+  await until(page, 'button.sample');
+  await page.locator('button.sample').first().click();
+  await page.mouse.move(0, 0);
+  await until(page, '#pg-panel tbody tr');
+  await page.clock.runFor(500);
+}
 
 /** @type {Scene[]} */
 export const scenes = [
@@ -25,8 +48,89 @@ export const scenes = [
   { name: 'run-compare', path: '/runs/compare?ids=run_7d1e,run_c19a,run_5be3,run_a2f0', viewports: ['desktop', 'mobile'] },
   { name: 'run-compare-empty', path: '/runs/compare', themes: ['dark'], viewports: ['desktop'] },
   { name: 'run-queued', path: '/runs/run_q4n2', themes: ['dark'], viewports: ['desktop'] },
-  { name: 'models', path: '/models' },
-  { name: 'playground', path: '/playground' },
+  { name: 'datasets-empty', path: '/datasets', search: 'scenario=empty' },
+  {
+    name: 'datasets-add',
+    path: '/datasets',
+    fullPage: false,
+    setup: async (page) => {
+      await page.getByRole('button', { name: 'Add dataset' }).first().click();
+      await page.locator('dialog[open]').waitFor();
+    },
+  },
+  { name: 'dataset-stats', path: '/datasets/ds_shapes_hard?tab=stats' },
+  {
+    name: 'dataset-images',
+    path: '/datasets/ds_fasteners?class=2',
+    fullPage: false,
+    setup: async (page) => {
+      await page.locator('.cell img.loaded').nth(6).waitFor();
+      await page.waitForTimeout(400);
+    },
+  },
+  {
+    name: 'dataset-inspector',
+    path: '/datasets/ds_fasteners',
+    fullPage: false,
+    setup: async (page) => {
+      await page.locator('.cell img.loaded').first().waitFor();
+      await page.locator('.cell').nth(1).click();
+      await page.locator('dialog[open] .stage img.loaded').waitFor();
+      await page.locator('dialog[open] .labels button').nth(1).hover();
+      await page.waitForTimeout(200);
+    },
+  },
+  { name: 'runs', path: '/runs' },
+  { name: 'models', path: '/models', viewports: ['desktop', 'laptop', 'mobile'] },
+  { name: 'models-empty', path: '/models', search: 'scenario=empty' },
+  { name: 'models-error', path: '/models', search: 'scenario=error', viewports: ['desktop'] },
+  { name: 'models-loading', path: '/models', search: 'scenario=loading', themes: ['dark'], viewports: ['desktop'] },
+  {
+    name: 'model-detail',
+    path: '/models/m_fast_n',
+    setup: (page) => until(page, '#cm .cell'),
+  },
+  {
+    name: 'model-coco',
+    path: '/models/m_coco_s',
+    themes: ['dark'],
+    viewports: ['desktop'],
+    setup: (page) => until(page, '#cm .cell'),
+  },
+  {
+    name: 'model-export',
+    path: '/models/m_shapes_s',
+    fullPage: false,
+    setup: async (page) => {
+      await until(page, 'button:has-text("Export")');
+      await page.locator('button:has-text("Export")').first().click();
+      await until(page, 'dialog[open] fieldset');
+    },
+  },
+  { name: 'playground-empty', path: '/playground', setup: (page) => until(page, 'button.sample') },
+  { name: 'playground-result', path: '/playground?model=m_hard_s', setup: playgroundResult },
+  {
+    name: 'playground-json',
+    path: '/playground?model=m_hard_s',
+    viewports: ['desktop'],
+    setup: async (page) => {
+      await playgroundResult(page);
+      await page.locator('#pg-json').click();
+      await until(page, '#pg-panel pre');
+    },
+  },
+  {
+    name: 'playground-picker',
+    path: '/playground',
+    fullPage: false,
+    themes: ['dark'],
+    setup: async (page) => {
+      await until(page, 'button:has-text("Pick from a dataset")');
+      await page.locator('button:has-text("Pick from a dataset")').click();
+      await until(page, 'dialog[open] button.thumb');
+      await page.clock.runFor(1000);
+    },
+  },
   { name: 'settings', path: '/settings' },
   { name: 'overview-empty', path: '/', search: 'scenario=empty', viewports: ['desktop', 'mobile'] },
   { name: 'overview-loading', path: '/', search: 'scenario=loading', themes: ['dark'], viewports: ['desktop'] },

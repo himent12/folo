@@ -11,11 +11,13 @@ import type {
   ExportResult,
   Health,
   Model,
+  ModelEval,
   PredictInput,
   PredictOptions,
   Prediction,
   Run,
   RunEventMap,
+  RunLogs,
   RunMetrics,
   RunSamples,
   SystemInfo,
@@ -28,7 +30,7 @@ export class ApiError extends Error {
     readonly status: number,
     readonly code: string,
     message: string,
-    readonly hint?: string,
+    readonly hint?: string | null,
   ) {
     super(message);
     this.name = 'ApiError';
@@ -60,6 +62,8 @@ export interface Api {
 
   models(signal?: AbortSignal): Promise<Model[]>;
   model(id: string, signal?: AbortSignal): Promise<Model>;
+  /** PR curves, confusion matrix and per-class metrics on the model's validation split. */
+  modelEval(id: string, signal?: AbortSignal): Promise<ModelEval>;
   exportModel(id: string, format: ExportFormat): Promise<ExportResult>;
 
   runs(signal?: AbortSignal): Promise<Run[]>;
@@ -67,7 +71,10 @@ export interface Api {
   createRun(config: TrainConfig): Promise<Run>;
   stopRun(id: string): Promise<Run>;
   deleteRun(id: string): Promise<void>;
-  runMetrics(id: string, signal?: AbortSignal): Promise<RunMetrics>;
+  /** Full history; `every` keeps every N-th step (plus the latest) to thin long runs. */
+  runMetrics(id: string, signal?: AbortSignal, every?: number): Promise<RunMetrics>;
+  /** The most recent `limit` log lines, oldest first. */
+  runLogs(id: string, limit?: number, signal?: AbortSignal): Promise<RunLogs>;
   runSamples(id: string, epoch?: number, signal?: AbortSignal): Promise<RunSamples>;
   /** Subscribes to a run's SSE stream. Returns an unsubscribe function. */
   runEvents(id: string, handlers: RunEventHandlers): () => void;
@@ -158,6 +165,9 @@ export class HttpApi implements Api {
   model(id: string, signal?: AbortSignal) {
     return this.#req<Model>('GET', `/models/${encodeURIComponent(id)}`, undefined, signal);
   }
+  modelEval(id: string, signal?: AbortSignal) {
+    return this.#req<ModelEval>('GET', `/models/${encodeURIComponent(id)}/eval`, undefined, signal);
+  }
   exportModel(id: string, format: ExportFormat) {
     return this.#req<ExportResult>('POST', `/models/${encodeURIComponent(id)}/export`, { format });
   }
@@ -177,8 +187,11 @@ export class HttpApi implements Api {
   deleteRun(id: string) {
     return this.#req<void>('DELETE', `/runs/${encodeURIComponent(id)}`);
   }
-  runMetrics(id: string, signal?: AbortSignal) {
-    return this.#req<RunMetrics>('GET', `/runs/${encodeURIComponent(id)}/metrics`, undefined, signal);
+  runMetrics(id: string, signal?: AbortSignal, every?: number) {
+    return this.#req<RunMetrics>('GET', `/runs/${encodeURIComponent(id)}/metrics${qs({ every })}`, undefined, signal);
+  }
+  runLogs(id: string, limit?: number, signal?: AbortSignal) {
+    return this.#req<RunLogs>('GET', `/runs/${encodeURIComponent(id)}/logs${qs({ limit })}`, undefined, signal);
   }
   runSamples(id: string, epoch?: number, signal?: AbortSignal) {
     return this.#req<RunSamples>('GET', `/runs/${encodeURIComponent(id)}/samples${qs({ epoch })}`, undefined, signal);
@@ -200,7 +213,7 @@ export class HttpApi implements Api {
     return this.#req<Prediction>(
       'POST',
       '/predict',
-      { model_id: opts.model_id, dataset_id: input.dataset_id, image_id: input.image_id, conf: opts.conf, iou: opts.iou },
+      { model_id: opts.model_id, dataset_id: input.dataset_id, image_id: input.image_id, conf: opts.conf, iou: opts.iou, max_det: opts.max_det },
       signal,
     );
   }
