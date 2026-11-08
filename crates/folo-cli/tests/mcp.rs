@@ -678,10 +678,12 @@ fn confine_checks_what_a_dataset_reads() {
     // A folder inside the root that is a link (a junction on Windows) to an outside folder.
     let linked = data.join("linked");
     std::fs::create_dir_all(linked.join("labels/train")).unwrap();
-    if make_dir_link(&outside.join("images"), &linked.join("images")) {
-        c.tool_error("register_dataset", json!({ "path": "linked" }), "path_outside_data_dir");
-        remove_dir_link(&linked.join("images"));
-    }
+    assert!(
+        make_dir_link(&outside.join("images"), &linked.join("images")),
+        "could not create a directory link"
+    );
+    c.tool_error("register_dataset", json!({ "path": "linked" }), "path_outside_data_dir");
+    remove_dir_link(&linked.join("images"));
     // YAML forms a hand-written parser might miss: a tab after the colon, an escaped scalar, another manifest name.
     // The reader itself refuses the outside list, so the exact syntax does not matter.
     for (name, yaml) in [
@@ -780,14 +782,28 @@ fn confine_rebuilds_persisted_indexes() {
         "categories": [{ "id": 1, "name": "secretcat" }],
     });
     std::fs::write(ann.join("instances_train.json"), coco.to_string()).unwrap();
-    if !make_dir_link(&ann, &ds.join("annotations")) {
-        return;
-    }
+    assert!(make_dir_link(&ann, &ds.join("annotations")), "could not create a directory link");
+    // And a YOLO dataset whose labels folder links outside (it still indexes under the guard, minus the labels).
+    let y = data.join("yolo");
+    std::fs::create_dir_all(y.join("images/train")).unwrap();
+    image::RgbImage::from_pixel(32, 24, image::Rgb([9, 9, 9])).save(y.join("images/train/a.jpg")).unwrap();
+    let out_labels = root.join("outside-labels");
+    std::fs::create_dir_all(out_labels.join("train")).unwrap();
+    std::fs::write(
+        out_labels.join("train/a.txt"),
+        "0 0.5 0.5 0.25 0.25
+",
+    )
+    .unwrap();
+    assert!(make_dir_link(&out_labels, &y.join("labels")));
     let mut c = spawn(&["--data-dir", data.to_str().unwrap()], None);
     init_old(&mut c);
     let reg = c.ok("register_dataset", json!({ "path": "coco" }));
     assert_eq!(reg["classes"], json!(["secretcat"]));
     let id = reg["id"].as_str().unwrap().to_string();
+    let yreg = c.ok("register_dataset", json!({ "path": "yolo" }));
+    assert_eq!(yreg["stats"]["boxes"], 1);
+    let yid = yreg["id"].as_str().unwrap().to_string();
     c.finish();
 
     let mut c = spawn(&["--confine", "--data-dir", data.to_str().unwrap()], None);
@@ -795,9 +811,20 @@ fn confine_rebuilds_persisted_indexes() {
     let list = c.ok("list_datasets", json!({}));
     assert!(!list.to_string().contains("secretcat"), "{list}");
     assert_eq!(list["total"], 0, "{list}");
+    c.tool_error("get_dataset", json!({ "dataset_id": yid }), "path_outside_data_dir");
     let r = c.call("get_dataset", json!({ "dataset_id": id }));
     assert_eq!(r["isError"], true);
     assert!(!r.to_string().contains("secretcat"), "{r}");
+    c.finish();
+
+    // The confined session's partial index was not cached: without --confine the dataset is whole again.
+    let mut c = spawn(&["--data-dir", data.to_str().unwrap()], None);
+    init_old(&mut c);
+    let d = c.ok("get_dataset", json!({ "dataset_id": yid }));
+    assert_eq!(d["stats"]["boxes"], 1, "{d}");
+    let d = c.ok("get_dataset", json!({ "dataset_id": id }));
+    assert_eq!(d["classes"], json!(["secretcat"]), "{d}");
+    assert_eq!(d["splits"]["train"].as_u64().unwrap() + d["splits"]["val"].as_u64().unwrap(), 1, "{d}");
     c.finish();
 }
 

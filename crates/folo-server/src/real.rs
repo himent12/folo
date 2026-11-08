@@ -317,6 +317,11 @@ fn write_registry(dir: &Path, regs: &[Registration]) -> Result<()> {
 }
 
 fn save_index(dir: &Path, e: &Entry, idx: &Index) {
+    // An index built under a read guard may be partial (refused files skipped); never let it stand in for the
+    // ordinary cache that an unguarded process would trust.
+    if folo_data::guard::installed() {
+        return;
+    }
     let id = e.reg().id;
     let path = index_path(dir, &id);
     let bytes = serde_json::to_vec(idx).expect("indexes serialize");
