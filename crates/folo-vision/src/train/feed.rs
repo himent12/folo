@@ -99,7 +99,7 @@ mod tests {
         let lc =
             LoaderConfig { batch_size: 2, imgsz: 64, workers: 1, u8_images: true, ..LoaderConfig::default() };
         let loader = DataLoader::new(ds, lc).unwrap();
-        ctx.device().destroy();
+        ctx.destroy_device();
         let mut feed = Feeder::new(loader.epoch(0), ctx).unwrap();
         match feed.next() {
             Some(Err(Error::Core(e))) => assert!(folo_gpu::is_device_lost(&e), "{e}"),

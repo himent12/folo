@@ -240,7 +240,8 @@ regular kernels' fused epilogue (`alpha`, row or column bias, any activation).
   as its GEMM, other non-depthwise convs as its implicit-GEMM conv). Depthwise convs, f32 and every gradient keep
   the regular kernels; so do calls with an explicit `TileConfig`.
 - **Fallback.** Anything unexpected leaves the regular kernels in place: an adapter without the configuration, a
-  device that refuses the feature (it is created again without it), a failed self-test, or a tensor-core kernel
+  device that refuses the feature (it is created again without it), a failed self-test (the experimental device is
+  dropped and the context rebuilt on a plain one), or a tensor-core kernel
   that fails to build (tensor cores turn off for the context and the call runs on the regular kernel).
   `ctx.tensor_cores_status()` says which; `ctx.set_tensor_cores(bool)` switches them at run time (A/B tests and
   benchmarks).
@@ -250,7 +251,10 @@ regular kernels' fused epilogue (`alpha`, row or column bias, any activation).
   proves in bounds (asserted for every fragment; the subgroup index is clamped to 0..8), never a storage buffer, so
   wgpu's missing bounds checks on cooperative accesses cannot reach outside a binding (global memory goes through
   ordinary, bounds-checked loads and stores); every cooperative op runs in workgroup-uniform control flow (naga
-  checks this and rejects the shader otherwise); and the self-test passes first.
+  checks this and rejects the shader otherwise); the self-test passes first; and no other code gets the
+  experimental device safely: `ctx.device()` is `None` on such a context (the raw device is behind the `unsafe`
+  `device_unchecked`, whose contract is the two conditions before), and `ctx.destroy_device()` covers what tests
+  used the raw device for.
 - **Kernel.** 256 invocations = 8 subgroups per workgroup, each owning `FM × FN` 16×16 f32 accumulators of a
   `BM × BN` tile (`subgroup_id` picks the subgroup's fragments, so they are uniform per subgroup). `K` is walked
   32 at a time with the f32 generator's scheme: the next `A` / `B` tiles are loaded into registers (vec4 when

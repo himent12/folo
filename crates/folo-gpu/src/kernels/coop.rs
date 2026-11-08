@@ -79,6 +79,14 @@ pub(crate) fn unavailable_reason(adapter: &wgpu::Adapter, features: wgpu::Featur
     None
 }
 
+/// Why the tensor-core kernels cannot run on `adapter` at all (no `shader-f16`, no 16×16×16 f16 → f32
+/// cooperative matrices, no 32-wide subgroups), or `None` when it qualifies: a context created on it with
+/// [`crate::GpuOptions::tensor_cores`] then has them unless the device refuses or the self-test fails (which tests
+/// treat as a bug, not a skip).
+pub fn adapter_unavailable_reason(adapter: &wgpu::Adapter) -> Option<String> {
+    unavailable_reason(adapter, adapter.features() & wgpu::Features::SHADER_F16)
+}
+
 /// Device features the tensor-core kernels need on top of FOLO's usual ones.
 pub(crate) const FEATURES: wgpu::Features =
     wgpu::Features::EXPERIMENTAL_COOPERATIVE_MATRIX.union(wgpu::Features::SUBGROUP);
@@ -107,8 +115,11 @@ pub(crate) const FEATURES: wgpu::Features =
 ///    subgroup-scope operations require. Workgroups are 256 invocations, a multiple of the subgroup size, and
 ///    which fragments a subgroup owns comes from `@builtin(subgroup_id)`, so it is uniform within the subgroup.
 /// 4. A device must pass [`self_test`] (the generated kernels against a CPU reference, plus a probe) before the
-///    kernels are used, so a driver that mis-compiles them is caught at start-up and FOLO keeps the regular
-///    kernels.
+///    kernels are used, so a driver that mis-compiles them is caught at start-up; on failure the experimental
+///    device is dropped and the context is rebuilt on a plain one.
+/// 5. No other code gets the experimental device through a safe API: `GpuContext::device()` is `None` on such a
+///    context, and the raw device is only reachable through the `unsafe` `GpuContext::device_unchecked`, whose
+///    contract is conditions 2 and 3.
 pub(crate) fn experimental_opt_in() -> wgpu::ExperimentalFeatures {
     // SAFETY: the only experimental feature FOLO requests is `EXPERIMENTAL_COOPERATIVE_MATRIX`, and it is used
     // only by this module's kernels under conditions 1-4 above.

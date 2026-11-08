@@ -29,6 +29,10 @@ fn gpu_tc() -> Option<(Device, folo_gpu::GpuContext, MutexGuard<'static, ()>)> {
         }
     };
     if !ctx.caps().coop_f16 {
+        // A qualifying adapter must end up with tensor cores; anything else is a regression, not a skip.
+        let why = folo_gpu::kernels::coop::adapter_unavailable_reason(ctx.adapter());
+        let no_f16 = std::env::var("FOLO_GPU_NO_F16").is_ok_and(|v| v != "0" && !v.is_empty());
+        assert!(why.is_some() || no_f16, "the adapter qualifies but: {}", ctx.tensor_cores_status());
         eprintln!("note: skipping tensor-core test: {}", ctx.tensor_cores_status());
         return None;
     }

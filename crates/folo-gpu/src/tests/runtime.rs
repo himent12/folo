@@ -46,9 +46,9 @@ fn pool_evicts_least_recently_freed_and_caches_up_to_the_high_water_mark() {
     let usage = wgpu::BufferUsages::STORAGE;
     let mut pool = crate::pool::BufferPool::new(4096);
     let (a, b, c) = (
-        pool.take(ctx.device(), 1024, usage),
-        pool.take(ctx.device(), 2048, usage),
-        pool.take(ctx.device(), 1536, usage),
+        pool.take(ctx.wgpu_device(), 1024, usage),
+        pool.take(ctx.wgpu_device(), 2048, usage),
+        pool.take(ctx.wgpu_device(), 1536, usage),
     );
     // 4.5 KiB were live at once, so the cache may hold that much even though the cap is 4 KiB.
     pool.give(a, 1024);
@@ -56,13 +56,13 @@ fn pool_evicts_least_recently_freed_and_caches_up_to_the_high_water_mark() {
     pool.give(c, 1536);
     assert_eq!(pool.stats().cached_bytes, 4608);
     // A 3 KiB buffer pushes out the two least recently freed (1 KiB, then 2 KiB).
-    let d = pool.take(ctx.device(), 3072, usage);
+    let d = pool.take(ctx.wgpu_device(), 3072, usage);
     pool.give(d, 3072);
     assert_eq!(pool.stats().cached_bytes, 1536 + 3072);
     let before = pool.stats();
-    let _ = pool.take(ctx.device(), 1536, usage);
-    let _ = pool.take(ctx.device(), 3072, usage);
-    let _ = pool.take(ctx.device(), 1024, usage);
+    let _ = pool.take(ctx.wgpu_device(), 1536, usage);
+    let _ = pool.take(ctx.wgpu_device(), 3072, usage);
+    let _ = pool.take(ctx.wgpu_device(), 1024, usage);
     let after = pool.stats();
     assert_eq!((after.hits - before.hits, after.misses - before.misses), (2, 1));
     pool.clear();
@@ -183,7 +183,7 @@ fn lost_device_is_an_error_not_a_panic() {
         let ctx = crate::GpuContext::new().unwrap();
         let buf = ctx.upload(&[1, 2, 3, 4]).unwrap();
         ctx.sync().unwrap();
-        ctx.device().destroy();
+        ctx.destroy_device();
         (ctx, buf)
     };
     let (ctx, _buf) = fresh();
@@ -209,7 +209,7 @@ fn map_outcome_prefers_a_recorded_loss() {
     let ctx = crate::GpuContext::new().unwrap();
     assert!(matches!(ctx.map_outcome(Err("rejected".into())), Err(crate::GpuError::Map(_))));
     assert!(ctx.map_outcome(Ok(())).is_ok());
-    ctx.device().destroy();
+    ctx.destroy_device();
     assert!(ctx.sync().is_err());
     assert!(matches!(ctx.map_outcome(Err("rejected".into())), Err(crate::GpuError::DeviceLost(_))));
     assert!(matches!(ctx.map_outcome(Ok(())), Err(crate::GpuError::DeviceLost(_))));

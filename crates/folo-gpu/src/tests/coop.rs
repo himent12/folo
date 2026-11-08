@@ -19,23 +19,30 @@ use crate::kernels::pooling::Window2d;
 use crate::tests::gemm::cpu_gemm;
 use crate::{DType, GpuContext, GpuOptions, GpuTensor, UnaryOp};
 
-/// The tensor-core context plus a lock: tests flip the run-time switch, so they run one at a time.
+/// The tensor-core context plus a lock: tests flip the run-time switch, so they run one at a time. `None` (a skip)
+/// only when the adapter does not qualify; on one that does, failing to get tensor cores is a test failure.
 fn coop_ctx() -> Option<(GpuContext, MutexGuard<'static, ()>)> {
     static CTX: OnceLock<Option<GpuContext>> = OnceLock::new();
     static LOCK: Mutex<()> = Mutex::new(());
     let ctx = CTX
         .get_or_init(|| {
             let base = super::ctx()?;
-            let opts = GpuOptions { tensor_cores: true, ..GpuOptions::from_env() };
-            let ctx = GpuContext::with_options(&opts).ok()?;
-            if !ctx.tensor_cores() {
-                eprintln!(
-                    "note: skipping tensor-core tests on {}: {}",
-                    base.summary().name,
-                    ctx.tensor_cores_status()
-                );
+            if let Some(why) = coop::adapter_unavailable_reason(base.adapter()) {
+                eprintln!("note: skipping tensor-core tests: {why}");
                 return None;
             }
+            if !GpuOptions::from_env().enable_f16 {
+                eprintln!("note: skipping tensor-core tests: FOLO_GPU_NO_F16 is set");
+                return None;
+            }
+            let opts = GpuOptions { tensor_cores: true, ..GpuOptions::from_env() };
+            let ctx = GpuContext::with_options(&opts).expect("a context on a qualifying adapter");
+            assert!(
+                ctx.tensor_cores(),
+                "{} qualifies but: {}",
+                base.summary().name,
+                ctx.tensor_cores_status()
+            );
             Some(ctx)
         })
         .clone()?;
@@ -159,7 +166,13 @@ const CONFIGS: [CoopConfig; 5] =
 #[test]
 fn self_test_passes_and_reports() {
     let (ctx, _g) = coop!();
-    assert!(ctx.caps().coop_f16);
+    assert!(ctx.caps().coop_f16 && ctx.experimental_features());
+    // The raw device of an experimental context is only reachable unsafely; a plain context hands it out.
+    assert!(ctx.device().is_none());
+    let plain = super::ctx().unwrap();
+    if !plain.experimental_features() {
+        assert!(plain.device().is_some());
+    }
     assert_eq!(ctx.tensor_cores_status(), "on");
     assert!(!ctx.set_tensor_cores(false) && !ctx.tensor_cores());
     assert!(ctx.tensor_cores_status().contains("switched off"));
