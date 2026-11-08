@@ -967,7 +967,7 @@ impl FoloApp {
             cx,
         );
         let note = match (self.play_target, &self.local_gpu) {
-            (None, _) if !local => "Built-in demo · simulated inference (local runs need folo serve)".into(),
+            (None, _) if !local => "Built-in demo · simulated inference".into(),
             (None, _) => format!("On folo serve at {}", self.store.api.describe()),
             (Some(Target::Gpu), Load::Ready(name)) => {
                 format!("In this app, on {}", crate::ui::short_gpu(name))
@@ -988,7 +988,9 @@ impl FoloApp {
                     .child(help),
             )
             .child(control)
-            .child(text(ty::XS, t.text_tertiary).w_full().truncate().child(note))
+            // Wraps rather than truncating: GPUI only ellipsizes against a known width, so a
+            // w_full note would hard-clip mid-word in a narrow rail.
+            .child(text(ty::XS, t.text_tertiary).w_full().whitespace_normal().child(note))
             .into_any_element()
     }
 
