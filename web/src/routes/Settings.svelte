@@ -31,6 +31,21 @@
     { id: 'about', label: 'About' },
   ];
 
+  // The section nearest the top of the viewport is the current one (scroll-spy).
+  let current = $state<string>('connection');
+  $effect(() => {
+    const els = sections.map((x) => document.getElementById(x.id)).filter((e): e is HTMLElement => !!e);
+    const io = new IntersectionObserver(
+      (entries) => {
+        const top = entries.filter((e) => e.isIntersecting).sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top)[0];
+        if (top) current = top.target.id;
+      },
+      { rootMargin: '-56px 0px -60% 0px' },
+    );
+    for (const e of els) io.observe(e);
+    return () => io.disconnect();
+  });
+
   // ---- connection ----
   const origin = typeof location === 'undefined' ? '' : location.origin;
   let url = $state(prefs.serverUrl);
@@ -83,7 +98,16 @@
 
   <div class="layout">
     <nav class="toc" aria-label="Settings sections">
-      {#each sections as s (s.id)}<a href="#/settings" onclick={(e) => { e.preventDefault(); document.getElementById(s.id)?.scrollIntoView({ block: 'start' }); }}>{s.label}</a>{/each}
+      {#each sections as s (s.id)}<a
+          href="#/settings"
+          class:on={current === s.id}
+          aria-current={current === s.id ? 'location' : undefined}
+          onclick={(e) => {
+            e.preventDefault();
+            current = s.id;
+            document.getElementById(s.id)?.scrollIntoView({ block: 'start' });
+          }}>{s.label}</a
+        >{/each}
     </nav>
 
     <div class="col">
@@ -256,6 +280,10 @@
     transition:
       background-color var(--dur-fast) var(--ease-standard),
       color var(--dur-fast) var(--ease-standard);
+  }
+  .toc a.on {
+    background: var(--bg-active);
+    color: var(--text-primary);
   }
   .toc a:hover {
     background: var(--bg-hover);

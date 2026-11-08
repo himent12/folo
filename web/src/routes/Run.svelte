@@ -7,6 +7,7 @@
   import ScanSearch from '@lucide/svelte/icons/scan-search';
   import Square from '@lucide/svelte/icons/square';
   import Trash from '@lucide/svelte/icons/trash-2';
+  import X from '@lucide/svelte/icons/x';
   import TriangleAlert from '@lucide/svelte/icons/triangle-alert';
   import WifiOff from '@lucide/svelte/icons/wifi-off';
   import { hub } from '$lib/api/index.svelte';
@@ -136,8 +137,10 @@
         {#if run.status !== 'completed'}<Button icon={ScanSearch} href={href(`/playground?model=${run.model_id}`)}>Try model</Button>{/if}
         <Button icon={Box} href={href(`/models/${run.model_id}`)}>Model</Button>
       {/if}
-      {#if run.status === 'running' || run.status === 'queued'}
+      {#if run.status === 'running'}
         <Button variant="danger" icon={Square} onclick={() => (stopOpen = true)}>Stop</Button>
+      {:else if run.status === 'queued'}
+        <Button variant="ghost" icon={X} onclick={() => (stopOpen = true)}>Remove from queue</Button>
       {:else if !active}
         <Button variant="ghost" icon={Trash} aria-label="Delete run" title="Delete run" onclick={() => (deleteOpen = true)} />
       {/if}
@@ -198,8 +201,9 @@
         <span class="big num">{run.epoch}<span class="of">/ {run.epochs}</span></span>
         <div class="track" aria-hidden="true">
           <div class="fill" class:done={run.status === 'completed'} class:bad={run.status === 'failed'} style:transform="scaleX({run.status === 'completed' ? 1 : progress})"></div>
-          {#if closeFrom < 1}<div class="close" style:left="{closeFrom * 100}%" title="Mosaic off for the last {run.config.augment.close_mosaic} epochs"></div>{/if}
+          {#if closeFrom < 1 && active}<div class="close" style:left="{closeFrom * 100}%"></div>{/if}
         </div>
+        {#if closeFrom < 1 && active}<span class="sr-only">The hatched end of the bar marks the last {run.config.augment.close_mosaic} epochs, trained without mosaic.</span>{/if}
         <span class="small num">
           {#if active}{(progress * 100).toFixed(1)}% · {run.eta_s !== null ? `${duration(run.eta_s)} left` : 'estimating…'}{:else}{duration(elapsed)} total{/if}
         </span>
@@ -244,10 +248,17 @@
     <ConfigPanel config={run.config} datasetName={dataset?.name} />
   </Page>
 
-  <Dialog bind:open={stopOpen} title="Stop {run.name}?" description="Training stops after the current step. The last checkpoint is kept and saved as a model." size="sm">
+  <Dialog
+    bind:open={stopOpen}
+    title={run.status === 'queued' ? `Remove ${run.name} from the queue?` : `Stop ${run.name}?`}
+    description={run.status === 'queued'
+      ? 'It has not started yet, so nothing is lost. You can start it again from New run.'
+      : 'Training stops after the current step. The last checkpoint is kept and saved as a model.'}
+    size="sm"
+  >
     {#snippet footer()}
-      <Button onclick={() => (stopOpen = false)}>Keep training</Button>
-      <Button variant="danger" icon={Square} loading={busy} onclick={stop}>Stop run</Button>
+      <Button onclick={() => (stopOpen = false)}>{run.status === 'queued' ? 'Keep it queued' : 'Keep training'}</Button>
+      <Button variant="danger" icon={run.status === 'queued' ? X : Square} loading={busy} onclick={stop}>{run.status === 'queued' ? 'Remove' : 'Stop run'}</Button>
     {/snippet}
   </Dialog>
   <Dialog bind:open={deleteOpen} title="Delete {run.name}?" description="Removes the run and its metric history from Studio. Checkpoint files on disk are not touched." size="sm">
@@ -422,6 +433,7 @@
     font-weight: var(--weight-semibold);
   }
   .of {
+    line-height: 1;
     margin-left: 6px;
     font-size: var(--type-lg-size);
     font-weight: var(--weight-regular);
@@ -444,6 +456,7 @@
     color: var(--text-disabled);
   }
   .unit {
+    line-height: 1;
     margin-left: 3px;
     font-size: var(--type-sm-size);
     color: var(--text-tertiary);
@@ -490,7 +503,7 @@
     display: grid;
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
     gap: var(--space-4);
-    align-items: start;
+    align-items: stretch;
   }
   @media (max-width: 1199px) {
     /* Six cells as a clean 3 × 2. */

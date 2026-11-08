@@ -42,9 +42,9 @@
     return [
       { id: 'raw', label: 'total (raw)', color: 'var(--chart-1)', ghost: true, points: a > 0 ? total : [] },
       { id: 'total', label: 'total', color: 'var(--chart-1)', points: smooth(total, a) },
-      { id: 'box', label: 'box', color: 'var(--chart-2)', points: smooth(pts((s) => s.loss.box), a) },
-      { id: 'cls', label: 'cls', color: 'var(--chart-3)', points: smooth(pts((s) => s.loss.cls), a) },
-      { id: 'dfl', label: 'dfl', color: 'var(--chart-4)', points: smooth(pts((s) => s.loss.dfl), a) },
+      { id: 'box', label: 'box', color: 'var(--chart-1)', pattern: 'dash', points: smooth(pts((s) => s.loss.box), a) },
+      { id: 'cls', label: 'cls', color: 'var(--chart-1)', pattern: 'dot', points: smooth(pts((s) => s.loss.cls), a) },
+      { id: 'dfl', label: 'dfl', color: 'var(--chart-1)', pattern: 'dashdot', points: smooth(pts((s) => s.loss.dfl), a) },
     ];
   });
 
@@ -54,15 +54,15 @@
     void version;
     return [
       { id: 'm95', label: 'mAP50-95', color: 'var(--chart-1)', area: true, points: ep((e) => e.val.map50_95) },
-      { id: 'm50', label: 'mAP50', color: 'var(--chart-5)', points: ep((e) => e.val.map50) },
+      { id: 'm50', label: 'mAP50', color: 'var(--chart-1)', pattern: 'dash', points: ep((e) => e.val.map50) },
     ];
   });
 
   const pr = $derived.by((): Series[] => {
     void version;
     return [
-      { id: 'p', label: 'precision', color: 'var(--chart-3)', points: ep((e) => e.val.precision) },
-      { id: 'r', label: 'recall', color: 'var(--chart-4)', points: ep((e) => e.val.recall) },
+      { id: 'p', label: 'precision', color: 'var(--chart-1)', points: ep((e) => e.val.precision) },
+      { id: 'r', label: 'recall', color: 'var(--chart-1)', pattern: 'dash', points: ep((e) => e.val.recall) },
     ];
   });
 
@@ -71,14 +71,14 @@
     void version;
     const spe = Math.max(1, run.steps_per_epoch);
     const k = thin(600);
-    return [{ id: 'lr', label: 'learning rate', color: 'var(--chart-5)', points: steps.filter((_, i) => i % k === 0).map((s) => ({ x: s.step / spe, y: s.lr })) }];
+    return [{ id: 'lr', label: 'learning rate', color: 'var(--text-secondary)', points: steps.filter((_, i) => i % k === 0).map((s) => ({ x: s.step / spe, y: s.lr })) }];
   });
 
   const ips = $derived.by((): Series[] => {
     void version;
     const spe = Math.max(1, run.steps_per_epoch);
     const pts = steps.map((s) => ({ x: s.step / spe, y: s.imgs_per_s }));
-    return [{ id: 'ips', label: 'images/s', color: 'var(--chart-6)', area: true, points: smooth(pts, 0.9) }];
+    return [{ id: 'ips', label: 'images/s', color: 'var(--chart-1)', area: true, points: smooth(pts, 0.9) }];
   });
   // Throughput reads best against zero: a steady line near the top, dips stand out.
   const ipsMax = $derived.by(() => {

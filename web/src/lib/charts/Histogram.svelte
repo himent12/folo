@@ -1,7 +1,6 @@
 <script lang="ts">
   /** Vertical bars for a histogram (`edges` + `counts`) with per-bar hover. */
   import { scaleLinear } from 'd3-scale';
-  import { compact } from '$lib/format';
   import { ticks as niceTicks } from './downsample';
 
   let {
@@ -34,6 +33,8 @@
   const name = (i: number) =>
     binLabel ? binLabel(edges[i] ?? 0, edges[i + 1] ?? 0, i) : `${edges[i]}–${edges[i + 1]}`;
   const total = $derived(counts.reduce((a, b) => a + b, 0));
+  // One notation per axis: all ticks in thousands once the axis reaches 1,000.
+  const tickFmt = (v: number) => ((y.domain()[1] ?? 0) >= 1000 ? `${+(v / 1000).toFixed(1)}k` : String(v));
 </script>
 
 <div class="hist" bind:clientWidth={width} style:height="{height}px">
@@ -41,7 +42,7 @@
     <svg {width} {height} role="img" aria-label={label}>
       {#each yt as t (t)}
         <line class="grid" x1={m.left} x2={width - m.right} y1={y(t)} y2={y(t)} />
-        <text class="tick" x={m.left - 8} y={y(t)} dy="0.32em" text-anchor="end">{compact(t)}</text>
+        <text class="tick" x={m.left - 8} y={y(t)} dy="0.32em" text-anchor="end">{tickFmt(t)}</text>
       {/each}
       {#each counts as c, i (i)}
         {@const h = Math.max(c > 0 ? 2 : 0, height - m.bottom - y(c))}

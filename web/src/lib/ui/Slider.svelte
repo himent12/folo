@@ -83,8 +83,8 @@
     border-radius: 999px;
     background: linear-gradient(
       to right,
-      var(--accent-line) 0,
-      var(--accent-line) var(--pct),
+      var(--text-secondary) 0,
+      var(--text-secondary) var(--pct),
       var(--bg-active) var(--pct),
       var(--bg-active) 100%
     );
@@ -97,7 +97,7 @@
   input::-moz-range-progress {
     height: 4px;
     border-radius: 999px;
-    background: var(--accent-line);
+    background: var(--text-secondary);
   }
   input::-webkit-slider-thumb {
     -webkit-appearance: none;

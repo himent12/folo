@@ -8,6 +8,7 @@
   import Settings from '@lucide/svelte/icons/settings';
   import WifiOff from '@lucide/svelte/icons/wifi-off';
   import ScanSearch from '@lucide/svelte/icons/scan-search';
+  import { ApiError } from '$lib/api/client';
   import { hub } from '$lib/api/index.svelte';
   import { Resource } from '$lib/api/resource.svelte';
   import type { Dataset, Model } from '$lib/api/types';
@@ -44,7 +45,13 @@
   // One failure behind every request is a connection problem: say it once instead of in every panel.
   const offline = $derived(!!runs.error && !runs.data && !!models.error && !models.data && !!datasets.error && !datasets.data);
   const fresh = $derived(datasets.data?.length === 0 && runs.data?.length === 0 && models.data?.length === 0);
-  const errDetail = $derived(runs.error instanceof Error ? runs.error.message : null);
+  // A specific line beats a generic message: code, status and when it happened.
+  const errDetail = $derived.by(() => {
+    const e = runs.error;
+    if (!(e instanceof ApiError)) return e instanceof Error ? e.message : null;
+    const at = new Date().toLocaleTimeString('en-US', { hour12: false });
+    return `GET /api/runs → ${e.status ? `HTTP ${e.status}` : 'no response'} · ${e.code} · ${at}`;
+  });
   function retryAll() {
     void runs.refresh();
     void models.refresh();
@@ -69,9 +76,9 @@
 
 <Page title="Overview">
   {#snippet sub()}
-    <span>
+    {#if !offline}<span>
       {#if hub.mode === 'live'}Connected to <span class="mono">folo serve {hub.version}</span>{:else if hub.mode === 'mock'}Showing built-in demo data{:else}Connecting…{/if}
-    </span>
+    </span>{/if}
   {/snippet}
   {#snippet actions()}
     <Button icon={Images} href={href('/datasets')}>Datasets</Button>
@@ -119,121 +126,116 @@
       </ol>
     </section>
   {:else}
-  <div class="top">
-    <div class="live">
-      {#if runs.error && !runs.data}
-        <Panel title="Training"><ErrorState error={runs.error} retry={() => runs.refresh()} compact /></Panel>
-      {:else if !runs.data}
-        <div class="live-sk"><Skeleton h="260px" r="var(--radius-lg)" /></div>
-      {:else if live}
-        {#key live.id}<LiveRunCard run={live} dataset={dsById.get(live.config.dataset_id)} />{/key}
-      {:else}
-        <Panel title="Training">
-          <EmptyState
-            icon={Activity}
-            title="Nothing is training"
-            description={runs.data.length ? 'Start a run to watch its loss, mAP and samples update live here.' : 'Train your first detector: pick a dataset, a model size and go.'}
-          >
-            {#snippet actions()}<Button variant="primary" icon={Plus} href={href('/runs/new')}>New run</Button>{/snippet}
-          </EmptyState>
-        </Panel>
-      {/if}
-    </div>
-    <SystemCard />
-  </div>
-
-  <div class="mid">
-    <Panel title="Recent runs" meta={runs.data ? String(runs.data.length) : undefined} pad="none" id="recent-runs">
-      {#snippet actions()}<Button size="sm" variant="ghost" iconRight={ArrowRight} href={href('/runs')}>All runs</Button>{/snippet}
-      {#if runs.error && !runs.data}
-        <ErrorState error={runs.error} retry={() => runs.refresh()} />
-      {:else if !runs.data}
-        <div class="list-sk">{#each [0, 1, 2, 3] as i (i)}<Skeleton h="20px" />{/each}</div>
-      {:else if recent.length === 0}
-        <EmptyState compact icon={Activity} title="No runs yet" description="Runs you start appear here with their progress and best mAP." />
-      {:else}
-        <div class="scroll">
-          <table class="table">
-            <thead>
-              <tr>
-                <th>Run</th>
-                <th>Status</th>
-                <th class="hide-sm">Progress</th>
-                <th class="r">mAP50-95</th>
-                <th class="hide-sm">Trend</th>
-                <th class="r hide-sm">Created</th>
-              </tr>
-            </thead>
-            <tbody>
-              {#each recent as r (r.id)}
-                <tr class="link" onclick={() => router.go(`/runs/${r.id}`)}>
-                  <td>
-                    <a class="run-name" href={href(`/runs/${r.id}`)} onclick={(e) => e.stopPropagation()}>{r.name}</a>
-                    <span class="run-sub">{dsById.get(r.config.dataset_id)?.name ?? r.config.dataset_id} · {r.config.arch}</span>
-                  </td>
-                  <td><StatusBadge status={r.status} size="sm" /></td>
-                  <td class="hide-sm">
-                    <div class="prog">
-                      <Progress value={r.epoch / r.epochs} size="xs" tone={r.status === 'failed' ? 'danger' : r.status === 'completed' ? 'success' : r.status === 'running' ? 'accent' : 'neutral'} label="{r.name} progress" />
-                      <span class="num faint">{r.epoch}/{r.epochs}</span>
-                    </div>
-                  </td>
-                  <td class="r num">{metric(r.best?.map50_95)}</td>
-                  <td class="hide-sm"><RunSpark run={r} /></td>
-                  <td class="r faint hide-sm">{ago(r.created)}</td>
+  <div class="cols">
+    <div class="col-main">
+      <div class="live">
+        {#if runs.error && !runs.data}
+          <Panel title="Training"><ErrorState error={runs.error} retry={() => runs.refresh()} compact /></Panel>
+        {:else if !runs.data}
+          <div class="live-sk"><Skeleton h="260px" r="var(--radius-lg)" /></div>
+        {:else if live}
+          {#key live.id}<LiveRunCard run={live} dataset={dsById.get(live.config.dataset_id)} />{/key}
+        {:else}
+          <Panel title="Training">
+            <EmptyState
+              icon={Activity}
+              title="Nothing is training"
+              description={runs.data.length ? 'Start a run to watch its loss, mAP and samples update live here.' : 'Train your first detector: pick a dataset, a model size and go.'}
+            >
+              {#snippet actions()}<Button variant="primary" icon={Plus} href={href('/runs/new')}>New run</Button>{/snippet}
+            </EmptyState>
+          </Panel>
+        {/if}
+      </div>
+      <Panel title="Recent runs" meta={runs.data ? String(runs.data.length) : undefined} pad="none" id="recent-runs">
+        {#snippet actions()}<Button size="sm" variant="ghost" iconRight={ArrowRight} href={href('/runs')}>All runs</Button>{/snippet}
+        {#if runs.error && !runs.data}
+          <ErrorState error={runs.error} retry={() => runs.refresh()} />
+        {:else if !runs.data}
+          <div class="list-sk">{#each [0, 1, 2, 3] as i (i)}<Skeleton h="20px" />{/each}</div>
+        {:else if recent.length === 0}
+          <EmptyState compact icon={Activity} title="No runs yet" description="Runs you start appear here with their progress and best mAP." />
+        {:else}
+          <div class="scroll">
+            <table class="table">
+              <thead>
+                <tr>
+                  <th>Run</th>
+                  <th>Status</th>
+                  <th class="hide-sm">Progress</th>
+                  <th class="r">mAP50-95</th>
+                  <th class="hide-sm">Trend</th>
+                  <th class="r hide-sm">Created</th>
                 </tr>
-              {/each}
-            </tbody>
-          </table>
-        </div>
-      {/if}
-    </Panel>
-
-    <Panel title="Best model per dataset" pad="none" id="best-models">
-      {#snippet actions()}<Button size="sm" variant="ghost" iconRight={ArrowRight} href={href('/models')}>All models</Button>{/snippet}
-      {#if models.error && !models.data}
-        <ErrorState error={models.error} retry={() => models.refresh()} />
-      {:else if !models.data}
-        <div class="list-sk">{#each [0, 1, 2] as i (i)}<Skeleton h="20px" />{/each}</div>
-      {:else if topModels.length === 0}
-        <EmptyState compact icon={Box} title="No models yet" description="Finished runs save their best weights here." />
-      {:else}
-        <ul class="models">
-          {#each topModels as { m, ds } (m.id)}
-            <li>
-              <a href={href(`/models/${m.id}`)}>
-                <span class="m-text">
-                  <span class="m-ds truncate">{ds}</span>
-                  <span class="m-name truncate">{m.name}</span>
-                  <span class="m-sub num">{m.arch} · {m.classes.length} classes · {bytes(m.bytes, prefs.units)}</span>
-                </span>
-                <span class="m-map">
-                  <span class="num">{metric(m.metrics?.map50_95)}</span>
-                  <span class="m-cap">mAP50-95</span>
-                </span>
-              </a>
-            </li>
-          {/each}
-        </ul>
-      {/if}
-    </Panel>
+              </thead>
+              <tbody>
+                {#each recent as r (r.id)}
+                  <tr class="link" onclick={() => router.go(`/runs/${r.id}`)}>
+                    <td>
+                      <a class="run-name" href={href(`/runs/${r.id}`)} onclick={(e) => e.stopPropagation()}>{r.name}</a>
+                      <span class="run-sub">{dsById.get(r.config.dataset_id)?.name ?? r.config.dataset_id} · {r.config.arch}</span>
+                    </td>
+                    <td><StatusBadge status={r.status} size="sm" /></td>
+                    <td class="hide-sm">
+                      <div class="prog">
+                        <Progress value={r.epoch / r.epochs} size="xs" tone={r.status === 'failed' ? 'danger' : r.status === 'completed' ? 'success' : r.status === 'running' ? 'accent' : 'neutral'} label="{r.name} progress" />
+                        <span class="num faint">{r.epoch}/{r.epochs}</span>
+                      </div>
+                    </td>
+                    <td class="r num">{metric(r.best?.map50_95)}</td>
+                    <td class="hide-sm"><RunSpark run={r} /></td>
+                    <td class="r faint hide-sm">{ago(r.created)}</td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
+        {/if}
+      </Panel>
+    </div>
+    <div class="col-side">
+      <SystemCard />
+      <Panel title="Best model per dataset" pad="none" id="best-models">
+        {#snippet actions()}<Button size="sm" variant="ghost" iconRight={ArrowRight} href={href('/models')}>All models</Button>{/snippet}
+        {#if models.error && !models.data}
+          <ErrorState error={models.error} retry={() => models.refresh()} />
+        {:else if !models.data}
+          <div class="list-sk">{#each [0, 1, 2] as i (i)}<Skeleton h="20px" />{/each}</div>
+        {:else if topModels.length === 0}
+          <EmptyState compact icon={Box} title="No models yet" description="Finished runs save their best weights here." />
+        {:else}
+          <ul class="models">
+            {#each topModels as { m, ds } (m.id)}
+              <li>
+                <a href={href(`/models/${m.id}`)}>
+                  <span class="m-text">
+                    <span class="m-ds truncate">{ds}</span>
+                    <span class="m-name truncate">{m.name}</span>
+                    <span class="m-sub num">{m.arch} · {m.classes.length} classes · {bytes(m.bytes, prefs.units)}</span>
+                  </span>
+                  <span class="m-map">
+                    <span class="num">{metric(m.metrics?.map50_95)}</span>
+                    <span class="m-cap">mAP50-95</span>
+                  </span>
+                </a>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      </Panel>
+    </div>
   </div>
 
-  <section class="datasets" aria-labelledby="ds-title">
-    <div class="section-head">
-      <h2 id="ds-title">Datasets</h2>
-      <Button size="sm" variant="ghost" iconRight={ArrowRight} href={href('/datasets')}>All datasets</Button>
-    </div>
+  <Panel title="Datasets" meta={datasets.data ? String(datasets.data.length) : undefined} id="datasets">
+    {#snippet actions()}<Button size="sm" variant="ghost" iconRight={ArrowRight} href={href('/datasets')}>All datasets</Button>{/snippet}
     {#if datasets.error && !datasets.data}
-      <Panel><ErrorState error={datasets.error} retry={() => datasets.refresh()} compact /></Panel>
+      <ErrorState error={datasets.error} retry={() => datasets.refresh()} compact />
     {:else if !datasets.data}
       <div class="ds-grid">{#each [0, 1, 2] as i (i)}<Skeleton h="118px" r="var(--radius-lg)" />{/each}</div>
     {:else if datasets.data.length === 0}
-      <Panel>
-        <EmptyState compact icon={Images} title="No datasets registered" description="Register a YOLO or COCO folder, or generate a synthetic shapes set to try FOLO in a minute.">
-          {#snippet actions()}<Button icon={Plus} href={href('/datasets')}>Add dataset</Button>{/snippet}
-        </EmptyState>
-      </Panel>
+      <EmptyState compact icon={Images} title="No datasets registered" description="Register a YOLO or COCO folder, or generate a synthetic shapes set to try FOLO in a minute.">
+        {#snippet actions()}<Button icon={Plus} href={href('/datasets')}>Add dataset</Button>{/snippet}
+      </EmptyState>
     {:else}
       <div class="ds-grid">
         {#each datasets.data.slice(0, 3) as d (d.id)}
@@ -253,7 +255,7 @@
         {/each}
       </div>
     {/if}
-  </section>
+  </Panel>
   {/if}
 </Page>
 
@@ -341,7 +343,8 @@
     gap: var(--space-3);
     padding: var(--space-16) var(--space-6);
     text-align: center;
-    border: 1px dashed var(--line-strong);
+    background: var(--bg-panel);
+    border: 1px solid color-mix(in srgb, var(--danger-solid) 35%, transparent);
     border-radius: var(--radius-lg);
   }
   .off-mark {
@@ -370,21 +373,22 @@
     gap: var(--space-2);
     margin-top: var(--space-2);
   }
-  .top {
+  /* Two independent stacks, so a short side panel never leaves a hole in a shared row. */
+  .cols {
     display: grid;
     grid-template-columns: minmax(0, 1fr) 340px;
     gap: var(--space-4);
     align-items: start;
+  }
+  .col-main,
+  .col-side {
+    display: grid;
+    gap: var(--space-4);
+    min-width: 0;
   }
   .live,
   .live-sk {
     min-width: 0;
-  }
-  .mid {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) 340px;
-    gap: var(--space-4);
-    align-items: start;
   }
   .scroll {
     overflow-x: auto;
@@ -471,16 +475,6 @@
     font-size: var(--type-micro-size);
     color: var(--text-tertiary);
   }
-  .section-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: var(--space-3);
-  }
-  .section-head h2 {
-    font-size: var(--type-base-size);
-    font-weight: var(--weight-medium);
-  }
   .ds-grid {
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -490,8 +484,8 @@
     display: grid;
     gap: var(--space-3);
     padding: var(--space-4);
-    border-radius: var(--radius-lg);
-    background: var(--bg-panel);
+    border-radius: var(--radius-md);
+    background: var(--bg-raised);
     border: 1px solid var(--line-subtle);
     transition: border-color var(--dur-fast) var(--ease-standard);
   }
@@ -526,8 +520,17 @@
     color: var(--text-tertiary);
   }
   @media (max-width: 1199px) {
-    .top,
-    .mid {
+    .cols {
+      grid-template-columns: minmax(0, 1fr);
+    }
+    /* Laptop: System and Best models side by side under the main column. */
+    .col-side {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      align-items: start;
+    }
+  }
+  @media (max-width: 767px) {
+    .col-side {
       grid-template-columns: minmax(0, 1fr);
     }
   }

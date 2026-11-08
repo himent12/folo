@@ -28,6 +28,7 @@
       z-index: var(--z-sidebar);
       display: grid;
       grid-template-columns: repeat(5, 1fr);
+      height: calc(var(--tabbar-h) + env(safe-area-inset-bottom));
       padding: var(--space-1) var(--space-1) calc(var(--space-1) + env(safe-area-inset-bottom));
       background: color-mix(in srgb, var(--bg-app) 88%, transparent);
       backdrop-filter: blur(16px) saturate(1.4);

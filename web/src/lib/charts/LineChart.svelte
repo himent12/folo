@@ -8,6 +8,8 @@
     color: string;
     points: Pt[];
     dashed?: boolean;
+    /** Line pattern for secondary series of the same hue: dashed, dotted or dash-dot. */
+    pattern?: 'dash' | 'dot' | 'dashdot';
     /** Fill the area under the line. */
     area?: boolean;
     /** Thin, recessive line (e.g. raw values under a smoothed line); hidden from legend and tooltip. */
@@ -247,6 +249,13 @@
     cursor = s.points[i]!.x;
   }
 
+  const PATTERNS = { dash: [6, 3], dot: [1.5, 3], dashdot: [7, 3, 1.5, 3] } as const;
+  /** stroke-dasharray for a series (scaled for the small legend swatch). */
+  function dashOf(s: Series, k = 1): string | undefined {
+    const p = s.pattern ? PATTERNS[s.pattern] : s.dashed ? PATTERNS.dash : null;
+    return p ? p.map((v) => v * k).join(' ') : undefined;
+  }
+
   const latest = (s: Series) => {
     for (let i = s.points.length - 1; i >= 0; i--) {
       const p = s.points[i]!;
@@ -259,13 +268,19 @@
   const tipLeft = $derived(hover ? hover.px + 12 + tipWidth > width - 4 : false);
 </script>
 
+{#snippet swatch(s: Series)}
+  <svg class="swatch" width="14" height="6" viewBox="0 0 14 6" aria-hidden="true">
+    <line x1="1" x2="13" y1="3" y2="3" style:stroke={s.color} style:stroke-dasharray={dashOf(s, 0.6)} />
+  </svg>
+{/snippet}
+
 <div class="chart">
   {#if legend && keyed.length > 0}
     <ul class="legend" aria-hidden="true">
       {#each keyed as s (s.id)}
         {@const v = hover ? hover.rows.find((r) => r.s.id === s.id)?.p.y : latest(s)}
         <li>
-          <span class="swatch" class:dashed={s.dashed} style:--c={s.color}></span>
+          {@render swatch(s)}
           <span class="name">{s.label}</span>
           <span class="val">{v === null || v === undefined ? '—' : fmtValue(v)}</span>
         </li>
@@ -335,7 +350,7 @@
           </defs>
           {#each paths as { s, d, a } (s.id)}
             {#if a}<path class="area" d={a} fill="url(#{uid}-{s.id})" />{/if}
-            <path class="line" class:dashed={s.dashed} class:ghost={s.ghost} class:emphasis={s.emphasis} {d} style:stroke={s.color} />
+            <path class="line" class:dashed={s.dashed} class:ghost={s.ghost} class:emphasis={s.emphasis} {d} style:stroke={s.color} style:stroke-dasharray={dashOf(s)} />
           {/each}
 
           {#each markers as m (m.label + m.x)}
@@ -371,7 +386,7 @@
           <p class="tip-title">{hover.title}</p>
           {#each hover.rows as r (r.s.id)}
             <p class="tip-row">
-              <span class="swatch" class:dashed={r.s.dashed} style:--c={r.s.color}></span>
+              {@render swatch(r.s)}
               <span class="name">{r.s.label}{#if r.at}<span class="at">{r.at}</span>{/if}</span>
               <span class="val">{fmtValue(r.p.y)}</span>
             </p>
@@ -402,14 +417,12 @@
     gap: 6px;
   }
   .swatch {
-    width: 12px;
-    height: 2px;
-    border-radius: 1px;
-    background: var(--c);
     flex-shrink: 0;
+    overflow: visible;
   }
-  .swatch.dashed {
-    background: repeating-linear-gradient(90deg, var(--c) 0 4px, transparent 4px 6px);
+  .swatch line {
+    stroke-width: 2;
+    stroke-linecap: round;
   }
   .name {
     color: var(--text-secondary);
@@ -455,7 +468,6 @@
     stroke-linecap: round;
   }
   .line.dashed {
-    stroke-dasharray: 4 3;
     stroke-width: 1.5;
   }
   .line.emphasis {

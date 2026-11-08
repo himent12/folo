@@ -219,6 +219,14 @@
   input[type='checkbox'] {
     width: 14px;
     height: 14px;
+  }
+  @media (pointer: coarse) {
+    input[type='checkbox'] {
+      width: 20px;
+      height: 20px;
+    }
+  }
+  input[type='checkbox'] {
     accent-color: var(--accent-line);
     cursor: pointer;
   }

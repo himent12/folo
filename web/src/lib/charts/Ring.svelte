@@ -4,7 +4,7 @@
     value,
     size = 44,
     stroke = 4,
-    color = 'var(--accent-line)',
+    color = 'var(--text-secondary)',
     label,
   }: { value: number | null; size?: number; stroke?: number; color?: string; label: string } = $props();
 

@@ -52,7 +52,9 @@
       slots = next;
     });
   });
-  const color = (id: string) => `var(--chart-${(slots[id] ?? ids.indexOf(id)) + 1})`;
+  // Run slots use the four most distinct series hues: sky, orange, magenta, amber.
+  const RUN_SLOTS = [1, 6, 3, 2];
+  const color = (id: string) => `var(--chart-${RUN_SLOTS[slots[id] ?? Math.max(0, ids.indexOf(id))] ?? 1})`;
 
   function setIds(next: string[]) {
     router.go(`/runs/compare${next.length ? `?ids=${next.join(',')}` : ''}`, { replace: true });

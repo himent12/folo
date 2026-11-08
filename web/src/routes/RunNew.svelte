@@ -268,7 +268,7 @@
         <Panel title="3 · Training" id="sec-train">
           <div class="fields">
             <Field label="Epochs" for="epochs" error={errors.epochs}>
-              <Input id="epochs" type="number" min="1" max="10000" step="1" bind:value={epochs} invalid={!!errors.epochs} />
+              <Input id="epochs" type="number" min="1" max="10000" step="1" bind:value={epochs} invalid={!!errors.epochs} suffix="epochs" />
             </Field>
             <Field label="Batch size" for="batch" hint="Per step. Lower it if you run out of GPU memory.">
               <Segmented label="Batch size" bind:value={batch} options={['8', '16', '32', '64'].map((v) => ({ value: v, label: v }))} />
@@ -715,7 +715,7 @@
   }
   @media (max-width: 767px) {
     .dock {
-      bottom: calc(60px + env(safe-area-inset-bottom));
+      bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom));
       justify-content: space-between;
     }
     .cards,

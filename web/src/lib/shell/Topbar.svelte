@@ -8,7 +8,7 @@
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
   import Settings from '@lucide/svelte/icons/settings';
   import { prefs } from '$lib/prefs.svelte';
-  import { href } from '$lib/router.svelte';
+  import { href, router } from '$lib/router.svelte';
   import Button from '$lib/ui/Button.svelte';
   import Kbd from '$lib/ui/Kbd.svelte';
   import Logo from './Logo.svelte';
@@ -50,7 +50,8 @@
     </button>
     <Button variant="ghost" icon={themeIcon} aria-label={themeLabel} title={themeLabel} onclick={() => prefs.cycleTheme()} />
     <span class="mobile-only"><Button variant="ghost" icon={Settings} href={href('/settings')} aria-label="Settings" /></span>
-    <span class="new-run"><Button variant="primary" icon={Plus} href={href('/runs/new')}>New run</Button></span>
+    <!-- A global shortcut, so not lime: each page keeps a single lime primary of its own. -->
+    {#if router.route.name !== 'run-new'}<span class="new-run"><Button icon={Plus} href={href('/runs/new')}>New run</Button></span>{/if}
   </div>
 </header>
 
