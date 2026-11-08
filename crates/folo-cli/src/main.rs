@@ -377,7 +377,7 @@ fn doctor(args: DoctorArgs, out: Out) -> Result<(), CliError> {
         format!("folo-wasm in {source}; the Playground can run models in the browser (WebGPU or CPU)")
     } else {
         format!(
-            "no folo-wasm in {source}; the Playground runs models on the server only (build it with              scripts/build-wasm before `npm run build`)"
+            "no folo-wasm in {source}; the Playground runs models on the server only (build it with scripts/build-wasm before `npm run build`)"
         )
     };
     out.human(format!("browser   {wasm}"));

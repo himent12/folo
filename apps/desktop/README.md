@@ -76,6 +76,9 @@ with `+` (`dataset+light`, `overview+empty`). `folo-desktop --list-scenarios` pr
 ```powershell
 tools\shoot-all.ps1 -Dir shots\round1      # every scenario + minimum and wide window sizes, at the display's scale
 tools\shoot.ps1 -Scenario palette -Out shots\palette.png -Width 960 -Height 620
+tools\shoot.ps1 -Scenario none -Out shots\run.png -ExtraArgs "--server http://127.0.0.1:7878 --open run:run_9d9d"   # real data
 ```
+
+The scripts run `$CARGO_TARGET_DIR/debug/folo-desktop.exe` unless `-Exe` names another build (a release one, say).
 
 `shots/` is gitignored. Design reviews score the shots against `REVIEW_RUBRIC.md`; `HILLCLIMB.md` logs each round.
