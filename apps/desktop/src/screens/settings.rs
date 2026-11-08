@@ -164,7 +164,7 @@ impl FoloApp {
                 // What autoconnect actually starts: a demo server (`folo serve --mock`), not
                 // one that trains. Read at startup, whatever the current source.
                 "Start a demo server automatically",
-                help("At startup, launch `folo serve --mock` when no server is running (else the built-in demo)."),
+                help("At startup, connect to a running server; otherwise launch `folo serve --mock`. If that fails, use the built-in demo."),
                 spawn.into_any_element(),
             ));
 

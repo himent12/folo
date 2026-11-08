@@ -193,22 +193,27 @@ pub fn image_canvas(
 
 /// Shimmering placeholder blocks shaped like a panel of rows.
 pub fn loading_rows(t: &Theme, id: &str, rows: usize) -> Div {
-    div().flex().flex_col().gap(px(10.)).p(px(16.)).children((0..rows).map(|i| {
+    // Shaped like the tables they stand in for: 36 px rows on hairlines, a name at the left and a
+    // right-aligned number (no leading icon, which no table has).
+    div().flex().flex_col().children((0..rows).map(|i| {
         div()
+            .h(px(36.))
+            .px(px(16.))
             .flex()
-            .gap(px(12.))
+            .gap(px(16.))
             .items_center()
-            .child(div().size(px(16.)).flex_none().child(skeleton(t, format!("{id}-a{i}"))))
+            .border_b_1()
+            .border_color(t.line_subtle)
             .child(
                 // Relative widths so placeholders fit any panel.
                 div()
-                    .h(px(12.))
-                    .w(gpui::relative(0.45 + (i % 3) as f32 * 0.12))
+                    .h(px(10.))
+                    .w(gpui::relative(0.3 + (i % 3) as f32 * 0.08))
                     .min_w_0()
                     .child(skeleton(t, format!("{id}-b{i}"))),
             )
             .child(div().flex_1())
-            .child(div().h(px(12.)).w(gpui::relative(0.15)).child(skeleton(t, format!("{id}-c{i}"))))
+            .child(div().h(px(10.)).w(px(48.)).flex_none().child(skeleton(t, format!("{id}-c{i}"))))
     }))
 }
 

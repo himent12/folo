@@ -752,8 +752,9 @@ impl FoloApp {
                             .cursor_pointer()
                             .border_1()
                             .border_color(gpui::transparent_black())
+                            // Over an image a fill wouldn't show: the edge answers instead.
                             .hover(|s| s.border_color(t.line_strong))
-                            .active(|s| s.opacity(0.85))
+                            .active(|s| s.border_color(t.text_tertiary))
                             .child(
                                 div()
                                     .absolute()

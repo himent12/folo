@@ -636,14 +636,20 @@ impl FoloApp {
             .border_1()
             .cursor_pointer()
             // Selected chips answer the pointer too: the hover tint over the selected fill.
+            // Pressed is a fill a step past hover, as on buttons (not a fade).
             .when(on, |d| {
                 let hot = crate::theme::over(t.bg_selected, t.bg_hover);
-                d.bg(t.bg_selected).border_color(t.accent_line).hover(move |s| s.bg(hot))
+                let down = crate::theme::over(t.bg_selected, t.bg_active);
+                d.bg(t.bg_selected)
+                    .border_color(t.accent_line)
+                    .hover(move |s| s.bg(hot))
+                    .active(move |s| s.bg(down))
             })
             .when(!on, |d| {
-                d.border_color(t.line_default).hover(|s| s.bg(t.bg_hover).border_color(t.line_strong))
+                d.border_color(t.line_default)
+                    .hover(|s| s.bg(t.bg_hover).border_color(t.line_strong))
+                    .active(|s| s.bg(t.bg_active))
             })
-            .active(|s| s.opacity(0.8))
             // Selected: a check in the class colour takes the swatch's slot, so selection isn't
             // colour alone and nothing shifts.
             .when_some(swatch_color, |d, c| {
@@ -688,9 +694,13 @@ impl FoloApp {
             .rounded_full()
             .cursor_pointer()
             .bg(if on { t.accent_fill() } else { t.line_strong })
-            .when(!on, |d| d.hover(|s| s.bg(t.text_disabled)))
-            .when(on, |d| d.hover(|s| s.opacity(0.88)))
-            .active(|s| s.opacity(0.8))
+            // Hover and pressed are fills a step apart, like every other control.
+            .when(!on, |d| d.hover(|s| s.bg(t.text_disabled)).active(|s| s.bg(t.text_tertiary)))
+            .when(on, |d| {
+                let hot = crate::theme::over(t.accent_fill(), t.bg_hover);
+                let down = crate::theme::over(t.accent_fill(), t.bg_active);
+                d.hover(move |s| s.bg(hot)).active(move |s| s.bg(down))
+            })
             .child({
                 // Dark: a dark knob on lime; light: white on olive. Off: a bright knob on grey.
                 let knob = if on && t.is_dark() {
@@ -703,7 +713,16 @@ impl FoloApp {
                 let knob =
                     div().absolute().top(px(2.)).size(px(14.)).rounded_full().bg(knob).shadow(t.shadow_sm());
                 let (from, to) = if on { (2., 14.) } else { (14., 2.) };
-                if reduce_motion() {
+                // Animate only within the motion's time after a real change of value.
+                let changed = {
+                    let mut seen = self.switch_seen.borrow_mut();
+                    let e = seen.entry(key.to_string()).or_insert((on, None));
+                    if e.0 != on {
+                        *e = (on, Some(std::time::Instant::now()));
+                    }
+                    e.1.is_some_and(|at| at.elapsed() < std::time::Duration::from_millis(150))
+                };
+                if reduce_motion() || !changed {
                     knob.left(px(to)).into_any_element()
                 } else {
                     knob.with_animation(

@@ -1284,3 +1284,60 @@ Round 32 changes:
   - The thumbnail slider names its value.
   - The broken-labels tooltip says a click copies.
   - Settings lists F6 / Shift F6.
+
+## Round 32
+
+| Line | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | avg |
+|------|---|---|---|---|---|---|---|---|---|----|----|----|-----|
+| Opus 5.5 | 8 | 9 | 9 | 8 | 8 | 8 | 8 | 9 | 9 | 9 | 8 | 8 | 8.4 |
+| GPT-6.1 Sol | 9 | 8 | 9 | 9 | 8 | 9 | 8 | 9 | 8 | 8 | 9 | 8 | 8.5 |
+
+Sol reached its best yet, 8.5, with dataviz, responsiveness and hierarchy at 9. Opus dipped to 8.4. Hierarchy fell to 8 because Playground's rail stacked its inputs over the result: at 1280 × 800 the detections sat below the fold. Opus also flagged:
+- A 0.30 / 0.65 / 1.00 P/R axis.
+- Opacity-only presses on chips, the switch and tiles.
+- A grey "Share of all FP" ramp with no key.
+- Icon-shaped loading rows.
+- The empty band under Name in New run.
+- A stretched sparkline at minimum size.
+
+Sol flagged:
+- An oversized chart group revealed by its bottom.
+- No Retry after a failed prediction.
+- An optimizer helper that described the schedule.
+- Switches animating on first draw.
+- A pointer-only connection line.
+- "16" sample images where 8 show.
+- "When the GPU is free" for any device.
+- Proportional digits in age columns.
+- Undiscoverable pan and fit keys.
+- Ambiguous demo-server wording.
+
+Opus measured the light "Running" badge at about 4.5:1. The contrast test covers that pair and passes, so the reading came from anti-aliased pixels. Three reversals went into the brief's settled decisions:
+- "Copy check".
+- The toast's stack links.
+- Loss ticks counted from the top.
+
+Round 33 changes:
+- **Playground:**
+  - The sample picker folds below 900 px, so all detections and the latency show at 1280 × 800.
+  - A help icon gives zoom, pan and fit.
+  - A failed prediction offers Retry (and Local CPU after an OOM).
+- **New run:**
+  - The Optimizer helper says what Auto picks for this run (the engine's rule: SGD past 10,000 steps of a 64-image nominal batch, else AdamW).
+  - The learning-rate helper gives the schedule, and under Auto the rate it uses.
+  - The dataset summary sits on its label row at every size.
+  - The queue waits on the current run, not "the GPU".
+- **Charts:**
+  - The P/R floor snaps to 0.2 steps (0.40 / 0.70 / 1.00).
+  - The FP share row is plain numbers.
+  - The sparkline is capped at 160 px, or 240 in the wrapped grid.
+- **Controls:**
+  - Switches animate only after a change.
+  - Pressed is a fill on chips, the switch and dataset cards, or an edge on image tiles and samples.
+  - The connection line is a Tab stop; Enter opens Settings, and its status shows on focus.
+- **Focus:** a target taller than the view reveals its top.
+- **Copy:**
+  - The demo-server help is clearer.
+  - "8 of the 16" validation images.
+  - Ages use tabular digits.
+- **Loading rows:** shaped like table rows, with no icon.

@@ -161,7 +161,7 @@ impl FoloApp {
                             .child(num_cell(72., text(ty::SM, t.text_secondary).tnum().child(metrics.as_ref().map_or("–".into(), |mm| f3(mm.map50)))))
                             .when(params_col, |d| d.child(num_cell(72., text(ty::SM, t.text_secondary).tnum().child(format!("{p} {pu}")))))
                             .child(num_cell(72., text(ty::SM, t.text_secondary).tnum().child(format!("{b} {bu}"))))
-                            .child(num_cell(84., text(ty::SM, t.text_tertiary).child(time::parse(&m.created).map_or(String::new(), |c| time::ago(c, now)))));
+                            .child(num_cell(84., text(ty::SM, t.text_tertiary).tnum().child(time::parse(&m.created).map_or(String::new(), |c| time::ago(c, now)))));
                         self.bind(row, &key, 0., window, cx, act(move |this, w, cx| this.navigate(Route::Model(id.clone()), w, cx))).into_any_element()
                     })
                     .collect();
@@ -1000,7 +1000,7 @@ impl FoloApp {
         let row_sums: Vec<u32> = ev.confusion.iter().map(|r| r.iter().sum::<u32>().max(1)).collect();
         let max_count = ev.confusion.iter().flatten().copied().max().unwrap_or(1).max(1);
         // The error ramp spans 0 to the largest confusion between classes (the false-positive row,
-        // a split of all false positives that sums to 100 %, has its own neutral ramp), so the worst confusion is the
+        // a split of all false positives that sums to 100 %, is plain numbers), so the worst confusion is the
         // darkest cell and small ones stay apart (the key states that maximum).
         let frac_of =
             |r: usize, v: u32| if norm { v as f32 / row_sums[r] as f32 } else { v as f32 / max_count as f32 };
@@ -1158,7 +1158,9 @@ impl FoloApp {
                         if diag {
                             crate::theme::over(t.bg_inset, alpha(base, (0.35 + 0.6 * frac).min(0.95)))
                         } else if r == n - 1 {
-                            crate::theme::over(t.bg_panel, alpha(t.text_tertiary, 0.12 + 0.5 * frac.sqrt()))
+                            // The false-positive split is read as numbers: a flat inset, no ramp (a
+                            // grey ramp beside the red one read as an encoding without a key).
+                            t.bg_inset
                         } else {
                             crate::theme::over(t.bg_panel, alpha(t.danger_solid, err_alpha(frac / max_err)))
                         }
@@ -1180,6 +1182,8 @@ impl FoloApp {
                     // Pick the label colour from the composited cell, not the theme.
                     let ink = if na || v == 0 {
                         t.text_tertiary
+                    } else if r == n - 1 && !diag {
+                        t.text_secondary
                     } else {
                         t.readable_on(crate::theme::over(t.bg_panel, fill))
                     };

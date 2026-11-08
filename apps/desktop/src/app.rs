@@ -335,6 +335,9 @@ pub struct FoloApp {
 
     pub root_focus: FocusHandle,
     pub focus: RefCell<HashMap<SharedString, FocusHandle>>,
+    /// Each switch's last drawn value and when it last changed: the knob animates only after a
+    /// change, not when a switch first appears (opening Settings shows it settled).
+    pub switch_seen: RefCell<HashMap<String, (bool, Option<std::time::Instant>)>>,
     /// The last input came from the keyboard, so focus rings are shown.
     pub kb: bool,
     pub page_scroll: ScrollHandle,
@@ -526,6 +529,7 @@ impl FoloApp {
             hold_loading: false,
             root_focus,
             focus: RefCell::new(HashMap::new()),
+            switch_seen: RefCell::new(HashMap::new()),
             kb: false,
             page_scroll: ScrollHandle::new(),
             scroll_drag: None,
@@ -1723,7 +1727,7 @@ impl FoloApp {
                             this.toast_with(
                                 Tone::Info,
                                 format!("Queued {name}"),
-                                Some("It starts when the GPU is free.".into()),
+                                Some("It starts when the current run finishes.".into()),
                                 Some((
                                     "View queue".into(),
                                     Rc::new(
@@ -1976,6 +1980,13 @@ impl FoloApp {
             .ok();
         })
         .detach();
+    }
+
+    /// Run the failed prediction again, showing "Detecting…" meanwhile (a plain rerun of the same
+    /// image and model keeps the old result up, which here is the error and its Retry button).
+    pub fn retry_predict(&mut self, cx: &mut Context<Self>) {
+        self.play_pred_for = None;
+        self.run_predict(cx);
     }
 
     pub fn run_predict(&mut self, cx: &mut Context<Self>) {
@@ -2270,7 +2281,7 @@ impl FoloApp {
             live_card =
                 Some(if compact { self.live_rail(&r, window, cx) } else { self.live_mini(&r, window, cx) });
         }
-        let health = self.connection_line(compact, cx);
+        let health = self.connection_line(compact, window, cx);
         div()
             .w(px(if compact { tsize::SIDEBAR_COLLAPSED } else { tsize::SIDEBAR }))
             .flex_none()
@@ -2479,7 +2490,7 @@ impl FoloApp {
         .into_any_element()
     }
 
-    fn connection_line(&self, compact: bool, cx: &mut Context<Self>) -> impl IntoElement {
+    fn connection_line(&self, compact: bool, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let (color, glyph, label) = match &self.store.health {
             _ if self.connecting.is_some() => (
@@ -2495,8 +2506,13 @@ impl FoloApp {
             Load::Failed(_) => (t.danger_solid, "icons/circle-x.svg", "Server unreachable".to_string()),
             _ => (t.text_disabled, "icons/refresh-cw.svg", "Connecting…".to_string()),
         };
-        div()
+        // A control, by pointer and keyboard: it opens Connection settings, and the collapsed rail's
+        // glyph (a shape, not colour alone) shows the full status on hover and on focus.
+        let tip = format!("Connection: {label}");
+        let ring = self.ring(&self.fh("connection", cx), window);
+        let el = div()
             .id("connection")
+            .relative()
             .h(px(36.))
             .flex_none()
             .flex()
@@ -2505,17 +2521,21 @@ impl FoloApp {
             .px(px(16.))
             .border_t_1()
             .border_color(t.line_subtle)
-            // Collapsed rail: a shaped glyph (not colour alone) with the full status on hover.
+            .cursor_pointer()
+            .hover(|s| s.bg(t.bg_hover))
+            .active(|s| s.bg(t.bg_active))
+            .tooltip(crate::controls::tip(tip.clone(), None))
             .when(compact, |d| {
                 d.justify_center()
                     .px(px(0.))
-                    .tooltip(crate::controls::tip(format!("Connection: {label}"), None))
                     .child(icon(glyph, 14., color))
+                    .when(ring, |d| d.child(crate::controls::focus_tip(&t, tip.clone(), 30.)))
             })
             .when(!compact, |d| {
                 d.child(div().size(px(6.)).rounded_full().bg(color))
                     .child(text(ty::XS, t.text_tertiary).truncate().child(label))
-            })
+            });
+        self.bind(el, "connection", 0., window, cx, act(|this, w, cx| this.navigate(Route::Settings, w, cx)))
     }
 
     fn page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -2592,8 +2612,13 @@ fn reveal(b: gpui::Bounds<Pixels>, window: &mut Window) {
         if vp.size.width <= px(0.) || !inside {
             continue;
         }
+        let tall = b.size.height + margin * 2. > vp.size.height;
         let dy = if b.top() - margin < vp.top() {
             b.top() - margin - vp.top()
+        } else if tall {
+            // Taller than the view (the run page's linked chart group at minimum size): its top
+            // leads. Already in view, it stays; below, it comes up to the top edge, never past.
+            if b.top() + margin > vp.bottom() - margin * 4. { b.top() - margin - vp.top() } else { px(0.) }
         } else if b.bottom() + margin > vp.bottom() {
             b.bottom() + margin - vp.bottom()
         } else {
@@ -2853,7 +2878,12 @@ impl FoloApp {
                 Section::Settings => "Settings",
             }
         );
-        let in_nav = self.focus.borrow().iter().any(|(k, f)| k.starts_with("nav-") && f.is_focused(window));
+        // The sidebar region: its navigation and the connection line at its foot.
+        let in_nav = self
+            .focus
+            .borrow()
+            .iter()
+            .any(|(k, f)| (k.starts_with("nav-") || k.as_ref() == "connection") && f.is_focused(window));
         let in_search = self.fh("titlebar-search", cx).is_focused(window);
         let at = if in_nav {
             0

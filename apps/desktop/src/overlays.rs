@@ -696,6 +696,19 @@ impl FoloApp {
         // Short windows (the 620 px minimum): tighter rhythm and no restating helpers in the Model
         // rows, so the Schedule's controls are in view without scrolling.
         let short = window.viewport_size().height < px(700.);
+        // What Auto resolves to for this dataset, batch and length (the engine's rule: SGD at 0.01
+        // past 10,000 optimizer steps of a 64-image nominal batch, else AdamW at 0.01 / (4 + classes) to six decimals),
+        // so the form can say which, and that the rate field is then unused.
+        let auto_pick = ds.as_ref().filter(|_| opt == 0).map(|d| {
+            let steps = (d.splits.train as usize).div_ceil(BATCHES[batch].max(64) as usize)
+                * epochs.round().max(1.) as usize;
+            if steps > 10_000 {
+                ("SGD", "0.01".to_string())
+            } else {
+                let lr = (0.01 / (4. + d.classes.len() as f64) * 1e6).round() / 1e6;
+                ("AdamW", format!("{lr:.6}").trim_end_matches('0').to_string())
+            }
+        });
         // The adapter behind "GPU 0", named as the other screens name it.
         let gpu_name =
             self.store.system.ready().and_then(|s| s.gpus.first()).map(|g| crate::ui::short_gpu(&g.name));
@@ -836,28 +849,26 @@ impl FoloApp {
                                 int(d.splits.val)
                             )
                         });
-                        if short {
-                            // Short windows: the summary rides on the label row, a line saved
-                            // toward keeping the Schedule above the footer.
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap(px(8.))
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_baseline()
-                                        .justify_between()
-                                        .gap(px(8.))
-                                        .child(label("Dataset"))
-                                        .children(summary.map(|s| {
+                        // The summary rides on the label row (no band under Name beside it,
+                        // and a line saved toward keeping the Schedule above the footer).
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(8.))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_baseline()
+                                    .justify_between()
+                                    .gap(px(8.))
+                                    .child(label("Dataset"))
+                                    .children(
+                                        summary.map(|s| {
                                             text(ty::XS, t.text_tertiary).tnum().truncate().child(s)
-                                        })),
-                                )
-                                .child(ds_select)
-                        } else {
-                            field("Dataset", ds_select, summary)
-                        }
+                                        }),
+                                    ),
+                            )
+                            .child(ds_select)
                     }),
                 ),
             )
@@ -916,12 +927,29 @@ impl FoloApp {
                         epochs_slider,
                         epochs_bad.then_some("Enter a whole number from 1 to 10,000"),
                     )))
-                    .child(div().flex_1().child(typed(
-                        "Initial learning rate",
-                        lr_box,
-                        lr_slider,
-                        lr_bad.then_some("Enter a number above 0 and below 10, e.g. 0.01 or 1e-3"),
-                    ))),
+                    .child(
+                        div()
+                            .flex_1()
+                            .flex()
+                            .flex_col()
+                            .gap(px(8.))
+                            .child(typed(
+                                "Initial learning rate",
+                                lr_box,
+                                lr_slider,
+                                lr_bad.then_some("Enter a number above 0 and below 10, e.g. 0.01 or 1e-3"),
+                            ))
+                            // The schedule, and under Auto the rate it uses instead (short windows keep
+                            // the Schedule above the footer; the Optimizer helper still says it).
+                            .when(!short && !lr_bad, |d| {
+                                d.child(text(ty::XS, t.text_tertiary).tnum().child(match &auto_pick {
+                                    Some((_, lr)) => {
+                                        format!("Auto uses {lr}; 3-epoch warmup, then linear decay")
+                                    }
+                                    None => "3-epoch warmup, then linear decay to 1%".to_string(),
+                                }))
+                            }),
+                    ),
             )
             .child(
                 div()
@@ -930,7 +958,14 @@ impl FoloApp {
                     .child(div().flex_1().child(field(
                         "Optimizer",
                         opt_seg,
-                        Some(format!("{}: warm up 3 epochs, then cosine decay", OPT_LABELS[opt])),
+                        Some(match (opt, auto_pick) {
+                            (0, Some((kind, _))) => {
+                                format!("Auto: {kind} for this run, at its own learning rate")
+                            }
+                            (0, None) => "Auto: SGD for long runs, else AdamW".to_string(),
+                            (1, _) => "SGD with Nesterov momentum 0.937".to_string(),
+                            _ => "AdamW with weight decay".to_string(),
+                        }),
                     )))
                     .child(
                         div().flex_1().child(
@@ -1113,7 +1148,7 @@ impl FoloApp {
             "New training run",
             Some(match &busy_with {
                 Some(n) => {
-                    format!("{n} is training; this run queues and starts when the GPU is free.")
+                    format!("{n} is training; this run queues and starts when it finishes.")
                 }
                 None => "Trains on this machine and streams metrics into the run dashboard.".into(),
             }),

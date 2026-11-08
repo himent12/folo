@@ -223,10 +223,18 @@ impl FoloApp {
         if zoom <= 1.0 && self.fh("play-fit", cx).is_focused(window) {
             window.focus(&self.fh("play-zoom-in", cx));
         }
+        // How to move around the image, as the inspector lists it (the fitted "Fit" names no key).
+        let view_help = self.help_icon(
+            "play-view-help",
+            "Scroll, + or − zoom · drag, or arrows when zoomed, pan · 0 fits the image",
+            window,
+            cx,
+        );
         let zoom_bar = div()
             .flex()
             .items_center()
             .gap(px(2.))
+            .child(div().pr(px(4.)).child(view_help))
             .child(self.icon_button(
                 "play-zoom-out",
                 "icons/zoom-out.svg",
@@ -323,7 +331,7 @@ impl FoloApp {
                                         - rail
                                         - 16.;
                                     let budget =
-                                        (stage - 560.).clamp(if compact { 120. } else { 160. }, 520.);
+                                        (stage - 584.).clamp(if compact { 120. } else { 160. }, 520.);
                                     // Monospace: the measured width is the glyph count times the advance.
                                     let advance = window.text_system().advance(
                                         window.text_system().resolve_font(&gpui::font(crate::theme::MONO)),
@@ -777,6 +785,17 @@ impl FoloApp {
                     .into_any_element()
             }
             Load::Failed(e) => {
+                let retry = self.button(
+                    "play-retry",
+                    "Retry",
+                    Btn::Secondary,
+                    Some("icons/refresh-cw.svg"),
+                    window,
+                    cx,
+                    // Show "Detecting…" again (the failure would otherwise stay up, and its
+                    // button live, while the retry runs).
+                    act(|this, _, cx| this.retry_predict(cx)),
+                );
                 // Out of GPU memory locally: the CPU is one click away.
                 let to_cpu = (e.code == "gpu_out_of_memory"
                     && self.play_target == Some(crate::local::Target::Gpu))
@@ -801,7 +820,8 @@ impl FoloApp {
                     .when_some(e.hint.clone(), |d, h| {
                         d.child(text(ty::XS, t.text_tertiary).whitespace_normal().child(h))
                     })
-                    .children(to_cpu.map(|b| div().pt(px(4.)).child(b)))
+                    // Retry (same image, model and thresholds), with the CPU beside it after an OOM.
+                    .child(div().pt(px(4.)).flex().gap(px(8.)).child(retry).children(to_cpu))
                     .into_any_element()
             }
             Load::Loading => div()
@@ -848,8 +868,11 @@ impl FoloApp {
                     .h(px(48.))
                     .rounded(px(radius::SM))
                     .cursor_pointer()
-                    .hover(|s| s.opacity(0.85))
-                    .active(|s| s.opacity(0.7))
+                    // Over an image a fill wouldn't show: the edge answers, as on dataset tiles.
+                    .border_1()
+                    .border_color(gpui::transparent_black())
+                    .hover(|s| s.border_color(t.line_strong))
+                    .active(|s| s.border_color(t.text_tertiary))
                     .child(div().size_full().rounded(px(radius::SM)).overflow_hidden().bg(t.bg_inset).child(
                         image_canvas(
                             &t,
@@ -873,8 +896,9 @@ impl FoloApp {
                 );
             }
         }
-        // Short windows fold the picker to its heading, so the detections start higher up.
-        let fold = window.viewport_size().height < px(700.);
+        // Below 900 px (the default 1280 x 800 too) the picker folds to its heading, so the
+        // detections, the screen's result, start higher up.
+        let fold = window.viewport_size().height < px(900.);
         let picker_open = !fold || self.play_picker_open;
         let heading =
             text(ty::SM, t.text_secondary).font_weight(FontWeight::MEDIUM).child("Try a validation image");
