@@ -292,6 +292,37 @@ impl Backend for HttpBackend {
         self.post_slow("/datasets/synthetic", req)
     }
 
+    fn local_inference(&self) -> bool {
+        true
+    }
+
+    fn model_weights(&self, id: &str, etag: Option<&str>) -> ApiResult<Option<Weights>> {
+        let url = self.url(&format!("/models/{}/weights?format=f16", seg(id)));
+        // The first request of a checkpoint makes its f16 export on the server: allow for it.
+        let mut req = agent(Some(Duration::from_secs(300))).get(&url);
+        if let Some(e) = etag {
+            req = req.header("If-None-Match", e);
+        }
+        let mut resp = req.call().map_err(|e| self.unreachable(&e))?;
+        match resp.status().as_u16() {
+            304 => return Ok(None),
+            s if s >= 400 => {
+                return Err(self.decode::<serde_json::Value>(resp).err().unwrap_or_else(|| {
+                    ApiError::new("http_error", format!("folo serve answered HTTP {s}"))
+                }));
+            }
+            _ => {}
+        }
+        let etag = resp.headers().get("etag").and_then(|v| v.to_str().ok()).unwrap_or_default().to_string();
+        let bytes = resp
+            .body_mut()
+            .with_config()
+            .limit(2 << 30)
+            .read_to_vec()
+            .map_err(|e| ApiError::new("bad_response", e.to_string()))?;
+        Ok(Some(Weights { bytes, etag }))
+    }
+
     fn metrics(&self, id: &str) -> ApiResult<RunMetrics> {
         self.get(&format!("/runs/{}/metrics", seg(id)))
     }

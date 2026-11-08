@@ -29,6 +29,7 @@ src/main.rs       args, fonts (design/fonts), window, keymap
 src/theme.rs      the active theme (Colors from tokens, dark/light), class palette, shadows
 src/api/          Backend trait (the client seam), wire types for docs/API.md, the in-app mock
 src/synth.rs      procedural "shapes" scenes behind the mock's images
+src/local.rs      local inference: folo-vision's Predictor in process, on folo-gpu or the CPU
 src/store.rs      fetched state, live run data (SSE events), the decoded-image cache
 src/app.rs        root view: chrome, sidebar, routing, fetching, live event pump, actions
 src/controls.rs   focusable controls: buttons, segmented, chips, switch, slider, select, tooltip
@@ -47,6 +48,11 @@ Everything comes through `api::Backend`, typed with the shared `crates/folo-api`
 
 - **`HttpBackend`** talks to `folo serve` (docs/API.md): JSON over HTTP with `ureq`, live runs over SSE on a
   background thread, image bytes for the grid, multipart uploads for the Playground.
+- **Local inference** (`src/local.rs`): Playground's *Run on* switch runs the model in this process instead of on the
+  server: Local GPU (folo-gpu, wgpu) or Local CPU. Weights are the f16 export from
+  `GET /api/models/{id}/weights?format=f16`, held in memory and revalidated by ETag before each run (a retrained model
+  reloads; an unreachable server still runs the loaded copy). The demo data has no weights, so there it is Server only.
+  `FOLO_SERVER=… cargo test real_server -- --ignored` checks local results against the server's.
 - **`MockBackend`** is built-in demo data (procedural shapes datasets, models and runs with a live simulator) used
   for screenshots, tests and when no server is available.
 
