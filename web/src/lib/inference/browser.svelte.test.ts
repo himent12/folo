@@ -129,4 +129,15 @@ describe('BrowserEngine', () => {
     await e.predict({ ...req('m1', null, 'cpu', 2), tag: '"b"' });
     expect(w.loads).toEqual(['m1:1:cpu', 'm1:2:cpu']);
   });
+
+  it('downloads the weights once for both backends when the ETag is the same', async () => {
+    const w = fakeWasm();
+    const e = new BrowserEngine(async () => w.mod, pixels);
+    let downloads = 0;
+    const r = (backend: 'cpu' | 'webgpu') => ({ ...req('m1', null, backend), tag: '"a"', download: async () => (downloads++, new Uint8Array([1]).buffer) });
+    await e.predict(r('cpu'));
+    await e.predict(r('webgpu'));
+    expect(downloads).toBe(1);
+    expect(w.loads).toEqual(['m1:1:cpu', 'm1:1:webgpu']);
+  });
 });

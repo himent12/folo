@@ -86,6 +86,8 @@ export class BrowserEngine {
   info = $state.raw<DetectorInfo | null>(null);
 
   #detectors = new Map<string, Entry>();
+  /** The last weights downloaded (by model and ETag): loading the same model on the other backend reuses them. */
+  #lastDownload: { key: string; bytes: Promise<ArrayBuffer> } | null = null;
   #runtimeReady = false;
 
   /** `load` provides the folo-wasm module and `decode` an image's pixels (tests pass fakes). */
@@ -141,7 +143,7 @@ export class BrowserEngine {
       const m = await this.load();
       this.#runtimeReady = true;
       this.phase = 'weights';
-      const bytes = new Uint8Array(await (req.file ? req.file.arrayBuffer() : req.download()));
+      const bytes = new Uint8Array(await (req.file ? req.file.arrayBuffer() : this.#download(req)));
       this.phase = 'compile';
       return m.FoloDetector.load(bytes, { backend: req.backend, modelId: req.modelId });
     })();
@@ -157,6 +159,18 @@ export class BrowserEngine {
       this.#release(e);
     }
     return entry;
+  }
+
+  #download(req: { modelId: string; download: () => Promise<ArrayBuffer>; tag?: string | null }): Promise<ArrayBuffer> {
+    const key = `${req.modelId}|${req.tag ?? ''}`;
+    // Without an ETag the bytes may have changed: fetch again.
+    if (req.tag && this.#lastDownload?.key === key) return this.#lastDownload.bytes;
+    const bytes = req.download();
+    this.#lastDownload = { key, bytes };
+    bytes.catch(() => {
+      if (this.#lastDownload?.bytes === bytes) this.#lastDownload = null;
+    });
+    return bytes;
   }
 
   /** Frees an evicted detector once no request is using it. */
