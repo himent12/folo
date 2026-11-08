@@ -1200,7 +1200,7 @@ impl FoloApp {
             .overflow_hidden()
             .cursor_pointer()
             .hover(|s| s.border_color(t.line_strong))
-            .active(|s| s.opacity(0.9))
+            .active(|s| s.bg(crate::theme::over(t.bg_panel, t.bg_active)))
             .child(
                 div()
                     .h(px(136.))

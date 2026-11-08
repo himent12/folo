@@ -866,8 +866,11 @@ impl FoloApp {
                     .h(px(48.))
                     .rounded(px(radius::SM))
                     .cursor_pointer()
-                    .hover(|s| s.opacity(0.85))
-                    .active(|s| s.opacity(0.7))
+                    // Over an image a fill wouldn't show: the edge answers, as on dataset tiles.
+                    .border_1()
+                    .border_color(gpui::transparent_black())
+                    .hover(|s| s.border_color(t.line_strong))
+                    .active(|s| s.border_color(t.text_tertiary))
                     .child(div().size_full().rounded(px(radius::SM)).overflow_hidden().bg(t.bg_inset).child(
                         image_canvas(
                             &t,
