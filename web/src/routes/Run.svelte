@@ -180,36 +180,35 @@
       <span class="phone-only"><Menu label="More run actions" items={moreItems} /></span>
     {/snippet}
 
+    <!-- The outcome as one line under the header (status mark, what happened, the next action); it wraps rather than
+         grows into a card. The failure's cause stays in full: it is what decides between Resume and a smaller batch. -->
     {#if run.status === 'failed'}
-      <div class="banner danger" role="alert">
-        <TriangleAlert size={16} />
-        <div class="b-text">
-          <p class="b-title">Failed at epoch {run.epoch}</p>
-          <p class="b-msg">{run.error}</p>
-        </div>
-        <div class="b-acts">
+      <div class="callout danger" role="alert">
+        <TriangleAlert size={16} aria-hidden="true" />
+        <p class="c-text"><span class="c-title">Failed at epoch {run.epoch}</span> <span class="c-msg">{run.error}</span></p>
+        <div class="c-acts">
           <!-- Out of memory needs a smaller batch (a new run); anything else can continue from the last checkpoint. -->
           {#if !run.error?.includes('memory')}<Button size="sm" icon={Play} loading={resuming} onclick={resume}>Resume</Button>{/if}
           <Button size="sm" icon={RotateCcw} href={retryHref}>{run.error?.includes('memory') ? `Retry with batch ${Math.max(1, run.config.batch / 2)}` : 'New run like this'}</Button>
         </div>
       </div>
     {:else if run.status === 'completed'}
-      <div class="banner success">
-        <CircleCheck size={16} />
-        <div class="b-text">
-          <p class="b-title">Completed in {duration(elapsed)}</p>
-          <p class="b-msg">Best mAP50-95 {metric(run.best?.map50_95)} at epoch {run.best?.epoch ?? 0}. The best weights are saved as a model.</p>
-        </div>
-        {#if run.model_id}<Button size="sm" icon={ScanSearch} href={href(`/playground?model=${run.model_id}`)}>Try in Playground</Button>{/if}
+      <div class="callout success" role="status">
+        <CircleCheck size={16} aria-hidden="true" />
+        <p class="c-text">
+          <span class="c-title">Completed in {duration(elapsed)}</span>
+          <span class="c-msg brief">Best mAP50-95 <span class="num">{metric(run.best?.map50_95)}</span> at epoch {run.best?.epoch ?? 0}, saved as a model.</span>
+        </p>
+        {#if run.model_id}<div class="c-acts"><Button size="sm" icon={ScanSearch} href={href(`/playground?model=${run.model_id}`)}>Try in Playground</Button></div>{/if}
       </div>
     {:else if run.status === 'stopped'}
-      <div class="banner neutral">
-        <Square size={16} />
-        <div class="b-text">
-          <p class="b-title">Stopped at epoch {run.epoch}</p>
-          <p class="b-msg">The last checkpoint was kept{run.model_id ? ' and saved as a model' : ''}. Resume continues from it.</p>
-        </div>
-        <Button size="sm" icon={Play} loading={resuming} onclick={resume}>Resume</Button>
+      <div class="callout neutral" role="status">
+        <Square size={16} aria-hidden="true" />
+        <p class="c-text">
+          <span class="c-title">Stopped at epoch {run.epoch}</span>
+          <span class="c-msg">The last checkpoint was kept{run.model_id ? ' and saved as a model' : ''}; Resume continues from it.</span>
+        </p>
+        <div class="c-acts"><Button size="sm" icon={Play} loading={resuming} onclick={resume}>Resume</Button></div>
       </div>
     {/if}
 
@@ -375,53 +374,47 @@
   .dev {
     max-width: 320px;
   }
-  .banner {
-    display: flex;
-    align-items: center;
-    gap: var(--space-3);
-    padding: var(--space-3) var(--space-3) var(--space-3) var(--space-4);
-    border-radius: var(--radius-lg);
-    border: 1px solid;
-  }
-  .banner > :global(svg) {
-    flex-shrink: 0;
-    align-self: flex-start;
-    margin-top: 2px;
-  }
-  .b-acts {
-    display: flex;
-    flex-wrap: wrap;
-    gap: var(--space-2);
-  }
-  .b-text {
-    flex: 1;
-    min-width: 0;
+  .callout {
     display: grid;
-    gap: 2px;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: var(--space-2) var(--space-3);
+    min-height: 44px;
+    padding: var(--space-2) var(--space-2) var(--space-2) var(--space-4);
+    background: var(--bg-panel);
+    border: 1px solid var(--line-default);
+    border-radius: var(--radius-lg);
   }
-  .b-title {
-    font-weight: var(--weight-medium);
+  /* The status mark carries the hue; the text stays in ink, so it reads at AA on the panel in both themes. */
+  .callout > :global(svg) {
+    flex-shrink: 0;
   }
-  .b-msg {
-    color: var(--text-secondary);
-  }
-  .danger {
-    background: var(--danger-muted);
-    border-color: color-mix(in srgb, var(--danger-solid) 25%, transparent);
+  .danger > :global(svg) {
     color: var(--danger-text);
   }
-  .success {
-    background: var(--success-muted);
-    border-color: color-mix(in srgb, var(--success-solid) 25%, transparent);
+  .success > :global(svg) {
     color: var(--success-text);
   }
-  .neutral {
-    background: var(--bg-panel);
-    border-color: var(--line-default);
+  .neutral > :global(svg) {
+    color: var(--text-tertiary);
+  }
+  .c-text {
+    min-width: 0;
     color: var(--text-secondary);
   }
-  .banner .b-title {
+  .c-title {
+    margin-right: var(--space-2);
+    font-weight: var(--weight-medium);
     color: var(--text-primary);
+  }
+  .c-msg .num {
+    color: var(--text-primary);
+  }
+  .c-acts {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: var(--space-2);
   }
 
   .queued {
@@ -525,24 +518,30 @@
       flex: 1;
       justify-content: center;
     }
-    .b-msg {
+    /* Phones: the mark and the title share the first line; a cause wraps below it, the actions under the text. */
+    .callout {
+      padding-left: var(--space-3);
+    }
+    .callout:has(.c-msg:not(.brief)) {
+      grid-template-columns: auto minmax(0, 1fr);
+      align-items: start;
+      padding-block: var(--space-3);
+    }
+    .callout:has(.c-msg:not(.brief)) > :global(svg) {
+      margin-top: 2px;
+    }
+    .callout:has(.c-msg:not(.brief)) .c-acts {
+      grid-column: 2;
+      justify-content: flex-start;
+    }
+    .c-msg {
+      display: block;
+      margin-top: 2px;
       font-size: var(--type-sm-size);
+      line-height: var(--type-sm-line);
     }
-    .banner {
-      flex-direction: column;
-      align-items: stretch;
-      gap: var(--space-3);
-    }
-    /* Success is a one-line summary with its action; the details are in the tiles below. */
-    .banner.success {
-      flex-direction: row;
-      align-items: center;
-      padding: var(--space-2) var(--space-2) var(--space-2) var(--space-3);
-    }
-    .banner.success .b-msg {
-      display: none;
-    }
-    .banner > :global(svg) {
+    /* Success is a one-line summary with its action; the best epoch is in the tiles below. */
+    .c-msg.brief {
       display: none;
     }
     .dev,

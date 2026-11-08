@@ -14,7 +14,8 @@
    * An image with detection boxes drawn over it in screen pixels (crisp at any size). Boxes: a 2 px class-colour
    * stroke inside a 1 px dark halo; label chips with the class name (and score) sit on the top-left corner, or
    * elsewhere next to their own box (see ./chips).
-   * Ground truth, when given, is drawn dashed underneath the predictions.
+   * Ground truth, when given, is drawn dashed underneath the predictions: in the class colour at full size, neutral and
+   * just outside the prediction's stroke in compact thumbnails (where the two would otherwise coincide).
    */
   import { classColor } from '$lib/design/tokens';
   import { CHIP_H, placeChips } from './chips';
@@ -275,9 +276,15 @@
     border-width: 1.5px;
     box-shadow: 0 0 0 1px var(--class-halo);
   }
+  /* Thumbnails: a prediction and its matching truth share a class colour and nearly the same rectangle, so a coloured
+     dash would vanish under the solid stroke. Truth is neutral there (white dashes in their dark halo) and ringed just
+     outside the prediction's stroke and halo, so a match reads as two marks and a miss as a lone white ring. */
   .compact .box.truth {
-    margin: -1px;
-    border-width: 1px;
+    margin: 0;
+    border: 0;
+    outline: 1px dashed #ffffff;
+    outline-offset: 2.5px;
+    opacity: 1;
   }
   .chip {
     /* left/top come from the placement pass, relative to the box's own top-left (its stroke lies just outside). */

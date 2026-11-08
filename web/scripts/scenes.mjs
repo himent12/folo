@@ -44,8 +44,8 @@ export const scenes = [
       await page.getByRole('radio', { name: 'Classes' }).click();
     },
   },
-  { name: 'run-failed', path: '/runs/run_a2f0', viewports: ['desktop'] },
-  { name: 'run-completed', path: '/runs/run_c19a', viewports: ['desktop', 'mobile'] },
+  { name: 'run-failed', path: '/runs/run_a2f0', viewports: ['desktop', 'laptop', 'mobile'] },
+  { name: 'run-completed', path: '/runs/run_c19a', viewports: ['desktop', 'laptop', 'mobile'] },
   { name: 'run-new', path: '/runs/new', viewports: ['desktop', 'laptop', 'mobile'] },
   {
     name: 'run-new-focus-mosaic',
@@ -68,6 +68,15 @@ export const scenes = [
       await page.locator('.dock-est').click();
       await page.locator('dialog[open]').waitFor();
     },
+  },
+  {
+    // The viewport, not the whole page (a full-page shot grows the viewport, so the dock steps aside for the summary's
+    // own button): up to 1199 px Start training stays in the bottom dock while the form scrolls.
+    name: 'run-new-dock',
+    path: '/runs/new',
+    fullPage: false,
+    viewports: ['laptop'],
+    setup: (page) => until(page, '.dock-est'),
   },
   {
     name: 'run-new-aug-open',
@@ -142,18 +151,25 @@ export const scenes = [
   { name: 'models-error', path: '/models', search: 'scenario=error', viewports: ['desktop'] },
   { name: 'models-loading', path: '/models', search: 'scenario=loading', viewports: ['desktop', 'laptop', 'mobile'] },
   {
+    // Phones open on the Curves section (the matrix is behind the section picker).
     name: 'model-detail',
     path: '/models/m_fast_n',
     viewports: ['desktop', 'laptop', 'mobile'],
-    setup: (page) => until(page, '#cm .cell'),
+    setup: (page, { vp }) => until(page, vp === 'mobile' ? '#pr svg' : '#cm .cell'),
   },
   {
-    // Up to 1199 px the details fold into one line above the matrix; opened here, they list in two columns.
+    // Laptop: the details fold into one line above the matrix; opened here, they list in two columns. Phones: the
+    // Details section.
     name: 'model-detail-details',
     path: '/models/m_fast_n',
     viewports: ['laptop', 'mobile'],
     fullPage: true,
-    setup: async (page) => {
+    setup: async (page, { vp }) => {
+      if (vp === 'mobile') {
+        await until(page, '#pr svg');
+        await page.getByRole('radio', { name: 'Details' }).click();
+        return;
+      }
       await until(page, '#cm .cell');
       await page.locator('.d-line').click();
     },
@@ -165,12 +181,36 @@ export const scenes = [
     setup: (page) => until(page, '#cm .cell'),
   },
   {
-    // Phones, whole page: the KPI hero row, then the confusion matrix with its column range and miss summary.
+    // Phones, whole page: the KPI hero row, the section picker, then the Curves section.
     name: 'model-phone',
     path: '/models/m_fast_n',
     viewports: ['mobile'],
     fullPage: true,
-    setup: (page) => until(page, '#cm .cell'),
+    setup: (page) => until(page, '#pr svg'),
+  },
+  {
+    // Phones: the Classes section with one class opened (its details row).
+    name: 'model-phone-classes',
+    path: '/models/m_fast_n',
+    viewports: ['mobile'],
+    fullPage: true,
+    setup: async (page) => {
+      await until(page, '#pr svg');
+      await page.getByRole('radio', { name: 'Classes' }).click();
+      await page.locator('#pr button.cls').first().click();
+    },
+  },
+  {
+    // Phones: the Confusion section, with its column range and miss summary.
+    name: 'model-phone-confusion',
+    path: '/models/m_fast_n',
+    viewports: ['mobile'],
+    fullPage: true,
+    setup: async (page) => {
+      await until(page, '#pr svg');
+      await page.getByRole('radio', { name: 'Confusion' }).click();
+      await until(page, '#cm .cell');
+    },
   },
   {
     // Phones: a reduced 13-column matrix (top 12 classes + Other) that scrolls sideways.
@@ -178,7 +218,11 @@ export const scenes = [
     path: '/models/m_coco_s',
     viewports: ['mobile'],
     fullPage: true,
-    setup: (page) => until(page, '#cm .cell'),
+    setup: async (page) => {
+      await until(page, '#pr svg');
+      await page.getByRole('radio', { name: 'Confusion' }).click();
+      await until(page, '#cm .cell');
+    },
   },
   {
     name: 'model-export',
