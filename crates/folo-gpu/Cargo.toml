@@ -14,10 +14,17 @@ workspace = true
 [dependencies]
 folo-core.workspace = true
 wgpu.workspace = true
-pollster.workspace = true
 bytemuck.workspace = true
 half.workspace = true
 thiserror.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+pollster.workspace = true
+
+# In the browser, wgpu's WebGPU objects are only `Send + Sync` with this feature. It is sound for FOLO because
+# the wasm build has no threads (no `atomics` target feature): everything runs on the page's one thread.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wgpu = { workspace = true, features = ["fragile-send-sync-non-atomic-wasm"] }
 
 [dev-dependencies]
 folo-nn.workspace = true

@@ -109,6 +109,13 @@ fn kernel() -> Kernel {
     })
 }
 
+/// True in a wasm build with SIMD128 (`+simd128`, as scripts/build-wasm.sh builds): LLVM vectorises
+/// the portable micro-kernel to it. A hand-written SIMD128 kernel measured the same (~20 GFLOP/s on one thread), so
+/// there is none.
+pub fn uses_simd128() -> bool {
+    cfg!(all(target_arch = "wasm32", target_feature = "simd128"))
+}
+
 /// True if the AVX2/FMA micro-kernel is in use.
 pub fn uses_avx2() -> bool {
     #[cfg(target_arch = "x86_64")]

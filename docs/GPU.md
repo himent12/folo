@@ -1,7 +1,7 @@
 # folo-gpu: GPU compute on wgpu
 
 `crates/folo-gpu` is FOLO's GPU layer. It runs on [wgpu](https://wgpu.rs) 30: Vulkan, DX12 and Metal natively,
-WebGPU in the browser later. It implements folo-core's `Backend` trait, so folo-core tensors train and infer on
+WebGPU in the browser (through folo-wasm, see [In the browser](#in-the-browser) and docs/WASM.md). It implements folo-core's `Backend` trait, so folo-core tensors train and infer on
 the GPU (see [folo-core backend](#folo-core-backend)).
 
 ```
@@ -74,6 +74,33 @@ declarations in front of the source, together with `alias T = f32|f16` and `enab
 can therefore size workgroup arrays, select code paths and compile bounds checks out. Pipelines are cached by
 `(kernel name, spec)`, and compilation happens on first use. Rendering constants as source text works the same
 on every backend, including browser WebGPU; pipeline-overridable constants cannot size arrays on every backend.
+
+### In the browser
+
+On `wasm32` the same crate runs on the browser's WebGPU. Nothing may block the page's thread there, so:
+
+- **Async device creation.** `GpuContext::new_async`, `with_options_async` and `shared_async`, and
+  `folo_gpu::init_async()`, are the async forms of the blocking constructors (which `pollster` wraps natively). In
+  the browser the blocking ones return `GpuError::Unsupported` with a "use the async variant" message;
+  `GpuContext::shared()` / `init()` return the context `shared_async()` / `init_async()` created.
+- **Async readback.** A readback is split into `begin_read` (encode the copy into a staging buffer, submit, request
+  the map) and a wait. `read_with` waits by polling the device; `read_async` / `read_with_async` and
+  `folo_gpu::download_async(ctx, &tensor)` (a GPU tensor → a CPU tensor, strided views made dense on the GPU first)
+  await a future the map callback completes, which WebGPU runs from the event loop. Natively the async forms poll to
+  completion first, so they work (and are tested) there too. In the browser a blocking readback (`to_vec`,
+  `to_device(Cpu)` of a GPU tensor) fails with that error instead of hanging. The staging buffer is unmapped on
+  every path, including an abandoned wait.
+- **Errors.** Natively, pipeline creation sits in a validation error scope whose result is awaited with `pollster`.
+  In the browser that result is asynchronous, so no scope is pushed: compile errors go to the device's
+  uncaptured-error sink and are returned by the next readback.
+- **`sync()`** submits but cannot wait in the browser (WebGPU's `poll` is a no-op); an awaited readback is the wait.
+- **`Send + Sync`.** wgpu's WebGPU objects are `Send + Sync` only with its `fragile-send-sync-non-atomic-wasm`
+  feature, which folo-gpu enables on wasm32. That is sound because the wasm build has no threads.
+- **WGSL.** The kernels are unchanged. Chrome's Tint is stricter than Naga in places: it rejects float literals
+  beyond `f32::MAX` that Naga rounds (`-3.4028235e38` in `softmax` is now `bitcast<f32>(0xff7fffffu)`). Keep new
+  kernels to literals inside the `f32` range.
+- `GpuContext::enumerate` is empty in the browser (WebGPU hands out one adapter on request), and the adapter name
+  is usually hidden (empty).
 
 ## Buffer layout conventions
 

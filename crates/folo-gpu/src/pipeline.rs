@@ -172,6 +172,10 @@ pub(crate) fn render(def: &KernelDef, spec: &Spec) -> String {
 impl Kernel {
     pub fn compile(device: &wgpu::Device, def: &'static KernelDef, spec: &Spec) -> Result<Self> {
         let src = render(def, spec);
+        // Natively, compile errors are caught in an error scope. In the browser the scope's result arrives
+        // asynchronously and nothing may block for it, so errors go to the device's uncaptured-error sink
+        // and surface at the next readback instead.
+        #[cfg(not(target_arch = "wasm32"))]
         let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some(def.name),
@@ -220,6 +224,7 @@ impl Kernel {
             },
             cache: None,
         });
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some(err) = pollster::block_on(scope.pop()) {
             return Err(GpuError::Wgpu(format!("compiling kernel {} ({spec:?}): {err}", def.name)));
         }

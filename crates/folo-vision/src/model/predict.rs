@@ -68,6 +68,14 @@ impl HeadOutput {
     /// `[B, A, 4 + nc]` on the device so that only the decoded values are downloaded (about 60% of the raw
     /// head) and the host does no transpose. Same formulas as the CPU path (max-subtracted softmax).
     pub fn decode_on_device(&self) -> Result<Vec<(Vec<Xyxy>, Vec<f32>)>> {
+        let all = self.decoded_on_device()?.to_vec::<f32>()?;
+        Ok(Self::split_decoded(&all, self.num_anchors(), self.num_classes))
+    }
+
+    /// The device half of [`HeadOutput::decode_on_device`]: the decoded `[B, A, 4 + nc]` tensor (a transposed
+    /// view) on the outputs' device, not read back yet. Readers that cannot block (the browser) download it
+    /// asynchronously and hand the values to [`HeadOutput::split_decoded`].
+    pub fn decoded_on_device(&self) -> Result<Tensor> {
         let _g = no_grad();
         let (b, a, nc, rm) = (self.batch(), self.num_anchors(), self.num_classes, self.reg_max);
         if self.box_raw.dims() != [b, 4 * rm, a] || self.cls_raw.dims() != [b, nc, a] {
@@ -93,10 +101,14 @@ impl HeadOutput {
         let xy2 = points.add(&dist.narrow(1, 2, 2)?)?;
         let boxes = Tensor::cat(&[&xy1, &xy2], 1)?.mul(&stride)?;
         let scores = self.cls_raw.sigmoid()?;
-        let all = Tensor::cat(&[&boxes, &scores], 1)?.transpose(1, 2)?.to_vec::<f32>()?; // [B, A, 4 + nc]
+        Ok(Tensor::cat(&[&boxes, &scores], 1)?.transpose(1, 2)?) // [B, A, 4 + nc]
+    }
+
+    /// Per image `(boxes [A], scores [A, nc])` from the host values of [`HeadOutput::decoded_on_device`]
+    /// (`[B, A, 4 + nc]`, row-major).
+    pub fn split_decoded(all: &[f32], a: usize, nc: usize) -> Vec<(Vec<Xyxy>, Vec<f32>)> {
         let row = 4 + nc;
-        Ok(all
-            .par_chunks_exact(a * row)
+        all.par_chunks_exact(a * row)
             .map(|img| {
                 let boxes = img.chunks_exact(row).map(|r| Xyxy::new(r[0], r[1], r[2], r[3])).collect();
                 let mut scores = Vec::with_capacity(a * nc);
@@ -105,7 +117,7 @@ impl HeadOutput {
                 }
                 (boxes, scores)
             })
-            .collect())
+            .collect()
     }
 
     /// The decoded output `[B, A, 4 + nc]` (MODEL.md §6.4): per anchor `x1, y1, x2, y2` in input pixels, then

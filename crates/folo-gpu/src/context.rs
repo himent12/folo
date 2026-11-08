@@ -1,8 +1,11 @@
 //! [`GpuContext`]: adapter selection, device + queue, buffer pool, pipeline cache and command batching.
 
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, mpsc};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::task::{Context, Poll, Waker};
 
 use crate::error::{GpuError, Result};
 use crate::pipeline::{Kernel, KernelDef, KernelKey, Params, Spec, UNIFORM_SLOT};
@@ -263,44 +266,96 @@ fn adapter_score(a: &wgpu::Adapter, power: wgpu::PowerPreference) -> (u32, u32) 
     (ty, backend)
 }
 
+/// The context behind [`GpuContext::shared`] (set by the first `shared` / `shared_async` call).
+static SHARED: OnceLock<std::result::Result<GpuContext, String>> = OnceLock::new();
+
+/// The error the blocking entry points return in the browser, where nothing may block the page's thread.
+#[cfg(target_arch = "wasm32")]
+const NO_BLOCKING: &str = "blocking GPU calls are not available in the browser; use the async variants \
+     (GpuContext::shared_async, folo_gpu::init_async, folo_gpu::download_async)";
+
 impl GpuContext {
-    /// Lists the adapters visible with `options.backends` (ignores the adapter filter).
+    /// Lists the adapters visible with `options.backends` (ignores the adapter filter). Empty in the browser,
+    /// where WebGPU hands out one adapter on request instead of enumerating.
     pub fn enumerate(options: &GpuOptions) -> Vec<AdapterSummary> {
-        let inst = instance(options.backends.unwrap_or_else(default_backends));
-        let adapters = pollster::block_on(inst.enumerate_adapters(wgpu::Backends::all()));
-        adapters.iter().enumerate().map(|(i, a)| AdapterSummary::new(i, a)).collect()
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let inst = instance(options.backends.unwrap_or_else(default_backends));
+            let adapters = pollster::block_on(inst.enumerate_adapters(wgpu::Backends::all()));
+            adapters.iter().enumerate().map(|(i, a)| AdapterSummary::new(i, a)).collect()
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = options;
+            Vec::new()
+        }
     }
 
-    /// Creates a context with [`GpuOptions::from_env`].
+    /// Creates a context with [`GpuOptions::from_env`]. Blocks; in the browser use [`GpuContext::new_async`].
     pub fn new() -> Result<Self> {
         Self::with_options(&GpuOptions::from_env())
     }
 
-    /// The process-wide shared context, created on first use with [`GpuOptions::from_env`].
-    ///
-    /// Tests and the future folo-core backend use this so the device is created once.
-    pub fn shared() -> Result<Self> {
-        static SHARED: OnceLock<std::result::Result<GpuContext, String>> = OnceLock::new();
-        SHARED.get_or_init(|| Self::new().map_err(|e| e.to_string())).clone().map_err(GpuError::NoAdapter)
+    /// [`GpuContext::new`] without blocking (the only way to create a context in the browser).
+    pub async fn new_async() -> Result<Self> {
+        Self::with_options_async(&GpuOptions::from_env()).await
     }
 
-    /// Creates a context with explicit options.
+    /// The process-wide shared context, created on first use with [`GpuOptions::from_env`].
+    ///
+    /// Tests and the folo-core backend use this so the device is created once. In the browser it cannot be
+    /// created here (that would block): it returns the context [`GpuContext::shared_async`] created, or an
+    /// error before that.
+    pub fn shared() -> Result<Self> {
+        #[cfg(not(target_arch = "wasm32"))]
+        let r = SHARED.get_or_init(|| Self::new().map_err(|e| e.reason()));
+        #[cfg(target_arch = "wasm32")]
+        let r = SHARED.get().ok_or(GpuError::Unsupported(NO_BLOCKING))?;
+        r.clone().map_err(GpuError::NoAdapter)
+    }
+
+    /// [`GpuContext::shared`] without blocking: creates the shared context on first use.
+    pub async fn shared_async() -> Result<Self> {
+        if let Some(r) = SHARED.get() {
+            return r.clone().map_err(GpuError::NoAdapter);
+        }
+        let created = Self::new_async().await.map_err(|e| e.reason());
+        // Two concurrent first calls may both create a device; the first one stored wins.
+        SHARED.get_or_init(|| created).clone().map_err(GpuError::NoAdapter)
+    }
+
+    /// Creates a context with explicit options. Blocks; in the browser use [`GpuContext::with_options_async`].
     pub fn with_options(options: &GpuOptions) -> Result<Self> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            pollster::block_on(Self::with_options_async(options))
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = options;
+            Err(GpuError::Unsupported(NO_BLOCKING))
+        }
+    }
+
+    /// [`GpuContext::with_options`] without blocking.
+    pub async fn with_options_async(options: &GpuOptions) -> Result<Self> {
         let backends = options.backends.unwrap_or_else(default_backends);
         let inst = instance(backends);
-        let adapters = pollster::block_on(inst.enumerate_adapters(wgpu::Backends::all()));
+        let adapters = inst.enumerate_adapters(wgpu::Backends::all()).await;
         let (index, adapter) = if adapters.is_empty() {
             // The browser backend does not enumerate; ask for one.
             if options.adapter.is_some() {
                 return Err(GpuError::NoAdapter("adapter filter given but no adapters enumerate".into()));
             }
-            let a = pollster::block_on(inst.request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: options.power_preference,
-                force_fallback_adapter: false,
-                compatible_surface: None,
-                apply_limit_buckets: false,
-            }))
-            .map_err(|e| GpuError::NoAdapter(e.to_string()))?;
+            let a = inst
+                .request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: options.power_preference,
+                    force_fallback_adapter: false,
+                    compatible_surface: None,
+                    apply_limit_buckets: false,
+                })
+                .await
+                .map_err(|e| GpuError::NoAdapter(e.to_string()))?;
             (0, a)
         } else if let Some(filter) = &options.adapter {
             let found = if let Ok(i) = filter.parse::<usize>() {
@@ -321,10 +376,10 @@ impl GpuContext {
                 .max_by_key(|(i, a)| (adapter_score(a, options.power_preference), std::cmp::Reverse(*i)))
                 .expect("non-empty")
         };
-        Self::from_adapter(index, adapter, options)
+        Self::from_adapter(index, adapter, options).await
     }
 
-    fn from_adapter(index: usize, adapter: wgpu::Adapter, options: &GpuOptions) -> Result<Self> {
+    async fn from_adapter(index: usize, adapter: wgpu::Adapter, options: &GpuOptions) -> Result<Self> {
         let summary = AdapterSummary::new(index, &adapter);
         let limits = adapter.limits();
         let mut problems = Vec::new();
@@ -345,15 +400,17 @@ impl GpuContext {
             features |= wgpu::Features::SHADER_F16;
         }
         // Ask for everything the adapter offers: big storage buffers and the full workgroup memory.
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("folo-gpu"),
-            required_features: features,
-            required_limits: limits.clone(),
-            experimental_features: wgpu::ExperimentalFeatures::disabled(),
-            memory_hints: wgpu::MemoryHints::Performance,
-            trace: wgpu::Trace::Off,
-        }))
-        .map_err(|e| GpuError::RequestDevice(e.to_string()))?;
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("folo-gpu"),
+                required_features: features,
+                required_limits: limits.clone(),
+                experimental_features: wgpu::ExperimentalFeatures::disabled(),
+                memory_hints: wgpu::MemoryHints::Performance,
+                trace: wgpu::Trace::Off,
+            })
+            .await
+            .map_err(|e| GpuError::RequestDevice(e.to_string()))?;
         let errors: Arc<Mutex<Vec<String>>> = Arc::default();
         let sink = errors.clone();
         device.on_uncaptured_error(Arc::new(move |e: wgpu::Error| {
@@ -520,7 +577,8 @@ impl GpuContext {
         Ok(())
     }
 
-    /// Reads `len` bytes at `offset` of `buf` back to the host (flushes and waits).
+    /// Reads `len` bytes at `offset` of `buf` back to the host (flushes and waits). Not available in the
+    /// browser, where [`GpuContext::read_async`] is the way to read.
     pub fn read(&self, buf: &wgpu::Buffer, offset: u64, len: u64) -> Result<Vec<u8>> {
         self.read_with(buf, offset, len, <[u8]>::to_vec)
     }
@@ -534,8 +592,42 @@ impl GpuContext {
         len: u64,
         f: impl FnOnce(&[u8]) -> R,
     ) -> Result<R> {
+        let Some(pending) = self.begin_read(buf, offset, len)? else { return Ok(f(&[])) };
+        pending.wait_blocking()?;
+        pending.finish(f)
+    }
+
+    /// Reads `len` bytes at `offset` of `buf` back to the host without blocking: the copy is ordered after
+    /// all work encoded so far, and the future resolves once the GPU has finished it. This is the browser's
+    /// readback (WebGPU maps buffers asynchronously and the page's thread must not wait); natively it waits
+    /// for the device like [`GpuContext::read`].
+    pub async fn read_async(&self, buf: &wgpu::Buffer, offset: u64, len: u64) -> Result<Vec<u8>> {
+        self.read_with_async(buf, offset, len, <[u8]>::to_vec).await
+    }
+
+    /// [`GpuContext::read_async`] that hands the mapped bytes to `f` (see [`GpuContext::read_with`]).
+    pub async fn read_with_async<R>(
+        &self,
+        buf: &wgpu::Buffer,
+        offset: u64,
+        len: u64,
+        f: impl FnOnce(&[u8]) -> R,
+    ) -> Result<R> {
+        let Some(pending) = self.begin_read(buf, offset, len)? else { return Ok(f(&[])) };
+        pending.wait().await?;
+        pending.finish(f)
+    }
+
+    /// Encodes the copy of a readback into a staging buffer, submits it and requests the map. `None` for an
+    /// empty read.
+    pub(crate) fn begin_read(
+        &self,
+        buf: &wgpu::Buffer,
+        offset: u64,
+        len: u64,
+    ) -> Result<Option<PendingRead>> {
         if len == 0 {
-            return Ok(f(&[]));
+            return Ok(None);
         }
         if !offset.is_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT) {
             return Err(GpuError::Shape(format!("read offset {offset} is not 4-byte aligned")));
@@ -553,28 +645,17 @@ impl GpuContext {
             self.encoder(&mut b).copy_buffer_to_buffer(buf, offset, staging.raw(), 0, len4);
         }
         self.flush();
-        let (tx, rx) = mpsc::channel();
+        let state: Arc<MapSignal> = Arc::default();
+        let sink = state.clone();
         staging.raw().slice(..len4).map_async(wgpu::MapMode::Read, move |r| {
-            let _ = tx.send(r);
+            let mut s = sink.state.lock().expect("map state lock");
+            s.result = Some(r.map_err(|e| e.to_string()));
+            if let Some(w) = s.waker.take() {
+                w.wake();
+            }
+            sink.ready.notify_all();
         });
-        self.inner
-            .device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .map_err(|e| GpuError::Poll(e.to_string()))?;
-        rx.recv()
-            .map_err(|_| GpuError::Map("map callback did not run".into()))?
-            .map_err(|e| GpuError::Map(e.to_string()))?;
-        let out = staging
-            .raw()
-            .slice(..len4)
-            .get_mapped_range()
-            .map(|view| f(&view[..len as usize]))
-            .map_err(|e| GpuError::Map(e.to_string()));
-        // Unmap on every path so the staging buffer goes back to the pool usable.
-        staging.raw().unmap();
-        let out = out?;
-        self.take_error()?;
-        Ok(out)
+        Ok(Some(PendingRead { ctx: self.clone(), staging, len, len4, state }))
     }
 
     /// Copies `len` bytes between buffers, ordered with the other encoded work.
@@ -611,14 +692,22 @@ impl GpuContext {
 
     /// Submits the open batch and blocks until the GPU has finished all submitted work.
     ///
-    /// Returns any validation / out-of-memory error wgpu reported since the last check.
+    /// Returns any validation / out-of-memory error wgpu reported since the last check. In the browser it
+    /// cannot wait: it submits and reports the errors seen so far (an awaited readback,
+    /// [`GpuContext::read_async`], is what waits there).
     pub fn sync(&self) -> Result<()> {
         self.flush();
+        self.wait_idle()?;
+        self.take_error()
+    }
+
+    /// Blocks until the device is idle (returns at once in the browser, where WebGPU's `poll` cannot wait).
+    fn wait_idle(&self) -> Result<()> {
         self.inner
             .device
             .poll(wgpu::PollType::wait_indefinitely())
-            .map_err(|e| GpuError::Poll(e.to_string()))?;
-        self.take_error()
+            .map(|_| ())
+            .map_err(|e| GpuError::Poll(e.to_string()))
     }
 
     fn take_error(&self) -> Result<()> {
@@ -767,5 +856,119 @@ impl GpuContext {
             return Err(GpuError::Limit(format!("{threads} threads do not fit one dispatch")));
         }
         Ok([max as u32, y as u32, 1])
+    }
+}
+
+/// What a readback's map callback reported, and the task to wake.
+#[derive(Default)]
+struct MapState {
+    result: Option<std::result::Result<(), String>>,
+    waker: Option<Waker>,
+}
+
+/// [`MapState`] plus a condition variable for blocking waiters.
+#[derive(Default)]
+struct MapSignal {
+    state: Mutex<MapState>,
+    ready: Condvar,
+}
+
+/// A readback whose copy is submitted and whose staging buffer is being mapped ([`GpuContext::begin_read`]).
+pub(crate) struct PendingRead {
+    ctx: GpuContext,
+    staging: GpuBuffer,
+    len: u64,
+    len4: u64,
+    state: Arc<MapSignal>,
+}
+
+impl PendingRead {
+    /// Waits for the map by blocking on the device (native targets).
+    ///
+    /// The callback can run on another thread: when several threads poll the device, the one that collected
+    /// the callbacks may still be running them after this thread's poll returned. So wait on the condition
+    /// variable, polling again now and then in case no other thread is.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn wait_blocking(&self) -> Result<()> {
+        self.ctx.wait_idle()?;
+        let mut s = self.state.state.lock().expect("map state lock");
+        loop {
+            if let Some(r) = s.result.take() {
+                return r.map_err(GpuError::Map);
+            }
+            let (guard, timeout) = self
+                .state
+                .ready
+                .wait_timeout(s, std::time::Duration::from_millis(10))
+                .expect("map state lock");
+            s = guard;
+            if timeout.timed_out() && s.result.is_none() {
+                drop(s);
+                self.ctx.wait_idle()?;
+                s = self.state.state.lock().expect("map state lock");
+            }
+        }
+    }
+
+    /// In the browser the map callback only runs from the page's event loop, which a blocking call never gives
+    /// a turn.
+    #[cfg(target_arch = "wasm32")]
+    fn wait_blocking(&self) -> Result<()> {
+        match self.state.state.lock().expect("map state lock").result.take() {
+            Some(r) => r.map_err(GpuError::Map),
+            None => Err(GpuError::Unsupported(NO_BLOCKING)),
+        }
+    }
+
+    /// Waits for the map without blocking the browser. Natively the device is polled to completion first,
+    /// so the future is ready at once; in the browser WebGPU resolves it from the event loop.
+    pub(crate) async fn wait(&self) -> Result<()> {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.ctx.wait_idle()?;
+        MapWait { state: &self.state.state }.await.map_err(GpuError::Map)
+    }
+
+    /// Hands the mapped bytes to `f`, unmaps, and reports the errors wgpu captured meanwhile.
+    pub(crate) fn finish<R>(self, f: impl FnOnce(&[u8]) -> R) -> Result<R> {
+        let out = self
+            .staging
+            .raw()
+            .slice(..self.len4)
+            .get_mapped_range()
+            .map(|view| f(&view[..self.len as usize]))
+            .map_err(|e| GpuError::Map(e.to_string()));
+        let ctx = self.ctx.clone();
+        drop(self);
+        let out = out?;
+        ctx.take_error()?;
+        Ok(out)
+    }
+}
+
+impl Drop for PendingRead {
+    fn drop(&mut self) {
+        // Unmap on every path (also a failed or abandoned wait, which cancels a pending map) so the staging
+        // buffer goes back to the pool usable.
+        self.staging.raw().unmap();
+    }
+}
+
+/// Resolves when a readback's map callback has run.
+struct MapWait<'a> {
+    state: &'a Mutex<MapState>,
+}
+
+impl Future for MapWait<'_> {
+    type Output = std::result::Result<(), String>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut s = self.state.lock().expect("map state lock");
+        match s.result.take() {
+            Some(r) => Poll::Ready(r),
+            None => {
+                s.waker = Some(cx.waker().clone());
+                Poll::Pending
+            }
+        }
     }
 }

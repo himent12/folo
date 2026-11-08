@@ -19,6 +19,7 @@ folo-data = { path = "crates/folo-data" }
 folo-vision = { path = "crates/folo-vision" }
 folo-server = { path = "crates/folo-server" }
 folo-mcp = { path = "crates/folo-mcp" }
+folo-wasm = { path = "crates/folo-wasm" }
 bytemuck = { version = "1", features = ["extern_crate_alloc"] }
 crossbeam-channel = "0.5"
 half = { version = "2", features = ["bytemuck"] }
@@ -31,6 +32,7 @@ serde_yaml = "0.9"
 smallvec = { version = "1", features = ["union", "const_generics"] }
 thiserror = "2"
 walkdir = "2"
+web-time = "1"
 folo-api = { path = "crates/folo-api" }
 axum = { version = "0.8", features = ["macros", "multipart"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time"] }
@@ -56,6 +58,10 @@ http = "1"
 ureq = { version = "3", default-features = false }
 # Test-only: validates MCP tool results against their outputSchema.
 jsonschema = { version = "0.60", default-features = false }
+# folo-wasm. wasm-bindgen must match the wasm-bindgen CLI exactly (scripts/build-wasm.sh checks that).
+wasm-bindgen = "=0.2.130"
+wasm-bindgen-futures = "0.4.80"
+js-sys = "0.3.107"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
