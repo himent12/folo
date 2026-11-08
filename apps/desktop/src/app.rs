@@ -440,6 +440,9 @@ pub struct FoloApp {
     pub menu_scroll: ScrollHandle,
     /// Bounds of the open select's trigger, so a click on it toggles rather than counting as outside.
     pub menu_trigger: Rc<std::cell::Cell<Option<gpui::Bounds<Pixels>>>>,
+    /// The inspector's and the Playground's image views as last laid out (for pan clamping).
+    pub insp_view: Rc<std::cell::Cell<Option<gpui::Bounds<Pixels>>>>,
+    pub play_view: Rc<std::cell::Cell<Option<gpui::Bounds<Pixels>>>>,
 
     pub drag: Option<Drag>,
     pub slider_bounds: Rc<RefCell<HashMap<&'static str, Bounds<Pixels>>>>,
@@ -554,6 +557,8 @@ impl FoloApp {
             menu_hl: 0,
             menu_scroll: ScrollHandle::new(),
             menu_trigger: Rc::new(std::cell::Cell::new(None)),
+            insp_view: Rc::new(std::cell::Cell::new(None)),
+            play_view: Rc::new(std::cell::Cell::new(None)),
             drag: None,
             slider_bounds: Rc::new(RefCell::new(HashMap::new())),
             subscriptions: HashMap::new(),

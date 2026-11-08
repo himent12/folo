@@ -1,12 +1,11 @@
 //! Playground: open or drop an image, run a model, inspect boxes, tune thresholds.
 
-use std::cell::Cell;
 use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, Bounds, Context, FontWeight, InteractiveElement, IntoElement, MouseMoveEvent, ParentElement,
-    Pixels, SharedString, StatefulInteractiveElement, Styled, Window, canvas, div, px, relative,
+    SharedString, StatefulInteractiveElement, Styled, Window, canvas, div, px, relative,
 };
 
 use super::*;
@@ -186,7 +185,11 @@ impl FoloApp {
             Load::Loading => (Vec::new(), None, true),
             _ => (Vec::new(), None, false),
         };
-        let bounds_cell: Rc<Cell<Option<Bounds<Pixels>>>> = Rc::new(Cell::new(None));
+        let bounds_cell = self.play_view.clone();
+        if let Some(b) = bounds_cell.get() {
+            self.play_pan =
+                crate::viz::clamp_pan(b, dims.0, dims.1, Fit::Contain, self.play_zoom, self.play_pan);
+        }
         let paint_cell = bounds_cell.clone();
         let wheel_cell = bounds_cell.clone();
         let (zoom, pan) = (self.play_zoom, self.play_pan);

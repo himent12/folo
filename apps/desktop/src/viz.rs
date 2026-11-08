@@ -43,6 +43,19 @@ pub enum Fit {
 }
 
 /// Where an image of `w` × `h` lands inside `b` for a fit, zoom (1 = fit) and pan (px).
+/// `pan` held so at least a 48 px strip of the image stays in view. Viewers store the clamped
+/// value back, so reversing a pan never has a dead zone.
+pub fn clamp_pan(b: Bounds<Pixels>, w: f32, h: f32, fit: Fit, zoom: f32, pan: (f32, f32)) -> (f32, f32) {
+    let (bw, bh) = (f32::from(b.size.width), f32::from(b.size.height));
+    let s = match fit {
+        Fit::Cover => (bw / w).max(bh / h),
+        Fit::Contain => (bw / w).min(bh / h),
+    } * zoom;
+    let (dw, dh) = (w * s, h * s);
+    let keep = |view: f32, drawn: f32| ((view + drawn) / 2. - 48.).max(0.);
+    (pan.0.clamp(-keep(bw, dw), keep(bw, dw)), pan.1.clamp(-keep(bh, dh), keep(bh, dh)))
+}
+
 pub fn image_rect(b: Bounds<Pixels>, w: f32, h: f32, fit: Fit, zoom: f32, pan: (f32, f32)) -> Bounds<Pixels> {
     let (bw, bh) = (f32::from(b.size.width), f32::from(b.size.height));
     let s = match fit {
@@ -50,9 +63,7 @@ pub fn image_rect(b: Bounds<Pixels>, w: f32, h: f32, fit: Fit, zoom: f32, pan: (
         Fit::Contain => (bw / w).min(bh / h),
     } * zoom;
     let (dw, dh) = (w * s, h * s);
-    // Pan is held so at least a 48 px strip of the image stays in view, however far it's pushed.
-    let keep = |view: f32, drawn: f32| ((view + drawn) / 2. - 48.).max(0.);
-    let pan = (pan.0.clamp(-keep(bw, dw), keep(bw, dw)), pan.1.clamp(-keep(bh, dh), keep(bh, dh)));
+    let pan = clamp_pan(b, w, h, fit, zoom, pan);
     let x = f32::from(b.left()) + (bw - dw) / 2. + pan.0;
     let y = f32::from(b.top()) + (bh - dh) / 2. + pan.1;
     Bounds::new(point(px(x), px(y)), size(px(dw), px(dh)))
@@ -171,7 +182,7 @@ pub fn paint_image_with_boxes(
                     && (b.label.is_some() || b.score.is_some())
                 {
                     // Small views (< 480 px): 14 px chips with 10 px text (design/README).
-                    let compact = rect.size.width < px(480.);
+                    let compact = bounds.size.width < px(480.);
                     let fs = if compact { 10. } else { ty::XS.size };
                     let name = b.label.clone().unwrap_or_default();
                     // The selected box's chip takes the selection colour, like its outline.
@@ -201,12 +212,15 @@ pub fn paint_image_with_boxes(
                     let ch = px(if compact { 14. } else { 16. });
                     // Preferred spots: above the top-left corner, inside it, below the bottom-left
                     // corner, inside the bottom-left. Take the first that is on the image and free.
-                    // Within the visible part of its box (and the view).
+                    // Inside the visible part of the box when the chip fits there, else inside the view.
                     let clamp_x = |x: Pixels| {
-                        x.min(visible.right() - cw)
-                            .min(bounds.right() - cw)
-                            .max(visible.left())
-                            .max(bounds.left())
+                        let lo = visible.left().max(bounds.left());
+                        let hi = visible.right().min(bounds.right()) - cw;
+                        if hi >= lo {
+                            x.max(lo).min(hi)
+                        } else {
+                            x.min(bounds.right() - cw).max(bounds.left())
+                        }
                     };
                     let candidates = [
                         point(clamp_x(r.left() - px(1.)), r.top() - ch - px(1.)),

@@ -772,7 +772,8 @@ impl FoloApp {
                         move |b, window, _| {
                             if cell.get() != Some(b) {
                                 cell.set(Some(b));
-                                window.refresh();
+                                // refresh() is ignored mid-draw; this schedules the next frame.
+                                window.request_animation_frame();
                             }
                         },
                         |_, _, _, _| {},
