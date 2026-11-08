@@ -14,6 +14,7 @@
   import Select from '$lib/ui/Select.svelte';
   import Skeleton from '$lib/ui/Skeleton.svelte';
   import Slider from '$lib/ui/Slider.svelte';
+  import { MediaQuery } from 'svelte/reactivity';
 
   let { runId, classes, epochsDone }: { runId: string; classes: string[]; epochsDone: number } = $props();
 
@@ -25,6 +26,8 @@
   // The first eight samples show by default; the rest are one click away.
   const FIRST = 8;
   let showAll = $state(false);
+  // Phones: one row each for the header, the key and the confidence slider, so the images start on the first screen.
+  const phone = new MediaQuery('max-width: 767px', false);
 
   // Memoise the props the fetcher reads: the parent passes values derived from a run object that changes every
   // step, and an unmemoised prop read would refetch on each one.
@@ -46,7 +49,8 @@
   const hits = (s: Sample) => s.pred.filter((p) => p.score >= conf).length;
 </script>
 
-<Panel title="Validation samples" meta={samples.data ? `epoch ${samples.data.epoch}` : undefined} id="samples">
+<!-- The epoch picker names the epoch, so phones drop the meta that repeats it (title and picker then share a row). -->
+<Panel title="Validation samples" meta={samples.data && !phone.current ? `epoch ${samples.data.epoch}` : undefined} id="samples">
   {#snippet actions()}
     <div class="ctl">
       <Segmented
@@ -65,10 +69,10 @@
   <div class="bar">
     <div class="legend" aria-hidden="true">
       <span><i class="solid"></i>prediction</span>
-      <span><i class="dashed"></i>ground truth</span>
-      <span class="count-key num">7/8 = predictions / true boxes</span>
+      <span><i class="dashed"></i>{phone.current ? 'truth' : 'ground truth'}</span>
+      <span class="count-key num">{phone.current ? '7/8 = predicted / true' : '7/8 = predictions / true boxes'}</span>
     </div>
-    <div class="conf"><Slider label="Min confidence" bind:value={conf} min={0.05} max={0.95} step={0.05} /></div>
+    <div class="conf"><Slider label="Min confidence" bind:value={conf} min={0.05} max={0.95} step={0.05} inline={phone.current} /></div>
   </div>
   {#if epochsDone === 0}
     <p class="none">Samples appear after the first validation pass.</p>
@@ -225,6 +229,7 @@
     .bar {
       flex-direction: column;
       align-items: stretch;
+      gap: var(--space-2);
     }
     .conf {
       width: 100%;
