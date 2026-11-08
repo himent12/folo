@@ -1308,17 +1308,20 @@ impl FoloApp {
                 .into_any_element(),
             _ => loading_rows(&t, "logs", 8).into_any_element(),
         };
-        // Follow the tail while the view is at the bottom; scrolling up pauses it.
-        let at_bottom = {
-            let max = self.log_scroll.max_offset().height;
+        // Follow the tail; scrolling up pauses it, scrolling back to the bottom resumes. Decided
+        // only when the offset moved, so a reflow (a wrapped line after a resize) doesn't pause it.
+        let (y, max) = (-self.log_scroll.offset().y, self.log_scroll.max_offset().height);
+        if y != self.log_last_y {
             // Tighter than one keyboard line (21 px), so a single Up press pauses following.
-            max - (-self.log_scroll.offset().y) < px(8.)
-        };
+            self.log_follow = max - y < px(8.);
+            self.log_last_y = y;
+        }
         let rev = self.store.log_rev;
-        if at_bottom && rev != self.log_seen {
+        if self.log_follow && (rev != self.log_seen || max - y >= px(8.)) {
             self.log_scroll.scroll_to_bottom();
         }
         self.log_seen = rev;
+        let at_bottom = self.log_follow;
         let follow = if r.status != RunStatus::Running {
             div().into_any_element()
         } else if at_bottom {

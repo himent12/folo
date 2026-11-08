@@ -378,6 +378,11 @@ pub struct FoloApp {
     pub log_scroll: ScrollHandle,
     /// Log lines on screen at the last render (new ones scroll into view while following).
     pub log_seen: u64,
+    /// The log follows its tail. Only a scroll changes this (the offset moved); a reflow that
+    /// grows the content without one keeps following.
+    pub log_follow: bool,
+    /// The log's scroll offset at the last render, to tell a scroll from a reflow.
+    pub log_last_y: Pixels,
     pub sample_epoch: Option<u32>,
 
     // Models
@@ -547,6 +552,8 @@ impl FoloApp {
             loss_parts: [true, true, true, true],
             log_scroll: ScrollHandle::new(),
             log_seen: 0,
+            log_follow: true,
+            log_last_y: px(0.),
             sample_epoch: None,
             export_open: false,
             pr_hover: None,

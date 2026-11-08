@@ -1122,20 +1122,24 @@ fn paint_line_chart(
     let mut placed: Vec<Point<Pixels>> = Vec::new();
     for &(x, y, c) in &spec.dots {
         if x >= x0 && x <= x1 {
-            let mut p = point(sx(x), sy(y));
-            // A move can land on a dot already checked: repeat until clear (a few passes at most).
-            for _ in 0..8 {
-                let Some(q) = placed.iter().find(|q| {
+            let at = point(sx(x), sy(y));
+            // Its own spot if clear, else the first clear one on rings of 8, 12 and 16 px around
+            // it (eight directions each, deterministic), else its own spot after all.
+            let clear = |p: Point<Pixels>| {
+                placed.iter().all(|q| {
                     let (dx, dy) = (f32::from(p.x - q.x), f32::from(p.y - q.y));
-                    dx * dx + dy * dy < 63.9
-                }) else {
-                    break;
-                };
-                let (dx, dy) = (f32::from(p.x - q.x), f32::from(p.y - q.y));
-                let d = (dx * dx + dy * dy).sqrt();
-                let (ux, uy) = if d < 0.5 { (1., 0.) } else { (dx / d, dy / d) };
-                p = point(q.x + px(ux * 8.), q.y + px(uy * 8.));
-            }
+                    dx * dx + dy * dy >= 63.9
+                })
+            };
+            let p = std::iter::once(at)
+                .chain([8f32, 12., 16.].into_iter().flat_map(|r| {
+                    (0..8).map(move |k| {
+                        let a = k as f32 * std::f32::consts::FRAC_PI_4;
+                        point(at.x + px(r * a.cos()), at.y + px(r * a.sin()))
+                    })
+                }))
+                .find(|&p| clear(p))
+                .unwrap_or(at);
             placed.push(p);
             window.paint_quad(
                 fill(Bounds::centered_at(p, size(px(10.), px(10.))), t.bg_panel).corner_radii(px(5.)),
