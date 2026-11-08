@@ -107,20 +107,6 @@
   });
   const shownCount = $derived(groups.reduce((a, g) => a + g.rows.length, 0));
 
-  /** The best model (mAP50-95) of each evaluation dataset that has at least two to compare. */
-  const bestByDs = $derived.by(() => {
-    const by = new Map<string, Model[]>();
-    for (const m of models.data ?? []) {
-      const k = evalSet(m).key;
-      if (k === IMPORTED || k === UNKNOWN || !m.metrics) continue;
-      by.set(k, [...(by.get(k) ?? []), m]);
-    }
-    const out = new Map<string, string>();
-    for (const [k, list] of by)
-      if (list.length > 1) out.set(k, list.reduce((b, m) => ((m.metrics?.map50_95 ?? -1) > (b.metrics?.map50_95 ?? -1) ? m : b)).id);
-    return out;
-  });
-  const isBest = (m: Model) => bestByDs.get(evalSet(m).key) === m.id;
 
   const dsOptions = $derived.by(() => {
     const keys = new Map<string, { label: string; n: number }>();
@@ -228,7 +214,7 @@
                     <td class="r hide-lg">{num(m.flops_g, 1)}</td>
                     <td class="r hide-md">{bytes(m.bytes, prefs.units)}</td>
                     <td class="r map">
-                      {#if isBest(m)}<span class="best" title="Best mAP50-95 on {g.label}">best</span>{/if}{metric(m.metrics?.map50_95)}
+                      {metric(m.metrics?.map50_95)}
                     </td>
                     <td class="r muted">{metric(m.metrics?.map50)}</td>
                     <td class="hide-md">
@@ -262,7 +248,7 @@
                     </span>
                     <span class="m-side">
                       <span class="num map">{metric(m.metrics?.map50_95)}</span>
-                      <span class="m-cap">{isBest(m) ? 'best · ' : ''}mAP50-95</span>
+                      <span class="m-cap">mAP50-95</span>
                     </span>
                   </a>
                 </li>
@@ -373,12 +359,6 @@
   }
   .map {
     font-weight: var(--weight-medium);
-  }
-  .best {
-    margin-right: var(--space-2);
-    font-size: var(--type-sm-size);
-    font-weight: var(--weight-regular);
-    color: var(--text-tertiary);
   }
   .rows {
     display: none;

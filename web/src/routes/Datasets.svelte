@@ -124,7 +124,7 @@
             <a href={href(`/datasets/${d.id}`)}>
               <span class="m-main">
                 <span class="name truncate">{d.name}</span>
-                <span class="m-meta num truncate">{d.format} · {num(d.splits.train)} / {num(d.splits.val)} / {num(d.splits.test)} · {d.classes.length} classes</span>
+                <span class="m-meta num truncate">{num(d.splits.train)} train · {num(d.splits.val)} val · {num(d.splits.test)} test · {d.classes.length} classes</span>
               </span>
               <span class="m-side">
                 <span class="num">{compact(imageCount(d))}<span class="faint">&nbsp;img</span></span>

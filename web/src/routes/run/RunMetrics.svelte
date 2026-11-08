@@ -126,6 +126,8 @@
   interface TabDef {
     id: Tab;
     label: string;
+    /** Label on phones, where a cell is a third of the screen. */
+    short?: string;
     value: string;
     unit?: string;
     caption: string;
@@ -145,6 +147,7 @@
     {
       id: 'pr',
       label: 'Precision · Recall',
+      short: 'P · R',
       value: lastEpoch ? `${num(lastEpoch.val.precision, 2)} · ${num(lastEpoch.val.recall, 2)}` : '—',
       caption: 'last epoch',
       title: 'Precision and recall',
@@ -161,6 +164,7 @@
     {
       id: 'lr',
       label: 'Learning rate',
+      short: 'LR',
       value: fmtLr(lastStep?.lr),
       caption: 'warmup 3 · cosine',
       title: 'Learning rate',
@@ -219,7 +223,7 @@
           data-tab={t.id}
           onclick={() => (tab = t.id)}
         >
-          <span class="label">{t.label}</span>
+          <span class="label"><span class="long">{t.label}</span><span class="short">{t.short ?? t.label}</span></span>
           <span class="val num">{t.value}{#if t.unit}<span class="unit">{t.unit}</span>{/if}</span>
           <span class="cap num">{t.caption}</span>
         </button>
@@ -353,6 +357,9 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+  .label .short {
+    display: none;
   }
   .tab.on .label {
     color: var(--text-primary);
@@ -513,25 +520,17 @@
     .big {
       grid-row: 1 / span 2;
     }
-    .tabs {
-      display: flex;
-      overflow-x: auto;
-      scrollbar-width: none;
-      scroll-snap-type: x proximity;
-    }
+    /* Phones keep the 3 × 2 grid of wider screens (no sideways scrolling), with compact cells. */
     .tab {
-      flex: 0 0 132px;
       grid-template-rows: 16px 28px 16px;
       gap: 2px;
       padding: var(--space-3);
-      scroll-snap-align: start;
     }
-    .tab:nth-child(n) {
-      border-top: 0;
-      border-left: 1px solid var(--line-subtle);
+    .label .long {
+      display: none;
     }
-    .tab:first-child {
-      border-left: 0;
+    .label .short {
+      display: inline;
     }
     .val {
       font-size: var(--type-lg-size);
@@ -549,10 +548,6 @@
     }
     .q {
       white-space: normal;
-    }
-    /* The tab row scrolls sideways: fade its right edge so the cut-off tab reads as "more". */
-    .tabs {
-      mask-image: linear-gradient(90deg, #000 calc(100% - 32px), transparent);
     }
   }
 </style>

@@ -297,6 +297,10 @@
     color: var(--text-tertiary);
   }
   @media (max-width: 767px) {
+    /* The side-by-side table scrolls sideways on phones: the faded edge says there are more runs. */
+    .scroll {
+      mask-image: linear-gradient(90deg, #000 calc(100% - 32px), transparent);
+    }
     .compare {
       padding: var(--space-3);
     }

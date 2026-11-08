@@ -68,7 +68,7 @@
     <div class="kpi">
       <span class="k-label">Images</span>
       <span class="k-value num">{num(images)}</span>
-      <span class="k-sub num" title="train / val / test">{num(dataset.splits.train)} / {num(dataset.splits.val)} / {num(dataset.splits.test)}<span class="hide-sm"> train / val / test</span></span>
+      <span class="k-sub num">{num(dataset.splits.train)} train · {num(dataset.splits.val)} val · {num(dataset.splits.test)} test</span>
     </div>
     <div class="kpi">
       <span class="k-label">Boxes</span>
