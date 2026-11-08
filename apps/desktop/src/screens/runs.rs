@@ -1050,8 +1050,9 @@ impl FoloApp {
         // In the axis's power of ten ("× 10⁻³" is printed once, on the axis).
         let lr_hi = (d.lr_max * 1.15).max(1e-4);
         let lr_pow = crate::charts::axis_pow(0., lr_hi, 3);
+        // The legend value carries its power too, so it reads on its own ("6.58×10⁻³").
         let lr_value = crate::charts::value_at(&d.lr, hover, 0., total).map(|x| match lr_pow {
-            Some(p) => format!("{:.2}", x * 10f32.powi(-p)),
+            Some(p) => format!("{:.2}×10{}", x * 10f32.powi(-p), crate::charts::superscript(p)),
             None => format!("{x:.4}"),
         });
         let lr_legend =
@@ -1279,7 +1280,7 @@ impl FoloApp {
                                     LogLevel::Warn => ("WRN", t.warning_text),
                                     LogLevel::Error => ("ERR", t.danger_text),
                                 };
-                                let clock = time::parse(&l.t).map(time::clock).unwrap_or_default();
+                                let clock = time::parse(&l.t).map(time::local_clock).unwrap_or_default();
                                 div()
                                     .flex()
                                     .gap(px(12.))
@@ -1301,7 +1302,9 @@ impl FoloApp {
                                             } else {
                                                 t.text_secondary
                                             })
-                                            .child(l.message.clone()),
+                                            // Paths read with `/`, as everywhere else in the app
+                                            // (the trainer logs Windows paths with `\`).
+                                            .child(l.message.replace('\\', "/")),
                                     )
                             })),
                     )

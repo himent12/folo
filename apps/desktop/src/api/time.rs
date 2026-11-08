@@ -60,6 +60,42 @@ pub fn clock(t: i64) -> String {
     format!("{:02}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
 }
 
+/// `clock` in the machine's local time, as Studio shows log times (the server's are UTC).
+pub fn local_clock(t: i64) -> String {
+    clock(t + local_offset())
+}
+
+/// Seconds east of UTC, read once (Windows: the current bias, daylight saving included; UTC
+/// elsewhere).
+fn local_offset() -> i64 {
+    static OFFSET: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
+    *OFFSET.get_or_init(query_offset)
+}
+
+#[cfg(windows)]
+fn query_offset() -> i64 {
+    use windows_sys::Win32::System::Time::{GetTimeZoneInformation, TIME_ZONE_INFORMATION};
+    // GetTimeZoneInformation's return values (winnt.h; not exported by windows-sys).
+    const TIME_ZONE_ID_STANDARD: u32 = 1;
+    const TIME_ZONE_ID_DAYLIGHT: u32 = 2;
+    // SAFETY: a plain out-parameter struct, zeroed and then filled by the call.
+    let mut tz: TIME_ZONE_INFORMATION = unsafe { std::mem::zeroed() };
+    let id = unsafe { GetTimeZoneInformation(&mut tz) };
+    let bias = tz.Bias
+        + match id {
+            TIME_ZONE_ID_DAYLIGHT => tz.DaylightBias,
+            TIME_ZONE_ID_STANDARD => tz.StandardBias,
+            _ => 0,
+        };
+    // Bias is minutes to add to local time to get UTC.
+    -(bias as i64) * 60
+}
+
+#[cfg(not(windows))]
+fn query_offset() -> i64 {
+    0
+}
+
 /// "just now", "4 min ago", "3 h ago", "2 d ago", or a date for older times.
 pub fn ago(then: i64, now: i64) -> String {
     let d = (now - then).max(0);

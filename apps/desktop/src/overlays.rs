@@ -58,7 +58,7 @@ pub fn fuzzy(q: &str, s: &str) -> Option<i32> {
     Some(score)
 }
 
-/// Rough training cost of a configuration on this machine: (seconds, VRAM GB).
+/// Rough training cost of a configuration on this machine: (seconds, VRAM GiB).
 pub fn estimate(arch: usize, epochs: f32, batch: u32, imgsz: u32, images: u32) -> (f64, f32) {
     const GFLOPS: [f32; 5] = [6.6, 21.5, 48.0, 104.0, 165.0];
     const ACT_MB: [f32; 5] = [45., 80., 140., 210., 300.];
@@ -998,7 +998,8 @@ impl FoloApp {
         let cpu = DEVICES[device] == "cpu";
         let gpu = self.store.system.ready().and_then(|s| s.gpus.first().cloned());
         // 0 = not reported (wgpu can't on every platform): make no claim about fitting.
-        let gpu_gb = gpu.as_ref().map_or(0.0, |g| g.memory_bytes as f32 / 1e9);
+        // GiB, like the estimate (MiB of activations / 1024) and every size the app shows.
+        let gpu_gb = gpu.as_ref().map_or(0.0, |g| g.memory_bytes as f32 / (1u64 << 30) as f32);
         let fits = cpu || gpu_gb <= 0.0 || vram <= gpu_gb * 0.97;
         let estimate_line = div()
             .flex()
@@ -1023,10 +1024,10 @@ impl FoloApp {
                             .child(if cpu {
                                 "CPU selected · no time estimate".to_string()
                             } else if fits {
-                                format!("≈ {} · ≈ {vram:.1} GB GPU memory", crate::api::time::duration(secs))
+                                format!("≈ {} · ≈ {vram:.1} GiB GPU memory", crate::api::time::duration(secs))
                             } else {
                                 // No adapter name here: it can be long enough to reach the buttons.
-                                format!("≈ {vram:.0} GB needed, {gpu_gb:.0} GB on this GPU")
+                                format!("≈ {vram:.0} GiB needed, {gpu_gb:.0} GiB on this GPU")
                             }),
                     )
                     .child(text(ty::XS, t.text_tertiary).whitespace_nowrap().child(if cpu {

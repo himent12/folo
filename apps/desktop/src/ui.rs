@@ -516,15 +516,17 @@ pub fn int(n: u64) -> String {
     out
 }
 
-/// 5_400_000 → "5.4 MB".
+/// 5_400_000 → "5.1 MiB".
 pub fn bytes(n: u64) -> (String, &'static str) {
+    // Binary units, as Studio shows them by default (a 16 GiB card reads 16.0, not 17.2).
+    const K: f64 = 1024.;
     let f = n as f64;
-    if f >= 1e9 {
-        (format!("{:.1}", f / 1e9), "GB")
-    } else if f >= 1e6 {
-        (format!("{:.1}", f / 1e6), "MB")
-    } else if f >= 1e3 {
-        (format!("{:.0}", f / 1e3), "KB")
+    if f >= K * K * K {
+        (format!("{:.1}", f / (K * K * K)), "GiB")
+    } else if f >= K * K {
+        (format!("{:.1}", f / (K * K)), "MiB")
+    } else if f >= K {
+        (format!("{:.0}", f / K), "KiB")
     } else {
         (n.to_string(), "B")
     }
@@ -557,7 +559,8 @@ mod tests {
         assert_eq!(int(4210), "4,210");
         assert_eq!(int(999), "999");
         assert_eq!(int(1_000_000), "1,000,000");
-        assert_eq!(bytes(5_400_000), ("5.4".into(), "MB"));
+        assert_eq!(bytes(5_400_000), ("5.1".into(), "MiB"));
+        assert_eq!(bytes(17_171_480_576), ("16.0".into(), "GiB"));
         assert_eq!(count_si(2_630_000), ("2.63".into(), "M"));
     }
 }
