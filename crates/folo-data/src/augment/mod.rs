@@ -51,6 +51,11 @@ pub struct AugmentConfig {
     pub min_area_ratio: f32,
     /// Drop boxes with a larger aspect ratio than this (default 100).
     pub max_aspect: f32,
+    /// The closing epochs to use instead of the capped `close_mosaic` (never serialised). The trainer sets it when
+    /// it resumes a run, so the run keeps the closing epochs it started with: a checkpoint from before the cap
+    /// closes mosaic for `min(close_mosaic, epochs)`.
+    #[serde(skip)]
+    pub close_mosaic_fixed: Option<u32>,
 }
 
 impl Default for AugmentConfig {
@@ -69,6 +74,7 @@ impl Default for AugmentConfig {
             min_box_px: 2.0,
             min_area_ratio: 0.1,
             max_aspect: 100.0,
+            close_mosaic_fixed: None,
         }
     }
 }
@@ -95,7 +101,7 @@ impl AugmentConfig {
     /// least half of a short run keeps mosaic (docs/MODEL.md §8.6). Runs of `2 · close_mosaic` epochs or more
     /// close it for exactly `close_mosaic` epochs.
     pub fn close_mosaic_epochs(&self, epochs: u32) -> u32 {
-        self.close_mosaic.min(epochs / 2)
+        self.close_mosaic_fixed.unwrap_or(self.close_mosaic.min(epochs / 2)).min(epochs)
     }
 
     /// Whether mosaic is still on in `epoch` (0-based) of a run of `epochs` epochs
@@ -170,6 +176,10 @@ mod tests {
         assert_eq!((cfg.close_mosaic_epochs(12), cfg.close_mosaic_epochs(8)), (6, 4));
         assert_eq!(cfg.close_mosaic_epochs(1), 0);
         assert!(cfg.mosaic_active(3, 8) && !cfg.mosaic_active(4, 8));
+        // A resumed run keeps its closing epochs (the pre-cap rule: no mosaic at all in 8 epochs).
+        let legacy = AugmentConfig { close_mosaic_fixed: Some(8), ..cfg };
+        assert!(!legacy.mosaic_active(0, 8));
+        assert_eq!(AugmentConfig { close_mosaic_fixed: Some(99), ..cfg }.close_mosaic_epochs(8), 8);
         assert!(AugmentConfig { mosaic: 2.0, ..cfg }.validate().is_err());
     }
 }

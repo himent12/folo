@@ -1181,6 +1181,20 @@ fn real_store_end_to_end() {
     let x = checked(&mut c, &schemas, "export", json!({ "model_id": model_id, "format": "onnx" }));
     assert!(x["path"].as_str().unwrap().ends_with(".onnx"), "{x}");
     assert_eq!(std::fs::metadata(x["path"].as_str().unwrap()).unwrap().len(), x["bytes"].as_u64().unwrap());
+    // The ONNX switches: f16 weights make the file about half the size, and name it -f16.
+    let h = checked(
+        &mut c,
+        &schemas,
+        "export",
+        json!({ "model_id": model_id, "format": "onnx", "half": true, "decode": true, "dynamic": true }),
+    );
+    assert!(h["path"].as_str().unwrap().ends_with("-f16.onnx"), "{h}");
+    assert!(h["bytes"].as_u64().unwrap() < x["bytes"].as_u64().unwrap() * 3 / 4, "{h} vs {x}");
+    c.tool_error(
+        "export",
+        json!({ "model_id": model_id, "format": "folo-f16", "half": true }),
+        "invalid_body",
+    );
 
     // Stop a longer run after its first epoch, resume it (same id, from its checkpoint), and disconnect while it
     // trains: the shutdown stops it gracefully and the next session lists it as stopped.
@@ -1282,6 +1296,15 @@ fn proxy_mode_forwards_to_folo_serve() {
     let stopped = checked(&mut c, &schemas, "stop_run", json!({ "run_id": t["run_id"] }));
     assert_eq!(stopped["status"], "stopping");
     checked(&mut c, &schemas, "export", json!({ "model_id": "m_31aa", "format": "folo-f16" }));
+    // The proxy forwards the ONNX switches to a server that announces them (`/api/system` features).
+    let h =
+        checked(&mut c, &schemas, "export", json!({ "model_id": "m_31aa", "format": "onnx", "half": true }));
+    assert!(h["path"].as_str().unwrap().ends_with("f16.onnx"), "{h}");
+    c.tool_error(
+        "export",
+        json!({ "model_id": "m_31aa", "format": "folo-f16", "decode": true }),
+        "invalid_body",
+    );
     c.tool_error("get_dataset", json!({ "dataset_id": "nope" }), "dataset_not_found");
     // A run started through the proxy belongs to `folo serve` and outlives this MCP session.
     let kept = checked(&mut c, &schemas, "train", json!({ "dataset_id": "ds_5a1e", "epochs": 100 }));

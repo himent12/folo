@@ -164,6 +164,8 @@ fn micro_run_learns_checkpoints_and_resumes_bit_exactly() {
     let file = ModelFile::open(&last).unwrap();
     let c = file.checkpoint().expect("last.folo is a checkpoint");
     assert_eq!((c.epoch, c.optim.step, c.sched.step, c.ema_updates), (2, 6, 6, Some(6)));
+    // The closing epochs a resume keeps (close_mosaic 1 of 2 epochs).
+    assert_eq!(c.train[folo_vision::train::CLOSE_MOSAIC_KEY], 1);
     assert!(file.has_ema());
     assert!(!file.names(Namespace::Optim).is_empty());
     assert_eq!(file.metadata().classes, ds.classes);

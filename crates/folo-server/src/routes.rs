@@ -113,7 +113,8 @@ async fn system(State(st): State<AppState>) -> Result<Json<SystemResponse>> {
         .await
         .map_err(|e| Error::internal(format!("task failed: {e}")))?;
     let data_dir = st.store.data_dir().map(folo_api::json::path);
-    Ok(Json(SystemResponse { system: SystemInfo { cpu, memory, gpus: st.store.gpus() }, data_dir }))
+    let features = vec![folo_api::FEATURE_EXPORT_ONNX_SWITCHES.to_string()];
+    Ok(Json(SystemResponse { system: SystemInfo { cpu, memory, gpus: st.store.gpus() }, data_dir, features }))
 }
 
 // ---- datasets ----------------------------------------------------------------------------------------------------

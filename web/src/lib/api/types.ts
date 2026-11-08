@@ -37,6 +37,8 @@ export interface SystemInfo {
   gpus: Gpu[];
   /** The real server's data dir (`/` separators); absent in mock mode. */
   data_dir?: string;
+  /** Optional API features the server implements, e.g. `export_onnx_switches`; empty or absent from older ones. */
+  features?: string[];
 }
 
 // ---------- Datasets ----------

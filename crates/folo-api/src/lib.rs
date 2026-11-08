@@ -87,7 +87,15 @@ pub struct SystemResponse {
     /// in mock mode and from servers older than this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_dir: Option<String>,
+    /// Optional API features this server implements (for example [`FEATURE_EXPORT_ONNX_SWITCHES`]), so a client
+    /// can tell before it relies on one; empty from servers older than this field.
+    #[serde(default)]
+    pub features: Vec<String>,
 }
+
+/// [`SystemResponse::features`]: `POST /api/models/{id}/export` honours [`OnnxSwitches`] (older servers accept
+/// and ignore them).
+pub const FEATURE_EXPORT_ONNX_SWITCHES: &str = "export_onnx_switches";
 
 /// CPU name, logical thread count and current utilisation.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

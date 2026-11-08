@@ -48,9 +48,11 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
 - `GET /api/health` → `{ "status": "ok", "version": "0.1.0", "api": "v1", "mock": false }`
 - `GET /api/system` → `{ "cpu": { "name", "threads", "util" }, "memory": { "used_bytes", "total_bytes" },
   "gpus": [{ "ordinal", "name", "backend": "vulkan|dx12|metal", "memory_bytes", "util" | null }],
-  "data_dir"?: "D:/folo-data" }`
+  "data_dir"?: "D:/folo-data", "features": ["export_onnx_switches"] }`
   (`util` in `0..1`; CPU utilisation is measured since the previous call. `data_dir` is the real server's
-  `--data-dir`, with `/` separators, where its runs, models and exports live; the mock server leaves it out.) In real mode `gpus` comes from folo-gpu
+  `--data-dir`, with `/` separators, where its runs, models and exports live; the mock server leaves it out. `features` lists optional API features
+  the server implements, so a client can check before relying on one: `export_onnx_switches` (the export switches
+  below; older servers accept and ignore them). `folo mcp --server` refuses the switches without it.) In real mode `gpus` comes from folo-gpu
   (wgpu): every physical adapter once, through its preferred backend (software adapters are left out), best first,
   so ordinal 0 is the adapter `gpu:0` and `device: auto` use. wgpu reports neither memory size nor load, so
   `memory_bytes` is `0` and `util` `null`.

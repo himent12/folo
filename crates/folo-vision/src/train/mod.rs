@@ -62,6 +62,20 @@ pub const MAX_NONFINITE_BATCHES: usize = 10;
 /// The extra `folo.train` key holding the number of training images, checked on resume.
 pub const TRAIN_IMAGES_KEY: &str = "train_images";
 
+/// The extra `folo.train` key holding the epochs at the end of the run with mosaic off
+/// ([`folo_data::AugmentConfig::close_mosaic_epochs`]), so a resume keeps them. A checkpoint without it predates
+/// the cap of docs/MODEL.md §8.6 ([`resumed_close_mosaic`]).
+pub const CLOSE_MOSAIC_KEY: &str = "close_mosaic_epochs";
+
+/// The closing epochs a resumed run keeps: [`CLOSE_MOSAIC_KEY`] of its `folo.train`, or for a checkpoint from
+/// before the cap, the old rule `min(close_mosaic, epochs)`.
+pub fn resumed_close_mosaic(train: &serde_json::Value, cfg: &TrainConfig) -> u32 {
+    match train.get(CLOSE_MOSAIC_KEY).and_then(|v| v.as_u64()) {
+        Some(n) => u32::try_from(n).unwrap_or(u32::MAX).min(cfg.epochs),
+        None => cfg.augment.close_mosaic.min(cfg.epochs),
+    }
+}
+
 /// Checkpoint metadata key (FORMAT.md: unknown `folo.*` keys are preserved) holding the run of non-finite batches
 /// at the end of the checkpoint's epoch, so a streak crossing a resume still fails at [`MAX_NONFINITE_BATCHES`].
 pub const NONFINITE_STREAK_KEY: &str = "folo.nonfinite_streak";
@@ -307,6 +321,7 @@ impl Trainer {
         if let Some(d) = overrides.device {
             cfg.device = d;
         }
+        cfg.augment.close_mosaic_fixed = Some(resumed_close_mosaic(&c.train, &cfg));
         if let Some(n) = c.train.get(TRAIN_IMAGES_KEY).and_then(|v| v.as_u64())
             && n != data.train.len() as u64
         {
@@ -384,7 +399,7 @@ impl Trainer {
         }
         let mut pending_logs = Vec::new();
         let (close, close_eff) = (cfg.augment.close_mosaic, cfg.augment.close_mosaic_epochs(cfg.epochs));
-        if cfg.augment.mosaic > 0.0 && close > close_eff {
+        if cfg.augment.mosaic > 0.0 && cfg.augment.close_mosaic_fixed.is_none() && close > close_eff {
             pending_logs.push((
                 LogLevel::Info,
                 format!(
@@ -1012,6 +1027,7 @@ impl Trainer {
         let rng = RngState { seed: self.cfg.seed, streams };
         let mut train = serde_json::to_value(&self.cfg).expect("config serialises");
         train[TRAIN_IMAGES_KEY] = serde_json::json!(self.data.train.len());
+        train[CLOSE_MOSAIC_KEY] = serde_json::json!(self.cfg.augment.close_mosaic_epochs(self.cfg.epochs));
         let parts = CheckpointParts {
             model: &self.model,
             ema: self.ema.as_ref().map(|e| e as &dyn EmaState),
@@ -1065,6 +1081,19 @@ struct Clock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A resumed run keeps the closing epochs its checkpoint records; one from before the cap keeps the old rule.
+    #[test]
+    fn resumes_keep_their_close_mosaic() {
+        let cfg = TrainConfig { epochs: 8, ..TrainConfig::default() };
+        let old = serde_json::to_value(&cfg).unwrap();
+        assert_eq!(resumed_close_mosaic(&old, &cfg), 8, "close_mosaic 10 of 8 epochs: no mosaic at all");
+        let mut new = old.clone();
+        new[CLOSE_MOSAIC_KEY] = serde_json::json!(cfg.augment.close_mosaic_epochs(cfg.epochs));
+        assert_eq!(resumed_close_mosaic(&new, &cfg), 4);
+        // The key is not a TrainConfig field: folo.train with it still parses.
+        assert!(serde_json::from_value::<TrainConfig>(new).is_ok());
+    }
 
     /// A lost GPU device is recognised wherever it surfaces (tensor work, a layer, the batch feeder) and the
     /// message names the checkpoint that was actually written; other errors are left alone.

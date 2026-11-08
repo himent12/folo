@@ -772,7 +772,8 @@ Finally boxes are converted to the loader's normalised `cx, cy, w, h`. For the l
 floor(epochs / 2))` epochs (`e >= epochs − c`; `close_mosaic = 10`), mosaic and mixup are 0 and steps 2, 4 and 5
 stay on. The cap keeps mosaic on for at least half of a short run (with `close_mosaic >= epochs` a run would never
 see a mosaic); runs of at least `2 · close_mosaic` epochs are unaffected. To train without mosaic, set
-`mosaic = 0`. Validation uses no
+`mosaic = 0`. Checkpoints record the closing epochs in `folo.train` (`close_mosaic_epochs`), and a resume keeps
+them; a checkpoint without the key predates the cap and resumes with `min(close_mosaic, epochs)`. Validation uses no
 augmentation: resize as above and pad to a square `s × s` (§9.2) only.
 
 ### 8.7 Validation schedule and checkpoints
