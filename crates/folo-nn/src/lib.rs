@@ -1,3 +1,64 @@
-//! FOLO neural-network layers, optimizers, schedulers and the .folo weight format.
+//! FOLO neural-network layers, optimizers, schedules, EMA and the `.folo` weight format.
 //!
-//! See `docs/ARCHITECTURE.md` for how this crate fits into FOLO.
+//! Everything the detector and the trainer need below the model definition (docs/NN.md has the overview):
+//! - [`Module`] / [`Forward`]: stable dotted names, parameters vs buffers, train/eval propagation, visitors.
+//! - Layers: [`Conv2d`], [`BatchNorm2d`], [`Linear`], [`Activation`], [`MaxPool2d`], [`Upsample`],
+//!   [`Concat`], [`Identity`], [`Sequential`], [`ModuleList`], and [`ConvBnAct`] (docs/MODEL.md's `Conv`).
+//! - [`init`]: seeded Kaiming / Xavier and the head priors.
+//! - [`optim`]: [`optim::Sgd`], [`optim::AdamW`], parameter groups, gradient accumulation and clipping.
+//! - [`LrSchedule`] (warmup + linear / cosine) and [`ModelEma`].
+//! - [`io`]: `.folo` read / write, strict and partial loading, checkpoints, export with Conv+BN fusion.
+//!
+//! ```
+//! use folo_core::{rng::Rng, Tensor};
+//! use folo_nn::optim::{GradAccumulator, Optimizer, Sgd, StandardGroups};
+//! use folo_nn::{Activation, ConvBnAct, DecayKind, Forward, LrSchedule, ModelEma, Module, Sequential};
+//!
+//! # fn main() -> folo_nn::Result<()> {
+//! let build = |rng: &mut Rng| {
+//!     Sequential::new()
+//!         .push_named("stem", ConvBnAct::new(3, 8, 3, 2, 1, Activation::Silu, rng))
+//!         .push_named("out", ConvBnAct::new(8, 4, 1, 1, 1, Activation::Identity, rng))
+//! };
+//! let mut rng = Rng::seed(0);
+//! let model = build(&mut rng);
+//! assert_eq!(model.named_parameters()[0].0, "stem.conv.weight");
+//!
+//! let mut ema = ModelEma::new(build(&mut Rng::seed(1)), &model)?;
+//! let mut opt = Sgd::new(StandardGroups::from_module(&model).into_groups(0.01, 0.937, 5e-4))?;
+//! let mut sched = LrSchedule::new(DecayKind::Linear, 2, 3, 0.01, 0.0, 0.0, 0.8)?;
+//! let mut acc = GradAccumulator::new(&model.parameters());
+//!
+//! for _ in 0..3 {
+//!     let x = Tensor::rand_uniform([2, 3, 16, 16], 0.0, 1.0, &mut rng);
+//!     let loss = model.forward(&x)?.square()?.mean_all()?;
+//!     acc.add(&loss.backward()?)?;
+//!     sched.apply(&mut opt);
+//!     acc.clip_grad_norm(10.0)?;
+//!     opt.step(&acc)?;
+//!     ema.update(&model)?;
+//!     sched.advance();
+//!     acc.zero();
+//! }
+//! assert_eq!((opt.step_count(), sched.step(), ema.updates()), (3, 3, 3));
+//! # Ok(())
+//! # }
+//! ```
+
+mod ema;
+mod error;
+pub mod init;
+pub mod io;
+mod layers;
+mod module;
+pub mod optim;
+mod sched;
+
+pub use ema::{EMA_DECAY, EMA_TAU, EmaContract, EmaState, ModelEma};
+pub use error::{Error, Result};
+pub use layers::{
+    Activation, BN_EPS, BN_MOMENTUM, BatchNorm2d, Concat, Conv2d, Conv2dConfig, ConvBnAct, Identity, Linear,
+    MaxPool2d, ModuleList, RunningStats, Sequential, Upsample, fuse_conv_bn,
+};
+pub use module::{Forward, Layer, Mode, Module, NamedTensor, TensorKind};
+pub use sched::{DecayKind, LrSchedule, SchedContract, SchedUnit, warmup_iters};
