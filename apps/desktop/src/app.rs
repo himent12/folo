@@ -330,6 +330,12 @@ pub struct FoloApp {
     pub pr_hover: Option<f32>,
     /// The class isolated on the PR chart (hovered or focused in the per-class table).
     pub pr_focus: Option<u32>,
+    /// The class pinned on the PR chart (Enter/Space or a click); hover and focus override it.
+    pub pr_pin: Option<u32>,
+    /// Highlighted option while the Export menu is open.
+    pub export_hl: usize,
+    /// Models table order: column key and descending; None keeps the server's order.
+    pub models_sort: Option<(&'static str, bool)>,
     pub confusion_norm: bool,
 
     // Playground
@@ -451,6 +457,9 @@ impl FoloApp {
             export_open: false,
             pr_hover: None,
             pr_focus: None,
+            pr_pin: None,
+            export_hl: 0,
+            models_sort: None,
             confusion_norm: true,
             play_model: None,
             play_conf: 0.25,

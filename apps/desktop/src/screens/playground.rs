@@ -674,14 +674,33 @@ impl FoloApp {
                             vis.len().to_string()
                         },
                     )))
-                    .child(div().p(px(6.)).flex().flex_col().gap(px(1.)).children(rows).when(
-                        vis.is_empty(),
-                        |d| {
-                            d.child(div().p(px(10.)).child(text(ty::SM, t.text_tertiary).child(
+                    .child(
+                        div()
+                            .p(px(6.))
+                            .flex()
+                            .flex_col()
+                            .gap(px(1.))
+                            .when(!vis.is_empty(), |d| {
+                                // Column labels, on the rows' grid: swatch + class, box size, confidence.
+                                d.child(
+                                    div()
+                                        .h(px(24.))
+                                        .px(px(8.))
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(8.))
+                                        .child(th(&t, "Class").w(px(84.)).flex_none())
+                                        .child(th(&t, "Size (px)").w(px(52.)).flex_none())
+                                        .child(th(&t, "Confidence").flex_1().text_right()),
+                                )
+                            })
+                            .children(rows)
+                            .when(vis.is_empty(), |d| {
+                                d.child(div().p(px(10.)).child(text(ty::SM, t.text_tertiary).child(
                                 "Nothing above the threshold. Lower the confidence to see weaker detections.",
                             )))
-                        },
-                    ))
+                            }),
+                    )
                     .into_any_element()
             }
             Load::Failed(e) => div()
