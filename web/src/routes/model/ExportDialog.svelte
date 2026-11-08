@@ -160,9 +160,12 @@
   .opt:hover {
     border-color: var(--line-strong);
   }
+  /* Selected is neutral (lime is for the primary action, focus and live state): a raised card with a 1.5 px edge
+     (the inset ring adds the half pixel without moving the content). */
   .opt.on {
-    border-color: var(--accent-line);
-    background: var(--bg-selected);
+    border-color: var(--line-strong);
+    box-shadow: inset 0 0 0 0.5px var(--line-strong);
+    background: var(--bg-raised);
   }
   fieldset:disabled .opt {
     cursor: default;
@@ -180,12 +183,13 @@
     height: 14px;
     margin-top: 3px;
     border-radius: 50%;
-    border: 1px solid var(--line-strong);
+    /* text.tertiary keeps the empty ring at ≥ 3:1 on both themes' panels. */
+    border: 1px solid var(--text-tertiary);
     background: var(--bg-inset);
     transition: border-color var(--dur-fast) var(--ease-standard);
   }
   .on .radio {
-    border: 4px solid var(--accent-line);
+    border: 4px solid var(--text-primary);
     background: var(--bg-panel);
   }
   input:focus-visible + .radio {

@@ -107,7 +107,7 @@
         counts={stats.box_size_hist.counts}
         binLabel={(lo, hi) => sizeBinLabel(lo, hi)}
         label="Histogram of box sizes relative to the image side (square root of the area share)"
-        color="var(--chart-2)"
+        color="var(--chart-1)"
         height={180}
       />
     </Panel>
@@ -117,7 +117,7 @@
         counts={stats.boxes_per_image_hist.counts}
         binLabel={(lo, hi, i) => countBinLabel(lo, hi, i === perLast)}
         label="Histogram of the number of boxes per image"
-        color="var(--chart-5)"
+        color="var(--chart-1)"
         unit="images"
         height={180}
       />

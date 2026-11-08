@@ -208,7 +208,7 @@
       transform var(--dur-fast) var(--ease-standard);
   }
   .sample:hover {
-    box-shadow: 0 0 0 2px var(--accent-line);
+    box-shadow: 0 0 0 1px var(--text-tertiary);
   }
   .sample:focus-visible {
     outline-offset: 2px;

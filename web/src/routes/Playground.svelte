@@ -381,7 +381,7 @@
         <Select
           label="Model"
           value={modelId ?? ''}
-          options={ranked.map((m) => ({ value: m.id, label: `${m.name} · ${m.arch}${m.metrics ? ` · ${metric(m.metrics.map50_95)}` : ''}` }))}
+          options={ranked.map((m) => ({ value: m.id, label: `${m.name} · ${m.arch}${m.metrics ? ` · mAP ${metric(m.metrics.map50_95)}` : ''}` }))}
           onchange={chooseModel}
         />
         {#if model}<Button icon={ArrowUpRight} href={href(`/models/${model.id}`)} aria-label="Open {model.name}" />{/if}
@@ -512,7 +512,10 @@
                         <th scope="col" class="r idx">#</th>
                         <th scope="col">Class</th>
                         <th scope="col">Score</th>
-                        <th scope="col" class="r hide-sm">Box (x1, y1, x2, y2)</th>
+                        <th scope="col" class="r hide-sm coord" title="Box left edge, in image pixels">x1</th>
+                        <th scope="col" class="r hide-sm coord" title="Box top edge, in image pixels">y1</th>
+                        <th scope="col" class="r hide-sm coord" title="Box right edge, in image pixels">x2</th>
+                        <th scope="col" class="r hide-sm coord" title="Box bottom edge, in image pixels">y2</th>
                         <th scope="col" class="r">Size</th>
                       </tr>
                     </thead>
@@ -544,7 +547,10 @@
                               <span class="mono">{b.score.toFixed(3)}</span>
                             </span>
                           </td>
-                          <td class="r mono muted hide-sm">{px(b.x1)}, {px(b.y1)}, {px(b.x2)}, {px(b.y2)}</td>
+                          <td class="r mono muted hide-sm coord">{px(b.x1)}</td>
+                          <td class="r mono muted hide-sm coord">{px(b.y1)}</td>
+                          <td class="r mono muted hide-sm coord">{px(b.x2)}</td>
+                          <td class="r mono muted hide-sm coord">{px(b.y2)}</td>
                           <td class="r mono muted">{px(b.x2 - b.x1)}×{px(b.y2 - b.y1)}</td>
                         </tr>
                       {/each}
@@ -700,11 +706,12 @@
     width: 12px;
     height: 12px;
     border-radius: 3px;
-    box-shadow: inset 0 0 0 1px var(--line-strong);
+    /* text.tertiary keeps the empty box at ≥ 3:1; checked is neutral (lime is for actions, focus and live). */
+    box-shadow: inset 0 0 0 1px var(--text-tertiary);
   }
   .tog.on .tog-box {
-    background: var(--accent-line);
-    color: var(--accent-on);
+    background: var(--text-primary);
+    color: var(--text-inverse);
     box-shadow: none;
   }
   .stage {
@@ -840,6 +847,13 @@
   .idx {
     width: 40px;
   }
+  /* x1 y1 x2 y2 read as one group: tighter gaps between the four coordinate columns. */
+  .table .coord + .coord {
+    padding-left: var(--space-2);
+  }
+  .table .coord {
+    font-variant-numeric: tabular-nums;
+  }
   tbody tr {
     transition: background-color var(--dur-fast) var(--ease-standard);
   }
@@ -851,8 +865,8 @@
     background: var(--bg-hover);
   }
   tbody tr.sel {
-    background: var(--bg-selected);
-    box-shadow: inset 2px 0 0 var(--accent-line);
+    background: var(--bg-active);
+    box-shadow: inset 2px 0 0 var(--text-primary);
   }
   tbody tr:focus-visible {
     outline: 2px solid var(--focus);
