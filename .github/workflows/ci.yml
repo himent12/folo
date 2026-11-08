@@ -37,7 +37,7 @@ jobs:
       - name: persistent target dir (self-hosted, windows)
         if: runner.environment == 'self-hosted' && runner.os == 'Windows'
         shell: powershell
-        run: Add-Content -Path $env:GITHUB_ENV -Value "CARGO_TARGET_DIR=D:\gha\folo-target-ci"
+        run: Add-Content -Path $env:GITHUB_ENV -Value "CARGO_TARGET_DIR=D:\gha\folo-target-$env:RUNNER_NAME"
       - uses: Swatinem/rust-cache@v2
         if: runner.environment == 'github-hosted'
       - run: cargo fmt --all -- --check

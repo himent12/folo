@@ -9,8 +9,11 @@ own runners, selected by two repository variables holding a JSON `runs-on` value
 
 | variable | value | runner |
 |---|---|---|
-| `RUNS_ON_LINUX` | `["self-hosted","folo-linux"]` | `folo-linux-boat`: a boat.dev `large` sandbox (8 vCPU, 16 GB, Ubuntu 24.04), runner in `~/gha` |
-| `RUNS_ON_WINDOWS` | `["self-hosted","folo-win"]` | `folo-win-local`: the dev PC, runner in `D:\gha\win` |
+| `RUNS_ON_LINUX` | `["self-hosted","folo-linux"]` | `folo-linux-boat`, `folo-linux-boat-2..4`: boat.dev `large` sandboxes (8 vCPU, 16 GB, Ubuntu 24.04), runner in `~/gha` |
+| `RUNS_ON_WINDOWS` | `["self-hosted","folo-win"]` | `folo-win-local`, `folo-win-local-2`: the dev PC, runners in `D:\gha\win`, `D:\gha\win2` (each with its own target dir `D:\gha\folo-target-<runner name>`) |
+
+Linux runners are managed with `python tools/gha_boat_runner.py up|renew|down <n>` (sandbox ids in
+`~/.folo/gha_linux<n>_sid`).
 
 To fall back to GitHub-hosted runners, delete the variable (`gh variable delete RUNS_ON_LINUX`); the workflow then
 uses `ubuntu-latest` / `windows-latest`. Self-hosted jobs keep a persistent `CARGO_TARGET_DIR` outside the checkout,
