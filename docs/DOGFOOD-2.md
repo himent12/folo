@@ -29,8 +29,9 @@ CPU, with identical boxes on all three. The MCP surface is the best part:
 - `tools/list` stayed at 45 KB.
 
 Nothing blocked a job outright. The worst problems were these:
-1. **The Desktop release build crashed rustc 3 times in 3 attempts on this machine**, because of the shipped
-   thin-LTO + `codegen-units = 1` profile. It built only with an override (D1).
+1. **The Desktop release build crashed rustc 3 times in 3 attempts on this machine**, with the shipped
+   thin-LTO + `codegen-units = 1` profile. Turning off LTO and using 16 codegen units built it (D1). That is a
+   workaround, not an isolated cause.
 2. **Every front end shows a wrong timing split.** GPU time is counted as postprocess or "NMS", for example
    "model 0.6 ms, NMS 17.5 ms" (X1).
 3. **Short runs on small datasets silently spend almost all their steps in warmup**, and with no mosaic. An
@@ -163,10 +164,11 @@ or inconsistent. The IDs group findings by surface:
 #### C2. A second `cargo folo` call rebuilt folo-cli for 2 min 46 s with no source change (polish)
 - **Repro:** `git switch -c x`, then `cargo folo doctor` (cold build), then `cargo folo dataset synth …`. The
   second call printed "Compiling folo-cli" and took 2 min 46 s. Every later call took about 2 s.
-- **Likely cause:** `build.rs` watches the branch ref that `git switch -c` had just created. Its mtime fell inside
-  the first build, so cargo considered it changed.
-- **Fix:** watch `logs/HEAD` instead, or compare the sha the build script last saw. On a fresh clone this costs
-  one rebuild; on an agent's branch it costs one per new branch.
+- **Cause unconfirmed.** One guess: `build.rs` re-runs when HEAD, the branch ref or `packed-refs` changes, and
+  the ref `git switch -c` had just created was written during the first build.
+- **Fix:** diagnose it first with `CARGO_LOG=cargo::core::compiler::fingerprint=info cargo folo --version` right
+  after a fresh `git switch -c`. Keep the HEAD, ref and `packed-refs` watches (they keep the baked sha right). If
+  it is the mtime race, the cost is one rebuild per new branch.
 
 #### C3. Small items (polish)
 - **Mixed separators in human output:**
@@ -217,14 +219,14 @@ or inconsistent. The IDs group findings by surface:
 #### S1. Compare hides the starting weights (annoying)
 - **Repro:** run A is folo-n from scratch for 8 epochs. Run B fine-tunes the imported shapes-n for 5 epochs.
   Runs → select both → Compare.
-- **Happened:** "Side by side · **2 settings differ**", but the only differing setting shown is Epochs (5 vs 8).
-  "Show 8 identical settings" lists Dataset, Model, Batch, Image size, Optimizer, LR, Mosaic and Device.
-  - The start weights (`weights: m_67a4c8c1` vs none) are not shown, and they explain 0.833 vs 0.168.
-  - Close mosaic (5 vs 8 after clamping) is not shown either.
+- **Happened:** "Side by side · **2 settings differ**": Epochs (5 vs 8) and Duration (20 s vs 34 s). "Show 8
+  identical settings" lists Dataset, Model, Batch, Image size, Optimizer, LR, Mosaic and Device.
+  - Compare has no row for the start weights (`weights: m_67a4c8c1` vs none), and they explain 0.833 vs 0.168.
+  - Close mosaic (5 vs 8 after clamping) has no row either.
   - MCP `compare_runs` on the same pair, in proxy mode, says "4 config fields differ".
 - **Model page:** it shows "trained by studio-n-ft5" but not that it was fine-tuned from shapes-n.
-- **Fix:** add a "Start from" row (and Close mosaic) to Compare's settings, and make its count match the rows
-  shown. Add the parent model to the model page and to the runs table.
+- **Fix:** add "Start from" and "Close mosaic" rows to Compare's settings. Add the parent model to the model page
+  and to the runs table.
 
 #### S2. Model page shows a benchmark latency as the model's latency (polish)
 - **Where:** Models → studio-n-ft5-best → Details.
@@ -255,8 +257,6 @@ or inconsistent. The IDs group findings by surface:
 - **Image size:** New run defaults to 640 px on a dataset whose images are all 320×320. It could default to the
   dataset's size.
 - **Truncated learning rate:** the stat on the run page reads "3.42 × 10…" at 1440 px wide.
-- **No test hooks:** the size and arch pickers are `role=radio` buttons without names or test ids, so scripts
-  have to match text. That matters for agents driving Studio.
 - **Log noise:** `folo serve` logs every request at INFO, including Studio's 2-second `/api/runs` poll, so
   stderr is mostly noise. Log polling GETs at DEBUG.
 
@@ -338,8 +338,7 @@ messages, `folo_info.data_dir` (proxy), and the trainer's log line about loaded 
    codegen unit, and plain `release` for development.
 2. **X1:** fix the timing split so the GPU wait counts as inference, not postprocess or NMS, on all front ends.
 3. **X2:** warn when warmup takes most of a short run or `close_mosaic >= epochs`, and consider capping warmup.
-4. **S1:** show the start weights (and Close mosaic) in Studio's Compare and the model's lineage, and make
-   "N settings differ" match the rows shown.
+4. **S1:** show the start weights and Close mosaic in Studio's Compare, and the model's lineage on its page.
 5. **X3:** measure small-dataset 1080p throughput on an idle GPU, and break epoch time into load, train, val and
    checkpoint.
 6. **M2:** thumbnails for image resources and smaller sample grids (350 KB and 250 KB today).
