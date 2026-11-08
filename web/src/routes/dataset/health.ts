@@ -1,6 +1,6 @@
 // Dataset health checks and histogram labels. Pure functions so the thresholds are easy to test and tune.
 
-import type { Dataset, DatasetStats, Histogram } from '$lib/api/types';
+import type { Dataset, DatasetStats, Histogram, IssueCounts, IssueSeverity } from '$lib/api/types';
 
 export type Severity = 'danger' | 'warning' | 'info' | 'ok';
 
@@ -11,6 +11,8 @@ export interface HealthItem {
   detail: string;
   /** A concrete next step where the data allows one: a label and an app path (without the leading #). */
   action?: { label: string; path: string };
+  /** The `folo dataset check` issues behind it, listed from this severity on. */
+  issues?: IssueSeverity;
 }
 
 /** Findings that need attention (errors and warnings): the "N to review" count, everywhere it is shown. */
@@ -51,8 +53,12 @@ export function shareBelow(h: Histogram, limit: number): number {
   return total ? below / total : 0;
 }
 
-/** Health findings, most severe first. Returns one `ok` item when nothing stands out. */
-export function healthChecks(d: Dataset, s: DatasetStats): HealthItem[] {
+/**
+ * Health findings, most severe first. Returns one `ok` item when nothing stands out. `counts` (the issues endpoint's,
+ * from servers that send them) adds what `folo dataset check` finds beyond the stats: unreadable images, and warnings
+ * such as clipped boxes or duplicate images.
+ */
+export function healthChecks(d: Dataset, s: DatasetStats, counts?: IssueCounts): HealthItem[] {
   const out: HealthItem[] = [];
   const images = imageCount(d);
   const id = encodeURIComponent(d.id);
@@ -64,6 +70,24 @@ export function healthChecks(d: Dataset, s: DatasetStats): HealthItem[] {
       severity: 'danger',
       title: `${int(s.broken_labels)} broken label ${s.broken_labels === 1 ? 'file' : 'files'}`,
       detail: 'These labels could not be parsed, so their images are skipped in training. Fix or delete them, then re-register the dataset.',
+      issues: 'error',
+    });
+  } else if (counts && counts.error > 0) {
+    out.push({
+      id: 'check-errors',
+      severity: 'danger',
+      title: `${int(counts.error)} ${counts.error === 1 ? 'error' : 'errors'} from the dataset check`,
+      detail: 'Images that cannot be read and labels that cannot be parsed are left out of training. Fix or remove them.',
+      issues: 'error',
+    });
+  }
+  if (counts && counts.warning > 0) {
+    out.push({
+      id: 'check-warnings',
+      severity: 'warning',
+      title: `${int(counts.warning)} ${counts.warning === 1 ? 'warning' : 'warnings'} from the dataset check`,
+      detail: 'Training still uses these files: boxes past the image edge, duplicate labels or images. Each says what a cleanup would do.',
+      issues: 'warning',
     });
   }
 

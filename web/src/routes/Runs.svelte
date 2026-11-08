@@ -8,6 +8,8 @@
   import type { Run, RunStatus } from '$lib/api/types';
   import RunSpark from '$lib/charts/RunSpark.svelte';
   import { ago, duration, metric } from '$lib/format';
+  import { failureCause } from '$lib/oom';
+  import { tooltip } from '$lib/ui/tooltip';
   import { href, router } from '$lib/router.svelte';
   import { setCrumbs } from '$lib/shell/crumbs.svelte';
   import Page from '$lib/shell/Page.svelte';
@@ -150,7 +152,7 @@
                   <a class="name" href={href(`/runs/${r.id}`)} onclick={(e) => e.stopPropagation()}>{r.name}</a>
                   <span class="ctx">{dsName.get(r.config.dataset_id) ?? r.config.dataset_id} · <span class="mono">{r.config.arch}</span></span>
                 </td>
-                <td><StatusBadge status={r.status} plain /></td>
+                <td use:tooltip={failureCause(r)}><StatusBadge status={r.status} plain /></td>
                 <td class="hide-md muted">{dsName.get(r.config.dataset_id) ?? r.config.dataset_id}</td>
                 <td class="hide-md"><span class="mono muted">{r.config.arch}</span></td>
                 <td>
@@ -194,7 +196,7 @@
             <a class="r-main" href={href(`/runs/${r.id}`)}>
               <span class="r-text">
                 <span class="r-name"><StatusBadge status={r.status} plain dotOnly /><span class="name truncate">{r.name}</span></span>
-                <span class="r-meta num truncate">{STATUS[r.status]} · {r.epoch}/{r.epochs} · {dsName.get(r.config.dataset_id) ?? r.config.dataset_id}</span>
+                <span class="r-meta num truncate">{failureCause(r) ?? STATUS[r.status]} · {r.epoch}/{r.epochs} · {dsName.get(r.config.dataset_id) ?? r.config.dataset_id}</span>
               </span>
               <span class="r-end"><span class="r-val num">{metric(r.best?.map50_95)}</span><span class="r-age">{ago(r.created)}</span></span>
             </a>

@@ -151,7 +151,10 @@
 
   // ---------- derived view data ----------
   const total = $derived(d ? imageCount(d) : 0);
-  const issues = $derived(d?.stats ? reviewCount(healthChecks(d, d.stats)) : 0);
+  // The check's counts by severity (servers before them send none; a failure only leaves them out).
+  const check = new Resource((s) => hub.api.datasetIssues(id, { limit: 0 }, s));
+  const counts = $derived(check.data?.counts);
+  const issues = $derived(d?.stats ? reviewCount(healthChecks(d, d.stats, counts)) : 0);
   const filtered = $derived(cls !== undefined || split !== 'all');
   const splitOptions = $derived.by(() => {
     if (!d) return [];
@@ -232,7 +235,7 @@
     <div id="ds-tab-panel" role="tabpanel" aria-labelledby="ds-tab-{tab}" class="panel">
       {#if tab === 'stats'}
         {#if d.stats}
-          <StatsTab dataset={d} stats={d.stats} onclass={(c) => setQuery({ tab: null, class: String(c), image: null })} />
+          <StatsTab dataset={d} stats={d.stats} {counts} onclass={(c) => setQuery({ tab: null, class: String(c), image: null })} />
         {:else}
           <Panel><EmptyState icon={ImageOff} title="No statistics" description="The server did not return statistics for this dataset." /></Panel>
         {/if}

@@ -29,3 +29,45 @@ describe('loadIssues', () => {
     expect(r.list).toHaveLength(1200);
   });
 });
+
+describe('loadIssues with counts', () => {
+  const issues: DatasetIssue[] = [
+    { kind: 'broken_label', severity: 'error', file: 'labels/a.txt', line: 3, message: 'bad', fix: 'delete line 3' },
+    { kind: 'clipped_box', severity: 'warning', file: 'labels/b.txt', line: 1, message: 'clipped', fix: 'clip the box on line 1 to the image' },
+    { kind: 'duplicate_image', severity: 'warning', file: 'images/c.png', line: null, message: 'same bytes as images/a.png', fix: 'remove this copy' },
+    { kind: 'empty_image', severity: 'info', file: 'images/d.png', line: null, message: 'no boxes' },
+  ];
+  const counts = { error: 1, warning: 2, info: 1, by_kind: { broken_label: 1, clipped_box: 1, duplicate_image: 1, empty_image: 1 } };
+  const queries: DatasetIssuesQuery[] = [];
+  const server = {
+    async datasetIssues(_id: string, q: DatasetIssuesQuery) {
+      queries.push(q);
+      const m = issues.filter((i) => (!q.kind || i.kind === q.kind) && (!q.severity || i.severity === q.severity));
+      return { total: m.length, issues: m.slice(q.offset ?? 0), counts };
+    },
+  };
+
+  it('asks for a whole severity in one query and passes the counts on', async () => {
+    queries.length = 0;
+    const r = await loadIssues(server, 'ds', 'warning');
+    expect(queries).toEqual([{ severity: 'warning', offset: 0, limit: 1000 }]);
+    expect(r.total).toBe(2);
+    expect(r.list.map((i) => i.fix)).toEqual(['remove this copy', 'clip the box on line 1 to the image']);
+    expect(r.counts).toEqual(counts);
+    expect(r.byKind).toEqual({ clipped_box: 1, duplicate_image: 1 });
+  });
+
+  it('narrows to one kind', async () => {
+    queries.length = 0;
+    const r = await loadIssues(server, 'ds', 'warning', 2000, undefined, 'clipped_box');
+    expect(queries).toEqual([{ kind: 'clipped_box', offset: 0, limit: 1000 }]);
+    expect(r.list).toHaveLength(1);
+    expect(r.byKind).toEqual({ clipped_box: 1, duplicate_image: 1 });
+  });
+
+  it('reads an older server kind by kind and counts per kind itself', async () => {
+    const r = await loadIssues(api, 'ds', 'error');
+    expect(r.counts).toBeUndefined();
+    expect(r.byKind).toEqual({ broken_label: 1, class_overflow: 1 });
+  });
+});

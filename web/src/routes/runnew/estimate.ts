@@ -37,3 +37,12 @@ export function estimate(arch: Arch, trainImages: number, epochs: number, batch:
     vramBytes: cpu ? 0 : vram,
   };
 }
+
+/**
+ * The factor that makes the estimate agree with a run that ran out of GPU memory: when the estimate for its settings
+ * (`failedBytes`) fit in `gpuBytes`, it was low, so estimates are scaled until those settings exceed the memory by 5%.
+ * 1 when the estimate already said they would not fit.
+ */
+export function oomScale(failedBytes: number, gpuBytes: number): number {
+  return failedBytes > 0 && failedBytes < gpuBytes * 1.05 ? (gpuBytes * 1.05) / failedBytes : 1;
+}

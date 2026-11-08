@@ -138,7 +138,7 @@
   </Panel>
 </Page>
 
-<AddDatasetDialog bind:open={adding} bind:mode={addMode} />
+<AddDatasetDialog bind:open={adding} bind:mode={addMode} known={datasets.data} />
 
 <style>
   .scroll {
