@@ -1361,6 +1361,7 @@ impl FoloApp {
             .child(th(&t, "Recall").flex_1().min_w_0().text_right());
         let focus = self.pr_isolated(ev, window);
         let pin = self.pr_pin;
+        let num = |v: String| text(ty::SM, t.text_secondary).tnum().flex_1().min_w_0().text_right().child(v);
         let mut per: Vec<_> = ev.per_class.iter().collect();
         per.sort_by(|a, b| b.map50.total_cmp(&a.map50));
         // Numbers right-aligned (bar to their left), like every other table's metric columns.
@@ -1403,39 +1404,25 @@ impl FoloApp {
                             .child(crate::ui::class_swatch(&t, color, 8.))
                             .child(
                                 text(ty::BASE, t.text_primary)
-                                    .w(px(if pinned { 120. } else { 168. }))
+                                    .w(px(if pinned { 148. } else { 168. }))
                                     .flex_none()
                                     .truncate()
                                     .child(m.classes.get(c.class as usize).cloned().unwrap_or_default()),
                             )
-                            .when(pinned, |d| {
-                                d.child(text(ty::XS, t.text_tertiary).flex_none().child("pinned"))
-                            }),
+                            // The same pin as the PR legend's pinned row.
+                            .when(pinned, |d| d.child(icon("icons/pin.svg", 12., t.text_secondary))),
                     )
-                    .child(div().flex_1().min_w_0().flex().justify_end().child(bar_value(
-                        &t,
-                        c.map50,
-                        f3(c.map50),
-                        t.text_tertiary,
-                    )))
+                    // Only the headline metric carries a comparison bar; the others are plain
+                    // numbers, so AP50-95 leads the row.
+                    .child(num(f3(c.map50)))
                     .child(div().flex_1().min_w_0().flex().justify_end().child(bar_value(
                         &t,
                         c.map50_95,
                         f3(c.map50_95),
                         t.text_tertiary,
                     )))
-                    .child(div().flex_1().min_w_0().flex().justify_end().child(bar_value(
-                        &t,
-                        c.precision,
-                        format!("{:.3}", c.precision),
-                        t.text_tertiary,
-                    )))
-                    .child(div().flex_1().min_w_0().flex().justify_end().child(bar_value(
-                        &t,
-                        c.recall,
-                        format!("{:.3}", c.recall),
-                        t.text_tertiary,
-                    )));
+                    .child(num(format!("{:.3}", c.precision)))
+                    .child(num(format!("{:.3}", c.recall)));
                 // Keyboard: Enter/Space isolates (or releases) this class on the PR chart.
                 self.bind(
                     row,
