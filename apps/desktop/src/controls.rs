@@ -514,6 +514,11 @@ impl FoloApp {
                     .border_color(gpui::transparent_black())
                     .when(on, |d| d.bg(t.bg_raised).border_color(t.line_strong))
                     .when(!on && !dead, |d| d.hover(|s| s.bg(t.bg_hover)))
+                    // The selected option answers the pointer too: hover tint over its raised fill.
+                    .when(on, |d| {
+                        let hot = crate::theme::over(t.bg_raised, t.bg_hover);
+                        d.hover(move |s| s.bg(hot))
+                    })
                     .when(!dead, |d| d.active(|s| s.bg(t.bg_active)))
                     .when(!dead, |d| {
                         d.on_click(cx.listener(move |this, _, window, cx| {

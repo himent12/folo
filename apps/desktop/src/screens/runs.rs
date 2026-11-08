@@ -647,7 +647,14 @@ impl FoloApp {
                 ))),
             stat_sized(
                 &t,
-                if live { "mAP50-95 · latest" } else { "mAP50-95 · final" },
+                // "final" only for a run that finished; a stopped or failed one ends on its last validated epoch.
+                if live {
+                    "mAP50-95 · latest"
+                } else if r.status == RunStatus::Completed {
+                    "mAP50-95 · final"
+                } else {
+                    "mAP50-95 · last validated"
+                },
                 last.map_or("–".into(), |e| f3(e.val.map50_95)),
                 big,
                 delta.or_else(|| {
@@ -834,7 +841,8 @@ impl FoloApp {
             "run-map",
             vec![
                 Series::new("mAP50-95", t.chart_series[0], d.map50_95.clone()).area().live(live).width(1.75),
-                Series::new("mAP50", t.chart_series[1], d.map50.clone()).width(1.25),
+                // Dashed: the pair reads apart without colour (as in the legend).
+                Series::new("mAP50", t.chart_series[1], d.map50.clone()).width(1.25).dashed(),
             ],
             primary_h,
         );
@@ -987,7 +995,7 @@ impl FoloApp {
         let mut map_items = vec![
             crate::ui::legend_value(&t, "mAP50-95", t.chart_series[0], false, v(&d.map50_95, f3v))
                 .into_any_element(),
-            crate::ui::legend_value(&t, "mAP50", t.chart_series[1], false, v(&d.map50, f3v))
+            crate::ui::legend_value(&t, "mAP50", t.chart_series[1], true, v(&d.map50, f3v))
                 .into_any_element(),
         ];
         if let Some(b) = &r.best {

@@ -612,9 +612,16 @@ impl FoloApp {
                                     b.y2 - b.y1
                                 )),
                             )
-                            .child(div().flex_1().h(px(4.)).rounded_full().bg(t.bg_inset).child(
-                                div().h_full().w(relative(b.score)).rounded_full().bg(t.class(b.class)),
-                            ))
+                            .child(
+                                div().flex_1().h(px(4.)).rounded_full().bg(t.bg_inset).child(
+                                    // The class's surface-safe stroke (the photo palette washes out on a light panel).
+                                    div()
+                                        .h_full()
+                                        .w(relative(b.score))
+                                        .rounded_full()
+                                        .bg(t.class_stroke(b.class)),
+                                ),
+                            )
                             .child(
                                 text(ty::SM, t.text_primary)
                                     .tnum()

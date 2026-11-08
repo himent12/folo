@@ -170,7 +170,8 @@ impl FoloApp {
 
     fn live_panel(&mut self, r: &Run, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         // Short windows trade chart height for the sections below.
-        let hero_h = if window.viewport_size().height < px(700.) { 100. } else { 132. };
+        // Short windows (620 px minimum): a lower plot, so two Recent runs rows show under the hero.
+        let hero_h = if window.viewport_size().height < px(700.) { 76. } else { 132. };
         let t = theme(cx);
         self.ensure_run_data(&r.id, cx);
         let ds = self
@@ -222,7 +223,8 @@ impl FoloApp {
                     "ov-map",
                     vec![
                         Series::new("mAP50-95", t.chart_series[0], d.map50_95.clone()).area().live(true),
-                        Series::new("mAP50", t.chart_series[1], d.map50.clone()).width(1.25),
+                        // Dashed: the pair reads apart without colour (as in the legend).
+                        Series::new("mAP50", t.chart_series[1], d.map50.clone()).width(1.25).dashed(),
                     ],
                 );
                 map.x_range = Some((0., total));
@@ -252,7 +254,7 @@ impl FoloApp {
                     .items_center()
                     .gap(px(12.))
                     .child(crate::ui::legend_value(&t, "mAP50-95", t.chart_series[0], false, v(&d.map50_95)))
-                    .child(crate::ui::legend_value(&t, "mAP50", t.chart_series[1], false, v(&d.map50)))
+                    .child(crate::ui::legend_value(&t, "mAP50", t.chart_series[1], true, v(&d.map50)))
                     .into_any_element();
                 // One Tab stop with the dashboard's keyboard cursor (← / →, Home / End, Esc), ending
                 // at the latest validated epoch.
@@ -391,27 +393,33 @@ impl FoloApp {
                     .child(div().h_full().w(gpui::relative(r.progress().clamp(0., 1.))).bg(t.accent_fill())),
             )
             .child(
-                div().flex().flex_col().gap(px(16.)).p(px(16.)).child(kpis).child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .gap(px(4.))
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .child(
-                                    text(ty::SM, t.text_primary)
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .child("Validation mAP"),
-                                )
-                                .child(legend_el),
-                        )
-                        .child(chart),
-                ),
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(if hero_h < 100. { 8. } else { 16. }))
+                    .p(px(if hero_h < 100. { 12. } else { 16. }))
+                    .child(kpis)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(4.))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .child(
+                                        text(ty::SM, t.text_primary)
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .child("Validation mAP"),
+                                    )
+                                    .child(legend_el),
+                            )
+                            .child(chart),
+                    ),
             )
             .children(footer)
             .into_any_element()
@@ -473,7 +481,7 @@ impl FoloApp {
         if self.store.runs.is_loading() {
             // Same anatomy and heights as the live panel: header, rail, a row of four KPIs above the
             // chart (its title row, then the plot), meter footer. Nothing moves when data lands.
-            let hero_h = if window.viewport_size().height < px(700.) { 100. } else { 132. };
+            let hero_h = if window.viewport_size().height < px(700.) { 76. } else { 132. };
             let sk = |id: &str| skeleton(&t, id.to_string());
             return panel(&t)
                 .flex_1()
@@ -492,8 +500,8 @@ impl FoloApp {
                     div()
                         .flex()
                         .flex_col()
-                        .gap(px(16.))
-                        .p(px(16.))
+                        .gap(px(if hero_h < 100. { 8. } else { 16. }))
+                        .p(px(if hero_h < 100. { 12. } else { 16. }))
                         .child(div().flex().gap(px(40.)).children((0..4).map(|c| {
                             div().w(px(120.)).h(px(64.)).child(skeleton(&t, format!("hero-kpi-{c}")))
                         })))
