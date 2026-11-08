@@ -2,7 +2,7 @@
 
 use rayon::prelude::*;
 
-use super::gemm::{Epilogue, Operand, Strided, gemm, gemm_ex};
+use super::gemm::{ColumnMap, Epilogue, NR, Operand, RowPtrs, Strided, gemm, gemm_ex, gemm_rows};
 use crate::backend::Conv2dParams;
 
 /// Geometry shared by the kernels. All tensors are contiguous NCHW / OIHW.
@@ -45,13 +45,13 @@ impl ConvGeom {
     }
 }
 
-/// Copy one output row segment of the unfolded input: input row `iy` of `plane`, output columns
-/// `ox0..ox0 + len`, kernel column offset `dx` (already includes `-pad`). Writes `dst[t * stride]`.
+/// Copy one output row segment of the unfolded input: input row `iy` of `plane` (one `h x w` input plane),
+/// output columns `ox0..ox0 + len`, kernel column offset `dx` (already includes `-pad`). Writes
+/// `dst[t * stride]`.
 #[inline]
 #[allow(clippy::too_many_arguments)]
 fn im2col_segment(
-    x: &[f32],
-    plane: usize,
+    plane: &[f32],
     g: &ConvGeom,
     iy: isize,
     dx: isize,
@@ -67,7 +67,7 @@ fn im2col_segment(
         }
         return;
     }
-    let row = &x[plane + iy as usize * g.w..plane + (iy as usize + 1) * g.w];
+    let row = &plane[iy as usize * g.w..(iy as usize + 1) * g.w];
     let wi = g.w as isize;
     // Valid output columns: 0 <= ox * sw + dx < w.
     let ix0 = ox0 as isize * sw + dx;
@@ -90,10 +90,10 @@ fn im2col_segment(
     }
 }
 
-/// B operand of the forward GEMM: element `(j, kk)` is the unfolded input `col[kk][j]` of image `img`, group `grp`.
+/// B operand of the forward GEMM: element `(j, kk)` is the unfolded input `col[kk][j]` of one image and group,
+/// whose input channel `ci` is the plane `planes[ci]`.
 struct Im2Col<'a> {
-    x: &'a [f32],
-    base: usize,
+    planes: &'a [&'a [f32]],
     g: ConvGeom,
 }
 
@@ -107,7 +107,7 @@ impl Operand for Im2Col<'_> {
             let kidx = k0 + kk;
             let (ci, r) = (kidx / khw, kidx % khw);
             let (ky, kx) = ((r / g.kw) as isize, (r % g.kw) as isize);
-            let plane = self.base + ci * g.h * g.w;
+            let plane = self.planes[ci];
             let d = &mut dst[kk * width..kk * width + width];
             d[w..].fill(0.0);
             let (mut oy, mut ox) = (o0 / g.ow, o0 % g.ow);
@@ -115,12 +115,159 @@ impl Operand for Im2Col<'_> {
             while t < w {
                 let len = (g.ow - ox).min(w - t);
                 let iy = oy as isize * sh - ph + ky * dh;
-                im2col_segment(self.x, plane, g, iy, kx * dw - pw, ox, len, &mut d[t..], 1);
+                im2col_segment(plane, g, iy, kx * dw - pw, ox, len, &mut d[t..], 1);
                 t += len;
                 ox = 0;
                 oy += 1;
             }
         }
+    }
+}
+
+/// B operand of a pointwise forward GEMM: element `(j, kk)` is pixel `j` of input plane `planes[kk]`.
+struct PlaneRows<'a> {
+    planes: &'a [&'a [f32]],
+}
+
+impl Operand for PlaneRows<'_> {
+    fn pack(&self, o0: usize, w: usize, k0: usize, kc: usize, width: usize, dst: &mut [f32]) {
+        for kk in 0..kc {
+            let d = &mut dst[kk * width..kk * width + width];
+            d[..w].copy_from_slice(&self.planes[k0 + kk][o0..o0 + w]);
+            d[w..].fill(0.0);
+        }
+    }
+}
+
+/// One part of a conv input: `c` channels whose plane `(img, ci)` is `data[offset + img * img_stride + ci * h * w..]`
+/// (each image's planes contiguous, as in a contiguous tensor or a channel slice of one).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ConvPart<'a> {
+    pub data: &'a [f32],
+    pub offset: usize,
+    pub img_stride: usize,
+    pub c: usize,
+}
+
+impl<'a> ConvPart<'a> {
+    /// A contiguous `[N, c, H, W]` buffer.
+    pub fn contiguous(data: &'a [f32], c: usize, hw: usize) -> Self {
+        ConvPart { data, offset: 0, img_stride: c * hw, c }
+    }
+}
+
+/// The input of a forward conv: the channel concatenation of `parts` (one part is the ordinary case). Reading
+/// the planes in place lets a conv over `cat(parts, 1)` run without the concatenation ever being written.
+#[derive(Clone, Copy)]
+pub(crate) struct ConvInput<'a> {
+    pub parts: &'a [ConvPart<'a>],
+}
+
+impl<'a> ConvInput<'a> {
+    /// The `h x w` planes of image `img`, one per input channel.
+    fn planes(&self, img: usize, hw: usize) -> Vec<&'a [f32]> {
+        let mut v = Vec::with_capacity(self.parts.iter().map(|p| p.c).sum());
+        for p in self.parts {
+            let base = p.offset + img * p.img_stride;
+            v.extend((0..p.c).map(|ci| &p.data[base + ci * hw..base + (ci + 1) * hw]));
+        }
+        v
+    }
+}
+
+/// The shifted-rows form of one image's (one group's) conv input, the B operand of [`gemm_rows`]: the input,
+/// zero-padded and split into its `sy x sx` stride phases (`T[ci][a][b][i][j] = x_pad[sy·i + a][sx·j + b]`),
+/// so that kernel tap `(ky, kx)` of channel `ci` is the *contiguous* run of phase
+/// `(ky·dy mod sy, kx·dx mod sx)` starting at row `ky·dy / sy`, column `kx·dx / sx`: output pixel `(oy, ox)`
+/// is column `oy·wq + ox` of every run. The `wq - ow` extra columns per output row are computed and dropped
+/// (`ColumnMap`), and no unfolded matrix is ever written: B is read in place.
+///
+/// Planes are spaced an odd number of cache lines apart: rows of B that are a whole number of 4 KiB pages
+/// apart (as the planes of a 160x160 or 80x80 image are) would all compete for the same L1 sets.
+struct ShiftedRows {
+    /// The phase planes, with slack after the last one.
+    buf: Vec<f32>,
+    /// Row `k = (ci, ky, kx)` of B.
+    rows: Vec<*const f32>,
+    /// Columns of B: `oh · wq`.
+    n: usize,
+    map: ColumnMap,
+}
+
+impl ShiftedRows {
+    fn new(planes: &[&[f32]], g: &ConvGeom, parallel: bool) -> Self {
+        let [sy, sx] = g.p.stride;
+        let [ph, pw] = g.p.padding;
+        let [dy, dx] = g.p.dilation;
+        let (h, w) = (g.h, g.w);
+        let (hq, wq) = ((h + 2 * ph).div_ceil(sy), (w + 2 * pw).div_ceil(sx));
+        let plane = hq * wq;
+        // A plane stride of an odd number of 64-byte lines.
+        let lines = plane.div_ceil(16);
+        let pstride = (lines | 1) * 16;
+        // Only the phases some tap reads (at most kh·kw of them, however large the stride), each with its
+        // slot in the per-channel block.
+        let mut slot = std::collections::BTreeMap::new();
+        for ky in 0..g.kh {
+            for kx in 0..g.kw {
+                let next = slot.len();
+                slot.entry(((ky * dy) % sy, (kx * dx) % sx)).or_insert(next);
+            }
+        }
+        let phases: Vec<(usize, usize, usize)> = slot.iter().map(|(&(a, b), &s)| (a, b, s)).collect();
+        let per_ci = phases.len() * pstride;
+        // Valid outputs read inside their plane; the dropped columns of the last row may run up to `wq`
+        // floats past it (into the next plane, or this slack).
+        let mut buf = super::alloc_uninit(planes.len() * per_ci + wq + NR);
+        let fill = |(ci, dst): (usize, &mut [f32])| {
+            let src = planes[ci];
+            for &(a, b, s) in &phases {
+                {
+                    let d = &mut dst[s * pstride..s * pstride + plane];
+                    for (i, drow) in d.chunks_exact_mut(wq).enumerate() {
+                        let y = (sy * i + a) as isize - ph as isize;
+                        if y < 0 || y >= h as isize {
+                            drow.fill(0.0);
+                            continue;
+                        }
+                        let srow = &src[y as usize * w..(y as usize + 1) * w];
+                        if sx == 1 {
+                            // x = j - pw: zeros, the row, zeros.
+                            let (lo, hi) = (pw.min(wq), (pw + w).min(wq));
+                            drow[..lo].fill(0.0);
+                            drow[lo..hi].copy_from_slice(&srow[..hi - lo]);
+                            drow[hi..].fill(0.0);
+                        } else {
+                            for (j, v) in drow.iter_mut().enumerate() {
+                                let x = (sx * j + b) as isize - pw as isize;
+                                *v = if x >= 0 && x < w as isize { srow[x as usize] } else { 0.0 };
+                            }
+                        }
+                    }
+                }
+            }
+        };
+        let (body, slack) = buf.split_at_mut(planes.len() * per_ci);
+        slack.fill(0.0);
+        if parallel && body.len() >= super::PAR_MIN {
+            body.par_chunks_mut(per_ci).enumerate().for_each(fill);
+        } else {
+            body.chunks_mut(per_ci).enumerate().for_each(fill);
+        }
+        let base = buf.as_ptr();
+        let mut rows = Vec::with_capacity(planes.len() * g.kh * g.kw);
+        for ci in 0..planes.len() {
+            for ky in 0..g.kh {
+                for kx in 0..g.kw {
+                    let (a, rs) = ((ky * dy) % sy, (ky * dy) / sy);
+                    let (b, cs) = ((kx * dx) % sx, (kx * dx) / sx);
+                    let off = ci * per_ci + slot[&(a, b)] * pstride + rs * wq + cs;
+                    // SAFETY: `off` is inside `buf` (rs < hq, cs < wq), which outlives `rows`.
+                    rows.push(unsafe { base.add(off) });
+                }
+            }
+        }
+        ShiftedRows { buf, rows, n: g.oh * wq, map: ColumnMap { wp: wq, ow: g.ow } }
     }
 }
 
@@ -155,8 +302,7 @@ impl Operand for Im2ColT<'_> {
                 let plane = (img * g.c + self.grp * g.cg() + ci) * g.h * g.w;
                 let iy = oy as isize * sh - ph + ky * dh;
                 im2col_segment(
-                    self.x,
-                    plane,
+                    &self.x[plane..plane + g.h * g.w],
                     g,
                     iy,
                     kx * dw - pw,
@@ -245,26 +391,45 @@ pub(crate) fn conv2d_forward(
     accumulate: bool,
     epi: Option<ChannelEpilogue<'_>>,
 ) {
+    let part = [ConvPart::contiguous(x, g.c, g.h * g.w)];
+    conv2d_forward_parts(ConvInput { parts: &part }, wt, out, g, accumulate, epi);
+}
+
+/// [`conv2d_forward`] over the channel concatenation of the parts of `x` (their channel counts add up to
+/// `g.c`), reading each part in place.
+pub(crate) fn conv2d_forward_parts(
+    x: ConvInput<'_>,
+    wt: &[f32],
+    out: &mut [f32],
+    g: &ConvGeom,
+    accumulate: bool,
+    epi: Option<ChannelEpilogue<'_>>,
+) {
+    debug_assert_eq!(x.parts.iter().map(|p| p.c).sum::<usize>(), g.c);
     if g.is_depthwise() {
-        if !accumulate {
-            out.par_chunks_mut(1 << 16).for_each(|c| c.fill(0.0));
-        }
-        return depthwise_forward(x, wt, out, g, epi);
+        return depthwise_forward(x, wt, out, g, accumulate, epi);
     }
-    let (cg, og, kdim, ohw) = (g.cg(), g.og(), g.kdim(), g.ohw());
+    let (cg, og, kdim, ohw, hw) = (g.cg(), g.og(), g.kdim(), g.ohw(), g.h * g.w);
     let per_image_flops = 2 * g.o * ohw * kdim;
     for_each_image(out, g.o * ohw, g.n, per_image_flops, |img, out_img, threads| {
+        let planes = x.planes(img, hw);
         for grp in 0..g.p.groups {
             let a = Strided::lhs(wt, grp * og * kdim, kdim, 1);
             let c = &mut out_img[grp * og * ohw..(grp + 1) * og * ohw];
-            let base = (img * g.c + grp * cg) * g.h * g.w;
+            let planes = &planes[grp * cg..(grp + 1) * cg];
             let rows = epi.map(|f| move |i: usize, _: usize, row: &mut [f32]| f(grp * og + i, row));
             let rows = rows.as_ref().map(|r| r as Epilogue<'_>);
-            if g.is_pointwise() {
-                let b = Strided::rhs(x, base, g.h * g.w, 1);
+            // Pointwise convs pack B (a plain copy); every other conv reads shifted rows in place.
+            if !accumulate && !g.is_pointwise() {
+                let sr = ShiftedRows::new(planes, g, threads > 1);
+                let b = RowPtrs { rows: &sr.rows, n: sr.n };
+                gemm_rows(og, kdim, &a, &b, c, sr.map, threads, rows);
+                super::recycle(sr.buf);
+            } else if g.is_pointwise() {
+                let b = PlaneRows { planes };
                 gemm_ex(og, ohw, kdim, &a, &b, c, ohw, accumulate, threads, rows);
             } else {
-                let b = Im2Col { x, base, g: *g };
+                let b = Im2Col { planes, g: *g };
                 gemm_ex(og, ohw, kdim, &a, &b, c, ohw, accumulate, threads, rows);
             }
         }
@@ -451,45 +616,82 @@ fn valid_cols(ow: usize, s: isize, d: isize, w: isize) -> std::ops::Range<usize>
     lo..hi.max(lo)
 }
 
-fn depthwise_forward(x: &[f32], wt: &[f32], out: &mut [f32], g: &ConvGeom, epi: Option<ChannelEpilogue<'_>>) {
-    let mult = g.o / g.c;
-    let (hw, ohw, khw) = (g.h * g.w, g.ohw(), g.kh * g.kw);
+/// One output plane of a depthwise conv: `op += conv(xp, wk)` (`op` is `oh x ow`, `xp` one `h x w` input plane).
+#[inline(always)]
+fn depthwise_plane(xp: &[f32], wk: &[f32], op: &mut [f32], g: &ConvGeom) {
     let (sh, sw) = (g.p.stride[0] as isize, g.p.stride[1] as isize);
     let (ph, pw) = (g.p.padding[0] as isize, g.p.padding[1] as isize);
     let (dh, dw) = (g.p.dilation[0] as isize, g.p.dilation[1] as isize);
-    out.par_chunks_mut(ohw).enumerate().for_each(|(plane, op)| {
-        let (img, oc) = (plane / g.o, plane % g.o);
-        let xp = &x[(img * g.c + oc / mult) * hw..][..hw];
-        let wk = &wt[oc * khw..(oc + 1) * khw];
-        for oy in 0..g.oh {
-            let orow = &mut op[oy * g.ow..(oy + 1) * g.ow];
-            for ky in 0..g.kh {
-                let iy = oy as isize * sh - ph + ky as isize * dh;
-                if iy < 0 || iy >= g.h as isize {
+    for oy in 0..g.oh {
+        let orow = &mut op[oy * g.ow..(oy + 1) * g.ow];
+        for ky in 0..g.kh {
+            let iy = oy as isize * sh - ph + ky as isize * dh;
+            if iy < 0 || iy >= g.h as isize {
+                continue;
+            }
+            let xrow = &xp[iy as usize * g.w..(iy as usize + 1) * g.w];
+            for kx in 0..g.kw {
+                let wv = wk[ky * g.kw + kx];
+                let d = kx as isize * dw - pw;
+                let r = valid_cols(g.ow, sw, d, g.w as isize);
+                if r.is_empty() {
                     continue;
                 }
-                let xrow = &xp[iy as usize * g.w..(iy as usize + 1) * g.w];
-                for kx in 0..g.kw {
-                    let wv = wk[ky * g.kw + kx];
-                    let d = kx as isize * dw - pw;
-                    let r = valid_cols(g.ow, sw, d, g.w as isize);
-                    if r.is_empty() {
-                        continue;
+                if sw == 1 {
+                    let s0 = (r.start as isize + d) as usize;
+                    let len = r.len();
+                    for (o, &xv) in orow[r].iter_mut().zip(&xrow[s0..s0 + len]) {
+                        *o += wv * xv;
                     }
-                    if sw == 1 {
-                        let s0 = (r.start as isize + d) as usize;
-                        let len = r.len();
-                        for (o, &xv) in orow[r].iter_mut().zip(&xrow[s0..s0 + len]) {
-                            *o += wv * xv;
-                        }
-                    } else {
-                        for ox in r {
-                            orow[ox] += wv * xrow[(ox as isize * sw + d) as usize];
-                        }
+                } else {
+                    for ox in r {
+                        orow[ox] += wv * xrow[(ox as isize * sw + d) as usize];
                     }
                 }
             }
         }
+    }
+}
+
+/// [`depthwise_plane`] compiled for AVX2 (8-wide rows).
+///
+/// # Safety
+/// The CPU supports AVX2 and FMA.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn depthwise_plane_avx2(xp: &[f32], wk: &[f32], op: &mut [f32], g: &ConvGeom) {
+    depthwise_plane(xp, wk, op, g)
+}
+
+fn depthwise_forward(
+    x: ConvInput<'_>,
+    wt: &[f32],
+    out: &mut [f32],
+    g: &ConvGeom,
+    accumulate: bool,
+    epi: Option<ChannelEpilogue<'_>>,
+) {
+    let mult = g.o / g.c;
+    let (hw, ohw, khw) = (g.h * g.w, g.ohw(), g.kh * g.kw);
+    let planes: Vec<Vec<&[f32]>> = (0..g.n).map(|img| x.planes(img, hw)).collect();
+    #[cfg(target_arch = "x86_64")]
+    let avx2 = std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma");
+    out.par_chunks_mut(ohw).enumerate().for_each(|(plane, op)| {
+        let (img, oc) = (plane / g.o, plane % g.o);
+        let xp = planes[img][oc / mult];
+        let wk = &wt[oc * khw..(oc + 1) * khw];
+        if !accumulate {
+            op.fill(0.0);
+        }
+        #[cfg(target_arch = "x86_64")]
+        if avx2 {
+            // SAFETY: AVX2 and FMA were detected above.
+            unsafe { depthwise_plane_avx2(xp, wk, op, g) };
+        } else {
+            depthwise_plane(xp, wk, op, g);
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        depthwise_plane(xp, wk, op, g);
         if let Some(f) = epi {
             f(oc, op);
         }

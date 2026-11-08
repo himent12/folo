@@ -160,3 +160,134 @@ fn open_on_device_matches_cpu_predictions() {
     assert!(!w.detections.is_empty());
     assert_eq!(g.detections.len(), w.detections.len());
 }
+
+/// A deterministic noisy RGB image (smooth gradients plus hash noise, so the resize taps all matter).
+fn noisy_image(w: u32, h: u32, seed: u32) -> folo_data::Image {
+    let data = (0..w * h * 3)
+        .map(|i| {
+            let (p, c) = (i / 3, i % 3);
+            let (x, y) = (p % w, p / w);
+            let n = (i.wrapping_mul(2654435761).wrapping_add(seed) >> 24) & 63;
+            ((x * 7 + y * 3 + c * 50 + n) % 256) as u8
+        })
+        .collect();
+    folo_data::Image::from_raw(w, h, data).unwrap()
+}
+
+/// The GPU letterbox is bit-exact with folo-data's CPU letterbox + `÷255` (identity, upscale, downscale with
+/// and without the box prefilter, `rect` and square canvases, a batch of mixed sizes).
+#[test]
+fn letterbox_on_device_is_exact() {
+    use folo_data::{Letterbox, LetterboxOptions};
+    use folo_vision::predict::{letterbox_on_device, letterbox_on_host};
+    let dev = gpu!();
+    let square = LetterboxOptions::default();
+    let rect = LetterboxOptions { stride: Some(32), ..LetterboxOptions::default() };
+    // (image sizes, options, target size)
+    type Case<'a> = (&'a [(u32, u32)], &'a LetterboxOptions, u32);
+    let cases: [Case; 5] = [
+        (&[(640, 640)], &square, 640),
+        (&[(301, 211)], &rect, 640),
+        (&[(1920, 1080)], &rect, 640),
+        (&[(1001, 333)], &square, 320),
+        (&[(640, 480), (333, 777), (2000, 1500), (17, 9)], &square, 256),
+    ];
+    for (k, (sizes, opts, s)) in cases.iter().enumerate() {
+        let imgs: Vec<_> = sizes.iter().enumerate().map(|(i, &(w, h))| noisy_image(w, h, i as u32)).collect();
+        let boxes: Vec<Letterbox> =
+            imgs.iter().map(|i| Letterbox::compute(i.width, i.height, *s, *s, opts)).collect();
+        let want = letterbox_on_host(&imgs, &boxes).unwrap();
+        let got = letterbox_on_device(&imgs, &boxes, dev).unwrap().expect("the GPU has a letterbox kernel");
+        assert_eq!(got.device(), dev);
+        assert_eq!(got.dims(), want.dims(), "case {k}");
+        let (g, w) = (got.to_vec::<f32>().unwrap(), want.to_vec::<f32>().unwrap());
+        let bad = g.iter().zip(&w).position(|(a, b)| a.to_bits() != b.to_bits());
+        assert!(bad.is_none(), "case {k} ({sizes:?}): element {bad:?} differs");
+    }
+}
+
+/// Random head outputs with logits spread so that a good share of anchors pass `conf`.
+fn random_head(b: usize, a_side: usize, nc: usize, seed: u64) -> folo_vision::model::HeadOutput {
+    let rng = &mut Rng::seed(seed);
+    let m = FoloModel::new(ModelConfig::new("n", nc).unwrap()).unwrap();
+    let anchors = m.anchors(a_side * 8, a_side * 8);
+    let a = anchors.len();
+    folo_vision::model::HeadOutput {
+        box_raw: Tensor::randn([b, 64, a], 0.0, 2.0, rng),
+        cls_raw: Tensor::randn([b, nc, a], -2.5, 2.0, rng),
+        anchors,
+        reg_max: 16,
+        num_classes: nc,
+    }
+}
+
+/// The fused device decode keeps exactly the CPU's candidates (best class first-max, `> conf`), with the same
+/// scores and boxes up to float rounding; and `detections` on the GPU (one capped readback, a second one for
+/// images with more than `CANDIDATE_READBACK` candidates) gives the CPU's detections.
+#[test]
+fn device_candidates_and_detections_match_cpu() {
+    use folo_core::DetectDecode;
+    let dev = gpu!();
+    let _g = no_grad();
+    // 64x64 → 84 anchors; 320x320 → 2100 anchors (more candidates than one readback holds at low conf).
+    for (b, side, nc, conf) in [(2usize, 8usize, 5usize, 0.25f32), (3, 40, 80, 0.05), (1, 40, 80, 0.5)] {
+        let cpu = random_head(b, side, nc, (side * nc) as u64);
+        let a = cpu.num_anchors();
+        let gpu = folo_vision::model::HeadOutput {
+            box_raw: cpu.box_raw.to_device(dev).unwrap(),
+            cls_raw: cpu.cls_raw.to_device(dev).unwrap(),
+            ..cpu.clone()
+        };
+        let decoded = cpu.decode_images().unwrap();
+        let mut anchors = Vec::new();
+        for p in &cpu.anchors.points {
+            anchors.push(p[0]);
+        }
+        for p in &cpu.anchors.points {
+            anchors.push(p[1]);
+        }
+        anchors.extend_from_slice(&cpu.anchors.strides);
+        let at = Tensor::from_vec(anchors, [3, a]).unwrap().to_device(dev).unwrap();
+        let p = DetectDecode { reg_max: 16, num_classes: nc, conf };
+        let t = Tensor::detect_candidates(&gpu.box_raw, &gpu.cls_raw, &at, &p).unwrap().expect("GPU kernel");
+        let words = t.to_vec::<u32>().unwrap();
+        for (img, (boxes, scores)) in decoded.iter().enumerate() {
+            let row = &words[img * (1 + 7 * a)..(img + 1) * (1 + 7 * a)];
+            let mut got: Vec<&[u32; 7]> = row[1..1 + 7 * row[0] as usize].as_chunks::<7>().0.iter().collect();
+            got.sort_by_key(|r| r[0]);
+            let mut want = Vec::new();
+            for (i, s) in scores.chunks_exact(nc).enumerate() {
+                let (mut best, mut bs) = (0, s[0]);
+                for (c, &v) in s.iter().enumerate().skip(1) {
+                    if v > bs {
+                        (best, bs) = (c, v);
+                    }
+                }
+                if bs > conf {
+                    want.push((i, best, bs));
+                }
+            }
+            assert_eq!(got.len(), want.len(), "image {img}: candidate count (conf {conf})");
+            for (r, &(i, c, s)) in got.iter().zip(&want) {
+                assert_eq!((r[0] as usize, r[1] as usize), (i, c), "image {img}: anchor / class");
+                assert!((f32::from_bits(r[2]) - s).abs() <= 1e-6, "score {} vs {s}", f32::from_bits(r[2]));
+                let bx = &boxes[i];
+                for (g, w) in r[3..].iter().map(|&v| f32::from_bits(v)).zip([bx.x1, bx.y1, bx.x2, bx.y2]) {
+                    assert!((g - w).abs() <= 1e-3 * (1.0 + w.abs()), "anchor {i}: box {g} vs {w}");
+                }
+            }
+        }
+        let nms = NmsConfig { conf, iou: 0.6, ..NmsConfig::default() };
+        let want = cpu.detections(&nms).unwrap();
+        let got = gpu.detections(&nms).unwrap();
+        assert_eq!(got.len(), want.len());
+        for (g, w) in got.iter().zip(&want) {
+            assert_eq!(g.len(), w.len(), "detections per image");
+            for (x, y) in g.iter().zip(w) {
+                assert_eq!(x.class, y.class);
+                assert!((x.score - y.score).abs() <= 1e-6);
+                assert!((x.bbox.x1 - y.bbox.x1).abs() <= 1e-2 && (x.bbox.y2 - y.bbox.y2).abs() <= 1e-2);
+            }
+        }
+    }
+}

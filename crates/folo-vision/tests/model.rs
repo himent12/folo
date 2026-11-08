@@ -565,3 +565,51 @@ fn config_serde_and_seeds() {
     let mut d = model("n", 4);
     assert!(d.set_classes(vec!["a".into()]).is_err());
 }
+
+/// `HeadOutput::detections` on the CPU (anchors prefiltered by their largest logit, only candidates decoded)
+/// is bit for bit the full decode + `non_max_suppression`.
+#[test]
+fn cpu_detections_match_full_decode() {
+    use folo_vision::nms::{NmsConfig, non_max_suppression};
+    let rng = &mut folo_core::rng::Rng::seed(11);
+    let m = model("n", 7);
+    let anchors = m.anchors(96, 64);
+    let a = anchors.len();
+    for (b, nc, mean, cfg) in [
+        (2usize, 7usize, -2.5f32, NmsConfig::default()),
+        (1, 7, 0.0, NmsConfig { conf: 0.6, iou: 0.4, max_det: 9, ..NmsConfig::default() }),
+        (3, 7, -4.0, NmsConfig { conf: 0.05, classes: Some(vec![0, 3, 6]), ..NmsConfig::default() }),
+    ] {
+        let out = folo_vision::model::HeadOutput {
+            box_raw: Tensor::randn([b, 64, a], 0.0, 2.0, rng),
+            cls_raw: Tensor::randn([b, nc, a], mean, 2.0, rng),
+            anchors: anchors.clone(),
+            reg_max: 16,
+            num_classes: nc,
+        };
+        let want: Vec<_> = out
+            .decode_images()
+            .unwrap()
+            .iter()
+            .map(|(bx, sc)| non_max_suppression(bx, sc, nc, &cfg))
+            .collect();
+        let got = out.detections(&cfg).unwrap();
+        assert!(want.iter().any(|d| !d.is_empty()), "the case should keep some detections");
+        assert_eq!(got, want, "{cfg:?}");
+    }
+}
+
+#[test]
+fn letterbox_helpers_reject_mismatched_geometry() {
+    use folo_data::{Image, Letterbox, LetterboxOptions};
+    use folo_vision::predict::letterbox_on_host;
+    let opts = LetterboxOptions::default();
+    let imgs = [Image::new(40, 30, [1, 2, 3]), Image::new(20, 50, [4, 5, 6])];
+    let lb = |i: &Image, s: u32| Letterbox::compute(i.width, i.height, s, s, &opts);
+    let ok = [lb(&imgs[0], 64), lb(&imgs[1], 64)];
+    assert_eq!(letterbox_on_host(&imgs, &ok).unwrap().dims(), [2, 3, 64, 64]);
+    assert!(letterbox_on_host(&imgs, &ok[..1]).is_err(), "fewer geometries than images");
+    assert!(letterbox_on_host(&[], &[]).is_err(), "empty batch");
+    assert!(letterbox_on_host(&imgs, &[ok[1], ok[0]]).is_err(), "geometry of another image size");
+    assert!(letterbox_on_host(&imgs, &[ok[0], lb(&imgs[1], 32)]).is_err(), "different canvases");
+}

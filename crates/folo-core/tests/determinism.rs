@@ -79,3 +79,37 @@ fn training_gradients_are_bitwise_reproducible() {
         ]
     });
 }
+
+#[test]
+fn fused_inference_convs_are_bitwise_reproducible() {
+    use folo_core::{Conv2dParams, UnaryOp, no_grad};
+    let mut rng = Rng::seed(13);
+    let p = |s: usize, pad: usize, g: usize| Conv2dParams {
+        stride: [s; 2],
+        padding: [pad; 2],
+        dilation: [1; 2],
+        groups: g,
+    };
+    // Ragged spatial sizes, so GEMM tiles (which move with the pool size) cut output rows unevenly.
+    let x = Tensor::randn([1, 16, 41, 37], 0.0, 1.0, &mut rng);
+    let x2 = Tensor::randn([2, 8, 41, 37], 0.0, 1.0, &mut rng);
+    let w3 = Tensor::randn([24, 16, 3, 3], 0.0, 0.2, &mut rng);
+    let ws2 = Tensor::randn([24, 16, 3, 3], 0.0, 0.2, &mut rng);
+    let w1 = Tensor::randn([40, 24, 1, 1], 0.0, 0.2, &mut rng);
+    let wd = Tensor::randn([16, 1, 3, 3], 0.0, 0.2, &mut rng);
+    let b24 = Tensor::randn([24], 0.0, 0.2, &mut rng);
+    let b40 = Tensor::randn([40], 0.0, 0.2, &mut rng);
+    let wide = Tensor::randn([2, 24, 41, 37], 0.0, 1.0, &mut rng);
+    let silu = Some(UnaryOp::Silu);
+    assert_reproducible("fused convs", &|| {
+        let _g = no_grad();
+        // A conv over a contiguous part and a channel slice (strided across the batch), read in place.
+        let parts = [&x2, &wide.narrow(1, 4, 16).unwrap()];
+        vec![
+            x.conv2d_act(&w3, Some(&b24), &p(1, 1, 1), silu).unwrap(),
+            x.conv2d_act(&ws2, Some(&b24), &p(2, 1, 1), silu).unwrap(),
+            x.conv2d_act(&wd, None, &p(1, 1, 16), silu).unwrap(),
+            Tensor::conv2d_act_cat(&parts, &w1, Some(&b40), &p(1, 0, 1), silu).unwrap(),
+        ]
+    });
+}

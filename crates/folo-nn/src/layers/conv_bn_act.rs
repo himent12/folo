@@ -83,6 +83,36 @@ impl ConvBnAct {
         self.conv = Conv2d::from_tensors(*self.conv.config(), w, Some(b))?;
         Ok(())
     }
+
+    /// `forward(&Tensor::cat(xs, 1))`. When the conv runs as one fused kernel (fused block, or eval mode with
+    /// the BatchNorm folded on the fly, as in [`Forward::forward`]), it reads the parts in place through
+    /// [`Tensor::conv2d_act_cat`] and the concatenation is never written (on backends with that kernel).
+    pub fn forward_cat(&self, xs: &[&Tensor]) -> Result<Tensor> {
+        let first = *xs.first().ok_or_else(|| Error::Invalid("ConvBnAct::forward_cat: no inputs".into()))?;
+        let p = self.conv.config().params();
+        let act = self.act.unary_op();
+        match &self.bn {
+            None => Ok(Tensor::conv2d_act_cat(xs, &self.conv.weight, self.conv.bias.as_ref(), &p, act)?),
+            Some(bn) if !bn.is_training() && (!first.device().is_cpu() || !is_grad_enabled()) => {
+                let (w, b) = self.folded_eval(bn)?;
+                Ok(Tensor::conv2d_act_cat(xs, &w, Some(&b), &p, act)?)
+            }
+            Some(_) => self.forward(&Tensor::cat(xs, 1)?),
+        }
+    }
+
+    /// The eval-mode BatchNorm folded into the conv on the fly: `(W · k, β − mean · k (+ b · k))`, small
+    /// per-channel ops that stay differentiable.
+    fn folded_eval(&self, bn: &BatchNorm2d) -> Result<(Tensor, Tensor)> {
+        let (scale, shift) = bn.eval_scale_shift()?;
+        let o = scale.numel();
+        let w = self.conv.weight.mul(&scale.reshape([o, 1, 1, 1])?)?;
+        let b = match &self.conv.bias {
+            Some(cb) => cb.mul(&scale)?.add(&shift)?,
+            None => shift,
+        };
+        Ok((w, b))
+    }
 }
 
 impl Module for ConvBnAct {
@@ -110,13 +140,7 @@ impl Forward for ConvBnAct {
             None => Ok(x.conv2d_act(&self.conv.weight, self.conv.bias.as_ref(), &p, act)?),
             Some(bn) if bn.is_training() => bn.forward_act(&self.conv.forward(x)?, self.act),
             Some(bn) if !x.device().is_cpu() || !is_grad_enabled() => {
-                let (scale, shift) = bn.eval_scale_shift()?;
-                let o = scale.numel();
-                let w = self.conv.weight.mul(&scale.reshape([o, 1, 1, 1])?)?;
-                let b = match &self.conv.bias {
-                    Some(cb) => cb.mul(&scale)?.add(&shift)?,
-                    None => shift,
-                };
+                let (w, b) = self.folded_eval(bn)?;
                 Ok(x.conv2d_act(&w, Some(&b), &p, act)?)
             }
             Some(bn) => self.act.forward(&bn.forward(&self.conv.forward(x)?)?),

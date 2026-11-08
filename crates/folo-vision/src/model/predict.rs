@@ -1,14 +1,19 @@
 //! Decoding and the raw prediction path (docs/MODEL.md §6.4, §9.3): forward, decode (on the CPU with
 //! [`crate::decode`], or as tensor ops on the outputs' device), then NMS on the host.
 
-use folo_core::{Device, Tensor, no_grad};
+use folo_core::backend::DETECT_RECORD_WORDS;
+use folo_core::{DetectDecode, Device, Tensor, no_grad};
 use folo_nn::{Error, Module, Result};
 use rayon::prelude::*;
 
 use super::{FoloModel, HeadOutput};
 use crate::boxes::Xyxy;
-use crate::decode::decode_head;
-use crate::nms::{Detection, NmsConfig, non_max_suppression};
+use crate::decode::{decode_head, dist2bbox, sigmoid, softmax_expectation};
+use crate::nms::{Candidate, Detection, NmsConfig, nms_candidates, non_max_suppression};
+
+/// Records per image in the first download of [`HeadOutput::detections`]' device path: the counts and up to
+/// this many candidates of every image come back in one readback; an image with more takes a second one.
+pub const CANDIDATE_READBACK: usize = 1024;
 
 /// One image's decoded output, in network-input pixels (no letterbox inverse).
 #[derive(Debug, Clone, PartialEq)]
@@ -120,6 +125,156 @@ impl HeadOutput {
             .collect()
     }
 
+    /// The detections of every image (MODEL.md §6.4 decode, then §9.3 NMS with `nms`), in network-input
+    /// pixels, highest score first.
+    ///
+    /// On a device with the candidate kernel (the GPU) and without `multi_label`, the decode runs there in
+    /// one kernel ([`Tensor::detect_candidates`]) and only the anchors whose best class scores `> conf` are
+    /// downloaded: one readback of the counts plus up to [`CANDIDATE_READBACK`] records per image, a second
+    /// one only for an image with more. On the CPU (single-label) the anchors are prefiltered by their largest
+    /// logit and only the candidates are decoded, with the same functions as [`HeadOutput::decode_images`], so
+    /// the result is bit for bit that of the full decode. Everything else decodes every anchor and runs
+    /// [`non_max_suppression`]. All paths give the same detections up to the device's float rounding.
+    pub fn detections(&self, nms: &NmsConfig) -> Result<Vec<Vec<Detection>>> {
+        let _g = no_grad();
+        if !nms.multi_label {
+            let fast = if self.box_raw.device().is_cpu() {
+                self.detections_on_cpu(nms)?
+            } else {
+                self.detections_on_device(nms)?
+            };
+            if let Some(d) = fast {
+                return Ok(d);
+            }
+        }
+        let nc = self.num_classes;
+        Ok(self.decode_images()?.into_par_iter().map(|(b, s)| non_max_suppression(&b, &s, nc, nms)).collect())
+    }
+
+    /// The CPU half of [`HeadOutput::detections`]: straight from the channel-major outputs, a running maximum
+    /// of the class logits per anchor, then the full single-label extraction (sigmoid of every class, first
+    /// maximum, `> conf`) and the DFL decode only for anchors whose largest logit could pass. The sigmoid is
+    /// monotonic, so a skipped anchor has no score above `conf` (a NaN first score never passes either).
+    /// `None` for shapes the full path should report.
+    fn detections_on_cpu(&self, nms: &NmsConfig) -> Result<Option<Vec<Vec<Detection>>>> {
+        let (b, a, nc, rm) = (self.batch(), self.num_anchors(), self.num_classes, self.reg_max);
+        if self.box_raw.dims() != [b, 4 * rm, a] || self.cls_raw.dims() != [b, nc, a] || a == 0 || nc == 0 {
+            return Ok(None);
+        }
+        let (reg, cls) = (self.box_raw.contiguous()?, self.cls_raw.contiguous()?);
+        let (reg, cls) = (reg.to_vec::<f32>()?, cls.to_vec::<f32>()?);
+        let anchors = &self.anchors;
+        let image = |i: usize| -> Vec<Detection> {
+            let cl = &cls[i * nc * a..(i + 1) * nc * a];
+            let rg = &reg[i * 4 * rm * a..(i + 1) * 4 * rm * a];
+            let mut best = cl[..a].to_vec();
+            for row in cl.chunks_exact(a).skip(1) {
+                for (m, &v) in best.iter_mut().zip(row) {
+                    *m = m.max(v);
+                }
+            }
+            let mut cands = Vec::new();
+            let mut bins = vec![0f32; rm];
+            for (j, &m) in best.iter().enumerate() {
+                // A margin of a few ulp, so even a libm `exp` that is not monotonic cannot skip a candidate;
+                // the exact test follows.
+                let may_pass = sigmoid(m) * (1.0 + 1e-6) + 1e-30 > nms.conf;
+                if !may_pass {
+                    continue;
+                }
+                // Exactly the extraction of `non_max_suppression`.
+                let (mut bc, mut bs) = (0usize, sigmoid(cl[j]));
+                for c in 1..nc {
+                    let s = sigmoid(cl[c * a + j]);
+                    if s > bs {
+                        (bc, bs) = (c, s);
+                    }
+                }
+                let passes = bs > nms.conf; // false for NaN
+                if !passes {
+                    continue;
+                }
+                let mut d = [0f32; 4];
+                for (side, d) in d.iter_mut().enumerate() {
+                    for (k, v) in bins.iter_mut().enumerate() {
+                        *v = rg[(side * rm + k) * a + j];
+                    }
+                    *d = softmax_expectation(&bins);
+                }
+                let st = anchors.strides[j];
+                let bbox = dist2bbox(d, anchors.points[j]).scale(st, st);
+                cands.push(Candidate { anchor: j as u32, class: bc as u32, score: bs, bbox });
+            }
+            nms_candidates(&cands, nms)
+        };
+        Ok(Some((0..b).into_par_iter().map(image).collect()))
+    }
+
+    /// The anchors as `[3, A]` on `dev`: point x, point y (grid units), stride.
+    fn anchors_tensor(&self, dev: Device) -> Result<Tensor> {
+        let a = self.num_anchors();
+        let mut v = Vec::with_capacity(3 * a);
+        v.extend(self.anchors.points.iter().map(|p| p[0]));
+        v.extend(self.anchors.points.iter().map(|p| p[1]));
+        v.extend_from_slice(&self.anchors.strides);
+        Ok(Tensor::from_vec(v, [3, a])?.to_device(dev)?)
+    }
+
+    /// The device half of [`HeadOutput::detections`]; `None` when the device has no candidate kernel.
+    fn detections_on_device(&self, nms: &NmsConfig) -> Result<Option<Vec<Vec<Detection>>>> {
+        let (b, a, nc, rm) = (self.batch(), self.num_anchors(), self.num_classes, self.reg_max);
+        if self.box_raw.dims() != [b, 4 * rm, a] || self.cls_raw.dims() != [b, nc, a] || a == 0 || nc == 0 {
+            return Ok(None);
+        }
+        let dev = self.box_raw.device();
+        let p = DetectDecode { reg_max: rm, num_classes: nc, conf: nms.conf };
+        let anchors = self.anchors_tensor(dev)?;
+        let Some(cands) = Tensor::detect_candidates(&self.box_raw, &self.cls_raw, &anchors, &p)? else {
+            return Ok(None);
+        };
+        const W: usize = DETECT_RECORD_WORDS;
+        let cap = CANDIDATE_READBACK.min(a);
+        let head = cands.narrow(1, 0, 1 + W * cap)?.to_vec::<u32>()?;
+        let mut records: Vec<Vec<u32>> = Vec::with_capacity(b);
+        for (i, row) in head.chunks_exact(1 + W * cap).enumerate() {
+            let n = row[0] as usize;
+            if n > a {
+                return Err(Error::Invalid(format!("detect_candidates: {n} candidates for {a} anchors")));
+            }
+            records.push(if n <= cap {
+                row[1..1 + W * n].to_vec()
+            } else {
+                cands.narrow(0, i, 1)?.narrow(1, 1, W * n)?.to_vec::<u32>()?
+            });
+        }
+        Ok(Some(
+            records
+                .into_par_iter()
+                .map(|r| {
+                    let mut c: Vec<Candidate> = r
+                        .as_chunks::<W>()
+                        .0
+                        .iter()
+                        .map(|w| Candidate {
+                            anchor: w[0],
+                            class: w[1],
+                            score: f32::from_bits(w[2]),
+                            bbox: Xyxy::new(
+                                f32::from_bits(w[3]),
+                                f32::from_bits(w[4]),
+                                f32::from_bits(w[5]),
+                                f32::from_bits(w[6]),
+                            ),
+                        })
+                        .collect();
+                    // The kernel appends in arrival order; NMS tie-breaks by anchor.
+                    c.sort_unstable_by_key(|c| c.anchor);
+                    nms_candidates(&c, nms)
+                })
+                .collect(),
+        ))
+    }
+
     /// The decoded output `[B, A, 4 + nc]` (MODEL.md §6.4): per anchor `x1, y1, x2, y2` in input pixels, then
     /// the `nc` class scores. A CPU tensor without gradient.
     pub fn decode(&self) -> Result<Tensor> {
@@ -160,5 +315,19 @@ impl FoloModel {
             })
             .collect();
         Ok(RawPrediction { output, images })
+    }
+
+    /// The predictor's model step without the per-anchor outputs: an eval-mode forward under `no_grad`,
+    /// then [`HeadOutput::detections`] (decoded on the outputs' device where it can be, so a GPU prediction
+    /// downloads only the candidates). Boxes are in network-input pixels. Fails in training mode.
+    pub fn predict_detections(&self, x: &Tensor, nms: &NmsConfig) -> Result<Vec<Vec<Detection>>> {
+        if self.is_training() {
+            return Err(Error::Invalid(
+                "FoloModel::predict_detections: the model is in training mode; call eval() or fuse() first"
+                    .into(),
+            ));
+        }
+        let _g = no_grad();
+        self.forward(x)?.detections(nms)
     }
 }

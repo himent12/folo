@@ -416,3 +416,82 @@ fn fused_conv_act_matches_composite() {
         }
     }
 }
+
+#[test]
+fn conv2d_act_cat_matches_cat_then_conv() {
+    use folo_core::{UnaryOp, no_grad};
+    let p = |s: usize, pad: usize, g: usize| Conv2dParams {
+        stride: [s; 2],
+        padding: [pad; 2],
+        dilation: [1; 2],
+        groups: g,
+    };
+    // (batch, part channels, out channels, size, kernel, params)
+    type CatCase = (usize, &'static [usize], usize, usize, usize, Conv2dParams);
+    let cases: [CatCase; 5] = [
+        (1, &[8, 8, 4], 16, 12, 1, p(1, 0, 1)),
+        (2, &[16, 8], 24, 9, 3, p(1, 1, 1)),
+        (3, &[4, 4, 4, 4], 8, 10, 3, p(2, 1, 2)),
+        (1, &[32, 32], 32, 20, 1, p(1, 0, 1)),
+        (2, &[6, 10], 16, 7, 3, p(1, 1, 16)), // depthwise over the concatenation
+    ];
+    for (i, &(n, cs, o, hw, k, prm)) in cases.iter().enumerate() {
+        let _g = no_grad();
+        let c: usize = cs.iter().sum();
+        // The parts are channel slices of one wider tensor (strided views for batch > 1) and contiguous tensors.
+        let wide = randn(&[n, c + 3, hw, hw], 1100 + i as u64);
+        let mut parts = Vec::new();
+        let mut at = 0;
+        for (j, &ci) in cs.iter().enumerate() {
+            parts.push(if j % 2 == 0 {
+                wide.narrow(1, 3 + at, ci).unwrap()
+            } else {
+                randn(&[n, ci, hw, hw], 1200 + (i * 10 + j) as u64)
+            });
+            at += ci;
+        }
+        let w = randn(&[o, c / prm.groups, k, k], 1300 + i as u64).mul_scalar(0.2).unwrap();
+        let b = randn(&[o], 1400 + i as u64);
+        let refs: Vec<&Tensor> = parts.iter().collect();
+        let want =
+            Tensor::cat(&refs, 1).unwrap().conv2d_act(&w, Some(&b), &prm, Some(UnaryOp::Silu)).unwrap();
+        let got = Tensor::conv2d_act_cat(&refs, &w, Some(&b), &prm, Some(UnaryOp::Silu)).unwrap();
+        assert_eq!(got.dims(), want.dims());
+        assert_eq!(got.to_vec::<f32>().unwrap(), want.to_vec::<f32>().unwrap(), "case {i}");
+    }
+    // Recording: the composite path (cat, then conv), with gradients into every part.
+    let a = randn(&[1, 3, 5, 5], 1500).requires_grad_();
+    let bp = randn(&[1, 2, 5, 5], 1501).requires_grad_();
+    let w = randn(&[4, 5, 3, 3], 1502);
+    let y = Tensor::conv2d_act_cat(&[&a, &bp], &w, None, &p(1, 1, 1), None).unwrap();
+    let grads = y.square().unwrap().mean_all().unwrap().backward().unwrap();
+    assert_eq!(grads.get(&a).unwrap().dims(), a.dims());
+    assert_eq!(grads.get(&bp).unwrap().dims(), bp.dims());
+}
+
+#[test]
+fn conv2d_large_k_matches_naive() {
+    // K = 512 · 9 = 4608 with 1024 output channels needs several packed-A super-blocks.
+    let prm = Conv2dParams { stride: [1, 1], padding: [1, 1], dilation: [1, 1], groups: 1 };
+    let x = randn(&[1, 512, 4, 5], 1600);
+    let w = randn(&[1024, 512, 3, 3], 1601).mul_scalar(0.05).unwrap();
+    let y = x.conv2d_with(&w, None, &prm).unwrap();
+    assert_close(&y.to_vec::<f32>().unwrap(), &naive_conv(&x, &w, None, &prm), 1e-4, "large K");
+}
+
+#[test]
+fn conv2d_huge_stride_allocates_only_used_phases() {
+    // Stride 65536 on a 4x4 input: one output pixel; the shifted-rows copy must hold only the phase the 1x1
+    // kernel reads, not 65536² of them.
+    let prm = Conv2dParams { stride: [65536, 65536], padding: [0, 0], dilation: [1, 1], groups: 1 };
+    let x = randn(&[1, 2, 4, 4], 1700);
+    let w = randn(&[3, 2, 1, 1], 1701);
+    let y = x.conv2d_with(&w, None, &prm).unwrap();
+    assert_eq!(y.dims(), [1, 3, 1, 1]);
+    assert_close(&y.to_vec::<f32>().unwrap(), &naive_conv(&x, &w, None, &prm), 1e-5, "huge stride");
+    let prm = Conv2dParams { stride: [3, 5], padding: [2, 1], dilation: [2, 3], groups: 1 };
+    let x = randn(&[2, 3, 11, 13], 1702);
+    let w = randn(&[4, 3, 3, 2], 1703);
+    let y = x.conv2d_with(&w, None, &prm).unwrap();
+    assert_close(&y.to_vec::<f32>().unwrap(), &naive_conv(&x, &w, None, &prm), 1e-4, "stride 3x5 dilated");
+}

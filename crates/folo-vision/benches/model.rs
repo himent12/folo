@@ -2,7 +2,9 @@
 //!
 //! folo-n (80 classes) on the CPU in f32, eval mode under `no_grad`, random input:
 //! - forward at 640×640, batch 1 and 8, unfused (BatchNorm on running statistics) and fused (Conv+BN folded);
-//! - `predict_raw` (fused forward + decode + NMS at predict settings), batch 1.
+//! - `predict_raw` (fused forward + decode + NMS at predict settings), batch 1;
+//! - the predictor end to end (`Predictor::predict` on a decoded `u8` 640×640 image: letterbox, forward,
+//!   decode, NMS, boxes back in image pixels), batch 1, as Ultralytics' CPU `e2e` rows.
 //!
 //! Set `RAYON_NUM_THREADS` to pin the thread count (docs/BENCHMARKS.md compares against Ultralytics' best).
 
@@ -14,6 +16,7 @@ use folo_core::{Tensor, no_grad};
 use folo_nn::Module;
 use folo_vision::model::{FoloModel, ModelConfig};
 use folo_vision::nms::NmsConfig;
+use folo_vision::predict::{PredictConfig, Predictor};
 
 fn bench<T>(name: &str, iters: usize, mut f: impl FnMut() -> T) {
     for _ in 0..3 {
@@ -62,6 +65,15 @@ fn main() {
     bench("folo-n predict_raw 640 b1 (fused, decode+NMS)", 50, || {
         model.predict_raw(&x1, &cfg).expect("predict")
     });
+    let mut rng = Rng::seed(1);
+    let data = (0..640 * 640 * 3).map(|_| (rng.uniform(0.0, 256.0) as u32).min(255) as u8).collect();
+    let img = folo_data::Image::from_raw(640, 640, data).expect("image");
+    let pred = Predictor::new(
+        FoloModel::new(ModelConfig::new("n", 80).expect("config")).expect("model"),
+        PredictConfig::default(),
+    )
+    .expect("predictor");
+    bench("folo-n predictor 640 b1 (e2e, u8 image in)", 50, || pred.predict(&img).expect("predict"));
     layer_breakdown(&model, &x1);
 }
 

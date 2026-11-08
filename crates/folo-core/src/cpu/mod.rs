@@ -20,7 +20,7 @@ mod pool;
 mod pool_alloc;
 pub(crate) mod reduce;
 
-pub use elementwise::fast_exp;
+pub use elementwise::{SILU_MAX_REL_ERR, fast_exp};
 pub(crate) use pool_alloc::{alloc_filled, alloc_uninit, alloc_zeroed, recycle};
 pub use pool_alloc::{buffer_cache_bytes, clear_buffer_cache, set_buffer_cache_limit};
 
@@ -56,6 +56,21 @@ fn contiguous_f32<'a>(v: &View<'a>, op: &'static str) -> Result<Cow<'a, [f32]>> 
         Some(r) => Cow::Borrowed(&data[r]),
         None => Cow::Owned(elementwise::copy_strided(data, v.layout)),
     })
+}
+
+/// An `F32` NCHW view whose images each hold their planes contiguously (strides `[s_n, H·W, W, 1]`, ignoring
+/// size-1 dims): a contiguous tensor or a channel slice of one, as a conv input part read in place.
+fn conv_part<'a>(v: &View<'a>) -> Result<Option<conv::ConvPart<'a>>> {
+    let data = f32s(v, "conv2d")?;
+    let (l, d) = (v.layout, v.shape().dims());
+    let s = l.strides();
+    let (n, c, h, w) = (d[0], d[1], d[2], d[3]);
+    let ok = (w <= 1 || s[3] == 1) && (h <= 1 || s[2] == w) && (c <= 1 || s[1] == h * w);
+    if !ok || n * c * h * w == 0 {
+        return Ok(None);
+    }
+    let img_stride = if n <= 1 { c * h * w } else { s[0] };
+    Ok(Some(conv::ConvPart { data, offset: l.offset(), img_stride, c }))
 }
 
 /// The elements of a view of any dtype as a contiguous slice (borrowed when already contiguous).
@@ -297,8 +312,36 @@ impl Backend for CpuBackend {
         p: &Conv2dParams,
         act: Option<UnaryOp>,
     ) -> Result<Storage> {
-        let (xd, wd) = (contiguous_f32(&x, "conv2d")?, contiguous_f32(&w, "conv2d")?);
-        let (n, c, h, wi) = nchw(x.shape());
+        self.conv2d_act_cat(&[x], w, bias, p, act)
+    }
+
+    fn conv2d_act_cat(
+        &self,
+        xs: &[View<'_>],
+        w: View<'_>,
+        bias: Option<View<'_>>,
+        p: &Conv2dParams,
+        act: Option<UnaryOp>,
+    ) -> Result<Storage> {
+        // Parts whose images are each contiguous (a channel slice, for example) are read in place.
+        let owned = xs
+            .iter()
+            .map(|x| match conv_part(x)? {
+                Some(_) => Ok(None),
+                None => contiguous_f32(x, "conv2d").map(|d| Some(d.into_owned())),
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let (n, _, h, wi) = nchw(xs[0].shape());
+        let mut parts = Vec::with_capacity(xs.len());
+        for (x, o) in xs.iter().zip(&owned) {
+            let c = x.shape().dims()[1];
+            parts.push(match o {
+                Some(d) => conv::ConvPart::contiguous(d, c, h * wi),
+                None => conv_part(x)?.expect("checked above"),
+            });
+        }
+        let c = parts.iter().map(|p| p.c).sum();
+        let wd = contiguous_f32(&w, "conv2d")?;
         let (o, _, kh, kw) = nchw(w.shape());
         let [oh, ow] = p.output_hw(h, wi, kh, kw).expect("conv2d: output size validated by the caller");
         let g = conv::ConvGeom { n, c, h, w: wi, o, kh, kw, oh, ow, p: *p };
@@ -310,8 +353,8 @@ impl Backend for CpuBackend {
                 elementwise::bias_act_inplace(act, bd.as_ref().map_or(0.0, |b| b[ch]), v)
             };
             let fused = bd.is_some() || act.is_some();
-            conv::conv2d_forward(
-                &xd,
+            conv::conv2d_forward_parts(
+                conv::ConvInput { parts: &parts },
                 &wd,
                 &mut out,
                 &g,
