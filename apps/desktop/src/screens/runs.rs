@@ -301,10 +301,10 @@ impl FoloApp {
                 // Reuse the whole config; for out-of-memory failures, halve the batch.
                 let mut cfg = r.config.clone();
                 let oom = r.error.as_deref().is_some_and(|e| e.contains("out of memory"));
-                let note = (oom && cfg.batch > 1).then(|| {
+                let note = oom.then(|| crate::app::retry_batch(cfg.batch)).flatten().map(|to| {
                     let from = cfg.batch;
-                    cfg.batch = (cfg.batch / 2).max(1);
-                    format!("Batch lowered from {from} to {} so the run fits in GPU memory.", cfg.batch)
+                    cfg.batch = to;
+                    format!("Batch lowered from {from} to {to} so the run fits in GPU memory.")
                 });
                 actions.push(
                     self.button(

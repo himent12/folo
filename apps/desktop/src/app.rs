@@ -168,12 +168,36 @@ pub struct NewRunForm {
     pub scale: f32,
     /// Why some values differ from the run this form was prefilled from.
     pub note: Option<String>,
+    /// The run this form was prefilled from: settings the form doesn't show (weights, seed, colour and
+    /// translate jitter) carry over unchanged.
+    pub base: Option<TrainConfig>,
     pub submitting: bool,
     pub error: Option<ApiError>,
 }
 
 pub const ARCHS: [&str; 5] = ["folo-n", "folo-s", "folo-m", "folo-l", "folo-x"];
-pub const BATCHES: [u32; 5] = [8, 16, 32, 64, 128];
+pub const BATCHES: [u32; 7] = [2, 4, 8, 16, 32, 64, 128];
+
+/// The offered batch size closest to `v` without exceeding it (the smallest if `v` is below all).
+pub fn batch_index(v: u32) -> usize {
+    BATCHES.iter().rposition(|b| *b <= v).unwrap_or(0)
+}
+
+/// Batch for retrying an out-of-memory run: half, snapped to an offered size; None at the minimum.
+pub fn retry_batch(v: u32) -> Option<u32> {
+    (v > BATCHES[0]).then(|| BATCHES[batch_index(v / 2)])
+}
+
+/// Keep what the form can't edit from the run it was prefilled from.
+pub fn carry_over(base: Option<&TrainConfig>, mut c: TrainConfig) -> TrainConfig {
+    if let Some(b) = base {
+        c.weights = b.weights.clone();
+        c.seed = b.seed;
+        c.augment.hsv = b.augment.hsv;
+        c.augment.translate = b.augment.translate;
+    }
+    c
+}
 pub const IMGSZ: [u32; 5] = [320, 480, 640, 800, 1024];
 pub const DEVICES: [&str; 3] = ["auto", "gpu:0", "cpu"];
 pub const OPTIMIZERS: [&str; 3] = ["auto", "sgd", "adamw"];
@@ -876,7 +900,7 @@ impl FoloApp {
         if let Some(f) = self.new_run.as_mut() {
             f.arch = ARCHS.iter().position(|a| *a == config.arch).unwrap_or(f.arch);
             f.epochs = config.epochs as f32;
-            f.batch = idx(&BATCHES, config.batch).unwrap_or(f.batch);
+            f.batch = batch_index(config.batch);
             f.imgsz = idx(&IMGSZ, config.imgsz).unwrap_or(f.imgsz);
             f.device = DEVICES.iter().position(|d| *d == config.device).unwrap_or(0);
             f.optimizer = OPTIMIZERS.iter().position(|o| *o == config.optimizer).unwrap_or(0);
@@ -887,6 +911,7 @@ impl FoloApp {
             f.close_mosaic = config.augment.close_mosaic as f32;
             f.scale = config.augment.scale;
             f.note = note;
+            f.base = Some(config.clone());
             let input = f.name.clone();
             input.update(cx, |i, cx| i.set_text(name, cx));
         }
@@ -917,7 +942,7 @@ impl FoloApp {
             dataset: idx,
             arch: 1,
             epochs: 100.0,
-            batch: 1,
+            batch: batch_index(16),
             imgsz: 2,
             device: 0,
             optimizer: 0,
@@ -928,6 +953,7 @@ impl FoloApp {
             close_mosaic: 10.0,
             scale: 0.5,
             note: None,
+            base: None,
             submitting: false,
             error: None,
         });
@@ -948,27 +974,30 @@ impl FoloApp {
             return;
         }
         form.submitting = true;
-        let config = TrainConfig {
-            name,
-            dataset_id: ds.id.clone(),
-            arch: ARCHS[form.arch].into(),
-            epochs: form.epochs.round() as u32,
-            batch: BATCHES[form.batch],
-            imgsz: IMGSZ[form.imgsz],
-            device: DEVICES[form.device].into(),
-            optimizer: OPTIMIZERS[form.optimizer].into(),
-            lr0: form.lr0,
-            weights: None,
-            augment: Augment {
-                mosaic: form.mosaic,
-                mixup: form.mixup,
-                fliplr: form.fliplr,
-                close_mosaic: form.close_mosaic.round() as u32,
-                scale: form.scale,
-                ..Augment::default()
+        let config = carry_over(
+            form.base.as_ref(),
+            TrainConfig {
+                name,
+                dataset_id: ds.id.clone(),
+                arch: ARCHS[form.arch].into(),
+                epochs: form.epochs.round() as u32,
+                batch: BATCHES[form.batch],
+                imgsz: IMGSZ[form.imgsz],
+                device: DEVICES[form.device].into(),
+                optimizer: OPTIMIZERS[form.optimizer].into(),
+                lr0: form.lr0,
+                weights: None,
+                augment: Augment {
+                    mosaic: form.mosaic,
+                    mixup: form.mixup,
+                    fliplr: form.fliplr,
+                    close_mosaic: form.close_mosaic.round() as u32,
+                    scale: form.scale,
+                    ..Augment::default()
+                },
+                seed: 0,
             },
-            seed: 0,
-        };
+        );
         let _ = window;
         self.fetch(
             cx,
@@ -1968,5 +1997,61 @@ impl FoloApp {
             )
             .child(div().absolute().top_0().left_0().right_0().h(px(1.)).bg(alpha(t.bg_app, 0.0)))
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::{BATCHES, batch_index, carry_over, retry_batch};
+    use crate::api::{Augment, TrainConfig};
+
+    #[test]
+    fn oom_retries_halve_to_offered_sizes() {
+        assert_eq!(retry_batch(16), Some(8));
+        assert_eq!(retry_batch(8), Some(4));
+        assert_eq!(retry_batch(4), Some(2));
+        assert_eq!(retry_batch(2), None);
+        assert_eq!(retry_batch(48), Some(16));
+        // Whatever the retry picks, the form can show it exactly.
+        for b in [2, 4, 8, 16, 32, 64, 128] {
+            if let Some(to) = retry_batch(b) {
+                assert_eq!(BATCHES[batch_index(to)], to);
+            }
+        }
+        assert_eq!(BATCHES[batch_index(1)], 2);
+        assert_eq!(BATCHES[batch_index(500)], 128);
+    }
+
+    #[test]
+    fn hidden_settings_carry_over() {
+        let base = TrainConfig {
+            name: "a".into(),
+            dataset_id: "ds".into(),
+            arch: "folo-s".into(),
+            epochs: 50,
+            batch: 8,
+            imgsz: 640,
+            device: "auto".into(),
+            optimizer: "auto".into(),
+            lr0: 0.01,
+            weights: Some("runs/a/best.folo".into()),
+            augment: Augment { hsv: [0.1, 0.2, 0.3], translate: 0.25, ..Augment::default() },
+            seed: 42,
+        };
+        let edited = TrainConfig {
+            name: "a-2".into(),
+            weights: None,
+            seed: 0,
+            augment: Augment::default(),
+            ..base.clone()
+        };
+        let out = carry_over(Some(&base), edited.clone());
+        assert_eq!(out.weights, base.weights);
+        assert_eq!(out.seed, 42);
+        assert_eq!(out.augment.hsv, [0.1, 0.2, 0.3]);
+        assert_eq!(out.augment.translate, 0.25);
+        assert_eq!(out.name, "a-2");
+        // A fresh form keeps its own values.
+        assert_eq!(carry_over(None, edited.clone()), edited);
     }
 }
