@@ -1,0 +1,17 @@
+[package]
+name = "folo-vision"
+description = "FOLO detection models, losses, assigners, NMS and metrics"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+folo-core.workspace = true
+folo-nn.workspace = true
+folo-data.workspace = true

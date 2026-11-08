@@ -1,0 +1,5 @@
+[build]
+jobs = 8
+
+[alias]
+folo = "run --release -p folo-cli --"

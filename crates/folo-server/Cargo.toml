@@ -1,0 +1,15 @@
+[package]
+name = "folo-server"
+description = "FOLO Studio server: HTTP + SSE API for datasets, training runs and inference"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+folo-vision.workspace = true

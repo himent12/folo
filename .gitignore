@@ -1,0 +1,12 @@
+/target
+**/node_modules
+/web/dist
+*.folo
+*.pt
+*.onnx
+/runs
+/datasets
+.env
+*.key
+.DS_Store
+__pycache__/

@@ -1,0 +1,8 @@
+# FOLO
+> FOLO Only Looks Once: a from-scratch Rust vision framework (tensors, autograd, CPU + wgpu GPU kernels, a YOLO-style
+> detector, training/eval/export), a CLI (`folo`, every command supports --json), an HTTP API and the FOLO Studio web app.
+
+- [Agent rules](AGENTS.md)
+- [Architecture](docs/ARCHITECTURE.md)
+- [HTTP API](docs/API.md)
+- [Roadmap](docs/ROADMAP.md)

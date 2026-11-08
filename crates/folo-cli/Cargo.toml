@@ -1,0 +1,20 @@
+[package]
+name = "folo-cli"
+description = "The folo command-line tool: train, val, predict, export, serve, mcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+folo-vision.workspace = true
+folo-server.workspace = true
+
+[[bin]]
+name = "folo"
+path = "src/main.rs"
