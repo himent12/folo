@@ -25,7 +25,7 @@ everything asked of it: register a dataset, start and watch a run live, queue a 
 the PR curves and the confusion matrix, export, and run the Playground on the server, on WebGPU and on the wasm
 CPU, with identical boxes on all three. The MCP surface is the best part:
 - every error path tried (31) returned a stable code, a clear message and usually a useful hint;
-- 15 of the 16 DOGFOOD-1 fixes held (one was not re-tested);
+- most DOGFOOD-1 fixes held: F2 was not re-tested, F15 is still deferred, and F16 has one partial regression;
 - `tools/list` stayed at 45 KB.
 
 Nothing blocked a job outright. The worst problems were these:
@@ -122,7 +122,8 @@ or inconsistent. The IDs group findings by surface:
 - **Contrast:** the same model on WebGPU in the browser reports "Inference 12.7 ms, Postprocess 0.90 ms".
   BENCHMARKS.md puts the folo-n forward pass at about 3 ms, so a 0.6 to 0.9 ms "inference" means the timer stops
   when the GPU work is submitted, and the wait for the GPU lands in postprocess at readback.
-- **Expected:** inference includes the GPU work, and postprocess is decode plus NMS, as the wasm path reports.
+- **Expected:** inference includes the GPU work, as on WebGPU, where decode and readback finish before the
+  inference timer stops and postprocess is only CPU NMS and rescaling.
 - **Fix:** stop the inference timer after the output buffer is mapped, or add a `gpu_wait_ms` field. Then check
   whether CPU postprocess really costs 5 ms. Until then, anyone tuning NMS is chasing the wrong stage.
 
