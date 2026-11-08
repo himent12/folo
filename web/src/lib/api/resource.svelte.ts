@@ -28,13 +28,18 @@ export class Resource<T> {
       // Reactive reads inside the fetcher (before its first await) are tracked by this effect.
       const promise = fetcher(ctrl.signal);
       untrack(() => void this.#settle(promise, ctrl, false));
-      return () => ctrl.abort();
+      return () => {
+        // Invalidate whatever is in flight (including refreshes started since), so nothing lands after cleanup.
+        this.#seq++;
+        this.#ctrl?.abort();
+        ctrl.abort();
+      };
     });
     if (opts.poll) {
       const every = opts.poll;
       $effect(() => {
         const t = setInterval(() => {
-          if (!untrack(() => this.loading) && document.visibilityState === 'visible') void this.refresh();
+          if (!untrack(() => this.loading || this.refreshing) && document.visibilityState === 'visible') void this.refresh();
         }, every);
         return () => clearInterval(t);
       });

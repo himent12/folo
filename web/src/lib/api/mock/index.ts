@@ -290,14 +290,15 @@ export class MockApi implements Api {
     return this.#call(() => {
       const n = Math.max(10, Math.min(20000, Math.round(body.images)));
       const train = Math.round(n * 0.8);
+      const classes = (body.classes.length ? body.classes : ['circle', 'square', 'triangle']).slice(0, 6);
       const spec: MockDatasetSpec = {
         ...(specs.find((s) => s.id === 'ds_shapes') as MockDatasetSpec),
         id: `ds_${(hash(body.name + this.#nextId++) & 0xffff).toString(16).padStart(4, '0')}`,
         name: body.name,
         path: `D:/data/${body.name}`,
-        classes: body.classes.length ? body.classes.slice(0, 6) : ['circle', 'square', 'triangle'],
-        classWeights: body.classes.map(() => 1),
-        classShape: body.classes.map(() => 'square' as const),
+        classes,
+        classWeights: classes.map(() => 1),
+        classShape: classes.map(() => 'square' as const),
         splits: { train, val: n - train, test: 0 },
         width: body.imgsz,
         height: body.imgsz,
@@ -362,7 +363,7 @@ export class MockApi implements Api {
       const best = bestOf(p, Math.floor(progressAt(p, now).done));
       const ep = best ? epochAt(p, best.epoch) : null;
       const info = archInfo[p.config.arch];
-      const ds = specs.find((s) => s.id === p.config.dataset_id);
+      const ds = this.#datasets.find((s) => s.id === p.config.dataset_id);
       out.push({
         id: run.model_id,
         name: `${p.name}-${p.terminal?.status === 'stopped' ? 'last' : 'best'}`,
@@ -499,11 +500,13 @@ export class MockApi implements Api {
       const p = this.#profile(id);
       const done = Math.floor(progressAt(p, Date.now()).done);
       const e = Math.max(0, Math.min(done - 1, epoch ?? done - 1));
-      const ds = specs.find((s) => s.id === p.config.dataset_id) ?? this.#spec(p.config.dataset_id);
+      const ds = this.#spec(p.config.dataset_id);
       const quality = done > 0 ? epochAt(p, e).val.map50_95 : 0;
       const samples: Sample[] = [];
-      for (let i = 0; i < 16; i++) {
-        const index = ds.splits.train + i * 7;
+      // A fixed set of up to 16 validation images, spread evenly over the split.
+      const n = Math.min(16, ds.splits.val);
+      for (let i = 0; i < n; i++) {
+        const index = ds.splits.train + Math.floor((i * ds.splits.val) / n);
         const img = image(ds, index);
         samples.push({
           image_id: img.id,
@@ -542,7 +545,7 @@ export class MockApi implements Api {
       const now = Date.now();
       const cur = progressAt(p, now);
       const start = loopStart(p, now);
-      if (start !== lastStart) {
+      if (p.loop && p.startedAt !== null && start !== lastStart) {
         // The demo loop restarted: behave like a fresh run.
         lastStart = start;
         lastStep = -1;
@@ -551,13 +554,15 @@ export class MockApi implements Api {
         for (const l of startLogs(p, start, ds?.name ?? p.config.dataset_id, ds?.splits.train ?? 0)) h.log?.(l);
         h.reconnect?.();
       }
-      if (cur.status !== last.status) h.status?.({ status: cur.status, error: p.terminal?.error ?? null });
       if (cur.status === 'running') {
         const step = Math.floor(cur.done * p.stepsPerEpoch);
         if (step !== lastStep) {
           lastStep = step;
           h.step?.(stepAt(p, step));
         }
+      }
+      // Flush finished epochs before any terminal status, so the last one is never skipped.
+      if (cur.status !== 'queued') {
         const ep = Math.floor(cur.done);
         while (lastEpoch < ep) {
           const e = epochAt(p, lastEpoch);
@@ -566,6 +571,7 @@ export class MockApi implements Api {
           lastEpoch++;
         }
       }
+      if (cur.status !== last.status) h.status?.({ status: cur.status, error: p.terminal?.error ?? null });
       if (cur.status === 'stopped' && last.status !== 'stopped')
         h.log?.({ t: new Date(now).toISOString(), level: 'warn', message: `stopped by user at epoch ${Math.floor(cur.done) + 1}; last checkpoint kept` });
       last = cur;

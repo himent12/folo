@@ -82,6 +82,46 @@ describe('mock runs', () => {
     expect((await api.run('run_7d1e')).status).toBe('stopped');
   });
 
+  it('does not report reconnects for a queued run', () => {
+    const api = new MockApi('normal', 0);
+    let reconnects = 0;
+    const statuses: string[] = [];
+    const off = api.runEvents('run_q4n2', { reconnect: () => reconnects++, status: (s) => statuses.push(s.status) });
+    vi.advanceTimersByTime(1000);
+    off();
+    expect(reconnects).toBe(0);
+    expect(statuses).toEqual(['queued']);
+  });
+
+  it('emits the final epoch before the completed status', async () => {
+    const api = new MockApi('normal', 0);
+    const ds = await api.createSyntheticDataset({ name: 'tiny', images: 20, classes: ['a', 'b'], imgsz: 320, seed: 0 });
+    const cfg = (await api.run('run_31aa')).config;
+    const run = await api.createRun({ ...cfg, name: 'tiny-n', dataset_id: ds.id, epochs: 2 });
+    const events: string[] = [];
+    const off = api.runEvents(run.id, { epoch: (e) => events.push(`epoch ${e.epoch}`), status: (s) => events.push(s.status) });
+    vi.advanceTimersByTime(1500 + 2 * 300 * 1000 + 500);
+    off();
+    expect(events.filter((e) => e.startsWith('epoch'))).toEqual(['epoch 0', 'epoch 1']);
+    expect(events.indexOf('epoch 1')).toBeLessThan(events.indexOf('completed'));
+    const model = (await api.models()).find((m) => m.run_id === run.id);
+    expect(model?.classes).toEqual(['a', 'b']);
+  });
+
+  it('keeps synthetic classes, weights and samples consistent', async () => {
+    const api = new MockApi('normal', 0);
+    const ds = await api.createSyntheticDataset({ name: 'many', images: 10, classes: ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'], imgsz: 320, seed: 0 });
+    const full = await api.dataset(ds.id);
+    expect(full.classes).toHaveLength(6);
+    expect(full.stats!.class_counts).toHaveLength(6);
+    const cfg = (await api.run('run_31aa')).config;
+    const run = await api.createRun({ ...cfg, name: 'many-n', dataset_id: ds.id, epochs: 1 });
+    vi.advanceTimersByTime(1500 + 700 * 1000);
+    const s = await api.runSamples(run.id);
+    expect(s.samples.length).toBe(full.splits.val);
+    for (const x of s.samples) expect(Number(x.image_id.slice(4))).toBeLessThan(10);
+  });
+
   it('fails every call in the error scenario', async () => {
     const api = new MockApi('error', 0);
     await expect(api.runs()).rejects.toMatchObject({ code: 'server_unavailable' });

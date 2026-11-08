@@ -162,10 +162,11 @@ function bin(edges: number[], v: number): number {
   return edges.length - 2;
 }
 
-const statsCache = new Map<string, DatasetStats>();
+// Caches are keyed by the spec object itself: ids can repeat across mock instances with different specs.
+const statsCache = new WeakMap<MockDatasetSpec, DatasetStats>();
 
 export function stats(s: MockDatasetSpec): DatasetStats {
-  const hit = statsCache.get(s.id);
+  const hit = statsCache.get(s);
   if (hit) return hit;
   const class_counts = s.classes.map(() => 0);
   const size = new Array<number>(SIZE_EDGES.length - 1).fill(0);
@@ -191,7 +192,7 @@ export function stats(s: MockDatasetSpec): DatasetStats {
     box_size_hist: { edges: SIZE_EDGES, counts: size },
     boxes_per_image_hist: { edges: PER_IMAGE_EDGES, counts: per },
   };
-  statsCache.set(s.id, st);
+  statsCache.set(s, st);
   return st;
 }
 
@@ -209,12 +210,14 @@ export function toDataset(s: MockDatasetSpec, now: number, withStats: boolean): 
 }
 
 /** Index of images of `split` that contain `cls`, built lazily per (dataset, split, class). */
-const filterCache = new Map<string, number[]>();
+const filterCache = new WeakMap<MockDatasetSpec, Map<string, number[]>>();
 
 export function indices(s: MockDatasetSpec, split: Split | undefined, cls: number | undefined): number[] | null {
   if (split === undefined && cls === undefined) return null;
-  const key = `${s.id}|${split ?? ''}|${cls ?? ''}`;
-  const hit = filterCache.get(key);
+  const key = `${split ?? ''}|${cls ?? ''}`;
+  let byKey = filterCache.get(s);
+  if (!byKey) filterCache.set(s, (byKey = new Map()));
+  const hit = byKey.get(key);
   if (hit) return hit;
   const out: number[] = [];
   const lo = split === undefined || split === 'train' ? 0 : split === 'val' ? s.splits.train : s.splits.train + s.splits.val;
@@ -222,7 +225,7 @@ export function indices(s: MockDatasetSpec, split: Split | undefined, cls: numbe
   for (let i = lo; i < hi; i++) {
     if (cls === undefined || image(s, i).boxes.some((b) => b.class === cls)) out.push(i);
   }
-  filterCache.set(key, out);
+  byKey.set(key, out);
   return out;
 }
 

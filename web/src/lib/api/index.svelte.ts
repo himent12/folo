@@ -24,7 +24,15 @@ class Hub {
     return prefs.serverUrl || (typeof location === 'undefined' ? '' : location.origin);
   }
 
+  #attempt = 0;
+  #ctrl: AbortController | null = null;
+
+  /** (Re)connects. A newer call supersedes an older one still waiting on its health check. */
   async connect(): Promise<void> {
+    const attempt = ++this.#attempt;
+    this.#ctrl?.abort();
+    const ctrl = new AbortController();
+    this.#ctrl = ctrl;
     this.mode = 'connecting';
     if (forcedMock) {
       this.#useMock('forced');
@@ -32,13 +40,15 @@ class Hub {
     }
     const http = new HttpApi(prefs.serverUrl);
     try {
-      const h = await http.health(AbortSignal.timeout(2500));
+      const h = await http.health(AbortSignal.any([ctrl.signal, AbortSignal.timeout(2500)]));
+      if (attempt !== this.#attempt) return;
       this.api = http;
       this.version = h.version;
       this.reason = null;
       this.mode = 'live';
       this.epoch++;
     } catch {
+      if (attempt !== this.#attempt) return;
       this.#useMock('unreachable');
     }
   }
