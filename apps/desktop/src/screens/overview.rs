@@ -610,7 +610,8 @@ impl FoloApp {
                 window,
                 cx,
                 act(|this, w, cx| {
-                    // The label promises the picker: land on Datasets with it open.
+                    // The label promises the picker: land on Datasets with it open (the built-in demo
+                    // can't register folders, and says so there instead).
                     this.navigate(Route::Datasets, w, cx);
                     this.add_dataset_folder(cx);
                 }),
@@ -1015,7 +1016,8 @@ impl FoloApp {
                 window,
                 cx,
                 act(|this, w, cx| {
-                    // The label promises the picker: land on Datasets with it open.
+                    // The label promises the picker: land on Datasets with it open (the built-in demo
+                    // can't register folders, and says so there instead).
                     this.navigate(Route::Datasets, w, cx);
                     this.add_dataset_folder(cx);
                 }),

@@ -1151,7 +1151,7 @@ The caption (it wraps now) and the matrix ink (every nonzero cell picks its ink 
 
 Round 30 changes:
 - **Model page:**
-  - The PR chart marks each class's best-F1 operating point (its recall and precision, the "P @ best F1" column) instead of the curve ends. A footnote says so; isolating a class keeps only its dot.
+  - The PR chart marks each class's recall and precision at the best-F1 threshold (one threshold shared by all classes: the "P @ best F1" column) instead of the curve ends. A footnote says so; isolating a class keeps only its dot.
   - The matrix key reads "Error share 0% … N% max" (or "Errors 0 … N max" when unnormalised).
 - **Overview:**
   - The live run's KPI tiles share the row equally, with dividers, as on the run page.

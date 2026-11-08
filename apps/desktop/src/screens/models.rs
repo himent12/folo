@@ -642,7 +642,7 @@ impl FoloApp {
     ) -> AnyElement {
         let t = theme(cx);
         let iso = self.pr_isolated(ev, window);
-        // End each curve at its highest recall (with a dot) instead of a drop to zero.
+        // End each curve at its highest recall instead of a drop to zero.
         let curves: Vec<(u32, crate::charts::Points)> = ev
             .pr
             .iter()
@@ -786,7 +786,8 @@ impl FoloApp {
         chart.x_name = "recall";
         chart.axis_titles = Some(("Recall", "Precision"));
         chart.x_ticks = Some(4);
-        // Each class's operating point: recall and precision at its best-F1 threshold, the values
+        // Each class's operating point: recall and precision at the one threshold with the best mean
+        // F1 (shared by all classes, not each class's own optimum), the values
         // the legend's "P @ best F1" column and the KPI strip report.
         for c in &ev.per_class {
             let shown = match iso {
@@ -926,9 +927,9 @@ impl FoloApp {
                                     .flex_col()
                                     .gap(px(4.))
                                     .child(
-                                        text(ty::XS, t.text_tertiary)
-                                            .whitespace_normal()
-                                            .child("Dots mark each class's best-F1 point (its P and R)."),
+                                        text(ty::XS, t.text_tertiary).whitespace_normal().child(
+                                            "Dots mark each class's P and R at the best-F1 threshold.",
+                                        ),
                                     )
                                     .child(text(ty::XS, t.text_tertiary).whitespace_normal().child(pr_hint)),
                             ),
