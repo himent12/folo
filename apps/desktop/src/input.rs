@@ -579,12 +579,13 @@ impl Element for TextElement {
     ) {
         let focus_handle = self.input.read(cx).focus_handle.clone();
         window.handle_input(&focus_handle, ElementInputHandler::new(bounds, self.input.clone()), cx);
-        if let Some(selection) = prepaint.selection.take() {
-            window.paint_quad(selection)
-        }
         let line = prepaint.line.take().unwrap();
         let scroll_x = prepaint.scroll_x;
+        let selection = prepaint.selection.take();
         window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
+            if let Some(selection) = selection {
+                window.paint_quad(selection)
+            }
             line.paint(
                 point(bounds.origin.x - scroll_x + prepaint.text_dx, bounds.origin.y),
                 window.line_height(),

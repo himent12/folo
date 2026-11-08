@@ -98,7 +98,14 @@ impl FoloApp {
     /// until the dataset, its image list or a filter changes, so scrolling never rescans it.
     pub fn filtered_indices(&self, id: &str) -> Rc<Vec<usize>> {
         let Some(all) = self.store.images.get(id).and_then(|l| l.ready()) else { return Rc::new(Vec::new()) };
-        let key = (id.to_string(), self.ds_split, self.ds_class, self.ds_empty_only, all.len());
+        let key = (
+            id.to_string(),
+            self.ds_split,
+            self.ds_class,
+            self.ds_empty_only,
+            all.len(),
+            all.as_ptr() as usize,
+        );
         if let Some((k, v)) = self.ds_filter_cache.borrow().as_ref()
             && *k == key
         {
@@ -120,7 +127,7 @@ impl FoloApp {
     /// Boxes per class among a split's images (cached per dataset and split).
     pub fn split_class_counts(&self, id: &str, split: Split, classes: usize) -> Vec<u64> {
         let Some(all) = self.store.images.get(id).and_then(|l| l.ready()) else { return vec![0; classes] };
-        let key = (id.to_string(), split, all.len());
+        let key = (id.to_string(), split, all.len(), all.as_ptr() as usize, classes);
         if let Some((k, v)) = self.ds_split_counts.borrow().as_ref()
             && *k == key
         {
@@ -927,6 +934,13 @@ impl FoloApp {
             .id(SharedString::from(key.to_string()))
             .track_focus(&fh)
             .relative()
+            .on_action(cx.listener(move |this, _: &crate::app::Dismiss, _, cx| {
+                if this.hist_hover.remove(hover_key).is_some() {
+                    cx.notify();
+                } else {
+                    cx.propagate();
+                }
+            }))
             .on_key_down(cx.listener(move |this, ev: &KeyDownEvent, _, cx| {
                 let bin = this.hist_hover.get(hover_key).map(|f| ((f * n as f32) as usize).min(n - 1));
                 let next = match ev.keystroke.key.as_str() {

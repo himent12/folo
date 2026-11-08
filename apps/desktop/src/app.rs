@@ -119,7 +119,8 @@ impl Route {
 
 pub type Action = Rc<dyn Fn(&mut FoloApp, &mut Window, &mut Context<FoloApp>)>;
 
-pub type FilterCache = ((String, Option<Split>, Option<u32>, bool, usize), Rc<Vec<usize>>);
+/// Keyed by the image list's address too: a reload or a new source replaces the list.
+pub type FilterCache = ((String, Option<Split>, Option<u32>, bool, usize, usize), Rc<Vec<usize>>);
 
 pub fn act(f: impl Fn(&mut FoloApp, &mut Window, &mut Context<FoloApp>) + 'static) -> Action {
     Rc::new(f)
@@ -263,7 +264,7 @@ pub struct Drag {
 }
 
 /// Per-class box counts of one split, keyed by (dataset, split, image count).
-pub type SplitCounts = ((String, crate::api::Split, usize), Vec<u64>);
+pub type SplitCounts = ((String, crate::api::Split, usize, usize, usize), Vec<u64>);
 
 pub struct FoloApp {
     pub store: Store,
@@ -365,6 +366,8 @@ pub struct FoloApp {
     /// Highlighted option in the open select (committed with Enter).
     pub menu_hl: usize,
     pub menu_scroll: ScrollHandle,
+    /// Bounds of the open select's trigger, so a click on it toggles rather than counting as outside.
+    pub menu_trigger: Rc<std::cell::Cell<Option<gpui::Bounds<Pixels>>>>,
 
     pub drag: Option<Drag>,
     pub slider_bounds: Rc<RefCell<HashMap<&'static str, Bounds<Pixels>>>>,
@@ -460,6 +463,7 @@ impl FoloApp {
             menu_open: None,
             menu_hl: 0,
             menu_scroll: ScrollHandle::new(),
+            menu_trigger: Rc::new(std::cell::Cell::new(None)),
             drag: None,
             slider_bounds: Rc::new(RefCell::new(HashMap::new())),
             subscriptions: HashMap::new(),
@@ -2049,11 +2053,13 @@ impl Render for FoloApp {
                 }
             }))
             .on_action(cx.listener(|this, _: &FocusNext, w, cx| {
+                this.menu_open = None;
                 this.kb = true;
                 this.cycle_focus(true, w, cx);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &FocusPrev, w, cx| {
+                this.menu_open = None;
                 this.kb = true;
                 this.cycle_focus(false, w, cx);
                 cx.notify();
@@ -2221,6 +2227,8 @@ impl FoloApp {
         self.subscriptions.clear();
         self.subscribing.clear();
         self.store.clear_pending();
+        *self.ds_filter_cache.borrow_mut() = None;
+        *self.ds_split_counts.borrow_mut() = None;
         // Ids are only unique per server: cached pixels (and failures) belong to the old one. The
         // textures are freed after this update, when no window is mid-draw, so every window's atlas
         // is reached (this often runs inside a click handler).

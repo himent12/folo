@@ -236,6 +236,17 @@ impl FoloApp {
             .id(SharedString::from(key.to_string()))
             .track_focus(&fh)
             .relative()
+            // Esc is bound globally to Dismiss (go back), and actions run before key handlers: with
+            // a cursor showing, Esc clears it here instead; otherwise it passes on.
+            .on_action(cx.listener(move |this, _: &crate::app::Dismiss, _, cx| {
+                let cur = this.cursor_mut(cursor);
+                if cur.is_some() {
+                    *cur = None;
+                    cx.notify();
+                } else {
+                    cx.propagate();
+                }
+            }))
             .on_key_down(cx.listener(move |this, ev: &KeyDownEvent, _, cx| {
                 let big = if ev.keystroke.modifiers.shift { 10. } else { 1. };
                 let cur = this.cursor_mut(cursor);
@@ -633,6 +644,16 @@ impl FoloApp {
             .border_color(if open { t.accent_line } else { t.line_default })
             .cursor_pointer()
             .hover(|s| s.border_color(t.line_strong))
+            .when(open, |d| {
+                let cell = self.menu_trigger.clone();
+                d.child(
+                    gpui::canvas(move |b, _, _| cell.set(Some(b)), |_, _, _, _| {})
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full(),
+                )
+            })
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.menu_open = if this.menu_open == Some(key) { None } else { Some(key) };
                 this.menu_hl = selected;
@@ -694,8 +715,9 @@ impl FoloApp {
                     .left_0()
                     .right_0()
                     .occlude()
-                    .on_mouse_down_out(cx.listener(move |this, _, _, cx| {
-                        if this.menu_open == Some(key) {
+                    .on_mouse_down_out(cx.listener(move |this, ev: &gpui::MouseDownEvent, _, cx| {
+                        let on_trigger = this.menu_trigger.get().is_some_and(|b| b.contains(&ev.position));
+                        if this.menu_open == Some(key) && !on_trigger {
                             this.menu_open = None;
                             cx.notify();
                         }

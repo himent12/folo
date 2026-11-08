@@ -825,7 +825,12 @@ fn paint_line_chart(
         let r = Bounds::new(point(bx - px(4.), by - px(4.)), size(w + px(8.), h + px(8.)));
         spec.series
             .iter()
-            .map(|s| s.points.iter().filter(|&&(x, y)| r.contains(&point(sx(x), sy(y)))).count())
+            .map(|s| {
+                cached_envelope(&s.points, x0, x1, columns)
+                    .iter()
+                    .filter(|&&(x, y)| r.contains(&point(sx(x), sy(y))))
+                    .count()
+            })
             .sum::<usize>()
             + point_ys.iter().filter(|&&y| y > r.top() && y < r.bottom()).count() * 50
     };
