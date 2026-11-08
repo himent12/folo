@@ -26,20 +26,23 @@ behaviour, and keep the Rust types in `crates/folo-api` (used by the server, the
 
 ## Errors
 Non-2xx responses: `{ "error": { "code": "dataset_not_found", "message": "...", "hint": "..." | null } }`.
-`hint` is always present (`null` when there is nothing useful to add). Codes are stable:
+`hint` is always present (`null` when there is nothing useful to add). Codes are stable, and they are one
+vocabulary with the CLI and MCP (`folo_api::codes` lists every code with its status and the CLI's exit code; a
+test keeps the sources in line with it). Messages that wrap a driver report are cut to 500 characters:
 
 | status | code | when |
 |---|---|---|
 | 400 | `bad_request`, `invalid_path`, `invalid_query`, `invalid_body`, `invalid_config`, `unknown_format`, `invalid_dataset` | malformed input (`invalid_config`: a `TrainConfig` field is out of range, or the dataset has no classes / training images; the message names it. `invalid_dataset`: e.g. more than 4096 classes) |
 | 403 | `forbidden_origin` | a state-changing request from a disallowed browser origin (see Conventions) |
-| 404 | `dataset_not_found`, `image_not_found`, `model_not_found`, `run_not_found`, `path_not_found`, `epoch_not_available`, `route_not_found` | something named does not exist |
+| 404 | `dataset_not_found`, `image_not_found`, `model_not_found`, `run_not_found`, `path_not_found`, `device_not_found`, `epoch_not_available`, `route_not_found` | something named does not exist (`device_not_found`: a `gpu:<n>` this machine has no usable adapter for; the hint lists the devices it has). The `*_not_found` of listed things hint at the list that has them |
 | 405 | `method_not_allowed` | wrong HTTP method on a known path |
 | 409 | `run_active`, `run_not_active`, `run_not_resumable` | deleting (or resuming) a run that is still active; stopping one that is not; resuming one that completed |
 | 413 | `payload_too_large` | body over the limit (64 MiB for `/api/predict`, 2 MiB elsewhere) |
 | 415 | `unsupported_media_type` | JSON endpoint called without `Content-Type: application/json` |
 | 422 | `invalid_body`, `image_decode_failed`, `invalid_weights` | well-formed JSON with wrong types / missing required fields; an upload that is not an image; a `.folo` file that cannot be read |
 | 500 | `internal` | a bug or an IO failure |
-| 501 | `not_implemented` | the feature exists in the API but not yet in the engine (ONNX export, streaming inference, a `gpu:<n>` device this build cannot train or run models on; in mock mode, resuming runs) |
+| 501 | `not_implemented` | the feature exists in the API but not yet in the engine (ONNX export, streaming inference; in mock mode, resuming runs) |
+| 507 | `gpu_out_of_memory` | the GPU ran out of memory (inference; a training run fails with this message in `Run.error`); the hint says to lower `batch` or `imgsz` or use a smaller `arch` |
 
 ## System
 - `GET /api/health` → `{ "status": "ok", "version": "0.1.0", "api": "v1", "mock": false }`
@@ -62,7 +65,9 @@ Non-2xx responses: `{ "error": { "code": "dataset_not_found", "message": "...", 
   the latter; `folo dataset check` lists them all). Without `names` / `nc`, classes are named `class0..` up to the
   largest label index. Errors: `path_not_found`, `unknown_format` (nothing there looks like a dataset),
   `invalid_dataset` (malformed `data.yaml` / JSON, `nc` disagreeing with `names`, more than 4096 classes). The
-  request returns once the dataset is indexed (every image header is read, in parallel).
+  request returns once the dataset is indexed (every image header is read, in parallel). Registering a path that
+  is already registered (the same folder by its canonical path, whatever the spelling, with `format` `auto` or
+  the same format) returns the existing dataset (still `201`) instead of a duplicate; its `name` is kept.
 - `POST /api/datasets/synthetic` body `{ "name", "images": 1000, "classes": ["circle","square","triangle"], "imgsz": 640, "seed": 0 }`
   → `201 Dataset` with `stats`. Only `name` is required. Generates square JPEG images (folo-data's shapes
   generator, deterministic in `images`, `classes`, `imgsz` and `seed`) into `<data dir>/datasets/<name>` (the name
@@ -79,15 +84,19 @@ Non-2xx responses: `{ "error": { "code": "dataset_not_found", "message": "...", 
   relative to the dataset root (the registered folder, or the root folo-data resolves from it: a `data.yaml`'s
   `path:`, the folder above `annotations/`), absolute for images outside it. Image ids are the position in the dataset (train, then val, then test, each
   in path order): stable while the files do not change.
-- `GET /api/datasets/{id}/issues?kind=<kind>&offset=0&limit=100` →
-  `{ "total", "issues": [{ "kind", "severity": "error|warning|info", "file", "line": null | 1.., "message" }] }`:
-  what `folo dataset check` finds in the dataset (the same objects as its `--json` `issues`, without `fix`; kinds
-  and severities are listed in docs/CLI.md), in dataset order. Computed together with the stats and cached with
+- `GET /api/datasets/{id}/issues?kind=<kind>&severity=error|warning|info&offset=0&limit=100` →
+  `{ "total", "issues": [{ "kind", "severity": "error|warning|info", "file", "line": null | 1.., "message",
+  "fix"? }], "counts": { "error", "warning", "info", "by_kind": { kind: n } } }`:
+  what `folo dataset check --fix-dry-run` finds in the dataset (the same objects as its `--json` `issues`; `fix`
+  says what a cleanup would do and is absent for infos; kinds and severities are listed in docs/CLI.md), in
+  dataset order. `counts` covers every issue of the dataset whatever the filter (clients of older servers
+  without it read zeros). Computed together with the stats and cached with
   them (re-computed when the files change); in real mode image headers are read but images are not fully decoded
   (`folo dataset check` without `--headers-only` also catches truncated image data). `kind` keeps one kind
   (`broken_label`, `class_overflow`, `out_of_range_box`, `clipped_box`, `zero_size_box`, `duplicate_label`,
   `corrupt_image`, `missing_image`, `duplicate_image`, `empty_image`, `other`; anything else is `400
-  invalid_query`); `limit` defaults to 100 and is capped at 1000; `total` counts all matches before `offset` /
+  invalid_query`), `severity` one severity (anything else is `400 invalid_query`); `limit` defaults to 100 and is
+  capped at 1000; `total` counts all matches before `offset` /
   `limit`. `file` is relative to the dataset root like image files (and exactly as `folo dataset check --json` names it). Issues of images the loader skipped
   name files that `/images` does not list.
 - `GET /api/datasets/{id}/images/{image_id}` → original image bytes (`Content-Type` from the file); `?thumb=256`
@@ -146,7 +155,8 @@ Non-2xx responses: `{ "error": { "code": "dataset_not_found", "message": "...", 
   classes with ground truth.
 - `POST /api/models/{id}/export` body `{ "format": "folo-f16|onnx" }` → `{ "path", "bytes" }`. Real mode writes the
   fused EMA weights as f16 (as `folo export` does, docs/FORMAT.md) to `<data dir>/exports/<model name>-f16.folo`
-  (`-f16-2`, `-f16-3`, ... when taken; never overwriting). `onnx` answers `501 not_implemented`.
+  (`-f16-2`, `-f16-3`, ... when taken; never overwriting). `path` uses `/` separators. `onnx` answers `501
+  not_implemented`.
 - `GET /api/models/{id}/weights` (optional `?format=f16`) → the model's `.folo` file (docs/FORMAT.md), for loading
   it elsewhere, e.g. into the browser detector (docs/WASM.md). Without `format` it is the file as stored: a run model
   is its full training checkpoint (`weights/best.folo` / `last.folo`, with EMA and optimizer state); `format=f16` is the
@@ -176,9 +186,9 @@ Non-2xx responses: `{ "error": { "code": "dataset_not_found", "message": "...", 
 - `GET /api/runs` → `{ "runs": [Run] }` (newest first)
 - `POST /api/runs` body `TrainConfig` → `201 Run` (status `queued`, then `running`). Errors: `dataset_not_found`,
   `model_not_found` (bad `weights`), `invalid_config` (checked before anything is queued: the limits below, the
-  trainer's (real mode: `imgsz >= 64`), a dataset without classes or training images), `not_implemented` (a
-  `gpu:<n>` device the engine cannot train on), `503 shutting_down` (real mode: the server is shutting down; also
-  for resuming). Runs train one at a time, first come first served; the others wait
+  trainer's (real mode: `imgsz >= 64`), a dataset without classes or training images), `404 device_not_found` (a
+  `gpu:<n>` this machine has no usable adapter for), `503 shutting_down` (real mode: the server is shutting down;
+  also for resuming). Runs train one at a time, first come first served; the others wait
   `queued` (their log says how many runs are ahead).
   With `"resume_run_id": "<run id>"` in the body, the request **resumes** that `stopped` or `failed` run instead →
   `200 Run` (same id, status `queued` again): from its `weights/last.folo` with the full checkpoint state
@@ -318,9 +328,9 @@ Non-2xx responses: `{ "error": { "code": "dataset_not_found", "message": "...", 
 - `POST /api/val` body `{ "model_id", "dataset_id", "split": "val", "imgsz": null, "conf": 0.001, "iou": 0.7 }` →
   `{ "model_id", "dataset_id", "split", "imgsz", "images", "val": Epoch.val, "timing": { "total_s", "per_image_ms" } }`.
   Only `model_id` and `dataset_id` are required; `imgsz: null` uses the model's size. Errors: `model_not_found`,
-  `dataset_not_found`, `invalid_body` (an empty split, `conf` / `iou` outside `0..=1`, an `imgsz` that is not a
-  multiple of 32 in `32..=4096`), `invalid_dataset` (real mode: the dataset's classes are not the model's, in the
-  same order). Real mode runs folo-vision's evaluator (docs/METRICS.md) on the server's `--device` with the
+  `dataset_not_found`, `invalid_body` (`conf` / `iou` outside `0..=1`, an `imgsz` that is not a multiple of 32
+  in `32..=4096`), `invalid_dataset` (an empty split, as `folo val` reports it; real mode: the dataset's classes
+  are not the model's, in the same order). Real mode runs folo-vision's evaluator (docs/METRICS.md) on the server's `--device` with the
   request's `conf` / `iou` (the other NMS settings as in validation during training: multi-label, `max_det` 300), so
   the defaults on the validation split reproduce `/eval`'s per-class numbers; it is computed on every request (not
   cached). `timing.total_s` includes loading the model and the dataset; `per_image_ms` is the evaluation loop

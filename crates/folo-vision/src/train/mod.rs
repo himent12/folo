@@ -161,11 +161,18 @@ pub fn can_place(device: Device) -> Result<()> {
     if device.is_cpu() || folo_core::backend::backend(device).is_ok() {
         Ok(())
     } else {
-        Err(Error::Unsupported(format!(
-            "device {device} has no registered backend in this build (GPU support is folo-gpu's `init()`); use \
-             --device cpu"
-        )))
+        Err(device_not_found(device))
     }
+}
+
+/// `device` cannot be used: no GPU backend is registered for it (no such adapter, or no usable GPU at all).
+pub(crate) fn device_not_found(device: Device) -> Error {
+    let have: Vec<String> = folo_core::backend::available_devices().iter().map(|d| d.to_string()).collect();
+    let why = if have.len() > 1 { "this machine has no such GPU" } else { "no usable GPU adapter was found" };
+    Error::DeviceNotFound(format!(
+        "device {device} is not available: {why}; FOLO can use {}",
+        have.join(", ")
+    ))
 }
 
 /// The training loop of docs/MODEL.md §8. See the module docs.
@@ -533,8 +540,14 @@ impl Trainer {
         match &r {
             Ok(s) => self.emitter.status(s.status, None),
             Err(e) => {
-                self.emitter.log(LogLevel::Error, e.to_string());
-                self.emitter.status(RunStatus::Failed, Some(e.to_string()));
+                // The status carries the (capped) message; the log line only names the failure, so a driver
+                // report is not repeated in every record.
+                let summary = e.summary();
+                self.emitter.log(
+                    LogLevel::Error,
+                    format!("run failed ({}): {}", e.code(), folo_api::codes::cap(&summary, 120)),
+                );
+                self.emitter.status(RunStatus::Failed, Some(summary));
             }
         }
         r

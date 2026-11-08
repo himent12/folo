@@ -22,6 +22,30 @@ pub struct HostInfo {
     pub memory_available_bytes: u64,
 }
 
+/// The devices FOLO can run on, for error hints: `cpu, gpu:0 (NVIDIA GeForce RTX 4080 SUPER, vulkan)`. GPUs
+/// count once their backend is registered (folo-gpu's `init()`, which `auto` and `gpu:<n>` devices trigger).
+pub fn available_devices() -> String {
+    let gpus = crate::engine::gpus();
+    folo_core::backend::available_devices()
+        .into_iter()
+        .map(|d| match d {
+            folo_core::Device::Gpu(i) => match gpus.iter().find(|g| g.ordinal as usize == i) {
+                Some(g) => format!(
+                    "{d} ({}, {})",
+                    g.name,
+                    serde_json::to_value(g.backend)
+                        .ok()
+                        .and_then(|v| v.as_str().map(str::to_string))
+                        .unwrap_or_default()
+                ),
+                None => d.to_string(),
+            },
+            d => d.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// One-shot host information.
 pub fn host_info() -> HostInfo {
     let sys = System::new_with_specifics(

@@ -84,10 +84,21 @@ fn train_val_predict_export_with_json() {
     }
     let best = run.join("weights/best.folo");
 
-    // resume a finished run: nothing left to do, but the checkpoint and the dataset are found again.
-    let (code, lines, stderr) = folo(&["train", "--json", "--resume", s(&run.join("weights/last.folo"))]);
-    assert_eq!(code, 0, "{stderr}");
-    assert_eq!(lines.last().unwrap()["epochs_completed"], 2);
+    // JSON paths use `/` and floats carry no f32 -> f64 noise.
+    assert!(!done["run_dir"].as_str().unwrap().contains('\\'), "{done}");
+    assert!(!done["weights"]["best"].as_str().unwrap().contains('\\'), "{done}");
+    for l in &lines {
+        assert_no_f32_noise(l);
+    }
+
+    // resume a finished run: refused like MCP's, with the command that trains further.
+    let (code, lines, _) = folo(&["train", "--json", "--resume", s(&run.join("weights/last.folo"))]);
+    assert_eq!(code, 1);
+    let e = &lines.last().unwrap()["error"];
+    assert_eq!(e["code"], "run_not_resumable");
+    assert!(
+        e["hint"].as_str().unwrap().contains("--model") && e["hint"].as_str().unwrap().contains("best.folo")
+    );
 
     // val: one object with the metrics.
     let (code, lines, stderr) =
@@ -153,6 +164,21 @@ fn train_val_predict_export_with_json() {
     assert!(lines[0]["bytes"].as_u64().unwrap() < std::fs::metadata(&best).unwrap().len() / 4);
     let (code, _, stderr) = folo(&["predict", "--json", "--model", s(&out), s(&images.join("000008.png"))]);
     assert_eq!(code, 0, "{stderr}");
+    // Without --output the default name is never overwritten (as MCP `export`); an existing --output is refused.
+    let (code, first, stderr) = folo(&["export", "--json", "--model", s(&best)]);
+    assert_eq!(code, 0, "{stderr}");
+    let (code, second, stderr) = folo(&["export", "--json", "--model", s(&best)]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(first[0]["path"].as_str().unwrap().ends_with("weights/best-f16.folo"), "{}", first[0]);
+    assert!(second[0]["path"].as_str().unwrap().ends_with("weights/best-f16-2.folo"), "{}", second[0]);
+    let (code, lines, _) = folo(&["export", "--json", "--model", s(&best), "--output", s(&out)]);
+    assert_eq!((code, lines[0]["error"]["code"].as_str()), (1, Some("output_exists")));
+    // Something that is not a weights file says so.
+    let (code, lines, _) = folo(&["export", "--json", "--model", s(&data.join("data.yaml"))]);
+    assert_eq!(code, 1);
+    let e = &lines[0]["error"];
+    assert_eq!(e["code"], "invalid_weights");
+    assert!(e["message"].as_str().unwrap().contains("is not a .folo weights file"), "{e}");
     let (code, lines, _) = folo(&["export", "--json", "--model", s(&best), "--format", "onnx"]);
     assert_eq!(code, 4);
     assert_eq!(lines[0]["error"]["code"], "not_implemented");
@@ -197,6 +223,10 @@ fn train_val_predict_export_with_json() {
     assert_eq!(saved.len(), 2);
     assert_ne!(saved[0], saved[1]);
 
+    // a negative number reaches the range check (not a clap parse error).
+    let (code, lines, _) =
+        folo(&["train", "--json", "--data", s(&data), "--lr0", "-1", "--project", s(&project)]);
+    assert_eq!((code, lines.last().unwrap()["error"]["code"].as_str()), (2, Some("invalid_config")));
     // a bad config is a usage error and leaves no run folder behind.
     let (code, lines, _) = folo(&[
         "train",
@@ -213,5 +243,116 @@ fn train_val_predict_export_with_json() {
     assert_eq!(code, 2);
     assert_eq!(lines.last().unwrap()["error"]["code"], "invalid_config");
     assert!(!project.join("bad").exists());
+    // a GPU this machine does not have: device_not_found naming what it has, and no run folder either.
+    let (code, lines, _) = folo(&[
+        "train",
+        "--json",
+        "--data",
+        s(&data),
+        "--imgsz",
+        "64",
+        "--device",
+        "gpu:7",
+        "--project",
+        s(&project),
+        "--name",
+        "nogpu",
+    ]);
+    assert_eq!(code, 3);
+    let e = &lines.last().unwrap()["error"];
+    assert_eq!(e["code"], "device_not_found");
+    assert!(e["hint"].as_str().unwrap().contains("cpu"), "{e}");
+    assert!(!project.join("nogpu").exists());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Every float that is exactly an f32 prints as the f32 does (no `0.009999999776482582`).
+fn assert_no_f32_noise(v: &Value) {
+    match v {
+        Value::Number(n) if n.is_f64() => {
+            let x = n.as_f64().unwrap();
+            if (x as f32) as f64 == x {
+                assert_eq!(x.to_string(), (x as f32).to_string(), "f32 noise in {v}");
+            }
+        }
+        Value::Array(a) => a.iter().for_each(assert_no_f32_noise),
+        Value::Object(o) => o.values().for_each(assert_no_f32_noise),
+        _ => {}
+    }
+}
+
+/// `folo stop` ends a running `folo train` after its current batch (status `stopped`); `--resume` then refuses a
+/// changed setting, and `--json-events epoch` leaves the step records out.
+#[test]
+fn stop_resume_and_epoch_only_records() {
+    use std::io::BufRead;
+    let root = std::env::temp_dir().join(format!("folo-cli-stop-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let data = root.join("shapes");
+    let cfg = SyntheticConfig {
+        images: 16,
+        classes: vec!["circle".into(), "square".into()],
+        imgsz: 64,
+        vary_aspect: false,
+        val_fraction: 0.25,
+        ..SyntheticConfig::default()
+    };
+    write_yolo(&cfg, &data, ImageFormat::Png).unwrap();
+    let project = root.join("runs");
+    let run = project.join("long");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_folo"))
+        .args(["train", "--json", "--device", "cpu", "--data", s(&data), "--imgsz", "64", "--batch", "4"])
+        .args(["--epochs", "6", "--workers", "1", "--project", s(&project), "--name", "long"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let stdout = std::io::BufReader::new(child.stdout.take().unwrap());
+    let mut records = Vec::new();
+    let mut asked = false;
+    for line in stdout.lines() {
+        let v: Value = serde_json::from_str(&line.unwrap()).unwrap();
+        if v["event"] == "epoch" && !asked {
+            let (code, lines, stderr) = folo(&["stop", "--json", s(&run)]);
+            assert_eq!(code, 0, "{stderr}");
+            assert_eq!(lines[0]["event"], "stop_requested");
+            asked = true;
+        }
+        records.push(v);
+    }
+    assert!(child.wait().unwrap().success());
+    let done = records.last().unwrap();
+    assert_eq!(done["event"], "done");
+    assert_eq!(done["status"], "stopped", "{done}");
+    let finished = done["epochs_completed"].as_u64().unwrap();
+    assert!((1..6).contains(&finished), "{done}");
+    assert!(!run.join("stop").exists(), "the stop file is consumed");
+    // folo stop on something that is not a run.
+    let (code, lines, _) = folo(&["stop", "--json", s(&data)]);
+    assert_eq!((code, lines[0]["error"]["code"].as_str()), (3, Some("run_not_found")));
+
+    // A changed setting is refused, naming the flag; a repeated one is fine.
+    let last = run.join("weights/last.folo");
+    let (code, lines, _) = folo(&["train", "--json", "--resume", s(&last), "--epochs", "9"]);
+    assert_eq!(code, 2);
+    let e = &lines.last().unwrap()["error"];
+    assert_eq!(e["code"], "invalid_config");
+    assert!(e["message"].as_str().unwrap().contains("--epochs 9 differs from the run's 6"), "{e}");
+    let (code, lines, stderr) = folo(&[
+        "train",
+        "--json",
+        "--resume",
+        s(&last),
+        "--epochs",
+        "6",
+        "--batch",
+        "4",
+        "--json-events",
+        "epoch",
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(lines.iter().all(|l| l["event"] != "step"), "no step records");
+    assert_eq!(lines.iter().filter(|l| l["event"] == "epoch").count() as u64, 6 - finished);
+    assert_eq!(lines.last().unwrap()["status"], "completed");
     let _ = std::fs::remove_dir_all(&root);
 }

@@ -212,10 +212,11 @@ fn tmp_dir(name: &str) -> std::path::PathBuf {
     d
 }
 
-const ALL_TOOLS: [&str; 16] = [
+const ALL_TOOLS: [&str; 17] = [
     "folo_info",
     "list_datasets",
     "get_dataset",
+    "list_dataset_issues",
     "list_dataset_images",
     "register_dataset",
     "create_synthetic_dataset",
@@ -236,9 +237,18 @@ fn check_tools(c: &mut Client, expected: &[&str]) -> std::collections::HashMap<S
     let tools = c.result("tools/list", json!({}))["tools"].as_array().unwrap().clone();
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert_eq!(names, expected);
+    // Shared types are compacted (docs/MCP.md "Schemas"): the whole listing stays small.
+    let bytes = serde_json::to_vec(&tools).unwrap().len();
+    assert!(bytes < 48 * 1024, "tools/list is {bytes} bytes");
     let mut out = std::collections::HashMap::new();
     for t in &tools {
         assert!(t["description"].as_str().unwrap().len() > 20);
+        assert_eq!(
+            t["inputSchema"]["additionalProperties"], false,
+            "{} rejects unknown arguments",
+            t["name"]
+        );
+        assert!(!t.to_string().contains("0.009999999776482582"), "f32 noise in {}", t["name"]);
         for key in ["inputSchema", "outputSchema"] {
             assert_eq!(t[key]["type"], "object", "{} {key}", t["name"]);
             jsonschema::validator_for(&t[key]).unwrap_or_else(|e| panic!("{} {key}: {e}", t["name"]));
@@ -360,6 +370,14 @@ fn full_flow(c: &mut Client, data_dir: &std::path::Path) {
     c.ok("create_synthetic_dataset", json!({ "name": "tiny2", "images": 5, "imgsz": 64 }));
     assert!(c.notes.iter().all(|n| n["method"] != "notifications/progress"));
 
+    // Registering a folder again (any spelling of its path) returns the same dataset.
+    let folder = data_dir.join("reg");
+    yolo_files(&folder);
+    let first = checked(c, &schemas, "register_dataset", json!({ "path": folder, "name": "reg" }));
+    let again = c.call("register_dataset", json!({ "path": folder.join("..").join("reg"), "name": "reg2" }));
+    assert_eq!(again["structuredContent"]["id"], first["id"], "{again}");
+    assert!(again["content"][0]["text"].as_str().unwrap().contains("already registered"), "{again}");
+
     let detail = checked(c, &schemas, "get_dataset", json!({ "dataset_id": ds_id }));
     assert!(detail["stats"]["class_counts"].is_array());
     assert_eq!(detail["issues"], json!([]));
@@ -367,6 +385,49 @@ fn full_flow(c: &mut Client, data_dir: &std::path::Path) {
     let cams = checked(c, &schemas, "get_dataset", json!({ "dataset_id": "ds_7c2f" }));
     assert!(cams["issues_total"].as_u64().unwrap() >= 1, "{cams}");
     assert!(cams["issues"][0]["kind"].is_string());
+    // Errors first, then warnings; infos (empty images) are only counted.
+    let counts = &cams["issue_counts"];
+    assert_eq!(counts["error"], 3, "{cams}");
+    assert_eq!(counts["by_kind"].get("empty_image").cloned().unwrap_or(json!(0)), counts["info"], "{counts}");
+    let issues = cams["issues"].as_array().unwrap();
+    let ranks: Vec<u8> = issues.iter().map(|i| if i["severity"] == "error" { 0 } else { 1 }).collect();
+    assert!(issues.iter().all(|i| i["severity"] != "info") && ranks.is_sorted(), "{issues:?}");
+    assert!(issues[0]["fix"].is_string() && issues[0]["line"].is_u64(), "{}", issues[0]);
+    let errors =
+        checked(c, &schemas, "list_dataset_issues", json!({ "dataset_id": "ds_7c2f", "severity": "error" }));
+    assert_eq!((errors["total"].as_u64(), errors["items"].as_array().unwrap().len()), (Some(3), 3));
+    assert_eq!(errors["counts"], cams["issue_counts"]);
+    let page = checked(
+        c,
+        &schemas,
+        "list_dataset_issues",
+        json!({ "dataset_id": "ds_7c2f", "severity": "error", "limit": 2 }),
+    );
+    assert_eq!((page["items"].as_array().unwrap().len(), &page["next_cursor"]), (2, &json!("o2")));
+    let rest = checked(
+        c,
+        &schemas,
+        "list_dataset_issues",
+        json!({ "dataset_id": "ds_7c2f", "severity": "error", "cursor": "o2" }),
+    );
+    assert_eq!(rest["items"][0], errors["items"][2]);
+    let kind = checked(
+        c,
+        &schemas,
+        "list_dataset_issues",
+        json!({ "dataset_id": "ds_7c2f", "kind": "empty_image" }),
+    );
+    assert_eq!(kind["total"], counts["info"]);
+    c.tool_error(
+        "list_dataset_issues",
+        json!({ "dataset_id": "ds_7c2f", "kind": "typo" }),
+        "invalid_arguments",
+    );
+    c.tool_error(
+        "list_dataset_issues",
+        json!({ "dataset_id": "ds_7c2f", "severity": "fatal" }),
+        "invalid_arguments",
+    );
 
     let t = checked(
         c,
@@ -408,6 +469,9 @@ fn full_flow(c: &mut Client, data_dir: &std::path::Path) {
     } else {
         c.result("resources/unsubscribe", json!({ "uri": run_uri }));
     }
+    let snap = c.result("resources/read", json!({ "uri": format!("{run_uri}/epochs") }));
+    let epochs: Value = serde_json::from_str(snap["contents"][0]["text"].as_str().unwrap()).unwrap();
+    assert!(epochs["epochs"].is_array() && epochs.get("steps").is_none(), "{epochs}");
     let snap = c.result("resources/read", json!({ "uri": run_uri }));
     let snap: Value = serde_json::from_str(snap["contents"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(snap["run"]["id"], run_id);
@@ -480,7 +544,8 @@ fn full_flow(c: &mut Client, data_dir: &std::path::Path) {
     }
 
     // Tool errors (isError) vs protocol errors (JSON-RPC).
-    c.tool_error("get_dataset", json!({ "dataset_id": "nope" }), "dataset_not_found");
+    let e = c.tool_error("get_dataset", json!({ "dataset_id": "nope" }), "dataset_not_found");
+    assert!(e["hint"].as_str().unwrap().contains("list_datasets"), "{e}");
     c.tool_error("list_datasets", json!({ "limit": "many" }), "invalid_arguments");
     c.tool_error("get_dataset", json!({}), "invalid_arguments");
     c.tool_error("list_datasets", json!({ "limit": 500 }), "invalid_arguments");
@@ -489,6 +554,24 @@ fn full_flow(c: &mut Client, data_dir: &std::path::Path) {
     // The mock store does not resume runs (the real one does, see `real_store_end_to_end`).
     c.tool_error("train", json!({ "dataset_id": ds_id, "resume_run_id": run_id }), "not_implemented");
     c.tool_error("train", json!({ "resume_run_id": 7 }), "invalid_arguments");
+    // Unknown arguments are rejected, with the likely name (`lr` for `lr0`), also inside `augment`.
+    let e =
+        c.tool_error("train", json!({ "dataset_id": ds_id, "epochs": 1, "lr": 0.1 }), "invalid_arguments");
+    assert_eq!(e["message"], "unknown argument `lr`; did you mean `lr0`?");
+    let e = c.tool_error(
+        "train",
+        json!({ "dataset_id": ds_id, "augment": { "mosiac": 0 } }),
+        "invalid_arguments",
+    );
+    assert!(e["message"].as_str().unwrap().contains("augment.mosiac"), "{e}");
+    c.tool_error("list_runs", json!({ "state": "running" }), "invalid_arguments");
+    // One vocabulary with the CLI: a bad TrainConfig value is invalid_config, an empty split invalid_dataset.
+    c.tool_error("train", json!({ "dataset_id": ds_id, "arch": "folo-q" }), "invalid_config");
+    c.tool_error(
+        "val",
+        json!({ "model_id": model_id, "dataset_id": ds_id, "split": "test" }),
+        "invalid_dataset",
+    );
     let unknown = c.request("tools/call", json!({ "name": "no_such_tool", "arguments": {} }));
     assert_eq!(unknown["error"]["code"], -32602, "{unknown}");
     let method = c.request("no/such/method", json!({}));
@@ -566,6 +649,7 @@ fn read_only_hides_and_rejects_mutating_tools() {
         "folo_info",
         "list_datasets",
         "get_dataset",
+        "list_dataset_issues",
         "list_dataset_images",
         "list_models",
         "run_status",
@@ -976,6 +1060,14 @@ fn real_store_end_to_end() {
                 "augment": { "close_mosaic": 1 } })
     };
 
+    // A GPU this machine does not have: the same code as the CLI, the hint names the devices it has.
+    let mut gpu7 = tiny(1, "nogpu");
+    gpu7["device"] = json!("gpu:7");
+    let e = c.tool_error("train", gpu7, "device_not_found");
+    assert!(
+        e["hint"].as_str().unwrap().contains("cpu") && !e["message"].as_str().unwrap().contains("--device")
+    );
+
     // Train, following the run through its resource subscription (fed by the run's live events).
     let t = checked(&mut c, &schemas, "train", tiny(2, "tiny-n"));
     let run_id = t["run_id"].as_str().unwrap().to_string();
@@ -1014,7 +1106,7 @@ fn real_store_end_to_end() {
     c.tool_error(
         "val",
         json!({ "model_id": model_id, "dataset_id": ds_id, "split": "test" }),
-        "invalid_body",
+        "invalid_dataset",
     );
 
     let imgs = checked(

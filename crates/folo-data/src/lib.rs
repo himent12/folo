@@ -76,7 +76,7 @@ pub use dataset::{
 pub use error::{DataError, Result};
 pub use image::{
     IMAGE_EXTENSIONS, Image, ImageFormat, Sample, decode, encode, is_image_path, jpeg_exif_orientation,
-    probe_size, read_image, write_image,
+    jpeg_truncated, probe_size, read_image, write_image,
 };
 pub use letterbox::{Letterbox, LetterboxOptions, PAD_VALUE, letterbox, letterbox_sample};
 pub use loader::{Batch, DataLoader, EpochIter, ImageMeta, LoaderConfig, Throughput};

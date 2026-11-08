@@ -27,6 +27,16 @@ impl ExitCode {
     pub const ALL: [ExitCode; 5] =
         [ExitCode::Ok, ExitCode::Runtime, ExitCode::Usage, ExitCode::NotFound, ExitCode::NotImplemented];
 
+    /// The exit code of an error code (`folo_api::codes`, the vocabulary the CLI shares with the API and MCP).
+    pub fn of(code: &str) -> ExitCode {
+        match folo_api::codes::exit_code(code) {
+            2 => ExitCode::Usage,
+            3 => ExitCode::NotFound,
+            4 => ExitCode::NotImplemented,
+            _ => ExitCode::Runtime,
+        }
+    }
+
     /// Short name.
     pub fn name(self) -> &'static str {
         match self {
@@ -103,11 +113,13 @@ impl Out {
         }
     }
 
-    /// A machine record: one compact JSON line on stdout in `--json` mode, nothing otherwise.
+    /// A machine record: one compact JSON line on stdout in `--json` mode, nothing otherwise. Floats are written
+    /// without f32 → f64 noise (`0.01`, not `0.009999999776482582`; `folo_api::json::clean_floats`).
     pub fn record<T: Serialize>(&self, value: &T) {
         if self.json {
+            let Ok(value) = folo_api::json::to_value(value) else { return };
             let mut stdout = std::io::stdout().lock();
-            let _ = serde_json::to_writer(&mut stdout, value);
+            let _ = serde_json::to_writer(&mut stdout, &value);
             let _ = writeln!(stdout);
             let _ = stdout.flush();
         }

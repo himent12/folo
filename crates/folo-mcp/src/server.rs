@@ -95,7 +95,7 @@ impl Inner {
                 .blocking(move |s| resources::run_snapshot(s, &id))
                 .await
                 .map(|snap| hash(&snap.to_string())),
-            FoloUri::Metrics(id) => {
+            FoloUri::Metrics(id) | FoloUri::Epochs(id) => {
                 self.blocking(move |s| {
                     let run = s.get_run(&id)?;
                     let m = s.run_metrics(&id, u64::MAX)?;
@@ -193,7 +193,7 @@ where
         tasks: Vec::new(),
     };
     for (i, uri) in uris.iter().enumerate() {
-        let (FoloUri::Run(id) | FoloUri::Metrics(id)) = uri else { continue };
+        let (FoloUri::Run(id) | FoloUri::Metrics(id) | FoloUri::Epochs(id)) = uri else { continue };
         let id = id.clone();
         let Ok(sub) = subscribe(id).await else { continue };
         follow.streamed[i].store(true, Ordering::Relaxed);
@@ -454,8 +454,11 @@ impl ServerHandler for FoloMcp {
     ) -> Result<ReadResourceResponse, McpError> {
         let uri = request.uri;
         let parsed = FoloUri::parse(&uri).ok_or_else(|| not_found(&uri))?;
-        let json_contents =
-            |v: &Value| ResourceContents::text(v.to_string(), uri.clone()).with_mime_type("application/json");
+        let json_contents = |v: &Value| {
+            let mut v = v.clone();
+            folo_api::json::clean_floats(&mut v);
+            ResourceContents::text(v.to_string(), uri.clone()).with_mime_type("application/json")
+        };
         let c = self.inner.confinement.clone();
         let contents = match parsed {
             FoloUri::Dataset(id) => {
@@ -499,6 +502,14 @@ impl ServerHandler for FoloMcp {
                     .await
                     .map_err(|e| resource_error(&uri, e))?;
                 json_contents(&serde_json::to_value(m).unwrap_or_default())
+            }
+            FoloUri::Epochs(id) => {
+                let m = self
+                    .inner
+                    .blocking(move |s| s.run_metrics(&id, u64::MAX))
+                    .await
+                    .map_err(|e| resource_error(&uri, e))?;
+                json_contents(&json!({ "epochs": m.epochs, "last_step": m.steps.last() }))
             }
             FoloUri::Samples(id, epoch) => {
                 let jpeg = self

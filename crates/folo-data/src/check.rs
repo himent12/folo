@@ -220,7 +220,7 @@ fn check_yolo(scan: yolo::YoloScan, opts: &CheckOptions) -> Result<CheckReport> 
         })
         .collect();
     let classes = scan.names.unwrap_or_default();
-    merge(&mut issues, images.iter().map(|(_, p)| p.as_path()), results);
+    merge(&mut issues, images.iter().map(|(_, p)| p.as_path()), results, &scan.root);
     Ok(CheckReport { format: Format::Yolo, root: scan.root, classes, splits, issues })
 }
 
@@ -265,12 +265,18 @@ fn check_coco(path: &Path, opts: &CheckOptions) -> Result<CheckReport> {
             c
         })
         .collect();
-    merge(&mut issues, images.iter().map(|e| e.image.as_path()), results);
+    merge(&mut issues, images.iter().map(|e| e.image.as_path()), results, &ds.root);
     Ok(CheckReport { format: Format::Coco, root: ds.root, classes: ds.classes, splits, issues })
 }
 
-/// Appends per-image issues in order and flags images whose bytes repeat an earlier image's.
-fn merge<'a>(issues: &mut Vec<CheckIssue>, paths: impl Iterator<Item = &'a Path>, results: Vec<ImageCheck>) {
+/// Appends per-image issues in order and flags images whose bytes repeat an earlier image's (named relative to
+/// `root` with `/` separators, as issue files are reported).
+fn merge<'a>(
+    issues: &mut Vec<CheckIssue>,
+    paths: impl Iterator<Item = &'a Path>,
+    results: Vec<ImageCheck>,
+    root: &Path,
+) {
     let mut seen: HashMap<(u128, u64), &Path> = HashMap::new();
     for (path, r) in paths.zip(results) {
         issues.extend(r.issues);
@@ -280,8 +286,11 @@ fn merge<'a>(issues: &mut Vec<CheckIssue>, paths: impl Iterator<Item = &'a Path>
                     CheckKind::DuplicateImage,
                     path,
                     None,
-                    format!("same bytes as {}", first.display()),
-                    Some(format!("remove this copy (and its label file); keep {}", first.display())),
+                    format!("same bytes as {}", crate::paths::relative_to(first, root)),
+                    Some(format!(
+                        "remove this copy (and its label file); keep {}",
+                        crate::paths::relative_to(first, root)
+                    )),
                 )),
                 None => {
                     seen.insert(key, path);
@@ -333,7 +342,16 @@ fn read_image_file(image: &Path, opts: &CheckOptions) -> ImageCheck {
         Err(e) => return corrupt(format!("cannot read: {e}")),
     };
     let size = if opts.decode {
-        crate::image::decode(&bytes).map(|i| (i.width, i.height)).map_err(|e| e.to_string())
+        match crate::image::decode(&bytes) {
+            // Decoders fill a JPEG cut off mid-scan with grey instead of failing.
+            Ok(_) if crate::image::jpeg_truncated(&bytes) => Err(format!(
+                "truncated JPEG: the data ends before the end-of-image marker ({} bytes; it decodes with grey                  where the data is missing)",
+                bytes.len()
+            )),
+            Ok(i) => Ok((i.width, i.height)),
+            Err(crate::DataError::Image { message, .. }) => Err(format!("cannot decode: {message}")),
+            Err(e) => Err(format!("cannot decode: {e}")),
+        }
     } else {
         image::ImageReader::new(std::io::Cursor::new(&bytes))
             .with_guessed_format()
@@ -353,7 +371,8 @@ fn read_image_file(image: &Path, opts: &CheckOptions) -> ImageCheck {
             hash: Some((hash128(&bytes), bytes.len() as u64)),
             size: Some(size),
         },
-        Err(e) => corrupt(format!("cannot decode: {e}")),
+        Err(e) if opts.decode => corrupt(e),
+        Err(e) => corrupt(format!("cannot decode: {}", e.trim())),
     }
 }
 

@@ -17,17 +17,26 @@ use crate::error::{Error, Result};
 /// Loaded models kept by [`Predictors`] (least recently used first out).
 pub const PREDICTOR_CACHE: usize = 4;
 
-/// Maps an engine error to the API envelope: settings → `400 invalid_config`, a device this build cannot use →
-/// `501 not_implemented`, unusable data → `400 invalid_dataset`, bad weights → `422 invalid_weights`, the rest →
-/// `500 internal`.
+/// Maps an engine error to the API envelope (codes and statuses of `folo_api::codes`): settings → `400
+/// invalid_config`, unusable data → `400 invalid_dataset`, a device this machine does not have → `404
+/// device_not_found` (the hint lists the ones it has), GPU memory exhausted → `507 gpu_out_of_memory`, a feature
+/// the engine lacks → `501 not_implemented`, bad weights → `422 invalid_weights`, the rest → `500 internal`.
+/// Messages are capped ([`folo_vision::Error::summary`]).
 pub fn engine_error(e: folo_vision::Error) -> Error {
     use folo_vision::Error as E;
-    let msg = e.to_string();
+    let msg = e.summary();
     match &e {
         E::Config(_) => Error::new(StatusCode::BAD_REQUEST, "invalid_config", msg),
         E::Dataset(_) => Error::new(StatusCode::BAD_REQUEST, "invalid_dataset", msg),
-        E::Unsupported(_) => Error::new(StatusCode::NOT_IMPLEMENTED, "not_implemented", msg)
-            .hint("use device `cpu` (or `auto`, which falls back to the CPU)"),
+        E::DeviceNotFound(_) => Error::new(StatusCode::NOT_FOUND, "device_not_found", msg).hint(format!(
+            "this machine has {}; use device `auto` (the GPU when there is one) or `cpu`",
+            crate::system::available_devices()
+        )),
+        _ if e.is_gpu_out_of_memory() => {
+            Error::new(StatusCode::INSUFFICIENT_STORAGE, "gpu_out_of_memory", msg)
+                .hint("lower `batch` or `imgsz`, or use a smaller `arch` (folo-n, folo-s)")
+        }
+        E::Unsupported(_) => Error::new(StatusCode::NOT_IMPLEMENTED, "not_implemented", msg),
         _ if e.code() == "invalid_weights" => {
             Error::new(StatusCode::UNPROCESSABLE_ENTITY, "invalid_weights", msg)
         }

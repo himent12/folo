@@ -145,17 +145,30 @@ export interface DatasetIssue {
   /** 1-based label line, or null. */
   line: number | null;
   message: string;
+  /** What a cleanup would do, e.g. `delete line 3` (absent for infos). */
+  fix?: string;
 }
 
 export interface DatasetIssuesQuery {
   kind?: IssueKind;
+  severity?: IssueSeverity;
   offset?: number;
   limit?: number;
+}
+
+/** Every issue of the dataset by severity and kind, whatever the filter. */
+export interface IssueCounts {
+  error: number;
+  warning: number;
+  info: number;
+  by_kind: Partial<Record<IssueKind, number>>;
 }
 
 export interface DatasetIssues {
   total: number;
   issues: DatasetIssue[];
+  /** Absent from older servers. */
+  counts?: IssueCounts;
 }
 
 // ---------- Models ----------

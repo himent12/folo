@@ -106,6 +106,8 @@ Severity: **blocker** stops the job; **annoying** costs an agent time, tokens or
 is cosmetic or inconsistent.
 
 ### F1. `get_dataset` hides real errors behind info items (annoying, high)
+**Status:** fixed in #PR. `get_dataset` lists errors, then warnings (infos only counted in `issue_counts`), each issue with `severity`, `line` and `fix`; `list_dataset_issues {dataset_id, severity?, kind?}` pages through all of them over `GET /api/datasets/{id}/issues`, which gained `severity=` and `counts`.
+
 - **Call:** `get_dataset {dataset_id}` on the broken copy, after adding `9 0.5 0.5 0.1 0.1` to
   `labels/val/000999.txt`.
 - **Happened:** `issues_total: 57`, but only 50 issues were returned, in file order. 39 of them were
@@ -120,6 +122,8 @@ is cosmetic or inconsistent.
 - *This PR documents the workaround in the cookbook.*
 
 ### F2. GPU out of memory is a 32 KB `internal` error, three times (annoying, high)
+**Status:** fixed in #PR. `gpu_out_of_memory` with a "lower batch / imgsz, smaller arch" hint on every front end; folo-gpu keeps the first wgpu error and counts the rest; engine messages are capped at 500 characters; the run log line only names the failure; a new CLI run that fails before its first checkpoint removes its folder. Deferred: free VRAM in the message (wgpu does not report it).
+
 - **Command:** `folo train --data shapes --model folo-x --epochs 1 --json` (640 px on a GPU with 14 GB already in
   use by other processes).
 - **Happened:** exit 1 with `{"code":"internal","message":"wgpu backend: wgpu error: Out of Memory\nValidation
@@ -132,6 +136,8 @@ is cosmetic or inconsistent.
   500 characters in lists, but not in the CLI), and report free VRAM where possible.
 
 ### F3. Unknown tool arguments are silently ignored (annoying)
+**Status:** fixed in #PR. Every input schema (nested objects too) has `additionalProperties: false`, and unknown arguments are `invalid_arguments` with a suggestion (`lr` → `lr0`, `model` → `arch`).
+
 - **Call:** `train {"dataset_id": "ds_66f9", "epochs": 1, "lr": 0.1}`
 - **Happened:** a run started. The typo'd `lr` was dropped without a word.
 - **Expected:** `invalid_arguments: unknown field lr, expected one of ...`. This is the classic agent mistake
@@ -140,12 +146,16 @@ is cosmetic or inconsistent.
   validation.
 
 ### F4. `register_dataset` on the same path creates duplicates (annoying)
+**Status:** fixed in #PR. Registering a folder again (by canonical path) returns the existing dataset, in the real and mock stores (HTTP and MCP); the MCP summary says "already registered".
+
 - **Call:** `register_dataset {"name": "bad", "path": "D:/folo-dogfood/cli/bad"}`, three times across sessions.
 - **Happened:** three datasets, `ds_132e`, `ds_79ad` and `ds_e7ef`, all named `bad`.
 - **Expected:** the existing id back (idempotent), or a `dataset_exists` error that names it.
 - **Fix:** key registration on the canonical path.
 
 ### F5. `folo train --resume` silently ignores other flags and finished runs (annoying)
+**Status:** fixed in #PR. `--resume` refuses a changed flag (`invalid_config`, naming the flag and both values) and a completed run (`run_not_resumable`, with the `--model .../best.folo` command).
+
 - **Command:** `folo train --resume runs/ref5/weights/last.folo --epochs 8 --json` on a completed 5-epoch run.
 - **Happened:** exit 0, `"finished 5 epochs in 0.0 s"`, `status: completed`. `--epochs 8` was ignored.
 - **Expected:** what MCP does: `invalid_config` for a changed field, and `run_not_resumable` (with the
@@ -154,6 +164,8 @@ is cosmetic or inconsistent.
 - **Fix:** reuse the MCP checks in the CLI.
 
 ### F6. An agent cannot stop CLI training gracefully on Windows (annoying)
+**Status:** fixed in #PR. Ctrl+Break is handled like Ctrl+C on Windows, and `folo stop <run_dir>` writes a stop file the trainer polls (tested end to end; the Ctrl+Break path is not exercised by the tests).
+
 - **Command:** a script starts `folo train --json` in its own process group and sends `CTRL_BREAK_EVENT` after
   epoch 2. A script cannot send Ctrl+C to a child on Windows.
 - **Happened:** the process died at once (exit `0xC000013A`), with no `status: stopped` or `done` record. Resume
@@ -163,6 +175,8 @@ is cosmetic or inconsistent.
   PR.*
 
 ### F7. A JPEG truncated mid-scan passes `dataset check` (annoying)
+**Status:** fixed in #PR. `dataset check` (full decode) reports a JPEG without an end-of-image marker after its scan data as `corrupt_image` ("truncated JPEG").
+
 - **Command:** `head -c 2000 000011.jpg` (the original is 17 342 bytes), then
   `folo dataset check bad --json`.
 - **Happened:** no issue for `000011.jpg`, although the docs say the full decode catches truncated data. Cutting
@@ -172,6 +186,8 @@ is cosmetic or inconsistent.
   `truncated_image`.
 
 ### F8. `train --json` step records: no opt-out (annoying, tokens)
+**Status:** fixed in #PR. `folo train --json --json-events epoch` leaves the step records out; floats are written without f32 noise (F13).
+
 - **Command:** `folo train ... --json` (see Token cost).
 - **Happened:** 750 `step` records out of 771, one per batch, because each batch took longer than the 100 ms
   throttle.
@@ -180,6 +196,8 @@ is cosmetic or inconsistent.
   about 10 per second, which on slow runs means one per batch.*
 
 ### F9. `tools/list` and `describe --json` are heavy (annoying, tokens)
+**Status:** fixed in #PR. Schemas are compacted (no `$schema` / numeric `format` / `minimum: 0`, no output defaults or `$defs` descriptions, string enums): `tools/list` went from 68.6 KB to 44.9 KB with one more tool (`run_status` 11.2 → 5.3 KB, `list_runs` 8.4 → 3.7 KB, `stop_run` 6.9 → 3.3 KB), `describe --json` from 92 KB to 71 KB. `folo describe <command>` (about 7 KB for `train`) and `--no-mcp-tools` (27 KB). JSON Schema has no cross-tool `$defs`, so each tool still carries its shared types once.
+
 - **Calls:** `tools/list`, `folo describe --json`.
 - **Happened:** 68.6 KB and 92 KB respectively (see Token cost).
 - **Fix:**
@@ -188,12 +206,16 @@ is cosmetic or inconsistent.
   - Add `folo describe <command>` and `--no-mcp-tools`.
 
 ### F10. The metrics resource has no compact view (annoying, tokens)
+**Status:** fixed in #PR. `folo://runs/{id}/epochs` (subscribable): the epoch history without steps.
+
 - **Read:** `folo://runs/{id}/metrics`, 150 KB for 12 epochs.
 - **Happened:** every step is included, with no compact view. An agent wanting the mAP curve has to pull the
   whole history.
 - **Fix:** add `folo://runs/{id}/epochs`, or a `?steps=none` option, or downsample steps.
 
 ### F11. Misleading `device gpu:7` error (annoying)
+**Status:** fixed in #PR. `device_not_found` (HTTP 404, exit 3) on both front ends; the message names the devices FOLO can use and the hint lists the adapters ("gpu:0 (NVIDIA ..., vulkan)").
+
 - **Command / call:** `folo train ... --device gpu:7`; `train {"device": "gpu:7"}`.
 - **Happened:** "device gpu:7 has no registered backend in this build (GPU support is folo-gpu's `init()`); use
   --device cpu". The build does have GPU support; there is simply no adapter 7. The code is `not_supported`
@@ -202,6 +224,8 @@ is cosmetic or inconsistent.
   same code on both front ends.
 
 ### F12. Paths in JSON mix separators on Windows (polish)
+**Status:** fixed in #PR. CLI records, export paths, `duplicate_image` messages (now relative to the root) and `--confine` errors use `/` without `\\?\`; MCP registers dataset paths with `/`.
+
 Examples:
 - `"run_dir":"runs\\shapes-n"` and `"best":"runs\\shapes-n\\weights/best.folo"`
 - `"yaml":"D:/folo-dogfood/cli/shapes\\data.yaml"`
@@ -214,11 +238,15 @@ Examples:
 Fix: normalise every path in JSON output to `/` and strip the `\\?\` prefix.
 
 ### F13. Floats are serialised with f32→f64 noise (polish, tokens)
+**Status:** fixed in #PR. CLI records, MCP results, resources and schemas print f32 values as f32 (`folo_api::json::clean_floats`). Box coordinates keep f32 precision (not rounded to 0.1 px).
+
 - `"lr0": 0.009999999776482582`, `"hsv": [0.014999999664723873, ...]`, box coordinates with 15 digits, and
   metrics with 16.
 - **Fix:** serialise f32 as f32, round box coordinates to 0.1 px, and round metrics to 4–5 significant digits.
 
 ### F14. Error codes differ between the CLI and MCP for the same failure (polish)
+**Status:** fixed in #PR. One vocabulary in `folo_api::codes` (code, HTTP status, exit code; a test scans the sources). Bad arch → `invalid_config`, empty split → `invalid_dataset`, missing GPU → `device_not_found` everywhere; MCP reports the HTTP layer's `invalid_body` / `invalid_query` as `invalid_arguments`.
+
 | failure | CLI code | MCP code |
 |---|---|---|
 | bad arch | `invalid_config` | `invalid_arguments` |
@@ -228,6 +256,8 @@ Fix: normalise every path in JSON output to `/` and strip the `\\?\` prefix.
 Agents that branch on codes need one vocabulary.
 
 ### F15. Run config shows a learning rate that is not used (polish)
+**Status:** partly fixed in #PR: CLI.md explains `--optimizer auto` and where the used optimizer, `lr0` and accumulation are (`config.json`: `optimizer`, `accumulate`). Deferred: an `effective` object in `run_status` (a `Run` type change across the API, Studio and Desktop).
+
 - **Call:** `run_status`, and `runs/*/config.json`.
 - **Happened:** `config.lr0` is `0.01`, but the run log says `auto → adamw lr0 0.001429 ... batch 16 × accumulate 4`.
 - **Expected:** the effective optimizer, `lr0`, accumulate and warmup as fields. An agent tuning `lr0` has to
@@ -236,26 +266,28 @@ Agents that branch on codes need one vocabulary.
   CLI.md.
 
 ### F16. Smaller items (polish)
+**Status:** mostly fixed in #PR, see the list.
+
 - `folo train --lr0 -1` is a clap usage error ("unexpected argument '-1'"); only `--lr0=-1` reaches the
-  range check. Fix: `allow_negative_numbers`.
+  range check. Fix: `allow_negative_numbers`. *Fixed in #PR (`allow_negative_numbers`).*
 - `folo export --model shapes/data.yaml` says "invalid safetensors file: header length 8295717702782558243
-  exceeds the 100000000-byte limit". Fix: "not a .folo weights file".
+  exceeds the 100000000-byte limit". Fix: "not a .folo weights file". *Fixed in #PR: "... is not a .folo weights file".*
 - CLI `export` silently overwrites an existing `best-f16.folo`, while MCP `export` never overwrites (`-2`).
-  Pick one behaviour and document it.
+  Pick one behaviour and document it. *Fixed in #PR: the CLI never overwrites either (`-2` names, `output_exists`).*
 - Not-found errors (`model_not_found`, `dataset_not_found`, `run_not_found`) have `hint: null`. Suggest
-  `list_models` / `list_datasets` / `list_runs`, or `folo ... --help`.
+  `list_models` / `list_datasets` / `list_runs`, or `folo ... --help`. *Fixed in #PR: the hint names the list tool / endpoint.*
 - `corrupt_image` messages read "cannot decode: image error at : Format error ..." (an empty path) and end in
-  `\n`.
+  `\n`. *Fixed in #PR.*
 - `dataset stats` reports `skipped_images: 2` (the corrupt images) while 6 more images with broken labels are
-  also skipped (train went from 801 to 793). Count both, or name the field `unreadable_images`.
+  also skipped (train went from 801 to 793). Count both, or name the field `unreadable_images`. *Deferred: renaming or splitting the field is an output change for its own PR.*
 - `dataset check --json` has no severity filter: a clean dataset prints all its `empty_image` infos. Add
-  `--min-severity warning`.
-- `folo_info.devices.gpus[].memory_bytes` is 0 and `doctor` shows no VRAM, so an agent cannot size `batch`.
-- `run_status.device` is `"NVIDIA GeForce RTX 4080 SUPER (vulkan)"` while `predict.device` is `"gpu:0"`.
+  `--min-severity warning`. *Fixed in #PR (`--min-severity`).*
+- `folo_info.devices.gpus[].memory_bytes` is 0 and `doctor` shows no VRAM, so an agent cannot size `batch`. *Deferred: wgpu does not report VRAM.*
+- `run_status.device` is `"NVIDIA GeForce RTX 4080 SUPER (vulkan)"` while `predict.device` is `"gpu:0"`. *Deferred: changing `Run.device` touches Studio and Desktop.*
 - Annotated `--save` images and sample grids carry class *ids* (digit-only font) or no tags at all, and have no
-  legend, so an agent looking at them must already know the palette. A legend strip would fix it.
-- MCP `create_synthetic_dataset` has no `val_frac` or `vary_aspect`, which the CLI has.
-- There is no CLI `compare`. The cookbook's `jq -s` recipe needs `jq`, which a Windows machine usually lacks.
+  legend, so an agent looking at them must already know the palette. A legend strip would fix it. *Deferred (drawing work).*
+- MCP `create_synthetic_dataset` has no `val_frac` or `vary_aspect`, which the CLI has. *Deferred (API and both stores).*
+- There is no CLI `compare`. The cookbook's `jq -s` recipe needs `jq`, which a Windows machine usually lacks. *Deferred.*
 
 ## Doc gaps
 - CLI.md listed `train` as "works (CPU)" while it trains on the GPU. *Fixed.*
@@ -274,20 +306,20 @@ Agents that branch on codes need one vocabulary.
   separators (F12).
 
 ## Top 10 improvements, ranked
-1. **Make `get_dataset` issues trustworthy** (F1): severity first, infos as counts, `severity`/`line`/`fix` on
+1. **Make `get_dataset` issues trustworthy** (F1): severity first, infos as counts, `severity`/`line`/`fix` on *Fixed in #PR.*
    each issue, and a paged `list_dataset_issues` tool.
-2. **Add a GPU OOM error code** (F2): `gpu_out_of_memory` with a hint, the message capped at about 500
+2. **Add a GPU OOM error code** (F2): `gpu_out_of_memory` with a hint, the message capped at about 500 *Fixed in #PR.*
    characters, no triple repetition, and no orphaned run folder.
-3. **Reject unknown tool arguments** (F3), so typos do not silently train with defaults.
-4. **Cut the per-run token flood** (F8, F10): an epoch-only JSON mode for `folo train`, and an epoch-only
+3. **Reject unknown tool arguments** (F3), so typos do not silently train with defaults. *Fixed in #PR.*
+4. **Cut the per-run token flood** (F8, F10): an epoch-only JSON mode for `folo train`, and an epoch-only *Fixed in #PR.*
    metrics resource.
-5. **Shrink `tools/list` and `describe`** (F9): shared `$defs`, and a `describe <command>`.
-6. **Give the CLI a graceful stop for agents on Windows** (F6): handle Ctrl+Break, or add `folo stop`.
-7. **Detect JPEGs truncated mid-scan in `dataset check`** (F7).
-8. **Make `register_dataset` idempotent** per canonical path (F4).
-9. **Bring CLI `--resume` to MCP parity** (F5): refuse changed flags and completed runs, with the same hints.
+5. **Shrink `tools/list` and `describe`** (F9): shared `$defs`, and a `describe <command>`. *Fixed in #PR.*
+6. **Give the CLI a graceful stop for agents on Windows** (F6): handle Ctrl+Break, or add `folo stop`. *Fixed in #PR.*
+7. **Detect JPEGs truncated mid-scan in `dataset check`** (F7). *Fixed in #PR.*
+8. **Make `register_dataset` idempotent** per canonical path (F4). *Fixed in #PR.*
+9. **Bring CLI `--resume` to MCP parity** (F5): refuse changed flags and completed runs, with the same hints. *Fixed in #PR.*
 10. **Normalise the JSON surface** (F11–F14): `/` paths, rounded floats, one error-code vocabulary for the CLI
-    and MCP, and `device_not_found` naming the adapters that exist.
+    and MCP, and `device_not_found` naming the adapters that exist. *Fixed in #PR.*
 
 ## Fixed in this PR
 - `folo val --json` now includes `device` (as `predict` records already do), and the human line names the

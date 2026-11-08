@@ -100,8 +100,23 @@ async fn mock_issues_agree_with_the_stats() {
     let page: IssuePage =
         ok(&app, get(&format!("/api/datasets/{}/issues?offset=2&limit=3", traffic.id))).await;
     assert_eq!((page.total, page.issues.as_slice()), (all.total, &all.issues[2..5]));
+    // Severity filter and counts (over every issue, whatever the filter).
+    let errors: IssuePage =
+        ok(&app, get(&format!("/api/datasets/{}/issues?severity=error&limit=1000", traffic.id))).await;
+    assert_eq!(errors.total, 3);
+    assert!(errors.issues.iter().all(|i| i.severity == IssueSeverity::Error && i.fix.is_some()));
+    assert_eq!(errors.counts, all.counts);
+    assert_eq!(all.counts.error + all.counts.warning + all.counts.info, all.total);
+    assert_eq!(all.counts.by_kind.values().sum::<u64>(), all.total);
+    assert_eq!(
+        all.counts.by_kind.get("empty_image").copied().unwrap_or(0),
+        count(&all, "empty_image") as u64
+    );
+    assert!(all.issues.iter().filter(|i| i.kind == "empty_image").all(|i| i.fix.is_none()));
     // Errors.
     let bad = format!("/api/datasets/{}/issues?kind=nope", traffic.id);
+    assert_eq!(err_code(&app, get(&bad)).await, (StatusCode::BAD_REQUEST, "invalid_query".into()));
+    let bad = format!("/api/datasets/{}/issues?severity=fatal", traffic.id);
     assert_eq!(err_code(&app, get(&bad)).await, (StatusCode::BAD_REQUEST, "invalid_query".into()));
     let missing = err_code(&app, get("/api/datasets/ds_none/issues")).await;
     assert_eq!(missing, (StatusCode::NOT_FOUND, "dataset_not_found".into()));
@@ -134,6 +149,8 @@ async fn real_issues_are_cached_and_refreshed() {
         (overflow.file.as_str(), overflow.line, overflow.severity),
         ("labels/train/000001.txt", Some(2), IssueSeverity::Error)
     );
+    assert_eq!(overflow.fix.as_deref(), Some("delete line 2"));
+    assert_eq!(all.counts.by_kind["class_overflow"], 1);
     assert_eq!(find(&all, "corrupt_image").unwrap().file, "images/train/000002.png");
     assert_eq!(find(&all, "duplicate_image").unwrap().file, "images/train/000003b.png");
     assert_eq!(count(&all, "empty_image") as u64, ds.stats.unwrap().empty_images);

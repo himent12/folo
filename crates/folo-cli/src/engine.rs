@@ -22,21 +22,25 @@ pub fn open_dataset(arg: &str) -> Result<(folo_data::LoadedDataset, String), Cli
     Ok((ds, name))
 }
 
-/// Map an engine error to a CLI error with the matching exit code.
+/// Map an engine error to a CLI error: the code of `folo_api::codes` with its exit code, the message capped
+/// ([`folo_vision::Error::summary`]) and a hint for the failures an agent can fix.
 pub fn engine_error(e: folo_vision::Error) -> CliError {
-    use folo_vision::Error as E;
-    let exit = match &e {
-        E::Config(_) => ExitCode::Usage,
-        E::Unsupported(_) => ExitCode::NotImplemented,
-        _ => ExitCode::Runtime,
-    };
-    let hint = match &e {
-        E::Config(_) => Some("see `folo describe --json` for the accepted ranges"),
-        E::Failed(_) => Some("the last completed epoch's checkpoint is in <run>/weights/last.folo"),
-        E::Unsupported(_) => Some("use --device cpu"),
+    let code = e.code();
+    let hint = match code {
+        "invalid_config" => Some("see `folo describe train --json` for the accepted ranges".to_string()),
+        "training_failed" => {
+            Some("the last completed epoch's checkpoint is in <run>/weights/last.folo".into())
+        }
+        "gpu_out_of_memory" => {
+            Some("lower --batch or --imgsz, or use a smaller --model (folo-n, folo-s)".into())
+        }
+        "device_not_found" => Some(format!(
+            "this machine has {}; use --device auto (the GPU when there is one) or --device cpu",
+            folo_server::system::available_devices()
+        )),
         _ => None,
     };
-    let err = CliError::new(exit, e.code(), e.to_string());
+    let err = CliError::new(ExitCode::of(code), code, e.summary());
     match hint {
         Some(h) => err.hint(h),
         None => err,
@@ -48,7 +52,13 @@ pub fn require_file(path: &Path, code: &str) -> Result<(), CliError> {
     if path.is_file() {
         Ok(())
     } else {
-        Err(CliError::new(ExitCode::NotFound, code, format!("{} does not exist", path.display())))
+        let err = CliError::new(ExitCode::NotFound, code, format!("{} does not exist", path.display()));
+        Err(match code {
+            "model_not_found" => {
+                err.hint("pass a .folo file, e.g. runs/<name>/weights/best.folo from `folo train`")
+            }
+            _ => err,
+        })
     }
 }
 

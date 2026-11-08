@@ -8,6 +8,7 @@ whole command surface (generated from the clap command tree, so it never drifts 
 cargo run -p folo-cli -- serve --mock     # mock Studio API on http://127.0.0.1:7878
 cargo folo --help                         # alias for: cargo run --release -p folo-cli --
 folo describe --json                      # every command, argument, type, default and help string
+folo describe train --json                # one command (about 7 KB instead of the whole surface)
 folo doctor                               # version, OS, CPU, memory, GPU adapters, web app build
 folo --version                            # folo 0.1.0 (1a2b3c4d5e6f 2026-11-08): version, commit, build date
 ```
@@ -31,6 +32,9 @@ A global flag. With it, **stdout carries only JSON, one object per line** (JSON 
 tables, hints, logs) goes to **stderr**. Without it, human text goes to stdout and errors to stderr. Logs from the
 server (`tracing`) always go to stderr; tune them with `RUST_LOG` (default `info`).
 
+Paths in records use `/` separators (also on Windows, which accepts them), and floats are written as they were
+stored: `0.01`, not the `0.009999999776482582` an f32 widened to f64 would print.
+
 Long-running commands emit one record per event, each with an `"event"` field (e.g. `folo serve --json` prints
 `{"event":"listening","url":"http://127.0.0.1:7878",...}` once bound and `{"event":"stopped"}` on shutdown).
 One-shot commands print one object.
@@ -42,8 +46,12 @@ A failing command prints its error as the last stdout line in `--json` mode, and
 {"error":{"code":"not_implemented","message":"`folo train` is not implemented yet","hint":"it waits on ..."}}
 ```
 
-`code` is a stable snake_case identifier (the same vocabulary as the HTTP API's error codes where they overlap),
-`message` is for humans, `hint` says what to do next and is `null` when there is nothing to add.
+`code` is a stable snake_case identifier, `message` is for humans (engine errors are cut to 500 characters), `hint`
+says what to do next and is `null` when there is nothing to add. The codes are one vocabulary with the HTTP API
+and `folo mcp`: `folo_api::codes` lists each with its HTTP status and exit code, and the same failure has the same
+code everywhere (a bad `--model` arch is `invalid_config`, an empty split `invalid_dataset`, a `--device gpu:7`
+this machine lacks `device_not_found` with the devices it has in the hint, a GPU out of memory
+`gpu_out_of_memory` with "lower --batch or --imgsz, or use a smaller --model").
 
 ### Exit codes
 | code | name | meaning |
@@ -51,7 +59,7 @@ A failing command prints its error as the last stdout line in `--json` mode, and
 | 0 | `ok` | success (also `--help` / `--version`) |
 | 1 | `runtime_error` | the command ran and failed (IO, bind failure, bad data, ...) |
 | 2 | `usage_error` | invalid arguments or flags (error code `usage`) |
-| 3 | `not_found` | a named file, dataset, model or run does not exist |
+| 3 | `not_found` | a named file, dataset, model, run or device does not exist |
 | 4 | `not_implemented` | the command exists but is not implemented yet |
 
 ## Commands
@@ -59,22 +67,24 @@ A failing command prints its error as the last stdout line in `--json` mode, and
 | command | status | what it does |
 |---|---|---|
 | `serve [--mock] [--host 127.0.0.1] [--port 7878] [--web-dir DIR] [--data-dir DIR] [--device auto] [--cors-any]` | works | Runs the HTTP API (`docs/API.md`) and serves the built Studio with an SPA fallback: from `--web-dir` when given, else the Studio embedded in the binary (`embed-web` builds), else `web/dist`. The `listening` record says which (`web_source`: `dir` or `embedded`, `web_dir`, `web_ready`). `--mock` serves deterministic mock data. `--port 0` picks a free port. `--data-dir` (env `FOLO_DATA_DIR`, default `$FOLO_HOME` or `~/.folo`) holds the dataset registry, index and thumbnail caches, generated synthetic datasets, training runs, models and exports (see `docs/API.md`, Real mode). `--device` (env `FOLO_DEVICE`: `auto`, `cpu`, `gpu:<n>`) is where `/api/predict` and `/eval` run; each training run has its own `device`. Ctrl+C shuts down gracefully: open SSE streams are closed, then an active training run stops after its current batch (keeping its last epoch's checkpoint, status `stopped`). |
-| `describe` | works | Prints the CLI surface as JSON: `global_args`, `conventions` (exit codes, error shape) and `commands` (recursive, each with `path`, `about`, `args` and `subcommands`). Each argument has `name`, `long`, `short`, `positional`, `type` (`string`, `path`, `integer`, `number`, `boolean`, `enum`, `count`), `value_name`, `required`, `multiple`, `default`, `possible_values`, `env` and `help`. Pretty-printed without `--json`, one line with it. |
+| `describe [COMMAND...] [--no-mcp-tools]` | works | `folo describe train` (or `dataset check`) prints just that command (`path`, `about`, `args`, `subcommands`); `--no-mcp-tools` leaves out the MCP tool schemas, which are most of the full output. Prints the CLI surface as JSON: `global_args`, `conventions` (exit codes, error shape) and `commands` (recursive, each with `path`, `about`, `args` and `subcommands`). Each argument has `name`, `long`, `short`, `positional`, `type` (`string`, `path`, `integer`, `number`, `boolean`, `enum`, `count`), `value_name`, `required`, `multiple`, `default`, `possible_values`, `env` and `help`. Pretty-printed without `--json`, one line with it. |
 | `doctor [--web-dir web/dist]` | works | Version (`version`, `git_sha`, `build_date`), OS, CPU name and threads, memory, every wgpu adapter (`gpus`: name, backend, type, driver, `shader-f16`, buffer and workgroup limits), the adapter FOLO picks (`gpu_selected`, honouring `FOLO_GPU_ADAPTER` / `FOLO_GPU_BACKEND`), whether the web app is built (`web_dist`), whether one is embedded (`web_embedded`: `present`, `files`) and which one `folo serve` would use (`web_source`). |
-| `train --data D [--model folo-n] [--epochs 100] [--batch 16] [--imgsz 640] [--device auto] [--workers N] [--optimizer auto] [--lr0 0.01] [--lrf 0.01] [--cos-lr] [--warmup-epochs 3] [--patience 100] [augmentation flags] [--seed 0] [--project runs] [--name NAME] [--resume CKPT]` | works | Trains a detector (docs/MODEL.md §8). Arguments mirror `TrainConfig` in `docs/API.md`; `--arch` is an alias of `--model`, which also takes a `.folo` file to fine-tune from. Runs go to `<project>/<name>/` (default name `<dataset>-<arch suffix>`, numbered when it exists): `config.json`, `metrics.jsonl` (every event, every step), `weights/last.folo` and `weights/best.folo` (full checkpoints: EMA, optimizer, schedule), `samples/epoch_NNN.json`. Live view: epoch bar, losses, img/s, ETA and one table row per epoch (P, R, mAP50, mAP50-95). `--json` prints every event as a record: `{"event":"status"|"step"|"epoch"|"log", ...}` with the API.md payload fields (`step`s throttled to about 10 per second, the last batch of each epoch always sent, so a slow run gets one per batch; `metrics.jsonl` has every step), then `{"event":"done", "status", "run_dir", "best", "best_metrics", "weights"}`. `--resume runs/<name>/weights/last.folo` continues bit-exactly with the stored settings (only `--workers` / `--device` may change; the dataset is reopened from the checkpoint unless `--data` is given). Ctrl+C stops after the current batch and keeps the last epoch's checkpoint (on Windows, Ctrl+Break, which is what a script can send to a child started in its own process group, ends the process at once; the checkpoint of the last finished epoch is still there to `--resume` from). `--device auto` (the default; also for `val` and `predict`) uses the GPU when folo-gpu finds an adapter (the model, its optimizer state, EMA, gradient buffers and the detection loss all run there; batches are staged on a thread and uploaded as `u8`), else the CPU; `--device gpu:<n>` without a usable adapter exits 4. |
+| `train --data D [--model folo-n] [--epochs 100] [--batch 16] [--imgsz 640] [--device auto] [--workers N] [--optimizer auto] [--lr0 0.01] [--lrf 0.01] [--cos-lr] [--warmup-epochs 3] [--patience 100] [augmentation flags] [--seed 0] [--project runs] [--name NAME] [--resume CKPT] [--json-events all\|epoch]` | works | Trains a detector (docs/MODEL.md §8). Arguments mirror `TrainConfig` in `docs/API.md`; `--arch` is an alias of `--model`, which also takes a `.folo` file to fine-tune from. Runs go to `<project>/<name>/` (default name `<dataset>-<arch suffix>`, numbered when it exists): `config.json`, `metrics.jsonl` (every event, every step), `weights/last.folo` and `weights/best.folo` (full checkpoints: EMA, optimizer, schedule), `samples/epoch_NNN.json`. Live view: epoch bar, losses, img/s, ETA and one table row per epoch (P, R, mAP50, mAP50-95). `--json` prints every event as a record: `{"event":"status"|"step"|"epoch"|"log", ...}` with the API.md payload fields (`step`s throttled to about 10 per second, the last batch of each epoch always sent, so a slow run gets one per batch; `metrics.jsonl` has every step), then `{"event":"done", "status", "run_dir", "best", "best_metrics", "weights"}`. `--json-events epoch` leaves the `step` records out (status, epoch, log and done only: about 1 KB per epoch instead of one record per batch; a 15-epoch run of 50 batches drops from about 140 KB to 15 KB). `--resume runs/<name>/weights/last.folo` continues bit-exactly with the stored settings: only `--workers`, `--device`, `--data`, `--project` and `--json-events` may differ, any other flag given must repeat the run's value (a changed one is `invalid_config`, exit 2, naming the flag and both values), and a run that completed (all epochs, or stopped early) is `run_not_resumable` (exit 1) with the command that trains further (`--model <run>/weights/best.folo`), as MCP and `POST /api/runs` answer. Stopping: Ctrl+C, on Windows also Ctrl+Break (what a script can send to a child started in its own process group), or `folo stop <run_dir>` from another process stops after the current batch, keeps the last epoch's checkpoint and ends with `status: stopped` and the `done` record; a second interrupt exits at once. A new run that fails before its first checkpoint (a bad device, a GPU out of memory) removes its run folder. `--optimizer auto` (the default) picks SGD for long runs and AdamW with its own `lr0` for short ones, scaling for the batch with gradient accumulation, so `--lr0` only matters with `--optimizer sgd` or `adamw`; the run's `config.json` has what is used (`optimizer.type`, `optimizer.lr0`, `accumulate`; `train` holds the settings as given) and its first log line says the same. `--device auto` (the default; also for `val` and `predict`) uses the GPU when folo-gpu finds an adapter (the model, its optimizer state, EMA, gradient buffers and the detection loss all run there; batches are staged on a thread and uploaded as `u8`), else the CPU; `--device gpu:<n>` without a usable adapter is `device_not_found` (exit 3; the hint lists the devices this machine has). |
+| `stop RUN_DIR` | works | Asks the `folo train` writing `RUN_DIR` (its `run_dir`) to stop after its current batch: writes `RUN_DIR/stop`, which the trainer polls every 200 ms and removes. Returns at once with `{"event":"stop_requested","run_dir","stop_file"}`; the training process then ends with `status: stopped`. A folder that is not a run is `run_not_found` (exit 3). The portable way for a script to stop training, on Windows too. |
 | `val --model W --data D [--split val] [--batch 32] [--imgsz <model's>] [--conf 0.001] [--iou 0.7] [--device auto] [--workers N]` | works | mAP@0.5, mAP@0.5:0.95, precision and recall (docs/METRICS.md) of the weights' EMA (fused) on a split, overall and per class. One JSON object with `--json`: `{"model","data","split","imgsz","images","boxes","map50","map50_95","precision","recall","per_class":[{"class","name",...}],"device","seconds"}`. |
 | `predict --model W SOURCES... [--conf 0.25] [--iou 0.7] [--max-det 300] [--imgsz <model's>] [--device auto] [--save DIR]` | works | Inference on images or folders (recursive), letterboxed `rect` (docs/MODEL.md §9). One `{"event":"prediction", "file", "image", "boxes": [ScoredBox], "timing", "device", "saved"}` record per image (an unreadable image gives an `error` record and is skipped), then `{"event":"done", ...}` with mean timings. `--save` writes annotated copies (boxes coloured by class, tagged with the class id and score, e.g. `0 0.84`). |
-| `export --model W [--format folo-f16\|folo\|onnx] [--output FILE]` | works (`.folo`) | Fused EMA weights as a `weights` file (FORMAT.md export): `folo-f16` (default) casts to f16, `folo` keeps f32. Default output `<name>-f16.folo` / `<name>-fused.folo` next to the input. ONNX exits 4. |
+| `export --model W [--format folo-f16\|folo\|onnx] [--output FILE]` | works (`.folo`) | Fused EMA weights as a `weights` file (FORMAT.md export): `folo-f16` (default) casts to f16, `folo` keeps f32. Default output `<name>-f16.folo` / `<name>-fused.folo` next to the input, `-2`, `-3`, ... when taken: like MCP `export`, it never overwrites (an existing `--output` is `output_exists`, exit 1). A file that is not `.folo` weights is `invalid_weights` saying so. ONNX exits 4. |
 | `bench [--model folo-n] [--mode infer\|train] [--imgsz 640] [--batch 1] [--iters 100] [--warmup 10]` | planned (exit 4) | Speed benchmarks. |
 | `dataset synth OUT_DIR [--images 1000] [--classes circle,square,triangle] [--imgsz 640] [--seed 0] [--val-frac 0.2] [--image-format jpeg\|png] [--vary-aspect]` | works | Writes a synthetic shapes dataset (YOLO layout). See [Datasets](#datasets). |
 | `dataset stats PATH [--format auto\|yolo\|coco]` | works | Class counts, box sizes, boxes per image: a table with bar charts, or the `stats` object of `docs/API.md` with `--json`. |
-| `dataset check PATH [--format ...] [--fix-dry-run] [--headers-only]` | works | Every problem in a dataset, one issue per bad line / image. Exit 0 when clean, 1 with errors or warnings. |
+| `dataset check PATH [--format ...] [--fix-dry-run] [--headers-only] [--min-severity error\|warning\|info]` | works | Every problem in a dataset, one issue per bad line / image. Exit 0 when clean, 1 with errors or warnings. |
 | `dataset convert IN OUT --to yolo\|coco [--from auto\|yolo\|coco]` | works | Converts between YOLO and COCO; images are copied unchanged. |
 | `mcp [--data-dir DIR] [--mock] [--read-only] [--confine] [--server URL] [--device auto]` | works | Model Context Protocol server over stdio (MCP 2026-07-28 and 2025-11-25), see `docs/MCP.md`. stdout carries protocol messages only (also with `--json`); logs go to stderr. By default it embeds the real store on `--data-dir` (env `FOLO_DATA_DIR`, default `$FOLO_HOME` or `~/.folo`): datasets, training, models, `val`, `predict` and `export` on the FOLO engine, the same data `folo serve` uses. `--mock` serves mock data, `--server` forwards to a running `folo serve`, `--read-only` hides and rejects mutating tools, `--confine` only reads inside `--data-dir`, `--device` (env `FOLO_DEVICE`) is where inference and `val` run. Exits 0 when the client closes stdin; the runs it started are stopped first (an active run after its current batch, keeping its last checkpoint). Recipes: `docs/AGENT_COOKBOOK.md`. |
 
 `folo describe --json` is the authoritative list of arguments and defaults. Its `mcp_tools` array lists every
 `folo mcp` tool (`name`, `description`, `mutating`, `inputSchema`, `outputSchema`) with the schemas `tools/list`
-publishes.
+publishes (about 43 KB of the 71 KB; `--no-mcp-tools` leaves them out, `folo describe <command>` prints one
+command). Negative numbers are values (`--lr0 -1` reaches the range check and is `invalid_config`).
 
 ## Datasets
 
@@ -110,7 +120,7 @@ to truncated image data) and hashes file contents. Each issue has a kind and a s
 | `broken_label` | error | a line that is not `class cx cy w h` or a polygon of finite numbers; an unreadable or non-UTF-8 label file |
 | `class_overflow` | error | a class id that is negative, fractional, `>= nc` (when names are declared) or `>= 65536` |
 | `out_of_range_box` | error | coordinates clearly outside `[0, 1]` (pixels, not normalised) or a negative size |
-| `corrupt_image` | error | an image that cannot be read or decoded |
+| `corrupt_image` | error | an image that cannot be read or decoded, or a JPEG cut off mid-scan (no end-of-image marker after the scan data; decoders fill the missing rows with grey, so only the full check sees it) |
 | `missing_image` | error | an image named by an image list or COCO JSON that does not exist |
 | `clipped_box` | warning | a box up to 0.01 outside the image (the loader clips it) |
 | `zero_size_box` | warning | a box with no area inside the image (the loader drops it) |
@@ -119,7 +129,10 @@ to truncated image data) and hashes file contents. Each issue has a kind and a s
 | `other` | warning | a split path that does not exist, a COCO image whose declared width / height differ from the file, ... |
 | `empty_image` | info | an image without boxes (a background image; never makes the check fail) |
 
-Errors make the loader skip the image; warnings are fixed up on load. `--json` prints one report:
+Errors make the loader skip the image (except a truncated JPEG, which decodes with grey rows: fix or remove it);
+warnings are fixed up on load. `--min-severity warning` (or `error`) lists only the more serious issues in
+`--json` (`counts` still covers all; a clean dataset with background images then prints no issues). `--json`
+prints one report:
 `{"path","root","format","classes","images","splits","clean","counts":{"error","warning","info","by_kind":{kind: n}},
 "issues":[{"kind","severity","file","line","message","fix"?}],"seconds"}`. `file` is relative to `root` with `/`
 separators; `line` is 1-based for label-line issues and `null` otherwise. Without `fix`, each issue is exactly the

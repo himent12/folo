@@ -22,12 +22,15 @@ pub struct Cli {
 pub enum Command {
     /// Run the HTTP API (docs/API.md) and serve FOLO Studio.
     Serve(ServeArgs),
-    /// Print the whole CLI surface (commands, arguments, types, defaults, help) as JSON.
-    Describe,
+    /// Print the CLI surface (commands, arguments, types, defaults, help) as JSON: all of it, or one command.
+    Describe(DescribeArgs),
     /// Check the environment: version, OS, CPU, memory, web app build.
     Doctor(DoctorArgs),
     /// Train a detector.
+    #[command(allow_negative_numbers = true)]
     Train(TrainArgs),
+    /// Ask a running `folo train` to stop after its current batch (it keeps the last epoch's checkpoint).
+    Stop(StopArgs),
     /// Evaluate weights on a dataset split (mAP, precision, recall).
     Val(ValArgs),
     /// Run inference on images or folders.
@@ -69,6 +72,33 @@ pub struct ServeArgs {
     /// gpu:<n>. Training runs use their own `device` setting.
     #[arg(long, env = "FOLO_DEVICE", default_value = "auto")]
     pub device: String,
+}
+
+/// `folo describe`.
+#[derive(Debug, Args)]
+pub struct DescribeArgs {
+    /// Only this command, e.g. `train` or `dataset check` (its arguments and subcommands, without `mcp_tools`).
+    pub command: Vec<String>,
+    /// Leave out `mcp_tools` (the `folo mcp` tool schemas), which most of the full output is.
+    #[arg(long)]
+    pub no_mcp_tools: bool,
+}
+
+/// `folo stop`.
+#[derive(Debug, Args)]
+pub struct StopArgs {
+    /// The run folder `folo train` prints (`run_dir`), e.g. runs/shapes-n.
+    pub run_dir: PathBuf,
+}
+
+/// Which `folo train --json` records to print.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub enum JsonEvents {
+    /// Every record: status, step (throttled to about 10 per second), epoch, log and done.
+    #[default]
+    All,
+    /// No step records: status, epoch, log and done (about 1 KB per epoch).
+    Epoch,
 }
 
 /// `folo doctor`.
@@ -163,9 +193,16 @@ pub struct TrainArgs {
     #[arg(long, default_value = "runs")]
     pub project: PathBuf,
     /// Continue an interrupted run from its checkpoint (runs/<name>/weights/last.folo). The run's stored settings
-    /// are used; only --workers and --device may change.
+    /// are used: only --workers, --device and --data may differ, other flags must match or be left out. A run that
+    /// completed cannot be resumed; start a new run with --model <run>/weights/best.folo instead.
     #[arg(long)]
     pub resume: Option<PathBuf>,
+    /// Which records --json prints: all, or epoch (no per-batch step records).
+    #[arg(long, value_enum, default_value_t = JsonEvents::All)]
+    pub json_events: JsonEvents,
+    /// The arguments given on the command line (set by `main`, so --resume can tell them from defaults).
+    #[arg(skip)]
+    pub explicit: Vec<String>,
 }
 
 /// Dataset split.
@@ -351,6 +388,20 @@ pub struct CheckArgs {
     /// Read only image headers instead of decoding every image (faster; misses truncated image data).
     #[arg(long)]
     pub headers_only: bool,
+    /// List only issues at least this serious in `--json` (`counts` always covers every issue).
+    #[arg(long, value_enum, default_value_t = SeverityArg::Info)]
+    pub min_severity: SeverityArg,
+}
+
+/// Issue severity, most serious first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
+pub enum SeverityArg {
+    /// The loader skips the image.
+    Error,
+    /// Fixed up on load, or suspicious.
+    Warning,
+    /// Background images.
+    Info,
 }
 
 /// `folo dataset stats`.

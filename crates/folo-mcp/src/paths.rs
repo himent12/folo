@@ -114,7 +114,11 @@ fn outside_error(root: &Path, canon: &Path) -> Result<(), Error> {
     Err(Error::new(
         StatusCode::FORBIDDEN,
         "path_outside_data_dir",
-        format!("{} is outside the data dir {}", canon.display(), root.display()),
+        format!(
+            "{} is outside the data dir {}",
+            folo_api::json::path(canon),
+            folo_api::json::path(root)
+        ),
     )
     .hint("`folo mcp --confine` only reads inside --data-dir; copy the files there or restart without --confine"))
 }

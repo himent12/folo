@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use folo_api::{
-    Arch, Dataset, ExportResult, Model, PredictResponse, RegisterDataset, Run, RunMetrics, SyntheticDataset,
-    ValReport, ValRequest,
+    Arch, Dataset, ExportResult, IssueSeverity, Model, PredictResponse, RegisterDataset, Run, RunMetrics,
+    SyntheticDataset, ValReport, ValRequest,
 };
 use folo_server::store::{ImageQuery, IssueQuery, PredictInput, PredictSource};
 use rmcp::handler::server::common::{schema_for_input, schema_for_output};
@@ -51,7 +51,137 @@ pub struct ToolDef {
 }
 
 fn input<T: JsonSchema + 'static>() -> Arc<JsonObject> {
-    schema_for_input::<T>().expect("tool inputs are objects")
+    let mut s = (*schema_for_input::<T>().expect("tool inputs are objects")).clone();
+    compact(&mut s, false);
+    close_objects(&mut s);
+    s.entry("additionalProperties").or_insert(Value::Bool(false)); // `{}` has no `properties`
+    Arc::new(s)
+}
+
+/// Marks every object schema with `properties` (the root and the `$defs`) `additionalProperties: false`: tools
+/// reject arguments they do not know ([`unknown_argument`]) instead of silently ignoring a typo.
+fn close_objects(s: &mut JsonObject) {
+    if s.contains_key("properties") && !s.contains_key("additionalProperties") {
+        s.insert("additionalProperties".into(), Value::Bool(false));
+    }
+    for v in s.values_mut() {
+        match v {
+            Value::Object(o) => close_objects(o),
+            Value::Array(a) => a.iter_mut().filter_map(Value::as_object_mut).for_each(close_objects),
+            _ => {}
+        }
+    }
+}
+
+/// The object schema `s` stands for: itself, its `$ref` target in `root`'s `$defs`, or the object branch of an
+/// `anyOf` / `oneOf` (how schemars writes `Option<T>`).
+fn object_schema<'a>(s: &'a JsonObject, root: &'a JsonObject) -> Option<&'a JsonObject> {
+    if s.contains_key("properties") {
+        return Some(s);
+    }
+    if let Some(r) = s.get("$ref").and_then(Value::as_str) {
+        let name = r.rsplit('/').next()?;
+        let defs = root.get("$defs").or_else(|| root.get("definitions"))?.as_object()?;
+        return object_schema(defs.get(name)?.as_object()?, root);
+    }
+    ["anyOf", "oneOf", "allOf"].iter().filter_map(|k| s.get(*k)?.as_array()).flatten().find_map(|b| {
+        let b = b.as_object()?;
+        object_schema(b, root)
+    })
+}
+
+/// Common wrong names for tool arguments, and what they are called here.
+const ALIASES: &[(&str, &str)] = &[
+    ("lr", "lr0"),
+    ("learning_rate", "lr0"),
+    ("model", "arch"),
+    ("model_name", "arch"),
+    ("dataset", "dataset_id"),
+    ("data", "dataset_id"),
+    ("batch_size", "batch"),
+    ("img_size", "imgsz"),
+    ("image_size", "imgsz"),
+    ("imgsize", "imgsz"),
+    ("run", "run_id"),
+    ("resume", "resume_run_id"),
+    ("model_path", "model_id"),
+    ("path", "image_path"),
+    ("image", "image_path"),
+    ("max_detections", "max_det"),
+    ("confidence", "conf"),
+    ("page_size", "limit"),
+];
+
+/// The known name closest to `key`: an alias, a name `key` is a prefix of, or one within two edits.
+fn did_you_mean<'a>(key: &str, known: &[&'a str]) -> Option<&'a str> {
+    if let Some((_, to)) = ALIASES.iter().find(|(from, _)| *from == key) {
+        return known.iter().copied().find(|k| k == to);
+    }
+    fn edits(a: &str, b: &str) -> usize {
+        let b: Vec<char> = b.chars().collect();
+        let mut row: Vec<usize> = (0..=b.len()).collect();
+        for (i, ca) in a.chars().enumerate() {
+            let mut prev = row[0];
+            row[0] = i + 1;
+            for (j, cb) in b.iter().enumerate() {
+                let cur = row[j + 1];
+                row[j + 1] = (prev + usize::from(ca != *cb)).min(row[j] + 1).min(cur + 1);
+                prev = cur;
+            }
+        }
+        row[b.len()]
+    }
+    let prefix =
+        known.iter().copied().filter(|k| k.starts_with(key) && key.len() >= 2).min_by_key(|k| k.len());
+    prefix.or_else(|| {
+        known
+            .iter()
+            .copied()
+            .map(|k| (edits(key, k), k))
+            .filter(|&(d, k)| d <= 2 && d < k.len().min(key.len()))
+            .min_by_key(|&(d, _)| d)
+            .map(|(_, k)| k)
+    })
+}
+
+/// The first argument (dotted path for nested objects) that `schema` does not declare, as an `invalid_arguments`
+/// error naming the accepted ones.
+fn unknown_argument(tool: &str, schema: &JsonObject, args: &JsonObject) -> Option<Error> {
+    fn walk(
+        prefix: &str,
+        s: &JsonObject,
+        root: &JsonObject,
+        v: &JsonObject,
+    ) -> Option<(String, Vec<String>)> {
+        let empty = JsonObject::new();
+        let props = s.get("properties").and_then(Value::as_object).unwrap_or(&empty);
+        for (k, val) in v {
+            let path = if prefix.is_empty() { k.clone() } else { format!("{prefix}.{k}") };
+            match props.get(k) {
+                None => return Some((path, props.keys().cloned().collect())),
+                Some(Value::Object(ps)) => {
+                    if let (Value::Object(inner), Some(os)) = (val, object_schema(ps, root))
+                        && let Some(found) = walk(&path, os, root, inner)
+                    {
+                        return Some(found);
+                    }
+                }
+                Some(_) => {}
+            }
+        }
+        None
+    }
+    let (path, known) = walk("", schema, schema, args)?;
+    let names: Vec<&str> = known.iter().map(String::as_str).collect();
+    let last = path.rsplit('.').next().unwrap_or(&path);
+    let mut msg = format!("unknown argument `{}`", short(&path, 64));
+    if let Some(s) = did_you_mean(last, &names) {
+        msg.push_str(&format!("; did you mean `{s}`?"));
+    }
+    Some(
+        invalid_arguments(msg)
+            .hint(format!("{tool} takes {}; see its inputSchema (tools/list)", names.join(", "))),
+    )
 }
 
 /// `train`'s input: TrainConfig plus `resume_run_id`, where `dataset_id` is required unless `resume_run_id` is
@@ -71,7 +201,64 @@ fn train_input() -> Arc<JsonObject> {
 }
 
 fn output<T: JsonSchema + 'static>() -> Arc<JsonObject> {
-    schema_for_output::<T>()
+    let mut s = (*schema_for_output::<T>()).clone();
+    compact(&mut s, true);
+    Arc::new(s)
+}
+
+/// Shrinks a generated schema for `tools/list` (docs/MCP.md "Schemas"), keeping what validates. Everywhere: no
+/// `$schema`, no numeric `format` (`uint32`, `float`: `integer` / `number` say enough), no `minimum: 0` from
+/// unsigned types, and defaults without f32 noise. Output schemas also drop defaults and the descriptions inside
+/// shared `$defs` types (the root's fields keep theirs; docs/API.md documents the shared types), and write a
+/// `oneOf` of string constants as an `enum`.
+fn compact(s: &mut JsonObject, output: bool) {
+    /// `v` is a schema, or (`names`) a map from names to schemas (`properties`, `$defs`).
+    fn walk(v: &mut Value, output: bool, in_defs: bool, names: bool) {
+        match v {
+            Value::Object(o) if names => o.values_mut().for_each(|c| walk(c, output, in_defs, false)),
+            Value::Object(o) => {
+                if o.get("format").and_then(Value::as_str).is_some()
+                    && o.get("type") != Some(&json!("string"))
+                {
+                    o.remove("format");
+                }
+                if o.get("minimum") == Some(&json!(0)) && o.get("type") == Some(&json!("integer")) {
+                    o.remove("minimum");
+                }
+                if output {
+                    o.remove("default");
+                    if in_defs {
+                        o.remove("description");
+                    }
+                    let consts: Option<Vec<Value>> = o.get("oneOf").and_then(Value::as_array).and_then(|a| {
+                        a.iter().map(|b| b.get("const").filter(|c| c.is_string()).cloned()).collect()
+                    });
+                    if let Some(values) = consts {
+                        o.remove("oneOf");
+                        o.insert("type".into(), json!("string"));
+                        o.insert("enum".into(), Value::Array(values));
+                    }
+                }
+                for (k, child) in o.iter_mut() {
+                    let defs = k == "$defs" || k == "definitions";
+                    let names = defs || k == "properties" || k == "patternProperties";
+                    // `default`, `enum` and `const` hold values, not schemas.
+                    if !matches!(k.as_str(), "default" | "enum" | "const" | "examples") {
+                        walk(child, output, in_defs || defs, names);
+                    }
+                }
+            }
+            Value::Array(a) => a.iter_mut().for_each(|c| walk(c, output, in_defs, false)),
+            _ => {}
+        }
+    }
+    s.remove("$schema");
+    let mut v = Value::Object(std::mem::take(s));
+    walk(&mut v, output, false, false);
+    folo_api::json::clean_floats(&mut v);
+    if let Value::Object(o) = v {
+        *s = o;
+    }
 }
 
 /// Every tool, in the order of docs/MCP.md.
@@ -93,11 +280,19 @@ pub const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "get_dataset",
-        description: "One dataset with statistics (class counts, box sizes, boxes per image) and its first 50 \
-                      issues (broken labels, ...).",
+        description: "One dataset with statistics (class counts, box sizes, boxes per image), issue counts by \
+                      severity and kind, and its errors then warnings (first 50; infos are only counted).",
         mutating: false,
         input: input::<DatasetIdArgs>,
         output: output::<DatasetDetail>,
+    },
+    ToolDef {
+        name: "list_dataset_issues",
+        description: "Lists a dataset's issues (the `folo dataset check` findings: kind, severity, file, line, \
+                      message, suggested fix) in dataset order, optionally one severity or kind. Paged.",
+        mutating: false,
+        input: input::<ListIssuesArgs>,
+        output: output::<IssuesPage>,
     },
     ToolDef {
         name: "list_dataset_images",
@@ -271,7 +466,7 @@ pub(crate) fn short(s: &str, max: usize) -> String {
 /// what has a bounded form, and anything still too large is the `result_too_large` tool error.
 fn out<T: Serialize>(value: &T, summary: impl Into<String>) -> Result<Output, Error> {
     let value =
-        serde_json::to_value(value).map_err(|e| Error::internal(format!("serializing a result: {e}")))?;
+        folo_api::json::to_value(value).map_err(|e| Error::internal(format!("serializing a result: {e}")))?;
     let n = json_len(&value);
     if n > MAX_RESULT_BYTES {
         return Err(Error::new(
@@ -298,12 +493,31 @@ fn summary_classes(classes: &[String]) -> Vec<String> {
     classes.iter().take(SUMMARY_CLASSES).map(|c| short(c, 64)).collect()
 }
 
+/// An issue with its file, message and fix cut to 300 characters, so a page always makes progress.
+fn short_issue(mut i: folo_api::DatasetIssue) -> folo_api::DatasetIssue {
+    i.file = short(&i.file, 300);
+    i.message = short(&i.message, 300);
+    i.fix = i.fix.map(|f| short(&f, 300));
+    i
+}
+
 /// A run as a list item: names and the error cut so every item is small.
 fn run_summary(mut r: Run) -> Run {
     r.name = short(&r.name, MAX_NAME_CHARS);
     r.config.name = short(&r.config.name, MAX_NAME_CHARS);
     r.error = r.error.map(|e| short(&e, 500));
     r
+}
+
+/// Store errors keep their codes, except the HTTP layer's names for bad input (`invalid_body`, `invalid_query`,
+/// `invalid_path`, `bad_request`), which a tool reports as `invalid_arguments` (one vocabulary with the CLI:
+/// `folo_api::codes`).
+fn mcp_code(mut e: Error) -> Error {
+    if matches!(e.body.code.as_str(), "invalid_body" | "invalid_query" | "invalid_path" | "bad_request") {
+        e.body.code = "invalid_arguments".into();
+        e.body.hint.get_or_insert_with(|| "check the tool's inputSchema (tools/list)".into());
+    }
+    e
 }
 
 fn parse_args<T: DeserializeOwned>(args: JsonObject) -> Result<T, Error> {
@@ -418,10 +632,14 @@ impl Inner {
         if self.opts.read_only && def.mutating {
             return Err(read_only(def.name));
         }
+        if let Some(e) = unknown_argument(def.name, &(def.input)(), &args) {
+            return Err(e);
+        }
         let res = match def.name {
             "folo_info" => self.folo_info(parse_args(args)?).await,
             "list_datasets" => self.list_datasets(parse_args(args)?).await,
             "get_dataset" => self.get_dataset(parse_args(args)?).await,
+            "list_dataset_issues" => self.list_dataset_issues(parse_args(args)?).await,
             "list_dataset_images" => self.list_dataset_images(parse_args(args)?).await,
             "register_dataset" => self.register_dataset(parse_args(args)?).await,
             "create_synthetic_dataset" => self.create_synthetic(parse_args(args)?, progress).await,
@@ -437,7 +655,7 @@ impl Inner {
             "compare_runs" => self.compare_runs(parse_args(args)?).await,
             other => Err(Error::internal(format!("tool `{other}` has no handler"))),
         };
-        res.map_err(crate::confine::map_denied)
+        res.map_err(|e| mcp_code(crate::confine::map_denied(e)))
     }
 
     /// With `--confine`, fails unless dataset `id` reads only files inside the data dir.
@@ -497,38 +715,80 @@ impl Inner {
     async fn get_dataset(&self, a: DatasetIdArgs) -> Result<Output, Error> {
         self.ensure_dataset(&a.dataset_id).await?;
         let id = a.dataset_id.clone();
-        let (dataset, issues) = self
+        let (dataset, issues, counts) = self
             .blocking(move |s| {
-                let q = IssueQuery { kind: None, offset: 0, limit: MAX_ISSUES as u64 };
-                Ok((s.get_dataset(&id)?, s.list_issues(&id, &q)?))
+                let dataset = s.get_dataset(&id)?;
+                // Errors first, then warnings; infos (background images) are only counted.
+                let mut issues = Vec::new();
+                let mut counts = None;
+                for severity in [IssueSeverity::Error, IssueSeverity::Warning] {
+                    let limit = (MAX_ISSUES - issues.len()) as u64;
+                    let q = IssueQuery { severity: Some(severity), limit, ..IssueQuery::default() };
+                    let page = s.list_issues(&id, &q)?;
+                    // A `folo serve` without the severity filter returns every issue.
+                    issues.extend(
+                        page.issues.into_iter().filter(|i| i.severity == severity).take(limit as usize),
+                    );
+                    counts.get_or_insert(page.counts);
+                }
+                Ok((dataset, issues, counts.unwrap_or_default()))
             })
             .await?;
         let mut detail = DatasetDetail {
             dataset,
-            issues: issues
-                .issues
-                .into_iter()
-                .map(|i| IssueSummary {
-                    kind: i.kind,
-                    file: short(&i.file, 300),
-                    message: short(&i.message, 300),
-                })
-                .collect(),
-            issues_total: issues.total,
+            issues: issues.into_iter().map(short_issue).collect(),
+            issues_total: counts.error + counts.warning + counts.info,
+            issue_counts: counts,
         };
         while json_len(&detail) > MAX_RESULT_BYTES && detail.issues.pop().is_some() {}
         let s = &detail.dataset;
+        let c = &detail.issue_counts;
         let summary = format!(
-            "{} ({}): {} classes, {} train / {} val / {} test images, {} issues",
+            "{} ({}): {} classes, {} train / {} val / {} test images; {} errors, {} warnings, {} infos",
             s.name,
             s.id,
             s.classes.len(),
             s.splits.train,
             s.splits.val,
             s.splits.test,
-            detail.issues_total
+            c.error,
+            c.warning,
+            c.info
         );
         out(&detail, summary)
+    }
+
+    async fn list_dataset_issues(&self, a: ListIssuesArgs) -> Result<Output, Error> {
+        let (offset, limit) = page_window(a.cursor.as_deref(), a.limit)?;
+        if let Some(k) = &a.kind
+            && !folo_api::ISSUE_KINDS.contains(&k.as_str())
+        {
+            return Err(invalid_arguments(format!(
+                "unknown issue kind `{}`; kind is one of {}",
+                short(k, 40),
+                folo_api::ISSUE_KINDS.join(", ")
+            )));
+        }
+        self.ensure_dataset(&a.dataset_id).await?;
+        let q = IssueQuery { kind: a.kind.clone(), severity: a.severity, offset, limit };
+        let id = a.dataset_id.clone();
+        let page = self.blocking(move |s| s.list_issues(&id, &q)).await?;
+        let counts = page.counts;
+        let page = fit_page(page.issues.into_iter().map(short_issue), offset, limit, page.total);
+        let filter: Vec<&str> = a.severity.map(|s| s.as_str()).into_iter().chain(a.kind.as_deref()).collect();
+        let summary = format!(
+            "{} of {} {}issues of {}; {} errors, {} warnings, {} infos in all",
+            page.items.len(),
+            page.total,
+            if filter.is_empty() { String::new() } else { format!("{} ", filter.join(" ")) },
+            a.dataset_id,
+            counts.error,
+            counts.warning,
+            counts.info
+        );
+        let result =
+            IssuesPage { items: page.items, next_cursor: page.next_cursor, total: page.total, counts };
+        out(&result, summary)
     }
 
     async fn list_dataset_images(&self, a: ListImagesArgs) -> Result<Output, Error> {
@@ -556,18 +816,31 @@ impl Inner {
             check_name("name", n)?;
         }
         let path = self.resolve(a.path).await?;
-        let req =
-            RegisterDataset { name: a.name, path: path.to_string_lossy().into_owned(), format: a.format };
-        let d = self.blocking(move |s| s.register_dataset(req)).await?;
+        let req = RegisterDataset { name: a.name, path: folo_api::json::path(&path), format: a.format };
+        // The store returns the existing dataset for a folder registered before (same canonical path).
+        let (d, existed) = self
+            .blocking(move |s| {
+                let before: HashSet<String> = s.list_datasets()?.into_iter().map(|d| d.id).collect();
+                let d = s.register_dataset(req)?;
+                let existed = before.contains(&d.id);
+                Ok((d, existed))
+            })
+            .await?;
         // The root is inside the data dir; with --confine its contents must be too (a data.yaml or links can point
-        // elsewhere). If not, unregister it again (files are never touched).
+        // elsewhere). If not, unregister it again (files are never touched); one registered earlier stays.
         if let Err(e) = self.ensure_dataset(&d.id).await {
-            let (id, c) = (d.id.clone(), self.confinement.clone());
-            let _ = self.blocking(move |s| s.delete_dataset(&id)).await;
-            c.forget(&d.id);
+            if !existed {
+                let (id, c) = (d.id.clone(), self.confinement.clone());
+                let _ = self.blocking(move |s| s.delete_dataset(&id)).await;
+                c.forget(&d.id);
+            }
             return Err(e);
         }
-        let summary = format!("registered {} as {} ({} classes)", d.name, d.id, d.classes.len());
+        let summary = if existed {
+            format!("{} is already registered as {} ({}); returned it", d.path, d.id, d.name)
+        } else {
+            format!("registered {} as {} ({} classes)", d.name, d.id, d.classes.len())
+        };
         out(&d, summary)
     }
 
@@ -628,7 +901,14 @@ impl Inner {
                 id.as_str().ok_or_else(|| invalid_arguments("resume_run_id must be a string"))?.to_string();
             return self.resume(id, args).await;
         }
-        let a: TrainArgs = parse_args(args)?;
+        // A TrainConfig value the trainer cannot use (`arch: "folo-q"`, a negative `epochs`) is `invalid_config`,
+        // as in the CLI and `POST /api/runs`' range checks; a missing `dataset_id` stays `invalid_arguments`.
+        let a: TrainArgs = parse_args(args).map_err(|mut e| {
+            if !e.body.message.contains("missing field") {
+                e.body.code = "invalid_config".into();
+            }
+            e
+        })?;
         check_name("name", &a.config.name)?;
         self.ensure_dataset(&a.config.dataset_id).await?;
         let run = self.blocking(move |s| s.create_run(a.config)).await?;
@@ -1140,6 +1420,32 @@ mod tests {
         }
         let names: HashSet<_> = TOOLS.iter().map(|t| t.name).collect();
         assert_eq!(names.len(), TOOLS.len());
+    }
+
+    #[test]
+    fn unknown_arguments_are_rejected_with_a_suggestion() {
+        let args = |v: Value| v.as_object().unwrap().clone();
+        let train = find("train").unwrap();
+        let schema = (train.input)();
+        assert_eq!(schema.get("additionalProperties"), Some(&json!(false)));
+        let ok = args(json!({ "dataset_id": "ds_1", "epochs": 1, "lr0": 0.1, "augment": { "mosaic": 0.5 } }));
+        assert!(unknown_argument("train", &schema, &ok).is_none());
+        assert!(unknown_argument("train", &schema, &args(json!({ "resume_run_id": "run_1" }))).is_none());
+        let e = unknown_argument("train", &schema, &args(json!({ "dataset_id": "d", "lr": 0.1 }))).unwrap();
+        assert_eq!(e.body.code, "invalid_arguments");
+        assert_eq!(e.body.message, "unknown argument `lr`; did you mean `lr0`?");
+        assert!(e.body.hint.as_deref().unwrap().contains("dataset_id"));
+        let e = unknown_argument("train", &schema, &args(json!({ "dataset_id": "d", "model": "folo-s" })))
+            .unwrap();
+        assert!(e.body.message.contains("did you mean `arch`?"), "{}", e.body.message);
+        let nested = args(json!({ "dataset_id": "d", "augment": { "mosiac": 0.5 } }));
+        let e = unknown_argument("train", &schema, &nested).unwrap();
+        assert_eq!(e.body.message, "unknown argument `augment.mosiac`; did you mean `mosaic`?");
+        for t in TOOLS {
+            let s = (t.input)();
+            assert_eq!(s.get("additionalProperties"), Some(&json!(false)), "{}", t.name);
+            assert!(unknown_argument(t.name, &s, &args(json!({ "zzz_bogus": 1 }))).is_some(), "{}", t.name);
+        }
     }
 
     #[test]

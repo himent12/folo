@@ -840,7 +840,7 @@ fn build(
         cfg.dataset = dataset.id.clone();
         Trainer::new(cfg, data, opts)
     };
-    t.map_err(|err| err.to_string())
+    t.map_err(|err| err.summary())
 }
 
 /// folo-data's format of an API format.
