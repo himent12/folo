@@ -647,15 +647,16 @@ fn loss_impl(
     } else if n == 0 {
         sum_fixed_order(&cls_raw.softplus()?.sum(2, false)?)?
     } else {
-        // Move the foreground logits to −100 (softplus ≈ 4e-44, gradient ≈ 0) for the dense sum; the shift is
-        // detached and `index_add` passes the gradient through to `cls_raw` unchanged. Per-(image, class) row sums
-        // keep a fixed order.
+        // A constant 0/1 mask, built on the device (ones with −1 added at the foreground), removes the foreground
+        // positions from the dense sum exactly, value and gradient. Per-(image, class) row sums keep a fixed order.
         let idx = index(idx_cls)?;
-        let flat = cls_raw.flatten_all()?;
-        let x_fg = flat.index_select(0, &idx)?;
-        let shift = x_fg.detach().neg()?.sub_scalar(100.0)?;
-        let bg = flat.index_add(0, &idx, &shift)?.reshape(cls_raw.dims())?;
-        let dense = sum_fixed_order(&bg.softplus()?.sum(2, false)?)?;
+        let x_fg = cls_raw.flatten_all()?.index_select(0, &idx)?;
+        let bg_mask = {
+            let _g = no_grad();
+            let ones = Tensor::full_with([b * nc * n_a], 1.0, DType::F32, dev)?;
+            ones.index_add(0, &idx, &Tensor::full_with([n], -1.0, DType::F32, dev)?)?.reshape([b, nc, n_a])?
+        };
+        let dense = sum_fixed_order(&cls_raw.softplus()?.mul(&bg_mask)?.sum(2, false)?)?;
         dense.add(&sum_fixed_order(&x_fg.softplus()?.sub(&x_fg.mul(&t)?)?)?)?
     };
 
@@ -792,6 +793,42 @@ mod tests {
             // d/dx = B · 0.5 · (sigmoid(x) − T) / tss ≈ 0 at the positives.
             let g = out.total.backward().unwrap().get(&cls_raw).unwrap().to_vec::<f32>().unwrap();
             assert!(fg.iter().all(|&an| g[a + an].abs() < 1e-9), "fused {fused}");
+        }
+    }
+
+    /// Huge finite foreground logits (2^32, where `x − 100` rounds back to `x` in f32) are excluded from the dense
+    /// sum exactly on both paths: the loss is the background part alone and the positives' gradient is
+    /// `sigmoid(x) − t = 0`.
+    #[test]
+    fn huge_foreground_logits_are_masked_exactly() {
+        let anchors = make_anchors(32, 32, &[8], 0.5);
+        let a = anchors.len();
+        let mut cls = vec![-5.0f32; a];
+        cls[2] = 4_294_967_296.0;
+        cls[9] = -4_294_967_296.0;
+        let cls_raw = Tensor::from_vec(cls, [1, 1, a]).unwrap().requires_grad_();
+        let box_raw = Tensor::zeros([1, 64, a]);
+        let asg = BatchAssignment {
+            batch: 1,
+            num_anchors: a,
+            num_classes: 1,
+            image: vec![0, 0],
+            anchor: vec![2, 9],
+            label: vec![0, 0],
+            score: vec![1.0, 0.0],
+            target: vec![Xyxy::new(0.0, 0.0, 32.0, 32.0); 2],
+            inputs_finite: true,
+        };
+        let want = 0.5 * (a - 2) as f64 * (-5f64).exp().ln_1p(); // tss = 1
+        for fused in [true, false] {
+            let out = loss_impl(&box_raw, &cls_raw, &anchors, &asg, &LossConfig::default(), fused).unwrap();
+            assert!(
+                (out.items.cls as f64 - want).abs() <= 1e-6 * want,
+                "fused {fused}: {} vs {want}",
+                out.items.cls
+            );
+            let g = out.total.backward().unwrap().get(&cls_raw).unwrap().to_vec::<f32>().unwrap();
+            assert_eq!((g[2], g[9]), (0.0, 0.0), "fused {fused}");
         }
     }
 
