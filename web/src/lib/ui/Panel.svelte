@@ -82,6 +82,21 @@
     gap: var(--space-1);
     flex-shrink: 0;
   }
+  /* Phones: controls wrap under the title instead of truncating it. */
+  @media (max-width: 767px) {
+    header {
+      flex-wrap: wrap;
+      row-gap: var(--space-2);
+    }
+    .title {
+      flex: 1 0 auto;
+      max-width: 100%;
+    }
+    .actions {
+      flex-wrap: wrap;
+      margin-left: auto;
+    }
+  }
   .body {
     flex: 1;
     min-height: 0;
