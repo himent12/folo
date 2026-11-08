@@ -3,7 +3,7 @@
 use super::grads;
 use crate::backend::{Conv2dParams, Pool2dParams, View};
 use crate::shape::DimVec;
-use crate::{Error, Result, Shape, Tensor};
+use crate::{Error, Result, Shape, Storage, Tensor};
 
 impl Tensor {
     /// Matrix product. Both operands need rank >= 2: `[.., m, k] @ [.., k, n] -> [.., m, n]`, with the batch
@@ -69,8 +69,8 @@ impl Tensor {
         self.conv2d_with(weight, bias, &p)
     }
 
-    /// [`Tensor::conv2d`] with per-axis parameters.
-    pub fn conv2d_with(&self, weight: &Tensor, bias: Option<&Tensor>, p: &Conv2dParams) -> Result<Tensor> {
+    /// Validate a conv2d call; returns the output shape.
+    fn check_conv2d(&self, weight: &Tensor, bias: Option<&Tensor>, p: &Conv2dParams) -> Result<Shape> {
         const OP: &str = "conv2d";
         self.check_f32(OP)?;
         weight.check_f32(OP)?;
@@ -106,18 +106,30 @@ impl Tensor {
         let [oh, ow] = p.output_hw(h, w, kh, kw).ok_or_else(|| {
             Error::invalid_arg(OP, format!("kernel {kh}x{kw} with {p:?} does not fit input {}", self.shape()))
         })?;
+        Ok(Shape::new(&[n, o, oh, ow]))
+    }
+
+    /// Run the backend's conv2d.
+    fn conv2d_kernel(&self, weight: &Tensor, bias: Option<&Tensor>, p: &Conv2dParams) -> Result<Storage> {
         let backend = self.backend()?;
-        let s = match bias {
+        match bias {
             Some(bt) => super::with_views(
                 [self, weight, bt],
                 [self.layout(), weight.layout(), bt.layout()],
                 |[x, wv, bv]| backend.conv2d(x, wv, Some(bv), p),
-            )?,
+            ),
             None => super::with_views([self, weight], [self.layout(), weight.layout()], |[x, wv]| {
                 backend.conv2d(x, wv, None, p)
-            })?,
-        };
-        let out = Tensor::wrap(s, Shape::new(&[n, o, oh, ow]), OP)?;
+            }),
+        }
+    }
+
+    /// [`Tensor::conv2d`] with per-axis parameters.
+    pub fn conv2d_with(&self, weight: &Tensor, bias: Option<&Tensor>, p: &Conv2dParams) -> Result<Tensor> {
+        const OP: &str = "conv2d";
+        let shape = self.check_conv2d(weight, bias, p)?;
+        let s = self.conv2d_kernel(weight, bias, p)?;
+        let out = Tensor::wrap(s, shape, OP)?;
         let (x, wt, has_bias, p) = (self.clone(), weight.clone(), bias.is_some(), *p);
         let mut inputs = vec![self, weight];
         if let Some(b) = bias {

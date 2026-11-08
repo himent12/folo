@@ -1,7 +1,7 @@
 //! `ConvBnAct`, docs/MODEL.md's `Conv` block (§2.1), and Conv+BN fusion (§9.1).
 
 use folo_core::rng::Rng;
-use folo_core::{DType, Device, Tensor};
+use folo_core::{DType, Device, Tensor, is_grad_enabled};
 
 use super::batchnorm::{BN_EPS, BN_MOMENTUM, BatchNorm2d};
 use super::conv::{Conv2d, Conv2dConfig};
@@ -98,16 +98,18 @@ impl Forward for ConvBnAct {
     /// - Fused (no BatchNorm): `act(conv2d(x) + bias)` through [`Tensor::conv2d_act`], one kernel with bias and
     ///   activation in the epilogue on the GPU when nothing is recorded.
     /// - Training: the conv, then [`BatchNorm2d::forward_act`] (BatchNorm + activation fused on the GPU).
-    /// - Evaluation on a device other than the CPU: the BatchNorm is folded into the conv weights on the fly
-    ///   (`W · k`, `β − mean · k`, small per-channel ops, differentiable) and the conv runs fused as above.
-    /// - Evaluation on the CPU: conv, BatchNorm, activation.
+    /// - Evaluation on a device other than the CPU, or on the CPU when nothing is recorded: the BatchNorm is
+    ///   folded into the conv weights on the fly (`W · k`, `β − mean · k`, small per-channel ops,
+    ///   differentiable) and the conv runs fused as above (the CPU applies bias + activation as its GEMM
+    ///   epilogue).
+    /// - Evaluation on the CPU with autograd recording: conv, BatchNorm, activation.
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
         let p = self.conv.config().params();
         let act = self.act.unary_op();
         match &self.bn {
             None => Ok(x.conv2d_act(&self.conv.weight, self.conv.bias.as_ref(), &p, act)?),
             Some(bn) if bn.is_training() => bn.forward_act(&self.conv.forward(x)?, self.act),
-            Some(bn) if !x.device().is_cpu() => {
+            Some(bn) if !x.device().is_cpu() || !is_grad_enabled() => {
                 let (scale, shift) = bn.eval_scale_shift()?;
                 let o = scale.numel();
                 let w = self.conv.weight.mul(&scale.reshape([o, 1, 1, 1])?)?;

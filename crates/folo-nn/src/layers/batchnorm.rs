@@ -223,28 +223,42 @@ fn train_cpu(x: &Tensor, gamma: &Tensor, beta: &Tensor, eps: f64) -> Result<(Ten
     let (nb, c, h, w) = x.dims4()?;
     let hw = h * w;
     let n = (nb * hw) as f64;
-    // The `nb` planes of channel `ch` in an NCHW buffer.
-    let planes = move |ch: usize| (0..nb).map(move |b| (b * c + ch) * hw..(b * c + ch + 1) * hw);
+    // Per-channel sums of per-plane partial sums, planes added in image order (deterministic for any thread
+    // count). Planes are the parallel unit, so a layer with few channels still uses every thread.
+    let per_channel = move |plane: &[(f64, f64)]| -> Vec<(f64, f64)> {
+        (0..c)
+            .map(|ch| (0..nb).map(|b| plane[b * c + ch]).fold((0.0, 0.0), |a, v| (a.0 + v.0, a.1 + v.1)))
+            .collect()
+    };
     let (mean, inv, var) = x.with_f32_slice(|xs| {
-        let stats: Vec<(f64, f64)> = (0..c)
-            .into_par_iter()
-            .map(|ch| {
-                let s: f64 = planes(ch).flat_map(|r| &xs[r]).map(|&v| v as f64).sum();
-                let mean = s / n;
-                let q: f64 = planes(ch).flat_map(|r| &xs[r]).map(|&v| (v as f64 - mean).powi(2)).sum();
-                (mean, q / n)
-            })
-            .collect();
-        let mean: Vec<f32> = stats.iter().map(|s| s.0 as f32).collect();
-        let inv: Vec<f32> = stats.iter().map(|s| (1.0 / (s.1 + eps).sqrt()) as f32).collect();
-        let var: Vec<f32> = stats.iter().map(|s| s.1 as f32).collect();
-        (mean, inv, var)
+        let sums: Vec<(f64, f64)> = if hw == 0 {
+            vec![(0.0, 0.0); nb * c]
+        } else {
+            xs.par_chunks(hw).map(|p| (sum_f64(p, |v| v as f64), 0.0)).collect()
+        };
+        let mean: Vec<f64> = per_channel(&sums).iter().map(|s| s.0 / n).collect();
+        let sq: Vec<(f64, f64)> = if hw == 0 {
+            sums
+        } else {
+            xs.par_chunks(hw)
+                .enumerate()
+                .map(|(p, xp)| {
+                    let m = mean[p % c];
+                    (sum_f64(xp, |v| (v as f64 - m) * (v as f64 - m)), 0.0)
+                })
+                .collect()
+        };
+        let var: Vec<f64> = per_channel(&sq).iter().map(|s| s.0 / n).collect();
+        let inv: Vec<f32> = var.iter().map(|v| (1.0 / (v + eps).sqrt()) as f32).collect();
+        let mean: Vec<f32> = mean.iter().map(|&m| m as f32).collect();
+        (mean, inv, var.iter().map(|&v| v as f32).collect::<Vec<f32>>())
     })?;
     let g = gamma.to_vec::<f32>()?;
     let scale: Vec<f32> = inv.iter().zip(&g).map(|(i, g)| i * g).collect();
     let bv = beta.to_vec::<f32>()?;
     let y = x.with_f32_slice(|xs| {
-        let mut y = vec![0f32; xs.len()];
+        // Every element is written below.
+        let mut y = folo_core::cpu::take_buffer(xs.len());
         if hw > 0 {
             y.par_chunks_mut(hw).zip(xs.par_chunks(hw)).enumerate().for_each(|(p, (o, xp))| {
                 let ch = p % c;
@@ -264,21 +278,21 @@ fn train_cpu(x: &Tensor, gamma: &Tensor, beta: &Tensor, eps: f64) -> Result<(Ten
         let gy = gy.contiguous()?;
         let (dx, dg, db) = gy.with_f32_slice(|gs| {
             xd.with_f32_slice(|xs| {
-                let sums: Vec<(f64, f64)> = (0..c)
-                    .into_par_iter()
-                    .map(|ch| {
-                        let (m, i) = (mean[ch], inv[ch]);
-                        let (mut sg, mut sgx) = (0f64, 0f64);
-                        for r in planes(ch) {
-                            for (&g, &v) in gs[r.clone()].iter().zip(&xs[r]) {
-                                sg += g as f64;
-                                sgx += g as f64 * ((v - m) * i) as f64;
-                            }
-                        }
-                        (sg, sgx)
-                    })
-                    .collect();
-                let mut dx = vec![0f32; xs.len()];
+                let planes: Vec<(f64, f64)> = if hw == 0 {
+                    vec![(0.0, 0.0); nb * c]
+                } else {
+                    gs.par_chunks(hw)
+                        .zip(xs.par_chunks(hw))
+                        .enumerate()
+                        .map(|(p, (gp, xp))| {
+                            let (m, i) = (mean[p % c], inv[p % c]);
+                            sum2_f64(gp, xp, |g, v| (g as f64, g as f64 * ((v - m) * i) as f64))
+                        })
+                        .collect()
+                };
+                let sums = per_channel(&planes);
+                // Every element is written below.
+                let mut dx = folo_core::cpu::take_buffer(xs.len());
                 if hw > 0 {
                     dx.par_chunks_mut(hw).enumerate().for_each(|(p, o)| {
                         let ch = p % c;
@@ -303,6 +317,42 @@ fn train_cpu(x: &Tensor, gamma: &Tensor, beta: &Tensor, eps: f64) -> Result<(Ten
         ])
     })?;
     Ok((y, mean_t, var_t))
+}
+
+/// `sum(f(v))` in `f64` with 8 independent accumulators, so the loop vectorises.
+#[inline]
+fn sum_f64(xs: &[f32], f: impl Fn(f32) -> f64) -> f64 {
+    let mut acc = [0f64; 8];
+    let (chunks, rest) = xs.as_chunks::<8>();
+    for ch in chunks {
+        for i in 0..8 {
+            acc[i] += f(ch[i]);
+        }
+    }
+    let tail: f64 = rest.iter().map(|&v| f(v)).sum();
+    acc.iter().sum::<f64>() + tail
+}
+
+/// The two sums `(sum f(a, b).0, sum f(a, b).1)` in `f64` with 4 independent accumulator pairs.
+#[inline]
+fn sum2_f64(a: &[f32], b: &[f32], f: impl Fn(f32, f32) -> (f64, f64)) -> (f64, f64) {
+    let (mut s0, mut s1) = ([0f64; 4], [0f64; 4]);
+    let (ca, ra) = a.as_chunks::<4>();
+    let (cb, rb) = b.as_chunks::<4>();
+    for (x, y) in ca.iter().zip(cb) {
+        for i in 0..4 {
+            let (p, q) = f(x[i], y[i]);
+            s0[i] += p;
+            s1[i] += q;
+        }
+    }
+    let (mut t0, mut t1) = (s0.iter().sum::<f64>(), s1.iter().sum::<f64>());
+    for (&x, &y) in ra.iter().zip(rb) {
+        let (p, q) = f(x, y);
+        t0 += p;
+        t1 += q;
+    }
+    (t0, t1)
 }
 
 /// A copy of every floating buffer of a model (the BatchNorm running statistics), taken before a train-mode

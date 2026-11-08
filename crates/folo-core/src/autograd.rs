@@ -150,6 +150,17 @@ fn topo_order(root: &Tensor) -> Vec<Tensor> {
     order
 }
 
+/// `acc + g`, in place when nothing else can observe `acc` (a fresh, contiguous gradient that no node saved and
+/// no other gradient shares), which saves an allocation and a pass over memory per fan-in.
+fn accumulate(acc: Tensor, g: &Tensor) -> Result<Tensor> {
+    let dense = acc.is_contiguous() && acc.cell().read().len() == acc.numel();
+    if acc.is_exclusive() && dense && acc.dtype() == crate::DType::F32 && !acc.same_storage(g) {
+        acc.add_assign(g)?;
+        return Ok(acc);
+    }
+    acc.add(g)
+}
+
 pub(crate) fn backward(root: &Tensor, seed: Tensor) -> Result<Grads> {
     if !root.requires_grad() {
         return Err(Error::Autograd("backward() on a tensor that does not require grad".into()));
@@ -207,7 +218,7 @@ pub(crate) fn backward(root: &Tensor, seed: Tensor) -> Result<Grads> {
             }
             match pending.remove(&inp.id()) {
                 Some(acc) => {
-                    pending.insert(inp.id(), acc.add(&gi)?);
+                    pending.insert(inp.id(), accumulate(acc, &gi)?);
                 }
                 None => {
                     pending.insert(inp.id(), gi);

@@ -246,7 +246,16 @@ fn fused_conv_matches_unfused_eval() {
         }
         blk.eval();
         let x = Tensor::randn([2, 8, 6, 6], 0.0, 1.0, &mut rng);
-        let want = no_grad_fwd(&blk, &x).to_vec::<f32>().unwrap();
+        // Reference: the separate ops (eval BatchNorm on running statistics), not the block's folded fast path.
+        let want = {
+            let _g = no_grad();
+            let y = blk.bn.as_ref().unwrap().forward(&blk.conv.forward(&x).unwrap()).unwrap();
+            blk.act.forward(&y).unwrap().to_vec::<f32>().unwrap()
+        };
+        // The unfused block in eval mode under no_grad folds on the fly; it must agree too.
+        let auto = no_grad_fwd(&blk, &x).to_vec::<f32>().unwrap();
+        let worst = auto.iter().zip(&want).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+        assert!(worst <= 1e-5, "k{k} s{s} g{g}: on-the-fly fold max diff {worst}");
         blk.fuse_().unwrap();
         assert!(blk.is_fused());
         let names: Vec<_> = blk.named_tensors().into_iter().map(|t| t.name).collect();

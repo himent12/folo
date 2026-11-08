@@ -336,6 +336,62 @@ fn sign(x: f32) -> f32 {
     }
 }
 
+/// `v[i] = op(v[i] + bias)` in place (`op = None`: just the bias), for fused epilogues. The usual activations
+/// have dedicated loops; other ops go through [`unary`].
+pub(crate) fn bias_act_inplace(op: Option<UnaryOp>, bias: f32, v: &mut [f32]) {
+    #[inline(always)]
+    fn go(v: &mut [f32], bias: f32, f: impl Fn(f32) -> f32) {
+        for x in v.iter_mut() {
+            *x = f(*x + bias);
+        }
+    }
+    match op {
+        None if bias == 0.0 => {}
+        None => go(v, bias, |x| x),
+        Some(UnaryOp::Silu) => go(v, bias, |x| x * sigmoid(x)),
+        Some(UnaryOp::Relu) => go(v, bias, |x| x.max(0.0)),
+        Some(UnaryOp::Sigmoid) => go(v, bias, sigmoid),
+        Some(UnaryOp::LeakyRelu(a)) => go(v, bias, |x| if x > 0.0 { x } else { a * x }),
+        Some(UnaryOp::Hardswish) => go(v, bias, |x| x * (x + 3.0).clamp(0.0, 6.0) * (1.0 / 6.0)),
+        Some(op) => {
+            go(v, bias, |x| x);
+            let y = unary(op, v, &Layout::contiguous(crate::Shape::new(&[v.len()])));
+            v.copy_from_slice(&y);
+            super::recycle(y);
+        }
+    }
+}
+
+/// The error function, to about 1 ulp in `f32`: a Taylor series near 0 (relative accuracy for tiny `x`), and
+/// `1 - erfc(x)` with the Chebyshev-fitted `erfc` of Numerical Recipes (fractional error < 1.2e-7) beyond.
+#[inline]
+pub(crate) fn erf(x: f32) -> f32 {
+    let z = (x as f64).abs();
+    let r = if z < 0.5 {
+        // 2/sqrt(pi) * sum (-1)^n z^(2n+1) / (n! (2n+1)); the terms after z^17 are below 1e-12 relative.
+        let z2 = z * z;
+        let mut term = z;
+        let mut sum = z;
+        for n in 1..9 {
+            term *= -z2 / n as f64;
+            sum += term / (2 * n + 1) as f64;
+        }
+        sum * std::f64::consts::FRAC_2_SQRT_PI
+    } else {
+        let t = 1.0 / (1.0 + 0.5 * z);
+        let p = -1.265_512_23
+            + t * (1.000_023_68
+                + t * (0.374_091_96
+                    + t * (0.096_784_18
+                        + t * (-0.186_288_06
+                            + t * (0.278_868_07
+                                + t * (-1.135_203_98
+                                    + t * (1.488_515_87 + t * (-0.822_152_23 + t * 0.170_872_77))))))));
+        1.0 - t * (-z * z + p).exp()
+    };
+    if x.is_nan() { x } else { (r as f32).copysign(x) }
+}
+
 /// Apply a unary op.
 pub(crate) fn unary(op: UnaryOp, x: &[f32], lx: &Layout) -> Vec<f32> {
     use UnaryOp::*;
@@ -351,6 +407,10 @@ pub(crate) fn unary(op: UnaryOp, x: &[f32], lx: &Layout) -> Vec<f32> {
         Sin => map1(x, lx, f32::sin),
         Cos => map1(x, lx, f32::cos),
         Tanh => map1(x, lx, f32::tanh),
+        Atan => map1(x, lx, f32::atan),
+        Asin => map1(x, lx, f32::asin),
+        Acos => map1(x, lx, f32::acos),
+        Erf => map1(x, lx, erf),
         Sigmoid => map1(x, lx, sigmoid),
         Silu => map1(x, lx, |v| v * sigmoid(v)),
         Relu => map1(x, lx, |v| v.max(0.0)),
@@ -399,6 +459,18 @@ pub(crate) fn unary_backward(op: UnaryOp, x: &[f32], lx: &Layout, g: &[f32], lg:
         Tanh => map2(x, lx, g, lg, |x, g| {
             let t = x.tanh();
             g * (1.0 - t * t)
+        }),
+        // g / (1 + x^2), written as (g / x) / (x + 1 / x) for |x| > 1 so that x^2 never overflows.
+        Atan => {
+            map2(x, lx, g, lg, |x, g| if x.abs() > 1.0 { (g / x) / (x + 1.0 / x) } else { g / (1.0 + x * x) })
+        }
+        // (1 - x)(1 + x) keeps precision near |x| = 1, where 1 - x^2 cancels.
+        Asin => map2(x, lx, g, lg, |x, g| g / ((1.0 - x) * (1.0 + x)).sqrt()),
+        Acos => map2(x, lx, g, lg, |x, g| -g / ((1.0 - x) * (1.0 + x)).sqrt()),
+        // In f64, rounded once: exp(-x^2) underflows f32 long before g * exp(-x^2) does (x = 11, g = 3e38).
+        Erf => map2(x, lx, g, lg, |x, g| {
+            let x = x as f64;
+            (g as f64 * std::f64::consts::FRAC_2_SQRT_PI * (-x * x).exp()) as f32
         }),
         Sigmoid => map2(x, lx, g, lg, |x, g| {
             let s = sigmoid(x);
@@ -449,6 +521,7 @@ pub(crate) fn binary(op: BinaryOp, a: &[f32], la: &Layout, b: &[f32], lb: &Layou
         Pow => map2(a, la, b, lb, f32::powf),
         Maximum => map2(a, la, b, lb, f32::max),
         Minimum => map2(a, la, b, lb, f32::min),
+        Atan2 => map2(a, la, b, lb, f32::atan2),
         Eq => map2(a, la, b, lb, |a, b| mask(a == b)),
         Ne => map2(a, la, b, lb, |a, b| mask(a != b)),
         Gt => map2(a, la, b, lb, |a, b| mask(a > b)),
@@ -488,5 +561,37 @@ mod tests {
         assert_eq!(fast_exp(f32::NEG_INFINITY), 0.0);
         assert!(fast_exp(f32::NAN).is_nan());
         assert_eq!(fast_exp(0.0), 1.0);
+    }
+
+    #[test]
+    fn erf_accuracy() {
+        // Reference: the Maclaurin series in f64 (converges everywhere; 200 terms suffice for |x| <= 4.5).
+        let reference = |x: f64| {
+            let (mut term, mut sum) = (x, x);
+            for n in 1..200 {
+                term *= -x * x / n as f64;
+                sum += term / (2 * n + 1) as f64;
+            }
+            sum * std::f64::consts::FRAC_2_SQRT_PI
+        };
+        let mut worst = 0f64;
+        let mut x = -4.5f32;
+        while x <= 4.5 {
+            let (got, want) = (erf(x) as f64, reference(x as f64));
+            let a = (want.abs() as f32).max(f32::MIN_POSITIVE);
+            let ulp = (f32::from_bits(a.to_bits() + 1) - a) as f64;
+            worst = worst.max((got - want).abs() / ulp);
+            x += 0.00731;
+        }
+        assert!(worst <= 2.0, "worst error {worst} ulp");
+        for x in [1e-30f32, 1e-8, -3e-5] {
+            let want = x as f64 * std::f64::consts::FRAC_2_SQRT_PI;
+            assert!(((erf(x) as f64) - want).abs() <= 1e-7 * want.abs(), "{x}");
+        }
+        assert_eq!(erf(0.0), 0.0);
+        assert!(erf(-0.0).is_sign_negative());
+        assert_eq!(erf(10.0), 1.0);
+        assert_eq!(erf(f32::NEG_INFINITY), -1.0);
+        assert!(erf(f32::NAN).is_nan());
     }
 }

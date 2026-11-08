@@ -40,6 +40,14 @@ unary_fns! {
     cos => UnaryOp::Cos;
     /// Hyperbolic tangent.
     tanh => UnaryOp::Tanh;
+    /// Arctangent.
+    atan => UnaryOp::Atan;
+    /// Arcsine (NaN outside `[-1, 1]`; the gradient is infinite at `+-1`).
+    asin => UnaryOp::Asin;
+    /// Arccosine (NaN outside `[-1, 1]`; the gradient is infinite at `+-1`).
+    acos => UnaryOp::Acos;
+    /// The error function.
+    erf => UnaryOp::Erf;
     /// `1 / (1 + e^-x)`.
     sigmoid => UnaryOp::Sigmoid;
     /// `x * sigmoid(x)` (a.k.a. swish).
@@ -204,6 +212,12 @@ impl Tensor {
         self.binary(BinaryOp::Minimum, other)
     }
 
+    /// `atan2(self, other)` with broadcasting: the angle of the point `(x = other, y = self)` in `[-pi, pi]`.
+    /// The gradient at the origin is taken as 0.
+    pub fn atan2(&self, other: &Tensor) -> Result<Tensor> {
+        self.binary(BinaryOp::Atan2, other)
+    }
+
     /// `self == other` as a 0/1 `F32` mask.
     pub fn eq(&self, other: &Tensor) -> Result<Tensor> {
         self.binary(BinaryOp::Eq, other)
@@ -306,6 +320,10 @@ fn binary_backward(
                 sb
             )?
         ],
+        BinaryOp::Atan2 => {
+            let (ga, gb) = atan2_grads(a, b, g)?;
+            grads![side(need_a, &|| Ok(ga.clone()), sa)?, side(need_b, &|| Ok(gb.clone()), sb)?]
+        }
         BinaryOp::Maximum | BinaryOp::Minimum => {
             let wins = if op == BinaryOp::Maximum { a.gt(b)? } else { a.lt(b)? };
             let ties = a.eq(b)?.mul_scalar(0.5)?;
@@ -314,6 +332,39 @@ fn binary_backward(
         }
         _ => grads![None, None],
     })
+}
+
+/// `(g x / r^2, -g y / r^2)` for `atan2(y = a, x = b)` with `r^2 = x^2 + y^2`, both 0 at the origin, at the
+/// shape of `g` (the broadcast output).
+///
+/// No order of `f32` operations keeps every representable result for inputs and gradients near both ends of
+/// the range, so the CPU evaluates the formula in `f64` (exact squares, one rounding at the end). Other devices
+/// use `f32` ops on inputs scaled by `m = max(|x|, |y|)`, which avoids overflowing the squares.
+fn atan2_grads(a: &Tensor, b: &Tensor, g: &Tensor) -> Result<(Tensor, Tensor)> {
+    let shape = g.shape().clone();
+    if g.device().is_cpu() {
+        let y = a.broadcast_to(&shape)?.to_vec::<f32>()?;
+        let x = b.broadcast_to(&shape)?.to_vec::<f32>()?;
+        let gv = g.to_vec::<f32>()?;
+        let (mut ga, mut gb) = (vec![0f32; gv.len()], vec![0f32; gv.len()]);
+        for i in 0..gv.len() {
+            let (yv, xv, g) = (y[i] as f64, x[i] as f64, gv[i] as f64);
+            let r2 = xv * xv + yv * yv;
+            if r2 != 0.0 {
+                ga[i] = (g * xv / r2) as f32;
+                gb[i] = (-g * yv / r2) as f32;
+            }
+        }
+        return Ok((Tensor::from_vec(ga, shape.clone())?, Tensor::from_vec(gb, shape)?));
+    }
+    let m = a.abs()?.maximum(&b.abs()?)?;
+    let origin = m.eq_scalar(0.0)?;
+    let m = origin.where_cond(&a.scalar_like(1.0)?, &m)?;
+    let (ys, xs) = (a.div(&m)?, b.div(&m)?);
+    let r2 = ys.square()?.add(&xs.square()?)?;
+    let r2 = origin.where_cond(&a.scalar_like(1.0)?, &r2)?;
+    let part = |s: &Tensor| g.mul(s)?.div(&r2)?.div(&m);
+    Ok((part(&xs)?, part(&ys)?.neg()?))
 }
 
 #[cfg(test)]
@@ -383,6 +434,84 @@ mod tests {
         close(x.maximum(&t(&[0.25], &[])).unwrap().to_vec().unwrap(), vec![0.25, 0.25, 0.25, 0.5, 2.0]);
         close(x.square().unwrap().to_vec().unwrap(), vec![4.0, 0.25, 0.0, 0.25, 4.0]);
         close(x.exp().unwrap().log().unwrap().to_vec().unwrap(), vec![-2.0, -0.5, 0.0, 0.5, 2.0]);
+        let v = [-2.0f32, -0.5, 0.0, 0.5, 2.0];
+        close(x.atan().unwrap().to_vec().unwrap(), v.iter().map(|v| v.atan()).collect());
+        close(
+            x.mul_scalar(0.4).unwrap().asin().unwrap().to_vec().unwrap(),
+            v.iter().map(|v| (v * 0.4).asin()).collect(),
+        );
+        close(
+            x.mul_scalar(0.4).unwrap().acos().unwrap().to_vec().unwrap(),
+            v.iter().map(|v| (v * 0.4).acos()).collect(),
+        );
+        close(x.floor().unwrap().to_vec().unwrap(), vec![-2.0, -1.0, 0.0, 0.0, 2.0]);
+        close(x.ceil().unwrap().to_vec().unwrap(), vec![-2.0, -0.0, 0.0, 1.0, 2.0]);
+        close(x.round().unwrap().to_vec().unwrap(), vec![-2.0, -1.0, 0.0, 1.0, 2.0]);
+        close(x.sign().unwrap().to_vec().unwrap(), vec![-1.0, -1.0, 0.0, 1.0, 1.0]);
+        // erf(0.5) and erf(2) to 7 digits (Abramowitz & Stegun table 7.1).
+        close(
+            x.erf().unwrap().to_vec().unwrap(),
+            vec![-0.995_322_3, -0.520_499_9, 0.0, 0.520_499_9, 0.995_322_3],
+        );
+        // atan2(y, x) over the four quadrants and the axes.
+        let y = t(&[1.0, 1.0, -1.0, -1.0, 0.0, 2.0], &[6]);
+        let xx = t(&[1.0, -1.0, -1.0, 1.0, -3.0, 0.0], &[6]);
+        let want: Vec<f32> =
+            [(1.0f32, 1.0f32), (1.0, -1.0), (-1.0, -1.0), (-1.0, 1.0), (0.0, -3.0), (2.0, 0.0)]
+                .iter()
+                .map(|(y, x)| y.atan2(*x))
+                .collect();
+        close(y.atan2(&xx).unwrap().to_vec().unwrap(), want);
+        // Gradients stay finite and accurate where x^2 + y^2 would under- or overflow, and are 0 at the origin.
+        for v in [1e-30f32, 1e-20, 1.0, 1e20, 3e38] {
+            let (yv, xv) = (t(&[v], &[1]).requires_grad_(), t(&[v], &[1]).requires_grad_());
+            let g = yv.atan2(&xv).unwrap().sum_all().unwrap().backward().unwrap();
+            let want = 0.5 / v as f64;
+            for (got, sign) in [(g.get(&yv).unwrap(), 1.0), (g.get(&xv).unwrap(), -1.0)] {
+                let got = got.item::<f32>().unwrap() as f64;
+                assert!((got - sign * want).abs() <= 1e-6 * want, "atan2 grad at {v}: {got}");
+            }
+        }
+        // Unequal magnitudes, a large upstream gradient, a subnormal input on an axis (reference in f64).
+        let tiny = f32::from_bits(1);
+        for (yv, xv, gv) in [
+            (1e-30f32, 1e-20f32, 1e20f32),
+            (1e-39, 0.0, 1.0),
+            (3.0, -4e30, 1e-10),
+            (-2e-38, 5e-39, 1.0),
+            (tiny, tiny, tiny),
+            (1e-40, 1e-30, 1e-38),
+            (1e30, -1e-30, 3e38),
+        ] {
+            let (y, x) = (t(&[yv], &[1]).requires_grad_(), t(&[xv], &[1]).requires_grad_());
+            let g = y.atan2(&x).unwrap().backward_with(&t(&[gv], &[1])).unwrap();
+            let (y64, x64, g64) = (yv as f64, xv as f64, gv as f64);
+            let r2 = y64 * y64 + x64 * x64;
+            for (got, want) in [(g.get(&y).unwrap(), g64 * x64 / r2), (g.get(&x).unwrap(), -g64 * y64 / r2)] {
+                let got = got.item::<f32>().unwrap() as f64;
+                let want32 = want as f32 as f64; // the f32-representable answer (0, subnormal or inf included)
+                let ok = got == want32 || (got - want).abs() <= 1e-6 * want.abs() + 1e-44;
+                assert!(ok, "atan2 grad at ({yv}, {xv}) * {gv}: {got} vs {want}");
+            }
+        }
+        // atan's 1 / (1 + x^2) must not overflow for large |x| (true value g / x^2).
+        let xa = t(&[1e20, -3e15, 0.5], &[3]).requires_grad_();
+        let g = xa.atan().unwrap().backward_with(&t(&[1e20, 1.0, 2.0], &[3])).unwrap();
+        close(g.get(&xa).unwrap().to_vec().unwrap(), vec![1e-20, (1.0 / 9e30f64) as f32, 1.6]);
+        let gv = g.get(&xa).unwrap().to_vec::<f32>().unwrap();
+        assert!((gv[0] / 1e-20 - 1.0).abs() < 1e-6 && (gv[1] as f64 * 9e30 - 1.0).abs() < 1e-5, "{gv:?}");
+        // erf's derivative times a huge upstream gradient stays finite when the result is.
+        for xv in [1.0f32, 11.0] {
+            let xe = t(&[xv], &[1]).requires_grad_();
+            let g = xe.erf().unwrap().backward_with(&t(&[3.2e38], &[1])).unwrap();
+            let want = 3.2e38f64 * std::f64::consts::FRAC_2_SQRT_PI * (-(xv as f64).powi(2)).exp();
+            let got = g.get(&xe).unwrap().item::<f32>().unwrap() as f64;
+            assert!((got - want).abs() <= 1e-6 * want, "erf grad at {xv}: {got} vs {want}");
+        }
+        let (yv, xv) = (t(&[0.0], &[1]).requires_grad_(), t(&[0.0], &[1]).requires_grad_());
+        let g = yv.atan2(&xv).unwrap().sum_all().unwrap().backward().unwrap();
+        assert_eq!(g.get(&yv).unwrap().item::<f32>().unwrap(), 0.0);
+        assert_eq!(g.get(&xv).unwrap().item::<f32>().unwrap(), 0.0);
         assert!(Tensor::from_slice(&[1u8], [1]).unwrap().exp().is_err());
     }
 

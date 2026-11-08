@@ -57,6 +57,14 @@ pub enum UnaryOp {
     Sin,
     Cos,
     Tanh,
+    /// Arctangent, in `(-pi/2, pi/2)`.
+    Atan,
+    /// Arcsine of `x` in `[-1, 1]`.
+    Asin,
+    /// Arccosine of `x` in `[-1, 1]`.
+    Acos,
+    /// The error function `2/sqrt(pi) * integral_0^x e^(-t^2) dt`.
+    Erf,
     Sigmoid,
     /// `x * sigmoid(x)`.
     Silu,
@@ -107,6 +115,10 @@ impl UnaryOp {
             UnaryOp::Sin => "sin",
             UnaryOp::Cos => "cos",
             UnaryOp::Tanh => "tanh",
+            UnaryOp::Atan => "atan",
+            UnaryOp::Asin => "asin",
+            UnaryOp::Acos => "acos",
+            UnaryOp::Erf => "erf",
             UnaryOp::Sigmoid => "sigmoid",
             UnaryOp::Silu => "silu",
             UnaryOp::Relu => "relu",
@@ -142,6 +154,8 @@ pub enum BinaryOp {
     Pow,
     Maximum,
     Minimum,
+    /// `atan2(a, b)`: the angle of the point `(b, a)` (`a` is y, `b` is x), in `[-pi, pi]`.
+    Atan2,
     Eq,
     Ne,
     Gt,
@@ -161,6 +175,7 @@ impl BinaryOp {
             BinaryOp::Pow => "pow",
             BinaryOp::Maximum => "maximum",
             BinaryOp::Minimum => "minimum",
+            BinaryOp::Atan2 => "atan2",
             BinaryOp::Eq => "eq",
             BinaryOp::Ne => "ne",
             BinaryOp::Gt => "gt",
@@ -392,6 +407,35 @@ pub trait Backend: Send + Sync + 'static {
     /// A copy of `x` with `out[.., idx[.., i, ..], ..] += src[.., i, ..]` along `dim`.
     fn scatter_add(&self, x: View<'_>, dim: usize, idx: View<'_>, src: View<'_>) -> Result<Storage> {
         unsupported!(self, "scatter_add")
+    }
+    /// Gradient of [`Backend::index_select`]: zeros of `input_shape` with the slices of `grad` added at `idx`
+    /// along `dim` (duplicates accumulate). The default composes [`Backend::full`] and [`Backend::index_add`];
+    /// the CPU backend scatters straight into a zeroed buffer.
+    fn index_select_backward(
+        &self,
+        grad: View<'_>,
+        dim: usize,
+        idx: View<'_>,
+        input_shape: &Shape,
+    ) -> Result<Storage> {
+        let device = grad.storage.device();
+        let zeros = self.full(device, DType::F32, input_shape.numel(), 0.0)?;
+        let layout = Layout::contiguous(input_shape.clone());
+        self.index_add(View::new(&zeros, &layout), dim, idx, grad)
+    }
+    /// Gradient of [`Backend::gather`]: zeros of `input_shape` with `out[.., idx[.., i, ..], ..] += grad[.., i, ..]`
+    /// along `dim`. The default composes [`Backend::full`] and [`Backend::scatter_add`].
+    fn gather_backward(
+        &self,
+        grad: View<'_>,
+        dim: usize,
+        idx: View<'_>,
+        input_shape: &Shape,
+    ) -> Result<Storage> {
+        let device = grad.storage.device();
+        let zeros = self.full(device, DType::F32, input_shape.numel(), 0.0)?;
+        let layout = Layout::contiguous(input_shape.clone());
+        self.scatter_add(View::new(&zeros, &layout), dim, idx, grad)
     }
     /// The `k` largest (or smallest) entries along the last dim, sorted, as `(values, I64 indices)`.
     fn topk(&self, x: View<'_>, k: usize, largest: bool) -> Result<(Storage, Storage)> {

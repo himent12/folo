@@ -2,7 +2,7 @@
 
 use rayon::prelude::*;
 
-use super::gemm::{Operand, Strided, gemm};
+use super::gemm::{Epilogue, Operand, Strided, gemm, gemm_ex};
 use crate::backend::Conv2dParams;
 
 /// Geometry shared by the kernels. All tensors are contiguous NCHW / OIHW.
@@ -34,7 +34,11 @@ impl ConvGeom {
         self.oh * self.ow
     }
     fn is_pointwise(&self) -> bool {
-        self.kh == 1 && self.kw == 1 && self.p.stride == [1, 1] && self.p.padding == [0, 0]
+        self.kh == 1
+            && self.kw == 1
+            && self.p.stride == [1, 1]
+            && self.p.padding == [0, 0]
+            && (self.oh, self.ow) == (self.h, self.w)
     }
     fn is_depthwise(&self) -> bool {
         self.p.groups == self.c && self.p.groups > 1
@@ -204,72 +208,172 @@ impl Operand for GradRows<'_> {
 /// Above this many flops per image, one image's GEMM is parallelised; below it, images run in parallel.
 const IMAGE_PAR_FLOPS: usize = 1 << 25;
 
-/// Forward conv2d into `out` (`[N, O, OH, OW]`, pre-filled with the bias or zeros).
-pub(crate) fn conv2d_forward(x: &[f32], wt: &[f32], out: &mut [f32], g: &ConvGeom, accumulate: bool) {
+/// Applied to every finished run of output values of one channel: `f(channel, values)`. Each output element is
+/// passed exactly once (conv2d fuses bias + activation here).
+pub(crate) type ChannelEpilogue<'a> = &'a (dyn Fn(usize, &mut [f32]) + Sync);
+
+/// Run `f(img, out_img, threads)` for every image: one after another with the whole pool for large images, side
+/// by side otherwise, splitting the pool between the images when there are fewer images than threads.
+fn for_each_image(
+    out: &mut [f32],
+    per_image: usize,
+    n: usize,
+    flops: usize,
+    f: impl Fn(usize, &mut [f32], usize) + Sync,
+) {
+    let threads = rayon::current_num_threads();
+    if per_image == 0 {
+        return;
+    }
+    if flops >= IMAGE_PAR_FLOPS || n == 1 {
+        for (img, o) in out.chunks_mut(per_image).enumerate() {
+            f(img, o, threads);
+        }
+    } else {
+        let share = threads.div_ceil(n).max(1);
+        out.par_chunks_mut(per_image).enumerate().for_each(|(img, o)| f(img, o, share));
+    }
+}
+
+/// Forward conv2d into `out` (`[N, O, OH, OW]`): overwritten, or accumulated into if `accumulate`. `epi`, if
+/// given, sees every finished output element once.
+pub(crate) fn conv2d_forward(
+    x: &[f32],
+    wt: &[f32],
+    out: &mut [f32],
+    g: &ConvGeom,
+    accumulate: bool,
+    epi: Option<ChannelEpilogue<'_>>,
+) {
     if g.is_depthwise() {
         if !accumulate {
             out.par_chunks_mut(1 << 16).for_each(|c| c.fill(0.0));
         }
-        return depthwise_forward(x, wt, out, g);
+        return depthwise_forward(x, wt, out, g, epi);
     }
     let (cg, og, kdim, ohw) = (g.cg(), g.og(), g.kdim(), g.ohw());
     let per_image_flops = 2 * g.o * ohw * kdim;
-    let image = |img: usize, out_img: &mut [f32], parallel: bool| {
+    for_each_image(out, g.o * ohw, g.n, per_image_flops, |img, out_img, threads| {
         for grp in 0..g.p.groups {
             let a = Strided::lhs(wt, grp * og * kdim, kdim, 1);
             let c = &mut out_img[grp * og * ohw..(grp + 1) * og * ohw];
             let base = (img * g.c + grp * cg) * g.h * g.w;
+            let rows = epi.map(|f| move |i: usize, _: usize, row: &mut [f32]| f(grp * og + i, row));
+            let rows = rows.as_ref().map(|r| r as Epilogue<'_>);
             if g.is_pointwise() {
                 let b = Strided::rhs(x, base, g.h * g.w, 1);
-                gemm(og, ohw, kdim, &a, &b, c, ohw, accumulate, parallel);
+                gemm_ex(og, ohw, kdim, &a, &b, c, ohw, accumulate, threads, rows);
             } else {
                 let b = Im2Col { x, base, g: *g };
-                gemm(og, ohw, kdim, &a, &b, c, ohw, accumulate, parallel);
+                gemm_ex(og, ohw, kdim, &a, &b, c, ohw, accumulate, threads, rows);
             }
         }
-    };
-    if per_image_flops >= IMAGE_PAR_FLOPS || g.n == 1 {
-        for (img, o) in out.chunks_mut(g.o * ohw).enumerate() {
-            image(img, o, true);
-        }
-    } else {
-        out.par_chunks_mut(g.o * ohw).enumerate().for_each(|(img, o)| image(img, o, false));
-    }
+    });
 }
 
-/// Gradient with respect to the input, written into `gx` (zeroed, `[N, C, H, W]`).
+/// True if [`conv2d_backward_input`] takes the transposed-convolution path: stride 1 and padding within the
+/// kernel's reach (`p <= d (k - 1)`) on both axes, not depthwise.
+fn transposed_dx(g: &ConvGeom) -> bool {
+    !g.is_depthwise()
+        && g.p.stride == [1, 1]
+        && g.p.dilation[0] * (g.kh - 1) >= g.p.padding[0]
+        && g.p.dilation[1] * (g.kw - 1) >= g.p.padding[1]
+}
+
+/// True if [`conv2d_backward_input`] writes every element of `gx`, so it need not be zeroed first.
+pub(crate) fn backward_input_overwrites(g: &ConvGeom) -> bool {
+    transposed_dx(g)
+}
+
+/// Gradient with respect to the input, written into `gx` (`[N, C, H, W]`, zeroed unless
+/// [`backward_input_overwrites`]).
+///
+/// With stride 1 this is the convolution of `gy` with the flipped kernel, channels swapped within each group
+/// (`dx[c, i] = sum_{o,t} W[o, c, t] gy[o, i + p - t d]`, i.e. offset `d (k - 1) - p`), run through the forward
+/// kernel: no unfolded matrix and no scattered adds. Pointwise convs multiply by `W^T` directly. Strided convs
+/// go through an unfolded gradient and col2im.
 pub(crate) fn conv2d_backward_input(gy: &[f32], wt: &[f32], gx: &mut [f32], g: &ConvGeom) {
     if g.is_depthwise() {
         return depthwise_backward_input(gy, wt, gx, g);
     }
+    let (cg, og, groups) = (g.cg(), g.og(), g.p.groups);
+    let hw = g.h * g.w;
+    if g.is_pointwise() {
+        // gx[img, grp] = W_g^T [cg x og] * gy[img, grp] [og x hw], reading W transposed in place.
+        for_each_image(gx, g.c * hw, g.n, 2 * g.c * hw * og, |img, gx_img, threads| {
+            for grp in 0..groups {
+                let a = Strided::lhs(wt, grp * og * cg, 1, cg);
+                let b = Strided::rhs(gy, (img * g.o + grp * og) * hw, hw, 1);
+                let c = &mut gx_img[grp * cg * hw..(grp + 1) * cg * hw];
+                gemm_ex(cg, hw, og, &a, &b, c, hw, false, threads, None);
+            }
+        });
+        return;
+    }
+    if !transposed_dx(g) {
+        return backward_input_col2im(gy, wt, gx, g);
+    }
+    // W'[c, o, ky', kx'] = W[o, c, kh - 1 - ky', kw - 1 - kx'] (within each group). Rows of W' (one per input
+    // channel) are built in blocks of 8 so that both the reads of W and the writes stay in L1.
+    let khw = g.kh * g.kw;
+    let mut flipped = super::alloc_uninit(g.c * og * khw);
+    let block = |(b, dst): (usize, &mut [f32])| {
+        let rows = dst.len() / (og * khw);
+        for oi in 0..og {
+            for r in 0..rows {
+                let row = b * 8 + r;
+                let (grp, ci) = (row / cg, row % cg);
+                let src = &wt[((grp * og + oi) * cg + ci) * khw..][..khw];
+                let d = &mut dst[(r * og + oi) * khw..][..khw];
+                for (t, v) in d.iter_mut().enumerate() {
+                    *v = src[khw - 1 - t];
+                }
+            }
+        }
+    };
+    if flipped.len() >= super::PAR_MIN {
+        flipped.par_chunks_mut(8 * og * khw).enumerate().for_each(block);
+    } else {
+        flipped.chunks_mut(8 * og * khw).enumerate().for_each(block);
+    }
+    let (dh, dw) = (g.p.dilation[0], g.p.dilation[1]);
+    let tg = ConvGeom {
+        n: g.n,
+        c: g.o,
+        h: g.oh,
+        w: g.ow,
+        o: g.c,
+        kh: g.kh,
+        kw: g.kw,
+        oh: g.h,
+        ow: g.w,
+        p: Conv2dParams {
+            stride: [1, 1],
+            padding: [dh * (g.kh - 1) - g.p.padding[0], dw * (g.kw - 1) - g.p.padding[1]],
+            dilation: [dh, dw],
+            groups,
+        },
+    };
+    conv2d_forward(gy, &flipped, gx, &tg, false, None);
+    super::recycle(flipped);
+}
+
+/// [`conv2d_backward_input`] through an unfolded gradient (`W^T gy`) and col2im.
+fn backward_input_col2im(gy: &[f32], wt: &[f32], gx: &mut [f32], g: &ConvGeom) {
     let (cg, og, kdim, ohw, hw) = (g.cg(), g.og(), g.kdim(), g.ohw(), g.h * g.w);
-    let per_image_flops = 2 * g.c * ohw * g.og();
-    let image = |img: usize, gx_img: &mut [f32], col: &mut Vec<f32>, parallel: bool| {
+    let flops = 2 * g.c * ohw * og * g.kh * g.kw;
+    for_each_image(gx, g.c * hw, g.n, flops, |img, gx_img, threads| {
+        // Every element of `col` is overwritten, so a recycled buffer needs no clearing.
+        let mut col = super::alloc_uninit(kdim * ohw);
         for grp in 0..g.p.groups {
             // col = W_g^T [kdim x og] * gy[img, g] [og x ohw]
             let a = Strided::lhs(wt, grp * og * kdim, 1, kdim);
             let b = Strided::rhs(gy, (img * g.o + grp * og) * ohw, ohw, 1);
-            let gx_grp = &mut gx_img[grp * cg * hw..(grp + 1) * cg * hw];
-            if g.is_pointwise() {
-                gemm(kdim, ohw, og, &a, &b, gx_grp, ohw, false, parallel);
-                continue;
-            }
-            // Every element of `col` is overwritten, so a reused buffer needs no clearing.
-            col.resize(kdim * ohw, 0.0);
-            gemm(kdim, ohw, og, &a, &b, col, ohw, false, parallel);
-            col2im(col, gx_grp, g, parallel);
+            gemm_ex(kdim, ohw, og, &a, &b, &mut col, ohw, false, threads, None);
+            col2im(&col, &mut gx_img[grp * cg * hw..(grp + 1) * cg * hw], g, threads > 1);
         }
-    };
-    if per_image_flops >= IMAGE_PAR_FLOPS || g.n == 1 {
-        let mut col = Vec::new();
-        for (img, gxi) in gx.chunks_mut(g.c * hw).enumerate() {
-            image(img, gxi, &mut col, true);
-        }
-    } else {
-        gx.par_chunks_mut(g.c * hw)
-            .enumerate()
-            .for_each_init(Vec::new, |col, (img, gxi)| image(img, gxi, col, false));
-    }
+        super::recycle(col);
+    });
 }
 
 /// Accumulate the unfolded gradient `col` (`[cg*kh*kw, ohw]`) into the input planes of one group.
@@ -347,7 +451,7 @@ fn valid_cols(ow: usize, s: isize, d: isize, w: isize) -> std::ops::Range<usize>
     lo..hi.max(lo)
 }
 
-fn depthwise_forward(x: &[f32], wt: &[f32], out: &mut [f32], g: &ConvGeom) {
+fn depthwise_forward(x: &[f32], wt: &[f32], out: &mut [f32], g: &ConvGeom, epi: Option<ChannelEpilogue<'_>>) {
     let mult = g.o / g.c;
     let (hw, ohw, khw) = (g.h * g.w, g.ohw(), g.kh * g.kw);
     let (sh, sw) = (g.p.stride[0] as isize, g.p.stride[1] as isize);
@@ -385,6 +489,9 @@ fn depthwise_forward(x: &[f32], wt: &[f32], out: &mut [f32], g: &ConvGeom) {
                     }
                 }
             }
+        }
+        if let Some(f) = epi {
+            f(oc, op);
         }
     });
 }

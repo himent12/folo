@@ -41,6 +41,15 @@ fn unary_ops() {
     check1(|x| x.sin(), x.clone());
     check1(|x| x.cos(), x.clone());
     check1(|x| x.tanh(), x.clone());
+    check1(|x| x.atan(), x.mul_scalar(2.0).unwrap());
+    let inside = uniform(&[3, 5], -0.9, 0.9, 6);
+    check1(|x| x.asin(), inside.clone());
+    check1(|x| x.acos(), inside.clone());
+    check1(|x| x.erf(), x.clone());
+    // Zero-gradient rounding ops, away from their jumps.
+    for f in [Tensor::floor, Tensor::ceil, Tensor::round, Tensor::sign] {
+        check1(f, x.clone());
+    }
     check1(|x| x.sigmoid(), x.clone());
     check1(|x| x.silu(), x.clone());
     check1(|x| x.relu(), x.clone());
@@ -76,6 +85,9 @@ fn binary_ops_with_broadcasting() {
     grad2(|x, y| x.sub(y), a.clone(), b.clone());
     grad2(|x, y| x.mul(y), a.clone(), b.clone());
     grad2(|x, y| x.div(y), a.clone(), pos.clone());
+    // atan2 in all four quadrants (randn), with broadcasting both ways.
+    grad2(|x, y| x.atan2(y), a.clone(), b.clone());
+    grad2(|x, y| y.atan2(x), a.clone(), b.clone());
     let (ga, gb) = (grid(&[2, 3, 4], 16), grid(&[3, 1], 17).add_scalar(0.05).unwrap());
     grad2(|x, y| x.maximum(y), ga.clone(), gb.clone());
     grad2(|x, y| x.minimum(y), ga, gb);
@@ -211,6 +223,12 @@ fn conv2d_grads() {
     conv_case(1, 2, 2, [5, 5], [1, 1], p(2, 1, 1, 1), false, 76); // 1x1 with stride and padding
     let asym = Conv2dParams { stride: [1, 2], padding: [0, 1], dilation: [2, 1], groups: 1 };
     conv_case(1, 2, 3, [7, 6], [2, 3], asym, true, 77);
+    // conv2d_act records the composite conv2d + activation, so it trains like the separate ops.
+    let opts = GradCheck { max_checks: 24, ..GradCheck::default() };
+    let (x, w, b) =
+        (randn(&[1, 3, 5, 5], 78), randn(&[4, 3, 3, 3], 79).mul_scalar(0.5).unwrap(), randn(&[4], 80));
+    let act = Some(folo_core::UnaryOp::Silu);
+    grad_check_with(|v| v[0].conv2d_act(&v[1], Some(&v[2]), &p(1, 1, 1, 1), act), &[x, w, b], &opts).unwrap();
     // Non-contiguous input.
     let x = randn(&[1, 2, 5, 6], 78);
     let w = randn(&[3, 2, 3, 3], 79);

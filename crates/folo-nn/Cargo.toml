@@ -26,3 +26,7 @@ folo-gpu.workspace = true
 [[bench]]
 name = "nn"
 harness = false
+
+[[bench]]
+name = "train_step"
+harness = false

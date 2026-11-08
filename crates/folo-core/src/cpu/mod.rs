@@ -24,6 +24,14 @@ pub use elementwise::fast_exp;
 pub(crate) use pool_alloc::{alloc_filled, alloc_uninit, alloc_zeroed, recycle};
 pub use pool_alloc::{buffer_cache_bytes, clear_buffer_cache, set_buffer_cache_limit};
 
+/// A buffer of `n` floats from the CPU buffer cache (see [`set_buffer_cache_limit`]), with unspecified
+/// contents: zeros or the stale data of a recycled buffer. For kernels outside folo-core (custom ops) that
+/// overwrite every element; wrap the result with [`crate::Tensor::from_vec`] and it returns to the cache when the
+/// tensor drops.
+pub fn take_buffer(n: usize) -> Vec<f32> {
+    alloc_uninit(n)
+}
+
 /// Element count above which kernels go parallel.
 pub(crate) const PAR_MIN: usize = 1 << 15;
 /// Elements per parallel task for streaming kernels.
@@ -48,6 +56,14 @@ fn contiguous_f32<'a>(v: &View<'a>, op: &'static str) -> Result<Cow<'a, [f32]>> 
         Some(r) => Cow::Borrowed(&data[r]),
         None => Cow::Owned(elementwise::copy_strided(data, v.layout)),
     })
+}
+
+/// The elements of a view of any dtype as a contiguous slice (borrowed when already contiguous).
+fn contiguous<'a, T: Copy + Send + Sync + Default>(data: &'a [T], layout: &Layout) -> Cow<'a, [T]> {
+    match layout.contiguous_range() {
+        Some(r) => Cow::Borrowed(&data[r]),
+        None => Cow::Owned(elementwise::copy_strided(data, layout)),
+    }
 }
 
 /// Index values of an `I64`/`U32` view, validated against `size`.
@@ -270,20 +286,38 @@ impl Backend for CpuBackend {
     }
 
     fn conv2d(&self, x: View<'_>, w: View<'_>, bias: Option<View<'_>>, p: &Conv2dParams) -> Result<Storage> {
+        self.conv2d_act(x, w, bias, p, None)
+    }
+
+    fn conv2d_act(
+        &self,
+        x: View<'_>,
+        w: View<'_>,
+        bias: Option<View<'_>>,
+        p: &Conv2dParams,
+        act: Option<UnaryOp>,
+    ) -> Result<Storage> {
         let (xd, wd) = (contiguous_f32(&x, "conv2d")?, contiguous_f32(&w, "conv2d")?);
         let (n, c, h, wi) = nchw(x.shape());
         let (o, _, kh, kw) = nchw(w.shape());
         let [oh, ow] = p.output_hw(h, wi, kh, kw).expect("conv2d: output size validated by the caller");
         let g = conv::ConvGeom { n, c, h, w: wi, o, kh, kw, oh, ow, p: *p };
         let mut out = alloc_uninit(n * o * oh * ow);
-        if let Some(b) = bias {
-            let bd = contiguous_f32(&b, "conv2d")?;
-            for (i, plane) in out.chunks_mut(oh * ow).enumerate() {
-                plane.fill(bd[i % o]);
-            }
-        }
+        let bd = bias.map(|b| contiguous_f32(&b, "conv2d")).transpose()?;
         if !out.is_empty() {
-            conv::conv2d_forward(&xd, &wd, &mut out, &g, bias.is_some());
+            // Bias and activation are applied to each finished block of the output, while it is in cache.
+            let epi = |ch: usize, v: &mut [f32]| {
+                elementwise::bias_act_inplace(act, bd.as_ref().map_or(0.0, |b| b[ch]), v)
+            };
+            let fused = bd.is_some() || act.is_some();
+            conv::conv2d_forward(
+                &xd,
+                &wd,
+                &mut out,
+                &g,
+                false,
+                fused.then_some(&epi as conv::ChannelEpilogue<'_>),
+            );
         }
         Ok(f32_storage(out))
     }
@@ -300,7 +334,11 @@ impl Backend for CpuBackend {
         let (o, _, kh, kw) = nchw(w.shape());
         let (_, _, oh, ow) = nchw(grad.shape());
         let g = conv::ConvGeom { n, c, h, w: wi, o, kh, kw, oh, ow, p: *p };
-        let mut gx = alloc_zeroed(input_shape.numel());
+        let mut gx = if conv::backward_input_overwrites(&g) && !gd.is_empty() {
+            alloc_uninit(input_shape.numel())
+        } else {
+            alloc_zeroed(input_shape.numel())
+        };
         if !gx.is_empty() && !gd.is_empty() {
             conv::conv2d_backward_input(&gd, &wd, &mut gx, &g);
         }
@@ -401,8 +439,7 @@ impl Backend for CpuBackend {
         let ix = indices(&idx, "index_select", s3.1)?;
         let s = cpu(&x, "index_select")?;
         Ok(Storage::Cpu(with_cpu_storage!(s, v => {
-            let data = elementwise::copy_strided(v, x.layout);
-            Element::into_storage(index::index_select(&data, s3, &ix))
+            Element::into_storage(index::index_select(&contiguous(v, x.layout), s3, &ix))
         })))
     }
 
@@ -419,8 +456,7 @@ impl Backend for CpuBackend {
         let di = idx.shape().dims()[dim];
         let s = cpu(&x, "gather")?;
         Ok(Storage::Cpu(with_cpu_storage!(s, v => {
-            let data = elementwise::copy_strided(v, x.layout);
-            Element::into_storage(index::gather(&data, s3, &ix, di))
+            Element::into_storage(index::gather(&contiguous(v, x.layout), s3, &ix, di))
         })))
     }
 
@@ -430,6 +466,37 @@ impl Backend for CpuBackend {
         let di = idx.shape().dims()[dim];
         let (xd, sd) = (contiguous_f32(&x, "scatter_add")?, contiguous_f32(&src, "scatter_add")?);
         Ok(f32_storage(index::scatter_add(&xd, s3, &ix, &sd, di)))
+    }
+
+    fn index_select_backward(
+        &self,
+        grad: View<'_>,
+        dim: usize,
+        idx: View<'_>,
+        input_shape: &Shape,
+    ) -> Result<Storage> {
+        let s3 = reduce::split3(input_shape.dims(), dim);
+        let ix = indices(&idx, "index_select_backward", s3.1)?;
+        let gd = contiguous_f32(&grad, "index_select_backward")?;
+        let mut out = alloc_zeroed(input_shape.numel());
+        index::index_add_into(&mut out, s3, &ix, &gd);
+        Ok(f32_storage(out))
+    }
+
+    fn gather_backward(
+        &self,
+        grad: View<'_>,
+        dim: usize,
+        idx: View<'_>,
+        input_shape: &Shape,
+    ) -> Result<Storage> {
+        let s3 = reduce::split3(input_shape.dims(), dim);
+        let ix = indices(&idx, "gather_backward", s3.1)?;
+        let di = idx.shape().dims()[dim];
+        let gd = contiguous_f32(&grad, "gather_backward")?;
+        let mut out = alloc_zeroed(input_shape.numel());
+        index::scatter_add_into(&mut out, s3, &ix, &gd, di);
+        Ok(f32_storage(out))
     }
 
     fn topk(&self, x: View<'_>, k: usize, largest: bool) -> Result<(Storage, Storage)> {

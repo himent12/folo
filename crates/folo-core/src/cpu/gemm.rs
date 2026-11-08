@@ -13,7 +13,7 @@
 //! parallel. When C is too small to give every thread a tile but K is long, K is split across threads with
 //! private accumulators that are summed at the end.
 
-use std::cell::Cell;
+use std::cell::RefCell;
 use std::sync::OnceLock;
 
 use rayon::prelude::*;
@@ -263,20 +263,36 @@ unsafe fn kernel_avx2(
 }
 
 thread_local! {
-    static PACK_BUF: Cell<Vec<f32>> = const { Cell::new(Vec::new()) };
+    static PACK_BUFS: RefCell<Vec<Vec<f32>>> = const { RefCell::new(Vec::new()) };
 }
 
-/// Run `f` with a scratch buffer of at least `len` floats, reused across calls on the same thread. Re-entrant
-/// calls (rayon can run another task while this one waits) simply get a fresh buffer.
+/// Scratch buffers kept per thread. Re-entrant calls (rayon runs other tasks, including other GEMMs, on a thread
+/// while one of its tasks waits) take further buffers from the same stack instead of allocating.
+const PACK_BUFS_KEPT: usize = 4;
+
+/// Run `f` with a scratch buffer of at least `len` floats, reused across calls on the same thread.
 fn with_scratch<R>(len: usize, f: impl FnOnce(&mut [f32]) -> R) -> R {
-    let mut buf = PACK_BUF.with(|b| b.take());
+    // The smallest kept buffer that is large enough, else the largest (grown below).
+    let mut buf = PACK_BUFS
+        .with(|b| {
+            let mut b = b.borrow_mut();
+            let fit = (0..b.len()).filter(|&i| b[i].len() >= len).min_by_key(|&i| b[i].len());
+            let pick = fit.or_else(|| (0..b.len()).max_by_key(|&i| b[i].len()));
+            pick.map(|i| b.swap_remove(i))
+        })
+        .unwrap_or_default();
     if buf.len() < len {
         buf.resize(len, 0.0);
     }
     let r = f(&mut buf[..len]);
-    PACK_BUF.with(|b| {
-        let old = b.take();
-        b.set(if old.len() > buf.len() { old } else { buf });
+    PACK_BUFS.with(|b| {
+        let mut b = b.borrow_mut();
+        b.push(buf);
+        if b.len() > PACK_BUFS_KEPT {
+            // Drop the smallest.
+            let i = (0..b.len()).min_by_key(|&i| b[i].len()).unwrap_or(0);
+            b.swap_remove(i);
+        }
     });
     r
 }
@@ -334,42 +350,70 @@ pub fn gemm<A: Operand, B: Operand>(
     accumulate: bool,
     parallel: bool,
 ) {
+    let threads = if parallel { rayon::current_num_threads() } else { 1 };
+    gemm_ex(m, n, k, a, b, c, ldc, accumulate, threads, None);
+}
+
+/// Applied to every finished row segment of C, while it is still in cache: `f(i, j0, &mut C[i, j0..j1])`.
+/// Each element of C is passed exactly once, after its last K block.
+pub(crate) type Epilogue<'a> = &'a (dyn Fn(usize, usize, &mut [f32]) + Sync);
+
+/// [`gemm`] with a thread budget (`1` = the calling thread only; the tiling is sized for `threads` tasks, so
+/// GEMMs that already run side by side can share the pool) and an optional [`Epilogue`].
+///
+/// The result does not depend on `threads`: every element of C is computed by one task in a fixed K order, and
+/// the K split (see [`k_split_parts`]) is a function of the shape only.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn gemm_ex<A: Operand, B: Operand>(
+    m: usize,
+    n: usize,
+    k: usize,
+    a: &A,
+    b: &B,
+    c: &mut [f32],
+    ldc: usize,
+    accumulate: bool,
+    threads: usize,
+    epi: Option<Epilogue<'_>>,
+) {
     if m == 0 || n == 0 {
         return;
     }
     let needed = (m - 1).checked_mul(ldc).and_then(|v| v.checked_add(n));
     assert!(ldc >= n && needed.is_some_and(|e| e <= c.len()), "gemm: C buffer too small");
+    let finish_rows = |c: &mut [f32]| {
+        if let Some(f) = epi {
+            for i in 0..m {
+                f(i, 0, &mut c[i * ldc..i * ldc + n]);
+            }
+        }
+    };
     if k == 0 {
         if !accumulate {
             for i in 0..m {
                 c[i * ldc..i * ldc + n].fill(0.0);
             }
         }
+        finish_rows(c);
         return;
     }
-    let threads = if parallel { rayon::current_num_threads() } else { 1 };
-    if threads <= 1 || 2 * m * n * k < PAR_FLOPS {
-        gemm_blocked(m, n, 0..k, a, b, c, ldc, accumulate, false);
-        return;
-    }
-    let g = choose_tiles(m, n, threads);
-    let (tm, tn) = g.tiles();
-    if tm * tn < threads && k >= 8 * KC {
-        // Split K: private accumulators, summed at the end.
-        let parts = threads.min(k / (2 * KC)).max(2);
+    let parts = k_split_parts(m, n, k);
+    if parts > 1 {
+        // Split K: private accumulators, summed in part order. The split depends only on (m, n, k), never on
+        // the thread budget, so the result is bitwise the same however it is scheduled.
         let step = k.div_ceil(parts).div_ceil(KC) * KC;
-        let partials: Vec<Vec<f32>> = (0..parts)
-            .into_par_iter()
-            .filter_map(|p| {
-                let k0 = p * step;
-                if k0 >= k {
-                    return None;
-                }
-                let mut buf = vec![0f32; m * n];
-                gemm_blocked(m, n, k0..(k0 + step).min(k), a, b, &mut buf, n, false, false);
-                Some(buf)
-            })
-            .collect();
+        let part = |p: usize| {
+            let k0 = p * step;
+            let mut buf = super::alloc_uninit(m * n);
+            gemm_blocked(m, n, k0..(k0 + step).min(k), a, b, &mut buf, n, false, 1, None);
+            buf
+        };
+        let parts = k.div_ceil(step);
+        let partials: Vec<Vec<f32>> = if threads > 1 {
+            (0..parts).into_par_iter().map(part).collect()
+        } else {
+            (0..parts).map(part).collect()
+        };
         for i in 0..m {
             let row = &mut c[i * ldc..i * ldc + n];
             if !accumulate {
@@ -381,10 +425,29 @@ pub fn gemm<A: Operand, B: Operand>(
                 }
             }
         }
+        partials.into_iter().for_each(super::recycle);
+        finish_rows(c);
         return;
     }
-    gemm_blocked(m, n, 0..k, a, b, c, ldc, accumulate, true);
+    let threads = if 2 * m * n * k < PAR_FLOPS { 1 } else { threads };
+    gemm_blocked(m, n, 0..k, a, b, c, ldc, accumulate, threads, epi);
 }
+
+/// Number of K parts for a GEMM whose C is too small to keep every thread busy with tiles but whose K is long
+/// (conv weight gradients: K = N·OH·OW), or 1. A function of the shape only, for reproducibility.
+fn k_split_parts(m: usize, n: usize, k: usize) -> usize {
+    if k < 8 * KC || 2 * m * n * k < PAR_FLOPS {
+        return 1;
+    }
+    let (tm, tn) = choose_tiles(m, n, K_SPLIT_THREADS).tiles();
+    if tm * tn >= K_SPLIT_THREADS {
+        return 1;
+    }
+    (k / (2 * KC)).clamp(2, K_SPLIT_THREADS)
+}
+
+/// The nominal thread count the K-split decision is made for (see [`k_split_parts`]).
+const K_SPLIT_THREADS: usize = 32;
 
 #[allow(clippy::too_many_arguments)]
 fn gemm_blocked<A: Operand, B: Operand>(
@@ -396,20 +459,18 @@ fn gemm_blocked<A: Operand, B: Operand>(
     c: &mut [f32],
     ldc: usize,
     accumulate: bool,
-    parallel: bool,
+    threads: usize,
+    epi: Option<Epilogue<'_>>,
 ) {
     let kern = kernel();
     let k = krange.len();
     let pm = m.div_ceil(MR);
     let pn = n.div_ceil(NR);
+    let parallel = threads > 1;
     // K super-block: as many KC blocks as fit the pack budget.
     let blocks_fit = (PACK_BUDGET / ((pm * MR + pn * NR) * KC)).max(1);
     let ks = (blocks_fit * KC).min(k.div_ceil(KC) * KC);
-    let g = if parallel {
-        choose_tiles(m, n, rayon::current_num_threads())
-    } else {
-        Geometry { m, n, mc: 144, nc: 512 }
-    };
+    let g = if parallel { choose_tiles(m, n, threads) } else { Geometry { m, n, mc: 144, nc: 512 } };
     let (tm, tn) = g.tiles();
     let cptr = SendPtr(c.as_mut_ptr());
     let a_len = pm * MR * ks;
@@ -418,6 +479,7 @@ fn gemm_blocked<A: Operand, B: Operand>(
         let mut s0 = krange.start;
         while s0 < krange.end {
             let ksz = ks.min(krange.end - s0);
+            let last = s0 + ksz == krange.end;
             let pa = &mut pa[..pm * MR * ksz];
             let pb = &mut pb[..pn * NR * ksz];
             let pack_a = |(p, dst): (usize, &mut [f32])| {
@@ -452,8 +514,8 @@ fn gemm_blocked<A: Operand, B: Operand>(
                             let apanel = &pa[(i / MR) * MR * ksz + kb * MR..];
                             debug_assert!(apanel.len() >= kc * MR && bpanel.len() >= kc * NR);
                             // SAFETY: panels hold kc*MR / kc*NR floats (packed above); the C block
-                            // [i..i+mr, j..j+nr] lies inside `c` (asserted by `gemm`) and belongs to this tile
-                            // only, so no other task touches it.
+                            // [i..i+mr, j..j+nr] lies inside `c` (asserted by `gemm_ex`) and belongs to this
+                            // tile only, so no other task touches it.
                             let acc = accumulate || s0 != krange.start || kb != 0;
                             unsafe {
                                 kern(
@@ -472,6 +534,14 @@ fn gemm_blocked<A: Operand, B: Operand>(
                         j += NR;
                     }
                     kb += KC;
+                }
+                if let (true, Some(f)) = (last, epi) {
+                    for i in i0..i1 {
+                        // SAFETY: row segment [i, j0..j1] is inside `c` and owned by this tile (see above); no
+                        // other reference to it exists while `f` runs.
+                        let row = unsafe { std::slice::from_raw_parts_mut(cp.0.add(i * ldc + j0), j1 - j0) };
+                        f(i, j0, row);
+                    }
                 }
             };
             if parallel {

@@ -3,7 +3,7 @@
 use super::grads;
 use crate::backend::ReduceOp;
 use crate::shape::DimVec;
-use crate::{AllDims, DType, Dim, Dims, Error, Layout, Result, Shape, Tensor};
+use crate::{AllDims, Dim, Dims, Error, Layout, Result, Shape, Tensor};
 
 impl Tensor {
     /// Reduce `dims` (sorted, unique) without autograd. Output keeps the reduced dims as size 1.
@@ -38,7 +38,8 @@ impl Tensor {
         let merged = Shape::from(merged);
         let strides = merged.contiguous_strides();
         let mut cur = x.with_layout(Layout::new(merged, strides, x.layout().offset()));
-        for &d in &reduced {
+        // Innermost first: the first pass then reduces contiguous rows, the widest and most parallel case.
+        for &d in reduced.iter().rev() {
             let s = cur.with_view(|v| b.reduce(op, v, d))?;
             let shape = cur.shape().with_dim(d, 1);
             cur = Tensor::wrap(s, shape, name)?;
@@ -206,9 +207,9 @@ impl Tensor {
         let values = Tensor::wrap(vs, shape.clone(), "topk")?;
         let indices = Tensor::wrap(is, shape, "topk")?;
         let (idx, in_shape) = (indices.clone(), self.shape().clone());
+        let last = in_shape.rank() - 1;
         let values = values.track_saved("topk", &[self], &[&indices], move |g| {
-            let z = Tensor::zeros_with(&in_shape, DType::F32, g.device())?;
-            Ok(grads![Some(z.scatter_add(-1, &idx, g)?)])
+            Ok(grads![Some(g.gather_backward(last, &idx, &in_shape)?)])
         });
         Ok((values, indices))
     }

@@ -26,13 +26,24 @@ training and evaluation pipeline, a server, a CLI and a web studio.
 - CPU kernels: contiguous fast paths with rayon above ~32K elements; strided inputs are walked row by row after merging
   dimensions, or made contiguous once. A BLIS-style GEMM (`cpu::gemm`, packed panels, 6x16 AVX2/FMA micro-kernel
   chosen at runtime, tile- or K-split parallelism) backs `matmul` and conv2d. conv2d packs an implicit im2col operand
-  straight into GEMM panels (no unfolded matrix), with direct paths for 1x1 and depthwise convolutions. Large `f32`
-  buffers are recycled through a size-keyed cache (`cpu::set_buffer_cache_limit`, default 1 GiB) so training loops do
-  not pay page faults every step.
+  straight into GEMM panels (no unfolded matrix), with direct paths for 1x1 and depthwise convolutions; bias and
+  activation run as a GEMM epilogue on each finished output block (`Tensor::conv2d_act`, used by fused
+  `ConvBnAct` blocks and by eval-mode blocks under `no_grad`). Batches smaller than the thread pool split the pool
+  between images. The stride-1 input gradient is the forward kernel run on the output gradient with the flipped,
+  channel-swapped kernel (no col2im); strided convs use an unfolded gradient and col2im. Large `f32` buffers are
+  recycled through a size-keyed cache (`cpu::set_buffer_cache_limit`, default 1 GiB; `cpu::take_buffer` hands one
+  to custom ops) so training loops do not pay page faults every step.
+- Determinism: CPU results are bitwise identical from run to run and for every rayon thread count. Full and
+  long-row reductions use fixed blocks (8192 elements) combined by a fixed-order pairwise tree; reductions over
+  inner dims give each output element to one task; the GEMM's K split depends only on the shape; accumulating
+  scatters (`index_add`, `scatter_add` and the `index_select` / `gather` / `topk` gradients) partition work by
+  destination and add sources in index order. `crates/folo-core/tests/determinism.rs` checks this across pool
+  sizes.
 - Autograd: define-by-run, reverse mode. An op whose input requires grad records a node (inputs, their storage
   versions, a backward closure built from ordinary tensor ops) on the result. `loss.backward()` returns `Grads` (keyed
   by tensor id, leaves only) via a topological sort; graphs are retained, so backward can run twice. Graph teardown is
-  iterative (deep graphs do not overflow the stack). A thread-local `no_grad()` guard disables recording.
+  iterative (deep graphs do not overflow the stack). A thread-local `no_grad()` guard disables recording. Fan-in
+  gradients are summed in place when the running sum is a fresh tensor nothing else holds.
 - In-place updates for optimizers (`sub_assign`, `add_scaled_assign`, `copy_from`, `fill_assign`, `update_f32`, ...)
   refuse to touch a tensor that requires grad unless `no_grad` is active, and bump the storage version: backward
   through a graph that saved the old values fails with `Error::ModifiedInPlace` instead of using stale data.
@@ -44,7 +55,7 @@ training and evaluation pipeline, a server, a CLI and a web studio.
 - Fused ops with composite fallbacks (`ops/fused.rs`): `Tensor::conv2d_act` (conv + bias + activation),
   `Tensor::batch_norm_act_train` / `batch_norm_act_train_backward` (train-mode BatchNorm + activation, running
   update in place) and `Tensor::optimizer_step_` (in-place SGD / AdamW / EMA update) call optional `Backend` hooks;
-  folo-gpu implements them, other backends fall back.
+  folo-gpu implements them, the CPU backend implements `conv2d_act`, other backends fall back.
 - `Tensor::to_device_(device)` moves a storage to another device **in place**: the device lives on the shared storage
   cell, so every clone and view follows and the tensor keeps its id (gradients and optimizer state stay keyed). This
   is how whole models move (`Module::to_device`).
@@ -67,6 +78,8 @@ training and evaluation pipeline, a server, a CLI and a web studio.
   upsampling with their backwards, `index_select`/`index_add`/`gather`/`scatter_add`, `topk`) defaults to
   `Error::NotSupported { op, backend }`, so a backend can grow op by op. Gradients are composed from the same methods,
   so an op is trainable on a device once its forward and `*_backward` methods exist.
+- Optional gradient fast paths with composing defaults: `index_select_backward` and `gather_backward` (default
+  `full` zeros then `index_add` / `scatter_add`).
 - `max_pool2d_backward` also receives the pooling window (`Pool2dParams`), so a backend can compute the gradient as a
   gather (each input element visits only the windows that cover it) instead of a scatter with float atomics; the
   CPU backend ignores it.

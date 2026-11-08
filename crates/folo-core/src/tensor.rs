@@ -146,6 +146,17 @@ impl Tensor {
         Self::full_with(shape, 0.0, dtype, device)
     }
 
+    /// A tensor whose contents are unspecified (zeros, or stale data from the CPU buffer cache), for ops that
+    /// write every element before anything reads it.
+    pub(crate) fn uninit_with(shape: impl Into<Shape>, dtype: DType, device: Device) -> Result<Tensor> {
+        let shape = shape.into();
+        if device.is_cpu() && dtype == DType::F32 {
+            let data = crate::cpu::alloc_uninit(shape.numel());
+            return Ok(Self::make(Storage::Cpu(CpuStorage::F32(data)), shape));
+        }
+        Self::zeros_with(shape, dtype, device)
+    }
+
     /// Zeros with this tensor's shape, dtype and device.
     pub fn zeros_like(&self) -> Result<Tensor> {
         Self::full_with(self.shape(), 0.0, self.dtype(), self.device())
@@ -452,6 +463,11 @@ impl Tensor {
 
     pub(crate) fn cell(&self) -> &Arc<StorageCell> {
         &self.0.storage
+    }
+
+    /// True if no other handle, view or graph node can see this tensor's storage.
+    pub(crate) fn is_exclusive(&self) -> bool {
+        Arc::strong_count(&self.0) == 1 && Arc::strong_count(&self.0.storage) == 1
     }
 
     pub(crate) fn backend(&self) -> Result<Arc<dyn Backend>> {
