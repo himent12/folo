@@ -95,6 +95,14 @@
   });
 
   const dataset = $derived(datasets.data?.find((d) => d.id === datasetId));
+
+  // Pretrained weights must match the architecture; switching size drops an incompatible choice.
+  const weightOptions = $derived((models.data ?? []).filter((m) => m.arch === arch));
+  $effect(() => {
+    const opts = weightOptions;
+    if (!models.data) return;
+    if (untrack(() => weights) !== 'none' && !opts.some((m) => m.id === untrack(() => weights))) weights = 'none';
+  });
   const gpu = $derived(system.data?.gpus[0]);
 
   $effect(() => {
@@ -125,6 +133,7 @@
     seed: !isInt(seed, 0, 2 ** 32 - 1) ? 'A whole number, 0 or more.' : null,
     close: !isInt(augment.close_mosaic, 0, Number.isFinite(epochs) ? epochs : 0) ? 'A whole number up to the epoch count.' : null,
     dataset: !dataset ? 'Pick a dataset.' : null,
+    weights: weights !== 'none' && !weightOptions.some((m) => m.id === weights) ? 'Pick weights of the same model size.' : null,
   });
   const valid = $derived(prefilled && Object.values(errors).every((e) => e === null));
 
@@ -242,7 +251,7 @@
               <Select
                 id="weights"
                 bind:value={weights}
-                options={[{ value: 'none', label: 'Random init (from scratch)' }, ...(models.data ?? []).filter((m) => m.arch === arch).map((m) => ({ value: m.id, label: `${m.name} · mAP ${m.metrics?.map50_95.toFixed(3) ?? '—'}` }))]}
+                options={[{ value: 'none', label: 'Random init (from scratch)' }, ...weightOptions.map((m) => ({ value: m.id, label: `${m.name} · mAP ${m.metrics?.map50_95.toFixed(3) ?? '—'}` }))]}
               />
             </Field>
           </div>

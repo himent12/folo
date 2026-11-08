@@ -76,4 +76,42 @@ describe('LiveRun ordering', () => {
     expect(live.steps.map((s) => s.step)).toEqual([1, 2, 3, 4]);
     stop();
   });
+
+  it('reloads history once the stream opens, so nothing emitted before the subscription is lost', async () => {
+    let live!: LiveRun;
+    const stop = $effect.root(() => {
+      live = new LiveRun(() => 'run_7d1e');
+    });
+    flushSync();
+    metrics.resolve({ steps: [step(1), step(2)], epochs: [] });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.steps.map((s) => s.step)).toEqual([1, 2]);
+    // Step 3 happened on the server before our subscription was live; the history fetched on open has it.
+    metrics = deferred<RunMetrics>();
+    handlers.connection?.('open');
+    metrics.resolve({ steps: [step(1), step(2), step(3)], epochs: [] });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.steps.map((s) => s.step)).toEqual([1, 2, 3]);
+    stop();
+  });
+
+  it('refreshes the snapshot on a terminal status even while history is loading', async () => {
+    let calls = 0;
+    (hub.api as { run: Api['run'] }).run = () => {
+      calls++;
+      return Promise.resolve({ ...snapshot, status: calls > 1 ? 'completed' : 'running', model_id: calls > 1 ? 'm_new' : null });
+    };
+    let live!: LiveRun;
+    const stop = $effect.root(() => {
+      live = new LiveRun(() => 'run_7d1e');
+    });
+    flushSync();
+    handlers.status?.({ status: 'completed', error: null });
+    await vi.advanceTimersByTimeAsync(0);
+    metrics.resolve({ steps: [step(1)], epochs: [] });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.run?.status).toBe('completed');
+    expect(live.run?.model_id).toBe('m_new');
+    stop();
+  });
 });

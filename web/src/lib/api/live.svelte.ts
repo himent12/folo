@@ -81,11 +81,27 @@ export class LiveRun {
         this.#bump();
       });
 
+      // Snapshots can resolve out of order (history loads, terminal refreshes): a snapshot applies only if no newer
+      // request has been applied by the time it is used.
+      let snapIssued = 0;
+      let snapApplied = 0;
+      const snapshot = (): Promise<{ run: Run; claim: () => boolean }> => {
+        const my = ++snapIssued;
+        return api.run(runId).then((run) => ({
+          run,
+          claim: () => {
+            if (my < snapApplied) return false;
+            snapApplied = my;
+            return true;
+          },
+        }));
+      };
+
       const load = async () => {
         const seq = this.#statusSeq;
-        const [run, metrics] = await Promise.all([api.run(runId), api.runMetrics(runId)]);
+        const [snap, metrics] = await Promise.all([snapshot(), api.runMetrics(runId)]);
         if (closed) return;
-        this.#absorb(run, metrics.steps, metrics.epochs, seq);
+        this.#absorb(snap.claim() ? snap.run : (this.run ?? snap.run), metrics.steps, metrics.epochs, seq);
         if (api instanceof MockApi) this.logs = mergeLogs(api.logHistory(runId), this.logs);
         this.loading = false;
         this.#bump();
@@ -94,18 +110,23 @@ export class LiveRun {
       // Subscribe first: events that arrive while history loads are kept and merged, not lost.
       const unsub = api.runEvents(runId, {
         connection: (s) => {
-          if (!closed) this.connection = s;
+          if (closed) return;
+          // EventSource construction does not mean the subscription is live: events emitted between our first
+          // history load and the stream opening would be lost, so load (and merge) again once it opens.
+          if (s === 'open' && this.connection === 'idle') load().catch(() => {});
+          this.connection = s;
         },
         status: ({ status, error }) => {
           if (closed) return;
           this.#statusSeq++;
           this.#lastStatus = { status, error };
           if (this.run) this.run = { ...this.run, status, error };
-          if (this.run && !['queued', 'running', 'stopping'].includes(status)) {
-            // Terminal: refresh the snapshot for finished time, best and model id.
+          if (!['queued', 'running', 'stopping'].includes(status)) {
+            // Terminal: refresh the snapshot for finished time, best and model id (even if history is still loading).
             const seq = this.#statusSeq;
-            api.run(runId).then((r) => {
-              if (!closed && seq === this.#statusSeq) this.run = r;
+            snapshot().then((snap) => {
+              if (closed || seq !== this.#statusSeq || !snap.claim()) return;
+              this.run = snap.run;
             }, () => {});
           }
         },
