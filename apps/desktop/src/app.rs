@@ -437,6 +437,12 @@ pub struct FoloApp {
     // Overlays
     pub palette: Option<Palette>,
     pub new_run: Option<NewRunForm>,
+    /// A New run form closed without starting (Esc, the scrim, Cancel): the next plain New run
+    /// reopens it as it was, so a stray click doesn't lose a configured run.
+    pub new_run_draft: Option<NewRunForm>,
+    /// The draft's dataset by id (the list can gain datasets at the front while the draft waits,
+    /// so its index alone could point at another one).
+    pub new_run_draft_ds: Option<String>,
     /// The Generate synthetic dataset dialog.
     pub synth: Option<SynthForm>,
     pub synth_seq: u64,
@@ -576,6 +582,8 @@ impl FoloApp {
             reduce_motion: calm,
             palette: None,
             new_run: None,
+            new_run_draft: None,
+            new_run_draft_ds: None,
             synth: None,
             synth_seq: 0,
             restore_pending: false,
@@ -1440,8 +1448,21 @@ impl FoloApp {
         );
     }
 
+    /// The form to keep as a draft when the dialog closes without starting a run: none while a
+    /// submission is pending (that run is being created; keeping it would allow a duplicate).
+    fn keep_draft(&mut self, mut f: NewRunForm) -> Option<NewRunForm> {
+        if f.submitting {
+            self.new_run_draft_ds = None;
+            return None;
+        }
+        self.new_run_draft_ds =
+            self.store.datasets.ready().and_then(|d| d.get(f.dataset)).map(|d| d.id.clone());
+        f.error = None;
+        Some(f)
+    }
+
     pub fn close_new_run(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.new_run = None;
+        self.new_run_draft = self.new_run.take().and_then(|f| self.keep_draft(f));
         self.restore_focus(window);
         cx.notify();
     }
@@ -1491,6 +1512,25 @@ impl FoloApp {
         }
         if self.new_run.is_none() {
             self.remember_focus(window, cx);
+        }
+        // A plain New run picks up a draft left by Esc or Cancel; one for a specific dataset (or
+        // prefilled from a run) starts fresh.
+        // Its dataset is found again by id; gone (or the list unloaded), the draft is dropped.
+        let draft_ds = self
+            .new_run_draft_ds
+            .take()
+            .and_then(|id| self.store.datasets.ready().and_then(|d| d.iter().position(|d| d.id == id)));
+        if let Some(mut draft) = self.new_run_draft.take()
+            && self.new_run.is_none()
+            && dataset.is_none()
+            && let Some(idx) = draft_ds
+        {
+            draft.dataset = idx;
+            let fh = draft.name.read(cx).focus_handle(cx);
+            self.new_run = Some(draft);
+            window.focus(&fh);
+            cx.notify();
+            return;
         }
         let idx =
             dataset.and_then(|id| self.store.datasets.ready()?.iter().position(|d| d.id == id)).unwrap_or(0);
@@ -1608,6 +1648,9 @@ impl FoloApp {
             return;
         }
         form.submitting = true;
+        // Which form this request belongs to (its name input, kept by a restored draft): the
+        // dialog can be dismissed and another run submitted before this one answers.
+        let form_id = form.name.entity_id();
         let config = carry_over(
             form.base.as_ref(),
             TrainConfig {
@@ -1636,51 +1679,62 @@ impl FoloApp {
         self.fetch(
             cx,
             move |api| api.create_run(config),
-            |this, r, cx| match r {
-                Ok(run) => {
-                    this.new_run = None;
-                    this.overlay_return = None;
-                    let id = run.id.clone();
-                    let name = run.name.clone();
-                    if let Some(runs) = this.store.runs.ready_mut() {
-                        runs.insert(0, run);
+            move |this, r, cx| {
+                let mine = this.new_run.as_ref().is_some_and(|f| f.name.entity_id() == form_id);
+                match r {
+                    Ok(run) => {
+                        let id = run.id.clone();
+                        let name = run.name.clone();
+                        if let Some(runs) = this.store.runs.ready_mut() {
+                            runs.insert(0, run);
+                        }
+                        this.subscribe_active(cx);
+                        let queued =
+                            this.store.run(&id).is_some_and(|r| r.status == crate::api::RunStatus::Queued);
+                        if queued {
+                            // The run's page opens next, so the action is the queue it waits in.
+                            this.toast_with(
+                                Tone::Info,
+                                format!("Queued {name}"),
+                                Some("It starts when the GPU is free.".into()),
+                                Some((
+                                    "View queue".into(),
+                                    Rc::new(
+                                        move |this: &mut Self, w: &mut Window, cx: &mut Context<Self>| {
+                                            this.run_filter = RunFilter::Active;
+                                            this.navigate(Route::Runs, w, cx)
+                                        },
+                                    ),
+                                )),
+                                cx,
+                            );
+                        } else {
+                            this.toast(
+                                Tone::Accent,
+                                format!("Training {name}"),
+                                Some("Live metrics stream into the dashboard.".into()),
+                                cx,
+                            );
+                        }
+                        // An earlier, dismissed submission leaves the form now open alone.
+                        if mine {
+                            this.new_run = None;
+                            this.overlay_return = None;
+                            let prev = std::mem::replace(&mut this.route, Route::Run(id));
+                            this.history.push(prev);
+                        }
                     }
-                    this.subscribe_active(cx);
-                    let queued =
-                        this.store.run(&id).is_some_and(|r| r.status == crate::api::RunStatus::Queued);
-                    if queued {
-                        // The run's page opens next, so the action is the queue it waits in.
-                        this.toast_with(
-                            Tone::Info,
-                            format!("Queued {name}"),
-                            Some("It starts when the GPU is free.".into()),
-                            Some((
-                                "View queue".into(),
-                                Rc::new(move |this: &mut Self, w: &mut Window, cx: &mut Context<Self>| {
-                                    this.run_filter = RunFilter::Active;
-                                    this.navigate(Route::Runs, w, cx)
-                                }),
-                            )),
-                            cx,
-                        );
-                    } else {
-                        this.toast(
-                            Tone::Accent,
-                            format!("Training {name}"),
-                            Some("Live metrics stream into the dashboard.".into()),
-                            cx,
-                        );
+                    Err(e) => {
+                        if mine && let Some(f) = this.new_run.as_mut() {
+                            f.submitting = false;
+                            f.error = Some(e);
+                            // The error leads the form: scroll it into view.
+                            this.dialog_scroll.set_offset(point(px(0.), px(0.)));
+                        } else {
+                            // Its form is gone: say so where it can be seen.
+                            this.toast(Tone::Danger, e.message, e.hint.map(Into::into), cx);
+                        }
                     }
-                    let prev = std::mem::replace(&mut this.route, Route::Run(id));
-                    this.history.push(prev);
-                }
-                Err(e) => {
-                    if let Some(f) = this.new_run.as_mut() {
-                        f.submitting = false;
-                        f.error = Some(e);
-                    }
-                    // The error leads the form: scroll it into view.
-                    this.dialog_scroll.set_offset(point(px(0.), px(0.)));
                 }
             },
         );
@@ -2260,6 +2314,10 @@ impl FoloApp {
                 }
             }))
             .when(ring, |d| d.child(focus_ring(&t, 6.)))
+            // The icon rail names the focused item, as its tooltip does for the pointer.
+            .when(compact && ring, |d| {
+                d.child(crate::controls::focus_tip(&t, format!("{label} · {}", shortcut_label(key)), 34.))
+            })
             .when(compact, |d| {
                 d.justify_center().px(px(0.)).tooltip(crate::controls::tip(label, Some(shortcut_label(key))))
             })
@@ -2838,6 +2896,9 @@ impl FoloApp {
     /// Swap the data source; everything reloads from the new backend.
     pub fn set_backend(&mut self, api: Arc<dyn Backend>, mode: ServerMode, cx: &mut Context<Self>) {
         self.backend_gen += 1;
+        // A draft's dataset belongs to the old server.
+        self.new_run_draft = None;
+        self.new_run_draft_ds = None;
         // Model ids are per server: loaded local models belong to the old one.
         crate::local::forget_all();
         if !api.local_inference() {
@@ -2980,7 +3041,8 @@ impl FoloApp {
             self.confirm_stop = None;
             self.restore_focus(window);
         } else if self.new_run.is_some() {
-            self.new_run = None;
+            // Kept as a draft, like Cancel.
+            self.new_run_draft = self.new_run.take().and_then(|f| self.keep_draft(f));
             self.restore_focus(window);
         } else if self.synth.is_some() {
             self.synth = None;

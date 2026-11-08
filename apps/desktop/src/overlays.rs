@@ -16,7 +16,7 @@ use crate::api::RunStatus;
 use crate::app::{ARCHS, Action, BATCHES, DEVICES, FoloApp, IMGSZ, OPTIMIZERS, Route, act};
 use crate::controls::Btn;
 use crate::store::ImgKind;
-use crate::theme::{Theme, alpha, radius, theme, ty};
+use crate::theme::{Theme, radius, theme, ty};
 use crate::ui::*;
 use crate::viz::{DrawBox, Fit, hit_box, image_rect, paint_image_with_boxes, to_image};
 
@@ -279,6 +279,8 @@ impl FoloApp {
                     .rounded(px(radius::MD))
                     .cursor_pointer()
                     .when(on, |d| d.bg(t.bg_active))
+                    // Pressed reads stronger than the pointer-selected row.
+                    .active(|s| s.bg(crate::theme::over(t.bg_active, t.bg_hover)))
                     .on_mouse_move(cx.listener(move |this, _: &MouseMoveEvent, _, cx| {
                         if let Some(p) = this.palette.as_mut()
                             && p.selected != i
@@ -291,8 +293,26 @@ impl FoloApp {
                         this.close_palette(w, cx);
                         action(this, w, cx);
                     }))
-                    .child(icon(it.icon, 16., if on { t.text_primary } else { t.text_tertiary }))
-                    .child(text(ty::BASE, t.text_primary).flex_none().child(it.title))
+                    // Stopping a run is destructive: danger text here as on its button.
+                    .child(icon(
+                        it.icon,
+                        16.,
+                        if it.icon == "icons/stop.svg" {
+                            t.danger_text
+                        } else if on {
+                            t.text_primary
+                        } else {
+                            t.text_tertiary
+                        },
+                    ))
+                    .child(
+                        text(
+                            ty::BASE,
+                            if it.icon == "icons/stop.svg" { t.danger_text } else { t.text_primary },
+                        )
+                        .flex_none()
+                        .child(it.title),
+                    )
                     .child(text(ty::SM, t.text_tertiary).flex_1().min_w_0().truncate().child(it.detail))
                     .when(!it.keys.is_empty(), |d| d.child(shortcut(&t, it.keys)))
                     .when(on && it.keys.is_empty(), |d| {
@@ -734,10 +754,11 @@ impl FoloApp {
         };
         // Short windows drop the helper rows; the two that explain a choice stay one hover or
         // focus away.
-        let batch_help = short.then(|| self.help_icon("help-batch", "Images per training step.", window, cx));
+        let batch_help =
+            short.then(|| self.help_icon("nr-help-batch", "Images per training step.", window, cx));
         let device_help = short.then(|| {
             self.help_icon(
-                "help-device",
+                "nr-help-device",
                 "Auto uses the GPU when one is available, else the CPU.",
                 window,
                 cx,
@@ -1539,161 +1560,109 @@ impl FoloApp {
         let hit_boxes = boxes.clone();
         let tt = t;
         let img2 = img.clone();
-        let stage =
-            div()
-                .id("insp-stage")
-                .relative()
-                .flex_1()
-                .min_w_0()
-                .bg(t.bg_inset)
-                .cursor(if zoom > 1.0 { gpui::CursorStyle::OpenHand } else { gpui::CursorStyle::Arrow })
-                .on_scroll_wheel(cx.listener(move |this, ev: &ScrollWheelEvent, w, cx| {
-                    let Some(b) = wheel_cell.get() else { return };
-                    let Some(insp) = this.inspector.as_mut() else { return };
-                    let dy = f32::from(ev.delta.pixel_delta(w.line_height()).y);
-                    let factor = (1.0 + dy * 0.0025).clamp(0.5, 2.0);
-                    let new_zoom = (insp.zoom * factor).clamp(1.0, 12.0);
-                    // Zoom about the cursor: keep the image point under it fixed.
-                    let rect = image_rect(b, dims.0, dims.1, Fit::Contain, insp.zoom, insp.pan);
-                    let (px_, py_) = (
-                        f32::from(ev.position.x - rect.left()) / f32::from(rect.size.width),
-                        f32::from(ev.position.y - rect.top()) / f32::from(rect.size.height),
-                    );
-                    let new_rect = image_rect(b, dims.0, dims.1, Fit::Contain, new_zoom, (0., 0.));
-                    let want_x = f32::from(ev.position.x) - px_ * f32::from(new_rect.size.width);
-                    let want_y = f32::from(ev.position.y) - py_ * f32::from(new_rect.size.height);
-                    insp.pan = if new_zoom <= 1.0 {
-                        (0., 0.)
-                    } else {
-                        (want_x - f32::from(new_rect.left()), want_y - f32::from(new_rect.top()))
-                    };
-                    insp.zoom = new_zoom;
-                    cx.notify();
-                }))
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
-                        let _ = down_cell.get();
-                        if let Some(insp) = this.inspector.as_mut() {
-                            insp.drag_from = Some((ev.position, insp.pan));
-                            cx.notify();
-                        }
-                    }),
-                )
-                .on_mouse_up(
-                    MouseButton::Left,
-                    cx.listener(|this, _, _, cx| {
-                        if let Some(insp) = this.inspector.as_mut() {
-                            insp.drag_from = None;
-                            cx.notify();
-                        }
-                    }),
-                )
-                .on_mouse_move(cx.listener(move |this, ev: &MouseMoveEvent, _, cx| {
-                    let Some(insp) = this.inspector.as_mut() else { return };
-                    if let Some((from, pan0)) = insp.drag_from
-                        && ev.pressed_button == Some(MouseButton::Left)
-                    {
-                        if insp.zoom > 1.0 {
-                            insp.pan = (
-                                pan0.0 + f32::from(ev.position.x - from.x),
-                                pan0.1 + f32::from(ev.position.y - from.y),
-                            );
-                            cx.notify();
-                        }
-                        return;
-                    }
-                    let Some(b) = bounds_cell.get() else { return };
-                    let (x, y) = to_image(b, dims, Fit::Contain, insp.zoom, insp.pan, ev.position);
-                    let hit = hit_box(&hit_boxes, x, y);
-                    if hit != insp.hover_box {
-                        insp.hover_box = hit;
-                        // The pointer moved over the image: hover leads again (not a keyboard
-                        // focus left on a label row).
-                        this.kb = false;
+        let stage = div()
+            .id("insp-stage")
+            .relative()
+            .flex_1()
+            .min_w_0()
+            .bg(t.bg_inset)
+            .cursor(if zoom > 1.0 { gpui::CursorStyle::OpenHand } else { gpui::CursorStyle::Arrow })
+            .on_scroll_wheel(cx.listener(move |this, ev: &ScrollWheelEvent, w, cx| {
+                let Some(b) = wheel_cell.get() else { return };
+                let Some(insp) = this.inspector.as_mut() else { return };
+                let dy = f32::from(ev.delta.pixel_delta(w.line_height()).y);
+                let factor = (1.0 + dy * 0.0025).clamp(0.5, 2.0);
+                let new_zoom = (insp.zoom * factor).clamp(1.0, 12.0);
+                // Zoom about the cursor: keep the image point under it fixed.
+                let rect = image_rect(b, dims.0, dims.1, Fit::Contain, insp.zoom, insp.pan);
+                let (px_, py_) = (
+                    f32::from(ev.position.x - rect.left()) / f32::from(rect.size.width),
+                    f32::from(ev.position.y - rect.top()) / f32::from(rect.size.height),
+                );
+                let new_rect = image_rect(b, dims.0, dims.1, Fit::Contain, new_zoom, (0., 0.));
+                let want_x = f32::from(ev.position.x) - px_ * f32::from(new_rect.size.width);
+                let want_y = f32::from(ev.position.y) - py_ * f32::from(new_rect.size.height);
+                insp.pan = if new_zoom <= 1.0 {
+                    (0., 0.)
+                } else {
+                    (want_x - f32::from(new_rect.left()), want_y - f32::from(new_rect.top()))
+                };
+                insp.zoom = new_zoom;
+                cx.notify();
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
+                    let _ = down_cell.get();
+                    if let Some(insp) = this.inspector.as_mut() {
+                        insp.drag_from = Some((ev.position, insp.pan));
                         cx.notify();
                     }
-                }))
-                .child(
-                    canvas(
-                        |_, _, _| (),
-                        move |b, _, window, cx| {
-                            let inner = gpui::Bounds::new(
-                                b.origin + gpui::point(px(24.), px(24.)),
-                                b.size - gpui::size(px(48.), px(24. + 72.)),
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    if let Some(insp) = this.inspector.as_mut() {
+                        insp.drag_from = None;
+                        cx.notify();
+                    }
+                }),
+            )
+            .on_mouse_move(cx.listener(move |this, ev: &MouseMoveEvent, _, cx| {
+                let Some(insp) = this.inspector.as_mut() else { return };
+                if let Some((from, pan0)) = insp.drag_from
+                    && ev.pressed_button == Some(MouseButton::Left)
+                {
+                    if insp.zoom > 1.0 {
+                        insp.pan = (
+                            pan0.0 + f32::from(ev.position.x - from.x),
+                            pan0.1 + f32::from(ev.position.y - from.y),
+                        );
+                        cx.notify();
+                    }
+                    return;
+                }
+                let Some(b) = bounds_cell.get() else { return };
+                let (x, y) = to_image(b, dims, Fit::Contain, insp.zoom, insp.pan, ev.position);
+                let hit = hit_box(&hit_boxes, x, y);
+                if hit != insp.hover_box {
+                    insp.hover_box = hit;
+                    // The pointer moved over the image: hover leads again (not a keyboard
+                    // focus left on a label row).
+                    this.kb = false;
+                    cx.notify();
+                }
+            }))
+            .child(
+                canvas(
+                    |_, _, _| (),
+                    move |b, _, window, cx| {
+                        let inner = gpui::Bounds::new(
+                            b.origin + gpui::point(px(24.), px(24.)),
+                            b.size - gpui::size(px(48.), px(24. + 72.)),
+                        );
+                        paint_cell.set(Some(inner));
+                        window.with_content_mask(Some(gpui::ContentMask { bounds: b }), |window| {
+                            paint_image_with_boxes(
+                                &tt,
+                                window,
+                                cx,
+                                inner,
+                                img2.as_ref(),
+                                dims,
+                                &paint_boxes,
+                                Fit::Contain,
+                                zoom,
+                                pan,
+                                true,
+                                0.,
                             );
-                            paint_cell.set(Some(inner));
-                            window.with_content_mask(Some(gpui::ContentMask { bounds: b }), |window| {
-                                paint_image_with_boxes(
-                                    &tt,
-                                    window,
-                                    cx,
-                                    inner,
-                                    img2.as_ref(),
-                                    dims,
-                                    &paint_boxes,
-                                    Fit::Contain,
-                                    zoom,
-                                    pan,
-                                    true,
-                                    0.,
-                                );
-                            });
-                        },
-                    )
-                    .size_full(),
+                        });
+                    },
                 )
-                .child(
-                    // Zoom controls.
-                    div()
-                        .absolute()
-                        .bottom(px(16.))
-                        .left(px(16.))
-                        .flex()
-                        .items_center()
-                        .gap(px(2.))
-                        .p(px(3.))
-                        .rounded(px(radius::MD))
-                        .bg(alpha(t.bg_overlay, 0.92))
-                        .border_1()
-                        .border_color(t.line_default)
-                        .child(self.icon_button(
-                            "insp-zoom-out",
-                            "icons/zoom-out.svg",
-                            "Zoom out",
-                            window,
-                            cx,
-                            act(|this, _, cx| this.zoom_by(1.0 / 1.4, cx)),
-                        ))
-                        .child(
-                            text(ty::XS, t.text_secondary).tnum().w(px(44.)).text_center().child(
-                                if zoom <= 1.0 { "Fit".to_string() } else { format!("{:.1}×", zoom) },
-                            ),
-                        )
-                        .child(self.icon_button(
-                            "insp-zoom-in",
-                            "icons/zoom-in.svg",
-                            "Zoom in",
-                            window,
-                            cx,
-                            act(|this, _, cx| this.zoom_by(1.4, cx)),
-                        ))
-                        .child(div().w(px(1.)).h(px(16.)).bg(t.line_subtle))
-                        .child(self.icon_button(
-                            "insp-fit",
-                            "icons/maximize.svg",
-                            "Fit (0)",
-                            window,
-                            cx,
-                            act(|this, _, cx| {
-                                if let Some(i) = this.inspector.as_mut() {
-                                    i.zoom = 1.0;
-                                    i.pan = (0., 0.);
-                                }
-                                cx.notify();
-                            }),
-                        )),
-                );
+                .size_full(),
+            );
         // By class, then largest first, like the PR legend; indices stay the image's.
         let mut box_order: Vec<(usize, &crate::api::BBox)> = meta.boxes.iter().enumerate().collect();
         box_order.sort_by(|(_, a), (_, b)| {
@@ -1880,6 +1849,47 @@ impl FoloApp {
                         .child(row(kbd(&t, "Drag").into_any_element(), "pan"))
                 },
             );
+        // Zoom in the top bar, right-aligned before Close, as Playground keeps it in its header.
+        let zoom_ctrls = div()
+            .flex()
+            .items_center()
+            .gap(px(2.))
+            .child(self.icon_button(
+                "insp-zoom-out",
+                "icons/zoom-out.svg",
+                "Zoom out",
+                window,
+                cx,
+                act(|this, _, cx| this.zoom_by(1.0 / 1.4, cx)),
+            ))
+            .child(text(ty::XS, t.text_secondary).tnum().w(px(44.)).text_center().child(if zoom <= 1.0 {
+                "Fit".to_string()
+            } else {
+                format!("{:.1}×", zoom)
+            }))
+            .child(self.icon_button(
+                "insp-zoom-in",
+                "icons/zoom-in.svg",
+                "Zoom in",
+                window,
+                cx,
+                act(|this, _, cx| this.zoom_by(1.4, cx)),
+            ))
+            .child(div().w(px(1.)).h(px(16.)).bg(t.line_subtle))
+            .child(self.icon_button(
+                "insp-fit",
+                "icons/maximize.svg",
+                "Fit (0)",
+                window,
+                cx,
+                act(|this, _, cx| {
+                    if let Some(i) = this.inspector.as_mut() {
+                        i.zoom = 1.0;
+                        i.pan = (0., 0.);
+                    }
+                    cx.notify();
+                }),
+            ));
         let header = div()
             .h(px(48.))
             .flex_none()
@@ -1898,6 +1908,8 @@ impl FoloApp {
                 int(n as u64)
             )))
             .child(div().flex_1())
+            .child(zoom_ctrls)
+            .child(div().w(px(1.)).h(px(16.)).bg(t.line_subtle))
             .child(close);
         div()
             .absolute()

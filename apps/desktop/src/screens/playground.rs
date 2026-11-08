@@ -666,7 +666,6 @@ impl FoloApp {
                 let hidden = p.boxes.len() - vis.len();
                 let total = p.timing.total_ms.max(0.001);
                 let seg = |v: f64, c| div().h_full().w(relative((v / total) as f32)).bg(c);
-                // One neutral ramp: the model step darkest, the cheap steps lighter.
                 // One neutral ramp; the model step strongest without shouting.
                 let (c_pre, c_model, c_nms) = (
                     crate::theme::alpha(t.text_tertiary, 0.4),
@@ -883,7 +882,7 @@ impl FoloApp {
                 )
                 .child(div().flex().gap(px(6.)).children(thumbs))
         });
-        // One scrolling column: controls, detections and their latency, then sample images (no
+        // One scrolling column: controls and sample images, then detections and their latency (no
         // pinned footer, so no dead band and nothing hidden on short windows).
         let rail = if window.viewport_size().width < px(1100.) { 280. } else { 320. };
         panel(&t)
@@ -905,11 +904,12 @@ impl FoloApp {
                             .flex()
                             .flex_col()
                             .child(controls)
+                            // Inputs first (the model, its settings, an image to try), then the
+                            // results and their latency.
+                            .children(picker)
                             .child(hairline(&t))
                             .child(detections)
-                            // The run's latency next to its results; sample images after.
                             .children(timing)
-                            .children(picker)
                             // Room to scroll the last row clear of the fade below.
                             .child(div().h(px(12.))),
                     ),
@@ -945,7 +945,8 @@ impl FoloApp {
         };
         let control = self.segmented_fill_with(
             "play-target",
-            &["Server", "Local GPU", "Local CPU"],
+            // The built-in demo isn't a server: say what actually runs.
+            &[if local { "Server" } else { "Demo" }, "Local GPU", "Local CPU"],
             selected,
             &[None, gpu_why, no_local],
             window,
@@ -966,7 +967,7 @@ impl FoloApp {
             cx,
         );
         let note = match (self.play_target, &self.local_gpu) {
-            (None, _) if !local => "Local GPU / CPU need a model from folo serve".into(),
+            (None, _) if !local => "Built-in demo · simulated inference".into(),
             (None, _) => format!("On folo serve at {}", self.store.api.describe()),
             (Some(Target::Gpu), Load::Ready(name)) => {
                 format!("In this app, on {}", crate::ui::short_gpu(name))
@@ -987,7 +988,9 @@ impl FoloApp {
                     .child(help),
             )
             .child(control)
-            .child(text(ty::XS, t.text_tertiary).w_full().truncate().child(note))
+            // Wraps rather than truncating: GPUI only ellipsizes against a known width, so a
+            // w_full note would hard-clip mid-word in a narrow rail.
+            .child(text(ty::XS, t.text_tertiary).w_full().whitespace_normal().child(note))
             .into_any_element()
     }
 

@@ -752,8 +752,9 @@ impl FoloApp {
                     .h(px(3.))
                     .rounded_full()
                     .bg(t.line_strong)
+                    // 8 px: a px under the proportional fill, so no seam shows where the two meet.
                     .child(
-                        div().absolute().left_0().top_0().h_full().w(px(7.)).rounded_l_full().bg(fill_color),
+                        div().absolute().left_0().top_0().h_full().w(px(8.)).rounded_l_full().bg(fill_color),
                     )
                     .child(
                         div()

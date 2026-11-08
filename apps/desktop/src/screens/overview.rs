@@ -205,6 +205,15 @@ impl FoloApp {
             .and_then(|l| l.ready())
             .map(|d| (d.derived(), d.last_step().cloned(), d.last_epoch().cloned()));
         let best = r.best;
+        // Every KPI gets a second line, as on the run's dashboard: throughput's recent average and
+        // the time spent so far.
+        let ips_avg = self.store.run_data.get(&r.id).and_then(|l| l.ready()).and_then(|d| {
+            let s = &d.metrics.steps;
+            let n = s.len().min(120);
+            (n > 0).then(|| s[s.len() - n..].iter().map(|x| x.imgs_per_s).sum::<f32>() / n as f32)
+        });
+        let elapsed = crate::screens::runs::duration_of(r, self.store.api.now())
+            .map(|d| format!("{} elapsed", time::duration(d)));
         let (chart, legend_el, ips, map_now) = match data {
             Some((d, step, epoch)) => {
                 let hover = self.chart_hover;
@@ -359,13 +368,13 @@ impl FoloApp {
                                 ty::SM,
                             )
                             .into_any_element(),
-                            None,
+                            ips_avg.map(|a| format!("avg {a:.0}")),
                         )),
                     )
                     .child(div().flex_none().min_w(px(120.)).child(kpi(
                         "Time left",
                         duration_metric(&t, eta_s, ty::X2XL, ty::SM).into_any_element(),
-                        None,
+                        elapsed,
                     ))),
             );
         let footer = self.system_footer(cx);
