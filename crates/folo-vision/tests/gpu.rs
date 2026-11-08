@@ -148,6 +148,8 @@ fn open_on_device_matches_cpu_predictions() {
     let got = gm.predict_raw(&x.to_device(dev).unwrap(), &nms).unwrap();
     let (w, g) = (&want.images[0], &got.images[0]);
     // The GPU decodes on the device (softmax expectation, boxes, sigmoid) before downloading.
+    assert_eq!(w.scores.len(), g.scores.len());
+    assert!(w.scores.iter().chain(&g.scores).all(|v| v.is_finite()), "non-finite scores");
     let worst = w.scores.iter().zip(&g.scores).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
     assert!(worst <= 1e-3, "scores differ by {worst}");
     assert_eq!(w.boxes.len(), g.boxes.len());
@@ -156,4 +158,5 @@ fn open_on_device_matches_cpu_predictions() {
         assert!(d.iter().all(|&e| e <= 0.05), "box {i}: {b:?} vs {a:?}");
     }
     assert!(!w.detections.is_empty());
+    assert_eq!(g.detections.len(), w.detections.len());
 }
