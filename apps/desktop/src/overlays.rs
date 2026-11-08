@@ -1371,11 +1371,11 @@ impl FoloApp {
                             .mx(px(inset))
                             .h(px(6.))
                             .rounded_t(px(radius::LG))
-                            .bg(crate::theme::alpha(t.bg_raised, a))
+                            .bg(crate::theme::fade(t.bg_raised, a))
                             .border_1()
                             .border_b_0()
                             // line.default: on line.strong it would double the toast's own top edge.
-                            .border_color(crate::theme::alpha(t.line_default, a))
+                            .border_color(crate::theme::fade(t.line_default, a))
                     };
                     d.when(older > 1, |d| d.child(edge(16., 0.6))).child(edge(8., 1.))
                 })

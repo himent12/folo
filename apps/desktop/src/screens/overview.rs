@@ -224,7 +224,10 @@ impl FoloApp {
                     vec![
                         Series::new("mAP50-95", t.chart_series[0], d.map50_95.clone()).area().live(true),
                         // Dashed: the pair reads apart without colour (as in the legend).
-                        Series::new("mAP50", t.chart_series[1], d.map50.clone()).width(1.25).dashed(),
+                        Series::new("mAP50", t.chart_series[1], d.map50.clone())
+                            .width(1.25)
+                            .dashed()
+                            .live(true),
                     ],
                 );
                 map.x_range = Some((0., total));
@@ -407,10 +410,12 @@ impl FoloApp {
                             .flex_col()
                             .gap(px(4.))
                             .child(
+                                // Title, then the legend on its own left-aligned row, as on
+                                // the run dashboard's charts.
                                 div()
                                     .flex()
-                                    .items_center()
-                                    .justify_between()
+                                    .flex_col()
+                                    .gap(px(6.))
                                     .child(
                                         text(ty::SM, t.text_primary)
                                             .font_weight(FontWeight::MEDIUM)
@@ -512,6 +517,7 @@ impl FoloApp {
                                 .flex_col()
                                 .gap(px(4.))
                                 .child(div().h(px(20.)).w(px(120.)).child(sk("hero-chart-title")))
+                                .child(div().mt(px(2.)).h(px(18.)).w(px(220.)).child(sk("hero-chart-legend")))
                                 .child(div().h(px(hero_h + 16.)).child(sk("hero-chart"))),
                         ),
                 )
@@ -703,7 +709,12 @@ impl FoloApp {
                                         crate::api::RunStatus::Failed => t.danger_solid,
                                         _ => t.text_tertiary,
                                     };
-                                    d.child(div().flex_1().child(progress(&t, r.progress(), fill, 4.))).child(
+                                    // A bar under 48 px reads as a stub: narrow columns keep the
+                                    // number only.
+                                    d.when(prog_w - 64. >= 48., |d| {
+                                        d.child(div().flex_1().child(progress(&t, r.progress(), fill, 4.)))
+                                    })
+                                    .child(
                                         text(ty::XS, t.text_secondary)
                                             .tnum()
                                             .w(px(56.))
@@ -994,7 +1005,7 @@ impl FoloApp {
                 )
         };
         let steps = panel(&t)
-            .p(px(24.))
+            .p(px(16.))
             .flex()
             .flex_col()
             .gap(px(20.))
@@ -1059,7 +1070,7 @@ impl FoloApp {
                 .child(text(ty::SM, t.text_tertiary).child(what.to_string()))
         };
         let terminal = panel(&t)
-            .p(px(24.))
+            .p(px(16.))
             .flex()
             .flex_col()
             .gap(px(10.))

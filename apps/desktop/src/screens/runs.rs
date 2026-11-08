@@ -842,7 +842,7 @@ impl FoloApp {
             vec![
                 Series::new("mAP50-95", t.chart_series[0], d.map50_95.clone()).area().live(live).width(1.75),
                 // Dashed: the pair reads apart without colour (as in the legend).
-                Series::new("mAP50", t.chart_series[1], d.map50.clone()).width(1.25).dashed(),
+                Series::new("mAP50", t.chart_series[1], d.map50.clone()).width(1.25).dashed().live(live),
             ],
             primary_h,
         );
@@ -969,7 +969,9 @@ impl FoloApp {
                 .child(
                     div()
                         .h(px(if short { 24. } else { 28. }))
-                        .px(px(10.))
+                        // Legends start under the panel title (16 px); the loss toggles pull their
+                        // 6 px hover pads back out so their swatches land there too.
+                        .px(px(16.))
                         .pt(px(if short { 4. } else { 6. }))
                         .flex()
                         .items_center()
@@ -986,6 +988,7 @@ impl FoloApp {
         );
         let loss_legend = div()
             .id("loss-ema")
+            .ml(px(-6.))
             .flex()
             .items_center()
             .gap(px(2.))
