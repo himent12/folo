@@ -540,7 +540,7 @@ impl FoloApp {
         div().relative().child(trigger).children(menu).into_any_element()
     }
 
-    /// A sortable column header: click or Enter/Space sorts by it (descending first, then flips).
+    /// A sortable column header of the Models table.
     fn sort_th(
         &self,
         key: &'static str,
@@ -550,8 +550,27 @@ impl FoloApp {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        self.sort_th_on(self.models_sort, |a| &mut a.models_sort, "sort", key, label, w, right, window, cx)
+    }
+
+    /// A sortable column header: click or Enter/Space sorts by it (descending first, then flips).
+    /// `current` is the table's sort and `field` where it lives; `prefix` keeps element ids
+    /// apart between tables.
+    #[allow(clippy::too_many_arguments)]
+    pub fn sort_th_on(
+        &self,
+        current: Option<(&'static str, bool)>,
+        field: fn(&mut Self) -> &mut Option<(&'static str, bool)>,
+        prefix: &str,
+        key: &'static str,
+        label: &'static str,
+        w: f32,
+        right: bool,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let t = theme(cx);
-        let on = self.models_sort.filter(|s| s.0 == key);
+        let on = current.filter(|s| s.0 == key);
         let chevron = |desc: bool| {
             icon(if desc { "icons/chevron-down.svg" } else { "icons/chevron-up.svg" }, 12., t.text_primary)
         };
@@ -560,8 +579,9 @@ impl FoloApp {
             Some((_, desc)) => chevron(desc),
             None => icon("icons/chevrons-up-down.svg", 12., t.text_disabled),
         };
+        let id = format!("{prefix}-{key}");
         let el = div()
-            .id(SharedString::from(format!("sort-{key}")))
+            .id(SharedString::from(id.clone()))
             .w(px(w))
             .flex_none()
             .h(px(24.))
@@ -586,12 +606,13 @@ impl FoloApp {
             .when(!right, |d| d.child(mark(on)));
         self.bind(
             el,
-            &format!("sort-{key}"),
+            &id,
             radius::SM,
             window,
             cx,
             act(move |this, _, cx| {
-                this.models_sort = match this.models_sort {
+                let sort = field(this);
+                *sort = match *sort {
                     Some((k, desc)) if k == key => Some((key, !desc)),
                     _ => Some((key, true)),
                 };

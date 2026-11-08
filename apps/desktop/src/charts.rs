@@ -984,14 +984,9 @@ fn paint_line_chart(
         window.paint_quad(fill(Bounds::new(point(x, plot.bottom()), size(px(1.), px(4.))), t.chart_axis));
         let l = (spec.x_fmt)(*v);
         let w = text_width(window, &l, label_size);
-        // The first and last labels sit flush with their ticks instead of being centred and clamped.
-        let lx = if Some(v) == xt.first() && xt.len() > 1 {
-            x - px(1.)
-        } else if Some(v) == xt.last() && xt.len() > 1 {
-            x - w + px(1.)
-        } else {
-            (x - w / 2.).clamp(plot.left() - px(4.), plot.right() - w)
-        };
+        // Centred on its tick (the end labels too: "0.00" / "1.00" flush with the tick read as
+        // belonging beside it); only the chart's own edges push a label inward.
+        let lx = (x - w / 2.).clamp(bounds.left(), bounds.right() - w);
         if chip_span.is_some_and(|(cl, cr)| lx < cr + px(4.) && lx + w > cl - px(4.)) {
             continue;
         }

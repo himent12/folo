@@ -833,3 +833,57 @@ Round 23 changes:
   - New run tightens its rhythm and drops restating helpers, so Epochs, the learning rate, Optimizer and Close mosaic are all in view.
 - **Settings:** capped at 880 px, left-aligned.
 - **Review brief:** a "settled decisions" paragraph (Settings width, KPI gaps, "close mosaic" labelling, LR exponent placement).
+
+## Round 23
+
+| Line | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | avg |
+|------|---|---|---|---|---|---|---|---|---|----|----|----|-----|
+| Opus 5.5 | 8 | 8 | 8 | 8 | 8 | 8 | 8 | 8 | 8 | 8 | 9 | 8 | 8.1 |
+| GPT-6.1 Sol | 9 | 8 | 8 | 8 | 8 | 8 | 8 | 9 | 8 | 7 | 9 | 8 | 8.2 |
+
+Opus found an 8 px dark band between live data and the future tint on every live chart. Both reviewers found the Overview hero's KPI column left a gap either way it was aligned. Sol found that the Overview chart had no keyboard path. Other items:
+- The empty Playground's New run was a dead end with no datasets.
+- Thumbnail focus rings were clipped.
+- Dimmed chips were unreadable over photos.
+- The colour-only connection dot in the collapsed rail.
+- The matrix diagonal reused the circle class's cyan.
+- A toast seam.
+- Missing pressed states.
+- An unsortable Runs table.
+- No region jump.
+- Cramped P/R ticks.
+- Copy drift.
+- Model names cut at 200 px.
+- Left-aligned per-class numbers.
+- End tick labels off their ticks.
+
+Round 24 changes:
+- **Charts:**
+  - The future tint starts at the latest point drawn, behind a 1 px "now" rule.
+  - Every x label is centred on its tick.
+  - The run P/R chart and the short Overview chart tick at 0 / 0.50 / 1.00.
+- **Overview hero:** one row of four KPIs above a full-width chart, so there is no side column to leave a gap; the loading skeleton matches. The chart is a `chart_group` (keyboard cursor).
+- **Confusion matrix:**
+  - Correct cells use the success ramp.
+  - The caption fits one line.
+- **Playground:**
+  - With no models and no datasets, the primary action is "Add a dataset" (to Datasets).
+  - Sample thumbnails clip inside, so their focus ring shows whole, and they have a pressed state.
+  - The PR legend reads "P @ best F1" at rest.
+- **Dimmed chips:** an opaque muted class tint with contrast-picked text.
+- **Collapsed rail:** the connection shows a check, refresh or x glyph with a tooltip.
+- **Pressed states (`bg.active`):** nav, breadcrumbs, search, live-mini, toast links, inspector rows, select trigger and options, dataset KPI tiles, cards and grid tiles.
+- **Runs table:** sortable by Best mAP50-95, Duration and Created (the shared `sort_th_on`).
+- **Models table:** names use the width the other columns leave, with the full name on hover.
+- **Per-class table:** numbers right-aligned.
+- **F6 / Shift+F6:** cycle the sidebar (current section), search and the page's first control.
+- **New run:** the architecture letters are in Geist Mono.
+- **Toasts:** the peek edge uses line.default; the pill docks 2 px above it.
+- **Copy:**
+  - The run P/R caption reads "best-F1 · IoU 0.50 · val".
+  - Best models drops "by mAP50-95".
+  - "then Add dataset → choose ./shapes".
+  - The auto-start help says it applies at startup.
+  - A shorter stop dialog.
+- **Cleanup:** dead leftovers removed (`chart_block`, `let _ =` placeholders); the disabled-button comment now matches its behaviour.
+- **Review brief:** the selection colour is now a settled decision.

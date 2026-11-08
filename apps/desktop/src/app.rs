@@ -41,6 +41,8 @@ actions!(
         FocusNext,
         FocusPrev,
         Submit,
+        NextRegion,
+        PrevRegion,
     ]
 );
 
@@ -61,6 +63,9 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-o", OpenImage, None),
         KeyBinding::new("tab", FocusNext, None),
         KeyBinding::new("shift-tab", FocusPrev, None),
+        // Jump between the sidebar, the search field and the page without tabbing through each.
+        KeyBinding::new("f6", NextRegion, None),
+        KeyBinding::new("shift-f6", PrevRegion, None),
         KeyBinding::new("ctrl-enter", Submit, None),
     ]);
 }
@@ -380,6 +385,8 @@ pub struct FoloApp {
     pub export_hl: usize,
     /// Models table order: column key and descending; None keeps the server's order.
     pub models_sort: Option<(&'static str, bool)>,
+    /// The Runs table's sort: column key and descending.
+    pub runs_sort: Option<(&'static str, bool)>,
     /// The sorted order of the models list, for (list allocation, length, column, descending).
     pub models_order: RefCell<Option<(ModelsOrderKey, Vec<usize>)>>,
     pub confusion_norm: bool,
@@ -527,6 +534,7 @@ impl FoloApp {
             export_hl: 0,
             // Newest first, shown on the Created header, which is also how the server lists them.
             models_sort: Some(("created", true)),
+            runs_sort: Some(("created", true)),
             models_order: RefCell::new(None),
             confusion_norm: true,
             play_model: None,
@@ -2532,6 +2540,8 @@ impl Render for FoloApp {
                 this.cycle_focus(false, w, cx);
                 cx.notify();
             }))
+            .on_action(cx.listener(|this, _: &NextRegion, w, cx| this.cycle_region(true, w, cx)))
+            .on_action(cx.listener(|this, _: &PrevRegion, w, cx| this.cycle_region(false, w, cx)))
             .on_action(cx.listener(|this, _: &Dismiss, w, cx| this.dismiss(w, cx)))
             .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _, cx| {
                 if matches!(ev.keystroke.key.as_str(), "up" | "down" | "left" | "right" | "enter" | "space")
@@ -2601,7 +2611,16 @@ impl Render for FoloApp {
                     .flex()
                     .flex_col()
                     .child(titlebar)
-                    .child(div().flex_1().min_h_0().relative().child(page)),
+                    // The page's region anchor for F6 (not a Tab stop itself).
+                    .child(
+                        div()
+                            .id("page-region")
+                            .track_focus(&self.fh("page-region", cx).tab_stop(false))
+                            .flex_1()
+                            .min_h_0()
+                            .relative()
+                            .child(page),
+                    ),
             )
             .children(overlays)
     }
@@ -2662,6 +2681,45 @@ impl FoloApp {
     }
 
     /// Tab / Shift-Tab, trapped inside the topmost overlay.
+    /// F6 / Shift+F6: the sidebar (the current section's item), the search field, then the page
+    /// (its first control). Dialogs keep focus to themselves.
+    fn cycle_region(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.modal_open() {
+            return;
+        }
+        let nav = format!(
+            "nav-{}",
+            match self.route.section() {
+                Section::Overview => "Overview",
+                Section::Datasets => "Datasets",
+                Section::Runs => "Runs",
+                Section::Models => "Models",
+                Section::Playground => "Playground",
+                Section::Settings => "Settings",
+            }
+        );
+        let in_nav = self.focus.borrow().iter().any(|(k, f)| k.starts_with("nav-") && f.is_focused(window));
+        let in_search = self.fh("titlebar-search", cx).is_focused(window);
+        let at = if in_nav {
+            0
+        } else if in_search {
+            1
+        } else {
+            2
+        };
+        let next = if forward { (at + 1) % 3 } else { (at + 2) % 3 };
+        self.kb = true;
+        match next {
+            0 => window.focus(&self.fh(nav, cx)),
+            1 => window.focus(&self.fh("titlebar-search", cx)),
+            _ => {
+                window.focus(&self.fh("page-region", cx));
+                self.cycle_focus(true, window, cx);
+            }
+        }
+        cx.notify();
+    }
+
     fn cycle_focus(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
         // The newly focused control scrolls into view inside whichever of these holds it.
         let containers = if self.inspector.is_some() {

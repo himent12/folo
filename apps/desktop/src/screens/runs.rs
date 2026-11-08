@@ -93,7 +93,21 @@ impl FoloApp {
             Rc::new(move |this, i, _, _| this.run_filter = filters[i]),
         );
         let now = self.store.api.now();
-        let visible: Vec<Run> = runs.into_iter().filter(|r| matches_filter(r, self.run_filter)).collect();
+        let mut visible: Vec<Run> = runs.into_iter().filter(|r| matches_filter(r, self.run_filter)).collect();
+        // Sorted like Models (stable, so ties keep the server's newest-first order).
+        if let Some((k, desc)) = self.runs_sort {
+            let score = |r: &Run| -> f64 {
+                match k {
+                    "best" => r.best.as_ref().map_or(-1., |b| b.map50_95 as f64),
+                    "duration" => duration_of(r, now).unwrap_or(-1.),
+                    _ => time::parse(&r.created).unwrap_or(0) as f64,
+                }
+            };
+            visible.sort_by(|a, b| {
+                let o = score(a).total_cmp(&score(b));
+                if desc { o.reverse() } else { o }
+            });
+        }
         let ids: Vec<String> = visible.iter().map(|r| r.id.clone()).collect();
         let cols = |d: gpui::Div| d.flex().items_center().gap(px(16.)).px(px(16.));
         // Single-line rows; secondary facts get their own columns as the window allows. Budget
@@ -113,9 +127,41 @@ impl FoloApp {
             .when(wide, |d| d.child(th(&t, "Size · batch").w(px(104.)).flex_none()))
             .child(th(&t, "Status").w(px(96.)).flex_none())
             .child(th(&t, "Progress").w(px(150.)).flex_none())
-            .child(th(&t, "Best mAP50-95").w(px(96.)).flex_none().text_right())
-            .child(th(&t, "Duration").w(px(80.)).flex_none().text_right())
-            .when(show_created, |d| d.child(th(&t, "Created").w(px(80.)).flex_none().text_right()));
+            .child(self.sort_th_on(
+                self.runs_sort,
+                |a| &mut a.runs_sort,
+                "rsort",
+                "best",
+                "Best mAP50-95",
+                96.,
+                true,
+                window,
+                cx,
+            ))
+            .child(self.sort_th_on(
+                self.runs_sort,
+                |a| &mut a.runs_sort,
+                "rsort",
+                "duration",
+                "Duration",
+                80.,
+                true,
+                window,
+                cx,
+            ))
+            .when(show_created, |d| {
+                d.child(self.sort_th_on(
+                    self.runs_sort,
+                    |a| &mut a.runs_sort,
+                    "rsort",
+                    "created",
+                    "Created",
+                    80.,
+                    true,
+                    window,
+                    cx,
+                ))
+            });
         let rows: Vec<AnyElement> = visible
             .iter()
             .enumerate()
