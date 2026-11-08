@@ -14,7 +14,8 @@
 
   let { run: initial, dataset }: { run: Run; dataset?: Dataset } = $props();
 
-  const live = new LiveRun(() => initial.id);
+  const runId = $derived(initial.id);
+  const live = new LiveRun(() => runId);
   const run = $derived(live.run ?? initial);
 
   let cursor = $state<number | null>(null);

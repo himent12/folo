@@ -8,7 +8,11 @@
 export const scenes = [
   { name: 'overview', path: '/', viewports: ['desktop', 'laptop', 'mobile'] },
   { name: 'datasets', path: '/datasets' },
-  { name: 'runs', path: '/runs' },
+  { name: 'runs', path: '/runs', viewports: ['desktop', 'laptop', 'mobile'] },
+  { name: 'run-live', path: '/runs/run_7d1e', advance: 4000, viewports: ['desktop', 'laptop', 'mobile'] },
+  { name: 'run-failed', path: '/runs/run_a2f0', viewports: ['desktop'] },
+  { name: 'run-completed', path: '/runs/run_c19a', viewports: ['desktop', 'mobile'] },
+  { name: 'run-queued', path: '/runs/run_q4n2', themes: ['dark'], viewports: ['desktop'] },
   { name: 'models', path: '/models' },
   { name: 'playground', path: '/playground' },
   { name: 'settings', path: '/settings' },

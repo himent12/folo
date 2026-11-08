@@ -14,10 +14,14 @@
   import Toaster from '$lib/ui/Toaster.svelte';
   import NotFound from './routes/NotFound.svelte';
   import Overview from './routes/Overview.svelte';
+  import Run from './routes/Run.svelte';
+  import Runs from './routes/Runs.svelte';
   import Placeholder from './routes/Placeholder.svelte';
 
   const screens: Partial<Record<RouteName, Component>> = {
     overview: Overview,
+    runs: Runs,
+    run: Run,
   };
 
   const titles: Record<string, string> = {
