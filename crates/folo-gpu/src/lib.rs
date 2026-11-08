@@ -14,8 +14,11 @@
 //! - **Tensors** — [`GpuTensor`]: a buffer + shape + dtype handle with methods that validate shapes, allocate
 //!   outputs from the pool and call the kernel layer.
 //!
-//! The kernel layer is deliberately independent of [`GpuTensor`] so the folo-core `Backend` implementation can
-//! drive it with its own storage type (see `docs/GPU.md`).
+//! - **folo-core backend** — [`backend`]: [`GpuBackend`] implements `folo_core::backend::Backend` over the
+//!   kernel layer; [`init`] registers it as `Device::Gpu(0)` so folo-core tensors (and autograd) run on the GPU.
+//!
+//! The kernel layer is deliberately independent of [`GpuTensor`] so the folo-core backend drives it with its
+//! own storage type (see `docs/GPU.md`).
 //!
 //! ```no_run
 //! use folo_gpu::{GpuContext, GpuTensor};
@@ -26,6 +29,7 @@
 //! # Ok::<(), folo_gpu::GpuError>(())
 //! ```
 
+pub mod backend;
 pub mod context;
 pub mod dtype;
 pub mod error;
@@ -34,7 +38,8 @@ pub(crate) mod pipeline;
 pub mod pool;
 pub mod tensor;
 
-pub use context::{AdapterSummary, Capabilities, GpuContext, GpuOptions};
+pub use backend::{GpuBackend, GpuStorage, init};
+pub use context::{AdapterSummary, Capabilities, GpuContext, GpuOptions, WorkStats};
 pub use dtype::DType;
 pub use error::{GpuError, Result};
 pub use kernels::elementwise::{BinaryOp, UnaryOp};

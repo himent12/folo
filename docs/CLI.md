@@ -8,7 +8,7 @@ whole command surface (generated from the clap command tree, so it never drifts 
 cargo run -p folo-cli -- serve --mock     # mock Studio API on http://127.0.0.1:7878
 cargo folo --help                         # alias for: cargo run --release -p folo-cli --
 folo describe --json                      # every command, argument, type, default and help string
-folo doctor                               # version, OS, CPU, memory, web app build
+folo doctor                               # version, OS, CPU, memory, GPU adapters, web app build
 folo --version                            # folo 0.1.0 (1a2b3c4d5e6f 2026-11-08): version, commit, build date
 ```
 
@@ -60,7 +60,7 @@ A failing command prints its error as the last stdout line in `--json` mode, and
 |---|---|---|
 | `serve [--mock] [--host 127.0.0.1] [--port 7878] [--web-dir DIR] [--data-dir DIR] [--cors-any]` | works | Runs the HTTP API (`docs/API.md`) and serves the built Studio with an SPA fallback: from `--web-dir` when given, else the Studio embedded in the binary (`embed-web` builds), else `web/dist`. The `listening` record says which (`web_source`: `dir` or `embedded`, `web_dir`, `web_ready`). `--mock` serves deterministic mock data. `--port 0` picks a free port. `--data-dir` (env `FOLO_DATA_DIR`, default `$FOLO_HOME` or `~/.folo`) holds registered datasets. Ctrl+C shuts down gracefully (open SSE streams are closed first). |
 | `describe` | works | Prints the CLI surface as JSON: `global_args`, `conventions` (exit codes, error shape) and `commands` (recursive, each with `path`, `about`, `args` and `subcommands`). Each argument has `name`, `long`, `short`, `positional`, `type` (`string`, `path`, `integer`, `number`, `boolean`, `enum`, `count`), `value_name`, `required`, `multiple`, `default`, `possible_values`, `env` and `help`. Pretty-printed without `--json`, one line with it. |
-| `doctor [--web-dir web/dist]` | works | Version (`version`, `git_sha`, `build_date`), OS, CPU name and threads, memory, whether the web app is built (`web_dist`), whether one is embedded (`web_embedded`: `present`, `files`) and which one `folo serve` would use (`web_source`). GPU detection lands with `folo-gpu`. |
+| `doctor [--web-dir web/dist]` | works | Version (`version`, `git_sha`, `build_date`), OS, CPU name and threads, memory, every wgpu adapter (`gpus`: name, backend, type, driver, `shader-f16`, buffer and workgroup limits), the adapter FOLO picks (`gpu_selected`, honouring `FOLO_GPU_ADAPTER` / `FOLO_GPU_BACKEND`), whether the web app is built (`web_dist`), whether one is embedded (`web_embedded`: `present`, `files`) and which one `folo serve` would use (`web_source`). |
 | `train --data D [--model folo-n] [--epochs 100] [--batch 16] [--imgsz 640] [--device auto] [--optimizer auto] [--lr0 0.01] [augmentation flags] [--seed 0] [--project runs]` | planned (exit 4) | Arguments mirror `TrainConfig` in `docs/API.md`. |
 | `val --model W --data D [--split val] ...` | planned (exit 4) | mAP / precision / recall of weights on a split. |
 | `predict --model W SOURCES... [--conf 0.25] [--iou 0.7] [--max-det 300] [--save DIR]` | planned (exit 4) | Inference on images or folders. |

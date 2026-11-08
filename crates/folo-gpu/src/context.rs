@@ -1,6 +1,7 @@
 //! [`GpuContext`]: adapter selection, device + queue, buffer pool, pipeline cache and command batching.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
 
 use crate::error::{GpuError, Result};
@@ -203,6 +204,17 @@ struct Inner {
     batch: Mutex<Batch>,
     errors: Arc<Mutex<Vec<String>>>,
     dummy: wgpu::Buffer,
+    dispatches: AtomicU64,
+    submissions: AtomicU64,
+}
+
+/// Work counters since the context was created (see [`GpuContext::work_stats`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WorkStats {
+    /// Compute dispatches encoded.
+    pub dispatches: u64,
+    /// Command buffers submitted to the queue.
+    pub submissions: u64,
 }
 
 /// A wgpu device and queue plus FOLO's buffer pool, pipeline cache and command batch.
@@ -376,6 +388,8 @@ impl GpuContext {
                 batch: Mutex::default(),
                 errors,
                 dummy,
+                dispatches: AtomicU64::new(0),
+                submissions: AtomicU64::new(0),
             }),
         })
     }
@@ -408,6 +422,14 @@ impl GpuContext {
     /// A small storage buffer bound where a kernel's optional input is absent (never written).
     pub(crate) fn dummy(&self) -> &wgpu::Buffer {
         &self.inner.dummy
+    }
+
+    /// Dispatch and submission counters (benchmarks use the difference across a pass).
+    pub fn work_stats(&self) -> WorkStats {
+        WorkStats {
+            dispatches: self.inner.dispatches.load(Ordering::Relaxed),
+            submissions: self.inner.submissions.load(Ordering::Relaxed),
+        }
     }
 
     /// Buffer pool counters.
@@ -619,6 +641,7 @@ impl GpuContext {
             }
         }
         self.inner.queue.submit([enc.finish()]);
+        self.inner.submissions.fetch_add(1, Ordering::Relaxed);
         b.dispatches = 0;
         b.chunk = 0;
         b.cursor = 0;
@@ -709,6 +732,7 @@ impl GpuContext {
         pass.set_pipeline(&kernel.pipeline);
         pass.set_bind_group(0, &bind, &[]);
         pass.dispatch_workgroups(groups[0], groups[1], groups[2]);
+        self.inner.dispatches.fetch_add(1, Ordering::Relaxed);
         self.bump(b);
         Ok(())
     }

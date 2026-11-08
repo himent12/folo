@@ -6,8 +6,11 @@
 //! memory are consumed (double-buffered workgroup memory, one barrier per step). Tiles are stored `k`-major
 //! (`As[k][m]`, `Bs[k][n]`) so the inner loop reads `vec4`s of both operands. Global loads are `vec4` when the
 //! leading dimension and offsets allow it; bounds checks are compiled out when `M`, `N`, `K` are tile
-//! multiples. The same generator, with `CONV = true`, gathers `B` straight from an NCHW image (implicit GEMM,
-//! see [`super::conv`]).
+//! multiples. The same generator also does implicit-GEMM convolution (see [`super::conv`]): `CONV_MODE` 1
+//! gathers `B` straight from an NCHW image (forward), 2 gathers it from the output gradient with the
+//! transposed-conv rule (input gradient), and 3 gathers an im2col-transposed image tile while reading `A` from
+//! the output gradient across the batch (weight gradient). `SPLIT` splits `K` into chunks, one per extra
+//! workgroup layer, each writing its own partial result (split-K; the caller sums the partials).
 
 use std::fmt::Write as _;
 
@@ -242,7 +245,10 @@ pub(crate) fn gen_gemm(spec: &Spec) -> String {
     let (va, vb, vc) = (spec.get_bool("VEC_A"), spec.get_bool("VEC_B"), spec.get_bool("VEC_C"));
     let (ta, tb) = (spec.get_bool("TRANS_A"), spec.get_bool("TRANS_B"));
     let check = spec.get_bool("CHECK");
-    let conv = spec.get_bool("CONV");
+    // 0 = plain GEMM, 1 = conv forward, 2 = conv input gradient, 3 = conv weight gradient.
+    let mode = spec.get_u32("CONV_MODE", 0);
+    let conv = mode != 0;
+    let split = spec.get_bool("SPLIT");
     let bias = spec.get_u32("BIAS_KIND", 0);
     let f16 = spec.is_f16();
     let wgx = bn / tn;
@@ -278,29 +284,64 @@ pub(crate) fn gen_gemm(spec: &Spec) -> String {
     );
     let _ = writeln!(s, "  let tx = lid3.x; let ty = lid3.y; let tid = ty * {wgx}u + tx;");
     s.push_str(
-        "  let M = pu(0u); let N = pu(1u); let K = pu(2u);\n\
-         let lda = pu(3u); let ldb = pu(4u); let ldc = pu(5u);\n\
-         let b1 = wid.z / pu(6u); let b2 = wid.z % pu(6u);\n\
-         let offA = pu(8u) + b1 * pu(9u) + b2 * pu(10u);\n\
+        "  let M = pu(0u); let N = pu(1u);\n\
+         let lda = pu(3u); let ldb = pu(4u); let ldc = pu(5u);\n",
+    );
+    if split {
+        // wid.z = batch index * S + chunk; chunk `sidx` covers k in [kbeg, kbeg + KS) and writes its own C slab.
+        s.push_str(
+            "  let S = pu(28u); let zz = wid.z / S; let sidx = wid.z % S;\n\
+             let b1 = zz / pu(6u); let b2 = zz % pu(6u);\n\
+             let kbeg = sidx * pu(29u); let K = min(pu(2u), kbeg + pu(29u));\n\
+             let offC = pu(14u) + b1 * pu(15u) + b2 * pu(16u) + sidx * pu(30u);\n",
+        );
+    } else {
+        s.push_str(
+            "  let b1 = wid.z / pu(6u); let b2 = wid.z % pu(6u);\n\
+             let kbeg = 0u; let K = pu(2u);\n\
+             let offC = pu(14u) + b1 * pu(15u) + b2 * pu(16u);\n",
+        );
+    }
+    s.push_str(
+        "  let offA = pu(8u) + b1 * pu(9u) + b2 * pu(10u);\n\
          let offB = pu(11u) + b1 * pu(12u) + b2 * pu(13u);\n\
-         let offC = pu(14u) + b1 * pu(15u) + b2 * pu(16u);\n\
          let offBias = pu(18u) + b1 * pu(19u) + b2 * pu(20u);\n",
     );
     let _ = writeln!(s, "  let m0 = wid.y * {bm}u; let n0 = wid.x * {bn}u;");
-    if conv {
-        // Implicit-GEMM gather: B[k][j] = X[ci][oh*SH - PH + kh*DH][ow*SW - PW + kw*DW].
-        s.push_str("  let IH = pu(24u); let IW = pu(25u); let OW = pu(27u);\n");
+    match mode {
+        // Forward gather: B[k][j] = X[ci][oh*SH - PH + kh*DH][ow*SW - PW + kw*DW].
+        1 => s.push_str("  let IH = pu(24u); let IW = pu(25u); let OW = pu(27u);\n"),
+        // Input gradient: B[k = (co, kh, kw)][j = (ih, iw)] = G[co][(ih + PH - kh*DH) / SH][(iw + PW - kw*DW) / SW]
+        // where the divisions are exact and in range, else 0.
+        2 => s.push_str("  let IH = pu(24u); let IW = pu(25u); let OH = pu(26u); let OW = pu(27u);\n"),
+        // Weight gradient: k = (n, oh, ow) runs over the whole batch; A[m][k] = G[n][m][oh, ow] and
+        // B[k][j = (ci, kh, kw)] = X[n][ci][oh*SH - PH + kh*DH][ow*SW - PW + kw*DW].
+        3 => s.push_str(
+            "  let IH = pu(24u); let IW = pu(25u); let OW = pu(27u);\n\
+             let OHOW = pu(31u); let SAN = pu(32u); let SBN = pu(33u);\n",
+        ),
+        _ => {}
     }
     // Per-thread tile coordinates for the loads.
     let _ = writeln!(s, "  let ai = tid % {}u; let ao = tid / {}u;", pa.inner, pa.inner);
     let _ = writeln!(s, "  let bi = tid % {}u; let bo = tid / {}u;", pb.inner, pb.inner);
-    if conv {
-        // One output column per thread for the whole K loop.
-        s.push_str(
+    // One B column per thread for the whole K loop, so its index math is done once.
+    match mode {
+        1 => s.push_str(
             "  let cj = n0 + bi;\n  let coh = cj / OW; let cow = cj % OW;\n\
              let cih0 = i32(coh * SH) - PH; let ciw0 = i32(cow * SW) - PW;\n\
              let cjok = cj < N;\n",
-        );
+        ),
+        2 => s.push_str(
+            "  let cj = n0 + bi; let cjok = cj < N;\n\
+             let cih = i32(cj / IW) + PH; let ciw = i32(cj % IW) + PW;\n",
+        ),
+        3 => s.push_str(
+            "  let cj = n0 + bi; let cjok = cj < N;\n\
+             let cci = cj / (KH * KW); let cr = cj % (KH * KW);\n\
+             let cdh = i32((cr / KW) * DH) - PH; let cdw = i32((cr % KW) * DW) - PW;\n",
+        ),
+        _ => {}
     }
     let _ =
         writeln!(s, "  var ra: array<vec4<f32>, {}>;", pa.count.div_ceil(if pa.vec { 1 } else { 4 }).max(1));
@@ -311,7 +352,7 @@ pub(crate) fn gen_gemm(spec: &Spec) -> String {
             let _ = writeln!(s, "  var acc_{i}_{j} = vec4<f32>(0.0);");
         }
     }
-    s.push_str("  let nt = (K + BK - 1u) / BK;\n");
+    s.push_str("  let nt = (K - kbeg + BK - 1u) / BK;\n");
 
     // --- global → registers -------------------------------------------------------------------------------
     let mut load = String::new();
@@ -323,6 +364,17 @@ pub(crate) fn gen_gemm(spec: &Spec) -> String {
             (format!("ra[{}]", u / 4), format!("[{}]", u % 4))
         };
         let (idx, cond) = match (pa.vec, ta) {
+            // Weight gradient: k = (n, pixel) folds the batch into K; the gradient rows are `OHOW` long.
+            (true, false) if mode == 3 => (
+                format!(
+                    "(offA + ((k0 + ai * 4u) / OHOW) * SAN + (m0 + {o}) * OHOW + (k0 + ai * 4u) % OHOW) / 4u"
+                ),
+                format!("m0 + {o} < M && k0 + ai * 4u < K"),
+            ),
+            (false, false) if mode == 3 => (
+                format!("offA + ((k0 + ai) / OHOW) * SAN + (m0 + {o}) * OHOW + (k0 + ai) % OHOW"),
+                format!("m0 + {o} < M && k0 + ai < K"),
+            ),
             (true, false) => (
                 format!("(offA / 4u) + (m0 + {o}) * (lda / 4u) + ((k0 >> 2u) + ai)"),
                 format!("m0 + {o} < M && k0 + ai * 4u < K"),
@@ -354,17 +406,49 @@ pub(crate) fn gen_gemm(spec: &Spec) -> String {
         } else {
             (format!("rb[{}]", u / 4), format!("[{}]", u % 4))
         };
-        if conv {
-            // Unit (k = k0 + o, j = cj): gather from the image.
-            let _ = writeln!(
-                load,
-                "    {{ let k = k0 + {o}; let ci = k / (KH * KW); let r = k % (KH * KW);\n\
-                 \x20     let ih = cih0 + i32((r / KW) * DH); let iw = ciw0 + i32((r % KW) * DW);\n\
-                 \x20     if (cjok && k < K && ih >= 0 && ih < i32(IH) && iw >= 0 && iw < i32(IW)) {{\n\
-                 \x20       {reg}{comp} = f32(B[offB + (ci * IH + u32(ih)) * IW + u32(iw)]);\n\
-                 \x20     }} else {{ {reg}{comp} = 0.0; }} }}"
-            );
-            continue;
+        match mode {
+            1 => {
+                // Unit (k = k0 + o, j = cj): gather from the image.
+                let _ = writeln!(
+                    load,
+                    "    {{ let k = k0 + {o}; let ci = k / (KH * KW); let r = k % (KH * KW);\n\
+                     \x20     let ih = cih0 + i32((r / KW) * DH); let iw = ciw0 + i32((r % KW) * DW);\n\
+                     \x20     if (cjok && k < K && ih >= 0 && ih < i32(IH) && iw >= 0 && iw < i32(IW)) {{\n\
+                     \x20       {reg}{comp} = f32(B[offB + (ci * IH + u32(ih)) * IW + u32(iw)]);\n\
+                     \x20     }} else {{ {reg}{comp} = 0.0; }} }}"
+                );
+                continue;
+            }
+            2 => {
+                // Unit (k = (co, kh, kw), j = input pixel): the output pixel that read it, if any.
+                let _ = writeln!(
+                    load,
+                    "    {{ let k = k0 + {o}; let co = k / (KH * KW); let r = k % (KH * KW);\n\
+                     \x20     let th = cih - i32((r / KW) * DH); let tw = ciw - i32((r % KW) * DW);\n\
+                     \x20     var v = 0.0;\n\
+                     \x20     if (cjok && k < K && th >= 0 && tw >= 0) {{\n\
+                     \x20       let uh = u32(th); let uw = u32(tw);\n\
+                     \x20       if (uh % SH == 0u && uw % SW == 0u && uh / SH < OH && uw / SW < OW) {{\n\
+                     \x20         v = f32(B[offB + (co * OH + uh / SH) * OW + uw / SW]);\n\
+                     \x20       }}\n\
+                     \x20     }}\n\
+                     \x20     {reg}{comp} = v; }}"
+                );
+                continue;
+            }
+            3 => {
+                // Unit (k = (n, oh, ow), j = (ci, kh, kw)): the image element that output pixel read.
+                let _ = writeln!(
+                    load,
+                    "    {{ let k = k0 + {o}; let nn = k / OHOW; let r = k % OHOW;\n\
+                     \x20     let ih = i32((r / OW) * SH) + cdh; let iw = i32((r % OW) * SW) + cdw;\n\
+                     \x20     if (cjok && k < K && ih >= 0 && ih < i32(IH) && iw >= 0 && iw < i32(IW)) {{\n\
+                     \x20       {reg}{comp} = f32(B[offB + nn * SBN + (cci * IH + u32(ih)) * IW + u32(iw)]);\n\
+                     \x20     }} else {{ {reg}{comp} = 0.0; }} }}"
+                );
+                continue;
+            }
+            _ => {}
         }
         let (idx, cond) = match (pb.vec, tb) {
             (true, false) => (
@@ -476,20 +560,20 @@ pub(crate) fn gen_gemm(spec: &Spec) -> String {
     };
 
     // --- main loop: two K tiles per iteration so every workgroup-memory buffer index is a constant ----------
-    let _ = writeln!(s, "  {{\n    let k0 = 0u;\n{load}  }}");
+    let _ = writeln!(s, "  {{\n    let k0 = kbeg;\n{load}  }}");
     let _ = writeln!(s, "  {{\n{}  }}", store(0));
     s.push_str("  workgroupBarrier();\n");
     s.push_str("  for (var t = 0u; t < nt; t += 2u) {\n");
     let _ = writeln!(
         s,
-        "   {{\n    let more = t + 1u < nt;\n    if (more) {{\n    let k0 = (t + 1u) * BK;\n{load}    }}\n{}\
+        "   {{\n    let more = t + 1u < nt;\n    if (more) {{\n    let k0 = kbeg + (t + 1u) * BK;\n{load}    }}\n{}\
          \x20   if (more) {{\n{}    }}\n    workgroupBarrier();\n   }}",
         compute(0),
         store(1)
     );
     let _ = writeln!(
         s,
-        "   if (t + 1u < nt) {{\n    let more = t + 2u < nt;\n    if (more) {{\n    let k0 = (t + 2u) * BK;\n{load}    }}\n{}\
+        "   if (t + 1u < nt) {{\n    let more = t + 2u < nt;\n    if (more) {{\n    let k0 = kbeg + (t + 2u) * BK;\n{load}    }}\n{}\
          \x20   if (more) {{\n{}    }}\n    workgroupBarrier();\n   }}",
         compute(1),
         store(0)
@@ -679,7 +763,7 @@ pub fn gemm_with_config(
         .bool("TRANS_A", d.trans_a)
         .bool("TRANS_B", d.trans_b)
         .bool("CHECK", check)
-        .bool("CONV", false);
+        .u32("CONV_MODE", 0);
     let k = ctx.kernel(&GEMM, spec)?;
     let groups = [
         d.n.div_ceil(cfg.bn as usize) as u32,

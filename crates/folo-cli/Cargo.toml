@@ -16,6 +16,7 @@ workspace = true
 embed-web = ["folo-server/embed-web"]
 
 [dependencies]
+folo-gpu.workspace = true
 folo-server.workspace = true
 serde.workspace = true
 serde_json.workspace = true

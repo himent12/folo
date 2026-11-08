@@ -36,7 +36,13 @@ fn doctor_json() {
     assert!(v["cpu"]["threads"].as_u64().unwrap() >= 1);
     assert!(v["memory"]["total_bytes"].as_u64().unwrap() > 0);
     assert!(v["web_dist"]["exists"].is_boolean());
+    assert_eq!(v["gpu_detection"], "wgpu");
+    for g in v["gpus"].as_array().unwrap() {
+        assert!(g["name"].is_string() && g["backend"].is_string() && g["shader_f16"].is_boolean(), "{g}");
+    }
+    assert!(v["gpu_selected"].is_object());
     assert!(stderr.contains("cpu"), "human text goes to stderr in --json mode");
+    assert!(stderr.contains("gpu"), "{stderr}");
 }
 
 #[test]

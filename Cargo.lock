@@ -489,6 +489,7 @@ name = "folo-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "folo-gpu",
  "folo-server",
  "serde",
  "serde_json",
@@ -527,6 +528,8 @@ name = "folo-gpu"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "folo-core",
+ "folo-nn",
  "half",
  "pollster",
  "thiserror",
