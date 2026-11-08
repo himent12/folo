@@ -49,14 +49,14 @@
     flex-direction: column;
     gap: 4px;
     width: 30%;
-    padding: 7px 6px;
+    padding: 8px 6px;
     background: var(--panel);
     border-right: 1px solid var(--line);
   }
   .logo {
     width: 10px;
     height: 10px;
-    margin-bottom: 3px;
+    margin-bottom: 4px;
     border-radius: 2px;
     border: 1.5px solid var(--t1);
   }

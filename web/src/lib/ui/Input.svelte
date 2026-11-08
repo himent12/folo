@@ -66,7 +66,7 @@
     flex: 1;
     min-width: 0;
     height: 100%;
-    padding: 0 10px;
+    padding: 0 12px;
     background: transparent;
     border: 0;
     outline: none;
@@ -78,7 +78,7 @@
     font-size: var(--type-sm-size);
   }
   .has-icon input {
-    padding-left: 30px;
+    padding-left: 28px;
   }
   input::placeholder {
     color: var(--text-tertiary);
@@ -97,13 +97,13 @@
   }
   .icon {
     position: absolute;
-    left: 10px;
+    left: 8px;
     display: flex;
     color: var(--text-tertiary);
     pointer-events: none;
   }
   .suffix {
-    padding-right: 10px;
+    padding-right: 12px;
     color: var(--text-tertiary);
     font-size: var(--type-sm-size);
     white-space: nowrap;

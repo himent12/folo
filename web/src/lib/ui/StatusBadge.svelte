@@ -29,7 +29,7 @@
     align-items: center;
     gap: 6px;
     height: 20px;
-    padding: 0 8px 0 7px;
+    padding: 0 8px 0 6px;
     border-radius: var(--radius-full);
     background: var(--bg);
     color: var(--c);
@@ -40,7 +40,7 @@
   }
   .sm {
     height: 18px;
-    padding: 0 6px 0 5px;
+    padding: 0 6px 0 4px;
   }
   .dot {
     width: 6px;
