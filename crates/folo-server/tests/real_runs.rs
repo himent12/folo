@@ -534,6 +534,9 @@ async fn queue_stop_resume_and_restart() {
     assert!(b2.finished.is_some());
     assert_eq!(b2.epoch, ckpt_epochs, "progress comes back from the checkpoint");
     assert!(b2.best.is_some());
+    let b_last = format!("{}-last", b2.model_id.clone().unwrap().trim_end_matches("-last"));
+    let last: Model = ok(&app, get(&format!("/api/models/{b_last}"))).await;
+    assert_eq!(last.metrics, None, "the last epoch's metrics are unknown, not the best epoch's");
     let logs: RunLogs = ok(&app, get(&format!("/api/runs/{}/logs", b.id))).await;
     assert!(logs.lines.last().unwrap().message.contains("server stopped while the run was running"));
     let runs: RunList = ok(&app, get("/api/runs")).await;
@@ -545,6 +548,8 @@ async fn queue_stop_resume_and_restart() {
     assert_eq!(events.last().unwrap().1["status"], "completed", "{events:?}");
     let done: Run = ok(&app, get(&format!("/api/runs/{}", b.id))).await;
     assert_eq!(done.epoch, 3);
+    let last: Model = ok(&app, get(&format!("/api/models/{b_last}"))).await;
+    assert!(last.metrics.is_some(), "known again once an epoch was validated");
 }
 
 /// `device: auto` on a machine with a GPU: the run trains there and predictions run there. Skips (with a note)

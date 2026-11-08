@@ -106,7 +106,7 @@ pub struct ModelRef {
     pub dataset: Option<DatasetRef>,
 }
 
-/// Builds the API record of a weights file.
+/// Builds the API record of a weights file. `metrics` are used as given (`None` = unknown).
 pub fn model_of(
     id: String,
     name: String,
@@ -125,7 +125,7 @@ pub fn model_of(
         bytes: meta.bytes,
         created: meta.created.clone(),
         run_id,
-        metrics: metrics.or(meta.metrics),
+        metrics,
     }
 }
 
@@ -190,7 +190,7 @@ impl Models {
                 Ok(meta) => {
                     let name =
                         path.file_stem().map_or_else(|| "model".into(), |s| s.to_string_lossy().into_owned());
-                    let model = model_of(file_model_id(&path), name, &meta, None, None);
+                    let model = model_of(file_model_id(&path), name, &meta, None, meta.metrics);
                     out.push(ModelRef { model, path, dataset: None });
                 }
                 Err(e) => tracing::warn!("skipping {}: {e}", path.display()),

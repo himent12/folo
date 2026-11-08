@@ -335,8 +335,9 @@ impl RealStore {
                 match self.models.meta(&path) {
                     Ok(meta) => {
                         let suffix = if last { "last" } else { "best" };
-                        // A checkpoint's `folo.metrics` are the run's best; last.folo gets its own epoch's.
-                        let metrics = if last { e.last_metrics() } else { None };
+                        // A checkpoint's `folo.metrics` are the run's best; last.folo gets its own epoch's
+                        // (unknown when a crash kept that epoch out of the history).
+                        let metrics = if last { e.last_metrics() } else { meta.metrics };
                         let model = model_of(
                             run_model_id(&run.id, last),
                             format!("{}-{suffix}", run.name),
