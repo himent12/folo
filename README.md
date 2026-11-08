@@ -25,19 +25,17 @@ the method, the raw JSON and how much noise to expect.
 
 | metric | folo-n | yolo26n (best config) | |
 |---|---:|---:|---|
-| GPU forward, batch 1, f32 (median latency) | **3.98 ms** | 4.95 ms (6.04 ms default) | FOLO 1.24× faster |
-| GPU forward, batch 16, f32 (throughput) | **1461 img/s** | 1454 img/s (TF32) | tie |
+| GPU forward, batch 1, f32 (median latency) | **2.99 ms** | 4.95 ms (6.04 ms default) | FOLO 1.66× faster |
+| GPU forward, batch 16, f32 (throughput) | 1385 img/s | 1454 img/s (TF32) | tie (within run-to-run noise) |
 | Training step, batch 16, f32 (fwd + loss + bwd + SGD) | **219 img/s** | 202 img/s (fp32 with TF32) / 252 img/s (AMP) | FOLO faster than fp32; AMP still ahead |
 | Training step peak GPU memory, batch 16, f32 | **3474 MiB** | 4517 MiB (2646 MiB AMP) | FOLO uses 23% less in f32 |
-| GPU end to end, batch 1 (decoded image in, boxes out) | 8.69 ms | **6.92 ms** | FOLO behind |
-| GPU end to end, batch 16 | 299 img/s | **615 img/s** (fp16) / 536 (fp32) | FOLO behind |
-| CPU forward, batch 1, f32 | ~40 ms | **22.8 ms** (8 threads) | FOLO behind |
+| GPU end to end, batch 1 (decoded image in, boxes out) | **5.18 ms** | 6.92 ms | FOLO 1.34× faster |
+| GPU end to end, batch 16 | **722 img/s** (f32) | 615 img/s (fp16) / 536 (fp32) | FOLO faster than both |
+| CPU forward, batch 1, f32 | **21.4 ms** (28 threads, contended machine) | 22.8 ms (8 threads) | FOLO slightly faster |
+| CPU end to end, batch 1 | 26.9 ms | **24.8 ms** | FOLO behind |
 
-<!-- TODO(#55): when perf/inference-2 merges, update the three "FOLO behind" rows from docs/BENCHMARKS.md.
-     PR #55 reports GPU e2e b1 5.18 ms, GPU e2e b16 722 img/s and CPU forward b1 21.4 ms (28 threads). -->
-FOLO is not ahead everywhere yet. The end-to-end path (letterbox and NMS on the CPU, plus downloading every
-decoded anchor from the GPU) and the CPU forward are behind. An inference PR in review (#55) works on both; this table only lists merged code.
-f16 inference and the full trainer loop (data loader included) have not been benchmarked against the incumbent yet.
+FOLO is not ahead everywhere: the CPU end-to-end path (letterbox, decode and NMS around the forward) is still behind, and
+the CPU numbers were measured on a contended machine, so treat them as upper bounds. f16 inference and the full trainer loop (data loader included) have not been benchmarked against the incumbent yet.
 
 With the whole trainer (data loader, augmentation, validation), folo-n trains the shapes gate set (2,000 images
 at 320 px, 30 epochs) to mAP50 0.980 in **169 s on the GPU**, 25.6× faster than
