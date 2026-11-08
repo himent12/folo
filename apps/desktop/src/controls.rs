@@ -703,7 +703,16 @@ impl FoloApp {
                 let knob =
                     div().absolute().top(px(2.)).size(px(14.)).rounded_full().bg(knob).shadow(t.shadow_sm());
                 let (from, to) = if on { (2., 14.) } else { (14., 2.) };
-                if reduce_motion() {
+                // Animate only within the motion's time after a real change of value.
+                let changed = {
+                    let mut seen = self.switch_seen.borrow_mut();
+                    let e = seen.entry(key.to_string()).or_insert((on, None));
+                    if e.0 != on {
+                        *e = (on, Some(std::time::Instant::now()));
+                    }
+                    e.1.is_some_and(|at| at.elapsed() < std::time::Duration::from_millis(150))
+                };
+                if reduce_motion() || !changed {
                     knob.left(px(to)).into_any_element()
                 } else {
                     knob.with_animation(

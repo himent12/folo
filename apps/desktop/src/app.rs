@@ -335,6 +335,9 @@ pub struct FoloApp {
 
     pub root_focus: FocusHandle,
     pub focus: RefCell<HashMap<SharedString, FocusHandle>>,
+    /// Each switch's last drawn value and when it last changed: the knob animates only after a
+    /// change, not when a switch first appears (opening Settings shows it settled).
+    pub switch_seen: RefCell<HashMap<String, (bool, Option<std::time::Instant>)>>,
     /// The last input came from the keyboard, so focus rings are shown.
     pub kb: bool,
     pub page_scroll: ScrollHandle,
@@ -526,6 +529,7 @@ impl FoloApp {
             hold_loading: false,
             root_focus,
             focus: RefCell::new(HashMap::new()),
+            switch_seen: RefCell::new(HashMap::new()),
             kb: false,
             page_scroll: ScrollHandle::new(),
             scroll_drag: None,

@@ -777,6 +777,15 @@ impl FoloApp {
                     .into_any_element()
             }
             Load::Failed(e) => {
+                let retry = self.button(
+                    "play-retry",
+                    "Retry",
+                    Btn::Secondary,
+                    Some("icons/refresh-cw.svg"),
+                    window,
+                    cx,
+                    act(|this, _, cx| this.run_predict(cx)),
+                );
                 // Out of GPU memory locally: the CPU is one click away.
                 let to_cpu = (e.code == "gpu_out_of_memory"
                     && self.play_target == Some(crate::local::Target::Gpu))
@@ -801,7 +810,8 @@ impl FoloApp {
                     .when_some(e.hint.clone(), |d, h| {
                         d.child(text(ty::XS, t.text_tertiary).whitespace_normal().child(h))
                     })
-                    .children(to_cpu.map(|b| div().pt(px(4.)).child(b)))
+                    // Retry (same image, model and thresholds), with the CPU beside it after an OOM.
+                    .child(div().pt(px(4.)).flex().gap(px(8.)).child(retry).children(to_cpu))
                     .into_any_element()
             }
             Load::Loading => div()
