@@ -62,10 +62,13 @@ training and evaluation pipeline, a server, a CLI and a web studio.
 - Details (formats, augmentation parameters, determinism): `docs/DATA.md`.
 
 ## folo-vision — the detector
+The exact block definitions, layer tables, parameter names, head, loss, training recipe and verification plan are in
+**[docs/MODEL.md](MODEL.md)**, the normative spec for the detector. In short:
 - **Architecture** (per scale `n/s/m/l/x` via depth and width multipliers): a CSP-style backbone (Conv-BN-SiLU stem,
-  C2f-like blocks with split + bottlenecks + concat), SPPF, a PAN-FPN neck, and an anchor-free decoupled head on three
-  scales (strides 8 / 16 / 32). Box regression uses distribution focal loss bins (`reg_max`, default 16).
-  An NMS-free one-to-one head (dual assignment during training, as in YOLOv10) is a later milestone.
+  C3k2 blocks with split + bottlenecks + concat), SPPF, one C2PSA attention block at P5, a PAN-FPN neck, and an
+  anchor-free decoupled head on three scales (strides 8 / 16 / 32). Box regression uses distribution focal loss bins
+  (`reg_max`, default 16). An NMS-free one-to-one head (dual assignment during training, as in YOLOv10) is specified
+  in MODEL.md but reserved for a later milestone.
 - **Loss**: task-aligned assigner (TAL: `score^alpha * IoU^beta`, top-k), BCE classification on aligned targets,
   CIoU box loss and DFL, weighted 7.5 / 0.5 / 1.5 by default.
 - **Box ops, NMS, metrics** work on plain slices so they are reusable everywhere: IoU / GIoU / DIoU / CIoU,
