@@ -27,6 +27,16 @@ async function playgroundResult(/** @type {import('playwright-core').Page} */ pa
   await page.clock.runFor(500);
 }
 
+/** Starts New run on a GPU the mock then reports gone (404 device_not_found) and waits for the Device error. */
+async function unplugGpu(/** @type {import('playwright-core').Page} */ page) {
+  // An <option> is never "visible": wait for it to exist, running the mock's clock meanwhile.
+  for (let t = 0; t < 8000 && !(await page.locator('select#device option[value="gpu:1"]').count()); t += 250) await page.clock.runFor(250);
+  await page.selectOption('select#device', 'gpu:1');
+  await page.locator('form.layout').evaluate((f) => /** @type {HTMLFormElement} */ (f).requestSubmit());
+  await until(page, '#device-error');
+  await page.clock.runFor(1000);
+}
+
 /** @type {Scene[]} */
 export const scenes = [
   { name: 'overview', path: '/', viewports: ['desktop', 'laptop', 'mobile'] },
@@ -44,9 +54,50 @@ export const scenes = [
       await page.getByRole('radio', { name: 'Classes' }).click();
     },
   },
+  // run_a2f0 ran out of GPU memory: the plain cause, the smaller settings as actions, the driver's report folded.
   { name: 'run-failed', path: '/runs/run_a2f0', viewports: ['desktop', 'laptop', 'mobile'] },
+  {
+    name: 'run-failed-report',
+    path: '/runs/run_a2f0',
+    fullPage: false,
+    viewports: ['desktop', 'laptop', 'mobile'],
+    setup: async (page) => {
+      await until(page, '.c-detail summary');
+      await page.locator('.c-detail summary').click();
+    },
+  },
   { name: 'run-completed', path: '/runs/run_c19a', viewports: ['desktop', 'laptop', 'mobile'] },
   { name: 'run-new', path: '/runs/new', viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
+  {
+    // "Retry with batch 16" on the out-of-memory run: the note says what failed and what changed, the field is marked.
+    name: 'run-new-oom-retry',
+    path: '/runs/new?from=run_a2f0&batch=16',
+    viewports: ['desktop', 'laptop', 'mobile'],
+    setup: (page) => until(page, '.oom-note'),
+  },
+  {
+    // Start on a GPU that went away (404 device_not_found): the cause and the adapters at the Device field.
+    name: 'run-new-device-not-found',
+    path: '/runs/new',
+    search: 'scenario=gpu-unplugged',
+    // The whole form: the harness shoots from the top, and the message sits at the Device field further down.
+    fullPage: true,
+    viewports: ['desktop', 'laptop', 'mobile'],
+    setup: unplugGpu,
+  },
+  {
+    // The same on tablet and phone, in the viewport: the dock's Start says why it is off.
+    name: 'run-new-device-dock',
+    path: '/runs/new',
+    search: 'scenario=gpu-unplugged',
+    fullPage: false,
+    viewports: ['tablet', 'mobile'],
+    setup: async (page) => {
+      await unplugGpu(page);
+      await page.evaluate(() => window.scrollTo(0, 0));
+      await until(page, '#dock-why');
+    },
+  },
   {
     name: 'run-new-focus-mosaic',
     fullPage: false,
@@ -102,6 +153,38 @@ export const scenes = [
     },
   },
   { name: 'dataset-stats', path: '/datasets/ds_shapes_hard?tab=stats', viewports: ['desktop', 'laptop', 'mobile'] },
+  {
+    // The check's findings with their fixes; the severity filter moved to warnings in the first list.
+    name: 'dataset-issues',
+    path: '/datasets/ds_shapes_hard?tab=stats',
+    fullPage: false,
+    viewports: ['desktop', 'laptop', 'mobile'],
+    setup: async (page, { vp }) => {
+      // Phones start the findings folded: open the first one.
+      if (vp === 'mobile') {
+        await until(page, '#ds-health summary');
+        await page.locator('#ds-health summary').first().click();
+      }
+      await until(page, '#ds-health .issues li');
+      await page.locator('#ds-health details[open] .issues').first().getByRole('radio', { name: /Warnings/ }).click();
+      await until(page, '#ds-health .issues .fix');
+      await page.clock.runFor(500);
+    },
+  },
+  {
+    // Registering a folder that is already in the list opens it and says so.
+    name: 'datasets-add-existing',
+    path: '/datasets',
+    fullPage: false,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page) => {
+      await page.getByRole('button', { name: 'Add dataset' }).first().click();
+      await page.locator('dialog[open]').waitFor();
+      await page.locator('dialog[open] input[placeholder="D:/data/my-dataset"]').fill('D:/data/shapes');
+      await page.locator('dialog[open] form').evaluate((f) => /** @type {HTMLFormElement} */ (f).requestSubmit());
+      await until(page, 'text=Already registered as shapes');
+    },
+  },
   {
     name: 'dataset-images',
     path: '/datasets/ds_fasteners?class=2',
@@ -235,6 +318,21 @@ export const scenes = [
     },
   },
   { name: 'playground-empty', path: '/playground', setup: (page) => until(page, 'button.sample') },
+  {
+    // Server inference ran out of GPU memory (507): the cause, the hint, and the ways out (this browser, a smaller model).
+    name: 'playground-oom',
+    path: '/playground?model=m_shapes_s',
+    search: 'scenario=oom',
+    viewports: ['desktop', 'laptop', 'mobile'],
+    setup: async (page) => {
+      await until(page, 'button.sample');
+      await page.locator('button.sample').first().click();
+      await page.mouse.move(0, 0);
+      await until(page, '.stage-err .err');
+      // The toast repeats the cause; let it go so the shot shows the state in place.
+      await page.clock.runFor(6000);
+    },
+  },
   { name: 'playground-result', path: '/playground?model=m_hard_s', viewports: ['desktop', 'laptop', 'mobile'], setup: playgroundResult },
   {
     name: 'playground-selected',

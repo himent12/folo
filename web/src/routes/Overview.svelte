@@ -11,6 +11,8 @@
   import RunSpark from '$lib/charts/RunSpark.svelte';
   import ClassStrip from '$lib/detect/ClassStrip.svelte';
   import { ago, bytes, compact, metric } from '$lib/format';
+  import { failureCause } from '$lib/oom';
+  import { tooltip } from '$lib/ui/tooltip';
   import { prefs } from '$lib/prefs.svelte';
   import { href, router } from '$lib/router.svelte';
   import Page from '$lib/shell/Page.svelte';
@@ -171,7 +173,7 @@
                       <a class="run-name" href={href(`/runs/${r.id}`)} onclick={(e) => e.stopPropagation()}>{r.name}</a>
                       <span class="run-sub">{dsById.get(r.config.dataset_id)?.name ?? r.config.dataset_id} · {r.config.arch}</span>
                     </td>
-                    <td><StatusBadge status={r.status} plain /></td>
+                    <td use:tooltip={failureCause(r)}><StatusBadge status={r.status} plain /></td>
                     <td class="hide-sm">
                       <div class="prog">
                         <Progress value={r.epoch / r.epochs} size="xs" tone={r.status === 'running' ? 'accent' : 'neutral'} label="{r.name} progress" />

@@ -16,6 +16,8 @@
     label,
     onchange,
     disabled = false,
+    invalid = false,
+    describedby,
   }: {
     value: T;
     options: Option[];
@@ -25,11 +27,14 @@
     label?: string;
     onchange?: (v: T) => void;
     disabled?: boolean;
+    /** The field shows an error: announced, and tied to its message by `describedby` (Field's `<for>-error`). */
+    invalid?: boolean;
+    describedby?: string;
   } = $props();
 </script>
 
 <div class="select {size}">
-  <select {id} bind:value aria-label={label} {disabled} onchange={() => onchange?.(value)}>
+  <select {id} bind:value aria-label={label} {disabled} aria-invalid={invalid || undefined} aria-describedby={describedby} onchange={() => onchange?.(value)}>
     {#each options as o (o.value)}
       <option value={o.value} disabled={o.disabled}>{o.label}</option>
     {/each}

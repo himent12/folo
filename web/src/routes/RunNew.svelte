@@ -9,11 +9,12 @@
   import RotateCcw from '@lucide/svelte/icons/rotate-ccw';
   import TriangleAlert from '@lucide/svelte/icons/triangle-alert';
   import { tick, untrack } from 'svelte';
-  import { hub } from '$lib/api/index.svelte';
+  import { ApiError, hub } from '$lib/api/index.svelte';
   import { Resource } from '$lib/api/resource.svelte';
   import type { Arch, Augment, DatasetImage, Device, Optimizer, TrainConfig } from '$lib/api/types';
   import ClassStrip from '$lib/detect/ClassStrip.svelte';
-  import { bytes, compact, deviceName, duration, num } from '$lib/format';
+  import { bytes, compact, deviceName, duration, num, sentence } from '$lib/format';
+  import { IMGSZ_STEPS, isOom } from '$lib/oom';
   import { prefs } from '$lib/prefs.svelte';
   import { href, router } from '$lib/router.svelte';
   import { setCrumbs } from '$lib/shell/crumbs.svelte';
@@ -31,7 +32,7 @@
   import Slider from '$lib/ui/Slider.svelte';
   import { toast } from '$lib/ui/toast.svelte';
   import AugPreview, { type AugKey } from './runnew/AugPreview.svelte';
-  import { arches, estimate } from './runnew/estimate';
+  import { arches, estimate, oomScale } from './runnew/estimate';
 
   setCrumbs({ label: 'Runs', path: '/runs' }, { label: 'New run' });
 
@@ -52,7 +53,8 @@
   let arch = $state<Arch>('folo-s');
   let epochs = $state(100);
   let batch = $state('16');
-  const IMGSZ = ['320', '480', '640', '960', '1280'];
+  const IMGSZ = IMGSZ_STEPS.map(String);
+  const BATCHES = ['8', '16', '32', '64'];
   // ?imgsz= (e.g. from a dataset's "Train at 960 px" health finding) preselects a supported size.
   let imgsz = $state(IMGSZ.includes(q.get('imgsz') ?? '') ? q.get('imgsz')! : '640');
   let device = $state<string>('auto');
@@ -98,12 +100,18 @@
     const r = source.data;
     if (!r || untrack(() => prefilled)) return;
     const c = r.config;
+    // A retry's fix comes in the query (?batch=, ?imgsz=, ?arch=, ?device=; see $lib/oom) and wins over the run's.
+    // A value the trainer would reject is ignored (the run's own stays), never offered with Start enabled.
+    const whole = (k: string, lo: number, hi: number, step = 1) => {
+      const v = Number(q.get(k));
+      return Number.isInteger(v) && v >= lo && v <= hi && v % step === 0 ? String(v) : null;
+    };
     datasetId = c.dataset_id;
-    arch = c.arch;
+    arch = arches.find((a) => a.arch === q.get('arch'))?.arch ?? c.arch;
     epochs = c.epochs;
-    batch = q.get('batch') ?? String(c.batch);
-    imgsz = String(c.imgsz);
-    device = c.device;
+    batch = whole('batch', 1, 1024) ?? String(c.batch);
+    imgsz = whole('imgsz', 64, 4096, 32) ?? String(c.imgsz); // the trainer's limits (docs/API.md, runs)
+    device = q.get('device') === 'cpu' ? 'cpu' : c.device;
     optimizer = c.optimizer;
     lr0 = c.lr0;
     seed = c.seed;
@@ -169,7 +177,33 @@
   const est = $derived(estimate(arch, dataset?.splits.train ?? 0, epochs, batchN, imgszN, onCpu));
   // wgpu cannot report adapter memory (real servers send 0): then there is no meter and no out-of-memory guess.
   const gpuMem = $derived(gpu && gpu.memory_bytes > 0 ? gpu.memory_bytes : null);
-  const vramPct = $derived(gpuMem ? est.vramBytes / gpuMem : 0);
+
+  // A retry of a run that ran out of GPU memory: what changed since, and an estimate that agrees with the failure.
+  const oomRun = $derived(source.data && source.data.status === 'failed' && isOom(source.data.error) ? source.data : null);
+  const oomChanges = $derived.by(() => {
+    const c = oomRun?.config;
+    if (!c) return [];
+    const out: { key: 'batch' | 'imgsz' | 'model' | 'device'; was: string; now: string }[] = [];
+    if (c.batch !== batchN) out.push({ key: 'batch', was: `batch ${c.batch}`, now: `batch ${batchN}` });
+    if (c.imgsz !== imgszN) out.push({ key: 'imgsz', was: `${c.imgsz} px`, now: `${imgszN} px` });
+    if (c.arch !== arch) out.push({ key: 'model', was: c.arch, now: arch });
+    if (c.device !== device) out.push({ key: 'device', was: c.device, now: device });
+    return out;
+  });
+  const was = (key: string) => oomChanges.find((x) => x.key === key)?.was;
+  // The estimate is rough; when it thought the failed settings fit, it is scaled up until they no longer do.
+  const scale = $derived.by(() => {
+    const c = oomRun?.config;
+    if (!c || !gpuMem || c.device === 'cpu') return 1;
+    return oomScale(estimate(c.arch, dataset?.splits.train ?? 0, c.epochs, c.batch, c.imgsz, false).vramBytes, gpuMem);
+  });
+  const vram = $derived(est.vramBytes * scale);
+  const vramPct = $derived(gpuMem ? vram / gpuMem : 0);
+
+  // Start answered `404 device_not_found` (`501 not_implemented` from servers before it): said at the Device field,
+  // with the server's list of adapters, until another device is picked.
+  let deviceError = $state<{ device: string; text: string } | null>(null);
+  const deviceMsg = $derived(deviceError && deviceError.device === device ? deviceError.text : null);
 
   const errors = $derived({
     name: !name.trim() ? 'Give the run a name.' : /[^\w.-]/.test(name.trim()) ? 'Letters, digits, dot, dash and underscore only.' : null,
@@ -179,6 +213,8 @@
     close: !isInt(augment.close_mosaic, 0, Number.isFinite(epochs) ? epochs : 0) ? 'A whole number up to the epoch count.' : null,
     dataset: !dataset ? 'Pick a dataset.' : null,
     weights: weights !== 'none' && !weightOptions.some((m) => m.id === weights) ? 'Pick weights of the same model size.' : null,
+    // The field has the server's words and the adapters; the line beside Start only needs the gist.
+    device: deviceMsg ? `${device} is not on this machine; pick another.` : null,
   });
   const valid = $derived(prefilled && Object.values(errors).every((e) => e === null));
   const firstError = $derived(Object.values(errors).find((e) => e !== null) ?? null);
@@ -190,12 +226,14 @@
     close: 'Close mosaic',
     dataset: 'Dataset',
     weights: 'Start from',
+    device: 'Device',
   };
   /** The first problem, named by its field (shown beside a disabled Start). */
   const why = $derived.by(() => {
     for (const [k, v] of Object.entries(errors)) if (v) return `${FIELD[k as keyof typeof errors]}: ${v}`;
     return null;
   });
+  const showWhy = $derived(!valid && !!why && prefilled);
   // A folded section must not hide its own error: while one is shown the section stays open whatever was toggled.
   const augShown = $derived(augOpen || errors.close !== null);
 
@@ -253,7 +291,12 @@
       toast.success(`Started ${run.name}`, `${run.epochs} epochs of ${run.config.arch} on ${dataset?.name}.`);
       router.go(`/runs/${run.id}`);
     } catch (err) {
-      toast.error(err, 'Could not start the run');
+      if (err instanceof ApiError && (err.code === 'device_not_found' || (err.code === 'not_implemented' && device.startsWith('gpu:')))) {
+        deviceError = { device, text: [err.message, err.hint].filter((x): x is string => !!x).map((x) => sentence(x, true)).join(' ') };
+        // The adapters may have changed (an eGPU unplugged): list them again, and show the field with its message.
+        void system.refresh();
+        void jump('device');
+      } else toast.error(err, 'Could not start the run');
     } finally {
       submitting = false;
     }
@@ -269,6 +312,8 @@
   }
 
   const pct2 = (v: number) => `${Math.round(v * 100)}%`;
+  /** The standard choices plus `v` when it is not one of them (a copied run's batch 4, 1024 px), in order. */
+  const withValue = (list: string[], v: string) => (list.includes(v) ? list : [...list, v].sort((a, b) => Number(a) - Number(b)));
 
   // ---------- review ----------
   const shortGpu = deviceName;
@@ -286,7 +331,7 @@
     { key: 'epochs', label: 'Epochs', value: errors.epochs ? '—' : num(epochs), warn: !!errors.epochs },
     { key: 'batch', label: 'Batch', value: String(batchN) },
     { key: 'imgsz', label: 'Image size', value: `${imgszN} px` },
-    { key: 'device', label: 'Device', value: deviceLabel },
+    { key: 'device', label: 'Device', value: deviceLabel, warn: !!deviceMsg },
     {
       key: 'weights',
       label: 'Start from',
@@ -354,9 +399,10 @@
     <dt>Est. time</dt><dd class="num">{roughDuration(est.totalSeconds)} <span class="faint">(~{num(Math.round(est.imgsPerS / 10) * 10, 0)} img/s)</span></dd>
     {#if !onCpu && gpu}
       <dt>Est. GPU memory</dt>
-      <dd class="num" class:warn={vramPct > 0.9}>{roughBytes(est.vramBytes)} <span class="faint">/ {gpuMem ? bytes(gpuMem, prefs.units) : 'GPU memory unknown'}</span></dd>
+      <dd class="num" class:warn={vramPct > 0.9}>{roughBytes(vram)} <span class="faint">/ {gpuMem ? bytes(gpuMem, prefs.units) : 'GPU memory unknown'}</span></dd>
     {/if}
   </dl>
+  {#if scale > 1 && !onCpu}<p class="calib">Scaled up from the failed run's settings, which did not fit.</p>{/if}
   {#if !onCpu && gpuMem}
     <div class="vram" aria-hidden="true"><i class:warn={vramPct > 0.9} style:width={pct2(Math.min(1, vramPct))}></i></div>
   {/if}
@@ -387,6 +433,16 @@
     </Panel>
   {:else}
     <form class="layout" onsubmit={submit} novalidate>
+      {#if oomRun}
+        <!-- Why the form is not a plain copy: the run it retries ran out of memory, and what was changed for that. -->
+        <p class="oom-note" role="status">
+          <TriangleAlert size={16} aria-hidden="true" />
+          <span>
+            <a class="link" href={href(`/runs/${oomRun.id}`)}>{oomRun.name}</a> ran out of GPU memory at
+            {#if oomChanges.length}{oomChanges.map((x) => x.was).join(', ')}. Now {oomChanges.map((x) => x.now).join(', ')}.{:else}batch {oomRun.config.batch}, {oomRun.config.imgsz} px. These are the same settings: lower the batch or image size, or pick a smaller model.{/if}
+          </span>
+        </p>
+      {/if}
       <div class="form">
         <Panel title="1 · Dataset" id="sec-data">
           {#if !datasets.data}
@@ -417,7 +473,7 @@
           {/if}
         </Panel>
 
-        <Panel title="2 · Model" id="sec-model">
+        <Panel title="2 · Model" id="sec-model" meta={was('model') ? `was ${oomRun?.config.arch}` : undefined}>
           <div class="arches" role="radiogroup" aria-label="Model size">
             <!-- Below 960 px the cards become single-line rows; this is their column header. -->
             <div class="a-head" aria-hidden="true"><span class="a-head-lead"></span><span>Params</span><span>GFLOPs</span><span>Latency</span></div>
@@ -456,18 +512,25 @@
               <Input id="epochs" type="number" min="1" max="10000" step="1" bind:value={epochs} invalid={!!errors.epochs} suffix="epochs" />
             </Field>
             <Field label="Batch size" for="batch" hint="Per step. Lower it if you run out of GPU memory.">
-              <Segmented id="batch" label="Batch size" bind:value={batch} options={['8', '16', '32', '64'].map((v) => ({ value: v, label: v }))} />
+              {#snippet aside()}{#if was('batch')}<span class="was">was {oomRun?.config.batch}</span>{/if}{/snippet}
+              <Segmented id="batch" label="Batch size" bind:value={batch} options={withValue(BATCHES, batch).map((v) => ({ value: v, label: v }))} />
             </Field>
             <Field label="Image size" for="imgsz" hint="Longer side in pixels, letterboxed.">
-              <Segmented id="imgsz" label="Image size" bind:value={imgsz} options={IMGSZ.map((v) => ({ value: v, label: v }))} />
+              {#snippet aside()}{#if was('imgsz')}<span class="was">was {oomRun?.config.imgsz}</span>{/if}{/snippet}
+              <Segmented id="imgsz" label="Image size" bind:value={imgsz} options={withValue(IMGSZ, imgsz).map((v) => ({ value: v, label: v }))} />
             </Field>
-            <Field label="Device" for="device">
+            <Field label="Device" for="device" error={deviceMsg}>
+              {#snippet aside()}{#if was('device')}<span class="was">was {oomRun?.config.device}</span>{/if}{/snippet}
               <Select
                 id="device"
                 bind:value={device}
+                invalid={!!deviceMsg}
+                describedby={deviceMsg ? 'device-error' : undefined}
                 options={[
                   { value: 'auto', label: `Auto${gpu ? ` · ${deviceName(gpu.name)}` : ''}` },
                   ...(system.data?.gpus ?? []).map((g) => ({ value: `gpu:${g.ordinal}`, label: `gpu:${g.ordinal} · ${deviceName(g.name)}` })),
+                  // A device the run asked for that the machine no longer lists stays selectable, so the form keeps it.
+                  ...(device.startsWith('gpu:') && system.data && !system.data.gpus.some((g) => `gpu:${g.ordinal}` === device) ? [{ value: device, label: `${device} · not found` }] : []),
                   { value: 'cpu', label: `CPU${system.data ? ` · ${system.data.cpu.threads} threads` : ''}` },
                 ]}
               />
@@ -561,9 +624,18 @@
             <div class="sum-col">
             {@render figures()}
             <div class="start" bind:this={startEl}>
-              <Button type="submit" variant="primary" size="lg" icon={Play} block loading={submitting} disabled={!valid}>Start training</Button>
+              <Button
+                type="submit"
+                variant="primary"
+                size="lg"
+                icon={Play}
+                block
+                loading={submitting}
+                disabled={!valid}
+                aria-describedby={showWhy ? 'start-why' : undefined}>Start training</Button
+              >
               <!-- A disabled Start always says why, next to it (the field may be far away). -->
-              {#if !valid && why && prefilled}<p class="why" role="status">{why}</p>{/if}
+              {#if showWhy}<p class="why" id="start-why" role="status">{why}</p>{/if}
             </div>
             <details class="cli">
               <summary><ChevronRight size={14} aria-hidden="true" />CLI command <span class="faint">the same run from a terminal</span></summary>
@@ -579,13 +651,17 @@
 
       <!-- Narrow screens: the summary sits below the form, so keep the essentials and the action in reach. -->
       <div class="dock" class:away={startVisible} role="region" aria-label="Start training" inert={startVisible}>
+        <!-- The reason Start is off travels with it (the Summary's line is out of view here). -->
+        {#if showWhy}<p class="why dock-why" id="dock-why">{why}</p>{/if}
         <button type="button" class="dock-est num" aria-haspopup="dialog" aria-label="Show the run summary" onclick={() => (sumOpen = true)}>
           <span>{roughDuration(est.totalSeconds)}</span>
-          {#if !onCpu && gpu}<span class:warn={vramPct > 0.9}>{roughBytes(est.vramBytes)} VRAM</span>{/if}
+          {#if !onCpu && gpu}<span class:warn={vramPct > 0.9}>{roughBytes(vram)} VRAM</span>{/if}
           {#if dataset}<span class="faint">{dataset.name} · {arch}</span>{/if}
           <span class="dock-more"><ChevronUp size={14} strokeWidth={1.75} aria-hidden="true" /></span>
         </button>
-        <Button type="submit" variant="primary" size="lg" icon={Play} loading={submitting} disabled={!valid}>Start training</Button>
+        <Button type="submit" variant="primary" size="lg" icon={Play} loading={submitting} disabled={!valid} aria-describedby={showWhy ? 'dock-why' : undefined}
+          >Start training</Button
+        >
       </div>
 
       <!-- Inside the form, so its Start button submits it. -->
@@ -949,6 +1025,44 @@
     background: var(--warning-muted);
     color: var(--warning-text);
   }
+  .calib {
+    margin-top: calc(-1 * var(--space-1));
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--text-tertiary);
+  }
+  /* The retry note spans the form and the summary; the mark carries the hue, the text stays in ink. */
+  .oom-note {
+    grid-column: 1 / -1;
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-4);
+    background: var(--bg-panel);
+    border: 1px solid var(--line-default);
+    border-radius: var(--radius-lg);
+    color: var(--text-secondary);
+  }
+  .oom-note > :global(svg) {
+    flex-shrink: 0;
+    margin-top: 2px;
+    color: var(--warning-text);
+  }
+  .oom-note .link {
+    color: var(--text-primary);
+    font-weight: var(--weight-medium);
+    text-decoration: underline;
+    text-decoration-color: var(--line-strong);
+    text-underline-offset: 3px;
+  }
+  .oom-note .link:hover {
+    text-decoration-color: var(--text-secondary);
+  }
+  /* A field the retry changed: its earlier value beside the label. */
+  .was {
+    color: var(--text-secondary);
+    font-variant-numeric: tabular-nums;
+  }
   .warning :global(svg) {
     flex-shrink: 0;
     margin-top: 4px;
@@ -1090,6 +1204,15 @@
         transform var(--dur-base) var(--ease-out),
         opacity var(--dur-base) var(--ease-out);
     }
+    .dock:has(.dock-why) {
+      flex-wrap: wrap;
+      row-gap: var(--space-2);
+    }
+    .dock-why {
+      flex-basis: 100%;
+      margin-top: 0;
+      text-align: right;
+    }
     .dock.away {
       transform: translateY(100%);
       opacity: 0;
@@ -1210,6 +1333,10 @@
       grid-template-columns: minmax(0, 1fr) auto;
       gap: var(--space-3);
       padding: var(--space-2) var(--space-4);
+    }
+    /* The reason Start is off takes its own row over both columns. */
+    .dock-why {
+      grid-column: 1 / -1;
     }
     .dock-est {
       position: relative;

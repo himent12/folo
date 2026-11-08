@@ -1,9 +1,12 @@
 <script lang="ts">
+  import type { Snippet } from 'svelte';
   import TriangleAlert from '@lucide/svelte/icons/triangle-alert';
   import RotateCw from '@lucide/svelte/icons/rotate-cw';
   import Settings from '@lucide/svelte/icons/settings';
   import { ApiError } from '$lib/api/client';
   import { hub } from '$lib/api/index.svelte';
+  import { sentence } from '$lib/format';
+  import { isOom, oomDetail } from '$lib/oom';
   import { href } from '$lib/router.svelte';
   import Button from './Button.svelte';
 
@@ -12,16 +15,35 @@
     retry,
     title = 'Could not load this',
     compact = false,
-  }: { error: unknown; retry?: () => void; title?: string; compact?: boolean } = $props();
+    actions,
+    hint: ownHint,
+  }: {
+    error: unknown;
+    retry?: () => void;
+    title?: string;
+    compact?: boolean;
+    actions?: Snippet;
+    /** What to do, in this screen's terms, instead of the server's hint (which then goes with the technical details). */
+    hint?: string;
+  } = $props();
 
   // Connection failures look the same everywhere: what was tried, and both ways out (retry, settings).
   const offline = $derived(error instanceof ApiError && error.code === 'network');
   const heading = $derived(offline ? "Can't reach the FOLO server" : title);
+  // Out of GPU memory says so plainly; the driver's report goes with the technical details.
+  const oom = $derived(!offline && isOom(error));
+  const raw = $derived(error instanceof Error ? error.message : String(error));
   const message = $derived(
-    offline ? `Nothing answered at ${hub.serverUrl}.` : error instanceof Error ? error.message : String(error),
+    offline ? `Nothing answered at ${hub.serverUrl}.` : oom ? 'The GPU ran out of memory.' : error instanceof ApiError ? sentence(raw) : raw,
   );
-  const hint = $derived(offline ? 'Start folo serve, or check the server URL.' : error instanceof ApiError ? error.hint : undefined);
+  const serverHint = $derived(error instanceof ApiError && error.hint ? sentence(error.hint) : undefined);
+  const hint = $derived(offline ? 'Start folo serve, or check the server URL.' : (ownHint ?? serverHint));
+  /** The hint in parts, identifiers (in backticks, as the server writes them) set in mono. */
+  const hintParts = $derived((hint ?? '').split('`').map((text, i) => ({ text, code: i % 2 === 1 })));
   const code = $derived(error instanceof ApiError ? `${error.code}${error.status ? ` · HTTP ${error.status}` : ''}` : undefined);
+  const detail = $derived(oom ? oomDetail(raw) : null);
+  /** The server's own hint, kept with the details when the screen says what applies here. */
+  const hiddenHint = $derived(!offline && ownHint && serverHint ? serverHint.replaceAll('`', '') : null);
 </script>
 
 <div class="err" class:compact role="alert">
@@ -29,11 +51,19 @@
   <div class="text">
     <p class="title">{heading}</p>
     <p class="msg">{message}</p>
-    {#if hint}<p class="hint">{hint}</p>{/if}
-    {#if code}<details class="code"><summary>Technical details</summary>{code}</details>{/if}
+    {#if hint}<p class="hint">{#each hintParts as p, i (i)}{#if p.code}<code>{p.text}</code>{:else}{p.text}{/if}{/each}</p>{/if}
+    {#if code || detail || hiddenHint}
+      <details class="code">
+        <summary>Technical details</summary>
+        {#if detail}<span class="line">{detail}</span>{/if}
+        {#if hiddenHint}<span class="line">Server hint: {hiddenHint}</span>{/if}
+        {#if code}<span class="line">{code}</span>{/if}
+      </details>
+    {/if}
     <!-- The ways out sit under the cause they answer, not at the far edge of the panel. -->
-    {#if retry || offline}
+    {#if retry || offline || actions}
       <div class="acts">
+        {@render actions?.()}
         {#if retry}<Button size="sm" icon={RotateCw} onclick={retry}>Retry</Button>{/if}
         {#if offline}<Button size="sm" variant="ghost" icon={Settings} href={href('/settings')}>Connection settings</Button>{/if}
       </div>
@@ -72,11 +102,19 @@
   .hint {
     color: var(--text-tertiary);
   }
+  .hint code {
+    font-family: var(--font-mono);
+    font-size: var(--type-sm-size);
+  }
   .code {
     margin-top: 2px;
     font-family: var(--font-mono);
     color: var(--text-tertiary);
     font-size: var(--type-xs-size);
+  }
+  .code .line {
+    display: block;
+    overflow-wrap: anywhere;
   }
   .code summary {
     display: flex;
@@ -103,6 +141,12 @@
   }
   .code[open] summary::before {
     transform: rotate(45deg);
+  }
+  /* Touch: the disclosure is a 44 px target, as Outcome's driver report is. */
+  @media (pointer: coarse) {
+    .code summary {
+      min-height: 44px;
+    }
   }
   .acts {
     display: flex;

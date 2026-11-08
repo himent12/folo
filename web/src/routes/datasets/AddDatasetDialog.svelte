@@ -17,7 +17,16 @@
   import { toast } from '$lib/ui/toast.svelte';
 
   type Mode = 'folder' | 'synthetic';
-  let { open = $bindable(false), mode = $bindable('folder') }: { open?: boolean; mode?: Mode } = $props();
+  let {
+    open = $bindable(false),
+    mode = $bindable('folder'),
+    known,
+  }: {
+    open?: boolean;
+    mode?: Mode;
+    /** The datasets already listed, to tell a new registration from an existing one (fetched when absent). */
+    known?: readonly { id: string }[];
+  } = $props();
 
   const uid = $props.id();
   let busy = $state(false);
@@ -94,6 +103,8 @@
     if (!valid || busy) return;
     busy = true;
     try {
+      // Registering a folder that is already registered answers with that dataset (docs/API.md), not a copy.
+      const before = mode === 'folder' ? (known ?? (await hub.api.datasets().catch(() => []))) : [];
       const ds =
         mode === 'folder'
           ? await hub.api.createDataset({ name: folderName, path: path.trim(), format })
@@ -104,7 +115,8 @@
               imgsz: Number(imgsz),
               seed: seed ?? 0,
             });
-      toast.success(mode === 'folder' ? 'Dataset registered' : 'Synthetic dataset ready', `${ds.name} · ${ds.splits.train + ds.splits.val + ds.splits.test} images`);
+      if (before.some((d) => d.id === ds.id)) toast.info(`Already registered as ${ds.name}`, 'That folder is in the list; opening it.');
+      else toast.success(mode === 'folder' ? 'Dataset registered' : 'Synthetic dataset ready', `${ds.name} · ${ds.splits.train + ds.splits.val + ds.splits.test} images`);
       open = false;
       router.go(`/datasets/${ds.id}`);
     } catch (err) {

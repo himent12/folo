@@ -15,6 +15,7 @@
   import { MediaQuery } from 'svelte/reactivity';
   import { ApiError } from '$lib/api/client';
   import { hub } from '$lib/api/index.svelte';
+  import { MockApi } from '$lib/api/mock';
   import { Resource } from '$lib/api/resource.svelte';
   import type { Dataset, DatasetImage as Img, Model, PredictInput, Prediction } from '$lib/api/types';
   import { classColor } from '$lib/design/tokens';
@@ -22,6 +23,7 @@
   import { filterDetections } from '$lib/detect/nms';
   import { BrowserEngine, hasWebGpu, PHASE_TEXT, type Backend } from '$lib/inference/browser.svelte';
   import { metric, ms, num } from '$lib/format';
+  import { isOom } from '$lib/oom';
   import { href, router } from '$lib/router.svelte';
   import Page from '$lib/shell/Page.svelte';
   import { setCrumbs } from '$lib/shell/crumbs.svelte';
@@ -311,8 +313,8 @@
     const run =
       on === 'server'
         ? hub.api.predict(input, { model_id: id, ...FETCH }, ctrl.signal)
-        : hub.api.mock
-          ? hub.api.predict(input, { model_id: id, ...FETCH }, ctrl.signal).then((p) => simulate(p, on))
+        : hub.api instanceof MockApi
+          ? hub.api.predictInPage(input, { model_id: id, ...FETCH }).then((p) => simulate(p, on))
           : (file ? Promise.resolve(null) : hub.api.modelWeightsTag(id, ctrl.signal)).then((tag) => {
               // Superseded while asking for the ETag: do not start loading or running a model nobody waits for.
               if (ctrl.signal.aborted) throw new DOMException('Superseded', 'AbortError');
@@ -341,11 +343,24 @@
           return;
         }
         error = e;
-        toast.error(e, 'Prediction failed');
+        // Out of GPU memory is answered in place, with its ways out; a toast would only repeat it.
+        if (!(on === 'server' && isOom(e))) toast.error(e, 'Prediction failed');
       },
     );
     return () => ctrl.abort();
   });
+
+  // Out of GPU memory on the server (507): this browser has its own device, and a smaller model of the same classes
+  // may fit where this one does not.
+  const oom = $derived(runOn === 'server' && isOom(error));
+  const ARCH_ORDER = ['folo-n', 'folo-s', 'folo-m', 'folo-l', 'folo-x'];
+  const smaller = $derived.by(() => {
+    const m = model;
+    if (!m) return null;
+    const rank = (x: Model) => ARCH_ORDER.indexOf(x.arch);
+    return ranked.find((x) => x.id !== m.id && rank(x) < rank(m) && x.classes.join('|') === m.classes.join('|')) ?? null;
+  });
+  const localBackend: Backend = webgpu ? 'webgpu' : 'cpu';
 
   // ---------- client-side filtering ----------
   let conf = $state(DEFAULTS.conf);
@@ -645,7 +660,24 @@
                     </div>
                   </div>
                 {:else if error && !pred}
-                  <div class="stage-err"><ErrorState {error} title="Prediction failed" retry={() => retryTick++} compact /></div>
+                  <div class="stage-err">
+                    <div class="need-file err-card">
+                      <ErrorState
+                        {error}
+                        title="Prediction failed"
+                        retry={() => retryTick++}
+                        compact
+                        hint={oom ? (smaller ? 'Run it in this browser, or use a smaller model.' : 'Run it in this browser instead.') : undefined}
+                      >
+                        {#snippet actions()}
+                          {#if oom}
+                            <Button size="sm" variant="primary" onclick={() => (runOn = localBackend)}>Run in this browser</Button>
+                            {#if smaller}<Button size="sm" onclick={() => chooseModel(smaller.id)}>Use {smaller.name} <span class="mono">{smaller.arch}</span></Button>{/if}
+                          {/if}
+                        {/snippet}
+                      </ErrorState>
+                    </div>
+                  </div>
                 {/if}
                 {#if dragging}<div class="drop-hint"><span>Drop to replace</span></div>{/if}
               {/if}
@@ -1026,6 +1058,10 @@
   }
   .nf-title {
     font-weight: 600;
+  }
+  /* An error over the image gets the same card, so it reads on any photo. */
+  .err-card {
+    padding: 0 var(--space-4);
   }
   .nf-text {
     color: var(--text-secondary);

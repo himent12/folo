@@ -7,12 +7,14 @@
   import IssueList from './IssueList.svelte';
   import { MediaQuery } from 'svelte/reactivity';
   import ArrowRight from '@lucide/svelte/icons/arrow-right';
+  import ArrowUp from '@lucide/svelte/icons/arrow-up';
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import CircleAlert from '@lucide/svelte/icons/circle-alert';
   import CircleCheck from '@lucide/svelte/icons/circle-check';
   import Info from '@lucide/svelte/icons/info';
   import TriangleAlert from '@lucide/svelte/icons/triangle-alert';
-  import type { Dataset, DatasetStats } from '$lib/api/types';
+  import { tick } from 'svelte';
+  import type { Dataset, DatasetStats, IssueCounts, IssueSeverity } from '$lib/api/types';
   import Histogram from '$lib/charts/Histogram.svelte';
   import { classInk } from '$lib/design/classInk.svelte';
   import { num } from '$lib/format';
@@ -21,13 +23,29 @@
   import { tooltip } from '$lib/ui/tooltip';
   import { countBinLabel, healthChecks, imageCount, reviewCount, sizeBinLabel, TINY_SIZE, type Severity } from './health';
 
-  let { dataset, stats, onclass }: { dataset: Dataset; stats: DatasetStats; onclass: (cls: number) => void } = $props();
+  let {
+    dataset,
+    stats,
+    counts,
+    onclass,
+  }: { dataset: Dataset; stats: DatasetStats; counts?: IssueCounts; onclass: (cls: number) => void } = $props();
 
   const images = $derived(imageCount(dataset));
-  const health = $derived(healthChecks(dataset, stats));
+  const health = $derived(healthChecks(dataset, stats, counts));
   const issues = $derived(reviewCount(health));
   const findings = $derived(health.filter((h) => h.severity !== 'ok'));
   const notes = $derived(findings.length - issues);
+  // One list of the check's issues, under the first finding they back; the others move its filter to their severity.
+  const host = $derived(findings.find((h) => h.issues));
+  let listed = $state<IssueSeverity | null>(null);
+  const listSeverity = $derived(listed ?? host?.issues ?? 'error');
+  async function showIssues(sev: IssueSeverity) {
+    if (!host) return;
+    listed = sev;
+    toggled[host.id] = true;
+    await tick();
+    document.getElementById('ds-issues')?.scrollIntoView({ block: 'nearest', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+  }
   // Findings start open on wide screens and collapsed on phones; once toggled, a finding keeps its own state.
   const phone = new MediaQuery('max-width: 767px', false);
   let toggled = $state<Record<string, boolean>>({});
@@ -71,9 +89,15 @@
               </summary>
               <div class="hbody">
                 <p class="hdetail">{h.detail}</p>
-                {#if h.id === 'broken'}
-                  <!-- The evidence: each file and line with the parser's message. -->
-                  <IssueList datasetId={dataset.id} path={dataset.path} severity="error" />
+                {#if h.issues && h.id === host?.id}
+                  <!-- The evidence: each file and line with the checker's message and its fix. -->
+                  <div class="hlist" id="ds-issues">
+                    <IssueList datasetId={dataset.id} path={dataset.path} bind:severity={() => listSeverity, (v) => (listed = v)} {counts} />
+                  </div>
+                {:else if h.issues}
+                  <button type="button" class="haction" onclick={() => h.issues && showIssues(h.issues)}
+                    >List the {h.issues === 'error' ? 'errors' : 'warnings'}<ArrowUp size={12} strokeWidth={2} aria-hidden="true" /></button
+                  >
                 {/if}
                 {#if h.action}
                   <a class="haction" href={href(h.action.path)}>{h.action.label}<ArrowRight size={12} strokeWidth={2} aria-hidden="true" /></a>
@@ -387,6 +411,11 @@
     line-height: var(--type-sm-line);
     color: var(--text-secondary);
   }
+  /* The issue list takes two thirds of the row beside the detail. */
+  .hlist {
+    flex: 2 1 0;
+    min-width: 0;
+  }
   .haction {
     flex-shrink: 0;
     display: inline-flex;
@@ -433,7 +462,8 @@
     .hbody {
       flex-wrap: wrap;
     }
-    .haction {
+    .haction,
+    .hlist {
       flex-basis: 100%;
     }
     /* Phones: Images spans the grid so the split counts stay inside their tile; the other three share one row. */

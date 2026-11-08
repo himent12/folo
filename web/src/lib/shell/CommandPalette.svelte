@@ -13,6 +13,7 @@
   import Keyboard from '@lucide/svelte/icons/keyboard';
   import CornerDownLeft from '@lucide/svelte/icons/corner-down-left';
   import { hub } from '$lib/api/index.svelte';
+  import { failureCause } from '$lib/oom';
   import type { Dataset, Model, Run } from '$lib/api/types';
   import { prefs } from '$lib/prefs.svelte';
   import { router } from '$lib/router.svelte';
@@ -90,7 +91,7 @@
       id: `run-${x.id}`,
       group: 'Runs',
       label: x.name,
-      hint: `${x.status} · ${x.config.arch} · epoch ${x.epoch}/${x.epochs}`,
+      hint: `${failureCause(x) ? 'failed, out of GPU memory' : x.status} · ${x.config.arch} · epoch ${x.epoch}/${x.epochs}`,
       icon: Activity,
       run: go(`/runs/${x.id}`),
     }));

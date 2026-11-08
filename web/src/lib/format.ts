@@ -147,3 +147,15 @@ export function deviceName(label: string): string {
   if (/^cpu\b/i.test(s)) return 'CPU';
   return cpu ? `${s} (CPU)` : s || label;
 }
+
+/**
+ * A server message or hint as a sentence: a capital first letter and a closing full stop ("device gpu:3 is not
+ * available" → "Device gpu:3 is not available."). `plain` also drops the backticks around identifiers, for places
+ * that cannot set them in mono (toasts, field messages).
+ */
+export function sentence(s: string, plain = false): string {
+  const t = (plain ? s.replace(/`([^`]*)`/g, '$1') : s).trim();
+  if (!t) return t;
+  const cap = t[0]!.toUpperCase() + t.slice(1);
+  return /[.!?]$/.test(cap) ? cap : `${cap}.`;
+}

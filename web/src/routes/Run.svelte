@@ -1,21 +1,17 @@
 <script lang="ts">
   import ChartSkeleton from '$lib/charts/ChartSkeleton.svelte';
   import Box from '@lucide/svelte/icons/box';
-  import CircleCheck from '@lucide/svelte/icons/circle-check';
   import Clock from '@lucide/svelte/icons/clock';
   import GitCompare from '@lucide/svelte/icons/git-compare-arrows';
-  import RotateCcw from '@lucide/svelte/icons/rotate-ccw';
-  import Play from '@lucide/svelte/icons/play';
   import ScanSearch from '@lucide/svelte/icons/scan-search';
   import Square from '@lucide/svelte/icons/square';
   import Trash from '@lucide/svelte/icons/trash-2';
   import X from '@lucide/svelte/icons/x';
-  import TriangleAlert from '@lucide/svelte/icons/triangle-alert';
   import WifiOff from '@lucide/svelte/icons/wifi-off';
   import { hub } from '$lib/api/index.svelte';
   import { LiveRun } from '$lib/api/live.svelte';
   import { Resource } from '$lib/api/resource.svelte';
-  import { ago, deviceName, duration, eta, metric } from '$lib/format';
+  import { ago, deviceName, eta } from '$lib/format';
   import { href, router } from '$lib/router.svelte';
   import { setCrumbs } from '$lib/shell/crumbs.svelte';
   import Page from '$lib/shell/Page.svelte';
@@ -31,6 +27,7 @@
   import { toast } from '$lib/ui/toast.svelte';
   import ConfigPanel from './run/ConfigPanel.svelte';
   import Logs from './run/Logs.svelte';
+  import Outcome from './run/Outcome.svelte';
   import PerClass from './run/PerClass.svelte';
   import RunMetrics from './run/RunMetrics.svelte';
   import Samples from './run/Samples.svelte';
@@ -117,7 +114,6 @@
     }
   }
 
-  const retryHref = $derived(run ? href(`/runs/new?from=${run.id}${run.error?.includes('memory') ? `&batch=${Math.max(1, run.config.batch / 2)}` : ''}`) : '#');
 </script>
 
 {#if live.error && !run}
@@ -211,37 +207,7 @@
       <span class="phone-only"><Menu label="More run actions" items={moreItems} /></span>
     {/snippet}
 
-    <!-- The outcome as one line under the header (status mark, what happened, the next action); it wraps rather than
-         grows into a card. The failure's cause stays in full: it is what decides between Resume and a smaller batch. -->
-    {#if run.status === 'failed'}
-      <div class="callout danger" role="alert">
-        <TriangleAlert size={16} aria-hidden="true" />
-        <p class="c-text"><span class="c-title">Failed at epoch {run.epoch}</span> <span class="c-msg">{run.error}</span></p>
-        <div class="c-acts">
-          <!-- Out of memory needs a smaller batch (a new run); anything else can continue from the last checkpoint. -->
-          {#if !run.error?.includes('memory')}<Button size="sm" icon={Play} loading={resuming} onclick={resume}>Resume</Button>{/if}
-          <Button size="sm" icon={RotateCcw} href={retryHref}>{run.error?.includes('memory') ? `Retry with batch ${Math.max(1, run.config.batch / 2)}` : 'New run like this'}</Button>
-        </div>
-      </div>
-    {:else if run.status === 'completed'}
-      <div class="callout success" role="status">
-        <CircleCheck size={16} aria-hidden="true" />
-        <p class="c-text">
-          <span class="c-title">Completed in {duration(elapsed)}</span>
-          <span class="c-msg brief">Best mAP50-95 <span class="num">{metric(run.best?.map50_95)}</span> at epoch {run.best?.epoch ?? 0}, saved as a model.</span>
-        </p>
-        {#if run.model_id}<div class="c-acts"><Button size="sm" icon={ScanSearch} href={href(`/playground?model=${run.model_id}`)}>Try in Playground</Button></div>{/if}
-      </div>
-    {:else if run.status === 'stopped'}
-      <div class="callout neutral" role="status">
-        <Square size={16} aria-hidden="true" />
-        <p class="c-text">
-          <span class="c-title">Stopped at epoch {run.epoch}</span>
-          <span class="c-msg">The last checkpoint was kept{run.model_id ? ' and saved as a model' : ''}; Resume continues from it.</span>
-        </p>
-        <div class="c-acts"><Button size="sm" icon={Play} loading={resuming} onclick={resume}>Resume</Button></div>
-      </div>
-    {/if}
+    <Outcome {run} {elapsed} {resuming} onresume={resume} />
 
     {#if queuedOnly}
       <!-- Nothing has run yet: one clear waiting state instead of empty charts. -->
@@ -520,49 +486,6 @@
   .dev {
     max-width: 320px;
   }
-  .callout {
-    display: grid;
-    grid-template-columns: auto minmax(0, 1fr) auto;
-    align-items: center;
-    gap: var(--space-2) var(--space-3);
-    min-height: 44px;
-    padding: var(--space-2) var(--space-2) var(--space-2) var(--space-4);
-    background: var(--bg-panel);
-    border: 1px solid var(--line-default);
-    border-radius: var(--radius-lg);
-  }
-  /* The status mark carries the hue; the text stays in ink, so it reads at AA on the panel in both themes. */
-  .callout > :global(svg) {
-    flex-shrink: 0;
-  }
-  .danger > :global(svg) {
-    color: var(--danger-text);
-  }
-  .success > :global(svg) {
-    color: var(--success-text);
-  }
-  .neutral > :global(svg) {
-    color: var(--text-tertiary);
-  }
-  .c-text {
-    min-width: 0;
-    color: var(--text-secondary);
-  }
-  .c-title {
-    margin-right: var(--space-2);
-    font-weight: var(--weight-medium);
-    color: var(--text-primary);
-  }
-  .c-msg .num {
-    color: var(--text-primary);
-  }
-  .c-acts {
-    display: flex;
-    flex-wrap: wrap;
-    justify-content: flex-end;
-    gap: var(--space-2);
-  }
-
   .queued {
     display: grid;
     justify-items: center;
@@ -663,32 +586,6 @@
     .phone-pick :global(.seg > *) {
       flex: 1;
       justify-content: center;
-    }
-    /* Phones: the mark and the title share the first line; a cause wraps below it, the actions under the text. */
-    .callout {
-      padding-left: var(--space-3);
-    }
-    .callout:has(.c-msg:not(.brief)) {
-      grid-template-columns: auto minmax(0, 1fr);
-      align-items: start;
-      padding-block: var(--space-3);
-    }
-    .callout:has(.c-msg:not(.brief)) > :global(svg) {
-      margin-top: 2px;
-    }
-    .callout:has(.c-msg:not(.brief)) .c-acts {
-      grid-column: 2;
-      justify-content: flex-start;
-    }
-    .c-msg {
-      display: block;
-      margin-top: 2px;
-      font-size: var(--type-sm-size);
-      line-height: var(--type-sm-line);
-    }
-    /* Success is a one-line summary with its action; the best epoch is in the tiles below. */
-    .c-msg.brief {
-      display: none;
     }
     .dev,
     .cfg,

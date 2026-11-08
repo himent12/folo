@@ -242,7 +242,8 @@ const issuesCache = new WeakMap<MockDatasetSpec, DatasetIssue[]>();
 
 /**
  * `folo dataset check` findings for a mock dataset, consistent with its stats: one error per broken label file, an
- * `empty_image` info per image without boxes, and a few deterministic warnings. Dataset order (train, val, test).
+ * `empty_image` info per image without boxes, and a few deterministic warnings, each with the cleanup `folo dataset
+ * check --fix-dry-run` would suggest (none for infos). Dataset order (train, val, test).
  */
 export function issues(s: MockDatasetSpec): DatasetIssue[] {
   const hit = issuesCache.get(s);
@@ -260,17 +261,17 @@ export function issues(s: MockDatasetSpec): DatasetIssue[] {
     const i = Math.floor(r() * s.splits.train);
     const [kind, msg] = BROKEN[k % BROKEN.length]!;
     const line = 1 + Math.floor(r() * 9);
-    out.push({ i, issue: { kind, severity: 'error', file: labelOf(image(s, i).file), line, message: msg(line) } });
+    out.push({ i, issue: { kind, severity: 'error', file: labelOf(image(s, i).file), line, message: msg(line), fix: `delete line ${line}` } });
   }
   for (let k = 0; k < 2 && n > 0; k++) {
     const i = Math.floor(r() * n);
     const line = 1 + Math.floor(r() * 6);
-    out.push({ i, issue: { kind: 'clipped_box', severity: 'warning', file: labelOf(image(s, i).file), line, message: 'box extends 0.004 past the right edge; clipped on load' } });
+    out.push({ i, issue: { kind: 'clipped_box', severity: 'warning', file: labelOf(image(s, i).file), line, message: 'box extends 0.004 past the right edge; clipped on load', fix: `clip the box on line ${line} to the image` } });
   }
   if (n > 2) {
     const a = Math.floor(r() * (n - 1));
     const b = Math.min(n - 1, a + 1 + Math.floor(r() * (n - a - 1)));
-    out.push({ i: b, issue: { kind: 'duplicate_image', severity: 'warning', file: image(s, b).file, line: null, message: `same bytes as ${image(s, a).file}` } });
+    out.push({ i: b, issue: { kind: 'duplicate_image', severity: 'warning', file: image(s, b).file, line: null, message: `same bytes as ${image(s, a).file}`, fix: `remove this copy (and its label file); keep ${image(s, a).file}` } });
   }
   for (let i = 0; i < n; i++) {
     const img = image(s, i);
