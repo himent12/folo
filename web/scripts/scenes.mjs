@@ -2,7 +2,7 @@
 // (default: dark + light, desktop + mobile). `setup(page)` drives the UI into the state before the shot.
 // `search` adds query params to the page URL (e.g. `scenario=empty` for the mock), next to `mock=1`.
 
-/** @typedef {{ name: string, path: string, themes?: ('dark' | 'light')[], viewports?: ('desktop' | 'laptop' | 'mobile')[], advance?: number, search?: string,
+/** @typedef {{ name: string, path: string, themes?: ('dark' | 'light')[], viewports?: ('desktop' | 'laptop' | 'tablet' | 'mobile')[], advance?: number, search?: string,
  *   fullPage?: boolean, setup?: (page: import('playwright-core').Page, ctx: { vp: string, theme: string }) => Promise<void> }} Scene */
 
 /**
@@ -32,7 +32,7 @@ export const scenes = [
   { name: 'overview', path: '/', viewports: ['desktop', 'laptop', 'mobile'] },
   { name: 'datasets', path: '/datasets', viewports: ['desktop', 'laptop', 'mobile'] },
   { name: 'runs', path: '/runs', viewports: ['desktop', 'laptop', 'mobile'] },
-  { name: 'run-live', path: '/runs/run_7d1e', advance: 4000, viewports: ['desktop', 'laptop', 'mobile'] },
+  { name: 'run-live', path: '/runs/run_7d1e', advance: 4000, viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
   {
     // The phone layout below the fold: the metrics instrument, then one section at a time (here: per-class results).
     name: 'run-live-phone-classes',
@@ -46,7 +46,7 @@ export const scenes = [
   },
   { name: 'run-failed', path: '/runs/run_a2f0', viewports: ['desktop', 'laptop', 'mobile'] },
   { name: 'run-completed', path: '/runs/run_c19a', viewports: ['desktop', 'laptop', 'mobile'] },
-  { name: 'run-new', path: '/runs/new', viewports: ['desktop', 'laptop', 'mobile'] },
+  { name: 'run-new', path: '/runs/new', viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
   {
     name: 'run-new-focus-mosaic',
     fullPage: false,
@@ -58,11 +58,11 @@ export const scenes = [
     },
   },
   {
-    // Up to 1199 px the dock's estimate opens the run summary as a dialog (a bottom sheet on phones).
+    // Below 960 px the dock's estimate opens the run summary as a dialog (a bottom sheet on phones).
     name: 'run-new-summary',
     fullPage: false,
     path: '/runs/new',
-    viewports: ['laptop', 'mobile'],
+    viewports: ['tablet', 'mobile'],
     setup: async (page) => {
       await until(page, '.dock-est');
       await page.locator('.dock-est').click();
@@ -71,11 +71,11 @@ export const scenes = [
   },
   {
     // The viewport, not the whole page (a full-page shot grows the viewport, so the dock steps aside for the summary's
-    // own button): up to 1199 px Start training stays in the bottom dock while the form scrolls.
+    // own button): below 960 px Start training stays in the bottom dock while the form scrolls.
     name: 'run-new-dock',
     path: '/runs/new',
     fullPage: false,
-    viewports: ['laptop'],
+    viewports: ['tablet'],
     setup: (page) => until(page, '.dock-est'),
   },
   {
@@ -297,7 +297,7 @@ export const scenes = [
   { name: 'overview-loading', path: '/', search: 'scenario=loading', viewports: ['desktop', 'laptop', 'mobile'] },
   { name: 'overview-error', path: '/', search: 'scenario=error', viewports: ['desktop'] },
   { name: 'runs-empty', path: '/runs', search: 'scenario=empty', themes: ['dark'], viewports: ['desktop'] },
-  { name: 'run-loading', path: '/runs/run_7d1e', search: 'scenario=loading', themes: ['dark'], viewports: ['desktop'] },
+  { name: 'run-loading', path: '/runs/run_7d1e', search: 'scenario=loading', themes: ['dark'], viewports: ['desktop', 'laptop'] },
   {
     name: 'palette-open',
     fullPage: false,

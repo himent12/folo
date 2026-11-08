@@ -135,14 +135,45 @@
       <Skeleton w="240px" h="28px" />
       <Skeleton w="min(420px, 100%)" h="16px" />
     </div>
-    <!-- The metrics instrument (strip + one chart), then samples beside the rail. -->
+    <!-- The metrics instrument (epoch, six KPI tabs, one chart), then the samples grid beside the per-class and config
+         rail. -->
     <div class="sk-metrics">
       <div class="sk-strip">
-        {#each [0, 1, 2, 3, 4, 5, 6] as i (i)}<div class="sk-cell"><Skeleton w="56%" h="12px" /><Skeleton w="48%" h="28px" /><Skeleton w="68%" h="10px" /></div>{/each}
+        <div class="sk-cell sk-epoch"><Skeleton w="40px" h="12px" /><Skeleton w="88px" h="32px" /><Skeleton h="4px" /><Skeleton w="64%" h="12px" /></div>
+        <div class="sk-tabs">
+          {#each [0, 1, 2, 3, 4, 5] as i (i)}<div class="sk-cell"><Skeleton w="56%" h="12px" /><Skeleton w="48%" h="24px" /><Skeleton w="68%" h="12px" /></div>{/each}
+        </div>
       </div>
       <div class="sk-chart"><ChartSkeleton height={320} /></div>
     </div>
-    <div class="sk-row2"><Skeleton h="300px" r="var(--radius-lg)" /><Skeleton h="300px" r="var(--radius-lg)" /></div>
+    <div class="sk-pick"><Skeleton w="280px" h="28px" r="var(--radius-md)" /></div>
+    <div class="sk-detail">
+      <div class="sk-panel">
+        <div class="sk-ph"><Skeleton w="128px" h="14px" /><span class="sk-ctl"><Skeleton w="160px" h="24px" r="var(--radius-md)" /><Skeleton w="120px" h="24px" r="var(--radius-md)" /></span></div>
+        <div class="sk-pb">
+          <div class="sk-bar"><Skeleton w="min(300px, 60%)" h="12px" /><Skeleton w="200px" h="12px" /></div>
+          <div class="sk-tiles">{#each [0, 1, 2, 3, 4, 5, 6, 7, 8] as i (i)}<Skeleton h="auto" class="sk-tile" r="var(--radius-md)" />{/each}</div>
+        </div>
+      </div>
+      <div class="sk-rail">
+        <div class="sk-panel">
+          <div class="sk-ph"><Skeleton w="72px" h="14px" /></div>
+          <div class="sk-rows">
+            {#each [0, 1, 2, 3, 4, 5, 6, 7] as i (i)}
+              <div class="sk-row"><Skeleton w="8px" h="8px" r="2px" /><Skeleton w="{56 + ((i * 23) % 40)}px" h="12px" /><Skeleton w="40px" h="12px" /><Skeleton h="4px" /></div>
+            {/each}
+          </div>
+        </div>
+        <div class="sk-panel">
+          <div class="sk-ph"><Skeleton w="56px" h="14px" /></div>
+          <div class="sk-rows">
+            {#each [0, 1, 2, 3, 4, 5] as i (i)}
+              <div class="sk-row cfg"><Skeleton w="{64 + ((i * 17) % 32)}px" h="12px" /><Skeleton w="{36 + ((i * 29) % 40)}px" h="12px" /></div>
+            {/each}
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 {:else}
   <Page title={run.name} inlineActions>
@@ -236,7 +267,7 @@
     <RunMetrics {run} steps={live.steps} epochs={live.epochs} version={live.version} loading={live.loading} />
 
     <!-- Evidence on the left (what the model sees, what the trainer says); reference in a sticky rail on the right. -->
-    <!-- Up to 1199 px one of these shows at a time, chosen here; wider screens show them all beside a rail. -->
+    <!-- Below 960 px one of these shows at a time, chosen here; wider screens show them all beside a rail. -->
     <div class="phone-pick">
       <Segmented
         label="Show"
@@ -305,40 +336,155 @@
   }
   .sk-strip {
     display: grid;
-    grid-template-columns: 240px repeat(6, minmax(0, 1fr));
+    grid-template-columns: 240px minmax(0, 1fr);
     border-bottom: 1px solid var(--line-subtle);
   }
+  .sk-tabs {
+    display: grid;
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+  }
+  /* The same row geometry as the loaded cells (RunMetrics), so the chart does not move when data arrives. */
   .sk-cell {
     display: grid;
-    gap: var(--space-2);
+    grid-template-rows: 16px 40px 16px;
+    align-items: center;
+    gap: 6px;
     padding: var(--space-4);
     border-left: 1px solid var(--line-subtle);
   }
-  .sk-cell:first-child {
+  .sk-epoch {
+    grid-template-rows: 16px 40px auto 16px;
     border-left: 0;
   }
   .sk-chart {
     padding: var(--space-4);
   }
+  .sk-pick {
+    display: none;
+  }
+  .sk-detail {
+    display: grid;
+    grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+    gap: var(--space-4);
+    align-items: start;
+  }
+  .sk-rail {
+    display: grid;
+    gap: var(--space-4);
+  }
+  .sk-panel {
+    background: var(--bg-panel);
+    border: 1px solid var(--line-subtle);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+  }
+  .sk-ph {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+    height: 40px;
+    padding: 0 var(--space-3) 0 var(--space-4);
+  }
+  .sk-ctl {
+    display: flex;
+    gap: var(--space-2);
+  }
+  .sk-pb {
+    display: grid;
+    gap: var(--space-3);
+    padding: 0 var(--space-4) var(--space-4);
+  }
+  .sk-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-4);
+    height: 24px;
+  }
+  /* The loaded grid's geometry: tiles at least 152 px wide, 4:3, 8 px apart. */
+  .sk-tiles {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(152px, 1fr));
+    gap: var(--space-2);
+  }
+  .sk-tiles :global(.sk-tile) {
+    aspect-ratio: 4 / 3;
+  }
+  /* Full rows only, as loaded: eight tiles in four or two columns, nine in three (laptops). */
+  .sk-tiles :global(.sk-tile:nth-child(9)) {
+    display: none;
+  }
+  .sk-rows {
+    display: grid;
+    padding-bottom: var(--space-2);
+  }
+  /* Per-class rows (swatch, name, value, bar) and config rows (label, value), 28 px like the loaded tables. */
+  .sk-row {
+    display: grid;
+    grid-template-columns: 8px minmax(0, 1fr) 40px 30%;
+    align-items: center;
+    gap: var(--space-2);
+    height: 28px;
+    padding: 0 var(--space-4);
+  }
+  .sk-row.cfg {
+    grid-template-columns: auto auto;
+    justify-content: space-between;
+  }
   @media (max-width: 1199px) {
     .sk-strip {
-      grid-template-columns: repeat(3, minmax(0, 1fr));
+      grid-template-columns: minmax(0, 1fr);
     }
-    .sk-cell:first-child {
+    .sk-epoch {
+      grid-template-columns: 88px minmax(0, 1fr) 160px;
+      grid-template-rows: 32px;
+      align-items: center;
+      gap: var(--space-4);
+      padding: var(--space-3) var(--space-4);
+      border-bottom: 1px solid var(--line-subtle);
+    }
+    .sk-epoch > :global(:first-child) {
       display: none;
     }
+    .sk-tabs .sk-cell {
+      grid-template-rows: 16px 32px 16px;
+      gap: var(--space-1);
+      padding: var(--space-3) var(--space-4);
+    }
+    .sk-tabs .sk-cell:first-child {
+      border-left: 0;
+    }
+    .sk-tiles :global(.sk-tile:nth-child(9)) {
+      display: block;
+    }
   }
-  .sk-row2 {
-    display: grid;
-    grid-template-columns: 2fr 1fr;
-    gap: var(--space-4);
+  @media (max-width: 959px) {
+    .sk-tabs {
+      display: none;
+    }
+    .sk-pick {
+      display: block;
+    }
+    .sk-detail {
+      grid-template-columns: minmax(0, 1fr);
+    }
+    .sk-rail {
+      display: none;
+    }
+    .sk-tiles :global(.sk-tile:nth-child(9)) {
+      display: none;
+    }
   }
   @media (max-width: 767px) {
     .loading {
       padding: var(--space-4);
     }
-    .sk-row2 {
-      grid-template-columns: minmax(0, 1fr);
+    .sk-ctl :global(:first-child) {
+      display: none;
+    }
+    .sk-tiles {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
     }
   }
   .id {
@@ -480,8 +626,8 @@
   .phone-pick {
     display: none;
   }
-  @media (max-width: 1199px) {
-    /* Up to 1199 px the rail no longer fits beside the samples: one section at a time, picked above. */
+  @media (max-width: 959px) {
+    /* Below 960 px the rail no longer fits beside the samples: one section at a time, picked above. */
     /* The section picker stays reachable while the section scrolls (just under the top bar). */
     .phone-pick {
       display: block;

@@ -95,7 +95,7 @@
         {#if d.mix}<div class="mix" style:opacity={d.mixAlpha}>{@render tile(d.mix)}</div>{/if}
       </div>
       <span class="tag" aria-hidden="true">
-        {[d.mosaic && 'mosaic', d.flip && 'flip', Math.abs(d.scale - 1) > 0.02 && `×${d.scale.toFixed(2)}`, d.mix && 'mixup'].filter(Boolean).join(' · ') || 'original'}
+        {#each [d.mosaic && 'mosaic', d.flip && 'flip', Math.abs(d.scale - 1) > 0.02 && `×${d.scale.toFixed(2)}`, d.mix && 'mixup'].filter(Boolean) as part, i (i)}{#if i > 0}<span class="sep">·</span>{/if}{part}{:else}original{/each}
       </span>
     </div>
   {:else}
@@ -152,5 +152,15 @@
     font-family: var(--font-mono);
     font-size: var(--type-micro-size);
     line-height: 16px;
+    /* One line on small frames (the laptop column): it truncates rather than wraps over the image. */
+    max-width: calc(100% - 12px);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  /* Narrower than a space either side, so "mosaic · flip · ×1.11" fits a 140 px frame. */
+  .sep {
+    margin: 0 var(--space-0-5);
+    color: #ffffffa6;
   }
 </style>
