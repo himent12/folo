@@ -1353,7 +1353,8 @@ impl FoloApp {
         let body = format!("{} images · {}", int(ds.splits.total()), ds.classes.join(", "));
         // Registering a folder twice answers with the dataset it already is: say so, and leave
         // the list's order alone.
-        let existed = self.store.datasets.ready().is_some_and(|l| l.iter().any(|d| d.id == ds.id));
+        // Unknown while the list isn't loaded: neither "added" nor "already added" is claimed then.
+        let existed = self.store.datasets.ready().map(|l| l.iter().any(|d| d.id == ds.id));
         if let Some(list) = self.store.datasets.ready_mut() {
             if let Some(slot) = list.iter_mut().find(|d| d.id == ds.id) {
                 *slot = ds;
@@ -1362,8 +1363,12 @@ impl FoloApp {
             }
         }
         self.toast_with(
-            if existed { Tone::Info } else { Tone::Accent },
-            if existed { format!("{name} is already added") } else { format!("{verb} {name}") },
+            if existed == Some(true) { Tone::Info } else { Tone::Accent },
+            match existed {
+                Some(true) => format!("{name} is already added"),
+                Some(false) => format!("{verb} {name}"),
+                None => format!("{name} is ready"),
+            },
             Some(body.into()),
             Some((
                 "Open".into(),

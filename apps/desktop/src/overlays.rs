@@ -1365,6 +1365,9 @@ impl FoloApp {
                     div().flex().justify_end().child(
                         // A compact pill, right-aligned: clearly controls, not another notification.
                         div()
+                            // The pill, edges and cards stop pointer events; the space beside the
+                            // pill stays the page's.
+                            .occlude()
                             .flex()
                             .gap(px(2.))
                             .p(px(2.))
@@ -1380,6 +1383,7 @@ impl FoloApp {
                 .when(!expanded, |d| {
                     let edge = |inset: f32, a: f32| {
                         div()
+                            .occlude()
                             .mx(px(inset))
                             .h(px(6.))
                             .rounded_t(px(radius::LG))
@@ -1402,8 +1406,6 @@ impl FoloApp {
             .bottom(px(24.))
             .right(px(24.))
             .w(px(360.))
-            // One surface: pointer events stop here, not on the page under the stack.
-            .occlude()
             .flex()
             .flex_col()
             .gap(px(if folded.is_some() { 0. } else { 8. }))
