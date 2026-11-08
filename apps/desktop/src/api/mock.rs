@@ -765,7 +765,9 @@ fn initial_logs(f: &RunFixture, created: i64) -> Vec<LogLine> {
 
 impl Backend for MockBackend {
     fn describe(&self) -> String {
-        "Built-in demo".into()
+        // The failing variant stands in for an unreachable folo serve (the error scenario): it
+        // names the address the app tried, as the HTTP backend would.
+        if self.fail { "127.0.0.1:7878".into() } else { "Built-in demo".into() }
     }
 
     fn now(&self) -> i64 {

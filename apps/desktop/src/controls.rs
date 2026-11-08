@@ -668,9 +668,16 @@ impl FoloApp {
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let t = theme(cx);
+        let dragging = self.drag.as_ref().is_some_and(|d| d.id == key);
+        // Mid-drag the range holds still (a widened range would otherwise shrink with the value
+        // under the pointer and the thumb run away from it).
+        let (min, max) = match self.slider_ranges.borrow().get(key) {
+            Some(&r) if dragging => r,
+            _ => (min, max),
+        };
+        self.slider_ranges.borrow_mut().insert(key, (min, max));
         let fh = self.fh(key, cx);
         let ring = self.ring(&fh, window);
-        let dragging = self.drag.as_ref().is_some_and(|d| d.id == key);
         let f = ((value - min) / (max - min)).clamp(0.0, 1.0);
         let store = self.slider_bounds.clone();
         let fill_color = t.accent_fill();
@@ -760,15 +767,27 @@ impl FoloApp {
     /// Map a slider fraction to its value and store it.
     pub fn set_slider(&mut self, key: &str, frac: f32, cx: &mut Context<Self>) {
         let q = |v: f32, step: f32| (v / step).round() * step;
+        // The range the slider was drawn with (it may have widened to a typed value), else its
+        // preset.
+        let range = self.slider_ranges.borrow().get(key).copied();
+        let at = |lo: f32, hi: f32| {
+            let (lo, hi) = range.unwrap_or((lo, hi));
+            lo + frac * (hi - lo)
+        };
+        // Quantised, except the ends stay exact (a typed 1 epoch or 0.0001 learning rate is an
+        // end of a widened range: rounding it to the step would make it invalid).
+        let snap = |v: f32, step: f32| {
+            if frac <= 0. || frac >= 1. { v } else { q(v, step) }
+        };
         match key {
-            "play-conf" => self.play_conf = q(0.05 + frac * 0.90, 0.01),
-            "play-iou" => self.play_iou = q(0.3 + frac * 0.65, 0.01),
-            "ds-tile" => self.ds_tile = q(112. + frac * 160., 8.),
+            "play-conf" => self.play_conf = q(at(0.05, 0.95), 0.01),
+            "play-iou" => self.play_iou = q(at(0.3, 0.95), 0.01),
+            "ds-tile" => self.ds_tile = q(at(112., 272.), 8.),
             _ => {
                 if let Some(f) = self.new_run.as_mut() {
                     match key {
                         "nr-epochs" => {
-                            f.epochs = q(10. + frac * 290., 5.);
+                            f.epochs = snap(at(10., 300.), 5.).round().clamp(1., 10_000.);
                             f.epochs_invalid = false;
                             let (input, v) = (f.epochs_input.clone(), format!("{:.0}", f.epochs));
                             input.update(cx, |i, cx| i.set_text(v, cx));
@@ -776,20 +795,21 @@ impl FoloApp {
                             f.check_close(&close);
                         }
                         "nr-lr0" => {
-                            f.lr0 = q(0.001 + frac * 0.049, 0.001);
-                            let (input, v) = (f.lr_input.clone(), format!("{:.3}", f.lr0));
+                            // Above 0 and below 10, the range the field accepts.
+                            f.lr0 = snap(at(0.001, 0.05), 0.001).clamp(1e-6, 9.9999);
+                            let (input, v) = (f.lr_input.clone(), crate::app::format_lr(f.lr0));
                             input.update(cx, |i, cx| i.set_text(v, cx));
                         }
-                        "nr-mosaic" => f.mosaic = q(frac, 0.05),
-                        "nr-mixup" => f.mixup = q(frac * 0.5, 0.05),
-                        "nr-fliplr" => f.fliplr = q(frac, 0.05),
+                        "nr-mosaic" => f.mosaic = q(at(0., 1.), 0.05),
+                        "nr-mixup" => f.mixup = q(at(0., 0.5), 0.05),
+                        "nr-fliplr" => f.fliplr = q(at(0., 1.), 0.05),
                         "nr-close" => {
-                            f.close_mosaic = q(frac * 30., 1.);
+                            f.close_mosaic = snap(at(0., 30.), 1.).round().max(0.);
                             let (input, v) = (f.close_input.clone(), format!("{:.0}", f.close_mosaic));
                             input.update(cx, |i, cx| i.set_text(v.clone(), cx));
                             f.check_close(&v);
                         }
-                        "nr-scale" => f.scale = q(frac * 0.9, 0.05),
+                        "nr-scale" => f.scale = q(at(0., 0.9), 0.05),
                         _ => {}
                     }
                 }

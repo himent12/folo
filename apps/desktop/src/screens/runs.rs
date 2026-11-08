@@ -746,20 +746,14 @@ impl FoloApp {
             if !first {
                 row = row.border_t_1().border_color(t.line_subtle);
             }
-            let wrapped = !first;
             first = false;
             for (i, c) in it.by_ref().take(per_row).enumerate() {
                 if i > 0 {
                     row = row.child(vline(&t));
                 }
-                // On a 3-column grid: the second row's first tile spans two columns, so its
-                // divider lines up with the first row's second one.
-                row = row.child(if wrapped && per_row == 3 && i == 0 {
-                    // (flex_1's 0 basis would win over a width: set the basis itself.)
-                    tile(c).flex_none().flex_basis(gpui::relative(2. / 3.))
-                } else {
-                    tile(c)
-                });
+                // Equal tiles per row (a wrapped row of two splits in half, so neither tile is a
+                // stretched hole around a fixed-width sparkline).
+                row = row.child(tile(c));
             }
             rows.push(row);
         }

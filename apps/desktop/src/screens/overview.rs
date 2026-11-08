@@ -37,8 +37,11 @@ impl FoloApp {
                 };
                 format!("{} · {} · {live}", plural(d, "dataset"), plural(m, "model"))
             }
-            // The error panel below says it; the subtitle doesn't repeat it.
-            _ if self.store.runs.error().is_some() => String::new(),
+            // The header keeps its subtitle row: where the app tried to connect (the panel below
+            // says what went wrong).
+            _ if self.store.runs.error().is_some() => {
+                format!("Not connected · {}", self.store.api.describe())
+            }
             _ => "Loading…".to_string(),
         };
         // Training needs a server and a dataset; until then the action explains itself instead.
@@ -244,8 +247,11 @@ impl FoloApp {
                 map.on_hover = Some(on_hover);
                 map.x_name = "epoch";
                 map.readout = false;
-                // The span shows what's left; "Time left" beside it already gives the ETA.
-                map.future = Some((r.epoch as f32, SharedString::default()));
+                // The span shows what's left, labelled like the run dashboard's.
+                map.future = Some((
+                    r.epoch as f32,
+                    r.eta_s.map_or(SharedString::default(), |s| format!("ETA {}", time::duration(s)).into()),
+                ));
                 if let Some(b) = &best {
                     map.dots.push((b.epoch as f32, b.map50_95, t.accent_fill()));
                 }
@@ -417,9 +423,16 @@ impl FoloApp {
                                     .flex_col()
                                     .gap(px(6.))
                                     .child(
-                                        text(ty::SM, t.text_primary)
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .child("Validation mAP"),
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .justify_between()
+                                            .child(
+                                                text(ty::SM, t.text_primary)
+                                                    .font_weight(FontWeight::MEDIUM)
+                                                    .child("Validation mAP"),
+                                            )
+                                            .child(caption(&t, "per epoch")),
                                     )
                                     .child(legend_el),
                             )

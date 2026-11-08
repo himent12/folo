@@ -257,6 +257,12 @@ pub fn parse_epochs(s: &str) -> Option<u32> {
 }
 
 /// Learning rate as typed, scientific notation allowed (`1e-3`): 0 < lr < 10.
+/// A learning rate for its input field: three decimals in the slider's range (0.010), and as
+/// many digits as it needs below it (0.0001 doesn't round to 0.000).
+pub fn format_lr(v: f32) -> String {
+    if v >= 0.001 { format!("{v:.3}") } else { format!("{v}") }
+}
+
 pub fn parse_lr(s: &str) -> Option<f32> {
     s.trim().parse::<f32>().ok().filter(|v| v.is_finite() && *v > 0.0 && *v < 10.0)
 }
@@ -444,6 +450,8 @@ pub struct FoloApp {
     pub toasts_expanded: bool,
     /// The toast whose action or close button has keyboard focus (its expiry waits too).
     pub toast_focus: Option<u64>,
+    /// Keyboard focus is on the stack's own controls (Show earlier, Dismiss all): no toast expires.
+    pub toast_stack_focus: bool,
     toast_seq: u64,
     pub menu_open: Option<&'static str>,
     /// Highlighted option in the open select (committed with Enter).
@@ -461,6 +469,9 @@ pub struct FoloApp {
 
     pub drag: Option<Drag>,
     pub slider_bounds: Rc<RefCell<HashMap<&'static str, Bounds<Pixels>>>>,
+    /// Each slider's value range as last rendered (a range can widen to hold a typed value), so
+    /// drags and keys map a position back to the value the slider shows.
+    pub slider_ranges: RefCell<HashMap<&'static str, (f32, f32)>>,
 
     subscriptions: HashMap<String, crate::api::Subscription>,
     /// Runs whose event stream is being opened (off the UI thread).
@@ -571,6 +582,7 @@ impl FoloApp {
             toast_hover: None,
             toasts_expanded: false,
             toast_focus: None,
+            toast_stack_focus: false,
             toast_seq: 0,
             menu_open: None,
             menu_hl: 0,
@@ -582,6 +594,7 @@ impl FoloApp {
             play_view: Rc::new(std::cell::Cell::new(None)),
             drag: None,
             slider_bounds: Rc::new(RefCell::new(HashMap::new())),
+            slider_ranges: RefCell::new(HashMap::new()),
             subscriptions: HashMap::new(),
             subscribing: Default::default(),
             sub_attempt: HashMap::new(),
@@ -1112,7 +1125,11 @@ impl FoloApp {
                 cx.background_executor().timer(Duration::from_millis(4200)).await;
                 loop {
                     let hovered = this
-                        .update(cx, |this, _| this.toast_hover == Some(id) || this.toast_focus == Some(id))
+                        .update(cx, |this, _| {
+                            this.toast_hover == Some(id)
+                                || this.toast_focus == Some(id)
+                                || this.toast_stack_focus
+                        })
                         .unwrap_or(false);
                     if !hovered {
                         break;
@@ -1576,6 +1593,10 @@ impl FoloApp {
         let name = form.name.read(cx).text().trim().to_string();
         if name.is_empty() {
             form.error = Some(ApiError::new("invalid_name", "Give the run a name."));
+            // The error shows at the top of the form, by the Name field: go there.
+            let name_fh = form.name.read(cx).focus_handle(cx);
+            window.focus(&name_fh);
+            self.dialog_scroll.set_offset(point(px(0.), px(0.)));
             cx.notify();
             return;
         }
@@ -1621,15 +1642,16 @@ impl FoloApp {
                     let queued =
                         this.store.run(&id).is_some_and(|r| r.status == crate::api::RunStatus::Queued);
                     if queued {
-                        let rid = id.clone();
+                        // The run's page opens next, so the action is the queue it waits in.
                         this.toast_with(
                             Tone::Info,
                             format!("Queued {name}"),
                             Some("It starts when the GPU is free.".into()),
                             Some((
-                                "Open run".into(),
+                                "View queue".into(),
                                 Rc::new(move |this: &mut Self, w: &mut Window, cx: &mut Context<Self>| {
-                                    this.navigate(Route::Run(rid.clone()), w, cx)
+                                    this.run_filter = RunFilter::Active;
+                                    this.navigate(Route::Runs, w, cx)
                                 }),
                             )),
                             cx,
@@ -1650,6 +1672,8 @@ impl FoloApp {
                         f.submitting = false;
                         f.error = Some(e);
                     }
+                    // The error leads the form: scroll it into view.
+                    this.dialog_scroll.set_offset(point(px(0.), px(0.)));
                 }
             },
         );
@@ -3010,6 +3034,13 @@ impl FoloApp {
 mod retry_tests {
     use super::{BATCHES, batch_index, carry_over, retry_batch};
     use crate::api::{Augment, TrainConfig};
+
+    #[test]
+    fn small_learning_rates_keep_their_digits() {
+        assert_eq!(crate::app::format_lr(0.01), "0.010");
+        assert_eq!(crate::app::format_lr(0.0001), "0.0001");
+        assert!(crate::app::parse_lr(&crate::app::format_lr(0.0001)).is_some());
+    }
 
     #[test]
     fn oom_retries_halve_to_offered_sizes() {

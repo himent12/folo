@@ -993,3 +993,48 @@ Round 26 changes:
 - **Overview:** Progress is 112 px wide in the 1280 band (name 124, best 80), so its bar shows.
 - **Toasts:** opaque peek edges docked to the pill, and the stack occludes.
 - **Comments:** the misplaced ones are fixed.
+
+## Round 26
+
+| Line | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | avg |
+|------|---|---|---|---|---|---|---|---|---|----|----|----|-----|
+| Opus 5.5 | 9 | 9 | 9 | 8 | 8 | 9 | 8 | 9 | 9 | 9 | 8 | 8 | 8.6 |
+| GPT-6.1 Sol | 9 | 9 | 9 | 8 | 8 | 8 | 8 | 9 | 8 | 8 | 8 | 8 | 8.3 |
+
+Opus is at 8.6 with eight lines at 9. Sol found four behaviour bugs:
+- New run errors rendered below the fold.
+- Sliders and typed values took different ranges.
+- The Empty images and class filters could combine into an impossible filter.
+- In the inspector, a stale pointer hover outranked keyboard focus.
+
+Both reviewers also flagged:
+- the toast stack's floating pill;
+- PR curves told apart by colour only;
+- unlabelled chip counts and the copy action;
+- the inspector's hint layout;
+- the compact Playground rail;
+- the New run fade over controls;
+- the Overview chart without its caption or ETA;
+- the error state's missing subtitle;
+- a redundant "Open run".
+
+Round 27 changes:
+- **New run:**
+  - Errors lead the form; a failed submit scrolls there, and an empty name focuses Name.
+  - Sliders draw (and map positions back with) a range widened to any typed value, recorded per slider in `slider_ranges`.
+  - 36 px of bottom room under the fade.
+- **Dataset page:**
+  - Empty images and a class filter are mutually exclusive.
+  - The chip row reads "Filter images by class · counts are boxes".
+  - The Broken labels tile shows the severity split and then a named "Copy check command".
+- **Inspector:**
+  - While the keyboard is in use, the focused label row decides the highlighted box.
+  - Key hints are a grid with a 96 px key column, one action per row.
+- **PR panel:** curves and legend swatches are solid, dashed or dotted by class.
+- **Toasts:** "Show N earlier · Dismiss all" sits in the newest card's action row; no floating pill.
+- **Queued-run toast:** offers "View queue" (Runs, Active), since the run's page opens anyway.
+- **Overview:**
+  - The chart has its "per epoch" caption and ETA label.
+  - The error state keeps a subtitle ("Not connected · <server>").
+- **Run page:** the wrapped KPI row splits evenly (no stretched sparkline tile).
+- **Short windows:** a tighter Playground control block.
