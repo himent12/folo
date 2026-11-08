@@ -1361,8 +1361,8 @@ impl FoloApp {
                 .flex()
                 .flex_col()
                 .child(
-                    // Docked to the stack (2 px above its edges), not floating over the page.
-                    div().flex().justify_end().pb(px(2.)).child(
+                    // Docked on the stack's edges (no gap for the page to show through).
+                    div().flex().justify_end().child(
                         // A compact pill, right-aligned: clearly controls, not another notification.
                         div()
                             .flex()
@@ -1383,11 +1383,16 @@ impl FoloApp {
                             .mx(px(inset))
                             .h(px(6.))
                             .rounded_t(px(radius::LG))
-                            .bg(crate::theme::fade(t.bg_raised, a))
+                            // Opaque: the edges are cards behind the latest one, not tints the
+                            // page shows through. line.default, so the toast's top edge isn't doubled.
+                            .bg(if a < 1. {
+                                crate::theme::over(t.bg_raised, crate::theme::fade(t.bg_app, 1. - a))
+                            } else {
+                                t.bg_raised
+                            })
                             .border_1()
                             .border_b_0()
-                            // line.default: on line.strong it would double the toast's own top edge.
-                            .border_color(crate::theme::fade(t.line_default, a))
+                            .border_color(t.line_default)
                     };
                     d.when(older > 1, |d| d.child(edge(16., 0.6))).child(edge(8., 1.))
                 })
@@ -1397,6 +1402,8 @@ impl FoloApp {
             .bottom(px(24.))
             .right(px(24.))
             .w(px(360.))
+            // One surface: pointer events stop here, not on the page under the stack.
+            .occlude()
             .flex()
             .flex_col()
             .gap(px(if folded.is_some() { 0. } else { 8. }))

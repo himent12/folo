@@ -941,3 +941,55 @@ Round 25 changes:
   - Short windows keep Batch size and Device help as icons.
 - **PR panel:** the caption shows keys while the chart or a class row has keyboard focus.
 - **Empty Overview cards:** 16 px padding.
+
+## Round 25
+
+| Line | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | avg |
+|------|---|---|---|---|---|---|---|---|---|----|----|----|-----|
+| Opus 5.5 | 9 | 9 | 8 | 8 | 8 | 8 | 8 | 9 | 9 | 9 | 8 | 8 | 8.4 |
+| GPT-6.1 Sol | 9 | 9 | 9 | 9 | 8 | 8 | 8 | 9 | 9 | 8 | 8 | 8 | 8.5 |
+
+The best round so far: Sol has seven lines at 9. Both reviewers found Playground latency hidden at the default size (and a row cut by the rail's bottom edge). Other items:
+- Help popovers could leave the window.
+- Selection on class chips was colour-only.
+- "Boxes by class" counted boxes but filtered images.
+- The FP row's denominator wasn't stated.
+- "Throughput" on finished runs read as current.
+- The toast stack still let the page show through.
+- The 1280 Progress column dropped its bar.
+- The short log axis grew 15 % empty headroom.
+- The ETA label sat outside the marker band.
+- "hex." was shortened although it fit.
+- The PR panel had a dead band.
+- Contradictory comments.
+
+Opus also measured the light theme's warning text at 4.44:1. That is a token in design/, so it went to the orchestrator.
+
+Round 26 changes:
+- **Orchestrator follow-ups from #69:**
+  - Registering a duplicate folder says "already added".
+  - Local GPU OOM uses the `gpu_out_of_memory` code, with a "Run on Local CPU" action.
+  - Playground and New run show server hints (`device_not_found`, OOM).
+  - One shared OOM check for failed runs.
+  - The Broken labels tile splits its count by severity (issue counts).
+  - The README Desktop screenshots are refreshed.
+- **Playground:**
+  - Latency in the toolbar at every width.
+  - The rail fades out at its bottom edge (12 px of trailing room).
+  - The filename's budget comes from the toolbar's remaining width.
+  - The Run on note: "Local GPU / CPU need a model from folo serve".
+- **Help popovers:** anchored and snapped 8 px inside the window.
+- **Class chips:**
+  - Selected chips show a check in the class colour in the swatch's slot.
+  - The row is "Filter images by class", with box counts in each chip's tooltip.
+- **Confusion matrix:**
+  - The FP row reads "Share of all FP" in Row % mode.
+  - Headings that fit render whole (2 px overhang allowed), so "hexagon" is no longer "hex.".
+- **PR panel:** the header caption is "IoU 0.50"; the keyboard- or pointer-aware instruction moves under the class list.
+- **Run page:**
+  - Finished runs read "Final throughput".
+  - Log axes count the tick stride down from the top power, so the domain stays the data's and the steps stay even (8 2 0.5).
+  - The ETA label sits in the marker band when lane 0 is free there.
+- **Overview:** Progress is 112 px wide in the 1280 band (name 124, best 80), so its bar shows.
+- **Toasts:** opaque peek edges docked to the pill, and the stack occludes.
+- **Comments:** the misplaced ones are fixed.
