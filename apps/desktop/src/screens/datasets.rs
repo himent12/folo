@@ -10,7 +10,7 @@ use gpui::{
 };
 
 use super::*;
-use crate::api::{Dataset, ImageMeta, Split};
+use crate::api::{Dataset, ImageInfo, Split};
 use crate::app::{DsTab, FoloApp, act};
 use crate::charts::{HoverFn, histogram};
 use crate::controls::Btn;
@@ -25,11 +25,9 @@ impl FoloApp {
         let t = theme(cx);
         let list = self.store.datasets.ready().cloned();
         let subtitle = match &list {
-            Some(l) => format!(
-                "{} datasets · {} images",
-                l.len(),
-                int(l.iter().map(|d| d.splits.total() as u64).sum())
-            ),
+            Some(l) => {
+                format!("{} datasets · {} images", l.len(), int(l.iter().map(|d| d.splits.total()).sum()))
+            }
             None => "Loading…".into(),
         };
         let add = self
@@ -120,7 +118,7 @@ impl FoloApp {
     }
 
     /// The `n`th filtered image of a dataset.
-    pub fn filtered_image(&self, id: &str, n: usize) -> Option<&ImageMeta> {
+    pub fn filtered_image(&self, id: &str, n: usize) -> Option<&ImageInfo> {
         let i = *self.filtered_indices(id).get(n)?;
         self.store.images.get(id)?.ready()?.get(i)
     }
@@ -175,7 +173,7 @@ impl FoloApp {
             .items_center()
             .gap(px(10.))
             .child(text(ty::XL, t.text_primary).child(ds.name.clone()))
-            .child(badge(&t, crate::screens::format_label(&ds.format), Tone::Neutral));
+            .child(badge(&t, ds.format.label(), Tone::Neutral));
         let header = div()
             .flex()
             .items_end()
@@ -255,7 +253,7 @@ impl FoloApp {
                     .items_center()
                     .gap(px(5.))
                     .child(swatch(col, 6.))
-                    .child(text(ty::XS, t.text_tertiary).tnum().child(format!("{n} {}", int(c as u64))))
+                    .child(text(ty::XS, t.text_tertiary).tnum().child(format!("{n} {}", int(c))))
             }),
         );
         let tile = |content: gpui::Div| div().flex_1().min_w_0().px(px(16.)).py(px(12.)).child(content);
@@ -271,7 +269,7 @@ impl FoloApp {
                         .flex_col()
                         .gap(px(6.))
                         .child(caption(&t, "Images"))
-                        .child(metric(&t, int(ds.splits.total() as u64), "", ty::X2XL, ty::SM))
+                        .child(metric(&t, int(ds.splits.total()), "", ty::X2XL, ty::SM))
                         .child(split_bar)
                         .child(legend),
                 ),
@@ -280,7 +278,7 @@ impl FoloApp {
             .child(tile(stat(
                 &t,
                 "Boxes",
-                int(boxes as u64),
+                int(boxes),
                 "",
                 Some(text(ty::XS, t.text_tertiary).tnum().child(format!("{per:.1} per image"))),
             )))
@@ -308,7 +306,7 @@ impl FoloApp {
                     .child(stat(
                         &t,
                         "Empty images",
-                        int(empty as u64),
+                        int(empty),
                         "",
                         Some(if empty > 0 {
                             text(ty::XS, if on { t.accent_text } else { t.text_secondary }).child(if on {
@@ -503,7 +501,7 @@ impl FoloApp {
             cx.processor(move |this, range: std::ops::Range<usize>, window, cx| {
                 let t = theme(cx);
                 // Clone only the visible rows' metadata.
-                let visible: Vec<Option<ImageMeta>> = (range.start * cols..range.end * cols)
+                let visible: Vec<Option<ImageInfo>> = (range.start * cols..range.end * cols)
                     .map(|i| this.filtered_image(&ds_id, i).cloned())
                     .collect();
                 let first = range.start * cols;
@@ -617,7 +615,7 @@ impl FoloApp {
                 .into_any_element();
         };
         let max = s.class_counts.iter().copied().max().unwrap_or(1).max(1) as f32;
-        let total: u32 = s.class_counts.iter().sum();
+        let total: u64 = s.class_counts.iter().sum();
         let class_rows = div().flex().flex_col().gap(px(10.)).p(px(16.)).children(
             ds.classes.iter().enumerate().map(|(i, name)| {
                 let c = s.class_counts.get(i).copied().unwrap_or(0);
@@ -643,7 +641,7 @@ impl FoloApp {
                                 .bg(crate::theme::alpha(t.class(i as u32), 0.85)),
                         ),
                     )
-                    .child(text(ty::SM, t.text_primary).tnum().w(px(56.)).text_right().child(int(c as u64)))
+                    .child(text(ty::SM, t.text_primary).tnum().w(px(56.)).text_right().child(int(c)))
                     .child(
                         text(ty::XS, t.text_tertiary)
                             .tnum()
@@ -712,13 +710,9 @@ impl FoloApp {
                     .gap(px(16.))
                     .child(
                         panel(&t)
-                            .child(
-                                panel_header(&t, "Class balance").child(
-                                    text(ty::XS, t.text_tertiary)
-                                        .tnum()
-                                        .child(format!("{} boxes", int(total as u64))),
-                                ),
-                            )
+                            .child(panel_header(&t, "Class balance").child(
+                                text(ty::XS, t.text_tertiary).tnum().child(format!("{} boxes", int(total))),
+                            ))
                             .child(class_rows),
                     )
                     .child(

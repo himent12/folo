@@ -2,6 +2,8 @@
 
 use std::rc::Rc;
 
+#[allow(unused_imports)]
+use crate::api::{Label, RunExt, SplitsExt};
 use gpui::Focusable;
 use gpui::prelude::FluentBuilder;
 use gpui::{
@@ -165,7 +167,7 @@ impl FoloApp {
                 let id = r.id.clone();
                 let detail = match r.status {
                     RunStatus::Running => format!("running · epoch {} / {}", r.epoch, r.epochs),
-                    s => format!("{} · {}", s.label().to_lowercase(), r.config.arch),
+                    s => format!("{} · {}", s.label().to_lowercase(), r.config.arch.as_str()),
                 };
                 items.push(PaletteItem {
                     group: "Runs",
@@ -180,10 +182,9 @@ impl FoloApp {
         if let Some(models) = self.store.models.ready() {
             for m in models {
                 let id = m.id.clone();
-                let detail = m
-                    .metrics
-                    .as_ref()
-                    .map_or(m.arch.clone(), |x| format!("{} · mAP {:.3}", m.arch, x.map50_95));
+                let detail = m.metrics.as_ref().map_or(m.arch.as_str().to_string(), |x| {
+                    format!("{} · mAP {:.3}", m.arch.as_str(), x.map50_95)
+                });
                 items.push(PaletteItem {
                     group: "Models",
                     icon: "icons/box.svg",
@@ -201,7 +202,7 @@ impl FoloApp {
                     group: "Datasets",
                     icon: "icons/images.svg",
                     title: d.name.clone(),
-                    detail: format!("{} images · {}", int(d.splits.total() as u64), d.format),
+                    detail: format!("{} images · {}", int(d.splits.total()), d.format.label()),
                     keys: &[],
                     action: act(move |this, w, cx| this.navigate(Route::Dataset(id.clone()), w, cx)),
                 });
@@ -521,7 +522,7 @@ impl FoloApp {
                 .map(|d| {
                     (
                         SharedString::from(d.name.clone()),
-                        Some(SharedString::from(format!("{} images", int(d.splits.total() as u64)))),
+                        Some(SharedString::from(format!("{} images", int(d.splits.total())))),
                     )
                 })
                 .collect(),
@@ -612,8 +613,8 @@ impl FoloApp {
                             format!(
                                 "{} classes · train {} · val {}",
                                 d.classes.len(),
-                                int(d.splits.train as u64),
-                                int(d.splits.val as u64)
+                                int(d.splits.train),
+                                int(d.splits.val)
                             )
                         }),
                     )),
@@ -627,7 +628,7 @@ impl FoloApp {
                     .child(div().flex_1().child(field(
                         "Architecture",
                         arch_seg,
-                        Some(format!("{} · {}", ARCHS[arch], PARAMS[arch])),
+                        Some(format!("{} · {}", ARCHS[arch].as_str(), PARAMS[arch])),
                     )))
                     .child(div().flex_1().child(field(
                         "Image size",
@@ -673,7 +674,7 @@ impl FoloApp {
                     .child(div().flex_1().child(field(
                         "Optimizer",
                         opt_seg,
-                        Some(format!("{} · warmup 3 epochs, then cosine decay", OPTIMIZERS[opt])),
+                        Some(format!("{} · warmup 3 epochs, then cosine decay", OPTIMIZERS[opt].label())),
                     )))
                     .child(
                         div().flex_1().child(
@@ -747,7 +748,7 @@ impl FoloApp {
                 )
             });
         let images = ds.as_ref().map_or(0, |d| d.splits.train);
-        let (secs, vram) = estimate(arch, epochs, BATCHES[batch], IMGSZ[imgsz], images);
+        let (secs, vram) = estimate(arch, epochs, BATCHES[batch], IMGSZ[imgsz], images as u32);
         let fits = vram <= 15.5 || DEVICES[device] == "cpu";
         let estimate_line = div()
             .flex()

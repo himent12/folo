@@ -1,12 +1,16 @@
 //! The data seam: everything the UI knows about FOLO comes through [`Backend`].
 //!
-//! Two implementations: [`mock::MockBackend`] (in-process fixtures with a live training simulator,
-//! for development and deterministic screenshots) and, later, an HTTP client for `folo serve`.
+//! Two implementations: [`http::HttpBackend`] (`folo serve` over HTTP + SSE) and
+//! [`mock::MockBackend`] (in-process fixtures with a live training simulator, for development,
+//! deterministic screenshots and running without a server).
 
+pub mod http;
 pub mod mock;
 pub mod time;
 pub mod types;
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
 
 pub use types::*;
@@ -73,26 +77,6 @@ pub struct PredictRequest {
     pub max_det: u32,
 }
 
-/// Per-class precision–recall curve sampled at fixed recall points.
-#[derive(Clone, Debug, PartialEq)]
-pub struct PrCurve {
-    pub class: u32,
-    pub recall: Vec<f32>,
-    pub precision: Vec<f32>,
-    pub ap50: f32,
-}
-
-/// Validation-set evaluation of a model. Not in API v1 yet (proposed as
-/// `GET /api/models/{id}/eval`); backends without it return `not_supported`.
-#[derive(Clone, Debug, PartialEq)]
-pub struct ModelEval {
-    pub pr: Vec<PrCurve>,
-    /// `confusion[truth][pred]`, with a trailing "background" row and column.
-    pub confusion: Vec<Vec<u32>>,
-    pub per_class: Vec<ClassMetrics>,
-    pub images: u32,
-}
-
 pub trait Backend: Send + Sync + 'static {
     /// Where the data comes from, for the status bar ("Mock data", "127.0.0.1:7878").
     fn describe(&self) -> String;
@@ -116,13 +100,41 @@ pub trait Backend: Send + Sync + 'static {
     fn run(&self, id: &str) -> ApiResult<Run>;
     fn create_run(&self, config: TrainConfig) -> ApiResult<Run>;
     fn stop_run(&self, id: &str) -> ApiResult<Run>;
-    fn metrics(&self, id: &str) -> ApiResult<Metrics>;
-    fn samples(&self, id: &str, epoch: Option<u32>) -> ApiResult<Samples>;
+    fn metrics(&self, id: &str) -> ApiResult<RunMetrics>;
+    fn samples(&self, id: &str, epoch: Option<u32>) -> ApiResult<RunSamples>;
     /// Log history of a run. Not in API v1 yet (proposed as `GET /api/runs/{id}/logs`); the SSE
     /// stream only carries new lines.
     fn logs(&self, id: &str) -> ApiResult<Vec<LogLine>>;
-    /// Live events for a run; the stream ends when the receiver is dropped or the run finishes.
-    fn events(&self, id: &str) -> ApiResult<Receiver<RunEvent>>;
+    /// Live events for a run. The producer stops when the [`Subscription`] is dropped or the run
+    /// finishes.
+    fn events(&self, id: &str) -> ApiResult<Subscription>;
 
-    fn predict(&self, req: &PredictRequest) -> ApiResult<Prediction>;
+    fn predict(&self, req: &PredictRequest) -> ApiResult<PredictResponse>;
+}
+
+/// A live event stream. Dropping it tells the producer to stop: the mock's worker at its next tick,
+/// the HTTP reader at the next line it receives (at the latest the server's 15 s keep-alive).
+pub struct Subscription {
+    rx: Receiver<RunEvent>,
+    cancel: Arc<AtomicBool>,
+}
+
+impl Subscription {
+    pub fn new(rx: Receiver<RunEvent>) -> (Self, Arc<AtomicBool>) {
+        let cancel = Arc::new(AtomicBool::new(false));
+        (Self { rx, cancel: cancel.clone() }, cancel)
+    }
+}
+
+impl std::ops::Deref for Subscription {
+    type Target = Receiver<RunEvent>;
+    fn deref(&self) -> &Receiver<RunEvent> {
+        &self.rx
+    }
+}
+
+impl Drop for Subscription {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
 }

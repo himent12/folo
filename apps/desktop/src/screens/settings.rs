@@ -4,7 +4,9 @@ use std::rc::Rc;
 
 use gpui::Focusable;
 use gpui::prelude::FluentBuilder;
-use gpui::{AnyElement, Context, FontWeight, IntoElement, ParentElement, Styled, Window, div, px};
+use gpui::{
+    AnyElement, Context, FontWeight, InteractiveElement, IntoElement, ParentElement, Styled, Window, div, px,
+};
 
 use super::*;
 use crate::app::{FoloApp, ServerMode, act};
@@ -44,19 +46,16 @@ impl FoloApp {
         let mode_sel = if self.server_mode == ServerMode::Mock { 0 } else { 1 };
         let mode_seg = self.segmented(
             "set-server",
-            &["Mock data", "Local server"],
+            &["Built-in demo", "folo serve"],
             mode_sel,
             window,
             cx,
             Rc::new(|this, i, _, cx| {
-                this.server_mode = if i == 0 { ServerMode::Mock } else { ServerMode::Local };
-                if i == 1 {
-                    this.toast(
-                        Tone::Info,
-                        "Local server support lands with folo serve",
-                        Some("The app keeps using mock data until the engine's API is on main.".into()),
-                        cx,
-                    );
+                let mode = if i == 0 { ServerMode::Mock } else { ServerMode::Local };
+                // While a connection attempt is pending the installed mode is still the old one, so
+                // choosing the demo must go through even if it "already" is the demo: that cancels it.
+                if mode != this.server_mode || (mode == ServerMode::Mock && this.connecting.is_some()) {
+                    this.switch_source(mode, cx);
                 }
             }),
         );
@@ -76,16 +75,19 @@ impl FoloApp {
             .font_family(crate::theme::MONO)
             .text_size(px(ty::SM.size))
             .when(url_ring, |d| d.child(crate::app::focus_ring(&t, radius::MD)))
-            .map(|d| {
-                // With mock data the address is unused: show it read-only (not focusable).
-                if self.server_mode == ServerMode::Mock {
-                    d.bg(t.bg_inset)
-                        .border_color(t.line_subtle)
-                        .child(text(ty::SM, t.text_disabled).child(self.server_url.read(cx).text()))
-                } else {
-                    d.child(self.server_url.clone())
-                }
-            })
+            // Always editable, even while the demo is installed: it's where the next Connect goes.
+            .child(self.server_url.clone())
+            .into_any_element();
+        let connect = self
+            .button(
+                "set-connect",
+                "Connect",
+                crate::controls::Btn::Secondary,
+                Some("icons/plug.svg"),
+                window,
+                cx,
+                act(|this, _, cx| this.switch_source(ServerMode::Local, cx)),
+            )
             .into_any_element();
         let spawn = self.switch(
             "set-spawn",
@@ -118,17 +120,36 @@ impl FoloApp {
                 .gap(px(8.))
                 .child(div().size(px(6.)).rounded_full().bg(t.danger_solid))
                 .child(text(ty::SM, t.danger_text).child(e.message.clone())),
-            _ => div().child(text(ty::SM, t.text_tertiary).child("Connecting…")),
+            _ => div().child(
+                text(ty::SM, t.text_tertiary)
+                    .child(self.connecting.clone().unwrap_or_else(|| "Connecting…".into())),
+            ),
         };
         let connection = panel(&t)
             .overflow_hidden()
             .child(panel_header(&t, "Connection").child(status))
             .child(row(
                 "Data source",
-                "Mock data runs entirely in the app; Local server talks to folo serve over HTTP.",
+                "Built-in demo data runs inside the app; folo serve is the FOLO engine over HTTP (docs/API.md).",
                 mode_seg.into_any_element(),
             ))
-            .child(row("Server address", "Where folo serve listens.", url))
+            .child(row(
+                "Server address",
+                "Where folo serve listens. Enter or Connect switches to it.",
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _, cx| {
+                        if ev.keystroke.key == "enter" {
+                            this.switch_source(ServerMode::Local, cx);
+                            cx.stop_propagation();
+                        }
+                    }))
+                    .child(url)
+                    .child(connect)
+                    .into_any_element(),
+            ))
             .child(row(
                 "Start folo serve automatically",
                 "Launch a local server when the app opens and none is running.",

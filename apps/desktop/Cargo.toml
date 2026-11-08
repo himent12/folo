@@ -18,11 +18,18 @@ path = "src/main.rs"
 
 [dependencies]
 gpui = "0.2.2"
+# The API types shared with folo-server and the CLI (root workspace, by path).
+folo-api = { path = "../../crates/folo-api" }
+ureq = { version = "3", features = ["json"] }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Same major as gpui's own `image` dependency, so RenderImage frames are the same type.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+
+# Tie a spawned `folo serve` to the app's lifetime (Job Object, kill on close).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading"] }
 
 [build-dependencies]
 serde_json = "1"

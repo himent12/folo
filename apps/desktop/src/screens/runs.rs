@@ -161,7 +161,9 @@ impl FoloApp {
                             r.name.clone(),
                             format!(
                                 "{} · {ds} · {} · batch {}",
-                                r.config.arch, r.config.imgsz, r.config.batch
+                                r.config.arch.as_str(),
+                                r.config.imgsz,
+                                r.config.batch
                             ),
                         )
                         .flex_1(),
@@ -239,8 +241,8 @@ impl FoloApp {
         let started = r.started.as_deref().and_then(time::parse).map(|s| time::ago(s, now));
         let device = r.device.replace("NVIDIA GeForce ", "");
         let subtitle = text(ty::BASE, t.text_secondary).child(match started {
-            Some(s) => format!("{} · {ds_name} · {device} · started {s}", r.config.arch),
-            None => format!("{} · {ds_name} · {device}", r.config.arch),
+            Some(s) => format!("{} · {ds_name} · {device} · started {s}", r.config.arch.as_str()),
+            None => format!("{} · {ds_name} · {device}", r.config.arch.as_str()),
         });
 
         let mut actions = Vec::new();
@@ -930,7 +932,7 @@ impl FoloApp {
             .flex()
             .flex_col()
             .child(kv(&t, "Dataset", mono_v(ds_name.to_string())))
-            .child(kv(&t, "Architecture", mono_v(c.arch.clone())))
+            .child(kv(&t, "Architecture", mono_v(c.arch.as_str().to_string())))
             .child(kv(&t, "Pretrained weights", mono_v(c.weights.clone().unwrap_or_else(|| "none".into()))))
             .child(kv(&t, "Seed", mono_v(c.seed.to_string())));
         let col2 = div()
@@ -945,7 +947,7 @@ impl FoloApp {
             .flex_1()
             .flex()
             .flex_col()
-            .child(kv(&t, "Optimizer", mono_v(format!("{} · lr0 {}", c.optimizer, c.lr0))))
+            .child(kv(&t, "Optimizer", mono_v(format!("{} · lr0 {}", c.optimizer.label(), c.lr0))))
             .child(kv(
                 &t,
                 "Mosaic · close",

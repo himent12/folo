@@ -5,7 +5,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::mpsc::{Receiver, TryRecvError};
+use std::sync::mpsc::TryRecvError;
 use std::time::Duration;
 
 use gpui::prelude::FluentBuilder;
@@ -88,6 +88,23 @@ pub enum Section {
 }
 
 impl Route {
+    /// `overview`, `datasets`, `dataset:ID`, `runs`, `run:ID`, `models`, `model:ID`, `playground`, `settings`.
+    pub fn parse(s: &str) -> Option<Route> {
+        let (kind, id) = s.split_once(':').map_or((s, None), |(k, i)| (k, Some(i.to_string())));
+        Some(match (kind, id) {
+            ("overview", None) => Route::Overview,
+            ("datasets", None) => Route::Datasets,
+            ("dataset", Some(id)) => Route::Dataset(id),
+            ("runs", None) => Route::Runs,
+            ("run", Some(id)) => Route::Run(id),
+            ("models", None) => Route::Models,
+            ("model", Some(id)) => Route::Model(id),
+            ("playground", None) => Route::Playground,
+            ("settings", None) => Route::Settings,
+            _ => return None,
+        })
+    }
+
     pub fn section(&self) -> Section {
         match self {
             Route::Overview => Section::Overview,
@@ -175,7 +192,7 @@ pub struct NewRunForm {
     pub error: Option<ApiError>,
 }
 
-pub const ARCHS: [&str; 5] = ["folo-n", "folo-s", "folo-m", "folo-l", "folo-x"];
+pub const ARCHS: [Arch; 5] = Arch::ALL;
 pub const BATCHES: [u32; 7] = [2, 4, 8, 16, 32, 64, 128];
 
 /// The offered batch size closest to `v` without exceeding it (the smallest if `v` is below all).
@@ -200,7 +217,7 @@ pub fn carry_over(base: Option<&TrainConfig>, mut c: TrainConfig) -> TrainConfig
 }
 pub const IMGSZ: [u32; 5] = [320, 480, 640, 800, 1024];
 pub const DEVICES: [&str; 3] = ["auto", "gpu:0", "cpu"];
-pub const OPTIMIZERS: [&str; 3] = ["auto", "sgd", "adamw"];
+pub const OPTIMIZERS: [Optimizer; 3] = [Optimizer::Auto, Optimizer::Sgd, Optimizer::Adamw];
 
 pub struct PlayImage {
     pub name: SharedString,
@@ -285,7 +302,7 @@ pub struct FoloApp {
     pub play_conf: f32,
     pub play_iou: f32,
     pub play_image: Option<PlayImage>,
-    pub play_pred: Load<Prediction>,
+    pub play_pred: Load<PredictResponse>,
     pub play_hover: Option<usize>,
     pub play_drop_hover: bool,
     /// Stage zoom (1 = fit) and pan in px, like the inspector.
@@ -305,6 +322,10 @@ pub struct FoloApp {
     pub server_mode: ServerMode,
     pub server_url: Entity<TextInput>,
     pub spawn_server: bool,
+    /// A `folo serve --mock` this app started (stopped when the app quits).
+    server_proc: Option<crate::api::http::ServerProcess>,
+    /// Startup / switch in progress: what the app is doing ("Starting folo serve…").
+    pub connecting: Option<SharedString>,
     pub reduce_motion: bool,
 
     // Overlays
@@ -318,7 +339,16 @@ pub struct FoloApp {
     pub drag: Option<Drag>,
     pub slider_bounds: Rc<RefCell<HashMap<&'static str, Bounds<Pixels>>>>,
 
-    subscriptions: HashMap<String, Receiver<RunEvent>>,
+    subscriptions: HashMap<String, crate::api::Subscription>,
+    /// Runs whose event stream is being opened (off the UI thread).
+    subscribing: std::collections::HashSet<String>,
+    /// Bumped on every data-source switch; async results from an older source are discarded.
+    backend_gen: u64,
+    /// Bumped on every connection attempt; only the latest one may install its result.
+    connect_seq: u64,
+    /// The latest request per (run, "metrics" | "logs"); older responses are dropped.
+    history_tickets: HashMap<(String, &'static str), u64>,
+    history_seq: u64,
     _tasks: Vec<Task<()>>,
     _subs: Vec<Subscription>,
 }
@@ -384,6 +414,8 @@ impl FoloApp {
             server_mode: ServerMode::Mock,
             server_url,
             spawn_server: true,
+            server_proc: None,
+            connecting: None,
             reduce_motion: false,
             palette: None,
             new_run: None,
@@ -394,12 +426,21 @@ impl FoloApp {
             drag: None,
             slider_bounds: Rc::new(RefCell::new(HashMap::new())),
             subscriptions: HashMap::new(),
+            subscribing: Default::default(),
+            backend_gen: 0,
+            connect_seq: 0,
+            history_tickets: HashMap::new(),
+            history_seq: 0,
             _tasks: Vec::new(),
             _subs: Vec::new(),
         };
         if !frozen {
             this.start_pump(cx);
         }
+        this._subs.push(cx.on_app_quit(|this: &mut Self, _| {
+            this.server_proc = None;
+            async {}
+        }));
         this
     }
 
@@ -483,9 +524,14 @@ impl FoloApp {
             return;
         }
         let api = self.store.api.clone();
+        let generation = self.backend_gen;
         cx.spawn(async move |this, cx| {
             let r = cx.background_executor().spawn(async move { call(&*api) }).await;
             this.update(cx, |this, cx| {
+                // Answered by a source we've since switched away from: not ours any more.
+                if this.backend_gen != generation {
+                    return;
+                }
                 apply(this, r, cx);
                 cx.notify();
             })
@@ -554,16 +600,28 @@ impl FoloApp {
         let spe = self.store.run(id).map_or(1, |r| r.steps_per_epoch);
         if self.store.run_data.get(id).is_none_or(|l| l.needs_fetch()) {
             self.store.run_data.insert(id.to_string(), Load::Loading);
+            let ticket = self.history_ticket(id, "metrics");
             let rid = id.to_string();
             let key = id.to_string();
             self.fetch(
                 cx,
                 move |api| api.metrics(&rid),
                 move |this, r, _| {
+                    // A reload started since: this older snapshot must not overwrite it.
+                    if this.history_tickets.get(&(key.clone(), "metrics")) != Some(&ticket) {
+                        return;
+                    }
                     this.store.install_run_data(&key, r.map(|m| RunData::new(m, spe)));
                 },
             );
         }
+    }
+
+    /// A fresh ticket for one history request of a run; earlier tickets stop counting.
+    fn history_ticket(&mut self, id: &str, what: &'static str) -> u64 {
+        self.history_seq += 1;
+        self.history_tickets.insert((id.to_string(), what), self.history_seq);
+        self.history_seq
     }
 
     pub fn ensure_samples(&mut self, id: &str, cx: &mut Context<Self>) {
@@ -583,11 +641,15 @@ impl FoloApp {
     pub fn ensure_logs(&mut self, id: &str, cx: &mut Context<Self>) {
         if self.store.logs.get(id).is_none_or(|l| l.needs_fetch()) {
             self.store.logs.insert(id.to_string(), Load::Loading);
+            let ticket = self.history_ticket(id, "logs");
             let (rid, key) = (id.to_string(), id.to_string());
             self.fetch(
                 cx,
                 move |api| api.logs(&rid),
                 move |this, r, _| {
+                    if this.history_tickets.get(&(key.clone(), "logs")) != Some(&ticket) {
+                        return;
+                    }
                     this.store.install_logs(&key, r);
                     this.log_scroll.scroll_to_bottom();
                 },
@@ -654,6 +716,7 @@ impl FoloApp {
             return None;
         }
         let api = self.store.api.clone();
+        let generation = self.backend_gen;
         let thumb = (kind == ImgKind::Thumb).then_some(320);
         cx.spawn(async move |this, cx| {
             let k2 = key.clone();
@@ -662,6 +725,12 @@ impl FoloApp {
                 .spawn(async move { api.image(&k2.dataset, &k2.image, thumb).ok().and_then(to_render_image) })
                 .await;
             this.update(cx, |this, cx| {
+                if this.backend_gen != generation {
+                    if let Some(img) = img {
+                        cx.drop_image(img, None);
+                    }
+                    return;
+                }
                 let evicted = this.store.images_px.finish(key, img);
                 for e in evicted {
                     cx.drop_image(e, None);
@@ -675,7 +744,7 @@ impl FoloApp {
     }
 
     /// Subscribe to live events of every active run.
-    pub fn subscribe_active(&mut self, _cx: &mut Context<Self>) {
+    pub fn subscribe_active(&mut self, cx: &mut Context<Self>) {
         if self.frozen {
             return;
         }
@@ -686,13 +755,59 @@ impl FoloApp {
             .map(|runs| runs.iter().filter(|r| r.status.is_active()).map(|r| r.id.clone()).collect())
             .unwrap_or_default();
         for id in ids {
-            if self.subscriptions.contains_key(&id) {
-                continue;
-            }
-            if let Ok(rx) = self.store.api.events(&id) {
-                self.subscriptions.insert(id, rx);
+            if !self.subscriptions.contains_key(&id) {
+                self.resubscribe(id, cx);
             }
         }
+    }
+
+    /// Open a run's live stream (off the UI thread), then reload whatever history of it is already
+    /// loaded: events from the stream buffer while the history loads and merge into it, so nothing
+    /// between an earlier snapshot (or a dropped stream) and this stream is lost. A failed attempt
+    /// is retried by the periodic run-list refresh.
+    fn resubscribe(&mut self, id: String, cx: &mut Context<Self>) {
+        if !self.subscribing.insert(id.clone()) {
+            return;
+        }
+        let api = self.store.api.clone();
+        let generation = self.backend_gen;
+        cx.spawn(async move |this, cx| {
+            let rid = id.clone();
+            let sub = cx.background_executor().spawn(async move { api.events(&rid) }).await;
+            this.update(cx, |this, cx| {
+                if this.backend_gen != generation {
+                    return;
+                }
+                this.subscribing.remove(&id);
+                let Ok(sub) = sub else { return };
+                this.subscriptions.insert(id.clone(), sub);
+                let had_data = this.store.run_data.remove(&id).is_some();
+                let had_logs = this.store.logs.remove(&id).is_some();
+                if had_data {
+                    this.ensure_run_data(&id, cx);
+                }
+                if had_logs {
+                    this.ensure_logs(&id, cx);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Reload the run list in place (no loading state) and subscribe to whatever is active.
+    fn refresh_runs(&mut self, cx: &mut Context<Self>) {
+        self.fetch(
+            cx,
+            |api| api.runs(),
+            |this, r, cx| {
+                if let Ok(runs) = r {
+                    this.store.runs = Load::Ready(newest_first_runs(runs));
+                    this.subscribe_active(cx);
+                }
+            },
+        );
     }
 
     /// Drain live events ~10× a second and refresh slow-moving data every few seconds.
@@ -727,8 +842,20 @@ impl FoloApp {
                                 changed = true;
                             }
                         }
+                        // A stream that ended without a terminal status dropped out: the events in the
+                        // gap are gone (the API replays only the status), so reload that run's history
+                        // and the run list, which resubscribes if it's still training.
+                        let dropped: Vec<String> = ended
+                            .iter()
+                            .filter(|id| !finished.iter().any(|(f, _)| f == *id))
+                            .filter(|id| this.store.run(id).is_some_and(|r| r.status.is_active()))
+                            .cloned()
+                            .collect();
                         for id in ended {
                             this.subscriptions.remove(&id);
+                        }
+                        for id in dropped {
+                            this.resubscribe(id, cx);
                         }
                         for (id, status) in finished {
                             let name = this.store.run(&id).map(|r| r.name.clone()).unwrap_or(id.clone());
@@ -749,16 +876,7 @@ impl FoloApp {
                             this.ensure_core(cx);
                         }
                         if tick.is_multiple_of(50) && matches!(this.store.runs, Load::Ready(_)) {
-                            this.fetch(
-                                cx,
-                                |api| api.runs(),
-                                |this, r, cx| {
-                                    if let Ok(runs) = r {
-                                        this.store.runs = Load::Ready(newest_first_runs(runs));
-                                        this.subscribe_active(cx);
-                                    }
-                                },
-                            );
+                            this.refresh_runs(cx);
                         }
                         if changed {
                             cx.notify();
@@ -979,12 +1097,12 @@ impl FoloApp {
             TrainConfig {
                 name,
                 dataset_id: ds.id.clone(),
-                arch: ARCHS[form.arch].into(),
+                arch: ARCHS[form.arch],
                 epochs: form.epochs.round() as u32,
                 batch: BATCHES[form.batch],
                 imgsz: IMGSZ[form.imgsz],
                 device: DEVICES[form.device].into(),
-                optimizer: OPTIMIZERS[form.optimizer].into(),
+                optimizer: OPTIMIZERS[form.optimizer],
                 lr0: form.lr0,
                 weights: None,
                 augment: Augment {
@@ -1679,6 +1797,9 @@ impl FoloApp {
     fn connection_line(&self, compact: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let (color, label) = match &self.store.health {
+            _ if self.connecting.is_some() => {
+                (t.warning_solid, self.connecting.clone().unwrap_or_default().to_string())
+            }
             Load::Ready(h) if h.mock => {
                 (t.accent_fill(), format!("{} · v{}", self.store.api.describe(), h.version))
             }
@@ -1952,6 +2073,134 @@ impl FoloApp {
         cx.notify();
     }
 
+    /// Swap the data source; everything reloads from the new backend.
+    pub fn set_backend(&mut self, api: Arc<dyn Backend>, mode: ServerMode, cx: &mut Context<Self>) {
+        self.backend_gen += 1;
+        self.store.api = api;
+        self.server_mode = mode;
+        self.subscriptions.clear();
+        self.subscribing.clear();
+        self.store.clear_pending();
+        // Ids are only unique per server: cached pixels (and failures) belong to the old one. The
+        // textures are freed after this update, when no window is mid-draw, so every window's atlas
+        // is reached (this often runs inside a click handler).
+        let mut textures = self.store.images_px.clear();
+        textures.extend(self.play_image.take().map(|p| p.image));
+        cx.defer(move |cx| {
+            for img in textures {
+                cx.drop_image(img, None);
+            }
+        });
+        self.connecting = None;
+        self.hold_loading = false;
+        self.store.gpu_util.clear();
+        self.play_pred = Load::Idle;
+        self.play_model = None;
+        self.retry_all(cx);
+    }
+
+    /// Find a data source: a running `folo serve`, else one we start (`folo serve --mock`),
+    /// else the built-in demo data. Runs off the UI thread; the app shows "Connecting…" meanwhile.
+    pub fn autoconnect(&mut self, url: String, spawn: bool, cx: &mut Context<Self>) {
+        use crate::api::http::{HttpBackend, spawn_mock_server};
+        self.hold_loading = true;
+        self.connecting = Some(format!("Connecting to {}", url.trim_start_matches("http://")).into());
+        // Only the newest attempt may install its result; older ones bail out at each step, and a
+        // server an obsolete attempt started is dropped (stopped) with it.
+        self.connect_seq += 1;
+        let seq = self.connect_seq;
+        let live_step = 4180;
+        cx.spawn(async move |this, cx| {
+            let current = |this: &Self| this.connect_seq == seq;
+            let probe = url.clone();
+            let found = cx
+                .background_executor()
+                .spawn(async move { HttpBackend::new(&probe).health().is_ok() })
+                .await;
+            if found {
+                this.update(cx, |this, cx| {
+                    if current(this) {
+                        this.set_backend(Arc::new(HttpBackend::new(&url)), ServerMode::Local, cx);
+                    }
+                })
+                .ok();
+                return;
+            }
+            if spawn {
+                let go_on = this
+                    .update(cx, |this, cx| {
+                        if current(this) {
+                            this.connecting = Some("Starting folo serve --mock…".into());
+                            cx.notify();
+                        }
+                        current(this)
+                    })
+                    .unwrap_or(false);
+                if !go_on {
+                    return;
+                }
+                let started = cx
+                    .background_executor()
+                    .spawn(async move { spawn_mock_server(std::time::Duration::from_secs(10)) })
+                    .await;
+                if let Ok(proc_) = started {
+                    this.update(cx, |this, cx| {
+                        if !current(this) {
+                            return; // proc_ drops here: the stray server stops.
+                        }
+                        let backend = HttpBackend::new(&proc_.url);
+                        let url = proc_.url.clone();
+                        this.server_proc = Some(proc_);
+                        this.server_url.update(cx, |i, cx| i.set_text(url, cx));
+                        this.set_backend(Arc::new(backend), ServerMode::Local, cx);
+                    })
+                    .ok();
+                    return;
+                }
+            }
+            this.update(cx, |this, cx| {
+                if !current(this) {
+                    return;
+                }
+                this.set_backend(
+                    Arc::new(crate::api::mock::MockBackend::new(live_step, false)),
+                    ServerMode::Mock,
+                    cx,
+                );
+                this.toast(
+                    Tone::Info,
+                    "Using built-in demo data",
+                    Some("No folo serve was found. Start one and pick it in Settings › Connection.".into()),
+                    cx,
+                );
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Settings › Data source.
+    pub fn switch_source(&mut self, mode: ServerMode, cx: &mut Context<Self>) {
+        match mode {
+            ServerMode::Mock => {
+                // Cancels any connection attempt still in flight.
+                self.connect_seq += 1;
+                self.server_proc = None;
+                self.set_backend(
+                    Arc::new(crate::api::mock::MockBackend::new(4180, false)),
+                    ServerMode::Mock,
+                    cx,
+                );
+            }
+            ServerMode::Local => {
+                let url = self.server_url.read(cx).text().to_string();
+                let spawn = self.spawn_server;
+                self.autoconnect(url, spawn, cx);
+            }
+        }
+    }
+
     pub fn dismiss(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.menu_open.is_some() || self.export_open {
             self.menu_open = None;
@@ -2025,12 +2274,12 @@ mod retry_tests {
         let base = TrainConfig {
             name: "a".into(),
             dataset_id: "ds".into(),
-            arch: "folo-s".into(),
+            arch: crate::api::Arch::S,
             epochs: 50,
             batch: 8,
             imgsz: 640,
             device: "auto".into(),
-            optimizer: "auto".into(),
+            optimizer: crate::api::Optimizer::Auto,
             lr0: 0.01,
             weights: Some("runs/a/best.folo".into()),
             augment: Augment { hsv: [0.1, 0.2, 0.3], translate: 0.25, ..Augment::default() },

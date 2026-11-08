@@ -5,7 +5,7 @@
 //! pixel-identical screenshots.
 
 use std::collections::HashMap;
-use std::sync::mpsc::{Receiver, channel};
+use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -25,7 +25,7 @@ struct DatasetFixture {
     max_objects: u32,
     small: bool,
     /// Per-image boxes, computed once from the scenes.
-    images: Vec<ImageMeta>,
+    images: Vec<ImageInfo>,
 }
 
 impl DatasetFixture {
@@ -59,7 +59,7 @@ impl DatasetFixture {
                 max_objects,
                 small,
             );
-            images.push(ImageMeta {
+            images.push(ImageInfo {
                 // 1-based ids, so "7 of 4,400" in the inspector shows img_00007.
                 id: format!("img_{:05}", i + 1),
                 file: format!("images/{}/img_{:05}.jpg", split.label(), i + 1),
@@ -69,25 +69,26 @@ impl DatasetFixture {
                 boxes: scene.boxes(w, h),
             });
         }
-        let mut class_counts = vec![0u32; classes.len()];
+        let mut class_counts = vec![0u64; classes.len()];
         let size_edges = vec![0.0, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0];
-        let mut size_counts = vec![0u32; size_edges.len() - 1];
+        let mut size_counts = vec![0u64; size_edges.len() - 1];
         let per_edges = vec![0.0, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0];
-        let mut per_counts = vec![0u32; per_edges.len() - 1];
-        let mut boxes = 0;
-        let mut empty = 0;
+        let mut per_counts = vec![0u64; per_edges.len() - 1];
+        let mut boxes = 0u64;
+        let mut empty = 0u64;
         for im in &images {
-            boxes += im.boxes.len() as u32;
+            boxes += im.boxes.len() as u64;
             if im.boxes.is_empty() {
                 empty += 1;
             }
-            let n = im.boxes.len() as f32;
+            let n = im.boxes.len() as f64;
             let slot =
                 per_edges.windows(2).position(|w| n >= w[0] && n < w[1]).unwrap_or(per_counts.len() - 1);
             per_counts[slot] += 1;
             for b in &im.boxes {
                 class_counts[b.class as usize] += 1;
-                let area = (b.x2 - b.x1) * (b.y2 - b.y1) / (im.width * im.height) as f32;
+                // Relative size: sqrt(box area / image area), as docs/API.md defines it.
+                let area = (((b.x2 - b.x1) * (b.y2 - b.y1)) as f64 / (im.width * im.height) as f64).sqrt();
                 let slot = size_edges
                     .windows(2)
                     .position(|w| area >= w[0] && area < w[1])
@@ -99,17 +100,17 @@ impl DatasetFixture {
             id: id.into(),
             name: name.into(),
             path: path.into(),
-            format: format.into(),
+            format: if format == "coco" { DatasetFormat::Coco } else { DatasetFormat::Yolo },
             classes: classes.iter().map(|c| c.to_string()).collect(),
             created: time::format(created),
-            splits: Splits { train: splits.0, val: splits.1, test: splits.2 },
+            splits: Splits { train: splits.0 as u64, val: splits.1 as u64, test: splits.2 as u64 },
             stats: Some(DatasetStats {
                 boxes,
                 empty_images: empty,
                 broken_labels: if small { 3 } else { 0 },
                 class_counts,
-                box_size_hist: Hist { edges: size_edges, counts: size_counts },
-                boxes_per_image_hist: Hist { edges: per_edges, counts: per_counts },
+                box_size_hist: Histogram { edges: size_edges, counts: size_counts },
+                boxes_per_image_hist: Histogram { edges: per_edges, counts: per_counts },
             }),
         };
         Self { ds, seed, max_objects, small, images }
@@ -130,7 +131,7 @@ impl DatasetFixture {
 struct Curve {
     seed: u64,
     epochs: u32,
-    spe: u32,
+    spe: u64,
     lr0: f32,
     batch: u32,
     map_max: f32,
@@ -140,8 +141,8 @@ struct Curve {
 }
 
 impl Curve {
-    fn noise(&self, i: u32, k: u64) -> f32 {
-        Rng::new(self.seed ^ (i as u64).wrapping_mul(0x2545_F491) ^ k).normal()
+    fn noise(&self, i: u64, k: u64) -> f32 {
+        Rng::new(self.seed ^ i.wrapping_mul(0x2545_F491) ^ k).normal()
     }
 
     fn lr(&self, frac: f32) -> f32 {
@@ -164,7 +165,7 @@ impl Curve {
         Loss { box_, cls, dfl, total: box_ + cls + dfl }
     }
 
-    fn step(&self, i: u32) -> Step {
+    fn step(&self, i: u64) -> Step {
         let frac = i as f32 / self.spe as f32;
         let base = self.loss_at(frac);
         let jitter = |k: u64| 1.0 + 0.045 * self.noise(i, k);
@@ -172,14 +173,14 @@ impl Curve {
         let cls = base.cls * jitter(2);
         let dfl = base.dfl * jitter(3);
         let ips = self.ips * (1.0 + 0.025 * self.noise(i, 4));
-        let remaining = (self.epochs * self.spe).saturating_sub(i) as f64;
+        let remaining = (self.epochs as u64 * self.spe).saturating_sub(i) as f64;
         Step {
-            epoch: (i.max(1) - 1) / self.spe + 1,
+            epoch: ((i.max(1) - 1) / self.spe + 1) as u32,
             step: i,
             lr: self.lr(frac),
             loss: Loss { box_, cls, dfl, total: box_ + cls + dfl },
             imgs_per_s: ips,
-            eta_s: Some(remaining * STEP_DT),
+            eta_s: remaining * STEP_DT,
         }
     }
 
@@ -193,7 +194,8 @@ impl Curve {
             (e - (n - self.close_mosaic as f32)).clamp(0.0, self.close_mosaic as f32)
                 / self.close_mosaic as f32
         };
-        ((1.0 - (-e / (n * 0.17)).exp()) * (1.0 + 0.012 * self.noise(epoch, 9)) + 0.025 * closing).min(1.02)
+        ((1.0 - (-e / (n * 0.17)).exp()) * (1.0 + 0.012 * self.noise(epoch as u64, 9)) + 0.025 * closing)
+            .min(1.02)
     }
 
     fn epoch(&self, epoch: u32) -> Epoch {
@@ -223,7 +225,7 @@ impl Curve {
                 recall: (0.33 + 0.56 * q).min(0.97),
                 per_class,
             },
-            duration_s: (self.spe * self.batch) as f32 / self.ips + 2.4,
+            duration_s: (self.spe * self.batch as u64) as f64 / self.ips as f64 + 2.4,
         }
     }
 }
@@ -232,9 +234,9 @@ struct RunFixture {
     run: Run,
     curve: Curve,
     /// Live runs: steps done when the clock started, and when that was.
-    live: Option<(u32, Instant)>,
+    live: Option<(u64, Instant)>,
     /// Frozen at this step (finished, stopped, failed, or a frozen clock).
-    step: u32,
+    step: u64,
     logs: Vec<LogLine>,
 }
 
@@ -311,7 +313,7 @@ impl MockBackend {
                      m: [f32; 4]| Model {
             id: id.into(),
             name: name.into(),
-            arch: arch.into(),
+            arch: Arch::parse(arch).unwrap_or_default(),
             imgsz,
             classes: classes(ds),
             params,
@@ -379,12 +381,12 @@ impl MockBackend {
         let cfg = |name: &str, ds: &str, arch: &str, epochs, batch, imgsz, device: &str, lr0| TrainConfig {
             name: name.into(),
             dataset_id: ds.into(),
-            arch: arch.into(),
+            arch: Arch::parse(arch).unwrap_or_default(),
             epochs,
             batch,
             imgsz,
             device: device.into(),
-            optimizer: "auto".into(),
+            optimizer: Optimizer::Auto,
             lr0,
             weights: None,
             augment: Augment::default(),
@@ -395,8 +397,8 @@ impl MockBackend {
             id: &'static str,
             config: TrainConfig,
             status: RunStatus,
-            step: u32,
-            spe: u32,
+            step: u64,
+            spe: u64,
             created_h: f64,
             map_max: f32,
             ips: f32,
@@ -408,7 +410,7 @@ impl MockBackend {
                 id: LIVE_ID,
                 config: cfg("shapes-hard-m", "ds_3b91", "folo-m", 100, 32, 640, "gpu:0", 0.01),
                 status: RunStatus::Running,
-                step: live_step,
+                step: live_step as u64,
                 spe: 100,
                 created_h: 0.25,
                 map_max: 0.71,
@@ -498,8 +500,8 @@ impl MockBackend {
                     close_mosaic: s.config.augment.close_mosaic,
                 };
                 let created = h(s.created_h);
-                let total = s.config.epochs * s.spe;
-                let run_secs = |steps: u32| (steps as f64 * (s.config.batch as f64 / s.ips as f64)) as i64;
+                let total = s.config.epochs as u64 * s.spe;
+                let run_secs = |steps: u64| (steps as f64 * (s.config.batch as f64 / s.ips as f64)) as i64;
                 let finished =
                     matches!(s.status, RunStatus::Completed | RunStatus::Stopped | RunStatus::Failed).then(
                         || time::format(created + 5 + run_secs(s.step) + s.step as i64 / s.spe as i64 * 3),
@@ -576,10 +578,10 @@ impl MockBackend {
     }
 
     /// Current step of a run fixture, advancing live runs with the clock.
-    fn current_step(f: &RunFixture) -> u32 {
-        let total = f.run.epochs * f.run.steps_per_epoch;
+    fn current_step(f: &RunFixture) -> u64 {
+        let total = f.run.epochs as u64 * f.run.steps_per_epoch;
         match f.live {
-            Some((base, at)) => (base + (at.elapsed().as_secs_f64() / STEP_DT) as u32).min(total),
+            Some((base, at)) => (base + (at.elapsed().as_secs_f64() / STEP_DT) as u64).min(total),
             None => f.step.min(total),
         }
     }
@@ -587,20 +589,21 @@ impl MockBackend {
     fn snapshot(f: &RunFixture) -> Run {
         let mut run = f.run.clone();
         let step = Self::current_step(f);
-        let total = run.epochs * run.steps_per_epoch;
+        let total = run.epochs as u64 * run.steps_per_epoch;
         run.step = step;
-        run.epoch = if step == 0 { 0 } else { ((step - 1) / run.steps_per_epoch + 1).min(run.epochs) };
+        run.epoch =
+            if step == 0 { 0 } else { (((step - 1) / run.steps_per_epoch + 1) as u32).min(run.epochs) };
         if f.live.is_some() && step >= total {
             run.status = RunStatus::Completed;
         }
         if run.status == RunStatus::Running {
             run.eta_s = Some((total - step) as f64 * STEP_DT + (run.epochs - run.epoch) as f64 * 0.4);
         }
-        let done_epochs = step / run.steps_per_epoch;
+        let done_epochs = (step / run.steps_per_epoch) as u32;
         run.best = (1..=done_epochs)
             .map(|e| (e, f.curve.epoch(e).val.map50_95))
             .max_by(|a, b| a.1.total_cmp(&b.1))
-            .map(|(epoch, map50_95)| Best { epoch, map50_95 });
+            .map(|(epoch, map50_95)| BestEpoch { epoch, map50_95 });
         run
     }
 
@@ -608,7 +611,7 @@ impl MockBackend {
         if self.frozen { MOCK_NOW } else { MOCK_NOW + self.started.elapsed().as_secs() as i64 }
     }
 
-    fn val_images(&self, dataset_id: &str) -> Vec<(u32, &ImageMeta)> {
+    fn val_images(&self, dataset_id: &str) -> Vec<(u32, &ImageInfo)> {
         let Ok(f) = self.fixture(dataset_id) else { return Vec::new() };
         f.images
             .iter()
@@ -627,7 +630,11 @@ fn initial_logs(f: &RunFixture, created: i64) -> Vec<LogLine> {
             LogLevel::Info,
             format!(
                 "folo train {} on {} ({} epochs, batch {}, imgsz {})",
-                c.arch, c.dataset_id, c.epochs, c.batch, c.imgsz
+                c.arch.as_str(),
+                c.dataset_id,
+                c.epochs,
+                c.batch,
+                c.imgsz
             ),
         ),
         (1, LogLevel::Info, format!("device: {}", f.run.device)),
@@ -637,7 +644,7 @@ fn initial_logs(f: &RunFixture, created: i64) -> Vec<LogLine> {
             LogLevel::Info,
             format!(
                 "model: {} · {} params · fused BN off (training)",
-                c.arch,
+                c.arch.as_str(),
                 match c.arch.as_str() {
                     "folo-n" => "2.63 M",
                     "folo-s" => "9.42 M",
@@ -679,7 +686,12 @@ impl Backend for MockBackend {
 
     fn health(&self) -> ApiResult<Health> {
         self.check()?;
-        Ok(Health { status: "ok".into(), version: "0.1.0".into(), mock: true })
+        Ok(Health {
+            status: "ok".into(),
+            version: "0.1.0".into(),
+            api: folo_api::API_VERSION.into(),
+            mock: true,
+        })
     }
 
     fn system(&self) -> ApiResult<SystemInfo> {
@@ -689,16 +701,16 @@ impl Backend for MockBackend {
         let live = !self.empty
             && self.runs.lock().unwrap().iter().any(|f| Self::snapshot(f).status == RunStatus::Running);
         Ok(SystemInfo {
-            cpu: Cpu {
+            cpu: CpuInfo {
                 name: "AMD Ryzen 9 7950X".into(),
                 threads: 32,
                 util: if live { 0.31 + wobble } else { 0.04 },
             },
-            memory: Memory { used_bytes: 23_100_000_000, total_bytes: 68_719_476_736 },
-            gpus: vec![Gpu {
+            memory: MemoryInfo { used_bytes: 23_100_000_000, total_bytes: 68_719_476_736 },
+            gpus: vec![GpuInfo {
                 ordinal: 0,
                 name: "NVIDIA GeForce RTX 4080 SUPER".into(),
-                backend: "vulkan".into(),
+                backend: GpuBackend::Vulkan,
                 memory_bytes: 17_171_480_576,
                 util: Some(if live { 0.94 + wobble } else { 0.02 }),
             }],
@@ -721,7 +733,7 @@ impl Backend for MockBackend {
     fn images(&self, id: &str, q: &ImageQuery) -> ApiResult<ImagePage> {
         self.check()?;
         let f = self.fixture(id)?;
-        let matching: Vec<&ImageMeta> = f
+        let matching: Vec<&ImageInfo> = f
             .images
             .iter()
             .filter(|im| q.split.is_none_or(|s| im.split == s))
@@ -729,7 +741,7 @@ impl Backend for MockBackend {
             .collect();
         let limit = if q.limit == 0 { 100 } else { q.limit };
         Ok(ImagePage {
-            total: matching.len() as u32,
+            total: matching.len() as u64,
             images: matching.into_iter().skip(q.offset as usize).take(limit as usize).cloned().collect(),
         })
     }
@@ -779,12 +791,8 @@ impl Backend for MockBackend {
             .iter()
             .find(|m| m.id == id)
             .ok_or_else(|| ApiError::new("model_not_found", format!("No model {id}")))?;
-        let metrics = m.metrics.clone().unwrap_or(ModelMetrics {
-            map50: 0.5,
-            map50_95: 0.3,
-            precision: 0.5,
-            recall: 0.5,
-        });
+        let metrics =
+            m.metrics.unwrap_or(ModelMetrics { map50: 0.5, map50_95: 0.3, precision: 0.5, recall: 0.5 });
         let n = m.classes.len();
         let mut rng = Rng::new(hash(id));
         let per_class: Vec<ClassMetrics> = (0..n as u32)
@@ -869,7 +877,7 @@ impl Backend for MockBackend {
         let ds = self.fixture(&config.dataset_id)?;
         let mut runs = self.runs.lock().unwrap();
         let id = format!("run_{:04x}", hash(&format!("{}{}", config.name, runs.len())) & 0xFFFF);
-        let spe = (ds.ds.splits.train / config.batch.max(1)).max(1);
+        let spe = (ds.ds.splits.train / config.batch.max(1) as u64).max(1);
         let curve = Curve {
             seed: hash(&id),
             epochs: config.epochs,
@@ -944,7 +952,7 @@ impl Backend for MockBackend {
         Ok(Self::snapshot(f))
     }
 
-    fn metrics(&self, id: &str) -> ApiResult<Metrics> {
+    fn metrics(&self, id: &str) -> ApiResult<RunMetrics> {
         self.check()?;
         let runs = self.runs.lock().unwrap();
         let f = runs
@@ -952,13 +960,13 @@ impl Backend for MockBackend {
             .find(|f| f.run.id == id)
             .ok_or_else(|| ApiError::new("run_not_found", format!("No run {id}")))?;
         let step = Self::current_step(f);
-        Ok(Metrics {
+        Ok(RunMetrics {
             steps: (1..=step).map(|i| f.curve.step(i)).collect(),
-            epochs: (1..=step / f.run.steps_per_epoch).map(|e| f.curve.epoch(e)).collect(),
+            epochs: (1..=(step / f.run.steps_per_epoch) as u32).map(|e| f.curve.epoch(e)).collect(),
         })
     }
 
-    fn samples(&self, id: &str, epoch: Option<u32>) -> ApiResult<Samples> {
+    fn samples(&self, id: &str, epoch: Option<u32>) -> ApiResult<RunSamples> {
         self.check()?;
         let (curve, dataset_id, done) = {
             let runs = self.runs.lock().unwrap();
@@ -966,10 +974,15 @@ impl Backend for MockBackend {
                 .iter()
                 .find(|f| f.run.id == id)
                 .ok_or_else(|| ApiError::new("run_not_found", format!("No run {id}")))?;
-            (f.curve.clone(), f.run.config.dataset_id.clone(), Self::current_step(f) / f.run.steps_per_epoch)
+            (
+                f.curve.clone(),
+                f.run.config.dataset_id.clone(),
+                (Self::current_step(f) / f.run.steps_per_epoch) as u32,
+            )
         };
         let epoch = epoch.unwrap_or(done).min(done);
         let q = (curve.quality(epoch) * curve.map_max / 0.75).clamp(0.05, 1.0);
+        let class_names = self.fixture(&dataset_id).map(|f| f.ds.classes.clone()).unwrap_or_default();
         let samples = self
             .val_images(&dataset_id)
             .into_iter()
@@ -985,12 +998,12 @@ impl Backend for MockBackend {
                     im.width,
                     im.height,
                     q,
-                    curve.classes,
+                    &class_names,
                     hash(id) ^ i as u64 ^ (epoch as u64) << 20,
                 ),
             })
             .collect();
-        Ok(Samples { epoch, samples })
+        Ok(RunSamples { epoch, samples })
     }
 
     fn logs(&self, id: &str) -> ApiResult<Vec<LogLine>> {
@@ -1002,7 +1015,7 @@ impl Backend for MockBackend {
             .ok_or_else(|| ApiError::new("run_not_found", format!("No run {id}")))?;
         // Epoch summaries up to now, merged with the fixture's lines in time order.
         let created = time::parse(&f.run.created).unwrap_or(MOCK_NOW);
-        let done = Self::current_step(f) / f.run.steps_per_epoch;
+        let done = (Self::current_step(f) / f.run.steps_per_epoch) as u32;
         let per_epoch = (f.run.steps_per_epoch as f64 * STEP_DT) as i64 + 1;
         let mut lines = f.logs.clone();
         let from = done.saturating_sub(60) + 1;
@@ -1021,9 +1034,10 @@ impl Backend for MockBackend {
         Ok(lines)
     }
 
-    fn events(&self, id: &str) -> ApiResult<Receiver<RunEvent>> {
+    fn events(&self, id: &str) -> ApiResult<Subscription> {
         self.check()?;
         let (tx, rx) = channel();
+        let (sub, cancel) = Subscription::new(rx);
         let (live, curve, spe, epochs, status, log_mark) = {
             let runs = self.runs.lock().unwrap();
             let f = runs
@@ -1040,17 +1054,20 @@ impl Backend for MockBackend {
             )
         };
         let _ = tx.send(RunEvent::Status(StatusEvent { status, error: None }));
-        let Some((base, at)) = live else { return Ok(rx) };
-        let total = epochs * spe;
+        let Some((base, at)) = live else { return Ok(sub) };
+        let total = epochs as u64 * spe;
         let start_secs = self.sim_now();
         let runs = self.runs.clone();
         let run_id = id.to_string();
         // The stream starts where the history a client just fetched ends: capture it now, not
         // whenever the worker thread happens to start.
-        let mut sent = (base + (at.elapsed().as_secs_f64() / STEP_DT) as u32).min(total);
+        let mut sent = (base + (at.elapsed().as_secs_f64() / STEP_DT) as u64).min(total);
         std::thread::spawn(move || {
             loop {
                 std::thread::sleep(Duration::from_millis(100));
+                if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                    return;
+                }
                 // One lock for the whole decision, so a stop can't land between "is it stopped?"
                 // and "how far has it got?".
                 let (target, stop) = {
@@ -1071,8 +1088,8 @@ impl Backend for MockBackend {
                     while sent < stop_step {
                         sent += 1;
                         let _ = tx.send(RunEvent::Step(curve.step(sent)));
-                        if sent % spe == 0 {
-                            let _ = tx.send(RunEvent::Epoch(curve.epoch(sent / spe)));
+                        if sent.is_multiple_of(spe) {
+                            let _ = tx.send(RunEvent::Epoch(curve.epoch((sent / spe) as u32)));
                         }
                     }
                     for l in lines {
@@ -1088,8 +1105,8 @@ impl Backend for MockBackend {
                     if tx.send(RunEvent::Step(curve.step(sent))).is_err() {
                         return;
                     }
-                    if sent % spe == 0 {
-                        let e = sent / spe;
+                    if sent.is_multiple_of(spe) {
+                        let e = (sent / spe) as u32;
                         let ep = curve.epoch(e);
                         let t = time::format(start_secs + at.elapsed().as_secs() as i64);
                         let msg = format!(
@@ -1112,10 +1129,10 @@ impl Backend for MockBackend {
                 }
             }
         });
-        Ok(rx)
+        Ok(sub)
     }
 
-    fn predict(&self, req: &PredictRequest) -> ApiResult<Prediction> {
+    fn predict(&self, req: &PredictRequest) -> ApiResult<PredictResponse> {
         self.check()?;
         let m = self
             .models
@@ -1136,7 +1153,7 @@ impl Backend for MockBackend {
                     im.width,
                     im.height,
                     q,
-                    m.classes.len() as u32,
+                    &m.classes,
                     hash(image_id) ^ hash(&m.id),
                 );
                 (im.width, im.height, p, hash(image_id))
@@ -1160,8 +1177,10 @@ impl Backend for MockBackend {
                         let bh = bw * rng.range(0.7, 1.4);
                         let x1 = rng.range(0.0, w as f32 - bw);
                         let y1 = rng.range(0.0, (h as f32 - bh).max(1.0));
+                        let class = rng.below(m.classes.len() as u32);
                         ScoredBox {
-                            class: rng.below(m.classes.len() as u32),
+                            class,
+                            name: m.classes.get(class as usize).cloned().unwrap_or_default(),
                             score: rng.range(0.3, 0.92),
                             x1,
                             y1,
@@ -1173,19 +1192,7 @@ impl Backend for MockBackend {
                 (w, h, p, seed)
             }
         };
-        let mut boxes: Vec<DetBox> = raw
-            .into_iter()
-            .filter(|b| b.score >= req.conf)
-            .map(|b| DetBox {
-                class: b.class,
-                name: m.classes.get(b.class as usize).cloned().unwrap_or_default(),
-                score: b.score,
-                x1: b.x1,
-                y1: b.y1,
-                x2: b.x2,
-                y2: b.y2,
-            })
-            .collect();
+        let mut boxes: Vec<ScoredBox> = raw.into_iter().filter(|b| b.score >= req.conf).collect();
         boxes.sort_by(|a, b| b.score.total_cmp(&a.score));
         boxes.truncate(req.max_det as usize);
         let scale = match m.arch.as_str() {
@@ -1198,15 +1205,15 @@ impl Backend for MockBackend {
         let pre = 0.62 + 0.1 * rng.f32();
         let inf = 2.9 * scale * (1.0 + 0.05 * rng.normal());
         let post = 0.14 + 0.02 * boxes.len() as f32;
-        Ok(Prediction {
+        Ok(PredictResponse {
             model_id: m.id.clone(),
             image: ImageSize { width: w, height: h },
             boxes,
             timing: Timing {
-                preprocess_ms: pre,
-                inference_ms: inf,
-                postprocess_ms: post,
-                total_ms: pre + inf + post,
+                preprocess_ms: pre as f64,
+                inference_ms: inf as f64,
+                postprocess_ms: post as f64,
+                total_ms: (pre + inf + post) as f64,
             },
             device: "gpu:0".into(),
         })
@@ -1215,7 +1222,9 @@ impl Backend for MockBackend {
 
 /// Plausible detections for known ground truth at model quality `q` (0..1): jittered hits,
 /// occasional class confusions and misses, and a few low-score false positives.
-fn fake_predictions(truth: &[BBoxT], w: u32, h: u32, q: f32, classes: u32, seed: u64) -> Vec<ScoredBox> {
+fn fake_predictions(truth: &[BBoxT], w: u32, h: u32, q: f32, names: &[String], seed: u64) -> Vec<ScoredBox> {
+    let classes = names.len().max(1) as u32;
+    let name = |c: u32| names.get(c as usize).cloned().unwrap_or_default();
     let mut rng = Rng::new(seed);
     let mut out = Vec::new();
     for b in truth {
@@ -1231,6 +1240,7 @@ fn fake_predictions(truth: &[BBoxT], w: u32, h: u32, q: f32, classes: u32, seed:
         let class = if rng.f32() < (1.0 - q) * 0.18 { rng.below(classes) } else { b.class };
         out.push(ScoredBox {
             class,
+            name: name(class),
             score: (0.45 + 0.5 * q * rng.range(0.75, 1.0) + 0.04 * rng.normal()).clamp(0.26, 0.99),
             x1,
             y1,
@@ -1243,8 +1253,10 @@ fn fake_predictions(truth: &[BBoxT], w: u32, h: u32, q: f32, classes: u32, seed:
         let s = w.min(h) as f32 * rng.range(0.05, 0.15);
         let x1 = rng.range(0.0, w as f32 - s);
         let y1 = rng.range(0.0, h as f32 - s);
+        let class = rng.below(classes);
         out.push(ScoredBox {
-            class: rng.below(classes),
+            class,
+            name: name(class),
             score: rng.range(0.26, 0.48),
             x1,
             y1,
@@ -1255,7 +1267,7 @@ fn fake_predictions(truth: &[BBoxT], w: u32, h: u32, q: f32, classes: u32, seed:
     out
 }
 
-type BBoxT = super::types::LabelBox;
+type BBoxT = super::types::BBox;
 
 #[cfg(test)]
 mod tests {
@@ -1312,8 +1324,8 @@ mod tests {
         let m = MockBackend::new(0, true);
         let ds = m.dataset("ds_3b91").unwrap();
         let stats = ds.stats.unwrap();
-        assert_eq!(stats.class_counts.iter().sum::<u32>(), stats.boxes);
-        assert_eq!(stats.boxes_per_image_hist.counts.iter().sum::<u32>(), ds.splits.total());
+        assert_eq!(stats.class_counts.iter().sum::<u64>(), stats.boxes);
+        assert_eq!(stats.boxes_per_image_hist.counts.iter().sum::<u64>(), ds.splits.total());
     }
 
     #[test]

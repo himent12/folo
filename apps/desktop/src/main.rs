@@ -1,6 +1,6 @@
 //! FOLO Desktop: the native GPUI front end for FOLO.
 //!
-//! `folo-desktop [--scenario NAME] [--width W --height H] [--theme dark|light]`
+//! `folo-desktop [--server URL | --mock] [--scenario NAME] [--width W --height H] [--theme dark|light]`
 //!
 //! Scenarios put the app into a fixed, deterministic state (frozen mock clock, a screen, an
 //! overlay, a hover) for screenshots; see `scenario.rs` and `tools/shoot-all.ps1`.
@@ -76,6 +76,13 @@ fn main() {
         _ => Mode::Dark,
     };
     let spec = scenario.as_deref().map(scenario::Spec::parse);
+    // Data source: `--server URL` connects to a running folo serve; `--mock` uses the built-in demo
+    // data; by default the app finds or starts a server (see `FoloApp::autoconnect`).
+    let server = arg("--server");
+    // `--open run:run_3c02` starts on a screen (also `dataset:ID`, `model:ID`, `runs`, …).
+    let open = arg("--open");
+    let use_mock = std::env::args().any(|a| a == "--mock");
+    let default_url = std::env::var("FOLO_SERVER").unwrap_or_else(|_| "http://127.0.0.1:7878".into());
 
     Application::new().with_assets(Assets).run(move |cx: &mut App| {
         cx.text_system()
@@ -95,7 +102,13 @@ fn main() {
         if spec.as_ref().is_some_and(|s| s.empty) {
             mock = mock.empty();
         }
-        let api: Arc<dyn api::Backend> = Arc::new(mock);
+        let auto = spec.is_none() && !use_mock && server.is_none();
+        let api: Arc<dyn api::Backend> = match (&spec, &server) {
+            (None, Some(url)) => Arc::new(api::http::HttpBackend::new(url)),
+            _ => Arc::new(mock),
+        };
+        let server_mode = if server.is_some() { app::ServerMode::Local } else { app::ServerMode::Mock };
+        let connect_url = server.clone().unwrap_or(default_url.clone());
 
         let bounds = Bounds::centered(None, size(px(width), px(height)), cx);
         let window = cx
@@ -114,8 +127,16 @@ fn main() {
                 |window, cx| {
                     cx.new(|cx| {
                         let mut app = app::FoloApp::new(api, frozen, window, cx);
+                        app.server_mode = server_mode;
+                        app.server_url.update(cx, |i, cx| i.set_text(connect_url.clone(), cx));
                         if let Some(s) = &spec {
                             scenario::apply(&mut app, s, window, cx);
+                        }
+                        if auto {
+                            app.autoconnect(connect_url.clone(), true, cx);
+                        }
+                        if let Some(route) = open.as_deref().and_then(app::Route::parse) {
+                            app.route = route;
                         }
                         app
                     })

@@ -4,7 +4,7 @@
 //! textured backgrounds) so the UI can show real pixels without a server. A scene is described in
 //! normalised coordinates and rendered at any size, so thumbnails and full-size views agree.
 
-use crate::api::types::LabelBox as BBox;
+use crate::api::types::BBox;
 
 /// SplitMix64: tiny, fast, good enough for deterministic fixtures.
 #[derive(Clone)]

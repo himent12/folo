@@ -771,7 +771,7 @@ pub fn sparkline_in(
 pub fn histogram(
     t: &Theme,
     id: impl Into<SharedString>,
-    counts: Arc<Vec<u32>>,
+    counts: Arc<Vec<u64>>,
     labels: Arc<Vec<String>>,
     color: Hsla,
     height: f32,
@@ -850,7 +850,7 @@ pub fn histogram(
                             }
                         }
                         if hot {
-                            let s = crate::ui::int(c as u64);
+                            let s = crate::ui::int(c);
                             let w = text_width(window, &s, ty::XS.size);
                             paint_text(
                                 window,
