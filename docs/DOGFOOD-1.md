@@ -89,7 +89,7 @@ Outputs an agent would pull into its context:
 
 | output | size | note |
 |---|---|---|
-| `folo train --json`, 15 epochs at 50 batches | **143 KB** (771 lines; 750 are `step`) | No way to opt out of step records. An agent reading stdout sees about 190 bytes per batch. |
+| `folo train --json`, 15 epochs at 50 batches | **143 KB** (771 lines; 750 are `step`) | No way to opt out of step records. On this slow, contended GPU, every batch got a record of about 190 bytes; the 10-per-second throttle never kicked in. |
 | GPU out-of-memory failure (`train --json`) | **32.6 KB per record, three times** (log, `status.error`, error envelope) plus 1180 stderr lines | The wgpu validation error, repeated. |
 | `folo://runs/{id}/metrics` (12 epochs) | **150 KB** | Every step is included, with no epoch-only view. |
 | `tools/list` | **68.6 KB** (48.6 KB read-only) | `run_status` 11.2 KB, `list_runs` 8.4 KB and `stop_run` 6.9 KB each embed the full `Run` schema. |
@@ -173,10 +173,11 @@ is cosmetic or inconsistent.
 
 ### F8. `train --json` step records: no opt-out (annoying, tokens)
 - **Command:** `folo train ... --json` (see Token cost).
-- **Happened:** one `step` per batch, 750 records out of 771.
+- **Happened:** 750 `step` records out of 771, one per batch, because each batch took longer than the 100 ms
+  throttle.
 - **Fix:** `--json-events epoch` (or `--no-steps`), and round floats in the records.
-- *The docs claimed "about 10 per second"; it is one per batch, at most about 10 per second, which is fixed in
-  this PR.*
+- *The docs said "about 10 per second", which reads as a rate rather than a cap. Fixed in this PR: throttled to
+  about 10 per second, which on slow runs means one per batch.*
 
 ### F9. `tools/list` and `describe --json` are heavy (annoying, tokens)
 - **Calls:** `tools/list`, `folo describe --json`.
@@ -258,8 +259,8 @@ Agents that branch on codes need one vocabulary.
 
 ## Doc gaps
 - CLI.md listed `train` as "works (CPU)" while it trains on the GPU. *Fixed.*
-- CLI.md and the cookbook said step records arrive "about 10 per second"; they arrive once per batch, at most
-  about 10 per second. *Fixed, with a size warning.*
+- CLI.md and the cookbook said step records arrive "about 10 per second"; that is a cap, and slow runs get
+  one per batch. *Fixed, with a size warning.*
 - `folo val --json` had no documented shape, and the `val` and `predict` rows omitted `--device`. *Fixed;
   `val` now also reports `device`.*
 - `get_dataset`'s 50-issue cap is in file order and can hide errors (F1). *Workaround documented in the
@@ -293,7 +294,7 @@ Agents that branch on codes need one vocabulary.
   device. The CLI engine test checks it.
 - docs/CLI.md:
   - `train` status changed from "works (CPU)" to "works".
-  - Step records are described as one per batch, at most about 10 per second.
+  - Step records are described as throttled to about 10 per second (one per batch on slow runs).
   - Documented the `val` JSON shape.
   - Added `--device` to the `val` and `predict` rows.
   - Clarified the `--save` tag.

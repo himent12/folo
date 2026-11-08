@@ -147,9 +147,9 @@ for r in folo("predict", "--model", best, "D:/photos"):
 
 `folo dataset check` is the one command that exits 1 with a useful report (issues found), so read its records
 before treating exit 1 as a failure. For a long `folo train`, read stdout line by line instead of waiting for the
-process: `step` records arrive once per batch (at most about 10 times per second) and `epoch` records after
-each validation. A 15-epoch run is about 150 KB of records, mostly `step`s; keep only the `epoch` and `done`
-records in an agent's context.
+process: `step` records are throttled to about 10 per second (a slow run gets one per batch) and `epoch`
+records arrive after each validation. Most of the output is `step`s (in one test, 15 epochs of 50 batches made
+about 150 KB); keep only the `epoch` and `done` records in an agent's context.
 
 ## 6. Run the same flow headless, then look at it in Studio
 Point the agent at a running server instead of an embedded store, so its runs show up in FOLO Studio and keep
