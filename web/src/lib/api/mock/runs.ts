@@ -234,9 +234,10 @@ export function startLogs(p: RunProfile, startedAt: number, datasetName: string,
 }
 
 /** Published size/speed hints per architecture (also used by the New run form). */
+// Sizes: n and s as measured in docs/BENCHMARKS.md. `ms` only paces the demo's simulated inference timings.
 export const archInfo = {
-  'folo-n': { params: 2_630_000, flops: 6.6, ms: 1.4 },
-  'folo-s': { params: 9_410_000, flops: 21.5, ms: 2.3 },
+  'folo-n': { params: 2_624_064, flops: 6.54, ms: 1.4 },
+  'folo-s': { params: 9_458_736, flops: 21.59, ms: 2.3 },
   'folo-m': { params: 20_050_000, flops: 68.0, ms: 4.6 },
   'folo-l': { params: 25_310_000, flops: 86.9, ms: 6.1 },
   'folo-x': { params: 56_970_000, flops: 194.9, ms: 11.3 },

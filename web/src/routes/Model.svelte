@@ -7,7 +7,7 @@
   import { MediaQuery } from 'svelte/reactivity';
   import { hub } from '$lib/api/index.svelte';
   import { fromModelEval, reduceConfusion } from '$lib/api/evaluation';
-  import { archInfo } from '$lib/api/mock/runs';
+  import { e2eMs } from '$lib/benchmarks';
   import { Resource } from '$lib/api/resource.svelte';
   import type { Dataset, Model, Run } from '$lib/api/types';
   import ConfusionMatrix from '$lib/charts/ConfusionMatrix.svelte';
@@ -146,8 +146,8 @@
     matrixView?.reveal(at.r, at.c);
   }
 
-  /** The architecture's published 640 px reference time, scaled by input area. */
-  const latency = (m: Model) => archInfo[m.arch].ms * (m.imgsz / 640) ** 2;
+  /** The architecture's measured end-to-end time at 640 px (docs/BENCHMARKS.md), or undefined when not measured. */
+  const latency = (m: Model): number | undefined => e2eMs[m.arch];
   const kpis = (m: Model) => [
     { label: 'mAP50-95', value: m.metrics?.map50_95, sub: 'IoU 0.50:0.95', rest: ', all classes' },
     { label: 'mAP50', value: m.metrics?.map50, sub: 'IoU 0.50', rest: '' },
@@ -251,9 +251,13 @@
             <div class="kv">
               <dt>Latency</dt>
               <dd class="latency">
-                <span class="num">Reference ~{latency(m).toFixed(1)} ms</span>
-                <!-- A scaled hint, not a measurement: say exactly what it assumes. -->
-                <span class="faint">RTX 4080-class GPU · {m.imgsz} px · fp32</span>
+                <!-- Measured for the architecture (docs/BENCHMARKS.md), never scaled or estimated: say exactly what it is. -->
+                {#if latency(m) !== undefined}
+                  <span class="num">{latency(m)!.toFixed(2)} ms{m.imgsz !== 640 ? ' at 640 px' : ''}</span>
+                  <span class="faint">End to end, one image · RTX 4080 SUPER · fp32</span>
+                {:else}
+                  <span class="faint">Not measured for {m.arch} yet</span>
+                {/if}
               </dd>
             </div>
             <div class="kv wide">
@@ -293,11 +297,11 @@
           <Panel pad="none" id="details">
             <button type="button" class="d-line" aria-expanded={detailsOpen} aria-controls="model-details" onclick={() => (detailsOpen = !detailsOpen)}>
               <span class="d-sum num truncate">
-                <span class="mono">{m.arch}</span><span class="sep" aria-hidden="true">·</span>{m.imgsz} px<span class="d-lat"
-                  ><span class="sep" aria-hidden="true">·</span><span title="Reference latency: RTX 4080-class GPU, {m.imgsz} px, fp32"
-                    >~{latency(m).toFixed(1)} ms ref.</span
-                  ></span
-                ><span class="sep" aria-hidden="true">·</span>{bytes(m.bytes, prefs.units)}
+                <span class="mono">{m.arch}</span><span class="sep" aria-hidden="true">·</span>{m.imgsz} px{#if latency(m) !== undefined}<span class="d-lat"
+                    ><span class="sep" aria-hidden="true">·</span><span title="Measured end to end at 640 px: RTX 4080 SUPER, fp32, one image"
+                      >{latency(m)!.toFixed(2)} ms</span
+                    ></span
+                  >{/if}<span class="sep" aria-hidden="true">·</span>{bytes(m.bytes, prefs.units)}
               </span>
               <span class="d-verb">Details <ChevronRight size={14} aria-hidden="true" /></span>
             </button>

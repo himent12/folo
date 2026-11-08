@@ -2,12 +2,14 @@
 // they are hints ("about 9 minutes", "about 7 GiB"), labelled as estimates in the UI.
 
 import type { Arch } from '$lib/api/types';
+import { e2eMs, modelSize } from '$lib/benchmarks';
 
-export const arches: { arch: Arch; size: string; params: number; flops: number; ms: number; note: string }[] = [
-  { arch: 'folo-n', size: 'n', params: 2_630_000, flops: 6.6, ms: 1.4, note: 'Fastest. Edge devices, quick experiments.' },
-  { arch: 'folo-s', size: 's', params: 9_410_000, flops: 21.5, ms: 2.3, note: 'The sensible default: fast and accurate.' },
-  { arch: 'folo-m', size: 'm', params: 20_050_000, flops: 68.0, ms: 4.6, note: 'More accuracy on harder, busier scenes.' },
-  { arch: 'folo-l', size: 'l', params: 25_310_000, flops: 86.9, ms: 6.1, note: 'Best accuracy; needs a strong GPU.' },
+// Sizes and latency are measured where docs/BENCHMARKS.md has them (n, s); `ms` is absent otherwise.
+export const arches: { arch: Arch; size: string; params: number; flops: number; ms?: number; note: string }[] = [
+  { arch: 'folo-n', size: 'n', params: modelSize['folo-n']!.params, flops: modelSize['folo-n']!.gflops, ms: e2eMs['folo-n'], note: 'Fastest. Edge devices, quick experiments.' },
+  { arch: 'folo-s', size: 's', params: modelSize['folo-s']!.params, flops: modelSize['folo-s']!.gflops, ms: e2eMs['folo-s'], note: 'The sensible default: fast and accurate.' },
+  { arch: 'folo-m', size: 'm', params: 20_050_000, flops: 68.0, note: 'More accuracy on harder, busier scenes.' },
+  { arch: 'folo-l', size: 'l', params: 25_310_000, flops: 86.9, note: 'Best accuracy; needs a strong GPU.' },
 ];
 
 const gpuImgsPerS: Record<Arch, number> = { 'folo-n': 520, 'folo-s': 320, 'folo-m': 170, 'folo-l': 130, 'folo-x': 70 };
