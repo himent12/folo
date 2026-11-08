@@ -819,7 +819,7 @@ impl Store for RealStore {
             let model = run_model_id(id, last);
             let _ =
                 std::fs::remove_file(self.data_dir.join("cache").join("eval").join(format!("{model}.json")));
-            self.models.forget_weights(&model, None);
+            self.models.forget_weights(&model);
         }
         Ok(())
     }

@@ -192,19 +192,31 @@ impl Models {
         if let Some(f) = open()? {
             return Ok((out, f));
         }
+        // Its run may have been deleted (and its cache cleared, under this lock) since the lookup.
+        if !m.path.is_file() {
+            return Err(Error::not_found("model", id));
+        }
         std::fs::create_dir_all(&dir)
             .map_err(|e| Error::internal(format!("creating {}: {e}", dir.display())))?;
-        let file = engine::read_model_file(&m.path)?;
+        let file = engine::read_model_file(&m.path)
+            .map_err(|e| if m.path.exists() { e } else { Error::not_found("model", id) })?;
         // Written to a temporary file and renamed into place, so a reader never sees a partial export.
         file.export(&out, FloatDType::F16).map_err(nn_error)?;
         // Opened before the lock is released: a newer export's cleanup may remove the file, not this handle.
         let f = open()?.ok_or_else(|| Error::internal(format!("{} vanished", out.display())))?;
-        self.forget_weights(id, Some(&out));
+        self.remove_weights(id, Some(&out));
         Ok((out, f))
     }
 
-    /// Removes the cached f16 weights of model `id` (except `keep`).
-    pub fn forget_weights(&self, id: &str, keep: Option<&Path>) {
+    /// Removes the cached f16 weights of model `id` (when its run is deleted). Waits for an export in progress, so
+    /// none is left behind.
+    pub fn forget_weights(&self, id: &str) {
+        let _guard = self.f16.lock().unwrap();
+        self.remove_weights(id, None);
+    }
+
+    /// Removes the cached f16 weights of model `id` except `keep`; the caller holds the export lock.
+    fn remove_weights(&self, id: &str, keep: Option<&Path>) {
         let prefix = format!("{id}.");
         let Ok(entries) = std::fs::read_dir(self.weights_cache()) else { return };
         for e in entries.flatten() {
