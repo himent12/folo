@@ -3,7 +3,12 @@
 A `.folo` file stores model weights, or a full training checkpoint. It is byte-compatible with
 [safetensors](https://github.com/huggingface/safetensors): every `.folo` file is a valid safetensors file, and FOLO adds
 conventions for the metadata block and the tensor names. "Writers" below means FOLO's writer; "readers" means FOLO's
-reader. FOLO's reader also accepts any valid safetensors file (it simply lacks FOLO metadata).
+reader.
+
+Two levels are distinguished: **container parsing** (the safetensors layer: any valid safetensors file parses) and
+**model loading** (requires FOLO metadata). A plain safetensors file without `folo.*` metadata can be loaded only
+through the explicit import path (`folo import --config <json> --classes <json>` / `ModelFile::import(config, classes)`),
+where the caller supplies what the metadata would have said. Loading then follows the same rules below.
 
 ## Layout
 ```
@@ -56,10 +61,12 @@ All values are strings; structured values are JSON encoded into a string.
 | `folo.imgsz` | yes | training image size, e.g. `"640"` |
 | `folo.fused` | no | `"true"` if Conv+BN are fused (an inference-only tensor set) |
 | `folo.dtype` | no | `"F32"` (default) or `"F16"`: the floating dtype of parameters and buffers |
-| `folo.train` | checkpoint | JSON: the resolved TrainConfig (docs/API.md) with every default filled in |
-| `folo.optim` | checkpoint | JSON: optimizer state contract, see below |
-| `folo.rng` | checkpoint | JSON: RNG states needed to continue the random sequence (global seed, data-loader epoch seed, per-stream states) |
-| `folo.epoch` | checkpoint | number of completed epochs |
+| `folo.train` | checkpoint | JSON: the resolved TrainConfig (docs/API.md) with every default filled in (informational; the contracts below are authoritative for resuming) |
+| `folo.optim` | checkpoint | JSON: optimizer contract, see below |
+| `folo.sched` | checkpoint | JSON: LR / momentum schedule contract, see below |
+| `folo.ema` | checkpoint, if EMA | JSON: `{ "decay": 0.9999, "tau": 2000 }`. The effective decay at update `u` is `decay × (1 − exp(−u / tau))`, and `u` is `ema.__updates` |
+| `folo.rng` | checkpoint | JSON: `{ "algo": "<generator name from folo_core::rng, e.g. xoshiro256pp>", "seed": <u64>, "streams": { "<stream name>": "<state as lowercase hex of the generator's state words, little-endian>" } }`. Stream names are defined by the trainer (e.g. `data`, `augment`, `init`) |
+| `folo.epoch` | checkpoint | number of completed epochs. In v1, checkpoints are written only at epoch boundaries, so no within-epoch loader position is stored |
 | `folo.metrics` | no | JSON: best validation metrics `{ "map50", "map50_95", "precision", "recall" }` |
 | `folo.created` | no | RFC 3339 timestamp |
 | `folo.version` | no | FOLO version that wrote the file |
@@ -95,15 +102,32 @@ separately.
   "step": 1234 }                                           // number of optimizer.step() calls; equals optim.__step
 ```
 Every model parameter appears in exactly one group. `lr` is the group's base LR, before the scheduler multiplier.
-The scheduler is fully determined by `folo.train` (schedule type, warmup, epochs) plus `sched.__step`. Loaders must
-reject a checkpoint whose optimizer type or parameter set does not match the model being resumed.
+Loaders must reject a checkpoint whose optimizer type or parameter set does not match the model being resumed.
+
+### Scheduler contract (`folo.sched`)
+```jsonc
+{ "type": "cosine" | "linear",        // decay shape after warmup
+  "unit": "iteration",                // the schedule advances once per optimizer.step()
+  "epochs": 100, "steps_per_epoch": 250, // total length = epochs × steps_per_epoch iterations
+  "lrf": 0.01,                        // final LR = base lr × lrf
+  "warmup_iters": 750,                // linear warmup length in iterations (0 = none)
+  "warmup_bias_lr": 0.1,              // bias-group LR at iteration 0, ramping to its scheduled value
+  "warmup_momentum": 0.8,             // momentum (SGD) / beta1 (AdamW) at iteration 0, ramping to the group value
+  "step": 1234 }                      // completed iterations; equals sched.__step
+```
+The exact formulas (cosine shape, warmup interpolation) are defined in docs/MODEL.md (training recipe). Given this
+object and the optimizer groups, the LR and momentum of every group at any iteration are fully determined.
 
 ## Loading rules
 1. Parse and validate the header (acceptance rules above). Partition tensors by namespace.
-2. Choose the source: for inference or export, `ema.*` (prefix stripped) if present, otherwise the model namespace.
-   For resume, the model namespace (plus `ema.` / `optim.` / `sched.` into their owners).
+2. Choose the source: for inference or export, the EMA weights if present (every `ema.<model name>` tensor with the
+   prefix stripped; the counter `ema.__updates` and any other `ema.__*` scalar are EMA state, never model tensors),
+   otherwise the model namespace. For resume, the model namespace, with `ema.` / `optim.` / `sched.` routed to their
+   owners.
 3. **Strict** (the default) compares only the chosen source against the model's parameters and buffers. Missing names,
-   unexpected names and shape mismatches are errors that list every offending name.
+   unexpected names and shape mismatches are errors that list every offending name. When loading into an existing
+   model that has its own class list, strict loading also requires `folo.classes` to be identical (same names, same
+   order). Otherwise it fails and suggests partial (transfer) loading.
 4. **Partial** (`strict: false`, used for transfer learning) loads a tensor only when the name matches, the shape is
    identical, and the dtype converts. Everything else is skipped and reported. If `folo.classes` differs from the
    target model's classes (in count **or** order), the classification output layers of the head (named in
