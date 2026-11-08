@@ -38,7 +38,11 @@ training and evaluation pipeline, a server, a CLI and a web studio.
   through a graph that saved the old values fails with `Error::ModifiedInPlace` instead of using stale data.
 - `testing::grad_check` compares autograd against central finite differences (f64 loss accumulation); every
   differentiable op has a check in `crates/folo-core/tests/grad.rs`.
-- Seeded RNG (`folo_core::rng::Rng`, xoshiro256++) for reproducible init, augmentation and tests.
+- Custom ops: `Tensor::custom_op(name, inputs, output, backward)` lets downstream crates record fused kernels
+  (Conv+BN+SiLU, BatchNorm, DFL / CIoU losses) with a hand-written backward; inputs and output are version-checked
+  like built-in ops and a wrong gradient count or shape is an error at `backward()`.
+- Seeded RNG (`folo_core::rng::Rng`, xoshiro256++) for reproducible init, augmentation and tests. `Rng::ALGO`
+  (`"xoshiro256pp"`), `state()` and `from_state()` save and resume the exact stream (the `folo.rng` checkpoint entry).
 
 ### Backend integration contract (for folo-gpu and other devices)
 - Implement `folo_core::backend::Backend` and call `register_backend(Device::Gpu(i), Arc::new(backend))` at startup

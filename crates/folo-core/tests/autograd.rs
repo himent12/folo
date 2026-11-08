@@ -244,3 +244,17 @@ fn edge_case_gradients() -> Result<()> {
     assert!(Tensor::zeros([1, 1, 0, 3]).max_pool2d(2, 2, 1).is_err());
     Ok(())
 }
+
+#[test]
+fn reciprocal_gradients_do_not_square() -> Result<()> {
+    let x = Tensor::full([1], 1e-30).requires_grad_();
+    let g = x.rdiv_scalar(1e-30)?.sum_all()?.backward()?;
+    let v = g.get(&x).unwrap().item::<f32>()?;
+    assert!(v.is_finite() && (v / -1e30 - 1.0).abs() < 1e-3, "{v}");
+    let g = x.recip()?.backward_with(&Tensor::full([1], 1e-30))?;
+    let v = g.get(&x).unwrap().item::<f32>()?;
+    assert!(v.is_finite() && (v / -1e30 - 1.0).abs() < 1e-3, "{v}");
+    assert_eq!(Tensor::scalar(1e-39).div_scalar(1e-39)?.item::<f32>()?, 1.0);
+    assert_eq!((Tensor::scalar(1e-39) / 1e-39)?.item::<f32>()?, 1.0);
+    Ok(())
+}

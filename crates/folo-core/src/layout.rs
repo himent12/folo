@@ -86,7 +86,8 @@ impl Layout {
     /// One past the largest storage index this layout touches (0 for an empty view), or `None` if that
     /// overflows `usize` (such a layout can never be valid).
     pub fn storage_extent(&self) -> Option<usize> {
-        if self.numel() == 0 {
+        // Test for a zero dim rather than `numel() == 0`: the element count of a bogus shape can wrap to 0.
+        if self.shape.dims().contains(&0) {
             return Some(0);
         }
         let mut end = self.offset;
@@ -345,6 +346,9 @@ mod tests {
         let huge = Layout::new(Shape::new(&[2]), smallvec::smallvec![usize::MAX], 1);
         assert_eq!(huge.storage_extent(), None);
         assert!(!huge.fits(1));
+        // An element count that wraps to zero must not look empty.
+        let wraps = Layout::new(Shape::new(&[1 << 32, 1 << 32]), smallvec::smallvec![1, 1 << 32], 0);
+        assert!(!wraps.fits(1));
         let b = Layout::contiguous([3, 1]).broadcast_to(&Shape::new(&[2, 3, 5]), "b").unwrap();
         assert_eq!(b.strides(), &[0, 1, 0]);
         assert!(b.has_broadcast());

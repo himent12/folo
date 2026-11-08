@@ -79,6 +79,8 @@ pub enum UnaryOp {
     RSubScalar(f32),
     /// `c / x`.
     RDivScalar(f32),
+    /// `x / c`.
+    DivScalar(f32),
     /// `max(x, c)`.
     MaxScalar(f32),
     /// `min(x, c)`.
@@ -117,6 +119,7 @@ impl UnaryOp {
             UnaryOp::MulScalar(_) => "mul_scalar",
             UnaryOp::RSubScalar(_) => "rsub_scalar",
             UnaryOp::RDivScalar(_) => "rdiv_scalar",
+            UnaryOp::DivScalar(_) => "div_scalar",
             UnaryOp::MaxScalar(_) => "max_scalar",
             UnaryOp::MinScalar(_) => "min_scalar",
             UnaryOp::Floor => "floor",

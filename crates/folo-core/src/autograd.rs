@@ -180,7 +180,14 @@ pub(crate) fn backward(root: &Tensor, seed: Tensor) -> Result<Grads> {
             }
         }
         let gins = (node.backward)(&g)?;
-        debug_assert_eq!(gins.len(), node.inputs.len(), "backward of {} returned the wrong arity", node.op);
+        if gins.len() != node.inputs.len() {
+            return Err(Error::Autograd(format!(
+                "backward of `{}` returned {} gradients for {} inputs",
+                node.op,
+                gins.len(),
+                node.inputs.len()
+            )));
+        }
         for (inp, gi) in node.inputs.iter().zip(gins) {
             let Some(gi) = gi else { continue };
             if !inp.requires_grad() {

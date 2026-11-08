@@ -384,6 +384,44 @@ impl Tensor {
         self.track_saved(op, inputs, &[], backward)
     }
 
+    /// Record a custom differentiable op (a fused kernel, a hand-written loss, ...) built outside folo-core.
+    ///
+    /// `output` is the op's result, computed however the caller likes: raw kernels, [`Tensor::update_f32`],
+    /// or ordinary ops under [`crate::no_grad`]. Any graph it already carries is ignored. The returned tensor
+    /// shares `output`'s data and, when grad mode is on and any input requires grad, records a node whose
+    /// gradient is `backward(grad_output)`: one entry per input, in order, `None` for "no gradient", each with
+    /// that input's shape. `backward` runs under `no_grad` and may use any tensor ops.
+    ///
+    /// Inputs and `output` are version-checked like built-in ops: modifying them in place before `backward()`
+    /// is an error. Other tensors the closure captures are not tracked, so save copies or make them inputs.
+    ///
+    /// ```
+    /// use folo_core::{no_grad, Result, Tensor};
+    ///
+    /// /// `x * y` with a hand-written backward.
+    /// fn fused_mul(x: &Tensor, y: &Tensor) -> Result<Tensor> {
+    ///     let out = { let _g = no_grad(); x.mul(y)? };
+    ///     let (xs, ys) = (x.detach(), y.detach());
+    ///     Tensor::custom_op("fused_mul", &[x, y], out, move |g| {
+    ///         Ok(vec![Some(g.mul(&ys)?), Some(g.mul(&xs)?)])
+    ///     })
+    /// }
+    ///
+    /// let x = Tensor::from_slice(&[2.0f32], [1])?.requires_grad_();
+    /// let y = Tensor::from_slice(&[3.0f32], [1])?;
+    /// let grads = fused_mul(&x, &y)?.sum_all()?.backward()?;
+    /// assert_eq!(grads.get(&x).unwrap().to_vec::<f32>()?, vec![3.0]);
+    /// # Ok::<(), folo_core::Error>(())
+    /// ```
+    pub fn custom_op<F>(name: &'static str, inputs: &[&Tensor], output: Tensor, backward: F) -> Result<Tensor>
+    where
+        F: Fn(&Tensor) -> Result<Vec<Option<Tensor>>> + Send + Sync + 'static,
+    {
+        let out = output.detach();
+        let saved = out.clone();
+        Ok(out.track_saved(name, inputs, &[&saved], move |g| Ok(SmallVec::from_vec(backward(g)?))))
+    }
+
     /// [`Tensor::track`] for a backward closure that also reads `saved` tensors that are not differentiable
     /// inputs (indices, masks, the op's own output). Their storage versions are checked like the inputs'.
     pub(crate) fn track_saved<F>(

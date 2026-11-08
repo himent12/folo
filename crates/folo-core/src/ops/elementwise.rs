@@ -114,7 +114,7 @@ impl Tensor {
 
     /// `x / c`.
     pub fn div_scalar(&self, c: f32) -> Result<Tensor> {
-        self.unary(UnaryOp::MulScalar(1.0 / c))
+        self.unary(UnaryOp::DivScalar(c))
     }
 
     /// `c - x`.

@@ -18,6 +18,19 @@ fn splitmix64(state: &mut u64) -> u64 {
 }
 
 impl Rng {
+    /// Name of the algorithm, stored next to [`Rng::state`] in checkpoints (`folo.rng` in docs/FORMAT.md).
+    pub const ALGO: &'static str = "xoshiro256pp";
+
+    /// The full generator state, for checkpoints. [`Rng::from_state`] resumes the exact stream.
+    pub fn state(&self) -> [u64; 4] {
+        self.s
+    }
+
+    /// A generator resuming from [`Rng::state`]. `None` for the all-zero state, which xoshiro cannot leave.
+    pub fn from_state(s: [u64; 4]) -> Option<Rng> {
+        (s != [0; 4]).then_some(Rng { s })
+    }
+
     /// A generator from a 64-bit seed. Equal seeds give equal streams on every platform.
     pub fn seed(seed: u64) -> Self {
         let mut st = seed;
@@ -145,5 +158,19 @@ mod tests {
             counts[r.below(5) as usize] += 1;
         }
         assert!(counts.iter().all(|&c| (c as f64 - n as f64 / 5.0).abs() < 1000.0));
+    }
+
+    #[test]
+    fn state_round_trip() {
+        let mut a = Rng::seed(99);
+        for _ in 0..10 {
+            a.next_u64();
+        }
+        let mut b = Rng::from_state(a.state()).unwrap();
+        for _ in 0..100 {
+            assert_eq!(a.next_u64(), b.next_u64());
+        }
+        assert!(Rng::from_state([0; 4]).is_none());
+        assert_eq!(Rng::ALGO, "xoshiro256pp");
     }
 }
