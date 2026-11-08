@@ -976,8 +976,8 @@
     width: 12px;
     height: 12px;
     border-radius: 3px;
-    /* text.tertiary keeps the empty box at ≥ 3:1; checked is neutral (lime is for actions, focus and live). */
-    box-shadow: inset 0 0 0 1px var(--text-tertiary);
+    /* The empty box's edge is line.control (>= 3:1); checked is neutral (lime is for actions, focus and live). */
+    box-shadow: inset 0 0 0 1px var(--line-control);
   }
   .tog.on .tog-box {
     background: var(--text-primary);

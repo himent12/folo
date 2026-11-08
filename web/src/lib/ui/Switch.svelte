@@ -49,7 +49,8 @@
     height: 18px;
     border-radius: 999px;
     background: var(--bg-active);
-    box-shadow: inset 0 0 0 1px var(--line-default);
+    /* Off, the track's edge is what shows the control: line.control (>= 3:1, WCAG 1.4.11). */
+    box-shadow: inset 0 0 0 1px var(--line-control);
     transition: background-color var(--dur-fast) var(--ease-standard);
   }
   .thumb {

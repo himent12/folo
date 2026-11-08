@@ -181,6 +181,7 @@
   --line-subtle: #ffffff0d;
   --line-default: #ffffff17;
   --line-strong: #ffffff29;
+  --line-control: #ffffff59;
   --text-primary: #edeff2;
   --text-secondary: #a1a7b0;
   --text-tertiary: #80868f;
@@ -237,6 +238,7 @@
   --line-subtle: #0a0e1410;
   --line-default: #0a0e141c;
   --line-strong: #0a0e1430;
+  --line-control: #0a0e1474;
   --text-primary: #0c0e12;
   --text-secondary: #4f5661;
   --text-tertiary: #646b75;

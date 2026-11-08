@@ -104,14 +104,15 @@
       to right,
       var(--text-secondary) 0,
       var(--text-secondary) var(--pct),
-      var(--bg-active) var(--pct),
-      var(--bg-active) 100%
+      var(--line-control) var(--pct),
+      var(--line-control) 100%
     );
   }
   input::-moz-range-track {
     height: 4px;
     border-radius: 999px;
-    background: var(--bg-active);
+    /* The unfilled rail marks the control's extent: line.control (>= 3:1, WCAG 1.4.11). */
+    background: var(--line-control);
   }
   input::-moz-range-progress {
     height: 4px;

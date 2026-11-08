@@ -259,13 +259,6 @@
     accent-color: var(--accent-line);
     cursor: pointer;
   }
-  /* Checkboxes rest faint (so the column reads as a selection column, not a gap) and come up on hover, focus, or for
-     every row once one is selected. */
-  @media (hover: hover) {
-    .runs:not(.selecting) tbody tr:not(:hover) .check input:not(:focus-visible):not(:checked) {
-      opacity: 0.35;
-    }
-  }
   .name {
     display: block;
     font-weight: var(--weight-medium);

@@ -41,8 +41,10 @@ live state and the primary action; status colours for status; the class palette 
 - Radii: `xs` 3 (chips), `sm` 4 (small controls), `md` 6 (controls, inputs), `lg` 8 (panels, cards), `xl` 12
   (dialogs, palette). Detection boxes are square (radius 0): they are measurements.
 - Controls: heights 20 / 24 / 28 / 32 / 40 (`size.control`). Default 28. Table rows 36, dense 28.
-- Lines are 1 px hairlines (`line.subtle` inside panels, `line.default` for panel edges and inputs, `line.strong` for
-  hover / emphasis). Never 2 px borders, except the focus ring.
+- Lines are 1 px hairlines (`line.subtle` inside panels, `line.default` for panel edges, `line.strong` for hover /
+  emphasis and separators). Never 2 px borders, except the focus ring. A line that is the only thing marking a
+  control (an input or select edge, an unchecked checkbox or radio, an off switch track, a slider's unfilled rail) is
+  `line.control`, ≥ 3:1 on every surface (WCAG 1.4.11); separators and panel edges never use it.
 
 ## Surfaces (elevation by lightness, not by shadow)
 `bg.app` (window) → `bg.panel` (panels, sidebar) → `bg.raised` (inputs, hovered cards, table headers) →

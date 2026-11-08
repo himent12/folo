@@ -38,7 +38,8 @@
     height: var(--control-md);
     border-radius: var(--radius-md);
     background: var(--bg-inset);
-    border: 1px solid var(--line-default);
+    /* The edge is what marks the field: line.control is >= 3:1 on every surface (WCAG 1.4.11). */
+    border: 1px solid var(--line-control);
     transition:
       border-color var(--dur-fast) var(--ease-standard),
       box-shadow var(--dur-fast) var(--ease-standard);
@@ -52,7 +53,7 @@
     border-radius: var(--radius-sm);
   }
   .input:hover {
-    border-color: var(--line-strong);
+    border-color: var(--text-tertiary);
   }
   .input:focus-within {
     border-color: var(--focus);

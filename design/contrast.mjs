@@ -26,6 +26,8 @@ function rules(theme) {
     // Non-text marks that must be seen against the surface: accent.line and focus rings.
     { fg: 'accent.line', on: SURFACES, min: MARK },
     { fg: 'focus', on: SURFACES, min: MARK },
+    // Control boundaries (WCAG 1.4.11): switch tracks, slider rails, checkbox / radio and input edges.
+    { fg: 'line.control', on: SURFACES, min: MARK },
     // Status: text on every surface and on its own tint (badges, banners); solid dots and icons are marks.
     ...STATUS.map((s) => ({ fg: `${s}.text`, on: [...SURFACES, ...tinted(`${s}.muted`)], min: TEXT })),
     ...STATUS.map((s) => ({ fg: `${s}.solid`, on: SURFACES, min: MARK })),

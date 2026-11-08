@@ -183,8 +183,8 @@
     height: 14px;
     margin-top: 4px;
     border-radius: 50%;
-    /* text.tertiary keeps the empty ring at ≥ 3:1 on both themes' panels. */
-    border: 1px solid var(--text-tertiary);
+    /* The empty ring marks the option: line.control (>= 3:1 on every surface). */
+    border: 1px solid var(--line-control);
     background: var(--bg-inset);
     transition: border-color var(--dur-fast) var(--ease-standard);
   }
