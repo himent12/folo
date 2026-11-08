@@ -81,7 +81,7 @@ impl FoloApp {
             .flex()
             .flex_col()
             .gap(px(16.))
-            .px(px(24.))
+            .px(px(self.gutter()))
             .pt(px(20.))
             .pb(px(20.))
             .child(header)
@@ -135,7 +135,8 @@ impl FoloApp {
                 .rounded(px(radius::LG))
                 .bg(t.bg_inset)
                 .border_1()
-                .border_dashed()
+                // Dashed only where a drop works (a model to run it).
+                .when(!no_models, |d| d.border_dashed())
                 .border_color(if drop_hover { t.accent_line } else { t.line_strong })
                 .flex()
                 .items_center()
@@ -159,12 +160,17 @@ impl FoloApp {
                                 .flex_col()
                                 .items_center()
                                 .gap(px(4.))
-                                .child(text(ty::LG, t.text_primary).child(if no_models {
+                                // Headline, body and button name the same next step.
+                                .child(text(ty::LG, t.text_primary).child(if no_models && no_datasets {
+                                    "Add a dataset to get started"
+                                } else if no_models {
                                     "Train a model to start detecting"
                                 } else {
                                     "Drop an image to detect objects"
                                 }))
-                                .child(text(ty::SM, t.text_secondary).child(if no_models {
+                                .child(text(ty::SM, t.text_secondary).child(if no_models && no_datasets {
+                                    "Then train a model on it and come back with an image."
+                                } else if no_models {
                                     "The Playground runs your trained models. Start a run, then come back with an image."
                                 } else {
                                     "JPEG or PNG · or pick a validation image on the right"
@@ -612,9 +618,16 @@ impl FoloApp {
                                     b.y2 - b.y1
                                 )),
                             )
-                            .child(div().flex_1().h(px(4.)).rounded_full().bg(t.bg_inset).child(
-                                div().h_full().w(relative(b.score)).rounded_full().bg(t.class(b.class)),
-                            ))
+                            .child(
+                                div().flex_1().h(px(4.)).rounded_full().bg(t.bg_inset).child(
+                                    // The class's surface-safe stroke (the photo palette washes out on a light panel).
+                                    div()
+                                        .h_full()
+                                        .w(relative(b.score))
+                                        .rounded_full()
+                                        .bg(t.class_stroke(b.class)),
+                                ),
+                            )
                             .child(
                                 text(ty::SM, t.text_primary)
                                     .tnum()

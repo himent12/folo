@@ -1974,7 +1974,8 @@ impl FoloApp {
                     .flex()
                     .items_center()
                     .gap(px(6.))
-                    .pl(px(20.))
+                    // The crumbs' 4 px pads put their text on the page gutter.
+                    .pl(px(self.gutter() - 4.))
                     .window_control_area(WindowControlArea::Drag)
                     .children(crumbs.into_iter().enumerate().map(|(i, (label, route))| {
                         let last = route.is_none();
@@ -2936,6 +2937,12 @@ impl FoloApp {
     }
 
     /// A page frame: scrollable column with the standard gutter and an optional header.
+    /// The page's side gutter: 16 px below 1120 px wide, else 24. Every page, and the breadcrumbs
+    /// (which sit 4 px further in for their hover pads), use it.
+    pub fn gutter(&self) -> f32 {
+        if self.narrow { 16. } else { 24. }
+    }
+
     pub fn page_frame(
         &self,
         t: &Theme,
@@ -2960,7 +2967,7 @@ impl FoloApp {
                             .flex()
                             .flex_col()
                             .gap(px(16.))
-                            .px(px(if self.narrow { 16. } else { 24. }))
+                            .px(px(self.gutter()))
                             .pt(px(20.))
                             .pb(px(32.))
                             .child(header)

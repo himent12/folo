@@ -783,10 +783,25 @@ impl FoloApp {
             .flex_1()
             .flex()
             .flex_col()
-            .child(
-                panel_header(&t, "Precision–recall")
-                    .child(caption(&t, "IoU 0.50 · hover a class to isolate, click to pin")),
-            )
+            .child(panel_header(&t, "Precision–recall").child(caption(&t, {
+                // The instruction follows the input in use: keys while the chart or a class
+                // row has keyboard focus, the pointer otherwise.
+                let focused = |k: &str| self.focus.borrow().get(k).is_some_and(|f| f.is_focused(window));
+                // Class focus is either family of rows (the legend's chips, the class table's
+                // rows), as `pr_isolated` reads it; pointer mode skips the lookups.
+                let row_focused = || {
+                    ev.pr.iter().any(|c| {
+                        focused(&format!("pr-chip-{}", c.class)) || focused(&format!("pc-row-{}", c.class))
+                    })
+                };
+                if self.kb && focused("pr-chart") {
+                    "IoU 0.50 · ← → inspect recall · Esc clears"
+                } else if self.kb && row_focused() {
+                    "IoU 0.50 · Enter pins the class"
+                } else {
+                    "IoU 0.50 · hover a class to isolate, click to pin"
+                }
+            })))
             .child(
                 div()
                     .flex()
@@ -906,7 +921,8 @@ impl FoloApp {
         // detected, the last row detections with no object.
         let row_sums: Vec<u32> = ev.confusion.iter().map(|r| r.iter().sum::<u32>().max(1)).collect();
         let max_count = ev.confusion.iter().flatten().copied().max().unwrap_or(1).max(1);
-        // The error ramp spans 0 to the largest error on screen, so the worst confusion is the
+        // The error ramp spans 0 to the largest confusion between classes (the false-positive row,
+        // a split of all false positives that sums to 100 %, has its own neutral ramp), so the worst confusion is the
         // darkest cell and small ones stay apart (the key states that maximum).
         let frac_of =
             |r: usize, v: u32| if norm { v as f32 / row_sums[r] as f32 } else { v as f32 / max_count as f32 };
@@ -916,7 +932,7 @@ impl FoloApp {
             .iter()
             .enumerate()
             .flat_map(|(r, row)| row.iter().enumerate().map(move |(c, &v)| (r, c, v)))
-            .filter(|&(r, c, _)| r != c && !(r == last && c == last))
+            .filter(|&(r, c, _)| r != c && r != last)
             .map(|(r, _, v)| frac_of(r, v))
             .fold(0f32, f32::max)
             .max(1e-6);
@@ -995,7 +1011,7 @@ impl FoloApp {
             div()
                 .flex()
                 .items_center()
-                .when(r == n - 1, |d| d.mt(px(6.)))
+                .when(r == n - 1, |d| d.mt(px(8.)))
                 .child(
                     text(ty::XS, if r == n - 1 { t.text_tertiary } else { t.text_secondary })
                         .font_weight(FontWeight::MEDIUM)
@@ -1021,6 +1037,8 @@ impl FoloApp {
                         // to the largest error), so small and large confusions stay apart.
                         if diag {
                             crate::theme::over(t.bg_inset, alpha(base, (0.35 + 0.6 * frac).min(0.95)))
+                        } else if r == n - 1 {
+                            crate::theme::over(t.bg_panel, alpha(t.text_tertiary, 0.12 + 0.5 * frac.sqrt()))
                         } else {
                             crate::theme::over(t.bg_panel, alpha(t.danger_solid, err_alpha(frac / max_err)))
                         }
@@ -1057,7 +1075,6 @@ impl FoloApp {
                                 .rounded(px(3.))
                                 .bg(fill)
                                 .when(diag && !na, |d| d.border_1().border_color(alpha(base, 0.9)))
-                                .when(na, |d| d.border_1().border_color(t.line_subtle))
                                 .flex()
                                 .items_center()
                                 .justify_center()

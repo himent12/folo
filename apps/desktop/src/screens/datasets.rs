@@ -289,7 +289,7 @@ impl FoloApp {
             .flex()
             .flex_col()
             .gap(px(if short { 12. } else { 16. }))
-            .px(px(24.))
+            .px(px(self.gutter()))
             .pt(px(if short { 16. } else { 20. }))
             .pb(px(16.))
             .child(header)

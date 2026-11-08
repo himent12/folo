@@ -278,16 +278,37 @@ pub fn format_step(v: f32, step: f32) -> String {
     format!("{v:.d$}")
 }
 
-/// Powers of two from `y0` to `y1` (both > 0), for log axes.
+/// The stride (in octaves) of a log axis over `y0..y1` with room for `max` labels.
+fn pow2_stride(y0: f32, y1: f32, max: usize) -> i32 {
+    let e0 = y0.max(1e-6).log2().ceil() as i32;
+    let e1 = (y1.max(1e-6) * 1.0001).log2().floor() as i32;
+    let n = (e1 - e0 + 1).max(1) as usize;
+    n.div_ceil(max.max(1)) as i32
+}
+
+/// `y1` raised to the next power of two on a tick stride of `k` octaves (aligned on 1), so the
+/// top label keeps the stride: 0.25 1 4 16, not 0.25 1 4 8.
+pub fn pow2_top(y1: f32, k: i32) -> f32 {
+    let e1 = (y1.max(1e-6) * 0.9999).log2().ceil() as i32;
+    let top = if k > 1 { e1 + (k - e1.rem_euclid(k)) % k } else { e1 };
+    2f32.powi(top).max(y1)
+}
+
+/// Powers of two from `y0` to `y1` (both > 0), for log axes, at most about `max` of them.
+#[cfg(test)]
 pub fn pow2_ticks(y0: f32, y1: f32, max: usize) -> Vec<f32> {
+    pow2_ticks_every(y0, y1, pow2_stride(y0, y1, max))
+}
+
+/// [`pow2_ticks`] at a given stride of `k` octaves.
+pub fn pow2_ticks_every(y0: f32, y1: f32, k: i32) -> Vec<f32> {
     let e0 = y0.max(1e-6).log2().ceil() as i32;
     let e1 = (y1.max(1e-6) * 1.0001).log2().floor() as i32;
     if e1 < e0 {
         return Vec::new();
     }
     // More powers than fit: every k-th (4, 1, 0.25 …), aligned on 1 so the ticks stay round.
-    let n = (e1 - e0 + 1) as usize;
-    let k = n.div_ceil(max.max(1)) as i32;
+    let k = k.max(1);
     let mut es: Vec<i32> = (e0..=e1).filter(|e| e.rem_euclid(k) == 0).collect();
     // The top of the axis keeps its label when it isn't crowded by the last one.
     if es.last().is_none_or(|&l| e1 - l >= (k + 1) / 2) && es.last() != Some(&e1) {
@@ -812,11 +833,16 @@ fn paint_line_chart(
     if y1 <= y0 {
         y1 = y0 + 1.0;
     }
-    let (ly0, ly1) = if spec.log_y { (y0.max(1e-6).ln(), y1.max(1e-6).ln()) } else { (y0, y1) };
     // Log axes tick at powers of two (0.5 1 2 4 8): a factor of two reads the same everywhere.
-    // Log ticks thin out to one label per 22 px of chart height (short charts keep them apart).
+    // Log ticks thin out to one label per 22 px of chart height (short charts keep them apart),
+    // and the top rises to the next power on that stride so the steps stay even.
     let fit = ((f32::from(bounds.size.height) - 40.) / 22.).floor().max(2.) as usize;
-    let yticks = if spec.log_y { pow2_ticks(y0, y1, fit) } else { ticks(y0, y1, spec.y_ticks) };
+    let stride = pow2_stride(y0, y1, fit);
+    if spec.log_y {
+        y1 = pow2_top(y1, stride);
+    }
+    let (ly0, ly1) = if spec.log_y { (y0.max(1e-6).ln(), y1.max(1e-6).ln()) } else { (y0, y1) };
+    let yticks = if spec.log_y { pow2_ticks_every(y0, y1, stride) } else { ticks(y0, y1, spec.y_ticks) };
     let ystep = nice_step(y1 - y0, spec.y_ticks);
     // Tiny values share one power of ten, shown once ("0 5 10" and "× 10⁻³", design/README).
     let ypow = (spec.y_fmt.is_none() && !spec.log_y).then(|| axis_pow(y0, y1, spec.y_ticks)).flatten();
@@ -1021,7 +1047,7 @@ fn paint_line_chart(
             ),
         }),
         |window| {
-            // Live endpoint dots already drawn: one closer than 6 px to another is skipped.
+            // Live endpoint dots already drawn: one within 3 px of another is skipped.
             let mut live_dots: Vec<Point<Pixels>> = Vec::new();
             for s in &spec.series {
                 if s.points.is_empty() {
@@ -1077,7 +1103,8 @@ fn paint_line_chart(
                     && let Some(&(x, y)) = main.last()
                     && !live_dots.iter().any(|d| {
                         let c = point(sx(x), sy(y));
-                        (d.x - c.x).abs() < px(6.) && (d.y - c.y).abs() < px(6.)
+                        // Only a dot that would sit on another is dropped; near ones both show.
+                        (d.x - c.x).abs() < px(3.) && (d.y - c.y).abs() < px(3.)
                     })
                 {
                     let c = point(sx(x), sy(y));
@@ -1553,6 +1580,13 @@ mod tests {
         assert_eq!(pow2_ticks(1., 1.5, 8), vec![1.]);
         // 0.001..10 is 14 powers; in room for 4, every fourth, through 1.
         assert_eq!(pow2_ticks(0.001, 10., 4), vec![2f32.powi(-8), 2f32.powi(-4), 1., 8.]);
+        // Raised to the stride: 0.25..8 in room for 3 is every other power, so the top goes to 16.
+        let k = pow2_stride(0.25, 8., 3);
+        assert_eq!(k, 2);
+        assert_eq!(pow2_top(8., k), 16.);
+        assert_eq!(pow2_ticks_every(0.25, 16., k), vec![0.25, 1., 4., 16.]);
+        assert_eq!(pow2_top(8., 1), 8.);
+        assert_eq!(pow2_top(9., 1), 16.);
         // 0.001..2 is 11 powers: every third, and 2 is too close to 1 to get its own label.
         assert_eq!(pow2_ticks(0.001, 2., 4), vec![2f32.powi(-9), 2f32.powi(-6), 2f32.powi(-3), 1.]);
     }

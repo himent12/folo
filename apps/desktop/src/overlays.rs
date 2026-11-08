@@ -724,6 +724,26 @@ impl FoloApp {
                 )
                 .when_some(bad, |d, msg| d.child(text(ty::XS, t.danger_text).child(msg.to_string())))
         };
+        // Short windows drop the helper rows; the two that explain a choice stay one hover or
+        // focus away.
+        let batch_help = short.then(|| self.help_icon("help-batch", "Images per training step.", window, cx));
+        let device_help = short.then(|| {
+            self.help_icon(
+                "help-device",
+                "Auto uses the GPU when one is available, else the CPU.",
+                window,
+                cx,
+            )
+        });
+        let labelled = |name: &str, help: AnyElement, control: AnyElement| {
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(8.))
+                .child(div().flex().items_center().gap(px(4.)).child(label(name)).child(help))
+                .child(control)
+                .into_any_element()
+        };
         let body = div()
             .flex()
             .flex_col()
@@ -766,22 +786,27 @@ impl FoloApp {
                 div()
                     .flex()
                     .gap(px(16.))
-                    .child(div().flex_1().child(field(
-                        "Batch size",
-                        batch_seg,
-                        (!short).then(|| "images per step".into()),
-                    )))
-                    .child(div().flex_1().child(field(
-                        "Device",
-                        device_seg,
-                        (!short).then(|| {
-                            if DEVICES[device] == "auto" {
-                                "GPU when available, else CPU".into()
-                            } else {
-                                DEVICES[device].to_string()
-                            }
+                    .child(div().flex_1().child(match batch_help {
+                        Some(h) => labelled("Batch size", h, batch_seg),
+                        None => {
+                            field("Batch size", batch_seg, Some("images per step".into())).into_any_element()
+                        }
+                    }))
+                    .child(
+                        div().flex_1().child(match device_help {
+                            Some(h) => labelled("Device", h, device_seg),
+                            None => field(
+                                "Device",
+                                device_seg,
+                                Some(if DEVICES[device] == "auto" {
+                                    "GPU when available, else CPU".into()
+                                } else {
+                                    DEVICES[device].to_string()
+                                }),
+                            )
+                            .into_any_element(),
                         }),
-                    ))),
+                    ),
             )
             .child(section("Schedule"))
             .child(
@@ -1346,11 +1371,11 @@ impl FoloApp {
                             .mx(px(inset))
                             .h(px(6.))
                             .rounded_t(px(radius::LG))
-                            .bg(crate::theme::alpha(t.bg_raised, a))
+                            .bg(crate::theme::fade(t.bg_raised, a))
                             .border_1()
                             .border_b_0()
                             // line.default: on line.strong it would double the toast's own top edge.
-                            .border_color(crate::theme::alpha(t.line_default, a))
+                            .border_color(crate::theme::fade(t.line_default, a))
                     };
                     d.when(older > 1, |d| d.child(edge(16., 0.6))).child(edge(8., 1.))
                 })

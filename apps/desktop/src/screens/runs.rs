@@ -647,7 +647,14 @@ impl FoloApp {
                 ))),
             stat_sized(
                 &t,
-                if live { "mAP50-95 · latest" } else { "mAP50-95 · final" },
+                // "final" only for a run that finished; a stopped or failed one ends on its last validated epoch.
+                if live {
+                    "mAP50-95 · latest"
+                } else if r.status == RunStatus::Completed {
+                    "mAP50-95 · final"
+                } else {
+                    "mAP50-95 · last validated"
+                },
                 last.map_or("–".into(), |e| f3(e.val.map50_95)),
                 big,
                 delta.or_else(|| {
@@ -734,16 +741,25 @@ impl FoloApp {
         let mut it = tiles.into_iter().peekable();
         let mut first = true;
         while it.peek().is_some() {
-            let mut row = div().flex();
+            // Full width, so the two-column span below has a width to take a fraction of.
+            let mut row = div().w_full().flex();
             if !first {
                 row = row.border_t_1().border_color(t.line_subtle);
             }
+            let wrapped = !first;
             first = false;
             for (i, c) in it.by_ref().take(per_row).enumerate() {
                 if i > 0 {
                     row = row.child(vline(&t));
                 }
-                row = row.child(tile(c));
+                // On a 3-column grid: the second row's first tile spans two columns, so its
+                // divider lines up with the first row's second one.
+                row = row.child(if wrapped && per_row == 3 && i == 0 {
+                    // (flex_1's 0 basis would win over a width: set the basis itself.)
+                    tile(c).flex_none().flex_basis(gpui::relative(2. / 3.))
+                } else {
+                    tile(c)
+                });
             }
             rows.push(row);
         }
@@ -834,7 +850,8 @@ impl FoloApp {
             "run-map",
             vec![
                 Series::new("mAP50-95", t.chart_series[0], d.map50_95.clone()).area().live(live).width(1.75),
-                Series::new("mAP50", t.chart_series[1], d.map50.clone()).width(1.25),
+                // Dashed: the pair reads apart without colour (as in the legend).
+                Series::new("mAP50", t.chart_series[1], d.map50.clone()).width(1.25).dashed().live(live),
             ],
             primary_h,
         );
@@ -961,7 +978,9 @@ impl FoloApp {
                 .child(
                     div()
                         .h(px(if short { 24. } else { 28. }))
-                        .px(px(10.))
+                        // Legends start under the panel title (16 px); the loss toggles pull their
+                        // 6 px hover pads back out so their swatches land there too.
+                        .px(px(16.))
                         .pt(px(if short { 4. } else { 6. }))
                         .flex()
                         .items_center()
@@ -978,6 +997,7 @@ impl FoloApp {
         );
         let loss_legend = div()
             .id("loss-ema")
+            .ml(px(-6.))
             .flex()
             .items_center()
             .gap(px(2.))
@@ -987,7 +1007,7 @@ impl FoloApp {
         let mut map_items = vec![
             crate::ui::legend_value(&t, "mAP50-95", t.chart_series[0], false, v(&d.map50_95, f3v))
                 .into_any_element(),
-            crate::ui::legend_value(&t, "mAP50", t.chart_series[1], false, v(&d.map50, f3v))
+            crate::ui::legend_value(&t, "mAP50", t.chart_series[1], true, v(&d.map50, f3v))
                 .into_any_element(),
         ];
         if let Some(b) = &r.best {

@@ -27,6 +27,12 @@ pub fn alpha(c: Hsla, a: f32) -> Hsla {
     Hsla { a, ..c }
 }
 
+/// `c` at `f` of its own opacity (for translucent tokens such as `line.*`, where [`alpha`] would
+/// replace their alpha and make them opaque).
+pub fn fade(c: Hsla, f: f32) -> Hsla {
+    Hsla { a: c.a * f, ..c }
+}
+
 /// Composite `top` over `base` (both may be translucent), for painting token overlays such as
 /// `bg_hover` where a solid colour is needed (canvas fills, rings over images).
 pub fn over(base: Hsla, top: Hsla) -> Hsla {
