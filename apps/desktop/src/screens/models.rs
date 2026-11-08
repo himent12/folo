@@ -629,8 +629,11 @@ impl FoloApp {
                 .iter()
                 .any(|k| self.focus.borrow().get(k.as_str()).is_some_and(|f| f.is_focused(window)))
         });
-        // A pin from another evaluation never applies here.
-        self.pr_focus.or(focused).or(self.pr_pin).filter(|c| ev.pr.iter().any(|p| p.class == *c))
+        // In keyboard mode the focused row wins over a hover left behind by the pointer (as in
+        // Playground and the inspector); moving the pointer hands it back. A pin from another
+        // evaluation never applies here.
+        let lead = if self.kb { focused.or(self.pr_focus) } else { self.pr_focus.or(focused) };
+        lead.or(self.pr_pin).filter(|c| ev.pr.iter().any(|p| p.class == *c))
     }
 
     fn pr_panel(
@@ -707,8 +710,16 @@ impl FoloApp {
                 let key = format!("pr-chip-{class}");
                 let on = iso == Some(class);
                 let pinned = self.pr_pin == Some(class);
+                let name = m.classes.get(class as usize).cloned().unwrap_or_default();
+                // A name the 68 px slot (54 px beside the pin) cuts short shows whole on hover and
+                // keyboard focus.
+                let long = name.chars().count() > if pinned { 7 } else { 9 };
+                let ring = self.ring(&self.fh(key.clone(), cx), window);
                 let el = div()
                     .id(SharedString::from(key.clone()))
+                    .relative()
+                    .when(long, |d| d.tooltip(crate::controls::tip(name.clone(), None)))
+                    .when(long && ring, |d| d.child(crate::controls::focus_tip(&t, name.clone(), 28.)))
                     .h(px(28.))
                     .px(px(8.))
                     .flex()
@@ -736,12 +747,22 @@ impl FoloApp {
                     .child(
                         // A known width (the legend row is 220 px: 14 swatch, 68 name, 70 P, 44 AP50
                         // and three 8 px gaps), so long class names end in "…" (GPUI truncates against
-                        // the pre-shrink width).
-                        text(ty::SM, t.text_secondary)
+                        // the pre-shrink width). A pinned class ends its slot with a pin, the columns
+                        // after it unmoved.
+                        div()
                             .w(px(68.))
                             .flex_none()
-                            .truncate()
-                            .child(m.classes.get(class as usize).cloned().unwrap_or_default()),
+                            .flex()
+                            .items_center()
+                            .gap(px(2.))
+                            .child(
+                                text(ty::SM, if pinned { t.text_primary } else { t.text_secondary })
+                                    .w(px(if pinned { 54. } else { 68. }))
+                                    .flex_none()
+                                    .truncate()
+                                    .child(name),
+                            )
+                            .when(pinned, |d| d.child(icon("icons/pin.svg", 12., t.text_secondary))),
                     )
                     .child(
                         text(ty::SM, t.text_secondary)
@@ -819,7 +840,13 @@ impl FoloApp {
         let pr_hint = if self.kb && focused("pr-chart") {
             "← → inspect recall · Esc clears"
         } else if self.kb && row_focused() {
-            "Enter pins the class"
+            if self.pr_pin.is_some() {
+                "Enter pins the class (again to unpin)"
+            } else {
+                "Enter pins the class"
+            }
+        } else if self.pr_pin.is_some() {
+            "Pinned: click the class again to unpin."
         } else {
             "Hover a class to isolate it; click to pin."
         };
