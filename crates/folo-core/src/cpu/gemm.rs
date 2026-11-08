@@ -105,20 +105,13 @@ fn kernel() -> Kernel {
                 return kernel_avx2_entry as Kernel;
             }
         }
-        // wasm has no runtime feature detection: a module built with simd128 (scripts/build-wasm.sh) uses
-        // it unconditionally, as every current browser supports it.
-        #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-        {
-            return kernel_simd128 as Kernel;
-        }
-        #[allow(unreachable_code)]
-        {
-            kernel_generic as Kernel
-        }
+        kernel_generic as Kernel
     })
 }
 
-/// True if the wasm SIMD128 micro-kernel is in use (a wasm build with `+simd128`).
+/// True in a wasm build with SIMD128 (`+simd128`, as scripts/build-wasm.sh builds): LLVM vectorises
+/// the portable micro-kernel to it. A hand-written SIMD128 kernel measured the same (~20 GFLOP/s on one thread), so
+/// there is none.
 pub fn uses_simd128() -> bool {
     cfg!(all(target_arch = "wasm32", target_feature = "simd128"))
 }
@@ -268,82 +261,6 @@ unsafe fn kernel_avx2(
             }
             for i in 0..mr {
                 for j in 0..nr {
-                    let p = c.add(i * ldc + j);
-                    *p = if acc { *p + tmp[i * NR + j] } else { tmp[i * NR + j] };
-                }
-            }
-        }
-    }
-}
-
-/// wasm SIMD128 6x16 micro-kernel. Browsers run wasm on 16 vector registers, so the 6x16 block is done as
-/// two 6x8 halves (12 `f32x4` accumulators, 2 for B, 1 broadcast of A each) over the same L1-resident A
-/// panel instead of 24 accumulators that would spill. Base SIMD128 has no FMA: multiply, then add.
-///
-/// # Safety
-/// As [`kernel_generic`].
-#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-#[allow(clippy::too_many_arguments)]
-unsafe fn kernel_simd128(
-    kc: usize,
-    a: *const f32,
-    b: *const f32,
-    c: *mut f32,
-    ldc: usize,
-    mr: usize,
-    nr: usize,
-    acc: bool,
-) {
-    use std::arch::wasm32::*;
-    let mut tmp = [0f32; MR * NR];
-    let full = mr == MR && nr == NR;
-    for half in 0..2 {
-        let col = half * 8;
-        if col >= nr {
-            break;
-        }
-        let z = f32x4_splat(0.0);
-        let mut r = [[z; 2]; MR];
-        // SAFETY: the caller guarantees kc * MR floats at `a` and kc * NR at `b`; `col + 8 <= NR`.
-        unsafe {
-            let mut ap = a;
-            let mut bp = b.add(col);
-            for _ in 0..kc {
-                let b0 = v128_load(bp as *const v128);
-                let b1 = v128_load(bp.add(4) as *const v128);
-                for (i, ri) in r.iter_mut().enumerate() {
-                    let ai = f32x4_splat(*ap.add(i));
-                    ri[0] = f32x4_add(ri[0], f32x4_mul(ai, b0));
-                    ri[1] = f32x4_add(ri[1], f32x4_mul(ai, b1));
-                }
-                ap = ap.add(MR);
-                bp = bp.add(NR);
-            }
-            if full {
-                for (i, ri) in r.iter().enumerate() {
-                    let cp = c.add(i * ldc + col) as *mut v128;
-                    let cq = c.add(i * ldc + col + 4) as *mut v128;
-                    if acc {
-                        v128_store(cp, f32x4_add(v128_load(cp), ri[0]));
-                        v128_store(cq, f32x4_add(v128_load(cq), ri[1]));
-                    } else {
-                        v128_store(cp, ri[0]);
-                        v128_store(cq, ri[1]);
-                    }
-                }
-            } else {
-                for (i, ri) in r.iter().enumerate() {
-                    v128_store(tmp.as_mut_ptr().add(i * NR + col) as *mut v128, ri[0]);
-                    v128_store(tmp.as_mut_ptr().add(i * NR + col + 4) as *mut v128, ri[1]);
-                }
-            }
-        }
-    }
-    if !full {
-        for i in 0..mr {
-            for j in 0..nr {
-                // SAFETY: (i, j) is inside the block the caller owns.
-                unsafe {
                     let p = c.add(i * ldc + j);
                     *p = if acc { *p + tmp[i * NR + j] } else { tmp[i * NR + j] };
                 }

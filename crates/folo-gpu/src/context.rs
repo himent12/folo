@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::task::{Context, Poll, Waker};
 
 use crate::error::{GpuError, Result};
@@ -308,7 +308,7 @@ impl GpuContext {
     /// error before that.
     pub fn shared() -> Result<Self> {
         #[cfg(not(target_arch = "wasm32"))]
-        let r = SHARED.get_or_init(|| Self::new().map_err(|e| e.to_string()));
+        let r = SHARED.get_or_init(|| Self::new().map_err(|e| e.reason()));
         #[cfg(target_arch = "wasm32")]
         let r = SHARED.get().ok_or(GpuError::Unsupported(NO_BLOCKING))?;
         r.clone().map_err(GpuError::NoAdapter)
@@ -319,7 +319,7 @@ impl GpuContext {
         if let Some(r) = SHARED.get() {
             return r.clone().map_err(GpuError::NoAdapter);
         }
-        let created = Self::new_async().await.map_err(|e| e.to_string());
+        let created = Self::new_async().await.map_err(|e| e.reason());
         // Two concurrent first calls may both create a device; the first one stored wins.
         SHARED.get_or_init(|| created).clone().map_err(GpuError::NoAdapter)
     }
@@ -645,14 +645,15 @@ impl GpuContext {
             self.encoder(&mut b).copy_buffer_to_buffer(buf, offset, staging.raw(), 0, len4);
         }
         self.flush();
-        let state: Arc<Mutex<MapState>> = Arc::default();
+        let state: Arc<MapSignal> = Arc::default();
         let sink = state.clone();
         staging.raw().slice(..len4).map_async(wgpu::MapMode::Read, move |r| {
-            let mut s = sink.lock().expect("map state lock");
+            let mut s = sink.state.lock().expect("map state lock");
             s.result = Some(r.map_err(|e| e.to_string()));
             if let Some(w) = s.waker.take() {
                 w.wake();
             }
+            sink.ready.notify_all();
         });
         Ok(Some(PendingRead { ctx: self.clone(), staging, len, len4, state }))
     }
@@ -865,27 +866,57 @@ struct MapState {
     waker: Option<Waker>,
 }
 
+/// [`MapState`] plus a condition variable for blocking waiters.
+#[derive(Default)]
+struct MapSignal {
+    state: Mutex<MapState>,
+    ready: Condvar,
+}
+
 /// A readback whose copy is submitted and whose staging buffer is being mapped ([`GpuContext::begin_read`]).
 pub(crate) struct PendingRead {
     ctx: GpuContext,
     staging: GpuBuffer,
     len: u64,
     len4: u64,
-    state: Arc<Mutex<MapState>>,
+    state: Arc<MapSignal>,
 }
 
 impl PendingRead {
     /// Waits for the map by blocking on the device (native targets).
+    ///
+    /// The callback can run on another thread: when several threads poll the device, the one that collected
+    /// the callbacks may still be running them after this thread's poll returned. So wait on the condition
+    /// variable, polling again now and then in case no other thread is.
+    #[cfg(not(target_arch = "wasm32"))]
     fn wait_blocking(&self) -> Result<()> {
         self.ctx.wait_idle()?;
-        match self.state.lock().expect("map state lock").result.take() {
+        let mut s = self.state.state.lock().expect("map state lock");
+        loop {
+            if let Some(r) = s.result.take() {
+                return r.map_err(GpuError::Map);
+            }
+            let (guard, timeout) = self
+                .state
+                .ready
+                .wait_timeout(s, std::time::Duration::from_millis(10))
+                .expect("map state lock");
+            s = guard;
+            if timeout.timed_out() && s.result.is_none() {
+                drop(s);
+                self.ctx.wait_idle()?;
+                s = self.state.state.lock().expect("map state lock");
+            }
+        }
+    }
+
+    /// In the browser the map callback only runs from the page's event loop, which a blocking call never gives
+    /// a turn.
+    #[cfg(target_arch = "wasm32")]
+    fn wait_blocking(&self) -> Result<()> {
+        match self.state.state.lock().expect("map state lock").result.take() {
             Some(r) => r.map_err(GpuError::Map),
-            // In the browser the callback only runs from the page's event loop, which a blocking call never
-            // gives a turn.
-            #[cfg(target_arch = "wasm32")]
             None => Err(GpuError::Unsupported(NO_BLOCKING)),
-            #[cfg(not(target_arch = "wasm32"))]
-            None => Err(GpuError::Map("map callback did not run".into())),
         }
     }
 
@@ -894,7 +925,7 @@ impl PendingRead {
     pub(crate) async fn wait(&self) -> Result<()> {
         #[cfg(not(target_arch = "wasm32"))]
         self.ctx.wait_idle()?;
-        MapWait { state: &self.state }.await.map_err(GpuError::Map)
+        MapWait { state: &self.state.state }.await.map_err(GpuError::Map)
     }
 
     /// Hands the mapped bytes to `f`, unmaps, and reports the errors wgpu captured meanwhile.

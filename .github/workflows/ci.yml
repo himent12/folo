@@ -68,7 +68,7 @@ jobs:
     runs-on: ${{ fromJSON(vars.RUNS_ON_LINUX || '"ubuntu-latest"') }}
     timeout-minutes: 30
     env:
-      # RUSTFLAGS replaces .cargo/config.toml's target flags, so SIMD128 (the CPU GEMM micro-kernel) is repeated here.
+      # RUSTFLAGS replaces .cargo/config.toml's target flags, so SIMD128 (docs/WASM.md) is repeated here.
       RUSTFLAGS: -D warnings -C target-feature=+simd128
     steps:
       - uses: actions/checkout@v4

@@ -73,8 +73,8 @@ Several `detect` calls may be in flight on one detector; each awaits its own rea
 ### `detector.info() → FoloDetectorInfo`
 `{ backend, device, adapter, fallback, simd128, threads, arch, imgsz, classes, modelId }`: `adapter` is the GPU
 adapter's name, or `null` when the browser does not disclose it (Chrome does not); `fallback` is why `auto` chose
-the CPU (`null` otherwise); `simd128` is whether the CPU GEMM uses the SIMD128 micro-kernel (always, in builds
-from the script); `threads` is 1 (see Limitations).
+the CPU (`null` otherwise); `simd128` is whether the module was built with SIMD128 (always, from the script);
+`threads` is 1 (see Limitations).
 
 ### Functions
 - `hasWebGpu()`: whether `navigator.gpu` exists. A `true` does not guarantee a usable device; `auto` checks that.
@@ -102,25 +102,36 @@ and reuse it per image: loading parses and fuses the model and, on WebGPU, compi
   pipeline creation). The kernels are the native WGSL unchanged; Chrome's compiler (Tint) is stricter than Naga in
   places (it rejects `-3.4028235e38` as out of `f32` range, so `softmax` spells `-f32::MAX` by its bits).
 - **CPU.** rayon runs on the calling thread on wasm (no threads without the `atomics` target feature), so the
-  parallel paths cost nothing extra. The GEMM behind matmul and conv2d has a wasm SIMD128 6×16 micro-kernel, done as
-  two 6×8 halves so the 12 `f32x4` accumulators fit the 16 registers engines map wasm onto (base SIMD128 has no
-  FMA). `.cargo/config.toml` enables `+simd128` for wasm32; every current browser supports it.
+  parallel paths need no separate code. `.cargo/config.toml` (and the build script, and CI) enable `+simd128` for
+  wasm32, which every current browser supports: LLVM vectorises the GEMM micro-kernel and the elementwise loops to
+  it, which makes folo-n 3.6x faster than a scalar build (491 vs 1758 ms at 640). A hand-written SIMD128 6×16 GEMM
+  kernel (two 6×8 halves to fit 16 vector registers, multiply + add since base SIMD128 has no FMA) measured the same
+  as the vectorised portable one (about 20 GFLOP/s on one thread, `cargo bench -p folo-core --bench gemm` built for
+  `wasm32-wasip1` and run under Node's WASI), so it was not kept.
 - **Timing.** `std::time::Instant` panics on `wasm32-unknown-unknown`; folo-vision and folo-wasm use `web-time`
   there.
 - **Memory.** `ModelFile::from_bytes` parses in place (no mmap in the browser); the wasm heap holds the file once
   while loading and the fused F32 model after.
 
 ## Performance
-folo-n at 640 (a 640 × 640 image, `rect` letterbox, conf 0.25), median of 20 calls after 3 warm-up calls, wall time
-around `await detect(...)` in headless Chrome 156 on Windows 11 (RTX 4080 SUPER, i7-14700KF):
+folo-n at 640 (a 640 × 640 image, `rect` letterbox, conf 0.25, a small shapes model), median of 20 calls after 3
+warm-up calls, wall time around `await detect(...)`, headless Chrome 156 on Windows 11 (RTX 4080 SUPER through
+Chrome's D3D12 Dawn, i7-14700KF), `crates/folo-wasm/demo/test.mjs`:
 
-| backend | median | min | native, same machine |
-|---|---|---|---|
-| WebGPU (Chrome's D3D12 Dawn) | see the PR | | 3.98 ms forward (Vulkan), docs/BENCHMARKS.md |
-| CPU (wasm SIMD128, 1 thread) | see the PR | | 43.7 ms YOLOv8n-shaped forward on 28 threads (docs/GPU.md) |
+| backend | median | min | split of one call | load |
+|---|---|---|---|---|
+| WebGPU | **14.1 ms** | 10.5 ms | preprocess 2.5, inference (forward, GPU decode, readback) 11.1, NMS 0.2 | 3.0–3.7 s |
+| CPU (wasm SIMD128, 1 thread) | **496 ms** | 475 ms | preprocess 6, inference 477, decode + NMS 8 | 60–80 ms |
+| CPU, scalar build (no SIMD128) | 1758 ms | 1682 ms | | |
 
-The first `detect` at a new input size compiles that size's pipelines (hundreds of ms on WebGPU); later calls reuse
-them.
+- The GPU was shared with other jobs (33–90% busy) during these runs. Natively under the same load, folo-vision's
+  end-to-end predict bench measured 12.7–26 ms median at batch 1 (8.69 ms on an idle GPU, docs/BENCHMARKS.md), so
+  the browser is close to native; the remaining gap is per-dispatch cost through the WebGPU JS API and the
+  `mapAsync` round trip.
+- **Load time on WebGPU is pipeline compilation**: the test pass compiles about 50 pipelines through Chrome's shader
+  compiler. The first call at 640 after loading took 26 ms, so the 64×64 test pass covers the kernels a real input
+  needs. The CPU loads in tens of milliseconds.
+- The CPU backend is single-threaded (see Limitations): about 13 GFLOP/s effective on folo-n's 6.5 GFLOPs.
 
 ## Demo and browser test
 `crates/folo-wasm/demo/index.html` is a standalone page (vanilla JS): pick a `.folo` model and an image, choose the

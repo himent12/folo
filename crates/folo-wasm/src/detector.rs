@@ -37,7 +37,7 @@ pub enum BackendChoice {
 pub enum Backend {
     /// folo-gpu on WebGPU (natively: Vulkan / DX12 / Metal).
     Webgpu,
-    /// folo-core's CPU kernels (wasm SIMD128 when built with it).
+    /// folo-core's CPU kernels (vectorised to wasm SIMD128 in browser builds).
     Cpu,
 }
 
@@ -93,7 +93,7 @@ pub struct DetectorInfo {
     pub adapter: Option<String>,
     /// Why `auto` fell back to the CPU, if it did.
     pub fallback: Option<String>,
-    /// Whether the CPU GEMM uses the wasm SIMD128 micro-kernel.
+    /// Whether the CPU kernels were built with wasm SIMD128.
     pub simd128: bool,
     /// CPU threads (1: the wasm build is single-threaded).
     pub threads: usize,

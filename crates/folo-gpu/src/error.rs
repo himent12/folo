@@ -40,6 +40,17 @@ pub enum GpuError {
     Limit(String),
 }
 
+impl GpuError {
+    /// The message without the variant's prefix for [`GpuError::NoAdapter`], so re-wrapping a stored
+    /// "no adapter" error (the shared context, `init`) does not repeat "no GPU adapter available".
+    pub(crate) fn reason(&self) -> String {
+        match self {
+            GpuError::NoAdapter(m) => m.clone(),
+            e => e.to_string(),
+        }
+    }
+}
+
 /// `Result` alias for `folo-gpu`.
 pub type Result<T> = std::result::Result<T, GpuError>;
 

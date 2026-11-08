@@ -170,7 +170,7 @@ The exact block definitions, layer tables, parameter names, head, loss, training
 ## folo-wasm — FOLO in the browser
 - `crates/folo-wasm` (wasm-bindgen) loads a `.folo` file from bytes and runs `folo_vision::Predictor`'s steps on
   WebGPU (folo-gpu's browser backend, async device creation and readback) or on folo-core's CPU kernels compiled to
-  wasm (single-threaded, SIMD128 GEMM micro-kernel). `detect` resolves to `/api/predict`'s response shape plus the
+  wasm (single-threaded, built with SIMD128). `detect` resolves to `/api/predict`'s response shape plus the
   backend, so Studio can run models in the page. `scripts/build-wasm.sh` builds it into `web/public/folo-wasm/`.
   JS API, build and limits: `docs/WASM.md`.
 

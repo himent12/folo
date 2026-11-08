@@ -5,7 +5,8 @@
 //   sh scripts/build-wasm.sh
 //   node crates/folo-wasm/demo/test.mjs --model shapes-n.folo --image img.jpg [--expect native.json] [--runs 20]
 //
-// Options: --conf 0.25   --imgsz <n>   --backends webgpu,cpu   --chrome <chrome executable>   --headed   --screenshots <dir>
+// Options: --conf 0.25   --imgsz <n>   --backends webgpu,cpu,auto   --chrome <chrome executable>
+//          --chrome-args="<extra Chrome flags>"   --headed   --screenshots <dir>
 // playwright-core comes from web/node_modules (`npm ci` in web/) or anywhere Node resolves it.
 import { createServer } from "node:http";
 import { createRequire } from "node:module";
@@ -14,9 +15,13 @@ import { extname, join, normalize, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
+// `--key value`, `--key=value` (needed when the value starts with `--`) or a bare `--flag`.
 const args = Object.fromEntries(
   process.argv.slice(2).reduce((acc, a, i, all) => {
-    if (a.startsWith("--")) acc.push([a.slice(2), all[i + 1] && !all[i + 1].startsWith("--") ? all[i + 1] : "true"]);
+    if (!a.startsWith("--")) return acc;
+    const eq = a.indexOf("=");
+    if (eq > 0) acc.push([a.slice(2, eq), a.slice(eq + 1)]);
+    else acc.push([a.slice(2), all[i + 1] && !all[i + 1].startsWith("--") ? all[i + 1] : "true"]);
     return acc;
   }, []),
 );
@@ -67,7 +72,8 @@ const base = `http://127.0.0.1:${server.address().port}`;
 const browser = await playwright.chromium.launch({
   executablePath: chrome,
   headless: args.headed !== "true",
-  args: ["--enable-unsafe-webgpu", "--enable-gpu", "--ignore-gpu-blocklist"],
+  args: ["--enable-unsafe-webgpu", "--enable-gpu", "--ignore-gpu-blocklist",
+    ...(args["chrome-args"] ? args["chrome-args"].split(" ") : [])],
 });
 
 function iou(a, b) {
@@ -139,7 +145,7 @@ for (const backend of backends) {
     timing_last: r.last.timing,
     hasWebGpu: await page.evaluate(() => window.foloDemo.hasWebGpu()),
   };
-  if (r.backend !== backend) { entry.error = `ran on ${r.backend}`; failed = true; }
+  if (backend !== "auto" && r.backend !== backend) { entry.error = `ran on ${r.backend}`; failed = true; }
   if (expected) {
     const problems = compare(r.last.boxes, expected);
     entry.matches_native = problems.length === 0;

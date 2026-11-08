@@ -70,7 +70,7 @@ impl std::fmt::Debug for GpuBackend {
 static INIT: OnceLock<std::result::Result<Device, String>> = OnceLock::new();
 
 fn register_shared(ctx: std::result::Result<GpuContext, GpuError>) -> std::result::Result<Device, String> {
-    let ctx = ctx.map_err(|e| e.to_string())?;
+    let ctx = ctx.map_err(|e| e.reason())?;
     let device = Device::Gpu(0);
     folo_core::backend::register_backend(device, Arc::new(GpuBackend::new(ctx, device)))
         .map_err(|e| e.to_string())?;
