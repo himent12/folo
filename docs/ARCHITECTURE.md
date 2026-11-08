@@ -70,7 +70,7 @@ training and evaluation pipeline, a server, a CLI and a web studio.
   CIoU box loss and DFL, weighted 7.5 / 0.5 / 1.5 by default.
 - **Box ops, NMS, metrics** work on plain slices so they are reusable everywhere: IoU / GIoU / DIoU / CIoU,
   xywh↔xyxy, class-aware batched NMS, COCO-style mAP@0.5 and mAP@0.5:0.95 (101-point interpolation), precision /
-  recall / F1 curves, confusion matrix.
+  recall / F1 curves, confusion matrix. `docs/METRICS.md` defines exactly how mAP is computed.
 - **Trainer**: epochs, AMP-free f32 training on CPU or GPU, warmup, cosine LR, EMA, gradient clipping, validation every
   epoch, best/last checkpoints, metrics streamed as events (consumed by the CLI's progress UI, `--json` lines and the
   server's SSE).

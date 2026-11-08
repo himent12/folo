@@ -12,6 +12,13 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
-folo-core.workspace = true
-folo-nn.workspace = true
-folo-data.workspace = true
+# folo-core / folo-nn / folo-data come back when the detector and trainer land; the detection math is tensor-free.
+rayon.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[[bench]]
+name = "post"
+harness = false
