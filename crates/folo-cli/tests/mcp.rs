@@ -251,6 +251,7 @@ fn check_tools(c: &mut Client, expected: &[&str]) -> std::collections::HashMap<S
         assert!(input.is_valid(&json!({ "dataset_id": "ds_1", "epochs": 2 })));
         assert!(input.is_valid(&json!({ "resume_run_id": "run_1" })));
         assert!(!input.is_valid(&json!({ "epochs": 2 })));
+        assert!(!input.is_valid(&json!({ "resume_run_id": null })));
         assert!(train["inputSchema"]["properties"]["resume_run_id"].is_object());
         assert_eq!(train["annotations"]["readOnlyHint"], false);
     }

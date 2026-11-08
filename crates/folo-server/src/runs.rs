@@ -871,6 +871,53 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A create or resume that passed `check_open` before the shutdown and reaches `enqueue` after it: the run is
+    /// marked stopped instead of queued, and no worker starts.
+    #[test]
+    fn enqueue_after_shutdown_refuses_and_stops_the_run() {
+        let dir = std::env::temp_dir().join(format!("folo-runs-late-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let runs = Runs::open(dir.clone());
+        let config: TrainConfig = serde_json::from_str(r#"{"dataset_id":"ds_1","name":"late"}"#).unwrap();
+        let run = Run {
+            id: "run_late".into(),
+            name: config.name.clone(),
+            status: RunStatus::Queued,
+            epochs: config.epochs,
+            config,
+            created: now(),
+            started: None,
+            finished: None,
+            epoch: 0,
+            step: 0,
+            steps_per_epoch: 0,
+            eta_s: None,
+            best: None,
+            device: "cpu".into(),
+            model_id: None,
+            error: None,
+        };
+        let dataset = DatasetRef {
+            id: "ds_1".into(),
+            name: "d".into(),
+            path: "nowhere".into(),
+            format: DatasetFormat::Yolo,
+        };
+        let file = RunFile { run, dataset, weights: None, val_offset: 0, epochs_done: 0, last_metrics: None };
+        std::fs::create_dir_all(dir.join("run_late")).unwrap();
+        let entry = Arc::new(RunEntry::new("run_late".into(), dir.join("run_late"), file));
+        runs.list.write().unwrap().push(entry.clone());
+
+        runs.shutdown(None);
+        let e = runs.enqueue(&entry).unwrap_err();
+        assert_eq!((e.status, e.body.code.as_str()), (StatusCode::SERVICE_UNAVAILABLE, "shutting_down"));
+        assert_eq!(entry.run().status, RunStatus::Stopped);
+        assert!(runs.queue.lock().unwrap().runs.is_empty());
+        assert!(!*runs.worker.lock().unwrap(), "no worker for a refused run");
+        assert!(runs.logs("run_late", 10).unwrap().iter().any(|l| l.message.contains("not queued")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn run_model_ids() {
         assert_eq!(run_model_id("run_7d1e", false), "m_7d1e");

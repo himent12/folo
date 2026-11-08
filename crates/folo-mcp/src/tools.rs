@@ -64,7 +64,9 @@ fn train_input() -> Arc<JsonObject> {
             s.remove("required");
         }
     }
-    s.insert("anyOf".into(), json!([{ "required": ["dataset_id"] }, { "required": ["resume_run_id"] }]));
+    let resume =
+        json!({ "required": ["resume_run_id"], "properties": { "resume_run_id": { "type": "string" } } });
+    s.insert("anyOf".into(), json!([{ "required": ["dataset_id"] }, resume]));
     Arc::new(s)
 }
 

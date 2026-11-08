@@ -116,41 +116,7 @@ impl Inner {
     /// re-reading it every second. URIs without an event stream (stores without one, like the `folo serve`
     /// proxy, or once a stream closes) are polled.
     async fn follow(&self, uris: &[FoloUri]) -> Follow {
-        let flags = || Arc::new(uris.iter().map(|_| AtomicBool::new(false)).collect::<Vec<_>>());
-        // The guard exists before the first await, so a watcher cancelled while it subscribes still aborts the
-        // forwarders started so far.
-        let mut follow = Follow {
-            wake: Arc::new(tokio::sync::Notify::new()),
-            changed: flags(),
-            streamed: flags(),
-            tasks: Vec::new(),
-        };
-        for (i, uri) in uris.iter().enumerate() {
-            let (FoloUri::Run(id) | FoloUri::Metrics(id)) = uri else { continue };
-            let id = id.clone();
-            let Ok(sub) = self.blocking(move |s| s.subscribe(&id)).await else { continue };
-            follow.streamed[i].store(true, Ordering::Relaxed);
-            let (wake, changed, streamed) =
-                (follow.wake.clone(), follow.changed.clone(), follow.streamed.clone());
-            let mut events = sub.events;
-            let task = tokio::spawn(async move {
-                loop {
-                    // Lagging only means several events were missed: the snapshot is re-read anyway.
-                    let closed =
-                        matches!(events.recv().await, Err(tokio::sync::broadcast::error::RecvError::Closed));
-                    if closed {
-                        streamed[i].store(false, Ordering::Relaxed);
-                    }
-                    changed[i].store(true, Ordering::Relaxed);
-                    wake.notify_one();
-                    if closed {
-                        return;
-                    }
-                }
-            });
-            follow.tasks.push(task.abort_handle());
-        }
-        follow
+        follow_with(uris, |id| self.blocking(move |s| s.subscribe(&id))).await
     }
 
     /// Calls `notify` whenever one of `uris` changes, until it returns false: when the store reports one of
@@ -209,6 +175,49 @@ impl Inner {
             }
         }
     }
+}
+
+/// [`Inner::follow`] with the store's `subscribe` passed in (tests pause it).
+async fn follow_with<F, Fut>(uris: &[FoloUri], mut subscribe: F) -> Follow
+where
+    F: FnMut(String) -> Fut,
+    Fut: std::future::Future<Output = Result<folo_server::store::Subscription, Error>>,
+{
+    let flags = || Arc::new(uris.iter().map(|_| AtomicBool::new(false)).collect::<Vec<_>>());
+    // The guard exists before the first await, so a watcher cancelled while it subscribes still aborts the
+    // forwarders started so far.
+    let mut follow = Follow {
+        wake: Arc::new(tokio::sync::Notify::new()),
+        changed: flags(),
+        streamed: flags(),
+        tasks: Vec::new(),
+    };
+    for (i, uri) in uris.iter().enumerate() {
+        let (FoloUri::Run(id) | FoloUri::Metrics(id)) = uri else { continue };
+        let id = id.clone();
+        let Ok(sub) = subscribe(id).await else { continue };
+        follow.streamed[i].store(true, Ordering::Relaxed);
+        let (wake, changed, streamed) =
+            (follow.wake.clone(), follow.changed.clone(), follow.streamed.clone());
+        let mut events = sub.events;
+        let task = tokio::spawn(async move {
+            loop {
+                // Lagging only means several events were missed: the snapshot is re-read anyway.
+                let closed =
+                    matches!(events.recv().await, Err(tokio::sync::broadcast::error::RecvError::Closed));
+                if closed {
+                    streamed[i].store(false, Ordering::Relaxed);
+                }
+                changed[i].store(true, Ordering::Relaxed);
+                wake.notify_one();
+                if closed {
+                    return;
+                }
+            }
+        });
+        follow.tasks.push(task.abort_handle());
+    }
+    follow
 }
 
 /// The live-event side of [`Inner::watch`]: per URI, whether an event arrived since the last check and whether
@@ -611,6 +620,40 @@ impl ServerHandler for FoloMcp {
 mod tests {
     use super::*;
     use folo_server::MockStore;
+
+    /// Cancelled while it waits for its second subscription, `follow` still ends the first forwarder.
+    #[tokio::test]
+    async fn cancelled_setup_releases_its_event_streams() {
+        let (tx, _) = tokio::sync::broadcast::channel::<folo_api::RunEvent>(4);
+        let tx2 = tx.clone();
+        let uris = vec![FoloUri::Run("a".into()), FoloUri::Run("b".into())];
+        let setup = tokio::spawn(async move {
+            follow_with(&uris, |id| {
+                let events = tx2.subscribe();
+                async move {
+                    if id == "b" {
+                        std::future::pending::<()>().await;
+                    }
+                    let initial = folo_api::StatusEvent { status: folo_api::RunStatus::Running, error: None };
+                    Ok(folo_server::store::Subscription { initial, events })
+                }
+            })
+            .await
+        });
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        // One receiver held by the running forwarder of "a", one by the pending subscribe of "b".
+        while tx.receiver_count() < 2 {
+            assert!(tokio::time::Instant::now() < deadline, "setup never subscribed");
+            tokio::task::yield_now().await;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        setup.abort();
+        assert!(setup.await.is_err_and(|e| e.is_cancelled()));
+        while tx.receiver_count() > 0 {
+            assert!(tokio::time::Instant::now() < deadline, "the first forwarder leaked");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
 
     #[tokio::test]
     async fn dropped_watchers_release_their_event_streams() {
