@@ -304,6 +304,12 @@ impl Backend for HttpBackend {
                 reader,
                 || !cancel.load(std::sync::atomic::Ordering::Relaxed),
                 |name, data| match RunEvent::from_sse(name, data) {
+                    // A finished run's stream stays open on the server; once its final status is
+                    // delivered there's nothing more to read.
+                    Some(Ok(RunEvent::Status(s))) if !s.status.is_active() => {
+                        let _ = tx.send(RunEvent::Status(s));
+                        false
+                    }
                     Some(Ok(ev)) => tx.send(ev).is_ok(),
                     // Unknown event types are skipped; malformed data too (the stream goes on).
                     _ => true,
@@ -461,8 +467,8 @@ pub fn spawn_mock_server(timeout: Duration) -> Result<ServerProcess, String> {
 mod tests {
     use super::*;
 
-    /// A server that accepts the event stream request, then only ever sends keep-alives.
-    fn keepalive_server(write_failed: std::sync::mpsc::Sender<()>) -> String {
+    /// A server that accepts the event stream request, sends `prelude`, then only keep-alives.
+    fn keepalive_server(prelude: &'static [u8], write_failed: std::sync::mpsc::Sender<()>) -> String {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
@@ -473,6 +479,10 @@ mod tests {
             let _ = sock.write_all(
                 b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n",
             );
+            if !prelude.is_empty() {
+                let frame = [format!("{:x}\r\n", prelude.len()).as_bytes(), prelude, b"\r\n"].concat();
+                let _ = sock.write_all(&frame);
+            }
             loop {
                 std::thread::sleep(Duration::from_millis(30));
                 let chunk = b": keep-alive\n\n";
@@ -489,7 +499,7 @@ mod tests {
     #[test]
     fn dropping_a_subscription_closes_a_quiet_stream() {
         let (tx, failed) = std::sync::mpsc::channel();
-        let base = keepalive_server(tx);
+        let base = keepalive_server(b"", tx);
         let sub = HttpBackend::new(&base).events("run_x").expect("stream opens");
         // Still open while subscribed.
         assert!(failed.recv_timeout(Duration::from_millis(300)).is_err());
@@ -499,6 +509,19 @@ mod tests {
             failed.recv_timeout(Duration::from_secs(5)).is_ok(),
             "reader thread outlived its subscription"
         );
+    }
+
+    #[test]
+    fn a_finished_run_closes_its_stream() {
+        let (tx, failed) = std::sync::mpsc::channel();
+        let base =
+            keepalive_server(b"event: status\ndata: {\"status\":\"completed\",\"error\":null}\n\n", tx);
+        let sub = HttpBackend::new(&base).events("run_x").expect("stream opens");
+        let first = sub.recv_timeout(Duration::from_secs(2)).expect("status delivered");
+        assert!(matches!(first, RunEvent::Status(s) if s.status == RunStatus::Completed));
+        // Still subscribed, yet the reader is done: the socket closes and the server's writes fail.
+        assert!(failed.recv_timeout(Duration::from_secs(5)).is_ok(), "reader kept a finished stream open");
+        drop(sub);
     }
 
     #[test]

@@ -330,6 +330,11 @@ impl Store {
         self.prune_pending(run_id);
     }
 
+    /// Forget live events buffered for histories still loading (a new data source: ids may repeat).
+    pub fn clear_pending(&mut self) {
+        self.pending.clear();
+    }
+
     fn prune_pending(&mut self, run_id: &str) {
         let waiting = |l: Option<bool>| l.unwrap_or(false);
         let data_loading = waiting(self.run_data.get(run_id).map(|l| matches!(l, Load::Loading)));
@@ -452,6 +457,37 @@ mod tests {
         assert_eq!(store.run_data[id].ready().unwrap().derived().loss[3].len(), before + 1);
         store.apply(id, RunEvent::Status(StatusEvent { status: RunStatus::Completed, error: None }));
         assert_eq!(store.run(id).unwrap().status, RunStatus::Completed);
+    }
+
+    #[test]
+    fn buffered_events_do_not_cross_sources() {
+        let api = MockBackend::new(4200, true);
+        let mut store = Store::new(Arc::new(MockBackend::new(4200, true)));
+        store.runs = api.runs().into();
+        let id = "run_a19f";
+        store.run_data.insert(id.into(), Load::Loading);
+        store.logs.insert(id.into(), Load::Loading);
+        let history = api.metrics(id).unwrap();
+        let mut from_a = *history.steps.last().unwrap();
+        from_a.step += 1;
+        store.apply(id, RunEvent::Step(from_a));
+        store.apply(
+            id,
+            RunEvent::Log(LogLine {
+                t: "2026-11-08T07:30:00Z".into(),
+                level: LogLevel::Info,
+                message: "a".into(),
+            }),
+        );
+        // Switch to source B, which has a run with the same id and its own history.
+        store.clear_pending();
+        store.run_data.insert(id.into(), Load::Loading);
+        store.logs.insert(id.into(), Load::Loading);
+        store.install_run_data(id, Ok(RunData::new(history.clone(), 100)));
+        store.install_logs(id, Ok(vec![]));
+        let last = store.run_data[id].ready().unwrap().last_step().unwrap().step;
+        assert_eq!(last, history.steps.last().unwrap().step, "source A's step leaked into B");
+        assert!(store.logs[id].ready().unwrap().is_empty(), "source A's log leaked into B");
     }
 
     #[test]

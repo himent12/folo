@@ -52,7 +52,9 @@ impl FoloApp {
             cx,
             Rc::new(|this, i, _, cx| {
                 let mode = if i == 0 { ServerMode::Mock } else { ServerMode::Local };
-                if mode != this.server_mode {
+                // While a connection attempt is pending the installed mode is still the old one, so
+                // choosing the demo must go through even if it "already" is the demo: that cancels it.
+                if mode != this.server_mode || (mode == ServerMode::Mock && this.connecting.is_some()) {
                     this.switch_source(mode, cx);
                 }
             }),

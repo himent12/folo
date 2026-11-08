@@ -758,6 +758,43 @@ impl FoloApp {
         }
     }
 
+    /// A live stream dropped out. Open a new one first, then reload the run's history: events from
+    /// the new stream buffer while the history loads and merge into it, so nothing in between is
+    /// lost. (If the stream can't be reopened, the run list refresh sorts out its status.)
+    fn resubscribe(&mut self, id: String, cx: &mut Context<Self>) {
+        if !self.subscribing.insert(id.clone()) {
+            return;
+        }
+        let api = self.store.api.clone();
+        let generation = self.backend_gen;
+        cx.spawn(async move |this, cx| {
+            let rid = id.clone();
+            let sub = cx.background_executor().spawn(async move { api.events(&rid) }).await;
+            this.update(cx, |this, cx| {
+                if this.backend_gen != generation {
+                    return;
+                }
+                this.subscribing.remove(&id);
+                let Ok(sub) = sub else {
+                    this.refresh_runs(cx);
+                    return;
+                };
+                this.subscriptions.insert(id.clone(), sub);
+                let had_data = this.store.run_data.remove(&id).is_some();
+                let had_logs = this.store.logs.remove(&id).is_some();
+                if had_data {
+                    this.ensure_run_data(&id, cx);
+                }
+                if had_logs {
+                    this.ensure_logs(&id, cx);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Reload the run list in place (no loading state) and subscribe to whatever is active.
     fn refresh_runs(&mut self, cx: &mut Context<Self>) {
         self.fetch(
@@ -816,12 +853,8 @@ impl FoloApp {
                         for id in ended {
                             this.subscriptions.remove(&id);
                         }
-                        if !dropped.is_empty() {
-                            for id in &dropped {
-                                this.store.run_data.remove(id);
-                                this.store.logs.remove(id);
-                            }
-                            this.refresh_runs(cx);
+                        for id in dropped {
+                            this.resubscribe(id, cx);
                         }
                         for (id, status) in finished {
                             let name = this.store.run(&id).map(|r| r.name.clone()).unwrap_or(id.clone());
@@ -2046,14 +2079,20 @@ impl FoloApp {
         self.server_mode = mode;
         self.subscriptions.clear();
         self.subscribing.clear();
-        // Ids are only unique per server: cached pixels (and failures) belong to the old one.
-        for img in self.store.images_px.clear() {
-            cx.drop_image(img, None);
-        }
+        self.store.clear_pending();
+        // Ids are only unique per server: cached pixels (and failures) belong to the old one. The
+        // textures are freed after this update, when no window is mid-draw, so every window's atlas
+        // is reached (this often runs inside a click handler).
+        let mut textures = self.store.images_px.clear();
+        textures.extend(self.play_image.take().map(|p| p.image));
+        cx.defer(move |cx| {
+            for img in textures {
+                cx.drop_image(img, None);
+            }
+        });
         self.connecting = None;
         self.hold_loading = false;
         self.store.gpu_util.clear();
-        self.play_image = None;
         self.play_pred = Load::Idle;
         self.play_model = None;
         self.retry_all(cx);
