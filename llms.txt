@@ -1,21 +1,84 @@
 # FOLO
-> FOLO Only Looks Once: a from-scratch Rust vision framework (tensors, autograd, CPU + wgpu GPU kernels, a YOLO-style
-> detector, training/eval/export), a CLI (`folo`, every command supports --json), an HTTP API and the FOLO Studio web app.
+> FOLO Only Looks Once: a from-scratch Rust vision framework. It has its own tensors, autograd, CPU kernels and
+> wgpu/WGSL GPU kernels, a YOLO-style detector (folo-n/s/m/l/x), and training, evaluation and export. It ships one
+> `folo` CLI (every command supports `--json`, with stable exit codes), an HTTP + SSE API (`folo serve`), an MCP
+> server for agents (`folo mcp`), the FOLO Studio web app, the FOLO Desktop native app, and in-browser inference
+> (wasm + WebGPU). Status: v0.1, early. No pretrained weights, no ONNX export, no published release yet (build from
+> source).
 
-- [Agent rules](AGENTS.md)
-- [Architecture](docs/ARCHITECTURE.md)
-- [Detector spec: model, loss, training recipe](docs/MODEL.md)
-- [HTTP API](docs/API.md)
-- [MCP server for agents](docs/MCP.md): `folo mcp [--data-dir D] [--device auto] [--mock] [--read-only] [--confine] [--server URL]`,
-  stdio, MCP 2026-07-28 and 2025-11-25. 16 tools (folo_info, list_datasets, get_dataset, list_dataset_images,
-  register_dataset, create_synthetic_dataset, list_models, train, run_status, list_runs, stop_run, val, predict,
-  predict_batch, export, compare_runs) with JSON Schemas, `folo://` resources (dataset images as blobs, subscribable
-  runs and metrics, sample grids, docs), prompts train_on_folder and diagnose_run. Tool failures are `isError`
-  results whose text is `{code, message, hint}`. The default embedded store trains, evaluates, predicts and
-  exports on the real engine (runs persist under the data dir and resume with `train {resume_run_id}`); `--mock`
-  simulates everything. Setup for Claude Code / Codex: README.md, "Use FOLO from Claude Code / Codex"
-- [Agent cookbook](docs/AGENT_COOKBOOK.md): short recipes as MCP tool calls and as `folo ... --json` commands
-  (train on a folder of images, evaluate and compare runs, find label problems, export and run inference,
-  script FOLO with --json)
-- [CLI conventions, `folo describe --json`](docs/CLI.md) (its `mcp_tools` lists every MCP tool with its schemas)
-- [Roadmap](docs/ROADMAP.md)
+Fastest path for an agent:
+- **MCP:** `folo mcp --data-dir DIR` (stdio). It has 16 tools: folo_info, list_datasets, get_dataset,
+  list_dataset_images, register_dataset, create_synthetic_dataset, list_models, train, run_status, list_runs,
+  stop_run, val, predict, predict_batch, export and compare_runs.
+- **CLI:** `folo <command> --json`. stdout is then JSON Lines only. Errors end with
+  `{"error":{"code","message","hint"}}`. Exit codes: 0 ok, 1 runtime, 2 usage, 3 not found, 4 not implemented.
+- **Discovery:** `folo describe --json` prints every command, argument and default, plus every MCP tool's input and
+  output schemas.
+- **From a checkout:** `cargo folo ...` (an alias for `cargo run --release -p folo-cli -- ...`).
+
+## Start here
+- [README](README.md): the pitch, benchmark headline vs Ultralytics yolo26n, 60-second quickstart, Studio and
+  Desktop, agent setup (Claude Code / Codex / .mcp.json), architecture at a glance, project status
+- [Quickstart](docs/QUICKSTART.md): the longer walkthrough. It covers building, synthetic data, training on your
+  own YOLO or COCO folder, dataset checks, fine-tuning from a .folo file, resume, val, predict, export, Studio,
+  in-browser inference and troubleshooting
+- [Agent cookbook](docs/AGENT_COOKBOOK.md): recipes in two forms, MCP tool calls and `folo ... --json`. They cover
+  training on a folder, comparing runs, finding label problems, export and inference, scripting with --json, and
+  sharing runs with Studio
+- [MCP server](docs/MCP.md): the `folo mcp` contract. Flags are `[--data-dir D] [--device auto|cpu|gpu:N] [--mock]
+  [--read-only] [--confine] [--server URL]`; it speaks MCP 2026-07-28 and 2025-11-25. It documents the tools with
+  their JSON Schemas, the `folo://` resources (dataset images, subscribable runs and metrics, sample grids, docs),
+  the prompts train_on_folder and diagnose_run, and the errors: `isError` results whose text is
+  `{code, message, hint}`
+- [CLI](docs/CLI.md): every `folo` command (serve, describe, doctor, train, val, predict, export, dataset
+  synth|stats|check|convert, mcp), its flags and its --json records, plus the error and exit-code conventions
+
+## Reference
+- [HTTP API](docs/API.md): the HTTP + SSE contract of `folo serve`, used by Studio, Desktop and `folo mcp --server`.
+  It covers datasets, models (weights download), runs (live events), predict, val, export, and real vs mock mode
+- [Architecture](docs/ARCHITECTURE.md): the crates (folo-core, folo-gpu, folo-nn, folo-data, folo-vision,
+  folo-api, folo-server, folo-mcp, folo-cli, folo-wasm) and how they fit together, with the backend contract
+- [Detector spec](docs/MODEL.md): the normative spec of folo-n/s/m/l/x. It covers the blocks, the head, the loss,
+  the task-aligned assigner, the training recipe and the inference path
+- [Data](docs/DATA.md): YOLO and COCO detection rules, label parsing, robustness, augmentation, the data loader,
+  dataset checks and conversion
+- [Metrics](docs/METRICS.md): how mAP, precision, recall and the confusion matrix are computed (pycocotools parity)
+- [NN](docs/NN.md): modules, init, optimizers (SGD, AdamW), LR schedules, EMA, and `.folo` IO
+- [File format](docs/FORMAT.md): `.folo` weights and checkpoints (safetensors-compatible) and its metadata
+- [GPU](docs/GPU.md): the wgpu backend, buffer pool and WGSL kernels, adapter selection (`FOLO_GPU_ADAPTER`,
+  `FOLO_GPU_BACKEND`) and testing
+- [In the browser](docs/WASM.md): folo-wasm. It covers the build (`scripts/build-wasm.sh`), the JS API
+  (`FoloDetector.load` / `detect`, the /api/predict result shape), WebGPU vs wasm-CPU performance and the browser
+  test
+- [Benchmarks](docs/BENCHMARKS.md): folo-n/s vs Ultralytics yolo26n/s/m on an RTX 4080 SUPER (GPU forward, end to
+  end, CPU, training step, memory), with the method, raw numbers and next optimisations. Scripts and raw JSON are
+  in `bench/baselines/`
+
+## Examples
+- [Shapes](examples/shapes/README.md): the convergence gate (folo-n on synthetic shapes at 320 px). It has the
+  commands and per-epoch results on CPU (72 min) and GPU (169 s)
+- [R6](examples/r6/README.md): folo-n trained from scratch on real gameplay footage at 640 px. It has the commands,
+  the training curve, test and held-out results, and prediction images
+
+## Apps
+- [FOLO Studio](web/README.md): the web app (Svelte 5 + TypeScript + Vite). It covers the dev server, checks,
+  tests, screenshots (`npm run shoot`) and data sources
+- [FOLO Desktop](apps/desktop/README.md): the native GPUI app. It covers running it, connecting to `folo serve`,
+  `--mock`, `--scenario`, layout and screenshots
+- [Design system](design/README.md): the shared design tokens (`design/tokens.json`) both apps generate their
+  themes from
+- UI hill-climb docs, for UI work only:
+  - Studio: [direction](web/DESIGN_DIRECTION.md), [rubric](web/REVIEW_RUBRIC.md), [log](web/HILLCLIMB.md)
+  - Desktop: [direction](apps/desktop/DIRECTION.md), [rubric](apps/desktop/REVIEW_RUBRIC.md),
+    [log](apps/desktop/HILLCLIMB.md), [review brief](apps/desktop/tools/review-brief.md)
+
+## Project
+- [Agent rules](AGENTS.md): the ground rules for contributors (stable Rust, no ML frameworks, tests, docs), build
+  hygiene and the layout
+- [Process](docs/PROCESS.md): implement → PR → review → fix → merge, and the reviewer setup
+- [Roadmap](docs/ROADMAP.md): milestones, with what is merged, in progress and next
+- [Releasing](docs/RELEASING.md): versioning, the tag → draft release workflow, the install scripts
+  (`scripts/install.sh`, `scripts/install.ps1`) and the embedded Studio
+- [CI](docs/CI.md): the CI jobs and the self-hosted runners
+- [boat.dev](docs/BOAT.md): CPU-only cloud sandboxes for offloading Linux builds and CPU-heavy work
+- [Dogfood report 1](docs/DOGFOOD-1.md): a fresh agent's friction report from driving FOLO via the CLI and MCP

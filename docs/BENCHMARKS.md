@@ -166,7 +166,7 @@ model size.
 | 8 | CPU end to end latency, batch 1 | **24.8 ms** (Ultralytics default, 8 threads) | f32, with NMS | 26.9 ms (the predictor on a `u8` image, 28 threads, same contended run as row 7: behind) | |
 | 9 | Training compute, batch 16 (step only, no data loader) | **202 img/s** fp32 (TF32) / 252 img/s AMP | f32 | **219 img/s** (73.0 ms; beats; 143 before the loss moved to the GPU) | **109 img/s** (146.6 ms; yolo26s 105 fp32: beats; was 68) |
 | 10 | Trainer sustained images/s (epoch-2 wall), batch 16, mosaic, 8 workers, best of 3 | **199 img/s** fp32 / 224 img/s AMP | f32 | | |
-| 11 | Training peak GPU memory, batch 16, f32 | **4353 MiB** allocated (5148 MiB reserved); 2435 MiB AMP | f32 | **3619 MiB** (train step; beats) | **6686 MiB** (yolo26s train step 8245: beats) |
+| 11 | Training peak GPU memory, batch 16, f32 | **4353 MiB** allocated (5148 MiB reserved); 2435 MiB AMP | f32 | **3474 MiB** (train step; beats) | **6541 MiB** (yolo26s train step 8245: beats) |
 
 For yolo26s and yolo26m, read the same bars from the tables below. Rows 1, 3, 9 and 10 are the headline targets,
 because FOLO starts in f32. Row 1 is where a native engine should win by the widest margin, since the incumbent is

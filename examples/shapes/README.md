@@ -9,7 +9,7 @@ non-finite loss.
 ```sh
 # 1. The dataset: circle / square / triangle / star, 1 to 8 objects per image, seed 0 (about 3 s, ~60 MB of JPEGs).
 cargo run --release -p folo-data --example shapes -- D:/folo-data/shapes-smoke
-#    (`cargo folo dataset synth D:/folo-data/shapes-alt --images 2200 --val-frac 0.090909 --imgsz 320 #     --classes circle,square,triangle,star` is close, but its generator defaults keep 5 % empty images.)
+#    `cargo folo dataset synth D:/folo-data/shapes-alt --images 2200 --val-frac 0.090909 --imgsz 320 \n#      --classes circle,square,triangle,star` is close, but its generator defaults keep 5 % empty images.
 
 # 2. Train (MODEL.md's run; `auto` picks AdamW at lr0 0.00125, 125 batches = 32 optimizer steps per epoch,
 #    100 warmup steps, mosaic off for the last 5 epochs).
