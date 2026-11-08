@@ -215,61 +215,61 @@ against the `fp32-strict` rows. The default-fp32 rows are what users actually ge
 
 ### GPU forward pass (input already on the GPU, ms; img/s = pipelined throughput)
 
-| model | precision | batch | cudnn.benchmark | median | p90 | img/s | FOLO median |
-|---|---|---|---|---|---|---|---|
-| yolo26n | fp32 | 1 | off | 6.04 | 7.55 | 163 |  |
-| yolo26n | fp32 | 16 | off | 10.97 | 11.57 | 1444 |  |
-| yolo26n | fp32 | 1 | on | 6.00 | 7.41 | 152 |  |
-| yolo26n | fp32 | 16 | on | 11.02 | 11.54 | 1454 |  |
-| yolo26n | fp32-strict | 1 | off | 5.35 | 6.55 | 165 |  |
-| yolo26n | fp32-strict | 16 | off | 12.06 | 12.64 | 1334 |  |
-| yolo26n | fp32-strict | 1 | on | 4.95 | 5.80 | 179 |  |
-| yolo26n | fp32-strict | 16 | on | 12.02 | 12.65 | 1333 |  |
-| yolo26n | fp16 | 1 | off | 6.29 | 7.09 | 153 |  |
-| yolo26n | fp16 | 16 | off | 6.82 | 9.53 | 2370 |  |
-| yolo26n | fp16 | 1 | on | 6.25 | 7.00 | 140 |  |
-| yolo26n | fp16 | 16 | on | 6.81 | 7.72 | 2164 |  |
-| yolo26s | fp32 | 1 | off | 6.04 | 6.83 | 160 |  |
-| yolo26s | fp32 | 16 | off | 25.34 | 26.02 | 627 |  |
-| yolo26s | fp32 | 1 | on | 5.59 | 6.24 | 169 |  |
-| yolo26s | fp32 | 16 | on | 25.39 | 26.04 | 626 |  |
-| yolo26s | fp32-strict | 1 | off | 4.87 | 5.58 | 193 |  |
-| yolo26s | fp32-strict | 16 | off | 28.43 | 28.97 | 564 |  |
-| yolo26s | fp32-strict | 1 | on | 6.57 | 10.98 | 133 |  |
-| yolo26s | fp32-strict | 16 | on | 28.46 | 29.10 | 564 |  |
-| yolo26s | fp16 | 1 | off | 7.67 | 13.89 | 100 |  |
-| yolo26s | fp16 | 16 | off | 14.04 | 14.76 | 1159 |  |
-| yolo26s | fp16 | 1 | on | 7.47 | 11.65 | 108 |  |
-| yolo26s | fp16 | 16 | on | 14.03 | 14.80 | 1149 |  |
-| yolo26m | fp32 | 1 | off | 7.17 | 8.95 | 145 |  |
-| yolo26m | fp32 | 16 | off | 64.12 | 64.57 | 250 |  |
-| yolo26m | fp32 | 1 | on | 9.01 | 14.54 | 111 |  |
-| yolo26m | fp32 | 16 | on | 64.19 | 64.50 | 250 |  |
-| yolo26m | fp32-strict | 1 | off | 7.11 | 11.99 | 132 |  |
-| yolo26m | fp32-strict | 16 | off | 71.42 | 72.50 | 224 |  |
-| yolo26m | fp32-strict | 1 | on | 10.02 | 15.40 | 94 |  |
-| yolo26m | fp32-strict | 16 | on | 71.62 | 72.23 | 224 |  |
-| yolo26m | fp16 | 1 | off | 6.79 | 7.95 | 150 |  |
-| yolo26m | fp16 | 16 | off | 32.36 | 32.74 | 497 |  |
-| yolo26m | fp16 | 1 | on | 7.00 | 9.39 | 131 |  |
-| yolo26m | fp16 | 16 | on | 32.51 | 33.00 | 497 |  |
+| model | precision | batch | cudnn.benchmark | median | p90 | img/s | other GPU load | FOLO median |
+|---|---|---|---|---|---|---|---|---|
+| yolo26n | fp32 | 1 | off | 6.04 | 7.55 | 163 | none seen (legacy sampler) |  |
+| yolo26n | fp32 | 16 | off | 10.97 | 11.57 | 1444 | none seen (legacy sampler) |  |
+| yolo26n | fp32 | 1 | on | 6.00 | 7.41 | 152 | none seen (legacy sampler) |  |
+| yolo26n | fp32 | 16 | on | 11.02 | 11.54 | 1454 | none seen (legacy sampler) |  |
+| yolo26n | fp32-strict | 1 | off | 5.35 | 6.55 | 165 | none seen (legacy sampler) |  |
+| yolo26n | fp32-strict | 16 | off | 12.06 | 12.64 | 1334 | none seen (legacy sampler) |  |
+| yolo26n | fp32-strict | 1 | on | 4.95 | 5.80 | 179 | none seen (legacy sampler) |  |
+| yolo26n | fp32-strict | 16 | on | 12.02 | 12.65 | 1333 | none seen (legacy sampler) |  |
+| yolo26n | fp16 | 1 | off | 6.29 | 7.09 | 153 | none seen (legacy sampler) |  |
+| yolo26n | fp16 | 16 | off | 6.82 | 9.53 | 2370 | none seen (legacy sampler) |  |
+| yolo26n | fp16 | 1 | on | 6.25 | 7.00 | 140 | none seen (legacy sampler) |  |
+| yolo26n | fp16 | 16 | on | 6.81 | 7.72 | 2164 | none seen (legacy sampler) |  |
+| yolo26s | fp32 | 1 | off | 6.04 | 6.83 | 160 | none seen (legacy sampler) |  |
+| yolo26s | fp32 | 16 | off | 25.34 | 26.02 | 627 | none seen (legacy sampler) |  |
+| yolo26s | fp32 | 1 | on | 5.59 | 6.24 | 169 | none seen (legacy sampler) |  |
+| yolo26s | fp32 | 16 | on | 25.39 | 26.04 | 626 | none seen (legacy sampler) |  |
+| yolo26s | fp32-strict | 1 | off | 4.87 | 5.58 | 193 | none seen (legacy sampler) |  |
+| yolo26s | fp32-strict | 16 | off | 28.43 | 28.97 | 564 | none seen (legacy sampler) |  |
+| yolo26s | fp32-strict | 1 | on | 6.57 | 10.98 | 133 | none seen (legacy sampler) |  |
+| yolo26s | fp32-strict | 16 | on | 28.46 | 29.10 | 564 | none seen (legacy sampler) |  |
+| yolo26s | fp16 | 1 | off | 7.67 | 13.89 | 100 | none seen (legacy sampler) |  |
+| yolo26s | fp16 | 16 | off | 14.04 | 14.76 | 1159 | none seen (legacy sampler) |  |
+| yolo26s | fp16 | 1 | on | 7.47 | 11.65 | 108 | none seen (legacy sampler) |  |
+| yolo26s | fp16 | 16 | on | 14.03 | 14.80 | 1149 | none seen (legacy sampler) |  |
+| yolo26m | fp32 | 1 | off | 7.17 | 8.95 | 145 | none seen (legacy sampler) |  |
+| yolo26m | fp32 | 16 | off | 64.12 | 64.57 | 250 | none seen (legacy sampler) |  |
+| yolo26m | fp32 | 1 | on | 9.01 | 14.54 | 111 | none seen (legacy sampler) |  |
+| yolo26m | fp32 | 16 | on | 64.19 | 64.50 | 250 | none seen (legacy sampler) |  |
+| yolo26m | fp32-strict | 1 | off | 7.11 | 11.99 | 132 | none seen (legacy sampler) |  |
+| yolo26m | fp32-strict | 16 | off | 71.42 | 72.50 | 224 | none seen (legacy sampler) |  |
+| yolo26m | fp32-strict | 1 | on | 10.02 | 15.40 | 94 | none seen (legacy sampler) |  |
+| yolo26m | fp32-strict | 16 | on | 71.62 | 72.23 | 224 | none seen (legacy sampler) |  |
+| yolo26m | fp16 | 1 | off | 6.79 | 7.95 | 150 | none seen (legacy sampler) |  |
+| yolo26m | fp16 | 16 | off | 32.36 | 32.74 | 497 | none seen (legacy sampler) |  |
+| yolo26m | fp16 | 1 | on | 7.00 | 9.39 | 131 | none seen (legacy sampler) |  |
+| yolo26m | fp16 | 16 | on | 32.51 | 33.00 | 497 | none seen (legacy sampler) |  |
 
 ### GPU end to end (Ultralytics predictor, decoded uint8 BGR 640x640 in, boxes on the host, ms)
 
-| model | precision | batch | median | p90 | img/s | UL pre / inf / post per img | FOLO median |
-|---|---|---|---|---|---|---|---|
-| yolo26n | fp32 | 1 | 6.92 | 7.73 | 143 | 0.71 / 5.69 / 0.30 |  |
-| yolo26n | fp32 | 16 | 29.71 | 30.80 | 536 | 0.82 / 0.68 / 0.31 |  |
-| yolo26n | fp16 | 1 | 7.11 | 7.85 | 137 | 0.69 / 5.99 / 0.27 |  |
-| yolo26n | fp16 | 16 | 25.61 | 28.48 | 615 | 0.80 / 0.43 / 0.32 |  |
-| yolo26s | fp32 | 1 | 8.59 | 13.77 | 103 | 0.82 / 7.13 / 0.39 |  |
-| yolo26s | fp32 | 16 | 48.97 | 56.40 | 317 | 0.94 / 1.59 / 0.44 |  |
-| yolo26s | fp16 | 1 | 8.71 | 11.95 | 106 | 0.80 / 7.19 / 0.37 |  |
-| yolo26s | fp16 | 16 | 35.63 | 38.09 | 446 | 0.85 / 0.87 / 0.43 |  |
-| yolo26m | fp32 | 1 | 7.72 | 9.17 | 124 | 0.75 / 6.44 / 0.33 |  |
-| yolo26m | fp32 | 16 | 83.38 | 87.31 | 190 | 0.84 / 4.00 / 0.31 |  |
-| yolo26m | fp16 | 1 | 8.15 | 9.59 | 119 | 0.75 / 6.86 / 0.33 |  |
-| yolo26m | fp16 | 16 | 50.20 | 51.19 | 318 | 0.78 / 2.01 / 0.31 |  |
+| model | precision | batch | median | p90 | img/s | UL pre / inf / post per img | other GPU load | FOLO median |
+|---|---|---|---|---|---|---|---|---|
+| yolo26n | fp32 | 1 | 6.92 | 7.73 | 143 | 0.71 / 5.69 / 0.30 | none seen (legacy sampler) |  |
+| yolo26n | fp32 | 16 | 29.71 | 30.80 | 536 | 0.82 / 0.68 / 0.31 | none seen (legacy sampler) |  |
+| yolo26n | fp16 | 1 | 7.11 | 7.85 | 137 | 0.69 / 5.99 / 0.27 | none seen (legacy sampler) |  |
+| yolo26n | fp16 | 16 | 25.61 | 28.48 | 615 | 0.80 / 0.43 / 0.32 | none seen (legacy sampler) |  |
+| yolo26s | fp32 | 1 | 8.59 | 13.77 | 103 | 0.82 / 7.13 / 0.39 | none seen (legacy sampler) |  |
+| yolo26s | fp32 | 16 | 48.97 | 56.40 | 317 | 0.94 / 1.59 / 0.44 | none seen (legacy sampler) |  |
+| yolo26s | fp16 | 1 | 8.71 | 11.95 | 106 | 0.80 / 7.19 / 0.37 | none seen (legacy sampler) |  |
+| yolo26s | fp16 | 16 | 35.63 | 38.09 | 446 | 0.85 / 0.87 / 0.43 | none seen (legacy sampler) |  |
+| yolo26m | fp32 | 1 | 7.72 | 9.17 | 124 | 0.75 / 6.44 / 0.33 | none seen (legacy sampler) |  |
+| yolo26m | fp32 | 16 | 83.38 | 87.31 | 190 | 0.84 / 4.00 / 0.31 | none seen (legacy sampler) |  |
+| yolo26m | fp16 | 1 | 8.15 | 9.59 | 119 | 0.75 / 6.86 / 0.33 | none seen (legacy sampler) |  |
+| yolo26m | fp16 | 16 | 50.20 | 51.19 | 318 | 0.78 / 2.01 / 0.31 | none seen (legacy sampler) |  |
 
 ### CPU, fp32, batch 1 (ms)
 
@@ -299,24 +299,24 @@ against the `fp32-strict` rows. The default-fp32 rows are what users actually ge
 
 ### Training step only (fixed batch 16 on the GPU, forward + loss + backward + SGD)
 
-| model | precision | median ms/step | p90 | img/s | peak alloc MiB | FOLO img/s |
-|---|---|---|---|---|---|---|
-| yolo26n | AMP fp16 | 63.3 | 67.6 | 252 | 2646 |  |
-| yolo26n | fp32 (TF32 convs) | 76.8 | 81.7 | 202 | 4517 |  |
-| yolo26s | AMP fp16 | 85.2 | 90.6 | 188 | 4614 |  |
-| yolo26s | fp32 (TF32 convs) | 148.1 | 155.7 | 105 | 8245 |  |
+| model | precision | median ms/step | p90 | img/s | peak alloc MiB | other GPU load | FOLO img/s |
+|---|---|---|---|---|---|---|---|
+| yolo26n | AMP fp16 | 63.3 | 67.6 | 252 | 2646 | none seen (legacy sampler) |  |
+| yolo26n | fp32 (TF32 convs) | 76.8 | 81.7 | 202 | 4517 | none seen (legacy sampler) |  |
+| yolo26s | AMP fp16 | 85.2 | 90.6 | 188 | 4614 | none seen (legacy sampler) |  |
+| yolo26s | fp32 (TF32 convs) | 148.1 | 155.7 | 105 | 8245 | none seen (legacy sampler) |  |
 
-### Ultralytics trainer (synthetic 512-image set, batch 16, workers 8, mosaic on, 2 epochs)
+### Ultralytics trainer (synthetic 512-image set, batch 16 requested, workers 8, mosaic on, 2 epochs)
 
-| model | precision | run | median-batch equivalent img/s | epoch-2 img/s | epoch-2 median batch ms | other procs' CPU cores (epoch 2) | other GPU load | peak alloc MiB | peak reserved MiB |
-|---|---|---|---|---|---|---|---|---|---|
-| yolo26n | AMP | 0 | 136 | 128 | 118.0 | n/a | pid 30860 folo_gpu-92372f1fabd58549.exe 6.6% | 2435 | 2626 |
-| yolo26s | AMP | 0 | 176 | 171 | 89.9 | n/a | pid 23720 gemm-0cbfdb0d74d93b53.exe 6.4% | 4494 | 4792 |
-| yolo26n | fp32 (TF32 convs) | 0 | 198 | 199 | 78.8 | n/a | none | 4353 | 5148 |
-| yolo26n | AMP | 1 | 168 | 165 | 93.5 | n/a | none | 2435 | 2626 |
-| yolo26s | AMP | 1 | 142 | 82 | 107.3 | n/a | none | 4494 | 4792 |
-| yolo26n | fp32 (TF32 convs) | 1 | 116 | 117 | 137.0 | n/a | none | 4353 | 5148 |
-| yolo26n | AMP | 2 | 229 | 224 | 67.2 | 3.1 | none | 2435 | 2626 |
-| yolo26s | AMP | 2 | 124 | 123 | 123.9 | 17.3 | pid 31376 chrome.exe 8.1% | 4494 | 4792 |
-| yolo26n | fp32 (TF32 convs) | 2 | 164 | 150 | 105.0 | 11.3 | none | 4353 | 5148 |
+| model | precision | run | batch used | median-batch equivalent img/s | epoch-2 img/s | epoch-2 median batch ms | other procs' CPU cores (epoch 2) | other GPU load | peak alloc MiB | peak reserved MiB |
+|---|---|---|---|---|---|---|---|---|---|---|
+| yolo26n | AMP | 0 | 16 | 136 | 128 | 118.0 | n/a | pid 30860 folo_gpu-92372f1fabd58549.exe 6.6% | 2435 | 2626 |
+| yolo26s | AMP | 0 | 16 | 176 | 171 | 89.9 | n/a | pid 23720 gemm-0cbfdb0d74d93b53.exe 6.4% | 4494 | 4792 |
+| yolo26n | fp32 (TF32 convs) | 0 | 16 | 198 | 199 | 78.8 | n/a | none seen (legacy sampler) | 4353 | 5148 |
+| yolo26n | AMP | 1 | 16 | 168 | 165 | 93.5 | n/a | none seen (legacy sampler) | 2435 | 2626 |
+| yolo26s | AMP | 1 | 16 | 142 | 82 | 107.3 | n/a | none seen (legacy sampler) | 4494 | 4792 |
+| yolo26n | fp32 (TF32 convs) | 1 | 16 | 116 | 117 | 137.0 | n/a | none seen (legacy sampler) | 4353 | 5148 |
+| yolo26n | AMP | 2 | 16 | 229 | 224 | 67.2 | 3.1 | none seen (legacy sampler) | 2435 | 2626 |
+| yolo26s | AMP | 2 | 16 | 124 | 123 | 123.9 | 17.3 | pid 31376 chrome.exe 8.1% | 4494 | 4792 |
+| yolo26n | fp32 (TF32 convs) | 2 | 16 | 164 | 150 | 105.0 | 11.3 | none seen (legacy sampler) | 4353 | 5148 |
 <!-- tables:end -->

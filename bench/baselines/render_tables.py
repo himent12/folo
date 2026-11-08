@@ -24,6 +24,20 @@ def f(x, nd=2) -> str:
     return f"{x:.{nd}f}"
 
 
+def contention_label(r: dict) -> str:
+    """Other processes' GPU load during a row. Unobserved (no successful sample) is never shown as quiet."""
+    load = r.get("other_gpu_load_pct") or {}
+    errors = r.get("contention_errors", 0)
+    err = f" ({errors} failed queries)" if errors else ""
+    if load:
+        return ", ".join(f"{k} {v}%" for k, v in load.items()) + err
+    if "contention_samples" not in r:
+        return "none seen (legacy sampler)"
+    if r["contention_samples"] == 0:
+        return "unobserved" + err
+    return "none" + err
+
+
 def headline(d: dict) -> None:
     """One row per model: the numbers FOLO is measured against (see docs/BENCHMARKS.md for which is which)."""
 
@@ -126,7 +140,10 @@ def env_rows(env: dict) -> list[list[str]]:
 
 
 def main(path: str) -> None:
-    d = json.load(open(path, encoding="utf-8"))
+    render(json.load(open(path, encoding="utf-8")))
+
+
+def render(d: dict) -> None:
     present = [s for s in SECTIONS if s in d]
     envs = {s: env_rows(section_meta(d, s)[0]) for s in present}
     print("### Machine\n")
@@ -164,10 +181,16 @@ def main(path: str) -> None:
                     f(r["median_ms"]),
                     f(r["p90_ms"]),
                     f(r["throughput_images_per_s"], 0),
+                    contention_label(r),
                     "",
                 ]
             )
-        print(table(["model", "precision", "batch", "cudnn.benchmark", "median", "p90", "img/s", "FOLO median"], rows))
+        print(
+            table(
+                ["model", "precision", "batch", "cudnn.benchmark", "median", "p90", "img/s", "other GPU load", "FOLO median"],
+                rows,
+            )
+        )
 
     if "gpu_e2e" in d:
         print("\n### GPU end to end (Ultralytics predictor, decoded uint8 BGR 640x640 in, boxes on the host, ms)\n")
@@ -183,12 +206,23 @@ def main(path: str) -> None:
                     f(r["p90_ms"]),
                     f(r["throughput_images_per_s"], 0),
                     f"{f(s['preprocess'])} / {f(s['inference'])} / {f(s['postprocess'])}",
+                    contention_label(r),
                     "",
                 ]
             )
         print(
             table(
-                ["model", "precision", "batch", "median", "p90", "img/s", "UL pre / inf / post per img", "FOLO median"],
+[
+                    "model",
+                    "precision",
+                    "batch",
+                    "median",
+                    "p90",
+                    "img/s",
+                    "UL pre / inf / post per img",
+                    "other GPU load",
+                    "FOLO median",
+                ],
                 rows,
             )
         )
@@ -222,33 +256,40 @@ def main(path: str) -> None:
                     f(r["p90_ms"], 1),
                     f(r["throughput_images_per_s"], 0),
                     r["max_memory_allocated_mib"],
+                    contention_label(r),
                     "",
                 ]
             )
-        print(table(["model", "precision", "median ms/step", "p90", "img/s", "peak alloc MiB", "FOLO img/s"], rows))
+        print(
+            table(
+                ["model", "precision", "median ms/step", "p90", "img/s", "peak alloc MiB", "other GPU load", "FOLO img/s"],
+                rows,
+            )
+        )
 
     if "train" in d:
         cfg = section_meta(d, "train")[1]
         n_epochs = cfg.get("epochs", 2)
         n_img = cfg["synthetic_dataset"]["train"]
         print(
-            f"\n### Ultralytics trainer (synthetic {n_img}-image set, batch 16, workers 8, mosaic on, {n_epochs} epochs)\n"
+            f"\n### Ultralytics trainer (synthetic {n_img}-image set, batch 16 requested, workers 8, mosaic on, "
+            f"{n_epochs} epochs)\n"
         )
         rows = []
         for r in d["train"]:
             e = r["epochs"][-1]
             cpu = e.get("cpu_cores_busy", {})
-            others = r.get("other_gpu_load_pct") or {}
             rows.append(
                 [
                     r["model"],
                     "AMP" if r["amp"] else "fp32 (TF32 convs)",
                     r.get("repeat", 0),
+                    r.get("effective_batch", r["batch"]),  # Ultralytics halves the batch after an OOM
                     f(r["steady_images_per_s"], 0) if "steady_images_per_s" in r else "",
                     f(e["images_per_s"], 0),
                     f(e["median_batch_ms"], 1),
                     f(cpu["others"], 1) if cpu else "n/a",
-                    ", ".join(f"{k} {v}%" for k, v in others.items()) or "none",
+                    contention_label(r),
                     r.get("max_memory_allocated_mib", ""),
                     r.get("max_memory_reserved_mib", ""),
                 ]
@@ -259,6 +300,7 @@ def main(path: str) -> None:
                     "model",
                     "precision",
                     "run",
+                    "batch used",
                     "median-batch equivalent img/s",
                     f"epoch-{n_epochs} img/s",
                     f"epoch-{n_epochs} median batch ms",
