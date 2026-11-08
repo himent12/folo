@@ -38,6 +38,7 @@ export const scenes = [
   { name: 'run-new', path: '/runs/new', viewports: ['desktop', 'laptop', 'mobile'] },
   {
     name: 'run-new-focus-mosaic',
+    fullPage: false,
     path: '/runs/new',
     themes: ['dark'],
     viewports: ['desktop'],

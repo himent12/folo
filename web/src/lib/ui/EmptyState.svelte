@@ -97,6 +97,7 @@
   }
   .desc {
     color: var(--text-secondary);
+    text-wrap: balance;
   }
   .actions {
     display: flex;
