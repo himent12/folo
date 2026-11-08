@@ -43,3 +43,10 @@ so incremental builds stay warm.
   dedicated account or VM with no developer credentials (or back to GitHub-hosted runners) first.
 - An offline runner does not trigger the fallback: jobs queue (up to 24 h). If a runner is down for long, delete the
   variable to switch to GitHub-hosted runners.
+
+## Unstable self-hosted Windows host
+The dev PC (an i7-14700KF) occasionally crashes rustc or rustfmt under heavy parallel load (`STATUS_ACCESS_VIOLATION`
+0xc0000005, `STATUS_ILLEGAL_INSTRUCTION` 0xc000001d, `STATUS_STACK_BUFFER_OVERRUN` 0xc0000409), a pattern consistent
+with the Intel 13th/14th-gen instability issue. Until the host is fixed (BIOS / microcode update), the Windows steps in
+`ci.yml` and `desktop.yml` retry once on self-hosted runners and log a warning. A genuine compile error or test failure
+fails both attempts, so the retry cannot hide one; it only absorbs a crashed compiler.
