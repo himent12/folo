@@ -564,8 +564,14 @@ impl FoloApp {
                         let hot = active == Some(i);
                         let color = t.class(b.class);
                         let key = format!("det-{i}");
+                        // A cut class name shows in full on hover and on keyboard focus.
+                        let long = b.name.chars().count() > 9;
+                        let focused = long && self.ring(&self.fh(key.clone(), cx), window);
+                        let full = b.name.clone();
                         let row = div()
                             .id(SharedString::from(key.clone()))
+                            .when(long, |d| d.tooltip(crate::controls::tip(full.clone(), None)))
+                            .when(focused, |d| d.child(crate::controls::focus_tip(&t, full.clone(), 28.)))
                             .flex_none()
                             .h(px(28.))
                             .px(px(8.))

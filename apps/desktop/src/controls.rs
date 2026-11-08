@@ -766,12 +766,21 @@ impl FoloApp {
             .hover(|s| s.border_color(t.line_strong))
             .when(open, |d| {
                 let cell = self.menu_trigger.clone();
+                // Where the trigger is decides where the menu fits; a move redraws once.
                 d.child(
-                    gpui::canvas(move |b, _, _| cell.set(Some(b)), |_, _, _, _| {})
-                        .absolute()
-                        .top_0()
-                        .left_0()
-                        .size_full(),
+                    gpui::canvas(
+                        move |b, window, _| {
+                            if cell.get() != Some(b) {
+                                cell.set(Some(b));
+                                window.refresh();
+                            }
+                        },
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full(),
                 )
             })
             .on_click(cx.listener(move |this, _, _, cx| {
@@ -829,11 +838,27 @@ impl FoloApp {
                 14.,
                 t.text_tertiary,
             ));
+        // Below the trigger when it fits, else above; never taller than the room there (8 px margin).
+        let want = (n as f32 * 33. + 8.).min(288.);
+        let (up, max_h) = match self.menu_trigger.get() {
+            Some(b) if open => {
+                let vh = f32::from(window.viewport_size().height);
+                let below = vh - f32::from(b.bottom()) - 12.;
+                let above = f32::from(b.top()) - 12.;
+                if below >= want || below >= above {
+                    (false, below.min(288.))
+                } else {
+                    (true, above.min(288.))
+                }
+            }
+            _ => (false, 288.),
+        };
         let menu = (open && !empty).then(|| {
             gpui::deferred(
                 div()
                     .absolute()
-                    .top(px(tsize::CONTROL_LG + 4.))
+                    .when(!up, |d| d.top(px(tsize::CONTROL_LG + 4.)))
+                    .when(up, |d| d.bottom(px(tsize::CONTROL_LG + 4.)))
                     .left_0()
                     .right_0()
                     .occlude()
@@ -852,7 +877,7 @@ impl FoloApp {
                     .child(
                         div()
                             .id(SharedString::from(format!("{key}-menu")))
-                            .max_h(px(288.))
+                            .max_h(px(max_h.max(64.)))
                             .overflow_y_scroll()
                             .track_scroll(&menu_scroll)
                             .p(px(4.))
@@ -918,7 +943,8 @@ pub fn btn_colors(t: &Theme, kind: Btn) -> (Hsla, Hsla, Option<Hsla>, Hsla) {
 }
 
 /// A tooltip shown while a control has keyboard focus, below it and kept inside the window.
-pub fn focus_tip(t: &Theme, text_: &'static str, below: f32) -> Div {
+pub fn focus_tip(t: &Theme, text_: impl Into<SharedString>, below: f32) -> Div {
+    let text_: SharedString = text_.into();
     div().absolute().top(px(below + 6.)).left_0().child(
         gpui::deferred(
             gpui::anchored().snap_to_window_with_margin(px(8.)).child(

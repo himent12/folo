@@ -50,6 +50,9 @@ pub fn image_rect(b: Bounds<Pixels>, w: f32, h: f32, fit: Fit, zoom: f32, pan: (
         Fit::Contain => (bw / w).min(bh / h),
     } * zoom;
     let (dw, dh) = (w * s, h * s);
+    // Pan is held so at least a 48 px strip of the image stays in view, however far it's pushed.
+    let keep = |view: f32, drawn: f32| ((view + drawn) / 2. - 48.).max(0.);
+    let pan = (pan.0.clamp(-keep(bw, dw), keep(bw, dw)), pan.1.clamp(-keep(bh, dh), keep(bh, dh)));
     let x = f32::from(b.left()) + (bw - dw) / 2. + pan.0;
     let y = f32::from(b.top()) + (bh - dh) / 2. + pan.1;
     Bounds::new(point(px(x), px(y)), size(px(dw), px(dh)))
@@ -156,16 +159,18 @@ pub fn paint_image_with_boxes(
                     ));
                 }
                 // Boxes under 20 px on screen show their label only when selected (design/README).
-                let small = r.size.height < px(20.) && !b.highlight;
+                let small = (r.size.height < px(20.) || r.size.width < px(20.)) && !b.highlight;
                 if pass == 1 && !b.truth && labels && !small && (b.label.is_some() || b.score.is_some()) {
-                    let fs = ty::XS.size;
+                    // Small views (< 480 px): 14 px chips with 10 px text (design/README).
+                    let compact = rect.size.width < px(480.);
+                    let fs = if compact { 10. } else { ty::XS.size };
                     let name = b.label.clone().unwrap_or_default();
                     // The selected box's chip takes the selection colour, like its outline.
                     let (chip_bg, ink) = if b.highlight {
                         (t.accent_solid, t.accent_on)
                     } else if b.dim {
                         // Faded with their boxes, so the selection is the brightest thing.
-                        (alpha(color, 0.45), alpha(chip_text, 0.7))
+                        (alpha(color, 0.3), alpha(chip_text, 0.6))
                     } else {
                         (color, chip_text)
                     };
@@ -184,7 +189,7 @@ pub fn paint_image_with_boxes(
                     );
                     let gap = if score.is_empty() || name.is_empty() { px(0.) } else { px(5.) };
                     let cw = name_line.width + gap + score_line.width + px(10.);
-                    let ch = px(16.);
+                    let ch = px(if compact { 14. } else { 16. });
                     // Preferred spots: above the top-left corner, inside it, below the bottom-left
                     // corner, inside the bottom-left. Take the first that is on the image and free.
                     let clamp_x = |x: Pixels| x.min(bounds.right() - cw).max(bounds.left());
@@ -208,11 +213,12 @@ pub fn paint_image_with_boxes(
                     placed.push(chip);
                     // Dimming applies to strokes only: chip text keeps its contrast.
                     window.paint_quad(fill(chip, chip_bg).corner_radii(px(tokens::radius::XS)));
-                    let ty_ = origin.y + px(1.5);
-                    let _ = name_line.paint(point(origin.x + px(5.), ty_), px(13.), window, cx);
+                    let (ty_, lh) =
+                        if compact { (origin.y + px(1.), px(12.)) } else { (origin.y + px(1.5), px(13.)) };
+                    let _ = name_line.paint(point(origin.x + px(5.), ty_), lh, window, cx);
                     let _ = score_line.paint(
                         point(origin.x + px(5.) + name_line.width + gap, ty_),
-                        px(13.),
+                        lh,
                         window,
                         cx,
                     );

@@ -20,7 +20,7 @@ use crate::theme::{alpha, radius, theme, ty};
 use crate::ui::*;
 
 /// Row-label column of the confusion matrix (fits "False positives").
-const LABEL_W: f32 = 100.;
+const LABEL_W: f32 = 96.;
 
 impl FoloApp {
     pub fn models(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -293,14 +293,14 @@ impl FoloApp {
                 "Precision",
                 mm.as_ref().map_or("–".into(), |x| format!("{:.3}", x.precision)),
                 "",
-                Some(text(ty::XS, t.text_tertiary).child("best-F1 threshold · IoU 0.50")),
+                Some(text(ty::XS, t.text_tertiary).child("best-F1 · IoU 0.50")),
             )))
             .child(vline(&t))
             .child(tile(small(
                 "Recall",
                 mm.as_ref().map_or("–".into(), |x| format!("{:.3}", x.recall)),
                 "",
-                Some(text(ty::XS, t.text_tertiary).child("best-F1 threshold · IoU 0.50")),
+                Some(text(ty::XS, t.text_tertiary).child("best-F1 · IoU 0.50")),
             )))
             .child(vline(&t))
             .child(tile(small(
@@ -340,11 +340,22 @@ impl FoloApp {
                             .child(div().flex().child(pr))
                             .child(div().flex().child(cm))
                     } else {
+                        // The PR panel holds a plot and its legend: it takes the larger share, so the
+                        // plot keeps ~280 px at 1280; the matrix keeps its 380 px minimum.
                         div()
                             .flex()
                             .gap(px(16.))
-                            .child(div().flex_1().min_w_0().flex().child(pr))
-                            .child(div().flex_1().min_w(px(380.)).flex().child(cm))
+                            .child(
+                                div().flex_grow().flex_basis(gpui::relative(0.62)).min_w_0().flex().child(pr),
+                            )
+                            .child(
+                                div()
+                                    .flex_grow()
+                                    .flex_basis(gpui::relative(0.38))
+                                    .min_w(px(400.))
+                                    .flex()
+                                    .child(cm),
+                            )
                     })
                     .child(table)
                     .into_any_element()
@@ -662,7 +673,7 @@ impl FoloApp {
                         // A known width, so long class names end in "…" (GPUI truncates against
                         // the pre-shrink width).
                         text(ty::SM, t.text_secondary)
-                            .w(px(84.))
+                            .w(px(76.))
                             .flex_none()
                             .truncate()
                             .child(m.classes.get(class as usize).cloned().unwrap_or_default()),
@@ -739,7 +750,7 @@ impl FoloApp {
                     )))
                     .child(
                         div()
-                            .w(px(260.))
+                            .w(px(252.))
                             .flex_none()
                             .p(px(8.))
                             .pt(px(12.))
@@ -785,7 +796,7 @@ impl FoloApp {
                                         .child(div().w(px(12.)).flex_none())
                                         .child(
                                             text(ty::SM, t.text_secondary)
-                                                .w(px(84.))
+                                                .w(px(76.))
                                                 .flex_none()
                                                 .child("All classes"),
                                         )

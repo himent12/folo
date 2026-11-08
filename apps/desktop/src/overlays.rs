@@ -887,7 +887,7 @@ impl FoloApp {
                     "CPU selected · no time estimate; expect many times slower than a GPU".to_string()
                 } else if fits {
                     format!(
-                        "≈ {} on {gpu_name} · ≈ {vram:.1} GB of GPU memory",
+                        "≈ {} · reference estimate, not measured on {gpu_name} · ≈ {vram:.1} GB",
                         crate::api::time::duration(secs)
                     )
                 } else {

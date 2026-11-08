@@ -254,8 +254,6 @@ impl FoloApp {
             .flex()
             .flex_col()
             .gap(px(24.))
-            // Spread over the chart's height: the first row level with its title, the last with its axis.
-            .justify_between()
             .child(
                 div()
                     .flex()
