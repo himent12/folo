@@ -551,6 +551,12 @@ pub fn value_near(points: &[(f32, f32)], x: f32, span: f32) -> Option<f32> {
     ((px_ - x).abs() <= span * 0.06).then_some(py)
 }
 
+/// The cursor chip's text, named ("epoch 36") so a linked cursor's unit is explicit.
+fn chip_label(spec: &LineChart, x: f32) -> String {
+    let v = (spec.x_fmt)(x);
+    if spec.x_name.is_empty() { v } else { format!("{} {v}", spec.x_name) }
+}
+
 /// Index of the point nearest to `x` in a sorted series.
 /// The value a legend shows: at the shared cursor when there is one, else the latest point.
 pub fn value_at(points: &[(f32, f32)], hover: Option<f32>, x0: f32, x1: f32) -> Option<f32> {
@@ -882,18 +888,30 @@ fn paint_line_chart(
     let max_x = spec.x_ticks.unwrap_or(((plot.size.width / px(90.)) as usize).clamp(2, 8));
     let xt = if spec.x_int { int_ticks(x0, x1, max_x) } else { even_ticks(x0, x1, max_x) };
     // Where the cursor chip will sit (legend-driven charts), so tick labels give way to it.
-    let chip_x = (!spec.readout && has_data)
+    // The chip's real span (same label and clamping as where it's painted).
+    let chip_span = (!spec.readout && has_data)
         .then_some(spec.hover)
         .flatten()
         .and_then(|f| cursor_x(&spec.series, x0 + (x1 - x0) * f, x1 - x0))
-        .map(sx);
+        .map(|v| {
+            let w = text_width(window, &chip_label(spec, v), label_size) + px(10.);
+            let left = (sx(v) - w / 2.).clamp(plot.left() - px(4.), plot.right() - w);
+            (left, left + w)
+        });
     for v in &xt {
         let x = sx(*v);
         window.paint_quad(fill(Bounds::new(point(x, plot.bottom()), size(px(1.), px(4.))), t.chart_axis));
         let l = (spec.x_fmt)(*v);
         let w = text_width(window, &l, label_size);
-        let lx = (x - w / 2.).clamp(plot.left() - px(4.), plot.right() - w);
-        if chip_x.is_some_and(|c| (lx + w / 2. - c).abs() < w / 2. + px(22.)) {
+        // The first and last labels sit flush with their ticks instead of being centred and clamped.
+        let lx = if Some(v) == xt.first() && xt.len() > 1 {
+            x - px(1.)
+        } else if Some(v) == xt.last() && xt.len() > 1 {
+            x - w + px(1.)
+        } else {
+            (x - w / 2.).clamp(plot.left() - px(4.), plot.right() - w)
+        };
+        if chip_span.is_some_and(|(cl, cr)| lx < cr + px(4.) && lx + w > cl - px(4.)) {
             continue;
         }
         paint_text(window, cx, &l, point(lx, plot.bottom() + px(6.)), t.chart_label, label_size, false);
@@ -925,6 +943,8 @@ fn paint_line_chart(
             ),
         }),
         |window| {
+            // Live endpoint dots already drawn: one closer than 6 px to another is skipped.
+            let mut live_dots: Vec<Point<Pixels>> = Vec::new();
             for s in &spec.series {
                 if s.points.is_empty() {
                     continue;
@@ -974,8 +994,13 @@ fn paint_line_chart(
                 }
                 if s.live
                     && let Some(&(x, y)) = main.last()
+                    && !live_dots.iter().any(|d| {
+                        let c = point(sx(x), sy(y));
+                        (d.x - c.x).abs() < px(6.) && (d.y - c.y).abs() < px(6.)
+                    })
                 {
                     let c = point(sx(x), sy(y));
+                    live_dots.push(c);
                     window.paint_quad(
                         fill(Bounds::centered_at(c, size(px(10.), px(10.))), alpha(s.color, 0.22))
                             .corner_radii(px(5.)),
@@ -1049,7 +1074,7 @@ fn paint_line_chart(
     ));
     if !spec.readout {
         // The values are in the header legend; the axis says where the cursor is.
-        let l = (spec.x_fmt)(snap);
+        let l = chip_label(spec, snap);
         let w = text_width(window, &l, label_size) + px(10.);
         let chip = Bounds::new(
             point((cx_px - w / 2.).clamp(plot.left() - px(4.), plot.right() - w), plot.bottom() + px(3.)),

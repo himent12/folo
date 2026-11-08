@@ -251,7 +251,7 @@ impl FoloApp {
             .flex_none()
             .flex()
             .flex_col()
-            .gap(px(16.))
+            .gap(px(24.))
             .child(
                 div()
                     .flex()
@@ -333,7 +333,7 @@ impl FoloApp {
                     .child(div().h_full().w(gpui::relative(r.progress().clamp(0., 1.))).bg(t.accent_fill())),
             )
             .child(
-                div().flex().items_center().gap(px(24.)).p(px(16.)).child(kpis).child(
+                div().flex().gap(px(24.)).p(px(16.)).child(kpis).child(
                     div()
                         .flex_1()
                         .min_w_0()
@@ -550,7 +550,11 @@ impl FoloApp {
         let vw = window.viewport_size().width;
         let wide = vw >= px(1500.) || vw < px(1280.);
         // Beside Best models below 1500 the list is too narrow for Created as well.
-        let created = wide;
+        // Created fits beside Best models too, with an 88 px progress track (584 px available at 1280).
+        let created = true;
+        // Beside Best models (584 px at 1280) every column tightens so all six fit.
+        let (name_w, prog_w, best_w, when_w) =
+            if wide { (150., 120., 96., 80.) } else { (140., 88., 88., 64.) };
         let now = self.store.api.now();
         let all = self.view_all("ov-runs-all", Route::Runs, window, cx);
         let header = panel_header(&t, "Recent runs").child(all);
@@ -564,14 +568,14 @@ impl FoloApp {
             .gap(px(12.))
             .border_b_1()
             .border_color(t.line_subtle)
-            .child(th(&t, "Run").w(px(150.)).flex_none())
+            .child(th(&t, "Run").w(px(name_w)).flex_none())
             .when(wide, |d| d.child(th(&t, "Dataset · arch").w(px(130.)).flex_none()))
             .child(th(&t, "Status").w(px(96.)).flex_none())
-            .child(th(&t, "Progress").w(px(120.)).flex_none())
+            .child(th(&t, "Progress").w(px(prog_w)).flex_none())
             .child(div().flex_1())
-            .child(div().w(px(96.)).flex_none().flex().justify_end().child(th(&t, "Best mAP50-95")))
+            .child(div().w(px(best_w)).flex_none().flex().justify_end().child(th(&t, "Best mAP50-95")))
             .when(created, |d| {
-                d.child(div().w(px(80.)).flex_none().flex().justify_end().child(th(&t, "Created")))
+                d.child(div().w(px(when_w)).flex_none().flex().justify_end().child(th(&t, "Created")))
             });
         let body = match &self.store.runs {
             Load::Ready(runs) if runs.is_empty() => div()
@@ -599,7 +603,7 @@ impl FoloApp {
                         // Progress (training runs only) right after Status; best mAP50-95 at the end.
                         let training = r.status.is_active() && r.status != crate::api::RunStatus::Queued;
                         let progress_el = div()
-                            .w(px(120.))
+                            .w(px(prog_w))
                             .flex_none()
                             .flex()
                             .items_center()
@@ -614,7 +618,7 @@ impl FoloApp {
                                             .child(format!("{:.0}%", r.progress() * 100.)),
                                     )
                             });
-                        let best = div().w(px(96.)).flex_none().flex().justify_end().child(
+                        let best = div().w(px(best_w)).flex_none().flex().justify_end().child(
                             text(ty::SM, if r.best.is_some() { t.text_primary } else { t.text_tertiary })
                                 .tnum()
                                 .child(r.best.as_ref().map_or("–".to_string(), |b| f3(b.map50_95))),
@@ -638,7 +642,7 @@ impl FoloApp {
                                 .child(
                                     text(ty::SM, t.text_primary)
                                         .font_weight(FontWeight::MEDIUM)
-                                        .w(px(150.))
+                                        .w(px(name_w))
                                         .flex_none()
                                         .truncate()
                                         .child(r.name.clone()),
@@ -663,7 +667,7 @@ impl FoloApp {
                                 .child(best)
                                 .when(created, |d| {
                                     d.child(
-                                        div().w(px(80.)).flex_none().flex().justify_end().child(
+                                        div().w(px(when_w)).flex_none().flex().justify_end().child(
                                             text(ty::XS, t.text_tertiary).whitespace_nowrap().child(when),
                                         ),
                                     )
@@ -765,7 +769,7 @@ impl FoloApp {
                     }))
                     .into_any_element()
             }
-            _ => loading_rows(&t, "ov-models", 4).into_any_element(),
+            _ => loading_rows(&t, "ov-models", 5).into_any_element(),
         };
         panel(&t)
             .flex_1()

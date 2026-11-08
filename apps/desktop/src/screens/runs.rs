@@ -261,18 +261,33 @@ impl FoloApp {
     }
 
     /// Resume a stopped or failed run where it left off (its last finished epoch).
-    fn resume_button(&self, id: &str, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let rid = id.to_string();
+    /// The last finished (validated) epoch, from the loaded history: where a resume continues from
+    /// (`weights/last.folo`). None until the history is in (the run's own fields don't say).
+    fn last_finished_epoch(&self, r: &Run) -> Option<u32> {
+        let d = self.store.run_data.get(&r.id)?.ready()?;
+        Some(d.metrics.epochs.last().map_or(0, |e| e.epoch))
+    }
+
+    fn resume_button(&self, r: &Run, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let rid = r.id.clone();
+        let from = self.last_finished_epoch(r).map(|e| e + 1);
         self.button(
             "run-resume",
-            "Resume",
+            from.map_or("Resume".to_string(), |f| format!("Resume from epoch {f}")),
             Btn::Secondary,
             Some("icons/play.svg"),
             window,
             cx,
             act(move |this, _, cx| this.resume_run(rid.clone(), cx)),
         )
-        .tooltip(crate::controls::tip("Continue from the last finished epoch", None))
+        .tooltip(crate::controls::tip(
+            if from == Some(1) {
+                "No epoch finished: starts over with the same config"
+            } else {
+                "Continues from the last saved checkpoint"
+            },
+            None,
+        ))
         .into_any_element()
     }
 
@@ -336,7 +351,7 @@ impl FoloApp {
             }
             RunStatus::Completed | RunStatus::Stopped => {
                 if r.status == RunStatus::Stopped {
-                    actions.push(self.resume_button(&r.id, window, cx));
+                    actions.push(self.resume_button(&r, window, cx));
                 }
                 if let Some(mid) = r.model_id.clone() {
                     let m2 = mid.clone();
@@ -372,10 +387,13 @@ impl FoloApp {
                 }
             }
             RunStatus::Failed => {
-                actions.push(self.resume_button(&r.id, window, cx));
-                // Reuse the whole config; for out-of-memory failures, halve the batch.
+                // Reuse the whole config; for out-of-memory failures, halve the batch. Resuming an
+                // OOM failure would hit the same limit (the config can't change), so it isn't offered.
                 let mut cfg = r.config.clone();
                 let oom = r.error.as_deref().is_some_and(|e| e.contains("out of memory"));
+                if !oom {
+                    actions.push(self.resume_button(&r, window, cx));
+                }
                 let note = oom.then(|| crate::app::retry_batch(cfg.batch)).flatten().map(|to| {
                     let from = cfg.batch;
                     cfg.batch = to;
@@ -385,7 +403,8 @@ impl FoloApp {
                     self.button(
                         "run-retry-cfg",
                         "New run from this config",
-                        Btn::Secondary,
+                        // The way forward after a failure: the page's primary action.
+                        Btn::Primary,
                         Some("icons/refresh-cw.svg"),
                         window,
                         cx,
@@ -449,9 +468,14 @@ impl FoloApp {
         let t = theme(cx);
         let msg = r.error.clone().unwrap_or_else(|| "The run failed.".into());
         let hint = if msg.contains("out of memory") {
-            "Lower the batch size or image size, or pick a smaller architecture. The last checkpoint was not saved."
+            match crate::app::retry_batch(r.config.batch) {
+                Some(to) => format!(
+                    "The batch didn't fit in GPU memory. New run from this config starts with batch {to}; a smaller image size or architecture also helps."
+                ),
+                None => "The batch didn't fit in GPU memory and can't go lower: lower the image size or pick a smaller architecture in New run from this config.".to_string(),
+            }
         } else {
-            "See the log below for details."
+            "See the log below for details.".to_string()
         };
         div()
             .flex()
@@ -470,7 +494,7 @@ impl FoloApp {
                     .child(
                         text(ty::BASE, t.text_primary)
                             .font_weight(FontWeight::MEDIUM)
-                            .child(format!("Failed at epoch {} of {}", r.epoch, r.epochs)),
+                            .child(format!("Failed in epoch {} of {}", r.epoch, r.epochs)),
                     )
                     .child(
                         div()
@@ -861,16 +885,20 @@ impl FoloApp {
                 )
                 .child(div().px(px(12.)).pb(px(6.)).child(chart))
         };
+        // The smoothing explanation, on hover and on keyboard focus.
+        let loss_help = self.help_icon(
+            "loss-ema-help",
+            "Lines are an exponential moving average (0.94) of per-step loss; the faint trace is raw",
+            window,
+            cx,
+        );
         let loss_legend = div()
             .id("loss-ema")
             .flex()
             .items_center()
             .gap(px(2.))
-            .tooltip(crate::controls::tip(
-                "Lines are an exponential moving average (0.94) of per-step loss; the faint trace is raw",
-                None,
-            ))
             .children(legend)
+            .child(loss_help)
             .into_any_element();
         let mut map_items = vec![
             crate::ui::legend_value(&t, "mAP50-95", t.chart_series[0], false, v(&d.map50_95, f3v))
@@ -936,7 +964,8 @@ impl FoloApp {
             ))
             .child(row(
                 card("Precision and recall", "validation", pr_legend, line_chart(&t, pr)).into_any_element(),
-                card("Learning rate", "per step", lr_legend, line_chart(&t, lr)).into_any_element(),
+                card("Learning rate", "per step · by epoch", lr_legend, line_chart(&t, lr))
+                    .into_any_element(),
                 0.6,
                 0.4,
             ));
@@ -1094,7 +1123,7 @@ impl FoloApp {
                                     )
                             })),
                     )
-                    .child(div().absolute().top_0().left_0().right_0().h(px(12.)).bg(gpui::linear_gradient(
+                    .child(div().absolute().top_0().left_0().right_0().h(px(20.)).bg(gpui::linear_gradient(
                         180.,
                         gpui::linear_color_stop(t.bg_inset, 0.),
                         gpui::linear_color_stop(crate::theme::alpha(t.bg_inset, 0.), 1.),

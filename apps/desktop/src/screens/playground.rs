@@ -278,7 +278,31 @@ impl FoloApp {
                                     )
                                     .child(text(ty::SM, t.text_tertiary).flex_none().child("/"))
                                 })
-                                .child(text(ty::SM, t.text_primary).flex_none().child(file)),
+                                .child({
+                                    // A file-name budget per breakpoint: a long name ends in "…" (at a
+                                    // known width, as GPUI needs) and the full name is on hover.
+                                    let budget = if compact { 200. } else { 320. };
+                                    // Monospace: the measured width is the glyph count times the advance.
+                                    let advance = window.text_system().advance(
+                                        window.text_system().resolve_font(&gpui::font(crate::theme::MONO)),
+                                        px(ty::SM.size),
+                                        'M',
+                                    );
+                                    let width = advance.map_or(8., |a| f32::from(a.width))
+                                        * file.chars().count() as f32;
+                                    let long = width > budget;
+                                    let full = file.clone();
+                                    div()
+                                        .id("play-file-name")
+                                        .flex_none()
+                                        .when(long, |d| d.tooltip(crate::controls::tip(full, None)))
+                                        .child(
+                                            text(ty::SM, t.text_primary)
+                                                .w(px(width.min(budget).ceil()))
+                                                .truncate()
+                                                .child(file),
+                                        )
+                                }),
                         )
                     })
                     .when(true, |d| {

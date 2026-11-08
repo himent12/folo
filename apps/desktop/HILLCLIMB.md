@@ -576,3 +576,52 @@ Round 16 changes:
   - The class table has a 200 px name column and lists the best AP50 first.
 - **Overview:** the hero KPIs are centred and the ETA label no longer repeats. Best models shows five rows with architecture.
 - **Smaller fixes:** the empty Playground drop zone is top-aligned, and the thumbnail-size control is labelled as such.
+
+## Round 16
+
+| Line | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | avg |
+|------|---|---|---|---|---|---|---|---|---|----|----|----|-----|
+| Opus 5.5 | 8 | 9 | 9 | 8 | 9 | 8 | 8 | 9 | 9 | 9 | 8 | 9 | 8.6 |
+| GPT-6.1 Sol | 8 | 8 | 9 | 9 | 8 | 8 | 8 | 9 | 8 | 8 | 8 | 8 | 8.3 |
+
+Opus is at 9 on seven lines. What was left:
+- **Failed runs:** recovery advice contradicted itself (Resume after an OOM, no primary action).
+- **Charts:**
+  - Edge tick labels were clamped off their ticks.
+  - The cursor chip was unnamed ("36").
+  - Loss endpoint dots overlapped.
+  - The LR caption didn't mention the epoch axis.
+  - The PR cursor column had no heading.
+- **Inspector:** dimmed boxes kept full-strength chips.
+- **Overview:** Recent runs dropped Created at 1280 while showing it at 960, and the hero KPIs weren't aligned.
+- **Labels:** class names and Playground filenames had no width contract.
+- **Small items:**
+  - The loss-smoothing explanation was pointer-only.
+  - PR rows had no pressed state.
+  - The Best models skeleton had 4 rows against 5 loaded.
+  - The copy icon gap.
+
+Round 17 changes:
+- **Failed runs:**
+  - "New run from this config" is the primary action.
+  - The OOM banner says the new run halves the batch, and OOM failures don't offer Resume.
+  - Elsewhere the button reads "Resume from epoch N" (from the last finished epoch).
+- **Charts:**
+  - The first and last x labels anchor to their ticks.
+  - The cursor chip reads "epoch 36".
+  - Live endpoint dots within 6 px of another are skipped.
+  - The LR caption reads "per step · by epoch".
+  - Dimmed boxes dim their chips too.
+- **Model page:**
+  - The PR legend has a "Precision" column ("–" until inspecting) and 84 px truncating names.
+  - Rows show pressed feedback.
+  - Class table names truncate at a known width.
+- **Overview:**
+  - Recent runs tightens every column beside Best models, so all six fit at 1280.
+  - The hero KPIs are top-aligned with the chart title, rows 24 apart.
+  - The Best models skeleton has 5 rows.
+- **Playground:** a filename budget per breakpoint, with the full name on hover.
+- **Small fixes:**
+  - The loss legend gets a focusable help icon.
+  - The log has a taller top fade.
+  - A 4 px gap before the copy icon.
