@@ -23,7 +23,9 @@
   import Skeleton from '$lib/ui/Skeleton.svelte';
   import Tabs from '$lib/ui/Tabs.svelte';
   import { toast } from '$lib/ui/toast.svelte';
+  import Select from '$lib/ui/Select.svelte';
   import ClassPicker from './dataset/ClassPicker.svelte';
+  import DisplayMenu from './dataset/DisplayMenu.svelte';
   import { healthChecks, imageCount, reviewCount } from './dataset/health';
   import ImageGrid, { type Density } from './dataset/ImageGrid.svelte';
   import Inspector from './dataset/Inspector.svelte';
@@ -100,6 +102,24 @@
   }
   let density = $state<Density>(readPref('folo.datasets.density', ['s', 'm', 'l'] as const, 'm'));
   let boxes = $state(readPref('folo.datasets.boxes', ['on', 'off'] as const, 'on') === 'on');
+  function setBoxes(on: boolean) {
+    boxes = on;
+    writePref('folo.datasets.boxes', on ? 'on' : 'off');
+  }
+  function setDensity(v: Density) {
+    density = v;
+    writePref('folo.datasets.density', v);
+  }
+
+  // Phones get their own header and toolbar: one meta line, an icon Train button, and a one-row image toolbar.
+  const PHONE = '(max-width: 767px)';
+  let phone = $state(typeof matchMedia !== 'undefined' && matchMedia(PHONE).matches);
+  $effect(() => {
+    const mq = matchMedia(PHONE);
+    const on = () => (phone = mq.matches);
+    mq.addEventListener('change', on);
+    return () => mq.removeEventListener('change', on);
+  });
 
   // ---------- header actions ----------
   async function copyPath() {
@@ -175,14 +195,29 @@
 {:else}
   <Page title={d.name}>
     {#snippet sub()}
+      {#if phone}
+        <!-- The top bar names the dataset; the path is one tap away in the ⋯ menu (Copy path). -->
+        <span class="meta-sm num"><span class="faint">{d.format}</span> · {num(total)} images · {d.classes.length} classes</span>
+      {:else}
       <span class="faint">{d.format}</span>
       <span class="path mono truncate" title={d.path}>{d.path}</span>
       <span class="num">{num(d.splits.train)} train · {num(d.splits.val)} val · {num(d.splits.test)} test</span>
       <span class="num">{d.classes.length} classes</span>
-      <span class="faint hide-sm">added {ago(d.created)}</span>
+      <span class="faint">added {ago(d.created)}</span>
+      {/if}
     {/snippet}
     {#snippet actions()}
-      <Button variant="primary" icon={Play} href={href(`/runs/new?dataset=${encodeURIComponent(d.id)}`)}>Train on this dataset</Button>
+      {#if phone}
+        <Button
+          variant="primary"
+          icon={Play}
+          aria-label="Train on this dataset"
+          title="Train on this dataset"
+          href={href(`/runs/new?dataset=${encodeURIComponent(d.id)}`)}
+        />
+      {:else}
+        <Button variant="primary" icon={Play} href={href(`/runs/new?dataset=${encodeURIComponent(d.id)}`)}>Train on this dataset</Button>
+      {/if}
       <Menu label="More dataset actions" items={moreItems} />
     {/snippet}
 
@@ -207,51 +242,67 @@
           <Panel><EmptyState icon={ImageOff} title="No statistics" description="The server did not return statistics for this dataset." /></Panel>
         {/if}
       {:else}
-        <!-- One toolbar: what to show on the left, how to show it on the right. -->
-        <div class="ds-toolbar">
-          <Segmented
-            label="Split"
-            size="sm"
-            options={splitOptions}
-            value={split}
-            onchange={(s) => setQuery({ split: s === 'all' ? null : s, image: null })}
-          />
+        <!-- One toolbar: what to show on the left, how to show it on the right. Phones keep it to one row. -->
+        <div class="ds-toolbar" class:phone>
+          {#if phone}
+            <span class="split-pick">
+              <Select
+                label="Split"
+                size="sm"
+                options={splitOptions.map((o) => ({ value: o.value, label: `${o.label} · ${o.meta}` }))}
+                value={split}
+                onchange={(s) => setQuery({ split: s === 'all' ? null : s, image: null })}
+              />
+            </span>
+          {:else}
+            <Segmented
+              label="Split"
+              size="sm"
+              options={splitOptions}
+              value={split}
+              onchange={(s) => setQuery({ split: s === 'all' ? null : s, image: null })}
+            />
+          {/if}
           <ClassPicker classes={d.classes} counts={d.stats?.class_counts} value={cls} onchange={(c) => setQuery({ class: c === undefined ? null : String(c), image: null })} />
           <span class="count num" aria-live="polite">
-            {#if filtered}
+            {#if phone}
+              {#if filtered}{pager?.total != null ? compact(pager.total) : '…'}<span class="sr-only"> of {num(total)} images</span>{/if}
+            {:else if filtered}
               {pager?.total != null ? num(pager.total) : '…'} of {num(total)} images
             {:else}
               {num(total)} images
             {/if}
           </span>
           {#if filtered}
-            <button type="button" class="clear" onclick={() => setQuery({ split: null, class: null, image: null })}>
-              <X size={12} strokeWidth={2} aria-hidden="true" />Clear
+            <button
+              type="button"
+              class="clear"
+              aria-label={phone ? 'Clear filters' : undefined}
+              title={phone ? 'Clear filters' : undefined}
+              onclick={() => setQuery({ split: null, class: null, image: null })}
+            >
+              <X size={phone ? 14 : 12} strokeWidth={2} aria-hidden="true" />{#if !phone}Clear{/if}
             </button>
           {/if}
           <span class="spacer"></span>
-          <button
-            type="button"
-            class="toggle"
-            aria-pressed={boxes}
-            onclick={() => {
-              boxes = !boxes;
-              writePref('folo.datasets.boxes', boxes ? 'on' : 'off');
-            }}
-          >
-            <Scan size={14} strokeWidth={1.75} aria-hidden="true" />Boxes
-          </button>
-          <Segmented
-            label="Thumbnail size"
-            size="sm"
-            options={[
-              { value: 's', label: 'S' },
-              { value: 'm', label: 'M' },
-              { value: 'l', label: 'L' },
-            ]}
-            bind:value={density}
-            onchange={(v) => writePref('folo.datasets.density', v)}
-          />
+          {#if phone}
+            <DisplayMenu {boxes} {density} onboxes={setBoxes} ondensity={setDensity} />
+          {:else}
+            <button type="button" class="toggle" aria-pressed={boxes} onclick={() => setBoxes(!boxes)}>
+              <Scan size={14} strokeWidth={1.75} aria-hidden="true" />Boxes
+            </button>
+            <Segmented
+              label="Thumbnail size"
+              size="sm"
+              options={[
+                { value: 's', label: 'S' },
+                { value: 'm', label: 'M' },
+                { value: 'l', label: 'L' },
+              ]}
+              value={density}
+              onchange={setDensity}
+            />
+          {/if}
         </div>
 
         {#if pager?.error && pager.total !== null}
@@ -358,6 +409,26 @@
   .spacer {
     flex: 1;
   }
+  /* Phones: split, class, count, clear and Display share one row; the class name truncates first. */
+  .ds-toolbar.phone {
+    flex-wrap: nowrap;
+    gap: var(--space-2);
+  }
+  .ds-toolbar.phone .split-pick {
+    flex-shrink: 0;
+  }
+  .ds-toolbar.phone :global(.picker) {
+    flex: 0 1 auto;
+  }
+  .ds-toolbar.phone .clear {
+    justify-content: center;
+    width: var(--control-sm);
+    margin-left: calc(var(--space-2) * -1);
+    padding: 0;
+  }
+  .ds-toolbar.phone .count {
+    flex-shrink: 0;
+  }
   .toggle {
     display: inline-flex;
     align-items: center;
@@ -387,6 +458,9 @@
     .toggle,
     .clear {
       height: 44px;
+    }
+    .ds-toolbar.phone .clear {
+      width: 44px;
     }
   }
   .confirm {
@@ -424,11 +498,12 @@
       margin-inline: calc(var(--space-4) * -1);
       padding-inline: var(--space-4);
     }
-    .path {
-      max-width: 100%;
-    }
-    .hide-sm {
-      display: none;
+    .meta-sm {
+      display: flex;
+      align-items: center;
+      gap: var(--space-1);
+      min-height: var(--control-md);
+      white-space: nowrap;
     }
     .sk-page {
       padding: var(--space-4);

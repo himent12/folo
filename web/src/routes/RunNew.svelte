@@ -1,6 +1,7 @@
 <script lang="ts">
   import Check from '@lucide/svelte/icons/check';
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
+  import ChevronUp from '@lucide/svelte/icons/chevron-up';
   import Copy from '@lucide/svelte/icons/copy';
   import Images from '@lucide/svelte/icons/images';
   import Play from '@lucide/svelte/icons/play';
@@ -18,6 +19,7 @@
   import { setCrumbs } from '$lib/shell/crumbs.svelte';
   import Page from '$lib/shell/Page.svelte';
   import Button from '$lib/ui/Button.svelte';
+  import Dialog from '$lib/ui/Dialog.svelte';
   import EmptyState from '$lib/ui/EmptyState.svelte';
   import ErrorState from '$lib/ui/ErrorState.svelte';
   import Field from '$lib/ui/Field.svelte';
@@ -65,8 +67,10 @@
   let shuffle = $state(1);
   let submitting = $state(false);
   let advancedOpen = $state(false);
-  /** Phones: the model cards show only size and note until the specs are expanded. */
-  let specsOpen = $state(false);
+  /** Up to 1199 px the augmentation settings fold behind a one-line summary (wide screens always show them). */
+  let augOpen = $state(false);
+  /** Up to 1199 px the dock opens the summary as a sheet, so the run can be reviewed without scrolling down. */
+  let sumOpen = $state(false);
 
   const datasets = new Resource(async (s) => {
     const list = await hub.api.datasets(s);
@@ -159,6 +163,23 @@
     weights: weights !== 'none' && !weightOptions.some((m) => m.id === weights) ? 'Pick weights of the same model size.' : null,
   });
   const valid = $derived(prefilled && Object.values(errors).every((e) => e === null));
+  const firstError = $derived(Object.values(errors).find((e) => e !== null) ?? null);
+  // A folded section must not hide its own error.
+  $effect(() => {
+    if (errors.close) augOpen = true;
+  });
+
+  const trim = (v: number) => String(+v.toFixed(3));
+  /** The augmentation settings as one line; values that differ from the defaults are emphasised. */
+  const augLine = $derived([
+    { k: 'mosaic', v: trim(augment.mosaic), changed: augment.mosaic !== defaults.mosaic },
+    { k: 'mixup', v: trim(augment.mixup), changed: augment.mixup !== defaults.mixup },
+    { k: 'flip', v: trim(augment.fliplr), changed: augment.fliplr !== defaults.fliplr },
+    { k: 'scale', v: `±${trim(augment.scale)}`, changed: augment.scale !== defaults.scale },
+    { k: 'translate', v: `±${trim(augment.translate)}`, changed: augment.translate !== defaults.translate },
+    { k: 'colour', v: trim(augment.hsv[1]), changed: augment.hsv[1] !== defaults.hsv[1] },
+    { k: 'close mosaic', v: String(augment.close_mosaic), changed: augment.close_mosaic !== defaults.close_mosaic },
+  ]);
 
   const config = $derived<TrainConfig>({
     name: name.trim(),
@@ -195,6 +216,7 @@
   async function submit(e: SubmitEvent) {
     e.preventDefault();
     if (!valid || submitting) return;
+    sumOpen = false;
     submitting = true;
     try {
       const run = await hub.api.createRun(config);
@@ -218,6 +240,30 @@
 
   const pct2 = (v: number) => `${Math.round(v * 100)}%`;
 </script>
+
+{#snippet estimates(withName: boolean)}
+  <dl class="est">
+    {#if withName}<dt>Run name</dt><dd class="mono">{name.trim() || '—'}</dd>{/if}
+    <dt>Data</dt><dd>{dataset ? `${dataset.name} · ${compact(dataset.splits.train)} images` : '—'}</dd>
+    <dt>Model</dt><dd class="mono">{arch}</dd>
+    <dt>Steps / epoch</dt><dd class="num">{num(est.stepsPerEpoch)}</dd>
+    <dt>Est. time</dt><dd class="num">{roughDuration(est.totalSeconds)} <span class="faint">(~{num(Math.round(est.imgsPerS / 10) * 10, 0)} img/s)</span></dd>
+    {#if !onCpu && gpu}
+      <dt>Est. GPU memory</dt>
+      <dd class="num" class:warn={vramPct > 0.9}>{roughBytes(est.vramBytes)} <span class="faint">/ {bytes(gpu.memory_bytes, prefs.units)}</span></dd>
+    {/if}
+  </dl>
+  {#if !onCpu && gpu}
+    <div class="vram" aria-hidden="true"><i class:warn={vramPct > 0.9} style:width={pct2(Math.min(1, vramPct))}></i></div>
+  {/if}
+  {#if vramPct > 1}
+    <p class="warning" role="alert">
+      <TriangleAlert size={14} /> This likely runs out of GPU memory. Try batch {Math.max(1, Math.floor(batchN / Math.ceil(vramPct)))} or a smaller image size.
+    </p>
+  {:else if onCpu}
+    <p class="warning soft"><TriangleAlert size={14} /> Training on the CPU is roughly 14× slower than on a GPU.</p>
+  {/if}
+{/snippet}
 
 <Page title="New training run">
   {#snippet sub()}<span>Pick data and a model size; the defaults are tuned to work well. Everything else is optional.</span>{/snippet}
@@ -262,7 +308,9 @@
         </Panel>
 
         <Panel title="2 · Model" id="sec-model">
-          <div class="arches" class:specs={specsOpen} role="radiogroup" aria-label="Model size">
+          <div class="arches" role="radiogroup" aria-label="Model size">
+            <!-- Up to 1199 px the cards become single-line rows; this is their column header. -->
+            <div class="a-head" aria-hidden="true"><span class="a-head-lead"></span><span>Params</span><span>GFLOPs</span><span>Latency</span></div>
             {#each arches as a (a.arch)}
               {@const on = a.arch === arch}
               <label class="arch" class:on>
@@ -278,10 +326,6 @@
               </label>
             {/each}
           </div>
-          <button type="button" class="specs-toggle" aria-expanded={specsOpen} onclick={() => (specsOpen = !specsOpen)}>
-            <ChevronRight size={14} aria-hidden="true" />{specsOpen ? 'Hide specs' : 'Compare specs'}
-            <span class="faint">params, GFLOPs, latency</span>
-          </button>
           <p class="ref">Latency is a reference figure: RTX 4080-class GPU, 640 px input, fp32, one image.</p>
           <div class="row2">
             <Field label="Start from" for="weights" hint="Fine-tuning from a trained model converges much faster.">
@@ -335,10 +379,19 @@
 
         <Panel title="4 · Augmentation" id="sec-aug">
           {#snippet actions()}
-            <Button size="sm" variant="ghost" icon={Shuffle} onclick={() => shuffle++}>New samples</Button>
-            <Button size="sm" variant="ghost" icon={RotateCcw} onclick={() => (augment = structuredClone(defaults))}>Defaults</Button>
+            <span class="aug-actions" class:shut={!augOpen}>
+              <Button size="sm" variant="ghost" icon={Shuffle} onclick={() => shuffle++}>New samples</Button>
+              <Button size="sm" variant="ghost" icon={RotateCcw} onclick={() => (augment = structuredClone(defaults))}>Defaults</Button>
+            </span>
           {/snippet}
-          <div class="aug">
+          <button type="button" class="aug-toggle" aria-expanded={augOpen} aria-controls="aug-body" onclick={() => (augOpen = !augOpen)}>
+            <ChevronRight size={14} aria-hidden="true" />
+            <span class="aug-line num">
+              {#each augLine as it, i (it.k)}{#if i > 0}<span class="sep" aria-hidden="true">·</span>{/if}<span class:changed={it.changed}>{it.k} {it.v}</span>{/each}
+            </span>
+            <span class="aug-verb">{augOpen ? 'Hide' : 'Edit'}</span>
+          </button>
+          <div class="aug" id="aug-body" class:shut={!augOpen}>
             <div class="aug-controls">
               {#snippet ctl(k: AugKey, children: import('svelte').Snippet)}
                 <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -388,26 +441,7 @@
             <Field label="Run name" for="name" error={errors.name}>
               <Input id="name" bind:value={name} oninput={() => (nameEdited = true)} invalid={!!errors.name} spellcheck="false" autocomplete="off" />
             </Field>
-            <dl class="est">
-              <dt>Data</dt><dd>{dataset ? `${dataset.name} · ${compact(dataset.splits.train)} images` : '—'}</dd>
-              <dt>Model</dt><dd class="mono">{arch}</dd>
-              <dt>Steps / epoch</dt><dd class="num">{num(est.stepsPerEpoch)}</dd>
-              <dt>Est. time</dt><dd class="num">{roughDuration(est.totalSeconds)} <span class="faint">(~{num(Math.round(est.imgsPerS / 10) * 10, 0)} img/s)</span></dd>
-              {#if !onCpu && gpu}
-                <dt>Est. GPU memory</dt>
-                <dd class="num" class:warn={vramPct > 0.9}>{roughBytes(est.vramBytes)} <span class="faint">/ {bytes(gpu.memory_bytes, prefs.units)}</span></dd>
-              {/if}
-            </dl>
-            {#if !onCpu && gpu}
-              <div class="vram" aria-hidden="true"><i class:warn={vramPct > 0.9} style:width={pct2(Math.min(1, vramPct))}></i></div>
-            {/if}
-            {#if vramPct > 1}
-              <p class="warning" role="alert">
-                <TriangleAlert size={14} /> This likely runs out of GPU memory. Try batch {Math.max(1, Math.floor(batchN / Math.ceil(vramPct)))} or a smaller image size.
-              </p>
-            {:else if onCpu}
-              <p class="warning soft"><TriangleAlert size={14} /> Training on the CPU is roughly 14× slower than on a GPU.</p>
-            {/if}
+            {@render estimates(false)}
             <div class="start" bind:this={startEl}>
               <Button type="submit" variant="primary" size="lg" icon={Play} block loading={submitting} disabled={!valid}>Start training</Button>
             </div>
@@ -424,13 +458,26 @@
 
       <!-- Narrow screens: the summary sits below the form, so keep the essentials and the action in reach. -->
       <div class="dock" class:away={startVisible} role="region" aria-label="Start training" inert={startVisible}>
-        <span class="dock-est num">
+        <button type="button" class="dock-est num" aria-haspopup="dialog" aria-label="Show the run summary" onclick={() => (sumOpen = true)}>
           <span>{roughDuration(est.totalSeconds)}</span>
           {#if !onCpu && gpu}<span class:warn={vramPct > 0.9}>{roughBytes(est.vramBytes)} VRAM</span>{/if}
           {#if dataset}<span class="faint">{dataset.name} · {arch}</span>{/if}
-        </span>
+          <span class="dock-more"><ChevronUp size={14} strokeWidth={1.75} aria-hidden="true" /></span>
+        </button>
         <Button type="submit" variant="primary" size="lg" icon={Play} loading={submitting} disabled={!valid}>Start training</Button>
       </div>
+
+      <!-- Inside the form, so its Start button submits it. -->
+      <Dialog bind:open={sumOpen} title="Summary" size="sm">
+        <div class="sum">
+          {@render estimates(true)}
+          {#if firstError && prefilled}<p class="warning" role="alert"><TriangleAlert size={14} /> {firstError}</p>{/if}
+        </div>
+        {#snippet footer()}
+          <Button variant="ghost" onclick={() => (sumOpen = false)}>Keep editing</Button>
+          <Button type="submit" variant="primary" icon={Play} loading={submitting} disabled={!valid}>Start training</Button>
+        {/snippet}
+      </Dialog>
     </form>
   {/if}
 </Page>
@@ -642,7 +689,8 @@
     background: var(--warning-solid);
   }
   .ds-pick,
-  .specs-toggle {
+  .a-head,
+  .aug-toggle {
     display: none;
   }
   .ds-line {
@@ -654,23 +702,51 @@
   .ds-line .mono {
     color: var(--text-tertiary);
   }
-  .specs-toggle {
+  .aug-toggle {
     align-items: center;
     gap: var(--space-2);
-    min-height: 44px;
-    margin-top: var(--space-1);
+    min-height: var(--control-lg);
+    margin-top: calc(-1 * var(--space-1));
+    padding: 0 var(--space-2);
+    margin-inline: calc(-1 * var(--space-2));
+    width: calc(100% + 2 * var(--space-2));
+    border-radius: var(--radius-md);
     color: var(--text-secondary);
-    font-weight: var(--weight-medium);
+    font-size: var(--type-sm-size);
+    text-align: left;
   }
-  .specs-toggle :global(svg) {
+  .aug-toggle:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+  }
+  .aug-toggle > :global(svg) {
+    flex-shrink: 0;
     transition: transform var(--dur-fast) var(--ease-standard);
   }
-  .specs-toggle[aria-expanded='true'] :global(svg) {
+  .aug-toggle[aria-expanded='true'] > :global(svg) {
     transform: rotate(90deg);
   }
-  .specs-toggle .faint {
-    font-weight: var(--weight-regular);
-    font-size: var(--type-xs-size);
+  .aug-line {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .aug-line .sep {
+    margin-inline: var(--space-1-5);
+    color: var(--text-tertiary);
+  }
+  .aug-line .changed {
+    color: var(--text-primary);
+    font-weight: var(--weight-medium);
+  }
+  .aug-verb {
+    flex-shrink: 0;
+    color: var(--text-tertiary);
+  }
+  .aug-actions {
+    display: contents;
   }
   .warning {
     display: flex;
@@ -808,9 +884,22 @@
     }
     .dock-est {
       display: flex;
+      align-items: center;
       gap: var(--space-3);
+      min-height: var(--control-lg);
+      padding: 0 var(--space-2);
+      border-radius: var(--radius-md);
       color: var(--text-secondary);
       font-size: var(--type-sm-size);
+      text-align: left;
+    }
+    .dock-est:hover {
+      background: var(--bg-hover);
+      color: var(--text-primary);
+    }
+    .dock-more {
+      display: grid;
+      color: var(--text-tertiary);
     }
     .dock-est .warn {
       color: var(--warning-text);
@@ -821,8 +910,78 @@
     .summary {
       position: static;
     }
+    /* Model sizes as single-line rows: letter, name, note, then the three specs in columns. */
     .arches {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
+      --a-cols: 16px auto minmax(0, 1fr) repeat(3, 72px) 14px;
+      grid-template-columns: minmax(0, 1fr);
+      gap: var(--space-1);
+    }
+    .a-head,
+    .arch {
+      grid-template-columns: var(--a-cols);
+      align-items: center;
+      column-gap: var(--space-3);
+    }
+    .a-head {
+      display: grid;
+      padding: 0 calc(var(--space-3) + 1px) var(--space-1);
+      font-size: var(--type-sm-size);
+      color: var(--text-tertiary);
+      text-align: right;
+    }
+    .a-head-lead {
+      grid-column: 1 / -5;
+    }
+    .arch {
+      gap: 0 var(--space-3);
+      align-content: center;
+      min-height: 36px;
+      padding: 0 var(--space-3);
+    }
+    .a-top,
+    .a-bars {
+      display: contents;
+    }
+    .a-size {
+      font-size: var(--type-md-size);
+      line-height: var(--type-md-line);
+      letter-spacing: 0;
+    }
+    .arch.on .a-name {
+      visibility: visible;
+      color: var(--text-secondary);
+    }
+    .a-note {
+      grid-column: 3;
+      grid-row: 1;
+      min-height: 0;
+      color: var(--text-tertiary);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .a-row {
+      display: block;
+      text-align: right;
+      white-space: nowrap;
+    }
+    .a-row .faint {
+      display: none;
+    }
+    .arch .tick {
+      position: static;
+      grid-column: -2;
+      grid-row: 1;
+    }
+    .aug-toggle {
+      display: flex;
+    }
+    .aug.shut,
+    .aug-actions.shut {
+      display: none;
+    }
+    .aug-toggle[aria-expanded='true'] {
+      margin-bottom: var(--space-3);
     }
   }
   .dock-est .faint {
@@ -838,10 +997,19 @@
       padding: var(--space-2) var(--space-4);
     }
     .dock-est {
+      position: relative;
       flex-wrap: wrap;
       gap: 0 var(--space-3);
       min-width: 0;
+      margin-left: calc(-1 * var(--space-2));
+      padding: var(--space-1) var(--space-6) var(--space-1) var(--space-2);
       line-height: var(--type-sm-line);
+    }
+    .dock-more {
+      position: absolute;
+      right: var(--space-2);
+      top: 50%;
+      transform: translateY(-50%);
     }
     .dock-est .faint {
       display: block;
@@ -863,20 +1031,22 @@
     .cards {
       display: none;
     }
-    /* Model cards: size, name and note (80-96 px); the specs open on request. */
+    /* Model rows: the note gives way so the three specs keep their columns; 44 px touch rows. */
+    .arches {
+      --a-cols: 16px minmax(0, 1fr) repeat(3, 52px) 14px;
+    }
+    .a-head,
     .arch {
-      gap: 2px;
-      padding: var(--space-2) var(--space-3);
-      min-height: 80px;
+      column-gap: var(--space-2);
+    }
+    .a-head {
+      padding-inline: calc(var(--space-3) + 1px);
+    }
+    .arch {
+      min-height: 44px;
     }
     .a-note {
-      min-height: 0;
-    }
-    .arches:not(.specs) .a-bars {
       display: none;
-    }
-    .specs-toggle {
-      display: flex;
     }
     .fields,
     .aug {
