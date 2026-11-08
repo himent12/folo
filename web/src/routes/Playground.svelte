@@ -315,8 +315,8 @@
           ? hub.api.predict(input, { model_id: id, ...FETCH }, ctrl.signal).then((p) => simulate(p, on))
           : engine.predict({
               modelId: id,
-              weightsKey: file ? `file:${file.name}:${file.size}:${file.lastModified}` : id,
-              weights: () => (file ? file.arrayBuffer() : hub.api.modelWeights(id)),
+              file: file ?? null,
+              download: () => hub.api.modelWeights(id),
               backend: on,
               image: () => imageBlob(s, ctrl.signal),
               options: { conf: FETCH.conf, iou: FETCH.iou, maxDet: FETCH.max_det },

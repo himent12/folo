@@ -20,14 +20,14 @@ export interface DetectorInfo {
   classes: string[];
 }
 
-interface Detector {
+export interface Detector {
   readonly backend: Backend;
   info(): DetectorInfo;
   detect(image: ImageData, width?: number, height?: number, options?: { conf?: number; iou?: number; maxDet?: number }): Promise<Prediction>;
   free(): void;
 }
 
-interface WasmModule {
+export interface WasmModule {
   default(): Promise<unknown>;
   FoloDetector: { load(bytes: Uint8Array, options: { backend: Backend; modelId: string }): Promise<Detector> };
 }
@@ -85,31 +85,47 @@ export class BrowserEngine {
   /** The detector that ran the latest prediction. */
   info = $state.raw<DetectorInfo | null>(null);
 
-  #detectors = new Map<string, Promise<Detector>>();
+  #detectors = new Map<string, Entry>();
   #runtimeReady = false;
 
+  /** `load` provides the folo-wasm module and `decode` an image's pixels (tests pass fakes). */
+  constructor(
+    readonly load: () => Promise<WasmModule> = loadWasm,
+    readonly decode: (image: Blob) => Promise<ImageData> = toImageData,
+  ) {}
+
   /**
-   * Runs `modelId` on an image in the browser. `weightsKey` identifies the weights (a model id, or a file the user
-   * picked); `weights` fetches them, only when that key is not loaded on this backend yet.
+   * Runs `modelId` on an image in the browser. `file` is a .folo the user picked for this model; without one the
+   * weights come from `download` (the server). Either is read only when that model and source are not loaded on
+   * this backend yet.
    */
   async predict(req: {
     modelId: string;
-    weightsKey: string;
-    weights: () => Promise<ArrayBuffer>;
+    file: File | null;
+    download: () => Promise<ArrayBuffer>;
     backend: Backend;
     image: () => Promise<Blob>;
     options: { conf: number; iou: number; maxDet: number };
   }): Promise<Prediction> {
-    const det = await this.#detector(req);
-    this.phase = 'ready';
-    const pixels = await toImageData(await req.image());
-    const p = await det.detect(pixels, undefined, undefined, req.options);
-    this.info = det.info();
-    return p;
+    const entry = this.#detector(req);
+    entry.users++;
+    try {
+      const det = await entry.detector;
+      this.phase = 'ready';
+      const pixels = await this.decode(await req.image());
+      const p = await det.detect(pixels, undefined, undefined, req.options);
+      this.info = det.info();
+      return p;
+    } finally {
+      entry.users--;
+      this.#release(entry);
+    }
   }
 
-  #detector(req: { modelId: string; weightsKey: string; weights: () => Promise<ArrayBuffer>; backend: Backend }): Promise<Detector> {
-    const key = `${req.weightsKey}|${req.backend}`;
+  #detector(req: { modelId: string; file: File | null; download: () => Promise<ArrayBuffer>; backend: Backend }): Entry {
+    // One detector per model, weights source and backend: the same file picked for two models loads twice, since
+    // a detector stamps its model id on every result.
+    const key = `${req.modelId}|${req.file ? `file#${fileId(req.file)}` : 'server'}|${req.backend}`;
     const hit = this.#detectors.get(key);
     if (hit) {
       // Most recently used last.
@@ -117,26 +133,49 @@ export class BrowserEngine {
       this.#detectors.set(key, hit);
       return hit;
     }
-    const p = (async () => {
+    const detector = (async () => {
       if (!this.#runtimeReady) this.phase = 'runtime';
-      const m = await loadWasm();
+      const m = await this.load();
       this.#runtimeReady = true;
       this.phase = 'weights';
-      const bytes = new Uint8Array(await req.weights());
+      const bytes = new Uint8Array(await (req.file ? req.file.arrayBuffer() : req.download()));
       this.phase = 'compile';
       return m.FoloDetector.load(bytes, { backend: req.backend, modelId: req.modelId });
     })();
-    this.#detectors.set(key, p);
-    p.catch(() => {
-      if (this.#detectors.get(key) === p) this.#detectors.delete(key);
+    const entry: Entry = { detector, users: 0, evicted: false };
+    this.#detectors.set(key, entry);
+    detector.catch(() => {
+      if (this.#detectors.get(key) === entry) this.#detectors.delete(key);
     });
     while (this.#detectors.size > KEEP) {
-      const [old, d] = this.#detectors.entries().next().value!;
+      const [old, e] = this.#detectors.entries().next().value!;
       this.#detectors.delete(old);
-      d.then((x) => x.free(), () => {});
+      e.evicted = true;
+      this.#release(e);
     }
-    return p;
+    return entry;
   }
+
+  /** Frees an evicted detector once no request is using it. */
+  #release(e: Entry) {
+    if (e.evicted && e.users === 0) e.detector.then((d) => d.free(), () => {});
+  }
+}
+
+interface Entry {
+  detector: Promise<Detector>;
+  /** Requests using it right now: an evicted detector is freed only when they are done. */
+  users: number;
+  evicted: boolean;
+}
+
+/** A stable identity per picked file (two files can share name, size and time). */
+const fileIds = new WeakMap<Blob, number>();
+let nextFileId = 0;
+function fileId(f: Blob): number {
+  let id = fileIds.get(f);
+  if (id === undefined) fileIds.set(f, (id = ++nextFileId));
+  return id;
 }
 
 /** Decodes an image to RGBA pixels (EXIF orientation applied, as browsers display it). */

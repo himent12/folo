@@ -47,6 +47,14 @@ export function mergeBy<T>(a: T[], b: T[], key: (x: T) => number): T[] {
   return out;
 }
 
+/**
+ * Steps per epoch is fixed for a run once the trainer has counted it (0 before): a snapshot taken earlier, even one
+ * applied later, never takes a learned figure back.
+ */
+function keepStepsPerEpoch(next: Run, cur: Run | null | undefined): Run {
+  return !(next.steps_per_epoch > 0) && cur?.id === next.id && cur.steps_per_epoch > 0 ? { ...next, steps_per_epoch: cur.steps_per_epoch } : next;
+}
+
 /** The server's history rule for one new step: it replaces every step from it on, and the epochs from its epoch on. */
 function replaceFrom(steps: Step[], epochs: Epoch[], s: Step): [Step[], Epoch[]] {
   return [[...steps.filter((x) => x.step < s.step), s], epochs.filter((e) => e.epoch < s.epoch)];
@@ -191,7 +199,7 @@ export class LiveRun {
             const gen = this.#gen;
             snapshot().then((snap) => {
               if (closed || seq !== this.#statusSeq || gen !== this.#gen || !snap.claim()) return;
-              this.run = snap.run;
+              this.run = keepStepsPerEpoch(snap.run, this.run);
             }, () => {});
           }
         },
@@ -328,6 +336,7 @@ export class LiveRun {
     const last = this.steps[this.steps.length - 1];
     if (last && last.step > next.step && ['running', 'stopping'].includes(next.status))
       next = { ...next, step: last.step, epoch: last.epoch, eta_s: last.eta_s };
+    next = keepStepsPerEpoch(next, this.run);
     // During a replay the snapshot may still count the interrupted attempt: progress follows the steps held.
     if (this.#replay && live) next = { ...next, step: last?.step ?? 0, epoch: last?.epoch ?? this.epochs[this.epochs.length - 1]?.epoch ?? 0 };
     for (const e of this.epochs)

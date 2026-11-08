@@ -1,0 +1,87 @@
+import { describe, expect, it } from 'vitest';
+import type { Prediction } from '$lib/api/types';
+import { BrowserEngine, type Backend, type Detector, type WasmModule } from './browser.svelte';
+
+/** A fake folo-wasm: counts loads, records frees, and lets a test hold a detect call open. */
+function fakeWasm() {
+  const loads: string[] = [];
+  const freed: string[] = [];
+  let hold: Promise<void> | null = null;
+  const mod: WasmModule = {
+    default: async () => {},
+    FoloDetector: {
+      load: async (bytes, { backend, modelId }) => {
+        const tag = `${modelId}:${bytes[0]}:${backend}`;
+        loads.push(tag);
+        let alive = true;
+        const det: Detector = {
+          backend,
+          info: () => ({ backend, device: backend === 'webgpu' ? 'gpu:0' : 'cpu', adapter: null, fallback: null, arch: 'folo-n', imgsz: 64, classes: [] }),
+          detect: async () => {
+            if (hold) await hold;
+            if (!alive) throw new Error('detector was freed');
+            return { model_id: modelId, image: { width: 1, height: 1 }, boxes: [], timing: { preprocess_ms: 0, inference_ms: 0, postprocess_ms: 0, total_ms: 0 }, device: 'cpu', backend } as Prediction;
+          },
+          free: () => {
+            alive = false;
+            freed.push(tag);
+          },
+        };
+        return det;
+      },
+    },
+  };
+  return { mod, loads, freed, holdUntil: (p: Promise<void> | null) => (hold = p) };
+}
+
+const pixels = async () => ({ data: new Uint8ClampedArray(4), width: 1, height: 1 }) as ImageData;
+const req = (modelId: string, file: File | null, backend: Backend = 'cpu', byte = 1) => ({
+  modelId,
+  file,
+  download: async () => new Uint8Array([byte]).buffer,
+  backend,
+  image: async () => new Blob(),
+  options: { conf: 0.01, iou: 1, maxDet: 1000 },
+});
+
+describe('BrowserEngine', () => {
+  it('loads a model once per backend and reuses it', async () => {
+    const w = fakeWasm();
+    const e = new BrowserEngine(async () => w.mod, pixels);
+    await e.predict(req('m1', null));
+    await e.predict(req('m1', null));
+    await e.predict(req('m1', null, 'webgpu'));
+    expect(w.loads).toEqual(['m1:1:cpu', 'm1:1:webgpu']);
+  });
+
+  it('never answers for one model with a detector loaded for another, even from the same file', async () => {
+    const w = fakeWasm();
+    const e = new BrowserEngine(async () => w.mod, pixels);
+    const f = new File([new Uint8Array([7])], 'best.folo', { lastModified: 1 });
+    expect((await e.predict(req('m1', f))).model_id).toBe('m1');
+    expect((await e.predict(req('m2', f))).model_id).toBe('m2');
+    // Another file with the same name, size and time is another file.
+    const g = new File([new Uint8Array([9])], 'best.folo', { lastModified: 1 });
+    await e.predict(req('m1', g));
+    expect(w.loads).toEqual(['m1:7:cpu', 'm2:7:cpu', 'm1:9:cpu']);
+  });
+
+  it('frees an evicted detector only after the requests using it are done', async () => {
+    const w = fakeWasm();
+    const e = new BrowserEngine(async () => w.mod, pixels);
+    await e.predict(req('m1', null));
+    let release!: () => void;
+    w.holdUntil(new Promise<void>((r) => (release = r)));
+    const busy = e.predict(req('m1', null));
+    await new Promise((r) => setTimeout(r, 0));
+    w.holdUntil(null);
+    // Two more models evict m1 while its request is still detecting.
+    await e.predict(req('m2', null));
+    await e.predict(req('m3', null));
+    expect(w.freed).toEqual([]);
+    release();
+    expect((await busy).model_id).toBe('m1');
+    await new Promise((r) => setTimeout(r, 0));
+    expect(w.freed).toEqual(['m1:1:cpu']);
+  });
+});
