@@ -492,10 +492,11 @@ export const scenes = [
     fullPage: true,
     viewports: ['desktop', 'mobile'],
     setup: async (page) => {
+      // The panel lives in the collapsed Engine benchmarks fold: open that, then its own "How this was measured".
+      await until(page, 'details.bench > summary');
+      await page.locator('details.bench > summary').first().click();
       await until(page, '#engine-speed');
-      const how = page.locator('#engine-speed summary', { hasText: 'How this was measured' });
-      if (!(await how.isVisible())) await page.locator('summary', { hasText: /Engine benchmarks/ }).first().click();
-      await how.click();
+      await page.locator('#engine-speed summary', { hasText: 'How this was measured' }).click();
     },
   },
   { name: 'playground-empty', path: '/playground', setup: (page) => until(page, 'button.sample') },
@@ -626,8 +627,9 @@ export const scenes = [
     path: '/models',
     viewports: ['desktop', 'mobile'],
     setup: async (page) => {
-      await until(page, 'details.bench summary');
-      await page.locator('details.bench summary').click();
+      // The outer Engine benchmarks fold (the panel inside has a "How this was measured" fold of its own).
+      await until(page, 'details.bench > summary');
+      await page.locator('details.bench > summary').first().click();
       await page.mouse.move(0, 0);
     },
   },
