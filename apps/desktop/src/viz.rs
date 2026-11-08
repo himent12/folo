@@ -1,0 +1,269 @@
+//! Images with detection boxes, painted on a canvas.
+//!
+//! Boxes follow design/README.md: a 2 px stroke in the class colour wrapped by a 1 px halo so it
+//! reads on any photo, square corners (boxes are measurements), and a label chip on the box's
+//! top-left corner outside the box, moved inside when it would leave the image.
+
+use std::sync::Arc;
+
+use gpui::{
+    App, BorderStyle, Bounds, Corners, Edges, FontWeight, Hsla, Pixels, Point, RenderImage, SharedString,
+    TextRun, Window, fill, point, px, quad, size, transparent_black,
+};
+
+use crate::theme::{MONO, SANS, Theme, alpha, tokens, ty};
+
+#[derive(Clone, Debug)]
+pub struct DrawBox {
+    pub class: u32,
+    pub x1: f32,
+    pub y1: f32,
+    pub x2: f32,
+    pub y2: f32,
+    pub label: Option<SharedString>,
+    pub score: Option<f32>,
+    /// Ground truth drawn as a dashed-look thin outline instead of a solid detection box.
+    pub truth: bool,
+    pub highlight: bool,
+    pub dim: bool,
+}
+
+impl DrawBox {
+    pub fn new(class: u32, x1: f32, y1: f32, x2: f32, y2: f32) -> Self {
+        Self { class, x1, y1, x2, y2, label: None, score: None, truth: false, highlight: false, dim: false }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Fit {
+    /// Fill the bounds, cropping overflow (grid tiles).
+    Cover,
+    /// Fit inside the bounds, letterboxed (inspector, playground).
+    Contain,
+}
+
+/// Where an image of `w` × `h` lands inside `b` for a fit, zoom (1 = fit) and pan (px).
+pub fn image_rect(b: Bounds<Pixels>, w: f32, h: f32, fit: Fit, zoom: f32, pan: (f32, f32)) -> Bounds<Pixels> {
+    let (bw, bh) = (f32::from(b.size.width), f32::from(b.size.height));
+    let s = match fit {
+        Fit::Cover => (bw / w).max(bh / h),
+        Fit::Contain => (bw / w).min(bh / h),
+    } * zoom;
+    let (dw, dh) = (w * s, h * s);
+    let x = f32::from(b.left()) + (bw - dw) / 2. + pan.0;
+    let y = f32::from(b.top()) + (bh - dh) / 2. + pan.1;
+    Bounds::new(point(px(x), px(y)), size(px(dw), px(dh)))
+}
+
+fn run(text: &str, family: &'static str, weight: FontWeight, color: Hsla) -> TextRun {
+    TextRun {
+        len: text.len(),
+        font: gpui::Font {
+            weight,
+            features: gpui::FontFeatures(Arc::new(vec![("tnum".into(), 1)])),
+            ..gpui::font(family)
+        },
+        color,
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    }
+}
+
+/// Paint an image (or a placeholder well while it loads) with boxes in image pixel coordinates.
+#[allow(clippy::too_many_arguments)]
+pub fn paint_image_with_boxes(
+    t: &Theme,
+    window: &mut Window,
+    cx: &mut App,
+    bounds: Bounds<Pixels>,
+    img: Option<&Arc<RenderImage>>,
+    (w, h): (f32, f32),
+    boxes: &[DrawBox],
+    fit: Fit,
+    zoom: f32,
+    pan: (f32, f32),
+    labels: bool,
+    corner: f32,
+) {
+    let rect = image_rect(bounds, w.max(1.), h.max(1.), fit, zoom, pan);
+    window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
+        match img {
+            Some(img) => {
+                let r = if fit == Fit::Cover { corner } else { 0. };
+                let _ = window.paint_image(rect, Corners::all(px(r)), img.clone(), 0, false);
+            }
+            None => window.paint_quad(fill(rect, t.bg_raised)),
+        }
+        let sx = f32::from(rect.size.width) / w.max(1.);
+        let sy = f32::from(rect.size.height) / h.max(1.);
+        let to = |x: f32, y: f32| point(rect.left() + px(x * sx), rect.top() + px(y * sy));
+        let halo = rgba(tokens::CLASS_HALO);
+        let chip_text = rgba(tokens::CLASS_CHIP_TEXT);
+        // Dimmed boxes first, highlighted last, so focus sits on top.
+        let mut order: Vec<&DrawBox> = boxes.iter().collect();
+        order.sort_by_key(|b| (b.highlight as u8, !b.dim as u8));
+        // Label chips already placed, so later chips can step around them.
+        let mut placed: Vec<Bounds<Pixels>> = Vec::new();
+        for b in order {
+            let color = t.class(b.class);
+            let a = if b.dim { 0.6 } else { 1.0 };
+            let p1 = to(b.x1, b.y1);
+            let p2 = to(b.x2, b.y2);
+            let r = Bounds::from_corners(p1, p2);
+            if b.truth {
+                // Ground truth: thin outline in the class colour over a halo, no label chip.
+                window.paint_quad(quad(
+                    r.dilate(px(1.)),
+                    px(0.),
+                    transparent_black(),
+                    px(1.),
+                    alpha(halo, 0.6 * a),
+                    BorderStyle::Solid,
+                ));
+                window.paint_quad(quad(
+                    r,
+                    px(0.),
+                    transparent_black(),
+                    px(1.),
+                    alpha(color, 0.9 * a),
+                    BorderStyle::Dashed,
+                ));
+                continue;
+            }
+            if b.highlight {
+                window.paint_quad(fill(r, alpha(color, tokens::CLASS_FILL_OPACITY * 1.6)));
+            }
+            let stroke = if b.highlight { 3. } else { 2. };
+            window.paint_quad(quad(
+                r.dilate(px(1.)),
+                px(0.),
+                transparent_black(),
+                px(1.),
+                alpha(halo, a * 0.8),
+                BorderStyle::Solid,
+            ));
+            window.paint_quad(quad(
+                r,
+                px(0.),
+                transparent_black(),
+                Edges::all(px(stroke)),
+                alpha(color, a),
+                BorderStyle::Solid,
+            ));
+            if labels && (b.label.is_some() || b.score.is_some()) {
+                let fs = ty::XS.size;
+                let name = b.label.clone().unwrap_or_default();
+                let score = b.score.map(|s| format!("{s:.2}")).unwrap_or_default();
+                let name_line = window.text_system().shape_line(
+                    name.clone(),
+                    px(fs),
+                    &[run(&name, SANS, FontWeight::MEDIUM, chip_text)],
+                    None,
+                );
+                let score_line = window.text_system().shape_line(
+                    score.clone().into(),
+                    px(fs),
+                    &[run(&score, MONO, FontWeight::MEDIUM, alpha(chip_text, 0.72))],
+                    None,
+                );
+                let gap = if score.is_empty() || name.is_empty() { px(0.) } else { px(5.) };
+                let cw = name_line.width + gap + score_line.width + px(10.);
+                let ch = px(16.);
+                // Preferred spots: above the top-left corner, inside it, below the bottom-left
+                // corner, inside the bottom-left. Take the first that is on the image and free.
+                let clamp_x = |x: Pixels| x.min(bounds.right() - cw).max(bounds.left());
+                let candidates = [
+                    point(clamp_x(r.left() - px(1.)), r.top() - ch - px(1.)),
+                    point(clamp_x(r.left() + px(1.)), r.top() + px(1.)),
+                    point(clamp_x(r.left() - px(1.)), r.bottom() + px(1.)),
+                    point(clamp_x(r.left() + px(1.)), r.bottom() - ch - px(1.)),
+                ];
+                let fits = |o: Point<Pixels>| {
+                    o.y >= bounds.top().max(rect.top()) && o.y + ch <= bounds.bottom().min(rect.bottom())
+                };
+                let free = |c: &Bounds<Pixels>| !placed.iter().any(|p| p.intersects(c));
+                let origin = candidates
+                    .iter()
+                    .copied()
+                    .find(|o| fits(*o) && free(&Bounds::new(*o, size(cw, ch))))
+                    .or_else(|| candidates.iter().copied().find(|o| fits(*o)))
+                    .unwrap_or(candidates[1]);
+                let chip = Bounds::new(origin, size(cw, ch));
+                placed.push(chip);
+                window.paint_quad(fill(chip, alpha(color, a)).corner_radii(px(tokens::radius::XS)));
+                let ty_ = origin.y + px(1.5);
+                let _ = name_line.paint(point(origin.x + px(5.), ty_), px(13.), window, cx);
+                let _ = score_line.paint(
+                    point(origin.x + px(5.) + name_line.width + gap, ty_),
+                    px(13.),
+                    window,
+                    cx,
+                );
+            }
+        }
+    });
+}
+
+fn rgba(v: u32) -> Hsla {
+    gpui::rgba(v).into()
+}
+
+/// Map a window point to image pixel coordinates (for hover hit-testing).
+pub fn to_image(
+    bounds: Bounds<Pixels>,
+    (w, h): (f32, f32),
+    fit: Fit,
+    zoom: f32,
+    pan: (f32, f32),
+    p: Point<Pixels>,
+) -> (f32, f32) {
+    let rect = image_rect(bounds, w, h, fit, zoom, pan);
+    let x = f32::from(p.x - rect.left()) / f32::from(rect.size.width) * w;
+    let y = f32::from(p.y - rect.top()) / f32::from(rect.size.height) * h;
+    (x, y)
+}
+
+/// Index of the smallest box containing an image point.
+pub fn hit_box(boxes: &[DrawBox], x: f32, y: f32) -> Option<usize> {
+    boxes
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| x >= b.x1 && x <= b.x2 && y >= b.y1 && y <= b.y2)
+        .min_by(|a, b| {
+            ((a.1.x2 - a.1.x1) * (a.1.y2 - a.1.y1)).total_cmp(&((b.1.x2 - b.1.x1) * (b.1.y2 - b.1.y1)))
+        })
+        .map(|(i, _)| i)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn contain_letterboxes_and_cover_crops() {
+        let b = Bounds::new(point(px(0.), px(0.)), size(px(200.), px(100.)));
+        let c = image_rect(b, 100., 100., Fit::Contain, 1.0, (0., 0.));
+        assert_eq!((f32::from(c.size.width), f32::from(c.left())), (100., 50.));
+        let v = image_rect(b, 100., 100., Fit::Cover, 1.0, (0., 0.));
+        assert_eq!((f32::from(v.size.width), f32::from(v.top())), (200., -50.));
+    }
+
+    #[test]
+    fn mapping_round_trips() {
+        let b = Bounds::new(point(px(10.), px(20.)), size(px(400.), px(300.)));
+        let (x, y) = to_image(b, (640., 480.), Fit::Contain, 2.0, (13., -7.), {
+            let r = image_rect(b, 640., 480., Fit::Contain, 2.0, (13., -7.));
+            point(r.left() + r.size.width / 4., r.top() + r.size.height / 2.)
+        });
+        assert!((x - 160.).abs() < 0.01 && (y - 240.).abs() < 0.01);
+    }
+
+    #[test]
+    fn hit_prefers_smallest() {
+        let boxes = vec![DrawBox::new(0, 0., 0., 100., 100.), DrawBox::new(1, 10., 10., 20., 20.)];
+        assert_eq!(hit_box(&boxes, 15., 15.), Some(1));
+        assert_eq!(hit_box(&boxes, 50., 50.), Some(0));
+        assert_eq!(hit_box(&boxes, 150., 50.), None);
+    }
+}
