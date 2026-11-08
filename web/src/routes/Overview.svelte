@@ -99,14 +99,8 @@
       {#if runs.error && !runs.data}
         <Panel title="Training"><ErrorState error={runs.error} retry={() => runs.refresh()} compact /></Panel>
       {:else if !runs.data}
-        <!-- The live card's frame (header, stat column, two charts), so nothing jumps when it arrives. -->
-        <div class="live-sk" aria-busy="true" aria-label="Loading training">
-          <div class="lsk-head"><Skeleton w="72px" h="20px" r="var(--radius-full)" /><Skeleton w="180px" h="20px" /><Skeleton w="min(360px, 70%)" h="14px" /></div>
-          <div class="lsk-body">
-            <div class="lsk-stats"><Skeleton w="96px" h="40px" /><Skeleton h="4px" /><div class="lsk-grid">{#each [0, 1, 2, 3] as i (i)}<Skeleton h="44px" />{/each}</div></div>
-            <ChartSkeleton height={200} />
-          </div>
-        </div>
+        <!-- The live card itself with placeholder values, so nothing jumps when it arrives. -->
+        <LiveRunCard run={null} />
       {:else if live}
         {#key live.id}<LiveRunCard run={live} dataset={dsById.get(live.config.dataset_id)} />{/key}
       {:else}
@@ -368,39 +362,11 @@
     gap: var(--space-4);
     min-width: 0;
   }
-  .live,
-  .live-sk {
+  .live {
     min-width: 0;
   }
   .scroll {
     overflow-x: auto;
-  }
-  .live-sk {
-    display: grid;
-    gap: var(--space-4);
-    padding: var(--space-4);
-    border: 1px solid var(--line-subtle);
-    border-radius: var(--radius-lg);
-    background: var(--bg-panel);
-  }
-  .lsk-head {
-    display: grid;
-    gap: var(--space-2);
-  }
-  .lsk-body {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(0, 2fr);
-    gap: var(--space-4);
-  }
-  .lsk-stats {
-    display: grid;
-    gap: var(--space-3);
-    align-content: start;
-  }
-  .lsk-grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: var(--space-3);
   }
   /* Skeleton bars centred in the line box of the text they stand for (13/20 body, 12/16 meta). */
   .l-20,
@@ -415,11 +381,6 @@
   .l-20.end,
   .l-16.end {
     justify-content: flex-end;
-  }
-  @media (max-width: 1023px) {
-    .lsk-body {
-      grid-template-columns: minmax(0, 1fr);
-    }
   }
   .run-name {
     display: block;

@@ -13,12 +13,14 @@
   import { href } from '$lib/router.svelte';
   import Button from '$lib/ui/Button.svelte';
   import Progress from '$lib/ui/Progress.svelte';
+  import Skeleton from '$lib/ui/Skeleton.svelte';
   import Stat from '$lib/ui/Stat.svelte';
   import StatusBadge from '$lib/ui/StatusBadge.svelte';
 
-  let { run: initial, dataset }: { run: Run; dataset?: Dataset } = $props();
+  /** `run: null` while the runs load: the same card with real labels and placeholder values, so nothing moves. */
+  let { run: initial, dataset }: { run: Run | null; dataset?: Dataset } = $props();
 
-  const runId = $derived(initial.id);
+  const runId = $derived(initial?.id ?? null);
   const live = new LiveRun(() => runId);
   const run = $derived(live.run ?? initial);
 
@@ -46,51 +48,69 @@
 
   const horizon = $derived.by(() => {
     void live.version;
+    if (!run) return [0, 1] as [number, number];
     return runHorizon(Math.max(live.epochs.length, run.step / Math.max(1, stepsPerEpoch(run, live.steps))), run.epochs, true, 'observed');
   });
-  const progress = $derived(runProgress(run));
+  const progress = $derived(run ? runProgress(run) : 0);
 
   // The device this run is using, live: its own label, plus load only from the GPU it actually trains on.
   const sys = new Resource((s) => hub.api.system(s), { poll: 2000 });
-  const deviceText = $derived(deviceLine(run, sys.data?.gpus ?? []));
+  const deviceText = $derived(run ? deviceLine(run, sys.data?.gpus ?? []) : '');
 </script>
 
-<section class="card" aria-labelledby="live-title">
+<section class="card" aria-labelledby={run ? 'live-title' : undefined} aria-label={run ? undefined : 'Loading training'} aria-busy={!run}>
   <header>
     <div class="title-row">
-      <StatusBadge status={run.status} />
-      <h2 id="live-title"><a href={href(`/runs/${run.id}`)}>{run.name}</a></h2>
+      {#if run}
+        <StatusBadge status={run.status} />
+        <h2 id="live-title"><a href={href(`/runs/${run.id}`)}>{run.name}</a></h2>
+      {:else}
+        <Skeleton w="80px" h="20px" r="var(--radius-full)" />
+        <h2>&#8203;<Skeleton inline w="min(160px, 30vw)" h="16px" /></h2>
+      {/if}
     </div>
     <p class="meta">
-      <span>{dataset?.name ?? run.config.dataset_id}</span><span class="sep">·</span>
-      <span class="mono">{run.config.arch}</span><span class="sep">·</span>
-      <span>{run.config.imgsz} px · batch {run.config.batch}</span><span class="sep">·</span>
-      <span class="truncate num">{deviceText}</span>
+      {#if run}
+        <span>{dataset?.name ?? run.config.dataset_id}</span><span class="sep">·</span>
+        <span class="mono">{run.config.arch}</span><span class="sep">·</span>
+        <span>{run.config.imgsz} px · batch {run.config.batch}</span><span class="sep">·</span>
+        <span class="truncate num">{deviceText}</span>
+      {:else}
+        <!-- The trailing span takes the place of the device, which phones hide. -->
+        <span>&#8203;<Skeleton inline w="min(280px, 60vw)" h="10px" /></span><span></span>
+      {/if}
     </p>
-    <div class="cta"><Button size="sm" variant="ghost" iconRight={ArrowRight} href={href(`/runs/${run.id}`)}>Open run</Button></div>
+    <div class="cta">
+      {#if run}<Button size="sm" variant="ghost" iconRight={ArrowRight} href={href(`/runs/${run.id}`)}>Open run</Button>{:else}<Skeleton w="88px" h="var(--control-sm)" />{/if}
+    </div>
   </header>
 
   <div class="body">
     <div class="stats">
       <div class="epoch">
-        <Stat label="Epoch" value={num(run.epoch)} unit="/ {run.epochs}" size="lg" />
+        <Stat label="Epoch" value={run ? num(run.epoch) : ''} unit={run ? `/ ${run.epochs}` : undefined} size="lg" loading={!run} />
         <Progress value={progress} size="sm" label="Training progress" />
         <p class="eta num">
-          <span>{(progress * 100).toFixed(1)}%</span>
-          <span>{run.eta_s !== null ? `${duration(run.eta_s)} left` : '—'}</span>
+          {#if run}
+            <span>{(progress * 100).toFixed(1)}%</span>
+            <span>{run.eta_s !== null ? `${duration(run.eta_s)} left` : '—'}</span>
+          {:else}
+            <span>&#8203;<Skeleton inline w="40px" h="10px" /></span><span>&#8203;<Skeleton inline w="64px" h="10px" /></span>
+          {/if}
         </p>
       </div>
       <div class="grid">
-        <Stat label="Best mAP50-95" value={metric(run.best?.map50_95)} sub={run.best ? `epoch ${run.best.epoch}` : 'after first epoch'} />
-        <Stat label="Throughput" value={num(charts.lastStep?.imgs_per_s, 0)} unit="img/s" />
-        <Stat label="Learning rate" value={lr(charts.lastStep?.lr)} />
-        <Stat label="Loss" value={num(charts.lastStep?.loss.total, 3)} sub="last step, raw" />
+        <Stat label="Best mAP50-95" value={metric(run?.best?.map50_95)} sub={run?.best ? `epoch ${run.best.epoch}` : 'after first epoch'} loading={!run} />
+        <Stat label="Throughput" value={num(charts.lastStep?.imgs_per_s, 0)} unit="img/s" loading={!run} />
+        <Stat label="Learning rate" value={lr(charts.lastStep?.lr)} loading={!run} />
+        <Stat label="Loss" value={num(charts.lastStep?.loss.total, 3)} sub="last step, raw" loading={!run} />
       </div>
     </div>
     <div class="chart">
       <p class="chart-title">Validation mAP <span class="faint">by epoch</span></p>
-      {#if live.loading}
-        <ChartSkeleton height={narrow ? 140 : 200} />
+      {#if !run || live.loading}
+        <!-- Phones: the legend (note and two values) wraps to two rows. -->
+        <ChartSkeleton height={narrow ? 140 : 200} legendRows={narrow ? 2 : 1} />
       {:else}
         <LineChart
           series={charts.map}

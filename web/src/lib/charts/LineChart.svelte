@@ -14,6 +14,12 @@
     area?: boolean;
     /** Thin, recessive line (e.g. raw values under a smoothed line); hidden from legend and tooltip. */
     ghost?: boolean;
+    /**
+     * Context line (e.g. each class under their mean): 1 px in `--chart-context`, which holds >= 3:1 on the plot
+     * without opacity, so it stays traceable while the emphasised series carry weight and ink. Like a ghost it is
+     * hidden from the legend, the readout and end labels; `color` is ignored.
+     */
+    context?: boolean;
     /** Thicker line drawn above the others (e.g. a mean over many thin per-class lines). */
     emphasis?: boolean;
     /**
@@ -236,7 +242,7 @@
   const ends = $derived.by(() => {
     if (!showEnds) return [];
     const out = visible
-      .filter((s) => !s.ghost)
+      .filter((s) => !s.ghost && !s.context)
       .map((s) => {
         const p = s.points[s.points.length - 1];
         return p && Number.isFinite(p.y)
@@ -257,7 +263,7 @@
   });
 
   // ---- hover / keyboard cursor ----
-  const keyed = $derived(visible.filter((s) => !s.ghost && !s.lower));
+  const keyed = $derived(visible.filter((s) => !s.ghost && !s.context && !s.lower));
   const longestSeries = $derived(keyed.reduce<Series | undefined>((m, s) => (!m || s.points.length > m.points.length ? s : m), undefined));
 
   const hover = $derived.by(() => {
@@ -452,10 +458,11 @@
               class:dashed={s.dashed}
               class:dotted={s.pattern === 'dot'}
               class:ghost={s.ghost}
+              class:context={s.context}
               class:emphasis={s.emphasis || (highlight !== null && s.id === highlight)}
-              class:faded={highlight !== null && s.id !== highlight && !s.ghost}
+              class:faded={highlight !== null && s.id !== highlight && !s.ghost && !s.context}
               {d}
-              style:stroke={s.color}
+              style:stroke={s.context ? undefined : s.color}
               style:stroke-dasharray={dashOf(s)}
             />
           {/each}
@@ -634,6 +641,10 @@
   .line.ghost {
     stroke-width: 1;
     opacity: 0.28;
+  }
+  .line.context {
+    stroke: var(--chart-context);
+    stroke-width: 1;
   }
   .band {
     stroke: none;

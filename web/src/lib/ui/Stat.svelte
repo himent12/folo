@@ -1,6 +1,7 @@
 <script lang="ts">
   /** A labelled metric: small label, big tabular value, optional unit and a secondary line. */
   import type { Snippet } from 'svelte';
+  import Skeleton from './Skeleton.svelte';
 
   let {
     label,
@@ -9,6 +10,7 @@
     sub,
     size = 'md',
     tone,
+    loading = false,
   }: {
     label: string;
     value: string;
@@ -16,14 +18,21 @@
     sub?: Snippet | string;
     size?: 'sm' | 'md' | 'lg';
     tone?: 'accent' | 'danger';
+    /** The label is real; the value (and sub, when given) are placeholders in their exact line boxes. */
+    loading?: boolean;
   } = $props();
 </script>
 
 <div class="stat {size}">
   <span class="label">{label}</span>
-  <span class="value {tone ?? ''}">{value}{#if unit}<span class="unit">{unit}</span>{/if}</span>
-  {#if sub}
-    <span class="sub">{#if typeof sub === 'string'}{sub}{:else}{@render sub()}{/if}</span>
+  {#if loading}
+    <span class="value ph"><Skeleton w={size === 'lg' ? '96px' : '64px'} h={size === 'lg' ? '28px' : size === 'sm' ? '12px' : '16px'} /></span>
+    {#if sub}<span class="sub ph"><Skeleton w="72px" h="10px" /></span>{/if}
+  {:else}
+    <span class="value {tone ?? ''}">{value}{#if unit}<span class="unit">{unit}</span>{/if}</span>
+    {#if sub}
+      <span class="sub">{#if typeof sub === 'string'}{sub}{:else}{@render sub()}{/if}</span>
+    {/if}
   {/if}
 </div>
 
@@ -65,6 +74,13 @@
     line-height: var(--type-3xl-line);
     letter-spacing: var(--type-3xl-tracking);
     font-weight: var(--weight-semibold);
+  }
+  .ph {
+    display: flex;
+    align-items: center;
+  }
+  .sub.ph {
+    height: var(--type-sm-line);
   }
   .value.accent {
     color: var(--accent-text);

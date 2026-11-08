@@ -20,6 +20,7 @@
   import ErrorState from '$lib/ui/ErrorState.svelte';
   import Panel from '$lib/ui/Panel.svelte';
   import Skeleton from '$lib/ui/Skeleton.svelte';
+  import { cmIndex } from './model/confusion';
   import ExportDialog from './model/ExportDialog.svelte';
   import PrCurves from './model/PrCurves.svelte';
 
@@ -107,6 +108,21 @@
       if (sum >= 20 && m > 0 && (!worst || m / sum > worst.v)) worst = { r, v: m / sum };
     }
     return total ? { v: miss / total, worst } : null;
+  });
+
+  // The summary points into the matrix: each figure is a button that reveals its cell (on a phone the matrix scrolls
+  // sideways, so the background column starts out of view).
+  let matrixView = $state<ConfusionMatrix>();
+  const confusedCell = $derived.by(() => {
+    if (!cm || !confused) return null;
+    const r = cmIndex(confused.r, cm.ids);
+    const c = cmIndex(confused.c, cm.ids);
+    return r === null || c === null ? null : { r, c };
+  });
+  const missedCell = $derived.by(() => {
+    if (!cm || !missed?.worst) return null;
+    const r = cmIndex(missed.worst.r, cm.ids);
+    return r === null ? null : { r, c: cm.classes.length };
   });
 
   let exportOpen = $state(false);
@@ -268,20 +284,33 @@
              consequential cells lead (a phone's matrix scrolls sideways, hiding the background column), and the
              reading notes follow the matrix. -->
         <div class="cm-layout">
-          <div class="cm-main"><ConfusionMatrix classes={cm.classes} classIds={cm.ids} matrix={cm.matrix} label="Confusion matrix of {m.name}" sparseLabels minCell={32} scale /></div>
+          <div class="cm-main"><ConfusionMatrix bind:this={matrixView} classes={cm.classes} classIds={cm.ids} matrix={cm.matrix} label="Confusion matrix of {m.name}" sparseLabels minCell={32} scale /></div>
           {#if confused || missed}
             <dl class="cm-sum">
               {#if confused}
                 <div>
                   <dt>Most confused</dt>
-                  <dd><b>{m.classes[confused.r]}</b> → <b>{m.classes[confused.c]}</b> <span class="num">{num(confused.v * 100, 1)}%</span></dd>
+                  <dd>
+                    {#snippet pair()}<b>{m.classes[confused.r]}</b> → <b>{m.classes[confused.c]}</b> <span class="num">{num(confused.v * 100, 1)}%</span>{/snippet}
+                    {#if confusedCell}
+                      {@const at = confusedCell}
+                      <button type="button" class="go" title="Show in the matrix" onclick={() => matrixView?.reveal(at.r, at.c)}>{@render pair()}</button>
+                    {:else}{@render pair()}{/if}
+                  </dd>
                 </div>
               {/if}
               {#if missed}
                 <div>
                   <dt>Missed (background)</dt>
                   <dd>
-                    {#if missed.worst}<b>{m.classes[missed.worst.r]}</b> <span class="num">{num(missed.worst.v * 100, 1)}%</span><span class="sep" aria-hidden="true">·</span>{/if}<span
+                    {#if missed.worst}
+                      {@const w = missed.worst}
+                      {#snippet worst()}<b>{m.classes[w.r]}</b> <span class="num">{num(w.v * 100, 1)}%</span>{/snippet}
+                      {#if missedCell}
+                        {@const at = missedCell}
+                        <button type="button" class="go" title="Show in the matrix" onclick={() => matrixView?.reveal(at.r, at.c)}>{@render worst()}</button>
+                      {:else}{@render worst()}{/if}<span class="sep" aria-hidden="true">·</span>
+                    {/if}<span
                       class="num">{num(missed.v * 100, 1)}%</span> overall
                   </dd>
                 </div>
@@ -418,6 +447,8 @@
     display: grid;
     grid-template-columns: 128px minmax(0, 1fr);
     gap: var(--space-3);
+    /* The label sits on the figure's baseline, also when the figure is a taller touch target. */
+    align-items: baseline;
   }
   .cm-sum dt {
     color: var(--text-tertiary);
@@ -430,6 +461,25 @@
   .cm-sum .num {
     color: var(--text-primary);
     font-weight: var(--weight-medium);
+  }
+  /* A figure that points at its cell: reads as a link (ink, underline), the cell takes the selection stroke. */
+  .go {
+    display: inline;
+    color: inherit;
+    text-decoration: underline;
+    text-decoration-color: var(--line-strong);
+    text-underline-offset: 3px;
+    text-align: left;
+  }
+  .go:hover {
+    text-decoration-color: currentColor;
+  }
+  @media (pointer: coarse) {
+    /* 20 px of text + 12 px above and below: a 44 px target. */
+    .go {
+      display: inline-block;
+      padding-block: var(--space-3);
+    }
   }
   .cm-notes {
     grid-area: notes;

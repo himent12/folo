@@ -2,7 +2,8 @@
   /**
    * Confusion matrix: rows are true classes, columns predicted, plus a "background" row/column for misses and false
    * positives. Cells are row-normalised and shaded on one sequential luminance ramp in ink (the diagonal is told apart
-   * by position, not hue), counts on hover.
+   * by position, not hue), counts on hover. `reveal(r, c)` lets a summary elsewhere point at one cell: it scrolls the
+   * cell into view and makes it the active cell, whose counts the readout states.
    */
   import { classColor } from '$lib/design/tokens';
   import { prefs } from '$lib/prefs.svelte';
@@ -71,8 +72,23 @@
     const last = Math.max(first, Math.min(n, Math.floor(end / step + 0.05)));
     range = { first, last };
   }
-  const scrollEnd = () =>
-    root.scrollTo({ left: root.scrollWidth, behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+  const behavior = (): ScrollBehavior => (matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth');
+  const scrollEnd = () => root.scrollTo({ left: root.scrollWidth, behavior: behavior() });
+
+  /**
+   * Shows the cell at row `r`, column `c` (indices into `classes`; `classes.length` is background) and makes it the
+   * active cell: scrolled into view past the pinned row labels, focused (so the keyboard continues from it and a
+   * screen reader reads it), marked and stated by the readout.
+   */
+  export function reveal(r: number, c: number) {
+    const cell = root?.querySelector<HTMLElement>(`[data-r="${r}"][data-c="${c}"]`);
+    if (!cell) return;
+    focus = { r, c };
+    cell.focus({ preventScroll: true });
+    hovered = pinned = { r, c };
+    // scroll-padding keeps the cell clear of the sticky row labels and the faded right edge.
+    cell.scrollIntoView({ block: 'center', inline: 'nearest', behavior: behavior() });
+  }
   $effect(() => {
     if (!fixed) return;
     onscroll();
@@ -139,6 +155,7 @@
         <div
           class="cell"
           class:hl={hovered && (hovered.r === r || hovered.c === c)}
+          class:pin={pinned !== null && pinned.r === r && pinned.c === c}
           role="gridcell"
           tabindex={focus.r === r && focus.c === c ? 0 : -1}
           data-r={r}
@@ -193,6 +210,8 @@
     /* Cells grow with the panel up to 56 px, so a wide panel does not turn the matrix into a wall. */
     grid-template-columns: 96px repeat(var(--n), minmax(var(--min-cell), 56px));
     overscroll-behavior-x: contain;
+    /* Scrolling a cell into view stops short of the pinned labels (96 + 2 px gap) and the 24 px fade. */
+    scroll-padding-inline: 98px 24px;
   }
   .cm.more-r {
     mask-image: linear-gradient(to left, transparent, #000 24px);
@@ -286,6 +305,12 @@
   }
   .cell.hl {
     box-shadow: inset 0 0 0 1px var(--line-strong);
+  }
+  /* The active cell (tapped, or pointed at from a summary): a selection stroke; keyboard focus has its own ring. */
+  .cell.pin:not(:focus-visible) {
+    box-shadow:
+      inset 0 0 0 2px var(--accent-line),
+      inset 0 0 0 3px var(--bg-panel);
   }
   /* Low cells sit near the well, high cells near the ink; the label takes the far extreme (see `flip`). */
   :global([data-theme='dark']) .cell span {

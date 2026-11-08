@@ -84,4 +84,40 @@ describe('BrowserEngine', () => {
     await new Promise((r) => setTimeout(r, 0));
     expect(w.freed).toEqual(['m1:1:cpu']);
   });
+
+  it('frees a detector evicted while it was still loading, once its request is done', async () => {
+    const w = fakeWasm();
+    const e = new BrowserEngine(async () => w.mod, pixels);
+    let release!: () => void;
+    const slow = new Promise<void>((r) => (release = r));
+    const first = e.predict({ ...req('m1', null), download: async () => (await slow, new Uint8Array([1]).buffer) });
+    await e.predict(req('m2', null));
+    await e.predict(req('m3', null));
+    expect(w.freed).toEqual([]);
+    release();
+    expect((await first).model_id).toBe('m1');
+    await new Promise((r) => setTimeout(r, 0));
+    expect(w.freed).toEqual(['m1:1:cpu']);
+  });
+
+  it('releases a detector after a request that failed, and drops a load that failed', async () => {
+    const w = fakeWasm();
+    let failDecode = true;
+    const e = new BrowserEngine(async () => w.mod, async (b) => {
+      if (failDecode) throw new Error('not an image');
+      void b;
+      return pixels();
+    });
+    await expect(e.predict(req('m1', null))).rejects.toThrow('not an image');
+    failDecode = false;
+    // The failed request did not pin m1: evicting it frees it.
+    await e.predict(req('m2', null));
+    await e.predict(req('m3', null));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(w.freed).toEqual(['m1:1:cpu']);
+    // A failed download is not cached: the next request loads again.
+    await expect(e.predict({ ...req('m4', null), download: () => Promise.reject(new Error('offline')) })).rejects.toThrow('offline');
+    await e.predict(req('m4', null));
+    expect(w.loads.filter((l) => l.startsWith('m4'))).toEqual(['m4:1:cpu']);
+  });
 });

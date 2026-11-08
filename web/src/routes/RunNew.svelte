@@ -628,7 +628,8 @@
   .arch:hover {
     border-color: var(--line-strong);
   }
-  /* Selection: a strong edge on the selection tint and a small ink check; lime stays for the Start button and focus. */
+  /* Selection: a strong edge on a neutral fill and a small ink check; lime stays for the Start button and focus.
+     (bg.selected is lime-tinted, for selected rows; a chosen card is a static choice, so it stays neutral.) */
   .card,
   .arch {
     position: relative;
@@ -636,7 +637,7 @@
   .card.on,
   .arch.on {
     border-color: var(--line-strong);
-    background: var(--bg-selected);
+    background: var(--bg-active);
   }
   .tick {
     position: absolute;

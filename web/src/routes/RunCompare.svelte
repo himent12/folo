@@ -136,10 +136,31 @@
   let managing = $state(false);
   let tableEl = $state<HTMLElement>();
   let tableMore = $state(false);
+  /** Run columns (1-based) fully in view while the table scrolls sideways; null when every run fits. */
+  let tableRange = $state<{ first: number; last: number } | null>(null);
   function measureTable() {
     const el = tableEl;
     tableMore = !!el && el.scrollLeft + el.clientWidth < el.scrollWidth - 1;
+    if (!el || el.scrollWidth <= el.clientWidth + 1) {
+      tableRange = null;
+      return;
+    }
+    // In view = at least 80 % of the column between the pinned setting column and the right edge.
+    const ths = [...el.querySelectorAll<HTMLElement>('thead th')];
+    const left = el.scrollLeft + (ths[0]?.offsetWidth ?? 0);
+    const right = el.scrollLeft + el.clientWidth;
+    let first = 0;
+    let last = 0;
+    ths.slice(1).forEach((th, i) => {
+      if (th.offsetLeft + th.offsetWidth * 0.2 >= left - 1 && th.offsetLeft + th.offsetWidth * 0.8 <= right) {
+        first ||= i + 1;
+        last = i + 1;
+      }
+    });
+    tableRange = first ? { first, last } : null;
   }
+  const scrollTableEnd = () =>
+    tableEl?.scrollTo({ left: tableEl.scrollWidth, behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
   $effect(() => {
     const el = tableEl;
     if (!el) return;
@@ -237,6 +258,16 @@
 
     {#if chosen.length}
       <Panel title="Side by side" meta={sameRows.length ? `${diffRows.length} settings differ` : undefined} pad="none" id="cmp-table">
+        {#if tableRange}
+          <!-- What the sideways scroll hides: the runs in view, and a way to the others. -->
+          <p class="t-range num">
+            {tableRange.first === tableRange.last ? `Run ${tableRange.first}` : `Runs ${tableRange.first}–${tableRange.last}`} of {chosen.length}{#if tableRange.last < chosen.length}<span class="sep" aria-hidden="true">·</span><button
+                type="button"
+                class="more"
+                onclick={scrollTableEnd}>Scroll for {chosen.length - tableRange.last} more →</button
+              >{/if}
+          </p>
+        {/if}
         <div class="scroll" class:more={tableMore} bind:this={tableEl} onscroll={measureTable}>
           <table class="table">
             <thead>
@@ -393,12 +424,38 @@
   .manage {
     display: none;
   }
+  .t-range {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    min-height: 24px;
+    padding: var(--space-2) var(--space-4) 0;
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--text-tertiary);
+  }
+  .t-range .sep {
+    margin-inline: var(--space-2);
+  }
+  .t-range .more {
+    color: var(--text-secondary);
+    text-decoration: underline;
+    text-decoration-color: var(--line-strong);
+    text-underline-offset: 3px;
+  }
+  .t-range .more:hover {
+    color: var(--text-primary);
+  }
   @media (max-width: 767px) {
-    /* Phones: the legend is two columns of compact rows (key, name, value); open / remove appear with Edit. */
+    /* Phones: the legend is one column of full-width rows (key, name, value), so every run's whole name shows;
+       open / remove appear with Edit. */
     .chips {
       display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
+      grid-template-columns: minmax(0, 1fr) auto;
       gap: 0 var(--space-3);
+    }
+    .chips .chip {
+      grid-column: 1 / -1;
     }
     .chips .at {
       grid-column: 1;
@@ -416,11 +473,12 @@
     .chips .chip {
       display: grid;
       grid-template-columns: minmax(0, 1fr) auto;
+      align-items: center;
       border-radius: 0;
       border-width: 0 0 1px;
       background: none;
       padding: 0;
-      height: 44px;
+      min-height: 44px;
     }
     .chips:not(.managing) .chip .open,
     .chips:not(.managing) .chip .rm {
@@ -431,7 +489,7 @@
     }
     .chips.managing .chip {
       grid-template-columns: minmax(0, 1fr) auto 44px 44px;
-      height: 48px;
+      min-height: 48px;
     }
     .chips.managing .manage {
       grid-column: 1;
@@ -441,9 +499,24 @@
       display: none;
     }
     .chips .chip .key {
-      height: 44px;
+      min-height: 44px;
+      height: auto;
       margin-left: 0;
-      padding-left: 0;
+      padding: var(--space-1) 0;
+    }
+    /* A name too long for the row wraps instead of ending in an ellipsis: compared runs often differ only in the
+       suffix (shapes-hard-s / -m), which must stay visible. */
+    .chips .chip .key {
+      text-align: left;
+    }
+    .chips .chip .nm {
+      white-space: normal;
+      overflow-wrap: anywhere;
+      display: -webkit-box;
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 2;
+      line-clamp: 2;
+      line-height: var(--type-sm-line);
     }
     .chips .chip .open,
     .chips .chip .rm {

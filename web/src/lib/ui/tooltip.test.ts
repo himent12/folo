@@ -21,4 +21,49 @@ describe('tooltip', () => {
     t.destroy();
     b.remove();
   });
+
+  it('shows for keyboard focus inside a wrapper and describes the focused button', () => {
+    vi.useFakeTimers();
+    const wrap = document.createElement('span');
+    const b = document.createElement('button');
+    wrap.appendChild(b);
+    document.body.appendChild(wrap);
+    const t = tooltip(wrap, { text: 'Zoom in', keys: '+' });
+    const visible = vi.spyOn(b, 'matches').mockImplementation((sel: string) => sel === ':focus-visible' || Element.prototype.matches.call(b, sel));
+    b.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+    vi.advanceTimersByTime(10);
+    expect(document.getElementById('folo-tooltip')?.hasAttribute('data-show')).toBe(true);
+    expect(b.getAttribute('aria-describedby')).toBe('folo-tooltip');
+    expect(wrap.hasAttribute('aria-describedby')).toBe(false);
+    b.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+    expect(document.getElementById('folo-tooltip')?.hasAttribute('data-show')).toBe(false);
+    expect(b.hasAttribute('aria-describedby')).toBe(false);
+    visible.mockRestore();
+    t.destroy();
+    wrap.remove();
+  });
+
+  it('describes one element at a time: hover the first button, focus the second, destroy', () => {
+    vi.useFakeTimers();
+    const wrap = document.createElement('span');
+    const a = document.createElement('button');
+    const b = document.createElement('button');
+    a.setAttribute('aria-describedby', 'hint-a');
+    wrap.append(a, b);
+    document.body.appendChild(wrap);
+    const t = tooltip(wrap, 'Zoom');
+    wrap.dispatchEvent(new PointerEvent('pointerenter'));
+    vi.advanceTimersByTime(500);
+    expect(a.getAttribute('aria-describedby')).toBe('hint-a folo-tooltip');
+    const visible = vi.spyOn(b, 'matches').mockImplementation((sel: string) => sel === ':focus-visible' || Element.prototype.matches.call(b, sel));
+    b.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+    vi.advanceTimersByTime(10);
+    expect(a.getAttribute('aria-describedby')).toBe('hint-a');
+    expect(b.getAttribute('aria-describedby')).toBe('folo-tooltip');
+    t.destroy();
+    expect(a.getAttribute('aria-describedby')).toBe('hint-a');
+    expect(b.hasAttribute('aria-describedby')).toBe(false);
+    visible.mockRestore();
+    wrap.remove();
+  });
 });

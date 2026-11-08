@@ -149,14 +149,17 @@
     {#snippet lead()}
       <StatusBadge status={run.status} />
       <span class="mono faint id">{run.id}</span>
+      <!-- Phones: the time joins the status, so the meta line below fits one row. -->
+      <span class="faint when-phone">{run.started ? `started ${ago(run.started)}` : `created ${ago(run.created)}`}</span>
       {#if live.connection === 'reconnecting'}<Badge tone="warning"><WifiOff size={12} /> Reconnecting</Badge>{/if}
     {/snippet}
     {#snippet sub()}
       <a class="link" href={href(`/datasets/${run.config.dataset_id}`)}>{dataset?.name ?? run.config.dataset_id}</a>
       <span class="mono">{run.config.arch}</span>
-      <span>{run.config.imgsz} px · batch {run.config.batch}</span>
+      <!-- Phones: size, batch and device are in the Config section; the id is in the URL. -->
+      <span class="cfg">{run.config.imgsz} px · batch {run.config.batch}</span>
       <span class="truncate dev">{run.device}</span>
-      <span class="faint">{run.started ? `started ${ago(run.started)}` : `created ${ago(run.created)}`}</span>
+      <span class="faint when">{run.started ? `started ${ago(run.started)}` : `created ${ago(run.created)}`}</span>
     {/snippet}
     {#snippet actions()}
       <span class="wide-only">
@@ -341,6 +344,10 @@
   }
   .id {
     font-size: var(--type-xs-size);
+  }
+  .when-phone {
+    display: none;
+    font-size: var(--type-sm-size);
   }
   .wide-only {
     display: contents;
@@ -538,8 +545,14 @@
     .banner > :global(svg) {
       display: none;
     }
-    .dev {
+    .dev,
+    .cfg,
+    .id,
+    .when {
       display: none;
+    }
+    .when-phone {
+      display: inline;
     }
   }
 </style>

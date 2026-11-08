@@ -105,7 +105,7 @@
     <div class="kpi">
       <span class="k-label">Broken labels</span>
       <span class="k-value num" class:bad={stats.broken_labels > 0}>{num(stats.broken_labels)}</span>
-      <span class="k-sub">{stats.broken_labels > 0 ? 'skipped in training' : 'all labels parse'}</span>
+      <span class="k-sub">{stats.broken_labels > 0 ? 'not trained on' : 'all labels parse'}</span>
     </div>
   </section>
   <!-- Phones: the split counts get a full line of their own instead of truncating inside the Images cell. -->

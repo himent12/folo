@@ -70,7 +70,9 @@ app: chart plots, image canvases, code/log views. In light mode panels are white
   always labelled. Light series are ≥ 3:1 on both plot surfaces (`bg.panel`, `bg.inset`). Under tritan deficiency
   amber and magenta are the closest pair, which is why lines also carry legends with values. Grid lines `chart.grid`, axis lines `chart.axis`, tick labels `chart.label` (10 px
   Geist, tabular; decimals follow the tick step: "0 2 4 6", "0 0.2 0.4"; tiny values share one power of ten shown
-  once, "× 10⁻³"), hover cursor `chart.cursor`. Area fills under a line use the series colour at `area_opacity`. Loss
+  once, "× 10⁻³"), hover cursor `chart.cursor`. Context curves (many thin lines of one kind under an emphasised one, e.g. every
+  class under the mean PR curve) are 1 px `chart.context`, ≥ 3:1 on the panel in both themes and never faded with
+  opacity; the emphasised line carries weight and ink, highlighted entities their hue. Area fills under a line use the series colour at `area_opacity`. Loss
   components: total = `text.primary` (thicker), box = series 1, cls = series 4 (dashed), dfl = series 5 (dotted),
   everywhere a loss is drawn. Two or more series always get a legend with values, and
   run comparisons assign series slots by run, so a run keeps its colour: sky, amber, magenta, teal, with slots 3

@@ -26,7 +26,8 @@
   type Tab = 'map' | 'map50' | 'pr' | 'loss' | 'lr' | 'ips';
   let tab = $state<Tab>('map');
 
-  // Phones get a shorter plot so the samples start within the first screen.
+  // Phones get a shorter plot and fold the metric picker into the chart header, so the samples start within the
+  // first screen.
   let narrow = $state(typeof matchMedia !== 'undefined' && matchMedia('(max-width: 767px)').matches);
   $effect(() => {
     const mq = matchMedia('(max-width: 767px)');
@@ -195,8 +196,17 @@
   }
 </script>
 
+{#snippet picker()}
+  <Select
+    label="Metric to chart"
+    bind:value={tab}
+    options={tabs.map((t) => ({ value: t.id, label: `${t.label} · ${t.value}${t.unit ? ` ${t.unit}` : ''}` }))}
+  />
+{/snippet}
+
 <section class="metrics" aria-label="Run metrics">
-  <div class="strip">
+  <!-- Phones: a finished run's strip only repeats the completed banner above it (status, duration), so it goes. -->
+  <div class="strip" class:finished={run.status === 'completed'}>
     <div class="epoch">
       <span class="label">Epoch</span>
       <span class="big num">{run.epoch}<span class="of">/ {run.epochs}</span></span>
@@ -213,14 +223,9 @@
         {#if live}{(progress * 100).toFixed(1)}% · {run.eta_s !== null ? `${duration(run.eta_s)} left` : 'estimating…'}{#if closeFrom < 1}<span class="hatch-key">&nbsp;· <i aria-hidden="true"></i>no mosaic</span>{/if}{:else}{elapsed !== null ? `${duration(elapsed)} total` : '—'}{/if}
       </span>
     </div>
-    <!-- Phones: one picker instead of six cells; the chart below shows what it names. -->
-    <div class="phone-metric">
-      <Select
-        label="Metric to chart"
-        bind:value={tab}
-        options={tabs.map((t) => ({ value: t.id, label: `${t.label} · ${t.value}${t.unit ? ` ${t.unit}` : ''}` }))}
-      />
-    </div>
+    <!-- Up to 1199 px: one picker instead of six cells; the chart below shows what it names. Phones carry it in the
+         chart header instead. -->
+    {#if !narrow}<div class="phone-metric">{@render picker()}</div>{/if}
     <!-- svelte-ignore a11y_interactive_supports_focus -->
     <div class="tabs" role="tablist" aria-label="Metric to chart" {onkeydown}>
       {#each tabs as t (t.id)}
@@ -244,6 +249,7 @@
 
   <div class="chart" id="run-chart" role="tabpanel" aria-label={current.title}>
     <header>
+      {#if narrow}<div class="pick">{@render picker()}</div>{/if}
       <h2><span class="t">{current.title}</span><span class="q">{current.qualifier}</span></h2>
       <div class="ctl">
         {#if tab === 'loss'}
@@ -274,12 +280,12 @@
       </div>
     </header>
     {#if loading}
-      <ChartSkeleton height={narrow ? 180 : 320} />
+      <ChartSkeleton height={narrow ? 168 : 320} />
     {:else}
       {#key tab}
         <LineChart
           {series}
-          height={narrow ? 180 : 320}
+          height={narrow ? 168 : 320}
           {xDomain}
           xInteger
           yDomain={tab === 'map' || tab === 'map50' || tab === 'pr' ? [0, 1] : tab === 'ips' ? [0, ipsMax * 1.15] : undefined}
@@ -544,17 +550,35 @@
     .big {
       grid-row: 1 / span 2;
     }
-    .phone-metric {
-      padding: var(--space-3);
-    }
     .val {
       font-size: var(--type-lg-size);
       line-height: 28px;
     }
+    .strip.finished {
+      display: none;
+    }
     .chart {
       padding: 0 var(--space-3) var(--space-3);
     }
-    /* The picker above already names the metric: the header keeps only its qualifier (best value and epoch). */
+    /* One row: the metric picker and the range control; the qualifier (best value and epoch) on a line below. */
+    .chart header {
+      min-height: 0;
+      padding-top: var(--space-3);
+      row-gap: var(--space-2);
+    }
+    .pick {
+      flex: 1 1 160px;
+      min-width: 0;
+      max-width: 240px;
+    }
+    .ctl {
+      margin-left: auto;
+    }
+    h2 {
+      order: 1;
+      flex-basis: 100%;
+    }
+    /* The picker already names the metric: the header keeps only its qualifier (best value and epoch). */
     h2 .t {
       position: absolute;
       width: 1px;
