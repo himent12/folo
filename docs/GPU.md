@@ -45,7 +45,8 @@ whose working set is bigger than 2 GiB still reuses every buffer on the next ste
 does); when a returned buffer does not fit, the least recently freed buffers are evicted first. `trim_pool()`
 empties the lists and `pool_stats()` reports hits, misses and bytes. With a fixed 2 GiB cap that dropped the
 buffer being returned, batch-16 training thrashed the driver allocator (171 GB allocated in one benchmark run,
-batch-1 inference after it 3.5x slower).
+batch-1 inference after it 3.5x slower). `PoolStats::peak_live_bytes` is the largest `live_bytes` seen, PyTorch's
+`max_memory_allocated` counterpart (in size-class bytes); `ctx.reset_peak_memory()` restarts it.
 
 Reusing a buffer while earlier, unsubmitted work still reads it is safe. All work runs on one queue in encoding
 order, and wgpu puts barriers between dispatches that touch the same buffer. The one exception is
@@ -118,6 +119,8 @@ on every backend, including browser WebGPU; pipeline-overridable constants canno
 | top-k | `kernels::reduce::topk` | f32 → (f32, i64) | sorted, ties by index, `total_cmp` order; one thread per row |
 | pooling + gradients | `kernels::pool_grad::*` | f32 | max pooling with indices and its gather backward, avg / adaptive avg pooling and backward, upsample backward |
 | conv2d gradients | `kernels::conv::{conv2d_backward_input, conv2d_backward_weight}` | f32 | implicit GEMM (`CONV_MODE` 2 / 3) with split-K for the weight gradient, a transposed-A GEMM for 1×1 input gradients, direct depthwise kernels |
+| train-mode BatchNorm + activation | `kernels::norm::{batch_norm_forward, batch_norm_backward}` | f32 | NCHW, statistics over `N·H·W`. Forward: per-(channel, chunk) Welford partials merged with Chan's formula, a per-channel finalize (mean, `invstd`, the running-statistics update in place), then `act(x · scale + shift)`; backward: partial sums of `dz` and `dz · x̂` with the activation's derivative at the recomputed pre-activation, a finalize (`dγ`, `dβ`), then `dx`. Identity, SiLU or ReLU; 3 dispatches each way |
+| optimizer updates | `kernels::optim::optimizer_step` | f32 | in place, one thread per element: SGD (momentum, Nesterov, coupled decay), AdamW (decoupled decay, bias corrections), and `p = a·p + b·g` for EMAs, in the op order of folo-nn's CPU loops |
 
 The f16 kernels need `shader-f16`; without it they return `GpuError::Unsupported`. Everything not listed as f16
 is f32-only.
@@ -279,6 +282,14 @@ println!("{}", loss.item::<f32>()?);                  // the only wait for the G
   meet few outputs), arg-reductions to `i64`. Softmax over any dim. conv2d forward is the existing kernel; its
   gradients are the `CONV_MODE` 2 / 3 GEMMs or the depthwise kernels. Pooling, upsampling, index ops and top-k use
   the kernels in the table above.
+- **Fused ops** (folo-core's optional `Backend` hooks, each with a composite fallback on other backends):
+  `conv2d_act` is the conv kernel with bias and activation in its epilogue (`Tensor::conv2d_act`, used by folo-nn's
+  `ConvBnAct` in eval / fused mode, so a fused folo-n forward is one dispatch per conv);
+  `batch_norm_act` / `batch_norm_act_backward` are the BatchNorm kernels above (`Tensor::batch_norm_act_train`,
+  recorded by folo-nn's `BatchNorm2d` as one custom op); `optimizer_step` is the update kernel
+  (`Tensor::optimizer_step_`, used by folo-nn's SGD, AdamW and EMA on the GPU).
+- **Readback.** `download` decodes the mapped staging buffer straight into typed host storage
+  (`GpuContext::read_with`), and `Tensor::to_vec` takes that storage without another copy.
 - **No round trips.** Kernels only encode; nothing waits until a download (`to_vec`, `item`, `to_device(Cpu)`)
   or `folo_core::backend::synchronize(dev)`. Uploads flush the open batch; they do not wait. A YOLOv8n-shaped
   forward at batch 1 is 131 dispatches in one submission; forward + backward is about 2 200 dispatches in 3
@@ -292,7 +303,12 @@ println!("{}", loss.item::<f32>()?);                  // the only wait for the G
 - **Autograd** is folo-core's, unchanged: `src/tests/backend_net.rs` runs a small conv net (conv, BatchNorm from
   composite ops, SiLU, max pooling, upsample, concat) on both devices and compares every gradient, runs
   folo-core's finite-difference `grad_check` through the GPU, and checks that folo-nn's SGD and AdamW steps on GPU
-  parameters (their device-generic tensor-op paths) match the CPU.
+  parameters match the CPU. The fused ops are tested from folo-nn (`crates/folo-nn/tests/gpu.rs`: fused BatchNorm
+  against composite ops and finite differences, Conv + BN + act inference parity, every optimizer variant, a moved
+  training setup against the CPU) and folo-vision (`crates/folo-vision/tests/gpu.rs`: the detector's eval forward,
+  a training step's loss and gradients, `.folo` loading onto the GPU).
+- **Moving whole models**: `Tensor::to_device_` moves a storage in place (identity kept), and folo-nn's
+  `Module::to_device` / `Optimizer::to_device` / `ModelEma::to_device` build on it (docs/NN.md).
 
 ### Benchmark: a YOLOv8n-shaped network
 
@@ -313,12 +329,20 @@ C2f, SPPF, PAN neck with upsample + concat, a decoupled 3-scale head; 3.16 M par
 | batch 16 | i7-14700KF | 1 007 ms | 2 340 ms | 9 139 ms |
 
 The GPU is 10x the CPU at batch 1 and 57x (inference) to 81x (training) at batch 16. Batch-1 inference spends
-about 0.4 ms encoding on the CPU; repeated runs vary by about ±15% (GPU clocks on a shared desktop). Most of the
-training time is memory-bound elementwise work: BatchNorm as composite ops is about ten full passes over each
-activation forward and twice that backward, and SiLU is a separate pass. Fused Conv-BN-SiLU custom ops (folo-nn)
-and elementwise fusion are the next wins. `FOLO_BENCH_CPU=0` skips the CPU rows; `FOLO_BENCH_PROFILE=1` prints the
-encode / submit / wait split of batch-1 inference. The folo-n detector itself, and the comparison with the
-Ultralytics numbers in [BENCHMARKS.md](BENCHMARKS.md), come once folo-vision's model lands.
+about 0.4 ms encoding on the CPU; repeated runs vary by about ±15% (GPU clocks on a shared desktop). This network is
+built from plain ops: BatchNorm as composite ops is about ten full passes over each activation forward and twice
+that backward, and SiLU is a separate pass. The real detector uses the fused kernels instead (folo-nn's `ConvBnAct`
+on the GPU). `FOLO_BENCH_CPU=0` skips the CPU rows; `FOLO_BENCH_PROFILE=1` prints the encode / submit / wait split
+of batch-1 inference.
+
+### Benchmark: the folo-n / folo-s detector
+
+`cargo bench -p folo-vision --bench gpu` runs the real detector (fused inference forward, end-to-end predict,
+training step, peak memory); its numbers and the comparison with Ultralytics are in
+[BENCHMARKS.md](BENCHMARKS.md#folo-on-the-gpu). In short, folo-n at 640: 3.98 ms batch-1 forward, 1461 img/s at
+batch 16, 143 img/s training step at batch 16, 3.6 GiB training peak. The fused kernels' effect on the training step:
+the SGD update went from 62 ms (about ten elementwise dispatches and copies per parameter) to 5 ms with the fused
+update kernel.
 
 ## Known limitations / follow-ups
 
@@ -327,16 +351,13 @@ Ultralytics numbers in [BENCHMARKS.md](BENCHMARKS.md), come once folo-vision's m
 - The f16 depthwise conv is slower than the f32 one (2-byte scalar loads); vectorising it is a follow-up.
 - Timings are wall-clock; GPU timestamp queries would make small-kernel numbers more precise.
 - `max_pool2d` has no `ceil_mode`; upsampling is nearest-only.
-- Backend: no elementwise fusion yet, so composite BatchNorm and every activation are separate memory passes; the
-  conv epilogue's fused bias + activation is not reachable from folo-core ops (a fused Conv-BN-SiLU custom op in
-  folo-nn can call the kernel layer directly).
+- Backend: no general elementwise fusion. The fused paths are Conv + bias + activation (inference), BatchNorm +
+  activation (training) and the optimizer updates; other chains (residual adds, attention, the loss) are separate
+  memory passes.
 - Backend: strided convolution input gradients run the transposed-conv GEMM over every `(kh, kw)` tap and skip
   the positions the stride never touched (3/4 of the B tile is zero at stride 2); a stride-phase decomposition
   would remove that waste.
 - Backend: index ops do not report out-of-range indices (see [folo-core backend](#folo-core-backend)), and top-k
   is one thread per row (`O(k · d)`), sized for assigner-style `k`.
-- folo-nn modules build their parameters on the CPU and have no `to_device` yet, so a whole model cannot move to
-  the GPU in one call; folo-nn needs a mutable tensor visitor for that. Its optimizers work on GPU parameters
-  (tested above).
 - Backend: `Device::Gpu(0)` only; registering further adapters as `Gpu(1..)` is a few lines with
   `GpuBackend::new` but untested.

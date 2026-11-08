@@ -16,8 +16,8 @@
 //! - **peak memory**: the buffer pool's peak live bytes over the measured calls (PyTorch's
 //!   `max_memory_allocated` counterpart, in pool size classes, which round up by at most 25%).
 //!
-//! Before every section the bench prints the GPU utilisation `nvidia-smi` reports, because the GPU is shared
-//! with other jobs on the dev machine.
+//! Before every section the bench idles for a second and prints the GPU utilisation `nvidia-smi` reports,
+//! because the GPU is shared with other jobs on the dev machine.
 
 use std::hint::black_box;
 use std::time::{Duration, Instant};
@@ -79,7 +79,10 @@ fn throughput(dev: Device, iters: usize, mut f: impl FnMut()) -> f64 {
     t.elapsed().as_secs_f64() * 1e3 / iters as f64
 }
 
+/// `nvidia-smi`'s utilisation after a second of idling, so its sampling window no longer covers this
+/// process's previous section: what remains is other processes' load.
 fn gpu_load() -> String {
+    std::thread::sleep(Duration::from_secs(1));
     std::process::Command::new("nvidia-smi")
         .args(["--query-gpu=utilization.gpu,memory.used", "--format=csv,noheader"])
         .output()

@@ -5,7 +5,8 @@
 //!   raw training outputs of MODEL.md §6.3 as a [`HeadOutput`], with the anchors of the input size.
 //! - [`blocks`] and [`head`]: the blocks of MODEL.md §2 and §6.1, with MODEL.md §5's tensor names.
 //! - Inference: [`FoloModel::fuse`] folds every BatchNorm into its conv; [`FoloModel::predict_raw`] runs the
-//!   forward pass and decodes + NMSes CPU copies of the outputs with [`crate::decode`] and [`crate::nms`].
+//!   forward pass, decodes the outputs (on their device) and runs [`crate::nms`] on the host.
+//! - Devices: [`FoloModel::to_device`] moves the whole model in place; [`FoloModel::open_on`] loads onto a device.
 //! - Weights: [`FoloModel::save`], [`FoloModel::export`], [`FoloModel::from_file`] /
 //!   [`FoloModel::open`] and [`FoloModel::transfer_from`] (partial loading for a new class list) go through
 //!   folo-nn's `.folo` format (docs/FORMAT.md).

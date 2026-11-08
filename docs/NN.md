@@ -18,13 +18,20 @@ are normative, this one is the map.
   forwards the list's `visit_children` gets MODEL.md's `<p>.block0.*` names without an extra segment.
 - Mode is an atomic flag owned by the modules that need it (`BatchNorm2d`), so `train()` / `eval()` take `&self`
   and propagate with the same visitor as names.
+- **Devices.** `to_device(&mut self, Device)` moves every parameter and buffer in place (folo-core's
+  `Tensor::to_device_`): each tensor keeps its identity (`TensorId`), name, dtype and `requires_grad`, and the mode is
+  unchanged, so parameter groups, `GradAccumulator` slots and an EMA's source built earlier stay valid.
+  `Optimizer::to_device` moves the optimizer's parameters and state (SGD momentum buffers, AdamW moments),
+  `GradAccumulator::to_device` its buffers and `ModelEma::to_device` the averaged model (`ModelEma::new` also moves
+  its copy to the source's device). A whole training setup can therefore be built on the CPU and moved, even
+  mid-run (tested against an all-CPU run in `tests/gpu.rs`).
 
 ## Layers
 | layer | notes |
 |---|---|
 | `Conv2d` | groups, stride, padding, dilation, optional bias. Init per MODEL.md §2.9: weight then bias, `U(±1/sqrt(fan_in))` |
-| `BatchNorm2d` | `eps = 1e-3`, `momentum = 0.03`. Train: batch mean and biased variance, running update with the unbiased variance under `no_grad`; `N·H·W < 2` is an error. Eval: running statistics. On the CPU, train mode is one fused kernel (`f64` statistics, hand-written backward via `Tensor::custom_op`), about 5× faster than the composite ops other devices use |
-| `ConvBnAct` | MODEL.md's `Conv` (§2.1): bias-free conv, BN, activation. `fuse_()` folds the BN into the conv; `new_fused` builds the fused structure for loading `folo.fused` files |
+| `BatchNorm2d` | `eps = 1e-3`, `momentum = 0.03`. Train: batch mean and biased variance, running update with the unbiased variance under `no_grad`; `N·H·W < 2` is an error. Eval: running statistics. On the CPU, train mode is one fused kernel (`f64` statistics, hand-written backward via `Tensor::custom_op`), about 5× faster than composite ops. On the GPU, train mode is folo-gpu's fused BatchNorm kernels (Welford statistics, the running update inside the kernel, analytic backward) recorded as one `batch_norm2d_act` custom op; `forward_act(x, act)` fuses the following SiLU / ReLU in as well. Other devices compose tensor ops |
+| `ConvBnAct` | MODEL.md's `Conv` (§2.1): bias-free conv, BN, activation. `fuse_()` folds the BN into the conv; `new_fused` builds the fused structure for loading `folo.fused` files. Forward: fused → `Tensor::conv2d_act` (on the GPU one kernel with bias and activation in the epilogue when nothing is recorded); train → conv then `BatchNorm2d::forward_act`; eval on a non-CPU device → the BN folded into the conv weights on the fly (small per-channel ops, still differentiable) then `conv2d_act`; eval on the CPU → conv, BN, activation |
 | `Linear`, `Activation` (Identity, SiLU, ReLU, LeakyReLU, Sigmoid, Tanh, Hardswish), `MaxPool2d`, `Upsample` (nearest), `Concat` (several inputs, so not a `Forward`), `Identity`, `Sequential`, `ModuleList` | |
 
 `RunningStats::capture(model)` / `restore()` / `all_finite(model)` implement the non-finite batch guard of
@@ -48,7 +55,8 @@ is reproducible everywhere. Head priors (MODEL.md §6.5): `BOX_BIAS_PRIOR = 2.0`
 - `Sgd`: L2 (coupled) decay, `buf = μ·buf + g` (zero-initialised, so the first step is `buf = g`), Nesterov
   `p −= lr·(g + μ·buf)`. `AdamW`: decoupled decay `p *= 1 − lr·wd`, bias-corrected moments, global step counter.
   Both skip parameters without a gradient, update CPU tensors with fused per-element loops (parallel over
-  parameters for large steps) and fall back to tensor ops on other devices with bit-identical arithmetic.
+  parameters for large steps), use one fused update kernel per parameter on the GPU (`Tensor::optimizer_step_`,
+  same op order), and fall back to tensor ops with the same arithmetic elsewhere.
 - `GradAccumulator` sums gradients over a window of backward passes into private buffers (reused across windows),
   implements `GradSource` for the step, and does MODEL.md's global-norm clipping (`clip_grad_norm`).
 - Recipe helpers: `accumulate_steps(nbs, batch)`, `effective_weight_decay`, `auto_optimizer` (§8.2 `auto`).
@@ -60,8 +68,9 @@ is reproducible everywhere. Head priors (MODEL.md §6.5): `BOX_BIAS_PRIOR = 2.0`
   `W` with MODEL.md §8.4's formula. Each optimizer step: `sched.apply(&mut opt)` (LR and momentum of every group at
   iteration `t`; the `bias` group warms up from `warmup_bias_lr`), `opt.step(..)`, `sched.advance()`.
   `contract()` / `from_contract()` are `folo.sched`.
-- `ModelEma<M>` keeps a second instance of the model (eval mode, no grad) and updates every parameter and floating
-  buffer with `d = decay · (1 − exp(−updates / tau))`. The object-safe `EmaState` trait is what checkpoints use.
+- `ModelEma<M>` keeps a second instance of the model (eval mode, no grad, on the source's device) and updates every
+  parameter and floating buffer with `d = decay · (1 − exp(−updates / tau))` (a fused `a·p + b·g` kernel on the GPU).
+  The object-safe `EmaState` trait is what checkpoints use.
 
 ## `.folo` files (`folo_nn::io`)
 - `io::safetensors`: the container. `Container::parse` applies FORMAT.md's acceptance rules exactly (header limit,
@@ -95,4 +104,5 @@ accumulation, clipping and EMA in a step loop.
 
 ## Benchmarks
 `cargo bench -p folo-nn --bench nn` reports BatchNorm train forward + backward (fused vs composite), the SGD, AdamW
-and EMA steps over a folo-n-sized parameter set, and `.folo` save / load.
+and EMA steps over a folo-n-sized parameter set, and `.folo` save / load. The GPU paths are measured on the real
+detector by `cargo bench -p folo-vision --bench gpu` (docs/BENCHMARKS.md, "FOLO on the GPU").

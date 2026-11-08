@@ -1,4 +1,5 @@
-//! Decoding and the raw prediction path (docs/MODEL.md §6.4, §9.3): forward, then decode + NMS on CPU copies.
+//! Decoding and the raw prediction path (docs/MODEL.md §6.4, §9.3): forward, decode (on the CPU with
+//! [`crate::decode`], or as tensor ops on the outputs' device), then NMS on the host.
 
 use folo_core::{Device, Tensor, no_grad};
 use folo_nn::{Error, Module, Result};
@@ -125,7 +126,8 @@ impl HeadOutput {
 
 impl FoloModel {
     /// The predictor's model step: an eval-mode forward under `no_grad`, then decode and class-aware NMS
-    /// (`nms`, MODEL.md §9.3) of CPU copies of the outputs, images in parallel. Boxes are in network-input
+    /// (`nms`, MODEL.md §9.3) on the host, images in parallel; outputs on a GPU are decoded there and downloaded
+    /// once ([`HeadOutput::decode_on_device`]). Boxes are in network-input
     /// pixels; mapping back through the letterbox is the caller's job. Fails in training mode, where the
     /// forward would update the BatchNorm statistics.
     pub fn predict_raw(&self, x: &Tensor, nms: &NmsConfig) -> Result<RawPrediction> {

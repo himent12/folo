@@ -41,6 +41,13 @@ training and evaluation pipeline, a server, a CLI and a web studio.
 - Custom ops: `Tensor::custom_op(name, inputs, output, backward)` lets downstream crates record fused kernels
   (Conv+BN+SiLU, BatchNorm, DFL / CIoU losses) with a hand-written backward; inputs and output are version-checked
   like built-in ops and a wrong gradient count or shape is an error at `backward()`.
+- Fused ops with composite fallbacks (`ops/fused.rs`): `Tensor::conv2d_act` (conv + bias + activation),
+  `Tensor::batch_norm_act_train` / `batch_norm_act_train_backward` (train-mode BatchNorm + activation, running
+  update in place) and `Tensor::optimizer_step_` (in-place SGD / AdamW / EMA update) call optional `Backend` hooks;
+  folo-gpu implements them, other backends fall back.
+- `Tensor::to_device_(device)` moves a storage to another device **in place**: the device lives on the shared storage
+  cell, so every clone and view follows and the tensor keeps its id (gradients and optimizer state stay keyed). This
+  is how whole models move (`Module::to_device`).
 - Seeded RNG (`folo_core::rng::Rng`, xoshiro256++) for reproducible init, augmentation and tests. `Rng::ALGO`
   (`"xoshiro256pp"`), `state()` and `from_state()` save and resume the exact stream (the `folo.rng` checkpoint entry).
 
@@ -63,6 +70,10 @@ training and evaluation pipeline, a server, a CLI and a web studio.
 - `max_pool2d_backward` also receives the pooling window (`Pool2dParams`), so a backend can compute the gradient as a
   gather (each input element visits only the windows that cover it) instead of a scatter with float atomics; the
   CPU backend ignores it.
+- Optional fused hooks (`conv2d_act`, `batch_norm_act`, `batch_norm_act_backward`, `optimizer_step`) default to
+  `NotSupported`; folo-core's fused entry points then compose ordinary ops (or report "not available" so folo-nn
+  uses its own path). `batch_norm_act` and `optimizer_step` write into `&mut Storage` arguments (running statistics,
+  parameters, optimizer state) that folo-core has write-locked, checked to be contiguous and distinct.
 - `synchronize` (default no-op) waits for queued device work and reports asynchronous errors;
   `folo_core::backend::synchronize(device)` calls it. Backends may queue work lazily: only `download` (`to_vec`,
   `to_device(Cpu)`, `item`) and `synchronize` have to wait.
@@ -77,7 +88,8 @@ training and evaluation pipeline, a server, a CLI and a web studio.
 - f16 storage/compute when the adapter supports `shader-f16`, with f32 accumulation.
 - Implements folo-core's `Backend` (`folo_gpu::GpuBackend`): `folo_gpu::init()` registers the default adapter as
   `Device::Gpu(0)`, after which `tensor.to_device(Device::Gpu(0))` keeps data and every op (forward and the gradient
-  ops autograd records) on the GPU. Work is encoded into the context's open batch and only waits on readback, so
+  ops autograd records) on the GPU. It also implements the fused hooks: Conv + bias + activation in the conv
+  epilogue, train-mode BatchNorm + activation forward / backward kernels, and in-place optimizer updates. Work is encoded into the context's open batch and only waits on readback, so
   a forward + backward pass is a handful of queue submissions. Every dtype is stored (`u8` / `f16` packed into
   words, `i64` as word pairs); strided views are read in place by elementwise ops, copies and matmul.
 - A standalone `GpuTensor` over the same kernel layer stays for kernel-level work. Kernel list, layout
@@ -85,8 +97,8 @@ training and evaluation pipeline, a server, a CLI and a web studio.
 
 ## folo-nn — layers and training utilities
 - `Module` trait: `parameters()`/`named_parameters()`/`named_buffers()` (stable, dotted names like
-  `backbone.stem.conv.weight`), `train()`/`eval()` mode, submodule visitor; `Forward` adds `forward` for one-in,
-  one-out layers. Overview: [docs/NN.md](NN.md). Layers: `Conv2d` (groups, stride, padding, dilation), `BatchNorm2d` (running stats,
+  `backbone.stem.conv.weight`), `train()`/`eval()` mode, submodule visitor, `to_device()` (in place, identities
+  kept; optimizers and EMAs have their own `to_device`); `Forward` adds `forward` for one-in, one-out layers. Overview: [docs/NN.md](NN.md). Layers: `Conv2d` (groups, stride, padding, dilation), `BatchNorm2d` (running stats,
   momentum; fused into the conv for inference), `Linear`, activations (SiLU, ReLU, LeakyReLU, Sigmoid, Hardswish),
   `MaxPool2d`, `Upsample` (nearest), `Concat`, `Sequential`.
 - Init: Kaiming / Xavier uniform/normal, seeded. Optimizers: SGD (momentum, Nesterov, weight decay) and AdamW, with
@@ -118,7 +130,8 @@ The exact block definitions, layer tables, parameter names, head, loss, training
   (`reg_max`, default 16). An NMS-free one-to-one head (dual assignment during training, as in YOLOv10) is specified
   in MODEL.md but reserved for a later milestone. Implemented in `folo_vision::model`: `FoloModel::new(config)` for
   any scale and class count, `forward` → `HeadOutput { box_raw [B, 64, A], cls_raw [B, nc, A], anchors }`, `fuse()`,
-  `predict_raw` (forward + CPU decode + NMS), and `.folo` save / load / transfer through folo-nn.
+  `predict_raw` (forward + decode + NMS; decode runs on the outputs' device, NMS on the CPU), `to_device()`, and
+  `.folo` save / load (`open_on(path, device)`) / transfer through folo-nn.
 - **Loss**: task-aligned assigner (TAL: `score^alpha * IoU^beta`, top-k), BCE classification on aligned targets,
   CIoU box loss and DFL, weighted 7.5 / 0.5 / 1.5 by default. `folo_vision::loss` runs the assigner on host copies of the detached
   head outputs, then builds the terms from folo-core tensor ops (fused custom ops for the full-size BCE and gather on
