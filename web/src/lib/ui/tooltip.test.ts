@@ -21,4 +21,25 @@ describe('tooltip', () => {
     t.destroy();
     b.remove();
   });
+
+  it('shows for keyboard focus inside a wrapper and describes the focused button', () => {
+    vi.useFakeTimers();
+    const wrap = document.createElement('span');
+    const b = document.createElement('button');
+    wrap.appendChild(b);
+    document.body.appendChild(wrap);
+    const t = tooltip(wrap, { text: 'Zoom in', keys: '+' });
+    const visible = vi.spyOn(b, 'matches').mockImplementation((sel: string) => sel === ':focus-visible' || Element.prototype.matches.call(b, sel));
+    b.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+    vi.advanceTimersByTime(10);
+    expect(document.getElementById('folo-tooltip')?.hasAttribute('data-show')).toBe(true);
+    expect(b.getAttribute('aria-describedby')).toBe('folo-tooltip');
+    expect(wrap.hasAttribute('aria-describedby')).toBe(false);
+    b.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+    expect(document.getElementById('folo-tooltip')?.hasAttribute('data-show')).toBe(false);
+    expect(b.hasAttribute('aria-describedby')).toBe(false);
+    visible.mockRestore();
+    t.destroy();
+    wrap.remove();
+  });
 });

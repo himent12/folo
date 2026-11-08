@@ -1,5 +1,7 @@
 // `use:tooltip={'Text'}` or `use:tooltip={{ text, keys: 'G R', side: 'right' }}`: a small tooltip on hover (after
 // a short delay) and on keyboard focus. One shared element, positioned with fixed coordinates, so it never clips.
+// The node may be a wrapper (a span around a component's button): focus inside it shows the tooltip, and the
+// description goes on the focusable element, which is what assistive technology reads.
 
 import { formatKeys } from '$lib/keys';
 
@@ -24,16 +26,21 @@ function norm(o: TooltipOptions) {
   return typeof o === 'string' ? { text: o, side: 'top' as const } : { side: 'top' as const, ...o };
 }
 
+const FOCUSABLE = 'button, a[href], input, select, textarea, [tabindex]';
+
 export function tooltip(node: HTMLElement, opts: TooltipOptions) {
   let o = norm(opts);
+  /** The element the tooltip describes: the node, or the focusable element it wraps. */
+  let described: HTMLElement = node;
+  const target = () => (node.matches(FOCUSABLE) ? node : (node.querySelector<HTMLElement>(FOCUSABLE) ?? node));
   // The element's own aria-describedby (if any) is kept: the tooltip id is added to it, then removed again.
-  const own = () => (node.getAttribute('aria-describedby') ?? '').split(/\s+/).filter((id) => id && id !== 'folo-tooltip');
+  const own = (el: HTMLElement) => (el.getAttribute('aria-describedby') ?? '').split(/\s+/).filter((id) => id && id !== 'folo-tooltip');
   // Escape dismisses a visible tooltip without moving focus (WCAG 1.4.13).
   const onKey = (e: KeyboardEvent) => {
     if (e.key === 'Escape') hide();
   };
 
-  const show = (immediate: boolean) => {
+  const show = (immediate: boolean, focused?: HTMLElement) => {
     if (!o) return;
     clearTimeout(showTimer);
     // Moving between neighbours while a tooltip is up shows the next one at once.
@@ -69,7 +76,8 @@ export function tooltip(node: HTMLElement, opts: TooltipOptions) {
       }
       x = Math.max(4, Math.min(window.innerWidth - t.width - 4, x));
       el.style.transform = `translate(${Math.round(x)}px, ${Math.round(y)}px)`;
-      node.setAttribute('aria-describedby', [...own(), el.id].join(' '));
+      described = focused ?? target();
+      described.setAttribute('aria-describedby', [...own(described), el.id].join(' '));
       document.addEventListener('keydown', onKey);
     }, delay);
   };
@@ -81,19 +89,20 @@ export function tooltip(node: HTMLElement, opts: TooltipOptions) {
       lastHide = Date.now();
     }
     document.removeEventListener('keydown', onKey);
-    const rest = own();
-    if (rest.length) node.setAttribute('aria-describedby', rest.join(' '));
-    else node.removeAttribute('aria-describedby');
+    const rest = own(described);
+    if (rest.length) described.setAttribute('aria-describedby', rest.join(' '));
+    else described.removeAttribute('aria-describedby');
   };
 
   const onEnter = () => show(false);
-  const onFocus = () => {
-    if (node.matches(':focus-visible')) show(true);
+  // focusin / focusout bubble: focus on the node or anything inside it (a wrapped button) counts.
+  const onFocus = (e: FocusEvent) => {
+    if (e.target instanceof HTMLElement && e.target.matches(':focus-visible')) show(true, e.target);
   };
   node.addEventListener('pointerenter', onEnter);
   node.addEventListener('pointerleave', hide);
-  node.addEventListener('focus', onFocus);
-  node.addEventListener('blur', hide);
+  node.addEventListener('focusin', onFocus);
+  node.addEventListener('focusout', hide);
   node.addEventListener('pointerdown', hide);
 
   return {
@@ -105,8 +114,8 @@ export function tooltip(node: HTMLElement, opts: TooltipOptions) {
       hide();
       node.removeEventListener('pointerenter', onEnter);
       node.removeEventListener('pointerleave', hide);
-      node.removeEventListener('focus', onFocus);
-      node.removeEventListener('blur', hide);
+      node.removeEventListener('focusin', onFocus);
+      node.removeEventListener('focusout', hide);
       node.removeEventListener('pointerdown', hide);
     },
   };
