@@ -136,13 +136,12 @@ table {
   box-shadow: inset 0 0 0 1px var(--chart-swatch-edge);
 }
 
+/* A group label inside a panel or dialog. Sentence case at 12 px: uppercase micro text is reserved for key hints. */
 .overline {
-  font-size: var(--type-micro-size);
-  line-height: var(--type-micro-line);
-  letter-spacing: var(--type-micro-tracking);
-  font-weight: var(--type-micro-weight);
-  text-transform: uppercase;
-  color: var(--text-tertiary);
+  font-size: var(--type-sm-size);
+  line-height: var(--type-sm-line);
+  font-weight: var(--weight-medium);
+  color: var(--text-secondary);
 }
 
 .muted {

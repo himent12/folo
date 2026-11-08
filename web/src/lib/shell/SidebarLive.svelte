@@ -33,7 +33,7 @@
     <a href={href(`/runs/${live.id}`)} class="card">
       <span class="top">
         <span class="pulse" aria-hidden="true"></span>
-        <span class="overline">Training</span>
+        <span class="label">Training</span>
         <span class="eta num">{duration(live.eta_s)} left</span>
       </span>
       <span class="name truncate">{live.name}</span>
@@ -71,8 +71,11 @@
     align-items: center;
     gap: 6px;
   }
-  .overline {
-    color: var(--accent-text);
+  /* The pulsing dot carries "live"; the word stays in ink. */
+  .label {
+    font-size: var(--type-xs-size);
+    font-weight: var(--weight-medium);
+    color: var(--text-secondary);
   }
   .pulse {
     width: 6px;
