@@ -499,9 +499,10 @@ impl FoloApp {
             let util = g.util.unwrap_or(0.0);
             let label = if g.memory_bytes > 0 {
                 let (vram, vu) = bytes(g.memory_bytes);
-                format!("{} · {vram} {vu}", crate::ui::short_gpu(&g.name))
+                // Its total memory, named (the meter beside it is load, not memory use).
+                format!("{} · {vram} {vu} VRAM", crate::ui::short_gpu(&g.name))
             } else {
-                format!("{} · memory unknown", crate::ui::short_gpu(&g.name))
+                format!("{} · VRAM unknown", crate::ui::short_gpu(&g.name))
             };
             row = row.child(meter(
                 label,

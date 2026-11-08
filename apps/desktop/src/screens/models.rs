@@ -821,7 +821,7 @@ impl FoloApp {
         } else if self.kb && row_focused() {
             "Enter pins the class"
         } else {
-            "Hover a class to isolate it, click to pin"
+            "Hover a class to isolate it; click to pin."
         };
 
         panel(&t)
@@ -927,9 +927,9 @@ impl FoloApp {
                                     .flex_col()
                                     .gap(px(4.))
                                     .child(
-                                        text(ty::XS, t.text_tertiary).whitespace_normal().child(
-                                            "Dots mark each class's P and R at the best-F1 threshold.",
-                                        ),
+                                        text(ty::XS, t.text_tertiary)
+                                            .whitespace_normal()
+                                            .child("Dots: P and R at the best-F1 threshold."),
                                     )
                                     .child(text(ty::XS, t.text_tertiary).whitespace_normal().child(pr_hint)),
                             ),

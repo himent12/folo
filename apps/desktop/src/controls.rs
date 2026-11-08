@@ -236,6 +236,42 @@ impl FoloApp {
         self.bind(el, key, radius::MD, window, cx, action)
     }
 
+    /// An image's zoom level as a quiet button: "Fit", or "2.4×" when zoomed (a click fits again).
+    /// One control instead of a readout beside a fit icon that read as full screen.
+    pub fn zoom_readout(
+        &self,
+        key: &str,
+        zoom: f32,
+        window: &Window,
+        cx: &mut Context<Self>,
+        action: Action,
+    ) -> Stateful<Div> {
+        let t = theme(cx);
+        let fitted = zoom <= 1.0;
+        let tooltip = if fitted { "Fitted to the view" } else { "Fit to the view (0)" };
+        let el = div()
+            .id(SharedString::from(key.to_string()))
+            .h(px(tsize::CONTROL_MD))
+            .w(px(48.))
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .rounded(px(radius::MD))
+            .cursor_pointer()
+            .hover(move |s| s.bg(t.bg_hover))
+            .active(move |s| s.bg(t.bg_active))
+            .tooltip(tip(tooltip, None))
+            .child(text(ty::XS, t.text_secondary).tnum().child(if fitted {
+                "Fit".to_string()
+            } else {
+                format!("{zoom:.1}×")
+            }));
+        let ring = self.ring(&self.fh(key.to_string(), cx), window);
+        let el = el.when(ring, |d| d.child(focus_tip(&t, tooltip, tsize::CONTROL_MD)));
+        self.bind(el, key, radius::MD, window, cx, action)
+    }
+
     fn cursor_mut(&mut self, c: Cursor) -> &mut Option<f32> {
         match c {
             Cursor::Run => &mut self.chart_hover,

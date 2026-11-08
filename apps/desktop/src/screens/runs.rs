@@ -891,8 +891,11 @@ impl FoloApp {
             ],
             secondary_h,
         );
-        pr.y_range = Some((0., 1.));
-        // 0 / 0.50 / 1.00: the lower row's plot is under 180 px, where five labels crowd.
+        // From a tenth under the lowest value (0 while either is still low), so a converged pair
+        // spreads over the plot instead of its top half.
+        let low = d.precision.iter().chain(d.recall.iter()).map(|p| p.1).fold(f32::INFINITY, f32::min);
+        pr.y_range = Some((pr_floor(low), 1.));
+        // Three labels (floor, middle, 1.00): the lower row's plot is under 180 px, where five crowd.
         pr.y_ticks = 2;
         pr.y_fmt = Some(|v| format!("{v:.2}"));
         let mut lr = base(
@@ -1440,11 +1443,29 @@ fn is_gpu_oom(message: &str) -> bool {
     m.contains("out of memory") || m.contains("outofmemory")
 }
 
+/// The P/R chart's lower bound: a tenth step under the lowest value, or 0 when that is under 0.2
+/// (or there is no data yet).
+fn pr_floor(low: f32) -> f32 {
+    if !low.is_finite() {
+        return 0.;
+    }
+    let f = ((low - 0.05) * 10.).floor() / 10.;
+    if f < 0.2 { 0. } else { f.min(0.8) }
+}
+
 /// One log line with its padding: an arrow key's scroll step in the log.
 const LOG_LINE: f32 = 21.;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pr_floor_steps() {
+        assert_eq!(super::pr_floor(f32::INFINITY), 0.);
+        assert_eq!(super::pr_floor(0.12), 0.);
+        assert!((super::pr_floor(0.47) - 0.4).abs() < 1e-6);
+        assert!((super::pr_floor(0.99) - 0.8).abs() < 1e-6);
+    }
+
     use super::log_range;
 
     #[test]
