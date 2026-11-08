@@ -16,12 +16,16 @@
   import Overview from './routes/Overview.svelte';
   import Run from './routes/Run.svelte';
   import Runs from './routes/Runs.svelte';
+  import RunNew from './routes/RunNew.svelte';
+  import RunCompare from './routes/RunCompare.svelte';
   import Placeholder from './routes/Placeholder.svelte';
 
   const screens: Partial<Record<RouteName, Component>> = {
     overview: Overview,
     runs: Runs,
     run: Run,
+    'run-new': RunNew,
+    'run-compare': RunCompare,
   };
 
   const titles: Record<string, string> = {

@@ -73,6 +73,7 @@
     background: var(--bg-inset);
     border: 1px solid var(--line-subtle);
     max-width: 100%;
+    justify-self: start;
     overflow-x: auto;
     scrollbar-width: none;
   }

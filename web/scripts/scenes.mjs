@@ -12,6 +12,18 @@ export const scenes = [
   { name: 'run-live', path: '/runs/run_7d1e', advance: 4000, viewports: ['desktop', 'laptop', 'mobile'] },
   { name: 'run-failed', path: '/runs/run_a2f0', viewports: ['desktop'] },
   { name: 'run-completed', path: '/runs/run_c19a', viewports: ['desktop', 'mobile'] },
+  { name: 'run-new', path: '/runs/new', viewports: ['desktop', 'laptop', 'mobile'] },
+  {
+    name: 'run-new-focus-mosaic',
+    path: '/runs/new',
+    themes: ['dark'],
+    viewports: ['desktop'],
+    setup: async (page) => {
+      await page.getByText('Mosaic', { exact: true }).first().hover();
+    },
+  },
+  { name: 'run-compare', path: '/runs/compare?ids=run_7d1e,run_c19a,run_5be3,run_a2f0', viewports: ['desktop', 'mobile'] },
+  { name: 'run-compare-empty', path: '/runs/compare', themes: ['dark'], viewports: ['desktop'] },
   { name: 'run-queued', path: '/runs/run_q4n2', themes: ['dark'], viewports: ['desktop'] },
   { name: 'models', path: '/models' },
   { name: 'playground', path: '/playground' },
