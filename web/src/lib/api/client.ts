@@ -89,6 +89,8 @@ export interface Api {
   runEvents(id: string, handlers: RunEventHandlers): () => void;
 
   predict(input: PredictInput, opts: PredictOptions, signal?: AbortSignal): Promise<Prediction>;
+  /** A model's `.folo` file, for running it in the browser (GET /api/models/{id}/weights). */
+  modelWeights(id: string, signal?: AbortSignal): Promise<ArrayBuffer>;
 }
 
 /** Builds a query string from defined values only. */
@@ -218,6 +220,19 @@ export class HttpApi implements Api {
   }
   runEvents(id: string, handlers: RunEventHandlers) {
     return openEventStream(`${this.base}/api/runs/${encodeURIComponent(id)}/events`, handlers);
+  }
+
+  async modelWeights(id: string, signal?: AbortSignal) {
+    let res: Response;
+    try {
+      res = await fetch(`${this.base}/api/models/${encodeURIComponent(id)}/weights`, { signal });
+    } catch (e) {
+      if (e instanceof DOMException && e.name === 'AbortError') throw e;
+      throw new ApiError(0, 'network', 'Cannot reach the FOLO server.', 'Is folo serve running? Check the server URL in Settings.');
+    }
+    if (res.ok) return res.arrayBuffer();
+    const err = ((await res.json().catch(() => undefined)) as { error?: { code?: string; message?: string; hint?: string } } | undefined)?.error;
+    throw new ApiError(res.status, err?.code ?? `http_${res.status}`, err?.message ?? `Could not download the model (HTTP ${res.status}).`, err?.hint);
   }
 
   predict(input: PredictInput, opts: PredictOptions, signal?: AbortSignal) {

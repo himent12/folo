@@ -4,7 +4,9 @@
 //   folo serve --data-dir D:/folo-data/studio-smoke --port 7979
 //   curl -X POST http://127.0.0.1:7979/api/datasets/synthetic -H 'Content-Type: application/json' \
 //        -d '{"name":"smoke-shapes","images":240,"classes":["circle","square","triangle"],"imgsz":320,"seed":1}'
-//   FOLO_API=http://127.0.0.1:7979 npm run live-smoke -- <out dir> [--epochs 3] [--watch 120]
+//   FOLO_API=http://127.0.0.1:7979 npm run live-smoke -- <out dir> [--epochs 3] [--watch 120] [--weights <.folo>]
+// With --weights (and web/public/folo-wasm built by scripts/build-wasm), the Playground also runs that model file in
+// the browser on WebGPU and the CPU (the server has no route that sends model files yet).
 import { mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -21,6 +23,7 @@ const opt = (name, dflt) => {
 const out = resolve(root, args.find((a, i) => !a.startsWith('--') && !args[i - 1]?.startsWith('--')) ?? 'shots/live');
 const epochs = opt('epochs', 3);
 const watchS = opt('watch', 120);
+const weights = args.includes('--weights') ? args[args.indexOf('--weights') + 1] : null;
 mkdirSync(out, { recursive: true });
 
 const ds = (await fetch(`${api}/api/datasets`).then((r) => r.json())).datasets[0];
@@ -29,7 +32,8 @@ if (!ds) throw new Error(`No dataset on ${api}; create one first (see the header
 const server = await createServer({ root, logLevel: 'error', server: { host: '127.0.0.1', port: 5196, strictPort: false } });
 await server.listen();
 const base = (server.resolvedUrls?.local[0] ?? 'http://127.0.0.1:5196/').replace(/\/$/, '');
-const browser = await chromium.launch({ channel: 'chrome', headless: true });
+// Headless Chrome exposes WebGPU only with this flag.
+const browser = await chromium.launch({ channel: 'chrome', headless: true, args: ['--enable-unsafe-webgpu'] });
 const problems = [];
 let n = 0;
 // Full-page captures resize the viewport mid-shot, which can catch the sidebar's width transition halfway: grow the
@@ -49,9 +53,11 @@ async function shot(page, name) {
 async function open(viewport) {
   const page = await (await browser.newContext({ viewport, colorScheme: 'dark' })).newPage();
   page.on('pageerror', (e) => problems.push(`pageerror: ${e.message}`));
-  page.on('console', (m) => m.type() === 'error' && problems.push(`console: ${m.text()}`));
+  // The browser logs every 404 as a console error without its URL; failed API calls are caught below by URL (where
+  // the weights route's expected 404 is let through).
+  page.on('console', (m) => m.type() === 'error' && !m.text().includes('404 (Not Found)') && problems.push(`console: ${m.text()}`));
   page.on('response', (r) => {
-    if (r.url().includes('/api/') && r.status() >= 400) problems.push(`${r.status()} ${r.request().method()} ${r.url().replace(base, '')}`);
+    if (r.url().includes('/api/') && r.status() >= 400 && !/\/weights$/.test(r.url())) problems.push(`${r.status()} ${r.request().method()} ${r.url().replace(base, '')}`);
   });
   return page;
 }
@@ -100,6 +106,30 @@ try {
       problems.push(`${vp}: no playground sample to try`);
     }
     await shot(p, `${vp}-playground`);
+  }
+
+  // In the browser: the run's weights through folo-wasm, on each backend.
+  if (weights) {
+    const p = page;
+    await p.goto(`${base}/#/models`, { waitUntil: 'networkidle' }); // leave the Playground, so it starts empty
+    await p.goto(`${base}/#/playground${models[0] ? `?model=${models[0].id}` : ''}`, { waitUntil: 'networkidle' });
+    await p.locator('button.sample').first().click();
+    await p.waitForFunction(() => !document.querySelector('.busy'), null, { timeout: 60_000 });
+    for (const backend of ['WebGPU', 'CPU']) {
+      const t0 = Date.now();
+      await p.getByRole('radio', { name: backend }).click();
+      const need = p.getByRole('button', { name: 'Choose .folo file' });
+      // Asked once, on the first backend (the file is kept for the model).
+      if (backend === 'WebGPU' && (await need.waitFor({ timeout: 5000 }).then(() => true, () => false))) await p.locator('input[accept=".folo"]').setInputFiles(weights);
+      await p.waitForFunction(
+        (b) => !document.querySelector('.busy') && document.body.innerText.includes(`browser · ${b}`),
+        backend,
+        { timeout: 120_000 },
+      );
+      const timing = (await p.locator('.timing').first().innerText()).replace(/\s+/g, ' ');
+      console.log(`  in the browser, ${backend}: ready in ${Date.now() - t0} ms; ${timing}`);
+      await shot(p, `desktop-playground-${backend.toLowerCase()}`);
+    }
   }
 } finally {
   await browser.close();
