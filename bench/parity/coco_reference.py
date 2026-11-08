@@ -2,6 +2,8 @@
 
 Generates seeded random detection scenarios, evaluates each with pycocotools' COCOeval (bbox, area range "all",
 maxDets 100) and writes the inputs plus the reference numbers to crates/folo-vision/tests/fixtures/coco/<name>.json.
+The scenarios with crowd regions and annotation areas for the full COCOeval port (crates/folo-vision/src/cocoeval.rs,
+all twelve summary numbers) go to crates/folo-vision/tests/fixtures/coco_full/<name>.json.
 It also computes Ultralytics' AP (a numpy port of ultralytics 8.4.198 and of the older 8.x algorithm, see below) so
 docs/METRICS.md can say how far that method is from COCO's; the Rust test does not check those.
 
@@ -385,6 +387,80 @@ SCENARIOS = [
 NEEDS_COCO_COMPATIBLE = {"outside_area_range"}
 
 
+# Full-COCOeval scenarios (crates/folo-vision/tests/coco_full.rs, fixtures/coco_full/): truths are
+# [x1, y1, x2, y2, class, iscrowd, area], where `area` is an annotation area that differs from the box area (as a
+# segmentation area does) and buckets small / medium / large by it.
+
+
+def seg_area(g, b, lo=0.4, hi=1.0):
+    """An annotation area: the box area times U(lo, hi), on a 1/4 grid (exact in f64 on both sides)."""
+    a = (b[2] - b[0]) * (b[3] - b[1]) * float(g.rng.uniform(lo, hi))
+    return float(np.round(a * 4) / 4)
+
+
+def sc_crowd_regions(seed):
+    # Regular objects plus 0-2 crowd regions per image; the detector also fires inside the crowds (those
+    # detections are ignored, not FPs, and crowds can absorb any number of them).
+    g = Gen(seed)
+    images = []
+    for _ in range(40):
+        truths = [t + [0, seg_area(g, t)] for t in random_truths(g, 3, int(g.rng.integers(0, 7)), lo=6, hi=250)]
+        preds = detector(g, truths, 3, lo=6, hi=250)
+        for _ in range(int(g.rng.integers(0, 3))):
+            c = int(g.rng.integers(3))
+            crowd = g.box(640, 120, 400)
+            truths.append(crowd + [c, 1, seg_area(g, crowd)])
+            for _ in range(int(g.rng.integers(1, 6))):
+                w, h = g.rng.uniform(10, 80, 2)
+                x = g.rng.uniform(crowd[0], max(crowd[2] - w, crowd[0]))
+                y = g.rng.uniform(crowd[1], max(crowd[3] - h, crowd[1]))
+                cls = c if g.rng.random() < 0.8 else int(g.rng.integers(3))
+                preds.append(g.fix([x, y, x + w, y + h]) + [g.score(), cls])
+        g.rng.shuffle(truths)
+        images.append({"truths": truths, "preds": preds})
+    return images
+
+
+def sc_bucket_edges(seed):
+    # Sides 4-300 px; annotation areas include the bucket edges 32^2 and 96^2 exactly (inclusive on both sides,
+    # so such a truth counts in two buckets), and predictions whose box area straddles them.
+    g = Gen(seed)
+    images = []
+    for _ in range(50):
+        truths = []
+        for t in random_truths(g, 4, int(g.rng.integers(1, 9)), lo=4, hi=300):
+            r = g.rng.random()
+            area = 1024.0 if r < 0.15 else 9216.0 if r < 0.3 else seg_area(g, t, 0.3, 1.2)
+            truths.append(t + [0, area])
+        images.append({"truths": truths, "preds": detector(g, truths, 4, lo=4, hi=300, n_fp=(0, 8))})
+    return images
+
+
+def sc_crowd_only_class(seed):
+    # Class 1 only ever appears as a crowd: it has no regular truth, so it is left out of every mean even though
+    # it is predicted; class 0 is ordinary.
+    g = Gen(seed)
+    images = []
+    for _ in range(30):
+        truths = [t + [0, seg_area(g, t)] for t in random_truths(g, 1, int(g.rng.integers(1, 5)))]
+        preds = detector(g, truths, 1)
+        if g.rng.random() < 0.5:
+            crowd = g.box(640, 100, 300)
+            truths.append(crowd + [1, 1, seg_area(g, crowd)])
+            preds.append(g.jitter(crowd, 0.1) + [g.score(), 1])
+        images.append({"truths": truths, "preds": preds})
+    return images
+
+
+SCENARIOS_FULL = [
+    ("crowd_regions", "regular truths plus crowd regions that absorb detections", lambda: sc_crowd_regions(201)),
+    ("bucket_edges", "annotation areas on and around the 32^2 / 96^2 bucket edges", lambda: sc_bucket_edges(202)),
+    ("crowd_only_class", "a class with only crowd truths (excluded from the means)",
+     lambda: sc_crowd_only_class(203)),
+]
+OUT_DIR_FULL = os.path.join(os.path.dirname(OUT_DIR), "coco_full")
+
+
 # --------------------------------------------------------------------------------------------------------------------
 # pycocotools
 # --------------------------------------------------------------------------------------------------------------------
@@ -402,9 +478,10 @@ def run_cocoeval(images, nc):
     for i, im in enumerate(images):
         for t in im["truths"]:
             w, h = t[2] - t[0], t[3] - t[1]
+            crowd, area = (t[5], t[6]) if len(t) > 5 else (0, w * h)
             gt["annotations"].append({
                 "id": len(gt["annotations"]) + 1, "image_id": i + 1, "category_id": t[4] + 1,
-                "bbox": [t[0], t[1], w, h], "area": w * h, "iscrowd": 0,
+                "bbox": [t[0], t[1], w, h], "area": area, "iscrowd": crowd,
             })
         for p in im["preds"]:
             dets.append({"image_id": i + 1, "category_id": p[5] + 1, "bbox": [p[0], p[1], p[2] - p[0], p[3] - p[1]],
@@ -500,6 +577,16 @@ def main():
         fmt = lambda v: f"{v:8.4f}" if v is not None else "       -"
         print(f"{r[0]:22} {r[1]:4} {r[2]:3} {r[3]:5} {r[4]:5} " + " ".join(fmt(v) for v in r[5:11]) + f" {r[11]:7}")
     print(f"total {total} bytes in {len(rows)} fixtures", file=sys.stderr)
+
+    os.makedirs(OUT_DIR_FULL, exist_ok=True)
+    for name, desc, make in SCENARIOS_FULL:
+        images = make()
+        nc = 1 + max([b[4] for im in images for b in im["truths"]] + [b[5] for im in images for b in im["preds"]])
+        coco = run_cocoeval(images, nc)
+        fx = {"name": name, "description": desc, "num_classes": nc, "coco": {"stat_names": STAT_NAMES, **coco},
+              "images": images}
+        write_fixture(os.path.join(OUT_DIR_FULL, name + ".json"), fx)
+        print(f"{name:22} " + " ".join(f"{v:.4f}" for v in coco["stats"]))
 
 
 if __name__ == "__main__":

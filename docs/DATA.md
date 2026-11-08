@@ -36,6 +36,15 @@ produces plain buffers that the trainer wraps in tensors.
 - `bbox` is pixel `[x, y, w, h]`; boxes are clipped to the image and normalised. `iscrowd: 1` annotations are skipped.
 - Category ids (from all JSON files) are sorted and remapped to `0..n`; names come from `categories`.
 - An image with an annotation that has a bad `bbox` or an unknown category is skipped as a broken label.
+- The annotation array is read as borrowed raw JSON, and only `image_id`, `category_id`, `bbox` and `iscrowd` are
+  parsed out of each entry (segmentation polygons are skipped unbuilt): COCO 2017's `instances_train2017.json`
+  (448 MB, 860k annotations) opens with a peak of 1.2 GB instead of 7 GB, with identical results. The official COCO
+  folder (`annotations/`, `train2017/`, `val2017/`) opens directly; see examples/coco.
+- `read_coco_ground_truth(json)` reads one instances file strictly, with what the loader drops (crowd regions, the
+  `area` field and boxes in f64, image and category ids); `open_coco_ground_truth(path, split)` does that for a
+  split's file and resolves every image's path exactly as the loader does, so dataset entries match COCO images by
+  path. `coco_annotation_files(path)` lists a COCO dataset's annotation files per split. Entries and the top level
+  are read as structs only when they are JSON objects (a positional array would otherwise fill one). `folo val --coco` uses them for pycocotools-exact evaluation (docs/METRICS.md).
 
 `LoadedDataset::sources` lists every file and folder a dataset was read from (description files, split folders and
 image lists, folders of every candidate image and label, split paths that do not exist yet), so callers such as

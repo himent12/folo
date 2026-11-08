@@ -8,6 +8,7 @@
 //! - [`decode`]: anchor grids and DFL decoding of raw head outputs.
 //! - [`nms`]: class-aware batched NMS and the full detector post-process.
 //! - [`metrics`]: COCO-style mAP, precision / recall / F1, PR curves and a confusion matrix (`docs/METRICS.md`).
+//! - [`cocoeval`]: the full pycocotools `COCOeval` (crowd regions, area buckets, AR) for reporting on COCO splits.
 //! - [`assign`]: the task-aligned assigner and DFL target encoding.
 //! - [`loss`]: the detection loss (BCE + CIoU + DFL) on folo-core tensors, with autograd. The assigner runs on
 //!   host copies of the detached head outputs; that read is the loss's only full-size device-to-host transfer.
@@ -25,6 +26,7 @@
 
 pub mod assign;
 pub mod boxes;
+pub mod cocoeval;
 pub mod decode;
 mod error;
 pub mod export;

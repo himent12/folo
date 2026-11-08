@@ -329,3 +329,39 @@ fn absurd_class_counts_are_rejected_not_allocated() {
     write(&r.join("data.yaml"), "train: images/train\nnc: 4000000000\n");
     assert!(open(r).is_err());
 }
+
+#[test]
+fn coco_ground_truth_paths_match_the_loader() {
+    // Nested file names deeper than three levels, and `a.png` next to `dir/a.png`: every dataset entry must map
+    // to exactly the COCO image it was loaded from.
+    let t = TempDir::new("coco-gt-paths");
+    let r = t.path();
+    let names = ["a.png", "dir/a.png", "x/y/z/w/d.png"];
+    for n in names {
+        write_png(&r.join("val2017").join(n), 16, 16, [10, 10, 10]);
+    }
+    let images: Vec<String> = names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| format!(r#"{{"id":{},"file_name":"{n}","width":16,"height":16}}"#, i + 10))
+        .collect();
+    write(
+        &r.join("annotations/instances_val2017.json"),
+        format!(
+            r#"{{"images":[{}],"annotations":[{{"id":1,"image_id":11,"category_id":1,"bbox":[1,1,5,5],"area":20,"iscrowd":1}}],"categories":[{{"id":1,"name":"x"}}]}}"#,
+            images.join(",")
+        ),
+    );
+    let ds = open(r).unwrap();
+    let gt = folo_data::open_coco_ground_truth(r, Split::Val).unwrap();
+    assert_eq!(ds.val.len(), 3);
+    for e in ds.val.entries() {
+        let hits: Vec<_> =
+            gt.images.iter().filter(|im| im.path.as_deref() == Some(e.image.as_path())).collect();
+        assert_eq!(hits.len(), 1, "{}", e.image.display());
+        assert!(e.image.ends_with(&hits[0].file_name));
+    }
+    let crowd = &gt.images.iter().find(|im| im.id == 11).unwrap().annotations[0];
+    assert!(crowd.iscrowd && crowd.area == 20.0 && crowd.bbox == [1.0, 1.0, 5.0, 5.0]);
+    assert!(folo_data::open_coco_ground_truth(r, Split::Train).is_err());
+}

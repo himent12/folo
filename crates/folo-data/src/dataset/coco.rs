@@ -101,6 +101,113 @@ struct Parsed {
     anns: Vec<(String, u64, Value)>,
 }
 
+/// The fields of one `annotations` entry the loader reads. Everything else, `segmentation` included (the bulk of an
+/// instances file), is skipped without being built.
+#[derive(Debug, Default, PartialEq, serde::Deserialize)]
+#[serde(default)]
+struct AnnFields {
+    image_id: Option<Value>,
+    category_id: Option<Value>,
+    bbox: Option<Value>,
+    iscrowd: Option<Value>,
+    /// The entry's JSON text, for messages (only kept for entries without an image id).
+    #[serde(skip)]
+    text: String,
+}
+
+impl AnnFields {
+    fn from_value(a: &Value) -> Self {
+        let field = |k: &str| a.get(k).filter(|v| !v.is_null()).cloned();
+        AnnFields {
+            image_id: field("image_id"),
+            category_id: field("category_id"),
+            bbox: field("bbox"),
+            iscrowd: field("iscrowd"),
+            text: String::new(),
+        }
+    }
+}
+
+/// The top level of a COCO file, annotations borrowed as raw JSON so they are never built as a `Value` tree
+/// (that tree is about 15x the file: 7 GB for COCO's 448 MB `instances_train2017.json`).
+#[derive(serde::Deserialize)]
+struct Top<'a> {
+    images: Option<Value>,
+    categories: Option<Value>,
+    #[serde(borrow)]
+    annotations: Option<&'a serde_json::value::RawValue>,
+}
+
+/// Whether JSON text is an object. A derived struct deserializer also accepts a positional array
+/// (`[1, 1, [0, 0, 10, 10]]` would fill `image_id`, `category_id`, `bbox`), which the `Value` reading never does.
+fn is_object(json: &[u8]) -> bool {
+    json.trim_ascii_start().first() == Some(&b'{')
+}
+
+/// What the loader reads from one COCO file.
+#[derive(Debug, PartialEq)]
+struct Sections {
+    images: Option<Value>,
+    categories: Option<Value>,
+    annotations: Vec<AnnFields>,
+}
+
+impl Sections {
+    /// Same result as reading the file as one `Value` (a non-array `annotations` means none, a non-object entry
+    /// has no fields), with a fraction of the memory.
+    fn parse(bytes: &[u8]) -> serde_json::Result<Self> {
+        if !is_object(bytes) {
+            return Self::parse_value(serde_json::from_slice(bytes)?);
+        }
+        let top: Top = match serde_json::from_slice(bytes) {
+            Ok(t) => t,
+            // Duplicate top-level keys and the like: fall back to the `Value` reading (last key wins).
+            Err(e) if !e.is_syntax() && !e.is_eof() => {
+                return Self::parse_value(serde_json::from_slice(bytes)?);
+            }
+            Err(e) => return Err(e),
+        };
+        let raws: Vec<&serde_json::value::RawValue> =
+            top.annotations.and_then(|a| serde_json::from_str(a.get()).ok()).unwrap_or_default();
+        let annotations = raws
+            .into_iter()
+            .map(|raw| {
+                let typed = if is_object(raw.get().as_bytes()) {
+                    serde_json::from_str::<AnnFields>(raw.get()).ok()
+                } else {
+                    None
+                };
+                let mut a = typed.unwrap_or_else(|| {
+                    // Not an object (no fields, as with `Value::get`), or a duplicate field (last key wins).
+                    serde_json::from_str::<Value>(raw.get())
+                        .map(|v| AnnFields::from_value(&v))
+                        .unwrap_or_default()
+                });
+                if a.image_id.is_none() {
+                    a.text = raw.get().to_string();
+                }
+                a
+            })
+            .collect();
+        Ok(Sections { images: top.images, categories: top.categories, annotations })
+    }
+
+    fn parse_value(v: Value) -> serde_json::Result<Self> {
+        let annotations = v
+            .get("annotations")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .map(|a| AnnFields { text: a.to_string(), ..AnnFields::from_value(a) })
+            .collect();
+        Ok(Sections {
+            images: v.get("images").cloned(),
+            categories: v.get("categories").cloned(),
+            annotations,
+        })
+    }
+}
+
 pub(crate) fn open_jsons(
     root: &Path,
     jsons: Vec<(Split, PathBuf)>,
@@ -113,18 +220,19 @@ pub(crate) fn open_jsons(
         let bytes = crate::guard::check(&path)
             .and_then(|_| std::fs::read(&path))
             .map_err(|e| DataError::io(&path, e))?;
-        let v: Value = match serde_json::from_slice(&bytes) {
-            Ok(v) => v,
+        let sections = match Sections::parse(&bytes) {
+            Ok(s) => s,
             Err(e) => {
                 report.push(IssueKind::BrokenLabel, &path, format!("invalid JSON: {e}"));
                 continue;
             }
         };
-        let Some(images) = v.get("images").and_then(Value::as_array) else {
+        drop(bytes);
+        let Some(images) = sections.images.as_ref().and_then(Value::as_array) else {
             report.push(IssueKind::BrokenLabel, &path, "no `images` array: not a COCO file");
             continue;
         };
-        for c in v.get("categories").and_then(Value::as_array).into_iter().flatten() {
+        for c in sections.categories.as_ref().and_then(Value::as_array).into_iter().flatten() {
             let (Some(id), Some(name)) =
                 (c.get("id").and_then(Value::as_u64), c.get("name").and_then(Value::as_str))
             else {
@@ -157,17 +265,21 @@ pub(crate) fn open_jsons(
             let declared = dim("width").zip(dim("height")).map(|(w, h)| (w as u32, h as u32));
             imgs.push((id, file.to_string(), declared));
         }
-        let mut anns = Vec::new();
-        for a in v.get("annotations").and_then(Value::as_array).into_iter().flatten() {
-            if a.get("iscrowd").and_then(Value::as_u64) == Some(1) {
+        let mut anns = Vec::with_capacity(sections.annotations.len());
+        for a in sections.annotations {
+            if a.iscrowd.as_ref().and_then(Value::as_u64) == Some(1) {
                 continue;
             }
-            let Some(img) = a.get("image_id").and_then(id_key) else {
-                report.push(IssueKind::BrokenLabel, &path, format!("annotation without image_id: {a}"));
+            let Some(img) = a.image_id.as_ref().and_then(id_key) else {
+                report.push(
+                    IssueKind::BrokenLabel,
+                    &path,
+                    format!("annotation without image_id: {}", a.text),
+                );
                 continue;
             };
-            let cat = a.get("category_id").and_then(Value::as_u64).unwrap_or(u64::MAX);
-            anns.push((img, cat, a.get("bbox").cloned().unwrap_or(Value::Null)));
+            let cat = a.category_id.as_ref().and_then(Value::as_u64).unwrap_or(u64::MAX);
+            anns.push((img, cat, a.bbox.unwrap_or(Value::Null)));
         }
         parsed.push(Parsed { split, path, images: imgs, anns });
     }
@@ -181,7 +293,8 @@ pub(crate) fn open_jsons(
     let mut by_split: BTreeMap<Split, Vec<Candidate>> = BTreeMap::new();
     for p in parsed {
         deps.insert(p.path.clone());
-        let base = image_base(root, &p);
+        let files: Vec<&str> = p.images.iter().map(|im| im.1.as_str()).collect();
+        let base = image_base(root, &p.path, p.split, &files);
         let mut per_image: HashMap<&str, ImageAnns> = HashMap::new();
         let known: HashMap<&str, ()> = p.images.iter().map(|(id, _, _)| (id.as_str(), ())).collect();
         for (img, cat, bbox) in &p.anns {
@@ -242,18 +355,18 @@ pub(crate) fn open_jsons(
 }
 
 /// Picks the folder the JSON's `file_name`s are relative to by probing a few images.
-fn image_base(root: &Path, p: &Parsed) -> PathBuf {
-    let json_dir = p.path.parent().unwrap_or(root).to_path_buf();
-    let stem = p.path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+fn image_base(root: &Path, json: &Path, split: Split, files: &[&str]) -> PathBuf {
+    let json_dir = json.parent().unwrap_or(root).to_path_buf();
+    let stem = json.file_stem().and_then(|s| s.to_str()).unwrap_or("");
     let tag = stem.strip_prefix("instances_").unwrap_or(stem);
     let mut cands = vec![
         json_dir.clone(),
         root.join("images").join(tag),
         root.join(tag),
-        root.join("images").join(p.split.as_str()),
-        root.join(p.split.as_str()),
+        root.join("images").join(split.as_str()),
+        root.join(split.as_str()),
     ];
-    if p.split == Split::Val {
+    if split == Split::Val {
         cands.push(root.join("images").join("valid"));
         cands.push(root.join("valid"));
     }
@@ -261,7 +374,7 @@ fn image_base(root: &Path, p: &Parsed) -> PathBuf {
     cands.push(root.to_path_buf());
     // Probe the first few images and an even spread over the rest, so a run of missing files at the start
     // does not hide the right folder.
-    let n = p.images.len();
+    let n = files.len();
     let mut idx: Vec<usize> = (0..n.min(8)).collect();
     if n > 1 {
         // 32 points from the first to the last entry inclusive.
@@ -269,7 +382,7 @@ fn image_base(root: &Path, p: &Parsed) -> PathBuf {
     }
     idx.sort_unstable();
     idx.dedup();
-    let probe: Vec<&str> = idx.iter().map(|&i| p.images[i].1.as_str()).collect();
+    let probe: Vec<&str> = idx.iter().map(|&i| files[i]).collect();
     cands
         .iter()
         .map(|c| (c, probe.iter().filter(|f| c.join(f).is_file()).count()))
@@ -277,4 +390,190 @@ fn image_base(root: &Path, p: &Parsed) -> PathBuf {
         .max_by_key(|&(c, n)| (n, std::cmp::Reverse(cands.iter().position(|x| x == c))))
         .map(|(c, _)| c.clone())
         .unwrap_or(json_dir)
+}
+
+/// One COCO annotation as pycocotools' `COCOeval` uses it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CocoAnnotation {
+    /// `category_id` as in the file.
+    pub category_id: u64,
+    /// Pixel `[x, y, w, h]`.
+    pub bbox: [f64; 4],
+    /// `area` (COCO instances: the segmentation area); the box area when the file has none.
+    pub area: f64,
+    /// `iscrowd: 1`.
+    pub iscrowd: bool,
+}
+
+/// One COCO image with its annotations.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CocoImage {
+    /// `id`.
+    pub id: u64,
+    /// `file_name` as in the file.
+    pub file_name: String,
+    /// The image file as the dataset loader resolves it (set by [`open_coco_ground_truth`]; `None` from
+    /// [`read_coco_ground_truth`]), so a [`FileDataset`] entry can be matched by its exact path.
+    pub path: Option<PathBuf>,
+    /// Every annotation of the image, crowd regions included, in file order.
+    pub annotations: Vec<CocoAnnotation>,
+}
+
+/// The ground truth of one COCO instances file, for exact COCO evaluation (crowd regions and annotation areas,
+/// which [`open`](crate::open) drops) and for writing COCO results files.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CocoGroundTruth {
+    /// The file.
+    pub path: PathBuf,
+    /// Images in file order.
+    pub images: Vec<CocoImage>,
+    /// `(id, name)` sorted by id: class `i` of a dataset [`open`](crate::open)ed from this file is entry `i`.
+    pub categories: Vec<(u64, String)>,
+}
+
+mod gt {
+    use serde::Deserialize;
+
+    #[derive(Deserialize)]
+    pub struct File {
+        pub images: Vec<Image>,
+        #[serde(default)]
+        pub annotations: Vec<Ann>,
+        #[serde(default)]
+        pub categories: Vec<Cat>,
+    }
+    #[derive(Deserialize)]
+    pub struct Image {
+        pub id: u64,
+        pub file_name: String,
+    }
+    #[derive(Deserialize)]
+    pub struct Ann {
+        pub image_id: u64,
+        pub category_id: u64,
+        pub bbox: [f64; 4],
+        pub area: Option<f64>,
+        #[serde(default)]
+        pub iscrowd: u8,
+        // Unknown fields, `segmentation` (the bulk of an instances file) included, are skipped without being built.
+    }
+    #[derive(Deserialize)]
+    pub struct Cat {
+        pub id: u64,
+        pub name: String,
+    }
+}
+
+/// Reads a COCO instances file strictly (numeric image and category ids, four-number boxes), keeping crowd regions
+/// and areas. Unlike [`open`](crate::open) it fails on the first malformed entry.
+pub fn read_coco_ground_truth(path: impl AsRef<Path>) -> Result<CocoGroundTruth> {
+    let path = path.as_ref();
+    let file = crate::guard::check(path)
+        .and_then(|_| std::fs::File::open(path))
+        .map_err(|e| DataError::io(path, e))?;
+    let f: gt::File = serde_json::from_reader(std::io::BufReader::with_capacity(1 << 20, file))
+        .map_err(|e| DataError::Format(format!("{}: not a COCO instances file: {e}", path.display())))?;
+    let mut index: HashMap<u64, usize> = HashMap::with_capacity(f.images.len());
+    let mut images: Vec<CocoImage> = Vec::with_capacity(f.images.len());
+    for im in f.images {
+        if index.insert(im.id, images.len()).is_some() {
+            return Err(DataError::Format(format!("{}: duplicate image id {}", path.display(), im.id)));
+        }
+        images.push(CocoImage { id: im.id, file_name: im.file_name, path: None, annotations: Vec::new() });
+    }
+    for a in f.annotations {
+        let Some(&i) = index.get(&a.image_id) else {
+            return Err(DataError::Format(format!(
+                "{}: annotation for unknown image id {}",
+                path.display(),
+                a.image_id
+            )));
+        };
+        images[i].annotations.push(CocoAnnotation {
+            category_id: a.category_id,
+            bbox: a.bbox,
+            area: a.area.unwrap_or(a.bbox[2] * a.bbox[3]),
+            iscrowd: a.iscrowd == 1,
+        });
+    }
+    let mut categories: Vec<(u64, String)> = f.categories.into_iter().map(|c| (c.id, c.name)).collect();
+    categories.sort_by_key(|c| c.0);
+    categories.dedup_by_key(|c| c.0);
+    Ok(CocoGroundTruth { path: path.to_path_buf(), images, categories })
+}
+
+/// The ground truth of the one annotation file of `split` in the COCO dataset at `path` (a COCO `.json` or folder),
+/// with every image's [`CocoImage::path`] resolved exactly as [`open`](crate::open) resolves it. Fails when the
+/// split has no annotation file or several.
+pub fn open_coco_ground_truth(path: impl AsRef<Path>, split: Split) -> Result<CocoGroundTruth> {
+    let path = path.as_ref();
+    let super::Source::Coco { root, jsons } = super::detect(path, Format::Coco)? else {
+        return Err(DataError::Format(format!("{} is not a COCO dataset", path.display())));
+    };
+    let mut of_split = jsons.into_iter().filter(|(s, _)| *s == split).map(|(_, p)| p);
+    let (Some(json), None) = (of_split.next(), of_split.next()) else {
+        return Err(DataError::Format(format!(
+            "{}: expected exactly one COCO annotation file for the {} split",
+            path.display(),
+            split.as_str()
+        )));
+    };
+    let mut gt = read_coco_ground_truth(&json)?;
+    let files: Vec<&str> = gt.images.iter().map(|im| im.file_name.as_str()).collect();
+    let base = image_base(&root, &json, split, &files);
+    for im in &mut gt.images {
+        im.path = Some(base.join(&im.file_name));
+    }
+    Ok(gt)
+}
+
+/// The COCO annotation files of the dataset at `path` (a COCO `.json` or a COCO dataset folder, as
+/// [`open`](crate::open) finds them) with the split each one feeds.
+pub fn coco_annotation_files(path: impl AsRef<Path>) -> Result<Vec<(Split, PathBuf)>> {
+    match super::detect(path.as_ref(), Format::Coco)? {
+        super::Source::Coco { jsons, .. } => Ok(jsons),
+        _ => Err(DataError::Format(format!("{} is not a COCO dataset", path.as_ref().display()))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    type Fields = (Option<Value>, Option<Value>, Option<Value>, Option<Value>);
+
+    fn fields(s: &Sections) -> Vec<Fields> {
+        s.annotations
+            .iter()
+            .map(|a| (a.image_id.clone(), a.category_id.clone(), a.bbox.clone(), a.iscrowd.clone()))
+            .collect()
+    }
+
+    /// The borrowed parse agrees with reading the whole file as a `Value`, including on malformed input.
+    #[test]
+    fn borrowed_parse_matches_value_parse() {
+        let cases = [
+            r#"{"images":[{"id":1,"file_name":"a.jpg"}],"annotations":[{"id":1,"image_id":1,"category_id":2,"bbox":[0,0,10,10],"segmentation":[[0,0,1,1]],"iscrowd":0}],"categories":[{"id":2,"name":"x"}]}"#,
+            // Positional arrays and scalars are not annotations.
+            r#"{"images":[],"annotations":[[1,1,[0,0,10,10],0], 7, "s", null, {"image_id":3}]}"#,
+            // Duplicate fields: the last one wins.
+            r#"{"images":[],"annotations":[{"image_id":1,"image_id":2,"bbox":null}]}"#,
+            // `annotations` not an array; missing sections.
+            r#"{"images":[],"annotations":{"image_id":1}}"#,
+            r#"{"categories":[]}"#,
+            // Duplicate top-level keys.
+            r#"{"images":[1],"images":[],"annotations":[{"image_id":5}],"annotations":[{"image_id":6}]}"#,
+            // The top level is not an object (an array would fill a derived struct positionally).
+            r#"[[{"id":1,"file_name":"a.jpg"}], [], [{"image_id":1}]]"#,
+            r#"  [1, 2, 3]"#,
+            r#"{"images":[], "annotations":[ {"image_id": "s1", "iscrowd": 1}, {"category_id": 4.5} ]}"#,
+        ];
+        for c in cases {
+            let a = Sections::parse(c.as_bytes()).unwrap();
+            let b = Sections::parse_value(serde_json::from_str(c).unwrap()).unwrap();
+            assert_eq!((&a.images, &a.categories), (&b.images, &b.categories), "{c}");
+            assert_eq!(fields(&a), fields(&b), "{c}");
+        }
+        assert!(Sections::parse(br#"{"images": ["#).is_err());
+    }
 }

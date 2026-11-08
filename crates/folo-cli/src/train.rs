@@ -112,15 +112,16 @@ fn start(
     let data_arg = args.data.as_deref().expect("clap requires --data without --resume");
     let (ds, ds_name) = open_dataset(data_arg)?;
     let mut weights = None;
-    let arch = if args.model.ends_with(".folo") {
-        let p = PathBuf::from(&args.model);
-        if !p.is_file() {
-            return Err(CliError::new(
-                ExitCode::NotFound,
-                "model_not_found",
-                format!("{} does not exist", p.display()),
-            ));
+    // Initial weights: --weights, or --model naming a .folo file or published weights rather than an arch.
+    let init = match &args.weights {
+        Some(w) => Some(w.as_str()),
+        None if args.model.ends_with(".folo") || crate::weights::is_published(&args.model) => {
+            Some(args.model.as_str())
         }
+        None => None,
+    };
+    let arch = if let Some(init) = init {
+        let p = crate::weights::resolve(Path::new(init))?;
         let file = folo_nn::io::ModelFile::open(&p).map_err(|e| engine_error(e.into()))?;
         weights = Some(p);
         file.metadata().arch.clone()

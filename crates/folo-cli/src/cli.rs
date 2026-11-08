@@ -42,6 +42,9 @@ pub enum Command {
     /// Inspect and generate datasets.
     #[command(subcommand)]
     Dataset(DatasetCommand),
+    /// Published pretrained weights: list them, download them into the local cache.
+    #[command(subcommand)]
+    Weights(WeightsCommand),
     /// Run a Model Context Protocol server over stdio so agents can drive FOLO.
     Mcp(McpArgs),
 }
@@ -130,9 +133,13 @@ pub struct TrainArgs {
     /// Dataset: a folder (YOLO or COCO) or a data.yaml.
     #[arg(long, required_unless_present = "resume")]
     pub data: Option<String>,
-    /// Architecture (folo-n, folo-s, folo-m, folo-l, folo-x) or .folo weights to fine-tune.
+    /// Architecture (folo-n, folo-s, folo-m, folo-l, folo-x), or .folo weights / a published name to fine-tune.
     #[arg(long, visible_alias = "arch", default_value = "folo-n")]
     pub model: String,
+    /// Start from these weights (transfer learning; the architecture is theirs): a .folo file or a published name
+    /// such as folo-n-coco (`folo weights list`; download with `folo weights pull`).
+    #[arg(long, conflicts_with = "model")]
+    pub weights: Option<String>,
     /// Run name [default: <dataset>-<arch suffix>]; an existing run folder gets a numeric suffix.
     #[arg(long)]
     pub name: Option<String>,
@@ -223,7 +230,7 @@ pub enum SplitArg {
 /// `folo val`.
 #[derive(Debug, Args)]
 pub struct ValArgs {
-    /// Weights (.folo) to evaluate (EMA weights when the file has them).
+    /// Weights (.folo, or a published name such as folo-n-coco) to evaluate (EMA weights when the file has them).
     #[arg(long)]
     pub model: PathBuf,
     /// Dataset: a folder (YOLO or COCO) or a data.yaml.
@@ -254,12 +261,19 @@ pub struct ValArgs {
     /// Data loader worker threads [default: min(cores, 8)].
     #[arg(long)]
     pub workers: Option<usize>,
+    /// Also evaluate exactly as pycocotools' COCOeval does on a COCO dataset: original-image boxes, crowd regions,
+    /// annotation areas, the small / medium / large buckets and AR@1/10/100 (adds a `coco` object).
+    #[arg(long)]
+    pub coco: bool,
+    /// Write the detections as a COCO results file (the input of pycocotools' loadRes; COCO datasets only).
+    #[arg(long, value_name = "FILE")]
+    pub save_json: Option<PathBuf>,
 }
 
 /// `folo predict`.
 #[derive(Debug, Args)]
 pub struct PredictArgs {
-    /// Weights (.folo; EMA weights when the file has them).
+    /// Weights (.folo, or a published name such as folo-n-coco; EMA weights when the file has them).
     #[arg(long)]
     pub model: PathBuf,
     /// Images or folders of images (searched recursively).
@@ -296,6 +310,9 @@ pub enum ExportFormatArg {
     FoloF16,
     /// Fused `.folo` with f32 weights.
     Folo,
+    /// Unfused `.folo` weights file in f32 (the EMA weights when present, no optimizer state): for fine-tuning
+    /// with `folo train --weights` and for publishing.
+    Weights,
     /// ONNX (opset 17) graph of the fused model, for onnxruntime, TensorRT, OpenVINO, ...
     Onnx,
 }
@@ -303,7 +320,7 @@ pub enum ExportFormatArg {
 /// `folo export`.
 #[derive(Debug, Args)]
 pub struct ExportArgs {
-    /// Weights (.folo) to export.
+    /// Weights (.folo, or a published name) to export.
     #[arg(long)]
     pub model: PathBuf,
     /// Target format.
@@ -365,6 +382,30 @@ pub struct BenchArgs {
     /// Untimed warmup iterations.
     #[arg(long, default_value_t = 10)]
     pub warmup: u32,
+}
+
+/// `folo weights`.
+#[derive(Debug, Subcommand)]
+pub enum WeightsCommand {
+    /// Published weights, whether each is downloaded, and its cache path ($FOLO_WEIGHTS_DIR or
+    /// <FOLO_HOME or ~/.folo>/weights).
+    List,
+    /// Download published weights from the repository's GitHub release (with the GitHub CLI `gh`) and verify their
+    /// SHA-256 against the release's SHA256SUMS.
+    Pull(WeightsPullArgs),
+}
+
+/// `folo weights pull`.
+#[derive(Debug, Args)]
+pub struct WeightsPullArgs {
+    /// Published name (`folo weights list`), e.g. folo-n-coco.
+    pub name: String,
+    /// Download again even if the file is already in the cache.
+    #[arg(long)]
+    pub force: bool,
+    /// GitHub repository (owner/name) whose release holds the weights.
+    #[arg(long, default_value = crate::weights::REPO)]
+    pub repo: String,
 }
 
 /// `folo dataset`.

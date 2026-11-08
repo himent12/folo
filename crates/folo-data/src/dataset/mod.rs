@@ -1,6 +1,11 @@
 //! Datasets: the [`Dataset`] trait, YOLO and COCO readers with format auto-detection, and the load report.
 
 mod coco;
+
+pub use coco::{
+    CocoAnnotation, CocoGroundTruth, CocoImage, coco_annotation_files, open_coco_ground_truth,
+    read_coco_ground_truth,
+};
 pub(crate) mod labels;
 pub(crate) mod yolo;
 
