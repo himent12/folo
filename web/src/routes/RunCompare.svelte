@@ -106,7 +106,8 @@
   // Hover, focus or tap a run chip to bring its line forward (the others fade).
   let hovered = $state<string | null>(null);
   let pinned = $state<string | null>(null);
-  const highlight = $derived(hovered ?? pinned);
+  // Only runs still in the comparison count (a removed run must not leave every line faded).
+  const highlight = $derived([hovered, pinned].find((x) => x !== null && ids.includes(x)) ?? null);
   const readoutAt = $derived(cursor === null ? 'Latest' : x === 'epoch' ? `Epoch ${Math.round(cursor)}` : `${Math.round(cursor)}% through`);
   const xDomain = $derived<[number, number]>(x === 'epoch' ? [0, Math.max(1, ...chosen.map((r) => r.epochs))] : [0, 100]);
 
@@ -156,7 +157,7 @@
         <span class="at num" aria-hidden="true">{readoutAt}</span>
         {#each chosen as r (r.id)}
           {@const v = valueOf(r.id)}
-          <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
           <span
             class="chip"
             class:pinned={pinned === r.id}
@@ -165,13 +166,15 @@
             onpointerleave={() => (hovered = null)}
             onfocusin={() => (hovered = r.id)}
             onfocusout={() => (hovered = null)}
-            onclick={(e) => {
-              // Tap / click on the chip (not its link or remove button) pins the run's line forward.
-              if ((e.target as HTMLElement).closest('a, button')) return;
-              pinned = pinned === r.id ? null : r.id;
-            }}
           >
-            <i aria-hidden="true" data-pattern={SLOT_PATTERN[slotOf(r.id)]}></i>
+            <!-- The colour key is the toggle: it keeps the run's line in front (click, tap, Enter or Space). -->
+            <button
+              type="button"
+              class="key"
+              aria-pressed={pinned === r.id}
+              aria-label="Keep {r.name} in front"
+              onclick={() => (pinned = pinned === r.id ? null : r.id)}
+            ><i aria-hidden="true" data-pattern={SLOT_PATTERN[slotOf(r.id)]}></i></button>
             <a href={href(`/runs/${r.id}`)}>{r.name}</a>
             <span class="v num">{v === null ? '—' : v.toFixed(3)}</span>
             <button aria-label="Remove {r.name}" onclick={() => setIds(ids.filter((id) => id !== r.id))}><X size={12} /></button>
@@ -306,8 +309,29 @@
     color: var(--text-tertiary);
   }
   .chip {
-    cursor: pointer;
     transition: border-color var(--dur-fast) var(--ease-standard);
+  }
+  .key {
+    position: relative;
+    display: grid;
+    place-items: center;
+    width: 20px;
+    height: 20px;
+    margin-left: calc(-1 * var(--space-1));
+    border-radius: var(--radius-sm);
+  }
+  .key:hover {
+    background: var(--bg-hover);
+  }
+  .key[aria-pressed='true'] {
+    background: var(--bg-active);
+  }
+  @media (pointer: coarse) {
+    .key::after {
+      content: '';
+      position: absolute;
+      inset: -12px;
+    }
   }
   .chip:hover,
   .chip.pinned {
