@@ -66,7 +66,7 @@ try {
         }, theme);
         page.on('pageerror', (e) => failures.push(`${name}: ${e.message}`));
         try {
-          await page.goto(`${base}/?mock=1#${scene.path}`, { waitUntil: 'networkidle' });
+          await page.goto(`${base}/?mock=1${scene.search ? `&${scene.search}` : ''}#${scene.path}`, { waitUntil: 'networkidle' });
           await page.evaluate(() => document.fonts.ready);
           // Let the mock's live run advance a little, deterministically.
           await page.clock.runFor(scene.advance ?? 2000);
