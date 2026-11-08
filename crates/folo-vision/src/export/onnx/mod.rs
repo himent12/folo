@@ -127,11 +127,10 @@ impl OnnxExport {
     /// Write the model to `path`, replacing it atomically: the bytes go to a fresh temporary file next to it
     /// (`<path>.<n>.tmp`, never an existing file) that is then renamed over `path`.
     pub fn write_to(&self, path: impl AsRef<Path>) -> Result<()> {
-        use std::io::Write;
         let path = path.as_ref();
         let mut name = path.file_name().unwrap_or_default().to_os_string();
         name.push(format!(".{}", std::process::id()));
-        let (tmp, mut f) = (0u32..)
+        let (tmp, f) = (0u32..)
             .find_map(|n| {
                 let mut nm = name.clone();
                 nm.push(format!(".{n}.tmp"));
@@ -143,14 +142,21 @@ impl OnnxExport {
                 }
             })
             .expect("some temporary name is free")?;
-        let done = f.write_all(&self.bytes).and_then(|()| f.sync_all());
-        drop(f);
+        // `write_closed` takes the file and closes it before the rename, which Windows needs.
+        let done = write_closed(f, &self.bytes);
         if let Err(e) = done.and_then(|()| std::fs::rename(&tmp, path)) {
             let _ = std::fs::remove_file(&tmp);
             return Err(Error::io(path, e));
         }
         Ok(())
     }
+}
+
+/// Write `bytes` to `f`, flush them to disk and close the file.
+fn write_closed(mut f: std::fs::File, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    f.write_all(bytes)?;
+    f.sync_all()
 }
 
 impl FoloModel {
