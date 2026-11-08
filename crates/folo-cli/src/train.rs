@@ -129,9 +129,8 @@ fn start(
     };
     let suffix = arch.strip_prefix("folo-").unwrap_or(&arch).to_string();
     let name = args.name.clone().unwrap_or_else(|| format!("{ds_name}-{suffix}"));
-    let run_dir = unique_dir(&args.project, &name);
-    let cfg = TrainConfig {
-        name: run_dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or(name),
+    let mut cfg = TrainConfig {
+        name: name.clone(),
         dataset: absolute(data_arg),
         arch,
         epochs: args.epochs,
@@ -165,9 +164,14 @@ fn start(
     // Validate before creating the run folder, so a typo leaves nothing behind.
     cfg.validate().map_err(engine_error)?;
     let data = train_data(&ds)?;
-    std::fs::create_dir_all(&run_dir).map_err(|e| {
-        CliError::new(ExitCode::Runtime, "io_error", format!("cannot create {}: {e}", run_dir.display()))
+    let run_dir = reserve_dir(&args.project, &name).map_err(|e| {
+        CliError::new(
+            ExitCode::Runtime,
+            "io_error",
+            format!("cannot create a run folder under {}: {e}", args.project.display()),
+        )
     })?;
+    cfg.name = run_dir.file_name().map_or(name, |n| n.to_string_lossy().into_owned());
     let opts = TrainOptions {
         run_dir: Some(run_dir.clone()),
         events: Some(progress_sink(out, args.json_events, cfg.epochs, nb)),
@@ -297,7 +301,9 @@ fn check_resume_flags(args: &TrainArgs, stored: &TrainConfig) -> Result<(), CliE
             "hsv" => (aug("hsv"), json!(args.hsv)),
             _ => continue,
         };
-        if !same(&stored_value, &given) {
+        // `--lrf` and `--warmup-epochs` are f64 settings: compared exactly; the rest are integers or f32s.
+        let f32_setting = !matches!(id.as_str(), "lrf" | "warmup_epochs");
+        if !same(&stored_value, &given, f32_setting) {
             let flag = format!("--{}", id.replace('_', "-"));
             return Err(CliError::new(
                 ExitCode::Usage,
@@ -317,17 +323,19 @@ fn check_resume_flags(args: &TrainArgs, stored: &TrainConfig) -> Result<(), CliE
     Ok(())
 }
 
-/// Equal JSON values: integers exactly, floats as the same f32 (the run stores f32 settings widened to f64,
-/// and f64 ones compare equal to themselves).
-fn same(a: &serde_json::Value, b: &serde_json::Value) -> bool {
+/// Equal JSON values: integers exactly, floats exactly or, for `f32` settings (stored widened to f64), as the
+/// same f32.
+fn same(a: &serde_json::Value, b: &serde_json::Value, f32_setting: bool) -> bool {
     use serde_json::Value;
     match (a, b) {
         (Value::Number(x), Value::Number(y)) if !x.is_f64() && !y.is_f64() => x == y,
         (Value::Number(x), Value::Number(y)) => {
             let (x, y) = (x.as_f64().unwrap_or(f64::NAN), y.as_f64().unwrap_or(f64::NAN));
-            x == y || x as f32 == y as f32
+            x == y || (f32_setting && x as f32 == y as f32)
         }
-        (Value::Array(x), Value::Array(y)) => x.len() == y.len() && x.iter().zip(y).all(|(x, y)| same(x, y)),
+        (Value::Array(x), Value::Array(y)) => {
+            x.len() == y.len() && x.iter().zip(y).all(|(x, y)| same(x, y, f32_setting))
+        }
         _ => a == b,
     }
 }
@@ -364,13 +372,19 @@ fn train_data(ds: &folo_data::LoadedDataset) -> Result<TrainData, CliError> {
     })
 }
 
-/// `<project>/<name>`, or `<name>2`, `<name>3`, … if it exists.
-fn unique_dir(project: &Path, name: &str) -> PathBuf {
-    let first = project.join(name);
-    if !first.exists() {
-        return first;
+/// Creates `<project>/<name>`, or `<name>2`, `<name>3`, … if it exists, and returns it. `create_dir` claims the
+/// folder atomically, so concurrent `folo train`s never share one (and a failed run only removes its own).
+fn reserve_dir(project: &Path, name: &str) -> std::io::Result<PathBuf> {
+    std::fs::create_dir_all(project)?;
+    for i in 1.. {
+        let dir = if i == 1 { project.join(name) } else { project.join(format!("{name}{i}")) };
+        match std::fs::create_dir(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
     }
-    (2..).map(|i| project.join(format!("{name}{i}"))).find(|p| !p.exists()).expect("some suffix is free")
+    unreachable!("some suffix is free")
 }
 
 /// First Ctrl+C (on Windows also Ctrl+Break, which is what a script can send to a child started in its own
@@ -583,15 +597,37 @@ mod tests {
 
     #[test]
     fn resume_settings_compare_integers_exactly() {
-        assert!(!same(&json!(20_261_108u64), &json!(20_261_109u64)));
-        assert!(!same(&json!(u64::MAX), &json!(u64::MAX - 1)));
-        assert!(same(&json!(16), &json!(16u32)));
+        let f32s = |a, b| same(&a, &b, true);
+        assert!(!f32s(json!(20_261_108u64), json!(20_261_109u64)));
+        assert!(!f32s(json!(u64::MAX), json!(u64::MAX - 1)));
+        assert!(f32s(json!(16), json!(16u32)));
         // f32 settings widened to f64 still match what the flag parses to.
-        assert!(same(&json!(0.015f32 as f64), &json!(0.015f32)));
-        assert!(same(&json!([0.015f32 as f64, 0.7]), &json!([0.015f32, 0.7f32])));
-        assert!(!same(&json!(0.5), &json!(0.6)));
+        assert!(f32s(json!(0.015f32 as f64), json!(0.015f32)));
+        assert!(f32s(json!([0.015f32 as f64, 0.7]), json!([0.015f32, 0.7f32])));
+        assert!(!f32s(json!(0.5), json!(0.6)));
         // Small learning rates are told apart.
-        assert!(!same(&json!(1e-7), &json!(1e-6)));
-        assert!(same(&json!(folo_vision::train::f32_decimal(1e-7)), &json!(1e-7f32)));
+        assert!(!f32s(json!(1e-7), json!(1e-6)));
+        assert!(f32s(json!(folo_vision::train::f32_decimal(1e-7)), json!(1e-7f32)));
+        // f64 settings compare exactly (1e-50 is 0 as an f32).
+        assert!(!same(&json!(1e-50), &json!(0.0), false));
+        assert!(same(&json!(0.01), &json!(0.01), false));
+    }
+
+    #[test]
+    fn concurrent_runs_reserve_distinct_folders() {
+        let project = std::env::temp_dir().join(format!("folo-reserve-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&project);
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let project = project.clone();
+                std::thread::spawn(move || super::reserve_dir(&project, "shapes-n").unwrap())
+            })
+            .collect();
+        let mut dirs: Vec<_> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+        dirs.sort();
+        dirs.dedup();
+        assert_eq!(dirs.len(), 8);
+        assert!(dirs.contains(&project.join("shapes-n")) && dirs.contains(&project.join("shapes-n8")));
+        let _ = std::fs::remove_dir_all(&project);
     }
 }
