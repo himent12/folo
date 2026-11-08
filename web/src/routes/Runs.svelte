@@ -159,11 +159,11 @@
         </table>
       </div>
       <!-- Phones: stacked rows with the essentials (selection, name, status, score, progress). -->
-      <ul class="cards">
+      <ul class="rows">
         {#each shown as r (r.id)}
           {@const on = selected.includes(r.id)}
           <li class:on>
-            <label class="c-check">
+            <label class="r-check">
               <input
                 type="checkbox"
                 checked={on}
@@ -172,23 +172,16 @@
                 onchange={() => toggle(r.id)}
               />
             </label>
-            <a class="c-main" href={href(`/runs/${r.id}`)}>
-              <span class="c-top">
-                <span class="name">{r.name}</span>
-                <span class="c-best num">
-                  {metric(r.best?.map50_95)}
-                  <span class="c-cap">{r.best ? `best mAP50-95 · ep ${r.best.epoch + 1}` : 'best mAP50-95'}</span>
-                </span>
+            <a class="r-main" href={href(`/runs/${r.id}`)}>
+              <span class="r-text">
+                <span class="r-name"><StatusBadge status={r.status} plain /><span class="name truncate">{r.name}</span></span>
+                <span class="r-meta num truncate">{dsName.get(r.config.dataset_id) ?? r.config.dataset_id} · {r.config.arch} · {r.epoch}/{r.epochs} · {ago(r.created)}</span>
               </span>
-              <span class="c-mid">
-                <StatusBadge status={r.status} size="sm" />
-                <span class="sub"><span>{dsName.get(r.config.dataset_id) ?? r.config.dataset_id}</span><span class="mono">{r.config.arch}</span></span>
-              </span>
-              <span class="c-prog">
-                <Progress value={r.status === 'running' ? r.step / Math.max(1, r.steps_per_epoch * r.epochs) : r.epoch / r.epochs} size="xs" tone={tone(r)} label="{r.name} progress" />
-                <span class="num faint">{r.epoch}/{r.epochs} · {ago(r.created)}</span>
-              </span>
+              <span class="r-val num">{metric(r.best?.map50_95)}</span>
             </a>
+            {#if r.status === 'running'}
+              <span class="r-prog" aria-hidden="true" style:transform="scaleX({r.step / Math.max(1, r.steps_per_epoch * r.epochs)})"></span>
+            {/if}
           </li>
         {/each}
       </ul>
@@ -259,13 +252,6 @@
     text-underline-offset: 3px;
     text-decoration-color: var(--line-strong);
   }
-  .sub {
-    display: flex;
-    gap: var(--space-2);
-    font-size: var(--type-xs-size);
-    line-height: var(--type-xs-line);
-    color: var(--text-tertiary);
-  }
   .prog {
     display: flex;
     align-items: center;
@@ -289,7 +275,7 @@
     font-size: var(--type-xs-size);
     margin-left: 6px;
   }
-  .cards {
+  .rows {
     display: none;
   }
   @media (max-width: 1439px) {
@@ -311,70 +297,74 @@
     .scroll {
       display: none;
     }
-    .cards {
+    .rows {
       display: block;
     }
-    .cards li {
+    /* Phones: 56 px rows (status and name, one meta line, the score on the right), like the desktop table's essentials. */
+    .rows li {
+      position: relative;
       display: flex;
-      align-items: flex-start;
-      gap: var(--space-3);
-      padding: var(--space-3) var(--space-4);
+      align-items: center;
+      min-height: 56px;
+      padding-right: var(--space-4);
       border-bottom: 1px solid var(--line-subtle);
     }
-    .cards li:last-child {
+    .rows li:last-child {
       border-bottom: 0;
     }
-    .cards li.on {
+    .rows li.on {
       background: var(--bg-selected);
+      box-shadow: inset 2px 0 0 var(--accent-line);
     }
-    .c-check {
+    .r-check {
       display: grid;
       place-items: center;
+      flex-shrink: 0;
       width: 44px;
-      height: 44px;
-      margin: -12px 0 0 -14px;
+      height: 56px;
     }
-    .c-main {
+    .r-main {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      align-items: center;
+      gap: var(--space-3);
+      min-height: 56px;
+    }
+    .r-text {
       flex: 1;
       min-width: 0;
       display: grid;
-      gap: 6px;
+      gap: 2px;
     }
-    .c-top,
-    .c-mid {
+    .r-name {
       display: flex;
       align-items: center;
-      justify-content: space-between;
       gap: var(--space-2);
       min-width: 0;
     }
-    .c-mid {
-      justify-content: flex-start;
+    /* In a row the word "Running" is redundant next to the name: keep the dot only. */
+    .r-name :global(.badge) {
+      font-size: 0;
+      gap: 0;
     }
-    .c-best {
-      display: grid;
-      justify-items: end;
-      font-weight: var(--weight-medium);
-    }
-    .c-cap {
-      font-size: var(--type-micro-size);
-      line-height: var(--type-micro-line);
-      font-weight: var(--weight-regular);
+    .r-meta {
+      font-size: var(--type-sm-size);
       color: var(--text-tertiary);
     }
-    /* A fixed caption column, so every card's bar has the same length and progress compares down the list. */
-    .c-prog {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) 128px;
-      align-items: center;
-      gap: var(--space-3);
-      font-size: var(--type-xs-size);
+    .r-val {
+      flex-shrink: 0;
+      font-weight: var(--weight-medium);
     }
-    .c-prog > span {
-      text-align: right;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
+    /* A live run shows its progress as a hairline along the row's bottom edge. */
+    .r-prog {
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: -1px;
+      height: 2px;
+      transform-origin: left;
+      background: var(--accent-line);
     }
     .search {
       width: 100%;

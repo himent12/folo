@@ -22,6 +22,7 @@
   import Dialog from '$lib/ui/Dialog.svelte';
   import EmptyState from '$lib/ui/EmptyState.svelte';
   import Menu, { type MenuItem } from '$lib/ui/Menu.svelte';
+  import Segmented from '$lib/ui/Segmented.svelte';
   import ErrorState from '$lib/ui/ErrorState.svelte';
   import Skeleton from '$lib/ui/Skeleton.svelte';
   import StatusBadge from '$lib/ui/StatusBadge.svelte';
@@ -52,6 +53,7 @@
   });
   const elapsed = $derived(run?.started ? ((run.finished ? Date.parse(run.finished) : Date.now()) - Date.parse(run.started)) / 1000 : null);
 
+  let section = $state<'samples' | 'classes' | 'logs' | 'config'>('samples');
   let stopOpen = $state(false);
   let deleteOpen = $state(false);
   let busy = $state(false);
@@ -204,14 +206,27 @@
     <RunMetrics {run} steps={live.steps} epochs={live.epochs} version={live.version} loading={live.loading} />
 
     <!-- Evidence on the left (what the model sees, what the trainer says); reference in a sticky rail on the right. -->
-    <div class="detail">
+    <!-- Phones show one of these at a time, chosen here; wider screens show them all. -->
+    <div class="phone-pick">
+      <Segmented
+        label="Show"
+        bind:value={section}
+        options={[
+          { value: 'samples', label: 'Samples' },
+          { value: 'classes', label: 'Classes' },
+          { value: 'logs', label: 'Logs' },
+          { value: 'config', label: 'Config' },
+        ]}
+      />
+    </div>
+    <div class="detail" data-show={section}>
       <div class="main-col">
-        <Samples runId={run.id} classes={dataset?.classes ?? []} {epochsDone} />
-        <Logs logs={live.logs} version={live.version} live={active} />
+        <div class="part" data-part="samples"><Samples runId={run.id} classes={dataset?.classes ?? []} {epochsDone} /></div>
+        <div class="part" data-part="logs"><Logs logs={live.logs} version={live.version} live={active} /></div>
       </div>
       <aside class="rail" aria-label="Per-class results and config">
-        <PerClass classes={dataset?.classes ?? []} epochs={live.epochs} version={live.version} loading={live.loading} compact />
-        <ConfigPanel config={run.config} datasetName={dataset?.name} compact />
+        <div class="part" data-part="classes"><PerClass classes={dataset?.classes ?? []} epochs={live.epochs} version={live.version} loading={live.loading} compact /></div>
+        <div class="part" data-part="config"><ConfigPanel config={run.config} datasetName={dataset?.name} compact /></div>
       </aside>
     </div>
     {/if}
@@ -400,6 +415,13 @@
     position: sticky;
     top: calc(var(--size-topbar) + var(--space-4));
   }
+  .part {
+    display: grid;
+    min-width: 0;
+  }
+  .phone-pick {
+    display: none;
+  }
   @media (max-width: 1199px) {
     .detail {
       grid-template-columns: minmax(0, 1fr);
@@ -409,6 +431,30 @@
     }
   }
   @media (max-width: 767px) {
+    .phone-pick {
+      display: block;
+      margin-bottom: calc(-1 * var(--space-1));
+    }
+    .phone-pick :global(.seg) {
+      display: flex;
+      width: 100%;
+    }
+    .phone-pick :global(.seg > *) {
+      flex: 1;
+      justify-content: center;
+    }
+    /* One part is visible at a time, so the empty columns must not add gaps. */
+    .detail,
+    .main-col,
+    .rail {
+      gap: 0;
+    }
+    .detail:not([data-show='samples']) [data-part='samples'],
+    .detail:not([data-show='classes']) [data-part='classes'],
+    .detail:not([data-show='logs']) [data-part='logs'],
+    .detail:not([data-show='config']) [data-part='config'] {
+      display: none;
+    }
     .b-msg {
       font-size: var(--type-sm-size);
     }

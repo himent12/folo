@@ -33,6 +33,17 @@ export const scenes = [
   { name: 'datasets', path: '/datasets' },
   { name: 'runs', path: '/runs', viewports: ['desktop', 'laptop', 'mobile'] },
   { name: 'run-live', path: '/runs/run_7d1e', advance: 4000, viewports: ['desktop', 'laptop', 'mobile'] },
+  {
+    // The phone layout below the fold: the metrics instrument, then one section at a time (here: per-class results).
+    name: 'run-live-phone-classes',
+    path: '/runs/run_7d1e',
+    advance: 4000,
+    viewports: ['mobile'],
+    fullPage: true,
+    setup: async (page) => {
+      await page.getByRole('radio', { name: 'Classes' }).click();
+    },
+  },
   { name: 'run-failed', path: '/runs/run_a2f0', viewports: ['desktop'] },
   { name: 'run-completed', path: '/runs/run_c19a', viewports: ['desktop', 'mobile'] },
   { name: 'run-new', path: '/runs/new', viewports: ['desktop', 'laptop', 'mobile'] },
