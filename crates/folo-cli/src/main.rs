@@ -150,6 +150,10 @@ fn serve(args: ServeArgs, out: Out) -> Result<(), CliError> {
         .precision
         .parse()
         .map_err(|e: folo_vision::Error| CliError::new(ExitCode::Usage, "usage", e.to_string()))?;
+    if args.tensor_cores {
+        // Before anything creates the GPU context: the device has to be created with them.
+        folo_gpu::context::request_tensor_cores();
+    }
     let data_dir = args.data_dir.clone().unwrap_or_else(default_data_dir);
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -273,7 +277,8 @@ fn doctor(args: DoctorArgs, out: Out) -> Result<(), CliError> {
     let options = folo_gpu::GpuOptions::from_env();
     let adapters = folo_gpu::GpuContext::enumerate(&options);
     // Creating the device proves the default adapter works and shows which one FOLO picks.
-    let selected = folo_gpu::GpuContext::with_options(&options).map(|c| c.summary().clone());
+    let selected =
+        folo_gpu::GpuContext::with_options(&options).map(|c| (c.summary().clone(), c.tensor_cores_status()));
     let gpus: Vec<_> = adapters
         .iter()
         .map(|a| {
@@ -287,6 +292,7 @@ fn doctor(args: DoctorArgs, out: Out) -> Result<(), CliError> {
                 "driver": a.driver,
                 "driver_info": a.driver_info,
                 "shader_f16": a.shader_f16,
+                "tensor_cores": a.tensor_cores,
                 "max_buffer_bytes": a.max_buffer_size,
                 "max_storage_binding_bytes": a.max_storage_buffer_binding_size,
                 "workgroup_storage_bytes": a.max_compute_workgroup_storage_size,
@@ -296,7 +302,12 @@ fn doctor(args: DoctorArgs, out: Out) -> Result<(), CliError> {
         })
         .collect();
     let selected_json = match &selected {
-        Ok(s) => json!({ "index": s.index, "name": s.name, "backend": s.backend.to_ascii_lowercase() }),
+        Ok((s, tc)) => json!({
+            "index": s.index,
+            "name": s.name,
+            "backend": s.backend.to_ascii_lowercase(),
+            "tensor_cores": tc,
+        }),
         Err(e) => json!({ "error": e.to_string() }),
     };
     let report = json!({
@@ -331,13 +342,16 @@ fn doctor(args: DoctorArgs, out: Out) -> Result<(), CliError> {
         out.human(format!("gpu       {a}"));
     }
     match &selected {
-        Ok(s) => out.human(format!(
-            "gpu       FOLO uses [{}] {} ({}); set {} to pick another",
-            s.index,
-            s.name,
-            s.backend,
-            folo_gpu::context::ENV_ADAPTER
-        )),
+        Ok((s, tc)) => {
+            out.human(format!(
+                "gpu       FOLO uses [{}] {} ({}); set {} to pick another",
+                s.index,
+                s.name,
+                s.backend,
+                folo_gpu::context::ENV_ADAPTER
+            ));
+            out.human(format!("gpu       tensor cores (f16): {tc}"));
+        }
         Err(e) => out.human(format!("gpu       no usable adapter: {e}")),
     }
     let web = if web_ready {

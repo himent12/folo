@@ -18,8 +18,8 @@ use super::check_buf;
 use crate::DType;
 use crate::context::GpuContext;
 use crate::error::{GpuError, Result, shape_err};
-use crate::kernels::UNARY_FN;
 use crate::kernels::elementwise::UnaryOp;
+use crate::kernels::{UNARY_FN, coop};
 use crate::pipeline::{Access, KernelDef, Params, Source, Spec};
 
 /// Bias added in the epilogue.
@@ -704,7 +704,7 @@ pub fn gemm(
     bias: Option<&wgpu::Buffer>,
     c: &wgpu::Buffer,
 ) -> Result<()> {
-    gemm_with_config(ctx, d, a, b, bias, c, pick_config(ctx, d))
+    gemm_impl(ctx, d, a, b, bias, c, None)
 }
 
 /// [`gemm`] with an explicit tile configuration (benchmarks and tuning).
@@ -717,8 +717,24 @@ pub fn gemm_with_config(
     c: &wgpu::Buffer,
     cfg: TileConfig,
 ) -> Result<()> {
+    gemm_impl(ctx, d, a, b, bias, c, Some(cfg))
+}
+
+/// [`gemm`] (`cfg == None`: tensor cores for f16 when the context has them on, else a picked tile config) or
+/// [`gemm_with_config`].
+fn gemm_impl(
+    ctx: &GpuContext,
+    d: &GemmDesc,
+    a: &wgpu::Buffer,
+    b: &wgpu::Buffer,
+    bias: Option<&wgpu::Buffer>,
+    c: &wgpu::Buffer,
+    cfg: Option<TileConfig>,
+) -> Result<()> {
     check_dtype(ctx, d.dtype, "gemm")?;
-    check_config(ctx, cfg)?;
+    if let Some(cfg) = cfg {
+        check_config(ctx, cfg)?;
+    }
     let (ar, ac) = if d.trans_a { (d.k, d.m) } else { (d.m, d.k) };
     let (br, bc) = if d.trans_b { (d.n, d.k) } else { (d.k, d.n) };
     if d.lda < ac || d.ldb < bc || d.ldc < d.n {
@@ -746,6 +762,15 @@ pub fn gemm_with_config(
         }
         (_, None) => return Err(shape_err("gemm: bias kind set but no bias buffer")),
     };
+    if cfg.is_none()
+        && d.dtype == DType::F16
+        && ctx.tensor_cores()
+        && coop::encode_gemm(ctx, d, DType::F16, a, b, bias_buf, c, None)?
+    {
+        return Ok(());
+    }
+    let cfg = cfg.unwrap_or_else(|| pick_config(ctx, d));
+    check_config(ctx, cfg)?;
     let vec_a = d.lda.is_multiple_of(4)
         && d.a.aligned4()
         && if d.trans_a { d.m.is_multiple_of(4) } else { d.k.is_multiple_of(4) };

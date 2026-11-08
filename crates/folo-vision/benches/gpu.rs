@@ -1,6 +1,7 @@
 //! The FOLO detector on the GPU, the numbers in docs/BENCHMARKS.md's FOLO columns. Run with
 //! `cargo bench -p folo-vision --bench gpu` (`FOLO_BENCH_SCALES=n,s` picks scales, default `n,s`;
-//! `FOLO_BENCH_PRECISION=f32,f16` the inference precisions, default both, f16 only where the GPU computes in it;
+//! `FOLO_BENCH_PRECISION=f32,f16,f16tc` the inference precisions, default all three, f16 only where the GPU
+//! computes in it and `f16tc` (f16 on tensor cores) only with `FOLO_GPU_TENSOR_CORES=1` on an adapter that has them;
 //! `FOLO_BENCH_SECTIONS=forward,predict,train` the sections, default all).
 //!
 //! Per scale, 80 classes, 640×640, untrained (seed-0) weights, inference in f32 and f16 (half precision: f16
@@ -111,10 +112,13 @@ fn mib(b: u64) -> f64 {
 }
 
 /// The inference sections (forward, end-to-end predict) of folo-`scale` at `prec`.
-fn bench_infer(scale: &str, dev: Device, ctx: &GpuContext, prec: Precision, sections: &str) {
+/// `tc`: run the f16 GEMMs and convs on tensor cores (the output names it in the precision label).
+fn bench_infer(scale: &str, dev: Device, ctx: &GpuContext, prec: Precision, tc: bool, sections: &str) {
+    ctx.set_tensor_cores(tc);
+    let label = if tc { format!("{prec}, tensor cores") } else { prec.to_string() };
     let cfg = ModelConfig::new(scale, 80).expect("config");
     let mut model = FoloModel::new(cfg).expect("model");
-    println!("\nfolo-{scale} {prec}: {} parameters (unfused)", model.num_parameters());
+    println!("\nfolo-{scale} {label}: {} parameters (unfused)", model.num_parameters());
     model.to_device(dev).expect("to_device");
     model.fuse().expect("fuse");
     model.to_dtype(prec.dtype()).expect("to_dtype");
@@ -140,7 +144,7 @@ fn bench_infer(scale: &str, dev: Device, ctx: &GpuContext, prec: Precision, sect
             let iters = if batch == 1 { 100 } else { 30 };
             let s = latency(dev, 25, iters, || drop(black_box(model.forward(&x).expect("forward"))));
             let peak = ctx.pool_stats().peak_live_bytes;
-            row(&format!("forward b{batch} (fused, {prec})"), &s, batch);
+            row(&format!("forward b{batch} (fused, {label})"), &s, batch);
             let t = throughput(dev, iters, || drop(black_box(model.forward(&x).expect("forward"))));
             println!(
                 "    pipelined {:.2} ms/call = {:.0} img/s; {} dispatches, {} submissions per call; peak {:.0} MiB \
@@ -185,7 +189,7 @@ fn bench_infer(scale: &str, dev: Device, ctx: &GpuContext, prec: Precision, sect
         };
         let iters = if batch == 1 { 50 } else { 15 };
         let s = latency(dev, 10, iters, &mut run);
-        row(&format!("predict b{batch} (e2e, {prec})"), &s, batch);
+        row(&format!("predict b{batch} (e2e, {label})"), &s, batch);
         let t = throughput(dev, iters, &mut run);
         println!("    back to back {:.2} ms/call = {:.0} img/s", t, batch as f64 * 1e3 / t);
         // Where the time goes: each phase synchronised on its own.
@@ -314,22 +318,33 @@ fn main() {
     println!("folo-vision GPU bench on {} ({}, driver {})", s.name, s.backend, s.driver);
     let scales = std::env::var("FOLO_BENCH_SCALES").unwrap_or_else(|_| "n,s".into());
     let sections = std::env::var("FOLO_BENCH_SECTIONS").unwrap_or_else(|_| "forward,predict,train".into());
-    let precisions: Vec<Precision> = std::env::var("FOLO_BENCH_PRECISION")
-        .unwrap_or_else(|_| "f32,f16".into())
+    // `(precision, on tensor cores)` per entry.
+    let precisions: Vec<(Precision, bool)> = std::env::var("FOLO_BENCH_PRECISION")
+        .unwrap_or_else(|_| "f32,f16,f16tc".into())
         .split(',')
-        .filter(|s| !s.trim().is_empty())
-        .map(|s| s.parse().expect("FOLO_BENCH_PRECISION: f32 and / or f16"))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| match s {
+            "f16tc" => (Precision::F16, true),
+            s => (s.parse().expect("FOLO_BENCH_PRECISION: f32, f16 and / or f16tc"), false),
+        })
         .collect();
+    let tc = ctx.tensor_cores();
     for scale in scales.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-        for &prec in &precisions {
+        for &(prec, on) in &precisions {
             if prec == Precision::F16
                 && let Some(why) = f16_unavailable(dev)
             {
                 println!("\nfolo-{scale} f16: skipped ({why})");
                 continue;
             }
-            bench_infer(scale, dev, &ctx, prec, &sections);
+            if on && !ctx.caps().coop_f16 {
+                println!("\nfolo-{scale} f16 on tensor cores: skipped ({})", ctx.tensor_cores_status());
+                continue;
+            }
+            bench_infer(scale, dev, &ctx, prec, on, &sections);
         }
+        ctx.set_tensor_cores(tc);
         if sections.contains("train") {
             bench_train(scale, dev, &ctx);
         }

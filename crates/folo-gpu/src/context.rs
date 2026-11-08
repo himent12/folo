@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::task::{Context, Poll, Waker};
 
@@ -19,6 +19,25 @@ pub const ENV_ADAPTER: &str = "FOLO_GPU_ADAPTER";
 pub const ENV_BACKEND: &str = "FOLO_GPU_BACKEND";
 /// Environment variable that disables f16 kernels even when the adapter has `shader-f16` (`FOLO_GPU_NO_F16=1`).
 pub const ENV_NO_F16: &str = "FOLO_GPU_NO_F16";
+/// Environment variable that opts into the tensor-core (cooperative-matrix) f16 kernels
+/// (`FOLO_GPU_TENSOR_CORES=1`); see [`GpuOptions::tensor_cores`].
+pub const ENV_TENSOR_CORES: &str = "FOLO_GPU_TENSOR_CORES";
+
+/// Set by [`request_tensor_cores`]: contexts built from [`GpuOptions::from_env`] opt in even without
+/// [`ENV_TENSOR_CORES`].
+static TENSOR_CORES_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// Asks for tensor cores in every context later built from [`GpuOptions::from_env`], including the process-wide
+/// [`GpuContext::shared`] one (what `--tensor-cores` on the CLI and the server option call). It only has an effect
+/// before that context is created: returns `false` when the shared context already exists without them.
+pub fn request_tensor_cores() -> bool {
+    TENSOR_CORES_REQUESTED.store(true, Ordering::Relaxed);
+    match SHARED.get() {
+        Some(Ok(c)) => c.caps().coop_f16,
+        Some(Err(_)) => false,
+        None => true,
+    }
+}
 
 /// Dispatches encoded before the open batch is submitted on its own.
 const MAX_DISPATCHES_PER_BATCH: u32 = 1024;
@@ -36,6 +55,11 @@ pub struct GpuOptions {
     pub power_preference: wgpu::PowerPreference,
     /// Request `shader-f16` when the adapter has it.
     pub enable_f16: bool,
+    /// Opt into the tensor-core f16 GEMM and conv kernels (wgpu's experimental cooperative matrices, see
+    /// [`crate::kernels::coop`]). They are used only when the adapter reports 16×16×16 f16 → f32 cooperative
+    /// matrices and `shader-f16`, and a start-up self-test on the device passes; otherwise the context keeps the
+    /// regular kernels and [`GpuContext::tensor_cores_status`] says why.
+    pub tensor_cores: bool,
 }
 
 impl Default for GpuOptions {
@@ -45,12 +69,14 @@ impl Default for GpuOptions {
             backends: None,
             power_preference: wgpu::PowerPreference::HighPerformance,
             enable_f16: true,
+            tensor_cores: false,
         }
     }
 }
 
 impl GpuOptions {
-    /// Defaults overridden by [`ENV_ADAPTER`], [`ENV_BACKEND`] and [`ENV_NO_F16`].
+    /// Defaults overridden by [`ENV_ADAPTER`], [`ENV_BACKEND`], [`ENV_NO_F16`] and [`ENV_TENSOR_CORES`] (or
+    /// [`request_tensor_cores`]).
     pub fn from_env() -> Self {
         let mut o = Self::default();
         if let Ok(a) = std::env::var(ENV_ADAPTER)
@@ -64,6 +90,8 @@ impl GpuOptions {
         if std::env::var(ENV_NO_F16).is_ok_and(|v| v != "0" && !v.is_empty()) {
             o.enable_f16 = false;
         }
+        o.tensor_cores = TENSOR_CORES_REQUESTED.load(Ordering::Relaxed)
+            || std::env::var(ENV_TENSOR_CORES).is_ok_and(|v| v != "0" && !v.is_empty());
         o
     }
 }
@@ -105,6 +133,9 @@ pub struct AdapterSummary {
     pub driver_info: String,
     /// Whether the adapter supports `shader-f16`.
     pub shader_f16: bool,
+    /// Whether the adapter offers the 16×16×16 f16 → f32 cooperative matrices the tensor-core kernels need
+    /// (wgpu's experimental `EXPERIMENTAL_COOPERATIVE_MATRIX`; native Vulkan / Metal only).
+    pub tensor_cores: bool,
     /// Largest buffer in bytes.
     pub max_buffer_size: u64,
     /// Largest storage buffer binding in bytes.
@@ -131,6 +162,7 @@ impl AdapterSummary {
             driver: i.driver,
             driver_info: i.driver_info,
             shader_f16: adapter.features().contains(wgpu::Features::SHADER_F16),
+            tensor_cores: crate::kernels::coop::adapter_supports(adapter),
             max_buffer_size: l.max_buffer_size,
             max_storage_buffer_binding_size: l.max_storage_buffer_binding_size,
             max_compute_workgroup_storage_size: l.max_compute_workgroup_storage_size,
@@ -144,7 +176,7 @@ impl std::fmt::Display for AdapterSummary {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "[{}] {} ({}, {}) driver {} {}; shader-f16 {}; max buffer {} MiB, storage binding {} MiB, \
+            "[{}] {} ({}, {}) driver {} {}; shader-f16 {}; tensor cores {}; max buffer {} MiB, storage binding {} MiB, \
              workgroup storage {} KiB, {} invocations/workgroup, subgroup {}..{}",
             self.index,
             self.name,
@@ -153,6 +185,7 @@ impl std::fmt::Display for AdapterSummary {
             self.driver,
             self.driver_info,
             if self.shader_f16 { "yes" } else { "no" },
+            if self.tensor_cores { "yes" } else { "no" },
             self.max_buffer_size >> 20,
             self.max_storage_buffer_binding_size >> 20,
             self.max_compute_workgroup_storage_size >> 10,
@@ -168,6 +201,9 @@ impl std::fmt::Display for AdapterSummary {
 pub struct Capabilities {
     /// f16 kernels are available (`shader-f16` enabled on the device).
     pub shader_f16: bool,
+    /// The device was created with cooperative matrices and passed the tensor-core self-test, so the f16 GEMM
+    /// and conv kernels can run on tensor cores (see [`GpuContext::tensor_cores`] for the run-time switch).
+    pub coop_f16: bool,
     /// Largest buffer in bytes.
     pub max_buffer_size: u64,
     /// Largest storage binding in bytes.
@@ -211,6 +247,11 @@ struct Inner {
     dummy: wgpu::Buffer,
     dispatches: AtomicU64,
     submissions: AtomicU64,
+    /// Tensor-core kernels in use (only ever true when `caps.coop_f16`); cleared by
+    /// [`GpuContext::set_tensor_cores`] or when a tensor-core kernel fails to build.
+    tensor_cores: AtomicBool,
+    /// `"on"`, or why tensor cores are off.
+    tensor_cores_status: Mutex<String>,
 }
 
 /// Host data in a staging buffer, made by [`GpuContext::stage`] (on any thread) and copied to the device with
@@ -420,18 +461,46 @@ impl GpuContext {
         if options.enable_f16 && adapter.features().contains(wgpu::Features::SHADER_F16) {
             features |= wgpu::Features::SHADER_F16;
         }
+        let mut status = String::from("off (not requested: FOLO_GPU_TENSOR_CORES=1 or --tensor-cores)");
+        let want_coop = options.tensor_cores
+            && match crate::kernels::coop::unavailable_reason(&adapter, features) {
+                None => true,
+                Some(why) => {
+                    status = format!("off: {why}");
+                    false
+                }
+            };
         // Ask for everything the adapter offers: big storage buffers and the full workgroup memory.
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor {
+        let request = |features: wgpu::Features, coop: bool| {
+            adapter.request_device(&wgpu::DeviceDescriptor {
                 label: Some("folo-gpu"),
                 required_features: features,
                 required_limits: limits.clone(),
-                experimental_features: wgpu::ExperimentalFeatures::disabled(),
+                experimental_features: if coop {
+                    crate::kernels::coop::experimental_opt_in()
+                } else {
+                    wgpu::ExperimentalFeatures::disabled()
+                },
                 memory_hints: wgpu::MemoryHints::Performance,
                 trace: wgpu::Trace::Off,
             })
-            .await
-            .map_err(|e| GpuError::RequestDevice(e.to_string()))?;
+        };
+        let mut coop = false;
+        let (device, queue) = if want_coop {
+            match request(features | crate::kernels::coop::FEATURES, true).await {
+                Ok(dq) => {
+                    coop = true;
+                    dq
+                }
+                Err(e) => {
+                    // Fall back to a device without cooperative matrices rather than failing.
+                    status = format!("off: the device refused cooperative matrices ({e})");
+                    request(features, false).await.map_err(|e| GpuError::RequestDevice(e.to_string()))?
+                }
+            }
+        } else {
+            request(features, false).await.map_err(|e| GpuError::RequestDevice(e.to_string()))?
+        };
         let errors: Arc<Mutex<Vec<String>>> = Arc::default();
         let sink = errors.clone();
         device.on_uncaptured_error(Arc::new(move |e: wgpu::Error| {
@@ -449,6 +518,8 @@ impl GpuContext {
         let dl = device.limits();
         let caps = Capabilities {
             shader_f16: device.features().contains(wgpu::Features::SHADER_F16),
+            // Set below once the self-test passes.
+            coop_f16: false,
             max_buffer_size: dl.max_buffer_size,
             max_storage_buffer_binding_size: dl.max_storage_buffer_binding_size,
             max_workgroup_storage: dl.max_compute_workgroup_storage_size,
@@ -461,7 +532,7 @@ impl GpuContext {
             usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
-        Ok(Self {
+        let ctx = Self {
             inner: Arc::new(Inner {
                 adapter,
                 device,
@@ -476,8 +547,60 @@ impl GpuContext {
                 dummy,
                 dispatches: AtomicU64::new(0),
                 submissions: AtomicU64::new(0),
+                tensor_cores: AtomicBool::new(false),
+                tensor_cores_status: Mutex::new(status),
             }),
-        })
+        };
+        if !coop {
+            return Ok(ctx);
+        }
+        // The kernels must agree with a CPU reference on this device before they are trusted. The test runs
+        // the tensor-core path explicitly, so `caps.coop_f16` is still false here.
+        let tested = crate::kernels::coop::self_test(&ctx);
+        let mut inner = Arc::into_inner(ctx.inner).expect("the context is not shared during creation");
+        match tested {
+            Ok(()) => {
+                inner.caps.coop_f16 = true;
+                inner.tensor_cores = AtomicBool::new(true);
+                inner.tensor_cores_status = Mutex::new("on".into());
+            }
+            Err(e) => {
+                inner.tensor_cores_status = Mutex::new(format!("off: the tensor-core self-test failed ({e})"))
+            }
+        }
+        Ok(Self { inner: Arc::new(inner) })
+    }
+
+    /// Whether the f16 GEMM and conv kernels currently run on tensor cores (see [`GpuOptions::tensor_cores`]).
+    pub fn tensor_cores(&self) -> bool {
+        self.inner.tensor_cores.load(Ordering::Relaxed)
+    }
+
+    /// Turns the tensor-core kernels on or off for later dispatches (A/B comparisons in one process). Turning
+    /// them on has no effect unless [`Capabilities::coop_f16`] (and not after a tensor-core kernel failed to
+    /// build); returns whether they are now on.
+    pub fn set_tensor_cores(&self, on: bool) -> bool {
+        let status = self.inner.tensor_cores_status.lock().expect("status lock");
+        let on = on && self.inner.caps.coop_f16 && *status == "on";
+        self.inner.tensor_cores.store(on, Ordering::Relaxed);
+        on
+    }
+
+    /// `"on"`, or why the tensor-core kernels are off (not requested, unsupported adapter, failed self-test, a
+    /// kernel that did not build, or switched off with [`GpuContext::set_tensor_cores`]).
+    pub fn tensor_cores_status(&self) -> String {
+        let status = self.inner.tensor_cores_status.lock().expect("status lock").clone();
+        if status == "on" && !self.tensor_cores() {
+            return "off (switched off at run time)".into();
+        }
+        status
+    }
+
+    /// Turns tensor cores off for good after a tensor-core kernel failed to build, recording why.
+    pub(crate) fn disable_tensor_cores(&self, why: String) {
+        let mut status = self.inner.tensor_cores_status.lock().expect("status lock");
+        self.inner.tensor_cores.store(false, Ordering::Relaxed);
+        *status = format!("off: {why}");
     }
 
     /// Adapter description for `folo doctor`.

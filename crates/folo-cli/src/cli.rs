@@ -79,6 +79,10 @@ pub struct ServeArgs {
     /// with a warning where f16 is not available).
     #[arg(long, env = "FOLO_PRECISION", default_value = "f32")]
     pub precision: String,
+    /// Run f16 inference and evaluation (`--precision f16`) on the GPU's tensor cores (wgpu's experimental
+    /// cooperative matrices); the regular kernels are used where they are not available.
+    #[arg(long, env = "FOLO_GPU_TENSOR_CORES", value_parser = clap::builder::BoolishValueParser::new())]
+    pub tensor_cores: bool,
 }
 
 /// `folo describe`.
@@ -258,6 +262,11 @@ pub struct ValArgs {
     /// note anywhere else.
     #[arg(long)]
     pub half: bool,
+    /// With --half, run the f16 convolutions and matrix products on the GPU's tensor cores (wgpu's experimental
+    /// cooperative matrices; the same as FOLO_GPU_TENSOR_CORES=1). Falls back to the regular kernels, with a note,
+    /// where they are not available.
+    #[arg(long)]
+    pub tensor_cores: bool,
     /// Data loader worker threads [default: min(cores, 8)].
     #[arg(long)]
     pub workers: Option<usize>,
@@ -298,6 +307,11 @@ pub struct PredictArgs {
     /// note anywhere else.
     #[arg(long)]
     pub half: bool,
+    /// With --half, run the f16 convolutions and matrix products on the GPU's tensor cores (wgpu's experimental
+    /// cooperative matrices; the same as FOLO_GPU_TENSOR_CORES=1). Falls back to the regular kernels, with a note,
+    /// where they are not available.
+    #[arg(long)]
+    pub tensor_cores: bool,
     /// Write annotated images (boxes coloured by class, with class id and score) to this folder.
     #[arg(long)]
     pub save: Option<PathBuf>,

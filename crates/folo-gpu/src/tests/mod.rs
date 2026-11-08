@@ -7,6 +7,7 @@
 pub(crate) mod backend;
 mod backend_net;
 mod conv;
+mod coop;
 mod elementwise;
 mod f16;
 mod gemm;

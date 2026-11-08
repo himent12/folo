@@ -67,6 +67,7 @@ pub(crate) enum SpecVal {
 pub(crate) struct Spec {
     vals: Vec<(&'static str, SpecVal)>,
     f16: bool,
+    coop: bool,
 }
 
 impl Spec {
@@ -101,6 +102,13 @@ impl Spec {
         self
     }
 
+    /// Enables wgpu's cooperative matrices (`enable wgpu_cooperative_matrix;`) for the tensor-core kernels.
+    /// Only valid on a device created with them (see `kernels::coop`).
+    pub fn coop(mut self, on: bool) -> Self {
+        self.coop = on;
+        self
+    }
+
     /// Looks up a constant (for generators).
     pub fn get(&self, name: &str) -> Option<SpecVal> {
         self.vals.iter().find(|(n, _)| *n == name).map(|(_, v)| *v)
@@ -127,6 +135,10 @@ impl Spec {
 
     fn header(&self) -> String {
         let mut s = String::new();
+        // Directives first: WGSL rejects `enable` after any declaration.
+        if self.coop {
+            s.push_str("enable wgpu_cooperative_matrix;\n");
+        }
         if self.f16 {
             s.push_str("enable f16;\nalias T = f16;\n");
         } else {

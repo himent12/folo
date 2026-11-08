@@ -24,12 +24,15 @@ The kernel layer sees neither a `GpuTensor` nor a folo-core tensor: both front e
   - `FOLO_GPU_ADAPTER=<index | name substring>` picks an adapter (`FOLO_GPU_ADAPTER=1`, `FOLO_GPU_ADAPTER=4080`).
   - `FOLO_GPU_BACKEND=vulkan,dx12,metal,webgpu` restricts the backends.
   - `FOLO_GPU_NO_F16=1` turns the f16 kernels off even when the adapter supports them.
+  - `FOLO_GPU_TENSOR_CORES=1` (or `GpuOptions::tensor_cores`, `folo_gpu::request_tensor_cores()`, the CLI's
+    `--tensor-cores`) runs the f16 GEMMs and convolutions on tensor cores; see [Tensor cores](#tensor-cores-cooperative-matrices).
 - **Features and limits.** `shader-f16` is requested when the adapter has it. The device asks for the adapter's
   full limits: the largest storage buffers and bindings, and all the workgroup memory (48 KiB on NVIDIA Vulkan).
   Adapters with fewer than 4 storage buffers per stage, less than 16 KiB of workgroup memory or fewer than 256
   invocations per workgroup are rejected.
 - **`folo doctor`.** `GpuContext::enumerate()` lists every adapter as an `AdapterSummary` (name, backend, type,
-  driver, `shader-f16`, key limits, subgroup size); `ctx.summary()` describes the one in use.
+  driver, `shader-f16`, tensor cores, key limits, subgroup size); `ctx.summary()` describes the one in use and
+  `ctx.tensor_cores_status()` says whether its tensor cores are on (or why not).
 - **Shared context.** `GpuContext::shared()` is a process-wide context created once from the environment. Tests
   and the folo-core backend (`folo_gpu::init()`) use it.
 - **Errors.** Validation and out-of-memory errors are captured, not panicked on. `sync()` and readbacks return
@@ -132,6 +135,7 @@ On `wasm32` the same crate runs on the browser's WebGPU. Nothing may block the p
 | softmax / log_softmax | `kernels::reduce::softmax`, `softmax_rows` | f32, f16 (f32 max, sum and exponentials) | last dim, one workgroup per row, max-shifted |
 | GEMM | `kernels::gemm::gemm` | f32, f16 | `alpha·op(A)·op(B) (+ row/col bias) → act`; A, Aᵀ, B, Bᵀ; two-level batch with arbitrary offsets and strides (stride 0 broadcasts); f16 storage with f32 accumulation |
 | conv2d | `kernels::conv::conv2d` | f32, f16 | NCHW; stride, padding, dilation, groups; fused bias + activation. Implicit GEMM, a pointwise GEMM fast path for 1×1, and a direct depthwise kernel |
+| tensor-core GEMM / conv2d | `kernels::coop::{gemm, conv2d}` | f16 in; f16 or f32 out | cooperative matrices (16×16×16, f32 accumulation), the same GEMM / implicit-GEMM conv contract and fused `alpha` + bias + activation; `gemm::gemm` and `conv::conv2d` route f16 problems here when the context has [tensor cores](#tensor-cores-cooperative-matrices) on |
 | max_pool2d | `kernels::pooling::max_pool2d` | f32, f16 | kernel / stride / padding / dilation; padding never wins (−∞); floor mode |
 | upsample_nearest2d | `kernels::layout::upsample_nearest2d` | f32, f16 | any output size; `src = dst · in / out`, as in PyTorch `nearest` |
 | concat | `kernels::layout::copy_rows` | f32, f16 | any dim, via row-blocked copies; a single block becomes a buffer copy; f16 blocks need even lengths and offsets |
@@ -215,8 +219,60 @@ Notes from the tuning runs:
 - **Padding the workgroup-tile rows** by one vec4 removes a 2-way bank conflict in the A scatter, but it was
   slightly slower overall and was dropped.
 - **DX12 (FXC)** reaches 9.7 / 15.4 / 20.9 / 25.2 TFLOPS on the same kernels.
-- **Not tried yet:** subgroup (warp) shuffles, `subgroupMatrix` / cooperative matrices (not in stable WebGPU),
-  split-K for skinny problems, and a persistent-kernel / stream-K schedule.
+- **Not tried yet:** subgroup (warp) shuffles, split-K for skinny problems, and a persistent-kernel / stream-K
+  schedule. Cooperative matrices (tensor cores) are the next section; they are native-only (not in stable WebGPU).
+
+### Tensor cores (cooperative matrices)
+
+`kernels/coop.rs` runs f16 GEMMs and convolutions on NVIDIA tensor cores through wgpu 30's experimental cooperative
+matrices (`EXPERIMENTAL_COOPERATIVE_MATRIX`; WGSL `coop_mat16x16<f16, A>`, `coopLoadT`, `coopMultiplyAdd`,
+`coopStoreT`; `SPV_KHR_cooperative_matrix` on Vulkan). f16 inputs, f32 accumulation, f16 or f32 output, and the
+regular kernels' fused epilogue (`alpha`, row or column bias, any activation).
+
+- **Opt-in, then capability.** A context uses them only when asked (`FOLO_GPU_TENSOR_CORES=1`,
+  `GpuOptions::tensor_cores`, `folo_gpu::request_tensor_cores()` before the shared context exists, or
+  `--tensor-cores` on `folo predict` / `val` / `serve`) **and** the adapter reports a 16×16×16 f16 × f16 → f32
+  configuration (`adapter.cooperative_matrix_properties()`), `shader-f16`, subgroups and 32-wide subgroups. The
+  RTX 4080 SUPER on Vulkan has them (driver 621.01); DX12, Metal and the browser do not in wgpu 30.
+- **Self-test, then routing.** The device is created with the experimental feature, then a probe fragment and a
+  ragged GEMM (70×90×75, row bias + SiLU, f16 and f32 output) run against the CPU before `caps().coop_f16` is set.
+  After that, `gemm::gemm` and `conv::conv2d` send every f16 problem to the tensor-core kernel (1×1 stride-1 convs
+  as its GEMM, other non-depthwise convs as its implicit-GEMM conv). Depthwise convs, f32 and every gradient keep
+  the regular kernels; so do calls with an explicit `TileConfig`.
+- **Fallback.** Anything unexpected leaves the regular kernels in place: an adapter without the configuration, a
+  device that refuses the feature (it is created again without it), a failed self-test, or a tensor-core kernel
+  that fails to build (tensor cores turn off for the context and the call runs on the regular kernel).
+  `ctx.tensor_cores_status()` says which; `ctx.set_tensor_cores(bool)` switches them at run time (A/B tests and
+  benchmarks).
+- **The one `unsafe`.** `ExperimentalFeatures::enabled()` is called in exactly one place,
+  `coop::experimental_opt_in`, whose doc comment states the safety conditions: the opt-in and capability checks
+  above; cooperative loads and stores touch only workgroup arrays of compile-time size, at offsets the generator
+  proves in bounds (asserted for every fragment; the subgroup index is clamped to 0..8), never a storage buffer, so
+  wgpu's missing bounds checks on cooperative accesses cannot reach outside a binding (global memory goes through
+  ordinary, bounds-checked loads and stores); every cooperative op runs in workgroup-uniform control flow (naga
+  checks this and rejects the shader otherwise); and the self-test passes first.
+- **Kernel.** 256 invocations = 8 subgroups per workgroup, each owning `FM × FN` 16×16 f32 accumulators of a
+  `BM × BN` tile (`subgroup_id` picks the subgroup's fragments, so they are uniform per subgroup). `K` is walked
+  32 at a time with the f32 generator's scheme: the next `A` / `B` tiles are loaded into registers (vec4 when
+  aligned, the conv's `B` gathered straight from the NCHW image) while the current ones, double-buffered f16 in
+  workgroup memory, row-major with 8 halves of padding per row, feed `coopLoadT` + `coopMultiplyAdd`; one barrier
+  per step. The K loop starts each half with a `break` check instead of wrapping it in an `if`, because naga
+  treats values derived from the loop counter as non-uniform. Epilogue: cooperative matrices have no per-element
+  access, so each subgroup stores one fragment at a time into its own 1 KiB f32 scratch slice, and its 32 lanes
+  apply `alpha`, bias and activation to 8 elements each and store them with bounds checks. Configs: 128×128 (4×2
+  fragments per subgroup), 64×128, 64×64, 32×128 for `M ≤ 32` and 16×256 for `M ≤ 16` (folo-n's 16- and 32-channel
+  early layers); `coop::pick_config` picks by `M` and occupancy. 45 KiB of workgroup memory at 128×128.
+- **Accuracy.** Products of f16 values are exact in f32, so the only difference from the regular f16 kernels is
+  the f32 summation order. `src/tests/coop.rs` checks the kernels against the f64 CPU on the same f16 inputs with a
+  per-element bound of `K · 2^-23 · Σ|a·b|` (one ulp per addition, which also covers tensor cores that truncate
+  while aligning addends) plus the activation's few ulps and, for f16 output, one rounding (`2^-11 · |y|`), with 2x
+  slack: every config and transpose on ragged and aligned shapes, odd shapes from 1×1×1 up, a `K = 4608`
+  reduction, every bias kind with SiLU / ReLU / sigmoid / identity and `alpha`, two-level batches with strides,
+  offsets and padded leading dimensions, attention-shaped batched products, and every conv variant folo-n / s use
+  (3×3 s1 / s2, the 3-channel stem, 1×1, ragged channel counts, groups, dilation, rectangular kernels) in f16 and
+  f32 output, through the routing and explicitly. `crates/folo-vision/tests/gpu_tensor_cores.rs` checks the whole
+  detector (decoded scores within 1.1e-5 of f32 on a random folo-n) and the end-to-end predictor; trained-model
+  mAP is within 0.002 of f32 (docs/BENCHMARKS.md).
 
 ## Benchmarks
 
@@ -234,6 +290,8 @@ build:
 | 1000³ (not a multiple of 4) | 18 095 |
 | batched 64 × 256³ | 24 817 |
 | HGEMM (f16 storage, f32 accumulation) 1024 / 2048 / 4096 | 20 603 / 26 582 / 31 997 |
+| tensor-core HGEMM, under 60–70% load from another job (regular HGEMM in the same run: 17 269 / 15 239 / 18 072) 1024 / 2048 / 4096 | **22 565 / 30 298 / 37 091** |
+| tensor-core 2048 Aᵀ·B / A·Bᵀ / Aᵀ·Bᵀ (same run) | 19 535 / 25 821 / 18 436 |
 
 | conv2d, N = 8, 80×80, 64 → 128 | ms | GFLOPS |
 |---|---|---|
@@ -242,6 +300,8 @@ build:
 | 1×1 s1 | 0.041 | 20 579 |
 | depthwise 3×3 s1, 128 ch | 0.069 | 1 707 (memory-bound) |
 | f16: 3×3 s1 / 3×3 s2 / 1×1 / depthwise | 0.270 / 0.110 / 0.039 / 0.113 | 27 935 / 17 107 / 21 272 / 1 048 |
+| tensor cores, under ~65% load (regular f16 in the same run: 0.584 / 0.177 / 0.101 ms): 3×3 s1 / 3×3 s2 / 1×1 | **0.288 / 0.118 / 0.044** | 26 191 / 15 937 / 19 239 |
+| tensor cores, folo-n's stem at batch 16 (same run, regular f16 0.831 / 0.780 / 0.309 ms): 3→16 at 640, 16→32 at 320, 32→64 at 160, all 3×3 s2 | **0.245 / 0.250 / 0.097** | 5 783 / 15 104 / 39 097 |
 
 | Memory-bound, 64 Mi f32 | GB/s |
 |---|---|
@@ -329,7 +389,8 @@ println!("{}", loss.item::<f32>()?);                  // the only wait for the G
   operands and return f16 results, f32 inside as above; average pooling and the arg-reductions run on an f32 copy.
   `Tensor::to_dtype_` converts a storage in place (the dtype lives in the storage cell, like the device), so
   folo-nn's `Module::to_dtype(F16)` turns a fused model into an f16 one; folo-vision's `Predictor::new_f16` /
-  `folo predict --half` build on it. Gradient kernels stay f32-only and refuse f16 (`UnsupportedDType`): f16 is
+  `folo predict --half` build on it. With [tensor cores](#tensor-cores-cooperative-matrices) on, the matmuls and
+  convs among them run on the tensor-core kernels. Gradient kernels stay f32-only and refuse f16 (`UnsupportedDType`): f16 is
   for inference. Without `shader-f16` folo-core refuses f16 compute (`DTypeMismatch`) and the predictor falls back
   to f32 (`predict::f16_unavailable` says why). `src/tests/f16.rs` checks every such op on f16 GPU tensors
   against the f32 CPU on the same f16-rounded inputs (`1e-3` relative for single roundings, `2e-3` plus a small
@@ -413,12 +474,12 @@ update kernel.
 
 ## Known limitations / follow-ups
 
-- **f16 is storage, not tensor cores.** The f16 GEMM and convs keep f32 tiles and f32 FMAs, so f16 saves memory
-  traffic (half the activation bytes) but not arithmetic: on Ada, non-tensor f16 math is no faster than f32. The
-  RTX 4080 SUPER does expose wgpu 30's `EXPERIMENTAL_COOPERATIVE_MATRIX` on Vulkan with 16×16×16 f16 → f32 (and
-  f16 → f16) configurations (`adapter.cooperative_matrix_properties()`, naga's `coop_mat16x16<f16, A>`,
-  `coopLoad` / `coopMultiplyAdd`); a tensor-core implicit-GEMM conv on it is the next step for f16 throughput. It
-  needs wgpu's `unsafe` `ExperimentalFeatures::enabled()` opt-in, so it would be behind a switch.
+- **Tensor cores are opt-in and inference-only.** Without `FOLO_GPU_TENSOR_CORES` / `--tensor-cores` the f16
+  GEMM and convs keep f32 tiles and f32 FMAs (f16 saves memory traffic, not arithmetic: on Ada, non-tensor f16
+  math is no faster than f32). Training does not use them yet: mixed-precision training (f16 forward and backward
+  GEMMs on tensor cores, f32 master weights, loss scaling) needs f16 variants of the gradient convs
+  (`CONV_MODE` 2 / 3) and an `--amp` trainer path, a follow-up. The transposed-operand tensor-core GEMMs scatter
+  into workgroup memory with scalar stores and are 15–40% slower than the plain layout.
 - The f16 depthwise conv is slower than the f32 one (2-byte scalar loads); vectorising it is a follow-up.
 - Timings are wall-clock; GPU timestamp queries would make small-kernel numbers more precise.
 - `max_pool2d` has no `ceil_mode`; upsampling is nearest-only.
