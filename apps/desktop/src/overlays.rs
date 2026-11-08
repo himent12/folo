@@ -870,7 +870,6 @@ impl FoloApp {
         let gpu = self.store.system.ready().and_then(|s| s.gpus.first().cloned());
         // 0 = not reported (wgpu can't on every platform): make no claim about fitting.
         let gpu_gb = gpu.as_ref().map_or(0.0, |g| g.memory_bytes as f32 / 1e9);
-        let gpu_name = gpu.as_ref().map_or("the GPU".to_string(), |g| crate::ui::short_gpu(&g.name));
         let fits = cpu || gpu_gb <= 0.0 || vram <= gpu_gb * 0.97;
         let estimate_line = div()
             .flex()
@@ -897,7 +896,8 @@ impl FoloApp {
                             } else if fits {
                                 format!("≈ {} · ≈ {vram:.1} GB GPU memory", crate::api::time::duration(secs))
                             } else {
-                                format!("≈ {vram:.0} GB needed, {gpu_gb:.0} GB on {gpu_name}")
+                                // No adapter name here: it can be long enough to reach the buttons.
+                                format!("≈ {vram:.0} GB needed, {gpu_gb:.0} GB on this GPU")
                             }),
                     )
                     .child(text(ty::XS, t.text_tertiary).whitespace_nowrap().child(if cpu {

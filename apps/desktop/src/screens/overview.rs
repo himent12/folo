@@ -594,8 +594,9 @@ impl FoloApp {
         // Created fits beside Best models too, with an 88 px progress track (584 px available at 1280).
         let created = true;
         // Beside Best models (584 px at 1280) every column tightens so all six fit.
-        // From 1500 the list is wide: the name and dataset columns take the room, not a dead band.
-        let full = vw >= px(1500.);
+        // From 1680 (where the content cap gives the list ~976 px) the name and dataset columns
+        // take the room instead of a dead band; 1500–1680 keeps the narrower set (~776 px).
+        let full = vw >= px(1680.);
         let (name_w, prog_w, best_w, when_w) = if full {
             (200., 160., 96., 80.)
         } else if wide {
