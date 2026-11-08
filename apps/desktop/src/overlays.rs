@@ -895,13 +895,25 @@ impl FoloApp {
                 d.child(
                     div()
                         .flex()
-                        .items_center()
+                        .items_start()
                         .gap(px(8.))
                         .p(px(10.))
                         .rounded(px(radius::MD))
                         .bg(t.danger_muted)
                         .child(icon("icons/circle-alert.svg", 14., t.danger_solid))
-                        .child(text(ty::SM, t.danger_text).child(e.message)),
+                        // The server's hint says what to change (device_not_found lists the
+                        // adapters there are; gpu_out_of_memory names batch, imgsz and arch).
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(2.))
+                                .min_w_0()
+                                .child(text(ty::SM, t.danger_text).whitespace_normal().child(e.message))
+                                .when_some(e.hint, |d, h| {
+                                    d.child(text(ty::XS, t.text_secondary).whitespace_normal().child(h))
+                                }),
+                        ),
                 )
             });
         let images = ds.as_ref().map_or(0, |d| d.splits.train);
@@ -1349,10 +1361,13 @@ impl FoloApp {
                 .flex()
                 .flex_col()
                 .child(
-                    // Docked to the stack (2 px above its edges), not floating over the page.
-                    div().flex().justify_end().pb(px(2.)).child(
+                    // Docked on the stack's edges (no gap for the page to show through).
+                    div().flex().justify_end().child(
                         // A compact pill, right-aligned: clearly controls, not another notification.
                         div()
+                            // The pill, edges and cards stop pointer events; the space beside the
+                            // pill stays the page's.
+                            .occlude()
                             .flex()
                             .gap(px(2.))
                             .p(px(2.))
@@ -1368,14 +1383,20 @@ impl FoloApp {
                 .when(!expanded, |d| {
                     let edge = |inset: f32, a: f32| {
                         div()
+                            .occlude()
                             .mx(px(inset))
                             .h(px(6.))
                             .rounded_t(px(radius::LG))
-                            .bg(crate::theme::fade(t.bg_raised, a))
+                            // Opaque: the edges are cards behind the latest one, not tints the
+                            // page shows through. line.default, so the toast's top edge isn't doubled.
+                            .bg(if a < 1. {
+                                crate::theme::over(t.bg_raised, crate::theme::fade(t.bg_app, 1. - a))
+                            } else {
+                                t.bg_raised
+                            })
                             .border_1()
                             .border_b_0()
-                            // line.default: on line.strong it would double the toast's own top edge.
-                            .border_color(crate::theme::fade(t.line_default, a))
+                            .border_color(t.line_default)
                     };
                     d.when(older > 1, |d| d.child(edge(16., 0.6))).child(edge(8., 1.))
                 })

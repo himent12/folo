@@ -440,7 +440,7 @@ impl FoloApp {
                 // Reuse the whole config; for out-of-memory failures, halve the batch. Resuming an
                 // OOM failure would hit the same limit (the config can't change), so it isn't offered.
                 let mut cfg = r.config.clone();
-                let oom = r.error.as_deref().is_some_and(|e| e.contains("out of memory"));
+                let oom = r.error.as_deref().is_some_and(is_gpu_oom);
                 if !oom {
                     actions.push(self.resume_button(&r, window, cx));
                 }
@@ -517,7 +517,7 @@ impl FoloApp {
     fn failure_banner(&self, r: &Run, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
         let msg = r.error.clone().unwrap_or_else(|| "The run failed.".into());
-        let hint = if msg.contains("out of memory") {
+        let hint = if is_gpu_oom(&msg) {
             match crate::app::retry_batch(r.config.batch) {
                 Some(to) => format!(
                     "The batch didn't fit in GPU memory. New run from this config starts with batch {to}; a smaller image size or architecture also helps."
@@ -694,7 +694,7 @@ impl FoloApp {
                 .flex()
                 .flex_col()
                 .gap(px(6.))
-                .child(caption(&t, "Throughput"))
+                .child(caption(&t, if live { "Throughput" } else { "Final throughput" }))
                 .child(
                     div()
                         .flex()
@@ -1407,9 +1407,24 @@ fn log_range(lo: f32, hi: f32) -> (f32, f32) {
     (y0, y1)
 }
 
+/// A run that failed with `gpu_out_of_memory`. Runs carry the message, not the code (docs/API.md):
+/// the server writes "the GPU ran out of memory (…)", older servers the driver's "… out of memory …".
+fn is_gpu_oom(message: &str) -> bool {
+    let m = message.to_ascii_lowercase();
+    m.contains("out of memory") || m.contains("outofmemory")
+}
+
 #[cfg(test)]
 mod tests {
     use super::log_range;
+
+    #[test]
+    fn out_of_memory_failures_are_recognised() {
+        use super::is_gpu_oom;
+        assert!(is_gpu_oom("the GPU ran out of memory (Out of Memory: tried to allocate 2.1 GiB)"));
+        assert!(is_gpu_oom("wgpu: OutOfMemory"));
+        assert!(!is_gpu_oom("invalid dataset: no training images"));
+    }
 
     #[test]
     fn the_log_loss_axis_holds_every_positive_value() {

@@ -229,6 +229,9 @@ impl FoloApp {
             vec![reveal.into_any_element(), train.into_any_element()],
         );
 
+        if ds.stats.as_ref().is_some_and(|s| s.broken_labels > 0) {
+            self.ensure_issues(&ds.id, cx);
+        }
         let strip = self.dataset_strip_stats(&ds, window, cx);
         // A view switch, so underline tabs: the segmented control below is the split filter.
         let tab = |this: &Self,
@@ -471,7 +474,11 @@ impl FoloApp {
                                     ),
                             )
                             .child(metric(&t, broken.to_string(), "", step, ty::SM))
-                            .child(broken_detail(&t, narrow_strip))
+                            // Split by severity when the server reports it, then the copy action.
+                            .child(match self.store.issues.get(&ds.id).and_then(|l| l.ready()) {
+                                Some(c) if c.error + c.warning > 0 => severity_detail(&t, c),
+                                _ => broken_detail(&t, narrow_strip),
+                            })
                     } else {
                         stat(
                             &t,
@@ -540,6 +547,13 @@ impl FoloApp {
             .enumerate()
             .map(|(i, name)| {
                 let on = self.ds_class == Some(i as u32);
+                // The count is boxes; the chip filters images (the tooltip says both).
+                let n = counts.get(i).copied();
+                let tip_text = if on {
+                    format!("{} {name} boxes · showing images with one; click to clear", int(n.unwrap_or(0)))
+                } else {
+                    format!("{} {name} boxes · click to show only images with one", int(n.unwrap_or(0)))
+                };
                 self.chip(
                     &format!("ds-class-{i}"),
                     name.clone(),
@@ -554,6 +568,7 @@ impl FoloApp {
                         cx.notify();
                     }),
                 )
+                .tooltip(crate::controls::tip(tip_text, None))
                 .into_any_element()
             })
             .collect();
@@ -601,7 +616,7 @@ impl FoloApp {
             .flex()
             .items_center()
             .gap(px(6.))
-            .child(text(ty::XS, t.text_tertiary).mr(px(2.)).child("Boxes by class"))
+            .child(text(ty::XS, t.text_tertiary).mr(px(2.)).child("Filter images by class"))
             .children(chips)
             .when(self.ds_empty_only, |d| {
                 d.child(self.chip(
@@ -1067,6 +1082,32 @@ impl FoloApp {
 /// Under the broken-label count: the check command to copy, or that every label is valid.
 fn broken_detail(t: &crate::theme::Theme, narrow: bool) -> gpui::Div {
     if narrow { copy_cmd(t, "Copy command") } else { copy_cmd(t, "Copy check command") }
+}
+
+/// "2 errors · 1 warning" in their severity colours, then the copy icon (the tile copies the
+/// check command).
+fn severity_detail(t: &crate::theme::Theme, c: &crate::api::IssueCounts) -> gpui::Div {
+    let n = |k: u64, one: &str, many: &str| format!("{k} {}", if k == 1 { one } else { many });
+    div()
+        .flex()
+        .items_center()
+        .gap(px(4.))
+        .min_w_0()
+        .when(c.error > 0, |d| {
+            d.child(
+                text(ty::XS, t.danger_text).tnum().whitespace_nowrap().child(n(c.error, "error", "errors")),
+            )
+        })
+        .when(c.error > 0 && c.warning > 0, |d| d.child(text(ty::XS, t.text_tertiary).child("·")))
+        .when(c.warning > 0, |d| {
+            d.child(
+                text(ty::XS, t.warning_text)
+                    .tnum()
+                    .whitespace_nowrap()
+                    .child(n(c.warning, "warning", "warnings")),
+            )
+        })
+        .child(div().flex_none().ml(px(2.)).child(icon("icons/copy.svg", 12., t.text_secondary)))
 }
 
 fn copy_cmd(t: &crate::theme::Theme, label: &'static str) -> gpui::Div {

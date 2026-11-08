@@ -301,9 +301,24 @@ impl FoloApp {
                                     .child(text(ty::SM, t.text_tertiary).flex_none().child("/"))
                                 })
                                 .child({
-                                    // A file-name budget per breakpoint: a long name ends in "…" (at a
-                                    // known width, as GPUI needs) and the full name is on hover.
-                                    let budget = if compact { 200. } else { 320. };
+                                    // The name takes what the toolbar leaves: the stage's width (window
+                                    // less sidebar, gutters and rail) less its other items (~560 px:
+                                    // crumb, size, latency, count, zoom). A long name ends in "…" at that
+                                    // known width, as GPUI needs; the full name is on hover.
+                                    let vw = f32::from(window.viewport_size().width);
+                                    let side = if vw < 1120. {
+                                        crate::theme::size::SIDEBAR_COLLAPSED
+                                    } else {
+                                        crate::theme::size::SIDEBAR
+                                    };
+                                    let rail = if vw < 1100. { 280. } else { 320. };
+                                    let stage = vw.min(crate::theme::size::CONTENT_MAX + side)
+                                        - side
+                                        - 2. * self.gutter()
+                                        - rail
+                                        - 16.;
+                                    let budget =
+                                        (stage - 560.).clamp(if compact { 120. } else { 160. }, 520.);
                                     // Monospace: the measured width is the glyph count times the advance.
                                     let advance = window.text_system().advance(
                                         window.text_system().resolve_font(&gpui::font(crate::theme::MONO)),
@@ -337,22 +352,14 @@ impl FoloApp {
                     })
                     .child(div().flex_1().min_w(px(8.)))
                     .when(loading, |d| d.child(text(ty::XS, t.text_tertiary).flex_none().child("Detecting…")))
-                    // Compact windows: the side panel's latency scrolls away, so the toolbar shows it.
-                    .when_some(
-                        self.play_pred
-                            .ready()
-                            .map(|p| p.timing.total_ms)
-                            .filter(|_| window.viewport_size().width < px(1100.)),
-                        |d, ms| {
-                            d.child(
-                                text(ty::XS, t.text_secondary)
-                                    .flex_none()
-                                    .tnum()
-                                    .child(format!("{ms:.1} ms")),
-                            )
-                            .child(div().flex_none().w(px(1.)).h(px(16.)).bg(t.line_subtle))
-                        },
-                    )
+                    // The latency always reads here, beside the count (the rail's breakdown is
+                    // below the fold at most window sizes).
+                    .when_some(self.play_pred.ready().map(|p| p.timing.total_ms), |d, ms| {
+                        d.child(
+                            text(ty::XS, t.text_secondary).flex_none().tnum().child(format!("{ms:.1} ms")),
+                        )
+                        .child(div().flex_none().w(px(1.)).h(px(16.)).bg(t.line_subtle))
+                    })
                     .when_some(count, |d, n| {
                         d.child(div().flex_none().flex().items_center().gap(px(6.)).child(
                             text(ty::XS, t.text_secondary).tnum().child(format!(
@@ -758,10 +765,34 @@ impl FoloApp {
                     )
                     .into_any_element()
             }
-            Load::Failed(e) => div()
-                .p(px(16.))
-                .child(text(ty::SM, t.danger_text).child(e.message.clone()))
-                .into_any_element(),
+            Load::Failed(e) => {
+                // Out of GPU memory locally: the CPU is one click away.
+                let to_cpu = (e.code == "gpu_out_of_memory"
+                    && self.play_target == Some(crate::local::Target::Gpu))
+                .then(|| {
+                    self.button(
+                        "play-to-cpu",
+                        "Run on Local CPU",
+                        Btn::Secondary,
+                        None,
+                        window,
+                        cx,
+                        act(|this, _, cx| this.set_play_target(Some(crate::local::Target::Cpu), cx)),
+                    )
+                });
+                div()
+                    .p(px(16.))
+                    .flex()
+                    .flex_col()
+                    .items_start()
+                    .gap(px(6.))
+                    .child(text(ty::SM, t.danger_text).whitespace_normal().child(e.message.clone()))
+                    .when_some(e.hint.clone(), |d, h| {
+                        d.child(text(ty::XS, t.text_tertiary).whitespace_normal().child(h))
+                    })
+                    .children(to_cpu.map(|b| div().pt(px(4.)).child(b)))
+                    .into_any_element()
+            }
             Load::Loading => div()
                 .flex_none()
                 .child(
@@ -871,9 +902,19 @@ impl FoloApp {
                             .child(hairline(&t))
                             .child(detections)
                             .children(picker)
-                            .children(timing),
+                            .children(timing)
+                            // Room to scroll the last row clear of the fade below.
+                            .child(div().h(px(12.))),
                     ),
             )
+            // A row cut by the rail's bottom edge fades out instead of stopping mid-glyph.
+            .child(div().absolute().bottom_0().left_0().right_0().h(px(20.)).rounded_b(px(radius::LG)).bg(
+                gpui::linear_gradient(
+                    0.,
+                    gpui::linear_color_stop(t.bg_panel, 0.),
+                    gpui::linear_color_stop(crate::theme::alpha(t.bg_panel, 0.), 1.),
+                ),
+            ))
             .child(self.scrollbar(self.play_side_scroll.clone(), cx))
             .into_any_element()
     }
@@ -918,7 +959,7 @@ impl FoloApp {
             cx,
         );
         let note = match (self.play_target, &self.local_gpu) {
-            (None, _) if !local => "Built-in demo · local runs need folo serve".into(),
+            (None, _) if !local => "Local GPU / CPU need a model from folo serve".into(),
             (None, _) => format!("On folo serve at {}", self.store.api.describe()),
             (Some(Target::Gpu), Load::Ready(name)) => {
                 format!("In this app, on {}", crate::ui::short_gpu(name))

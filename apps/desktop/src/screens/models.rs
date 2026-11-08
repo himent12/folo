@@ -19,7 +19,7 @@ use crate::store::Load;
 use crate::theme::{alpha, radius, size as tsize, theme, ty};
 use crate::ui::*;
 
-/// Row-label column of the confusion matrix (fits "False positives").
+/// Row-label column of the confusion matrix (fits "Share of all FP").
 const LABEL_W: f32 = 96.;
 
 impl FoloApp {
@@ -779,29 +779,29 @@ impl FoloApp {
         // Values live in the legend beside the plot; the cursor shows a recall chip on the axis.
         chart.readout = false;
 
+        // The instruction follows the input in use: keys while the chart or a class row
+        // has keyboard focus, the pointer otherwise. Class focus is either family of rows
+        // (the legend's chips, the class table's rows), as `pr_isolated` reads it; pointer
+        // mode skips the lookups.
+        let focused = |k: &str| self.focus.borrow().get(k).is_some_and(|f| f.is_focused(window));
+        let row_focused = || {
+            ev.pr
+                .iter()
+                .any(|c| focused(&format!("pr-chip-{}", c.class)) || focused(&format!("pc-row-{}", c.class)))
+        };
+        let pr_hint = if self.kb && focused("pr-chart") {
+            "← → inspect recall · Esc clears"
+        } else if self.kb && row_focused() {
+            "Enter pins the class"
+        } else {
+            "Hover a class to isolate it, click to pin"
+        };
+
         panel(&t)
             .flex_1()
             .flex()
             .flex_col()
-            .child(panel_header(&t, "Precision–recall").child(caption(&t, {
-                // The instruction follows the input in use: keys while the chart or a class
-                // row has keyboard focus, the pointer otherwise.
-                let focused = |k: &str| self.focus.borrow().get(k).is_some_and(|f| f.is_focused(window));
-                // Class focus is either family of rows (the legend's chips, the class table's
-                // rows), as `pr_isolated` reads it; pointer mode skips the lookups.
-                let row_focused = || {
-                    ev.pr.iter().any(|c| {
-                        focused(&format!("pr-chip-{}", c.class)) || focused(&format!("pc-row-{}", c.class))
-                    })
-                };
-                if self.kb && focused("pr-chart") {
-                    "IoU 0.50 · ← → inspect recall · Esc clears"
-                } else if self.kb && row_focused() {
-                    "IoU 0.50 · Enter pins the class"
-                } else {
-                    "IoU 0.50 · hover a class to isolate, click to pin"
-                }
-            })))
+            .child(panel_header(&t, "Precision–recall").child(caption(&t, "IoU 0.50")))
             .child(
                 div()
                     .flex()
@@ -890,7 +890,14 @@ impl FoloApp {
                                                 .child(format!("{:.3}", mm.map50)),
                                         ),
                                 )
-                            }),
+                            })
+                            // How to use the panel, in the room under the list (beside the plot).
+                            .child(
+                                div()
+                                    .mt(px(10.))
+                                    .px(px(8.))
+                                    .child(text(ty::XS, t.text_tertiary).whitespace_normal().child(pr_hint)),
+                            ),
                     ),
             )
             .into_any_element()
@@ -979,7 +986,9 @@ impl FoloApp {
                 .children(labels.iter().enumerate().map(|(i, l)| {
                     // The full name, else its short form, else its initial (each measured); a
                     // shortened heading shows the full name on hover.
-                    let room = |window: &mut Window, s: &str| col_w.is_none_or(|w| wide(window, s) <= w);
+                    // A heading may overhang its cell by 2 px into the 4 px gap.
+                    let room =
+                        |window: &mut Window, s: &str| col_w.is_none_or(|w| wide(window, s) <= w + px(4.));
                     let fits = i == n - 1 || room(window, l);
                     let shown = if fits {
                         l.clone()
@@ -1002,7 +1011,11 @@ impl FoloApp {
                             text(ty::XS, if i == n - 1 { t.text_tertiary } else { t.text_secondary })
                                 .font_weight(FontWeight::MEDIUM)
                                 .whitespace_nowrap()
-                                .when(i != n - 1, |d| d.when_some(col_w, |d, w| d.max_w(w).overflow_hidden()))
+                                // A name that passed the fit check renders whole (a few px into the gap at most);
+                                // only a shortened form keeps the hard cap.
+                                .when(!fits, |d| {
+                                    d.when_some(col_w, |d, w| d.max_w(w + px(4.)).overflow_hidden())
+                                })
                                 .child(shown),
                         )
                 })),
@@ -1020,7 +1033,12 @@ impl FoloApp {
                         .pr(px(8.))
                         .text_right()
                         .truncate()
-                        .child(if r == n - 1 { "False positives".to_string() } else { labels[r].clone() }),
+                        .child(if r == n - 1 {
+                            // Its denominator differs from the class rows': all false positives.
+                            if norm { "Share of all FP".to_string() } else { "False positives".to_string() }
+                        } else {
+                            labels[r].clone()
+                        }),
                 )
                 .children(row.iter().enumerate().map(|(c, &v)| {
                     let frac = if norm { v as f32 / row_sums[r] as f32 } else { v as f32 / max_count as f32 };
@@ -1289,13 +1307,14 @@ fn num_cell(w: f32, content: impl IntoElement) -> gpui::Div {
     div().w(px(w)).flex_none().flex().justify_end().child(content)
 }
 
-/// Fill opacity of an error cell: a square-root ramp over the whole 0–100 % range.
 /// A column heading's short form: the first three letters and a full stop ("hexagon" → "hex.").
 fn short_name(name: &str) -> String {
     let short: String = name.chars().take(3).collect();
     if short.chars().count() < name.chars().count() { format!("{short}.") } else { short }
 }
 
+/// Fill opacity of an error cell: a square-root ramp over `frac`, the cell's share of the largest
+/// class-to-class confusion shown.
 fn err_alpha(frac: f32) -> f32 {
     0.8 * frac.clamp(0., 1.).sqrt()
 }

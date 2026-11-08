@@ -280,6 +280,8 @@ pub struct Store {
     pub images: HashMap<String, Load<Vec<ImageInfo>>>,
     pub models: Load<Vec<Model>>,
     pub evals: HashMap<String, Load<ModelEval>>,
+    /// Per dataset, its issue counts by severity (fetched when it has broken labels).
+    pub issues: HashMap<String, Load<IssueCounts>>,
     pub runs: Load<Vec<Run>>,
     pub run_data: HashMap<String, Load<RunData>>,
     pub samples: HashMap<String, Load<RunSamples>>,
@@ -310,6 +312,7 @@ impl Store {
             images: HashMap::new(),
             models: Load::Idle,
             evals: HashMap::new(),
+            issues: HashMap::new(),
             runs: Load::Idle,
             run_data: HashMap::new(),
             samples: HashMap::new(),
