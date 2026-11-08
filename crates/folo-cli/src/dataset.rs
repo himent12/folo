@@ -58,7 +58,7 @@ fn data_error(e: DataError, path: &Path) -> CliError {
         DataError::Config(m) => {
             CliError::new(ExitCode::Usage, "usage", m).hint("see `folo dataset <command> --help`")
         }
-        e => CliError::new(ExitCode::Runtime, "io", e.to_string()),
+        e => CliError::new(ExitCode::Runtime, "io_error", e.to_string()),
     }
 }
 
@@ -108,8 +108,8 @@ fn stats(args: StatsArgs, out: Out) -> Result<(), CliError> {
     let skipped = ds.report.skipped_images();
     out.record(&json!({
         "name": dataset_name(&args.path),
-        "path": args.path,
-        "root": ds.root,
+        "path": folo_api::json::path(&args.path),
+        "root": folo_api::json::path(&ds.root),
         "format": format_name(ds.format),
         "classes": ds.classes,
         "splits": splits_json(ds.split_sizes()),
@@ -253,15 +253,20 @@ fn check(args: CheckArgs, out: Out) -> Result<(), CliError> {
     let by_kind: serde_json::Map<String, Value> =
         report.counts().into_iter().map(|(k, n)| (k.as_str().to_string(), json!(n))).collect();
     out.record(&json!({
-        "path": args.path,
-        "root": report.root,
+        "path": folo_api::json::path(&args.path),
+        "root": folo_api::json::path(&report.root),
         "format": format_name(report.format),
         "classes": report.classes,
         "images": report.images(),
         "splits": splits_json(report.splits),
         "clean": report.is_clean(),
         "counts": { "error": errors, "warning": warnings, "info": infos, "by_kind": by_kind },
-        "issues": report.issues.iter().map(|i| issue_json(i, &report.root, args.fix_dry_run)).collect::<Vec<_>>(),
+        "issues": report
+            .issues
+            .iter()
+            .filter(|i| severity_rank(i.severity()) <= args.min_severity as u8)
+            .map(|i| issue_json(i, &report.root, args.fix_dry_run))
+            .collect::<Vec<_>>(),
         "seconds": secs,
     }));
     for line in check_lines(&report, args.fix_dry_run, secs) {
@@ -280,6 +285,15 @@ fn check(args: CheckArgs, out: Out) -> Result<(), CliError> {
     } else {
         "see the issues above; --fix-dry-run shows what a cleanup would change"
     }))
+}
+
+/// `Severity` in `SeverityArg` order (0 error, 1 warning, 2 info).
+fn severity_rank(s: Severity) -> u8 {
+    match s {
+        Severity::Error => 0,
+        Severity::Warning => 1,
+        Severity::Info => 2,
+    }
 }
 
 fn check_lines(r: &CheckReport, fixes: bool, secs: f64) -> Vec<String> {
@@ -401,8 +415,8 @@ fn synth(args: SynthArgs, out: Out) -> Result<(), CliError> {
     let [train, val] = written.splits;
     out.record(&json!({
         "event": "done",
-        "path": written.root,
-        "yaml": written.yaml,
+        "path": folo_api::json::path(&written.root),
+        "yaml": folo_api::json::path(&written.yaml),
         "images": cfg.images,
         "splits": splits_json([train, val, 0]),
         "boxes": written.boxes,
@@ -447,8 +461,8 @@ fn convert(args: ConvertArgs, out: Out) -> Result<(), CliError> {
     })?;
     let secs = t0.elapsed().as_secs_f64();
     out.record(&json!({
-        "input": args.input,
-        "output": done.root,
+        "input": folo_api::json::path(&args.input),
+        "output": folo_api::json::path(&done.root),
         "from": format_name(ds.format),
         "to": format_name(to),
         "classes": ds.classes,

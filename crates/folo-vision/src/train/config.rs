@@ -266,11 +266,7 @@ impl TrainConfig {
 pub fn resolve_device(s: &str) -> Result<Device> {
     let gpu = |i: usize| {
         let d = Device::Gpu(i);
-        folo_core::backend::backend(d).map(|_| d).map_err(|_| {
-            Error::Unsupported(format!(
-                "device {d} has no registered backend in this build (GPU support is folo-gpu's `init()`); use --device cpu"
-            ))
-        })
+        folo_core::backend::backend(d).map(|_| d).map_err(|_| super::device_not_found(d))
     };
     match s.trim().to_ascii_lowercase().as_str() {
         "cpu" => Ok(Device::Cpu),

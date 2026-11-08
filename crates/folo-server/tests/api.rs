@@ -927,7 +927,7 @@ async fn val_endpoint() {
     .await;
     assert_eq!(train.images, 800);
     let req = json!({ "model_id": "m_31aa", "dataset_id": "ds_5a1e", "split": "test" });
-    err(&app, post_json("/api/val", req), StatusCode::BAD_REQUEST, "invalid_body").await;
+    err(&app, post_json("/api/val", req), StatusCode::BAD_REQUEST, "invalid_dataset").await;
     let req = json!({ "model_id": "nope", "dataset_id": "ds_5a1e" });
     err(&app, post_json("/api/val", req), StatusCode::NOT_FOUND, "model_not_found").await;
     let req = json!({ "model_id": "m_31aa", "dataset_id": "ds_5a1e", "conf": 2.0 });

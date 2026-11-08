@@ -31,6 +31,8 @@ pub struct ImageQuery {
 pub struct IssueQuery {
     /// Only issues of this kind (one of [`folo_api::ISSUE_KINDS`]).
     pub kind: Option<String>,
+    /// Only issues of this severity.
+    pub severity: Option<folo_api::IssueSeverity>,
     /// Skip this many matching issues.
     pub offset: u64,
     /// Return at most this many.
@@ -38,17 +40,23 @@ pub struct IssueQuery {
 }
 
 impl IssueQuery {
-    /// The page of `issues` this query selects.
-    pub fn page<'a>(&self, issues: impl Iterator<Item = &'a folo_api::DatasetIssue>) -> folo_api::IssuePage {
+    /// The page of `issues` this query selects, with the counts of all of them.
+    pub fn page<'a>(
+        &self,
+        issues: impl Iterator<Item = &'a folo_api::DatasetIssue> + Clone,
+    ) -> folo_api::IssuePage {
         let mut total = 0u64;
         let mut page = Vec::new();
-        for i in issues.filter(|i| self.kind.as_ref().is_none_or(|k| *k == i.kind)) {
+        let keep = |i: &&folo_api::DatasetIssue| {
+            self.kind.as_ref().is_none_or(|k| *k == i.kind) && self.severity.is_none_or(|s| s == i.severity)
+        };
+        for i in issues.clone().filter(keep) {
             if total >= self.offset && (page.len() as u64) < self.limit {
                 page.push(i.clone());
             }
             total += 1;
         }
-        folo_api::IssuePage { total, issues: page }
+        folo_api::IssuePage { total, issues: page, counts: folo_api::IssueCounts::of(issues) }
     }
 }
 

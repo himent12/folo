@@ -21,7 +21,7 @@ use crate::util::fnv1a;
 pub const MAX_CLASSES: usize = 4096;
 
 /// Bumped whenever the cached [`Index`] layout or its derivation changes, so old caches are rebuilt.
-pub const INDEX_VERSION: u32 = 3;
+pub const INDEX_VERSION: u32 = 4;
 
 /// A cheap summary of every file under a dataset's folders: count, total size and a hash of each file's relative
 /// path, size and modification time (and of each folder's name). Adding, removing, renaming or editing a file, or
@@ -273,6 +273,7 @@ impl Index {
                 file: relative_to(&i.file, &root),
                 line: i.line.map(|l| l.min(u32::MAX as usize) as u32),
                 message: i.message.clone(),
+                fix: i.fix.clone(),
             })
             .collect();
         if ds.classes.len() > MAX_CLASSES {

@@ -16,7 +16,7 @@ Claude Code and Codex are in the README ("Use FOLO from Claude Code / Codex"). T
 `folo-mcp` crate; the end-to-end tests are `crates/folo-cli/tests/mcp.rs`.
 
 ## Status
-Implemented: both protocol revisions, all 16 tools with generated input and output schemas, every resource and
+Implemented: both protocol revisions, all 17 tools with generated input and output schemas, every resource and
 both subscription flows, both prompts, paging and size limits, `--read-only`, `--confine`, and proxy mode. Every
 tool goes through the [`Store`](../crates/folo-server/src/store.rs) behind the server, so what works depends on
 it:
@@ -34,8 +34,8 @@ it:
 | run subscriptions | fired by the run's live events | fired by the mock runs' events | polled every second |
 | `folo://runs/{id}/samples/{epoch}` | the run's validation samples (first 16 val images) | rendered mock samples | `/api/runs/{id}/samples` |
 
-`get_dataset`'s `issues` come from `Store::list_issues` (`/api/datasets/{id}/issues` in proxy mode). The one
-remaining `not_implemented` in real mode is ONNX export; its hint points at `folo-f16`.
+`get_dataset`'s `issues` and `list_dataset_issues` come from `Store::list_issues` (`/api/datasets/{id}/issues`
+in proxy mode). The one remaining `not_implemented` in real mode is ONNX export; its hint points at `folo-f16`.
 
 ## Protocol
 - **Revisions.** The server supports MCP **2026-07-28** and the previous stable revision **2025-11-25**. The two
@@ -70,17 +70,31 @@ remaining `not_implemented` in real mode is ONNX export; its hint points at `fol
 ## Results and errors
 Every tool declares an `inputSchema` and an `outputSchema`. The schemas are generated from the same Rust types as the
 HTTP API (`schemars`), so `folo describe --json` prints identical schemas, and docs/API.md is the source of field
-meanings.
+meanings. They are compacted for `tools/list` (about 45 KB for all 17 tools): no `$schema`, no numeric `format`
+annotations, no `minimum: 0` of unsigned types, defaults without f32 noise (`0.01`, not `0.009999999776482582`);
+output schemas also leave out defaults and the field descriptions of the shared types in `$defs` (`Run`,
+`TrainConfig`, `Epoch`, ...; docs/API.md documents them) and write string enums as `enum`. Every input schema,
+nested objects included, has `additionalProperties: false`: **an argument the tool does not know is an
+`invalid_arguments` error**, never silently ignored, and the message suggests the likely name
+(``unknown argument `lr`; did you mean `lr0`?``; also `model` → `arch`, `augment.mosiac` → `mosaic`).
 - **Success:** `structuredContent` validates against the tool's `outputSchema`, plus one short `text` content item
   summarising it (one or two lines, for transcripts).
 - **Tool failure** (tool arguments that fail the `inputSchema` (missing or wrongly typed fields), bad values, missing
   dataset, GPU unavailable, ...): a normal result with `isError: true`, no
   `structuredContent`, and a single `text` item containing the JSON error object
-  `{ "code": "dataset_not_found", "message": "...", "hint": "..." | null }`. Codes are the ones of docs/API.md
-  (store errors pass through unchanged), plus `invalid_arguments` (arguments that fail the `inputSchema` or a
-  documented range, e.g. names over 128 characters), `read_only`, `path_outside_data_dir`, `path_not_found`,
-  `too_many_inputs`, `payload_too_large` (images over 64 MiB), `result_too_large` (see below) and
-  `server_unreachable` (proxy mode, `folo serve` not answering).
+  `{ "code": "dataset_not_found", "message": "...", "hint": "..." | null }`. Codes are one vocabulary with the
+  CLI and docs/API.md (`folo_api::codes`; the same failure has the same code on every front end): store errors
+  pass through unchanged, except the HTTP layer's names for bad input (`invalid_body`, `invalid_query`,
+  `invalid_path`, `bad_request`), which are `invalid_arguments`. Added by MCP: `invalid_arguments` (arguments
+  that fail the `inputSchema`, unknown ones included, or a documented range, e.g. names over 128 characters),
+  `read_only`, `path_outside_data_dir`, `path_not_found`, `too_many_inputs`, `payload_too_large` (images over 64
+  MiB), `result_too_large` (see below) and `server_unreachable` (proxy mode, `folo serve` not answering). A
+  `TrainConfig` value the trainer cannot use (`arch: "folo-q"`, out of range) is `invalid_config` as in the CLI;
+  an empty split for `val` is `invalid_dataset`; a `device: "gpu:7"` this machine lacks is `device_not_found`
+  (the hint lists the devices it has); a GPU out of memory is `gpu_out_of_memory` (hint: lower `batch` or
+  `imgsz`, or a smaller `arch`). Messages are cut to 1000 characters and hints to 500; engine errors (also a
+  failed run's `error`) are already cut to 500, so a driver report never floods the context. The `*_not_found`
+  codes of listed things hint at the list tool (`list_datasets`, `list_models`, `list_runs`, ...).
 - **Protocol errors** (malformed JSON-RPC, a malformed `tools/call` envelope, unknown tool or method, unsupported
   protocol version): JSON-RPC errors per the spec, never `isError` results: unknown tool `-32602`, unknown method
   `-32601`, unsupported version `-32022`, a prompt without its required argument `-32602`. Well-formed JSON that is
@@ -98,7 +112,8 @@ meanings.
   `num_classes`), and run errors are cut to 500 characters, so a page always makes progress.
 - No tool result exceeds ~32 KB of JSON, and every result still validates against its `outputSchema`. Limits are
   part of each schema: list pages shrink below `limit` to fit (the `next_cursor` continues from the last item
-  returned), `predict` returns at most `max_det` boxes, `get_dataset` caps `issues` at 50 (with `issues_total`), and
+  returned), `predict` returns at most `max_det` boxes, `get_dataset` lists at most 50 issues (errors, then
+  warnings; `issue_counts` and `issues_total` count them all, `list_dataset_issues` pages through them), and
   `predict_batch` always returns summaries plus a resource link. Bulk data with no bounded inline form (per-image
   batch predictions, full metric histories, sample grids) exists only as resources, and the outputs that refer to it
   carry a `details_uri` field plus a `resource_link` content item. Every result is measured before it is returned;
@@ -111,9 +126,10 @@ meanings.
 |---|---|---|
 | `folo_info` | `{}` | `version`, `mode` (`embedded` / `mock` / `proxy`), `server`, `data_dir`, `read_only`, `confine`, `devices` (`cpu`, `gpus` with backend and memory; `memory_bytes` 0 when unknown), `scales` with params and GFLOPs at 640 and 320 |
 | `list_datasets` | paging | page of `{ id, name, format, classes, splits }` |
-| `get_dataset` | `{ dataset_id }` | `Dataset` with `stats`, plus `issues: [{ kind, file, message }]` (first 50, with `issues_total`) |
+| `get_dataset` | `{ dataset_id }` | `Dataset` with `stats`, plus `issues`: errors, then warnings, each `{ kind, severity, file, line, message, fix }` (first 50; infos such as `empty_image` are only counted), `issue_counts: { error, warning, info, by_kind }` and `issues_total` |
+| `list_dataset_issues` | `{ dataset_id, severity?: "error"\|"warning"\|"info", kind?: string }` + paging | page of `{ kind, severity, file, line, message, fix? }` in dataset order (the `folo dataset check --fix-dry-run` objects), plus `counts` of all issues |
 | `list_dataset_images` | `{ dataset_id, split?: "train"\|"val"\|"test", class?: integer, include_boxes?: boolean (default false) }` + paging | page of `{ image_id, file, split, width, height, boxes? }` (`boxes` only with `include_boxes: true`) |
-| `register_dataset` | `{ name, path, format?: "auto"\|"yolo"\|"coco" }` | `Dataset` |
+| `register_dataset` | `{ name, path, format?: "auto"\|"yolo"\|"coco" }` | `Dataset`; a folder registered before (same canonical path) returns that dataset (the summary says "already registered") |
 | `create_synthetic_dataset` | `{ name, images?: 1000 (max 100000), classes?: string[], imgsz?: 640, seed?: 0 }` | `Dataset` |
 | `list_models` | paging | page of `{ id, name, arch, imgsz, classes, metrics }` |
 | `train` | `TrainConfig` (docs/API.md; `dataset_id` required), or `{ resume_run_id }` (other fields optional and must match the run) | `{ run_id, status }` |
@@ -145,15 +161,17 @@ Each resource read returns a JSON snapshot, unless stated otherwise.
   left out) and each update carries the subscription id in `_meta`; cancelling the listen request ends it. On
   2025-11-25, subscribing to an unknown run is a resource-not-found error. Missed intermediate steps are not an error: epoch history is in
   the metrics resource.
-- `folo://runs/{id}/metrics`: the full history (docs/API.md `/metrics`). Subscribable, and updated after each epoch
-  (and on status changes).
+- `folo://runs/{id}/metrics`: the full history (docs/API.md `/metrics`), every step included (about 150 KB for
+  12 epochs of 50 batches). Subscribable, and updated after each epoch (and on status changes).
+- `folo://runs/{id}/epochs`: `{ epochs: [Epoch], last_step }`, the epoch history without per-step records (about
+  1 KB per epoch); what an agent wants for the mAP and loss curves. Subscribable like `/metrics`.
 - `folo://runs/{id}/samples/{epoch}`: validation samples rendered as an annotated JPEG grid (truth outlined white,
   predictions in class colours), for quick visual checks.
 - `folo://predictions/{batch_id}`: per-image boxes of a `predict_batch` call (kept for the server's lifetime).
 - `folo://docs/{name}`: repository docs (`ARCHITECTURE`, `API`, `CLI`, `MODEL`, `FORMAT`, `METRICS`, `MCP`, `AGENT_COOKBOOK`) as text/markdown
   (compiled into the binary).
 
-`resources/list` lists datasets, runs (with their metrics) and docs, 100 per page; images, samples and predictions
+`resources/list` lists datasets, runs (with their metrics and epochs) and docs, 100 per page; images, samples and predictions
 are reached through `resources/templates/list`.
 
 ## Prompts
@@ -192,6 +210,8 @@ In read-only mode, `train_on_folder` is not listed.
   data dir between a check and the open (FOLO never creates links).
 
 ## Run lifetime
+- **Progress fields.** `run_status.epoch` is the epoch in progress (1-based), so `epoch: 2` while running means one
+  epoch has finished; `last_epoch.epoch` is the last validated one.
 - **Embedded mode** (default): runs execute inside the `folo mcp` process. Run state is persisted under
   `--data-dir/runs/<id>/` (config, metrics, checkpoints at every epoch). When the MCP client disconnects (stdin
   closes) or the process receives a shutdown signal, the runs this session started are stopped (`stop_run` on
@@ -232,9 +252,11 @@ In read-only mode, `train_on_folder` is not listed.
 ## Tests
 `crates/folo-cli/tests/mcp.rs` spawns `folo mcp` and, for **each supported revision**, runs the handshake or discovery (plus,
 for 2026-07-28, a direct tool call without discovery and an unsupported-version request), both subscription flows, `tools/list`
-(checking the schemas), `resources/list`, `prompts/list`, a `create_synthetic_dataset` → `train` (2 epochs on a tiny
-set) → subscribe / `run_status` → `predict` flow on the mock store, an `isError` case, a JSON-RPC error case, and a
-read-only-mode dispatch rejection. It asserts that nothing but valid JSON-RPC lines appears on stdout. Every
+(checking the schemas, their size and `additionalProperties: false`), `resources/list`, `prompts/list`, a
+`create_synthetic_dataset` → `train` (2 epochs on a tiny set) → subscribe / `run_status` → `predict` flow on the
+mock store, issues errors-first and paged, a repeated `register_dataset`, unknown and misspelled arguments, the
+shared error codes, the `/epochs` resource, an `isError` case, a JSON-RPC error case, and a read-only-mode
+dispatch rejection. It asserts that nothing but valid JSON-RPC lines appears on stdout. Every
 structured tool result is validated against the tool's `outputSchema`. `real_store_end_to_end` drives the **real**
 store (`--device cpu`, 64 px, about 15 s): a synthetic dataset, a 2-epoch run followed through its resource
 subscription until it completes, `list_models`, `val` on two splits, `predict` on a dataset image and the same

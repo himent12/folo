@@ -117,7 +117,8 @@ impl Confinement {
         // A read the guard refused while indexing is reported as an issue (an unreadable list, image or label).
         let mut offset = 0;
         loop {
-            let page = store.list_issues(id, &IssueQuery { kind: None, offset, limit: WALK_PAGE })?;
+            let page =
+                store.list_issues(id, &IssueQuery { offset, limit: WALK_PAGE, ..IssueQuery::default() })?;
             if let Some(i) = page.issues.iter().find(|i| i.message.contains(folo_data::guard::DENIED)) {
                 return Err(in_dataset(
                     Error::new(StatusCode::FORBIDDEN, "path_outside_data_dir", i.message.clone()),

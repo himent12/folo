@@ -35,6 +35,8 @@ pub enum FoloUri {
     Run(String),
     /// `folo://runs/{id}/metrics`
     Metrics(String),
+    /// `folo://runs/{id}/epochs`
+    Epochs(String),
     /// `folo://runs/{id}/samples/{epoch}`
     Samples(String, u32),
     /// `folo://predictions/{batch_id}`
@@ -71,6 +73,7 @@ impl FoloUri {
             ["datasets", id, "images", image] => FoloUri::Image(decode(id)?, decode(image)?),
             ["runs", id] => FoloUri::Run(decode(id)?),
             ["runs", id, "metrics"] => FoloUri::Metrics(decode(id)?),
+            ["runs", id, "epochs"] => FoloUri::Epochs(decode(id)?),
             ["runs", id, "samples", epoch] => FoloUri::Samples(decode(id)?, epoch.parse().ok()?),
             ["predictions", id] => FoloUri::Predictions(decode(id)?),
             ["docs", name] => FoloUri::Doc(decode(name)?),
@@ -78,9 +81,9 @@ impl FoloUri {
         })
     }
 
-    /// Run snapshots and metric histories can be subscribed to.
+    /// Run snapshots and metric (or epoch) histories can be subscribed to.
     pub fn subscribable(&self) -> bool {
-        matches!(self, FoloUri::Run(_) | FoloUri::Metrics(_))
+        matches!(self, FoloUri::Run(_) | FoloUri::Metrics(_) | FoloUri::Epochs(_))
     }
 }
 
@@ -91,6 +94,7 @@ impl fmt::Display for FoloUri {
             FoloUri::Image(id, image) => write!(f, "folo://datasets/{}/images/{}", encode(id), encode(image)),
             FoloUri::Run(id) => write!(f, "folo://runs/{}", encode(id)),
             FoloUri::Metrics(id) => write!(f, "folo://runs/{}/metrics", encode(id)),
+            FoloUri::Epochs(id) => write!(f, "folo://runs/{}/epochs", encode(id)),
             FoloUri::Samples(id, e) => write!(f, "folo://runs/{}/samples/{e}", encode(id)),
             FoloUri::Predictions(id) => write!(f, "folo://predictions/{}", encode(id)),
             FoloUri::Doc(name) => write!(f, "folo://docs/{}", encode(name)),
@@ -124,6 +128,11 @@ pub fn list(store: &dyn Store, keep: &dyn Fn(&str) -> bool) -> Result<Vec<Resour
         out.push(
             Resource::new(FoloUri::Metrics(r.id.clone()).to_string(), format!("metrics of {}", r.name))
                 .with_description(format!("{}: full step and epoch history (subscribable)", r.id))
+                .with_mime_type("application/json"),
+        );
+        out.push(
+            Resource::new(FoloUri::Epochs(r.id.clone()).to_string(), format!("epochs of {}", r.name))
+                .with_description(format!("{}: epoch history only, no steps (subscribable)", r.id))
                 .with_mime_type("application/json"),
         );
     }
@@ -161,6 +170,12 @@ pub fn templates() -> Vec<ResourceTemplate> {
             "folo://runs/{id}/metrics",
             "run metrics",
             "Full step and epoch history; subscribable.",
+            "application/json",
+        ),
+        t(
+            "folo://runs/{id}/epochs",
+            "run epochs",
+            "{ epochs, last_step }: the epoch history without per-step records (about 1 KB per epoch); subscribable.",
             "application/json",
         ),
         t(
@@ -202,6 +217,7 @@ mod tests {
             FoloUri::Image("ds_1".into(), "train/0 1".into()),
             FoloUri::Run("run_1".into()),
             FoloUri::Metrics("run_1".into()),
+            FoloUri::Epochs("run_1".into()),
             FoloUri::Samples("run_1".into(), 3),
             FoloUri::Predictions("pb_1".into()),
             FoloUri::Doc("API".into()),

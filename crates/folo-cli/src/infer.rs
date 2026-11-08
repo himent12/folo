@@ -20,12 +20,28 @@ fn nn_error(e: folo_nn::Error) -> CliError {
     engine_error(e.into())
 }
 
+/// A weights file that cannot be read: `invalid_weights` saying what the file is not, instead of a parser
+/// detail such as a header length.
+fn weights_error(path: &Path, e: folo_nn::Error) -> CliError {
+    let mut err = nn_error(e);
+    if err.code == "invalid_weights" {
+        err.message = folo_api::codes::cap(
+            &format!("{} is not a .folo weights file ({})", path.display(), err.message),
+            folo_api::codes::MAX_MESSAGE_CHARS,
+        );
+        err = err.hint(
+            "pass a .folo file written by `folo train` (runs/<name>/weights/best.folo) or `folo export`",
+        );
+    }
+    err
+}
+
 /// Open weights for inference (EMA when present, fused) on `device`.
 fn open_model(path: &Path, device: &str) -> Result<FoloModel, CliError> {
     require_file(path, "model_not_found")?;
     crate::engine::init_device(device);
     let device = resolve_device(device).map_err(engine_error)?;
-    let mut model = FoloModel::open(path).map_err(nn_error)?;
+    let mut model = FoloModel::open(path).map_err(|e| weights_error(path, e))?;
     model.fuse().map_err(nn_error)?;
     place_model(model, device).map_err(engine_error)
 }
@@ -66,8 +82,8 @@ pub fn val(args: ValArgs, out: Out) -> Result<(), CliError> {
     let names = model.classes();
     let name = |c: u32| names.get(c as usize).cloned().unwrap_or_else(|| c.to_string());
     out.record(&json!({
-        "model": args.model,
-        "data": args.data,
+        "model": folo_api::json::path(&args.model),
+        "data": folo_api::json::path(&args.data),
         "split": split.as_str(),
         "imgsz": imgsz,
         "images": r.report.num_images,
@@ -233,7 +249,7 @@ pub fn predict(args: PredictArgs, out: Out) -> Result<(), CliError> {
             Ok(i) => i,
             Err(e) => {
                 failed += 1;
-                out.record(&json!({ "event": "error", "file": path, "error": { "code": "image_decode_failed", "message": e.to_string() } }));
+                out.record(&json!({ "event": "error", "file": folo_api::json::path(path), "error": { "code": "image_decode_failed", "message": e.to_string() } }));
                 out.human(format!("{}: {e}", path.display()));
                 continue;
             }
@@ -265,12 +281,12 @@ pub fn predict(args: PredictArgs, out: Out) -> Result<(), CliError> {
         }
         out.record(&json!({
             "event": "prediction",
-            "file": path,
+            "file": folo_api::json::path(path),
             "image": { "width": p.width, "height": p.height },
             "boxes": p.scored_boxes(&classes),
             "timing": ti.to_api(),
             "device": device,
-            "saved": saved,
+            "saved": saved.as_ref().map(folo_api::json::path),
         }));
         let summary: Vec<String> =
             p.scored_boxes(&classes).iter().take(6).map(|b| format!("{} {:.2}", b.name, b.score)).collect();
@@ -326,25 +342,60 @@ pub fn export(args: ExportArgs, out: Out) -> Result<(), CliError> {
             .hint("export --format folo-f16 (or folo) for FOLO's own runtime"));
         }
     };
-    let file = ModelFile::open(&args.model).map_err(nn_error)?;
-    let output = args.output.clone().unwrap_or_else(|| {
-        let stem =
-            args.model.file_stem().map_or_else(|| "model".into(), |s| s.to_string_lossy().into_owned());
-        args.model.with_file_name(format!("{stem}-{suffix}.folo"))
-    });
-    let same = |a: &Path, b: &Path| match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => a == b,
+    let file = ModelFile::open(&args.model).map_err(|e| weights_error(&args.model, e))?;
+    // Like MCP `export`, never overwrite: the output is claimed with `create_new` (so concurrent exports never
+    // share a file; the export then replaces the empty claim atomically). The default name gets `-2`, `-3`, ...
+    // when taken; an existing --output is an error.
+    let claim = |p: &Path| std::fs::OpenOptions::new().write(true).create_new(true).open(p).map(drop);
+    let io = |p: &Path, e: std::io::Error| {
+        CliError::new(ExitCode::Runtime, "io_error", format!("cannot create {}: {e}", p.display()))
     };
-    if same(&output, &args.model) {
-        return Err(CliError::new(ExitCode::Usage, "usage", "--output must differ from --model"));
-    }
+    let output = match args.output.clone() {
+        Some(o) => {
+            let same = |a: &Path, b: &Path| match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+                (Ok(a), Ok(b)) => a == b,
+                _ => a == b,
+            };
+            if same(&o, &args.model) {
+                return Err(CliError::new(ExitCode::Usage, "usage", "--output must differ from --model"));
+            }
+            match claim(&o) {
+                Ok(()) => o,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    return Err(CliError::new(
+                        ExitCode::Runtime,
+                        "output_exists",
+                        format!("{} exists; export never overwrites", o.display()),
+                    )
+                    .hint("pass another --output, or leave it out for a free name next to --model"));
+                }
+                Err(e) => return Err(io(&o, e)),
+            }
+        }
+        None => {
+            let stem =
+                args.model.file_stem().map_or_else(|| "model".into(), |s| s.to_string_lossy().into_owned());
+            let mut n = 1;
+            loop {
+                let tag = if n == 1 { String::new() } else { format!("-{n}") };
+                let p = args.model.with_file_name(format!("{stem}-{suffix}{tag}.folo"));
+                match claim(&p) {
+                    Ok(()) => break p,
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => n += 1,
+                    Err(e) => return Err(io(&p, e)),
+                }
+            }
+        }
+    };
     let t = Instant::now();
-    file.export(&output, dtype).map_err(nn_error)?;
+    if let Err(e) = file.export(&output, dtype) {
+        let _ = std::fs::remove_file(&output); // only the file claimed above
+        return Err(nn_error(e));
+    }
     let bytes = std::fs::metadata(&output).map(|m| m.len()).unwrap_or(0);
     let source = if file.has_ema() { "ema" } else { "model" };
     out.record(&json!({
-        "path": output,
+        "path": folo_api::json::path(&output),
         "bytes": bytes,
         "format": match args.format { ExportFormatArg::FoloF16 => "folo-f16", _ => "folo" },
         "dtype": dtype.as_str(),

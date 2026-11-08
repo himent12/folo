@@ -330,7 +330,8 @@ fn invalid_configs_are_rejected() {
     }
     let gpu = TrainConfig { device: "gpu:3".into(), ..micro_config(1) };
     let err = Trainer::new(gpu, data(&ds), TrainOptions::default()).err().unwrap();
-    assert_eq!(err.code(), "not_supported");
+    assert_eq!(err.code(), "device_not_found");
+    assert!(err.to_string().contains("FOLO can use cpu"), "{err}");
     let empty = Arc::new(InMemoryDataset { samples: vec![], classes: vec!["a".into()], split: Split::Train });
     let no_images = TrainData { train: empty.clone(), val: empty, classes: vec!["a".into()] };
     let err = Trainer::new(micro_config(1), no_images, TrainOptions::default()).err().unwrap();

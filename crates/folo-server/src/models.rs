@@ -339,7 +339,7 @@ impl Models {
             return Err(nn_error(e));
         }
         let bytes = std::fs::metadata(&out).map(|x| x.len()).unwrap_or(0);
-        Ok(ExportResult { path: out.to_string_lossy().into_owned(), bytes })
+        Ok(ExportResult { path: folo_api::json::path(&out), bytes })
     }
 }
 
@@ -410,7 +410,12 @@ pub fn val(
         folo_api::Split::Test => Split::Test,
     });
     if part.is_empty() {
-        return Err(bad(format!("dataset '{}' has no {} images", dataset.id, split.as_str())));
+        // `invalid_dataset`, as `folo val` reports an empty split.
+        return Err(Error::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_dataset",
+            format!("dataset '{}' has no {} images", dataset.id, split.as_str()),
+        ));
     }
     let imgsz = imgsz.unwrap_or(model.imgsz());
     let cfg = ValConfig {

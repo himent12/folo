@@ -9,6 +9,9 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod codes;
+pub mod json;
+
 /// API version string reported in [`Health::api`].
 pub const API_VERSION: &str = "v1";
 
@@ -300,6 +303,40 @@ pub struct IssuePage {
     pub total: u64,
     /// This page.
     pub issues: Vec<DatasetIssue>,
+    /// Every issue of the dataset counted by severity and by kind, whatever the filter (servers before these
+    /// counts existed omit them; they then read as zero).
+    #[serde(default)]
+    pub counts: IssueCounts,
+}
+
+/// Issue counts by severity and by kind (only kinds that occur), as `folo dataset check --json` reports them.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct IssueCounts {
+    /// Errors (the loader skips those images).
+    pub error: u64,
+    /// Warnings (fixed up on load, or suspicious).
+    pub warning: u64,
+    /// Infos (background images).
+    pub info: u64,
+    /// Issues per kind.
+    pub by_kind: std::collections::BTreeMap<String, u64>,
+}
+
+impl IssueCounts {
+    /// Counts `issues`.
+    pub fn of<'a>(issues: impl IntoIterator<Item = &'a DatasetIssue>) -> IssueCounts {
+        let mut c = IssueCounts::default();
+        for i in issues {
+            match i.severity {
+                IssueSeverity::Error => c.error += 1,
+                IssueSeverity::Warning => c.warning += 1,
+                IssueSeverity::Info => c.info += 1,
+            }
+            *c.by_kind.entry(i.kind.clone()).or_default() += 1;
+        }
+        c
+    }
 }
 
 /// Every issue kind, in the order `folo dataset check` reports counts. Errors: `broken_label`, `class_overflow`,
@@ -319,8 +356,9 @@ pub const ISSUE_KINDS: [&str; 11] = [
     "other",
 ];
 
-/// How serious a [`DatasetIssue`] is.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// How serious a [`DatasetIssue`] is (ordered most serious first).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum IssueSeverity {
     /// The loader skips the image.
@@ -331,9 +369,28 @@ pub enum IssueSeverity {
     Info,
 }
 
-/// One problem in a dataset; the same object as an entry of `folo dataset check --json`'s `issues` (which may also
-/// carry a `fix`).
+impl IssueSeverity {
+    /// Every severity, most serious first.
+    pub const ALL: [IssueSeverity; 3] = [IssueSeverity::Error, IssueSeverity::Warning, IssueSeverity::Info];
+
+    /// The serialised name (`error`, `warning`, `info`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            IssueSeverity::Error => "error",
+            IssueSeverity::Warning => "warning",
+            IssueSeverity::Info => "info",
+        }
+    }
+
+    /// Parses a serialised name.
+    pub fn parse(s: &str) -> Option<IssueSeverity> {
+        IssueSeverity::ALL.into_iter().find(|v| v.as_str() == s)
+    }
+}
+
+/// One problem in a dataset; the same object as an entry of `folo dataset check --fix-dry-run --json`'s `issues`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct DatasetIssue {
     /// One of [`ISSUE_KINDS`].
     pub kind: String,
@@ -346,6 +403,9 @@ pub struct DatasetIssue {
     pub line: Option<u32>,
     /// Human-readable details.
     pub message: String,
+    /// What a cleanup would do about it, e.g. `delete line 3` (absent for infos). FOLO never applies it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fix: Option<String>,
 }
 
 /// One dataset image with its ground-truth boxes.

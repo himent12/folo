@@ -4,8 +4,8 @@
 use std::collections::BTreeMap;
 
 use folo_api::{
-    Arch, BBox, BestEpoch, DatasetFormat, Epoch, ExportFormat, GpuInfo, LogLine, Loss, ModelMetrics, Run,
-    RunStatus, Split, Splits, Step, TrainConfig, ValMetrics,
+    Arch, BBox, BestEpoch, DatasetFormat, DatasetIssue, Epoch, ExportFormat, GpuInfo, IssueCounts,
+    IssueSeverity, LogLine, Loss, ModelMetrics, Run, RunStatus, Split, Splits, Step, TrainConfig, ValMetrics,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -377,27 +377,52 @@ pub struct DatasetSummary {
     pub splits: Splits,
 }
 
-/// One dataset issue (summary of `/api/datasets/{id}/issues`).
-#[derive(Debug, Clone, Serialize, JsonSchema)]
-pub struct IssueSummary {
-    /// Issue kind, e.g. `broken_label`.
-    pub kind: String,
-    /// File it is in, relative to the dataset root.
-    pub file: String,
-    /// Details.
-    pub message: String,
-}
-
-/// `get_dataset` result: the dataset with stats, plus its first issues.
+/// `get_dataset` result: the dataset with stats, plus its most serious issues.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct DatasetDetail {
     /// The dataset, with `stats`.
     #[serde(flatten)]
     pub dataset: folo_api::Dataset,
-    /// The first 50 issues.
-    pub issues: Vec<IssueSummary>,
-    /// All issues.
+    /// Errors, then warnings, each in dataset order (at most 50; infos are only counted). `list_dataset_issues`
+    /// pages through all of them.
+    pub issues: Vec<DatasetIssue>,
+    /// All issues, infos included.
     pub issues_total: u64,
+    /// All issues by severity and by kind.
+    pub issue_counts: IssueCounts,
+}
+
+/// `list_dataset_issues`.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ListIssuesArgs {
+    /// Dataset id.
+    pub dataset_id: String,
+    /// Only this severity (`error`: the loader skips the image; `warning`; `info`: background images).
+    #[serde(default)]
+    pub severity: Option<IssueSeverity>,
+    /// Only this kind, e.g. `class_overflow`.
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// `next_cursor` of the previous page; omit for the first page.
+    #[serde(default)]
+    pub cursor: Option<String>,
+    /// Page size (the page may be shorter to stay under the result size limit).
+    #[serde(default)]
+    #[schemars(range(min = 1, max = 200))]
+    pub limit: Option<u32>,
+}
+
+/// `list_dataset_issues` result: a page of issues plus the counts of all of them.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct IssuesPage {
+    /// This page, in dataset order.
+    pub items: Vec<DatasetIssue>,
+    /// Pass as `cursor` to get the next page; `null` on the last page.
+    pub next_cursor: Option<String>,
+    /// Issues matching the filter over all pages.
+    pub total: u64,
+    /// All issues of the dataset by severity and by kind, whatever the filter.
+    pub counts: IssueCounts,
 }
 
 /// `list_dataset_images` item.

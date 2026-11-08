@@ -122,12 +122,18 @@ impl ProcDataset {
     /// file (those images are not listed, as the loader skips them), an `empty_image` per image without boxes, and
     /// a sprinkle of warnings (boxes clipped at the frame, a duplicated image) chosen by the seed.
     fn issues(&self) -> Vec<DatasetIssue> {
-        let issue = |kind: &str, severity, file: String, line: Option<u32>, message: String| DatasetIssue {
-            kind: kind.into(),
-            severity,
-            file,
-            line,
-            message,
+        let issue = |kind: &str, severity, file: String, line: Option<u32>, message: String| {
+            // The fixes `folo dataset check --fix-dry-run` suggests for these kinds.
+            let fix = match (kind, line) {
+                ("empty_image", _) => None,
+                ("clipped_box", Some(l)) => Some(format!("clip the box on line {l} to the image")),
+                (_, Some(l)) => Some(format!("delete line {l}")),
+                _ => Some(match message.strip_prefix("same bytes as ") {
+                    Some(first) => format!("remove this copy (and its label file); keep {first}"),
+                    None => "remove the image and its label file".into(),
+                }),
+            };
+            DatasetIssue { kind: kind.into(), severity, file, line, message, fix }
         };
         let mut out = Vec::new();
         let n = self.labels.len() as u64;
@@ -836,8 +842,29 @@ impl Store for MockStore {
     }
 
     fn register_dataset(&self, req: RegisterDataset) -> Result<Dataset> {
+        // Registering a folder again (by its canonical path) returns the dataset it already is: checked before
+        // indexing and again under the write lock.
+        let want = std::fs::canonicalize(&req.path).ok();
+        let same = |list: &[Arc<DatasetEntry>]| {
+            let want = want.as_ref()?;
+            list.iter().find_map(|d| match &**d {
+                DatasetEntry::Disk(meta, _)
+                    if std::fs::canonicalize(&meta.path).ok().as_ref() == Some(want)
+                        && (req.format == DatasetFormat::Auto || req.format == meta.format) =>
+                {
+                    Some(d.with_stats())
+                }
+                _ => None,
+            })
+        };
+        if let Some(d) = same(&self.datasets.read().unwrap()) {
+            return Ok(d);
+        }
         let index = Index::build(&req.path, req.format, &[])?;
         let mut list = self.datasets.write().unwrap();
+        if let Some(d) = same(&list) {
+            return Ok(d);
+        }
         let id = unique_id("ds", fnv1a(req.path.as_bytes()) ^ unix_now().to_bits(), |id| {
             list.iter().any(|d| d.meta().id == id)
         });

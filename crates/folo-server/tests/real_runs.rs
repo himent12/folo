@@ -336,7 +336,7 @@ async fn train_evaluate_predict_and_reload() {
         (
             json!({ "model_id": model_id, "dataset_id": ds.id, "split": "test" }),
             StatusCode::BAD_REQUEST,
-            "invalid_body",
+            "invalid_dataset",
         ),
         (
             json!({ "model_id": model_id, "dataset_id": ds.id, "imgsz": 100 }),

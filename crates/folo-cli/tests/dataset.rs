@@ -114,6 +114,9 @@ fn check_reports_each_issue_and_exits_1() {
         .unwrap();
     std::fs::write(dir.join("images/train/000002.jpg"), b"not a jpeg at all").unwrap();
     std::fs::copy(dir.join("images/train/000003.jpg"), dir.join("images/train/000003b.jpg")).unwrap();
+    // Cut mid-scan (the dogfood's `head -c 2000`): it still decodes, with grey rows.
+    let jpg = std::fs::read(dir.join("images/train/000004.jpg")).unwrap();
+    std::fs::write(dir.join("images/train/000004.jpg"), &jpg[..jpg.len() * 2 / 3]).unwrap();
 
     let (code, stdout, stderr) = folo(&["dataset", "check", s(&dir), "--json", "--fix-dry-run"]);
     assert_eq!(code, 1, "{stderr}");
@@ -132,9 +135,19 @@ fn check_reports_each_issue_and_exits_1() {
     assert_eq!(overflow["severity"], "error");
     assert!(overflow["fix"].as_str().unwrap().contains("line 2"));
     assert_eq!(find("broken_label")["line"], 3);
-    assert_eq!(find("corrupt_image")["file"], "images/train/000002.jpg");
+    let corrupt = |file: &str| {
+        issues
+            .iter()
+            .find(|i| i["kind"] == "corrupt_image" && i["file"] == file)
+            .unwrap_or_else(|| panic!("no corrupt_image for {file} in {issues:?}"))
+    };
+    let undecodable = corrupt("images/train/000002.jpg")["message"].as_str().unwrap();
+    assert!(undecodable.starts_with("cannot decode: ") && !undecodable.contains(" at :"), "{undecodable}");
+    assert_eq!(undecodable, undecodable.trim_end());
+    assert!(corrupt("images/train/000004.jpg")["message"].as_str().unwrap().contains("truncated JPEG"));
     let dup = find("duplicate_image");
     assert_eq!(dup["file"], "images/train/000003b.jpg");
+    assert_eq!(dup["message"], "same bytes as images/train/000003.jpg");
     assert!(dup["line"].is_null());
     // Each issue parses as the API's issue object.
     for i in issues {
@@ -144,6 +157,15 @@ fn check_reports_each_issue_and_exits_1() {
         assert!(i["kind"].is_string() && i["file"].is_string() && i["message"].is_string(), "{i}");
     }
     assert_eq!(r["counts"]["by_kind"]["class_overflow"], 1);
+    assert!(!r["root"].as_str().unwrap().contains('\\'), "JSON paths use /: {}", r["root"]);
+
+    // --min-severity error lists only errors; the counts still cover everything.
+    let (code, stdout, _) = folo(&["dataset", "check", s(&dir), "--json", "--min-severity", "error"]);
+    assert_eq!(code, 1);
+    let only = &json_lines(&stdout)[0];
+    let listed = only["issues"].as_array().unwrap();
+    assert!(!listed.is_empty() && listed.iter().all(|i| i["severity"] == "error"), "{listed:?}");
+    assert_eq!(only["counts"], r["counts"]);
 
     // Without --fix-dry-run there are no fixes; human output names the file and line.
     let (code, stdout, _) = folo(&["dataset", "check", s(&dir), "--json"]);

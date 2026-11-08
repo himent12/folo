@@ -12,7 +12,7 @@ mod train;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use clap::{CommandFactory, Parser};
+use clap::CommandFactory;
 use folo_server::{Cors, MockStore, Options, RealStore, Server, Store, WebSource};
 use serde_json::json;
 
@@ -39,7 +39,7 @@ fn resolve_web(web_dir: Option<PathBuf>) -> WebSource {
 fn main() -> std::process::ExitCode {
     let json = std::env::args_os().skip(1).any(|a| a == "--json");
     let out = Out { json };
-    let cli = match Cli::try_parse() {
+    let cli = match parse() {
         Ok(cli) => cli,
         Err(e) => return usage_error(out, e),
     };
@@ -51,6 +51,22 @@ fn main() -> std::process::ExitCode {
             std::process::ExitCode::from(e.exit as u8)
         }
     }
+}
+
+/// Parses the command line. `folo train` also learns which flags were given (not defaulted), so `--resume` can
+/// refuse a changed setting.
+fn parse() -> Result<Cli, clap::Error> {
+    use clap::FromArgMatches;
+    let matches = Cli::command().try_get_matches()?;
+    let mut cli = Cli::from_arg_matches(&matches)?;
+    if let (Command::Train(t), Some(("train", m))) = (&mut cli.command, matches.subcommand()) {
+        t.explicit = m
+            .ids()
+            .filter(|id| m.value_source(id.as_str()) == Some(clap::parser::ValueSource::CommandLine))
+            .map(|id| id.to_string())
+            .collect();
+    }
+    Ok(cli)
 }
 
 /// Help and version go to stdout with exit 0; real parse errors are usage errors (exit 2).
@@ -75,8 +91,8 @@ fn usage_error(out: Out, e: clap::Error) -> std::process::ExitCode {
 fn run(cli: Cli, out: Out) -> Result<(), CliError> {
     match cli.command {
         Command::Serve(args) => serve(args, out),
-        Command::Describe => {
-            let surface = describe::describe(&Cli::command());
+        Command::Describe(args) => {
+            let surface = describe::describe(&Cli::command(), &args.command, !args.no_mcp_tools)?;
             if out.json {
                 out.record(&surface);
             } else {
@@ -86,6 +102,7 @@ fn run(cli: Cli, out: Out) -> Result<(), CliError> {
         }
         Command::Doctor(args) => doctor(args, out),
         Command::Train(args) => train::train(args, out),
+        Command::Stop(args) => train::request_stop(&args.run_dir, out),
         Command::Val(args) => infer::val(args, out),
         Command::Predict(args) => infer::predict(args, out),
         Command::Export(args) => infer::export(args, out),
@@ -329,6 +346,7 @@ fn doctor(args: DoctorArgs, out: Out) -> Result<(), CliError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
 
     #[test]
     fn clap_tree_is_valid() {
@@ -353,12 +371,13 @@ mod tests {
 
     #[test]
     fn describe_covers_every_command() {
-        let d = describe::describe(&Cli::command());
+        let d = describe::describe(&Cli::command(), &[], true).unwrap();
         let names: Vec<&str> =
             d["commands"].as_array().unwrap().iter().map(|c| c["name"].as_str().unwrap()).collect();
-        for want in
-            ["serve", "describe", "doctor", "train", "val", "predict", "export", "bench", "dataset", "mcp"]
-        {
+        for want in [
+            "serve", "describe", "doctor", "train", "stop", "val", "predict", "export", "bench", "dataset",
+            "mcp",
+        ] {
             assert!(names.contains(&want), "{want} missing from {names:?}");
         }
         assert_eq!(d["global_args"][0]["long"], "--json");

@@ -337,7 +337,7 @@ export class MockApi implements Api {
   datasetIssues(id: string, q: DatasetIssuesQuery): Promise<DatasetIssues> {
     return this.#call(() => {
       const all = issues(this.#spec(id));
-      const matching = q.kind ? all.filter((i) => i.kind === q.kind) : all;
+      const matching = all.filter((i) => (!q.kind || i.kind === q.kind) && (!q.severity || i.severity === q.severity));
       const offset = Math.max(0, q.offset ?? 0);
       const limit = Math.max(0, Math.min(1000, q.limit ?? 100));
       return { total: matching.length, issues: matching.slice(offset, offset + limit) };

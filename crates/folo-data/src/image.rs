@@ -133,7 +133,7 @@ pub fn decode(bytes: &[u8]) -> Result<Image> {
 }
 
 pub(crate) fn decode_with_path(bytes: &[u8], path: &Path) -> Result<Image> {
-    let dynimg = image::load_from_memory(bytes).map_err(|e| DataError::image(path, e))?;
+    let dynimg = image::load_from_memory(bytes).map_err(|e| DataError::image(path, e.to_string().trim()))?;
     let rgb = dynimg.into_rgb8();
     let (width, height) = rgb.dimensions();
     if width == 0 || height == 0 {
@@ -259,6 +259,50 @@ pub fn jpeg_exif_orientation(bytes: &[u8]) -> Option<u8> {
     None
 }
 
+/// True for a JPEG whose data ends before its end-of-image marker: the file was cut off mid-scan (a partial
+/// download or copy). Decoders accept such files and fill the missing rows with grey, so a full decode alone does
+/// not notice. The markers before the first scan are walked by their lengths (an EXIF thumbnail carries its own
+/// EOI), then the rest must contain `FF D9`, which never occurs inside entropy-coded data (`FF` is stuffed as
+/// `FF 00` there, restart markers are `FF D0`..`FF D7`). Non-JPEG bytes are never truncated by this test.
+pub fn jpeg_truncated(bytes: &[u8]) -> bool {
+    if bytes.len() < 4 || bytes[0] != 0xFF || bytes[1] != 0xD8 {
+        return false;
+    }
+    let mut i = 2;
+    loop {
+        if i + 2 > bytes.len() {
+            return true; // the headers themselves are cut off
+        }
+        if bytes[i] != 0xFF {
+            return false; // not a marker: leave it to the decoder
+        }
+        let marker = bytes[i + 1];
+        if marker == 0xFF {
+            i += 1;
+            continue;
+        }
+        if marker == 0xD8 || (0xD0..=0xD7).contains(&marker) || marker == 0x01 {
+            i += 2;
+            continue;
+        }
+        if marker == 0xD9 {
+            return false; // EOI before any scan
+        }
+        if i + 4 > bytes.len() {
+            return true;
+        }
+        let len = u16::from_be_bytes([bytes[i + 2], bytes[i + 3]]) as usize;
+        if marker == 0xDA {
+            let scan = (i + 2 + len).min(bytes.len());
+            return !bytes[scan..].windows(2).any(|w| w == [0xFF, 0xD9]);
+        }
+        if len < 2 {
+            return false;
+        }
+        i += 2 + len;
+    }
+}
+
 fn tiff_orientation(t: &[u8]) -> Option<u8> {
     let le = match t.get(..2)? {
         b"II" => true,
@@ -372,5 +416,29 @@ mod tests {
         assert_eq!(decode(&png).unwrap(), img);
         assert!(decode(b"not an image").is_err());
         assert!(decode(&png[..png.len() / 2]).is_err());
+    }
+
+    #[test]
+    fn truncated_jpegs_are_detected() {
+        let mut img = Image::new(64, 48, [0, 0, 0]);
+        for y in 0..48 {
+            for x in 0..64 {
+                img.set_pixel(x, y, [(x * 4) as u8, (y * 5) as u8, ((x ^ y) * 3) as u8]);
+            }
+        }
+        let jpg = encode(&img, ImageFormat::Jpeg(90)).unwrap();
+        assert!(!jpeg_truncated(&jpg));
+        // Trailing bytes after EOI (camera trailers) are fine.
+        let mut trailer = jpg.clone();
+        trailer.extend_from_slice(b"trailer");
+        assert!(!jpeg_truncated(&trailer));
+        // Cut mid-scan: the decoder still accepts it, the marker walk does not.
+        let cut = &jpg[..jpg.len() * 3 / 4];
+        assert!(jpeg_truncated(cut));
+        // Cut inside the headers.
+        assert!(jpeg_truncated(&jpg[..10]));
+        let png = encode(&img, ImageFormat::Png).unwrap();
+        assert!(!jpeg_truncated(&png));
+        assert!(!jpeg_truncated(b"not an image"));
     }
 }

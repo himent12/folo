@@ -171,7 +171,7 @@ export class HttpApi implements Api {
   datasetIssues(id: string, q: DatasetIssuesQuery, signal?: AbortSignal) {
     return this.#req<DatasetIssues>(
       'GET',
-      `/datasets/${encodeURIComponent(id)}/issues${qs({ kind: q.kind, offset: q.offset, limit: q.limit })}`,
+      `/datasets/${encodeURIComponent(id)}/issues${qs({ kind: q.kind, severity: q.severity, offset: q.offset, limit: q.limit })}`,
       undefined,
       signal,
     );

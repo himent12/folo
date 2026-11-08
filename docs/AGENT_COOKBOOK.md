@@ -18,14 +18,17 @@ The folder must be a labelled dataset: YOLO (`images/` + `labels/`, or a `data.y
 → folo_info {}                                    ← devices.gpus, scales (params, GFLOPs at 640 / 320)
 → register_dataset { "path": "D:/data/cats", "name": "cats" }
                                                   ← { "id": "ds_8f21", "classes": ["cat", "dog"], "splits": {...} }
-→ get_dataset { "dataset_id": "ds_8f21" }         ← stats (class counts, box sizes), issues (see recipe 4)
+→ get_dataset { "dataset_id": "ds_8f21" }         ← stats (class counts, box sizes), issue_counts, issues (recipe 3)
 → train { "dataset_id": "ds_8f21", "arch": "folo-s", "epochs": 50, "imgsz": 640, "device": "auto" }
                                                   ← { "run_id": "run_4c1a", "status": "queued" }
 → run_status { "run_id": "run_4c1a" }             ← status, epoch / epochs, best, eta_s, last_epoch.val, log
 ```
 
 Instead of polling `run_status` (every 30 s is plenty), subscribe to `folo://runs/run_4c1a`; the server sends a
-resource-updated notification (at most one per second) on every step, epoch and status change. When the status is
+resource-updated notification (at most one per second) on every step, epoch and status change. For the loss and
+mAP curves read `folo://runs/run_4c1a/epochs` (about 1 KB per epoch), not `/metrics`, which holds every step.
+Arguments a tool does not know are rejected (`lr` → "did you mean `lr0`?"), so a typo never trains with defaults;
+calling `register_dataset` again on the same folder returns the dataset it already is. When the status is
 `completed`, `model_id` names the best weights (`m_4c1a`; `m_4c1a-last` is the last epoch). The prompt
 `train_on_folder { "folder_path": "D:/data/cats" }` returns these steps as instructions.
 
@@ -37,11 +40,13 @@ after a run **completed**, start a new run with `"weights": "m_4c1a"`.
 
 CLI:
 ```sh
-folo train --data D:/data/cats --model folo-s --epochs 50 --imgsz 640 --json > train.jsonl
-# one {"event":"status"|"step"|"epoch"|"log",...} record per event, then
+folo train --data D:/data/cats --model folo-s --epochs 50 --imgsz 640 --json --json-events epoch > train.jsonl
+# one {"event":"status"|"epoch"|"log",...} record per event (drop --json-events epoch for per-batch "step"s), then
 # {"event":"done","status":"completed","run_dir":"runs/cats-s","best":{"epoch":41,"map50_95":0.62},
 #  "weights":{"best":"runs/cats-s/weights/best.folo","last":".../last.folo"}}
-folo train --resume runs/cats-s/weights/last.folo --json   # after Ctrl+C (or a killed process)
+folo stop runs/cats-s                                      # from another process: stop after the current batch
+folo train --resume runs/cats-s/weights/last.folo --json   # after a stop, Ctrl+C or a killed process
+folo train --model runs/cats-s/weights/best.folo --data D:/data/cats --epochs 20 --json   # after it completed
 ```
 
 ## 2. Evaluate and compare two runs
@@ -72,15 +77,17 @@ jq -s 'map({model, map50, map50_95, precision, recall})' a.json b.json
 ```
 → get_dataset { "dataset_id": "ds_8f21" }
     ← stats: { class_counts, box_size_hist, empty_images, broken_labels },
-      issues: [{ "kind": "out_of_range_box", "file": "labels/train/0412.txt", "message": "..." }, ...] (first 50),
-      issues_total
+      issue_counts: { "error": 3, "warning": 12, "info": 40, "by_kind": { "out_of_range_box": 1, ... } },
+      issues: [{ "kind": "out_of_range_box", "severity": "error", "file": "labels/train/0412.txt", "line": 3,
+                 "message": "...", "fix": "delete line 3" }, ...] (errors, then warnings; first 50)
+→ list_dataset_issues { "dataset_id": "ds_8f21", "severity": "error" }   ← every error, paged (also by kind)
 → list_dataset_images { "dataset_id": "ds_8f21", "class": 1, "include_boxes": true, "limit": 20 }
 → (read folo://datasets/ds_8f21/images/{image_id} to look at an image)
 ```
 
-`get_dataset` lists issues in file order, so on a dataset with many background images the 50 it returns can
-be mostly `empty_image` infos while an error further down is left out: when `issues_total` is over 50, run
-`folo dataset check` (below) for the full list. Look for: errors (`broken_label`, `class_overflow`, `out_of_range_box`, `corrupt_image`, `missing_image`; the
+`get_dataset` lists errors first, then warnings; infos (`empty_image`, background images) are only counted in
+`issue_counts`, so a dataset with many background images cannot hide an error. When there are more than 50,
+page with `list_dataset_issues` (`severity`, `kind`, `cursor`). Look for: errors (`broken_label`, `class_overflow`, `out_of_range_box`, `corrupt_image`, `missing_image`; the
 loader skips those images), warnings (`clipped_box`, `zero_size_box`, `duplicate_label`, `duplicate_image`), a
 class with far fewer boxes than the others, and many tiny boxes for a small `imgsz`. After training, `val`'s
 `per_class` and the sample grid show which classes the labels let down. FOLO never edits a dataset; fix the files
@@ -89,6 +96,7 @@ and the next `get_dataset` re-indexes them.
 CLI (every issue, not just 50, with a suggested fix for each):
 ```sh
 folo dataset check D:/data/cats --fix-dry-run --json   # exit 0 when clean, 1 with errors or warnings
+folo dataset check D:/data/cats --json --min-severity warning   # leave the background-image infos out
 # {"clean":false,"counts":{"error":3,"warning":12,"info":40,"by_kind":{...}},
 #  "issues":[{"kind","severity","file","line","message","fix"}, ...]}
 folo dataset stats D:/data/cats --json                 # the same stats object as get_dataset
@@ -113,6 +121,7 @@ puts the per-image boxes in the linked `folo://predictions/{batch_id}` resource.
 CLI:
 ```sh
 folo export --model runs/cats-s/weights/best.folo --json   # {"path":"runs/cats-s/weights/best-f16.folo","bytes",...}
+                                                           # (never overwrites: a second export is best-f16-2.folo)
 folo predict --model runs/cats-s/weights/best-f16.folo D:/photos --conf 0.25 --save annotated --json
 # {"event":"prediction","file":"D:/photos/garden.jpg","image":{...},"boxes":[...],"timing":{...},"saved":"..."}
 # ... one per image, then {"event":"done","images":12,"failed":0,"boxes":31,"mean_timing":{...}}
@@ -149,7 +158,10 @@ for r in folo("predict", "--model", best, "D:/photos"):
 before treating exit 1 as a failure. For a long `folo train`, read stdout line by line instead of waiting for the
 process: `step` records are throttled to about 10 per second (a slow run gets one per batch) and `epoch`
 records arrive after each validation. Most of the output is `step`s (in one test, 15 epochs of 50 batches made
-about 150 KB); keep only the `epoch` and `done` records in an agent's context.
+about 150 KB): pass `--json-events epoch` to leave them out (about 1 KB per epoch). To stop a run from the
+script, `folo stop <run_dir>` (or Ctrl+Break on Windows, Ctrl+C elsewhere) ends it after the current batch with
+`status: stopped`. Error codes are the same as MCP's (a `--device gpu:7` the machine lacks is
+`device_not_found`, a GPU out of memory `gpu_out_of_memory`), and JSON paths use `/` on every OS.
 
 ## 6. Run the same flow headless, then look at it in Studio
 Point the agent at a running server instead of an embedded store, so its runs show up in FOLO Studio and keep

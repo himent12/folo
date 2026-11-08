@@ -827,7 +827,12 @@ impl GpuContext {
         if errs.is_empty() {
             return Ok(());
         }
-        let msg = errs.join("\n");
+        // The first error is the cause; once a buffer could not be created (out of memory), every later use of
+        // it fails validation too, so the rest is only counted.
+        let mut msg = errs[0].clone();
+        if errs.len() > 1 {
+            msg.push_str(&format!("\n({} more wgpu errors followed)", errs.len() - 1));
+        }
         errs.clear();
         Err(GpuError::Wgpu(msg))
     }

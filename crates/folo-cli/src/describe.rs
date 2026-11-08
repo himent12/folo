@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use clap::{Arg, ArgAction, Command};
 use serde_json::{Value, json};
 
-use crate::output::{ExitCode, error_shape};
+use crate::output::{CliError, ExitCode, error_shape};
 
 fn value_type(arg: &Arg) -> &'static str {
     if matches!(arg.get_action(), ArgAction::SetTrue | ArgAction::SetFalse) {
@@ -101,8 +101,40 @@ fn describe_command(cmd: &Command, path: &[&str]) -> Value {
     })
 }
 
-/// The whole CLI surface.
-pub fn describe(root: &Command) -> Value {
+/// The CLI surface: everything (`path` empty), or the command `path` names (e.g. `["dataset", "check"]`).
+/// `mcp_tools` adds the `folo mcp` tool schemas to the full surface.
+pub fn describe(root: &Command, path: &[String], mcp_tools: bool) -> Result<Value, CliError> {
+    if path.is_empty() {
+        let mut all = describe_all(root);
+        if mcp_tools {
+            // The `folo mcp` tools with the same JSON Schemas `tools/list` publishes (docs/MCP.md).
+            all["mcp_tools"] = folo_mcp::describe_tools();
+        }
+        return Ok(all);
+    }
+    let mut cmd = root;
+    let mut names = vec![root.get_name()];
+    for name in path {
+        cmd = cmd.get_subcommands().filter(|c| !c.is_hide_set()).find(|c| c.get_name() == name).ok_or_else(
+            || {
+                let have: Vec<&str> =
+                    cmd.get_subcommands().filter(|c| !c.is_hide_set()).map(Command::get_name).collect();
+                CliError::new(
+                    ExitCode::Usage,
+                    "usage",
+                    format!("`{} {name}` is not a command", names.join(" ")),
+                )
+                .hint(format!("`{}` has: {}", names.join(" "), have.join(", ")))
+            },
+        )?;
+        names.push(cmd.get_name());
+    }
+    names.pop();
+    Ok(describe_command(cmd, &names))
+}
+
+/// The whole CLI surface, without the MCP tools.
+fn describe_all(root: &Command) -> Value {
     let globals: Vec<Value> = root.get_arguments().filter(|a| a.is_global_set()).map(describe_arg).collect();
     let commands: Vec<Value> = root
         .get_subcommands()
@@ -121,7 +153,5 @@ pub fn describe(root: &Command) -> Value {
             "docs": "docs/CLI.md",
         },
         "commands": commands,
-        // The `folo mcp` tools with the same JSON Schemas `tools/list` publishes (docs/MCP.md).
-        "mcp_tools": folo_mcp::describe_tools(),
     })
 }

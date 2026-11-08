@@ -172,6 +172,7 @@ async fn list_images(
 #[derive(Deserialize)]
 struct IssuesParams {
     kind: Option<String>,
+    severity: Option<String>,
     #[serde(default)]
     offset: u64,
     limit: Option<u64>,
@@ -192,8 +193,19 @@ async fn list_issues(
         )
         .hint(format!("kind is one of {}", folo_api::ISSUE_KINDS.join(", "))));
     }
-    let q =
-        IssueQuery { kind: p.kind, offset: p.offset, limit: p.limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT) };
+    let severity = match p.severity.as_deref() {
+        None => None,
+        Some(s) => Some(folo_api::IssueSeverity::parse(s).ok_or_else(|| {
+            Error::new(StatusCode::BAD_REQUEST, "invalid_query", format!("unknown issue severity '{s}'"))
+                .hint("severity is one of error, warning, info")
+        })?),
+    };
+    let q = IssueQuery {
+        kind: p.kind,
+        severity,
+        offset: p.offset,
+        limit: p.limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT),
+    };
     Ok(Json(blocking(&st, move |s| s.list_issues(&id, &q)).await?))
 }
 

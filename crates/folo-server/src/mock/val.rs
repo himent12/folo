@@ -30,7 +30,8 @@ pub(super) fn val(store: &MockStore, req: ValRequest) -> Result<ValReport> {
         Split::Test => meta.splits.test,
     };
     if images == 0 {
-        return bad(format!("dataset '{}' has no {} images", meta.id, req.split.as_str()));
+        let msg = format!("dataset '{}' has no {} images", meta.id, req.split.as_str());
+        return Err(Error::new(StatusCode::BAD_REQUEST, "invalid_dataset", msg));
     }
     let imgsz = req.imgsz.unwrap_or(model.imgsz);
     let base = model.metrics;

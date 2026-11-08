@@ -37,10 +37,17 @@ impl Error {
         Error::new(StatusCode::BAD_REQUEST, "bad_request", message)
     }
 
-    /// `404 <what>_not_found`, e.g. `not_found("dataset", "ds_1")`.
+    /// `404 <what>_not_found`, e.g. `not_found("dataset", "ds_1")`, with a hint naming where the ones that exist
+    /// are listed.
     pub fn not_found(what: &str, id: &str) -> Error {
         let code = format!("{what}_not_found");
-        Error::new(StatusCode::NOT_FOUND, &code, format!("{what} '{id}' does not exist"))
+        let hint = match what {
+            "image" => {
+                "list_dataset_images (MCP) or GET /api/datasets/{id}/images lists a dataset's images".into()
+            }
+            _ => format!("list_{what}s (MCP) or GET /api/{what}s lists the {what}s that exist"),
+        };
+        Error::new(StatusCode::NOT_FOUND, &code, format!("{what} '{id}' does not exist")).hint(hint)
     }
 
     /// `409 conflict`-style error with a specific code.

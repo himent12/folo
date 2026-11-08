@@ -194,6 +194,9 @@ impl Store for HttpStore {
         if let Some(k) = &q.kind {
             path.push_str(&format!("&kind={}", encode(k)));
         }
+        if let Some(s) = q.severity {
+            path.push_str(&format!("&severity={}", s.as_str()));
+        }
         self.get(&path)
     }
 
