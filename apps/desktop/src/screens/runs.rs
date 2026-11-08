@@ -894,9 +894,14 @@ impl FoloApp {
         // From a tenth under the lowest value (0 while either is still low), so a converged pair
         // spreads over the plot instead of its top half.
         let low = d.precision.iter().chain(d.recall.iter()).map(|p| p.1).fold(f32::INFINITY, f32::min);
-        pr.y_range = Some((pr_floor(low), 1.));
+        let floor = pr_floor(low);
+        pr.y_range = Some((floor, 1.));
         // Three labels (floor, middle, 1.00): the lower row's plot is under 180 px, where five crowd.
+        // A raised floor is labelled, so the axis never reads as starting at 0.
         pr.y_ticks = 2;
+        if floor > 0. {
+            pr.y_tick_values = Some(vec![floor, (floor + 1.) / 2., 1.]);
+        }
         pr.y_fmt = Some(|v| format!("{v:.2}"));
         let mut lr = base(
             "run-lr",

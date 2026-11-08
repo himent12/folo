@@ -13,7 +13,10 @@ use gpui::{
 };
 
 use crate::api::RunStatus;
-use crate::app::{ARCHS, Action, BATCHES, DEVICES, FoloApp, IMGSZ, OPTIMIZERS, Route, act};
+use crate::app::{ARCHS, Action, BATCHES, DEVICES, FoloApp, IMGSZ, Route, act};
+
+/// The optimizer segments' labels (the helper under them repeats the chosen one).
+const OPT_LABELS: [&str; 3] = ["Auto", "SGD", "AdamW"];
 use crate::controls::Btn;
 use crate::store::ImgKind;
 use crate::theme::{Theme, radius, theme, ty};
@@ -650,7 +653,7 @@ impl FoloApp {
         let size_seg = seg(self, "nr-imgsz", &size_refs, imgsz, window, cx, |f, i| f.imgsz = i);
         let device_seg =
             seg(self, "nr-device", &["Auto", "GPU 0", "CPU"], device, window, cx, |f, i| f.device = i);
-        let opt_seg = seg(self, "nr-opt", &["Auto", "SGD", "AdamW"], opt, window, cx, |f, i| f.optimizer = i);
+        let opt_seg = seg(self, "nr-opt", &OPT_LABELS, opt, window, cx, |f, i| f.optimizer = i);
         // A typed value outside a slider's preset range widens it (rather than pinning the thumb at
         // an end, where one arrow press would jump to the end value).
         let epochs_slider = self
@@ -871,7 +874,7 @@ impl FoloApp {
                     .child(div().flex_1().child(field(
                         "Image size",
                         size_seg,
-                        (!short).then(|| "pixels · images are letterboxed to a square".into()),
+                        (!short).then(|| "Pixels; images are letterboxed to a square".into()),
                     ))),
             )
             .child(
@@ -881,7 +884,7 @@ impl FoloApp {
                     .child(div().flex_1().child(match batch_help {
                         Some(h) => labelled("Batch size", h, batch_seg),
                         None => {
-                            field("Batch size", batch_seg, Some("images per step".into())).into_any_element()
+                            field("Batch size", batch_seg, Some("Images per step".into())).into_any_element()
                         }
                     }))
                     .child(
@@ -893,8 +896,8 @@ impl FoloApp {
                                 Some(match (DEVICES[device], &gpu_name) {
                                     ("auto", Some(g)) => format!("{g} when available, else CPU"),
                                     ("auto", None) => "GPU when available, else CPU".into(),
-                                    ("cpu", _) => "cpu".into(),
-                                    (d, Some(g)) => format!("{d} · {g}"),
+                                    ("cpu", _) => "Trains on the CPU (much slower)".into(),
+                                    (_, Some(g)) => format!("GPU 0: {g}"),
                                     (d, None) => d.to_string(),
                                 }),
                             )
@@ -927,7 +930,7 @@ impl FoloApp {
                     .child(div().flex_1().child(field(
                         "Optimizer",
                         opt_seg,
-                        Some(format!("{} · warmup 3 epochs, then cosine decay", OPTIMIZERS[opt].label())),
+                        Some(format!("{}: warm up 3 epochs, then cosine decay", OPT_LABELS[opt])),
                     )))
                     .child(
                         div().flex_1().child(
@@ -1502,56 +1505,66 @@ impl FoloApp {
                         }
                     }))
                     .flex()
-                    .items_start()
-                    .gap(px(10.))
+                    .flex_col()
                     .p(px(12.))
                     .rounded(px(radius::LG))
                     .bg(t.bg_overlay)
                     .border_1()
                     .border_color(t.line_strong)
                     .shadow(t.shadow_lg())
-                    .child(div().pt(px(2.)).child(icon(
-                        icon_path,
-                        16.,
-                        if tone == Tone::Neutral { t.text_secondary } else { dotc },
-                    )))
                     .child(
                         div()
-                            .flex_1()
-                            .min_w_0()
                             .flex()
-                            .flex_col()
-                            .gap(px(2.))
+                            .items_start()
+                            .gap(px(10.))
+                            .child(div().pt(px(2.)).child(icon(
+                                icon_path,
+                                16.,
+                                if tone == Tone::Neutral { t.text_secondary } else { dotc },
+                            )))
                             .child(
-                                text(ty::BASE, t.text_primary).font_weight(FontWeight::MEDIUM).child(title),
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(2.))
+                                    .child(
+                                        text(ty::BASE, t.text_primary)
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .child(title),
+                                    )
+                                    .when_some(body, |d, b| d.child(text(ty::SM, t.text_secondary).child(b))),
                             )
-                            .when_some(body, |d, b| d.child(text(ty::SM, t.text_secondary).child(b)))
-                            // The card's action, then the stack's controls on their own right-aligned
-                            // row (an action and both controls don't fit one 274 px row).
-                            .when_some(action_btn, |d, b| d.child(div().pt(px(8.)).flex().child(b)))
-                            .when_some(ctrls, |d, (show, dismiss)| {
-                                d.child(
-                                    div()
-                                        .pt(px(6.))
-                                        .flex()
-                                        .justify_end()
-                                        .gap(px(4.))
-                                        .child(show)
-                                        .child(dismiss),
+                            .child(
+                                self.icon_button(
+                                    &format!("toast-x-{id}"),
+                                    "icons/x.svg",
+                                    "Dismiss",
+                                    window,
+                                    cx,
+                                    act(move |this, _, cx| this.dismiss_toast(id, cx)),
                                 )
-                            }),
+                                .size(px(24.)),
+                            ),
                     )
-                    .child(
-                        self.icon_button(
-                            &format!("toast-x-{id}"),
-                            "icons/x.svg",
-                            "Dismiss",
-                            window,
-                            cx,
-                            act(move |this, _, cx| this.dismiss_toast(id, cx)),
+                    // One footer: the card's action under the text, the stack's controls ending at
+                    // the card's padding, under the close button.
+                    .when(action_btn.is_some() || ctrls.is_some(), |d| {
+                        d.child(
+                            div()
+                                .pt(px(8.))
+                                .pl(px(26.))
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap(px(8.))
+                                .child(div().flex().children(action_btn))
+                                .children(ctrls.map(|(show, dismiss)| {
+                                    div().flex().items_center().gap(px(4.)).child(show).child(dismiss)
+                                })),
                         )
-                        .size(px(24.)),
-                    )
+                    })
             }))
             .into_any_element()
     }
@@ -1911,11 +1924,13 @@ impl FoloApp {
                 zoom,
                 window,
                 cx,
-                act(|this, _, cx| {
+                act(|this, w, cx| {
                     if let Some(i) = this.inspector.as_mut() {
                         i.zoom = 1.0;
                         i.pan = (0., 0.);
                     }
+                    // Fitted, the readout is text: keyboard focus moves to its neighbour.
+                    this.focus_key("insp-zoom-in", w, cx);
                     cx.notify();
                 }),
             ))

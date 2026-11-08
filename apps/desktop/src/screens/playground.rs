@@ -235,9 +235,11 @@ impl FoloApp {
                 zoom,
                 window,
                 cx,
-                act(|this, _, cx| {
+                act(|this, w, cx| {
                     this.play_zoom = 1.0;
                     this.play_pan = (0., 0.);
+                    // Fitted, the readout is text: keyboard focus moves to its neighbour.
+                    this.focus_key("play-zoom-in", w, cx);
                     cx.notify();
                 }),
             ))
@@ -880,9 +882,13 @@ impl FoloApp {
                 .items_center()
                 .justify_between()
                 .h(px(24.))
+                // A row like the others: a hover fill, inset 4 px past the text on each side.
+                .mx(px(-4.))
+                .px(px(4.))
                 .rounded(px(radius::SM))
                 .cursor_pointer()
-                .hover(|s| s.opacity(0.85))
+                .hover(|s| s.bg(t.bg_hover))
+                .active(|s| s.bg(t.bg_active))
                 .child(heading)
                 .child(icon(
                     if picker_open { "icons/chevron-down.svg" } else { "icons/chevron-right.svg" },

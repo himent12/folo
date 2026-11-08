@@ -236,8 +236,9 @@ impl FoloApp {
         self.bind(el, key, radius::MD, window, cx, action)
     }
 
-    /// An image's zoom level as a quiet button: "Fit", or "2.4×" when zoomed (a click fits again).
-    /// One control instead of a readout beside a fit icon that read as full screen.
+    /// An image's zoom level: "2.4×" when zoomed, a quiet button that fits again; "Fit" when fitted,
+    /// plain text (no hover, no Tab stop: there's nothing to do). One control instead of a readout
+    /// beside a fit icon that read as full screen.
     pub fn zoom_readout(
         &self,
         key: &str,
@@ -248,7 +249,18 @@ impl FoloApp {
     ) -> Stateful<Div> {
         let t = theme(cx);
         let fitted = zoom <= 1.0;
-        let tooltip = if fitted { "Fitted to the view" } else { "Fit to the view (0)" };
+        if fitted {
+            return div()
+                .id(SharedString::from(key.to_string()))
+                .h(px(tsize::CONTROL_MD))
+                .w(px(48.))
+                .flex()
+                .flex_none()
+                .items_center()
+                .justify_center()
+                .child(text(ty::XS, t.text_tertiary).child("Fit"));
+        }
+        let tooltip = "Fit to the view (0)";
         let el = div()
             .id(SharedString::from(key.to_string()))
             .h(px(tsize::CONTROL_MD))
@@ -262,11 +274,7 @@ impl FoloApp {
             .hover(move |s| s.bg(t.bg_hover))
             .active(move |s| s.bg(t.bg_active))
             .tooltip(tip(tooltip, None))
-            .child(text(ty::XS, t.text_secondary).tnum().child(if fitted {
-                "Fit".to_string()
-            } else {
-                format!("{zoom:.1}×")
-            }));
+            .child(text(ty::XS, t.text_secondary).tnum().child(format!("{zoom:.1}×")));
         let ring = self.ring(&self.fh(key.to_string(), cx), window);
         let el = el.when(ring, |d| d.child(focus_tip(&t, tooltip, tsize::CONTROL_MD)));
         self.bind(el, key, radius::MD, window, cx, action)
