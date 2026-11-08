@@ -370,6 +370,16 @@ impl Store {
     /// Forget live events buffered for histories still loading (a new data source: ids may repeat).
     pub fn clear_pending(&mut self) {
         self.pending.clear();
+        self.resumed.clear();
+    }
+
+    /// The run list is authoritative: a resumed run it reports finished needs no more cutting
+    /// (its terminal status event may never have arrived).
+    pub fn sync_resumed(&mut self) {
+        let Some(runs) = self.runs.ready() else { return };
+        let active: std::collections::HashSet<&str> =
+            runs.iter().filter(|r| r.status.is_active()).map(|r| r.id.as_str()).collect();
+        self.resumed.retain(|id| active.contains(id.as_str()));
     }
 
     fn prune_pending(&mut self, run_id: &str) {
@@ -546,6 +556,19 @@ mod tests {
         store.run_data.insert(id.into(), Load::Loading);
         store.install_run_data(id, Ok(RunData::new(stale(), 10)));
         assert_eq!(store.run_data[id].ready().unwrap().metrics.steps.len(), 24);
+    }
+
+    #[test]
+    fn a_run_list_reporting_the_resumed_run_finished_clears_the_cut() {
+        let mut store = Store::new(Arc::new(MockBackend::new(4200, true)));
+        let mut runs = store.api.runs().unwrap();
+        let id = runs[0].id.clone();
+        store.reset_for_resume(&id);
+        // The terminal status event was missed; the next run-list refresh says it stopped.
+        runs[0].status = RunStatus::Stopped;
+        store.runs = Load::Ready(runs);
+        store.sync_resumed();
+        assert!(!store.resumed.contains(&id));
     }
 
     #[test]
