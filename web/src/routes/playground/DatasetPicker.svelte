@@ -97,7 +97,8 @@
       <Segmented label="Split" size="sm" bind:value={split} options={splits} onchange={() => (offset = 0)} />
     </div>
 
-    {#if images.error && !images.data}
+    <!-- Errors show even with an older page retained, so a stale page of another dataset is never pickable. -->
+    {#if images.error}
       <ErrorState error={images.error} retry={() => images.refresh()} compact />
     {:else}
       <div class="grid" aria-busy={images.loading}>

@@ -212,6 +212,12 @@
     untrack(() => {
       predicting = true;
       error = null;
+      // Results belong to a model: never show another model's boxes while (or if) this one fails.
+      if (pred && pred.model_id !== id) {
+        pred = null;
+        hidden = new Set();
+        active = null;
+      }
     });
     hub.api.predict(input, { model_id: id, ...FETCH }, ctrl.signal).then(
       (p) => {
