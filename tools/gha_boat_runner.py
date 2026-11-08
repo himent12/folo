@@ -67,8 +67,9 @@ def up(n):
         raise SystemExit(f"{f} already exists (sandbox {f.read_text().strip()}); use renew, or down first")
     b = Boat()
     tok = gh("api", "-X", "POST", f"repos/{REPO}/actions/runners/registration-token", "-q", ".token")
-    sid = b.create("large", name=f"folo-gha-linux-{n}", ttl=TTL)
-    f.write_text(sid)  # saved before setup, so a failed setup can still be cleaned up with `down`
+    sid = b.create("large", name=f"folo-gha-linux-{n}", ttl=TTL, wait=False)
+    f.write_text(sid)  # saved before waiting and setup, so a failure can still be cleaned up with `down`
+    b.wait(sid)
     cmd = f"""set -e
 mkdir -p ~/gha && cd ~/gha
 curl -sSL -o r.tgz https://github.com/actions/runner/releases/download/v{RUNNER_VERSION}/actions-runner-linux-x64-{RUNNER_VERSION}.tar.gz
@@ -112,7 +113,7 @@ def down(n):
         try:
             Boat().delete(sid)
         except RuntimeError as e:
-            if "404" not in str(e):  # already gone counts as deleted; anything else keeps the state file
+            if "-> 404:" not in str(e):  # already gone counts as deleted; anything else keeps the state file
                 raise
         f.unlink()
     print(f"removed {name}")
