@@ -152,6 +152,11 @@ for (const backend of backends) {
     if (problems.length) { entry.problems = problems; failed = true; }
   }
   if (args.screenshots) await page.screenshot({ path: join(resolve(args.screenshots), `folo-wasm-${backend}.png`) });
+  // Bad inputs reject with an Error on every backend (no synchronous throw, no pending promise).
+  const probes = await page.evaluate(() => window.foloDemo.probeErrors());
+  const bad = Object.entries(probes).filter(([, v]) => !v.startsWith("rejected: "));
+  if (bad.length) { entry.error_handling = Object.fromEntries(bad); failed = true; }
+  else entry.error_handling = "ok";
   summary.results.push(entry);
   await page.close();
 }

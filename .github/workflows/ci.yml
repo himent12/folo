@@ -89,4 +89,9 @@ jobs:
         with:
           tool: wasm-bindgen@${{ env.WASM_BINDGEN_VERSION }}
       - run: cargo clippy --target wasm32-unknown-unknown -p folo-wasm -- -D warnings
-      - run: sh scripts/build-wasm.sh --out "$RUNNER_TEMP/folo-wasm"
+      - run: sh scripts/build-wasm.sh
+      # The documented JS API type-checks against the generated declarations.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npx --yes -p typescript@6.0 tsc -p crates/folo-wasm/demo/tsconfig.json

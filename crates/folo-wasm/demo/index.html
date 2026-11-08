@@ -161,6 +161,33 @@ window.foloDemo = {
   async detect(backend, conf = 0.25) { const r = await detect(backend, conf); draw(r.boxes); return { result: r, info: detector.info() }; },
   bench,
   hasWebGpu,
+  /** Bad inputs must reject (not throw, not hang): returns `{ case: "rejected: <message>" | <problem> }`. */
+  async probeErrors() {
+    const detached = () => { const b = new ArrayBuffer(16); structuredClone(b, { transfer: [b] }); return b; };
+    const det = detector;
+    const cases = {
+      "load detached ArrayBuffer": () => FoloDetector.load(detached()),
+      "load detached view": () => FoloDetector.load(new Uint8Array(detached())),
+      "load not bytes": () => FoloDetector.load(42),
+      "load bad options": () => FoloDetector.load(modelBytes, { backend: "cuda" }),
+      "detect detached": () => det.detect(new Uint8ClampedArray(detached()), 2, 2),
+      "detect wrong size": () => det.detect(new Uint8Array(15), 2, 2),
+      "detect huge": () => det.detect(new Uint8Array(0), 65536, 65536),
+      "detect no size": () => det.detect(new Uint8Array(16)),
+      "detect bad conf": () => det.detect(imageData, undefined, undefined, { conf: 2 }),
+    };
+    const out = {};
+    for (const [name, f] of Object.entries(cases)) {
+      try {
+        const p = f();
+        const r = await Promise.race([p.then(() => "resolved"), new Promise((r) => setTimeout(() => r("pending"), 5000))]);
+        out[name] = r;
+      } catch (e) {
+        out[name] = e instanceof Error && e.message ? `rejected: ${e.message}` : `threw a non-Error: ${e}`;
+      }
+    }
+    return out;
+  },
 };
 
 await init();

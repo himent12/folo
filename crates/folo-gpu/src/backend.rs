@@ -96,7 +96,7 @@ pub async fn init_async() -> std::result::Result<Device, GpuError> {
     init()
 }
 
-/// Copies `t` to a CPU tensor without blocking (a detached copy for a tensor already on the CPU).
+/// Copies `t` to a new CPU tensor (its own storage, no gradient) without blocking.
 ///
 /// The browser cannot wait for the GPU inside a call (WebGPU maps buffers from the event loop), so
 /// [`Tensor::to_vec`] and `to_device(Device::Cpu)` fail there for GPU tensors; this is the readback to await
@@ -105,7 +105,7 @@ pub async fn init_async() -> std::result::Result<Device, GpuError> {
 /// [`init`] / [`init_async`]).
 pub async fn download_async(ctx: &GpuContext, t: &Tensor) -> Result<Tensor> {
     if t.device().is_cpu() {
-        return Ok(t.detach());
+        return Tensor::from_storage(Storage::Cpu(t.to_cpu_storage()?), t.shape().clone());
     }
     let dtype = t.dtype();
     let n = t.numel();

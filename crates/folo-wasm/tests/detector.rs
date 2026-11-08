@@ -135,6 +135,7 @@ fn rejects_bad_images() {
     assert!(rgba_to_image(&[0; 16], 2, 2).is_ok());
     assert!(rgba_to_image(&[0; 15], 2, 2).unwrap_err().contains("expected 16 RGBA bytes"));
     assert!(rgba_to_image(&[], 0, 2).unwrap_err().contains("empty"));
+    assert!(rgba_to_image(&[], u32::MAX, u32::MAX).unwrap_err().contains("too large"));
     let rgb = rgba_to_image(&[1, 2, 3, 4, 5, 6, 7, 8], 2, 1).unwrap();
     assert_eq!(rgb, Image { width: 2, height: 1, data: vec![1, 2, 3, 5, 6, 7] });
 

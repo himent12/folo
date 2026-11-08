@@ -740,3 +740,38 @@ fn errors_name_the_backend() {
     // An op on a GPU tensor stays on the GPU; mixing in a CPU index tensor is rejected.
     assert!(g.index_select(0, &Tensor::from_slice(&[0i64], [1]).unwrap()).is_err());
 }
+
+#[test]
+fn download_async_matches_to_vec() {
+    let dev = dev!();
+    let ctx = crate::GpuContext::shared().unwrap();
+    let x = randn(&[3, 5, 7], 41);
+    let g = x.to_device(dev).unwrap();
+    // A strided view (made dense on the GPU first), an offset view and the whole tensor.
+    let views = [g.transpose(0, 2).unwrap(), g.narrow(1, 1, 3).unwrap(), g.clone()];
+    let cpu_views = [x.transpose(0, 2).unwrap(), x.narrow(1, 1, 3).unwrap(), x.clone()];
+    for (v, c) in views.iter().zip(&cpu_views) {
+        let got = pollster::block_on(crate::download_async(&ctx, v)).unwrap();
+        assert!(got.device().is_cpu() && got.dims() == c.dims());
+        assert_eq!(got.to_vec::<f32>().unwrap(), c.to_vec::<f32>().unwrap());
+    }
+    // Other dtypes and the empty tensor.
+    let i = Tensor::from_vec(vec![-3i64, 0, 7, i64::MAX], [4]).unwrap();
+    let got = pollster::block_on(crate::download_async(&ctx, &i.to_device(dev).unwrap())).unwrap();
+    assert_eq!(got.to_vec::<i64>().unwrap(), vec![-3, 0, 7, i64::MAX]);
+    let e = Tensor::zeros([0, 4]).to_device(dev).unwrap();
+    assert_eq!(pollster::block_on(crate::download_async(&ctx, &e)).unwrap().dims(), [0, 4]);
+}
+
+#[test]
+fn download_async_copies_cpu_tensors() {
+    let ctx = match crate::GpuContext::shared() {
+        Ok(c) => c,
+        Err(e) => return eprintln!("note: skipping GPU backend test: {e}"),
+    };
+    let x = Tensor::from_vec(vec![1f32, 2.0, 3.0], [3]).unwrap();
+    let got = pollster::block_on(crate::download_async(&ctx, &x)).unwrap();
+    let _g = no_grad();
+    x.fill_assign(9.0).unwrap();
+    assert_eq!(got.to_vec::<f32>().unwrap(), vec![1.0, 2.0, 3.0], "an independent copy");
+}

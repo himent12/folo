@@ -42,11 +42,12 @@ the CPU, then moved to the backend. Options (all optional; unknown fields are ig
 
 | option | default | meaning |
 |---|---|---|
-| `backend` | `"auto"` | `"auto"`: WebGPU when it initialises and passes one small test pass (64×64, which also compiles the core kernels), otherwise the CPU, with the reason in `info().fallback`. `"webgpu"`: WebGPU or a rejected promise. `"cpu"`: always the CPU |
+| `backend` | `"auto"` | `"auto"`: WebGPU when it initialises and passes a test pass (a small gray image letterboxed to `imgsz`, which also compiles the kernels a real call needs), otherwise the CPU, with the reason in `info().fallback`. `"webgpu"`: WebGPU or a rejected promise. `"cpu"`: always the CPU |
 | `modelId` | `""` | echoed as `model_id` in every result |
 | `imgsz` | the file's `folo.imgsz` | letterbox size `S` (a multiple of 32): one image is padded `rect` to multiples of 32 inside `S × S`, like `folo predict` |
 
-Rejects with an `Error` whose message says what is wrong (not a `.folo` file, unsupported config, no WebGPU, ...).
+Rejects with an `Error` whose message says what is wrong (not a `.folo` file, unsupported config, no WebGPU, a
+detached buffer, ...). `detect` likewise never throws: every problem rejects its promise.
 
 ### `detector.detect(image, width?, height?, options?) → Promise<FoloDetectResult>`
 `image` is an `ImageData` (or any `{ data, width, height }`, in which case `width` / `height` may be `undefined`),
@@ -81,7 +82,9 @@ the CPU (`null` otherwise); `simd128` is whether the module was built with SIMD1
 - `version()`: the crate version.
 
 `folo_wasm.d.ts` types all of the above (`FoloLoadOptions`, `FoloDetectOptions`, `FoloDetectResult`, `FoloBox`,
-`FoloDetectorInfo`, `FoloImage`).
+`FoloDetectorInfo`, `FoloImage`). wasm-bindgen's class declaration uses `Symbol.dispose`, so a strict type check of
+it needs the `esnext.disposable` lib (or `skipLibCheck`, as Studio has). `crates/folo-wasm/demo/api-check.ts`
+exercises the documented calls; CI runs `tsc -p crates/folo-wasm/demo/tsconfig.json` on it.
 
 ### Swapping it in for `/api/predict`
 The result is a superset of the server's response, so code that renders `/api/predict` renders it unchanged. Load
@@ -128,9 +131,9 @@ Chrome's D3D12 Dawn, i7-14700KF), `crates/folo-wasm/demo/test.mjs`:
   end-to-end predict bench measured 12.7–26 ms median at batch 1 (8.69 ms on an idle GPU, docs/BENCHMARKS.md), so
   the browser is close to native; the remaining gap is per-dispatch cost through the WebGPU JS API and the
   `mapAsync` round trip.
-- **Load time on WebGPU is pipeline compilation**: the test pass compiles about 50 pipelines through Chrome's shader
-  compiler. The first call at 640 after loading took 26 ms, so the 64×64 test pass covers the kernels a real input
-  needs. The CPU loads in tens of milliseconds.
+- **Load time on WebGPU is pipeline compilation**: the test pass (at the letterbox size, so with the same kernel
+  specialisations as a real call) compiles them through Chrome's shader compiler. The first call at 640 after loading
+  took 26 ms. The CPU loads in tens of milliseconds.
 - The CPU backend is single-threaded (see Limitations): about 13 GFLOP/s effective on folo-n's 6.5 GFLOPs.
 
 ## Demo and browser test
@@ -148,10 +151,12 @@ folo predict --model shapes-n.folo img.jpg --imgsz 640 --device cpu --json > nat
 node crates/folo-wasm/demo/test.mjs --model shapes-n.folo --image img.jpg --imgsz 640 --expect native.json
 ```
 
-Options: `--backends webgpu,cpu`, `--runs 20`, `--conf 0.25`, `--chrome <path>`, `--headed`, `--screenshots <dir>`.
+Options: `--backends webgpu,cpu,auto`, `--runs 20`, `--conf 0.25`, `--imgsz <n>`, `--chrome <path>`,
+`--chrome-args="<flags>"` (e.g. `--disable-gpu` to exercise `auto`'s CPU fallback), `--headed`, `--screenshots <dir>`.
 Chrome runs with `--enable-unsafe-webgpu`, which headless Chrome needs for WebGPU. The script exits non-zero when a
-backend fails, runs on another backend than requested, or disagrees with the native boxes (same class, IoU ≥ 0.98,
-score within 0.01).
+backend fails, runs on another backend than requested, disagrees with the native boxes (same class, IoU ≥ 0.98,
+score within 0.01), or does not reject bad inputs (detached buffers, wrong or overflowing sizes, bad options) with an
+`Error`.
 
 ## Limitations and follow-ups
 - **One CPU thread.** Threads need `wasm-bindgen-rayon`, a nightly toolchain with `-Z build-std` and

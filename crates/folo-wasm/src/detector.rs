@@ -181,8 +181,9 @@ impl Detector {
             model_id: model_id.to_string(),
             fallback: None,
         };
-        // One small pass compiles the core kernels and surfaces shader or device errors now, so `auto` can
-        // still fall back to the CPU.
+        // One pass on a small gray image, letterboxed to the configured size like any input, compiles the
+        // kernels a real call needs (so the first `detect` is fast) and surfaces shader or device errors now,
+        // so `auto` can still fall back to the CPU.
         let gray = vec![114u8; 64 * 64 * 4];
         d.detect(&gray, 64, 64, DetectOptions::default())
             .await
@@ -286,7 +287,11 @@ pub fn rgba_to_image(rgba: &[u8], width: u32, height: u32) -> Result<Image, Stri
     if width == 0 || height == 0 {
         return Err(format!("image is empty ({width}x{height})"));
     }
-    let n = width as usize * height as usize;
+    // Checked: `usize` is 32 bits on wasm32, where 65536 x 65536 x 4 would wrap to 0.
+    let n = (width as usize)
+        .checked_mul(height as usize)
+        .filter(|n| n.checked_mul(4).is_some())
+        .ok_or_else(|| format!("image is too large ({width}x{height})"))?;
     if rgba.len() != n * 4 {
         return Err(format!(
             "expected {} RGBA bytes for a {width}x{height} image, got {}",
