@@ -4,5 +4,6 @@
 
 - [Agent rules](AGENTS.md)
 - [Architecture](docs/ARCHITECTURE.md)
+- [Detector spec: model, loss, training recipe](docs/MODEL.md)
 - [HTTP API](docs/API.md)
 - [Roadmap](docs/ROADMAP.md)
