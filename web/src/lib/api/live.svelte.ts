@@ -7,9 +7,10 @@
 // event reported after the request was sent.
 //
 // Resume: a stopped / failed run that becomes active again continues from its last finished epoch and repeats the
-// steps after it. Those steps are dropped (rewound), and until the resumed run has passed the old last step, history
-// responses may still hold the interrupted attempt's steps there (the server replaces them as it writes new ones):
-// such stale steps are ignored, only streamed ones count.
+// steps after it. We follow the server's own rule for its history (docs/API.md, folo-server read_metrics): a step or
+// epoch at or below the last one seen replaces everything from it on. The view rewinds to the last finished epoch
+// right away; history requested before a rewind is dropped (a generation counter), and history requested after it
+// is the server's word up to its last step.
 
 import { untrack } from 'svelte';
 import { hub } from './index.svelte';
@@ -65,10 +66,8 @@ export class LiveRun {
   /** Increments with every status event, so a snapshot can tell whether one arrived while it was in flight. */
   #statusSeq = 0;
   #lastStatus: Pick<Run, 'status' | 'error'> | null = null;
-  /** Re-synchronises history with the server (set while subscribed). */
-  #resync: (() => void) | null = null;
-  /** After a rewind: steps in (from, to] from history are the interrupted attempt's and are ignored. */
-  #stale: { from: number; to: number } | null = null;
+  /** Bumps on every rewind (resume): history requested before it describes an earlier attempt and is dropped. */
+  #gen = 0;
 
   constructor(id: () => string | null) {
     $effect(() => {
@@ -79,7 +78,6 @@ export class LiveRun {
       const api = hub.api;
       let closed = false;
       this.#lastStatus = null;
-      this.#stale = null;
       untrack(() => {
         this.loading = true;
         this.error = undefined;
@@ -109,6 +107,7 @@ export class LiveRun {
 
       const load = async () => {
         const seq = this.#statusSeq;
+        const gen = this.#gen;
         const [snap, metrics, logs] = await Promise.all([
           snapshot(),
           api.runMetrics(runId),
@@ -116,6 +115,8 @@ export class LiveRun {
           api.runLogs(runId, 500).catch(() => ({ lines: [] })),
         ]);
         if (closed) return;
+        // Requested before a resume rewound the view: it may hold the interrupted attempt. Ask again.
+        if (gen !== this.#gen) return sync();
         this.#absorb(snap.claim() ? snap.run : (this.run ?? snap.run), metrics.steps, metrics.epochs, seq);
         this.logs = mergeLogs(logs.lines, this.logs);
         this.loading = false;
@@ -146,10 +147,7 @@ export class LiveRun {
           this.#statusSeq++;
           this.#lastStatus = { status, error };
           // Finished → active again: the run was resumed (here or elsewhere).
-          if (this.run && !ACTIVE.includes(this.run.status) && ACTIVE.includes(status)) {
-            this.#rewind();
-            sync();
-          }
+          if (this.run && !ACTIVE.includes(this.run.status) && ACTIVE.includes(status)) this.#rewind();
           if (this.run) this.run = { ...this.run, status, error };
           if (!['queued', 'running', 'stopping'].includes(status)) {
             // Terminal: refresh the snapshot for finished time, best and model id (even if history is still loading).
@@ -162,18 +160,16 @@ export class LiveRun {
         },
         step: (s) => {
           if (closed) return;
-          // The resumed run is past everything the interrupted attempt wrote: history is whole again.
-          if (this.#stale && s.step > this.#stale.to) this.#stale = null;
-          const last = this.steps[this.steps.length - 1];
-          if (last && s.step <= last.step) return;
+          // The server's rule: a step at or below the last one replaces everything from it on (a resumed epoch).
+          while (this.steps.length && this.steps[this.steps.length - 1]!.step >= s.step) this.steps.pop();
+          if (this.epochs.length && this.epochs[this.epochs.length - 1]!.epoch >= s.epoch) this.epochs = this.epochs.filter((e) => e.epoch < s.epoch);
           this.steps.push(s);
-          if (this.run && s.step > this.run.step) this.run = { ...this.run, step: s.step, epoch: s.epoch, eta_s: s.eta_s };
+          if (this.run) this.run = { ...this.run, step: s.step, epoch: s.epoch, eta_s: s.eta_s };
           this.#bump();
         },
         epoch: (e) => {
           if (closed) return;
-          const last = this.epochs[this.epochs.length - 1];
-          if (last && e.epoch <= last.epoch) return;
+          if (this.epochs.length && this.epochs[this.epochs.length - 1]!.epoch >= e.epoch) this.epochs = this.epochs.filter((x) => x.epoch < e.epoch);
           this.epochs.push(e);
           const best = this.run?.best;
           if (this.run && (!best || e.val.map50_95 > best.map50_95))
@@ -197,11 +193,9 @@ export class LiveRun {
         this.error = e;
         this.loading = false;
       });
-      this.#resync = () => sync();
 
       return () => {
         closed = true;
-        this.#resync = null;
         clearTimeout(syncTimer);
         unsub();
         cancelAnimationFrame(this.#raf);
@@ -229,43 +223,32 @@ export class LiveRun {
     const cur = this.run;
     const status = this.#statusSeq === seq ? { status: r.status, error: r.error } : (this.#lastStatus ?? { status: r.status, error: r.error });
     this.run = { ...r, ...(cur ? { step: cur.step, epoch: cur.epoch, best: cur.best } : {}), ...status };
-    this.#resync?.();
     return r;
   }
 
-  /**
-   * Drops the steps after the last finished epoch (1-based; a resumed run repeats them), moves the run back there and
-   * marks the dropped range stale for later history responses.
-   */
+  /** Drops the steps after the last finished epoch (1-based; a resumed run repeats them) and moves the run there. */
   #rewind() {
+    this.#gen++;
     const done = this.epochs[this.epochs.length - 1]?.epoch ?? 0;
-    const oldLast = this.steps[this.steps.length - 1]?.step ?? 0;
     this.steps = this.steps.filter((s) => s.epoch <= done);
     const kept = this.steps[this.steps.length - 1]?.step ?? 0;
-    if (oldLast > kept) this.#stale = { from: kept, to: oldLast };
     if (this.run) this.run = { ...this.run, step: kept, epoch: done };
     this.#bump();
   }
 
   /** Merges a snapshot + history into what the stream has delivered so far, never moving backwards. */
   #absorb(run: Run, steps: Step[], epochs: Epoch[], statusSeqAtStart: number) {
-    const stale = this.#stale;
-    if (stale) {
-      // History that reaches past the interrupted attempt was written after the resume replaced its steps: it is
-      // authoritative again (the window retires). Otherwise the window's steps may still be the old attempt's.
-      if (steps.some((s) => s.step > stale.to)) this.#stale = null;
-      else steps = steps.filter((s) => s.step <= stale.from);
-    }
-    this.steps = mergeBy(steps, this.steps, (s) => s.step);
-    this.epochs = mergeBy(epochs, this.epochs, (e) => e.epoch);
+    // The server's history is its word up to its last step / epoch; streamed ones beyond it are newer and kept.
+    const hs = steps[steps.length - 1]?.step ?? 0;
+    const he = epochs[epochs.length - 1]?.epoch ?? 0;
+    this.steps = [...steps, ...this.steps.filter((s) => s.step > hs)];
+    this.epochs = [...epochs, ...this.epochs.filter((e) => e.epoch > he)];
     let next = run;
     const last = this.steps[this.steps.length - 1];
     if (last && last.step > next.step && ['running', 'stopping'].includes(next.status))
       next = { ...next, step: last.step, epoch: last.epoch, eta_s: last.eta_s };
     for (const e of this.epochs)
       if (!next.best || e.val.map50_95 > next.best.map50_95) next = { ...next, best: { epoch: e.epoch, map50_95: e.val.map50_95 } };
-    // While rewound, the snapshot may still count the interrupted attempt's steps: progress follows the steps we hold.
-    if (this.#stale) next = { ...next, step: last?.step ?? 0, epoch: Math.max(last?.epoch ?? 0, this.epochs[this.epochs.length - 1]?.epoch ?? 0) };
     // A status event that arrived after this request was sent is newer than the snapshot.
     if (this.#statusSeq !== statusSeqAtStart && this.#lastStatus) next = { ...next, ...this.#lastStatus };
     this.run = next;
