@@ -2,6 +2,7 @@
   import ArrowUpRight from '@lucide/svelte/icons/arrow-up-right';
   import Box from '@lucide/svelte/icons/box';
   import Check from '@lucide/svelte/icons/check';
+  import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import ImageIcon from '@lucide/svelte/icons/image';
   import Images from '@lucide/svelte/icons/images';
   import Plus from '@lucide/svelte/icons/plus';
@@ -9,6 +10,7 @@
   import Upload from '@lucide/svelte/icons/upload';
   import X from '@lucide/svelte/icons/x';
   import { onDestroy, untrack } from 'svelte';
+  import { MediaQuery } from 'svelte/reactivity';
   import { hub } from '$lib/api/index.svelte';
   import { Resource } from '$lib/api/resource.svelte';
   import type { Dataset, DatasetImage as Img, Model, PredictInput, Prediction } from '$lib/api/types';
@@ -40,6 +42,12 @@
   // re-filter and run NMS in the browser. Suppressing on the server first would lose boxes a looser IoU should keep.
   const FETCH = { conf: 0.01, iou: 1, max_det: 1000 };
   const DEFAULTS = { conf: 0.25, iou: 0.7, maxDet: 300 };
+
+  // Phones with an image loaded: no intro line, the image full-bleed with Confidence under it, and everything else
+  // (IoU, max detections, display toggles, classes, timing) behind one disclosure right below, so tuning never
+  // scrolls or covers the result.
+  const phone = new MediaQuery('max-width: 767px', false);
+  let moreOpen = $state(false);
 
   // ---------- model ----------
   const models = new Resource((s) => hub.api.models(s));
@@ -370,13 +378,67 @@
   </button>
 {/snippet}
 
-<Page title="Playground" wide>
-  {#snippet sub()}
-    <span>Run a model on any image. Thresholds re-filter instantly in the browser.</span>
-  {/snippet}
+{#snippet displayToggles()}
+  {@render toggle('Labels', labels, (v) => (labels = v))}
+  {@render toggle('Scores', scores, (v) => (scores = v))}
+  {#if source?.kind === 'dataset'}{@render toggle('Ground truth', truth, (v) => (truth = v))}{/if}
+{/snippet}
+
+{#snippet secondarySliders(inline: boolean)}
+  <div title="Non-max suppression: a lower-scoring box of the same class is dropped when it overlaps a kept one by more than this.">
+    <Slider {inline} label={inline ? 'IoU' : 'Overlap threshold (IoU)'} bind:value={iou} min={0.05} max={0.95} step={0.05} hint="Merge same-class boxes that overlap more." />
+  </div>
+  <Slider {inline} label={inline ? 'Max boxes' : 'Max detections'} bind:value={maxDet} min={1} max={300} step={1} format={(v) => String(Math.round(v))} hint="Keep at most this many boxes." />
+{/snippet}
+
+{#snippet resetButton()}
+  <Button size="sm" variant="ghost" icon={RotateCcw} disabled={isDefault} onclick={resetThresholds}>Reset</Button>
+{/snippet}
+
+{#snippet showAllButton()}
+  {#if hidden.size}<Button size="sm" variant="ghost" onclick={() => (hidden = new Set())}>Show all</Button>{/if}
+{/snippet}
+
+{#snippet classList()}
+  {#if !result}
+    <p class="hint">Per-class counts, click one to hide it.</p>
+  {:else if counts.length === 0}
+    <p class="hint">Nothing above the confidence threshold.</p>
+  {:else}
+    <ul class="counts" aria-label="Detected classes">
+      {#each counts as [c, n] (c)}
+        {@const off = hidden.has(c)}
+        <li>
+          <button type="button" class:off aria-pressed={!off} onclick={() => toggleClass(c)} aria-label="{off ? 'Show' : 'Hide'} {classes[c] ?? `class ${c}`}">
+            <span class="sw" style:background={classColor(c)} aria-hidden="true"></span>
+            <span class="c-name truncate">{classes[c] ?? `class ${c}`}</span>
+            <span class="c-bar" aria-hidden="true"><span style:transform="scaleX({n / maxCount})" style:background={classColor(c)}></span></span>
+            <span class="c-n num">{n}</span>
+          </button>
+        </li>
+      {/each}
+    </ul>
+  {/if}
+{/snippet}
+
+{#snippet timingBody()}
+  {#if pred}
+    <TimingBar timing={pred.timing} device={pred.device} />
+  {:else if predicting}
+    <div class="t-sk"><Skeleton h="28px" w="50%" /><Skeleton h="8px" /><Skeleton h="14px" /><Skeleton h="14px" /></div>
+  {:else}
+    <p class="hint">Preprocess, inference and postprocess time of the last prediction.</p>
+  {/if}
+{/snippet}
+
+{#snippet intro()}
+  <span>Run a model on any image. Thresholds re-filter instantly in the browser.</span>
+{/snippet}
+
+<Page title="Playground" wide sub={source && phone.current ? undefined : intro}>
   {#snippet actions()}
     {#if ranked.length}
-      <div class="model-pick">
+      <div class="model-pick" class:compact={!!source}>
         <span class="pick-label">Model</span>
         <Select
           label="Model"
@@ -401,7 +463,7 @@
     <div class="layout">
       <div class="main">
         <!-- svelte-ignore a11y_no_static_element_interactions -->
-        <div class="viewer" {ondragover} {ondragleave} {ondrop}>
+        <div class="viewer" class:loaded={!!source} {ondragover} {ondragleave} {ondrop}>
           <Panel pad="none">
             <div class="vbar">
               <span class="seg">
@@ -420,19 +482,11 @@
                 <span class="src-name mono truncate" title={sourceName}>{shortName}</span>
                 {#if dims}<span class="src-dims num">{dims.width}×{dims.height}</span>{/if}
                 <span class="vbar-gap"></span>
-                <span class="toggles">
-                  {@render toggle('Labels', labels, (v) => (labels = v))}
-                  {@render toggle('Scores', scores, (v) => (scores = v))}
-                  {#if source.kind === 'dataset'}{@render toggle('Ground truth', truth, (v) => (truth = v))}{/if}
-                </span>
+                <span class="toggles">{@render displayToggles()}</span>
                 <Button size="sm" variant="ghost" class="replace" aria-label="Replace image" icon={source.kind === 'dataset' ? Images : Upload} onclick={() => (source?.kind === 'dataset' ? (pickerOpen = true) : fileInput.click())}>Replace</Button>
                 <Button size="sm" variant="ghost" class="clear" icon={X} aria-label="Clear image" onclick={clear} />
               {/if}
             </div>
-            {#if source}
-              <!-- Narrow screens: the threshold tuned most sits right above the image, so the result stays in view. -->
-              <div class="qconf"><Slider inline label="Confidence" bind:value={conf} min={0.01} max={0.95} step={0.01} /></div>
-            {/if}
             <div class="stage" class:empty={!source} style:--ar={dims ? `${dims.width} / ${dims.height}` : undefined}>
               {#if !source}
                 <DropZone {dragging} {samples} onbrowse={() => fileInput.click()} onpick={() => (pickerOpen = true)} onsample={(ds, img) => setSource({ kind: 'dataset', ds, img })} />
@@ -462,15 +516,17 @@
                 {#if dragging}<div class="drop-hint"><span>Drop to replace</span></div>{/if}
               {/if}
             </div>
+            {#if source}
+              <!-- Phones: the threshold tuned most sits right under the image; the rest is one tap away below it. -->
+              <div class="qconf"><Slider inline label="Confidence" bind:value={conf} min={0.01} max={0.95} step={0.01} /></div>
+            {/if}
             {#if source && result}
               <!-- Phones: the picked detection in one line under the image, so its numbers are readable without the table. -->
               {@const sel = selectedIdx !== null ? kept[selectedIdx] : undefined}
-              <p class="pick-line num" aria-live="polite">
+              <p class="pick-line num" class:empty={!sel} aria-live="polite">
                 {#if sel}
                   <span class="sw" style:background={classColor(sel.class)} aria-hidden="true"></span>
                   <b>{sel.name}</b> {sel.score.toFixed(2)}<span class="sep" aria-hidden="true">·</span>{px(sel.x2 - sel.x1)}×{px(sel.y2 - sel.y1)} px
-                {:else}
-                  <span class="faint">Tap a box for its class, score and size.</span>
                 {/if}
               </p>
             {/if}
@@ -479,16 +535,39 @@
                 {#if result}
                   <!-- Each item after the first draws its own separator, so hiding one never leaves a stray dot. -->
                   <span class="fi"><b>{rows.length}</b> shown <span class="wide">of {num(pred?.boxes.length)} candidates</span></span>
-                  <span class="fi">conf ≥ {conf.toFixed(2)}</span>
-                  <span class="fi wide">IoU {iou.toFixed(2)}</span>
+                  <span class="fi wide">conf ≥ {conf.toFixed(2)}</span>
+                  <span class="fi" class:wide={iou === DEFAULTS.iou}>IoU {iou.toFixed(2)}</span>
                   {#if maxDet < DEFAULTS.maxDet}<span class="fi">max {Math.round(maxDet)}</span>{/if}
                   {#if hidden.size}<span class="fi">{hidden.size} {hidden.size === 1 ? 'class' : 'classes'} hidden</span>{/if}
                   <span class="grow"></span>
+                  {#if selectedIdx === null}<span class="tap">Tap a box to inspect</span>{/if}
                   <span class="faint">filtered in {result.ms < 0.01 ? '<0.01' : result.ms.toFixed(2)} ms</span>
                 {:else}
                   <span class="faint">{predicting ? 'Running inference…' : 'Waiting for a model'}</span>
+                  <span class="grow"></span>
                 {/if}
+                <Button size="sm" variant="ghost" class="more-btn" iconRight={ChevronDown} aria-expanded={moreOpen} aria-controls="pg-more" onclick={() => (moreOpen = !moreOpen)}>Thresholds</Button>
               </div>
+              {#if moreOpen && phone.current}
+                <div class="more" id="pg-more">
+                  <div class="more-sliders">{@render secondarySliders(true)}</div>
+                  <div class="more-row">
+                    <span class="more-toggles">{@render displayToggles()}</span>
+                    {@render resetButton()}
+                  </div>
+                  <section class="more-sec" aria-labelledby="pg-more-cls">
+                    <div class="more-head">
+                      <h2 id="pg-more-cls">Classes{#if result}<span class="more-meta num">{counts.length} found</span>{/if}</h2>
+                      {@render showAllButton()}
+                    </div>
+                    {@render classList()}
+                  </section>
+                  <section class="more-sec" aria-labelledby="pg-more-time">
+                    <div class="more-head"><h2 id="pg-more-time">Timing{#if pred}<span class="more-meta">server</span>{/if}</h2></div>
+                    {@render timingBody()}
+                  </section>
+                </div>
+              {/if}
             {/if}
           </Panel>
         </div>
@@ -575,64 +654,35 @@
         </div>
       </div>
 
-      <div class="aside">
+      <!-- Phones with an image: these move into the disclosure under the image. -->
+      <div class="aside" class:tucked={!!source}>
         <div class="thresholds">
           <Panel title="Thresholds" divided>
-            {#snippet actions()}
-              <Button size="sm" variant="ghost" icon={RotateCcw} disabled={isDefault} onclick={resetThresholds}>Reset</Button>
-            {/snippet}
+            {#snippet actions()}{@render resetButton()}{/snippet}
             <div class="sliders">
-              <div class="conf-full" class:moved={!!source}><Slider label="Confidence" bind:value={conf} min={0.01} max={0.95} step={0.01} hint="Hide boxes scored below this." /></div>
-              <div title="Non-max suppression: a lower-scoring box of the same class is dropped when it overlaps a kept one by more than this.">
-                <Slider label="Overlap threshold (IoU)" bind:value={iou} min={0.05} max={0.95} step={0.05} hint="Merge same-class boxes that overlap more." />
-              </div>
-              <Slider label="Max detections" bind:value={maxDet} min={1} max={300} step={1} format={(v) => String(Math.round(v))} hint="Keep at most this many boxes." />
+              <Slider label="Confidence" bind:value={conf} min={0.01} max={0.95} step={0.01} hint="Hide boxes scored below this." />
+              {@render secondarySliders(false)}
             </div>
           </Panel>
         </div>
 
         <div class="classes">
           <Panel title="Classes" meta={result ? `${counts.length} found` : undefined} divided>
-            {#snippet actions()}
-              {#if hidden.size}<Button size="sm" variant="ghost" onclick={() => (hidden = new Set())}>Show all</Button>{/if}
-            {/snippet}
-            {#if !result}
-              <p class="hint">Per-class counts, click one to hide it.</p>
-            {:else if counts.length === 0}
-              <p class="hint">Nothing above the confidence threshold.</p>
-            {:else}
-              <ul class="counts" aria-label="Detected classes">
-                {#each counts as [c, n] (c)}
-                  {@const off = hidden.has(c)}
-                  <li>
-                    <button type="button" class:off aria-pressed={!off} onclick={() => toggleClass(c)} aria-label="{off ? 'Show' : 'Hide'} {classes[c] ?? `class ${c}`}">
-                      <span class="sw" style:background={classColor(c)} aria-hidden="true"></span>
-                      <span class="c-name truncate">{classes[c] ?? `class ${c}`}</span>
-                      <span class="c-bar" aria-hidden="true"><span style:transform="scaleX({n / maxCount})" style:background={classColor(c)}></span></span>
-                      <span class="c-n num">{n}</span>
-                    </button>
-                  </li>
-                {/each}
-              </ul>
-            {/if}
+            {#snippet actions()}{@render showAllButton()}{/snippet}
+            {@render classList()}
           </Panel>
         </div>
 
         <div class="timing">
           <Panel title="Timing" meta={pred ? 'server' : undefined} divided>
-            {#if pred}
-              <TimingBar timing={pred.timing} device={pred.device} />
-            {:else if predicting}
-              <div class="t-sk"><Skeleton h="28px" w="50%" /><Skeleton h="8px" /><Skeleton h="14px" /><Skeleton h="14px" /></div>
-            {:else}
-              <p class="hint">Preprocess, inference and postprocess time of the last prediction.</p>
-            {/if}
+            {@render timingBody()}
           </Panel>
         </div>
       </div>
     </div>
   {/if}
 </Page>
+
 
 <DatasetPicker bind:open={pickerOpen} prefer={classes} onpick={(ds, img) => setSource({ kind: 'dataset', ds, img })} onclose={() => (seg = source?.kind ?? 'file')} />
 
@@ -822,10 +872,13 @@
     margin-right: var(--space-2);
     color: var(--text-tertiary);
   }
-  .qconf {
+  .qconf,
+  .tap {
     display: none;
-    padding: 0 var(--space-3);
-    border-bottom: 1px solid var(--line-subtle);
+  }
+  .qconf :global(.slider) {
+    flex: 1;
+    min-width: 0;
   }
   .grow {
     flex: 1;
@@ -988,11 +1041,75 @@
     display: grid;
     gap: var(--space-3);
   }
+  /* Phones: the disclosure under the image. Slider labels share one width so the tracks line up with Confidence. */
+  .more {
+    padding: 0 var(--space-4) var(--space-4);
+    border-top: 1px solid var(--line-subtle);
+  }
+  .qconf :global(.slider.inline label),
+  .more-sliders :global(.slider.inline label) {
+    min-width: 80px;
+  }
+  .more-sliders :global(.slider.inline) {
+    min-height: 44px;
+  }
+  .more-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+    min-height: 44px;
+    margin-left: calc(-1 * var(--space-2));
+  }
+  .more-toggles {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 2px;
+  }
+  .more-sec {
+    margin-top: var(--space-2);
+    padding-top: var(--space-3);
+    border-top: 1px solid var(--line-subtle);
+  }
+  .more-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+    min-height: var(--control-sm);
+    margin-bottom: var(--space-2);
+  }
+  .more-head h2 {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-2);
+    font-size: var(--type-md-size);
+    line-height: var(--type-md-line);
+    letter-spacing: var(--type-md-tracking);
+    font-weight: var(--weight-medium);
+  }
+  .more-meta {
+    font-size: var(--type-sm-size);
+    letter-spacing: 0;
+    font-weight: var(--weight-regular);
+    color: var(--text-tertiary);
+  }
+  .vfoot :global(.more-btn) {
+    display: none;
+    flex-shrink: 0;
+  }
+  .vfoot :global(.more-btn svg) {
+    transition: transform var(--dur-fast) var(--ease-standard);
+  }
+  .vfoot :global(.more-btn[aria-expanded='true'] svg) {
+    transform: rotate(180deg);
+  }
   @media (pointer: coarse) {
     .table.dense td {
       height: 44px;
     }
-    .counts button {
+    .counts button,
+    .more-toggles .tog {
       height: 44px;
     }
   }
@@ -1034,10 +1151,48 @@
     .model-pick {
       width: calc(100vw - 2 * var(--space-4));
     }
-    .vbar {
-      flex-wrap: wrap;
-      row-gap: var(--space-1);
-      gap: var(--space-1);
+    /* With an image the intro line is gone; the empty title row must not leave a gap above the model picker. */
+    :global(.page > header:has(.model-pick.compact)) {
+      row-gap: 0;
+    }
+    /* The image goes edge to edge; its bars keep the 16 px gutter inside. */
+    .viewer.loaded {
+      margin: 0 calc(-1 * var(--space-4));
+    }
+    .viewer.loaded :global(.panel) {
+      border-left: 0;
+      border-right: 0;
+      border-radius: 0;
+    }
+    .viewer.loaded .vbar,
+    .viewer.loaded .vfoot,
+    .viewer.loaded .pick-line,
+    .viewer.loaded .qconf {
+      padding-left: var(--space-4);
+      padding-right: var(--space-4);
+    }
+    .viewer.loaded .vbar {
+      padding-right: var(--space-2);
+      gap: var(--space-2);
+    }
+    .viewer.loaded .vfoot {
+      height: auto;
+      min-height: 40px;
+      padding-right: var(--space-2);
+    }
+    .vfoot :global(.more-btn) {
+      display: inline-flex;
+    }
+    .aside.tucked,
+    .vbar .toggles {
+      display: none;
+    }
+    .vbar .src-name {
+      display: block;
+      flex: 1;
+    }
+    .vbar-gap {
+      display: none;
     }
     .vbar :global(.replace .label) {
       display: none;
@@ -1048,6 +1203,10 @@
     }
     .vfoot .wide {
       display: none;
+    }
+    .tap {
+      display: inline;
+      color: var(--text-tertiary);
     }
     .pick-line {
       display: flex;
@@ -1061,6 +1220,11 @@
       white-space: nowrap;
       overflow: hidden;
     }
+    /* Nothing picked: the live region stays in the tree but takes no room. */
+    .pick-line.empty {
+      min-height: 0;
+      border-top: 0;
+    }
     .pick-line b {
       color: var(--text-primary);
       font-weight: var(--weight-medium);
@@ -1069,17 +1233,12 @@
       color: var(--text-tertiary);
     }
     .qconf {
-      display: block;
-    }
-    .conf-full.moved {
-      display: none;
-    }
-    .toggles {
-      order: 3;
-      flex: 1;
-    }
-    .vbar :global(.clear) {
-      order: 4;
+      display: flex;
+      align-items: center;
+      gap: var(--space-3);
+      min-height: 48px;
+      padding: 0 var(--space-3);
+      border-top: 1px solid var(--line-subtle);
     }
     .stage {
       height: auto;

@@ -18,6 +18,7 @@
   import Input from '$lib/ui/Input.svelte';
   import Panel from '$lib/ui/Panel.svelte';
   import Segmented from '$lib/ui/Segmented.svelte';
+  import Select from '$lib/ui/Select.svelte';
   import Skeleton from '$lib/ui/Skeleton.svelte';
 
   setCrumbs({ label: 'Models' });
@@ -140,7 +141,12 @@
   {#if !models.error && (!models.data || models.data.length > 0)}
     <div class="toolbar">
       {#if models.data}
-        <div class="seg-scroll"><Segmented label="Evaluation dataset" bind:value={dsFilter} options={dsOptions} /></div>
+        <div class="seg"><Segmented label="Evaluation dataset" bind:value={dsFilter} options={dsOptions} /></div>
+        <!-- Phones: every dataset in a native picker; a strip that scrolls sideways hides the last ones. -->
+        <div class="ds-pick">
+          <label for="models-ds">Dataset</label>
+          <Select id="models-ds" bind:value={dsFilter} options={dsOptions.map((o) => ({ value: o.value, label: `${o.label} · ${o.meta}` }))} />
+        </div>
       {:else}
         <Skeleton w="320px" h="var(--control-md)" r="var(--radius-md)" />
       {/if}
@@ -273,17 +279,23 @@
     width: 280px;
     max-width: 100%;
   }
-  .seg-scroll {
+  .seg {
     max-width: 100%;
     overflow-x: auto;
     scrollbar-width: none;
   }
-  /* Phones: the dataset filters scroll sideways; the faded edge says there is more. */
-  @media (max-width: 767px) {
-    .seg-scroll {
-      mask-image: linear-gradient(90deg, #000 calc(100% - 32px), transparent);
-      padding-right: var(--space-6);
-    }
+  .ds-pick {
+    display: none;
+    align-items: center;
+    gap: var(--space-3);
+    width: 100%;
+  }
+  .ds-pick label {
+    flex-shrink: 0;
+    color: var(--text-tertiary);
+  }
+  .ds-pick :global(.select) {
+    flex: 1;
   }
   .scroll {
     overflow-x: auto;
@@ -379,6 +391,12 @@
     }
     .rows {
       display: block;
+    }
+    .seg {
+      display: none;
+    }
+    .ds-pick {
+      display: flex;
     }
     .search {
       width: 100%;

@@ -133,6 +133,18 @@ export const scenes = [
     },
   },
   {
+    // Phones: IoU, max detections, display toggles, classes and timing open in place under the Confidence slider.
+    name: 'playground-thresholds',
+    path: '/playground?model=m_hard_s',
+    viewports: ['mobile'],
+    fullPage: true,
+    setup: async (page) => {
+      await playgroundResult(page);
+      await page.getByRole('button', { name: 'Thresholds' }).click();
+      await page.locator('#pg-more').waitFor();
+    },
+  },
+  {
     name: 'playground-json',
     path: '/playground?model=m_hard_s',
     viewports: ['desktop'],
