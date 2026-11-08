@@ -1,5 +1,5 @@
 <script lang="ts">
-  /** Class names on one line, cut by whole names with "+n" for the rest (the full list is in the title). */
+  /** Class names on one line, cut by whole names with "+n more" for the rest (the full list is in the title). */
   import { fitCount } from './fit';
 
   let { names }: { names: readonly string[] } = $props();
@@ -23,21 +23,21 @@
     ctx.font = `${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
     const w = (s: string) => ctx!.measureText(s).width;
     // A px of slack for sub-pixel rounding between canvas and layout.
-    return fitCount(names.map(w), w(SEP), (rest) => w(` +${rest}`) + 4, width - 1);
+    return fitCount(names.map(w), w(SEP), (rest) => w(`+${rest} more`) + 6, width - 1);
   });
   const rest = $derived(names.length - shown);
 </script>
 
 <span class="names" bind:this={el} bind:clientWidth={width} title={rest ? names.join(SEP) : undefined}>
   <span class="list">{names.slice(0, shown).join(SEP)}</span>
-  {#if rest > 0}<span class="more">+{rest}<span class="sr-only"> more</span></span>{/if}
+  {#if rest > 0}<span class="more">+{rest} more</span>{/if}
 </span>
 
 <style>
   .names {
     display: flex;
     align-items: baseline;
-    gap: 4px;
+    gap: 6px;
     min-width: 0;
     font-size: var(--type-xs-size);
     color: var(--text-tertiary);

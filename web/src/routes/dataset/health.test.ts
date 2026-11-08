@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Dataset, DatasetStats } from '$lib/api/types';
-import { countBinLabel, healthChecks, shareBelow, sizeBinLabel } from './health';
+import { countBinLabel, healthChecks, reviewCount, shareBelow, sizeBinLabel } from './health';
 
 const ds = (over: Partial<Dataset> = {}): Dataset => ({
   id: 'ds_x',
@@ -21,6 +21,20 @@ const st = (over: Partial<DatasetStats> = {}): DatasetStats => ({
   box_size_hist: { edges: [0, 0.05, 0.1, 1], counts: [10, 990, 2000] },
   boxes_per_image_hist: { edges: [0, 1, 2, 4], counts: [0, 500, 500] },
   ...over,
+});
+
+describe('reviewCount', () => {
+  it('counts exactly the error and warning findings', () => {
+    const h = healthChecks(ds(), st({ broken_labels: 3, empty_images: 20, box_size_hist: { edges: [0, 0.05, 1], counts: [500, 2500] } }));
+    expect(h.map((x) => x.severity)).toEqual(['danger', 'warning', 'info']);
+    expect(reviewCount(h)).toBe(2);
+    expect(reviewCount(healthChecks(ds(), st()))).toBe(0);
+  });
+
+  it('gives tiny boxes a concrete action', () => {
+    const tiny = healthChecks(ds(), st({ box_size_hist: { edges: [0, 0.05, 1], counts: [500, 2500] } })).find((x) => x.id === 'tiny');
+    expect(tiny?.action).toEqual({ label: 'Train at 960 px', path: '/runs/new?dataset=ds_x&imgsz=960' });
+  });
 });
 
 describe('healthChecks', () => {
