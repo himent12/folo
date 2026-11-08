@@ -79,6 +79,24 @@ fn usage_errors_exit_2() {
 }
 
 #[test]
+fn version_has_sha_and_build_date() {
+    let (code, stdout, _) = folo(&["--version"]);
+    assert_eq!(code, 0);
+    // folo 0.1.0 (1a2b3c4d5e6f 2026-11-07)
+    let line = stdout.trim();
+    let rest = line.strip_prefix(&format!("folo {} (", env!("CARGO_PKG_VERSION"))).expect(line);
+    let (sha, date) = rest.strip_suffix(')').and_then(|r| r.split_once(' ')).expect(line);
+    assert!(sha == "unknown" || (sha.len() == 12 && sha.chars().all(|c| c.is_ascii_hexdigit())), "{line}");
+    let d: Vec<&str> = date.split('-').collect();
+    assert_eq!(d.iter().map(|p| p.len()).collect::<Vec<_>>(), [4, 2, 2], "{line}");
+    assert!(d.iter().all(|p| p.parse::<u32>().is_ok()), "{line}");
+    let (_, stdout, _) = folo(&["doctor", "--json"]);
+    let v = &json_lines(&stdout)[0];
+    assert_eq!(v["git_sha"], sha);
+    assert_eq!(v["build_date"], date);
+}
+
+#[test]
 fn serve_mock_prints_the_url_as_json() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_folo"))
         .args(["serve", "--mock", "--port", "0", "--json", "--web-dir", "does/not/exist"])

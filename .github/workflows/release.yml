@@ -1,0 +1,313 @@
+name: release
+
+# Release builds of the `folo` CLI (FOLO Studio embedded, so `folo serve` works out of the box) and FOLO Desktop.
+#
+# - Push a tag `vX.Y.Z` equal to `[workspace.package] version` in Cargo.toml: builds everything and creates a
+#   *draft* GitHub Release with generated notes, the archives, a `.sha256` per archive and `SHA256SUMS`.
+#   Review the draft and publish it by hand; the install scripts only see published releases.
+# - Run it by hand (workflow_dispatch) for a dry run: the same builds, uploaded as run artifacts, no release.
+# - Pull requests that touch the release machinery get the same dry run (without macOS) plus an install-script test.
+#
+# Assets (names carry no version so `releases/latest/download/<asset>` URLs stay stable):
+#   folo-x86_64-pc-windows-msvc.zip, folo-x86_64-unknown-linux-gnu.tar.gz, folo-aarch64-apple-darwin.tar.gz,
+#   folo-desktop-x86_64-pc-windows-msvc.zip, each with a `<asset>.sha256`, plus SHA256SUMS.
+# Each CLI archive holds one folder `folo-<target>/` with the binary, README.md and the licenses.
+
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - scripts/install.sh
+      - scripts/install.ps1
+      - crates/folo-cli/build.rs
+      - crates/folo-server/build.rs
+      - crates/folo-server/src/web.rs
+  workflow_dispatch:
+    inputs:
+      macos:
+        description: Also build aarch64-apple-darwin (macOS runner minutes are billed at 10x on private repos)
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      prerelease: ${{ steps.plan.outputs.prerelease }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          # Tag builds include macOS unless the repository variable FOLO_RELEASE_MACOS is "false"; PRs never do.
+          MACOS: ${{ github.event_name == 'workflow_dispatch' && inputs.macos || github.event_name == 'push' && vars.FOLO_RELEASE_MACOS != 'false' }}
+        run: |
+          set -euo pipefail
+          # The single source of truth: [workspace.package] version in the root Cargo.toml.
+          version=$(sed -n '/^\[workspace\.package\]/,/^\[/s/^version *= *"\([^"]*\)".*/\1/p' Cargo.toml)
+          test -n "$version" || { echo "::error::no [workspace.package] version in Cargo.toml"; exit 1; }
+          if [ "$EVENT" = push ] && [ "$REF_NAME" != "v$version" ]; then
+            echo "::error::tag $REF_NAME does not match the workspace version $version (expected v$version)"
+            exit 1
+          fi
+          case "$version" in *-*) prerelease=true ;; *) prerelease=false ;; esac
+          # ubuntu-22.04 (glibc 2.35) rather than ubuntu-latest so the Linux binary runs on older distributions.
+          # macOS is optional: a failed macOS build does not block the release (continue-on-error).
+          include='[{"target":"x86_64-pc-windows-msvc","os":"windows-latest","exe":".exe","optional":false},
+                    {"target":"x86_64-unknown-linux-gnu","os":"ubuntu-22.04","exe":"","optional":false}]'
+          if [ "$MACOS" = true ]; then
+            include=$(jq -c '. + [{"target":"aarch64-apple-darwin","os":"macos-latest","exe":"","optional":true}]' <<<"$include")
+          fi
+          {
+            echo "version=$version"
+            echo "prerelease=$prerelease"
+            echo "matrix=$(jq -c '{include: .}' <<<"$include")"
+          } >> "$GITHUB_OUTPUT"
+          echo "FOLO $version ($EVENT, macOS: $MACOS)" >> "$GITHUB_STEP_SUMMARY"
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - working-directory: web
+        run: npm ci && npm run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+          if-no-files-found: error
+          retention-days: 7
+
+  cli:
+    name: cli (${{ matrix.target }})
+    needs: [plan, web]
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.optional }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    env:
+      FOLO_GIT_SHA: ${{ github.sha }}
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+      EXE: ${{ matrix.exe }}
+      TARGET: ${{ matrix.target }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: build
+        run: cargo build --release --locked -p folo-cli --features embed-web --target "$TARGET"
+      - name: smoke test
+        run: |
+          set -euo pipefail
+          exe="target/$TARGET/release/folo$EXE"
+          "$exe" --version
+          "$exe" doctor --json > doctor.json
+          grep -q '"web_source":"embedded"' doctor.json || { cat doctor.json; exit 1; }
+          # Without --web-dir the embedded Studio wins over the web/dist checked out here.
+          "$exe" serve --mock --port 0 --json > serve.log &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 100); do grep -q '"listening"' serve.log && break; sleep 0.1; done
+          url=$(sed -n 's/.*"url":"\([^"]*\)".*/\1/p' serve.log | head -n 1)
+          test -n "$url" || { echo "server did not start"; cat serve.log; exit 1; }
+          curl -fsS "$url/api/health"
+          curl -fsS -o index.html "$url/" && grep -qi '<!doctype html>' index.html
+          curl -fsS -o spa.html "$url/runs/some-run" && grep -qi '<!doctype html>' spa.html
+      - name: package
+        run: |
+          set -euo pipefail
+          name="folo-$TARGET"
+          mkdir -p "pkg/$name" dist
+          cp "target/$TARGET/release/folo$EXE" README.md LICENSE-MIT LICENSE-APACHE "pkg/$name/"
+          if [ "$RUNNER_OS" = Windows ]; then
+            archive="$name.zip"
+            (cd pkg && 7z a -tzip -bso0 "../dist/$archive" "$name")
+          else
+            archive="$name.tar.gz"
+            tar -C pkg -czf "dist/$archive" "$name"
+          fi
+          cd dist
+          if command -v sha256sum >/dev/null; then sum=$(sha256sum "$archive"); else sum=$(shasum -a 256 "$archive"); fi
+          printf '%s  %s\n' "${sum%% *}" "$archive" > "$archive.sha256"
+          cat "$archive.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  # A separate job: a desktop failure never blocks the CLI release (the release job only requires `cli`).
+  desktop:
+    needs: plan
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: check for the desktop app
+        id: desktop
+        run: test -f apps/desktop/Cargo.toml && echo "present=true" >> "$GITHUB_OUTPUT" || echo "present=false" >> "$GITHUB_OUTPUT"
+      - name: check the desktop version
+        if: steps.desktop.outputs.present == 'true'
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          desktop=$(sed -n '/^\[package\]/,/^\[/s/^version *= *"\([^"]*\)".*/\1/p' apps/desktop/Cargo.toml)
+          if [ "$desktop" != "$VERSION" ]; then
+            echo "::error::apps/desktop/Cargo.toml has version $desktop, the workspace has $VERSION"
+            exit 1
+          fi
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.desktop.outputs.present == 'true'
+      - name: build
+        if: steps.desktop.outputs.present == 'true'
+        run: cargo build --release --locked --manifest-path apps/desktop/Cargo.toml
+      - name: package
+        if: steps.desktop.outputs.present == 'true'
+        run: |
+          set -euo pipefail
+          archive=folo-desktop-x86_64-pc-windows-msvc.zip
+          mkdir -p pkg dist
+          cp apps/desktop/target/release/folo-desktop.exe LICENSE-MIT LICENSE-APACHE pkg/
+          (cd pkg && 7z a -tzip -bso0 "../dist/$archive" ./*)
+          cd dist
+          sum=$(sha256sum "$archive")
+          printf '%s  %s\n' "${sum%% *}" "$archive" > "$archive.sha256"
+          cat "$archive.sha256"
+      - uses: actions/upload-artifact@v4
+        if: steps.desktop.outputs.present == 'true'
+        with:
+          name: desktop-x86_64-pc-windows-msvc
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    needs: [plan, cli, desktop]
+    # Runs even when `desktop` failed; needs every required CLI build (optional legs use continue-on-error).
+    if: ${{ !cancelled() && needs.cli.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: cli-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        if: needs.desktop.result == 'success'
+        continue-on-error: true # the desktop job succeeds without an artifact when apps/desktop is absent
+        with:
+          pattern: desktop-*
+          path: dist
+          merge-multiple: true
+      - name: checksums
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          sha256sum -c ./*.sha256
+          cat ./*.sha256 > SHA256SUMS
+          {
+            echo "### Assets"
+            echo '```'
+            ls -l
+            echo
+            cat SHA256SUMS
+            echo '```'
+            echo "desktop job: ${{ needs.desktop.result }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ needs.plan.outputs.version }}
+          path: dist/*
+      - name: draft release
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.plan.outputs.version }}
+          PRERELEASE: ${{ needs.plan.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          if draft=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null); then
+            # A re-run: refresh the assets of the existing draft, but never touch a published release.
+            if [ "$draft" != true ]; then
+              echo "::error::release $TAG is already published; delete it or tag a new version instead of re-running"
+              exit 1
+            fi
+            gh release upload "$TAG" dist/* --clobber
+          else
+            flags=()
+            if [ "$PRERELEASE" = true ]; then flags+=(--prerelease); fi
+            gh release create "$TAG" dist/* --draft --verify-tag --generate-notes --title "FOLO $VERSION" "${flags[@]}"
+          fi
+
+  # Installs the archives just built with the install scripts, the way users will (from a local folder of assets).
+  install-test:
+    needs: [plan, release]
+    if: ${{ !cancelled() && needs.release.result == 'success' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-${{ needs.plan.outputs.version }}
+          path: assets
+      - name: install.sh
+        if: runner.os != 'Windows'
+        run: |
+          set -eu
+          sh scripts/install.sh --base-url "$PWD/assets" --dir "$RUNNER_TEMP/bin"
+          "$RUNNER_TEMP/bin/folo" --version
+          "$RUNNER_TEMP/bin/folo" doctor --json | grep -q '"web_source":"embedded"'
+          # A tampered archive must be refused.
+          cp -r assets bad && echo junk >> bad/folo-x86_64-unknown-linux-gnu.tar.gz
+          if sh scripts/install.sh --base-url "$PWD/bad" --dir "$RUNNER_TEMP/bad"; then exit 1; fi
+          test ! -e "$RUNNER_TEMP/bad/folo"
+      - name: install.ps1
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $assets = Join-Path $PWD 'assets'
+          $dir = Join-Path $env:RUNNER_TEMP 'bin'
+          $withDesktop = Test-Path (Join-Path $assets 'folo-desktop-x86_64-pc-windows-msvc.zip')
+          ./scripts/install.ps1 -BaseUrl $assets -InstallDir $dir -NoModifyPath -Desktop:$withDesktop
+          if ($withDesktop -and -not (Test-Path (Join-Path $dir 'folo-desktop.exe'))) { throw 'folo-desktop.exe was not installed' }
+          & (Join-Path $dir 'folo.exe') --version
+          if ($LASTEXITCODE -ne 0) { throw 'folo --version failed' }

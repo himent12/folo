@@ -8,7 +8,7 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use folo_server::api::*;
-use folo_server::{Cors, MockStore, Options, RealStore, Server, Store};
+use folo_server::{Cors, MockStore, Options, RealStore, Server, Store, WebSource};
 use http_body_util::BodyExt;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -555,8 +555,10 @@ async fn static_files_spa_fallback() {
     std::fs::create_dir_all(dir.join("assets")).unwrap();
     std::fs::write(dir.join("index.html"), "<!doctype html><title>Studio</title>").unwrap();
     std::fs::write(dir.join("assets/app.js"), "console.log(1)").unwrap();
-    let server =
-        Server::new(Arc::new(MockStore::new()), Options { web_dir: Some(dir.clone()), cors: Cors::Loopback });
+    let server = Server::new(
+        Arc::new(MockStore::new()),
+        Options { web: WebSource::Dir(dir.clone()), cors: Cors::Loopback },
+    );
     let app = server.router();
     let (s, _, b) = send(&app, get("/")).await;
     assert_eq!(s, StatusCode::OK);
@@ -575,6 +577,21 @@ async fn static_files_spa_fallback() {
     assert_eq!(s, StatusCode::NOT_FOUND);
     assert!(String::from_utf8_lossy(&b).contains("not built"));
     std::fs::remove_dir_all(&dir).unwrap();
+
+    // The embedded web app (only present in `embed-web` builds) serves the same way.
+    let embedded =
+        Server::new(Arc::new(MockStore::new()), Options { web: WebSource::Embedded, cors: Cors::Loopback })
+            .router();
+    let (s, h, b) = send(&embedded, get("/runs/run_1a01")).await;
+    if folo_server::web::embedded().is_some() {
+        assert_eq!(s, StatusCode::OK);
+        assert!(h[header::CONTENT_TYPE].to_str().unwrap().starts_with("text/html"));
+        assert!(String::from_utf8_lossy(&b).to_ascii_lowercase().contains("<html"), "SPA fallback");
+    } else {
+        assert_eq!(s, StatusCode::NOT_FOUND);
+        assert!(String::from_utf8_lossy(&b).contains("embed-web"));
+    }
+    err(&embedded, get("/api/not-a-route"), StatusCode::NOT_FOUND, "route_not_found").await;
 }
 
 #[tokio::test]
@@ -596,7 +613,8 @@ async fn cors_and_gzip() {
     let (_, h, _) = send(&app, preflight("https://evil.example")).await;
     assert!(h.get(header::ACCESS_CONTROL_ALLOW_ORIGIN).is_none());
 
-    let any = Server::new(Arc::new(MockStore::new()), Options { web_dir: None, cors: Cors::Any }).router();
+    let any =
+        Server::new(Arc::new(MockStore::new()), Options { web: WebSource::None, cors: Cors::Any }).router();
     let (_, h, _) = send(&any, preflight("https://elsewhere.example")).await;
     assert_eq!(h[header::ACCESS_CONTROL_ALLOW_ORIGIN], "*");
 
@@ -657,7 +675,8 @@ async fn cross_origin_mutations_are_refused() {
     let (s, _, _) = send(&app, create("http://localhost:5173", "127.0.0.1:7878")).await;
     assert_eq!(s, StatusCode::CREATED);
     // --cors-any turns the guard off.
-    let any = Server::new(Arc::new(MockStore::new()), Options { web_dir: None, cors: Cors::Any }).router();
+    let any =
+        Server::new(Arc::new(MockStore::new()), Options { web: WebSource::None, cors: Cors::Any }).router();
     let (s, _, _) = send(&any, create("https://elsewhere.example", "127.0.0.1:7878")).await;
     assert_eq!(s, StatusCode::CREATED);
 }

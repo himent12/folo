@@ -14,6 +14,30 @@ cargo folo predict --model runs/shapes-n/best.folo image.jpg
 cargo folo serve                  # FOLO Studio on http://127.0.0.1:7878
 ```
 
+## Install
+
+Prebuilt `folo` binaries (x86_64 Windows and Linux, Apple-silicon macOS) ship with FOLO Studio built in, so
+`folo serve` works out of the box. The install scripts download the latest release for your platform, check its
+SHA-256 and put `folo` in a user bin directory:
+
+```sh
+sh scripts/install.sh                     # Linux / macOS: into ~/.local/bin
+sh scripts/install.sh --version v0.2.0 --dir ~/bin
+```
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\install.ps1            # into %LOCALAPPDATA%\Programs\folo\bin, added to PATH
+powershell -ExecutionPolicy Bypass -File scripts\install.ps1 -Desktop   # also FOLO Desktop (folo-desktop.exe)
+```
+
+While the repository is private, the scripts need a token that can read it: `GH_TOKEN` / `GITHUB_TOKEN`, or a
+logged-in [`gh`](https://cli.github.com) (they use `gh auth token`). Options: `--version` / `-Version` (a tag,
+default `latest`), `--dir` / `-InstallDir`, `--repo` / `-Repo`, `--base-url` / `-BaseUrl` (a mirror or a local
+folder of release assets); each also reads `FOLO_VERSION`, `FOLO_INSTALL_DIR`, `FOLO_REPO`, `FOLO_BASE_URL`.
+`folo --version` shows the version, commit and build date. To build from source instead:
+`cargo install --path crates/folo-cli` (add `--features embed-web` after building `web/`). Releases:
+[docs/RELEASING.md](docs/RELEASING.md).
+
 ## Running the server
 
 ```sh
