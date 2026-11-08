@@ -1,6 +1,6 @@
 <script lang="ts">
   import Construction from '@lucide/svelte/icons/construction';
-  import { setCrumbs } from '$lib/shell/page.svelte';
+  import { setCrumbs } from '$lib/shell/crumbs.svelte';
   import EmptyState from '$lib/ui/EmptyState.svelte';
 
   let { title }: { title: string } = $props();
