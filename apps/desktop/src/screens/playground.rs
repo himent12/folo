@@ -758,10 +758,34 @@ impl FoloApp {
                     )
                     .into_any_element()
             }
-            Load::Failed(e) => div()
-                .p(px(16.))
-                .child(text(ty::SM, t.danger_text).child(e.message.clone()))
-                .into_any_element(),
+            Load::Failed(e) => {
+                // Out of GPU memory locally: the CPU is one click away.
+                let to_cpu = (e.code == "gpu_out_of_memory"
+                    && self.play_target == Some(crate::local::Target::Gpu))
+                .then(|| {
+                    self.button(
+                        "play-to-cpu",
+                        "Run on Local CPU",
+                        Btn::Secondary,
+                        None,
+                        window,
+                        cx,
+                        act(|this, _, cx| this.set_play_target(Some(crate::local::Target::Cpu), cx)),
+                    )
+                });
+                div()
+                    .p(px(16.))
+                    .flex()
+                    .flex_col()
+                    .items_start()
+                    .gap(px(6.))
+                    .child(text(ty::SM, t.danger_text).whitespace_normal().child(e.message.clone()))
+                    .when_some(e.hint.clone(), |d, h| {
+                        d.child(text(ty::XS, t.text_tertiary).whitespace_normal().child(h))
+                    })
+                    .children(to_cpu.map(|b| div().pt(px(4.)).child(b)))
+                    .into_any_element()
+            }
             Load::Loading => div()
                 .flex_none()
                 .child(

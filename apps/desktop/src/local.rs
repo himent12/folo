@@ -75,12 +75,13 @@ pub fn gpu() -> Result<(Device, String), String> {
 
 fn engine_error(e: impl Into<folo_vision::Error>) -> ApiError {
     let e = e.into();
-    let code = match e.code() {
-        "invalid_weights" => "invalid_weights",
-        "invalid_config" => "invalid_config",
-        _ => "local_inference_failed",
-    };
-    ApiError::new(code, e.to_string())
+    // The engine's codes are the API's (folo_api::codes); its summary keeps driver reports short.
+    match e.code() {
+        "gpu_out_of_memory" => ApiError::new("gpu_out_of_memory", e.summary())
+            .with_hint("Run it on the Local CPU, or on the server."),
+        code @ ("invalid_weights" | "invalid_config") => ApiError::new(code, e.summary()),
+        _ => ApiError::new("local_inference_failed", e.summary()),
+    }
 }
 
 fn device(target: Target) -> ApiResult<(Device, String)> {

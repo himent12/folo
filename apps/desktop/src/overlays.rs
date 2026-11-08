@@ -895,13 +895,25 @@ impl FoloApp {
                 d.child(
                     div()
                         .flex()
-                        .items_center()
+                        .items_start()
                         .gap(px(8.))
                         .p(px(10.))
                         .rounded(px(radius::MD))
                         .bg(t.danger_muted)
                         .child(icon("icons/circle-alert.svg", 14., t.danger_solid))
-                        .child(text(ty::SM, t.danger_text).child(e.message)),
+                        // The server's hint says what to change (device_not_found lists the
+                        // adapters there are; gpu_out_of_memory names batch, imgsz and arch).
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(2.))
+                                .min_w_0()
+                                .child(text(ty::SM, t.danger_text).whitespace_normal().child(e.message))
+                                .when_some(e.hint, |d, h| {
+                                    d.child(text(ty::XS, t.text_secondary).whitespace_normal().child(h))
+                                }),
+                        ),
                 )
             });
         let images = ds.as_ref().map_or(0, |d| d.splits.train);

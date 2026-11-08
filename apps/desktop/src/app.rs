@@ -1336,13 +1336,19 @@ impl FoloApp {
     fn dataset_added(&mut self, ds: crate::api::Dataset, verb: &str, cx: &mut Context<Self>) {
         let (id, name) = (ds.id.clone(), ds.name.clone());
         let body = format!("{} images · {}", int(ds.splits.total()), ds.classes.join(", "));
+        // Registering a folder twice answers with the dataset it already is: say so, and leave
+        // the list's order alone.
+        let existed = self.store.datasets.ready().is_some_and(|l| l.iter().any(|d| d.id == ds.id));
         if let Some(list) = self.store.datasets.ready_mut() {
-            list.retain(|d| d.id != ds.id);
-            list.insert(0, ds);
+            if let Some(slot) = list.iter_mut().find(|d| d.id == ds.id) {
+                *slot = ds;
+            } else {
+                list.insert(0, ds);
+            }
         }
         self.toast_with(
-            Tone::Accent,
-            format!("{verb} {name}"),
+            if existed { Tone::Info } else { Tone::Accent },
+            if existed { format!("{name} is already added") } else { format!("{verb} {name}") },
             Some(body.into()),
             Some((
                 "Open".into(),
