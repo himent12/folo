@@ -262,7 +262,8 @@
 
   <p class="sr-only" aria-live="polite">{spoken}</p>
   {#if keyed.length}
-    <table class="sr-only">
+    <!-- A table ignores width: 1px, so the visually-hidden box is a wrapper that clips it. -->
+    <div class="sr-only"><table>
       <caption>{label}: summary by series. Focus the chart and use the arrow keys to read values point by point.</caption>
       <thead><tr><th scope="col">Series</th><th scope="col">Latest</th><th scope="col">Minimum</th><th scope="col">Maximum</th></tr></thead>
       <tbody>
@@ -275,7 +276,7 @@
           </tr>
         {/each}
       </tbody>
-    </table>
+    </table></div>
   {/if}
 
   <div class="plot" bind:clientWidth={width} style:height="{height}px">
