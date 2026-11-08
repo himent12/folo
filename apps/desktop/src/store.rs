@@ -93,6 +93,14 @@ impl RunData {
         Self { metrics, spe: spe.max(1), derived: RefCell::new(None) }
     }
 
+    /// The run's steps per epoch became known (or changed): step positions are recomputed.
+    pub fn set_spe(&mut self, spe: u64) {
+        if spe > 0 && spe != self.spe {
+            self.spe = spe;
+            self.derived.replace(None);
+        }
+    }
+
     pub fn push_step(&mut self, s: Step) {
         if self.metrics.steps.last().is_none_or(|l| s.step > l.step) {
             self.metrics.steps.push(s);
@@ -282,6 +290,10 @@ pub struct Store {
     pending: HashMap<String, Vec<RunEvent>>,
     /// Runs resumed and still active: every history load is cut back to the last finished epoch.
     resumed: std::collections::HashSet<String>,
+    /// Each run's length as its live events last reported it (steps per epoch, epochs; 0 where
+    /// unknown). Kept apart from the replaceable run list, so an older snapshot that still says
+    /// 0 can't undo it.
+    lengths: HashMap<String, (u64, u32)>,
     pub images_px: ImageCache,
     /// Throughput history for the system card (GPU util samples), newest last.
     pub gpu_util: VecDeque<f32>,
@@ -305,6 +317,7 @@ impl Store {
             log_rev: 0,
             pending: HashMap::new(),
             resumed: Default::default(),
+            lengths: HashMap::new(),
             images_px: ImageCache::default(),
             gpu_util: VecDeque::new(),
         }
@@ -333,6 +346,9 @@ impl Store {
             if self.resumed.contains(run_id) {
                 d.cut_to_last_epoch();
             }
+            // The fetch may have started before the run's length was known; events since have it.
+            let known = self.lengths.get(run_id).map_or(0, |l| l.0);
+            d.set_spe(if known > 0 { known } else { self.run(run_id).map_or(0, |r| r.steps_per_epoch) });
             for ev in self.pending.get(run_id).into_iter().flatten() {
                 match ev {
                     RunEvent::Step(s) => d.push_step(*s),
@@ -380,6 +396,18 @@ impl Store {
     pub fn clear_pending(&mut self) {
         self.pending.clear();
         self.resumed.clear();
+        self.lengths.clear();
+    }
+
+    /// After a run list lands: lengths the stream reported fill in snapshot zeros, and loaded
+    /// histories adopt their run's length.
+    pub fn sync_run_list(&mut self) {
+        self.sync_resumed();
+        let ids: Vec<String> =
+            self.runs.ready().map_or(Vec::new(), |r| r.iter().map(|r| r.id.clone()).collect());
+        for id in ids {
+            self.set_length(&id, 0, 0);
+        }
     }
 
     /// The run list is authoritative: a resumed run it reports finished needs no more cutting
@@ -410,7 +438,14 @@ impl Store {
                 buf.push(ev.clone());
             }
         }
-        let spe = self.run(run_id).map_or(1, |r| r.steps_per_epoch.max(1));
+        // Step and status events carry the run's length (0 from older servers and before the
+        // trainer is built), so a snapshot taken before it was known catches up from the stream.
+        let length = match &ev {
+            RunEvent::Step(s) => (s.steps_per_epoch, s.epochs),
+            RunEvent::Status(s) => (s.steps_per_epoch, s.epochs),
+            _ => (0, 0),
+        };
+        self.set_length(run_id, length.0, length.1);
         match ev {
             RunEvent::Step(s) => {
                 if let Some(runs) = self.runs.ready_mut()
@@ -468,7 +503,37 @@ impl Store {
                 }
             }
         }
-        let _ = spe;
+    }
+
+    /// Adopt a run length from an event; zeros mean unknown and change nothing.
+    /// Zeros mean unknown and change nothing; the latest known length is applied to the run and
+    /// its loaded history (`set_length(id, 0, 0)` just re-applies it).
+    fn set_length(&mut self, run_id: &str, spe: u64, epochs: u32) {
+        if spe > 0 || epochs > 0 {
+            let l = self.lengths.entry(run_id.to_string()).or_default();
+            if spe > 0 {
+                l.0 = spe;
+            }
+            if epochs > 0 {
+                l.1 = epochs;
+            }
+        }
+        let (spe, epochs) = self.lengths.get(run_id).copied().unwrap_or_default();
+        let mut run_spe = 0;
+        if let Some(runs) = self.runs.ready_mut()
+            && let Some(r) = runs.iter_mut().find(|r| r.id == run_id)
+        {
+            if spe > 0 {
+                r.steps_per_epoch = spe;
+            }
+            if epochs > 0 {
+                r.epochs = epochs;
+            }
+            run_spe = r.steps_per_epoch;
+        }
+        if let Some(Load::Ready(d)) = self.run_data.get_mut(run_id) {
+            d.set_spe(run_spe);
+        }
     }
 }
 
@@ -567,6 +632,92 @@ mod tests {
         store.run_data.insert(id.into(), Load::Loading);
         store.install_run_data(id, Ok(RunData::new(stale(), 10)));
         assert_eq!(store.run_data[id].ready().unwrap().metrics.steps.len(), 24);
+    }
+
+    #[test]
+    fn the_run_length_comes_from_the_stream() {
+        let mut store = Store::new(Arc::new(MockBackend::new(4200, true)));
+        let mut runs = store.api.runs().unwrap();
+        // A real run's snapshot before its trainer is built: the length isn't known yet.
+        runs[0].steps_per_epoch = 0;
+        let id = runs[0].id.clone();
+        store.runs = Load::Ready(runs);
+        let empty = || RunMetrics { steps: vec![], epochs: vec![] };
+        store.install_run_data(&id, Ok(RunData::new(empty(), 0)));
+        assert_eq!(store.run_data[&id].ready().unwrap().spe, 1);
+        // Older servers send zeros: nothing changes.
+        store.apply(&id, RunEvent::Status(StatusEvent::new(RunStatus::Running, None)));
+        assert_eq!(store.run(&id).unwrap().steps_per_epoch, 0);
+        store.apply(&id, RunEvent::Status(StatusEvent::new(RunStatus::Running, None).with_length(7, 25)));
+        assert_eq!(store.run(&id).unwrap().steps_per_epoch, 25);
+        assert_eq!(store.run(&id).unwrap().epochs, 7);
+        assert_eq!(store.run_data[&id].ready().unwrap().spe, 25);
+        // A history fetched with the old length is corrected when it lands.
+        store.install_run_data(&id, Ok(RunData::new(empty(), 0)));
+        assert_eq!(store.run_data[&id].ready().unwrap().spe, 25);
+    }
+
+    #[test]
+    fn a_stale_run_list_cannot_undo_the_streamed_length() {
+        let loss = || crate::api::Loss { box_: 1., cls: 1., dfl: 1., total: 3. };
+        let step = |n: u64, spe: u64| Step {
+            epoch: 1,
+            step: n,
+            lr: 0.01,
+            loss: loss(),
+            imgs_per_s: 1.,
+            eta_s: 1.,
+            steps_per_epoch: spe,
+            epochs: 4,
+        };
+        let mut store = Store::new(Arc::new(MockBackend::new(4200, true)));
+        let mut runs = store.api.runs().unwrap();
+        runs[0].steps_per_epoch = 0;
+        let id = runs[0].id.clone();
+        let stale = runs.clone();
+        store.runs = Load::Ready(runs);
+        // History loading; a length-bearing step and the terminal status arrive meanwhile.
+        store.run_data.insert(id.clone(), Load::Loading);
+        store.apply(&id, RunEvent::Step(step(5, 25)));
+        store.apply(&id, RunEvent::Status(StatusEvent::new(RunStatus::Completed, None).with_length(4, 25)));
+        // An older run-list response lands, still saying 0, then the history.
+        store.runs = Load::Ready(stale);
+        store.sync_run_list();
+        assert_eq!(store.run(&id).unwrap().steps_per_epoch, 25);
+        let hist = RunMetrics { steps: (1..=4).map(|n| step(n, 0)).collect(), epochs: vec![] };
+        store.install_run_data(&id, Ok(RunData::new(hist, 0)));
+        let d = store.run_data[&id].ready().unwrap();
+        assert_eq!(d.spe, 25);
+        // Steps sit at step / steps-per-epoch on the epoch axis.
+        assert_eq!(d.derived().loss[3].last().map(|p| p.0), Some(5. / 25.));
+    }
+
+    #[test]
+    fn a_learned_length_moves_points_already_drawn() {
+        let loss = || crate::api::Loss { box_: 1., cls: 1., dfl: 1., total: 3. };
+        let step = |n: u64| Step {
+            epoch: 1,
+            step: n,
+            lr: 0.01,
+            loss: loss(),
+            imgs_per_s: 1.,
+            eta_s: 1.,
+            steps_per_epoch: 0,
+            epochs: 0,
+        };
+        let mut store = Store::new(Arc::new(MockBackend::new(4200, true)));
+        let mut runs = store.api.runs().unwrap();
+        runs[0].steps_per_epoch = 0;
+        let id = runs[0].id.clone();
+        store.runs = Load::Ready(runs);
+        store.install_run_data(
+            &id,
+            Ok(RunData::new(RunMetrics { steps: (1..=10).map(step).collect(), epochs: vec![] }, 0)),
+        );
+        // Drawn once with the fallback length: raw step numbers.
+        assert_eq!(store.run_data[&id].ready().unwrap().derived().lr.last().map(|p| p.0), Some(10.));
+        store.apply(&id, RunEvent::Status(StatusEvent::new(RunStatus::Running, None).with_length(4, 5)));
+        assert_eq!(store.run_data[&id].ready().unwrap().derived().lr.last().map(|p| p.0), Some(2.));
     }
 
     #[test]
