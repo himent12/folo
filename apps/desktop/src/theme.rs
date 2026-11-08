@@ -176,6 +176,57 @@ mod tests {
         }
     }
 
+    /// Status text (success, warning, danger, info, and accent text) is ≥ 4.5:1 (WCAG AA) on every
+    /// surface it sits on, in both themes: each plain surface (inset included), those under a
+    /// hover or selection, and its own tint (the muted fill of badges, banners and the Danger
+    /// button) over the surfaces tints are drawn on. Inset only carries the danger tint (error
+    /// rows of the run log). Every failing pair is reported, so a token change names what it broke.
+    #[test]
+    fn status_text_meets_aa_on_every_surface_and_tint() {
+        let mut failures = Vec::new();
+        for t in [Theme::new(Mode::Dark), Theme::new(Mode::Light)] {
+            let surfaces = [
+                ("app", t.bg_app),
+                ("panel", t.bg_panel),
+                ("raised", t.bg_raised),
+                ("overlay", t.bg_overlay),
+                ("inset", t.bg_inset),
+                ("panel+hover", over(t.bg_panel, t.bg_hover)),
+                ("panel+selected", over(t.bg_panel, t.bg_selected)),
+            ];
+            let statuses = [
+                ("success", t.success_text, t.success_muted),
+                ("warning", t.warning_text, t.warning_muted),
+                ("danger", t.danger_text, t.danger_muted),
+                ("info", t.info_text, t.info_muted),
+                ("accent", t.accent_text, t.accent_muted),
+            ];
+            for (name, text, tint) in statuses {
+                for (where_, bg) in surfaces {
+                    let mut pairs = vec![(where_.to_string(), bg)];
+                    if where_ != "inset" || name == "danger" {
+                        pairs.push((format!("{where_}+{name} tint"), over(bg, tint)));
+                    }
+                    for (on, fill) in pairs {
+                        let c = contrast(text, fill);
+                        if c < 4.5 {
+                            failures.push(format!("{:?} {name} text on {on}: {c:.2}:1", t.mode));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "status text below 4.5:1:
+{}",
+            failures.join(
+                "
+"
+            )
+        );
+    }
+
     #[test]
     fn over_composites() {
         let base = rgba32(0x000000FF);
