@@ -148,7 +148,12 @@
           <Select id="models-ds" bind:value={dsFilter} options={dsOptions.map((o) => ({ value: o.value, label: `${o.label} · ${o.meta}` }))} />
         </div>
       {:else}
-        <Skeleton w="320px" h="var(--control-md)" r="var(--radius-md)" />
+        <!-- The same two controls at their loaded size: the dataset strip (a picker on phones). -->
+        <div class="seg ctl-sk" style:width="320px"><Skeleton h="100%" r="var(--radius-md)" /></div>
+        <div class="ds-pick" aria-hidden="true">
+          <span class="ds-label">Dataset</span>
+          <span class="ctl-sk"><Skeleton h="100%" r="var(--radius-md)" /></span>
+        </div>
       {/if}
       <div class="search"><Input bind:value={query} icon={Search} placeholder="Filter by name, arch or run" aria-label="Filter models" type="search" /></div>
     </div>
@@ -187,9 +192,9 @@
             </tr>
           </thead>
           {#if !models.data}
+            <!-- Plain 40 px rows: the dataset groups are unknown until the list arrives, so none are drawn. -->
             <tbody aria-hidden="true">
-              <tr class="group"><th colspan={cols.length}><Skeleton w="96px" h="10px" /></th></tr>
-              {#each [0, 1, 2, 3] as i (i)}
+              {#each [0, 1, 2, 3, 4, 5, 6, 7] as i (i)}
                 <tr>
                   {#each cols as c (c.key)}
                     <td class={hideCls(c)} class:r={c.num}><Skeleton h="12px" w={c.key === 'name' ? '112px' : '40px'} /></td>
@@ -241,6 +246,18 @@
 
       <!-- Phones: the same groups as two-line rows (name and one meta line, mAP on the right). -->
       <div class="rows">
+        {#if !models.data}
+          <ul aria-hidden="true">
+            {#each [0, 1, 2, 3, 4, 5, 6] as i (i)}
+              <li>
+                <span class="row-sk">
+                  <span class="m-main"><span class="l-name"><Skeleton w="55%" h="14px" /></span><span class="l-meta"><Skeleton w="75%" h="10px" /></span></span>
+                  <span class="m-side"><span class="l-name"><Skeleton w="40px" h="14px" /></span><span class="l-meta"><Skeleton w="56px" h="10px" /></span></span>
+                </span>
+              </li>
+            {/each}
+          </ul>
+        {/if}
         {#each groups as g (g.key)}
           <section aria-label={g.label}>
             <h2 class="m-group">{g.label} <span class="faint num">{g.rows.length}</span></h2>
@@ -290,12 +307,24 @@
     gap: var(--space-3);
     width: 100%;
   }
-  .ds-pick label {
+  .ds-pick label,
+  .ds-label {
     flex-shrink: 0;
     color: var(--text-tertiary);
   }
-  .ds-pick :global(.select) {
+  .ds-pick :global(.select),
+  .ds-pick .ctl-sk {
     flex: 1;
+  }
+  .ctl-sk {
+    display: block;
+    max-width: 100%;
+    height: var(--control-md);
+  }
+  @media (pointer: coarse) {
+    .ctl-sk {
+      height: 44px;
+    }
   }
   .scroll {
     overflow-x: auto;
@@ -425,7 +454,8 @@
     li + li {
       border-top: 1px solid var(--line-subtle);
     }
-    li a {
+    li a,
+    .row-sk {
       display: flex;
       align-items: center;
       gap: var(--space-3);
@@ -439,6 +469,20 @@
       flex: 1;
       min-width: 0;
       display: grid;
+    }
+    /* Skeleton lines in the line boxes of the name (20 px) and meta line (16 px). */
+    .l-name,
+    .l-meta {
+      display: flex;
+      align-items: center;
+      height: 20px;
+    }
+    .l-meta {
+      height: 16px;
+    }
+    .m-side .l-name,
+    .m-side .l-meta {
+      justify-content: flex-end;
     }
     .m-meta {
       font-size: var(--type-sm-size);

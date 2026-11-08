@@ -12,7 +12,8 @@
 <script lang="ts">
   /**
    * An image with detection boxes drawn over it in screen pixels (crisp at any size). Boxes: a 2 px class-colour
-   * stroke inside a 1 px dark halo; label chips with the class name (and score) sit on the top-left corner.
+   * stroke inside a 1 px dark halo; label chips with the class name (and score) sit on the top-left corner, or
+   * elsewhere next to their own box (see ./chips).
    * Ground truth, when given, is drawn dashed underneath the predictions.
    */
   import { classColor } from '$lib/design/tokens';
@@ -167,16 +168,12 @@
           >
             {#if labels && !compact && ((!chips[i]?.hidden && !tiny(b)) || active === i || selected === i)}
               {@const c = chips[i]}
-              {#if c && (c.dy < -chipH - 9 || (c.inside && c.dy > 8))}
-                <!-- The chip had to move away from its box: a thin leader keeps ownership readable. -->
-                <span
-                  class="leader"
-                  style:left="{Math.max(0, c.dx + 6) - 2}px"
-                  style:top="{(c.dy < 0 ? c.dy + chipH : 0) - 2}px"
-                  style:height="{c.dy < 0 ? -c.dy - chipH : c.dy}px"
-                ></span>
+              {#if c && c.leader > 0}
+                <!-- Hung below its box: a leader from the box's bottom stroke keeps ownership readable. -->
+                {@const bh = (b.y2 - b.y1) * geo.s}
+                <span class="leader" style:left="{Math.max(0, c.dx + 6) - 2}px" style:top="{bh + 2}px" style:height="{c.dy - bh - 4}px"></span>
               {/if}
-              <span class="chip" class:inside={c?.inside} style:left="{(c?.dx ?? 0) - 2}px" style:top="{(c?.dy ?? -17) - 2}px">
+              <span class="chip" class:inside={c?.inside} class:below={c?.side === 'below'} style:left="{(c?.dx ?? 0) - 2}px" style:top="{(c?.dy ?? -17) - 2}px">
                 {name(b.class)}{#if scores && b.score !== undefined}<span class="score">{b.score.toFixed(2)}</span>{/if}
               </span>
             {/if}
@@ -309,6 +306,9 @@
   }
   .chip.inside {
     border-radius: 0 0 3px 0;
+  }
+  .chip.below {
+    border-radius: 3px;
   }
   .small .chip {
     height: 14px;

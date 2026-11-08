@@ -128,9 +128,32 @@
         {#if runs.error && !runs.data}
           <ErrorState error={runs.error} retry={() => runs.refresh()} />
         {:else if !runs.data}
-          <!-- Rows with the table's columns: name, status, progress, score. -->
-          <div class="list-sk">
-            {#each [0, 1, 2, 3] as i (i)}<div class="rsk"><span class="rsk-name"><Skeleton w="60%" h="14px" /><Skeleton w="40%" h="10px" /></span><Skeleton w="64px" h="18px" r="var(--radius-full)" /><Skeleton h="4px" /><Skeleton w="40px" h="14px" /></div>{/each}
+          <!-- The loaded table itself (header, six 48 px rows, the same columns), with placeholder cells. -->
+          <div class="scroll" aria-busy="true" aria-label="Loading recent runs">
+            <table class="table" aria-hidden="true">
+              <thead>
+                <tr>
+                  <th>Run</th>
+                  <th>Status</th>
+                  <th class="hide-sm">Progress</th>
+                  <th class="r">mAP50-95</th>
+                  <th class="hide-sm">Trend</th>
+                  <th class="r hide-sm">Created</th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each [0, 1, 2, 3, 4, 5] as i (i)}
+                  <tr>
+                    <td><span class="l-20"><Skeleton w="112px" h="12px" /></span><span class="l-16"><Skeleton w="88px" h="10px" /></span></td>
+                    <td><Skeleton w="72px" h="12px" /></td>
+                    <td class="hide-sm"><div class="prog"><Skeleton h="4px" /><span><Skeleton w="40px" h="10px" /></span></div></td>
+                    <td class="r"><span class="l-20 end"><Skeleton w="40px" h="12px" /></span></td>
+                    <td class="hide-sm"><Skeleton w="88px" h="12px" /></td>
+                    <td class="r hide-sm"><span class="l-20 end"><Skeleton w="56px" h="12px" /></span></td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
           </div>
         {:else if recent.length === 0}
           <EmptyState icon={Activity} title="No runs yet" description="Runs you start appear here with their progress and best mAP." />
@@ -178,7 +201,21 @@
         {#if models.error && !models.data}
           <ErrorState error={models.error} retry={() => models.refresh()} />
         {:else if !models.data}
-          <div class="list-sk">{#each [0, 1, 2] as i (i)}<Skeleton h="20px" />{/each}</div>
+          <!-- The loaded list's rows (dataset, name, meta; mAP on the right) at their height. -->
+          <ul class="models" aria-busy="true" aria-label="Loading models">
+            {#each [0, 1, 2, 3] as i (i)}
+              <li aria-hidden="true">
+                <span class="m-row">
+                  <span class="m-text">
+                    <span class="l-20"><Skeleton w="64px" h="10px" /></span>
+                    <span class="l-20"><Skeleton w="128px" h="12px" /></span>
+                    <span class="l-20"><Skeleton w="152px" h="10px" /></span>
+                  </span>
+                  <span class="m-map"><span class="l-20 end"><Skeleton w="40px" h="12px" /></span><span class="l-16 end"><Skeleton w="48px" h="8px" /></span></span>
+                </span>
+              </li>
+            {/each}
+          </ul>
         {:else if topModels.length === 0}
           <EmptyState icon={Box} title="No models yet" description="Finished runs save their best weights here." />
         {:else}
@@ -206,7 +243,16 @@
         {#if datasets.error && !datasets.data}
           <ErrorState error={datasets.error} retry={() => datasets.refresh()} compact />
         {:else if !datasets.data}
-          <div class="list-sk">{#each [0, 1, 2] as i (i)}<Skeleton h="20px" />{/each}</div>
+          <ul class="dslist" aria-busy="true" aria-label="Loading datasets">
+            {#each [0, 1, 2] as i (i)}
+              <li aria-hidden="true">
+                <span class="d-sk">
+                  <span class="d-row"><span class="l-20"><Skeleton w="96px" h="12px" /></span><span class="l-20"><Skeleton w="128px" h="10px" /></span></span>
+                  <Skeleton h="4px" r="2px" />
+                </span>
+              </li>
+            {/each}
+          </ul>
         {:else if datasets.data.length === 0}
           <EmptyState icon={Images} title="No datasets registered" description="Register a YOLO or COCO folder, or generate a synthetic shapes set." />
         {:else}
@@ -356,20 +402,19 @@
     grid-template-columns: 1fr 1fr;
     gap: var(--space-3);
   }
-  .list-sk {
-    display: grid;
-    gap: var(--space-4);
-    padding: var(--space-4);
-  }
-  .rsk {
-    display: grid;
-    grid-template-columns: minmax(0, 1.4fr) 72px minmax(0, 1fr) 48px;
+  /* Skeleton bars centred in the line box of the text they stand for (13/20 body, 12/16 meta). */
+  .l-20,
+  .l-16 {
+    display: flex;
     align-items: center;
-    gap: var(--space-4);
+    height: 20px;
   }
-  .rsk-name {
-    display: grid;
-    gap: 4px;
+  .l-16 {
+    height: 16px;
+  }
+  .l-20.end,
+  .l-16.end {
+    justify-content: flex-end;
   }
   @media (max-width: 1023px) {
     .lsk-body {
@@ -408,7 +453,8 @@
   .models {
     padding: 0 var(--space-2) var(--space-2);
   }
-  .models a {
+  .models a,
+  .m-row {
     display: flex;
     align-items: center;
     gap: var(--space-3);
@@ -452,7 +498,8 @@
   .dslist {
     padding: 0 var(--space-2) var(--space-2);
   }
-  .dslist a {
+  .dslist a,
+  .d-sk {
     display: grid;
     gap: 6px;
     padding: var(--space-2);
