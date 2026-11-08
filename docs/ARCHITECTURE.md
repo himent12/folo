@@ -194,6 +194,12 @@ The exact block definitions, layer tables, parameter names, head, loss, training
   (bit-exact with the CPU letterbox) and only the decoded candidates come back: one upload per image, one queue of
   work, one small readback. On the CPU the head's six branch chains run side by side and the neck's Concat layers
   are never written (`C3k2::forward_cat`).
+- **ONNX export** (`folo_vision::export::onnx`): `FoloModel::to_onnx` turns a fused model into an opset-17 graph
+  that mirrors `forward` op for op (raw head outputs, or the MODEL.md §6.4 decode in the graph; fixed or dynamic
+  shapes; f32 or f16), encoded by a small hand-written protobuf writer (`export::onnx::proto`), with the class names
+  and `folo.*` metadata in `metadata_props`. Any model tensor no node consumed, or an unfused BatchNorm, is an error
+  naming it. `folo export --format onnx` and `POST /api/models/{id}/export` call `export_file`; parity with
+  onnxruntime is `crates/folo-cli/tests/onnx.rs` + `bench/parity/onnx_check.py` (docs/CLI.md, ONNX export).
 
 ## folo-wasm — FOLO in the browser
 - `crates/folo-wasm` (wasm-bindgen) loads a `.folo` file from bytes and runs `folo_vision::Predictor`'s steps on

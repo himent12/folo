@@ -3,7 +3,7 @@
 > wgpu/WGSL GPU kernels, a YOLO-style detector (folo-n/s/m/l/x), and training, evaluation and export. It ships one
 > `folo` CLI (every command supports `--json`, with stable exit codes), an HTTP + SSE API (`folo serve`), an MCP
 > server for agents (`folo mcp`), the FOLO Studio web app, the FOLO Desktop native app, and in-browser inference
-> (wasm + WebGPU). Status: v0.1, early. No pretrained weights, no ONNX export, no published release yet (build from
+> (wasm + WebGPU). Status: v0.1, early. No pretrained weights, no published release yet (build from
 > source).
 
 Fastest path for an agent:

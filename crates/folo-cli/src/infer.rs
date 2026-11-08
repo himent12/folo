@@ -6,6 +6,7 @@ use std::time::Instant;
 
 use folo_data::{Dataset, ImageFormat, Split};
 use folo_nn::io::{FloatDType, ModelFile};
+use folo_vision::export::onnx::{self, OnnxOptions, OnnxValue, proto::Dim};
 use folo_vision::predict::f16_unavailable;
 use folo_vision::train::{can_place, resolve_device};
 use folo_vision::val::{ValConfig, val_metrics, validate};
@@ -346,19 +347,46 @@ pub fn predict(args: PredictArgs, out: Out) -> Result<(), CliError> {
 
 pub fn export(args: ExportArgs, out: Out) -> Result<(), CliError> {
     require_file(&args.model, "model_not_found")?;
-    let (dtype, suffix) = match args.format {
-        ExportFormatArg::FoloF16 => (FloatDType::F16, "f16"),
-        ExportFormatArg::Folo => (FloatDType::F32, "fused"),
-        ExportFormatArg::Onnx => {
+    let onnx = args.format == ExportFormatArg::Onnx;
+    if !onnx {
+        let given = [
+            ("--imgsz", args.imgsz.is_some()),
+            ("--batch", args.batch.is_some()),
+            ("--dynamic", args.dynamic),
+            ("--half", args.half),
+            ("--decode", args.decode),
+        ];
+        if let Some((flag, _)) = given.iter().find(|(_, on)| *on) {
             return Err(CliError::new(
-                ExitCode::NotImplemented,
-                "not_implemented",
-                "ONNX export is not implemented yet",
+                ExitCode::Usage,
+                "usage",
+                format!("{flag} only applies to --format onnx"),
             )
-            .hint("export --format folo-f16 (or folo) for FOLO's own runtime"));
+            .hint("`.folo` exports are size-independent; --format folo-f16 is the f16 one"));
         }
+    }
+    if args.dynamic && args.batch.is_some() {
+        return Err(CliError::new(ExitCode::Usage, "usage", "--batch and --dynamic exclude each other")
+            .hint("--dynamic makes the batch symbolic; leave out --batch"));
+    }
+    if args.batch == Some(0) {
+        return Err(CliError::new(ExitCode::Usage, "usage", "--batch must be at least 1"));
+    }
+    let (dtype, suffix, ext) = match args.format {
+        ExportFormatArg::FoloF16 => (FloatDType::F16, "-f16", "folo"),
+        ExportFormatArg::Folo => (FloatDType::F32, "-fused", "folo"),
+        ExportFormatArg::Onnx if args.half => (FloatDType::F16, "-f16", "onnx"),
+        ExportFormatArg::Onnx => (FloatDType::F32, "", "onnx"),
     };
     let file = ModelFile::open(&args.model).map_err(|e| weights_error(&args.model, e))?;
+    let imgsz = args.imgsz.unwrap_or(file.metadata().imgsz);
+    if onnx && (imgsz == 0 || !imgsz.is_multiple_of(32) || imgsz > 8192) {
+        return Err(CliError::new(
+            ExitCode::Usage,
+            "usage",
+            format!("--imgsz {imgsz} must be a multiple of 32 in 32..=8192"),
+        ));
+    }
     // Like MCP `export`, never overwrite: the output is claimed with `create_new` (so concurrent exports never
     // share a file; the export then replaces the empty claim atomically). The default name gets `-2`, `-3`, ...
     // when taken; an existing --output is an error.
@@ -394,7 +422,7 @@ pub fn export(args: ExportArgs, out: Out) -> Result<(), CliError> {
             let mut n = 1;
             loop {
                 let tag = if n == 1 { String::new() } else { format!("-{n}") };
-                let p = args.model.with_file_name(format!("{stem}-{suffix}{tag}.folo"));
+                let p = args.model.with_file_name(format!("{stem}{suffix}{tag}.{ext}"));
                 match claim(&p) {
                     Ok(()) => break p,
                     Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => n += 1,
@@ -404,12 +432,75 @@ pub fn export(args: ExportArgs, out: Out) -> Result<(), CliError> {
         }
     };
     let t = Instant::now();
+    let source = if file.has_ema() { "ema" } else { "model" };
+    let meta = file.metadata();
+    if onnx {
+        let opts = OnnxOptions {
+            height: imgsz,
+            width: imgsz,
+            batch: args.batch.unwrap_or(1),
+            dynamic: args.dynamic,
+            half: args.half,
+            decode: args.decode,
+            // The source's other keys (folo.metrics, folo.created, unknown folo.* keys) travel along.
+            metadata: meta.for_weights().to_map(),
+        };
+        let written = onnx::export_file(&file, &opts).and_then(|x| x.write_to(&output).map(|()| x));
+        let x = match written {
+            Ok(x) => x,
+            Err(e) => {
+                let _ = std::fs::remove_file(&output); // only the file claimed above
+                return Err(engine_error(e));
+            }
+        };
+        let value = |v: &OnnxValue| {
+            let shape: Vec<serde_json::Value> = v
+                .shape
+                .iter()
+                .map(|d| match d {
+                    Dim::Value(n) => json!(n),
+                    Dim::Param(p) => json!(p),
+                })
+                .collect();
+            json!({ "name": v.name, "dtype": v.dtype, "shape": shape })
+        };
+        out.record(&json!({
+            "path": folo_api::json::path(&output),
+            "bytes": x.bytes.len(),
+            "format": "onnx",
+            "dtype": dtype.as_str(),
+            "fused": true,
+            "source": source,
+            "arch": meta.arch,
+            "classes": meta.classes,
+            "opset": onnx::OPSET,
+            "imgsz": imgsz,
+            "batch": if args.dynamic { json!("dynamic") } else { json!(opts.batch) },
+            "dynamic": args.dynamic,
+            "decode": args.decode,
+            "inputs": x.inputs.iter().map(value).collect::<Vec<_>>(),
+            "outputs": x.outputs.iter().map(value).collect::<Vec<_>>(),
+            "seconds": t.elapsed().as_secs_f64(),
+        }));
+        let shape = |v: &OnnxValue| v.shape.iter().map(ToString::to_string).collect::<Vec<_>>().join("x");
+        out.human(format!(
+            "Exported the {source} weights of {} to {} (ONNX opset {}, {}, {:.1} MB): {} {} -> {}",
+            args.model.display(),
+            output.display(),
+            onnx::OPSET,
+            dtype.as_str(),
+            x.bytes.len() as f64 / 1e6,
+            onnx::INPUT,
+            shape(&x.inputs[0]),
+            x.outputs.iter().map(|o| format!("{} {}", o.name, shape(o))).collect::<Vec<_>>().join(", "),
+        ));
+        return Ok(());
+    }
     if let Err(e) = file.export(&output, dtype) {
         let _ = std::fs::remove_file(&output); // only the file claimed above
         return Err(nn_error(e));
     }
     let bytes = std::fs::metadata(&output).map(|m| m.len()).unwrap_or(0);
-    let source = if file.has_ema() { "ema" } else { "model" };
     out.record(&json!({
         "path": folo_api::json::path(&output),
         "bytes": bytes,
@@ -417,8 +508,8 @@ pub fn export(args: ExportArgs, out: Out) -> Result<(), CliError> {
         "dtype": dtype.as_str(),
         "fused": true,
         "source": source,
-        "arch": file.metadata().arch,
-        "classes": file.metadata().classes,
+        "arch": meta.arch,
+        "classes": meta.classes,
         "seconds": t.elapsed().as_secs_f64(),
     }));
     out.human(format!(

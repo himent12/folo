@@ -144,12 +144,24 @@ FOLO ships **no pretrained weights yet**, so for now you fine-tune from your own
 ```sh
 folo export --model runs/shapes-n/weights/best.folo                  # → runs/shapes-n/weights/best-f16.folo
 folo export --model runs/shapes-n/weights/best.folo --format folo    # → best-fused.folo (f32)
+folo export --model runs/shapes-n/weights/best.folo --format onnx    # → best.onnx (ONNX opset 17, f32)
 ```
 
 Export fuses BatchNorm into the convolutions and keeps only the EMA weights. The default `folo-f16` stores them as
 f16: 5.2 MB for folo-n, against 42 MB for the full checkpoint. Exports load anywhere a model is expected:
 `folo predict`, `folo val`, `folo serve`'s model list and the browser. `.folo` files are valid safetensors files
-([FORMAT.md](FORMAT.md)). ONNX export is not implemented yet: `--format onnx` exits with code 4.
+([FORMAT.md](FORMAT.md)).
+
+`--format onnx` writes an ONNX graph for other runtimes (onnxruntime, TensorRT, OpenVINO, the CoreML converters):
+input `images: [1, 3, S, S]` (RGB in `[0, 1]`, `S` the model's imgsz), outputs the raw head `box_raw` / `cls_raw`.
+`--decode` puts the box decode in the graph (one `detections: [B, A, 4 + nc]` output: `x1 y1 x2 y2` in input pixels,
+then class scores; you still run NMS), `--dynamic` makes batch, height and width symbolic, `--half` writes f16. Class
+names are in the model's metadata (`names`). Details: [CLI.md, ONNX export](CLI.md#onnx-export).
+
+```sh
+folo export --model runs/shapes-n/weights/best.folo --format onnx --decode --output best-decoded.onnx
+python -c "import onnxruntime as ort, numpy as np; s = ort.InferenceSession('best-decoded.onnx'); print(s.run(None, {'images': np.zeros((1, 3, 640, 640), np.float32)})[0].shape)"
+```
 
 ## 7. FOLO Studio
 

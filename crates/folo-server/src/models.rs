@@ -14,6 +14,7 @@ use folo_core::Device;
 use folo_data::{Dataset as _, Split};
 use folo_nn::io::{FloatDType, Namespace};
 use folo_vision::NmsConfig;
+use folo_vision::export::onnx::{self, OnnxOptions};
 use folo_vision::val::{ValConfig, val_metrics, validate};
 use serde::{Deserialize, Serialize};
 
@@ -311,32 +312,41 @@ impl Models {
         Ok(eval)
     }
 
-    /// Exports `m` to `<data dir>/exports/<name>-f16.folo` (`-2`, `-3`, ... when taken).
+    /// Exports `m` to `<data dir>/exports/`: `folo-f16` as `<name>-f16.folo`, `onnx` as `<name>.onnx` (the
+    /// defaults of `folo export --format onnx`: f32, batch 1, the model's imgsz, raw head outputs). `-2`, `-3`,
+    /// ... when the name is taken; never overwriting.
     pub fn export(&self, m: &ModelRef, format: ExportFormat) -> Result<ExportResult> {
-        if format == ExportFormat::Onnx {
-            return Err(
-                Error::not_implemented("ONNX export").hint("export to folo-f16 for FOLO's own runtime")
-            );
-        }
         let file = engine::read_model_file(&m.path)?;
         let dir = self.data_dir.join("exports");
         std::fs::create_dir_all(&dir)
             .map_err(|e| Error::internal(format!("creating {}: {e}", dir.display())))?;
         let base = m.model.name.replace(['/', '\\', ':'], "-");
+        let (suffix, ext) = match format {
+            ExportFormat::FoloF16 => ("-f16", "folo"),
+            ExportFormat::Onnx => ("", "onnx"),
+        };
         // create_new claims the name, so two exports never share a file; the export then replaces it atomically.
         let mut n = 1;
         let out = loop {
-            let name = if n == 1 { format!("{base}-f16.folo") } else { format!("{base}-f16-{n}.folo") };
-            let p = dir.join(name);
+            let tag = if n == 1 { String::new() } else { format!("-{n}") };
+            let p = dir.join(format!("{base}{suffix}{tag}.{ext}"));
             match std::fs::OpenOptions::new().write(true).create_new(true).open(&p) {
                 Ok(_) => break p,
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => n += 1,
                 Err(e) => return Err(Error::internal(format!("creating {}: {e}", p.display()))),
             }
         };
-        if let Err(e) = file.export(&out, FloatDType::F16) {
+        let written = match format {
+            ExportFormat::FoloF16 => file.export(&out, FloatDType::F16).map_err(nn_error),
+            ExportFormat::Onnx => {
+                let mut opts = OnnxOptions::new(file.metadata().imgsz);
+                opts.metadata = file.metadata().for_weights().to_map();
+                onnx::export_file(&file, &opts).and_then(|x| x.write_to(&out)).map_err(engine_error)
+            }
+        };
+        if let Err(e) = written {
             let _ = std::fs::remove_file(&out);
-            return Err(nn_error(e));
+            return Err(e);
         }
         let bytes = std::fs::metadata(&out).map(|x| x.len()).unwrap_or(0);
         Ok(ExportResult { path: folo_api::json::path(&out), bytes })

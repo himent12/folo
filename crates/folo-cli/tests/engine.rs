@@ -197,9 +197,54 @@ fn train_val_predict_export_with_json() {
     let e = &lines[0]["error"];
     assert_eq!(e["code"], "invalid_weights");
     assert!(e["message"].as_str().unwrap().contains("is not a .folo weights file"), "{e}");
-    let (code, lines, _) = folo(&["export", "--json", "--model", s(&best), "--format", "onnx"]);
-    assert_eq!(code, 4);
-    assert_eq!(lines[0]["error"]["code"], "not_implemented");
+    // ONNX: `<name>.onnx` next to the input at the model's imgsz, raw head outputs by default.
+    let (code, lines, stderr) = folo(&["export", "--json", "--model", s(&best), "--format", "onnx"]);
+    assert_eq!(code, 0, "{stderr}");
+    let r = &lines[0];
+    assert!(r["path"].as_str().unwrap().ends_with("best.onnx"), "{r}");
+    assert_eq!(
+        (r["format"].as_str(), r["opset"].as_i64(), r["imgsz"].as_i64()),
+        (Some("onnx"), Some(17), Some(64))
+    );
+    assert_eq!(
+        r["inputs"][0],
+        serde_json::json!({ "name": "images", "dtype": "float", "shape": [1, 3, 64, 64] })
+    );
+    assert_eq!(r["outputs"][0]["shape"], serde_json::json!([1, 64, 84]));
+    assert_eq!(r["outputs"][1]["name"], "cls_raw");
+    assert_eq!(std::fs::metadata(r["path"].as_str().unwrap()).unwrap().len(), r["bytes"].as_u64().unwrap());
+    let (code, lines, stderr) = folo(&[
+        "export",
+        "--json",
+        "--model",
+        s(&best),
+        "--format",
+        "onnx",
+        "--half",
+        "--decode",
+        "--dynamic",
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    let r = &lines[0];
+    assert!(r["path"].as_str().unwrap().ends_with("best-f16.onnx"), "{r}");
+    assert_eq!(
+        r["outputs"][0],
+        serde_json::json!({
+            "name": "detections", "dtype": "float16", "shape": ["batch", "anchors", 6]
+        })
+    );
+    // ONNX-only flags with a .folo format, --batch with --dynamic and a bad --imgsz are usage errors.
+    for bad in [
+        &["--half"][..],
+        &["--format", "onnx", "--dynamic", "--batch", "2"],
+        &["--format", "onnx", "--imgsz", "100"],
+    ] {
+        let mut args = vec!["export", "--json", "--model", s(&best)];
+        args.extend(bad);
+        let (code, lines, _) = folo(&args);
+        assert_eq!(code, 2, "{bad:?}");
+        assert_eq!(lines.last().unwrap()["error"]["code"], "usage", "{bad:?}");
+    }
 
     // export never touches its input, even when the input is named like the writer's temporary file.
     let decoy = root.join("decoy.folo.tmp");

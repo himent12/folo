@@ -365,14 +365,13 @@ async fn train_evaluate_predict_and_reload() {
     let x2: ExportResult =
         ok(&app, post_json(&format!("/api/models/{model_id}/export"), json!({ "format": "folo-f16" }))).await;
     assert_ne!(x2.path, x.path, "exports never overwrite");
-    let onnx = json!({ "format": "onnx" });
-    err(
-        &app,
-        post_json(&format!("/api/models/{model_id}/export"), onnx),
-        StatusCode::NOT_IMPLEMENTED,
-        "not_implemented",
-    )
-    .await;
+    let onnx: ExportResult =
+        ok(&app, post_json(&format!("/api/models/{model_id}/export"), json!({ "format": "onnx" }))).await;
+    assert_eq!(Path::new(&onnx.path), home.join("exports").join("tiny-n-best.onnx"));
+    let bytes = std::fs::read(&onnx.path).unwrap();
+    assert_eq!(bytes.len() as u64, onnx.bytes);
+    // A ModelProto: field 1 (ir_version) = 8 first.
+    assert_eq!(&bytes[..2], &[0x08, 8]);
 
     // Predict: a dataset image (JSON) and an upload (multipart).
     let p = json!({ "model_id": model_id, "dataset_id": ds.id, "image_id": "0", "conf": 0.001 });

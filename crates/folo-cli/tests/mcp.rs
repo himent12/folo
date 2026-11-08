@@ -1145,7 +1145,9 @@ fn real_store_end_to_end() {
 
     let x = checked(&mut c, &schemas, "export", json!({ "model_id": model_id, "format": "folo-f16" }));
     assert_eq!(std::fs::metadata(x["path"].as_str().unwrap()).unwrap().len(), x["bytes"].as_u64().unwrap());
-    c.tool_error("export", json!({ "model_id": model_id, "format": "onnx" }), "not_implemented");
+    let x = checked(&mut c, &schemas, "export", json!({ "model_id": model_id, "format": "onnx" }));
+    assert!(x["path"].as_str().unwrap().ends_with(".onnx"), "{x}");
+    assert_eq!(std::fs::metadata(x["path"].as_str().unwrap()).unwrap().len(), x["bytes"].as_u64().unwrap());
 
     // Stop a longer run after its first epoch, resume it (same id, from its checkpoint), and disconnect while it
     // trains: the shutdown stops it gracefully and the next session lists it as stopped.

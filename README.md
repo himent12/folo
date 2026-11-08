@@ -14,7 +14,7 @@ plus training, evaluation and export. You drive it from one `folo` binary, an HT
   at 640 in Chrome).
 
 > **Status: early (v0.1).** The detector trains and infers on CPU and GPU, and it passes its convergence gate. There
-> are no pretrained weights and no ONNX export yet. See [Project status](#project-status).
+> are no pretrained weights yet. See [Project status](#project-status).
 
 ## Why FOLO: the numbers
 
@@ -194,12 +194,12 @@ What works today (v0.1):
   shapes gate it reaches mAP50 0.980 / mAP50-95 0.896. On a real 2,030-frame dataset folo-n reaches 0.397 mAP50-95
   on the test split, trained from scratch ([examples/r6](examples/r6/README.md)).
 - YOLO and COCO datasets: reading, stats, checks and conversion. mAP that matches pycocotools.
-- `val`, `predict` and export to `.folo` (f32 or f16, a safetensors-compatible format).
+- `val`, `predict` and export to `.folo` (f32 or f16, a safetensors-compatible format) and ONNX (opset 17, f32 or
+  f16, optional in-graph decode and dynamic shapes; parity-tested in onnxruntime).
 - `folo serve` (Studio and the HTTP API), `folo mcp`, in-browser inference, and release builds and install scripts.
 
 Not yet:
 - pretrained weights;
-- ONNX export (`--format onnx` exits 4);
 - f16 compute on the GPU;
 - `folo bench`;
 - a published release.
