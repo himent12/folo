@@ -116,9 +116,13 @@ export class LiveRun {
         }));
       };
 
+      // History responses can arrive out of order too: one older than the last applied is dropped.
+      let loadIssued = 0;
+      let loadApplied = 0;
       const load = async () => {
         const seq = this.#statusSeq;
         const gen = this.#gen;
+        const my = ++loadIssued;
         const [snap, metrics, logs] = await Promise.all([
           snapshot(),
           api.runMetrics(runId),
@@ -126,8 +130,11 @@ export class LiveRun {
           api.runLogs(runId, 500).catch(() => ({ lines: [] })),
         ]);
         if (closed) return;
-        // Requested before a resume rewound the view: it may hold the interrupted attempt. Ask again.
+        if (my < loadApplied) return;
+        // Requested before a resume rewound the view (or before its replay ended): it may hold the interrupted
+        // attempt. Ask again.
         if (gen !== this.#gen) return sync();
+        loadApplied = my;
         this.#absorb(snap.claim() ? snap.run : (this.run ?? snap.run), metrics.steps, metrics.epochs, seq);
         // Still replaying a resumed run: ask again shortly, until its new steps have replaced the old ones.
         if (this.#replay && this.run && ACTIVE.includes(this.run.status)) {
@@ -172,7 +179,9 @@ export class LiveRun {
           if (!ACTIVE.includes(status)) {
             if (this.#replay) {
               // A resumed attempt that ended before passing the old one: the server's final history settles it.
+              // Requests issued during the replay may still hold the interrupted attempt: invalidate them.
               this.#replay = null;
+              this.#gen++;
               sync();
             }
             // Terminal: refresh the snapshot for finished time, best and model id (even if history is still loading).
@@ -192,8 +201,10 @@ export class LiveRun {
             this.#replay.steps.push(s);
             [this.steps, this.epochs] = replaceFrom(this.steps, this.epochs, s);
             if (s.step > this.#replay.until) {
-              // Past the interrupted attempt: the replay is over; one last reconcile with the server.
+              // Past the interrupted attempt: the replay is over; one last reconcile with the server (requests issued
+              // during the replay are invalidated, they may still hold the interrupted attempt).
               this.#replay = null;
+              this.#gen++;
               sync();
             }
           } else {

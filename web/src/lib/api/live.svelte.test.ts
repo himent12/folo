@@ -379,4 +379,52 @@ describe('LiveRun resume', () => {
     expect(live.run?.step).toBe(2);
     stop();
   });
+
+  it('drops a history response from the replay that lands after the final reconcile', async () => {
+    let live!: LiveRun;
+    const stop = $effect.root(() => {
+      live = new LiveRun(() => 'run_7d1e');
+    });
+    flushSync();
+    await vi.advanceTimersByTimeAsync(0);
+    serverStatus = 'running';
+    await live.resume(() => Promise.resolve({ ...snapshot, status: 'queued', step: 4, epoch: 2 }));
+    // Request A (during the replay) still sees the interrupted attempt and is slow.
+    const a = deferred<RunMetrics>();
+    gate = a.promise;
+    handlers.reconnect?.();
+    // The resumed run does step 3 again and stops; the final reconcile (request B) has the true history.
+    handlers.step?.(at(3, 2, 70));
+    history = { steps: [at(1, 1), at(2, 1), at(3, 2, 70)], epochs: [ep(1)] as never };
+    serverStatus = 'stopped';
+    serverStep = 3;
+    handlers.status?.({ status: 'stopped', error: null });
+    await vi.advanceTimersByTimeAsync(0);
+    a.resolve({ steps: [at(1, 1), at(2, 1), at(3, 2), at(4, 2)], epochs: [ep(1)] as never });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.steps.map((s) => [s.step, s.loss.total])).toEqual([[1, 3], [2, 3], [3, 70]]);
+    stop();
+  });
+
+  it('drops an older history response in an ordinary finished run', async () => {
+    let live!: LiveRun;
+    serverStatus = 'running';
+    const stop = $effect.root(() => {
+      live = new LiveRun(() => 'run_7d1e');
+    });
+    flushSync();
+    await vi.advanceTimersByTimeAsync(0);
+    const a = deferred<RunMetrics>();
+    gate = a.promise;
+    handlers.reconnect?.();
+    handlers.step?.(at(5, 3));
+    history = { steps: [at(1, 1), at(2, 1), at(3, 2), at(4, 2), at(5, 3)], epochs: [ep(1), ep(2)] as never };
+    serverStatus = 'completed';
+    handlers.reconnect?.();
+    await vi.advanceTimersByTimeAsync(0);
+    a.resolve({ steps: [at(1, 1), at(2, 1), at(3, 2), at(4, 2)], epochs: [ep(1)] as never });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.steps.map((s) => s.step)).toEqual([1, 2, 3, 4, 5]);
+    stop();
+  });
 });
