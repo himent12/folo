@@ -972,9 +972,9 @@ impl FoloApp {
                     .flex_none()
                     .items_center()
                     .gap(px(8.))
+                    .child(text(ty::XS, t.text_tertiary).whitespace_nowrap().mr(px(4.)).child("Ctrl Enter"))
                     .child(cancel)
-                    .child(start)
-                    .child(shortcut(&t, &["Ctrl", "Enter"])),
+                    .child(start),
             );
         self.dialog_frame(
             &t,
@@ -1723,9 +1723,11 @@ impl FoloApp {
             .child(
                 div()
                     .id("insp-boxes")
-                    .flex_1()
+                    // As tall as its rows (up to the room left), so the key hints sit right under it.
+                    .flex_shrink()
                     .min_h_0()
                     .overflow_y_scroll()
+                    .track_scroll(&self.insp_list_scroll)
                     .px(px(8.))
                     .children(box_rows)
                     .when(meta.boxes.is_empty(), |d| {

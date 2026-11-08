@@ -122,6 +122,8 @@ pub struct LineChart {
     pub x_ticks: Option<usize>,
     /// What the data belongs to (`ease_key(run or model id)`): easing never blends two owners.
     pub ease_key: u64,
+    /// Print a shared power of ten above the y axis. Off when the panel caption carries it.
+    pub pow_caption: bool,
     /// The part of x not reached yet (a live run's remaining epochs): tinted, with a label.
     pub future: Option<(f32, SharedString)>,
     /// Points to mark with a dot (x, y, colour), e.g. the best epoch.
@@ -152,6 +154,7 @@ impl LineChart {
             x_ticks: None,
             future: None,
             ease_key: 0,
+            pow_caption: true,
             dots: Vec::new(),
         }
     }
@@ -664,7 +667,7 @@ fn text_width(window: &mut Window, text: &str, size_px: f32) -> Pixels {
 
 /// Dash patterns (on, off) in px.
 const DASHED: &[f32] = &[4., 3.];
-const DOTTED: &[f32] = &[1.5, 2.5];
+const DOTTED: &[f32] = &[1.5, 3.];
 
 fn stroke_path(window: &mut Window, pts: &[Point<Pixels>], width: f32, color: Hsla, dash: &[f32]) {
     if pts.len() < 2 {
@@ -877,7 +880,7 @@ fn paint_line_chart(
     };
 
     // Grid + y labels.
-    if let Some(p) = ypow {
+    if let Some(p) = ypow.filter(|_| spec.pow_caption) {
         // The shared factor, once, above the axis labels.
         let f = format!("× 10{}", superscript(p));
         let w = text_width(window, &f, label_size);
@@ -1044,7 +1047,9 @@ fn paint_line_chart(
                         );
                     }
                 }
+                // While the cursor inspects, its dots are the markers; latest-point halos return on exit.
                 if s.live
+                    && spec.hover.is_none()
                     && let Some(&(x, y)) = main.last()
                     && !live_dots.iter().any(|d| {
                         let c = point(sx(x), sy(y));

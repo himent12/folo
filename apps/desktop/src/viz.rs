@@ -184,13 +184,18 @@ pub fn paint_image_with_boxes(
                     // Small views (< 480 px): 14 px chips with 10 px text (design/README).
                     let compact = bounds.size.width < px(480.);
                     let fs = if compact { 10. } else { ty::XS.size };
-                    let name = b.label.clone().unwrap_or_default();
+                    // Narrow views (thumbnails under 140 px) show the score only; the key names the hue.
+                    let name = if bounds.size.width < px(140.) {
+                        Default::default()
+                    } else {
+                        b.label.clone().unwrap_or_default()
+                    };
                     // The selected box's chip takes the selection colour, like its outline.
                     let (chip_bg, ink) = if b.highlight {
                         (t.accent_solid, t.accent_on)
                     } else if b.dim {
                         // Faded with their boxes, so the selection is the brightest thing.
-                        (alpha(color, 0.3), alpha(chip_text, 0.6))
+                        (alpha(color, 0.3), alpha(chip_text, 0.85))
                     } else {
                         (color, chip_text)
                     };
@@ -240,7 +245,7 @@ pub fn paint_image_with_boxes(
                         .unwrap_or(candidates[1]);
                     let chip = Bounds::new(origin, size(cw, ch));
                     placed.push(chip);
-                    // Dimming applies to strokes only: chip text keeps its contrast.
+                    // Dimmed chips fade their fill with the box; the text stays readable.
                     window.paint_quad(fill(chip, chip_bg).corner_radii(px(tokens::radius::XS)));
                     let (ty_, lh) =
                         if compact { (origin.y + px(1.), px(12.)) } else { (origin.y + px(1.5), px(13.)) };

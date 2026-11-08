@@ -636,7 +636,7 @@ impl FoloApp {
                                 .child(last.map_or("–".into(), |e| format!("{:.3}", e.val.recall))),
                         ),
                 )
-                .child(text(ty::XS, t.text_tertiary).child("on the validation split")),
+                .child(text(ty::XS, t.text_tertiary).child("best-F1 · IoU 0.50 · val")),
             div()
                 .flex()
                 .flex_col()
@@ -736,7 +736,7 @@ impl FoloApp {
             c.x_name = "epoch";
             c.x_fmt = |v| format!("{v:.0}");
             // Named on the first chart only; the others keep the line.
-            c.markers = vec![if id == "run-map" {
+            c.markers = vec![if id == "run-map" || id == "run-loss" {
                 close_marker.clone()
             } else {
                 Marker { label: SharedString::default(), ..close_marker.clone() }
@@ -795,7 +795,7 @@ impl FoloApp {
             let stopped = d.loss[3].last().map_or(r.epoch as f32, |p| p.0);
             let fail = Marker {
                 x: stopped,
-                label: format!("failed in epoch {}", r.epoch).into(),
+                label: format!("failed during epoch {}", r.epoch).into(),
                 color: t.danger_text,
                 lane: Some(0),
             };
@@ -820,6 +820,8 @@ impl FoloApp {
             secondary_h,
         );
         lr.y_range = Some((0., (d.lr_max * 1.15).max(1e-4)));
+        // Its "× 10⁻ⁿ" goes in the panel caption, once, beside the legend that uses it.
+        lr.pow_caption = false;
         lr.y_ticks = 3;
 
         // Legend values: at the shared cursor, else the latest point.
@@ -950,6 +952,10 @@ impl FoloApp {
         });
         let lr_legend =
             crate::ui::legend_value(&t, "lr", t.text_tertiary, false, lr_value).into_any_element();
+        let lr_caption = match lr_pow {
+            Some(p) => format!("per step · by epoch · × 10{}", crate::charts::superscript(p)),
+            None => "per step · by epoch".to_string(),
+        };
         let _ = chart_block;
         // The mAP chart is the focal point: wider and first. Narrow windows stack each row.
         let stack = window.viewport_size().width < px(1120.);
@@ -980,9 +986,9 @@ impl FoloApp {
                 if pair_a { 0.5 } else { 0.4 },
             ))
             .child(row(
-                card("Precision and recall", "validation", pr_legend, line_chart(&t, pr)).into_any_element(),
-                card("Learning rate", "per step · by epoch", lr_legend, line_chart(&t, lr))
+                card("Precision and recall", "best-F1 · validation", pr_legend, line_chart(&t, pr))
                     .into_any_element(),
+                card("Learning rate", &lr_caption, lr_legend, line_chart(&t, lr)).into_any_element(),
                 0.6,
                 0.4,
             ));
@@ -1002,6 +1008,8 @@ impl FoloApp {
             cx,
             Rc::new(move |this, i, _, _| this.sample_view = views[i]),
         );
+        let classes =
+            self.store.dataset_summary(&r.config.dataset_id).map(|d| d.classes.clone()).unwrap_or_default();
         let body = match self.store.samples.get(&r.id) {
             _ if r.epoch == 0 => div()
                 .child(empty_state(
@@ -1029,8 +1037,8 @@ impl FoloApp {
                         }
                         if view != SampleView::Truth {
                             boxes.extend(smp.pred.iter().filter(|p| p.score >= 0.3).map(|p| DrawBox {
-                                // Score only: at thumbnail size the class colour names the class.
-                                label: None,
+                                // Class and score where the cell has room (viz drops the name below 140 px).
+                                label: classes.get(p.class as usize).cloned().map(Into::into),
                                 score: Some(p.score),
                                 ..DrawBox::new(p.class, p.x1, p.y1, p.x2, p.y2)
                             }));
@@ -1126,7 +1134,7 @@ impl FoloApp {
                             .py(px(10.))
                             .children(lines[start..].iter().map(|l| {
                                 let (tag, color) = match l.level {
-                                    LogLevel::Debug => ("DBG", t.text_disabled),
+                                    LogLevel::Debug => ("DBG", t.text_tertiary),
                                     LogLevel::Info => ("INF", t.text_tertiary),
                                     LogLevel::Warn => ("WRN", t.warning_text),
                                     LogLevel::Error => ("ERR", t.danger_text),
@@ -1141,7 +1149,7 @@ impl FoloApp {
                                     .text_size(px(ty::XS.size))
                                     .line_height(px(17.))
                                     .when(l.level == LogLevel::Error, |d| d.bg(t.danger_muted))
-                                    .child(div().flex_none().text_color(t.text_disabled).child(clock))
+                                    .child(div().flex_none().text_color(t.text_tertiary).child(clock))
                                     .child(div().flex_none().w(px(24.)).text_color(color).child(tag))
                                     .child(
                                         // Long entries wrap under the message column, so nothing is clipped.

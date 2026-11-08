@@ -573,7 +573,7 @@ impl FoloApp {
             .flex()
             .items_center()
             .gap(px(6.))
-            .child(text(ty::XS, t.text_tertiary).mr(px(2.)).child("Classes"))
+            .child(text(ty::XS, t.text_tertiary).mr(px(2.)).child("Boxes by class"))
             .children(chips)
             .when(self.ds_empty_only, |d| {
                 d.child(self.chip(
