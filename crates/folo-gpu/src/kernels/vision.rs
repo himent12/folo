@@ -1,11 +1,12 @@
-//! Detector pre- and post-processing: letterboxing `u8` RGB images into the f32 network input, and decoding
-//! the detection head into a compact list of above-threshold candidates, so that a prediction uploads raw
-//! pixels and downloads only what NMS needs.
+//! Detector pre- and post-processing: letterboxing `u8` RGB images into the network input (f32, or f16 for
+//! half-precision inference), and decoding the detection head (f32 or f16, decoded in f32) into a compact list
+//! of above-threshold candidates, so that a prediction uploads raw pixels and downloads only what NMS needs.
 
 use super::check_buf;
 use crate::DType;
 use crate::context::GpuContext;
 use crate::error::{GpuError, Result, shape_err};
+use crate::kernels::gemm::check_dtype;
 use crate::pipeline::{Access, KernelDef, Params, Source, Spec};
 
 static LETTERBOX: KernelDef = KernelDef {
@@ -44,15 +45,17 @@ pub struct LetterboxDesc {
     pub taps: usize,
 }
 
-/// Letterbox one image (see [`LetterboxDesc`]) into `y` (f32). Bit-exact with folo-data's CPU resize followed
-/// by `value as f32 * scale`.
+/// Letterbox one image (see [`LetterboxDesc`]) into `y` of `dtype`. In f32 bit-exact with folo-data's CPU
+/// resize followed by `value as f32 * scale`; in f16 that value rounded once.
 pub fn letterbox_rgb8(
     ctx: &GpuContext,
     src: &wgpu::Buffer,
     taps: &wgpu::Buffer,
     y: &wgpu::Buffer,
     d: &LetterboxDesc,
+    dtype: DType,
 ) -> Result<()> {
+    check_dtype(ctx, dtype, "letterbox")?;
     let [ow, oh] = d.out;
     let [sw, sh] = d.src;
     let [rw, rh] = d.resized;
@@ -68,8 +71,8 @@ pub fn letterbox_rgb8(
     check_buf(src, (sw * sh * 3).div_ceil(4), DType::F32, "letterbox source")?;
     check_buf(taps, d.taps + 3 * (rw + rh), DType::F32, "letterbox taps")?;
     let n = ow.checked_mul(oh).ok_or_else(|| shape_err("letterbox: canvas too large"))?;
-    check_buf(y, d.out_offset + 3 * n, DType::F32, "letterbox output")?;
-    let k = ctx.kernel(&LETTERBOX, Spec::new())?;
+    check_buf(y, d.out_offset + 3 * n, dtype, "letterbox output")?;
+    let k = ctx.kernel(&LETTERBOX, Spec::new().f16(dtype == DType::F16))?;
     let p = Params::new()
         .uz(ow)?
         .uz(oh)?
@@ -100,10 +103,10 @@ pub fn prefilter_fits(fx: usize, fy: usize) -> bool {
 /// Words per candidate record of [`detect_candidates`].
 pub const RECORD_WORDS: usize = 7;
 
-/// Decode `box_raw` (f32 `[B, 4·rm, A]`), `cls_raw` (f32 `[B, nc, A]`) and `anchors` (f32 `[3, A]`: x, y in
-/// grid units, stride) into `out` (u32 `[B, 1 + 7·A]`): per image a count, then that many records
-/// `(anchor, class, score, x1, y1, x2, y2)` in arrival order, one per anchor whose best class score is
-/// `> conf`. `out` is cleared first.
+/// Decode `box_raw` (`[B, 4·rm, A]`), `cls_raw` (`[B, nc, A]`, both of `dtype`: f32 or f16, decoded in f32)
+/// and `anchors` (f32 `[3, A]`: x, y in grid units, stride) into `out` (u32 `[B, 1 + 7·A]`): per image a
+/// count, then that many records `(anchor, class, score, x1, y1, x2, y2)` in arrival order, one per anchor
+/// whose best class score is `> conf`. `out` is cleared first.
 #[allow(clippy::too_many_arguments)]
 pub fn detect_candidates(
     ctx: &GpuContext,
@@ -116,13 +119,15 @@ pub fn detect_candidates(
     nc: usize,
     rm: usize,
     conf: f32,
+    dtype: DType,
 ) -> Result<()> {
+    check_dtype(ctx, dtype, "detect_candidates")?;
     if anchors_n == 0 || nc == 0 || rm == 0 {
         return Err(shape_err("detect_candidates: empty head"));
     }
     let ba = batch.checked_mul(anchors_n).ok_or_else(|| shape_err("detect_candidates: too many anchors"))?;
-    check_buf(box_raw, ba * 4 * rm, DType::F32, "detect box_raw")?;
-    check_buf(cls_raw, ba * nc, DType::F32, "detect cls_raw")?;
+    check_buf(box_raw, ba * 4 * rm, dtype, "detect box_raw")?;
+    check_buf(cls_raw, ba * nc, dtype, "detect cls_raw")?;
     check_buf(anchors, 3 * anchors_n, DType::F32, "detect anchors")?;
     let words = batch * (1 + RECORD_WORDS * anchors_n);
     check_buf(out, words, DType::F32, "detect output")?;
@@ -134,7 +139,7 @@ pub fn detect_candidates(
         return Ok(());
     }
     ctx.clear(out, 4 * words as u64);
-    let k = ctx.kernel(&DETECT, Spec::new())?;
+    let k = ctx.kernel(&DETECT, Spec::new().f16(dtype == DType::F16))?;
     let p = Params::new().uz(ba)?.uz(anchors_n)?.uz(nc)?.uz(rm)?.f(conf);
     ctx.dispatch(&k, &[box_raw, cls_raw, anchors, out], &p, ctx.grid_1d(ba as u64, 256)?)
 }

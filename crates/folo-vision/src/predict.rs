@@ -11,6 +11,12 @@
 //! there into above-threshold candidates, so only those come back ([`crate::model::HeadOutput::detections`]).
 //! GPU work is queued asynchronously, so on a GPU the time of the forward pass shows up under postprocess,
 //! where the first download waits for it.
+//!
+//! **Half precision.** [`Predictor::new_f16`] / [`Predictor::open_on`] with [`Precision::F16`] run the whole
+//! model in f16 on a GPU that computes in it (`shader-f16`): f16 weights and activations, f32 accumulation in
+//! every GEMM, convolution, reduction and softmax, the letterbox writing the f16 input and the candidate kernel
+//! reading the f16 head. Where f16 is not available (the CPU, an adapter without `shader-f16`,
+//! `FOLO_GPU_NO_F16=1`) the predictor runs in f32 and [`Predictor::fallback`] says why.
 
 use std::path::Path;
 #[cfg(not(target_arch = "wasm32"))]
@@ -19,8 +25,10 @@ use std::time::Instant;
 #[cfg(target_arch = "wasm32")]
 use web_time::Instant;
 
-use folo_core::{Device, LetterboxImage, Tensor, no_grad};
+use folo_core::{DType, Device, LetterboxImage, Tensor, no_grad};
 use folo_data::{Image, Letterbox, LetterboxOptions};
+use folo_nn::Module;
+use folo_nn::io::ModelFile;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -137,10 +145,71 @@ impl Prediction {
     }
 }
 
+/// The numeric precision a [`Predictor`] runs in (docs/API.md `precision`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Precision {
+    /// f32 weights and activations (every device).
+    #[default]
+    F32,
+    /// f16 weights and activations with f32 accumulation (a GPU with `shader-f16`).
+    F16,
+}
+
+impl Precision {
+    /// `"f32"` or `"f16"`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Precision::F32 => "f32",
+            Precision::F16 => "f16",
+        }
+    }
+
+    /// The tensor dtype of the weights and activations.
+    pub fn dtype(self) -> DType {
+        match self {
+            Precision::F32 => DType::F32,
+            Precision::F16 => DType::F16,
+        }
+    }
+}
+
+impl std::fmt::Display for Precision {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for Precision {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "f32" | "fp32" | "float32" => Ok(Precision::F32),
+            "f16" | "fp16" | "half" | "float16" => Ok(Precision::F16),
+            other => Err(Error::Config(format!("precision must be f32 or f16, got `{other}`"))),
+        }
+    }
+}
+
+/// Why f16 inference cannot run on `device` (so it runs in f32), or `None` when it can: it needs a GPU whose
+/// backend computes in f16 (`shader-f16`, not turned off with `FOLO_GPU_NO_F16`).
+pub fn f16_unavailable(device: Device) -> Option<String> {
+    if device.is_cpu() {
+        return Some("f16 inference needs a GPU; running in f32 on the CPU".into());
+    }
+    (!folo_core::backend::computes_f16(device)).then(|| {
+        format!(
+            "{device} has no f16 compute (the adapter lacks shader-f16, or FOLO_GPU_NO_F16 is set); running in f32"
+        )
+    })
+}
+
 /// A fused, eval-mode detector ready for inference. See the module docs.
 pub struct Predictor {
     model: FoloModel,
     cfg: PredictConfig,
+    fallback: Option<String>,
 }
 
 impl Predictor {
@@ -149,11 +218,56 @@ impl Predictor {
         Self::new(FoloModel::open(path)?, cfg)
     }
 
-    /// Wrap a model: it is fused (a no-op if it already is) and stays in eval mode.
+    /// Load `.folo` weights onto `device` at `precision` ([`FoloModel::from_file_for_inference`]: an f16 export
+    /// goes to the GPU as f16, other files are fused in f32 and converted). When f16 cannot run on `device`
+    /// the model is loaded in f32 and [`Predictor::fallback`] says why.
+    pub fn open_on(
+        path: impl AsRef<Path>,
+        cfg: PredictConfig,
+        device: Device,
+        precision: Precision,
+    ) -> Result<Self> {
+        cfg.validate()?;
+        let fallback = if precision == Precision::F16 { f16_unavailable(device) } else { None };
+        let dtype = if fallback.is_some() { DType::F32 } else { precision.dtype() };
+        let model = FoloModel::from_file_for_inference(&ModelFile::open(path)?, device, dtype)?;
+        let mut p = Self::new(model, cfg)?;
+        p.fallback = fallback;
+        Ok(p)
+    }
+
+    /// Wrap a model: it is fused (a no-op if it already is) and stays in eval mode. The model keeps its dtype
+    /// (an f16 model, from [`Module::to_dtype`], predicts in f16).
     pub fn new(mut model: FoloModel, cfg: PredictConfig) -> Result<Self> {
         cfg.validate()?;
         model.fuse()?;
-        Ok(Predictor { model, cfg })
+        Ok(Predictor { model, cfg, fallback: None })
+    }
+
+    /// [`Predictor::new`] in half precision: the model is fused (in f32) and converted to f16 on its device. On
+    /// a device without f16 compute ([`f16_unavailable`]) it stays f32 and [`Predictor::fallback`] says why.
+    pub fn new_f16(model: FoloModel, cfg: PredictConfig) -> Result<Self> {
+        Self::with_precision(model, cfg, Precision::F16)
+    }
+
+    /// [`Predictor::new`] at `precision` (see [`Predictor::new_f16`]).
+    pub fn with_precision(model: FoloModel, cfg: PredictConfig, precision: Precision) -> Result<Self> {
+        let mut p = Self::new(model, cfg)?;
+        let fallback = if precision == Precision::F16 { f16_unavailable(p.device()) } else { None };
+        let dtype = if fallback.is_some() { DType::F32 } else { precision.dtype() };
+        p.model.to_dtype(dtype)?;
+        p.fallback = fallback;
+        Ok(p)
+    }
+
+    /// The precision the model runs in.
+    pub fn precision(&self) -> Precision {
+        if self.model.dtype() == DType::F16 { Precision::F16 } else { Precision::F32 }
+    }
+
+    /// Why an f16 request runs in f32 ([`f16_unavailable`]), or `None` when it did not fall back.
+    pub fn fallback(&self) -> Option<&str> {
+        self.fallback.as_deref()
     }
 
     /// The (fused) model.
@@ -246,13 +360,15 @@ impl Predictor {
         let letterboxes: Vec<Letterbox> =
             imgs.iter().map(|i| Letterbox::compute(i.width, i.height, s, s, &opts)).collect();
         // `rect` is only used for one image, so every canvas of a call has the same size.
-        let device = self.model.device();
-        let on_device = if device.is_cpu() { None } else { letterbox_on_device(imgs, &letterboxes, device)? };
+        let (device, dtype) = (self.model.device(), self.model.dtype());
+        let on_device =
+            if device.is_cpu() { None } else { letterbox_on_device_as(imgs, &letterboxes, device, dtype)? };
         let input = match on_device {
             Some(x) => x,
             None => {
                 let x = letterbox_on_host(imgs, &letterboxes)?;
-                if device.is_cpu() { x } else { x.to_device(device)? }
+                let x = if device.is_cpu() { x } else { x.to_device(device)? };
+                x.to_dtype(dtype)?
             }
         };
         let sizes = imgs.iter().map(|i| [i.width, i.height]).collect();
@@ -299,7 +415,7 @@ impl Predictor {
 
 /// Letterboxed images and their input tensor ([`Predictor::prepare`]).
 pub struct PreparedBatch {
-    /// `[B, 3, H, W]` in `0..1`, on the model's device.
+    /// `[B, 3, H, W]` in `0..1`, on the model's device, in the model's dtype.
     pub input: Tensor,
     letterboxes: Vec<Letterbox>,
     sizes: Vec<[u32; 2]>,
@@ -346,6 +462,17 @@ pub fn letterbox_on_host(imgs: &[Image], boxes: &[Letterbox]) -> Result<Tensor> 
 /// no letterbox kernel): the images go up as they are, with folo-data's resize taps, and the canvas is
 /// built there.
 pub fn letterbox_on_device(imgs: &[Image], boxes: &[Letterbox], device: Device) -> Result<Option<Tensor>> {
+    letterbox_on_device_as(imgs, boxes, device, DType::F32)
+}
+
+/// [`letterbox_on_device`] writing a canvas of `dtype` (`F16` for half-precision inference: the f32 value
+/// rounded once).
+pub fn letterbox_on_device_as(
+    imgs: &[Image],
+    boxes: &[Letterbox],
+    device: Device,
+    dtype: DType,
+) -> Result<Option<Tensor>> {
     let [w, h] = check_letterbox(imgs, boxes)?;
     let mut taps: Vec<u32> = Vec::new();
     let mut geoms = Vec::with_capacity(imgs.len());
@@ -373,7 +500,7 @@ pub fn letterbox_on_device(imgs: &[Image], boxes: &[Letterbox], device: Device) 
     let dev_imgs = host.iter().map(|t| t.to_device(device)).collect::<folo_core::Result<Vec<_>>>()?;
     let refs: Vec<&Tensor> = dev_imgs.iter().collect();
     let out = [h as usize, w as usize];
-    Ok(Tensor::letterbox_rgb8(&refs, &taps, &geoms, out, folo_data::PAD_VALUE, INV_255)?)
+    Ok(Tensor::letterbox_rgb8(&refs, &taps, &geoms, out, folo_data::PAD_VALUE, INV_255, dtype)?)
 }
 
 /// The common canvas `[width, height]` of a letterbox batch: one geometry per image, computed for its size,

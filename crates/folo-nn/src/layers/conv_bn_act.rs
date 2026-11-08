@@ -68,9 +68,11 @@ impl ConvBnAct {
     }
 
     /// Fold the BatchNorm into the conv (in `F32`, with its running statistics), in place. A no-op if already
-    /// fused. The result matches eval-mode output of the unfused block.
+    /// fused. The result matches eval-mode output of the unfused block. The fused tensors take the conv
+    /// weight's dtype (an `F16` block is folded in `F32` and rounded once).
     pub fn fuse_(&mut self) -> Result<()> {
         let Some(bn) = self.bn.take() else { return Ok(()) };
+        let dtype = self.conv.weight.dtype();
         let (w, b) = fuse_conv_bn(
             &self.conv.weight,
             self.conv.bias.as_ref(),
@@ -80,6 +82,7 @@ impl ConvBnAct {
             &bn.running_var,
             bn.eps,
         )?;
+        let (w, b) = (w.to_dtype(dtype)?, b.to_dtype(dtype)?);
         self.conv = Conv2d::from_tensors(*self.conv.config(), w, Some(b))?;
         Ok(())
     }

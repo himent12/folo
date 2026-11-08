@@ -238,13 +238,13 @@ impl Tensor {
     }
 
     /// `self != 0 ? on_true : on_false` elementwise with broadcasting over all three. `self` is an `F32` or
-    /// `U8` mask; the values are `F32`.
+    /// `U8` mask; the values are `F32` (or both `F16` on a backend that computes in it).
     pub fn where_cond(&self, on_true: &Tensor, on_false: &Tensor) -> Result<Tensor> {
         if !matches!(self.dtype(), DType::F32 | DType::U8) {
             return Err(Error::UnsupportedDType { op: "where_cond", dtype: self.dtype() });
         }
-        on_true.check_f32("where_cond")?;
-        on_false.check_f32("where_cond")?;
+        on_true.check_float("where_cond")?;
+        on_false.check_float_like(on_true, "where_cond")?;
         self.check_same_device(on_true, "where_cond")?;
         self.check_same_device(on_false, "where_cond")?;
         let shape = self
@@ -395,6 +395,32 @@ impl Tensor {
                 if device.is_cpu() { crate::Storage::Cpu(host) } else { dst.upload(device, &host)? }
             }
         };
+        cell.replace(&mut guard, new);
+        Ok(())
+    }
+
+    /// Convert this tensor's storage to `dtype` **in place** (a no-op if it already has it), on its device:
+    /// PyTorch's `param.data = param.data.half()`. Like [`Tensor::to_device_`], the identity, `requires_grad`
+    /// flag and layout are kept and every clone and view sharing the storage follows (layouts count elements,
+    /// so they stay valid). This is how folo-nn converts a whole model (`Module::to_dtype`). The whole storage
+    /// is converted, also elements no view of it reaches.
+    ///
+    /// Not an autograd op: the storage version is bumped, and only leaves convert. Do not call it while another
+    /// thread uses the tensor.
+    pub fn to_dtype_(&self, dtype: DType) -> Result<()> {
+        if dtype == self.dtype() {
+            return Ok(());
+        }
+        if !self.is_leaf() {
+            return Err(Error::Autograd(format!(
+                "to_dtype_: {} is the result of a recorded op; detach it or use to_dtype",
+                self.grad_fn_name().unwrap_or("?")
+            )));
+        }
+        let cell = self.cell();
+        let mut guard = cell.write();
+        let whole = Layout::contiguous(Shape::new(&[guard.len()]));
+        let new = backend::backend(guard.device())?.cast(backend::View::new(&guard, &whole), dtype)?;
         cell.replace(&mut guard, new);
         Ok(())
     }

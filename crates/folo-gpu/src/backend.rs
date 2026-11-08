@@ -11,6 +11,12 @@
 //! `u8` and `f16` elements are packed into 32-bit words, `i64` elements take two words. Views arrive as strided
 //! layouts; elementwise ops, copies and matmul read them in place, other kernels get a dense copy first.
 //!
+//! **Half precision.** With `shader-f16` (and without `FOLO_GPU_NO_F16`) the backend computes in f16
+//! ([`Backend::computes_f16`]): every forward op folo-core lets `F16` through takes f16 operands and returns
+//! f16 results. Storage is f16, the arithmetic f32: GEMM and conv accumulate in f32, reductions and softmax
+//! accumulate in f32, elementwise ops widen on load and round once on the store. Average pooling and the
+//! arg-reductions run on an f32 copy. Gradient kernels stay f32-only (f16 is for inference) and refuse f16 data.
+//!
 //! Differences from the CPU backend: index ops cannot report out-of-range indices without a host round trip,
 //! so `index_select` / `gather` produce zeros and `index_add` / `scatter_add` skip such entries; the
 //! scatter-adds use float atomics, so their summation order (and last-bit rounding) is unspecified.
@@ -243,6 +249,19 @@ fn elem(d: CoreDType) -> Elem {
     }
 }
 
+/// The kernels' storage type of a float dtype (f16 stays f16, everything else is f32).
+fn kdt(d: CoreDType) -> crate::DType {
+    if d == CoreDType::F16 { crate::DType::F16 } else { crate::DType::F32 }
+}
+
+/// Refuses f16 data in ops with f32 kernels only: the gradient kernels (half precision is for inference).
+fn f32_only(v: &View<'_>, op: &'static str) -> Result<()> {
+    match v.storage.dtype() {
+        CoreDType::F16 => Err(Error::UnsupportedDType { op, dtype: CoreDType::F16 }),
+        _ => Ok(()),
+    }
+}
+
 fn strided_of(l: &Layout) -> Strided {
     Strided { offset: l.offset(), dims: l.dims().to_vec(), strides: l.strides().to_vec() }
 }
@@ -387,13 +406,28 @@ impl GpuBackend {
 
     fn ew(&self, op: EwOp, out_shape: &Shape, inputs: &[View<'_>]) -> Result<Storage> {
         let n = out_shape.numel();
-        let out = self.alloc(CoreDType::F32, n)?;
+        // The values' dtype (a `where` condition is input 0): the output's too.
+        let value = if matches!(op, EwOp::Where { .. }) { &inputs[1] } else { &inputs[0] };
+        let dtype = value.storage.dtype();
+        let out = self.alloc(dtype, n)?;
         let views: Vec<Strided> = inputs.iter().map(|v| strided_of(v.layout)).collect();
         let bufs = inputs.iter().map(|v| self.buf(v)).collect::<Result<Vec<_>>>()?;
         let ins: Vec<EwInput<'_>> =
             bufs.iter().zip(&views).map(|(b, v)| EwInput { buf: b, view: v }).collect();
-        ew::elementwise(&self.ctx, op, out_shape.dims(), &ins, out.raw()).core()?;
-        Ok(self.wrap(CoreDType::F32, n, out))
+        ew::elementwise(&self.ctx, op, out_shape.dims(), &ins, out.raw(), kdt(dtype)).core()?;
+        Ok(self.wrap(dtype, n, out))
+    }
+
+    /// `f` on an f32 copy of an f16 `x`, its result cast back to f16 (ops without an f16 kernel); `f(x)` for
+    /// anything else.
+    fn via_f32(&self, x: View<'_>, f: impl FnOnce(View<'_>) -> Result<Storage>) -> Result<Storage> {
+        if x.storage.dtype() != CoreDType::F16 {
+            return f(x);
+        }
+        let tmp = self.cast(x, CoreDType::F32)?;
+        let out = f(View::new(&tmp, &Layout::contiguous(x.shape().clone())))?;
+        let whole = Layout::contiguous(Shape::new(&[out.len()]));
+        self.cast(View::new(&out, &whole), CoreDType::F16)
     }
 
     fn indices<'a>(&self, v: &View<'a>, op: &'static str) -> Result<(Dense<'a>, bool)> {
@@ -405,7 +439,8 @@ impl GpuBackend {
         Ok((self.dense(v)?, i64))
     }
 
-    fn conv_desc(&self, x: &Shape, w: &Shape, p: &Conv2dParams) -> Conv2dDesc {
+    /// The conv problem of `x` and `w` (stored as `dtype`).
+    fn conv_desc(&self, x: &Shape, w: &Shape, p: &Conv2dParams, dtype: CoreDType) -> Conv2dDesc {
         let (n, c, h, wi) = nchw(x);
         let (o, _, kh, kw) = nchw(w);
         Conv2dDesc {
@@ -422,7 +457,7 @@ impl GpuBackend {
                 dilation: (p.dilation[0], p.dilation[1]),
             },
             act: GpuUnary::Identity,
-            dtype: crate::DType::F32,
+            dtype: kdt(dtype),
         }
     }
 
@@ -454,6 +489,7 @@ impl GpuBackend {
             _ => (cd[0], cd[1]),
         };
         let mut g = GemmDesc::new(m, n, k, ta, tb, outer);
+        g.dtype = kdt(a.storage.dtype());
         g.lda = lda;
         g.ldb = ldb;
         g.ldc = n;
@@ -483,6 +519,10 @@ impl Backend for GpuBackend {
 
     fn synchronize(&self) -> Result<()> {
         self.ctx.sync().core()
+    }
+
+    fn computes_f16(&self) -> bool {
+        self.ctx.caps().shader_f16
     }
 
     fn full(&self, _device: Device, dtype: CoreDType, len: usize, value: f64) -> Result<Storage> {
@@ -626,9 +666,14 @@ impl Backend for GpuBackend {
         let (outer, r, inner) = split3(x.shape().dims(), dim);
         let n = outer * inner;
         let arg = matches!(op, ReduceOp::ArgMax | ReduceOp::ArgMin);
-        let dtype = if arg { CoreDType::I64 } else { CoreDType::F32 };
+        let xdt = x.storage.dtype();
+        let dtype = if arg { CoreDType::I64 } else { xdt };
         let out = self.alloc(dtype, n)?;
         if n > 0 {
+            // The arg-reductions have an f32 kernel only.
+            let wide = if arg && xdt == CoreDType::F16 { Some(self.cast(x, CoreDType::F32)?) } else { None };
+            let wl = Layout::contiguous(x.shape().clone());
+            let x = wide.as_ref().map_or(x, |s| View::new(s, &wl));
             let xd = self.dense(&x)?;
             let gop = match op {
                 ReduceOp::Sum => Some(GpuReduce::Sum),
@@ -637,7 +682,8 @@ impl Backend for GpuBackend {
                 _ => None,
             };
             match gop {
-                Some(g) => reduce::reduce_split(&self.ctx, g, xd.raw(), out.raw(), outer, r, inner).core()?,
+                Some(g) => reduce::reduce_split(&self.ctx, g, xd.raw(), out.raw(), outer, r, inner, kdt(xdt))
+                    .core()?,
                 None => reduce::arg_reduce(
                     &self.ctx,
                     op == ReduceOp::ArgMax,
@@ -655,12 +701,14 @@ impl Backend for GpuBackend {
 
     fn softmax(&self, x: View<'_>, dim: usize, log: bool) -> Result<Storage> {
         let n = x.layout.numel();
-        let out = self.alloc(CoreDType::F32, n)?;
+        let dtype = x.storage.dtype();
+        let out = self.alloc(dtype, n)?;
         if n > 0 {
             let xd = self.dense(&x)?;
-            reduce::softmax_dim(&self.ctx, xd.raw(), out.raw(), split3(x.shape().dims(), dim), log).core()?;
+            let dims = split3(x.shape().dims(), dim);
+            reduce::softmax_dim(&self.ctx, xd.raw(), out.raw(), dims, log, kdt(dtype)).core()?;
         }
-        Ok(self.wrap(CoreDType::F32, n, out))
+        Ok(self.wrap(dtype, n, out))
     }
 
     fn matmul(&self, a: View<'_>, b: View<'_>) -> Result<Storage> {
@@ -668,13 +716,14 @@ impl Backend for GpuBackend {
         let (m, k, n) = (a.layout.dims()[r - 2], a.layout.dims()[r - 1], b.layout.dims()[r - 1]);
         let batch: usize = a.layout.dims()[..r - 2].iter().product();
         let len = batch * m * n;
-        let out = self.alloc(CoreDType::F32, len)?;
+        let dtype = a.storage.dtype();
+        let out = self.alloc(dtype, len)?;
         if len == 0 {
-            return Ok(self.wrap(CoreDType::F32, len, out));
+            return Ok(self.wrap(dtype, len, out));
         }
         if k == 0 {
-            self.ctx.clear(out.raw(), crate::DType::F32.bytes(len));
-            return Ok(self.wrap(CoreDType::F32, len, out));
+            self.ctx.clear(out.raw(), elem(dtype).buffer_bytes(len).core()?);
+            return Ok(self.wrap(dtype, len, out));
         }
         self.check_fits(&a, "matmul")?;
         self.check_fits(&b, "matmul")?;
@@ -685,18 +734,11 @@ impl Backend for GpuBackend {
             self.try_matmul(&View::new(&sa, &la), &View::new(&sb, &lb), out.raw())?
                 .ok_or_else(|| core_err(GpuError::Limit("matmul batch does not fit one dispatch".into())))?;
         }
-        Ok(self.wrap(CoreDType::F32, len, out))
+        Ok(self.wrap(dtype, len, out))
     }
 
     fn conv2d(&self, x: View<'_>, w: View<'_>, bias: Option<View<'_>>, p: &Conv2dParams) -> Result<Storage> {
-        let d = self.conv_desc(x.shape(), w.shape(), p);
-        let (oh, ow) = d.output().core()?;
-        let len = d.n * d.c_out * oh * ow;
-        let out = self.alloc(CoreDType::F32, len)?;
-        let (xd, wd) = (self.dense(&x)?, self.dense(&w)?);
-        let bd = bias.as_ref().map(|b| self.dense(b)).transpose()?;
-        conv::conv2d(&self.ctx, &d, xd.raw(), wd.raw(), bd.as_ref().map(|b| b.raw()), out.raw()).core()?;
-        Ok(self.wrap(CoreDType::F32, len, out))
+        self.conv2d_act(x, w, bias, p, None)
     }
 
     fn conv2d_backward_input(
@@ -706,7 +748,8 @@ impl Backend for GpuBackend {
         input_shape: &Shape,
         p: &Conv2dParams,
     ) -> Result<Storage> {
-        let d = self.conv_desc(input_shape, w.shape(), p);
+        f32_only(&grad, "conv2d_backward_input")?;
+        let d = self.conv_desc(input_shape, w.shape(), p, CoreDType::F32);
         let len = input_shape.numel();
         let out = self.alloc(CoreDType::F32, len)?;
         let (gd, wd) = (self.dense(&grad)?, self.dense(&w)?);
@@ -721,7 +764,8 @@ impl Backend for GpuBackend {
         weight_shape: &Shape,
         p: &Conv2dParams,
     ) -> Result<Storage> {
-        let d = self.conv_desc(x.shape(), weight_shape, p);
+        f32_only(&x, "conv2d_backward_weight")?;
+        let d = self.conv_desc(x.shape(), weight_shape, p, CoreDType::F32);
         let len = weight_shape.numel();
         let out = self.alloc(CoreDType::F32, len)?;
         let (xd, gd) = (self.dense(&x)?, self.dense(&grad)?);
@@ -734,11 +778,13 @@ impl Backend for GpuBackend {
         let win = pool2d(p);
         let (oh, ow) = win.output(h, w).core()?;
         let len = n * c * oh * ow;
-        let (vals, idx) = (self.alloc(CoreDType::F32, len)?, self.alloc(CoreDType::I64, len)?);
+        let dtype = x.storage.dtype();
+        let (vals, idx) = (self.alloc(dtype, len)?, self.alloc(CoreDType::I64, len)?);
         let xd = self.dense(&x)?;
-        pool_grad::max_pool2d_indices(&self.ctx, xd.raw(), vals.raw(), idx.raw(), (n * c, h, w), &win)
+        let planes = (n * c, h, w);
+        pool_grad::max_pool2d_indices(&self.ctx, xd.raw(), vals.raw(), idx.raw(), planes, &win, kdt(dtype))
             .core()?;
-        Ok((self.wrap(CoreDType::F32, len, vals), self.wrap(CoreDType::I64, len, idx)))
+        Ok((self.wrap(dtype, len, vals), self.wrap(CoreDType::I64, len, idx)))
     }
 
     fn max_pool2d_backward(
@@ -755,6 +801,7 @@ impl Backend for GpuBackend {
                 got: indices.storage.dtype(),
             });
         }
+        f32_only(&grad, "max_pool2d_backward")?;
         let (n, c, h, w) = nchw(input_shape);
         let len = input_shape.numel();
         let out = self.alloc(CoreDType::F32, len)?;
@@ -765,17 +812,20 @@ impl Backend for GpuBackend {
     }
 
     fn avg_pool2d(&self, x: View<'_>, p: &Pool2dParams) -> Result<Storage> {
-        let (n, c, h, w) = nchw(x.shape());
-        let win = pool2d(p);
-        let (oh, ow) = win.output(h, w).core()?;
-        let len = n * c * oh * ow;
-        let out = self.alloc(CoreDType::F32, len)?;
-        let xd = self.dense(&x)?;
-        pool_grad::avg_pool2d(&self.ctx, xd.raw(), out.raw(), (n * c, h, w), &win).core()?;
-        Ok(self.wrap(CoreDType::F32, len, out))
+        self.via_f32(x, |x| {
+            let (n, c, h, w) = nchw(x.shape());
+            let win = pool2d(p);
+            let (oh, ow) = win.output(h, w).core()?;
+            let len = n * c * oh * ow;
+            let out = self.alloc(CoreDType::F32, len)?;
+            let xd = self.dense(&x)?;
+            pool_grad::avg_pool2d(&self.ctx, xd.raw(), out.raw(), (n * c, h, w), &win).core()?;
+            Ok(self.wrap(CoreDType::F32, len, out))
+        })
     }
 
     fn avg_pool2d_backward(&self, grad: View<'_>, input_shape: &Shape, p: &Pool2dParams) -> Result<Storage> {
+        f32_only(&grad, "avg_pool2d_backward")?;
         let (n, c, h, w) = nchw(input_shape);
         let len = input_shape.numel();
         let out = self.alloc(CoreDType::F32, len)?;
@@ -785,16 +835,20 @@ impl Backend for GpuBackend {
     }
 
     fn adaptive_avg_pool2d(&self, x: View<'_>, out_hw: [usize; 2]) -> Result<Storage> {
-        let (n, c, h, w) = nchw(x.shape());
-        let len = n * c * out_hw[0] * out_hw[1];
-        let out = self.alloc(CoreDType::F32, len)?;
-        let xd = self.dense(&x)?;
-        pool_grad::adaptive_avg_pool2d(&self.ctx, xd.raw(), out.raw(), (n * c, h, w), (out_hw[0], out_hw[1]))
-            .core()?;
-        Ok(self.wrap(CoreDType::F32, len, out))
+        self.via_f32(x, |x| {
+            let (n, c, h, w) = nchw(x.shape());
+            let len = n * c * out_hw[0] * out_hw[1];
+            let out = self.alloc(CoreDType::F32, len)?;
+            let xd = self.dense(&x)?;
+            let planes = (n * c, h, w);
+            pool_grad::adaptive_avg_pool2d(&self.ctx, xd.raw(), out.raw(), planes, (out_hw[0], out_hw[1]))
+                .core()?;
+            Ok(self.wrap(CoreDType::F32, len, out))
+        })
     }
 
     fn adaptive_avg_pool2d_backward(&self, grad: View<'_>, input_shape: &Shape) -> Result<Storage> {
+        f32_only(&grad, "adaptive_avg_pool2d_backward")?;
         let (n, c, h, w) = nchw(input_shape);
         let (_, _, oh, ow) = nchw(grad.shape());
         let len = input_shape.numel();
@@ -809,26 +863,18 @@ impl Backend for GpuBackend {
         let (n, c, h, w) = nchw(x.shape());
         let (oh, ow) = (h * scale[0], w * scale[1]);
         let len = n * c * oh * ow;
-        let out = self.alloc(CoreDType::F32, len)?;
+        let dtype = x.storage.dtype();
+        let out = self.alloc(dtype, len)?;
         if len > 0 {
             let xd = self.dense(&x)?;
-            layout::upsample_nearest2d(
-                &self.ctx,
-                xd.raw(),
-                out.raw(),
-                n * c,
-                h,
-                w,
-                oh,
-                ow,
-                crate::DType::F32,
-            )
-            .core()?;
+            layout::upsample_nearest2d(&self.ctx, xd.raw(), out.raw(), n * c, h, w, oh, ow, kdt(dtype))
+                .core()?;
         }
-        Ok(self.wrap(CoreDType::F32, len, out))
+        Ok(self.wrap(dtype, len, out))
     }
 
     fn upsample_nearest2d_backward(&self, grad: View<'_>, scale: [usize; 2]) -> Result<Storage> {
+        f32_only(&grad, "upsample_nearest2d_backward")?;
         let (n, c, oh, ow) = nchw(grad.shape());
         let (h, w) = (oh / scale[0], ow / scale[1]);
         let len = n * c * h * w;
@@ -916,15 +962,16 @@ impl Backend for GpuBackend {
         p: &Conv2dParams,
         act: Option<UnaryOp>,
     ) -> Result<Storage> {
-        let mut d = self.conv_desc(x.shape(), w.shape(), p);
+        let dtype = x.storage.dtype();
+        let mut d = self.conv_desc(x.shape(), w.shape(), p, dtype);
         d.act = conv_act(act).ok_or(Error::NotSupported { op: "conv2d_act", backend: BACKEND_NAME })?;
         let (oh, ow) = d.output().core()?;
         let len = d.n * d.c_out * oh * ow;
-        let out = self.alloc(CoreDType::F32, len)?;
+        let out = self.alloc(dtype, len)?;
         let (xd, wd) = (self.dense(&x)?, self.dense(&w)?);
         let bd = bias.as_ref().map(|b| self.dense(b)).transpose()?;
         conv::conv2d(&self.ctx, &d, xd.raw(), wd.raw(), bd.as_ref().map(|b| b.raw()), out.raw()).core()?;
-        Ok(self.wrap(CoreDType::F32, len, out))
+        Ok(self.wrap(dtype, len, out))
     }
 
     fn batch_norm_act(
@@ -1062,6 +1109,7 @@ impl Backend for GpuBackend {
         out_hw: [usize; 2],
         pad_value: u8,
         scale: f32,
+        dtype: CoreDType,
     ) -> Result<Storage> {
         let [oh, ow] = out_hw;
         let per = 3 * oh * ow;
@@ -1070,7 +1118,7 @@ impl Backend for GpuBackend {
             return Err(Error::NotSupported { op: "letterbox_rgb8", backend: BACKEND_NAME });
         }
         let len = images.len() * per;
-        let out = self.alloc(CoreDType::F32, len)?;
+        let out = self.alloc(dtype, len)?;
         let td = self.dense(&taps)?;
         for (i, (im, g)) in images.iter().zip(geoms).enumerate() {
             let d = LetterboxDesc {
@@ -1085,9 +1133,9 @@ impl Backend for GpuBackend {
                 taps: g.taps,
             };
             let src = self.dense(im)?;
-            vision::letterbox_rgb8(&self.ctx, src.raw(), td.raw(), out.raw(), &d).core()?;
+            vision::letterbox_rgb8(&self.ctx, src.raw(), td.raw(), out.raw(), &d, kdt(dtype)).core()?;
         }
-        Ok(self.wrap(CoreDType::F32, len, out))
+        Ok(self.wrap(dtype, len, out))
     }
 
     fn detect_candidates(
@@ -1113,6 +1161,7 @@ impl Backend for GpuBackend {
             p.num_classes,
             p.reg_max,
             p.conf,
+            kdt(box_raw.storage.dtype()),
         )
         .core()?;
         Ok(self.wrap(CoreDType::U32, len, out))

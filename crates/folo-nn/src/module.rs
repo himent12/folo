@@ -11,9 +11,9 @@
 use std::any::Any;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use folo_core::{Device, Tensor};
+use folo_core::{DType, Device, Tensor};
 
-use crate::Result;
+use crate::{Error, Result};
 
 /// Whether a tensor is learned (a parameter, updated by optimizers) or a buffer (state such as BatchNorm
 /// running statistics).
@@ -198,6 +198,41 @@ pub trait Module: Any + Send + Sync {
             t.tensor.to_device_(device)?;
         }
         Ok(())
+    }
+
+    /// Convert every floating parameter and buffer to `dtype` (`F32` or `F16`) in place, on its device
+    /// ([`folo_core::Tensor::to_dtype_`]): identities and `requires_grad` are kept, like [`Module::to_device`].
+    /// `F16` is for inference on a backend that computes in it (the GPU with `shader-f16`, see
+    /// `folo_core::backend::computes_f16`); folo-nn's layers then run their forward in `F16` storage.
+    /// Non-float tensors are left alone.
+    ///
+    /// ```
+    /// use folo_core::{rng::Rng, DType};
+    /// use folo_nn::{Conv2d, Conv2dConfig, Module};
+    ///
+    /// let mut conv = Conv2d::new(Conv2dConfig::new(3, 8, 3), &mut Rng::seed(0));
+    /// conv.to_dtype(DType::F16).unwrap();
+    /// assert_eq!(conv.weight.dtype(), DType::F16);
+    /// ```
+    fn to_dtype(&mut self, dtype: DType) -> Result<()> {
+        if !dtype.is_float() {
+            return Err(Error::Invalid(format!("Module::to_dtype: {dtype} is not a float dtype")));
+        }
+        for t in self.named_tensors() {
+            if t.tensor.dtype().is_float() {
+                t.tensor.to_dtype_(dtype)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The dtype of the first floating parameter or buffer (`F32` for a module without any).
+    fn dtype(&self) -> DType {
+        self.named_tensors()
+            .into_iter()
+            .map(|t| t.tensor.dtype())
+            .find(|d| d.is_float())
+            .unwrap_or(DType::F32)
     }
 
     /// The mode of this module, or of its first descendant that has one; `true` if none does.

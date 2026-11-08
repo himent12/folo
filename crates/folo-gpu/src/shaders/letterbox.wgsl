@@ -1,11 +1,11 @@
-// Letterbox one u8 RGB image into an f32 [3, OH, OW] slice of the output, sampling exactly as folo-data's
+// Letterbox one u8 RGB image into a [3, OH, OW] slice of the output, sampling exactly as folo-data's
 // resize (an integer box prefilter, then 11-bit fixed-point bilinear taps; see kernels/vision.rs).
 // Params: 0 = OW, 1 = OH, 2 = source width, 3 = source height, 4 = pad x, 5 = pad y, 6 = resized width,
 // 7 = resized height, 8 = fx, 9 = fy, 10 = pad value, 11 = scale (f32), 12 = output offset (elements),
-// 13 = taps offset (words).
+// 13 = taps offset (words). T is the output type (f32, or f16 rounded once from the f32 value).
 @group(0) @binding(1) var<storage, read> SRC: array<u32>;
 @group(0) @binding(2) var<storage, read> TAPS: array<u32>;
-@group(0) @binding(3) var<storage, read_write> Y: array<f32>;
+@group(0) @binding(3) var<storage, read_write> Y: array<T>;
 
 fn byte_at(i: u32) -> u32 {
     return (SRC[i >> 2u] >> ((i & 3u) * 8u)) & 0xffu;
@@ -52,7 +52,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
     let rw = pu(6u);
     let rh = pu(7u);
     if (x < px || x >= px + rw || y < py || y >= py + rh) {
-        let v = f32(pu(10u)) * scale;
+        let v = T(f32(pu(10u)) * scale);
         Y[base] = v;
         Y[base + plane] = v;
         Y[base + 2u * plane] = v;
@@ -74,6 +74,6 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
         let t = src_px(a, ya, c) * iwx + src_px(b, ya, c) * wx;
         let u = src_px(a, yb, c) * iwx + src_px(b, yb, c) * wx;
         let v = (t * iwy + u * wy + (1u << 21u)) >> 22u;
-        Y[base + c * plane] = f32(v) * scale;
+        Y[base + c * plane] = T(f32(v) * scale);
     }
 }

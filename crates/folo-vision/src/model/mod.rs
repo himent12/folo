@@ -470,6 +470,12 @@ impl FoloModel {
         self.backbone.stem.conv.weight.device()
     }
 
+    /// The floating dtype of the weights: `F32`, or `F16` after [`Module::to_dtype`] for half-precision
+    /// inference (the forward then takes and returns `F16` tensors).
+    pub fn dtype(&self) -> folo_core::DType {
+        self.backbone.stem.conv.weight.dtype()
+    }
+
     /// Move every weight and BatchNorm buffer to `device` in place (folo-nn's [`Module::to_device`]): tensor
     /// identities, names, `requires_grad` and the train/eval and fused state are kept, so an optimizer or
     /// EMA built over this model stays valid (move their own state with `Optimizer::to_device` /

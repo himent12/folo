@@ -1,8 +1,9 @@
 // Reduce the middle axis of [outer, R, inner] with inner > 1: out[o, i] = reduce_r x[o, r, i].
 // Workgroup = 64 columns x 4 lanes over R. Spec: OP. Params: 0 = outer, 1 = R, 2 = scale, 3 = inner,
-// 4 = column chunks per outer row (ceil(inner / 64)), 5 = identity.
-@group(0) @binding(1) var<storage, read> X: array<f32>;
-@group(0) @binding(2) var<storage, read_write> Y: array<f32>;
+// 4 = column chunks per outer row (ceil(inner / 64)), 5 = identity. XT / YT are the storage types of X and Y
+// (f32 or f16); the arithmetic is f32.
+@group(0) @binding(1) var<storage, read> X: array<XT>;
+@group(0) @binding(2) var<storage, read_write> Y: array<YT>;
 
 var<workgroup> partial: array<f32, 256>;
 
@@ -34,7 +35,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
     if (o < outer && col < inner) {
         let base = o * r * inner + col;
         for (var i = lid.y; i < r; i += 4u) {
-            acc = combine(acc, X[base + i * inner]);
+            acc = combine(acc, f32(X[base + i * inner]));
         }
     }
     let slot = lid.y * 64u + lid.x;
@@ -43,6 +44,6 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
     if (lid.y == 0u && o < outer && col < inner) {
         let v = combine(combine(partial[lid.x], partial[64u + lid.x]),
                         combine(partial[128u + lid.x], partial[192u + lid.x]));
-        Y[o * inner + col] = v * pf(2u);
+        Y[o * inner + col] = YT(v * pf(2u));
     }
 }

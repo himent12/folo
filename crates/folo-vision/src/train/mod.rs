@@ -734,7 +734,7 @@ impl Trainer {
             let targets = targets_from_normalized(&batch.targets, n, s, s)?;
             let x = match (&ctx, staged) {
                 (Some(c), Some(st)) => feed::staged_tensor(c, self.device, &st, batch.shape)?,
-                _ => batch_tensor(&mut batch, self.device)?,
+                _ => batch_tensor(&mut batch, self.device, folo_core::DType::F32)?,
             };
             let lr = self.sched.lr_at(self.sched.step(), &self.opt.groups()[decay]);
 

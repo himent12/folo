@@ -21,7 +21,10 @@ training and evaluation pipeline, a server, a CLI and a web studio.
   squeeze/unsqueeze, flatten) do not copy. Ops return `Result`; `+ - * /` (on `Tensor`, `&Tensor`, `f32`) return
   `Result<Tensor>` too. Errors name the op and both shapes.
 - `DType`: `F32` (compute), `F16` (storage / GPU inference), `U8` (images), `U32`/`I64` (indices). Arithmetic is `F32`;
-  copies, views, `cat`, `index_select`, `gather` and casts work for every dtype. Comparisons return 0/1 `F32` masks.
+  copies, views, `cat`, `index_select`, `gather` and casts work for every dtype. Comparisons return 0/1 masks of their
+  operands' dtype. On a backend that computes in f16 (`Backend::computes_f16`: the GPU with `shader-f16`) the forward
+  ops also take `F16` operands and return `F16` (half-precision inference); every float operand of an op has one dtype.
+  The dtype lives with the storage, like the device, so `Tensor::to_dtype_` / `Module::to_dtype` convert in place.
 - `Device`: `Cpu` or `Gpu(ordinal)`. Kernels sit behind the `Backend` trait (below); the CPU backend lives in folo-core.
 - CPU kernels: contiguous fast paths with rayon above ~32K elements; strided inputs are walked row by row after merging
   dimensions, or made contiguous once. A BLIS-style GEMM (`cpu::gemm`, packed panels, 6x16 AVX2/FMA micro-kernel

@@ -8,7 +8,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use folo_core::{Device, Tensor};
+use folo_core::{DType, Device, Tensor};
 use folo_data::{Batch, DataLoader, Dataset, LoaderConfig};
 use folo_nn::Module;
 use serde::Serialize;
@@ -78,17 +78,19 @@ pub struct ValResult {
     pub seconds: f64,
 }
 
-/// Wrap a loader batch as an `[n, 3, h, w]` f32 tensor in `0..1` on `device`. A `u8` batch
-/// ([`LoaderConfig::u8_images`]) is uploaded as bytes and converted there (`value / 255`).
-pub(crate) fn batch_tensor(batch: &mut Batch, device: Device) -> Result<Tensor> {
+/// Wrap a loader batch as an `[n, 3, h, w]` tensor of `dtype` (`F32`, or `F16` for a half-precision model) in
+/// `0..1` on `device`. A `u8` batch ([`LoaderConfig::u8_images`]) is uploaded as bytes and converted there
+/// (`value / 255`, computed in f32).
+pub(crate) fn batch_tensor(batch: &mut Batch, device: Device, dtype: DType) -> Result<Tensor> {
     if !batch.images_u8.is_empty() {
         let t = Tensor::from_vec(std::mem::take(&mut batch.images_u8), batch.shape)?;
         let t = if device.is_cpu() { t } else { t.to_device(device)? };
-        return Ok(t.to_dtype(folo_core::DType::F32)?.div_scalar(255.0)?);
+        return Ok(t.to_dtype(dtype)?.div_scalar(255.0)?);
     }
     let images = std::mem::take(&mut batch.images);
     let t = Tensor::from_vec(images, batch.shape)?;
-    Ok(if device.is_cpu() { t } else { t.to_device(device)? })
+    let t = if device.is_cpu() { t } else { t.to_device(device)? };
+    Ok(t.to_dtype(dtype)?)
 }
 
 /// The ground truth of image `i` of a batch, in network-input pixels.
@@ -104,8 +106,8 @@ pub(crate) fn batch_truths(batch: &Batch) -> Vec<Vec<Truth>> {
     out
 }
 
-/// Evaluate `model` (in eval mode, fused or not) on `ds`. Every class id of the dataset must be below the model's
-/// class count.
+/// Evaluate `model` (in eval mode, fused or not; `F32`, or `F16` after [`Module::to_dtype`] on a GPU that computes
+/// in it) on `ds`. Every class id of the dataset must be below the model's class count.
 pub fn validate(model: &FoloModel, ds: Arc<dyn Dataset>, cfg: &ValConfig) -> Result<ValResult> {
     let t0 = Instant::now();
     if model.is_training() {
@@ -152,7 +154,7 @@ pub fn validate(model: &FoloModel, ds: Arc<dyn Dataset>, cfg: &ValConfig) -> Res
     for batch in loader.epoch(0) {
         let mut batch = batch?;
         let truths = batch_truths(&batch);
-        let x = batch_tensor(&mut batch, device)?;
+        let x = batch_tensor(&mut batch, device, model.dtype())?;
         let pred = model.predict_raw(&x, &cfg.nms)?;
         for (i, img) in pred.images.iter().enumerate() {
             ev.add_image(&img.detections, &truths[i]);

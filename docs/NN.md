@@ -91,7 +91,8 @@ is reproducible everywhere. Head priors (MODEL.md §6.5): `BOX_BIAS_PRIOR = 2.0`
 - `ModelFile::load(model, &LoadOptions)`: source selection (EMA for inference when present, model namespace for
   training), strict (every offending name listed; class lists must be identical) or partial (load matching names,
   shapes and convertible dtypes; skip and report the rest; skip the class-output layers `head.cls.*.out.*` whenever
-  the class lists differ), `F16 → F32` conversion, fused files for inference only. `LoadReport` lists the loaded,
+  the class lists differ), `F16 → F32` conversion (and `F16` files into an `F16` model as they are), fused files for
+  inference only. `LoadReport` lists the loaded,
   skipped (with reasons) and missing names.
 - Checkpoints: `save_checkpoint(path, &meta, &CheckpointParts { model, ema, optimizer, schedule, rng, epoch, best,
   train_config })` writes the model, `ema.*` + `ema.__updates`, `optim.*` + `optim.__step`, `sched.__step` and the

@@ -1,7 +1,7 @@
 //! Raw element buffers behind tensors.
 
 use std::any::Any;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use half::f16;
@@ -220,13 +220,20 @@ impl Storage {
 /// Shared, lockable storage with a version counter bumped on every in-place write. Autograd records the
 /// version when an op saves its inputs and refuses to run backward if it changed.
 ///
-/// The device is kept next to the data (not in each tensor) so [`crate::Tensor::to_device_`] can move a
-/// storage in place: every tensor and view sharing it follows. It is an atomic so `Tensor::device()` never
-/// takes the lock.
+/// The device and dtype are kept next to the data (not in each tensor) so [`crate::Tensor::to_device_`] and
+/// [`crate::Tensor::to_dtype_`] can convert a storage in place: every tensor and view sharing it follows. They
+/// are atomics so `Tensor::device()` / `Tensor::dtype()` never take the lock.
 pub(crate) struct StorageCell {
     data: RwLock<Storage>,
     version: AtomicU64,
     device: AtomicU64,
+    dtype: AtomicU8,
+}
+
+const DTYPES: [DType; 5] = [DType::F32, DType::F16, DType::U8, DType::U32, DType::I64];
+
+fn encode_dtype(d: DType) -> u8 {
+    DTYPES.iter().position(|&x| x == d).expect("every dtype is listed") as u8
 }
 
 /// `Cpu` as 0, `Gpu(i)` as `i + 1`.
@@ -247,7 +254,14 @@ fn decode_device(v: u64) -> Device {
 impl StorageCell {
     pub fn new(s: Storage) -> Self {
         let device = AtomicU64::new(encode_device(s.device()));
-        StorageCell { data: RwLock::new(s), version: AtomicU64::new(0), device }
+        let dtype = AtomicU8::new(encode_dtype(s.dtype()));
+        StorageCell { data: RwLock::new(s), version: AtomicU64::new(0), device, dtype }
+    }
+
+    /// The element type of the data.
+    #[inline]
+    pub fn dtype(&self) -> DType {
+        DTYPES[self.dtype.load(Ordering::Acquire) as usize]
     }
 
     /// The device of the data.
@@ -256,11 +270,12 @@ impl StorageCell {
         decode_device(self.device.load(Ordering::Acquire))
     }
 
-    /// Replace the data with `new` (same dtype and length, any device) through an already-held write guard.
+    /// Replace the data with `new` (same length, any device and dtype) through an already-held write guard.
     pub fn replace(&self, guard: &mut RwLockWriteGuard<'_, Storage>, new: Storage) {
-        let device = new.device();
+        let (device, dtype) = (new.device(), new.dtype());
         let old = std::mem::replace(&mut **guard, new);
         self.device.store(encode_device(device), Ordering::Release);
+        self.dtype.store(encode_dtype(dtype), Ordering::Release);
         if let Storage::Cpu(CpuStorage::F32(v)) = old {
             crate::cpu::recycle(v);
         }

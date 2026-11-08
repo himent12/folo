@@ -48,6 +48,7 @@ the CPU, then moved to the backend. Options (all optional; unknown fields are ig
 | `backend` | `"auto"` | `"auto"`: WebGPU when it initialises and passes a test pass (a small gray image letterboxed to `imgsz`, which also compiles the kernels a real call needs), otherwise the CPU, with the reason in `info().fallback`. `"webgpu"`: WebGPU or a rejected promise. `"cpu"`: always the CPU |
 | `modelId` | `""` | echoed as `model_id` in every result |
 | `imgsz` | the file's `folo.imgsz` | letterbox size `S` (a multiple of 32): one image is padded `rect` to multiples of 32 inside `S × S`, like `folo predict` |
+| `precision` | `"f32"` | `"f16"`: half precision (f16 weights and activations, f32 accumulation) on WebGPU when the adapter has `shader-f16`; on the CPU or without `shader-f16` the model runs in f32 and `info().precisionFallback` says why. `"f32"`: always f32 |
 
 Rejects with an `Error` whose message says what is wrong (not a `.folo` file, unsupported config, no WebGPU, a
 detached buffer, ...). `detect` likewise never throws: every problem rejects its promise.
@@ -75,9 +76,10 @@ and the awaited readback (the forward pass is queued work, the readback is where
 Several `detect` calls may be in flight on one detector; each awaits its own readback.
 
 ### `detector.info() → FoloDetectorInfo`
-`{ backend, device, adapter, fallback, simd128, threads, arch, imgsz, classes, modelId }`: `adapter` is the GPU
-adapter's name, or `null` when the browser does not disclose it (Chrome does not); `fallback` is why `auto` chose
-the CPU (`null` otherwise); `simd128` is whether the module was built with SIMD128 (always, from the script);
+`{ backend, device, adapter, fallback, precision, precisionFallback, simd128, threads, arch, imgsz, classes, modelId }`:
+`adapter` is the GPU adapter's name, or `null` when the browser does not disclose it (Chrome does not); `fallback` is
+why `auto` chose the CPU (`null` otherwise); `precision` is what the model runs in (`"f32"` / `"f16"`) and
+`precisionFallback` why a requested `"f16"` runs in f32 (`null` otherwise); `simd128` is whether the module was built with SIMD128 (always, from the script);
 `threads` is 1 (see Limitations).
 
 ### Functions
@@ -165,7 +167,8 @@ score within 0.01), or does not reject bad inputs (detached buffers, wrong or ov
 - **One CPU thread.** Threads need `wasm-bindgen-rayon`, a nightly toolchain with `-Z build-std` and
   `+atomics,+bulk-memory`, and a cross-origin isolated page (COOP / COEP headers). FOLO stays on stable Rust, so the
   CPU backend is single-threaded; WebGPU is the fast path.
-- **f32 on WebGPU.** The model computes in f32, as natively; `shader-f16` is requested when the adapter has it, but
-  no inference path uses f16 compute yet.
+- **f16 on WebGPU is opt-in** (`precision: "f16"`) and needs the adapter's `shader-f16` (Chrome exposes it on most
+  desktop GPUs; WebGPU on D3D12 through Dawn may not). It is not benchmarked in the browser yet; natively it is a
+  modest gain at large batches (docs/BENCHMARKS.md) and none at batch 1, which is what the page runs.
 - No video / webcam streaming helper yet (call `detect` per frame); no batching (`predictBatch`) in the JS API.
 - Training is not exposed (folo-vision's trainer compiles for wasm but needs threads and files).

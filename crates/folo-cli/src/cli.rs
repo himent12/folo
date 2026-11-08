@@ -72,6 +72,10 @@ pub struct ServeArgs {
     /// gpu:<n>. Training runs use their own `device` setting.
     #[arg(long, env = "FOLO_DEVICE", default_value = "auto")]
     pub device: String,
+    /// Precision of inference and model evaluation: f32, or f16 (half precision on a GPU with shader-f16; f32
+    /// with a warning where f16 is not available).
+    #[arg(long, env = "FOLO_PRECISION", default_value = "f32")]
+    pub precision: String,
 }
 
 /// `folo describe`.
@@ -243,6 +247,10 @@ pub struct ValArgs {
     /// Device: auto, cpu or gpu:<n>.
     #[arg(long, default_value = "auto")]
     pub device: String,
+    /// Half precision: f16 weights and activations (f32 accumulation) on a GPU with shader-f16; runs in f32 with a
+    /// note anywhere else.
+    #[arg(long)]
+    pub half: bool,
     /// Data loader worker threads [default: min(cores, 8)].
     #[arg(long)]
     pub workers: Option<usize>,
@@ -272,6 +280,10 @@ pub struct PredictArgs {
     /// Device: auto, cpu or gpu:<n>.
     #[arg(long, default_value = "auto")]
     pub device: String,
+    /// Half precision: f16 weights and activations (f32 accumulation) on a GPU with shader-f16; runs in f32 with a
+    /// note anywhere else.
+    #[arg(long)]
+    pub half: bool,
     /// Write annotated images (boxes coloured by class, with class id and score) to this folder.
     #[arg(long)]
     pub save: Option<PathBuf>,

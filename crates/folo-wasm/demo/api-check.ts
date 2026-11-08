@@ -5,14 +5,16 @@ import init, { FoloDetector, hasWebGpu, version, type FoloDetectResult, type Fol
 export async function check(bytes: Uint8Array, buffer: ArrayBuffer, img: ImageData, rgba: Uint8ClampedArray): Promise<number> {
   await init();
   const a: FoloDetector = await FoloDetector.load(bytes);
-  const b = await FoloDetector.load(buffer, { backend: "cpu", modelId: "m_1", imgsz: 320 });
+  const b = await FoloDetector.load(buffer, { backend: "cpu", modelId: "m_1", imgsz: 320, precision: "f16" });
   const r1: FoloDetectResult = await a.detect(img);
   const r2 = await b.detect(rgba, 64, 48, { conf: 0.5, iou: 0.6, maxDet: 10 });
   const r3 = await a.detect(img, undefined, undefined, { conf: 0.3 });
   const info: FoloDetectorInfo = a.info();
   const backend: "webgpu" | "cpu" = r1.backend;
+  const precision: "f32" | "f16" = info.precision;
+  const why: string | null = info.precisionFallback;
   a.free();
   b.free();
   return r1.boxes.length + r2.timing.total_ms + r3.image.width + info.classes.length + backend.length
-    + (hasWebGpu() ? 1 : 0) + version().length + (a.backend === "cpu" ? 0 : 1);
+    + precision.length + (why ?? "").length + (hasWebGpu() ? 1 : 0) + version().length + (a.backend === "cpu" ? 0 : 1);
 }

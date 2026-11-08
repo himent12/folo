@@ -26,7 +26,6 @@ pub(crate) struct TensorInner {
     id: TensorId,
     storage: Arc<StorageCell>,
     layout: Layout,
-    dtype: DType,
     requires_grad: AtomicBool,
     node: Option<Node>,
 }
@@ -61,12 +60,11 @@ pub struct Tensor(pub(crate) Arc<TensorInner>);
 impl Tensor {
     // ----- construction -----
 
-    pub(crate) fn from_cell(storage: Arc<StorageCell>, layout: Layout, dtype: DType) -> Tensor {
+    pub(crate) fn from_cell(storage: Arc<StorageCell>, layout: Layout) -> Tensor {
         Tensor(Arc::new(TensorInner {
             id: TensorId::next(),
             storage,
             layout,
-            dtype,
             requires_grad: AtomicBool::new(false),
             node: None,
         }))
@@ -89,13 +87,12 @@ impl Tensor {
     /// Wrap a storage whose length is known to match.
     pub(crate) fn make(storage: Storage, shape: Shape) -> Tensor {
         debug_assert_eq!(storage.len(), shape.numel());
-        let dtype = storage.dtype();
-        Self::from_cell(Arc::new(StorageCell::new(storage)), Layout::contiguous(shape), dtype)
+        Self::from_cell(Arc::new(StorageCell::new(storage)), Layout::contiguous(shape))
     }
 
     /// A new tensor (new identity, no graph) over the same storage with `layout`.
     pub(crate) fn with_layout(&self, layout: Layout) -> Tensor {
-        Self::from_cell(self.0.storage.clone(), layout, self.0.dtype)
+        Self::from_cell(self.0.storage.clone(), layout)
     }
 
     /// A tensor from host data.
@@ -268,7 +265,7 @@ impl Tensor {
     /// The element type.
     #[inline]
     pub fn dtype(&self) -> DType {
-        self.0.dtype
+        self.0.storage.dtype()
     }
 
     /// The device.
@@ -453,7 +450,6 @@ impl Tensor {
             id: TensorId::next(),
             storage: inner.storage.clone(),
             layout: inner.layout.clone(),
-            dtype: inner.dtype,
             requires_grad: AtomicBool::new(false),
             node: Some(node),
         }))

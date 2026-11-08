@@ -69,9 +69,10 @@ unary_fns! {
 }
 
 impl Tensor {
-    /// Apply an elementwise op (`F32`).
+    /// Apply an elementwise op (`F32`, or `F16` on backends that compute in it; the result has the input's
+    /// dtype).
     pub fn unary(&self, op: UnaryOp) -> Result<Tensor> {
-        self.check_f32(op.name())?;
+        self.check_float(op.name())?;
         let b = self.backend()?;
         let s = self.with_view(|v| b.unary(op, v))?;
         let out = Tensor::wrap(s, self.shape().clone(), op.name())?;
@@ -145,12 +146,13 @@ impl Tensor {
         self.unary(UnaryOp::MinScalar(c))
     }
 
-    /// Apply a broadcasting binary op (`F32`). Comparisons return 0/1 `F32` masks without gradient.
+    /// Apply a broadcasting binary op (`F32`, or `F16` on backends that compute in it; both operands have the
+    /// same dtype, and so does the result). Comparisons return 0/1 masks without gradient.
     pub fn binary(&self, op: BinaryOp, other: &Tensor) -> Result<Tensor> {
         let name = op.name();
         self.check_same_device(other, name)?;
-        self.check_f32(name)?;
-        other.check_f32(name)?;
+        self.check_float(name)?;
+        other.check_float_like(self, name)?;
         let b = self.backend()?;
         let (shape, s) =
             self.with_broadcast(other, name, |shape, va, vb| Ok((shape.clone(), b.binary(op, va, vb)?)))?;
@@ -248,9 +250,10 @@ impl Tensor {
         self.binary(BinaryOp::Le, other)
     }
 
-    /// A rank-0 `F32` tensor holding `v` on this tensor's device.
+    /// A rank-0 tensor holding `v` on this tensor's device, in its dtype when that is a float (else `F32`).
     pub(crate) fn scalar_like(&self, v: f32) -> Result<Tensor> {
-        Tensor::full_with(Shape::scalar(), v as f64, DType::F32, self.device())
+        let dtype = if self.dtype().is_float() { self.dtype() } else { DType::F32 };
+        Tensor::full_with(Shape::scalar(), v as f64, dtype, self.device())
     }
 
     /// `self == c` as a 0/1 `F32` mask.

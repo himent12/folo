@@ -141,11 +141,12 @@ impl Conv2d {
     }
 
     /// A conv over existing tensors (shapes are checked against `config`; `config.bias` follows `bias`). The
-    /// tensors are used as they are: mark them `requires_grad_()` to train them.
+    /// tensors are used as they are: mark them `requires_grad_()` to train them. Both are `F32`, or both `F16`
+    /// (half-precision inference).
     pub fn from_tensors(mut config: Conv2dConfig, weight: Tensor, bias: Option<Tensor>) -> Result<Self> {
         config.bias = bias.is_some();
         config.validate()?;
-        if weight.dims() != config.weight_shape() || weight.dtype() != DType::F32 {
+        if weight.dims() != config.weight_shape() || !matches!(weight.dtype(), DType::F32 | DType::F16) {
             return Err(Error::Invalid(format!(
                 "Conv2d: weight {:?} {} does not match {:?}",
                 weight.dims(),
@@ -154,7 +155,7 @@ impl Conv2d {
             )));
         }
         if let Some(b) = &bias
-            && (b.dims() != [config.out_channels] || b.dtype() != DType::F32)
+            && (b.dims() != [config.out_channels] || b.dtype() != weight.dtype())
         {
             return Err(Error::Invalid(format!(
                 "Conv2d: bias {:?} does not match [{}]",

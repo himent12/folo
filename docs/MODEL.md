@@ -784,6 +784,11 @@ Fuse each Conv's BN into its conv, in f32: `k = γ / sqrt(running_var + eps)`, `
 `b' = β − running_mean · k`. The head `Conv2d`s are unchanged. Then optionally cast to f16 (FORMAT.md export).
 Fused inference must match unfused eval-mode inference to `1e-4` relative on the decoded output (f32).
 
+Half precision (`Predictor::new_f16`, `folo predict --half`): the fused model is converted to f16 and runs with f16
+weights and activations on a GPU with `shader-f16`; every GEMM, convolution, reduction and softmax accumulates in
+f32, the letterbox writes the f16 input, and the head decode (DFL softmax, sigmoid, boxes) runs in f32 on the f16
+outputs. Its mAP must be within 0.002 of the f32 model's (docs/BENCHMARKS.md).
+
 ### 9.2 Letterbox
 For an `h0 × w0` image and target `S` (default `imgsz = 640`): `r = min(S / h0, S / w0)` (upscaling allowed),
 `nw = clamp(round(w0 · r), 1, S)`, `nh = clamp(round(h0 · r), 1, S)`, bilinear resize, then pad with gray `114` to:

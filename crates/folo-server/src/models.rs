@@ -364,7 +364,8 @@ fn open_for(model: &folo_vision::FoloModel, dataset: &DatasetRef) -> Result<folo
 
 /// Validates the weights at `path` on `dataset` and shapes the report as `/eval`.
 fn evaluate(path: &Path, dataset: &DatasetRef, device: Device) -> Result<ModelEval> {
-    let model = engine::open_model(path, device)?;
+    // The cached evaluation is the model's reference score: always f32.
+    let model = engine::open_model(path, device, folo_vision::Precision::F32)?;
     let ds = open_for(&model, dataset)?;
     let split = if ds.val.is_empty() { Split::Train } else { Split::Val };
     let part = ds.split(split);
@@ -381,7 +382,9 @@ fn evaluate(path: &Path, dataset: &DatasetRef, device: Device) -> Result<ModelEv
 }
 
 /// `POST /api/val`: validates the weights of `m` on `split` of `dataset` at `imgsz` (the model's own size when
-/// `None`) with NMS thresholds `conf` / `iou` (the rest of MODEL.md §8.7's validation settings).
+/// `None`) with NMS thresholds `conf` / `iou` (the rest of MODEL.md §8.7's validation settings), at `precision`
+/// (f16 only where the device computes in it).
+#[allow(clippy::too_many_arguments)]
 pub fn val(
     m: &ModelRef,
     dataset: &DatasetRef,
@@ -390,6 +393,7 @@ pub fn val(
     conf: f32,
     iou: f32,
     device: Device,
+    precision: folo_vision::Precision,
 ) -> Result<ValReport> {
     let bad = |msg: String| Error::new(StatusCode::BAD_REQUEST, "invalid_body", msg);
     let unit = |x: f32| (0.0..=1.0).contains(&x); // false for NaN
@@ -402,7 +406,7 @@ pub fn val(
         return Err(bad(format!("imgsz must be a multiple of 32 in 32..=4096, got {s}")));
     }
     let t0 = std::time::Instant::now();
-    let model = engine::open_model(&m.path, device)?;
+    let model = engine::open_model(&m.path, device, precision)?;
     let ds = open_for(&model, dataset)?;
     let part = ds.split(match split {
         folo_api::Split::Train => Split::Train,

@@ -125,11 +125,11 @@ On `wasm32` the same crate runs on the browser's WebGPU. Nothing may block the p
 
 | Kernel | Entry point | dtypes | Notes |
 |---|---|---|---|
-| unary | `kernels::elementwise::unary` | f32 | exp, log, sqrt, rsqrt, neg, abs, sigmoid, silu, relu, relu6, tanh, gelu (tanh), leaky_relu, hardswish, hardsigmoid, square, recip, sin, cos, floor, ceil; vec4 path when `n % 4 == 0` |
+| unary | `kernels::elementwise::unary` | f32 (the backend's ops go through the strided kernel below, f16 too) | exp, log, sqrt, rsqrt, neg, abs, sigmoid, silu, relu, relu6, tanh, gelu (tanh), leaky_relu, hardswish, hardsigmoid, square, recip, sin, cos, floor, ceil; vec4 path when `n % 4 == 0` |
 | binary | `kernels::elementwise::binary` | f32 | add, sub, mul, div, max, min, pow (C `powf` semantics). NumPy broadcasting; dims are coalesced first (`[N,C,H,W] + [1,C,1,1]` becomes rank 3); same-shape vec4 fast path; rank ≤ 8 after coalescing |
 | bias + activation | `kernels::elementwise::bias_act` | f32 | `act(x + bias[(i / inner) % C])`, or the activation alone |
-| reduce | `kernels::reduce::reduce` | f32 | sum, mean, max, min over the middle axis of `[outer, R, inner]`, i.e. any dim. `inner == 1`: one workgroup per row with a tree in workgroup memory; otherwise each thread owns a column and loads are coalesced |
-| softmax / log_softmax | `kernels::reduce::softmax` | f32 | last dim, one workgroup per row, max-shifted |
+| reduce | `kernels::reduce::reduce`, `reduce_as` | f32, f16 (f32 accumulation) | sum, mean, max, min over the middle axis of `[outer, R, inner]`, i.e. any dim. `inner == 1`: one workgroup per row with a tree in workgroup memory; otherwise each thread owns a column and loads are coalesced |
+| softmax / log_softmax | `kernels::reduce::softmax`, `softmax_rows` | f32, f16 (f32 max, sum and exponentials) | last dim, one workgroup per row, max-shifted |
 | GEMM | `kernels::gemm::gemm` | f32, f16 | `alpha·op(A)·op(B) (+ row/col bias) → act`; A, Aᵀ, B, Bᵀ; two-level batch with arbitrary offsets and strides (stride 0 broadcasts); f16 storage with f32 accumulation |
 | conv2d | `kernels::conv::conv2d` | f32, f16 | NCHW; stride, padding, dilation, groups; fused bias + activation. Implicit GEMM, a pointwise GEMM fast path for 1×1, and a direct depthwise kernel |
 | max_pool2d | `kernels::pooling::max_pool2d` | f32, f16 | kernel / stride / padding / dilation; padding never wins (−∞); floor mode |
@@ -137,27 +137,28 @@ On `wasm32` the same crate runs on the browser's WebGPU. Nothing may block the p
 | concat | `kernels::layout::copy_rows` | f32, f16 | any dim, via row-blocked copies; a single block becomes a buffer copy; f16 blocks need even lengths and offsets |
 | permute / transpose | `kernels::layout::permute` | f32, f16 | dims are coalesced; batched 2-D transposes (NCHW ↔ NHWC) go through a padded 32×32 tile, everything else through a generic strided copy |
 | cast | `kernels::layout::cast` | f32 ↔ f16 | packed words; needs no `shader-f16` |
-| strided gather | `kernels::strided::gather_strided` | any (1/2/4/8-byte) | make-contiguous of any view (offset, strides, stride-0 broadcast); dims coalesced; contiguous views become a buffer copy; sub-word elements assembled one output word per thread |
-| strided scatter | `kernels::strided::scatter_strided` | any | `copy_into` (cat, pad, view gradients, `copy_from`); sub-word elements written with `atomicAnd` / `atomicOr` on their own bits |
+| strided gather | `kernels::strided::gather_strided` | any (1/2/4/8-byte) | make-contiguous of any view (offset, strides, stride-0 broadcast); dims coalesced; contiguous views become a buffer copy; sub-word views whose innermost run is word-aligned (even f16 runs, u8 runs of four, every offset and outer stride too) are copied as `u32` views; other sub-word elements assembled one output word per thread |
+| strided scatter | `kernels::strided::scatter_strided` | any | `copy_into` (cat, pad, view gradients, `copy_from`); word-aligned sub-word views (as for the gather, e.g. concatenating f16 feature maps with even `H·W`) are written as `u32` words; other sub-word elements with `atomicAnd` / `atomicOr` on their own bits |
 | fill / cast | `kernels::strided::{fill_words, cast}` | any | `full` with a two-word pattern (i64) or `clear_buffer` for zeros; casts between all five dtypes with Rust `as` semantics (truncate, saturate, NaN → 0) |
 | index_select / gather | `kernels::strided::{index_select, gather}` | any | `i64` or `u32` indices; out-of-range indices give zeros |
 | index_add / scatter_add | `kernels::strided::{index_add, scatter_add}` | f32 | compare-and-swap float atomics; out-of-range indices skipped |
-| strided elementwise | `kernels::ew::elementwise` | f32 | folo-core's unary ops and their gradients, binary ops and comparisons, `where` (f32 or u8 mask); every operand a strided view read in place, linear + vec4 path when all are contiguous |
-| arg-reduce | `kernels::reduce::arg_reduce` | f32 → i64 | first max / min, NaN wins |
-| split reduce | `kernels::reduce::reduce_split` | f32 | long reductions over few outputs (BatchNorm statistics) in two passes |
-| softmax (any dim) | `kernels::reduce::softmax_dim` | f32 | rows kernel for the last dim, a column kernel otherwise |
+| strided elementwise | `kernels::ew::elementwise` | f32, f16 (f32 arithmetic; a `where` condition stays f32 / u8) | folo-core's unary ops and their gradients, binary ops and comparisons, `where` (f32 or u8 mask); every operand a strided view read in place, linear + vec4 path when all are contiguous |
+| arg-reduce | `kernels::reduce::arg_reduce` | f32 → i64 | first max / min, NaN wins (the backend runs f16 inputs on an f32 copy) |
+| split reduce | `kernels::reduce::reduce_split` | f32, f16 | long reductions over few outputs (BatchNorm statistics) in two passes; the partials between them are f32 |
+| softmax (any dim) | `kernels::reduce::softmax_dim` | f32, f16 | rows kernel for the last dim, a column kernel otherwise |
 | top-k | `kernels::reduce::topk` | f32 → (f32, i64) | sorted, ties by index, `total_cmp` order; one thread per row |
-| pooling + gradients | `kernels::pool_grad::*` | f32 | max pooling with indices and its gather backward, avg / adaptive avg pooling and backward, upsample backward |
+| pooling + gradients | `kernels::pool_grad::*` | f32 (max pooling with indices also f16) | max pooling with indices and its gather backward, avg / adaptive avg pooling and backward, upsample backward |
 | conv2d gradients | `kernels::conv::{conv2d_backward_input, conv2d_backward_weight}` | f32 | implicit GEMM (`CONV_MODE` 2 / 3) with split-K for the weight gradient, a transposed-A GEMM for 1×1 input gradients, direct depthwise kernels |
 | train-mode BatchNorm + activation | `kernels::norm::{batch_norm_forward, batch_norm_backward}` | f32 | NCHW, statistics over `N·H·W`. Forward: per-(channel, chunk) Welford partials merged with Chan's formula, a per-channel finalize (mean, `invstd`, the running-statistics update in place), then `act(x · scale + shift)`; backward: partial sums of `dz` and `dz · x̂` with the activation's derivative at the recomputed pre-activation, a finalize (`dγ`, `dβ`), then `dx`. Identity, SiLU or ReLU; 3 dispatches each way |
 | optimizer updates | `kernels::optim::optimizer_step` | f32 | in place, one thread per element: SGD (momentum, Nesterov, coupled decay), AdamW (decoupled decay, bias corrections), and `p = a·p + b·g` for EMAs, in the op order of folo-nn's CPU loops |
 | task-aligned assigner | `kernels::detect::assign` | f32 / u32 | docs/MODEL.md §7.3 on the raw head outputs, five dispatches: DFL decode of every anchor; one workgroup per gt that scans its candidates, scores `u = max(CIoU, 0)` and `m = score^α · u^β` and keeps its top k by `(m desc, anchor asc)` (per-thread sorted lists merged by a k-round tournament); two atomic passes for the conflicts (largest `u`, then the smallest gt index); the soft targets `t = m · u_max / (m_max + eps)` per gt and a dense per-anchor `(label, t)` map. Same decisions as `folo_vision::assign` |
 | detection loss | `kernels::detect::{bce_forward, bce_backward, box_terms, combine}` | f32 | §7.4: BCE over every logit against the dense targets, each element formed whole; CIoU + DFL per positive (softmax expectation, both terms and their hand-written backward in one thread); a one-workgroup fixed-order reduction to the reported items, the total and the backward scales. `exp`, `ln(1 + x)` and `atan` are written out in plain arithmetic (folo-core's `fast_exp`, an atanh series, Cephes `atanf`), since WGSL only promises an absolute error of 2^-21 for `log` near 1 |
-| letterbox | `kernels::vision::letterbox_rgb8` | u8 → f32 | one thread per canvas pixel: the padding grey, or the resized image sampled with folo-data's `ResizePlan` (integer box prefilter computed on the fly, then 11-bit fixed-point bilinear taps uploaded by the host), in integers, times `scale`: bit-exact with the CPU letterbox. Prefilter blocks whose sum could overflow u32 are refused (the caller letterboxes on the host) |
-| detection candidates | `kernels::vision::detect_candidates` | f32 → u32 | one thread per (image, anchor): the first maximum of the `nc` sigmoid scores; above `conf`, the DFL softmax expectation of each side, the box around the anchor times the stride, and a 7-word record `(anchor, class, score, x1, y1, x2, y2)` appended with an atomic counter per image (the output is cleared first) |
+| letterbox | `kernels::vision::letterbox_rgb8` | u8 → f32, f16 (the f32 value rounded once) | one thread per canvas pixel: the padding grey, or the resized image sampled with folo-data's `ResizePlan` (integer box prefilter computed on the fly, then 11-bit fixed-point bilinear taps uploaded by the host), in integers, times `scale`: bit-exact with the CPU letterbox. Prefilter blocks whose sum could overflow u32 are refused (the caller letterboxes on the host) |
+| detection candidates | `kernels::vision::detect_candidates` | f32, f16 → u32 (decoded in f32) | one thread per (image, anchor): the first maximum of the `nc` sigmoid scores; above `conf`, the DFL softmax expectation of each side, the box around the anchor times the stride, and a 7-word record `(anchor, class, score, x1, y1, x2, y2)` appended with an atomic counter per image (the output is cleared first) |
 
 The f16 kernels need `shader-f16`; without it they return `GpuError::Unsupported`. Everything not listed as f16
-is f32-only.
+is f32-only. f16 is storage: every f16 kernel widens to f32 on load, computes and accumulates in f32, and rounds once
+on the store (the GEMM and conv tiles are f32 in workgroup memory).
 
 ### GEMM design
 
@@ -322,6 +323,18 @@ println!("{}", loss.item::<f32>()?);                  // the only wait for the G
   `batch_norm_act` / `batch_norm_act_backward` are the BatchNorm kernels above (`Tensor::batch_norm_act_train`,
   recorded by folo-nn's `BatchNorm2d` as one custom op); `optimizer_step` is the update kernel
   (`Tensor::optimizer_step_`, used by folo-nn's SGD, AdamW and EMA on the GPU).
+- **Half precision** (`Backend::computes_f16`, true with `shader-f16` unless `FOLO_GPU_NO_F16` is set): the forward
+  ops folo-core lets `F16` through (elementwise and `where`, reductions, softmax, matmul, conv2d and the fused
+  conv, max / average / adaptive pooling, upsampling, the letterbox output and `detect_candidates`) take f16
+  operands and return f16 results, f32 inside as above; average pooling and the arg-reductions run on an f32 copy.
+  `Tensor::to_dtype_` converts a storage in place (the dtype lives in the storage cell, like the device), so
+  folo-nn's `Module::to_dtype(F16)` turns a fused model into an f16 one; folo-vision's `Predictor::new_f16` /
+  `folo predict --half` build on it. Gradient kernels stay f32-only and refuse f16 (`UnsupportedDType`): f16 is
+  for inference. Without `shader-f16` folo-core refuses f16 compute (`DTypeMismatch`) and the predictor falls back
+  to f32 (`predict::f16_unavailable` says why). `src/tests/f16.rs` checks every such op on f16 GPU tensors
+  against the f32 CPU on the same f16-rounded inputs (`1e-3` relative for single roundings, `2e-3` plus a small
+  absolute term for accumulations), and `crates/folo-vision/tests/gpu_f16.rs` the detector (decoded boxes and
+  scores, the end-to-end predictor, f16 exports loading as f16, the CPU fallback).
 - **Prediction** (folo-core's detector hooks): `letterbox_rgb8` and `detect_candidates` are the two kernels above.
   `folo_vision::predict::Predictor` on the GPU uploads each decoded image as raw `u8` (a quarter of the f32
   bytes), letterboxes on the device, runs the forward, decodes into candidates, and downloads the per-image counts
@@ -400,8 +413,12 @@ update kernel.
 
 ## Known limitations / follow-ups
 
-- Elementwise, reduce and softmax are f32-only; the f16 coverage is GEMM, conv, pooling, upsample, concat,
-  permute and casts.
+- **f16 is storage, not tensor cores.** The f16 GEMM and convs keep f32 tiles and f32 FMAs, so f16 saves memory
+  traffic (half the activation bytes) but not arithmetic: on Ada, non-tensor f16 math is no faster than f32. The
+  RTX 4080 SUPER does expose wgpu 30's `EXPERIMENTAL_COOPERATIVE_MATRIX` on Vulkan with 16×16×16 f16 → f32 (and
+  f16 → f16) configurations (`adapter.cooperative_matrix_properties()`, naga's `coop_mat16x16<f16, A>`,
+  `coopLoad` / `coopMultiplyAdd`); a tensor-core implicit-GEMM conv on it is the next step for f16 throughput. It
+  needs wgpu's `unsafe` `ExperimentalFeatures::enabled()` opt-in, so it would be behind a switch.
 - The f16 depthwise conv is slower than the f32 one (2-byte scalar loads); vectorising it is a follow-up.
 - Timings are wall-clock; GPU timestamp queries would make small-kernel numbers more precise.
 - `max_pool2d` has no `ceil_mode`; upsampling is nearest-only.

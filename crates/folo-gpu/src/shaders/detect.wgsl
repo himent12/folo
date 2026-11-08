@@ -3,9 +3,10 @@
 // expectation over RM bins per side, ltrb around the anchor point, times the stride) and a record
 // (anchor, class, score, x1, y1, x2, y2) is appended to the image's region of OUT: word 0 of the region
 // counts the records (zeroed by the host), the records follow in arrival order.
-// Params: 0 = B * A, 1 = A, 2 = NC, 3 = RM, 4 = conf (f32).
-@group(0) @binding(1) var<storage, read> BOX: array<f32>;
-@group(0) @binding(2) var<storage, read> CLS: array<f32>;
+// Params: 0 = B * A, 1 = A, 2 = NC, 3 = RM, 4 = conf (f32). T is the storage type of BOX and CLS (f32 or f16);
+// the decode is f32.
+@group(0) @binding(1) var<storage, read> BOX: array<T>;
+@group(0) @binding(2) var<storage, read> CLS: array<T>;
 @group(0) @binding(3) var<storage, read> ANC: array<f32>;
 @group(0) @binding(4) var<storage, read_write> OUT: array<atomic<u32>>;
 
@@ -25,9 +26,9 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
     let a = i % na;
     let cb = b * nc * na + a;
     var best = 0u;
-    var bs = sig(CLS[cb]);
+    var bs = sig(f32(CLS[cb]));
     for (var c = 1u; c < nc; c++) {
-        let s = sig(CLS[cb + c * na]);
+        let s = sig(f32(CLS[cb + c * na]));
         if (s > bs) {
             best = c;
             bs = s;
@@ -37,14 +38,14 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
     var d = array<f32, 4>(0.0, 0.0, 0.0, 0.0);
     for (var side = 0u; side < 4u; side++) {
         let base = (b * 4u + side) * rm * na + a;
-        var m = BOX[base];
+        var m = f32(BOX[base]);
         for (var k = 1u; k < rm; k++) {
-            m = max(m, BOX[base + k * na]);
+            m = max(m, f32(BOX[base + k * na]));
         }
         var z = 0.0;
         var e = 0.0;
         for (var k = 0u; k < rm; k++) {
-            let p = exp(BOX[base + k * na] - m);
+            let p = exp(f32(BOX[base + k * na]) - m);
             z += p;
             e += p * f32(k);
         }

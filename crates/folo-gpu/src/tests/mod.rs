@@ -8,6 +8,7 @@ pub(crate) mod backend;
 mod backend_net;
 mod conv;
 mod elementwise;
+mod f16;
 mod gemm;
 mod layout;
 mod reduce;

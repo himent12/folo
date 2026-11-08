@@ -62,11 +62,11 @@ impl Tensor {
     ) -> Result<Tensor> {
         let records = is_grad_enabled()
             && (self.requires_grad() || weight.requires_grad() || bias.is_some_and(Tensor::requires_grad));
-        let dev = self.device();
+        let (dev, dt) = (self.device(), self.dtype());
         let uniform = weight.device() == dev
-            && bias.is_none_or(|b| b.device() == dev && b.dtype() == DType::F32)
-            && self.dtype() == DType::F32
-            && weight.dtype() == DType::F32;
+            && bias.is_none_or(|b| b.device() == dev && b.dtype() == dt)
+            && weight.dtype() == dt
+            && self.check_float("conv2d_act").is_ok();
         if !records
             && uniform
             && let Some(shape) = conv_out_shape(self, weight, bias, p)
@@ -113,11 +113,12 @@ impl Tensor {
             && (xs.iter().any(|x| x.requires_grad())
                 || weight.requires_grad()
                 || bias.is_some_and(Tensor::requires_grad));
-        let dev = first.device();
-        let uniform = xs.iter().all(|x| x.device() == dev && x.dtype() == DType::F32)
+        let (dev, dt) = (first.device(), first.dtype());
+        let uniform = xs.iter().all(|x| x.device() == dev && x.dtype() == dt)
             && weight.device() == dev
-            && weight.dtype() == DType::F32
-            && bias.is_none_or(|b| b.device() == dev && b.dtype() == DType::F32);
+            && weight.dtype() == dt
+            && bias.is_none_or(|b| b.device() == dev && b.dtype() == dt)
+            && first.check_float("conv2d_act_cat").is_ok();
         // Every part NCHW with the first one's N, H, W; the channel counts add up.
         let dims = xs.iter().map(|x| x.dims4().ok()).collect::<Option<Vec<_>>>();
         let cat_dims = dims.and_then(|d| {

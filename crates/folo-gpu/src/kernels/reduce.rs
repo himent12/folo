@@ -3,12 +3,43 @@
 //! A reduction over dim `d` of a dense tensor views it as `[outer, R, inner]` (`R` = size of `d`). When
 //! `inner == 1` the reduced axis is contiguous and one workgroup reduces each row with a tree in workgroup
 //! memory; otherwise each thread owns one output column and walks `R` with coalesced loads across columns.
+//!
+//! The `*_as` / dtype-taking entry points also read and write f16 storage (with `shader-f16`); the arithmetic
+//! is always f32, so an f16 reduction or softmax accumulates in f32 and rounds once on the store.
 
 use super::{check_buf, prod};
 use crate::DType;
 use crate::context::GpuContext;
 use crate::error::{Result, shape_err};
+use crate::kernels::gemm::check_dtype;
 use crate::pipeline::{Access, KernelDef, Params, Source, Spec};
+
+/// `alias XT` / `alias YT` (the storage types of `X` and `Y`) in front of `body`, from the spec's `XH` / `YH`.
+fn typed(spec: &Spec, body: &str) -> String {
+    let t = |h: bool| if h { "f16" } else { "f32" };
+    format!("alias XT = {};\nalias YT = {};\n{body}", t(spec.get_bool("XH")), t(spec.get_bool("YH")))
+}
+
+/// The spec switches for an `x` of `xdt` and a `y` of `ydt`.
+fn typed_spec(ctx: &GpuContext, xdt: DType, ydt: DType, op: &'static str) -> Result<Spec> {
+    check_dtype(ctx, xdt, op)?;
+    check_dtype(ctx, ydt, op)?;
+    let (xh, yh) = (xdt == DType::F16, ydt == DType::F16);
+    Ok(Spec::new().bool("XH", xh).bool("YH", yh).f16(xh || yh))
+}
+
+fn gen_rows(s: &Spec) -> String {
+    typed(s, include_str!("../shaders/reduce_rows.wgsl"))
+}
+fn gen_cols(s: &Spec) -> String {
+    typed(s, include_str!("../shaders/reduce_cols.wgsl"))
+}
+fn gen_softmax(s: &Spec) -> String {
+    typed(s, include_str!("../shaders/softmax.wgsl"))
+}
+fn gen_softmax_cols(s: &Spec) -> String {
+    typed(s, include_str!("../shaders/softmax_cols.wgsl"))
+}
 
 /// Reduction kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -44,17 +75,17 @@ impl ReduceOp {
 static ROWS: KernelDef = KernelDef {
     name: "reduce_rows",
     storage: &[Access::Read, Access::ReadWrite],
-    source: Source::Static(include_str!("../shaders/reduce_rows.wgsl")),
+    source: Source::Generated(gen_rows),
 };
 static COLS: KernelDef = KernelDef {
     name: "reduce_cols",
     storage: &[Access::Read, Access::ReadWrite],
-    source: Source::Static(include_str!("../shaders/reduce_cols.wgsl")),
+    source: Source::Generated(gen_cols),
 };
 static SOFTMAX: KernelDef = KernelDef {
     name: "softmax",
     storage: &[Access::Read, Access::ReadWrite],
-    source: Source::Static(include_str!("../shaders/softmax.wgsl")),
+    source: Source::Generated(gen_softmax),
 };
 
 /// Reduces `x` viewed as `[outer, r, inner]` over the middle axis into `y` (`[outer, inner]`), f32.
@@ -67,13 +98,26 @@ pub fn reduce(
     r: usize,
     inner: usize,
 ) -> Result<()> {
-    check_buf(x, prod(&[outer, r, inner])?, DType::F32, "reduce input")?;
-    check_buf(y, prod(&[outer, inner])?, DType::F32, "reduce output")?;
+    reduce_as(ctx, op, (x, DType::F32), (y, DType::F32), outer, r, inner)
+}
+
+/// [`reduce`] with `x` and `y` stored as the given dtypes (f32 or f16; f32 arithmetic either way).
+pub fn reduce_as(
+    ctx: &GpuContext,
+    op: ReduceOp,
+    (x, xdt): (&wgpu::Buffer, DType),
+    (y, ydt): (&wgpu::Buffer, DType),
+    outer: usize,
+    r: usize,
+    inner: usize,
+) -> Result<()> {
+    check_buf(x, prod(&[outer, r, inner])?, xdt, "reduce input")?;
+    check_buf(y, prod(&[outer, inner])?, ydt, "reduce output")?;
     if outer * inner == 0 {
         return Ok(());
     }
     let scale = if op == ReduceOp::Mean { 1.0 / r as f32 } else { 1.0 };
-    let spec = Spec::new().u32("OP", op.code());
+    let spec = typed_spec(ctx, xdt, ydt, "reduce")?.u32("OP", op.code());
     if inner == 1 {
         let k = ctx.kernel(&ROWS, spec)?;
         let p = Params::new().uz(outer)?.uz(r)?.f(scale).f(op.identity());
@@ -103,12 +147,25 @@ pub fn softmax(
     n: usize,
     log: bool,
 ) -> Result<()> {
-    check_buf(x, prod(&[rows, n])?, DType::F32, "softmax input")?;
-    check_buf(y, prod(&[rows, n])?, DType::F32, "softmax output")?;
+    softmax_rows(ctx, x, y, rows, n, log, DType::F32)
+}
+
+/// [`softmax`] for `x` and `y` of `dtype` (f32 or f16; the max, the sum and the exponentials are f32).
+pub fn softmax_rows(
+    ctx: &GpuContext,
+    x: &wgpu::Buffer,
+    y: &wgpu::Buffer,
+    rows: usize,
+    n: usize,
+    log: bool,
+    dtype: DType,
+) -> Result<()> {
+    check_buf(x, prod(&[rows, n])?, dtype, "softmax input")?;
+    check_buf(y, prod(&[rows, n])?, dtype, "softmax output")?;
     if rows * n == 0 {
         return Ok(());
     }
-    let k = ctx.kernel(&SOFTMAX, Spec::new().bool("LOG", log))?;
+    let k = ctx.kernel(&SOFTMAX, typed_spec(ctx, dtype, dtype, "softmax")?.bool("LOG", log))?;
     let p = Params::new().uz(rows)?.uz(n)?;
     ctx.dispatch(&k, &[x, y], &p, ctx.grid_1d(rows as u64 * 256, 256)?)
 }
@@ -123,7 +180,7 @@ static ARG: KernelDef = KernelDef {
 static SOFTMAX_COLS: KernelDef = KernelDef {
     name: "softmax_cols",
     storage: &[Access::Read, Access::ReadWrite],
-    source: Source::Static(include_str!("../shaders/softmax_cols.wgsl")),
+    source: Source::Generated(gen_softmax_cols),
 };
 static TOPK: KernelDef = KernelDef {
     name: "topk",
@@ -145,7 +202,9 @@ fn split_factor(r: usize, want: usize, min_len: usize) -> usize {
 }
 
 /// [`reduce`] (sum / max / min) that splits a long reduction over few outputs into two passes so the GPU
-/// fills up: `[outer, r, inner]` is reduced as `[outer · s, r / s, inner]`, then `[outer, s, inner]`.
+/// fills up: `[outer, r, inner]` is reduced as `[outer · s, r / s, inner]`, then `[outer, s, inner]`. `x` and
+/// `y` hold `dtype` (f32 or f16); the partial results between the passes are f32.
+#[allow(clippy::too_many_arguments)]
 pub fn reduce_split(
     ctx: &GpuContext,
     op: ReduceOp,
@@ -154,18 +213,19 @@ pub fn reduce_split(
     outer: usize,
     r: usize,
     inner: usize,
+    dtype: DType,
 ) -> Result<()> {
     // Workgroups the single-pass kernels would launch.
     let groups = if inner == 1 { outer } else { outer.saturating_mul(inner.div_ceil(64)) };
     let s =
         if groups < 256 && r >= 8192 { split_factor(r, 512usize.div_ceil(groups.max(1)), 1024) } else { 1 };
     if s <= 1 || op == ReduceOp::Mean {
-        return reduce(ctx, op, x, y, outer, r, inner);
+        return reduce_as(ctx, op, (x, dtype), (y, dtype), outer, r, inner);
     }
-    check_buf(x, prod(&[outer, r, inner])?, DType::F32, "reduce input")?;
+    check_buf(x, prod(&[outer, r, inner])?, dtype, "reduce input")?;
     let tmp = ctx.alloc(DType::F32.bytes(prod(&[outer, s, inner])?))?;
-    reduce(ctx, op, x, tmp.raw(), outer * s, r / s, inner)?;
-    reduce(ctx, op, tmp.raw(), y, outer, s, inner)
+    reduce_as(ctx, op, (x, dtype), (tmp.raw(), DType::F32), outer * s, r / s, inner)?;
+    reduce_as(ctx, op, (tmp.raw(), DType::F32), (y, dtype), outer, s, inner)
 }
 
 /// Index of the first maximum (`max`) or minimum over the middle axis of dense f32 `[outer, r, inner]`, as
@@ -193,24 +253,26 @@ pub fn arg_reduce(
     ctx.dispatch(&k, &[x, y], &p, ctx.grid_1d(n as u64, 256)?)
 }
 
-/// Softmax (or log-softmax) over the middle axis of dense f32 `[outer, d, inner]`.
+/// Softmax (or log-softmax) over the middle axis of dense `[outer, d, inner]` of `dtype` (f32 or f16, f32
+/// arithmetic).
 pub fn softmax_dim(
     ctx: &GpuContext,
     x: &wgpu::Buffer,
     y: &wgpu::Buffer,
     (outer, d, inner): (usize, usize, usize),
     log: bool,
+    dtype: DType,
 ) -> Result<()> {
     if inner == 1 {
-        return softmax(ctx, x, y, outer, d, log);
+        return softmax_rows(ctx, x, y, outer, d, log, dtype);
     }
-    check_buf(x, prod(&[outer, d, inner])?, DType::F32, "softmax input")?;
-    check_buf(y, prod(&[outer, d, inner])?, DType::F32, "softmax output")?;
+    check_buf(x, prod(&[outer, d, inner])?, dtype, "softmax input")?;
+    check_buf(y, prod(&[outer, d, inner])?, dtype, "softmax output")?;
     let n = outer * inner;
     if n * d == 0 {
         return Ok(());
     }
-    let k = ctx.kernel(&SOFTMAX_COLS, Spec::new().bool("LOG", log))?;
+    let k = ctx.kernel(&SOFTMAX_COLS, typed_spec(ctx, dtype, dtype, "softmax")?.bool("LOG", log))?;
     let p = Params::new().uz(n)?.uz(d)?.uz(inner)?.f(f32::NEG_INFINITY);
     ctx.dispatch(&k, &[x, y], &p, ctx.grid_1d(n as u64, 256)?)
 }

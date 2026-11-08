@@ -25,7 +25,7 @@ Status keys: `[ ]` todo, `[~]` in progress, `[x]` merged. The orchestrator keeps
 - [x] benchmarks: Ultralytics baselines (#14); folo-n GPU forward b1 3.98 ms vs yolo26n 4.95 ms (docs/BENCHMARKS.md)
 - [~] GPU training end to end with the loss and assigner on the device; R6 real-data run (#46)
 - [~] inference round 2: CPU forward ≤ 22.8 ms, GPU end-to-end predict (perf/inference-2)
-- [ ] f16 whole-model inference
+- [x] f16 whole-model inference (`--half`; tensor-core GEMMs next)
 
 ## M4 — real use
 - [x] real datasets from disk (YOLO, COCO), export folo-f16
