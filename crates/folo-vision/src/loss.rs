@@ -695,12 +695,38 @@ fn loss_impl(
     Ok(LossOutput { total, total_value, items, num_fg: n, target_score_sum: tss_raw as f32 })
 }
 
-/// The full detection loss of `docs/MODEL.md` §7: [`assign_batch`] then [`loss_with_assignment`].
+/// The full detection loss of `docs/MODEL.md` §7: [`assign_batch`] then [`loss_with_assignment`] on the host,
+/// or, when the head outputs are on a folo-gpu device, the same computation as GPU kernels
+/// ([`folo_gpu::detect::detection_loss`]: assigner, fused BCE, fused CIoU + DFL, with a fused backward) whose
+/// only host round trip is reading back the reported items.
 ///
 /// `box_raw: [B, 4 · reg_max, A]`, `cls_raw: [B, nc, A]` (§6.3), `anchors` for the input size, `targets` one entry
-/// per image in input pixels. If any head output is non-finite the result is a detached NaN loss
-/// ([`LossOutput::is_finite`] is false) and the assigner is skipped.
+/// per image in input pixels. If any head output is non-finite the result is a NaN loss
+/// ([`LossOutput::is_finite`] is false; on the host the assigner is skipped and `total` is detached).
 pub fn detection_loss(
+    box_raw: &Tensor,
+    cls_raw: &Tensor,
+    anchors: &Anchors,
+    targets: &[ImageTargets],
+    cfg: &LossConfig,
+) -> Result<LossOutput> {
+    if device_loss_supported(box_raw, cfg) {
+        return detection_loss_device(box_raw, cls_raw, anchors, targets, cfg);
+    }
+    detection_loss_host(box_raw, cls_raw, anchors, targets, cfg)
+}
+
+/// Whether [`detection_loss`] runs on the device for these outputs: they live on a folo-gpu device and `topk`
+/// and `reg_max` fit its kernels (`1..=64`, `2..=32`); other settings take the host path.
+pub fn device_loss_supported(box_raw: &Tensor, cfg: &LossConfig) -> bool {
+    folo_gpu::detect::supported(box_raw.device())
+        && (1..=folo_gpu::detect::MAX_TOPK).contains(&cfg.tal.topk)
+        && (2..=folo_gpu::detect::MAX_REG_MAX).contains(&cfg.reg_max)
+}
+
+/// [`detection_loss`] with the assigner on the host, whatever the device (the reference the device path is
+/// tested against).
+pub fn detection_loss_host(
     box_raw: &Tensor,
     cls_raw: &Tensor,
     anchors: &Anchors,
@@ -709,16 +735,123 @@ pub fn detection_loss(
 ) -> Result<LossOutput> {
     let asg = assign_batch(box_raw, cls_raw, anchors, targets, cfg)?;
     if !asg.inputs_finite {
-        let nan = f32::NAN;
-        return Ok(LossOutput {
-            total: Tensor::scalar(nan).to_device(cls_raw.device())?,
-            total_value: nan,
-            items: LossItems { box_: nan, cls: nan, dfl: nan },
-            num_fg: 0,
-            target_score_sum: 0.0,
-        });
+        return nan_loss(cls_raw.device());
     }
     loss_with_assignment(box_raw, cls_raw, anchors, &asg, cfg)
+}
+
+fn nan_loss(device: folo_core::Device) -> Result<LossOutput> {
+    let nan = f32::NAN;
+    Ok(LossOutput {
+        total: Tensor::scalar(nan).to_device(device)?,
+        total_value: nan,
+        items: LossItems { box_: nan, cls: nan, dfl: nan },
+        num_fg: 0,
+        target_score_sum: 0.0,
+    })
+}
+
+/// The ground truth as folo-gpu's per-image tables.
+fn gpu_targets(targets: &[ImageTargets]) -> Vec<(Vec<[f32; 4]>, &[u32])> {
+    targets
+        .iter()
+        .map(|t| (t.boxes.iter().map(|b| [b.x1, b.y1, b.x2, b.y2]).collect(), &t.labels[..]))
+        .collect()
+}
+
+fn gpu_tal(cfg: &LossConfig) -> folo_gpu::detect::TalSettings {
+    let t = &cfg.tal;
+    folo_gpu::detect::TalSettings {
+        topk: t.topk,
+        alpha: t.alpha,
+        beta: t.beta,
+        eps: t.eps,
+        min_box_size: t.min_box_size,
+    }
+}
+
+fn detection_loss_device(
+    box_raw: &Tensor,
+    cls_raw: &Tensor,
+    anchors: &Anchors,
+    targets: &[ImageTargets],
+    cfg: &LossConfig,
+) -> Result<LossOutput> {
+    check_inputs(box_raw, cls_raw, anchors, cfg)?;
+    let tables = gpu_targets(targets);
+    let gts: Vec<_> = tables.iter().map(|(b, l)| folo_gpu::detect::ImageGt { boxes: b, labels: l }).collect();
+    let at = folo_gpu::detect::AnchorTable { points: &anchors.points, strides: &anchors.strides };
+    let s = folo_gpu::detect::LossSettings {
+        reg_max: cfg.reg_max,
+        gains: [cfg.box_gain, cfg.cls_gain, cfg.dfl_gain],
+        tal: gpu_tal(cfg),
+    };
+    let out = folo_gpu::detect::detection_loss(box_raw, cls_raw, &at, &gts, &s)?;
+    // The loss's one readback: the reported items, the positives and the target score sum.
+    let st = out.stats.to_vec::<f32>()?;
+    if st[6] != 0.0 {
+        return nan_loss(cls_raw.device());
+    }
+    Ok(LossOutput {
+        total: out.total,
+        total_value: st[0],
+        items: LossItems { box_: st[1], cls: st[2], dfl: st[3] },
+        num_fg: st[4] as usize,
+        target_score_sum: st[5],
+    })
+}
+
+/// [`assign_batch`] on a folo-gpu device (the kernels [`detection_loss`] uses there), downloaded into the same
+/// [`BatchAssignment`] form (image, then anchor order). For tests and tools: training never downloads it.
+pub fn assign_batch_device(
+    box_raw: &Tensor,
+    cls_raw: &Tensor,
+    anchors: &Anchors,
+    targets: &[ImageTargets],
+    cfg: &LossConfig,
+) -> Result<BatchAssignment> {
+    let (b, nc, n_a) = check_inputs(box_raw, cls_raw, anchors, cfg)?;
+    let tables = gpu_targets(targets);
+    let gts: Vec<_> = tables.iter().map(|(b, l)| folo_gpu::detect::ImageGt { boxes: b, labels: l }).collect();
+    let at = folo_gpu::detect::AnchorTable { points: &anchors.points, strides: &anchors.strides };
+    let asg = folo_gpu::detect::assign(box_raw, cls_raw, &at, &gts, cfg.reg_max, &gpu_tal(cfg))?;
+    let (g, k) = (asg.desc.g, asg.desc.k);
+    let picks = asg.picks.to_vec::<u32>()?;
+    let slots = asg.slots.to_vec::<u32>()?;
+    let mut fg: Vec<(u32, u32, u32, f32, Xyxy)> = Vec::new();
+    for s in 0..b * g * k {
+        if slots[2 * s + 1] == 1 {
+            let (i, gi) = (s / (g * k), (s / k) % g);
+            let a = picks[3 * s];
+            fg.push((i as u32, a, targets[i].labels[gi], f32::from_bits(slots[2 * s]), targets[i].boxes[gi]));
+        }
+    }
+    fg.sort_by_key(|e| (e.0, e.1));
+    // The loss kernels flag non-finite head values themselves; this test helper checks on the host like
+    // `assign_batch`.
+    let finite = [box_raw, cls_raw]
+        .iter()
+        .map(|t| t.to_vec::<f32>().map(|v| v.iter().all(|x| x.is_finite())))
+        .collect::<Result<Vec<bool>>>()?
+        .into_iter()
+        .all(|f| f);
+    let mut out = BatchAssignment {
+        batch: b,
+        num_anchors: n_a,
+        num_classes: nc,
+        inputs_finite: finite,
+        ..Default::default()
+    };
+    if finite {
+        for (i, a, l, t, bx) in fg {
+            out.image.push(i);
+            out.anchor.push(a);
+            out.label.push(l);
+            out.score.push(t);
+            out.target.push(bx);
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

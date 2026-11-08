@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 
+use folo_core::backend::OptimStep;
 use folo_core::{DType, Device, Grads, Tensor, TensorId, no_grad};
 
 use super::GradSource;
@@ -46,7 +47,13 @@ impl GradAccumulator {
         for s in &mut self.slots {
             let Some(g) = grads.get(&s.param) else { continue };
             if s.valid {
-                s.buf.as_ref().expect("valid slot has a buffer").add_assign(g)?;
+                let buf = s.buf.as_ref().expect("valid slot has a buffer");
+                // One fused in-place `buf = buf + g` where the backend has it (the GPU), else a tensor op.
+                let fused = !buf.device().is_cpu()
+                    && buf.optimizer_step_(g, &[], &OptimStep::Axpby { a: 1.0, b: 1.0 })?;
+                if !fused {
+                    buf.add_assign(g)?;
+                }
             } else {
                 let buf = match &s.buf {
                     Some(b) => b.clone(),
@@ -104,8 +111,14 @@ impl GradAccumulator {
     }
 
     /// docs/MODEL.md §8.3: if the global norm `n` exceeds `max_norm`, scale every gradient by
-    /// `max_norm / (n + 1e-6)`. Returns `n` (before clipping). `max_norm <= 0` disables clipping.
+    /// `max_norm / (n + 1e-6)`. Returns `n` (before clipping). `max_norm <= 0` disables clipping. Gradients on a
+    /// device are clipped there without reading the norm back, and the result is then NaN (use
+    /// [`GradAccumulator::global_norm`] to read it).
     pub fn clip_grad_norm(&mut self, max_norm: f64) -> Result<f64> {
+        if self.slots.iter().any(|s| s.valid && !s.param.device().is_cpu()) {
+            self.clip_grad_norm_device(max_norm)?;
+            return Ok(f64::NAN);
+        }
         let n = self.global_norm()?;
         if max_norm > 0.0 && n > max_norm {
             let c = (max_norm / (n + 1e-6)) as f32;
@@ -115,6 +128,48 @@ impl GradAccumulator {
             }
         }
         Ok(n)
+    }
+
+    /// [`GradAccumulator::clip_grad_norm`] for gradients on a device, without a host round trip: the norm (in
+    /// `f32`) and the factor `max_norm / (n + 1e-6)` (or 1) are device scalars and every gradient is scaled by it.
+    /// The squares are summed in units of the largest magnitude `s` (`n = s · sqrt(Σ (g / s)²)`), so finite
+    /// gradients whose squares overflow `f32` still give their norm, as the CPU's `f64` sum does.
+    fn clip_grad_norm_device(&mut self, max_norm: f64) -> Result<()> {
+        if max_norm <= 0.0 {
+            return Ok(());
+        }
+        let _g = no_grad();
+        let bufs: Vec<&Tensor> =
+            self.slots.iter().filter(|s| s.valid).map(|s| s.buf.as_ref().expect("valid")).collect();
+        let cat = |v: Vec<Tensor>| -> Result<Tensor> {
+            let refs: Vec<&Tensor> = v.iter().collect();
+            Ok(Tensor::cat(&refs, 0)?)
+        };
+        let peaks = bufs.iter().map(|b| Ok(b.abs()?.max_all()?.reshape([1])?)).collect::<Result<Vec<_>>>()?;
+        let peak = cat(peaks)?.max_all()?;
+        let scale = peak.gt_scalar(0.0)?.where_cond(&peak, &peak.ones_like()?)?;
+        // Work in units of s = the largest magnitude, through h = 1 / sqrt(s): every intermediate (g·h, g·h², max·h,
+        // r·sqrt(s)) stays a normal f32 for any finite s, where 1 / s or max / s could be subnormal (and flushed to
+        // zero by the GPU's division) and n = s·r could overflow.
+        let root = scale.sqrt()?;
+        let h = root.recip()?;
+        let sq = bufs
+            .iter()
+            .map(|b| Ok(b.mul(&h)?.mul(&h)?.square()?.sum_all()?.reshape([1])?))
+            .collect::<Result<Vec<_>>>()?;
+        let r = cat(sq)?.sum_all()?.sqrt()?; // n / s
+        // n > max ⇔ r·sqrt(s) > max·h, and max / (n + 1e-6) = h · (max·h / (r + 1e-6·h²)), applied as two factors.
+        let max = max_norm as f32;
+        let clip = r.mul(&root)?.gt(&h.mul_scalar(max)?)?;
+        let one = r.ones_like()?;
+        let k = h.mul_scalar(max)?.div(&r.add(&h.mul(&h)?.mul_scalar(1e-6)?)?)?;
+        let (f1, f2) = (clip.where_cond(&h, &one)?, clip.where_cond(&k, &one)?);
+        for s in self.slots.iter().filter(|s| s.valid) {
+            let b = s.buf.as_ref().expect("valid");
+            b.mul_assign(&f1)?;
+            b.mul_assign(&f2)?;
+        }
+        Ok(())
     }
 }
 

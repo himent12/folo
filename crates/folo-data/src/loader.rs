@@ -41,6 +41,9 @@ pub struct LoaderConfig {
     pub epochs: u32,
     /// Finished batches buffered ahead of the consumer.
     pub prefetch_batches: usize,
+    /// Deliver the pixels as `u8` ([`Batch::images_u8`], a quarter of the bytes, for uploading to a GPU that
+    /// converts them) instead of `f32` in `0..1` ([`Batch::images`]).
+    pub u8_images: bool,
 }
 
 impl Default for LoaderConfig {
@@ -55,6 +58,7 @@ impl Default for LoaderConfig {
             augment: Some(AugmentConfig::default()),
             epochs: 0,
             prefetch_batches: 2,
+            u8_images: false,
         }
     }
 }
@@ -96,8 +100,12 @@ impl ImageMeta {
 /// A batch ready for the network.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Batch {
-    /// `n * 3 * h * w` floats in `0..1`, `NCHW`, contiguous, channels `R G B`.
+    /// `n * 3 * h * w` floats in `0..1`, `NCHW`, contiguous, channels `R G B`; empty with
+    /// [`LoaderConfig::u8_images`].
     pub images: Vec<f32>,
+    /// With [`LoaderConfig::u8_images`]: the same pixels as `u8` (`NCHW`, `R G B`, `value / 255` is the float);
+    /// empty otherwise.
+    pub images_u8: Vec<u8>,
     /// `[n, 3, h, w]`.
     pub shape: [usize; 4],
     /// One row per box: `[batch_idx, class, cx, cy, w, h]`, coordinates normalised to the network input.
@@ -375,9 +383,9 @@ fn spawn(
                     let items: Vec<Result<Transformed>> =
                         (lo..hi).map(|p| pending.remove(&p).unwrap()).collect();
                     let batch = if collate_serial {
-                        par::serial(|| collate(items, shared.cfg.imgsz))
+                        par::serial(|| collate(items, &shared.cfg))
                     } else {
-                        collate(items, shared.cfg.imgsz)
+                        collate(items, &shared.cfg)
                     };
                     gate.advance(hi);
                     if batch_tx.send(batch).is_err() {
@@ -392,30 +400,45 @@ fn spawn(
 }
 
 /// Converts transformed samples into a [`Batch`].
-fn collate(items: Vec<Result<Transformed>>, imgsz: u32) -> Result<Batch> {
+fn collate(items: Vec<Result<Transformed>>, cfg: &LoaderConfig) -> Result<Batch> {
     let items: Vec<Transformed> = items.into_iter().collect::<Result<_>>()?;
-    let s = imgsz as usize;
+    let s = cfg.imgsz as usize;
     let plane = s * s;
     let n = items.len();
-    let mut images = vec![0f32; n * 3 * plane];
-    let lut: [f32; 256] = std::array::from_fn(|i| i as f32 / 255.0);
-    let fill = |(k, out): (usize, &mut [f32])| {
-        let img = &items[k].sample.image;
-        debug_assert_eq!((img.width as usize, img.height as usize), (s, s));
-        let (r, rest) = out.split_at_mut(plane);
-        let (g, b) = rest.split_at_mut(plane);
-        for (i, px) in img.data.as_chunks::<3>().0.iter().enumerate() {
-            r[i] = lut[px[0] as usize];
-            g[i] = lut[px[1] as usize];
-            b[i] = lut[px[2] as usize];
+    // Interleaved RGB → planar, through `conv` (the f32 LUT or the identity).
+    fn planar<T: Copy + Send + Sync + Default>(
+        items: &[Transformed],
+        s: usize,
+        conv: impl Fn(u8) -> T + Sync,
+    ) -> Vec<T> {
+        let plane = s * s;
+        let mut out = vec![T::default(); items.len() * 3 * plane];
+        let fill = |(k, out): (usize, &mut [T])| {
+            let img = &items[k].sample.image;
+            debug_assert_eq!((img.width as usize, img.height as usize), (s, s));
+            let (r, rest) = out.split_at_mut(plane);
+            let (g, b) = rest.split_at_mut(plane);
+            for (i, px) in img.data.as_chunks::<3>().0.iter().enumerate() {
+                r[i] = conv(px[0]);
+                g[i] = conv(px[1]);
+                b[i] = conv(px[2]);
+            }
+        };
+        if par::is_serial() || items.len() == 1 {
+            out.chunks_mut(3 * plane).enumerate().for_each(fill);
+        } else {
+            use rayon::prelude::*;
+            out.par_chunks_mut(3 * plane).enumerate().for_each(fill);
         }
-    };
-    if par::is_serial() || n == 1 {
-        images.chunks_mut(3 * plane).enumerate().for_each(fill);
-    } else {
-        use rayon::prelude::*;
-        images.par_chunks_mut(3 * plane).enumerate().for_each(fill);
+        out
     }
+    let (images, images_u8) = if cfg.u8_images {
+        (Vec::new(), planar(&items, s, |v| v))
+    } else {
+        let lut: [f32; 256] = std::array::from_fn(|i| i as f32 / 255.0);
+        (planar(&items, s, |v| lut[v as usize]), Vec::new())
+    };
+    debug_assert_eq!(images.len().max(images_u8.len()), n * 3 * plane);
     let mut targets = Vec::new();
     let mut meta = Vec::with_capacity(n);
     for (k, t) in items.iter().enumerate() {
@@ -429,7 +452,7 @@ fn collate(items: Vec<Result<Transformed>>, imgsz: u32) -> Result<Batch> {
             pad: t.letterbox.pad,
         });
     }
-    Ok(Batch { images, shape: [n, 3, s, s], targets, meta })
+    Ok(Batch { images, images_u8, shape: [n, 3, s, s], targets, meta })
 }
 
 /// Iterator over one epoch's batches. Dropping it stops the workers and joins them.
@@ -471,7 +494,7 @@ impl Iterator for EpochIter {
                 let bs = shared.cfg.batch_size;
                 let (lo, hi) = (self.batches * bs, ((self.batches + 1) * bs).min(order.len()));
                 let items = (lo..hi).map(|p| shared.produce(transform, *epoch, p, order[p])).collect();
-                collate(items, shared.cfg.imgsz)
+                collate(items, &shared.cfg)
             }
             Inner::Threads { rx, .. } => match rx.as_ref()?.recv() {
                 Ok(b) => b,

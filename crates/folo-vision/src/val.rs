@@ -78,8 +78,14 @@ pub struct ValResult {
     pub seconds: f64,
 }
 
-/// Wrap a loader batch as an `[n, 3, h, w]` tensor on `device`.
+/// Wrap a loader batch as an `[n, 3, h, w]` f32 tensor in `0..1` on `device`. A `u8` batch
+/// ([`LoaderConfig::u8_images`]) is uploaded as bytes and converted there (`value / 255`).
 pub(crate) fn batch_tensor(batch: &mut Batch, device: Device) -> Result<Tensor> {
+    if !batch.images_u8.is_empty() {
+        let t = Tensor::from_vec(std::mem::take(&mut batch.images_u8), batch.shape)?;
+        let t = if device.is_cpu() { t } else { t.to_device(device)? };
+        return Ok(t.to_dtype(folo_core::DType::F32)?.div_scalar(255.0)?);
+    }
     let images = std::mem::take(&mut batch.images);
     let t = Tensor::from_vec(images, batch.shape)?;
     Ok(if device.is_cpu() { t } else { t.to_device(device)? })
@@ -132,11 +138,16 @@ pub fn validate(model: &FoloModel, ds: Arc<dyn Dataset>, cfg: &ValConfig) -> Res
     if ds.is_empty() {
         return Ok(ValResult { report: ev.compute(), samples, seconds: t0.elapsed().as_secs_f64() });
     }
+    let device = model.device();
+    // A device gets the pixels as bytes (a quarter of the upload) and converts them itself.
     let loader = DataLoader::new(
         ds.clone(),
-        LoaderConfig { workers: cfg.workers, ..LoaderConfig::val(cfg.batch, cfg.imgsz) },
+        LoaderConfig {
+            workers: cfg.workers,
+            u8_images: !device.is_cpu(),
+            ..LoaderConfig::val(cfg.batch, cfg.imgsz)
+        },
     )?;
-    let device = model.device();
     let mut index = 0usize;
     for batch in loader.epoch(0) {
         let mut batch = batch?;

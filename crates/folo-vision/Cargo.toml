@@ -18,6 +18,8 @@ workspace = true
 folo-api.workspace = true
 folo-core.workspace = true
 folo-data.workspace = true
+# The task-aligned assigner and the detection loss run as folo-gpu kernels when the head outputs are on a GPU.
+folo-gpu.workspace = true
 folo-nn.workspace = true
 rayon.workspace = true
 serde.workspace = true
@@ -27,10 +29,6 @@ thiserror.workspace = true
 # `std::time::Instant` panics in the browser; web-time reads `performance.now()` there.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 web-time.workspace = true
-
-[dev-dependencies]
-# GPU tests (tests/gpu.rs) and the GPU benchmark; both skip without an adapter.
-folo-gpu.workspace = true
 
 [[bench]]
 name = "post"

@@ -146,9 +146,11 @@ The exact block definitions, layer tables, parameter names, head, loss, training
   `predict_raw` (forward + decode + NMS; decode runs on the outputs' device, NMS on the CPU), `to_device()`, and
   `.folo` save / load (`open_on(path, device)`) / transfer through folo-nn.
 - **Loss**: task-aligned assigner (TAL: `score^alpha * IoU^beta`, top-k), BCE classification on aligned targets,
-  CIoU box loss and DFL, weighted 7.5 / 0.5 / 1.5 by default. `folo_vision::loss` runs the assigner on host copies of the detached
-  head outputs, then builds the terms from folo-core tensor ops (fused custom ops for the full-size BCE and gather on
-  the CPU), so gradients flow into both head branches.
+  CIoU box loss and DFL, weighted 7.5 / 0.5 / 1.5 by default. On the CPU `folo_vision::loss` runs the assigner on the
+  detached head outputs, then builds the terms from folo-core tensor ops (fused custom ops for the full-size BCE and
+  gather), so gradients flow into both head branches. On a GPU the whole loss runs as folo-gpu kernels
+  (`folo_gpu::detect`: assigner, fused BCE, fused CIoU + DFL with a hand-written backward, as one custom op) and
+  only the reported items are read back.
 - **Box ops, NMS, metrics** work on plain slices so they are reusable everywhere: IoU / GIoU / DIoU / CIoU,
   xywh↔xyxy, class-aware batched NMS, COCO-style mAP@0.5 and mAP@0.5:0.95 (101-point interpolation), precision /
   recall / F1 curves, confusion matrix. `docs/METRICS.md` defines exactly how mAP is computed.
@@ -161,7 +163,9 @@ The exact block definitions, layer tables, parameter names, head, loss, training
   FORMAT.md state, atomic), early stopping. Resume from a checkpoint is bit-exact. Events (`status`, rate-limited
   `step`, `epoch`, `log`: the API.md payloads as `folo_api::RunEvent`) go to a callback and to the run's
   `metrics.jsonl`; the CLI's progress view, `--json` and the server consume them. The device is a parameter:
-  `place_model` moves the model (and with it the optimizer state and EMA) there with `Module::to_device`. `folo_vision::val::validate`
+  on a GPU (`place_model` moves the model; optimizer, EMA and gradient buffers follow) a feeder thread stages each
+  `u8` batch for upload while the previous step runs, accumulation and clipping stay on the device, and the step
+  waits only for the loss items and one BatchNorm finiteness check. `folo_vision::val::validate`
   is the same validation for `folo val`.
 - **Predictor** (`folo_vision::predict::Predictor`): loads `.folo` (EMA when present), fuses BN, letterboxes (rect for
   one image, square for a batch), forward, decode, NMS, rescale to the original image, with a preprocess /

@@ -148,6 +148,8 @@ On `wasm32` the same crate runs on the browser's WebGPU. Nothing may block the p
 | conv2d gradients | `kernels::conv::{conv2d_backward_input, conv2d_backward_weight}` | f32 | implicit GEMM (`CONV_MODE` 2 / 3) with split-K for the weight gradient, a transposed-A GEMM for 1×1 input gradients, direct depthwise kernels |
 | train-mode BatchNorm + activation | `kernels::norm::{batch_norm_forward, batch_norm_backward}` | f32 | NCHW, statistics over `N·H·W`. Forward: per-(channel, chunk) Welford partials merged with Chan's formula, a per-channel finalize (mean, `invstd`, the running-statistics update in place), then `act(x · scale + shift)`; backward: partial sums of `dz` and `dz · x̂` with the activation's derivative at the recomputed pre-activation, a finalize (`dγ`, `dβ`), then `dx`. Identity, SiLU or ReLU; 3 dispatches each way |
 | optimizer updates | `kernels::optim::optimizer_step` | f32 | in place, one thread per element: SGD (momentum, Nesterov, coupled decay), AdamW (decoupled decay, bias corrections), and `p = a·p + b·g` for EMAs, in the op order of folo-nn's CPU loops |
+| task-aligned assigner | `kernels::detect::assign` | f32 / u32 | docs/MODEL.md §7.3 on the raw head outputs, five dispatches: DFL decode of every anchor; one workgroup per gt that scans its candidates, scores `u = max(CIoU, 0)` and `m = score^α · u^β` and keeps its top k by `(m desc, anchor asc)` (per-thread sorted lists merged by a k-round tournament); two atomic passes for the conflicts (largest `u`, then the smallest gt index); the soft targets `t = m · u_max / (m_max + eps)` per gt and a dense per-anchor `(label, t)` map. Same decisions as `folo_vision::assign` |
+| detection loss | `kernels::detect::{bce_forward, bce_backward, box_terms, combine}` | f32 | §7.4: BCE over every logit against the dense targets, each element formed whole; CIoU + DFL per positive (softmax expectation, both terms and their hand-written backward in one thread); a one-workgroup fixed-order reduction to the reported items, the total and the backward scales. `exp`, `ln(1 + x)` and `atan` are written out in plain arithmetic (folo-core's `fast_exp`, an atanh series, Cephes `atanf`), since WGSL only promises an absolute error of 2^-21 for `log` near 1 |
 
 The f16 kernels need `shader-f16`; without it they return `GpuError::Unsupported`. Everything not listed as f16
 is f32-only.
@@ -336,6 +338,19 @@ println!("{}", loss.item::<f32>()?);                  // the only wait for the G
   a training step's loss and gradients, `.folo` loading onto the GPU).
 - **Moving whole models**: `Tensor::to_device_` moves a storage in place (identity kept), and folo-nn's
   `Module::to_device` / `Optimizer::to_device` / `ModelEma::to_device` build on it (docs/NN.md).
+- **Kernels outside the `Backend` trait.** `folo_gpu::register(ctx, device)` (which `init()` calls) also records the
+  context, so `context_for(device)` finds it; `dense_buffer(&tensor)` returns the wgpu buffer of a dense GPU tensor
+  and `tensor_from_buffer` wraps a pooled buffer as one. `folo_gpu::detect` uses them to run the task-aligned
+  assigner and the detection loss straight on the head outputs: `detect::assign` returns the assignment as device
+  tensors, `detect::detection_loss` the total as a custom op (its backward is the BCE and box backward kernels)
+  plus a 12-float `stats` tensor (items, positives, target score sum) that the caller reads once. folo-vision's
+  `detection_loss` takes this path for GPU tensors; `crates/folo-vision/tests/gpu_loss.rs` checks the assignment
+  against the host assigner (identical positives, gts and labels, soft targets to 1e-5) and the loss and both
+  gradients against the host loss.
+- **Staged uploads.** `GpuContext::stage(&[u8])` copies host data into a new mapped-at-creation staging buffer and
+  touches neither the command batch nor the queue, so another thread can prepare the next batch while the GPU runs;
+  `upload_staged` then encodes one buffer copy into a pooled buffer in stream order (no flush, no wait). The
+  trainer's feeder thread stages each `u8` batch this way (docs/MODEL.md §8.3).
 
 ### Benchmark: a YOLOv8n-shaped network
 
@@ -367,7 +382,7 @@ of batch-1 inference.
 `cargo bench -p folo-vision --bench gpu` runs the real detector (fused inference forward, end-to-end predict,
 training step, peak memory); its numbers and the comparison with Ultralytics are in
 [BENCHMARKS.md](BENCHMARKS.md#folo-on-the-gpu). In short, folo-n at 640: 3.98 ms batch-1 forward, 1461 img/s at
-batch 16, 143 img/s training step at batch 16, 3.6 GiB training peak. The fused kernels' effect on the training step:
+batch 16, 219 img/s training step at batch 16 (143 before the loss moved to the GPU), 3.5 GiB training peak. The fused kernels' effect on the training step:
 the SGD update went from 62 ms (about ten elementwise dispatches and copies per parameter) to 5 ms with the fused
 update kernel.
 
@@ -379,8 +394,8 @@ update kernel.
 - Timings are wall-clock; GPU timestamp queries would make small-kernel numbers more precise.
 - `max_pool2d` has no `ceil_mode`; upsampling is nearest-only.
 - Backend: no general elementwise fusion. The fused paths are Conv + bias + activation (inference), BatchNorm +
-  activation (training) and the optimizer updates; other chains (residual adds, attention, the loss) are separate
-  memory passes.
+  activation (training), the optimizer updates and the detection loss (`folo_gpu::detect`); other chains (residual
+  adds, attention, gradient accumulation and clipping) are separate memory passes.
 - Backend: strided convolution input gradients run the transposed-conv GEMM over every `(kh, kw)` tap and skip
   the positions the stride never touched (3/4 of the B tile is zero at stride 2); a stride-phase decomposition
   would remove that waste.

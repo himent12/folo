@@ -36,7 +36,8 @@ are normative, this one is the map.
 
 `RunningStats::capture(model)` / `restore()` / `all_finite(model)` implement the non-finite batch guard of
 MODEL.md §8.3: snapshot the running statistics before a train-mode forward and restore them if the loss or a
-statistic is not finite.
+statistic is not finite. Buffers on a device are checked there with a single readback (`Σ 0 · x` over all of them
+is 0 exactly when every value is finite).
 
 `fuse_conv_bn(w, b, γ, β, mean, var, eps)` is the reusable fusion (`k = γ / sqrt(var + eps)`, `W' = W·k`,
 `b' = β + (b − mean)·k`), in `F32`.
@@ -58,7 +59,10 @@ is reproducible everywhere. Head priors (MODEL.md §6.5): `BOX_BIAS_PRIOR = 2.0`
   parameters for large steps), use one fused update kernel per parameter on the GPU (`Tensor::optimizer_step_`,
   same op order), and fall back to tensor ops with the same arithmetic elsewhere.
 - `GradAccumulator` sums gradients over a window of backward passes into private buffers (reused across windows),
-  implements `GradSource` for the step, and does MODEL.md's global-norm clipping (`clip_grad_norm`).
+  implements `GradSource` for the step, and does MODEL.md's global-norm clipping (`clip_grad_norm`). On the GPU a pass
+  adds with one fused `buf = buf + g` kernel per parameter, and clipping stays on the device: the norm (in `f32`) and
+  the factor `max_norm / (n + 1e-6)` (or 1) are device scalars that scale every buffer, so no value is read back
+  (`clip_grad_norm` then returns NaN instead of the norm).
 - Recipe helpers: `accumulate_steps(nbs, batch)`, `effective_weight_decay`, `auto_optimizer` (§8.2 `auto`).
 - `Optimizer::contract()` / `apply_contract()` / `state_tensors()` / `load_state()` are the `folo.optim` contract
   and `optim.*` tensors of FORMAT.md.

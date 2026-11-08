@@ -397,14 +397,28 @@ impl RunningStats {
         Ok(())
     }
 
-    /// True if every floating buffer of `model` is finite.
+    /// True if every floating buffer of `model` is finite. Buffers on a device are checked there with one
+    /// readback in all (`Σ 0 · x` is 0 exactly when every `x` is finite).
     pub fn all_finite<M: Module + ?Sized>(model: &M) -> Result<bool> {
+        let mut device = Vec::new();
         for (_, b) in model.named_buffers() {
-            if b.dtype() == DType::F32 && !all_finite(&b)? {
-                return Ok(false);
+            if b.dtype() != DType::F32 {
+                continue;
+            }
+            if b.device().is_cpu() {
+                if !all_finite(&b)? {
+                    return Ok(false);
+                }
+            } else {
+                device.push(b.flatten_all()?);
             }
         }
-        Ok(true)
+        if device.is_empty() {
+            return Ok(true);
+        }
+        let _g = no_grad();
+        let refs: Vec<&Tensor> = device.iter().collect();
+        Ok(Tensor::cat(&refs, 0)?.mul_scalar(0.0)?.sum_all()?.item::<f32>()? == 0.0)
     }
 }
 

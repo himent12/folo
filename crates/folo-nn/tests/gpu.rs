@@ -529,3 +529,85 @@ fn fused_batch_norm_huge_mean() {
     assert!((dg - dg_want).abs() <= 1e-3 * (1.0 + dg_want.abs()), "dweight {dg} vs {dg_want}");
     assert!(grads.get(&x).unwrap().to_vec::<f32>().unwrap().iter().all(|d| d.is_finite() && d.abs() < 1e-13));
 }
+
+/// Gradient accumulation and global-norm clipping on the device (fused `buf += g`, the norm and the clip factor as
+/// device scalars, no readback) give the CPU accumulator's gradients, clipped and unclipped.
+#[test]
+fn grad_accumulator_on_gpu_matches_cpu() {
+    let dev = gpu!();
+    let rng = &mut Rng::seed(21);
+    let shapes: [&[usize]; 3] = [&[8, 3, 3, 3], &[8], &[5, 7]];
+    let params: Vec<Tensor> =
+        shapes.iter().map(|s| Tensor::randn(*s, 0.0, 1.0, rng).requires_grad_()).collect();
+    let dparams: Vec<Tensor> =
+        params.iter().map(|p| p.to_device(dev).unwrap().detach().requires_grad_()).collect();
+    let passes: Vec<Vec<Tensor>> =
+        (0..3).map(|_| shapes.iter().map(|s| Tensor::randn(*s, 0.0, 2.0, rng)).collect()).collect();
+    // Gradients of Σ p · g for each pass: exactly g.
+    let grads_of = |ps: &[Tensor], gs: &[Tensor]| {
+        let mut loss = Tensor::zeros_with([], folo_core::DType::F32, ps[0].device()).unwrap();
+        for (p, g) in ps.iter().zip(gs) {
+            loss = loss.add(&p.mul(&g.to_device(p.device()).unwrap()).unwrap().sum_all().unwrap()).unwrap();
+        }
+        loss.backward().unwrap()
+    };
+    for max_norm in [1e9, 5.0] {
+        let mut cpu = GradAccumulator::new(&params);
+        let mut gpu = GradAccumulator::new(&dparams);
+        for gs in &passes {
+            cpu.add(&grads_of(&params, gs)).unwrap();
+            gpu.add(&grads_of(&dparams, gs)).unwrap();
+        }
+        let n = cpu.clip_grad_norm(max_norm).unwrap();
+        gpu.clip_grad_norm(max_norm).unwrap();
+        assert!(max_norm > 1e8 || n > max_norm, "the clipped case clips (norm {n})");
+        for (p, d) in params.iter().zip(&dparams) {
+            let (c, g) = (cpu.grad(p).unwrap(), gpu.grad(d).unwrap());
+            assert_eq!(g.device(), dev);
+            close(g, c, 1e-5, 1e-5, &format!("grad, max_norm {max_norm}"));
+        }
+    }
+}
+
+/// The device check of `RunningStats::all_finite` sees a NaN or an infinity in any BatchNorm buffer.
+#[test]
+fn running_stats_all_finite_on_gpu() {
+    let dev = gpu!();
+    let mut m = Sequential::new().push(BatchNorm2d::new(3)).push(BatchNorm2d::new(4));
+    m.to_device(dev).unwrap();
+    assert!(RunningStats::all_finite(&m).unwrap());
+    let snap = RunningStats::capture(&m).unwrap();
+    for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        let (_, buf) = m.named_buffers().into_iter().nth(3).unwrap();
+        let mut v = buf.to_vec::<f32>().unwrap();
+        v[1] = bad;
+        let _g = no_grad();
+        buf.copy_from(&Tensor::from_vec(v, buf.shape()).unwrap().to_device(dev).unwrap()).unwrap();
+        assert!(!RunningStats::all_finite(&m).unwrap(), "{bad}");
+        snap.restore().unwrap();
+        assert!(RunningStats::all_finite(&m).unwrap());
+    }
+}
+
+/// Finite gradients whose squares (1e20) or norm (near f32::MAX) overflow `f32` still get the CPU's (`f64`) clip on
+/// the device: clipped to the norm, not zeroed or left alone.
+#[test]
+fn device_clip_survives_huge_finite_gradients() {
+    let dev = gpu!();
+    for vals in [vec![1e20f32, -2e20, 3e19, 0.0], vec![1e38, -1e38, 3e38, 2e38]] {
+        let p = Tensor::zeros([4]).requires_grad_();
+        let dp = p.to_device(dev).unwrap().detach().requires_grad_();
+        let g = Tensor::from_vec(vals, [4]).unwrap();
+        let (mut cpu, mut gpu) =
+            (GradAccumulator::new(std::slice::from_ref(&p)), GradAccumulator::new(std::slice::from_ref(&dp)));
+        cpu.add(&p.mul(&g).unwrap().sum_all().unwrap().backward().unwrap()).unwrap();
+        gpu.add(&dp.mul(&g.to_device(dev).unwrap()).unwrap().sum_all().unwrap().backward().unwrap()).unwrap();
+        cpu.clip_grad_norm(10.0).unwrap();
+        gpu.clip_grad_norm(10.0).unwrap();
+        let (c, d) = (cpu.grad(&p).unwrap(), gpu.grad(&dp).unwrap());
+        close(d, c, 1e-5, 1e-5, "clipped huge gradient");
+        let v = d.to_vec::<f32>().unwrap();
+        let n = v.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
+        assert!((n - 10.0).abs() < 1e-3, "clipped to norm 10, got {v:?}");
+    }
+}

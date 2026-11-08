@@ -29,6 +29,7 @@
 
 mod config;
 mod events;
+mod feed;
 
 pub use config::{OptimizerChoice, ResolvedOptim, TrainConfig, default_workers, f32_decimal, resolve_device};
 pub use events::{EventSink, channel_sink, event_record, rfc3339_now};
@@ -42,7 +43,7 @@ use std::time::{Duration, Instant};
 use folo_api::{LogLevel, RunEvent, RunStatus};
 use folo_core::Device;
 use folo_core::rng::Rng;
-use folo_data::{DataLoader, Dataset, LoaderConfig};
+use folo_data::{Batch, DataLoader, Dataset, LoaderConfig};
 use folo_nn::io::{BestState, CheckpointParts, Metrics, ModelConfig, ModelFile, RngState, save_checkpoint};
 use folo_nn::optim::{
     AdamW, GradAccumulator, OptimKind, Optimizer, Sgd, StandardGroups, effective_weight_decay,
@@ -377,6 +378,7 @@ impl Trainer {
                 augment: Some(cfg.augment),
                 epochs: cfg.epochs,
                 prefetch_batches: 2,
+                u8_images: folo_gpu::context_for(device).is_some(),
             },
         )?;
         let acc = GradAccumulator::new(&model.parameters());
@@ -689,14 +691,24 @@ impl Trainer {
         let mut sum = [0f64; 3];
         let (mut finite_batches, mut window_finite) = (0usize, false);
         let (epoch_start, mut epoch_images) = (Instant::now(), 0usize);
-        let mut iter = self.loader.epoch(e);
+        // On a folo-gpu device the loader delivers u8 pixels and a feeder thread stages each batch while the
+        // previous step runs; the step then only encodes the copy and the conversion.
+        let ctx = folo_gpu::context_for(self.device);
+        let iter = self.loader.epoch(e);
+        let mut source: Box<dyn Iterator<Item = Result<(Batch, Option<folo_gpu::Staged>)>>> = match &ctx {
+            Some(c) => Box::new(feed::Feeder::new(iter, c.clone())?.map(|r| r.map(|(b, s)| (b, Some(s))))),
+            None => Box::new(iter.map(|r| r.map(|b| (b, None)).map_err(Error::from))),
+        };
         let mut k = 0usize;
-        for batch in iter.by_ref() {
+        for item in source.by_ref() {
             let batch_start = Instant::now();
-            let mut batch = batch?;
+            let (mut batch, staged) = item?;
             let n = batch.len();
             let targets = targets_from_normalized(&batch.targets, n, s, s)?;
-            let x = batch_tensor(&mut batch, self.device)?;
+            let x = match (&ctx, staged) {
+                (Some(c), Some(st)) => feed::staged_tensor(c, self.device, &st, batch.shape)?,
+                _ => batch_tensor(&mut batch, self.device)?,
+            };
             let lr = self.sched.lr_at(self.sched.step(), &self.opt.groups()[decay]);
 
             let snapshot = RunningStats::capture(&self.model)?;
@@ -768,7 +780,7 @@ impl Trainer {
                 return Ok(None);
             }
         }
-        drop(iter);
+        drop(source);
         if k != nb {
             return Err(Error::Failed(format!("epoch {} delivered {k} of {nb} batches", e + 1)));
         }
