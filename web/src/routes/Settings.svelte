@@ -31,19 +31,31 @@
     { id: 'about', label: 'About' },
   ];
 
-  // The section nearest the top of the viewport is the current one (scroll-spy).
+  // Scroll-spy from geometry: the current section is the last one whose top has passed just below the top bar
+  // (the first while nothing has; the last once the page is scrolled to the bottom).
   let current = $state<string>('connection');
   $effect(() => {
-    const els = sections.map((x) => document.getElementById(x.id)).filter((e): e is HTMLElement => !!e);
-    const io = new IntersectionObserver(
-      (entries) => {
-        const top = entries.filter((e) => e.isIntersecting).sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top)[0];
-        if (top) current = top.target.id;
-      },
-      { rootMargin: '-56px 0px -60% 0px' },
-    );
-    for (const e of els) io.observe(e);
-    return () => io.disconnect();
+    let raf = 0;
+    const update = () => {
+      raf = 0;
+      const line = 56 + 24;
+      const els = sections.map((x) => document.getElementById(x.id)).filter((e): e is HTMLElement => !!e);
+      let id = els[0]?.id ?? 'connection';
+      for (const e of els) if (e.getBoundingClientRect().top <= line) id = e.id;
+      if (window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 2) id = els[els.length - 1]?.id ?? id;
+      current = id;
+    };
+    const onscroll = () => {
+      if (!raf) raf = requestAnimationFrame(update);
+    };
+    update();
+    window.addEventListener('scroll', onscroll, { passive: true });
+    window.addEventListener('resize', onscroll);
+    return () => {
+      cancelAnimationFrame(raf);
+      window.removeEventListener('scroll', onscroll);
+      window.removeEventListener('resize', onscroll);
+    };
   });
 
   // ---- connection ----

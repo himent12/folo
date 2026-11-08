@@ -206,6 +206,7 @@
       cursor = null;
       return;
     }
+    announce = false;
     cursor = x.invert(px);
   }
 
@@ -320,7 +321,7 @@
         onpointerleave={() => (cursor = null)}
         onpointerdown={() => (announce = false)}
         {onkeydown}
-        onblur={() => (cursor = null)}
+        onblur={() => ((cursor = null), (announce = false))}
       >
         <g class="grid">
           {#each yTickValues as t (t)}

@@ -27,14 +27,14 @@ const paths = [
   '/',
   '/datasets',
   ...ds.datasets.map((/** @type {{id: string}} */ d) => `/datasets/${d.id}?tab=stats`),
-  `/datasets/${dsId}?tab=images`,
+  ...(dsId ? [`/datasets/${dsId}?tab=images`] : []),
   '/runs',
   ...runIds.map((/** @type {string} */ id) => `/runs/${id}`),
   '/runs/new',
-  `/runs/compare?ids=${runIds.slice(0, 3).join(',')}`,
+  runIds.length ? `/runs/compare?ids=${runIds.slice(0, 3).join(',')}` : '/runs/compare',
   '/models',
   ...models.models.map((/** @type {{id: string}} */ m) => `/models/${m.id}`),
-  `/playground?model=${modelId}`,
+  modelId ? `/playground?model=${modelId}` : '/playground',
   '/settings',
 ];
 

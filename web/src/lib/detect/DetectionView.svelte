@@ -16,6 +16,7 @@
    * Ground truth, when given, is drawn dashed underneath the predictions.
    */
   import { classColor } from '$lib/design/tokens';
+  import { placeChips } from './chips';
 
   interface Props {
     src: string | null;
@@ -70,37 +71,27 @@
   const shown = (b: ViewBox) => !only || only.has(b.class);
   const name = (c: number) => classes[c] ?? `class ${c}`;
 
-  /**
-   * Chip placement in screen pixels, relative to each box's top-left: above the box by default, inside it when
-   * that would leave the image or hit an earlier chip, nudged down 18 px on further collisions, and clamped
-   * horizontally to the visible image with a 4 px inset. Widths are estimated from the text (11 px Geist).
-   */
-  const CHIP_H = 16;
+  /** Label chips placed in screen pixels (see ./chips). Widths are estimated from the text (11 px Geist). */
   const chips = $derived.by(() => {
     const g = geo;
     if (!g || !labels || compact) return [];
-    const minX = Math.max(0, g.ox) + 4;
-    const maxX = Math.min(cw, g.ox + width * g.s) - 4;
-    const minY = Math.max(0, g.oy) + 2;
-    const placed: { x: number; y: number; w: number }[] = [];
-    const hits = (x: number, y: number, w: number) =>
-      placed.some((p) => x < p.x + p.w && x + w > p.x && y < p.y + CHIP_H && y + CHIP_H > p.y);
-    return boxes.map((b) => {
-      if (!shown(b)) return null;
-      const bx = g.ox + b.x1 * g.s;
-      const by = g.oy + b.y1 * g.s;
-      const w = Math.ceil(name(b.class).length * 6.4 + 12 + (scores && b.score !== undefined ? 32 : 0));
-      const x = Math.max(minX, Math.min(maxX - w, bx - 2));
-      let y = by - CHIP_H - 1;
-      let inside = false;
-      if (y < minY || hits(x, y, w)) {
-        y = by;
-        inside = true;
-        for (let k = 0; k < 3 && hits(x, y, w); k++) y += CHIP_H + 2;
-      }
-      placed.push({ x, y, w });
-      return { dx: x - bx, dy: y - by, inside };
-    });
+    return placeChips(
+      boxes.map((b) =>
+        shown(b)
+          ? {
+              x: g.ox + b.x1 * g.s,
+              y: g.oy + b.y1 * g.s,
+              w: Math.ceil(name(b.class).length * 6.4 + 12 + (scores && b.score !== undefined ? 32 : 0)),
+            }
+          : null,
+      ),
+      {
+        minX: Math.max(0, g.ox) + 4,
+        maxX: Math.min(cw, g.ox + width * g.s) - 4,
+        minY: Math.max(0, g.oy) + 2,
+        maxY: Math.min(ch, g.oy + height * g.s) - 2,
+      },
+    );
   });
 
   $effect(() => {

@@ -111,7 +111,7 @@
     <div class="sk-head">
       <Skeleton w="140px" h="20px" r="var(--radius-full)" />
       <Skeleton w="240px" h="28px" />
-      <Skeleton w="420px" h="16px" />
+      <Skeleton w="min(420px, 100%)" h="16px" />
     </div>
     <Skeleton h="118px" r="var(--radius-lg)" />
     <div class="sk-row2"><Skeleton h="300px" r="var(--radius-lg)" /><Skeleton h="300px" r="var(--radius-lg)" /></div>
