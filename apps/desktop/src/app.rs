@@ -639,6 +639,10 @@ impl FoloApp {
     // ---------- navigation ----------
 
     pub fn navigate(&mut self, route: Route, window: &mut Window, cx: &mut Context<Self>) {
+        // The confusion-matrix cursor belongs to the model page it was set on.
+        if matches!(route, Route::Model(_)) {
+            self.cm_cell = None;
+        }
         if route == self.route {
             return;
         }

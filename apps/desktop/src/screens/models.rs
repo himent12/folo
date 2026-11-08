@@ -1215,7 +1215,9 @@ impl FoloApp {
             .on_key_down(cx.listener(move |this, ev: &gpui::KeyDownEvent, _, cx| {
                 let key = ev.keystroke.key.as_str();
                 let arrows = matches!(key, "left" | "right" | "up" | "down" | "home" | "end");
-                let next = match (this.cm_cell, key) {
+                // A cell from another model's (larger) matrix doesn't count: start over.
+                let cur = this.cm_cell.filter(|&(r, c)| r < n && c < n);
+                let next = match (cur, key) {
                     // The first press lands on the top-left cell.
                     (None, _) if arrows => Some((0, 0)),
                     (Some((r, c)), "left") => Some((r, c.saturating_sub(1))),
