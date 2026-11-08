@@ -50,7 +50,10 @@ app: chart plots, image canvases, code/log views. In light mode panels are white
 - **Accent "signal" lime** (`accent.solid` #C5F82A): the focus-confirm green of a viewfinder. Used for the primary
   button, focus rings, the live/running state, selection and the first chart series. Text on a lime fill is
   `accent.on` (near black). On light backgrounds lime is too pale for text and strokes, so use `accent.text` /
-  `accent.line` (deeper olive) there; on dark they equal the solid.
+  `accent.line` (deeper olive) there; on dark they equal the solid. The same applies to **non-text fills that must be
+  seen against the surface** (progress bars, live/status dots, slider fills, selection strokes, chart areas): use
+  `accent.line` so they keep ≥ 3:1 in light mode. `accent.solid` stays for large filled controls whose content
+  carries the contrast (the primary button with `accent.on` text, the selected segment).
 - Status: `success` (completed, healthy), `warning` (degraded, stopping), `danger` (failed, errors), `info`
   (queued, neutral notices). Each has `solid` (dots, icons, bars), `text` (readable text) and `muted` (tinted
   backgrounds for badges and banners).
