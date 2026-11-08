@@ -102,8 +102,8 @@
     color: var(--text-secondary);
   }
   .v {
-    font-family: var(--font-mono);
     font-size: var(--type-xs-size);
+    font-variant-numeric: tabular-nums;
   }
   .pct {
     text-align: right;

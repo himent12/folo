@@ -88,7 +88,6 @@
   @keyframes in {
     from {
       opacity: 0;
-      transform: translateY(4px);
     }
   }
   @media (max-width: 767px) {
@@ -98,6 +97,15 @@
     }
     header {
       align-items: flex-start;
+    }
+    /* The top bar shows the title on phones; the heading stays for assistive tech and the outline. */
+    h1 {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip-path: inset(50%);
+      white-space: nowrap;
     }
   }
 </style>

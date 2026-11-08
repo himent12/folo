@@ -23,13 +23,17 @@ export interface Placement {
   dx: number;
   dy: number;
   inside: boolean;
+  /** No free slot: show this label only when its box is hovered or selected. */
+  hidden: boolean;
 }
 
 /**
+ * `chipH` is the chip height (16 px, 14 px on small views).
  * Above the box by default; inside it when that leaves the image or hits an earlier chip; nudged down on further
  * collisions while it fits; otherwise the nearest free slot above. Always clamped to the visible image.
  */
-export function placeChips(boxes: (ChipBox | null)[], b: ChipBounds): (Placement | null)[] {
+export function placeChips(boxes: (ChipBox | null)[], b: ChipBounds, chipH = CHIP_H): (Placement | null)[] {
+  const CHIP_H = chipH;
   const maxY = b.maxY - CHIP_H;
   const placed: { x: number; y: number; w: number }[] = [];
   const hits = (x: number, y: number, w: number) =>
@@ -54,7 +58,9 @@ export function placeChips(boxes: (ChipBox | null)[], b: ChipBounds): (Placement
       }
     }
     y = Math.max(b.minY, Math.min(maxY, y));
+    // Earlier boxes win (callers pass them highest score first); a label that would cover one waits for hover.
+    if (hits(x, y, box.w)) return { dx: x - box.x, dy: y - box.y, inside, hidden: true };
     placed.push({ x, y, w: box.w });
-    return { dx: x - box.x, dy: y - box.y, inside };
+    return { dx: x - box.x, dy: y - box.y, inside, hidden: false };
   });
 }

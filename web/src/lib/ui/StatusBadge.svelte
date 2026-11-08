@@ -1,7 +1,11 @@
 <script lang="ts">
   import type { RunStatus } from '$lib/api/types';
 
-  let { status, size = 'md' }: { status: RunStatus; size?: 'sm' | 'md' } = $props();
+  let {
+    status,
+    size = 'md',
+    plain = false,
+  }: { status: RunStatus; size?: 'sm' | 'md'; /** Dot and word without the pill, for table cells. */ plain?: boolean } = $props();
 
   const labels: Record<RunStatus, string> = {
     queued: 'Queued',
@@ -13,7 +17,7 @@
   };
 </script>
 
-<span class="badge {status} {size}">
+<span class="badge {status} {size}" class:plain>
   <span class="dot" aria-hidden="true"></span>{labels[status]}
 </span>
 
@@ -64,9 +68,10 @@
     --c: var(--warning-text);
     --bg: var(--warning-muted);
   }
+  /* Waiting is not a signal: neutral grey, with a hollow dot. */
   .queued {
-    --c: var(--info-text);
-    --bg: var(--info-muted);
+    --c: var(--text-secondary);
+    --bg: var(--bg-active);
   }
   .queued .dot {
     background: none;
@@ -74,6 +79,25 @@
   }
   .stopped .dot {
     border-radius: 1.5px;
+  }
+  /* In tables: the hue is on the dot only, the word stays in ink. */
+  .plain {
+    height: auto;
+    padding: 0;
+    background: none;
+    color: var(--text-secondary);
+    font-size: inherit;
+    font-weight: var(--weight-regular);
+  }
+  .plain .dot {
+    background: var(--c);
+  }
+  .plain.queued .dot {
+    background: none;
+    box-shadow: inset 0 0 0 1.5px var(--c);
+  }
+  .plain.running {
+    color: var(--text-primary);
   }
   @keyframes pulse {
     0% {

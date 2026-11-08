@@ -1,5 +1,8 @@
 <script lang="ts">
-  /** A 0..1 metric as a number with a small inline bar (for tables). `bare` draws the bar only. */
+  /**
+   * A 0..1 metric as a number with a small inline bar (for tables). `bare` draws the bar only. The bar is a neutral
+   * meter; `best` only strengthens it, the "best" marker itself is drawn by the caller.
+   */
   import { metric } from '$lib/format';
 
   let {
@@ -50,7 +53,7 @@
     background: var(--text-secondary);
   }
   .best .fill {
-    background: var(--accent-line);
+    background: var(--text-primary);
   }
   .val {
     min-width: 38px;
@@ -63,6 +66,6 @@
     color: var(--text-secondary);
   }
   .best .val {
-    color: var(--accent-text);
+    color: var(--text-primary);
   }
 </style>

@@ -27,5 +27,6 @@
   span {
     flex-basis: 0;
     min-width: 2px;
+    box-shadow: inset 0 0 0 1px var(--chart-swatch-edge);
   }
 </style>

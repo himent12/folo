@@ -8,17 +8,22 @@
   import TriangleAlert from '@lucide/svelte/icons/triangle-alert';
   import type { Dataset, DatasetStats } from '$lib/api/types';
   import Histogram from '$lib/charts/Histogram.svelte';
-  import { classInk } from '$lib/design/classInk.svelte';
+  import { classColor } from '$lib/design/tokens';
   import { num } from '$lib/format';
+  import { href } from '$lib/router.svelte';
   import Panel from '$lib/ui/Panel.svelte';
   import Stat from '$lib/ui/Stat.svelte';
-  import { countBinLabel, healthChecks, imageCount, sizeBinLabel, type Severity } from './health';
+  import { countBinLabel, healthChecks, imageCount, reviewCount, sizeBinLabel, TINY_SIZE, type Severity } from './health';
 
   let { dataset, stats, onclass }: { dataset: Dataset; stats: DatasetStats; onclass: (cls: number) => void } = $props();
 
   const images = $derived(imageCount(dataset));
   const health = $derived(healthChecks(dataset, stats));
-  const issues = $derived(health.filter((h) => h.severity === 'danger' || h.severity === 'warning').length);
+  const issues = $derived(reviewCount(health));
+  const sizeEdges = $derived(stats.box_size_hist.edges);
+  // Unequal size bins keep their true widths up to 60 % of the side; the open last bin (≥ 50 %) is drawn up to there.
+  const sizeMax = $derived(Math.min(0.6, sizeEdges[sizeEdges.length - 1] ?? 1));
+  const pctEdge = (v: number) => `${+(v * 100).toFixed(1)}%`;
   const balance = $derived(
     stats.class_counts
       .map((count, cls) => ({ cls, count, name: dataset.classes[cls] ?? `class ${cls}` }))
@@ -48,7 +53,9 @@
 <div class="stats">
   <Panel class="summary" pad="none">
     <div class="tiles">
-      <Stat label="Images" value={num(images)} sub="{num(dataset.splits.train)} / {num(dataset.splits.val)} / {num(dataset.splits.test)}" />
+      <Stat label="Images" value={num(images)}>
+        {#snippet sub()}{num(dataset.splits.train)} / {num(dataset.splits.val)} / {num(dataset.splits.test)} <span class="split-key">train / val / test</span>{/snippet}
+      </Stat>
       <Stat label="Boxes" value={num(stats.boxes)} sub="{dataset.classes.length} classes" />
       <Stat label="Boxes per image" value={images ? (stats.boxes / images).toFixed(1) : '—'} unit="mean" sub="over all images" />
       <Stat label="Empty images" value={num(stats.empty_images)} sub={images ? `${((stats.empty_images / images) * 100).toFixed(1)}% of images` : undefined} />
@@ -71,10 +78,10 @@
       <ul class="bars">
         {#each balance as b (b.cls)}
           <li>
-            <button type="button" onclick={() => onclass(b.cls)} aria-label="{b.name}: {num(b.count)} boxes, {share(b.count).toFixed(1)}%. Show images">
-              <span class="sw" style:background={classInk(b.cls)}></span>
+            <button type="button" class:absent={b.count === 0} onclick={() => onclass(b.cls)} aria-label="{b.name}: {num(b.count)} boxes, {share(b.count).toFixed(1)}%. Show images">
+              <span class="sw" style:background={classColor(b.cls)}></span>
               <span class="cname truncate">{b.name}</span>
-              <span class="track"><span class="fill" style:width="{(b.count / maxCount) * 100}%" style:background={classInk(b.cls)}></span></span>
+              <span class="track"><span class="fill" style:width="{(b.count / maxCount) * 100}%" style:background={classColor(b.cls)}></span></span>
               <span class="count num">{num(b.count)}</span>
               <span class="pct num">{share(b.count).toFixed(1)}<small>%</small></span>
               <span class="go" aria-hidden="true"><ArrowRight size={12} /></span>
@@ -93,6 +100,9 @@
             <span class="htext">
               <span class="htitle">{h.title}</span>
               <span class="hdetail">{h.detail}</span>
+              {#if h.action}
+                <a class="haction" href={href(h.action.path)}>{h.action.label}<ArrowRight size={12} strokeWidth={2} aria-hidden="true" /></a>
+              {/if}
             </span>
           </li>
         {/each}
@@ -103,13 +113,19 @@
   <div class="two even">
     <Panel title="Box size" meta="% of image side, √area" id="ds-size">
       <Histogram
-        edges={stats.box_size_hist.edges}
+        edges={sizeEdges}
         counts={stats.box_size_hist.counts}
         binLabel={(lo, hi) => sizeBinLabel(lo, hi)}
-        label="Histogram of box sizes relative to the image side (square root of the area share)"
-        color="var(--chart-2)"
+        label="Histogram of box sizes relative to the image side (square root of the area share), with bins drawn at their true widths and a marker at the 5 % tiny-box threshold"
+        color="var(--chart-1)"
         height={180}
+        proportional
+        xMax={sizeMax}
+        edgeLabel={pctEdge}
+        densityPer={0.01}
+        marker={{ x: TINY_SIZE, label: 'tiny' }}
       />
+      <p class="caption">Bins keep their true widths and bar heights are boxes per 1 % step, so a bar's area is its count. Left of the dashed line: tiny boxes, under 5 % of the side.</p>
     </Panel>
     <Panel title="Boxes per image" meta="images" id="ds-per">
       <Histogram
@@ -117,7 +133,7 @@
         counts={stats.boxes_per_image_hist.counts}
         binLabel={(lo, hi, i) => countBinLabel(lo, hi, i === perLast)}
         label="Histogram of the number of boxes per image"
-        color="var(--chart-5)"
+        color="var(--chart-1)"
         unit="images"
         height={180}
       />
@@ -166,12 +182,41 @@
   .tiles > .tile-link:hover {
     background: linear-gradient(var(--bg-hover), var(--bg-hover)), var(--bg-panel);
   }
+  /* A neutral link: the red count above it carries the alarm. */
   .see {
     display: inline-flex;
     align-items: center;
     gap: 2px;
-    color: var(--danger-text);
+    color: var(--text-secondary);
     font-weight: var(--weight-medium);
+  }
+  .tile-link:hover .see {
+    color: var(--text-primary);
+  }
+  .split-key {
+    display: block;
+    color: var(--text-tertiary);
+  }
+  .caption {
+    margin-top: var(--space-2);
+    font-size: var(--type-xs-size);
+    line-height: var(--type-xs-line);
+    color: var(--text-tertiary);
+  }
+  .haction {
+    justify-self: start;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    margin-top: var(--space-1);
+    font-size: var(--type-sm-size);
+    font-weight: var(--weight-medium);
+    color: var(--text-primary);
+  }
+  .haction:hover {
+    text-decoration: underline;
+    text-underline-offset: 3px;
+    text-decoration-color: var(--line-strong);
   }
   .see::after {
     content: '';
@@ -214,6 +259,14 @@
     width: 10px;
     height: 10px;
     border-radius: 2px;
+  }
+  /* Class marks keep the palette hue in both themes; a hairline edge holds pale hues on white. */
+  :global([data-theme='light']) .sw,
+  :global([data-theme='light']) .fill {
+    box-shadow: inset 0 0 0 1px #0a0e1433;
+  }
+  .absent .sw {
+    opacity: 0.4;
   }
   .cname {
     font-weight: var(--weight-medium);
@@ -308,6 +361,14 @@
     .two,
     .two.issues {
       grid-template-columns: minmax(0, 1fr);
+    }
+  }
+  @media (pointer: coarse) {
+    .bars button {
+      height: 44px;
+    }
+    .haction {
+      min-height: 44px;
     }
   }
   @media (max-width: 767px) {

@@ -8,6 +8,7 @@
   import { HttpApi } from '$lib/api/client';
   import { hub } from '$lib/api/index.svelte';
   import { bytes } from '$lib/format';
+  import { formatKeys } from '$lib/keys';
   import { prefs, type ThemePref, type Units } from '$lib/prefs.svelte';
   import Page from '$lib/shell/Page.svelte';
   import { setCrumbs } from '$lib/shell/crumbs.svelte';
@@ -15,7 +16,6 @@
   import Button from '$lib/ui/Button.svelte';
   import Field from '$lib/ui/Field.svelte';
   import Input from '$lib/ui/Input.svelte';
-  import Kbd from '$lib/ui/Kbd.svelte';
   import Panel from '$lib/ui/Panel.svelte';
   import Segmented from '$lib/ui/Segmented.svelte';
   import { toast } from '$lib/ui/toast.svelte';
@@ -103,6 +103,17 @@
   ];
   let units = $state<Units>(prefs.units);
   const sample = 5_600_000_000;
+
+  // ---- shortcuts ----
+  /**
+   * How a shortcut is pressed: a chord ("Ctrl K", held together), a sequence ("G then O", one after the other) or
+   * alternatives ("J / K", either key).
+   */
+  function keyKind(keys: string): 'chord' | 'sequence' | 'either' | 'single' {
+    if (/[^\s+]\+[^\s+]/.test(keys)) return 'chord';
+    if (/^G \S$/.test(keys)) return 'sequence';
+    return keys.includes(' ') ? 'either' : 'single';
+  }
 </script>
 
 <Page title="Settings">
@@ -151,14 +162,16 @@
           <Field
             label="Server URL"
             for="server-url"
-            hint="Leave empty to use the server that serves this page ({origin})."
+            hint={origin
+              ? `Empty means this page's own address: requests go to ${origin}/api. Enter a URL only to reach a folo serve elsewhere.`
+              : "Empty means this page's own address. Enter a URL only to reach a folo serve elsewhere."}
             error={invalid ? 'Use a full address like http://127.0.0.1:7878.' : null}
           >
             <div class="url-row">
               <Input
                 id="server-url"
                 bind:value={url}
-                placeholder="http://127.0.0.1:7878"
+                placeholder={origin ? `${origin} (this page)` : 'This page'}
                 spellcheck={false}
                 autocomplete="off"
                 {invalid}
@@ -176,7 +189,7 @@
               {#if test.ok}
                 <Check size={14} strokeWidth={2.25} aria-hidden="true" />
                 <span>Reachable: <span class="mono">folo serve {test.version}</span>{test.mock ? ' (mock mode)' : ''}</span>
-                <span class="mono faint">{Math.round(test.ms)} ms</span>
+                <span class="num faint">{Math.round(test.ms)} ms</span>
               {:else}
                 <span class="x" aria-hidden="true">×</span>
                 <span>{test.message}</span>
@@ -241,7 +254,18 @@
               <h3 class="overline">{g}</h3>
               <ul>
                 {#each shortcutList.filter((s) => s.group === g) as s (s.keys + s.label)}
-                  <li><span>{s.label}</span><Kbd keys={s.keys} /></li>
+                  {@const kind = keyKind(s.keys)}
+                  {@const caps = formatKeys(s.keys)}
+                  <li>
+                    <span>{s.label}</span>
+                    <span class="caps {kind}" aria-label={kind === 'sequence' ? caps.join(' then ') : kind === 'either' ? caps.join(' or ') : caps.join(' ')}>
+                      {#each caps as k, i (i)}
+                        {#if i > 0 && kind === 'sequence'}<span class="join" aria-hidden="true">then</span>{/if}
+                        {#if i > 0 && kind === 'either'}<span class="join" aria-hidden="true">/</span>{/if}
+                        <kbd aria-hidden="true">{k}</kbd>
+                      {/each}
+                    </span>
+                  </li>
                 {/each}
               </ul>
             </section>
@@ -252,9 +276,9 @@
       <Panel title="About" id="about" divided>
         <dl class="about">
           <dt>FOLO Studio</dt>
-          <dd class="mono">{pkg.version}</dd>
+          <dd class="num">{pkg.version}</dd>
           <dt>Server</dt>
-          <dd class="mono">{hub.mode === 'live' ? `folo serve ${hub.version}` : hub.mode === 'mock' ? `built-in demo ${hub.version}` : '—'}</dd>
+          <dd class="num">{hub.mode === 'live' ? `folo serve ${hub.version}` : hub.mode === 'mock' ? `built-in demo ${hub.version}` : '—'}</dd>
           <dt>HTTP API</dt>
           <dd class="mono">docs/API.md</dd>
           <dt>Architecture</dt>
@@ -420,10 +444,11 @@
   .theme:hover .preview {
     box-shadow: 0 0 0 1px var(--line-strong);
   }
+  /* Selection is neutral (lime is for the primary action, focus and live state). */
   .theme.on .preview {
     box-shadow:
       0 0 0 1px var(--bg-panel),
-      0 0 0 3px var(--accent-line);
+      0 0 0 3px var(--text-secondary);
   }
   .theme input:focus-visible + .preview {
     outline: var(--size-focus-ring) solid var(--focus);
@@ -481,6 +506,36 @@
   }
   .keys li:last-child {
     border-bottom: 0;
+  }
+  .caps {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+  }
+  /* A chord's keys are held together: caps touch. */
+  .caps.chord {
+    gap: 2px;
+  }
+  .join {
+    font-size: var(--type-xs-size);
+    color: var(--text-tertiary);
+  }
+  kbd {
+    display: inline-grid;
+    place-items: center;
+    min-width: 18px;
+    height: 18px;
+    padding: 0 4px;
+    border-radius: var(--radius-xs);
+    border: 1px solid var(--line-default);
+    border-bottom-color: var(--line-strong);
+    background: var(--bg-raised);
+    color: var(--text-secondary);
+    font-family: var(--font-sans);
+    font-size: var(--type-xs-size);
+    line-height: 1;
+    font-weight: var(--weight-medium);
   }
   .about {
     display: grid;

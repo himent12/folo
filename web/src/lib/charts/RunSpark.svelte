@@ -22,9 +22,8 @@
     };
   });
 
-  const color = $derived(
-    run.status === 'failed' ? 'var(--danger-solid)' : run.status === 'running' ? 'var(--chart-1)' : 'var(--text-tertiary)',
-  );
+  // Neutral ink; only a live run's line takes the accent. Failure is stated by the status dot, not repeated here.
+  const color = $derived(run.status === 'running' ? 'var(--accent-line)' : 'var(--text-tertiary)');
 </script>
 
 <Sparkline {values} {width} {height} {color} domain={[0, Math.max(0.1, ...values)]} length={run.epochs} fill={run.status === 'running'} />

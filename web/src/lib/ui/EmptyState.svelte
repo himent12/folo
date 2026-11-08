@@ -17,7 +17,7 @@
       <span class="corner tl"></span><span class="corner tr"></span><span class="corner bl"></span><span
         class="corner br"
       ></span>
-      <Icon size={20} strokeWidth={1.5} />
+      <Icon size={16} strokeWidth={1.75} />
     </div>
   {/if}
   <div class="text">
@@ -34,8 +34,8 @@
     align-items: center;
     justify-content: center;
     text-align: center;
-    gap: var(--space-4);
-    padding: var(--space-12) var(--space-6);
+    gap: var(--space-3);
+    padding: var(--space-10) var(--space-6);
   }
   .compact {
     padding: var(--space-8) var(--space-4);
@@ -45,14 +45,14 @@
     position: relative;
     display: grid;
     place-items: center;
-    width: 48px;
-    height: 48px;
+    width: 32px;
+    height: 32px;
     color: var(--text-tertiary);
   }
   .corner {
     position: absolute;
-    width: 10px;
-    height: 10px;
+    width: 7px;
+    height: 7px;
     border-color: var(--line-strong);
     border-style: solid;
     border-width: 0;

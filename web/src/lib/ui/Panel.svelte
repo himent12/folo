@@ -51,8 +51,8 @@
     display: flex;
     align-items: center;
     gap: var(--space-3);
-    min-height: 44px;
-    padding: var(--space-2) var(--space-3) var(--space-2) var(--space-4);
+    min-height: 40px;
+    padding: var(--space-1) var(--space-3) var(--space-1) var(--space-4);
   }
   header.divided {
     border-bottom: 1px solid var(--line-subtle);
@@ -63,8 +63,9 @@
     display: flex;
     align-items: baseline;
     gap: var(--space-2);
-    font-size: var(--type-base-size);
-    line-height: var(--type-base-line);
+    font-size: var(--type-md-size);
+    line-height: var(--type-md-line);
+    letter-spacing: var(--type-md-tracking);
     font-weight: var(--weight-medium);
     color: var(--text-primary);
     white-space: nowrap;
@@ -72,6 +73,8 @@
     text-overflow: ellipsis;
   }
   .meta {
+    font-size: var(--type-sm-size);
+    letter-spacing: 0;
     color: var(--text-tertiary);
     font-weight: var(--weight-regular);
     font-variant-numeric: tabular-nums;

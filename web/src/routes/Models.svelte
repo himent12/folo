@@ -138,6 +138,21 @@
   });
   const dsCount = $derived(dsOptions.filter((o) => o.value !== 'all' && o.value !== IMPORTED).length);
   const totalBytes = $derived((models.data ?? []).reduce((a, m) => a + m.bytes, 0));
+  // Loading placeholder widths per column, close to the real content so nothing jumps when rows arrive.
+  const skWidth: Record<Key, string> = {
+    name: '112px',
+    dataset: '72px',
+    arch: '48px',
+    classes: '16px',
+    imgsz: '40px',
+    params: '36px',
+    flops: '28px',
+    bytes: '52px',
+    map50_95: '88px',
+    map50: '88px',
+    source: '72px',
+    created: '52px',
+  };
   const ariaSort = (k: Key) => (sortKey === k ? (sortDir === 'asc' ? 'ascending' : 'descending') : undefined);
 </script>
 
@@ -166,19 +181,56 @@
       <div class="search">
         <Input bind:value={query} icon={Search} placeholder="Filter models" aria-label="Filter models" type="search" />
       </div>
+    {:else if !models.data && !models.error}
+      <div class="search"><Skeleton h="var(--control-md)" r="var(--radius-md)" /></div>
     {/if}
     <span class="pg"><Button icon={ScanSearch} href={href('/playground')}>Playground</Button></span>
   {/snippet}
 
   {#if models.error && !models.data}
-    <Panel><ErrorState error={models.error} retry={() => models.refresh()} title="Could not load models" compact /></Panel>
+    <ErrorState error={models.error} retry={() => models.refresh()} title="Could not load models" compact />
   {:else if !models.data}
-    <Panel pad="none">
-      <div class="sk" aria-busy="true" aria-label="Loading models">
-        <Skeleton h="14px" w="40%" />
-        {#each [0, 1, 2, 3, 4, 5] as i (i)}<Skeleton h="22px" />{/each}
-      </div>
-    </Panel>
+    <!-- Mirrors the table (and the phone cards) row for row, so the page doesn't move when the list arrives. -->
+    <div class="desk" aria-busy="true" aria-label="Loading models">
+      <Panel pad="none">
+        <div class="scroll">
+          <table class="table sk-table" aria-hidden="true">
+            <thead>
+              <tr>
+                {#each cols as c (c.key)}
+                  <th class:r={c.num} class:hide-md={c.hide === 'md'}><span class="sort">{c.label}</span></th>
+                {/each}
+              </tr>
+            </thead>
+            <tbody>
+              {#each [0, 1, 2, 3, 4] as i (i)}
+                <tr>
+                  {#each cols as c (c.key)}
+                    <td class:r={c.num} class:hide-md={c.hide === 'md'}>
+                      {#if c.key === 'name'}
+                        <span class="sk-two"><Skeleton h="12px" w={skWidth.name} /><Skeleton h="10px" w="56px" /></span>
+                      {:else}
+                        <Skeleton h={c.key === 'arch' ? '18px' : '12px'} w={skWidth[c.key]} />
+                      {/if}
+                    </td>
+                  {/each}
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+      </Panel>
+    </div>
+    <ul class="cards" aria-hidden="true">
+      {#each [0, 1, 2] as i (i)}
+        <li class="card sk-card">
+          <span class="c-top"><Skeleton h="14px" w="140px" /><Skeleton h="18px" w="48px" /></span>
+          <span class="c-metrics"><Skeleton h="22px" w="56px" /><Skeleton h="22px" w="56px" /></span>
+          <Skeleton h="10px" w="70%" />
+          <Skeleton h="10px" w="50%" />
+        </li>
+      {/each}
+    </ul>
   {:else if models.data.length === 0}
     <Panel>
       <EmptyState
@@ -278,7 +330,7 @@
               {m.classes.length} classes · {m.imgsz}px · {compact(m.params)} params · {bytes(m.bytes, prefs.units)}
             </span>
             <span class="c-meta">
-              {#if m.run_id}on <b>{evalSet(m).label}</b>{#if isBest(m)}{' · '}<span class="c-best">best</span>{/if}{' · '}from {sourceName(m)}{:else}imported{/if} · {ago(m.created)}
+              {#if m.run_id}{#if isBest(m)}<span class="c-best">Best on {evalSet(m).label}</span>{:else}on <b>{evalSet(m).label}</b>{/if}{' · '}from {sourceName(m)}{:else}imported{/if} · {ago(m.created)}
             </span>
           </a>
         </li>
@@ -323,10 +375,15 @@
     text-underline-offset: 3px;
     text-decoration-color: var(--line-strong);
   }
-  .sk {
+  .sk-table td.r :global(.sk) {
+    margin-left: auto;
+  }
+  .sk-two {
     display: grid;
-    gap: var(--space-4);
-    padding: var(--space-4);
+    gap: 6px;
+  }
+  .sk-table th .sort {
+    cursor: default;
   }
   .scroll {
     overflow-x: auto;
@@ -478,6 +535,7 @@
     }
     .c-best {
       color: var(--accent-text);
+      font-weight: var(--weight-medium);
     }
     .none {
       padding: var(--space-6);

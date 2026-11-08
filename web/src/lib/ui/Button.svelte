@@ -5,7 +5,8 @@
   import Spinner from './Spinner.svelte';
 
   interface Props extends Omit<HTMLButtonAttributes, 'children'> {
-    variant?: 'primary' | 'secondary' | 'ghost' | 'danger';
+    /** `danger` is the quiet destructive control on a page; `destructive` is the solid confirm inside a dialog. */
+    variant?: 'primary' | 'secondary' | 'ghost' | 'danger' | 'destructive';
     size?: 'sm' | 'md' | 'lg';
     icon?: IconType;
     iconRight?: IconType;
@@ -141,8 +142,23 @@
     background: color-mix(in srgb, var(--danger-solid) 22%, transparent);
   }
 
+  .destructive {
+    background: var(--danger-solid);
+    color: var(--text-inverse);
+    font-weight: var(--weight-medium);
+  }
+  .destructive:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--danger-solid), var(--text-inverse) 10%);
+  }
+
   .btn:disabled {
-    opacity: 0.45;
+    opacity: 0.55;
+  }
+  /* Light theme: lime on white needs an edge to read as a control; a neutral one, so lime stays a single accent. */
+  :global([data-theme='light']) .primary {
+    box-shadow:
+      inset 0 0 0 1px #0b0e0326,
+      0 1px 2px #0a0e1414;
   }
   /* Touch: grow the hit area to at least 44 px without changing the visual size. */
   @media (pointer: coarse) {
@@ -152,7 +168,14 @@
     .btn::after {
       content: '';
       position: absolute;
-      inset: min(0px, calc((var(--h) - 44px) / 2)) min(0px, calc((var(--h) - 44px) / 4));
+      inset: min(0px, calc((var(--h) - 44px) / 2)) 0;
+    }
+    /* Icon buttons get a real 44 × 44 box (no overlapping invisible targets). */
+    .btn.square {
+      --h: 44px;
+    }
+    .btn.square::after {
+      display: none;
     }
   }
   .label {

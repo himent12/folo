@@ -19,6 +19,7 @@
   import Skeleton from '$lib/ui/Skeleton.svelte';
   import { tooltip } from '$lib/ui/tooltip';
   import AddDatasetDialog from './datasets/AddDatasetDialog.svelte';
+  import ClassNames from './datasets/ClassNames.svelte';
   import { imageCount } from './dataset/health';
 
   setCrumbs({ label: 'Datasets' });
@@ -109,14 +110,15 @@
           <span class="c-images r num" role="cell">
             <span class="big" use:tooltip={splitTip(d)}>{num(imageCount(d))}</span>
             <span class="splits">
-              <span title="train">{compact(d.splits.train)}</span><i>/</i><span title="val">{compact(d.splits.val)}</span><i>/</i><span title="test">{compact(d.splits.test)}</span>
+              <span title="train">{num(d.splits.train)}</span><i>/</i><span title="val">{num(d.splits.val)}</span><i>/</i><span title="test">{num(d.splits.test)}</span>
             </span>
+            <span class="split-key" aria-hidden="true">train<i>/</i>val<i>/</i>test</span>
           </span>
           <span class="c-classes r num" role="cell"><span class="big">{d.classes.length}</span><span class="lbl">classes</span></span>
           <span class="c-balance" role="cell">
             {#if d.stats}
               <ClassStrip counts={d.stats.class_counts} classes={d.classes} />
-              <span class="classes truncate">{d.classes.join(', ')}</span>
+              <ClassNames names={d.classes} />
             {:else}
               <span class="faint">—</span>
             {/if}
@@ -144,7 +146,7 @@
   .head,
   .row {
     display: grid;
-    grid-template-columns: minmax(0, 2.2fr) 112px 72px minmax(160px, 1.6fr) 72px 88px;
+    grid-template-columns: minmax(0, 2.2fr) 128px 72px minmax(160px, 1.6fr) 72px 88px;
     align-items: center;
     gap: var(--space-6);
     padding: 0 var(--space-4);
@@ -213,7 +215,13 @@
     font-size: var(--type-xs-size);
     color: var(--text-tertiary);
   }
-  .splits i {
+  .split-key {
+    font-size: var(--type-micro-size);
+    line-height: var(--type-micro-line);
+    color: var(--text-tertiary);
+  }
+  .splits i,
+  .split-key i {
     font-style: normal;
     margin: 0 2px;
     color: var(--text-disabled);
@@ -222,10 +230,6 @@
     display: grid;
     gap: 6px;
     min-width: 0;
-  }
-  .classes {
-    font-size: var(--type-xs-size);
-    color: var(--text-tertiary);
   }
   .c-created {
     font-size: var(--type-sm-size);
@@ -242,7 +246,7 @@
   @media (max-width: 1023px) {
     .head,
     .row {
-      grid-template-columns: minmax(0, 2fr) 104px 64px minmax(120px, 1.4fr) 64px;
+      grid-template-columns: minmax(0, 2fr) 120px 64px minmax(120px, 1.4fr) 64px;
     }
     .c-created {
       display: none;
@@ -285,7 +289,8 @@
       justify-self: start;
       text-align: left;
     }
-    .c-images .splits {
+    .c-images .splits,
+    .c-images .split-key {
       display: none;
     }
     .lbl {

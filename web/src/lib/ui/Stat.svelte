@@ -39,7 +39,10 @@
     color: var(--text-tertiary);
     white-space: nowrap;
   }
+  /* Inline flow, not flex: a unit or a superscript never changes the line box, so every stat's value sits on the same
+     baseline whatever it contains. */
   .value {
+    display: block;
     font-size: var(--type-lg-size);
     line-height: var(--type-lg-line);
     letter-spacing: var(--type-lg-tracking);

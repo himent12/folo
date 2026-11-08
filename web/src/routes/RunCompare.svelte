@@ -3,11 +3,11 @@
   import GitCompare from '@lucide/svelte/icons/git-compare-arrows';
   import X from '@lucide/svelte/icons/x';
   import Plus from '@lucide/svelte/icons/plus';
-  import Info from '@lucide/svelte/icons/info';
   import { hub } from '$lib/api/index.svelte';
   import { Resource } from '$lib/api/resource.svelte';
   import type { Epoch, Run, RunMetrics } from '$lib/api/types';
   import LineChart, { type Series } from '$lib/charts/LineChart.svelte';
+  import { nearest } from '$lib/charts/downsample';
   import { duration, metric } from '$lib/format';
   import { href, router } from '$lib/router.svelte';
   import { setCrumbs } from '$lib/shell/crumbs.svelte';
@@ -33,6 +33,13 @@
   });
 
   let x = $state<'epoch' | 'progress'>('epoch');
+  let narrow = $state(typeof matchMedia !== 'undefined' && matchMedia('(max-width: 767px)').matches);
+  $effect(() => {
+    const mq = matchMedia('(max-width: 767px)');
+    const on = () => (narrow = mq.matches);
+    mq.addEventListener('change', on);
+    return () => mq.removeEventListener('change', on);
+  });
   let cursor = $state<number | null>(null);
 
   const chosen = $derived(ids.map((id) => runs.data?.find((r) => r.id === id)).filter((r): r is Run => !!r));
@@ -52,9 +59,12 @@
       slots = next;
     });
   });
-  // Run slots use the four most distinct series hues: sky, orange, magenta, amber.
-  const RUN_SLOTS = [1, 6, 3, 2];
-  const color = (id: string) => `var(--chart-${RUN_SLOTS[slots[id] ?? Math.max(0, ids.indexOf(id))] ?? 1})`;
+  // Run slots: sky and amber first (the most distinct pair, for the common two-run comparison), then magenta and teal.
+  // No four hues stay apart for every colour-vision type, so slots 3 and 4 also get a line pattern.
+  const RUN_SLOTS = [1, 2, 3, 4];
+  const SLOT_PATTERN = [undefined, undefined, 'dash', 'dot'] as const;
+  const slotOf = (id: string) => slots[id] ?? Math.max(0, ids.indexOf(id));
+  const color = (id: string) => `var(--chart-${RUN_SLOTS[slotOf(id)] ?? 1})`;
 
   function setIds(next: string[]) {
     router.go(`/runs/compare${next.length ? `?ids=${next.join(',')}` : ''}`, { replace: true });
@@ -67,16 +77,33 @@
         id: r.id,
         label: r.name,
         color: color(r.id),
+        pattern: SLOT_PATTERN[slotOf(r.id)],
         points: eps.map((e) => ({ x: x === 'epoch' ? e.epoch + 1 : ((e.epoch + 1) / r.epochs) * 100, y: f(e) })),
       };
     });
 
-  const charts = $derived([
-    { id: 'm95', title: 'mAP50-95', series: curve((e) => e.val.map50_95), y: [0, 1] as [number, number] },
-    { id: 'm50', title: 'mAP50', series: curve((e) => e.val.map50), y: [0, 1] as [number, number] },
-    { id: 'loss', title: 'Train loss', series: curve((e) => e.train_loss.total), y: undefined },
-    { id: 'rec', title: 'Recall', series: curve((e) => e.val.recall), y: [0, 1] as [number, number] },
-  ]);
+  type MetricId = 'm95' | 'm50' | 'loss' | 'rec';
+  const METRICS: { id: MetricId; label: string; f: (e: Epoch) => number; y?: [number, number] }[] = [
+    { id: 'm95', label: 'mAP50-95', f: (e) => e.val.map50_95, y: [0, 1] },
+    { id: 'm50', label: 'mAP50', f: (e) => e.val.map50, y: [0, 1] },
+    { id: 'loss', label: 'Train loss', f: (e) => e.train_loss.total },
+    { id: 'rec', label: 'Recall', f: (e) => e.val.recall, y: [0, 1] },
+  ];
+  // One chart, one metric at a time: four small charts repeated the same legend four times.
+  let metricId = $state<MetricId>('m95');
+  const metricDef = $derived(METRICS.find((m) => m.id === metricId)!);
+  const series = $derived(curve(metricDef.f));
+  // The chips are the legend: each shows its run's value under the cursor, or its latest value at rest.
+  function valueOf(id: string): number | null {
+    const pts = series.find((s) => s.id === id)?.points ?? [];
+    const first = pts[0];
+    const last = pts[pts.length - 1];
+    if (!first || !last) return null;
+    if (cursor === null) return last.y;
+    if (cursor < first.x - 0.5 || cursor > last.x + 0.5) return null;
+    return pts[nearest(pts, cursor)]?.y ?? null;
+  }
+  const readoutAt = $derived(cursor === null ? 'Latest' : x === 'epoch' ? `Epoch ${Math.round(cursor)}` : `${Math.round(cursor)}% through`);
   const xDomain = $derived<[number, number]>(x === 'epoch' ? [0, Math.max(1, ...chosen.map((r) => r.epochs))] : [0, 100]);
 
   // mAP is only comparable on the same data: no winner across datasets.
@@ -96,99 +123,89 @@
     ['Duration', (r) => (r.started ? duration(((r.finished ? Date.parse(r.finished) : Date.now()) - Date.parse(r.started)) / 1000) : '—')],
   ]);
   const differs = (f: (r: Run) => string) => new Set(chosen.map(f)).size > 1;
+  // What differs is the comparison; identical settings fold into one row that can be opened.
+  const diffRows = $derived(chosen.length > 1 ? rows.filter(([, f]) => differs(f)) : rows);
+  const sameRows = $derived(chosen.length > 1 ? rows.filter(([, f]) => !differs(f)) : []);
+  let showSame = $state(false);
 
   const candidates = $derived((runs.data ?? []).filter((r) => !ids.includes(r.id) && r.status !== 'queued'));
 </script>
 
 <Page title="Compare runs">
   {#snippet sub()}<span>Overlay the curves of up to four runs. Colours follow the run, not its rank.</span>{/snippet}
-  {#snippet actions()}
-    <Segmented label="X axis" bind:value={x} options={[{ value: 'epoch', label: 'Epoch' }, { value: 'progress', label: '% of run' }]} />
-  {/snippet}
-
-  <div class="picker" role="group" aria-label="Runs being compared">
-    {#each chosen as r, i (r.id)}
-      <span class="chip" style:--c={color(r.id)}>
-        <i aria-hidden="true"></i>
-        <a href={href(`/runs/${r.id}`)}>{r.name}</a>
-        <button aria-label="Remove {r.name}" onclick={() => setIds(ids.filter((id) => id !== r.id))}><X size={12} /></button>
-      </span>
-    {/each}
-    {#if ids.length < MAX && candidates.length}
-      <label class="add">
-        <Plus size={14} />
-        <span class="sr-only">Add a run</span>
-        <select
-          aria-label="Add a run to the comparison"
-          onchange={(e) => {
-            const v = (e.currentTarget as HTMLSelectElement).value;
-            if (v) setIds([...ids, v]);
-          }}
-        >
-          <option value="">Add run…</option>
-          {#each candidates as c (c.id)}<option value={c.id}>{c.name} · {c.status}</option>{/each}
-        </select>
-      </label>
-    {/if}
-  </div>
 
   {#if runs.error && !runs.data}
     <ErrorState error={runs.error} retry={() => runs.refresh()} />
   {:else if ids.length === 0}
     <Panel>
-      <EmptyState icon={GitCompare} title="Pick runs to compare" description="Add two to four runs above, or select them on the Runs page.">
-        {#snippet actions()}<Button href={href('/runs')}>Go to Runs</Button>{/snippet}
+      <EmptyState icon={GitCompare} title="Pick runs to compare" description="Add two to four runs, or select them on the Runs page.">
+        {#snippet actions()}
+          {#if candidates.length}{@render adder()}{/if}
+          <Button href={href('/runs')}>Go to Runs</Button>
+        {/snippet}
       </EmptyState>
     </Panel>
   {:else}
-    {#if !sameData && chosen.length > 1}
-      <p class="notice" role="note">
-        <Info size={14} />
-        <span>These runs use different datasets, so their mAP is not directly comparable. Compare the shape of the curves, not the values.</span>
-      </p>
-    {/if}
-    <div class="charts">
-      {#each charts as c (c.id)}
-        <Panel title={c.title} id="cmp-{c.id}">
-          {#if metrics.error}
-            <ErrorState error={metrics.error} compact retry={() => metrics.refresh()} title="Could not load these runs' metrics" />
-          {:else if !metrics.data || !runs.data}
-            <Skeleton h="200px" r="var(--radius-md)" />
-          {:else}
-            <LineChart
-              series={c.series}
-              height={200}
-              {xDomain}
-              yDomain={c.y}
-              curve="monotone"
-              yFormat={(v) => v.toFixed(1)}
-              valueFormat={(v) => v.toFixed(3)}
-              xFormat={(v) => (x === 'epoch' ? String(Math.round(v)) : `${Math.round(v)}%`)}
-              xTitle={(v) => (x === 'epoch' ? `Epoch ${Math.round(v)}` : `${v.toFixed(0)}% through`)}
-              bind:cursor
-              label="{c.title} for the compared runs"
-            />
-          {/if}
-        </Panel>
-      {/each}
-    </div>
+    <section class="compare" aria-label="Curves">
+      <!-- The run chips are the legend: colour key, value under the cursor, link and remove. -->
+      <div class="chips" role="group" aria-label="Runs being compared">
+        <span class="at num" aria-hidden="true">{readoutAt}</span>
+        {#each chosen as r (r.id)}
+          {@const v = valueOf(r.id)}
+          <span class="chip" style:--c={color(r.id)}>
+            <i aria-hidden="true" data-pattern={SLOT_PATTERN[slotOf(r.id)]}></i>
+            <a href={href(`/runs/${r.id}`)}>{r.name}</a>
+            <span class="v num">{v === null ? '—' : v.toFixed(3)}</span>
+            <button aria-label="Remove {r.name}" onclick={() => setIds(ids.filter((id) => id !== r.id))}><X size={12} /></button>
+          </span>
+        {/each}
+        {#if ids.length < MAX && candidates.length}{@render adder()}{/if}
+      </div>
+      {#if !sameData && chosen.length > 1}
+        <p class="note">Different datasets: compare the shape of the curves, not their values.</p>
+      {/if}
+      <header class="c-head">
+        <Segmented label="Metric" bind:value={metricId} options={METRICS.map((m) => ({ value: m.id, label: m.label }))} />
+        <Segmented size="sm" label="X axis" bind:value={x} options={[{ value: 'epoch', label: 'By epoch' }, { value: 'progress', label: '% of run' }]} />
+      </header>
+      {#if metrics.error}
+        <ErrorState error={metrics.error} compact retry={() => metrics.refresh()} title="Could not load these runs' metrics" />
+      {:else if !metrics.data || !runs.data}
+        <Skeleton h="{narrow ? 240 : 340}px" r="var(--radius-md)" />
+      {:else}
+        <LineChart
+          {series}
+          height={narrow ? 240 : 340}
+          {xDomain}
+          yDomain={metricDef.y}
+          curve="monotone"
+          valueFormat={(v) => v.toFixed(3)}
+          xFormat={(v) => (x === 'epoch' ? String(Math.round(v)) : `${Math.round(v)}%`)}
+          xTitle={(v) => (x === 'epoch' ? `Epoch ${Math.round(v)}` : `${v.toFixed(0)}% through`)}
+          xLabel={x === 'epoch' ? 'epoch' : undefined}
+          bind:cursor
+          legend={false}
+          label="{metricDef.label} for the compared runs"
+        />
+      {/if}
+    </section>
 
     {#if chosen.length}
-      <Panel title="Side by side" pad="none" id="cmp-table">
+      <Panel title="Side by side" meta={sameRows.length ? `${diffRows.length} settings differ` : undefined} pad="none" id="cmp-table">
         <div class="scroll">
           <table class="table">
             <thead>
               <tr>
                 <th></th>
-                {#each chosen as r, i (r.id)}
-                  <th><span class="th"><i style:background={color(r.id)}></i>{r.name}</span></th>
+                {#each chosen as r (r.id)}
+                  <th><span class="th" style:--c={color(r.id)}><i data-pattern={SLOT_PATTERN[slotOf(r.id)]}></i>{r.name}</span></th>
                 {/each}
               </tr>
             </thead>
             <tbody>
               <tr>
                 <td class="k">Status</td>
-                {#each chosen as r (r.id)}<td><StatusBadge status={r.status} size="sm" /></td>{/each}
+                {#each chosen as r (r.id)}<td><StatusBadge status={r.status} plain /></td>{/each}
               </tr>
               <tr>
                 <td class="k">Best mAP50-95</td>
@@ -196,13 +213,29 @@
                   <td class="num" class:winner={sameData && i === bestIdx && chosen.length > 1}>{metric(r.best?.map50_95)}{#if sameData && i === bestIdx && chosen.length > 1}<span class="tag">best</span>{/if}</td>
                 {/each}
               </tr>
-              {#each rows as [k, f] (k)}
-                {@const diff = differs(f)}
+              {#each diffRows as [k, f] (k)}
                 <tr>
-                  <td class="k">{k}{#if diff}<span class="dot" title="Differs between runs"></span>{/if}</td>
-                  {#each chosen as r (r.id)}<td class="mono" class:diff>{f(r)}</td>{/each}
+                  <td class="k">{k}</td>
+                  {#each chosen as r (r.id)}<td class="num cfg diff">{f(r)}</td>{/each}
                 </tr>
               {/each}
+              {#if sameRows.length}
+                <tr class="fold">
+                  <td colspan={chosen.length + 1}>
+                    <button aria-expanded={showSame} onclick={() => (showSame = !showSame)}>
+                      {showSame ? 'Hide' : 'Show'} {sameRows.length} identical {sameRows.length === 1 ? 'setting' : 'settings'}
+                    </button>
+                  </td>
+                </tr>
+                {#if showSame}
+                  {#each sameRows as [k, f] (k)}
+                    <tr>
+                      <td class="k">{k}</td>
+                      {#each chosen as r (r.id)}<td class="num cfg">{f(r)}</td>{/each}
+                    </tr>
+                  {/each}
+                {/if}
+              {/if}
             </tbody>
           </table>
         </div>
@@ -211,12 +244,86 @@
   {/if}
 </Page>
 
+{#snippet adder()}
+  <label class="add">
+    <Plus size={14} />
+    <span class="sr-only">Add a run</span>
+    <select
+      aria-label="Add a run to the comparison"
+      onchange={(e) => {
+        const v = (e.currentTarget as HTMLSelectElement).value;
+        if (v) setIds([...ids, v]);
+      }}
+    >
+      <option value="">Add run…</option>
+      {#each candidates as c (c.id)}<option value={c.id}>{c.name} · {c.status}</option>{/each}
+    </select>
+  </label>
+{/snippet}
+
 <style>
-  .picker {
+  .compare {
+    display: grid;
+    gap: var(--space-3);
+    padding: var(--space-4);
+    background: var(--bg-panel);
+    border: 1px solid var(--line-default);
+    border-radius: var(--radius-lg);
+    min-width: 0;
+  }
+  :global([data-theme='dark']) .compare {
+    border-color: var(--line-subtle);
+  }
+  .chips {
     display: flex;
     flex-wrap: wrap;
     gap: var(--space-2);
     align-items: center;
+  }
+  .at {
+    min-width: 6.5em;
+    font-size: var(--type-sm-size);
+    color: var(--text-tertiary);
+  }
+  .chip .v {
+    min-width: 3.2em;
+    color: var(--text-primary);
+    font-weight: var(--weight-medium);
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+  }
+  .note {
+    font-size: var(--type-sm-size);
+    color: var(--text-tertiary);
+  }
+  @media (max-width: 767px) {
+    .compare {
+      padding: var(--space-3);
+    }
+    .at {
+      flex-basis: 100%;
+    }
+  }
+  .c-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+    flex-wrap: wrap;
+    padding-top: var(--space-3);
+    border-top: 1px solid var(--line-subtle);
+  }
+  .fold td {
+    padding-top: 0;
+    padding-bottom: 0;
+  }
+  .fold button {
+    height: 32px;
+    font-size: var(--type-sm-size);
+    color: var(--text-secondary);
+  }
+  .fold button:hover {
+    color: var(--text-primary);
   }
   .chip {
     display: inline-flex;
@@ -269,7 +376,7 @@
     height: var(--control-md);
     padding: 0 10px;
     border-radius: var(--radius-full);
-    border: 1px dashed var(--line-strong);
+    border: 1px solid var(--line-default);
     color: var(--text-secondary);
   }
   .add select {
@@ -290,25 +397,6 @@
   .add option {
     background: var(--bg-overlay);
   }
-  .notice {
-    display: flex;
-    align-items: flex-start;
-    gap: var(--space-2);
-    padding: var(--space-2) var(--space-3);
-    border-radius: var(--radius-md);
-    background: var(--info-muted);
-    color: var(--text-secondary);
-  }
-  .notice :global(svg) {
-    flex-shrink: 0;
-    margin-top: 3px;
-    color: var(--info-text);
-  }
-  .charts {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: var(--space-4);
-  }
   .scroll {
     overflow-x: auto;
   }
@@ -323,23 +411,29 @@
     width: 10px;
     height: 3px;
     border-radius: 2px;
+    background: var(--c);
+  }
+  /* Same patterns as the lines, so a run's key matches its curve without relying on colour. */
+  .chip i,
+  .th i {
+    width: 14px;
+  }
+  i[data-pattern='dash'] {
+    background: repeating-linear-gradient(90deg, var(--c) 0 5px, transparent 5px 7px);
+    border-radius: 0;
+  }
+  i[data-pattern='dot'] {
+    background: repeating-linear-gradient(90deg, var(--c) 0 2px, transparent 2px 4px);
+    border-radius: 0;
   }
   .k {
     color: var(--text-tertiary);
   }
-  .dot {
-    display: inline-block;
-    width: 5px;
-    height: 5px;
-    margin-left: 6px;
-    border-radius: 50%;
-    background: var(--warning-solid);
-    vertical-align: middle;
-  }
   td.diff {
     color: var(--text-primary);
+    font-weight: var(--weight-medium);
   }
-  td.mono:not(.diff) {
+  td.cfg:not(.diff) {
     color: var(--text-tertiary);
   }
   .winner {
@@ -352,10 +446,5 @@
     border-radius: var(--radius-xs);
     background: var(--accent-muted);
     font-size: var(--type-micro-size);
-  }
-  @media (max-width: 1023px) {
-    .charts {
-      grid-template-columns: minmax(0, 1fr);
-    }
   }
 </style>

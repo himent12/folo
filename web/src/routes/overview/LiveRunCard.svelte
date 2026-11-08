@@ -2,10 +2,12 @@
   import ArrowRight from '@lucide/svelte/icons/arrow-right';
   import { LiveRun } from '$lib/api/live.svelte';
   import type { Dataset, Run } from '$lib/api/types';
-  import { smooth } from '$lib/charts/downsample';
   import LineChart from '$lib/charts/LineChart.svelte';
   import { runHorizon } from '$lib/charts/horizon';
+  import { hub } from '$lib/api/index.svelte';
+  import { Resource } from '$lib/api/resource.svelte';
   import { duration, lr, metric, num } from '$lib/format';
+  import { deviceLine } from './device';
   import { href } from '$lib/router.svelte';
   import Button from '$lib/ui/Button.svelte';
   import Progress from '$lib/ui/Progress.svelte';
@@ -23,16 +25,11 @@
 
   const charts = $derived.by(() => {
     void live.version;
-    const spe = Math.max(1, run.steps_per_epoch);
-    const raw = live.steps.map((s) => ({ x: s.step / spe, y: s.loss.total }));
     return {
       map: [
-        { id: 'm95', label: 'mAP50-95', color: 'var(--chart-1)', area: true, points: live.epochs.map((e) => ({ x: e.epoch + 1, y: e.val.map50_95 })) },
-        { id: 'm50', label: 'mAP50', color: 'var(--chart-1)', pattern: 'dash' as const, points: live.epochs.map((e) => ({ x: e.epoch + 1, y: e.val.map50 })) },
-      ],
-      loss: [
-        { id: 'raw', label: 'raw', color: 'var(--chart-1)', ghost: true, points: raw },
-        { id: 'loss', label: 'Train loss', color: 'var(--chart-1)', points: smooth(raw, 0.9) },
+        // One run, so ink rather than a hue (hue identifies entities): primary metric solid, secondary tertiary dashed.
+        { id: 'm95', label: 'mAP50-95', color: 'var(--text-primary)', area: true, points: live.epochs.map((e) => ({ x: e.epoch + 1, y: e.val.map50_95 })) },
+        { id: 'm50', label: 'mAP50', color: 'var(--text-tertiary)', pattern: 'dash' as const, points: live.epochs.map((e) => ({ x: e.epoch + 1, y: e.val.map50 })) },
       ],
       lastStep: live.steps[live.steps.length - 1],
     };
@@ -43,6 +40,10 @@
     return runHorizon(Math.max(live.epochs.length, run.step / Math.max(1, run.steps_per_epoch)), run.epochs, true, 'observed');
   });
   const progress = $derived(run.step / Math.max(1, run.steps_per_epoch * run.epochs));
+
+  // The device this run is using, live: its own label, plus load only from the GPU it actually trains on.
+  const sys = new Resource((s) => hub.api.system(s), { poll: 2000 });
+  const deviceText = $derived(deviceLine(run, sys.data?.gpus ?? []));
 </script>
 
 <section class="card" aria-labelledby="live-title">
@@ -54,8 +55,8 @@
     <p class="meta">
       <span>{dataset?.name ?? run.config.dataset_id}</span><span class="sep">·</span>
       <span class="mono">{run.config.arch}</span><span class="sep">·</span>
-      <span>{run.config.imgsz}px, batch {run.config.batch}</span><span class="sep">·</span>
-      <span class="truncate">{run.device}</span>
+      <span>{run.config.imgsz} px · batch {run.config.batch}</span><span class="sep">·</span>
+      <span class="truncate num">{deviceText}</span>
     </p>
     <div class="cta"><Button size="sm" variant="ghost" iconRight={ArrowRight} href={href(`/runs/${run.id}`)}>Open run</Button></div>
   </header>
@@ -71,46 +72,27 @@
         </p>
       </div>
       <div class="grid">
-        <Stat label="Best mAP50-95" value={metric(run.best?.map50_95)} sub={run.best ? `epoch ${run.best.epoch + 1}` : 'after first epoch'} tone="accent" />
+        <Stat label="Best mAP50-95" value={metric(run.best?.map50_95)} sub={run.best ? `epoch ${run.best.epoch + 1}` : 'after first epoch'} />
         <Stat label="Throughput" value={num(charts.lastStep?.imgs_per_s, 0)} unit="img/s" />
         <Stat label="Learning rate" value={lr(charts.lastStep?.lr)} />
-        <Stat label="Loss" value={num(charts.lastStep?.loss.total, 3)} />
+        <Stat label="Loss" value={num(charts.lastStep?.loss.total, 3)} sub="last step, raw" />
       </div>
     </div>
     <div class="chart">
-      <p class="chart-title">Validation mAP</p>
+      <p class="chart-title">Validation mAP <span class="faint">by epoch</span></p>
       {#if live.loading}
-        <Skeleton h="150px" r="var(--radius-md)" />
+        <Skeleton h="200px" r="var(--radius-md)" />
       {:else}
         <LineChart
           series={charts.map}
-          height={150}
+          height={200}
           xDomain={horizon}
-          yFormat={(v) => v.toFixed(2)}
           valueFormat={(v) => v.toFixed(3)}
           xTitle={(x) => `Epoch ${Math.round(x)}`}
           curve="monotone"
-          bind:cursor
+          legendNote="Latest"
           label="Validation mAP by epoch"
           empty="Waiting for the first validation…"
-        />
-      {/if}
-    </div>
-    <div class="chart">
-      <p class="chart-title">Training loss</p>
-      {#if live.loading}
-        <Skeleton h="150px" r="var(--radius-md)" />
-      {:else}
-        <LineChart
-          series={charts.loss}
-          height={150}
-          xDomain={horizon}
-          yFormat={(v) => v.toFixed(1)}
-          valueFormat={(v) => v.toFixed(3)}
-          xTitle={(x) => `Epoch ${x.toFixed(1)}`}
-          bind:cursor
-          label="Training loss by epoch"
-          legend={false}
         />
       {/if}
     </div>
@@ -181,7 +163,7 @@
   }
   .body {
     display: grid;
-    grid-template-columns: minmax(220px, 260px) 1fr 1fr;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 2fr);
     gap: var(--space-5);
     padding: var(--space-2) var(--space-5) var(--space-5);
   }
@@ -212,16 +194,19 @@
     align-content: start;
   }
   .chart-title {
-    font-size: var(--type-xs-size);
-    color: var(--text-tertiary);
+    font-size: var(--type-md-size);
+    line-height: var(--type-md-line);
     font-weight: var(--weight-medium);
   }
-  @media (max-width: 1199px) {
+  .chart-title .faint {
+    font-size: var(--type-sm-size);
+    font-weight: var(--weight-regular);
+  }
+  @media (max-width: 1023px) {
     .body {
-      grid-template-columns: 1fr 1fr;
+      grid-template-columns: minmax(0, 1fr);
     }
     .stats {
-      grid-column: 1 / -1;
       grid-template-columns: minmax(200px, 1fr) 2fr;
       align-items: start;
     }

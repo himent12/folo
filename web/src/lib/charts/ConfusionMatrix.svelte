@@ -3,17 +3,38 @@
    * Confusion matrix: rows are true classes, columns predicted, plus a "background" row/column for misses and false
    * positives. Cells are row-normalised and shaded in one hue (sequential), counts on hover.
    */
-  import { classInk } from '$lib/design/classInk.svelte';
+  import { classColor } from '$lib/design/tokens';
 
   let {
     classes,
     matrix,
     label = 'Confusion matrix',
+    sparseLabels = false,
+    minCell,
+    scale = false,
+    classIds,
   }: {
     classes: string[];
     /** (n+1)×(n+1) counts; the last row/column is background. */
     matrix: number[][];
     label?: string;
+    /**
+     * Label only cells of at least 10 % that are at least 32 px wide, so dense matrices don't run numerals together;
+     * the readout still gives every value on hover or focus.
+     */
+    sparseLabels?: boolean;
+    /**
+     * Minimum cell size in px. Wide matrices then scroll sideways with the row labels pinned, instead of squeezing
+     * cells; on touch screens cells are at least 44 px.
+     */
+    minCell?: number;
+    /** Show a labelled 0–100 % colour scale under the matrix. */
+    scale?: boolean;
+    /**
+     * The palette index of each entry of `classes` (defaults to its position), for reduced matrices whose rows are a
+     * subset of the model's classes; a negative index draws a neutral dot (e.g. "other classes").
+     */
+    classIds?: number[];
   } = $props();
 
   const uid = $props.id();
@@ -23,6 +44,17 @@
   /** Roving tabindex: one cell is in the tab order; arrow keys move it. */
   let focus = $state({ r: 0, c: 0 });
   let root: HTMLDivElement;
+  /** A scrolling matrix fades its right edge while there are more columns to scroll to. */
+  let moreRight = $state(false);
+  const fixed = $derived(minCell !== undefined);
+  const onscroll = () => (moreRight = root.scrollLeft + root.clientWidth < root.scrollWidth - 1);
+  $effect(() => {
+    if (!fixed) return;
+    onscroll();
+    const ro = new ResizeObserver(onscroll);
+    ro.observe(root);
+    return () => ro.disconnect();
+  });
 
   function onkeydown(e: KeyboardEvent) {
     const max = n - 1;
@@ -45,15 +77,20 @@
     return s ? (matrix[r]?.[c] ?? 0) / s : 0;
   };
   const n = $derived(names.length);
+  /** Swatch colour of row/column `i`: the class palette hue, neutral for background and folded rows. */
+  const dotColor = (i: number) => {
+    const id = i < classes.length ? (classIds?.[i] ?? i) : -1;
+    return id >= 0 ? classColor(id) : 'var(--text-tertiary)';
+  };
 </script>
 
 <!-- svelte-ignore a11y_interactive_supports_focus -->
-<div class="cm" style:--n={n} role="grid" aria-label={label} aria-describedby="{uid}-readout" bind:this={root} {onkeydown}>
+<div class="cm" class:sparse={sparseLabels} class:fixed class:more-r={moreRight} style:--n={n} style:--min-cell={minCell !== undefined ? `${minCell}px` : undefined} role="grid" aria-label={label} aria-describedby="{uid}-readout" bind:this={root} {onkeydown} {onscroll}>
   <div class="row" role="row">
     <div class="corner" role="columnheader"><span>true ↓ / pred →</span></div>
     {#each names as name, c (c)}
       <div class="colhead" role="columnheader" title={name}>
-        <span class="dot" style:background={c < classes.length ? classInk(c) : 'var(--text-tertiary)'}></span>
+        <span class="dot" style:background={dotColor(c)}></span>
         <span class="lbl">{name}</span>
       </div>
     {/each}
@@ -61,7 +98,7 @@
   {#each names as rname, r (r)}
     <div class="row" role="row">
       <div class="rowhead" role="rowheader" title={rname}>
-        <span class="dot" style:background={r < classes.length ? classInk(r) : 'var(--text-tertiary)'}></span>
+        <span class="dot" style:background={dotColor(r)}></span>
         <span class="lbl">{rname}</span>
       </div>
       {#each names as cname, c (c)}
@@ -83,21 +120,30 @@
           onclick={() => (hovered = pinned = { r, c })}
           onkeydown={() => {}}
         >
-          {#if v >= 0.005}<span class:light={v > 0.55}>{(v * 100).toFixed(v >= 0.1 ? 0 : 1)}</span>{/if}
+          {#if v >= (sparseLabels ? 0.1 : 0.005)}<span class:light={v > 0.55}>{(v * 100).toFixed(v >= 0.1 ? 0 : 1)}</span>{/if}
         </div>
       {/each}
     </div>
   {/each}
 </div>
+{#if scale}
+  <div class="scale" aria-hidden="true">
+    <span>Correct</span>
+    <span class="ramp diag"></span>
+    <span>Confused</span>
+    <span class="ramp off"></span>
+    <span class="ticks"><span>0 %</span><span>50 %</span><span>100 %</span></span>
+  </div>
+{/if}
 <p class="readout" class:faint={!hovered} id="{uid}-readout">
   {#if hovered}
     {@const h = hovered}
     <b>{names[h.r]}</b> predicted as <b>{names[h.c]}</b>:
-    <span class="mono">{(matrix[h.r]?.[h.c] ?? 0).toLocaleString('en-US')}</span> of
-    <span class="mono">{(rowSums[h.r] ?? 0).toLocaleString('en-US')}</span>
-    (<span class="mono">{(norm(h.r, h.c) * 100).toFixed(1)}%</span>)
+    <span class="num">{(matrix[h.r]?.[h.c] ?? 0).toLocaleString('en-US')}</span> of
+    <span class="num">{(rowSums[h.r] ?? 0).toLocaleString('en-US')}</span>
+    (<span class="num">{(norm(h.r, h.c) * 100).toFixed(1)} %</span>)
   {:else}
-    Row-normalised, in %. Hover, tap or arrow through the cells for counts.
+    Row-normalised, in %{sparseLabels ? '; cells under 10 % unlabelled' : ''}. Hover, tap or arrow through the cells for counts.
   {/if}
 </p>
 
@@ -111,6 +157,31 @@
     gap: 2px;
     font-size: var(--type-xs-size);
     overflow-x: auto;
+  }
+  /* Fixed minimum cells: the matrix scrolls sideways under pinned row labels. */
+  .cm.fixed {
+    grid-template-columns: 96px repeat(var(--n), minmax(var(--min-cell), 1fr));
+    overscroll-behavior-x: contain;
+  }
+  .cm.more-r {
+    mask-image: linear-gradient(to left, transparent, #000 24px);
+  }
+  .fixed .corner,
+  .fixed .rowhead {
+    position: sticky;
+    left: 0;
+    z-index: 1;
+    background: var(--bg-panel);
+    /* Covers the 2 px gap so scrolled cells don't show between the label and the first column. */
+    box-shadow: 2px 0 0 var(--bg-panel);
+  }
+  .fixed .cell {
+    min-width: var(--min-cell);
+  }
+  @media (pointer: coarse) {
+    .cm.fixed {
+      --min-cell: 44px !important;
+    }
   }
   .corner {
     display: flex;
@@ -151,10 +222,14 @@
     white-space: nowrap;
   }
   .dot {
-    width: 6px;
-    height: 6px;
+    width: 8px;
+    height: 8px;
     border-radius: 2px;
     flex-shrink: 0;
+  }
+  /* The raw palette hue, edged so pale classes hold up on white. */
+  :global([data-theme='light']) .dot {
+    box-shadow: inset 0 0 0 1px #0a0e1433;
   }
   .cell {
     aspect-ratio: 1;
@@ -162,11 +237,20 @@
     place-items: center;
     border-radius: 3px;
     background: color-mix(in srgb, var(--chart-2) calc(var(--v) * 92% + 4%), var(--bg-inset));
-    font-family: var(--font-mono);
     font-size: var(--type-xs-size);
+    font-variant-numeric: tabular-nums;
     color: var(--text-secondary);
     transition: box-shadow var(--dur-fast) var(--ease-standard);
     min-width: 22px;
+  }
+  /* Each cell is a size container so a label can hide itself when its cell is too narrow to hold it. */
+  .sparse .cell {
+    container-type: inline-size;
+  }
+  @container (max-width: 31.98px) {
+    .sparse .cell span {
+      display: none;
+    }
   }
   .cell.hl {
     box-shadow: inset 0 0 0 1px var(--line-strong);
@@ -193,7 +277,34 @@
     color: var(--text-primary);
     font-weight: var(--weight-medium);
   }
-  .mono {
-    font-family: var(--font-mono);
+  .num {
+    font-variant-numeric: tabular-nums;
+  }
+  .scale {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: center;
+    gap: 4px var(--space-2);
+    max-width: 320px;
+    margin-top: var(--space-3);
+    font-size: var(--type-xs-size);
+    line-height: var(--type-xs-line);
+    color: var(--text-tertiary);
+  }
+  .ramp {
+    height: 8px;
+    border-radius: 2px;
+  }
+  .ramp.diag {
+    background: linear-gradient(to right, color-mix(in srgb, var(--chart-1) 4%, var(--bg-inset)), color-mix(in srgb, var(--chart-1) 96%, var(--bg-inset)));
+  }
+  .ramp.off {
+    background: linear-gradient(to right, color-mix(in srgb, var(--chart-2) 4%, var(--bg-inset)), color-mix(in srgb, var(--chart-2) 96%, var(--bg-inset)));
+  }
+  .ticks {
+    grid-column: 2;
+    display: flex;
+    justify-content: space-between;
+    font-variant-numeric: tabular-nums;
   }
 </style>

@@ -75,6 +75,10 @@
   });
 
   const shown = (b: ViewBox) => !only || only.has(b.class);
+  // Small views (phones) get smaller chips, and boxes under 20 px on screen keep their label for hover/selection.
+  const small = $derived(cw > 0 && cw < 480);
+  const chipH = $derived(small ? 14 : CHIP_H);
+  const tiny = (b: ViewBox) => !!geo && small && Math.min(b.x2 - b.x1, b.y2 - b.y1) * geo.s < 20;
   const name = (c: number) => classes[c] ?? `class ${c}`;
 
   /** Label chips placed in screen pixels (see ./chips). Widths are estimated from the text (11 px Geist). */
@@ -87,7 +91,7 @@
           ? {
               x: g.ox + b.x1 * g.s,
               y: g.oy + b.y1 * g.s,
-              w: Math.ceil(name(b.class).length * 6.4 + 12 + (scores && b.score !== undefined ? 32 : 0)),
+              w: Math.ceil(name(b.class).length * (small ? 5.8 : 6.4) + (small ? 10 : 12) + (scores && b.score !== undefined ? (small ? 28 : 32) : 0)),
             }
           : null,
       ),
@@ -97,6 +101,7 @@
         minY: Math.max(0, g.oy) + 2,
         maxY: Math.min(ch, g.oy + height * g.s) - 2,
       },
+      chipH,
     );
   });
 
@@ -106,7 +111,7 @@
   });
 </script>
 
-<div class="view" class:compact bind:clientWidth={cw} bind:clientHeight={ch}>
+<div class="view" class:compact class:small bind:clientWidth={cw} bind:clientHeight={ch}>
   {#if src}
     <img
       {src}
@@ -144,6 +149,7 @@
             class:active={active === i}
             class:selected={selected === i}
             class:dim={active !== null && active !== i}
+            class:recede={selected !== null && selected !== i && active !== i}
             data-box={i}
             style:--c={classColor(b.class)}
             style:left="{geo.ox + b.x1 * geo.s}px"
@@ -154,15 +160,15 @@
             onpointerleave={onhover ? () => onhover(null) : undefined}
             onclick={onselect ? () => onselect(i) : undefined}
           >
-            {#if labels && !compact}
+            {#if labels && !compact && ((!chips[i]?.hidden && !tiny(b)) || active === i || selected === i)}
               {@const c = chips[i]}
-              {#if c && (c.dy < -CHIP_H - 9 || (c.inside && c.dy > 8))}
+              {#if c && (c.dy < -chipH - 9 || (c.inside && c.dy > 8))}
                 <!-- The chip had to move away from its box: a thin leader keeps ownership readable. -->
                 <span
                   class="leader"
                   style:left="{Math.max(0, c.dx + 6) - 2}px"
-                  style:top="{(c.dy < 0 ? c.dy + CHIP_H : 0) - 2}px"
-                  style:height="{c.dy < 0 ? -c.dy - CHIP_H : c.dy}px"
+                  style:top="{(c.dy < 0 ? c.dy + chipH : 0) - 2}px"
+                  style:height="{c.dy < 0 ? -c.dy - chipH : c.dy}px"
                 ></span>
               {/if}
               <span class="chip" class:inside={c?.inside} style:left="{(c?.dx ?? 0) - 2}px" style:top="{(c?.dy ?? -17) - 2}px">
@@ -219,10 +225,20 @@
     z-index: 2;
   }
   .box.selected {
-    /* Selection ring outside the halo: 2 px in the accent, the same mark as focus and selection elsewhere. */
-    outline: 2px solid var(--accent-line);
-    outline-offset: 1px;
-    z-index: 3;
+    /* Selected: a 3 px accent stroke (lime reads on any photo inside its dark halo), drawn above everything else. */
+    border: 3px solid var(--accent-solid);
+    box-shadow:
+      0 0 0 1px var(--class-halo),
+      0 0 0 3px color-mix(in srgb, var(--class-halo) 50%, transparent),
+      inset 0 0 0 1px var(--class-halo);
+    z-index: 5;
+  }
+  .box.selected .chip {
+    z-index: 6;
+  }
+  /* With a selection, the rest of the scene steps back so the selected detection is unmistakable. */
+  .box.recede {
+    opacity: 0.3;
   }
   .box.dim {
     /* Keep context readable: fade the stroke, never the label. */
@@ -272,8 +288,17 @@
   .chip.inside {
     border-radius: 0 0 3px 0;
   }
+  .small .chip {
+    height: 14px;
+    padding: 0 4px;
+    gap: 4px;
+    font-size: 10px;
+  }
+  .small .score {
+    font-size: 9px;
+  }
   .score {
-    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
     font-size: 10px;
     opacity: 0.8;
   }

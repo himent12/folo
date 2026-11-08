@@ -3,7 +3,7 @@
   import PanelLeftOpen from '@lucide/svelte/icons/panel-left-open';
   import type { Snippet } from 'svelte';
   import { router, section, href } from '$lib/router.svelte';
-  import { prefs } from '$lib/prefs.svelte';
+  import { sidebar } from './sidebarState.svelte';
   import Kbd from '$lib/ui/Kbd.svelte';
   import Logo from './Logo.svelte';
   import { mainNav, settingsNav, type NavItem } from './nav';
@@ -11,7 +11,7 @@
   let { footer, live }: { footer?: Snippet<[boolean]>; live?: Snippet<[boolean]> } = $props();
 
   const current = $derived(section(router.route.name));
-  const collapsed = $derived(prefs.sidebarCollapsed);
+  const collapsed = $derived(sidebar.collapsed);
 </script>
 
 {#snippet item(n: NavItem)}
@@ -51,7 +51,7 @@
     {#if footer}{@render footer(collapsed)}{/if}
     <button
       class="collapse"
-      onclick={() => (prefs.sidebarCollapsed = !collapsed)}
+      onclick={() => sidebar.toggle()}
       aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
       title={collapsed ? 'Expand sidebar  [' : 'Collapse sidebar  ['}
     >

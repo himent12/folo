@@ -12,7 +12,7 @@
   import { hub } from '$lib/api/index.svelte';
   import { Resource } from '$lib/api/resource.svelte';
   import type { Dataset, DatasetImage as Img, Model, PredictInput, Prediction } from '$lib/api/types';
-  import { classInk } from '$lib/design/classInk.svelte';
+  import { classColor } from '$lib/design/tokens';
   import DetectionView from '$lib/detect/DetectionView.svelte';
   import { filterDetections } from '$lib/detect/nms';
   import { metric, num } from '$lib/format';
@@ -381,7 +381,7 @@
         <Select
           label="Model"
           value={modelId ?? ''}
-          options={ranked.map((m) => ({ value: m.id, label: `${m.name} · ${m.arch}${m.metrics ? ` · ${metric(m.metrics.map50_95)}` : ''}` }))}
+          options={ranked.map((m) => ({ value: m.id, label: `${m.name} · ${m.arch}${m.metrics ? ` · mAP ${metric(m.metrics.map50_95)}` : ''}` }))}
           onchange={chooseModel}
         />
         {#if model}<Button icon={ArrowUpRight} href={href(`/models/${model.id}`)} aria-label="Open {model.name}" />{/if}
@@ -418,7 +418,7 @@
               </span>
               {#if source}
                 <span class="src-name mono truncate" title={sourceName}>{shortName}</span>
-                {#if dims}<span class="src-dims mono">{dims.width}×{dims.height}</span>{/if}
+                {#if dims}<span class="src-dims num">{dims.width}×{dims.height}</span>{/if}
                 <span class="vbar-gap"></span>
                 <span class="toggles">
                   {@render toggle('Labels', labels, (v) => (labels = v))}
@@ -462,8 +462,20 @@
                 {#if dragging}<div class="drop-hint"><span>Drop to replace</span></div>{/if}
               {/if}
             </div>
+            {#if source && result}
+              <!-- Phones: the picked detection in one line under the image, so its numbers are readable without the table. -->
+              {@const sel = selectedIdx !== null ? kept[selectedIdx] : undefined}
+              <p class="pick-line num" aria-live="polite">
+                {#if sel}
+                  <span class="sw" style:background={classColor(sel.class)} aria-hidden="true"></span>
+                  <b>{sel.name}</b> {sel.score.toFixed(2)}<span class="sep" aria-hidden="true">·</span>{px(sel.x2 - sel.x1)}×{px(sel.y2 - sel.y1)} px
+                {:else}
+                  <span class="faint">Tap a box for its class, score and size.</span>
+                {/if}
+              </p>
+            {/if}
             {#if source}
-              <div class="vfoot mono">
+              <div class="vfoot num">
                 {#if result}
                   <!-- Each item after the first draws its own separator, so hiding one never leaves a stray dot. -->
                   <span class="fi"><b>{rows.length}</b> shown <span class="wide">of {num(pred?.boxes.length)} candidates</span></span>
@@ -512,7 +524,10 @@
                         <th scope="col" class="r idx">#</th>
                         <th scope="col">Class</th>
                         <th scope="col">Score</th>
-                        <th scope="col" class="r hide-sm">Box (x1, y1, x2, y2)</th>
+                        <th scope="col" class="r hide-sm coord" title="Box left edge, in image pixels">x1</th>
+                        <th scope="col" class="r hide-sm coord" title="Box top edge, in image pixels">y1</th>
+                        <th scope="col" class="r hide-sm coord" title="Box right edge, in image pixels">x2</th>
+                        <th scope="col" class="r hide-sm coord" title="Box bottom edge, in image pixels">y2</th>
                         <th scope="col" class="r">Size</th>
                       </tr>
                     </thead>
@@ -534,18 +549,21 @@
                           <td class="r idx faint">{i + 1}</td>
                           <td>
                             <span class="cls">
-                              <span class="sw" style:background={classInk(b.class)} aria-hidden="true"></span>
+                              <span class="sw" style:background={classColor(b.class)} aria-hidden="true"></span>
                               <span class="truncate">{b.name}</span>
                             </span>
                           </td>
                           <td>
                             <span class="score">
-                              <span class="s-track" aria-hidden="true"><span style:transform="scaleX({b.score})" style:background={classInk(b.class)}></span></span>
-                              <span class="mono">{b.score.toFixed(3)}</span>
+                              <span class="s-track" aria-hidden="true"><span style:transform="scaleX({b.score})" style:background={classColor(b.class)}></span></span>
+                              <span class="num">{b.score.toFixed(3)}</span>
                             </span>
                           </td>
-                          <td class="r mono muted hide-sm">{px(b.x1)}, {px(b.y1)}, {px(b.x2)}, {px(b.y2)}</td>
-                          <td class="r mono muted">{px(b.x2 - b.x1)}×{px(b.y2 - b.y1)}</td>
+                          <td class="r muted hide-sm coord">{px(b.x1)}</td>
+                          <td class="r muted hide-sm coord">{px(b.y1)}</td>
+                          <td class="r muted hide-sm coord">{px(b.x2)}</td>
+                          <td class="r muted hide-sm coord">{px(b.y2)}</td>
+                          <td class="r muted">{px(b.x2 - b.x1)}×{px(b.y2 - b.y1)}</td>
                         </tr>
                       {/each}
                     </tbody>
@@ -586,9 +604,9 @@
                   {@const off = hidden.has(c)}
                   <li>
                     <button type="button" class:off aria-pressed={!off} onclick={() => toggleClass(c)} aria-label="{off ? 'Show' : 'Hide'} {classes[c] ?? `class ${c}`}">
-                      <span class="sw" style:background={classInk(c)} aria-hidden="true"></span>
+                      <span class="sw" style:background={classColor(c)} aria-hidden="true"></span>
                       <span class="c-name truncate">{classes[c] ?? `class ${c}`}</span>
-                      <span class="c-bar" aria-hidden="true"><span style:transform="scaleX({n / maxCount})" style:background={classInk(c)}></span></span>
+                      <span class="c-bar" aria-hidden="true"><span style:transform="scaleX({n / maxCount})" style:background={classColor(c)}></span></span>
                       <span class="c-n num">{n}</span>
                     </button>
                   </li>
@@ -700,11 +718,12 @@
     width: 12px;
     height: 12px;
     border-radius: 3px;
-    box-shadow: inset 0 0 0 1px var(--line-strong);
+    /* text.tertiary keeps the empty box at ≥ 3:1; checked is neutral (lime is for actions, focus and live). */
+    box-shadow: inset 0 0 0 1px var(--text-tertiary);
   }
   .tog.on .tog-box {
-    background: var(--accent-line);
-    color: var(--accent-on);
+    background: var(--text-primary);
+    color: var(--text-inverse);
     box-shadow: none;
   }
   .stage {
@@ -840,6 +859,13 @@
   .idx {
     width: 40px;
   }
+  /* x1 y1 x2 y2 read as one group: tighter gaps between the four coordinate columns. */
+  .table .coord + .coord {
+    padding-left: var(--space-2);
+  }
+  .table .coord {
+    font-variant-numeric: tabular-nums;
+  }
   tbody tr {
     transition: background-color var(--dur-fast) var(--ease-standard);
   }
@@ -851,8 +877,8 @@
     background: var(--bg-hover);
   }
   tbody tr.sel {
-    background: var(--bg-selected);
-    box-shadow: inset 2px 0 0 var(--accent-line);
+    background: var(--bg-active);
+    box-shadow: inset 2px 0 0 var(--text-primary);
   }
   tbody tr:focus-visible {
     outline: 2px solid var(--focus);
@@ -869,6 +895,12 @@
     height: 8px;
     border-radius: 2px;
     flex-shrink: 0;
+  }
+  /* Class marks keep the palette hue in both themes; a hairline edge holds pale hues on light surfaces. */
+  :global([data-theme='light']) .sw,
+  :global([data-theme='light']) .s-track span,
+  :global([data-theme='light']) .c-bar span {
+    box-shadow: inset 0 0 0 1px #0a0e1433;
   }
   .score {
     display: inline-flex;
@@ -894,6 +926,15 @@
   .sliders {
     display: grid;
     gap: var(--space-5);
+  }
+  /* Threshold values are numbers, not code: sans with tabular numerals. */
+  .sliders :global(output.val),
+  .qconf :global(output.val) {
+    font-family: var(--font-sans);
+    font-variant-numeric: tabular-nums;
+  }
+  .pick-line {
+    display: none;
   }
   .hint {
     color: var(--text-tertiary);
@@ -938,7 +979,6 @@
   .c-n {
     min-width: 24px;
     text-align: right;
-    font-family: var(--font-mono);
     font-size: var(--type-xs-size);
   }
   .t-sk {
@@ -1005,6 +1045,25 @@
     }
     .vfoot .wide {
       display: none;
+    }
+    .pick-line {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      min-height: 32px;
+      padding: 0 var(--space-3);
+      border-top: 1px solid var(--line-subtle);
+      font-size: var(--type-sm-size);
+      color: var(--text-secondary);
+      white-space: nowrap;
+      overflow: hidden;
+    }
+    .pick-line b {
+      color: var(--text-primary);
+      font-weight: var(--weight-medium);
+    }
+    .pick-line .sep {
+      color: var(--text-tertiary);
     }
     .qconf {
       display: block;

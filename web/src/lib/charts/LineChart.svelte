@@ -23,6 +23,8 @@
     y: number;
     label: string;
     color?: string;
+    /** Ring only: the label is stated elsewhere (e.g. the panel header), not floated over the data. */
+    quiet?: boolean;
   }
 </script>
 
@@ -40,6 +42,7 @@
     yLog?: boolean;
     curve?: 'linear' | 'monotone';
     xFormat?: (x: number) => string;
+    /** Tick labels on y. Default: as many decimals as the tick step needs ("6", "0.5", "0.25"). */
     yFormat?: (y: number) => string;
     /** Formats values in the tooltip and legend (defaults to yFormat). */
     valueFormat?: (y: number) => string;
@@ -53,6 +56,14 @@
     cursor?: number | null;
     label: string;
     empty?: string;
+    /** Label each line where it ends (direct labels), for comparisons where colour alone is not enough. */
+    endLabels?: boolean;
+    /** Short x-axis caption drawn under the y labels, e.g. "epoch". */
+    xLabel?: string;
+    /** Leading legend caption saying which value the legend shows, e.g. "Last". Replaced by the x title on hover. */
+    legendNote?: string;
+    /** A floating tooltip at the cursor. Off by default: the legend is the readout (cursor values on hover). */
+    tooltip?: boolean;
   }
 
   let {
@@ -63,7 +74,7 @@
     yLog = false,
     curve = 'linear',
     xFormat: xFormatProp,
-    yFormat = (y) => String(+y.toFixed(3)),
+    yFormat: yFormatProp,
     valueFormat,
     xTitle,
     markers = [],
@@ -73,11 +84,14 @@
     cursor = $bindable(null),
     label,
     empty = 'No data yet',
+    endLabels = false,
+    xLabel,
+    legendNote,
+    tooltip = false,
   }: Props = $props();
 
   const uid = $props.id();
   let width = $state(0);
-  const fmtValue = $derived(valueFormat ?? yFormat);
 
   const visible = $derived(series.filter((s) => s.points.length > 0));
   const hasData = $derived(visible.length > 0);
@@ -126,9 +140,22 @@
     return niceTicks(yExtent[0], yExtent[1], yTicks);
   });
 
+  // Decimals follow the tick step, so a 0..6 axis reads "0 2 4 6" and a 0..1 axis "0 0.5 1"; log ticks use 3 digits.
+  const yFormat = $derived.by(() => {
+    if (yFormatProp) return yFormatProp;
+    if (yLog) return (v: number) => String(+v.toPrecision(3));
+    const step = yTickValues.length > 1 ? Math.abs(yTickValues[1]! - yTickValues[0]!) : 1;
+    const d = Math.max(0, Math.min(6, Math.ceil(-Math.log10(step) - 1e-9)));
+    return (v: number) => v.toFixed(d);
+  });
+  const fmtValue = $derived(valueFormat ?? yFormatProp ?? ((v: number) => String(+v.toFixed(3))));
+
   const margin = $derived.by(() => {
     const longest = Math.max(...yTickValues.map((v) => yFormat(v).length), 1);
-    return { top: 8, right: 12, bottom: 22, left: Math.ceil(longest * 6.4) + 14 };
+    // ~7 px per character at 11 px Geist (tabular digits).
+    const labelW = endLabels && width >= 560 ? Math.min(120, Math.max(0, ...series.map((s) => s.label.length)) * 6.2 + 10) : 0;
+    const left = Math.max(Math.ceil(longest * 7) + 14, xLabel ? Math.ceil(xLabel.length * 6.2) + 12 : 0);
+    return { top: 8, right: 12 + labelW, bottom: 22, left };
   });
 
   const x = $derived(scaleLinear().domain(xExtent).range([margin.left, Math.max(margin.left + 1, width - margin.right)]));
@@ -171,6 +198,32 @@
       const pts = downsample(s.points, buckets);
       return { s, d: ln(pts) ?? '', a: s.area ? (ar(pts) ?? '') : '' };
     });
+  });
+
+  /** Direct labels at each line's last point, nudged apart vertically so they never overlap. */
+  // Narrow plots keep their width for data: the legend names the lines instead.
+  const showEnds = $derived(endLabels && width >= 560);
+  const ends = $derived.by(() => {
+    if (!showEnds) return [];
+    const out = visible
+      .filter((s) => !s.ghost)
+      .map((s) => {
+        const p = s.points[s.points.length - 1];
+        return p && Number.isFinite(p.y)
+          ? { id: s.id, label: s.label.length > 18 ? `${s.label.slice(0, 17)}…` : s.label, color: s.color, x: x(p.x), y: y(p.y), y0: y(p.y) }
+          : null;
+      })
+      .filter((e): e is NonNullable<typeof e> => e !== null)
+      .sort((a, b) => a.y - b.y);
+    for (let i = 1; i < out.length; i++) if (out[i]!.y - out[i - 1]!.y < 14) out[i]!.y = out[i - 1]!.y + 14;
+    // Keep the stack inside the plot: if it runs past the bottom, push it back up (still 12 px apart).
+    const bottom = height - margin.bottom - 4;
+    for (let i = out.length - 1; i >= 0; i--) {
+      const limit = i === out.length - 1 ? bottom : out[i + 1]!.y - 14;
+      if (out[i]!.y > limit) out[i]!.y = limit;
+    }
+    for (const e of out) e.y = Math.max(margin.top + 4, e.y);
+    return out;
   });
 
   // ---- hover / keyboard cursor ----
@@ -285,6 +338,7 @@
 <div class="chart">
   {#if legend && keyed.length > 0}
     <ul class="legend" aria-hidden="true">
+      {#if legendNote || hover}<li class="note" class:at={!!hover}>{hover ? hover.title : legendNote}</li>{/if}
       {#each keyed as s (s.id)}
         {@const v = hover ? hover.rows.find((r) => r.s.id === s.id)?.p.y : latest(s)}
         <li>
@@ -343,6 +397,7 @@
           {#each xTickValues as t (t)}
             <text x={x(t)} y={height - 6} text-anchor="middle">{xFormat(t)}</text>
           {/each}
+          {#if xLabel}<text class="x-label" x={margin.left - 8} y={height - 6} text-anchor="end">{xLabel}</text>{/if}
         </g>
 
         {#if hasData}
@@ -350,7 +405,7 @@
             {#each paths as { s, a } (s.id)}
               {#if a}
                 <linearGradient id="{uid}-{s.id}" x1="0" x2="0" y1="0" y2="1">
-                  <stop offset="0" style:stop-color={s.color} stop-opacity="0.28" />
+                  <stop offset="0" style:stop-color={s.color} stop-opacity="0.1" />
                   <stop offset="1" style:stop-color={s.color} stop-opacity="0" />
                 </linearGradient>
               {/if}
@@ -361,15 +416,26 @@
             <path class="line" class:dashed={s.dashed} class:ghost={s.ghost} class:emphasis={s.emphasis} {d} style:stroke={s.color} style:stroke-dasharray={dashOf(s)} />
           {/each}
 
+          {#if showEnds}
+            {#each ends as e (e.id)}
+              {#if Math.abs(e.y - e.y0) > 3}
+                <!-- Moved to avoid a neighbour: a short leader ties the label to its line end. -->
+                <path class="end-leader" d="M{e.x + 2},{e.y0} L{e.x + 8},{e.y}" style:stroke={e.color} />
+              {/if}
+              <text class="end-label" x={e.x + 10} y={e.y} dy="0.32em" style:fill={e.color}>{e.label}</text>
+            {/each}
+          {/if}
           {#each markers as m (m.label + m.x)}
             {#if m.x >= xExtent[0] && m.x <= xExtent[1]}
               <g class="marker" transform="translate({x(m.x)},{y(m.y)})">
                 <circle r="4.5" style:stroke={m.color ?? 'var(--chart-1)'} />
-                <text
-                  y="-10"
-                  text-anchor={x(m.x) > width - margin.right - 40 ? 'end' : x(m.x) < margin.left + 40 ? 'start' : 'middle'}
-                  dx={x(m.x) > width - margin.right - 40 ? 6 : x(m.x) < margin.left + 40 ? -6 : 0}>{m.label}</text
-                >
+                {#if !m.quiet}
+                  <text
+                    y="-10"
+                    text-anchor={x(m.x) > width - margin.right - 40 ? 'end' : x(m.x) < margin.left + 40 ? 'start' : 'middle'}
+                    dx={x(m.x) > width - margin.right - 40 ? 6 : x(m.x) < margin.left + 40 ? -6 : 0}>{m.label}</text
+                  >
+                {/if}
               </g>
             {/if}
           {/each}
@@ -389,7 +455,7 @@
         <p class="empty">{empty}</p>
       {/if}
 
-      {#if hover}
+      {#if hover && tooltip}
         <div class="tip" class:left={tipLeft} style:--x="{hover.px}px" role="presentation" bind:clientWidth={tipWidth}>
           <p class="tip-title">{hover.title}</p>
           {#each hover.rows as r (r.s.id)}
@@ -416,13 +482,25 @@
     display: flex;
     flex-wrap: wrap;
     gap: var(--space-1) var(--space-4);
-    font-size: var(--type-xs-size);
-    line-height: var(--type-xs-line);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
   }
   .legend li {
     display: inline-flex;
     align-items: center;
     gap: 6px;
+  }
+  .legend .note {
+    /* Fixed width so the readout does not shift the legend as the cursor moves (phones wrap instead). */
+    min-width: min(6.5em, 100%);
+    color: var(--text-tertiary);
+    font-variant-numeric: tabular-nums;
+  }
+  .legend .note.at {
+    color: var(--text-secondary);
+  }
+  .x-label {
+    fill: var(--text-tertiary);
   }
   .swatch {
     flex-shrink: 0;
@@ -437,7 +515,6 @@
   }
   .val {
     color: var(--text-primary);
-    font-family: var(--font-mono);
     font-variant-numeric: tabular-nums;
   }
   .plot {
@@ -465,8 +542,7 @@
   }
   .ticks text {
     fill: var(--chart-label);
-    font-family: var(--font-mono);
-    font-size: 10px;
+    font-size: 11px;
     font-variant-numeric: tabular-nums;
   }
   .line {
@@ -498,6 +574,18 @@
     stroke: var(--bg-panel);
     stroke-width: 2;
   }
+  .end-leader {
+    fill: none;
+    stroke-width: 1;
+    opacity: 0.7;
+  }
+  .end-label {
+    font-size: 10px;
+    font-weight: var(--weight-medium);
+    paint-order: stroke;
+    stroke: var(--bg-panel);
+    stroke-width: 3px;
+  }
   .marker circle {
     fill: var(--bg-panel);
     stroke-width: 2;
@@ -505,7 +593,7 @@
   .marker text {
     fill: var(--text-secondary);
     font-size: 10px;
-    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
     paint-order: stroke;
     stroke: var(--bg-panel);
     stroke-width: 3px;
@@ -540,7 +628,7 @@
   .tip-title {
     color: var(--text-tertiary);
     margin-bottom: 2px;
-    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
   }
   .tip-row {
     display: flex;
@@ -550,7 +638,7 @@
   .tip-row .at {
     margin-left: 6px;
     color: var(--text-tertiary);
-    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
     font-size: var(--type-micro-size);
   }
   .tip-row .name {

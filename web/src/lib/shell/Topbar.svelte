@@ -28,7 +28,9 @@
   {:else}
     <a href={href('/')} class="mobile-logo" aria-label="FOLO Studio home"><Logo wordmark={false} /></a>
   {/if}
-  <ol class="crumbs" aria-label="Breadcrumb">
+  <!-- Desktop: a top-level page's H1 already names it, so a one-item trail is not repeated here. Phones: the bar
+       carries the page title (the H1 is visually hidden there). -->
+  <ol class="crumbs" class:single={page.crumbs.length < 2} aria-label="Breadcrumb">
     {#each page.crumbs as c, i (i)}
       {@const last = i === page.crumbs.length - 1}
       <li class:last>
@@ -110,6 +112,9 @@
   .sep {
     flex-shrink: 0;
   }
+  .crumbs.single li {
+    visibility: hidden;
+  }
   .crumbs li:not(.last):not(.sep) {
     flex-shrink: 0;
   }
@@ -181,9 +186,18 @@
       background: var(--bg-hover);
       color: var(--text-primary);
     }
-    /* The page's own title sits right below; the bar keeps only navigation and actions. */
+    /* The bar is the page title: the current page only, its parent is the back button. */
     .crumbs li {
       display: none;
+    }
+    .crumbs li.last,
+    .crumbs.single li.last {
+      display: flex;
+      visibility: visible;
+      font-size: 15px;
+      line-height: 20px;
+      font-weight: var(--weight-semibold);
+      letter-spacing: -0.005em;
     }
     .new-run {
       display: none;

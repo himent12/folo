@@ -6,10 +6,11 @@
   import Play from '@lucide/svelte/icons/play';
   import Scan from '@lucide/svelte/icons/scan';
   import Trash from '@lucide/svelte/icons/trash-2';
+  import X from '@lucide/svelte/icons/x';
   import { ApiError, hub } from '$lib/api/index.svelte';
   import { Resource } from '$lib/api/resource.svelte';
   import type { Split } from '$lib/api/types';
-  import { classInk } from '$lib/design/classInk.svelte';
+  import { classColor } from '$lib/design/tokens';
   import { ago, compact, num } from '$lib/format';
   import { href, router } from '$lib/router.svelte';
   import Page from '$lib/shell/Page.svelte';
@@ -25,7 +26,7 @@
   import Tabs from '$lib/ui/Tabs.svelte';
   import { toast } from '$lib/ui/toast.svelte';
   import { tooltip } from '$lib/ui/tooltip';
-  import { healthChecks, imageCount } from './dataset/health';
+  import { healthChecks, imageCount, reviewCount } from './dataset/health';
   import ImageGrid, { type Density } from './dataset/ImageGrid.svelte';
   import Inspector from './dataset/Inspector.svelte';
   import { ImagePager } from './dataset/pager.svelte';
@@ -134,9 +135,8 @@
 
   // ---------- derived view data ----------
   const total = $derived(d ? imageCount(d) : 0);
-  const issues = $derived(
-    d?.stats ? healthChecks(d, d.stats).filter((h) => h.severity === 'danger' || h.severity === 'warning').length : 0,
-  );
+  const issues = $derived(d?.stats ? reviewCount(healthChecks(d, d.stats)) : 0);
+  const filtered = $derived(cls !== undefined || split !== 'all');
   const splitOptions = $derived.by(() => {
     if (!d) return [];
     const opts: { value: SplitFilter; label: string; meta: string }[] = [{ value: 'all', label: 'All', meta: compact(total) }];
@@ -145,17 +145,17 @@
     return opts;
   });
 
-  /** Fades a horizontally scrolling rail's edges (24 px) on the sides that have more to scroll to. */
+  /**
+   * Fades a horizontally scrolling rail's edges (24 px) on the sides that have more to scroll to. The rail always
+   * starts at its beginning: the filter summary names the active class, so it never has to be scrolled into view.
+   */
   function edgeFade(el: HTMLElement) {
     const update = () => {
       const max = el.scrollWidth - el.clientWidth;
       el.style.setProperty('--fade-l', el.scrollLeft > 1 ? '24px' : '0px');
       el.style.setProperty('--fade-r', el.scrollLeft < max - 1 ? '24px' : '0px');
     };
-    // Start with the active chip in view (a linked ?class= can point past the fold).
-    const on = el.querySelector<HTMLElement>('[aria-pressed="true"]');
-    const left = on ? on.getBoundingClientRect().left - el.getBoundingClientRect().left : 0;
-    if (on && left + on.offsetWidth > el.clientWidth) el.scrollLeft += left - el.clientWidth / 3;
+    el.scrollLeft = 0;
     update();
     el.addEventListener('scroll', update, { passive: true });
     const ro = new ResizeObserver(update);
@@ -252,9 +252,6 @@
               value={split}
               onchange={(s) => setQuery({ split: s === 'all' ? null : s, image: null })}
             />
-            <span class="count num" aria-live="polite">
-              {#if pager?.total != null}<b>{num(pager.total)}</b> {pager.total === 1 ? 'image' : 'images'}{:else}&nbsp;{/if}
-            </span>
             <span class="spacer"></span>
             <button
               type="button"
@@ -279,19 +276,43 @@
               onchange={(v) => writePref('folo.datasets.density', v)}
             />
           </div>
-          <div class="chips" role="group" aria-label="Filter by class" use:edgeFade>
-            <button type="button" class="chip" aria-pressed={cls === undefined} onclick={() => setQuery({ class: null, image: null })}>All classes</button>
-            {#each d.classes as c, i (i)}
-              <button
-                type="button"
-                class="chip"
-                aria-pressed={cls === i}
-                onclick={() => setQuery({ class: cls === i ? null : String(i), image: null })}
-              >
-                <span class="sw" style:background={classInk(i)}></span>{c}
-                {#if d.stats}<span class="cmeta num">{compact(d.stats.class_counts[i])}</span>{/if}
+          <div class="class-row" role="group" aria-label="Filter by class">
+            <!-- "All classes" stays put; only the class chips scroll. -->
+            <button type="button" class="chip" aria-pressed={cls === undefined} onclick={() => setQuery({ class: null, image: null })}>
+              {#if cls === undefined}<Check size={12} strokeWidth={2.25} aria-hidden="true" />{/if}All classes
+            </button>
+            <div class="chips" use:edgeFade>
+              {#each d.classes as c, i (i)}
+                <button
+                  type="button"
+                  class="chip"
+                  class:absent={d.stats?.class_counts[i] === 0}
+                  aria-pressed={cls === i}
+                  onclick={() => setQuery({ class: cls === i ? null : String(i), image: null })}
+                >
+                  {#if cls === i}<Check size={12} strokeWidth={2.25} aria-hidden="true" />{/if}
+                  <span class="sw" style:background={classColor(i)}></span>{c}
+                  {#if d.stats}<span class="cmeta num">{compact(d.stats.class_counts[i])}</span>{/if}
+                </button>
+              {/each}
+            </div>
+          </div>
+          <!-- What the grid shows, always: the active filters and how many of the dataset's images match. -->
+          <div class="summary">
+            <span class="sum-text num" aria-live="polite">
+              {#if cls !== undefined}<b>{d.classes[cls]}</b><span class="sep" aria-hidden="true">·</span>{/if}
+              {#if split !== 'all'}<b>{split[0]!.toUpperCase() + split.slice(1)}</b><span class="sep" aria-hidden="true">·</span>{/if}
+              {#if filtered}
+                <b>{pager?.total != null ? num(pager.total) : '…'}</b> of {num(total)} images
+              {:else}
+                <b>{num(total)}</b> images
+              {/if}
+            </span>
+            {#if filtered}
+              <button type="button" class="clear" onclick={() => setQuery({ split: null, class: null, image: null })}>
+                <X size={12} strokeWidth={2} aria-hidden="true" />Clear filters
               </button>
-            {/each}
+            {/if}
           </div>
         </div>
 
@@ -341,7 +362,7 @@
     </p>
     {#snippet footer()}
       <Button variant="ghost" onclick={() => (confirmDelete = false)}>Cancel</Button>
-      <Button variant="danger" icon={Trash} loading={deleting} onclick={remove}>Delete dataset</Button>
+      <Button variant="destructive" icon={Trash} loading={deleting} onclick={remove}>Delete dataset</Button>
     {/snippet}
   </Dialog>
 {/if}
@@ -402,14 +423,39 @@
     gap: var(--space-3);
     flex-wrap: wrap;
   }
-  .count {
+  .summary {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    min-height: var(--control-sm);
     font-size: var(--type-sm-size);
     color: var(--text-tertiary);
-    white-space: nowrap;
   }
-  .count b {
+  .sum-text {
+    min-width: 0;
+  }
+  .sum-text b {
     color: var(--text-primary);
     font-weight: var(--weight-medium);
+  }
+  .sep {
+    margin: 0 6px;
+    color: var(--text-disabled);
+  }
+  .clear {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    height: var(--control-sm);
+    padding: 0 var(--space-2);
+    border-radius: var(--radius-sm);
+    color: var(--text-secondary);
+    font-weight: var(--weight-medium);
+    white-space: nowrap;
+  }
+  .clear:hover {
+    color: var(--text-primary);
+    background: var(--bg-hover);
   }
   .spacer {
     flex: 1;
@@ -437,25 +483,44 @@
     color: var(--text-primary);
     border-color: var(--line-strong);
   }
+  /* Selected is neutral (lime is for the primary action, focus and live state): a strong edge (1.5 px via the inset
+     ring, so the chip doesn't change size), a check mark on chips, and primary text. */
   .toggle[aria-pressed='true'],
   .chip[aria-pressed='true'] {
-    background: var(--bg-selected);
-    border-color: var(--accent-line);
+    border-color: var(--text-tertiary);
+    box-shadow: inset 0 0 0 0.5px var(--text-tertiary);
     color: var(--text-primary);
   }
+  .class-row {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-1-5);
+    min-width: 0;
+  }
+  .class-row > .chip {
+    flex-shrink: 0;
+  }
   .chips {
+    flex: 1;
+    min-width: 0;
     display: flex;
     flex-wrap: wrap;
     gap: var(--space-1-5);
   }
+  /* Chips never shrink in the scrolling strip (that would squeeze out the check mark). */
   .chip {
+    flex-shrink: 0;
     border-radius: var(--radius-full);
     padding: 0 10px;
   }
+  .chip :global(svg) {
+    flex-shrink: 0;
+  }
   @media (pointer: coarse) {
     .toggle,
-    .chip {
-      height: 36px;
+    .chip,
+    .clear {
+      height: 44px;
     }
     .chip {
       padding: 0 var(--space-3);
@@ -465,6 +530,13 @@
     width: 8px;
     height: 8px;
     border-radius: 2px;
+    flex-shrink: 0;
+  }
+  :global([data-theme='light']) .sw {
+    box-shadow: inset 0 0 0 1px #0a0e1433;
+  }
+  .absent .sw {
+    opacity: 0.4;
   }
   .cmeta {
     color: var(--text-tertiary);
@@ -505,12 +577,13 @@
       margin-inline: calc(var(--space-4) * -1);
       padding-inline: var(--space-4);
     }
+    /* The class chips scroll from just after "All classes" to the screen edge; the strip's end keeps the 16 px gutter. */
     .chips {
       flex-wrap: nowrap;
       overflow-x: auto;
       scrollbar-width: none;
-      margin-inline: calc(var(--space-4) * -1);
-      padding-inline: var(--space-4);
+      margin-right: calc(var(--space-4) * -1);
+      padding-right: var(--space-4);
       /* Clipped chips read as scrollable: the edges with more to scroll to fade out. */
       mask-image: linear-gradient(
         to right,

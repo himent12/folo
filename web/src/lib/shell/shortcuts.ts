@@ -1,7 +1,7 @@
 // Global keyboard shortcuts. Two-key "go to" sequences (G then R) like Linear and GitHub.
 
 import { isTyping } from '$lib/keys';
-import { prefs } from '$lib/prefs.svelte';
+import { sidebar } from './sidebarState.svelte';
 import { router } from '$lib/router.svelte';
 import { mainNav, settingsNav } from './nav';
 
@@ -52,7 +52,7 @@ export function installShortcuts(h: ShortcutHandlers): () => void {
       h.shortcuts();
     } else if (e.key === '[') {
       e.preventDefault();
-      prefs.sidebarCollapsed = !prefs.sidebarCollapsed;
+      sidebar.toggle();
     } else if (k === 'n') {
       e.preventDefault();
       router.go('/runs/new');

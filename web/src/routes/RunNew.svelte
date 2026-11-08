@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Check from '@lucide/svelte/icons/check';
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
   import Copy from '@lucide/svelte/icons/copy';
   import Images from '@lucide/svelte/icons/images';
@@ -39,7 +40,9 @@
   let arch = $state<Arch>('folo-s');
   let epochs = $state(100);
   let batch = $state('16');
-  let imgsz = $state('640');
+  const IMGSZ = ['320', '480', '640', '960', '1280'];
+  // ?imgsz= (e.g. from a dataset's "Train at 960 px" health finding) preselects a supported size.
+  let imgsz = $state(IMGSZ.includes(q.get('imgsz') ?? '') ? q.get('imgsz')! : '640');
   let device = $state<string>('auto');
   let optimizer = $state<Optimizer>('auto');
   let lr0 = $state(0.01);
@@ -52,6 +55,8 @@
   let shuffle = $state(1);
   let submitting = $state(false);
   let advancedOpen = $state(false);
+  /** Phones: the model cards show only size and note until the specs are expanded. */
+  let specsOpen = $state(false);
 
   const datasets = new Resource(async (s) => {
     const list = await hub.api.datasets(s);
@@ -224,12 +229,22 @@
           {#if !datasets.data}
             <div class="cards">{#each [0, 1, 2] as i (i)}<Skeleton h="88px" r="var(--radius-md)" />{/each}</div>
           {:else}
+            <!-- Phones: a compact picker and a one-line summary; the cards are for wider screens. -->
+            <div class="ds-pick">
+              <Select id="dataset-pick" label="Dataset" bind:value={datasetId} options={datasets.data.map((d) => ({ value: d.id, label: d.name }))} />
+              {#if dataset}
+                <p class="ds-line num">
+                  {num(dataset.splits.train)} train · {num(dataset.splits.val)} val · {dataset.classes.length} classes · <span class="mono">{dataset.format}</span>
+                </p>
+              {/if}
+            </div>
             <div class="cards" role="radiogroup" aria-label="Dataset">
               {#each datasets.data as d (d.id)}
                 {@const on = d.id === datasetId}
                 <label class="card" class:on>
                   <input type="radio" name="dataset" value={d.id} bind:group={datasetId} class="sr-only" />
                   <span class="c-top"><span class="c-name">{d.name}</span><span class="c-fmt mono">{d.format}</span></span>
+                  {#if on}<span class="tick" aria-hidden="true"><Check size={14} strokeWidth={2.25} /></span>{/if}
                   <span class="c-meta num">{compact(d.splits.train)} train · {compact(d.splits.val)} val · {d.classes.length} classes</span>
                   {#if d.stats}<ClassStrip counts={d.stats.class_counts} classes={d.classes} height={4} />{/if}
                 </label>
@@ -239,12 +254,13 @@
         </Panel>
 
         <Panel title="2 · Model" id="sec-model">
-          <div class="arches" role="radiogroup" aria-label="Model size">
+          <div class="arches" class:specs={specsOpen} role="radiogroup" aria-label="Model size">
             {#each arches as a (a.arch)}
               {@const on = a.arch === arch}
               <label class="arch" class:on>
                 <input type="radio" name="arch" value={a.arch} bind:group={arch} class="sr-only" />
                 <span class="a-top"><span class="a-size">{a.size}</span><span class="a-name mono">{a.arch}</span></span>
+                {#if on}<span class="tick" aria-hidden="true"><Check size={14} strokeWidth={2.25} /></span>{/if}
                 <span class="a-note">{a.note}</span>
                 <span class="a-bars">
                   <span class="a-row"><span class="faint">Params</span><span class="bar"><i style:width={pct2(a.params / maxParams)}></i></span><span class="num">{compact(a.params)}</span></span>
@@ -254,6 +270,10 @@
               </label>
             {/each}
           </div>
+          <button type="button" class="specs-toggle" aria-expanded={specsOpen} onclick={() => (specsOpen = !specsOpen)}>
+            <ChevronRight size={14} aria-hidden="true" />{specsOpen ? 'Hide specs' : 'Compare specs'}
+            <span class="faint">params, GFLOPs, latency</span>
+          </button>
           <p class="ref">Latency is a reference figure: RTX 4080-class GPU, 640 px input, fp32, one image.</p>
           <div class="row2">
             <Field label="Start from" for="weights" hint="Fine-tuning from a trained model converges much faster.">
@@ -275,7 +295,7 @@
               <Segmented label="Batch size" bind:value={batch} options={['8', '16', '32', '64'].map((v) => ({ value: v, label: v }))} />
             </Field>
             <Field label="Image size" for="imgsz" hint="Longer side in pixels, letterboxed.">
-              <Segmented label="Image size" bind:value={imgsz} options={['320', '480', '640', '960', '1280'].map((v) => ({ value: v, label: v }))} />
+              <Segmented label="Image size" bind:value={imgsz} options={IMGSZ.map((v) => ({ value: v, label: v }))} />
             </Field>
             <Field label="Device" for="device">
               <Select
@@ -394,6 +414,7 @@
         <span class="dock-est num">
           <span>{roughDuration(est.totalSeconds)}</span>
           {#if !onCpu && gpu}<span class:warn={vramPct > 0.9}>{roughBytes(est.vramBytes)} VRAM</span>{/if}
+          {#if dataset}<span class="faint">{dataset.name} · {arch}</span>{/if}
         </span>
         <Button type="submit" variant="primary" size="lg" icon={Play} loading={submitting} disabled={!valid}>Start training</Button>
       </div>
@@ -441,10 +462,26 @@
   .arch:hover {
     border-color: var(--line-strong);
   }
+  /* Selection is neutral (a strong border and a small check); lime stays for the Start button and focus. */
+  .card,
+  .arch {
+    position: relative;
+  }
   .card.on,
   .arch.on {
-    border-color: var(--accent-line);
-    background: var(--bg-selected);
+    border-color: var(--text-secondary);
+    box-shadow: inset 0 0 0 0.5px var(--text-secondary);
+  }
+  .tick {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    display: grid;
+    color: var(--text-primary);
+  }
+  .card.on .c-fmt,
+  .arch.on .a-name {
+    visibility: hidden;
   }
   .card:has(:focus-visible),
   .arch:has(:focus-visible) {
@@ -482,7 +519,7 @@
     letter-spacing: var(--type-2xl-tracking);
   }
   .arch.on .a-size {
-    color: var(--accent-text);
+    color: var(--text-primary);
   }
   .a-note {
     font-size: var(--type-xs-size);
@@ -520,7 +557,7 @@
     border-radius: 2px;
   }
   .arch.on .bar i {
-    background: var(--accent-line);
+    background: var(--text-secondary);
   }
   .ref {
     margin-top: var(--space-2);
@@ -585,8 +622,9 @@
     white-space: nowrap;
   }
   .est dd.warn {
-    color: var(--danger-text);
+    color: var(--warning-text);
   }
+  /* A neutral meter; the warning colour only above 90 % of the GPU's memory. */
   .vram {
     height: 4px;
     margin-top: calc(-1 * var(--space-2));
@@ -597,11 +635,42 @@
   .vram i {
     display: block;
     height: 100%;
-    background: var(--accent-line);
+    background: var(--text-secondary);
     transition: width var(--dur-chart) var(--ease-standard);
   }
   .vram i.warn {
-    background: var(--danger-solid);
+    background: var(--warning-solid);
+  }
+  .ds-pick,
+  .specs-toggle {
+    display: none;
+  }
+  .ds-line {
+    margin-top: var(--space-2);
+    font-size: var(--type-xs-size);
+    line-height: var(--type-xs-line);
+    color: var(--text-secondary);
+  }
+  .ds-line .mono {
+    color: var(--text-tertiary);
+  }
+  .specs-toggle {
+    align-items: center;
+    gap: var(--space-2);
+    min-height: 44px;
+    margin-top: var(--space-1);
+    color: var(--text-secondary);
+    font-weight: var(--weight-medium);
+  }
+  .specs-toggle :global(svg) {
+    transition: transform var(--dur-fast) var(--ease-standard);
+  }
+  .specs-toggle[aria-expanded='true'] :global(svg) {
+    transform: rotate(90deg);
+  }
+  .specs-toggle .faint {
+    font-weight: var(--weight-regular);
+    font-size: var(--type-xs-size);
   }
   .warning {
     display: flex;
@@ -707,7 +776,7 @@
       font-size: var(--type-sm-size);
     }
     .dock-est .warn {
-      color: var(--danger-text);
+      color: var(--warning-text);
     }
     .layout {
       grid-template-columns: minmax(0, 1fr);
@@ -719,12 +788,59 @@
       grid-template-columns: repeat(2, minmax(0, 1fr));
     }
   }
+  .dock-est .faint {
+    display: none;
+  }
   @media (max-width: 767px) {
+    /* Two columns: the estimate wraps on the left, a 44 px Start button holds the right; 16 px gutters. */
     .dock {
       bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom));
-      justify-content: space-between;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: var(--space-3);
+      padding: var(--space-2) var(--space-4);
     }
-    .cards,
+    .dock-est {
+      flex-wrap: wrap;
+      gap: 0 var(--space-3);
+      min-width: 0;
+      line-height: var(--type-sm-line);
+    }
+    .dock-est .faint {
+      display: block;
+      flex-basis: 100%;
+      font-size: var(--type-xs-size);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .dock :global(.btn.lg) {
+      --h: 44px;
+    }
+    .ds-pick {
+      display: block;
+    }
+    .ds-pick :global(select) {
+      height: 44px;
+    }
+    .cards {
+      display: none;
+    }
+    /* Model cards: size, name and note (80-96 px); the specs open on request. */
+    .arch {
+      gap: 2px;
+      padding: var(--space-2) var(--space-3);
+      min-height: 80px;
+    }
+    .a-note {
+      min-height: 0;
+    }
+    .arches:not(.specs) .a-bars {
+      display: none;
+    }
+    .specs-toggle {
+      display: flex;
+    }
     .fields,
     .aug {
       grid-template-columns: minmax(0, 1fr);

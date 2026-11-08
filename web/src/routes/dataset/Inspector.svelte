@@ -14,7 +14,7 @@
   import { hub } from '$lib/api/index.svelte';
   import type { Box } from '$lib/api/types';
   import DatasetImage from '$lib/detect/DatasetImage.svelte';
-  import { classInk } from '$lib/design/classInk.svelte';
+  import { classColor } from '$lib/design/tokens';
   import { num } from '$lib/format';
   import Badge from '$lib/ui/Badge.svelte';
   import Button from '$lib/ui/Button.svelte';
@@ -108,6 +108,8 @@
   const x = $derived(clampAxis(tx, dw, vw));
   const y = $derived(clampAxis(ty, dh, vh));
   const zoomPct = $derived(Math.round(s0 * z * 100));
+  /** The zoom readout: "Fit" at the fitted view (where it opens), the scale in % once zoomed. */
+  const zoomLabel = $derived(z <= 1.001 ? 'Fit' : `${zoomPct}%`);
 
   // Fit whenever the image changes.
   $effect(() => {
@@ -239,7 +241,7 @@
 {#snippet zoomTools()}
   <div class="group" role="group" aria-label="Zoom">
     <span use:tooltip={{ text: 'Zoom out', keys: '-' }}><Button variant="ghost" size="sm" icon={Minus} aria-label="Zoom out" disabled={z <= 1} onclick={() => zoomAt(1 / 1.5)} /></span>
-    <button type="button" class="zoom num" onclick={fit} use:tooltip={{ text: 'Fit to view', keys: '0' }} aria-label="Zoom {zoomPct}%. Fit to view">{zoomPct}%</button>
+    <button type="button" class="zoom num" onclick={fit} use:tooltip={{ text: 'Fit to view', keys: '0' }} aria-label="Zoom {zoomPct}%. Fit to view">{zoomLabel}</button>
     <span use:tooltip={{ text: 'Zoom in', keys: '+' }}><Button variant="ghost" size="sm" icon={Plus} aria-label="Zoom in" disabled={z >= maxZ} onclick={() => zoomAt(1.5)} /></span>
     <span use:tooltip={{ text: 'Fit', keys: '0' }}><Button variant="ghost" size="sm" icon={Maximize} aria-label="Fit to view" onclick={fit} /></span>
   </div>
@@ -318,8 +320,12 @@
         <span class="touch">Pinch to zoom · drag to pan</span>
       </div>
     </div>
-    <!-- Narrow screens: the zoom controls float over the image instead of crowding the header. -->
-    <div class="float-zoom">{@render zoomTools()}</div>
+    <!-- Narrow screens: the zoom controls get their own 44 px bar under the image (never over the labels), with the
+         gesture hint beneath it. -->
+    <div class="zoom-bar">
+      {@render zoomTools()}
+      <p class="touch-hint">Pinch to zoom · drag to pan · double-tap to zoom in</p>
+    </div>
 
     <aside>
       <section>
@@ -338,9 +344,9 @@
                   onclick={() => zoomToBox(b)}
                   aria-label="{name(b.class)}, {Math.round(b.x2 - b.x1)} by {Math.round(b.y2 - b.y1)} pixels. Zoom to box"
                 >
-                  <span class="sw" style:background={classInk(b.class)}></span>
+                  <span class="sw" style:background={classColor(b.class)}></span>
                   <span class="cn truncate">{name(b.class)}</span>
-                  <span class="sz mono">{Math.round(b.x2 - b.x1)}×{Math.round(b.y2 - b.y1)}</span>
+                  <span class="sz num">{Math.round(b.x2 - b.x1)}×{Math.round(b.y2 - b.y1)}</span>
                 </button>
               </li>
             {/each}
@@ -355,7 +361,7 @@
         <ul class="legend">
           {#each legend as l (l.i)}
             <li class:absent={l.n === 0}>
-              <span class="sw" style:background={classInk(l.i)}></span>
+              <span class="sw" style:background={classColor(l.i)}></span>
               <span class="truncate">{l.name}</span>
               {#if l.n}<span class="num faint">{l.n}</span>{/if}
             </li>
@@ -445,13 +451,13 @@
     gap: 2px;
   }
   .tools span,
-  .float-zoom span {
+  .zoom-bar span {
     display: inline-flex;
   }
   .head-zoom {
     display: contents;
   }
-  .float-zoom {
+  .zoom-bar {
     display: none;
   }
   .sep {
@@ -598,6 +604,10 @@
     border-radius: 2px;
     flex-shrink: 0;
   }
+  /* Class swatches keep the palette hue in both themes; a hairline edge holds pale hues on light surfaces. */
+  :global([data-theme='light']) .sw {
+    box-shadow: inset 0 0 0 1px #0a0e1433;
+  }
   .sz {
     font-size: var(--type-xs-size);
     color: var(--text-tertiary);
@@ -622,7 +632,7 @@
     color: var(--text-tertiary);
   }
   .legend li.absent .sw {
-    opacity: 0.35;
+    opacity: 0.4;
   }
   dl {
     display: grid;
@@ -656,13 +666,10 @@
     header {
       padding-left: var(--space-3);
     }
+    /* The zoom bar under the image carries the controls and the gesture hint. */
     .head-zoom,
-    .hint .fine {
+    .hint {
       display: none;
-    }
-    /* Narrow screens show the touch hint, so the capsule is never empty. */
-    .hint .touch {
-      display: inline-flex;
     }
     /* The image sets the stage height (no empty bands); the label list takes the rest. */
     .body {
@@ -676,16 +683,24 @@
       aspect-ratio: var(--ar, 4 / 3);
       max-height: 70vh;
     }
-    .float-zoom {
-      position: absolute;
-      top: var(--space-2);
-      right: var(--space-2);
-      display: flex;
-      padding: 2px;
-      border-radius: var(--radius-md);
-      background: color-mix(in srgb, var(--bg-overlay) 82%, transparent);
-      backdrop-filter: blur(6px);
-      box-shadow: var(--shadow-sm);
+    .zoom-bar {
+      flex: none;
+      display: grid;
+      justify-items: center;
+      padding: 0 var(--space-3) var(--space-2);
+      border-top: 1px solid var(--line-subtle);
+    }
+    .zoom-bar .group {
+      height: 44px;
+    }
+    .zoom-bar .zoom {
+      min-width: 56px;
+      height: 44px;
+    }
+    .touch-hint {
+      font-size: var(--type-xs-size);
+      line-height: var(--type-xs-line);
+      color: var(--text-tertiary);
     }
     aside {
       flex: 1;

@@ -5,7 +5,14 @@
   import Panel from '$lib/ui/Panel.svelte';
   import Skeleton from '$lib/ui/Skeleton.svelte';
 
-  let { classes, epochs, version, loading }: { classes: string[]; epochs: Epoch[]; version: number; loading: boolean } = $props();
+  let {
+    classes,
+    epochs,
+    version,
+    loading,
+    compact = false,
+  }: { classes: string[]; epochs: Epoch[]; version: number; loading: boolean; /** Rail width: class, mAP50-95, change, bar. */ compact?: boolean } =
+    $props();
 
   const rows = $derived.by(() => {
     void version;
@@ -39,9 +46,11 @@
             <th>Class</th>
             <th class="r">mAP50-95</th>
             <th class="bar-col"><span class="sr-only">mAP50-95 bar</span></th>
-            <th class="r">mAP50</th>
-            <th class="r">P</th>
-            <th class="r">R</th>
+            {#if !compact}
+              <th class="r">mAP50</th>
+              <th class="r">P</th>
+              <th class="r">R</th>
+            {/if}
           </tr>
         </thead>
         <tbody>
@@ -57,9 +66,11 @@
                 {:else}<span class="delta">·</span>{/if}
               </td>
               <td class="bar-col"><span class="bar"><span style:width="{c.map50_95 * 100}%" style:background={classInk(c.class)}></span></span></td>
-              <td class="r num">{c.map50.toFixed(3)}</td>
-              <td class="r num faint">{c.precision.toFixed(2)}</td>
-              <td class="r num faint">{c.recall.toFixed(2)}</td>
+              {#if !compact}
+                <td class="r num">{c.map50.toFixed(3)}</td>
+                <td class="r num faint">{c.precision.toFixed(2)}</td>
+                <td class="r num faint">{c.recall.toFixed(2)}</td>
+              {/if}
             </tr>
           {/each}
         </tbody>
@@ -122,6 +133,7 @@
     display: block;
     height: 100%;
     border-radius: 2px;
+    box-shadow: inset 0 0 0 1px var(--chart-swatch-edge);
     transition: width var(--dur-chart) var(--ease-standard);
   }
 </style>

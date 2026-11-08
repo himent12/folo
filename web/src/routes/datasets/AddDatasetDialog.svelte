@@ -5,7 +5,7 @@
   import X from '@lucide/svelte/icons/x';
   import { hub } from '$lib/api/index.svelte';
   import type { CreateDataset } from '$lib/api/types';
-  import { classInk } from '$lib/design/classInk.svelte';
+  import { classColor } from '$lib/design/tokens';
   import { router } from '$lib/router.svelte';
   import Button from '$lib/ui/Button.svelte';
   import Dialog from '$lib/ui/Dialog.svelte';
@@ -161,7 +161,7 @@
           <div class="chips" class:invalid={!!show(errs.classes)} onclick={(e) => (e.currentTarget.querySelector('input') as HTMLInputElement | null)?.focus()}>
             {#each classes as c, i (c)}
               <span class="chip">
-                <span class="sw" style:background={classInk(i)}></span>
+                <span class="sw" style:background={classColor(i)}></span>
                 {c}
                 <button type="button" aria-label="Remove {c}" onclick={() => (classes = classes.filter((x) => x !== c))}><X size={12} /></button>
               </span>
@@ -282,6 +282,9 @@
     height: 8px;
     border-radius: 2px;
   }
+  :global([data-theme='light']) .sw {
+    box-shadow: inset 0 0 0 1px #0a0e1433;
+  }
   .chip button {
     display: grid;
     place-items: center;
@@ -293,6 +296,17 @@
   .chip button:hover {
     color: var(--text-primary);
     background: var(--bg-hover);
+  }
+  /* Touch: a 44 px hit area around the small remove glyph. */
+  @media (pointer: coarse) {
+    .chip button {
+      position: relative;
+    }
+    .chip button::after {
+      content: '';
+      position: absolute;
+      inset: -14px;
+    }
   }
   .chips input {
     flex: 1;
