@@ -48,10 +48,6 @@ impl BatchStrides {
         Self { offset: 0, outer: size, inner: 0 }
     }
 
-    fn at(&self, b1: usize, b2: usize) -> usize {
-        self.offset + b1 * self.outer + b2 * self.inner
-    }
-
     fn aligned4(&self) -> bool {
         self.offset.is_multiple_of(4) && self.outer.is_multiple_of(4) && self.inner.is_multiple_of(4)
     }
@@ -110,9 +106,10 @@ impl GemmDesc {
             ldb: if trans_b { k } else { n },
             ldc: n,
             batch: (batch, 1),
-            a: BatchStrides::packed(m * k),
-            b: BatchStrides::packed(k * n),
-            c: BatchStrides::packed(m * n),
+            // Saturating: an absurd size then fails the extent check instead of wrapping.
+            a: BatchStrides::packed(m.saturating_mul(k)),
+            b: BatchStrides::packed(k.saturating_mul(n)),
+            c: BatchStrides::packed(m.saturating_mul(n)),
             bias_strides: BatchStrides::default(),
             alpha: 1.0,
             bias: GemmBias::None,
@@ -158,12 +155,24 @@ impl TileConfig {
         2 * self.bk * (self.bm + self.bn) * 4
     }
 
-    fn valid(&self) -> bool {
+    /// Whether the generator supports this configuration: every dimension non-zero and at most 256, thread
+    /// tiles that divide the workgroup tile exactly (otherwise outputs would be skipped), multiples of 4 for
+    /// the vec4 accumulators, at most 256 threads, and tile loads that divide evenly among the threads.
+    pub fn valid(&self) -> bool {
+        let dims = [self.bm, self.bn, self.bk, self.tm, self.tn];
+        if dims.iter().any(|&d| d == 0 || d > 256) {
+            return false;
+        }
+        if !self.bm.is_multiple_of(self.tm)
+            || !self.bn.is_multiple_of(self.tn)
+            || !self.tm.is_multiple_of(4)
+            || !self.tn.is_multiple_of(4)
+            || !self.bk.is_multiple_of(4)
+        {
+            return false;
+        }
         let t = self.threads();
-        self.tm.is_multiple_of(4)
-            && self.tn.is_multiple_of(4)
-            && self.bk.is_multiple_of(4)
-            && t <= 256
+        t <= 256
             && t.is_multiple_of(self.bk / 4)
             && t.is_multiple_of(self.bk)
             && t.is_multiple_of(self.bm / 4)
@@ -175,15 +184,23 @@ impl TileConfig {
     }
 }
 
+/// Fails unless `cfg` is [`TileConfig::valid`] and fits the device's workgroup memory.
+pub(crate) fn check_config(ctx: &GpuContext, cfg: TileConfig) -> Result<()> {
+    if !cfg.valid() || cfg.workgroup_bytes() > ctx.caps().max_workgroup_storage {
+        return Err(shape_err(format!("invalid GEMM tile config {cfg:?} for this device")));
+    }
+    Ok(())
+}
+
 /// Picks a tile config from the problem size and the device's workgroup memory.
 ///
 /// The largest tile wins as long as it still yields enough workgroups to fill the GPU (measured on an RTX
 /// 4080 SUPER: 64+ workgroups) and does not waste more than a quarter of its rows on a short `M`.
 pub fn pick_config(ctx: &GpuContext, d: &GemmDesc) -> TileConfig {
-    let batch = d.batch.0 * d.batch.1;
+    let batch = d.batch.0.saturating_mul(d.batch.1);
     for cfg in [TileConfig::LARGE, TileConfig::MEDIUM] {
         let (bm, bn) = (cfg.bm as usize, cfg.bn as usize);
-        let groups = d.m.div_ceil(bm) * d.n.div_ceil(bn) * batch;
+        let groups = d.m.div_ceil(bm).saturating_mul(d.n.div_ceil(bn)).saturating_mul(batch);
         let row_waste = (d.m.div_ceil(bm) * bm) as f64 / d.m.max(1) as f64;
         if groups >= 64 && row_waste <= 1.25 && cfg.workgroup_bytes() <= ctx.caps().max_workgroup_storage {
             return cfg;
@@ -527,11 +544,18 @@ pub(crate) static GEMM: KernelDef = KernelDef {
 };
 
 /// Highest element index (exclusive) a strided batched matrix operand touches.
-fn extent(s: &BatchStrides, batch: (usize, usize), rows: usize, cols: usize, ld: usize) -> usize {
+fn extent(s: &BatchStrides, batch: (usize, usize), rows: usize, cols: usize, ld: usize) -> Result<usize> {
     if rows == 0 || cols == 0 || batch.0 == 0 || batch.1 == 0 {
-        return 0;
+        return Ok(0);
     }
-    s.at(batch.0 - 1, batch.1 - 1) + (rows - 1) * ld + cols
+    (|| {
+        s.offset
+            .checked_add((batch.0 - 1).checked_mul(s.outer)?)?
+            .checked_add((batch.1 - 1).checked_mul(s.inner)?)?
+            .checked_add((rows - 1).checked_mul(ld)?)?
+            .checked_add(cols)
+    })()
+    .ok_or_else(|| GpuError::Limit(format!("gemm operand extent overflows ({s:?}, {rows}x{cols}, ld {ld})")))
 }
 
 pub(crate) fn base_spec(d: &GemmDesc, cfg: TileConfig) -> Spec {
@@ -610,9 +634,7 @@ pub fn gemm_with_config(
     cfg: TileConfig,
 ) -> Result<()> {
     check_dtype(ctx, d.dtype, "gemm")?;
-    if !cfg.valid() || cfg.workgroup_bytes() > ctx.caps().max_workgroup_storage {
-        return Err(shape_err(format!("gemm: invalid tile config {cfg:?} for this device")));
-    }
+    check_config(ctx, cfg)?;
     let (ar, ac) = if d.trans_a { (d.k, d.m) } else { (d.m, d.k) };
     let (br, bc) = if d.trans_b { (d.n, d.k) } else { (d.k, d.n) };
     if d.lda < ac || d.ldb < bc || d.ldc < d.n {
@@ -624,9 +646,9 @@ pub fn gemm_with_config(
     if d.m == 0 || d.n == 0 || d.batch.0 == 0 {
         return Ok(());
     }
-    check_buf(a, extent(&d.a, d.batch, ar, ac, d.lda), d.dtype, "gemm A")?;
-    check_buf(b, extent(&d.b, d.batch, br, bc, d.ldb), d.dtype, "gemm B")?;
-    check_buf(c, extent(&d.c, d.batch, d.m, d.n, d.ldc), d.dtype, "gemm C")?;
+    check_buf(a, extent(&d.a, d.batch, ar, ac, d.lda)?, d.dtype, "gemm A")?;
+    check_buf(b, extent(&d.b, d.batch, br, bc, d.ldb)?, d.dtype, "gemm B")?;
+    check_buf(c, extent(&d.c, d.batch, d.m, d.n, d.ldc)?, d.dtype, "gemm C")?;
     let bias_len = match d.bias {
         GemmBias::None => 0,
         GemmBias::Row => d.m,
@@ -635,7 +657,7 @@ pub fn gemm_with_config(
     let bias_buf = match (d.bias, bias) {
         (GemmBias::None, _) => ctx.dummy(),
         (_, Some(bb)) => {
-            check_buf(bb, extent(&d.bias_strides, d.batch, 1, bias_len, bias_len), d.dtype, "gemm bias")?;
+            check_buf(bb, extent(&d.bias_strides, d.batch, 1, bias_len, bias_len)?, d.dtype, "gemm bias")?;
             bb
         }
         (_, None) => return Err(shape_err("gemm: bias kind set but no bias buffer")),
@@ -662,7 +684,11 @@ pub fn gemm_with_config(
     let groups = [
         d.n.div_ceil(cfg.bn as usize) as u32,
         d.m.div_ceil(cfg.bm as usize) as u32,
-        u32::try_from(d.batch.0 * d.batch.1).map_err(|_| GpuError::Limit("gemm batch too large".into()))?,
+        d.batch
+            .0
+            .checked_mul(d.batch.1)
+            .and_then(|b| u32::try_from(b).ok())
+            .ok_or_else(|| GpuError::Limit("gemm batch too large".into()))?,
     ];
     ctx.dispatch(&k, &[a, b, bias_buf, c], &gemm_params(d)?, groups)
 }

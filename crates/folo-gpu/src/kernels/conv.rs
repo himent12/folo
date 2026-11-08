@@ -10,7 +10,7 @@
 //!   for the whole K loop, so the index math is a few constant divisions per element), so no im2col buffer is
 //!   ever written. Weight `[C_out, C_in/groups, KH, KW]` is the row-major `A` matrix of each group as is.
 
-use super::check_buf;
+use super::{check_buf, prod};
 use crate::DType;
 use crate::context::GpuContext;
 use crate::error::{Result, shape_err};
@@ -121,9 +121,9 @@ pub fn conv2d_with_config(
     let (kh, kw) = d.win.kernel;
     let cin_g = d.c_in / d.groups;
     let cout_g = d.c_out / d.groups;
-    check_buf(x, d.n * d.c_in * d.h * d.w, d.dtype, "conv2d input")?;
-    check_buf(weight, d.c_out * cin_g * kh * kw, d.dtype, "conv2d weight")?;
-    check_buf(y, d.n * d.c_out * oh * ow, d.dtype, "conv2d output")?;
+    check_buf(x, prod(&[d.n, d.c_in, d.h, d.w])?, d.dtype, "conv2d input")?;
+    check_buf(weight, prod(&[d.c_out, cin_g, kh, kw])?, d.dtype, "conv2d weight")?;
+    check_buf(y, prod(&[d.n, d.c_out, oh, ow])?, d.dtype, "conv2d output")?;
     if let Some(b) = bias {
         check_buf(b, d.c_out, d.dtype, "conv2d bias")?;
     }
@@ -170,9 +170,7 @@ pub fn conv2d_with_config(
 
     // Implicit GEMM.
     let cfg = cfg.unwrap_or_else(|| gemm::pick_config(ctx, &g));
-    if cfg.workgroup_bytes() > ctx.caps().max_workgroup_storage {
-        return Err(shape_err(format!("conv2d: tile config {cfg:?} exceeds workgroup memory")));
-    }
+    gemm::check_config(ctx, cfg)?;
     let check = !g.m.is_multiple_of(cfg.bm as usize)
         || !g.n.is_multiple_of(cfg.bn as usize)
         || !g.k.is_multiple_of(cfg.bk as usize);

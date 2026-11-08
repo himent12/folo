@@ -177,3 +177,30 @@ fn matmul_tensor_api() {
     // Shape errors are reported, not panics.
     assert!(ga.matmul(&ga).is_err());
 }
+
+#[test]
+fn gemm_rejects_bad_configs_and_sizes() {
+    let ctx = gpu!();
+    let buf = GpuTensor::zeros(&ctx, &[64 * 64], DType::F32).unwrap();
+    let d = GemmDesc::new(36, 36, 16, false, false, 1);
+    for cfg in [
+        // bm not a multiple of tm: rows would be skipped silently.
+        TileConfig { bm: 36, bn: 144, bk: 16, tm: 8, tn: 4 },
+        TileConfig { bm: 64, bn: 64, bk: 16, tm: 0, tn: 4 },
+        TileConfig { bm: 0, bn: 64, bk: 16, tm: 4, tn: 4 },
+        TileConfig { bm: 64, bn: 64, bk: 6, tm: 4, tn: 4 },
+        TileConfig { bm: 4096, bn: 64, bk: 16, tm: 4, tn: 4 },
+    ] {
+        assert!(!cfg.valid(), "{cfg:?}");
+        assert!(gemm::gemm_with_config(&ctx, &d, buf.raw(), buf.raw(), None, buf.raw(), cfg).is_err());
+    }
+    for cfg in [TileConfig::LARGE, TileConfig::MEDIUM, TileConfig::SMALL] {
+        assert!(cfg.valid(), "{cfg:?}");
+    }
+    // Sizes whose extents overflow are rejected, not wrapped.
+    let huge = GemmDesc::new(1 << 40, 1 << 40, 1 << 40, false, false, 1);
+    assert!(gemm::gemm(&ctx, &huge, buf.raw(), buf.raw(), None, buf.raw()).is_err());
+    // An operand that is too small is rejected.
+    let d = GemmDesc::new(128, 128, 128, false, false, 1);
+    assert!(gemm::gemm(&ctx, &d, buf.raw(), buf.raw(), None, buf.raw()).is_err());
+}

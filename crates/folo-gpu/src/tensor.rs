@@ -11,6 +11,7 @@ use crate::kernels::gemm::{self, BatchStrides, GemmBias, GemmDesc};
 use crate::kernels::layout;
 use crate::kernels::pooling::{self, Window2d};
 use crate::kernels::reduce::{self, ReduceOp};
+use crate::kernels::{prod, shape_numel};
 use crate::pool::GpuBuffer;
 
 /// A dense, row-major tensor in GPU memory.
@@ -38,7 +39,7 @@ pub(crate) fn numel(shape: &[usize]) -> usize {
 impl GpuTensor {
     /// Wraps an existing buffer. Fails if it is too small for `shape` and `dtype`.
     pub fn from_buffer(ctx: &GpuContext, buf: Arc<GpuBuffer>, shape: &[usize], dtype: DType) -> Result<Self> {
-        let need = dtype.bytes(numel(shape));
+        let need = dtype.bytes(shape_numel(shape)?);
         if buf.size() < need {
             return Err(shape_err(format!(
                 "buffer of {} bytes is too small for {shape:?} {dtype:?}",
@@ -50,7 +51,7 @@ impl GpuTensor {
 
     /// A tensor with unspecified contents.
     pub fn empty(ctx: &GpuContext, shape: &[usize], dtype: DType) -> Result<Self> {
-        let buf = ctx.alloc(dtype.bytes(numel(shape)))?;
+        let buf = ctx.alloc(dtype.bytes(shape_numel(shape)?))?;
         Ok(Self { ctx: ctx.clone(), buf: Arc::new(buf), shape: shape.to_vec(), dtype })
     }
 
@@ -63,7 +64,7 @@ impl GpuTensor {
 
     /// Uploads f32 data.
     pub fn from_slice(ctx: &GpuContext, data: &[f32], shape: &[usize]) -> Result<Self> {
-        if data.len() != numel(shape) {
+        if data.len() != shape_numel(shape)? {
             return Err(shape_err(format!("{} values for shape {shape:?}", data.len())));
         }
         let buf = ctx.upload(bytemuck::cast_slice(data))?;
@@ -72,7 +73,7 @@ impl GpuTensor {
 
     /// Uploads f16 data.
     pub fn from_f16(ctx: &GpuContext, data: &[half::f16], shape: &[usize]) -> Result<Self> {
-        if data.len() != numel(shape) {
+        if data.len() != shape_numel(shape)? {
             return Err(shape_err(format!("{} values for shape {shape:?}", data.len())));
         }
         let buf = ctx.upload(bytemuck::cast_slice(data))?;
@@ -138,7 +139,7 @@ impl GpuTensor {
     /// Same data, new shape (no copy). One dimension may be `usize::MAX` to infer it.
     pub fn reshape(&self, shape: &[usize]) -> Result<Self> {
         let mut shape = shape.to_vec();
-        let known: usize = shape.iter().filter(|&&d| d != usize::MAX).product();
+        let known = prod(&shape.iter().copied().filter(|&d| d != usize::MAX).collect::<Vec<_>>())?;
         let infer = shape.iter().filter(|&&d| d == usize::MAX).count();
         if infer > 1 {
             return Err(shape_err("reshape: at most one inferred dimension"));
@@ -150,7 +151,7 @@ impl GpuTensor {
             let d = self.numel() / known;
             shape.iter_mut().filter(|d| **d == usize::MAX).for_each(|x| *x = d);
         }
-        if numel(&shape) != self.numel() {
+        if shape_numel(&shape)? != self.numel() {
             return Err(shape_err(format!("reshape {:?} -> {shape:?}", self.shape)));
         }
         Ok(Self { ctx: self.ctx.clone(), buf: self.buf.clone(), shape, dtype: self.dtype })

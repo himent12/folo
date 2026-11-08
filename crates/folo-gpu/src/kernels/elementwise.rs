@@ -1,6 +1,6 @@
 //! Elementwise kernels: unary ops, broadcasting binary ops and fused bias + activation.
 
-use super::{UNARY_FN, check_buf, vec_prelude};
+use super::{UNARY_FN, check_buf, shape_numel, vec_prelude};
 use crate::DType;
 use crate::context::GpuContext;
 use crate::error::{Result, shape_err};
@@ -308,9 +308,9 @@ pub fn binary(
     out: &wgpu::Buffer,
 ) -> Result<Vec<usize>> {
     let oshape = broadcast_shape(a_shape, b_shape)?;
-    let n: usize = oshape.iter().product();
-    check_buf(a, a_shape.iter().product(), DType::F32, "binary lhs")?;
-    check_buf(b, b_shape.iter().product(), DType::F32, "binary rhs")?;
+    let n = shape_numel(&oshape)?;
+    check_buf(a, shape_numel(a_shape)?, DType::F32, "binary lhs")?;
+    check_buf(b, shape_numel(b_shape)?, DType::F32, "binary rhs")?;
     check_buf(out, n, DType::F32, "binary output")?;
     if n == 0 {
         return Ok(oshape);

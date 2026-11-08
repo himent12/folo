@@ -6,20 +6,38 @@
 @group(0) @binding(2) var<storage, read> B: array<E>;
 @group(0) @binding(3) var<storage, read_write> O: array<E>;
 
-fn pow_np(x: vec4<f32>, y: vec4<f32>) -> vec4<f32> {
-    // pow() is undefined for x < 0 in WGSL; follow C/NumPy powf for integer exponents of negative bases.
-    let ax = abs(x);
-    var r = exp2(y * log2(ax));
+// C `powf` for one lane. NaN, infinities and signed zeros are classified by bit pattern (WGSL builtins
+// are allowed to assume finite inputs), and every special case of C99 Annex F is handled explicitly.
+fn pow1(x: f32, y: f32) -> f32 {
+    let bx = bitcast<u32>(x);
+    let ax = bx & 0x7fffffffu;
+    let ay = bitcast<u32>(y) & 0x7fffffffu;
+    let nan = pf(28u);
+    let inf = pf(29u);
+    // x^±0 = 1 and 1^y = 1, even for NaN.
+    if (ay == 0u || bx == 0x3f800000u) { return 1.0; }
+    if (ax > 0x7f800000u || ay > 0x7f800000u) { return nan; }
+    if (ay == 0x7f800000u) {
+        // y = ±inf: (-1)^±inf = 1; |x| > 1 grows towards +inf, |x| < 1 shrinks towards +inf for y = -inf.
+        if (ax == 0x3f800000u) { return 1.0; }
+        return select(0.0, inf, (ax > 0x3f800000u) == (y > 0.0));
+    }
     let yi = round(y);
     let is_int = yi == y;
-    let odd = is_int & (abs(yi - 2.0 * floor(yi * 0.5)) == vec4<f32>(1.0));
-    r = select(r, -r, (x < vec4<f32>(0.0)) & odd);
-    r = select(r, vec4<f32>(pf(28u)), (x < vec4<f32>(0.0)) & !is_int);
-    // 0^y: 0 for y > 0, 1 for y == 0, inf for y < 0; x^0 == 1 always.
-    r = select(r, select(select(vec4<f32>(0.0), vec4<f32>(pf(29u)), y < vec4<f32>(0.0)),
-                          vec4<f32>(1.0), y == vec4<f32>(0.0)), ax == vec4<f32>(0.0));
-    r = select(r, vec4<f32>(1.0), y == vec4<f32>(0.0));
-    return r;
+    let odd = is_int && abs(yi - 2.0 * floor(yi * 0.5)) == 1.0;
+    let negate = (bx >> 31u) == 1u && odd;
+    if (ax == 0u || ax == 0x7f800000u) {
+        // x = ±0 or ±inf: the magnitude is inf exactly when (x is 0) == (y < 0); odd integer y keeps x's sign.
+        let r = select(0.0, inf, (ax == 0u) == (y < 0.0));
+        return select(r, -r, negate);
+    }
+    if ((bx >> 31u) == 1u && !is_int) { return nan; }
+    let r = exp2(y * log2(bitcast<f32>(ax)));
+    return select(r, -r, negate);
+}
+
+fn pow_np(x: vec4<f32>, y: vec4<f32>) -> vec4<f32> {
+    return vec4<f32>(pow1(x.x, y.x), pow1(x.y, y.y), pow1(x.z, y.z), pow1(x.w, y.w));
 }
 
 fn binop(a: vec4<f32>, b: vec4<f32>) -> vec4<f32> {

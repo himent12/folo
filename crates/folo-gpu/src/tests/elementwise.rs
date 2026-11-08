@@ -140,6 +140,50 @@ fn pow_follows_powf() {
     let gb = GpuTensor::from_slice(&ctx, &b, &[12]).unwrap();
     let got = ga.binary(BinaryOp::Pow, &gb).unwrap().to_vec().unwrap();
     assert_close(&got, &want, 1e-5, 1e-5, "pow");
+    // C99 Annex F special cases must match bit for bit (signed zeros and infinities included).
+    let (inf, nan) = (f32::INFINITY, f32::NAN);
+    let special = [
+        (-0.0f32, -3.0f32),
+        (-0.0, 3.0),
+        (-0.0, 2.0),
+        (0.0, -2.5),
+        (1.0, inf),
+        (1.0, nan),
+        (nan, 0.0),
+        (nan, -0.0),
+        (nan, 2.0),
+        (2.0, nan),
+        (-1.0, inf),
+        (-1.0, -inf),
+        (0.5, inf),
+        (0.5, -inf),
+        (2.0, inf),
+        (-2.0, -inf),
+        (-inf, 3.0),
+        (-inf, -3.0),
+        (-inf, 2.0),
+        (-inf, -0.5),
+        (inf, -1.0),
+        (inf, 0.5),
+        (-2.0, 0.5),
+        (-8.0, 3.0),
+        (-0.5, -3.0),
+    ];
+    let (xs, ys): (Vec<f32>, Vec<f32>) = special.iter().copied().unzip();
+    let ga = GpuTensor::from_slice(&ctx, &xs, &[xs.len()]).unwrap();
+    let gb = GpuTensor::from_slice(&ctx, &ys, &[ys.len()]).unwrap();
+    let got = ga.binary(BinaryOp::Pow, &gb).unwrap().to_vec().unwrap();
+    for ((x, y), g) in special.iter().zip(&got) {
+        let w = x.powf(*y);
+        let same = if w.is_nan() {
+            g.is_nan()
+        } else if w == 0.0 || w.is_infinite() {
+            g.to_bits() == w.to_bits()
+        } else {
+            (g - w).abs() <= 1e-5 * w.abs()
+        };
+        assert!(same, "pow({x}, {y}): got {g}, want {w}");
+    }
     let mut rng = Rng::new(3);
     let x = rng.vec(4 * 33, 0.1, 3.0);
     let e = rng.vec(33, -2.0, 2.0);

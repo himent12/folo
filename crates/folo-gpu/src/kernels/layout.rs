@@ -1,6 +1,6 @@
 //! Data movement: permute / transpose (copy), concat, nearest upsampling and f32 ↔ f16 casts.
 
-use super::{check_buf, vec_prelude};
+use super::{check_buf, prod, shape_numel, vec_prelude};
 use crate::DType;
 use crate::context::GpuContext;
 use crate::error::{GpuError, Result, shape_err};
@@ -80,7 +80,7 @@ pub fn permute(
     dtype: DType,
 ) -> Result<()> {
     check_dtype(ctx, dtype, "permute")?;
-    let n: usize = shape.iter().product();
+    let n = shape_numel(shape)?;
     check_buf(x, n, dtype, "permute input")?;
     check_buf(y, n, dtype, "permute output")?;
     if n == 0 {
@@ -132,11 +132,11 @@ pub fn copy_rows(
     dst_off: usize,
     dtype: DType,
 ) -> Result<()> {
-    if dst_off + row > dst_row {
+    if dst_off.checked_add(row).is_none_or(|end| end > dst_row) {
         return Err(shape_err("copy_rows: row overruns the destination row"));
     }
-    check_buf(x, outer * row, dtype, "concat input")?;
-    check_buf(y, outer * dst_row, dtype, "concat output")?;
+    check_buf(x, prod(&[outer, row])?, dtype, "concat input")?;
+    check_buf(y, prod(&[outer, dst_row])?, dtype, "concat output")?;
     if outer * row == 0 {
         return Ok(());
     }
@@ -175,8 +175,8 @@ pub fn upsample_nearest2d(
     dtype: DType,
 ) -> Result<()> {
     check_dtype(ctx, dtype, "upsample_nearest2d")?;
-    check_buf(x, planes * h * w, dtype, "upsample input")?;
-    check_buf(y, planes * oh * ow, dtype, "upsample output")?;
+    check_buf(x, prod(&[planes, h, w])?, dtype, "upsample input")?;
+    check_buf(y, prod(&[planes, oh, ow])?, dtype, "upsample output")?;
     let n = planes * oh * ow;
     if n == 0 {
         return Ok(());

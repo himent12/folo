@@ -4,7 +4,7 @@
 //! `inner == 1` the reduced axis is contiguous and one workgroup reduces each row with a tree in workgroup
 //! memory; otherwise each thread owns one output column and walks `R` with coalesced loads across columns.
 
-use super::check_buf;
+use super::{check_buf, prod};
 use crate::DType;
 use crate::context::GpuContext;
 use crate::error::{Result, shape_err};
@@ -67,8 +67,8 @@ pub fn reduce(
     r: usize,
     inner: usize,
 ) -> Result<()> {
-    check_buf(x, outer * r * inner, DType::F32, "reduce input")?;
-    check_buf(y, outer * inner, DType::F32, "reduce output")?;
+    check_buf(x, prod(&[outer, r, inner])?, DType::F32, "reduce input")?;
+    check_buf(y, prod(&[outer, inner])?, DType::F32, "reduce output")?;
     if outer * inner == 0 {
         return Ok(());
     }
@@ -103,8 +103,8 @@ pub fn softmax(
     n: usize,
     log: bool,
 ) -> Result<()> {
-    check_buf(x, rows * n, DType::F32, "softmax input")?;
-    check_buf(y, rows * n, DType::F32, "softmax output")?;
+    check_buf(x, prod(&[rows, n])?, DType::F32, "softmax input")?;
+    check_buf(y, prod(&[rows, n])?, DType::F32, "softmax output")?;
     if rows * n == 0 {
         return Ok(());
     }

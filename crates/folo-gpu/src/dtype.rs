@@ -19,8 +19,9 @@ impl DType {
         }
     }
 
-    /// Bytes for `n` elements, rounded up to wgpu's 4-byte copy alignment.
+    /// Bytes for `n` elements, rounded up to wgpu's 4-byte copy alignment (saturating, so an absurd count
+    /// fails the allocation limit instead of wrapping).
     pub const fn bytes(self, n: usize) -> u64 {
-        ((n * self.size()) as u64).next_multiple_of(4)
+        (n as u64).saturating_mul(self.size() as u64).saturating_add(3) & !3
     }
 }

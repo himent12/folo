@@ -1,6 +1,6 @@
 //! 2-D max pooling (NCHW).
 
-use super::check_buf;
+use super::{check_buf, prod};
 use crate::DType;
 use crate::context::GpuContext;
 use crate::error::{Result, shape_err};
@@ -97,8 +97,8 @@ pub fn max_pool2d(
         return Err(shape_err(format!("max_pool2d: padding must be at most half the kernel, got {win:?}")));
     }
     let (oh, ow) = win.output(h, w)?;
-    check_buf(x, planes * h * w, dtype, "max_pool2d input")?;
-    check_buf(y, planes * oh * ow, dtype, "max_pool2d output")?;
+    check_buf(x, prod(&[planes, h, w])?, dtype, "max_pool2d input")?;
+    check_buf(y, prod(&[planes, oh, ow])?, dtype, "max_pool2d output")?;
     let n = planes * oh * ow;
     if n == 0 {
         return Ok((oh, ow));

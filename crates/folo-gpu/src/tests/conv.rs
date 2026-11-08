@@ -161,3 +161,14 @@ fn conv_tensor_api() {
     // Mismatched groups are rejected.
     assert!(gx.conv2d(&gw, None, (1, 1), (0, 0), (1, 1), 2, UnaryOp::Identity).is_err());
 }
+
+#[test]
+fn conv_rejects_bad_configs() {
+    let ctx = gpu!();
+    let buf = GpuTensor::zeros(&ctx, &[4096], DType::F32).unwrap();
+    let d = desc(1, 4, 8, 8, 8, 1, Window2d::square(3, 1, 1));
+    let bad = TileConfig { bm: 36, bn: 144, bk: 16, tm: 8, tn: 4 };
+    assert!(conv::conv2d_with_config(&ctx, &d, buf.raw(), buf.raw(), None, buf.raw(), Some(bad)).is_err());
+    let d = desc(1, 1 << 20, 1 << 20, 1 << 20, 8, 1, Window2d::square(3, 1, 1));
+    assert!(conv::conv2d(&ctx, &d, buf.raw(), buf.raw(), None, buf.raw()).is_err());
+}

@@ -112,6 +112,11 @@ fn shape_and_dtype_errors() {
     let h = t.to_dtype(DType::F16).unwrap();
     assert!(h.unary(UnaryOp::Relu).is_err());
     assert!(t.to_f16_vec().is_err());
+    // Shapes whose element count (or any sub-product) overflows are rejected before allocating.
+    assert!(GpuTensor::empty(&ctx, &[1 << 32, 1 << 32], DType::F32).is_err());
+    assert!(GpuTensor::empty(&ctx, &[0, 1 << 40, 1 << 40], DType::F32).is_err());
+    assert!(GpuTensor::empty(&ctx, &[1 << 40], DType::F32).is_err());
+    assert!(t.reshape(&[0, 1 << 40, 1 << 40]).is_err());
     let empty = GpuTensor::zeros(&ctx, &[0, 4], DType::F32).unwrap();
     assert_eq!(empty.unary(UnaryOp::Exp).unwrap().to_vec().unwrap(), Vec::<f32>::new());
     assert_eq!(empty.sum(1, false).unwrap().shape(), &[0]);

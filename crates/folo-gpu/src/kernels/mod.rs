@@ -30,9 +30,25 @@ pub(crate) fn vec_prelude(vec: bool) -> &'static str {
 /// WGSL for the unary function table shared by unary, bias+activation, GEMM and conv epilogues.
 pub(crate) const UNARY_FN: &str = include_str!("../shaders/unary_fn.wgsl");
 
+/// Checked product of `dims`; fails with [`GpuError::Limit`] instead of wrapping.
+pub(crate) fn prod(dims: &[usize]) -> Result<usize> {
+    dims.iter().try_fold(1usize, |acc, &d| acc.checked_mul(d)).ok_or_else(|| overflow(dims))
+}
+
+/// Validates a tensor shape: the product of its dims (zeros counted as 1) must fit in `usize`, so every
+/// sub-product of the shape is safe to compute unchecked afterwards. Returns the element count.
+pub(crate) fn shape_numel(shape: &[usize]) -> Result<usize> {
+    shape.iter().try_fold(1usize, |acc, &d| acc.checked_mul(d.max(1))).ok_or_else(|| overflow(shape))?;
+    Ok(shape.iter().product())
+}
+
+fn overflow(dims: &[usize]) -> GpuError {
+    GpuError::Limit(format!("size {dims:?} overflows"))
+}
+
 /// Fails unless `buf` holds at least `elems` elements of `dtype`.
 pub(crate) fn check_buf(buf: &wgpu::Buffer, elems: usize, dtype: DType, what: &str) -> Result<()> {
-    let need = (elems * dtype.size()) as u64;
+    let need = elems.checked_mul(dtype.size()).ok_or_else(|| overflow(&[elems, dtype.size()]))? as u64;
     if buf.size() < need {
         return Err(GpuError::Shape(format!(
             "{what}: buffer of {} bytes is smaller than {need} bytes",
