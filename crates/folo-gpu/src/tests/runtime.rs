@@ -199,3 +199,18 @@ fn lost_device_is_an_error_not_a_panic() {
     assert!(crate::is_device_lost(&folo_core::Error::from(err)));
     assert!(!crate::is_device_lost(&folo_core::Error::from(crate::GpuError::Wgpu("validation".into()))));
 }
+
+/// A readback's map outcome is loss-aware (the check the browser's async readback relies on, since it cannot
+/// poll): once the loss is recorded, a failed and a succeeded map both report `DeviceLost`; on a healthy device a
+/// failed map stays a `Map` error.
+#[test]
+fn map_outcome_prefers_a_recorded_loss() {
+    let _shared = gpu!();
+    let ctx = crate::GpuContext::new().unwrap();
+    assert!(matches!(ctx.map_outcome(Err("rejected".into())), Err(crate::GpuError::Map(_))));
+    assert!(ctx.map_outcome(Ok(())).is_ok());
+    ctx.device().destroy();
+    assert!(ctx.sync().is_err());
+    assert!(matches!(ctx.map_outcome(Err("rejected".into())), Err(crate::GpuError::DeviceLost(_))));
+    assert!(matches!(ctx.map_outcome(Ok(())), Err(crate::GpuError::DeviceLost(_))));
+}

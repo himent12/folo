@@ -812,6 +812,16 @@ impl GpuContext {
         }
     }
 
+    /// The result of a readback's buffer map, loss-aware: a recorded device loss wins over both a map failure and
+    /// a map that succeeded meanwhile. This is the only loss check the browser gets, where waits cannot poll and
+    /// the device-lost callback runs from the event loop.
+    pub(crate) fn map_outcome(&self, r: std::result::Result<(), String>) -> Result<()> {
+        if let Some(why) = self.lost_reason() {
+            return Err(GpuError::DeviceLost(why));
+        }
+        r.map_err(GpuError::Map)
+    }
+
     fn take_error(&self) -> Result<()> {
         let mut errs = self.inner.errors.lock().expect("error lock");
         if errs.is_empty() {
@@ -996,7 +1006,7 @@ impl PendingRead {
         let mut s = self.state.state.lock().expect("map state lock");
         loop {
             if let Some(r) = s.result.take() {
-                return r.map_err(GpuError::Map);
+                return self.ctx.map_outcome(r);
             }
             let (guard, timeout) = self
                 .state
@@ -1017,7 +1027,7 @@ impl PendingRead {
     #[cfg(target_arch = "wasm32")]
     fn wait_blocking(&self) -> Result<()> {
         match self.state.state.lock().expect("map state lock").result.take() {
-            Some(r) => r.map_err(GpuError::Map),
+            Some(r) => self.ctx.map_outcome(r),
             None => Err(GpuError::Unsupported(NO_BLOCKING)),
         }
     }
@@ -1027,7 +1037,8 @@ impl PendingRead {
     pub(crate) async fn wait(&self) -> Result<()> {
         #[cfg(not(target_arch = "wasm32"))]
         self.ctx.wait_idle()?;
-        MapWait { state: &self.state.state }.await.map_err(GpuError::Map)
+        let r = MapWait { state: &self.state.state }.await;
+        self.ctx.map_outcome(r)
     }
 
     /// Hands the mapped bytes to `f`, unmaps, and reports the errors wgpu captured meanwhile.
