@@ -212,8 +212,10 @@
 
   // Keyboard scrubbing announces the values under the cursor; pointer hover stays silent.
   let announce = $state(false);
+  /** The cursor this chart set from the keyboard; a linked chart moving the shared cursor never makes it speak. */
+  let kbdCursor = $state<number | null>(null);
   const spoken = $derived(
-    announce && hover
+    announce && hover && cursor === kbdCursor
       ? `${xTitle ? xTitle(hover.xv) : xFormat(hover.xv)}: ${hover.rows.map((r) => `${r.s.label} ${fmtValue(r.p.y)}`).join(', ')}`
       : '',
   );
@@ -247,7 +249,8 @@
     } else return;
     e.preventDefault();
     announce = true;
-    cursor = s.points[i]!.x;
+    kbdCursor = s.points[i]!.x;
+    cursor = kbdCursor;
   }
 
   const PATTERNS = { dash: [6, 3], dot: [1.5, 3], dashdot: [7, 3, 1.5, 3] } as const;
