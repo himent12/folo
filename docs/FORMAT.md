@@ -28,7 +28,7 @@ Reader acceptance rules (identical to safetensors):
 - `N <= 100_000_000` bytes. The header is a JSON object with no duplicate keys. `__metadata__`, if present, maps
   strings to strings.
 - `data_offsets` are `[begin, end)` relative to the start of the data section, and `end - begin == numel × dtype size`.
-  Taken together, the tensors must cover the data section exactly, with no overlaps and no holes (sorted by `begin`,
+  Taken together, the tensors must cover the data section exactly, with no overlaps and no holes (sorted by `(begin, end)`,
   each tensor starts where the previous one ended; the first starts at 0, and the last ends at the end of the file).
 - Zero-sized tensors have `begin == end`. Scalars have `shape: []`.
 - Readers do not require any particular order of keys or any element alignment.
@@ -103,6 +103,10 @@ separately.
 ```
 Every model parameter appears in exactly one group. `lr` is the group's base LR, before the scheduler multiplier.
 Loaders must reject a checkpoint whose optimizer type or parameter set does not match the model being resumed.
+State tensors must be complete: every parameter in a group has each state tensor its optimizer type uses
+(`momentum_buffer` for SGD with momentum > 0; `exp_avg` and `exp_avg_sq` for AdamW), with the parameter's shape and dtype
+`F32`. Missing or mismatched state is an error on resume. The only exception is a checkpoint with `step == 0`, which may
+omit state tensors (they are initialised to zero).
 
 ### Scheduler contract (`folo.sched`)
 ```jsonc
