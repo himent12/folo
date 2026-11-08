@@ -97,6 +97,15 @@ impl RunData {
         }
     }
 
+    /// A resumed run restarts at `first` (its first new step): drop the steps from there on and
+    /// the epochs from its epoch on, which the interrupted attempt left behind (the server's
+    /// history does the same: repeated steps replace earlier ones).
+    pub fn truncate_from(&mut self, first: &Step) {
+        self.metrics.steps.retain(|s| s.step < first.step);
+        self.metrics.epochs.retain(|e| e.epoch < first.epoch);
+        self.derived.replace(None);
+    }
+
     pub fn push_epoch(&mut self, e: Epoch) {
         if self.metrics.epochs.last().is_none_or(|l| e.epoch > l.epoch) {
             self.metrics.epochs.push(e);
@@ -262,6 +271,8 @@ pub struct Store {
     pub log_rev: u64,
     /// Live events that arrived while a run's history was loading, merged in when it lands.
     pending: HashMap<String, Vec<RunEvent>>,
+    /// Runs resumed since their history was last fixed up: their first new step truncates it.
+    resumed: std::collections::HashSet<String>,
     pub images_px: ImageCache,
     /// Throughput history for the system card (GPU util samples), newest last.
     pub gpu_util: VecDeque<f32>,
@@ -284,6 +295,7 @@ impl Store {
             logs: HashMap::new(),
             log_rev: 0,
             pending: HashMap::new(),
+            resumed: Default::default(),
             images_px: ImageCache::default(),
             gpu_util: VecDeque::new(),
         }
@@ -309,6 +321,16 @@ impl Store {
     pub fn install_run_data(&mut self, run_id: &str, data: ApiResult<RunData>) {
         let mut load: Load<RunData> = data.into();
         if let Load::Ready(d) = &mut load {
+            // Resumed: the first step buffered since says where training restarted.
+            if self.resumed.contains(run_id)
+                && let Some(first) = self.pending.get(run_id).into_iter().flatten().find_map(|ev| match ev {
+                    RunEvent::Step(s) => Some(*s),
+                    _ => None,
+                })
+            {
+                d.truncate_from(&first);
+                self.resumed.remove(run_id);
+            }
             for ev in self.pending.get(run_id).into_iter().flatten() {
                 match ev {
                     RunEvent::Step(s) => d.push_step(*s),
@@ -340,6 +362,16 @@ impl Store {
         self.logs.insert(run_id.to_string(), load);
         self.log_rev += 1;
         self.prune_pending(run_id);
+    }
+
+    /// A run was resumed: drop its history and buffered events; the next history load and the
+    /// first new step rebuild it.
+    pub fn reset_for_resume(&mut self, run_id: &str) {
+        self.run_data.remove(run_id);
+        self.logs.remove(run_id);
+        self.samples.remove(run_id);
+        self.pending.remove(run_id);
+        self.resumed.insert(run_id.to_string());
     }
 
     /// Forget live events buffered for histories still loading (a new data source: ids may repeat).
@@ -377,6 +409,9 @@ impl Store {
                     r.eta_s = Some(s.eta_s);
                 }
                 if let Some(Load::Ready(d)) = self.run_data.get_mut(run_id) {
+                    if self.resumed.remove(run_id) {
+                        d.truncate_from(&s);
+                    }
                     d.push_step(s);
                 }
             }
@@ -470,6 +505,46 @@ mod tests {
         assert_eq!(store.run_data[id].ready().unwrap().derived().loss[3].len(), before + 1);
         store.apply(id, RunEvent::Status(StatusEvent { status: RunStatus::Completed, error: None }));
         assert_eq!(store.run(id).unwrap().status, RunStatus::Completed);
+    }
+
+    #[test]
+    fn resumed_steps_replace_the_interrupted_epoch() {
+        // Two finished epochs of 10 steps, then 4 steps of epoch 3 before the stop.
+        let loss = || crate::api::Loss { box_: 1., cls: 1., dfl: 1., total: 3. };
+        let step = |n: u64| Step {
+            epoch: ((n - 1) / 10 + 1) as u32,
+            step: n,
+            lr: 0.01,
+            loss: loss(),
+            imgs_per_s: 1.,
+            eta_s: 1.,
+        };
+        let epoch = |n: u32| Epoch {
+            epoch: n,
+            train_loss: loss(),
+            val: crate::api::ValMetrics {
+                map50: 0.5,
+                map50_95: 0.3,
+                precision: 0.5,
+                recall: 0.5,
+                per_class: vec![],
+            },
+            duration_s: 1.,
+        };
+        let metrics = RunMetrics { steps: (1..=24).map(step).collect(), epochs: vec![epoch(1), epoch(2)] };
+        let mut store = Store::new(Arc::new(MockBackend::new(4200, true)));
+        let id = "run_r";
+        store.run_data.insert(id.into(), Load::Ready(RunData::new(metrics, 10)));
+        store.resumed.insert(id.into());
+        // Resumed from the end of epoch 2: step 21 again.
+        store.apply(id, RunEvent::Step(step(21)));
+        let d = store.run_data[id].ready().unwrap();
+        assert_eq!(d.metrics.steps.last().unwrap().step, 21);
+        assert_eq!(d.metrics.steps.len(), 21);
+        assert_eq!(d.metrics.epochs.len(), 2);
+        // Later steps append normally (no more truncation).
+        store.apply(id, RunEvent::Step(step(22)));
+        assert_eq!(store.run_data[id].ready().unwrap().metrics.steps.len(), 22);
     }
 
     #[test]

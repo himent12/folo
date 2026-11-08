@@ -202,6 +202,8 @@ pub fn parse_images(s: &str) -> Option<u64> {
 }
 
 pub struct SynthForm {
+    /// Which opening of the dialog this is: a late answer only touches its own dialog.
+    pub id: u64,
     pub name: Entity<TextInput>,
     pub images: Entity<TextInput>,
     pub imgsz: usize,
@@ -418,6 +420,9 @@ pub struct FoloApp {
     pub new_run: Option<NewRunForm>,
     /// The Generate synthetic dataset dialog.
     pub synth: Option<SynthForm>,
+    pub synth_seq: u64,
+    /// Restore focus to the opener on the next render (set where no window is at hand).
+    pub restore_pending: bool,
     pub confirm_stop: Option<String>,
     pub toasts: Vec<Toast>,
     /// The toast under the pointer (its expiry waits).
@@ -532,6 +537,8 @@ impl FoloApp {
             palette: None,
             new_run: None,
             synth: None,
+            synth_seq: 0,
+            restore_pending: false,
             confirm_stop: None,
             toasts: Vec::new(),
             toast_hover: None,
@@ -1164,7 +1171,16 @@ impl FoloApp {
             i
         });
         window.focus(&name.read(cx).focus_handle(cx));
-        self.synth = Some(SynthForm { name, images, imgsz: 1, classes: 0, submitting: false, error: None });
+        self.synth_seq += 1;
+        self.synth = Some(SynthForm {
+            id: self.synth_seq,
+            name,
+            images,
+            imgsz: 1,
+            classes: 0,
+            submitting: false,
+            error: None,
+        });
         cx.notify();
     }
 
@@ -1192,6 +1208,7 @@ impl FoloApp {
         };
         f.submitting = true;
         f.error = None;
+        let form = f.id;
         let req = SyntheticDataset {
             name,
             images,
@@ -1203,16 +1220,25 @@ impl FoloApp {
         self.fetch(
             cx,
             move |api| api.synth_dataset(&req),
-            |this, r, cx| match r {
-                Ok(ds) => {
-                    this.synth = None;
-                    this.dataset_added(ds, "Generated", cx);
-                }
-                Err(e) => {
-                    if let Some(f) = this.synth.as_mut() {
-                        f.submitting = false;
-                        f.error = Some(e.message);
+            move |this, r, cx| {
+                let mine = this.synth.as_ref().is_some_and(|f| f.id == form);
+                match r {
+                    Ok(ds) => {
+                        if mine {
+                            this.synth = None;
+                            // Back to whatever opened the dialog, on the next frame (needs a window).
+                            this.restore_pending = true;
+                        }
+                        this.dataset_added(ds, "Generated", cx);
                     }
+                    Err(e) if mine => {
+                        if let Some(f) = this.synth.as_mut() {
+                            f.submitting = false;
+                            f.error = Some(e.message);
+                        }
+                    }
+                    // Its dialog is gone (dismissed, or another one open): say so instead.
+                    Err(e) => this.toast(Tone::Danger, e.message, e.hint.map(Into::into), cx),
                 }
             },
         );
@@ -1299,10 +1325,15 @@ impl FoloApp {
                     {
                         *slot = run;
                     }
-                    // Resumed steps replace the earlier ones: reload the history, then follow live.
-                    this.store.run_data.remove(&rid);
-                    this.store.logs.remove(&rid);
-                    this.subscribe_active(cx);
+                    // Resumed steps replace the earlier ones. Retire everything tied to the old
+                    // attempt (stream, in-flight history, buffered events), then open a fresh
+                    // stream; the dashboard reloads history once it is open.
+                    this.subscriptions.remove(&rid);
+                    this.store.reset_for_resume(&rid);
+                    this.history_ticket(&rid, "metrics");
+                    this.history_ticket(&rid, "logs");
+                    this.history_ticket(&rid, "samples");
+                    this.resubscribe(rid.clone(), cx);
                     this.toast(
                         Tone::Accent,
                         format!("Resuming {name}"),
@@ -2332,6 +2363,9 @@ pub fn focus_ring(t: &Theme, radius: f32) -> gpui::Div {
 
 impl Render for FoloApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if std::mem::take(&mut self.restore_pending) {
+            self.restore_focus(window);
+        }
         let t = theme(cx);
         self.ensure_core(cx);
         let titlebar = self.titlebar(window, cx).into_any_element();
