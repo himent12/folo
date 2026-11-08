@@ -673,7 +673,7 @@ impl FoloApp {
         let mut lr =
             base("run-lr", vec![Series::new("lr", t.chart_series[5], d.lr.clone()).area().live(live)]);
         lr.value_fmt = Some(|v| format!("{v:.5}"));
-        let lr_max = d.lr.iter().map(|p| p.1).fold(0f32, f32::max);
+        let lr_max = d.lr_max;
         lr.y_range = Some((0., (lr_max * 1.15).max(1e-4)));
         lr.markers.clear();
         lr.markers.push(Marker { x: 3., label: "warmup".into(), color: t.text_tertiary });

@@ -70,6 +70,8 @@ pub struct Derived {
     pub map50_95: Pts,
     pub precision: Pts,
     pub recall: Pts,
+    /// Highest learning rate in the history (for the LR chart's scale).
+    pub lr_max: f32,
 }
 
 /// A run's full metric history, extended live by SSE events.
@@ -119,6 +121,7 @@ impl RunData {
             map50_95: epts(&|e| e.val.map50_95),
             precision: epts(&|e| e.val.precision),
             recall: epts(&|e| e.val.recall),
+            lr_max: steps.iter().map(|s| s.lr).fold(0f32, f32::max),
         };
         self.derived.replace(Some(d.clone()));
         d
