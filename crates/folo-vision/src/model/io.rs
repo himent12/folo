@@ -5,7 +5,7 @@ use std::path::Path;
 use folo_nn::io::{
     FileKind, FloatDType, LoadOptions, LoadReport, Metadata, ModelFile, Purpose, export_module, save_weights,
 };
-use folo_nn::{Module, Result};
+use folo_nn::{Error, Module, Result};
 
 use super::FoloModel;
 
@@ -56,8 +56,16 @@ impl FoloModel {
 
     /// Load `file` into this model with `opts` (FORMAT.md loading rules). When `opts.classes` is unset it is
     /// filled with this model's class list, so strict loading requires identical classes and partial loading
-    /// skips the class-output layers (`head.cls.*.out.*`) when they differ.
+    /// skips the class-output layers (`head.cls.*.out.*`) when they differ. A fused model can only be loaded
+    /// for inference: its tensor set has no BatchNorm to train, so [`Purpose::Training`] is refused before any
+    /// tensor is written.
     pub fn load(&self, file: &ModelFile, mut opts: LoadOptions) -> Result<LoadReport> {
+        if self.fused && opts.purpose == Purpose::Training {
+            return Err(Error::Load(
+                "this model is fused (Conv+BN folded) and can only be loaded for inference; build an unfused                  model to train"
+                    .into(),
+            ));
+        }
         if opts.classes.is_none() {
             opts.classes = Some(self.classes.clone());
         }

@@ -126,6 +126,7 @@ fn assert_close(a: &[f32], b: &[f32], rel: f32, what: &str) {
     assert_eq!(a.len(), b.len(), "{what}: lengths");
     let mut worst = (0.0f32, 0usize);
     for (i, (&x, &y)) in a.iter().zip(b).enumerate() {
+        assert!(x.is_finite() && y.is_finite(), "{what}: non-finite value at {i} ({x} vs {y})");
         let err = (x - y).abs() / x.abs().max(y.abs()).max(1.0);
         if err > worst.0 {
             worst = (err, i);
@@ -149,6 +150,18 @@ fn bits(m: &FoloModel) -> Vec<(String, Vec<usize>, Vec<u32>)> {
             (t.name, t.tensor.dims().to_vec(), v.iter().map(|v| v.to_bits()).collect())
         })
         .collect()
+}
+
+#[test]
+#[should_panic(expected = "non-finite")]
+fn assert_close_rejects_nan() {
+    assert_close(&[1.0, f32::NAN], &[1.0, f32::NAN], 1e-4, "nan");
+}
+
+#[test]
+#[should_panic(expected = "non-finite")]
+fn assert_close_rejects_inf() {
+    assert_close(&[f32::INFINITY], &[f32::INFINITY], 1e-4, "inf");
 }
 
 // ---- §10.1 blocks ----
@@ -447,6 +460,14 @@ fn save_load_round_trip() {
     assert_eq!(a.box_raw.to_vec::<f32>().unwrap(), b.box_raw.to_vec::<f32>().unwrap());
     let err = FoloModel::from_file(&ModelFile::open(&fused_path).unwrap(), Purpose::Training).err().unwrap();
     assert!(err.to_string().contains("fused"), "{err}");
+    // A fused model refuses training loads of an unfused file before writing anything.
+    let before = bits(&m);
+    let unfused = ModelFile::open(&path).unwrap();
+    for res in [m.transfer_from(&unfused), m.load(&unfused, LoadOptions::strict(Purpose::Training))] {
+        assert!(res.err().unwrap().to_string().contains("fused"));
+    }
+    assert!(bits(&m) == before, "a refused load changed the model");
+    drop(unfused);
 
     // F16 export of the unfused model loads for inference (fused, computing in F32), close to the F32 model.
     let half = scratch("f16");

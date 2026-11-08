@@ -29,10 +29,11 @@ pub struct RawPrediction {
     pub images: Vec<ImagePrediction>,
 }
 
-/// `[B, C, A]` → host `[B, A, C]` (anchor-major, the layout [`crate::decode`] takes).
+/// `[B, C, A]` → host `[B, A, C]` (anchor-major, the layout [`crate::decode`] takes). `to_vec` walks the
+/// transposed view in logical order, so this is one copy.
 fn anchor_major(t: &Tensor) -> Result<Vec<f32>> {
     let t = if t.device() == Device::Cpu { t.clone() } else { t.to_device(Device::Cpu)? };
-    Ok(t.transpose(1, 2)?.contiguous()?.to_vec::<f32>()?)
+    Ok(t.transpose(1, 2)?.to_vec::<f32>()?)
 }
 
 impl HeadOutput {

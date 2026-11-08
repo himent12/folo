@@ -392,29 +392,36 @@ impl FoloModel {
             trace(i, &y);
             y
         };
-        let x0 = t(0, b.stem.forward(x)?);
-        let x1 = t(1, b.down2.forward(&x0)?);
-        let x2 = t(2, b.stage2.forward(&x1)?);
-        let x3 = t(3, b.down3.forward(&x2)?);
-        let x4 = t(4, b.stage3.forward(&x3)?);
-        let x5 = t(5, b.down4.forward(&x4)?);
-        let x6 = t(6, b.stage4.forward(&x5)?);
-        let x7 = t(7, b.down5.forward(&x6)?);
-        let x8 = t(8, b.stage5.forward(&x7)?);
-        let x9 = t(9, b.sppf.forward(&x8)?);
-        let x10 = t(10, b.psa.forward(&x9)?);
-        let x11 = t(11, x10.upsample_nearest2d(2)?);
-        let x12 = t(12, Tensor::cat(&[&x11, &x6], 1)?);
-        let x13 = t(13, n.td4.forward(&x12)?);
-        let x14 = t(14, x13.upsample_nearest2d(2)?);
-        let x15 = t(15, Tensor::cat(&[&x14, &x4], 1)?);
-        let x16 = t(16, n.out3.forward(&x15)?);
-        let x17 = t(17, n.down3.forward(&x16)?);
-        let x18 = t(18, Tensor::cat(&[&x17, &x13], 1)?);
-        let x19 = t(19, n.out4.forward(&x18)?);
-        let x20 = t(20, n.down4.forward(&x19)?);
-        let x21 = t(21, Tensor::cat(&[&x20, &x10], 1)?);
-        let x22 = t(22, n.out5.forward(&x21)?);
+        // Only the skip connections (x4, x6, x10, x13) and the head inputs outlive the next layer; every other
+        // intermediate is shadowed or dropped right after its consumer, so inference can recycle its buffer.
+        let y = t(0, b.stem.forward(x)?);
+        let y = t(1, b.down2.forward(&y)?);
+        let y = t(2, b.stage2.forward(&y)?);
+        let y = t(3, b.down3.forward(&y)?);
+        let x4 = t(4, b.stage3.forward(&y)?);
+        let y = t(5, b.down4.forward(&x4)?);
+        let x6 = t(6, b.stage4.forward(&y)?);
+        let y = t(7, b.down5.forward(&x6)?);
+        let y = t(8, b.stage5.forward(&y)?);
+        let y = t(9, b.sppf.forward(&y)?);
+        let x10 = t(10, b.psa.forward(&y)?);
+        let y = t(11, x10.upsample_nearest2d(2)?);
+        let y = t(12, Tensor::cat(&[&y, &x6], 1)?);
+        drop(x6);
+        let x13 = t(13, n.td4.forward(&y)?);
+        let y = t(14, x13.upsample_nearest2d(2)?);
+        let y = t(15, Tensor::cat(&[&y, &x4], 1)?);
+        drop(x4);
+        let x16 = t(16, n.out3.forward(&y)?);
+        let y = t(17, n.down3.forward(&x16)?);
+        let y = t(18, Tensor::cat(&[&y, &x13], 1)?);
+        drop(x13);
+        let x19 = t(19, n.out4.forward(&y)?);
+        let y = t(20, n.down4.forward(&x19)?);
+        let y = t(21, Tensor::cat(&[&y, &x10], 1)?);
+        drop(x10);
+        let x22 = t(22, n.out5.forward(&y)?);
+        drop(y);
         let (box_raw, cls_raw) = self.head.forward([&x16, &x19, &x22])?;
         Ok(HeadOutput {
             box_raw,
