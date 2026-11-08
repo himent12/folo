@@ -136,7 +136,8 @@ export function stepAt(p: RunProfile, globalStep: number): Step {
   const total = p.config.epochs * p.stepsPerEpoch;
   const ips = p.imgsPerS * (1 + 0.04 * smoothNoise(seedOf(p) + 5, epochF * 3) + (r() - 0.5) * 0.03);
   return {
-    epoch: Math.min(p.config.epochs - 1, Math.floor(epochF)) + 1,
+    // 1-based; step N (1-based, global) belongs to epoch ceil(N / steps per epoch).
+    epoch: Math.max(1, Math.min(p.config.epochs, Math.ceil(globalStep / p.stepsPerEpoch))),
     step: globalStep,
     lr: r6(lrAt(p, epochF)),
     loss: lossAt(p, epochF, true),

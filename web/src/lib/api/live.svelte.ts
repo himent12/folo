@@ -162,10 +162,10 @@ export class LiveRun {
         },
         step: (s) => {
           if (closed) return;
-          const last = this.steps[this.steps.length - 1];
-          if (last && s.step <= last.step) return;
           // The resumed run is past everything the interrupted attempt wrote: history is whole again.
           if (this.#stale && s.step > this.#stale.to) this.#stale = null;
+          const last = this.steps[this.steps.length - 1];
+          if (last && s.step <= last.step) return;
           this.steps.push(s);
           if (this.run && s.step > this.run.step) this.run = { ...this.run, step: s.step, epoch: s.epoch, eta_s: s.eta_s };
           this.#bump();
@@ -250,7 +250,12 @@ export class LiveRun {
   /** Merges a snapshot + history into what the stream has delivered so far, never moving backwards. */
   #absorb(run: Run, steps: Step[], epochs: Epoch[], statusSeqAtStart: number) {
     const stale = this.#stale;
-    if (stale) steps = steps.filter((s) => s.step <= stale.from || s.step > stale.to);
+    if (stale) {
+      // History that reaches past the interrupted attempt was written after the resume replaced its steps: it is
+      // authoritative again (the window retires). Otherwise the window's steps may still be the old attempt's.
+      if (steps.some((s) => s.step > stale.to)) this.#stale = null;
+      else steps = steps.filter((s) => s.step <= stale.from);
+    }
     this.steps = mergeBy(steps, this.steps, (s) => s.step);
     this.epochs = mergeBy(epochs, this.epochs, (e) => e.epoch);
     let next = run;
@@ -259,6 +264,8 @@ export class LiveRun {
       next = { ...next, step: last.step, epoch: last.epoch, eta_s: last.eta_s };
     for (const e of this.epochs)
       if (!next.best || e.val.map50_95 > next.best.map50_95) next = { ...next, best: { epoch: e.epoch, map50_95: e.val.map50_95 } };
+    // While rewound, the snapshot may still count the interrupted attempt's steps: progress follows the steps we hold.
+    if (this.#stale) next = { ...next, step: last?.step ?? 0, epoch: Math.max(last?.epoch ?? 0, this.epochs[this.epochs.length - 1]?.epoch ?? 0) };
     // A status event that arrived after this request was sent is newer than the snapshot.
     if (this.#statusSeq !== statusSeqAtStart && this.#lastStatus) next = { ...next, ...this.#lastStatus };
     this.run = next;

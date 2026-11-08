@@ -143,6 +143,7 @@ describe('LiveRun resume', () => {
   let handlers: RunEventHandlers = {};
   let snapshot: Run;
   let serverStatus: Run['status'] = 'stopped';
+  let history: RunMetrics;
   /** When set, snapshots never answer: the test sees only what events and the resume response did. */
   let hold = false;
   const saved = hub.api;
@@ -156,7 +157,7 @@ describe('LiveRun resume', () => {
     snapshot = await new MockApi('normal', 0).run('run_7d1e');
     // Epochs are 1-based (folo-api). Stopped in epoch 2: epoch 1 finished (steps 1-2), epoch 2 had steps 3-4. The
     // server keeps those interrupted steps in /metrics until the resumed run writes their replacements.
-    const history: RunMetrics = { steps: [at(1, 1), at(2, 1), at(3, 2), at(4, 2)], epochs: [ep(1)] as never };
+    history = { steps: [at(1, 1), at(2, 1), at(3, 2), at(4, 2)], epochs: [ep(1)] as never };
     const fake: Partial<Api> = {
       mock: false,
       run: () => (hold ? new Promise<Run>(() => {}) : Promise.resolve({ ...snapshot, status: serverStatus, step: 4, epoch: 2, best: { epoch: 1, map50_95: 0.3 } })),
@@ -189,9 +190,12 @@ describe('LiveRun resume', () => {
     expect(live.steps.map((s) => s.step)).toEqual([1, 2]);
     expect(live.run?.epoch).toBe(1);
     expect(live.run?.step).toBe(2);
-    // The resync after resuming returns the interrupted steps 3-4 again: they stay out.
+    // The resync after resuming returns the interrupted steps 3-4 (and a snapshot still counting step 4): they stay
+    // out, and progress stays rewound.
     await vi.advanceTimersByTimeAsync(0);
     expect(live.steps.map((s) => s.step)).toEqual([1, 2]);
+    expect(live.run?.step).toBe(2);
+    expect(live.run?.epoch).toBe(1);
     // The resumed epoch repeats step 3 with new values: it is shown, not dropped as old.
     handlers.step?.(at(3, 2, 90));
     expect(live.steps.at(-1)?.loss.total).toBe(90);
@@ -217,6 +221,27 @@ describe('LiveRun resume', () => {
     expect(live.run?.status).toBe('running');
     await vi.advanceTimersByTimeAsync(0);
     expect(live.run?.status).toBe('running');
+    stop();
+  });
+
+  it('accepts history again once it reaches past the interrupted attempt (reconnect after the run went on)', async () => {
+    let live!: LiveRun;
+    const stop = $effect.root(() => {
+      live = new LiveRun(() => 'run_7d1e');
+    });
+    flushSync();
+    await vi.advanceTimersByTimeAsync(0);
+    serverStatus = 'queued';
+    await live.resume(() => Promise.resolve({ ...snapshot, status: 'queued', step: 4, epoch: 2 }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.steps.map((s) => s.step)).toEqual([1, 2]);
+    // We missed the resumed steps while disconnected; the server's history now has replacements 3-4 and new 5-6.
+    history = { steps: [at(1, 1), at(2, 1), at(3, 2, 70), at(4, 2, 60), at(5, 3), at(6, 3)], epochs: [ep(1), ep(2)] as never };
+    serverStatus = 'completed';
+    handlers.reconnect?.();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.steps.map((s) => s.step)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(live.steps[2]?.loss.total).toBe(70);
     stop();
   });
 });

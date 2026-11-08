@@ -175,6 +175,9 @@ describe('mock runs', () => {
     };
     expect(epochAt(prof, 49).val.map50_95).toBeGreaterThan(epochAt(prof, 2).val.map50_95);
     expect(stepAt(prof, 499).loss.total).toBeLessThan(stepAt(prof, 5).loss.total);
+    // 1-based epochs: steps 1-10 are epoch 1, step 10 is its last, step 11 starts epoch 2.
+    expect([1, 10, 11, 500].map((n) => stepAt(prof, n).epoch)).toEqual([1, 1, 2, 50]);
+    expect(epochAt(prof, 0).epoch).toBe(1);
     expect(progressAt(prof, NOW + 25_000).status).toBe('running');
     expect(progressAt(prof, NOW + 60_000).status).toBe('completed');
   });
