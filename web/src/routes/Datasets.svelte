@@ -19,6 +19,7 @@
   import Skeleton from '$lib/ui/Skeleton.svelte';
   import { tooltip } from '$lib/ui/tooltip';
   import AddDatasetDialog from './datasets/AddDatasetDialog.svelte';
+  import ClassNames from './datasets/ClassNames.svelte';
   import { imageCount } from './dataset/health';
 
   setCrumbs({ label: 'Datasets' });
@@ -116,7 +117,7 @@
           <span class="c-balance" role="cell">
             {#if d.stats}
               <ClassStrip counts={d.stats.class_counts} classes={d.classes} />
-              <span class="classes truncate">{d.classes.join(', ')}</span>
+              <ClassNames names={d.classes} />
             {:else}
               <span class="faint">—</span>
             {/if}
@@ -222,10 +223,6 @@
     display: grid;
     gap: 6px;
     min-width: 0;
-  }
-  .classes {
-    font-size: var(--type-xs-size);
-    color: var(--text-tertiary);
   }
   .c-created {
     font-size: var(--type-sm-size);
