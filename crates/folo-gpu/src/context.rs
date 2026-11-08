@@ -211,6 +211,25 @@ struct Inner {
     submissions: AtomicU64,
 }
 
+/// Host data in a staging buffer, made by [`GpuContext::stage`] (on any thread) and copied to the device with
+/// [`GpuContext::upload_staged`].
+pub struct Staged {
+    buf: wgpu::Buffer,
+    len: u64,
+}
+
+impl Staged {
+    /// Bytes staged.
+    pub fn len(&self) -> u64 {
+        self.len
+    }
+
+    /// Whether nothing was staged.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
 /// Work counters since the context was created (see [`GpuContext::work_stats`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct WorkStats {
@@ -547,6 +566,38 @@ impl GpuContext {
         let buf = self.alloc(data.len() as u64)?;
         self.write(&buf, 0, data)?;
         Ok(buf)
+    }
+
+    /// Copies `data` into a new host-visible staging buffer (mapped at creation), ready for
+    /// [`GpuContext::upload_staged`]. This touches neither the command batch nor the queue, so another thread can
+    /// stage the next batch of inputs while this one encodes and the GPU runs: the host-side copy leaves the
+    /// critical path, and the device copy is one transfer command in stream order.
+    pub fn stage(&self, data: &[u8]) -> Result<Staged> {
+        let len = data.len() as u64;
+        let size = len.next_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT).max(wgpu::COPY_BUFFER_ALIGNMENT);
+        let buf = self.inner.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("folo-gpu staging"),
+            size,
+            usage: wgpu::BufferUsages::MAP_WRITE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: true,
+        });
+        let copied = buf
+            .slice(..)
+            .get_mapped_range_mut()
+            .map(|mut view| view.slice(..data.len()).copy_from_slice(data))
+            .map_err(|e| GpuError::Map(e.to_string()));
+        buf.unmap();
+        copied?;
+        Ok(Staged { buf, len })
+    }
+
+    /// A pooled storage buffer holding the bytes of `staged`, filled by a copy encoded after all work so far
+    /// (no submission, no wait).
+    pub fn upload_staged(&self, staged: &Staged) -> Result<GpuBuffer> {
+        let out = self.alloc(staged.len.max(1))?;
+        let len = staged.len.next_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT);
+        self.copy(&staged.buf, 0, out.raw(), 0, len.min(staged.buf.size()));
+        Ok(out)
     }
 
     /// Writes `data` at byte `offset` of `buf`, ordered after all work encoded so far.

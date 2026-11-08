@@ -152,3 +152,22 @@ fn shape_and_dtype_errors() {
     assert_eq!(empty.unary(UnaryOp::Exp).unwrap().to_vec().unwrap(), Vec::<f32>::new());
     assert_eq!(empty.sum(1, false).unwrap().shape(), &[0]);
 }
+
+/// `stage` on another thread, then `upload_staged`: the bytes arrive in stream order (after work encoded earlier
+/// into the same pooled buffer), including a length that is not a multiple of 4.
+#[test]
+fn staged_upload_from_another_thread() {
+    let ctx = gpu!();
+    for len in [1usize, 7, 4096, 300_001] {
+        let data: Vec<u8> = (0..len).map(|i| (i * 31 % 251) as u8).collect();
+        let staged = {
+            let (c, d) = (ctx.clone(), data.clone());
+            std::thread::spawn(move || c.stage(&d).unwrap()).join().unwrap()
+        };
+        assert_eq!(staged.len(), len as u64);
+        let buf = ctx.upload_staged(&staged).unwrap();
+        drop(staged);
+        let back = ctx.read(buf.raw(), 0, len as u64).unwrap();
+        assert_eq!(back, data, "length {len}");
+    }
+}

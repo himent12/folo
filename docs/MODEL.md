@@ -576,6 +576,16 @@ Implementation: `folo_vision::loss` (`detection_loss`, `LossConfig` with these w
   reproducible.
 - If any head output is NaN or infinite, `detection_loss` skips the assigner and returns a non-finite loss
   (`LossOutput::is_finite() == false`, `total` a detached NaN), which the trainer skips (§8.3).
+- **On a GPU** (head outputs on a folo-gpu device, `topk <= 64`) `detection_loss` runs all of the above as kernels
+  (`folo_gpu::detect`, docs/GPU.md) and downloads nothing but the reported items: the decode, §7.3 step by step (each
+  gt's candidates scored and ranked in one workgroup, conflicts by atomics, then the soft targets and a dense
+  per-anchor target map), the BCE over every logit (each element formed whole), CIoU + DFL per positive with the
+  backward written out by hand (α constant, min / max ties split as folo-core's autograd does), and a fixed-order
+  reduction. `detection_loss_host` keeps the host assigner on any device. `crates/folo-vision/tests/gpu_loss.rs`
+  checks the device assignment against the host one (the same positives, gts and labels; `t` to 1e-5) on several
+  sizes, class counts and settings, and the items and both gradients against the host loss. The positives are
+  listed per gt slot rather than per anchor and the sums run in another (fixed) order, so values agree to float
+  rounding, not bit for bit.
 - `crates/folo-vision/tests/loss_cases.rs` checks the terms against an `f64` reference, the loss cases of §10.3, a
   finite-difference gradient check of the whole loss, CIoU against `ciou_eps`, and determinism.
 
@@ -665,6 +675,15 @@ trainer snapshots every `running_mean` / `running_var` before each forward (well
 If the loss is not finite, or any running statistic became non-finite, it restores the snapshot, so the next EMA
 update never sees poisoned buffers. Ten consecutive non-finite batches, or an epoch without a single finite batch,
 abort the run with an error (`status: failed`).
+
+**On a GPU** (`--device gpu:0`, or `auto` with an adapter) the same loop runs with everything on the device: the model,
+the EMA, the optimizer state and the accumulation buffers live there; the loader delivers `u8` pixels and a feeder
+thread stages the next batch in a mapped buffer while the current step runs, so a step starts with one buffer copy
+and a `u8 → f32 / 255` conversion on the device; the loss is folo-gpu's (§7.4); global-norm clipping computes the norm
+and the factor on the device. A step waits for the GPU twice, both after the loss: the reported items and the
+finiteness check of the running statistics (one readback for all of them). Validation uploads `u8` batches too and
+runs the predictor's forward + decode on the device (NMS on the host). The numbers are the same as on the CPU up to
+float rounding (sums in other orders), so a run is reproducible on one device but not bit-identical across devices.
 
 **Progress reporting (API `Run` / `Step`).** `Run.step` and `Step.step` count training **batches** completed in the
 run (`e · nb + k + 1`), and `Run.steps_per_epoch = nb`. The optimizer iteration `t` is internal (checkpoints only).

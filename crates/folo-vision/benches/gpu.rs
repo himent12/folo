@@ -11,7 +11,8 @@
 //!   timing ends with the boxes on the host. Untrained weights give almost no candidates above `conf`, so
 //!   NMS is nearly free here; with a trained model it adds about 0.1–0.3 ms per image (`benches/post.rs`).
 //! - **train step**: one fixed batch of 16 random images with 8 random boxes each on the GPU; train-mode
-//!   forward (fused BatchNorm + SiLU kernels), the detection loss (task-aligned assigner on host copies),
+//!   forward (fused BatchNorm + SiLU kernels), the detection loss (assigner and terms as GPU kernels, one
+//!   readback of the reported items),
 //!   backward, SGD (momentum 0.937, Nesterov, weight decay on the decay group). 3 warm-up steps, median of 10.
 //! - **peak memory**: the buffer pool's peak live bytes over the measured calls (PyTorch's
 //!   `max_memory_allocated` counterpart, in pool size classes, which round up by at most 25%).
@@ -30,7 +31,7 @@ use folo_gpu::GpuContext;
 use folo_nn::Module;
 use folo_nn::optim::{Optimizer, Sgd, StandardGroups};
 use folo_vision::boxes::Xyxy;
-use folo_vision::loss::{ImageTargets, LossConfig, detection_loss};
+use folo_vision::loss::{ImageTargets, LossConfig, detection_loss, detection_loss_host};
 use folo_vision::model::{FoloModel, ModelConfig};
 use folo_vision::nms::NmsConfig;
 use rayon::prelude::*;
@@ -242,52 +243,63 @@ fn bench_scale(scale: &str, dev: Device, ctx: &GpuContext) {
         })
         .collect();
     let lcfg = LossConfig::default();
-    let (mut t_fwd, mut t_loss, mut t_bwd, mut t_opt) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-    let mut step = |record: bool| {
+    // `split` synchronises after every phase (forward, loss, backward, SGD) to time them; otherwise the step runs
+    // as training does, with the loss's one readback as its only wait, and is synchronised at the end. `host`
+    // takes the host assigner (the previous loss, `detection_loss_host`) for comparison. Returns the step time
+    // and the four phase times.
+    let mut step = |split: bool, host: bool| {
+        let sync = |on: bool| {
+            if on {
+                synchronize(dev).expect("sync");
+            }
+        };
         let t0 = Instant::now();
         let out = model.forward(&x).expect("forward");
-        synchronize(dev).expect("sync");
+        sync(split);
         let t1 = Instant::now();
-        let loss = detection_loss(&out.box_raw, &out.cls_raw, &out.anchors, &targets, &lcfg).expect("loss");
-        synchronize(dev).expect("sync");
+        let loss = if host {
+            detection_loss_host(&out.box_raw, &out.cls_raw, &out.anchors, &targets, &lcfg)
+        } else {
+            detection_loss(&out.box_raw, &out.cls_raw, &out.anchors, &targets, &lcfg)
+        }
+        .expect("loss");
+        sync(split);
         let t2 = Instant::now();
         let grads = loss.total.backward().expect("backward");
         drop(out);
         drop(loss);
-        synchronize(dev).expect("sync");
+        sync(split);
         let t3 = Instant::now();
         opt.step(&grads).expect("step");
         drop(grads);
-        synchronize(dev).expect("sync");
-        if record {
-            t_fwd.push(t1 - t0);
-            t_loss.push(t2 - t1);
-            t_bwd.push(t3 - t2);
-            t_opt.push(t3.elapsed());
-        }
-        t0.elapsed()
+        sync(true);
+        (t0.elapsed(), [t1 - t0, t2 - t1, t3 - t2, t3.elapsed()])
     };
     let w0 = ctx.work_stats();
     for _ in 0..3 {
-        step(false);
+        step(false, false);
     }
     let w1 = ctx.work_stats();
     ctx.reset_peak_memory();
-    let s = stats((0..10).map(|_| step(true)).collect());
+    let s = stats((0..10).map(|_| step(false, false).0).collect());
     let peak = ctx.pool_stats().peak_live_bytes;
     row("train step b16 (f32, SGD)", &s, 16);
-    let (f, l, b, o) = (stats(t_fwd), stats(t_loss), stats(t_bwd), stats(t_opt));
+    let mut split = |host: bool| {
+        step(true, host);
+        let runs: Vec<[Duration; 4]> = (0..10).map(|_| step(true, host).1).collect();
+        let m = |i: usize| stats(runs.iter().map(|r| r[i]).collect()).median;
+        (m(0), m(1), m(2), m(3))
+    };
+    let (f, l, b, o) = split(false);
     println!(
-        "    split (medians, each phase synchronised): forward {:.1} ms, loss {:.1} ms, backward {:.1} ms, \
-         SGD {:.1} ms; {} dispatches and {} submissions per step; peak {:.0} MiB",
-        f.median,
-        l.median,
-        b.median,
-        o.median,
+        "    split (medians, each phase synchronised): forward {f:.1} ms, loss {l:.1} ms, backward {b:.1} ms, \
+         SGD {o:.1} ms; {} dispatches and {} submissions per step; peak {:.0} MiB",
         (w1.dispatches - w0.dispatches) / 3,
         (w1.submissions - w0.submissions) / 3,
         mib(peak)
     );
+    let (_, l, b, _) = split(true);
+    println!("    host assigner instead (detection_loss_host): loss {l:.1} ms, backward {b:.1} ms");
 }
 
 fn main() {

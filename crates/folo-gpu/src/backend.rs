@@ -72,8 +72,7 @@ static INIT: OnceLock<std::result::Result<Device, String>> = OnceLock::new();
 fn register_shared(ctx: std::result::Result<GpuContext, GpuError>) -> std::result::Result<Device, String> {
     let ctx = ctx.map_err(|e| e.reason())?;
     let device = Device::Gpu(0);
-    folo_core::backend::register_backend(device, Arc::new(GpuBackend::new(ctx, device)))
-        .map_err(|e| e.to_string())?;
+    register(ctx, device).map_err(|e| e.to_string())?;
     Ok(device)
 }
 
@@ -152,6 +151,56 @@ pub async fn download_async(ctx: &GpuContext, t: &Tensor) -> Result<Tensor> {
         }
     };
     Tensor::from_storage(Storage::Cpu(host), t.shape().clone())
+}
+
+/// Registers a [`GpuBackend`] over `ctx` as folo-core's `device` and remembers the pair for [`context_for`], which
+/// the tensor-level kernels outside the `Backend` trait (such as [`crate::detect`]) use to find the context.
+pub fn register(ctx: GpuContext, device: Device) -> Result<()> {
+    folo_core::backend::register_backend(device, Arc::new(GpuBackend::new(ctx.clone(), device)))?;
+    let mut m = contexts().lock().expect("context registry lock");
+    m.retain(|(d, _)| *d != device);
+    m.push((device, ctx));
+    Ok(())
+}
+
+fn contexts() -> &'static std::sync::Mutex<Vec<(Device, GpuContext)>> {
+    static CONTEXTS: OnceLock<std::sync::Mutex<Vec<(Device, GpuContext)>>> = OnceLock::new();
+    CONTEXTS.get_or_init(Default::default)
+}
+
+/// The context serving `device`, if it was registered through [`init`] or [`register`].
+pub fn context_for(device: Device) -> Option<GpuContext> {
+    contexts()
+        .lock()
+        .expect("context registry lock")
+        .iter()
+        .find(|(d, _)| *d == device)
+        .map(|(_, c)| c.clone())
+}
+
+/// A folo-core tensor of `shape` over a pooled buffer holding its elements of `dtype` (dense from byte 0).
+pub fn tensor_from_buffer(
+    device: Device,
+    dtype: CoreDType,
+    shape: impl Into<Shape>,
+    buf: GpuBuffer,
+) -> Result<folo_core::Tensor> {
+    let shape = shape.into();
+    let len = shape.numel();
+    let storage = Storage::Device(DeviceStorage::new(device, dtype, len, GpuStorage { buf }));
+    folo_core::Tensor::from_storage(storage, shape)
+}
+
+/// The wgpu buffer behind a GPU tensor whose elements are dense from byte 0 (contiguous, offset 0), or `None`
+/// for any other tensor. The handle does not keep the storage alive: hold on to the tensor while it is in use.
+pub fn dense_buffer(t: &folo_core::Tensor) -> Option<wgpu::Buffer> {
+    if !t.is_contiguous() || t.layout().offset() != 0 {
+        return None;
+    }
+    t.with_view(|v| match v.storage {
+        Storage::Device(ds) => ds.downcast_ref::<GpuStorage>().map(|s| s.buf.raw().clone()),
+        Storage::Cpu(_) => None,
+    })
 }
 
 fn core_err(e: GpuError) -> Error {

@@ -31,6 +31,7 @@
 
 pub mod backend;
 pub mod context;
+pub mod detect;
 pub mod dtype;
 pub mod error;
 pub mod kernels;
@@ -38,8 +39,10 @@ pub(crate) mod pipeline;
 pub mod pool;
 pub mod tensor;
 
-pub use backend::{GpuBackend, GpuStorage, download_async, init, init_async};
-pub use context::{AdapterSummary, Capabilities, GpuContext, GpuOptions, WorkStats};
+pub use backend::{
+    GpuBackend, GpuStorage, context_for, dense_buffer, download_async, init, init_async, register, tensor_from_buffer,
+};
+pub use context::{AdapterSummary, Capabilities, GpuContext, GpuOptions, Staged, WorkStats};
 pub use dtype::DType;
 pub use error::{GpuError, Result};
 pub use kernels::elementwise::{BinaryOp, UnaryOp};

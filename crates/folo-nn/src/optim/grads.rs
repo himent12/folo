@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 
+use folo_core::backend::OptimStep;
 use folo_core::{DType, Device, Grads, Tensor, TensorId, no_grad};
 
 use super::GradSource;
@@ -46,7 +47,13 @@ impl GradAccumulator {
         for s in &mut self.slots {
             let Some(g) = grads.get(&s.param) else { continue };
             if s.valid {
-                s.buf.as_ref().expect("valid slot has a buffer").add_assign(g)?;
+                let buf = s.buf.as_ref().expect("valid slot has a buffer");
+                // One fused in-place `buf = buf + g` where the backend has it (the GPU), else a tensor op.
+                let fused = !buf.device().is_cpu()
+                    && buf.optimizer_step_(g, &[], &OptimStep::Axpby { a: 1.0, b: 1.0 })?;
+                if !fused {
+                    buf.add_assign(g)?;
+                }
             } else {
                 let buf = match &s.buf {
                     Some(b) => b.clone(),
@@ -104,8 +111,14 @@ impl GradAccumulator {
     }
 
     /// docs/MODEL.md §8.3: if the global norm `n` exceeds `max_norm`, scale every gradient by
-    /// `max_norm / (n + 1e-6)`. Returns `n` (before clipping). `max_norm <= 0` disables clipping.
+    /// `max_norm / (n + 1e-6)`. Returns `n` (before clipping). `max_norm <= 0` disables clipping. Gradients on a
+    /// device are clipped there without reading the norm back, and the result is then NaN (use
+    /// [`GradAccumulator::global_norm`] to read it).
     pub fn clip_grad_norm(&mut self, max_norm: f64) -> Result<f64> {
+        if self.slots.iter().any(|s| s.valid && !s.param.device().is_cpu()) {
+            self.clip_grad_norm_device(max_norm)?;
+            return Ok(f64::NAN);
+        }
         let n = self.global_norm()?;
         if max_norm > 0.0 && n > max_norm {
             let c = (max_norm / (n + 1e-6)) as f32;
@@ -115,6 +128,29 @@ impl GradAccumulator {
             }
         }
         Ok(n)
+    }
+
+    /// [`GradAccumulator::clip_grad_norm`] for gradients on a device, without a host round trip: the norm (in
+    /// `f32`) and the factor `max_norm / (n + 1e-6)` (or 1) are device scalars and every gradient is scaled by it.
+    fn clip_grad_norm_device(&mut self, max_norm: f64) -> Result<()> {
+        if max_norm <= 0.0 {
+            return Ok(());
+        }
+        let _g = no_grad();
+        let mut sq: Vec<Tensor> = Vec::new();
+        for s in self.slots.iter().filter(|s| s.valid) {
+            let b = s.buf.as_ref().expect("valid");
+            sq.push(b.square()?.sum_all()?.reshape([1])?);
+        }
+        let refs: Vec<&Tensor> = sq.iter().collect();
+        let n = Tensor::cat(&refs, 0)?.sum_all()?.sqrt()?;
+        let max = max_norm as f32;
+        let factor =
+            n.gt_scalar(max)?.where_cond(&n.add_scalar(1e-6)?.recip()?.mul_scalar(max)?, &n.ones_like()?)?;
+        for s in self.slots.iter().filter(|s| s.valid) {
+            s.buf.as_ref().expect("valid").mul_assign(&factor)?;
+        }
+        Ok(())
     }
 }
 

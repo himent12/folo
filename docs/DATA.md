@@ -106,8 +106,11 @@ rebuilds its dataset indexes then). Nothing installs one by default; `folo mcp
 `augment: None` (validation) it only letterboxes and records the geometry.
 
 ## DataLoader and determinism
-- `LoaderConfig { batch_size, imgsz, workers, shuffle, drop_last, seed, augment, epochs, prefetch_batches }`.
-- Batches: `images` is `n * 3 * s * s` `f32` in `0..1` (`NCHW`, RGB), `shape = [n, 3, s, s]`, `targets` rows are
+- `LoaderConfig { batch_size, imgsz, workers, shuffle, drop_last, seed, augment, epochs, prefetch_batches,
+  u8_images }`.
+- Batches: `images` is `n * 3 * s * s` `f32` in `0..1` (`NCHW`, RGB), or, with `u8_images`, `images_u8` holds the same
+  pixels as `u8` (`value / 255` is the float; a quarter of the bytes, for a GPU that converts them itself, as the
+  trainer and validation do on a GPU) and `images` is empty. `shape = [n, 3, s, s]`, `targets` rows are
   `[batch_idx, class, cx, cy, w, h]` normalised to the network input, `meta` has the dataset index, original size,
   letterbox ratio and pad of each image.
 - The epoch order is a shuffle seeded by `(seed, epoch)`; sample position `p` draws all its randomness from
