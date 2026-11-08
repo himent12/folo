@@ -4,7 +4,8 @@
 //!
 //! 1. **Candidates.** Anchor `a` is a candidate for gt `g` when its centre lies inside the gt box by more than
 //!    [`TalConfig::eps`] on every side.
-//! 2. **Alignment.** For candidates, `overlap = max(CIoU(gt, pred_box), 0)` and
+//! 2. **Alignment.** For candidates, `overlap = max(CIoU(gt, pred_box), 0)` (CIoU with Ultralytics' `eps = 1e-7`
+//!    terms, so tiny boxes get the same overlaps as upstream) and
 //!    `align = score[a, class(g)]^alpha * overlap^beta` (`alpha = 0.5`, `beta = 6`). Non-candidates have both 0.
 //! 3. **Top-k.** Each gt keeps its `topk = 10` candidates with the largest `align` (ties: lower anchor index).
 //! 4. **Conflicts.** An anchor selected by several gts goes to the gt with the largest `overlap` over *all* gts
@@ -16,7 +17,7 @@
 //! All boxes and points must be in the same units (Ultralytics uses input-image pixels: decoded predictions and
 //! anchor points multiplied by their stride). Scores are post-sigmoid.
 
-use crate::boxes::{IouKind, Xyxy, iou};
+use crate::boxes::Xyxy;
 use crate::decode::Anchors;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -116,7 +117,7 @@ pub fn assign(
 
     // (align, overlap) of gt g and a candidate anchor a.
     let metrics = |g: usize, a: usize| -> (f32, f32) {
-        let ov = iou(&gt_bboxes[g], &pd_bboxes[a], IouKind::Ciou).max(0.0);
+        let ov = ciou_ultralytics(&gt_bboxes[g], &pd_bboxes[a]).max(0.0);
         let s = pd_scores[a * num_classes + gt_labels[g] as usize];
         (s.powf(cfg.alpha) * ov.powf(cfg.beta), ov)
     };
@@ -196,6 +197,31 @@ pub fn assign(
     out
 }
 
+/// CIoU exactly as Ultralytics' `bbox_iou(box1, box2, xywh=False, CIoU=True)` computes it, including its
+/// `eps = 1e-7` terms (added to both heights, the union and the squared enclosing diagonal). Unlike
+/// [`crate::boxes::iou`], identical boxes score slightly below 1, noticeably so for boxes of a few 1e-3 pixels.
+fn ciou_ultralytics(b1: &Xyxy, b2: &Xyxy) -> f32 {
+    const EPS: f32 = 1e-7;
+    let (w1, h1) = (b1.x2 - b1.x1, b1.y2 - b1.y1 + EPS);
+    let (w2, h2) = (b2.x2 - b2.x1, b2.y2 - b2.y1 + EPS);
+    let inter =
+        (b1.x2.min(b2.x2) - b1.x1.max(b2.x1)).max(0.0) * (b1.y2.min(b2.y2) - b1.y1.max(b2.y1)).max(0.0);
+    let union = w1 * h1 + w2 * h2 - inter + EPS;
+    let iou = inter / union;
+    let cw = b1.x2.max(b2.x2) - b1.x1.min(b2.x1);
+    let ch = b1.y2.max(b2.y2) - b1.y1.min(b2.y1);
+    let c2 = cw * cw + ch * ch + EPS;
+    let dx = b2.x1 + b2.x2 - b1.x1 - b1.x2;
+    let dy = b2.y1 + b2.y2 - b1.y1 - b1.y2;
+    let rho2 = (dx * dx + dy * dy) / 4.0;
+    // atan(w / h), kept finite if a malformed box makes h exactly 0.
+    let at = |w: f32, h: f32| if h != 0.0 { (w / h).atan() } else { w.atan2(h) };
+    let d = at(w2, h2) - at(w1, h1);
+    let v = (4.0 / (std::f32::consts::PI * std::f32::consts::PI)) * d * d;
+    let alpha = v / (v - iou + (1.0 + EPS));
+    iou - (rho2 / c2 + v * alpha)
+}
+
 /// Box → `ltrb` distances from `anchor` for the DFL target, clamped to `[0, reg_max - 1 - 0.01]`. Both inputs are in
 /// stride units (grid cells), as in Ultralytics' `bbox2dist(anchor_points, target_bboxes / stride, reg_max - 1)`.
 #[inline]
@@ -233,6 +259,21 @@ pub fn dfl_bins(t: f32) -> (usize, f32, f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ciou_matches_ultralytics_eps() {
+        // Identical 0.001-pixel boxes: Ultralytics' eps terms give IoU = 1e-6 / (2 * 1e-3 * (1e-3 + 1e-7) - 1e-6 + 1e-7).
+        let b = Xyxy::new(0.0, 0.0, 0.001, 0.001);
+        let want = 1e-6 / (2.0 * 1e-3 * (1e-3 + 1e-7) - 1e-6 + 1e-7);
+        assert!((ciou_ultralytics(&b, &b) as f64 - want).abs() < 1e-4, "{}", ciou_ultralytics(&b, &b));
+        // So the TAL target is that IoU, not 1 (score^alpha cancels in the normalisation).
+        let a = assign(&[0.5], 1, &[b], &[[0.0005, 0.0005]], &[b], &[0], &TalConfig::default());
+        assert!((a.target_scores[0] as f64 - want).abs() < 1e-4, "{}", a.target_scores[0]);
+        // Normal-sized boxes agree with the eps-free CIoU.
+        let (p, q) = (Xyxy::new(0.0, 0.0, 20.0, 10.0), Xyxy::new(5.0, 0.0, 25.0, 12.0));
+        let exact = crate::boxes::iou(&p, &q, crate::boxes::IouKind::Ciou);
+        assert!((ciou_ultralytics(&p, &q) - exact).abs() < 1e-5);
+    }
 
     #[test]
     fn dfl_encoding() {
