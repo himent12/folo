@@ -6,6 +6,7 @@
 
 mod runs;
 mod scene;
+mod val;
 
 use std::io::Cursor;
 use std::sync::{Arc, RwLock};
@@ -1136,6 +1137,10 @@ impl Store for MockStore {
             },
             device: "gpu:0".into(),
         })
+    }
+
+    fn val(&self, req: folo_api::ValRequest) -> Result<folo_api::ValReport> {
+        val::val(self, req)
     }
 }
 

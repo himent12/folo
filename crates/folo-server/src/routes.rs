@@ -13,7 +13,7 @@ use axum::routing::{get, post};
 use folo_api::{
     API_VERSION, DatasetList, ExportRequest, Health, ImagePage, IssuePage, LogLevel, LogLine, ModelList,
     PredictRequest, RegisterDataset, RunEvent, RunList, RunLogs, Split, SyntheticDataset, SystemInfo,
-    TrainConfig,
+    TrainConfig, ValReport, ValRequest,
 };
 use futures_util::{Stream, StreamExt, stream};
 use serde::Deserialize;
@@ -58,6 +58,7 @@ pub fn api() -> Router<AppState> {
         .route("/runs/{id}/events", get(run_events))
         .route("/predict", post(predict).layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)))
         .route("/predict/stream", get(predict_stream))
+        .route("/val", post(val))
         .fallback(api_not_found)
         .method_not_allowed_fallback(method_not_allowed)
 }
@@ -235,6 +236,10 @@ async fn export_model(
     ApiJson(req): ApiJson<ExportRequest>,
 ) -> Result<Response> {
     Ok(Json(blocking(&st, move |s| s.export_model(&id, req.format)).await?).into_response())
+}
+
+async fn val(State(st): State<AppState>, ApiJson(req): ApiJson<ValRequest>) -> Result<Json<ValReport>> {
+    Ok(Json(blocking(&st, move |s| s.val(req)).await?))
 }
 
 // ---- runs --------------------------------------------------------------------------------------------------------

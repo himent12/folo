@@ -51,6 +51,39 @@ The server also serves the built Studio from `web/dist` (`--web-dir`) when it ex
 (`0` picks a free one), `--data-dir`, `--cors-any`, and the global `--json`. See [API](docs/API.md) and
 [CLI](docs/CLI.md).
 
+## Use FOLO from Claude Code / Codex
+
+`folo mcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server over stdio
+([docs/MCP.md](docs/MCP.md)): agents get tools to build datasets, train, follow runs, evaluate, predict and export,
+`folo://` resources (dataset images, run status, metrics, sample grids, the docs) and two prompts. It speaks MCP
+2026-07-28 and 2025-11-25.
+
+**Claude Code**: register it once (`--scope project` writes `.mcp.json` into the repository instead):
+
+```sh
+claude mcp add folo -- folo mcp --data-dir D:/folo-data
+```
+
+or put this in `.mcp.json` (Claude Desktop: `claude_desktop_config.json`):
+
+```json
+{ "mcpServers": { "folo": { "command": "folo", "args": ["mcp", "--data-dir", "D:/folo-data"] } } }
+```
+
+**Codex**: add to `~/.codex/config.toml` (or run `codex mcp add folo -- folo mcp --data-dir D:/folo-data`):
+
+```toml
+[mcp_servers.folo]
+command = "folo"
+args = ["mcp", "--data-dir", "D:/folo-data"]
+```
+
+Flags: `--mock` (deterministic mock data, so the whole dataset → train → predict flow works today, before the
+engine is wired into the real store), `--read-only` (only tools that do not change state), `--confine` (only read
+files inside `--data-dir`), `--server http://127.0.0.1:7878` (forward to a running `folo serve`, so the agent and
+Studio share runs). From a checkout, use `"command": "cargo", "args": ["run", "-q", "--release", "-p",
+"folo-cli", "--", "mcp", "--mock"]`.
+
 - Why: fast (Rust, hand-written kernels, GPU through wgpu everywhere including the browser), small, hackable, and
   built to be driven by agents (`--json`, MCP server, stable error codes).
 - Read: [ARCHITECTURE](docs/ARCHITECTURE.md) · [API](docs/API.md) · [AGENTS](AGENTS.md)

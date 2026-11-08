@@ -47,13 +47,12 @@ fn doctor_json() {
 
 #[test]
 fn stubs_exit_4_with_error_envelope() {
-    for args in [&["bench", "--json"][..], &["mcp", "--json"]] {
-        let (code, stdout, stderr) = folo(args);
-        assert_eq!(code, 4, "{args:?}: {stderr}");
-        let v = &json_lines(&stdout)[0];
-        assert_eq!(v["error"]["code"], "not_implemented", "{args:?}");
-        assert!(v["error"]["hint"].is_string());
-    }
+    let args = ["bench", "--json"];
+    let (code, stdout, stderr) = folo(&args);
+    assert_eq!(code, 4, "{args:?}: {stderr}");
+    let v = &json_lines(&stdout)[0];
+    assert_eq!(v["error"]["code"], "not_implemented", "{args:?}");
+    assert!(v["error"]["hint"].is_string());
     let (code, stdout, stderr) = folo(&["bench"]);
     assert_eq!(code, 4);
     assert!(stdout.is_empty());

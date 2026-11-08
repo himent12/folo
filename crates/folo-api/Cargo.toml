@@ -11,6 +11,12 @@ authors.workspace = true
 [lints]
 workspace = true
 
+[features]
+# `schemars::JsonSchema` for every type, so the MCP server (docs/MCP.md) and `folo describe` can publish JSON Schemas
+# generated from the wire types. Off by default to keep the crate light for FOLO Desktop.
+schema = ["dep:schemars"]
+
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+schemars = { workspace = true, optional = true }

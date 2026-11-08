@@ -237,6 +237,15 @@ Non-2xx responses: `{ "error": { "code": "dataset_not_found", "message": "...", 
 Models, runs and inference are not wired to the engine yet: `/api/models` and `/api/runs` are empty, `POST
 /api/runs` and `POST /api/predict` answer `501 not_implemented` (after checking that the dataset exists).
 
+## Validation
+- `POST /api/val` body `{ "model_id", "dataset_id", "split": "val", "imgsz": null, "conf": 0.001, "iou": 0.7 }` →
+  `{ "model_id", "dataset_id", "split", "imgsz", "images", "val": Epoch.val, "timing": { "total_s", "per_image_ms" } }`.
+  Only `model_id` and `dataset_id` are required; `imgsz: null` uses the model's size. Errors: `model_not_found`,
+  `dataset_not_found`, `invalid_body` (an empty split, `conf` / `iou` outside `0..=1`, a bad `imgsz`),
+  `not_implemented` (real mode, until the evaluator is wired in). The MCP `val` tool uses it in proxy mode.
+- Planned: `POST /api/predict/batch` (many uploads in one request). Until it exists the MCP proxy sends one
+  `POST /api/predict` per image.
+
 ## Mock mode
 `folo serve --mock` answers every endpoint with deterministic, realistic data (the same ids and values on every
 start, except live-run timestamps):
@@ -254,4 +263,5 @@ start, except live-run timestamps):
   loops (`status` back to `queued`, metrics restart).
 - `POST /api/runs` starts a simulated run (6 s per epoch) that can be stopped; when it completes, its model appears
   in `/api/models`. `POST /api/datasets` scans real folders; `POST /api/datasets/synthetic` makes a procedural
-  dataset. Predictions are deterministic in the image bytes (or dataset image) and the model.
+  dataset. Predictions are deterministic in the image bytes (or dataset image) and the model. `POST /api/val` derives
+  per-class metrics from the model's metrics (deterministic per model, dataset and split).

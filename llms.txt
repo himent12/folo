@@ -6,6 +6,12 @@
 - [Architecture](docs/ARCHITECTURE.md)
 - [Detector spec: model, loss, training recipe](docs/MODEL.md)
 - [HTTP API](docs/API.md)
-- [MCP server for agents](docs/MCP.md)
-- [CLI conventions, `folo describe --json`](docs/CLI.md)
+- [MCP server for agents](docs/MCP.md): `folo mcp [--data-dir D] [--mock] [--read-only] [--confine] [--server URL]`,
+  stdio, MCP 2026-07-28 and 2025-11-25. 16 tools (folo_info, list_datasets, get_dataset, list_dataset_images,
+  register_dataset, create_synthetic_dataset, list_models, train, run_status, list_runs, stop_run, val, predict,
+  predict_batch, export, compare_runs) with JSON Schemas, `folo://` resources (dataset images as blobs, subscribable
+  runs and metrics, sample grids, docs), prompts train_on_folder and diagnose_run. Tool failures are `isError`
+  results whose text is `{code, message, hint}`. `--mock` runs the whole flow without the engine. Setup for
+  Claude Code / Codex: README.md, "Use FOLO from Claude Code / Codex"
+- [CLI conventions, `folo describe --json`](docs/CLI.md) (its `mcp_tools` lists every MCP tool with its schemas)
 - [Roadmap](docs/ROADMAP.md)

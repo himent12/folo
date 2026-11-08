@@ -70,9 +70,11 @@ A failing command prints its error as the last stdout line in `--json` mode, and
 | `dataset stats PATH [--format auto\|yolo\|coco]` | works | Class counts, box sizes, boxes per image: a table with bar charts, or the `stats` object of `docs/API.md` with `--json`. |
 | `dataset check PATH [--format ...] [--fix-dry-run] [--headers-only]` | works | Every problem in a dataset, one issue per bad line / image. Exit 0 when clean, 1 with errors or warnings. |
 | `dataset convert IN OUT --to yolo\|coco [--from auto\|yolo\|coco]` | works | Converts between YOLO and COCO; images are copied unchanged. |
-| `mcp [--mock]` | planned (exit 4) | Model Context Protocol server over stdio. |
+| `mcp [--data-dir DIR] [--mock] [--read-only] [--confine] [--server URL]` | works | Model Context Protocol server over stdio (MCP 2026-07-28 and 2025-11-25), see `docs/MCP.md`. stdout carries protocol messages only (also with `--json`); logs go to stderr. `--mock` serves mock data, `--server` forwards to a running `folo serve`, `--read-only` hides and rejects mutating tools, `--confine` only reads inside `--data-dir` (env `FOLO_DATA_DIR`, default `$FOLO_HOME` or `~/.folo`). Exits 0 when the client closes stdin; runs it started are stopped first. |
 
-`folo describe --json` is the authoritative list of arguments and defaults.
+`folo describe --json` is the authoritative list of arguments and defaults. Its `mcp_tools` array lists every
+`folo mcp` tool (`name`, `description`, `mutating`, `inputSchema`, `outputSchema`) with the schemas `tools/list`
+publishes.
 
 ## Datasets
 

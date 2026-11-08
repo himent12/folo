@@ -55,6 +55,7 @@ crates/folo-data     image IO, YOLO/COCO dataset formats, augmentation, batching
 crates/folo-vision   FOLO detector (n/s/m/l), loss, task-aligned assigner, box ops, NMS, mAP, trainer, predictor
 crates/folo-api      serde types of docs/API.md, shared by the server, the CLI and FOLO Desktop
 crates/folo-server   axum HTTP + SSE API used by Studio and by agents; serves the built web app
+crates/folo-mcp      `folo mcp`: the MCP server (rmcp, stdio) over the server's Store, embedded or proxying folo serve
 crates/folo-cli      the `folo` binary (train / val / predict / export / serve / mcp / doctor)
 web/                 FOLO Studio (Svelte 5 + TypeScript + Vite, custom design system, no UI kit)
 apps/desktop/        FOLO Desktop (Rust + GPUI, its own cargo workspace; talks to folo-server over docs/API.md)
