@@ -3,7 +3,7 @@
 
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc::{Receiver, channel};
+use std::sync::mpsc::channel;
 use std::time::Duration;
 
 use serde::Serialize;
@@ -11,10 +11,14 @@ use serde::de::DeserializeOwned;
 
 use super::*;
 
+/// How long an event stream may take to send its response headers.
+const STREAM_HANDSHAKE: Duration = Duration::from_secs(5);
+
 pub struct HttpBackend {
     base: String,
     agent: ureq::Agent,
-    /// No overall timeout: SSE streams stay open for the life of a run.
+    /// No overall timeout (SSE streams stay open for the life of a run), but the handshake is
+    /// bounded: connect and response headers.
     stream_agent: ureq::Agent,
 }
 
@@ -23,6 +27,15 @@ fn agent(timeout: Option<Duration>) -> ureq::Agent {
         .http_status_as_error(false)
         .timeout_connect(Some(Duration::from_secs(2)))
         .timeout_global(timeout)
+        .build()
+        .into()
+}
+
+fn stream_agent(headers: Duration) -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_connect(Some(Duration::from_secs(2)))
+        .timeout_recv_response(Some(headers))
         .build()
         .into()
 }
@@ -43,10 +56,14 @@ fn seg(s: &str) -> String {
 impl HttpBackend {
     /// `base` like `http://127.0.0.1:7878` (no trailing `/api`).
     pub fn new(base: &str) -> Self {
+        Self::with_handshake(base, STREAM_HANDSHAKE)
+    }
+
+    fn with_handshake(base: &str, handshake: Duration) -> Self {
         Self {
             base: base.trim_end_matches('/').to_string(),
             agent: agent(Some(Duration::from_secs(30))),
-            stream_agent: agent(None),
+            stream_agent: stream_agent(handshake),
         }
     }
 
@@ -105,11 +122,25 @@ impl HttpBackend {
 }
 
 /// Split an SSE stream into `(event, data)` pairs; comments and unknown fields are skipped.
-pub fn parse_sse(reader: impl BufRead, mut on_event: impl FnMut(&str, &str) -> bool) {
+#[cfg(test)]
+pub fn parse_sse(reader: impl BufRead, on_event: impl FnMut(&str, &str) -> bool) {
+    parse_sse_while(reader, || true, on_event)
+}
+
+/// [`parse_sse`] that also stops as soon as `go` turns false, checked on every line received
+/// (keep-alive comments included), so a quiet stream still notices a cancelled subscriber.
+pub fn parse_sse_while(
+    reader: impl BufRead,
+    go: impl Fn() -> bool,
+    mut on_event: impl FnMut(&str, &str) -> bool,
+) {
     let mut event = String::new();
     let mut data = String::new();
     for line in reader.lines() {
         let Ok(line) = line else { return };
+        if !go() {
+            return;
+        }
         let line = line.trim_end_matches('\r');
         if line.is_empty() {
             if !data.is_empty() {
@@ -249,7 +280,7 @@ impl Backend for HttpBackend {
         self.get::<folo_api::RunLogs>(&format!("/runs/{}/logs?limit=1000", seg(id))).map(|l| l.lines)
     }
 
-    fn events(&self, id: &str) -> ApiResult<Receiver<RunEvent>> {
+    fn events(&self, id: &str) -> ApiResult<Subscription> {
         let url = self.url(&format!("/runs/{}/events", seg(id)));
         let resp = self
             .stream_agent
@@ -264,16 +295,22 @@ impl Backend for HttpBackend {
                 .unwrap_or_else(|| ApiError::new("http_error", "event stream failed")));
         }
         let (tx, rx) = channel();
+        let (sub, cancel) = Subscription::new(rx);
         let reader = BufReader::new(resp.into_body().into_reader());
         std::thread::spawn(move || {
-            // Ends when the server closes the stream or the receiver is dropped.
-            parse_sse(reader, |name, data| match RunEvent::from_sse(name, data) {
-                Some(Ok(ev)) => tx.send(ev).is_ok(),
-                // Unknown event types are skipped; malformed data too (the stream goes on).
-                _ => true,
-            });
+            // Ends when the server closes the stream or the subscription is dropped; the reader and
+            // its socket go with it.
+            parse_sse_while(
+                reader,
+                || !cancel.load(std::sync::atomic::Ordering::Relaxed),
+                |name, data| match RunEvent::from_sse(name, data) {
+                    Some(Ok(ev)) => tx.send(ev).is_ok(),
+                    // Unknown event types are skipped; malformed data too (the stream goes on).
+                    _ => true,
+                },
+            );
         });
-        Ok(rx)
+        Ok(sub)
     }
 
     fn predict(&self, req: &PredictRequest) -> ApiResult<PredictResponse> {
@@ -423,6 +460,62 @@ pub fn spawn_mock_server(timeout: Duration) -> Result<ServerProcess, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A server that accepts the event stream request, then only ever sends keep-alives.
+    fn keepalive_server(write_failed: std::sync::mpsc::Sender<()>) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 2048];
+            let _ = sock.read(&mut buf);
+            let _ = sock.write_all(
+                b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n",
+            );
+            loop {
+                std::thread::sleep(Duration::from_millis(30));
+                let chunk = b": keep-alive\n\n";
+                let frame = [format!("{:x}\r\n", chunk.len()).as_bytes(), chunk, b"\r\n"].concat();
+                if sock.write_all(&frame).and_then(|_| sock.flush()).is_err() {
+                    let _ = write_failed.send(());
+                    return;
+                }
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    #[test]
+    fn dropping_a_subscription_closes_a_quiet_stream() {
+        let (tx, failed) = std::sync::mpsc::channel();
+        let base = keepalive_server(tx);
+        let sub = HttpBackend::new(&base).events("run_x").expect("stream opens");
+        // Still open while subscribed.
+        assert!(failed.recv_timeout(Duration::from_millis(300)).is_err());
+        drop(sub);
+        // The reader sees the next keep-alive, stops, and closes the socket: the server's writes fail.
+        assert!(
+            failed.recv_timeout(Duration::from_secs(5)).is_ok(),
+            "reader thread outlived its subscription"
+        );
+    }
+
+    #[test]
+    fn a_silent_server_cannot_hang_the_stream_handshake() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        // Accept and never answer.
+        std::thread::spawn(move || {
+            let _held = listener.accept();
+            std::thread::sleep(Duration::from_secs(10));
+        });
+        let t0 = std::time::Instant::now();
+        let r = HttpBackend::with_handshake(&format!("http://{addr}"), Duration::from_millis(300))
+            .events("run_x");
+        assert!(r.is_err());
+        assert!(t0.elapsed() < Duration::from_secs(3), "handshake took {:?}", t0.elapsed());
+    }
 
     #[test]
     fn sse_frames_split_into_events() {

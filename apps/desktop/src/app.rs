@@ -5,7 +5,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::mpsc::{Receiver, TryRecvError};
+use std::sync::mpsc::TryRecvError;
 use std::time::Duration;
 
 use gpui::prelude::FluentBuilder;
@@ -339,7 +339,13 @@ pub struct FoloApp {
     pub drag: Option<Drag>,
     pub slider_bounds: Rc<RefCell<HashMap<&'static str, Bounds<Pixels>>>>,
 
-    subscriptions: HashMap<String, Receiver<RunEvent>>,
+    subscriptions: HashMap<String, crate::api::Subscription>,
+    /// Runs whose event stream is being opened (off the UI thread).
+    subscribing: std::collections::HashSet<String>,
+    /// Bumped on every data-source switch; async results from an older source are discarded.
+    backend_gen: u64,
+    /// Bumped on every connection attempt; only the latest one may install its result.
+    connect_seq: u64,
     _tasks: Vec<Task<()>>,
     _subs: Vec<Subscription>,
 }
@@ -417,6 +423,9 @@ impl FoloApp {
             drag: None,
             slider_bounds: Rc::new(RefCell::new(HashMap::new())),
             subscriptions: HashMap::new(),
+            subscribing: Default::default(),
+            backend_gen: 0,
+            connect_seq: 0,
             _tasks: Vec::new(),
             _subs: Vec::new(),
         };
@@ -510,9 +519,14 @@ impl FoloApp {
             return;
         }
         let api = self.store.api.clone();
+        let generation = self.backend_gen;
         cx.spawn(async move |this, cx| {
             let r = cx.background_executor().spawn(async move { call(&*api) }).await;
             this.update(cx, |this, cx| {
+                // Answered by a source we've since switched away from: not ours any more.
+                if this.backend_gen != generation {
+                    return;
+                }
                 apply(this, r, cx);
                 cx.notify();
             })
@@ -681,6 +695,7 @@ impl FoloApp {
             return None;
         }
         let api = self.store.api.clone();
+        let generation = self.backend_gen;
         let thumb = (kind == ImgKind::Thumb).then_some(320);
         cx.spawn(async move |this, cx| {
             let k2 = key.clone();
@@ -689,6 +704,12 @@ impl FoloApp {
                 .spawn(async move { api.image(&k2.dataset, &k2.image, thumb).ok().and_then(to_render_image) })
                 .await;
             this.update(cx, |this, cx| {
+                if this.backend_gen != generation {
+                    if let Some(img) = img {
+                        cx.drop_image(img, None);
+                    }
+                    return;
+                }
                 let evicted = this.store.images_px.finish(key, img);
                 for e in evicted {
                     cx.drop_image(e, None);
@@ -702,7 +723,7 @@ impl FoloApp {
     }
 
     /// Subscribe to live events of every active run.
-    pub fn subscribe_active(&mut self, _cx: &mut Context<Self>) {
+    pub fn subscribe_active(&mut self, cx: &mut Context<Self>) {
         if self.frozen {
             return;
         }
@@ -713,13 +734,42 @@ impl FoloApp {
             .map(|runs| runs.iter().filter(|r| r.status.is_active()).map(|r| r.id.clone()).collect())
             .unwrap_or_default();
         for id in ids {
-            if self.subscriptions.contains_key(&id) {
+            if self.subscriptions.contains_key(&id) || !self.subscribing.insert(id.clone()) {
                 continue;
             }
-            if let Ok(rx) = self.store.api.events(&id) {
-                self.subscriptions.insert(id, rx);
-            }
+            // Opening a stream is network I/O: never on the UI thread.
+            let api = self.store.api.clone();
+            let generation = self.backend_gen;
+            cx.spawn(async move |this, cx| {
+                let rid = id.clone();
+                let sub = cx.background_executor().spawn(async move { api.events(&rid) }).await;
+                this.update(cx, |this, _| {
+                    if this.backend_gen != generation {
+                        return;
+                    }
+                    this.subscribing.remove(&id);
+                    if let Ok(sub) = sub {
+                        this.subscriptions.insert(id, sub);
+                    }
+                })
+                .ok();
+            })
+            .detach();
         }
+    }
+
+    /// Reload the run list in place (no loading state) and subscribe to whatever is active.
+    fn refresh_runs(&mut self, cx: &mut Context<Self>) {
+        self.fetch(
+            cx,
+            |api| api.runs(),
+            |this, r, cx| {
+                if let Ok(runs) = r {
+                    this.store.runs = Load::Ready(newest_first_runs(runs));
+                    this.subscribe_active(cx);
+                }
+            },
+        );
     }
 
     /// Drain live events ~10× a second and refresh slow-moving data every few seconds.
@@ -754,8 +804,24 @@ impl FoloApp {
                                 changed = true;
                             }
                         }
+                        // A stream that ended without a terminal status dropped out: the events in the
+                        // gap are gone (the API replays only the status), so reload that run's history
+                        // and the run list, which resubscribes if it's still training.
+                        let dropped: Vec<String> = ended
+                            .iter()
+                            .filter(|id| !finished.iter().any(|(f, _)| f == *id))
+                            .filter(|id| this.store.run(id).is_some_and(|r| r.status.is_active()))
+                            .cloned()
+                            .collect();
                         for id in ended {
                             this.subscriptions.remove(&id);
+                        }
+                        if !dropped.is_empty() {
+                            for id in &dropped {
+                                this.store.run_data.remove(id);
+                                this.store.logs.remove(id);
+                            }
+                            this.refresh_runs(cx);
                         }
                         for (id, status) in finished {
                             let name = this.store.run(&id).map(|r| r.name.clone()).unwrap_or(id.clone());
@@ -776,16 +842,7 @@ impl FoloApp {
                             this.ensure_core(cx);
                         }
                         if tick.is_multiple_of(50) && matches!(this.store.runs, Load::Ready(_)) {
-                            this.fetch(
-                                cx,
-                                |api| api.runs(),
-                                |this, r, cx| {
-                                    if let Ok(runs) = r {
-                                        this.store.runs = Load::Ready(newest_first_runs(runs));
-                                        this.subscribe_active(cx);
-                                    }
-                                },
-                            );
+                            this.refresh_runs(cx);
                         }
                         if changed {
                             cx.notify();
@@ -1984,9 +2041,15 @@ impl FoloApp {
 
     /// Swap the data source; everything reloads from the new backend.
     pub fn set_backend(&mut self, api: Arc<dyn Backend>, mode: ServerMode, cx: &mut Context<Self>) {
+        self.backend_gen += 1;
         self.store.api = api;
         self.server_mode = mode;
         self.subscriptions.clear();
+        self.subscribing.clear();
+        // Ids are only unique per server: cached pixels (and failures) belong to the old one.
+        for img in self.store.images_px.clear() {
+            cx.drop_image(img, None);
+        }
         self.connecting = None;
         self.hold_loading = false;
         self.store.gpu_util.clear();
@@ -2002,8 +2065,13 @@ impl FoloApp {
         use crate::api::http::{HttpBackend, spawn_mock_server};
         self.hold_loading = true;
         self.connecting = Some(format!("Connecting to {}", url.trim_start_matches("http://")).into());
+        // Only the newest attempt may install its result; older ones bail out at each step, and a
+        // server an obsolete attempt started is dropped (stopped) with it.
+        self.connect_seq += 1;
+        let seq = self.connect_seq;
         let live_step = 4180;
         cx.spawn(async move |this, cx| {
+            let current = |this: &Self| this.connect_seq == seq;
             let probe = url.clone();
             let found = cx
                 .background_executor()
@@ -2011,23 +2079,35 @@ impl FoloApp {
                 .await;
             if found {
                 this.update(cx, |this, cx| {
-                    this.set_backend(Arc::new(HttpBackend::new(&url)), ServerMode::Local, cx);
+                    if current(this) {
+                        this.set_backend(Arc::new(HttpBackend::new(&url)), ServerMode::Local, cx);
+                    }
                 })
                 .ok();
                 return;
             }
             if spawn {
-                this.update(cx, |this, cx| {
-                    this.connecting = Some("Starting folo serve --mock…".into());
-                    cx.notify();
-                })
-                .ok();
+                let go_on = this
+                    .update(cx, |this, cx| {
+                        if current(this) {
+                            this.connecting = Some("Starting folo serve --mock…".into());
+                            cx.notify();
+                        }
+                        current(this)
+                    })
+                    .unwrap_or(false);
+                if !go_on {
+                    return;
+                }
                 let started = cx
                     .background_executor()
                     .spawn(async move { spawn_mock_server(std::time::Duration::from_secs(10)) })
                     .await;
                 if let Ok(proc_) = started {
                     this.update(cx, |this, cx| {
+                        if !current(this) {
+                            return; // proc_ drops here: the stray server stops.
+                        }
                         let backend = HttpBackend::new(&proc_.url);
                         let url = proc_.url.clone();
                         this.server_proc = Some(proc_);
@@ -2039,6 +2119,9 @@ impl FoloApp {
                 }
             }
             this.update(cx, |this, cx| {
+                if !current(this) {
+                    return;
+                }
                 this.set_backend(
                     Arc::new(crate::api::mock::MockBackend::new(live_step, false)),
                     ServerMode::Mock,
@@ -2061,6 +2144,8 @@ impl FoloApp {
     pub fn switch_source(&mut self, mode: ServerMode, cx: &mut Context<Self>) {
         match mode {
             ServerMode::Mock => {
+                // Cancels any connection attempt still in flight.
+                self.connect_seq += 1;
                 self.server_proc = None;
                 self.set_backend(
                     Arc::new(crate::api::mock::MockBackend::new(4180, false)),

@@ -5,7 +5,7 @@
 //! pixel-identical screenshots.
 
 use std::collections::HashMap;
-use std::sync::mpsc::{Receiver, channel};
+use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -1034,9 +1034,10 @@ impl Backend for MockBackend {
         Ok(lines)
     }
 
-    fn events(&self, id: &str) -> ApiResult<Receiver<RunEvent>> {
+    fn events(&self, id: &str) -> ApiResult<Subscription> {
         self.check()?;
         let (tx, rx) = channel();
+        let (sub, cancel) = Subscription::new(rx);
         let (live, curve, spe, epochs, status, log_mark) = {
             let runs = self.runs.lock().unwrap();
             let f = runs
@@ -1053,7 +1054,7 @@ impl Backend for MockBackend {
             )
         };
         let _ = tx.send(RunEvent::Status(StatusEvent { status, error: None }));
-        let Some((base, at)) = live else { return Ok(rx) };
+        let Some((base, at)) = live else { return Ok(sub) };
         let total = epochs as u64 * spe;
         let start_secs = self.sim_now();
         let runs = self.runs.clone();
@@ -1064,6 +1065,9 @@ impl Backend for MockBackend {
         std::thread::spawn(move || {
             loop {
                 std::thread::sleep(Duration::from_millis(100));
+                if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                    return;
+                }
                 // One lock for the whole decision, so a stop can't land between "is it stopped?"
                 // and "how far has it got?".
                 let (target, stop) = {
@@ -1125,7 +1129,7 @@ impl Backend for MockBackend {
                 }
             }
         });
-        Ok(rx)
+        Ok(sub)
     }
 
     fn predict(&self, req: &PredictRequest) -> ApiResult<PredictResponse> {

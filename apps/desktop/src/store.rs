@@ -187,6 +187,18 @@ impl ImageCache {
         true
     }
 
+    /// Forget everything (a new data source); returns the decoded images to free on the GPU.
+    pub fn clear(&mut self) -> Vec<Arc<RenderImage>> {
+        self.order.clear();
+        self.slots
+            .drain()
+            .filter_map(|(_, s)| match s {
+                ImgSlot::Ready(img) => Some(img),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Store a result; returns images evicted to stay within budget (free them on the GPU).
     pub fn finish(&mut self, k: ImgKey, img: Option<Arc<RenderImage>>) -> Vec<Arc<RenderImage>> {
         // A request evicted while it was still loading has no slot (and no place in `order`) any
@@ -398,6 +410,26 @@ impl Store {
 mod tests {
     use super::*;
     use crate::api::mock::MockBackend;
+
+    #[test]
+    fn image_cache_clear_forgets_slots_and_returns_images() {
+        let mut c = ImageCache::default();
+        let k = |i: &str| ImgKey { dataset: "ds".into(), image: i.into(), kind: ImgKind::Thumb };
+        let img = Arc::new(RenderImage::new(vec![image::Frame::new(image::RgbaImage::new(1, 1))]));
+        assert!(c.begin(&k("a")));
+        c.finish(k("a"), Some(img));
+        assert!(c.begin(&k("b")));
+        c.finish(k("b"), None); // a failure
+        assert!(c.begin(&k("c"))); // still loading
+        let freed = c.clear();
+        assert_eq!(freed.len(), 1);
+        // Nothing is remembered: every key can be fetched again, failures included.
+        assert!(c.get(&k("a")).is_none() && c.get(&k("b")).is_none());
+        assert!(c.begin(&k("b")));
+        // A request that was in flight across the clear lands nowhere.
+        let late = Arc::new(RenderImage::new(vec![image::Frame::new(image::RgbaImage::new(1, 1))]));
+        assert_eq!(c.finish(k("c"), Some(late)).len(), 1);
+    }
 
     #[test]
     fn live_events_extend_history() {

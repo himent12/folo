@@ -9,6 +9,8 @@ pub mod mock;
 pub mod time;
 pub mod types;
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
 
 pub use types::*;
@@ -103,8 +105,36 @@ pub trait Backend: Send + Sync + 'static {
     /// Log history of a run. Not in API v1 yet (proposed as `GET /api/runs/{id}/logs`); the SSE
     /// stream only carries new lines.
     fn logs(&self, id: &str) -> ApiResult<Vec<LogLine>>;
-    /// Live events for a run; the stream ends when the receiver is dropped or the run finishes.
-    fn events(&self, id: &str) -> ApiResult<Receiver<RunEvent>>;
+    /// Live events for a run. The producer stops when the [`Subscription`] is dropped or the run
+    /// finishes.
+    fn events(&self, id: &str) -> ApiResult<Subscription>;
 
     fn predict(&self, req: &PredictRequest) -> ApiResult<PredictResponse>;
+}
+
+/// A live event stream. Dropping it tells the producer to stop: the mock's worker at its next tick,
+/// the HTTP reader at the next line it receives (at the latest the server's 15 s keep-alive).
+pub struct Subscription {
+    rx: Receiver<RunEvent>,
+    cancel: Arc<AtomicBool>,
+}
+
+impl Subscription {
+    pub fn new(rx: Receiver<RunEvent>) -> (Self, Arc<AtomicBool>) {
+        let cancel = Arc::new(AtomicBool::new(false));
+        (Self { rx, cancel: cancel.clone() }, cancel)
+    }
+}
+
+impl std::ops::Deref for Subscription {
+    type Target = Receiver<RunEvent>;
+    fn deref(&self) -> &Receiver<RunEvent> {
+        &self.rx
+    }
+}
+
+impl Drop for Subscription {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
 }
