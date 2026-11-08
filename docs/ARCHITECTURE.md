@@ -55,7 +55,7 @@ training and evaluation pipeline, a server, a CLI and a web studio.
 - Fused ops with composite fallbacks (`ops/fused.rs`): `Tensor::conv2d_act` (conv + bias + activation),
   `Tensor::batch_norm_act_train` / `batch_norm_act_train_backward` (train-mode BatchNorm + activation, running
   update in place) and `Tensor::optimizer_step_` (in-place SGD / AdamW / EMA update) call optional `Backend` hooks;
-  folo-gpu implements them, other backends fall back.
+  folo-gpu implements them, the CPU backend implements `conv2d_act`, other backends fall back.
 - `Tensor::to_device_(device)` moves a storage to another device **in place**: the device lives on the shared storage
   cell, so every clone and view follows and the tensor keeps its id (gradients and optimizer state stay keyed). This
   is how whole models move (`Module::to_device`).
@@ -78,8 +78,8 @@ training and evaluation pipeline, a server, a CLI and a web studio.
   upsampling with their backwards, `index_select`/`index_add`/`gather`/`scatter_add`, `topk`) defaults to
   `Error::NotSupported { op, backend }`, so a backend can grow op by op. Gradients are composed from the same methods,
   so an op is trainable on a device once its forward and `*_backward` methods exist.
-- Optional fast paths with composing defaults: `conv2d_act` (conv2d + bias + activation; default `conv2d` then
-  `unary`), `index_select_backward` and `gather_backward` (default `full` zeros then `index_add` / `scatter_add`).
+- Optional gradient fast paths with composing defaults: `index_select_backward` and `gather_backward` (default
+  `full` zeros then `index_add` / `scatter_add`).
 - `max_pool2d_backward` also receives the pooling window (`Pool2dParams`), so a backend can compute the gradient as a
   gather (each input element visits only the windows that cover it) instead of a scatter with float atomics; the
   CPU backend ignores it.
