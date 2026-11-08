@@ -30,7 +30,7 @@ async function playgroundResult(/** @type {import('playwright-core').Page} */ pa
 /** @type {Scene[]} */
 export const scenes = [
   { name: 'overview', path: '/', viewports: ['desktop', 'laptop', 'mobile'] },
-  { name: 'datasets', path: '/datasets' },
+  { name: 'datasets', path: '/datasets', viewports: ['desktop', 'laptop', 'mobile'] },
   { name: 'runs', path: '/runs', viewports: ['desktop', 'laptop', 'mobile'] },
   { name: 'run-live', path: '/runs/run_7d1e', advance: 4000, viewports: ['desktop', 'laptop', 'mobile'] },
   { name: 'run-failed', path: '/runs/run_a2f0', viewports: ['desktop'] },
@@ -59,7 +59,7 @@ export const scenes = [
       await page.locator('dialog[open]').waitFor();
     },
   },
-  { name: 'dataset-stats', path: '/datasets/ds_shapes_hard?tab=stats' },
+  { name: 'dataset-stats', path: '/datasets/ds_shapes_hard?tab=stats', viewports: ['desktop', 'laptop', 'mobile'] },
   {
     name: 'dataset-images',
     path: '/datasets/ds_fasteners?class=2',
@@ -89,6 +89,7 @@ export const scenes = [
   {
     name: 'model-detail',
     path: '/models/m_fast_n',
+    viewports: ['desktop', 'laptop', 'mobile'],
     setup: (page) => until(page, '#cm .cell'),
   },
   {
@@ -109,7 +110,7 @@ export const scenes = [
     },
   },
   { name: 'playground-empty', path: '/playground', setup: (page) => until(page, 'button.sample') },
-  { name: 'playground-result', path: '/playground?model=m_hard_s', setup: playgroundResult },
+  { name: 'playground-result', path: '/playground?model=m_hard_s', viewports: ['desktop', 'laptop', 'mobile'], setup: playgroundResult },
   {
     name: 'playground-selected',
     path: '/playground?model=m_hard_s',
@@ -142,7 +143,7 @@ export const scenes = [
       await page.clock.runFor(1000);
     },
   },
-  { name: 'settings', path: '/settings' },
+  { name: 'settings', path: '/settings', viewports: ['desktop', 'laptop', 'mobile'] },
   { name: 'overview-empty', path: '/', search: 'scenario=empty', viewports: ['desktop', 'mobile'] },
   { name: 'overview-loading', path: '/', search: 'scenario=loading', themes: ['dark'], viewports: ['desktop'] },
   { name: 'overview-error', path: '/', search: 'scenario=error', viewports: ['desktop'] },
