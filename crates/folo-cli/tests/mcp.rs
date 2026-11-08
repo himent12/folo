@@ -764,6 +764,44 @@ fn confine_checks_what_a_dataset_reads() {
 }
 
 #[test]
+fn confine_rebuilds_persisted_indexes() {
+    // A COCO dataset whose images are inside but whose annotations folder links outside, registered without
+    // --confine (so its index is cached), must not be trusted from that cache once --confine is on.
+    let root = tmp_dir("confine-coco");
+    let data = root.join("data");
+    let ds = data.join("coco");
+    std::fs::create_dir_all(ds.join("images")).unwrap();
+    image::RgbImage::from_pixel(32, 24, image::Rgb([9, 9, 9])).save(ds.join("images/a.jpg")).unwrap();
+    let ann = root.join("outside-ann");
+    std::fs::create_dir_all(&ann).unwrap();
+    let coco = json!({
+        "images": [{ "id": 1, "file_name": "a.jpg", "width": 32, "height": 24 }],
+        "annotations": [{ "id": 1, "image_id": 1, "category_id": 1, "bbox": [1, 1, 5, 5], "area": 25, "iscrowd": 0 }],
+        "categories": [{ "id": 1, "name": "secretcat" }],
+    });
+    std::fs::write(ann.join("instances_train.json"), coco.to_string()).unwrap();
+    if !make_dir_link(&ann, &ds.join("annotations")) {
+        return;
+    }
+    let mut c = spawn(&["--data-dir", data.to_str().unwrap()], None);
+    init_old(&mut c);
+    let reg = c.ok("register_dataset", json!({ "path": "coco" }));
+    assert_eq!(reg["classes"], json!(["secretcat"]));
+    let id = reg["id"].as_str().unwrap().to_string();
+    c.finish();
+
+    let mut c = spawn(&["--confine", "--data-dir", data.to_str().unwrap()], None);
+    init_old(&mut c);
+    let list = c.ok("list_datasets", json!({}));
+    assert!(!list.to_string().contains("secretcat"), "{list}");
+    assert_eq!(list["total"], 0, "{list}");
+    let r = c.call("get_dataset", json!({ "dataset_id": id }));
+    assert_eq!(r["isError"], true);
+    assert!(!r.to_string().contains("secretcat"), "{r}");
+    c.finish();
+}
+
+#[test]
 fn confine_keeps_yolo_labels_inside() {
     // With the data dir at <tmp>/images, the label of <tmp>/images/ds/a.jpg would be <tmp>/labels/ds/a.txt.
     let root = tmp_dir("confine-labels");

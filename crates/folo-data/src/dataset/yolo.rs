@@ -189,7 +189,13 @@ pub(crate) fn scan_dir(root: &Path) -> YoloScan {
         .iter()
         .map(|n| root.join(n))
         .find(|p| p.is_file())
-        .and_then(|p| crate::guard::check(&p).and_then(|_| std::fs::read_to_string(p)).ok())
+        .and_then(|p| match crate::guard::check(&p) {
+            Ok(()) => std::fs::read_to_string(p).ok(),
+            Err(e) => {
+                report.push(IssueKind::Other, &p, format!("cannot read class names: {e}"));
+                None
+            }
+        })
         .map(|t| t.lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect::<Vec<_>>());
     YoloScan { root: root.to_path_buf(), names, splits, report, sources: vec![root.to_path_buf()] }
 }
@@ -302,11 +308,29 @@ fn collect_images(src: &Path, root: &Path, out: &mut Vec<PathBuf>, report: &mut 
     }
     if src.is_dir() {
         let mut found: Vec<PathBuf> = Vec::new();
+        // Folders the read guard refuses (e.g. a link out of the data dir) are reported once and not descended.
+        let mut denied = Vec::new();
         let files = walkdir::WalkDir::new(src)
             .follow_links(true)
             .into_iter()
+            .filter_entry(|e| {
+                if !e.file_type().is_dir() {
+                    return true;
+                }
+                match crate::guard::check(e.path()) {
+                    Ok(()) => true,
+                    Err(err) => {
+                        denied.push((e.path().to_path_buf(), err));
+                        false
+                    }
+                }
+            })
             .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().is_file() && is_image_path(e.path()));
+            .filter(|e| e.file_type().is_file() && is_image_path(e.path()))
+            .collect::<Vec<_>>();
+        for (dir, err) in denied {
+            report.push(IssueKind::Other, dir, format!("cannot read folder: {err}"));
+        }
         for e in files {
             match crate::guard::check(e.path()) {
                 Ok(()) => found.push(e.into_path()),

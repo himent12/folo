@@ -333,7 +333,9 @@ fn load_or_build(dir: &Path, e: &Entry) {
     let cached = std::fs::read(index_path(dir, &reg.id))
         .ok()
         .and_then(|b| serde_json::from_slice::<Index>(&b).ok())
-        .filter(|i| i.version == INDEX_VERSION);
+        .filter(|i| i.version == INDEX_VERSION)
+        // A cache built without the read guard may hold data from files the guard refuses: rebuild under it.
+        .filter(|_| !folo_data::guard::installed());
     if let Some(idx) = cached
         && idx.is_fresh()
     {

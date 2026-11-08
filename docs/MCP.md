@@ -168,7 +168,8 @@ In read-only mode, `train_on_folder` is not listed.
   folders, YOLO labels derived from image paths), so `folo mcp --confine` installs folo-data's process-wide read
   guard (`folo_data::guard`). Every manifest, image list, split folder, COCO JSON, image and label the dataset
   reader opens, and every image the server sends, is resolved canonically first and refused outside the data dir,
-  whatever the manifest syntax, at registration and at every later re-index. A refused read fails like an
+  whatever the manifest syntax, at registration and at every later re-index (with the guard on, the real store
+  rebuilds every index at startup instead of trusting caches built without it; refused folders are not descended). A refused read fails like an
   unreadable file and shows up as a dataset issue or error that names it. On top of that, before any tool or
   resource reads a dataset, its root, every image the store reports, each image's label, and its issues are
   checked, so the agent gets a clear `path_outside_data_dir` error (results cached per dataset; the guard keeps

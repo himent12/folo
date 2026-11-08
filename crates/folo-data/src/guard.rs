@@ -28,6 +28,11 @@ pub fn check(path: &Path) -> std::io::Result<()> {
     }
 }
 
+/// True when a guard is installed (callers then re-read what they would otherwise take from a cache).
+pub fn installed() -> bool {
+    GUARD.get().is_some()
+}
+
 /// True when `path` may be read.
 pub fn allowed(path: &Path) -> bool {
     check(path).is_ok()

@@ -52,7 +52,9 @@ training, the loader records it (`DataLoader::failures`) and uses the next reada
 ### Read guard
 `folo_data::guard::install(allow)` sets a process-wide check on every file and folder the dataset reader opens
 (manifests, image lists, split folders, COCO JSON, images, labels, `check` included). A refused path fails like an
-unreadable file, with a message containing `folo_data::guard::DENIED`. Nothing installs one by default; `folo mcp
+unreadable file, with a message containing `folo_data::guard::DENIED`; a refused folder is reported once and not
+descended. `guard::installed()` tells callers to re-read instead of trusting caches (the server's `RealStore`
+rebuilds its dataset indexes then). Nothing installs one by default; `folo mcp
 --confine` does, to keep dataset reads inside `--data-dir` (docs/MCP.md).
 
 ### Statistics
