@@ -1648,6 +1648,9 @@ impl FoloApp {
             return;
         }
         form.submitting = true;
+        // Which form this request belongs to (its name input, kept by a restored draft): the
+        // dialog can be dismissed and another run submitted before this one answers.
+        let form_id = form.name.entity_id();
         let config = carry_over(
             form.base.as_ref(),
             TrainConfig {
@@ -1676,51 +1679,62 @@ impl FoloApp {
         self.fetch(
             cx,
             move |api| api.create_run(config),
-            |this, r, cx| match r {
-                Ok(run) => {
-                    this.new_run = None;
-                    this.overlay_return = None;
-                    let id = run.id.clone();
-                    let name = run.name.clone();
-                    if let Some(runs) = this.store.runs.ready_mut() {
-                        runs.insert(0, run);
+            move |this, r, cx| {
+                let mine = this.new_run.as_ref().is_some_and(|f| f.name.entity_id() == form_id);
+                match r {
+                    Ok(run) => {
+                        let id = run.id.clone();
+                        let name = run.name.clone();
+                        if let Some(runs) = this.store.runs.ready_mut() {
+                            runs.insert(0, run);
+                        }
+                        this.subscribe_active(cx);
+                        let queued =
+                            this.store.run(&id).is_some_and(|r| r.status == crate::api::RunStatus::Queued);
+                        if queued {
+                            // The run's page opens next, so the action is the queue it waits in.
+                            this.toast_with(
+                                Tone::Info,
+                                format!("Queued {name}"),
+                                Some("It starts when the GPU is free.".into()),
+                                Some((
+                                    "View queue".into(),
+                                    Rc::new(
+                                        move |this: &mut Self, w: &mut Window, cx: &mut Context<Self>| {
+                                            this.run_filter = RunFilter::Active;
+                                            this.navigate(Route::Runs, w, cx)
+                                        },
+                                    ),
+                                )),
+                                cx,
+                            );
+                        } else {
+                            this.toast(
+                                Tone::Accent,
+                                format!("Training {name}"),
+                                Some("Live metrics stream into the dashboard.".into()),
+                                cx,
+                            );
+                        }
+                        // An earlier, dismissed submission leaves the form now open alone.
+                        if mine {
+                            this.new_run = None;
+                            this.overlay_return = None;
+                            let prev = std::mem::replace(&mut this.route, Route::Run(id));
+                            this.history.push(prev);
+                        }
                     }
-                    this.subscribe_active(cx);
-                    let queued =
-                        this.store.run(&id).is_some_and(|r| r.status == crate::api::RunStatus::Queued);
-                    if queued {
-                        // The run's page opens next, so the action is the queue it waits in.
-                        this.toast_with(
-                            Tone::Info,
-                            format!("Queued {name}"),
-                            Some("It starts when the GPU is free.".into()),
-                            Some((
-                                "View queue".into(),
-                                Rc::new(move |this: &mut Self, w: &mut Window, cx: &mut Context<Self>| {
-                                    this.run_filter = RunFilter::Active;
-                                    this.navigate(Route::Runs, w, cx)
-                                }),
-                            )),
-                            cx,
-                        );
-                    } else {
-                        this.toast(
-                            Tone::Accent,
-                            format!("Training {name}"),
-                            Some("Live metrics stream into the dashboard.".into()),
-                            cx,
-                        );
+                    Err(e) => {
+                        if mine && let Some(f) = this.new_run.as_mut() {
+                            f.submitting = false;
+                            f.error = Some(e);
+                            // The error leads the form: scroll it into view.
+                            this.dialog_scroll.set_offset(point(px(0.), px(0.)));
+                        } else {
+                            // Its form is gone: say so where it can be seen.
+                            this.toast(Tone::Danger, e.message, e.hint.map(Into::into), cx);
+                        }
                     }
-                    let prev = std::mem::replace(&mut this.route, Route::Run(id));
-                    this.history.push(prev);
-                }
-                Err(e) => {
-                    if let Some(f) = this.new_run.as_mut() {
-                        f.submitting = false;
-                        f.error = Some(e);
-                    }
-                    // The error leads the form: scroll it into view.
-                    this.dialog_scroll.set_offset(point(px(0.), px(0.)));
                 }
             },
         );
