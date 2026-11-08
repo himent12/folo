@@ -18,6 +18,7 @@
   import Panel from '$lib/ui/Panel.svelte';
   import Progress from '$lib/ui/Progress.svelte';
   import Segmented from '$lib/ui/Segmented.svelte';
+  import { runProgress } from '$lib/api/progress';
   import Skeleton from '$lib/ui/Skeleton.svelte';
   import StatusBadge from '$lib/ui/StatusBadge.svelte';
 
@@ -151,7 +152,7 @@
                 <td class="hide-md"><span class="mono muted">{r.config.arch}</span></td>
                 <td>
                   <div class="prog">
-                    <Progress value={r.status === 'running' ? r.step / Math.max(1, r.steps_per_epoch * r.epochs) : r.epoch / r.epochs} size="xs" tone={tone(r)} label="{r.name} progress" />
+                    <Progress value={r.status === 'running' ? runProgress(r) : r.epoch / r.epochs} size="xs" tone={tone(r)} label="{r.name} progress" />
                     <span class="num faint">{r.epoch}/{r.epochs}</span>
                   </div>
                 </td>
@@ -190,7 +191,7 @@
               <span class="r-end"><span class="r-val num">{metric(r.best?.map50_95)}</span><span class="r-age">{ago(r.created)}</span></span>
             </a>
             {#if r.status === 'running'}
-              <span class="r-prog" aria-hidden="true" style:transform="scaleX({r.step / Math.max(1, r.steps_per_epoch * r.epochs)})"></span>
+              <span class="r-prog" aria-hidden="true" style:transform="scaleX({runProgress(r)})"></span>
             {/if}
           </li>
         {/each}

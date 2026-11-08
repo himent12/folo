@@ -63,6 +63,15 @@
   let name = $state('');
   let nameEdited = $state(false);
   let augment = $state<Augment>(structuredClone(defaults));
+  // Close mosaic follows the epoch count (default 10, never more than the run's epochs) until it is set by hand, so a
+  // short run never starts out invalid.
+  let closeEdited = $state(false);
+  $effect(() => {
+    const e = epochs;
+    if (closeEdited || !Number.isFinite(e) || e < 1) return;
+    const want = Math.min(defaults.close_mosaic, Math.floor(e));
+    if (untrack(() => augment.close_mosaic) !== want) augment.close_mosaic = want;
+  });
   let focus = $state<AugKey | null>(null);
   let shuffle = $state(1);
   let submitting = $state(false);
@@ -78,6 +87,7 @@
   });
   const system = new Resource((s) => hub.api.system(s));
   const models = new Resource((s) => hub.api.models(s));
+  const runs = new Resource((s) => hub.api.runs(s));
 
   // Prefill from an earlier run (?from=run_x, e.g. "Retry with batch 32"). Loaded through the hub, so it waits for
   // the real server instead of asking the mock that answers before the connection settles.
@@ -99,6 +109,7 @@
     seed = c.seed;
     weights = c.weights ?? 'none';
     augment = structuredClone(c.augment);
+    closeEdited = true;
     name = `${c.name}-retry`;
     nameEdited = true;
     prefilled = true;
@@ -126,8 +137,12 @@
   });
   const gpu = $derived(system.data?.gpus[0]);
 
+  // The suggested name is unique among existing runs (dataset-size, then -2, -3, …), so runs stay tellable apart.
   $effect(() => {
-    const auto = `${dataset?.name ?? 'run'}-${arch.replace('folo-', '')}`;
+    const base = `${dataset?.name ?? 'run'}-${arch.replace('folo-', '')}`;
+    const taken = new Set((runs.data ?? []).map((r) => r.name));
+    let auto = base;
+    for (let k = 2; taken.has(auto); k++) auto = `${base}-${k}`;
     if (!untrack(() => nameEdited)) name = auto;
   });
 
@@ -166,6 +181,20 @@
   });
   const valid = $derived(prefilled && Object.values(errors).every((e) => e === null));
   const firstError = $derived(Object.values(errors).find((e) => e !== null) ?? null);
+  const FIELD: Record<keyof typeof errors, string> = {
+    name: 'Run name',
+    epochs: 'Epochs',
+    lr0: 'Learning rate',
+    seed: 'Seed',
+    close: 'Close mosaic',
+    dataset: 'Dataset',
+    weights: 'Start from',
+  };
+  /** The first problem, named by its field (shown beside a disabled Start). */
+  const why = $derived.by(() => {
+    for (const [k, v] of Object.entries(errors)) if (v) return `${FIELD[k as keyof typeof errors]}: ${v}`;
+    return null;
+  });
   // A folded section must not hide its own error: while one is shown the section stays open whatever was toggled.
   const augShown = $derived(augOpen || errors.close !== null);
 
@@ -456,7 +485,7 @@
           {#snippet actions()}
             <span class="aug-actions" class:shut={!augShown}>
               <Button size="sm" variant="ghost" icon={Shuffle} onclick={() => shuffle++}>New samples</Button>
-              <Button size="sm" variant="ghost" icon={RotateCcw} onclick={() => (augment = structuredClone(defaults))}>Defaults</Button>
+              <Button size="sm" variant="ghost" icon={RotateCcw} onclick={() => ((augment = structuredClone(defaults)), (closeEdited = false))}>Defaults</Button>
             </span>
           {/snippet}
           <button type="button" class="aug-toggle" aria-expanded={augShown} aria-controls="aug-body" onclick={() => (augOpen = !augShown)}>
@@ -495,7 +524,7 @@
               {@render ctl('hsv', hsvCtl)}
               <div class="aug-row">
                 <Field label="Close mosaic" for="close" hint="Train the last N epochs on plain images to settle the boxes." error={errors.close}>
-                  <Input id="close" type="number" min="0" step="1" max={epochs} bind:value={augment.close_mosaic} suffix="epochs" invalid={!!errors.close} />
+                  <Input id="close" type="number" min="0" step="1" max={epochs} bind:value={augment.close_mosaic} oninput={() => (closeEdited = true)} suffix="epochs" invalid={!!errors.close} />
                 </Field>
               </div>
             </div>
@@ -519,6 +548,8 @@
             {@render estimates(false)}
             <div class="start" bind:this={startEl}>
               <Button type="submit" variant="primary" size="lg" icon={Play} block loading={submitting} disabled={!valid}>Start training</Button>
+              <!-- A disabled Start always says why, next to it (the field may be far away). -->
+              {#if !valid && why && prefilled}<p class="why" role="status">{why}</p>{/if}
             </div>
             <details class="cli">
               <summary><ChevronRight size={14} aria-hidden="true" />CLI command <span class="faint">the same run from a terminal</span></summary>
@@ -738,6 +769,11 @@
     .rv.rv {
       height: 44px;
     }
+  }
+  .why {
+    margin-top: var(--space-2);
+    font-size: var(--type-sm-size);
+    color: var(--danger-text);
   }
   .rv {
     display: flex;

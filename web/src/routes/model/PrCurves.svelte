@@ -106,6 +106,7 @@
       yTicks={5}
       legend={false}
       bind:cursor
+      empty="No correct detections yet: precision is 0 at every recall."
       label="Precision-recall curves at IoU 0.5 for {classes.length} classes and the mean over all classes"
     />
   </div>

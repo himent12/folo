@@ -218,6 +218,7 @@
           {series}
           height={narrow ? 240 : 340}
           {xDomain}
+          xInteger={x === 'epoch'}
           yDomain={metricDef.y}
           curve="monotone"
           valueFormat={(v) => metric(v)}

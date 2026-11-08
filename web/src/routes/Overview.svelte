@@ -54,7 +54,9 @@
       const key = dsId ?? 'imported';
       const ds = dsId ? (dsById.get(dsId)?.name ?? dsId) : 'Imported';
       const cur = best.get(key);
-      if (!cur || (m.metrics?.map50_95 ?? -1) > (cur.m.metrics?.map50_95 ?? -1)) best.set(key, { m, ds });
+      // On a tie the earlier checkpoint wins (a run's best weights are saved before its last).
+      const d = (m.metrics?.map50_95 ?? -1) - (cur?.m.metrics?.map50_95 ?? -1);
+      if (!cur || d > 0 || (d === 0 && m.created < cur.m.created)) best.set(key, { m, ds });
     }
     return [...best.values()].sort((a, b) => (b.m.created > a.m.created ? 1 : -1)).slice(0, 5);
   });

@@ -10,6 +10,7 @@
   import LineChart, { type Marker, type Series } from '$lib/charts/LineChart.svelte';
   import { runHorizon } from '$lib/charts/horizon';
   import type { Epoch, Run, Step } from '$lib/api/types';
+  import { runProgress, stepsPerEpoch } from '$lib/api/progress';
   import { duration, lr as fmtLr, metric, num, pow10 } from '$lib/format';
   import Segmented from '$lib/ui/Segmented.svelte';
   import Select from '$lib/ui/Select.svelte';
@@ -35,7 +36,7 @@
   });
 
   const live = $derived(['queued', 'running', 'stopping'].includes(run.status));
-  const progress = $derived(Math.min(1, run.step / Math.max(1, run.steps_per_epoch * run.epochs)));
+  const progress = $derived(runProgress(run));
   const closeFrom = $derived(1 - run.config.augment.close_mosaic / run.epochs);
   const elapsed = $derived(run.started ? ((run.finished ? Date.parse(run.finished) : Date.now()) - Date.parse(run.started)) / 1000 : null);
 
@@ -54,7 +55,7 @@
   let horizon = $state<'observed' | 'full'>('observed');
   const observed = $derived.by(() => {
     void version;
-    const spe = Math.max(1, run.steps_per_epoch);
+    const spe = Math.max(1, stepsPerEpoch(run, steps));
     return Math.max(lastStep ? lastStep.step / spe : 0, lastEpoch ? lastEpoch.epoch : 0);
   });
   const xDomain = $derived(runHorizon(observed, run.epochs, live, horizon));
@@ -64,7 +65,7 @@
   const INK2 = 'var(--text-tertiary)';
   const ep = (f: (e: Epoch) => number): Pt[] => epochs.map((e) => ({ x: e.epoch, y: f(e) }));
   const perStep = (f: (s: Step) => number): Pt[] => {
-    const spe = Math.max(1, run.steps_per_epoch);
+    const spe = Math.max(1, stepsPerEpoch(run, steps));
     return steps.map((s) => ({ x: s.step / spe, y: f(s) }));
   };
 
@@ -280,6 +281,7 @@
           {series}
           height={narrow ? 180 : 320}
           {xDomain}
+          xInteger
           yDomain={tab === 'map' || tab === 'map50' || tab === 'pr' ? [0, 1] : tab === 'ips' ? [0, ipsMax * 1.15] : undefined}
           yLog={tab === 'loss' && scale === 'log'}
           yFormat={tab === 'lr' ? (v) => String(+(v / 10 ** lrExp).toFixed(2)) : undefined}

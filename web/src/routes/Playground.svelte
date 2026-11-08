@@ -82,7 +82,10 @@
 
   // ---------- model ----------
   const models = new Resource((s) => hub.api.models(s));
-  const ranked = $derived([...(models.data ?? [])].sort((a, b) => (b.metrics?.map50_95 ?? -1) - (a.metrics?.map50_95 ?? -1)));
+  // Best first; on a tie the earlier checkpoint (a run's best weights are saved before its last).
+  const ranked = $derived(
+    [...(models.data ?? [])].sort((a, b) => (b.metrics?.map50_95 ?? -1) - (a.metrics?.map50_95 ?? -1) || a.created.localeCompare(b.created)),
+  );
   const queryModel = $derived(router.route.query.get('model'));
   let pickedModel = $state<string | null>(null);
   const model = $derived.by((): Model | null => {
@@ -437,7 +440,7 @@
   {#if !result}
     <p class="hint">Per-class counts, click one to hide it.</p>
   {:else if counts.length === 0}
-    <p class="hint">Nothing above the confidence threshold.</p>
+    <p class="hint">{pred?.boxes.length ? 'Nothing above the confidence threshold.' : 'The model found nothing in this image.'}</p>
   {:else}
     <ul class="counts" aria-label="Detected classes">
       {#each counts as [c, n] (c)}
@@ -631,6 +634,9 @@
                 <p class="placeholder">{predicting ? 'Running inference…' : 'Detections appear here once you run the model on an image.'}</p>
               {:else if tab === 'json'}
                 <div class="json-wrap"><JsonView value={json} label="Prediction as JSON" /></div>
+              {:else if !pred?.boxes.length}
+                <!-- Candidates are fetched down to the lowest threshold (FETCH): none means no threshold would show more. -->
+                <p class="placeholder">The model found nothing in this image, even at conf ≥ {FETCH.conf}.</p>
               {:else if rows.length === 0}
                 <p class="placeholder">
                   No detections at conf ≥ {conf.toFixed(2)}{hidden.size ? ' in the visible classes' : ''}.

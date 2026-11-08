@@ -151,6 +151,7 @@ export class LiveRun {
       // Re-synchronising history (on open / reconnect) must not silently give up: a gap would stay forever.
       let syncTimer: ReturnType<typeof setTimeout> | undefined;
       let replayTimer: ReturnType<typeof setTimeout> | undefined;
+      let speAsked = false;
       const sync = (attempt = 0) => {
         clearTimeout(syncTimer);
         load().catch(() => {
@@ -214,6 +215,19 @@ export class LiveRun {
             this.steps.push(s);
           }
           if (this.run) this.run = { ...this.run, step: s.step, epoch: s.epoch, eta_s: s.eta_s };
+          // A real run reports 0 steps per epoch until its trainer has loaded the data, i.e. in the snapshot taken
+          // at start: steps are flowing now, so ask once more (only that field is taken; progress needs it).
+          if (this.run?.steps_per_epoch === 0 && !speAsked) {
+            speAsked = true;
+            api.run(runId).then(
+              (r) => {
+                if (closed || !this.run || r.steps_per_epoch <= 0) return void (speAsked = false);
+                this.run = { ...this.run, steps_per_epoch: r.steps_per_epoch };
+                this.#bump();
+              },
+              () => (speAsked = false),
+            );
+          }
           this.#bump();
         },
         epoch: (e) => {

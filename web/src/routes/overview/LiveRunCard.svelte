@@ -7,6 +7,7 @@
   import { runHorizon } from '$lib/charts/horizon';
   import { hub } from '$lib/api/index.svelte';
   import { Resource } from '$lib/api/resource.svelte';
+  import { runProgress, stepsPerEpoch } from '$lib/api/progress';
   import { duration, lr, metric, num } from '$lib/format';
   import { deviceLine } from './device';
   import { href } from '$lib/router.svelte';
@@ -45,9 +46,9 @@
 
   const horizon = $derived.by(() => {
     void live.version;
-    return runHorizon(Math.max(live.epochs.length, run.step / Math.max(1, run.steps_per_epoch)), run.epochs, true, 'observed');
+    return runHorizon(Math.max(live.epochs.length, run.step / Math.max(1, stepsPerEpoch(run, live.steps))), run.epochs, true, 'observed');
   });
-  const progress = $derived(run.step / Math.max(1, run.steps_per_epoch * run.epochs));
+  const progress = $derived(runProgress(run));
 
   // The device this run is using, live: its own label, plus load only from the GPU it actually trains on.
   const sys = new Resource((s) => hub.api.system(s), { poll: 2000 });
@@ -95,6 +96,7 @@
           series={charts.map}
           height={narrow ? 140 : 200}
           xDomain={horizon}
+          xInteger
           yDomain={[0, 1]}
           valueFormat={(v) => metric(v)}
           xTitle={(x) => `Epoch ${Math.round(x)}`}
