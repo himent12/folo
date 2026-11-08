@@ -1566,77 +1566,83 @@ impl FoloApp {
                     Tone::Accent => "icons/activity.svg",
                     _ => "icons/info.svg",
                 };
-                div()
-                    .id(("toast", id as usize))
-                    .occlude()
-                    .on_hover(cx.listener(move |this, h: &bool, _, _| {
-                        if *h {
-                            this.toast_hover = Some(id);
-                        } else if this.toast_hover == Some(id) {
-                            this.toast_hover = None;
-                        }
-                    }))
-                    .flex()
-                    .flex_col()
-                    .p(px(12.))
-                    .rounded(px(radius::LG))
-                    .bg(t.bg_overlay)
-                    .border_1()
-                    .border_color(t.line_strong)
-                    .shadow(t.shadow_lg())
-                    .child(
-                        div()
-                            .flex()
-                            .items_start()
-                            .gap(px(10.))
-                            .child(div().pt(px(2.)).child(icon(
-                                icon_path,
-                                16.,
-                                if tone == Tone::Neutral { t.text_secondary } else { dotc },
-                            )))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .flex()
-                                    .flex_col()
-                                    .gap(px(2.))
-                                    .child(
-                                        text(ty::BASE, t.text_primary)
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .child(title),
-                                    )
-                                    .when_some(body, |d, b| d.child(text(ty::SM, t.text_secondary).child(b))),
-                            )
-                            .child(
-                                self.icon_button(
-                                    &format!("toast-x-{id}"),
-                                    "icons/x.svg",
-                                    "Dismiss",
-                                    window,
-                                    cx,
-                                    act(move |this, _, cx| this.dismiss_toast(id, cx)),
-                                )
-                                .size(px(24.)),
-                            ),
-                    )
-                    // One footer: the card's action under the text, the stack's controls ending at
-                    // the card's padding, under the close button.
-                    .when(action_btn.is_some() || ctrls.is_some(), |d| {
-                        d.child(
+                // Each toast fades in as it arrives (160 ms; none under Reduce motion).
+                crate::ui::appear(
+                    div()
+                        .id(("toast", id as usize))
+                        .occlude()
+                        .on_hover(cx.listener(move |this, h: &bool, _, _| {
+                            if *h {
+                                this.toast_hover = Some(id);
+                            } else if this.toast_hover == Some(id) {
+                                this.toast_hover = None;
+                            }
+                        }))
+                        .flex()
+                        .flex_col()
+                        .p(px(12.))
+                        .rounded(px(radius::LG))
+                        .bg(t.bg_overlay)
+                        .border_1()
+                        .border_color(t.line_strong)
+                        .shadow(t.shadow_lg())
+                        .child(
                             div()
-                                .pt(px(8.))
-                                .pl(px(26.))
                                 .flex()
-                                .items_center()
-                                .justify_between()
-                                .gap(px(8.))
-                                .child(div().flex().children(action_btn))
-                                .children(ctrls.map(|(show, dismiss)| {
-                                    div().flex().items_center().gap(px(4.)).child(show).child(dismiss)
-                                })),
+                                .items_start()
+                                .gap(px(10.))
+                                .child(div().pt(px(2.)).child(icon(
+                                    icon_path,
+                                    16.,
+                                    if tone == Tone::Neutral { t.text_secondary } else { dotc },
+                                )))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .flex()
+                                        .flex_col()
+                                        .gap(px(2.))
+                                        .child(
+                                            text(ty::BASE, t.text_primary)
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .child(title),
+                                        )
+                                        .when_some(body, |d, b| {
+                                            d.child(text(ty::SM, t.text_secondary).child(b))
+                                        }),
+                                )
+                                .child(
+                                    self.icon_button(
+                                        &format!("toast-x-{id}"),
+                                        "icons/x.svg",
+                                        "Dismiss",
+                                        window,
+                                        cx,
+                                        act(move |this, _, cx| this.dismiss_toast(id, cx)),
+                                    )
+                                    .size(px(24.)),
+                                ),
                         )
-                    })
+                        // One footer: the card's action under the text, the stack's controls ending at
+                        // the card's padding, under the close button.
+                        .when(action_btn.is_some() || ctrls.is_some(), |d| {
+                            d.child(
+                                div()
+                                    .pt(px(8.))
+                                    .pl(px(26.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap(px(8.))
+                                    .child(div().flex().children(action_btn))
+                                    .children(ctrls.map(|(show, dismiss)| {
+                                        div().flex().items_center().gap(px(4.)).child(show).child(dismiss)
+                                    })),
+                            )
+                        }),
+                    &format!("toast-in-{id}"),
+                )
             }))
             .into_any_element()
     }
@@ -2038,63 +2044,66 @@ impl FoloApp {
             .child(zoom_ctrls)
             .child(div().w(px(1.)).h(px(16.)).bg(t.line_subtle))
             .child(close);
-        div()
-            .absolute()
-            .top_0()
-            .left_0()
-            .size_full()
-            .child(self.scrim(&t, "insp-scrim", cx, act(|this, w, cx| this.close_inspector(w, cx))))
-            .child(
-                div()
-                    .id("inspector")
-                    .track_focus(&self.inspector_focus)
-                    .absolute()
-                    .top(px(24.))
-                    .left(px(24.))
-                    .right(px(24.))
-                    .bottom(px(24.))
-                    .occlude()
-                    .flex()
-                    .flex_col()
-                    .rounded(px(radius::XL))
-                    .border_1()
-                    .border_color(t.line_default)
-                    .shadow(t.shadow_lg())
-                    .overflow_hidden()
-                    .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| {
-                        // Zoomed in, arrows pan (Shift: further); otherwise ←/→ browse. Page Up/Down
-                        // always browse.
-                        let zoomed = this.inspector.as_ref().is_some_and(|i| i.zoom > 1.0);
-                        let d = if ev.keystroke.modifiers.shift { 128. } else { 32. };
-                        let pan = |this: &mut Self, dx: f32, dy: f32| {
-                            if let Some(i) = this.inspector.as_mut() {
-                                i.pan = (i.pan.0 + dx, i.pan.1 + dy);
-                            }
-                        };
-                        match ev.keystroke.key.as_str() {
-                            "left" if zoomed => pan(this, d, 0.),
-                            "right" if zoomed => pan(this, -d, 0.),
-                            "up" if zoomed => pan(this, 0., d),
-                            "down" if zoomed => pan(this, 0., -d),
-                            "left" | "pageup" => this.step_inspector(-1, cx),
-                            "right" | "pagedown" => this.step_inspector(1, cx),
-                            "+" | "=" => this.zoom_by(1.4, cx),
-                            "-" => this.zoom_by(1.0 / 1.4, cx),
-                            "0" => {
+        // Fades in like the dialogs and palette (160 ms; none under Reduce motion).
+        crate::ui::appear(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .child(self.scrim(&t, "insp-scrim", cx, act(|this, w, cx| this.close_inspector(w, cx))))
+                .child(
+                    div()
+                        .id("inspector")
+                        .track_focus(&self.inspector_focus)
+                        .absolute()
+                        .top(px(24.))
+                        .left(px(24.))
+                        .right(px(24.))
+                        .bottom(px(24.))
+                        .occlude()
+                        .flex()
+                        .flex_col()
+                        .rounded(px(radius::XL))
+                        .border_1()
+                        .border_color(t.line_default)
+                        .shadow(t.shadow_lg())
+                        .overflow_hidden()
+                        .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| {
+                            // Zoomed in, arrows pan (Shift: further); otherwise ←/→ browse. Page Up/Down
+                            // always browse.
+                            let zoomed = this.inspector.as_ref().is_some_and(|i| i.zoom > 1.0);
+                            let d = if ev.keystroke.modifiers.shift { 128. } else { 32. };
+                            let pan = |this: &mut Self, dx: f32, dy: f32| {
                                 if let Some(i) = this.inspector.as_mut() {
-                                    i.zoom = 1.0;
-                                    i.pan = (0., 0.);
+                                    i.pan = (i.pan.0 + dx, i.pan.1 + dy);
                                 }
+                            };
+                            match ev.keystroke.key.as_str() {
+                                "left" if zoomed => pan(this, d, 0.),
+                                "right" if zoomed => pan(this, -d, 0.),
+                                "up" if zoomed => pan(this, 0., d),
+                                "down" if zoomed => pan(this, 0., -d),
+                                "left" | "pageup" => this.step_inspector(-1, cx),
+                                "right" | "pagedown" => this.step_inspector(1, cx),
+                                "+" | "=" => this.zoom_by(1.4, cx),
+                                "-" => this.zoom_by(1.0 / 1.4, cx),
+                                "0" => {
+                                    if let Some(i) = this.inspector.as_mut() {
+                                        i.zoom = 1.0;
+                                        i.pan = (0., 0.);
+                                    }
+                                }
+                                _ => return,
                             }
-                            _ => return,
-                        }
-                        cx.stop_propagation();
-                        cx.notify();
-                    }))
-                    .child(header)
-                    .child(div().flex_1().min_h_0().flex().child(stage).child(side)),
-            )
-            .into_any_element()
+                            cx.stop_propagation();
+                            cx.notify();
+                        }))
+                        .child(header)
+                        .child(div().flex_1().min_h_0().flex().child(stage).child(side)),
+                ),
+            "inspector-in",
+        )
     }
 
     pub fn step_inspector(&mut self, d: i32, cx: &mut Context<Self>) {
