@@ -699,8 +699,8 @@ impl FoloApp {
         // Section headings sit above a hairline and lead their group (stronger than field labels).
         let section = |title: &str| {
             div()
-                .mt(px(if short { 2. } else { 6. }))
-                .pt(px(if short { 10. } else { 14. }))
+                .mt(px(if short { 0. } else { 6. }))
+                .pt(px(if short { 8. } else { 14. }))
                 .border_t_1()
                 .border_color(t.line_subtle)
                 // Two size steps above the 12 px field labels, not only a weight step.
@@ -792,7 +792,7 @@ impl FoloApp {
         let body = div()
             .flex()
             .flex_col()
-            .gap(px(if short { 10. } else { 14. }))
+            .gap(px(if short { 8. } else { 14. }))
             .px(px(20.))
             // 16 px past the last control for the footer's fade, so it never dims a control.
             .pb(px(36.))
@@ -824,18 +824,38 @@ impl FoloApp {
             })
             .child(
                 div().flex().gap(px(16.)).child(div().flex_1().child(field("Name", name_box, None))).child(
-                    div().flex_1().child(field(
-                        "Dataset",
-                        ds_select,
-                        ds.as_ref().map(|d| {
+                    div().flex_1().child({
+                        let summary = ds.as_ref().map(|d| {
                             format!(
                                 "{} classes · train {} · val {}",
                                 d.classes.len(),
                                 int(d.splits.train),
                                 int(d.splits.val)
                             )
-                        }),
-                    )),
+                        });
+                        if short {
+                            // Short windows: the summary rides on the label row, a line saved
+                            // toward keeping the Schedule above the footer.
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(8.))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_baseline()
+                                        .justify_between()
+                                        .gap(px(8.))
+                                        .child(label("Dataset"))
+                                        .children(summary.map(|s| {
+                                            text(ty::XS, t.text_tertiary).tnum().truncate().child(s)
+                                        })),
+                                )
+                                .child(ds_select)
+                        } else {
+                            field("Dataset", ds_select, summary)
+                        }
+                    }),
                 ),
             )
             .child(section("Model"))
