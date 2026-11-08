@@ -501,11 +501,13 @@ mod tests {
         let gv = g.get(&xa).unwrap().to_vec::<f32>().unwrap();
         assert!((gv[0] / 1e-20 - 1.0).abs() < 1e-6 && (gv[1] as f64 * 9e30 - 1.0).abs() < 1e-5, "{gv:?}");
         // erf's derivative times a huge upstream gradient stays finite when the result is.
-        let xe = t(&[1.0], &[1]).requires_grad_();
-        let g = xe.erf().unwrap().backward_with(&t(&[3.2e38], &[1])).unwrap();
-        let want = 3.2e38f64 * std::f64::consts::FRAC_2_SQRT_PI * (-1f64).exp();
-        let got = g.get(&xe).unwrap().item::<f32>().unwrap() as f64;
-        assert!((got - want).abs() <= 1e-6 * want, "erf grad {got} vs {want}");
+        for xv in [1.0f32, 11.0] {
+            let xe = t(&[xv], &[1]).requires_grad_();
+            let g = xe.erf().unwrap().backward_with(&t(&[3.2e38], &[1])).unwrap();
+            let want = 3.2e38f64 * std::f64::consts::FRAC_2_SQRT_PI * (-(xv as f64).powi(2)).exp();
+            let got = g.get(&xe).unwrap().item::<f32>().unwrap() as f64;
+            assert!((got - want).abs() <= 1e-6 * want, "erf grad at {xv}: {got} vs {want}");
+        }
         let (yv, xv) = (t(&[0.0], &[1]).requires_grad_(), t(&[0.0], &[1]).requires_grad_());
         let g = yv.atan2(&xv).unwrap().sum_all().unwrap().backward().unwrap();
         assert_eq!(g.get(&yv).unwrap().item::<f32>().unwrap(), 0.0);

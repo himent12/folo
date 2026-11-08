@@ -467,8 +467,11 @@ pub(crate) fn unary_backward(op: UnaryOp, x: &[f32], lx: &Layout, g: &[f32], lg:
         // (1 - x)(1 + x) keeps precision near |x| = 1, where 1 - x^2 cancels.
         Asin => map2(x, lx, g, lg, |x, g| g / ((1.0 - x) * (1.0 + x)).sqrt()),
         Acos => map2(x, lx, g, lg, |x, g| -g / ((1.0 - x) * (1.0 + x)).sqrt()),
-        // The derivative (at most 2/sqrt(pi)) first, so a finite result never overflows on the way.
-        Erf => map2(x, lx, g, lg, |x, g| g * (std::f32::consts::FRAC_2_SQRT_PI * fast_exp(-x * x))),
+        // In f64, rounded once: exp(-x^2) underflows f32 long before g * exp(-x^2) does (x = 11, g = 3e38).
+        Erf => map2(x, lx, g, lg, |x, g| {
+            let x = x as f64;
+            (g as f64 * std::f64::consts::FRAC_2_SQRT_PI * (-x * x).exp()) as f32
+        }),
         Sigmoid => map2(x, lx, g, lg, |x, g| {
             let s = sigmoid(x);
             g * s * (1.0 - s)
