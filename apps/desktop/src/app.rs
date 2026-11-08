@@ -2596,8 +2596,13 @@ fn reveal(b: gpui::Bounds<Pixels>, window: &mut Window) {
         if vp.size.width <= px(0.) || !inside {
             continue;
         }
+        let tall = b.size.height + margin * 2. > vp.size.height;
         let dy = if b.top() - margin < vp.top() {
             b.top() - margin - vp.top()
+        } else if tall {
+            // Taller than the view (the run page's linked chart group at minimum size): its top
+            // leads. Already in view, it stays; below, it comes up to the top edge, never past.
+            if b.top() + margin > vp.bottom() - margin * 4. { b.top() - margin - vp.top() } else { px(0.) }
         } else if b.bottom() + margin > vp.bottom() {
             b.bottom() + margin - vp.bottom()
         } else {
