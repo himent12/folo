@@ -5,7 +5,7 @@
    */
   import type { Evaluation } from '$lib/api/evaluation';
   import LineChart, { type Series } from '$lib/charts/LineChart.svelte';
-  import { classInk } from '$lib/design/classInk.svelte';
+  import { classStroke } from '$lib/design/classInk.svelte';
   import { classColor } from '$lib/design/tokens';
   import { metric } from '$lib/format';
   import Input from '$lib/ui/Input.svelte';
@@ -16,7 +16,7 @@
   let { classes, ev, map50 }: { classes: readonly string[]; ev: Evaluation; map50: number | null } = $props();
 
   // Curves are 2 px strokes: the darker light-theme ink. Legend swatches use the palette hue itself.
-  const lineColor = classInk;
+  const lineColor = classStroke;
   // Phones: a shorter plot, chips above it and the class list folded away below.
   let narrow = $state(typeof matchMedia !== 'undefined' && matchMedia('(max-width: 767px)').matches);
   $effect(() => {

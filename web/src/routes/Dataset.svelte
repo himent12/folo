@@ -362,7 +362,7 @@
     </p>
     {#snippet footer()}
       <Button variant="ghost" onclick={() => (confirmDelete = false)}>Cancel</Button>
-      <Button variant="danger" icon={Trash} loading={deleting} onclick={remove}>Delete dataset</Button>
+      <Button variant="destructive" icon={Trash} loading={deleting} onclick={remove}>Delete dataset</Button>
     {/snippet}
   </Dialog>
 {/if}
