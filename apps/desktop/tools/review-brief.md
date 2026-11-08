@@ -41,7 +41,10 @@ caption; the selected detection box and its chip take accent.solid (design/READM
 with an extra ring, and the other boxes' outlines drop to 30 % (the same rule; their chips stay opaque and readable); the chart
 cursor's chip sits on the x axis and the tick labels under it give way (it names the cursor's epoch where the axis
 would); Playground's image toolbar shows the latency beside the detection count (asked for by both reviewers in
-round 25), even though the rail also has the breakdown.
+round 25), even though the rail also has the breakdown; the narrow Broken labels tile says "Copy check" (one round
+asked for it, the next for "Copy command"; its tooltip names the command); the newest toast carries the stack's
+"Show N earlier · Dismiss all" (the only way to the folded toasts and to clear them); log-scale loss ticks thinned at
+small sizes are counted from the top power, so the top is labelled.
 
 ## Scoring
 Use `REVIEW_RUBRIC.md` (path in your task): 12 lines, 1–10, where **9 means "would ship as-is at Linear / Raycast / Zed
