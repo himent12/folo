@@ -96,7 +96,7 @@
     background: var(--bg-hover);
   }
   .t {
-    color: var(--text-disabled);
+    color: var(--text-tertiary);
     flex-shrink: 0;
   }
   .lv {

@@ -220,7 +220,7 @@
         <span class="small">last epoch</span>
       </div>
       <div class="cell">
-        <span class="label">Loss</span>
+        <span class="label">Loss · last step</span>
         <span class="val num">{num(lastStep?.loss.total, 3)}</span>
         <span class="small num">box {num(lastStep?.loss.box, 2)} · cls {num(lastStep?.loss.cls, 2)}</span>
       </div>
@@ -513,8 +513,8 @@
       grid-template-columns: repeat(2, minmax(0, 1fr));
     }
     .cell {
-      padding: var(--space-3);
-      gap: 2px;
+      padding: var(--space-2) var(--space-3);
+      gap: 0;
     }
     .cell:nth-child(n) {
       border-left: 0;
@@ -533,12 +533,21 @@
       display: none;
     }
     .big {
-      font-size: var(--type-2xl-size);
-      line-height: var(--type-2xl-line);
+      font-size: var(--type-xl-size);
+      line-height: var(--type-xl-line);
+    }
+    .of {
+      font-size: var(--type-sm-size);
     }
     .val {
-      font-size: var(--type-lg-size);
-      line-height: var(--type-lg-line);
+      font-size: var(--type-md-size);
+      line-height: var(--type-md-line);
+    }
+    .cell.main {
+      padding: var(--space-3);
+    }
+    .b-msg {
+      font-size: var(--type-sm-size);
     }
     .banner {
       flex-direction: column;

@@ -17,6 +17,16 @@
   }: { run: Run; steps: Step[]; epochs: Epoch[]; version: number; loading: boolean } = $props();
 
   let cursor = $state<number | null>(null);
+  // Phones get shorter plots so more evidence fits above the fold.
+  let narrow = $state(typeof matchMedia !== 'undefined' && matchMedia('(max-width: 767px)').matches);
+  $effect(() => {
+    const mq = matchMedia('(max-width: 767px)');
+    const on = () => (narrow = mq.matches);
+    mq.addEventListener('change', on);
+    return () => mq.removeEventListener('change', on);
+  });
+  const hBig = $derived(narrow ? 180 : 220);
+  const hSmall = $derived(narrow ? 160 : 180);
   let smoothing = $state<'0' | '0.6' | '0.9' | '0.97'>('0.9');
   let scale = $state<'lin' | 'log'>('lin');
 
@@ -83,7 +93,7 @@
 {#snippet chartSk()}<Skeleton h="180px" r="var(--radius-md)" />{/snippet}
 
 <div class="grid">
-  <Panel title="Loss" class="span2" id="chart-loss">
+  <Panel title="Loss" meta={smoothing === '0' ? 'raw per step' : `smoothed · EMA ${smoothing}`} class="span2" id="chart-loss">
     {#snippet actions()}
       <Segmented
         size="sm"
@@ -101,7 +111,7 @@
     {#if loading}{@render chartSk()}{:else}
       <LineChart
         series={loss}
-        height={220}
+        height={hBig}
         {xDomain}
         yLog={scale === 'log'}
         yFormat={(v) => (v >= 10 ? v.toFixed(0) : v.toFixed(1))}
@@ -118,7 +128,7 @@
     {#if loading}{@render chartSk()}{:else}
       <LineChart
         series={map}
-        height={220}
+        height={hBig}
         {xDomain}
         yDomain={[0, 1]}
         yFormat={(v) => v.toFixed(1)}
@@ -137,7 +147,7 @@
     {#if loading}{@render chartSk()}{:else}
       <LineChart
         series={pr}
-        height={180}
+        height={hSmall}
         {xDomain}
         yDomain={[0, 1]}
         yFormat={(v) => v.toFixed(1)}
@@ -155,7 +165,7 @@
     {#if loading}{@render chartSk()}{:else}
       <LineChart
         series={lrS}
-        height={180}
+        height={hSmall}
         {xDomain}
         yFormat={(v) => fmtLr(v)}
         xTitle={epochTitle}
@@ -170,7 +180,7 @@
     {#if loading}{@render chartSk()}{:else}
       <LineChart
         series={ips}
-        height={180}
+        height={hSmall}
         {xDomain}
         yDomain={[0, ipsMax * 1.2]}
         yFormat={(v) => num(v, 0)}
