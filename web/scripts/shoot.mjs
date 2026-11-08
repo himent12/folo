@@ -20,6 +20,8 @@ const outDir = resolve(root, 'shots', round);
 const VIEWPORTS = {
   desktop: { width: 1440, height: 900 },
   laptop: { width: 1024, height: 768 },
+  // Below the 960 px laptop tier: one column, the section picker, the New run dock.
+  tablet: { width: 820, height: 1180 },
   mobile: { width: 390, height: 844 },
 };
 // Fixed wall clock so relative times ("3 min ago") and the mock's live run are identical every round.

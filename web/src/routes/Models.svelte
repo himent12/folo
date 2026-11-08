@@ -17,6 +17,7 @@
   import ErrorState from '$lib/ui/ErrorState.svelte';
   import Input from '$lib/ui/Input.svelte';
   import Panel from '$lib/ui/Panel.svelte';
+  import Versus from './models/Versus.svelte';
   import Segmented from '$lib/ui/Segmented.svelte';
   import Select from '$lib/ui/Select.svelte';
   import Skeleton from '$lib/ui/Skeleton.svelte';
@@ -24,6 +25,8 @@
   setCrumbs({ label: 'Models' });
 
   const models = new Resource((s) => hub.api.models(s));
+  /** Loading: placeholder dataset groups (models per group), so the list keeps its grouped rhythm when it arrives. */
+  const SK_GROUPS = [2, 3, 2];
   // Only for source-run names and evaluation datasets; the list still renders if these fail.
   const runs = new Resource((s) => hub.api.runs(s));
   const datasets = new Resource((s) => hub.api.datasets(s));
@@ -168,7 +171,7 @@
         title="No models yet"
         description="A training run saves its best weights here when it finishes."
       >
-        {#snippet actions()}<Button variant="primary" icon={Plus} href={href('/runs/new')}>New run</Button>{/snippet}
+        {#snippet actions()}<Button icon={Plus} href={href('/runs/new')}>New run</Button>{/snippet}
       </EmptyState>
     {:else if models.data && shownCount === 0}
       <EmptyState icon={Search} title="No models match" description="Try another dataset or search term.">
@@ -192,16 +195,19 @@
             </tr>
           </thead>
           {#if !models.data}
-            <!-- Plain 40 px rows: the dataset groups are unknown until the list arrives, so none are drawn. -->
-            <tbody aria-hidden="true">
-              {#each [0, 1, 2, 3, 4, 5, 6, 7] as i (i)}
-                <tr>
-                  {#each cols as c (c.key)}
-                    <td class={hideCls(c)} class:r={c.num}><Skeleton h="12px" w={c.key === 'name' ? '112px' : '40px'} /></td>
-                  {/each}
-                </tr>
-              {/each}
-            </tbody>
+            <!-- The loaded rhythm: dataset groups (a header row, then their models), with placeholder content. -->
+            {#each SK_GROUPS as n, gi (gi)}
+              <tbody aria-hidden="true">
+                <tr class="group"><th colspan={cols.length}><Skeleton h="10px" w="96px" /></th></tr>
+                {#each Array(n) as _, i (i)}
+                  <tr>
+                    {#each cols as c (c.key)}
+                      <td class={hideCls(c)} class:r={c.num}><Skeleton h="12px" w={c.key === 'name' ? '112px' : '40px'} /></td>
+                    {/each}
+                  </tr>
+                {/each}
+              </tbody>
+            {/each}
           {:else}
             {#each groups as g (g.key)}
               <tbody>
@@ -247,16 +253,21 @@
       <!-- Phones: the same groups as two-line rows (name and one meta line, mAP on the right). -->
       <div class="rows">
         {#if !models.data}
-          <ul aria-hidden="true">
-            {#each [0, 1, 2, 3, 4, 5, 6] as i (i)}
-              <li>
-                <span class="row-sk">
-                  <span class="m-main"><span class="l-name"><Skeleton w="55%" h="14px" /></span><span class="l-meta"><Skeleton w="75%" h="10px" /></span></span>
-                  <span class="m-side"><span class="l-name"><Skeleton w="40px" h="14px" /></span><span class="l-meta"><Skeleton w="56px" h="10px" /></span></span>
-                </span>
-              </li>
-            {/each}
-          </ul>
+          {#each SK_GROUPS as n, gi (gi)}
+            <section aria-hidden="true">
+              <h2 class="m-group"><Skeleton h="10px" w="96px" /></h2>
+              <ul>
+                {#each Array(n) as _, i (i)}
+                  <li>
+                    <span class="row-sk">
+                      <span class="m-main"><span class="l-name"><Skeleton w="55%" h="14px" /></span><span class="l-meta"><Skeleton w="75%" h="10px" /></span></span>
+                      <span class="m-side"><span class="l-name"><Skeleton w="40px" h="14px" /></span><span class="l-meta"><Skeleton w="56px" h="10px" /></span></span>
+                    </span>
+                  </li>
+                {/each}
+              </ul>
+            </section>
+          {/each}
         {/if}
         {#each groups as g (g.key)}
           <section aria-label={g.label}>
@@ -282,6 +293,9 @@
       </div>
     {/if}
   </Panel>
+
+  <!-- Only with models to look at: the empty / error states stay about getting a model. -->
+  {#if models.data?.length}<Versus />{/if}
 </Page>
 
 <style>
@@ -367,6 +381,10 @@
     outline-offset: -2px;
   }
   /* A 32 px section header per evaluation dataset: the groups are ranked separately. */
+  /* Placeholders in number columns sit where the numbers will: at the right. */
+  td.r :global(.sk) {
+    margin-left: auto;
+  }
   .group th {
     height: 32px;
     padding: 0 var(--space-4);

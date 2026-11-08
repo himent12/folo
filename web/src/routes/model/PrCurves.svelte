@@ -90,9 +90,14 @@
 
 <div class="pr">
   <div class="part" class:off={view === 'classes'}>
-    <!-- At rest the legend states each curve's AP50; under the cursor it reads precision at that recall. -->
-    <div class="legend">
-      <span class="what num">{cursor === null ? 'AP50' : `Precision at recall ${cursor.toFixed(2)}`}</span>
+    <!-- At rest the legend states each curve's AP50 (a summary of the whole curve); under the cursor it switches to a
+         readout, marked by the cursor's own glyph: the precision at that recall. -->
+    <div class="legend" class:reading={cursor !== null}>
+      {#if cursor === null}
+        <span class="what">AP50 <span class="what-sub">area under each curve</span></span>
+      {:else}
+        <span class="what at num"><span class="cur" aria-hidden="true"></span>Precision at recall {cursor.toFixed(2)}</span>
+      {/if}
       <span class="item"><span class="line mean" aria-hidden="true"></span>All classes <span class="num">{cursor === null ? metric(meanAp) : at(ev.mean)}</span></span>
       {#each lit as i (i)}
         <span class="item"><span class="line" style:background={classStroke(i)} aria-hidden="true"></span>{name(i)} <span class="num">{cursor === null ? metric(apOf.get(i)) : at(ev.curves[i] ?? [])}</span></span>
@@ -119,6 +124,8 @@
         xTicks={6}
         yTicks={5}
         legend={false}
+        xLabel="Recall"
+        yLabel="Precision"
         bind:cursor
         empty="No correct detections yet: precision is 0 at every recall."
         label="Precision-recall curves at IoU 0.5 for {classes.length} classes and the mean over all classes"
@@ -230,8 +237,24 @@
     margin-left: auto;
   }
   .what {
-    min-width: 11em;
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    min-width: 13em;
+    color: var(--text-secondary);
+  }
+  .what-sub {
     color: var(--text-tertiary);
+  }
+  /* The readout state: the cursor's dashed rule as its key, values in place of the AP summary. */
+  .what.at {
+    color: var(--text-primary);
+  }
+  .cur {
+    width: 1px;
+    height: 12px;
+    background: repeating-linear-gradient(to bottom, var(--chart-cursor) 0 2px, transparent 2px 4px);
+    flex-shrink: 0;
   }
   .legend {
     display: flex;
@@ -294,12 +317,16 @@
     overflow-x: auto;
     border-top: 1px solid var(--line-subtle);
   }
-  /* Selected classes: a 2 px accent bar on the row's leading edge. */
+  /* The selection rule: a neutral bg.active fill and a 2 px accent bar on the row's leading edge. Hover is a lighter
+     neutral step, and adds to the fill of a selected row, so the two stay distinct. */
   tr.hot {
     background: var(--bg-hover);
   }
   tr.on {
-    background: var(--bg-selected);
+    background: var(--bg-active);
+  }
+  tr.on.hot {
+    background: linear-gradient(var(--bg-hover), var(--bg-hover)), var(--bg-active);
   }
   tr.on td:first-child {
     box-shadow: inset 2px 0 0 var(--accent-line);
@@ -328,7 +355,7 @@
   tr.detail td {
     height: auto;
     padding: var(--space-2) var(--space-4) var(--space-3);
-    background: var(--bg-selected);
+    background: var(--bg-active);
     box-shadow: inset 2px 0 0 var(--accent-line);
   }
   .detail dl {

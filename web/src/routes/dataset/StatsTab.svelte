@@ -18,6 +18,7 @@
   import { num } from '$lib/format';
   import { href } from '$lib/router.svelte';
   import Panel from '$lib/ui/Panel.svelte';
+  import { tooltip } from '$lib/ui/tooltip';
   import { countBinLabel, healthChecks, imageCount, reviewCount, sizeBinLabel, TINY_SIZE, type Severity } from './health';
 
   let { dataset, stats, onclass }: { dataset: Dataset; stats: DatasetStats; onclass: (cls: number) => void } = $props();
@@ -128,7 +129,17 @@
   </Panel>
 
   <div class="two">
-    <Panel title="Box size" meta="boxes per 1% step of √area / image side · bar area = count" id="ds-size">
+    <Panel title="Box size" meta="how big objects are next to the image" id="ds-size">
+      {#snippet actions()}
+        <!-- The precise reading, one step away: the plain line above is what most readers need. -->
+        <button
+          type="button"
+          class="how"
+          aria-label="How box size is measured"
+          use:tooltip={{ text: "Size = √(box area ÷ image area): 10% is a box about a tenth of the image's side. Bars span their real size range, so a bar's area is its count.", side: 'bottom' }}
+          ><Info size={14} aria-hidden="true" /></button
+        >
+      {/snippet}
       <Histogram
         edges={sizeEdges}
         counts={stats.box_size_hist.counts}
@@ -144,7 +155,7 @@
         marker={{ x: TINY_SIZE, label: 'tiny' }}
       />
     </Panel>
-    <Panel title="Boxes per image" meta="images" id="ds-per">
+    <Panel title="Boxes per image" meta="how many images have each count" id="ds-per">
       <Histogram
         edges={stats.boxes_per_image_hist.edges}
         counts={stats.boxes_per_image_hist.counts}
@@ -175,6 +186,24 @@
   }
   :global([data-theme='dark']) .kpis {
     border-color: var(--line-subtle);
+  }
+  .how {
+    display: grid;
+    place-items: center;
+    width: 24px;
+    height: 24px;
+    border-radius: var(--radius-sm);
+    color: var(--text-tertiary);
+  }
+  .how:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+  }
+  @media (pointer: coarse) {
+    .how {
+      width: 44px;
+      height: 44px;
+    }
   }
   .kpi {
     display: grid;

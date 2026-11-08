@@ -223,7 +223,7 @@
         {#if live}{(progress * 100).toFixed(1)}% · {run.eta_s !== null ? `${eta(run.eta_s)} left` : 'estimating…'}{#if closeFrom < 1}<span class="hatch-key">&nbsp;· <i aria-hidden="true"></i>no mosaic</span>{/if}{:else}{elapsed !== null ? `${duration(elapsed)} total` : '—'}{/if}
       </span>
     </div>
-    <!-- Up to 1199 px: one picker instead of six cells; the chart below shows what it names. Phones carry it in the
+    <!-- Below 960 px: one picker instead of six cells; the chart below shows what it names. Phones carry it in the
          chart header instead. -->
     {#if !narrow}<div class="phone-metric">{@render picker()}</div>{/if}
     <!-- svelte-ignore a11y_interactive_supports_focus -->
@@ -505,6 +505,8 @@
     flex-wrap: wrap;
   }
   @media (max-width: 1199px) {
+    /* Laptops: the epoch becomes a one-line row over the six tabs, which keep their values in one row (scrolling
+       sideways only if a narrow window cannot fit them). */
     .strip {
       grid-template-columns: minmax(0, 1fr);
     }
@@ -524,7 +526,38 @@
       font-size: var(--type-2xl-size);
       line-height: 32px;
     }
-    /* Up to 1199 px six large tiles would push the chart down: one compact metric picker instead. */
+    /* 152 px holds the widest value ("7.16 × 10⁻³") unclipped; below 1100 px the tabs go compact (next block). */
+    .tabs {
+      grid-template-columns: repeat(6, minmax(152px, 1fr));
+      overflow-x: auto;
+      scrollbar-width: thin;
+    }
+    .tab {
+      grid-template-rows: 16px 32px 16px;
+      gap: var(--space-1);
+      padding: var(--space-3) var(--space-4);
+    }
+    .tab::after {
+      bottom: 0;
+    }
+  }
+  @media (max-width: 1099px) {
+    /* The low end of the tier: values a step smaller and tighter sides, so all six tabs fit at 960 px (128 px each
+       holds "7.16 × 10⁻³") without scrolling. */
+    .tabs {
+      grid-template-columns: repeat(6, minmax(128px, 1fr));
+    }
+    .tab {
+      padding: var(--space-3);
+    }
+    .val {
+      font-size: var(--type-xl-size);
+      line-height: 32px;
+      letter-spacing: var(--type-xl-tracking);
+    }
+  }
+  @media (max-width: 959px) {
+    /* Below 960 px six tiles would push the chart down: one compact metric picker instead. */
     .tabs {
       display: none;
     }

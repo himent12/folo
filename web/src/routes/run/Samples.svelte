@@ -39,7 +39,7 @@
     return () => ro.disconnect();
   });
   let showAll = $state(false);
-  // Phones: one row each for the header, the key and the confidence slider, so the images start on the first screen.
+  // Phones drop the header's epoch meta (the picker names it).
   const phone = new MediaQuery('max-width: 767px', false);
 
   // Memoise the props the fetcher reads: the parent passes values derived from a run object that changes every
@@ -79,13 +79,17 @@
       <Select size="sm" label="Epoch" bind:value={pick} {options} />
     </div>
   {/snippet}
-  <div class="bar">
-    <div class="legend" aria-hidden="true">
-      <span><i class="solid"></i>prediction</span>
-      <span><i class="dashed"></i>{phone.current ? 'truth' : 'ground truth'}</span>
-      <span class="count-key num">{phone.current ? '7/8 = predicted / true' : '7/8 = predictions / true boxes'}</span>
+  <!-- One toolbar row under the header: the key on the left, the confidence slider (label, track, value) on the
+       right. A narrow panel (the laptop column, phones) shortens the key instead of wrapping it. -->
+  <div class="bar-c">
+    <div class="bar">
+      <div class="legend" aria-hidden="true">
+        <span><i class="solid"></i>prediction</span>
+        <span><i class="dashed"></i><span class="long">ground truth</span><span class="short">truth</span></span>
+        <span class="count-key num"><span class="long">7/8 = predictions / true boxes</span><span class="short">7/8 = predicted / true</span></span>
+      </div>
+      <div class="conf"><Slider label="Min confidence" bind:value={conf} min={0.05} max={0.95} step={0.05} inline /></div>
     </div>
-    <div class="conf"><Slider label="Min confidence" bind:value={conf} min={0.05} max={0.95} step={0.05} inline={phone.current} /></div>
   </div>
   {#if epochsDone === 0}
     <p class="none">Samples appear after the first validation pass.</p>
@@ -139,12 +143,39 @@
     gap: var(--space-2);
     align-items: center;
   }
+  .bar-c {
+    container-type: inline-size;
+    margin-bottom: var(--space-3);
+  }
   .bar {
     display: flex;
-    align-items: flex-end;
+    align-items: center;
     justify-content: space-between;
-    gap: var(--space-4);
-    margin-bottom: var(--space-3);
+    gap: var(--space-2) var(--space-4);
+    min-height: var(--control-sm);
+  }
+  .legend .short {
+    display: none;
+  }
+  @container (max-width: 640px) {
+    .legend .long {
+      display: none;
+    }
+    .legend .short {
+      display: inline;
+    }
+  }
+  /* Too narrow for one row (phones): the key, then the slider across the full width. */
+  @container (max-width: 560px) {
+    .bar {
+      flex-direction: column;
+      align-items: stretch;
+    }
+    .bar .conf {
+      flex: none;
+      width: 100%;
+      min-width: 0;
+    }
   }
   .legend {
     display: flex;
@@ -153,7 +184,7 @@
     font-size: var(--type-sm-size);
     color: var(--text-tertiary);
   }
-  .legend span {
+  .legend > span {
     display: inline-flex;
     align-items: center;
     gap: 6px;
@@ -174,7 +205,8 @@
     border: 1px dashed var(--text-secondary);
   }
   .conf {
-    width: 220px;
+    flex: 0 1 260px;
+    min-width: 220px;
   }
   /* Thumbnails at least ~150 px wide, so boxes and prediction / truth outlines stay readable. */
   .grid {
@@ -241,14 +273,6 @@
   @media (max-width: 767px) {
     .grid {
       grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
-    .bar {
-      flex-direction: column;
-      align-items: stretch;
-      gap: var(--space-2);
-    }
-    .conf {
-      width: 100%;
     }
     .ctl :global(.seg) {
       display: none;

@@ -1,5 +1,6 @@
 <script lang="ts">
   import ArrowLeft from '@lucide/svelte/icons/arrow-left';
+  import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
   import Download from '@lucide/svelte/icons/download';
   import ScanSearch from '@lucide/svelte/icons/scan-search';
@@ -7,7 +8,7 @@
   import { MediaQuery } from 'svelte/reactivity';
   import { hub } from '$lib/api/index.svelte';
   import { fromModelEval, reduceConfusion } from '$lib/api/evaluation';
-  import { archInfo } from '$lib/api/mock/runs';
+  import { e2eMs } from '$lib/benchmarks';
   import { Resource } from '$lib/api/resource.svelte';
   import type { Dataset, Model, Run } from '$lib/api/types';
   import ConfusionMatrix from '$lib/charts/ConfusionMatrix.svelte';
@@ -146,8 +147,8 @@
     matrixView?.reveal(at.r, at.c);
   }
 
-  /** The architecture's published 640 px reference time, scaled by input area. */
-  const latency = (m: Model) => archInfo[m.arch].ms * (m.imgsz / 640) ** 2;
+  /** The architecture's measured end-to-end time at 640 px (docs/BENCHMARKS.md), or undefined when not measured. */
+  const latency = (m: Model): number | undefined => e2eMs[m.arch];
   const kpis = (m: Model) => [
     { label: 'mAP50-95', value: m.metrics?.map50_95, sub: 'IoU 0.50:0.95', rest: ', all classes' },
     { label: 'mAP50', value: m.metrics?.map50, sub: 'IoU 0.50', rest: '' },
@@ -251,9 +252,13 @@
             <div class="kv">
               <dt>Latency</dt>
               <dd class="latency">
-                <span class="num">Reference ~{latency(m).toFixed(1)} ms</span>
-                <!-- A scaled hint, not a measurement: say exactly what it assumes. -->
-                <span class="faint">RTX 4080-class GPU · {m.imgsz} px · fp32</span>
+                <!-- Measured for the architecture (docs/BENCHMARKS.md), never scaled or estimated: say exactly what it is. -->
+                {#if latency(m) !== undefined}
+                  <span class="num">{latency(m)!.toFixed(2)} ms{m.imgsz !== 640 ? ' at 640 px' : ''}</span>
+                  <span class="faint">End to end, one image · RTX 4080 SUPER · fp32</span>
+                {:else}
+                  <span class="faint">Not measured for {m.arch} yet</span>
+                {/if}
               </dd>
             </div>
             <div class="kv wide">
@@ -293,11 +298,11 @@
           <Panel pad="none" id="details">
             <button type="button" class="d-line" aria-expanded={detailsOpen} aria-controls="model-details" onclick={() => (detailsOpen = !detailsOpen)}>
               <span class="d-sum num truncate">
-                <span class="mono">{m.arch}</span><span class="sep" aria-hidden="true">·</span>{m.imgsz} px<span class="d-lat"
-                  ><span class="sep" aria-hidden="true">·</span><span title="Reference latency: RTX 4080-class GPU, {m.imgsz} px, fp32"
-                    >~{latency(m).toFixed(1)} ms ref.</span
-                  ></span
-                ><span class="sep" aria-hidden="true">·</span>{bytes(m.bytes, prefs.units)}
+                <span class="mono">{m.arch}</span><span class="sep" aria-hidden="true">·</span>{m.imgsz} px{#if latency(m) !== undefined}<span class="d-lat"
+                    ><span class="sep" aria-hidden="true">·</span><span title="Measured end to end at 640 px: RTX 4080 SUPER, fp32, one image"
+                      >{latency(m)!.toFixed(2)} ms{m.imgsz !== 640 ? ' at 640 px' : ''}</span
+                    ></span
+                  >{/if}<span class="sep" aria-hidden="true">·</span>{bytes(m.bytes, prefs.units)}
               </span>
               <span class="d-verb">Details <ChevronRight size={14} aria-hidden="true" /></span>
             </button>
@@ -310,11 +315,11 @@
     </div>
     <!-- Full width: the matrix grows with the class count, and the rail beside it would sit empty. -->
     <div class="cm-part" class:off={!showing('confusion')}>
-      <Panel title="Confusion matrix" meta={cm?.partial ? `top ${CM_MAX} of ${m.classes.length} classes` : 'row-normalised'} id="cm">
+      <Panel title="Confusion matrix" meta={cm?.partial ? `top ${CM_MAX} of ${m.classes.length} classes` : 'share of each true class'} id="cm">
         {#if cm}
-          <!-- Matrix left (square, so it stays compact), what to read from it on the right. Up to 1199 px the two
-               consequential cells lead (a phone's matrix scrolls sideways, hiding the background column), and the
-               reading notes follow the matrix. -->
+          <!-- 8 + 4, on the grid of the panels above: the matrix in the main column, what to read from it in the side
+               column (aligned with the Details rail). Up to 1199 px the two consequential cells lead (a phone's
+               matrix scrolls sideways, hiding the background column), and the reading notes follow the matrix. -->
           <div class="cm-layout">
             <div class="cm-main"><ConfusionMatrix bind:this={matrixView} classes={cm.classes} classIds={cm.ids} matrix={cm.matrix} label="Confusion matrix of {m.name}" sparseLabels minCell={32} scale /></div>
             {#if confused || missed}
@@ -333,7 +338,7 @@
                 {/if}
                 {#if missed}
                   <div>
-                    <dt>Missed (background)</dt>
+                    <dt>Most missed</dt>
                     <dd>
                       {#if missed.worst}
                         {@const w = missed.worst}
@@ -350,11 +355,19 @@
               </dl>
             {/if}
             <div class="cm-notes">
-              <p>Rows are the true class, columns the prediction; each row sums to 100%. The diagonal is correct; the last
-                column is missed objects and the last row false detections on background.</p>
-              {#if cm.partial}
-                <p>Top {CM_MAX} classes by instances; the other {m.classes.length - CM_MAX} are folded into Other.</p>
-              {/if}
+              <p>Each row is one true class, split by what the model predicted for its objects. The diagonal is right;
+                the background column is objects it missed.</p>
+              <details class="how">
+                <summary><ChevronDown size={14} aria-hidden="true" />How the shares are computed</summary>
+                <div class="how-body">
+                  <p>Each row sums to 100% of that class's ground-truth boxes at IoU 0.5. Cells under 10% are not
+                    labelled; hover or tap one for its count.</p>
+                  <p>The background row splits the false detections (boxes on no object) by the class they were given.</p>
+                  {#if cm.partial}
+                    <p>The {CM_MAX} most frequent classes are shown; the other {m.classes.length - CM_MAX} are folded into Other.</p>
+                  {/if}
+                </div>
+              </details>
             </div>
           </div>
         {:else if evaluation.error}
@@ -426,11 +439,11 @@
     line-height: 40px;
     letter-spacing: var(--type-3xl-tracking);
   }
+  /* Panels in a row end together: the rail stretches to the PR panel's height. */
   .detail {
     display: grid;
     grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
     gap: var(--space-4);
-    align-items: start;
   }
   .main-col,
   .rail {
@@ -475,16 +488,17 @@
     grid-area: main;
     min-width: 0;
   }
+  /* The same 2 : 1 split as the panels above. Inside the panel's 16 px padding, an 80 px column gap puts the side
+     column's text on the Details rail's text edge (rail edge + 16). */
   .cm-layout {
     display: grid;
-    grid-template-columns: minmax(0, auto) minmax(220px, 320px);
+    grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
     grid-template-rows: auto 1fr;
     grid-template-areas:
       'main sum'
       'main notes';
-    gap: var(--space-4) var(--space-8);
+    gap: var(--space-4) calc(var(--space-16) + var(--space-4));
     align-items: start;
-    justify-content: start;
   }
   @media (max-width: 1199px) {
     .cm-layout {
@@ -542,9 +556,45 @@
     grid-area: notes;
     display: grid;
     gap: var(--space-2);
+    max-width: 60ch;
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
+    color: var(--text-secondary);
+  }
+  /* Secondary explanation: how the figures are made, folded until asked for. */
+  .how summary {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    min-height: 24px;
+    list-style: none;
+    cursor: pointer;
     color: var(--text-tertiary);
+    border-radius: var(--radius-sm);
+  }
+  .how summary::-webkit-details-marker {
+    display: none;
+  }
+  .how summary:hover {
+    color: var(--text-primary);
+  }
+  .how summary :global(svg) {
+    transform: rotate(-90deg);
+    transition: transform var(--dur-fast) var(--ease-standard);
+  }
+  .how[open] summary :global(svg) {
+    transform: none;
+  }
+  .how-body {
+    display: grid;
+    gap: var(--space-2);
+    padding-top: var(--space-1);
+    color: var(--text-tertiary);
+  }
+  @media (pointer: coarse) {
+    .how summary {
+      min-height: 44px;
+    }
   }
   .none {
     color: var(--text-tertiary);
@@ -667,6 +717,7 @@
   @media (max-width: 1199px) {
     .detail {
       grid-template-columns: minmax(0, 1fr);
+      align-items: start;
     }
     .rail {
       position: static;

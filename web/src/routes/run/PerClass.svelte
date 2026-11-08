@@ -61,7 +61,7 @@
                 {c.map50_95.toFixed(3)}
                 {#if Math.abs(c.delta) >= 0.0005}
                   <span class="delta" class:up={c.delta > 0} class:down={c.delta < 0} aria-label="{c.delta > 0 ? 'up' : 'down'} {Math.abs(c.delta).toFixed(3)} since the previous epoch"
-                    >{c.delta > 0 ? '+' : '−'}{Math.abs(c.delta).toFixed(3)}</span
+                    >{c.delta > 0 ? '▲' : '▼'}&#8201;{Math.abs(c.delta).toFixed(3)}</span
                   >
                 {:else}<span class="delta">·</span>{/if}
               </td>
@@ -112,15 +112,17 @@
     font-size: var(--type-sm-size);
     color: var(--text-disabled);
   }
+  /* Direction by mark (▲ / ▼) in ink, not by status hue: a metric moving is not a status. */
   .delta.up {
-    color: var(--success-text);
+    color: var(--text-secondary);
   }
   .delta.down {
-    color: var(--danger-text);
+    color: var(--text-tertiary);
   }
   .bar-col {
     width: 30%;
-    min-width: 80px;
+    /* Low enough that the table fits the rail at 960 px (about 278 px wide). */
+    min-width: 48px;
   }
   .bar {
     display: block;

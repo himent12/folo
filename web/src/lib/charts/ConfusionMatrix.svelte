@@ -3,10 +3,13 @@
    * Confusion matrix: rows are true classes, columns predicted, plus a "background" row/column for misses and false
    * positives. Cells are row-normalised and shaded on one sequential luminance ramp in ink (the diagonal is told apart
    * by position, not hue), counts on hover. `reveal(r, c)` lets a summary elsewhere point at one cell: it scrolls the
-   * cell into view and makes it the active cell, whose counts the readout states.
+   * cell into view and makes it the active cell, whose counts the readout states. A matrix that scrolls sideways
+   * (phones) also gets a whole-matrix overview: every cell as a small square and a band over the columns in view. A tap
+   * on it brings those columns into view; cells are picked in the full matrix, whose cells are large enough to hit.
    */
   import { classColor } from '$lib/design/tokens';
   import { prefs } from '$lib/prefs.svelte';
+  import { overviewGeometry, overviewHit, overviewWindow } from './cmOverview';
   import { CONFUSION_FLIP } from './confusionInk';
   // Cell labels are pure white or black, switched near the ramp's luminance crossover (see ./confusionInk).
   const flip = $derived(CONFUSION_FLIP[prefs.resolvedTheme]);
@@ -80,14 +83,14 @@
    * active cell: scrolled into view past the pinned row labels, focused (so the keyboard continues from it and a
    * screen reader reads it), marked and stated by the readout.
    */
-  export function reveal(r: number, c: number) {
+  export function reveal(r: number, c: number, block: ScrollLogicalPosition = 'center') {
     const cell = root?.querySelector<HTMLElement>(`[data-r="${r}"][data-c="${c}"]`);
     if (!cell) return;
     focus = { r, c };
     cell.focus({ preventScroll: true });
     hovered = pinned = { r, c };
     // scroll-padding keeps the cell clear of the sticky row labels and the faded right edge.
-    cell.scrollIntoView({ block: 'center', inline: 'nearest', behavior: behavior() });
+    cell.scrollIntoView({ block, inline: 'nearest', behavior: behavior() });
   }
   $effect(() => {
     if (!fixed) return;
@@ -123,8 +126,59 @@
     const id = i < classes.length ? (classIds?.[i] ?? i) : -1;
     return id >= 0 ? classColor(id) : 'var(--text-tertiary)';
   };
+
+  const geo = $derived(overviewGeometry(n));
+  const band = $derived(range ? overviewWindow(range.first, range.last, geo) : null);
+  /**
+   * A tap on the overview centres the tapped column in the full matrix (sideways only, so the page does not jump).
+   * Coarse on purpose: the map's squares are far below a touch target, so a near miss only moves the view a column.
+   */
+  function onmap(e: MouseEvent) {
+    const rect = (e.currentTarget as SVGElement).getBoundingClientRect();
+    const hit = overviewHit(e.clientX - rect.left, e.clientY - rect.top, geo, n);
+    const cell = hit && root?.querySelector<HTMLElement>(`[data-r="0"][data-c="${hit.c}"]`);
+    if (!cell) return;
+    const box = root.getBoundingClientRect();
+    const at = cell.getBoundingClientRect();
+    root.scrollTo({ left: root.scrollLeft + at.left - box.left - (box.width - at.width) / 2, behavior: behavior() });
+  }
 </script>
 
+{#snippet readout()}
+  <p class="readout" class:faint={!hovered} id="{uid}-readout">
+    {#if hovered}
+      {@const h = hovered}
+      <b>{names[h.r]}</b> predicted as <b>{names[h.c]}</b>:
+      <span class="num">{(matrix[h.r]?.[h.c] ?? 0).toLocaleString('en-US')}</span> of
+      <span class="num">{(rowSums[h.r] ?? 0).toLocaleString('en-US')}</span>
+      (<span class="num">{(norm(h.r, h.c) * 100).toFixed(1)}%</span>)
+    {:else if range}
+      Tap the map to move to those columns, or a cell for its counts.
+    {:else}
+      Hover, tap or arrow through the cells for counts.
+    {/if}
+  </p>
+{/snippet}
+
+{#if range && band}
+  <!-- The whole matrix at a glance, with the selected cell's figures beside it: the full matrix below shows only a
+       few columns at a time. A pointer shortcut; the grid itself stays the keyboard and screen-reader path. -->
+  <div class="ov">
+    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+    <svg class="ov-map" width={geo.size} height={geo.size} viewBox="0 0 {geo.size} {geo.size}" aria-hidden="true" onclick={onmap}>
+      {#each names as _, r (r)}
+        {#each names as _, c (c)}
+          <rect class="ov-cell" x={c * (geo.cell + geo.gap)} y={r * (geo.cell + geo.gap)} width={geo.cell} height={geo.cell} rx="1" style:--v={norm(r, c)} />
+        {/each}
+      {/each}
+      <rect class="ov-band" x={band.x - 1.5} y="-1.5" width={band.w + 3} height={geo.size + 3} rx="2" />
+      {#if pinned}
+        <rect class="ov-pin" x={pinned.c * (geo.cell + geo.gap) - 1} y={pinned.r * (geo.cell + geo.gap) - 1} width={geo.cell + 2} height={geo.cell + 2} rx="2" />
+      {/if}
+    </svg>
+    {@render readout()}
+  </div>
+{/if}
 {#if range}
   <!-- What the sideways scroll hides: the columns in view, and a way to the last ones (background = missed objects). -->
   <p class="range num">
@@ -136,7 +190,7 @@
 <!-- svelte-ignore a11y_interactive_supports_focus -->
 <div class="cm" class:sparse={sparseLabels} class:fixed class:more-r={moreRight} style:--n={n} style:--min-cell={minCell !== undefined ? `${minCell}px` : undefined} role="grid" aria-label={label} aria-describedby="{uid}-readout" bind:this={root} {onkeydown} {onscroll}>
   <div class="row" role="row">
-    <div class="corner" role="columnheader"><span>true ↓ / pred →</span></div>
+    <div class="corner" role="columnheader"><span>Predicted →</span><span>True ↓</span></div>
     {#each names as name, c (c)}
       <div class="colhead" role="columnheader" title={name}>
         <span class="dot" style:background={dotColor(c)}></span>
@@ -177,22 +231,12 @@
 </div>
 {#if scale}
   <div class="scale" aria-hidden="true">
-    <span>Share of row</span>
+    <span class="scale-name">Share of the true class</span>
     <span class="ramp"></span>
     <span class="ticks"><span>0%</span><span>50%</span><span>100%</span></span>
   </div>
 {/if}
-<p class="readout" class:faint={!hovered} id="{uid}-readout">
-  {#if hovered}
-    {@const h = hovered}
-    <b>{names[h.r]}</b> predicted as <b>{names[h.c]}</b>:
-    <span class="num">{(matrix[h.r]?.[h.c] ?? 0).toLocaleString('en-US')}</span> of
-    <span class="num">{(rowSums[h.r] ?? 0).toLocaleString('en-US')}</span>
-    (<span class="num">{(norm(h.r, h.c) * 100).toFixed(1)}%</span>)
-  {:else}
-    Row-normalised, in %{sparseLabels ? '; cells under 10% unlabelled' : ''}. Hover, tap or arrow through the cells for counts.
-  {/if}
-</p>
+{#if !range}{@render readout()}{/if}
 
 <style>
   .row {
@@ -207,8 +251,8 @@
   }
   /* Fixed minimum cells: the matrix scrolls sideways under pinned row labels. */
   .cm.fixed {
-    /* Cells grow with the panel up to 56 px, so a wide panel does not turn the matrix into a wall. */
-    grid-template-columns: 96px repeat(var(--n), minmax(var(--min-cell), 56px));
+    /* Cells grow with their column up to 72 px, so a wide panel does not turn the matrix into a wall. */
+    grid-template-columns: 96px repeat(var(--n), minmax(var(--min-cell), 72px));
     overscroll-behavior-x: contain;
     /* Scrolling a cell into view stops short of the pinned labels (96 + 2 px gap) and the 24 px fade. */
     scroll-padding-inline: 98px 24px;
@@ -233,12 +277,17 @@
       --min-cell: 44px !important;
     }
   }
+  /* Orientation, at the helper size: what the columns and the rows are. */
   .corner {
     display: flex;
-    align-items: flex-end;
+    flex-direction: column;
+    justify-content: flex-end;
+    gap: 2px;
     color: var(--text-tertiary);
-    font-size: var(--type-micro-size);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
     padding: 0 0 4px;
+    white-space: nowrap;
   }
   .colhead {
     display: flex;
@@ -350,8 +399,38 @@
   }
   .readout {
     margin-top: var(--space-3);
-    font-size: var(--type-xs-size);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
     color: var(--text-secondary);
+  }
+  .ov {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: var(--space-3);
+    align-items: start;
+    margin-bottom: var(--space-3);
+  }
+  .ov .readout {
+    margin-top: 0;
+  }
+  .ov-map {
+    display: block;
+    overflow: visible;
+    cursor: pointer;
+    touch-action: manipulation;
+  }
+  .ov-cell {
+    fill: color-mix(in oklab, var(--text-primary) calc(var(--v) * 90% + 4%), var(--bg-inset));
+  }
+  .ov-band {
+    fill: none;
+    stroke: var(--text-secondary);
+    stroke-width: 1;
+  }
+  .ov-pin {
+    fill: none;
+    stroke: var(--accent-line);
+    stroke-width: 2;
   }
   .readout b {
     color: var(--text-primary);
@@ -370,6 +449,10 @@
     font-size: var(--type-xs-size);
     line-height: var(--type-xs-line);
     color: var(--text-tertiary);
+  }
+  .scale-name {
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
   }
   .ramp {
     height: 8px;

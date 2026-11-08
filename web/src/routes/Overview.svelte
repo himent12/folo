@@ -131,7 +131,7 @@
                   <th>Status</th>
                   <th class="hide-sm">Progress</th>
                   <th class="r">mAP50-95</th>
-                  <th class="hide-sm">Trend</th>
+                  <th class="hide-sm">mAP trend</th>
                   <th class="r hide-sm">Created</th>
                 </tr>
               </thead>
@@ -160,7 +160,7 @@
                   <th>Status</th>
                   <th class="hide-sm">Progress</th>
                   <th class="r">mAP50-95</th>
-                  <th class="hide-sm">Trend</th>
+                  <th class="hide-sm">mAP trend</th>
                   <th class="r hide-sm">Created</th>
                 </tr>
               </thead>

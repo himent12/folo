@@ -1,7 +1,9 @@
 // `use:tooltip={'Text'}` or `use:tooltip={{ text, keys: 'G R', side: 'right' }}`: a small tooltip on hover (after
 // a short delay) and on keyboard focus. One shared element, positioned with fixed coordinates, so it never clips.
 // The node may be a wrapper (a span around a component's button): focus inside it shows the tooltip, and the
-// description goes on the focusable element, which is what assistive technology reads.
+// description goes on the focusable element, which is what assistive technology reads. A tooltip shown by hover stays
+// while the pointer moves onto it (WCAG 1.4.13, hoverable): leaving the trigger or the tooltip hides it after a short
+// grace period, unless the pointer arrives on the other.
 
 import { formatKeys } from '$lib/keys';
 
@@ -9,7 +11,17 @@ export type TooltipOptions = string | { text: string; keys?: string; side?: 'top
 
 let tip: HTMLDivElement | null = null;
 let showTimer: ReturnType<typeof setTimeout> | undefined;
+let hideTimer: ReturnType<typeof setTimeout> | undefined;
 let lastHide = 0;
+/** Hides the tooltip currently shown (set by the trigger that showed it). */
+let hideCurrent: (() => void) | null = null;
+/** Time the pointer has to cross from a trigger to its tooltip (6 px apart) or back. */
+const GRACE_MS = 150;
+
+const leave = () => {
+  clearTimeout(hideTimer);
+  hideTimer = setTimeout(() => hideCurrent?.(), GRACE_MS);
+};
 
 function ensure(): HTMLDivElement {
   if (tip) return tip;
@@ -17,6 +29,8 @@ function ensure(): HTMLDivElement {
   tip.className = 'folo-tooltip';
   tip.setAttribute('role', 'tooltip');
   tip.id = 'folo-tooltip';
+  tip.addEventListener('pointerenter', () => clearTimeout(hideTimer));
+  tip.addEventListener('pointerleave', leave);
   document.body.appendChild(tip);
   return tip;
 }
@@ -66,6 +80,7 @@ export function tooltip(node: HTMLElement, opts: TooltipOptions) {
         el.appendChild(k);
       }
       el.dataset.show = '';
+      hideCurrent = hide;
       const r = node.getBoundingClientRect();
       const t = el.getBoundingClientRect();
       const gap = 6;
@@ -92,6 +107,8 @@ export function tooltip(node: HTMLElement, opts: TooltipOptions) {
   };
 
   const hide = () => {
+    clearTimeout(hideTimer);
+    if (hideCurrent === hide) hideCurrent = null;
     clearTimeout(showTimer);
     if (tip && 'show' in tip.dataset) {
       delete tip.dataset.show;
@@ -101,13 +118,21 @@ export function tooltip(node: HTMLElement, opts: TooltipOptions) {
     release(described);
   };
 
-  const onEnter = () => show(false);
+  const onEnter = () => {
+    clearTimeout(hideTimer);
+    show(false);
+  };
+  // Leaving before the delay is up cancels the pending show; a shown tooltip gets the grace period.
+  const onLeave = () => {
+    if (hideCurrent !== hide) clearTimeout(showTimer);
+    leave();
+  };
   // focusin / focusout bubble: focus on the node or anything inside it (a wrapped button) counts.
   const onFocus = (e: FocusEvent) => {
     if (e.target instanceof HTMLElement && e.target.matches(':focus-visible')) show(true, e.target);
   };
   node.addEventListener('pointerenter', onEnter);
-  node.addEventListener('pointerleave', hide);
+  node.addEventListener('pointerleave', onLeave);
   node.addEventListener('focusin', onFocus);
   node.addEventListener('focusout', hide);
   node.addEventListener('pointerdown', hide);
@@ -120,7 +145,7 @@ export function tooltip(node: HTMLElement, opts: TooltipOptions) {
     destroy() {
       hide();
       node.removeEventListener('pointerenter', onEnter);
-      node.removeEventListener('pointerleave', hide);
+      node.removeEventListener('pointerleave', onLeave);
       node.removeEventListener('focusin', onFocus);
       node.removeEventListener('focusout', hide);
       node.removeEventListener('pointerdown', hide);
