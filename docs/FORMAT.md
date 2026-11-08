@@ -68,7 +68,7 @@ All values are strings; structured values are JSON encoded into a string.
 | `folo.rng` | checkpoint | JSON: `{ "algo": "<generator name from folo_core::rng, e.g. xoshiro256pp>", "seed": <u64>, "streams": { "<stream name>": "<state as lowercase hex of the generator's state words, little-endian>" } }`. Stream names are defined by the trainer (e.g. `data`, `augment`, `init`) |
 | `folo.epoch` | checkpoint | number of completed epochs. In v1, checkpoints are written only at epoch boundaries, so no within-epoch loader position is stored |
 | `folo.metrics` | no | JSON: best validation metrics `{ "map50", "map50_95", "precision", "recall" }` |
-| `folo.best` | checkpoint | JSON: early-stopping state `{ "epoch": <best epoch, -1 if none>, "fitness": <best fitness> }`, see docs/MODEL.md (validation schedule) |
+| `folo.best` | checkpoint | JSON: early-stopping state `{ "epoch": <best epoch, -1 if none>, "fitness": <best fitness, null if none> }`, see docs/MODEL.md (validation schedule) |
 | `folo.created` | no | RFC 3339 timestamp |
 | `folo.version` | no | FOLO version that wrote the file |
 

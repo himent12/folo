@@ -713,7 +713,7 @@ augmentation: resize as above and pad to a square `s × s` (§9.2) only.
 - Best and early stopping: `best_fitness` starts at −∞ and `best_epoch` at −1. After validating epoch `e`, if
   `fitness > best_fitness`, set both and write `best`. Write `last` every epoch. Stop after epoch `e` when
   `e − best_epoch >= patience`. Checkpoints persist `{ "epoch": best_epoch, "fitness": best_fitness }` as
-  `folo.best` (FORMAT.md), so a resume continues the same patience count.
+  `folo.best` (FORMAT.md; `fitness` is `null` while it is −∞), so a resume continues the same patience count.
 - v1 reports training losses only (API `Epoch.train_loss`). Validation loss is not computed.
 
 ## 9. Inference
