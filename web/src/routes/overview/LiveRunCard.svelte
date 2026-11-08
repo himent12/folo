@@ -87,6 +87,7 @@
           series={charts.map}
           height={200}
           xDomain={horizon}
+          yDomain={[0, 1]}
           valueFormat={(v) => v.toFixed(3)}
           xTitle={(x) => `Epoch ${Math.round(x)}`}
           curve="monotone"

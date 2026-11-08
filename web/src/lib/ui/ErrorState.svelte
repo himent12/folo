@@ -39,19 +39,15 @@
 </div>
 
 <style>
+  /* In place of the data, inside the panel that would hold it: no second box, the red is in the icon and title. */
   .err {
     display: flex;
     align-items: flex-start;
     gap: var(--space-3);
-    padding: var(--space-4);
-    margin: var(--space-4);
-    border-radius: var(--radius-md);
-    background: var(--danger-muted);
-    border: 1px solid color-mix(in srgb, var(--danger-solid) 22%, transparent);
+    padding: var(--space-6) var(--space-4);
   }
   .compact {
-    margin: 0;
-    padding: var(--space-3);
+    padding: var(--space-3) 0;
   }
   .icon {
     color: var(--danger-text);
@@ -65,6 +61,7 @@
   }
   .title {
     font-weight: var(--weight-medium);
+    color: var(--danger-text);
   }
   .msg {
     color: var(--text-secondary);
@@ -79,9 +76,30 @@
     font-size: var(--type-xs-size);
   }
   .code summary {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
     cursor: pointer;
     font-family: var(--font-sans);
     width: max-content;
+    list-style: none;
+  }
+  .code summary::-webkit-details-marker {
+    display: none;
+  }
+  /* The system disclosure chevron (as in Config), not the native triangle. */
+  .code summary::before {
+    content: '';
+    width: 5px;
+    height: 5px;
+    margin: 0 2px;
+    border-right: 1.5px solid currentColor;
+    border-bottom: 1.5px solid currentColor;
+    transform: rotate(-45deg);
+    transition: transform var(--dur-fast) var(--ease-standard);
+  }
+  .code[open] summary::before {
+    transform: rotate(45deg);
   }
   .acts {
     display: flex;

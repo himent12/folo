@@ -375,8 +375,8 @@
     width: 44px;
     height: 44px;
     border-radius: 50%;
-    background: var(--info-muted);
-    color: var(--info-text);
+    background: var(--bg-active);
+    color: var(--text-secondary);
   }
   .queued h2 {
     font-size: var(--type-lg-size);

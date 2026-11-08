@@ -75,10 +75,11 @@
   });
 
   const shown = (b: ViewBox) => !only || only.has(b.class);
-  // Small views (phones) get smaller chips, and boxes under 20 px on screen keep their label for hover/selection.
+  // Small views (phones) get smaller chips. Boxes under 20 px on screen keep their label for hover/selection (a chip
+  // would cover the object); their chips are placed and clamped but reserve no slot, so they never push others around.
   const small = $derived(cw > 0 && cw < 480);
   const chipH = $derived(small ? 14 : CHIP_H);
-  const tiny = (b: ViewBox) => !!geo && small && Math.min(b.x2 - b.x1, b.y2 - b.y1) * geo.s < 20;
+  const tiny = (b: ViewBox) => !!geo && Math.min(b.x2 - b.x1, b.y2 - b.y1) * geo.s < 20;
   const name = (c: number) => classes[c] ?? `class ${c}`;
 
   /** Label chips placed in screen pixels (see ./chips). Widths are estimated from the text (11 px Geist). */
@@ -92,6 +93,10 @@
               x: g.ox + b.x1 * g.s,
               y: g.oy + b.y1 * g.s,
               w: Math.ceil(name(b.class).length * (small ? 5.8 : 6.4) + (small ? 10 : 12) + (scores && b.score !== undefined ? (small ? 28 : 32) : 0)),
+              bw: (b.x2 - b.x1) * g.s,
+              bh: (b.y2 - b.y1) * g.s,
+              // A tiny box's label shows only on hover / selection: placed and clamped, but it reserves no slot.
+              reserve: !tiny(b),
             }
           : null,
       ),

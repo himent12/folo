@@ -150,28 +150,6 @@
             <div class="sk"><Skeleton h="24px" w="200px" /><Skeleton h="300px" /></div>
           {/if}
         </Panel>
-        <Panel title="Confusion matrix" meta={cm?.partial ? `top ${CM_MAX} of ${m.classes.length} classes` : 'row-normalised'} id="cm">
-          {#if cm}
-            {#if cm.partial || confused}
-              <div class="cm-notes">
-                {#if confused}
-                  <p class="confused">
-                    Most confused: <b>{m.classes[confused.r]}</b> → <b>{m.classes[confused.c]}</b>
-                    <span class="num">{num(confused.v * 100, 1)} %</span>
-                  </p>
-                {/if}
-                {#if cm.partial}
-                  <p>Top {CM_MAX} classes by instances; the other {m.classes.length - CM_MAX} are folded into Other.</p>
-                {/if}
-              </div>
-            {/if}
-            <ConfusionMatrix classes={cm.classes} classIds={cm.ids} matrix={cm.matrix} label="Confusion matrix of {m.name}" sparseLabels minCell={32} scale />
-          {:else if evaluation.error}
-            <p class="none">No evaluation available.</p>
-          {:else}
-            <Skeleton h="300px" />
-          {/if}
-        </Panel>
       </div>
 
       <aside class="rail" aria-label="Model details">
@@ -217,6 +195,32 @@
         </Panel>
       </aside>
     </div>
+    <!-- Full width: the matrix grows with the class count, and the rail beside it would sit empty. -->
+    <Panel title="Confusion matrix" meta={cm?.partial ? `top ${CM_MAX} of ${m.classes.length} classes` : 'row-normalised'} id="cm">
+      {#if cm}
+        <!-- Matrix left (square, so it stays compact), what to read from it on the right. -->
+        <div class="cm-layout">
+          <div class="cm-main"><ConfusionMatrix classes={cm.classes} classIds={cm.ids} matrix={cm.matrix} label="Confusion matrix of {m.name}" sparseLabels minCell={32} scale /></div>
+          <div class="cm-notes">
+            {#if confused}
+              <p class="confused">
+                Most confused: <b>{m.classes[confused.r]}</b> → <b>{m.classes[confused.c]}</b>
+                <span class="num">{num(confused.v * 100, 1)} %</span>
+              </p>
+            {/if}
+            <p>Rows are the true class, columns the prediction; each row sums to 100 %. The diagonal is correct; the last
+              column is missed objects and the last row false detections on background.</p>
+            {#if cm.partial}
+              <p>Top {CM_MAX} classes by instances; the other {m.classes.length - CM_MAX} are folded into Other.</p>
+            {/if}
+          </div>
+        </div>
+      {:else if evaluation.error}
+        <p class="none">No evaluation available.</p>
+      {:else}
+        <Skeleton h="300px" />
+      {/if}
+    </Panel>
   </Page>
   <ExportDialog model={m} bind:open={exportOpen} />
 {/if}
@@ -297,10 +301,28 @@
     gap: var(--space-2);
     padding: 0 var(--space-4) var(--space-4);
   }
+  .cm-main {
+    min-width: 0;
+  }
+  .cm-layout {
+    display: grid;
+    grid-template-columns: minmax(0, auto) minmax(220px, 320px);
+    gap: var(--space-8);
+    align-items: start;
+    justify-content: start;
+  }
+  @media (max-width: 1199px) {
+    .cm-layout {
+      grid-template-columns: minmax(0, 1fr);
+      gap: var(--space-4);
+    }
+    .cm-layout .cm-notes {
+      order: -1;
+    }
+  }
   .cm-notes {
     display: grid;
-    gap: 2px;
-    margin-bottom: var(--space-3);
+    gap: var(--space-2);
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
     color: var(--text-tertiary);

@@ -43,6 +43,8 @@
      baseline whatever it contains. */
   .value {
     display: block;
+    /* A fixed row: glyphs from a fallback font (superscripts like ⁻³) cannot grow the line box. */
+    height: var(--type-lg-line);
     font-size: var(--type-lg-size);
     line-height: var(--type-lg-line);
     letter-spacing: var(--type-lg-tracking);
@@ -53,10 +55,12 @@
     text-overflow: ellipsis;
   }
   .sm .value {
+    height: var(--type-md-line);
     font-size: var(--type-md-size);
     line-height: var(--type-md-line);
   }
   .lg .value {
+    height: var(--type-3xl-line);
     font-size: var(--type-3xl-size);
     line-height: var(--type-3xl-line);
     letter-spacing: var(--type-3xl-tracking);
