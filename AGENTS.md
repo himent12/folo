@@ -5,7 +5,7 @@ FOLO is built almost entirely by AI agents coordinated from one orchestrator thr
 
 ## What FOLO is
 A from-scratch, very fast vision framework in Rust (a YOLO-style object detector, plus training, evaluation and export)
-with two front ends with one design language: **FOLO Studio**, a web app (`web/`), and **FOLO Desktop**, a native
+with two front ends sharing one design language: **FOLO Studio**, a web app (`web/`), and **FOLO Desktop**, a native
 GPUI app (`apps/desktop/`), for datasets, training runs and live inference. It is meant to be pleasant for people and
 easy for agents to drive (`--json` everywhere, an MCP server, stable exit codes).
 
