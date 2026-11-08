@@ -1079,3 +1079,49 @@ Round 28 changes:
   - The inspector header is "x, y · w×h (px)".
   - The chip row is "Classes · box counts".
 - **Empty Playground drop zone:** uses the panel surface.
+
+## Round 28
+
+| Line | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | avg |
+|------|---|---|---|---|---|---|---|---|---|----|----|----|-----|
+| Opus 5.5 | 9 | 9 | 9 | 8 | 8 | 9 | 9 | 9 | 9 | 9 | 9 | 8 | 8.8 |
+| GPT-6.1 Sol | 8 | 9 | 9 | 8 | 8 | 8 | 8 | 9 | 8 | 8 | 8 | 8 | 8.3 |
+
+Opus is at 8.8, its best yet, with nine lines at 9. Two rendering defects decided its remaining lines:
+- The PR legend rows needed 250 px in a 236 px column.
+- A 1 px seam at the slider fill's lead.
+
+Opus also flagged:
+- The wrapped KPI grid.
+- The ragged Overview KPI row.
+- The palette's grey Stop.
+- The `<1%` matrix cells' jump.
+- The inspector's floating zoom pill.
+
+Sol flagged:
+- The compact New run help icons, outside the modal's keyboard scope.
+- A dismissed New run losing its configuration.
+- "Server" shown for the demo.
+- The fade over visible form controls.
+- The picker below the fold.
+- Rail icons without focus labels.
+- No pressed state on palette rows.
+
+Round 29 changes:
+- **New run:**
+  - Esc, the scrim and Cancel keep the form as a draft; the next plain New run reopens it. Opening it for a dataset, from a run or on a new server starts fresh.
+  - The compact help icons are `nr-` handles, so Tab reaches them.
+- **Playground:**
+  - With the built-in demo, Run on reads "Demo", with "Built-in demo · simulated inference".
+  - The validation-image picker follows the controls, ahead of the results.
+- **Collapsed rail:** a focused icon shows its name and shortcut.
+- **Model page:**
+  - The PR legend fits its 220 px row: 14 px swatch, 68 px name, 70 px P, 44 px AP50, three 8 px gaps. The summary row's spacer matches the swatch.
+  - `<1%` confusion cells sit on the error ramp at their value.
+- **Run page:** the wrapped KPI row is back on a 3-column grid. Throughput spans two columns, and its sparkline fills that tile, so no hole opens.
+- **Overview:** Throughput and Time left get "avg N" and "N elapsed" lines.
+- **Controls:**
+  - The slider's lead fill overlaps the proportional fill by 1 px (no seam).
+  - Palette rows have a pressed state, and Stop is in danger text.
+- **Inspector:** the zoom controls sit in the top bar before Close, as in Playground.
+- **Review brief:** the toolbar latency in Playground is a settled decision (both reviewers asked for it in round 25).
