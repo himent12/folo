@@ -44,6 +44,7 @@ impl FoloApp {
                 Btn::Primary,
                 Some("icons/plus.svg"),
                 "Add a dataset first",
+                window,
                 cx,
             )
             .into_any_element()
@@ -468,8 +469,8 @@ impl FoloApp {
         let t = theme(cx);
         // One row of five; very narrow windows wrap to two rows, one type step smaller.
         let narrow = window_w < 1000.;
-        // Short or wrapped: 64 px tiles (label and value only) so both primary charts stay on screen.
-        let compact = narrow || short;
+        // Short windows: tighter tiles (padding only; every value keeps its detail line).
+        let compact = short;
         let big = if narrow { ty::XL } else { ty::X2XL };
         let live = r.status == RunStatus::Running;
         // Change since the previous epoch only means something while training.
@@ -505,7 +506,7 @@ impl FoloApp {
                 .min_w_0()
                 .child(caption(&t, label))
                 .child(duration_metric(&t, secs, big, ty::SM))
-                .when(!compact, |d| d.child(detail))
+                .child(detail)
         };
         let time_tile = if live || r.status == RunStatus::Queued {
             duration_tile(
@@ -534,30 +535,26 @@ impl FoloApp {
                 .gap(px(6.))
                 .child(caption(&t, "Epoch"))
                 .child(metric(&t, r.epoch.to_string(), &format!("/ {}", r.epochs), big, ty::SM))
-                .when(!compact, |d| {
-                    d.child(div().pt(px(6.)).child(progress(
-                        &t,
-                        r.progress(),
-                        if live { t.accent_fill() } else { t.text_tertiary },
-                        3.,
-                    )))
-                }),
-            stat(
+                .child(div().pt(px(if compact { 4. } else { 6. })).child(progress(
+                    &t,
+                    r.progress(),
+                    if live { t.accent_fill() } else { t.text_tertiary },
+                    3.,
+                ))),
+            stat_sized(
                 &t,
                 if live { "mAP50-95 · latest" } else { "mAP50-95 · final" },
                 last.map_or("–".into(), |e| f3(e.val.map50_95)),
-                "",
-                delta
-                    .or_else(|| {
-                        r.best.as_ref().map(|b| {
-                            text(ty::XS, t.text_tertiary).tnum().child(format!(
-                                "best {} @ {}",
-                                f3(b.map50_95),
-                                b.epoch
-                            ))
-                        })
+                big,
+                delta.or_else(|| {
+                    r.best.as_ref().map(|b| {
+                        text(ty::XS, t.text_tertiary).tnum().child(format!(
+                            "best {} @ {}",
+                            f3(b.map50_95),
+                            b.epoch
+                        ))
                     })
-                    .filter(|_| !compact),
+                }),
             ),
             div()
                 .flex()
@@ -581,7 +578,7 @@ impl FoloApp {
                                 .child(last.map_or("–".into(), |e| format!("{:.3}", e.val.recall))),
                         ),
                 )
-                .when(!compact, |d| d.child(text(ty::XS, t.text_tertiary).child("on the validation split"))),
+                .child(text(ty::XS, t.text_tertiary).child("on the validation split")),
             div()
                 .flex()
                 .flex_col()
@@ -605,11 +602,9 @@ impl FoloApp {
                             }),
                         ),
                 )
-                .when(!compact, |d| {
-                    d.child(text(ty::XS, t.text_tertiary).tnum().child(
-                        ips_avg.map_or(String::new(), |a| format!("avg {a:.0} · last {} steps", ips.len())),
-                    ))
-                }),
+                .child(text(ty::XS, t.text_tertiary).tnum().child(
+                    ips_avg.map_or(String::new(), |a| format!("avg {a:.0} · last {} steps", ips.len())),
+                )),
             time_tile,
         ];
         let tile = |content: gpui::Div| {
@@ -718,6 +713,12 @@ impl FoloApp {
             primary_h,
         );
         map.y_range = Some((0., 1.));
+        if live {
+            map.future = Some((
+                r.epoch as f32,
+                r.eta_s.map_or("remaining".into(), |s| format!("ETA {}", time::duration(s)).into()),
+            ));
+        }
         map.y_fmt = Some(|v| format!("{v:.2}"));
         if let Some(b) = &r.best {
             map.dots.push((b.epoch as f32, b.map50_95, t.accent_fill()));
@@ -744,6 +745,7 @@ impl FoloApp {
             secondary_h,
         );
         pr.y_range = Some((0., 1.));
+        pr.y_ticks = if short { 2 } else { 4 };
         pr.y_fmt = Some(|v| format!("{v:.2}"));
         pr.y_ticks = 3;
         let mut lr = base(

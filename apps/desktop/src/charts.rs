@@ -792,7 +792,8 @@ fn paint_line_chart(
             window,
             cx,
             label,
-            point(plot.right() - w - px(6.), plot.top() + px(4.)),
+            // At the start of the span (where "now" is), clear of event markers further right.
+            point((fx + px(6.)).min(plot.right() - w - px(6.)), plot.top() + px(4.)),
             t.text_tertiary,
             label_size,
             false,

@@ -69,21 +69,25 @@ impl FoloApp {
             .when(params_col, |d| d.child(num_cell(72., th(&t, "Params"))))
             .child(self.sort_th("size", "Size", 72., true, window, cx))
             .child(self.sort_th("created", "Created", 84., true, window, cx));
-        let models = models.map(|mut m| {
-            if let Some((k, desc)) = self.models_sort {
-                let score = |m: &Model| -> f64 {
-                    match k {
-                        "map" => m.metrics.as_ref().map_or(-1., |x| x.map50_95 as f64),
-                        "size" => m.bytes as f64,
-                        _ => time::parse(&m.created).map_or(0., |c| c as f64),
-                    }
+        let src = self.store.models.ready().map_or(0, |v| v.as_ptr() as usize);
+        let models = models.map(|m| {
+            let Some((k, desc)) = self.models_sort else { return m };
+            let key = (src, m.len(), k, desc);
+            let mut cache = self.models_order.borrow_mut();
+            if cache.as_ref().is_none_or(|(c, _)| *c != key) {
+                let score = |m: &Model| -> i64 {
+                    let v = match k {
+                        "map" => m.metrics.as_ref().map_or(-1, |x| (x.map50_95 * 1e6) as i64),
+                        "size" => m.bytes as i64,
+                        _ => time::parse(&m.created).unwrap_or(0),
+                    };
+                    if desc { -v } else { v }
                 };
-                m.sort_by(|a, b| {
-                    let o = score(a).total_cmp(&score(b));
-                    if desc { o.reverse() } else { o }
-                });
+                let mut idx: Vec<usize> = (0..m.len()).collect();
+                idx.sort_by_cached_key(|&i| score(&m[i]));
+                *cache = Some((key, idx));
             }
-            m
+            cache.as_ref().map_or(m.clone(), |(_, idx)| idx.iter().map(|&i| m[i].clone()).collect())
         });
         let body = match models {
             None => panel(&t).child(head).child(loading_rows(&t, "models", 4)).into_any_element(),
@@ -385,16 +389,20 @@ impl FoloApp {
                 window,
                 cx,
                 act(move |this, _, cx| {
-                    if this.export_open {
-                        let fmt = fmts[this.export_hl.min(fmts.len() - 1)];
-                        this.export_model(mid.clone(), fmt, cx);
-                    } else {
-                        this.export_open = true;
-                        this.export_hl = 0;
-                    }
+                    this.export_open = !this.export_open;
+                    this.export_hl = 0;
                     cx.notify();
                 }),
             )
+            // Captured before the button's own Enter/Space toggle.
+            .capture_key_down(cx.listener(move |this, ev: &gpui::KeyDownEvent, _, cx| {
+                if this.export_open && matches!(ev.keystroke.key.as_str(), "enter" | "space") {
+                    let fmt = fmts[this.export_hl.min(fmts.len() - 1)];
+                    this.export_model(mid.clone(), fmt, cx);
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }))
             .when(open, |d| {
                 let cell = self.menu_trigger.clone();
                 d.child(
@@ -542,7 +550,8 @@ impl FoloApp {
                 .iter()
                 .any(|k| self.focus.borrow().get(k.as_str()).is_some_and(|f| f.is_focused(window)))
         });
-        self.pr_focus.or(focused).or(self.pr_pin)
+        // A pin from another evaluation never applies here.
+        self.pr_focus.or(focused).or(self.pr_pin).filter(|c| ev.pr.iter().any(|p| p.class == *c))
     }
 
     fn pr_panel(
@@ -641,6 +650,7 @@ impl FoloApp {
         chart.x_fmt = |v| format!("{v:.2}");
         chart.x_name = "recall";
         chart.axis_titles = Some(("Recall", "Precision"));
+        chart.x_ticks = Some(4);
         // As tall as the confusion matrix beside it (its rows set the panel height).
         chart.height = (32. * ev.confusion.len() as f32 + 76.).max(220.);
         chart.hover = self.pr_hover;
@@ -651,7 +661,10 @@ impl FoloApp {
             .flex_1()
             .flex()
             .flex_col()
-            .child(panel_header(&t, "Precision–recall").child(caption(&t, "precision vs recall · IoU 0.50")))
+            .child(
+                panel_header(&t, "Precision–recall")
+                    .child(caption(&t, "IoU 0.50 · hover a class to isolate, click to pin")),
+            )
             .child(
                 div()
                     .flex()
@@ -753,14 +766,14 @@ impl FoloApp {
                     let fill = if na {
                         gpui::transparent_black()
                     } else if v == 0 || tiny {
-                        t.bg_inset
+                        crate::theme::over(t.bg_panel, t.bg_hover)
                     } else {
                         // Correct cells in the series blue; errors on a danger ramp (square root over
                         // 0–100 %), so 2 %, 10 %, 22 % and 25 % stay visibly apart.
                         if diag {
                             crate::theme::over(t.bg_inset, alpha(base, (0.35 + 0.6 * frac).min(0.95)))
                         } else {
-                            crate::theme::over(t.bg_inset, alpha(t.danger_solid, err_alpha(frac)))
+                            crate::theme::over(t.bg_panel, alpha(t.danger_solid, err_alpha(frac)))
                         }
                     };
                     let label = if na {
@@ -807,6 +820,16 @@ impl FoloApp {
             .flex()
             .items_center()
             .gap(px(6.))
+            .child(
+                div()
+                    .w(px(10.))
+                    .h(px(10.))
+                    .rounded(px(2.))
+                    .bg(crate::theme::over(t.bg_inset, alpha(base, 0.8)))
+                    .border_1()
+                    .border_color(alpha(base, 0.9)),
+            )
+            .child(text(ty::XS, t.text_tertiary).mr(px(6.)).child("correct"))
             .child(text(ty::XS, t.text_tertiary).child("errors 0%"))
             .child(div().flex().h(px(8.)).w(px(96.)).rounded(px(2.)).overflow_hidden().children((0..12).map(
                 |i| {
@@ -881,9 +904,7 @@ impl FoloApp {
             .h(px(36.))
             .border_b_1()
             .border_color(t.line_subtle)
-            .child(div().flex_1().flex().items_center().gap(px(8.)).child(th(&t, "Class")).child(
-                text(ty::XS, t.text_tertiary).child("· hover to isolate a curve, Enter or click to pin"),
-            ))
+            .child(th(&t, "Class").flex_1())
             .child(th(&t, "AP50").w(px(140.)))
             .child(th(&t, "AP50-95").w(px(140.)))
             .child(th(&t, "Precision").w(px(140.)))
@@ -973,7 +994,7 @@ fn num_cell(w: f32, content: impl IntoElement) -> gpui::Div {
 
 /// Fill opacity of an error cell: a square-root ramp over the whole 0–100 % range.
 fn err_alpha(frac: f32) -> f32 {
-    0.08 + 0.72 * frac.clamp(0., 1.).sqrt()
+    0.1 + 0.7 * frac.clamp(0., 1.).sqrt()
 }
 
 /// Weight precision inferred from file size per parameter (the API doesn't report it).

@@ -160,6 +160,7 @@ impl FoloApp {
         kind: Btn,
         icon_path: Option<&'static str>,
         reason: &'static str,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let t = theme(cx);
@@ -167,6 +168,8 @@ impl FoloApp {
         let _ = kind;
         let (bg, fg, border) = (t.bg_inset, t.text_disabled, Some(t.line_default));
         let label: SharedString = label.into();
+        let fh = self.fh(format!("{key}-disabled"), cx);
+        let ring = self.ring(&fh, window);
         div()
             .id(SharedString::from(format!("{key}-disabled")))
             .h(px(tsize::CONTROL_MD))
@@ -183,6 +186,25 @@ impl FoloApp {
             .tooltip(tip(reason, None))
             .when_some(icon_path, |d, p| d.child(icon(p, 14., fg)))
             .child(text(ty::BASE, fg).font_weight(FontWeight::MEDIUM).whitespace_nowrap().child(label))
+            // Focusable, so keyboard users reach it; focus shows the reason the tooltip gives on hover.
+            .relative()
+            .track_focus(&fh)
+            .when(ring, |d| {
+                d.child(focus_ring(&t, radius::MD)).child(
+                    div()
+                        .absolute()
+                        .top(px(tsize::CONTROL_MD + 6.))
+                        .right_0()
+                        .px(px(8.))
+                        .py(px(4.))
+                        .rounded(px(radius::SM))
+                        .bg(t.bg_overlay)
+                        .border_1()
+                        .border_color(t.line_default)
+                        .shadow(t.shadow_lg())
+                        .child(text(ty::XS, t.text_secondary).whitespace_nowrap().child(reason)),
+                )
+            })
     }
 
     pub fn icon_button(

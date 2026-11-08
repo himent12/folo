@@ -52,7 +52,15 @@ impl FoloApp {
         };
         let new_run = match blocked {
             Some(reason) => self
-                .button_disabled("ov-new", "New run", Btn::Primary, Some("icons/plus.svg"), reason, cx)
+                .button_disabled(
+                    "ov-new",
+                    "New run",
+                    Btn::Primary,
+                    Some("icons/plus.svg"),
+                    reason,
+                    window,
+                    cx,
+                )
                 .into_any_element(),
             None => self
                 .button(
@@ -530,11 +538,34 @@ impl FoloApp {
 
     fn recent_runs(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
-        let wide = window.viewport_size().width >= px(1500.);
+        // Dataset and architecture fit when the list is wide: beside Best models at 1500+, or
+        // full width when the two lists stack (below 1200).
+        let vw = window.viewport_size().width;
+        let wide = vw >= px(1500.) || vw < px(1200.);
+        // Beside Best models below 1500 the list is too narrow for Created as well.
+        let created = vw >= px(1500.) || vw < px(1200.);
         let now = self.store.api.now();
         let all = self.view_all("ov-runs-all", Route::Runs, window, cx);
-        let header = panel_header(&t, "Recent runs")
-            .child(div().flex().items_center().gap(px(8.)).child(caption(&t, "best mAP50-95")).child(all));
+        let header = panel_header(&t, "Recent runs").child(all);
+        // Column heads on the rows' grid, so the metric label sits over its values.
+        let heads = div()
+            .h(px(28.))
+            .mx(px(4.))
+            .px(px(12.))
+            .flex()
+            .items_center()
+            .gap(px(12.))
+            .border_b_1()
+            .border_color(t.line_subtle)
+            .child(th(&t, "Run").w(px(150.)).flex_none())
+            .when(wide, |d| d.child(th(&t, "Dataset · arch").w(px(130.)).flex_none()))
+            .child(th(&t, "Status").w(px(96.)).flex_none())
+            .child(th(&t, "Progress").w(px(120.)).flex_none())
+            .child(div().flex_1())
+            .child(div().w(px(96.)).flex_none().flex().justify_end().child(th(&t, "Best mAP50-95")))
+            .when(created, |d| {
+                d.child(div().w(px(80.)).flex_none().flex().justify_end().child(th(&t, "Created")))
+            });
         let body = match &self.store.runs {
             Load::Ready(runs) if runs.is_empty() => div()
                 .child(empty_state(
@@ -550,20 +581,23 @@ impl FoloApp {
                 div()
                     .flex()
                     .flex_col()
-                    .py(px(4.))
+                    .pb(px(4.))
+                    .child(heads)
                     .children(runs.into_iter().map(|r| {
                         let ds = self
                             .store
                             .dataset_summary(&r.config.dataset_id)
                             .map_or(r.config.dataset_id.clone(), |d| d.name.clone());
                         let when = time::parse(&r.created).map_or(String::new(), |c| time::ago(c, now));
-                        // Two fixed columns: progress (training runs only) and best mAP50-95.
+                        // Progress (training runs only) right after Status; best mAP50-95 at the end.
                         let training = r.status.is_active() && r.status != crate::api::RunStatus::Queued;
-                        let right = div()
+                        let progress_el = div()
+                            .w(px(120.))
+                            .flex_none()
                             .flex()
                             .items_center()
-                            .gap(px(16.))
-                            .child(div().w(px(120.)).flex().items_center().gap(px(8.)).when(training, |d| {
+                            .gap(px(8.))
+                            .when(training, |d| {
                                 d.child(div().flex_1().child(progress(&t, r.progress(), t.accent_fill(), 4.)))
                                     .child(
                                         text(ty::XS, t.text_secondary)
@@ -572,62 +606,61 @@ impl FoloApp {
                                             .text_right()
                                             .child(format!("{:.0}%", r.progress() * 100.)),
                                     )
-                            }))
-                            .child(
-                                text(ty::SM, if r.best.is_some() { t.text_primary } else { t.text_tertiary })
-                                    .tnum()
-                                    .w(px(48.))
-                                    .text_right()
-                                    .child(r.best.as_ref().map_or("–".to_string(), |b| f3(b.map50_95))),
-                            );
+                            });
+                        let best = div().w(px(96.)).flex_none().flex().justify_end().child(
+                            text(ty::SM, if r.best.is_some() { t.text_primary } else { t.text_tertiary })
+                                .tnum()
+                                .child(r.best.as_ref().map_or("–".to_string(), |b| f3(b.map50_95))),
+                        );
                         let id = r.id.clone();
                         let key = format!("ov-run-{}", r.id);
-                        let row = div()
-                            .id(SharedString::from(key.clone()))
-                            .h(px(36.))
-                            .mx(px(4.))
-                            .px(px(12.))
-                            .flex()
-                            .items_center()
-                            .gap(px(12.))
-                            .rounded(px(radius::MD))
-                            .cursor_pointer()
-                            .hover(|s| s.bg(t.bg_hover))
-                            // Same order as the Runs table: name, then status.
-                            // One line per run: name, then dataset and architecture, then status as a dot.
-                            .child(
-                                text(ty::SM, t.text_primary)
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .w(px(150.))
-                                    .flex_none()
-                                    .truncate()
-                                    .child(r.name.clone()),
-                            )
-                            // Room for the dataset and architecture only on wide windows.
-                            .when(wide, |d| {
-                                d.child(
-                                    text(ty::XS, t.text_tertiary)
-                                        .w(px(130.))
+                        let row =
+                            div()
+                                .id(SharedString::from(key.clone()))
+                                .h(px(36.))
+                                .mx(px(4.))
+                                .px(px(12.))
+                                .flex()
+                                .items_center()
+                                .gap(px(12.))
+                                .rounded(px(radius::MD))
+                                .cursor_pointer()
+                                .hover(|s| s.bg(t.bg_hover))
+                                // Same order as the Runs table: name, then status.
+                                // One line per run: name, then dataset and architecture, then status as a dot.
+                                .child(
+                                    text(ty::SM, t.text_primary)
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .w(px(150.))
                                         .flex_none()
                                         .truncate()
-                                        .child(format!("{ds} · {}", r.config.arch.as_str())),
+                                        .child(r.name.clone()),
                                 )
-                            })
-                            .child(div().w(px(96.)).flex_none().child(status_dot(
-                                &t,
-                                r.status,
-                                &format!("ov-{}", r.id),
-                            )))
-                            .child(div().flex_1())
-                            .child(right)
-                            .child(
-                                text(ty::XS, t.text_tertiary)
-                                    .w(px(80.))
-                                    .flex_none()
-                                    .whitespace_nowrap()
-                                    .text_right()
-                                    .child(when),
-                            );
+                                // Room for the dataset and architecture only on wide windows.
+                                .when(wide, |d| {
+                                    d.child(
+                                        text(ty::XS, t.text_tertiary)
+                                            .w(px(130.))
+                                            .flex_none()
+                                            .truncate()
+                                            .child(format!("{ds} · {}", r.config.arch.as_str())),
+                                    )
+                                })
+                                .child(div().w(px(96.)).flex_none().child(status_dot(
+                                    &t,
+                                    r.status,
+                                    &format!("ov-{}", r.id),
+                                )))
+                                .child(progress_el)
+                                .child(div().flex_1())
+                                .child(best)
+                                .when(created, |d| {
+                                    d.child(
+                                        div().w(px(80.)).flex_none().flex().justify_end().child(
+                                            text(ty::XS, t.text_tertiary).whitespace_nowrap().child(when),
+                                        ),
+                                    )
+                                });
                         self.bind(
                             row,
                             &key,
@@ -758,7 +791,7 @@ impl FoloApp {
                         Tone::Neutral,
                     ))
                 } else if cards.is_empty() {
-                    d.child(div().flex().gap(px(16.)).children(
+                    d.child(div().p(px(16.)).flex().gap(px(16.)).children(
                         (0..3).map(|i| div().flex_1().h(px(196.)).child(skeleton(&t, format!("ov-ds-{i}")))),
                     ))
                 } else {

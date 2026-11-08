@@ -186,6 +186,8 @@ impl NewRunForm {
     }
 }
 
+pub type ModelsOrderKey = (usize, usize, &'static str, bool);
+
 pub struct NewRunForm {
     pub name: Entity<TextInput>,
     pub dataset: usize,
@@ -354,6 +356,8 @@ pub struct FoloApp {
     pub export_hl: usize,
     /// Models table order: column key and descending; None keeps the server's order.
     pub models_sort: Option<(&'static str, bool)>,
+    /// The sorted order of the models list, for (list allocation, length, column, descending).
+    pub models_order: RefCell<Option<(ModelsOrderKey, Vec<usize>)>>,
     pub confusion_norm: bool,
 
     // Playground
@@ -478,6 +482,7 @@ impl FoloApp {
             pr_pin: None,
             export_hl: 0,
             models_sort: None,
+            models_order: RefCell::new(None),
             confusion_norm: true,
             play_model: None,
             play_conf: 0.25,
@@ -588,6 +593,8 @@ impl FoloApp {
         self.page_scroll.set_offset(gpui::point(px(0.), px(0.)));
         self.chart_hover = None;
         self.export_open = false;
+        self.pr_pin = None;
+        self.pr_focus = None;
         self.menu_open = None;
         self.sample_epoch = None;
         if !self.focus_within_page(window) {
@@ -2160,12 +2167,14 @@ impl Render for FoloApp {
             }))
             .on_action(cx.listener(|this, _: &FocusNext, w, cx| {
                 this.menu_open = None;
+                this.export_open = false;
                 this.kb = true;
                 this.cycle_focus(true, w, cx);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &FocusPrev, w, cx| {
                 this.menu_open = None;
+                this.export_open = false;
                 this.kb = true;
                 this.cycle_focus(false, w, cx);
                 cx.notify();

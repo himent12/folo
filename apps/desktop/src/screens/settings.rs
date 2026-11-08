@@ -140,7 +140,7 @@ impl FoloApp {
             .child(row(
                 "Server address",
                 help(if self.server_mode == ServerMode::Mock {
-                    "Used when the data source is folo serve. Connect switches to it and uses this address."
+                    "Address of folo serve. Connect switches the data source to it."
                 } else {
                     "Where folo serve listens. Press Enter or Connect to connect again."
                 }),

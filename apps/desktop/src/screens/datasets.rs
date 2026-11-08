@@ -81,9 +81,14 @@ impl FoloApp {
                 let mut rows = Vec::new();
                 let mut it = cards.into_iter().peekable();
                 while it.peek().is_some() {
-                    let mut row: Vec<AnyElement> = it.by_ref().take(3).collect();
+                    // Equal thirds (basis 0, no min width), so a short last row matches the rows above.
+                    let mut row: Vec<AnyElement> = it
+                        .by_ref()
+                        .take(3)
+                        .map(|c| div().flex_grow().flex_basis(px(0.)).min_w_0().flex().child(c).into_any_element())
+                        .collect();
                     while row.len() < 3 {
-                        row.push(div().flex_1().into_any_element());
+                        row.push(div().flex_grow().flex_basis(px(0.)).min_w_0().into_any_element());
                     }
                     rows.push(div().flex().gap(px(16.)).children(row));
                 }

@@ -45,6 +45,7 @@ impl FoloApp {
                 Btn::Secondary,
                 Some("icons/image-up.svg"),
                 "Train a model first",
+                window,
                 cx,
             )
             .into_any_element()
@@ -114,7 +115,8 @@ impl FoloApp {
                 )
             };
             let drop_hover = self.play_drop_hover;
-            return div()
+            // Capped at 420 px and centred: an empty state, not a 970 px hole.
+            let zone = div()
                 .id("drop-zone")
                 .flex_1()
                 .min_w_0()
@@ -167,6 +169,14 @@ impl FoloApp {
                             )
                         })),
                 )
+                .max_h(px(420.));
+            return div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .justify_center()
+                .child(zone)
                 .into_any_element();
         }
         let active = self.play_active(window, cx);

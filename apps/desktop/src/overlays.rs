@@ -915,6 +915,7 @@ impl FoloApp {
                 Btn::Primary,
                 Some("icons/play.svg"),
                 "Creating the run…",
+                window,
                 cx,
             )
         } else if epochs_bad || lr_bad || close_bad {
@@ -924,6 +925,7 @@ impl FoloApp {
                 Btn::Primary,
                 Some("icons/play.svg"),
                 "Fix the highlighted fields first",
+                window,
                 cx,
             )
         } else {

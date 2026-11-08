@@ -301,6 +301,24 @@ pub fn metric(
 }
 
 /// Labelled metric tile body: overline label, value, optional detail line.
+/// A stat at a given value size (no unit).
+pub fn stat_sized(
+    t: &Theme,
+    label: &str,
+    value: impl Into<SharedString>,
+    size: TypeStep,
+    detail: Option<Div>,
+) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(6.))
+        .min_w_0()
+        .child(caption(t, label))
+        .child(metric(t, value, "", size, ty::SM))
+        .children(detail)
+}
+
 pub fn stat(t: &Theme, label: &str, value: impl Into<SharedString>, unit: &str, detail: Option<Div>) -> Div {
     div()
         .flex()
