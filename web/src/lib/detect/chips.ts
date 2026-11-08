@@ -78,9 +78,11 @@ export function placeChips(boxes: (ChipBox | null)[], b: ChipBounds, chipH = CHI
       }
     }
     if (hits(x, y, box.w)) {
-      // Last resort: the free slot in this column nearest the box's top edge.
+      // Last resort: the free slot in this column nearest the box's top edge. A free slot always touches an edge of
+      // the image or of a placed chip, so those positions are the only candidates to check.
+      const cands = [box.y, b.minY, maxY, ...placed.flatMap((p) => [p.y - CHIP_H, p.y + CHIP_H])].filter((t) => t >= b.minY && t <= maxY);
       let best: number | null = null;
-      for (let t = b.minY; t <= maxY; t += 2)
+      for (const t of cands)
         if (!hits(x, t, box.w) && (best === null || Math.abs(t - box.y) < Math.abs(best - box.y))) best = t;
       if (best !== null) {
         y = best;

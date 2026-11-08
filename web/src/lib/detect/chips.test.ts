@@ -85,4 +85,10 @@ describe('placeChips', () => {
     );
     expect(ps[1]!.dy).toBe(ps[0]!.dy);
   });
+
+  it('finds an exact-fit slot between two placed chips', () => {
+    const ps = placeChips([34, 49, 35].map((y) => ({ x: 20, y, w: 60 })), { minX: 4, maxX: 196, minY: 2, maxY: 65 });
+    expect(ps[2]!.hidden).toBe(false);
+    expect(35 + ps[2]!.dy).toBe(33);
+  });
 });
