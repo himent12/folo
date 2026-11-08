@@ -223,10 +223,18 @@ impl FoloApp {
         if zoom <= 1.0 && self.fh("play-fit", cx).is_focused(window) {
             window.focus(&self.fh("play-zoom-in", cx));
         }
+        // How to move around the image, as the inspector lists it (the fitted "Fit" names no key).
+        let view_help = self.help_icon(
+            "play-view-help",
+            "Scroll, + or − zoom · drag, or arrows when zoomed, pan · 0 fits the image",
+            window,
+            cx,
+        );
         let zoom_bar = div()
             .flex()
             .items_center()
             .gap(px(2.))
+            .child(div().pr(px(4.)).child(view_help))
             .child(self.icon_button(
                 "play-zoom-out",
                 "icons/zoom-out.svg",
@@ -323,7 +331,7 @@ impl FoloApp {
                                         - rail
                                         - 16.;
                                     let budget =
-                                        (stage - 560.).clamp(if compact { 120. } else { 160. }, 520.);
+                                        (stage - 584.).clamp(if compact { 120. } else { 160. }, 520.);
                                     // Monospace: the measured width is the glyph count times the advance.
                                     let advance = window.text_system().advance(
                                         window.text_system().resolve_font(&gpui::font(crate::theme::MONO)),
