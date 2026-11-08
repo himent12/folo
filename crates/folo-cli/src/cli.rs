@@ -65,6 +65,10 @@ pub struct ServeArgs {
     /// Allow cross-origin requests from any website (default: only localhost / 127.0.0.1 / [::1] origins).
     #[arg(long)]
     pub cors_any: bool,
+    /// Device of inference and model evaluation: auto (the GPU when one can hold the model, else the CPU), cpu or
+    /// gpu:<n>. Training runs use their own `device` setting.
+    #[arg(long, env = "FOLO_DEVICE", default_value = "auto")]
+    pub device: String,
 }
 
 /// `folo doctor`.

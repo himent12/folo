@@ -170,8 +170,14 @@ The exact block definitions, layer tables, parameter names, head, loss, training
 ## folo-server and folo-cli
 - `folo-server` (axum + tokio) implements `docs/API.md`: datasets, models, training runs with live SSE metrics, and
   inference. Handlers sit on a `Store` trait (`MockStore` for `--mock`, `RealStore` for the engine; its datasets
-  are read with folo-data and indexed into a JSON cache under the data dir, invalidated by file mtimes). The request and
-  response types live in `folo-api`, a dependency-light crate (serde only) that FOLO Desktop reuses. `folo serve` runs it and serves the built Studio from `web/dist`, or from the copy compiled into the binary by
+  are read with folo-data and indexed into a JSON cache under the data dir, invalidated by file mtimes). The real
+  store trains with folo-vision's `Trainer` on one background worker thread (a FIFO queue, one run at a time), fans
+  the trainer's events out to SSE subscribers through a per-run broadcast channel and persists each run under
+  `<data dir>/runs/<id>/`; finished runs' checkpoints and `.folo` files under `<data dir>/models` are its models
+  (`/eval` runs folo-vision's validator, cached); `/predict` keeps an LRU of loaded, fused `Predictor`s. Devices go
+  through folo-vision's `resolve_device` / `can_place` (`auto` uses the GPU once models can live there) and GPU info
+  comes from folo-gpu. The request and response types live in `folo-api`, a dependency-light crate (serde only) that
+  FOLO Desktop reuses. `folo serve` runs it and serves the built Studio from `web/dist`, or from the copy compiled into the binary by
   the `embed-web` feature (release builds, see `docs/RELEASING.md`). `folo serve --mock` serves realistic
   synthetic data for UI work before or without a trained model.
 - `folo` CLI (`docs/CLI.md`): `train`, `val`, `predict`, `export`, `bench`, `dataset check|stats|synth|convert`, `serve`,

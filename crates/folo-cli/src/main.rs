@@ -143,8 +143,11 @@ fn serve(args: ServeArgs, out: Out) -> Result<(), CliError> {
         let addr = listener
             .local_addr()
             .map_err(|e| CliError::new(ExitCode::Runtime, "bind_failed", e.to_string()))?;
-        let store: Arc<dyn Store> =
-            if args.mock { Arc::new(MockStore::new()) } else { Arc::new(RealStore::open(data_dir.clone())) };
+        let store: Arc<dyn Store> = if args.mock {
+            Arc::new(MockStore::new())
+        } else {
+            Arc::new(RealStore::open(data_dir.clone()).device(args.device.clone()))
+        };
         let web = resolve_web(args.web_dir.clone());
         let (web_dir, web_ready) = match &web {
             WebSource::Dir(dir) => (Some(dir.clone()), folo_server::web_dir_ready(dir)),

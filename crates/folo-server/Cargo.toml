@@ -17,7 +17,11 @@ embed-web = []
 
 [dependencies]
 folo-api.workspace = true
+folo-core.workspace = true
 folo-data.workspace = true
+folo-gpu.workspace = true
+folo-nn.workspace = true
+folo-vision.workspace = true
 walkdir.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -219,11 +219,11 @@ async fn image(
 // ---- models ------------------------------------------------------------------------------------------------------
 
 async fn list_models(State(st): State<AppState>) -> Result<Json<ModelList>> {
-    Ok(Json(ModelList { models: st.store.list_models()? }))
+    Ok(Json(ModelList { models: blocking(&st, |s| s.list_models()).await? }))
 }
 
 async fn get_model(State(st): State<AppState>, ApiPath(id): ApiPath<String>) -> Result<Response> {
-    Ok(Json(st.store.get_model(&id)?).into_response())
+    Ok(Json(blocking(&st, move |s| s.get_model(&id)).await?).into_response())
 }
 
 async fn model_eval(State(st): State<AppState>, ApiPath(id): ApiPath<String>) -> Result<Response> {
@@ -248,7 +248,30 @@ async fn list_runs(State(st): State<AppState>) -> Result<Json<RunList>> {
     Ok(Json(RunList { runs: st.store.list_runs()? }))
 }
 
-async fn create_run(State(st): State<AppState>, ApiJson(config): ApiJson<TrainConfig>) -> Result<Response> {
+fn body_error(e: impl std::fmt::Display) -> Error {
+    Error::new(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "invalid_body",
+        format!("Failed to deserialize the JSON body into the target type: {e}"),
+    )
+}
+
+/// `POST /api/runs`: a `TrainConfig` starts a new run (`201`); with `resume_run_id` it resumes that run instead
+/// (`200`, same id).
+async fn create_run(
+    State(st): State<AppState>,
+    ApiJson(body): ApiJson<serde_json::Value>,
+) -> Result<Response> {
+    let serde_json::Value::Object(fields) = body else {
+        return Err(body_error("expected a JSON object"));
+    };
+    if let Some(rid) = fields.get("resume_run_id").filter(|v| !v.is_null()) {
+        let rid = rid.as_str().ok_or_else(|| body_error("resume_run_id: expected a string"))?.to_string();
+        let run = blocking(&st, move |s| s.resume_run(&rid, &fields)).await?;
+        return Ok(Json(run).into_response());
+    }
+    let config: TrainConfig =
+        serde_json::from_value(serde_json::Value::Object(fields)).map_err(body_error)?;
     let run = blocking(&st, move |s| s.create_run(config)).await?;
     Ok((StatusCode::CREATED, Json(run)).into_response())
 }
@@ -258,11 +281,11 @@ async fn get_run(State(st): State<AppState>, ApiPath(id): ApiPath<String>) -> Re
 }
 
 async fn stop_run(State(st): State<AppState>, ApiPath(id): ApiPath<String>) -> Result<Response> {
-    Ok(Json(st.store.stop_run(&id)?).into_response())
+    Ok(Json(blocking(&st, move |s| s.stop_run(&id)).await?).into_response())
 }
 
 async fn delete_run(State(st): State<AppState>, ApiPath(id): ApiPath<String>) -> Result<StatusCode> {
-    st.store.delete_run(&id)?;
+    blocking(&st, move |s| s.delete_run(&id)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
