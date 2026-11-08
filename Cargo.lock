@@ -753,7 +753,11 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "folo-api",
+ "folo-core",
  "folo-data",
+ "folo-gpu",
+ "folo-nn",
+ "folo-vision",
  "futures-util",
  "http-body-util",
  "image",

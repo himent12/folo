@@ -7,8 +7,14 @@ use folo_data::ImageFormat;
 use folo_data::synthetic::{SyntheticConfig, write_yolo};
 use serde_json::Value;
 
+/// Runs `folo` with `args`; engine commands get `--device cpu` (their `auto` would pick a GPU when there is one).
 fn folo(args: &[&str]) -> (i32, Vec<Value>, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_folo")).args(args).output().unwrap();
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_folo"));
+    cmd.args(args);
+    if matches!(args.first(), Some(&"train" | &"val" | &"predict")) && !args.contains(&"--device") {
+        cmd.args(["--device", "cpu"]);
+    }
+    let out = cmd.output().unwrap();
     let stdout = String::from_utf8(out.stdout).unwrap();
     let lines = stdout
         .lines()

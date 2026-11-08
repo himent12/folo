@@ -487,7 +487,7 @@ async fn sse_finished_run_and_errors() {
 }
 
 #[tokio::test]
-async fn real_store_disk_dataset_and_not_implemented() {
+async fn real_store_disk_dataset_and_engine_checks() {
     // More real-store dataset tests: tests/real_datasets.rs.
     let root = std::env::temp_dir().join(format!("folo-real-store-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
@@ -522,17 +522,19 @@ async fn real_store_disk_dataset_and_not_implemented() {
     let list: DatasetList = ok(&reopened, get("/api/datasets")).await;
     assert_eq!(list.datasets.len(), 1);
 
-    let cfg = json!({ "dataset_id": ds.id });
-    err(&app, post_json("/api/runs", cfg), StatusCode::NOT_IMPLEMENTED, "not_implemented").await;
+    // Training and inference: tests/real_runs.rs. Here only the checks before any work starts.
+    let cfg = json!({ "dataset_id": ds.id, "epochs": 0 });
+    err(&app, post_json("/api/runs", cfg), StatusCode::BAD_REQUEST, "invalid_config").await;
     let p = json!({ "model_id": "m_1", "dataset_id": ds.id, "image_id": "0" });
-    let e = err(&app, post_json("/api/predict", p), StatusCode::NOT_IMPLEMENTED, "not_implemented").await;
-    assert!(e.hint.is_some());
+    err(&app, post_json("/api/predict", p), StatusCode::NOT_FOUND, "model_not_found").await;
+    let p = json!({ "model_id": "m_1", "dataset_id": ds.id, "image_id": "9" });
+    err(&app, post_json("/api/predict", p), StatusCode::NOT_FOUND, "image_not_found").await;
     let runs: RunList = ok(&app, get("/api/runs")).await;
     assert!(runs.runs.is_empty());
     let models: ModelList = ok(&app, get("/api/models")).await;
     assert!(models.models.is_empty());
     let s: SystemInfo = ok(&app, get("/api/system")).await;
-    assert!(s.gpus.is_empty());
+    assert!(s.gpus.iter().enumerate().all(|(i, g)| g.ordinal == i as u32 && !g.name.is_empty()));
 
     let (status, _, _) =
         send(&app, Request::delete(format!("/api/datasets/{}", ds.id)).body(Body::empty()).unwrap()).await;

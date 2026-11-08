@@ -2,18 +2,21 @@
 //!
 //! Implements the contract in `docs/API.md` on axum. Handlers sit on a [`Store`]: [`MockStore`] serves deterministic
 //! synthetic data (`folo serve --mock`), [`RealStore`] serves datasets from disk (read with folo-data, indexed and
-//! cached under the data dir) and answers `501 not_implemented` for training and inference until the engine is wired
-//! in. The request / response types live in the `folo-api`
-//! crate (re-exported as [`api`]) so the CLI and FOLO Desktop share them.
+//! cached under the data dir), trains runs with folo-vision's trainer on a background worker, lists their models and
+//! runs inference. The request / response types live in the `folo-api` crate (re-exported as [`api`]) so the CLI and
+//! FOLO Desktop share them.
 //!
 //! See `docs/ARCHITECTURE.md` for how this crate fits into FOLO.
 
+mod engine;
 pub mod error;
 mod index;
 pub mod mock;
+mod models;
 mod raster;
 pub mod real;
 mod routes;
+mod runs;
 mod stats;
 pub mod store;
 pub mod system;
@@ -87,6 +90,7 @@ pub struct AppState {
 pub struct Server {
     router: Router,
     shutdown: Arc<watch::Sender<bool>>,
+    store: Arc<dyn Store>,
 }
 
 /// True when the web app folder exists and has an `index.html`.
@@ -160,8 +164,11 @@ impl Server {
     ) -> Server {
         let (tx, _) = watch::channel(false);
         let shutdown = Arc::new(tx);
-        let state =
-            AppState { store, probe: Arc::new(system::SystemProbe::default()), shutdown: shutdown.clone() };
+        let state = AppState {
+            store: store.clone(),
+            probe: Arc::new(system::SystemProbe::default()),
+            shutdown: shutdown.clone(),
+        };
         let mut router = Router::new().nest("/api", routes::api()).with_state(state);
         router = match (opts.web, embedded) {
             (WebSource::Dir(dir), _) if web_dir_ready(&dir) => {
@@ -191,7 +198,7 @@ impl Server {
                     .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
                     .on_response(DefaultOnResponse::new().level(Level::INFO)),
             );
-        Server { router, shutdown }
+        Server { router, shutdown, store }
     }
 
     /// The router (cheap clone), e.g. for `tower::ServiceExt::oneshot` in tests.
@@ -204,20 +211,25 @@ impl Server {
         self.shutdown.send_replace(true);
     }
 
-    /// Serves until `signal` resolves, then ends open SSE streams and waits for in-flight requests.
+    /// Serves until `signal` resolves, then ends open SSE streams, waits for in-flight requests and shuts the
+    /// store down ([`Store::shutdown`]: the real store stops an active training run at its next batch, keeping the
+    /// last checkpoint).
     pub async fn serve(
         self,
         listener: TcpListener,
         signal: impl Future<Output = ()> + Send + 'static,
     ) -> std::io::Result<()> {
         let shutdown = self.shutdown.clone();
-        axum::serve(listener, self.router)
+        let served = axum::serve(listener, self.router)
             .with_graceful_shutdown(async move {
                 signal.await;
                 tracing::info!("shutting down");
                 shutdown.send_replace(true);
             })
-            .await
+            .await;
+        let store = self.store.clone();
+        let _ = tokio::task::spawn_blocking(move || store.shutdown()).await;
+        served
     }
 }
 

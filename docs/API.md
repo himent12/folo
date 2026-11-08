@@ -33,18 +33,21 @@ Non-2xx responses: `{ "error": { "code": "dataset_not_found", "message": "...", 
 | 403 | `forbidden_origin` | a state-changing request from a disallowed browser origin (see Conventions) |
 | 404 | `dataset_not_found`, `image_not_found`, `model_not_found`, `run_not_found`, `path_not_found`, `epoch_not_available`, `route_not_found` | something named does not exist |
 | 405 | `method_not_allowed` | wrong HTTP method on a known path |
-| 409 | `run_active`, `run_not_active` | deleting a run that is still active; stopping one that is not |
+| 409 | `run_active`, `run_not_active`, `run_not_resumable` | deleting (or resuming) a run that is still active; stopping one that is not; resuming one that completed |
 | 413 | `payload_too_large` | body over the limit (64 MiB for `/api/predict`, 2 MiB elsewhere) |
 | 415 | `unsupported_media_type` | JSON endpoint called without `Content-Type: application/json` |
-| 422 | `invalid_body`, `image_decode_failed` | well-formed JSON with wrong types / missing required fields; an upload that is not an image |
+| 422 | `invalid_body`, `image_decode_failed`, `invalid_weights` | well-formed JSON with wrong types / missing required fields; an upload that is not an image; a `.folo` file that cannot be read |
 | 500 | `internal` | a bug or an IO failure |
-| 501 | `not_implemented` | the feature exists in the API but not yet in the engine (real mode: training, inference and export) |
+| 501 | `not_implemented` | the feature exists in the API but not yet in the engine (ONNX export, streaming inference, a `gpu:<n>` device this build cannot train or run models on; in mock mode, resuming runs) |
 
 ## System
 - `GET /api/health` → `{ "status": "ok", "version": "0.1.0", "api": "v1", "mock": false }`
 - `GET /api/system` → `{ "cpu": { "name", "threads", "util" }, "memory": { "used_bytes", "total_bytes" },
   "gpus": [{ "ordinal", "name", "backend": "vulkan|dx12|metal", "memory_bytes", "util" | null }] }`
-  (`util` in `0..1`; CPU utilisation is measured since the previous call. `gpus` is empty until GPU detection lands.)
+  (`util` in `0..1`; CPU utilisation is measured since the previous call.) In real mode `gpus` comes from folo-gpu
+  (wgpu): every physical adapter once, through its preferred backend (software adapters are left out), best first,
+  so ordinal 0 is the adapter `gpu:0` and `device: auto` use. wgpu reports neither memory size nor load, so
+  `memory_bytes` is `0` and `util` `null`.
 
 ## Datasets
 - `GET /api/datasets` → `{ "datasets": [Dataset] }` (oldest first, without `stats`)
@@ -111,7 +114,14 @@ Non-2xx responses: `{ "error": { "code": "dataset_not_found", "message": "...", 
 ```
 
 ## Models
-- `GET /api/models` → `{ "models": [Model] }` (newest first; `.folo` files under the models directory and run outputs)
+- `GET /api/models` → `{ "models": [Model] }` (newest first by `created`). In real mode: the weights of every run that
+  ended `completed` or `stopped` with a checkpoint (`weights/best.folo` as `m_<run id suffix>`, named
+  `<run name>-best`, with the run's best metrics; `weights/last.folo` as `m_<suffix>-last`, `<run name>-last`, with
+  the last validated epoch's metrics), plus every `.folo` file under `<data dir>/models/` (recursively; id `m_` and 8
+  hex digits of the path's hash, stable across restarts; name = file stem; `metrics` from `folo.metrics` when the
+  file has them). `params` counts the stored learnable tensors, `flops_g` is the architecture's GFLOPs at `imgsz`
+  (docs/MODEL.md §3's 640 px figure scaled by the pixel count), `created` is `folo.created` or the file's
+  modification time.
 - `GET /api/models/{id}` → `Model`
 - `GET /api/models/{id}/eval` → validation results of the model on its dataset's `val` split (`train` when there is
   none), for the PR curves and confusion matrix of the Models view:
@@ -126,7 +136,16 @@ Non-2xx responses: `{ "error": { "code": "dataset_not_found", "message": "...", 
   `confusion` is `(classes + 1) × (classes + 1)`: rows are the true class, columns the predicted class, and the
   last row and column are background. `confusion[c][n]` counts missed objects of class `c`, `confusion[n][c]`
   counts false positives predicted as `c`, and `confusion[n][n]` is always 0.
-- `POST /api/models/{id}/export` body `{ "format": "folo-f16|onnx" }` → `{ "path", "bytes" }`
+  In real mode the model's dataset is its run's (the registered copy while it is registered, else the path the run
+  trained on); a model from the models folder is evaluated on the first registered dataset with exactly its classes
+  (`404 dataset_not_found` when there is none); `400 invalid_dataset` when the dataset's classes (names, in order)
+  are no longer the model's. Computed with folo-vision's validator (docs/METRICS.md; MODEL.md
+  §8.7 settings: `conf 0.001`, `iou 0.7`, the model's `imgsz`) on the server's `--device`, then cached (in memory and
+  in `cache/eval/<model id>.json`) until the weights file or the dataset's files change. `pr` has curves for the
+  classes with ground truth.
+- `POST /api/models/{id}/export` body `{ "format": "folo-f16|onnx" }` → `{ "path", "bytes" }`. Real mode writes the
+  fused EMA weights as f16 (as `folo export` does, docs/FORMAT.md) to `<data dir>/exports/<model name>-f16.folo`
+  (`-f16-2`, `-f16-3`, ... when taken; never overwriting). `onnx` answers `501 not_implemented`.
 
 ```jsonc
 // Model
@@ -139,15 +158,32 @@ Non-2xx responses: `{ "error": { "code": "dataset_not_found", "message": "...", 
 ## Training runs
 - `GET /api/runs` → `{ "runs": [Run] }` (newest first)
 - `POST /api/runs` body `TrainConfig` → `201 Run` (status `queued`, then `running`). Errors: `dataset_not_found`,
-  `model_not_found` (bad `weights`), `invalid_config`.
+  `model_not_found` (bad `weights`), `invalid_config` (checked before anything is queued: the limits below, the
+  trainer's (real mode: `imgsz >= 64`), a dataset without classes or training images), `not_implemented` (a
+  `gpu:<n>` device the engine cannot train on). Runs train one at a time, first come first served; the others wait
+  `queued` (their log says how many runs are ahead).
+  With `"resume_run_id": "<run id>"` in the body, the request **resumes** that `stopped` or `failed` run instead →
+  `200 Run` (same id, status `queued` again): from its `weights/last.folo` with the full checkpoint state
+  (docs/FORMAT.md: epoch, optimizer, schedule, EMA, RNG), or from scratch when no epoch had finished. The run keeps
+  its config: every other field in the body must equal it or be omitted (`dataset_id` too; an empty `name` counts
+  as omitted), except `device`, which may change. Errors: `run_not_found`, `run_active` (still queued / running /
+  stopping), `run_not_resumable` (it completed; start a new run with `weights` set to its model instead),
+  `invalid_config` (a field differs; the message names it), `dataset_not_found` (its dataset folder is gone).
+  `weights: <model id>` without `resume_run_id` starts a **new** run initialised from those weights (matching
+  tensors load; the class outputs are re-initialised when the class lists differ; no optimizer state).
 - `GET /api/runs/{id}` → `Run`
 - `POST /api/runs/{id}/stop` → `Run` (status `stopping` → `stopped`; the last checkpoint is kept). `409 run_not_active`
-  when the run already finished.
-- `DELETE /api/runs/{id}` → `204` (`409 run_active` while `queued`, `running` or `stopping`)
+  when the run already finished. A queued run stops at once; a running one after its current batch (the epoch in
+  progress is discarded; `weights/last.folo` is the last finished epoch's). `model_id` is set when at least one epoch
+  was validated. The final `status` event is sent once the run can be resumed or deleted.
+- `DELETE /api/runs/{id}` → `204` (`409 run_active` while `queued`, `running` or `stopping`). Real mode removes the run
+  folder, its weights included, so its models disappear too.
 - `GET /api/runs/{id}/metrics?every=1` → `{ "steps": [Step], "epochs": [Epoch] }` (full history, for charts on page
   load; `every=N` keeps every N-th step plus the latest one, to thin long runs)
 - `GET /api/runs/{id}/samples?epoch=<n>` → `{ "epoch", "samples": [{ "image_id", "dataset_id", "width", "height",
-  "truth": [Box], "pred": [ScoredBox] }] }` (validation predictions at `conf >= 0.25` on a fixed set of 16 images;
+  "truth": [Box], "pred": [ScoredBox] }] }` (validation predictions at `conf >= 0.25` on a fixed set of 16 images,
+  in original-image pixels: in real mode the first 16 of the validation split, or of the training split when there
+  is none;
   `epoch` defaults to the latest finished epoch; `404 epoch_not_available` before the first validation or for a
   future epoch)
 - `GET /api/runs/{id}/logs?limit=500` → `{ "lines": [{ "t", "level": "debug|info|warn|error", "message" }] }`:
@@ -176,7 +212,10 @@ Non-2xx responses: `{ "error": { "code": "dataset_not_found", "message": "...", 
                "close_mosaic": 10 },
   "seed": 0 }
 // An empty name becomes "<dataset name>-<arch suffix>", e.g. "shapes-1k-n". Limits: epochs 1..=10000,
-// batch 1..=1024, imgsz a multiple of 32 in 32..=4096, 0 < lr0 < 10.
+// batch 1..=1024, imgsz a multiple of 32 in 32..=4096 (real mode trains at 64 or more), 0 < lr0 < 10.
+// POST /api/runs also takes "resume_run_id": "run_…" (see above); it is not part of Run.config.
+// Real mode maps TrainConfig onto the trainer's config (docs/MODEL.md §8.1): the other recipe keys keep their
+// defaults, and "auto" resolves to the GPU when a model can be placed on it, else the CPU.
 // Run
 { "id": "run_7d1e", "name": "shapes-n", "status": "running", "config": TrainConfig, "created": "...",
   "started": "..." | null, "finished": null | "...",
@@ -211,6 +250,10 @@ Non-2xx responses: `{ "error": { "code": "dataset_not_found", "message": "...", 
   `conf` and `iou` must be in `0..=1`, `max_det >= 1`. Uploads up to 64 MiB; JPEG, PNG, BMP and WebP are accepted.
   Boxes only use the model's classes: on a dataset image, ground-truth classes the model does not know (by name) are
   never predicted.
+  Real mode runs folo-vision's `Predictor` (docs/MODEL.md §9: EMA weights, fused, letterboxed `rect` at the model's
+  `imgsz`) on the server's `--device` (`device` is `cpu` or `gpu:<n>`). Loaded models stay in an LRU of 4 (keyed by
+  the weights file's path, size and modification time, so retrained weights are reloaded); `timing` is measured:
+  `preprocess_ms` includes decoding the image, `postprocess_ms` covers decoding the head outputs, NMS and rescaling.
 - `GET /api/predict/stream?model_id=..&conf=..` — WebSocket: the client sends JPEG frames (binary), the server
   answers each with the same JSON as `/api/predict` (for webcam / screen demos). Later milestone; answers
   `501 not_implemented` for now.
@@ -234,8 +277,15 @@ Non-2xx responses: `{ "error": { "code": "dataset_not_found", "message": "...", 
 - `cache/thumbs/<id>/`: thumbnails, keyed by the image's path, size, modification time and the requested side.
 - `datasets/<name>/`: synthetic datasets. `DELETE /api/datasets/{id}` removes the dataset's caches, never its files.
 
-Models, runs and inference are not wired to the engine yet: `/api/models` and `/api/runs` are empty, `POST
-/api/runs` and `POST /api/predict` answer `501 not_implemented` (after checking that the dataset exists).
+- `runs/<id>/`: one folder per training run: `run.json` (the `Run` plus the dataset reference, rewritten atomically
+  on every status change and after every epoch), `log.jsonl` (every log line, as `/logs` returns them),
+  `config.json` (the trainer's resolved config), `metrics.jsonl` (every trainer event, every step; `/metrics` reads
+  it, and a resumed run's repeated steps replace the earlier ones), `weights/last.folo` and `weights/best.folo`
+  (full checkpoints, docs/FORMAT.md) and `samples/epoch_NNN.json`. On start every run is listed again; runs a
+  previous process left `queued`, `running` or `stopping` become `stopped` (with a `warn` log line) and can be
+  resumed with `resume_run_id`. On a graceful shutdown the active run stops after its current batch.
+- `models/`: `.folo` files listed as models (scanned on every listing; metadata read once per file version).
+- `exports/`: exported models. `cache/eval/`: cached `/eval` results.
 
 ## Validation
 - `POST /api/val` body `{ "model_id", "dataset_id", "split": "val", "imgsz": null, "conf": 0.001, "iou": 0.7 }` →

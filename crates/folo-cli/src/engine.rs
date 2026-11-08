@@ -52,12 +52,14 @@ pub fn require_file(path: &Path, code: &str) -> Result<(), CliError> {
     }
 }
 
-/// Register the GPU backend when `--device` names a GPU, so the engine can resolve it. `auto` stays on the CPU
-/// until models can move to the GPU (`folo_vision::train::can_place`); then it should initialise here too.
+/// Register the GPU backend when `--device` may use a GPU (`auto`, `gpu`, `gpu:<n>`), so the engine can resolve
+/// it. Without an adapter, `auto` runs on the CPU quietly and an explicit GPU fails in the engine.
 pub fn init_device(device: &str) {
     let d = device.trim().to_ascii_lowercase();
-    if (d.starts_with("gpu") || d.starts_with("cuda"))
+    let explicit = d.starts_with("gpu") || d.starts_with("cuda");
+    if (explicit || d == "auto" || d.is_empty())
         && let Err(e) = folo_gpu::init()
+        && explicit
     {
         eprintln!("warning: no usable GPU: {e}");
     }

@@ -1,9 +1,8 @@
 //! The [`Store`] trait: everything the HTTP handlers need, independent of where the data comes from.
 //!
 //! Two implementations: [`crate::mock::MockStore`] (deterministic synthetic data, `folo serve --mock`) and
-//! [`crate::real::RealStore`] (datasets on disk; training and inference return `not_implemented` until the engine
-//! is wired in). Methods are synchronous; handlers run the ones that may touch the disk or burn CPU on tokio's
-//! blocking pool.
+//! [`crate::real::RealStore`] (datasets on disk, training runs, models and inference on the FOLO engine). Methods
+//! are synchronous; handlers run the ones that may touch the disk or burn CPU on tokio's blocking pool.
 
 use folo_api::{
     Dataset, ExportFormat, ExportResult, GpuInfo, LogLine, Model, ModelEval, PredictResponse,
@@ -138,6 +137,14 @@ pub trait Store: Send + Sync + 'static {
     fn list_runs(&self) -> Result<Vec<Run>>;
     /// Starts a run.
     fn create_run(&self, config: TrainConfig) -> Result<Run>;
+    /// Resumes a `stopped` or `failed` run (same id) from its last checkpoint: `POST /api/runs` with
+    /// `resume_run_id`. `fields` are the body's other fields, which must match the run's config (`device` may
+    /// change). Stores without resumable runs answer `501 not_implemented`.
+    fn resume_run(&self, id: &str, fields: &serde_json::Map<String, serde_json::Value>) -> Result<Run> {
+        let _ = fields;
+        self.get_run(id)?;
+        Err(crate::error::Error::not_implemented("resuming runs"))
+    }
     /// One run.
     fn get_run(&self, id: &str) -> Result<Run>;
     /// Requests a stop.
@@ -162,4 +169,8 @@ pub trait Store: Send + Sync + 'static {
         let _ = req;
         Err(crate::error::Error::not_implemented("validation"))
     }
+
+    /// Called once when the server shuts down: stop background work (the real store stops the active run at a
+    /// batch boundary, keeping its last checkpoint). Blocking; the default does nothing.
+    fn shutdown(&self) {}
 }
