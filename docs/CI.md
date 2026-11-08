@@ -25,5 +25,12 @@ so incremental builds stay warm.
   --labels folo-linux --unattended --replace`, then `nohup ./run.sh &`. Get a registration token with
   `gh api -X POST repos/himent12/folo/actions/runners/registration-token -q .token`. Never print or commit tokens or
   the boat key (docs/BOAT.md).
-- Self-hosted runners execute code from PRs. This is acceptable only because the repository is private and every PR
-  comes from FOLO's own agents. Never enable these runners on a public fork.
+- **Security.** Self-hosted runners execute code from PRs (tests, build scripts, npm lifecycle scripts) with the
+  runner account's access. The Windows runner uses the developer account, which can read `~/.folo/boat.key` and the
+  gh credentials. That is the same trust boundary FOLO's agents already work in, since they build and run the same
+  code as the same user on the same machine, so the runner adds no new principal. It still means: never enable these
+  runners for a public repository or for PRs from forks; keep dependencies pinned through Cargo.lock and
+  package-lock.json; and review new dependencies in PRs. If FOLO ever accepts outside contributions, move CI to a
+  dedicated account or VM with no developer credentials (or back to GitHub-hosted runners) first.
+- An offline runner does not trigger the fallback: jobs queue (up to 24 h). If a runner is down for long, delete the
+  variable to switch to GitHub-hosted runners.
