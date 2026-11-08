@@ -390,8 +390,8 @@ of batch-1 inference.
 
 `cargo bench -p folo-vision --bench gpu` runs the real detector (fused inference forward, end-to-end predict,
 training step, peak memory); its numbers and the comparison with Ultralytics are in
-[BENCHMARKS.md](BENCHMARKS.md#folo-on-the-gpu). In short, folo-n at 640: 3.98 ms batch-1 forward, 1461 img/s at
-batch 16, 219 img/s training step at batch 16 (143 before the loss moved to the GPU), 3.5 GiB training peak. The fused kernels' effect on the training step:
+[BENCHMARKS.md](BENCHMARKS.md#folo-on-the-gpu). In short, folo-n at 640: 2.99 ms batch-1 forward, 1385–1461 img/s
+at batch 16, 5.18 ms / 722 img/s end to end through the predictor at batch 1 / 16, 219 img/s training step at batch 16 (143 before the loss moved to the GPU), 3.5 GiB training peak. The fused kernels' effect on the training step:
 the SGD update went from 62 ms (about ten elementwise dispatches and copies per parameter) to 5 ms with the fused
 update kernel.
 
