@@ -10,7 +10,8 @@
     "tokens": "node scripts/tokens.mjs",
     "check": "node scripts/tokens.mjs --check && svelte-check --tsconfig ./tsconfig.json --fail-on-warnings && tsc -p tsconfig.node.json",
     "test": "vitest run",
-    "shoot": "node scripts/shoot.mjs"
+    "shoot": "node scripts/shoot.mjs",
+    "smoke": "node scripts/smoke.mjs"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^7.3.1",

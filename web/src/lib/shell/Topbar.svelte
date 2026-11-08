@@ -4,6 +4,7 @@
   import Moon from '@lucide/svelte/icons/moon';
   import Monitor from '@lucide/svelte/icons/monitor';
   import Plus from '@lucide/svelte/icons/plus';
+  import ChevronLeft from '@lucide/svelte/icons/chevron-left';
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
   import Settings from '@lucide/svelte/icons/settings';
   import { prefs } from '$lib/prefs.svelte';
@@ -15,12 +16,18 @@
 
   let { onsearch }: { onsearch: () => void } = $props();
 
+  /** On phones the breadcrumb collapses to its last item; a back button leads to the parent. */
+  const parent = $derived(page.crumbs.length >= 2 ? page.crumbs[page.crumbs.length - 2] : undefined);
   const themeIcon = $derived(prefs.theme === 'dark' ? Moon : prefs.theme === 'light' ? Sun : Monitor);
   const themeLabel = $derived(`Theme: ${prefs.theme} (click to change)`);
 </script>
 
 <header class="topbar">
-  <a href={href('/')} class="mobile-logo" aria-label="FOLO Studio home"><Logo wordmark={false} /></a>
+  {#if parent}
+    <a href={href(parent.path ?? '/')} class="mobile-back" aria-label="Back to {parent.label}"><ChevronLeft size={20} strokeWidth={1.75} /></a>
+  {:else}
+    <a href={href('/')} class="mobile-logo" aria-label="FOLO Studio home"><Logo wordmark={false} /></a>
+  {/if}
   <ol class="crumbs" aria-label="Breadcrumb">
     {#each page.crumbs as c, i (i)}
       {@const last = i === page.crumbs.length - 1}
@@ -63,6 +70,7 @@
     border-bottom: 1px solid var(--line-subtle);
   }
   .mobile-logo,
+  .mobile-back,
   .mobile-only {
     display: none;
   }
@@ -157,6 +165,20 @@
     .mobile-logo,
     .mobile-only {
       display: inline-flex;
+    }
+    .mobile-back {
+      display: grid;
+      place-items: center;
+      width: 44px;
+      height: 44px;
+      margin-left: calc(-1 * var(--space-3));
+      margin-right: calc(-1 * var(--space-2));
+      border-radius: var(--radius-md);
+      color: var(--text-secondary);
+    }
+    .mobile-back:hover {
+      background: var(--bg-hover);
+      color: var(--text-primary);
     }
     .crumbs li:not(.last) {
       display: none;

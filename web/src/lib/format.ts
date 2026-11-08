@@ -26,9 +26,10 @@ export function pct(x: number | null | undefined, digits = 1): string {
   return ok(x) ? `${nf(digits).format(x * 100)}%` : '—';
 }
 
+/** 3 significant digits, without trailing zeros: 2.63, 12.4, 20, 940. */
 function trim(x: number): string {
   const a = Math.abs(x);
-  return nf(a >= 100 ? 0 : a >= 10 ? 1 : 2).format(x);
+  return String(Number(nf(a >= 100 ? 0 : a >= 10 ? 1 : 2).format(x).replace(/,/g, '')));
 }
 
 /** 2_630_000 → "2.63M"; 12_400 → "12.4k"; 940 → "940". */

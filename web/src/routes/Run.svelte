@@ -40,6 +40,9 @@
     setCrumbs({ label: 'Runs', path: '/runs' }, { label: run?.name ?? id });
   });
 
+  const others = new Resource((s) => hub.api.runs(s), { poll: 5000 });
+  const queuedOnly = $derived(run?.status === 'queued' && live.steps.length === 0);
+  const ahead = $derived(others.data?.find((r) => r.status === 'running' || r.status === 'stopping'));
   const active = $derived(run ? ['queued', 'running', 'stopping'].includes(run.status) : false);
   const lastStep = $derived.by(() => {
     void live.version;
@@ -102,11 +105,16 @@
     </EmptyState>
   </Page>
 {:else if !run}
+  <!-- Mirrors the real layout (header, summary strip, chart rows) so nothing jumps when data arrives. -->
   <div class="loading" aria-busy="true" aria-label="Loading run">
-    <Skeleton w="120px" h="20px" />
-    <Skeleton w="280px" h="28px" />
-    <Skeleton h="96px" r="var(--radius-lg)" />
-    <div class="sk-grid"><Skeleton h="260px" r="var(--radius-lg)" /><Skeleton h="260px" r="var(--radius-lg)" /></div>
+    <div class="sk-head">
+      <Skeleton w="140px" h="20px" r="var(--radius-full)" />
+      <Skeleton w="240px" h="28px" />
+      <Skeleton w="420px" h="16px" />
+    </div>
+    <Skeleton h="118px" r="var(--radius-lg)" />
+    <div class="sk-row2"><Skeleton h="300px" r="var(--radius-lg)" /><Skeleton h="300px" r="var(--radius-lg)" /></div>
+    <div class="sk-row3"><Skeleton h="260px" r="var(--radius-lg)" /><Skeleton h="260px" r="var(--radius-lg)" /><Skeleton h="260px" r="var(--radius-lg)" /></div>
   </div>
 {:else}
   <Page title={run.name}>
@@ -153,14 +161,6 @@
         </div>
         {#if run.model_id}<Button size="sm" icon={ScanSearch} href={href(`/playground?model=${run.model_id}`)}>Try in Playground</Button>{/if}
       </div>
-    {:else if run.status === 'queued'}
-      <div class="banner info">
-        <Clock size={16} />
-        <div class="b-text">
-          <p class="b-title">Queued</p>
-          <p class="b-msg">Waiting for the device. It starts when the run ahead of it finishes.</p>
-        </div>
-      </div>
     {:else if run.status === 'stopped'}
       <div class="banner neutral">
         <Square size={16} />
@@ -171,6 +171,27 @@
       </div>
     {/if}
 
+    {#if queuedOnly}
+      <!-- Nothing has run yet: one clear waiting state instead of empty charts. -->
+      <section class="queued" aria-label="Queued">
+        <div class="q-mark" aria-hidden="true"><Clock size={20} strokeWidth={1.5} /></div>
+        <h2>Queued{#if ahead}<span class="faint"> · next in line</span>{/if}</h2>
+        <p>
+          {#if ahead}
+            Starts when <a class="link" href={href(`/runs/${ahead.id}`)}>{ahead.name}</a> finishes{#if ahead.eta_s !== null}, in about {duration(ahead.eta_s)}{/if}.
+          {:else}
+            Waiting for the device. It starts as soon as it is free.
+          {/if}
+          Charts, samples and logs appear with the first training step.
+        </p>
+        <div class="q-facts num">
+          <span><b>{run.epochs}</b> epochs</span>
+          <span><b>{run.config.batch}</b> batch</span>
+          <span><b>{run.config.imgsz}</b> px</span>
+          <span class="mono">{run.config.arch}</span>
+        </div>
+      </section>
+    {:else}
     <section class="cluster" aria-label="Run summary">
       <div class="cell main">
         <span class="label">Epoch</span>
@@ -218,6 +239,7 @@
     </div>
 
     <Samples runId={run.id} classes={dataset?.classes ?? []} {epochsDone} />
+    {/if}
 
     <ConfigPanel config={run.config} datasetName={dataset?.name} />
   </Page>
@@ -244,10 +266,29 @@
     margin: 0 auto;
     padding: var(--space-6);
   }
-  .sk-grid {
+  .sk-head {
+    display: grid;
+    gap: var(--space-2);
+    max-width: 100%;
+  }
+  .sk-row2 {
     display: grid;
     grid-template-columns: 2fr 1fr;
     gap: var(--space-4);
+  }
+  .sk-row3 {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: var(--space-4);
+  }
+  @media (max-width: 767px) {
+    .loading {
+      padding: var(--space-4);
+    }
+    .sk-row2,
+    .sk-row3 {
+      grid-template-columns: minmax(0, 1fr);
+    }
   }
   .id {
     font-size: var(--type-xs-size);
@@ -299,11 +340,6 @@
     border-color: color-mix(in srgb, var(--success-solid) 25%, transparent);
     color: var(--success-text);
   }
-  .info {
-    background: var(--info-muted);
-    border-color: color-mix(in srgb, var(--info-solid) 25%, transparent);
-    color: var(--info-text);
-  }
   .neutral {
     background: var(--bg-panel);
     border-color: var(--line-default);
@@ -313,6 +349,45 @@
     color: var(--text-primary);
   }
 
+  .queued {
+    display: grid;
+    justify-items: center;
+    gap: var(--space-3);
+    padding: var(--space-12) var(--space-6);
+    text-align: center;
+    border: 1px dashed var(--line-strong);
+    border-radius: var(--radius-lg);
+  }
+  .q-mark {
+    display: grid;
+    place-items: center;
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    background: var(--info-muted);
+    color: var(--info-text);
+  }
+  .queued h2 {
+    font-size: var(--type-lg-size);
+    line-height: var(--type-lg-line);
+  }
+  .queued p {
+    max-width: 460px;
+    color: var(--text-secondary);
+    text-wrap: balance;
+  }
+  .q-facts {
+    display: flex;
+    gap: var(--space-4);
+    flex-wrap: wrap;
+    justify-content: center;
+    color: var(--text-tertiary);
+    font-size: var(--type-sm-size);
+  }
+  .q-facts b {
+    color: var(--text-primary);
+    font-weight: var(--weight-medium);
+  }
   .cluster {
     display: grid;
     grid-template-columns: 1.6fr repeat(5, minmax(0, 1fr));
