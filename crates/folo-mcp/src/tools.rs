@@ -500,9 +500,17 @@ fn list_issues_compat(
     fetch: impl Fn(&IssueQuery) -> Result<IssuePage, Error>,
     q: &IssueQuery,
 ) -> Result<IssuePage, Error> {
+    let counted = |p: &IssuePage| p.counts.error + p.counts.warning + p.counts.info > 0;
     let page = fetch(q)?;
-    let c = &page.counts;
-    if c.error + c.warning + c.info > 0 || (page.total == 0 && page.issues.is_empty()) {
+    if counted(&page) {
+        return Ok(page);
+    }
+    // No counts: a dataset without issues, or an older server. A filtered answer cannot tell them apart (an old
+    // server honours `kind`), so ask for everything once.
+    let filtered = q.kind.is_some() || q.severity.is_some();
+    let probe =
+        if filtered { fetch(&IssueQuery { limit: 1, ..IssueQuery::default() })? } else { page.clone() };
+    if probe.total == 0 || counted(&probe) {
         return Ok(page);
     }
     let mut all = Vec::new();
@@ -1501,6 +1509,16 @@ mod tests {
         let none =
             |_: &IssueQuery| Ok(IssuePage { total: 0, issues: vec![], counts: IssueCounts::default() });
         assert_eq!(list_issues_compat(none, &q).unwrap().total, 0);
+        // An old server that honours `kind`: a kind without matches still gets the dataset-wide counts.
+        let old_kind = |q: &IssueQuery| -> Result<IssuePage, Error> {
+            let m: Vec<_> =
+                all.iter().filter(|i| q.kind.as_ref().is_none_or(|k| *k == i.kind)).cloned().collect();
+            let page = m.iter().skip(q.offset as usize).take(q.limit as usize).cloned().collect();
+            Ok(IssuePage { total: m.len() as u64, issues: page, counts: IssueCounts::default() })
+        };
+        let q = IssueQuery { kind: Some("clipped_box".into()), limit: 50, ..IssueQuery::default() };
+        let page = list_issues_compat(old_kind, &q).unwrap();
+        assert_eq!((page.total, page.counts.error, page.counts.info), (0, 1, 60));
     }
 
     #[test]

@@ -317,15 +317,15 @@ fn check_resume_flags(args: &TrainArgs, stored: &TrainConfig) -> Result<(), CliE
     Ok(())
 }
 
-/// Equal JSON values: integers exactly, other numbers within f32 precision (the run stores f32 settings widened
-/// to f64).
+/// Equal JSON values: integers exactly, floats as the same f32 (the run stores f32 settings widened to f64,
+/// and f64 ones compare equal to themselves).
 fn same(a: &serde_json::Value, b: &serde_json::Value) -> bool {
     use serde_json::Value;
     match (a, b) {
         (Value::Number(x), Value::Number(y)) if !x.is_f64() && !y.is_f64() => x == y,
         (Value::Number(x), Value::Number(y)) => {
             let (x, y) = (x.as_f64().unwrap_or(f64::NAN), y.as_f64().unwrap_or(f64::NAN));
-            (x - y).abs() <= 1e-6 * x.abs().max(y.abs()).max(1.0)
+            x == y || x as f32 == y as f32
         }
         (Value::Array(x), Value::Array(y)) => x.len() == y.len() && x.iter().zip(y).all(|(x, y)| same(x, y)),
         _ => a == b,
@@ -590,5 +590,8 @@ mod tests {
         assert!(same(&json!(0.015f32 as f64), &json!(0.015f32)));
         assert!(same(&json!([0.015f32 as f64, 0.7]), &json!([0.015f32, 0.7f32])));
         assert!(!same(&json!(0.5), &json!(0.6)));
+        // Small learning rates are told apart.
+        assert!(!same(&json!(1e-7), &json!(1e-6)));
+        assert!(same(&json!(folo_vision::train::f32_decimal(1e-7)), &json!(1e-7f32)));
     }
 }
