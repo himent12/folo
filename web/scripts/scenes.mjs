@@ -153,6 +153,29 @@ export const scenes = [
     },
   },
   { name: 'run-compare', path: '/runs/compare?ids=run_7d1e,run_c19a,run_5be3,run_a2f0', viewports: ['desktop', 'mobile'] },
+  {
+    // A run kept in front from the legend: its card selected, its line (here the dotted fourth run) painted over the rest.
+    name: 'run-compare-pinned',
+    path: '/runs/compare?ids=run_7d1e,run_c19a,run_5be3,run_a2f0',
+    fullPage: false,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page) => {
+      await until(page, '.chip .key');
+      await page.locator('.chip .key').nth(3).click();
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // Phones: Edit turns the compact two-column legend into one run per row with open and remove.
+    name: 'run-compare-edit',
+    path: '/runs/compare?ids=run_7d1e,run_c19a,run_5be3,run_a2f0',
+    fullPage: false,
+    viewports: ['mobile'],
+    setup: async (page) => {
+      await until(page, 'button.manage');
+      await page.locator('button.manage').click();
+    },
+  },
   { name: 'run-compare-empty', path: '/runs/compare', themes: ['dark'], viewports: ['desktop'] },
   { name: 'run-queued', path: '/runs/run_q4n2', themes: ['dark'], viewports: ['desktop'] },
   { name: 'datasets-empty', path: '/datasets', search: 'scenario=empty' },

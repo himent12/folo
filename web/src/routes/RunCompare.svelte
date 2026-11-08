@@ -1,3 +1,14 @@
+<script lang="ts" module>
+  /**
+   * The weights a run started from, by name: a model id resolves through the models list, a path shows its file name,
+   * none is null ("from scratch"). Fine-tuned vs from scratch often explains most of a gap between two runs.
+   */
+  export function startFrom(weights: string | null, models: readonly { id: string; name: string }[] | undefined): string | null {
+    if (!weights) return null;
+    return models?.find((m) => m.id === weights)?.name ?? weights.split(/[\\/]/).pop() ?? weights;
+  }
+</script>
+
 <script lang="ts">
   import ChartSkeleton from '$lib/charts/ChartSkeleton.svelte';
   import { untrack } from 'svelte';
@@ -10,6 +21,7 @@
   import { Resource } from '$lib/api/resource.svelte';
   import type { Epoch, Run, RunMetrics } from '$lib/api/types';
   import LineChart, { type Series } from '$lib/charts/LineChart.svelte';
+  import { niceDomain, unitDomain } from '$lib/charts/domain';
   import { nearest } from '$lib/charts/downsample';
   import { deviceName, duration, metric } from '$lib/format';
   import { href, router } from '$lib/router.svelte';
@@ -29,6 +41,8 @@
   const ids = $derived((router.route.query.get('ids') ?? '').split(',').filter(Boolean).slice(0, MAX));
   const runs = new Resource((s) => hub.api.runs(s));
   const datasets = new Resource((s) => hub.api.datasets(s));
+  // Names for runs fine-tuned from a model ("Start from").
+  const models = new Resource((s) => hub.api.models(s));
   const metrics = new Resource(async (s) => {
     const list = ids;
     const out = await Promise.all(list.map((id) => hub.api.runMetrics(id, s).then((m) => [id, m] as const)));
@@ -86,16 +100,32 @@
     });
 
   type MetricId = 'm95' | 'm50' | 'loss' | 'rec';
-  const METRICS: { id: MetricId; label: string; f: (e: Epoch) => number; y?: [number, number] }[] = [
-    { id: 'm95', label: 'mAP50-95', f: (e) => e.val.map50_95, y: [0, 1] },
-    { id: 'm50', label: 'mAP50', f: (e) => e.val.map50, y: [0, 1] },
+  const METRICS: { id: MetricId; label: string; f: (e: Epoch) => number; unit?: boolean }[] = [
+    { id: 'm95', label: 'mAP50-95', f: (e) => e.val.map50_95, unit: true },
+    { id: 'm50', label: 'mAP50', f: (e) => e.val.map50, unit: true },
     { id: 'loss', label: 'Train loss', f: (e) => e.train_loss.total },
-    { id: 'rec', label: 'Recall', f: (e) => e.val.recall, y: [0, 1] },
+    { id: 'rec', label: 'Recall', f: (e) => e.val.recall, unit: true },
   ];
   // One chart, one metric at a time: four small charts repeated the same legend four times.
   let metricId = $state<MetricId>('m95');
   const metricDef = $derived(METRICS.find((m) => m.id === metricId)!);
   const series = $derived(curve(metricDef.f));
+  // The run page's main-chart size; phones a shorter plot.
+  const height = $derived(narrow ? 240 : 320);
+  // Fitted to the runs (./domain): four runs between 0.45 and 0.62 spread over 0–0.7, not bunched in a 0–1 axis.
+  const fit = $derived.by(() => {
+    let lo = Infinity;
+    let hi = -Infinity;
+    for (const s of series)
+      for (const p of s.points) {
+        if (!Number.isFinite(p.y)) continue;
+        if (p.y < lo) lo = p.y;
+        if (p.y > hi) hi = p.y;
+      }
+    if (!Number.isFinite(lo)) return undefined;
+    // LineChart's plot sits inside 8 px top and 22 px bottom margins.
+    return metricDef.unit ? unitDomain(hi, height - 30) : niceDomain(lo, hi);
+  });
   // The chips are the legend: each shows its run's value under the cursor, or its latest value at rest.
   function valueOf(id: string): number | null {
     const pts = series.find((s) => s.id === id)?.points ?? [];
@@ -118,15 +148,23 @@
   const sameData = $derived(new Set(chosen.map((r) => r.config.dataset_id)).size <= 1);
   const bestIdx = $derived(chosen.reduce((b, r, i) => ((r.best?.map50_95 ?? -1) > (chosen[b]?.best?.map50_95 ?? -1) ? i : b), 0));
 
+  const startOf = (r: Run) => startFrom(r.config.weights, models.data);
+  const startLine = (r: Run) => {
+    const from = startOf(r);
+    return from ? `fine-tuned from ${from}` : 'from scratch';
+  };
+
   const rows = $derived<[string, (r: Run) => string][]>([
     ['Dataset', (r) => datasets.data?.find((d) => d.id === r.config.dataset_id)?.name ?? r.config.dataset_id],
     ['Model', (r) => r.config.arch],
+    ['Start from', (r) => startOf(r) ?? 'from scratch'],
     ['Epochs', (r) => `${r.epoch}/${r.epochs}`],
     ['Batch', (r) => String(r.config.batch)],
     ['Image size', (r) => `${r.config.imgsz} px`],
     ['Optimizer', (r) => r.config.optimizer],
     ['LR', (r) => String(r.config.lr0)],
     ['Mosaic / mixup', (r) => `${r.config.augment.mosaic} / ${r.config.augment.mixup}`],
+    ['Close mosaic', (r) => (r.config.augment.close_mosaic > 0 ? `last ${r.config.augment.close_mosaic} epochs` : 'never')],
     ['Device', (r) => deviceName(r.device)],
     ['Duration', (r) => (r.started ? duration(((r.finished ? Date.parse(r.finished) : Date.now()) - Date.parse(r.started)) / 1000) : '—')],
   ]);
@@ -194,17 +232,19 @@
   {:else}
     <section class="compare" aria-label="Curves">
       {#if narrow}
-        <!-- Phones: one control row, the plot, then the legend (its readout follows a tap or scrub on the plot). -->
+        <!-- Phones: one control row, the runs (a compact legend whose values follow a tap or scrub on the plot), the
+             one caveat that changes how to read it, then the plot. The longer explanation sits in the disclosure. -->
         <header class="c-row">
           <Select label="Metric" bind:value={metricId} options={METRICS.map((m) => ({ value: m.id, label: m.label }))} />
           <Segmented size="sm" label="X axis" bind:value={x} options={[{ value: 'epoch', label: 'By epoch' }, { value: 'progress', label: '% of run' }]} />
         </header>
-        {@render plot()}
         {@render chips()}
+        {#if !sameData && chosen.length > 1}<p class="caveat">Different datasets: scores are not directly comparable</p>{/if}
+        {@render plot()}
         <details class="about">
           <summary>
             <ChevronRight size={14} aria-hidden="true" />
-            <span>{!sameData && chosen.length > 1 ? 'Different datasets: how to read this' : 'How to read this'}</span>
+            <span>How to read this</span>
           </summary>
           <div class="about-body">
             {#if !sameData && chosen.length > 1}<p>The runs use different datasets: compare the shape of the curves, not their values.</p>{/if}
@@ -293,9 +333,11 @@
 {#snippet chips()}
   <!-- The run chips are the legend: colour key, value under the cursor, link and remove. -->
   <div class="chips" class:managing role="group" aria-label="Runs being compared">
-    <span class="at num" aria-hidden="true">{readoutAt}</span>
-    <!-- Phones: opening and removing runs sit behind one toggle, so the legend stays compact. -->
-    <button type="button" class="manage" aria-pressed={managing} onclick={() => (managing = !managing)}>{managing ? 'Done' : 'Edit'}</button>
+    <div class="chips-head">
+      <span class="at num" aria-hidden="true">{readoutAt}</span>
+      <!-- Phones: opening and removing runs sit behind one toggle, so the legend stays compact. -->
+      <button type="button" class="manage" aria-pressed={managing} onclick={() => (managing = !managing)}>{managing ? 'Done' : 'Edit'}</button>
+    </div>
     {#each chosen as r (r.id)}
       {@const v = valueOf(r.id)}
       <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -317,8 +359,13 @@
           onclick={() => (pinned = pinned === r.id ? null : r.id)}
         ><i aria-hidden="true" data-pattern={SLOT_PATTERN[slotOf(r.id)]}></i><span class="nm">{r.name}</span></button>
         <span class="v num">{v === null ? '—' : metric(v)}</span>
-        <a class="open" href={href(`/runs/${r.id}`)} aria-label="Open {r.name}" title="Open run"><ArrowUpRight size={12} /></a>
-        <button class="rm" aria-label="Remove {r.name}" onclick={() => setIds(ids.filter((id) => id !== r.id))}><X size={12} /></button>
+        <!-- How the run started: fine-tuned vs from scratch often explains a gap between two curves. It lies over the
+             toggle's lower half (clicks pass through to it) and runs on under the value. -->
+        <span class="from" class:tuned={!!r.config.weights} title={startLine(r)}>{startLine(r)}</span>
+        <span class="acts">
+          <a class="open" href={href(`/runs/${r.id}`)} aria-label="Open {r.name}" title="Open run"><ArrowUpRight size={12} /></a>
+          <button class="rm" aria-label="Remove {r.name}" onclick={() => setIds(ids.filter((id) => id !== r.id))}><X size={12} /></button>
+        </span>
       </span>
     {/each}
     {#if ids.length < MAX && candidates.length}{@render adder()}{/if}
@@ -329,14 +376,15 @@
   {#if metrics.error}
     <ErrorState error={metrics.error} compact retry={() => metrics.refresh()} title="Could not load these runs' metrics" />
   {:else if !metrics.data || !runs.data}
-    <ChartSkeleton height={narrow ? 240 : 340} legend={false} />
+    <ChartSkeleton {height} legend={false} />
   {:else}
     <LineChart
       {series}
-      height={narrow ? 240 : 340}
+      {height}
       {xDomain}
       xInteger={x === 'epoch'}
-      yDomain={metricDef.y}
+      yDomain={fit?.domain}
+      yTickValues={fit?.ticks}
       curve="monotone"
       valueFormat={(v) => metric(v)}
       xFormat={(v) => (x === 'epoch' ? String(Math.round(v)) : `${Math.round(v)}%`)}
@@ -381,72 +429,143 @@
   :global([data-theme='dark']) .compare {
     border-color: var(--line-subtle);
   }
+  /* The legend: one card per run (key, name, value under the cursor; how it started below), side by side. */
   .chips {
-    display: flex;
-    flex-wrap: wrap;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(232px, 1fr));
     gap: var(--space-2);
+    align-items: stretch;
+  }
+  .chips-head {
+    grid-column: 1 / -1;
+    display: flex;
     align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
   }
   .at {
-    min-width: 6.5em;
     font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
     color: var(--text-tertiary);
   }
   .chip {
-    transition: border-color var(--dur-fast) var(--ease-standard);
-  }
-  .key {
     position: relative;
-    display: inline-flex;
-    align-items: center;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    grid-template-rows: auto auto;
+    column-gap: var(--space-1);
+    min-width: 0;
+    padding: var(--space-1) var(--space-1) var(--space-1) var(--space-3);
+    border-radius: var(--radius-md);
+    background: var(--bg-panel);
+    border: 1px solid var(--line-default);
+    transition:
+      border-color var(--dur-fast) var(--ease-standard),
+      background-color var(--dur-fast) var(--ease-standard);
+  }
+  .chip:hover {
+    border-color: var(--line-strong);
+  }
+  /* The run kept in front: the one selection rule (bg.active and a 2 px accent bar). */
+  .chip.pinned {
+    background: var(--bg-active);
+  }
+  .chip.pinned::before {
+    content: '';
+    position: absolute;
+    left: -1px;
+    top: -1px;
+    bottom: -1px;
+    width: 2px;
+    border-radius: var(--radius-md) 0 0 var(--radius-md);
+    background: var(--accent-line);
+  }
+  /* The legend entry is the toggle: key and name, over both lines of the card. */
+  .key {
+    grid-column: 1;
+    grid-row: 1 / 3;
+    position: relative;
+    display: flex;
+    align-items: flex-start;
     gap: var(--space-2);
-    height: 24px;
-    padding: 0 var(--space-1);
+    padding: var(--space-1);
     margin-left: calc(-1 * var(--space-1));
     border-radius: var(--radius-sm);
-    font-weight: var(--weight-medium);
     min-width: 0;
-  }
-  .nm {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .open {
-    display: grid;
-    place-items: center;
-    width: 20px;
-    height: 20px;
-    border-radius: var(--radius-sm);
-    color: var(--text-tertiary);
-  }
-  .open:hover {
-    background: var(--bg-hover);
-    color: var(--text-primary);
+    text-align: left;
   }
   .key:hover {
     background: var(--bg-hover);
   }
-  .key[aria-pressed='true'] {
-    background: var(--bg-active);
+  /* On the name's centre line (20 px line). */
+  .key i {
+    margin-top: 8px;
   }
-  @media (pointer: coarse) {
-    .key::after {
-      content: '';
-      position: absolute;
-      inset: -12px;
-    }
-  }
-  .chip:hover,
-  .chip.pinned {
-    border-color: var(--line-strong);
+  .nm {
+    font-weight: var(--weight-medium);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .chip .v {
+    grid-column: 2;
+    grid-row: 1;
+    align-self: start;
+    padding: var(--space-1) var(--space-1) 0 0;
     min-width: 3.2em;
     color: var(--text-primary);
     font-weight: var(--weight-medium);
     font-variant-numeric: tabular-nums;
     text-align: right;
+  }
+  /* Indented under the name, past the key (16 px swatch + 8 px gap); clicks fall through to the toggle. */
+  .from {
+    grid-column: 1 / 3;
+    grid-row: 2;
+    align-self: end;
+    position: relative;
+    min-width: 0;
+    padding: 0 var(--space-1) var(--space-1) var(--space-6);
+    pointer-events: none;
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--text-tertiary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .from.tuned {
+    color: var(--text-secondary);
+  }
+  .acts {
+    grid-column: 3;
+    grid-row: 1 / 3;
+    display: grid;
+    align-content: center;
+  }
+  .open,
+  .chip .rm {
+    display: grid;
+    place-items: center;
+    width: 24px;
+    height: 24px;
+    border-radius: var(--radius-sm);
+    color: var(--text-tertiary);
+  }
+  .open:hover,
+  .chip .rm:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+  }
+  @media (pointer: coarse) {
+    .chip .rm {
+      position: relative;
+    }
+    .chip .rm::after {
+      content: '';
+      position: absolute;
+      inset: -8px;
+    }
   }
   .note {
     font-size: var(--type-sm-size);
@@ -477,82 +596,79 @@
   .t-range .more:hover {
     color: var(--text-primary);
   }
+  /* Phones: the one caveat that changes how to read the plot, always in view, on one line above it. */
+  .caveat {
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--text-secondary);
+  }
   @media (max-width: 767px) {
-    /* Phones: the legend is one column of full-width rows (key, name, value), so every run's whole name shows;
-       open / remove appear with Edit. */
+    /* Phones: a compact legend above the plot, one 44 px row per run (key, name over how it started, value), so
+       every run is named before the curves; open / remove appear with Edit. */
     .chips {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) auto;
-      gap: 0 var(--space-3);
+      grid-template-columns: minmax(0, 1fr);
+      gap: 0;
     }
-    .chips .chip {
-      grid-column: 1 / -1;
-    }
-    .chips .at {
-      grid-column: 1;
-      align-self: center;
+    .chips-head {
+      margin-top: calc(-1 * var(--space-2));
     }
     .manage {
       display: inline-flex;
-      grid-column: 2;
-      justify-self: end;
       align-items: center;
       height: 44px;
+      padding-left: var(--space-3);
       font-size: var(--type-sm-size);
       color: var(--text-secondary);
     }
+    /* Rows bleed into the panel padding, so the selection bar sits at the panel's inner edge. The value is centred
+       on the row; the start line stays under the name. */
     .chips .chip {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) auto;
-      align-items: center;
-      border-radius: 0;
+      margin-inline: calc(-1 * var(--space-2));
+      padding: 0 var(--space-2);
       border-width: 0 0 1px;
+      border-color: var(--line-subtle);
+      border-radius: 0;
       background: none;
-      padding: 0;
-      min-height: 44px;
     }
-    .chips:not(.managing) .chip .open,
-    .chips:not(.managing) .chip .rm {
+    .chips .chip:first-of-type {
+      border-top-width: 1px;
+    }
+    .chips .chip.pinned {
+      background: var(--bg-active);
+    }
+    .chips .chip.pinned::before {
+      top: 0;
+      bottom: 0;
+      left: 0;
+      border-radius: 0;
+    }
+    .chips .chip .key {
+      min-height: 52px;
+      margin-left: 0;
+      padding: var(--space-2) 0 0;
+    }
+    .chips .chip .v {
+      grid-row: 1 / 3;
+      align-self: center;
+      padding-top: 0;
+    }
+    .chips .chip .from {
+      grid-column: 1;
+      padding-bottom: var(--space-2);
+      white-space: normal;
+    }
+    .chips:not(.managing) .chip .acts {
       display: none;
     }
-    .chips.managing {
-      grid-template-columns: minmax(0, 1fr);
-    }
-    .chips.managing .chip {
-      grid-template-columns: minmax(0, 1fr) auto 44px 44px;
-      min-height: 48px;
-    }
-    .chips.managing .manage {
-      grid-column: 1;
-      grid-row: 1;
-    }
-    .chips .chip .key {
-      min-height: 44px;
-      height: auto;
-      margin-left: 0;
-      padding: var(--space-1) 0;
-    }
-    /* A name too long for the row wraps instead of ending in an ellipsis: compared runs often differ only in the
-       suffix (shapes-hard-s / -m), which must stay visible. */
-    .chips .chip .key {
-      text-align: left;
-    }
-    .chips .chip .nm {
-      white-space: normal;
-      overflow-wrap: anywhere;
-      display: -webkit-box;
-      -webkit-box-orient: vertical;
-      -webkit-line-clamp: 2;
-      line-clamp: 2;
-      line-height: var(--type-sm-line);
+    .chips.managing .chip .acts {
+      grid-template-columns: 44px 44px;
     }
     .chips .chip .open,
     .chips .chip .rm {
       width: 44px;
       height: 44px;
     }
-    .chips .chip .rm::after,
-    .chips .chip .key::after {
+    .chips .chip .rm::after {
       content: none;
     }
     /* The side-by-side table scrolls sideways on phones: setting names stay pinned, and the right edge fades only
@@ -570,11 +686,8 @@
     .compare {
       padding: var(--space-3);
     }
-    .at {
-      flex-basis: 100%;
-    }
   }
-  /* Phones: metric picker and x axis share one row above the plot. */
+  /* Phones: metric picker and x axis share one row above the legend. */
   .c-row {
     display: flex;
     align-items: center;
@@ -583,9 +696,9 @@
   .c-row > :global(.select) {
     flex: 1;
   }
-  /* Directly under the legend rows, whose last hairline closes the legend. */
   .about {
     margin-top: calc(-1 * var(--space-2));
+    border-top: 1px solid var(--line-subtle);
   }
   .about summary {
     display: flex;
@@ -640,58 +753,17 @@
   .fold button:hover {
     color: var(--text-primary);
   }
-  .chip {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    height: var(--control-md);
-    padding: 0 4px 0 8px;
-    border-radius: var(--radius-full);
-    background: var(--bg-panel);
-    border: 1px solid var(--line-default);
-    font-weight: var(--weight-medium);
-  }
-  .chip i {
-    width: 10px;
-    height: 3px;
-    border-radius: 2px;
-    background: var(--c);
-  }
-  .chip a:hover {
-    text-decoration: underline;
-    text-underline-offset: 3px;
-  }
-  .chip .rm {
-    display: grid;
-    place-items: center;
-    width: 20px;
-    height: 20px;
-    border-radius: 50%;
-    color: var(--text-tertiary);
-  }
-  @media (pointer: coarse) {
-    .chip .rm {
-      position: relative;
-    }
-    .chip .rm::after {
-      content: '';
-      position: absolute;
-      inset: -12px;
-    }
-  }
-  .chip .rm:hover {
-    background: var(--bg-hover);
-    color: var(--text-primary);
-  }
   .add {
     position: relative;
     display: inline-flex;
     align-items: center;
+    align-self: center;
+    justify-self: start;
     gap: 6px;
     height: var(--control-md);
     padding: 0 12px;
     border-radius: var(--radius-full);
-    border: 1px solid var(--line-default);
+    border: 1px solid var(--line-control);
     color: var(--text-secondary);
   }
   .add select {
@@ -722,16 +794,14 @@
     color: var(--text-primary);
     font-size: var(--type-sm-size);
   }
-  .th i {
-    width: 10px;
-    height: 3px;
-    border-radius: 2px;
-    background: var(--c);
-  }
   /* Same patterns as the lines, so a run's key matches its curve without relying on colour. */
   .chip i,
   .th i {
-    width: 14px;
+    flex-shrink: 0;
+    width: 16px;
+    height: 3px;
+    border-radius: 2px;
+    background: var(--c);
   }
   i[data-pattern='dash'] {
     background: repeating-linear-gradient(90deg, var(--c) 0 5px, transparent 5px 7px);
@@ -760,6 +830,6 @@
     padding: 1px 6px;
     border-radius: var(--radius-xs);
     background: var(--accent-muted);
-    font-size: var(--type-micro-size);
+    font-size: var(--type-sm-size);
   }
 </style>
