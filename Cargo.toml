@@ -37,6 +37,8 @@ folo-api = { path = "crates/folo-api" }
 axum = { version = "0.8", features = ["macros", "multipart"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
+tokio-util = { version = "0.7", features = ["io"] }
+httpdate = "1"
 futures-util = "0.3"
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["cors", "compression-gzip", "trace", "fs"] }

@@ -125,6 +125,8 @@ impl Curve {
             loss: self.step_loss(step),
             imgs_per_s,
             eta_s,
+            steps_per_epoch: self.spe,
+            epochs: self.epochs,
         }
     }
 
@@ -403,6 +405,11 @@ impl SimRun {
         }
     }
 
+    /// A `status` event (with the run's length).
+    fn status_event(&self, status: RunStatus) -> StatusEvent {
+        StatusEvent::new(status, self.error(status)).with_length(self.config.epochs, self.spe)
+    }
+
     fn error(&self, status: RunStatus) -> Option<String> {
         match &self.timeline {
             Timeline::Static { error, .. } if status == RunStatus::Failed => error.clone(),
@@ -529,7 +536,7 @@ impl SimRun {
         }
         drop(hub);
         let events = rx;
-        Subscription { initial: StatusEvent { status: snap.status, error: self.error(snap.status) }, events }
+        Subscription { initial: self.status_event(snap.status), events }
     }
 
     /// Number of live subscribers (for tests).
@@ -640,8 +647,7 @@ impl SimRun {
     /// Events describing the change from `prev` to `now`.
     fn diff(&self, prev: &Snap, now: &Snap) -> Vec<RunEvent> {
         let mut out = Vec::new();
-        let status =
-            |s: &Snap| RunEvent::Status(StatusEvent { status: s.status, error: self.error(s.status) });
+        let status = |s: &Snap| RunEvent::Status(self.status_event(s.status));
         let mut prev = *prev;
         if now.cycle != prev.cycle {
             out.push(

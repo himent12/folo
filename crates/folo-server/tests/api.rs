@@ -433,10 +433,15 @@ async fn sse_live_run_streams_and_cleans_up() {
     assert_eq!(a[0].0, "status");
     let st: StatusEvent = serde_json::from_str(&a[0].1).unwrap();
     assert_eq!(st.status, RunStatus::Running);
+    // The events carry the run's length, so clients need not re-read the run.
+    let run: Run = ok(&app, get(&format!("/api/runs/{live}"))).await;
+    assert!(run.steps_per_epoch > 0);
+    assert_eq!((st.epochs, st.steps_per_epoch), (run.epochs, run.steps_per_epoch));
     for (name, data) in &a[1..] {
         let ev = RunEvent::from_sse(name, data).expect("known event").expect("valid payload");
         if let RunEvent::Step(s) = ev {
             assert!(s.step > 0 && s.lr > 0.0 && s.loss.total > 0.0);
+            assert_eq!((s.epochs, s.steps_per_epoch), (run.epochs, run.steps_per_epoch));
         }
     }
     assert!(a.iter().any(|(n, _)| n == "step"));

@@ -634,7 +634,7 @@ mod tests {
                     if id == "b" {
                         std::future::pending::<()>().await;
                     }
-                    let initial = folo_api::StatusEvent { status: folo_api::RunStatus::Running, error: None };
+                    let initial = folo_api::StatusEvent::new(folo_api::RunStatus::Running, None);
                     Ok(folo_server::store::Subscription { initial, events })
                 }
             })

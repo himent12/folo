@@ -13,7 +13,8 @@ behaviour, and keep the Rust types in `crates/folo-api` (used by the server, the
 - Creating endpoints answer `201 Created` with the new object; deletes answer `204 No Content`; everything else `200`.
 - Request bodies are JSON (`Content-Type: application/json`) except multipart uploads to `/api/predict`. Unknown
   fields are ignored; missing optional fields take the defaults listed here.
-- Responses are gzip-compressed when the client sends `Accept-Encoding: gzip` (never images or SSE).
+- Responses are gzip-compressed when the client sends `Accept-Encoding: gzip` (never images, SSE or weights
+  files: `application/octet-stream`).
 - CORS: by default only browser origins on `localhost`, `127.0.0.1` or `[::1]` (any port, e.g. the Vite dev server
   on :5173) may call the API; `folo serve --cors-any` allows every origin. Because browsers send simple form POSTs
   without a preflight, state-changing requests (`POST`, `DELETE`) whose `Origin` header is neither such a loopback
@@ -146,6 +147,22 @@ Non-2xx responses: `{ "error": { "code": "dataset_not_found", "message": "...", 
 - `POST /api/models/{id}/export` body `{ "format": "folo-f16|onnx" }` → `{ "path", "bytes" }`. Real mode writes the
   fused EMA weights as f16 (as `folo export` does, docs/FORMAT.md) to `<data dir>/exports/<model name>-f16.folo`
   (`-f16-2`, `-f16-3`, ... when taken; never overwriting). `onnx` answers `501 not_implemented`.
+- `GET /api/models/{id}/weights` (optional `?format=f16`) → the model's `.folo` file (docs/FORMAT.md), for loading
+  it elsewhere, e.g. into the browser detector (docs/WASM.md). Without `format` it is the file as stored: a run model
+  is its full training checkpoint (`weights/best.folo` / `last.folo`, with EMA and optimizer state); `format=f16` is the
+  `folo-f16` export of `POST /api/models/{id}/export` (fused EMA weights in F16, a fraction of a checkpoint's size),
+  made on the first request and cached in `cache/weights/` until the model's file changes. Any other `format` is
+  `400 invalid_query`; `404 model_not_found` as usual (also when the file disappears).
+  - `Content-Type: application/octet-stream`, `Content-Length`, `Content-Disposition: attachment;
+    filename="<model name>.folo"` (`<model name>-f16.folo`; characters outside `A-Z a-z 0-9 . _ -` become `_`).
+    Real files are streamed from disk (never read into memory whole), and never gzip-compressed.
+  - Validators: a strong `ETag` (real mode: the file's size and modification time in nanoseconds, cheap and exact
+    for FOLO's writers, which replace files whole; a replacement keeping both the size and the exact modification
+    time, e.g. with `touch -r`, is not noticed; mock mode: a hash of the bytes) and `Last-Modified`, with `Cache-Control: no-cache` (a run's `last.folo` changes every
+    epoch). `If-None-Match` (weak comparison, `*` too) and, without it, `If-Modified-Since` answer
+    `304 Not Modified` with the validators and no body. `HEAD` answers the headers alone.
+  - CORS exposes `ETag` and `Content-Disposition` to page scripts, so Studio (also from the Vite dev server) can
+    cache weights by ETag.
 
 ```jsonc
 // Model
@@ -192,7 +209,8 @@ Non-2xx responses: `{ "error": { "code": "dataset_not_found", "message": "...", 
   the same as the SSE `log` events, so a dashboard opened mid-run loads this and then appends live events. The
   shape is stable (the MCP proxy uses it, docs/MCP.md).
 - `GET /api/runs/{id}/events` → SSE stream. Each SSE `event:` name is the payload type, `data:` is its JSON:
-  - `status` `{ "status": "queued|running|stopping|stopped|completed|failed", "error": null | "..." }`
+  - `status` `{ "status": "queued|running|stopping|stopped|completed|failed", "error": null | "...",
+    "steps_per_epoch": 50, "epochs": 100 }` (the run's length, as in `Run`)
   - `step` `Step` (at most ~10 per second; steps in between are skipped, `/metrics` has them all)
   - `epoch` `Epoch` (after each validation)
   - `log` `{ "t", "level": "debug|info|warn|error", "message" }`
@@ -202,6 +220,11 @@ Non-2xx responses: `{ "error": { "code": "dataset_not_found", "message": "...", 
   loop) and ends when the run is deleted or the server shuts down. Any number of clients may subscribe. A client too
   slow to keep up gets a `warn` `log` event saying how many events it missed. Clients must ignore unknown event
   names (new types may be added).
+  `status` and `step` events carry `steps_per_epoch` and `epochs`, so progress can be drawn from the stream alone.
+  `steps_per_epoch` is only known once the trainer is built: a run's snapshot (`GET /api/runs/{id}`) and its
+  `status` events say `0` until then (typically the initial `queued` status of a new run), and the trainer's
+  `running` status and every `step` carry the real value. Both fields are missing from servers that predate them
+  (clients should treat that as `0`).
 
 ```jsonc
 // TrainConfig (only dataset_id is required; the rest shows the defaults)
@@ -223,15 +246,15 @@ Non-2xx responses: `{ "error": { "code": "dataset_not_found", "message": "...", 
   "epoch": 12,             // epoch in progress, 1-based (0 before the first step; the last epoch once finished)
   "epochs": 100,
   "step": 575,             // optimizer steps completed over all epochs
-  "steps_per_epoch": 50,  // 0 until the trainer has loaded the dataset (the first seconds of a real run); step and
-                         // status events don't carry it, so re-read GET /api/runs/{id} once the first step arrives
+  "steps_per_epoch": 50,  // 0 until the trainer is built (before the first `running` status; events carry it)
   "eta_s": 1840 | null,    // null unless queued / running / stopping
   "best": { "epoch": 11, "map50_95": 0.61 } | null, "device": "NVIDIA GeForce RTX 4080 SUPER (vulkan)",
   "model_id": null | "m_31aa",  // set once the run completed, or stopped after at least one validated epoch
   "error": null | "..." }
 // Step
 { "epoch": 12, "step": 575, "lr": 0.0098, "loss": { "box": 1.21, "cls": 0.83, "dfl": 1.02, "total": 3.06 },
-  "imgs_per_s": 412.5, "eta_s": 1840 }      // epoch is 1-based; step is the global, 1-based step number
+  "imgs_per_s": 412.5, "eta_s": 1840,
+  "steps_per_epoch": 50, "epochs": 100 }  // epoch is 1-based; step is the global, 1-based step number
 // Epoch (epoch is 1-based, as everywhere in this API: Run.epoch, Run.best.epoch, Step.epoch, ?epoch= queries)
 { "epoch": 12, "train_loss": { "box": 1.18, "cls": 0.80, "dfl": 1.00, "total": 2.98 },
   "val": { "map50": 0.82, "map50_95": 0.61, "precision": 0.84, "recall": 0.77,
@@ -287,7 +310,9 @@ Non-2xx responses: `{ "error": { "code": "dataset_not_found", "message": "...", 
   previous process left `queued`, `running` or `stopping` become `stopped` (with a `warn` log line) and can be
   resumed with `resume_run_id`. On a graceful shutdown the active run stops after its current batch.
 - `models/`: `.folo` files listed as models (scanned on every listing; metadata read once per file version).
-- `exports/`: exported models. `cache/eval/`: cached `/eval` results.
+- `exports/`: exported models. `cache/eval/`: cached `/eval` results. `cache/weights/<model id>.<hash>.f16.folo`:
+  the f16 weights of `/weights?format=f16` (the hash is of the source file's path, size and modification time;
+  older copies are removed when a new one is made, and a run's when the run is deleted).
 
 ## Validation
 - `POST /api/val` body `{ "model_id", "dataset_id", "split": "val", "imgsz": null, "conf": 0.001, "iou": 0.7 }` →
@@ -314,6 +339,10 @@ start, except live-run timestamps):
   deterministic `clipped_box` / `duplicate_image` warnings.
 - Models: six (`m_31aa`, `m_31ab`, `m_42c1`, `m_42c2`, `m_53d1`, `m_53d2`), each linked to its run, with
   deterministic `/eval` results consistent with its metrics (smooth PR curves, a mostly diagonal confusion matrix).
+  `/weights` serves a real, loadable `.folo` file: always the **folo-n** architecture (whatever the model's `arch`)
+  with the model's classes and `imgsz` and deterministic random weights (about 10 MB, 5 MB as `f16`), generated on
+  the first request and kept in memory, so the in-browser path works in mock mode (it detects nothing useful).
+  `Last-Modified` is the server's start time.
 - Runs: four completed, one stopped (`run_2b02`), one failed with an out-of-memory error (`run_2b03`), all with full
   metric histories; and one live run (`run_3c02`, r6-operators / folo-s) whose SSE stream advances in real time: a
   100-epoch run compressed into ~10 minutes (6 s per epoch, ~7 steps per second), starting around epoch 12, then it

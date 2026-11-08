@@ -63,6 +63,99 @@ pub struct ImageData {
     pub immutable: bool,
 }
 
+/// Which weights file `GET /api/models/{id}/weights` serves.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum WeightsFormat {
+    /// The model's `.folo` file as stored (a run model is its full training checkpoint).
+    #[default]
+    Stored,
+    /// The `folo-f16` export (fused EMA weights in F16), created on first request and cached.
+    F16,
+}
+
+/// Where the bytes of a [`Weights`] come from.
+#[derive(Debug)]
+pub enum WeightsBody {
+    /// An open file, streamed from its start (at most [`Weights::len`] bytes are sent).
+    File(std::fs::File),
+    /// Bytes in memory (the mock store's generated files).
+    Bytes(axum::body::Bytes),
+}
+
+/// A model's weights file with its HTTP validators (`GET /api/models/{id}/weights`).
+#[derive(Debug)]
+pub struct Weights {
+    /// The bytes.
+    pub body: WeightsBody,
+    /// Their length (`Content-Length`).
+    pub len: u64,
+    /// Last modification (`Last-Modified`).
+    pub modified: std::time::SystemTime,
+    /// Strong ETag, quoted (`"..."`): it changes whenever the bytes do.
+    pub etag: String,
+    /// Suggested file name (`Content-Disposition`), e.g. `shapes-n-best.folo`.
+    pub file_name: String,
+}
+
+impl Weights {
+    /// Opens `path` for streaming ([`Weights::from_file`]). A missing file is `model_not_found` with `id`.
+    pub fn open(path: &std::path::Path, id: &str, file_name: String) -> Result<Weights> {
+        let file = std::fs::File::open(path).map_err(|e| weights_io(e, path, id))?;
+        Weights::from_file(file, path, id, file_name)
+    }
+
+    /// Weights streamed from `file` (opened from `path`). The length, modification time and ETag come from the
+    /// open handle, so they describe the bytes sent even when the file is replaced or removed meanwhile. The ETag
+    /// is the size and the modification time in nanoseconds: every writer of `.folo` files replaces them whole,
+    /// which gives the new file a new modification time (a replacement that keeps both the size and the exact
+    /// modification time, e.g. `touch -r`, is not noticed).
+    pub fn from_file(
+        file: std::fs::File,
+        path: &std::path::Path,
+        id: &str,
+        file_name: String,
+    ) -> Result<Weights> {
+        let meta = file.metadata().map_err(|e| weights_io(e, path, id))?;
+        let modified = meta.modified().map_err(|e| weights_io(e, path, id))?;
+        let nanos = modified.duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+        let len = meta.len();
+        Ok(Weights {
+            body: WeightsBody::File(file),
+            len,
+            modified,
+            etag: format!("\"{len:x}-{nanos:x}\""),
+            file_name,
+        })
+    }
+}
+
+/// An IO error on the weights file of model `id`: `model_not_found` when the file is gone, else `internal`.
+pub fn weights_io(e: std::io::Error, path: &std::path::Path, id: &str) -> crate::error::Error {
+    if e.kind() == std::io::ErrorKind::NotFound {
+        crate::error::Error::not_found("model", id)
+    } else {
+        crate::error::Error::internal(format!("{}: {e}", path.display()))
+    }
+}
+
+/// The file name a model's weights are offered under: its name reduced to `A-Z a-z 0-9 . _ -` (anything else
+/// becomes `_`, outer dots are dropped), `-f16` for the export, and `.folo`.
+pub fn weights_file_name(model_name: &str, format: WeightsFormat) -> String {
+    let stem: String = model_name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') { c } else { '_' })
+        .collect();
+    // No leading dot (a hidden file) and no trailing one (Windows drops it).
+    let stem = match stem.trim_matches('.') {
+        "" => "model",
+        s => s,
+    };
+    match format {
+        WeightsFormat::Stored => format!("{stem}.folo"),
+        WeightsFormat::F16 => format!("{stem}-f16.folo"),
+    }
+}
+
 /// Input of `POST /api/predict`.
 #[derive(Clone, Debug)]
 pub struct PredictInput {
@@ -132,6 +225,13 @@ pub trait Store: Send + Sync + 'static {
     fn model_eval(&self, id: &str) -> Result<ModelEval>;
     /// Exports a model.
     fn export_model(&self, id: &str, format: ExportFormat) -> Result<ExportResult>;
+    /// A model's weights file (`GET /api/models/{id}/weights`). Stores without files answer
+    /// `501 not_implemented` (the default).
+    fn model_weights(&self, id: &str, format: WeightsFormat) -> Result<Weights> {
+        let _ = format;
+        self.get_model(id)?;
+        Err(crate::error::Error::not_implemented("downloading weights"))
+    }
 
     /// All runs, newest first.
     fn list_runs(&self) -> Result<Vec<Run>>;

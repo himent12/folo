@@ -181,6 +181,8 @@ impl Curve {
             loss: Loss { box_, cls, dfl, total: box_ + cls + dfl },
             imgs_per_s: ips,
             eta_s: remaining * STEP_DT,
+            steps_per_epoch: self.spe,
+            epochs: self.epochs,
         }
     }
 
@@ -1139,7 +1141,7 @@ impl Backend for MockBackend {
                 f.logs.len(),
             )
         };
-        let _ = tx.send(RunEvent::Status(StatusEvent { status, error: None }));
+        let _ = tx.send(RunEvent::Status(StatusEvent::new(status, None).with_length(epochs, spe)));
         let Some((base, at)) = live else { return Ok(sub) };
         let total = epochs as u64 * spe;
         let start_secs = self.sim_now();
@@ -1181,8 +1183,9 @@ impl Backend for MockBackend {
                     for l in lines {
                         let _ = tx.send(RunEvent::Log(l));
                     }
-                    let _ =
-                        tx.send(RunEvent::Status(StatusEvent { status: RunStatus::Stopped, error: None }));
+                    let _ = tx.send(RunEvent::Status(
+                        StatusEvent::new(RunStatus::Stopped, None).with_length(epochs, spe),
+                    ));
                     return;
                 }
                 let now = target;
@@ -1209,8 +1212,9 @@ impl Backend for MockBackend {
                     }
                 }
                 if sent >= total {
-                    let _ =
-                        tx.send(RunEvent::Status(StatusEvent { status: RunStatus::Completed, error: None }));
+                    let _ = tx.send(RunEvent::Status(
+                        StatusEvent::new(RunStatus::Completed, None).with_length(epochs, spe),
+                    ));
                     return;
                 }
             }

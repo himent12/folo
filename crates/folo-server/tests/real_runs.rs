@@ -222,6 +222,11 @@ async fn train_evaluate_predict_and_reload() {
     assert_eq!(last["status"], "completed", "{last}: {events:?}");
     assert_eq!(count(&events, "epoch"), 2);
     assert!(count(&events, "step") >= 2 && count(&events, "log") >= 1);
+    // Steps and the trainer's statuses carry the run's length (3 batches of 4 out of 10 images, 2 epochs).
+    for (name, v) in events.iter().filter(|(n, v)| n == "step" || (n == "status" && v["status"] != "queued"))
+    {
+        assert_eq!((v["steps_per_epoch"].as_u64(), v["epochs"].as_u64()), (Some(3), Some(2)), "{name} {v}");
+    }
 
     let done: Run = ok(&app, get(&format!("/api/runs/{}", run.id))).await;
     assert_eq!(done.status, RunStatus::Completed);
@@ -284,6 +289,26 @@ async fn train_evaluate_predict_and_reload() {
     let last: Model = ok(&app, get(&format!("/api/models/{model_id}-last"))).await;
     assert_eq!(last.metrics.unwrap().map50_95, m.epochs[1].val.map50_95);
     err(&app, get("/api/models/m_none"), StatusCode::NOT_FOUND, "model_not_found").await;
+
+    // Its weights: the checkpoint as stored, and the f16 export (cached under cache/weights/).
+    let (status, body) = send(&app, get(&format!("/api/models/{model_id}/weights"))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, std::fs::read(home.join("runs").join(&run.id).join("weights/best.folo")).unwrap());
+    let (status, f16) = send(&app, get(&format!("/api/models/{model_id}/weights?format=f16"))).await;
+    assert_eq!(status, StatusCode::OK);
+    let file = folo_nn::io::ModelFile::from_bytes(f16.clone()).unwrap();
+    assert_eq!(file.metadata().dtype, folo_nn::io::FloatDType::F16);
+    assert!(file.metadata().fused && f16.len() < body.len() / 2, "{} vs {}", f16.len(), body.len());
+    let cached = || {
+        std::fs::read_dir(home.join("cache/weights"))
+            .map(|d| {
+                d.flatten()
+                    .filter(|e| e.file_name().to_string_lossy().starts_with(&format!("{model_id}.")))
+                    .count()
+            })
+            .unwrap_or(0)
+    };
+    assert_eq!(cached(), 1);
 
     // Eval on the validation split (cached), export.
     let eval: ModelEval = ok(&app, get(&format!("/api/models/{model_id}/eval"))).await;
@@ -407,7 +432,18 @@ async fn train_evaluate_predict_and_reload() {
     assert_eq!(r3.boxes, r.boxes, "same weights, same image, same boxes");
     assert_eq!(ok::<SystemInfo>(&app, get("/api/system")).await.gpus, system.gpus);
 
-    // Deleting a finished run removes it, its folder and its models.
+    // Deleting a finished run removes it, its folder and its models (their cached f16 weights too).
+    let tuned_model = format!("m_{}", tuned.id.trim_start_matches("run_"));
+    let (status, _) = send(&app, get(&format!("/api/models/{tuned_model}/weights?format=f16"))).await;
+    assert_eq!(status, StatusCode::OK);
+    let tuned_cache = || {
+        std::fs::read_dir(home.join("cache/weights"))
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with(&format!("{tuned_model}.")))
+            .count()
+    };
+    assert_eq!(tuned_cache(), 1);
     let (status, _) = send(&app, delete(&format!("/api/runs/{}", tuned.id))).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
     assert!(!home.join("runs").join(&tuned.id).exists());
@@ -415,6 +451,9 @@ async fn train_evaluate_predict_and_reload() {
     let r = json!({ "resume_run_id": tuned.id });
     err(&app, post_json("/api/runs", r), StatusCode::NOT_FOUND, "run_not_found").await;
     assert_eq!(ok::<ModelList>(&app, get("/api/models")).await.models.len(), models.models.len());
+    assert_eq!(tuned_cache(), 0);
+    let uri = format!("/api/models/{tuned_model}/weights");
+    err(&app, get(&uri), StatusCode::NOT_FOUND, "model_not_found").await;
 
     // A dataset whose classes changed order since training is not evaluated against the old labels.
     let yaml = home.join("datasets/tiny/data.yaml");

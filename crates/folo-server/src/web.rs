@@ -54,6 +54,19 @@ pub(crate) fn content_type(path: &str) -> &'static str {
     }
 }
 
+/// Whether the request's `If-None-Match` matches `etag` (`None` without the header). It uses the weak comparison
+/// (RFC 9110 §13.1.2): opaque tags match regardless of `W/`, and `*` matches anything.
+pub(crate) fn if_none_match(headers: &HeaderMap, etag: &str) -> Option<bool> {
+    let opaque = |t: &str| t.trim().trim_start_matches("W/").to_string();
+    let mut values = headers.get_all(header::IF_NONE_MATCH).iter().peekable();
+    values.peek()?;
+    Some(
+        values
+            .filter_map(|v| v.to_str().ok())
+            .any(|v| v.split(',').any(|t| t.trim() == "*" || opaque(t) == opaque(etag))),
+    )
+}
+
 fn find(files: &'static [EmbeddedFile], path: &str) -> Option<&'static EmbeddedFile> {
     files.binary_search_by(|f| f.path.cmp(path)).ok().map(|i| &files[i])
 }
@@ -83,13 +96,7 @@ pub(crate) fn respond(
         // The body may be gzip-encoded by the compression layer; caches must key on the request's encoding.
         (header::VARY, HeaderValue::from_static("accept-encoding")),
     ];
-    // If-None-Match uses the weak comparison: opaque tags match regardless of `W/`.
-    let opaque = |t: &str| t.trim().trim_start_matches("W/").to_string();
-    let fresh = headers
-        .get(header::IF_NONE_MATCH)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|v| v.split(',').any(|t| t.trim() == "*" || opaque(t) == opaque(file.etag)));
-    if fresh {
+    if if_none_match(headers, file.etag) == Some(true) {
         return (StatusCode::NOT_MODIFIED, common).into_response();
     }
     (StatusCode::OK, common, [(header::CONTENT_TYPE, content_type(file.path))], file.bytes).into_response()

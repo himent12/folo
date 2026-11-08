@@ -11,7 +11,7 @@ pub use checkpoint::{
     BestState, CheckpointMeta, CheckpointParts, FileContents, Resumed, RngState, checkpoint_contents,
     save_checkpoint,
 };
-pub use export::{export_module, export_tensors, fuse_bn_tensors, save_weights};
+pub use export::{export_module, export_tensors, fuse_bn_tensors, save_weights, write_export, write_weights};
 pub use file::{
     LoadOptions, LoadReport, ModelFile, Namespace, Purpose, SkipReason, Skipped, Source, is_class_output,
 };

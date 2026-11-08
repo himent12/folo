@@ -7,6 +7,7 @@
 mod runs;
 mod scene;
 mod val;
+mod weights;
 
 use std::io::Cursor;
 use std::sync::{Arc, RwLock};
@@ -22,7 +23,10 @@ use folo_api::{
 use crate::error::{Error, Result};
 use crate::index::{Index, read_image};
 use crate::stats::StatsBuilder;
-use crate::store::{ImageData, ImageQuery, IssueQuery, PredictInput, PredictSource, Store, Subscription};
+use crate::store::{
+    ImageData, ImageQuery, IssueQuery, PredictInput, PredictSource, Store, Subscription, Weights,
+    WeightsFormat,
+};
 use crate::util::{Rng, fnv1a, mix64, noise, parse_rfc3339, rfc3339, unique_id, unix_now};
 use runs::{Curve, LiveClock, SimRun, Timeline, arch_spec};
 use scene::{Scene, Theme};
@@ -464,6 +468,7 @@ pub struct MockStore {
     datasets: RwLock<Vec<Arc<DatasetEntry>>>,
     models: RwLock<Vec<StaticModel>>,
     runs: RwLock<Vec<(Arc<SimRun>, Arc<DatasetEntry>)>>,
+    weights: weights::MockWeights,
 }
 
 impl Default for MockStore {
@@ -717,7 +722,12 @@ impl MockStore {
         );
         runs.push((Arc::new(live), Arc::clone(r6)));
 
-        MockStore { datasets: RwLock::new(datasets), models: RwLock::new(models), runs: RwLock::new(runs) }
+        MockStore {
+            datasets: RwLock::new(datasets),
+            models: RwLock::new(models),
+            runs: RwLock::new(runs),
+            weights: weights::MockWeights::new(),
+        }
     }
 
     fn dataset(&self, id: &str) -> Result<Arc<DatasetEntry>> {
@@ -942,6 +952,10 @@ impl Store for MockStore {
             ExportFormat::Onnx => ("onnx", m.params * 4 + 61_440),
         };
         Ok(ExportResult { path: format!("mock://exports/{}.{ext}", m.name), bytes })
+    }
+
+    fn model_weights(&self, id: &str, format: WeightsFormat) -> Result<Weights> {
+        self.weights.get(&self.get_model(id)?, format)
     }
 
     fn list_runs(&self) -> Result<Vec<Run>> {

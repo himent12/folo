@@ -275,6 +275,9 @@ export interface Step {
   loss: Loss;
   imgs_per_s: number;
   eta_s: number;
+  /** The run's length (Run.steps_per_epoch / Run.epochs); absent from older servers. */
+  steps_per_epoch?: number;
+  epochs?: number;
 }
 
 export interface ClassMetrics {
@@ -326,7 +329,8 @@ export interface RunLogs {
 
 /** SSE events on GET /api/runs/{id}/events, keyed by the SSE `event:` name. */
 export interface RunEventMap {
-  status: { status: RunStatus; error: string | null };
+  /** steps_per_epoch is 0 until the run is built; both are absent from older servers. */
+  status: { status: RunStatus; error: string | null; steps_per_epoch?: number; epochs?: number };
   step: Step;
   epoch: Epoch;
   log: LogLine;
