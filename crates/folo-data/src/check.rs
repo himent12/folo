@@ -345,7 +345,7 @@ fn read_image_file(image: &Path, opts: &CheckOptions) -> ImageCheck {
         match crate::image::decode(&bytes) {
             // Decoders fill a JPEG cut off mid-scan with grey instead of failing.
             Ok(_) if crate::image::jpeg_truncated(&bytes) => Err(format!(
-                "truncated JPEG: the data ends before the end-of-image marker ({} bytes; it decodes with grey                  where the data is missing)",
+                "truncated JPEG: the data ends before the end-of-image marker ({} bytes; it decodes with grey rows where the data is missing)",
                 bytes.len()
             )),
             Ok(i) => Ok((i.width, i.height)),
