@@ -80,7 +80,19 @@ impl FoloApp {
                 .tooltip(crate::controls::tip("Start training", Some("Ctrl N")))
                 .into_any_element(),
         };
-        let actions = vec![
+        // Not connected: there's no model to run an image with (like New run beside it).
+        let open = if self.store.runs.error().is_some() {
+            self.button_disabled(
+                "ov-open",
+                "Open image",
+                Btn::Secondary,
+                Some("icons/image-up.svg"),
+                "Not connected",
+                window,
+                cx,
+            )
+            .into_any_element()
+        } else {
             self.button(
                 "ov-open",
                 "Open image",
@@ -91,9 +103,9 @@ impl FoloApp {
                 act(|this, _, cx| this.pick_image(cx)),
             )
             .tooltip(crate::controls::tip("Run a model on an image", Some("Ctrl O")))
-            .into_any_element(),
-            new_run,
-        ];
+            .into_any_element()
+        };
+        let actions = vec![open, new_run];
         let nothing_yet = no_ds
             && self.store.runs.ready().is_some_and(|r| r.is_empty())
             && self.store.models.ready().is_some_and(|m| m.is_empty());
@@ -174,7 +186,7 @@ impl FoloApp {
     fn live_panel(&mut self, r: &Run, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         // Short windows trade chart height for the sections below.
         // Short windows (620 px minimum): a lower plot, so two Recent runs rows show under the hero.
-        let hero_h = if window.viewport_size().height < px(700.) { 76. } else { 132. };
+        let hero_h = if window.viewport_size().height < px(700.) { 108. } else { 132. };
         let t = theme(cx);
         self.ensure_run_data(&r.id, cx);
         let ds = self
@@ -309,16 +321,17 @@ impl FoloApp {
         };
         // One row of four KPIs above a full-width chart: no column beside the chart to leave a
         // gap in, whatever the chart's height.
+        // Four equal tiles across the card with 1 px dividers, like the run, model and dataset strips
+        // (the row used to stop at ~60 % of the card).
         let kpis = div()
+            .w_full()
             .flex()
-            .flex_wrap()
-            .gap(px(40.))
             .child(
                 div()
+                    .flex_1()
                     .flex()
-                    .gap(px(40.))
                     .child(
-                        div().flex_none().min_w(px(120.)).child(kpi(
+                        div().flex_1().min_w_0().pl(px(0.)).child(kpi(
                             "Epoch",
                             div()
                                 .flex()
@@ -343,39 +356,47 @@ impl FoloApp {
                         )),
                     )
                     .child(
-                        div().flex_none().min_w(px(120.)).child(kpi(
-                            "mAP50-95",
-                            text(ty::X2XL, t.text_primary)
-                                .tnum()
-                                .child(map_now.map_or("–".into(), f3))
-                                .into_any_element(),
-                            Some(best_line),
-                        )),
+                        div().flex_1().min_w_0().border_l_1().border_color(t.line_subtle).pl(px(16.)).child(
+                            kpi(
+                                "mAP50-95",
+                                text(ty::X2XL, t.text_primary)
+                                    .tnum()
+                                    .child(map_now.map_or("–".into(), f3))
+                                    .into_any_element(),
+                                Some(best_line),
+                            ),
+                        ),
                     ),
             )
             .child(
                 div()
+                    .flex_1()
                     .flex()
-                    .gap(px(40.))
                     .child(
-                        div().flex_none().min_w(px(120.)).child(kpi(
-                            "Throughput",
-                            metric(
-                                &t,
-                                ips.map_or("–".into(), |v| format!("{v:.0}")),
-                                "img/s",
-                                ty::X2XL,
-                                ty::SM,
-                            )
-                            .into_any_element(),
-                            ips_avg.map(|a| format!("avg {a:.0}")),
-                        )),
+                        div().flex_1().min_w_0().border_l_1().border_color(t.line_subtle).pl(px(16.)).child(
+                            kpi(
+                                "Throughput",
+                                metric(
+                                    &t,
+                                    ips.map_or("–".into(), |v| format!("{v:.0}")),
+                                    "img/s",
+                                    ty::X2XL,
+                                    ty::SM,
+                                )
+                                .into_any_element(),
+                                ips_avg.map(|a| format!("avg {a:.0}")),
+                            ),
+                        ),
                     )
-                    .child(div().flex_none().min_w(px(120.)).child(kpi(
-                        "Time left",
-                        duration_metric(&t, eta_s, ty::X2XL, ty::SM).into_any_element(),
-                        elapsed,
-                    ))),
+                    .child(
+                        div().flex_1().min_w_0().border_l_1().border_color(t.line_subtle).pl(px(16.)).child(
+                            kpi(
+                                "Time left",
+                                duration_metric(&t, eta_s, ty::X2XL, ty::SM).into_any_element(),
+                                elapsed,
+                            ),
+                        ),
+                    ),
             );
         let footer = self.system_footer(cx);
         panel(&t)
@@ -414,8 +435,8 @@ impl FoloApp {
                 div()
                     .flex()
                     .flex_col()
-                    .gap(px(if hero_h < 100. { 8. } else { 16. }))
-                    .p(px(if hero_h < 100. { 12. } else { 16. }))
+                    .gap(px(if hero_h < 120. { 8. } else { 16. }))
+                    .p(px(if hero_h < 120. { 12. } else { 16. }))
                     .child(kpis)
                     .child(
                         div()
@@ -508,7 +529,7 @@ impl FoloApp {
         if self.store.runs.is_loading() {
             // Same anatomy and heights as the live panel: header, rail, a row of four KPIs above the
             // chart (its title row, then the plot), meter footer. Nothing moves when data lands.
-            let hero_h = if window.viewport_size().height < px(700.) { 76. } else { 132. };
+            let hero_h = if window.viewport_size().height < px(700.) { 108. } else { 132. };
             let sk = |id: &str| skeleton(&t, id.to_string());
             return panel(&t)
                 .flex_1()
@@ -527,11 +548,13 @@ impl FoloApp {
                     div()
                         .flex()
                         .flex_col()
-                        .gap(px(if hero_h < 100. { 8. } else { 16. }))
-                        .p(px(if hero_h < 100. { 12. } else { 16. }))
-                        .child(div().flex().gap(px(40.)).children((0..4).map(|c| {
-                            div().w(px(120.)).h(px(64.)).child(skeleton(&t, format!("hero-kpi-{c}")))
-                        })))
+                        .gap(px(if hero_h < 120. { 8. } else { 16. }))
+                        .p(px(if hero_h < 120. { 12. } else { 16. }))
+                        .child(div().flex().gap(px(16.)).children(
+                            (0..4).map(|c| {
+                                div().flex_1().h(px(64.)).child(skeleton(&t, format!("hero-kpi-{c}")))
+                            }),
+                        ))
                         .child(
                             div()
                                 .flex_1()
@@ -586,7 +609,12 @@ impl FoloApp {
                 Some("icons/plus.svg"),
                 window,
                 cx,
-                act(|this, w, cx| this.navigate(Route::Datasets, w, cx)),
+                act(|this, w, cx| {
+                    // The label promises the picker: land on Datasets with it open (the built-in demo
+                    // can't register folders, and says so there instead).
+                    this.navigate(Route::Datasets, w, cx);
+                    this.add_dataset_folder(cx);
+                }),
             )
         };
         panel(&t)
@@ -987,7 +1015,12 @@ impl FoloApp {
                 Some("icons/plus.svg"),
                 window,
                 cx,
-                act(|this, w, cx| this.navigate(Route::Datasets, w, cx)),
+                act(|this, w, cx| {
+                    // The label promises the picker: land on Datasets with it open (the built-in demo
+                    // can't register folders, and says so there instead).
+                    this.navigate(Route::Datasets, w, cx);
+                    this.add_dataset_folder(cx);
+                }),
             )
             .into_any_element();
         let step = |n: &str, title: &str, body: &str, active: bool| {

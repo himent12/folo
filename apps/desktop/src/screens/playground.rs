@@ -103,7 +103,12 @@ impl FoloApp {
                     Some("icons/plus.svg"),
                     window,
                     cx,
-                    act(|this, w, cx| this.navigate(crate::app::Route::Datasets, w, cx)),
+                    act(|this, w, cx| {
+                        // The label promises the picker: land on Datasets with it open (the built-in demo
+                        // can't register folders, and says so there instead).
+                        this.navigate(crate::app::Route::Datasets, w, cx);
+                        this.add_dataset_folder(cx);
+                    }),
                 )
             } else if no_models {
                 self.button(

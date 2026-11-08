@@ -159,9 +159,10 @@ impl FoloApp {
                     .into_any_element(),
             ))
             .child(row(
-                "Start folo serve automatically",
-                // Read at startup, whatever the current source.
-                help("At startup, launch folo serve when none is running (else the built-in demo)."),
+                // What autoconnect actually starts: a demo server (`folo serve --mock`), not
+                // one that trains. Read at startup, whatever the current source.
+                "Start a demo server automatically",
+                help("At startup, launch folo serve --mock when no server is running (else the built-in demo)."),
                 spawn.into_any_element(),
             ));
 
