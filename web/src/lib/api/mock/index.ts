@@ -142,7 +142,7 @@ function profiles(t0: number): RunProfile[] {
     {
       id: 'run_a2f0',
       name: 'shapes-hard-m',
-      config: config('shapes-hard-m', 'ds_shapes_hard', 'folo-m', 100, { batch: 32, imgsz: 960 }),
+      config: config('shapes-hard-m', 'ds_shapes_hard', 'folo-m', 100, { batch: 32, imgsz: 960, augment: { ...defaultAugment, close_mosaic: 15 } }),
       classes: 6,
       classEase: [1.1, 1.05, 1, 0.82, 0.95, 0.75],
       stepsPerEpoch: 125,
@@ -163,7 +163,8 @@ function profiles(t0: number): RunProfile[] {
     {
       id: 'run_5be3',
       name: 'shapes-hard-s',
-      config: config('shapes-hard-s', 'ds_shapes_hard', 'folo-s', 100, { weights: 'm_coco_s' }),
+      // Fine-tuned from shapes-s: Compare's Start from row and legend show it next to the runs from scratch.
+      config: config('shapes-hard-s', 'ds_shapes_hard', 'folo-s', 100, { weights: 'm_shapes_s' }),
       classes: 6,
       classEase: [1.1, 1.05, 1, 0.82, 0.95, 0.75],
       stepsPerEpoch: 250,

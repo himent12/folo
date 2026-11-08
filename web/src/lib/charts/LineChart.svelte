@@ -56,6 +56,8 @@
     xDomain?: [number, number];
     yDomain?: [number, number];
     yLog?: boolean;
+    /** Y tick values, when the caller fitted the domain itself (./domain): the ticks end exactly on its top. */
+    yTickValues?: number[];
     curve?: 'linear' | 'monotone';
     xFormat?: (x: number) => string;
     /** Tick labels on y. Default: as many decimals as the tick step needs ("6", "0.5", "0.25"). */
@@ -96,6 +98,7 @@
     xDomain,
     yDomain,
     yLog = false,
+    yTickValues: yTickProp,
     curve = 'linear',
     xFormat: xFormatProp,
     yFormat: yFormatProp,
@@ -155,6 +158,7 @@
   });
 
   const yTickValues = $derived.by(() => {
+    if (yTickProp) return yTickProp.filter((t) => t >= yExtent[0] - 1e-9 && t <= yExtent[1] + 1e-9);
     if (yLog) {
       const [lo, hi] = yExtent;
       const out: number[] = [];
@@ -180,8 +184,8 @@
 
   const margin = $derived.by(() => {
     const longest = Math.max(...yTickValues.map((v) => yFormat(v).length), 1);
-    // ~7 px per character at 11 px Geist (tabular digits).
-    const labelW = endLabels && width >= 560 ? Math.min(120, Math.max(0, ...series.map((s) => s.label.length)) * 6.2 + 10) : 0;
+    // ~7 px per character at 11 px Geist (tabular digits); end labels are 12 px.
+    const labelW = endLabels && width >= 560 ? Math.min(130, Math.max(0, ...series.map((s) => Math.min(18, s.label.length))) * 6.8 + 10) : 0;
     const left = Math.ceil(longest * 7) + 14;
     // An x-axis title gets its own line under the tick labels.
     return { top: yLabel ? 24 : 8, right: 12 + labelW, bottom: xLabel ? 36 : 22, left };
@@ -255,7 +259,8 @@
     const points = drawn
       .map((s) => {
         const p = s.points[s.points.length - 1];
-        return p && Number.isFinite(p.y) ? { id: s.id, label: s.label.length > 18 ? `${s.label.slice(0, 17)}…` : s.label, x: x(p.x), y: y(p.y) } : null;
+        const curve = visible.indexOf(s);
+        return p && Number.isFinite(p.y) ? { id: s.id, label: s.label.length > 18 ? `${s.label.slice(0, 17)}…` : s.label, x: x(p.x), y: y(p.y), curve } : null;
       })
       .filter((e): e is NonNullable<typeof e> => e !== null)
       // The highlighted line is labelled first, so it never loses its spot; then the shortest lines, which are the
@@ -372,7 +377,7 @@
   const compact = $derived(width > 0 && width < 480);
   const pill = $derived.by(() => {
     if (!compact || !hover) return null;
-    const w = Math.ceil(hover.title.length * 6.2) + 12;
+    const w = Math.ceil(hover.title.length * 6.8) + 12;
     const cx = Math.min(width - w / 2 - 1, Math.max(w / 2 + 1, hover.px));
     return { w, cx, text: hover.title };
   });
@@ -420,11 +425,24 @@
   }
 
   // Dots are 0-length dashes drawn with round caps (stroke width), so they read as dots, not a faint hairline.
-  const PATTERNS = { dash: [6, 3], dot: [0.01, 3.5], dashdot: [7, 3, 0.01, 3] } as const;
-  /** stroke-dasharray for a series (scaled for the small legend swatch). */
+  // Dots sit 4.5 px apart, so a line they run along (box under dfl in the loss chart) still shows between them.
+  const PATTERNS = { dash: [6, 3], dot: [0.01, 4.5], dashdot: [7, 3, 0.01, 3] } as const;
+  // The legend swatch (12 px, 2 px stroke, round caps) shows the same rhythm as its line: two dashes, three dots.
+  const SWATCH = { dash: [3, 4], dot: [0.01, 4.5], dashdot: [4, 3.5, 0.01, 3.5] } as const;
+  const patternOf = (s: Series) => s.pattern ?? (s.dashed ? 'dash' : null);
+  /** stroke-dasharray for a series; `k` scales it with a heavier stroke (a highlighted line keeps its rhythm). */
   function dashOf(s: Series, k = 1): string | undefined {
-    const p = s.pattern ? PATTERNS[s.pattern] : s.dashed ? PATTERNS.dash : null;
-    return p ? p.map((v) => v * k).join(' ') : undefined;
+    const p = patternOf(s);
+    return p ? PATTERNS[p].map((v) => +(v * k).toFixed(3)).join(' ') : undefined;
+  }
+  const swatchDash = (s: Series) => {
+    const p = patternOf(s);
+    return p ? SWATCH[p].join(' ') : undefined;
+  };
+  /** `items` with the highlighted series moved to the end, so it is painted over every other line. */
+  function lifted<T>(items: T[], id: (t: T) => string): T[] {
+    if (highlight === null) return items;
+    return [...items.filter((t) => id(t) !== highlight), ...items.filter((t) => id(t) === highlight)];
   }
 
   const latest = (s: Series) => {
@@ -441,7 +459,7 @@
 
 {#snippet swatch(s: Series)}
   <svg class="swatch" width="14" height="6" viewBox="0 0 14 6" aria-hidden="true">
-    <line x1="1" x2="13" y1="3" y2="3" style:stroke={s.color} style:stroke-dasharray={dashOf(s, 0.6)} />
+    <line x1="1" x2="13" y1="3" y2="3" style:stroke={s.color} style:stroke-dasharray={swatchDash(s)} />
   </svg>
 {/snippet}
 
@@ -528,16 +546,16 @@
           {#each paths.filter((p) => p.b) as { s, b } (s.id)}
             <path class="band" d={b} style:fill={s.color} />
           {/each}
-          {#each paintOrder(paths.filter((p) => !p.b), (p) => p.s) as { s, d, a } (s.id)}
+          {#each lifted(paintOrder(paths.filter((p) => !p.b), (p) => p.s), (p) => p.s.id) as { s, d, a } (s.id)}
             {#if a}<path class="area" d={a} fill="url(#{uid}-{s.id})" />{/if}
             {#if s.pattern === 'dot' && !s.ghost && !s.context}
-              <!-- A dotted line over a coincident solid one would show the other line through its gaps: a thin
-                   knockout in the panel colour underneath keeps its dots readable. -->
-              <path class="knockout" class:faded={highlight !== null && s.id !== highlight} {d} />
+              <!-- A dotted line over a coincident solid one would lose its dots in the other line: a partial knockout in
+                   the panel colour underneath keeps the dots readable, and the other line still shows, recessed. -->
+              <path class="knockout" class:faded={highlight !== null && s.id !== highlight} {d} style:stroke-width={s.id === highlight ? 4.5 : undefined} />
             {/if}
             <path
               class="line"
-              class:dashed={s.dashed}
+              class:dashed={s.dashed || s.pattern === 'dash' || s.pattern === 'dashdot'}
               class:dotted={s.pattern === 'dot'}
               class:thin={s.thin}
               class:ghost={s.ghost}
@@ -546,17 +564,11 @@
               class:faded={highlight !== null && s.id !== highlight && !s.ghost && !s.context}
               {d}
               style:stroke={s.context ? undefined : s.color}
-              style:stroke-dasharray={dashOf(s)}
+              style:stroke-dasharray={dashOf(s, s.id === highlight ? 1.4 : 1)}
             />
           {/each}
-          {#if highlight !== null}
-            <!-- The highlighted line is drawn again on top, so overlapping lines cannot hide it. -->
-            {#each paths.filter((p) => p.s.id === highlight) as { s, d } (s.id)}
-              <path class="line emphasis" {d} style:stroke={s.color} style:stroke-dasharray={dashOf(s)} />
-            {/each}
-          {/if}
           {#if endDots}
-            {#each paintOrder(keyed, (s) => s) as s (s.id)}
+            {#each lifted(paintOrder(keyed, (s) => s), (s) => s.id) as s (s.id)}
               {@const p = s.points[s.points.length - 1]}
               {#if p && Number.isFinite(p.y)}
                 <circle class="end-dot" class:faded={highlight !== null && s.id !== highlight} cx={x(p.x)} cy={y(p.y)} r="3" style:fill={s.color} />
@@ -652,8 +664,10 @@
   .legend .note.at {
     color: var(--text-secondary);
   }
-  .x-label {
+  /* Axis names are labels, not ticks: 12 px. */
+  .ticks .x-label {
     fill: var(--text-tertiary);
+    font-size: var(--type-sm-size);
   }
   .swatch {
     flex-shrink: 0;
@@ -729,10 +743,13 @@
     stroke: var(--bg-panel);
     stroke-width: 1.5;
   }
+  /* Partial, so a line the dots run along (box under dfl in the loss chart) still shows between them: the knockout
+     only softens it enough for the dots to read as dots. */
   .knockout {
     fill: none;
     stroke: var(--bg-panel);
-    stroke-width: 3.5;
+    stroke-width: 3;
+    opacity: 0.3;
     stroke-linejoin: round;
     stroke-linecap: round;
   }
@@ -774,11 +791,11 @@
   }
   .pill text {
     fill: var(--text-primary);
-    font-size: var(--type-xs-size);
+    font-size: var(--type-sm-size);
     font-variant-numeric: tabular-nums;
   }
   .end-label {
-    font-size: var(--type-micro-size);
+    font-size: var(--type-sm-size);
     font-weight: var(--weight-medium);
     paint-order: stroke;
     stroke: var(--bg-panel);
@@ -790,7 +807,7 @@
   }
   .marker text {
     fill: var(--text-secondary);
-    font-size: var(--type-micro-size);
+    font-size: var(--type-sm-size);
     font-variant-numeric: tabular-nums;
     paint-order: stroke;
     stroke: var(--bg-panel);
@@ -817,8 +834,8 @@
     background: var(--bg-overlay);
     box-shadow: var(--shadow-md);
     pointer-events: none;
-    font-size: var(--type-xs-size);
-    line-height: var(--type-xs-line);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
     z-index: 2;
     white-space: nowrap;
   }
@@ -839,7 +856,7 @@
     margin-left: 6px;
     color: var(--text-tertiary);
     font-variant-numeric: tabular-nums;
-    font-size: var(--type-micro-size);
+    font-size: var(--type-sm-size);
   }
   .tip-row .name {
     flex: 1;

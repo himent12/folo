@@ -1,3 +1,13 @@
+<script lang="ts" module>
+  import { lr as fmtLr } from '$lib/format';
+
+  /** "3.42" and "× 10⁻⁴" from 3.42e-4: the value set large, its power of ten as the unit, so a tab never cuts it off. */
+  export function lrParts(v: number | null | undefined): { value: string; unit?: string } {
+    const [m, e] = fmtLr(v).split(' × ');
+    return e ? { value: m!, unit: `× ${e}` } : { value: m! };
+  }
+</script>
+
 <script lang="ts">
   /**
    * The run's metrics as one instrument: the epoch progress, a row of KPI tabs (each with its current value) and the one
@@ -6,12 +16,13 @@
    */
   import { tooltip } from '$lib/ui/tooltip';
   import ChartSkeleton from '$lib/charts/ChartSkeleton.svelte';
+  import { holdDomain, logDomain, niceDomain, unitDomain, type Fit, type Held } from '$lib/charts/domain';
   import { smooth, type Pt } from '$lib/charts/downsample';
   import LineChart, { type Marker, type Series } from '$lib/charts/LineChart.svelte';
   import { runHorizon } from '$lib/charts/horizon';
   import type { Epoch, Run, Step } from '$lib/api/types';
   import { runProgress, stepsPerEpoch } from '$lib/api/progress';
-  import { duration, eta, lr as fmtLr, metric, num, pow10 } from '$lib/format';
+  import { duration, eta, metric, num, pow10 } from '$lib/format';
   import Segmented from '$lib/ui/Segmented.svelte';
   import Select from '$lib/ui/Select.svelte';
 
@@ -26,15 +37,20 @@
   type Tab = 'map' | 'map50' | 'pr' | 'loss' | 'lr' | 'ips';
   let tab = $state<Tab>('map');
 
-  // Phones get a shorter plot and fold the metric picker into the chart header, so the samples start within the
-  // first screen.
-  let narrow = $state(typeof matchMedia !== 'undefined' && matchMedia('(max-width: 767px)').matches);
+  // Below 960 px the six tabs become one metric picker in the chart header, where it replaces the title; phones also
+  // get a shorter plot, so the samples start within the first screen.
+  const media = (q: string) => typeof matchMedia !== 'undefined' && matchMedia(q).matches;
+  let narrow = $state(media('(max-width: 767px)'));
+  let picking = $state(media('(max-width: 959px)'));
   $effect(() => {
-    const mq = matchMedia('(max-width: 767px)');
-    const on = () => (narrow = mq.matches);
-    mq.addEventListener('change', on);
-    return () => mq.removeEventListener('change', on);
+    const phone = matchMedia('(max-width: 767px)');
+    const tablet = matchMedia('(max-width: 959px)');
+    const on = () => ((narrow = phone.matches), (picking = tablet.matches));
+    phone.addEventListener('change', on);
+    tablet.addEventListener('change', on);
+    return () => (phone.removeEventListener('change', on), tablet.removeEventListener('change', on));
   });
+  const height = $derived(narrow ? 168 : 320);
 
   const live = $derived(['queued', 'running', 'stopping'].includes(run.status));
   const progress = $derived(runProgress(run));
@@ -116,10 +132,33 @@
     for (const s of steps) if (s.lr > m) m = s.lr;
     return m > 0 ? Math.floor(Math.log10(m)) : 0;
   });
-  const ipsMax = $derived.by(() => {
-    let m = 1;
-    if (tab === 'ips') for (const p of series[0]?.points ?? []) if (p.y > m) m = p.y;
-    return m;
+
+  // ---- y domain ----
+  // Fitted to the data and "nice" (it ends on a gridline): a failed run's mAP of 0.5 fills the plot instead of half
+  // of a 0–1 axis. A live chart re-fits at most once per epoch (./domain holdDomain), and values never tween.
+  const unit = $derived(tab === 'map' || tab === 'map50' || tab === 'pr');
+  // The plot inside LineChart's margins (8 px top, 22 px bottom).
+  const plotPx = $derived(height - 30);
+  let held: Held<Fit & { log?: boolean }> | null = null;
+  const fit = $derived.by((): (Fit & { log?: boolean }) | null => {
+    let lo = Infinity;
+    let hi = -Infinity;
+    for (const s of series)
+      for (const p of s.points) {
+        if (!Number.isFinite(p.y) || (tab === 'loss' && scale === 'log' && p.y <= 0)) continue;
+        if (p.y < lo) lo = p.y;
+        if (p.y > hi) hi = p.y;
+      }
+    if (!Number.isFinite(lo)) return null;
+    let next: Fit & { log?: boolean };
+    if (unit) next = unitDomain(hi, plotPx);
+    else if (tab === 'loss' && scale === 'log') next = { domain: logDomain(lo, hi), ticks: [], log: true };
+    // Throughput starts at 0 (a rate), with a little headroom over its peak.
+    else if (tab === 'ips') next = niceDomain(0, hi * 1.05);
+    else next = niceDomain(lo, hi);
+    const epochNow = live ? Math.floor(observed) : -1;
+    held = holdDomain(held, `${tab}|${scale}|${smoothing}|${height}|${epochNow}`, next);
+    return held.value;
   });
 
   const best = $derived<Marker[]>(
@@ -150,7 +189,7 @@
     {
       id: 'pr',
       label: 'Precision · Recall',
-      value: lastEpoch ? `${num(lastEpoch.val.precision, 2)} · ${num(lastEpoch.val.recall, 2)}` : '—',
+      value: lastEpoch ? `${metric(lastEpoch.val.precision)} · ${metric(lastEpoch.val.recall)}` : '—',
       caption: 'last epoch',
       title: 'Precision and recall',
       qualifier: 'by epoch',
@@ -166,7 +205,8 @@
     {
       id: 'lr',
       label: 'Learning rate',
-      value: fmtLr(lastStep?.lr),
+      // The power of ten is the value's unit, set smaller, so the tab never cuts the value off.
+      ...lrParts(lastStep?.lr),
       caption: 'warmup 3 · cosine',
       title: 'Learning rate',
       qualifier: `by epoch · × ${pow10(lrExp)}`,
@@ -182,6 +222,7 @@
     },
   ]);
   const current = $derived(tabs.find((t) => t.id === tab)!);
+
 
   function onkeydown(e: KeyboardEvent) {
     const i = tabs.findIndex((t) => t.id === tab);
@@ -224,9 +265,6 @@
         {#if live}{(progress * 100).toFixed(1)}% · {run.eta_s !== null ? `${eta(run.eta_s)} left` : 'estimating…'}{#if closeFrom < 1}<span class="hatch-key">&nbsp;· <i aria-hidden="true"></i>no mosaic</span>{/if}{:else}{elapsed !== null ? `${duration(elapsed)} total` : '—'}{/if}
       </span>
     </div>
-    <!-- Below 960 px: one picker instead of six cells; the chart below shows what it names. Phones carry it in the
-         chart header instead. -->
-    {#if !narrow}<div class="phone-metric">{@render picker()}</div>{/if}
     <!-- svelte-ignore a11y_interactive_supports_focus -->
     <div class="tabs" role="tablist" aria-label="Metric to chart" {onkeydown}>
       {#each tabs as t (t.id)}
@@ -250,7 +288,8 @@
 
   <div class="chart" id="run-chart" role="tabpanel" aria-label={current.title}>
     <header>
-      {#if narrow}<div class="pick">{@render picker()}</div>{/if}
+      <!-- Below 960 px the picker names the metric in place of the title (the tabs above are hidden). -->
+      {#if picking}<div class="pick">{@render picker()}</div>{/if}
       <h2><span class="t">{current.title}</span><span class="q">{current.qualifier}</span></h2>
       <div class="ctl">
         {#if tab === 'loss'}
@@ -281,24 +320,25 @@
       </div>
     </header>
     {#if loading}
-      <ChartSkeleton height={narrow ? 168 : 320} />
+      <ChartSkeleton {height} />
     {:else}
       {#key tab}
         <LineChart
           {series}
-          height={narrow ? 168 : 320}
+          {height}
           {xDomain}
           xInteger
-          yDomain={tab === 'map' || tab === 'map50' || tab === 'pr' ? [0, 1] : tab === 'ips' ? [0, ipsMax * 1.15] : undefined}
+          yDomain={fit?.domain}
+          yTickValues={fit && !fit.log ? fit.ticks : undefined}
           yLog={tab === 'loss' && scale === 'log'}
           yFormat={tab === 'lr' ? (v) => String(+(v / 10 ** lrExp).toFixed(2)) : undefined}
           valueFormat={tab === 'lr' ? (v) => fmtLr(v) : tab === 'ips' ? (v) => `${num(v, 0)} img/s` : (v) => metric(v)}
           xTitle={epochTitle}
-          curve={tab === 'map' || tab === 'map50' || tab === 'pr' ? 'monotone' : 'linear'}
+          curve={unit ? 'monotone' : 'linear'}
           markers={best}
           legendNote={live ? 'Latest' : 'Last'}
           label="{current.title} by epoch"
-          empty={tab === 'map' || tab === 'map50' || tab === 'pr' ? 'Waiting for the first validation…' : 'Waiting for the first step…'}
+          empty={unit ? 'Waiting for the first validation…' : 'Waiting for the first step…'}
         />
       {/key}
     {/if}
@@ -327,9 +367,10 @@
     padding: var(--space-4);
     border-right: 1px solid var(--line-subtle);
   }
+  /* Each tab is at least as wide as its value and caption, so no value is ever cut off; spare width is shared. */
   .tabs {
     display: grid;
-    grid-template-columns: repeat(6, minmax(0, 1fr));
+    grid-template-columns: repeat(6, minmax(max-content, 1fr));
     min-width: 0;
   }
   .tab {
@@ -377,9 +418,6 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .phone-metric {
-    display: none;
-  }
   .tab.on .label {
     color: var(--text-primary);
   }
@@ -405,8 +443,6 @@
     font-weight: var(--weight-semibold);
     color: var(--text-secondary);
     white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
   }
   .tab.on .val {
     color: var(--text-primary);
@@ -505,6 +541,23 @@
     gap: var(--space-2);
     flex-wrap: wrap;
   }
+  @media (min-width: 1200px) and (max-width: 1299px) {
+    /* The narrow end of the wide tier: a slimmer epoch cell and tab sides keep every value whole beside it; a
+       scroll is the fallback for values wider than the mock's. */
+    .strip {
+      grid-template-columns: 200px minmax(0, 1fr);
+    }
+    .tabs {
+      overflow-x: auto;
+      scrollbar-width: thin;
+    }
+    .tab {
+      padding-inline: var(--space-3);
+    }
+    .tab::after {
+      bottom: 0;
+    }
+  }
   @media (max-width: 1199px) {
     /* Laptops: the epoch becomes a one-line row over the six tabs, which keep their values in one row (scrolling
        sideways only if a narrow window cannot fit them). */
@@ -527,9 +580,8 @@
       font-size: var(--type-2xl-size);
       line-height: 32px;
     }
-    /* 152 px holds the widest value ("7.16 × 10⁻³") unclipped; below 1100 px the tabs go compact (next block). */
+    /* A window too narrow for all six scrolls them sideways rather than cutting a value off. */
     .tabs {
-      grid-template-columns: repeat(6, minmax(152px, 1fr));
       overflow-x: auto;
       scrollbar-width: thin;
     }
@@ -543,11 +595,8 @@
     }
   }
   @media (max-width: 1099px) {
-    /* The low end of the tier: values a step smaller and tighter sides, so all six tabs fit at 960 px (128 px each
-       holds "7.16 × 10⁻³") without scrolling. */
-    .tabs {
-      grid-template-columns: repeat(6, minmax(128px, 1fr));
-    }
+    /* The low end of the tier: values a step smaller and tighter sides, so all six tabs fit at 960 px without
+       scrolling. */
     .tab {
       padding: var(--space-3);
     }
@@ -558,15 +607,36 @@
     }
   }
   @media (max-width: 959px) {
-    /* Below 960 px six tiles would push the chart down: one compact metric picker instead. */
+    /* Below 960 px six tiles would push the chart down: one compact metric picker in the chart header instead, in
+       place of the title (the qualifier stays beside it). */
     .tabs {
       display: none;
     }
-    .phone-metric {
-      display: grid;
-      gap: var(--space-1);
-      max-width: 400px;
-      padding: var(--space-3) var(--space-4);
+    .epoch {
+      border-bottom: 0;
+    }
+    .chart header {
+      padding-top: var(--space-3);
+      row-gap: var(--space-2);
+    }
+    .pick {
+      flex: 0 1 280px;
+      min-width: 0;
+    }
+    h2 {
+      flex: 1 1 200px;
+    }
+    h2 .t {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip-path: inset(50%);
+      white-space: nowrap;
+    }
+    h2 {
+      font-size: var(--type-sm-size);
+      font-weight: var(--weight-regular);
     }
   }
   @media (max-width: 767px) {
@@ -597,12 +667,9 @@
     /* One row: the metric picker and the range control; the qualifier (best value and epoch) on a line below. */
     .chart header {
       min-height: 0;
-      padding-top: var(--space-3);
-      row-gap: var(--space-2);
     }
     .pick {
       flex: 1 1 160px;
-      min-width: 0;
       max-width: 240px;
     }
     .ctl {
@@ -611,19 +678,6 @@
     h2 {
       order: 1;
       flex-basis: 100%;
-    }
-    /* The picker already names the metric: the header keeps only its qualifier (best value and epoch). */
-    h2 .t {
-      position: absolute;
-      width: 1px;
-      height: 1px;
-      overflow: hidden;
-      clip-path: inset(50%);
-      white-space: nowrap;
-    }
-    h2 {
-      font-size: var(--type-sm-size);
-      font-weight: var(--weight-regular);
     }
     .q {
       white-space: normal;

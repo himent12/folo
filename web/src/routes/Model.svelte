@@ -315,7 +315,7 @@
     </div>
     <!-- Full width: the matrix grows with the class count, and the rail beside it would sit empty. -->
     <div class="cm-part" class:off={!showing('confusion')}>
-      <Panel title="Confusion matrix" meta={cm?.partial ? `top ${CM_MAX} of ${m.classes.length} classes` : 'share of each true class'} id="cm">
+      <Panel title="Confusion matrix" meta={cm?.partial ? (phone.current ? `${CM_MAX} most common + Other` : `${CM_MAX} most common classes + Other + background`) : 'share of each true class'} id="cm">
         {#if cm}
           <!-- 8 + 4, on the grid of the panels above: the matrix in the main column, what to read from it in the side
                column (aligned with the Details rail). Up to 1199 px the two consequential cells lead (a phone's
@@ -364,7 +364,7 @@
                     labelled; hover or tap one for its count.</p>
                   <p>The background row splits the false detections (boxes on no object) by the class they were given.</p>
                   {#if cm.partial}
-                    <p>The {CM_MAX} most frequent classes are shown; the other {m.classes.length - CM_MAX} are folded into Other.</p>
+                    <p>The {CM_MAX} classes with the most ground-truth boxes are shown by name; the other {m.classes.length - CM_MAX} are folded into Other.</p>
                   {/if}
                 </div>
               </details>
