@@ -7,11 +7,12 @@
 use crate::image::Image;
 use crate::par::for_rows;
 
-const BITS: u32 = 11;
+/// Fixed-point bits of the bilinear weights (`1 << RESIZE_WEIGHT_BITS` is a weight of 1).
+pub const RESIZE_WEIGHT_BITS: u32 = 11;
+const BITS: u32 = RESIZE_WEIGHT_BITS;
 const ONE: u32 = 1 << BITS;
 
-/// Per destination coordinate: the two source indices (already multiplied by the element step) and the weight of
-/// the second one.
+/// Per destination coordinate: the two source indices and the weight of the second one.
 struct Taps {
     i0: Vec<u32>,
     i1: Vec<u32>,
@@ -20,7 +21,7 @@ struct Taps {
 
 /// Builds taps for `dst` outputs over `src` inputs, where the source has `src_extent` real pixels of size `cell`
 /// (`cell > 1` after a box prefilter whose last cell may be partial).
-fn taps(dst: u32, src: u32, src_extent: f64, step: u32) -> Taps {
+fn taps(dst: u32, src: u32, src_extent: f64) -> Taps {
     let scale = src_extent / dst as f64;
     let mut t = Taps { i0: Vec::with_capacity(dst as usize), i1: Vec::new(), w: Vec::new() };
     t.i1.reserve(dst as usize);
@@ -31,11 +32,58 @@ fn taps(dst: u32, src: u32, src_extent: f64, step: u32) -> Taps {
         let i0 = s.floor() as u32;
         let i1 = (i0 + 1).min(src - 1);
         let w = (((s - i0 as f64) * ONE as f64).round() as u32).min(ONE);
-        t.i0.push(i0 * step);
-        t.i1.push(i1 * step);
+        t.i0.push(i0);
+        t.i1.push(i1);
         t.w.push(w);
     }
     t
+}
+
+/// The exact sampling of [`resize_into`] for a `src_w x src_h` → `width x height` resize, so that another
+/// implementation (the GPU letterbox) can reproduce it bit for bit:
+///
+/// 1. When shrinking by 2x or more on an axis, an integer box prefilter: the source is reduced to
+///    `ceil(src_w / fx) x ceil(src_h / fy)` pixels, each channel of a pixel the rounded mean
+///    `(sum + n / 2) / n` of its `fx x fy` block (the last block on an axis may be partial; `n` counts what is
+///    there).
+/// 2. Bilinear taps on that image: destination pixel `(x, y)` mixes columns `x0[x]`, `x1[x]` with weight
+///    `wx[x]` on `x1` and rows `y0[y]`, `y1[y]` with `wy[y]` (weights in `1 / 2^RESIZE_WEIGHT_BITS`):
+///    `t = top[x0]·(1 − wx) + top[x1]·wx`, `u` likewise on the bottom row, then
+///    `(t·(1 − wy) + u·wy + 2^(2·BITS − 1)) >> (2·BITS)`, all in integers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResizePlan {
+    /// Box-prefilter factors `[fx, fy]`; `[1, 1]` means no prefilter.
+    pub prefilter: [u32; 2],
+    /// Left source column of each destination column (prefiltered pixels).
+    pub x0: Vec<u32>,
+    /// Right source column of each destination column.
+    pub x1: Vec<u32>,
+    /// Weight of `x1`, in `1 / 2^RESIZE_WEIGHT_BITS`.
+    pub wx: Vec<u32>,
+    /// Top source row of each destination row.
+    pub y0: Vec<u32>,
+    /// Bottom source row of each destination row.
+    pub y1: Vec<u32>,
+    /// Weight of `y1`, in `1 / 2^RESIZE_WEIGHT_BITS`.
+    pub wy: Vec<u32>,
+}
+
+/// The [`ResizePlan`] of a `src_w x src_h` → `width x height` resize.
+///
+/// # Panics
+/// If any size is zero.
+pub fn resize_plan(src_w: u32, src_h: u32, width: u32, height: u32) -> ResizePlan {
+    assert!(width > 0 && height > 0 && src_w > 0 && src_h > 0, "resize to or from an empty image");
+    let fx = (src_w / width).max(1);
+    let fy = (src_h / height).max(1);
+    let (pw, ph, ext_w, ext_h) = if fx >= 2 || fy >= 2 {
+        (src_w.div_ceil(fx), src_h.div_ceil(fy), src_w as f64 / fx as f64, src_h as f64 / fy as f64)
+    } else {
+        (src_w, src_h, src_w as f64, src_h as f64)
+    };
+    let xt = taps(width, pw, ext_w);
+    let yt = taps(height, ph, ext_h);
+    ResizePlan { prefilter: [fx, fy], x0: xt.i0, x1: xt.i1, wx: xt.w, y0: yt.i0, y1: yt.i1, wy: yt.w }
 }
 
 /// Resizes `src` to `width x height` with bilinear filtering.
@@ -58,28 +106,26 @@ pub fn resize_into(src: &Image, dst: &mut [u8], dst_stride: usize, x_offset: usi
         });
         return;
     }
+    let plan = resize_plan(src.width, src.height, width, height);
+    let [fx, fy] = plan.prefilter;
     // Integer box prefilter for large reductions.
-    let fx = (src.width / width).max(1);
-    let fy = (src.height / height).max(1);
     let filtered;
-    let (s, ext_w, ext_h) = if fx >= 2 || fy >= 2 {
+    let s = if fx >= 2 || fy >= 2 {
         filtered = box_downsample(src, fx, fy);
-        (&filtered, src.width as f64 / fx as f64, src.height as f64 / fy as f64)
+        &filtered
     } else {
-        (src, src.width as f64, src.height as f64)
+        src
     };
-    let xt = taps(width, s.width, ext_w, 3);
-    let yt = taps(height, s.height, ext_h, 1);
     let sstride = s.stride();
     let sdata = &s.data;
     for_rows(dst, dst_stride, |y, out| {
-        let top = &sdata[yt.i0[y] as usize * sstride..][..sstride];
-        let bot = &sdata[yt.i1[y] as usize * sstride..][..sstride];
-        let wy = yt.w[y];
+        let top = &sdata[plan.y0[y] as usize * sstride..][..sstride];
+        let bot = &sdata[plan.y1[y] as usize * sstride..][..sstride];
+        let wy = plan.wy[y];
         let iwy = ONE - wy;
         let out = &mut out[x_offset * 3..x_offset * 3 + width as usize * 3];
         for (x, px) in out.as_chunks_mut::<3>().0.iter_mut().enumerate() {
-            let (a, b, wx) = (xt.i0[x] as usize, xt.i1[x] as usize, xt.w[x]);
+            let (a, b, wx) = (plan.x0[x] as usize * 3, plan.x1[x] as usize * 3, plan.wx[x]);
             let iwx = ONE - wx;
             for c in 0..3 {
                 let t = top[a + c] as u32 * iwx + top[b + c] as u32 * wx;

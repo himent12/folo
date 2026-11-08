@@ -8,6 +8,17 @@ use crate::backend::Pool2dParams;
 /// `(planes, h, w)` of an NCHW tensor.
 pub(crate) type Planes = (usize, usize, usize);
 
+/// `a` beats the running best `b` (with index `bi`, negative = none yet): strictly greater, or the first NaN.
+/// Scanning a window in row-major order with this rule picks its first maximum (or first NaN).
+#[inline(always)]
+fn beats(a: f32, b: f32, bi: i64) -> bool {
+    a > b || bi < 0 || a.is_nan() && !b.is_nan()
+}
+
+/// Max pooling with the argmax of each window (flat index into its input plane). Separable: a row pass takes
+/// the best of each `kw`-wide window of every input row, then a column pass takes the best of `kh` row results.
+/// Both passes scan in ascending order with [`beats`], so the result is the first maximum of the window in
+/// row-major order, exactly as a direct scan of the window.
 pub(crate) fn max_pool2d(
     x: &[f32],
     (np, h, w): Planes,
@@ -22,30 +33,48 @@ pub(crate) fn max_pool2d(
     let [kh, kw] = p.kernel;
     let [sh, sw] = p.stride;
     let [ph, pw] = p.padding;
-    out.par_chunks_mut(oh * ow).zip(idx.par_chunks_mut(oh * ow)).enumerate().for_each(|(pl, (o, ix))| {
+    // Window ranges along each axis (clipped to the input; padding never wins).
+    let range = |o: usize, s: usize, pad: usize, k: usize, n: usize| {
+        let a = (o * s) as isize - pad as isize;
+        a.max(0) as usize..((a + k as isize).min(n as isize)).max(0) as usize
+    };
+    let xs: Vec<_> = (0..ow).map(|ox| range(ox, sw, pw, kw, w)).collect();
+    let ys: Vec<_> = (0..oh).map(|oy| range(oy, sh, ph, kh, h)).collect();
+    let work = |(rv, ri): &mut (Vec<f32>, Vec<i64>), (pl, (o, ix)): (usize, (&mut [f32], &mut [i64]))| {
         let xp = &x[pl * h * w..(pl + 1) * h * w];
-        for oy in 0..oh {
-            let y0 = (oy * sh) as isize - ph as isize;
-            let ys = y0.max(0) as usize..((y0 + kh as isize).min(h as isize)).max(0) as usize;
+        rv.resize(h * ow, 0.0);
+        ri.resize(h * ow, 0);
+        for yy in 0..h {
+            let row = &xp[yy * w..(yy + 1) * w];
+            for (ox, r) in xs.iter().enumerate() {
+                let (mut best, mut bi) = (f32::NEG_INFINITY, -1i64);
+                for xx in r.clone() {
+                    if beats(row[xx], best, bi) {
+                        best = row[xx];
+                        bi = xx as i64;
+                    }
+                }
+                rv[yy * ow + ox] = best;
+                ri[yy * ow + ox] = bi;
+            }
+        }
+        for (oy, r) in ys.iter().enumerate() {
             for ox in 0..ow {
-                let x0 = (ox * sw) as isize - pw as isize;
-                let xs = x0.max(0) as usize..((x0 + kw as isize).min(w as isize)).max(0) as usize;
-                let mut best = f32::NEG_INFINITY;
-                let mut bi = -1i64;
-                for yy in ys.clone() {
-                    for xx in xs.clone() {
-                        let v = xp[yy * w + xx];
-                        if v > best || bi < 0 || v.is_nan() && !best.is_nan() {
-                            best = v;
-                            bi = (yy * w + xx) as i64;
-                        }
+                let (mut best, mut bi) = (f32::NEG_INFINITY, -1i64);
+                for yy in r.clone() {
+                    let (v, i) = (rv[yy * ow + ox], ri[yy * ow + ox]);
+                    if i >= 0 && beats(v, best, bi) {
+                        best = v;
+                        bi = yy as i64 * w as i64 + i;
                     }
                 }
                 o[oy * ow + ox] = best;
                 ix[oy * ow + ox] = bi.max(0);
             }
         }
-    });
+    };
+    let planes = out.par_chunks_mut(oh * ow).zip(idx.par_chunks_mut(oh * ow)).enumerate();
+    planes.for_each_init(|| (Vec::new(), Vec::new()), work);
     (out, idx)
 }
 
@@ -218,4 +247,56 @@ pub(crate) fn upsample_nearest2d_backward(g: &[f32], (np, h, w): Planes, [sh, sw
         }
     });
     gx
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The direct window scan the separable kernel must reproduce, argmax included.
+    fn direct(x: &[f32], (np, h, w): Planes, p: &Pool2dParams, [oh, ow]: [usize; 2]) -> (Vec<f32>, Vec<i64>) {
+        let (mut v, mut ix) = (Vec::new(), Vec::new());
+        for pl in 0..np {
+            for oy in 0..oh {
+                for ox in 0..ow {
+                    let (mut best, mut bi) = (f32::NEG_INFINITY, -1i64);
+                    for ky in 0..p.kernel[0] {
+                        for kx in 0..p.kernel[1] {
+                            let yy = (oy * p.stride[0] + ky) as isize - p.padding[0] as isize;
+                            let xx = (ox * p.stride[1] + kx) as isize - p.padding[1] as isize;
+                            if yy < 0 || xx < 0 || yy >= h as isize || xx >= w as isize {
+                                continue;
+                            }
+                            let i = yy as usize * w + xx as usize;
+                            if beats(x[pl * h * w + i], best, bi) {
+                                best = x[pl * h * w + i];
+                                bi = i as i64;
+                            }
+                        }
+                    }
+                    v.push(best);
+                    ix.push(bi.max(0));
+                }
+            }
+        }
+        (v, ix)
+    }
+
+    #[test]
+    fn separable_max_pool_matches_direct_scan_with_ties_and_nans() {
+        // Few distinct values, so most windows have tied maxima; a sprinkling of NaNs.
+        let (np, h, w) = (3, 11, 9);
+        let x: Vec<f32> =
+            (0..np * h * w).map(|i| if i % 37 == 5 { f32::NAN } else { ((i * 7919) % 5) as f32 }).collect();
+        for (k, s, pad) in [([5, 5], [1, 1], [2, 2]), ([3, 2], [2, 1], [1, 1]), ([2, 3], [2, 3], [0, 1])] {
+            let p = Pool2dParams { kernel: k, stride: s, padding: pad };
+            let ohw = p.output_hw(h, w).unwrap();
+            let (v, ix) = max_pool2d(&x, (np, h, w), &p, ohw);
+            let (wv, wix) = direct(&x, (np, h, w), &p, ohw);
+            assert_eq!(ix, wix, "{p:?}");
+            for (a, b) in v.iter().zip(&wv) {
+                assert!(a == b || a.is_nan() && b.is_nan(), "{p:?}: {a} vs {b}");
+            }
+        }
+    }
 }

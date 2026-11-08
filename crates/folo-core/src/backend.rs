@@ -457,6 +457,19 @@ pub trait Backend: Send + Sync + 'static {
     ) -> Result<Storage> {
         unsupported!(self, "conv2d_act")
     }
+    /// [`Backend::conv2d_act`] over the channel concatenation of `xs` (each `[N, C_i, H, W]` with the same `N`,
+    /// `H`, `W`; `w` has `ΣC_i / groups` input channels), without writing the concatenation. Reached through
+    /// `Tensor::conv2d_act_cat`, which falls back to `cat` then [`Backend::conv2d_act`].
+    fn conv2d_act_cat(
+        &self,
+        xs: &[View<'_>],
+        w: View<'_>,
+        bias: Option<View<'_>>,
+        p: &Conv2dParams,
+        act: Option<UnaryOp>,
+    ) -> Result<Storage> {
+        unsupported!(self, "conv2d_act_cat")
+    }
     /// Train-mode batch normalisation of `x` `[N, C, H, W]` over `N·H·W` per channel, then `act` (`None` is
     /// the identity): `y = act((x − mean) · invstd · weight + bias)` with the batch mean and
     /// `invstd = 1 / sqrt(var + eps)` of the *biased* variance. Returns `(y, mean [C], invstd [C])`.
@@ -502,7 +515,73 @@ pub trait Backend: Send + Sync + 'static {
     ) -> Result<()> {
         unsupported!(self, "optimizer_step")
     }
+
+    // ----- Detector pre- and post-processing (optional; callers fall back to host code) -----
+
+    /// Letterbox `U8` RGB images (`images[i]` is `[H_i, W_i, 3]`) onto one `F32 [B, 3, OH, OW]` canvas
+    /// (`out_hw = [OH, OW]`), scaled by `scale` (`1 / 255` for network input): every pixel is `pad_value`
+    /// except the resized image at `geoms[i].pad`, which is sampled exactly as folo-data's bilinear resize
+    /// (integer box prefilter, then 11-bit fixed-point bilinear taps; see [`LetterboxImage`]). `taps` is `U32`.
+    /// Reached through `Tensor::letterbox_rgb8`.
+    fn letterbox_rgb8(
+        &self,
+        images: &[View<'_>],
+        taps: View<'_>,
+        geoms: &[LetterboxImage],
+        out_hw: [usize; 2],
+        pad_value: u8,
+        scale: f32,
+    ) -> Result<Storage> {
+        unsupported!(self, "letterbox_rgb8")
+    }
+    /// Decode an anchor-free detection head and keep only the candidates: for every image `b` and anchor `a`,
+    /// the best class `c` (the first maximum of the `nc` sigmoid scores) when its score is `> conf`, with the
+    /// anchor's box (DFL softmax expectation of each side's `reg_max` bins, `ltrb` around the anchor point,
+    /// times the stride). `box_raw` is `F32 [B, 4·reg_max, A]`, `cls_raw` `F32 [B, nc, A]`, `anchors` `F32
+    /// [3, A]` (point x, point y in grid units, stride). Returns `U32 [B, 1 + 7·A]`: per image the candidate
+    /// count `n`, then `n` records `(a, c, score, x1, y1, x2, y2)` (floats as their bits) in unspecified order.
+    /// Reached through `Tensor::detect_candidates`.
+    fn detect_candidates(
+        &self,
+        box_raw: View<'_>,
+        cls_raw: View<'_>,
+        anchors: View<'_>,
+        p: &DetectDecode,
+    ) -> Result<Storage> {
+        unsupported!(self, "detect_candidates")
+    }
 }
+
+/// One image of [`Backend::letterbox_rgb8`]. The sampling is folo-data's `ResizePlan` for a `src` →
+/// `resized` resize.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LetterboxImage {
+    /// Source `[width, height]`.
+    pub src: [usize; 2],
+    /// Size `[width, height]` of the resized image inside the canvas.
+    pub resized: [usize; 2],
+    /// Its top-left corner `[x, y]` in the canvas.
+    pub pad: [usize; 2],
+    /// Box-prefilter factors `[fx, fy]` (`[1, 1]`: none).
+    pub prefilter: [usize; 2],
+    /// Offset in `taps` of this image's six tap arrays: `x0, x1, wx` (`resized[0]` entries each), then
+    /// `y0, y1, wy` (`resized[1]` each). Indices are prefiltered pixels; weights are in 1/2048.
+    pub taps: usize,
+}
+
+/// Settings of [`Backend::detect_candidates`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DetectDecode {
+    /// DFL bins per box side.
+    pub reg_max: usize,
+    /// Number of classes.
+    pub num_classes: usize,
+    /// Keep a candidate when its score is `> conf`.
+    pub conf: f32,
+}
+
+/// Words per record of [`Backend::detect_candidates`]: anchor, class, score, x1, y1, x2, y2.
+pub const DETECT_RECORD_WORDS: usize = 7;
 
 /// The update [`Backend::optimizer_step`] applies, per element, in `f32`.
 #[derive(Debug, Clone, Copy, PartialEq)]

@@ -1,8 +1,10 @@
 //! The detect head of docs/MODEL.md §6: per level a box branch (DFL logits) and a class branch, flattened and
 //! concatenated along the anchor axis.
 
-use folo_core::Tensor;
+use folo_core::{Tensor, is_grad_enabled, with_no_grad};
 use folo_nn::{Activation, Conv2d, Conv2dConfig, ConvBnAct, Forward, Module, Result, init};
+
+use rayon::prelude::*;
 
 use super::blocks::{Fuse, Init};
 
@@ -143,15 +145,31 @@ impl Detect {
     }
 
     /// Raw outputs `(box_raw [B, 4·reg_max, A], cls_raw [B, nc, A])` (MODEL.md §6.3) from the level features.
+    ///
+    /// On the CPU with nothing recorded (inference), the six branch chains (box and class, three levels) run
+    /// side by side on the rayon pool: the P4 / P5 convs are too small to occupy every thread on their own.
+    /// Each chain is the same sequence of deterministic ops either way, so the result does not change.
     pub fn forward(&self, feats: [&Tensor; 3]) -> Result<(Tensor, Tensor)> {
-        let mut boxes = Vec::with_capacity(3);
-        let mut classes = Vec::with_capacity(3);
-        for (l, x) in self.levels.iter().zip(feats) {
+        let branch = |j: usize| -> Result<Tensor> {
+            let (l, x) = (&self.levels[j / 2], feats[j / 2]);
             let (b, _, h, w) = x.dims4()?;
-            boxes.push(l.box_branch.forward(x)?.reshape([b, 4 * self.reg_max, h * w])?);
-            classes.push(l.cls_branch.forward(x)?.reshape([b, self.num_classes, h * w])?);
-        }
-        Ok((Tensor::cat(&boxes, 2)?, Tensor::cat(&classes, 2)?))
+            if j.is_multiple_of(2) {
+                Ok(l.box_branch.forward(x)?.reshape([b, 4 * self.reg_max, h * w])?)
+            } else {
+                Ok(l.cls_branch.forward(x)?.reshape([b, self.num_classes, h * w])?)
+            }
+        };
+        let n = 2 * self.levels.len().min(feats.len());
+        let outs: Vec<Tensor> = if feats.iter().all(|x| x.device().is_cpu()) && !is_grad_enabled() {
+            // Grad mode is per thread: the workers must not record either.
+            (0..n).into_par_iter().map(|j| with_no_grad(|| branch(j))).collect::<Result<_>>()?
+        } else {
+            (0..n).map(branch).collect::<Result<_>>()?
+        };
+        let (boxes, classes): (Vec<_>, Vec<_>) =
+            outs.into_iter().enumerate().partition(|(j, _)| j.is_multiple_of(2));
+        let strip = |v: Vec<(usize, Tensor)>| v.into_iter().map(|(_, t)| t).collect::<Vec<_>>();
+        Ok((Tensor::cat(&strip(boxes), 2)?, Tensor::cat(&strip(classes), 2)?))
     }
 }
 

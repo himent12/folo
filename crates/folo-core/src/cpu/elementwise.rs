@@ -336,6 +336,95 @@ fn sign(x: f32) -> f32 {
     }
 }
 
+/// `v[i] = silu(v[i] + bias)` in place: the fused-epilogue SiLU. With AVX2 + FMA (detected at runtime) eight
+/// lanes at a time through [`silu8`] (a ragged tail too, padded), whose error against the exact SiLU is
+/// bounded by [`SILU_MAX_REL_ERR`] (tested); otherwise the scalar `x * sigmoid(x)`. Either way every element's
+/// result depends only on its value, never on its position in `v`.
+pub(crate) fn silu_bias_inplace(v: &mut [f32], bias: f32) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") {
+            // SAFETY: AVX2 and FMA were detected above.
+            return unsafe { silu_bias_avx2(v, bias) };
+        }
+    }
+    for x in v.iter_mut() {
+        let t = *x + bias;
+        *x = t * sigmoid(t);
+    }
+}
+
+/// Bound on the relative error of the vectorised SiLU (`|y - silu(x)| <= SILU_MAX_REL_ERR * |silu(x)|`, plus
+/// the subnormal spacing once `silu(x)` underflows), checked by `silu_avx2_error_bound`: about 4 ulp.
+pub const SILU_MAX_REL_ERR: f64 = 5e-7;
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+fn silu_bias_avx2(v: &mut [f32], bias: f32) {
+    use std::arch::x86_64::*;
+    let b = _mm256_set1_ps(bias);
+    let (chunks, tail) = v.as_chunks_mut::<8>();
+    for c in chunks {
+        // SAFETY: `c` is 8 floats; unaligned loads and stores.
+        unsafe {
+            let x = _mm256_add_ps(_mm256_loadu_ps(c.as_ptr()), b);
+            _mm256_storeu_ps(c.as_mut_ptr(), silu8(x));
+        }
+    }
+    if !tail.is_empty() {
+        // The tail goes through the same lanes (padded), so an element's value never depends on where a
+        // caller's segment boundaries fall (GEMM tiles move with the thread count).
+        let mut pad = [0f32; 8];
+        pad[..tail.len()].copy_from_slice(tail);
+        // SAFETY: `pad` is 8 floats.
+        unsafe {
+            let x = _mm256_add_ps(_mm256_loadu_ps(pad.as_ptr()), b);
+            _mm256_storeu_ps(pad.as_mut_ptr(), silu8(x));
+        }
+        let n = tail.len();
+        tail.copy_from_slice(&pad[..n]);
+    }
+}
+
+/// `x * sigmoid(x)` on eight lanes: `e = exp(-|x|)` by Cody-Waite reduction and the degree-6 polynomial of
+/// [`fast_exp`] (FMA), `sigmoid = 1 / (1 + e)` for `x >= 0` and `e / (1 + e)` below, so neither tail overflows.
+/// NaN stays NaN.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+#[inline]
+pub(crate) fn silu8(x: std::arch::x86_64::__m256) -> std::arch::x86_64::__m256 {
+    use std::arch::x86_64::*;
+    let one = _mm256_set1_ps(1.0);
+    let zero = _mm256_setzero_ps();
+    // t = -|x| clamped to the bottom of the exp range (a NaN lane becomes -104; x * sig is NaN again below).
+    let t = _mm256_andnot_ps(_mm256_set1_ps(-0.0), x);
+    let t = _mm256_max_ps(_mm256_sub_ps(zero, t), _mm256_set1_ps(-104.0));
+    let n = _mm256_round_ps::<{ _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC }>(_mm256_mul_ps(
+        t,
+        _mm256_set1_ps(LOG2E),
+    ));
+    let r = _mm256_fnmadd_ps(n, _mm256_set1_ps(0.693_359_4), t);
+    let r = _mm256_fnmadd_ps(n, _mm256_set1_ps(-2.121_944_4e-4), r);
+    let mut p = _mm256_set1_ps(1.987_569_1e-4);
+    p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(1.398_199_9e-3));
+    p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(8.333_452e-3));
+    p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(4.166_579_6e-2));
+    p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(1.666_666_5e-1));
+    p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(0.5));
+    let y = _mm256_add_ps(_mm256_fmadd_ps(_mm256_mul_ps(p, r), r, r), one);
+    // 2^n as two normal powers of two (n is in -150..=0), so tiny results underflow gradually.
+    let ni = _mm256_cvtps_epi32(n);
+    let n1 = _mm256_srai_epi32::<1>(ni);
+    let n2 = _mm256_sub_epi32(ni, n1);
+    let bias127 = _mm256_set1_epi32(127);
+    let s1 = _mm256_castsi256_ps(_mm256_slli_epi32::<23>(_mm256_add_epi32(n1, bias127)));
+    let s2 = _mm256_castsi256_ps(_mm256_slli_epi32::<23>(_mm256_add_epi32(n2, bias127)));
+    let e = _mm256_mul_ps(_mm256_mul_ps(y, s1), s2);
+    let r = _mm256_div_ps(one, _mm256_add_ps(one, e));
+    let sig = _mm256_blendv_ps(_mm256_mul_ps(e, r), r, _mm256_cmp_ps::<_CMP_GE_OQ>(x, zero));
+    _mm256_mul_ps(x, sig)
+}
+
 /// `v[i] = op(v[i] + bias)` in place (`op = None`: just the bias), for fused epilogues. The usual activations
 /// have dedicated loops; other ops go through [`unary`].
 pub(crate) fn bias_act_inplace(op: Option<UnaryOp>, bias: f32, v: &mut [f32]) {
@@ -348,7 +437,7 @@ pub(crate) fn bias_act_inplace(op: Option<UnaryOp>, bias: f32, v: &mut [f32]) {
     match op {
         None if bias == 0.0 => {}
         None => go(v, bias, |x| x),
-        Some(UnaryOp::Silu) => go(v, bias, |x| x * sigmoid(x)),
+        Some(UnaryOp::Silu) => silu_bias_inplace(v, bias),
         Some(UnaryOp::Relu) => go(v, bias, |x| x.max(0.0)),
         Some(UnaryOp::Sigmoid) => go(v, bias, sigmoid),
         Some(UnaryOp::LeakyRelu(a)) => go(v, bias, |x| if x > 0.0 { x } else { a * x }),
@@ -561,6 +650,69 @@ mod tests {
         assert_eq!(fast_exp(f32::NEG_INFINITY), 0.0);
         assert!(fast_exp(f32::NAN).is_nan());
         assert_eq!(fast_exp(0.0), 1.0);
+    }
+
+    #[test]
+    fn silu_does_not_depend_on_segment_boundaries() {
+        let xs: Vec<f32> = (0..1000).map(|i| (i as f32 * 0.37).sin() * 9.0).collect();
+        let mut whole = xs.clone();
+        silu_bias_inplace(&mut whole, 0.25);
+        let mut pieces = xs.clone();
+        let mut at = 0;
+        for len in (1..20).cycle() {
+            if at >= pieces.len() {
+                break;
+            }
+            let end = (at + len).min(pieces.len());
+            silu_bias_inplace(&mut pieces[at..end], 0.25);
+            at = end;
+        }
+        assert!(whole.iter().zip(&pieces).all(|(a, b)| a.to_bits() == b.to_bits()));
+    }
+
+    #[test]
+    fn silu_avx2_error_bound() {
+        let silu = |x: f64| x / (1.0 + (-x).exp());
+        let check = |xs: &[f32]| {
+            let mut v = xs.to_vec();
+            silu_bias_inplace(&mut v, 0.0);
+            let mut worst = 0f64;
+            for (&x, &y) in xs.iter().zip(&v) {
+                let want = silu(x as f64);
+                let err = (y as f64 - want).abs();
+                // Once exp(-|x|) is subnormal its spacing, times |x|, limits any f32 x * sigmoid(x).
+                let slack = (x.abs() as f64 + 1.0) * 2.0 * f32::from_bits(1) as f64;
+                assert!(err <= SILU_MAX_REL_ERR * want.abs() + slack, "silu({x}) = {y}, want {want}");
+                if want.abs() > 1e-30 {
+                    worst = worst.max(err / want.abs());
+                }
+            }
+            worst
+        };
+        // A dense sweep (every lane position sees every kind of value), the tails, and the subnormal range.
+        let xs: Vec<f32> = (0..400_003).map(|i| -100.0 + i as f32 * 5e-4).collect();
+        let worst = check(&xs);
+        let tails: Vec<f32> =
+            [-104.0f32, -103.5, -95.0, -88.0, -87.3, -20.0, -1e-30, 1e-30, 1e-7, 20.0, 88.7, 1e30, f32::MAX]
+                .into_iter()
+                .chain((0..64).map(|i| -0.5 + i as f32 / 64.0))
+                .collect();
+        check(&tails);
+        println!("worst relative error of the vectorised SiLU: {worst:e}");
+        // Special values match the scalar path.
+        let mut sp = vec![f32::NAN, f32::INFINITY, -0.0, 0.0, -110.0, f32::MIN, 3.0, -3.0, 1.0];
+        silu_bias_inplace(&mut sp, 0.0);
+        assert!(sp[0].is_nan());
+        assert_eq!(sp[1], f32::INFINITY);
+        assert_eq!(sp[2], 0.0);
+        assert_eq!(sp[3], 0.0);
+        assert!(sp[4] <= 0.0 && sp[4] > -1e-40);
+        // The bias is added before the activation.
+        let mut b = vec![0.5f32; 19];
+        silu_bias_inplace(&mut b, -1.5);
+        for y in b {
+            assert!(((y as f64) - silu(-1.0)).abs() < 1e-6);
+        }
     }
 
     #[test]

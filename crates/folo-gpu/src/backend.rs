@@ -18,7 +18,8 @@
 use std::sync::{Arc, OnceLock};
 
 use folo_core::backend::{
-    Backend, BinaryOp, Conv2dParams, OptimStep, Pool2dParams, ReduceOp, RunningUpdate, UnaryOp, View,
+    Backend, BinaryOp, Conv2dParams, DetectDecode, LetterboxImage, OptimStep, Pool2dParams, ReduceOp,
+    RunningUpdate, UnaryOp, View,
 };
 use folo_core::{
     CpuStorage, DType as CoreDType, Device, DeviceStorage, Error, Layout, Result, Shape, Storage, Tensor,
@@ -37,6 +38,7 @@ use crate::kernels::pool_grad::{self, Pool2d};
 use crate::kernels::pooling::Window2d;
 use crate::kernels::reduce::{self, ReduceOp as GpuReduce};
 use crate::kernels::strided::{self, Elem, Indices, Strided};
+use crate::kernels::vision::{self, LetterboxDesc};
 use crate::pool::GpuBuffer;
 
 /// Name used in errors.
@@ -1036,5 +1038,69 @@ impl Backend for GpuBackend {
         let s0 = state.first().map(|s| self.storage_buf(s)).transpose()?;
         let s1 = state.get(1).map(|s| self.storage_buf(s)).transpose()?;
         optim::optimizer_step(&self.ctx, &u, p, gd.raw(), s0, s1, n).core()
+    }
+
+    fn letterbox_rgb8(
+        &self,
+        images: &[View<'_>],
+        taps: View<'_>,
+        geoms: &[LetterboxImage],
+        out_hw: [usize; 2],
+        pad_value: u8,
+        scale: f32,
+    ) -> Result<Storage> {
+        let [oh, ow] = out_hw;
+        let per = 3 * oh * ow;
+        // Prefilter blocks the kernel cannot sum in u32: let the caller's host path handle them.
+        if geoms.iter().any(|g| !vision::prefilter_fits(g.prefilter[0], g.prefilter[1])) {
+            return Err(Error::NotSupported { op: "letterbox_rgb8", backend: BACKEND_NAME });
+        }
+        let len = images.len() * per;
+        let out = self.alloc(CoreDType::F32, len)?;
+        let td = self.dense(&taps)?;
+        for (i, (im, g)) in images.iter().zip(geoms).enumerate() {
+            let d = LetterboxDesc {
+                out: [ow, oh],
+                src: g.src,
+                pad: g.pad,
+                resized: g.resized,
+                prefilter: g.prefilter,
+                pad_value,
+                scale,
+                out_offset: i * per,
+                taps: g.taps,
+            };
+            let src = self.dense(im)?;
+            vision::letterbox_rgb8(&self.ctx, src.raw(), td.raw(), out.raw(), &d).core()?;
+        }
+        Ok(self.wrap(CoreDType::F32, len, out))
+    }
+
+    fn detect_candidates(
+        &self,
+        box_raw: View<'_>,
+        cls_raw: View<'_>,
+        anchors: View<'_>,
+        p: &DetectDecode,
+    ) -> Result<Storage> {
+        let d = box_raw.shape().dims();
+        let (b, a) = (d[0], d[2]);
+        let len = b * (1 + vision::RECORD_WORDS * a);
+        let out = self.alloc(CoreDType::U32, len)?;
+        let (bd, cd, ad) = (self.dense(&box_raw)?, self.dense(&cls_raw)?, self.dense(&anchors)?);
+        vision::detect_candidates(
+            &self.ctx,
+            bd.raw(),
+            cd.raw(),
+            ad.raw(),
+            out.raw(),
+            b,
+            a,
+            p.num_classes,
+            p.reg_max,
+            p.conf,
+        )
+        .core()?;
+        Ok(self.wrap(CoreDType::U32, len, out))
     }
 }

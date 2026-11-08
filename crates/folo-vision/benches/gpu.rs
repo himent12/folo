@@ -5,11 +5,12 @@
 //! - **forward**: the fused model (`fuse()`: Conv+BN folded, Conv + bias + SiLU in one kernel), eval mode,
 //!   `no_grad`, input already on the GPU. Latency: every call synchronised, 25 warm-up calls, median / p90 of
 //!   100 (batch 1) or 30 (batch 16). Throughput: the same calls back to back with one synchronise at the end.
-//! - **predict (end to end)**: decoded `u8` RGB 640×640 images in, letterbox on the CPU (folo-data), upload of
-//!   the `u8` pixels, cast / HWC→CHW / `÷255` on the GPU, forward, download of the raw head, decode and
-//!   class-aware NMS on the CPU (Ultralytics predict defaults), boxes mapped back through the letterbox. The
-//!   timing ends with the boxes on the host. Untrained weights give almost no candidates above `conf`, so
-//!   NMS is nearly free here; with a trained model it adds about 0.1–0.3 ms per image (`benches/post.rs`).
+//! - **predict (end to end)**: `folo_vision::predict::Predictor` (`predict` for batch 1, `predict_batch` for
+//!   16) on decoded `u8` RGB 640×640 images: upload of the raw `u8` pixels, letterbox + `÷255` on the GPU,
+//!   forward, decode on the GPU into the candidates above `conf`, one small download, class-aware NMS on the
+//!   CPU (Ultralytics predict defaults), boxes mapped back through the letterbox. The timing ends with the
+//!   boxes on the host. Untrained weights give almost no candidates above `conf`, so NMS is nearly free here;
+//!   with a trained model it adds about 0.1–0.3 ms per image (`benches/post.rs`).
 //! - **train step**: one fixed batch of 16 random images with 8 random boxes each on the GPU; train-mode
 //!   forward (fused BatchNorm + SiLU kernels), the detection loss (assigner and terms as GPU kernels, one
 //!   readback of the reported items),
@@ -25,16 +26,15 @@ use std::time::{Duration, Instant};
 
 use folo_core::backend::synchronize;
 use folo_core::rng::Rng;
-use folo_core::{DType, Device, Tensor, no_grad};
-use folo_data::{Image, LetterboxOptions, letterbox};
+use folo_core::{Device, Tensor, no_grad};
+use folo_data::{Image, Letterbox, LetterboxOptions};
 use folo_gpu::GpuContext;
 use folo_nn::Module;
 use folo_nn::optim::{Optimizer, Sgd, StandardGroups};
 use folo_vision::boxes::Xyxy;
 use folo_vision::loss::{ImageTargets, LossConfig, detection_loss, detection_loss_host};
 use folo_vision::model::{FoloModel, ModelConfig};
-use folo_vision::nms::NmsConfig;
-use rayon::prelude::*;
+use folo_vision::predict::{PredictConfig, Predictor, letterbox_on_device};
 
 struct Stats {
     median: f64,
@@ -107,23 +107,6 @@ fn mib(b: u64) -> f64 {
     b as f64 / (1 << 20) as f64
 }
 
-/// Letterbox on the CPU, then `u8` NHWC → `f32` NCHW in `0..1` on the device.
-fn preprocess(images: &[Image], dev: Device) -> (Tensor, Vec<folo_data::Letterbox>) {
-    let opts = LetterboxOptions::default();
-    let boxed: Vec<_> = images.par_iter().map(|im| letterbox(im, 640, 640, &opts)).collect();
-    let mut pixels = Vec::with_capacity(images.len() * 640 * 640 * 3);
-    for (im, _) in &boxed {
-        pixels.extend_from_slice(&im.data);
-    }
-    let x = Tensor::from_vec(pixels, [images.len(), 640, 640, 3])
-        .and_then(|t| t.to_device(dev))
-        .and_then(|t| t.to_dtype(DType::F32))
-        .and_then(|t| t.permute([0, 3, 1, 2]))
-        .and_then(|t| t.mul_scalar(1.0 / 255.0))
-        .expect("preprocess");
-    (x, boxed.into_iter().map(|(_, lb)| lb).collect())
-}
-
 fn bench_scale(scale: &str, dev: Device, ctx: &GpuContext) {
     let cfg = ModelConfig::new(scale, 80).expect("config");
     let mut model = FoloModel::new(cfg.clone()).expect("model");
@@ -161,9 +144,12 @@ fn bench_scale(scale: &str, dev: Device, ctx: &GpuContext) {
         );
     }
 
-    // End-to-end predict.
+    // End-to-end predict, through the predictor (rect letterbox for one image, square for a batch; a
+    // 640×640 image is the identity either way).
     println!("  [gpu load before predict: {}]", gpu_load());
-    let nms = NmsConfig::default();
+    let pred = Predictor::new(model, PredictConfig::default()).expect("predictor");
+    let model = pred.model();
+    let nms = folo_vision::nms::NmsConfig::default();
     for batch in [1usize, 16] {
         let images: Vec<Image> = (0..batch)
             .map(|_| {
@@ -173,53 +159,46 @@ fn bench_scale(scale: &str, dev: Device, ctx: &GpuContext) {
             })
             .collect();
         let mut dets = 0;
-        let run = |dets: &mut usize| {
-            let (x, lbs) = preprocess(&images, dev);
-            let pred = model.predict_raw(&x, &nms).expect("predict");
-            let mapped: Vec<Vec<[f32; 4]>> = pred
-                .images
-                .iter()
-                .zip(&lbs)
-                .map(|(im, lb)| {
-                    im.detections
-                        .iter()
-                        .map(|d| lb.unmap_xyxy([d.bbox.x1, d.bbox.y1, d.bbox.x2, d.bbox.y2]))
-                        .collect()
-                })
-                .collect();
-            *dets = mapped.iter().map(Vec::len).sum();
-            black_box(mapped);
+        let mut run = || {
+            let p = if batch == 1 {
+                vec![pred.predict(&images[0]).expect("predict")]
+            } else {
+                pred.predict_batch(&images).expect("predict")
+            };
+            dets = p.iter().map(|p| p.detections.len()).sum();
+            black_box(p);
         };
         let iters = if batch == 1 { 50 } else { 15 };
-        let s = latency(dev, 10, iters, || run(&mut dets));
+        let s = latency(dev, 10, iters, &mut run);
         row(&format!("predict b{batch} (e2e, f32)"), &s, batch);
+        let t = throughput(dev, iters, &mut run);
+        println!("    back to back {:.2} ms/call = {:.0} img/s", t, batch as f64 * 1e3 / t);
         // Where the time goes: each phase synchronised on its own.
+        let opts = LetterboxOptions { stride: (batch == 1).then_some(32), ..LetterboxOptions::default() };
+        let boxes: Vec<Letterbox> =
+            images.iter().map(|i| Letterbox::compute(i.width, i.height, 640, 640, &opts)).collect();
         let (mut pre, mut fwd, mut post) = (Vec::new(), Vec::new(), Vec::new());
         for _ in 0..iters {
             let t0 = Instant::now();
-            let (x, _) = preprocess(&images, dev);
+            let x = letterbox_on_device(&images, &boxes, dev).expect("letterbox").expect("GPU letterbox");
             synchronize(dev).expect("sync");
             let t1 = Instant::now();
             let out = model.forward(&x).expect("forward");
             synchronize(dev).expect("sync");
             let t2 = Instant::now();
-            let decoded = out.decode_images().expect("decode");
-            let n: usize = decoded
-                .into_par_iter()
-                .map(|(b, sc)| folo_vision::nms::non_max_suppression(&b, &sc, 80, &nms).len())
-                .sum();
-            black_box(n);
+            black_box(out.detections(&nms).expect("detections"));
             pre.push(t1 - t0);
             fwd.push(t2 - t1);
             post.push(t2.elapsed());
         }
         let (a, b, c) = (stats(pre), stats(fwd), stats(post));
         println!(
-            "    split (medians): preprocess {:.2} ms, forward {:.2} ms, download + decode + NMS {:.2} ms;              {dets} detections in the last call",
+            "    split (medians): upload + letterbox {:.2} ms, forward {:.2} ms, decode + download + NMS {:.2} ms; \
+             {dets} detections in the last call",
             a.median, b.median, c.median
         );
     }
-    drop(model);
+    drop(pred);
     drop(_g);
 
     // Training step.

@@ -25,11 +25,20 @@ training and evaluation pipeline, a server, a CLI and a web studio.
 - `Device`: `Cpu` or `Gpu(ordinal)`. Kernels sit behind the `Backend` trait (below); the CPU backend lives in folo-core.
 - CPU kernels: contiguous fast paths with rayon above ~32K elements; strided inputs are walked row by row after merging
   dimensions, or made contiguous once. A BLIS-style GEMM (`cpu::gemm`, packed panels, 6x16 AVX2/FMA micro-kernel
-  chosen at runtime, tile- or K-split parallelism) backs `matmul` and conv2d. conv2d packs an implicit im2col operand
-  straight into GEMM panels (no unfolded matrix), with direct paths for 1x1 and depthwise convolutions; bias and
-  activation run as a GEMM epilogue on each finished output block (`Tensor::conv2d_act`, used by fused
-  `ConvBnAct` blocks and by eval-mode blocks under `no_grad`). Batches smaller than the thread pool split the pool
-  between images. The stride-1 input gradient is the forward kernel run on the output gradient with the flipped,
+  chosen at runtime, tile- or K-split parallelism) backs `matmul` and conv2d. Each GEMM task packs the B panels of
+  its own columns into an L2-sized buffer one `KC` block at a time (column tiles first, rows only when there are
+  too few columns, about three tasks per thread and none under ~1 MFLOP). conv2d (any kernel, stride, padding or
+  dilation, not depthwise) never builds an im2col matrix: the input is copied once, zero-padded and split into its
+  stride phases, so every `(channel, ky, kx)` row of B is a contiguous run of that copy, read in place by a variant
+  of the micro-kernel through a row-pointer table (a few dropped columns per output row; planes are spaced an odd
+  number of cache lines apart so the rows do not alias in L1). Pointwise convs pack B as a plain copy; depthwise
+  convs have a direct (AVX2-dispatched) kernel. Bias and activation run as an epilogue on each finished output
+  block (`Tensor::conv2d_act`, used by fused `ConvBnAct` blocks and by eval-mode blocks under `no_grad`); SiLU there
+  is an 8-lane AVX2 `x · sigmoid(x)` with relative error below `cpu::SILU_MAX_REL_ERR` (5e-7, tested).
+  `Tensor::conv2d_act_cat` runs the same conv over the channel concatenation of several inputs, reading each part
+  (or a channel slice of a tensor) in place, so `cat` + conv never writes the concatenation. Max pooling is
+  separable (row pass, then column pass; same first-maximum argmax as a direct scan). Batches smaller than the
+  thread pool split the pool between images. The stride-1 input gradient is the forward kernel run on the output gradient with the flipped,
   channel-swapped kernel (no col2im); strided convs use an unfolded gradient and col2im. Large `f32` buffers are
   recycled through a size-keyed cache (`cpu::set_buffer_cache_limit`, default 1 GiB; `cpu::take_buffer` hands one
   to custom ops) so training loops do not pay page faults every step.
@@ -53,9 +62,15 @@ training and evaluation pipeline, a server, a CLI and a web studio.
   (Conv+BN+SiLU, BatchNorm, DFL / CIoU losses) with a hand-written backward; inputs and output are version-checked
   like built-in ops and a wrong gradient count or shape is an error at `backward()`.
 - Fused ops with composite fallbacks (`ops/fused.rs`): `Tensor::conv2d_act` (conv + bias + activation),
+  `Tensor::conv2d_act_cat` (the same over a channel concatenation, without writing it),
   `Tensor::batch_norm_act_train` / `batch_norm_act_train_backward` (train-mode BatchNorm + activation, running
   update in place) and `Tensor::optimizer_step_` (in-place SGD / AdamW / EMA update) call optional `Backend` hooks;
-  folo-gpu implements them, the CPU backend implements `conv2d_act`, other backends fall back.
+  folo-gpu implements them, the CPU backend implements `conv2d_act` and `conv2d_act_cat`, other backends fall
+  back.
+- Detector pre- and post-processing hooks (`ops/vision.rs`, `Ok(None)` without a kernel so callers keep their host
+  code): `Tensor::letterbox_rgb8` (raw `u8` images → letterboxed `f32` NCHW input, sampled with folo-data's exact
+  resize taps) and `Tensor::detect_candidates` (head → per-anchor best class above `conf` with its decoded box, as
+  a compact list). folo-gpu implements both.
 - `Tensor::to_device_(device)` moves a storage to another device **in place**: the device lives on the shared storage
   cell, so every clone and view follows and the tensor keeps its id (gradients and optimizer state stay keyed). This
   is how whole models move (`Module::to_device`).
@@ -83,7 +98,8 @@ training and evaluation pipeline, a server, a CLI and a web studio.
 - `max_pool2d_backward` also receives the pooling window (`Pool2dParams`), so a backend can compute the gradient as a
   gather (each input element visits only the windows that cover it) instead of a scatter with float atomics; the
   CPU backend ignores it.
-- Optional fused hooks (`conv2d_act`, `batch_norm_act`, `batch_norm_act_backward`, `optimizer_step`) default to
+- Optional fused hooks (`conv2d_act`, `conv2d_act_cat`, `batch_norm_act`, `batch_norm_act_backward`,
+  `optimizer_step`, `letterbox_rgb8`, `detect_candidates`) default to
   `NotSupported`; folo-core's fused entry points then compose ordinary ops (or report "not available" so folo-nn
   uses its own path). `batch_norm_act` and `optimizer_step` write into `&mut Storage` arguments (running statistics,
   parameters, optimizer state) that folo-core has write-locked, checked to be contiguous and distinct.
@@ -143,7 +159,9 @@ The exact block definitions, layer tables, parameter names, head, loss, training
   (`reg_max`, default 16). An NMS-free one-to-one head (dual assignment during training, as in YOLOv10) is specified
   in MODEL.md but reserved for a later milestone. Implemented in `folo_vision::model`: `FoloModel::new(config)` for
   any scale and class count, `forward` → `HeadOutput { box_raw [B, 64, A], cls_raw [B, nc, A], anchors }`, `fuse()`,
-  `predict_raw` (forward + decode + NMS; decode runs on the outputs' device, NMS on the CPU), `to_device()`, and
+  `predict_raw` (forward + decode + NMS; decode runs on the outputs' device, NMS on the CPU),
+  `predict_detections` / `HeadOutput::detections` (on a GPU the decode runs in one kernel that keeps only the
+  candidates above `conf`, and only those are downloaded), `to_device()`, and
   `.folo` save / load (`open_on(path, device)`) / transfer through folo-nn.
 - **Loss**: task-aligned assigner (TAL: `score^alpha * IoU^beta`, top-k), BCE classification on aligned targets,
   CIoU box loss and DFL, weighted 7.5 / 0.5 / 1.5 by default. On the CPU `folo_vision::loss` runs the assigner on the
@@ -169,7 +187,10 @@ The exact block definitions, layer tables, parameter names, head, loss, training
   is the same validation for `folo val`.
 - **Predictor** (`folo_vision::predict::Predictor`): loads `.folo` (EMA when present), fuses BN, letterboxes (rect for
   one image, square for a batch), forward, decode, NMS, rescale to the original image, with a preprocess /
-  inference / postprocess timing split.
+  inference / postprocess timing split. On a GPU the raw `u8` images are uploaded and letterboxed there
+  (bit-exact with the CPU letterbox) and only the decoded candidates come back: one upload per image, one queue of
+  work, one small readback. On the CPU the head's six branch chains run side by side and the neck's Concat layers
+  are never written (`C3k2::forward_cat`).
 
 ## folo-wasm — FOLO in the browser
 - `crates/folo-wasm` (wasm-bindgen) loads a `.folo` file from bytes and runs `folo_vision::Predictor`'s steps on

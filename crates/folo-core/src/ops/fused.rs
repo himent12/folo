@@ -3,7 +3,7 @@
 //! returns `NotSupported`; [`Tensor::conv2d_act`] then composes ordinary ops, and the other entry points
 //! return `Ok(None)` / `Ok(false)` so the caller (folo-nn) can use its own path.
 
-use super::with_views;
+use super::{with_views, with_views_dyn};
 use crate::autograd::is_grad_enabled;
 use crate::backend::{Conv2dParams, OptimStep, RunningUpdate, UnaryOp};
 use crate::{DType, Error, Result, Shape, Tensor};
@@ -25,7 +25,15 @@ fn unsupported(e: &Error) -> bool {
 
 /// The output shape of a valid conv2d, or `None` (the composite path then reports the exact error).
 fn conv_out_shape(x: &Tensor, w: &Tensor, bias: Option<&Tensor>, p: &Conv2dParams) -> Option<Shape> {
-    let (n, c, h, wi) = x.dims4().ok()?;
+    conv_out_shape_dims(x.dims4().ok()?, w, bias, p)
+}
+
+fn conv_out_shape_dims(
+    (n, c, h, wi): (usize, usize, usize, usize),
+    w: &Tensor,
+    bias: Option<&Tensor>,
+    p: &Conv2dParams,
+) -> Option<Shape> {
     let (o, cg, kh, kw) = w.dims4().ok()?;
     let ok = p.groups > 0
         && !p.stride.contains(&0)
@@ -85,6 +93,57 @@ impl Tensor {
             Some(op) => y.unary(op),
             None => Ok(y),
         }
+    }
+
+    /// [`Tensor::conv2d_act`] of `Tensor::cat(xs, 1)`. When nothing is being recorded and the backend has the
+    /// kernel ([`crate::backend::Backend::conv2d_act_cat`], the CPU does), the conv reads each part in place and
+    /// the concatenation is never written; otherwise this is `cat` then [`Tensor::conv2d_act`], with autograd.
+    pub fn conv2d_act_cat(
+        xs: &[&Tensor],
+        weight: &Tensor,
+        bias: Option<&Tensor>,
+        p: &Conv2dParams,
+        act: Option<UnaryOp>,
+    ) -> Result<Tensor> {
+        let first = *xs.first().ok_or_else(|| Error::invalid_arg("conv2d_act_cat", "no inputs given"))?;
+        if xs.len() == 1 {
+            return first.conv2d_act(weight, bias, p, act);
+        }
+        let records = is_grad_enabled()
+            && (xs.iter().any(|x| x.requires_grad())
+                || weight.requires_grad()
+                || bias.is_some_and(Tensor::requires_grad));
+        let dev = first.device();
+        let uniform = xs.iter().all(|x| x.device() == dev && x.dtype() == DType::F32)
+            && weight.device() == dev
+            && weight.dtype() == DType::F32
+            && bias.is_none_or(|b| b.device() == dev && b.dtype() == DType::F32);
+        // Every part NCHW with the first one's N, H, W; the channel counts add up.
+        let dims = xs.iter().map(|x| x.dims4().ok()).collect::<Option<Vec<_>>>();
+        let cat_dims = dims.and_then(|d| {
+            let (n, _, h, w) = d[0];
+            let same = d.iter().all(|&(n2, _, h2, w2)| (n2, h2, w2) == (n, h, w));
+            same.then(|| (n, d.iter().map(|x| x.1).sum(), h, w))
+        });
+        if !records
+            && uniform
+            && let Some(shape) = cat_dims.and_then(|d| conv_out_shape_dims(d, weight, bias, p))
+        {
+            let b = first.backend()?;
+            let mut ts: Vec<&Tensor> = xs.to_vec();
+            ts.push(weight);
+            ts.extend(bias);
+            let r = with_views_dyn(&ts, |v| {
+                let k = xs.len();
+                b.conv2d_act_cat(&v[..k], v[k], v.get(k + 1).copied(), p, act)
+            });
+            match r {
+                Ok(s) => return Tensor::wrap(s, shape, "conv2d_act_cat"),
+                Err(e) if unsupported(&e) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Tensor::cat(xs, 1)?.conv2d_act(weight, bias, p, act)
     }
 
     /// Fused train-mode BatchNorm over the channels of `self` (`[N, C, H, W]`, statistics over `N·H·W`)

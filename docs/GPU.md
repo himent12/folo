@@ -150,6 +150,8 @@ On `wasm32` the same crate runs on the browser's WebGPU. Nothing may block the p
 | optimizer updates | `kernels::optim::optimizer_step` | f32 | in place, one thread per element: SGD (momentum, Nesterov, coupled decay), AdamW (decoupled decay, bias corrections), and `p = a·p + b·g` for EMAs, in the op order of folo-nn's CPU loops |
 | task-aligned assigner | `kernels::detect::assign` | f32 / u32 | docs/MODEL.md §7.3 on the raw head outputs, five dispatches: DFL decode of every anchor; one workgroup per gt that scans its candidates, scores `u = max(CIoU, 0)` and `m = score^α · u^β` and keeps its top k by `(m desc, anchor asc)` (per-thread sorted lists merged by a k-round tournament); two atomic passes for the conflicts (largest `u`, then the smallest gt index); the soft targets `t = m · u_max / (m_max + eps)` per gt and a dense per-anchor `(label, t)` map. Same decisions as `folo_vision::assign` |
 | detection loss | `kernels::detect::{bce_forward, bce_backward, box_terms, combine}` | f32 | §7.4: BCE over every logit against the dense targets, each element formed whole; CIoU + DFL per positive (softmax expectation, both terms and their hand-written backward in one thread); a one-workgroup fixed-order reduction to the reported items, the total and the backward scales. `exp`, `ln(1 + x)` and `atan` are written out in plain arithmetic (folo-core's `fast_exp`, an atanh series, Cephes `atanf`), since WGSL only promises an absolute error of 2^-21 for `log` near 1 |
+| letterbox | `kernels::vision::letterbox_rgb8` | u8 → f32 | one thread per canvas pixel: the padding grey, or the resized image sampled with folo-data's `ResizePlan` (integer box prefilter computed on the fly, then 11-bit fixed-point bilinear taps uploaded by the host), in integers, times `scale`: bit-exact with the CPU letterbox. Prefilter blocks whose sum could overflow u32 are refused (the caller letterboxes on the host) |
+| detection candidates | `kernels::vision::detect_candidates` | f32 → u32 | one thread per (image, anchor): the first maximum of the `nc` sigmoid scores; above `conf`, the DFL softmax expectation of each side, the box around the anchor times the stride, and a 7-word record `(anchor, class, score, x1, y1, x2, y2)` appended with an atomic counter per image (the output is cleared first) |
 
 The f16 kernels need `shader-f16`; without it they return `GpuError::Unsupported`. Everything not listed as f16
 is f32-only.
@@ -317,6 +319,13 @@ println!("{}", loss.item::<f32>()?);                  // the only wait for the G
   `batch_norm_act` / `batch_norm_act_backward` are the BatchNorm kernels above (`Tensor::batch_norm_act_train`,
   recorded by folo-nn's `BatchNorm2d` as one custom op); `optimizer_step` is the update kernel
   (`Tensor::optimizer_step_`, used by folo-nn's SGD, AdamW and EMA on the GPU).
+- **Prediction** (folo-core's detector hooks): `letterbox_rgb8` and `detect_candidates` are the two kernels above.
+  `folo_vision::predict::Predictor` on the GPU uploads each decoded image as raw `u8` (a quarter of the f32
+  bytes), letterboxes on the device, runs the forward, decodes into candidates, and downloads the per-image counts
+  plus up to `CANDIDATE_READBACK` (1024) records per image in one readback (a second one only for an image with
+  more): about 28 KiB per image instead of the 2.8 MB of a decoded `[A, 4 + nc]` head. Nothing waits on the GPU
+  before that readback. `src/tests` has no tests for these two; they are tested against the CPU path in
+  `crates/folo-vision/tests/gpu.rs` (letterbox bit for bit, candidates and detections to float rounding).
 - **Readback.** `download` decodes the mapped staging buffer straight into typed host storage
   (`GpuContext::read_with`), and `Tensor::to_vec` takes that storage without another copy.
 - **No round trips.** Kernels only encode; nothing waits until a download (`to_vec`, `item`, `to_device(Cpu)`)
@@ -381,8 +390,8 @@ of batch-1 inference.
 
 `cargo bench -p folo-vision --bench gpu` runs the real detector (fused inference forward, end-to-end predict,
 training step, peak memory); its numbers and the comparison with Ultralytics are in
-[BENCHMARKS.md](BENCHMARKS.md#folo-on-the-gpu). In short, folo-n at 640: 3.98 ms batch-1 forward, 1461 img/s at
-batch 16, 219 img/s training step at batch 16 (143 before the loss moved to the GPU), 3.5 GiB training peak. The fused kernels' effect on the training step:
+[BENCHMARKS.md](BENCHMARKS.md#folo-on-the-gpu). In short, folo-n at 640: 2.99 ms batch-1 forward, 1385–1461 img/s
+at batch 16, 5.18 ms / 722 img/s end to end through the predictor at batch 1 / 16, 219 img/s training step at batch 16 (143 before the loss moved to the GPU), 3.5 GiB training peak. The fused kernels' effect on the training step:
 the SGD update went from 62 ms (about ten elementwise dispatches and copies per parameter) to 5 ms with the fused
 update kernel.
 

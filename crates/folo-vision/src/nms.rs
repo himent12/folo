@@ -346,6 +346,40 @@ pub fn non_max_suppression(
     finish(cands, cfg, |i| boxes[i as usize])
 }
 
+/// An anchor's best class above the confidence threshold, with its decoded box: what a device decode
+/// downloads instead of every anchor's scores (folo-core's `Tensor::detect_candidates`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Candidate {
+    /// Anchor index.
+    pub anchor: u32,
+    /// Its best class (first maximum).
+    pub class: u32,
+    /// That class's score.
+    pub score: f32,
+    /// The decoded box, `xyxy`.
+    pub bbox: Xyxy,
+}
+
+/// [`non_max_suppression`] (single-label) from the candidates already extracted: one per anchor whose best
+/// class scores `> conf`, **sorted by anchor**. Applies the class filter, the candidate cap and batched NMS;
+/// for the candidates of the same decoded outputs the result is identical to [`non_max_suppression`] with
+/// `multi_label` off.
+///
+/// # Panics
+/// If there are more than `u32::MAX` candidates.
+pub fn nms_candidates(cands: &[Candidate], cfg: &NmsConfig) -> Vec<Detection> {
+    assert!(cands.len() <= u32::MAX as usize, "nms_candidates: too many candidates");
+    debug_assert!(cands.windows(2).all(|w| w[0].anchor < w[1].anchor), "nms_candidates: unsorted");
+    // Positions in anchor order tie-break exactly as anchor indices do.
+    let list: Vec<Cand> = cands
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.score > cfg.conf && class_allowed(cfg, c.class))
+        .map(|(i, c)| Cand { score: c.score, idx: i as u32, class: c.class })
+        .collect();
+    finish(list, cfg, |i| cands[i as usize].bbox)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -372,6 +406,41 @@ mod tests {
         let boxes = [b(0., 0., 10., 10.), b(1., 1., 11., 11.), b(0., 0., 10., 10.)];
         let classes = [u32::MAX, u32::MAX, 7];
         assert_eq!(batched_nms(&boxes, &[0.9, 0.8, 0.7], &classes, 0.5, 300, false), vec![0, 2]);
+    }
+
+    #[test]
+    fn candidates_match_full_nms() {
+        // 50 anchors, 4 classes, many overlapping boxes and tied scores.
+        let (a, nc) = (50usize, 4usize);
+        let boxes: Vec<Xyxy> = (0..a)
+            .map(|i| b((i % 7) as f32, (i % 5) as f32, (i % 7) as f32 + 9.0, (i % 5) as f32 + 9.0))
+            .collect();
+        let scores: Vec<f32> = (0..a * nc).map(|i| ((i * 37) % 11) as f32 / 10.0).collect();
+        for cfg in [
+            NmsConfig { conf: 0.25, iou: 0.5, ..NmsConfig::default() },
+            NmsConfig { conf: 0.05, iou: 0.3, max_det: 7, max_candidates: 20, ..NmsConfig::default() },
+            NmsConfig { classes: Some(vec![1, 3]), agnostic: true, ..NmsConfig::default() },
+        ] {
+            let want = non_max_suppression(&boxes, &scores, nc, &cfg);
+            let cands: Vec<Candidate> = (0..a)
+                .filter_map(|i| {
+                    let row = &scores[i * nc..(i + 1) * nc];
+                    let (mut best, mut bs) = (0, row[0]);
+                    for (c, &s) in row.iter().enumerate().skip(1) {
+                        if s > bs {
+                            (best, bs) = (c, s);
+                        }
+                    }
+                    (bs > cfg.conf).then_some(Candidate {
+                        anchor: i as u32,
+                        class: best as u32,
+                        score: bs,
+                        bbox: boxes[i],
+                    })
+                })
+                .collect();
+            assert_eq!(nms_candidates(&cands, &cfg), want, "{cfg:?}");
+        }
     }
 
     #[test]

@@ -237,6 +237,9 @@ impl HeadOutput {
     }
 }
 
+/// The callback of [`FoloModel::forward_traced`]: `(layer, output)`.
+type LayerTrace<'a> = dyn FnMut(usize, &Tensor) + 'a;
+
 /// A FOLO detector (docs/MODEL.md): `folo-<scale>` with `num_classes` classes.
 ///
 /// Tensor names and their canonical order are MODEL.md §5's (`backbone.stem.conv.weight` first,
@@ -380,22 +383,41 @@ impl FoloModel {
     /// The raw outputs (MODEL.md §6.3) of an `[B, 3, H, W]` batch with `H` and `W` positive multiples of 32.
     /// In training mode BatchNorm uses (and updates) batch statistics; in eval mode its running statistics.
     pub fn forward(&self, x: &Tensor) -> Result<HeadOutput> {
-        self.forward_traced(x, &mut |_, _| {})
+        self.forward_impl(x, None)
     }
 
     /// [`FoloModel::forward`], calling `trace(layer, output)` with the output of every layer 0–22 of
     /// MODEL.md §4 (see [`LAYER_NAMES`]) as it is computed.
     pub fn forward_traced(&self, x: &Tensor, trace: &mut dyn FnMut(usize, &Tensor)) -> Result<HeadOutput> {
+        self.forward_impl(x, Some(trace))
+    }
+
+    /// The forward pass. Without a trace, the neck's Concat layers (12, 15, 18, 21) are never written: the
+    /// C3k2 after each reads both parts in place ([`C3k2::forward_cat`]).
+    fn forward_impl(&self, x: &Tensor, mut trace: Option<&mut LayerTrace<'_>>) -> Result<HeadOutput> {
         let (h, w) = self.check_input(x)?;
         let b = &self.backbone;
         let n = &self.neck;
+        let traced = trace.is_some();
         let mut t = |i: usize, y: Tensor| -> Tensor {
-            trace(i, &y);
+            if let Some(f) = trace.as_mut() {
+                f(i, &y);
+            }
             y
         };
+        // Layer `l` (a Concat) then the C3k2 `blk` after it, as layer `l + 1`.
+        let cat_c3k2 =
+            |t: &mut dyn FnMut(usize, Tensor) -> Tensor, l: usize, blk: &C3k2, a: &Tensor, c: &Tensor| {
+                if traced {
+                    let y = t(l, Tensor::cat(&[a, c], 1)?);
+                    Ok::<_, Error>(t(l + 1, blk.forward(&y)?))
+                } else {
+                    Ok(t(l + 1, blk.forward_cat(&[a, c])?))
+                }
+            };
         // Only the skip connections (x4, x6, x10, x13) and the head inputs outlive the next layer. Every other
-        // intermediate lives in `y`, whose old value is dropped on each reassignment (the skips right after their
-        // concat), so inference can recycle buffers as it goes.
+        // intermediate lives in `y`, whose old value is dropped on each reassignment (the skips right after the
+        // C3k2 that reads them), so inference can recycle buffers as it goes.
         let mut y = t(0, b.stem.forward(x)?);
         y = t(1, b.down2.forward(&y)?);
         y = t(2, b.stage2.forward(&y)?);
@@ -408,21 +430,17 @@ impl FoloModel {
         y = t(9, b.sppf.forward(&y)?);
         let x10 = t(10, b.psa.forward(&y)?);
         y = t(11, x10.upsample_nearest2d(2)?);
-        y = t(12, Tensor::cat(&[&y, &x6], 1)?);
+        let x13 = cat_c3k2(&mut t, 12, &n.td4, &y, &x6)?;
         drop(x6);
-        let x13 = t(13, n.td4.forward(&y)?);
         y = t(14, x13.upsample_nearest2d(2)?);
-        y = t(15, Tensor::cat(&[&y, &x4], 1)?);
+        let x16 = cat_c3k2(&mut t, 15, &n.out3, &y, &x4)?;
         drop(x4);
-        let x16 = t(16, n.out3.forward(&y)?);
         y = t(17, n.down3.forward(&x16)?);
-        y = t(18, Tensor::cat(&[&y, &x13], 1)?);
+        let x19 = cat_c3k2(&mut t, 18, &n.out4, &y, &x13)?;
         drop(x13);
-        let x19 = t(19, n.out4.forward(&y)?);
         y = t(20, n.down4.forward(&x19)?);
-        y = t(21, Tensor::cat(&[&y, &x10], 1)?);
+        let x22 = cat_c3k2(&mut t, 21, &n.out5, &y, &x10)?;
         drop(x10);
-        let x22 = t(22, n.out5.forward(&y)?);
         drop(y);
         let (box_raw, cls_raw) = self.head.forward([&x16, &x19, &x22])?;
         Ok(HeadOutput {

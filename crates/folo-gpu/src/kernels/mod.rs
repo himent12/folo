@@ -18,6 +18,7 @@ pub mod pool_grad;
 pub mod pooling;
 pub mod reduce;
 pub mod strided;
+pub mod vision;
 
 use crate::DType;
 use crate::error::{GpuError, Result};

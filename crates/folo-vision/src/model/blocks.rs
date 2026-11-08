@@ -148,7 +148,7 @@ impl Forward for C3k {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
         let a = self.blocks.forward(&self.cv1.forward(x)?)?;
         let b = self.cv2.forward(x)?;
-        self.cv3.forward(&Tensor::cat(&[a, b], 1)?)
+        self.cv3.forward_cat(&[&a, &b])
     }
 }
 
@@ -234,16 +234,31 @@ impl Module for C3k2 {
     }
 }
 
+impl C3k2 {
+    /// `forward(&Tensor::cat(xs, 1))` without writing the concatenation when the convs run fused
+    /// ([`ConvBnAct::forward_cat`]).
+    pub fn forward_cat(&self, xs: &[&Tensor]) -> Result<Tensor> {
+        // `cat(split(y), b_1, ..)` is `cat(y, b_1, ..)`: cv2 reads y whole, and the chain starts on its
+        // second half (a channel slice, read in place by the CPU conv).
+        let y = self.cv1.forward_cat(xs)?;
+        let mut outs: Vec<Tensor> = Vec::with_capacity(self.blocks.len());
+        for b in self.blocks.iter() {
+            let next = match outs.last() {
+                Some(prev) => b.forward(prev)?,
+                None => b.forward(&y.narrow(1, self.c, self.c)?)?,
+            };
+            outs.push(next);
+        }
+        let mut parts = Vec::with_capacity(1 + outs.len());
+        parts.push(&y);
+        parts.extend(&outs);
+        self.cv2.forward_cat(&parts)
+    }
+}
+
 impl Forward for C3k2 {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let y = self.cv1.forward(x)?;
-        let mut ys = y.split_sizes(&[self.c, self.c], 1)?;
-        ys.reserve(self.blocks.len());
-        for b in self.blocks.iter() {
-            let next = b.forward(ys.last().expect("two halves"))?;
-            ys.push(next);
-        }
-        self.cv2.forward(&Tensor::cat(&ys, 1)?)
+        self.forward_cat(&[x])
     }
 }
 
@@ -290,7 +305,7 @@ impl Forward for Sppf {
         let y1 = pool(&y0)?;
         let y2 = pool(&y1)?;
         let y3 = pool(&y2)?;
-        self.cv2.forward(&Tensor::cat(&[y0, y1, y2, y3], 1)?)
+        self.cv2.forward_cat(&[&y0, &y1, &y2, &y3])
     }
 }
 
@@ -455,7 +470,7 @@ impl Forward for C2Psa {
         let y = self.cv1.forward(x)?;
         let ab = y.split_sizes(&[self.c, self.c], 1)?;
         let b = self.blocks.forward(&ab[1])?;
-        self.cv2.forward(&Tensor::cat(&[&ab[0], &b], 1)?)
+        self.cv2.forward_cat(&[&ab[0], &b])
     }
 }
 

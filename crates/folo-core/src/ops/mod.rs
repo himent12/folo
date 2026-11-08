@@ -8,6 +8,7 @@ mod nn;
 mod overload;
 mod reduce;
 mod view;
+mod vision;
 
 use std::sync::Arc;
 
@@ -40,6 +41,25 @@ pub(crate) fn with_views<R, const N: usize>(
     let guards: SmallVec<[_; 4]> = cells.iter().map(|c| c.read()).collect();
     let views = std::array::from_fn(|i| View::new(&guards[idx[i]], layouts[i]));
     f(views)
+}
+
+/// [`with_views`] for a runtime number of tensors, each with its own layout.
+pub(crate) fn with_views_dyn<R>(ts: &[&Tensor], f: impl FnOnce(&[View<'_>]) -> R) -> R {
+    let mut cells: SmallVec<[&Arc<StorageCell>; 4]> = SmallVec::new();
+    let mut idx: SmallVec<[usize; 8]> = SmallVec::new();
+    for t in ts {
+        idx.push(match cells.iter().position(|c| Arc::ptr_eq(c, t.cell())) {
+            Some(j) => j,
+            None => {
+                cells.push(t.cell());
+                cells.len() - 1
+            }
+        });
+    }
+    let guards: SmallVec<[_; 4]> = cells.iter().map(|c| c.read()).collect();
+    let views: SmallVec<[View<'_>; 8]> =
+        ts.iter().zip(&idx).map(|(t, &i)| View::new(&guards[i], t.layout())).collect();
+    f(&views)
 }
 
 /// Build the gradient list returned by backward closures.
