@@ -99,6 +99,37 @@ export const scenes = [
     setup: unplugGpu,
   },
   {
+    // The server's own words fold under "Technical details" at the Device field; here opened.
+    name: 'run-new-device-details',
+    path: '/runs/new',
+    search: 'scenario=gpu-unplugged',
+    fullPage: false,
+    viewports: ['laptop'],
+    setup: async (page) => {
+      await unplugGpu(page);
+      await page.locator('.dev-detail summary').click();
+      await page.locator('#device').scrollIntoViewIfNeeded();
+    },
+  },
+  {
+    // A short run on fasteners (5 epochs, 1,920 images): warmup would take 100 of its 150 optimizer steps. The Summary
+    // warns with the fix; below 960 px the dock says so too.
+    name: 'run-new-short',
+    path: '/runs/new',
+    fullPage: false,
+    viewports: ['desktop', 'tablet', 'mobile'],
+    setup: async (page, { vp }) => {
+      await until(page, 'input#epochs');
+      await page.locator('input#epochs').fill('5');
+      await page.mouse.move(0, 0);
+      if (vp === 'mobile') {
+        await page.locator('.dock-est').click();
+        await page.locator('dialog[open]').waitFor();
+      } else if (vp === 'desktop') await until(page, '.summary .short');
+      else await until(page, '.dock-warn');
+    },
+  },
+  {
     // The same on tablet and phone, in the viewport: the dock's Start says why it is off.
     name: 'run-new-device-dock',
     path: '/runs/new',
@@ -469,7 +500,8 @@ export const scenes = [
   },
   { name: 'playground-empty', path: '/playground', setup: (page) => until(page, 'button.sample') },
   {
-    // Server inference ran out of GPU memory (507): the cause, the hint, and the ways out (this browser, a smaller model).
+    // Server inference ran out of GPU memory (507): the cause, the hint, and the ways out (this browser, a smaller model),
+    // in a strip under the image, which stays whole.
     name: 'playground-oom',
     path: '/playground?model=m_shapes_s',
     search: 'scenario=oom',
@@ -478,12 +510,27 @@ export const scenes = [
       await until(page, 'button.sample');
       await page.locator('button.sample').first().click();
       await page.mouse.move(0, 0);
-      await until(page, '.stage-err .err');
+      await until(page, '.notice .err');
       // The toast repeats the cause; let it go so the shot shows the state in place.
       await page.clock.runFor(6000);
     },
   },
   { name: 'playground-result', path: '/playground?model=m_hard_s', viewports: ['desktop', 'laptop', 'mobile'], setup: playgroundResult },
+  {
+    // A browser without WebGPU: the option is off and the header says why, and what is left.
+    name: 'playground-no-webgpu',
+    path: '/playground?model=m_hard_s',
+    fullPage: false,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page) => {
+      await page.addInitScript(() => {
+        delete (/** @type {any} */ (Navigator.prototype)).gpu;
+      });
+      await page.reload({ waitUntil: 'networkidle' });
+      await page.clock.runFor(2000);
+      await until(page, '.runon-note');
+    },
+  },
   {
     name: 'playground-selected',
     path: '/playground?model=m_hard_s',

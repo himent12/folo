@@ -22,7 +22,7 @@
   import DetectionView from '$lib/detect/DetectionView.svelte';
   import { filterDetections } from '$lib/detect/nms';
   import { BrowserEngine, hasWebGpu, PHASE_TEXT, type Backend } from '$lib/inference/browser.svelte';
-  import { metric, ms, num } from '$lib/format';
+  import { metric, ms, num, sentence } from '$lib/format';
   import { isOom } from '$lib/oom';
   import { href, router } from '$lib/router.svelte';
   import Page from '$lib/shell/Page.svelte';
@@ -39,6 +39,7 @@
   import { toast } from '$lib/ui/toast.svelte';
   import DatasetPicker from './playground/DatasetPicker.svelte';
   import DropZone from './playground/DropZone.svelte';
+  import { looksLikeFolo } from './playground/folo';
   import JsonView from './playground/JsonView.svelte';
   import TimingBar from './playground/TimingBar.svelte';
 
@@ -264,11 +265,29 @@
     pred?.backend ? `${BACKEND_NAME[pred.backend]}${pred.backend === 'webgpu' && engine.info?.adapter ? ` · ${engine.info.adapter}` : ''}` : (pred?.device ?? ''),
   );
 
-  function pickWeights(e: Event) {
+  /** A picked file that was refused as weights (not a .folo), or that the runtime could not load; cleared on a new pick. */
+  let badFile = $state<{ name: string; why: string | null } | null>(null);
+
+  async function pickWeights(e: Event) {
     const f = (e.currentTarget as HTMLInputElement).files?.[0];
     (e.currentTarget as HTMLInputElement).value = '';
-    if (!f || !modelId) return;
-    localWeights = new Map(localWeights).set(modelId, f);
+    const id = modelId;
+    if (!f || !id) return;
+    // Refused before it becomes this model's weights: the server's (or the request for a file) stay in place.
+    if (!(await looksLikeFolo(f))) {
+      badFile = { name: f.name, why: null };
+      return;
+    }
+    badFile = null;
+    localWeights = new Map(localWeights).set(id, f);
+  }
+
+  /** Drops a picked file that failed to load, so the model goes back to the server's weights. */
+  function dropLocal(id: string, f: File, e: unknown) {
+    const next = new Map(localWeights);
+    next.delete(id);
+    localWeights = next;
+    badFile = { name: f.name, why: e instanceof Error ? sentence(e.message) : null };
   }
 
   /** The demo has no real networks: the browser path is simulated with the documented speeds (docs/WASM.md). */
@@ -337,6 +356,11 @@
       (e: unknown) => {
         if (ctrl.signal.aborted) return;
         predicting = false;
+        // A picked file the runtime could not load is not kept as this model's weights.
+        if (file && on !== 'server' && engine.phase !== 'ready') {
+          dropLocal(id, file, e);
+          return;
+        }
         // A server without the weights route (or one that cannot read this model's file): ask for the file.
         if (on !== 'server' && !file && e instanceof ApiError && (e.status === 404 || e.status === 405 || e.status === 501) && e.code !== 'model_not_found') {
           weightsMissing = true;
@@ -361,6 +385,25 @@
     return ranked.find((x) => x.id !== m.id && rank(x) < rank(m) && x.classes.join('|') === m.classes.join('|')) ?? null;
   });
   const localBackend: Backend = webgpu ? 'webgpu' : 'cpu';
+
+  // What stands between the image and its boxes, shown in a strip under the image (which stays in view).
+  const notice = $derived(!source || predicting ? null : weightsMissing ? 'file' : error && !pred ? 'error' : null);
+  $effect(() => {
+    void modelId;
+    badFile = null;
+  });
+  /** The cause of a failed prediction, for the caption under the image. */
+  const cause = $derived(
+    oom ? 'out of GPU memory' : error instanceof Error ? sentence(error.message).replace(/\.$/, '') : null,
+  );
+  // Focus moves to the notice's heading as it appears, so it is announced and its actions are next in tab order.
+  let noticeEl = $state<HTMLElement>();
+  $effect(() => {
+    const h = noticeEl?.querySelector<HTMLElement>('.n-title, .title');
+    if (!h) return;
+    h.tabIndex = -1;
+    h.focus();
+  });
 
   // ---------- client-side filtering ----------
   let conf = $state(DEFAULTS.conf);
@@ -474,6 +517,8 @@
   }
   const isDefault = $derived(conf === DEFAULTS.conf && iou === DEFAULTS.iou && maxDet === DEFAULTS.maxDet);
   const px = (v: number) => Math.round(v);
+  /** Scores read the same everywhere here (table, the picked box's line, the label chips on the image): 2 decimals. */
+  const score = (v: number) => v.toFixed(2);
 </script>
 
 <svelte:window {onpaste} onkeydown={onwindowkey} onpointerdown={onwindowdown} />
@@ -508,7 +553,7 @@
 
 {#snippet secondarySliders(inline: boolean)}
   <div title="Non-max suppression: a lower-scoring box of the same class is dropped when it overlaps a kept one by more than this.">
-    <Slider {inline} label={inline ? 'Overlap (IoU)' : 'Overlap threshold (IoU)'} bind:value={iou} min={0.05} max={0.95} step={0.05} hint="Merge same-class boxes that overlap more." />
+    <Slider {inline} label={inline ? 'Overlap (IoU)' : 'Overlap threshold (IoU)'} bind:value={iou} min={0.05} max={0.95} step={0.05} hint="Suppress lower-scoring boxes of the same class above this overlap." />
   </div>
   <Slider {inline} label="Max detections" bind:value={maxDet} min={1} max={300} step={1} format={(v) => String(Math.round(v))} hint="Keep at most this many boxes." />
 {/snippet}
@@ -570,8 +615,8 @@
         />
         {#if model}<Button icon={ArrowUpRight} href={href(`/models/${model.id}`)} aria-label="Open {model.name}" />{/if}
       </div>
-      <div class="runon">
-        <span class="pick-label">Run on</span>
+      <div class="runon" role="group" aria-label="Run on" aria-describedby={webgpu ? undefined : 'runon-note'}>
+        <span class="pick-label" aria-hidden="true">Run on</span>
         <Segmented
           label="Run the model on"
           size="sm"
@@ -582,6 +627,8 @@
             { value: 'cpu', label: 'CPU' },
           ]}
         />
+        <!-- A choice that is off says why, and what is left. -->
+        {#if !webgpu}<span class="runon-note" id="runon-note">WebGPU isn't available in this browser; use Server or CPU.</span>{/if}
       </div>
     {/if}
   {/snippet}
@@ -595,7 +642,8 @@
       </EmptyState>
     </Panel>
   {:else}
-    <div class="layout">
+    <!-- With an image, the main column takes the image's width at the canvas height (see .layout.fit). -->
+    <div class="layout" class:fit={!!source && !!dims} style:--arn={dims ? dims.width / dims.height : undefined}>
       <div class="main">
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div class="viewer" class:loaded={!!source} {ondragover} {ondragleave} {ondrop}>
@@ -617,7 +665,6 @@
                 <span class="src-name mono truncate" title={sourceName}>{shortName}</span>
                 {#if dims}<span class="src-dims num">{dims.width}×{dims.height}</span>{/if}
                 <span class="vbar-gap"></span>
-                <span class="toggles">{@render displayToggles()}</span>
                 <Button size="sm" variant="ghost" class="replace" aria-label="Replace image" icon={source.kind === 'dataset' ? Images : Upload} onclick={() => (source?.kind === 'dataset' ? (pickerOpen = true) : fileInput.click())}>Replace</Button>
                 <Button size="sm" variant="ghost" class="clear" icon={X} aria-label="Clear image" onclick={clear} />
               {/if}
@@ -645,43 +692,56 @@
                 {#if predicting}
                   <div class="scan" aria-hidden="true"><span></span></div>
                   <span class="busy" role="status">{runOn === 'server' || hub.api.mock ? `Detecting with ${model?.name}…` : PHASE_TEXT[engine.phase] || 'Starting…'}</span>
-                {:else if weightsMissing}
-                  <div class="stage-err">
-                    <div class="need-file" role="alert">
-                      <p class="nf-title">This server cannot send model files yet</p>
-                      <p class="nf-text">
-                        To run {model?.name} in the browser, choose its <span class="mono">.folo</span> file (<span class="mono">weights/best.folo</span>
-                        in the run's folder), or run it on the server.
-                      </p>
-                      <div class="nf-actions">
-                        <Button size="sm" variant="primary" icon={FileUp} onclick={() => weightsInput.click()}>Choose .folo file</Button>
-                        <Button size="sm" onclick={() => (runOn = 'server')}>Run on the server</Button>
-                      </div>
-                    </div>
-                  </div>
-                {:else if error && !pred}
-                  <div class="stage-err">
-                    <div class="need-file err-card">
-                      <ErrorState
-                        {error}
-                        title="Prediction failed"
-                        retry={() => retryTick++}
-                        compact
-                        hint={oom ? (smaller ? 'Run it in this browser, or use a smaller model.' : 'Run it in this browser instead.') : undefined}
-                      >
-                        {#snippet actions()}
-                          {#if oom}
-                            <Button size="sm" variant="primary" onclick={() => (runOn = localBackend)}>Run in this browser</Button>
-                            {#if smaller}<Button size="sm" onclick={() => chooseModel(smaller.id)}>Use {smaller.name} <span class="mono">{smaller.arch}</span></Button>{/if}
-                          {/if}
-                        {/snippet}
-                      </ErrorState>
-                    </div>
-                  </div>
                 {/if}
                 {#if dragging}<div class="drop-hint"><span>Drop to replace</span></div>{/if}
               {/if}
             </div>
+            {#if notice}
+              <!-- Under the image, which stays in full view: what went wrong and the ways out. -->
+              {#key notice}
+                <div class="notice" bind:this={noticeEl}>
+                  {#if notice === 'file'}
+                    <div class="need-file" role="alert">
+                      <FileUp size={16} strokeWidth={1.75} aria-hidden="true" />
+                      <div class="nf-body">
+                        {#if badFile}
+                          <p class="n-title bad">{badFile.why ? `${badFile.name} could not be loaded` : `${badFile.name} is not a .folo weights file`}</p>
+                          <p class="nf-text">
+                            {#if badFile.why}{badFile.why} {/if}Choose {model?.name}'s <span class="mono">weights/best.folo</span> from its run's folder, or run it on the
+                            server.
+                          </p>
+                        {:else}
+                          <p class="n-title">This server cannot send model files yet</p>
+                          <p class="nf-text">
+                            To run {model?.name} in the browser, choose its <span class="mono">.folo</span> file (<span class="mono">weights/best.folo</span>
+                            in the run's folder), or run it on the server.
+                          </p>
+                        {/if}
+                        <div class="nf-actions">
+                          <Button size="sm" variant="primary" icon={FileUp} onclick={() => weightsInput.click()}>Choose .folo file</Button>
+                          <Button size="sm" onclick={() => (runOn = 'server')}>Run on the server</Button>
+                        </div>
+                      </div>
+                    </div>
+                  {:else}
+                    <ErrorState
+                      {error}
+                      title="Prediction failed"
+                      retry={() => retryTick++}
+                      compact
+                      hint={oom ? (smaller ? 'Run it in this browser, or use a smaller model.' : 'Run it in this browser instead.') : undefined}
+                    >
+                      {#snippet actions()}
+                        {#if oom}
+                          <Button size="sm" variant="primary" onclick={() => (runOn = localBackend)}>Run in this browser</Button>
+                          {#if smaller}<Button size="sm" onclick={() => chooseModel(smaller.id)}>Use {smaller.name} <span class="mono">{smaller.arch}</span></Button>{/if}
+                        {/if}
+                      {/snippet}
+                    </ErrorState>
+                  {/if}
+                </div>
+              {/key}
+            {/if}
             {#if source}
               <!-- Phones: the threshold tuned most sits right under the image; the rest is one tap away below it. -->
               <div class="qconf"><Slider inline label="Confidence" bind:value={conf} min={0.01} max={0.95} step={0.01} /></div>
@@ -692,7 +752,7 @@
               <p class="pick-line num" class:empty={!sel} aria-live="polite">
                 {#if sel}
                   <span class="sw" style:background={classColor(sel.class)} aria-hidden="true"></span>
-                  <b>{sel.name}</b> {sel.score.toFixed(2)}<span class="sep" aria-hidden="true">·</span>{px(sel.x2 - sel.x1)}×{px(sel.y2 - sel.y1)} px
+                  <b>{sel.name}</b> {score(sel.score)}<span class="sep" aria-hidden="true">·</span>{px(sel.x2 - sel.x1)}×{px(sel.y2 - sel.y1)} px
                 {/if}
               </p>
             {/if}
@@ -708,6 +768,9 @@
                   <span class="grow"></span>
                   {#if selectedIdx === null}<span class="tap">Tap a box to inspect</span>{/if}
                   <span class="faint">filtered in {result.ms < 0.01 ? '<0.01' : result.ms.toFixed(2)} ms</span>
+                {:else if notice === 'error'}
+                  <span class="failed truncate"><b>Prediction failed</b>{#if cause}<span class="sep" aria-hidden="true">·</span>{cause}{/if}</span>
+                  <span class="grow"></span>
                 {:else}
                   <span class="faint">{predicting ? 'Running inference…' : weightsMissing ? 'Waiting for the model file' : 'Waiting for a model'}</span>
                   <span class="grow"></span>
@@ -794,7 +857,7 @@
                           class:hot={activeIdx === i}
                           class:sel={selectedIdx === i}
                           aria-current={selectedIdx === i ? 'true' : undefined}
-                          aria-label="{b.name}, score {b.score.toFixed(2)}, {px(b.x2 - b.x1)} by {px(b.y2 - b.y1)} pixels"
+                          aria-label="{b.name}, score {score(b.score)}, {px(b.x2 - b.x1)} by {px(b.y2 - b.y1)} pixels"
                           onpointerenter={() => (hover = b)}
                           onpointerleave={() => (hover = null)}
                           onfocus={() => (picked = b)}
@@ -811,7 +874,7 @@
                           <td>
                             <span class="score">
                               <span class="s-track" aria-hidden="true"><span style:transform="scaleX({b.score})" style:background={classColor(b.class)}></span></span>
-                              <span class="num">{b.score.toFixed(3)}</span>
+                              <span class="num">{score(b.score)}</span>
                             </span>
                           </td>
                           <td class="r muted hide-sm coord">{px(b.x1)}</td>
@@ -864,6 +927,9 @@
               <Slider label="Confidence" bind:value={conf} min={0.01} max={0.95} step={0.01} hint="Hide boxes scored below this." />
               {@render secondarySliders(false)}
             </div>
+            <!-- What is drawn on the image: here rather than on the image's toolbar, which is only as wide as the image
+                 (on phones the same toggles sit in the Thresholds sheet). -->
+            {#if source}<div class="show" role="group" aria-label="Show on the image">{@render displayToggles()}</div>{/if}
           </Panel>
         </div>
 
@@ -906,11 +972,27 @@
     color: var(--text-tertiary);
     font-size: var(--type-sm-size);
   }
+  .runon-note {
+    color: var(--text-tertiary);
+    font-size: var(--type-sm-size);
+  }
   .layout {
     display: grid;
     grid-template-columns: minmax(0, 1fr) 320px;
     gap: var(--space-4);
     align-items: start;
+    --stage-h: max(360px, calc(100dvh - 220px));
+  }
+  /* An image is shown whole at the canvas height: the main column is the image's width at that height (or what is
+     left beside a 320 px rail), and the canvas takes the image's aspect, so the image fills it edge to edge and the
+     toolbar and caption line up with it. The rail takes the rest. */
+  .layout.fit {
+    grid-template-columns: minmax(0, calc(var(--stage-h) * var(--arn))) minmax(320px, 1fr);
+  }
+  .layout.fit .stage {
+    height: auto;
+    aspect-ratio: var(--ar);
+    max-height: var(--stage-h);
   }
   .main,
   .aside {
@@ -944,10 +1026,17 @@
   .vbar-gap {
     flex: 1;
   }
-  .toggles {
+  .show {
     display: flex;
+    flex-wrap: wrap;
     gap: 2px;
-    flex-shrink: 0;
+    margin-top: var(--space-4);
+    padding-top: var(--space-3);
+    border-top: 1px solid var(--line-subtle);
+  }
+  /* The first toggle's box lines up with the slider labels above. */
+  .show .tog:first-child {
+    margin-left: calc(-1 * var(--space-2));
   }
   .tog {
     display: inline-flex;
@@ -987,7 +1076,7 @@
   /* The canvas takes the viewport minus the chrome above and below it. */
   .stage {
     position: relative;
-    height: max(360px, calc(100dvh - 220px));
+    height: var(--stage-h);
     background: var(--bg-inset);
   }
   .stage.empty {
@@ -1041,37 +1130,45 @@
     font-size: var(--type-sm-size);
     color: var(--text-secondary);
   }
-  .stage-err {
-    position: absolute;
-    left: var(--space-4);
-    right: var(--space-4);
-    bottom: var(--space-4);
+  /* A strip between the image and its caption: the image stays whole, the notice reads on the panel, not a photo. */
+  .notice {
+    padding: 0 var(--space-4);
+    border-top: 1px solid var(--line-subtle);
   }
   .need-file {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-3);
+    padding: var(--space-3) 0;
+  }
+  .need-file > :global(svg) {
+    flex-shrink: 0;
+    margin-top: 2px;
+    color: var(--text-tertiary);
+  }
+  .nf-body {
     display: grid;
-    gap: var(--space-2);
-    padding: var(--space-4);
-    border: 1px solid var(--line-default);
-    border-radius: var(--radius-md);
-    background: var(--bg-overlay);
-    box-shadow: var(--shadow-md);
+    gap: 2px;
+    min-width: 0;
   }
-  .nf-title {
-    font-weight: 600;
+  .n-title {
+    font-weight: var(--weight-medium);
   }
-  /* An error over the image gets the same card, so it reads on any photo. */
-  .err-card {
-    padding: 0 var(--space-4);
+  .n-title.bad {
+    color: var(--danger-text);
+  }
+  .n-title:focus,
+  .notice :global(.title:focus) {
+    outline: none;
   }
   .nf-text {
     color: var(--text-secondary);
-    font-size: var(--type-sm-size);
   }
   .nf-actions {
     display: flex;
     flex-wrap: wrap;
     gap: var(--space-2);
-    margin-top: var(--space-1);
+    margin-top: var(--space-2);
   }
   .drop-hint {
     position: absolute;
@@ -1098,6 +1195,16 @@
   .vfoot b {
     color: var(--text-primary);
     font-weight: var(--weight-medium);
+  }
+  .vfoot .failed {
+    min-width: 0;
+  }
+  .vfoot .failed b {
+    color: var(--danger-text);
+  }
+  .vfoot .failed .sep {
+    margin: 0 var(--space-2);
+    color: var(--text-tertiary);
   }
   .fi + .fi::before {
     content: '·';
@@ -1414,17 +1521,9 @@
       height: 44px;
     }
   }
-  @media (max-width: 1199px) {
-    .src-name,
-    .src-dims {
-      display: none;
-    }
-    .vbar-gap {
-      flex: 1;
-    }
-  }
   @media (max-width: 1023px) {
-    .layout {
+    .layout,
+    .layout.fit {
       grid-template-columns: minmax(0, 1fr);
     }
     /* One column: interleave the panels so the controls sit right under the image. */
@@ -1454,7 +1553,24 @@
     }
     .runon {
       width: calc(100vw - 2 * var(--space-4));
+      flex-wrap: wrap;
       justify-content: space-between;
+    }
+    .runon-note {
+      flex-basis: 100%;
+      text-align: right;
+    }
+    /* The ways out stack full width, the primary first, 44 px each. */
+    .notice :global(.acts),
+    .nf-actions {
+      flex-direction: column;
+      align-items: stretch;
+      gap: var(--space-2);
+    }
+    .notice :global(.acts .btn),
+    .nf-actions :global(.btn) {
+      --h: 44px;
+      width: 100%;
     }
     /* With an image the intro line is gone; the empty title row must not leave a gap above the model picker. */
     :global(.page > header:has(.model-pick.compact)) {
@@ -1471,6 +1587,7 @@
     }
     .viewer.loaded .vbar,
     .viewer.loaded .vfoot,
+    .viewer.loaded .notice,
     .viewer.loaded .pick-line,
     .viewer.loaded .qconf {
       padding-left: var(--space-4);
@@ -1493,7 +1610,7 @@
       padding-bottom: 45dvh;
     }
     .aside.tucked,
-    .vbar .toggles {
+    .vbar .src-dims {
       display: none;
     }
     .vbar .src-name {
@@ -1549,7 +1666,8 @@
       padding: 0 var(--space-3);
       border-top: 1px solid var(--line-subtle);
     }
-    .stage {
+    .stage,
+    .layout.fit .stage {
       height: auto;
       aspect-ratio: var(--ar, 4 / 3);
       max-height: 70vh;
