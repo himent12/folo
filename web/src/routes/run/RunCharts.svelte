@@ -116,6 +116,7 @@
 <div class="grid">
   <Panel title="Loss" meta={smoothing === '0' ? 'raw per step' : `smoothed · EMA ${smoothing}`} class="span2" id="chart-loss">
     {#snippet actions()}
+      <span class="ctl-label" aria-hidden="true">Smoothing</span>
       <Segmented
         size="sm"
         label="Smoothing"
@@ -216,6 +217,11 @@
 </div>
 
 <style>
+  .ctl-label {
+    font-size: var(--type-xs-size);
+    color: var(--text-tertiary);
+    margin-right: 2px;
+  }
   .bar {
     display: flex;
     justify-content: flex-end;
@@ -237,6 +243,10 @@
   @media (max-width: 767px) {
     .grid {
       grid-template-columns: minmax(0, 1fr);
+    }
+    /* Phones: the validation result first. */
+    .grid :global(#chart-map) {
+      order: -1;
     }
     .grid :global(.span2) {
       grid-column: auto;

@@ -131,7 +131,7 @@
 
   const margin = $derived.by(() => {
     const longest = Math.max(...yTickValues.map((v) => yFormat(v).length), 1);
-    const labelW = endLabels ? Math.min(120, Math.max(0, ...series.map((s) => s.label.length)) * 6.2 + 10) : 0;
+    const labelW = endLabels && width >= 560 ? Math.min(120, Math.max(0, ...series.map((s) => s.label.length)) * 6.2 + 10) : 0;
     return { top: 8, right: 12 + labelW, bottom: 22, left: Math.ceil(longest * 6.4) + 14 };
   });
 
@@ -178,21 +178,25 @@
   });
 
   /** Direct labels at each line's last point, nudged apart vertically so they never overlap. */
+  // Narrow plots keep their width for data: the legend names the lines instead.
+  const showEnds = $derived(endLabels && width >= 560);
   const ends = $derived.by(() => {
-    if (!endLabels) return [];
+    if (!showEnds) return [];
     const out = visible
       .filter((s) => !s.ghost)
       .map((s) => {
         const p = s.points[s.points.length - 1];
-        return p && Number.isFinite(p.y) ? { id: s.id, label: s.label.length > 18 ? `${s.label.slice(0, 17)}…` : s.label, color: s.color, x: x(p.x), y: y(p.y) } : null;
+        return p && Number.isFinite(p.y)
+          ? { id: s.id, label: s.label.length > 18 ? `${s.label.slice(0, 17)}…` : s.label, color: s.color, x: x(p.x), y: y(p.y), y0: y(p.y) }
+          : null;
       })
       .filter((e): e is NonNullable<typeof e> => e !== null)
       .sort((a, b) => a.y - b.y);
-    for (let i = 1; i < out.length; i++) if (out[i]!.y - out[i - 1]!.y < 12) out[i]!.y = out[i - 1]!.y + 12;
+    for (let i = 1; i < out.length; i++) if (out[i]!.y - out[i - 1]!.y < 14) out[i]!.y = out[i - 1]!.y + 14;
     // Keep the stack inside the plot: if it runs past the bottom, push it back up (still 12 px apart).
     const bottom = height - margin.bottom - 4;
     for (let i = out.length - 1; i >= 0; i--) {
-      const limit = i === out.length - 1 ? bottom : out[i + 1]!.y - 12;
+      const limit = i === out.length - 1 ? bottom : out[i + 1]!.y - 14;
       if (out[i]!.y > limit) out[i]!.y = limit;
     }
     for (const e of out) e.y = Math.max(margin.top + 4, e.y);
@@ -387,9 +391,13 @@
             <path class="line" class:dashed={s.dashed} class:ghost={s.ghost} class:emphasis={s.emphasis} {d} style:stroke={s.color} style:stroke-dasharray={dashOf(s)} />
           {/each}
 
-          {#if endLabels}
+          {#if showEnds}
             {#each ends as e (e.id)}
-              <text class="end-label" x={e.x + 6} y={e.y} dy="0.32em" style:fill={e.color}>{e.label}</text>
+              {#if Math.abs(e.y - e.y0) > 3}
+                <!-- Moved to avoid a neighbour: a short leader ties the label to its line end. -->
+                <path class="end-leader" d="M{e.x + 2},{e.y0} L{e.x + 8},{e.y}" style:stroke={e.color} />
+              {/if}
+              <text class="end-label" x={e.x + 10} y={e.y} dy="0.32em" style:fill={e.color}>{e.label}</text>
             {/each}
           {/if}
           {#each markers as m (m.label + m.x)}
@@ -528,6 +536,11 @@
   .dot {
     stroke: var(--bg-panel);
     stroke-width: 2;
+  }
+  .end-leader {
+    fill: none;
+    stroke-width: 1;
+    opacity: 0.7;
   }
   .end-label {
     font-size: 10px;

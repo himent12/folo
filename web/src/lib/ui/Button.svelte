@@ -158,7 +158,14 @@
     .btn::after {
       content: '';
       position: absolute;
-      inset: min(0px, calc((var(--h) - 44px) / 2)) min(0px, calc((var(--h) - 44px) / 4));
+      inset: min(0px, calc((var(--h) - 44px) / 2)) 0;
+    }
+    /* Icon buttons get a real 44 × 44 box (no overlapping invisible targets). */
+    .btn.square {
+      --h: 44px;
+    }
+    .btn.square::after {
+      display: none;
     }
   }
   .label {
