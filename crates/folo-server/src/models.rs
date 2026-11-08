@@ -10,7 +10,7 @@ use axum::http::StatusCode;
 use folo_api::{Arch, ExportFormat, ExportResult, Model, ModelEval, ModelMetrics, PrCurve};
 use folo_core::Device;
 use folo_data::{Dataset as _, Split};
-use folo_nn::io::{FloatDType, ModelFile, Namespace};
+use folo_nn::io::{FloatDType, Namespace};
 use folo_vision::val::{ValConfig, val_metrics, validate};
 use serde::{Deserialize, Serialize};
 
@@ -64,7 +64,7 @@ fn is_buffer(name: &str) -> bool {
 }
 
 fn read_meta(path: &Path) -> Result<FileMeta> {
-    let file = ModelFile::open(path).map_err(nn_error)?;
+    let file = engine::read_model_file(path)?;
     let m = file.metadata();
     let params = file
         .tensor_infos()
@@ -245,7 +245,7 @@ impl Models {
                 Error::not_implemented("ONNX export").hint("export to folo-f16 for FOLO's own runtime")
             );
         }
-        let file = ModelFile::open(&m.path).map_err(nn_error)?;
+        let file = engine::read_model_file(&m.path)?;
         let dir = self.data_dir.join("exports");
         std::fs::create_dir_all(&dir)
             .map_err(|e| Error::internal(format!("creating {}: {e}", dir.display())))?;
@@ -276,6 +276,17 @@ fn evaluate(path: &Path, dataset: &DatasetRef, device: Device) -> Result<ModelEv
     let opts = folo_data::OpenOptions { format: data_format(dataset.format), verify_images: true };
     let ds = folo_data::open_with(Path::new(&dataset.path), &opts)
         .map_err(|e| crate::index::data_error(e, &dataset.path))?;
+    if ds.classes != model.classes() {
+        return Err(Error::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_dataset",
+            format!(
+                "the dataset's classes {:?} are not the model's {:?} (in the same order)",
+                ds.classes,
+                model.classes()
+            ),
+        ));
+    }
     let split = if ds.val.is_empty() { Split::Train } else { Split::Val };
     let part = ds.split(split);
     if part.is_empty() {

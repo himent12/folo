@@ -379,6 +379,21 @@ async fn train_evaluate_predict_and_reload() {
     let r = json!({ "resume_run_id": tuned.id });
     err(&app, post_json("/api/runs", r), StatusCode::NOT_FOUND, "run_not_found").await;
     assert_eq!(ok::<ModelList>(&app, get("/api/models")).await.models.len(), models.models.len());
+
+    // A dataset whose classes changed order since training is not evaluated against the old labels.
+    let yaml = home.join("datasets/tiny/data.yaml");
+    let text = std::fs::read_to_string(&yaml).unwrap();
+    std::fs::write(
+        &yaml,
+        text.replace("\"circle\"", "\"tmp\"")
+            .replace("\"square\"", "\"circle\"")
+            .replace("\"tmp\"", "\"square\""),
+    )
+    .unwrap();
+    let e =
+        err(&app, get(&format!("/api/models/{model_id}/eval")), StatusCode::BAD_REQUEST, "invalid_dataset")
+            .await;
+    assert!(e.message.contains("same order"), "{}", e.message);
 }
 
 /// A `multipart/form-data` predict request.

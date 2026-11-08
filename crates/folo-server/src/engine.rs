@@ -8,6 +8,7 @@ use std::time::SystemTime;
 use axum::http::StatusCode;
 use folo_api::{GpuBackend, GpuInfo};
 use folo_core::Device;
+use folo_nn::io::{ModelFile, Purpose};
 use folo_vision::train::{can_place, place_model, resolve_device};
 use folo_vision::{FoloModel, PredictConfig, Predictor};
 
@@ -143,9 +144,27 @@ pub fn gpus() -> Vec<GpuInfo> {
     .clone()
 }
 
+/// Reads a `.folo` file into memory (never memory-mapped: on Windows a mapped file cannot be replaced, and a run's
+/// checkpoints are replaced while it trains).
+pub fn read_model_file(path: &Path) -> Result<ModelFile> {
+    let bytes = std::fs::read(path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            Error::new(
+                StatusCode::NOT_FOUND,
+                "model_not_found",
+                format!("{} no longer exists", path.display()),
+            )
+        } else {
+            Error::internal(format!("reading {}: {e}", path.display()))
+        }
+    })?;
+    ModelFile::from_bytes(bytes).map_err(nn_error)
+}
+
 /// Opens `.folo` weights for inference (EMA when present, fused, eval mode) on `device`.
 pub fn open_model(path: &Path, device: Device) -> Result<FoloModel> {
-    let mut model = FoloModel::open(path).map_err(nn_error)?;
+    let file = read_model_file(path)?;
+    let mut model = FoloModel::from_file(&file, Purpose::Inference).map_err(nn_error)?.0;
     model.fuse().map_err(nn_error)?;
     place_model(model, device).map_err(engine_error)
 }

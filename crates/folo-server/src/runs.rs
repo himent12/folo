@@ -267,7 +267,8 @@ pub fn run_model_id(run_id: &str, last: bool) -> String {
 }
 
 struct Queue {
-    ids: VecDeque<String>,
+    /// Entries, not ids: the worker never looks the registry up while it holds the queue.
+    runs: VecDeque<Arc<RunEntry>>,
     shutdown: bool,
 }
 
@@ -322,7 +323,7 @@ impl Runs {
         Arc::new(Runs {
             dir,
             list: RwLock::new(list),
-            queue: Mutex::new(Queue { ids: VecDeque::new(), shutdown: false }),
+            queue: Mutex::new(Queue { runs: VecDeque::new(), shutdown: false }),
             wake: Condvar::new(),
             active: Mutex::new(None),
             idle: Condvar::new(),
@@ -402,11 +403,11 @@ impl Runs {
         Ok(run)
     }
 
-    fn enqueue(self: &Arc<Self>, entry: &RunEntry) {
+    fn enqueue(self: &Arc<Self>, entry: &Arc<RunEntry>) {
         let ahead = {
             let mut q = self.queue.lock().unwrap();
-            q.ids.push_back(entry.id.clone());
-            q.ids.len() - 1 + usize::from(self.active.lock().unwrap().is_some())
+            q.runs.push_back(entry.clone());
+            q.runs.len() - 1 + usize::from(self.active.lock().unwrap().is_some())
         };
         entry.log(
             LogLevel::Info,
@@ -432,22 +433,21 @@ impl Runs {
         loop {
             let entry = {
                 let mut q = self.queue.lock().unwrap();
-                let id = loop {
+                let entry = loop {
                     if q.shutdown {
                         return;
                     }
-                    if let Some(id) = q.ids.pop_front() {
-                        break id;
+                    if let Some(e) = q.runs.pop_front() {
+                        break e;
                     }
                     q = self.wake.wait(q).unwrap();
                 };
-                let Ok(entry) = self.get(&id) else { continue };
                 // Set before the queue lock is released, so `enqueue` counts the runs ahead exactly.
                 *self.active.lock().unwrap() = Some(entry.clone());
                 entry
             };
-            // Lock order: a run's state before the queue (as `stop` takes them), so the queue lock is released
-            // first. A run stopped or deleted between the two is skipped.
+            // Lock order: registry, then a run's state, then the queue (as `delete` and `stop` take them); the
+            // queue lock is released first. A run stopped or deleted in between is skipped.
             {
                 let mut st = entry.state.lock().unwrap();
                 if st.file.run.status != RunStatus::Queued || st.deleted {
@@ -491,7 +491,7 @@ impl Runs {
         }
         match st.file.run.status {
             RunStatus::Queued if !st.claimed => {
-                self.queue.lock().unwrap().ids.retain(|q| q != id);
+                self.queue.lock().unwrap().runs.retain(|q| q.id != id);
                 e.finish(&mut st, RunStatus::Stopped, None);
                 let run = st.file.run.clone();
                 drop(st);
@@ -615,9 +615,12 @@ impl Runs {
     /// Subscribes to a run's events.
     pub fn subscribe(&self, id: &str) -> Result<Subscription> {
         let e = self.get(id)?;
+        // Under the state lock (which every status change holds while it sends), so the initial status and the
+        // first event received are in order.
+        let st = e.state.lock().unwrap();
         let events = e.tx.subscribe();
-        let r = e.run();
-        Ok(Subscription { initial: StatusEvent { status: r.status, error: r.error }, events })
+        let r = &st.file.run;
+        Ok(Subscription { initial: StatusEvent { status: r.status, error: r.error.clone() }, events })
     }
 
     /// The run's metric history: `metrics.jsonl` (resumed epochs replace the steps and epochs they repeat) plus the
@@ -647,18 +650,16 @@ impl Runs {
     /// Stops accepting work, stops the active run (it keeps its last checkpoint) and marks queued runs `stopped`.
     /// With `wait`, blocks until the active run has stopped (at most `wait`).
     pub fn shutdown(&self, wait: Option<Duration>) {
-        let queued: Vec<String> = {
+        let queued: Vec<Arc<RunEntry>> = {
             let mut q = self.queue.lock().unwrap();
             q.shutdown = true;
-            q.ids.drain(..).collect()
+            q.runs.drain(..).collect()
         };
         self.wake.notify_all();
-        for id in queued {
-            if let Ok(e) = self.get(&id) {
-                let mut st = e.state.lock().unwrap();
-                if st.file.run.status == RunStatus::Queued {
-                    e.finish(&mut st, RunStatus::Stopped, None);
-                }
+        for e in queued {
+            let mut st = e.state.lock().unwrap();
+            if st.file.run.status == RunStatus::Queued && !st.deleted {
+                e.finish(&mut st, RunStatus::Stopped, None);
             }
         }
         let active = self.active.lock().unwrap().clone();

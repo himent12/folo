@@ -138,7 +138,8 @@ Non-2xx responses: `{ "error": { "code": "dataset_not_found", "message": "...", 
   counts false positives predicted as `c`, and `confusion[n][n]` is always 0.
   In real mode the model's dataset is its run's (the registered copy while it is registered, else the path the run
   trained on); a model from the models folder is evaluated on the first registered dataset with exactly its classes
-  (`404 dataset_not_found` when there is none). Computed with folo-vision's validator (docs/METRICS.md; MODEL.md
+  (`404 dataset_not_found` when there is none); `400 invalid_dataset` when the dataset's classes (names, in order)
+  are no longer the model's. Computed with folo-vision's validator (docs/METRICS.md; MODEL.md
   §8.7 settings: `conf 0.001`, `iou 0.7`, the model's `imgsz`) on the server's `--device`, then cached (in memory and
   in `cache/eval/<model id>.json`) until the weights file or the dataset's files change. `pr` has curves for the
   classes with ground truth.
