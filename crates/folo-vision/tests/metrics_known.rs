@@ -219,6 +219,34 @@ fn max_dets_per_class_cap() {
 }
 
 #[test]
+fn coco_compatible_area_range() {
+    // An ignored truth (area 1.00001e10 > 1e5²) listed first, a regular one, and a prediction of area exactly 1e10
+    // (inside the range) that overlaps the ignored truth better (IoU 0.99999 vs 0.9999).
+    let truths = [gt(0., 0., 100000., 100001., 0), gt(0., 0., 99990., 100000., 0)];
+    let big = det(0., 0., 100000., 100000., 0.9, 0);
+    // pycocotools matches it to the regular truth anyway (ignored truths are scanned last and only taken when nothing
+    // regular matched): one TP of one counted truth, AP 1. A second identical prediction takes the ignored truth and
+    // is neither TP nor FP; an unmatched inverted prediction (negative area) is ignored too. AP stays 1.
+    let preds = [big, Detection { score: 0.8, ..big }, det(10., 10., 5., 20., 0.85, 0)];
+    let mut ev = Evaluator::with_config(1, EvalConfig::coco());
+    ev.add_image(&preds, &truths);
+    let r = ev.compute();
+    assert!(close(r.map50_95, 1.0), "{}", r.map50_95);
+    assert_eq!(r.per_class[0].truths, 1);
+    assert!(close(r.precision, 1.0) && close(r.recall, 1.0));
+    // A class whose only truths are ignored is not evaluated.
+    let mut ev = Evaluator::with_config(2, EvalConfig::coco());
+    ev.add_image(&[det(0., 0., 10., 10., 0.9, 1)], &[gt(0., 0., 1e6, 1e6, 1), gt(0., 0., 10., 10., 0)]);
+    assert_eq!(ev.compute().per_class.iter().map(|c| c.class).collect::<Vec<_>>(), vec![0]);
+
+    // Default mode: both truths count. TP, TP (IoU >= 0.9999), FP (the inverted box): ranks TP, FP, TP → the
+    // TP/FP/TP answer.
+    let mut ev = Evaluator::new(1);
+    ev.add_image(&preds, &truths);
+    assert!(close(ev.compute().map50_95, AP_TP_FP_TP));
+}
+
+#[test]
 fn confusion_matrix() {
     let mut ev = Evaluator::new(2);
     ev.add_image(
