@@ -57,6 +57,28 @@ export const scenes = [
       await page.getByText('Mosaic', { exact: true }).first().hover();
     },
   },
+  {
+    // Up to 1199 px the dock's estimate opens the run summary as a dialog (a bottom sheet on phones).
+    name: 'run-new-summary',
+    fullPage: false,
+    path: '/runs/new',
+    viewports: ['laptop', 'mobile'],
+    setup: async (page) => {
+      await until(page, '.dock-est');
+      await page.locator('.dock-est').click();
+      await page.locator('dialog[open]').waitFor();
+    },
+  },
+  {
+    name: 'run-new-aug-open',
+    path: '/runs/new',
+    themes: ['dark'],
+    viewports: ['laptop'],
+    setup: async (page) => {
+      await until(page, '.aug-toggle');
+      await page.locator('.aug-toggle').click();
+    },
+  },
   { name: 'run-compare', path: '/runs/compare?ids=run_7d1e,run_c19a,run_5be3,run_a2f0', viewports: ['desktop', 'mobile'] },
   { name: 'run-compare-empty', path: '/runs/compare', themes: ['dark'], viewports: ['desktop'] },
   { name: 'run-queued', path: '/runs/run_q4n2', themes: ['dark'], viewports: ['desktop'] },
@@ -78,6 +100,27 @@ export const scenes = [
     setup: async (page) => {
       await page.locator('.cell img.loaded').nth(6).waitFor();
       await page.waitForTimeout(400);
+    },
+  },
+  {
+    name: 'dataset-plain',
+    path: '/datasets/ds_fasteners',
+    fullPage: false,
+    setup: async (page) => {
+      await page.locator('.cell img.loaded').nth(6).waitFor();
+      await page.waitForTimeout(400);
+    },
+  },
+  {
+    // Phones: boxes and thumbnail size live behind the toolbar's Display button.
+    name: 'dataset-display',
+    path: '/datasets/ds_fasteners?class=2',
+    fullPage: false,
+    viewports: ['mobile'],
+    setup: async (page) => {
+      await page.locator('.cell img.loaded').first().waitFor();
+      await page.getByRole('button', { name: 'Display options' }).click();
+      await page.waitForTimeout(200);
     },
   },
   {
