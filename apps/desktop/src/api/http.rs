@@ -73,7 +73,9 @@ impl HttpBackend {
 
     fn unreachable(&self, e: &ureq::Error) -> ApiError {
         ApiError::new("server_unreachable", format!("Could not reach folo serve at {}", self.host()))
-            .with_hint(format!("Start it with `folo serve`, or switch to mock data in Settings. ({e})"))
+            .with_hint(format!(
+                "Start it with `folo serve`, or switch to the built-in demo in Settings. ({e})"
+            ))
     }
 
     fn host(&self) -> String {

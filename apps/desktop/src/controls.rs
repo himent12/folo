@@ -285,6 +285,89 @@ impl FoloApp {
             .into_any_element()
     }
 
+    /// An info glyph that explains a control: tooltip on hover, and a Tab stop that shows the same
+    /// text in a popover while keyboard-focused.
+    pub fn help_icon(
+        &self,
+        key: &str,
+        help: &'static str,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = theme(cx);
+        let fh = self.fh(key.to_string(), cx);
+        let shown = self.ring(&fh, window);
+        let el = div()
+            .id(SharedString::from(key.to_string()))
+            .relative()
+            .size(px(20.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(radius::SM))
+            .cursor_default()
+            .hover(|s| s.bg(t.bg_hover))
+            .tooltip(tip(help, None))
+            .child(icon("icons/info.svg", 12., t.text_tertiary))
+            .when(shown, |d| {
+                d.child(
+                    gpui::deferred(
+                        div()
+                            .absolute()
+                            .top(px(24.))
+                            .left(px(-8.))
+                            .w(px(260.))
+                            .p(px(8.))
+                            .rounded(px(radius::MD))
+                            .bg(t.bg_overlay)
+                            .border_1()
+                            .border_color(t.line_default)
+                            .shadow(t.shadow_md())
+                            .child(text(ty::SM, t.text_primary).child(help)),
+                    )
+                    .with_priority(1),
+                )
+            });
+        self.bind(el, key, radius::SM, window, cx, std::rc::Rc::new(|_, _, _| {})).into_any_element()
+    }
+
+    /// A scroll thumb for a scroll container: drawn from its handle, draggable, and a click on
+    /// the track jumps there. Place it after the container inside a relative parent.
+    pub fn scrollbar(&self, handle: gpui::ScrollHandle, cx: &mut Context<Self>) -> AnyElement {
+        let t = theme(cx);
+        let paint = handle.clone();
+        let hot = self.scroll_drag.as_ref().is_some_and(|(h, _, _)| h.bounds() == handle.bounds());
+        div()
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .right_0()
+            .w(px(12.))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, ev: &gpui::MouseDownEvent, _, cx| {
+                    let Some(g) = crate::ui::ThumbGeo::of(&handle) else { return };
+                    if ev.position.y < g.y || ev.position.y > g.y + g.thumb {
+                        // Track click: centre the thumb on the pointer.
+                        let travel = (g.h - g.thumb).max(px(1.));
+                        let at = ((ev.position.y - g.top - g.thumb / 2.) / travel).clamp(0., 1.);
+                        handle.set_offset(gpui::point(handle.offset().x, -(g.max * at)));
+                    }
+                    this.scroll_drag = Some((handle.clone(), ev.position.y, -handle.offset().y));
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            )
+            .child(
+                gpui::canvas(
+                    |_, _, _| (),
+                    move |_, _, window, _| crate::ui::paint_thumb(&t, &paint, hot, window),
+                )
+                .size_full(),
+            )
+            .into_any_element()
+    }
+
     /// A segmented control. Arrow keys move the selection while it has focus.
     pub fn segmented(
         &self,
@@ -568,6 +651,9 @@ impl FoloApp {
                         .border_2()
                         .border_color(t.accent_fill())
                         .shadow(t.shadow_sm())
+                        .hover(|s| {
+                            s.shadow(t.shadow_md()).bg(crate::theme::over(gpui::white(), t.accent_muted))
+                        })
                         .when(ring, |d| d.child(focus_ring(&t, 7.))),
                 ),
             )
@@ -596,7 +682,11 @@ impl FoloApp {
                         "nr-mosaic" => f.mosaic = q(frac, 0.05),
                         "nr-mixup" => f.mixup = q(frac * 0.5, 0.05),
                         "nr-fliplr" => f.fliplr = q(frac, 0.05),
-                        "nr-close" => f.close_mosaic = q(frac * 30., 1.),
+                        "nr-close" => {
+                            f.close_mosaic = q(frac * 30., 1.);
+                            let (input, v) = (f.close_input.clone(), format!("{:.0}", f.close_mosaic));
+                            input.update(cx, |i, cx| i.set_text(v, cx));
+                        }
                         "nr-scale" => f.scale = q(frac * 0.9, 0.05),
                         _ => {}
                     }

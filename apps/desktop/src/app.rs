@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::sync::mpsc::TryRecvError;
 use std::time::Duration;
 
+use gpui::point;
 use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, App, AppContext, Bounds, Context, Entity, FocusHandle, Focusable, FontWeight,
@@ -194,6 +195,8 @@ pub struct NewRunForm {
     pub lr_input: Entity<TextInput>,
     pub epochs_invalid: bool,
     pub lr_invalid: bool,
+    pub close_input: Entity<TextInput>,
+    pub close_invalid: bool,
     _subs: Vec<Subscription>,
     pub submitting: bool,
     pub error: Option<ApiError>,
@@ -280,6 +283,8 @@ pub struct FoloApp {
     /// The last input came from the keyboard, so focus rings are shown.
     pub kb: bool,
     pub page_scroll: ScrollHandle,
+    /// A scroll thumb being dragged: its container, the pointer's start y and the start offset.
+    pub scroll_drag: Option<(ScrollHandle, Pixels, Pixels)>,
     pub play_side_scroll: ScrollHandle,
     pub dialog_scroll: ScrollHandle,
 
@@ -316,11 +321,15 @@ pub struct FoloApp {
     pub sample_view: SampleView,
     pub loss_parts: [bool; 4],
     pub log_scroll: ScrollHandle,
+    /// Log lines on screen at the last render (new ones scroll into view while following).
+    pub log_seen: usize,
     pub sample_epoch: Option<u32>,
 
     // Models
     pub export_open: bool,
     pub pr_hover: Option<f32>,
+    /// The class isolated on the PR chart (hovered or focused in the per-class table).
+    pub pr_focus: Option<u32>,
     pub confusion_norm: bool,
 
     // Playground
@@ -361,6 +370,10 @@ pub struct FoloApp {
     pub toasts: Vec<Toast>,
     /// The toast under the pointer (its expiry waits).
     pub toast_hover: Option<u64>,
+    /// Older toasts shown instead of folded.
+    pub toasts_expanded: bool,
+    /// The toast whose action or close button has keyboard focus (its expiry waits too).
+    pub toast_focus: Option<u64>,
     toast_seq: u64,
     pub menu_open: Option<&'static str>,
     /// Highlighted option in the open select (committed with Enter).
@@ -388,6 +401,8 @@ pub struct FoloApp {
 
 impl FoloApp {
     pub fn new(api: Arc<dyn Backend>, frozen: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let calm = crate::ui::os_prefers_reduced_motion();
+        crate::ui::set_reduce_motion(calm);
         let root_focus = cx.focus_handle();
         window.focus(&root_focus);
         let server_url = cx.new(|cx| {
@@ -406,6 +421,7 @@ impl FoloApp {
             focus: RefCell::new(HashMap::new()),
             kb: false,
             page_scroll: ScrollHandle::new(),
+            scroll_drag: None,
             play_side_scroll: ScrollHandle::new(),
             dialog_scroll: ScrollHandle::new(),
             ds_tab: DsTab::Images,
@@ -413,7 +429,7 @@ impl FoloApp {
             ds_class: None,
             ds_empty_only: false,
             ds_boxes: true,
-            ds_fill: false,
+            ds_fill: true,
             ds_split_counts: RefCell::new(None),
             ds_tile: 168.,
             ds_filter_cache: RefCell::new(None),
@@ -430,9 +446,11 @@ impl FoloApp {
             sample_view: SampleView::Predictions,
             loss_parts: [true, true, true, true],
             log_scroll: ScrollHandle::new(),
+            log_seen: 0,
             sample_epoch: None,
             export_open: false,
             pr_hover: None,
+            pr_focus: None,
             confusion_norm: true,
             play_model: None,
             play_conf: 0.25,
@@ -453,12 +471,15 @@ impl FoloApp {
             spawn_server: true,
             server_proc: None,
             connecting: None,
-            reduce_motion: false,
+            // Follow the OS animation setting until the user picks in Settings.
+            reduce_motion: calm,
             palette: None,
             new_run: None,
             confirm_stop: None,
             toasts: Vec::new(),
             toast_hover: None,
+            toasts_expanded: false,
+            toast_focus: None,
             toast_seq: 0,
             menu_open: None,
             menu_hl: 0,
@@ -967,7 +988,9 @@ impl FoloApp {
             cx.spawn(async move |this, cx| {
                 cx.background_executor().timer(Duration::from_millis(4200)).await;
                 loop {
-                    let hovered = this.update(cx, |this, _| this.toast_hover == Some(id)).unwrap_or(false);
+                    let hovered = this
+                        .update(cx, |this, _| this.toast_hover == Some(id) || this.toast_focus == Some(id))
+                        .unwrap_or(false);
                     if !hovered {
                         break;
                     }
@@ -1076,6 +1099,8 @@ impl FoloApp {
             f.optimizer = OPTIMIZERS.iter().position(|o| *o == config.optimizer).unwrap_or(0);
             f.lr0 = config.lr0;
             let (ei, li) = (f.epochs_input.clone(), f.lr_input.clone());
+            let (ci, cv) = (f.close_input.clone(), config.augment.close_mosaic.to_string());
+            ci.update(cx, |i, cx| i.set_text(cv, cx));
             let (ev, lv) = (config.epochs.to_string(), format!("{}", config.lr0));
             ei.update(cx, |i, cx| i.set_text(ev, cx));
             li.update(cx, |i, cx| i.set_text(lv, cx));
@@ -1121,7 +1146,25 @@ impl FoloApp {
             i.set_text("0.010", cx);
             i
         });
+        let close_input = cx.new(|cx| {
+            let mut i = TextInput::new("10", cx);
+            i.set_text("10", cx);
+            i
+        });
         let subs = vec![
+            cx.subscribe(&close_input, |this: &mut Self, _, ev: &InputEvent, cx| {
+                let InputEvent::Changed(s) = ev;
+                if let Some(f) = this.new_run.as_mut() {
+                    match s.trim().parse::<u32>().ok().filter(|v| (*v as f32) <= f.epochs) {
+                        Some(v) => {
+                            f.close_mosaic = v as f32;
+                            f.close_invalid = false;
+                        }
+                        None => f.close_invalid = true,
+                    }
+                    cx.notify();
+                }
+            }),
             cx.subscribe(&epochs_input, |this: &mut Self, _, ev: &InputEvent, cx| {
                 let InputEvent::Changed(s) = ev;
                 if let Some(f) = this.new_run.as_mut() {
@@ -1168,6 +1211,8 @@ impl FoloApp {
             base: None,
             epochs_input,
             lr_input,
+            close_input,
+            close_invalid: false,
             epochs_invalid: false,
             lr_invalid: false,
             _subs: subs,
@@ -1180,7 +1225,7 @@ impl FoloApp {
 
     pub fn submit_new_run(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(form) = self.new_run.as_mut() else { return };
-        if form.submitting || form.epochs_invalid || form.lr_invalid {
+        if form.submitting || form.epochs_invalid || form.lr_invalid || form.close_invalid {
             return;
         }
         let Some(ds) = self.store.datasets.ready().and_then(|d| d.get(form.dataset)).cloned() else { return };
@@ -1491,6 +1536,16 @@ impl FoloApp {
     // ---------- sliders ----------
 
     pub fn on_drag_move(&mut self, ev: &MouseMoveEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        // A scroll thumb being dragged: move the content by the thumb's travel ratio.
+        if let Some((handle, y0, off0)) = self.scroll_drag.as_ref() {
+            if let Some(g) = crate::ui::ThumbGeo::of(handle) {
+                let travel = (g.h - g.thumb).max(px(1.));
+                let to = (*off0 + (ev.position.y - *y0) * (g.max / travel)).clamp(px(0.), g.max);
+                handle.set_offset(point(handle.offset().x, -to));
+                cx.notify();
+            }
+            return;
+        }
         let Some(drag) = self.drag.as_ref() else { return };
         let Some(b) = self.slider_bounds.borrow().get(drag.id).copied() else { return };
         let frac = ((ev.position.x - b.left()) / b.size.width).clamp(0.0, 1.0);
@@ -1499,6 +1554,9 @@ impl FoloApp {
     }
 
     fn on_drag_end(&mut self, _: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.scroll_drag.take().is_some() {
+            cx.notify();
+        }
         if let Some(d) = self.drag.take() {
             if d.id == "play-iou" {
                 self.run_predict(cx);
@@ -1823,22 +1881,24 @@ impl FoloApp {
         let ring = self.ring(&fh, window);
         let map = r.best.as_ref().map_or("–".to_string(), |b| f3(b.map50_95));
         let id2 = id.clone();
+        // A single footer row: the nav badge already says a run is live, so this only names it.
+        let _ = map;
         div()
             .id("live-mini")
             .track_focus(&fh)
             .relative()
             .mx(px(8.))
-            .mb(px(8.))
-            .p(px(12.))
+            .mb(px(6.))
+            .h(px(36.))
+            .px(px(10.))
             .flex()
             .flex_col()
-            .gap(px(10.))
-            .rounded(px(8.))
-            .bg(t.bg_raised)
-            .border_1()
-            .border_color(t.line_subtle)
+            .justify_center()
+            .gap(px(6.))
+            .rounded(px(crate::theme::radius::MD))
             .cursor_pointer()
-            .hover(|s| s.border_color(t.line_default))
+            .hover(|s| s.bg(t.bg_hover))
+            .tooltip(crate::controls::tip(format!("{} · epoch {} / {}", r.name, r.epoch, r.epochs), None))
             .on_click(cx.listener(move |this, _, w, cx| this.navigate(Route::Run(id.clone()), w, cx)))
             .on_key_down(cx.listener(move |this, ev: &gpui::KeyDownEvent, w, cx| {
                 if matches!(ev.keystroke.key.as_str(), "enter" | "space") {
@@ -1846,37 +1906,20 @@ impl FoloApp {
                     cx.stop_propagation();
                 }
             }))
-            .when(ring, |d| d.child(focus_ring(&t, 8.)))
+            .when(ring, |d| d.child(focus_ring(&t, crate::theme::radius::MD)))
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap(px(8.))
                     .child(dot(t.accent_fill(), 6., true, "mini"))
-                    .child(text(ty::XS, t.accent_text).font_weight(FontWeight::MEDIUM).child("Training"))
+                    .child(text(ty::SM, t.text_primary).w(px(140.)).truncate().child(r.name.clone()))
                     .child(div().flex_1())
                     .child(
-                        text(ty::XS, t.text_tertiary).tnum().child(format!("{:.0}%", r.progress() * 100.0)),
+                        text(ty::XS, t.text_secondary).tnum().child(format!("{:.0}%", r.progress() * 100.0)),
                     ),
             )
-            .child(
-                text(ty::BASE, t.text_primary)
-                    .font_weight(FontWeight::MEDIUM)
-                    .truncate()
-                    .child(r.name.clone()),
-            )
-            .child(progress(&t, r.progress(), t.accent_fill(), 3.))
-            .child(
-                div()
-                    .flex()
-                    .justify_between()
-                    .child(
-                        text(ty::XS, t.text_tertiary)
-                            .tnum()
-                            .child(format!("Epoch {} / {}", r.epoch, r.epochs)),
-                    )
-                    .child(text(ty::XS, t.text_secondary).tnum().child(format!("mAP50-95 {map}"))),
-            )
+            .child(progress(&t, r.progress(), t.accent_fill(), 2.))
             .into_any_element()
     }
 
@@ -2164,7 +2207,7 @@ impl FoloApp {
         }
         if let Some(f) = &self.new_run
             && self.confirm_stop.is_none()
-            && [&f.name, &f.epochs_input, &f.lr_input]
+            && [&f.name, &f.epochs_input, &f.lr_input, &f.close_input]
                 .iter()
                 .any(|i| i.read(cx).focus_handle(cx).is_focused(window))
         {
@@ -2373,7 +2416,13 @@ impl FoloApp {
     }
 
     /// A page frame: scrollable column with the standard gutter and an optional header.
-    pub fn page_frame(&self, t: &Theme, header: impl IntoElement, body: impl IntoElement) -> AnyElement {
+    pub fn page_frame(
+        &self,
+        t: &Theme,
+        header: impl IntoElement,
+        body: impl IntoElement,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         div()
             .relative()
             .size_full()
@@ -2399,7 +2448,7 @@ impl FoloApp {
                     )
                     .child(div().absolute().top_0().left_0().right_0().h(px(1.)).bg(alpha(t.bg_app, 0.0))),
             )
-            .child(crate::ui::scrollbar(t, self.page_scroll.clone()))
+            .child(self.scrollbar(self.page_scroll.clone(), cx))
             .into_any_element()
     }
 }

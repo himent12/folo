@@ -20,16 +20,19 @@ impl FoloApp {
         let header = page_header(&t, "Settings", "Connection, appearance and keyboard shortcuts.", vec![]);
         let row = |title: &str, help: AnyElement, control: AnyElement| {
             div()
+                .w_full()
                 .flex()
                 .items_center()
                 .justify_between()
                 .gap(px(24.))
                 .px(px(16.))
-                .py(px(14.))
+                .py(px(16.))
                 .border_b_1()
                 .border_color(t.line_subtle)
+                // Label and description take the slack (and wrap); every control ends on the same edge.
                 .child(
                     div()
+                        .flex_1()
                         .flex()
                         .flex_col()
                         .gap(px(2.))
@@ -41,7 +44,7 @@ impl FoloApp {
                         )
                         .child(help),
                 )
-                .child(div().flex_none().child(control))
+                .child(div().flex_none().flex().justify_end().child(control))
         };
         let help = |s: &str| text(ty::SM, t.text_tertiary).child(s.to_string()).into_any_element();
         let mode_sel = if self.server_mode == ServerMode::Mock { 0 } else { 1 };
@@ -64,7 +67,7 @@ impl FoloApp {
         let url_ring = self.ring(&url_fh, window);
         let url = div()
             .relative()
-            .w(px(280.))
+            .w(px(232.))
             .h(px(32.))
             .px(px(10.))
             .flex()
@@ -123,6 +126,8 @@ impl FoloApp {
             ),
         };
         let connection = panel(&t)
+            .flex()
+            .flex_col()
             .overflow_hidden()
             .child(panel_header(&t, "Connection").child(status))
             .child(row(
@@ -178,6 +183,8 @@ impl FoloApp {
             }),
         );
         let appearance = panel(&t)
+            .flex()
+            .flex_col()
             .overflow_hidden()
             .child(panel_header(&t, "Appearance"))
             .child(row(
@@ -197,42 +204,50 @@ impl FoloApp {
                 motion.into_any_element(),
             ));
 
-        let shortcuts: [(&str, &[&str]); 12] = [
+        let actions: [(&str, &[&str]); 7] = [
             ("Command palette", &["Ctrl", "K"]),
             ("New run", &["Ctrl", "N"]),
             ("Open image", &["Ctrl", "O"]),
+            ("Switch theme", &["Ctrl", "Shift", "L"]),
+            ("Back", &["Alt", "←"]),
+            ("Close / back", &["Esc"]),
+            ("Start training (in the dialog)", &["Ctrl", "Enter"]),
+        ];
+        let go_to: [(&str, &[&str]); 6] = [
             ("Overview", &["Ctrl", "1"]),
             ("Datasets", &["Ctrl", "2"]),
             ("Runs", &["Ctrl", "3"]),
             ("Models", &["Ctrl", "4"]),
             ("Playground", &["Ctrl", "5"]),
-            ("Settings", &["Ctrl", ","]),
-            ("Back", &["Alt", "←"]),
-            ("Close / back", &["Esc"]),
-            ("Start training (in the dialog)", &["Ctrl", "Enter"]),
+            ("Settings", &["Ctrl", "Comma"]),
         ];
-        let half = shortcuts.len().div_ceil(2);
-        let col = |items: &[(&str, &[&str])]| {
-            div().flex_1().flex().flex_col().children(items.iter().map(|(name, keys)| {
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .h(px(36.))
-                    .border_b_1()
-                    .border_color(t.line_subtle)
-                    .child(text(ty::SM, t.text_secondary).child(name.to_string()))
-                    .child(shortcut(&t, keys))
-            }))
+        let col = |title: &str, items: &[(&str, &[&str])]| {
+            div()
+                .flex_1()
+                .flex()
+                .flex_col()
+                .child(div().pt(px(4.)).pb(px(6.)).child(overline(&t, title)))
+                .children(items.iter().map(|(name, keys)| {
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .h(px(36.))
+                        .border_b_1()
+                        .border_color(t.line_subtle)
+                        .child(text(ty::SM, t.text_secondary).child(name.to_string()))
+                        .child(shortcut(&t, keys))
+                }))
         };
-        let keys = panel(&t).child(panel_header(&t, "Keyboard")).child(
+        let keys = panel(&t).flex().flex_col().child(panel_header(&t, "Keyboard")).child(
             div()
                 .flex()
                 .gap(px(32.))
                 .px(px(16.))
+                .pt(px(8.))
                 .pb(px(8.))
-                .child(col(&shortcuts[..half]))
-                .child(col(&shortcuts[half..])),
+                .child(col("Actions", &actions))
+                .child(col("Go to", &go_to)),
         );
 
         let about = panel(&t).child(
@@ -252,35 +267,17 @@ impl FoloApp {
                     ),
             ),
         );
-        let wide = f32::from(window.viewport_size().width) >= 1400.;
-        let body = if wide {
-            div()
-                .flex()
-                .items_start()
-                .gap(px(16.))
-                .w_full()
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .gap(px(16.))
-                        .child(connection)
-                        .child(appearance),
-                )
-                .child(div().w(px(440.)).flex_none().flex().flex_col().gap(px(16.)).child(keys).child(about))
-        } else {
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(16.))
-                .w_full()
-                .child(connection)
-                .child(appearance)
-                .child(keys)
-                .child(about)
-        };
-        self.page_frame(&t, header, body)
+        // A readable column, left-aligned: labels stay near their controls at any window width.
+        let body = div()
+            .flex()
+            .flex_col()
+            .gap(px(16.))
+            .w_full()
+            .max_w(px(760.))
+            .child(connection)
+            .child(appearance)
+            .child(keys)
+            .child(about);
+        self.page_frame(&t, header, body, cx)
     }
 }

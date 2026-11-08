@@ -1,7 +1,6 @@
 //! Overview: the live run, the machine, recent runs, best models and datasets at a glance.
 
 use std::rc::Rc;
-use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
@@ -13,7 +12,7 @@ use super::*;
 use crate::api::time;
 use crate::api::{Run, RunStatus};
 use crate::app::{FoloApp, Route, act};
-use crate::charts::{LineChart, Series, line_chart, sparkline_in};
+use crate::charts::{LineChart, Series, line_chart};
 use crate::controls::Btn;
 use crate::store::Load;
 use crate::theme::{radius, theme, ty};
@@ -38,7 +37,8 @@ impl FoloApp {
                 };
                 format!("{d} datasets · {m} models · {live}")
             }
-            _ if self.store.runs.error().is_some() => "Server unreachable".to_string(),
+            // The error panel below says it; the subtitle doesn't repeat it.
+            _ if self.store.runs.error().is_some() => String::new(),
             _ => "Loading…".to_string(),
         };
         // Training needs a server and a dataset; until then the action explains itself instead.
@@ -86,35 +86,24 @@ impl FoloApp {
             && self.store.models.ready().is_some_and(|m| m.is_empty());
         // First run: the getting-started panel owns the only call to action.
         let actions = if nothing_yet { Vec::new() } else { actions };
-        let header = page_header(
-            &t,
-            "Overview",
-            text(ty::BASE, if self.store.runs.error().is_some() { t.danger_text } else { t.text_secondary })
-                .child(subtitle),
-            actions,
-        );
+        let header = page_header(&t, "Overview", text(ty::BASE, t.text_secondary).child(subtitle), actions);
 
         if let Some(e) = self.store.runs.error().cloned() {
             let err = self.error_panel(&e, "ov-retry", window, cx);
-            return self.page_frame(&t, header, err);
+            return self.page_frame(&t, header, err, cx);
         }
 
         if nothing_yet {
             let body = self.getting_started(window, cx);
-            return self.page_frame(&t, header, body);
+            return self.page_frame(&t, header, body, cx);
         }
         let live = self.store.live_run().cloned();
         let hero = match &live {
             Some(r) => self.live_panel(r, window, cx),
             None => self.idle_panel(window, cx),
         };
-        // Below this the System column would squeeze the training charts; it becomes a strip.
-        let narrow = window.viewport_size().width < px(1360.);
-        let (system, strip) = if narrow {
-            (div().into_any_element(), Some(self.system_strip(cx)))
-        } else {
-            (self.system_panel(cx), None)
-        };
+        // With a live run the machine sits in the hero's footer; otherwise a slim strip says it.
+        let strip = if live.is_none() { Some(self.system_strip(cx)) } else { None };
         let recent = self.recent_runs(window, cx);
         let models = self.top_models(window, cx);
         let datasets = self.dataset_strip(window, cx);
@@ -122,13 +111,7 @@ impl FoloApp {
             .flex()
             .flex_col()
             .gap(px(16.))
-            .child(
-                div()
-                    .flex()
-                    .gap(px(16.))
-                    .child(div().flex_1().min_w_0().flex().child(hero))
-                    .when(!narrow, |d| d.child(div().w(px(SIDE_W)).flex_none().flex().child(system))),
-            )
+            .child(div().flex().child(hero))
             .when_some(strip, |d, s| d.child(s))
             // Narrow windows stack the two lists full width rather than squeeze the runs table.
             .map(|d| {
@@ -136,14 +119,16 @@ impl FoloApp {
                     d.child(div().flex().child(recent)).child(div().flex().child(models))
                 } else {
                     d.child(
-                        div().flex().gap(px(16.)).child(div().flex_1().min_w_0().flex().child(recent)).child(
-                            div().w(px(if narrow { 380. } else { SIDE_W })).flex_none().flex().child(models),
-                        ),
+                        div()
+                            .flex()
+                            .gap(px(16.))
+                            .child(div().flex_1().min_w_0().flex().child(recent))
+                            .child(div().w(px(SIDE_W + 40.)).flex_none().flex().child(models)),
                     )
                 }
             })
             .child(datasets);
-        self.page_frame(&t, header, body)
+        self.page_frame(&t, header, body, cx)
     }
 
     fn live_panel(&mut self, r: &Run, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -179,7 +164,7 @@ impl FoloApp {
             .and_then(|l| l.ready())
             .map(|d| (d.derived(), d.last_step().cloned(), d.last_epoch().cloned()));
         let best = r.best;
-        let (charts, ips, map_now) = match data {
+        let (chart, legend_el, ips, map_now) = match data {
             Some((d, step, epoch)) => {
                 let hover = self.chart_hover;
                 let on_hover: crate::charts::HoverFn = {
@@ -195,24 +180,7 @@ impl FoloApp {
                     })
                 };
                 let total = r.epochs as f32;
-                let mut loss = LineChart::new(
-                    "ov-loss",
-                    vec![
-                        Series::new("total", t.loss_colors()[3], d.loss[3].clone())
-                            .smooth(0.92)
-                            .area()
-                            .live(true),
-                    ],
-                );
-                loss.x_range = Some((0., total));
-                loss.x_int = true;
-                let loss_max = d.loss[3].iter().map(|p| p.1).fold(0f32, f32::max);
-                loss.y_range = Some((0., crate::charts::nice_ceil((loss_max * 1.05).max(0.1), 3)));
-                loss.height = hero_h;
-                loss.hover = hover;
-                loss.on_hover = Some(on_hover.clone());
-                loss.x_name = "epoch";
-                loss.value_fmt = Some(|v| format!("{v:.3}"));
+                // One chart here: validation mAP is what a glance needs; loss lives on the dashboard.
                 let mut map = LineChart::new(
                     "ov-map",
                     vec![
@@ -223,142 +191,247 @@ impl FoloApp {
                 map.x_range = Some((0., total));
                 map.x_int = true;
                 map.y_range = Some((0., 1.));
-                map.height = hero_h;
+                map.y_ticks = 2;
+                map.height = hero_h + 48.;
                 map.hover = hover;
                 map.on_hover = Some(on_hover);
                 map.x_name = "epoch";
-                map.value_fmt = Some(|v| format!("{v:.3}"));
-                let charts = div()
+                map.readout = false;
+                map.future = Some((
+                    r.epoch as f32,
+                    r.eta_s.map_or("remaining".into(), |s| format!("ETA {}", time::duration(s)).into()),
+                ));
+                if let Some(b) = &best {
+                    map.dots.push((b.epoch as f32, b.map50_95, t.accent_fill()));
+                }
+                let v = |pts: &[(f32, f32)]| {
+                    crate::charts::value_at(pts, hover, 0., total).map(|x| format!("{x:.3}"))
+                };
+                let legend_el = div()
                     .flex()
-                    .gap(px(16.))
-                    .child(chart_block(&t, "Training loss", "total · smoothed", None, line_chart(&t, loss)))
-                    .child(chart_block(
-                        &t,
-                        "Validation mAP",
-                        "",
-                        Some(legend(&t, &[("mAP50-95", t.chart_series[0]), ("mAP50", t.chart_series[1])])),
-                        line_chart(&t, map),
-                    ))
+                    .items_center()
+                    .gap(px(12.))
+                    .child(crate::ui::legend_value(&t, "mAP50-95", t.chart_series[0], false, v(&d.map50_95)))
+                    .child(crate::ui::legend_value(&t, "mAP50", t.chart_series[1], false, v(&d.map50)))
                     .into_any_element();
-                (charts, step.map(|s| s.imgs_per_s), epoch.map(|e| e.val.map50_95))
+                (line_chart(&t, map), legend_el, step.map(|s| s.imgs_per_s), epoch.map(|e| e.val.map50_95))
             }
-            None => (div().h(px(150.)).child(skeleton(&t, "ov-charts")).into_any_element(), None, None),
+            None => (
+                div().h(px(hero_h + 48.)).child(skeleton(&t, "ov-charts")).into_any_element(),
+                div().into_any_element(),
+                None,
+                None,
+            ),
         };
         let eta_s = r.eta_s;
-        let best_line =
-            best.map(|b| format!("best {} · epoch {}", f3(b.map50_95), b.epoch)).unwrap_or_default();
-        panel(&t)
-            .flex_1()
+        let best_line = best.map(|b| format!("best {} @ {}", f3(b.map50_95), b.epoch)).unwrap_or_default();
+        let kpi = |label: &str, value: AnyElement, detail: Option<String>| {
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(4.))
+                .min_w_0()
+                .child(caption(&t, label))
+                .child(value)
+                .when_some(detail, |d, s| d.child(text(ty::XS, t.text_tertiary).tnum().child(s)))
+        };
+        let kpis = div()
+            .w(px(220.))
+            .flex_none()
             .flex()
             .flex_col()
-            .p(px(16.))
             .gap(px(16.))
             .child(
                 div()
                     .flex()
-                    .items_start()
-                    .justify_between()
-                    .gap(px(12.))
+                    .gap(px(16.))
                     .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(4.))
-                            .min_w_0()
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(10.))
-                                    .child(status_badge(&t, r.status, &r.id))
-                                    .child(text(ty::LG, t.text_primary).truncate().child(r.name.clone())),
+                        div().flex_1().child(kpi(
+                            "Epoch",
+                            metric(&t, r.epoch.to_string(), &format!("/ {}", r.epochs), ty::X2XL, ty::SM)
+                                .into_any_element(),
+                            None,
+                        )),
+                    )
+                    .child(
+                        div().flex_1().child(kpi(
+                            "mAP50-95",
+                            text(ty::X2XL, t.text_primary)
+                                .tnum()
+                                .child(map_now.map_or("–".into(), f3))
+                                .into_any_element(),
+                            Some(best_line),
+                        )),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap(px(16.))
+                    .child(
+                        div().flex_1().child(kpi(
+                            "Throughput",
+                            metric(
+                                &t,
+                                ips.map_or("–".into(), |v| format!("{v:.0}")),
+                                "img/s",
+                                ty::X2XL,
+                                ty::SM,
                             )
-                            .child(
-                                text(ty::SM, t.text_tertiary).truncate().child(format!(
-                                    "{ds} · {} · {device} · {started}",
-                                    r.config.arch.as_str()
-                                )),
-                            ),
+                            .into_any_element(),
+                            None,
+                        )),
+                    )
+                    .child(div().flex_1().child(kpi(
+                        "Time left",
+                        duration_metric(&t, eta_s, ty::X2XL, ty::SM).into_any_element(),
+                        None,
+                    ))),
+            );
+        let footer = self.system_footer(cx);
+        panel(&t)
+            .flex_1()
+            .min_w_0()
+            .overflow_hidden()
+            .flex()
+            .flex_col()
+            // Header: name, status, meta, and the way to the full dashboard.
+            .child(
+                div()
+                    .h(px(48.))
+                    .px(px(16.))
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .child(text(ty::LG, t.text_primary).flex_none().child(r.name.clone()))
+                    .child(status_badge(&t, r.status, &r.id))
+                    .child(
+                        text(ty::SM, t.text_tertiary)
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .child(format!("{ds} · {} · {device} · {started}", r.config.arch.as_str())),
+                    )
+                    .child(
+                        text(ty::XS, t.text_secondary)
+                            .flex_none()
+                            .tnum()
+                            .child(format!("{:.0}%", r.progress() * 100.)),
                     )
                     .child(open),
             )
+            // Progress as a hairline rail across the panel.
             .child(
                 div()
-                    .flex()
-                    .child(div().flex_1().min_w_0().child(stat(
-                        &t,
-                        "Epoch",
-                        r.epoch.to_string(),
-                        &format!("/ {}", r.epochs),
-                        None,
-                    )))
-                    .child(vline(&t))
-                    .child(div().flex_1().min_w_0().pl(px(16.)).child(stat(
-                        &t,
-                        "mAP50-95",
-                        map_now.map_or("–".into(), f3),
-                        "",
-                        Some(text(ty::XS, t.text_tertiary).tnum().child(best_line)),
-                    )))
-                    .child(vline(&t))
-                    .child(div().flex_1().min_w_0().pl(px(16.)).child(stat(
-                        &t,
-                        "Throughput",
-                        ips.map_or("–".into(), |v| format!("{v:.0}")),
-                        "img/s",
-                        None,
-                    )))
-                    .child(vline(&t))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .pl(px(16.))
-                            .flex()
-                            .flex_col()
-                            .gap(px(6.))
-                            .child(caption(&t, "Time left"))
-                            .child(duration_metric(&t, eta_s, ty::X2XL, ty::SM)),
-                    ),
+                    .h(px(2.))
+                    .bg(t.bg_inset)
+                    .child(div().h_full().w(gpui::relative(r.progress().clamp(0., 1.))).bg(t.accent_fill())),
             )
             .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(12.))
-                    .child(div().flex_1().child(progress(&t, r.progress(), t.accent_fill(), 4.)))
-                    .child(
-                        text(ty::XS, t.text_secondary).tnum().child(format!("{:.0}%", r.progress() * 100.)),
-                    ),
+                div().flex().gap(px(24.)).p(px(16.)).child(kpis).child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap(px(4.))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .child(
+                                    text(ty::SM, t.text_primary)
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .child("Validation mAP"),
+                                )
+                                .child(legend_el),
+                        )
+                        .child(chart),
+                ),
             )
-            .child(charts)
+            .children(footer)
             .into_any_element()
+    }
+
+    /// The machine at a glance, as a 36 px footer row of meters (GPU, CPU, memory).
+    fn system_footer(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let t = theme(cx);
+        let s = self.store.system.ready()?.clone();
+        let meter = |label: String, value: String, frac: f32, color: gpui::Hsla| {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .child(text(ty::XS, t.text_tertiary).whitespace_nowrap().child(label))
+                .child(div().w(px(48.)).child(progress(&t, frac, color, 3.)))
+                .child(text(ty::XS, t.text_secondary).tnum().whitespace_nowrap().child(value))
+        };
+        let mut row = div()
+            .h(px(36.))
+            .px(px(16.))
+            .flex()
+            .items_center()
+            .gap(px(24.))
+            .border_t_1()
+            .border_color(t.line_subtle);
+        if let Some(g) = s.gpus.first() {
+            let util = g.util.unwrap_or(0.0);
+            let (vram, vu) = bytes(g.memory_bytes);
+            row = row.child(meter(
+                format!("{} · {vram} {vu}", crate::ui::short_gpu(&g.name)),
+                format!("{:.0}%", util * 100.),
+                util,
+                if util > 0.95 { t.warning_solid } else { t.text_tertiary },
+            ));
+        }
+        let mem = s.memory.used_bytes as f32 / s.memory.total_bytes.max(1) as f32;
+        let (used, _) = bytes(s.memory.used_bytes);
+        let (total, unit) = bytes(s.memory.total_bytes);
+        row = row
+            .child(meter(
+                format!("CPU · {} threads", s.cpu.threads),
+                format!("{:.0}%", s.cpu.util * 100.),
+                s.cpu.util,
+                t.text_tertiary,
+            ))
+            .child(meter("Memory".into(), format!("{used} / {total} {unit}"), mem, t.text_tertiary));
+        Some(row.into_any_element())
     }
 
     fn idle_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
         if self.store.runs.is_loading() {
-            let block = |id: &str, w: f32, h: f32| {
-                div().w(gpui::relative(w)).h(px(h)).child(skeleton(&t, id.to_string()))
-            };
+            // Same anatomy as the live panel: header, rail, 2×2 KPIs beside one chart, meter footer.
+            let sk = |id: &str| skeleton(&t, id.to_string());
             return panel(&t)
                 .flex_1()
-                .p(px(16.))
                 .flex()
                 .flex_col()
-                .gap(px(16.))
-                .child(block("hero-title", 0.4, 22.))
-                .child(div().flex().gap(px(16.)).children(
-                    (0..4).map(|i| div().flex_1().h(px(52.)).child(skeleton(&t, format!("hero-kpi-{i}")))),
-                ))
-                .child(block("hero-progress", 1.0, 4.))
+                .child(
+                    div()
+                        .h(px(48.))
+                        .px(px(16.))
+                        .flex()
+                        .items_center()
+                        .child(div().w(px(260.)).h(px(18.)).child(sk("hero-title"))),
+                )
+                .child(div().h(px(2.)).bg(t.bg_inset))
                 .child(
                     div()
                         .flex()
-                        .gap(px(16.))
-                        .child(div().flex_1().h(px(150.)).child(skeleton(&t, "hero-c1")))
-                        .child(div().flex_1().h(px(150.)).child(skeleton(&t, "hero-c2"))),
+                        .gap(px(24.))
+                        .p(px(16.))
+                        .child(div().w(px(220.)).flex_none().flex().flex_col().gap(px(16.)).children(
+                            (0..2).map(|r| {
+                                div().flex().gap(px(16.)).children((0..2).map(move |c| {
+                                    div().flex_1().h(px(52.)).child(skeleton(&t, format!("hero-kpi-{r}{c}")))
+                                }))
+                            }),
+                        ))
+                        .child(div().flex_1().h(px(180.)).child(sk("hero-chart"))),
                 )
+                .child(div().h(px(36.)).border_t_1().border_color(t.line_subtle))
                 .into_any_element();
         }
         let has_ds = self.store.datasets.ready().is_some_and(|d| !d.is_empty());
@@ -409,136 +482,6 @@ impl FoloApp {
             .into_any_element()
     }
 
-    fn system_panel(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let t = theme(cx);
-        let body = match &self.store.system {
-            Load::Ready(s) => {
-                let gpu = s.gpus.first();
-                let util = gpu.and_then(|g| g.util).unwrap_or(0.0);
-                let hist: Vec<f32> = self.store.gpu_util.iter().copied().collect();
-                let mem = s.memory.used_bytes as f32 / s.memory.total_bytes.max(1) as f32;
-                let (used, _) = bytes(s.memory.used_bytes);
-                let (total, unit) = bytes(s.memory.total_bytes);
-                let row = |label: &str, value: String, frac: f32, color| {
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(6.))
-                        .child(
-                            div()
-                                .flex()
-                                .justify_between()
-                                .child(text(ty::SM, t.text_secondary).child(label.to_string()))
-                                .child(text(ty::SM, t.text_primary).tnum().child(value)),
-                        )
-                        .child(progress(&t, frac, color, 4.))
-                };
-                div()
-                    .flex_1()
-                    .flex()
-                    .flex_col()
-                    .gap(px(14.))
-                    .p(px(16.))
-                    .when_some(gpu, |d, g| {
-                        let (vram, vu) = bytes(g.memory_bytes);
-                        d.child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap(px(10.))
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .justify_between()
-                                        .gap(px(8.))
-                                        .child(
-                                            text(ty::BASE, t.text_primary)
-                                                .font_weight(FontWeight::MEDIUM)
-                                                .truncate()
-                                                .child(crate::ui::short_gpu(&g.name)),
-                                        )
-                                        .child(badge(&t, g.backend.label(), Tone::Neutral)),
-                                )
-                                .child(metric(&t, format!("{:.0}", util * 100.), "%", ty::X3XL, ty::LG))
-                                .child(
-                                    text(ty::XS, t.text_tertiary)
-                                        .tnum()
-                                        .child(format!("GPU utilisation · {vram} {vu} GPU memory")),
-                                ),
-                        )
-                    })
-                    .child(
-                        // Utilisation history fills the space the hero gives this panel.
-                        div()
-                            .flex_1()
-                            .min_h(px(56.))
-                            .flex()
-                            .flex_col()
-                            .gap(px(6.))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_h(px(40.))
-                                    .rounded(px(radius::MD))
-                                    .bg(t.bg_inset)
-                                    .p(px(6.))
-                                    .when(hist.len() <= 1, |d| {
-                                        d.flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .child(text(ty::XS, t.text_tertiary).child("Collecting…"))
-                                    })
-                                    .when(hist.len() > 1, |d| {
-                                        d.child(sparkline_in(
-                                            &t,
-                                            Arc::new(hist.clone()),
-                                            t.text_secondary,
-                                            0.,
-                                            true,
-                                            Some((0., 1.)),
-                                        ))
-                                    }),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .justify_between()
-                                    .child(text(ty::XS, t.text_tertiary).child("Utilisation"))
-                                    .child(
-                                        text(ty::XS, t.text_tertiary)
-                                            .tnum()
-                                            .child(format!("last {} min", (hist.len() * 2).div_ceil(60))),
-                                    ),
-                            ),
-                    )
-                    .child(hairline(&t))
-                    .child(row(
-                        &format!("CPU · {} threads", s.cpu.threads),
-                        format!("{:.0}%", s.cpu.util * 100.),
-                        s.cpu.util,
-                        t.text_tertiary,
-                    ))
-                    .child(row("Memory", format!("{used} / {total} {unit}"), mem, t.text_tertiary))
-                    .into_any_element()
-            }
-            Load::Failed(e) => div()
-                .p(px(16.))
-                .child(text(ty::SM, t.danger_text).child(e.message.clone()))
-                .into_any_element(),
-            _ => loading_rows(&t, "sys", 4).into_any_element(),
-        };
-        panel(&t)
-            .flex_1()
-            .min_w_0()
-            .flex()
-            .flex_col()
-            .child(panel_header(&t, "System"))
-            .child(body)
-            .into_any_element()
-    }
-
-    /// The machine in one line, for narrow windows: GPU, CPU and memory with small meters.
     fn system_strip(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
         let Some(s) = self.store.system.ready().cloned() else {
@@ -552,9 +495,9 @@ impl FoloApp {
                 .items_center()
                 .gap(px(10.))
                 .px(px(16.))
-                .child(text(ty::SM, t.text_secondary).truncate().child(label))
-                .child(div().w(px(56.)).flex_none().child(progress(&t, frac, color, 4.)))
-                .child(text(ty::SM, t.text_primary).tnum().whitespace_nowrap().child(value))
+                .child(text(ty::SM, t.text_secondary).flex_none().whitespace_nowrap().child(label))
+                .child(div().flex_1().min_w(px(80.)).child(progress(&t, frac, color, 4.)))
+                .child(text(ty::SM, t.text_primary).flex_none().tnum().whitespace_nowrap().child(value))
         };
         let mut row = div().h(px(48.)).flex().items_center();
         if let Some(g) = s.gpus.first() {
@@ -581,6 +524,7 @@ impl FoloApp {
 
     fn recent_runs(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
+        let wide = window.viewport_size().width >= px(1500.);
         let now = self.store.api.now();
         let all = self.view_all("ov-runs-all", Route::Runs, window, cx);
         let header = panel_header(&t, "Recent runs")
@@ -634,7 +578,7 @@ impl FoloApp {
                         let key = format!("ov-run-{}", r.id);
                         let row = div()
                             .id(SharedString::from(key.clone()))
-                            .h(px(48.))
+                            .h(px(36.))
                             .mx(px(4.))
                             .px(px(12.))
                             .flex()
@@ -644,18 +588,40 @@ impl FoloApp {
                             .cursor_pointer()
                             .hover(|s| s.bg(t.bg_hover))
                             // Same order as the Runs table: name, then status.
+                            // One line per run: name, then dataset and architecture, then status as a dot.
                             .child(
-                                cell2(&t, r.name.clone(), format!("{ds} · {}", r.config.arch.as_str()))
-                                    .flex_1()
-                                    .min_w_0(),
+                                text(ty::SM, t.text_primary)
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .w(px(150.))
+                                    .flex_none()
+                                    .truncate()
+                                    .child(r.name.clone()),
                             )
-                            .child(div().w(px(96.)).flex_none().flex().child(status_badge(
+                            // Room for the dataset and architecture only on wide windows.
+                            .when(wide, |d| {
+                                d.child(
+                                    text(ty::XS, t.text_tertiary)
+                                        .w(px(130.))
+                                        .flex_none()
+                                        .truncate()
+                                        .child(format!("{ds} · {}", r.config.arch.as_str())),
+                                )
+                            })
+                            .child(div().w(px(96.)).flex_none().child(status_dot(
                                 &t,
                                 r.status,
                                 &format!("ov-{}", r.id),
                             )))
+                            .child(div().flex_1())
                             .child(right)
-                            .child(text(ty::XS, t.text_tertiary).w(px(72.)).text_right().child(when));
+                            .child(
+                                text(ty::XS, t.text_tertiary)
+                                    .w(px(80.))
+                                    .flex_none()
+                                    .whitespace_nowrap()
+                                    .text_right()
+                                    .child(when),
+                            );
                         self.bind(
                             row,
                             &key,
@@ -683,6 +649,7 @@ impl FoloApp {
 
     fn top_models(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
+        let wide = window.viewport_size().width >= px(1500.);
         let all = self.view_all("ov-models-all", Route::Models, window, cx);
         let header = panel_header(&t, "Best models")
             .child(div().flex().items_center().gap(px(8.)).child(caption(&t, "by mAP50-95")).child(all));
@@ -715,7 +682,7 @@ impl FoloApp {
                         let (p, pu) = count_si(m.params);
                         let row = div()
                             .id(SharedString::from(key.clone()))
-                            .h(px(48.))
+                            .h(px(36.))
                             .mx(px(4.))
                             .px(px(12.))
                             .flex()
@@ -725,13 +692,20 @@ impl FoloApp {
                             .cursor_pointer()
                             .hover(|s| s.bg(t.bg_hover))
                             .child(
-                                cell2(
-                                    &t,
-                                    m.name.clone(),
-                                    format!("{} · {} px · {p} {pu} params", m.arch.as_str(), m.imgsz),
-                                )
-                                .flex_1(),
+                                text(ty::SM, t.text_primary)
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .w(px(150.))
+                                    .flex_none()
+                                    .truncate()
+                                    .child(m.name.clone()),
                             )
+                            .child(div().flex_1().min_w_0().when(wide, |d| {
+                                d.child(text(ty::XS, t.text_tertiary).whitespace_nowrap().child(format!(
+                                    "{} · {} px · {p}{pu}",
+                                    m.arch.as_str(),
+                                    m.imgsz
+                                )))
+                            }))
                             .child(bar_value(&t, map, f3(map), t.text_tertiary));
                         self.bind(
                             row,

@@ -63,7 +63,7 @@ impl FoloApp {
         let header = page_header(&t, "Runs", subtitle, vec![new]);
         if let Some(e) = self.store.runs.error().cloned() {
             let err = self.error_panel(&e, "runs-retry", window, cx);
-            return self.page_frame(&t, header, err);
+            return self.page_frame(&t, header, err, cx);
         }
         let filters = [RunFilter::All, RunFilter::Active, RunFilter::Completed, RunFilter::Failed];
         let labels: Vec<String> = filters
@@ -92,16 +92,20 @@ impl FoloApp {
         let visible: Vec<Run> = runs.into_iter().filter(|r| matches_filter(r, self.run_filter)).collect();
         let ids: Vec<String> = visible.iter().map(|r| r.id.clone()).collect();
         let cols = |d: gpui::Div| d.flex().items_center().gap(px(16.)).px(px(16.));
+        // Single-line rows; secondary facts get their own columns, and wide windows show more of them.
+        let wide = window.viewport_size().width >= px(1360.);
         let head = cols(div())
             .h(px(36.))
             .border_b_1()
             .border_color(t.line_subtle)
-            .child(th(&t, "Run").flex_1())
+            .child(th(&t, "Run").flex_1().min_w(px(180.)))
+            .child(th(&t, "Model").w(px(64.)))
+            .when(wide, |d| d.child(th(&t, "Dataset").w(px(120.))).child(th(&t, "Size · batch").w(px(104.))))
             .child(th(&t, "Status").w(px(96.)))
             .child(th(&t, "Progress").w(px(150.)))
-            .child(th(&t, "Best mAP50-95").w(px(110.)).text_right())
-            .child(th(&t, "Duration").w(px(88.)).text_right())
-            .child(th(&t, "Created").w(px(84.)).text_right());
+            .child(th(&t, "Best mAP50-95").w(px(96.)).text_right())
+            .child(th(&t, "Duration").w(px(80.)).text_right())
+            .child(th(&t, "Created").w(px(80.)).text_right());
         let rows: Vec<AnyElement> = visible
             .iter()
             .enumerate()
@@ -133,7 +137,9 @@ impl FoloApp {
                         .child(
                             text(ty::XS, t.text_secondary)
                                 .tnum()
-                                .w(px(46.))
+                                .w(px(72.))
+                                .flex_none()
+                                .whitespace_nowrap()
                                 .text_right()
                                 .child(format!("{} / {}", r.epoch, r.epochs)),
                         ),
@@ -150,7 +156,7 @@ impl FoloApp {
                     .items_center()
                     .gap(px(16.))
                     .px(px(16.))
-                    .h(px(52.))
+                    .h(px(36.))
                     .border_b_1()
                     .border_color(t.line_subtle)
                     .cursor_pointer()
@@ -167,27 +173,52 @@ impl FoloApp {
                         }
                     }))
                     .child(
-                        cell2(
-                            &t,
-                            r.name.clone(),
-                            format!(
-                                "{} · {ds} · {} · batch {}",
-                                r.config.arch.as_str(),
-                                r.config.imgsz,
-                                r.config.batch
-                            ),
-                        )
-                        .flex_1(),
+                        div().flex_1().min_w(px(180.)).child(
+                            text(ty::SM, t.text_primary)
+                                .font_weight(FontWeight::MEDIUM)
+                                .w(px(180.))
+                                .truncate()
+                                .child(r.name.clone()),
+                        ),
                     )
-                    .child(div().w(px(96.)).flex().child(status_badge(
+                    .child(
+                        text(ty::SM, t.text_secondary).w(px(64.)).flex_none().child(r.config.arch.as_str()),
+                    )
+                    .when(wide, |d| {
+                        d.child(
+                            text(ty::SM, t.text_secondary)
+                                .w(px(120.))
+                                .flex_none()
+                                .truncate()
+                                .child(ds.clone()),
+                        )
+                        .child(
+                            text(ty::SM, t.text_tertiary)
+                                .w(px(104.))
+                                .flex_none()
+                                .tnum()
+                                .whitespace_nowrap()
+                                .child(format!("{} px · {}", r.config.imgsz, r.config.batch)),
+                        )
+                    })
+                    .child(div().w(px(96.)).flex_none().child(status_dot(
                         &t,
                         r.status,
                         &format!("row-{}", r.id),
                     )))
-                    .child(div().w(px(150.)).child(progress_cell))
-                    .child(div().w(px(110.)).flex().justify_end().child(best))
-                    .child(text(ty::SM, t.text_secondary).tnum().w(px(88.)).text_right().child(dur))
-                    .child(text(ty::SM, t.text_tertiary).w(px(84.)).text_right().child(created));
+                    .child(div().w(px(150.)).flex_none().child(progress_cell))
+                    .child(div().w(px(96.)).flex_none().flex().justify_end().child(best))
+                    .child(
+                        text(ty::SM, t.text_secondary).tnum().w(px(80.)).flex_none().text_right().child(dur),
+                    )
+                    .child(
+                        text(ty::SM, t.text_tertiary)
+                            .w(px(80.))
+                            .flex_none()
+                            .whitespace_nowrap()
+                            .text_right()
+                            .child(created),
+                    );
                 self.bind(
                     row,
                     &key,
@@ -215,7 +246,7 @@ impl FoloApp {
             }
         });
         let body = div().flex().flex_col().gap(px(12.)).child(div().flex().child(seg)).child(table);
-        self.page_frame(&t, header, body)
+        self.page_frame(&t, header, body, cx)
     }
 
     pub fn run_view(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -237,7 +268,7 @@ impl FoloApp {
                     ))
                     .into_any_element()
             };
-            return self.page_frame(&t, header, body);
+            return self.page_frame(&t, header, body, cx);
         };
         self.ensure_run_data(id, cx);
         self.ensure_logs(id, cx);
@@ -358,8 +389,8 @@ impl FoloApp {
         });
         match data {
             Some(Ok((d, ips, last, prev))) => {
-                let narrow = window.viewport_size().width < px(1360.);
-                body = body.child(self.kpi_strip(&r, &ips, last.as_ref(), prev, now, narrow, cx));
+                let window_w = f32::from(window.viewport_size().width);
+                body = body.child(self.kpi_strip(&r, &ips, last.as_ref(), prev, now, window_w, cx));
                 body = body.child(self.run_charts(&r, &d, window, cx));
             }
             Some(Err(Some(e))) => body = body.child(self.error_panel(&e, "run-data-retry", window, cx)),
@@ -369,24 +400,17 @@ impl FoloApp {
             }
         }
         let samples = self.samples_panel(&r, window, cx);
-        let logs = self.logs_panel(&r, cx);
+        let logs = self.logs_panel(&r, window, cx);
         body = body.child(
             div()
                 .flex()
                 .gap(px(16.))
-                .child(div().flex_1().min_w_0().flex().child(samples))
-                // Wide windows split evenly, so log lines fit on one row; otherwise a fixed column
-                // wide enough for an epoch summary line.
-                .map(|d| {
-                    if window.viewport_size().width >= px(1500.) {
-                        d.child(div().flex_1().min_w_0().flex().child(logs))
-                    } else {
-                        d.child(div().w(px(500.)).flex_none().flex().child(logs))
-                    }
-                }),
+                // The same 3:2 columns as the chart rows above, so every gutter lines up.
+                .child(div().flex().min_w_0().flex_grow().flex_basis(gpui::relative(0.6)).child(samples))
+                .child(div().flex().min_w_0().flex_grow().flex_basis(gpui::relative(0.4)).child(logs)),
         );
         body = body.child(self.config_panel(&r, &ds_name, cx));
-        self.page_frame(&t, header, body)
+        self.page_frame(&t, header, body, cx)
     }
 
     fn failure_banner(&self, r: &Run, cx: &mut Context<Self>) -> AnyElement {
@@ -436,10 +460,13 @@ impl FoloApp {
         last: Option<&crate::api::Epoch>,
         prev: Option<f32>,
         now: i64,
-        narrow: bool,
+        window_w: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let t = theme(cx);
+        // One row of five; very narrow windows wrap to two rows, one type step smaller.
+        let narrow = window_w < 1000.;
+        let big = if narrow { ty::XL } else { ty::X2XL };
         let live = r.status == RunStatus::Running;
         // Change since the previous epoch only means something while training.
         let delta = match (last, prev) {
@@ -461,12 +488,6 @@ impl FoloApp {
             }
             _ => None,
         };
-        let best50 = self
-            .store
-            .run_data
-            .get(&r.id)
-            .and_then(|l| l.ready())
-            .and_then(|d| d.metrics.epochs.iter().map(|e| e.val.map50).max_by(|a, b| a.total_cmp(b)));
         let ips_now = ips.last().copied();
         let ips_avg = if ips.is_empty() { None } else { Some(ips.iter().sum::<f32>() / ips.len() as f32) };
         // Smooth the throughput trace so the sparkline shows the trend, not per-step jitter.
@@ -479,7 +500,7 @@ impl FoloApp {
                 .gap(px(6.))
                 .min_w_0()
                 .child(caption(&t, label))
-                .child(duration_metric(&t, secs, ty::X2XL, ty::SM))
+                .child(duration_metric(&t, secs, big, ty::SM))
                 .child(detail)
         };
         let time_tile = if live || r.status == RunStatus::Queued {
@@ -508,7 +529,7 @@ impl FoloApp {
                 .flex_col()
                 .gap(px(6.))
                 .child(caption(&t, "Epoch"))
-                .child(metric(&t, r.epoch.to_string(), &format!("/ {}", r.epochs), ty::X2XL, ty::SM))
+                .child(metric(&t, r.epoch.to_string(), &format!("/ {}", r.epochs), big, ty::SM))
                 .child(div().pt(px(6.)).child(progress(
                     &t,
                     r.progress(),
@@ -523,19 +544,12 @@ impl FoloApp {
                 delta.or_else(|| {
                     r.best.as_ref().map(|b| {
                         text(ty::XS, t.text_tertiary).tnum().child(format!(
-                            "best {} at epoch {}",
+                            "best {} @ {}",
                             f3(b.map50_95),
                             b.epoch
                         ))
                     })
                 }),
-            ),
-            stat(
-                &t,
-                "mAP50",
-                last.map_or("–".into(), |e| f3(e.val.map50)),
-                "",
-                best50.map(|b| text(ty::XS, t.text_tertiary).tnum().child(format!("best {}", f3(b)))),
             ),
             div()
                 .flex()
@@ -548,13 +562,13 @@ impl FoloApp {
                         .items_baseline()
                         .gap(px(4.))
                         .child(
-                            text(ty::X2XL, t.text_primary)
+                            text(big, t.text_primary)
                                 .tnum()
                                 .child(last.map_or("–".into(), |e| format!("{:.3}", e.val.precision))),
                         )
                         .child(text(ty::LG, t.text_tertiary).child("/"))
                         .child(
-                            text(ty::X2XL, t.text_primary)
+                            text(big, t.text_primary)
                                 .tnum()
                                 .child(last.map_or("–".into(), |e| format!("{:.3}", e.val.recall))),
                         ),
@@ -574,7 +588,7 @@ impl FoloApp {
                             &t,
                             ips_now.map_or("–".into(), |v| format!("{v:.0}")),
                             "img/s",
-                            ty::X2XL,
+                            big,
                             ty::SM,
                         ))
                         .child(
@@ -588,10 +602,8 @@ impl FoloApp {
                 )),
             time_tile,
         ];
-        let tile = |content: gpui::Div| {
-            div().flex_1().min_w_0().px(px(16.)).py(px(if narrow { 10. } else { 14. })).child(content)
-        };
-        let per_row = if narrow { 3 } else { 6 };
+        let tile = |content: gpui::Div| div().flex_1().min_w_0().px(px(16.)).py(px(12.)).child(content);
+        let per_row = if window_w < 1000. { 3 } else { 5 };
         let mut rows = Vec::new();
         let mut it = tiles.into_iter().peekable();
         let mut first = true;
@@ -639,59 +651,62 @@ impl FoloApp {
             r.epoch.max(1) as f32
         };
         let closing = (r.epochs.saturating_sub(r.config.augment.close_mosaic)) as f32;
-        let close_marker = Marker { x: closing, label: "close mosaic".into(), color: t.text_tertiary };
-        // Every chart in the grid reserves the same two label lanes, so plot tops always line up.
-        let lanes = 2;
-        let base = |id: &str, series: Vec<Series>| {
+        // One annotation band: the schedule (close mosaic) and what went wrong (failure). The best
+        // epoch is a dot on its series, with the value in the legend.
+        let close_marker =
+            Marker { x: closing, label: "close mosaic".into(), color: t.text_tertiary, lane: Some(0) };
+        let base = |id: &str, series: Vec<Series>, height: f32| {
             let mut c = LineChart::new(id.to_string(), series);
             c.x_range = Some((0., total));
             c.hover = hover;
             c.on_hover = Some(on_hover.clone());
-            c.height = 200.;
-            // All four charts reserve the same marker band, so plot tops line up across a row.
-            c.min_lanes = lanes;
+            c.height = height;
+            c.min_lanes = 1;
             c.x_int = true;
             c.x_name = "epoch";
             c.x_fmt = |v| format!("{v:.0}");
             c.markers = vec![close_marker.clone()];
+            // Values live in each panel's legend; the plot keeps only the cursor and dots.
+            c.readout = false;
+            // Same x ticks in all four charts.
+            c.x_ticks = Some(6);
             c
         };
+        // Short windows keep both primary charts on screen.
+        let short = window.viewport_size().height < px(700.);
+        let (primary_h, secondary_h) = if short { (150., 110.) } else { (220., 140.) };
         let names = ["box", "cls", "dfl", "total"];
         let colors = t.loss_colors();
         let loss_series: Vec<Series> = (0..4)
             .filter(|&i| self.loss_parts[i])
-            .map(|i| Series::new(names[i], colors[i], d.loss[i].clone()).smooth(0.94).live(live))
+            .map(|i| {
+                let s = Series::new(names[i], colors[i], d.loss[i].clone()).smooth(0.94).live(live);
+                if i == 2 { s.dashed() } else { s }
+            })
             .collect();
         let loss_max = (0..4).filter(|&i| self.loss_parts[i]).map(|i| d.loss_max[i]).fold(0f32, f32::max);
-        let mut loss = base("run-loss", loss_series);
+        let mut loss = base("run-loss", loss_series, primary_h);
         loss.y_range = Some((0., crate::charts::nice_ceil((loss_max * 1.05).max(0.1), 4)));
-        loss.value_fmt = Some(|v| format!("{v:.3}"));
         let mut map = base(
             "run-map",
             vec![
-                // Legend order: mAP50-95 first, so the hover readout lists it first too.
                 Series::new("mAP50-95", t.chart_series[0], d.map50_95.clone()).area().live(live).width(1.75),
                 Series::new("mAP50", t.chart_series[1], d.map50.clone()).width(1.25),
             ],
+            primary_h,
         );
         map.y_range = Some((0., 1.));
-        map.value_fmt = Some(|v| format!("{v:.3}"));
         if let Some(b) = &r.best {
-            map.markers.insert(
-                0,
-                Marker {
-                    x: b.epoch as f32,
-                    label: format!("best {} · epoch {}", f3(b.map50_95), b.epoch).into(),
-                    color: t.accent_text,
-                },
-            );
+            map.dots.push((b.epoch as f32, b.map50_95, t.accent_fill()));
         }
         // A failed run marks where it stopped, on the charts that tell the story.
         if r.status == RunStatus::Failed {
+            let stopped = d.loss[3].last().map_or(r.epoch as f32, |p| p.0);
             let fail = Marker {
-                x: r.epoch as f32,
-                label: format!("failed · epoch {}", r.epoch).into(),
+                x: stopped,
+                label: format!("failed in epoch {}", r.epoch).into(),
                 color: t.danger_text,
+                lane: Some(0),
             };
             loss.markers.insert(0, fail.clone());
             map.markers.insert(0, fail);
@@ -703,22 +718,31 @@ impl FoloApp {
                 Series::new("precision", t.chart_series[5], d.precision.clone()).live(live),
                 Series::new("recall", t.chart_series[5], d.recall.clone()).dashed().live(live),
             ],
+            secondary_h,
         );
         pr.y_range = Some((0., 1.));
-        pr.value_fmt = Some(|v| format!("{v:.3}"));
-        let mut lr = base("run-lr", vec![Series::new("lr", t.text_tertiary, d.lr.clone()).area().live(live)]);
-        lr.value_fmt = Some(|v| format!("{v:.5}"));
-        let lr_max = d.lr_max;
-        lr.y_range = Some((0., (lr_max * 1.15).max(1e-4)));
-        lr.markers.clear();
-        lr.markers.push(Marker { x: 3., label: "warmup".into(), color: t.text_tertiary });
+        pr.y_ticks = 3;
+        let mut lr = base(
+            "run-lr",
+            vec![Series::new("lr", t.text_tertiary, d.lr.clone()).area().live(live)],
+            secondary_h,
+        );
+        lr.y_range = Some((0., (d.lr_max * 1.15).max(1e-4)));
+        lr.y_ticks = 3;
+        lr.markers = vec![Marker { x: 3., label: "warmup".into(), color: t.text_tertiary, lane: Some(0) }];
 
-        // Legend toggles for the loss parts.
+        // Legend values: at the shared cursor, else the latest point.
+        let v = |pts: &[(f32, f32)], fmt: fn(f32) -> String| {
+            crate::charts::value_at(pts, hover, 0., total).map(fmt)
+        };
+        let f3v: fn(f32) -> String = |x| format!("{x:.3}");
+        // Loss parts are toggles; their values are the smoothed curve's, like the lines.
         let mut legend = Vec::new();
         for (i, name) in names.iter().enumerate() {
             let on = self.loss_parts[i];
             let key = format!("loss-part-{name}");
             let color = colors[i];
+            let value = on.then(|| v(&crate::charts::smoothed(&d.loss[i], 0.94), f3v)).flatten();
             let el = div()
                 .id(SharedString::from(key.clone()))
                 .h(px(20.))
@@ -730,16 +754,23 @@ impl FoloApp {
                 .cursor_pointer()
                 .hover(|s| s.bg(t.bg_hover))
                 .tooltip(crate::controls::tip(if on { "Hide this series" } else { "Show this series" }, None))
-                .child(
+                .child(if on && i == 2 {
+                    div()
+                        .w(px(10.))
+                        .flex()
+                        .gap(px(2.))
+                        .children((0..3).map(move |_| div().w(px(2.)).h(px(2.)).bg(color)))
+                } else {
                     div()
                         .w(px(10.))
                         .h(px(if on { 2. } else { 6. }))
                         .rounded(px(2.))
-                        .map(|d| if on { d.bg(color) } else { d.border_1().border_color(color) }),
-                )
+                        .map(|d| if on { d.bg(color) } else { d.border_1().border_color(color) })
+                })
                 .child(
                     text(ty::XS, if on { t.text_secondary } else { t.text_tertiary }).child(name.to_string()),
-                );
+                )
+                .when_some(value, |d, val| d.child(text(ty::XS, t.text_primary).tnum().child(val)));
             legend.push(
                 self.bind(
                     el,
@@ -758,57 +789,93 @@ impl FoloApp {
                 .into_any_element(),
             );
         }
-        let card = |title: &str, extra: AnyElement, chart: AnyElement| {
+        // Every card has the same anatomy: header, a 28 px legend row, then the plot. Plot tops line
+        // up across a row however long a legend is.
+        let card = |title: &str, sub: &str, extra: AnyElement, chart: AnyElement| {
             panel(&t)
                 .flex_1()
                 .min_w_0()
                 .flex()
                 .flex_col()
-                .child(panel_header(&t, title).child(extra))
-                .child(div().px(px(12.)).pt(px(12.)).pb(px(8.)).child(chart))
+                .child(panel_header(&t, title).child(caption(&t, sub)))
+                .child(div().h(px(28.)).px(px(10.)).pt(px(6.)).flex().items_center().child(extra))
+                .child(div().px(px(12.)).pb(px(6.)).child(chart))
         };
-        let legend_row = div()
+        let loss_legend = div()
+            .id("loss-ema")
             .flex()
             .items_center()
             .gap(px(2.))
-            .child(
-                div()
-                    .id("loss-ema")
-                    .mr(px(6.))
-                    .tooltip(crate::controls::tip(
-                        "Lines are an exponential moving average (0.94) of per-step loss; the faint trace is raw",
-                        None,
-                    ))
-                    .child(text(ty::XS, t.text_tertiary).child("smoothed · EMA 0.94")),
-            )
+            .tooltip(crate::controls::tip(
+                "Lines are an exponential moving average (0.94) of per-step loss; the faint trace is raw",
+                None,
+            ))
             .children(legend)
             .into_any_element();
-        let map_legend =
-            crate::ui::legend(&t, &[("mAP50-95", t.chart_series[0]), ("mAP50", t.chart_series[1])]);
-        let pr_legend = crate::ui::legend_styled(
-            &t,
-            &[("precision", t.chart_series[5], false), ("recall", t.chart_series[5], true)],
-        );
-        let lr_legend = text(ty::XS, t.text_tertiary).child("cosine · warmup 3 epochs").into_any_element();
+        let mut map_items = vec![
+            crate::ui::legend_value(&t, "mAP50-95", t.chart_series[0], false, v(&d.map50_95, f3v))
+                .into_any_element(),
+            crate::ui::legend_value(&t, "mAP50", t.chart_series[1], false, v(&d.map50, f3v))
+                .into_any_element(),
+        ];
+        if let Some(b) = &r.best {
+            map_items.push(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(5.))
+                    .child(div().size(px(6.)).rounded_full().bg(t.accent_fill()))
+                    .child(text(ty::XS, t.text_secondary).child("best"))
+                    .child(text(ty::XS, t.text_primary).tnum().child(format!(
+                        "{} @ {}",
+                        f3(b.map50_95),
+                        b.epoch
+                    )))
+                    .into_any_element(),
+            );
+        }
+        let map_legend = div().flex().items_center().gap(px(12.)).children(map_items).into_any_element();
+        let pr_legend = div()
+            .flex()
+            .items_center()
+            .gap(px(12.))
+            .child(crate::ui::legend_value(&t, "precision", t.chart_series[5], false, v(&d.precision, f3v)))
+            .child(crate::ui::legend_value(&t, "recall", t.chart_series[5], true, v(&d.recall, f3v)))
+            .into_any_element();
+        let lr_legend =
+            crate::ui::legend_value(&t, "lr", t.text_tertiary, false, v(&d.lr, |x| format!("{x:.5}")))
+                .into_any_element();
         let _ = chart_block;
+        // The mAP chart is the focal point: wider and first. Narrow windows stack each row.
+        let stack = window.viewport_size().width < px(1120.);
+        let row = |a: AnyElement, b: AnyElement, ga: f32, gb: f32| {
+            if stack {
+                div().flex().flex_col().gap(px(16.)).child(a).child(b)
+            } else {
+                div()
+                    .flex()
+                    .gap(px(16.))
+                    .child(div().flex().min_w_0().flex_grow().flex_basis(gpui::relative(ga)).child(a))
+                    .child(div().flex().min_w_0().flex_grow().flex_basis(gpui::relative(gb)).child(b))
+            }
+        };
         let grid = div()
             .flex()
             .flex_col()
             .gap(px(16.))
-            .child(
-                div()
-                    .flex()
-                    .gap(px(16.))
-                    .child(card("Training loss", legend_row, line_chart(&t, loss)))
-                    .child(card("Validation mAP", map_legend, line_chart(&t, map))),
-            )
-            .child(
-                div()
-                    .flex()
-                    .gap(px(16.))
-                    .child(card("Precision and recall", pr_legend, line_chart(&t, pr)))
-                    .child(card("Learning rate", lr_legend, line_chart(&t, lr))),
-            );
+            .child(row(
+                card("Validation mAP", "per epoch", map_legend, line_chart(&t, map)).into_any_element(),
+                card("Training loss", "smoothed · EMA 0.94", loss_legend, line_chart(&t, loss))
+                    .into_any_element(),
+                0.6,
+                0.4,
+            ))
+            .child(row(
+                card("Precision and recall", "validation", pr_legend, line_chart(&t, pr)).into_any_element(),
+                card("Learning rate", "cosine · warmup 3", lr_legend, line_chart(&t, lr)).into_any_element(),
+                0.6,
+                0.4,
+            ));
         // One Tab stop for the linked charts: arrows walk the epochs.
         self.chart_group("run-charts", 1.0 / total.max(1.0), crate::controls::Cursor::Run, grid, window, cx)
     }
@@ -867,7 +934,7 @@ impl FoloApp {
                             .rounded(px(radius::MD))
                             .overflow_hidden()
                             .bg(t.bg_inset)
-                            .child(image_canvas(&t, img, dims, boxes, Fit::Contain, false));
+                            .child(image_canvas(&t, img, dims, boxes, Fit::Cover, false));
                         square.style().aspect_ratio = Some(1.0);
                         div().flex_1().min_w(px(0.)).child(square).into_any_element()
                     })
@@ -911,7 +978,7 @@ impl FoloApp {
             .into_any_element()
     }
 
-    fn logs_panel(&mut self, r: &Run, cx: &mut Context<Self>) -> AnyElement {
+    fn logs_panel(&mut self, r: &Run, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
         let body = match self.store.logs.get(&r.id) {
             Some(Load::Ready(lines)) => {
@@ -976,15 +1043,51 @@ impl FoloApp {
                 .into_any_element(),
             _ => loading_rows(&t, "logs", 8).into_any_element(),
         };
-        let follow = if r.status == RunStatus::Running {
+        // Follow the tail while the view is at the bottom; scrolling up pauses it.
+        let at_bottom = {
+            let max = self.log_scroll.max_offset().height;
+            max - (-self.log_scroll.offset().y) < px(24.)
+        };
+        let n_lines = self.store.logs.get(&r.id).and_then(|l| l.ready()).map_or(0, |l| l.len());
+        if at_bottom && n_lines != self.log_seen {
+            self.log_scroll.scroll_to_bottom();
+        }
+        self.log_seen = n_lines;
+        let follow = if r.status != RunStatus::Running {
+            div().into_any_element()
+        } else if at_bottom {
             div()
                 .flex()
                 .items_center()
                 .gap(px(6.))
                 .child(dot(t.accent_fill(), 6., true, "log-live"))
                 .child(text(ty::XS, t.text_tertiary).child("Following"))
+                .into_any_element()
         } else {
-            div()
+            let el = div()
+                .id("log-resume")
+                .flex()
+                .items_center()
+                .gap(px(4.))
+                .px(px(6.))
+                .h(px(20.))
+                .rounded(px(radius::SM))
+                .cursor_pointer()
+                .hover(|s| s.bg(t.bg_hover))
+                .child(text(ty::XS, t.text_secondary).child("Resume following"))
+                .child(icon("icons/chevron-down.svg", 12., t.text_secondary));
+            self.bind(
+                el,
+                "log-resume",
+                radius::SM,
+                window,
+                cx,
+                act(|this, _, cx| {
+                    this.log_scroll.scroll_to_bottom();
+                    cx.notify();
+                }),
+            )
+            .into_any_element()
         };
         panel(&t)
             .flex_1()

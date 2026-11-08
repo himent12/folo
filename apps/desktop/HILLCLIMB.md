@@ -295,3 +295,156 @@ Round 9 changes:
 - **Charts:** a key hint under a keyboard-focused chart group; a fade under the log header.
 - **Consistency:** connection dots use success green; one format ("42 / 100", "640 px").
 - **Tooling:** `shoot-all.ps1` retries a capture once when a window is slow to appear.
+
+## Round 9
+
+| Line | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | avg |
+|------|---|---|---|---|---|---|---|---|---|----|----|----|-----|
+| Opus 5.5 | 8 | 7 | 8 | 8 | 8 | 8 | 8 | 8 | 8 | 8 | 8 | 8 | 7.9 |
+| GPT-6.1 Sol | 8 | 8 | 8 | 8 | 8 | 8 | 8 | 9 | 8 | 8 | 9 | 8 | 8.2 |
+
+Shared issues:
+- The Runs table wrapped "120 / 120".
+- Marker labels at different heights in sibling charts.
+- Empty bands above the plots.
+- The Recent runs gap at wide widths.
+- box and dfl were neighbouring hues.
+- The folded toast row couldn't expand and floated as its own card.
+- "Following" on the log wasn't true once scrolled.
+- Help icons were pointer-only.
+- Chip counts didn't say they count boxes.
+- Slider thumbs had no hover state.
+- Raw loss traces competed with the smoothed lines.
+- The KPI block was heavy.
+- The failure marker sat past the data.
+- Shortcuts were split mid-group.
+- Dimmed label chips lost contrast.
+- The light-theme letterbox disappeared.
+
+Round 10 changes:
+- **Charts:**
+  - Markers have pinned lanes (lane 0 for events, lane 1 for the schedule), so siblings match.
+  - Less padding above plots; raw traces at 9 %.
+  - dfl dashed, with a dashed legend swatch.
+  - The failure marker sits at the last trained step.
+- **Runs:** fixed 72 px no-wrap fractions; one-step-smaller KPIs when the strip wraps.
+- **Log:** follows only at the bottom, with "Resume following" otherwise.
+- **Recent runs:** a fixed 170 px name column with a spacer after the status.
+- **Toasts:** a slim strip attached to the stack: "Show N earlier" / "Dismiss all".
+- **Playground:** focusable help icons that show their text on keyboard focus; latency follows the samples in one scrolling column, and the toolbar drops the duplicate ms.
+- **Datasets:** "Boxes" before the class chips; a visible letterbox cell in both themes.
+- **Controls:** slider-thumb hover.
+- **Inspector:** label chips stay full strength when other boxes dim.
+- **Settings:** shortcuts in "Actions" and "Go to" groups.
+- **New run:** a fade above the footer.
+
+## Round 10
+
+| Line | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | avg |
+|------|---|---|---|---|---|---|---|---|---|----|----|----|-----|
+| Opus 5.5 | 8 | 8 | 8 | 8 | 8 | 7 | 8 | 8 | 8 | 8 | 7 | 8 | 7.8 |
+| GPT-6.1 Sol | 8 | 8 | 9 | 8 | 8 | 7 | 8 | 8 | 8 | 7 | 8 | 8 | 7.9 |
+
+Shared issues:
+- Failed-run labels collided: best and failure were both pinned to lane 0.
+- The dataset filter row wrapped awkwardly at minimum width.
+- Scroll thumbs were paint-only.
+- The confusion matrix's single blue ramp made errors look like hits.
+- The System strip at 1280 was mostly empty.
+- Image tabs and the split filter used the same control.
+- The Playground rail was too wide at minimum size.
+- Close mosaic had no number field.
+- The palette cut its last row.
+- Toasts expired under keyboard focus.
+- Reduce motion ignored the OS setting.
+- Copy drift ("at epoch" vs "· epoch"; pill before vs after the name).
+- "Server unreachable" appeared three times.
+
+Round 11 changes:
+- **Charts:** a pinned lane falls back to another lane on a collision; "failed in epoch N".
+- **Scroll thumbs:** drawn from `ThumbGeo` and draggable (app-level drag state); a track click jumps there.
+- **Confusion matrix:** blue only on the diagonal, errors and margins on a neutral ramp; the bottom row is explained as the false-positive split.
+- **Dataset detail:**
+  - Underline tabs for Images / Statistics.
+  - Class chips on their own row below 1100 px.
+  - The grid defaults to Fill.
+- **Overview:** System meters flex; the hero pill comes after the name; a quiet subtitle on error; the hero loss axis ends on a tick.
+- **Playground:** a 280 px rail and latency in the toolbar below 1100 px.
+- **New run:** a Close mosaic number field, validated against the epoch count.
+- **Overlays and accessibility:**
+  - A bottom fade on the palette.
+  - Toasts wait while their buttons have keyboard focus.
+  - Reduce motion starts from Windows' animation setting (`SPI_GETCLIENTAREAANIMATION`).
+
+## Round 11
+
+| Line | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | avg |
+|------|---|---|---|---|---|---|---|---|---|----|----|----|-----|
+| Opus 5.5 | 8 | 8 | 8 | 8 | 8 | 7 | 8 | 8 | 8 | 8 | 8 | 8 | 7.9 |
+| GPT-6.1 Sol | 8 | 8 | 9 | 8 | 8 | 8 | 8 | 9 | 8 | 7 | 8 | 8 | 8.1 |
+
+Rounds 5–11 held at 7.8–8.2. Per-issue fixes had reached diminishing returns, so round 12 is a structural redesign
+against `DIRECTION.md`, written by a design-director pass. The review brief now also requires a "To make it a 9:" for
+every line below 9.
+
+Round 12 changes (structural):
+- **Chart anatomy:** value legends instead of the floating readout; a cursor x-chip on the axis; Geist tabular ticks;
+  one annotation band; the best epoch as a lime dot on its series; no "epoch" corner caption.
+- **Run dashboard:**
+  - Five KPIs in one row.
+  - Validation mAP (3) beside Training loss (2) at 220 px, with loss toggles and values on their own row.
+  - Precision / recall beside the learning rate at 140 px.
+  - Rows stack below 1120 px.
+- **Overview and sidebar:**
+  - The sidebar live card becomes a 36 px row with a 2 px rail.
+  - The Overview hero has a 48 px header with a progress rail, a 2×2 KPI column, one mAP chart with a value legend,
+    and a system-meter footer.
+  - Lists are single-line 36 px rows with dot statuses; meta columns appear only at 1500 px and up.
+- **Runs and model detail:**
+  - The Runs table is single-line 36 px rows with Model, Dataset and Size · batch columns (wide only).
+  - Durations read "14m 55s".
+  - Model detail has a double-width 32 px mAP50-95 tile; the per-class table isolates PR curves on hover or focus.
+- **Dataset, Settings and New run:**
+  - Dataset detail puts tabs, split, Fit/Fill, Boxes and size on one line; class chips go on a row with the count.
+  - Settings is one 760 px column.
+  - New run puts each slider and its exact field on one row.
+- **Header meta:** a 12 px line.
+- **Richer demo data:** 5 datasets, 9 runs, 6 models.
+
+## Round 12 (structural)
+
+| Line | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | avg |
+|------|---|---|---|---|---|---|---|---|---|----|----|----|-----|
+| Opus 5.5 | 8 | 7 | 8 | 6 | 7 | 7 | 8 | 7 | 8 | 8 | 8 | 7 | 7.4 |
+| GPT-6.1 Sol | 8 | 8 | 8 | 7 | 8 | 7 | 8 | 8 | 8 | 8 | 7 | 8 | 7.8 |
+
+The redesign landed, but its seams cost points:
+- Settings controls were ragged, with the address field clipped.
+- The three dashboard rows used three different gutters.
+- Linked charts showed different ticks, and the cursor chip collided with tick labels.
+- The PR legend was below the fold.
+- Units sat below the baseline.
+- The loading skeleton didn't match the loaded page.
+- Off-diagonal confusion cells were flat.
+- Sol again reported missing light-theme Playground boxes; the capture has them.
+
+Round 13 changes:
+- **Settings:** label columns flex, controls right-aligned in full-width rows (the panels are flex columns: block panels don't stretch children in GPUI).
+- **Run dashboard:**
+  - One 3:2 grid for all three rows.
+  - Every chart card is header + 28 px legend row + plot, so plot tops align.
+  - Six shared x ticks; tick labels hidden under the cursor chip.
+  - Three y ticks on the small charts.
+  - Square cropped validation samples; compact charts on short windows.
+- **Type and copy:** units bottom-aligned and lifted to the numeral's baseline (`baseline_lift`); "best X @ N" everywhere.
+- **Model page:**
+  - PR class chips with AP50 in the panel header; hover or keyboard focus isolates a curve.
+  - Danger-tinted ramp for confusion errors, scaled to 20 %.
+  - A detail line on every model KPI.
+- **Models table:** 36 px single-line rows with a From run column.
+- **Overview:** the loading skeleton mirrors the hero; the chart tints the epochs not reached yet, labelled with the ETA.
+- **Polish:**
+  - Dialogs and the palette fade in over 160 ms (instant under Reduce motion).
+  - Grid tiles show a hover edge.
+  - Taller palette and log edge fades.
+  - Tabular Geist for coordinates and number fields.

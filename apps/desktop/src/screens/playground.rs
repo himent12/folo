@@ -65,7 +65,7 @@ impl FoloApp {
             &t,
             "Playground",
             if no_models_hdr {
-                "No models yet: train one to start detecting."
+                "Run a model on any image."
             } else {
                 "Run a model on any image. Drop a file anywhere in the window."
             },
@@ -187,7 +187,6 @@ impl FoloApp {
         let paint_cell = bounds_cell.clone();
         let wheel_cell = bounds_cell.clone();
         let (zoom, pan) = (self.play_zoom, self.play_pan);
-        let latency = self.play_pred.ready().map(|p| p.timing.total_ms);
         let zoom_bar = div()
             .flex()
             .items_center()
@@ -289,12 +288,22 @@ impl FoloApp {
                     })
                     .child(div().flex_1().min_w(px(8.)))
                     .when(loading, |d| d.child(text(ty::XS, t.text_tertiary).flex_none().child("Detecting…")))
-                    .when_some(latency, |d, ms| {
-                        d.child(
-                            text(ty::XS, t.text_secondary).flex_none().tnum().child(format!("{ms:.1} ms")),
-                        )
-                        .child(div().flex_none().w(px(1.)).h(px(16.)).bg(t.line_subtle))
-                    })
+                    // Compact windows: the side panel's latency scrolls away, so the toolbar shows it.
+                    .when_some(
+                        self.play_pred
+                            .ready()
+                            .map(|p| p.timing.total_ms)
+                            .filter(|_| window.viewport_size().width < px(1100.)),
+                        |d, ms| {
+                            d.child(
+                                text(ty::XS, t.text_secondary)
+                                    .flex_none()
+                                    .tnum()
+                                    .child(format!("{ms:.1} ms")),
+                            )
+                            .child(div().flex_none().w(px(1.)).h(px(16.)).bg(t.line_subtle))
+                        },
+                    )
                     .when_some(count, |d, n| {
                         d.child(div().flex_none().flex().items_center().gap(px(6.)).child(
                             text(ty::XS, t.text_secondary).tnum().child(format!(
@@ -429,7 +438,14 @@ impl FoloApp {
         );
         let conf = self.slider("play-conf", self.play_conf, 0.05, 0.95, 0.01, window, cx);
         let iou = self.slider("play-iou", self.play_iou, 0.3, 0.95, 0.01, window, cx);
-        let field = |label: &str, value: String, control: AnyElement, help: &'static str| {
+        let conf_help = self.help_icon(
+            "help-conf",
+            "Hide detections scoring below this. Filtering is instant; it doesn't rerun the model.",
+            window,
+            cx,
+        );
+        let iou_help = self.help_icon("help-iou", "Non-max suppression drops a weaker box that overlaps a stronger one by more than this. Changing it reruns the model.", window, cx);
+        let field = |label: &str, value: String, control: AnyElement, help: AnyElement| {
             div()
                 .flex()
                 .flex_col()
@@ -449,14 +465,7 @@ impl FoloApp {
                                         .font_weight(FontWeight::MEDIUM)
                                         .child(label.to_string()),
                                 )
-                                .child(
-                                    div()
-                                        .id(SharedString::from(format!("help-{label}")))
-                                        .p(px(2.))
-                                        .cursor_default()
-                                        .tooltip(crate::controls::tip(help, None))
-                                        .child(icon("icons/info.svg", 12., t.text_tertiary)),
-                                ),
+                                .child(help),
                         )
                         .child(text(ty::SM, t.text_primary).tnum().child(value)),
                 )
@@ -505,13 +514,13 @@ impl FoloApp {
                     "Confidence",
                     format!("{:.2}", self.play_conf),
                     conf.into_any_element(),
-                    "Hide detections scoring below this. Filtering is instant; it doesn't rerun the model.",
+                    conf_help,
                 ))
                 .child(field(
                     "IoU",
                     format!("{:.2}", self.play_iou),
                     iou.into_any_element(),
-                    "Non-max suppression drops a weaker box that overlaps a stronger one by more than this. Changing it reruns the model.",
+                    iou_help,
                 ))
             });
 
@@ -761,13 +770,12 @@ impl FoloApp {
                 )
                 .child(div().flex().gap(px(6.)).children(thumbs))
         });
-        // Short windows scroll the latency with the rest instead of pinning it over the detections.
-        let pinned = window.viewport_size().height >= px(700.);
-        // The panel scrolls, so short windows never squeeze a section to nothing; latency stays
-        // pinned at the bottom because it is the number people look for.
+        // One scrolling column: controls, detections, samples, then latency right after them (no
+        // pinned footer, so no dead band and nothing hidden on short windows).
+        let rail = if window.viewport_size().width < px(1100.) { 280. } else { 320. };
         panel(&t)
             .relative()
-            .w(px(320.))
+            .w(px(rail))
             .flex_none()
             .overflow_hidden()
             .flex()
@@ -787,15 +795,10 @@ impl FoloApp {
                             .child(hairline(&t))
                             .child(detections)
                             .children(picker)
-                            .when(!pinned, |d| d.children(timing.take())),
+                            .children(timing),
                     ),
             )
-            .when(pinned, |d| {
-                d.children(
-                    timing.take().map(|el| div().flex_none().flex().flex_col().bg(t.bg_panel).child(el)),
-                )
-            })
-            .child(crate::ui::scrollbar(&t, self.play_side_scroll.clone()))
+            .child(self.scrollbar(self.play_side_scroll.clone(), cx))
             .into_any_element()
     }
 

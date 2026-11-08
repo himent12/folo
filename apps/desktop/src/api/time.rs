@@ -80,12 +80,13 @@ pub fn ago(then: i64, now: i64) -> String {
 /// Compact duration: "42 s", "12 m 05 s", "3 h 20 m".
 pub fn duration(secs: f64) -> String {
     let s = secs.max(0.0).round() as i64;
+    // Units hug their numbers ("14m 55s"), like a clock reading, not prose.
     if s < 60 {
-        format!("{s} s")
+        format!("{s}s")
     } else if s < 3600 {
-        format!("{} m {:02} s", s / 60, s % 60)
+        format!("{}m {:02}s", s / 60, s % 60)
     } else {
-        format!("{} h {:02} m", s / 3600, s / 60 % 60)
+        format!("{}h {:02}m", s / 3600, s / 60 % 60)
     }
 }
 
@@ -108,7 +109,7 @@ mod tests {
         assert_eq!(ago(0, 10), "just now");
         assert_eq!(ago(0, 600), "10 min ago");
         assert_eq!(ago(0, 7200), "2 h ago");
-        assert_eq!(duration(1840.0), "30 m 40 s");
-        assert_eq!(duration(12_000.0), "3 h 20 m");
+        assert_eq!(duration(1840.0), "30m 40s");
+        assert_eq!(duration(12_000.0), "3h 20m");
     }
 }

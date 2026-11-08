@@ -55,7 +55,7 @@ pub fn detail_header(
                 .gap(px(4.))
                 .min_w_0()
                 .child(div().h(px(ty::XL.line)).flex().items_center().child(title))
-                .child(div().text_color(t.text_secondary).text_size(px(ty::BASE.size)).child(subtitle)),
+                .child(div().text_color(t.text_secondary).text_size(px(ty::SM.size)).child(subtitle)),
         )
         .child(div().h(px(ty::XL.line)).flex().items_center().gap(px(8.)).flex_none().children(actions))
 }

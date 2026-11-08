@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    Animation, AnimationExt, Bounds, Div, FontFeatures, FontWeight, Hsla, IntoElement, ParentElement,
-    ScrollHandle, SharedString, Styled, Svg, canvas, div, fill, point, px, relative, size, svg,
+    Animation, AnimationExt, Bounds, Div, FontFeatures, FontWeight, Hsla, IntoElement, ParentElement, Pixels,
+    ScrollHandle, SharedString, Styled, Svg, div, fill, point, px, relative, size, svg,
 };
 
 use crate::api::{Label, RunStatus};
@@ -19,6 +19,25 @@ use crate::theme::{Theme, TypeStep, radius, ty};
 static REDUCE_MOTION: AtomicBool = AtomicBool::new(false);
 
 /// Settings › Reduce motion: stops pulses and shimmers and makes transitions instant.
+/// Whether the OS asks for less motion (Windows: Settings › Accessibility › Animation effects off).
+pub fn os_prefers_reduced_motion() -> bool {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            SPI_GETCLIENTAREAANIMATION, SystemParametersInfoW,
+        };
+        let mut on: i32 = 1;
+        // SAFETY: SPI_GETCLIENTAREAANIMATION writes one BOOL into the pointed-to value.
+        let ok =
+            unsafe { SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, (&mut on as *mut i32).cast(), 0) };
+        ok != 0 && on == 0
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
 pub fn set_reduce_motion(on: bool) {
     REDUCE_MOTION.store(on, Ordering::Relaxed);
 }
@@ -196,6 +215,21 @@ pub fn badge(t: &Theme, label: impl Into<SharedString>, tone: Tone) -> Div {
 }
 
 /// Status chip for a run: a dot (pulsing while running) and the status word.
+/// Status for dense rows: a dot and a word, no tinted pill.
+pub fn status_dot(t: &Theme, s: RunStatus, id: &str) -> Div {
+    let (_, fg, dotc) = status_tone(s).colors(t);
+    div()
+        .flex()
+        .items_center()
+        .gap(px(6.))
+        .child(dot(dotc, 6., s == RunStatus::Running, format!("sd-{id}")))
+        .child(
+            text(ty::XS, if s == RunStatus::Running { t.text_primary } else { fg })
+                .whitespace_nowrap()
+                .child(s.label()),
+        )
+}
+
 pub fn status_badge(t: &Theme, s: RunStatus, id: &str) -> Div {
     let tone = status_tone(s);
     let (_, _, dotc) = tone.colors(t);
@@ -247,13 +281,22 @@ pub fn metric(
     s: TypeStep,
     unit_step: TypeStep,
 ) -> Div {
+    // GPUI's flex baseline doesn't align mixed sizes, so bottom-align and lift the unit by the
+    // difference between the two lines' baselines.
     div()
         .flex()
-        .items_baseline()
-        .gap(px(3.))
+        .items_end()
+        .gap(px(2.))
         .whitespace_nowrap()
         .child(text(s, t.text_primary).tnum().child(value.into()))
-        .when(!unit.is_empty(), |d| d.child(text(unit_step, t.text_tertiary).tnum().child(unit.to_string())))
+        .when(!unit.is_empty(), |d| {
+            d.child(
+                text(unit_step, t.text_tertiary)
+                    .tnum()
+                    .pb(px(baseline_lift(s, unit_step)))
+                    .child(unit.to_string()),
+            )
+        })
 }
 
 /// Labelled metric tile body: overline label, value, optional detail line.
@@ -269,6 +312,13 @@ pub fn stat(t: &Theme, label: &str, value: impl Into<SharedString>, unit: &str, 
 }
 
 /// A duration as a metric: numbers at value size, units ("h", "m", "s") one step smaller.
+/// How far above the bottom of its line box a smaller step's baseline must move to meet a larger
+/// step's baseline (both bottom-aligned): baseline ≈ half the leading plus 0.2 em of descent.
+pub fn baseline_lift(big: TypeStep, small: TypeStep) -> f32 {
+    let from_bottom = |s: TypeStep| (s.line - s.size) / 2. + 0.2 * s.size;
+    (from_bottom(big) - from_bottom(small)).max(0.)
+}
+
 pub fn duration_metric(t: &Theme, secs: Option<f64>, s: TypeStep, unit_step: TypeStep) -> Div {
     let Some(secs) = secs else { return text(s, t.text_primary).child("–") };
     let total = secs.max(0.0).round() as i64;
@@ -279,12 +329,15 @@ pub fn duration_metric(t: &Theme, secs: Option<f64>, s: TypeStep, unit_step: Typ
     } else {
         vec![((total / 3600).to_string(), "h"), (format!("{:02}", total / 60 % 60), "m")]
     };
-    div()
-        .flex()
-        .items_baseline()
-        .gap(px(6.))
-        .whitespace_nowrap()
-        .children(parts.into_iter().map(|(v, u)| metric(t, v, u, s, unit_step)))
+    // "14m 55s": each unit hugs its number; the pair is one reading.
+    div().flex().items_end().gap(px(5.)).whitespace_nowrap().children(parts.into_iter().map(|(v, u)| {
+        div()
+            .flex()
+            .items_end()
+            .gap(px(1.))
+            .child(text(s, t.text_primary).tnum().child(v))
+            .child(text(unit_step, t.text_tertiary).pb(px(baseline_lift(s, unit_step))).child(u))
+    }))
 }
 
 /// A filesystem path as the platform writes it (backslashes on Windows).
@@ -371,41 +424,20 @@ pub fn empty_state(t: &Theme, icon_path: &'static str, title: &str, body: &str, 
         )
 }
 
-/// A series legend: short coloured strokes with names.
-pub fn legend(t: &Theme, items: &[(&str, Hsla)]) -> gpui::AnyElement {
+/// One legend entry with its value: swatch, name, number (tabular).
+pub fn legend_value(t: &Theme, name: &str, color: Hsla, dashed: bool, value: Option<String>) -> Div {
+    let swatch = if dashed {
+        div().w(px(10.)).flex().gap(px(2.)).children((0..3).map(move |_| div().w(px(2.)).h(px(2.)).bg(color)))
+    } else {
+        div().w(px(10.)).h(px(2.)).rounded_full().bg(color)
+    };
     div()
         .flex()
-        .gap(px(12.))
-        .children(items.iter().map(|(name, color)| {
-            div()
-                .flex()
-                .items_center()
-                .gap(px(5.))
-                .child(div().w(px(10.)).h(px(2.)).rounded_full().bg(*color))
-                .child(text(ty::XS, t.text_secondary).whitespace_nowrap().child(name.to_string()))
-        }))
-        .into_any_element()
-}
-
-/// A legend whose items can be dashed (two series sharing a hue).
-pub fn legend_styled(t: &Theme, items: &[(&str, Hsla, bool)]) -> gpui::AnyElement {
-    div()
-        .flex()
-        .gap(px(12.))
-        .children(items.iter().map(|(name, color, dashed)| {
-            let swatch = if *dashed {
-                div().flex().gap(px(2.)).children((0..3).map(|_| div().w(px(2.)).h(px(2.)).bg(*color)))
-            } else {
-                div().w(px(10.)).h(px(2.)).rounded_full().bg(*color)
-            };
-            div()
-                .flex()
-                .items_center()
-                .gap(px(5.))
-                .child(swatch)
-                .child(text(ty::XS, t.text_secondary).whitespace_nowrap().child(name.to_string()))
-        }))
-        .into_any_element()
+        .items_center()
+        .gap(px(5.))
+        .child(swatch)
+        .child(text(ty::XS, t.text_secondary).whitespace_nowrap().child(name.to_string()))
+        .when_some(value, |d, v| d.child(text(ty::XS, t.text_primary).tnum().whitespace_nowrap().child(v)))
 }
 
 /// A class swatch: a small square in the class colour.
@@ -486,32 +518,39 @@ mod tests {
     }
 }
 
-/// A thin scroll thumb for a scroll container (GPUI draws none), so overflow is visible. Place it
-/// after the container inside a relative parent; it reads the container's handle when painting.
-pub fn scrollbar(t: &Theme, handle: ScrollHandle) -> impl IntoElement {
-    let color = crate::theme::alpha(t.text_tertiary, 0.45);
-    canvas(
-        |_, _, _| (),
-        move |_, _, window, _| {
-            let b = handle.bounds();
-            let max = handle.max_offset().height;
-            let h = b.size.height;
-            if max <= px(0.5) || h <= px(8.) {
-                return;
-            }
-            let thumb = (h * (h / (h + max))).max(px(28.)).min(h);
-            let off = (-handle.offset().y).clamp(px(0.), max);
-            let y = b.top() + (h - thumb) * (off / max);
-            window.paint_quad(
-                fill(Bounds::new(point(b.right() - px(6.), y + px(2.)), size(px(4.), thumb - px(4.))), color)
-                    .corner_radii(px(2.)),
-            );
-        },
-    )
-    .absolute()
-    .top_0()
-    .left_0()
-    .size_full()
+/// Where a scroll container's thumb sits, from its handle (None when nothing overflows).
+#[derive(Clone, Copy)]
+pub struct ThumbGeo {
+    pub top: Pixels,
+    pub right: Pixels,
+    pub h: Pixels,
+    pub thumb: Pixels,
+    pub y: Pixels,
+    pub max: Pixels,
+}
+
+impl ThumbGeo {
+    pub fn of(handle: &ScrollHandle) -> Option<Self> {
+        let b = handle.bounds();
+        let max = handle.max_offset().height;
+        let h = b.size.height;
+        if max <= px(0.5) || h <= px(8.) {
+            return None;
+        }
+        let thumb = (h * (h / (h + max))).max(px(28.)).min(h);
+        let off = (-handle.offset().y).clamp(px(0.), max);
+        Some(Self { top: b.top(), right: b.right(), h, thumb, y: b.top() + (h - thumb) * (off / max), max })
+    }
+}
+
+/// Paint the thumb (GPUI draws none), so overflow is visible.
+pub fn paint_thumb(t: &Theme, handle: &ScrollHandle, hot: bool, window: &mut gpui::Window) {
+    let Some(g) = ThumbGeo::of(handle) else { return };
+    let color = crate::theme::alpha(t.text_tertiary, if hot { 0.7 } else { 0.45 });
+    window.paint_quad(
+        fill(Bounds::new(point(g.right - px(6.), g.y + px(2.)), size(px(4.), g.thumb - px(4.))), color)
+            .corner_radii(px(2.)),
+    );
 }
 
 /// A run's device as shown: "RTX 4080 SUPER · Vulkan" from "NVIDIA GeForce RTX 4080 SUPER (vulkan)".
@@ -539,4 +578,17 @@ pub fn short_gpu(name: &str) -> String {
         n = n.strip_prefix(p).unwrap_or(n);
     }
     n.to_string()
+}
+
+/// Fade an overlay in over 160 ms when it first appears (instant under Reduce motion).
+pub fn appear<E: IntoElement + Styled + 'static>(el: E, id: &str) -> gpui::AnyElement {
+    if reduce_motion() {
+        return el.into_any_element();
+    }
+    el.with_animation(
+        SharedString::from(id.to_string()),
+        Animation::new(Duration::from_millis(160)).with_easing(gpui::ease_out_quint()),
+        |d, p| d.opacity(p),
+    )
+    .into_any_element()
 }

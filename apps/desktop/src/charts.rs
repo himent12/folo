@@ -16,7 +16,7 @@ use gpui::{
     div, fill, linear_color_stop, linear_gradient, point, px, size,
 };
 
-use crate::theme::{MONO, Theme, alpha, ty};
+use crate::theme::{SANS, Theme, alpha, ty};
 
 pub type HoverFn = Rc<dyn Fn(Option<f32>, &mut Window, &mut App)>;
 
@@ -80,6 +80,8 @@ pub struct Marker {
     pub x: f32,
     pub label: SharedString,
     pub color: Hsla,
+    /// A fixed label lane, so the same marker sits at the same height in sibling charts.
+    pub lane: Option<usize>,
 }
 
 pub struct LineChart {
@@ -106,6 +108,14 @@ pub struct LineChart {
     pub min_lanes: usize,
     /// X is a count (epochs): ticks land on whole numbers and the last one labels the end.
     pub x_int: bool,
+    /// Draw the floating readout box on hover. Off when the panel's legend shows the values.
+    pub readout: bool,
+    /// Fixed x tick count (shared across linked charts); None picks one from the width.
+    pub x_ticks: Option<usize>,
+    /// The part of x not reached yet (a live run's remaining epochs): tinted, with a label.
+    pub future: Option<(f32, SharedString)>,
+    /// Points to mark with a dot (x, y, colour), e.g. the best epoch.
+    pub dots: Vec<(f32, f32, Hsla)>,
 }
 
 impl LineChart {
@@ -128,6 +138,10 @@ impl LineChart {
             axis_titles: None,
             min_lanes: 0,
             x_int: false,
+            readout: true,
+            x_ticks: None,
+            future: None,
+            dots: Vec::new(),
         }
     }
 }
@@ -140,7 +154,7 @@ pub fn nice_ceil(v: f32, n: usize) -> f32 {
 }
 
 /// Height of one marker-label lane above a plot.
-const LANE: f32 = 14.;
+const LANE: f32 = 16.;
 
 pub fn nice_step(range: f32, n: usize) -> f32 {
     if range <= 0.0 || !range.is_finite() {
@@ -366,6 +380,14 @@ fn cached_envelope(points: &Arc<Vec<(f32, f32)>>, x0: f32, x1: f32, columns: usi
 }
 
 /// Index of the point nearest to `x` in a sorted series.
+/// The value a legend shows: at the shared cursor when there is one, else the latest point.
+pub fn value_at(points: &[(f32, f32)], hover: Option<f32>, x0: f32, x1: f32) -> Option<f32> {
+    match hover {
+        Some(f) => nearest(points, x0 + (x1 - x0) * f).map(|i| points[i].1),
+        None => points.last().map(|p| p.1),
+    }
+}
+
 pub fn nearest(points: &[(f32, f32)], x: f32) -> Option<usize> {
     if points.is_empty() {
         return None;
@@ -395,7 +417,7 @@ pub fn paint_text(
         len: text.len(),
         font: gpui::Font {
             features: gpui::FontFeatures(Arc::new(vec![("tnum".into(), 1)])),
-            ..gpui::font(MONO)
+            ..gpui::font(SANS)
         },
         color,
         background_color: None,
@@ -413,7 +435,10 @@ pub fn paint_text(
 fn text_width(window: &mut Window, text: &str, size_px: f32) -> Pixels {
     let run = TextRun {
         len: text.len(),
-        font: gpui::font(MONO),
+        font: gpui::Font {
+            features: gpui::FontFeatures(Arc::new(vec![("tnum".into(), 1)])),
+            ..gpui::font(SANS)
+        },
         color: gpui::black(),
         background_color: None,
         underline: None,
@@ -554,7 +579,7 @@ fn paint_line_chart(
     let ylabels: Vec<String> =
         yticks.iter().map(|v| spec.y_fmt.map_or_else(|| format_step(*v, ystep), |f| f(*v))).collect();
     // A shared minimum gutter keeps plots in a grid aligned.
-    let label_w = ylabels.iter().map(|l| text_width(window, l, label_size)).fold(px(28.), |a, b| a.max(b));
+    let label_w = ylabels.iter().map(|l| text_width(window, l, label_size)).fold(px(30.), |a, b| a.max(b));
     let left = bounds.left() + label_w + px(10.);
     let plot_w = bounds.right() - left - px(2.);
     let sx0 = |x: f32| left + plot_w * ((x - x0) / (x1 - x0));
@@ -579,9 +604,15 @@ fn paint_line_chart(
                     .any(|(ox, ow, ol, _)| *ol == lane && *ox < lx + w + px(6.) && lx < *ox + *ow + px(6.))
         };
         // Labels stay on their line: the next lane down before drifting away from it.
+        // A pinned lane first; on a collision the other lanes, so labels never overdraw.
+        let order: Vec<usize> = match m.lane {
+            Some(l) => std::iter::once(l).chain((0..3).filter(move |&x| x != l)).collect(),
+            None => (0..3).collect(),
+        };
         let spots: Vec<(Pixels, usize)> =
-            (0..3).flat_map(|lane| sides.into_iter().map(move |lx| (lx, lane))).collect();
-        let (lx, lane) = spots.into_iter().find(|&(lx, lane)| free(lx, lane)).unwrap_or((sides[0], 2));
+            order.iter().flat_map(|&lane| sides.into_iter().map(move |lx| (lx, lane))).collect();
+        let fallback = (sides[0], m.lane.unwrap_or(2));
+        let (lx, lane) = spots.into_iter().find(|&(lx, lane)| free(lx, lane)).unwrap_or(fallback);
         marker_layout.push((lx, w, lane, m));
     }
     let band = marker_layout.iter().map(|l| l.2 + 1).max().unwrap_or(0).max(spec.min_lanes) as f32 * LANE;
@@ -633,29 +664,48 @@ fn paint_line_chart(
         t.chart_axis,
     ));
     // X ticks.
-    let max_x = ((plot.size.width / px(90.)) as usize).clamp(2, 8);
+    // Remaining epochs read as planned, not empty: a faint tint and the time left.
+    if let Some((from, label)) = &spec.future
+        && *from < x1
+    {
+        let fx = sx(*from).max(plot.left());
+        window.paint_quad(fill(
+            Bounds::new(point(fx, plot.top()), size(plot.right() - fx, plot.size.height)),
+            alpha(t.text_primary, 0.025),
+        ));
+        let w = text_width(window, label, label_size);
+        paint_text(
+            window,
+            cx,
+            label,
+            point(plot.right() - w - px(6.), plot.top() + px(4.)),
+            t.text_tertiary,
+            label_size,
+            false,
+        );
+    }
+    // Linked charts pass one tick count, so every chart in a group shows the same x ticks.
+    let max_x = spec.x_ticks.unwrap_or(((plot.size.width / px(90.)) as usize).clamp(2, 8));
     let xt = if spec.x_int { int_ticks(x0, x1, max_x) } else { even_ticks(x0, x1, max_x) };
+    // Where the cursor chip will sit (legend-driven charts), so tick labels give way to it.
+    let chip_x = (!spec.readout && has_data)
+        .then_some(spec.hover)
+        .flatten()
+        .and_then(|f| {
+            let hx = x0 + (x1 - x0) * f;
+            spec.series.iter().find_map(|s| nearest(&s.points, hx).map(|i| s.points[i].0))
+        })
+        .map(sx);
     for v in &xt {
         let x = sx(*v);
         window.paint_quad(fill(Bounds::new(point(x, plot.bottom()), size(px(1.), px(4.))), t.chart_axis));
         let l = (spec.x_fmt)(*v);
         let w = text_width(window, &l, label_size);
         let lx = (x - w / 2.).clamp(plot.left() - px(4.), plot.right() - w);
+        if chip_x.is_some_and(|c| (lx + w / 2. - c).abs() < w / 2. + px(22.)) {
+            continue;
+        }
         paint_text(window, cx, &l, point(lx, plot.bottom() + px(6.)), t.chart_label, label_size, false);
-    }
-    // The x unit sits in the corner under the y labels, where no tick label goes.
-    if !spec.x_name.is_empty() && spec.axis_titles.is_none() {
-        let w = text_width(window, spec.x_name, label_size);
-        let lx = (plot.left() - px(8.) - w).max(bounds.left());
-        paint_text(
-            window,
-            cx,
-            spec.x_name,
-            point(lx, plot.bottom() + px(6.)),
-            t.text_tertiary,
-            label_size,
-            false,
-        );
     }
 
     // Markers: dashed lines under the data, labels in the band above the plot.
@@ -686,7 +736,7 @@ fn paint_line_chart(
                     // Raw data faint underneath, smoothed on top.
                     let raw = cached_envelope(&s.points, x0, x1, columns);
                     let pts: Vec<Point<Pixels>> = raw.iter().map(|&(x, y)| point(sx(x), sy(y))).collect();
-                    stroke_path(window, &pts, 1.0, alpha(s.color, 0.14), false);
+                    stroke_path(window, &pts, 1.0, alpha(s.color, 0.09), false);
                     cached_envelope(&smoothed(&s.points, s.smooth), x0, x1, columns / 2 + 1)
                 } else {
                     cached_envelope(&s.points, x0, x1, columns)
@@ -734,6 +784,15 @@ fn paint_line_chart(
         },
     );
 
+    for &(x, y, c) in &spec.dots {
+        if x >= x0 && x <= x1 {
+            let p = point(sx(x), sy(y));
+            window.paint_quad(
+                fill(Bounds::centered_at(p, size(px(10.), px(10.))), t.bg_panel).corner_radii(px(5.)),
+            );
+            window.paint_quad(fill(Bounds::centered_at(p, size(px(7.), px(7.))), c).corner_radii(px(3.5)));
+        }
+    }
     for (r, m) in &labels {
         window.paint_quad(fill(*r, t.bg_panel).corner_radii(px(3.)));
         paint_text(
@@ -784,6 +843,26 @@ fn paint_line_chart(
         Bounds::new(point(cx_px, plot.top()), size(px(1.), plot.size.height)),
         t.chart_cursor,
     ));
+    if !spec.readout {
+        // The values are in the header legend; the axis says where the cursor is.
+        let l = (spec.x_fmt)(snap);
+        let w = text_width(window, &l, label_size) + px(10.);
+        let chip = Bounds::new(
+            point((cx_px - w / 2.).clamp(plot.left() - px(4.), plot.right() - w), plot.bottom() + px(3.)),
+            size(w, px(16.)),
+        );
+        window.paint_quad(fill(chip, t.text_primary).corner_radii(px(3.)));
+        paint_text(
+            window,
+            cx,
+            &l,
+            point(chip.left() + px(5.), chip.top() + px(1.)),
+            t.bg_panel,
+            label_size,
+            false,
+        );
+        return;
+    }
     // Readout box.
     let smoothed_any = spec.series.iter().any(|s| s.smooth > 0.0);
     let title =
