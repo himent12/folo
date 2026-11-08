@@ -410,3 +410,41 @@ Round 12 changes (structural):
   - New run puts each slider and its exact field on one row.
 - **Header meta:** a 12 px line.
 - **Richer demo data:** 5 datasets, 9 runs, 6 models.
+
+## Round 12 (structural)
+
+| Line | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | avg |
+|------|---|---|---|---|---|---|---|---|---|----|----|----|-----|
+| Opus 5.5 | 8 | 7 | 8 | 6 | 7 | 7 | 8 | 7 | 8 | 8 | 8 | 7 | 7.4 |
+| GPT-6.1 Sol | 8 | 8 | 8 | 7 | 8 | 7 | 8 | 8 | 8 | 8 | 7 | 8 | 7.8 |
+
+The redesign landed, but its seams cost points:
+- Settings controls were ragged, with the address field clipped.
+- The three dashboard rows used three different gutters.
+- Linked charts showed different ticks, and the cursor chip collided with tick labels.
+- The PR legend was below the fold.
+- Units sat below the baseline.
+- The loading skeleton didn't match the loaded page.
+- Off-diagonal confusion cells were flat.
+- Sol again reported missing light-theme Playground boxes; the capture has them.
+
+Round 13 changes:
+- **Settings:** label columns flex, controls right-aligned in full-width rows (the panels are flex columns: block panels don't stretch children in GPUI).
+- **Run dashboard:**
+  - One 3:2 grid for all three rows.
+  - Every chart card is header + 28 px legend row + plot, so plot tops align.
+  - Six shared x ticks; tick labels hidden under the cursor chip.
+  - Three y ticks on the small charts.
+  - Square cropped validation samples; compact charts on short windows.
+- **Type and copy:** units bottom-aligned and lifted to the numeral's baseline (`baseline_lift`); "best X @ N" everywhere.
+- **Model page:**
+  - PR class chips with AP50 in the panel header; hover or keyboard focus isolates a curve.
+  - Danger-tinted ramp for confusion errors, scaled to 20 %.
+  - A detail line on every model KPI.
+- **Models table:** 36 px single-line rows with a From run column.
+- **Overview:** the loading skeleton mirrors the hero; the chart tints the epochs not reached yet, labelled with the ETA.
+- **Polish:**
+  - Dialogs and the palette fade in over 160 ms (instant under Reduce motion).
+  - Grid tiles show a hover edge.
+  - Taller palette and log edge fades.
+  - Tabular Geist for coordinates and number fields.

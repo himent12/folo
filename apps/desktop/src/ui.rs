@@ -281,13 +281,22 @@ pub fn metric(
     s: TypeStep,
     unit_step: TypeStep,
 ) -> Div {
+    // GPUI's flex baseline doesn't align mixed sizes, so bottom-align and lift the unit by the
+    // difference between the two lines' baselines.
     div()
         .flex()
-        .items_baseline()
+        .items_end()
         .gap(px(2.))
         .whitespace_nowrap()
         .child(text(s, t.text_primary).tnum().child(value.into()))
-        .when(!unit.is_empty(), |d| d.child(text(unit_step, t.text_tertiary).tnum().child(unit.to_string())))
+        .when(!unit.is_empty(), |d| {
+            d.child(
+                text(unit_step, t.text_tertiary)
+                    .tnum()
+                    .pb(px(baseline_lift(s, unit_step)))
+                    .child(unit.to_string()),
+            )
+        })
 }
 
 /// Labelled metric tile body: overline label, value, optional detail line.
@@ -303,6 +312,13 @@ pub fn stat(t: &Theme, label: &str, value: impl Into<SharedString>, unit: &str, 
 }
 
 /// A duration as a metric: numbers at value size, units ("h", "m", "s") one step smaller.
+/// How far above the bottom of its line box a smaller step's baseline must move to meet a larger
+/// step's baseline (both bottom-aligned): baseline ≈ half the leading plus 0.2 em of descent.
+pub fn baseline_lift(big: TypeStep, small: TypeStep) -> f32 {
+    let from_bottom = |s: TypeStep| (s.line - s.size) / 2. + 0.2 * s.size;
+    (from_bottom(big) - from_bottom(small)).max(0.)
+}
+
 pub fn duration_metric(t: &Theme, secs: Option<f64>, s: TypeStep, unit_step: TypeStep) -> Div {
     let Some(secs) = secs else { return text(s, t.text_primary).child("–") };
     let total = secs.max(0.0).round() as i64;
@@ -314,13 +330,13 @@ pub fn duration_metric(t: &Theme, secs: Option<f64>, s: TypeStep, unit_step: Typ
         vec![((total / 3600).to_string(), "h"), (format!("{:02}", total / 60 % 60), "m")]
     };
     // "14m 55s": each unit hugs its number; the pair is one reading.
-    div().flex().items_baseline().gap(px(5.)).whitespace_nowrap().children(parts.into_iter().map(|(v, u)| {
+    div().flex().items_end().gap(px(5.)).whitespace_nowrap().children(parts.into_iter().map(|(v, u)| {
         div()
             .flex()
-            .items_baseline()
+            .items_end()
             .gap(px(1.))
             .child(text(s, t.text_primary).tnum().child(v))
-            .child(text(unit_step, t.text_tertiary).child(u))
+            .child(text(unit_step, t.text_tertiary).pb(px(baseline_lift(s, unit_step))).child(u))
     }))
 }
 
@@ -562,4 +578,17 @@ pub fn short_gpu(name: &str) -> String {
         n = n.strip_prefix(p).unwrap_or(n);
     }
     n.to_string()
+}
+
+/// Fade an overlay in over 160 ms when it first appears (instant under Reduce motion).
+pub fn appear<E: IntoElement + Styled + 'static>(el: E, id: &str) -> gpui::AnyElement {
+    if reduce_motion() {
+        return el.into_any_element();
+    }
+    el.with_animation(
+        SharedString::from(id.to_string()),
+        Animation::new(Duration::from_millis(160)).with_easing(gpui::ease_out_quint()),
+        |d, p| d.opacity(p),
+    )
+    .into_any_element()
 }

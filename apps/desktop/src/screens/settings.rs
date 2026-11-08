@@ -20,16 +20,19 @@ impl FoloApp {
         let header = page_header(&t, "Settings", "Connection, appearance and keyboard shortcuts.", vec![]);
         let row = |title: &str, help: AnyElement, control: AnyElement| {
             div()
+                .w_full()
                 .flex()
                 .items_center()
                 .justify_between()
                 .gap(px(24.))
                 .px(px(16.))
-                .py(px(14.))
+                .py(px(16.))
                 .border_b_1()
                 .border_color(t.line_subtle)
+                // Label and description take the slack (and wrap); every control ends on the same edge.
                 .child(
                     div()
+                        .flex_1()
                         .flex()
                         .flex_col()
                         .gap(px(2.))
@@ -41,7 +44,7 @@ impl FoloApp {
                         )
                         .child(help),
                 )
-                .child(div().flex_none().child(control))
+                .child(div().flex_none().flex().justify_end().child(control))
         };
         let help = |s: &str| text(ty::SM, t.text_tertiary).child(s.to_string()).into_any_element();
         let mode_sel = if self.server_mode == ServerMode::Mock { 0 } else { 1 };
@@ -64,7 +67,7 @@ impl FoloApp {
         let url_ring = self.ring(&url_fh, window);
         let url = div()
             .relative()
-            .w(px(280.))
+            .w(px(232.))
             .h(px(32.))
             .px(px(10.))
             .flex()
@@ -123,6 +126,8 @@ impl FoloApp {
             ),
         };
         let connection = panel(&t)
+            .flex()
+            .flex_col()
             .overflow_hidden()
             .child(panel_header(&t, "Connection").child(status))
             .child(row(
@@ -178,6 +183,8 @@ impl FoloApp {
             }),
         );
         let appearance = panel(&t)
+            .flex()
+            .flex_col()
             .overflow_hidden()
             .child(panel_header(&t, "Appearance"))
             .child(row(
@@ -232,7 +239,7 @@ impl FoloApp {
                         .child(shortcut(&t, keys))
                 }))
         };
-        let keys = panel(&t).child(panel_header(&t, "Keyboard")).child(
+        let keys = panel(&t).flex().flex_col().child(panel_header(&t, "Keyboard")).child(
             div()
                 .flex()
                 .gap(px(32.))

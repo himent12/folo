@@ -55,8 +55,9 @@ impl FoloApp {
             .h(px(36.))
             .border_b_1()
             .border_color(t.line_subtle)
-            .child(th(&t, "Model").flex_1())
+            .child(th(&t, "Model").flex_1().min_w(px(200.)))
             .child(th(&t, "Architecture").w(px(110.)))
+            .child(th(&t, "From run").w(px(150.)))
             .child(th(&t, "mAP50-95").w(px(130.)))
             .child(th(&t, "mAP50").w(px(64.)).text_right())
             .child(th(&t, "Params").w(px(72.)).text_right())
@@ -81,7 +82,7 @@ impl FoloApp {
                         let key = format!("model-row-{}", m.id);
                         let ids_k = ids.clone();
                         let row = cols(div().id(SharedString::from(key.clone())))
-                            .h(px(52.))
+                            .h(px(36.))
                             .border_b_1()
                             .border_color(t.line_subtle)
                             .cursor_pointer()
@@ -97,8 +98,9 @@ impl FoloApp {
                                     cx.stop_propagation();
                                 }
                             }))
-                            .child(cell2(&t, m.name.clone(), run).flex_1())
-                            .child(div().w(px(110.)).flex().child(badge(&t, format!("{} · {}", m.arch.as_str(), m.imgsz), Tone::Neutral)))
+                            .child(div().flex_1().min_w(px(200.)).child(text(ty::SM, t.text_primary).font_weight(FontWeight::MEDIUM).w(px(200.)).truncate().child(m.name.clone())))
+                            .child(text(ty::SM, t.text_secondary).w(px(110.)).flex_none().tnum().child(format!("{} · {} px", m.arch.as_str(), m.imgsz)))
+                            .child(text(ty::SM, t.text_tertiary).w(px(150.)).flex_none().truncate().child(run.trim_start_matches("from ").to_string()))
                             .child(div().w(px(130.)).child(metrics.as_ref().map_or(text(ty::SM, t.text_tertiary).child("–"), |mm| bar_value(&t, mm.map50_95, f3(mm.map50_95), t.text_tertiary))))
                             .child(text(ty::SM, t.text_secondary).tnum().w(px(64.)).text_right().child(metrics.as_ref().map_or("–".into(), |mm| f3(mm.map50))))
                             .child(text(ty::SM, t.text_secondary).tnum().w(px(72.)).text_right().child(format!("{p} {pu}")))
@@ -239,7 +241,12 @@ impl FoloApp {
                 ),
             )
             .child(vline(&t))
-            .child(tile(small("mAP50", mm.as_ref().map_or("–".into(), |x| f3(x.map50)), "", None)))
+            .child(tile(small(
+                "mAP50",
+                mm.as_ref().map_or("–".into(), |x| f3(x.map50)),
+                "",
+                Some(text(ty::XS, t.text_tertiary).child("IoU 0.50")),
+            )))
             .child(vline(&t))
             .child(tile(small(
                 "Precision",
@@ -406,6 +413,13 @@ impl FoloApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let t = theme(cx);
+        if let Some(c) = ev.pr.iter().map(|c| c.class).find(|c| {
+            [format!("pr-chip-{c}"), format!("pc-row-{c}")]
+                .iter()
+                .any(|k| self.focus.borrow().get(k.as_str()).is_some_and(|f| f.is_focused(window)))
+        }) {
+            self.pr_focus = Some(c);
+        }
         let series: Vec<Series> = ev
             .pr
             .iter()
@@ -435,13 +449,58 @@ impl FoloApp {
             })
             .ok();
         });
+        let chips: Vec<AnyElement> = ev
+            .pr
+            .iter()
+            .map(|c| {
+                let class = c.class;
+                let key = format!("pr-chip-{class}");
+                let on = self.pr_focus == Some(class);
+                let el = div()
+                    .id(SharedString::from(key.clone()))
+                    .h(px(24.))
+                    .px(px(8.))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .rounded(px(radius::SM))
+                    .cursor_pointer()
+                    .when(on, |d| d.bg(t.bg_active))
+                    .hover(|s| s.bg(t.bg_hover))
+                    .on_hover(cx.listener(move |this, h: &bool, _, cx| {
+                        let next = if *h { Some(class) } else { None };
+                        if this.pr_focus != next && (*h || this.pr_focus == Some(class)) {
+                            this.pr_focus = next;
+                            cx.notify();
+                        }
+                    }))
+                    .child(div().w(px(10.)).h(px(2.)).rounded_full().bg(t.class_stroke(class)))
+                    .child(
+                        text(ty::XS, t.text_secondary)
+                            .child(m.classes.get(class as usize).cloned().unwrap_or_default()),
+                    )
+                    .child(text(ty::XS, t.text_primary).tnum().child(format!("{:.3}", c.ap50)));
+                self.bind(
+                    el,
+                    &key,
+                    radius::SM,
+                    window,
+                    cx,
+                    act(move |this, _, cx| {
+                        this.pr_focus = if this.pr_focus == Some(class) { None } else { Some(class) };
+                        cx.notify();
+                    }),
+                )
+                .into_any_element()
+            })
+            .collect();
         let mut chart = LineChart::new("pr-curve", series);
         chart.x_range = Some((0., 1.));
         chart.y_range = Some((0., 1.));
         chart.x_fmt = |v| format!("{v:.2}");
         chart.x_name = "recall";
-        // As tall as the confusion matrix beside it, so the two panels line up.
-        chart.height = (44. * ev.confusion.len() as f32 + 34.).max(240.);
+        // As tall as the confusion matrix beside it, less the legend row, so the panels end level.
+        chart.height = (44. * ev.confusion.len() as f32 + 64.).max(240.);
         chart.hover = self.pr_hover;
         chart.on_hover = Some(on_hover);
         chart.value_fmt = Some(|v| format!("P {v:.3}"));
@@ -450,10 +509,9 @@ impl FoloApp {
             .flex_1()
             .flex()
             .flex_col()
-            .child(
-                panel_header(&t, "Precision–recall")
-                    .child(caption(&t, "precision vs recall · IoU 0.50 · hover a class below to isolate it")),
-            )
+            .child(panel_header(&t, "Precision–recall").child(caption(&t, "precision vs recall · IoU 0.50")))
+            // The legend: one chip per class with its AP50; hover or keyboard focus isolates a curve.
+            .child(div().px(px(12.)).pt(px(8.)).flex().flex_wrap().gap(px(4.)).children(chips))
             .child(self.chart_group(
                 "pr-chart",
                 0.01,
@@ -535,9 +593,14 @@ impl FoloApp {
                         // Square-root ramp: 2 %, 10 % and 25 % stay visibly apart.
                         // Correct cells in the series blue; errors and the margins on a neutral ramp,
                         // so a 25 % confusion never looks like a 79 % hit.
-                        let hue = if diag { base } else { t.text_tertiary };
-                        let top = if diag { 0.92 } else { 0.55 };
-                        crate::theme::over(t.bg_inset, alpha(hue, (0.9 * frac.sqrt()).clamp(0.06, top)))
+                        if diag {
+                            crate::theme::over(t.bg_inset, alpha(base, (0.35 + 0.6 * frac).min(0.95)))
+                        } else {
+                            crate::theme::over(
+                                t.bg_inset,
+                                alpha(t.danger_solid, 0.06 + 0.39 * (frac / 0.2).min(1.)),
+                            )
+                        }
                     };
                     let label = if na {
                         "–".to_string()

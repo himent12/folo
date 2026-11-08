@@ -110,6 +110,10 @@ pub struct LineChart {
     pub x_int: bool,
     /// Draw the floating readout box on hover. Off when the panel's legend shows the values.
     pub readout: bool,
+    /// Fixed x tick count (shared across linked charts); None picks one from the width.
+    pub x_ticks: Option<usize>,
+    /// The part of x not reached yet (a live run's remaining epochs): tinted, with a label.
+    pub future: Option<(f32, SharedString)>,
     /// Points to mark with a dot (x, y, colour), e.g. the best epoch.
     pub dots: Vec<(f32, f32, Hsla)>,
 }
@@ -135,6 +139,8 @@ impl LineChart {
             min_lanes: 0,
             x_int: false,
             readout: true,
+            x_ticks: None,
+            future: None,
             dots: Vec::new(),
         }
     }
@@ -658,14 +664,47 @@ fn paint_line_chart(
         t.chart_axis,
     ));
     // X ticks.
-    let max_x = ((plot.size.width / px(90.)) as usize).clamp(2, 8);
+    // Remaining epochs read as planned, not empty: a faint tint and the time left.
+    if let Some((from, label)) = &spec.future
+        && *from < x1
+    {
+        let fx = sx(*from).max(plot.left());
+        window.paint_quad(fill(
+            Bounds::new(point(fx, plot.top()), size(plot.right() - fx, plot.size.height)),
+            alpha(t.text_primary, 0.025),
+        ));
+        let w = text_width(window, label, label_size);
+        paint_text(
+            window,
+            cx,
+            label,
+            point(plot.right() - w - px(6.), plot.top() + px(4.)),
+            t.text_tertiary,
+            label_size,
+            false,
+        );
+    }
+    // Linked charts pass one tick count, so every chart in a group shows the same x ticks.
+    let max_x = spec.x_ticks.unwrap_or(((plot.size.width / px(90.)) as usize).clamp(2, 8));
     let xt = if spec.x_int { int_ticks(x0, x1, max_x) } else { even_ticks(x0, x1, max_x) };
+    // Where the cursor chip will sit (legend-driven charts), so tick labels give way to it.
+    let chip_x = (!spec.readout && has_data)
+        .then_some(spec.hover)
+        .flatten()
+        .and_then(|f| {
+            let hx = x0 + (x1 - x0) * f;
+            spec.series.iter().find_map(|s| nearest(&s.points, hx).map(|i| s.points[i].0))
+        })
+        .map(sx);
     for v in &xt {
         let x = sx(*v);
         window.paint_quad(fill(Bounds::new(point(x, plot.bottom()), size(px(1.), px(4.))), t.chart_axis));
         let l = (spec.x_fmt)(*v);
         let w = text_width(window, &l, label_size);
         let lx = (x - w / 2.).clamp(plot.left() - px(4.), plot.right() - w);
+        if chip_x.is_some_and(|c| (lx + w / 2. - c).abs() < w / 2. + px(22.)) {
+            continue;
+        }
         paint_text(window, cx, &l, point(lx, plot.bottom() + px(6.)), t.chart_label, label_size, false);
     }
 

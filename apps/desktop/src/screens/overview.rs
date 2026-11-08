@@ -197,6 +197,10 @@ impl FoloApp {
                 map.on_hover = Some(on_hover);
                 map.x_name = "epoch";
                 map.readout = false;
+                map.future = Some((
+                    r.epoch as f32,
+                    r.eta_s.map_or("remaining".into(), |s| format!("ETA {}", time::duration(s)).into()),
+                ));
                 if let Some(b) = &best {
                     map.dots.push((b.epoch as f32, b.map50_95, t.accent_fill()));
                 }
@@ -398,27 +402,36 @@ impl FoloApp {
     fn idle_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
         if self.store.runs.is_loading() {
-            let block = |id: &str, w: f32, h: f32| {
-                div().w(gpui::relative(w)).h(px(h)).child(skeleton(&t, id.to_string()))
-            };
+            // Same anatomy as the live panel: header, rail, 2×2 KPIs beside one chart, meter footer.
+            let sk = |id: &str| skeleton(&t, id.to_string());
             return panel(&t)
                 .flex_1()
-                .p(px(16.))
                 .flex()
                 .flex_col()
-                .gap(px(16.))
-                .child(block("hero-title", 0.4, 22.))
-                .child(div().flex().gap(px(16.)).children(
-                    (0..4).map(|i| div().flex_1().h(px(52.)).child(skeleton(&t, format!("hero-kpi-{i}")))),
-                ))
-                .child(block("hero-progress", 1.0, 4.))
+                .child(
+                    div()
+                        .h(px(48.))
+                        .px(px(16.))
+                        .flex()
+                        .items_center()
+                        .child(div().w(px(260.)).h(px(18.)).child(sk("hero-title"))),
+                )
+                .child(div().h(px(2.)).bg(t.bg_inset))
                 .child(
                     div()
                         .flex()
-                        .gap(px(16.))
-                        .child(div().flex_1().h(px(150.)).child(skeleton(&t, "hero-c1")))
-                        .child(div().flex_1().h(px(150.)).child(skeleton(&t, "hero-c2"))),
+                        .gap(px(24.))
+                        .p(px(16.))
+                        .child(div().w(px(220.)).flex_none().flex().flex_col().gap(px(16.)).children(
+                            (0..2).map(|r| {
+                                div().flex().gap(px(16.)).children((0..2).map(move |c| {
+                                    div().flex_1().h(px(52.)).child(skeleton(&t, format!("hero-kpi-{r}{c}")))
+                                }))
+                            }),
+                        ))
+                        .child(div().flex_1().h(px(180.)).child(sk("hero-chart"))),
                 )
+                .child(div().h(px(36.)).border_t_1().border_color(t.line_subtle))
                 .into_any_element();
         }
         let has_ds = self.store.datasets.ready().is_some_and(|d| !d.is_empty());

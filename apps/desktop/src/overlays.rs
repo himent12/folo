@@ -407,7 +407,7 @@ impl FoloApp {
             .left_0()
             .size_full()
             .child(self.scrim(&t, "palette-scrim", cx, act(|this, w, cx| this.close_palette(w, cx))))
-            .child(panel_el)
+            .child(crate::ui::appear(panel_el, "palette-in"))
             .into_any_element()
     }
 
@@ -426,76 +426,89 @@ impl FoloApp {
     ) -> AnyElement {
         let close_btn =
             self.icon_button("dialog-close", "icons/x.svg", "Close (Esc)", window, cx, on_close.clone());
-        div()
-            .absolute()
-            .top_0()
-            .left_0()
-            .size_full()
-            .child(self.scrim(t, "dialog-scrim", cx, on_close))
-            .child(
-                div().absolute().top_0().left_0().size_full().flex().items_center().justify_center().child(
+        crate::ui::appear(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .child(self.scrim(t, "dialog-scrim", cx, on_close))
+                .child(
                     div()
-                        .id(id)
-                        .w(px(width))
-                        .max_h(gpui::relative(0.92))
-                        .occlude()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full()
                         .flex()
-                        .flex_col()
-                        .rounded(px(radius::XL))
-                        .bg(t.bg_overlay)
-                        .border_1()
-                        .border_color(t.line_default)
-                        .shadow(t.shadow_lg())
-                        .overflow_hidden()
+                        .items_center()
+                        .justify_center()
                         .child(
                             div()
+                                .id(id)
+                                .w(px(width))
+                                .max_h(gpui::relative(0.92))
+                                .occlude()
                                 .flex()
-                                .items_start()
-                                .justify_between()
-                                .px(px(20.))
-                                .pt(px(18.))
-                                .pb(px(14.))
+                                .flex_col()
+                                .rounded(px(radius::XL))
+                                .bg(t.bg_overlay)
+                                .border_1()
+                                .border_color(t.line_default)
+                                .shadow(t.shadow_lg())
+                                .overflow_hidden()
                                 .child(
                                     div()
                                         .flex()
-                                        .flex_col()
-                                        .gap(px(4.))
-                                        .child(text(ty::LG, t.text_primary).child(title.to_string()))
-                                        .when_some(subtitle, |d, s| {
-                                            d.child(text(ty::SM, t.text_secondary).child(s))
-                                        }),
+                                        .items_start()
+                                        .justify_between()
+                                        .px(px(20.))
+                                        .pt(px(18.))
+                                        .pb(px(14.))
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .flex_col()
+                                                .gap(px(4.))
+                                                .child(text(ty::LG, t.text_primary).child(title.to_string()))
+                                                .when_some(subtitle, |d, s| {
+                                                    d.child(text(ty::SM, t.text_secondary).child(s))
+                                                }),
+                                        )
+                                        .child(close_btn),
                                 )
-                                .child(close_btn),
-                        )
-                        .child(
-                            div()
-                                .relative()
-                                .flex_1()
-                                .min_h_0()
-                                .flex()
-                                .flex_col()
                                 .child(
                                     div()
-                                        .id("dialog-body")
+                                        .relative()
                                         .flex_1()
                                         .min_h_0()
-                                        .overflow_y_scroll()
-                                        .track_scroll(&self.dialog_scroll)
-                                        .child(body),
+                                        .flex()
+                                        .flex_col()
+                                        .child(
+                                            div()
+                                                .id("dialog-body")
+                                                .flex_1()
+                                                .min_h_0()
+                                                .overflow_y_scroll()
+                                                .track_scroll(&self.dialog_scroll)
+                                                .child(body),
+                                        )
+                                        .child(self.scrollbar(self.dialog_scroll.clone(), cx))
+                                        .child(div().absolute().bottom_0().left_0().right_0().h(px(16.)).bg(
+                                            gpui::linear_gradient(
+                                                0.,
+                                                gpui::linear_color_stop(t.bg_overlay, 0.),
+                                                gpui::linear_color_stop(
+                                                    crate::theme::alpha(t.bg_overlay, 0.),
+                                                    1.,
+                                                ),
+                                            ),
+                                        )),
                                 )
-                                .child(self.scrollbar(self.dialog_scroll.clone(), cx))
-                                .child(div().absolute().bottom_0().left_0().right_0().h(px(16.)).bg(
-                                    gpui::linear_gradient(
-                                        0.,
-                                        gpui::linear_color_stop(t.bg_overlay, 0.),
-                                        gpui::linear_color_stop(crate::theme::alpha(t.bg_overlay, 0.), 1.),
-                                    ),
-                                )),
-                        )
-                        .child(footer),
+                                .child(footer),
+                        ),
                 ),
-            )
-            .into_any_element()
+            &format!("{id}-in"),
+        )
     }
 
     fn new_run_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -669,7 +682,7 @@ impl FoloApp {
                 } else {
                     t.line_default
                 })
-                .font_family(crate::theme::MONO)
+                .font_family(crate::theme::SANS)
                 .text_size(px(ty::SM.size))
                 .when(ring, |d| d.child(crate::app::focus_ring(&t, radius::MD)))
                 .child(input)
@@ -1424,7 +1437,7 @@ impl FoloApp {
                     )
                     .child(
                         text(ty::XS, if hot { t.text_secondary } else { t.text_tertiary })
-                            .font_family(crate::theme::MONO)
+                            .tnum()
                             .flex_1()
                             .text_right()
                             .child(format!(

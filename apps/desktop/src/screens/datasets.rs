@@ -664,6 +664,9 @@ impl FoloApp {
                             .flex_none()
                             .rounded(px(radius::MD))
                             .cursor_pointer()
+                            .border_1()
+                            .border_color(gpui::transparent_black())
+                            .hover(|s| s.border_color(t.line_strong))
                             .child(
                                 div()
                                     .absolute()

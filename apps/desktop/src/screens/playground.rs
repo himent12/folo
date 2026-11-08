@@ -65,7 +65,7 @@ impl FoloApp {
             &t,
             "Playground",
             if no_models_hdr {
-                "No models yet: train one to start detecting."
+                "Run a model on any image."
             } else {
                 "Run a model on any image. Drop a file anywhere in the window."
             },

@@ -405,16 +405,9 @@ impl FoloApp {
             div()
                 .flex()
                 .gap(px(16.))
-                .child(div().flex_1().min_w_0().flex().child(samples))
-                // Wide windows split evenly, so log lines fit on one row; otherwise a fixed column
-                // wide enough for an epoch summary line.
-                .map(|d| {
-                    if window.viewport_size().width >= px(1500.) {
-                        d.child(div().flex_1().min_w_0().flex().child(logs))
-                    } else {
-                        d.child(div().w(px(500.)).flex_none().flex().child(logs))
-                    }
-                }),
+                // The same 3:2 columns as the chart rows above, so every gutter lines up.
+                .child(div().flex().min_w_0().flex_grow().flex_basis(gpui::relative(0.6)).child(samples))
+                .child(div().flex().min_w_0().flex_grow().flex_basis(gpui::relative(0.4)).child(logs)),
         );
         body = body.child(self.config_panel(&r, &ds_name, cx));
         self.page_frame(&t, header, body, cx)
@@ -551,7 +544,7 @@ impl FoloApp {
                 delta.or_else(|| {
                     r.best.as_ref().map(|b| {
                         text(ty::XS, t.text_tertiary).tnum().child(format!(
-                            "best {} · epoch {}",
+                            "best {} @ {}",
                             f3(b.map50_95),
                             b.epoch
                         ))
@@ -675,9 +668,13 @@ impl FoloApp {
             c.markers = vec![close_marker.clone()];
             // Values live in each panel's legend; the plot keeps only the cursor and dots.
             c.readout = false;
+            // Same x ticks in all four charts.
+            c.x_ticks = Some(6);
             c
         };
-        let (primary_h, secondary_h) = (220., 140.);
+        // Short windows keep both primary charts on screen.
+        let short = window.viewport_size().height < px(700.);
+        let (primary_h, secondary_h) = if short { (150., 110.) } else { (220., 140.) };
         let names = ["box", "cls", "dfl", "total"];
         let colors = t.loss_colors();
         let loss_series: Vec<Series> = (0..4)
@@ -688,8 +685,7 @@ impl FoloApp {
             })
             .collect();
         let loss_max = (0..4).filter(|&i| self.loss_parts[i]).map(|i| d.loss_max[i]).fold(0f32, f32::max);
-        // 28 px shorter: its legend row sits above the plot, so both cards in the row end level.
-        let mut loss = base("run-loss", loss_series, primary_h - 28.);
+        let mut loss = base("run-loss", loss_series, primary_h);
         loss.y_range = Some((0., crate::charts::nice_ceil((loss_max * 1.05).max(0.1), 4)));
         let mut map = base(
             "run-map",
@@ -725,14 +721,14 @@ impl FoloApp {
             secondary_h,
         );
         pr.y_range = Some((0., 1.));
-        pr.y_ticks = 2;
+        pr.y_ticks = 3;
         let mut lr = base(
             "run-lr",
             vec![Series::new("lr", t.text_tertiary, d.lr.clone()).area().live(live)],
             secondary_h,
         );
         lr.y_range = Some((0., (d.lr_max * 1.15).max(1e-4)));
-        lr.y_ticks = 2;
+        lr.y_ticks = 3;
         lr.markers = vec![Marker { x: 3., label: "warmup".into(), color: t.text_tertiary, lane: Some(0) }];
 
         // Legend values: at the shared cursor, else the latest point.
@@ -793,17 +789,17 @@ impl FoloApp {
                 .into_any_element(),
             );
         }
+        // Every card has the same anatomy: header, a 28 px legend row, then the plot. Plot tops line
+        // up across a row however long a legend is.
         let card = |title: &str, sub: &str, extra: AnyElement, chart: AnyElement| {
             panel(&t)
                 .flex_1()
                 .min_w_0()
                 .flex()
                 .flex_col()
-                .child(
-                    panel_header(&t, title)
-                        .child(div().flex().items_center().gap(px(12.)).child(caption(&t, sub)).child(extra)),
-                )
-                .child(div().px(px(12.)).pt(px(4.)).pb(px(6.)).child(chart))
+                .child(panel_header(&t, title).child(caption(&t, sub)))
+                .child(div().h(px(28.)).px(px(10.)).pt(px(6.)).flex().items_center().child(extra))
+                .child(div().px(px(12.)).pb(px(6.)).child(chart))
         };
         let loss_legend = div()
             .id("loss-ema")
@@ -869,15 +865,7 @@ impl FoloApp {
             .gap(px(16.))
             .child(row(
                 card("Validation mAP", "per epoch", map_legend, line_chart(&t, map)).into_any_element(),
-                // Four toggles with values don't fit beside the title: they get a row of their own.
-                panel(&t)
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .child(panel_header(&t, "Training loss").child(caption(&t, "smoothed · EMA 0.94")))
-                    .child(div().px(px(10.)).pt(px(8.)).flex().flex_wrap().child(loss_legend))
-                    .child(div().px(px(12.)).pb(px(6.)).child(line_chart(&t, loss)))
+                card("Training loss", "smoothed · EMA 0.94", loss_legend, line_chart(&t, loss))
                     .into_any_element(),
                 0.6,
                 0.4,
@@ -885,8 +873,8 @@ impl FoloApp {
             .child(row(
                 card("Precision and recall", "validation", pr_legend, line_chart(&t, pr)).into_any_element(),
                 card("Learning rate", "cosine · warmup 3", lr_legend, line_chart(&t, lr)).into_any_element(),
-                0.5,
-                0.5,
+                0.6,
+                0.4,
             ));
         // One Tab stop for the linked charts: arrows walk the epochs.
         self.chart_group("run-charts", 1.0 / total.max(1.0), crate::controls::Cursor::Run, grid, window, cx)
@@ -946,7 +934,7 @@ impl FoloApp {
                             .rounded(px(radius::MD))
                             .overflow_hidden()
                             .bg(t.bg_inset)
-                            .child(image_canvas(&t, img, dims, boxes, Fit::Contain, false));
+                            .child(image_canvas(&t, img, dims, boxes, Fit::Cover, false));
                         square.style().aspect_ratio = Some(1.0);
                         div().flex_1().min_w(px(0.)).child(square).into_any_element()
                     })
