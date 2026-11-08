@@ -19,7 +19,7 @@ use crate::theme::{radius, theme, ty};
 use crate::ui::*;
 use crate::viz::{DrawBox, Fit};
 
-fn duration_of(r: &Run, now: i64) -> Option<f64> {
+pub(crate) fn duration_of(r: &Run, now: i64) -> Option<f64> {
     let start = time::parse(r.started.as_deref()?)?;
     let end = r.finished.as_deref().and_then(time::parse).unwrap_or(now);
     Some((end - start) as f64)
@@ -708,10 +708,15 @@ impl FoloApp {
                             ty::SM,
                         ))
                         .child(
-                            // Capped: in a wrapped (wide) tile the trend stays a glance, not a chart.
-                            div().flex_1().min_w(px(40.)).max_w(px(160.)).h(px(28.)).pb(px(4.)).when(
-                                smooth.len() > 2,
-                                |d| {
+                            // Capped in the one-row strip (a glance, not a chart); in the wrapped
+                            // two-column tile it fills the tile, so no hole opens beside it.
+                            div()
+                                .flex_1()
+                                .min_w(px(40.))
+                                .when(!narrow, |d| d.max_w(px(160.)))
+                                .h(px(28.))
+                                .pb(px(4.))
+                                .when(smooth.len() > 2, |d| {
                                     d.child(sparkline(
                                         &t,
                                         Arc::new(smooth.clone()),
@@ -719,8 +724,7 @@ impl FoloApp {
                                         24.,
                                         live,
                                     ))
-                                },
-                            ),
+                                }),
                         ),
                 )
                 .child(text(ty::XS, t.text_tertiary).tnum().child(
@@ -746,14 +750,20 @@ impl FoloApp {
             if !first {
                 row = row.border_t_1().border_color(t.line_subtle);
             }
+            let wrapped = !first;
             first = false;
             for (i, c) in it.by_ref().take(per_row).enumerate() {
                 if i > 0 {
                     row = row.child(vline(&t));
                 }
-                // Equal tiles per row (a wrapped row of two splits in half, so neither tile is a
-                // stretched hole around a fixed-width sparkline).
-                row = row.child(tile(c));
+                // On a 3-column grid: the wrapped row's first tile (Throughput, whose sparkline
+                // fills it) spans two columns, so its divider lines up with the first row's second.
+                // flex_1's 0 basis would win over a width, so the basis is set itself.
+                row = row.child(if wrapped && per_row == 3 && i == 0 {
+                    tile(c).flex_none().flex_basis(gpui::relative(2. / 3.))
+                } else {
+                    tile(c)
+                });
             }
             rows.push(row);
         }

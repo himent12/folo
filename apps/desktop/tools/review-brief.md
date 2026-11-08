@@ -40,7 +40,8 @@ spreading tiles; "close mosaic" is named on the top-row charts only; the learnin
 caption; the selected detection box and its chip take accent.solid (design/README's selection rule), not a class colour
 with an extra ring, and the other boxes' outlines drop to 30 % (the same rule; their chips stay opaque and readable); the chart
 cursor's chip sits on the x axis and the tick labels under it give way (it names the cursor's epoch where the axis
-would).
+would); Playground's image toolbar shows the latency beside the detection count (asked for by both reviewers in
+round 25), even though the rail also has the breakdown.
 
 ## Scoring
 Use `REVIEW_RUBRIC.md` (path in your task): 12 lines, 1–10, where **9 means "would ship as-is at Linear / Raycast / Zed

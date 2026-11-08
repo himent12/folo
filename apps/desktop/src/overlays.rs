@@ -293,8 +293,26 @@ impl FoloApp {
                         this.close_palette(w, cx);
                         action(this, w, cx);
                     }))
-                    .child(icon(it.icon, 16., if on { t.text_primary } else { t.text_tertiary }))
-                    .child(text(ty::BASE, t.text_primary).flex_none().child(it.title))
+                    // Stopping a run is destructive: danger text here as on its button.
+                    .child(icon(
+                        it.icon,
+                        16.,
+                        if it.icon == "icons/stop.svg" {
+                            t.danger_text
+                        } else if on {
+                            t.text_primary
+                        } else {
+                            t.text_tertiary
+                        },
+                    ))
+                    .child(
+                        text(
+                            ty::BASE,
+                            if it.icon == "icons/stop.svg" { t.danger_text } else { t.text_primary },
+                        )
+                        .flex_none()
+                        .child(it.title),
+                    )
                     .child(text(ty::SM, t.text_tertiary).flex_1().min_w_0().truncate().child(it.detail))
                     .when(!it.keys.is_empty(), |d| d.child(shortcut(&t, it.keys)))
                     .when(on && it.keys.is_empty(), |d| {

@@ -734,10 +734,11 @@ impl FoloApp {
                             .child(pattern_swatch(t.class_stroke(class), pr_pattern(class))),
                     )
                     .child(
-                        // A known width, so long class names end in "…" (GPUI truncates against
+                        // A known width (the legend row is 220 px: 14 swatch, 68 name, 70 P, 44 AP50
+                        // and three 8 px gaps), so long class names end in "…" (GPUI truncates against
                         // the pre-shrink width).
                         text(ty::SM, t.text_secondary)
-                            .w(px(76.))
+                            .w(px(68.))
                             .flex_none()
                             .truncate()
                             .child(m.classes.get(class as usize).cloned().unwrap_or_default()),
@@ -745,7 +746,7 @@ impl FoloApp {
                     .child(
                         text(ty::SM, t.text_secondary)
                             .tnum()
-                            .w(px(76.))
+                            .w(px(70.))
                             .flex_none()
                             .text_right()
                             // At rest: precision at the best-F1 threshold (as the KPI reports it);
@@ -847,7 +848,7 @@ impl FoloApp {
                                     .child(th(&t, "Class").flex_1())
                                     // At rest precision at the best-F1 threshold (the KPI's operating
                                     // point); while inspecting, precision at the recall under the cursor.
-                                    .child(div().w(px(76.)).flex_none().flex().justify_end().child(th(
+                                    .child(div().w(px(70.)).flex_none().flex().justify_end().child(th(
                                         &t,
                                         &hover.map_or("P @ best F1".to_string(), |r| format!("P @ R {r:.2}")),
                                     )))
@@ -874,17 +875,17 @@ impl FoloApp {
                                         .flex()
                                         .items_center()
                                         .gap(px(8.))
-                                        .child(div().w(px(12.)).flex_none())
+                                        .child(div().w(px(14.)).flex_none())
                                         .child(
                                             text(ty::SM, t.text_secondary)
-                                                .w(px(76.))
+                                                .w(px(68.))
                                                 .flex_none()
                                                 .child("All classes"),
                                         )
                                         .child(
                                             text(ty::SM, t.text_secondary)
                                                 .tnum()
-                                                .w(px(76.))
+                                                .w(px(70.))
                                                 .flex_none()
                                                 .text_right()
                                                 // No aggregate value at the cursor: a dash while inspecting.
@@ -1093,7 +1094,7 @@ impl FoloApp {
                     let tiny = norm && frac < 0.01;
                     let fill = if na {
                         gpui::transparent_black()
-                    } else if v == 0 || tiny {
+                    } else if v == 0 {
                         crate::theme::over(t.bg_panel, t.bg_hover)
                     } else {
                         // Correct cells on the success ramp; errors on a danger ramp (square root up

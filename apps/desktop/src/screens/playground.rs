@@ -666,7 +666,6 @@ impl FoloApp {
                 let hidden = p.boxes.len() - vis.len();
                 let total = p.timing.total_ms.max(0.001);
                 let seg = |v: f64, c| div().h_full().w(relative((v / total) as f32)).bg(c);
-                // One neutral ramp: the model step darkest, the cheap steps lighter.
                 // One neutral ramp; the model step strongest without shouting.
                 let (c_pre, c_model, c_nms) = (
                     crate::theme::alpha(t.text_tertiary, 0.4),
