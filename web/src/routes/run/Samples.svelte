@@ -62,6 +62,7 @@
     <div class="legend" aria-hidden="true">
       <span><i class="solid"></i>prediction</span>
       <span><i class="dashed"></i>ground truth</span>
+      <span class="count-key num">7/8 = predictions / true boxes</span>
     </div>
     <div class="conf"><Slider label="Min confidence" bind:value={conf} min={0.05} max={0.95} step={0.05} /></div>
   </div>
