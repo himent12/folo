@@ -100,7 +100,7 @@ impl FoloApp {
     /// until the dataset, its image list or a filter changes, so scrolling never rescans it.
     pub fn filtered_indices(&self, id: &str) -> Rc<Vec<usize>> {
         let Some(all) = self.store.images.get(id).and_then(|l| l.ready()) else { return Rc::new(Vec::new()) };
-        let key = (id.to_string(), self.ds_split, self.ds_class, all.len());
+        let key = (id.to_string(), self.ds_split, self.ds_class, self.ds_empty_only, all.len());
         if let Some((k, v)) = self.ds_filter_cache.borrow().as_ref()
             && *k == key
         {
@@ -111,6 +111,7 @@ impl FoloApp {
                 .enumerate()
                 .filter(|(_, m)| self.ds_split.is_none_or(|s| m.split == s))
                 .filter(|(_, m)| self.ds_class.is_none_or(|c| m.boxes.iter().any(|b| b.class == c)))
+                .filter(|(_, m)| !self.ds_empty_only || m.boxes.is_empty())
                 .map(|(i, _)| i)
                 .collect(),
         );
@@ -174,7 +175,7 @@ impl FoloApp {
             .items_center()
             .gap(px(10.))
             .child(text(ty::XL, t.text_primary).child(ds.name.clone()))
-            .child(badge(&t, ds.format.to_uppercase(), Tone::Neutral));
+            .child(badge(&t, crate::screens::format_label(&ds.format), Tone::Neutral));
         let header = div()
             .flex()
             .items_end()
@@ -185,12 +186,12 @@ impl FoloApp {
                     text(ty::SM, t.text_tertiary)
                         .font_family(crate::theme::MONO)
                         .truncate()
-                        .child(ds.path.clone()),
+                        .child(display_path(&ds.path)),
                 ),
             )
             .child(div().flex().gap(px(8.)).child(reveal).child(train));
 
-        let strip = self.dataset_strip_stats(&ds, cx);
+        let strip = self.dataset_strip_stats(&ds, window, cx);
         let tabs = self.segmented(
             "ds-tabs",
             &["Images", "Statistics"],
@@ -226,7 +227,7 @@ impl FoloApp {
             .into_any_element()
     }
 
-    fn dataset_strip_stats(&self, ds: &Dataset, cx: &mut Context<Self>) -> AnyElement {
+    fn dataset_strip_stats(&self, ds: &Dataset, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
         let total = ds.splits.total().max(1) as f32;
         let s = ds.stats.as_ref();
@@ -289,20 +290,55 @@ impl FoloApp {
                 "Classes",
                 ds.classes.len().to_string(),
                 "",
-                Some(text(ty::XS, t.text_tertiary).truncate().child(if ds.classes.len() > 3 {
-                    format!("{} +{} more", ds.classes[..3].join(", "), ds.classes.len() - 3)
-                } else {
-                    ds.classes.join(", ")
-                })),
+                Some(text(ty::XS, t.text_tertiary).whitespace_nowrap().child(names_summary(&ds.classes, 24))),
             )))
             .child(vline(&t))
-            .child(tile(stat(
-                &t,
-                "Empty images",
-                int(s.map_or(0, |s| s.empty_images) as u64),
-                "",
-                Some(text(ty::XS, t.text_tertiary).child("no labels")),
-            )))
+            .child({
+                // Defects are actionable: this tile filters the grid to the images in question.
+                let empty = s.map_or(0, |s| s.empty_images);
+                let on = self.ds_empty_only;
+                let el = div()
+                    .id("ds-empty-tile")
+                    .flex_1()
+                    .min_w_0()
+                    .px(px(16.))
+                    .py(px(12.))
+                    .when(empty > 0, |d| d.cursor_pointer().hover(|s| s.bg(t.bg_hover)))
+                    .when(on, |d| d.bg(t.bg_selected))
+                    .child(stat(
+                        &t,
+                        "Empty images",
+                        int(empty as u64),
+                        "",
+                        Some(if empty > 0 {
+                            text(ty::XS, if on { t.accent_text } else { t.text_secondary }).child(if on {
+                                "Showing them · clear"
+                            } else {
+                                "Show them"
+                            })
+                        } else {
+                            text(ty::XS, t.text_tertiary).child("every image has labels")
+                        }),
+                    ));
+                if empty > 0 {
+                    self.bind(
+                        el,
+                        "ds-empty-tile",
+                        0.,
+                        window,
+                        cx,
+                        act(|this, _, cx| {
+                            this.ds_empty_only = !this.ds_empty_only;
+                            this.ds_tab = DsTab::Images;
+                            this.grid_scroll.scroll_to_item(0, gpui::ScrollStrategy::Top);
+                            cx.notify();
+                        }),
+                    )
+                    .into_any_element()
+                } else {
+                    el.into_any_element()
+                }
+            })
             .child(vline(&t))
             .child(tile(stat(
                 &t,
@@ -389,6 +425,21 @@ impl FoloApp {
             .child(seg)
             .child(div().w(px(1.)).h(px(20.)).bg(t.line_subtle))
             .child(div().flex().items_center().gap(px(6.)).flex_1().min_w_0().flex_wrap().children(chips))
+            .when(self.ds_empty_only, |d| {
+                d.child(self.chip(
+                    "ds-empty-chip",
+                    "Empty images ×",
+                    true,
+                    None,
+                    None,
+                    window,
+                    cx,
+                    act(|this, _, cx| {
+                        this.ds_empty_only = false;
+                        cx.notify();
+                    }),
+                ))
+            })
             .child(text(ty::SM, t.text_tertiary).tnum().whitespace_nowrap().child(count_label));
         let view_controls = div()
             .flex()
@@ -465,7 +516,7 @@ impl FoloApp {
                             row = row.child(div().w(px(cell_w)).flex_none());
                             continue;
                         };
-                        let tile_el = this.tile(&ds_id, meta, this.ds_boxes, crate::viz::Fit::Contain, cx);
+                        let tile_el = this.tile(&ds_id, meta, this.ds_boxes, crate::viz::Fit::Cover, cx);
                         let key = format!("tile-{}", meta.id);
                         let n = meta.boxes.len();
                         let dsid = ds_id.to_string();
@@ -698,5 +749,35 @@ impl FoloApp {
                     ),
             )
             .into_any_element()
+    }
+}
+
+/// Class names that fit in about `budget` characters, then "+N" ("circle, square +3").
+pub fn names_summary(names: &[String], budget: usize) -> String {
+    let mut out = String::new();
+    for (i, n) in names.iter().enumerate() {
+        let sep = if out.is_empty() { "" } else { ", " };
+        let rest = names.len() - i;
+        let tail = if rest > 1 { 4 } else { 0 };
+        if !out.is_empty() && out.len() + sep.len() + n.len() + tail > budget {
+            return format!("{out} +{rest}");
+        }
+        out.push_str(sep);
+        out.push_str(n);
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::names_summary;
+
+    #[test]
+    fn summaries_fit_whole_names() {
+        let n: Vec<String> =
+            ["circle", "square", "triangle", "star", "hexagon"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(names_summary(&n, 24), "circle, square +3");
+        assert_eq!(names_summary(&n[..3], 30), "circle, square, triangle");
+        assert_eq!(names_summary(&n[..1], 2), "circle");
     }
 }

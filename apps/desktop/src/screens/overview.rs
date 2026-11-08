@@ -80,7 +80,12 @@ impl FoloApp {
             Some(r) => self.live_panel(r, window, cx),
             None => self.idle_panel(window, cx),
         };
-        let system = self.system_panel(cx);
+        let narrow = window.viewport_size().width < px(1200.);
+        let (system, strip) = if narrow {
+            (div().into_any_element(), Some(self.system_strip(cx)))
+        } else {
+            (self.system_panel(cx), None)
+        };
         let recent = self.recent_runs(window, cx);
         let models = self.top_models(window, cx);
         let datasets = self.dataset_strip(window, cx);
@@ -93,8 +98,9 @@ impl FoloApp {
                     .flex()
                     .gap(px(16.))
                     .child(div().flex_1().min_w_0().flex().child(hero))
-                    .child(div().w(px(312.)).flex_none().flex().child(system)),
+                    .when(!narrow, |d| d.child(div().w(px(312.)).flex_none().flex().child(system))),
             )
+            .when_some(strip, |d, s| d.child(s))
             .child(
                 div()
                     .flex()
@@ -200,7 +206,7 @@ impl FoloApp {
             }
             None => (div().h(px(150.)).child(skeleton(&t, "ov-charts")).into_any_element(), None, None),
         };
-        let eta = r.eta_s.map_or("–".into(), time::duration);
+        let eta_s = r.eta_s;
         let best_line =
             best.map(|b| format!("best {} · epoch {}", f3(b.map50_95), b.epoch)).unwrap_or_default();
         panel(&t)
@@ -240,23 +246,41 @@ impl FoloApp {
             .child(
                 div()
                     .flex()
-                    .gap(px(32.))
-                    .child(stat(&t, "Epoch", r.epoch.to_string(), &format!("/ {}", r.epochs), None))
-                    .child(stat(
+                    .child(div().flex_1().min_w_0().child(stat(
+                        &t,
+                        "Epoch",
+                        r.epoch.to_string(),
+                        &format!("/ {}", r.epochs),
+                        None,
+                    )))
+                    .child(vline(&t))
+                    .child(div().flex_1().min_w_0().pl(px(16.)).child(stat(
                         &t,
                         "mAP50-95",
                         map_now.map_or("–".into(), f3),
                         "",
                         Some(text(ty::XS, t.text_tertiary).tnum().child(best_line)),
-                    ))
-                    .child(stat(
+                    )))
+                    .child(vline(&t))
+                    .child(div().flex_1().min_w_0().pl(px(16.)).child(stat(
                         &t,
                         "Throughput",
                         ips.map_or("–".into(), |v| format!("{v:.0}")),
                         "img/s",
                         None,
-                    ))
-                    .child(stat(&t, "Time left", eta, "", None)),
+                    )))
+                    .child(vline(&t))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .pl(px(16.))
+                            .flex()
+                            .flex_col()
+                            .gap(px(6.))
+                            .child(caption(&t, "Time left"))
+                            .child(duration_metric(&t, eta_s, ty::X2XL, ty::SM)),
+                    ),
             )
             .child(
                 div()
@@ -275,7 +299,28 @@ impl FoloApp {
     fn idle_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
         if self.store.runs.is_loading() {
-            return panel(&t).flex_1().child(loading_rows(&t, "ov-idle", 5)).into_any_element();
+            let block = |id: &str, w: f32, h: f32| {
+                div().w(gpui::relative(w)).h(px(h)).child(skeleton(&t, id.to_string()))
+            };
+            return panel(&t)
+                .flex_1()
+                .p(px(16.))
+                .flex()
+                .flex_col()
+                .gap(px(16.))
+                .child(block("hero-title", 0.4, 22.))
+                .child(div().flex().gap(px(16.)).children(
+                    (0..4).map(|i| div().flex_1().h(px(52.)).child(skeleton(&t, format!("hero-kpi-{i}")))),
+                ))
+                .child(block("hero-progress", 1.0, 4.))
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(16.))
+                        .child(div().flex_1().h(px(150.)).child(skeleton(&t, "hero-c1")))
+                        .child(div().flex_1().h(px(150.)).child(skeleton(&t, "hero-c2"))),
+                )
+                .into_any_element();
         }
         let has_ds = self.store.datasets.ready().is_some_and(|d| !d.is_empty());
         let (title, body) = if has_ds {
@@ -374,7 +419,11 @@ impl FoloApp {
                                                 .truncate()
                                                 .child(g.name.replace("NVIDIA GeForce ", "")),
                                         )
-                                        .child(badge(&t, g.backend.to_uppercase(), Tone::Neutral)),
+                                        .child(badge(
+                                            &t,
+                                            crate::screens::backend_label(&g.backend),
+                                            Tone::Neutral,
+                                        )),
                                 )
                                 .child(metric(&t, format!("{:.0}", util * 100.), "%", ty::X3XL, ty::LG))
                                 .child(
@@ -399,6 +448,12 @@ impl FoloApp {
                                     .rounded(px(radius::MD))
                                     .bg(t.bg_inset)
                                     .p(px(6.))
+                                    .when(hist.len() <= 1, |d| {
+                                        d.flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .child(text(ty::XS, t.text_tertiary).child("Collecting…"))
+                                    })
                                     .when(hist.len() > 1, |d| {
                                         d.child(sparkline_in(
                                             &t,
@@ -446,6 +501,46 @@ impl FoloApp {
             .child(panel_header(&t, "System"))
             .child(body)
             .into_any_element()
+    }
+
+    /// The machine in one line, for narrow windows: GPU, CPU and memory with small meters.
+    fn system_strip(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let t = theme(cx);
+        let Some(s) = self.store.system.ready().cloned() else {
+            return panel(&t).h(px(48.)).child(skeleton(&t, "sys-strip")).into_any_element();
+        };
+        let cell = |label: String, value: String, frac: f32, color: gpui::Hsla| {
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .px(px(16.))
+                .child(text(ty::SM, t.text_secondary).truncate().child(label))
+                .child(div().w(px(56.)).flex_none().child(progress(&t, frac, color, 4.)))
+                .child(text(ty::SM, t.text_primary).tnum().whitespace_nowrap().child(value))
+        };
+        let mut row = div().h(px(48.)).flex().items_center();
+        if let Some(g) = s.gpus.first() {
+            let util = g.util.unwrap_or(0.0);
+            row = row
+                .child(cell(
+                    g.name.replace("NVIDIA GeForce ", ""),
+                    format!("{:.0}%", util * 100.),
+                    util,
+                    t.accent_fill(),
+                ))
+                .child(vline(&t));
+        }
+        let mem = s.memory.used_bytes as f32 / s.memory.total_bytes.max(1) as f32;
+        let (used, _) = bytes(s.memory.used_bytes);
+        let (total, unit) = bytes(s.memory.total_bytes);
+        row = row
+            .child(cell("CPU".into(), format!("{:.0}%", s.cpu.util * 100.), s.cpu.util, t.chart_series[1]))
+            .child(vline(&t))
+            .child(cell("Memory".into(), format!("{used} / {total} {unit}"), mem, t.chart_series[2]));
+        panel(&t).child(row).into_any_element()
     }
 
     fn recent_runs(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -588,7 +683,7 @@ impl FoloApp {
                                 )
                                 .flex_1(),
                             )
-                            .child(bar_value(&t, map, f3(map), t.accent_fill()));
+                            .child(bar_value(&t, map, f3(map), t.text_tertiary));
                         self.bind(
                             row,
                             &key,
@@ -711,7 +806,7 @@ impl FoloApp {
                         d.name.clone(),
                         format!("{} images · {} classes", int(d.splits.total() as u64), d.classes.len()),
                     ))
-                    .child(badge(&t, d.format.to_uppercase(), Tone::Neutral)),
+                    .child(badge(&t, crate::screens::format_label(&d.format), Tone::Neutral)),
             );
         self.bind(
             card,

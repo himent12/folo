@@ -569,6 +569,9 @@ impl FoloApp {
         let lr_slider = self.slider("nr-lr0", lr0, 0.001, 0.05, 0.001, window, cx).into_any_element();
         let mosaic_slider = self.slider("nr-mosaic", mosaic, 0., 1., 0.05, window, cx).into_any_element();
         let mixup_slider = self.slider("nr-mixup", mixup, 0., 0.5, 0.05, window, cx).into_any_element();
+        let scale = self.new_run.as_ref().map_or(0.5, |f| f.scale);
+        let scale_slider = self.slider("nr-scale", scale, 0., 0.9, 0.05, window, cx).into_any_element();
+        let note = self.new_run.as_ref().and_then(|f| f.note.clone());
         let flip_slider = self.slider("nr-fliplr", fliplr, 0., 1., 0.05, window, cx).into_any_element();
         let close_mosaic = self.new_run.as_ref().map_or(10., |f| f.close_mosaic);
         let close_slider = self.slider("nr-close", close_mosaic, 0., 30., 1., window, cx).into_any_element();
@@ -700,13 +703,36 @@ impl FoloApp {
                     .flex()
                     .gap(px(16.))
                     .child(div().flex_1().child(valued("Mosaic", format!("{mosaic:.2}"), mosaic_slider)))
-                    .child(div().flex_1().child(valued("Mixup", format!("{mixup:.2}"), mixup_slider)))
+                    .child(div().flex_1().child(valued("Mixup", format!("{mixup:.2}"), mixup_slider))),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap(px(16.))
                     .child(div().flex_1().child(valued(
                         "Horizontal flip",
                         format!("{fliplr:.2}"),
                         flip_slider,
+                    )))
+                    .child(div().flex_1().child(valued(
+                        "Scale jitter",
+                        format!("±{scale:.2}"),
+                        scale_slider,
                     ))),
             )
+            .when_some(note, |d, n| {
+                d.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .p(px(10.))
+                        .rounded(px(radius::MD))
+                        .bg(t.info_muted)
+                        .child(icon("icons/info.svg", 14., t.info_solid))
+                        .child(text(ty::SM, t.text_primary).child(n)),
+                )
+            })
             .when_some(error.clone(), |d, e| {
                 d.child(
                     div()
@@ -734,9 +760,14 @@ impl FoloApp {
             ))
             .child(text(ty::SM, if fits { t.text_secondary } else { t.warning_text }).tnum().child(
                 if fits {
-                    format!("≈ {} on RTX 4080 SUPER · ~{vram:.1} GB VRAM", crate::api::time::duration(secs))
+                    format!(
+                        "≈ {} on RTX 4080 SUPER · ≈ {vram:.1} GB of GPU memory",
+                        crate::api::time::duration(secs)
+                    )
                 } else {
-                    format!("~{vram:.0} GB VRAM needed, 16 GB available · lower the batch or image size")
+                    format!(
+                        "≈ {vram:.0} GB of GPU memory needed, 16 GB available · lower the batch or image size"
+                    )
                 },
             ));
         let cancel = self.button(
@@ -746,11 +777,7 @@ impl FoloApp {
             None,
             window,
             cx,
-            act(|this, w, cx| {
-                this.new_run = None;
-                w.focus(&this.root_focus);
-                cx.notify();
-            }),
+            act(|this, w, cx| this.close_new_run(w, cx)),
         );
         let start = self.button(
             "nr-start",
@@ -791,11 +818,7 @@ impl FoloApp {
             footer,
             window,
             cx,
-            act(|this, w, cx| {
-                this.new_run = None;
-                w.focus(&this.root_focus);
-                cx.notify();
-            }),
+            act(|this, w, cx| this.close_new_run(w, cx)),
         )
     }
 
@@ -812,8 +835,9 @@ impl FoloApp {
             None,
             window,
             cx,
-            act(|this, _, cx| {
+            act(|this, w, cx| {
                 this.confirm_stop = None;
+                this.restore_focus(w);
                 cx.notify();
             }),
         );
@@ -824,12 +848,21 @@ impl FoloApp {
             Some("icons/square.svg"),
             window,
             cx,
-            act(move |this, _, cx| this.stop_run(rid.clone(), cx)),
+            act(move |this, w, cx| {
+                this.restore_focus(w);
+                this.stop_run(rid.clone(), cx)
+            }),
         );
         let body = div()
             .px(px(20.))
             .pb(px(20.))
-            .child(text(ty::BASE, t.text_secondary).child(format!("Training stops after the current step. The checkpoint from epoch {epoch} is kept, so you can export it or start a new run from it.")));
+            .child(
+                text(ty::BASE, t.text_secondary)
+                    .w_full()
+                    .min_w_0()
+                    .whitespace_normal()
+                    .child(format!("Training stops after this step. The epoch {epoch} checkpoint is kept, so you can export it or train on from it.")),
+            );
         let footer = div()
             .flex()
             .justify_end()
@@ -860,8 +893,12 @@ impl FoloApp {
 
     fn toasts_view(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
-        let toasts: Vec<(u64, Tone, SharedString, Option<SharedString>)> =
-            self.toasts.iter().map(|x| (x.id, x.tone, x.title.clone(), x.body.clone())).collect();
+        type ToastRow = (u64, Tone, SharedString, Option<SharedString>, Option<(SharedString, Action)>);
+        let toasts: Vec<ToastRow> = self
+            .toasts
+            .iter()
+            .map(|x| (x.id, x.tone, x.title.clone(), x.body.clone(), x.action.clone()))
+            .collect();
         div()
             .absolute()
             .bottom(px(20.))
@@ -870,7 +907,21 @@ impl FoloApp {
             .flex()
             .flex_col()
             .gap(px(8.))
-            .children(toasts.into_iter().map(|(id, tone, title, body)| {
+            .children(toasts.into_iter().map(|(id, tone, title, body, action)| {
+                let action_btn = action.map(|(label, a)| {
+                    self.button(
+                        &format!("toast-act-{id}"),
+                        label,
+                        Btn::Secondary,
+                        None,
+                        window,
+                        cx,
+                        act(move |this, w, cx| {
+                            a(this, w, cx);
+                            this.dismiss_toast(id, cx);
+                        }),
+                    )
+                });
                 let (_, _, dotc) = tone.colors(&t);
                 let icon_path = match tone {
                     Tone::Success => "icons/circle-check.svg",
@@ -906,7 +957,8 @@ impl FoloApp {
                             .child(
                                 text(ty::BASE, t.text_primary).font_weight(FontWeight::MEDIUM).child(title),
                             )
-                            .when_some(body, |d, b| d.child(text(ty::SM, t.text_secondary).child(b))),
+                            .when_some(body, |d, b| d.child(text(ty::SM, t.text_secondary).child(b)))
+                            .when_some(action_btn, |d, b| d.child(div().pt(px(8.)).flex().child(b))),
                     )
                     .child(
                         self.icon_button(
@@ -1045,7 +1097,7 @@ impl FoloApp {
                         move |b, _, window, cx| {
                             let inner = gpui::Bounds::new(
                                 b.origin + gpui::point(px(24.), px(24.)),
-                                b.size - gpui::size(px(48.), px(48.)),
+                                b.size - gpui::size(px(48.), px(24. + 72.)),
                             );
                             paint_cell.set(Some(inner));
                             window.with_content_mask(Some(gpui::ContentMask { bounds: b }), |window| {
@@ -1362,12 +1414,7 @@ impl FoloApp {
 
     pub fn zoom_by(&mut self, f: f32, cx: &mut Context<Self>) {
         if let Some(i) = self.inspector.as_mut() {
-            i.zoom = (i.zoom * f).clamp(1.0, 12.0);
-            if i.zoom <= 1.0 {
-                i.pan = (0., 0.);
-            } else {
-                i.pan = (i.pan.0 * f, i.pan.1 * f);
-            }
+            (i.zoom, i.pan) = crate::viz::zoom_step(i.zoom, i.pan, f);
             cx.notify();
         }
     }

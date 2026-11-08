@@ -167,6 +167,46 @@ impl FoloApp {
         };
         let bounds_cell: Rc<Cell<Option<Bounds<Pixels>>>> = Rc::new(Cell::new(None));
         let paint_cell = bounds_cell.clone();
+        let wheel_cell = bounds_cell.clone();
+        let (zoom, pan) = (self.play_zoom, self.play_pan);
+        let latency = self.play_pred.ready().map(|p| p.timing.total_ms);
+        let zoom_bar = div()
+            .flex()
+            .items_center()
+            .gap(px(2.))
+            .child(self.icon_button(
+                "play-zoom-out",
+                "icons/zoom-out.svg",
+                "Zoom out (−)",
+                window,
+                cx,
+                act(|this, _, cx| this.play_zoom_by(1.0 / 1.4, cx)),
+            ))
+            .child(text(ty::XS, t.text_secondary).tnum().w(px(40.)).text_center().child(if zoom <= 1.0 {
+                "Fit".to_string()
+            } else {
+                format!("{zoom:.1}×")
+            }))
+            .child(self.icon_button(
+                "play-zoom-in",
+                "icons/zoom-in.svg",
+                "Zoom in (+)",
+                window,
+                cx,
+                act(|this, _, cx| this.play_zoom_by(1.4, cx)),
+            ))
+            .child(self.icon_button(
+                "play-fit",
+                "icons/maximize.svg",
+                "Fit (0)",
+                window,
+                cx,
+                act(|this, _, cx| {
+                    this.play_zoom = 1.0;
+                    this.play_pan = (0., 0.);
+                    cx.notify();
+                }),
+            ));
         let hover_boxes = boxes.clone();
         let paint_boxes = boxes;
         let tt = t;
@@ -200,6 +240,10 @@ impl FoloApp {
                     )
                     .child(div().flex_1())
                     .when(loading, |d| d.child(text(ty::XS, t.text_tertiary).child("Detecting…")))
+                    .when_some(latency, |d, ms| {
+                        d.child(text(ty::XS, t.text_secondary).tnum().child(format!("{ms:.1} ms")))
+                            .child(div().w(px(1.)).h(px(16.)).bg(t.line_subtle))
+                    })
                     .when_some(count, |d, n| {
                         d.child(
                             div()
@@ -213,7 +257,9 @@ impl FoloApp {
                                     self.play_conf
                                 ))),
                         )
-                    }),
+                    })
+                    .child(div().w(px(1.)).h(px(16.)).bg(t.line_subtle))
+                    .child(zoom_bar),
             )
             .child(
                 div()
@@ -222,9 +268,45 @@ impl FoloApp {
                     .flex_1()
                     .min_h_0()
                     .bg(t.bg_inset)
+                    .cursor(if zoom > 1.0 { gpui::CursorStyle::OpenHand } else { gpui::CursorStyle::Arrow })
+                    .on_scroll_wheel(cx.listener(move |this, ev: &gpui::ScrollWheelEvent, w, cx| {
+                        let Some(b) = wheel_cell.get() else { return };
+                        let dy = f32::from(ev.delta.pixel_delta(w.line_height()).y);
+                        let new_zoom =
+                            (this.play_zoom * (1.0 + dy * 0.0025).clamp(0.5, 2.0)).clamp(1.0, 12.0);
+                        this.play_pan = crate::viz::zoom_about(
+                            b,
+                            dims,
+                            this.play_zoom,
+                            this.play_pan,
+                            ev.position,
+                            new_zoom,
+                        );
+                        this.play_zoom = new_zoom;
+                        cx.notify();
+                    }))
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(|this, ev: &gpui::MouseDownEvent, _, _| {
+                            this.play_drag = Some((ev.position, this.play_pan));
+                        }),
+                    )
+                    .on_mouse_up(gpui::MouseButton::Left, cx.listener(|this, _, _, _| this.play_drag = None))
                     .on_mouse_move(cx.listener(move |this, ev: &MouseMoveEvent, _, cx| {
+                        if let Some((from, pan0)) = this.play_drag
+                            && ev.pressed_button == Some(gpui::MouseButton::Left)
+                            && this.play_zoom > 1.0
+                        {
+                            this.play_pan = (
+                                pan0.0 + f32::from(ev.position.x - from.x),
+                                pan0.1 + f32::from(ev.position.y - from.y),
+                            );
+                            cx.notify();
+                            return;
+                        }
                         let Some(b) = bounds_cell.get() else { return };
-                        let (x, y) = to_image(b, dims, Fit::Contain, 1.0, (0., 0.), ev.position);
+                        let (x, y) =
+                            to_image(b, dims, Fit::Contain, this.play_zoom, this.play_pan, ev.position);
                         let hit = hit_box(&hover_boxes, x, y);
                         if hit != this.play_hover {
                             this.play_hover = hit;
@@ -255,8 +337,8 @@ impl FoloApp {
                                     dims,
                                     &paint_boxes,
                                     Fit::Contain,
-                                    1.0,
-                                    (0., 0.),
+                                    zoom,
+                                    pan,
                                     true,
                                     0.,
                                 );
@@ -357,6 +439,7 @@ impl FoloApp {
             });
 
         let active = self.play_active(window, cx);
+        let mut timing: Option<AnyElement> = None;
         let detections = match &self.play_pred {
             Load::Ready(p) => {
                 let vis: Vec<crate::api::DetBox> =
@@ -415,7 +498,7 @@ impl FoloApp {
                 let hidden = p.boxes.len() - vis.len();
                 let total = p.timing.total_ms.max(0.001);
                 let seg = |v: f32, c| div().h_full().w(relative(v / total)).bg(c);
-                let timing = div()
+                let timing_el = div()
                     .flex()
                     .flex_col()
                     .gap(px(10.))
@@ -469,6 +552,7 @@ impl FoloApp {
                         p.device,
                         1000. / total
                     )));
+                timing = Some(timing_el.into_any_element());
                 div()
                     .flex()
                     .flex_col()
@@ -485,7 +569,6 @@ impl FoloApp {
                             "Nothing above the threshold. Lower the confidence to see weaker detections.",
                         )))
                     }))
-                    .child(timing)
                     .into_any_element()
             }
             Load::Failed(e) => div()
@@ -574,13 +657,16 @@ impl FoloApp {
                 )
                 .child(div().flex().gap(px(6.)).children(thumbs))
         });
-        // The whole panel scrolls, so short windows never squeeze a section to nothing.
+        // The panel scrolls, so short windows never squeeze a section to nothing; latency stays
+        // pinned at the bottom because it is the number people look for.
         panel(&t)
             .w(px(320.))
             .flex_none()
             .overflow_hidden()
+            .flex()
+            .flex_col()
             .child(
-                div().id("play-side").size_full().overflow_y_scroll().child(
+                div().id("play-side").flex_1().min_h_0().overflow_y_scroll().child(
                     div()
                         .flex()
                         .flex_col()
@@ -590,6 +676,7 @@ impl FoloApp {
                         .children(picker),
                 ),
             )
+            .children(timing.map(|el| div().flex_none().bg(t.bg_panel).child(el)))
             .into_any_element()
     }
 

@@ -298,7 +298,14 @@ impl FoloApp {
                 }
             }
             RunStatus::Failed => {
-                let ds = r.config.dataset_id.clone();
+                // Reuse the whole config; for out-of-memory failures, halve the batch.
+                let mut cfg = r.config.clone();
+                let oom = r.error.as_deref().is_some_and(|e| e.contains("out of memory"));
+                let note = oom.then(|| crate::app::retry_batch(cfg.batch)).flatten().map(|to| {
+                    let from = cfg.batch;
+                    cfg.batch = to;
+                    format!("Batch lowered from {from} to {to} so the run fits in GPU memory.")
+                });
                 actions.push(
                     self.button(
                         "run-retry-cfg",
@@ -307,7 +314,7 @@ impl FoloApp {
                         Some("icons/refresh-cw.svg"),
                         window,
                         cx,
-                        act(move |this, w, cx| this.open_new_run(Some(&ds), w, cx)),
+                        act(move |this, w, cx| this.open_new_run_from(&cfg, note.clone(), w, cx)),
                     )
                     .into_any_element(),
                 );
@@ -451,29 +458,33 @@ impl FoloApp {
         // Smooth the throughput trace so the sparkline shows the trend, not per-step jitter.
         let pts: Vec<(f32, f32)> = ips.iter().enumerate().map(|(i, v)| (i as f32, *v)).collect();
         let smooth: Vec<f32> = crate::charts::ema(&pts, 0.85).into_iter().map(|p| p.1).collect();
+        let duration_tile = |label: &str, secs: Option<f64>, detail: gpui::Div| {
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .min_w_0()
+                .child(caption(&t, label))
+                .child(duration_metric(&t, secs, ty::X2XL, ty::SM))
+                .child(detail)
+        };
         let time_tile = if live || r.status == RunStatus::Queued {
-            stat(
-                &t,
+            duration_tile(
                 "Time left",
-                r.eta_s.map_or("–".into(), time::duration),
-                "",
-                Some(text(ty::XS, t.text_tertiary).tnum().child(
+                r.eta_s,
+                text(ty::XS, t.text_tertiary).tnum().child(
                     duration_of(r, now).map_or(String::new(), |d| format!("{} elapsed", time::duration(d))),
-                )),
+                ),
             )
         } else {
-            stat(
-                &t,
+            duration_tile(
                 "Duration",
-                duration_of(r, now).map_or("–".into(), time::duration),
-                "",
-                Some(
-                    text(ty::XS, t.text_tertiary).child(
-                        r.finished
-                            .as_deref()
-                            .and_then(time::parse)
-                            .map_or(String::new(), |f| format!("ended {}", time::ago(f, now))),
-                    ),
+                duration_of(r, now),
+                text(ty::XS, t.text_tertiary).child(
+                    r.finished
+                        .as_deref()
+                        .and_then(time::parse)
+                        .map_or(String::new(), |f| format!("ended {}", time::ago(f, now))),
                 ),
             )
         };
@@ -525,13 +536,13 @@ impl FoloApp {
                         .child(
                             text(ty::X2XL, t.text_primary)
                                 .tnum()
-                                .child(last.map_or("–".into(), |e| format!("{:.2}", e.val.precision))),
+                                .child(last.map_or("–".into(), |e| format!("{:.3}", e.val.precision))),
                         )
                         .child(text(ty::LG, t.text_tertiary).child("/"))
                         .child(
                             text(ty::X2XL, t.text_primary)
                                 .tnum()
-                                .child(last.map_or("–".into(), |e| format!("{:.2}", e.val.recall))),
+                                .child(last.map_or("–".into(), |e| format!("{:.3}", e.val.recall))),
                         ),
                 )
                 .child(text(ty::XS, t.text_tertiary).child("on the validation split")),
@@ -636,8 +647,9 @@ impl FoloApp {
         let mut map = base(
             "run-map",
             vec![
-                Series::new("mAP50", t.chart_series[1], d.map50.clone()).width(1.25),
+                // Legend order: mAP50-95 first, so the hover readout lists it first too.
                 Series::new("mAP50-95", t.chart_series[0], d.map50_95.clone()).area().live(live).width(1.75),
+                Series::new("mAP50", t.chart_series[1], d.map50.clone()).width(1.25),
             ],
         );
         map.y_range = Some((0., 1.));
@@ -661,7 +673,7 @@ impl FoloApp {
         let mut lr =
             base("run-lr", vec![Series::new("lr", t.chart_series[5], d.lr.clone()).area().live(live)]);
         lr.value_fmt = Some(|v| format!("{v:.5}"));
-        let lr_max = d.lr.iter().map(|p| p.1).fold(0f32, f32::max);
+        let lr_max = d.lr_max;
         lr.y_range = Some((0., (lr_max * 1.15).max(1e-4)));
         lr.markers.clear();
         lr.markers.push(Marker { x: 3., label: "warmup".into(), color: t.text_tertiary });
@@ -867,15 +879,17 @@ impl FoloApp {
                             .child(div().flex_none().text_color(t.text_disabled).child(clock))
                             .child(div().flex_none().w(px(24.)).text_color(color).child(tag))
                             .child(
+                                // One line per entry, like a terminal; long lines end in an ellipsis.
                                 div()
                                     .flex_1()
                                     .min_w_0()
+                                    .truncate()
                                     .text_color(if l.level == LogLevel::Debug {
                                         t.text_tertiary
                                     } else {
                                         t.text_secondary
                                     })
-                                    .child(l.message.replace(" · ", "\u{a0}·\u{a0}")),
+                                    .child(l.message.clone()),
                             )
                     }))
                     .into_any_element()

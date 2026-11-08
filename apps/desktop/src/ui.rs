@@ -51,10 +51,10 @@ pub fn text(s: TypeStep, color: Hsla) -> Div {
     div().font_family(crate::theme::SANS).step(s).text_color(color)
 }
 
-/// Uppercase overline (`micro`) for group headings. Metric labels use [`caption`], which keeps
-/// case so names like "mAP50-95" stay correct.
+/// A group heading (palette groups, form sections). Sentence case: GPUI has no letter-spacing, and
+/// untracked capitals look cramped next to sentence-case titles.
 pub fn overline(t: &Theme, label: &str) -> Div {
-    text(ty::MICRO, t.text_tertiary).child(label.to_uppercase())
+    text(ty::XS, t.text_tertiary).font_weight(FontWeight::MEDIUM).child(label.to_string())
 }
 
 /// A metric or field label: `xs` medium, tertiary, in its own case.
@@ -266,6 +266,30 @@ pub fn stat(t: &Theme, label: &str, value: impl Into<SharedString>, unit: &str, 
         .child(caption(t, label))
         .child(metric(t, value, unit, ty::X2XL, ty::SM))
         .children(detail)
+}
+
+/// A duration as a metric: numbers at value size, units ("h", "m", "s") one step smaller.
+pub fn duration_metric(t: &Theme, secs: Option<f64>, s: TypeStep, unit_step: TypeStep) -> Div {
+    let Some(secs) = secs else { return text(s, t.text_primary).child("–") };
+    let total = secs.max(0.0).round() as i64;
+    let parts: Vec<(String, &str)> = if total < 60 {
+        vec![(total.to_string(), "s")]
+    } else if total < 3600 {
+        vec![((total / 60).to_string(), "m"), (format!("{:02}", total % 60), "s")]
+    } else {
+        vec![((total / 3600).to_string(), "h"), (format!("{:02}", total / 60 % 60), "m")]
+    };
+    div()
+        .flex()
+        .items_baseline()
+        .gap(px(6.))
+        .whitespace_nowrap()
+        .children(parts.into_iter().map(|(v, u)| metric(t, v, u, s, unit_step)))
+}
+
+/// A filesystem path as the platform writes it (backslashes on Windows).
+pub fn display_path(p: &str) -> String {
+    if cfg!(windows) { p.replace('/', "\\") } else { p.to_string() }
 }
 
 /// A thin progress track with a filled part.

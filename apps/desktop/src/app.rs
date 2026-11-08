@@ -102,7 +102,7 @@ impl Route {
 
 pub type Action = Rc<dyn Fn(&mut FoloApp, &mut Window, &mut Context<FoloApp>)>;
 
-pub type FilterCache = ((String, Option<Split>, Option<u32>, usize), Rc<Vec<usize>>);
+pub type FilterCache = ((String, Option<Split>, Option<u32>, bool, usize), Rc<Vec<usize>>);
 
 pub fn act(f: impl Fn(&mut FoloApp, &mut Window, &mut Context<FoloApp>) + 'static) -> Action {
     Rc::new(f)
@@ -134,6 +134,8 @@ pub struct Toast {
     pub tone: Tone,
     pub title: SharedString,
     pub body: Option<SharedString>,
+    /// An optional follow-up ("Show in folder").
+    pub action: Option<(SharedString, Action)>,
 }
 
 /// The image inspector over a dataset grid.
@@ -162,12 +164,40 @@ pub struct NewRunForm {
     pub fliplr: f32,
     /// Epochs at the end trained without mosaic.
     pub close_mosaic: f32,
+    /// Scale jitter (± fraction).
+    pub scale: f32,
+    /// Why some values differ from the run this form was prefilled from.
+    pub note: Option<String>,
+    /// The run this form was prefilled from: settings the form doesn't show (weights, seed, colour and
+    /// translate jitter) carry over unchanged.
+    pub base: Option<TrainConfig>,
     pub submitting: bool,
     pub error: Option<ApiError>,
 }
 
 pub const ARCHS: [&str; 5] = ["folo-n", "folo-s", "folo-m", "folo-l", "folo-x"];
-pub const BATCHES: [u32; 5] = [8, 16, 32, 64, 128];
+pub const BATCHES: [u32; 7] = [2, 4, 8, 16, 32, 64, 128];
+
+/// The offered batch size closest to `v` without exceeding it (the smallest if `v` is below all).
+pub fn batch_index(v: u32) -> usize {
+    BATCHES.iter().rposition(|b| *b <= v).unwrap_or(0)
+}
+
+/// Batch for retrying an out-of-memory run: half, snapped to an offered size; None at the minimum.
+pub fn retry_batch(v: u32) -> Option<u32> {
+    (v > BATCHES[0]).then(|| BATCHES[batch_index(v / 2)])
+}
+
+/// Keep what the form can't edit from the run it was prefilled from.
+pub fn carry_over(base: Option<&TrainConfig>, mut c: TrainConfig) -> TrainConfig {
+    if let Some(b) = base {
+        c.weights = b.weights.clone();
+        c.seed = b.seed;
+        c.augment.hsv = b.augment.hsv;
+        c.augment.translate = b.augment.translate;
+    }
+    c
+}
 pub const IMGSZ: [u32; 5] = [320, 480, 640, 800, 1024];
 pub const DEVICES: [&str; 3] = ["auto", "gpu:0", "cpu"];
 pub const OPTIMIZERS: [&str; 3] = ["auto", "sgd", "adamw"];
@@ -218,6 +248,8 @@ pub struct FoloApp {
     pub ds_tab: DsTab,
     pub ds_split: Option<Split>,
     pub ds_class: Option<u32>,
+    /// Show only images without labels (from the Empty images tile).
+    pub ds_empty_only: bool,
     pub ds_boxes: bool,
     pub ds_tile: f32,
     /// Filtered image indices keyed by (dataset, split, class, list length).
@@ -227,6 +259,8 @@ pub struct FoloApp {
     pub inspector: Option<Inspector>,
     /// Focus target of the inspector so its keys (arrows, +/-, 0, Esc) work as soon as it opens.
     pub inspector_focus: FocusHandle,
+    /// Focus to restore when the palette, a dialog or the stop confirmation closes.
+    overlay_return: Option<FocusHandle>,
     /// Where focus was before the inspector opened, restored on close.
     inspector_return: Option<FocusHandle>,
     pub hist_hover: HashMap<&'static str, f32>,
@@ -254,6 +288,10 @@ pub struct FoloApp {
     pub play_pred: Load<Prediction>,
     pub play_hover: Option<usize>,
     pub play_drop_hover: bool,
+    /// Stage zoom (1 = fit) and pan in px, like the inspector.
+    pub play_zoom: f32,
+    pub play_pan: (f32, f32),
+    pub play_drag: Option<(gpui::Point<Pixels>, (f32, f32))>,
     /// Generation of the latest image load request (older completions are dropped).
     play_load_seq: u64,
     /// Generation of the image on stage; predictions are tagged with it.
@@ -308,6 +346,7 @@ impl FoloApp {
             ds_tab: DsTab::Images,
             ds_split: None,
             ds_class: None,
+            ds_empty_only: false,
             ds_boxes: true,
             ds_tile: 168.,
             ds_filter_cache: RefCell::new(None),
@@ -315,6 +354,7 @@ impl FoloApp {
             grid_width: Rc::new(std::cell::Cell::new(px(900.))),
             inspector: None,
             inspector_focus: cx.focus_handle(),
+            overlay_return: None,
             inspector_return: None,
             hist_hover: HashMap::new(),
             ds_view_controls: None,
@@ -334,6 +374,9 @@ impl FoloApp {
             play_pred: Load::Idle,
             play_hover: None,
             play_drop_hover: false,
+            play_zoom: 1.0,
+            play_pan: (0., 0.),
+            play_drag: None,
             play_load_seq: 0,
             play_image_gen: 0,
             play_pred_seq: 0,
@@ -458,7 +501,7 @@ impl FoloApp {
                 cx,
                 |api| api.runs(),
                 |this, r, cx| {
-                    this.store.runs = r.into();
+                    this.store.runs = r.map(newest_first_runs).into();
                     this.subscribe_active(cx);
                 },
             );
@@ -473,7 +516,12 @@ impl FoloApp {
                 cx,
                 |api| api.models(),
                 |this, r, _| {
-                    this.store.models = r.into();
+                    this.store.models = r
+                        .map(|mut m| {
+                            m.sort_by(|a, b| b.created.cmp(&a.created));
+                            m
+                        })
+                        .into();
                     if this.play_model.is_none() {
                         this.play_model =
                             this.store.models.ready().and_then(|m| m.first()).map(|m| m.id.clone());
@@ -706,7 +754,7 @@ impl FoloApp {
                                 |api| api.runs(),
                                 |this, r, cx| {
                                     if let Ok(runs) = r {
-                                        this.store.runs = Load::Ready(runs);
+                                        this.store.runs = Load::Ready(newest_first_runs(runs));
                                         this.subscribe_active(cx);
                                     }
                                 },
@@ -734,15 +782,27 @@ impl FoloApp {
         body: Option<SharedString>,
         cx: &mut Context<Self>,
     ) {
+        self.toast_with(tone, title, body, None, cx);
+    }
+
+    pub fn toast_with(
+        &mut self,
+        tone: Tone,
+        title: impl Into<SharedString>,
+        body: Option<SharedString>,
+        action: Option<(SharedString, Action)>,
+        cx: &mut Context<Self>,
+    ) {
         self.toast_seq += 1;
         let id = self.toast_seq;
-        self.toasts.push(Toast { id, tone, title: title.into(), body });
+        let linger = if action.is_some() { 7000 } else { 4200 };
+        self.toasts.push(Toast { id, tone, title: title.into(), body, action });
         if self.toasts.len() > 3 {
             self.toasts.remove(0);
         }
         if !self.frozen {
             cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(Duration::from_millis(4200)).await;
+                cx.background_executor().timer(Duration::from_millis(linger)).await;
                 this.update(cx, |this, cx| {
                     this.toasts.retain(|t| t.id != id);
                     cx.notify();
@@ -775,6 +835,11 @@ impl FoloApp {
             self.close_palette(window, cx);
             return;
         }
+        // One overlay at a time: the palette doesn't open over a dialog or the inspector.
+        if self.modal_open() {
+            return;
+        }
+        self.remember_focus(window, cx);
         let input = cx.new(|cx| TextInput::new("Search runs, models, datasets and commands…", cx));
         let sub = cx.subscribe(&input, |this: &mut Self, _, ev: &InputEvent, cx| {
             let InputEvent::Changed(q) = ev;
@@ -798,11 +863,65 @@ impl FoloApp {
 
     pub fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.palette = None;
-        window.focus(&self.root_focus);
+        self.restore_focus(window);
+        cx.notify();
+    }
+
+    /// Remember the focused control before an overlay takes focus.
+    pub fn remember_focus(&mut self, window: &Window, cx: &App) {
+        self.overlay_return = window.focused(cx);
+    }
+
+    /// Give focus back to whatever had it before the overlay opened.
+    pub fn restore_focus(&mut self, window: &mut Window) {
+        match self.overlay_return.take() {
+            Some(fh) => window.focus(&fh),
+            None => window.focus(&self.root_focus),
+        }
+    }
+
+    pub fn close_new_run(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.new_run = None;
+        self.restore_focus(window);
+        cx.notify();
+    }
+
+    /// The New run dialog prefilled from an earlier run; `note` explains any adjustment.
+    pub fn open_new_run_from(
+        &mut self,
+        config: &TrainConfig,
+        note: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_new_run(Some(&config.dataset_id), window, cx);
+        let idx = |list: &[u32], v: u32| list.iter().position(|x| *x == v);
+        let name = format!("{}-2", config.name);
+        if let Some(f) = self.new_run.as_mut() {
+            f.arch = ARCHS.iter().position(|a| *a == config.arch).unwrap_or(f.arch);
+            f.epochs = config.epochs as f32;
+            f.batch = batch_index(config.batch);
+            f.imgsz = idx(&IMGSZ, config.imgsz).unwrap_or(f.imgsz);
+            f.device = DEVICES.iter().position(|d| *d == config.device).unwrap_or(0);
+            f.optimizer = OPTIMIZERS.iter().position(|o| *o == config.optimizer).unwrap_or(0);
+            f.lr0 = config.lr0;
+            f.mosaic = config.augment.mosaic;
+            f.mixup = config.augment.mixup;
+            f.fliplr = config.augment.fliplr;
+            f.close_mosaic = config.augment.close_mosaic as f32;
+            f.scale = config.augment.scale;
+            f.note = note;
+            f.base = Some(config.clone());
+            let input = f.name.clone();
+            input.update(cx, |i, cx| i.set_text(name, cx));
+        }
         cx.notify();
     }
 
     pub fn open_new_run(&mut self, dataset: Option<&str>, window: &mut Window, cx: &mut Context<Self>) {
+        if self.new_run.is_none() {
+            self.remember_focus(window, cx);
+        }
         let idx =
             dataset.and_then(|id| self.store.datasets.ready()?.iter().position(|d| d.id == id)).unwrap_or(0);
         let n = self.store.runs.ready().map_or(0, |r| r.len()) + 1;
@@ -823,7 +942,7 @@ impl FoloApp {
             dataset: idx,
             arch: 1,
             epochs: 100.0,
-            batch: 1,
+            batch: batch_index(16),
             imgsz: 2,
             device: 0,
             optimizer: 0,
@@ -832,6 +951,9 @@ impl FoloApp {
             mixup: 0.0,
             fliplr: 0.5,
             close_mosaic: 10.0,
+            scale: 0.5,
+            note: None,
+            base: None,
             submitting: false,
             error: None,
         });
@@ -852,26 +974,30 @@ impl FoloApp {
             return;
         }
         form.submitting = true;
-        let config = TrainConfig {
-            name,
-            dataset_id: ds.id.clone(),
-            arch: ARCHS[form.arch].into(),
-            epochs: form.epochs.round() as u32,
-            batch: BATCHES[form.batch],
-            imgsz: IMGSZ[form.imgsz],
-            device: DEVICES[form.device].into(),
-            optimizer: OPTIMIZERS[form.optimizer].into(),
-            lr0: form.lr0,
-            weights: None,
-            augment: Augment {
-                mosaic: form.mosaic,
-                mixup: form.mixup,
-                fliplr: form.fliplr,
-                close_mosaic: form.close_mosaic.round() as u32,
-                ..Augment::default()
+        let config = carry_over(
+            form.base.as_ref(),
+            TrainConfig {
+                name,
+                dataset_id: ds.id.clone(),
+                arch: ARCHS[form.arch].into(),
+                epochs: form.epochs.round() as u32,
+                batch: BATCHES[form.batch],
+                imgsz: IMGSZ[form.imgsz],
+                device: DEVICES[form.device].into(),
+                optimizer: OPTIMIZERS[form.optimizer].into(),
+                lr0: form.lr0,
+                weights: None,
+                augment: Augment {
+                    mosaic: form.mosaic,
+                    mixup: form.mixup,
+                    fliplr: form.fliplr,
+                    close_mosaic: form.close_mosaic.round() as u32,
+                    scale: form.scale,
+                    ..Augment::default()
+                },
+                seed: 0,
             },
-            seed: 0,
-        };
+        );
         let _ = window;
         self.fetch(
             cx,
@@ -879,6 +1005,7 @@ impl FoloApp {
             |this, r, cx| match r {
                 Ok(run) => {
                     this.new_run = None;
+                    this.overlay_return = None;
                     let id = run.id.clone();
                     let name = run.name.clone();
                     if let Some(runs) = this.store.runs.ready_mut() {
@@ -952,10 +1079,15 @@ impl FoloApp {
             |this, r, cx| match r {
                 Ok(res) => {
                     let (v, u) = bytes(res.bytes);
-                    this.toast(
+                    let path = res.path.clone();
+                    this.toast_with(
                         Tone::Success,
                         "Export complete",
-                        Some(format!("{} · {v} {u}", res.path).into()),
+                        Some(format!("{} · {v} {u}", display_path(&res.path)).into()),
+                        Some((
+                            "Show in folder".into(),
+                            act(move |_, _, cx| cx.reveal_path(std::path::Path::new(&path))),
+                        )),
                         cx,
                     );
                 }
@@ -1049,6 +1181,11 @@ impl FoloApp {
         );
     }
 
+    pub fn play_zoom_by(&mut self, f: f32, cx: &mut Context<Self>) {
+        (self.play_zoom, self.play_pan) = crate::viz::zoom_step(self.play_zoom, self.play_pan, f);
+        cx.notify();
+    }
+
     /// Put a new image on the Playground stage; its old detections never paint over it.
     fn set_play_image(&mut self, img: PlayImage, cx: &mut Context<Self>) {
         self.play_image_gen += 1;
@@ -1060,6 +1197,8 @@ impl FoloApp {
         self.play_pred = Load::Idle;
         self.play_pred_for = None;
         self.play_hover = None;
+        self.play_zoom = 1.0;
+        self.play_pan = (0., 0.);
         self.run_predict(cx);
     }
 
@@ -1312,7 +1451,9 @@ impl FoloApp {
         );
         let mut live_card = None;
         // On Overview the live run is already the hero; don't repeat it in the sidebar.
-        if let Some(r) = live.filter(|_| self.route != Route::Overview) {
+        if let Some(r) =
+            live.filter(|r| self.route != Route::Overview && self.route != Route::Run(r.id.clone()))
+        {
             live_card =
                 Some(if compact { self.live_rail(&r, window, cx) } else { self.live_mini(&r, window, cx) });
         }
@@ -1474,7 +1615,7 @@ impl FoloApp {
                     .items_center()
                     .gap(px(8.))
                     .child(dot(t.accent_fill(), 6., true, "mini"))
-                    .child(text(ty::XS, t.accent_text).font_weight(FontWeight::MEDIUM).child("TRAINING"))
+                    .child(text(ty::XS, t.accent_text).font_weight(FontWeight::MEDIUM).child("Training"))
                     .child(div().flex_1())
                     .child(
                         text(ty::XS, t.text_tertiary).tnum().child(format!("{:.0}%", r.progress() * 100.0)),
@@ -1509,7 +1650,7 @@ impl FoloApp {
             .id("live-rail")
             .mx(px(10.))
             .mb(px(8.))
-            .h(px(36.))
+            .h(px(40.))
             .flex()
             .flex_col()
             .items_center()
@@ -1523,7 +1664,7 @@ impl FoloApp {
             .hover(|s| s.border_color(t.line_default))
             .tooltip(crate::controls::tip(format!("{} · epoch {} / {}", r.name, r.epoch, r.epochs), None))
             .child(dot(t.accent_fill(), 6., true, "rail"))
-            .child(div().w(px(20.)).child(progress(&t, r.progress(), t.accent_fill(), 2.)));
+            .child(text(ty::MICRO, t.text_secondary).tnum().child(format!("{:.0}%", r.progress() * 100.)));
         self.bind(
             el,
             "live-rail",
@@ -1583,6 +1724,12 @@ fn shortcut_label(key: &str) -> &'static str {
         "5" => "Ctrl 5",
         _ => "Ctrl ,",
     }
+}
+
+/// Runs newest first (the server already sends them so; the mock and refreshes may not).
+fn newest_first_runs(mut runs: Vec<Run>) -> Vec<Run> {
+    runs.sort_by(|a, b| b.created.cmp(&a.created));
+    runs
 }
 
 /// The FOLO mark: a viewfinder (four corner brackets) around the signal dot.
@@ -1652,8 +1799,16 @@ impl Render for FoloApp {
             )
             .on_action(cx.listener(|this, _: &GoSettings, w, cx| this.nav_shortcut(Route::Settings, w, cx)))
             .on_action(cx.listener(|this, _: &ToggleTheme, _, cx| this.toggle_theme(cx)))
-            .on_action(cx.listener(|this, _: &Back, w, cx| this.back(w, cx)))
-            .on_action(cx.listener(|this, _: &OpenImage, _, cx| this.pick_image(cx)))
+            .on_action(cx.listener(|this, _: &Back, w, cx| {
+                if !this.modal_open() {
+                    this.back(w, cx)
+                }
+            }))
+            .on_action(cx.listener(|this, _: &OpenImage, _, cx| {
+                if !this.modal_open() {
+                    this.pick_image(cx)
+                }
+            }))
             .on_action(cx.listener(|this, _: &Submit, w, cx| {
                 if this.new_run.is_some() {
                     this.submit_new_run(w, cx);
@@ -1767,6 +1922,7 @@ impl FoloApp {
 
     /// Ask before stopping a run; the safe choice has focus.
     pub fn ask_stop(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.remember_focus(window, cx);
         self.confirm_stop = Some(id);
         let fh = self.fh("stop-cancel", cx);
         window.focus(&fh);
@@ -1804,10 +1960,10 @@ impl FoloApp {
             self.close_palette(window, cx);
         } else if self.confirm_stop.is_some() {
             self.confirm_stop = None;
-            window.focus(&self.root_focus);
+            self.restore_focus(window);
         } else if self.new_run.is_some() {
             self.new_run = None;
-            window.focus(&self.root_focus);
+            self.restore_focus(window);
         } else if self.inspector.is_some() {
             self.close_inspector(window, cx);
         } else if let Some(p) = self.parent_route() {
@@ -1839,5 +1995,61 @@ impl FoloApp {
             )
             .child(div().absolute().top_0().left_0().right_0().h(px(1.)).bg(alpha(t.bg_app, 0.0)))
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::{BATCHES, batch_index, carry_over, retry_batch};
+    use crate::api::{Augment, TrainConfig};
+
+    #[test]
+    fn oom_retries_halve_to_offered_sizes() {
+        assert_eq!(retry_batch(16), Some(8));
+        assert_eq!(retry_batch(8), Some(4));
+        assert_eq!(retry_batch(4), Some(2));
+        assert_eq!(retry_batch(2), None);
+        assert_eq!(retry_batch(48), Some(16));
+        // Whatever the retry picks, the form can show it exactly.
+        for b in [2, 4, 8, 16, 32, 64, 128] {
+            if let Some(to) = retry_batch(b) {
+                assert_eq!(BATCHES[batch_index(to)], to);
+            }
+        }
+        assert_eq!(BATCHES[batch_index(1)], 2);
+        assert_eq!(BATCHES[batch_index(500)], 128);
+    }
+
+    #[test]
+    fn hidden_settings_carry_over() {
+        let base = TrainConfig {
+            name: "a".into(),
+            dataset_id: "ds".into(),
+            arch: "folo-s".into(),
+            epochs: 50,
+            batch: 8,
+            imgsz: 640,
+            device: "auto".into(),
+            optimizer: "auto".into(),
+            lr0: 0.01,
+            weights: Some("runs/a/best.folo".into()),
+            augment: Augment { hsv: [0.1, 0.2, 0.3], translate: 0.25, ..Augment::default() },
+            seed: 42,
+        };
+        let edited = TrainConfig {
+            name: "a-2".into(),
+            weights: None,
+            seed: 0,
+            augment: Augment::default(),
+            ..base.clone()
+        };
+        let out = carry_over(Some(&base), edited.clone());
+        assert_eq!(out.weights, base.weights);
+        assert_eq!(out.seed, 42);
+        assert_eq!(out.augment.hsv, [0.1, 0.2, 0.3]);
+        assert_eq!(out.augment.translate, 0.25);
+        assert_eq!(out.name, "a-2");
+        // A fresh form keeps its own values.
+        assert_eq!(carry_over(None, edited.clone()), edited);
     }
 }

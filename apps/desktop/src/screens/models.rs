@@ -96,7 +96,7 @@ impl FoloApp {
                             }))
                             .child(cell2(&t, m.name.clone(), run).flex_1())
                             .child(div().w(px(110.)).flex().child(badge(&t, format!("{} · {}", m.arch, m.imgsz), Tone::Neutral)))
-                            .child(div().w(px(130.)).child(metrics.as_ref().map_or(text(ty::SM, t.text_tertiary).child("–"), |mm| bar_value(&t, mm.map50_95, f3(mm.map50_95), t.accent_fill()))))
+                            .child(div().w(px(130.)).child(metrics.as_ref().map_or(text(ty::SM, t.text_tertiary).child("–"), |mm| bar_value(&t, mm.map50_95, f3(mm.map50_95), t.text_tertiary))))
                             .child(text(ty::SM, t.text_secondary).tnum().w(px(64.)).text_right().child(metrics.as_ref().map_or("–".into(), |mm| f3(mm.map50))))
                             .child(text(ty::SM, t.text_secondary).tnum().w(px(72.)).text_right().child(format!("{p} {pu}")))
                             .child(text(ty::SM, t.text_secondary).tnum().w(px(72.)).text_right().child(format!("{b} {bu}")))
@@ -176,8 +176,8 @@ impl FoloApp {
                 .cursor_pointer()
                 .hover(|s| s.bg(t.bg_hover))
                 .child(text(ty::BASE, t.text_tertiary).child("· from"))
-                .child(text(ty::BASE, t.accent_text).child(r.name.clone()))
-                .child(icon("icons/arrow-up-right.svg", 12., t.accent_text));
+                .child(text(ty::BASE, t.text_primary).child(r.name.clone()))
+                .child(icon("icons/arrow-up-right.svg", 12., t.text_tertiary));
             subtitle = subtitle.child(self.bind(
                 link,
                 "model-run-link",
@@ -215,7 +215,7 @@ impl FoloApp {
             .child(tile(stat(
                 &t,
                 "Precision",
-                mm.as_ref().map_or("–".into(), |x| format!("{:.2}", x.precision)),
+                mm.as_ref().map_or("–".into(), |x| format!("{:.3}", x.precision)),
                 "",
                 None,
             )))
@@ -223,7 +223,7 @@ impl FoloApp {
             .child(tile(stat(
                 &t,
                 "Recall",
-                mm.as_ref().map_or("–".into(), |x| format!("{:.2}", x.recall)),
+                mm.as_ref().map_or("–".into(), |x| format!("{:.3}", x.recall)),
                 "",
                 None,
             )))
@@ -260,7 +260,8 @@ impl FoloApp {
                             .flex()
                             .gap(px(16.))
                             .child(div().flex_1().min_w_0().flex().child(pr))
-                            .child(div().w(px(460.)).flex_none().flex().child(cm)),
+                            .child(div().w(px(460.)).flex_none().flex().child(cm))
+                            .items_start(),
                     )
                     .child(table)
                     .into_any_element()
@@ -401,18 +402,21 @@ impl FoloApp {
         chart.hover = self.pr_hover;
         chart.on_hover = Some(on_hover);
         chart.value_fmt = Some(|v| format!("P {v:.3}"));
-        let legend = div().flex().flex_wrap().gap(px(12.)).children(ev.pr.iter().map(|c| {
-            div()
-                .flex()
-                .items_center()
-                .gap(px(5.))
-                .child(div().w(px(10.)).h(px(2.)).rounded_full().bg(t.class(c.class)))
-                .child(
-                    text(ty::XS, t.text_secondary)
-                        .child(m.classes.get(c.class as usize).cloned().unwrap_or_default()),
-                )
-                .child(text(ty::XS, t.text_tertiary).tnum().child(format!("{:.3}", c.ap50)))
-        }));
+        let legend =
+            div().flex().flex_wrap().items_center().gap(px(12.)).child(caption(&t, "AP50")).children(
+                ev.pr.iter().map(|c| {
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(5.))
+                        .child(div().w(px(10.)).h(px(2.)).rounded_full().bg(t.class(c.class)))
+                        .child(
+                            text(ty::XS, t.text_secondary)
+                                .child(m.classes.get(c.class as usize).cloned().unwrap_or_default()),
+                        )
+                        .child(text(ty::XS, t.text_tertiary).tnum().child(format!("{:.3}", c.ap50)))
+                }),
+            );
         panel(&t)
             .flex_1()
             .flex()
@@ -437,7 +441,7 @@ impl FoloApp {
         let norm = self.confusion_norm;
         let seg = self.segmented(
             "cm-norm",
-            &["Normalized", "Counts"],
+            &["Row %", "Counts"],
             if norm { 0 } else { 1 },
             window,
             cx,
@@ -449,7 +453,7 @@ impl FoloApp {
         labels.push("background".into());
         let row_sums: Vec<u32> = ev.confusion.iter().map(|r| r.iter().sum::<u32>().max(1)).collect();
         let max_count = ev.confusion.iter().flatten().copied().max().unwrap_or(1).max(1);
-        let cell = px(((428. - 80.) / n as f32).floor().clamp(36., 64.));
+        let cell = px(((460. - 34. - 80.) / n as f32).floor().clamp(36., 64.));
         let base = t.chart_series[1];
         let header_row = div().flex().pl(px(80.)).children(labels.iter().enumerate().map(|(i, l)| {
             div().w(cell).flex().justify_center().child(
@@ -484,7 +488,11 @@ impl FoloApp {
                     let label = if na {
                         "–".to_string()
                     } else if norm {
-                        if v == 0 { String::new() } else { format!("{:.2}", v as f32 / row_sums[r] as f32) }
+                        if v == 0 {
+                            String::new()
+                        } else {
+                            format!("{:.0}%", v as f32 / row_sums[r] as f32 * 100.)
+                        }
                     } else {
                         int(v as u64)
                     };
@@ -525,11 +533,16 @@ impl FoloApp {
                     .flex_col()
                     .p(px(16.))
                     .gap(px(4.))
-                    .child(div().flex().pl(px(80.)).child(text(ty::XS, t.text_tertiary).child("Predicted →")))
+                    .child(
+                        div()
+                            .flex()
+                            .child(text(ty::XS, t.text_tertiary).w(px(80.)).pr(px(8.)).text_right().child("Actual ↓"))
+                            .child(text(ty::XS, t.text_tertiary).flex_1().child("Predicted →")),
+                    )
                     .child(header_row)
                     .children(rows)
                     .child(div().pt(px(8.)).child(text(ty::XS, t.text_tertiary).tnum().child(format!(
-                        "Rows are ground truth · {} validation images",
+                        "Rows sum to 100% of each class · background = missed or extra detections · {} images",
                         int(ev.images as u64)
                     )))),
             )

@@ -60,8 +60,9 @@ impl DatasetFixture {
                 small,
             );
             images.push(ImageMeta {
-                id: format!("img_{i:05}"),
-                file: format!("images/{}/img_{i:05}.jpg", split.label()),
+                // 1-based ids, so "7 of 4,400" in the inspector shows img_00007.
+                id: format!("img_{:05}", i + 1),
+                file: format!("images/{}/img_{:05}.jpg", split.label(), i + 1),
                 split,
                 width: w,
                 height: h,
@@ -185,8 +186,13 @@ impl Curve {
     fn quality(&self, epoch: u32) -> f32 {
         let e = epoch as f32;
         let n = self.epochs as f32;
-        let closing = (e - (n - self.close_mosaic as f32)).clamp(0.0, self.close_mosaic as f32)
-            / self.close_mosaic as f32;
+        // Without a close-mosaic phase there is no late boost (and no 0 / 0).
+        let closing = if self.close_mosaic == 0 {
+            0.0
+        } else {
+            (e - (n - self.close_mosaic as f32)).clamp(0.0, self.close_mosaic as f32)
+                / self.close_mosaic as f32
+        };
         ((1.0 - (-e / (n * 0.17)).exp()) * (1.0 + 0.012 * self.noise(epoch, 9)) + 0.025 * closing).min(1.02)
     }
 
@@ -732,7 +738,8 @@ impl Backend for MockBackend {
         let f = self.fixture(dataset_id)?;
         let index: u32 = image_id
             .strip_prefix("img_")
-            .and_then(|n| n.parse().ok())
+            .and_then(|n| n.parse::<u32>().ok())
+            .and_then(|n| n.checked_sub(1))
             .filter(|&i| (i as usize) < f.images.len())
             .ok_or_else(|| ApiError::new("image_not_found", format!("No image {image_id}")))?;
         let meta = &f.images[index as usize];
@@ -1038,20 +1045,29 @@ impl Backend for MockBackend {
         let start_secs = self.sim_now();
         let runs = self.runs.clone();
         let run_id = id.to_string();
+        // The stream starts where the history a client just fetched ends: capture it now, not
+        // whenever the worker thread happens to start.
+        let mut sent = (base + (at.elapsed().as_secs_f64() / STEP_DT) as u32).min(total);
         std::thread::spawn(move || {
-            let mut sent = (base + (at.elapsed().as_secs_f64() / STEP_DT) as u32).min(total);
             loop {
                 std::thread::sleep(Duration::from_millis(100));
+                // One lock for the whole decision, so a stop can't land between "is it stopped?"
+                // and "how far has it got?".
+                let (target, stop) = {
+                    let runs = runs.lock().unwrap();
+                    match runs.iter().find(|f| f.run.id == run_id) {
+                        None => (sent, Some(Vec::new())),
+                        Some(f) if f.live.is_none() => (
+                            f.step.min(total),
+                            Some(f.logs.get(log_mark..).map(<[LogLine]>::to_vec).unwrap_or_default()),
+                        ),
+                        Some(f) => (Self::current_step(f), None),
+                    }
+                };
                 // Stopped through the API: flush the steps up to the stop point and the stop's log
                 // lines, then report the terminal status and end the stream.
-                let stop = runs
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .find(|f| f.run.id == run_id)
-                    .filter(|f| f.live.is_none())
-                    .map(|f| (f.step, f.logs.get(log_mark..).map(<[LogLine]>::to_vec).unwrap_or_default()));
-                if let Some((stop_step, lines)) = stop {
+                if let Some(lines) = stop {
+                    let stop_step = target;
                     while sent < stop_step {
                         sent += 1;
                         let _ = tx.send(RunEvent::Step(curve.step(sent)));
@@ -1066,7 +1082,7 @@ impl Backend for MockBackend {
                         tx.send(RunEvent::Status(StatusEvent { status: RunStatus::Stopped, error: None }));
                     return;
                 }
-                let now = (base + (at.elapsed().as_secs_f64() / STEP_DT) as u32).min(total);
+                let now = target;
                 while sent < now {
                     sent += 1;
                     if tx.send(RunEvent::Step(curve.step(sent))).is_err() {
@@ -1328,6 +1344,36 @@ mod tests {
         }
         assert_eq!(last_step, stopped.step, "every step up to the stop point is delivered");
         assert!(saw_log, "the stop's log lines are delivered");
+    }
+
+    #[test]
+    fn no_close_mosaic_still_learns() {
+        let mut c = MockBackend::new(0, true).runs.lock().unwrap()[0].curve.clone();
+        c.close_mosaic = 0;
+        let (early, late) = (c.quality(1), c.quality(c.epochs));
+        assert!(early.is_finite() && late.is_finite());
+        assert!(late > early + 0.3, "quality rises over training: {early} -> {late}");
+    }
+
+    #[test]
+    fn immediate_stop_flushes_exactly_to_the_stop_point() {
+        let m = MockBackend::new(500, false);
+        let rx = m.events(LIVE_ID).unwrap();
+        // Stop before the worker's first tick.
+        let stopped = m.stop_run(LIVE_ID).unwrap();
+        let mut steps = Vec::new();
+        loop {
+            match rx.recv_timeout(Duration::from_secs(5)).expect("stream ends with a status") {
+                RunEvent::Step(s) => steps.push(s.step),
+                RunEvent::Status(s) if s.status == RunStatus::Stopped => break,
+                _ => {}
+            }
+        }
+        assert!(steps.iter().all(|&s| s <= stopped.step), "no step beyond the stop point");
+        assert!(steps.windows(2).all(|w| w[1] == w[0] + 1), "no gaps");
+        if let Some(&last) = steps.last() {
+            assert_eq!(last, stopped.step);
+        }
     }
 
     #[test]

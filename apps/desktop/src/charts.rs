@@ -461,10 +461,32 @@ fn paint_line_chart(
     // A shared minimum gutter keeps plots in a grid aligned.
     let label_w = ylabels.iter().map(|l| text_width(window, l, label_size)).fold(px(28.), |a, b| a.max(b));
     let left = bounds.left() + label_w + px(10.);
-    let (top_pad, bottom_pad) = if spec.axis_titles.is_some() { (22., 40.) } else { (6., 22.) };
+    let plot_w = bounds.right() - left - px(2.);
+    let sx0 = |x: f32| left + plot_w * ((x - x0) / (x1 - x0));
+    // Marker labels live in a band above the plot, in lanes so they never overlap each other, and
+    // the data never runs through them.
+    let mut marker_layout: Vec<(Pixels, Pixels, usize, &Marker)> = Vec::new();
+    let mut ms: Vec<&Marker> = spec.markers.iter().filter(|m| m.x >= x0 && m.x <= x1).collect();
+    ms.sort_by(|a, b| a.x.total_cmp(&b.x));
+    for m in ms {
+        let x = sx0(m.x);
+        let w = text_width(window, &m.label, label_size) + px(8.);
+        // Flip to the left of the line near the right edge.
+        let lx = if x + px(2.) + w > left + plot_w { x - px(2.) - w } else { x + px(2.) };
+        let lane = (0..3)
+            .find(|&lane| {
+                !marker_layout
+                    .iter()
+                    .any(|(ox, ow, ol, _)| *ol == lane && *ox < lx + w + px(6.) && lx < *ox + *ow + px(6.))
+            })
+            .unwrap_or(2);
+        marker_layout.push((lx, w, lane, m));
+    }
+    let band = marker_layout.iter().map(|l| l.2 + 1).max().unwrap_or(0) as f32 * 16.;
+    let (top_pad, bottom_pad) = if spec.axis_titles.is_some() { (26. + band, 40.) } else { (6. + band, 22.) };
     let plot = Bounds::new(
         point(left, bounds.top() + px(top_pad)),
-        size(bounds.right() - left - px(2.), bounds.size.height - px(top_pad) - px(bottom_pad)),
+        size(plot_w, bounds.size.height - px(top_pad) - px(bottom_pad)),
     );
     if let Some((xt, yt)) = spec.axis_titles {
         paint_text(window, cx, yt, point(bounds.left(), bounds.top()), t.text_tertiary, ty::XS.size, false);
@@ -509,7 +531,12 @@ fn paint_line_chart(
         t.chart_axis,
     ));
     // X ticks.
-    let xt = ticks(x0, x1, ((plot.size.width / px(90.)) as usize).clamp(2, 8));
+    let mut xt = ticks(x0, x1, ((plot.size.width / px(90.)) as usize).clamp(2, 8));
+    if let (Some(&last), Some(step)) = (xt.last(), (xt.len() > 1).then(|| xt[1] - xt[0]))
+        && x1 - last > step * 0.35
+    {
+        xt.push(x1);
+    }
     for v in &xt {
         let x = sx(*v);
         window.paint_quad(fill(Bounds::new(point(x, plot.bottom()), size(px(1.), px(4.))), t.chart_axis));
@@ -522,32 +549,17 @@ fn paint_line_chart(
         let _ = spec.x_name;
     }
 
-    // Markers: dashed lines under the data; their labels are laid out in lanes so they never
-    // overlap, and painted after the data on a panel-coloured pill so lines never cross text.
+    // Markers: dashed lines under the data, labels in the band above the plot.
     let mut labels: Vec<(Bounds<Pixels>, &Marker)> = Vec::new();
-    let mut ms: Vec<&Marker> = spec.markers.iter().filter(|m| m.x >= x0 && m.x <= x1).collect();
-    ms.sort_by(|a, b| a.x.total_cmp(&b.x));
-    for m in ms {
+    for (lx, w, lane, m) in &marker_layout {
         let x = sx(m.x);
         stroke_path(window, &[point(x, plot.top()), point(x, plot.bottom())], 1.0, alpha(m.color, 0.5), true);
-        let w = text_width(window, &m.label, label_size) + px(8.);
-        let lx = if x + px(2.) + w > plot.right() { x - px(2.) - w } else { x + px(2.) };
-        let mut lane = 0;
-        loop {
-            let r = Bounds::new(point(lx, plot.top() + px(lane as f32 * 17.)), size(w, px(15.)));
-            let clash = labels.iter().any(|(o, _)| {
-                o.top() == r.top() && o.left() < r.right() + px(6.) && r.left() < o.right() + px(6.)
-            });
-            if !clash || lane >= 3 {
-                labels.push((r, m));
-                break;
-            }
-            lane += 1;
-        }
+        let r = Bounds::new(
+            point(*lx, plot.top() - px(band) - px(2.) + px(*lane as f32 * 16.)),
+            size(*w, px(15.)),
+        );
+        labels.push((r, m));
     }
-    let lanes_used =
-        labels.iter().map(|(r, _)| ((r.top() - plot.top()) / px(17.)) as usize + 1).max().unwrap_or(0);
-
     let columns = (plot.size.width / px(1.)).max(1.0) as usize;
     window.with_content_mask(
         Some(gpui::ContentMask {
@@ -663,8 +675,7 @@ fn paint_line_chart(
     let h = px(8.) + px(16.) * (rows.len() as f32 + 1.) + px(6.);
     let bx = if cx_px + px(12.) + w > plot.right() { cx_px - px(12.) - w } else { cx_px + px(12.) };
     let bx = bx.max(bounds.left());
-    // Below the annotation lanes, so the readout never hides a marker label.
-    let by = plot.top() + px(4. + lanes_used as f32 * 17.);
+    let by = plot.top() + px(4.);
     let rect = Bounds::new(point(bx, by), size(w, h));
     window.paint_quad(gpui::quad(
         rect,
