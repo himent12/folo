@@ -132,18 +132,27 @@ impl GradAccumulator {
 
     /// [`GradAccumulator::clip_grad_norm`] for gradients on a device, without a host round trip: the norm (in
     /// `f32`) and the factor `max_norm / (n + 1e-6)` (or 1) are device scalars and every gradient is scaled by it.
+    /// The squares are summed after dividing by the largest magnitude `s` (`n = s · sqrt(Σ (g / s)²)`), so finite
+    /// gradients whose squares overflow `f32` still give their norm, as the CPU's `f64` sum does.
     fn clip_grad_norm_device(&mut self, max_norm: f64) -> Result<()> {
         if max_norm <= 0.0 {
             return Ok(());
         }
         let _g = no_grad();
-        let mut sq: Vec<Tensor> = Vec::new();
-        for s in self.slots.iter().filter(|s| s.valid) {
-            let b = s.buf.as_ref().expect("valid");
-            sq.push(b.square()?.sum_all()?.reshape([1])?);
-        }
-        let refs: Vec<&Tensor> = sq.iter().collect();
-        let n = Tensor::cat(&refs, 0)?.sum_all()?.sqrt()?;
+        let bufs: Vec<&Tensor> =
+            self.slots.iter().filter(|s| s.valid).map(|s| s.buf.as_ref().expect("valid")).collect();
+        let cat = |v: Vec<Tensor>| -> Result<Tensor> {
+            let refs: Vec<&Tensor> = v.iter().collect();
+            Ok(Tensor::cat(&refs, 0)?)
+        };
+        let peaks = bufs.iter().map(|b| Ok(b.abs()?.max_all()?.reshape([1])?)).collect::<Result<Vec<_>>>()?;
+        let peak = cat(peaks)?.max_all()?;
+        let scale = peak.gt_scalar(0.0)?.where_cond(&peak, &peak.ones_like()?)?;
+        let sq = bufs
+            .iter()
+            .map(|b| Ok(b.div(&scale)?.square()?.sum_all()?.reshape([1])?))
+            .collect::<Result<Vec<_>>>()?;
+        let n = cat(sq)?.sum_all()?.sqrt()?.mul(&scale)?;
         let max = max_norm as f32;
         let factor =
             n.gt_scalar(max)?.where_cond(&n.add_scalar(1e-6)?.recip()?.mul_scalar(max)?, &n.ones_like()?)?;

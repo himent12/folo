@@ -97,19 +97,21 @@ fn assigner_matches_host() {
 }
 
 /// Other assigner settings take the kernels' general paths (pow for non-integer beta and alpha != 0.5, a topk
-/// above 16) and still agree.
+/// above 16, zero exponents with `powf`'s `0^0 = 1`) and still agree.
 #[test]
 fn assigner_matches_host_with_other_settings() {
     let dev = gpu!();
     let (anchors, box_raw, cls_raw, targets) = case(5, 160, 4);
-    let mut cfg = LossConfig::default();
-    cfg.tal.topk = 24;
-    cfg.tal.alpha = 1.0;
-    cfg.tal.beta = 4.5;
-    let want = assign_batch(&box_raw, &cls_raw, &anchors, &targets, &cfg).unwrap();
     let (bd, cd) = (box_raw.to_device(dev).unwrap(), cls_raw.to_device(dev).unwrap());
-    let got = assign_batch_device(&bd, &cd, &anchors, &targets, &cfg).unwrap();
-    assert_same_assignment(&got, &want);
+    for (topk, alpha, beta) in [(24, 1.0, 4.5), (10, 0.0, 6.0), (10, 0.5, 0.0), (7, 0.0, 0.0)] {
+        let mut cfg = LossConfig::default();
+        cfg.tal.topk = topk;
+        cfg.tal.alpha = alpha;
+        cfg.tal.beta = beta;
+        let want = assign_batch(&box_raw, &cls_raw, &anchors, &targets, &cfg).unwrap();
+        let got = assign_batch_device(&bd, &cd, &anchors, &targets, &cfg).unwrap();
+        assert_same_assignment(&got, &want);
+    }
 }
 
 #[track_caller]
@@ -194,4 +196,46 @@ fn non_finite_head_gives_non_finite_loss() {
     let box_bad = Tensor::from_vec(v, box_raw.shape()).unwrap().to_device(dev).unwrap();
     let out = detection_loss(&box_bad, &cls_raw.to_device(dev).unwrap(), &anchors, &targets, &cfg).unwrap();
     assert!(!out.is_finite());
+}
+
+/// `folo_gpu::detect::detection_loss` hands out a copy of its stats: overwriting it changes neither the backward nor
+/// a second read.
+#[test]
+fn returned_stats_do_not_feed_the_backward() {
+    let dev = gpu!();
+    let (anchors, box_raw, cls_raw, targets) = case(41, 96, 3);
+    let bd = box_raw.to_device(dev).unwrap().requires_grad_();
+    let cd = cls_raw.to_device(dev).unwrap().requires_grad_();
+    let boxes: Vec<Vec<[f32; 4]>> =
+        targets.iter().map(|t| t.boxes.iter().map(|b| [b.x1, b.y1, b.x2, b.y2]).collect()).collect();
+    let gts: Vec<_> = boxes
+        .iter()
+        .zip(&targets)
+        .map(|(b, t)| folo_gpu::detect::ImageGt { boxes: b, labels: &t.labels })
+        .collect();
+    let at = folo_gpu::detect::AnchorTable { points: &anchors.points, strides: &anchors.strides };
+    let cfg = LossConfig::default();
+    let s = folo_gpu::detect::LossSettings {
+        reg_max: 16,
+        gains: [cfg.box_gain, cfg.cls_gain, cfg.dfl_gain],
+        tal: folo_gpu::detect::TalSettings {
+            topk: cfg.tal.topk,
+            alpha: cfg.tal.alpha,
+            beta: cfg.tal.beta,
+            eps: cfg.tal.eps,
+            min_box_size: cfg.tal.min_box_size,
+        },
+    };
+    let grads = |mutate: bool| {
+        let out = folo_gpu::detect::detection_loss(&bd, &cd, &at, &gts, &s).unwrap();
+        if mutate {
+            out.stats.fill_assign(0.0).unwrap();
+        }
+        let g = out.total.backward().unwrap();
+        (g.get(&bd).unwrap().to_vec::<f32>().unwrap(), g.get(&cd).unwrap().to_vec::<f32>().unwrap())
+    };
+    let (b0, c0) = grads(false);
+    let (b1, c1) = grads(true);
+    assert!(b0.iter().any(|v| *v != 0.0) && c0.iter().any(|v| *v != 0.0));
+    assert_eq!((b0, c0), (b1, c1));
 }

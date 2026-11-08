@@ -88,10 +88,9 @@ pub struct DeviceLoss {
     /// was not finite.
     pub total: Tensor,
     /// `[12]` f32: total, box, cls, dfl (the reported items), positives, Σ t, non-finite flag, then the backward
-    /// scales (see `shaders/det_combine.wgsl`).
+    /// scales (see `shaders/det_combine.wgsl`). A copy: the backward reads its own, private buffers, which the
+    /// caller cannot reach (use [`assign`] to inspect an assignment).
     pub stats: Tensor,
-    /// The assignment the loss used.
-    pub assignment: Assignment,
 }
 
 /// Whether `device` is served by a folo-gpu context (so [`assign`] and [`detection_loss`] can run there).
@@ -366,5 +365,9 @@ pub fn detection_loss(
     });
     let total =
         Tensor::custom_op("detection_loss_gpu", &[box_raw, cls_raw], total, move |g| saved.backward(g))?;
-    Ok(DeviceLoss { total, stats, assignment: asg })
+    // The caller gets a copy of the stats, so nothing it does to them can change the backward.
+    let (public, public_b) = bufs.alloc(DType::F32, &[12], false)?;
+    ctx.copy(&stats_b, 0, &public_b, 0, 48);
+    drop(asg);
+    Ok(DeviceLoss { total, stats: public })
 }

@@ -22,17 +22,21 @@ var<workgroup> LEN: array<u32, WG>;
 var<workgroup> HEAD: array<u32, WG>;
 var<workgroup> BEST: array<u32, WG>;
 
+// x^y for x >= 0 with C `powf`'s special cases (WGSL leaves pow undefined for x = 0): x^0 = 1 (also 0^0),
+// 0^y = 0 for y > 0 and +inf for y < 0.
+fn pow_c(x: f32, y: f32) -> f32 {
+    if (y == 0.0) { return 1.0; }
+    if (x == 0.0) { return select(bitcast<f32>(0x7f800000u), 0.0, y > 0.0); }
+    return pow(x, y);
+}
+
 fn pow_alpha(x: f32) -> f32 {
     if (ALPHA_SQRT) { return sqrt(x); }
-    if (x == 0.0) { return 0.0; }
-    return pow(x, pf(8u));
+    return pow_c(x, pf(8u));
 }
 
 fn pow_beta(x: f32) -> f32 {
-    if (BETA_INT == 0u) {
-        if (x == 0.0) { return 0.0; }
-        return pow(x, pf(9u));
-    }
+    if (BETA_INT == 0u) { return pow_c(x, pf(9u)); }
     var r = 1.0;
     var base = x;
     var e = BETA_INT;

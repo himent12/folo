@@ -129,21 +129,27 @@ impl DetectDesc {
         Ok(())
     }
 
-    /// `(workgroup size, alpha is 0.5, beta as an integer or 0)` of the top-k kernel.
-    fn topk_spec(&self) -> Spec {
-        // At most 2048 list entries of workgroup memory (24 KiB).
-        let wg = match self.k {
-            0..=16 => 128,
-            17..=32 => 64,
-            _ => 32,
-        };
+    /// `(workgroup size, alpha is 0.5, beta as an integer or 0)` of the top-k kernel: the largest power-of-two
+    /// workgroup up to 128 whose lists (`WG · K` entries of 12 bytes) and three per-thread words fit in
+    /// `max_storage` bytes of workgroup memory.
+    fn topk_spec(&self, max_storage: u32) -> Result<Spec> {
+        let bytes = |wg: usize| wg * self.k * 12 + wg * 12;
+        let wg = [128usize, 64, 32, 16, 8, 4, 2, 1]
+            .into_iter()
+            .find(|&wg| bytes(wg) <= max_storage as usize)
+            .ok_or_else(|| {
+                shape_err(format!(
+                    "detect: topk {} does not fit {max_storage} bytes of workgroup memory",
+                    self.k
+                ))
+            })?;
         let beta_int =
             if self.beta.fract() == 0.0 && (1.0..=16.0).contains(&self.beta) { self.beta as u32 } else { 0 };
-        Spec::new()
+        Ok(Spec::new()
             .u32("K", self.k as u32)
             .u32("WG", wg as u32)
             .bool("ALPHA_SQRT", self.alpha == 0.5)
-            .u32("BETA_INT", beta_int)
+            .u32("BETA_INT", beta_int))
     }
 }
 
@@ -175,7 +181,7 @@ pub fn assign(
     if d.slots() == 0 {
         return Ok(());
     }
-    let k = ctx.kernel(&TOPK, d.topk_spec())?;
+    let k = ctx.kernel(&TOPK, d.topk_spec(ctx.caps().max_workgroup_storage)?)?;
     let p = Params::new()
         .uz(d.a)?
         .uz(d.nc)?
@@ -273,4 +279,41 @@ pub fn combine(
     let p =
         Params::new().uz(d.bce_partials())?.uz(d.slots())?.f(d.b as f32).f(gains[0]).f(gains[1]).f(gains[2]);
     ctx.dispatch(&k, &[part, terms, slot, misc, stats, total], &p, [1, 1, 1])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn desc(k: usize) -> DetectDesc {
+        DetectDesc {
+            b: 1,
+            a: 100,
+            nc: 2,
+            g: 1,
+            k,
+            reg_max: 16,
+            alpha: 0.5,
+            beta: 6.0,
+            eps: 1e-9,
+            min_box_size: 16.0,
+        }
+    }
+
+    /// The top-k workgroup shrinks until its lists fit the adapter's workgroup memory (16 KiB is the minimum FOLO
+    /// accepts), and every topk up to MAX_TOPK fits it.
+    #[test]
+    fn topk_workgroup_fits_workgroup_memory() {
+        for (k, storage, want) in
+            [(10, 48 * 1024, 128), (10, 16 * 1024, 64), (64, 16 * 1024, 16), (17, 49152, 128)]
+        {
+            let spec = desc(k).topk_spec(storage).unwrap();
+            let wg = spec.get_u32("WG", 0) as usize;
+            assert_eq!(wg, want, "k {k}, {storage} bytes");
+            assert!(wg * k * 12 + wg * 12 <= storage as usize);
+        }
+        for k in 1..=MAX_TOPK {
+            assert!(desc(k).topk_spec(16 * 1024).is_ok(), "k {k}");
+        }
+    }
 }
