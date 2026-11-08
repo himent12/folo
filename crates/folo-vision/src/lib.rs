@@ -19,6 +19,7 @@
 //!   checkpoints, early stopping, resume) and its docs/API.md event stream.
 //! - [`val`]: validation of a model on a dataset split.
 //! - [`predict`]: the [`Predictor`] (letterbox, forward, decode, NMS, rescale, with a timing breakdown).
+//! - [`export`]: ONNX export of a fused model ([`export::onnx`]).
 //!
 //! See `docs/ARCHITECTURE.md` for how this crate fits into FOLO.
 
@@ -26,6 +27,7 @@ pub mod assign;
 pub mod boxes;
 pub mod decode;
 mod error;
+pub mod export;
 pub mod loss;
 pub mod metrics;
 pub mod model;

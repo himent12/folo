@@ -73,7 +73,7 @@ this machine lacks `device_not_found` with the devices it has in the hint, a GPU
 | `stop RUN_DIR` | works | Asks the `folo train` writing `RUN_DIR` (its `run_dir`) to stop after its current batch: writes `RUN_DIR/stop`, which the trainer polls every 200 ms and removes. Returns at once with `{"event":"stop_requested","run_dir","stop_file"}`; the training process then ends with `status: stopped`. A folder that is not a run is `run_not_found` (exit 3). The portable way for a script to stop training, on Windows too. |
 | `val --model W --data D [--split val] [--batch 32] [--imgsz <model's>] [--conf 0.001] [--iou 0.7] [--device auto] [--half] [--workers N]` | works | mAP@0.5, mAP@0.5:0.95, precision and recall (docs/METRICS.md) of the weights' EMA (fused) on a split, overall and per class. One JSON object with `--json`: `{"model","data","split","imgsz","images","boxes","map50","map50_95","precision","recall","per_class":[{"class","name",...}],"device","dtype","seconds"}` (`dtype`: `f32`, or `f16` with `--half` where the GPU computes in it). `--half` (also for `predict`): half-precision inference, f16 weights and activations with f32 accumulation, on a GPU with `shader-f16` (an f16 export is uploaded as it is; other files are fused in f32 and converted); elsewhere it runs in f32 and prints a `note:` on stderr. On trained models f16 mAP is within 0.002 of f32 (docs/BENCHMARKS.md). |
 | `predict --model W SOURCES... [--conf 0.25] [--iou 0.7] [--max-det 300] [--imgsz <model's>] [--device auto] [--half] [--save DIR]` | works | Inference on images or folders (recursive), letterboxed `rect` (docs/MODEL.md §9). One `{"event":"prediction", "file", "image", "boxes": [ScoredBox], "timing", "device", "dtype", "saved"}` record per image (`dtype` as for `val`) (an unreadable image gives an `error` record and is skipped), then `{"event":"done", ...}` with mean timings. `--save` writes annotated copies (boxes coloured by class, tagged with the class id and score, e.g. `0 0.84`). |
-| `export --model W [--format folo-f16\|folo\|onnx] [--output FILE]` | works (`.folo`) | Fused EMA weights as a `weights` file (FORMAT.md export): `folo-f16` (default) casts to f16, `folo` keeps f32. Default output `<name>-f16.folo` / `<name>-fused.folo` next to the input, `-2`, `-3`, ... when taken: like MCP `export`, it never overwrites (an existing `--output` is `output_exists`, exit 1). A file that is not `.folo` weights is `invalid_weights` saying so. ONNX exits 4. |
+| `export --model W [--format folo-f16\|folo\|onnx] [--output FILE] [--imgsz N] [--batch N] [--dynamic] [--half] [--decode]` | works | Fused EMA weights (FORMAT.md export). `folo-f16` (default) and `folo` write a `weights` file in f16 / f32; `onnx` writes an ONNX graph (opset 17) for onnxruntime, TensorRT, OpenVINO or the CoreML converters, see [ONNX export](#onnx-export) (`--imgsz`, `--batch`, `--dynamic`, `--half` and `--decode` are ONNX-only, a usage error otherwise). Default output next to the input: `<name>-f16.folo` / `<name>-fused.folo` / `<name>.onnx` / `<name>-f16.onnx` (`--half`), `-2`, `-3`, ... when taken: like MCP `export`, it never overwrites (an existing `--output` is `output_exists`, exit 1). A file that is not `.folo` weights is `invalid_weights` saying so. |
 | `bench [--model folo-n] [--mode infer\|train] [--imgsz 640] [--batch 1] [--iters 100] [--warmup 10]` | planned (exit 4) | Speed benchmarks. |
 | `dataset synth OUT_DIR [--images 1000] [--classes circle,square,triangle] [--imgsz 640] [--seed 0] [--val-frac 0.2] [--image-format jpeg\|png] [--vary-aspect]` | works | Writes a synthetic shapes dataset (YOLO layout). See [Datasets](#datasets). |
 | `dataset stats PATH [--format auto\|yolo\|coco]` | works | Class counts, box sizes, boxes per image: a table with bar charts, or the `stats` object of `docs/API.md` with `--json`. |
@@ -85,6 +85,57 @@ this machine lacks `device_not_found` with the devices it has in the hint, a GPU
 `folo mcp` tool (`name`, `description`, `mutating`, `inputSchema`, `outputSchema`) with the schemas `tools/list`
 publishes (about 43 KB of the 71 KB; `--no-mcp-tools` leaves them out, `folo describe <command>` prints one
 command). Negative numbers are values (`--lr0 -1` reaches the range check and is `invalid_config`).
+
+## ONNX export
+
+`folo export --model W --format onnx` loads the weights for inference (the EMA when present), fuses Conv+BN in f32
+(docs/MODEL.md §9.1) and writes an ONNX model, opset 17 (IR version 8), default domain only. The protobuf is FOLO's
+own encoder; no ONNX library is involved. The graph is FOLO's forward pass op for op: `Conv`, SiLU as `Sigmoid` ×
+`Mul` (opset 17 has no SiLU; runtimes fuse the pair), `MaxPool`, `Resize` (nearest, asymmetric, floor) for the
+upsamples, `Concat`, `Split`, `Add`, and for the attention block `Reshape`, `Transpose`, `MatMul`, `Mul`, `Softmax`
+and `Shape`. A model part the exporter has no mapping for fails with `not_implemented` (exit 4) naming it, and
+never writes a partial file. No FOLO v1 model has such a part.
+
+| flag | default | effect |
+|---|---|---|
+| `--imgsz N` | the model's training imgsz (`folo.imgsz`) | square input size, a multiple of 32 in 32..=8192 |
+| `--batch N` | 1 | fixed batch size |
+| `--dynamic` | off | symbolic `batch`, `height`, `width` (any batch, any H and W that are multiples of 32); excludes `--batch` |
+| `--half` | off | f16 weights, input, activations and outputs (default name `<name>-f16.onnx`) |
+| `--decode` | off | decode in the graph (below) instead of the raw head outputs |
+
+**Input** `images: [B, 3, H, W]`, RGB in `[0, 1]` (`u8 / 255`, no mean/std), letterboxed as docs/MODEL.md §9.2
+says (gray 114 padding). **Outputs**, raw (default): `box_raw: [B, 64, A]` (DFL logits, channel `side · 16 + bin`,
+sides left, top, right, bottom) and `cls_raw: [B, nc, A]` (class logits), docs/MODEL.md §6.3. With `--decode`, one
+output `detections: [B, A, 4 + nc]`: per anchor `x1, y1, x2, y2` in input pixels, then the `nc` class scores after
+the sigmoid (docs/MODEL.md §6.4: the DFL softmax expectation and the anchor decode run in the graph). NMS is not in
+the graph: apply docs/MODEL.md §9.3 (class-aware, `iou 0.7`) and map the boxes back through the letterbox. `A` is
+the anchor count, `(H/8)(W/8) + (H/16)(W/16) + (H/32)(W/32)` (8400 at 640), level-major (stride 8 first), row-major
+within a level; it is the symbolic `anchors` with `--dynamic`, where the decode builds its anchor grid from the
+feature-map shapes. Weights are initializers under their `.folo` names (`backbone.stem.conv.weight`, ...).
+
+`metadata_props` hold the model's `folo.*` metadata (`folo.arch`, `folo.config`, `folo.classes`, `folo.imgsz`,
+`folo.dtype`, `folo.fused = "true"`, and `folo.metrics` / `folo.created` and unknown `folo.*` keys of the source),
+`names` (`{"0": "<class 0>", ...}`) and `folo.onnx.*`: `outputs` (`raw` or `decoded`), `output_names`, `imgsz`
+(`[H, W]`), `batch` (a number or `dynamic`), `dynamic`, `opset`, `strides`, `reg_max`.
+
+With `--json`, one record: `{"path", "bytes", "format": "onnx", "dtype": "F32"|"F16", "fused", "source": "ema"|"model",
+"arch", "classes", "opset", "imgsz", "batch", "dynamic", "decode", "inputs": [{"name", "dtype", "shape"}],
+"outputs": [...], "seconds"}` (symbolic dimensions are strings in `shape`).
+
+**Parity.** `crates/folo-cli/tests/onnx.rs` exports folo-n and folo-s (f32 and f16, raw and decoded, plus dynamic
+graphs at other batches and rectangular sizes), runs them in onnxruntime with `bench/parity/onnx_check.py` (which
+also runs `onnx.checker.check_model` with `full_check`) and compares with FOLO's forward pass element-wise,
+`|onnx − folo| ≤ tol · max(|onnx|, |folo|, 1)`: f32 within `1e-4` (max) and `1e-5` (mean), f16 within `1e-1` (max)
+and `5e-3` (mean), since an f16 graph rounds every activation to half precision while FOLO computes in f32. The test
+needs a Python with `onnx`, `onnxruntime` and `numpy` (`FOLO_ONNX_PYTHON`, or the venv at `FOLO_ONNX_VENV`, default
+`D:/folo-venvs/onnx`) and skips without one, unless `FOLO_ONNX_REQUIRED=1`, which CI's `onnx` job sets (docs/CI.md).
+
+```sh
+folo export --model best.folo --format onnx                            # best.onnx: f32, 1x3x640x640, box_raw + cls_raw
+folo export --model best.folo --format onnx --decode --dynamic         # detections [batch, anchors, 4 + nc]
+folo export --model best.folo --format onnx --half --imgsz 320         # best-f16.onnx
+```
 
 ## Datasets
 

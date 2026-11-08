@@ -32,6 +32,7 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 base64.workspace = true
+folo-core.workspace = true
 image.workspace = true
 jsonschema.workspace = true
 

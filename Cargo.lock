@@ -660,6 +660,7 @@ dependencies = [
  "base64",
  "clap",
  "folo-api",
+ "folo-core",
  "folo-data",
  "folo-gpu",
  "folo-mcp",

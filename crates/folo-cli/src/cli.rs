@@ -296,7 +296,7 @@ pub enum ExportFormatArg {
     FoloF16,
     /// Fused `.folo` with f32 weights.
     Folo,
-    /// ONNX.
+    /// ONNX (opset 17) graph of the fused model, for onnxruntime, TensorRT, OpenVINO, ...
     Onnx,
 }
 
@@ -309,12 +309,27 @@ pub struct ExportArgs {
     /// Target format.
     #[arg(long, value_enum, default_value_t = ExportFormatArg::FoloF16)]
     pub format: ExportFormatArg,
-    /// Output file [default: next to the input, `<name>-fused.folo` / `<name>-f16.folo`].
+    /// Output file [default: next to the input, `<name>-fused.folo` / `<name>-f16.folo` / `<name>.onnx` /
+    /// `<name>-f16.onnx`].
     #[arg(long)]
     pub output: Option<PathBuf>,
-    /// Square input size baked into the export (ONNX only; `.folo` files are size-independent).
-    #[arg(long, default_value_t = 640)]
-    pub imgsz: u32,
+    /// Square input size baked into the graph, a multiple of 32 (ONNX only; `.folo` files are size-independent)
+    /// [default: the model's training imgsz].
+    #[arg(long)]
+    pub imgsz: Option<u32>,
+    /// Fixed batch size of the graph (ONNX only) [default: 1].
+    #[arg(long)]
+    pub batch: Option<usize>,
+    /// Symbolic batch, height and width (ONNX only): any batch, any H and W that are multiples of 32.
+    #[arg(long)]
+    pub dynamic: bool,
+    /// F16 weights, input, activations and outputs (ONNX only; use `--format folo-f16` for `.folo`).
+    #[arg(long)]
+    pub half: bool,
+    /// Decode in the graph (ONNX only): one `detections` output `[B, A, 4 + nc]` (x1 y1 x2 y2 in input pixels,
+    /// then sigmoid class scores; NMS not included) instead of the raw `box_raw` / `cls_raw` head outputs.
+    #[arg(long)]
+    pub decode: bool,
 }
 
 /// What `folo bench` measures.

@@ -41,7 +41,7 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
 | 415 | `unsupported_media_type` | JSON endpoint called without `Content-Type: application/json` |
 | 422 | `invalid_body`, `image_decode_failed`, `invalid_weights` | well-formed JSON with wrong types / missing required fields; an upload that is not an image; a `.folo` file that cannot be read |
 | 500 | `internal` | a bug or an IO failure |
-| 501 | `not_implemented` | the feature exists in the API but not yet in the engine (ONNX export, streaming inference; in mock mode, resuming runs) |
+| 501 | `not_implemented` | the feature exists in the API but not yet in the engine (streaming inference; in mock mode, resuming runs) |
 | 507 | `gpu_out_of_memory` | the GPU ran out of memory (inference; a training run fails with this message in `Run.error`); the hint says to lower `batch` or `imgsz` or use a smaller `arch` |
 
 ## System
@@ -153,10 +153,13 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   §8.7 settings: `conf 0.001`, `iou 0.7`, the model's `imgsz`) on the server's `--device`, then cached (in memory and
   in `cache/eval/<model id>.json`) until the weights file or the dataset's files change. `pr` has curves for the
   classes with ground truth.
-- `POST /api/models/{id}/export` body `{ "format": "folo-f16|onnx" }` → `{ "path", "bytes" }`. Real mode writes the
-  fused EMA weights as f16 (as `folo export` does, docs/FORMAT.md) to `<data dir>/exports/<model name>-f16.folo`
-  (`-f16-2`, `-f16-3`, ... when taken; never overwriting). `path` uses `/` separators. `onnx` answers `501
-  not_implemented`.
+- `POST /api/models/{id}/export` body `{ "format": "folo-f16|onnx" }` → `{ "path", "bytes" }`. Real mode writes
+  the fused EMA weights to `<data dir>/exports/`: `folo-f16` as f16 `.folo` (as `folo export` does, docs/FORMAT.md)
+  to `<model name>-f16.folo`; `onnx` as an ONNX graph (opset 17) to `<model name>.onnx`, with the defaults of
+  `folo export --format onnx` (docs/CLI.md, ONNX export): f32, a fixed batch of 1, the model's training imgsz
+  (square), and the raw head outputs `box_raw` / `cls_raw`. Names get `-2`, `-3`, ... when taken (exports never
+  overwrite). `path` uses `/` separators. A model the ONNX exporter cannot map is `501 not_implemented` naming the
+  part (no FOLO v1 model hits this).
 - `GET /api/models/{id}/weights` (optional `?format=f16`) → the model's `.folo` file (docs/FORMAT.md), for loading
   it elsewhere, e.g. into the browser detector (docs/WASM.md). Without `format` it is the file as stored: a run model
   is its full training checkpoint (`weights/best.folo` / `last.folo`, with EMA and optimizer state); `format=f16` is the

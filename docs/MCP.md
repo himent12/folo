@@ -30,12 +30,13 @@ it:
 | `list_models` | `best` / `last` weights of finished runs, plus `.folo` files under `models/` | mock models | `/api/models` |
 | `val` | folo-vision's evaluator on the requested split, `conf` / `iou` as given | derived from the model's metrics | `POST /api/val` |
 | `predict`, `predict_batch` | the engine (on `--device`), predictors cached | deterministic mock boxes | `POST /api/predict` |
-| `export` | `folo-f16` to `exports/` (`onnx` is `not_implemented`) | a `mock://` path (nothing is written) | `POST /api/models/{id}/export` |
+| `export` | `folo-f16` or `onnx` (f32, batch 1, the model's imgsz, raw head outputs) to `exports/` | a `mock://` path (nothing is written) | `POST /api/models/{id}/export` |
 | run subscriptions | fired by the run's live events | fired by the mock runs' events | polled every second |
 | `folo://runs/{id}/samples/{epoch}` | the run's validation samples (first 16 val images) | rendered mock samples | `/api/runs/{id}/samples` |
 
 `get_dataset`'s `issues` and `list_dataset_issues` come from `Store::list_issues` (`/api/datasets/{id}/issues`
-in proxy mode). The one remaining `not_implemented` in real mode is ONNX export; its hint points at `folo-f16`.
+in proxy mode). Real mode has no `not_implemented` tool left; ONNX options beyond the defaults (f16, a dynamic
+batch, the in-graph decode) are `folo export --format onnx` flags (docs/CLI.md).
 
 ## Protocol
 - **Revisions.** The server supports MCP **2026-07-28** and the previous stable revision **2025-11-25**. The two
