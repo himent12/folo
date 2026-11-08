@@ -9,7 +9,8 @@ use axum::body::Body;
 use axum::http::{HeaderMap, Request, StatusCode, header};
 use folo_nn::io::{FloatDType, ModelConfig, ModelFile, Purpose};
 use folo_server::api::*;
-use folo_server::{MockStore, Options, RealStore, Server};
+use folo_server::store::{WeightsBody, WeightsFormat};
+use folo_server::{MockStore, Options, RealStore, Server, Store};
 use folo_vision::FoloModel;
 use http_body_util::BodyExt;
 use tower::ServiceExt;
@@ -109,7 +110,19 @@ async fn check_validators(app: &Router, uri: &str, headers: &HeaderMap, body: &[
     assert_eq!(header(&h, header::CONTENT_LENGTH), body.len().to_string());
     assert_eq!(header(&h, header::ETAG), etag);
 
-    // The Vite dev server's origin may fetch it and read the validators.
+    // The Vite dev server's origin may fetch it and read the validators, also with a conditional HEAD.
+    let preflight = Request::builder()
+        .method("OPTIONS")
+        .uri(uri)
+        .header(header::ORIGIN, "http://localhost:5173")
+        .header(header::ACCESS_CONTROL_REQUEST_METHOD, "HEAD")
+        .header(header::ACCESS_CONTROL_REQUEST_HEADERS, "if-none-match")
+        .body(Body::empty())
+        .unwrap();
+    let (s, h, _, _) = send(app, preflight).await;
+    assert!(s.is_success(), "{s}");
+    assert_eq!(header(&h, header::ACCESS_CONTROL_ALLOW_ORIGIN), "http://localhost:5173");
+    assert!(header(&h, header::ACCESS_CONTROL_ALLOW_METHODS).contains("HEAD"), "{h:?}");
     let (s, h, _, _) = send(app, get(uri, &[(header::ORIGIN, "http://localhost:5173")])).await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(header(&h, header::ACCESS_CONTROL_ALLOW_ORIGIN), "http://localhost:5173");
@@ -194,7 +207,8 @@ async fn real_weights_stream_with_validators_and_a_cached_f16_export() {
     let on_disk = std::fs::read(&path).unwrap();
     assert!(on_disk.len() > 8 << 20, "a large-ish file: {} bytes", on_disk.len());
 
-    let app = Server::new(Arc::new(RealStore::open(home.clone()).device("cpu")), Options::default()).router();
+    let store = Arc::new(RealStore::open(home.clone()).device("cpu"));
+    let app = Server::new(store.clone(), Options::default()).router();
     let models: ModelList = {
         let (_, _, b, _) = send(&app, get("/api/models", &[])).await;
         serde_json::from_slice(&b).unwrap()
@@ -225,6 +239,8 @@ async fn real_weights_stream_with_validators_and_a_cached_f16_export() {
     assert_eq!(f16_cache(&home), cache);
 
     // New weights under the same name: new validators, the old copy is no longer current, the f16 is redone.
+    // A download in progress keeps its bytes when a newer export replaces (and removes) its cache file.
+    let held = store.model_weights(&id, WeightsFormat::F16).unwrap();
     write_model(&path, 2);
     let (status, h2, b2, _) = send(&app, get(&uri, &[(header::IF_NONE_MATCH, &etag)])).await;
     assert_eq!(status, StatusCode::OK);
@@ -237,6 +253,11 @@ async fn real_weights_stream_with_validators_and_a_cached_f16_export() {
     let cache2 = f16_cache(&home);
     assert_eq!(cache2.len(), 1, "the stale export is removed: {cache2:?}");
     assert_ne!(cache2, cache);
+    let WeightsBody::File(mut f) = held.body else { panic!("real weights are files") };
+    let mut old = Vec::new();
+    std::io::Read::read_to_end(&mut f, &mut old).unwrap();
+    assert!(old == b16, "the held handle still reads the old export");
+    assert_eq!(held.etag, etag16);
 
     // Gone: 404, also for the export.
     std::fs::remove_file(&path).unwrap();

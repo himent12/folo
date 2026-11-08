@@ -156,8 +156,9 @@ Non-2xx responses: `{ "error": { "code": "dataset_not_found", "message": "...", 
   - `Content-Type: application/octet-stream`, `Content-Length`, `Content-Disposition: attachment;
     filename="<model name>.folo"` (`<model name>-f16.folo`; characters outside `A-Z a-z 0-9 . _ -` become `_`).
     Real files are streamed from disk (never read into memory whole), and never gzip-compressed.
-  - Validators: a strong `ETag` (real mode: the file's size and modification time in nanoseconds; mock mode: a
-    hash of the bytes) and `Last-Modified`, with `Cache-Control: no-cache` (a run's `last.folo` changes every
+  - Validators: a strong `ETag` (real mode: the file's size and modification time in nanoseconds, cheap and exact
+    for FOLO's writers, which replace files whole; a replacement keeping both the size and the exact modification
+    time, e.g. with `touch -r`, is not noticed; mock mode: a hash of the bytes) and `Last-Modified`, with `Cache-Control: no-cache` (a run's `last.folo` changes every
     epoch). `If-None-Match` (weak comparison, `*` too) and, without it, `If-Modified-Since` answer
     `304 Not Modified` with the validators and no body. `HEAD` answers the headers alone.
   - CORS exposes `ETag` and `Content-Disposition` to page scripts, so Studio (also from the Vite dev server) can

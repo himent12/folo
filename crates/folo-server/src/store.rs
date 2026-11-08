@@ -98,21 +98,25 @@ pub struct Weights {
 }
 
 impl Weights {
-    /// Opens `path` for streaming. The length, modification time and ETag come from the open handle, so they
-    /// describe the bytes sent even when the file is replaced (renamed over) meanwhile. The ETag is the size and
-    /// the modification time in nanoseconds: every writer of `.folo` files replaces them whole, which gives the
-    /// new file a new modification time. A missing file is `not_found` (`model_not_found` with `id`).
+    /// Opens `path` for streaming ([`Weights::from_file`]). A missing file is `model_not_found` with `id`.
     pub fn open(path: &std::path::Path, id: &str, file_name: String) -> Result<Weights> {
-        let io = |e: std::io::Error| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                crate::error::Error::not_found("model", id)
-            } else {
-                crate::error::Error::internal(format!("{}: {e}", path.display()))
-            }
-        };
-        let file = std::fs::File::open(path).map_err(io)?;
-        let meta = file.metadata().map_err(io)?;
-        let modified = meta.modified().map_err(io)?;
+        let file = std::fs::File::open(path).map_err(|e| weights_io(e, path, id))?;
+        Weights::from_file(file, path, id, file_name)
+    }
+
+    /// Weights streamed from `file` (opened from `path`). The length, modification time and ETag come from the
+    /// open handle, so they describe the bytes sent even when the file is replaced or removed meanwhile. The ETag
+    /// is the size and the modification time in nanoseconds: every writer of `.folo` files replaces them whole,
+    /// which gives the new file a new modification time (a replacement that keeps both the size and the exact
+    /// modification time, e.g. `touch -r`, is not noticed).
+    pub fn from_file(
+        file: std::fs::File,
+        path: &std::path::Path,
+        id: &str,
+        file_name: String,
+    ) -> Result<Weights> {
+        let meta = file.metadata().map_err(|e| weights_io(e, path, id))?;
+        let modified = meta.modified().map_err(|e| weights_io(e, path, id))?;
         let nanos = modified.duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
         let len = meta.len();
         Ok(Weights {
@@ -122,6 +126,15 @@ impl Weights {
             etag: format!("\"{len:x}-{nanos:x}\""),
             file_name,
         })
+    }
+}
+
+/// An IO error on the weights file of model `id`: `model_not_found` when the file is gone, else `internal`.
+pub fn weights_io(e: std::io::Error, path: &std::path::Path, id: &str) -> crate::error::Error {
+    if e.kind() == std::io::ErrorKind::NotFound {
+        crate::error::Error::not_found("model", id)
+    } else {
+        crate::error::Error::internal(format!("{}: {e}", path.display()))
     }
 }
 

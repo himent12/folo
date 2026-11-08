@@ -21,6 +21,7 @@ use crate::engine::{self, FileKey, engine_error, nn_error};
 use crate::error::{Error, Result};
 use crate::index::write_atomic;
 use crate::runs::{DatasetRef, data_format};
+use crate::store::weights_io;
 use crate::util::{fnv1a, rfc3339};
 
 /// Validation batch of `/eval`.
@@ -164,19 +165,13 @@ impl Models {
         self.data_dir.join("cache").join("weights")
     }
 
-    /// The `folo-f16` export of `m` for `GET /api/models/{id}/weights?format=f16`:
-    /// `cache/weights/<model id>.<hash of the weights file's path, size and mtime>.f16.folo`, written by the export
-    /// code of `POST /api/models/{id}/export` the first time it is asked for (older versions of the model's file
-    /// are then removed).
-    pub fn f16_weights(&self, m: &ModelRef) -> Result<PathBuf> {
-        let missing = |e: std::io::Error| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                Error::not_found("model", &m.model.id)
-            } else {
-                Error::internal(format!("{}: {e}", m.path.display()))
-            }
-        };
-        let fk = FileKey::of(&m.path).map_err(missing)?;
+    /// The `folo-f16` export of `m` for `GET /api/models/{id}/weights?format=f16`, opened (so removing an older
+    /// copy never pulls it from under a request): `cache/weights/<model id>.<hash of the weights file's path, size
+    /// and mtime>.f16.folo`, written by the export code of `POST /api/models/{id}/export` the first time it is asked
+    /// for (older versions of the model's file are then removed).
+    pub fn f16_weights(&self, m: &ModelRef) -> Result<(PathBuf, std::fs::File)> {
+        let id = m.model.id.as_str();
+        let fk = FileKey::of(&m.path).map_err(|e| weights_io(e, &m.path, id))?;
         let mtime = fk
             .modified
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
@@ -184,22 +179,28 @@ impl Models {
         let key = fnv1a(format!("{}|{}|{mtime}", fk.path.display(), fk.len).as_bytes());
         let dir = self.weights_cache();
         // Model ids have no dots, so `<id>.` never prefixes another model's files.
-        let prefix = format!("{}.", m.model.id);
-        let out = dir.join(format!("{prefix}{key:016x}.f16.folo"));
-        if out.is_file() {
-            return Ok(out);
+        let out = dir.join(format!("{id}.{key:016x}.f16.folo"));
+        let open = || match std::fs::File::open(&out) {
+            Ok(f) => Ok(Some(f)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(Error::internal(format!("{}: {e}", out.display()))),
+        };
+        if let Some(f) = open()? {
+            return Ok((out, f));
         }
         let _guard = self.f16.lock().unwrap();
-        if out.is_file() {
-            return Ok(out);
+        if let Some(f) = open()? {
+            return Ok((out, f));
         }
         std::fs::create_dir_all(&dir)
             .map_err(|e| Error::internal(format!("creating {}: {e}", dir.display())))?;
         let file = engine::read_model_file(&m.path)?;
         // Written to a temporary file and renamed into place, so a reader never sees a partial export.
         file.export(&out, FloatDType::F16).map_err(nn_error)?;
-        self.forget_weights(&m.model.id, Some(&out));
-        Ok(out)
+        // Opened before the lock is released: a newer export's cleanup may remove the file, not this handle.
+        let f = open()?.ok_or_else(|| Error::internal(format!("{} vanished", out.display())))?;
+        self.forget_weights(id, Some(&out));
+        Ok((out, f))
     }
 
     /// Removes the cached f16 weights of model `id` (except `keep`).

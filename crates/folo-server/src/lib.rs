@@ -187,7 +187,7 @@ impl Server {
             Cors::Any => CorsLayer::permissive(),
             Cors::Loopback => CorsLayer::new()
                 .allow_origin(AllowOrigin::predicate(|o, _| is_loopback_origin(o)))
-                .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
+                .allow_methods([Method::GET, Method::HEAD, Method::POST, Method::DELETE, Method::OPTIONS])
                 .allow_headers(tower_http::cors::Any)
                 // Readable by page scripts (Studio caches downloaded weights by ETag).
                 .expose_headers([header::ETAG, header::CONTENT_DISPOSITION]),

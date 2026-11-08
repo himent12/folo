@@ -759,11 +759,14 @@ impl Store for RealStore {
 
     fn model_weights(&self, id: &str, format: WeightsFormat) -> Result<Weights> {
         let m = self.model(id)?;
-        let path = match format {
-            WeightsFormat::Stored => m.path.clone(),
-            WeightsFormat::F16 => self.models.f16_weights(&m)?,
-        };
-        Weights::open(&path, id, weights_file_name(&m.model.name, format))
+        let name = weights_file_name(&m.model.name, format);
+        match format {
+            WeightsFormat::Stored => Weights::open(&m.path, id, name),
+            WeightsFormat::F16 => {
+                let (path, file) = self.models.f16_weights(&m)?;
+                Weights::from_file(file, &path, id, name)
+            }
+        }
     }
 
     fn list_runs(&self) -> Result<Vec<Run>> {
