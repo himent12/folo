@@ -80,6 +80,8 @@ pub struct Marker {
     pub x: f32,
     pub label: SharedString,
     pub color: Hsla,
+    /// A fixed label lane, so the same marker sits at the same height in sibling charts.
+    pub lane: Option<usize>,
 }
 
 pub struct LineChart {
@@ -579,9 +581,15 @@ fn paint_line_chart(
                     .any(|(ox, ow, ol, _)| *ol == lane && *ox < lx + w + px(6.) && lx < *ox + *ow + px(6.))
         };
         // Labels stay on their line: the next lane down before drifting away from it.
+        // A pinned lane first; on a collision the other lanes, so labels never overdraw.
+        let order: Vec<usize> = match m.lane {
+            Some(l) => std::iter::once(l).chain((0..3).filter(move |&x| x != l)).collect(),
+            None => (0..3).collect(),
+        };
         let spots: Vec<(Pixels, usize)> =
-            (0..3).flat_map(|lane| sides.into_iter().map(move |lx| (lx, lane))).collect();
-        let (lx, lane) = spots.into_iter().find(|&(lx, lane)| free(lx, lane)).unwrap_or((sides[0], 2));
+            order.iter().flat_map(|&lane| sides.into_iter().map(move |lx| (lx, lane))).collect();
+        let fallback = (sides[0], m.lane.unwrap_or(2));
+        let (lx, lane) = spots.into_iter().find(|&(lx, lane)| free(lx, lane)).unwrap_or(fallback);
         marker_layout.push((lx, w, lane, m));
     }
     let band = marker_layout.iter().map(|l| l.2 + 1).max().unwrap_or(0).max(spec.min_lanes) as f32 * LANE;
@@ -686,7 +694,7 @@ fn paint_line_chart(
                     // Raw data faint underneath, smoothed on top.
                     let raw = cached_envelope(&s.points, x0, x1, columns);
                     let pts: Vec<Point<Pixels>> = raw.iter().map(|&(x, y)| point(sx(x), sy(y))).collect();
-                    stroke_path(window, &pts, 1.0, alpha(s.color, 0.14), false);
+                    stroke_path(window, &pts, 1.0, alpha(s.color, 0.09), false);
                     cached_envelope(&smoothed(&s.points, s.smooth), x0, x1, columns / 2 + 1)
                 } else {
                     cached_envelope(&s.points, x0, x1, columns)

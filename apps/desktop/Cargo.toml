@@ -29,7 +29,7 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg"]
 
 # Tie a spawned `folo serve` to the app's lifetime (Job Object, kill on close).
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
 
 [build-dependencies]
 serde_json = "1"

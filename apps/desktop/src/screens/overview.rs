@@ -38,7 +38,8 @@ impl FoloApp {
                 };
                 format!("{d} datasets · {m} models · {live}")
             }
-            _ if self.store.runs.error().is_some() => "Server unreachable".to_string(),
+            // The error panel below says it; the subtitle doesn't repeat it.
+            _ if self.store.runs.error().is_some() => String::new(),
             _ => "Loading…".to_string(),
         };
         // Training needs a server and a dataset; until then the action explains itself instead.
@@ -86,22 +87,16 @@ impl FoloApp {
             && self.store.models.ready().is_some_and(|m| m.is_empty());
         // First run: the getting-started panel owns the only call to action.
         let actions = if nothing_yet { Vec::new() } else { actions };
-        let header = page_header(
-            &t,
-            "Overview",
-            text(ty::BASE, if self.store.runs.error().is_some() { t.danger_text } else { t.text_secondary })
-                .child(subtitle),
-            actions,
-        );
+        let header = page_header(&t, "Overview", text(ty::BASE, t.text_secondary).child(subtitle), actions);
 
         if let Some(e) = self.store.runs.error().cloned() {
             let err = self.error_panel(&e, "ov-retry", window, cx);
-            return self.page_frame(&t, header, err);
+            return self.page_frame(&t, header, err, cx);
         }
 
         if nothing_yet {
             let body = self.getting_started(window, cx);
-            return self.page_frame(&t, header, body);
+            return self.page_frame(&t, header, body, cx);
         }
         let live = self.store.live_run().cloned();
         let hero = match &live {
@@ -143,7 +138,7 @@ impl FoloApp {
                 }
             })
             .child(datasets);
-        self.page_frame(&t, header, body)
+        self.page_frame(&t, header, body, cx)
     }
 
     fn live_panel(&mut self, r: &Run, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -207,7 +202,7 @@ impl FoloApp {
                 loss.x_range = Some((0., total));
                 loss.x_int = true;
                 let loss_max = d.loss[3].iter().map(|p| p.1).fold(0f32, f32::max);
-                loss.y_range = Some((0., crate::charts::nice_ceil((loss_max * 1.05).max(0.1), 3)));
+                loss.y_range = Some((0., crate::charts::nice_ceil((loss_max * 1.05).max(0.1), loss.y_ticks)));
                 loss.height = hero_h;
                 loss.hover = hover;
                 loss.on_hover = Some(on_hover.clone());
@@ -270,8 +265,8 @@ impl FoloApp {
                                     .flex()
                                     .items_center()
                                     .gap(px(10.))
-                                    .child(status_badge(&t, r.status, &r.id))
-                                    .child(text(ty::LG, t.text_primary).truncate().child(r.name.clone())),
+                                    .child(text(ty::LG, t.text_primary).truncate().child(r.name.clone()))
+                                    .child(status_badge(&t, r.status, &r.id)),
                             )
                             .child(
                                 text(ty::SM, t.text_tertiary).truncate().child(format!(
@@ -552,9 +547,9 @@ impl FoloApp {
                 .items_center()
                 .gap(px(10.))
                 .px(px(16.))
-                .child(text(ty::SM, t.text_secondary).truncate().child(label))
-                .child(div().w(px(56.)).flex_none().child(progress(&t, frac, color, 4.)))
-                .child(text(ty::SM, t.text_primary).tnum().whitespace_nowrap().child(value))
+                .child(text(ty::SM, t.text_secondary).flex_none().whitespace_nowrap().child(label))
+                .child(div().flex_1().min_w(px(80.)).child(progress(&t, frac, color, 4.)))
+                .child(text(ty::SM, t.text_primary).flex_none().tnum().whitespace_nowrap().child(value))
         };
         let mut row = div().h(px(48.)).flex().items_center();
         if let Some(g) = s.gpus.first() {
@@ -646,16 +641,25 @@ impl FoloApp {
                             // Same order as the Runs table: name, then status.
                             .child(
                                 cell2(&t, r.name.clone(), format!("{ds} · {}", r.config.arch.as_str()))
-                                    .flex_1()
-                                    .min_w_0(),
+                                    // A fixed column (statuses line up); the spacer after them takes the rest.
+                                    .w(px(170.))
+                                    .flex_none(),
                             )
                             .child(div().w(px(96.)).flex_none().flex().child(status_badge(
                                 &t,
                                 r.status,
                                 &format!("ov-{}", r.id),
                             )))
+                            .child(div().flex_1())
                             .child(right)
-                            .child(text(ty::XS, t.text_tertiary).w(px(72.)).text_right().child(when));
+                            .child(
+                                text(ty::XS, t.text_tertiary)
+                                    .w(px(80.))
+                                    .flex_none()
+                                    .whitespace_nowrap()
+                                    .text_right()
+                                    .child(when),
+                            );
                         self.bind(
                             row,
                             &key,

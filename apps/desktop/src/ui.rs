@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    Animation, AnimationExt, Bounds, Div, FontFeatures, FontWeight, Hsla, IntoElement, ParentElement,
-    ScrollHandle, SharedString, Styled, Svg, canvas, div, fill, point, px, relative, size, svg,
+    Animation, AnimationExt, Bounds, Div, FontFeatures, FontWeight, Hsla, IntoElement, ParentElement, Pixels,
+    ScrollHandle, SharedString, Styled, Svg, div, fill, point, px, relative, size, svg,
 };
 
 use crate::api::{Label, RunStatus};
@@ -19,6 +19,25 @@ use crate::theme::{Theme, TypeStep, radius, ty};
 static REDUCE_MOTION: AtomicBool = AtomicBool::new(false);
 
 /// Settings › Reduce motion: stops pulses and shimmers and makes transitions instant.
+/// Whether the OS asks for less motion (Windows: Settings › Accessibility › Animation effects off).
+pub fn os_prefers_reduced_motion() -> bool {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            SPI_GETCLIENTAREAANIMATION, SystemParametersInfoW,
+        };
+        let mut on: i32 = 1;
+        // SAFETY: SPI_GETCLIENTAREAANIMATION writes one BOOL into the pointed-to value.
+        let ok =
+            unsafe { SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, (&mut on as *mut i32).cast(), 0) };
+        ok != 0 && on == 0
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
 pub fn set_reduce_motion(on: bool) {
     REDUCE_MOTION.store(on, Ordering::Relaxed);
 }
@@ -486,32 +505,39 @@ mod tests {
     }
 }
 
-/// A thin scroll thumb for a scroll container (GPUI draws none), so overflow is visible. Place it
-/// after the container inside a relative parent; it reads the container's handle when painting.
-pub fn scrollbar(t: &Theme, handle: ScrollHandle) -> impl IntoElement {
-    let color = crate::theme::alpha(t.text_tertiary, 0.45);
-    canvas(
-        |_, _, _| (),
-        move |_, _, window, _| {
-            let b = handle.bounds();
-            let max = handle.max_offset().height;
-            let h = b.size.height;
-            if max <= px(0.5) || h <= px(8.) {
-                return;
-            }
-            let thumb = (h * (h / (h + max))).max(px(28.)).min(h);
-            let off = (-handle.offset().y).clamp(px(0.), max);
-            let y = b.top() + (h - thumb) * (off / max);
-            window.paint_quad(
-                fill(Bounds::new(point(b.right() - px(6.), y + px(2.)), size(px(4.), thumb - px(4.))), color)
-                    .corner_radii(px(2.)),
-            );
-        },
-    )
-    .absolute()
-    .top_0()
-    .left_0()
-    .size_full()
+/// Where a scroll container's thumb sits, from its handle (None when nothing overflows).
+#[derive(Clone, Copy)]
+pub struct ThumbGeo {
+    pub top: Pixels,
+    pub right: Pixels,
+    pub h: Pixels,
+    pub thumb: Pixels,
+    pub y: Pixels,
+    pub max: Pixels,
+}
+
+impl ThumbGeo {
+    pub fn of(handle: &ScrollHandle) -> Option<Self> {
+        let b = handle.bounds();
+        let max = handle.max_offset().height;
+        let h = b.size.height;
+        if max <= px(0.5) || h <= px(8.) {
+            return None;
+        }
+        let thumb = (h * (h / (h + max))).max(px(28.)).min(h);
+        let off = (-handle.offset().y).clamp(px(0.), max);
+        Some(Self { top: b.top(), right: b.right(), h, thumb, y: b.top() + (h - thumb) * (off / max), max })
+    }
+}
+
+/// Paint the thumb (GPUI draws none), so overflow is visible.
+pub fn paint_thumb(t: &Theme, handle: &ScrollHandle, hot: bool, window: &mut gpui::Window) {
+    let Some(g) = ThumbGeo::of(handle) else { return };
+    let color = crate::theme::alpha(t.text_tertiary, if hot { 0.7 } else { 0.45 });
+    window.paint_quad(
+        fill(Bounds::new(point(g.right - px(6.), g.y + px(2.)), size(px(4.), g.thumb - px(4.))), color)
+            .corner_radii(px(2.)),
+    );
 }
 
 /// A run's device as shown: "RTX 4080 SUPER · Vulkan" from "NVIDIA GeForce RTX 4080 SUPER (vulkan)".

@@ -63,7 +63,7 @@ impl FoloApp {
         let header = page_header(&t, "Runs", subtitle, vec![new]);
         if let Some(e) = self.store.runs.error().cloned() {
             let err = self.error_panel(&e, "runs-retry", window, cx);
-            return self.page_frame(&t, header, err);
+            return self.page_frame(&t, header, err, cx);
         }
         let filters = [RunFilter::All, RunFilter::Active, RunFilter::Completed, RunFilter::Failed];
         let labels: Vec<String> = filters
@@ -133,7 +133,9 @@ impl FoloApp {
                         .child(
                             text(ty::XS, t.text_secondary)
                                 .tnum()
-                                .w(px(46.))
+                                .w(px(72.))
+                                .flex_none()
+                                .whitespace_nowrap()
                                 .text_right()
                                 .child(format!("{} / {}", r.epoch, r.epochs)),
                         ),
@@ -215,7 +217,7 @@ impl FoloApp {
             }
         });
         let body = div().flex().flex_col().gap(px(12.)).child(div().flex().child(seg)).child(table);
-        self.page_frame(&t, header, body)
+        self.page_frame(&t, header, body, cx)
     }
 
     pub fn run_view(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -237,7 +239,7 @@ impl FoloApp {
                     ))
                     .into_any_element()
             };
-            return self.page_frame(&t, header, body);
+            return self.page_frame(&t, header, body, cx);
         };
         self.ensure_run_data(id, cx);
         self.ensure_logs(id, cx);
@@ -369,7 +371,7 @@ impl FoloApp {
             }
         }
         let samples = self.samples_panel(&r, window, cx);
-        let logs = self.logs_panel(&r, cx);
+        let logs = self.logs_panel(&r, window, cx);
         body = body.child(
             div()
                 .flex()
@@ -386,7 +388,7 @@ impl FoloApp {
                 }),
         );
         body = body.child(self.config_panel(&r, &ds_name, cx));
-        self.page_frame(&t, header, body)
+        self.page_frame(&t, header, body, cx)
     }
 
     fn failure_banner(&self, r: &Run, cx: &mut Context<Self>) -> AnyElement {
@@ -440,6 +442,8 @@ impl FoloApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let t = theme(cx);
+        // Two rows of six headline numbers would bury the charts: one step smaller when wrapped.
+        let big = if narrow { ty::XL } else { ty::X2XL };
         let live = r.status == RunStatus::Running;
         // Change since the previous epoch only means something while training.
         let delta = match (last, prev) {
@@ -479,7 +483,7 @@ impl FoloApp {
                 .gap(px(6.))
                 .min_w_0()
                 .child(caption(&t, label))
-                .child(duration_metric(&t, secs, ty::X2XL, ty::SM))
+                .child(duration_metric(&t, secs, big, ty::SM))
                 .child(detail)
         };
         let time_tile = if live || r.status == RunStatus::Queued {
@@ -508,7 +512,7 @@ impl FoloApp {
                 .flex_col()
                 .gap(px(6.))
                 .child(caption(&t, "Epoch"))
-                .child(metric(&t, r.epoch.to_string(), &format!("/ {}", r.epochs), ty::X2XL, ty::SM))
+                .child(metric(&t, r.epoch.to_string(), &format!("/ {}", r.epochs), big, ty::SM))
                 .child(div().pt(px(6.)).child(progress(
                     &t,
                     r.progress(),
@@ -523,7 +527,7 @@ impl FoloApp {
                 delta.or_else(|| {
                     r.best.as_ref().map(|b| {
                         text(ty::XS, t.text_tertiary).tnum().child(format!(
-                            "best {} at epoch {}",
+                            "best {} · epoch {}",
                             f3(b.map50_95),
                             b.epoch
                         ))
@@ -548,13 +552,13 @@ impl FoloApp {
                         .items_baseline()
                         .gap(px(4.))
                         .child(
-                            text(ty::X2XL, t.text_primary)
+                            text(big, t.text_primary)
                                 .tnum()
                                 .child(last.map_or("–".into(), |e| format!("{:.3}", e.val.precision))),
                         )
                         .child(text(ty::LG, t.text_tertiary).child("/"))
                         .child(
-                            text(ty::X2XL, t.text_primary)
+                            text(big, t.text_primary)
                                 .tnum()
                                 .child(last.map_or("–".into(), |e| format!("{:.3}", e.val.recall))),
                         ),
@@ -574,7 +578,7 @@ impl FoloApp {
                             &t,
                             ips_now.map_or("–".into(), |v| format!("{v:.0}")),
                             "img/s",
-                            ty::X2XL,
+                            big,
                             ty::SM,
                         ))
                         .child(
@@ -639,7 +643,9 @@ impl FoloApp {
             r.epoch.max(1) as f32
         };
         let closing = (r.epochs.saturating_sub(r.config.augment.close_mosaic)) as f32;
-        let close_marker = Marker { x: closing, label: "close mosaic".into(), color: t.text_tertiary };
+        // Lane 0 is for what happened (best, failure, warmup); lane 1 for the schedule, in every chart.
+        let close_marker =
+            Marker { x: closing, label: "close mosaic".into(), color: t.text_tertiary, lane: Some(1) };
         // Every chart in the grid reserves the same two label lanes, so plot tops always line up.
         let lanes = 2;
         let base = |id: &str, series: Vec<Series>| {
@@ -660,7 +666,10 @@ impl FoloApp {
         let colors = t.loss_colors();
         let loss_series: Vec<Series> = (0..4)
             .filter(|&i| self.loss_parts[i])
-            .map(|i| Series::new(names[i], colors[i], d.loss[i].clone()).smooth(0.94).live(live))
+            .map(|i| {
+                let s = Series::new(names[i], colors[i], d.loss[i].clone()).smooth(0.94).live(live);
+                if i == 2 { s.dashed() } else { s }
+            })
             .collect();
         let loss_max = (0..4).filter(|&i| self.loss_parts[i]).map(|i| d.loss_max[i]).fold(0f32, f32::max);
         let mut loss = base("run-loss", loss_series);
@@ -683,15 +692,19 @@ impl FoloApp {
                     x: b.epoch as f32,
                     label: format!("best {} · epoch {}", f3(b.map50_95), b.epoch).into(),
                     color: t.accent_text,
+                    lane: Some(0),
                 },
             );
         }
         // A failed run marks where it stopped, on the charts that tell the story.
         if r.status == RunStatus::Failed {
+            // At the last step it trained, not the epoch it was counting toward.
+            let stopped = d.loss[3].last().map_or(r.epoch as f32, |p| p.0);
             let fail = Marker {
-                x: r.epoch as f32,
-                label: format!("failed · epoch {}", r.epoch).into(),
+                x: stopped,
+                label: format!("failed in epoch {}", r.epoch).into(),
                 color: t.danger_text,
+                lane: Some(0),
             };
             loss.markers.insert(0, fail.clone());
             map.markers.insert(0, fail);
@@ -711,7 +724,7 @@ impl FoloApp {
         let lr_max = d.lr_max;
         lr.y_range = Some((0., (lr_max * 1.15).max(1e-4)));
         lr.markers.clear();
-        lr.markers.push(Marker { x: 3., label: "warmup".into(), color: t.text_tertiary });
+        lr.markers.push(Marker { x: 3., label: "warmup".into(), color: t.text_tertiary, lane: Some(0) });
 
         // Legend toggles for the loss parts.
         let mut legend = Vec::new();
@@ -730,13 +743,19 @@ impl FoloApp {
                 .cursor_pointer()
                 .hover(|s| s.bg(t.bg_hover))
                 .tooltip(crate::controls::tip(if on { "Hide this series" } else { "Show this series" }, None))
-                .child(
+                .child(if on && i == 2 {
+                    div()
+                        .w(px(10.))
+                        .flex()
+                        .gap(px(2.))
+                        .children((0..3).map(move |_| div().w(px(2.)).h(px(2.)).bg(color)))
+                } else {
                     div()
                         .w(px(10.))
                         .h(px(if on { 2. } else { 6. }))
                         .rounded(px(2.))
-                        .map(|d| if on { d.bg(color) } else { d.border_1().border_color(color) }),
-                )
+                        .map(|d| if on { d.bg(color) } else { d.border_1().border_color(color) })
+                })
                 .child(
                     text(ty::XS, if on { t.text_secondary } else { t.text_tertiary }).child(name.to_string()),
                 );
@@ -765,7 +784,7 @@ impl FoloApp {
                 .flex()
                 .flex_col()
                 .child(panel_header(&t, title).child(extra))
-                .child(div().px(px(12.)).pt(px(12.)).pb(px(8.)).child(chart))
+                .child(div().px(px(12.)).pt(px(6.)).pb(px(8.)).child(chart))
         };
         let legend_row = div()
             .flex()
@@ -911,7 +930,7 @@ impl FoloApp {
             .into_any_element()
     }
 
-    fn logs_panel(&mut self, r: &Run, cx: &mut Context<Self>) -> AnyElement {
+    fn logs_panel(&mut self, r: &Run, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
         let body = match self.store.logs.get(&r.id) {
             Some(Load::Ready(lines)) => {
@@ -976,15 +995,51 @@ impl FoloApp {
                 .into_any_element(),
             _ => loading_rows(&t, "logs", 8).into_any_element(),
         };
-        let follow = if r.status == RunStatus::Running {
+        // Follow the tail while the view is at the bottom; scrolling up pauses it.
+        let at_bottom = {
+            let max = self.log_scroll.max_offset().height;
+            max - (-self.log_scroll.offset().y) < px(24.)
+        };
+        let n_lines = self.store.logs.get(&r.id).and_then(|l| l.ready()).map_or(0, |l| l.len());
+        if at_bottom && n_lines != self.log_seen {
+            self.log_scroll.scroll_to_bottom();
+        }
+        self.log_seen = n_lines;
+        let follow = if r.status != RunStatus::Running {
+            div().into_any_element()
+        } else if at_bottom {
             div()
                 .flex()
                 .items_center()
                 .gap(px(6.))
                 .child(dot(t.accent_fill(), 6., true, "log-live"))
                 .child(text(ty::XS, t.text_tertiary).child("Following"))
+                .into_any_element()
         } else {
-            div()
+            let el = div()
+                .id("log-resume")
+                .flex()
+                .items_center()
+                .gap(px(4.))
+                .px(px(6.))
+                .h(px(20.))
+                .rounded(px(radius::SM))
+                .cursor_pointer()
+                .hover(|s| s.bg(t.bg_hover))
+                .child(text(ty::XS, t.text_secondary).child("Resume following"))
+                .child(icon("icons/chevron-down.svg", 12., t.text_secondary));
+            self.bind(
+                el,
+                "log-resume",
+                radius::SM,
+                window,
+                cx,
+                act(|this, _, cx| {
+                    this.log_scroll.scroll_to_bottom();
+                    cx.notify();
+                }),
+            )
+            .into_any_element()
         };
         panel(&t)
             .flex_1()

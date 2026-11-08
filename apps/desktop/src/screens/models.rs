@@ -43,7 +43,7 @@ impl FoloApp {
         let header = page_header(&t, "Models", subtitle, vec![open]);
         if let Some(e) = self.store.models.error().cloned() {
             let err = self.error_panel(&e, "models-retry", window, cx);
-            return self.page_frame(&t, header, err);
+            return self.page_frame(&t, header, err, cx);
         }
         let now = self.store.api.now();
         let cols = |d: gpui::Stateful<gpui::Div>| d.flex().items_center().gap(px(16.)).px(px(16.));
@@ -110,7 +110,7 @@ impl FoloApp {
                 panel(&t).overflow_hidden().child(head).children(rows).into_any_element()
             }
         };
-        self.page_frame(&t, header, body)
+        self.page_frame(&t, header, body, cx)
     }
 
     pub fn model_view(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -130,7 +130,7 @@ impl FoloApp {
                     ))
                     .into_any_element()
             };
-            return self.page_frame(&t, header, body);
+            return self.page_frame(&t, header, body, cx);
         };
         self.ensure_eval(id, cx);
         let now = self.store.api.now();
@@ -301,7 +301,7 @@ impl FoloApp {
                 .child(div().h(px(360.)).child(skeleton(&t, "eval")))
                 .into_any_element(),
         };
-        self.page_frame(&t, header, body)
+        self.page_frame(&t, header, body, cx)
     }
 
     fn export_menu(&mut self, m: &Model, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -531,7 +531,11 @@ impl FoloApp {
                         crate::theme::over(t.bg_inset, alpha(base, 0.05))
                     } else {
                         // Square-root ramp: 2 %, 10 % and 25 % stay visibly apart.
-                        crate::theme::over(t.bg_inset, alpha(base, (0.9 * frac.sqrt()).clamp(0.06, 0.92)))
+                        // Correct cells in the series blue; errors and the margins on a neutral ramp,
+                        // so a 25 % confusion never looks like a 79 % hit.
+                        let hue = if diag { base } else { t.text_tertiary };
+                        let top = if diag { 0.92 } else { 0.55 };
+                        crate::theme::over(t.bg_inset, alpha(hue, (0.9 * frac.sqrt()).clamp(0.06, top)))
                     };
                     let label = if na {
                         "–".to_string()
@@ -601,7 +605,7 @@ impl FoloApp {
                     .child(div().pt(px(8.)).w_full().min_w_0().child(
                         text(ty::XS, t.text_tertiary).tnum().whitespace_normal().child(if norm {
                             format!(
-                                "Rows: actual objects · last row: share of unmatched detections · {} images",
+                                "Rows: actual objects · bottom row: how all false positives split by class · {} images",
                                 int(ev.images as u64)
                             )
                         } else {

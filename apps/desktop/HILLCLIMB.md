@@ -295,3 +295,83 @@ Round 9 changes:
 - **Charts:** a key hint under a keyboard-focused chart group; a fade under the log header.
 - **Consistency:** connection dots use success green; one format ("42 / 100", "640 px").
 - **Tooling:** `shoot-all.ps1` retries a capture once when a window is slow to appear.
+
+## Round 9
+
+| Line | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | avg |
+|------|---|---|---|---|---|---|---|---|---|----|----|----|-----|
+| Opus 5.5 | 8 | 7 | 8 | 8 | 8 | 8 | 8 | 8 | 8 | 8 | 8 | 8 | 7.9 |
+| GPT-6.1 Sol | 8 | 8 | 8 | 8 | 8 | 8 | 8 | 9 | 8 | 8 | 9 | 8 | 8.2 |
+
+Shared issues:
+- The Runs table wrapped "120 / 120".
+- Marker labels at different heights in sibling charts.
+- Empty bands above the plots.
+- The Recent runs gap at wide widths.
+- box and dfl were neighbouring hues.
+- The folded toast row couldn't expand and floated as its own card.
+- "Following" on the log wasn't true once scrolled.
+- Help icons were pointer-only.
+- Chip counts didn't say they count boxes.
+- Slider thumbs had no hover state.
+- Raw loss traces competed with the smoothed lines.
+- The KPI block was heavy.
+- The failure marker sat past the data.
+- Shortcuts were split mid-group.
+- Dimmed label chips lost contrast.
+- The light-theme letterbox disappeared.
+
+Round 10 changes:
+- **Charts:**
+  - Markers have pinned lanes (lane 0 for events, lane 1 for the schedule), so siblings match.
+  - Less padding above plots; raw traces at 9 %.
+  - dfl dashed, with a dashed legend swatch.
+  - The failure marker sits at the last trained step.
+- **Runs:** fixed 72 px no-wrap fractions; one-step-smaller KPIs when the strip wraps.
+- **Log:** follows only at the bottom, with "Resume following" otherwise.
+- **Recent runs:** a fixed 170 px name column with a spacer after the status.
+- **Toasts:** a slim strip attached to the stack: "Show N earlier" / "Dismiss all".
+- **Playground:** focusable help icons that show their text on keyboard focus; latency follows the samples in one scrolling column, and the toolbar drops the duplicate ms.
+- **Datasets:** "Boxes" before the class chips; a visible letterbox cell in both themes.
+- **Controls:** slider-thumb hover.
+- **Inspector:** label chips stay full strength when other boxes dim.
+- **Settings:** shortcuts in "Actions" and "Go to" groups.
+- **New run:** a fade above the footer.
+
+## Round 10
+
+| Line | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | avg |
+|------|---|---|---|---|---|---|---|---|---|----|----|----|-----|
+| Opus 5.5 | 8 | 8 | 8 | 8 | 8 | 7 | 8 | 8 | 8 | 8 | 7 | 8 | 7.8 |
+| GPT-6.1 Sol | 8 | 8 | 9 | 8 | 8 | 7 | 8 | 8 | 8 | 7 | 8 | 8 | 7.9 |
+
+Shared issues:
+- Failed-run labels collided: best and failure were both pinned to lane 0.
+- The dataset filter row wrapped awkwardly at minimum width.
+- Scroll thumbs were paint-only.
+- The confusion matrix's single blue ramp made errors look like hits.
+- The System strip at 1280 was mostly empty.
+- Image tabs and the split filter used the same control.
+- The Playground rail was too wide at minimum size.
+- Close mosaic had no number field.
+- The palette cut its last row.
+- Toasts expired under keyboard focus.
+- Reduce motion ignored the OS setting.
+- Copy drift ("at epoch" vs "· epoch"; pill before vs after the name).
+- "Server unreachable" appeared three times.
+
+Round 11 changes:
+- **Charts:** a pinned lane falls back to another lane on a collision; "failed in epoch N".
+- **Scroll thumbs:** drawn from `ThumbGeo` and draggable (app-level drag state); a track click jumps there.
+- **Confusion matrix:** blue only on the diagonal, errors and margins on a neutral ramp; the bottom row is explained as the false-positive split.
+- **Dataset detail:**
+  - Underline tabs for Images / Statistics.
+  - Class chips on their own row below 1100 px.
+  - The grid defaults to Fill.
+- **Overview:** System meters flex; the hero pill comes after the name; a quiet subtitle on error; the hero loss axis ends on a tick.
+- **Playground:** a 280 px rail and latency in the toolbar below 1100 px.
+- **New run:** a Close mosaic number field, validated against the epoch count.
+- **Overlays and accessibility:**
+  - A bottom fade on the palette.
+  - Toasts wait while their buttons have keyboard focus.
+  - Reduce motion starts from Windows' animation setting (`SPI_GETCLIENTAREAANIMATION`).

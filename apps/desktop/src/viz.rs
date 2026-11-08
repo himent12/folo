@@ -195,7 +195,8 @@ pub fn paint_image_with_boxes(
                         .unwrap_or(candidates[1]);
                     let chip = Bounds::new(origin, size(cw, ch));
                     placed.push(chip);
-                    window.paint_quad(fill(chip, alpha(color, a)).corner_radii(px(tokens::radius::XS)));
+                    // Dimming applies to strokes only: chip text keeps its contrast.
+                    window.paint_quad(fill(chip, color).corner_radii(px(tokens::radius::XS)));
                     let ty_ = origin.y + px(1.5);
                     let _ = name_line.paint(point(origin.x + px(5.), ty_), px(13.), window, cx);
                     let _ = score_line.paint(

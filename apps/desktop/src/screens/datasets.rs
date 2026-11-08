@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, Context, InteractiveElement, IntoElement, KeyDownEvent, ParentElement, SharedString,
-    StatefulInteractiveElement, Styled, Window, canvas, div, px, uniform_list,
+    AnyElement, Context, FontWeight, InteractiveElement, IntoElement, KeyDownEvent, ParentElement,
+    SharedString, StatefulInteractiveElement, Styled, Window, canvas, div, px, uniform_list,
 };
 
 use super::*;
@@ -69,7 +69,7 @@ impl FoloApp {
         let header = page_header(&t, "Datasets", subtitle, vec![synth, add]);
         if let Some(e) = self.store.datasets.error().cloned() {
             let err = self.error_panel(&e, "ds-retry", window, cx);
-            return self.page_frame(&t, header, err);
+            return self.page_frame(&t, header, err, cx);
         }
         let body = match list {
             None => div().flex().gap(px(16.)).children((0..3).map(|i| div().flex_1().h(px(200.)).child(skeleton(&t, format!("dsc{i}"))))).into_any_element(),
@@ -90,7 +90,7 @@ impl FoloApp {
                 div().flex().flex_col().gap(px(16.)).children(rows).into_any_element()
             }
         };
-        self.page_frame(&t, header, body)
+        self.page_frame(&t, header, body, cx)
     }
 
     /// Images of the open dataset after the split and class filters.
@@ -160,7 +160,7 @@ impl FoloApp {
                 let e = e.clone();
                 let header = page_header(&t, "Dataset", "", vec![]);
                 let err = self.error_panel(&e, "ds-detail-retry", window, cx);
-                return self.page_frame(&t, header, err);
+                return self.page_frame(&t, header, err, cx);
             }
             _ => {
                 let header = page_header(
@@ -169,7 +169,7 @@ impl FoloApp {
                     "Loading…",
                     vec![],
                 );
-                return self.page_frame(&t, header, panel(&t).child(loading_rows(&t, "ds", 6)));
+                return self.page_frame(&t, header, panel(&t).child(loading_rows(&t, "ds", 6)), cx);
             }
         };
         let did = ds.id.clone();
@@ -213,14 +213,46 @@ impl FoloApp {
         );
 
         let strip = self.dataset_strip_stats(&ds, window, cx);
-        let tabs = self.segmented(
-            "ds-tabs",
-            &["Images", "Statistics"],
-            if self.ds_tab == DsTab::Images { 0 } else { 1 },
-            window,
-            cx,
-            Rc::new(|this, i, _, _| this.ds_tab = if i == 0 { DsTab::Images } else { DsTab::Statistics }),
-        );
+        // A view switch, so underline tabs: the segmented control below is the split filter.
+        let tab = |this: &Self,
+                   key: &str,
+                   label: &str,
+                   on: bool,
+                   which: DsTab,
+                   window: &Window,
+                   cx: &mut Context<Self>| {
+            let el = div()
+                .id(SharedString::from(key.to_string()))
+                .h(px(32.))
+                .px(px(2.))
+                .flex()
+                .items_center()
+                .border_b_2()
+                .border_color(if on { t.text_primary } else { gpui::transparent_black() })
+                .cursor_pointer()
+                .child(
+                    text(ty::BASE, if on { t.text_primary } else { t.text_secondary })
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(label.to_string()),
+                );
+            this.bind(
+                el,
+                key,
+                radius::SM,
+                window,
+                cx,
+                act(move |this, _, cx| {
+                    this.ds_tab = which;
+                    cx.notify();
+                }),
+            )
+        };
+        let on_images = self.ds_tab == DsTab::Images;
+        let tabs = div()
+            .flex()
+            .gap(px(20.))
+            .child(tab(self, "ds-tab-images", "Images", on_images, DsTab::Images, window, cx))
+            .child(tab(self, "ds-tab-stats", "Statistics", !on_images, DsTab::Statistics, window, cx));
         let content = match self.ds_tab {
             DsTab::Images => self.image_browser(&ds, window, cx),
             DsTab::Statistics => self.dataset_stats(&ds, window, cx),
@@ -512,14 +544,28 @@ impl FoloApp {
         } else {
             format!("{} of {} images match", int(count as u64), int(total as u64))
         };
+        // Narrow windows give the class chips their own row; wide ones keep a single toolbar line.
+        let stack_chips = window.viewport_size().width < px(1100.);
+        let mut chip_row = Some(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .flex_1()
+                .min_w_0()
+                .flex_wrap()
+                .child(text(ty::XS, t.text_tertiary).child("Boxes"))
+                .children(chips),
+        );
         let toolbar = div()
             .flex()
             .items_center()
             .gap(px(12.))
-            .pb(px(12.))
+            .pb(px(if stack_chips { 0. } else { 12. }))
             .child(seg)
-            .child(div().w(px(1.)).h(px(20.)).bg(t.line_subtle))
-            .child(div().flex().items_center().gap(px(6.)).flex_1().min_w_0().flex_wrap().children(chips))
+            .when(!stack_chips, |d| {
+                d.child(div().w(px(1.)).h(px(20.)).bg(t.line_subtle)).children(chip_row.take())
+            })
             .when(self.ds_empty_only, |d| {
                 d.child(self.chip(
                     "ds-empty-chip",
@@ -535,7 +581,15 @@ impl FoloApp {
                     }),
                 ))
             })
+            .when(stack_chips, |d| d.child(div().flex_1()))
             .child(text(ty::SM, t.text_tertiary).tnum().whitespace_nowrap().child(count_label));
+        let toolbar = div()
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .pb(px(if stack_chips { 12. } else { 0. }))
+            .child(toolbar)
+            .when(stack_chips, |d| d.children(chip_row.take()));
         let view_controls = div()
             .flex()
             .items_center()
@@ -632,7 +686,11 @@ impl FoloApp {
                                     .inset_0()
                                     .rounded(px(radius::MD))
                                     .overflow_hidden()
-                                    .bg(if this.ds_fill { t.bg_inset } else { t.bg_raised })
+                                    .bg(if this.ds_fill {
+                                        t.bg_inset
+                                    } else {
+                                        crate::theme::over(t.bg_panel, t.bg_active)
+                                    })
                                     .child(tile_el)
                                     .child(
                                         div()

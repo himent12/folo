@@ -197,42 +197,50 @@ impl FoloApp {
                 motion.into_any_element(),
             ));
 
-        let shortcuts: [(&str, &[&str]); 12] = [
+        let actions: [(&str, &[&str]); 7] = [
             ("Command palette", &["Ctrl", "K"]),
             ("New run", &["Ctrl", "N"]),
             ("Open image", &["Ctrl", "O"]),
+            ("Switch theme", &["Ctrl", "Shift", "L"]),
+            ("Back", &["Alt", "←"]),
+            ("Close / back", &["Esc"]),
+            ("Start training (in the dialog)", &["Ctrl", "Enter"]),
+        ];
+        let go_to: [(&str, &[&str]); 6] = [
             ("Overview", &["Ctrl", "1"]),
             ("Datasets", &["Ctrl", "2"]),
             ("Runs", &["Ctrl", "3"]),
             ("Models", &["Ctrl", "4"]),
             ("Playground", &["Ctrl", "5"]),
-            ("Settings", &["Ctrl", ","]),
-            ("Back", &["Alt", "←"]),
-            ("Close / back", &["Esc"]),
-            ("Start training (in the dialog)", &["Ctrl", "Enter"]),
+            ("Settings", &["Ctrl", "Comma"]),
         ];
-        let half = shortcuts.len().div_ceil(2);
-        let col = |items: &[(&str, &[&str])]| {
-            div().flex_1().flex().flex_col().children(items.iter().map(|(name, keys)| {
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .h(px(36.))
-                    .border_b_1()
-                    .border_color(t.line_subtle)
-                    .child(text(ty::SM, t.text_secondary).child(name.to_string()))
-                    .child(shortcut(&t, keys))
-            }))
+        let col = |title: &str, items: &[(&str, &[&str])]| {
+            div()
+                .flex_1()
+                .flex()
+                .flex_col()
+                .child(div().pt(px(4.)).pb(px(6.)).child(overline(&t, title)))
+                .children(items.iter().map(|(name, keys)| {
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .h(px(36.))
+                        .border_b_1()
+                        .border_color(t.line_subtle)
+                        .child(text(ty::SM, t.text_secondary).child(name.to_string()))
+                        .child(shortcut(&t, keys))
+                }))
         };
         let keys = panel(&t).child(panel_header(&t, "Keyboard")).child(
             div()
                 .flex()
                 .gap(px(32.))
                 .px(px(16.))
+                .pt(px(8.))
                 .pb(px(8.))
-                .child(col(&shortcuts[..half]))
-                .child(col(&shortcuts[half..])),
+                .child(col("Actions", &actions))
+                .child(col("Go to", &go_to)),
         );
 
         let about = panel(&t).child(
@@ -281,6 +289,6 @@ impl FoloApp {
                 .child(keys)
                 .child(about)
         };
-        self.page_frame(&t, header, body)
+        self.page_frame(&t, header, body, cx)
     }
 }
