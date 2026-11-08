@@ -1122,7 +1122,7 @@ impl FoloApp {
                     };
                     let strong = frac > 0.55;
                     // Pick the label colour from the composited cell, not the theme.
-                    let ink = if na || v == 0 || tiny {
+                    let ink = if na || v == 0 {
                         t.text_tertiary
                     } else {
                         t.readable_on(crate::theme::over(t.bg_panel, fill))

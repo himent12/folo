@@ -440,6 +440,9 @@ pub struct FoloApp {
     /// A New run form closed without starting (Esc, the scrim, Cancel): the next plain New run
     /// reopens it as it was, so a stray click doesn't lose a configured run.
     pub new_run_draft: Option<NewRunForm>,
+    /// The draft's dataset by id (the list can gain datasets at the front while the draft waits,
+    /// so its index alone could point at another one).
+    pub new_run_draft_ds: Option<String>,
     /// The Generate synthetic dataset dialog.
     pub synth: Option<SynthForm>,
     pub synth_seq: u64,
@@ -580,6 +583,7 @@ impl FoloApp {
             palette: None,
             new_run: None,
             new_run_draft: None,
+            new_run_draft_ds: None,
             synth: None,
             synth_seq: 0,
             restore_pending: false,
@@ -1444,12 +1448,21 @@ impl FoloApp {
         );
     }
 
+    /// The form to keep as a draft when the dialog closes without starting a run: none while a
+    /// submission is pending (that run is being created; keeping it would allow a duplicate).
+    fn keep_draft(&mut self, mut f: NewRunForm) -> Option<NewRunForm> {
+        if f.submitting {
+            self.new_run_draft_ds = None;
+            return None;
+        }
+        self.new_run_draft_ds =
+            self.store.datasets.ready().and_then(|d| d.get(f.dataset)).map(|d| d.id.clone());
+        f.error = None;
+        Some(f)
+    }
+
     pub fn close_new_run(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.new_run_draft = self.new_run.take().map(|mut f| {
-            f.submitting = false;
-            f.error = None;
-            f
-        });
+        self.new_run_draft = self.new_run.take().and_then(|f| self.keep_draft(f));
         self.restore_focus(window);
         cx.notify();
     }
@@ -1502,10 +1515,17 @@ impl FoloApp {
         }
         // A plain New run picks up a draft left by Esc or Cancel; one for a specific dataset (or
         // prefilled from a run) starts fresh.
-        if let Some(draft) = self.new_run_draft.take()
+        // Its dataset is found again by id; gone (or the list unloaded), the draft is dropped.
+        let draft_ds = self
+            .new_run_draft_ds
+            .take()
+            .and_then(|id| self.store.datasets.ready().and_then(|d| d.iter().position(|d| d.id == id)));
+        if let Some(mut draft) = self.new_run_draft.take()
             && self.new_run.is_none()
             && dataset.is_none()
+            && let Some(idx) = draft_ds
         {
+            draft.dataset = idx;
             let fh = draft.name.read(cx).focus_handle(cx);
             self.new_run = Some(draft);
             window.focus(&fh);
@@ -2862,8 +2882,9 @@ impl FoloApp {
     /// Swap the data source; everything reloads from the new backend.
     pub fn set_backend(&mut self, api: Arc<dyn Backend>, mode: ServerMode, cx: &mut Context<Self>) {
         self.backend_gen += 1;
-        // A draft's dataset index belongs to the old server's list.
+        // A draft's dataset belongs to the old server.
         self.new_run_draft = None;
+        self.new_run_draft_ds = None;
         // Model ids are per server: loaded local models belong to the old one.
         crate::local::forget_all();
         if !api.local_inference() {
@@ -3007,11 +3028,7 @@ impl FoloApp {
             self.restore_focus(window);
         } else if self.new_run.is_some() {
             // Kept as a draft, like Cancel.
-            self.new_run_draft = self.new_run.take().map(|mut f| {
-                f.submitting = false;
-                f.error = None;
-                f
-            });
+            self.new_run_draft = self.new_run.take().and_then(|f| self.keep_draft(f));
             self.restore_focus(window);
         } else if self.synth.is_some() {
             self.synth = None;
