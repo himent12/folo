@@ -60,8 +60,9 @@ impl DatasetFixture {
                 small,
             );
             images.push(ImageMeta {
-                id: format!("img_{i:05}"),
-                file: format!("images/{}/img_{i:05}.jpg", split.label()),
+                // 1-based ids, so "7 of 4,400" in the inspector shows img_00007.
+                id: format!("img_{:05}", i + 1),
+                file: format!("images/{}/img_{:05}.jpg", split.label(), i + 1),
                 split,
                 width: w,
                 height: h,
@@ -732,7 +733,8 @@ impl Backend for MockBackend {
         let f = self.fixture(dataset_id)?;
         let index: u32 = image_id
             .strip_prefix("img_")
-            .and_then(|n| n.parse().ok())
+            .and_then(|n| n.parse::<u32>().ok())
+            .and_then(|n| n.checked_sub(1))
             .filter(|&i| (i as usize) < f.images.len())
             .ok_or_else(|| ApiError::new("image_not_found", format!("No image {image_id}")))?;
         let meta = &f.images[index as usize];

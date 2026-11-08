@@ -22,6 +22,25 @@ use crate::theme::{Theme, theme, ty};
 use crate::ui::*;
 use crate::viz::{DrawBox, Fit, paint_image_with_boxes};
 
+/// Display names for dataset formats ("YOLO", "COCO").
+pub fn format_label(f: &str) -> String {
+    match f {
+        "yolo" => "YOLO".into(),
+        "coco" => "COCO".into(),
+        other => other.to_string(),
+    }
+}
+
+/// Display names for GPU backends, in one casing everywhere ("Vulkan", "DX12", "Metal").
+pub fn backend_label(b: &str) -> String {
+    match b {
+        "vulkan" => "Vulkan".into(),
+        "dx12" => "DX12".into(),
+        "metal" => "Metal".into(),
+        other => other.to_string(),
+    }
+}
+
 /// Title, one line of context, and actions on the right.
 pub fn page_header(
     t: &Theme,

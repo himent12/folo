@@ -67,6 +67,23 @@ impl FoloApp {
         cx: &mut Context<Self>,
         action: Action,
     ) -> Stateful<Div> {
+        let t = theme(cx);
+        self.bind_ring(el, key, radius_px, t.focus, window, cx, action)
+    }
+
+    /// [`Self::bind`] with a custom ring colour (accent-filled controls ring in the text colour,
+    /// since a lime ring around a lime button reads as a thicker button, not focus).
+    #[allow(clippy::too_many_arguments)]
+    pub fn bind_ring(
+        &self,
+        el: Stateful<Div>,
+        key: &str,
+        radius_px: f32,
+        ring_color: gpui::Hsla,
+        window: &Window,
+        cx: &mut Context<Self>,
+        action: Action,
+    ) -> Stateful<Div> {
         let fh = self.fh(key.to_string(), cx);
         let ring = self.ring(&fh, window);
         let t = theme(cx);
@@ -84,7 +101,7 @@ impl FoloApp {
                     cx.notify();
                 }
             }))
-            .when(ring, |d| d.child(focus_ring(&t, radius_px)))
+            .when(ring, |d| d.child(focus_ring(&t, radius_px).border_color(ring_color)))
     }
 
     pub fn button(
@@ -117,7 +134,8 @@ impl FoloApp {
             .active(move |s| s.opacity(0.85))
             .when_some(icon_path, |d, p| d.child(icon(p, 14., fg)))
             .child(text(ty::BASE, fg).font_weight(FontWeight::MEDIUM).whitespace_nowrap().child(label));
-        self.bind(el, key, radius::MD, window, cx, action)
+        let ring_color = if kind == Btn::Primary { t.text_primary } else { t.focus };
+        self.bind_ring(el, key, radius::MD, ring_color, window, cx, action)
     }
 
     pub fn icon_button(
@@ -235,6 +253,7 @@ impl FoloApp {
                     .border_color(gpui::transparent_black())
                     .when(on, |d| d.bg(t.bg_raised).border_color(t.line_strong))
                     .when(!on, |d| d.hover(|s| s.bg(t.bg_hover)))
+                    .active(|s| s.bg(t.bg_active))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         f(this, i, window, cx);
                         cx.notify();
@@ -277,6 +296,7 @@ impl FoloApp {
             .when(!on, |d| {
                 d.border_color(t.line_default).hover(|s| s.bg(t.bg_hover).border_color(t.line_strong))
             })
+            .active(|s| s.opacity(0.8))
             .when_some(swatch_color, |d, c| d.child(swatch(c, 8.)))
             .child(
                 text(ty::SM, if on { t.text_primary } else { t.text_secondary })
@@ -305,6 +325,7 @@ impl FoloApp {
             .cursor_pointer()
             .bg(if on { t.accent_fill() } else { t.line_strong })
             .when(!on, |d| d.hover(|s| s.bg(t.text_disabled)))
+            .active(|s| s.opacity(0.8))
             .child({
                 // Dark: a dark knob on lime; light: white on olive. Off: a bright knob on grey.
                 let knob = if on && t.is_dark() {
@@ -447,6 +468,7 @@ impl FoloApp {
                         "nr-mixup" => f.mixup = q(frac * 0.5, 0.05),
                         "nr-fliplr" => f.fliplr = q(frac, 0.05),
                         "nr-close" => f.close_mosaic = q(frac * 30., 1.),
+                        "nr-scale" => f.scale = q(frac * 0.9, 0.05),
                         _ => {}
                     }
                 }

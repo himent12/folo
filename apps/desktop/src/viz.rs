@@ -105,101 +105,106 @@ pub fn paint_image_with_boxes(
         order.sort_by_key(|b| (b.highlight as u8, !b.dim as u8));
         // Label chips already placed, so later chips can step around them.
         let mut placed: Vec<Bounds<Pixels>> = Vec::new();
-        for b in order {
-            let color = t.class(b.class);
-            let a = if b.dim { 0.6 } else { 1.0 };
-            let p1 = to(b.x1, b.y1);
-            let p2 = to(b.x2, b.y2);
-            let r = Bounds::from_corners(p1, p2);
-            if b.truth {
-                // Ground truth: thin outline in the class colour over a halo, no label chip.
-                window.paint_quad(quad(
-                    r.dilate(px(1.)),
-                    px(0.),
-                    transparent_black(),
-                    px(1.),
-                    alpha(halo, 0.6 * a),
-                    BorderStyle::Solid,
-                ));
-                window.paint_quad(quad(
-                    r,
-                    px(0.),
-                    transparent_black(),
-                    px(1.),
-                    alpha(color, 0.9 * a),
-                    BorderStyle::Dashed,
-                ));
-                continue;
-            }
-            if b.highlight {
-                window.paint_quad(fill(r, alpha(color, tokens::CLASS_FILL_OPACITY * 1.6)));
-            }
-            let stroke = if b.highlight { 3. } else { 2. };
-            window.paint_quad(quad(
-                r.dilate(px(1.)),
-                px(0.),
-                transparent_black(),
-                px(1.),
-                alpha(halo, a * 0.8),
-                BorderStyle::Solid,
-            ));
-            window.paint_quad(quad(
-                r,
-                px(0.),
-                transparent_black(),
-                Edges::all(px(stroke)),
-                alpha(color, a),
-                BorderStyle::Solid,
-            ));
-            if labels && (b.label.is_some() || b.score.is_some()) {
-                let fs = ty::XS.size;
-                let name = b.label.clone().unwrap_or_default();
-                let score = b.score.map(|s| format!("{s:.2}")).unwrap_or_default();
-                let name_line = window.text_system().shape_line(
-                    name.clone(),
-                    px(fs),
-                    &[run(&name, SANS, FontWeight::MEDIUM, chip_text)],
-                    None,
-                );
-                let score_line = window.text_system().shape_line(
-                    score.clone().into(),
-                    px(fs),
-                    &[run(&score, MONO, FontWeight::MEDIUM, alpha(chip_text, 0.72))],
-                    None,
-                );
-                let gap = if score.is_empty() || name.is_empty() { px(0.) } else { px(5.) };
-                let cw = name_line.width + gap + score_line.width + px(10.);
-                let ch = px(16.);
-                // Preferred spots: above the top-left corner, inside it, below the bottom-left
-                // corner, inside the bottom-left. Take the first that is on the image and free.
-                let clamp_x = |x: Pixels| x.min(bounds.right() - cw).max(bounds.left());
-                let candidates = [
-                    point(clamp_x(r.left() - px(1.)), r.top() - ch - px(1.)),
-                    point(clamp_x(r.left() + px(1.)), r.top() + px(1.)),
-                    point(clamp_x(r.left() - px(1.)), r.bottom() + px(1.)),
-                    point(clamp_x(r.left() + px(1.)), r.bottom() - ch - px(1.)),
-                ];
-                let fits = |o: Point<Pixels>| {
-                    o.y >= bounds.top().max(rect.top()) && o.y + ch <= bounds.bottom().min(rect.bottom())
-                };
-                let free = |c: &Bounds<Pixels>| !placed.iter().any(|p| p.intersects(c));
-                let origin = candidates
-                    .iter()
-                    .copied()
-                    .find(|o| fits(*o) && free(&Bounds::new(*o, size(cw, ch))))
-                    .or_else(|| candidates.iter().copied().find(|o| fits(*o)))
-                    .unwrap_or(candidates[1]);
-                let chip = Bounds::new(origin, size(cw, ch));
-                placed.push(chip);
-                window.paint_quad(fill(chip, alpha(color, a)).corner_radii(px(tokens::radius::XS)));
-                let ty_ = origin.y + px(1.5);
-                let _ = name_line.paint(point(origin.x + px(5.), ty_), px(13.), window, cx);
-                let _ = score_line.paint(
-                    point(origin.x + px(5.) + name_line.width + gap, ty_),
-                    px(13.),
-                    window,
-                    cx,
-                );
+        // Two passes: every box first, then every label chip, so no box stroke covers a chip.
+        for pass in 0..2 {
+            for &b in &order {
+                let color = t.class(b.class);
+                let a = if b.dim { 0.6 } else { 1.0 };
+                let p1 = to(b.x1, b.y1);
+                let p2 = to(b.x2, b.y2);
+                let r = Bounds::from_corners(p1, p2);
+                if pass == 0 {
+                    if b.truth {
+                        // Ground truth: thin outline in the class colour over a halo, no label chip.
+                        window.paint_quad(quad(
+                            r.dilate(px(1.)),
+                            px(0.),
+                            transparent_black(),
+                            px(1.),
+                            alpha(halo, 0.6 * a),
+                            BorderStyle::Solid,
+                        ));
+                        window.paint_quad(quad(
+                            r,
+                            px(0.),
+                            transparent_black(),
+                            px(1.),
+                            alpha(color, 0.9 * a),
+                            BorderStyle::Dashed,
+                        ));
+                        continue;
+                    }
+                    if b.highlight {
+                        window.paint_quad(fill(r, alpha(color, tokens::CLASS_FILL_OPACITY * 1.6)));
+                    }
+                    let stroke = if b.highlight { 3. } else { 2. };
+                    window.paint_quad(quad(
+                        r.dilate(px(1.)),
+                        px(0.),
+                        transparent_black(),
+                        px(1.),
+                        alpha(halo, a * 0.8),
+                        BorderStyle::Solid,
+                    ));
+                    window.paint_quad(quad(
+                        r,
+                        px(0.),
+                        transparent_black(),
+                        Edges::all(px(stroke)),
+                        alpha(color, a),
+                        BorderStyle::Solid,
+                    ));
+                }
+                if pass == 1 && !b.truth && labels && (b.label.is_some() || b.score.is_some()) {
+                    let fs = ty::XS.size;
+                    let name = b.label.clone().unwrap_or_default();
+                    let score = b.score.map(|s| format!("{s:.2}")).unwrap_or_default();
+                    let name_line = window.text_system().shape_line(
+                        name.clone(),
+                        px(fs),
+                        &[run(&name, SANS, FontWeight::MEDIUM, chip_text)],
+                        None,
+                    );
+                    let score_line = window.text_system().shape_line(
+                        score.clone().into(),
+                        px(fs),
+                        &[run(&score, MONO, FontWeight::MEDIUM, alpha(chip_text, 0.72))],
+                        None,
+                    );
+                    let gap = if score.is_empty() || name.is_empty() { px(0.) } else { px(5.) };
+                    let cw = name_line.width + gap + score_line.width + px(10.);
+                    let ch = px(16.);
+                    // Preferred spots: above the top-left corner, inside it, below the bottom-left
+                    // corner, inside the bottom-left. Take the first that is on the image and free.
+                    let clamp_x = |x: Pixels| x.min(bounds.right() - cw).max(bounds.left());
+                    let candidates = [
+                        point(clamp_x(r.left() - px(1.)), r.top() - ch - px(1.)),
+                        point(clamp_x(r.left() + px(1.)), r.top() + px(1.)),
+                        point(clamp_x(r.left() - px(1.)), r.bottom() + px(1.)),
+                        point(clamp_x(r.left() + px(1.)), r.bottom() - ch - px(1.)),
+                    ];
+                    let fits = |o: Point<Pixels>| {
+                        o.y >= bounds.top().max(rect.top()) && o.y + ch <= bounds.bottom().min(rect.bottom())
+                    };
+                    let free = |c: &Bounds<Pixels>| !placed.iter().any(|p| p.intersects(c));
+                    let origin = candidates
+                        .iter()
+                        .copied()
+                        .find(|o| fits(*o) && free(&Bounds::new(*o, size(cw, ch))))
+                        .or_else(|| candidates.iter().copied().find(|o| fits(*o)))
+                        .unwrap_or(candidates[1]);
+                    let chip = Bounds::new(origin, size(cw, ch));
+                    placed.push(chip);
+                    window.paint_quad(fill(chip, alpha(color, a)).corner_radii(px(tokens::radius::XS)));
+                    let ty_ = origin.y + px(1.5);
+                    let _ = name_line.paint(point(origin.x + px(5.), ty_), px(13.), window, cx);
+                    let _ = score_line.paint(
+                        point(origin.x + px(5.) + name_line.width + gap, ty_),
+                        px(13.),
+                        window,
+                        cx,
+                    );
+                }
             }
         }
     });
@@ -207,6 +212,27 @@ pub fn paint_image_with_boxes(
 
 fn rgba(v: u32) -> Hsla {
     gpui::rgba(v).into()
+}
+
+/// Zoom to `new_zoom` keeping the image point under `cursor` fixed; returns the new pan.
+pub fn zoom_about(
+    bounds: Bounds<Pixels>,
+    (w, h): (f32, f32),
+    zoom: f32,
+    pan: (f32, f32),
+    cursor: Point<Pixels>,
+    new_zoom: f32,
+) -> (f32, f32) {
+    if new_zoom <= 1.0 {
+        return (0., 0.);
+    }
+    let rect = image_rect(bounds, w, h, Fit::Contain, zoom, pan);
+    let fx = f32::from(cursor.x - rect.left()) / f32::from(rect.size.width);
+    let fy = f32::from(cursor.y - rect.top()) / f32::from(rect.size.height);
+    let fresh = image_rect(bounds, w, h, Fit::Contain, new_zoom, (0., 0.));
+    let want_x = f32::from(cursor.x) - fx * f32::from(fresh.size.width);
+    let want_y = f32::from(cursor.y) - fy * f32::from(fresh.size.height);
+    (want_x - f32::from(fresh.left()), want_y - f32::from(fresh.top()))
 }
 
 /// Map a window point to image pixel coordinates (for hover hit-testing).
@@ -257,6 +283,16 @@ mod tests {
             point(r.left() + r.size.width / 4., r.top() + r.size.height / 2.)
         });
         assert!((x - 160.).abs() < 0.01 && (y - 240.).abs() < 0.01);
+    }
+
+    #[test]
+    fn zoom_keeps_the_cursor_point() {
+        let b = Bounds::new(point(px(0.), px(0.)), size(px(400.), px(300.)));
+        let cursor = point(px(130.), px(90.));
+        let before = to_image(b, (640., 480.), Fit::Contain, 1.0, (0., 0.), cursor);
+        let pan = zoom_about(b, (640., 480.), 1.0, (0., 0.), cursor, 3.0);
+        let after = to_image(b, (640., 480.), Fit::Contain, 3.0, pan, cursor);
+        assert!((before.0 - after.0).abs() < 0.01 && (before.1 - after.1).abs() < 0.01);
     }
 
     #[test]

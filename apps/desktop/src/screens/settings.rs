@@ -228,7 +228,7 @@ impl FoloApp {
             .flex()
             .flex_col()
             .gap(px(16.))
-            .max_w(px(880.))
+            .w_full()
             .child(connection)
             .child(appearance)
             .child(keys)

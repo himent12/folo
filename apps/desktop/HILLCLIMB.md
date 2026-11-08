@@ -45,3 +45,33 @@ strength and labels; label chips avoid each other; legends on the Overview mAP c
 loss axes from zero; "mAP50-95 · latest/final" with no red delta on finished runs; GPU utilisation history fills the
 System panel on a fixed 0–100 % scale; segmented items no longer shift; "Close mosaic" in the New run form; inspector
 says "Fit"; mock file names match image ids; the sidebar's live card hides on Overview.
+
+## Round 2
+
+| Line | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | avg |
+|------|---|---|---|---|---|---|---|---|---|----|----|----|-----|
+| Opus 5.5 | 8 | 7 | 8 | 7 | 7 | 8 | 7 | 7 | 7 | 7 | 7 | 7 | 7.3 |
+| GPT-6.1 Sol | 8 | 7 | 7 | 8 | 7 | 8 | 7 | 8 | 7 | 6 | 7 | 7 | 7.3 |
+
+Main issues: lists not sorted by time; clipped class summaries; Playground latency below the fold, no zoom; lime on
+plain magnitude bars and links; marker labels still crossing data; time units at full size; mixed metric precision;
+uppercase overlines without tracking; Overview hero dead space at wide sizes; wrapped log lines; weak focus ring on
+lime buttons; no pressed states on chips/segments/switches; global shortcuts and the palette leaking over modals,
+focus not returned to the invoker; "New run from this config" only kept the dataset; stop dialog text overflow;
+dataset defects not actionable; System panel too prominent at minimum size; confusion matrix "Normalized" unclear;
+inspector toolbar overlapping the image; Windows paths with forward slashes. Tertiary text contrast was fixed in
+design/tokens.json by the web thread (now #80868F dark, #646B75 light).
+
+Round 3 changes: runs and models newest first; class summaries fit whole names ("circle, square +3"); Playground
+latency pinned in a footer and in the stage header, wheel zoom / drag pan / Fit toolbar on the stage; neutral
+magnitude bars and links (lime only for live, focus and primary); marker labels in a reserved band above the plot,
+an end tick when the range overshoots (120-epoch runs); durations with small units ("12 m 02 s"); three-decimal
+detection metrics; readout order follows the legend; sentence-case group headings; Overview hero KPIs in four equal
+columns with dividers, a hero-shaped loading skeleton, "Collecting…" for an empty GPU history, a compact System
+strip below 1200 px; single-line log entries; focus ring in the text colour on lime buttons; pressed states on
+chips, segments and switches; palette and global shortcuts inert behind modals, focus returned to the invoker;
+"New run from this config" restores the whole config (halving the batch after out-of-memory, with a note); stop
+dialog copy within its padding; Empty images tile filters the grid; tiles crop to fill; native path separators;
+export toast with "Show in folder"; confusion matrix as row percentages with Actual/Predicted labels; AP50 legend
+heading; inspector image clear of its zoom bar; 1-based image ids; two-pass box painting so strokes never cover
+label chips; full-width Settings; "Vulkan" casing; the collapsed sidebar's live button shows its percentage.
