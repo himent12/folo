@@ -88,7 +88,6 @@
   @keyframes in {
     from {
       opacity: 0;
-      transform: translateY(4px);
     }
   }
   @media (max-width: 767px) {
