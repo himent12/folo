@@ -12,7 +12,9 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
-# folo-core / folo-nn / folo-data come back when the detector and trainer land; the detection math is tensor-free.
+# The detection math (boxes, decode, assign, nms, metrics) is tensor-free; the loss works on folo-core tensors.
+# folo-nn / folo-data come back when the detector and trainer land.
+folo-core.workspace = true
 rayon.workspace = true
 serde.workspace = true
 
@@ -21,4 +23,8 @@ serde_json.workspace = true
 
 [[bench]]
 name = "post"
+harness = false
+
+[[bench]]
+name = "loss"
 harness = false

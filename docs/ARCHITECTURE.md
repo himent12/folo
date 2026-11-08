@@ -106,7 +106,9 @@ The exact block definitions, layer tables, parameter names, head, loss, training
   (`reg_max`, default 16). An NMS-free one-to-one head (dual assignment during training, as in YOLOv10) is specified
   in MODEL.md but reserved for a later milestone.
 - **Loss**: task-aligned assigner (TAL: `score^alpha * IoU^beta`, top-k), BCE classification on aligned targets,
-  CIoU box loss and DFL, weighted 7.5 / 0.5 / 1.5 by default.
+  CIoU box loss and DFL, weighted 7.5 / 0.5 / 1.5 by default. `folo_vision::loss` runs the assigner on host copies of the detached
+  head outputs, then builds the terms from folo-core tensor ops (fused custom ops for the full-size BCE and gather on
+  the CPU), so gradients flow into both head branches.
 - **Box ops, NMS, metrics** work on plain slices so they are reusable everywhere: IoU / GIoU / DIoU / CIoU,
   xywh↔xyxy, class-aware batched NMS, COCO-style mAP@0.5 and mAP@0.5:0.95 (101-point interpolation), precision /
   recall / F1 curves, confusion matrix. `docs/METRICS.md` defines exactly how mAP is computed.
