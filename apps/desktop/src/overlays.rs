@@ -16,7 +16,7 @@ use crate::api::RunStatus;
 use crate::app::{ARCHS, Action, BATCHES, DEVICES, FoloApp, IMGSZ, OPTIMIZERS, Route, act};
 use crate::controls::Btn;
 use crate::store::ImgKind;
-use crate::theme::{Theme, alpha, radius, theme, ty};
+use crate::theme::{Theme, radius, theme, ty};
 use crate::ui::*;
 use crate::viz::{DrawBox, Fit, hit_box, image_rect, paint_image_with_boxes, to_image};
 
