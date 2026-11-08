@@ -7,10 +7,13 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use axum::http::StatusCode;
-use folo_api::{Arch, ExportFormat, ExportResult, Model, ModelEval, ModelMetrics, PrCurve};
+use folo_api::{
+    Arch, ExportFormat, ExportResult, Model, ModelEval, ModelMetrics, PrCurve, ValReport, ValTiming,
+};
 use folo_core::Device;
 use folo_data::{Dataset as _, Split};
 use folo_nn::io::{FloatDType, Namespace};
+use folo_vision::NmsConfig;
 use folo_vision::val::{ValConfig, val_metrics, validate};
 use serde::{Deserialize, Serialize};
 
@@ -270,9 +273,8 @@ impl Models {
     }
 }
 
-/// Validates the weights at `path` on `dataset` and shapes the report as `/eval`.
-fn evaluate(path: &Path, dataset: &DatasetRef, device: Device) -> Result<ModelEval> {
-    let model = engine::open_model(path, device)?;
+/// Opens `dataset` for validating `model`, whose classes it must have (in the same order).
+fn open_for(model: &folo_vision::FoloModel, dataset: &DatasetRef) -> Result<folo_data::LoadedDataset> {
     let opts = folo_data::OpenOptions { format: data_format(dataset.format), verify_images: true };
     let ds = folo_data::open_with(Path::new(&dataset.path), &opts)
         .map_err(|e| crate::index::data_error(e, &dataset.path))?;
@@ -287,6 +289,13 @@ fn evaluate(path: &Path, dataset: &DatasetRef, device: Device) -> Result<ModelEv
             ),
         ));
     }
+    Ok(ds)
+}
+
+/// Validates the weights at `path` on `dataset` and shapes the report as `/eval`.
+fn evaluate(path: &Path, dataset: &DatasetRef, device: Device) -> Result<ModelEval> {
+    let model = engine::open_model(path, device)?;
+    let ds = open_for(&model, dataset)?;
     let split = if ds.val.is_empty() { Split::Train } else { Split::Val };
     let part = ds.split(split);
     if part.is_empty() {
@@ -299,6 +308,62 @@ fn evaluate(path: &Path, dataset: &DatasetRef, device: Device) -> Result<ModelEv
     let cfg = ValConfig { samples: 0, ..ValConfig::new(model.imgsz(), EVAL_BATCH) };
     let r = validate(&model, Arc::new(part.clone()), &cfg).map_err(engine_error)?;
     Ok(eval_of(&r.report))
+}
+
+/// `POST /api/val`: validates the weights of `m` on `split` of `dataset` at `imgsz` (the model's own size when
+/// `None`) with NMS thresholds `conf` / `iou` (the rest of MODEL.md §8.7's validation settings).
+pub fn val(
+    m: &ModelRef,
+    dataset: &DatasetRef,
+    split: folo_api::Split,
+    imgsz: Option<u32>,
+    conf: f32,
+    iou: f32,
+    device: Device,
+) -> Result<ValReport> {
+    let bad = |msg: String| Error::new(StatusCode::BAD_REQUEST, "invalid_body", msg);
+    let unit = |x: f32| (0.0..=1.0).contains(&x); // false for NaN
+    if !unit(conf) || !unit(iou) {
+        return Err(bad(format!("conf and iou must be in 0..=1, got conf {conf} iou {iou}")));
+    }
+    if let Some(s) = imgsz
+        && (!s.is_multiple_of(32) || !(32..=4096).contains(&s))
+    {
+        return Err(bad(format!("imgsz must be a multiple of 32 in 32..=4096, got {s}")));
+    }
+    let t0 = std::time::Instant::now();
+    let model = engine::open_model(&m.path, device)?;
+    let ds = open_for(&model, dataset)?;
+    let part = ds.split(match split {
+        folo_api::Split::Train => Split::Train,
+        folo_api::Split::Val => Split::Val,
+        folo_api::Split::Test => Split::Test,
+    });
+    if part.is_empty() {
+        return Err(bad(format!("dataset '{}' has no {} images", dataset.id, split.as_str())));
+    }
+    let imgsz = imgsz.unwrap_or(model.imgsz());
+    let cfg = ValConfig {
+        samples: 0,
+        nms: NmsConfig { conf, iou, ..NmsConfig::val() },
+        ..ValConfig::new(imgsz, EVAL_BATCH)
+    };
+    let r = validate(&model, Arc::new(part.clone()), &cfg).map_err(engine_error)?;
+    let images = r.report.num_images;
+    let total_s = t0.elapsed().as_secs_f64();
+    let per_image_ms = if images == 0 { 0.0 } else { r.seconds * 1e3 / images as f64 };
+    Ok(ValReport {
+        model_id: m.model.id.clone(),
+        dataset_id: dataset.id.clone(),
+        split,
+        imgsz,
+        images,
+        val: val_metrics(&r.report),
+        timing: ValTiming {
+            total_s: (total_s * 1000.0).round() / 1000.0,
+            per_image_ms: (per_image_ms * 100.0).round() / 100.0,
+        },
+    })
 }
 
 /// docs/API.md's `/eval` shape of an evaluation report: PR curves (class order, 101 recall points), the

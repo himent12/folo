@@ -436,4 +436,8 @@ pub struct McpArgs {
     /// the engine in this process.
     #[arg(long, value_name = "URL")]
     pub server: Option<String>,
+    /// Embedded mode: device of `predict`, `predict_batch` and `val`: auto (the GPU when one can hold the model,
+    /// else the CPU), cpu or gpu:<n>. Training runs use their own `device` setting.
+    #[arg(long, env = "FOLO_DEVICE", default_value = "auto")]
+    pub device: String,
 }

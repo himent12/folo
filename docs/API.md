@@ -291,8 +291,13 @@ Non-2xx responses: `{ "error": { "code": "dataset_not_found", "message": "...", 
 - `POST /api/val` body `{ "model_id", "dataset_id", "split": "val", "imgsz": null, "conf": 0.001, "iou": 0.7 }` →
   `{ "model_id", "dataset_id", "split", "imgsz", "images", "val": Epoch.val, "timing": { "total_s", "per_image_ms" } }`.
   Only `model_id` and `dataset_id` are required; `imgsz: null` uses the model's size. Errors: `model_not_found`,
-  `dataset_not_found`, `invalid_body` (an empty split, `conf` / `iou` outside `0..=1`, a bad `imgsz`),
-  `not_implemented` (real mode, until the evaluator is wired in). The MCP `val` tool uses it in proxy mode.
+  `dataset_not_found`, `invalid_body` (an empty split, `conf` / `iou` outside `0..=1`, an `imgsz` that is not a
+  multiple of 32 in `32..=4096`), `invalid_dataset` (real mode: the dataset's classes are not the model's, in the
+  same order). Real mode runs folo-vision's evaluator (docs/METRICS.md) on the server's `--device` with the
+  request's `conf` / `iou` (the other NMS settings as in validation during training: multi-label, `max_det` 300), so
+  the defaults on the validation split reproduce `/eval`'s per-class numbers; it is computed on every request (not
+  cached). `timing.total_s` includes loading the model and the dataset; `per_image_ms` is the evaluation loop
+  divided by `images`. The MCP `val` tool calls it (through the store, or over HTTP in proxy mode).
 - Planned: `POST /api/predict/batch` (many uploads in one request). Until it exists the MCP proxy sends one
   `POST /api/predict` per image.
 

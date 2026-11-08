@@ -51,7 +51,7 @@ impl Error {
     /// `501 not_implemented`.
     pub fn not_implemented(what: &str) -> Error {
         Error::new(StatusCode::NOT_IMPLEMENTED, "not_implemented", format!("{what} is not implemented yet"))
-            .hint("the FOLO engine is not wired into the server yet; run `folo serve --mock` for mock data")
+            .hint("this server cannot do that yet; see docs/API.md for what each mode supports")
     }
 
     /// `500 internal`.

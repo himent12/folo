@@ -235,6 +235,16 @@ impl Store for HttpStore {
         self.post("/runs", &config)
     }
 
+    fn resume_run(
+        &self,
+        id: &str,
+        fields: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<Run, Error> {
+        let mut body = fields.clone();
+        body.insert("resume_run_id".into(), id.into());
+        self.post("/runs", &serde_json::Value::Object(body))
+    }
+
     fn get_run(&self, id: &str) -> Result<Run, Error> {
         self.get(&format!("/runs/{}", encode(id)))
     }

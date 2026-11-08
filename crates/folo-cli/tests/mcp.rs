@@ -481,8 +481,9 @@ fn full_flow(c: &mut Client, data_dir: &std::path::Path) {
     c.tool_error("list_datasets", json!({ "limit": 500 }), "invalid_arguments");
     c.tool_error("predict", json!({ "model_id": model_id }), "invalid_arguments");
     c.tool_error("compare_runs", json!({ "run_ids": [run_id] }), "invalid_arguments");
-    let e = c.tool_error("train", json!({ "dataset_id": ds_id, "resume_run_id": run_id }), "not_implemented");
-    assert!(e["hint"].as_str().unwrap().contains("--mock"));
+    // The mock store does not resume runs (the real one does, see `real_store_end_to_end`).
+    c.tool_error("train", json!({ "dataset_id": ds_id, "resume_run_id": run_id }), "not_implemented");
+    c.tool_error("train", json!({ "resume_run_id": 7 }), "invalid_arguments");
     let unknown = c.request("tools/call", json!({ "name": "no_such_tool", "arguments": {} }));
     assert_eq!(unknown["error"]["code"], -32602, "{unknown}");
     let method = c.request("no/such/method", json!({}));
@@ -929,20 +930,159 @@ fn results_stay_under_the_size_limit() {
     c.finish();
 }
 
+/// Polls `run_status` until `done` holds (at most `secs` seconds) and returns the last status.
+fn wait_run(c: &mut Client, run_id: &str, secs: u64, done: impl Fn(&Value) -> bool) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    loop {
+        let s = c.ok("run_status", json!({ "run_id": run_id, "log_lines": 5 }));
+        if done(&s) {
+            return s;
+        }
+        assert!(Instant::now() < deadline, "run {run_id} did not get there: {s}");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// The whole agent flow on the **real** store (CPU, 64 px): synthetic dataset → train (subscribed) → models →
+/// val → predict → sample grid → export, then stop / resume a second run, and a graceful shutdown on disconnect
+/// that the next session sees.
 #[test]
-fn real_store_reports_not_implemented() {
+fn real_store_end_to_end() {
     let dir = tmp_dir("real");
-    let mut c = spawn(&["--data-dir", dir.to_str().unwrap()], None);
-    c.result(
-        "initialize",
-        json!({ "protocolVersion": OLD, "capabilities": {}, "clientInfo": { "name": "t", "version": "1" } }),
-    );
-    let info = c.ok("folo_info", json!({}));
+    let data_dir = dir.to_str().unwrap();
+    let mut c = spawn(&["--data-dir", data_dir, "--device", "cpu"], None);
+    init_old(&mut c);
+    let schemas = check_tools(&mut c, &ALL_TOOLS);
+    let info = checked(&mut c, &schemas, "folo_info", json!({}));
     assert_eq!(info["mode"], "embedded");
-    let e = c.tool_error("val", json!({ "model_id": "m_1", "dataset_id": "ds_1" }), "not_implemented");
-    assert!(e["hint"].as_str().unwrap().contains("folo mcp --mock"));
     assert_eq!(c.ok("list_runs", json!({}))["total"], 0);
+    c.tool_error("val", json!({ "model_id": "m_1", "dataset_id": "ds_1" }), "model_not_found");
+
+    let ds = checked(
+        &mut c,
+        &schemas,
+        "create_synthetic_dataset",
+        json!({ "name": "tiny", "images": 12, "imgsz": 64, "classes": ["circle", "square"], "seed": 5 }),
+    );
+    let ds_id = ds["id"].as_str().unwrap().to_string();
+    assert_eq!((ds["splits"]["train"].as_u64(), ds["splits"]["val"].as_u64()), (Some(10), Some(2)));
+    let tiny = |epochs: u32, name: &str| {
+        json!({ "dataset_id": ds_id, "name": name, "epochs": epochs, "batch": 4, "imgsz": 64, "device": "cpu",
+                "augment": { "close_mosaic": 1 } })
+    };
+
+    // Train, following the run through its resource subscription (fed by the run's live events).
+    let t = checked(&mut c, &schemas, "train", tiny(2, "tiny-n"));
+    let run_id = t["run_id"].as_str().unwrap().to_string();
+    let run_uri = format!("folo://runs/{run_id}");
+    c.result("resources/subscribe", json!({ "uri": run_uri }));
+    let update =
+        c.notification(Duration::from_secs(30), |n| n["method"] == "notifications/resources/updated");
+    assert_eq!(update["params"]["uri"], run_uri);
+    let done =
+        wait_run(&mut c, &run_id, 120, |s| !matches!(s["status"].as_str(), Some("queued" | "running")));
+    assert_eq!(done["status"], "completed", "{done}");
+    assert_eq!(done["last_epoch"]["epoch"], 2);
+    assert!(!done["log"].as_array().unwrap().is_empty());
+    c.result("resources/unsubscribe", json!({ "uri": run_uri }));
+    let model_id = done["model_id"].as_str().unwrap().to_string();
+
+    let models = checked(&mut c, &schemas, "list_models", json!({}));
+    let ids: Vec<&str> =
+        models["items"].as_array().unwrap().iter().map(|m| m["id"].as_str().unwrap()).collect();
+    assert!(
+        ids.contains(&model_id.as_str()) && ids.contains(&format!("{model_id}-last").as_str()),
+        "{ids:?}"
+    );
+
+    let val = checked(&mut c, &schemas, "val", json!({ "model_id": model_id, "dataset_id": ds_id }));
+    assert_eq!((val["split"].as_str(), val["images"].as_u64()), (Some("val"), Some(2)));
+    assert_eq!(val["imgsz"], 64);
+    assert!(val["timing"]["per_image_ms"].as_f64().unwrap() > 0.0);
+    let on_train = checked(
+        &mut c,
+        &schemas,
+        "val",
+        json!({ "model_id": model_id, "dataset_id": ds_id, "split": "train", "conf": 0.25, "iou": 0.6 }),
+    );
+    assert_eq!(on_train["images"], 10);
+    c.tool_error(
+        "val",
+        json!({ "model_id": model_id, "dataset_id": ds_id, "split": "test" }),
+        "invalid_body",
+    );
+
+    let imgs = checked(
+        &mut c,
+        &schemas,
+        "list_dataset_images",
+        json!({ "dataset_id": ds_id, "split": "val", "limit": 1 }),
+    );
+    let image_id = imgs["items"][0]["image_id"].as_str().unwrap().to_string();
+    let pred = checked(
+        &mut c,
+        &schemas,
+        "predict",
+        json!({ "model_id": model_id, "dataset_id": ds_id, "image_id": image_id, "conf": 0.001 }),
+    );
+    assert!(!pred["boxes"].as_array().unwrap().is_empty(), "{pred}");
+    assert_eq!((pred["image"]["width"].as_u64(), pred["device"].as_str()), (Some(64), Some("cpu")));
+    let path = dir.join("datasets/tiny").join(imgs["items"][0]["file"].as_str().unwrap());
+    let by_path = checked(
+        &mut c,
+        &schemas,
+        "predict",
+        json!({ "model_id": model_id, "image_path": path.to_str().unwrap(), "conf": 0.001 }),
+    );
+    assert_eq!(by_path["boxes"], pred["boxes"], "the same image gives the same boxes");
+
+    // The run's validation samples as an annotated JPEG grid.
+    let grid = c.result("resources/read", json!({ "uri": format!("{run_uri}/samples/2") }));
+    assert_eq!(grid["contents"][0]["mimeType"], "image/jpeg");
+    let jpeg = base64::engine::general_purpose::STANDARD
+        .decode(grid["contents"][0]["blob"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(&jpeg[..2], &[0xFF, 0xD8]);
+    let missing = c.request("resources/read", json!({ "uri": format!("{run_uri}/samples/9") }));
+    assert!(missing.get("error").is_some(), "{missing}");
+
+    let x = checked(&mut c, &schemas, "export", json!({ "model_id": model_id, "format": "folo-f16" }));
+    assert_eq!(std::fs::metadata(x["path"].as_str().unwrap()).unwrap().len(), x["bytes"].as_u64().unwrap());
+    c.tool_error("export", json!({ "model_id": model_id, "format": "onnx" }), "not_implemented");
+
+    // Stop a longer run after its first epoch, resume it (same id, from its checkpoint), and disconnect while it
+    // trains: the shutdown stops it gracefully and the next session lists it as stopped.
+    let long = checked(&mut c, &schemas, "train", tiny(200, "tiny-long"));
+    let long_id = long["run_id"].as_str().unwrap().to_string();
+    let done_epochs = |s: &Value| s["last_epoch"]["epoch"].as_u64().unwrap_or(0);
+    wait_run(&mut c, &long_id, 60, |s| done_epochs(s) >= 1);
+    checked(&mut c, &schemas, "stop_run", json!({ "run_id": long_id }));
+    let stopped = wait_run(&mut c, &long_id, 60, |s| s["status"] == "stopped");
+    let epoch = done_epochs(&stopped);
+    assert!(epoch >= 1, "{stopped}");
+    c.tool_error("train", json!({ "resume_run_id": long_id, "epochs": 3 }), "invalid_config");
+    c.tool_error("train", json!({ "resume_run_id": run_id }), "run_not_resumable");
+    let resumed = checked(&mut c, &schemas, "train", json!({ "resume_run_id": long_id }));
+    assert_eq!(resumed, json!({ "run_id": long_id, "status": "queued" }));
+    wait_run(&mut c, &long_id, 60, |s| s["status"] == "running" && done_epochs(s) > epoch);
+    let cmp = checked(&mut c, &schemas, "compare_runs", json!({ "run_ids": [run_id, long_id] }));
+    assert_eq!(cmp["config_diff"]["epochs"], json!([2, 200]));
+    let running = checked(&mut c, &schemas, "list_runs", json!({ "status": "running" }));
+    assert_eq!(running["total"], 1);
     c.finish();
+
+    let mut c = spawn(&["--data-dir", data_dir, "--device", "cpu"], None);
+    init_old(&mut c);
+    let after = c.ok("run_status", json!({ "run_id": long_id, "log_lines": 200 }));
+    assert_eq!(after["status"], "stopped", "{after}");
+    // Stopped by the shutdown, not found active by the next start.
+    let log = after["log"].as_array().unwrap();
+    assert!(log.iter().all(|l| !l["message"].as_str().unwrap().contains("the server stopped")), "{after}");
+    assert!(done_epochs(&after) > epoch, "{after}");
+    assert_eq!(c.ok("list_runs", json!({}))["total"], 2);
+    assert!(c.ok("list_models", json!({}))["total"].as_u64().unwrap() >= 2);
+    c.finish();
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

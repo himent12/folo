@@ -22,7 +22,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
-use crate::errors::{Error, invalid_arguments, not_implemented, read_only};
+use crate::errors::{Error, invalid_arguments, read_only};
 use crate::paths::{MAX_BATCH, too_many_inputs};
 use crate::server::Inner;
 use crate::types::*;
@@ -391,10 +391,6 @@ impl Progress {
     }
 }
 
-/// The hint every `not_implemented` tool error carries.
-const NOT_IMPLEMENTED_HINT: &str = "this backend cannot do that yet (the engine is being wired into the real store); \
-                                    `folo mcp --mock` serves the whole dataset → train → predict flow with mock data";
-
 impl Inner {
     /// Dispatches a tool call. `Err` is a tool error (an `isError` result), never a protocol error.
     pub async fn call(
@@ -414,7 +410,7 @@ impl Inner {
             "register_dataset" => self.register_dataset(parse_args(args)?).await,
             "create_synthetic_dataset" => self.create_synthetic(parse_args(args)?, progress).await,
             "list_models" => self.list_models(parse_args(args)?).await,
-            "train" => self.train(parse_args(args)?).await,
+            "train" => self.train(args).await,
             "run_status" => self.run_status(parse_args(args)?).await,
             "list_runs" => self.list_runs(parse_args(args)?).await,
             "stop_run" => self.stop_run(parse_args(args)?).await,
@@ -425,8 +421,7 @@ impl Inner {
             "compare_runs" => self.compare_runs(parse_args(args)?).await,
             other => Err(Error::internal(format!("tool `{other}` has no handler"))),
         };
-        res.map_err(|e| if e.body.code == "not_implemented" { e.hint(NOT_IMPLEMENTED_HINT) } else { e })
-            .map_err(crate::confine::map_denied)
+        res.map_err(crate::confine::map_denied)
     }
 
     /// With `--confine`, fails unless dataset `id` reads only files inside the data dir.
@@ -609,13 +604,15 @@ impl Inner {
         out(&page, summary)
     }
 
-    async fn train(&self, a: TrainArgs) -> Result<Output, Error> {
-        if let Some(id) = a.resume_run_id {
-            return Err(not_implemented(
-                &format!("resuming run '{id}'"),
-                "start a new run instead, optionally from a model with `weights: <model_id>`",
-            ));
+    async fn train(&self, args: JsonObject) -> Result<Output, Error> {
+        // Resuming takes the arguments as given: the other fields must match the run's config or be omitted, so
+        // they are not filled with TrainConfig's defaults (and `dataset_id` may be left out).
+        if let Some(id) = args.get("resume_run_id").filter(|v| !v.is_null()) {
+            let id =
+                id.as_str().ok_or_else(|| invalid_arguments("resume_run_id must be a string"))?.to_string();
+            return self.resume(id, args).await;
         }
+        let a: TrainArgs = parse_args(args)?;
         check_name("name", &a.config.name)?;
         self.ensure_dataset(&a.config.dataset_id).await?;
         let run = self.blocking(move |s| s.create_run(a.config)).await?;
@@ -632,6 +629,25 @@ impl Inner {
             run.config.dataset_id,
             run.epochs,
             run.id
+        );
+        out(&TrainResult { run_id: run.id, status: run.status }, summary)
+    }
+
+    async fn resume(&self, id: String, args: JsonObject) -> Result<Output, Error> {
+        let rid = id.clone();
+        let dataset_id = self.blocking(move |s| Ok(s.get_run(&rid)?.config.dataset_id)).await?;
+        self.ensure_dataset(&dataset_id).await?;
+        let rid = id.clone();
+        let run = self.blocking(move |s| s.resume_run(&rid, &args)).await?;
+        if self.proxy.is_none() {
+            let mut created = self.created_runs.lock().unwrap();
+            if !created.contains(&run.id) {
+                created.push(run.id.clone());
+            }
+        }
+        let summary = format!(
+            "resuming {} ({}) after epoch {} of {}; follow it with run_status or folo://runs/{}",
+            run.id, run.name, run.epoch, run.epochs, run.id
         );
         out(&TrainResult { run_id: run.id, status: run.status }, summary)
     }
@@ -939,8 +955,6 @@ impl Inner {
 
     /// The `folo_info` record.
     pub async fn info(&self) -> Result<FoloInfo, Error> {
-        let local_gpus = self.local_gpus.clone();
-        let embedded_real = self.proxy.is_none() && !self.mock;
         let (cpu, gpus) = match &self.proxy {
             Some(p) => {
                 let p = p.clone();
@@ -961,11 +975,7 @@ impl Inner {
                         threads: host.cpu_threads,
                         memory_bytes: host.memory_total_bytes,
                     };
-                    let mut gpus = store.gpus();
-                    if gpus.is_empty() && embedded_real {
-                        gpus = local_gpus.get_or_init(crate::server::enumerate_gpus).clone();
-                    }
-                    (cpu, gpus)
+                    (cpu, store.gpus())
                 })
                 .await
                 .map_err(join)?

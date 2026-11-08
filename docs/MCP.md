@@ -9,25 +9,33 @@ scraping. It exposes the same operations as the CLI and `docs/API.md`, with the 
 { "mcpServers": { "folo": { "command": "folo", "args": ["mcp", "--data-dir", "D:/folo-data"] } } }
 ```
 
-`folo mcp [--data-dir DIR] [--mock] [--read-only] [--confine] [--server http://127.0.0.1:7878]`. Setup snippets for
+`folo mcp [--data-dir DIR] [--mock] [--read-only] [--confine] [--server http://127.0.0.1:7878] [--device auto]`.
+`--device` (env `FOLO_DEVICE`: `auto`, `cpu`, `gpu:<n>`) is where the embedded real store runs `predict`,
+`predict_batch` and `val`; each training run has its own `device`. Setup snippets for
 Claude Code and Codex are in the README ("Use FOLO from Claude Code / Codex"). The implementation is the
 `folo-mcp` crate; the end-to-end tests are `crates/folo-cli/tests/mcp.rs`.
 
 ## Status
 Implemented: both protocol revisions, all 16 tools with generated input and output schemas, every resource and
-both subscription flows, both prompts, paging and size limits, `--read-only`, `--confine`, and proxy mode. What a
-tool can do depends on the store behind it:
-- `--mock` (embedded `MockStore`): every tool works, so agents can run the whole dataset → train → predict flow
-  today (runs are simulated at 6 s per epoch).
-- Embedded real store (default): datasets work (registering, stats, issues, images, synthetic datasets). Until
-  training, models and inference are wired into `RealStore`, `train`, `val`, `predict`, `predict_batch` and
-  `export` return the `not_implemented` tool error (with a hint pointing at `--mock`), and there are no runs or
-  models to list. They start working with no MCP change once `RealStore` implements the matching `Store` methods
-  (`create_run`, `val`, `predict`, `export_model`, ...).
-- Proxy (`--server`): whatever the `folo serve` behind it implements.
+both subscription flows, both prompts, paging and size limits, `--read-only`, `--confine`, and proxy mode. Every
+tool goes through the [`Store`](../crates/folo-server/src/store.rs) behind the server, so what works depends on
+it:
 
-Not yet: `train` with `resume_run_id` returns `not_implemented` (the store has no resume yet). `get_dataset`'s
-`issues` come from `Store::list_issues` (`/api/datasets/{id}/issues` in proxy mode).
+| | embedded real store (default) | `--mock` | proxy (`--server`) |
+|---|---|---|---|
+| datasets (register, synthetic, stats, issues, images) | real files under `--data-dir` | 3 fixed mock datasets, plus real folders / synthetic ones | the `folo serve`'s |
+| `train` | trains on the FOLO engine, one run at a time (FIFO queue) | simulated, 6 s per epoch | `POST /api/runs` |
+| `train` with `resume_run_id` | resumes from `weights/last.folo` (same id) | `not_implemented` | `POST /api/runs` with `resume_run_id` |
+| `run_status`, `list_runs`, `stop_run`, `compare_runs` | persisted runs (`runs/<id>/`), also those of earlier sessions | mock runs | `/api/runs/...` |
+| `list_models` | `best` / `last` weights of finished runs, plus `.folo` files under `models/` | mock models | `/api/models` |
+| `val` | folo-vision's evaluator on the requested split, `conf` / `iou` as given | derived from the model's metrics | `POST /api/val` |
+| `predict`, `predict_batch` | the engine (on `--device`), predictors cached | deterministic mock boxes | `POST /api/predict` |
+| `export` | `folo-f16` to `exports/` (`onnx` is `not_implemented`) | a `mock://` path (nothing is written) | `POST /api/models/{id}/export` |
+| run subscriptions | fired by the run's live events | fired by the mock runs' events | polled every second |
+| `folo://runs/{id}/samples/{epoch}` | the run's validation samples (first 16 val images) | rendered mock samples | `/api/runs/{id}/samples` |
+
+`get_dataset`'s `issues` come from `Store::list_issues` (`/api/datasets/{id}/issues` in proxy mode). The one
+remaining `not_implemented` in real mode is ONNX export; its hint points at `folo-f16`.
 
 ## Protocol
 - **Revisions.** The server supports MCP **2026-07-28** and the previous stable revision **2025-11-25**. The two
@@ -129,7 +137,10 @@ Each resource read returns a JSON snapshot, unless stated otherwise.
   agent can look at it.
 - `folo://runs/{id}`: `{ run: Run, last_step, last_epoch, revision }`. `revision` increases on every change.
   **Subscribable**: the server sends the spec's resource-updated notification for this URI (coalesced, at most one
-  per second; the server checks subscribed runs once per second), and the client re-reads the snapshot. On
+  per second), and the client re-reads the snapshot. The server follows the run's live events (the store's
+  per-run event stream, the same one behind SSE `/events`): a step, an epoch, a status change or a log line
+  wakes it, and it checks the snapshot at most once per second (it re-reads runs with events every 10 s as well,
+  which is how a deleted run is noticed). Runs without an event stream (proxy mode) are polled every second. On
   2026-07-28, `subscriptions/listen` is acknowledged with the accepted filter (URIs that are not subscribable are
   left out) and each update carries the subscription id in `_meta`; cancelling the listen request ends it. On
   2025-11-25, subscribing to an unknown run is a resource-not-found error. Missed intermediate steps are not an error: epoch history is in
@@ -139,7 +150,7 @@ Each resource read returns a JSON snapshot, unless stated otherwise.
 - `folo://runs/{id}/samples/{epoch}`: validation samples rendered as an annotated JPEG grid (truth outlined white,
   predictions in class colours), for quick visual checks.
 - `folo://predictions/{batch_id}`: per-image boxes of a `predict_batch` call (kept for the server's lifetime).
-- `folo://docs/{name}`: repository docs (`ARCHITECTURE`, `API`, `CLI`, `MODEL`, `FORMAT`, `METRICS`, `MCP`) as text/markdown
+- `folo://docs/{name}`: repository docs (`ARCHITECTURE`, `API`, `CLI`, `MODEL`, `FORMAT`, `METRICS`, `MCP`, `AGENT_COOKBOOK`) as text/markdown
   (compiled into the binary).
 
 `resources/list` lists datasets, runs (with their metrics) and docs, 100 per page; images, samples and predictions
@@ -183,17 +194,23 @@ In read-only mode, `train_on_folder` is not listed.
 ## Run lifetime
 - **Embedded mode** (default): runs execute inside the `folo mcp` process. Run state is persisted under
   `--data-dir/runs/<id>/` (config, metrics, checkpoints at every epoch). When the MCP client disconnects (stdin
-  closes) or the process receives a shutdown signal, the runs this session started are stopped gracefully
-  (`stop_run` on each, then the process exits; in proxy mode runs belong to `folo serve` and are left running): the current epoch is abandoned, the last checkpoint
-  is kept, and the status becomes `stopped`. On the next start, persisted runs are listed again. `train` with
-  `resume_run_id` resumes that run from its `last` checkpoint, with the full state of docs/FORMAT.md (epoch, optimizer,
-  scheduler, EMA, RNG): same run id, and the other TrainConfig fields must match or be omitted. `train` with
+  closes) or the process receives a shutdown signal, the runs this session started are stopped (`stop_run` on
+  each), then the store is shut down (`Store::shutdown`: queued runs become `stopped`, and the process waits, at
+  most a minute, for the active run to stop after its current batch), then the process exits. The current epoch
+  is abandoned, the last epoch's checkpoint is kept, and the status becomes `stopped`. In proxy mode runs belong
+  to `folo serve` and are left running. On the next start, persisted runs are listed again (a run a crashed
+  process left active is `stopped`, with a warning in its log). `train` with `resume_run_id` resumes that
+  `stopped` or `failed` run (same id, status `queued` again) from its `last` checkpoint, with the full state of
+  docs/FORMAT.md (epoch, optimizer, scheduler, EMA, RNG), or from scratch when no epoch had finished. The other
+  TrainConfig fields must match the run's config or be omitted (`dataset_id` too; `device` may change); a field
+  that differs is `invalid_config`, a completed run `run_not_resumable` (start a new run from its model instead),
+  an active one `run_active`. `train` with
   `weights: <model_id>` instead starts a **new** run initialised from those weights (no optimizer state). Cancelling the `train` request itself (MCP cancellation) after it has returned
   has no effect on the run. Use `stop_run`.
 - **Proxy mode** (`folo mcp --server http://127.0.0.1:7878`): every tool maps to the HTTP API of a running
   `folo serve`, so Studio and the agent share runs that outlive the MCP process:
   `list_*`/`get_dataset` → `GET` list/detail endpoints (paging is applied by the MCP layer), `list_dataset_images` →
-  `GET /api/datasets/{id}/images`, `train` → `POST /api/runs`, `run_status` → `GET /api/runs/{id}`, `stop_run` → `POST /api/runs/{id}/stop`, `predict` → `POST /api/predict` (local `image_path` files are
+  `GET /api/datasets/{id}/images`, `train` → `POST /api/runs` (with `resume_run_id` when given), `run_status` → `GET /api/runs/{id}`, `stop_run` → `POST /api/runs/{id}/stop`, `predict` → `POST /api/predict` (local `image_path` files are
   read by the MCP process and uploaded as multipart), `export` → `POST /api/models/{id}/export`. `run_status`
   takes its `log` from `GET /api/runs/{id}/logs` and its `last_step` / `last_epoch` from `/metrics`, `val` →
   `POST /api/val`, `predict_batch` → one `POST /api/predict` upload per image (until the planned
@@ -215,7 +232,12 @@ In read-only mode, `train_on_folder` is not listed.
 `crates/folo-cli/tests/mcp.rs` spawns `folo mcp` and, for **each supported revision**, runs the handshake or discovery (plus,
 for 2026-07-28, a direct tool call without discovery and an unsupported-version request), both subscription flows, `tools/list`
 (checking the schemas), `resources/list`, `prompts/list`, a `create_synthetic_dataset` → `train` (2 epochs on a tiny
-set) → subscribe / `run_status` → `predict` flow, an `isError` case, a JSON-RPC error case, and a read-only-mode
-dispatch rejection. It asserts that nothing but valid JSON-RPC lines appears on stdout. Every structured tool
-result is validated against the tool's `outputSchema`. Further tests cover `--confine`, the real store's
-`not_implemented` errors, proxy mode against `folo serve --mock` and an unreachable server.
+set) → subscribe / `run_status` → `predict` flow on the mock store, an `isError` case, a JSON-RPC error case, and a
+read-only-mode dispatch rejection. It asserts that nothing but valid JSON-RPC lines appears on stdout. Every
+structured tool result is validated against the tool's `outputSchema`. `real_store_end_to_end` drives the **real**
+store (`--device cpu`, 64 px, about 15 s): a synthetic dataset, a 2-epoch run followed through its resource
+subscription until it completes, `list_models`, `val` on two splits, `predict` on a dataset image and the same
+file by path (boxes returned, identical), the sample grid resource, `export`, then a second run stopped after
+its first epoch, resumed (same id) and left training when the client disconnects; a new session finds it
+`stopped` by the graceful shutdown. Further tests cover `--confine`, proxy mode against `folo serve --mock` and an
+unreachable server.

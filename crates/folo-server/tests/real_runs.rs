@@ -297,6 +297,42 @@ async fn train_evaluate_predict_and_reload() {
     let again: ModelEval = ok(&app, get(&format!("/api/models/{model_id}/eval"))).await;
     assert_eq!(again, eval);
     assert!(home.join("cache/eval").join(format!("{model_id}.json")).is_file());
+    // POST /api/val: the same split and thresholds as /eval give the same numbers; other splits and errors.
+    let v: ValReport =
+        ok(&app, post_json("/api/val", json!({ "model_id": model_id, "dataset_id": ds.id }))).await;
+    assert_eq!((v.split, v.images, v.imgsz), (Split::Val, 2, 64));
+    assert_eq!(v.val.per_class, eval.per_class);
+    assert!(v.timing.total_s > 0.0 && v.timing.per_image_ms > 0.0);
+    let body =
+        json!({ "model_id": model_id, "dataset_id": ds.id, "split": "train", "imgsz": 96, "conf": 0.25 });
+    let t: ValReport = ok(&app, post_json("/api/val", body)).await;
+    assert_eq!((t.split, t.images, t.imgsz), (Split::Train, 10, 96));
+    for (body, status, code) in [
+        (
+            json!({ "model_id": model_id, "dataset_id": ds.id, "split": "test" }),
+            StatusCode::BAD_REQUEST,
+            "invalid_body",
+        ),
+        (
+            json!({ "model_id": model_id, "dataset_id": ds.id, "imgsz": 100 }),
+            StatusCode::BAD_REQUEST,
+            "invalid_body",
+        ),
+        (
+            json!({ "model_id": model_id, "dataset_id": ds.id, "iou": 1.5 }),
+            StatusCode::BAD_REQUEST,
+            "invalid_body",
+        ),
+        (json!({ "model_id": "m_none", "dataset_id": ds.id }), StatusCode::NOT_FOUND, "model_not_found"),
+        (
+            json!({ "model_id": model_id, "dataset_id": "ds_none" }),
+            StatusCode::NOT_FOUND,
+            "dataset_not_found",
+        ),
+    ] {
+        err(&app, post_json("/api/val", body), status, code).await;
+    }
+
     let x: ExportResult =
         ok(&app, post_json(&format!("/api/models/{model_id}/export"), json!({ "format": "folo-f16" }))).await;
     assert_eq!(Path::new(&x.path), home.join("exports").join("tiny-n-best-f16.folo"));

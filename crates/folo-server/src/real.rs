@@ -14,7 +14,7 @@
 //! - `runs/<id>/`: training runs (see [`crate::runs`]).
 //! - `models/`: `.folo` files listed as models (scanned on every listing).
 //! - `exports/`: `POST /api/models/{id}/export` output.
-//! - `cache/eval/<model id>.json`: cached `/eval` results.
+//! - `cache/eval/<model id>.json`: cached `/eval` results (`POST /api/val` is computed on every request).
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
@@ -24,7 +24,7 @@ use axum::http::StatusCode;
 use folo_api::{
     BBox, Dataset, DatasetFormat, ExportFormat, ExportResult, GpuInfo, ImagePage, ImageSize, LogLine, Model,
     ModelEval, PredictResponse, RegisterDataset, Run, RunMetrics, RunSamples, Sample, ScoredBox, Splits,
-    SyntheticDataset, TrainConfig,
+    SyntheticDataset, TrainConfig, ValReport, ValRequest,
 };
 use folo_vision::PredictConfig;
 use serde::{Deserialize, Serialize};
@@ -867,6 +867,15 @@ impl Store for RealStore {
             timing,
             device: p.device().to_string(),
         })
+    }
+
+    fn val(&self, req: ValRequest) -> Result<ValReport> {
+        let m = self.model(&req.model_id)?;
+        let e = self.entry(&req.dataset_id)?;
+        // Waits for an index still being built, so a dataset that cannot be read fails here.
+        self.fresh_index(&e)?;
+        let device = engine::resolve(&self.device)?;
+        crate::models::val(&m, &self.dataset_ref(&e), req.split, req.imgsz, req.conf, req.iou, device)
     }
 
     fn shutdown(&self) {
