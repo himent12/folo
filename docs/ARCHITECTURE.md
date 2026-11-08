@@ -69,6 +69,8 @@ training and evaluation pipeline, a server, a CLI and a web studio.
 - Kernels in WGSL: tiled GEMM (shared-memory tiles, vec4 loads), im2col / direct conv, elementwise + fused activations,
   reductions, softmax, pooling, upsample, concat. Each kernel is tested against the CPU reference.
 - f16 storage/compute when the adapter supports `shader-f16`, with f32 accumulation.
+- Standalone for now: its own `GpuTensor` over a kernel layer that takes raw buffers; the folo-core `Backend`
+  implementation comes next. Kernel list, layout conventions, GEMM tuning notes and benchmarks: `docs/GPU.md`.
 
 ## folo-nn — layers and training utilities
 - `Module` trait: `forward`, `parameters()`/`named_parameters()` (stable, dotted names like `backbone.stem.conv.weight`),
