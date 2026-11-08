@@ -160,8 +160,8 @@ The exact block definitions, layer tables, parameter names, head, loss, training
   EMA model with `metrics::Evaluator`, fitness mAP@0.5:0.95, `last.folo` / `best.folo` checkpoints (complete
   FORMAT.md state, atomic), early stopping. Resume from a checkpoint is bit-exact. Events (`status`, rate-limited
   `step`, `epoch`, `log`: the API.md payloads as `folo_api::RunEvent`) go to a callback and to the run's
-  `metrics.jsonl`; the CLI's progress view and `--json` consume them, the server will. The device is a parameter
-  (`place_model` is the one place that changes once a module can move to the GPU). `folo_vision::val::validate`
+  `metrics.jsonl`; the CLI's progress view, `--json` and the server consume them. The device is a parameter:
+  `place_model` moves the model (and with it the optimizer state and EMA) there with `Module::to_device`. `folo_vision::val::validate`
   is the same validation for `folo val`.
 - **Predictor** (`folo_vision::predict::Predictor`): loads `.folo` (EMA when present), fuses BN, letterboxes (rect for
   one image, square for a batch), forward, decode, NMS, rescale to the original image, with a preprocess /
@@ -175,7 +175,7 @@ The exact block definitions, layer tables, parameter names, head, loss, training
   the trainer's events out to SSE subscribers through a per-run broadcast channel and persists each run under
   `<data dir>/runs/<id>/`; finished runs' checkpoints and `.folo` files under `<data dir>/models` are its models
   (`/eval` runs folo-vision's validator, cached); `/predict` keeps an LRU of loaded, fused `Predictor`s. Devices go
-  through folo-vision's `resolve_device` / `can_place` (`auto` uses the GPU once models can live there) and GPU info
+  through folo-vision's `resolve_device` / `can_place` (`auto` is the GPU when folo-gpu finds an adapter, else the CPU) and GPU info
   comes from folo-gpu. The request and response types live in `folo-api`, a dependency-light crate (serde only) that
   FOLO Desktop reuses. `folo serve` runs it and serves the built Studio from `web/dist`, or from the copy compiled into the binary by
   the `embed-web` feature (release builds, see `docs/RELEASING.md`). `folo serve --mock` serves realistic

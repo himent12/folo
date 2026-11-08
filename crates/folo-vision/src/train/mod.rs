@@ -24,8 +24,8 @@
 //! derived schedule numbers), `metrics.jsonl`, `weights/{last,best}.folo` and `samples/epoch_NNN.json` (the
 //! predictions on the first 16 validation images, docs/API.md `/samples`).
 //!
-//! The device is a parameter: inputs, the loss and the optimizers follow the model's device, so training on a
-//! GPU is a matter of [`place_model`] once folo-core can move a module's tensors.
+//! The device is a parameter: inputs, the loss and the optimizers follow the model's device, which
+//! [`place_model`] sets (`Module::to_device`).
 
 mod config;
 mod events;
@@ -144,21 +144,25 @@ pub struct TrainSummary {
     pub best_weights: Option<PathBuf>,
 }
 
-/// Put a freshly built (CPU) model on `device`. The CPU is the only device a module can live on until folo-core
-/// can move a module's tensors; this and [`can_place`] are the single place that changes when it can.
-pub fn place_model(model: FoloModel, device: Device) -> Result<FoloModel> {
+/// Put a freshly built (CPU) model on `device` (`Module::to_device`: parameters, buffers and, through them, the
+/// optimizer state and EMA built from it). [`can_place`] says whether that device can be used.
+pub fn place_model(mut model: FoloModel, device: Device) -> Result<FoloModel> {
     can_place(device)?;
+    if !device.is_cpu() {
+        model.to_device(device)?;
+    }
     Ok(model)
 }
 
-/// Whether [`place_model`] can put a model on `device`.
+/// Whether [`place_model`] can put a model on `device`: the CPU always, a GPU once its folo-core backend is
+/// registered (folo-gpu's `init()`).
 pub fn can_place(device: Device) -> Result<()> {
-    if device.is_cpu() {
+    if device.is_cpu() || folo_core::backend::backend(device).is_ok() {
         Ok(())
     } else {
         Err(Error::Unsupported(format!(
-            "training and inference on {device} need the model, its optimizer state and EMA on that device, which \
-             waits on `Module::to_device`; use --device cpu"
+            "device {device} has no registered backend in this build (GPU support is folo-gpu's `init()`); use \
+             --device cpu"
         )))
     }
 }

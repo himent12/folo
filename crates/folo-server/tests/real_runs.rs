@@ -509,3 +509,34 @@ async fn queue_stop_resume_and_restart() {
     let done: Run = ok(&app, get(&format!("/api/runs/{}", b.id))).await;
     assert_eq!(done.epoch, 3);
 }
+
+/// `device: auto` on a machine with a GPU: the run trains there and predictions run there. Skips (with a note)
+/// without a hardware adapter, like folo-vision's GPU tests.
+#[tokio::test(flavor = "multi_thread")]
+async fn auto_trains_and_predicts_on_the_gpu() {
+    match folo_gpu::GpuContext::shared() {
+        Ok(ctx) if ctx.summary().device_type != "Cpu" => {}
+        Ok(ctx) => return eprintln!("note: skipping, software adapter {}", ctx.summary().name),
+        Err(e) => return eprintln!("note: skipping, no GPU adapter: {e}"),
+    }
+    let t = TempDir::new("gpu");
+    let home = t.0.join("home");
+    let s = Arc::new(RealStore::open(home.clone()).recheck_every(Duration::ZERO));
+    let app = app(&s);
+    let ds = dataset(&app, "gpu", 12).await;
+    let mut cfg = tiny(&ds, 1);
+    cfg["device"] = json!("auto");
+    let run: Run = ok(&app, post_json("/api/runs", cfg)).await;
+    let gpu = folo_gpu::GpuContext::shared().unwrap().summary().name.clone();
+    assert!(run.device.starts_with(&gpu), "{} on {gpu}", run.device);
+    let mut sse = Events::open(&app, &run.id).await;
+    let events = sse.until_status(&["completed", "failed"]).await;
+    assert_eq!(events.last().unwrap().1["status"], "completed", "{events:?}");
+    let model_id = ok::<Run>(&app, get(&format!("/api/runs/{}", run.id))).await.model_id.unwrap();
+    let p = json!({ "model_id": model_id, "dataset_id": ds.id, "image_id": "0", "conf": 0.001 });
+    let r: PredictResponse = ok(&app, post_json("/api/predict", p)).await;
+    assert_eq!(r.device, "gpu:0");
+    assert!(!r.boxes.is_empty());
+    let system: SystemInfo = ok(&app, get("/api/system")).await;
+    assert_eq!(system.gpus.first().map(|g| g.name.as_str()), Some(gpu.as_str()));
+}
