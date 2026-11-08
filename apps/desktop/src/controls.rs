@@ -657,6 +657,7 @@ impl FoloApp {
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.menu_open = if this.menu_open == Some(key) { None } else { Some(key) };
                 this.menu_hl = selected;
+                this.menu_scroll.scroll_to_item(selected);
                 cx.notify();
             }))
             .on_key_down(cx.listener(move |this, ev: &KeyDownEvent, window, cx| {
@@ -673,6 +674,7 @@ impl FoloApp {
                     "enter" | "space" | "down" | "up" if !is_open => {
                         this.menu_open = Some(key);
                         this.menu_hl = selected;
+                        this.menu_scroll.scroll_to_item(selected);
                     }
                     "down" => {
                         this.menu_hl = (this.menu_hl + 1).min(n - 1);

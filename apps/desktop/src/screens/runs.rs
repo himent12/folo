@@ -662,10 +662,7 @@ impl FoloApp {
             .filter(|&i| self.loss_parts[i])
             .map(|i| Series::new(names[i], colors[i], d.loss[i].clone()).smooth(0.94).live(live))
             .collect();
-        let loss_max = (0..4)
-            .filter(|&i| self.loss_parts[i])
-            .flat_map(|i| d.loss[i].iter().map(|p| p.1))
-            .fold(0f32, f32::max);
+        let loss_max = (0..4).filter(|&i| self.loss_parts[i]).map(|i| d.loss_max[i]).fold(0f32, f32::max);
         let mut loss = base("run-loss", loss_series);
         loss.y_range = Some((0., crate::charts::nice_ceil((loss_max * 1.05).max(0.1), 4)));
         loss.value_fmt = Some(|v| format!("{v:.3}"));

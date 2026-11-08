@@ -720,6 +720,9 @@ impl FoloApp {
                 },
                 move |this, r, _| {
                     this.store.images.insert(b, r.into());
+                    // New list, new truth: nothing derived from the old one may survive.
+                    *this.ds_filter_cache.borrow_mut() = None;
+                    *this.ds_split_counts.borrow_mut() = None;
                 },
             );
         }

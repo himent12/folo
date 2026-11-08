@@ -119,6 +119,8 @@ impl FoloApp {
 
     pub fn retry_all(&mut self, cx: &mut Context<Self>) {
         use crate::store::Load;
+        *self.ds_filter_cache.borrow_mut() = None;
+        *self.ds_split_counts.borrow_mut() = None;
         let s = &mut self.store;
         s.health = Load::Idle;
         s.system = Load::Idle;
