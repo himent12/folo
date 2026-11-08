@@ -1,5 +1,4 @@
 <script lang="ts">
-  import FolderOpen from '@lucide/svelte/icons/folder-open';
   import Images from '@lucide/svelte/icons/images';
   import Plus from '@lucide/svelte/icons/plus';
   import Sparkles from '@lucide/svelte/icons/sparkles';
@@ -11,15 +10,12 @@
   import { href, router } from '$lib/router.svelte';
   import Page from '$lib/shell/Page.svelte';
   import { setCrumbs } from '$lib/shell/crumbs.svelte';
-  import Badge from '$lib/ui/Badge.svelte';
   import Button from '$lib/ui/Button.svelte';
   import EmptyState from '$lib/ui/EmptyState.svelte';
   import ErrorState from '$lib/ui/ErrorState.svelte';
   import Panel from '$lib/ui/Panel.svelte';
   import Skeleton from '$lib/ui/Skeleton.svelte';
-  import { tooltip } from '$lib/ui/tooltip';
   import AddDatasetDialog from './datasets/AddDatasetDialog.svelte';
-  import ClassNames from './datasets/ClassNames.svelte';
   import { imageCount } from './dataset/health';
 
   setCrumbs({ label: 'Datasets' });
@@ -47,8 +43,7 @@
     };
   });
 
-  const splitTip = (d: Dataset) =>
-    `train ${num(d.splits.train)} · val ${num(d.splits.val)} · test ${num(d.splits.test)}`;
+  const classTip = (d: Dataset) => `${d.classes.length} classes: ${d.classes.join(', ')}`;
 </script>
 
 <Page title="Datasets">
@@ -63,243 +58,166 @@
     <Button variant="primary" icon={Plus} onclick={() => add('folder')}>Add dataset</Button>
   {/snippet}
 
-  {#if datasets.error && !datasets.data}
-    <Panel><ErrorState error={datasets.error} title="Could not load datasets" retry={() => datasets.refresh()} /></Panel>
-  {:else if !datasets.data}
-    <div class="list" aria-busy="true" aria-label="Loading datasets">
-      <div class="head" aria-hidden="true"><span>Dataset</span></div>
-      {#each [0, 1, 2] as i (i)}
-        <div class="row sk">
-          <div class="c-name"><Skeleton w="120px" h="14px" /><Skeleton w="200px" h="10px" /></div>
-          <div class="c-images"><Skeleton w="64px" h="14px" /></div>
-          <div class="c-classes"><Skeleton w="24px" h="14px" /></div>
-          <div class="c-balance"><Skeleton h="6px" r="999px" /></div>
-          <div class="c-boxes"><Skeleton w="48px" h="14px" /></div>
-          <div class="c-created"><Skeleton w="48px" h="12px" /></div>
-        </div>
-      {/each}
-    </div>
-  {:else if datasets.data.length === 0}
-    <Panel>
+  <Panel pad="none">
+    {#if datasets.error && !datasets.data}
+      <ErrorState error={datasets.error} title="Could not load datasets" retry={() => datasets.refresh()} />
+    {:else if datasets.data?.length === 0}
+      <!-- The header already holds the primary action; the empty state offers the quick start. -->
       <EmptyState icon={Images} title="No datasets yet" description="Register a YOLO or COCO folder the server can read, or generate a synthetic shapes set to try FOLO in a minute.">
-        {#snippet actions()}
-          <Button variant="primary" icon={FolderOpen} onclick={() => add('folder')}>Register folder</Button>
-          <Button icon={Sparkles} onclick={() => add('synthetic')}>Generate synthetic</Button>
-        {/snippet}
+        {#snippet actions()}<Button icon={Sparkles} onclick={() => add('synthetic')}>Generate synthetic</Button>{/snippet}
       </EmptyState>
-    </Panel>
-  {:else}
-    <div class="list" role="table" aria-label="Datasets">
-      <div class="head" role="row">
-        <span class="c-name" role="columnheader">Dataset</span>
-        <span class="c-images r" role="columnheader">Images</span>
-        <span class="c-classes r" role="columnheader">Classes</span>
-        <span class="c-balance" role="columnheader">Class balance</span>
-        <span class="c-boxes r" role="columnheader">Boxes</span>
-        <span class="c-created r" role="columnheader">Created</span>
-      </div>
-      {#each datasets.data as d (d.id)}
-        <a class="row" role="row" href={href(`/datasets/${d.id}`)}>
-          <span class="c-name" role="cell">
-            <span class="name-line">
-              <span class="name truncate">{d.name}</span>
-              <Badge tone="outline" mono>{d.format}</Badge>
-            </span>
-            <span class="path mono truncate" title={d.path}>{d.path}</span>
-          </span>
-          <span class="c-images r num" role="cell">
-            <span class="big" use:tooltip={splitTip(d)}>{num(imageCount(d))}</span>
-            <span class="splits">
-              <span title="train">{num(d.splits.train)}</span><i>/</i><span title="val">{num(d.splits.val)}</span><i>/</i><span title="test">{num(d.splits.test)}</span>
-            </span>
-            <span class="split-key" aria-hidden="true">train<i>/</i>val<i>/</i>test</span>
-          </span>
-          <span class="c-classes r num" role="cell"><span class="big">{d.classes.length}</span><span class="lbl">classes</span></span>
-          <span class="c-balance" role="cell">
-            {#if d.stats}
-              <ClassStrip counts={d.stats.class_counts} classes={d.classes} />
-              <ClassNames names={d.classes} />
+    {:else}
+      <div class="scroll">
+        <table class="table ds" aria-busy={!datasets.data} aria-label="Datasets">
+          <thead>
+            <tr>
+              <th scope="col">Dataset</th>
+              <th scope="col" class="hide-md">Format</th>
+              <th scope="col" class="hide-lg">Path</th>
+              <th scope="col" class="r">Train</th>
+              <th scope="col" class="r">Val</th>
+              <th scope="col" class="r">Test</th>
+              <th scope="col">Class balance</th>
+              <th scope="col" class="r hide-md">Boxes</th>
+              <th scope="col" class="r hide-md">Created</th>
+            </tr>
+          </thead>
+          <tbody>
+            {#if !datasets.data}
+              {#each [0, 1, 2] as i (i)}
+                <tr aria-hidden="true">
+                  <td><Skeleton w="96px" h="12px" /></td>
+                  <td class="hide-md"><Skeleton w="32px" h="12px" /></td>
+                  <td class="hide-lg"><Skeleton w="120px" h="12px" /></td>
+                  <td class="r"><Skeleton w="36px" h="12px" /></td>
+                  <td class="r"><Skeleton w="28px" h="12px" /></td>
+                  <td class="r"><Skeleton w="28px" h="12px" /></td>
+                  <td><Skeleton w="160px" h="6px" r="999px" /></td>
+                  <td class="r hide-md"><Skeleton w="36px" h="12px" /></td>
+                  <td class="r hide-md"><Skeleton w="44px" h="12px" /></td>
+                </tr>
+              {/each}
             {:else}
-              <span class="faint">—</span>
+              {#each datasets.data as d (d.id)}
+                <tr class="link" onclick={() => router.go(`/datasets/${d.id}`)}>
+                  <td><a class="name" href={href(`/datasets/${d.id}`)} onclick={(e) => e.stopPropagation()}>{d.name}</a></td>
+                  <td class="hide-md faint">{d.format}</td>
+                  <td class="hide-lg path-cell"><span class="path mono truncate" title={d.path}>{d.path}</span></td>
+                  <td class="r num">{num(d.splits.train)}</td>
+                  <td class="r num muted">{num(d.splits.val)}</td>
+                  <td class="r num muted">{num(d.splits.test)}</td>
+                  <td title={classTip(d)}>
+                    {#if d.stats}<div class="strip"><ClassStrip counts={d.stats.class_counts} classes={d.classes} /></div>{:else}<span class="faint">—</span>{/if}
+                  </td>
+                  <td class="r num hide-md">{compact(d.stats?.boxes)}</td>
+                  <td class="r faint hide-md">{ago(d.created)}</td>
+                </tr>
+              {/each}
             {/if}
-          </span>
-          <span class="c-boxes r num" role="cell"><span class="big">{compact(d.stats?.boxes)}</span><span class="lbl">boxes</span></span>
-          <span class="c-created r faint" role="cell">{ago(d.created)}</span>
-        </a>
-      {/each}
-    </div>
-  {/if}
+          </tbody>
+        </table>
+      </div>
+      <!-- Phones: two-line rows (name and one meta line, the image count and class balance on the right). -->
+      <ul class="rows" aria-label="Datasets">
+        {#each datasets.data ?? [] as d (d.id)}
+          <li>
+            <a href={href(`/datasets/${d.id}`)}>
+              <span class="m-main">
+                <span class="name truncate">{d.name}</span>
+                <span class="m-meta num truncate">{d.format} · {num(d.splits.train)} / {num(d.splits.val)} / {num(d.splits.test)} · {d.classes.length} classes</span>
+              </span>
+              <span class="m-side">
+                <span class="num">{compact(imageCount(d))}<span class="faint"> img</span></span>
+                {#if d.stats}<span class="m-strip"><ClassStrip counts={d.stats.class_counts} classes={d.classes} height={4} /></span>{/if}
+              </span>
+            </a>
+          </li>
+        {/each}
+      </ul>
+    {/if}
+  </Panel>
 </Page>
 
 <AddDatasetDialog bind:open={adding} bind:mode={addMode} />
 
 <style>
-  .list {
-    border-radius: var(--radius-lg);
-    background: var(--bg-panel);
-    border: 1px solid var(--line-subtle);
-    overflow: hidden;
+  .scroll {
+    overflow-x: auto;
   }
-  :global([data-theme='light']) .list {
-    border-color: var(--line-default);
-  }
-  .head,
-  .row {
-    display: grid;
-    grid-template-columns: minmax(0, 2.2fr) 128px 72px minmax(160px, 1.6fr) 72px 88px;
-    align-items: center;
-    gap: var(--space-6);
-    padding: 0 var(--space-4);
-  }
-  .head {
-    height: 32px;
-    border-bottom: 1px solid var(--line-subtle);
-    font-size: var(--type-xs-size);
-    font-weight: var(--weight-medium);
-    color: var(--text-tertiary);
-    white-space: nowrap;
-  }
-  .row {
-    min-height: 64px;
-    padding-block: var(--space-3);
-    border-bottom: 1px solid var(--line-subtle);
-    transition: background-color var(--dur-fast) var(--ease-standard);
-  }
-  .row:last-child {
-    border-bottom: 0;
-  }
-  a.row:hover {
-    background: var(--bg-hover);
-  }
-  a.row:focus-visible {
-    outline-offset: -2px;
-    border-radius: 0;
-  }
-  .r {
-    text-align: right;
-    justify-self: end;
-  }
-  .c-name {
-    display: grid;
-    gap: 2px;
-    min-width: 0;
-  }
-  .name-line {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    min-width: 0;
+  .ds td {
+    height: 40px;
   }
   .name {
     font-weight: var(--weight-medium);
-    font-size: var(--type-md-size);
+  }
+  .name:hover {
+    text-decoration: underline;
+    text-underline-offset: 3px;
+    text-decoration-color: var(--line-strong);
+  }
+  /* The path takes what the row has left, cut with an ellipsis (the full path is in the title). */
+  .path-cell {
+    width: 100%;
+    max-width: 0;
   }
   .path {
-    font-size: var(--type-xs-size);
+    display: block;
     color: var(--text-tertiary);
   }
-  .c-images,
-  .c-classes,
-  .c-boxes {
-    display: grid;
-    gap: 2px;
+  .strip {
+    width: 160px;
   }
-  .big {
-    font-weight: var(--weight-medium);
-  }
-  .lbl {
+  .rows {
     display: none;
   }
-  .splits,
-  .lbl {
-    font-size: var(--type-xs-size);
-    color: var(--text-tertiary);
-  }
-  .split-key {
-    font-size: var(--type-micro-size);
-    line-height: var(--type-micro-line);
-    color: var(--text-tertiary);
-  }
-  .splits i,
-  .split-key i {
-    font-style: normal;
-    margin: 0 2px;
-    color: var(--text-disabled);
-  }
-  .c-balance {
-    display: grid;
-    gap: 6px;
-    min-width: 0;
-  }
-  .c-created {
-    font-size: var(--type-sm-size);
-    white-space: nowrap;
-  }
-  .sk .c-name {
-    gap: var(--space-2);
-  }
-  .sk .c-images,
-  .sk .c-classes,
-  .sk .c-boxes {
-    justify-self: end;
+  @media (max-width: 1279px) {
+    .hide-lg {
+      display: none;
+    }
   }
   @media (max-width: 1023px) {
-    .head,
-    .row {
-      grid-template-columns: minmax(0, 2fr) 120px 64px minmax(120px, 1.4fr) 64px;
-    }
-    .c-created {
+    .hide-md {
       display: none;
     }
   }
   @media (max-width: 767px) {
-    .head {
+    .scroll {
       display: none;
     }
-    .row {
-      grid-template-columns: minmax(0, 1fr) auto auto;
-      grid-template-areas:
-        'name name name'
-        'images classes boxes'
-        'balance balance balance';
-      gap: var(--space-3) var(--space-4);
-      padding: var(--space-4);
+    .rows {
+      display: block;
     }
-    .c-name {
-      grid-area: name;
+    .rows li + li {
+      border-top: 1px solid var(--line-subtle);
     }
-    .c-images {
-      grid-area: images;
-    }
-    .c-classes {
-      grid-area: classes;
-    }
-    .c-boxes {
-      grid-area: boxes;
-    }
-    .c-balance {
-      grid-area: balance;
-    }
-    .c-images,
-    .c-classes,
-    .c-boxes {
+    .rows a {
       display: flex;
-      align-items: baseline;
-      gap: var(--space-1);
-      justify-self: start;
-      text-align: left;
+      align-items: center;
+      gap: var(--space-3);
+      min-height: 56px;
+      padding: var(--space-2) var(--space-4);
     }
-    .c-images .splits,
-    .c-images .split-key {
-      display: none;
+    .rows a:active {
+      background: var(--bg-hover);
     }
-    .lbl {
-      display: inline;
+    .m-main {
+      flex: 1;
+      min-width: 0;
+      display: grid;
     }
-    .c-images::after {
-      content: 'images';
-      font-size: var(--type-xs-size);
+    .m-meta {
+      font-size: var(--type-sm-size);
+      line-height: var(--type-sm-line);
       color: var(--text-tertiary);
+    }
+    .m-side {
+      display: grid;
+      justify-items: end;
+      gap: var(--space-1);
+      flex-shrink: 0;
+    }
+    .m-strip {
+      width: 64px;
     }
   }
 </style>
