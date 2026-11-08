@@ -215,6 +215,17 @@ fn rgba(v: u32) -> Hsla {
 }
 
 /// Zoom to `new_zoom` keeping the image point under `cursor` fixed; returns the new pan.
+/// Zoom by `f` about the view centre, within 1×..=12×. Pan scales by the zoom actually applied,
+/// so pressing zoom-in at the cap leaves the view where it is.
+pub fn zoom_step(zoom: f32, pan: (f32, f32), f: f32) -> (f32, (f32, f32)) {
+    let z = (zoom * f).clamp(1.0, 12.0);
+    if z <= 1.0 {
+        return (1.0, (0., 0.));
+    }
+    let k = z / zoom;
+    (z, (pan.0 * k, pan.1 * k))
+}
+
 pub fn zoom_about(
     bounds: Bounds<Pixels>,
     (w, h): (f32, f32),
@@ -264,6 +275,20 @@ pub fn hit_box(boxes: &[DrawBox], x: f32, y: f32) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn zoom_step_holds_still_at_the_cap() {
+        use super::zoom_step;
+        assert_eq!(zoom_step(2.0, (10., -4.), 2.0), (4.0, (20., -8.)));
+        // At 12× a further zoom-in changes nothing.
+        assert_eq!(zoom_step(12.0, (30., 6.), 1.4), (12.0, (30., 6.)));
+        // Approaching the cap scales pan by the zoom actually applied.
+        let (z, p) = zoom_step(10.0, (10., 0.), 1.4);
+        assert_eq!(z, 12.0);
+        assert!((p.0 - 12.0).abs() < 1e-4);
+        // Back to fit recentres.
+        assert_eq!(zoom_step(1.2, (5., 5.), 0.5), (1.0, (0., 0.)));
+    }
+
     use super::*;
 
     #[test]

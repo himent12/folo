@@ -1414,12 +1414,7 @@ impl FoloApp {
 
     pub fn zoom_by(&mut self, f: f32, cx: &mut Context<Self>) {
         if let Some(i) = self.inspector.as_mut() {
-            i.zoom = (i.zoom * f).clamp(1.0, 12.0);
-            if i.zoom <= 1.0 {
-                i.pan = (0., 0.);
-            } else {
-                i.pan = (i.pan.0 * f, i.pan.1 * f);
-            }
+            (i.zoom, i.pan) = crate::viz::zoom_step(i.zoom, i.pan, f);
             cx.notify();
         }
     }

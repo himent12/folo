@@ -1182,9 +1182,7 @@ impl FoloApp {
     }
 
     pub fn play_zoom_by(&mut self, f: f32, cx: &mut Context<Self>) {
-        self.play_zoom = (self.play_zoom * f).clamp(1.0, 12.0);
-        self.play_pan =
-            if self.play_zoom <= 1.0 { (0., 0.) } else { (self.play_pan.0 * f, self.play_pan.1 * f) };
+        (self.play_zoom, self.play_pan) = crate::viz::zoom_step(self.play_zoom, self.play_pan, f);
         cx.notify();
     }
 
