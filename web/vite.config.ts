@@ -7,7 +7,11 @@ const api = process.env.FOLO_API ?? 'http://127.0.0.1:7878';
 
 export default defineConfig({
   plugins: [svelte()],
-  resolve: { alias: { $lib: fileURLToPath(new URL('./src/lib', import.meta.url)) } },
+  resolve: {
+    alias: { $lib: fileURLToPath(new URL('./src/lib', import.meta.url)) },
+    // Tests run Svelte's client runtime so runes ($effect, $effect.root) behave as in the browser.
+    ...(process.env.VITEST ? { conditions: ['browser'] } : {}),
+  },
   server: {
     port: 5173,
     // design/ (fonts, tokens) lives next to web/.
