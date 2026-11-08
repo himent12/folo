@@ -472,6 +472,11 @@ fn ease_frame(
             to: to.to_vec(),
             start: settled,
         });
+        if reduce {
+            // Reduce motion: no move starts, and one in progress stops where its data is.
+            *e = Ease { key, from: vec![None; to.len()], to: to.to_vec(), start: settled };
+            return None;
+        }
         let unchanged =
             e.key == key && e.to.len() == to.len() && e.to.iter().zip(to).all(|(a, b)| same_points(a, b));
         if unchanged {
@@ -479,24 +484,28 @@ fn ease_frame(
             e.to = to.to_vec();
         } else {
             let p = progress(e.start).min(1.);
-            let related = !reduce && e.key == key && e.to.len() == to.len();
-            let from: Vec<Option<Pts>> = e
-                .from
-                .iter()
-                .zip(&e.to)
-                .zip(to)
-                .map(|((f, old), new)| {
-                    if !related || same_points(old, new) {
-                        return None;
-                    }
-                    // Start from what is on screen now (mid-move if this series was moving).
-                    let cur = match f {
-                        Some(f) if p < 1. => tween(f, old, ease_out(p)),
-                        _ => old.to_vec(),
-                    };
-                    (new.len() <= EASE_MAX_POINTS && is_append(&cur, new)).then(|| Arc::new(cur))
-                })
-                .collect();
+            let related = e.key == key && e.to.len() == to.len() && e.from.len() == to.len();
+            // One slot per series, always: a hidden-then-restored series can ease again.
+            let from: Vec<Option<Pts>> = if !related {
+                vec![None; to.len()]
+            } else {
+                e.from
+                    .iter()
+                    .zip(&e.to)
+                    .zip(to)
+                    .map(|((f, old), new)| {
+                        if same_points(old, new) {
+                            return None;
+                        }
+                        // Start from what is on screen now (mid-move if this series was moving).
+                        let cur = match f {
+                            Some(f) if p < 1. => tween(f, old, ease_out(p)),
+                            _ => old.to_vec(),
+                        };
+                        (new.len() <= EASE_MAX_POINTS && is_append(&cur, new)).then(|| Arc::new(cur))
+                    })
+                    .collect()
+            };
             let moving = from.iter().any(Option::is_some);
             *e = Ease { key, from, to: to.to_vec(), start: if moving { now } else { settled } };
         }
@@ -1394,6 +1403,24 @@ mod tests {
         let long = "test-long".into();
         assert!(ease_frame(&long, key(), &[pts(600)], t0, false).is_none());
         assert!(ease_frame(&long, key(), &[pts(601)], t0, false).is_none());
+    }
+
+    #[test]
+    fn easing_survives_hidden_series_and_stops_under_reduce_motion() {
+        let id: SharedString = "test-hide".into();
+        let names =
+            |n: usize| (7u64, (0..n).map(|i| SharedString::from(format!("s{i}"))).collect::<Vec<_>>());
+        let pts = |n: usize| Arc::new((0..n).map(|i| (i as f32, i as f32)).collect::<Vec<_>>());
+        let t0 = std::time::Instant::now();
+        assert!(ease_frame(&id, names(2), &[pts(10), pts(10)], t0, false).is_none());
+        // Hide one series, then restore both: appends ease again.
+        assert!(ease_frame(&id, names(1), &[pts(10)], t0, false).is_none());
+        assert!(ease_frame(&id, names(2), &[pts(10), pts(10)], t0, false).is_none());
+        assert!(ease_frame(&id, names(2), &[pts(11), pts(11)], t0, false).is_some());
+        // Reduce motion mid-move: the move stops at once.
+        let mid = t0 + std::time::Duration::from_millis(100);
+        assert!(ease_frame(&id, names(2), &[pts(11), pts(11)], mid, true).is_none());
+        assert!(ease_frame(&id, names(2), &[pts(11), pts(11)], mid, false).is_none());
     }
 
     #[test]
