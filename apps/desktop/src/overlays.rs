@@ -700,9 +700,9 @@ impl FoloApp {
                 .pt(px(if short { 10. } else { 14. }))
                 .border_t_1()
                 .border_color(t.line_subtle)
-                // A size step above the 13 px field labels, not only a weight step.
+                // Two size steps above the 12 px field labels, not only a weight step.
                 .child(
-                    text(ty::BASE, t.text_primary).font_weight(FontWeight::SEMIBOLD).child(title.to_string()),
+                    text(ty::MD, t.text_primary).font_weight(FontWeight::SEMIBOLD).child(title.to_string()),
                 )
         };
         let (epochs_input, lr_input, epochs_bad, lr_bad) = {
