@@ -167,6 +167,13 @@ The exact block definitions, layer tables, parameter names, head, loss, training
   one image, square for a batch), forward, decode, NMS, rescale to the original image, with a preprocess /
   inference / postprocess timing split.
 
+## folo-wasm — FOLO in the browser
+- `crates/folo-wasm` (wasm-bindgen) loads a `.folo` file from bytes and runs `folo_vision::Predictor`'s steps on
+  WebGPU (folo-gpu's browser backend, async device creation and readback) or on folo-core's CPU kernels compiled to
+  wasm (single-threaded, SIMD128 GEMM micro-kernel). `detect` resolves to `/api/predict`'s response shape plus the
+  backend, so Studio can run models in the page. `scripts/build-wasm.sh` builds it into `web/public/folo-wasm/`.
+  JS API, build and limits: `docs/WASM.md`.
+
 ## folo-server and folo-cli
 - `folo-server` (axum + tokio) implements `docs/API.md`: datasets, models, training runs with live SSE metrics, and
   inference. Handlers sit on a `Store` trait (`MockStore` for `--mock`, `RealStore` for the engine; its datasets

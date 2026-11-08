@@ -1,0 +1,36 @@
+[package]
+name = "folo-wasm"
+description = "FOLO detectors in the browser: wasm-bindgen bindings over folo-vision on WebGPU or the wasm CPU"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+# cdylib for the browser module (scripts/build-wasm.sh); rlib so the workspace's native tests can use it.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+folo-api.workspace = true
+folo-core.workspace = true
+folo-data.workspace = true
+folo-gpu.workspace = true
+folo-nn.workspace = true
+folo-vision.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+wasm-bindgen.workspace = true
+wasm-bindgen-futures.workspace = true
+js-sys.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-time.workspace = true
+
+[dev-dependencies]
+pollster.workspace = true

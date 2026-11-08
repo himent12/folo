@@ -362,9 +362,11 @@ pub fn write_file(
     let res = (|| {
         let mut w = std::io::BufWriter::with_capacity(1 << 20, f);
         write(&mut w, metadata, tensors)?;
-        let f = w.into_inner().map_err(|e| Error::io(&tmp, e.into_error()))?;
-        f.sync_all().map_err(|e| Error::io(&tmp, e))?;
-        drop(f);
+        // The file is closed at the end of this block, before the rename.
+        {
+            let f = w.into_inner().map_err(|e| Error::io(&tmp, e.into_error()))?;
+            f.sync_all().map_err(|e| Error::io(&tmp, e))?;
+        }
         std::fs::rename(&tmp, path).map_err(|e| Error::io(path, e))
     })();
     if res.is_err() {

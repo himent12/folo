@@ -38,7 +38,7 @@ pub(crate) mod pipeline;
 pub mod pool;
 pub mod tensor;
 
-pub use backend::{GpuBackend, GpuStorage, init};
+pub use backend::{GpuBackend, GpuStorage, download_async, init, init_async};
 pub use context::{AdapterSummary, Capabilities, GpuContext, GpuOptions, WorkStats};
 pub use dtype::DType;
 pub use error::{GpuError, Result};

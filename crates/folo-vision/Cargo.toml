@@ -24,6 +24,10 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 
+# `std::time::Instant` panics in the browser; web-time reads `performance.now()` there.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-time.workspace = true
+
 [dev-dependencies]
 # GPU tests (tests/gpu.rs) and the GPU benchmark; both skip without an adapter.
 folo-gpu.workspace = true

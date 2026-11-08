@@ -21,7 +21,7 @@ use folo_core::backend::{
     Backend, BinaryOp, Conv2dParams, OptimStep, Pool2dParams, ReduceOp, RunningUpdate, UnaryOp, View,
 };
 use folo_core::{
-    CpuStorage, DType as CoreDType, Device, DeviceStorage, Error, Layout, Result, Shape, Storage,
+    CpuStorage, DType as CoreDType, Device, DeviceStorage, Error, Layout, Result, Shape, Storage, Tensor,
 };
 
 use crate::context::GpuContext;
@@ -66,20 +66,82 @@ impl std::fmt::Debug for GpuBackend {
     }
 }
 
+/// The outcome of the first [`init`] / [`init_async`].
+static INIT: OnceLock<std::result::Result<Device, String>> = OnceLock::new();
+
+fn register_shared(ctx: std::result::Result<GpuContext, GpuError>) -> std::result::Result<Device, String> {
+    let ctx = ctx.map_err(|e| e.to_string())?;
+    let device = Device::Gpu(0);
+    folo_core::backend::register_backend(device, Arc::new(GpuBackend::new(ctx, device)))
+        .map_err(|e| e.to_string())?;
+    Ok(device)
+}
+
 /// Registers [`GpuContext::shared`] as folo-core's `Device::Gpu(0)` (once per process) and returns the device.
 ///
-/// Fails when there is no usable adapter; tensors then stay on the CPU.
+/// Fails when there is no usable adapter; tensors then stay on the CPU. In the browser, call [`init_async`]
+/// instead (afterwards `init` returns its result).
 pub fn init() -> std::result::Result<Device, GpuError> {
-    static INIT: OnceLock<std::result::Result<Device, String>> = OnceLock::new();
-    INIT.get_or_init(|| {
-        let ctx = GpuContext::shared().map_err(|e| e.to_string())?;
-        let device = Device::Gpu(0);
-        folo_core::backend::register_backend(device, Arc::new(GpuBackend::new(ctx, device)))
-            .map_err(|e| e.to_string())?;
-        Ok(device)
-    })
-    .clone()
-    .map_err(GpuError::NoAdapter)
+    INIT.get_or_init(|| register_shared(GpuContext::shared())).clone().map_err(GpuError::NoAdapter)
+}
+
+/// [`init`] without blocking, over [`GpuContext::shared_async`]: the way to get a GPU device in the browser
+/// (WebGPU creates adapters and devices asynchronously).
+pub async fn init_async() -> std::result::Result<Device, GpuError> {
+    if INIT.get().is_none() {
+        let ctx = GpuContext::shared_async().await;
+        // A concurrent first call may have registered meanwhile; the first result stored wins.
+        INIT.get_or_init(|| register_shared(ctx)).clone().map_err(GpuError::NoAdapter)?;
+    }
+    init()
+}
+
+/// Copies `t` to a CPU tensor without blocking (a detached copy for a tensor already on the CPU).
+///
+/// The browser cannot wait for the GPU inside a call (WebGPU maps buffers from the event loop), so
+/// [`Tensor::to_vec`] and `to_device(Device::Cpu)` fail there for GPU tensors; this is the readback to await
+/// instead. The copy is ordered after all work encoded so far, which it submits. Natively it works too and
+/// waits like a blocking download. `ctx` must be the context of `t`'s device ([`GpuContext::shared`] after
+/// [`init`] / [`init_async`]).
+pub async fn download_async(ctx: &GpuContext, t: &Tensor) -> Result<Tensor> {
+    if t.device().is_cpu() {
+        return Ok(t.detach());
+    }
+    let dtype = t.dtype();
+    let n = t.numel();
+    let eb = dtype.size_in_bytes();
+    let pending = t.with_view(|v| -> Result<_> {
+        let buf = match v.storage {
+            Storage::Device(ds) => ds
+                .downcast_ref::<GpuStorage>()
+                .map(|s| s.buf.raw())
+                .ok_or_else(|| core_err(GpuError::Shape("device storage is not a wgpu buffer".into())))?,
+            Storage::Cpu(_) => unreachable!("checked above"),
+        };
+        if !v.layout.fits(v.storage.len()) {
+            return Err(Error::InvalidShape {
+                op: "download_async",
+                shape: v.layout.shape().clone(),
+                msg: "layout reaches outside its storage".into(),
+            });
+        }
+        let off = v.layout.offset() * eb;
+        if v.layout.is_contiguous() && off.is_multiple_of(4) {
+            return ctx.begin_read(buf, off as u64, (n * eb) as u64).core();
+        }
+        // Dense copy first; the buffer may go back to the pool at once, the readback is ordered after it.
+        let dense = ctx.alloc(elem(dtype).buffer_bytes(n).core()?).core()?;
+        strided::gather_strided(ctx, elem(dtype), buf, &strided_of(v.layout), dense.raw()).core()?;
+        ctx.begin_read(dense.raw(), 0, (n * eb) as u64).core()
+    })?;
+    let host = match pending {
+        None => CpuStorage::from_bytes(&[], dtype)?,
+        Some(p) => {
+            p.wait().await.core()?;
+            p.finish(|bytes| CpuStorage::from_bytes(bytes, dtype)).core()??
+        }
+    };
+    Tensor::from_storage(Storage::Cpu(host), t.shape().clone())
 }
 
 fn core_err(e: GpuError) -> Error {

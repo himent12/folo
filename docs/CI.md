@@ -1,7 +1,9 @@
 # CI
 
 `.github/workflows/ci.yml` runs on every PR and on pushes to `main`: `cargo fmt --check` (Linux), `cargo clippy -D
-warnings` and `cargo test --workspace` on Linux and Windows, and the web app's `npm ci && npm run check && npm run build`.
+warnings` and `cargo test --workspace` on Linux and Windows, the web app's `npm ci && npm run check && npm run build`, and
+the browser build (`wasm`, Linux: `cargo clippy --target wasm32-unknown-unknown -p folo-wasm` and
+`scripts/build-wasm.sh` with the wasm-bindgen CLI matching `Cargo.lock`, docs/WASM.md).
 
 ## Runners
 The repository is private, so GitHub-hosted minutes are limited (Windows counts double). FOLO therefore runs CI on its

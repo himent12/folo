@@ -38,7 +38,8 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
     // `row` is uniform across the workgroup, so every invocation reaches the barriers.
     let valid = row < rows;
     let base = row * n;
-    var m = -3.4028235e38;
+    // -f32::MAX by its bits: Tint (browser WebGPU) rejects the decimal literal as out of range.
+    var m = bitcast<f32>(0xff7fffffu);
     if (valid) {
         for (var i = lid; i < n; i += 256u) { m = max(m, X[base + i]); }
     }

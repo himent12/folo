@@ -7,7 +7,11 @@
 //! preprocess / inference / postprocess like docs/API.md's `/api/predict`.
 
 use std::path::Path;
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
+
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
 
 use folo_core::{Device, Tensor, no_grad};
 use folo_data::{Image, Letterbox, LetterboxOptions};
@@ -16,7 +20,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::boxes::Xyxy;
 use crate::error::{Error, Result};
-use crate::model::FoloModel;
+use crate::model::{FoloModel, HeadOutput};
 use crate::nms::{Detection, NmsConfig, non_max_suppression};
 
 /// Prediction settings; the defaults are MODEL.md §9.3's `predict` column at `imgsz = 640`.
@@ -80,7 +84,8 @@ pub struct Timing {
 }
 
 impl Timing {
-    fn new(pre: f64, inf: f64, post: f64) -> Self {
+    /// A timing from its three parts (`total_ms` is their sum).
+    pub fn new(pre: f64, inf: f64, post: f64) -> Self {
         Timing { preprocess_ms: pre, inference_ms: inf, postprocess_ms: post, total_ms: pre + inf + post }
     }
 
@@ -199,6 +204,31 @@ impl Predictor {
 
     fn run(&self, imgs: &[Image], rect: bool) -> Result<Vec<Prediction>> {
         let t0 = Instant::now();
+        let batch = self.prepare(imgs, rect)?;
+        let pre = ms(t0);
+
+        let t1 = Instant::now();
+        let out = self.forward(&batch)?;
+        let inf = ms(t1);
+
+        // docs/API.md counts the decode as post-processing.
+        let t2 = Instant::now();
+        let decoded = out.decode_images()?;
+        let dets = self.finish(&batch, decoded, out.num_classes);
+        let post = ms(t2);
+        let n = imgs.len() as f64;
+        Ok(batch.predictions(dets, Timing::new(pre / n, inf / n, post / n)))
+    }
+
+    /// The first step of a prediction, for callers that drive the steps themselves (the browser, which
+    /// must await the GPU readback between [`Predictor::forward`] and [`Predictor::finish`]): letterbox the
+    /// images (`rect` padding for one image, else the square canvas) into the input tensor, on the model's
+    /// device. [`Predictor::predict`] is `prepare` → `forward` → [`HeadOutput::decode_images`] → `finish`.
+    pub fn prepare(&self, imgs: &[Image], rect: bool) -> Result<PreparedBatch> {
+        if imgs.is_empty() {
+            return Err(Error::Config("cannot predict an empty batch".into()));
+        }
+        let rect = rect && imgs.len() == 1;
         let s = self.cfg.imgsz;
         let opts = LetterboxOptions { stride: rect.then_some(32), ..LetterboxOptions::default() };
         for img in imgs {
@@ -206,35 +236,45 @@ impl Predictor {
                 return Err(Error::Config("cannot predict an empty image".into()));
             }
         }
-        let boxes: Vec<Letterbox> =
+        let letterboxes: Vec<Letterbox> =
             imgs.iter().map(|i| Letterbox::compute(i.width, i.height, s, s, &opts)).collect();
         // `rect` is only used for one image, so every canvas of a call has the same size.
-        let [w, h] = boxes[0].out;
+        let [w, h] = letterboxes[0].out;
         let plane = (w * h) as usize;
         let mut input = vec![0f32; imgs.len() * 3 * plane];
-        input.par_chunks_mut(3 * plane).zip(imgs.par_iter().zip(&boxes)).for_each(|(dst, (img, lb))| {
-            let canvas = lb.apply(img, folo_data::PAD_VALUE);
-            to_chw(&canvas.data, dst, plane);
-        });
+        input.par_chunks_mut(3 * plane).zip(imgs.par_iter().zip(&letterboxes)).for_each(
+            |(dst, (img, lb))| {
+                let canvas = lb.apply(img, folo_data::PAD_VALUE);
+                to_chw(&canvas.data, dst, plane);
+            },
+        );
         let x = Tensor::from_vec(input, [imgs.len(), 3, h as usize, w as usize])?;
         let device = self.model.device();
-        let x = if device.is_cpu() { x } else { x.to_device(device)? };
-        let pre = ms(t0);
+        let input = if device.is_cpu() { x } else { x.to_device(device)? };
+        let sizes = imgs.iter().map(|i| [i.width, i.height]).collect();
+        Ok(PreparedBatch { input, letterboxes, sizes })
+    }
 
-        let t1 = Instant::now();
+    /// The forward pass of a [`PreparedBatch`] under `no_grad`. On a GPU the result is queued work: nothing
+    /// waits until its outputs are read back.
+    pub fn forward(&self, batch: &PreparedBatch) -> Result<HeadOutput> {
         let _g = no_grad();
-        let out = self.model.forward(&x)?;
-        drop(x);
-        let inf = ms(t1);
+        Ok(self.model.forward(&batch.input)?)
+    }
 
-        // docs/API.md counts the decode as post-processing.
-        let t2 = Instant::now();
-        let decoded = out.decode_images()?;
-        let nc = out.num_classes;
+    /// The last step: class-aware NMS (with the current [`PredictConfig`]) on each image's decoded
+    /// `(boxes, scores)` (from [`HeadOutput::decode_images`] or [`HeadOutput::split_decoded`]), then the boxes
+    /// mapped back through the letterbox into original-image pixels. `nc` is the head's class count.
+    pub fn finish(
+        &self,
+        batch: &PreparedBatch,
+        decoded: Vec<(Vec<Xyxy>, Vec<f32>)>,
+        nc: usize,
+    ) -> Vec<Vec<Detection>> {
         let nms = self.cfg.nms();
-        let dets: Vec<Vec<Detection>> = decoded
+        decoded
             .into_par_iter()
-            .zip(boxes.par_iter())
+            .zip(batch.letterboxes.par_iter())
             .map(|((b, sc), lb)| {
                 non_max_suppression(&b, &sc, nc, &nms)
                     .into_iter()
@@ -244,15 +284,36 @@ impl Predictor {
                     })
                     .collect()
             })
-            .collect();
-        let post = ms(t2);
-        let n = imgs.len() as f64;
-        let timing = Timing::new(pre / n, inf / n, post / n);
-        Ok(imgs
+            .collect()
+    }
+}
+
+/// Letterboxed images and their input tensor ([`Predictor::prepare`]).
+pub struct PreparedBatch {
+    /// `[B, 3, H, W]` in `0..1`, on the model's device.
+    pub input: Tensor,
+    letterboxes: Vec<Letterbox>,
+    sizes: Vec<[u32; 2]>,
+}
+
+impl PreparedBatch {
+    /// Images in the batch.
+    pub fn len(&self) -> usize {
+        self.sizes.len()
+    }
+
+    /// Whether the batch is empty (never, for a batch from [`Predictor::prepare`]).
+    pub fn is_empty(&self) -> bool {
+        self.sizes.is_empty()
+    }
+
+    /// One [`Prediction`] per image from [`Predictor::finish`]'s detections and a per-image timing.
+    pub fn predictions(&self, dets: Vec<Vec<Detection>>, timing: Timing) -> Vec<Prediction> {
+        self.sizes
             .iter()
             .zip(dets)
-            .map(|(img, detections)| Prediction { width: img.width, height: img.height, detections, timing })
-            .collect())
+            .map(|(&[width, height], detections)| Prediction { width, height, detections, timing })
+            .collect()
     }
 }
 

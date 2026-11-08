@@ -838,6 +838,8 @@ impl Trainer {
         if improved {
             let best = weights.join("best.folo");
             let (tmp, mut f) = folo_nn::io::safetensors::create_temp_beside(&best)?;
+            // The file is closed before the rename (on wasm `File` has nothing to close, hence the allow).
+            #[cfg_attr(target_arch = "wasm32", allow(clippy::drop_non_drop))]
             let copied = std::fs::File::open(&last)
                 .and_then(|mut src| std::io::copy(&mut src, &mut f))
                 .and_then(|_| f.sync_all())
