@@ -454,6 +454,21 @@ fn reductions_and_softmax() {
     let ties = Tensor::from_slice(&[1.0f32, 3.0, 3.0, 2.0, 0.0, 0.0], [2, 3]).unwrap();
     check(dev, std::slice::from_ref(&ties), 0.0, 0.0, "max ties", |v| v[0].max(1, false));
     check(dev, &[ties], 0.0, 0.0, "argmax ties", |v| v[0].argmax(1, false));
+    // NaN propagates through max / min on the row, column and split paths, as on the CPU.
+    let mut v = randn(&[3, 4, 9000], 14).to_vec::<f32>().unwrap();
+    for i in [5usize, 9000 * 4 + 17, 9000 * 9 + 8999] {
+        v[i] = f32::NAN;
+    }
+    let nan = Tensor::from_vec(v, [3, 4, 9000]).unwrap();
+    for dims in [vec![2usize], vec![0], vec![1], vec![0, 2]] {
+        let (d1, d2) = (dims.clone(), dims.clone());
+        check(dev, std::slice::from_ref(&nan), 0.0, 0.0, &format!("max with NaN {dims:?}"), move |v| {
+            v[0].detach().max(d1.clone(), false)
+        });
+        check(dev, std::slice::from_ref(&nan), 0.0, 0.0, &format!("min with NaN {dims:?}"), move |v| {
+            v[0].detach().min(d2.clone(), false)
+        });
+    }
     // A long reduction over few outputs takes the two-pass split (BatchNorm statistics at 640x640).
     let long = randn(&[2, 3, 160, 160], 13);
     check(dev, &[long], 2e-3, 1e-4, "bn statistics", |v| v[0].sum([0, 2, 3], false));

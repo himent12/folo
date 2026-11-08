@@ -9,10 +9,13 @@ var<workgroup> partial: array<f32, 256>;
 // The reduction identity (0, -inf or +inf) comes from the host: WGSL constants cannot be infinite.
 fn identity() -> f32 { return pf(5u); }
 
+fn isnan1(v: f32) -> bool { return (bitcast<u32>(v) & 0x7fffffffu) > 0x7f800000u; }
+
+// Max / min propagate NaN explicitly (WGSL's builtins may drop it), as folo-core's CPU reductions do.
 fn combine(a: f32, b: f32) -> f32 {
     switch OP {
-        case 1u: { return max(a, b); }
-        case 2u: { return min(a, b); }
+        case 1u: { if (isnan1(a)) { return a; } if (isnan1(b)) { return b; } return max(a, b); }
+        case 2u: { if (isnan1(a)) { return a; } if (isnan1(b)) { return b; } return min(a, b); }
         default: { return a + b; }
     }
 }
