@@ -27,6 +27,16 @@ async function playgroundResult(/** @type {import('playwright-core').Page} */ pa
   await page.clock.runFor(500);
 }
 
+/** Starts New run on a GPU the mock then reports gone (404 device_not_found) and waits for the Device error. */
+async function unplugGpu(/** @type {import('playwright-core').Page} */ page) {
+  // An <option> is never "visible": wait for it to exist, running the mock's clock meanwhile.
+  for (let t = 0; t < 8000 && !(await page.locator('select#device option[value="gpu:1"]').count()); t += 250) await page.clock.runFor(250);
+  await page.selectOption('select#device', 'gpu:1');
+  await page.locator('form.layout').evaluate((f) => /** @type {HTMLFormElement} */ (f).requestSubmit());
+  await until(page, '#device-error');
+  await page.clock.runFor(1000);
+}
+
 /** @type {Scene[]} */
 export const scenes = [
   { name: 'overview', path: '/', viewports: ['desktop', 'laptop', 'mobile'] },
@@ -73,13 +83,19 @@ export const scenes = [
     // The whole form: the harness shoots from the top, and the message sits at the Device field further down.
     fullPage: true,
     viewports: ['desktop', 'laptop', 'mobile'],
+    setup: unplugGpu,
+  },
+  {
+    // The same on tablet and phone, in the viewport: the dock's Start says why it is off.
+    name: 'run-new-device-dock',
+    path: '/runs/new',
+    search: 'scenario=gpu-unplugged',
+    fullPage: false,
+    viewports: ['tablet', 'mobile'],
     setup: async (page) => {
-      // An <option> is never "visible": wait for it to exist, running the mock's clock meanwhile.
-      for (let t = 0; t < 8000 && !(await page.locator('select#device option[value="gpu:1"]').count()); t += 250) await page.clock.runFor(250);
-      await page.selectOption('select#device', 'gpu:1');
-      await page.locator('form.layout').evaluate((f) => /** @type {HTMLFormElement} */ (f).requestSubmit());
-      await until(page, '#device-error');
-      await page.clock.runFor(1000);
+      await unplugGpu(page);
+      await page.evaluate(() => window.scrollTo(0, 0));
+      await until(page, '#dock-why');
     },
   },
   {

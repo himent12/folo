@@ -1334,6 +1334,10 @@
       gap: var(--space-3);
       padding: var(--space-2) var(--space-4);
     }
+    /* The reason Start is off takes its own row over both columns. */
+    .dock-why {
+      grid-column: 1 / -1;
+    }
     .dock-est {
       position: relative;
       flex-wrap: wrap;
