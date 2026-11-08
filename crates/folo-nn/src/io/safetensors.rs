@@ -334,17 +334,32 @@ fn native_to_le(b: &[u8], size: usize) -> std::borrow::Cow<'_, [u8]> {
     le_to_native(b, size)
 }
 
-/// [`write`] to `path` atomically: the bytes go to `<path>.tmp`, which is then renamed over `path`.
+/// A new, uniquely named file next to `path` (`<path>.<pid>.<n>.tmp`, opened with `create_new`) for atomic
+/// writes. It never truncates an existing file, even one whose name looks temporary.
+pub fn create_temp_beside(path: &Path) -> Result<(std::path::PathBuf, std::fs::File)> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    loop {
+        let mut name = path.as_os_str().to_owned();
+        name.push(format!(".{}.{}.tmp", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+        let tmp = std::path::PathBuf::from(name);
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp) {
+            Ok(f) => return Ok((tmp, f)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(Error::io(&tmp, e)),
+        }
+    }
+}
+
+/// [`write`] to `path` atomically: the bytes go to a fresh temporary file next to it ([`create_temp_beside`]),
+/// which is then renamed over `path`.
 pub fn write_file(
     path: &Path,
     metadata: Option<&BTreeMap<String, String>>,
     tensors: &[(String, Tensor)],
 ) -> Result<()> {
-    let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".tmp");
-    let tmp = std::path::PathBuf::from(tmp);
+    let (tmp, f) = create_temp_beside(path)?;
     let res = (|| {
-        let f = std::fs::File::create(&tmp).map_err(|e| Error::io(&tmp, e))?;
         let mut w = std::io::BufWriter::with_capacity(1 << 20, f);
         write(&mut w, metadata, tensors)?;
         let f = w.into_inner().map_err(|e| Error::io(&tmp, e.into_error()))?;

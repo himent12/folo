@@ -13,22 +13,34 @@
 //!   host copies of the detached head outputs; that read is the loss's only full-size device-to-host transfer.
 //!
 //! On top of folo-core / folo-nn, [`model`] defines the detector family itself (`folo-n/s/m/l/x`, docs/MODEL.md):
-//! blocks, head, forward pass, fusion, raw prediction and `.folo` weight IO.
+//! blocks, head, forward pass, fusion, raw prediction and `.folo` weight IO. With folo-data on top of that:
+//!
+//! - [`train`]: the [`Trainer`] (docs/MODEL.md §8: accumulation, schedule, EMA, clipping, validation,
+//!   checkpoints, early stopping, resume) and its docs/API.md event stream.
+//! - [`val`]: validation of a model on a dataset split.
+//! - [`predict`]: the [`Predictor`] (letterbox, forward, decode, NMS, rescale, with a timing breakdown).
 //!
 //! See `docs/ARCHITECTURE.md` for how this crate fits into FOLO.
 
 pub mod assign;
 pub mod boxes;
 pub mod decode;
+mod error;
 pub mod loss;
 pub mod metrics;
 pub mod model;
 pub mod nms;
+pub mod predict;
+pub mod train;
+pub mod val;
 
 pub use assign::{Assignment, TalConfig};
 pub use boxes::{Cxcywh, IouKind, Letterbox, Xyxy};
 pub use decode::Anchors;
+pub use error::{Error, Result};
 pub use loss::{ImageTargets, LossConfig, LossItems, LossOutput, detection_loss};
 pub use metrics::{EvalConfig, EvalReport, Evaluator, Truth};
 pub use model::{FoloModel, HeadOutput, ModelConfig};
 pub use nms::{Detection, NmsConfig};
+pub use predict::{PredictConfig, Prediction, Predictor};
+pub use train::{TrainConfig, TrainData, TrainOptions, Trainer};

@@ -195,7 +195,7 @@ impl ModelFile {
         // SAFETY: the map is read-only and private to this value. As with every memory-mapped reader
         // (safetensors included), another process truncating or rewriting the file while it is mapped is
         // outside what Rust can guard against; FOLO's own writers never modify a file in place: they write
-        // `<path>.tmp` and rename it over the old file, which leaves an existing mapping intact on Unix and is
+        // a fresh temporary file and rename it over the old file, which leaves an existing mapping intact on Unix and is
         // refused while the file is mapped on Windows.
         let map = unsafe { memmap2::Mmap::map(&f) };
         let bytes = match map {

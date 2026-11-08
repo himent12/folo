@@ -47,24 +47,32 @@ fn doctor_json() {
 
 #[test]
 fn stubs_exit_4_with_error_envelope() {
-    for args in [
-        &["train", "--data", "d", "--json"][..],
-        &["val", "--model", "m.folo", "--data", "d", "--json"],
-        &["predict", "--model", "m.folo", "a.jpg", "--json"],
-        &["export", "--model", "m.folo", "--json"],
-        &["bench", "--json"],
-        &["mcp", "--json"],
-    ] {
+    for args in [&["bench", "--json"][..], &["mcp", "--json"]] {
         let (code, stdout, stderr) = folo(args);
         assert_eq!(code, 4, "{args:?}: {stderr}");
         let v = &json_lines(&stdout)[0];
         assert_eq!(v["error"]["code"], "not_implemented", "{args:?}");
         assert!(v["error"]["hint"].is_string());
     }
-    let (code, stdout, stderr) = folo(&["train", "--data", "d"]);
+    let (code, stdout, stderr) = folo(&["bench"]);
     assert_eq!(code, 4);
     assert!(stdout.is_empty());
     assert!(stderr.contains("not implemented"));
+}
+
+#[test]
+fn missing_files_exit_3() {
+    for (args, code) in [
+        (&["train", "--data", "no/such/dataset", "--json"][..], "dataset_not_found"),
+        (&["val", "--model", "no/such.folo", "--data", "d", "--json"], "model_not_found"),
+        (&["predict", "--model", "no/such.folo", "a.jpg", "--json"], "model_not_found"),
+        (&["export", "--model", "no/such.folo", "--json"], "model_not_found"),
+        (&["train", "--resume", "no/such/last.folo", "--json"], "path_not_found"),
+    ] {
+        let (exit, stdout, stderr) = folo(args);
+        assert_eq!(exit, 3, "{args:?}: {stderr}");
+        assert_eq!(json_lines(&stdout).last().unwrap()["error"]["code"], code, "{args:?}");
+    }
 }
 
 #[test]

@@ -3,7 +3,11 @@
 mod cli;
 mod dataset;
 mod describe;
+mod draw;
+mod engine;
+mod infer;
 mod output;
+mod train;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -81,10 +85,10 @@ fn run(cli: Cli, out: Out) -> Result<(), CliError> {
             Ok(())
         }
         Command::Doctor(args) => doctor(args, out),
-        Command::Train(_) => Err(not_implemented("train", "the trainer (folo-vision)")),
-        Command::Val(_) => Err(not_implemented("val", "evaluation (folo-vision)")),
-        Command::Predict(_) => Err(not_implemented("predict", "the predictor (folo-vision)")),
-        Command::Export(_) => Err(not_implemented("export", "weight export (folo-nn / folo-vision)")),
+        Command::Train(args) => train::train(args, out),
+        Command::Val(args) => infer::val(args, out),
+        Command::Predict(args) => infer::predict(args, out),
+        Command::Export(args) => infer::export(args, out),
         Command::Bench(_) => Err(not_implemented("bench", "the engine")),
         Command::Dataset(cmd) => dataset::run(cmd, out),
         Command::Mcp(_) => Err(not_implemented("mcp", "the MCP server")),

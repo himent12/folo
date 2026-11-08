@@ -283,7 +283,7 @@ pub fn checkpoint_contents(meta: &Metadata, p: &CheckpointParts<'_>) -> Result<F
     Ok((map, tensors))
 }
 
-/// Write a checkpoint to `path` (atomically: `<path>.tmp`, then rename). `meta` supplies the model metadata;
+/// Write a checkpoint to `path` (atomically: a fresh temporary file next to it, then rename). `meta` supplies the model metadata;
 /// its kind is set to `checkpoint` and the checkpoint contracts are filled from `parts`.
 pub fn save_checkpoint(path: impl AsRef<Path>, meta: &Metadata, parts: &CheckpointParts<'_>) -> Result<()> {
     let (map, tensors) = checkpoint_contents(meta, parts)?;
