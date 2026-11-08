@@ -1,5 +1,6 @@
 // The screens and states `npm run shoot` captures. Each scene is shot in every theme × viewport listed
 // (default: dark + light, desktop + mobile). `setup(page)` drives the UI into the state before the shot.
+// `search` adds query params to the page URL (e.g. `scenario=empty` for the mock), next to `mock=1`.
 
 /** @typedef {{ name: string, path: string, themes?: ('dark' | 'light')[], viewports?: ('desktop' | 'laptop' | 'mobile')[], advance?: number, search?: string,
  *   fullPage?: boolean, setup?: (page: import('playwright-core').Page, ctx: { vp: string, theme: string }) => Promise<void> }} Scene */
@@ -25,6 +26,39 @@ export const scenes = [
   { name: 'run-compare', path: '/runs/compare?ids=run_7d1e,run_c19a,run_5be3,run_a2f0', viewports: ['desktop', 'mobile'] },
   { name: 'run-compare-empty', path: '/runs/compare', themes: ['dark'], viewports: ['desktop'] },
   { name: 'run-queued', path: '/runs/run_q4n2', themes: ['dark'], viewports: ['desktop'] },
+  { name: 'datasets-empty', path: '/datasets', search: 'scenario=empty' },
+  {
+    name: 'datasets-add',
+    path: '/datasets',
+    fullPage: false,
+    setup: async (page) => {
+      await page.getByRole('button', { name: 'Add dataset' }).first().click();
+      await page.locator('dialog[open]').waitFor();
+    },
+  },
+  { name: 'dataset-stats', path: '/datasets/ds_shapes_hard?tab=stats' },
+  {
+    name: 'dataset-images',
+    path: '/datasets/ds_fasteners?class=2',
+    fullPage: false,
+    setup: async (page) => {
+      await page.locator('.cell img.loaded').nth(6).waitFor();
+      await page.waitForTimeout(400);
+    },
+  },
+  {
+    name: 'dataset-inspector',
+    path: '/datasets/ds_fasteners',
+    fullPage: false,
+    setup: async (page) => {
+      await page.locator('.cell img.loaded').first().waitFor();
+      await page.locator('.cell').nth(1).click();
+      await page.locator('dialog[open] .stage img.loaded').waitFor();
+      await page.locator('dialog[open] .labels button').nth(1).hover();
+      await page.waitForTimeout(200);
+    },
+  },
+  { name: 'runs', path: '/runs' },
   { name: 'models', path: '/models' },
   { name: 'playground', path: '/playground' },
   { name: 'settings', path: '/settings' },

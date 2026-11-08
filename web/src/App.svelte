@@ -12,6 +12,8 @@
   import Topbar from '$lib/shell/Topbar.svelte';
   import { installShortcuts } from '$lib/shell/shortcuts';
   import Toaster from '$lib/ui/Toaster.svelte';
+  import Dataset from './routes/Dataset.svelte';
+  import Datasets from './routes/Datasets.svelte';
   import NotFound from './routes/NotFound.svelte';
   import Overview from './routes/Overview.svelte';
   import Run from './routes/Run.svelte';
@@ -26,6 +28,8 @@
     run: Run,
     'run-new': RunNew,
     'run-compare': RunCompare,
+    datasets: Datasets,
+    dataset: Dataset,
   };
 
   const titles: Record<string, string> = {
