@@ -19,6 +19,8 @@ so incremental builds stay warm.
 ## Operating the runners
 - Status: `gh api repos/himent12/folo/actions/runners -q '.runners[] | .name + " " + .status'`.
 - Windows (dev PC): start with `Start-Process D:\gha\win\run.cmd -WindowStyle Hidden`. After a reboot, start it again.
+  Prerequisite: Git for Windows' `bin` and `usr\bin` on the runner's PATH (actions such as `dtolnay/rust-toolchain`
+  run bash). It is set in `D:\gha\win\.env` (`PATH=...`), which the runner reads at start.
 - Linux (boat.dev): the sandbox has a TTL (24 h) and is renewed or recreated by the orchestrator. The sandbox id is in
   `~/.folo/gha_linux_sid` on the dev PC. To recreate it: create a `large` sandbox named `folo-gha-linux`, download the
   runner tarball into `~/gha`, `./config.sh --url https://github.com/himent12/folo --token <registration token>
