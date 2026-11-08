@@ -388,6 +388,16 @@ pub fn value_at(points: &[(f32, f32)], hover: Option<f32>, x0: f32, x1: f32) -> 
     }
 }
 
+/// The x the cursor snaps to at `hx`: the first series point within 6 % of the range (the same
+/// rule the cursor painter uses), or None when the cursor is past the data.
+pub fn cursor_x(series: &[Series], hx: f32, span: f32) -> Option<f32> {
+    series.iter().find_map(|s| {
+        let data = if s.smooth > 0.0 { smoothed(&s.points, s.smooth) } else { s.points.clone() };
+        let (x, _) = data[nearest(&data, hx)?];
+        ((x - hx).abs() <= span * 0.06 || s.points.len() <= 1).then_some(x)
+    })
+}
+
 pub fn nearest(points: &[(f32, f32)], x: f32) -> Option<usize> {
     if points.is_empty() {
         return None;
@@ -691,10 +701,7 @@ fn paint_line_chart(
     let chip_x = (!spec.readout && has_data)
         .then_some(spec.hover)
         .flatten()
-        .and_then(|f| {
-            let hx = x0 + (x1 - x0) * f;
-            spec.series.iter().find_map(|s| nearest(&s.points, hx).map(|i| s.points[i].0))
-        })
+        .and_then(|f| cursor_x(&spec.series, x0 + (x1 - x0) * f, x1 - x0))
         .map(sx);
     for v in &xt {
         let x = sx(*v);
@@ -1165,6 +1172,15 @@ mod tests {
         let b = Arc::new(vec![(0.0, 1.0), (1.0, 3.0)]);
         assert!(!Arc::ptr_eq(&s1, &smoothed(&b, 0.5)));
         assert!(!Arc::ptr_eq(&s1, &smoothed(&a, 0.9)));
+    }
+
+    #[test]
+    fn cursor_past_the_data_has_no_chip() {
+        let pts: Vec<(f32, f32)> = (0..=40).map(|i| (i as f32, 0.5)).collect();
+        let s = vec![Series::new("a", gpui::hsla(0., 0., 0., 1.), Arc::new(pts))];
+        // Epoch 100 of 120 with data through 40: no snap, so no tick is hidden.
+        assert_eq!(cursor_x(&s, 100., 120.), None);
+        assert_eq!(cursor_x(&s, 39.6, 120.), Some(40.));
     }
 
     #[test]

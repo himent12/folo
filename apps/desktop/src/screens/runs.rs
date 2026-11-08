@@ -390,7 +390,8 @@ impl FoloApp {
         match data {
             Some(Ok((d, ips, last, prev))) => {
                 let window_w = f32::from(window.viewport_size().width);
-                body = body.child(self.kpi_strip(&r, &ips, last.as_ref(), prev, now, window_w, cx));
+                let short = window.viewport_size().height < px(700.);
+                body = body.child(self.kpi_strip(&r, &ips, last.as_ref(), prev, now, window_w, short, cx));
                 body = body.child(self.run_charts(&r, &d, window, cx));
             }
             Some(Err(Some(e))) => body = body.child(self.error_panel(&e, "run-data-retry", window, cx)),
@@ -461,11 +462,14 @@ impl FoloApp {
         prev: Option<f32>,
         now: i64,
         window_w: f32,
+        short: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let t = theme(cx);
         // One row of five; very narrow windows wrap to two rows, one type step smaller.
         let narrow = window_w < 1000.;
+        // Short or wrapped: 64 px tiles (label and value only) so both primary charts stay on screen.
+        let compact = narrow || short;
         let big = if narrow { ty::XL } else { ty::X2XL };
         let live = r.status == RunStatus::Running;
         // Change since the previous epoch only means something while training.
@@ -501,7 +505,7 @@ impl FoloApp {
                 .min_w_0()
                 .child(caption(&t, label))
                 .child(duration_metric(&t, secs, big, ty::SM))
-                .child(detail)
+                .when(!compact, |d| d.child(detail))
         };
         let time_tile = if live || r.status == RunStatus::Queued {
             duration_tile(
@@ -530,26 +534,30 @@ impl FoloApp {
                 .gap(px(6.))
                 .child(caption(&t, "Epoch"))
                 .child(metric(&t, r.epoch.to_string(), &format!("/ {}", r.epochs), big, ty::SM))
-                .child(div().pt(px(6.)).child(progress(
-                    &t,
-                    r.progress(),
-                    if live { t.accent_fill() } else { t.text_tertiary },
-                    3.,
-                ))),
+                .when(!compact, |d| {
+                    d.child(div().pt(px(6.)).child(progress(
+                        &t,
+                        r.progress(),
+                        if live { t.accent_fill() } else { t.text_tertiary },
+                        3.,
+                    )))
+                }),
             stat(
                 &t,
                 if live { "mAP50-95 · latest" } else { "mAP50-95 · final" },
                 last.map_or("–".into(), |e| f3(e.val.map50_95)),
                 "",
-                delta.or_else(|| {
-                    r.best.as_ref().map(|b| {
-                        text(ty::XS, t.text_tertiary).tnum().child(format!(
-                            "best {} @ {}",
-                            f3(b.map50_95),
-                            b.epoch
-                        ))
+                delta
+                    .or_else(|| {
+                        r.best.as_ref().map(|b| {
+                            text(ty::XS, t.text_tertiary).tnum().child(format!(
+                                "best {} @ {}",
+                                f3(b.map50_95),
+                                b.epoch
+                            ))
+                        })
                     })
-                }),
+                    .filter(|_| !compact),
             ),
             div()
                 .flex()
@@ -573,7 +581,7 @@ impl FoloApp {
                                 .child(last.map_or("–".into(), |e| format!("{:.3}", e.val.recall))),
                         ),
                 )
-                .child(text(ty::XS, t.text_tertiary).child("on the validation split")),
+                .when(!compact, |d| d.child(text(ty::XS, t.text_tertiary).child("on the validation split"))),
             div()
                 .flex()
                 .flex_col()
@@ -597,12 +605,21 @@ impl FoloApp {
                             }),
                         ),
                 )
-                .child(text(ty::XS, t.text_tertiary).tnum().child(
-                    ips_avg.map_or(String::new(), |a| format!("avg {a:.0} · last {} steps", ips.len())),
-                )),
+                .when(!compact, |d| {
+                    d.child(text(ty::XS, t.text_tertiary).tnum().child(
+                        ips_avg.map_or(String::new(), |a| format!("avg {a:.0} · last {} steps", ips.len())),
+                    ))
+                }),
             time_tile,
         ];
-        let tile = |content: gpui::Div| div().flex_1().min_w_0().px(px(16.)).py(px(12.)).child(content);
+        let tile = |content: gpui::Div| {
+            div()
+                .flex_1()
+                .min_w_0()
+                .px(px(16.))
+                .py(px(if compact { 8. } else { 12. }))
+                .child(content.when(compact, |d| d.gap(px(2.))))
+        };
         let per_row = if window_w < 1000. { 3 } else { 5 };
         let mut rows = Vec::new();
         let mut it = tiles.into_iter().peekable();
@@ -674,7 +691,7 @@ impl FoloApp {
         };
         // Short windows keep both primary charts on screen.
         let short = window.viewport_size().height < px(700.);
-        let (primary_h, secondary_h) = if short { (150., 110.) } else { (220., 140.) };
+        let (primary_h, secondary_h) = if short { (140., 110.) } else { (220., 140.) };
         let names = ["box", "cls", "dfl", "total"];
         let colors = t.loss_colors();
         let loss_series: Vec<Series> = (0..4)
@@ -696,6 +713,7 @@ impl FoloApp {
             primary_h,
         );
         map.y_range = Some((0., 1.));
+        map.y_fmt = Some(|v| format!("{v:.2}"));
         if let Some(b) = &r.best {
             map.dots.push((b.epoch as f32, b.map50_95, t.accent_fill()));
         }
@@ -716,11 +734,12 @@ impl FoloApp {
             vec![
                 // One hue for the pair, told apart by dash: no other chart here uses slot 5.
                 Series::new("precision", t.chart_series[5], d.precision.clone()).live(live),
-                Series::new("recall", t.chart_series[5], d.recall.clone()).dashed().live(live),
+                Series::new("recall", t.chart_series[3], d.recall.clone()).dashed().live(live),
             ],
             secondary_h,
         );
         pr.y_range = Some((0., 1.));
+        pr.y_fmt = Some(|v| format!("{v:.2}"));
         pr.y_ticks = 3;
         let mut lr = base(
             "run-lr",
@@ -797,8 +816,16 @@ impl FoloApp {
                 .min_w_0()
                 .flex()
                 .flex_col()
-                .child(panel_header(&t, title).child(caption(&t, sub)))
-                .child(div().h(px(28.)).px(px(10.)).pt(px(6.)).flex().items_center().child(extra))
+                .child(panel_header(&t, title).child(caption(&t, sub)).when(short, |d| d.h(px(32.))))
+                .child(
+                    div()
+                        .h(px(if short { 24. } else { 28. }))
+                        .px(px(10.))
+                        .pt(px(if short { 4. } else { 6. }))
+                        .flex()
+                        .items_center()
+                        .child(extra),
+                )
                 .child(div().px(px(12.)).pb(px(6.)).child(chart))
         };
         let loss_legend = div()
@@ -840,7 +867,7 @@ impl FoloApp {
             .items_center()
             .gap(px(12.))
             .child(crate::ui::legend_value(&t, "precision", t.chart_series[5], false, v(&d.precision, f3v)))
-            .child(crate::ui::legend_value(&t, "recall", t.chart_series[5], true, v(&d.recall, f3v)))
+            .child(crate::ui::legend_value(&t, "recall", t.chart_series[3], true, v(&d.recall, f3v)))
             .into_any_element();
         let lr_legend =
             crate::ui::legend_value(&t, "lr", t.text_tertiary, false, v(&d.lr, |x| format!("{x:.5}")))
@@ -848,14 +875,18 @@ impl FoloApp {
         let _ = chart_block;
         // The mAP chart is the focal point: wider and first. Narrow windows stack each row.
         let stack = window.viewport_size().width < px(1120.);
+        // Narrow and short: the primary pair stays side by side (half each), so Training loss is
+        // on screen with Validation mAP instead of below the fold.
+        let pair_a = stack && short;
         let row = |a: AnyElement, b: AnyElement, ga: f32, gb: f32| {
-            if stack {
+            // A negative weight marks the primary row.
+            if stack && !(pair_a && ga < 0.) {
                 div().flex().flex_col().gap(px(16.)).child(a).child(b)
             } else {
                 div()
                     .flex()
                     .gap(px(16.))
-                    .child(div().flex().min_w_0().flex_grow().flex_basis(gpui::relative(ga)).child(a))
+                    .child(div().flex().min_w_0().flex_grow().flex_basis(gpui::relative(ga.abs())).child(a))
                     .child(div().flex().min_w_0().flex_grow().flex_basis(gpui::relative(gb)).child(b))
             }
         };
@@ -867,8 +898,8 @@ impl FoloApp {
                 card("Validation mAP", "per epoch", map_legend, line_chart(&t, map)).into_any_element(),
                 card("Training loss", "smoothed · EMA 0.94", loss_legend, line_chart(&t, loss))
                     .into_any_element(),
-                0.6,
-                0.4,
+                if pair_a { -0.5 } else { -0.6 },
+                if pair_a { 0.5 } else { 0.4 },
             ))
             .child(row(
                 card("Precision and recall", "validation", pr_legend, line_chart(&t, pr)).into_any_element(),
@@ -1048,11 +1079,11 @@ impl FoloApp {
             let max = self.log_scroll.max_offset().height;
             max - (-self.log_scroll.offset().y) < px(24.)
         };
-        let n_lines = self.store.logs.get(&r.id).and_then(|l| l.ready()).map_or(0, |l| l.len());
-        if at_bottom && n_lines != self.log_seen {
+        let rev = self.store.log_rev;
+        if at_bottom && rev != self.log_seen {
             self.log_scroll.scroll_to_bottom();
         }
-        self.log_seen = n_lines;
+        self.log_seen = rev;
         let follow = if r.status != RunStatus::Running {
             div().into_any_element()
         } else if at_bottom {

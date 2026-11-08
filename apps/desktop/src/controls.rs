@@ -671,8 +671,11 @@ impl FoloApp {
                     match key {
                         "nr-epochs" => {
                             f.epochs = q(10. + frac * 290., 5.);
+                            f.epochs_invalid = false;
                             let (input, v) = (f.epochs_input.clone(), format!("{:.0}", f.epochs));
                             input.update(cx, |i, cx| i.set_text(v, cx));
+                            let close = f.close_input.read(cx).text();
+                            f.check_close(&close);
                         }
                         "nr-lr0" => {
                             f.lr0 = q(0.001 + frac * 0.049, 0.001);
@@ -685,7 +688,8 @@ impl FoloApp {
                         "nr-close" => {
                             f.close_mosaic = q(frac * 30., 1.);
                             let (input, v) = (f.close_input.clone(), format!("{:.0}", f.close_mosaic));
-                            input.update(cx, |i, cx| i.set_text(v, cx));
+                            input.update(cx, |i, cx| i.set_text(v.clone(), cx));
+                            f.check_close(&v);
                         }
                         "nr-scale" => f.scale = q(frac * 0.9, 0.05),
                         _ => {}

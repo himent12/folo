@@ -224,16 +224,26 @@ impl FoloApp {
             let el = div()
                 .id(SharedString::from(key.to_string()))
                 .h(px(32.))
-                .px(px(2.))
                 .flex()
                 .items_center()
                 .border_b_2()
                 .border_color(if on { t.text_primary } else { gpui::transparent_black() })
                 .cursor_pointer()
                 .child(
-                    text(ty::BASE, if on { t.text_primary } else { t.text_secondary })
-                        .font_weight(FontWeight::MEDIUM)
-                        .child(label.to_string()),
+                    div()
+                        .id(SharedString::from(format!("{key}-in")))
+                        .h(px(26.))
+                        .px(px(6.))
+                        .flex()
+                        .items_center()
+                        .rounded(px(radius::SM))
+                        .hover(|s| s.bg(t.bg_hover))
+                        .active(|s| s.bg(t.bg_active))
+                        .child(
+                            text(ty::BASE, if on { t.text_primary } else { t.text_secondary })
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(label.to_string()),
+                        ),
                 );
             this.bind(
                 el,
@@ -250,7 +260,7 @@ impl FoloApp {
         let on_images = self.ds_tab == DsTab::Images;
         let tabs = div()
             .flex()
-            .gap(px(20.))
+            .gap(px(12.))
             .child(tab(self, "ds-tab-images", "Images", on_images, DsTab::Images, window, cx))
             .child(tab(self, "ds-tab-stats", "Statistics", !on_images, DsTab::Statistics, window, cx));
         let content = match self.ds_tab {
@@ -539,10 +549,16 @@ impl FoloApp {
                 cx.notify();
             }),
         );
+        let (total, of) = match self.ds_split {
+            Some(Split::Train) => (ds.splits.train as usize, "train images"),
+            Some(Split::Val) => (ds.splits.val as usize, "val images"),
+            Some(Split::Test) => (ds.splits.test as usize, "test images"),
+            None => (total, "images"),
+        };
         let count_label = if count == total {
-            format!("{} images", int(total as u64))
+            format!("{} {of}", int(total as u64))
         } else {
-            format!("{} of {} images match", int(count as u64), int(total as u64))
+            format!("{} of {} {of} match", int(count as u64), int(total as u64))
         };
         // The split filter joins the view controls on the tab line; the class chips get one row
         // below it, with the result count at its end.

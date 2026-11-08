@@ -103,7 +103,8 @@ impl FoloApp {
             None => self.idle_panel(window, cx),
         };
         // With a live run the machine sits in the hero's footer; otherwise a slim strip says it.
-        let strip = if live.is_none() { Some(self.system_strip(cx)) } else { None };
+        // While runs load, the hero skeleton already reserves the machine footer.
+        let strip = (live.is_none() && !self.store.runs.is_loading()).then(|| self.system_strip(cx));
         let recent = self.recent_runs(window, cx);
         let models = self.top_models(window, cx);
         let datasets = self.dataset_strip(window, cx);
@@ -191,7 +192,8 @@ impl FoloApp {
                 map.x_range = Some((0., total));
                 map.x_int = true;
                 map.y_range = Some((0., 1.));
-                map.y_ticks = 2;
+                map.y_ticks = 4;
+                map.y_fmt = Some(|v| format!("{v:.2}"));
                 map.height = hero_h + 48.;
                 map.hover = hover;
                 map.on_hover = Some(on_hover);
@@ -312,12 +314,6 @@ impl FoloApp {
                             .truncate()
                             .child(format!("{ds} · {} · {device} · {started}", r.config.arch.as_str())),
                     )
-                    .child(
-                        text(ty::XS, t.text_secondary)
-                            .flex_none()
-                            .tnum()
-                            .child(format!("{:.0}%", r.progress() * 100.)),
-                    )
                     .child(open),
             )
             // Progress as a hairline rail across the panel.
@@ -402,7 +398,9 @@ impl FoloApp {
     fn idle_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
         if self.store.runs.is_loading() {
-            // Same anatomy as the live panel: header, rail, 2×2 KPIs beside one chart, meter footer.
+            // Same anatomy and heights as the live panel: header, rail, 2×2 KPIs beside the chart
+            // (its title row, then the plot), meter footer. Nothing below moves when data lands.
+            let hero_h = if window.viewport_size().height < px(700.) { 100. } else { 132. };
             let sk = |id: &str| skeleton(&t, id.to_string());
             return panel(&t)
                 .flex_1()
@@ -429,7 +427,15 @@ impl FoloApp {
                                 }))
                             }),
                         ))
-                        .child(div().flex_1().h(px(180.)).child(sk("hero-chart"))),
+                        .child(
+                            div()
+                                .flex_1()
+                                .flex()
+                                .flex_col()
+                                .gap(px(4.))
+                                .child(div().h(px(20.)).w(px(120.)).child(sk("hero-chart-title")))
+                                .child(div().h(px(hero_h + 48.)).child(sk("hero-chart"))),
+                        ),
                 )
                 .child(div().h(px(36.)).border_t_1().border_color(t.line_subtle))
                 .into_any_element();
@@ -679,7 +685,6 @@ impl FoloApp {
                         let id = m.id.clone();
                         let key = format!("ov-model-{}", m.id);
                         let map = m.metrics.as_ref().map_or(0., |m| m.map50_95);
-                        let (p, pu) = count_si(m.params);
                         let row = div()
                             .id(SharedString::from(key.clone()))
                             .h(px(36.))
@@ -700,8 +705,9 @@ impl FoloApp {
                                     .child(m.name.clone()),
                             )
                             .child(div().flex_1().min_w_0().when(wide, |d| {
-                                d.child(text(ty::XS, t.text_tertiary).whitespace_nowrap().child(format!(
-                                    "{} · {} px · {p}{pu}",
+                                // Architecture and size only: the parameter count didn't fit the column.
+                                d.child(text(ty::XS, t.text_tertiary).w(px(88.)).truncate().child(format!(
+                                    "{} · {} px",
                                     m.arch.as_str(),
                                     m.imgsz
                                 )))
@@ -721,7 +727,15 @@ impl FoloApp {
             }
             _ => loading_rows(&t, "ov-models", 4).into_any_element(),
         };
-        panel(&t).flex_1().flex().flex_col().child(header).child(body).into_any_element()
+        panel(&t)
+            .flex_1()
+            .min_w_0()
+            .overflow_hidden()
+            .flex()
+            .flex_col()
+            .child(header)
+            .child(body)
+            .into_any_element()
     }
 
     fn dataset_strip(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {

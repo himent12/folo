@@ -448,3 +448,45 @@ Round 13 changes:
   - Grid tiles show a hover edge.
   - Taller palette and log edge fades.
   - Tabular Geist for coordinates and number fields.
+
+## Round 13
+
+| Line | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | avg |
+|------|---|---|---|---|---|---|---|---|---|----|----|----|-----|
+| Opus 5.5 | 8 | 8 | 8 | 7 | 8 | 8 | 8 | 8 | 8 | 9 | 8 | 8 | 8.0 |
+| GPT-6.1 Sol | 8 | 9 | 9 | 8 | 8 | 8 | 8 | 8 | 8 | 8 | 7 | 8 | 8.2 |
+
+The seams from round 12 were closed. What was left was mostly measurable and local:
+- Models table columns overflowed at narrow and default widths, and headers sat 3–7 px off their values (header cells could shrink).
+- PR isolation could stick after focus left. Export had its own menu rules.
+- The evaluation row pushed the per-class table below the fold. Errors above 20 % shared one colour.
+- At 960 × 620 the run dashboard showed only one primary chart.
+- Loading Overview had a separate system strip, so the page jumped 44 px.
+- 0–1 axes used three different tick schemes. The PR legend wrapped and never named AP50.
+- Best models overflowed its column at wide sizes.
+- Precision and recall shared one hue.
+
+Round 14 changes:
+- **Models table:**
+  - Header and value cells share a flush-right fixed cell, and header cells no longer shrink.
+  - Params drops below 1360 px, From run below 1240.
+  - mAP50-95, Size and Created sort (click or Enter, 12 px chevron).
+- **Model page:**
+  - The KPI strip shares caption, value and detail lines, and Precision and Recall gain detail lines.
+  - The PR legend is a list beside the plot ("Class / AP50", best first).
+  - Hover and focus isolate a class temporarily; Enter or a click pins it, derived at render.
+  - Confusion errors use a continuous square-root ramp over 0–100 %, with a key. "<1%" and zero cells are neutral.
+  - 32 px cells, and the table head doubles as its title, so four class rows sit above the fold at 1280 × 800.
+- **Export:** a select-style menu with arrows, Home/End and Enter, closed by Escape, Tab or a click outside.
+- **Run dashboard:** short or narrow windows get 64 px KPI tiles, 32 px chart headers and 140 px plots, and the primary pair stays side by side. Recall has its own hue.
+- **Axes:** every 0–1 axis uses 0.25 steps with two decimals (three ticks on small charts).
+- **Overview:**
+  - The loading hero has the loaded hero's geometry and no separate strip.
+  - The header drops the duplicate percentage.
+  - Best models is clipped to its column.
+- **Datasets:** tabs have hover and pressed states, and the filter count is per split ("564 of 800 val images match").
+- **Playground:** the detections list has Class, Size (px) and Confidence labels.
+- **Code review of #43:**
+  - Close mosaic revalidates when the epochs change.
+  - Tick labels give way only to a chip that is actually drawn.
+  - Log following tracks a revision, so it keeps following at the 2,000-line cap.
