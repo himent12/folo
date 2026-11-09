@@ -498,8 +498,9 @@
         <span class="v num">{v === null ? '—' : metric(v)}{#if runEnd(r.status)}<span class="st"><span class="sep">{' · '}</span>{runEnd(r.status)}</span>{/if}</span>
         <!-- How the run started: fine-tuned vs from scratch often explains a gap between two curves. It lies over the
              toggle's lower half (clicks pass through to it) and runs on under the value. Phones show it only in Edit,
-             on a full-width line of its own. -->
-        <span class="from" class:tuned={!!from} title={startLine(r)}>{#if from}Fine-tuned from <Ident value={from} class="src" />{:else}From scratch{/if}</span>
+             on a full-width line of its own. "From <checkpoint>" (the tooltip says "Fine-tuned from"): the checkpoint
+             is an identifier, a fact, so it is never cut; a narrow chip breaks it after a hyphen onto a second line. -->
+        <span class="from" class:tuned={!!from} title={startLine(r)} data-fact>{#if from}From <Ident value={from} class="src" />{:else}From scratch{/if}</span>
         <span class="acts">
           <a class="open" href={href(`/runs/${r.id}`)} aria-label="Open {r.name}" title="Open run"><ArrowUpRight size={12} /></a>
           <button class="rm" aria-label="Remove {r.name}" onclick={() => setIds(ids.filter((id) => id !== r.id))}><X size={12} /></button>
@@ -687,16 +688,15 @@
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
     color: var(--text-tertiary);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
   .from.tuned {
     color: var(--text-secondary);
   }
+  /* Breaks only after a hyphen (fasteners-n-/best), never mid-word and never with an ellipsis. */
   .from :global(.ident) {
     font-size: var(--type-sm-size);
-    white-space: nowrap;
+    overflow-wrap: normal;
+    word-break: normal;
   }
   .acts {
     grid-column: 3;

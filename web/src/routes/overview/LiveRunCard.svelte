@@ -295,6 +295,14 @@
     header {
       padding: var(--space-3) var(--space-3) var(--space-2) var(--space-4);
     }
+    /* The meta line runs under the CTA too: beside it, "dataset · arch · 640 px · batch 16" left "batch 16" alone on a
+       second line at 390 px (round 23). Open run stays on the title's row. */
+    .cta {
+      grid-row: 1;
+    }
+    .meta {
+      grid-column: 1 / -1;
+    }
     .meta :global(.dev),
     .meta > span:last-child:not(:first-child) {
       display: none;
