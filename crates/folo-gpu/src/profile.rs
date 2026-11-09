@@ -144,9 +144,8 @@ impl Profiler {
         slice.map_async(wgpu::MapMode::Read, |_| {});
         let _ = device.poll(wgpu::PollType::wait_indefinitely());
         if let Ok(view) = slice.get_mapped_range() {
-            let ticks: Vec<u64> =
-                view.chunks_exact(8).map(|c| u64::from_le_bytes(c.try_into().unwrap())).collect();
-            for (label, t) in self.labels.drain(..).zip(ticks.chunks_exact(2)) {
+            let ticks: Vec<u64> = view.as_chunks::<8>().0.iter().map(|c| u64::from_le_bytes(*c)).collect();
+            for (label, t) in self.labels.drain(..).zip(ticks.as_chunks::<2>().0) {
                 let ms = t[1].saturating_sub(t[0]) as f64 * self.period * 1e-6;
                 let e = self.totals.entry(label).or_default();
                 e.0 += 1;
