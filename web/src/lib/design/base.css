@@ -344,13 +344,9 @@ table {
  * component-scoped rule cannot reach a header rendered by ui/SortHeader, and the values then slide under the wrong
  * headings). Put the same class on the <th> and on every <td> of the column, the loading skeleton's too. Never define
  * these in a component.
- *   .hide-xl  below 1440     .hide-lg  below 1280     .hide-md  below 1024     .hide-sm  below 768 (phones)
+ * One class per layout tier (design/README.md), so a column shows or hides at the same widths on every page:
+ *   .hide-lg  below 1280 (laptops)     .hide-md  below 1024 (tablets)     .hide-sm  below 768 (phones)
  */
-@media (max-width: 1439px) {
-  .table :is(th, td).hide-xl {
-    display: none;
-  }
-}
 @media (max-width: 1279px) {
   .table :is(th, td).hide-lg {
     display: none;
@@ -364,6 +360,53 @@ table {
 @media (max-width: 767px) {
   .table :is(th, td).hide-sm {
     display: none;
+  }
+}
+
+/*
+ * List toolbars (Runs, Models, Datasets): one structure per tier, its slots always in this order, any of them optional:
+ *   .lt-filter  status or dataset chips (a picker on phones where chips cannot fit)
+ *   .lt-count   what the list holds ("5 models · 65.5 MiB"), next to the filter field
+ *   .lt-search  the filter field
+ * Laptops and desktops: one row, the chips on the left, the count and a 280 px field on the right.
+ * Tablets and phones: two rows, the chips and the count, then the field across the full width.
+ * Without chips the count leads its row.
+ */
+.list-toolbar {
+  display: grid;
+  grid-template-columns: minmax(0, max-content) minmax(max-content, 1fr) auto;
+  grid-template-areas: 'filter count search';
+  align-items: center;
+  column-gap: var(--space-4);
+  row-gap: var(--space-3);
+}
+.list-toolbar .lt-filter {
+  grid-area: filter;
+  min-width: 0;
+}
+.list-toolbar .lt-count {
+  grid-area: count;
+  justify-self: end;
+  font-size: var(--type-sm-size);
+  line-height: var(--type-sm-line);
+  color: var(--text-tertiary);
+  white-space: nowrap;
+}
+.list-toolbar:not(:has(.lt-filter)) .lt-count {
+  grid-column: 1 / 3;
+  justify-self: start;
+}
+.list-toolbar .lt-search {
+  grid-area: search;
+  width: 280px;
+}
+@media (max-width: 1023px) {
+  .list-toolbar {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas: 'filter count' 'search search';
+  }
+  .list-toolbar .lt-search {
+    width: auto;
   }
 }
 

@@ -79,13 +79,13 @@
   {/snippet}
 
   {#if !datasets.error && (!datasets.data || datasets.data.length > 0)}
-    <div class="toolbar">
-      <span class="count num">
+    <div class="list-toolbar">
+      <span class="lt-count num">
         {#if datasets.data}
           {datasets.data.length} {datasets.data.length === 1 ? 'dataset' : 'datasets'} · {num(totals.images)} images · {num(totals.boxes)} boxes
         {:else}<Skeleton inline w="200px" h="10px" />{/if}
       </span>
-      <div class="search"><Input bind:value={query} icon={Search} placeholder="Filter by name or path" aria-label="Filter datasets" type="search" /></div>
+      <div class="lt-search"><Input bind:value={query} icon={Search} placeholder="Filter by name or path" aria-label="Filter datasets" type="search" /></div>
     </div>
   {/if}
 
@@ -184,21 +184,6 @@
   .scroll {
     overflow-x: auto;
   }
-  .toolbar {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--space-3);
-    flex-wrap: wrap;
-  }
-  .count {
-    font-size: var(--type-sm-size);
-    color: var(--text-tertiary);
-  }
-  .search {
-    width: 280px;
-    max-width: 100%;
-  }
   /* The path takes what the row has left, cut with an ellipsis (the full path is in the title). */
   .path-cell {
     width: 100%;
@@ -219,9 +204,6 @@
     .scroll:not(.state),
     .scroll.state thead {
       display: none;
-    }
-    .search {
-      width: 100%;
     }
     .rows .name {
       font-weight: var(--weight-medium);

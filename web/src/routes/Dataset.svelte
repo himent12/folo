@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { MediaQuery } from 'svelte/reactivity';
   import ArrowLeft from '@lucide/svelte/icons/arrow-left';
   import Copy from '@lucide/svelte/icons/copy';
   import ImageOff from '@lucide/svelte/icons/image-off';
@@ -31,6 +32,7 @@
   import Inspector from './dataset/Inspector.svelte';
   import { ImagePager } from './dataset/pager.svelte';
   import StatsTab from './dataset/StatsTab.svelte';
+  import { media } from '$lib/design/tokens';
 
   type Tab = 'images' | 'stats';
   type SplitFilter = 'all' | Split;
@@ -114,14 +116,8 @@
   }
 
   // Phones get their own header and toolbar: one meta line, an icon Train button, and a one-row image toolbar.
-  const PHONE = '(max-width: 767px)';
-  let phone = $state(typeof matchMedia !== 'undefined' && matchMedia(PHONE).matches);
-  $effect(() => {
-    const mq = matchMedia(PHONE);
-    const on = () => (phone = mq.matches);
-    mq.addEventListener('change', on);
-    return () => mq.removeEventListener('change', on);
-  });
+  const phoneQuery = new MediaQuery(media.phone, false);
+  const phone = $derived(phoneQuery.current);
 
   // ---------- header actions ----------
   async function copyPath() {

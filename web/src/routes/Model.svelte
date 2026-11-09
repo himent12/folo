@@ -31,6 +31,7 @@
   import { origin } from '$lib/lineage';
   import PrCurves from './model/PrCurves.svelte';
   import { MODEL_SECTIONS, prView, sectionShown, type ModelSection } from './model/sections';
+  import { media } from '$lib/design/tokens';
 
   const id = $derived(router.route.params.id ?? '');
   const model = new Resource((s) => hub.api.model(id, s));
@@ -103,11 +104,11 @@
   // sideways, so the background column starts out of view).
   let matrixView = $state<ConfusionMatrix>();
   let exportOpen = $state(false);
-  // Up to 1199 px the rail stacks under the PR panel: the details fold into one line so the matrix follows soon.
-  const narrow = new MediaQuery('max-width: 1199px', false);
+  // Below the desktop tier the rail stacks under the PR panel: the details fold into one line so the matrix follows soon.
+  const narrow = new MediaQuery(media.upToLaptop, false);
   let detailsOpen = $state(false);
   // Phones: after the headline metrics, one section at a time (as on the run page) instead of a 4,000 px column.
-  const phone = new MediaQuery('max-width: 767px', false);
+  const phone = new MediaQuery(media.phone, false);
   let section = $state<ModelSection>('curves');
   const showing = (part: ModelSection) => sectionShown(phone.current, section, part);
 
@@ -931,7 +932,7 @@
     gap: var(--space-5);
     min-width: 0;
   }
-  @media (max-width: 1199px) {
+  @media (max-width: 1279px) {
     .cm-layout {
       grid-template-columns: minmax(0, 1fr);
       grid-template-areas: 'main' 'rail';
@@ -1187,10 +1188,13 @@
     font-size: var(--type-sm-size);
     color: var(--text-secondary);
   }
-  @media (max-width: 1199px) {
+  @media (max-width: 1279px) {
     .k-body {
       grid-template-columns: minmax(0, 1fr);
     }
+  }
+  /* Tablets and phones: the rail stacks under the main column (as on Run and New run). */
+  @media (max-width: 1023px) {
     .detail {
       grid-template-columns: minmax(0, 1fr);
       align-items: start;

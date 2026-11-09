@@ -603,7 +603,7 @@
     border-radius: var(--radius-md);
     background: color-mix(in srgb, var(--bg-overlay) 82%, transparent);
     backdrop-filter: blur(6px);
-    font-size: var(--type-xs-size);
+    font-size: var(--type-sm-size);
     color: var(--text-tertiary);
     pointer-events: none;
   }
@@ -820,8 +820,8 @@
       height: 44px;
     }
     .touch-hint {
-      font-size: var(--type-xs-size);
-      line-height: var(--type-xs-line);
+      font-size: var(--type-sm-size);
+      line-height: var(--type-sm-line);
       color: var(--text-tertiary);
     }
     aside {

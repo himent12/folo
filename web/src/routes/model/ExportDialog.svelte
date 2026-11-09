@@ -315,7 +315,7 @@
   }
   .ext {
     color: var(--text-tertiary);
-    font-size: var(--type-xs-size);
+    font-size: var(--type-sm-size);
   }
   .est {
     margin-left: auto;

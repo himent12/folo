@@ -28,12 +28,31 @@ live state and the primary action; status colours for status; the class palette 
   (only identifiers, paths, filenames, logs, CLI and JSON), weights 400 / 500 / 600 only. A config value is mono only
   when it is an identifier (`folo-s`, a weights path); prose values ("from scratch", "auto") stay in Geist.
   Files (OFL, `fonts/OFL.txt`): `fonts/<Name>-<Weight>.ttf` for desktop and `.woff2` for web.
-- Base UI text is `base` (13 / 20). The scale: `micro` 10 (uppercase overlines, +0.06 em), `xs` 11, `sm` 12, `base`
-  13, `md` 14, `lg` 16, `xl` 20 (page titles), `2xl` 24, `3xl` 32 (headline metrics), `4xl` 44 (hero metric).
-  Larger steps tighten tracking.
+- Base UI text is `base` (13 / 20). The scale: `micro` 10, `xs` 11, `sm` 12, `base` 13, `md` 14, `lg` 16, `xl` 20 (page
+  titles), `2xl` 24, `3xl` 32 (headline metrics), `4xl` 44 (hero metric). Larger steps tighten tracking.
+- **Text-size floor: 12 px (`sm`).** Sentences, labels, captions, hints, dialog text, table cells, legends and readouts
+  are never smaller. `xs` (11) is for chart tick labels only; `micro` (10) only for label chips drawn on images and
+  keycaps' secondary marks. Studio's `npm run check` fails on any use of either step without a `small:` annotation
+  naming which (`web/scripts/lint-spacing.mjs`).
 - Every metric uses tabular numerals (`font-variant-numeric: tabular-nums`, OpenType `tnum`), so counters that tick
   live never jitter. Units and secondary parts of a number (`%`, `ms`, `/100`) are set one step smaller in
   `text.tertiary`.
+
+## Layout tiers
+Four viewport tiers (`breakpoint` in `tokens.json`; a tier starts at its width). Layouts change only at these
+boundaries, and each tier has one structure per page:
+
+| Tier | Width | Nav | Columns and rails | Dialogs | Toolbars and KPI rows |
+|---|---|---|---|---|---|
+| Phone | < 768 | top bar (title, back) + bottom tab bar | one column; rails and secondary panels become sections behind a picker | bottom sheets | list toolbars two rows (filter and count, then the field); KPI rows 2 × 2 or a picker |
+| Tablet | 768–1023 | icon sidebar (56 px) | one column; rails stack under the main column or become sections behind a picker | centred | list toolbars two rows; Run's metrics a picker in the chart header; short KPI captions |
+| Laptop | 1024–1279 | icon sidebar (opens over the page) | main column + sticky rail (Run, Model, New run, Playground, Settings) | centred | one row; Run's six metric tabs compact (20 px values) |
+| Desktop | ≥ 1280 (designed at 1440) | full sidebar (232 px, collapsible) | the same main + rail, wider panels side by side (Overview's Recent runs and Best models) | centred | one row; full-size tabs (24 px values); every table column |
+
+The web writes them as `(min-width: 768px)` / `(max-width: 767px)` (and 1024 / 1279, 1280 / 1279); `npm run tokens`
+exports the same queries as `media` in `tokens.ts` for script. A component that needs a threshold of its own (a panel
+whose content, not the viewport, decides) uses a container query or an intrinsic layout (`auto-fit`, `minmax`), with a
+comment saying why; `lint-spacing.mjs` rejects any other media width.
 
 ## Space and shape
 - 4 px grid (`space`): 2 / 4 / 6 / 8 / 12 / 16 / 20 / 24 / 32 / 40 / 48 / 64. Paddings inside panels are 16 (12 when

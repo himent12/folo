@@ -155,8 +155,9 @@
   {#snippet subPhone()}<span>Ranked per evaluation dataset.</span>{/snippet}
 
   {#if !models.error && (!models.data || models.data.length > 0)}
-    <!-- One row where it fits; narrower, two rows: the dataset chips, then the count and the filter on the right. -->
-    <div class="toolbar-frame"><div class="toolbar">
+    <!-- The list toolbar (base.css): one row on laptops and up; tablets and phones put the filter field on a row of its own. -->
+    <div class="list-toolbar">
+      <div class="lt-filter">
       {#if models.data}
         <div class="seg" data-scrolls><Segmented label="Evaluation dataset" bind:value={dsFilter} options={dsOptions} /></div>
         <!-- Phones: every dataset in a native picker; a strip that scrolls sideways hides the last ones. -->
@@ -172,13 +173,12 @@
           <span class="ctl-sk"><Skeleton h="100%" r="var(--radius-md)" /></span>
         </div>
       {/if}
-      <div class="end">
-        <span class="count num">
+      </div>
+        <span class="lt-count num">
           {#if models.data}{models.data.length} {models.data.length === 1 ? 'model' : 'models'} · {bytes(totalBytes, prefs.units)}{:else}<Skeleton inline w="104px" h="10px" />{/if}
         </span>
-        <div class="search"><Input bind:value={query} icon={Search} placeholder="Filter by name, arch or run" aria-label="Filter models" type="search" /></div>
-      </div>
-    </div></div>
+        <div class="lt-search"><Input bind:value={query} icon={Search} placeholder="Filter by name, arch or run" aria-label="Filter models" type="search" /></div>
+    </div>
   {/if}
 
   <Panel pad="none">
@@ -339,35 +339,6 @@
 </Page>
 
 <style>
-  .toolbar-frame {
-    container-type: inline-size;
-  }
-  .toolbar {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--space-3);
-    flex-wrap: wrap;
-  }
-  /* Too narrow for chips, count and filter on one line (820 px, or a wide sidebar at 1024): two deliberate rows rather
-     than a wrap that strands the count and the filter on a half-empty second line. The chips scroll sideways if they
-     must. */
-  @container (max-width: 879px) {
-    .toolbar {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr);
-    }
-    .seg {
-      justify-self: start;
-    }
-    .end {
-      justify-content: flex-end;
-    }
-  }
-  .search {
-    width: 280px;
-    max-width: 100%;
-  }
   .seg {
     max-width: 100%;
     overflow-x: auto;
@@ -441,16 +412,6 @@
   }
   .src {
     color: var(--text-secondary);
-  }
-  .end {
-    display: flex;
-    align-items: center;
-    gap: var(--space-4);
-  }
-  .count {
-    font-size: var(--type-sm-size);
-    color: var(--text-tertiary);
-    white-space: nowrap;
   }
   /* The engine benchmarks: a collapsed row with a one-line summary; the comparison opens beneath it. */
   .bench {
@@ -536,12 +497,6 @@
     .scroll.state thead {
       display: none;
     }
-    .end {
-      width: 100%;
-      flex-direction: column-reverse;
-      align-items: stretch;
-      gap: var(--space-2);
-    }
     /* The summary wraps under the title, on the title's edge (past the chevron). */
     .b-sum {
       flex-basis: 100%;
@@ -559,9 +514,6 @@
     }
     .ds-pick {
       display: flex;
-    }
-    .search {
-      width: 100%;
     }
     .m-group {
       display: flex;

@@ -15,6 +15,7 @@
 </script>
 
 <script lang="ts">
+  import { MediaQuery } from 'svelte/reactivity';
   /**
    * The run's metrics as one instrument: the epoch progress, a row of KPI tabs (each with its current value) and the one
    * chart the selected tab names. A single run is drawn in ink (primary metric in text.primary, secondary ones
@@ -34,6 +35,7 @@
   import { duration, eta, metric, num } from '$lib/format';
   import Segmented from '$lib/ui/Segmented.svelte';
   import Select from '$lib/ui/Select.svelte';
+  import { media } from '$lib/design/tokens';
 
   let {
     run,
@@ -64,13 +66,8 @@
   // Phones (< 768 px) turn the six tabs into one metric picker in the chart header, where it replaces the title, and
   // get a shorter plot, so the samples start within the first screen. Tablets keep the tabs (scrolling sideways when
   // a value needs it), as on laptops and desktops.
-  let narrow = $state(typeof matchMedia !== 'undefined' && matchMedia('(max-width: 767px)').matches);
-  $effect(() => {
-    const phone = matchMedia('(max-width: 767px)');
-    const on = () => (narrow = phone.matches);
-    phone.addEventListener('change', on);
-    return () => phone.removeEventListener('change', on);
-  });
+  const phoneQuery = new MediaQuery(media.phone, false);
+  const narrow = $derived(phoneQuery.current);
   // Phones: a queued run's plot is the axes and one line, folded until asked for. An ended run that learned almost
   // nothing (its best mAP50-95 sits under the 0–1 axis's lowest top, ../../lib/charts/domain UNIT_MIN_TOP) gets a
   // shorter plot on every tab, so its few low samples are not a thin line along the floor of a 320 px frame.
@@ -311,7 +308,7 @@
   }
 </script>
 
-<!-- A power of ten as "× 10" with a real 11 px superscript; other units as they are. -->
+<!-- A power of ten as "× 10" with a real 12 px superscript; other units as they are. -->
 {#snippet unitOf(t: TabDef)}
   {#if t.exp}<span class="unit" aria-label={t.unit}>× 10<sup class="exp">{t.exp}</sup></span>{:else}<span class="unit">{t.unit}</span>{/if}
 {/snippet}
@@ -422,7 +419,7 @@
               yTickValues={fit && !fit.log ? fit.ticks : undefined}
               yLog={tab === 'loss' && scale === 'log'}
               yFormat={tab === 'lr' ? (v) => String(+(v / 10 ** lrExp).toFixed(2)) : undefined}
-              valueFormat={tab === 'lr' ? (v) => fmtLr(v) : tab === 'ips' ? (v) => `${num(v, 0)} img/s` : (v) => metric(v)}
+              valueFormat={tab === 'lr' ? (v) => (v / 10 ** lrExp).toFixed(2) : tab === 'ips' ? (v) => `${num(v, 0)} img/s` : (v) => metric(v)}
               xTitle={epochTitle}
               curve={unit ? 'monotone' : 'linear'}
               markers={best}
@@ -465,11 +462,14 @@
     padding: var(--space-3) var(--space-4);
     border-bottom: 1px solid var(--line-subtle);
   }
-  /* Each tab is at least as wide as its value and caption, so no value is ever cut off; spare width is shared. */
+  /* Each tab is at least as wide as its value and caption, so no value is ever cut off; spare width is shared. Every
+     tier is sized to fit all six; a sideways scroll is only the fallback for values far wider than real ones. */
   .tabs {
     display: grid;
     grid-template-columns: repeat(6, minmax(max-content, 1fr));
     min-width: 0;
+    overflow-x: auto;
+    scrollbar-width: none;
   }
   .tab {
     position: relative;
@@ -489,13 +489,13 @@
   .tab:hover {
     background: var(--bg-hover);
   }
-  /* The selected metric: an ink bar on the edge it shares with its chart. */
+  /* The selected metric: an ink bar on the edge it shares with its chart (inside the tab, which the row may clip). */
   .tab::after {
     content: '';
     position: absolute;
     left: 0;
     right: 0;
-    bottom: -1px;
+    bottom: 0;
     height: 2px;
     background: var(--text-primary);
     transform: scaleX(0);
@@ -551,12 +551,12 @@
     color: var(--text-tertiary);
     letter-spacing: 0;
   }
-  /* A power of ten's exponent at 11 px, raised without opening up the line. */
+  /* A power of ten's exponent at the unit's own 12 px (the text floor), raised without opening up the line. */
   .exp {
     position: relative;
     top: -0.45em;
     margin-left: 1px;
-    font-size: var(--type-xs-size);
+    font-size: var(--type-sm-size);
     line-height: 0;
     vertical-align: baseline;
   }
@@ -739,40 +739,12 @@
     gap: var(--space-2);
     flex-wrap: wrap;
   }
-  @media (min-width: 1200px) and (max-width: 1299px) {
-    /* The narrow end of the wide tier: slimmer tab sides keep every value whole; a scroll is the fallback for values
-       wider than the mock's. */
-    .tabs {
-      overflow-x: auto;
-      scrollbar-width: thin;
-    }
-    .tab {
-      padding-inline: var(--space-3);
-    }
-    .tab::after {
-      bottom: 0;
-    }
-  }
-  @media (max-width: 1199px) {
-    /* Laptops: the six tabs keep their values in one row, scrolling sideways only if a narrow window cannot fit them. */
-    /* A window too narrow for all six scrolls them sideways rather than cutting a value off. */
-    .tabs {
-      overflow-x: auto;
-      scrollbar-width: thin;
-    }
+  /* Laptops: the same six tabs in one row, a step more compact (12 px sides, 20 px values), so all six fit from
+     1024 px up beside the collapsed sidebar. */
+  @media (max-width: 1279px) {
     .tab {
       grid-template-rows: 16px 32px 16px;
       gap: var(--space-1);
-      padding: var(--space-3) var(--space-4);
-    }
-    .tab::after {
-      bottom: 0;
-    }
-  }
-  @media (max-width: 1099px) {
-    /* The low end of the tier: values a step smaller and tighter sides, so all six tabs fit at 960 px without
-       scrolling. */
-    .tab {
       padding: var(--space-3);
     }
     .val {

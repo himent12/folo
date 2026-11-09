@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { MediaQuery } from 'svelte/reactivity';
   import ChartSkeleton from '$lib/charts/ChartSkeleton.svelte';
   import ArrowRight from '@lucide/svelte/icons/arrow-right';
   import { LiveRun } from '$lib/api/live.svelte';
@@ -15,6 +16,7 @@
   import Skeleton from '$lib/ui/Skeleton.svelte';
   import Stat from '$lib/ui/Stat.svelte';
   import StatusBadge from '$lib/ui/StatusBadge.svelte';
+  import { media } from '$lib/design/tokens';
 
   /** `run: null` while the runs load: the same card with real labels and placeholder values, so nothing moves. */
   let { run: initial, dataset }: { run: Run | null; dataset?: Dataset } = $props();
@@ -25,13 +27,8 @@
 
   let cursor = $state<number | null>(null);
   // Phones: a shorter plot, so the recent runs below start on the first screen.
-  let narrow = $state(typeof matchMedia !== 'undefined' && matchMedia('(max-width: 767px)').matches);
-  $effect(() => {
-    const mq = matchMedia('(max-width: 767px)');
-    const on = () => (narrow = mq.matches);
-    mq.addEventListener('change', on);
-    return () => mq.removeEventListener('change', on);
-  });
+  const phoneQuery = new MediaQuery(media.phone, false);
+  const narrow = $derived(phoneQuery.current);
 
   const charts = $derived.by(() => {
     void live.version;

@@ -23,6 +23,7 @@
   import { MediaQuery } from 'svelte/reactivity';
   import Button from '$lib/ui/Button.svelte';
   import Dialog from '$lib/ui/Dialog.svelte';
+  import { media } from '$lib/design/tokens';
 
   let { smoothing = $bindable(), scale = $bindable() }: { smoothing: Smoothing; scale: Scale } = $props();
 
@@ -31,7 +32,7 @@
   let root = $state<HTMLElement>();
   let trigger = $state<HTMLButtonElement>();
   let sheetBody = $state<HTMLElement>();
-  const phone = new MediaQuery('max-width: 767px', false);
+  const phone = new MediaQuery(media.phone, false);
 
   const SMOOTHING: { value: Smoothing; label: string }[] = [
     { value: '0', label: 'Raw' },

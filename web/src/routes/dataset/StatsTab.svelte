@@ -133,7 +133,8 @@
     <div class="kpi">
       <span class="k-label">Images</span>
       <span class="k-value num">{num(images)}</span>
-      <!-- The split counts break between train and the rest where one line would cut them off (tablets). -->
+      <!-- The split counts break between train and the rest where one line would cut them off; tablets and phones show
+           the class count instead. -->
       <span class="k-sub num splits" use:wrapWhenNarrow
         ><span class="wide"><span class="seg">{num(dataset.splits.train)} train<span class="sep">{' · '}</span></span><span class="seg"
             >{num(dataset.splits.val)} val · {num(dataset.splits.test)} test</span
@@ -521,10 +522,17 @@
       margin-bottom: calc(var(--space-2) * -1);
     }
   }
-  /* Below the laptop tier the histograms stack, each at full width; Health takes the full width too. */
+  /* Tablets and phones: the histograms stack, each at full width; Health takes the full width too. The KPI captions
+     take their short form (the split counts are in the page header's meta line), so every cell stays one line. */
   @media (max-width: 1023px) {
     .two {
       grid-template-columns: minmax(0, 1fr);
+    }
+    .wide {
+      display: none;
+    }
+    .narrow {
+      display: inline;
     }
   }
   @media (max-width: 767px) {
@@ -564,12 +572,6 @@
     }
     .kpis {
       grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
-    .wide {
-      display: none;
-    }
-    .narrow {
-      display: inline;
     }
     .bars button {
       grid-template-columns: 10px minmax(56px, 88px) minmax(0, 1fr) 48px 44px;

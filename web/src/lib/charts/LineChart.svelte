@@ -875,7 +875,7 @@
   }
   .ticks text {
     fill: var(--chart-label);
-    font-size: var(--type-xs-size);
+    font-size: var(--type-xs-size); /* small: chart tick */
     font-variant-numeric: tabular-nums;
   }
   .line {

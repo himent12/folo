@@ -308,7 +308,7 @@
     border-radius: 3px 3px 3px 0;
     background: var(--c);
     color: var(--class-chip-text);
-    font-size: var(--type-xs-size);
+    font-size: var(--type-xs-size); /* small: image chip */
     line-height: 1;
     font-weight: var(--weight-medium);
     white-space: nowrap;
@@ -331,14 +331,14 @@
     height: 14px;
     padding: 0 4px;
     gap: 4px;
-    font-size: var(--type-micro-size);
+    font-size: var(--type-micro-size); /* small: image chip (views under 480 px) */
   }
   .small .score {
-    font-size: var(--type-micro-size);
+    font-size: var(--type-micro-size); /* small: image chip */
   }
   .score {
     font-variant-numeric: tabular-nums;
-    font-size: var(--type-micro-size);
+    font-size: var(--type-micro-size); /* small: image chip (the score after the name) */
     opacity: 0.8;
   }
 </style>
