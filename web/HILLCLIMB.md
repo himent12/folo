@@ -57,6 +57,8 @@ Lines: 1 hierarchy & layout · 2 typography · 3 colour & theming · 4 spacing r
 | r25 | Claude Opus 5.5 (192 sheets, 33 full-size) | 8.5 | 8.5 | 8.5 | 8.5 | 8.5 | 8.5 | 8.5 | 8.5 | 9 | 9 | 8 | 8.5 | 8 |
 | r26 | GPT-6.1 Sol (195 sheets, 50 full-size) | 8.5 | 9 | 9 | 9 | 9 | 8.5 | 8.5 | 9 | 8.5 | 8.5 | 8.5 | 8.5 | 8.5 |
 | r26 | Claude Opus 5.5 (195 sheets, 33 full-size) | 8 | 8.5 | 9 | 8.5 | 8.5 | 8.5 | 8.5 | 8.5 | 9 | 9 | 8 | 8.5 | 8 |
+| r27 | GPT-6.1 Sol (204 sheets, 52 full-size) | 8 | 8.5 | 9 | 9 | 8.5 | 8.5 | 8.5 | 9 | 8.5 | 8.5 | 8 | 8 | 8 |
+| r27 | Claude Opus 5.5 (204 sheets, 30 full-size) | 8.5 | 8.5 | 9 | 8.5 | 8.5 | 8 | 8 | 8.5 | 9 | 9 | 8 | 8.5 | 8 |
 
 ## Per-line minimum (lower of the two reviewers)
 
@@ -88,6 +90,7 @@ Rounds with one reviewer are marked; their minimum is that reviewer's row.
 | r24 | 8 | 8 | 8 | 8 ↓ | 8 ↓ | 8.5 | 8 | 8 | 8.5 | 8.5 | 8 | 8 | 8 |
 | r25 | 8 | 8.5 ↑ | 8.5 ↑ | 8.5 ↑ | 8.5 ↑ | 8.5 | 8 | 8.5 ↑ | 9 ↑ | 8.5 | 8 | 8.5 ↑ | 8 |
 | r26 | 8 | 8.5 | 9 ↑ | 8.5 | 8.5 | 8.5 | 8.5 ↑ | 8.5 | 8.5 ↓ | 8.5 | 8 | 8.5 | 8 |
+| r27 | 8 | 8.5 | 9 | 8.5 | 8.5 | 8 ↓ | 8 ↓ | 8.5 | 8.5 | 8.5 | 8 | 8 ↓ | 8 |
 
 r4 lowest lines: 6 data visualisation (5.5), 2 typography, 3 colour, 8 consistency (6). Diagnosis: 2, 3 and 8 are
 structural (no single rule for mono vs sans, class colours that changed between legend and box, two accents in light),
@@ -210,3 +213,14 @@ error callouts stacking three buttons under a lime primary on a red tint, framel
 states, New run's rail wrapping raggedly at 1024, and mostly empty panels for few classes or a near-perfect curve.
 Sol adds the stale Overview not saying what is current, touch inputs under 16 px, grey PR curves that cannot be
 identified where they are drawn, and the palette's idle list losing active runs to a case mismatch.
+
+r27 (#158: headers, callouts, frames and tiers; charts that show the differences; states that say what is current):
+colour is 9 for both, and Opus gives 9 on interaction and accessibility, but the floor of 8 widened to lines 1, 6, 7,
+11 and 12. Both reviewers name the same defects: Compare's stopped and failed runs labelled in the right gutter far
+from where their lines end, the published Model's Band / All curves toggle clipped under the Trace bar on phones,
+"mAP50-…" in the phone Compare select and "shapes-har…" in the Models list, the phone Run page repeating one value
+three times above its chart, Compare's phone header stack, and one narrow column of findings in tablet Health. Opus
+adds New run showing the previous settings' estimate as current, the sidebar's "Last known" beside a live hero,
+"mAP" unnamed in four places, Fit's domain leaving a quarter of the plot empty, and the tablet inspector and
+Playground empty state; Sol adds class strips that do not look like disclosures, "mosaic off" read as current, and
+the live log announcing without its own pause.
