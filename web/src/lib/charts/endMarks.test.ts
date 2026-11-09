@@ -20,10 +20,19 @@ describe('end marks', () => {
     expect(mergedEnds([{ x: 299, y: 50 }, { x: 10, y: 10 }], ends)).toEqual(['b', null]);
   });
 
-  it('draws the live end lime, a failure in the danger ink, and any other end in its line', () => {
+  it('draws the live end lime, a failure on an ink line in the danger ink, and any other end in its line', () => {
     expect(endMarkInk('live', 'ink')).toBe(LIVE_INK);
     expect(endMarkInk(undefined, 'ink')).toBe('ink');
-    expect(endMarkInk('failed', 'red')).toBe('var(--danger-text)');
-    expect(endMarkInk('stopped', 'red')).toBe('red');
+    expect(endMarkInk('failed', 'var(--text-primary)')).toBe('var(--danger-text)');
+    expect(endMarkInk('stopped', 'var(--text-primary)')).toBe('var(--text-primary)');
+  });
+
+  it("draws a failed run's cross in its own hue where hue names the run: the glyph says it failed", () => {
+    // Round 27: Compare's failed teal run ended in a red cross, which on a plot of hues read as one more run.
+    for (const hue of ['var(--chart-4)', 'var(--chart-text-4)', 'var(--chart-fill-2)', 'var(--chart-context)']) {
+      expect(endMarkInk('failed', hue)).toBe(hue);
+      expect(endMarkInk('stopped', hue)).toBe(hue);
+    }
+    expect(endMarkInk('live', 'var(--chart-4)')).toBe(LIVE_INK);
   });
 });

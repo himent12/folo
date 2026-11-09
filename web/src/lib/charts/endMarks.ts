@@ -1,7 +1,10 @@
 // A focal chart's marks at a line's end (DESIGN_DIRECTION §2.4): each mark has one shape for one meaning, whatever
 // sits next to it. The best epoch is a hollow ink ring (the "○ best" glyph of the chart's header); the latest value of
 // a live run is a filled lime dot with the heartbeat (StatusBadge's running mark); a stopped run ends in a square and
-// a failed one in a cross in the danger ink. The best ring and the end mark are always two different shapes, so best
+// a failed one in a cross. **The glyph says the status; the hue says whose line it is**: on a line in a series hue (a
+// run in Compare, where hue identifies the run) the square and the cross take the line's hue, never the danger red,
+// which on a plot of hues would read as one more run (round 27); on a line in ink (a single run's focal chart) the
+// cross takes the danger ink, the status hue on its mark. The best ring and the end mark are always two different shapes, so best
 // at epoch 36 and live at 37 read as a ring and a dot, never "oo". Only when the best is the line's end (or so close
 // that the two marks would overlap) is the ring drawn around the end mark, as one mark: the status mark is never
 // hidden, and a ring never sits half over a dot.
@@ -52,7 +55,15 @@ export const LIVE_GROW = 1;
 /** The latest value of a live run: the running mark's lime, whatever the line's own ink. */
 export const LIVE_INK = 'var(--accent-line)';
 
-/** The status mark's own ink: a live end lime, a failed run's cross in the danger ink, the line's ink otherwise. */
+/** A line in a series hue (`--chart-N`, its fill or text ink) or receded behind one (`--chart-context`): an entity's line. */
+const SERIES_HUE = /^var\(--chart-(?:(?:fill-|text-)?[1-6]|context)\)$/;
+
+/**
+ * The status mark's own ink: a live end lime (the running mark, whatever the line); a failed run's cross in the danger
+ * ink on an ink line, in the line's own hue on a series-hued one (the glyph alone says it failed); the line's ink
+ * otherwise.
+ */
 export function endMarkInk(end: EndKind, line: string): string {
-  return end === 'live' ? LIVE_INK : end === 'failed' ? 'var(--danger-text)' : line;
+  if (end === 'live') return LIVE_INK;
+  return end === 'failed' && !SERIES_HUE.test(line.trim()) ? 'var(--danger-text)' : line;
 }

@@ -29,7 +29,7 @@
   import { Resource } from '$lib/api/resource.svelte';
   import type { Epoch, Run, RunMetrics } from '$lib/api/types';
   import LineChart, { type Series } from '$lib/charts/LineChart.svelte';
-  import { fitFloorNote, niceDomain, unitDomain, unitFitDomain, unitTop, UNIT_ZOOM_BELOW, UNIT_ZOOM_NOTE, withLabelRow } from '$lib/charts/domain';
+  import { fitFloor, fitFloorNote, niceDomain, unitDomain, unitFitDomain, unitTop, UNIT_ZOOM_BELOW, UNIT_ZOOM_NOTE, withLabelRow } from '$lib/charts/domain';
   import { nearest } from '$lib/charts/downsample';
   import { axisReason, AXIS_REASON, runEnd, runX } from '$lib/charts/runAxis';
   import { conf, deviceName, duration, metric } from '$lib/format';
@@ -177,21 +177,27 @@
   const plotPx = $derived(narrow ? 210 : 360);
   // The y axis: "Fit" (the default) starts under the values the runs spend most of their length in, so the differences
   // people came to compare fill the plot (round 26: 0–0.6 with the runs between 0.45 and 0.61, in its top quarter);
-  // "From 0" shows the whole climb. The top is fitted either way (./domain).
+  // "From 0" shows the whole climb. The top is fitted either way (./domain). On a phone, by progress, the default is
+  // From 0: its 210 px plot has no end labels, and a fitted floor cut the first ~18 % of every curve, the four lines
+  // entering from the bottom edge within a few px of each other with no cue (round 27), where a mark per entry would
+  // only pile up. A choice made by hand holds at every width.
   type YAxis = 'fit' | 'zero';
-  let yAxis = $state<YAxis>('fit');
+  let yChoice = $state<YAxis | null>(null);
+  const yAxis = $derived<YAxis>(yChoice ?? (narrow && x === 'progress' ? 'zero' : 'fit'));
+  const setY = (v: YAxis) => (yChoice = v);
   const Y_OPTIONS: { value: YAxis; label: string }[] = [
     { value: 'fit', label: 'Axis: Fit' },
     { value: 'zero', label: 'Axis: From 0' },
   ];
   const ys = $derived(series.flatMap((s) => s.points.map((p) => p.y)));
   const lastYs = $derived(series.map((s) => s.points.at(-1)?.y ?? NaN));
-  // Where the lines carry direct labels (768 px up) the top leaves a label row over the highest end (`withLabelRow`).
+  // Where the lines carry direct labels (768 px up) the top leaves a label row over the highest end (`withLabelRow`;
+  // `unitFitDomain`'s on the fitted span).
   const fit = $derived.by(() => {
     if (!extent) return undefined;
     if (!metricDef.unit) return niceDomain(yAxis === 'zero' ? Math.min(0, extent[0]) : extent[0], extent[1]);
-    const max = narrow ? extent[1] : withLabelRow(extent[1], plotPx);
-    return yAxis === 'fit' ? unitFitDomain(ys, lastYs, max, plotPx) : unitDomain(max, plotPx);
+    if (yAxis === 'fit') return unitFitDomain(ys, lastYs, extent[1], plotPx, !narrow);
+    return unitDomain(narrow ? extent[1] : withLabelRow(extent[1], plotPx), plotPx);
   });
   /** A fitted axis's floor, said where the axis is named ("y from 0.40"), as a zoomed axis says its full scale. */
   const floorNote = $derived(fitFloorNote(fit, metricDef.unit ? 2 : 0));
@@ -426,8 +432,8 @@
           <div class="about-body">
             <!-- The y axis's choice: the control row has no room for it on a phone. -->
             <div class="about-axis">
-              <p>{floorNote ? `The y axis starts at ${fit!.domain[0].toFixed(Math.max(2, fit!.decimals))}, under where the runs spend most of their length.` : 'The y axis starts at 0.'}</p>
-              <Segmented size="sm" label="Y axis" bind:value={yAxis} options={[
+              <p>{floorNote ? `The y axis starts at ${fitFloor(fit)}, under where the runs spend most of their length.` : 'The y axis starts at 0.'}</p>
+              <Segmented size="sm" label="Y axis" value={yAxis} onchange={setY} options={[
                 { value: 'fit', label: 'Fit' },
                 { value: 'zero', label: 'From 0' },
               ]} />
@@ -453,7 +459,7 @@
             <span class="qual">{floorNote ? `${xQual} · ${floorNote}` : xQual}</span>
           </span>
           <span class="c-ctl">
-            <Select size="sm" label="Y axis" bind:value={yAxis} options={Y_OPTIONS} />
+            <Select size="sm" label="Y axis" value={yAxis} onchange={setY} options={Y_OPTIONS} />
             <Segmented size="sm" label="X axis" value={x} onchange={setX} options={X_OPTIONS} />
           </span>
         </header>

@@ -486,15 +486,15 @@ export const scenes = [
     },
   },
   {
-    // Phones: the y axis's choice (Fit / From 0) in How to read this, the control row having no room; From 0 chosen,
-    // so the plot shows the whole climb and the y caption no floor.
+    // Phones: the y axis's choice (Fit / From 0) in How to read this, the control row having no room. By progress a
+    // phone opens on From 0 (the whole climb); Fit chosen by hand, so the plot starts at its floor and says so.
     name: 'run-compare-yaxis-phone',
     path: '/runs/compare?ids=run_7d1e,run_c19a,run_5be3,run_a2f0',
     viewports: ['mobile'],
     setup: async (page) => {
       await until(page, '.chip .key');
       await page.locator('details.about > summary').click();
-      await page.locator('.about-axis').getByRole('radio', { name: 'From 0' }).click();
+      await page.locator('.about-axis').getByRole('radio', { name: 'Fit' }).click();
       await page.mouse.move(0, 0);
     },
   },

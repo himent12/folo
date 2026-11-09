@@ -79,7 +79,7 @@
   import { area as d3area, curveLinear, curveMonotoneX, line as d3line } from 'd3-shape';
   import { downsample, nearest, ticks as niceTicks } from './downsample';
   import { capTicks, logMinors, logTicks, MAX_TICKS, stepDecimals } from './domain';
-  import { END_LABELS_MIN, LABEL_GAP, labelWidth, leaderOf, memoPlaceEndLabels } from './endLabels';
+  import { END_LABELS_MIN, KEY_W, LABEL_GAP, labelWidth, leaderOf, memoPlaceEndLabels, MORE_ID } from './endLabels';
   import { endMarkInk, LIVE_GROW, mergedEnds } from './endMarks';
   import { seriesText } from './ink';
   import { prefs } from '$lib/prefs.svelte';
@@ -296,8 +296,10 @@
     const longest = Math.max(...yTickValues.map((v) => yFormat(v).length), 1);
     // ~7 px per character at 11 px Geist (tabular digits); end labels are 12 px, measured (textWidth).
     // Plus room for a leader, when labels are moved apart (LEAD).
-    const widest = Math.max(0, ...series.map((s) => endShown(s)).map((t) => (t === null ? 0 : textWidth(t))));
-    // The gutter column holds the widest label whole (a failed or stopped run's "name · failed" goes there).
+    // A line that ends inside the plot may be labelled in the column, keyed by its swatch (KEY_W) before its name.
+    const key = (s: Series) => ((s.points.at(-1)?.x ?? Infinity) < xExtent[1] ? KEY_W : 0);
+    const widest = Math.max(0, ...series.map((s) => [endShown(s), s] as const).map(([t, s]) => (t === null ? 0 : textWidth(t) + key(s))));
+    // The gutter column holds the widest label whole.
     const labelW = showEnds ? Math.min(GUTTER_MAX, widest + 6) + LEAD - 6 : 0;
     const left = Math.ceil(longest * 7) + 14;
     // An x-axis title gets its own line under the tick labels; a y-axis name or an x mark's label one above the plot,
@@ -387,8 +389,8 @@
 
   /** How far right of the plot the label column moves when it needs leaders: short ones, fanning from each line's end. */
   const LEAD = 14;
-  /** The widest the gutter column grows for its labels, px ("shapes-hard-m · failed" at 12 px semibold is ~150). */
-  const GUTTER_MAX = 176;
+  /** The widest the gutter column grows for its labels, px ("shapes-hard-m · failed" at 12 px semibold is ~150, keyed ~168). */
+  const GUTTER_MAX = 196;
   /** Where a leader starts: just outside the line's end marker (the live ring is wider), px from its centre. */
   const endR = (id: string) => {
     if (!endDots) return 3;
@@ -408,10 +410,8 @@
         const p = s.points[s.points.length - 1];
         const curve = visible.indexOf(s);
         const label = endShown(s)!;
-        // A line that has ended short of the plot's edge (failed, stopped) is labelled in the gutter column at its last
-        // height, like a completed run's (endLabels `gutter`).
-        const gutter = s.end === 'failed' || s.end === 'stopped';
-        return p && Number.isFinite(p.y) ? { id: s.id, label, x: x(p.x), y: yTo(p.y), curve, w: textWidth(label), gutter } : null;
+        // A line that has ended short of the plot's edge (failed, stopped) is labelled beside its end like any other.
+        return p && Number.isFinite(p.y) ? { id: s.id, label, x: x(p.x), y: yTo(p.y), curve, w: textWidth(label) } : null;
       })
       .filter((e): e is NonNullable<typeof e> => e !== null)
       // The highlighted line is labelled first, so it never loses its spot; then the shortest lines, which are the
@@ -424,12 +424,18 @@
   const ends = $derived.by(() => {
     const color = new Map(visible.map((s) => [s.id, s.color]));
     const last = new Map(visible.map((s) => [s.id, s.points[s.points.length - 1]?.y ?? NaN]));
+    const byId = new Map(visible.map((s) => [s.id, s]));
     return placedEnds.map((p) => {
       // While the axis eases, each label rides with its line's end: moved as far as the end is from where it will be.
-      const ay = y(last.get(p.id)!);
+      // The column's "+N more" entry has no line, and stays where it was placed.
+      const ay = last.has(p.id) ? y(last.get(p.id)!) : p.ay;
       const e = { ...p, y: p.y + ay - p.ay, ay };
+      const s = byId.get(e.id);
       return {
         ...e,
+        // A keyed label (in the column, away from its line's end) starts with the line's swatch: its ink and dash.
+        key: e.detached && s ? s : null,
+        tx: e.detached && s ? e.x + KEY_W : e.x,
         // A receded run is a context curve: its label in ink, so the one hue left on the plot is the run in front.
         color: receding && e.id !== highlight ? 'var(--text-tertiary)' : (color.get(e.id) ?? 'var(--text-secondary)'),
         // The label is text: the series' text ink (./ink), 4.5:1 where the line's own ink is only a 3:1 mark.
@@ -928,7 +934,11 @@
               {#if e.lead}<line class="leader" x1={e.lead.x1} y1={e.lead.y1} x2={e.lead.x2} y2={e.lead.y2} style:stroke={e.color} />{/if}
             {/each}
             {#each ends as e (e.id)}
-              <text class="end-label" class:hl={e.id === highlight} x={e.x} y={e.y} dy="0.32em" style:fill={e.text}>{e.label}</text>
+              {#if e.key}
+                <!-- Keyed: the label could not sit beside its line's end, so it starts with the line's own swatch. -->
+                <line class="end-key" x1={e.x + 1} x2={e.x + 13} y1={e.y} y2={e.y} style:stroke={receding && e.id !== highlight ? 'var(--chart-context)' : inkOf(e.key)} style:stroke-dasharray={swatchDash(e.key)} />
+              {/if}
+              <text class="end-label" class:hl={e.id === highlight} class:more={e.id === MORE_ID} x={e.tx} y={e.y} dy="0.32em" style:fill={e.text}>{e.label}</text>
             {/each}
           {/if}
           {#each markers as m, i (m.label + m.x)}
@@ -1212,6 +1222,16 @@
   }
   .end-label.hl {
     font-weight: var(--weight-semibold);
+  }
+  /* The column's "+N more": not a line's name, so the quiet ink and the regular weight. */
+  .end-label.more {
+    fill: var(--text-tertiary);
+    font-weight: var(--weight-regular);
+  }
+  /* A keyed label's swatch: the legend's (2 px, round caps). */
+  .end-key {
+    stroke-width: 2;
+    stroke-linecap: round;
   }
   .leader {
     stroke-width: 1;
