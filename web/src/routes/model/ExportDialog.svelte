@@ -55,7 +55,8 @@
       result = r;
       done = format;
       phase = 'done';
-      toast.success(`Exported ${model.name}`, `${r.path} · ${bytes(r.bytes, prefs.units)}`);
+      // The open dialog already says "Export finished" with the path: a toast would say it twice at once.
+      if (!open) toast.success(`Exported ${model.name}`, `${r.path} · ${bytes(r.bytes, prefs.units)}`);
     } catch (e) {
       if (id !== run) return;
       error = e;

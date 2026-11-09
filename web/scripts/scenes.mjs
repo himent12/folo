@@ -327,6 +327,22 @@ export const scenes = [
       await page.waitForTimeout(200);
     },
   },
+  {
+    // A label clicked (selected: bg.active + accent bar, aria-current, the image zoomed to its box) while another
+    // is hovered (a lighter neutral step), so the two states show side by side.
+    name: 'dataset-inspector-selected',
+    path: '/datasets/ds_fasteners',
+    viewports: ['desktop', 'mobile'],
+    fullPage: false,
+    setup: async (page) => {
+      await page.locator('.cell img.loaded').first().waitFor();
+      await page.locator('.cell').nth(1).click();
+      await page.locator('dialog[open] .stage img.loaded').waitFor();
+      await page.locator('dialog[open] .labels button').nth(0).click();
+      await page.locator('dialog[open] .labels button').nth(2).hover();
+      await page.waitForTimeout(300);
+    },
+  },
   { name: 'runs', path: '/runs' },
   { name: 'models', path: '/models', viewports: ['desktop', 'laptop', 'mobile'] },
   { name: 'models-empty', path: '/models', search: 'scenario=empty' },
@@ -336,7 +352,7 @@ export const scenes = [
     // Phones open on the Curves section (the matrix is behind the section picker).
     name: 'model-detail',
     path: '/models/m_fast_n',
-    viewports: ['desktop', 'laptop', 'mobile'],
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
     setup: (page, { vp }) => until(page, vp === 'mobile' ? '#pr svg' : '#cm .cell'),
   },
   {

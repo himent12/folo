@@ -234,7 +234,7 @@
     {/snippet}
 
     <!-- One strip of numbers in ink: the headline metric, then the ones that support it, each with a short qualifier;
-         the ⓘ opens what they mean. Phones: one row of four values, qualifiers in the help. -->
+         the ⓘ opens what they mean. Phones: the headline on its own row at 32 px, the other three as a row under it. -->
     <section class="kpis" aria-label="Validation metrics">
       {#each kpis(m) as k, i (k.label)}
         <div class="kpi" class:hero={i === 0}>
@@ -321,18 +321,6 @@
               <dt>File size</dt>
               <dd class="num">{bytes(m.bytes, prefs.units)}</dd>
             </div>
-            <div class="kv">
-              <dt>Benchmark</dt>
-              <dd class="latency">
-                <!-- The architecture's number (docs/BENCHMARKS.md), never this model's timing: say exactly what it is. -->
-                {#if latency(m) !== undefined}
-                  <span class="num">{latency(m)!.toFixed(2)} ms</span>
-                  <span class="faint">{m.arch} benchmark (640 px), end to end on an RTX 4080 SUPER; not timed on this model</span>
-                {:else}
-                  <span class="faint">No {m.arch} benchmark yet</span>
-                {/if}
-              </dd>
-            </div>
             <div class="kv wide">
               <dt>Classes</dt>
               <dd class="classes">
@@ -374,6 +362,19 @@
             <div class="kv">
               <dt>Created</dt>
               <dd>{date(m.created)}</dd>
+            </div>
+            <!-- The architecture's number (docs/BENCHMARKS.md), never this model's timing: the label says whose it is,
+                 and the conditions sit beside the value. Last, apart from the facts about this model. -->
+            <div class="kv wide ref">
+              <dt>Architecture reference latency</dt>
+              <dd class="latency">
+                {#if latency(m) !== undefined}
+                  <span class="num">{latency(m)!.toFixed(2)} ms</span>
+                  <span class="faint"><span class="mono">{m.arch}</span> · 640 px · RTX 4080 SUPER · end to end</span>
+                {:else}
+                  <span class="faint">Not measured for <span class="mono">{m.arch}</span> yet</span>
+                {/if}
+              </dd>
             </div>
           </dl>
         {/snippet}
@@ -846,9 +847,21 @@
     text-align: right;
     overflow-wrap: anywhere;
   }
-  .latency {
+  /* Stacked in every layout: the label is long, and the value keeps its conditions on the same line. */
+  .kv.ref,
+  .two .kv.ref {
     display: grid;
+    grid-template-columns: minmax(0, 1fr);
     gap: 2px;
+    padding-top: var(--space-3);
+    border-top: 1px solid var(--line-subtle);
+  }
+  .latency {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0 var(--space-2);
+    text-align: left;
   }
   .latency .faint {
     font-size: var(--type-sm-size);
@@ -898,27 +911,32 @@
     .two .kv {
       grid-template-columns: 96px minmax(0, 1fr);
     }
-    /* One row of four values: the headline a step larger; the qualifiers live in the help. */
+    /* The headline alone on the first row (32 / 600, with its qualifier); the three supporting values 3-up under it,
+       their qualifiers in the help. */
     .kpis {
-      grid-template-columns: repeat(4, minmax(0, 1fr));
+      grid-template-columns: repeat(3, minmax(0, 1fr));
     }
     .kpi {
-      grid-template-rows: 16px 28px;
+      grid-template-rows: 16px 32px;
       gap: var(--space-1);
       padding: var(--space-3);
     }
-    .k-sub {
+    .kpi.hero {
+      grid-column: 1 / -1;
+      grid-template-rows: 16px 40px 16px;
+    }
+    .kpi:not(.hero) .k-sub {
       display: none;
     }
     .k-value {
-      font-size: var(--type-xl-size);
-      line-height: 28px;
-      letter-spacing: var(--type-xl-tracking);
+      font-size: var(--type-2xl-size);
+      line-height: 32px;
+      letter-spacing: var(--type-2xl-tracking);
     }
     .hero .k-value {
-      font-size: var(--type-2xl-size);
-      line-height: 28px;
-      letter-spacing: var(--type-2xl-tracking);
+      font-size: var(--type-3xl-size);
+      line-height: 40px;
+      letter-spacing: var(--type-3xl-tracking);
     }
     .k-body {
       grid-template-columns: minmax(0, 1fr);

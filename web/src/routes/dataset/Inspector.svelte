@@ -47,7 +47,11 @@
   let viewport = $state<HTMLDivElement>();
   let vw = $state(0);
   let vh = $state(0);
-  let active = $state<number | null>(null);
+  // A label (or box) under the pointer or focus is `hovered`; a label clicked to zoom to it stays `selected` until
+  // clicked again or the image changes. The image highlights the hovered box, else the selected one.
+  let hovered = $state<number | null>(null);
+  let selected = $state<number | null>(null);
+  const active = $derived(hovered ?? selected);
 
   const idx = $derived(id ? pager.indexOf(id) : -1);
   const img = $derived(idx >= 0 ? pager.get(idx) : undefined);
@@ -116,7 +120,8 @@
     void id;
     untrack(() => {
       z = 1;
-      active = null;
+      hovered = null;
+      selected = null;
     });
   });
 
@@ -131,6 +136,19 @@
 
   function fit() {
     z = 1;
+  }
+
+  /** A label's click: select it and zoom to its box, or (already selected) let go of it and fit the image again. */
+  function pick(i: number) {
+    const b = img?.boxes[i];
+    if (!b) return;
+    if (selected === i) {
+      selected = null;
+      fit();
+      return;
+    }
+    selected = i;
+    zoomToBox(b);
   }
 
   function zoomToBox(b: Box) {
@@ -306,7 +324,7 @@
               {classes}
               {only}
               {active}
-              onhover={(i) => (active = i)}
+              onhover={(i) => (hovered = i)}
               alt={stem(img.file)}
             />
           </div>
@@ -331,18 +349,20 @@
       <section>
         <h3>Labels <span class="meta num">{img?.boxes.length ?? 0}</span></h3>
         {#if img && img.boxes.length}
-          <ul class="labels" onpointerleave={() => (active = null)}>
+          <ul class="labels" onpointerleave={() => (hovered = null)}>
             {#each img.boxes as b, i (i)}
               <li>
                 <button
                   type="button"
-                  class:on={active === i}
+                  class:hot={hovered === i}
+                  class:on={selected === i}
                   class:dim={only !== null && !only.has(b.class)}
-                  onpointerenter={() => (active = i)}
-                  onfocus={() => (active = i)}
-                  onblur={() => (active = null)}
-                  onclick={() => zoomToBox(b)}
-                  aria-label="{name(b.class)}, {Math.round(b.x2 - b.x1)} by {Math.round(b.y2 - b.y1)} pixels. Zoom to box"
+                  aria-current={selected === i ? 'true' : undefined}
+                  onpointerenter={() => (hovered = i)}
+                  onfocus={() => (hovered = i)}
+                  onblur={() => (hovered = null)}
+                  onclick={() => pick(i)}
+                  aria-label="{name(b.class)}, {Math.round(b.x2 - b.x1)} by {Math.round(b.y2 - b.y1)} pixels. {selected === i ? 'Selected; show the whole image' : 'Zoom to box'}"
                 >
                   <span class="sw" style:background={classColor(b.class)}></span>
                   <span class="cn truncate">{name(b.class)}</span>
@@ -590,8 +610,18 @@
     text-align: left;
     transition: background-color var(--dur-fast) var(--ease-standard);
   }
+  /* Hover is a light neutral step; the selection takes the one rule (bg.active and a 2 px accent bar on the leading
+     edge), and hovering a selected row adds to its fill, so the two never look alike. */
+  .labels button.hot {
+    background: var(--bg-hover);
+  }
   .labels button.on {
     background: var(--bg-active);
+    box-shadow: inset 2px 0 0 var(--accent-line);
+    border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  }
+  .labels button.on.hot {
+    background: linear-gradient(var(--bg-hover), var(--bg-hover)), var(--bg-active);
   }
   .labels button.dim {
     opacity: 0.5;

@@ -109,7 +109,7 @@
         {#if selected.length}
           <button type="button" class="clear" onclick={() => (selected = [])}>Clear</button>
         {:else if hovered === null}
-          <span class="hint">Select classes under Classes to trace their curves</span>
+          <span class="hint">Tap a class in Classes to trace its curve.</span>
         {/if}
       {/if}
       {#if many}
@@ -155,10 +155,20 @@
       </p>
     </div>
     <div class="scroll">
-      <table class="table dense">
+      <table class="table dense" class:fixed={narrow}>
+        <!-- Phones: one column definition for the header and every row (fixed layout), so the headings sit over their
+             numbers and the class column ends a clear gutter before AP50. -->
+        {#if narrow}
+          <colgroup>
+            <col />
+            <col class="c-ap" />
+            <col class="c-ap95" />
+            <col class="c-inst" />
+          </colgroup>
+        {/if}
         <thead>
           <tr>
-            <th scope="col">Class</th>
+            <th scope="col" class="cls-h">Class</th>
             <th scope="col" class="r">AP50</th>
             <th scope="col" class="r">AP50-95</th>
             <th scope="col" class="r hide-sm">Precision</th>
@@ -364,6 +374,10 @@
   tr.on td:first-child {
     box-shadow: inset 2px 0 0 var(--accent-line);
   }
+  /* The heading starts where the names do, past the swatch (8 px) and its gap (8 px). */
+  .cls-h {
+    padding-left: calc(var(--space-4) + var(--space-4));
+  }
   .cls {
     display: flex;
     align-items: center;
@@ -385,9 +399,10 @@
     transform: rotate(180deg);
   }
   /* Phones: every metric of a selected class, under its row (precision and recall have no column there). */
+  /* Indented to the class names (past the swatch), like the Class heading. */
   tr.detail td {
     height: auto;
-    padding: var(--space-2) var(--space-4) var(--space-3);
+    padding: var(--space-2) var(--space-4) var(--space-3) calc(var(--space-4) + var(--space-4));
     background: var(--bg-active);
     box-shadow: inset 2px 0 0 var(--accent-line);
   }
@@ -470,6 +485,24 @@
     /* The button fills the class cell, so every row's chevron sits on one edge. */
     .cls {
       width: 100%;
+      max-width: none;
+    }
+    .fixed {
+      table-layout: fixed;
+    }
+    /* Each number column is as wide as its heading plus a 12 px gutter on both sides (16 at the table's edge). */
+    .c-ap {
+      width: 64px;
+    }
+    .c-ap95 {
+      width: 80px;
+    }
+    .c-inst {
+      width: 88px;
+    }
+    /* The chevron keeps a gutter to the AP50 column. */
+    .chev {
+      padding-left: var(--space-2);
     }
     .legend,
     .plot,

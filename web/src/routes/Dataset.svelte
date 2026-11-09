@@ -26,7 +26,7 @@
   import Select from '$lib/ui/Select.svelte';
   import ClassPicker from './dataset/ClassPicker.svelte';
   import DisplayMenu from './dataset/DisplayMenu.svelte';
-  import { healthChecks, imageCount, reviewCount } from './dataset/health';
+  import { healthChecks, imageCount, reviewCount, reviewLabel } from './dataset/health';
   import ImageGrid, { type Density } from './dataset/ImageGrid.svelte';
   import Inspector from './dataset/Inspector.svelte';
   import { ImagePager } from './dataset/pager.svelte';
@@ -225,7 +225,7 @@
         idPrefix="ds-tab"
         tabs={[
           { value: 'images', label: 'Images', meta: compact(total) },
-          { value: 'stats', label: 'Stats', meta: issues ? `${issues} to review` : undefined },
+          { value: 'stats', label: 'Stats', meta: reviewLabel(issues) },
         ]}
         value={tab}
         onchange={(t) => setQuery({ tab: t === 'images' ? null : t, image: null })}

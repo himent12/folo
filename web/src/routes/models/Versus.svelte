@@ -4,6 +4,9 @@
    * docs/BENCHMARKS.md's summary where both have a number, including the ones FOLO trails. Values in ink; the lead is a
    * word ("1.66× faster"), never a colour, and a row where FOLO is behind says so plainly. One sentence says what is
    * compared; each row keeps one short qualifier, and the method and caveats sit in a "How this was measured" fold.
+   * Phones stack each row (the metric, then its three values, each with its engine named in the markup); the header
+   * row stays for assistive tech, every value names its metric and column through `headers`, and explicit cell roles
+   * keep the table's semantics through the grid layout.
    */
   import { advantage, BENCH_SOURCE, versusYolo26n, type Versus } from '$lib/benchmarks';
   import { num } from '$lib/format';
@@ -27,23 +30,24 @@
   <table class="table vs">
     <thead>
       <tr>
-        <th>Measured</th>
-        <th class="r">folo-n</th>
-        <th class="r">YOLO26n</th>
-        <th class="r lead-h">FOLO</th>
+        <th scope="col" role="columnheader" id="vs-h-m">Measured</th>
+        <th scope="col" role="columnheader" class="r" id="vs-h-folo">folo-n</th>
+        <th scope="col" role="columnheader" class="r" id="vs-h-yolo">YOLO26n</th>
+        <th scope="col" role="columnheader" class="r lead-h" id="vs-h-lead">FOLO</th>
       </tr>
     </thead>
     <tbody>
-      {#each versusYolo26n as v (v.metric)}
+      {#each versusYolo26n as v, i (v.metric)}
         {@const ahead = advantage(v) >= 1}
         <tr class:behind={!ahead}>
-          <td>
+          <th scope="row" role="rowheader" id="vs-r-{i}" headers="vs-h-m">
             <span class="m">{v.metric}</span>
             {#if v.note}<span class="note">{v.note}</span>{/if}
-          </td>
-          <td class="r num v">{fmt(v, v.folo)}</td>
-          <td class="r num v yolo">{fmt(v, v.yolo)}</td>
-          <td class="r lead">{lead(v)}</td>
+          </th>
+          <!-- The engine's name over each value is for the stacked phone rows; screen readers get it from `headers`. -->
+          <td role="cell" class="r num v" headers="vs-r-{i} vs-h-folo"><span class="cl" aria-hidden="true">folo-n</span>{fmt(v, v.folo)}</td>
+          <td role="cell" class="r num v yolo" headers="vs-r-{i} vs-h-yolo"><span class="cl" aria-hidden="true">YOLO26n</span>{fmt(v, v.yolo)}</td>
+          <td role="cell" class="r lead" headers="vs-r-{i} vs-h-lead"><span class="cl" aria-hidden="true">FOLO</span>{lead(v)}</td>
         </tr>
       {/each}
     </tbody>
@@ -69,10 +73,26 @@
 </Panel>
 
 <style>
-  /* Two-line rows (metric + qualifier): 8 px above and below, values on the metric's line. */
-  .vs td {
+  /* Two-line rows (metric + qualifier): 8 px above and below, values on the metric's line. The row header looks like
+     the table system's first cell (13 / 500 primary), not a column header. */
+  .vs tbody :is(td, th) {
     vertical-align: top;
     padding-block: var(--space-2);
+  }
+  .vs tbody th {
+    height: auto;
+    text-align: left;
+    font-size: var(--type-base-size);
+    line-height: var(--type-base-line);
+    color: var(--text-primary);
+    white-space: normal;
+    border-bottom: 1px solid var(--line-subtle);
+  }
+  .vs tbody tr:last-child th {
+    border-bottom: 0;
+  }
+  .cl {
+    display: none;
   }
   .m {
     display: block;
@@ -93,7 +113,7 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .vs td:first-child {
+  .vs tbody th {
     max-width: 0;
     width: 50%;
   }
@@ -170,21 +190,30 @@
   }
   /* Phones: the metric on its own line, then the three values in a row. */
   @media (max-width: 767px) {
+    /* The header row is read, not seen: each value shows its engine above it instead. */
     .vs thead {
-      display: none;
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip-path: inset(50%);
+      white-space: nowrap;
     }
-    .vs tr {
+    .vs tbody tr {
       display: grid;
       grid-template-columns: repeat(3, minmax(0, 1fr));
       gap: var(--space-1) var(--space-3);
       padding: var(--space-3) var(--space-4);
       border-bottom: 1px solid var(--line-subtle);
     }
-    .vs td {
+    .vs tbody tr:last-child {
+      border-bottom: 0;
+    }
+    .vs tbody :is(td, th) {
       padding: 0;
       border: 0;
     }
-    .vs td:first-child {
+    .vs tbody th {
       grid-column: 1 / -1;
       max-width: none;
       width: auto;
@@ -192,22 +221,10 @@
     .vs .r {
       text-align: left;
     }
-    .vs td.v::before {
+    .cl {
       display: block;
       font-size: var(--type-sm-size);
-      color: var(--text-tertiary);
-      font-weight: var(--weight-regular);
-    }
-    .vs td.v:not(.yolo)::before {
-      content: 'folo-n';
-    }
-    .vs td.yolo::before {
-      content: 'YOLO26n';
-    }
-    .vs td.lead::before {
-      content: 'FOLO';
-      display: block;
-      font-size: var(--type-sm-size);
+      line-height: var(--type-sm-line);
       color: var(--text-tertiary);
       font-weight: var(--weight-regular);
     }

@@ -98,6 +98,16 @@
     gap: var(--space-2);
     flex-wrap: wrap;
   }
+  /* One rule for every page: from 768 px up the actions stay on the title row, right-aligned; the meta line wraps. */
+  @media (min-width: 768px) {
+    header {
+      flex-wrap: nowrap;
+    }
+    .actions {
+      flex-shrink: 0;
+      flex-wrap: nowrap;
+    }
+  }
   @keyframes in {
     from {
       opacity: 0;

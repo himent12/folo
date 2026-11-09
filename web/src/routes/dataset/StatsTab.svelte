@@ -1,7 +1,7 @@
 <script lang="ts">
   /**
-   * Dataset statistics. A compact health summary comes first: one line per severity (errors, warnings, notes) naming
-   * its findings, each opening to the evidence. Then four numbers, the class balance as the focal chart, the two
+   * Dataset statistics. A compact health summary comes first: one line per severity (errors, warnings, notes) with a
+   * short summary of its findings and their count on the right edge, each opening to the evidence. Then four numbers, the class balance as the focal chart, the two
    * histograms in ink, and last the `folo dataset check` issues in their own section with severity and kind filters.
    */
   import { tick } from 'svelte';
@@ -21,7 +21,7 @@
   import Panel from '$lib/ui/Panel.svelte';
   import { tooltip } from '$lib/ui/tooltip';
   import { swatchStyle } from './swatch';
-  import { bySeverity, countBinLabel, healthChecks, imageCount, reviewCount, sizeBinLabel, TINY_SIZE, type Severity } from './health';
+  import { bySeverity, countBinLabel, findings, groupSummary, healthChecks, imageCount, reviewCount, reviewLabel, sizeBinLabel, TINY_SIZE, type Severity } from './health';
 
   let {
     dataset,
@@ -37,7 +37,7 @@
   const notes = $derived(groups.find((g) => g.severity === 'info')?.items.length ?? 0);
   const ok = $derived(health.find((h) => h.severity === 'ok'));
   const summary = $derived(
-    [issues ? `${issues} to review` : 'nothing to fix', notes ? `${notes} ${notes === 1 ? 'note' : 'notes'}` : ''].filter(Boolean).join(' · '),
+    [reviewLabel(issues) ?? 'nothing to fix', notes ? `${notes} ${notes === 1 ? 'note' : 'notes'}` : ''].filter(Boolean).join(' · '),
   );
   // Each severity line starts folded: the summary is the point, the evidence one tap away.
   let open = $state<Partial<Record<Severity, boolean>>>({});
@@ -59,8 +59,9 @@
     document.getElementById('ds-check')?.scrollIntoView({ block: 'start', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
   }
   const sizeEdges = $derived(stats.box_size_hist.edges);
-  // Unequal size bins keep their true widths up to 60% of the side; the open last bin (≥ 50%) is drawn up to there.
-  const sizeMax = $derived(Math.min(0.6, sizeEdges[sizeEdges.length - 1] ?? 1));
+  // The server's size bins are unequal (finer near the tiny threshold) and do not merge into equal ones, so they keep
+  // their true widths on a linear axis. The open last bin (e.g. ≥ 50%) stands apart, drawn 10 points wide.
+  const sizeMax = $derived(Math.min((sizeEdges[sizeEdges.length - 2] ?? 0.9) + 0.1, sizeEdges[sizeEdges.length - 1] ?? 1));
   const pctEdge = (v: number) => `${+(v * 100).toFixed(1)}%`;
   const balance = $derived(
     stats.class_counts
@@ -91,15 +92,19 @@
             <summary>
               <span class="hicon"><Icon size={16} strokeWidth={1.75} aria-hidden="true" /></span>
               <span class="hlabel">{g.label}</span>
-              <!-- Folded: the findings' titles. Open: the titles head the evidence below, so the line just counts them. -->
-              <span class="htitles truncate">{open[g.severity] ? `${g.items.length} ${g.items.length === 1 ? 'finding' : 'findings'}` : g.items.map((h) => h.title).join(' · ')}</span>
+              <!-- Folded: a short summary of the findings (units named). Open: the titles head the evidence below. The
+                   count of findings sits on the right edge either way. -->
+              <span class="htitles">{groupSummary(g)}</span>
+              <span class="hcount num">{findings(g.items.length)}</span>
               <span class="hchev" aria-hidden="true"><ChevronDown size={14} strokeWidth={1.75} /></span>
             </summary>
             <ul class="hitems">
               {#each g.items as h (h.id)}
                 <li>
-                  <p class="htitle">{h.title}</p>
-                  <p class="hdetail">{h.detail}</p>
+                  <div class="htext">
+                    <p class="htitle">{h.title}</p>
+                    <p class="hdetail">{h.detail}</p>
+                  </div>
                   {#if h.issues || h.action}
                     <p class="hacts">
                       {#if h.issues}
@@ -181,7 +186,7 @@
           type="button"
           class="how"
           aria-label="How box size is measured"
-          use:tooltip={{ text: "Size = √(box area ÷ image area): 10% is a box about a tenth of the image's side. Bars span their real size range and their height is boxes per 1 percentage point of size, so a bar's area is its count.", side: 'bottom' }}
+          use:tooltip={{ text: "Size = √(box area ÷ image area): 10% is a box about a tenth of the image's side. Bars span their real size range and their height is boxes per 1% of size, so a bar's area is its count. The last bar, set apart, holds every larger box.", side: 'bottom' }}
           ><Info size={14} aria-hidden="true" /></button
         >
       {/snippet}
@@ -189,7 +194,7 @@
         edges={sizeEdges}
         counts={stats.box_size_hist.counts}
         binLabel={(lo, hi) => sizeBinLabel(lo, hi)}
-        label="Histogram of box sizes relative to the image side (square root of the area share), with bins drawn at their true widths and a marker at the 5% tiny-box threshold"
+        label="Histogram of box sizes relative to the image side (square root of the area share), with bins drawn at their true widths, the largest boxes in a bar set apart, and a marker at the 5% tiny-box threshold"
         color="var(--text-tertiary)"
         hoverColor="var(--text-primary)"
         height={180}
@@ -198,7 +203,7 @@
         edgeLabel={pctEdge}
         densityPer={0.01}
         marker={{ x: TINY_SIZE, label: 'tiny' }}
-        yLabel="Boxes per 1 percentage point of size"
+        yLabel="Boxes per 1% of size"
         note="bar area is the count"
       />
     </Panel>
@@ -357,14 +362,15 @@
   .bars button:focus-visible .go {
     opacity: 1;
   }
-  /* One 40 px line per severity: icon, the level as a word, its findings' titles; it opens to the evidence. */
+  /* One 40 px line per severity: icon, the level as a word, a short summary, the count of findings on the right edge;
+     it opens to the evidence. */
   .health > li {
     border-top: 1px solid var(--line-subtle);
   }
   summary,
   .okrow {
     display: grid;
-    grid-template-columns: 16px 72px minmax(0, 1fr) 14px;
+    grid-template-columns: 16px 72px minmax(0, 1fr) auto 14px;
     align-items: center;
     gap: var(--space-3);
     min-height: 40px;
@@ -411,7 +417,16 @@
     white-space: nowrap;
   }
   .htitles {
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
     color: var(--text-secondary);
+  }
+  .hcount {
+    font-size: var(--type-sm-size);
+    color: var(--text-tertiary);
+    white-space: nowrap;
   }
   /* Errors keep their weight in the summary: the titles in ink, not grey. */
   .danger .htitles {
@@ -421,8 +436,9 @@
   .ok .htitles {
     color: var(--text-secondary);
   }
+  /* Open, the titles below say it: the line keeps the level and the count. */
   details[open] .htitles {
-    color: var(--text-tertiary);
+    visibility: hidden;
   }
   .hchev {
     display: flex;
@@ -438,10 +454,17 @@
     gap: var(--space-3);
     padding: var(--space-1) var(--space-4) var(--space-4) calc(var(--space-16) * 2);
   }
+  /* Text on the left at a reading measure, its next step on the right edge (under the count). */
   .hitems li {
     display: grid;
+    grid-template-columns: minmax(0, 72ch) auto;
+    justify-content: space-between;
+    align-items: start;
+    gap: var(--space-1) var(--space-6);
+  }
+  .htext {
+    display: grid;
     gap: 2px;
-    max-width: 72ch;
   }
   .htitle {
     font-weight: var(--weight-medium);
@@ -454,6 +477,7 @@
   .hacts {
     display: flex;
     flex-wrap: wrap;
+    justify-content: flex-end;
     gap: 0 var(--space-4);
   }
   .haction {
@@ -501,10 +525,45 @@
     .two {
       grid-template-columns: minmax(0, 1fr);
     }
-    /* Phones: the level's word shrinks to fit, and the evidence starts under the icon's right edge. */
+    /* Phones: the level, its count and the chevron on the first line; the summary under them, whole (up to two
+       lines, never cut mid-phrase); the evidence starts under the icon's right edge. */
     summary {
       grid-template-columns: 16px auto minmax(0, 1fr) 14px;
-      gap: var(--space-2);
+      grid-template-areas:
+        'icon label count chev'
+        '. sum sum .';
+      gap: 0 var(--space-2);
+      padding-block: var(--space-2);
+    }
+    summary .hicon {
+      grid-area: icon;
+    }
+    summary .hlabel {
+      grid-area: label;
+    }
+    summary .hcount {
+      grid-area: count;
+      justify-self: end;
+    }
+    summary .hchev {
+      grid-area: chev;
+    }
+    summary .htitles {
+      grid-area: sum;
+      display: -webkit-box;
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 2;
+      line-clamp: 2;
+      white-space: normal;
+    }
+    details[open] summary .htitles {
+      display: none;
+    }
+    .hitems li {
+      grid-template-columns: minmax(0, 1fr);
+    }
+    .hacts {
+      justify-content: flex-start;
     }
     .okrow {
       gap: var(--space-2);

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { binAt, binDensities } from './histogram';
+import { binAt, binDensities, proportionalBars } from './histogram';
 
 describe('binDensities', () => {
   it('divides each count by its bin width', () => {
@@ -35,5 +35,28 @@ describe('binAt', () => {
     expect(binAt(bars, 87)).toBe(2);
     expect(binAt(bars, 10)).toBeNull();
     expect(binAt(bars, 200)).toBeNull();
+  });
+});
+
+describe('proportionalBars', () => {
+  it('keeps true widths on one linear axis when every bin fits', () => {
+    const { bars, mainEnd, tail } = proportionalBars([0, 0.1, 0.3], 0.3, 0, 300, 12);
+    expect(tail).toBe(false);
+    expect(mainEnd).toBe(300);
+    expect(bars).toEqual([
+      { x: 0, w: 100 },
+      { x: 100, w: 200 },
+    ]);
+  });
+
+  it('sets an open-ended last bin apart after a gap, at the same scale (area still equals count)', () => {
+    // [0.5, 1] drawn up to 0.6: the axis 0..0.6 over 312 − 12 px = 500 px per unit.
+    const { bars, mainEnd, tail } = proportionalBars([0, 0.2, 0.5, 1], 0.6, 0, 312, 12);
+    expect(tail).toBe(true);
+    expect(mainEnd).toBeCloseTo(250);
+    expect(bars[1]!.x + bars[1]!.w).toBeCloseTo(250);
+    expect(bars[2]!.x).toBeCloseTo(262);
+    expect(bars[2]!.w).toBeCloseTo(50);
+    expect(bars[2]!.x + bars[2]!.w).toBeCloseTo(312);
   });
 });
