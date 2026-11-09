@@ -4,7 +4,7 @@
    * training; its end is a toast (RunWatch), so it is never said twice.
    */
   import { href } from '$lib/router.svelte';
-  import { eta } from '$lib/format';
+  import { asOf, etaText, Now } from '$lib/api/freshness.svelte';
   import { runProgress } from '$lib/api/progress';
   import Progress from '$lib/ui/Progress.svelte';
   import { tooltip } from '$lib/ui/tooltip';
@@ -15,6 +15,9 @@
   const live = $derived(watched.runs?.find((r) => r.status === 'running' || r.status === 'stopping'));
   const queued = $derived(watched.runs?.filter((r) => r.status === 'queued').length ?? 0);
   const progress = $derived(live ? runProgress(live) : 0);
+  // The list stopped refreshing: the card is its last known state (lib/api/freshness), so it says so and stops pulsing.
+  const since = $derived(watched.since);
+  const now = new Now(() => since !== null);
 
   // Said once, when a run starts training while Studio is open (not for the run already training at load).
   let said = $state('');
@@ -35,7 +38,8 @@
     <a
       href={href(`/runs/${live.id}`)}
       class="mini"
-      aria-label="Live run {live.name}, epoch {live.epoch} of {live.epochs}"
+      class:held={since !== null}
+      aria-label={since !== null ? `${live.name}, last known ${asOf(since, now.current)}: epoch ${live.epoch} of ${live.epochs}` : `Live run ${live.name}, epoch ${live.epoch} of ${live.epochs}`}
       use:tooltip={{ text: `${live.name} · epoch ${live.epoch}/${live.epochs}`, side: 'right' }}
     >
       <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true">
@@ -45,14 +49,14 @@
       </svg>
     </a>
   {:else}
-    <a href={href(`/runs/${live.id}`)} class="card">
+    <a href={href(`/runs/${live.id}`)} class="card" class:held={since !== null}>
       <span class="top">
         <span class="pulse" aria-hidden="true"></span>
-        <span class="label">Training</span>
-        <span class="eta num">{eta(live.eta_s)} left</span>
+        <span class="label">{since !== null ? `Last known · ${asOf(since, now.current)}` : 'Training'}</span>
+        <span class="eta num">{since !== null && live.eta_s !== null ? '~' : ''}{etaText(live.eta_s, null, now.current)}</span>
       </span>
       <span class="name truncate">{live.name}</span>
-      <Progress value={progress} size="xs" label="Training progress" />
+      <Progress value={progress} size="xs" label="Training progress" tone={since !== null ? 'neutral' : 'accent'} />
       <span class="meta num">
         <span>Epoch {live.epoch}/{live.epochs}</span>
         {#if live.best}<span>mAP {live.best.map50_95.toFixed(3)}</span>{/if}
@@ -99,6 +103,17 @@
   }
   :global([data-theme='light']) .pulse {
     background: var(--accent-line);
+  }
+  .held .arc {
+    stroke: var(--text-tertiary);
+  }
+  .held .core {
+    fill: var(--text-tertiary);
+  }
+  /* A last known state: the dot in ink and still (nothing here is current). */
+  .held .pulse {
+    background: var(--text-tertiary);
+    animation: none;
   }
   .eta {
     margin-left: auto;

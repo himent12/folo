@@ -1,3 +1,8 @@
+<script lang="ts" module>
+  /** A definition's most characters: two lines at 13 px in the 320 px popover (DESIGN_DIRECTION §2.9, help). */
+  export const HELP_MAX = 100;
+</script>
+
 <script lang="ts">
   /**
    * The ⓘ: what a chart's terms, a measure or a set of numbers mean, one tap away. A real button: a tap, a click,
@@ -11,6 +16,9 @@
    *   (the frame's ./InfoRegion: ui/Panel provides one), so it never covers the plot it explains; wider screens keep the
    *   anchored popover. Every ⓘ in a chart's header takes it (DESIGN_DIRECTION §2.12).
    * `trigger` puts words in place of the icon (New run's "30 steps / epoch", dotted underline).
+   * **Short by rule** (DESIGN_DIRECTION §2.9, help): the definition is at most two lines at 13 px (`HELP_MAX`
+   * characters, `InfoButton.svelte.test.ts` scans the literals); a formula, a method or a provenance goes in `how`, a
+   * fold inside it ("How it's computed", or `howLabel`), closed at every opening.
    */
   import Info from '@lucide/svelte/icons/info';
   import { untrack, type Snippet } from 'svelte';
@@ -29,6 +37,8 @@
     open = $bindable(false),
     side = 'bottom',
     class: klass = '',
+    how,
+    howLabel = "How it's computed",
   }: {
     /** The button's accessible name: what it explains ("What the loss terms mean"). */
     label: string;
@@ -42,6 +52,9 @@
     open?: boolean;
     side?: Side;
     class?: string;
+    /** The detail behind the short definition (a formula, how a figure is made, where weights come from), folded. */
+    how?: string | Snippet;
+    howLabel?: string;
   } = $props();
 
   const uid = $props.id();
@@ -55,7 +68,7 @@
   $effect(() => {
     if (!slot) return;
     const release = () => untrack(() => slot.content?.owner === me && (slot.content = null));
-    if (inPlace && open) slot.content = { owner: me, text, children };
+    if (inPlace && open) slot.content = { owner: me, children: help };
     else release();
     return release;
   });
@@ -170,9 +183,22 @@
     popover={native ? 'auto' : undefined}
     {ontoggle}
   >
-    {#if children}{@render children()}{:else}{text}{/if}
+    {@render help()}
   </span>
 {/if}
+
+{#snippet help()}
+  <span class="info-text">{#if children}{@render children()}{:else}{text}{/if}</span>
+  {#if how}
+    <!-- Closed each time the definition opens: the short line is what most readers need. -->
+    {#key open}
+      <details class="info-how">
+        <summary>{howLabel}</summary>
+        <span class="info-how-body">{#if typeof how === 'string'}{how}{:else}{@render how()}{/if}</span>
+      </details>
+    {/key}
+  {/if}
+{/snippet}
 
 <style>
   .info-btn {
@@ -232,13 +258,53 @@
     background: var(--bg-overlay);
     color: var(--text-secondary);
     box-shadow: var(--shadow-md);
-    font-size: var(--type-sm-size);
-    line-height: var(--type-sm-line);
+    font-size: var(--type-base-size);
+    line-height: var(--type-base-line);
     font-weight: var(--weight-regular);
     text-align: left;
     white-space: normal;
     overflow: visible;
     z-index: var(--z-tooltip);
+  }
+  .info-text {
+    display: block;
+    max-inline-size: var(--measure);
+  }
+  /* The detail, one tap further: a quiet disclosure under the definition, its body at the 12 px helper size. */
+  .info-how {
+    margin-top: var(--space-2);
+  }
+  .info-how summary {
+    display: inline-flex;
+    align-items: center;
+    min-height: 24px;
+    color: var(--text-primary);
+    text-decoration: underline;
+    text-decoration-color: var(--line-strong);
+    text-underline-offset: 3px;
+    cursor: pointer;
+    list-style: none;
+  }
+  .info-how summary::-webkit-details-marker {
+    display: none;
+  }
+  .info-how summary::after {
+    content: ' ›';
+    white-space: pre;
+  }
+  .info-how[open] summary::after {
+    content: ' ⌄';
+  }
+  .info-how-body {
+    display: block;
+    margin-top: var(--space-1);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+  }
+  @media (pointer: coarse) {
+    .info-how summary {
+      min-height: 44px;
+    }
   }
   .info-pop:not(:popover-open):not(.open) {
     display: none;

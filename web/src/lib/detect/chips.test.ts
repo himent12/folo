@@ -241,3 +241,63 @@ describe('placeChips', () => {
     });
   });
 });
+
+describe('placeChips on a small view (phones)', () => {
+  const b = { minX: 4, maxX: 354, minY: 2, maxY: 460 };
+  const H = 14;
+  const rect = (box: ChipBox, p: { dx: number; dy: number }) => ({ x: box.x + p.dx, y: box.y + p.dy, w: box.w });
+  const coversBox = (r: { x: number; y: number; w: number }, o: ChipBox) =>
+    r.x < o.x + o.bw! - 2 && r.x + r.w > o.x + 2 && r.y < o.y + o.bh! - 2 && r.y + H > o.y + 2;
+
+  it('puts a chip inside its box when it fits there, outside otherwise', () => {
+    const [big, narrow] = placeChips(
+      [
+        { x: 60, y: 60, w: 70, bw: 120, bh: 110 },
+        { x: 220, y: 200, w: 70, bw: 40, bh: 90 },
+      ],
+      b,
+      H,
+      { small: true },
+    );
+    expect(big!.side).toBe('inside');
+    expect(narrow!.side).not.toBe('inside');
+  });
+
+  it('never covers another box: flips beside its box, or waits for a tap (round 26: "hexagon 0.33" over a circle)', () => {
+    // The playground's hexagon (29..83 × 281..342) between two circles, its chip wider than it.
+    const circleA: ChipBox = { x: 57, y: 215, w: 66, bw: 114, bh: 115 };
+    const hexagon: ChipBox = { x: 29, y: 281, w: 79, bw: 54, bh: 61 };
+    const circleB: ChipBox = { x: 71, y: 352, w: 66, bw: 83, bh: 80 };
+    const boxes = [circleA, circleB, hexagon];
+    const ps = placeChips(boxes, b, H, { small: true });
+    ps.forEach((p, i) => {
+      if (p!.hidden) return;
+      const r = rect(boxes[i]!, p!);
+      boxes.forEach((o, j) => {
+        if (j === i) return;
+        const contains = o.x <= boxes[i]!.x && o.y <= boxes[i]!.y && o.x + o.bw! >= boxes[i]!.x + boxes[i]!.bw! && o.y + o.bh! >= boxes[i]!.y + boxes[i]!.bh!;
+        if (!contains) expect(coversBox(r, o), `chip ${i} over box ${j}`).toBe(false);
+      });
+    });
+  });
+
+  it('keeps every shown chip off other boxes and other chips in crowded scenes', () => {
+    for (let seed = 1; seed <= 40; seed++) {
+      const boxes = scene(seed, 10, b);
+      const ps = placeChips(boxes, b, H, { small: true });
+      const shown = ps.flatMap((p, i) => (p!.hidden ? [] : [{ i, r: rect(boxes[i]!, p!) }]));
+      for (const { i, r } of shown) {
+        expect(r.x).toBeGreaterThanOrEqual(b.minX);
+        expect(r.x + r.w).toBeLessThanOrEqual(b.maxX);
+        boxes.forEach((o, j) => {
+          if (j === i) return;
+          const own = boxes[i]!;
+          const contains = o.x <= own.x && o.y <= own.y && o.x + o.bw! >= own.x + own.bw! && o.y + o.bh! >= own.y + own.bh!;
+          if (!contains) expect(coversBox(r, o), `seed ${seed}: chip ${i} over box ${j}`).toBe(false);
+        });
+        for (const q of shown)
+          if (q.i !== i) expect(r.x < q.r.x + q.r.w && r.x + r.w > q.r.x && r.y < q.r.y + H && r.y + H > q.r.y, `seed ${seed}`).toBe(false);
+      }
+    }
+  });
+});

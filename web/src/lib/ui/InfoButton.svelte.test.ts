@@ -3,7 +3,7 @@ import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { flushSync, mount, unmount } from 'svelte';
 import { describe, expect, it } from 'vitest';
-import InfoButton from './InfoButton.svelte';
+import InfoButton, { HELP_MAX } from './InfoButton.svelte';
 import InfoPanel from './InfoPanel.test.svelte';
 
 // happy-dom has no Popover API, so these run InfoButton's own open state (the same one a browser without popovers
@@ -191,6 +191,34 @@ describe('InfoButton', () => {
       }
     }
     expect(bad).toEqual([]);
+  });
+
+  it("keeps every definition to two lines (HELP_MAX), its detail folded under How it's computed", () => {
+    const src = join(__dirname, '..', '..');
+    const files = (dir: string): string[] =>
+      readdirSync(dir).flatMap((n) => {
+        const p = join(dir, n);
+        return statSync(p).isDirectory() ? files(p) : n.endsWith('.svelte') && !n.endsWith('.test.svelte') ? [p] : [];
+      });
+    const long: string[] = [];
+    let seen = 0;
+    for (const f of files(src)) {
+      for (const m of readFileSync(f, 'utf-8').matchAll(/<InfoButton\b(?:[^<>]|=>)*?\btext="([^"]*)"/g)) {
+        seen++;
+        if (m[1]!.length > HELP_MAX) long.push(`${relative(src, f)}: ${m[1]!.length} characters: ${m[1]}`);
+      }
+    }
+    expect(seen).toBeGreaterThan(0);
+    expect(long).toEqual([]);
+    // The fold: closed on every opening, the detail behind it.
+    const { target, button, done } = setup({ text: 'A short line.', how: 'Size = √(box area ÷ image area).' });
+    button.click();
+    flushSync();
+    const fold = target.querySelector<HTMLDetailsElement>('details.info-how')!;
+    expect(fold.querySelector('summary')?.textContent).toBe("How it's computed");
+    expect(fold.open).toBe(false);
+    expect(fold.textContent).toContain('Size = √(box area');
+    done();
   });
 
   it('every ⓘ in the app is an InfoButton, never a hover-only icon button', () => {

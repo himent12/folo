@@ -153,6 +153,14 @@
      * The legend shows it; a chart without one binds this to show it in its own readout row.
      */
     hint?: string | null;
+    /**
+     * Series the pointer can pick out where they are drawn (PR curves' quiet context lines): `picked` is the one whose
+     * line passes nearest the pointer, within PICK_PX (PICK_TOUCH_PX for a tap), and a click on the plot calls `onpick`
+     * with it. A tap pins the cursor and picks.
+     */
+    pick?: (s: Series) => boolean;
+    picked?: string | null;
+    onpick?: (id: string) => void;
   }
 
   let {
@@ -186,6 +194,9 @@
     recede = false,
     endDots = false,
     hint = $bindable(null),
+    pick,
+    picked = $bindable(null),
+    onpick,
   }: Props = $props();
   // A pulse the chart was mounted with is old news (a tab switch, a return to a finished run): only a newer one plays.
   const pulseBase = untrack(() => Math.max(0, ...markers.map((m) => m.pulse ?? 0)));
@@ -286,7 +297,8 @@
     // ~7 px per character at 11 px Geist (tabular digits); end labels are 12 px, measured (textWidth).
     // Plus room for a leader, when labels are moved apart (LEAD).
     const widest = Math.max(0, ...series.map((s) => endShown(s)).map((t) => (t === null ? 0 : textWidth(t))));
-    const labelW = showEnds ? Math.min(130, widest + 6) + LEAD - 6 : 0;
+    // The gutter column holds the widest label whole (a failed or stopped run's "name · failed" goes there).
+    const labelW = showEnds ? Math.min(GUTTER_MAX, widest + 6) + LEAD - 6 : 0;
     const left = Math.ceil(longest * 7) + 14;
     // An x-axis title gets its own line under the tick labels; a y-axis name or an x mark's label one above the plot.
     return { top: yLabel || xMark ? 24 : 8, right: 12 + labelW, bottom: xLabel ? 36 : 22, left };
@@ -363,6 +375,8 @@
 
   /** How far right of the plot the label column moves when it needs leaders: short ones, fanning from each line's end. */
   const LEAD = 14;
+  /** The widest the gutter column grows for its labels, px ("shapes-hard-m · failed" at 12 px semibold is ~150). */
+  const GUTTER_MAX = 176;
   /** Where a leader starts: just outside the line's end marker (the live ring is wider), px from its centre. */
   const endR = (id: string) => {
     if (!endDots) return 3;
@@ -382,7 +396,10 @@
         const p = s.points[s.points.length - 1];
         const curve = visible.indexOf(s);
         const label = endShown(s)!;
-        return p && Number.isFinite(p.y) ? { id: s.id, label, x: x(p.x), y: yTo(p.y), curve, w: textWidth(label) } : null;
+        // A line that has ended short of the plot's edge (failed, stopped) is labelled in the gutter column at its last
+        // height, like a completed run's (endLabels `gutter`).
+        const gutter = s.end === 'failed' || s.end === 'stopped';
+        return p && Number.isFinite(p.y) ? { id: s.id, label, x: x(p.x), y: yTo(p.y), curve, w: textWidth(label), gutter } : null;
       })
       .filter((e): e is NonNullable<typeof e> => e !== null)
       // The highlighted line is labelled first, so it never loses its spot; then the shortest lines, which are the
@@ -493,10 +510,47 @@
       keyFocus = false;
     }
   }
-  // A cursor cleared elsewhere (a synced chart, blur) is no longer pinned here.
+  // A cursor cleared elsewhere (a synced chart, blur) is no longer pinned here, and picks nothing.
   $effect(() => {
-    if (cursor === null) pinned = false;
+    if (cursor === null) {
+      pinned = false;
+      picked = null;
+    }
   });
+
+  /** How near a line the pointer picks it out (`pick`), px: a mouse, and a finger. */
+  const PICK_PX = 10;
+  const PICK_TOUCH_PX = 20;
+  /** The pickable series whose drawn line passes nearest (px, py), within `r` px; null for none. */
+  function pickAt(px: number, py: number, r: number): string | null {
+    if (!pick || !inPlot(px)) return null;
+    let best: string | null = null;
+    let bd = r;
+    for (const s of visible) {
+      if (!pick(s)) continue;
+      const pts = s.points;
+      for (let i = 1; i < pts.length; i++) {
+        const a = pts[i - 1]!;
+        const b = pts[i]!;
+        if (!Number.isFinite(a.y) || !Number.isFinite(b.y)) continue;
+        const ax = x(a.x);
+        const bx = x(b.x);
+        if (Math.max(ax, bx) < px - bd || Math.min(ax, bx) > px + bd) continue;
+        const ay = y(a.y);
+        const by = y(b.y);
+        // Distance from the point to the segment.
+        const dx = bx - ax;
+        const dy = by - ay;
+        const t = dx || dy ? Math.min(1, Math.max(0, ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy))) : 0;
+        const d = Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+        if (d < bd) {
+          bd = d;
+          best = s.id;
+        }
+      }
+    }
+    return best;
+  }
   $effect(() => {
     if (!pinned) return;
     const outside = (e: PointerEvent) => {
@@ -520,9 +574,16 @@
     gesture = new TouchGesture(px, py, pinned && hover ? hover.px : null);
   }
   function onpointerup(e: PointerEvent) {
-    if (!touchy(e) || !gesture) return;
-    apply(gesture.up(local(e).px));
+    if (!touchy(e)) {
+      // A click on a picked line (`pick`) acts on it.
+      if (picked !== null && e.button === 0) onpick?.(picked);
+      return;
+    }
+    if (!gesture) return;
+    const { px, py } = local(e);
+    apply(gesture.up(px));
     gesture = null;
+    picked = pinned ? pickAt(px, py, PICK_TOUCH_PX) : null;
   }
   function onpointercancel() {
     if (gesture) apply(gesture.cancel());
@@ -537,9 +598,13 @@
     }
     pinned = false;
     cursor = inPlot(px) ? x.invert(px) : null;
+    if (pick) picked = pickAt(px, py, PICK_PX);
   }
   function onpointerleave(e: PointerEvent) {
-    if (!touchy(e) && !pinned) cursor = null;
+    if (!touchy(e) && !pinned) {
+      cursor = null;
+      picked = null;
+    }
   }
 
   // Narrow plots: the cursor's x reads out on the axis, not in the legend's note.
@@ -723,6 +788,7 @@
       <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
       <svg
         bind:this={svgEl}
+        class:picking={picked !== null && !!onpick}
         {width}
         {height}
         role="group"
@@ -779,7 +845,10 @@
                 </linearGradient>
               {/if}
             {/each}
+            <!-- A fitted domain that does not start at 0 (Compare's "Fit") cuts a line's early climb at the baseline. -->
+            <clipPath id="{uid}-plot"><rect x="0" y="0" {width} height={Math.max(0, height - margin.bottom + 1)} /></clipPath>
           </defs>
+          <g clip-path="url(#{uid}-plot)">
           {#each paths.filter((p) => p.b) as { s, b } (s.id)}
             <path class="band" d={b} style:fill={s.color} />
           {/each}
@@ -805,6 +874,7 @@
               style:stroke-dasharray={dashOf(s, s.id === highlight ? 1.4 : 1)}
             />
           {/each}
+          </g>
           {#if endDots}
             {#each lifted(paintOrder(keyed, (s) => s), (s) => s.id) as s (s.id)}
               {@const p = s.points[s.points.length - 1]}
@@ -873,7 +943,8 @@
           {#if hover}
             <line class="cursor" class:pinned x1={hover.px} x2={hover.px} y1={margin.top} y2={height - margin.bottom} />
             {#each hover.rows as r (r.s.id)}
-              {#if Number.isFinite(r.p.y) && (!yLog || r.p.y > 0)}
+              <!-- None for a value under a fitted floor: the line is cut there, and the legend reads it. -->
+              {#if Number.isFinite(r.p.y) && (!yLog || r.p.y > 0) && r.p.y >= yShown[0] - 1e-9}
                 <circle class="dot" cx={x(r.p.x)} cy={y(r.p.y)} r="3.5" style:fill={contextual(r.s) ? 'var(--chart-context)' : r.s.color} />
               {/if}
             {/each}
@@ -971,6 +1042,10 @@
     display: block;
     overflow: visible;
     touch-action: pan-y;
+  }
+  /* Over a line a click acts on (`pick`, `onpick`). */
+  svg.picking {
+    cursor: pointer;
   }
   /* Focus: the global :focus-visible ring (base.css), never a halo of its own (DESIGN_DIRECTION §2.9). */
   .grid line {

@@ -4,6 +4,14 @@
 
 import type { Model } from '$lib/api/types';
 
+/**
+ * A run that started from no weights, one wording in two cases (DESIGN_DIRECTION §2.23): sentence case as a value (a
+ * table cell, a Config value, a chip, a legend line: "From scratch") and lowercase inside a meta line, where it runs on
+ * from the items before it ("fasteners · folo-s · from scratch"). Nothing else spells it (`lineage.test.ts`).
+ */
+export const FROM_SCRATCH = 'From scratch';
+export const FROM_SCRATCH_META = 'from scratch';
+
 export type Origin =
   | { kind: 'scratch'; label: 'scratch' }
   | { kind: 'model'; id: string; label: string }

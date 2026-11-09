@@ -16,7 +16,7 @@
   import type { QueueRequest } from '$lib/api/types';
   import { media } from '$lib/design/tokens';
   import { ago, deviceName, eta } from '$lib/format';
-  import { origin } from '$lib/lineage';
+  import { FROM_SCRATCH_META, origin } from '$lib/lineage';
   import { href, router } from '$lib/router.svelte';
   import { setCrumbs } from '$lib/shell/crumbs.svelte';
   import Page from '$lib/shell/Page.svelte';
@@ -364,13 +364,16 @@
       {#if live.connection === 'reconnecting'}<Badge tone="warning"><WifiOff size={12} /> Reconnecting</Badge>{/if}
     {/snippet}
     {#snippet sub()}
-      <Meta>
+      <!-- One line from 1024 px up, its last item ("started yesterday") never alone on a second one: below 1280 the
+           size and batch step out (Config has them), below 1024 the time joins the status row and, on a line with the
+           precision or head items, the device steps out too. Phones keep the dataset, model and lineage. -->
+      <Meta class={run.config.amp || run.config.head === 'o2o' ? 'run-meta extra' : 'run-meta'}>
         <a class="link" href={href(`/datasets/${run.config.dataset_id}`)}>{dataset?.name ?? run.config.dataset_id}</a>
         <Ident value={run.config.arch} />
         <!-- Phones: size, batch and device are in the Config section; the id is in the URL. -->
-        <span class="cfg num">{run.config.imgsz} px</span>
-        <span class="cfg num">batch {run.config.batch}</span>
-        <span class="cfg lineage">{#if !lineage || lineage.kind === 'scratch'}From scratch{:else}Fine-tuned from <Lineage origin={lineage} />{/if}</span>
+        <span class="cfg num size">{run.config.imgsz} px</span>
+        <span class="cfg num size">batch {run.config.batch}</span>
+        <span class="cfg lineage">{#if !lineage || lineage.kind === 'scratch'}{FROM_SCRATCH_META}{:else}fine-tuned from <Lineage origin={lineage} />{/if}</span>
         <!-- Only where they differ from the defaults (f32, the NMS head); Config always says both. -->
         {#if run.config.amp}<span class="cfg">Mixed precision</span>{/if}
         {#if run.config.head === 'o2o'}<span class="cfg">{HEAD_LABEL.o2o}</span>{/if}
@@ -443,8 +446,8 @@
         </div>
       </div>
     {:else}
-    <!-- Phones: while another section is picked, the chart folds to its one-line readout so that section starts in
-         the first screen. -->
+    <!-- Phones: the chart is open or folded to its one-line readout by one remembered state, the same in every section
+         (RunMetrics chartFold). -->
     <RunMetrics
       {run}
       steps={live.steps}
@@ -452,7 +455,6 @@
       version={live.version}
       loading={live.loading}
       queued={queuedOnly}
-      folded={section !== 'samples'}
       {evalOn}
     />
 
@@ -863,6 +865,19 @@
     display: grid;
     min-width: 0;
   }
+  /* Beside the rail, the two columns share their rows (subgrid): Validation samples and Per class start and end
+     together (the shorter one's frame stretches, as panels side by side do, DESIGN_DIRECTION §2.8), then the log and
+     Config share the rest, so no panel bottom sits 100 px off its neighbour's (round 26). */
+  @media (min-width: 1024px) {
+    .detail {
+      grid-template-rows: auto minmax(0, 1fr);
+    }
+    .main-col,
+    .rail {
+      grid-row: 1 / 3;
+      grid-template-rows: subgrid;
+    }
+  }
   .phone-pick {
     display: none;
   }
@@ -899,6 +914,23 @@
     /* One section at a time: the log keeps its own height. */
     .detail {
       --log-h: 300px;
+    }
+  }
+  /* The header's meta line holds one row at every tier: a middle item steps out before the last one would wrap alone. */
+  @media (max-width: 1279px) {
+    .size {
+      display: none;
+    }
+  }
+  @media (min-width: 768px) and (max-width: 1023px) {
+    .when {
+      display: none;
+    }
+    .when-phone {
+      display: inline;
+    }
+    :global(.run-meta.extra > .dev) {
+      display: none;
     }
   }
   @media (max-width: 767px) {

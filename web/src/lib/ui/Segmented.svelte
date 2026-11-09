@@ -12,7 +12,10 @@
     meta?: string;
     /** Shown but not selectable (e.g. "coming soon"). */
     disabled?: boolean;
-    /** Why a disabled option is off: its tooltip (pair it with a visible line the group is described by). */
+    /**
+     * Why a disabled option is off: its tooltip, and its accessible description (`aria-describedby`), so the reason is
+     * never pointer-only (pair it with a visible line the group is described by).
+     */
     tip?: string;
   }
 
@@ -44,6 +47,7 @@
   } = $props();
 
   const field = getField();
+  const uid = $props.id();
   let root: HTMLDivElement;
 
   function select(v: T) {
@@ -91,8 +95,10 @@
   {#each options as o (o.value)}
     {@const on = o.value === value}
     {#if o.disabled && o.tip}
-      <!-- A disabled button takes no pointer events in some browsers: the wrapper takes the hover, as ui/Gate does. -->
+      <!-- A disabled button takes no pointer events in some browsers: the wrapper takes the hover, as ui/Gate does. The
+           reason is also the option's description, for assistive technology (a tooltip is a pointer's alone). -->
       <span class="tip" use:tooltip={o.tip}>{@render option(o, on)}</span>
+      <span class="sr-only" id="{uid}-{o.value}-why">{o.tip}</span>
     {:else}
       {@render option(o, on)}
     {/if}
@@ -108,6 +114,7 @@
     class:on
     class:icon-only={iconOnly && o.icon}
     disabled={disabled || o.disabled}
+    aria-describedby={o.disabled && o.tip ? `${uid}-${o.value}-why` : undefined}
     onclick={() => select(o.value)}
     aria-label={iconOnly ? o.label : undefined}
     title={iconOnly ? o.label : undefined}

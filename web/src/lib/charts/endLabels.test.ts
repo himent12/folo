@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CLEAR, LABEL_GAP, LABEL_H, labelWidth, leaderOf, MAX_REACH, memoPlaceEndLabels, needsLeader, placeEndLabels, type Placed } from './endLabels';
+import { CLEAR, GUTTER_SLOT, LABEL_GAP, LABEL_H, labelWidth, leaderOf, MAX_REACH, memoPlaceEndLabels, needsLeader, placeEndLabels, type Placed } from './endLabels';
 
 const bounds = { x0: 0, y0: 0, x1: 600, y1: 300 };
 const line = (pts: [number, number][]) => pts.map(([x, y]) => ({ x, y }));
@@ -128,8 +128,9 @@ describe('placeEndLabels: the gutter column', () => {
     for (const p of placed) expect(p.y + 7).toBeLessThanOrEqual(300);
   });
 
-  it('keeps labels a clear gap apart, with leaders for those moved off their line', () => {
-    // The loss chart's box and dfl ending 1 px apart at the plot's edge, and the comparison's two runs ending at 100 %.
+  it('gives each label in the column its own 14 px slot: lines ending together are labelled at their ends, no leaders', () => {
+    // Round 26: Run › Loss's box and dfl, ending 1 px apart at the plot's edge, were pushed 28 px apart with a "<" of
+    // leaders between them. In 14 px slots each sits within 7 px of its own end.
     const flat = (y: number) => line([[0, y], [500, y]]);
     const ends = [
       { id: 'box', label: 'box', x: 500, y: 170, curve: 0 },
@@ -138,15 +139,31 @@ describe('placeEndLabels: the gutter column', () => {
     ];
     const placed = placeEndLabels(ends, [flat(170), flat(171), flat(210)], bounds, 2, 500, { gap: 10, lead: 14 });
     expect(placed).toHaveLength(3);
-    const ys = placed.map((p) => p.y).sort((a, b) => a - b);
-    // A gap asked below the rule's 12 px is raised to it: one 16 px label box plus 12 px between centres.
-    for (let i = 1; i < ys.length; i++) expect(ys[i]! - ys[i - 1]!).toBeGreaterThanOrEqual(LABEL_H + LABEL_GAP);
-    // Moved apart, the column steps out for the leaders; the labels stay inside the bounds.
+    const at = Object.fromEntries(placed.map((p) => [p.id, p]));
+    expect(GUTTER_SLOT).toBe(14);
+    expect(at.dfl!.y - at.box!.y).toBe(GUTTER_SLOT);
+    for (const e of ends) expect(Math.abs(at[e.id]!.y - e.y)).toBeLessThanOrEqual(GUTTER_SLOT / 2);
+    expect(placed.some(needsLeader)).toBe(false);
+    // One column, one left edge, inside the bounds.
     for (const p of placed) {
-      expect(p.x).toBe(514);
+      expect(p.x).toBe(506);
       expect(p.x + labelWidth(p.label)).toBeLessThanOrEqual(600);
     }
+  });
+
+  it('ties a label moved further than its slot to its end with a leader inside the gutter only', () => {
+    // Four lines ending within 2 px: the outer labels move 21 px, and their short leaders run in the gutter.
+    const ends = ['a', 'b', 'c', 'd'].map((id, i) => ({ id, label: id, x: 500, y: 150 + i * 0.5, curve: i }));
+    const placed = placeEndLabels(ends, ends.map((e) => line([[0, e.y], [500, e.y]])), bounds, 2, 500, { lead: 14 });
+    expect(placed).toHaveLength(4);
+    const ys = placed.map((p) => p.y).sort((a, b) => a - b);
+    for (let i = 1; i < ys.length; i++) expect(ys[i]! - ys[i - 1]!).toBeCloseTo(GUTTER_SLOT, 6);
     expect(placed.some(needsLeader)).toBe(true);
+    for (const p of placed) {
+      expect(p.x).toBe(514);
+      const l = leaderOf(p);
+      if (l) expect(Math.min(l.x1, l.x2)).toBeGreaterThanOrEqual(500);
+    }
   });
 
   it('labels a line ending at the plot edge in the column, beside its end when nothing crowds it', () => {
@@ -165,7 +182,7 @@ function clearance(a: Placed, b: Placed): number {
 }
 
 describe('placeEndLabels: the 12 px gap', () => {
-  it('never draws two labels closer than 12 px, whatever the caller asks and however the lines end', () => {
+  it('never draws two labels closer than 12 px in the plot, nor two in the column closer than a slot', () => {
     // Round 22: Run › Loss drew box and dfl with their 16 px text boxes 10 px apart (a 14 px box was assumed).
     const flat = (y: number) => line([[0, y], [500, y]]);
     let seed = 7;
@@ -184,13 +201,18 @@ describe('placeEndLabels: the 12 px gap', () => {
       const curves = ends.map((e) => line([[0, e.y + 40], [e.x, e.y]]));
       const gap = [undefined, 2, 4, 10, 12, 16][trial % 6];
       const placed = placeEndLabels(ends, [...curves, flat(60)], bounds, 2, atEdge ? 500 : undefined, { gap, lead: 14 });
+      const inColumn = (p: Placed) => atEdge && p.x >= 500;
       for (let i = 0; i < placed.length; i++)
-        for (let j = i + 1; j < placed.length; j++)
-          expect(clearance(placed[i]!, placed[j]!), `trial ${trial}`).toBeGreaterThanOrEqual(Math.max(gap ?? 0, LABEL_GAP) - 1e-9);
+        for (let j = i + 1; j < placed.length; j++) {
+          const A = placed[i]!;
+          const B = placed[j]!;
+          if (inColumn(A) && inColumn(B)) expect(Math.abs(A.y - B.y), `trial ${trial}`).toBeGreaterThanOrEqual(GUTTER_SLOT - 1e-9);
+          else expect(clearance(A, B), `trial ${trial}`).toBeGreaterThanOrEqual(Math.max(gap ?? 0, LABEL_GAP) - 1e-9);
+        }
     }
   });
 
-  it("keeps the loss chart's box and dfl 12 px apart where both lines end together", () => {
+  it("labels the loss chart's box and dfl in neighbouring slots where both lines end together", () => {
     const flat = (y: number) => line([[0, y], [500, y]]);
     const ends = [
       { id: 'total', label: 'total', x: 500, y: 100, curve: 0 },
@@ -201,8 +223,8 @@ describe('placeEndLabels: the 12 px gap', () => {
     const placed = placeEndLabels(ends, ends.map((e) => flat(e.y)), bounds, 2, 500, { lead: 14 });
     expect(placed).toHaveLength(4);
     const at = Object.fromEntries(placed.map((p) => [p.id, p]));
-    expect(clearance(at.box!, at.dfl!)).toBeGreaterThanOrEqual(LABEL_GAP);
-    expect(needsLeader(at.box!) || needsLeader(at.dfl!)).toBe(true);
+    expect(at.dfl!.y - at.box!.y).toBe(GUTTER_SLOT);
+    expect(needsLeader(at.box!) || needsLeader(at.dfl!)).toBe(false);
   });
 });
 
@@ -243,12 +265,27 @@ describe("placeEndLabels: other runs' lines are obstacles", () => {
     if (l) expect(crosses(l, other)).toBe(false);
   });
 
-  it('labels a line that ends among the others: the clear spot whose leader crosses the fewest lines, nearest its end', () => {
+  it('labels a line that ends among the others in the gutter column at its last height, with no leader across them', () => {
+    // Round 26 at 820: the last resort set "shapes-hard-m · failed" above "fasteners-s · live", its leader through that
+    // label and the blue line. With a gutter it goes to the column, level with its end.
+    const own = line([[0, 280], [200, 150]]);
+    const above = line([[100, 140], [440, 140]]);
+    const below = [160, 175, 190].map((y) => line([[100, y], [440, y]]));
+    const placed = placeEndLabels([{ id: 'a', label: 'shapes-hard-m · failed', x: 200, y: 150, curve: 0 }], [own, above, ...below], bounds, 2, 440);
+    expect(placed).toHaveLength(1);
+    const p = placed[0]!;
+    expect(p.x).toBeGreaterThanOrEqual(440);
+    expect(p.y).toBe(150);
+    expect(p.detached).toBe(true);
+    expect(leaderOf(p)).toBeNull();
+  });
+
+  it('labels a line that ends among the others: without a gutter, the clear spot whose leader crosses the fewest lines', () => {
     // Round 25: Compare's failed shapes-hard-m ended between two other runs with no free spot near it, and had no label.
     const own = line([[0, 280], [200, 150]]);
     const above = line([[100, 140], [600, 140]]);
     const below = [160, 175, 190].map((y) => line([[100, y], [600, y]]));
-    const placed = placeEndLabels([{ id: 'a', label: 'shapes-hard-m · failed', x: 200, y: 150, curve: 0 }], [own, above, ...below], bounds, 2, 560);
+    const placed = placeEndLabels([{ id: 'a', label: 'shapes-hard-m · failed', x: 200, y: 150, curve: 0 }], [own, above, ...below], bounds, 2);
     expect(placed).toHaveLength(1);
     const p = placed[0]!;
     // Above the one line, not below the three, and clear of every line it does not name.
@@ -260,6 +297,70 @@ describe("placeEndLabels: other runs' lines are obstacles", () => {
 });
 
 describe('placeEndLabels: leaders only from the gutter', () => {
+  it('labels a failed or stopped line in the gutter column at its last height, like a completed one', () => {
+    // Its spot beside the marker is clear, but a line that has ended is read with the others that ended, at the right.
+    const own = line([[0, 280], [200, 150]]);
+    const done = line([[0, 270], [500, 120]]);
+    const ends = [
+      { id: 'a', label: 'shapes-hard-s · stopped', x: 200, y: 150, curve: 0, gutter: true },
+      { id: 'b', label: 'fasteners-n', x: 500, y: 120, curve: 1 },
+    ];
+    const placed = placeEndLabels(ends, [own, done], bounds, 2, 500, { lead: 14 });
+    const at = Object.fromEntries(placed.map((p) => [p.id, p]));
+    expect(at.a!.x).toBe(at.b!.x);
+    expect(at.a!.x).toBeGreaterThanOrEqual(500);
+    expect(at.a!.y).toBe(150);
+    expect(at.b!.y).toBe(120);
+    expect(leaderOf(at.a!)).toBeNull();
+  });
+
+  it('never draws a leader across another label or another line, however the lines end', () => {
+    let seed = 11;
+    const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+    const names = ['fasteners-s · live', 'box', 'shapes-hard-m · failed', 'dfl'];
+    for (let trial = 0; trial < 150; trial++) {
+      const n = 2 + Math.floor(rnd() * 3);
+      const ends = Array.from({ length: n }, (_, i) => ({
+        id: `l${i}`,
+        label: names[i % 4]!,
+        x: rnd() < 0.5 ? 440 : 100 + Math.floor(rnd() * 340),
+        y: 100 + Math.floor(rnd() * 60),
+        curve: i,
+        gutter: rnd() < 0.3,
+      }));
+      const curves = ends.map((e) => line([[0, e.y + 40 + rnd() * 40], [e.x * 0.5, e.y + rnd() * 20 - 10], [e.x, e.y]]));
+      const placed = placeEndLabels(ends, curves, bounds, 2, 440, { lead: 14 });
+      expect(placed, `trial ${trial}`).toHaveLength(n);
+      for (const p of placed) {
+        const l = leaderOf(p);
+        if (!l) continue;
+        const k = ends.findIndex((e) => e.id === p.id);
+        curves.forEach((c, j) => j !== k && expect(crosses(l, c), `trial ${trial}`).toBe(false));
+        for (const q of placed) {
+          if (q === p) continue;
+          const t = q.y - LABEL_H / 2;
+          const b = q.y + LABEL_H / 2;
+          const box = line([[q.x, t], [q.x + q.w, t], [q.x + q.w, b], [q.x, b], [q.x, t]]);
+          expect(crosses(l, box), `trial ${trial}`).toBe(false);
+        }
+      }
+    }
+  });
+
+  it('moves a label beside its marker into the column when the column runs into it', () => {
+    // a ends just left of the gutter, its label beside it reaching into the column where b's label must go.
+    const a = line([[0, 200], [480, 150]]);
+    const b = line([[0, 260], [500, 152]]);
+    const ends = [
+      { id: 'a', label: 'fasteners-s · live', x: 480, y: 150, curve: 0 },
+      { id: 'b', label: 'fasteners-n', x: 500, y: 152, curve: 1 },
+    ];
+    const placed = placeEndLabels(ends, [a, b], bounds, 2, 500, { lead: 14 });
+    expect(placed).toHaveLength(2);
+    const [p, q] = placed;
+    expect(clearance(p!, q!) >= LABEL_GAP || (p!.x === q!.x && Math.abs(p!.y - q!.y) >= GUTTER_SLOT)).toBe(true);
+  });
+
   it('keeps a label inside the plot beside its marker or in the gutter while either has room', () => {
     // A line ending mid-plot with others crowding every spot beside its end: no spot beside it, none in reach of the
     // gutter, so it takes the last resort (a clear spot whose leader crosses the fewest lines) rather than no label.
@@ -294,17 +395,25 @@ describe('placeEndLabels: cost', () => {
     // Round 26 review: the last resort tested every grid box of the plot against every segment, ~240 ms for four
     // 150-point lines. The fastest of five runs, so a busy CI machine does not fail it; it was ~140 ms, now ~2 ms.
     const { points, curves, bounds } = crowded();
+    const timed = (gutter?: number) => {
+      let best = Infinity;
+      for (let i = 0; i < 5; i++) {
+        const t = performance.now();
+        placeEndLabels(points, curves, bounds, 2, gutter, { lead: 14 });
+        best = Math.min(best, performance.now() - t);
+      }
+      return best;
+    };
+    // Without a gutter, some label goes to the last resort: inside the plot, off its line's end.
+    const free = placeEndLabels(points, curves, bounds, 2, undefined, { lead: 14 });
+    expect(free).toHaveLength(4);
+    expect(free.some(needsLeader)).toBe(true);
+    expect(timed()).toBeLessThan(10);
+    // With one, the lines ending mid-plot among the others go to the gutter column.
     const placed = placeEndLabels(points, curves, bounds, 2, 820, { lead: 14 });
     expect(placed).toHaveLength(4);
-    // Some label went to the last resort: inside the plot, off its line's end.
-    expect(placed.some((p) => p.x < 820 && needsLeader(p))).toBe(true);
-    let best = Infinity;
-    for (let i = 0; i < 5; i++) {
-      const t = performance.now();
-      placeEndLabels(points, curves, bounds, 2, 820, { lead: 14 });
-      best = Math.min(best, performance.now() - t);
-    }
-    expect(best).toBeLessThan(10);
+    expect(placed.some((p) => p.detached)).toBe(true);
+    expect(timed(820)).toBeLessThan(10);
   });
 
   it('places again only when what it places changes (memoPlaceEndLabels)', () => {

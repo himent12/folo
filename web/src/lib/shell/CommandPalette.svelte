@@ -15,7 +15,7 @@
   import ScanSearch from '@lucide/svelte/icons/scan-search';
   import { hub } from '$lib/api/index.svelte';
   import { failureCause } from '$lib/oom';
-  import type { Dataset, Model, Run } from '$lib/api/types';
+  import type { Dataset, Model, Run, RunStatus } from '$lib/api/types';
   import { prefs } from '$lib/prefs.svelte';
   import { router } from '$lib/router.svelte';
   import Ident from '$lib/ui/Ident.svelte';
@@ -52,6 +52,8 @@
     scoped?: boolean;
     /** A Recent entry: the id of the item it repeats (what is remembered when it is chosen). */
     origin?: string;
+    /** A run's status, from the API's enum: what filters read, never the hint's display word. */
+    status?: RunStatus;
     run: () => void;
   }
 
@@ -84,6 +86,9 @@
   });
 
   const go = (path: string) => () => router.go(path);
+  const ACTIVE: RunStatus[] = ['running', 'stopping', 'queued'];
+  /** How long typing must pause before the result count is announced. */
+  const ANNOUNCE_MS = 500;
 
   const items = $derived.by((): Item[] => {
     // What the page on screen offers (shell/pageCommands): first, under This page.
@@ -132,6 +137,7 @@
       label: x.name,
       hint: [failureCause(x) ? 'Failed, out of GPU memory' : STATUS_LABEL[x.status], { ident: x.config.arch }, `epoch ${x.epoch}/${x.epochs}`],
       icon: Activity,
+      status: x.status,
       run: go(`/runs/${x.id}`),
     }));
     const d: Item[] = datasets.map((x) => ({
@@ -178,8 +184,9 @@
         run: go(`/playground?model=${encodeURIComponent(x.id)}`),
       })),
     ];
-    // With no query: navigation, the actions and the runs in flight.
-    const idle = (i: Item) => i.group === 'Go to' || i.group === 'Actions' || (i.group === 'Runs' && (i.hint?.[0] === 'running' || i.hint?.[0] === 'queued'));
+    // With no query: navigation, the actions and the runs in flight. A filter reads the status enum, never the hint's
+    // display word ("Running"): round 26's lowercase comparison against the sentence-case label dropped every run.
+    const idle = (i: Item) => i.group === 'Go to' || i.group === 'Actions' || (i.status !== undefined && ACTIVE.includes(i.status));
     return [...page, ...nav, ...actions, ...onEntity, ...r.map((i) => ({ ...i, scoped: !idle(i) })), ...d.map((i) => ({ ...i, scoped: true })), ...m.map((i) => ({ ...i, scoped: true }))];
   });
 
@@ -209,6 +216,17 @@
   });
 
   const flat = $derived(grouped.flatMap((g) => g.items.map((x) => x.item)));
+
+  // The result count, said politely once typing pauses ("5 results", "No results"), so a screen reader hears what the
+  // query found without leaving the field (focus stays in the input). Not said at open, where nothing was searched.
+  let said = $state('');
+  $effect(() => {
+    const q = query.trim();
+    const n = flat.length;
+    if (!open || !q) return void (said = '');
+    const t = setTimeout(() => (said = n === 0 ? 'No results' : n === 1 ? '1 result' : `${n} results`), ANNOUNCE_MS);
+    return () => clearTimeout(t);
+  });
 
   $effect(() => {
     void query;
@@ -314,6 +332,7 @@
         <li class="none" role="presentation">No matches for “{query}”</li>
       {/each}
     </ul>
+    <p class="sr-only" role="status" aria-live="polite" data-testid="palette-count">{said}</p>
     <footer>
       <span><Kbd keys="ArrowUp" subtle /><Kbd keys="ArrowDown" subtle /> move</span>
       <span><Kbd keys="Enter" subtle /> open</span>
@@ -369,6 +388,12 @@
   }
   input:focus-visible {
     outline: none;
+  }
+  /* Touch: the query at 16 px (type.lg), under which iOS zooms the page into the field (touchText.test.ts). */
+  @media (pointer: coarse) {
+    input {
+      font-size: var(--type-lg-size);
+    }
   }
   /* The results scroll with the dialog's edge shades (base.css .scroll-shade); 8 px under the last item, so the end of
      the list reads as its end, clear of the footer. */

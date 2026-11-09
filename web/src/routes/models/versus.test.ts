@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { unlike, unlikeSentence, versusYolo26n } from '$lib/benchmarks';
+import { unlike, unlikeCondition, versusYolo26n } from '$lib/benchmarks';
 
 describe('engine speed rows', () => {
   it('keep each qualifier to one short line; longer notes go to the measurement fold', () => {
@@ -17,10 +17,10 @@ describe('engine speed rows', () => {
   });
 });
 
-describe('unlikeSentence', () => {
-  it('says the conditions in one line for phones, and that there is no winner', () => {
-    expect(unlikeSentence(unlike['GPU forward throughput, batch 16']!)).toBe('Different precision: f32 vs TensorFloat-32, no winner');
-    expect(unlikeSentence(unlike['GPU end-to-end throughput, batch 16']!)).toBe('Different precision and work: f32 vs fp16, no winner');
-    expect(unlikeSentence(unlike['Training peak GPU memory']!)).toBe('Different work: train step vs trainer, no winner');
+describe('unlikeCondition', () => {
+  it('says each row its own condition only ("no winner" is the legend, said once)', () => {
+    expect(unlikeCondition(unlike['GPU forward throughput, batch 16']!)).toBe('Different precision: f32 vs TensorFloat-32');
+    expect(unlikeCondition(unlike['GPU end-to-end throughput, batch 16']!)).toBe('Different precision and work: f32 vs fp16');
+    expect(unlikeCondition(unlike['Training peak GPU memory']!)).toBe('Different work: train step vs trainer');
   });
 });

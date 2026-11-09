@@ -221,5 +221,25 @@
     :global(.cta-row) .btn.square {
       padding: 0;
     }
+    /* A block of ways out on a phone (`.cta-links`: run/Callout's actions, ui/ErrorState's, the Playground's notice) is
+       one button and a row of text links (DESIGN_DIRECTION §12): the lime primary, when there is one, across the block;
+       every other action a text link after it, so three stacked 44 px buttons never push the content 200 px down
+       (round 26). With no primary the first action stays a button and the rest are links. */
+    :global(.cta-links) > .primary {
+      flex: 1 0 100%;
+    }
+    :global(.cta-links:has(> .primary) > .btn:not(.primary)),
+    :global(.cta-links:not(:has(> .primary)) > .btn ~ .btn) {
+      --h: 32px;
+      padding: 0;
+      background: none;
+      border-color: transparent;
+      box-shadow: none;
+      color: var(--text-primary);
+      font-size: var(--type-base-size);
+      text-decoration: underline;
+      text-decoration-color: var(--line-strong);
+      text-underline-offset: 3px;
+    }
   }
 </style>

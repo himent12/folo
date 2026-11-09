@@ -30,6 +30,8 @@
   import Search from '@lucide/svelte/icons/search';
   import X from '@lucide/svelte/icons/x';
   import { classMetrics, matchesClass, prContext, prEnvelope, trimPrTail } from './pr';
+  import { prDomain, PR_ZOOM, UNIT_ZOOM_NOTE } from '$lib/charts/domain';
+  import { untrack } from 'svelte';
   import { media } from '$lib/design/tokens';
 
   let {
@@ -111,8 +113,38 @@
     ...lit.map((i) => ({ id: `c${i}`, label: name(i), color: classStroke(i), points: trimPrTail(ev.curves[i] ?? []), emphasis: true })),
   ]);
 
+  // A near-perfect model (every class above 0.9 precision under recall 0.95) is a flat line on a 0–1 frame's top edge:
+  // its axis is zoomed to 0.8–1, says so, and the plot is shorter (./domain prDomain, DESIGN_DIRECTION §2.4).
+  const zoom = $derived(prDomain(classes.map((_, i) => trimPrTail(ev.curves[i] ?? []))));
+  const plotPx = $derived(narrow ? PHONE_PLOT_H : zoom ? PR_ZOOM.plotPx : PLOT_H);
+
   // Cursor on the shared recall axis (bound to the chart); the legend reads each curve's precision there.
   let cursor = $state<number | null>(null);
+  // A quiet grey curve is identified where it is drawn: the pointer near it picks out the nearest class (LineChart
+  // `pick`), which takes its hue and its name and value in the readout, as a hovered table row does; a click traces it.
+  // A tap picks it too, and the readout offers Trace (a tap elsewhere in the plot lets it go).
+  let picked = $state<string | null>(null);
+  const classOf = (id: string | null) => (id !== null && id.startsWith('c') ? Number(id.slice(1)) : null);
+  $effect(() => {
+    const c = classOf(picked);
+    untrack(() => {
+      if (c !== null || (hovered !== null && pickedLit)) hovered = c;
+      pickedLit = c !== null;
+    });
+  });
+  /** Whether `hovered` was set by a pick on the chart (so letting the pick go clears it, not a table row's hover). */
+  let pickedLit = false;
+  /** The class a tap picked, kept for the readout's Trace button until it is traced or a tap picks nothing. */
+  let tapped = $state<number | null>(null);
+  function onplotup(e: PointerEvent) {
+    if (e.pointerType === 'mouse') return;
+    // After the chart has handled the tap (it sets `picked`).
+    queueMicrotask(() => (tapped = classOf(picked)));
+  }
+  const traceTapped = () => {
+    if (tapped !== null && !selected.includes(tapped)) selected = [...selected, tapped];
+    tapped = null;
+  };
   function at(points: { x: number; y: number }[]): string {
     const pts = trimPrTail(points);
     const c = cursor;
@@ -169,7 +201,44 @@
           {#if selected.length}<button type="button" class="clear" onclick={() => (selected = [])}>Clear</button>{/if}
         </p>
       </div>
-      <!-- Phones: the classes to trace, right here (the graph and its legend stay in view): the traced ones first, in
+    {/if}
+    <!-- At rest the legend states each curve's AP50 (a summary of the whole curve); under the cursor it switches to a
+         readout, marked by the cursor's own glyph: the precision at that recall. -->
+    <div class="legend" class:reading={cursor !== null}>
+      {#if cursor === null}
+        <span class="what">AP50 <span class="what-sub">area under each curve</span></span>
+      {:else}
+        <span class="what at num"><span class="cur" aria-hidden="true"></span>Precision at recall {cursor.toFixed(2)}</span>
+      {/if}
+      <span class="item"><span class="line mean" aria-hidden="true"></span>All classes <span class="num">{cursor === null ? metric(meanAp) : at(ev.mean)}</span></span>
+      {#each lit as i (i)}
+        <span class="item"><span class="line" style:background={classStroke(i)} aria-hidden="true"></span>{name(i)} <span class="num">{cursor === null ? metric(apOf.get(i)) : at(ev.curves[i] ?? [])}</span></span>
+      {/each}
+      <!-- The class picked out on the plot: a click traces it (or lets it go); a tap offers Trace here. -->
+      {#if tapped !== null && !selected.includes(tapped)}
+        <button type="button" class="clear trace-pick" onclick={traceTapped}><Plus size={14} aria-hidden="true" />Trace {name(tapped)}</button>
+      {:else if classOf(picked) !== null}
+        <span class="hint">Click to {selected.includes(classOf(picked)!) ? 'stop tracing' : 'trace'}</span>
+      {/if}
+      {#if banded}<span class="item band-key"><span class="swatch-band" aria-hidden="true"></span>10th–90th percentile of classes</span>{/if}
+      {#if view === 'curves' && !narrow}
+        <!-- The class picker, as on phones: the classes as chips under this row, the traced first. -->
+        <button type="button" class="view trace mode" aria-expanded={tracing} aria-controls="{uid}-trace" onclick={() => (tracing = !tracing)}
+          >{#if selected.length}{selected.length} {selected.length === 1 ? 'class' : 'classes'} traced{:else}<Plus size={14} aria-hidden="true" />Trace a class{/if}<span
+            class="chev"
+            class:open={tracing}
+            aria-hidden="true"><ChevronDown size={14} /></span
+          ></button
+        >
+        {#if selected.length}<button type="button" class="clear" onclick={() => (selected = [])}>Clear</button>{/if}
+      {/if}
+      {#if many && !modeInHeader}
+        <button type="button" class="clear mode" aria-pressed={allCurves} onclick={() => (allCurves = !allCurves)}>{allCurves ? 'Show band' : 'All curves'}</button>
+
+      {/if}
+    </div>
+    {#if view === 'curves'}
+      <!-- The classes to trace, right here at every width (the graph and its legend stay in view): the traced ones first, in
            their hue, each a tap to remove; then the others in the table's order, a tap to trace; many classes are
            found by name. The traced set is the one the Classes section shows. -->
       <div class="tracer" id="{uid}-trace" role="group" aria-label="Classes to trace" hidden={!tracing}>
@@ -195,36 +264,24 @@
         </div>
       </div>
     {/if}
-    <!-- At rest the legend states each curve's AP50 (a summary of the whole curve); under the cursor it switches to a
-         readout, marked by the cursor's own glyph: the precision at that recall. -->
-    <div class="legend" class:reading={cursor !== null}>
-      {#if cursor === null}
-        <span class="what">AP50 <span class="what-sub">area under each curve</span></span>
-      {:else}
-        <span class="what at num"><span class="cur" aria-hidden="true"></span>Precision at recall {cursor.toFixed(2)}</span>
-      {/if}
-      <span class="item"><span class="line mean" aria-hidden="true"></span>All classes <span class="num">{cursor === null ? metric(meanAp) : at(ev.mean)}</span></span>
-      {#each lit as i (i)}
-        <span class="item"><span class="line" style:background={classStroke(i)} aria-hidden="true"></span>{name(i)} <span class="num">{cursor === null ? metric(apOf.get(i)) : at(ev.curves[i] ?? [])}</span></span>
-      {/each}
-      {#if banded}<span class="item band-key"><span class="swatch-band" aria-hidden="true"></span>10th–90th percentile of classes</span>{/if}
-      {#if many && !modeInHeader}
-        <button type="button" class="clear mode" aria-pressed={allCurves} onclick={() => (allCurves = !allCurves)}>{allCurves ? 'Show band' : 'All curves'}</button>
-
-      {/if}
-    </div>
-    <div class="plot" class:fill bind:clientHeight={plotH}>
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="plot" class:fill bind:clientHeight={plotH} onpointerup={onplotup}>
       <LineChart
         {series}
-        height={narrow ? PHONE_PLOT_H + AXES_H : fill ? Math.max(PLOT_H + AXES_H, plotH - 24) : PLOT_H + AXES_H}
+        height={fill && !narrow ? Math.max(plotPx + AXES_H, plotH - 24) : plotPx + AXES_H}
         xDomain={[0, 1]}
-        yDomain={[0, 1]}
+        yDomain={zoom?.domain ?? [0, 1]}
+        yTickValues={zoom?.ticks}
+        yDecimals={zoom?.decimals}
+        pick={(s) => s.id.startsWith('c')}
+        bind:picked
+        onpick={(id) => toggle(classOf(id)!)}
         xFormat={(x) => x.toFixed(1)}
         valueFormat={(y) => y.toFixed(3)}
         xTicks={6}
         yTicks={5}
         xLabel="Recall"
-        yLabel="Precision"
+        yLabel={zoom ? `Precision · ${UNIT_ZOOM_NOTE}` : 'Precision'}
         legend={false}
         bind:cursor
         empty="No correct detections yet: precision is 0 at every recall."
@@ -389,6 +446,12 @@
   }
   .mode {
     margin-left: auto;
+  }
+  .trace-pick {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    color: var(--text-primary);
   }
   .what {
     display: inline-flex;
