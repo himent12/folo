@@ -744,7 +744,8 @@
     <dd class="basis">
       <details class="est-how">
         <summary><span>{shown.basis}</span><ChevronRight size={12} strokeWidth={2} aria-hidden="true" /></summary>
-        <!-- One row each, the value at the right; on a narrow rail it wraps under its label, still at the right. -->
+        <!-- One grid for every row: the term wraps in its own column, the value sits on the term's first line at the
+             right (never pushed to a line of its own), one word for a source, never a phrase in the value column. -->
         <dl class="how-list num">
           {#each shown.phases as p (p.phase)}
             <div>
@@ -758,7 +759,7 @@
           </div>
           <div><dt>First epoch</dt><dd>+{num(shown.startup, 1)} s startup</dd></div>
           {#if !onCpu && gpu}
-            <div><dt>Peak GPU memory</dt><dd>{shown.vramMeasured ? 'measured here' : 'reference model'}</dd></div>
+            <div><dt>Peak GPU memory</dt><dd>{shown.vramMeasured ? 'measured' : 'reference'}</dd></div>
           {/if}
         </dl>
         <p class="how-note">{shown.how}{#if shown.updated}{' '}Last measured {shown.updated}.{/if}</p>
@@ -1426,13 +1427,33 @@
   .arch.on :global(.a-name) {
     color: var(--text-secondary);
   }
+  /* A sentence is never cut (DESIGN_DIRECTION 2.3): where its column is short it wraps, and below 1280 it takes a line
+     of its own under the size's name, so the row grows instead (round 24's "Fastest; edge devices, qâ€¦" at 1024). */
   .a-note {
     min-width: 0;
     font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
     color: var(--text-tertiary);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+  }
+  @media (min-width: 768px) and (max-width: 1279px) {
+    .arch {
+      grid-template-rows: auto auto;
+      row-gap: 0;
+      padding-block: 6px;
+    }
+    .a-size,
+    .a-v,
+    .tick {
+      grid-row: 1 / 3;
+    }
+    .arch :global(.a-name) {
+      grid-column: 2 / 4;
+      grid-row: 1;
+    }
+    .a-note {
+      grid-column: 2 / 4;
+      grid-row: 2;
+    }
   }
   .a-v {
     font-size: var(--type-sm-size);
@@ -1770,7 +1791,8 @@
   }
   .how-list {
     display: grid;
-    gap: 2px;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 2px var(--space-3);
     margin-top: var(--space-2);
     padding: var(--space-2) var(--space-3);
     border-radius: var(--radius-md);
@@ -1778,16 +1800,13 @@
     text-align: left;
   }
   .how-list > div {
-    display: flex;
-    flex-wrap: wrap;
-    justify-content: space-between;
-    gap: 0 var(--space-3);
+    display: contents;
   }
   .how-list dt {
     color: var(--text-tertiary);
   }
   .how-list dd {
-    margin-left: auto;
+    align-self: start;
     color: var(--text-secondary);
     text-align: right;
     white-space: nowrap;

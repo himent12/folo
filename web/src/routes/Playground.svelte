@@ -707,8 +707,9 @@
     </div>
     <div class="runon" role="group" aria-label="Run on" aria-describedby={runOnNote ? 'runon-note' : undefined}>
       <span class="pick-label" aria-hidden="true">Run on</span>
-      <!-- A choice that is off says why: on the title row in a line under the control, from its left edge; in the
-           toolbar row beside it. -->
+      <!-- A choice that is off says why in its own tip, and the image panel's status line says it once ("No WebGPU in
+           this browser"), so the toolbar stays one row at every tier: never a note wrapping under the group (round
+           24's tablet). The group's description is the same words, for assistive technology. -->
       <span class="runon-seg">
         <Segmented
           label="Run the model on"
@@ -720,7 +721,7 @@
             { value: 'cpu', label: 'CPU', disabled: !!browserOff, tip: browserOff ?? undefined },
           ]}
         />
-        {#if runOnNote}<span class="runon-note" id="runon-note">{runOnNote}</span>{/if}
+        {#if runOnNote}<span class="sr-only" id="runon-note">{runOnNote}</span>{/if}
       </span>
     </div>
   {/if}
@@ -757,6 +758,7 @@
                   ]}
                 />
               </span>
+              {#if runOnNote && !source}<span class="vbar-note" aria-hidden="true">{runOnNote}</span>{/if}
               {#if source}
                 <span class="src-name mono truncate" title={sourceName}>{shortName}</span>
                 {#if dims}<span class="src-dims num">{dims.width}×{dims.height}</span>{/if}
@@ -1035,8 +1037,8 @@
     gap: var(--space-2);
     width: 400px;
   }
-  /* Below 1024 px: one full-width toolbar row under the title; the model select takes what Run on leaves, and the
-     WebGPU note sits beside the control (wrapping under it when the row is full). */
+  /* Below 1024 px: one full-width toolbar row under the title; the model select takes what Run on leaves (a choice
+     that is off says why in its tip and on the image panel's status line, never in a note that wraps the row). */
   .pg-tools {
     display: flex;
     flex-wrap: wrap;
@@ -1055,9 +1057,6 @@
   .pg-tools .runon-seg {
     display: contents;
   }
-  .pg-tools .runon-note {
-    position: static;
-  }
   .model-pick :global(.select) {
     flex: 1;
   }
@@ -1070,19 +1069,8 @@
     color: var(--text-tertiary);
     font-size: var(--type-sm-size);
   }
-  /* Under the segmented control, out of the row's flow (the title row keeps its height); as wide as the control. */
   .runon-seg {
-    position: relative;
     display: flex;
-  }
-  .runon-note {
-    position: absolute;
-    top: calc(100% + var(--space-1));
-    left: 0;
-    right: 0;
-    color: var(--text-tertiary);
-    font-size: var(--type-sm-size);
-    line-height: var(--type-sm-line);
   }
   /* The page grid's 8 + 4 split (the rail is always 4 columns), the same with or without an image. */
   .layout {
@@ -1123,6 +1111,15 @@
   }
   .vbar-gap {
     flex: 1;
+  }
+  /* Why a Run on choice is off, said once on the image panel's status line, at its right end, before an image is in
+     (its tip says it at the control). */
+  .vbar-note {
+    margin-left: auto;
+    padding-right: var(--space-2);
+    font-size: var(--type-sm-size);
+    color: var(--text-tertiary);
+    white-space: nowrap;
   }
   .show {
     display: flex;
@@ -1788,9 +1785,6 @@
     }
     .pg-tools .runon {
       justify-content: space-between;
-    }
-    .pg-tools .runon-note {
-      flex-basis: 100%;
     }
     /* The ways out: the primary full width, the others in one row of secondary buttons under it, 44 px each. */
     .notice :global(.acts),

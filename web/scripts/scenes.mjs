@@ -1225,7 +1225,7 @@ export const scenes = [
       });
       await page.reload({ waitUntil: 'networkidle' });
       await page.clock.runFor(2000);
-      await until(page, '.runon-note');
+      await until(page, '.vbar-note');
     },
   },
   {
@@ -1237,7 +1237,7 @@ export const scenes = [
     fullPage: false,
     viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
     setup: async (page, { vp }) => {
-      await until(page, '.runon-note');
+      await until(page, '.vbar-note');
       if (vp === 'desktop' || vp === 'laptop') await page.locator('.runon .tip').last().hover();
       else await page.mouse.move(0, 0);
       await page.clock.runFor(800);
