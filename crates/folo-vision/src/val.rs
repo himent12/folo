@@ -246,14 +246,21 @@ impl Post {
     fn add(&mut self, d: Decoded, ds: &dyn Dataset, cfg: &ValConfig) -> Result<()> {
         use rayon::prelude::*;
         let Decoded { images, nc, mode, truths, meta } = d;
-        let images = match images {
-            Outputs::Host(images) => images,
-            Outputs::Device(t, a) => crate::model::HeadOutput::split_decoded(&t.to_vec::<f32>()?, a, nc),
+        let post = |(b, s): (Vec<Xyxy>, Vec<f32>)| crate::nms::postprocess(&b, &s, nc, &cfg.nms, mode);
+        let dets: Vec<Vec<Detection>> = match images {
+            Outputs::Host(images) => images.into_par_iter().map(post).collect(),
+            Outputs::Device(t, a) => {
+                let all = t.to_vec::<f32>()?;
+                if mode == HeadMode::O2m {
+                    // NMS straight from the downloaded rows, without splitting them into boxes and scores.
+                    all.par_chunks_exact(a * (4 + nc))
+                        .map(|rows| crate::nms::non_max_suppression_rows(rows, nc, &cfg.nms))
+                        .collect()
+                } else {
+                    crate::model::HeadOutput::split_decoded(&all, a, nc).into_par_iter().map(post).collect()
+                }
+            }
         };
-        let dets: Vec<Vec<Detection>> = images
-            .into_par_iter()
-            .map(|(b, s)| crate::nms::postprocess(&b, &s, nc, &cfg.nms, mode))
-            .collect();
         for (i, dets) in dets.into_iter().enumerate() {
             self.ev.add_image(&dets, &truths[i]);
             let meta = &meta[i];
