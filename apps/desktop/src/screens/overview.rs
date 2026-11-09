@@ -46,6 +46,8 @@ impl FoloApp {
             _ if self.store.models.error().is_some() || self.store.datasets.error().is_some() => {
                 "Some data didn't load · retry in its panel".to_string()
             }
+            // The sidebar says "Connecting…" until the server answers; the page says the same.
+            _ if self.store.health.ready().is_none() => "Connecting…".to_string(),
             _ => "Loading…".to_string(),
         };
         // Training needs a server and a dataset; until then the action explains itself instead.
