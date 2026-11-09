@@ -42,6 +42,8 @@
   import Panel from '$lib/ui/Panel.svelte';
   import Note from '$lib/ui/Note.svelte';
   import InfoButton from '$lib/ui/InfoButton.svelte';
+  import InfoRegion from '$lib/ui/InfoRegion.svelte';
+  import { provideInfoSlot } from '$lib/ui/infoSlot.svelte';
   import Segmented from '$lib/ui/Segmented.svelte';
   import Select from '$lib/ui/Select.svelte';
   import StatusBadge from '$lib/ui/StatusBadge.svelte';
@@ -82,12 +84,14 @@
     { value: 'epoch', label: 'By epoch' },
     { value: 'progress', label: 'By progress' },
   ];
-  // The x axis is named in the chart's header, as on every chart (DESIGN_DIRECTION §2.4), never under the plot: the
-  // normalised axis names its unit; chosen for you, it also says why.
+  // Phones: the axis ⓘ opens in place under the control row (ui/infoSlot).
+  const axisInfo = provideInfoSlot('cmp-axis-info');
   /** Phones: the progress axis explained in the ⓘ beside its control, with why it was chosen when it was. */
   const progressWhy = $derived(
     `By progress puts each run over its planned epochs (% of the plan), so a short plan and a long one compare by shape.${xAuto && reason ? ` Chosen for you: ${AXIS_REASON[reason]}.` : ''}`,
   );
+  // The x axis is named in the chart's header, as on every chart (DESIGN_DIRECTION §2.4), never under the plot: the
+  // normalised axis names its unit; chosen for you, it also says why.
   const xQual = $derived(x === 'progress' ? `by progress, % of planned epochs${xAuto && reason ? ` · ${AXIS_REASON[reason]}` : ''}` : 'by epoch');
   let hint = $state<string | null>(null);
   // Colours follow the run, not its position: removing one run never repaints the others.
@@ -350,8 +354,10 @@
           <Segmented size="sm" label="X axis" value={x} onchange={setX} options={X_OPTIONS} />
           <!-- The normalised axis, and why it was chosen, one tap away beside its control: the ticks say "%", so the
                line of words under the controls went (it pushed the plot down). -->
-          {#if x === 'progress'}<InfoButton label="About the progress axis" text={progressWhy} />{/if}
+          {#if x === 'progress'}<InfoButton chart label="About the progress axis" text={progressWhy} />{/if}
         </header>
+        <!-- The ⓘ opens here, under the controls, never as a popover over the legend and plot (ui/infoSlot). -->
+        <InfoRegion slot={axisInfo} />
         {@render chips()}
         {#if !sameData && chosen.length > 1}<p class="caveat">{DATA_CAVEAT}</p>{/if}
         {@render plot()}
@@ -1045,6 +1051,11 @@
     .compare {
       padding: var(--space-3);
     }
+  }
+  /* The axis ⓘ's region sits on the frame's own edges; the section's gap spaces it. */
+  .compare {
+    --info-inset: 0;
+    --info-after: 0;
   }
   /* Phones: metric picker and x axis share one row above the legend. */
   .c-row {

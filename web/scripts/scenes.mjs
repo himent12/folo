@@ -440,6 +440,19 @@ export const scenes = [
   // in its run's status mark.
   { name: 'run-compare', path: '/runs/compare?ids=run_7d1e,run_c19a,run_5be3,run_a2f0', viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
   {
+    // Phones: the automatic axis's reason opened from the ⓘ beside the axis control, in place under the controls (the
+    // legend and the plot move down, never covered).
+    name: 'run-compare-axis-info',
+    path: '/runs/compare?ids=run_7d1e,run_c19a,run_5be3,run_a2f0',
+    fullPage: false,
+    viewports: ['mobile'],
+    setup: async (page) => {
+      await until(page, '.chip .key');
+      await page.getByRole('button', { name: 'About the progress axis' }).click();
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
     // "By epoch", chosen by hand over the default "By progress": one epoch scale to the longest plan. On a tablet the
     // header keeps one layout whatever the axis (the qualifier wraps under the metric tabs, the control on their row).
     name: 'run-compare-epoch',

@@ -44,7 +44,7 @@ describe('identifiers', () => {
   });
 
   it('never include a named optimizer, which is a name in sans ("AdamW": its struck W reads as "₩" in mono)', () => {
-    const OPTIMIZER_AS_IDENT = /<Ident[^>]*optimi[sz]/i;
+    const OPTIMIZER_AS_IDENT = /<Ident\b[^>]*optimi[sz]/i;
     const bare: string[] = [];
     for (const file of svelteFiles(SRC))
       markup(readFileSync(file, 'utf8')).forEach((line, i) => {

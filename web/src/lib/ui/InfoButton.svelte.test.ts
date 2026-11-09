@@ -120,8 +120,8 @@ describe('InfoButton', () => {
       });
     const bad: string[] = [];
     for (const f of files(src)) {
-      for (const m of readFileSync(f, 'utf-8').matchAll(/<InfoButton[^>]*>/g)) {
-        if (!/chart|controls=|trigger=/.test(m[0])) bad.push(`${relative(src, f)}: ${m[0].replace(/\s+/g, ' ')}`);
+      for (const m of readFileSync(f, 'utf-8').matchAll(/<InfoButton\b[^>]*>/g)) {
+        if (!/\bchart\b|\bcontrols=|\btrigger=/.test(m[0])) bad.push(`${relative(src, f)}: ${m[0].replace(/\s+/g, ' ')}`);
       }
     }
     expect(bad).toEqual([]);
