@@ -209,8 +209,15 @@ impl FoloApp {
                 let id = r.id.clone();
                 let key = format!("run-row-{}", r.id);
                 let ids_up = ids.clone();
+                // Keyboard focus shows what hover does: the full name and the exact time.
+                let focus_text = self.ring(&self.fh(key.clone(), cx), window).then(|| {
+                    created_at.map_or(r.name.clone(), |c| {
+                        format!("{} · created {}", r.name, time::local_datetime(c))
+                    })
+                });
                 let row = div()
                     .id(SharedString::from(key.clone()))
+                    .when_some(focus_text, |d, s| d.child(crate::controls::focus_tip(&t, s, 36.)))
                     .flex()
                     .items_center()
                     .gap(px(16.))

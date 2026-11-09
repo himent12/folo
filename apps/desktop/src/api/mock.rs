@@ -808,8 +808,15 @@ impl Backend for MockBackend {
                 util: Some(if live { 0.94 + wobble } else { 0.02 }),
             }],
         };
-        // The built-in demo says nothing about tensor cores, like an older server.
-        Ok(SystemResponse { system, data_dir: None, features: Vec::new(), capabilities: None })
+        // The demo's simulated GPU has tensor cores, so Mixed precision reads as this server's (a
+        // run trains the same simulated curve either way).
+        let capabilities = Capabilities {
+            device: "gpu:0".into(),
+            shader_f16: true,
+            tensor_cores: TensorCoreSupport { available: true, enabled: true, reason: None },
+            amp: AmpSupport { available: true, reason: None },
+        };
+        Ok(SystemResponse { system, data_dir: None, features: Vec::new(), capabilities: Some(capabilities) })
     }
 
     fn datasets(&self) -> ApiResult<Vec<Dataset>> {

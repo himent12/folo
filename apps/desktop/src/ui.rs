@@ -526,6 +526,23 @@ pub fn int(n: u64) -> String {
 }
 
 /// 5_400_000 → "5.1 MiB".
+/// Whether `s` set at `size` px in Geist may be wider than `width` px: a per-glyph estimate that
+/// errs wide (capitals and w / m count as wide), so a name that might be cut gets its full-name tip.
+pub fn may_overflow(s: &str, size: f32, width: f32) -> bool {
+    let em: f32 = s
+        .chars()
+        .map(|c| match c {
+            'W' | 'M' | 'm' | 'w' => 0.9,
+            c if c.is_uppercase() => 0.7,
+            'i' | 'l' | 'j' | 'I' | '.' | ',' | ':' | ';' | '\'' | '|' | '!' => 0.3,
+            c if c.is_ascii() => 0.58,
+            // CJK and other wide scripts.
+            _ => 1.0,
+        })
+        .sum();
+    em * size > width
+}
+
 pub fn bytes(n: u64) -> (String, &'static str) {
     // Binary units, as Studio shows them by default (a 16 GiB card reads 16.0, not 17.2).
     const K: f64 = 1024.;
@@ -562,6 +579,15 @@ pub fn f3(v: f32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overflow_is_by_width() {
+        // The inspector's 70 px class column at 12 px: short names fit, eight W's don't.
+        assert!(!may_overflow("hexagon", 12., 70.));
+        assert!(!may_overflow("triangle", 12., 70.));
+        assert!(may_overflow("WWWWWWWW", 12., 70.));
+        assert!(may_overflow("construction vehicle", 12., 70.));
+    }
 
     #[test]
     fn formats() {

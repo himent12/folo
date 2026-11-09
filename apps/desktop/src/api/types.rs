@@ -3,6 +3,7 @@
 //! The desktop app uses the same serde types as `folo-server`, so a contract change is a compile
 //! error here rather than a runtime surprise.
 
+pub use folo_api::{AmpSupport, Capabilities, SystemResponse, TensorCoreSupport};
 pub use folo_api::{
     Arch, Augment, BBox, BestEpoch, ClassMetrics, CpuInfo, Dataset, DatasetFormat, DatasetStats, Epoch,
     ExportResult, GpuBackend, GpuInfo, Health, Histogram, ImageInfo, ImagePage, ImageSize, IssueCounts,
@@ -10,7 +11,6 @@ pub use folo_api::{
     PredictResponse, RegisterDataset, Run, RunEvent, RunMetrics, RunSamples, RunStatus, Sample, ScoredBox,
     Split, Splits, StatusEvent, Step, SyntheticDataset, SystemInfo, Timing, TrainConfig, ValMetrics,
 };
-pub use folo_api::{Capabilities, SystemResponse};
 
 /// Display helpers for wire enums.
 pub trait Label {

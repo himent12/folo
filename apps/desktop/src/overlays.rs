@@ -1928,11 +1928,15 @@ impl FoloApp {
             .map(|(i, b)| {
                 let hot = hover == Some(i);
                 let key = format!("insp-box-{i}");
+                // The class column is 70 px: a name that may not fit shows in full on hover and on
+                // keyboard focus (short ones need neither).
                 let full_name = classes.get(b.class as usize).cloned().unwrap_or_default();
+                let long = crate::ui::may_overflow(&full_name, ty::SM.size, 70.);
+                let focused = long && self.ring(&self.fh(key.clone(), cx), window);
                 let row = div()
                     .id(SharedString::from(key.clone()))
-                    // The class column is 70 px; the full name on hover.
-                    .tooltip(crate::controls::tip(full_name, None))
+                    .when(long, |d| d.tooltip(crate::controls::tip(full_name.clone(), None)))
+                    .when(focused, |d| d.child(crate::controls::focus_tip(&t, full_name.clone(), 30.)))
                     .h(px(30.))
                     .px(px(8.))
                     .flex()

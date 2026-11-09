@@ -769,8 +769,8 @@ impl FoloApp {
         self.bind(el, key, 9., window, cx, action)
     }
 
-    /// A switch that can't be used now: off, its track the quiet line and its knob half strength,
-    /// with no pointer, hover or focus stop. The caller says why in the text beside it.
+    /// A switch that can't be used now: off, an edged inset track and a tertiary knob, with no
+    /// pointer, hover or focus stop. The caller says why in the text beside it.
     pub fn switch_disabled(&self, key: &str, cx: &mut Context<Self>) -> Stateful<Div> {
         let t = theme(cx);
         div()
@@ -779,16 +779,12 @@ impl FoloApp {
             .h(px(18.))
             .flex_none()
             .rounded_full()
-            .bg(t.line_subtle)
+            .bg(t.bg_inset)
+            .border_1()
+            .border_color(t.line_default)
             .child(
-                div()
-                    .absolute()
-                    .top(px(2.))
-                    .left(px(2.))
-                    .size(px(14.))
-                    .rounded_full()
-                    .bg(if t.is_dark() { t.text_primary } else { gpui::white() })
-                    .opacity(0.5),
+                // Inside the 1 px edge: 1 px in, so the knob sits where an enabled one does.
+                div().absolute().top(px(1.)).left(px(1.)).size(px(14.)).rounded_full().bg(t.text_tertiary),
             )
     }
 
