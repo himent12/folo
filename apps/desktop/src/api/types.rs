@@ -4,8 +4,9 @@
 //! error here rather than a runtime surprise.
 
 pub use folo_api::{
-    AmpSupport, Capabilities, Head, QueueAction, QueueRequest, ResolvedOptimizer, ResolvedTrain,
-    SystemResponse, TensorCoreSupport,
+    AmpSupport, Capabilities, Confidence, EstimateBasis, EstimatePhase, Head, PhaseKind, QueueAction,
+    QueueRequest, ResolvedOptimizer, ResolvedTrain, RunEstimate, SystemResponse, TensorCoreSupport,
+    ThroughputSource,
 };
 pub use folo_api::{
     Arch, Augment, BBox, BestEpoch, ClassMetrics, CpuInfo, Dataset, DatasetFormat, DatasetStats, Epoch,
