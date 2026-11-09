@@ -12,8 +12,8 @@ Status keys: `[ ]` todo, `[~]` in progress, `[x]` merged. The orchestrator keeps
 - [x] vision-post: box ops, IoU family, NMS, mAP / PR metrics, confusion matrix, TAL assigner (#5, #15); pycocotools parity (#20)
 - [x] server + CLI skeleton with `--mock` (#7); real dataset commands and store (#29)
 - [x] gpu: wgpu device, buffer pool, WGSL kernels (SGEMM ~31 TFLOPS on RTX 4080 SUPER) (#10)
-- [~] Studio (web/): all screens, in-browser Playground, real-server smoke; hill-climb round 15 (r12: min 8 from both reviewers); contrast + CVD token checks in CI (#84)
-- [~] Desktop (apps/desktop, GPUI): all screens, real server, local GPU inference (#73); hill-climb round 32 (r31: Opus 8.6 / Sol 8.3)
+- [~] Studio (web/): all screens, in-browser Playground, real-server smoke, mixed-precision and capability-aware New run; hill-climb round 18 (r16 per-line min 7.5, first 9s)
+- [~] Desktop (apps/desktop, GPUI): all screens, real server, local GPU inference, capability-aware New run; hill-climb round 40 (r36: Opus 8.75 / Sol 8.6)
 
 ## M2 — learning end to end
 - [x] nn: layers, init, SGD/AdamW, schedules, EMA, .folo IO (#21)
@@ -26,16 +26,17 @@ Status keys: `[ ]` todo, `[~]` in progress, `[x]` merged. The orchestrator keeps
 - [x] GPU training end to end with the loss and assigner on the device: 219 img/s vs yolo26n 202 (#46); R6 runs (#46, #67)
 - [x] inference round 2: pack-free CPU conv, GPU letterbox and candidate decode (#55)
 - [x] f16 whole-model inference (#80); tensor-core f16 GEMM/conv, opt-in (#89)
-- [~] AMP training on tensor cores (train/amp)
+- [x] AMP training on tensor cores: folo-n 307 img/s vs yolo26n AMP 252 (#101); /api/system capabilities (#108)
+- [x] NMS-free one-to-one head, `--head o2o` (#109)
 
 ## M4 — real use
 - [x] real datasets from disk (YOLO, COCO), export folo-f16
 - [x] server runs real training + inference (#42); `folo mcp` (#36) driving real training (#49); agent cookbook
 - [x] in-browser inference (wasm + WebGPU, ~14 ms folo-n @640 in Chrome) (#51), in Studio's Playground (#57, #70), shipped in release builds (#78)
 - [x] release pipeline: tagged binaries with embedded Studio, install scripts (#22)
-- [x] dogfooding: reports 1 (#59, fixed in #69) and 2 (#93; fixes in flight on fix/dogfood-2)
+- [x] dogfooding: reports 1 (#59 → #69) and 2 (#93 → #99)
 - [x] ONNX export with onnxruntime parity in CI (#87)
-- [~] COCO-pretrained folo-n: loader + COCOeval + `folo weights` (#72); 50-epoch run in progress (epoch 29: mAP50-95 0.273)
+- [~] COCO-pretrained folo-n: loader + COCOeval + `folo weights` (#72); 50-epoch run at epoch 43 (mAP50-95 ~0.28), results + weights-v1 release next
 
 ## M5 — polish
 - [x] README showcase, QUICKSTART, screenshots, llms.txt (#71); R6 example (examples/r6)
