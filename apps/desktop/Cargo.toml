@@ -1,6 +1,8 @@
 # FOLO Desktop: its own cargo workspace so the root workspace and its CI stay GPUI-free.
 [workspace]
 resolver = "3"
+# The vendored GPUI builds as a patched dependency, not a member (its own tests run from its manifest).
+exclude = ["vendor/gpui"]
 
 [package]
 name = "folo-desktop"
@@ -62,3 +64,8 @@ opt-level = 2
 inherits = "release"
 lto = "thin"
 codegen-units = 1
+
+# GPUI 0.2.2 with one fix (README.md, "Vendored GPUI"): the text element's truncation no longer
+# reuses run lengths shortened by an earlier measure (it panicked inside a multi-byte character).
+[patch.crates-io]
+gpui = { path = "vendor/gpui" }

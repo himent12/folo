@@ -82,3 +82,32 @@ tools\shoot.ps1 -Scenario none -Out shots\run.png -ExtraArgs "--server http://12
 The scripts run `$CARGO_TARGET_DIR/debug/folo-desktop.exe` unless `-Exe` names another build (a release one, say).
 
 `shots/` is gitignored. Design reviews score the shots against `REVIEW_RUBRIC.md`; `HILLCLIMB.md` logs each round.
+
+## Vendored GPUI
+
+`vendor/gpui` is GPUI 0.2.2 from crates.io, used via `[patch.crates-io]` in `Cargo.toml`, with one fix and two
+trims:
+
+- **The fix, `src/elements/text.rs`.**
+  - **The bug:** the text element built its `runs` once per layout and let `truncate_line` shorten them in place.
+    A later measure in the same layout (another width, or none) shaped the whole text with run lengths cut for the
+    truncated one. DirectWrite then sliced the text at that byte, and inside a multi-byte character ("·", "é", CJK)
+    that panicked (`direct_write.rs`: "byte index … is not a char boundary"). It crashed the finished-run page
+    on "best F1 · conf 0.4xx · val".
+  - **The change:** `truncate_for_measure` now truncates a copy of the element's runs on every measure. Truncation
+    still cuts on character boundaries, so the runs always cover the text exactly.
+  - **The test:** `folo_truncation_tests` measures truncated, then untruncated, text containing "·", "×", "é", "–",
+    "…" and CJK at several widths, and checks the runs cover each text on character boundaries.
+- **The trims:** `examples/` (4.8 MB of demo assets) and their 30 `[[example]]` entries in `Cargo.toml`, and
+  `Cargo.toml.orig`. Nothing else differs from the published crate.
+
+To check it on a GPUI upgrade:
+
+1. **See whether upstream still needs the fix.** In the new crate's `src/elements/text.rs`, look at the closure in
+   `TextLayout::layout`. If it still passes the element's own `runs` mutably to `truncate_line`, the fix is needed.
+2. **Re-vendor.** Copy the new crate into `vendor/gpui` without `examples/`, drop its `[[example]]` entries, and
+   re-apply `truncate_for_measure` and its test. `diff -ru` against the registry copy should show only those.
+3. **Run the test and a panic sweep:**
+   - `cargo test --manifest-path vendor/gpui/Cargo.toml --lib folo_truncation` (use its own target dir);
+   - every scenario at 960, 1280 and 1680 widths with stderr captured, checking for no "panicked".
+4. **Drop the vendor if upstream fixed it:** remove `vendor/gpui` and the `[patch]` entry.

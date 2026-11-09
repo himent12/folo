@@ -698,105 +698,102 @@ impl FoloApp {
                 ),
             )
         };
-        let tiles: Vec<gpui::Div> =
-            vec![
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(6.))
-                    .child(caption(&t, "Epoch"))
-                    .child(metric(&t, r.epoch.to_string(), &format!("/ {}", r.epochs), big, ty::SM))
-                    .child(div().pt(px(if compact { 4. } else { 6. })).child(progress(
-                        &t,
-                        r.progress(),
-                        if live { t.accent_fill() } else { t.text_tertiary },
-                        3.,
-                    ))),
-                stat_sized(
+        let tiles: Vec<gpui::Div> = vec![
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .child(caption(&t, "Epoch"))
+                .child(metric(&t, r.epoch.to_string(), &format!("/ {}", r.epochs), big, ty::SM))
+                .child(div().pt(px(if compact { 4. } else { 6. })).child(progress(
                     &t,
-                    // "final" only for a run that finished; a stopped or failed one ends on its last evaluated epoch.
-                    if live {
-                        "mAP50-95 · latest"
-                    } else if r.status == RunStatus::Completed {
-                        "mAP50-95 · final"
-                    } else {
-                        "mAP50-95 · last evaluated"
-                    },
-                    last.map_or("–".into(), |e| f3(e.val.map50_95)),
+                    r.progress(),
+                    if live { t.accent_fill() } else { t.text_tertiary },
+                    3.,
+                ))),
+            stat_sized(
+                &t,
+                // "final" only for a run that finished; a stopped or failed one ends on its last evaluated epoch.
+                if live {
+                    "mAP50-95 · latest"
+                } else if r.status == RunStatus::Completed {
+                    "mAP50-95 · final"
+                } else {
+                    "mAP50-95 · last evaluated"
+                },
+                last.map_or("–".into(), |e| f3(e.val.map50_95)),
+                big,
+                delta.or_else(|| {
+                    r.best.as_ref().map(|b| {
+                        text(ty::SM, t.text_tertiary).tnum().child(format!(
+                            "best {} @ {}",
+                            f3(b.map50_95),
+                            b.epoch
+                        ))
+                    })
+                }),
+            ),
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .child(caption(&t, "Precision / Recall"))
+                .child(metric_pair(
+                    &t,
                     big,
-                    delta.or_else(|| {
-                        r.best.as_ref().map(|b| {
-                            text(ty::SM, t.text_tertiary).tnum().child(format!(
-                                "best {} @ {}",
-                                f3(b.map50_95),
-                                b.epoch
-                            ))
-                        })
-                    }),
-                ),
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(6.))
-                    .child(caption(&t, "Precision / Recall"))
-                    .child(metric_pair(
-                        &t,
-                        big,
-                        last.map_or("–".into(), |e| format!("{:.3}", e.val.precision)),
-                        last.map_or("–".into(), |e| format!("{:.3}", e.val.recall)),
-                    ))
-                    // The epoch's own operating point once the engine reports it (`best_f1_conf`); the
-                    // P/R chart below states the match rule, so the tile's line fits at 1280. Clipped,
-                    // not ellipsized: GPUI 0.2.2's truncation shortens the text's run in place, and a later
-                    // untruncated measure in the same layout then slices inside the "·" and panics.
-                    .child(
-                        text(ty::SM, t.text_tertiary).whitespace_nowrap().overflow_hidden().child(
-                            pr_caption(last.and_then(|e| e.val.best_f1_conf), self.eval_split(r), false),
+                    last.map_or("–".into(), |e| format!("{:.3}", e.val.precision)),
+                    last.map_or("–".into(), |e| format!("{:.3}", e.val.recall)),
+                ))
+                // The epoch's own operating point once the engine reports it (`best_f1_conf`); the
+                // P/R chart below states the match rule, so the tile's line fits at 1280.
+                .child(text(ty::SM, t.text_tertiary).ellipsis().child(pr_caption(
+                    last.and_then(|e| e.val.best_f1_conf),
+                    self.eval_split(r),
+                    false,
+                ))),
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .child(caption(&t, if live { "Throughput" } else { "Final throughput" }))
+                .child(
+                    div()
+                        .flex()
+                        .items_end()
+                        .gap(px(10.))
+                        .child(metric(
+                            &t,
+                            ips_now.map_or("–".into(), |v| format!("{v:.0}")),
+                            "img/s",
+                            big,
+                            ty::SM,
+                        ))
+                        .child(
+                            // A glance, not a chart: 160 px in the one-row strip; in the wrapped
+                            // two-column tile a little wider (240), so 120 steps don't spread into
+                            // a noise band.
+                            div()
+                                .flex_1()
+                                .min_w(px(40.))
+                                .max_w(px(if narrow { 240. } else { 160. }))
+                                .h(px(28.))
+                                .pb(px(4.))
+                                .when(smooth.len() > 2, |d| {
+                                    d.child(sparkline(
+                                        &t,
+                                        Arc::new(smooth.clone()),
+                                        t.text_secondary,
+                                        24.,
+                                        live,
+                                    ))
+                                }),
                         ),
-                    ),
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(6.))
-                    .child(caption(&t, if live { "Throughput" } else { "Final throughput" }))
-                    .child(
-                        div()
-                            .flex()
-                            .items_end()
-                            .gap(px(10.))
-                            .child(metric(
-                                &t,
-                                ips_now.map_or("–".into(), |v| format!("{v:.0}")),
-                                "img/s",
-                                big,
-                                ty::SM,
-                            ))
-                            .child(
-                                // A glance, not a chart: 160 px in the one-row strip; in the wrapped
-                                // two-column tile a little wider (240), so 120 steps don't spread into
-                                // a noise band.
-                                div()
-                                    .flex_1()
-                                    .min_w(px(40.))
-                                    .max_w(px(if narrow { 240. } else { 160. }))
-                                    .h(px(28.))
-                                    .pb(px(4.))
-                                    .when(smooth.len() > 2, |d| {
-                                        d.child(sparkline(
-                                            &t,
-                                            Arc::new(smooth.clone()),
-                                            t.text_secondary,
-                                            24.,
-                                            live,
-                                        ))
-                                    }),
-                            ),
-                    )
-                    .child(text(ty::SM, t.text_tertiary).tnum().child(
-                        ips_avg.map_or(String::new(), |a| format!("avg {a:.0} · last {} steps", ips.len())),
-                    )),
-                time_tile,
-            ];
+                )
+                .child(text(ty::SM, t.text_tertiary).tnum().child(
+                    ips_avg.map_or(String::new(), |a| format!("avg {a:.0} · last {} steps", ips.len())),
+                )),
+            time_tile,
+        ];
         let tile = |content: gpui::Div| {
             div()
                 .flex_1()

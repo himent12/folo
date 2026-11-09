@@ -73,3 +73,10 @@ jobs:
         env:
           ATTEMPTS: ${{ runner.environment == 'self-hosted' && '2' || '1' }}
         run: bash ../../tools/ci-retry.sh cargo test
+      # The vendored GPUI's one patch (README.md, "Vendored GPUI"): truncated, then untruncated, measures keep runs
+      # that cover the text on character boundaries. Built from the vendor's own manifest and lock.
+      - name: vendored GPUI patch test
+        shell: bash
+        env:
+          ATTEMPTS: ${{ runner.environment == 'self-hosted' && '2' || '1' }}
+        run: bash ../../tools/ci-retry.sh cargo test --manifest-path vendor/gpui/Cargo.toml --lib folo_truncation
