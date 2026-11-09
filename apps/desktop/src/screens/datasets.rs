@@ -406,16 +406,11 @@ impl FoloApp {
                         int(empty),
                         "",
                         Some(if empty > 0 {
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(2.))
-                                .child(text(ty::XS, if on { t.accent_text } else { t.text_secondary }).child(if on {
-                                    "Showing them · clear"
-                                } else {
-                                    "Show them"
-                                }))
-                                .when(!on, |d| d.child(icon("icons/chevron-right.svg", 12., t.text_secondary)))
+                            if on {
+                                text(ty::XS, t.accent_text).child("Showing them · clear")
+                            } else {
+                                inline_link(&t, "Show them")
+                            }
                         } else {
                             text(ty::XS, t.text_tertiary).child("every image has labels")
                         }),
@@ -746,7 +741,7 @@ impl FoloApp {
                         let tile_el = this.tile(&ds_id, meta, this.ds_boxes, true, fit, reveal, cx);
                         // "2 square · 1 triangle · +2": the two commonest classes, then the rest as a
                         // count, so the box colours aren't the only way to tell what a tile holds.
-                        let what = {
+                        let (what, all) = {
                             let mut counts: Vec<(u32, usize)> = Vec::new();
                             for b in &meta.boxes {
                                 match counts.iter_mut().find(|(c, _)| *c == b.class) {
@@ -758,18 +753,31 @@ impl FoloApp {
                             let name = |c: u32| {
                                 class_names.get(c as usize).cloned().unwrap_or_else(|| format!("class {c}"))
                             };
-                            let mut parts: Vec<String> =
-                                counts.iter().take(2).map(|(c, k)| format!("{k} {}", name(*c))).collect();
+                            let named: Vec<String> =
+                                counts.iter().map(|(c, k)| format!("{k} {}", name(*c))).collect();
+                            let mut parts: Vec<String> = named.iter().take(2).cloned().collect();
                             let rest: usize = counts.iter().skip(2).map(|(_, k)| k).sum();
                             if rest > 0 {
                                 parts.push(format!("+{rest}"));
                             }
-                            if parts.is_empty() { "no boxes".to_string() } else { parts.join(" · ") }
+                            // The strip keeps two; the tile's tip lists every class it holds.
+                            let all = format!(
+                                "{} · {}",
+                                meta.id,
+                                if named.is_empty() { "no boxes".into() } else { named.join(" · ") }
+                            );
+                            (if parts.is_empty() { "no boxes".to_string() } else { parts.join(" · ") }, all)
                         };
                         let dsid = ds_id.to_string();
                         let focused = this.fh(key.clone(), cx).is_focused(window);
                         let el = div()
                             .id(SharedString::from(key.clone()))
+                            // Everything it holds, by class, on hover and keyboard focus (labels a
+                            // tile can't fit, a tiny box's class included).
+                            .tooltip(crate::controls::tip(all.clone(), Some("Enter opens")))
+                            .when(focused, |d| {
+                                d.child(crate::controls::focus_tip(&t, all.clone(), row_h - GAP))
+                            })
                             .group(SharedString::from(key.clone()))
                             .w(px(cell_w))
                             .h_full()

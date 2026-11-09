@@ -163,7 +163,9 @@ impl FoloApp {
             .when_some(strip, |d, s| d.child(s))
             // Narrow windows stack the two lists full width rather than squeeze the runs table.
             .map(|d| {
-                if window.viewport_size().width < px(1280.) {
+                // Side by side only from 1500 px: below it the two tables stack, so Recent runs keeps
+                // its dataset column at the default 1280 window rather than squeezing it out.
+                if window.viewport_size().width < px(1500.) {
                     d.child(div().flex().child(recent)).child(div().flex().child(models))
                 } else {
                     d.child(
@@ -696,25 +698,18 @@ impl FoloApp {
 
     fn recent_runs(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
-        // Dataset and architecture fit when the list is wide: beside Best models at 1500+, or
-        // full width when the two lists stack (below 1280).
+        // The list is never squeezed beside Best model (they stack below 1500), so the
+        // architecture and dataset always have their column.
         let vw = window.viewport_size().width;
-        let wide = vw >= px(1500.) || vw < px(1280.);
-        // Beside Best models below 1500 the list is too narrow for Created as well.
-        // Created fits beside Best models too, with an 88 px progress track (584 px available at 1280).
         let created = true;
-        // Beside Best models (584 px at 1280) every column tightens so all six fit.
-        // From 1680 (where the content cap gives the list ~976 px) the name and dataset columns
-        // take the room instead of a dead band; 1500–1680 keeps the narrower set (~776 px).
-        let full = vw >= px(1680.);
-        let (name_w, prog_w, best_w, when_w) = if full {
-            (200., 160., 96., 80.)
-        } else if wide {
-            (150., 120., 96., 80.)
-        } else {
-            // 112 px of progress so its bar (≥ 48 px) shows beside "42 / 100" at 1280.
-            (124., 112., 80., 64.)
-        };
+        // The list's width: the content (stacked, below 1500) or what Best model leaves beside it.
+        // The wider name and dataset columns need 918 px (812 of columns, six 12 px gaps, row
+        // padding, margins, borders); with less, the narrower set (778 px) keeps Created inside.
+        let content = self.content_width(window);
+        let list_w = if vw < px(1500.) { content } else { content - (SIDE_W + 40.) - 16. };
+        let full = list_w >= 918.;
+        let (name_w, prog_w, best_w, when_w) =
+            if full { (200., 160., 96., 80.) } else { (150., 120., 96., 80.) };
         let meta_w = if full { 180. } else { 130. };
         let now = self.store.api.now();
         let all = self.view_all("ov-runs-all", Route::Runs, window, cx);
@@ -730,7 +725,7 @@ impl FoloApp {
             .border_b_1()
             .border_color(t.line_subtle)
             .child(th(&t, "Run").w(px(name_w)).flex_none())
-            .when(wide, |d| d.child(th(&t, "Arch · dataset").w(px(meta_w)).flex_none()))
+            .child(th(&t, "Arch · dataset").w(px(meta_w)).flex_none())
             .child(th(&t, "Status").w(px(96.)).flex_none())
             .child(th(&t, "Progress").w(px(prog_w)).flex_none())
             .child(div().flex_1())
@@ -827,12 +822,8 @@ impl FoloApp {
                         };
                         let row = div()
                             .id(SharedString::from(key.clone()))
-                            .when_some(focus_text, |d, s| {
-                                d.child(crate::controls::focus_tip(&t, s, if wide { 36. } else { 44. }))
-                            })
-                            // Narrow: the dataset and architecture go under the name (a 44 px row)
-                            // rather than out of the list.
-                            .h(px(if wide { 36. } else { 44. }))
+                            .when_some(focus_text, |d, s| d.child(crate::controls::focus_tip(&t, s, 36.)))
+                            .h(px(36.))
                             .mx(px(4.))
                             .px(px(12.))
                             .flex()
@@ -859,11 +850,10 @@ impl FoloApp {
                                             .w_full()
                                             .ellipsis()
                                             .child(r.name.clone()),
-                                    )
-                                    .when(!wide, |d| d.child(meta(name_w))),
+                                    ),
                             )
                             // Wide: the dataset and architecture in their own column.
-                            .when(wide, |d| d.child(meta(meta_w)))
+                            .child(meta(meta_w))
                             .child(div().w(px(96.)).flex_none().child(status_dot(
                                 &t,
                                 r.status,
@@ -1355,8 +1345,14 @@ impl FoloApp {
         let row2: Vec<AnyElement> = it.collect();
         let id = d.id.clone();
         let key = format!("ds-card-{}", d.id);
+        // The card in full: its name, size and every class, on hover and on keyboard focus.
+        let full = format!("{} · {} images · {}", d.name, int(d.splits.total()), d.classes.join(", "));
+        let focused = self.ring(&self.fh(key.clone(), cx), window);
         let card = div()
             .id(SharedString::from(key.clone()))
+            .tooltip(crate::controls::tip(full.clone(), None))
+            // Under the card (its mosaic and footer are about 196 px tall), kept inside the window.
+            .when(focused, |d| d.child(crate::controls::focus_tip(&t, full.clone(), 196.)))
             .flex_1()
             .min_w_0()
             .flex()
@@ -1391,11 +1387,16 @@ impl FoloApp {
                     .child(cell2(
                         &t,
                         d.name.clone(),
-                        // The classes by name (as the dataset's Classes tile says them), not a count.
+                        // Counts that never need cutting; the class names are the card's tip (hover
+                        // and keyboard focus), in full.
                         format!(
                             "{} images · {}",
                             int(d.splits.total()),
-                            crate::screens::datasets::names_summary(&d.classes, 28)
+                            if d.classes.len() == 1 {
+                                "1 class".to_string()
+                            } else {
+                                format!("{} classes", d.classes.len())
+                            }
                         ),
                     ))
                     .child(badge(&t, d.format.label(), Tone::Neutral)),

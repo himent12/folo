@@ -336,17 +336,8 @@ impl FoloApp {
                                     // crumb, size, latency, count, zoom). A long name ends in "…" at that
                                     // known width, as GPUI needs; the full name is on hover.
                                     let vw = f32::from(window.viewport_size().width);
-                                    let side = if vw < 1120. {
-                                        crate::theme::size::SIDEBAR_COLLAPSED
-                                    } else {
-                                        crate::theme::size::SIDEBAR
-                                    };
                                     let rail = if vw < 1100. { 280. } else { 320. };
-                                    let stage = vw.min(crate::theme::size::CONTENT_MAX + side)
-                                        - side
-                                        - 2. * self.gutter()
-                                        - rail
-                                        - 16.;
+                                    let stage = self.content_width(window) - rail - 16.;
                                     let budget =
                                         (stage - 584.).clamp(if compact { 120. } else { 160. }, 520.);
                                     // Monospace: the measured width is the glyph count times the advance.
@@ -670,10 +661,9 @@ impl FoloApp {
                             .cursor_pointer()
                             .hover(|s| s.bg(t.bg_hover))
                             .active(|s| s.bg(t.bg_active))
-                            .child(
-                                text(ty::XS, t.text_secondary)
-                                    .child(format!("Use {} (best F1)", fmt_conf(c))),
-                            );
+                            // The shared inline-link look; -4 px so its text ends on the value above.
+                            .mr(px(-4.))
+                            .child(inline_link(&t, format!("Use {} (best F1)", fmt_conf(c))));
                         d.child(row.child(self.bind(
                             link,
                             "play-best-conf",
