@@ -240,11 +240,13 @@ while the server runs lists at once; the server reads the same cache (`$FOLO_WEI
 |---|---|---|
 | `folo-n-coco` | `weights-v1` | folo-n trained from scratch on COCO train2017 at 640 px (EMA, f32, unfused): fine-tune or predict. Budget and val2017 results: examples/coco/README.md |
 | `folo-n-coco-f16` | `weights-v1` | the same, fused and cast to f16 (`folo export`): inference only |
+| `folo-n-coco-v2` | `weights-v2` | interim: folo-n from scratch on COCO, epoch 62 of a paused 300-epoch run (EMA, f32, unfused), val2017 AP 0.317 against v1's 0.314. examples/coco/README.md, v2 |
+| `folo-n-coco-v2-f16` | `weights-v2` | the same, fused and cast to f16 (`folo export`): inference only |
 
-`weights-v1` is a draft release for now. `gh release download` finds draft releases by tag for accounts with write
-access to the repository, so `folo weights pull` already works for them. Everyone else needs the release published
-first. Without `folo`, `gh release download weights-v1 --repo himent12/folo --pattern 'folo-n-coco*' --pattern SHA256SUMS`
-then `sha256sum -c --ignore-missing SHA256SUMS` does the same by hand.
+`weights-v1` and `weights-v2` are draft releases for now. `gh release download` finds draft releases by tag for
+accounts with write access to the repository, so `folo weights pull` already works for them. Everyone else needs the
+release published first. Without `folo`, `gh release download weights-v1 --repo himent12/folo --pattern 'folo-n-coco*' --pattern SHA256SUMS`
+(or `weights-v2` with `'folo-n-coco-v2*'`) then `sha256sum -c --ignore-missing SHA256SUMS` does the same by hand.
 
 ## Adding a command
 1. Add the clap `Args` struct in `crates/folo-cli/src/cli.rs` with doc comments on every field (they become the help
