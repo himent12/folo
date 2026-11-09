@@ -229,7 +229,7 @@ v1 run's busier 600 s, 50 h. 300 epochs sits inside the 36–48 h budget at the 
 
 **AMP against f32.** The first five epochs of the AMP run against an f32 twin with identical settings (same seed, so
 the same batches and augmentations; stopped after epoch 5) and against the v1 f32 run (a 50-epoch cosine schedule,
-which differs from this one by under 2% in learning rate over these epochs):
+whose learning rate is at most 2.5% lower over these epochs):
 
 | epoch | f32 twin: loss box / cls / dfl | val mAP50 | mAP50-95 | **AMP**: loss box / cls / dfl | val mAP50 | mAP50-95 | v1 f32: mAP50-95 |
 |---:|---|---:|---:|---|---:|---:|---:|
@@ -241,5 +241,5 @@ which differs from this one by under 2% in learning rate over these epochs):
 | epoch time | 638 / 602 / 553 / 537 / 508 s | | | **482 / 454 / 466 / 440 / 462 s** | | | |
 
 The two f32 runs differ by 0.0035 mAP50-95 at epoch 5, the AMP run lies between them, and the losses agree to 1%
-after the first epoch (the scaler skipped 9 steps for overflow, all in the first epoch, while the scale backed off
-from 2^16). AMP keeps f32 accuracy here, as it did on the shapes gate (docs/BENCHMARKS.md).
+after the first epoch. The scaler skipped 4 optimizer steps for overflow, all in the first 24 batches, while the
+scale backed off from 2^16 to 2^12; it grew back to 2^16 by epoch 5 without another overflow. AMP keeps f32 accuracy here, as it did on the shapes gate (docs/BENCHMARKS.md).
