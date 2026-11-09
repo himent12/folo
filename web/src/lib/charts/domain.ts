@@ -1,11 +1,11 @@
-// Fitted y domains for run charts. A domain is "nice" (it ends on a tick) and is re-fitted at most once per epoch, so
-// a live chart never jitters as steps arrive (web/DESIGN_DIRECTION.md §2.9). Values are never tweened. Every y axis
-// holds 3–5 ticks (§2.4): more gridlines read as a texture rather than a scale. A log axis is the exception: its 1-2-5
-// values sit unevenly, so up to six of them still read as a scale (MAX_LOG_TICKS).
+// Fitted y domains for run charts. A domain fits its data (web/DESIGN_DIRECTION.md §2.4: never two-thirds of a plot
+// empty) and is re-fitted at most once per epoch, so a live chart never jitters as steps arrive (§2.9). Values are
+// never tweened. Every y axis holds 3–5 ticks (§2.4): more gridlines read as a texture rather than a scale. A log axis
+// is the exception: its 1-2-5 values sit unevenly, so up to six of them still read as a scale (MAX_LOG_TICKS).
 
 export interface Fit {
   domain: [number, number];
-  /** Tick values, ending exactly on the domain's top. */
+  /** Tick values inside the domain: niceDomain's end exactly on its top; unitDomain's top may sit a little above. */
   ticks: number[];
 }
 
@@ -64,17 +64,51 @@ function fitSteps(lo: number, hi: number, steps: readonly number[], gapOk: (gaps
   return { domain: [t[0]!, t[t.length - 1]!], ticks: t };
 }
 
-/** The lowest top a 0–1 metric's axis takes: a run stuck near 0 must read as low, not fill a 0–0.1 plot. */
-export const UNIT_MIN_TOP = 0.25;
+/**
+ * Below this top a 0–1 metric's axis is zoomed in, and the chart says so (`unitZoomed`, `UNIT_ZOOM_NOTE`): a run stuck
+ * near 0 must still read as low, so its plot names the full 0–1 scale instead of leaving two-thirds of itself empty.
+ */
+export const UNIT_ZOOM_BELOW = 0.25;
+
+/** The y-axis caption of a zoomed 0–1 axis: the scale it was cut from. */
+export const UNIT_ZOOM_NOTE = 'Zoomed in · full scale 0–1';
+
+/** Nice tick steps for a 0–1 metric, smallest first. */
+const UNIT_STEPS = [0.001, 0.002, 0.0025, 0.005, 0.01, 0.02, 0.025, 0.05, 0.1, 0.2, 0.25, 0.5];
 
 /**
- * A 0–1 metric (mAP, precision, recall): from 0 up to the first nice step at or above `max` plus `headroom` (and at
- * least UNIT_MIN_TOP), capped at 1. Steps of 0.01, 0.02, 0.05, 0.1, 0.2, 0.25 or 0.5, whichever gives the tightest top
- * in 3–5 ticks at least MIN_GAP apart; the top is always a tick.
+ * The top of a 0–1 metric's axis: the data's maximum plus 5 % headroom, rounded up to a fifth of its power of ten
+ * (0.02 from 0.1, 0.002 from 0.01), capped at 1, so the data reaches at least 80 % of the plot. It moves in those
+ * steps, never with every value.
  */
-export function unitDomain(max: number, plotPx: number, headroom = 0.02): Fit {
-  const hi = Number.isFinite(max) && max > 0 ? Math.min(1, Math.max(UNIT_MIN_TOP, max + headroom)) : 1;
-  return fitSteps(0, hi, [0.01, 0.02, 0.05, 0.1, 0.2, 0.25, 0.5, 1], (gaps) => plotPx / gaps >= MIN_GAP);
+export function unitTop(max: number): number {
+  if (!Number.isFinite(max) || max <= 0) return 1;
+  const h = max * 1.05;
+  const q = 10 ** Math.floor(Math.log10(h)) / 5;
+  return Math.min(1, +(Math.ceil(h / q - 1e-9) * q).toPrecision(6));
+}
+
+/** Whether a fitted 0–1 axis is zoomed in (its top under UNIT_ZOOM_BELOW). */
+export const unitZoomed = (fit: Fit | null | undefined) => !!fit && fit.domain[1] < UNIT_ZOOM_BELOW - 1e-9;
+
+/**
+ * A 0–1 metric (mAP, precision, recall): from 0 (which keeps the scale honest) up to `unitTop(max)`, so the data fills
+ * the plot. The gridlines take the nice step whose highest tick comes nearest that top in 3–5 ticks at least MIN_GAP
+ * apart (the smaller step on a tie); the top itself need not be a tick (0–0.65 reads 0 · 0.2 · 0.4 · 0.6).
+ */
+export function unitDomain(max: number, plotPx: number): Fit {
+  const top = unitTop(max);
+  let best: { step: number; n: number } | null = null;
+  for (const step of UNIT_STEPS) {
+    const n = Math.floor(top / step + 1e-9) + 1;
+    if (n < MIN_TICKS || n > MAX_TICKS || (plotPx * step) / top < MIN_GAP) continue;
+    if (!best || (n - 1) * step > (best.n - 1) * best.step + 1e-9) best = { step, n };
+  }
+  // A plot too short for three gridlines: its base and its top.
+  if (!best) return { domain: [0, top], ticks: [0, top] };
+  const { step, n } = best;
+  const d = stepDecimals(step);
+  return { domain: [0, top], ticks: Array.from({ length: n }, (_, k) => +(k * step).toFixed(d)) };
 }
 
 /**

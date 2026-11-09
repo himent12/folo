@@ -1,45 +1,54 @@
 import { describe, expect, it } from 'vitest';
-import { capTicks, holdDomain, logDomain, logMinors, logTicks, MAX_TICKS, niceDomain, stepDecimals, unitDomain } from './domain';
+import { capTicks, holdDomain, logDomain, logMinors, logTicks, MAX_TICKS, niceDomain, stepDecimals, unitDomain, unitTop, unitZoomed } from './domain';
 
 describe('unitDomain', () => {
-  it('fits a 0–1 metric to the tightest nice top above its maximum, with a little headroom', () => {
-    // A failed run's mAP50-95 (0.494), a comparison topping out at 0.606, a completed run's mAP50 (0.86).
-    expect(unitDomain(0.494, 290).domain).toEqual([0, 0.6]);
-    expect(unitDomain(0.606, 290).domain).toEqual([0, 0.75]);
-    expect(unitDomain(0.86, 290).domain).toEqual([0, 1]);
-    // Headroom: a value just under a step does not touch the top.
-    expect(unitDomain(0.39, 290).domain).toEqual([0, 0.5]);
+  it('fits a 0–1 metric to its data plus a little headroom, so the plot is never mostly empty', () => {
+    // A failed run's mAP50-95 (0.494), a comparison topping out at 0.606, a completed run's mAP50 (0.803), a run
+    // that learned almost nothing (0.081, run-short-warning).
+    expect(unitDomain(0.494, 290).domain).toEqual([0, 0.52]);
+    expect(unitDomain(0.606, 360).domain).toEqual([0, 0.64]);
+    expect(unitDomain(0.803, 122).domain).toEqual([0, 0.86]);
+    expect(unitDomain(0.081, 170).domain).toEqual([0, 0.086]);
+    // Whatever the value, the data reaches at least 80 % of the plot's height (rounding on top of 5 % headroom).
+    for (const max of [0.004, 0.0099, 0.01, 0.037, 0.081, 0.1, 0.12, 0.27, 0.45, 0.5, 0.63, 0.71, 0.88, 0.97])
+      expect(max / unitDomain(max, 290).domain[1], `${max}`).toBeGreaterThan(0.8);
+    expect(unitTop(0.99)).toBe(1);
   });
 
-  it('takes 3–5 ticks in nice steps, ending on its top, at any plot height', () => {
-    expect(unitDomain(0.494, 290).ticks).toEqual([0, 0.2, 0.4, 0.6]);
-    expect(unitDomain(0.606, 290).ticks).toEqual([0, 0.25, 0.5, 0.75]);
-    expect(unitDomain(0.86, 290).ticks).toEqual([0, 0.25, 0.5, 0.75, 1]);
-    expect(unitDomain(0.33, 290).ticks).toEqual([0, 0.1, 0.2, 0.3, 0.4]);
-    // A low score keeps a fitted axis, but never one so tight that a run stuck near 0 fills the plot: the top is at
-    // least 0.25 of the metric's 1.
-    expect(unitDomain(0.08, 290).ticks).toEqual([0, 0.1, 0.2, 0.3]);
-    expect(unitDomain(0.2, 290).domain[1]).toBeGreaterThanOrEqual(0.25);
-    for (const max of [0.01, 0.12, 0.27, 0.45, 0.5, 0.63, 0.71, 0.88, 0.97, 1])
-      for (const px of [138, 290]) {
-        const t = unitDomain(max, px).ticks;
-        expect(t.length, `${max} @ ${px}px`).toBeGreaterThanOrEqual(3);
-        expect(t.length, `${max} @ ${px}px`).toBeLessThanOrEqual(MAX_TICKS);
-        expect(t[t.length - 1]).toBeGreaterThanOrEqual(Math.min(1, max));
-        expect((px / (t.length - 1)) >= 32, `${max} @ ${px}px gap`).toBe(true);
+  it('draws 3–5 nice gridlines at least 32 px apart, the highest near the top', () => {
+    expect(unitDomain(0.494, 290).ticks).toEqual([0, 0.25, 0.5]);
+    expect(unitDomain(0.606, 360).ticks).toEqual([0, 0.2, 0.4, 0.6]);
+    // A phone's 122 px plot: four ticks, as five would sit 28 px apart.
+    expect(unitDomain(0.803, 122).ticks).toEqual([0, 0.25, 0.5, 0.75]);
+    expect(unitDomain(0.081, 170).ticks).toEqual([0, 0.02, 0.04, 0.06, 0.08]);
+    for (const max of [0.004, 0.01, 0.12, 0.27, 0.45, 0.5, 0.63, 0.71, 0.88, 0.97, 1])
+      for (const px of [122, 138, 290, 360]) {
+        const { ticks: t, domain } = unitDomain(max, px);
+        const at = `${max} @ ${px}px`;
+        expect(t.length, at).toBeGreaterThanOrEqual(3);
+        expect(t.length, at).toBeLessThanOrEqual(MAX_TICKS);
+        expect(t[t.length - 1]! / domain[1], `${at} top tick`).toBeGreaterThanOrEqual(0.7);
+        expect(t[t.length - 1]!, at).toBeLessThanOrEqual(domain[1] + 1e-9);
+        expect((px * t[1]!) / domain[1] >= 32, `${at} gap`).toBe(true);
       }
   });
 
+  it('says when it is zoomed in, so a run stuck near 0 still reads as low', () => {
+    expect(unitZoomed(unitDomain(0.081, 170))).toBe(true);
+    expect(unitZoomed(unitDomain(0.2, 170))).toBe(true);
+    expect(unitZoomed(unitDomain(0.3, 170))).toBe(false);
+    expect(unitZoomed(null)).toBe(false);
+  });
+
   it('never goes past 1, and falls back to 0–1 without data', () => {
-    expect(unitDomain(0.99, 290).domain).toEqual([0, 1]);
-    expect(unitDomain(1, 290).ticks).toEqual([0, 0.25, 0.5, 0.75, 1]);
+    expect(unitDomain(1, 290)).toEqual({ domain: [0, 1], ticks: [0, 0.25, 0.5, 0.75, 1] });
     expect(unitDomain(NaN, 290).domain).toEqual([0, 1]);
     expect(unitDomain(0, 290).domain).toEqual([0, 1]);
   });
 
-  it('is stable: a later, lower value never shrinks it, a higher one moves it by whole steps', () => {
+  it('is stable: a later, lower value never shrinks it, a higher one moves it in steps', () => {
     const seen = [0.31, 0.42, 0.48, 0.47, 0.5, 0.55, 0.57].map((v, i, a) => unitDomain(Math.max(...a.slice(0, i + 1)), 290).domain[1]);
-    expect(seen).toEqual([0.4, 0.5, 0.5, 0.5, 0.6, 0.6, 0.6]);
+    expect(seen).toEqual([0.34, 0.46, 0.52, 0.52, 0.54, 0.58, 0.6]);
   });
 });
 

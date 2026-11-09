@@ -5,6 +5,7 @@
   import { LiveRun } from '$lib/api/live.svelte';
   import type { Dataset, Run } from '$lib/api/types';
   import LineChart from '$lib/charts/LineChart.svelte';
+  import { unitDomain, unitZoomed, UNIT_ZOOM_NOTE } from '$lib/charts/domain';
   import { hub } from '$lib/api/index.svelte';
   import { Resource } from '$lib/api/resource.svelte';
   import { runProgress } from '$lib/api/progress';
@@ -50,6 +51,15 @@
     void live.version;
     return live.epochs[live.epochs.length - 1]?.epoch ?? 0;
   });
+  // The y axis fits the run's scores (../../lib/charts/domain): 0 up to just over the best, never a mostly empty 0–1;
+  // a run still near 0 gets a zoomed axis whose caption names the full scale. Epochs arrive one at a time, and the top
+  // moves in whole steps, so it re-fits at most once per epoch. The plot is the chart's height less its 30 px margins.
+  const chartH = $derived(narrow ? 140 : 200);
+  const fit = $derived.by(() => {
+    const hi = Math.max(-Infinity, ...charts.map.flatMap((s) => s.points.map((p) => p.y)).filter(Number.isFinite));
+    return Number.isFinite(hi) ? unitDomain(hi, chartH - 30) : undefined;
+  });
+  const zoomed = $derived(unitZoomed(fit));
   const horizon = $derived<[number, number]>(run ? [0, Math.max(1, lastEpoch)] : [0, 1]);
   const progress = $derived(run ? runProgress(run) : 0);
 
@@ -113,14 +123,16 @@
            so the legend holds only the two series and their values, on one row. -->
       <p class="chart-title">Validation mAP <span class="faint">{narrow && lastEpoch ? `Latest · ep ${lastEpoch}` : 'by epoch, so far'}</span></p>
       {#if !run || live.loading}
-        <ChartSkeleton height={narrow ? 140 : 200} />
+        <ChartSkeleton height={chartH} />
       {:else}
         <LineChart
           series={charts.map}
-          height={narrow ? 140 : 200}
+          height={chartH + (zoomed ? 16 : 0)}
           xDomain={horizon}
           xInteger
-          yDomain={[0, 1]}
+          yDomain={fit?.domain ?? [0, 1]}
+          yTickValues={fit?.ticks}
+          yLabel={zoomed ? UNIT_ZOOM_NOTE : undefined}
           valueFormat={(v) => metric(v)}
           xTitle={(x) => `Epoch ${Math.round(x)}`}
           curve="monotone"

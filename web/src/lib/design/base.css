@@ -335,8 +335,12 @@ a.ident:hover {
   cursor: pointer;
   transition: background-color var(--dur-fast) var(--ease-standard);
 }
-:where(.table) tbody tr.link:hover {
-  background: var(--bg-hover);
+/* Hover fills only where a pointer can hover (a tap never leaves one behind), and never over a selection's fill: a
+   list shows one highlighted row per meaning (DESIGN_DIRECTION §2.7). */
+@media (hover: hover) {
+  :where(.table) tbody tr.link:hover:not(.on, [aria-selected='true']) {
+    background: var(--bg-hover);
+  }
 }
 /* The selection rule: bg.active and a 2 px accent bar on the row's leading edge. */
 :where(.table) tbody tr:is(.on, [aria-selected='true']) {

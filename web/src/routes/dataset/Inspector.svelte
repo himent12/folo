@@ -398,7 +398,13 @@
                     // A tap is not a hover: on touch the selection alone marks the row.
                     if (e.pointerType !== 'touch') hovered = i;
                   }}
-                  onfocus={() => (hovered = i)}
+                  onpointerleave={() => {
+                    if (hovered === i) hovered = null;
+                  }}
+                  onfocus={(e) => {
+                    // Keyboard focus previews its box; a click or tap's focus does not, so it never leaves a hover behind.
+                    if (e.currentTarget.matches(':focus-visible')) hovered = i;
+                  }}
                   onblur={() => (hovered = null)}
                   onclick={() => pick(i)}
                   aria-label="{name(b.class)}, {Math.round(b.x2 - b.x1)} by {Math.round(b.y2 - b.y1)} pixels. {selected === i ? 'Selected; show the whole image' : 'Zoom to box'}"
@@ -670,15 +676,12 @@
     text-align: left;
     transition: background-color var(--dur-fast) var(--ease-standard);
   }
-  /* Hover is a light neutral step (only where a pointer can hover, so a tap never leaves one behind); the selection
-     takes the one rule (bg.active and a 2 px accent bar on the leading edge), and hovering a selected row adds to its
-     fill, so the two never look alike. */
+  /* Hover is a light neutral step (only where a pointer can hover, cleared when the pointer leaves the row, so a tap
+     never leaves one behind); the selection takes the one rule (bg.active and a 2 px accent bar on the leading edge),
+     which hover never changes. */
   @media (hover: hover) {
-    .labels button.hot {
+    .labels button.hot:not(.on) {
       background: var(--bg-hover);
-    }
-    .labels button.on.hot {
-      background: linear-gradient(var(--bg-hover), var(--bg-hover)), var(--bg-active);
     }
   }
   .labels button.on {

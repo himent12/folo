@@ -26,7 +26,7 @@
   import ChartSkeleton from '$lib/charts/ChartSkeleton.svelte';
   import { BestPulse } from '$lib/charts/bestPulse';
   import LossOptions, { type Scale, type Smoothing } from '$lib/charts/LossOptions.svelte';
-  import { holdDomain, logDomain, niceDomain, unitDomain, UNIT_MIN_TOP, type Fit, type Held } from '$lib/charts/domain';
+  import { holdDomain, logDomain, niceDomain, unitDomain, unitTop, UNIT_ZOOM_BELOW, UNIT_ZOOM_NOTE, type Fit, type Held } from '$lib/charts/domain';
   import { smooth, type Pt } from '$lib/charts/downsample';
   import LineChart, { type Marker, type Series } from '$lib/charts/LineChart.svelte';
   import { runHorizon } from '$lib/charts/horizon';
@@ -69,9 +69,9 @@
   const phoneQuery = new MediaQuery(media.phone, false);
   const narrow = $derived(phoneQuery.current);
   // Phones: a queued run's plot is the axes and one line, folded until asked for. An ended run that learned almost
-  // nothing (its best mAP50-95 sits under the 0–1 axis's lowest top, ../../lib/charts/domain UNIT_MIN_TOP) gets a
+  // nothing (its best mAP50-95 gets a zoomed 0–1 axis, ../../lib/charts/domain UNIT_ZOOM_BELOW) gets a
   // shorter plot on every tab, so its few low samples are not a thin line along the floor of a 320 px frame.
-  const flat = $derived(!['queued', 'running', 'stopping'].includes(run.status) && (run.best?.map50_95 ?? 0) + 0.02 < UNIT_MIN_TOP);
+  const flat = $derived(!['queued', 'running', 'stopping'].includes(run.status) && unitTop(run.best?.map50_95 ?? 0) < UNIT_ZOOM_BELOW);
   const height = $derived(queued && narrow ? 120 : narrow ? 168 : flat ? 200 : 320);
   let queuedOpen = $state(false);
   const queuedFold = $derived(queued && narrow && !queuedOpen);
@@ -172,13 +172,11 @@
   });
 
   // ---- y domain ----
-  // Fitted to the data and "nice" (it ends on a gridline): a failed run's mAP of 0.5 fills the plot instead of half
-  // of a 0–1 axis. A live chart re-fits at most once per epoch (./domain holdDomain), and values never tween.
+  // Fitted to the data: a failed run's mAP of 0.5 fills the plot instead of half of a 0–1 axis, and a run that learned
+  // almost nothing gets a zoomed axis that says so (its caption names the full 0–1 scale). A live chart re-fits at
+  // most once per epoch (./domain holdDomain), and values never tween.
   const unit = $derived(tab === 'map' || tab === 'map50' || tab === 'pr');
-  // The plot inside LineChart's margins (8 px top, 24 with the mosaic mark's label; 22 px bottom).
-  const plotPx = $derived(height - (mosaicOff ? 46 : 30));
-  let held: Held<Fit & { log?: boolean }> | null = null;
-  const fit = $derived.by((): (Fit & { log?: boolean }) | null => {
+  const extent = $derived.by((): [number, number] | null => {
     let lo = Infinity;
     let hi = -Infinity;
     for (const s of series)
@@ -187,7 +185,15 @@
         if (p.y < lo) lo = p.y;
         if (p.y > hi) hi = p.y;
       }
-    if (!Number.isFinite(lo)) return null;
+    return Number.isFinite(lo) ? [lo, hi] : null;
+  });
+  const zoomed = $derived(unit && !!extent && unitTop(extent[1]) < UNIT_ZOOM_BELOW);
+  // The plot inside LineChart's margins (8 px top, 24 with the mosaic mark's label or the zoom caption; 22 px bottom).
+  const plotPx = $derived(height - (mosaicOff || zoomed ? 46 : 30));
+  let held: Held<Fit & { log?: boolean }> | null = null;
+  const fit = $derived.by((): (Fit & { log?: boolean }) | null => {
+    if (!extent) return null;
+    const [lo, hi] = extent;
     let next: Fit & { log?: boolean };
     if (unit) next = unitDomain(hi, plotPx);
     else if (tab === 'loss' && scale === 'log') next = { domain: logDomain(lo, hi), ticks: [], log: true };
@@ -444,6 +450,7 @@
               curve={unit ? 'monotone' : 'linear'}
               markers={best}
               {xMark}
+              yLabel={zoomed ? UNIT_ZOOM_NOTE : undefined}
               {legendNote}
               label="{current.title} by epoch"
               endLabels={tab === 'loss'}

@@ -24,7 +24,7 @@
   import { Resource } from '$lib/api/resource.svelte';
   import type { Epoch, Run, RunMetrics } from '$lib/api/types';
   import LineChart, { type Series } from '$lib/charts/LineChart.svelte';
-  import { niceDomain, unitDomain } from '$lib/charts/domain';
+  import { niceDomain, unitDomain, unitTop, UNIT_ZOOM_BELOW, UNIT_ZOOM_NOTE } from '$lib/charts/domain';
   import { nearest } from '$lib/charts/downsample';
   import { defaultAxis, runEnd, runX } from '$lib/charts/runAxis';
   import { conf, deviceName, duration, metric } from '$lib/format';
@@ -97,6 +97,9 @@
   const SLOT_PATTERN = [undefined, undefined, 'dash', 'dot'] as const;
   const slotOf = (id: string) => slots[id] ?? Math.max(0, ids.indexOf(id));
   const color = (id: string) => `var(--chart-${RUN_SLOTS[slotOf(id)] ?? 1})`;
+  // Keys (chips, table header) are fills: the exact palette hue with the swatch edge, never the light theme's darker
+  // line ink, so a light amber run reads amber, not brown (design/README.md, chart.fill).
+  const fill = (id: string) => `var(--chart-fill-${RUN_SLOTS[slotOf(id)] ?? 1})`;
 
   function setIds(next: string[]) {
     router.go(`/runs/compare${next.length ? `?ids=${next.join(',')}` : ''}`, { replace: true });
@@ -127,10 +130,7 @@
   let metricId = $state<MetricId>('m95');
   const metricDef = $derived(METRICS.find((m) => m.id === metricId)!);
   const series = $derived(curve(metricDef.f));
-  // The run page's main-chart size; phones a shorter plot.
-  const height = $derived(narrow ? 240 : 320);
-  // Fitted to the runs (./domain): four runs between 0.45 and 0.62 spread over 0–0.7, not bunched in a 0–1 axis.
-  const fit = $derived.by(() => {
+  const extent = $derived.by((): [number, number] | null => {
     let lo = Infinity;
     let hi = -Infinity;
     for (const s of series)
@@ -139,10 +139,16 @@
         if (p.y < lo) lo = p.y;
         if (p.y > hi) hi = p.y;
       }
-    if (!Number.isFinite(lo)) return undefined;
-    // LineChart's plot sits inside 8 px top and 22 px bottom margins (36 under an axis name).
-    return metricDef.unit ? unitDomain(hi, height - (xLabel ? 44 : 30)) : niceDomain(lo, hi);
+    return Number.isFinite(lo) ? [lo, hi] : null;
   });
+  // Runs that all scored low get a zoomed axis whose caption names the full 0–1 scale (./domain UNIT_ZOOM_BELOW).
+  const zoomed = $derived(!!metricDef.unit && !!extent && unitTop(extent[1]) < UNIT_ZOOM_BELOW);
+  // The plot itself is at least 360 px tall from 768 px up, so four curves that climb together still separate; phones
+  // a 210 px plot. LineChart's margins add 8 px on top (24 under an axis caption) and 22 px below (36 under an x name).
+  const plotPx = $derived(narrow ? 210 : 360);
+  const height = $derived(plotPx + (zoomed ? 24 : 8) + (xLabel ? 36 : 22));
+  // Fitted to the runs (./domain): four runs between 0.45 and 0.62 spread over 0–0.64, not bunched in a 0–1 axis.
+  const fit = $derived(extent ? (metricDef.unit ? unitDomain(extent[1], plotPx) : niceDomain(extent[0], extent[1])) : undefined);
   // The chips are the legend: each shows its run's value under the cursor, or its latest value at rest.
   function valueOf(id: string): number | null {
     const pts = series.find((s) => s.id === id)?.points ?? [];
@@ -334,7 +340,7 @@
               <tr>
                 <th></th>
                 {#each chosen as r (r.id)}
-                  <th><span class="th" style:--c={color(r.id)}><i data-pattern={SLOT_PATTERN[slotOf(r.id)]}></i>{r.name}</span></th>
+                  <th><span class="th" style:--c={fill(r.id)}><i data-pattern={SLOT_PATTERN[slotOf(r.id)]}></i>{r.name}</span></th>
                 {/each}
               </tr>
             </thead>
@@ -408,7 +414,7 @@
       <span
         class="chip"
         class:pinned={pinned === r.id}
-        style:--c={color(r.id)}
+        style:--c={fill(r.id)}
         onpointerenter={() => (hovered = r.id)}
         onpointerleave={() => (hovered = null)}
         onfocusin={() => (hovered = r.id)}
@@ -422,7 +428,9 @@
           title={pinned === r.id ? 'Let the line fall back' : 'Keep this line in front'}
           onclick={() => (pinned = pinned === r.id ? null : r.id)}
         ><i aria-hidden="true" data-pattern={SLOT_PATTERN[slotOf(r.id)]}></i><span class="nm">{r.name}</span></button>
-        <span class="v num">{v === null ? '—' : metric(v)}</span>
+        <!-- How the line ended (live, stopped, failed) in words beside its value: the end label's fallback, and on phones,
+             which have no end labels, the only word for the end marker's shape. -->
+        <span class="v num">{v === null ? '—' : metric(v)}{#if runEnd(r.status)}<span class="st"><span class="sep">{' · '}</span>{runEnd(r.status)}</span>{/if}</span>
         <!-- How the run started: fine-tuned vs from scratch often explains a gap between two curves. It lies over the
              toggle's lower half (clicks pass through to it) and runs on under the value. Phones show it only in Edit,
              on a full-width line of its own. -->
@@ -455,6 +463,7 @@
       xFormat={(v) => (x === 'epoch' ? String(Math.round(v)) : `${Math.round(v)}%`)}
       xTitle={(v) => (x === 'epoch' ? `Epoch ${Math.round(v)}` : `${v.toFixed(0)}% through`)}
       {xLabel}
+      yLabel={zoomed ? UNIT_ZOOM_NOTE : undefined}
       bind:cursor
       bind:hint
       legend={false}
@@ -589,6 +598,12 @@
     font-weight: var(--weight-medium);
     font-variant-numeric: tabular-nums;
     text-align: right;
+    white-space: nowrap;
+  }
+  .chip .st {
+    font-size: var(--type-sm-size);
+    font-weight: var(--weight-regular);
+    color: var(--text-tertiary);
   }
   /* Indented under the name, past the key (16 px swatch + 8 px gap); clicks fall through to the toggle. */
   .from {
@@ -762,6 +777,17 @@
       min-width: 2.8em;
       padding-right: 0;
     }
+    /* The status word under the value (right-aligned), so the name keeps the row's width. */
+    .chips .chip .v {
+      display: grid;
+      justify-items: end;
+    }
+    .chips .chip .st {
+      line-height: var(--type-sm-line);
+    }
+    .chips .chip .st .sep {
+      display: none;
+    }
     /* Edit: the start line under the whole row, past the key; the identifier keeps whole and ellipsizes (title has it). */
     .chips .chip .from {
       grid-column: 1 / -1;
@@ -932,21 +958,23 @@
     color: var(--text-primary);
     font-size: var(--type-sm-size);
   }
-  /* Same patterns as the lines, so a run's key matches its curve without relying on colour. */
+  /* Same patterns as the lines, so a run's key matches its curve without relying on colour. A key is a fill: the
+     palette hue (--c is chart.fill) with the swatch hairline, which the pattern's mask cuts along with the dashes. */
   .chip i,
   .th i {
     flex-shrink: 0;
     width: 16px;
-    height: 3px;
+    height: 4px;
     border-radius: 2px;
     background: var(--c);
+    box-shadow: inset 0 0 0 1px var(--chart-swatch-edge);
   }
   i[data-pattern='dash'] {
-    background: repeating-linear-gradient(90deg, var(--c) 0 5px, transparent 5px 7px);
+    mask-image: repeating-linear-gradient(90deg, #000 0 5px, transparent 5px 7px);
     border-radius: 0;
   }
   i[data-pattern='dot'] {
-    background: repeating-linear-gradient(90deg, var(--c) 0 2px, transparent 2px 4px);
+    mask-image: repeating-linear-gradient(90deg, #000 0 3px, transparent 3px 5px);
     border-radius: 0;
   }
   .k {
