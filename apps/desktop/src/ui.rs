@@ -125,6 +125,38 @@ pub fn panel(t: &Theme) -> Div {
 }
 
 /// Panel header row: overline title on the left, optional extras on the right.
+/// A chart's anatomy, everywhere one shows: a header (title, caption) on a rule, a 28 px legend
+/// row whose items start under the title, then the plot inset 12 px. The run page frames it as a
+/// card; the Overview hero sets it under its KPIs. `short` windows trade 8 px of header and 4 of
+/// legend for plot.
+pub fn chart_section(
+    t: &Theme,
+    title: &str,
+    sub: &str,
+    legend: impl IntoElement,
+    plot: impl IntoElement,
+    short: bool,
+) -> Div {
+    div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .min_w_0()
+        .child(panel_header(t, title).child(caption(t, sub)).when(short, |d| d.h(px(32.))))
+        .child(
+            div()
+                .h(px(if short { 24. } else { 28. }))
+                // Legends start under the title (16 px); the loss toggles pull their 6 px hover
+                // pads back out so their swatches land there too.
+                .px(px(16.))
+                .pt(px(if short { 4. } else { 6. }))
+                .flex()
+                .items_center()
+                .child(legend),
+        )
+        .child(div().px(px(12.)).pb(px(6.)).child(plot))
+}
+
 pub fn panel_header(t: &Theme, title: &str) -> Div {
     div()
         .flex()
@@ -282,12 +314,16 @@ pub fn split_label(dataset: &str, split: &str, images: Option<u64>) -> String {
 }
 
 /// Where precision and recall were taken, as both pages caption them: the best-F1 confidence when
-/// known, the match rule, and the split ("best F1 · conf 0.31 · IoU 0.50 · val").
-pub fn pr_caption(conf: Option<f32>, split: &str) -> String {
-    let mut s = match conf {
-        Some(c) => format!("best F1 · conf {} · IoU 0.50", fmt_conf(c)),
-        None => "best F1 · IoU 0.50".to_string(),
-    };
+/// known, the match rule, and the split ("best F1 · conf 0.31 · IoU 0.50 · val"). A tile whose
+/// chart states the match rule beside it leaves it out (`iou: false`), so the line fits.
+pub fn pr_caption(conf: Option<f32>, split: &str, iou: bool) -> String {
+    let mut s = "best F1".to_string();
+    if let Some(c) = conf {
+        s += &format!(" · conf {}", fmt_conf(c));
+    }
+    if iou {
+        s += " · IoU 0.50";
+    }
     // A surface that names the split elsewhere (the model page's headline) leaves it out.
     if !split.is_empty() {
         s += &format!(" · {split}");
@@ -867,8 +903,8 @@ thread_local! {
 /// A scroll area's edge fades: 24 px of its surface `bg` over an edge only while content lies
 /// past it, so a row cut by the edge reads as "more", and at either end the rows show undimmed.
 /// With the thumbs hidden at rest, these are the scroll cue. Absolute children sit inside a
-/// parent's border already, so `inset` is extra room, and `radius` is the parent's inner radius. Every scroll area but the page uses them, through
-/// `FoloApp::scroll_chrome`.
+/// parent's border already, so `inset` is extra room, and `radius` is the parent's inner radius.
+/// Every scroll area, the page included, uses them, through `FoloApp::scroll_chrome`.
 pub fn scroll_edges(handle: &ScrollHandle, bg: Hsla, inset: f32, radius: f32) -> impl Iterator<Item = Div> {
     let y = handle.offset().y;
     let above = y < px(-1.);

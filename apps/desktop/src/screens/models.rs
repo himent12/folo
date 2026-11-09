@@ -341,7 +341,7 @@ impl FoloApp {
             .map(|d| (d.name.clone(), if d.splits.val == 0 { "train" } else { "val" }));
         // Where precision and recall are taken: the best-F1 confidence, named when the record has it.
         // The headline names the split; this tile's narrow caption says where on the curve.
-        let op_point = pr_caption(mm.as_ref().and_then(|x| x.best_f1_conf), "");
+        let op_point = pr_caption(mm.as_ref().and_then(|x| x.best_f1_conf), "", true);
         let tile = |content: gpui::Div| {
             div()
                 .flex_grow()
@@ -1104,13 +1104,21 @@ impl FoloApp {
     ) -> AnyElement {
         let t = theme(cx);
         let norm = self.confusion_norm;
-        // The evaluated dataset, named (by the model's run), so the numbers say what they measure.
-        let eval_ds = m
-            .run_id
-            .as_ref()
-            .and_then(|r| self.store.run(r))
-            .and_then(|r| self.store.dataset_summary(&r.config.dataset_id))
-            .map(|d| (d.name.clone(), if d.splits.val == 0 { "train" } else { "val" }));
+        // The evaluated dataset and split, as the server reports them (`ModelEval`); an older server
+        // leaves them out, and then they're inferred from the model's run.
+        let eval_ds = ev.dataset_name.clone().zip(ev.split.map(|s| s.as_str())).or_else(|| {
+            m.run_id
+                .as_ref()
+                .and_then(|r| self.store.run(r))
+                .and_then(|r| self.store.dataset_summary(&r.config.dataset_id))
+                .map(|d| (d.name.clone(), if d.splits.val == 0 { "train" } else { "val" }))
+        });
+        // What the matrix counts: predictions above `confusion_conf`, matched at `confusion_iou`.
+        let cm_rule = ev
+            .confusion_conf
+            .zip(ev.confusion_iou)
+            .map(|(c, i)| format!(" · conf {} · IoU {:.2}", fmt_conf(c), i))
+            .unwrap_or_default();
         let seg = self.segmented(
             "cm-norm",
             &["Row %", "Counts"],
@@ -1480,12 +1488,18 @@ impl FoloApp {
                             text(ty::XS, t.text_tertiary)
                                 .tnum()
                                 .child(match &eval_ds {
-                                    Some((d, split)) => split_label(d, split, Some(ev.images as u64)),
+                                    Some((d, split)) => {
+                                        format!("{}{cm_rule}", split_label(d, split, Some(ev.images as u64)))
+                                    }
                                     // Unknown dataset: the split isn't known either.
-                                    None => format!("Evaluation · {} images", int(ev.images as u64)),
+                                    None => format!("Evaluation · {} images{cm_rule}", int(ev.images as u64)),
                                 }),
                         ),
-                    ),
+                    )
+                    // Evaluated on another split than validation: the server's sentence says why.
+                    .when_some(ev.split_fallback.as_ref(), |d, f| {
+                        d.child(text(ty::XS, t.text_secondary).child(f.message.clone()))
+                    }),
             )
             .into_any_element()
     }

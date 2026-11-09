@@ -6,18 +6,21 @@ Releases are built by `.github/workflows/release.yml`. Nothing is published auto
 ## Version
 `[workspace.package] version` in the root `Cargo.toml` is the single source of truth. Every workspace crate
 inherits it (`version.workspace = true`), `folo --version` and `folo-desktop --version` print it, and
-`crates/folo-cli/tests/version.rs` fails when `web/package.json` or `apps/desktop/Cargo.toml` (its own cargo
-workspace, so it cannot inherit) disagree. The release workflow refuses a tag that is not `v<version>`; a version
+`crates/folo-cli/tests/version.rs` fails when `web/package.json`, `site/package.json`, their lock files or
+`apps/desktop/Cargo.toml` (its own cargo workspace, so it cannot inherit) disagree. The release workflow refuses a tag that is not `v<version>`; a version
 with a pre-release suffix (`0.2.0-rc.1`) makes a pre-release.
 
 ## Cutting a release
 1. **Bump the version** on a branch (`release/v0.2.0`):
    - `Cargo.toml`: `[workspace.package] version = "0.2.0"`
-   - `web/package.json`: `"version": "0.2.0"`, then `npm install` in `web/` to refresh `package-lock.json`
+   - `web/package.json` and `site/package.json`: `"version": "0.2.0"`, then `npm install` in `web/` and in `site/`
+     to refresh their `package-lock.json`
    - `apps/desktop/Cargo.toml`: `[package] version = "0.2.0"`
    - refresh both lock files, which the release builds use with `--locked`: `cargo check --workspace` at the root
      and `cargo check` in `apps/desktop/`
-   - `cargo test -p folo-cli --test version` checks they agree. Open the PR as usual and land it.
+   - `cargo test -p folo-cli --test version` checks they agree.
+   - add the version's section to `CHANGELOG.md` (grouped as Engine, Training, Inference and export, Server/API/MCP,
+     Studio, Desktop, Docs, Known issues; from `gh pr list --state merged`). Open the PR as usual and land it.
 2. **Rehearse the tag** on the merged `main`, without creating anything:
    ```sh
    gh workflow run release.yml --ref main -f tag=v0.2.0          # add -f macos=false to skip the macOS build
@@ -28,25 +31,36 @@ with a pre-release suffix (`0.2.0-rc.1`) makes a pre-release.
    notes and what would happen to the draft. The assets are uploaded as the run's `release-<version>` artifact.
    Download it (`gh run download <run id> -n release-0.2.0 -D dist`) to try the binaries before tagging (see
    [Checking a build](#checking-a-build)).
-3. **Tag `main`** and push the tag:
-   ```sh
-   git switch main && git pull --ff-only
-   git tag -a v0.2.0 -m "FOLO 0.2.0" && git push origin v0.2.0
-   ```
-   The workflow runs again for the tag and creates the draft release `FOLO 0.2.0` with generated notes and every
-   asset.
+3. **Create the draft**, either way:
+   - **Tag `main`** and push the tag:
+     ```sh
+     git switch main && git pull --ff-only
+     git tag -a v0.2.0 -m "FOLO 0.2.0" && git push origin v0.2.0
+     ```
+     The workflow runs again for the tag and creates the draft release `FOLO 0.2.0` with generated notes and every
+     asset.
+   - **Or dispatch with `draft`**, which creates the same draft without creating the tag:
+     ```sh
+     gh workflow run release.yml --ref main -f tag=v0.2.0 -f draft=true
+     ```
+     The draft targets the dispatched commit, and GitHub creates the tag `v0.2.0` there when the draft is published.
+     This also works from the release branch, to review a draft before the PR lands; then dispatch again on the
+     merged `main` before publishing, so the draft (and the tag publishing creates) points at `main`'s commit. A
+     re-run for an existing draft moves its target to the new commit and replaces its assets. It refuses when the
+     tag already exists at another commit.
 4. **Review the draft** (`gh release view v0.2.0`, or Releases on GitHub):
    - the assets: three CLI archives (macOS may be missing if its optional build failed or was skipped, see
-     [Runners](#runners); the run's summary says so), `folo-desktop-x86_64-pc-windows-msvc.zip`, a `.sha256` per
-     archive and `SHA256SUMS`;
-   - the notes: edit them into a short summary of what changed (`gh release edit v0.2.0 --notes-file notes.md`);
+     [Runners](#runners); the run's summary says so), `folo-desktop-x86_64-pc-windows-msvc.zip`,
+     `folo-wasm.tar.gz`, `install.sh` and `install.ps1`, a `.sha256` per asset and `SHA256SUMS`;
+   - the notes: edit them into the release notes (highlights, benchmarks, known issues; from the CHANGELOG section),
+     `gh release edit v0.2.0 --notes-file notes.md`. A re-run of the workflow for the draft keeps them;
    - optionally download an archive and run the [checks below](#checking-a-build).
 5. **Publish**: `gh release edit v0.2.0 --draft=false` (or "Publish release" on GitHub). Only now do
    `releases/latest/download/...` and the install scripts (`scripts/install.sh`, `scripts/install.ps1`) see it.
    Check with a fresh install: `sh scripts/install.sh --dir /tmp/folo-check && /tmp/folo-check/folo --version`.
 
-Re-running the workflow for a tag whose draft already exists replaces that draft's assets; it refuses to touch a
-release that is already published. To abandon a draft, delete it and the tag
+Re-running the workflow for a tag whose draft already exists replaces that draft's assets (and removes any asset
+the run did not build, so a draft never mixes commits); it refuses to touch a release that is already published. To abandon a draft, delete it and the tag
 (`gh release delete v0.2.0 --cleanup-tag`) and fix forward with a new version: a published version is never
 rebuilt.
 
@@ -56,6 +70,7 @@ rebuilt.
 | a PR touching the workflow, the install scripts, `scripts/build-wasm.sh` or the build scripts behind `--version` and `embed-web` | everything except macOS | no |
 | `gh workflow run release.yml --ref <branch or tag>` (Actions → release → Run workflow) | everything; `macos` (default on) adds the macOS build unless `FOLO_RELEASE_MACOS` is `false` | no |
 | the same with `-f tag=vX.Y.Z` | also the tag check and the notes preview | no |
+| the same with `-f tag=vX.Y.Z -f draft=true` | everything | a draft (the tag is created on publish) |
 | pushing a tag `v*` | everything (macOS unless `FOLO_RELEASE_MACOS` is `false`) | a draft |
 
 A dispatch runs the workflow file of the ref it is given, so a branch can rehearse changes to the workflow itself.
@@ -71,11 +86,11 @@ git push origin :refs/tags/dryrun-0.2.0 && git tag -d dryrun-0.2.0     # once th
 | job | runner | output |
 |---|---|---|
 | `plan` | Linux | the version, the tag check (tag builds, and dispatches with `tag`) and the build matrix |
-| `web` | Linux | `web/dist`: folo-wasm first (`scripts/build-wasm.sh` with SIMD128, wasm-bindgen-cli at the `Cargo.lock` version, binaryen's `wasm-opt` pinned by version and checksum), then `npm ci && npm run build`; fails unless `dist/folo-wasm/` has the module. Shared with every CLI build |
+| `web` | Linux | `web/dist`: folo-wasm first (`scripts/build-wasm.sh` with SIMD128, wasm-bindgen-cli at the `Cargo.lock` version, binaryen's `wasm-opt` pinned by version and checksum), then `npm ci && npm run build`; fails unless `dist/folo-wasm/` has the module. Shared with every CLI build. Also `folo-wasm.tar.gz`: a `folo-wasm/` folder with the ES module, the `.wasm`, the TypeScript declarations, docs/WASM.md as `README.md` and the licenses |
 | `cli` | Windows, Linux (built in an `ubuntu:22.04` container), macOS (hosted `macos-latest`) | `folo-<target>.zip` (Windows) / `.tar.gz`: a `folo-<target>/` folder with the binary (built with `--features embed-web`), `README.md` and the licenses |
 | `desktop` | Windows | `folo-desktop-x86_64-pc-windows-msvc.zip` with `folo-desktop.exe`, built with `--profile dist` (thin LTO, one codegen unit; apps/desktop's plain `release` profile is the faster-building development one) (skipped while `apps/desktop/Cargo.toml` does not exist) |
-| `release` | Linux | checks every `.sha256`, writes `SHA256SUMS`, uploads everything as the `release-<version>` artifact, creates the draft release (tags only) or previews it (dispatches with `tag`) |
-| `install-test` | Linux, Windows | runs `scripts/install.sh` / `scripts/install.ps1` against those assets (`--base-url`), checks the installed `folo` (and `folo-desktop`), checks that a tampered archive is refused, and runs the installed Linux `folo` in an `ubuntu:22.04` container, where it must start without loader warnings |
+| `release` | Linux | adds `install.sh` and `install.ps1` from `scripts/`, checks every `.sha256`, writes `SHA256SUMS`, uploads everything as the `release-<version>` artifact, creates or refreshes the draft release (tags, and dispatches with `tag` and `draft`) or previews it (dispatches with `tag` only) |
+| `install-test` | Linux, Windows | runs the `install.sh` / `install.ps1` assets against those assets (`--base-url`), checks the installed `folo` (and `folo-desktop`), checks that a tampered archive is refused, and runs the installed Linux `folo` in an `ubuntu:22.04` container, where it must start without loader warnings |
 
 Targets: `x86_64-pc-windows-msvc`, `x86_64-unknown-linux-gnu` (runs on glibc 2.35 and newer, see below) and
 `aarch64-apple-darwin` (macOS 11+).

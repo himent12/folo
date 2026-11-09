@@ -218,6 +218,40 @@ impl FoloApp {
         let dims = (img.width as f32, img.height as f32);
         let image = img.image.clone();
         let name = img.name.clone();
+        // The toolbar sheds by priority, not by flex order: the whole "dataset / file" with the
+        // image's size if both fit; else the whole name without the size; else the file alone.
+        // Whatever is shed moves into the file's tip. Widths are shaped in the toolbar's own font
+        // (fallbacks included, so CJK names measure true); `room` is the stage less every other
+        // item (icon, latency, count, zoom, rules and gaps: ~450 px measured, plus 20 of margin).
+        let size_text = format!("{} × {}", img.width, img.height);
+        let (prefix_all, file) = match name.rsplit_once(" / ") {
+            Some((p, f)) => (Some(p.to_string()), f.to_string()),
+            None => (None, name.to_string()),
+        };
+        let file_w = f32::from(crate::charts::text_width(window, &file, ty::SM.size));
+        // The crumb's "/" sits between 6 px gaps, a little wider than the shaped " / ".
+        let full_w = f32::from(crate::charts::text_width(window, &name, ty::SM.size)) + 6.;
+        let room = {
+            let rail = if window.viewport_size().width < px(1100.) { 280. } else { 320. };
+            self.content_width(window) - rail - 16. - 470.
+        };
+        const SIZE_W: f32 = 68.;
+        let (show_prefix, show_size) = match prefix_all {
+            None => (false, file_w + SIZE_W <= room),
+            Some(_) if full_w + SIZE_W <= room => (true, true),
+            Some(_) if full_w <= room => (true, false),
+            Some(_) => (false, false),
+        };
+        let prefix = prefix_all.clone().filter(|_| show_prefix);
+        let file_budget =
+            (room - if show_size { SIZE_W } else { 0. } - if show_prefix { full_w - file_w } else { 0. })
+                .clamp(room.clamp(40., 80.), 520.);
+        // The tip carries everything the toolbar shed: the dataset, the size, a cut file name.
+        let tip_text = {
+            let base = if prefix_all.is_some() && !show_prefix { name.to_string() } else { file.clone() };
+            if show_size { base } else { format!("{base} · {size_text}") }
+        };
+        let file_tip = file_w > file_budget || !show_size || (prefix_all.is_some() && !show_prefix);
         let (boxes, count, loading) = match &self.play_pred {
             Load::Ready(p) => {
                 let b = self.visible_boxes(p, active);
@@ -304,14 +338,8 @@ impl FoloApp {
                     .border_b_1()
                     .border_color(t.line_subtle)
                     .child(div().flex_none().child(icon("icons/image.svg", 14., t.text_tertiary)))
-                    // "dataset / file": the dataset part gives way first, the file name never.
+                    // "dataset / file", by the priority above; the file name is never shed.
                     .map(|d| {
-                        let compact = window.viewport_size().width < px(1150.);
-                        let (prefix, file) = match name.rsplit_once(" / ") {
-                            Some((p, f)) if !compact => (Some(p.to_string()), f.to_string()),
-                            Some((_, f)) => (None, f.to_string()),
-                            None => (None, name.to_string()),
-                        };
                         d.child(
                             div()
                                 .flex()
@@ -330,46 +358,31 @@ impl FoloApp {
                                     )
                                     .child(text(ty::SM, t.text_tertiary).flex_none().child("/"))
                                 })
-                                .child({
-                                    // The name takes what the toolbar leaves: the stage's width (window
-                                    // less sidebar, gutters and rail) less its other items (~560 px:
-                                    // crumb, size, latency, count, zoom). A long name ends in "…" at that
-                                    // known width, as GPUI needs; the full name is on hover.
-                                    let vw = f32::from(window.viewport_size().width);
-                                    let rail = if vw < 1100. { 280. } else { 320. };
-                                    let stage = self.content_width(window) - rail - 16.;
-                                    let budget =
-                                        (stage - 584.).clamp(if compact { 120. } else { 160. }, 520.);
-                                    // Monospace: the measured width is the glyph count times the advance.
-                                    let advance = window.text_system().advance(
-                                        window.text_system().resolve_font(&gpui::font(crate::theme::MONO)),
-                                        px(ty::SM.size),
-                                        'M',
-                                    );
-                                    let width = advance.map_or(8., |a| f32::from(a.width))
-                                        * file.chars().count() as f32;
-                                    let long = width > budget;
-                                    let full = file.clone();
-                                    div()
-                                        .id("play-file-name")
-                                        .flex_none()
-                                        .when(long, |d| d.tooltip(crate::controls::tip(full, None)))
-                                        .child(
-                                            text(ty::SM, t.text_primary)
-                                                .w(px(width.min(budget).ceil()))
-                                                .ellipsis()
-                                                .child(file),
-                                        )
-                                }),
+                                .child(
+                                    // A long file name ends in "…" at its known budget, as GPUI needs.
+                                    // What the toolbar shed shows on hover and on keyboard focus.
+                                    self.disclose(
+                                        div().id("play-file-name"),
+                                        "play-file-name",
+                                        tip_text.clone(),
+                                        file_tip,
+                                        28.,
+                                        true,
+                                        window,
+                                        cx,
+                                    )
+                                    .flex_none()
+                                    .child(
+                                        text(ty::SM, t.text_primary)
+                                            .w(px(file_w.min(file_budget).ceil()))
+                                            .ellipsis()
+                                            .child(file.clone()),
+                                    ),
+                                ),
                         )
                     })
-                    .when(true, |d| {
-                        d.child(
-                            text(ty::XS, t.text_tertiary)
-                                .flex_none()
-                                .tnum()
-                                .child(format!("{} × {}", img.width, img.height)),
-                        )
+                    .when(show_size, |d| {
+                        d.child(text(ty::XS, t.text_tertiary).flex_none().tnum().child(size_text.clone()))
                     })
                     .child(div().flex_1().min_w(px(8.)))
                     .when(loading, |d| d.child(text(ty::XS, t.text_tertiary).flex_none().child("Detecting…")))

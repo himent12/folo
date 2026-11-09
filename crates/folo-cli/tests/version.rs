@@ -19,8 +19,11 @@ fn first_version(text: &str) -> Option<&str> {
 #[test]
 fn versions_match_the_workspace() {
     let want = env!("CARGO_PKG_VERSION");
-    let web = std::fs::read_to_string(repo().join("web/package.json")).unwrap();
-    assert_eq!(first_version(&web), Some(want), "web/package.json: bump it with the workspace version");
+    // Studio and the docs site, with their lock files (whose first "version" is the package's own).
+    for file in ["web/package.json", "web/package-lock.json", "site/package.json", "site/package-lock.json"] {
+        let text = std::fs::read_to_string(repo().join(file)).unwrap();
+        assert_eq!(first_version(&text), Some(want), "{file}: bump it with the workspace version");
+    }
     // FOLO Desktop is its own cargo workspace, so it cannot inherit the version.
     if let Ok(desktop) = std::fs::read_to_string(repo().join("apps/desktop/Cargo.toml")) {
         let package =

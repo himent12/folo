@@ -50,18 +50,40 @@ on the CPU ([examples/shapes](examples/shapes/README.md)).
 
 ## Quickstart
 
-You need Rust (stable) and a GPU with Vulkan, DX12 or Metal. Without a GPU, `--device auto` falls back to the CPU,
-which is much slower. `cargo folo` is an alias for `cargo run --release -p folo-cli --`, and the first call builds
-the CLI (a few minutes):
+### Install
+
+Releases ship `folo` for x86_64 Windows and Linux (glibc 2.35 or newer) with Studio built in, so `folo serve` works
+anywhere, plus FOLO Desktop for Windows, the browser module (`folo-wasm.tar.gz`) and the install scripts. You need a
+GPU with Vulkan, DX12 or Metal for training at speed; without one, `--device auto` falls back to the CPU, which is
+much slower. The repository is private, so downloads need a logged-in [`gh`](https://cli.github.com) (or a token in
+`GH_TOKEN` / `GITHUB_TOKEN`):
 
 ```sh
-git clone https://github.com/himent12/folo && cd folo
-cargo folo doctor                                                         # the GPU FOLO picks
-cargo folo dataset synth datasets/shapes --images 1000 --imgsz 320        # a labelled YOLO dataset, ~1 s
-cargo folo train --data datasets/shapes --model folo-n --imgsz 320 --epochs 30   # ~2 min on the GPU
-cargo folo predict --model runs/shapes-n/weights/best.folo datasets/shapes/images/val --save runs/shapes-n/pred
-(cd web && npm ci && npm run build)                                       # build Studio's web app, once
-cargo folo serve --mock                                                   # Studio on http://127.0.0.1:7878, demo data
+gh release download --repo himent12/folo --pattern install.sh      # Linux: the latest release's install script
+sh install.sh                                                       # folo into ~/.local/bin
+```
+
+```powershell
+gh release download --repo himent12/folo --pattern install.ps1     # Windows
+powershell -ExecutionPolicy Bypass -File install.ps1                # into %LOCALAPPDATA%\Programs\folo\bin, added to PATH
+powershell -ExecutionPolicy Bypass -File install.ps1 -Desktop       # also FOLO Desktop
+```
+
+The scripts download the archive for your platform, check its SHA-256 and install `folo` (and `folo-desktop`).
+The same scripts are in a checkout as `scripts/install.sh` and `scripts\install.ps1`. Options: `--version` /
+`-Version` (a tag such as `v0.1.0`; default the latest release), `--dir` / `-InstallDir`, `--repo` / `-Repo` and
+`--base-url` / `-BaseUrl`, or the environment variables `FOLO_VERSION`, `FOLO_INSTALL_DIR`, `FOLO_REPO` and
+`FOLO_BASE_URL`. To install by hand, download `folo-<target>.zip` / `.tar.gz` and its `.sha256` from the release
+and put the binary on your `PATH`. There is no macOS build yet: on a Mac, build from source.
+
+### First model
+
+```sh
+folo doctor                                                         # the GPU FOLO picks
+folo dataset synth datasets/shapes --images 1000 --imgsz 320        # a labelled YOLO dataset, ~1 s
+folo train --data datasets/shapes --model folo-n --imgsz 320 --epochs 30   # ~2 min on the GPU
+folo predict --model runs/shapes-n/weights/best.folo datasets/shapes/images/val --save runs/shapes-n/pred
+folo serve --mock                                                   # Studio on http://127.0.0.1:7878, demo data
 ```
 
 `train` prints one row per epoch and writes `runs/shapes-n/`: `weights/best.folo`, `weights/last.folo` and
@@ -76,26 +98,21 @@ model in the Playground, copy it there: `mkdir -p ~/.folo/models && cp runs/shap
 **[docs/QUICKSTART.md](docs/QUICKSTART.md)** goes further: training on your own YOLO or COCO folder, fine-tuning,
 evaluation, export, and running a model in the browser.
 
-### Install a prebuilt binary
+### Build from source
 
-Tagged releases ship `folo` for x86_64 Windows and Linux and Apple-silicon macOS, with Studio built in, so `folo serve`
-works anywhere. **No release has been published yet**, so build from source for now. Once one is published:
+You need Rust (stable). `cargo folo` is an alias for `cargo run --release -p folo-cli --`, so every command above
+works as `cargo folo ...` from a checkout; the first call builds the CLI (a few minutes). Studio is a separate build:
 
 ```sh
-sh scripts/install.sh                     # Linux / macOS: into ~/.local/bin
+git clone https://github.com/himent12/folo && cd folo
+cargo folo doctor
+(cd web && npm ci && npm run build)       # build Studio's web app, once; cargo folo serve then serves web/dist
+cargo folo serve --mock
 ```
 
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\install.ps1            # into %LOCALAPPDATA%\Programs\folo\bin, added to PATH
-powershell -ExecutionPolicy Bypass -File scripts\install.ps1 -Desktop   # also FOLO Desktop
-```
-
-The scripts download the release for your platform, check its SHA-256 and install `folo`. The repository is private,
-so they need a token: `GH_TOKEN` / `GITHUB_TOKEN`, or a logged-in [`gh`](https://cli.github.com). Options:
-`--version` / `-Version`, `--dir` / `-InstallDir`, `--repo` / `-Repo` and `--base-url` / `-BaseUrl`, or the
-environment variables `FOLO_VERSION`, `FOLO_INSTALL_DIR`, `FOLO_REPO` and `FOLO_BASE_URL`. To install from a checkout
-instead: `cargo install --path crates/folo-cli` (add `--features embed-web` after building `web/`). See
-[docs/RELEASE.md](docs/RELEASE.md).
+To put a binary on your `PATH`: `cargo install --path crates/folo-cli` (add `--features embed-web` after building
+`web/` to embed Studio, as the releases do). [docs/RELEASE.md](docs/RELEASE.md) has the full release build, with the
+in-browser module.
 
 ## FOLO Studio
 
@@ -209,12 +226,14 @@ What works today (v0.1):
   f16, optional in-graph decode and dynamic shapes; parity-tested in onnxruntime).
 - f16 on the GPU: `--half` inference (on tensor cores with `--tensor-cores`) and mixed-precision training (`--amp`),
   plus the NMS-free one-to-one head (`--head o2o`).
-- `folo serve` (Studio and the HTTP API), `folo mcp`, in-browser inference, and release builds and install scripts.
+- `folo serve` (Studio and the HTTP API), `folo mcp`, in-browser inference, and the 0.1.0 release: Windows and
+  Linux binaries with Studio embedded, FOLO Desktop for Windows, the browser module and install scripts
+  ([CHANGELOG.md](CHANGELOG.md)).
 
 Not yet:
 - public pretrained weights (the release is a draft), or a COCO comparison with the incumbent at equal budget;
 - `folo bench`;
-- a published release.
+- a macOS build (it needs GitHub-hosted runners, which are unavailable for now).
 
 The live checklist is [docs/ROADMAP.md](docs/ROADMAP.md).
 
@@ -237,7 +256,7 @@ The live checklist is [docs/ROADMAP.md](docs/ROADMAP.md).
 | [FORMAT](docs/FORMAT.md) | The `.folo` weights and checkpoint format |
 | [METRICS](docs/METRICS.md) | How mAP, precision and recall are computed |
 | [ROADMAP](docs/ROADMAP.md) | What is done, in progress and next |
-| [RELEASE](docs/RELEASE.md) · [CI](docs/CI.md) · [PROCESS](docs/PROCESS.md) · [AGENTS](AGENTS.md) | Releases, CI runners, how changes land, rules for contributors |
+| [CHANGELOG](CHANGELOG.md) · [RELEASE](docs/RELEASE.md) · [CI](docs/CI.md) · [PROCESS](docs/PROCESS.md) · [AGENTS](AGENTS.md) | What each release changed, releases, CI runners, how changes land, rules for contributors |
 
 Examples: [shapes](examples/shapes/README.md) (the convergence gate, on CPU and GPU) and
 [r6](examples/r6/README.md) (a real dataset trained from scratch).

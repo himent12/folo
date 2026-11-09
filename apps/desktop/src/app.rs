@@ -3392,7 +3392,9 @@ impl FoloApp {
                     )
                     .child(div().absolute().top_0().left_0().right_0().h(px(1.)).bg(alpha(t.bg_app, 0.0))),
             )
-            .child(self.scrollbar(self.page_scroll.clone(), cx))
+            // The page is a scroll area like the rest: edge fades where content lies past the
+            // window (the at-rest cue, thumbs being hidden), and the thumb.
+            .children(self.scroll_chrome(self.page_scroll.clone(), t.bg_app, 0., 0., cx))
             .into_any_element()
     }
 }
