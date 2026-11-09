@@ -214,3 +214,24 @@ describe('Compare: a few runs use the panel', () => {
     expect(ths.slice(1).every((th) => !th.style.width)).toBe(true);
   });
 });
+
+describe('Compare: the phone control row', () => {
+  it('gives the metric the row, the x axis a compact select, and keeps value and status together in each key', async () => {
+    const runs = (await hub.api.runs()).filter((r) => r.status !== 'queued').slice(0, 4);
+    setWidth(390);
+    router.route = parse(`#/runs/compare?ids=${runs.map((r) => r.id).join(',')}`);
+    c = mount(RunCompare, { target });
+    const row = await until(() => target.querySelector('header.c-row'), 'the control row');
+    // Two selects (a select shows its whole value: the metric takes what is left), no segmented group on the row.
+    expect(row.querySelector('.c-metric select[aria-label="Metric"]')).not.toBeNull();
+    const x = row.querySelector<HTMLSelectElement>('.c-x select[aria-label="X axis"]')!;
+    expect([...x.options].map((o) => o.textContent)).toEqual(['Epoch', 'Progress']);
+    expect(row.querySelector('[role="radiogroup"]')).toBeNull();
+    // The ⓘ, when the axis has one, sits in a slot of its own, never as a bare 24 px button whose target reaches over
+    // the select beside it.
+    for (const info of row.querySelectorAll('.info-btn')) expect(info.parentElement?.classList.contains('i-slot')).toBe(true);
+    // Each legend key's value and status are one unit ("0.494 · failed").
+    await until(() => target.querySelector('.chips .chip .v .st'), 'a status in the legend');
+    for (const st of target.querySelectorAll('.chips .chip .st')) expect(st.parentElement?.classList.contains('v')).toBe(true);
+  });
+});

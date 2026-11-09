@@ -86,6 +86,11 @@
     { value: 'epoch', label: 'By epoch' },
     { value: 'progress', label: 'By progress' },
   ];
+  /** Phones: the x axis as a compact select ("X axis": Epoch, Progress), so the metric's select keeps its whole name. */
+  const X_PHONE: { value: Axis; label: string }[] = [
+    { value: 'epoch', label: 'Epoch' },
+    { value: 'progress', label: 'Progress' },
+  ];
   // Phones: the axis ⓘ opens in place under the control row (ui/infoSlot).
   const axisInfo = provideInfoSlot('cmp-axis-info');
   /** Phones: the progress axis explained in the ⓘ beside its control, with why it was chosen when it was. */
@@ -398,12 +403,15 @@
         <!-- Phones: one control row, the runs (two columns of compact keys whose values follow a tap or scrub on the
              plot), the one caveat that changes how to read it right above the plot, then the plot. Opening, removing and
              adding runs sit in a sheet (Edit); the longer explanation sits in the disclosure. -->
+        <!-- One row of three compact groups: the metric (the row's remaining width, its whole name at 16 px touch text),
+             the x axis as a select of two short words, and its ⓘ in a 44 px slot of its own, so no control's target
+             lies over its neighbour. -->
         <header class="c-row">
-          <Select label="Metric" bind:value={metricId} options={METRICS.map((m) => ({ value: m.id, label: m.label }))} />
-          <Segmented size="sm" label="X axis" value={x} onchange={setX} options={X_OPTIONS} />
+          <span class="c-metric"><Select label="Metric" bind:value={metricId} options={METRICS.map((m) => ({ value: m.id, label: m.label }))} /></span>
+          <span class="c-x"><Select label="X axis" bind:value={() => x, setX} options={X_PHONE} /></span>
           <!-- The normalised axis, and why it was chosen, one tap away beside its control: the ticks say "%", so the
                line of words under the controls went (it pushed the plot down). -->
-          {#if x === 'progress'}<InfoButton chart label="About the progress axis" text={progressWhy} how={PROGRESS_HOW} />{/if}
+          {#if x === 'progress'}<span class="i-slot"><InfoButton chart label="About the progress axis" text={progressWhy} how={PROGRESS_HOW} /></span>{/if}
         </header>
         <!-- The ⓘ opens here, under the controls, never as a popover over the legend and plot (ui/infoSlot). -->
         <InfoRegion slot={axisInfo} />
@@ -1018,25 +1026,25 @@
        area is the card. Opening, removing and adding runs live in the Edit sheet. */
     .chips {
       grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: var(--space-1) var(--space-2);
+      gap: 0 var(--space-2);
     }
+    /* The legend's caption ("Latest · ep 37", or how to read it on a first touch) and Edit: the first line of the
+       legend, not a row of its own. Edit is a real 32 px target (44 on touch), never a hit area over the controls above. */
     .chips-head {
-      min-height: 24px;
+      min-height: 32px;
     }
     .manage {
-      position: relative;
       display: inline-flex;
       align-items: center;
-      height: 24px;
-      padding-left: var(--space-3);
+      height: 32px;
+      padding: 0 var(--space-2);
+      margin-right: calc(-1 * var(--space-2));
+      border-radius: var(--radius-sm);
       font-size: var(--type-sm-size);
       color: var(--text-secondary);
     }
-    /* A 48 px target around the 24 px label, over the panel's padding above it. */
-    .manage::after {
-      content: '';
-      position: absolute;
-      inset: -12px -8px;
+    .manage:hover {
+      color: var(--text-primary);
     }
     /* A hanging indent: a wrapped line starts under the name, past the swatch (12 px and its 6 px gap). */
     .chips .chip {
@@ -1057,10 +1065,11 @@
       bottom: 0;
       left: 0;
     }
+    /* The space before the value is the name's margin, so a value wrapped under the name starts on its left edge. */
     .chips .chip .key {
       display: inline;
       position: static;
-      margin: 0;
+      margin: 0 var(--space-1) 0 0;
       padding: 0;
       font: inherit;
     }
@@ -1092,22 +1101,17 @@
       overflow: visible;
       overflow-wrap: break-word;
     }
+    /* The value and how the line ended ("0.494 · failed") are one unit that never breaks: beside the name when they
+       fit, else together on the line under it, never the status alone under the name with its value above. */
     .chips .chip .v {
-      display: inline;
+      display: inline-block;
       min-width: 0;
-      margin-left: var(--space-1-5);
+      margin: 0;
       padding: 0;
       text-align: left;
-      white-space: normal;
-      pointer-events: none;
-    }
-    /* How the line ended ("stopped") on a line of its own under the name: beside the value it would not fit a column. */
-    .chips .chip .st {
-      display: block;
       text-indent: 0;
-    }
-    .chips .chip .st .sep {
-      display: none;
+      white-space: nowrap;
+      pointer-events: none;
     }
     .chips .chip .from,
     .chips .chip .acts {
@@ -1125,8 +1129,17 @@
       z-index: 1;
       background: var(--bg-panel);
     }
+    /* Compact groups 8 px apart (controls, legend, caveat, plot), so the plot starts within ~200 px of the controls. */
     .compare {
+      gap: var(--space-2);
       padding: var(--space-3);
+    }
+  }
+  /* Touch: Edit is a real 44 px target (no invisible hit area over the controls above or the keys below). */
+  @media (max-width: 767px) and (pointer: coarse) {
+    .chips-head,
+    .manage {
+      min-height: 44px;
     }
   }
   /* The axis ⓘ's region sits on the frame's own edges; the section's gap spaces it. */
@@ -1134,17 +1147,33 @@
     --info-inset: 0;
     --info-after: 0;
   }
-  /* Phones: metric picker and x axis share one row above the legend. */
+  /* Phones: metric picker and x axis share one row above the legend. The metric takes what is left (at least 140 px,
+     so "mAP50-95" shows whole at 16 px touch text); the x axis is as wide as its longest word; the ⓘ has a real 44 px
+     slot, its touch target inside it rather than over the select beside it. */
   .c-row {
     display: flex;
     align-items: center;
     gap: var(--space-2);
   }
-  .c-row > :global(.select) {
+  .c-metric {
+    flex: 1 1 140px;
+    min-width: 140px;
+    display: flex;
+  }
+  .c-metric > :global(.select) {
     flex: 1;
   }
+  .c-x {
+    flex: 0 0 auto;
+    display: flex;
+  }
+  .i-slot {
+    flex: 0 0 44px;
+    display: grid;
+    place-items: center;
+    height: 44px;
+  }
   .about {
-    margin-top: calc(-1 * var(--space-2));
     border-top: 1px solid var(--line-subtle);
   }
   .about summary {

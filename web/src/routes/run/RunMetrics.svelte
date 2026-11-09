@@ -80,6 +80,9 @@
   import { provideInfoSlot } from '$lib/ui/infoSlot.svelte';
   import { tooltip } from '$lib/ui/tooltip';
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
+  import ChevronUp from '@lucide/svelte/icons/chevron-up';
+  import { tick } from 'svelte';
+  import Button from '$lib/ui/Button.svelte';
   import ChartSkeleton from '$lib/charts/ChartSkeleton.svelte';
   import { BestPulse, CompleteFocus } from '$lib/charts/bestPulse';
   import { scoresTitle, type EvalSource } from '$lib/evaluated';
@@ -416,6 +419,26 @@
   // The last epochs train without mosaic (the hatched end of the progress bar): marked where they start, on every chart.
   const xMark = $derived(mosaicOff ? { x: run.epochs - closeN, label: 'mosaic off' } : undefined);
   const current = $derived(tabs.find((t) => t.id === tab)!);
+  /**
+   * Phones, the chart open: the one line between the metric picker and the legend. A value appears once above its chart
+   * (DESIGN_DIRECTION §12): the legend reads the latest value (or the cursor's), so the best is stated here only where
+   * it differs from it ("○ best 0.599 · ep 36"); a run whose best is its last epoch says where ("○ best · ep 150").
+   */
+  const phoneQualifier = $derived(
+    tab === 'map' && run.best
+      ? `by epoch · ○ best${run.best.epoch === lastEpoch?.epoch ? '' : ` ${metric(run.best.map50_95)}`} · ep ${run.best.epoch}`
+      : current.qualifier,
+  );
+
+  // Phones: folding hands focus to the control that reopens it, and opening to the one that folds it again, so a
+  // keyboard never lands on <body> when the button it pressed goes away.
+  let readoutEl = $state<HTMLButtonElement>();
+  let hideEl = $state<HTMLElement>();
+  async function setFold(open: boolean) {
+    setChartOpen(open);
+    await tick();
+    (open ? hideEl?.querySelector<HTMLElement>('button') : readoutEl)?.focus();
+  }
 
 
   // 1–6 pick a metric tab from anywhere on the page (a single-key shortcut: off with the others in Settings).
@@ -453,11 +476,8 @@
 {/snippet}
 
 {#snippet picker()}
-  <Select
-    label="Metric to chart"
-    bind:value={tab}
-    options={tabs.map((t) => ({ value: t.id, label: `${t.label} · ${t.value}${t.unit && t.value !== '—' ? ` ${t.unit}` : ''}` }))}
-  />
+  <!-- The metric's name only: its value is the legend's, under the picker (a value appears once above its chart). -->
+  <Select label="Metric to chart" bind:value={tab} options={tabs.map((t) => ({ value: t.id, label: t.label }))} />
 {/snippet}
 
 <section class="metrics" aria-label="Run metrics" data-tip-bounds>
@@ -525,21 +545,30 @@
   </div>
 
   <div class="chart" class:folded={fold} id="run-chart" role="tabpanel" aria-label={current.title}>
-    {#if narrow && !queued}
-      <!-- Phones: the chart's one-line readout, which folds or opens it, one state in every section. -->
-      <button type="button" class="readout" aria-expanded={!fold} aria-controls="run-chart-body" onclick={() => setChartOpen(fold)}>
+    {#if fold}
+      <!-- Phones, folded: the chart's one-line readout, which opens it, one state in every section. Open, the picker,
+           the qualifier and the legend say all of this, so the row goes and "Hide chart" sits in the chart's header. -->
+      <button type="button" class="readout" aria-expanded="false" aria-controls="run-chart-body" bind:this={readoutEl} onclick={() => setFold(true)}>
         <span class="r-l">{current.label}</span>
         <span class="r-v num">{current.value}{#if current.unit && current.value !== '—'}{@render unitOf(current)}{/if}</span>
         <span class="r-c">{current.caption}</span>
-        <span class="r-a">{fold ? 'Show chart' : 'Hide chart'}<ChevronDown size={14} aria-hidden="true" /></span>
+        <span class="r-a">Show chart<ChevronDown size={14} aria-hidden="true" /></span>
       </button>
     {/if}
     {#if !fold}
       <div class="chart-body" id="run-chart-body">
         <header>
-          <!-- Phones: the picker names the metric in place of the title (the tabs above are hidden). -->
-          {#if narrow}<div class="pick">{@render picker()}</div>{/if}
-          <h2><span class="t">{current.title}</span><span class="q">{current.qualifier}{#if current.qExp}<sup class="exp">{current.qExp}</sup>{/if}</span></h2>
+          <!-- Phones: the picker names the metric in place of the title (the tabs above are hidden), and "Hide chart"
+               folds the chart from its own header row. -->
+          {#if narrow}
+            <div class="pick">{@render picker()}</div>
+            {#if !queued}
+              <span class="hide" bind:this={hideEl}>
+                <Button size="sm" variant="ghost" iconRight={ChevronUp} aria-expanded="true" aria-controls="run-chart-body" onclick={() => setFold(false)}>Hide chart</Button>
+              </span>
+            {/if}
+          {/if}
+          <h2><span class="t">{current.title}</span><span class="q">{narrow ? phoneQualifier : current.qualifier}{#if current.qExp}<sup class="exp">{current.qExp}</sup>{/if}</span></h2>
           <div class="ctl">
             <!-- One control for the loss view (smoothing and y scale behind one button), so the header keeps at most one
                  segmented group. -->
@@ -885,9 +914,6 @@
   .r-a :global(svg) {
     transition: transform var(--dur-fast) var(--ease-standard);
   }
-  .readout[aria-expanded='true'] .r-a :global(svg) {
-    transform: rotate(180deg);
-  }
   .chart header {
     display: flex;
     align-items: center;
@@ -1017,24 +1043,38 @@
     .chart {
       padding: 0 var(--space-3) var(--space-3);
     }
-    /* One row: the metric picker and the range control; the qualifier (best value and epoch) on a line below. */
+    /* Two rows, 12 px under the epoch row (or the panel's top): the metric picker, with "Hide chart" at the row's end;
+       then the one summary line (what the x axis is, the best where the legend does not already show it) with the
+       chart's range control on its right. The legend follows: a value appears once above its chart. */
     .chart header {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: center;
+      gap: var(--space-2) var(--space-3);
       min-height: 0;
     }
     .pick {
-      flex: 1 1 160px;
       min-width: 0;
-      max-width: 240px;
     }
-    .ctl {
-      margin-left: auto;
+    .hide {
+      display: flex;
     }
     h2 {
-      order: 1;
-      flex-basis: 100%;
+      grid-column: 1;
+      grid-row: 2;
     }
+    .ctl {
+      grid-column: 2;
+      grid-row: 2;
+      justify-content: flex-end;
+    }
+    .chart header:not(:has(.ctl > *)) h2 {
+      grid-column: 1 / -1;
+    }
+    /* Figures people read (the best and its epoch): secondary, as a KPI caption (DESIGN_DIRECTION §2.3). */
     .q {
       white-space: normal;
+      color: var(--text-secondary);
     }
   }
   /* The fading wrapper of a swapped chart: it takes the chart's place in the layout. */

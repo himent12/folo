@@ -23,6 +23,7 @@
   import { imagesOf } from '$lib/evaluated';
   import { metric, num } from '$lib/format';
   import Input from '$lib/ui/Input.svelte';
+  import Segmented from '$lib/ui/Segmented.svelte';
   import ArrowLeft from '@lucide/svelte/icons/arrow-left';
   import ArrowRight from '@lucide/svelte/icons/arrow-right';
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
@@ -63,7 +64,8 @@
     hovered?: number | null;
     /** Many classes: every curve instead of the 10th–90th percentile band. */
     allCurves?: boolean;
-    /** The band / all-curves switch sits in the panel's header (the page renders it), not at the legend row's end. */
+    /** The band / all-curves switch sits in the panel's header (the page renders it from 768 px up; on phones this
+     *  renders it at the end of the Curves bar), not at the legend row's end. */
     modeInHeader?: boolean;
   } = $props();
   /** The plot's box when it fills its panel: the chart is drawn at that height. */
@@ -200,6 +202,20 @@
           {/if}
           {#if selected.length}<button type="button" class="clear" onclick={() => (selected = [])}>Clear</button>{/if}
         </p>
+        <!-- Many classes: the band / every-curve switch the page's header holds from 768 px up, here at the bar's end. -->
+        {#if many && modeInHeader}
+          <span class="bar-mode">
+            <Segmented
+              size="sm"
+              label="Curves shown"
+              bind:value={() => (allCurves ? 'all' : 'band'), (v) => (allCurves = v === 'all')}
+              options={[
+                { value: 'band', label: 'Band' },
+                { value: 'all', label: 'All curves' },
+              ]}
+            />
+          </span>
+        {/if}
       </div>
     {/if}
     <!-- At rest the legend states each curve's AP50 (a summary of the whole curve); under the cursor it switches to a
@@ -544,14 +560,27 @@
     gap: var(--space-2) var(--space-4);
     padding: 0 var(--space-4) var(--space-2);
   }
-  /* Under the sticky section picker (the page sets --pick-bottom), on the panel's fill. */
+  /* Under the sticky section picker (the page sets --pick-bottom, 8 px under it), on the panel's fill. It starts where
+     the header above it ends, never pulled up over it: a bar that paints its own fill must not cover a neighbour's
+     control (round 27: the header's Band / All curves lost its bottom 6 px to a -8 px margin here). One row: what is
+     traced on the left, the curves' mode on the right. */
   .tools.bar {
     position: sticky;
     top: var(--pick-bottom, var(--size-topbar));
     z-index: 1;
-    padding-top: var(--space-2);
-    margin-top: calc(var(--space-2) * -1);
+    flex-wrap: nowrap;
+    justify-content: space-between;
     background: var(--bg-panel);
+  }
+  .bar-mode {
+    display: flex;
+    flex-shrink: 0;
+  }
+  /* What is traced and its ways back wrap inside their own part, so the mode keeps its place at the row's end. */
+  .tools.bar .pick {
+    flex: 1;
+    flex-wrap: wrap;
+    min-width: 0;
   }
   .view.to-curve,
   .view.trace {

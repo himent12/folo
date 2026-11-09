@@ -268,10 +268,12 @@
               onchange={(s) => setQuery({ split: s === 'all' ? null : s, image: null })}
             />
           {/if}
-          <ClassPicker classes={d.classes} counts={d.stats?.class_counts} value={cls} onchange={(c) => setQuery({ class: c === undefined ? null : String(c), image: null })} />
+          <ClassPicker block={phone} classes={d.classes} counts={d.stats?.class_counts} value={cls} onchange={(c) => setQuery({ class: c === undefined ? null : String(c), image: null })} />
           <!-- Phones, filtered: the count and Clear on a row of their own under the pickers ("1,873 of 2,400"). -->
           {#if phone && filtered}<span class="break" aria-hidden="true"></span>{/if}
-          <span class="count num" aria-live="polite">
+          <!-- Phones show no count until filtered; an empty span here would still take a gap after Display, 8 px short of
+               the content edge. The polite region stays, out of the row. -->
+          <span class="count num" class:none={phone && !filtered} aria-live="polite">
             {#if phone}
               {#if filtered}{pager?.total != null ? num(pager.total) : '…'} of {num(total)}<span class="sr-only"> images</span>{/if}
             {:else if filtered}
@@ -408,8 +410,9 @@
   .spacer {
     flex: 1;
   }
-  /* Phones: split, class and Display share one row (the class name truncates first); filtered, the count and Clear
-     follow on a second row, so neither is squeezed to a number and a bare ×. */
+  /* Phones: split, class and Display share one row; the class picker takes what the other two leave (its name
+     truncates first), so Display ends on the 16 px gutter whatever the class reads ("All classes" left it 14 px short).
+     Filtered, the count and Clear follow on a second row, so neither is squeezed to a number and a bare ×. */
   .ds-toolbar.phone {
     flex-wrap: wrap;
     gap: var(--space-2);
@@ -427,10 +430,20 @@
     flex-shrink: 0;
   }
   .ds-toolbar.phone :global(.picker) {
-    flex: 0 1 auto;
+    flex: 1 1 0;
+  }
+  .ds-toolbar.phone .spacer {
+    display: none;
   }
   .ds-toolbar.phone .count {
     flex-shrink: 0;
+  }
+  .ds-toolbar.phone .count.none {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
   }
   .toggle {
     display: inline-flex;

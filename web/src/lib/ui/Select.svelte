@@ -5,7 +5,9 @@
    * keep the full one (the name with its score and what the score is on), so a closed select never cuts a fact off at
    * its edge. Say the rest under the select, in a meta line it is described by (DESIGN_DIRECTION §2.23).
    */
-  import ChevronDown from '@lucide/svelte/icons/chevrons-up-down';
+  // One select affordance app-wide: a single down chevron at the field's end, the one Dataset's class picker (a list
+  // button) has too, so two pickers side by side never wear two different marks.
+  import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import { describedBy, getField } from './field';
 
   interface Option {
