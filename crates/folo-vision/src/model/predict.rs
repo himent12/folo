@@ -229,22 +229,28 @@ impl HeadOutput {
             cands
         };
         let blocks = a.div_ceil(CPU_DECODE_BLOCK);
-        let dets = self.box_raw.with_f32_slice(|reg| {
-            self.cls_raw.with_f32_slice(|cls| {
-                (0..b)
-                    .into_par_iter()
-                    .map(|i| {
-                        let cl = &cls[i * nc * a..(i + 1) * nc * a];
-                        let rg = &reg[i * 4 * rm * a..(i + 1) * 4 * rm * a];
-                        let parts: Vec<Vec<Candidate>> = (0..blocks)
-                            .into_par_iter()
-                            .map(|t| block(cl, rg, t * CPU_DECODE_BLOCK, ((t + 1) * CPU_DECODE_BLOCK).min(a)))
-                            .collect();
-                        self.finish_candidates(&parts.concat(), nms)
-                    })
-                    .collect()
-            })
-        })??;
+        let images = |reg: &[f32], cls: &[f32]| -> Vec<Vec<Detection>> {
+            (0..b)
+                .into_par_iter()
+                .map(|i| {
+                    let cl = &cls[i * nc * a..(i + 1) * nc * a];
+                    let rg = &reg[i * 4 * rm * a..(i + 1) * 4 * rm * a];
+                    let parts: Vec<Vec<Candidate>> = (0..blocks)
+                        .into_par_iter()
+                        .map(|t| block(cl, rg, t * CPU_DECODE_BLOCK, ((t + 1) * CPU_DECODE_BLOCK).min(a)))
+                        .collect();
+                    self.finish_candidates(&parts.concat(), nms)
+                })
+                .collect()
+        };
+        // Views of one storage (e.g. channel slices of one `[B, 4·reg_max + nc, A]` tensor) are not borrowed
+        // twice: a second read lock on a storage while a writer queues for it could deadlock. Copy one instead.
+        let dets = if self.box_raw.same_storage(&self.cls_raw) {
+            let cls = self.cls_raw.to_vec::<f32>()?;
+            self.box_raw.with_f32_slice(|reg| images(reg, &cls))?
+        } else {
+            self.box_raw.with_f32_slice(|reg| self.cls_raw.with_f32_slice(|cls| images(reg, cls)))??
+        };
         Ok(Some(dets))
     }
 

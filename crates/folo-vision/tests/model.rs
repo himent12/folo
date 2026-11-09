@@ -602,6 +602,16 @@ fn cpu_detections_match_full_decode() {
         let got = out.detections(&cfg).unwrap();
         assert!(want.iter().any(|d| !d.is_empty()), "the case should keep some detections");
         assert_eq!(got, want, "{cfg:?}");
+        // The same outputs as channel slices of one `[B, 64 + nc, A]` tensor (one storage, strided views for
+        // B > 1): same detections.
+        let joint = Tensor::cat(&[&out.box_raw, &out.cls_raw], 1).unwrap();
+        let shared = folo_vision::model::HeadOutput {
+            box_raw: joint.narrow(1, 0, 64).unwrap(),
+            cls_raw: joint.narrow(1, 64, nc).unwrap(),
+            ..out.clone()
+        };
+        assert!(shared.box_raw.same_storage(&shared.cls_raw));
+        assert_eq!(shared.detections(&cfg).unwrap(), want, "{cfg:?}, one storage");
     }
 }
 

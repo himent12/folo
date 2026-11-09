@@ -539,7 +539,9 @@ fn small_c_gather(planes: &[&[f32]], g: &ConvGeom, oy: usize, owp: usize, gat: &
                 let r = valid_cols(g.ow, sw, d, g.w as isize);
                 dst[..r.start].fill(0.0);
                 dst[r.end..].fill(0.0);
-                if sw == 1 {
+                if r.is_empty() {
+                    // The tap sees only padding (it starts right of the row, or ends left of it).
+                } else if sw == 1 {
                     let s0 = (r.start as isize + d) as usize;
                     dst[r.clone()].copy_from_slice(&src[s0..s0 + r.len()]);
                 } else {
@@ -1004,6 +1006,10 @@ mod small_c_tests {
             (2, 3, [8, 8], 4, [3, 3], p([1, 1], [3, 3], [1, 1])),
             (1, 3, [70, 70], 33, [7, 7], p([2, 2], [3, 3], [1, 1])),
             (1, 3, [5, 200], 2, [1, 3], p([1, 4], [0, 1], [1, 1])),
+            // Taps that see only padding on the left or the right of a row (and above / below it).
+            (1, 2, [1, 1], 2, [5, 5], p([1, 1], [2, 2], [1, 1])),
+            (2, 1, [4, 3], 3, [5, 7], p([1, 1], [2, 3], [1, 1])),
+            (1, 3, [3, 2], 2, [3, 5], p([2, 2], [1, 3], [1, 1])),
         ];
         let silu = |_: usize, v: &mut [f32]| v.iter_mut().for_each(|x| *x = *x / (1.0 + (-*x).exp()));
         let bias = |c: usize, v: &mut [f32]| v.iter_mut().for_each(|x| *x += c as f32 * 0.25 - 1.0);
