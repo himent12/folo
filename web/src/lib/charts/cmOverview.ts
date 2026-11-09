@@ -10,11 +10,11 @@ export interface OverviewGeometry {
   size: number;
 }
 
-/** Cells as large as fit `maxSize` (at least 6 px, at most 20 px) for an n × n matrix. */
-export function overviewGeometry(n: number, maxSize = 168): OverviewGeometry {
+/** Cells as large as fit `maxSize` (at least `minCell` px, 6 by default; at most 20 px) for an n × n matrix. */
+export function overviewGeometry(n: number, maxSize = 168, minCell = 6): OverviewGeometry {
   const gap = 1;
   const k = Math.max(1, n);
-  const cell = Math.max(6, Math.min(20, Math.floor((maxSize + gap) / k) - gap));
+  const cell = Math.max(minCell, Math.min(20, Math.floor((maxSize + gap) / k) - gap));
   return { cell, gap, size: k * cell + (k - 1) * gap };
 }
 

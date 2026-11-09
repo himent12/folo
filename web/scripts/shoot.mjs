@@ -145,6 +145,8 @@ async function overflowCheck(page) {
       if (hits.some((o) => o !== h && h.el.contains(o.el) && o.px >= h.px - 1)) continue;
       const d = culprit(h.el);
       if (d && deliberate(h.el, d)) continue;
+      // Nothing inside spills: a positioned ::before / ::after (a 44 px hit area around a small control) is the cause.
+      if (!d && ['::before', '::after'].some((p) => getComputedStyle(h.el, p).position === 'absolute')) continue;
       const text = ((d ?? h.el) instanceof HTMLElement ? /** @type {HTMLElement} */ (d ?? h.el).innerText : (d ?? h.el).textContent) ?? '';
       out.push({
         selector: describe(h.el) + (d ? `  [widest: ${describe(d).split(' > ').pop()}]` : ''),
