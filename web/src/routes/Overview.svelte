@@ -163,7 +163,7 @@
                     <tr class="link" onclick={() => router.go(`/runs/${r.id}`)}>
                       <td>
                         <a class="run-name" href={href(`/runs/${r.id}`)} onclick={(e) => e.stopPropagation()}>{r.name}</a>
-                        <span class="sub">{dsById.get(r.config.dataset_id)?.name ?? r.config.dataset_id} · <Ident value={r.config.arch} /></span>
+                        <span class="sub"><Meta line><span>{dsById.get(r.config.dataset_id)?.name ?? r.config.dataset_id}</span><Ident value={r.config.arch} /></Meta></span>
                       </td>
                       <td use:tooltip={failureCause(r)}><StatusBadge status={r.status} plain /></td>
                       <td class="hide-sm">

@@ -74,10 +74,10 @@
   </table>
   <!-- What "—" means, said once for every row that has it. -->
   {#if mixed}
-    <p class="foot">
-      <span aria-hidden="true">— </span>{mixed} of {versusYolo26n.length} rows ran under different conditions, so they name no winner;
-      <button type="button" class="see" onclick={showHow}>see how this was measured</button>.
-    </p>
+    <div class="foot">
+      <p><span aria-hidden="true">—&nbsp;</span>{mixed} of {versusYolo26n.length} rows ran under different conditions, so they name no winner;
+        <button type="button" class="see" onclick={showHow}>see how this was measured</button>.</p>
+    </div>
   {/if}
   <!-- How the rows were made and what qualifies them, one step away. -->
   <details class="how" bind:this={how}>
@@ -135,8 +135,10 @@
     color: var(--text-secondary);
   }
   /* The footnote for "—", under the rows it explains, one step quieter. */
-  .foot {
+  .foot p {
     max-width: 60ch;
+  }
+  .foot {
     padding: var(--space-3) var(--space-4);
     border-top: 1px solid var(--line-subtle);
     font-size: var(--type-sm-size);

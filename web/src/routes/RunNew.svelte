@@ -933,10 +933,12 @@
           {@render whyLine('dock-why', 'dock-why')}
         {:else}
           <button type="button" class="dock-est num" aria-haspopup="dialog" aria-label="Show the run summary" onclick={() => (sumOpen = true)}>
-            <span>{roughDuration(est.totalSeconds)}</span>
-            {#if !onCpu && gpu}<span class:warn={vramPct > 0.9}>{roughBytes(vram)} GPU memory</span>{/if}
-            {#if short}<span class="dock-warn"><TriangleAlert size={12} aria-hidden="true" />{short.scratch ? 'Too short to learn' : 'Mostly warmup'}</span>{/if}
-            {#if dataset}<span class="faint">{dataset.name} · <Ident value={arch} /></span>{/if}
+            <Meta>
+              <span>{roughDuration(est.totalSeconds)}</span>
+              {#if !onCpu && gpu}<span class:warn={vramPct > 0.9}>{roughBytes(vram)} GPU memory</span>{/if}
+              {#if short}<span class="dock-warn"><TriangleAlert size={12} aria-hidden="true" />{short.scratch ? 'Too short to learn' : 'Mostly warmup'}</span>{/if}
+              {#if dataset}<span class="faint"><Meta line><span>{dataset.name}</span><Ident value={arch} /></Meta></span>{/if}
+            </Meta>
             <span class="dock-more"><ChevronUp size={14} strokeWidth={1.75} aria-hidden="true" /></span>
           </button>
         {/if}

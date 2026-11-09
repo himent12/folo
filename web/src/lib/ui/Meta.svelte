@@ -18,12 +18,12 @@
   }: { children: Snippet; line?: boolean; class?: string; title?: string } = $props();
 </script>
 
-<span class="meta {cls}" class:line {title}>{@render children()}</span>
+<span class="ui-meta {cls}" class:line {title}>{@render children()}</span>
 
 <style>
   /* Wrapping: a flex row shifted one separator (20 px) left and clipped back at the content edge, so each line's
      leading dot is cut off; focus rings keep 4 px of room on that side. */
-  .meta {
+  .ui-meta {
     display: flex;
     flex-wrap: wrap;
     align-items: baseline;
@@ -33,11 +33,11 @@
     clip-path: inset(-8px -8px -8px 16px);
   }
   /* A line breaks between items, never inside one; an item that may be too long for the line truncates itself. */
-  .meta > :global(*) {
+  .ui-meta > :global(*) {
     min-width: 0;
     white-space: nowrap;
   }
-  .meta > :global(*)::before {
+  .ui-meta > :global(*)::before {
     content: '·';
     display: inline-block;
     flex: none;
@@ -48,8 +48,14 @@
     color: var(--text-tertiary);
     text-decoration: none;
   }
+  /* An item's content is inline (it follows its dot); a one-line meta nested in an item sits after the dot too. */
+  :global(.ui-meta) .ui-meta.line {
+    display: inline-block;
+    max-width: calc(100% - 20px);
+    vertical-align: top;
+  }
   /* One line: inline flow cut with an ellipsis; the first item has no dot. */
-  .meta.line {
+  .ui-meta.line {
     display: block;
     margin-left: 0;
     clip-path: none;
@@ -57,7 +63,7 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .meta.line > :global(*:first-child)::before {
+  .ui-meta.line > :global(*:first-child)::before {
     content: none;
   }
 </style>
