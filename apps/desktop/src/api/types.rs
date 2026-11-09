@@ -77,6 +77,8 @@ impl Label for CloudPhase {
             CloudPhase::Collecting => "Collecting weights",
             CloudPhase::Releasing => "Releasing",
             CloudPhase::Released => "Released",
+            // A newer server's phase: say so plainly instead of guessing which one it is.
+            CloudPhase::Unknown => "In progress",
         }
     }
 }
@@ -90,6 +92,7 @@ impl Label for CloudInstanceStatus {
             CloudInstanceStatus::Terminating => "Terminating",
             CloudInstanceStatus::Terminated => "Terminated",
             CloudInstanceStatus::Lost => "Lost",
+            CloudInstanceStatus::Unknown => "Unknown",
         }
     }
 }
