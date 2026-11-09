@@ -62,7 +62,7 @@
   }
   /* Helper text keeps a readable measure (DESIGN_DIRECTION §2.3: ≤ 60 characters a line). */
   .msg {
-    max-width: 60ch;
+    max-inline-size: var(--measure);
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
     color: var(--text-tertiary);

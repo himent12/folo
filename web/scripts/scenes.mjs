@@ -109,10 +109,19 @@ export const scenes = [
   { name: 'run-completed', path: '/runs/run_c19a', viewports: ['desktop', 'laptop', 'mobile'] },
   { name: 'run-new', path: '/runs/new', viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
   {
-    // "Retry with batch 16" on the out-of-memory run: the note says what failed and what changed, the field is marked.
+    // A retry of the out-of-memory run at batch 16, still forecast not to fit (~26.9 / 16 GiB): the note says what
+    // failed and what changed, the figure, meter and line are danger, "Use batch 8" is the one primary and Start a
+    // secondary; the phone dock says "~26.9 GiB / 16.0 GiB · Likely won't fit" beside "Use batch 8".
     name: 'run-new-oom-retry',
     path: '/runs/new?from=run_a2f0&batch=16',
-    viewports: ['desktop', 'laptop', 'mobile'],
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
+    setup: (page) => until(page, '.start .btn.primary:has-text("Use batch")'),
+  },
+  {
+    // The run page's retry ("Retry with batch 8 · ~13.6 GiB"): forecast to fit, so Start is the primary.
+    name: 'run-new-oom-fitted',
+    path: '/runs/new?from=run_a2f0&batch=8',
+    viewports: ['desktop', 'mobile'],
     setup: (page) => until(page, '.oom-note'),
   },
   {
@@ -855,9 +864,11 @@ export const scenes = [
     },
   },
   {
+    // Before an export, the demo says it creates no file ("Demo: no file is created"), under the formats.
     name: 'model-export',
     path: '/models/m_shapes_s',
     fullPage: false,
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
     setup: async (page, { vp }) => {
       // Phones keep Export in the header's ⋯ menu.
       if (vp === 'mobile') {
@@ -872,7 +883,8 @@ export const scenes = [
     },
   },
   {
-    // The f16 export finished: Download (the primary) for the file, by the name it has on the server.
+    // The demo's f16 export: a neutral preview (no success check, no saved file, no Download) whose one primary is
+    // "Connect to a server". A real server's finished export (Download, the path) is ExportDialog.svelte.test.ts's.
     name: 'model-export-done',
     path: '/models/m_shapes_s',
     fullPage: false,
@@ -888,7 +900,7 @@ export const scenes = [
       }
       await until(page, 'dialog[open] fieldset');
       await page.locator('dialog[open] footer button:has-text("Export")').click();
-      await until(page, 'dialog[open] .where');
+      await until(page, 'dialog[open] .done');
     },
   },
   {
@@ -914,9 +926,8 @@ export const scenes = [
     },
   },
   {
-    // ONNX on a server that serves it (weights_onnx): the primary names the file it downloads, the switches mapped to
-    // the query (half: "-f16.onnx").
-    name: 'model-export-onnx-download',
+    // ONNX in the demo: the same neutral preview as f16, by the file a server would write (fasteners-n-best.onnx).
+    name: 'model-export-onnx',
     path: '/models/m_fast_n',
     fullPage: false,
     viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
@@ -932,31 +943,7 @@ export const scenes = [
       await until(page, 'dialog[open] fieldset');
       await page.locator('dialog[open] label:has-text("ONNX")').first().click();
       await until(page, 'dialog[open] .switches');
-      await page.locator('dialog[open] .switches label').nth(2).click();
-      await until(page, 'dialog[open] footer button:has-text("Download")');
-      await page.mouse.move(0, 0);
-    },
-  },
-  {
-    // The download asked for: in the demo there is no graph to save, and the dialog says so by the file's name.
-    name: 'model-export-onnx',
-    path: '/models/m_fast_n',
-    fullPage: false,
-    viewports: ['desktop', 'mobile'],
-    setup: async (page, { vp }) => {
-      if (vp === 'mobile') {
-        await until(page, 'button[aria-label="More model actions"]');
-        await page.locator('button[aria-label="More model actions"]').click();
-        await page.getByRole('menuitem', { name: 'Export' }).click();
-      } else {
-        await until(page, 'button:has-text("Export")');
-        await page.locator('button:has-text("Export")').first().click();
-      }
-      await until(page, 'dialog[open] fieldset');
-      await page.locator('dialog[open] label:has-text("ONNX")').first().click();
-      // The server's features arrive on the mock's clock: Download replaces Export once they do.
-      await until(page, 'dialog[open] footer button:has-text("Download")');
-      await page.locator('dialog[open] footer button:has-text("Download")').click();
+      await page.locator('dialog[open] footer button:has-text("Export")').click();
       await until(page, 'dialog[open] .done');
     },
   },

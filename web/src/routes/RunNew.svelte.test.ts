@@ -160,6 +160,40 @@ describe('New run after running out of GPU memory', () => {
     expect(target.querySelector('#imgsz [aria-checked="true"]')?.textContent?.trim()).toBe('960');
     expect(target.querySelector('#imgsz')!.closest('.field')!.querySelector('.was')).toBeNull();
   });
+  it('makes the change that fits the one primary while the settings are forecast not to fit, and Start a secondary', async () => {
+    hub.api = api = new MockApi('normal', 0);
+    // "Retry with batch 16" as round 22 offered it: folo-m at 960 px, ~26.9 GiB on the mock's 16 GiB GPU.
+    await open('?from=run_a2f0&batch=16');
+    const fix = await until(() => [...target.querySelectorAll<HTMLElement>('.start .btn.primary')].find((b) => b.textContent?.includes('Use batch 8')), 'the fix');
+    expect(fix.textContent).toMatch(/Use batch 8 · ~13\.\d GiB/);
+    const startBtn = [...target.querySelectorAll<HTMLButtonElement>('.start button[type="submit"]')][0]!;
+    expect(startBtn.className).toContain('secondary');
+    expect(startBtn.getAttribute('aria-describedby')).toContain('rail-nofit');
+    // One condition, one severity: the meter and the line are danger; the figure, a metric, stays in ink.
+    expect(target.querySelector('#rail-nofit')?.className).toContain('danger');
+    expect(target.querySelector('.summary .vram i')?.className).toContain('danger');
+    const fig = [...target.querySelectorAll('.summary .est dd')].find((d) => /GiB/.test(d.textContent ?? ''))!;
+    expect(fig.textContent).toMatch(/~26\.\d GiB/);
+    expect(fig.className).not.toMatch(/danger|warn/);
+    // The dock (narrow screens) carries the figure against the GPU's, the verdict and the fix as its one button.
+    const dock = target.querySelector('.dock')!;
+    expect(dock.querySelector('.dock-est')?.textContent?.replace(/\s+/g, ' ')).toMatch(/~26\.\d GiB \/ 16\.0 GiB.*Likely won't fit/);
+    expect([...dock.querySelectorAll('.btn')].map((b) => b.textContent?.trim())).toEqual(['Use batch 8']);
+    // Taking it: batch 8, forecast to fit, and Start is the primary again.
+    fix.click();
+    flushSync();
+    expect(target.querySelector('#batch [aria-checked="true"]')?.textContent?.trim()).toBe('8');
+    await until(() => !target.querySelector('#rail-nofit'), 'the fit');
+    await until(() => target.querySelector('.start button[type="submit"]')?.className.includes('primary'), 'Start as the primary');
+    expect(target.querySelectorAll('.start .btn.primary')).toHaveLength(1);
+  });
+  it('keeps Start the primary when the settings fit', async () => {
+    hub.api = api = new MockApi('normal', 0);
+    await open();
+    await until(() => target.querySelector('.summary .vram i'), 'the meter');
+    expect(target.querySelector('#rail-nofit')).toBeNull();
+    expect(target.querySelector('.start button[type="submit"]')?.className).toContain('primary');
+  });
   it("ignores an image size the trainer would reject and keeps the run's", async () => {
     await open('?from=run_a2f0&imgsz=333');
     await until(() => target.querySelector('.oom-note'));
@@ -200,7 +234,7 @@ describe('New run: short runs', () => {
     expect(more.getAttribute('aria-expanded')).toBe('true');
     const why = warn.querySelector(`#${more.getAttribute('aria-controls')}`)!;
     const text = why.textContent!.replace(/[ \t\n]+/g, ' ');
-    expect(text).toContain('150 optimizer steps: 5 epochs × 30 (120 batches of 16, 4 per step).');
+    expect(text).toContain('5 epochs × 30 steps. From scratch, a detector needs a few hundred');
     // "0" never ends up alone on a line, and the prose names no config keys.
     expect(text).toContain('expect an mAP near 0.');
     expect(text).toContain('Warmup takes 90 of the 150 steps');
@@ -687,8 +721,8 @@ describe('New run: the estimate', () => {
     const radio = target.querySelector<HTMLInputElement>('input[name="arch"][value="folo-x"]')!;
     radio.click();
     flushSync();
-    await until(() => basis().startsWith('Scaled'), 'the folo-x estimate');
-    expect(basis()).toBe('Scaled from folo-s at 640 px on this GPU');
+    await until(() => basis().includes('caled'), 'the folo-x estimate');
+    expect(basis()).toBe('Wide range: scaled from folo-s at 640 px');
     // folo-x is 9x folo-s's compute: low confidence, the value one step quieter.
     expect(rough()).toBe(true);
   });
@@ -698,7 +732,7 @@ describe('New run: the estimate', () => {
     const ask = vi.spyOn(api, 'estimateRun');
     await open();
     await until(() => basis(), 'the estimate');
-    expect(basis()).toBe('Reference figures, same GPU model');
+    expect(basis()).toBe('Reference benchmarks · not run here yet');
     expect(time()).toMatch(/^\d+–\d+ min$/);
     expect(rough()).toBe(true);
     expect(target.querySelector('.summary .how-note')?.textContent).toContain('does not estimate runs');

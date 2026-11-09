@@ -17,10 +17,10 @@
   import type { Arch, Augment, DatasetImage, Device, Optimizer, RunEstimate, TrainConfig } from '$lib/api/types';
   import ClassStrip from '$lib/detect/ClassStrip.svelte';
   import { bytes, compact, deviceName, duration, num, sentence } from '$lib/format';
-  import { IMGSZ_STEPS, isOom } from '$lib/oom';
+  import { fitFix, IMGSZ_STEPS, isOom, oomCalibration, useLabel, vramForecaster, type OomFix } from '$lib/oom';
   import { prefs } from '$lib/prefs.svelte';
-  import { REF_CPU, REF_GPU } from '$lib/reference';
-  import { basisLine, confidenceLine, hasFeature, latencyMs, latencyRange, measuredLatency, timeRange, updatedWords } from '$lib/throughput';
+  import { REF_CPU, REF_GPU, referenceSource } from '$lib/reference';
+  import { basisLine, confidenceLine, hasFeature, referenceBasis, latencyMs, latencyRange, measuredLatency, timeRange, updatedWords } from '$lib/throughput';
   import { href, router } from '$lib/router.svelte';
   import { serverCommand, trainCommand } from '$lib/trainCli';
   import { ownCreateAction, setCrumbs } from '$lib/shell/crumbs.svelte';
@@ -47,7 +47,7 @@
   import { VULKAN } from './settings/capabilities';
   import { HEAD_LABEL } from './run/resolved';
   import AugPreview, { type AugKey } from './runnew/AugPreview.svelte';
-  import { AMP_SPEEDUP, arches, autoCloseMosaic, closeMosaicEpochs, defaultImgsz, estimate, oomScale, shortRun, warmup } from './runnew/estimate';
+  import { AMP_SPEEDUP, arches, autoCloseMosaic, closeMosaicEpochs, defaultImgsz, estimate, shortRun, warmup } from './runnew/estimate';
   import { media } from '$lib/design/tokens';
 
   setCrumbs({ label: 'Runs', path: '/runs' }, { label: 'New run' });
@@ -301,11 +301,8 @@
   });
   const was = (key: string) => oomChanges.find((x) => x.key === key)?.was;
   // The estimate is rough; when it thought the failed settings fit, it is scaled up until they no longer do.
-  const scale = $derived.by(() => {
-    const c = oomRun?.config;
-    if (!c || !gpuMem || c.device === 'cpu') return 1;
-    return oomScale(estimate(c.arch, dataset?.splits.train ?? 0, c.epochs, c.batch, c.imgsz, false).vramBytes, gpuMem);
-  });
+  // The run page forecasts its fixes with the same correction (lib/oom), so the retry it offers is shown here as fitting.
+  const scale = $derived(oomRun ? oomCalibration(oomRun.config, gpuMem) : 1);
 
   // Start answered `404 device_not_found` (`501 not_implemented` from servers before it): said at the Device field in
   // one line built from the devices this machine lists now, until another device is picked. The server's own words
@@ -469,13 +466,13 @@
       hi: est.highSeconds,
       vram: est.vramBytes,
       vramMeasured: false,
-      basis: refMachine ? `Reference figures, same ${onCpu ? 'CPU' : 'GPU'} model` : 'Reference figures, not measured here',
+      basis: referenceBasis(refMachine, onCpu),
       rough: true,
       how: !canEstimate
-        ? "This server does not estimate runs: docs/BENCHMARKS.md's figures, carried over to these settings."
+        ? `Estimated from ${referenceSource(onCpu)}, scaled to these settings: this server does not estimate runs.`
         : estimating
           ? "Loading this server's estimate."
-          : "This server could not estimate these settings: docs/BENCHMARKS.md's figures, carried over to them.",
+          : `Estimated from ${referenceSource(onCpu)}, scaled to these settings: this server could not estimate them.`,
       phases: est.phases,
       val: { images: est.valImages, rate: est.valImgsPerS, reference: false },
       startup: est.startupS,
@@ -485,6 +482,41 @@
   // Measured peaks need no scaling: only the reference model is corrected by a failed run.
   const vram = $derived(shown.vram * (shown.vramMeasured ? 1 : scale));
   const vramPct = $derived(gpuMem ? vram / gpuMem : 0);
+  /**
+   * One condition, one severity, on the meter and the line under it (the figure stays in ink): over the GPU's memory is
+   * `danger` (likely won't fit), within 10% of it `warning` (tight; lib/oom's headroom), else neutral.
+   */
+  const vramLevel = $derived(onCpu || !gpuMem ? null : vramPct > 1 ? ('danger' as const) : vramPct > 0.9 ? ('warning' as const) : null);
+  const noFit = $derived(vramLevel === 'danger');
+
+  // Settings forecast not to fit: the one primary becomes the change that fits ("Use batch 8"), chosen by lib/oom's
+  // `fitFix` from the same forecast as the figure above (the server's estimate, else the reference model) with 10% of
+  // the memory to spare; Start steps back to a secondary with the risk said beside it. Asked once the estimate for
+  // these settings is in, so the two never disagree.
+  let fitted = $state.raw<{ key: string; fix: OomFix | null } | null>(null);
+  $effect(() => {
+    const key = estKey;
+    if (!noFit || estimating || untrack(() => fitted?.key) === key) return;
+    const ctrl = new AbortController();
+    const c = untrack(() => config);
+    const forecaster = vramForecaster(hub.api, untrack(() => system.data), ctrl.signal);
+    fitFix(c, gpuMem, forecaster, untrack(() => scale)).then(
+      (fix) => !ctrl.signal.aborted && (fitted = { key, fix }),
+      () => {},
+    );
+    return () => ctrl.abort();
+  });
+  const fix = $derived(noFit && fitted?.key === estKey ? fitted.fix : null);
+  const fixLoading = $derived(noFit && fitted?.key !== estKey);
+  /** Applies the change, as a retry's query would have (lib/oom `OomFix.query`). */
+  function applyFix(f: OomFix) {
+    for (const [k, v] of Object.entries(f.query)) {
+      if (k === 'batch') batch = v;
+      else if (k === 'imgsz') ((imgsz = v), (imgszChosen = true));
+      else if (k === 'arch') arch = v as Arch;
+      else if (k === 'device') device = v;
+    }
+  }
 
   // The same run from a terminal: the server's command where it builds one (only it knows its files), else Studio's,
   // from the CLI's own mapping ($lib/trainCli). A fine-tune names the weights file by path; where the server does
@@ -663,20 +695,25 @@
     </dd>
     {#if !onCpu && gpu}
       <dt>Est. GPU memory</dt>
-      <dd class="num" class:warn={vramPct > 0.9}>{roughBytes(vram)}{#if gpuMem}{' '}<span class="faint">/ {bytes(gpuMem, prefs.units)}</span>{/if}</dd>
+      <!-- The figure is a metric, in ink; its severity is the meter's and the line's under it (§2.6). A GPU that does not
+           report its memory (0) gets no denominator. -->
+      <dd class="num">{roughBytes(vram)}{#if gpuMem}{' '}<span class="faint">/ {bytes(gpuMem, prefs.units)}</span>{/if}</dd>
     {/if}
   </dl>
   <!-- Some adapters report no memory size (`memory_bytes: 0`, e.g. through Vulkan): the estimate stands alone, said once. -->
   {#if !onCpu && gpu && !gpuMem}<p class="calib">This GPU’s memory size isn’t reported.</p>{/if}
   {#if scale > 1 && !onCpu}<p class="calib">Scaled up from the failed run's settings, which did not fit.</p>{/if}
   {#if !onCpu && gpuMem}
-    <div class="vram" aria-hidden="true"><i class:warn={vramPct > 0.9} style:width={pct2(Math.min(1, vramPct))}></i></div>
+    <div class="vram" aria-hidden="true"><i class={vramLevel} style:width={pct2(Math.min(1, vramPct))}></i></div>
   {/if}
   <!-- Warnings in the rail are one-line callouts in the status's text colour with its icon, no tinted fill (fills are
        for banners), right above Start. -->
-  {#if vramPct > 1}
-    <p class="callout danger" role="alert">
-      <TriangleAlert size={14} aria-hidden="true" /><span>This likely runs out of GPU memory. Try batch {Math.max(1, Math.floor(batchN / Math.ceil(vramPct)))} or a smaller image size.</span>
+  {#if noFit}
+    <!-- The change that fits is the action under it (Use batch 8); with none, the line says what to lower. -->
+    <p class="callout danger" id="{where}-nofit" role="alert">
+      <TriangleAlert size={14} aria-hidden="true" /><span
+        >Likely won't fit: this GPU has {bytes(gpuMem, prefs.units)}.{#if !fix && !fixLoading}{' '}No smaller batch, image size or model fits with 10% to spare.{/if}</span
+      >
     </p>
   {:else if onCpu}
     <p class="callout"><TriangleAlert size={14} aria-hidden="true" /><span>Training on the CPU is roughly 14× slower than on a GPU.</span></p>
@@ -693,13 +730,11 @@
       {#if shortWhy}
         <div class="short-why" id="{where}-short-why">
           {#if short.scratch}
-            <p>
-              {num(short.steps)} optimizer steps: {num(epochs)} epochs × {num(short.stepsPerEpoch)}{#if short.accumulate > 1}{' '}({batchesOf}, {short.accumulate} per step){/if}.
-              Trained from scratch, a detector needs a few hundred steps to learn anything, so expect an mAP near&nbsp;0.
-            </p>
+            <!-- Two short sentences: the batches behind the steps are the Schedule row's tooltip. -->
+            <p>{num(epochs)} epochs × {num(short.stepsPerEpoch)} steps. From scratch, a detector needs a few hundred, so expect an mAP near&nbsp;0.</p>
           {/if}
           {#if short.warmupHeavy}
-            <p>Warmup takes {num(short.warmup)} of the {num(short.steps)} steps, so the learning rate peaks only in the second half of the run.</p>
+            <p>Warmup takes {num(short.warmup)} of the {num(short.steps)} steps, so the learning rate peaks late.</p>
           {/if}
           <button type="button" class="fix" onclick={() => (epochs = short.epochs)}>Train {num(short.epochs)} epochs</button>
         </div>
@@ -1035,15 +1070,20 @@
             <div class="sum-col">
             {@render figures('rail')}
             <div class="start" bind:this={startEl}>
+              {#if noFit && (fix || fixLoading)}
+                <Button variant="primary" size="lg" block loading={fixLoading} onclick={() => fix && applyFix(fix)}
+                  >{fix ? `${useLabel(fix)}${fix.vram !== undefined ? ` · ${roughBytes(fix.vram)}` : ''}` : 'Finding settings that fit'}</Button
+                >
+              {/if}
               <Button
                 type="submit"
-                variant="primary"
+                variant={noFit ? 'secondary' : 'primary'}
                 size="lg"
                 icon={Play}
                 block
                 loading={submitting}
                 disabled={!valid}
-                aria-describedby={showWhy ? 'start-why' : undefined}>Start training</Button
+                aria-describedby={[showWhy ? 'start-why' : '', noFit ? 'rail-nofit' : ''].filter(Boolean).join(' ') || undefined}>Start training</Button
               >
               {@render whyLine('start-why')}
             </div>
@@ -1085,16 +1125,26 @@
           <button type="button" class="dock-est num" aria-haspopup="dialog" aria-label="Show the run summary" onclick={() => (sumOpen = true)}>
             <Meta>
               <span class:rough={shown.rough || !estReady}>{estReady ? timeRange(shown.lo, shown.hi) : 'Estimating…'}</span>
-              {#if estReady && !onCpu && gpu}<span class:warn={vramPct > 0.9}>{roughBytes(vram)} GPU memory</span>{/if}
+              <!-- Over the memory: the figure against the GPU's in ink, and the verdict with its mark in the rail's one
+                   severity. -->
+              {#if estReady && !onCpu && gpu}<span
+                  >{#if noFit && gpuMem}{roughBytes(vram)} / {bytes(gpuMem, prefs.units)}{:else}{roughBytes(vram)} GPU memory{/if}</span
+                >{/if}
+              {#if estReady && noFit}<span class="dock-warn danger"><TriangleAlert size={12} aria-hidden="true" />Likely won't fit</span>{/if}
               {#if short}<span class="dock-warn"><TriangleAlert size={12} aria-hidden="true" />{short.scratch ? 'Too short to learn' : 'Mostly warmup'}</span>{/if}
               {#if dataset}<span class="faint"><Meta line><span>{dataset.name}</span><Ident value={arch} /></Meta></span>{/if}
             </Meta>
             <span class="dock-more"><ChevronUp size={14} strokeWidth={1.75} aria-hidden="true" /></span>
           </button>
         {/if}
-        <Button type="submit" variant="primary" size="lg" icon={Play} loading={submitting} disabled={!valid} aria-describedby={showWhy ? 'dock-why' : undefined}
-          >Start training</Button
-        >
+        {#if noFit && (fix || fixLoading)}
+          <!-- The fix is the dock's one button; Start, secondary with the risk beside it, is in the summary it opens. -->
+          <Button variant="primary" size="lg" loading={fixLoading} onclick={() => fix && applyFix(fix)}>{fix ? useLabel(fix) : 'Finding a fit'}</Button>
+        {:else}
+          <Button type="submit" variant="primary" size="lg" icon={Play} loading={submitting} disabled={!valid} aria-describedby={showWhy ? 'dock-why' : undefined}
+            >Start training</Button
+          >
+        {/if}
       </div>
 
       <!-- Inside the form, so its Start button submits it. -->
@@ -1105,7 +1155,12 @@
         </div>
         {#snippet footer()}
           <Button variant="ghost" onclick={() => (sumOpen = false)}>Keep editing</Button>
-          <Button type="submit" variant="primary" icon={Play} loading={submitting} disabled={!valid} aria-describedby={showWhy ? 'sheet-why' : undefined}>Start training</Button>
+          {#if noFit && (fix || fixLoading)}
+            <Button type="submit" icon={Play} loading={submitting} disabled={!valid} aria-describedby={[showWhy ? 'sheet-why' : '', 'sheet-nofit'].filter(Boolean).join(' ')}>Start training</Button>
+            <Button variant="primary" loading={fixLoading} onclick={() => fix && applyFix(fix)}>{fix ? useLabel(fix) : 'Finding a fit'}</Button>
+          {:else}
+            <Button type="submit" variant="primary" icon={Play} loading={submitting} disabled={!valid} aria-describedby={showWhy ? 'sheet-why' : undefined}>Start training</Button>
+          {/if}
         {/snippet}
       </Dialog>
     </form>
@@ -1265,7 +1320,7 @@
     color: var(--text-primary);
   }
   .ref {
-    max-width: 60ch;
+    max-inline-size: var(--measure);
     text-wrap: pretty;
     margin-top: var(--space-2);
     font-size: var(--type-sm-size);
@@ -1527,9 +1582,6 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .est dd.warn {
-    color: var(--warning-text);
-  }
   /* A rough estimate (nothing close measured here) reads one step quieter than a measured one. */
   .est dd.rough {
     color: var(--text-secondary);
@@ -1595,6 +1647,7 @@
     white-space: nowrap;
   }
   .how-note {
+    max-inline-size: var(--measure);
     margin-top: var(--space-2);
     text-align: left;
     color: var(--text-tertiary);
@@ -1645,7 +1698,7 @@
       min-height: 44px;
     }
   }
-  /* A neutral meter; the warning colour only above 90 % of the GPU's memory. */
+  /* A neutral meter; the warning colour within 10 % of the GPU's memory, danger over it (the line under it says so). */
   .vram {
     height: 4px;
     margin-top: calc(-1 * var(--space-2));
@@ -1659,8 +1712,11 @@
     background: var(--text-secondary);
     transition: width var(--dur-chart) var(--ease-standard);
   }
-  .vram i.warn {
+  .vram i.warning {
     background: var(--warning-solid);
+  }
+  .vram i.danger {
+    background: var(--danger-solid);
   }
   .ds-pick {
     display: none;
@@ -1809,6 +1865,7 @@
   .short-why {
     display: grid;
     justify-items: start;
+    max-inline-size: calc(var(--measure) + 22px);
     gap: var(--space-2);
     padding-left: 22px; /* grid-ok: the icon (14) and the gap (8) */
     font-size: var(--type-sm-size);
@@ -2067,9 +2124,11 @@
       display: grid;
       color: var(--text-tertiary);
     }
-    .dock-est .warn,
     .dock-warn {
       color: var(--warning-text);
+    }
+    .dock-warn.danger {
+      color: var(--danger-text);
     }
     .dock-warn {
       display: inline-flex;

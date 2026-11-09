@@ -22,10 +22,13 @@ describe('synthEvaluation', () => {
     });
   });
 
-  it('centres synthesised per-class AP on the model metrics', () => {
+  it('centres synthesised per-class AP exactly on the model metrics', () => {
     const mean = ev.perClass.reduce((a, c) => a + c.ap50, 0) / classes.length;
-    expect(mean).toBeCloseTo(metrics.map50, 2);
-    expect(area(ev.mean)).toBeCloseTo(metrics.map50, 1);
+    expect(Math.abs(mean - metrics.map50)).toBeLessThan(0.001);
+    const mean95 = ev.perClass.reduce((a, c) => a + c.ap50_95, 0) / classes.length;
+    expect(Math.abs(mean95 - metrics.map50_95)).toBeLessThan(0.001);
+    // The 101-point AP of the mean curve (the "All classes" line) is the model's mAP50.
+    expect(Math.abs(ev.mean.reduce((a, p) => a + p.y, 0) / ev.mean.length - metrics.map50)).toBeLessThan(0.001);
   });
 
   it('uses given per-class metrics and instances', () => {

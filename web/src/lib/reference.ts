@@ -46,6 +46,11 @@ const ROWS: RefRow[] = [
 /** The reference machine: where the rows were measured. */
 export const REF_GPU = 'NVIDIA GeForce RTX 4080 SUPER';
 export const REF_CPU = 'Intel Core i7-14700KF';
+/**
+ * The reference figures as a person reads them (rule 23: one wording): "FOLO's reference benchmarks (RTX 4080
+ * SUPER)", never a document path.
+ */
+export const referenceSource = (cpu: boolean) => `FOLO's reference benchmarks (${cpu ? 'Core i7-14700KF' : 'RTX 4080 SUPER'})`;
 /** The first epoch over a steady one (pipeline compilation, buffer pool growth). */
 export const REF_STARTUP_S = 6;
 

@@ -326,3 +326,50 @@ describe('mock operating point', () => {
     expect((await api.onnxFile('m_fast_n', { half: true })).name).toBe('fasteners-n-best-f16.onnx');
   });
 });
+
+// mAP is the mean over classes (docs/METRICS.md), as folo-server's mock reports it
+// (`mock_model_metrics_match_their_run_epoch`): the headline, the per-class table, the PR curves' "All classes" and
+// the run's per-class at its best epoch are one set of numbers on every demo model and run.
+describe('mock metrics reconcile', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+  });
+  afterEach(() => vi.useRealTimers());
+  const mean = (xs: number[]) => xs.reduce((a, b) => a + b, 0) / xs.length;
+
+  it('every model: the class means are its metrics, and each PR curve’s AP is its class AP50', async () => {
+    for (const scenario of ['normal', 'no-throughput'] as const) {
+      const api = new MockApi(scenario, 0);
+      const models = await api.models();
+      expect(models.length).toBeGreaterThan(3);
+      for (const m of models) {
+        if (!m.metrics) continue;
+        const ev = await api.modelEval(m.id);
+        expect(ev.per_class).toHaveLength(m.classes.length);
+        expect(Math.abs(mean(ev.per_class.map((c) => c.map50)) - m.metrics.map50), `${m.name} AP50`).toBeLessThan(0.001);
+        expect(Math.abs(mean(ev.per_class.map((c) => c.map50_95)) - m.metrics.map50_95), `${m.name} AP50-95`).toBeLessThan(0.001);
+        for (const c of ev.per_class) {
+          const pr = ev.pr[c.class]!;
+          expect(Math.abs(mean(pr.precision) - pr.ap50)).toBeLessThan(0.0001);
+          expect(pr.ap50).toBe(c.map50);
+        }
+        // The "All classes" curve (the mean over classes at each recall) has the model's mAP50 as its AP.
+        const all = mean(ev.pr[0]!.recall.map((_, i) => mean(ev.pr.map((p) => p.precision[i]!))));
+        expect(Math.abs(all - m.metrics.map50), `${m.name} all classes`).toBeLessThan(0.001);
+      }
+    }
+  });
+
+  it('every run epoch: the overall metrics are the means of its per-class metrics', async () => {
+    const api = new MockApi('normal', 0);
+    for (const r of await api.runs()) {
+      const { epochs } = await api.runMetrics(r.id);
+      for (const e of epochs) {
+        if (!e.val.per_class.length) continue;
+        expect(Math.abs(mean(e.val.per_class.map((c) => c.map50)) - e.val.map50), `${r.name} epoch ${e.epoch}`).toBeLessThan(0.001);
+        expect(Math.abs(mean(e.val.per_class.map((c) => c.map50_95)) - e.val.map50_95), `${r.name} epoch ${e.epoch}`).toBeLessThan(0.001);
+      }
+    }
+  });
+});

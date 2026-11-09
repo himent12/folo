@@ -237,7 +237,7 @@
 {#snippet waiting()}
   {#if place !== null && place > 1}
     <!-- Behind other waiting runs: the one in front of it, then what trains now. -->
-    Starts after {#if before}<a class="link" href={href(`/runs/${before.id}`)}>{before.name}</a>{#if place > 2} and {place - 2} more{/if}{:else}{place - 1} queued {place === 2 ? 'run' : 'runs'}{/if}.
+    Starts after {#if before}<a class="link" href={href(`/runs/${before.id}`)}>{before.name}</a>{#if place > 2}{' '}and {place - 2} more{/if}{:else}{place - 1} queued {place === 2 ? 'run' : 'runs'}{/if}.
     {#if ahead}<a class="link" href={href(`/runs/${ahead.id}`)}>{ahead.name}</a> is training{#if ahead.eta_s !== null}, about {eta(ahead.eta_s)} left{/if}.{/if}
   {:else if ahead}
     Starts when <a class="link" href={href(`/runs/${ahead.id}`)}>{ahead.name}</a> finishes{#if ahead.eta_s !== null}, in about {eta(ahead.eta_s)}{/if}.
@@ -379,6 +379,7 @@
       waitingTitle={place !== null ? queuePlace(place) : undefined}
       waitingActions={canStart ? startNext : undefined}
       {warnings}
+      system={system.data ?? (system.error ? null : undefined)}
     />
 
     {#if waitingLayout}

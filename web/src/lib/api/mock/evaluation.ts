@@ -60,39 +60,51 @@ function group(name: string): number {
   return LOOKALIKES.findIndex((g) => g.includes(name));
 }
 
+/** Recall points of a PR curve, as `/eval` sends them (COCO's 101). */
+const GRID = 100;
+
 /**
- * A PR curve with the given area: precision = pmax·(1 − s·t)·(1 − t^k) for t = r/rmax, a gentle decline that falls off
- * at the curve's maximum recall. `k` is solved by bisection so the area matches; the result is made monotone.
+ * A PR curve on the 101-point recall grid whose AP (the mean of its 101 precisions, as `/eval`'s `ap50`) is `ap`, to
+ * the fourth decimal, so the per-class table, the curve's legend and the model's mAP50 (their mean) agree, as on
+ * folo-server's mock. The shape: precision = pmax·(1 − s·t)·(1 − t^k) for t = r/rmax, a gentle decline that falls off at
+ * the curve's maximum recall (0 past it); `k` is bisected until the AP matches. An AP that shape cannot reach (above
+ * ~0.95) lifts the curve toward a perfect one, by a share bisected the same way.
  */
-function prCurve(ap: number, recall: number, r: () => number): { x: number; y: number }[] {
+function prCurve(ap: number, recall: number, r: () => number): number[] {
   const pmax = clamp(0.985 + (r() - 0.5) * 0.02, 0.9, 1);
   // The curve reaches a little past the operating-point recall (low-confidence detections still find a few more).
   let rmax = clamp(recall + (1 - recall) * (0.35 + r() * 0.3), 0.05, 0.995);
-  // Need ap / (pmax·rmax) < ~0.97 for a valid shape; extend recall first if the AP demands it.
+  // Extend recall first if the AP demands it.
   rmax = Math.max(rmax, Math.min(0.999, ap / (0.97 * pmax)));
   const a = clamp(ap / (pmax * rmax), 0.02, 0.97);
   const s = clamp(1.2 * (1 - a), 0.02, 0.3) * (0.7 + 0.6 * r());
-  // ∫₀¹ (1 − s·t)(1 − t^k) dt = 1 − s/2 − 1/(k+1) + s/(k+2), increasing in k.
-  const integral = (k: number) => 1 - s / 2 - 1 / (k + 1) + s / (k + 2);
-  let lo = 0.05;
-  let hi = 400;
-  for (let i = 0; i < 60; i++) {
-    const mid = Math.sqrt(lo * hi);
-    if (integral(mid) < a) lo = mid;
-    else hi = mid;
-  }
-  const k = Math.sqrt(lo * hi);
-  const n = 100;
-  const raw: number[] = [];
-  for (let i = 0; i <= n; i++) {
-    const t = i / n;
-    const wiggle = 1 + (r() - 0.5) * 0.03 * Math.sin(t * Math.PI);
-    raw.push(clamp(pmax * (1 - s * t) * (1 - t ** k) * wiggle, 0, 1));
-  }
-  // Interpolated precision (max to the right), as PR curves are drawn: monotone non-increasing.
-  for (let i = n - 1; i >= 0; i--) raw[i] = Math.max(raw[i]!, raw[i + 1]!);
-  return raw.map((p, i) => ({ x: r4((i / n) * rmax), y: r4(p) }));
+  const wiggle = Array.from({ length: GRID + 1 }, (_, i) => 1 + (r() - 0.5) * 0.03 * Math.sin((i / GRID) * Math.PI));
+  const curve = (k: number, lift: number) => {
+    const p = wiggle.map((w, i) => {
+      const t = i / GRID / rmax;
+      const y = t > 1 ? 0 : clamp(pmax * (1 - s * t) * (1 - t ** k) * w, 0, 1);
+      return y + (1 - y) * lift;
+    });
+    // Interpolated precision (max to the right), as PR curves are drawn: monotone non-increasing.
+    for (let i = GRID - 1; i >= 0; i--) p[i] = Math.max(p[i]!, p[i + 1]!);
+    return p.map(r4);
+  };
+  const mean = (p: number[]) => p.reduce((x, y) => x + y, 0) / p.length;
+  const solve = (f: (v: number) => number[], lo: number, hi: number, geometric: boolean) => {
+    for (let i = 0; i < 80; i++) {
+      const mid = geometric ? Math.sqrt(lo * hi) : (lo + hi) / 2;
+      if (mean(f(mid)) < ap) lo = mid;
+      else hi = mid;
+    }
+    return f(hi);
+  };
+  const K_MAX = 1e4;
+  if (mean(curve(K_MAX, 0)) >= ap) return solve((k) => curve(k, 0), 1e-4, K_MAX, true);
+  return solve((l) => curve(K_MAX, l), 0, 1, false);
 }
+
+/** The AP of a curve on the recall grid: the mean of its precisions, rounded as `/eval` rounds it. */
+export const apOf = (precision: readonly number[]) => r4(precision.reduce((a, b) => a + b, 0) / Math.max(1, precision.length));
 
 /** Precision of a curve at recall `x` (step interpolation; 0 past the curve's end). */
 function at(curve: { x: number; y: number }[], x: number): number {
@@ -126,15 +138,22 @@ export function synthEvaluation(input: EvaluationInput): Evaluation {
   if (input.perClass && input.perClass.length === n) {
     perClass = input.perClass.map((c) => ({ class: c.class, ap50: c.map50, ap50_95: c.map50_95, precision: c.precision, recall: c.recall }));
   } else {
+    // Zero-mean deviations, scaled down where a class would leave its range, so the means stay the model's.
     const r = rng(seed + 17);
-    const ease = Array.from({ length: n }, () => 1 + (r() + r() + r() - 1.5) * 0.28);
-    const mean = ease.reduce((a, b) => a + b, 0) / Math.max(1, n);
-    perClass = ease.map((e0, c) => {
-      const e = e0 / mean;
+    const raw = Array.from({ length: n }, () => (r() + r() + r() - 1.5) * 0.28);
+    const rawMean = raw.reduce((a, b) => a + b, 0) / Math.max(1, n);
+    const dev = raw.map((d) => d - rawMean);
+    const room = dev.reduce((k, d) => {
+      const up = Math.min((0.995 - m.map50) / m.map50, (0.98 - m.map50_95) / m.map50_95);
+      const down = Math.min(1 - 0.02 / m.map50, 1 - 0.01 / m.map50_95);
+      return d > 0 ? Math.min(k, up / d) : d < 0 ? Math.min(k, down / -d) : k;
+    }, 1);
+    perClass = dev.map((d, c) => {
+      const e = 1 + room * d;
       return {
         class: c,
-        ap50: r4(clamp(m.map50 * e, 0.02, 0.995)),
-        ap50_95: r4(clamp(m.map50_95 * e, 0.01, 0.98)),
+        ap50: r4(m.map50 * e),
+        ap50_95: r4(m.map50_95 * e),
         precision: r4(clamp(m.precision * (0.6 + 0.4 * e) + (r() - 0.5) * 0.03, 0.05, 0.995)),
         recall: r4(clamp(m.recall * (0.55 + 0.45 * e) + (r() - 0.5) * 0.03, 0.05, 0.99)),
       };
@@ -151,7 +170,7 @@ export function synthEvaluation(input: EvaluationInput): Evaluation {
     }
   }
 
-  const curves = perClass.map((c, i) => prCurve(c.ap50, c.recall, rng(seed + 101 + i * 7919)));
+  const curves = perClass.map((c, i) => prCurve(c.ap50, c.recall, rng(seed + 101 + i * 7919)).map((y, j) => ({ x: j / GRID, y })));
   const mean: { x: number; y: number }[] = [];
   for (let i = 0; i <= 100; i++) {
     const x = i / 100;

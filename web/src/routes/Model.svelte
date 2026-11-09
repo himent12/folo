@@ -790,7 +790,7 @@
     display: grid;
     grid-template-columns: 112px minmax(0, 1fr);
     gap: var(--space-3);
-    max-width: 72ch;
+    max-width: calc(112px + var(--space-3) + var(--measure)); /* the term column, then the definition at the measure */
   }
   .k-body dt {
     color: var(--text-primary);
@@ -1153,7 +1153,7 @@
   .cm-notes {
     display: grid;
     gap: var(--space-2);
-    max-width: 60ch;
+    max-inline-size: var(--measure);
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
     color: var(--text-secondary);

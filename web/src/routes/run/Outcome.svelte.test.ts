@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { createRawSnippet, flushSync, mount, unmount } from 'svelte';
 import { describe, expect, it, vi } from 'vitest';
-import type { Run, TrainConfig } from '$lib/api/types';
+import type { Run, SystemInfo, TrainConfig } from '$lib/api/types';
 import Outcome from './Outcome.svelte';
 
 const config: TrainConfig = {
@@ -38,10 +38,18 @@ const failed = (error: string, c: Partial<TrainConfig> = {}): Run => ({
   error,
 });
 
-function render(run: Run, onresume = vi.fn(), warnings: string[] = []) {
+/** A server with one 16 GiB GPU and no `run_estimate`: the fixes are forecast with the reference model. */
+const SYSTEM = {
+  cpu: { name: 'cpu', threads: 8, util: 0 },
+  memory: { used_bytes: 0, total_bytes: 1 },
+  gpus: [{ ordinal: 0, name: 'NVIDIA GeForce RTX 4080 SUPER', backend: 'vulkan', memory_bytes: 16 * 2 ** 30, util: 0 }],
+  features: [],
+} as unknown as SystemInfo;
+
+function render(run: Run, onresume = vi.fn(), warnings: string[] = [], system: SystemInfo | null = null) {
   const target = document.createElement('div');
   document.body.appendChild(target);
-  const c = mount(Outcome, { target, props: { run, elapsed: 960, onresume, warnings } });
+  const c = mount(Outcome, { target, props: { run, elapsed: 960, onresume, warnings, system } });
   flushSync();
   const inside = (sel: string) => [...target.querySelectorAll<HTMLElement>('a, button')].filter((b) => b.closest(sel));
   const buttons = inside('.c-acts');
@@ -49,6 +57,8 @@ function render(run: Run, onresume = vi.fn(), warnings: string[] = []) {
     target,
     buttons,
     labels: buttons.map((b) => b.textContent?.trim()),
+    /** The actions once the forecast is in. */
+    acts: () => inside('.c-acts'),
     /** The actions behind the disclosure. */
     more: () => inside('.c-detail').map((b) => b.textContent?.trim()),
     done: () => {
@@ -60,8 +70,30 @@ function render(run: Run, onresume = vi.fn(), warnings: string[] = []) {
 
 const OOM = 'the GPU ran out of memory (wgpu backend: Out of Memory)';
 
+/** Waits for the fixes' forecast to replace the placeholder action. */
+const forecast = (r: ReturnType<typeof render>) =>
+  vi.waitFor(() => {
+    flushSync();
+    if (r.acts()[0]?.getAttribute('aria-busy')) throw new Error('still forecasting');
+  });
+
 describe('Outcome', () => {
+  it('offers the retry the memory forecast says fits, with its cost, and only fixes that fit behind More fixes', async () => {
+    const r = render(failed(OOM), vi.fn(), [], SYSTEM);
+    // While the forecast loads the action keeps its place and says it is choosing.
+    expect(r.acts()[0]?.textContent?.trim()).toBe('Retry with smaller settings');
+    await forecast(r);
+    const acts = r.acts();
+    // folo-m at 960 px on 16 GiB: batch 16 is forecast at ~26.9 GiB, so the retry is batch 8 (~13.6 GiB, under 90%).
+    expect(acts[0]?.textContent?.trim()).toMatch(/^Retry with batch 8 · ~13\.6 GiB$/);
+    expect(acts[0]?.className).toContain('primary');
+    expect(acts[0]?.getAttribute('href')).toBe('#/runs/new?from=run_a2f0&batch=8');
+    expect(r.more()).toEqual([expect.stringMatching(/^Retry at 640 px, batch 16 · ~\d+\.\d GiB$/), expect.stringMatching(/^Retry with folo-s, batch 16 · ~\d+\.\d GiB$/)]);
+    r.done();
+  });
+
   it('says plainly that a run ran out of GPU memory: one line, the likeliest fix, the rest behind More fixes', () => {
+    // Without the server's system info (it could not be read), the fixes are offered unforecast.
     const r = render(failed(OOM));
     expect(r.target.querySelector('.c-title')?.textContent).toBe('Ran out of GPU memory');
     expect(r.target.querySelector('.c-msg')?.textContent).toContain('Batch 32 at 960 px');

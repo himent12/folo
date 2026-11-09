@@ -184,7 +184,7 @@
   }
   /* The footnote for "—", under the rows it explains, one step quieter. */
   .foot p {
-    max-width: 60ch;
+    max-inline-size: var(--measure);
   }
   .foot {
     padding: var(--space-3) var(--space-4);
@@ -323,7 +323,7 @@
   .how-body {
     display: grid;
     gap: var(--space-2);
-    max-width: calc(60ch + var(--space-4) * 2 + 18px);
+    max-width: calc(var(--measure) + var(--space-4) * 2 + 18px);
     padding: 0 var(--space-4) var(--space-4) calc(var(--space-4) + 18px);
     color: var(--text-secondary);
   }
