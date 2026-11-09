@@ -119,4 +119,22 @@ describe('DatasetImage', () => {
     await until(() => url.mock.calls.length === 3, 'a third attempt');
     document.body.removeEventListener('click', onclick);
   });
+
+  it("says Retry in a labelled tile's own name while the image is unavailable, and restores it after", async () => {
+    let fail = true;
+    const url = render(async () => {
+      if (fail) throw new Error('offline');
+      return 'data:,a';
+    }, 'button');
+    target.setAttribute('aria-label', 'Use img_0004.jpg');
+    // The label is read when the failure lands, so set it before: re-render by retrying once.
+    await until(() => target.querySelector('.failed'), 'the failure');
+    target.click();
+    await until(() => url.mock.calls.length === 2 && target.querySelector('.failed'), 'the second failure');
+    expect(target.getAttribute('aria-label')).toBe('Use img_0004.jpg: image unavailable, activate to retry');
+    fail = false;
+    target.click();
+    await until(() => !target.querySelector('.failed'), 'the recovery');
+    expect(target.getAttribute('aria-label')).toBe('Use img_0004.jpg');
+  });
 });

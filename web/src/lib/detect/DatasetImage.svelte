@@ -43,7 +43,13 @@
     const h = host;
     if (!h || phase !== 'error') return;
     h.addEventListener('click', retry, { capture: true });
-    return () => h.removeEventListener('click', retry, { capture: true });
+    // A tile with its own aria-label ("Use …", "Try …") is named by that, not by the text inside: say it there.
+    const label = h.getAttribute('aria-label');
+    if (label !== null) h.setAttribute('aria-label', `${label}: image unavailable, activate to retry`);
+    return () => {
+      h.removeEventListener('click', retry, { capture: true });
+      if (label !== null) h.setAttribute('aria-label', label);
+    };
   });
 
   $effect(() => {
