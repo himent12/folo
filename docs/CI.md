@@ -24,6 +24,13 @@ To fall back to GitHub-hosted runners, delete the variable (`gh variable delete 
 uses `ubuntu-latest` / `windows-latest`. Self-hosted jobs keep a persistent `CARGO_TARGET_DIR` outside the checkout,
 so incremental builds stay warm.
 
+The same variables drive `desktop.yml` and `release.yml` (its Linux and Windows jobs, including the CLI build
+matrix that its `plan` job writes). Release builds are the exception to the persistent target dir: they always start
+from an empty one in `$RUNNER_TEMP` so no stale artifact reaches a shipped binary, and they need no tools
+preinstalled beyond the basics listed in docs/RELEASE.md, Runners. macOS release builds have no self-hosted runner
+and use GitHub-hosted `macos-latest`; set `FOLO_RELEASE_MACOS=false` while hosted runners are unavailable (hosted
+billing must be fixed before macOS release builds can run).
+
 ## Operating the runners
 - Status: `gh api repos/himent12/folo/actions/runners -q '.runners[] | .name + " " + .status'`.
 - Windows (dev PC): start with `Start-Process D:\gha\win\run.cmd -WindowStyle Hidden`. After a reboot, start it again.
@@ -48,6 +55,6 @@ so incremental builds stay warm.
 The dev PC (an i7-14700KF) occasionally crashes rustc or rustfmt under heavy parallel load (`STATUS_ACCESS_VIOLATION`
 0xc0000005, `STATUS_ILLEGAL_INSTRUCTION` 0xc000001d, `STATUS_STACK_BUFFER_OVERRUN` 0xc0000409), a pattern consistent
 with the Intel 13th/14th-gen instability issue. Until the host is fixed (BIOS / microcode update), the Windows steps in
-`ci.yml` and `desktop.yml` run through `tools/ci-retry.sh`, which on self-hosted runners retries a step once **only
-when its output shows one of those crash codes**, and logs a warning. Compile errors and failing (including flaky)
-tests are never retried.
+`ci.yml`, `desktop.yml` and `release.yml` (its Windows `cargo build` steps) run through `tools/ci-retry.sh`, which on
+self-hosted runners retries a step once **only when its output shows one of those crash codes**, and logs a warning.
+Compile errors and failing (including flaky) tests are never retried.
