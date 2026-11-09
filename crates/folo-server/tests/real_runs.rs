@@ -875,13 +875,16 @@ async fn auto_trains_and_predicts_on_the_gpu() {
     );
     let app = app(&s);
     let ds = dataset(&app, "gpu", 12).await;
-    let mut cfg = tiny(&ds, 1);
+    // A long run, stopped after its first epoch (so it has a model).
+    let mut cfg = tiny(&ds, 200);
     cfg["device"] = json!("auto");
     let run: Run = ok(&app, post_json("/api/runs", cfg)).await;
     let gpu = folo_gpu::GpuContext::shared().unwrap().summary().name.clone();
     assert!(run.device.starts_with(&gpu), "{} on {gpu}", run.device);
-    // Queued behind it: a fine-tune whose weights file is gone by the time it starts, so its trainer fails after
-    // placing the model on the GPU. Its buffers are released too.
+    let mut sse = Events::open(&app, &run.id).await;
+    sse.until_epoch().await;
+    // Queued behind it while it trains: a fine-tune whose weights file is gone by the time it starts, so its
+    // trainer fails after placing the model on the GPU. Its buffers are released too.
     let zoo = home.join("models");
     std::fs::create_dir_all(&zoo).unwrap();
     let mut seed = folo_vision::FoloModel::with_rng(
@@ -891,15 +894,17 @@ async fn auto_trains_and_predicts_on_the_gpu() {
     .unwrap();
     seed.set_classes(vec!["circle".into(), "square".into()]).unwrap();
     seed.save(zoo.join("seed.folo")).unwrap();
-    let seed_id = ok::<ModelList>(&app, get("/api/models")).await.models[0].id.clone();
+    let models = ok::<ModelList>(&app, get("/api/models")).await.models;
+    let seed_id = models.iter().find(|m| m.source == Some(ModelSource::File)).unwrap().id.clone();
     let mut doomed = tiny(&ds, 1);
     doomed["device"] = json!("auto");
     doomed["weights"] = json!(seed_id);
     let doomed: Run = ok(&app, post_json("/api/runs", doomed)).await;
+    assert_eq!(doomed.status, RunStatus::Queued);
     std::fs::remove_file(zoo.join("seed.folo")).unwrap();
-    let mut sse = Events::open(&app, &run.id).await;
-    let events = sse.until_status(&["completed", "failed"]).await;
-    assert_eq!(events.last().unwrap().1["status"], "completed", "{events:?}");
+    ok::<Run>(&app, post(&format!("/api/runs/{}/stop", run.id))).await;
+    let events = sse.until_status(&["completed", "failed", "stopped"]).await;
+    assert_eq!(events.last().unwrap().1["status"], "stopped", "{events:?}");
     let mut sse = Events::open(&app, &doomed.id).await;
     let events = sse.until_status(&["completed", "failed"]).await;
     assert_eq!(events.last().unwrap().1["status"], "failed", "{events:?}");
