@@ -93,7 +93,8 @@ pub fn rich(t: &Theme, s: TypeStep, color: Hsla, content: &str) -> Div {
             continue;
         }
         let code = i % 2 == 1;
-        // A code span never breaks inside (its chip would split into two boxes across the line).
+        // No-break spaces keep a code span together where they can, but GPUI's wrapper can still
+        // break at one, so a command that must stay whole belongs on its own chip line.
         let seg =
             if code { format!("\u{a0}{}\u{a0}", part.replace(' ', "\u{a0}")) } else { part.to_string() };
         runs.push(gpui::TextRun {

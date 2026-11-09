@@ -768,26 +768,34 @@ impl FoloApp {
                             ),
                     )
                     .child(
-                        // Whole entries wrap (the 280 px rail fits two of three stage names a line);
-                        // an entry never breaks inside.
-                        div().flex().flex_wrap().gap_x(px(12.)).gap_y(px(4.)).justify_between().children(
+                        // One line in the 280 px rail: short stage names, the full name on hover.
+                        div().flex().gap(px(12.)).children(
                             [
-                                ("Preprocess", p.timing.preprocess_ms, c_pre),
-                                ("Inference", p.timing.inference_ms, c_model),
+                                ("Pre", "Preprocess", p.timing.preprocess_ms, c_pre),
+                                ("Infer", "Inference", p.timing.inference_ms, c_model),
                                 // The engine's postprocess: box decoding and NMS (named as Studio names it).
-                                ("Postprocess", p.timing.postprocess_ms, c_nms),
+                                (
+                                    "Post",
+                                    "Postprocess · box decoding and NMS",
+                                    p.timing.postprocess_ms,
+                                    c_nms,
+                                ),
                             ]
                             .into_iter()
-                            .map(|(n, v, c)| {
+                            .map(|(n, full, v, c)| {
                                 div()
+                                    .id(SharedString::from(format!("lat-{n}")))
+                                    .tooltip(crate::controls::tip(full, None))
                                     .flex()
                                     .flex_none()
                                     .items_center()
                                     .gap(px(5.))
                                     .whitespace_nowrap()
-                                    .child(swatch(c, 8.).when(n == "Postprocess", |d| {
-                                        d.border_1().border_color(t.text_tertiary)
-                                    }))
+                                    .child(
+                                        swatch(c, 8.).when(n == "Post", |d| {
+                                            d.border_1().border_color(t.text_tertiary)
+                                        }),
+                                    )
                                     .child(text(ty::XS, t.text_tertiary).child(n))
                                     .child(text(ty::XS, t.text_secondary).tnum().child(format!("{v:.1} ms")))
                             }),

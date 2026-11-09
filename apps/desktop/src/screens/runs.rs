@@ -173,7 +173,8 @@ impl FoloApp {
                     .dataset_summary(&r.config.dataset_id)
                     .map_or(r.config.dataset_id.clone(), |d| d.name.clone());
                 let dur = duration_of(r, now).map_or("–".into(), time::duration);
-                let created = time::parse(&r.created).map_or(String::new(), |c| time::ago(c, now));
+                let created_at = time::parse(&r.created);
+                let created = created_at.map_or(String::new(), |c| time::ago(c, now));
                 let progress_cell = match r.status {
                     RunStatus::Queued => text(ty::SM, t.text_tertiary).child("Waiting to start"),
                     _ => div()
@@ -273,8 +274,13 @@ impl FoloApp {
                         text(ty::SM, t.text_secondary).tnum().w(px(80.)).flex_none().text_right().child(dur),
                     )
                     .when(show_created, |d| {
+                        // The exact local time on hover; the column reads relative.
                         d.child(
                             text(ty::SM, t.text_tertiary)
+                                .id(SharedString::from(format!("rc-{}", r.id)))
+                                .when_some(created_at, |d, c| {
+                                    d.tooltip(crate::controls::tip(time::local_datetime(c), None))
+                                })
                                 .tnum()
                                 .w(px(80.))
                                 .flex_none()

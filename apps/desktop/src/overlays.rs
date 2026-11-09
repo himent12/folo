@@ -200,7 +200,7 @@ impl FoloApp {
             for m in models {
                 let id = m.id.clone();
                 let detail = m.metrics.as_ref().map_or(m.arch.as_str().to_string(), |x| {
-                    format!("{} · mAP {:.3}", m.arch.as_str(), x.map50_95)
+                    format!("{} · mAP50-95 {:.3}", m.arch.as_str(), x.map50_95)
                 });
                 items.push(PaletteItem {
                     group: "Models",
@@ -844,258 +844,264 @@ impl FoloApp {
                 .child(control)
                 .into_any_element()
         };
-        let body = div()
-            .flex()
-            .flex_col()
-            .gap(px(if short { 8. } else { 14. }))
-            .px(px(20.))
-            // 16 px past the last control for the footer's fade, so it never dims a control.
-            .pb(px(36.))
-            // Errors lead the form, where a failed submit is seen (the dialog scrolls to the top).
-            .when_some(error.clone(), |d, e| {
-                d.child(
-                    div()
-                        .flex()
-                        .items_start()
-                        .gap(px(8.))
-                        .p(px(10.))
-                        .rounded(px(radius::MD))
-                        .bg(t.danger_muted)
-                        .child(icon("icons/circle-alert.svg", 14., t.danger_solid))
-                        // The server's hint says what to change (device_not_found lists the
-                        // adapters there are; gpu_out_of_memory names batch, imgsz and arch).
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap(px(2.))
-                                .min_w_0()
-                                .child(text(ty::SM, t.danger_text).whitespace_normal().child(e.message))
-                                .when_some(e.hint, |d, h| {
-                                    d.child(text(ty::XS, t.text_secondary).whitespace_normal().child(h))
-                                }),
-                        ),
-                )
-            })
-            .child(
-                div().flex().gap(px(16.)).child(div().flex_1().child(field("Name", name_box, None))).child(
-                    div().flex_1().child({
-                        let summary = ds.as_ref().map(|d| {
-                            format!(
-                                "{} classes · train {} · val {}",
-                                d.classes.len(),
-                                int(d.splits.train),
-                                int(d.splits.val)
-                            )
-                        });
-                        // The summary rides on the label row (no band under Name beside it,
-                        // and a line saved toward keeping the Schedule above the footer).
+        let body =
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(if short { 8. } else { 14. }))
+                .px(px(20.))
+                // 16 px past the last control for the footer's fade, so it never dims a control.
+                .pb(px(36.))
+                // Errors lead the form, where a failed submit is seen (the dialog scrolls to the top).
+                .when_some(error.clone(), |d, e| {
+                    d.child(
                         div()
                             .flex()
-                            .flex_col()
+                            .items_start()
                             .gap(px(8.))
+                            .p(px(10.))
+                            .rounded(px(radius::MD))
+                            .bg(t.danger_muted)
+                            .child(icon("icons/circle-alert.svg", 14., t.danger_solid))
+                            // The server's hint says what to change (device_not_found lists the
+                            // adapters there are; gpu_out_of_memory names batch, imgsz and arch).
                             .child(
                                 div()
                                     .flex()
-                                    .items_baseline()
-                                    .justify_between()
-                                    .gap(px(8.))
-                                    .child(label("Dataset"))
-                                    .children(
-                                        summary.map(|s| {
-                                            text(ty::XS, t.text_tertiary).tnum().truncate().child(s)
-                                        }),
-                                    ),
-                            )
-                            .child(ds_select)
-                    }),
-                ),
-            )
-            .child(section("Model"))
-            .child(
-                div()
-                    .flex()
-                    .gap(px(16.))
-                    .child(div().flex_1().child(field(
-                        "Architecture",
-                        arch_seg,
-                        // The letter's size named, so the five choices read without knowing FOLO.
-                        Some(format!(
-                            "{}, {} · {}",
-                            ARCHS[arch].as_str(),
-                            ["nano", "small", "medium", "large", "extra large"][arch],
-                            PARAMS[arch]
-                        )),
-                    )))
-                    .child(
-                        div().flex_1().child(match size_help {
-                            Some(h) => labelled("Image size", h, size_seg),
-                            None => field(
-                                "Image size",
-                                size_seg,
-                                Some("Pixels; images are letterboxed to a square".into()),
-                            )
-                            .into_any_element(),
-                        }),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .gap(px(16.))
-                    .child(div().flex_1().child(match batch_help {
-                        Some(h) => labelled("Batch size", h, batch_seg),
-                        None => {
-                            field("Batch size", batch_seg, Some("Images per step".into())).into_any_element()
-                        }
-                    }))
-                    .child(
-                        div().flex_1().child(match device_help {
-                            Some(h) => labelled("Device", h, device_seg),
-                            None => field(
-                                "Device",
-                                device_seg,
-                                Some(match (DEVICES[device], &gpu_name) {
-                                    ("auto", Some(g)) => format!("{g} when available, else CPU"),
-                                    ("auto", None) => "GPU when available, else CPU".into(),
-                                    ("cpu", _) => "Trains on the CPU (much slower)".into(),
-                                    (_, Some(g)) => format!("GPU 0: {g}"),
-                                    (d, None) => d.to_string(),
-                                }),
-                            )
-                            .into_any_element(),
-                        }),
-                    ),
-            )
-            // Optimizer first: the learning rate beside it depends on it (Auto sets it).
-            .child(section("Schedule"))
-            .child(
-                div()
-                    .flex()
-                    .gap(px(16.))
-                    .child(div().flex_1().child(field(
-                        "Optimizer",
-                        opt_seg,
-                        Some(match (opt, &auto_pick) {
-                            (0, Some((kind, _))) => {
-                                format!("Auto: {kind} for this run, at its own learning rate")
-                            }
-                            (0, None) => "Auto: SGD for long runs, else AdamW".to_string(),
-                            (1, _) => "SGD with Nesterov momentum 0.937".to_string(),
-                            _ => "AdamW with weight decay".to_string(),
-                        }),
-                    )))
-                    .child(
-                        div()
-                            .flex_1()
-                            .flex()
-                            .flex_col()
-                            .gap(px(8.))
-                            // Under Auto the engine sets the rate itself: the field shows that rate,
-                            // read-only, instead of an editable value it would ignore.
-                            .child(if opt == 0 {
-                                div()
-                                    .flex()
                                     .flex_col()
-                                    .gap(px(8.))
-                                    .child(label("Initial learning rate"))
-                                    .child(
-                                        div()
-                                            .h(px(crate::theme::size::CONTROL_MD))
-                                            .px(px(8.))
-                                            .flex()
-                                            .items_center()
-                                            .rounded(px(radius::MD))
-                                            // A value, not an input: an outline, no well.
-                                            .border_1()
-                                            .border_color(t.line_subtle)
-                                            .child(text(ty::SM, t.text_tertiary).tnum().child(
-                                                match &auto_pick {
-                                                    Some((_, lr)) => format!("Auto · {lr}"),
-                                                    None => "Auto".to_string(),
-                                                },
-                                            )),
-                                    )
-                                    .into_any_element()
-                            } else {
-                                typed(
-                                    "Initial learning rate",
-                                    lr_box,
-                                    lr_slider,
-                                    lr_bad
-                                        .then_some("Enter a number above 0 and below 10, e.g. 0.01 or 1e-3"),
+                                    .gap(px(2.))
+                                    .min_w_0()
+                                    .child(text(ty::SM, t.danger_text).whitespace_normal().child(e.message))
+                                    .when_some(e.hint, |d, h| {
+                                        d.child(text(ty::XS, t.text_secondary).whitespace_normal().child(h))
+                                    }),
+                            ),
+                    )
+                })
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(16.))
+                        .child(div().flex_1().child(field("Name", name_box, None)))
+                        .child(div().flex_1().child({
+                            let summary = ds.as_ref().map(|d| {
+                                format!(
+                                    "{} classes · train {} · val {}",
+                                    d.classes.len(),
+                                    int(d.splits.train),
+                                    int(d.splits.val)
                                 )
-                                .into_any_element()
-                            })
-                            // The schedule (short windows keep the Schedule above the footer).
-                            .when(!short && !lr_bad, |d| {
-                                d.child(text(ty::XS, t.text_tertiary).child(if opt == 0 {
-                                    "Set by Auto; pick SGD or AdamW to choose your own"
-                                } else {
-                                    "3-epoch warmup, then linear decay to 1%"
-                                }))
-                            }),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .gap(px(16.))
-                    .child(div().flex_1().child(typed(
-                        "Epochs",
-                        epochs_box,
-                        epochs_slider,
-                        epochs_bad.then_some("Enter a whole number from 1 to 10,000"),
-                    )))
-                    .child(
-                        div().flex_1().child(
+                            });
+                            // The summary rides on the label row (no band under Name beside it,
+                            // and a line saved toward keeping the Schedule above the footer).
                             div()
                                 .flex()
                                 .flex_col()
                                 .gap(px(8.))
-                                .child(typed(
-                                    "Final epochs without mosaic",
-                                    close_box,
-                                    close_slider,
-                                    close_bad.then_some("Enter a whole number up to the epoch count"),
-                                ))
-                                // Which epochs those are (the label already says what they do).
-                                .child(text(ty::XS, t.text_tertiary).child({
-                                    let last = epochs.round().max(1.) as u32;
-                                    let n = (close_mosaic.round() as u32).min(last);
-                                    match n {
-                                        0 => "Off: mosaic all the way through".to_string(),
-                                        1 => format!("Epoch {last} trains on whole images"),
-                                        _ => format!("Epochs {}–{last} train on whole images", last - n + 1),
-                                    }
-                                })),
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_baseline()
+                                        .justify_between()
+                                        .gap(px(8.))
+                                        .child(label("Dataset"))
+                                        .children(summary.map(|s| {
+                                            text(ty::XS, t.text_tertiary).tnum().truncate().child(s)
+                                        })),
+                                )
+                                .child(ds_select)
+                        })),
+                )
+                .child(section("Model"))
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(16.))
+                        .child(div().flex_1().child(field(
+                            "Architecture",
+                            arch_seg,
+                            // The letter's size named, so the five choices read without knowing FOLO.
+                            Some(format!(
+                                "{}, {} · {}",
+                                ARCHS[arch].as_str(),
+                                ["nano", "small", "medium", "large", "extra large"][arch],
+                                PARAMS[arch]
+                            )),
+                        )))
+                        .child(
+                            div().flex_1().child(match size_help {
+                                Some(h) => labelled("Image size", h, size_seg),
+                                None => field(
+                                    "Image size",
+                                    size_seg,
+                                    Some("Pixels; images are letterboxed to a square".into()),
+                                )
+                                .into_any_element(),
+                            }),
                         ),
-                    ),
-            )
-            // Mixed precision: f16 on tensor cores. The server says whether its GPU can
-            // (`capabilities.amp`); when it can't, the switch is off and inert with its reason. An older
-            // server can't say, so the requirement is stated and a run's failure tells.
-            .child({
-                let blocked = self.amp_blocked(DEVICES[device]);
-                let off = blocked.is_some();
-                let amp_on = amp && !off;
-                let switch = self
-                    .switch(
-                        "nr-amp",
-                        amp_on,
-                        window,
-                        cx,
-                        act(move |this, _, cx| {
-                            if let Some(f) = this.new_run.as_mut()
-                                && !off
-                            {
-                                f.amp = !f.amp;
-                                cx.notify();
-                            }
-                        }),
-                    )
-                    .into_any_element();
-                div()
+                )
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(16.))
+                        .child(
+                            div().flex_1().child(match batch_help {
+                                Some(h) => labelled("Batch size", h, batch_seg),
+                                None => field("Batch size", batch_seg, Some("Images per step".into()))
+                                    .into_any_element(),
+                            }),
+                        )
+                        .child(
+                            div().flex_1().child(match device_help {
+                                Some(h) => labelled("Device", h, device_seg),
+                                None => field(
+                                    "Device",
+                                    device_seg,
+                                    Some(match (DEVICES[device], &gpu_name) {
+                                        ("auto", Some(g)) => format!("{g} when available, else CPU"),
+                                        ("auto", None) => "GPU when available, else CPU".into(),
+                                        ("cpu", _) => "Trains on the CPU (much slower)".into(),
+                                        (_, Some(g)) => format!("GPU 0: {g}"),
+                                        (d, None) => d.to_string(),
+                                    }),
+                                )
+                                .into_any_element(),
+                            }),
+                        ),
+                )
+                // Optimizer first: the learning rate beside it depends on it (Auto sets it).
+                .child(section("Schedule"))
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(16.))
+                        .child(div().flex_1().child(field(
+                            "Optimizer",
+                            opt_seg,
+                            Some(match (opt, &auto_pick) {
+                                (0, Some((kind, _))) => {
+                                    format!("Auto: {kind} for this run, at its own learning rate")
+                                }
+                                (0, None) => "Auto: SGD for long runs, else AdamW".to_string(),
+                                (1, _) => "SGD with Nesterov momentum 0.937".to_string(),
+                                _ => "AdamW with weight decay".to_string(),
+                            }),
+                        )))
+                        .child(
+                            div()
+                                .flex_1()
+                                .flex()
+                                .flex_col()
+                                .gap(px(8.))
+                                // Under Auto the engine sets the rate itself: the field shows that rate,
+                                // read-only, instead of an editable value it would ignore.
+                                .child(if opt == 0 {
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap(px(8.))
+                                        .child(label("Initial learning rate"))
+                                        .child(
+                                            div()
+                                                .h(px(crate::theme::size::CONTROL_MD))
+                                                .px(px(8.))
+                                                .flex()
+                                                .items_center()
+                                                .rounded(px(radius::MD))
+                                                // A value, not an input: an outline, no well.
+                                                .border_1()
+                                                .border_color(t.line_subtle)
+                                                .child(text(ty::SM, t.text_tertiary).tnum().child(
+                                                    match &auto_pick {
+                                                        Some((_, lr)) => format!("Auto · {lr}"),
+                                                        None => "Auto".to_string(),
+                                                    },
+                                                )),
+                                        )
+                                        .into_any_element()
+                                } else {
+                                    typed(
+                                        "Initial learning rate",
+                                        lr_box,
+                                        lr_slider,
+                                        lr_bad.then_some(
+                                            "Enter a number above 0 and below 10, e.g. 0.01 or 1e-3",
+                                        ),
+                                    )
+                                    .into_any_element()
+                                })
+                                // The schedule (short windows keep the Schedule above the footer).
+                                .when(!short && !lr_bad, |d| {
+                                    d.child(text(ty::XS, t.text_tertiary).child(if opt == 0 {
+                                        "Set by Auto; pick SGD or AdamW to choose your own"
+                                    } else {
+                                        "3-epoch warmup, then linear decay to 1%"
+                                    }))
+                                }),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(16.))
+                        .child(div().flex_1().child(typed(
+                            "Epochs",
+                            epochs_box,
+                            epochs_slider,
+                            epochs_bad.then_some("Enter a whole number from 1 to 10,000"),
+                        )))
+                        .child(
+                            div().flex_1().child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(8.))
+                                    .child(typed(
+                                        "Final epochs without mosaic",
+                                        close_box,
+                                        close_slider,
+                                        close_bad.then_some("Enter a whole number up to the epoch count"),
+                                    ))
+                                    // Which epochs those are (the label already says what they do).
+                                    .child(text(ty::XS, t.text_tertiary).child({
+                                        let last = epochs.round().max(1.) as u32;
+                                        let n = (close_mosaic.round() as u32).min(last);
+                                        match n {
+                                            0 => "Off: mosaic all the way through".to_string(),
+                                            1 => format!("Epoch {last} trains on whole images"),
+                                            _ => format!(
+                                                "Epochs {}–{last} train on whole images",
+                                                last - n + 1
+                                            ),
+                                        }
+                                    })),
+                            ),
+                        ),
+                )
+                // Mixed precision: f16 on tensor cores. The server says whether its GPU can
+                // (`capabilities.amp`); when it can't, the switch is off and inert with its reason. An older
+                // server can't say, so the requirement is stated and a run's failure tells.
+                .child({
+                    let blocked = self.amp_blocked(DEVICES[device]);
+                    let off = blocked.is_some();
+                    let amp_on = amp && !off;
+                    let switch = self
+                        .switch(
+                            "nr-amp",
+                            amp_on,
+                            window,
+                            cx,
+                            act(move |this, _, cx| {
+                                if let Some(f) = this.new_run.as_mut()
+                                    && !off
+                                {
+                                    f.amp = !f.amp;
+                                    cx.notify();
+                                }
+                            }),
+                        )
+                        .into_any_element();
+                    div()
                     .flex()
                     .items_center()
                     .justify_between()
@@ -1109,55 +1115,56 @@ impl FoloApp {
                             .gap(px(2.))
                             .child(label("Mixed precision"))
                             .child(
-                                text(ty::XS, t.text_tertiary).whitespace_normal().child(match blocked {
+                                rich(&t, ty::XS, t.text_tertiary, &match blocked {
                                     Some(why) => why,
                                     // The server confirmed it can; an older one can't say, so the need is stated.
                                     None if self.store.capabilities.is_some() => {
                                         "Trains in f16 on this server's tensor cores".to_string()
                                     }
-                                    None => "Trains in f16 on tensor cores; needs folo serve --tensor-cores"
+                                    None => "Trains in f16 on tensor cores; needs `folo serve --tensor-cores`"
                                         .to_string(),
-                                }),
+                                })
+                                .text_left(),
                             ),
                     )
                     .child(switch)
-            })
-            .child(section("Augmentation"))
-            .child(
-                div()
-                    .flex()
-                    .gap(px(16.))
-                    .child(div().flex_1().child(valued("Mosaic", format!("{mosaic:.2}"), mosaic_slider)))
-                    .child(div().flex_1().child(valued("Mixup", format!("{mixup:.2}"), mixup_slider))),
-            )
-            .child(
-                div()
-                    .flex()
-                    .gap(px(16.))
-                    .child(div().flex_1().child(valued(
-                        "Horizontal flip",
-                        format!("{fliplr:.2}"),
-                        flip_slider,
-                    )))
-                    .child(div().flex_1().child(valued(
-                        "Scale jitter",
-                        format!("±{scale:.2}"),
-                        scale_slider,
-                    ))),
-            )
-            .when_some(note, |d, n| {
-                d.child(
+                })
+                .child(section("Augmentation"))
+                .child(
                     div()
                         .flex()
-                        .items_center()
-                        .gap(px(8.))
-                        .p(px(10.))
-                        .rounded(px(radius::MD))
-                        .bg(t.info_muted)
-                        .child(icon("icons/info.svg", 14., t.info_solid))
-                        .child(text(ty::SM, t.text_primary).child(n)),
+                        .gap(px(16.))
+                        .child(div().flex_1().child(valued("Mosaic", format!("{mosaic:.2}"), mosaic_slider)))
+                        .child(div().flex_1().child(valued("Mixup", format!("{mixup:.2}"), mixup_slider))),
                 )
-            });
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(16.))
+                        .child(div().flex_1().child(valued(
+                            "Horizontal flip",
+                            format!("{fliplr:.2}"),
+                            flip_slider,
+                        )))
+                        .child(div().flex_1().child(valued(
+                            "Scale jitter",
+                            format!("±{scale:.2}"),
+                            scale_slider,
+                        ))),
+                )
+                .when_some(note, |d, n| {
+                    d.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .p(px(10.))
+                            .rounded(px(radius::MD))
+                            .bg(t.info_muted)
+                            .child(icon("icons/info.svg", 14., t.info_solid))
+                            .child(text(ty::SM, t.text_primary).child(n)),
+                    )
+                });
         let images = ds.as_ref().map_or(0, |d| d.splits.train);
         let (secs, vram) = estimate(arch, epochs, BATCHES[batch], IMGSZ[imgsz], images as u32);
         let cpu = DEVICES[device] == "cpu";
