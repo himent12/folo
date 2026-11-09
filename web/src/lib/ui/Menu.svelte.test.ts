@@ -88,3 +88,33 @@ describe('Menu keyboard', () => {
     target.remove();
   });
 });
+
+describe('Menu on a phone', () => {
+  const width = window.innerWidth;
+  const viewport = (w: number) => (window as unknown as { happyDOM: { setViewport(v: { width: number }): void } }).happyDOM.setViewport({ width: w });
+
+  // Round 24: the queued run's ⋯ opened a popover over its callout's text. On phones a menu is the shared bottom sheet
+  // (ui/Dialog), as the loss view's options are; the action still runs and focus comes back to the trigger.
+  it('opens as the shared sheet, never a popover, and runs the action', async () => {
+    viewport(390);
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    const run = vi.fn();
+    const c = mount(Menu, { target, props: { label: 'More run actions', items: [{ label: 'Remove from queue', onclick: run }] } });
+    const trigger = target.querySelector<HTMLButtonElement>('button[aria-haspopup="menu"]')!;
+    trigger.click();
+    flushSync();
+    await tick();
+    expect(target.querySelector('.list')).toBeNull();
+    const menu = target.querySelector('dialog [role="menu"]')!;
+    expect(menu).not.toBeNull();
+    expect(menu.closest('dialog')?.querySelector('h2')?.textContent).toBe('More run actions');
+    menu.querySelector<HTMLElement>('[role="menuitem"]')!.click();
+    await tick();
+    flushSync();
+    expect(run).toHaveBeenCalledOnce();
+    unmount(c);
+    target.remove();
+    viewport(width);
+  });
+});

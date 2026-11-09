@@ -115,6 +115,31 @@ describe('Playground on a phone', () => {
   });
 });
 
+describe('Playground on a tablet', () => {
+  const width = window.innerWidth;
+  afterEach(() => {
+    (window as unknown as { happyDOM: { setViewport(v: { width: number }): void } }).happyDOM.setViewport({ width });
+  });
+
+  // Bottom sheets are for phones (DESIGN_DIRECTION 9): round 24's tablet sheet covered Classes and Timing, clipped at
+  // the viewport. More settings is a popover anchored under its button; focus moves in, and Escape brings it back.
+  it('opens More settings as an anchored popover, not a sheet, and Escape returns focus to the button', async () => {
+    (window as unknown as { happyDOM: { setViewport(v: { width: number }): void } }).happyDOM.setViewport({ width: 820 });
+    await run('normal', 'm_hard_s');
+    await until(() => target.querySelector('#pg-panel tbody tr'), 'the detections');
+    const btn = [...target.querySelectorAll<HTMLButtonElement>('.more-btn button')].find((b) => b.textContent?.includes('More settings'))!;
+    btn.click();
+    const pop = await until(() => target.querySelector<HTMLElement>('#pg-more'), 'the popover');
+    expect(pop.classList.contains('pop')).toBe(true);
+    expect(pop.querySelector('.sheet-handle')).toBeNull();
+    await until(() => document.activeElement === pop, 'focus in the popover');
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    flushSync();
+    expect(target.querySelector('#pg-more')).toBeNull();
+    expect(document.activeElement).toBe(btn);
+  });
+});
+
 describe('Playground: detections', () => {
   it('shows scores with one precision in the table and the picked line', async () => {
     await run('normal', 'm_hard_s');

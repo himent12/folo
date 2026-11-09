@@ -23,6 +23,9 @@ export interface Toast {
   timeout: number;
 }
 
+/** How long a success or a note without an action stays (DESIGN_DIRECTION 9): long enough to read two lines. */
+export const AUTO_DISMISS_MS = 6000;
+
 class Toasts {
   items = $state<Toast[]>([]);
   #id = 0;
@@ -33,8 +36,8 @@ class Toasts {
   show(t: Omit<Toast, 'id' | 'timeout'> & { timeout?: number }): number {
     const id = ++this.#id;
     // An error, or a toast that offers an action, stays until it is closed: nobody should have to race a timer to read
-    // what went wrong or to take the action.
-    const toast: Toast = { timeout: t.tone === 'error' || t.action ? 0 : 4000, ...t, id };
+    // what went wrong or to take the action. The rest (a success, a note) go after 6 s, paused while hovered or focused.
+    const toast: Toast = { timeout: t.tone === 'error' || t.action ? 0 : AUTO_DISMISS_MS, ...t, id };
     this.items = this.#held ? [...this.items, toast] : [...this.items.slice(-3), toast];
     if (toast.timeout > 0 && !this.#held) this.#timers.set(id, setTimeout(() => this.dismiss(id), toast.timeout));
     return id;

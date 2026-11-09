@@ -5,7 +5,7 @@
   const current = $derived(section(router.route.name));
 </script>
 
-<nav class="tabbar" aria-label="Main">
+<nav class="tabbar" aria-label="Main" data-tip-chrome>
   {#each mainNav as n (n.id)}
     {@const active = current === n.id}
     <a href={href(n.path)} class:active aria-current={active ? 'page' : undefined}>

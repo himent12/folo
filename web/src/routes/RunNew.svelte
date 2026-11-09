@@ -297,8 +297,9 @@
   );
   /** The trainer's schedule: optimizer steps an epoch, fewer than batches when gradients accumulate. */
   const sched = $derived(warmup(dataset?.splits.train ?? 0, Number.isInteger(epochs) && epochs > 0 ? epochs : 1, batchN));
-  /** The batches behind the steps, in the Summary's popover (ui/InfoButton): one line in the rail. */
+  /** The batches behind the steps, opened under the Summary's Schedule row (ui/InfoButton): one line in the rail. */
   const batchesOf = $derived(`${num(est.stepsPerEpoch)} ${est.stepsPerEpoch === 1 ? 'batch' : 'batches'} of ${batchN}`);
+  let stepsOpen = $state(false);
   const stepsWhy = $derived(sched.accumulate > 1 ? `${batchesOf}; ${sched.accumulate} per optimizer step.` : `${batchesOf}, one step each.`);
   // The figures wait for the server's devices and the dataset: until then "Estimating…", never a CPU guess or 0 steps.
   const estReady = $derived(!!dataset && (system.data !== undefined || system.error !== undefined));
@@ -728,13 +729,15 @@
   {:else}
   <dl class="est">
     <!-- The trainer's count (the short-run warning's unit). The batches behind it, one tap, click or Enter away
-         (ui/InfoButton: the value is its button; a popover over the Summary sheet too). -->
+         (ui/InfoButton: the value is its button), as a line under the row: in a list of rows a popover would cover
+         its neighbours (round 24's covered Start from), so it opens in place and pushes the rows below down. -->
     <dt>Schedule</dt>
     <dd class="num sched">
-      <InfoButton label="How the steps are counted" text={stepsWhy} side="top" class="steps"
+      <InfoButton label="How the steps are counted" controls="{where}-steps-why" bind:open={stepsOpen} class="steps"
         >{#snippet trigger()}{num(sched.stepsPerEpoch)} steps <span class="faint">/ epoch</span>{/snippet}</InfoButton
       >
     </dd>
+    {#if stepsOpen}<dd class="steps-why" id="{where}-steps-why">{stepsWhy}</dd>{/if}
     <!-- A range, never one precise figure; a rough one (low confidence) in secondary ink. What it stands on is the
          line under it, which opens the phases behind it. -->
     <dt>Est. time</dt><dd class="num" class:rough={shown.rough} aria-busy={estimating || undefined}>{timeRange(shown.lo, shown.hi)}</dd>
@@ -798,7 +801,7 @@
       {#if shortWhy}
         <div class="short-why" id="{where}-short-why">
           {#if short.scratch}
-            <!-- Two short sentences: the batches behind the steps are the Schedule row's tooltip. -->
+            <!-- Two short sentences: the batches behind the steps open under the Schedule row. -->
             <p>{num(epochs)} epochs × {num(short.stepsPerEpoch)} steps. From scratch, a detector needs a few hundred, so expect an mAP near&nbsp;0.</p>
           {/if}
           {#if short.warmupHeavy}
@@ -1232,6 +1235,7 @@
       <!-- use:dock: the phone tab bar steps aside while this bar is on the page (lib/shell/dock.ts). -->
       <div
         use:dock
+        data-tip-chrome
         class="dock"
         class:away={startVisible}
         role="region"
@@ -1803,6 +1807,13 @@
   /* The steps open their batches (ui/InfoButton): a button, so the value keeps room for its focus ring. */
   .est dd.sched {
     overflow: visible;
+  }
+  /* The batches behind the steps: one quiet line under the row, at the value's right edge, across the row. */
+  .est dd.steps-why {
+    grid-column: 1 / -1;
+    margin-top: -2px;
+    color: var(--text-secondary);
+    white-space: normal;
   }
   /* A switch field (Mixed precision, End-to-end): the Switch is the label's line, its track at the field's right edge,
      and the label reads as every field label (text.secondary, medium), also while only the control is disabled. */

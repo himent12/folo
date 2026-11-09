@@ -100,7 +100,7 @@
       </div>
       <Button variant="ghost" size="sm" icon={X} aria-label="Close" onclick={() => el.close()} />
     </header>
-    {#if children}<div class="body">{@render children()}</div>{/if}
+    {#if children}<div class="body scroll-shade">{@render children()}</div>{/if}
     <DialogStatusRegion {status} class="status" />
     {#if footer}<footer>{@render footer()}</footer>{/if}
   </div>
@@ -173,19 +173,12 @@
     line-height: var(--type-base-line);
     color: var(--text-secondary);
   }
-  /* A body taller than the dialog scrolls, with a shadow at each edge that has more behind it: the two covers in the
-     dialog's colour scroll with the content (local) and hide the edge shades (scroll) once the end is reached. */
+  /* A body taller than the dialog scrolls, with a shade at each edge that has more behind it (base.css .scroll-shade,
+     shared with the command palette's list). */
   .body {
     padding: var(--space-2) var(--space-5) var(--space-5);
     font-size: var(--type-base-size);
     line-height: var(--type-base-line);
-    overflow-y: auto;
-    background:
-      linear-gradient(var(--bg-overlay) 50%, transparent) top / 100% 32px no-repeat local,
-      linear-gradient(transparent, var(--bg-overlay) 50%) bottom / 100% 32px no-repeat local,
-      linear-gradient(var(--line-strong), transparent) top / 100% 16px no-repeat scroll,
-      linear-gradient(transparent, var(--line-strong)) bottom / 100% 16px no-repeat scroll,
-      var(--bg-overlay);
   }
   /* The status region sits between the body and the footer, so a result is in view however far the body scrolls. */
   .frame > :global(.status.on) {

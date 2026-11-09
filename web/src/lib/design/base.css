@@ -519,3 +519,18 @@ select[aria-invalid='true'],
 :root[data-dock] {
   --tabbar-h: 0px;
 }
+
+/*
+ * An overlay's scrolling body (ui/Dialog's body, the command palette's results): a shade at each edge that has more
+ * behind it, so a cut last row reads as "more below", never as a row clipped by the footer. The two covers in the
+ * overlay's colour scroll with the content (local) and hide the edge shades (scroll) once that end is reached.
+ */
+.scroll-shade {
+  overflow-y: auto;
+  background:
+    linear-gradient(var(--shade-bg, var(--bg-overlay)) 50%, transparent) top / 100% 32px no-repeat local,
+    linear-gradient(transparent, var(--shade-bg, var(--bg-overlay)) 50%) bottom / 100% 32px no-repeat local,
+    linear-gradient(var(--line-strong), transparent) top / 100% 16px no-repeat scroll,
+    linear-gradient(transparent, var(--line-strong)) bottom / 100% 16px no-repeat scroll,
+    var(--shade-bg, var(--bg-overlay));
+}

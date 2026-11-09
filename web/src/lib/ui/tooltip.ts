@@ -8,7 +8,9 @@
 // while the pointer moves onto it (WCAG 1.4.13, hoverable): leaving the trigger or the tooltip hides it after a short
 // grace period, unless the pointer arrives on the other. Placement is collision-aware (`placeTip`): the tooltip flips
 // to the other side when its own does not fit, shifts along the anchor to stay inside the anchor's panel (a rail's
-// edge) and the viewport, and its arrow keeps pointing at the anchor's centre.
+// edge) and the viewport, 8 px in from its edges, and its arrow keeps pointing at the anchor's centre. Fixed chrome (the
+// top bar, the tab bar, a dock: `data-tip-chrome`) is outside the bounds, so a tooltip near the top of a page flips
+// below its anchor rather than land on the top bar's buttons (round 24's "no runtime" tip over New run).
 
 import { formatKeys } from '$lib/keys';
 
@@ -22,9 +24,9 @@ interface Box {
   bottom: number;
 }
 
-/** Space between the anchor and the tooltip (the arrow sits in it), and the margin kept from the bounds' edges. */
+/** Space between the anchor and the tooltip (the arrow sits in it), and the margin kept from the viewport's edges. */
 const GAP = 8;
-const EDGE = 4;
+export const EDGE = 8;
 /** The arrow never comes closer to a corner than this, so it never sits on the rounded radius. */
 const ARROW_INSET = 8;
 
@@ -75,6 +77,15 @@ export function boundsFor(node: HTMLElement, width: number): Box {
   const vw = document.documentElement.clientWidth || window.innerWidth;
   const vh = window.innerHeight;
   const view = { left: EDGE, top: EDGE, right: vw - EDGE, bottom: vh - EDGE };
+  // Fixed chrome above or below the anchor is not room: the tooltip keeps the same margin from it.
+  const a = node.getBoundingClientRect();
+  for (const c of document.querySelectorAll<HTMLElement>('[data-tip-chrome]')) {
+    if (c.contains(node)) continue;
+    const r = c.getBoundingClientRect();
+    if (r.width === 0 || r.height === 0) continue;
+    if (r.bottom <= a.top) view.top = Math.max(view.top, r.bottom + EDGE);
+    else if (r.top >= a.bottom) view.bottom = Math.min(view.bottom, r.top - EDGE);
+  }
   const panel = node.closest<HTMLElement>('[data-tip-bounds], section.panel, [role="dialog"], dialog');
   if (!panel) return view;
   const p = panel.getBoundingClientRect();

@@ -5,6 +5,7 @@
   import Check from '@lucide/svelte/icons/check';
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
   import ChevronUp from '@lucide/svelte/icons/chevron-up';
+  import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import ImageIcon from '@lucide/svelte/icons/image';
   import Images from '@lucide/svelte/icons/images';
   import Plus from '@lucide/svelte/icons/plus';
@@ -55,7 +56,8 @@
 
   // Phones with an image loaded: no intro line, the image full-bleed with Confidence under it. IoU, max detections
   // and the display toggles open in a non-modal bottom sheet, so the image stays in view (and live) while tuning;
-  // classes and timing fold into two disclosures under the detections.
+  // classes and timing fold into two disclosures under the detections. Bottom sheets are for phones only
+  // (DESIGN_DIRECTION 9): a tablet's "More settings" is a popover anchored under its button.
   const phone = new MediaQuery(media.phone, false);
   // Below 1024 px the model and Run on leave the title row for a toolbar row of their own under it, full width.
   const narrow = new MediaQuery(media.upToLaptop, false);
@@ -67,9 +69,19 @@
   let sheetEl = $state<HTMLElement>();
   let moreBtn = $state<HTMLElement>();
 
-  // Focus moves into the sheet as it opens and back to its button as it closes.
+  // Focus moves into the sheet (or the tablet's popover) as it opens and back to its button as it closes.
   $effect(() => {
     if (sheetShown) sheetEl?.focus();
+  });
+  // The tablet's popover is transient: a press outside it (and outside its button) closes it, focus staying put.
+  $effect(() => {
+    if (!sheetShown || !tablet) return;
+    const away = (e: PointerEvent) => {
+      const t = e.target as Node;
+      if (!sheetEl?.contains(t) && !moreBtn?.contains(t)) moreOpen = false;
+    };
+    document.addEventListener('pointerdown', away);
+    return () => document.removeEventListener('pointerdown', away);
   });
   function closeSheet() {
     moreOpen = false;
@@ -572,6 +584,20 @@
   <Slider {inline} label="Max detections" bind:value={maxDet} min={1} max={300} step={1} format={(v) => String(Math.round(v))} hint="Keep at most this many boxes." />
 {/snippet}
 
+{#snippet moreBody()}
+  <div class="sheet-body">
+    <div class="more-sliders">
+      {#if tablet}
+        <Slider inline label="Max detections" bind:value={maxDet} min={1} max={300} step={1} format={(v) => String(Math.round(v))} />
+      {:else}
+        <Slider inline label="Confidence" bind:value={conf} min={0.01} max={0.95} step={0.01} />
+        {@render secondarySliders(true)}
+      {/if}
+    </div>
+    <div class="more-toggles">{@render displayToggles()}</div>
+  </div>
+{/snippet}
+
 {#snippet resetButton()}
   <Button size="sm" variant="ghost" icon={RotateCcw} disabled={isDefault} onclick={resetThresholds}>Reset</Button>
 {/snippet}
@@ -815,11 +841,21 @@
                   <span class="grow"></span>
                 {/if}
                 <span class="more-btn" bind:this={moreBtn}>
-                  <Button size="sm" variant="ghost" iconRight={ChevronUp} aria-expanded={sheetShown} aria-controls="pg-more" onclick={() => (sheetShown ? closeSheet() : (moreOpen = true))}>{sheetTitle}</Button>
+                  <Button size="sm" variant="ghost" iconRight={tablet ? ChevronDown : ChevronUp} aria-expanded={sheetShown} aria-controls="pg-more" onclick={() => (sheetShown ? closeSheet() : (moreOpen = true))}>{sheetTitle}</Button>
                 </span>
               </div>
-              {#if sheetShown}
-                <!-- Non-modal: no backdrop, the image above stays visible and keeps re-filtering as the sliders move. -->
+              {#if sheetShown && tablet}
+                <!-- Tablets: a popover anchored under its button (bg.overlay, shadow-lg), over the panels below,
+                     never a bottom sheet clipped at the viewport. Escape returns focus to the button. -->
+                <div class="pop" id="pg-more" role="dialog" aria-modal="false" aria-labelledby="pg-more-title" tabindex="-1" bind:this={sheetEl}>
+                  <div class="pop-head">
+                    <h2 id="pg-more-title">{sheetTitle}</h2>
+                    {@render resetButton()}
+                  </div>
+                  {@render moreBody()}
+                </div>
+              {:else if sheetShown}
+                <!-- Phones. Non-modal: no backdrop, the image above stays visible and keeps re-filtering as the sliders move. -->
                 <div
                   class="sheet"
                   id="pg-more"
@@ -835,17 +871,7 @@
                     {@render resetButton()}
                     <Button size="sm" variant="ghost" icon={X} aria-label="Close {sheetTitle.toLowerCase()}" onclick={closeSheet} />
                   </div>
-                  <div class="sheet-body">
-                    <div class="more-sliders">
-                      {#if tablet}
-                        <Slider inline label="Max detections" bind:value={maxDet} min={1} max={300} step={1} format={(v) => String(Math.round(v))} />
-                      {:else}
-                        <Slider inline label="Confidence" bind:value={conf} min={0.01} max={0.95} step={0.01} />
-                        {@render secondarySliders(true)}
-                      {/if}
-                    </div>
-                    <div class="more-toggles">{@render displayToggles()}</div>
-                  </div>
+                  {@render moreBody()}
                 </div>
               {/if}
             {/if}
@@ -1705,18 +1731,48 @@
     .vfoot .wide {
       display: none;
     }
-    /* A sheet from the content's bottom edge, as wide as a dialog, over the detections (never the image or strip). */
-    .sheet {
-      left: 0;
-      right: 0;
-      bottom: env(safe-area-inset-bottom);
-      width: min(560px, calc(100% - 2 * var(--space-4)));
-      margin-inline: auto;
-      border-inline: 1px solid var(--line-default);
-      max-height: 40dvh;
+    /* The settings the strip leaves out: a popover anchored under its button, its right edge on the button's, over
+       the panels below (never the image or the strip). Transient settings are popovers above 767 px (DESIGN_DIRECTION
+       9): no handle, no scrim, no edge it can be clipped at. */
+    .viewer {
+      position: relative;
     }
-    .layout:has(.sheet) {
-      padding-bottom: 40dvh;
+    .pop {
+      position: absolute;
+      top: calc(100% + 6px);
+      right: var(--space-2);
+      z-index: var(--z-overlay);
+      width: 360px;
+      background: var(--bg-overlay);
+      border: 1px solid var(--line-default);
+      border-radius: var(--radius-lg);
+      box-shadow: var(--shadow-lg);
+      color: var(--text-primary);
+      font-size: var(--type-base-size);
+      white-space: normal;
+      animation: pop-in var(--dur-fast) var(--ease-out);
+    }
+    .pop:focus {
+      outline: none;
+    }
+    .pop-head {
+      display: flex;
+      align-items: center;
+      gap: var(--space-1);
+      min-height: 40px;
+      padding: var(--space-1) var(--space-2) 0 var(--space-4);
+    }
+    .pop-head h2 {
+      flex: 1;
+      font-size: var(--type-md-size);
+      line-height: var(--type-md-line);
+      font-weight: var(--weight-medium);
+    }
+    @keyframes pop-in {
+      from {
+        opacity: 0;
+        transform: translateY(-2px);
+      }
     }
   }
   @media (max-width: 767px) {

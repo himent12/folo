@@ -83,7 +83,9 @@
     right: var(--space-4);
     bottom: var(--space-4);
     z-index: var(--z-toast);
-    width: min(380px, calc(100vw - 32px));
+    /* Wide enough for the title on one line and the detail on the next (round 24's 380 px toast wrapped a one-line
+       result into three beside its action): the text column is at least 240 px beside an action, 360 px without. */
+    width: min(440px, calc(100vw - 32px));
     pointer-events: none;
   }
   ol {
@@ -124,7 +126,10 @@
   .title {
     font-weight: var(--weight-medium);
   }
+  /* Title on line 1 (13/500), the detail on line 2 at 12 px secondary. */
   .detail {
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
     color: var(--text-secondary);
     overflow-wrap: anywhere;
   }
