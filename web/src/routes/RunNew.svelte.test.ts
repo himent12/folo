@@ -340,10 +340,14 @@ describe('New run: the schedule in the Summary', () => {
     expect(steps.textContent).toBe('30 steps / epoch. How the steps are counted');
     expect(steps.getAttribute('aria-expanded')).toBe('false');
     const why = () => document.getElementById(steps.getAttribute('aria-controls')!)?.textContent?.trim();
-    expect(why()).toBe('120 batches of 16; 4 per optimizer step.');
     steps.click();
     flushSync();
     expect(steps.getAttribute('aria-expanded')).toBe('true');
+    // A line under the row, in the list itself: a popover over the rail would cover its neighbours (round 24).
+    const line = document.getElementById(steps.getAttribute('aria-controls')!)!;
+    expect(line.tagName).toBe('DD');
+    expect(est.contains(line)).toBe(true);
+    expect(why()).toBe('120 batches of 16; 4 per optimizer step.');
     // Batch 64 is one batch a step.
     target.querySelector<HTMLButtonElement>('#batch button[role="radio"]:nth-child(4)')!.click();
     flushSync();

@@ -276,6 +276,10 @@
   const SETTING_COL = 152;
   const PAIR_SETTING_COL = 104;
   const RUN_COL_MIN = 136;
+  /** A few runs across a wide panel: bounded run columns and an empty last one (`.rest`, DESIGN_DIRECTION §2.7), so two
+   *  runs' values sit side by side, never 500 px apart across 1,200 px. */
+  const RUN_COL_BOUND = 224;
+  const laptopUp = new MediaQuery(media.laptopUp, true);
 
   // Phones compare two runs at a time: a baseline and one other, fully in view and paged with ‹ ›; values that differ
   // from the baseline's are marked. "All runs" opens the whole table (it scrolls). The baseline is its own choice (the
@@ -293,6 +297,7 @@
     });
   });
   const pairMode = $derived(narrow && chosen.length > 2 && !allRuns);
+  const bounded = $derived(!pairMode && laptopUp.current && chosen.length <= 3);
   const base = $derived(chosen.find((r) => r.id === baselineId) ?? chosen[0]);
   const others = $derived(chosen.filter((r) => r !== base));
   /** Makes `r` the baseline; the run it replaces takes the other column, so the pair on screen stays the same two. */
@@ -410,7 +415,7 @@
                 {#each shown as r (r.id)}
                   <!-- The key in a column of its own beside the name, so a name that wraps (at its hyphens) keeps its
                        left edge and never squeezes the key. -->
-                  <th>
+                  <th style:width={bounded ? `${RUN_COL_BOUND}px` : undefined}>
                     <span class="th" style:--c={fill(r.id)}
                       ><i data-pattern={SLOT_PATTERN[slotOf(r.id)]}></i><span class="th-name" class:truncate={!pairMode} title={pairMode ? undefined : r.name}>{r.name}</span
                       >{#if pairMode && r === base}<span class="base-tag">Baseline</span>{:else if pairMode}<button
@@ -423,12 +428,14 @@
                     >
                   </th>
                 {/each}
+                {#if bounded}<th class="rest" aria-hidden="true"></th>{/if}
               </tr>
             </thead>
             <tbody>
               <tr>
                 <td class="k">Status</td>
                 {#each shown as r (r.id)}<td><StatusBadge status={r.status} plain /></td>{/each}
+                {@render rest()}
               </tr>
               <tr>
                 <td class="k">Best mAP50-95</td>
@@ -436,6 +443,7 @@
                   {@const win = sameData && r === chosen[bestIdx] && chosen.length > 1}
                   <td class="num" class:winner={win}>{metric(r.best?.map50_95)}{#if win}<span class="tag">best</span>{/if}</td>
                 {/each}
+                {@render rest()}
               </tr>
               <tr>
                 <td class="k">Precision · recall</td>
@@ -447,6 +455,7 @@
                       >{:else}—{/if}
                   </td>
                 {/each}
+                {@render rest()}
               </tr>
               {#each diffRows as [k, f] (k)}
                 <tr>
@@ -463,11 +472,12 @@
                         >{:else}{@render cell(f(r))}{/if}</td
                     >
                   {/each}
+                  {@render rest()}
                 </tr>
               {/each}
               {#if sameRows.length}
                 <tr class="fold">
-                  <td colspan={shown.length + 1}>
+                  <td colspan={shown.length + 1 + (bounded ? 1 : 0)}>
                     <button aria-expanded={showSame} onclick={() => (showSame = !showSame)}>
                       {showSame ? 'Hide' : 'Show'} {sameRows.length} identical {sameRows.length === 1 ? 'setting' : 'settings'}
                     </button>
@@ -478,6 +488,7 @@
                     <tr>
                       <td class="k">{k}</td>
                       {#each shown as r (r.id)}<td class="num cfg">{@render cell(f(r))}</td>{/each}
+                      {@render rest()}
                     </tr>
                   {/each}
                 {/if}
@@ -489,6 +500,8 @@
     {/if}
   {/if}
 </Page>
+
+{#snippet rest()}{#if bounded}<td class="rest" aria-hidden="true"></td>{/if}{/snippet}
 
 {#snippet cell(v: Setting)}{#if v.ident}<Ident value={v.value} />{:else}<span class="val" class:whole={v.value.length <= 14} data-fact>{v.value}</span>{/if}{#if v.note}<Note text={v.note} fact />{/if}{/snippet}
 

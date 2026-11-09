@@ -636,7 +636,6 @@
     position: relative;
     display: grid;
     gap: var(--space-2);
-    /* Rows pack to the top: a card whose label has a second line ("Current") never pushes the others' names down. */
     align-content: start;
     cursor: pointer;
   }
@@ -676,8 +675,11 @@
   .light-half {
     clip-path: polygon(100% 0, 100% 100%, 0 100%);
   }
+  /* Every card reserves the "Current" line under its name, so the three names sit at one height whichever is chosen
+     (round 24: only the chosen card's label grew a line). */
   .theme-label {
     display: grid;
+    grid-template-rows: auto var(--type-sm-line);
     justify-items: start;
   }
   .theme-name {

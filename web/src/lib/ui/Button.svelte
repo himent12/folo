@@ -133,26 +133,32 @@
     background: var(--bg-active);
   }
 
-  /* The quiet destructive control on a page (Stop): a secondary button whose label and icon carry the danger hue,
-     no tinted fill, so it never outshouts the page's focal object. The dialog it opens holds the solid confirm. */
+  /* The quiet destructive control on a page (Stop, Remove from queue, Delete): a secondary button with its icon in the
+     danger hue and its label in ink, no tinted fill, so it never outshouts the page's focal object. Red text is the
+     dialog's solid confirm alone (`destructive`), which it opens. */
   .danger {
     background: var(--bg-raised);
     border-color: var(--line-default);
-    color: var(--danger-text);
+    color: var(--text-primary);
     box-shadow: var(--shadow-sm);
+  }
+  .danger :global(svg) {
+    color: var(--danger-text);
   }
   .danger:hover:not(:disabled) {
     border-color: color-mix(in srgb, var(--danger-solid) 45%, var(--line-default));
     background: color-mix(in srgb, var(--bg-raised), var(--danger-solid) 6%);
   }
 
+  /* The solid confirm: its own fill tokens, held to 4.5:1 under the label at rest and on hover (design/contrast.mjs);
+     in light a step darker than danger.solid, which white text on measured 4.37:1. */
   .destructive {
-    background: var(--danger-solid);
+    background: var(--danger-fill);
     color: var(--text-inverse);
     font-weight: var(--weight-medium);
   }
   .destructive:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--danger-solid), var(--text-inverse) 10%);
+    background: var(--danger-fill-hover);
   }
 
   /* Light theme: lime on white needs an edge to read as a control. A neutral 1 px line.default edge (design/README.md),
@@ -201,5 +207,19 @@
     display: inline-flex;
     align-items: center;
     gap: var(--space-1-5);
+  }
+  /* One phone button size for the actions a phone screen leads with (a callout's fix, a failed prediction's ways out,
+     a run's other fixes): a `.cta-row` around them makes every button in it 44 px with a 16 px label, whatever size the
+     wider layouts give it, so no screen invents a 40 or 56 px button of its own (round 24). */
+  @media (max-width: 767px) {
+    :global(.cta-row) .btn {
+      --h: 44px;
+      padding: 0 var(--space-4);
+      font-size: var(--type-lg-size);
+      border-radius: var(--radius-md);
+    }
+    :global(.cta-row) .btn.square {
+      padding: 0;
+    }
   }
 </style>

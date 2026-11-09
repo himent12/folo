@@ -105,7 +105,7 @@ describe('Toast timing and announcement', () => {
     const err = toast.error(new Error('nope'));
     const act = toast.success('Run finished', undefined, { label: 'Open run', run: () => {} });
     const by = (id: number) => toast.items.find((t) => t.id === id)?.timeout;
-    expect(by(plain)).toBe(4000);
+    expect(by(plain)).toBe(6000);
     expect(by(err)).toBe(0);
     expect(by(act)).toBe(0);
   });

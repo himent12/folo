@@ -45,6 +45,7 @@
   import Meta from '$lib/ui/Meta.svelte';
   import { toast } from '$lib/ui/toast.svelte';
   import InfoButton from '$lib/ui/InfoButton.svelte';
+  import CodeText from '$lib/ui/CodeText.svelte';
   import { VULKAN } from './settings/capabilities';
   import { HEAD_LABEL, optimizerLabel } from './run/resolved';
   import { balanced } from '$lib/ui/balancedGrid';
@@ -306,8 +307,9 @@
   );
   /** The trainer's schedule: optimizer steps an epoch, fewer than batches when gradients accumulate. */
   const sched = $derived(warmup(dataset?.splits.train ?? 0, Number.isInteger(epochs) && epochs > 0 ? epochs : 1, batchN));
-  /** The batches behind the steps, in the Summary's popover (ui/InfoButton): one line in the rail. */
+  /** The batches behind the steps, opened under the Summary's Schedule row (ui/InfoButton): one line in the rail. */
   const batchesOf = $derived(`${num(est.stepsPerEpoch)} ${est.stepsPerEpoch === 1 ? 'batch' : 'batches'} of ${batchN}`);
+  let stepsOpen = $state(false);
   const stepsWhy = $derived(sched.accumulate > 1 ? `${batchesOf}; ${sched.accumulate} per optimizer step.` : `${batchesOf}, one step each.`);
   // The figures wait for the server's devices and the dataset: until then "Estimating…", never a CPU guess or 0 steps.
   const estReady = $derived(!!dataset && (system.data !== undefined || system.error !== undefined));
@@ -737,20 +739,23 @@
   {:else}
   <dl class="est">
     <!-- The trainer's count (the short-run warning's unit). The batches behind it, one tap, click or Enter away
-         (ui/InfoButton: the value is its button; a popover over the Summary sheet too). -->
+         (ui/InfoButton: the value is its button), as a line under the row: in a list of rows a popover would cover
+         its neighbours (round 24's covered Start from), so it opens in place and pushes the rows below down. -->
     <dt>Schedule</dt>
     <dd class="num sched">
-      <InfoButton label="How the steps are counted" text={stepsWhy} side="top" class="steps"
+      <InfoButton label="How the steps are counted" controls="{where}-steps-why" bind:open={stepsOpen} class="steps"
         >{#snippet trigger()}{num(sched.stepsPerEpoch)} steps <span class="faint">/ epoch</span>{/snippet}</InfoButton
       >
     </dd>
+    {#if stepsOpen}<dd class="steps-why" id="{where}-steps-why">{stepsWhy}</dd>{/if}
     <!-- A range, never one precise figure; a rough one (low confidence) in secondary ink. What it stands on is the
          line under it, which opens the phases behind it. -->
     <dt>Est. time</dt><dd class="num" class:rough={shown.rough} aria-busy={estimating || undefined}>{timeRange(shown.lo, shown.hi)}</dd>
     <dd class="basis">
       <details class="est-how">
         <summary><span>{shown.basis}</span><ChevronRight size={12} strokeWidth={2} aria-hidden="true" /></summary>
-        <!-- One row each, the value at the right; on a narrow rail it wraps under its label, still at the right. -->
+        <!-- One grid for every row: the term wraps in its own column, the value sits on the term's first line at the
+             right (never pushed to a line of its own), one word for a source, never a phrase in the value column. -->
         <dl class="how-list num">
           {#each shown.phases as p (p.phase)}
             <div>
@@ -764,7 +769,7 @@
           </div>
           <div><dt>First epoch</dt><dd>+{num(shown.startup, 1)} s startup</dd></div>
           {#if !onCpu && gpu}
-            <div><dt>Peak GPU memory</dt><dd>{shown.vramMeasured ? 'measured here' : 'reference model'}</dd></div>
+            <div><dt>Peak GPU memory</dt><dd>{shown.vramMeasured ? 'measured' : 'reference'}</dd></div>
           {/if}
         </dl>
         <p class="how-note">{shown.how}{#if shown.updated}{' '}Last measured {shown.updated}.{/if}</p>
@@ -807,7 +812,7 @@
       {#if shortWhy}
         <div class="short-why" id="{where}-short-why">
           {#if short.scratch}
-            <!-- Two short sentences: the batches behind the steps are the Schedule row's tooltip. -->
+            <!-- Two short sentences: the batches behind the steps open under the Schedule row. -->
             <p>{num(epochs)} epochs × {num(short.stepsPerEpoch)} steps. From scratch, a detector needs a few hundred, so expect an mAP near&nbsp;0.</p>
           {/if}
           {#if short.warmupHeavy}
@@ -1066,7 +1071,7 @@
                 {#if ampErr}
                   <!-- The server's own words, where the setting is (never a toast), as one plain sentence. -->
                   <p class="sw-err" id="amp-error" role="alert">
-                    <CircleAlert size={14} strokeWidth={1.75} aria-hidden="true" /><span>Start was refused: {sentence(ampErr.message, true)}</span>
+                    <CircleAlert size={14} strokeWidth={1.75} aria-hidden="true" /><span>Start was refused: <CodeText text={sentence(ampErr.message)} /></span>
                   </p>
                 {/if}
                 {#if ampBlock}
@@ -1241,7 +1246,8 @@
       <!-- use:dock: the phone tab bar steps aside while this bar is on the page (lib/shell/dock.ts). -->
       <div
         use:dock
-        class="dock"
+        data-tip-chrome
+        class="dock cta-row"
         class:away={startVisible}
         role="region"
         aria-label="Start training"
@@ -1433,13 +1439,33 @@
   .arch.on :global(.a-name) {
     color: var(--text-secondary);
   }
+  /* A sentence is never cut (DESIGN_DIRECTION 2.3): where its column is short it wraps, and below 1280 it takes a line
+     of its own under the size's name, so the row grows instead (round 24's "Fastest; edge devices, qâ€¦" at 1024). */
   .a-note {
     min-width: 0;
     font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
     color: var(--text-tertiary);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+  }
+  @media (min-width: 768px) and (max-width: 1279px) {
+    .arch {
+      grid-template-rows: auto auto;
+      row-gap: 0;
+      padding-block: 6px;
+    }
+    .a-size,
+    .a-v,
+    .tick {
+      grid-row: 1 / 3;
+    }
+    .arch :global(.a-name) {
+      grid-column: 2 / 4;
+      grid-row: 1;
+    }
+    .a-note {
+      grid-column: 2 / 4;
+      grid-row: 2;
+    }
   }
   .a-v {
     font-size: var(--type-sm-size);
@@ -1777,7 +1803,8 @@
   }
   .how-list {
     display: grid;
-    gap: 2px;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 2px var(--space-3);
     margin-top: var(--space-2);
     padding: var(--space-2) var(--space-3);
     border-radius: var(--radius-md);
@@ -1785,16 +1812,13 @@
     text-align: left;
   }
   .how-list > div {
-    display: flex;
-    flex-wrap: wrap;
-    justify-content: space-between;
-    gap: 0 var(--space-3);
+    display: contents;
   }
   .how-list dt {
     color: var(--text-tertiary);
   }
   .how-list dd {
-    margin-left: auto;
+    align-self: start;
     color: var(--text-secondary);
     text-align: right;
     white-space: nowrap;
@@ -1814,6 +1838,13 @@
   /* The steps open their batches (ui/InfoButton): a button, so the value keeps room for its focus ring. */
   .est dd.sched {
     overflow: visible;
+  }
+  /* The batches behind the steps: one quiet line under the row, at the value's right edge, across the row. */
+  .est dd.steps-why {
+    grid-column: 1 / -1;
+    margin-top: -2px;
+    color: var(--text-secondary);
+    white-space: normal;
   }
   /* A switch field (Mixed precision, End-to-end): the Switch is the label's line, its track at the field's right edge,
      and the label reads as every field label (text.secondary, medium), also while only the control is disabled. */
@@ -2380,9 +2411,6 @@
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
-    }
-    .dock :global(.btn.lg) {
-      --h: 44px;
     }
     .ds-pick {
       display: block;

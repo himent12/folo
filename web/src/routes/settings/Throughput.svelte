@@ -104,7 +104,7 @@
     {#snippet group(title: string, list: (TrainThroughput | InferThroughput)[])}
       {#if list.length}
         <div class="tp-group">
-          <h3 class="tp-h">{title}</h3>
+          <h3 class="tp-h group-label">{title}</h3>
           <ul aria-label={title}>
             {#each list as r (`${r.device}/${r.measured_on}/${r.arch}/${r.imgsz}/${'amp' in r ? `${r.batch}/${r.amp}` : `${r.precision}/${r.tensor_cores}`}`)}
               {@const other = elsewhere(r)}
@@ -181,12 +181,9 @@
   .tp-group {
     display: grid;
   }
+  /* Type and ink: the shared group label (base.css .group-label). */
   .tp-h {
     padding-bottom: var(--space-1);
-    font-size: var(--type-sm-size);
-    line-height: var(--type-sm-line);
-    font-weight: var(--weight-medium);
-    color: var(--text-tertiary);
   }
   .tp-row {
     display: grid;

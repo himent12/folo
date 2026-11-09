@@ -116,17 +116,17 @@ describe('list tables: headers and columns hide together', () => {
 });
 
 describe('list tables: one geometry in every state', () => {
-  // Every column but the flexible ones carries its width on the header row, which loading, empty, error and loaded
-  // share, so a column sits at the same x in each (round 21: runs-empty and models-empty set their columns apart).
+  // Every column but the flexible ones carries its width on the header row, which loading and loaded share, so a
+  // column sits at the same x in each (round 21: runs-empty and models-empty set their columns apart).
   const FLEX: Record<string, string[]> = { Runs: ['Run'], Models: ['Model'], Datasets: ['Class balance'] };
   for (const [name, page, path, sel] of LISTS) {
-    for (const scenario of ['normal', 'empty', 'loading', 'error'] as const) {
+    for (const scenario of ['normal', 'loading'] as const) {
       it(`${name} (${scenario}): every header but ${FLEX[name]!.join(' and ')} has a fixed width`, async () => {
         await open(page, path, new MockApi(scenario, 0));
         const table = await vi.waitFor(() => {
           flushSync();
           const t = target.querySelector<HTMLTableElement>(sel);
-          if (!t) throw new Error('no table');
+          if (!t?.querySelector('thead')) throw new Error('no table');
           return t;
         });
         const loose = [...table.querySelectorAll<HTMLElement>('thead th')]
@@ -135,22 +135,38 @@ describe('list tables: one geometry in every state', () => {
         expect(loose).toEqual(FLEX[name]);
       });
     }
-  }
 
-  it('Models: with no rows to sort, the headers carry no sort mark', async () => {
+    // Round 24: an empty or failed list lost its toolbar (the table jumped ~48 px against loading) and kept a 9–11
+    // column header row over a one-line message. The toolbar stays, disabled with no counts; the column heads go.
     for (const scenario of ['empty', 'error'] as const) {
-      await open(Models as Component, '/models', new MockApi(scenario, 0));
-      await vi.waitFor(() => {
-        flushSync();
-        if (!target.querySelector('table.models tr.state')) throw new Error('no state yet');
+      it(`${name} (${scenario}): the toolbar stays in place, disabled, and the frame holds the state with no column heads`, async () => {
+        await open(page, path, new MockApi(scenario, 0));
+        const table = await vi.waitFor(() => {
+          flushSync();
+          const t = target.querySelector<HTMLTableElement>(sel);
+          if (!t?.querySelector('tr.state')) throw new Error('no state yet');
+          return t;
+        });
+        expect(table.querySelector('thead'), 'column heads').toBeNull();
+        expect(table.querySelectorAll('[aria-sort]').length).toBe(0);
+        const bar = target.querySelector('.list-toolbar');
+        expect(bar, 'toolbar').not.toBeNull();
+        const search = bar!.querySelector<HTMLInputElement>('.lt-search input')!;
+        expect(search.disabled).toBe(true);
+        const radios = [...bar!.querySelectorAll<HTMLButtonElement>('.lt-filter [role=radio]')];
+        expect(radios.length).toBeGreaterThan(0);
+        expect(radios.every((r) => r.disabled)).toBe(true);
+        // No counts over a list that has nothing to count.
+        expect(bar!.querySelectorAll('.lt-filter .meta').length).toBe(0);
       });
-      expect(target.querySelectorAll('table.models [aria-sort]').length, scenario).toBe(0);
-      expect(target.querySelectorAll('table.models .sort.on').length, scenario).toBe(0);
-      unmount(c!);
-      c = undefined;
-      target.remove();
     }
-  });
+
+    it(`${name} (loading): the toolbar is the same one, live`, async () => {
+      await open(page, path, new MockApi('loading'));
+      expect(target.querySelector('.list-toolbar .lt-search input')).not.toBeNull();
+      expect(target.querySelector<HTMLInputElement>('.list-toolbar .lt-search input')!.disabled).toBe(false);
+    });
+  }
 });
 
 describe('responsive columns are one shared rule', () => {

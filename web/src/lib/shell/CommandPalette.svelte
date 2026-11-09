@@ -276,9 +276,9 @@
       <span class="esc"><Kbd keys="Escape" subtle /></span>
       <button class="close" type="button" aria-label="Close" onclick={() => el.close()}><X size={18} /></button>
     </div>
-    <ul id="palette-list" role="listbox" bind:this={list} aria-label="Results">
+    <ul id="palette-list" class="scroll-shade" role="listbox" bind:this={list} aria-label="Results">
       {#each grouped as g (g.group)}
-        <li role="presentation" class="group">{g.group}</li>
+        <li role="presentation" class="group group-label">{g.group}</li>
         {#each g.items as { item, n } (item.id)}
           <li
             id="pi-{item.id}"
@@ -367,17 +367,17 @@
   input:focus-visible {
     outline: none;
   }
+  /* The results scroll with the dialog's edge shades (base.css .scroll-shade); 8 px under the last item, so the end of
+     the list reads as its end, clear of the footer. */
   ul {
     flex: 1;
-    overflow-y: auto;
+    min-height: 0;
     padding: var(--space-2);
     scroll-padding: var(--space-8);
   }
+  /* Type and ink: the shared group label (base.css .group-label). */
   .group {
     padding: var(--space-2) var(--space-2) var(--space-1);
-    font-size: var(--type-sm-size);
-    color: var(--text-tertiary);
-    font-weight: var(--weight-medium);
   }
   .group:not(:first-child) {
     margin-top: var(--space-1);

@@ -51,8 +51,17 @@
     height: var(--control-sm);
     border-radius: var(--radius-sm);
   }
-  .input:hover {
+  .input:hover:not(:has(> input:disabled)) {
     border-color: var(--line-control-hover);
+  }
+  /* Off (a list toolbar over an empty or failed list): in place, its edge kept, its ink and placeholder disabled. */
+  .input:has(> input:disabled) {
+    cursor: not-allowed;
+  }
+  input:disabled,
+  input:disabled::placeholder {
+    color: var(--text-disabled);
+    cursor: not-allowed;
   }
   /* Focus is the one global ring (base.css :focus-visible), drawn on the field's frame while its input has it: never
      a halo or a lime edge of its own (DESIGN_DIRECTION §2.9). An invalid field's ring is danger (base.css). */

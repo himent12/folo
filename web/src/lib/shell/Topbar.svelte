@@ -25,7 +25,7 @@
   const themeLabel = $derived(`Theme: ${prefs.theme} (click to change)`);
 </script>
 
-<header class="topbar">
+<header class="topbar" data-tip-chrome>
   {#if parent}
     <a href={href(parent.path ?? '/')} class="mobile-back" aria-label="Back to {parent.label}"><ChevronLeft size={20} strokeWidth={1.75} /></a>
   {:else}
