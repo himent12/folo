@@ -274,6 +274,8 @@ pub struct Store {
     pub api: Arc<dyn Backend>,
     pub health: Load<Health>,
     pub system: Load<SystemInfo>,
+    /// What runs can use on the server (from the same `/system` answer; absent from older servers).
+    pub capabilities: Option<crate::api::Capabilities>,
     pub datasets: Load<Vec<Dataset>>,
     pub dataset: HashMap<String, Load<Dataset>>,
     /// All image metadata of a dataset (cheap: boxes only), for filtering and the grid.
@@ -307,6 +309,7 @@ impl Store {
             api,
             health: Load::Idle,
             system: Load::Idle,
+            capabilities: None,
             datasets: Load::Idle,
             dataset: HashMap::new(),
             images: HashMap::new(),

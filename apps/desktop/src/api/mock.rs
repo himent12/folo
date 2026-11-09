@@ -786,13 +786,13 @@ impl Backend for MockBackend {
         })
     }
 
-    fn system(&self) -> ApiResult<SystemInfo> {
+    fn system(&self) -> ApiResult<SystemResponse> {
         self.check()?;
         let t = self.started.elapsed().as_secs_f32();
         let wobble = if self.frozen { 0.0 } else { (t * 0.7).sin() * 0.02 };
         let live = !self.empty
             && self.runs.lock().unwrap().iter().any(|f| Self::snapshot(f).status == RunStatus::Running);
-        Ok(SystemInfo {
+        let system = SystemInfo {
             cpu: CpuInfo {
                 name: "AMD Ryzen 9 7950X".into(),
                 threads: 32,
@@ -806,7 +806,9 @@ impl Backend for MockBackend {
                 memory_bytes: 17_171_480_576,
                 util: Some(if live { 0.94 + wobble } else { 0.02 }),
             }],
-        })
+        };
+        // The built-in demo says nothing about tensor cores, like an older server.
+        Ok(SystemResponse { system, data_dir: None, features: Vec::new(), capabilities: None })
     }
 
     fn datasets(&self) -> ApiResult<Vec<Dataset>> {

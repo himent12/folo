@@ -70,7 +70,7 @@ Options:
   --server URL          Connect to the folo serve at URL
   --mock                Use the built-in demo data
   --open SCREEN         Start on a screen: overview, datasets, dataset:ID, runs, run:ID, models,
-                        model:ID, playground or settings
+                        model:ID, playground, settings, or new-run (the dialog)
   --theme dark|light    Colour theme [default: dark]
   --width W             Window width in px [default: 1280]
   --height H            Window height in px [default: 800]
@@ -181,7 +181,9 @@ fn main() {
                         if auto {
                             app.autoconnect(connect_url.clone(), true, cx);
                         }
-                        if let Some(route) = open.as_deref().and_then(app::Route::parse) {
+                        if open.as_deref() == Some("new-run") {
+                            app.open_new_run_pending = true;
+                        } else if let Some(route) = open.as_deref().and_then(app::Route::parse) {
                             app.route = route;
                         }
                         app

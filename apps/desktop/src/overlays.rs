@@ -1072,11 +1072,13 @@ impl FoloApp {
                         ),
                     ),
             )
-            // Mixed precision: f16 on tensor cores. Whether the server's GPU has them shows only when
-            // the run starts (it fails with not_supported), so the requirement is stated here.
+            // Mixed precision: f16 on tensor cores. The server says whether its GPU can
+            // (`capabilities.amp`); when it can't, the switch is off and inert with its reason. An older
+            // server can't say, so the requirement is stated and a run's failure tells.
             .child({
-                let on_cpu = DEVICES[device] == "cpu";
-                let amp_on = amp && !on_cpu;
+                let blocked = self.amp_blocked(DEVICES[device]);
+                let off = blocked.is_some();
+                let amp_on = amp && !off;
                 let switch = self
                     .switch(
                         "nr-amp",
@@ -1085,7 +1087,7 @@ impl FoloApp {
                         cx,
                         act(move |this, _, cx| {
                             if let Some(f) = this.new_run.as_mut()
-                                && !on_cpu
+                                && !off
                             {
                                 f.amp = !f.amp;
                                 cx.notify();
@@ -1106,11 +1108,17 @@ impl FoloApp {
                             .flex_col()
                             .gap(px(2.))
                             .child(label("Mixed precision"))
-                            .child(text(ty::XS, t.text_tertiary).child(if on_cpu {
-                                "Off on the CPU: it needs a GPU with tensor cores"
-                            } else {
-                                "Trains in f16 on tensor cores; needs folo serve --tensor-cores"
-                            })),
+                            .child(
+                                text(ty::XS, t.text_tertiary).whitespace_normal().child(match blocked {
+                                    Some(why) => why,
+                                    // The server confirmed it can; an older one can't say, so the need is stated.
+                                    None if self.store.capabilities.is_some() => {
+                                        "Trains in f16 on this server's tensor cores".to_string()
+                                    }
+                                    None => "Trains in f16 on tensor cores; needs folo serve --tensor-cores"
+                                        .to_string(),
+                                }),
+                            ),
                     )
                     .child(switch)
             })
