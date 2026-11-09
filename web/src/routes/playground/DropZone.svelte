@@ -8,6 +8,7 @@
   import Button from '$lib/ui/Button.svelte';
   import Kbd from '$lib/ui/Kbd.svelte';
   import Skeleton from '$lib/ui/Skeleton.svelte';
+  import { TOUCH_ONLY } from '$lib/shell/shortcuts';
 
   let {
     dragging = false,
@@ -24,8 +25,9 @@
     onsample: (ds: Dataset, img: Img) => void;
   } = $props();
 
-  // Touch screens have no drag and drop or Ctrl+V: offer the picker instead of promising either.
-  const touch = new MediaQuery('pointer: coarse', false);
+  // A touch-only device (the shared detection, shell/shortcuts' TOUCH_ONLY) has no drag and drop and no Ctrl V: it
+  // leads with choosing an image and shows neither hint; a device with a mouse or trackpad shows both.
+  const touch = new MediaQuery(TOUCH_ONLY, false);
 </script>
 
 <!-- The viewfinder is the drop target and fills the canvas; the samples sit right under it, at the panel's foot. -->

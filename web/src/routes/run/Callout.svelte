@@ -9,6 +9,7 @@
    * trainer's warning that it was too short to learn), so one run never stacks two banners.
    */
   import type { Snippet } from 'svelte';
+  import Meta from '$lib/ui/Meta.svelte';
   import type { IconType } from '$lib/ui/types';
 
   let {
@@ -21,6 +22,7 @@
     brief = false,
     runIn = false,
     children,
+    facts,
     actions,
     more,
     moreLabel = 'Details',
@@ -39,6 +41,9 @@
     runIn?: boolean;
     /** The cause, after the title. */
     children?: Snippet;
+    /** Facts after the title instead of a sentence ("Completed in 53m 30s · best mAP50-95 0.604 at epoch 150"): one
+     *  span each, one ui/Meta line with the title, so the separator is the shared one at every width. */
+    facts?: Snippet;
     actions?: Snippet;
     /** What the disclosure opens. */
     more?: Snippet;
@@ -53,9 +58,13 @@
 
 <div class="callout {tone}" class:stack class:brief class:run-in={runIn} class:two={!!also} {role} aria-label={label}>
   <Icon size={16} aria-hidden="true" />
-  <p class="c-text">
-    <span class="c-title">{title}</span>{#if children}<span class="c-msg">{@render children()}</span>{/if}
-  </p>
+  {#if facts}
+    <p class="c-text facts"><Meta><span class="c-title">{title}</span>{@render facts()}</Meta></p>
+  {:else}
+    <p class="c-text">
+      <span class="c-title">{title}</span>{#if children}<span class="c-msg">{@render children()}</span>{/if}
+    </p>
+  {/if}
   {#if also}
     {@const AlsoIcon = also.icon}
     <span class="c-also-mark {also.tone}" aria-hidden="true"><AlsoIcon size={16} /></span>
@@ -64,7 +73,7 @@
     </p>
   {/if}
   {#if actions || more}
-    <div class="c-acts">
+    <div class="c-acts cta-row">
       {#if actions}{@render actions()}{/if}
       {#if more}
         <button type="button" class="c-more" aria-expanded={open} aria-controls="{uid}-more" onclick={() => (open = !open)}>{moreLabel}</button>
@@ -144,8 +153,13 @@
     font-weight: var(--weight-medium);
     color: var(--text-primary);
   }
-  .c-msg :global(.num) {
+  .c-msg :global(.num),
+  .facts :global(.num) {
     color: var(--text-primary);
+  }
+  /* Facts: the title is the line's first item; ui/Meta draws the gap and the dot. */
+  .facts .c-title {
+    margin-right: 0;
   }
   .c-acts {
     display: flex;
@@ -271,10 +285,9 @@
     .stack .c-acts {
       grid-column: 1 / -1;
     }
+    /* The one phone button size (ui/Button's .cta-row), across the callout. */
     .stack .c-acts > :global(.btn:first-child) {
-      --h: var(--control-xl);
       flex: 1 0 100%;
-      font-size: var(--type-base-size);
     }
     .stack .c-detail {
       grid-column: 1 / -1;
@@ -288,7 +301,8 @@
     .brief > :global(svg) {
       margin-top: 0;
     }
-    .brief .c-msg {
+    .brief .c-msg,
+    .brief .facts :global(.ui-meta > :not(:first-child)) {
       display: none;
     }
     .brief .c-acts {

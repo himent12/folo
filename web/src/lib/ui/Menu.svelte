@@ -238,7 +238,8 @@
     outline: var(--size-focus-ring) solid var(--focus);
     outline-offset: -2px;
   }
-  [role='menuitem'].danger,
+  /* A destructive item is the page's quiet destructive style (ui/Button `danger`): the icon in the danger hue, the
+     label in ink; red text is the confirm dialog's alone. */
   [role='menuitem'].danger :global(svg) {
     color: var(--danger-text);
   }

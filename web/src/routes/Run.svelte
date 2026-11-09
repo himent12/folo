@@ -389,7 +389,7 @@
           {#if wideQueueItems.length}<Menu label="More run actions" items={wideQueueItems} />{/if}
         </span>
       {:else if !active}
-        <span class="wide-only"><Button variant="ghost" icon={Trash} aria-label="Delete run" title="Delete run" onclick={() => (deleteOpen = true)} /></span>
+        <span class="wide-only"><Button variant="danger" icon={Trash} aria-label="Delete run" title="Delete run" onclick={() => (deleteOpen = true)} /></span>
       {/if}
       <!-- Phones: the state action stays visible, everything else goes behind one overflow button. -->
       <span class="phone-only"><Menu label="More run actions" items={moreItems} /></span>

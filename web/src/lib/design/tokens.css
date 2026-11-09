@@ -202,6 +202,8 @@
   --danger-solid: #ff5c5c;
   --danger-text: #ff7a7a;
   --danger-muted: #ff5c5c1f;
+  --danger-fill: #ff5c5c;
+  --danger-fill-hover: #ff7a7a;
   --info-solid: #5ba8ff;
   --info-text: #7db9ff;
   --info-muted: #5ba8ff1f;
@@ -271,6 +273,8 @@
   --danger-solid: #e0383e;
   --danger-text: #bb282e;
   --danger-muted: #e0383e1a;
+  --danger-fill: #d52f36;
+  --danger-fill-hover: #be222b;
   --info-solid: #1f7fe0;
   --info-text: #1664b5;
   --info-muted: #1f7fe01a;

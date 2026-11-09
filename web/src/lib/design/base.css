@@ -534,3 +534,15 @@ select[aria-invalid='true'],
     linear-gradient(transparent, var(--line-strong)) bottom / 100% 16px no-repeat scroll,
     var(--shade-bg, var(--bg-overlay));
 }
+
+/*
+ * A group label: the one caption over a group of rows or options (Run's Config "Training" / "Optimizer" /
+ * "Augmentation", the loss view's "Smoothing" / "Y scale", Settings' benchmark sections, the palette's "Pages"),
+ * 12/500 in text.secondary, sentence case. A component sets its own spacing, never its own type or ink.
+ */
+.group-label {
+  font-size: var(--type-sm-size);
+  line-height: var(--type-sm-line);
+  font-weight: var(--weight-medium);
+  color: var(--text-secondary);
+}

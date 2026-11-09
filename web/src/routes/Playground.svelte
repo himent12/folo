@@ -3,6 +3,8 @@
   import Box from '@lucide/svelte/icons/box';
   import FileUp from '@lucide/svelte/icons/file-up';
   import Check from '@lucide/svelte/icons/check';
+  import Eye from '@lucide/svelte/icons/eye';
+  import EyeOff from '@lucide/svelte/icons/eye-off';
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
   import ChevronUp from '@lucide/svelte/icons/chevron-up';
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
@@ -608,15 +610,19 @@
 
 {#snippet classList()}
   {#if !result}
-    <p class="hint">Per-class counts, click one to hide it.</p>
+    <p class="hint">Per-class counts; each row shows or hides its class.</p>
   {:else if counts.length === 0}
     <p class="hint">{pred?.boxes.length ? 'Nothing above the confidence threshold.' : 'The model found nothing in this image.'}</p>
   {:else}
+    <!-- A visibility toggle per class, never a static legend: every row wears its state (an eye, shown by default; a
+         struck eye and a dimmed row when hidden), the whole row is the button (aria-pressed: shown), and Show all
+         brings every class back. -->
     <ul class="counts" aria-label="Detected classes">
       {#each counts as [c, n] (c)}
         {@const off = hidden.has(c)}
         <li>
-          <button type="button" class:off aria-pressed={!off} onclick={() => toggleClass(c)} aria-label="{off ? 'Show' : 'Hide'} {classes[c] ?? `class ${c}`}">
+          <button type="button" class:off aria-pressed={!off} onclick={() => toggleClass(c)} aria-label="Show {classes[c] ?? `class ${c}`}, {n} found">
+            <span class="vis" aria-hidden="true">{#if off}<EyeOff size={14} strokeWidth={1.75} />{:else}<Eye size={14} strokeWidth={1.75} />{/if}</span>
             <span class="sw" style:background={classColor(c)} aria-hidden="true"></span>
             <span class="c-name truncate">{classes[c] ?? `class ${c}`}</span>
             <span class="c-bar" aria-hidden="true"><span style:transform="scaleX({n / maxCount})" style:background={classColor(c)}></span></span>
@@ -643,7 +649,7 @@
      image stays whole, and the failure and its recovery are in the first screen. -->
   {#if notice}
     {#key notice}
-      <div class="notice" bind:this={noticeEl}>
+      <div class="notice cta-row" bind:this={noticeEl}>
         {#if notice === 'file'}
           <div class="need-file" role="alert">
             <FileUp size={16} strokeWidth={1.75} aria-hidden="true" />
@@ -1471,6 +1477,15 @@
   .counts button.off {
     opacity: 0.4;
   }
+  /* The row's state, before its swatch: an eye in ink while shown, a struck one (dimmed with the row) when hidden. */
+  .vis {
+    display: flex;
+    flex: none;
+    color: var(--text-secondary);
+  }
+  .off .vis {
+    color: var(--text-tertiary);
+  }
   .counts button.off .c-name {
     text-decoration: line-through;
   }
@@ -1791,9 +1806,9 @@
     .nf-actions {
       gap: var(--space-2);
     }
+    /* The one phone button size (ui/Button's .cta-row on the notice). */
     .notice :global(.acts .btn),
     .nf-actions :global(.btn) {
-      --h: 44px;
       flex: 1 1 auto;
     }
     .notice :global(.acts .btn:first-child),

@@ -1194,7 +1194,22 @@ export const scenes = [
       await page.locator('#engine-speed summary', { hasText: 'How this was measured' }).click();
     },
   },
-  { name: 'playground-empty', path: '/playground', viewports: ['desktop', 'laptop', 'tablet', 'mobile'], setup: (page) => until(page, 'button.sample') },
+  {
+    // The empty Playground. Phones are shot as the touch-only devices they are: "Choose an image to detect objects", no
+    // drag-and-drop or Ctrl V hint (DropZone, the shared touch detection).
+    name: 'playground-empty',
+    path: '/playground',
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
+    setup: async (page, { vp }) => {
+      if (vp === 'mobile') {
+        const cdp = await page.context().newCDPSession(page);
+        await cdp.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
+        await page.reload({ waitUntil: 'networkidle' });
+        await page.clock.runFor(2000);
+      }
+      await until(page, 'button.sample');
+    },
+  },
   {
     // Server inference ran out of GPU memory (507): the cause, the hint, and the ways out (this browser, a smaller model),
     // in a strip above the image (where the result would be), which stays whole.

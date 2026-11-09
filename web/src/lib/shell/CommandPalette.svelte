@@ -274,7 +274,7 @@
     </div>
     <ul id="palette-list" class="scroll-shade" role="listbox" bind:this={list} aria-label="Results">
       {#each grouped as g (g.group)}
-        <li role="presentation" class="group">{g.group}</li>
+        <li role="presentation" class="group group-label">{g.group}</li>
         {#each g.items as { item, n } (item.id)}
           <li
             id="pi-{item.id}"
@@ -371,11 +371,9 @@
     padding: var(--space-2);
     scroll-padding: var(--space-8);
   }
+  /* Type and ink: the shared group label (base.css .group-label). */
   .group {
     padding: var(--space-2) var(--space-2) var(--space-1);
-    font-size: var(--type-sm-size);
-    color: var(--text-tertiary);
-    font-weight: var(--weight-medium);
   }
   .group:not(:first-child) {
     margin-top: var(--space-1);

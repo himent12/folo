@@ -44,6 +44,7 @@
   import Meta from '$lib/ui/Meta.svelte';
   import { toast } from '$lib/ui/toast.svelte';
   import InfoButton from '$lib/ui/InfoButton.svelte';
+  import CodeText from '$lib/ui/CodeText.svelte';
   import { VULKAN } from './settings/capabilities';
   import { HEAD_LABEL } from './run/resolved';
   import AugPreview, { type AugKey } from './runnew/AugPreview.svelte';
@@ -1061,7 +1062,7 @@
                 {#if ampErr}
                   <!-- The server's own words, where the setting is (never a toast), as one plain sentence. -->
                   <p class="sw-err" id="amp-error" role="alert">
-                    <CircleAlert size={14} strokeWidth={1.75} aria-hidden="true" /><span>Start was refused: {sentence(ampErr.message, true)}</span>
+                    <CircleAlert size={14} strokeWidth={1.75} aria-hidden="true" /><span>Start was refused: <CodeText text={sentence(ampErr.message)} /></span>
                   </p>
                 {/if}
                 {#if ampBlock}
@@ -1237,7 +1238,7 @@
       <div
         use:dock
         data-tip-chrome
-        class="dock"
+        class="dock cta-row"
         class:away={startVisible}
         role="region"
         aria-label="Start training"
@@ -2399,9 +2400,6 @@
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
-    }
-    .dock :global(.btn.lg) {
-      --h: 44px;
     }
     .ds-pick {
       display: block;

@@ -92,7 +92,7 @@
 {#snippet list(heading: string | null, items: [string, Setting][])}
   <dl>
     <!-- A heading only beside another group's; alone in the rail it would name the panel twice. -->
-    {#if heading}<p class="group">{heading}</p>{/if}
+    {#if heading}<p class="group group-label">{heading}</p>{/if}
     {#each items as [k, v] (k)}<dt>{k}</dt>{#if k === 'Weights' && weights}<dd>{#if weights.kind === 'scratch'}From scratch{:else}<Lineage origin={weights} />{/if}</dd>{:else}<dd class="num"><span class:mono={v.ident}>{v.value}</span>{#if v.note}<Note text={v.note} />{/if}</dd>{/if}{/each}
   </dl>
 {/snippet}
@@ -161,11 +161,10 @@
     gap: 0;
     align-content: start;
   }
+  /* Type and ink: the shared group label (base.css .group-label). */
   .group {
     grid-column: 1 / -1;
     margin-bottom: var(--space-1);
-    font-size: var(--type-sm-size);
-    color: var(--text-secondary);
   }
   dt,
   dd {

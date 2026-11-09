@@ -110,7 +110,7 @@
     {/snippet}
     {#snippet more()}
       {#if (fixes?.slice(1).some((f) => f.fits !== false) ?? false) || short}
-        <div class="alts">
+        <div class="alts cta-row">
           {#each fixes?.slice(1).filter((f) => f.fits !== false) ?? [] as f (f.kind)}<Button size="sm" href={href(retryPath(run.id, f))}>{fixLabel(f)}</Button>{/each}
           {#if short}{@render scheduleFix()}{/if}
         </div>
@@ -132,21 +132,22 @@
     {/snippet}
     {#snippet more()}
       {#if short}{@render why()}{:else}
-        <div class="alts"><Button size="sm" icon={RotateCcw} href={href(retryPath(run.id))}>New run like this</Button></div>
+        <div class="alts cta-row"><Button size="sm" icon={RotateCcw} href={href(retryPath(run.id))}>New run like this</Button></div>
       {/if}
     {/snippet}
   </Callout>
 {:else if run.status === 'completed' && short}
   <!-- A run that completed but was too short to learn: the outcome and the warning in one callout, the fix its action
        (trying a model that learned nothing in the Playground is not the next step). -->
-  <Callout tone="success" icon={CircleCheck} title="Completed in {duration(elapsed)}" moreLabel="Why?" also={short} runIn>
-    · best mAP50-95 <span class="num">{metric(run.best?.map50_95)}</span> at epoch {run.best?.epoch ?? 0}
+  <Callout tone="success" icon={CircleCheck} title="Completed in {duration(elapsed)}" moreLabel="Why?" also={short}>
+    {#snippet facts()}<span>best mAP50-95 <span class="num">{metric(run.best?.map50_95)}</span> at epoch {run.best?.epoch ?? 0}</span>{/snippet}
     {#snippet actions()}{@render scheduleFix()}{/snippet}
     {#snippet more()}{@render why()}{/snippet}
   </Callout>
 {:else if run.status === 'completed'}
   <Callout tone="success" icon={CircleCheck} title="Completed in {duration(elapsed)}" brief>
-    Best mAP50-95 <span class="num">{metric(run.best?.map50_95)}</span> at epoch {run.best?.epoch ?? 0}, saved as a model.
+    {#snippet facts()}<span>best mAP50-95 <span class="num">{metric(run.best?.map50_95)}</span> at epoch {run.best?.epoch ?? 0}</span
+      ><span>saved as a model</span>{/snippet}
     {#snippet actions()}
       {#if run.model_id}<Button size="sm" icon={ScanSearch} href={href(`/playground?model=${run.model_id}`)}>Try in Playground</Button>{/if}
     {/snippet}
@@ -207,14 +208,14 @@
     margin-top: var(--space-2);
   }
   @media (max-width: 767px) {
-    /* Phones: the other fixes as full-width 40 px secondary buttons, one per row (each names its setting and its
-       forecast, "Retry at 640 px, batch 16 · ~12.1 GiB", too long to share a row), matching the fix above them. */
+    /* Phones: the other fixes as full-width secondary buttons, one per row (each names its setting and its forecast,
+       "Retry at 640 px, batch 16 · ~12.1 GiB", too long to share a row), in the one phone button size (.cta-row) of the
+       fix above them. */
     .alts {
       flex-direction: column;
       align-items: stretch;
     }
     .alts > :global(.btn.btn) {
-      --h: var(--control-xl);
       min-width: 0;
     }
   }

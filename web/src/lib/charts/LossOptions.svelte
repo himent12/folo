@@ -79,7 +79,7 @@
 
 {#snippet group(name: string, legend: string, options: { value: string; label: string }[], value: string, set: (v: string) => void)}
   <fieldset>
-    <legend>{legend}</legend>
+    <legend class="group-label">{legend}</legend>
     {#each options as o (o.value)}
       <label class="opt" class:on={value === o.value}>
         <input type="radio" name="{uid}-{name}" value={o.value} checked={value === o.value} onchange={() => set(o.value)} />
@@ -179,11 +179,9 @@
     padding-top: var(--space-2);
     border-top: 1px solid var(--line-subtle);
   }
+  /* Type and ink: the shared group label (base.css .group-label). */
   legend {
     padding: var(--space-1) var(--space-3) var(--space-1);
-    font-size: var(--type-sm-size);
-    line-height: var(--type-sm-line);
-    color: var(--text-tertiary);
   }
   .opt {
     position: relative;
