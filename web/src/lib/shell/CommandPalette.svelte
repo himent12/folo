@@ -288,13 +288,17 @@
             onkeydown={() => {}}
           >
             <item.icon size={16} strokeWidth={1.75} aria-hidden="true" />
-            <span class="label">
-              {#each highlight(query, item.label) as part, k (k)}{#if part.m}<mark>{part.s}</mark>{:else}{part.s}{/if}{/each}
+            <!-- The name and its hint share one block: the hint sits right of the name while both fit and drops, whole, to
+                 a line under it when they do not (always on phones), so no fact in it is cut (DESIGN_DIRECTION §2.3). -->
+            <span class="main">
+              <span class="label">
+                {#each highlight(query, item.label) as part, k (k)}{#if part.m}<mark>{part.s}</mark>{:else}{part.s}{/if}{/each}
+              </span>
+              {#if typeof item.hint === 'string'}<span class="hint" class:describes={item.describes}>{item.hint}</span>
+              {:else if item.hint}<span class="hint num"
+                  ><Meta>{#each item.hint as part, k (k)}{#if typeof part === 'string'}<span>{part}</span>{:else}<Ident value={part.ident} />{/if}{/each}</Meta></span
+                >{/if}
             </span>
-            {#if typeof item.hint === 'string'}<span class="hint" class:describes={item.describes}>{item.hint}</span>
-            {:else if item.hint}<span class="hint num"
-                ><Meta line>{#each item.hint as part, k (k)}{#if typeof part === 'string'}<span>{part}</span>{:else}<Ident value={part.ident} />{/if}{/each}</Meta></span
-              >{/if}
             <!-- Every hint here is a single key: none while those are off (Settings). -->
             {#if item.keys && keyPrefs.singleKeys}<Kbd keys={item.keys} subtle />{/if}
           </li>
@@ -392,6 +396,14 @@
   .item > :global(svg) {
     flex-shrink: 0;
   }
+  .main {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    column-gap: var(--space-3);
+  }
   .label {
     min-width: 0;
     overflow-wrap: anywhere;
@@ -402,18 +414,15 @@
     color: var(--text-primary);
     font-weight: var(--weight-semibold);
   }
+  /* Right of the name while it fits; else a line of its own under it, its items wrapping whole (ui/Meta). */
   .hint {
-    flex: 1;
+    margin-left: auto;
     min-width: 0;
+    max-width: 100%;
     text-align: right;
     font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
     color: var(--text-tertiary);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  .label + :global(.kbd) {
-    margin-left: auto;
   }
   .none {
     padding: var(--space-8) var(--space-4);
@@ -470,6 +479,15 @@
     }
     .hint.describes {
       display: none;
+    }
+    /* Phones: the hint is the row's second line, under the name. */
+    .main {
+      flex-direction: column;
+      align-items: stretch;
+    }
+    .hint {
+      margin-left: 0;
+      text-align: left;
     }
   }
 </style>

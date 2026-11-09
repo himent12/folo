@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { labelWidth, leaderOf, MAX_REACH, needsLeader, placeEndLabels } from './endLabels';
+import { LABEL_GAP, LABEL_H, labelWidth, leaderOf, MAX_REACH, needsLeader, placeEndLabels, type Placed } from './endLabels';
 
 const bounds = { x0: 0, y0: 0, x1: 600, y1: 300 };
 const line = (pts: [number, number][]) => pts.map(([x, y]) => ({ x, y }));
@@ -25,7 +25,7 @@ describe('placeEndLabels', () => {
     expect(l).not.toBeNull();
     // It starts just outside the marker and ends on the label's box edge.
     expect(Math.hypot(l.x1 - 300, l.y1 - 100)).toBeCloseTo(5, 5);
-    expect(Math.abs(l.y2 - p!.y)).toBeLessThanOrEqual(9);
+    expect(Math.abs(l.y2 - p!.y)).toBeLessThanOrEqual(LABEL_H / 2 + 2);
   });
 
   it('moves off another line that runs through the right-hand spot', () => {
@@ -135,7 +135,8 @@ describe('placeEndLabels: the gutter column', () => {
     const placed = placeEndLabels(ends, [flat(170), flat(171), flat(210)], bounds, 2, 500, { gap: 10, lead: 14 });
     expect(placed).toHaveLength(3);
     const ys = placed.map((p) => p.y).sort((a, b) => a - b);
-    for (let i = 1; i < ys.length; i++) expect(ys[i]! - ys[i - 1]!).toBeGreaterThanOrEqual(24);
+    // A gap asked below the rule's 12 px is raised to it: one 16 px label box plus 12 px between centres.
+    for (let i = 1; i < ys.length; i++) expect(ys[i]! - ys[i - 1]!).toBeGreaterThanOrEqual(LABEL_H + LABEL_GAP);
     // Moved apart, the column steps out for the leaders; the labels stay inside the bounds.
     for (const p of placed) {
       expect(p.x).toBe(514);
@@ -149,5 +150,54 @@ describe('placeEndLabels: the gutter column', () => {
     const [p] = placeEndLabels(ends, [line([[0, 100], [500, 100]])], bounds, 2, 500, { gap: 10, lead: 14 });
     expect(p).toMatchObject({ x: 506, y: 100 });
     expect(needsLeader(p!)).toBe(false);
+  });
+});
+
+/** Clear space between two placed labels' drawn boxes (their measured width by the 16 px text line), px. */
+function clearance(a: Placed, b: Placed): number {
+  const dx = Math.max(b.x - (a.x + a.w), a.x - (b.x + b.w));
+  const dy = Math.abs(a.y - b.y) - LABEL_H;
+  return Math.max(dx, dy);
+}
+
+describe('placeEndLabels: the 12 px gap', () => {
+  it('never draws two labels closer than 12 px, whatever the caller asks and however the lines end', () => {
+    // Round 22: Run › Loss drew box and dfl with their 16 px text boxes 10 px apart (a 14 px box was assumed).
+    const flat = (y: number) => line([[0, y], [500, y]]);
+    let seed = 7;
+    const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+    const names = ['total', 'box', 'cls', 'dfl', 'fasteners-s', 'shapes-hard-m · failed'];
+    for (let trial = 0; trial < 200; trial++) {
+      const n = 2 + Math.floor(rnd() * 4);
+      const atEdge = rnd() < 0.5;
+      const ends = Array.from({ length: n }, (_, i) => ({
+        id: `l${i}`,
+        label: names[(trial + i) % names.length]!,
+        x: atEdge ? 500 : 300 + Math.floor(rnd() * 200),
+        y: 120 + Math.floor(rnd() * 60),
+        curve: i,
+      }));
+      const curves = ends.map((e) => line([[0, e.y + 40], [e.x, e.y]]));
+      const gap = [undefined, 2, 4, 10, 12, 16][trial % 6];
+      const placed = placeEndLabels(ends, [...curves, flat(60)], bounds, 2, atEdge ? 500 : undefined, { gap, lead: 14 });
+      for (let i = 0; i < placed.length; i++)
+        for (let j = i + 1; j < placed.length; j++)
+          expect(clearance(placed[i]!, placed[j]!), `trial ${trial}`).toBeGreaterThanOrEqual(Math.max(gap ?? 0, LABEL_GAP) - 1e-9);
+    }
+  });
+
+  it("keeps the loss chart's box and dfl 12 px apart where both lines end together", () => {
+    const flat = (y: number) => line([[0, y], [500, y]]);
+    const ends = [
+      { id: 'total', label: 'total', x: 500, y: 100, curve: 0 },
+      { id: 'box', label: 'box', x: 500, y: 176, curve: 1 },
+      { id: 'dfl', label: 'dfl', x: 500, y: 177, curve: 2 },
+      { id: 'cls', label: 'cls', x: 500, y: 243, curve: 3 },
+    ];
+    const placed = placeEndLabels(ends, ends.map((e) => flat(e.y)), bounds, 2, 500, { lead: 14 });
+    expect(placed).toHaveLength(4);
+    const at = Object.fromEntries(placed.map((p) => [p.id, p]));
+    expect(clearance(at.box!, at.dfl!)).toBeGreaterThanOrEqual(LABEL_GAP);
+    expect(needsLeader(at.box!) || needsLeader(at.dfl!)).toBe(true);
   });
 });

@@ -748,7 +748,7 @@ export const scenes = [
       await page.getByRole('tab', { name: 'Classes', exact: true }).click();
       await page.locator('#per-class button.disc').nth(2).click();
       await page.locator('#per-class tr.detail button', { hasText: 'View curve' }).click();
-      await until(page, '#pr .legend .back');
+      await until(page, '#pr .tools .back');
       await page.clock.runFor(500);
     },
   },

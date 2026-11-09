@@ -185,7 +185,7 @@
   </Panel>
 
   <div class="two">
-    <Panel title="Box size" meta="% of the image side" id="ds-size">
+    <Panel title="Box size" meta="boxes by size, % of the image side" id="ds-size">
       {#snippet actions()}
         <!-- The precise reading, one step away: the plain line above is what most readers need. -->
         <button
@@ -206,10 +206,9 @@
         hoverColor="var(--text-primary)"
         height={180}
         marker={{ x: TINY_SIZE, label: 'tiny' }}
-        yLabel="Boxes"
       />
     </Panel>
-    <Panel title="Boxes per image" meta="how many images have each count" id="ds-per">
+    <Panel title="Boxes per image" meta="images by their number of boxes" id="ds-per">
       <Histogram
         edges={stats.boxes_per_image_hist.edges}
         counts={stats.boxes_per_image_hist.counts}
@@ -219,7 +218,6 @@
         hoverColor="var(--text-primary)"
         unit="images"
         height={180}
-        yLabel="Images"
       />
     </Panel>
   </div>
