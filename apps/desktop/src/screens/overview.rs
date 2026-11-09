@@ -163,9 +163,9 @@ impl FoloApp {
             .when_some(strip, |d, s| d.child(s))
             // Narrow windows stack the two lists full width rather than squeeze the runs table.
             .map(|d| {
-                // Side by side only from 1500 px: below it the two tables stack, so Recent runs keeps
-                // its dataset column at the default 1280 window rather than squeezing it out.
-                if window.viewport_size().width < px(1500.) {
+                // Side by side only when Recent runs keeps a full row beside Best model (measured,
+                // so a content cap change can't squeeze it); otherwise the two tables stack.
+                if !self.tables_beside(window) {
                     d.child(div().flex().child(recent)).child(div().flex().child(models))
                 } else {
                     d.child(
@@ -430,17 +430,12 @@ impl FoloApp {
                     .bg(t.bg_inset)
                     .child(div().h_full().w(gpui::relative(r.progress().clamp(0., 1.))).bg(t.accent_fill())),
             )
-            .child(div().px(px(card_pad)).py(px(card_pad_y)).child(kpis))
+            .child(div().w_full().px(px(card_pad)).py(px(card_pad_y)).child(kpis))
             // The chart section is the run page's chart card without its frame: a header row on a
             // full-width rule, the legend row, then the plot, so the two screens' charts read alike.
-            .child(div().border_t_1().border_color(t.line_subtle).child(crate::ui::chart_section(
-                &t,
-                "Validation mAP",
-                "per epoch",
-                legend_el,
-                chart,
-                hero_h < 120.,
-            )))
+            .child(div().w_full().min_w_0().border_t_1().border_color(t.line_subtle).child(
+                crate::ui::chart_section(&t, "Validation mAP", "per epoch", legend_el, chart, hero_h < 120.),
+            ))
             .children(footer)
             .into_any_element()
     }
@@ -661,17 +656,24 @@ impl FoloApp {
         panel(&t).child(row).into_any_element()
     }
 
+    /// Whether Recent runs sits beside Best model: from 1500 px, and only while the list keeps its
+    /// narrow column set (778 px, plus 8 of slack) in what Best model leaves. A row wider than
+    /// its slot makes GPUI lay the whole page out at its min-content width.
+    fn tables_beside(&self, window: &Window) -> bool {
+        window.viewport_size().width >= px(1500.) && self.content_width(window) - (SIDE_W + 40.) - 16. >= 786.
+    }
+
     fn recent_runs(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
-        // The list is never squeezed beside Best model (they stack below 1500), so the
-        // architecture and dataset always have their column.
-        let vw = window.viewport_size().width;
+        // The list is never squeezed beside Best model (`tables_beside` stacks them first), so
+        // the architecture and dataset always have their column.
         let created = true;
-        // The list's width: the content (stacked, below 1500) or what Best model leaves beside it.
+        // The list's width: the content (stacked) or what Best model leaves beside it.
         // The wider name and dataset columns need 918 px (812 of columns, six 12 px gaps, row
         // padding, margins, borders); with less, the narrower set (778 px) keeps Created inside.
         let content = self.content_width(window);
-        let list_w = if vw < px(1500.) { content } else { content - (SIDE_W + 40.) - 16. };
+        let beside = self.tables_beside(window);
+        let list_w = if beside { content - (SIDE_W + 40.) - 16. } else { content };
         // 8 px of slack on every budget: a row exactly as wide as its slot can overflow it by a
         // rounding error, and GPUI then lays the whole page out at its min-content width (the
         // hero chart collapsed to its axis labels at 1680).
@@ -680,11 +682,11 @@ impl FoloApp {
         let (name_w, prog_w, best_w, when_w) =
             if full { (200., 160., 96., 80.) } else { (150., 120., 96., 80.) };
         let meta_w = if full { 180. } else { 130. };
-        // Stacked (below 1500), width past the set's need goes to the name, arch · dataset and
+        // Stacked, width past the set's need goes to the name, arch · dataset and
         // progress (2 : 1 : 1, to their caps); only what's left opens before the numbers. Beside
         // Best model the set stays as is: widened there, GPUI 0.2.2 laid the page out at its
         // min-content width (the hero chart collapsed to its axis at 1680).
-        let spare = if vw < px(1500.) { list_w - SLACK - if full { 918. } else { 778. } } else { 0. };
+        let spare = if beside { 0. } else { list_w - SLACK - if full { 918. } else { 778. } };
         let [name_w, meta_w, prog_w] =
             crate::ui::share_spare(spare, [(name_w, 2., 280.), (meta_w, 1., 240.), (prog_w, 1., 200.)]);
         let now = self.store.api.now();

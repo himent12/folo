@@ -138,6 +138,7 @@ pub fn chart_section(
     short: bool,
 ) -> Div {
     div()
+        .w_full()
         .flex()
         .flex_col()
         .min_w_0()
@@ -313,12 +314,16 @@ pub fn split_label(dataset: &str, split: &str, images: Option<u64>) -> String {
 }
 
 /// Where precision and recall were taken, as both pages caption them: the best-F1 confidence when
-/// known, the match rule, and the split ("best F1 · conf 0.31 · IoU 0.50 · val").
-pub fn pr_caption(conf: Option<f32>, split: &str) -> String {
-    let mut s = match conf {
-        Some(c) => format!("best F1 · conf {} · IoU 0.50", fmt_conf(c)),
-        None => "best F1 · IoU 0.50".to_string(),
-    };
+/// known, the match rule, and the split ("best F1 · conf 0.31 · IoU 0.50 · val"). A tile whose
+/// chart states the match rule beside it leaves it out (`iou: false`), so the line fits.
+pub fn pr_caption(conf: Option<f32>, split: &str, iou: bool) -> String {
+    let mut s = "best F1".to_string();
+    if let Some(c) = conf {
+        s += &format!(" · conf {}", fmt_conf(c));
+    }
+    if iou {
+        s += " · IoU 0.50";
+    }
     // A surface that names the split elsewhere (the model page's headline) leaves it out.
     if !split.is_empty() {
         s += &format!(" · {split}");
@@ -898,8 +903,8 @@ thread_local! {
 /// A scroll area's edge fades: 24 px of its surface `bg` over an edge only while content lies
 /// past it, so a row cut by the edge reads as "more", and at either end the rows show undimmed.
 /// With the thumbs hidden at rest, these are the scroll cue. Absolute children sit inside a
-/// parent's border already, so `inset` is extra room, and `radius` is the parent's inner radius. Every scroll area but the page uses them, through
-/// `FoloApp::scroll_chrome`.
+/// parent's border already, so `inset` is extra room, and `radius` is the parent's inner radius.
+/// Every scroll area, the page included, uses them, through `FoloApp::scroll_chrome`.
 pub fn scroll_edges(handle: &ScrollHandle, bg: Hsla, inset: f32, radius: f32) -> impl Iterator<Item = Div> {
     let y = handle.offset().y;
     let above = y < px(-1.);
