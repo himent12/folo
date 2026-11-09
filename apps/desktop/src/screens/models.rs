@@ -432,7 +432,14 @@ impl FoloApp {
                             .pb(px(baseline_lift(ty::X3XL, ty::XL))),
                         ),
                     )
-                    .child(text(ty::SM, t.text_tertiary).ellipsis().child(op_point.clone())),
+                    // Clipped, not ellipsized: the run page's twin caption hit GPUI 0.2.2's truncation
+                    // panic (a stale run length sliced inside "·"); this one fits its tile.
+                    .child(
+                        text(ty::SM, t.text_tertiary)
+                            .whitespace_nowrap()
+                            .overflow_hidden()
+                            .child(op_point.clone()),
+                    ),
             ))
             .child(vline(&t))
             .child(tile(small(
