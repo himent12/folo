@@ -671,7 +671,16 @@ impl MockBackend {
                 fixture.logs = initial_logs(&fixture, created);
                 fixture
             })
-            .collect();
+            .collect::<Vec<RunFixture>>();
+        // A model's operating point is its run's best epoch's (as `folo serve --mock`'s), so the run and model
+        // pages name the same confidence.
+        for model in &mut models {
+            let Some(f) = runs.iter().find(|f| Some(&*f.run.id) == model.run_id.as_deref()) else { continue };
+            let (Some(best), Some(metrics)) = (Self::snapshot(f).best, model.metrics.as_mut()) else {
+                continue;
+            };
+            metrics.best_f1_conf = f.curve.epoch(best.epoch).val.best_f1_conf;
+        }
         Self {
             datasets,
             models,
@@ -1599,6 +1608,15 @@ mod tests {
             assert_eq!(ev.best_f1_conf, model.metrics.unwrap().best_f1_conf, "{}", model.id);
             assert!(ev.best_f1_conf.is_some(), "{}", model.id);
             let run = m.run(model.run_id.as_deref().unwrap()).unwrap();
+            if let Some(best) = run.best {
+                let epochs = m.metrics(&run.id).unwrap().epochs;
+                let best = epochs.iter().find(|e| e.epoch == best.epoch).unwrap();
+                assert_eq!(
+                    ev.best_f1_conf, best.val.best_f1_conf,
+                    "{}: model vs its run's best epoch",
+                    model.id
+                );
+            }
             assert_eq!(ev.dataset_id.as_deref(), Some(&*run.config.dataset_id), "{}", model.id);
             let ds = m.fixture(&run.config.dataset_id).unwrap();
             assert_eq!(ev.dataset_name.as_deref(), Some(&*ds.ds.name));
