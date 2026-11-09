@@ -226,6 +226,7 @@ impl Curve {
                 precision: (0.42 + 0.52 * q).min(0.98),
                 recall: (0.33 + 0.56 * q).min(0.97),
                 per_class,
+                best_f1_conf: None,
             },
             duration_s: (self.spe * self.batch as u64) as f64 / self.ips as f64 + 2.4,
         }
@@ -347,7 +348,13 @@ impl MockBackend {
             bytes,
             created: time::format(h(hours)),
             run_id: Some(run.into()),
-            metrics: Some(ModelMetrics { map50: m[0], map50_95: m[1], precision: m[2], recall: m[3] }),
+            metrics: Some(ModelMetrics {
+                map50: m[0],
+                map50_95: m[1],
+                precision: m[2],
+                recall: m[3],
+                best_f1_conf: None,
+            }),
             head: folo_api::Head::O2m,
             trained_with: None,
             precision: Some(folo_api::ModelPrecision::F32),
@@ -638,6 +645,8 @@ impl MockBackend {
                         model_id: s.model.map(Into::into),
                         error: s.error.map(Into::into),
                         error_code: s.error.map(|_| "training_failed".into()),
+                        resolved: None,
+                        queue_position: None,
                         config: s.config,
                     },
                     curve,
@@ -929,8 +938,13 @@ impl Backend for MockBackend {
             .iter()
             .find(|m| m.id == id)
             .ok_or_else(|| ApiError::new("model_not_found", format!("No model {id}")))?;
-        let metrics =
-            m.metrics.unwrap_or(ModelMetrics { map50: 0.5, map50_95: 0.3, precision: 0.5, recall: 0.5 });
+        let metrics = m.metrics.unwrap_or(ModelMetrics {
+            map50: 0.5,
+            map50_95: 0.3,
+            precision: 0.5,
+            recall: 0.5,
+            best_f1_conf: None,
+        });
         let n = m.classes.len();
         let mut rng = Rng::new(hash(id));
         let per_class: Vec<ClassMetrics> = (0..n as u32)
@@ -974,7 +988,7 @@ impl Backend for MockBackend {
             confusion[t][n] = left;
             confusion[n][t] = (count as f32 * (1.0 - per_class[t].precision) * 0.6) as u32;
         }
-        Ok(ModelEval { pr, confusion, per_class, images })
+        Ok(ModelEval { pr, confusion, per_class, images, best_f1_conf: None })
     }
 
     fn export_model(&self, id: &str, format: &str) -> ApiResult<ExportResult> {
@@ -1050,6 +1064,8 @@ impl Backend for MockBackend {
                 model_id: None,
                 error: None,
                 error_code: None,
+                resolved: None,
+                queue_position: None,
                 config,
             },
             curve,

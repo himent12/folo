@@ -133,7 +133,7 @@ Desktop is its own cargo workspace, so the engine's builds and CI stay GPUI-free
 ## Use FOLO from an agent
 
 **MCP.** `folo mcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server over stdio (MCP 2026-07-28
-and 2025-11-25). It has 17 tools: build, register and check datasets, train, follow, stop and resume runs, evaluate,
+and 2025-11-25). It has 18 tools: build, register and check datasets, train, follow, stop, reorder and resume runs, evaluate,
 predict, export, and compare runs. It also has `folo://` resources (dataset images, live run status and metrics,
 validation sample grids, the docs) and two prompts. It runs the real engine on `--data-dir`.
 

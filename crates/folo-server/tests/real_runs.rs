@@ -286,6 +286,11 @@ async fn train_evaluate_predict_and_reload() {
     assert_eq!(model.run_id.as_deref(), Some(run.id.as_str()));
     assert!(model.params > 2_000_000 && model.bytes > 0 && model.flops_g > 0.0);
     assert_eq!(model.metrics.unwrap().map50_95, best.map50_95);
+    // The best-F1 confidence of the best epoch, through the checkpoint's `folo.metrics`.
+    assert!(best_epoch.val.best_f1_conf.is_some());
+    assert_eq!(model.metrics.unwrap().best_f1_conf, best_epoch.val.best_f1_conf);
+    let resolved = done.resolved.clone().expect("a finished run says what it trained with");
+    assert_eq!((resolved.optimizer, resolved.accumulate), (ResolvedOptimizer::Adamw, 16));
     // The head comes from `folo.config`, `trained_with` from the checkpoint's `folo.train`.
     let trained = TrainedWith { amp: false, imgsz: 64, epochs: 2 };
     assert_eq!((model.head, model.trained_with), (Head::O2m, Some(trained)));
@@ -390,6 +395,9 @@ async fn train_evaluate_predict_and_reload() {
         ok(&app, post_json("/api/val", json!({ "model_id": model_id, "dataset_id": ds.id }))).await;
     assert_eq!((v.split, v.images, v.imgsz), (Split::Val, 2, 64));
     assert_eq!(v.val.per_class, eval.per_class);
+    // Precision and recall come with their confidence threshold, the same in both.
+    assert!(eval.best_f1_conf.is_some_and(|c| (0.0..=1.0).contains(&c)), "{:?}", eval.best_f1_conf);
+    assert_eq!(v.val.best_f1_conf, eval.best_f1_conf);
     assert!(v.timing.total_s > 0.0 && v.timing.per_image_ms > 0.0);
     let body =
         json!({ "model_id": model_id, "dataset_id": ds.id, "split": "train", "imgsz": 96, "conf": 0.25 });
@@ -687,6 +695,131 @@ async fn queue_stop_resume_and_restart() {
     assert_eq!(done.epoch, 3);
     let last: Model = ok(&app, get(&format!("/api/models/{b_last}"))).await;
     assert!(last.metrics.is_some(), "known again once an epoch was validated");
+}
+
+/// docs/API.md `POST /api/runs/{id}/queue` on the real store: positions, moves, `start` behind the active run,
+/// `queue` events, `run_not_queued` for the active run, the worker taking the front run; and `Run.resolved`, from
+/// the trainer, from `run.json` after a restart and from `config.json` for runs recorded before the field.
+#[tokio::test(flavor = "multi_thread")]
+async fn queue_moves_and_resolved_config() {
+    let t = TempDir::new("queue");
+    let home = t.0.join("home");
+    let s = store(&home);
+    let app = app(&s);
+    let ds = dataset(&app, "queued", 12).await;
+    let mv = |id: &str, body: Value| post_json(&format!("/api/runs/{id}/queue"), body);
+    let run = |id: &str| {
+        let (app, id) = (app.clone(), id.to_string());
+        async move { ok::<Run>(&app, get(&format!("/api/runs/{id}"))).await }
+    };
+    // Until the next `queue` event equal to `want` (earlier ones are skipped).
+    async fn until_queue(sse: &mut Events, want: Value) {
+        loop {
+            let (name, v) = sse.next().await;
+            assert_ne!(name, "status", "a status before {want}: {v}");
+            if name == "queue" && v == want {
+                return;
+            }
+        }
+    }
+
+    // `a` trains (long enough to stay running while the others move).
+    let a: Run = ok(&app, post_json("/api/runs", tiny(&ds, 200))).await;
+    let mut sse_a = Events::open(&app, &a.id).await;
+    sse_a.until_status(&["running"]).await;
+    let a_now = run(&a.id).await;
+    assert_eq!(a_now.queue_position, None);
+    let resolved = a_now.resolved.clone().expect("set once the trainer is built");
+    // 400 iterations is a short run: `auto` is AdamW with lr0 0.002 · 5 / (4 + 2 classes), β2 0.999.
+    assert_eq!(resolved.optimizer, ResolvedOptimizer::Adamw);
+    assert_eq!((resolved.lr0, resolved.betas), (0.001667, Some([0.9, 0.999])));
+    assert_eq!((resolved.batch, resolved.accumulate, resolved.nbs), (4, 16, 64));
+    assert_eq!(resolved.optimizer_steps_per_epoch, 1, "3 batches of 4, accumulated over 16");
+    // The trainer writes config.json once it runs, before its first epoch.
+    sse_a.until_epoch().await;
+    let config: Value =
+        serde_json::from_slice(&std::fs::read(home.join("runs").join(&a.id).join("config.json")).unwrap())
+            .unwrap();
+    assert_eq!(serde_json::from_value::<ResolvedTrain>(config["resolved"].clone()).unwrap(), resolved);
+    assert_eq!(config["optimizer"]["lr0"], json!(resolved.lr0));
+    assert_eq!(a_now.config.optimizer, Optimizer::Auto, "the requested config is kept as requested");
+
+    let mut ids = Vec::new();
+    for i in 0..3 {
+        let r: Run = ok(&app, post_json("/api/runs", tiny(&ds, 3))).await;
+        assert_eq!(
+            (r.status, r.queue_position, r.resolved.is_none()),
+            (RunStatus::Queued, Some(i + 1), true)
+        );
+        ids.push(r.id);
+    }
+    let (b, c, d) = (ids[0].clone(), ids[1].clone(), ids[2].clone());
+    let mut sse_b = Events::open(&app, &b).await;
+    assert_eq!(sse_b.next().await.0, "status");
+
+    let r: Run = ok(&app, mv(&d, json!({ "action": "top" }))).await;
+    assert_eq!(r.queue_position, Some(1));
+    until_queue(&mut sse_b, json!({ "position": 2, "waiting": 3 })).await;
+    let list: RunList = ok(&app, get("/api/runs")).await;
+    let place = |id: &str| list.runs.iter().find(|r| r.id == id).unwrap().queue_position;
+    assert_eq!((place(&d), place(&b), place(&c), place(&a.id)), (Some(1), Some(2), Some(3), None));
+    let r: Run = ok(&app, mv(&b, json!({ "position": 3 }))).await;
+    assert_eq!(r.queue_position, Some(3));
+    until_queue(&mut sse_b, json!({ "position": 3, "waiting": 3 })).await;
+    let logs: RunLogs = ok(&app, get(&format!("/api/runs/{b}/logs"))).await;
+    assert!(logs.lines.last().unwrap().message.contains("position 3 of 3"), "{:?}", logs.lines);
+
+    // The active run is not in the queue; `start` while it trains only moves to the front.
+    let e = err(&app, mv(&a.id, json!({ "action": "top" })), StatusCode::CONFLICT, "run_not_queued").await;
+    assert!(e.message.contains("running"), "{}", e.message);
+    err(&app, mv(&b, json!({ "action": "top", "position": 1 })), StatusCode::BAD_REQUEST, "invalid_body")
+        .await;
+    let r: Run = ok(&app, mv(&c, json!({ "action": "start" }))).await;
+    assert_eq!((r.status, r.queue_position), (RunStatus::Queued, Some(1)));
+    assert_eq!(run(&a.id).await.status, RunStatus::Running, "never preempted");
+    let logs: RunLogs = ok(&app, get(&format!("/api/runs/{c}/logs"))).await;
+    assert!(
+        logs.lines.last().unwrap().message.contains("starts when the active run ends"),
+        "{:?}",
+        logs.lines
+    );
+
+    // Stopping the active run: the worker takes the front run (c); the others move up.
+    let mut sse_c = Events::open(&app, &c).await;
+    let _: Run = ok(&app, post(&format!("/api/runs/{}/stop", a.id))).await;
+    sse_a.until_status(&["stopped"]).await;
+    let seen = sse_c.until_status(&["running"]).await;
+    let last_queue = seen.iter().rev().find(|(n, _)| n == "queue");
+    assert!(last_queue.is_none_or(|(_, v)| v["position"] == 1), "{seen:?}");
+    until_queue(&mut sse_b, json!({ "position": 2, "waiting": 2 })).await;
+    err(&app, mv(&c, json!({ "action": "bottom" })), StatusCode::CONFLICT, "run_not_queued").await;
+    // Stopping a waiting run moves the ones behind it up.
+    let _: Run = ok(&app, post(&format!("/api/runs/{d}/stop"))).await;
+    until_queue(&mut sse_b, json!({ "position": 1, "waiting": 1 })).await;
+    assert_eq!(run(&b).await.queue_position, Some(1));
+    for id in [&c, &b] {
+        let _: Run = ok(&app, post(&format!("/api/runs/{id}/stop"))).await;
+    }
+    drop((sse_a, sse_b, sse_c));
+    drop(app);
+    s.shutdown();
+    drop(s);
+
+    // After a restart `resolved` comes from run.json; a run recorded before the field gets it from config.json
+    // (also from one written before config.json had `resolved`).
+    let dir = home.join("runs").join(&a.id);
+    for (file, key) in [("run.json", "run"), ("config.json", "")] {
+        let p = dir.join(file);
+        let mut v: Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
+        let obj = if key.is_empty() { &mut v } else { &mut v[key] };
+        assert!(obj.as_object_mut().unwrap().remove("resolved").is_some(), "{file}");
+        std::fs::write(&p, v.to_string()).unwrap();
+    }
+    let s = store(&home);
+    let app = self::app(&s);
+    assert_eq!(ok::<Run>(&app, get(&format!("/api/runs/{}", a.id))).await.resolved, Some(resolved));
+    let d_run: Run = ok(&app, get(&format!("/api/runs/{d}"))).await;
+    assert_eq!((d_run.resolved, d_run.queue_position), (None, None), "stopped before its trainer was built");
 }
 
 /// `device: auto` on a machine with a GPU: the run trains there and predictions run there. Skips (with a note)

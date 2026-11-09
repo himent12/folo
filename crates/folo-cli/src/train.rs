@@ -49,7 +49,7 @@ pub fn train(args: TrainArgs, out: Out) -> Result<(), CliError> {
             return Err(engine_error(e));
         }
     };
-    finish(&summary, &run_dir, trainer.config(), out);
+    finish(&summary, &run_dir, trainer.config(), &trainer.resolved_train(), out);
     Ok(())
 }
 
@@ -548,7 +548,7 @@ impl Progress {
                 };
                 println!("{tag}{}", l.message);
             }
-            RunEvent::Status(_) => {}
+            RunEvent::Status(_) | RunEvent::Queue(_) => {}
         }
     }
 
@@ -569,7 +569,7 @@ fn duration(secs: f64) -> String {
     }
 }
 
-fn finish(s: &TrainSummary, run_dir: &Path, cfg: &TrainConfig, out: Out) {
+fn finish(s: &TrainSummary, run_dir: &Path, cfg: &TrainConfig, resolved: &folo_api::ResolvedTrain, out: Out) {
     let path = |p: &Option<PathBuf>| p.as_ref().map(folo_api::json::path);
     out.record(&json!({
         "event": "done",
@@ -581,6 +581,7 @@ fn finish(s: &TrainSummary, run_dir: &Path, cfg: &TrainConfig, out: Out) {
         "best": s.best.map(|(epoch, fitness)| json!({ "epoch": epoch, "map50_95": fitness })),
         "best_metrics": s.best_metrics,
         "weights": { "best": path(&s.best_weights), "last": path(&s.last) },
+        "resolved": resolved,
     }));
     let verb = match s.status {
         RunStatus::Stopped => "Stopped",
@@ -590,8 +591,12 @@ fn finish(s: &TrainSummary, run_dir: &Path, cfg: &TrainConfig, out: Out) {
     out.human(format!("{verb} after {} of {} epochs.", s.epochs_completed, cfg.epochs));
     if let (Some((epoch, _)), Some(m)) = (s.best, &s.best_metrics) {
         out.human(format!(
-            "Best epoch {epoch}: mAP50 {:.3}  mAP50-95 {:.3}  P {:.3}  R {:.3}",
-            m.map50, m.map50_95, m.precision, m.recall
+            "Best epoch {epoch}: mAP50 {:.3}  mAP50-95 {:.3}  P {:.3}  R {:.3}{}",
+            m.map50,
+            m.map50_95,
+            m.precision,
+            m.recall,
+            m.best_f1_conf.map_or(String::new(), |c| format!(" (at conf {c:.3})"))
         ));
         if !m.per_class.is_empty() {
             out.human(format!("  {:<16} {:>7} {:>9} {:>7} {:>7}", "class", "mAP50", "mAP50-95", "P", "R"));

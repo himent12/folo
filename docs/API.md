@@ -36,7 +36,7 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
 | 403 | `forbidden_origin` | a state-changing request from a disallowed browser origin (see Conventions) |
 | 404 | `dataset_not_found`, `image_not_found`, `model_not_found`, `run_not_found`, `path_not_found`, `device_not_found`, `epoch_not_available`, `route_not_found` | something named does not exist (`device_not_found`: a `gpu:<n>` this machine has no usable adapter for; the hint lists the devices it has). The `*_not_found` of listed things hint at the list that has them |
 | 405 | `method_not_allowed` | wrong HTTP method on a known path |
-| 409 | `run_active`, `run_not_active`, `run_not_resumable` | deleting (or resuming) a run that is still active; stopping one that is not; resuming one that completed |
+| 409 | `run_active`, `run_not_active`, `run_not_resumable`, `run_not_queued` | deleting (or resuming) a run that is still active; stopping one that is not; resuming one that completed; moving one that does not wait in the queue |
 | 413 | `payload_too_large` | body over the limit (64 MiB for `/api/predict`, 2 MiB elsewhere) |
 | 415 | `unsupported_media_type` | JSON endpoint called without `Content-Type: application/json` |
 | 422 | `invalid_body`, `image_decode_failed`, `invalid_weights` | well-formed JSON with wrong types / missing required fields; an upload that is not an image; a `.folo` file that cannot be read |
@@ -48,11 +48,13 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
 - `GET /api/health` → `{ "status": "ok", "version": "0.1.0", "api": "v1", "mock": false }`
 - `GET /api/system` → `{ "cpu": { "name", "threads", "util" }, "memory": { "used_bytes", "total_bytes" },
   "gpus": [{ "ordinal", "name", "backend": "vulkan|dx12|metal", "memory_bytes", "util" | null }],
-  "data_dir"?: "D:/folo-data", "features": ["export_onnx_switches"], "capabilities"?: Capabilities }`
+  "data_dir"?: "D:/folo-data", "features": ["export_onnx_switches", "queue_control", "weights_onnx"],
+  "capabilities"?: Capabilities }`
   (`util` in `0..1`; CPU utilisation is measured since the previous call. `data_dir` is the real server's
   `--data-dir`, with `/` separators, where its runs, models and exports live; the mock server leaves it out. `features` lists optional API features
   the server implements, so a client can check before relying on one: `export_onnx_switches` (the export switches
-  below; older servers accept and ignore them). `folo mcp --server` refuses the switches without it.) In real mode `gpus` comes from folo-gpu
+  below; older servers accept and ignore them), `queue_control` (`POST /api/runs/{id}/queue`, `Run.queue_position`
+  and `queue` events), `weights_onnx` (`/weights?format=onnx`; older servers answer `400 invalid_query`). `folo mcp --server` refuses the switches without it.) In real mode `gpus` comes from folo-gpu
   (wgpu): every physical adapter once, through its preferred backend (software adapters are left out), best first,
   so ordinal 0 is the adapter `gpu:0` and `device: auto` use. wgpu reports neither memory size nor load, so
   `memory_bytes` is `0` and `util` `null`.
@@ -177,7 +179,8 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   { "pr": [{ "class": 0, "recall": [0.0, 0.01, ..., 1.0], "precision": [1.0, ..., 0.0], "ap50": 0.91 }],
     "confusion": [[412, 3, 1, 21], [2, 398, 4, 30], [0, 6, 405, 25], [9, 14, 7, 0]],
     "per_class": [ClassMetrics],   // as in Epoch.val.per_class; map50 equals pr[class].ap50
-    "images": 200 }
+    "images": 200,
+    "best_f1_conf": 0.312 }        // the confidence per_class precision / recall are taken at (null: unknown)
   ```
   `pr` has one curve per class, in class order, sampled at 101 recall points (`0.00` to `1.00`, IoU 0.5).
   `precision` is the COCO-interpolated envelope (it never rises with recall), and `ap50` is its mean.
@@ -189,8 +192,25 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   (`404 dataset_not_found` when there is none); `400 invalid_dataset` when the dataset's classes (names, in order)
   are no longer the model's. Computed with folo-vision's validator (docs/METRICS.md; MODEL.md
   §8.7 settings: `conf 0.001`, `iou 0.7`, the model's `imgsz`) on the server's `--device`, then cached (in memory and
-  in `cache/eval/<model id>.json`) until the weights file or the dataset's files change. `pr` has curves for the
-  classes with ground truth.
+  in `cache/eval/<model id>.json`) until the weights file or the dataset's files change (results cached by servers
+  from before `best_f1_conf` are computed again once). `pr` has curves for the classes with ground truth.
+- **Operating point (`best_f1_conf`).** Precision and recall (overall and per class) are taken at one confidence
+  threshold: the one on the `0.000, 0.001, ..., 1.000` grid that maximises the class-mean F1 at IoU 0.5 (the highest
+  on ties; detections with `score >= best_f1_conf` count; docs/METRICS.md). Every object with precision and recall
+  says which threshold that was, as `best_f1_conf` next to them: `/eval` (top level), `Model.metrics`,
+  `Epoch.val` (so `/metrics`, SSE `epoch` events and `metrics.jsonl`) and `POST /api/val`'s `val`. It is `null`
+  when unknown: no class has ground truth, an epoch recorded before the field, and `.folo` files whose
+  `folo.metrics` predate it (docs/FORMAT.md; newer checkpoints store it there). Additive: clients of older servers
+  read a missing field as `null`. Studio and Desktop can show it as "P 0.84 / R 0.77 at conf 0.31".
+- **Run, model and `/eval` numbers.** A run model's `metrics` are the validation of the epoch that wrote its
+  weights, unchanged (`<run>-best`: the epoch `Run.best` names, whose fitness is mAP@0.5:0.95 in the trainer too;
+  `<run>-last`: the last validated epoch), so they equal that epoch's `val` in `/metrics`, `best_f1_conf`
+  included. Overall precision, recall and mAP are the means of `per_class` (docs/METRICS.md). `/eval` and `POST
+  /api/val` evaluate the weights again: the fused EMA weights, with the validator's batch (16) on the server's
+  `--device`, against the dataset's files as they are now. Fused BatchNorm and another batch or device change
+  float rounding, so a detection close to a threshold can flip and the per-class numbers can differ from the
+  training epoch's in the last digits (more if the dataset changed since). The mock follows the same rules: its
+  `/eval` per-class numbers are within 0.01 of the epoch's, with the same `best_f1_conf`.
 - `POST /api/models/{id}/export` body `{ "format": "folo-f16|onnx", "decode"?: false, "dynamic"?: false,
   "half"?: false }` → `{ "path", "bytes" }`. The three switches are `folo export`'s `--decode`, `--dynamic` and
   `--half` and only apply to `onnx` (with `folo-f16` any of them is `400 invalid_body`). Real mode writes
@@ -201,14 +221,23 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   `<model name>-f16.onnx`). Names get `-2`, `-3`, ... when taken (exports never
   overwrite). `path` uses `/` separators. A model the ONNX exporter cannot map is `501 not_implemented` naming the
   part (no FOLO v1 model hits this).
-- `GET /api/models/{id}/weights` (optional `?format=f16`) → the model's `.folo` file (docs/FORMAT.md), for loading
-  it elsewhere, e.g. into the browser detector (docs/WASM.md). Without `format` it is the file as stored: a run model
-  is its full training checkpoint (`weights/best.folo` / `last.folo`, with EMA and optimizer state); `format=f16` is the
-  `folo-f16` export of `POST /api/models/{id}/export` (fused EMA weights in F16, a fraction of a checkpoint's size),
-  made on the first request and cached in `cache/weights/` until the model's file changes. Any other `format` is
-  `400 invalid_query`; `404 model_not_found` as usual (also when the file disappears).
-  - `Content-Type: application/octet-stream`, `Content-Length`, `Content-Disposition: attachment;
-    filename="<model name>.folo"` (`<model name>-f16.folo`; characters outside `A-Z a-z 0-9 . _ -` become `_`).
+- `GET /api/models/{id}/weights` (optional `?format=f16|onnx`) → the model's `.folo` file (docs/FORMAT.md), for loading
+  it elsewhere, e.g. into the browser detector (docs/WASM.md), or its ONNX graph. Without `format` it is the file as
+  stored: a run model is its full training checkpoint (`weights/best.folo` / `last.folo`, with EMA and optimizer
+  state); `format=f16` is the `folo-f16` export of `POST /api/models/{id}/export` (fused EMA weights in F16, a
+  fraction of a checkpoint's size); `format=onnx` is its `onnx` export, with the same defaults (f32, batch 1, the
+  model's training imgsz, raw head outputs) and the same switches as query parameters: `&decode=true`,
+  `&dynamic=true`, `&half=true` (each `true` or `false`, default `false`). Both exports are made on the first
+  request and cached in `cache/weights/` (one file per switch combination) until the model's file changes; the
+  first ONNX request of a model takes about as long as `POST /api/models/{id}/export`. Any other `format`, or a
+  switch with a `format` other than `onnx`, is `400 invalid_query`; a model the ONNX exporter cannot map is `501
+  not_implemented` naming the part (no FOLO v1 model hits this); `404 model_not_found` as usual (also when the file
+  disappears). Errors are the JSON error object, never a partial file. Studio downloads exports this way, so a
+  remote browser gets the file instead of a server path.
+  - `Content-Type: application/octet-stream` (also for ONNX, which has no registered media type), `Content-Length`,
+    `Content-Disposition: attachment; filename="<model name>.folo"` (`<model name>-f16.folo`; ONNX as the export
+    names it: `<model name>.onnx`, `<model name>-f16.onnx` with `half`; characters outside `A-Z a-z 0-9 . _ -`
+    become `_`).
     Real files are streamed from disk (never read into memory whole), and never gzip-compressed.
   - Validators: a strong `ETag` (real mode: the file's size and modification time in nanoseconds, cheap and exact
     for FOLO's writers, which replace files whole; a replacement keeping both the size and the exact modification
@@ -252,6 +281,26 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   when the run already finished. A queued run stops at once; a running one after its current batch (the epoch in
   progress is discarded; `weights/last.folo` is the last finished epoch's). `model_id` is set when at least one epoch
   was validated. The final `status` event is sent once the run can be resumed or deleted.
+- `POST /api/runs/{id}/queue` body `{ "action": "top|up|down|bottom|start" }` or `{ "position": 1 }` → `Run` (with
+  its new `queue_position`). Moves a run that waits in the training queue. The queue holds the runs that are
+  `queued` and not yet taken by the worker, front first; `Run.queue_position` is a run's 1-based place in it (`1`
+  starts next) and `null` for every other run. Exactly one of `action` and `position` (both or neither, or
+  `position: 0`, are `400 invalid_body`):
+  - `top` / `bottom`: to the front / back; `up` / `down`: one place (a no-op at the end it moves towards);
+    `position: n`: to place `n` (a larger `n` than the queue's length means the back). The other runs keep their
+    order.
+  - `start`: "start now". FOLO trains one run at a time and never preempts it: when nothing is training the run
+    starts at once (the worker takes it, as it would any front run); otherwise it moves to the front and starts
+    when the active run ends (completes, fails or is stopped).
+  - Races: the worker takes the front run under the queue's lock, the same lock the move holds, so a move either
+    happens before the run is taken (and counts) or finds it gone. A run the worker has already taken (still
+    `queued` while its trainer is built, then `running`), and every finished or stopping run, is `409
+    run_not_queued` (its message says whether it is starting, running or finished); `404 run_not_found` as usual.
+    Moves never change a run's status.
+  - Every change of the queue (a run queued, resumed, moved, taken by the worker, stopped or deleted while it
+    waits) sends each waiting run a `queue` SSE event with its place, and the moved run gets a `log` line. Mock
+    mode: runs created through the API share one training slot the same way (the seeded looping run `run_3c02` is
+    outside the queue).
 - `DELETE /api/runs/{id}` → `204` (`409 run_active` while `queued`, `running` or `stopping`). Real mode removes the run
   folder, its weights included, so its models disappear too.
 - `GET /api/runs/{id}/metrics?every=1` → `{ "steps": [Step], "epochs": [Epoch] }` (full history, for charts on page
@@ -273,6 +322,10 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   - `step` `Step` (at most ~10 per second; steps in between are skipped, `/metrics` has them all)
   - `epoch` `Epoch` (after each validation)
   - `log` `{ "t", "level": "debug|info|warn|error", "message" }`
+  - `queue` `{ "position": 2, "waiting": 3 }`: the run's place in the training queue (`Run.queue_position`) and
+    how many runs wait there, it included; sent to every waiting run after each change of the queue (see `POST
+    /api/runs/{id}/queue`), in order with its other events (a run's last `queue` event comes before its `running`
+    status). Servers older than the event never send it.
 
   The stream starts with a `status` event and replays nothing else (use `/metrics` and `/logs` for history). A `: keep-alive`
   comment is sent every 15 s. The stream stays open after the run finishes (so `EventSource` does not reconnect in a
@@ -318,7 +371,24 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   "eta_s": 1840 | null,    // null unless queued / running / stopping
   "best": { "epoch": 11, "map50_95": 0.61 } | null, "device": "NVIDIA GeForce RTX 4080 SUPER (vulkan)",
   "model_id": null | "m_31aa",  // set once the run completed, or stopped after at least one validated epoch
-  "error": null | "..." }
+  "error": null | "...",
+  "queue_position": null | 2,   // 1-based place in the training queue while the run waits there (1 starts next)
+  "resolved": null | ResolvedTrain }  // what the trainer resolved `config` to (below); null until it is built
+// ResolvedTrain: the settings the run trains with. `config` stays what was requested ("optimizer": "auto",
+// "lr0": 0.01); these are what that became (docs/MODEL.md §8.2, §8.4), as in the run folder's config.json.
+{ "optimizer": "sgd|adamw",     // never auto
+  "lr0": 0.001429,              // base LR of every parameter group: auto's pick, else config.lr0
+  "lrf": 0.01, "cos_lr": false, // the last step runs at lr0 · lrf; linear or cosine decay
+  "momentum": 0.9,              // SGD momentum, or AdamW β1, after warmup
+  "betas": [0.9, 0.999] | null, // AdamW only
+  "weight_decay": 0.0005,       // of the decay group, after the batch scaling weight_decay · batch · accumulate / nbs
+  "batch": 16, "accumulate": 4, "nbs": 64,  // gradients of `accumulate` batches per optimizer step (≈ nbs images)
+  "optimizer_steps_per_epoch": 13,
+  "warmup_iters": 100, "warmup_epochs": 3.0, "warmup_momentum": 0.8, "warmup_bias_lr": 0.0 }
+// Run.resolved is set when the trainer is built (by the time the `running` status is sent: fetch the run then),
+// recomputed on resume, and read from the run folder's config.json for runs recorded before the field; it stays
+// null for runs whose trainer never started (stopped while queued, failed to build). Mock runs fill it once they
+// start, with the real trainer's resolution of their config. Additive: missing reads as null.
 // Step
 { "epoch": 12, "step": 575, "lr": 0.0098, "loss": { "box": 1.21, "cls": 0.83, "dfl": 1.02, "total": 3.06 },
   "imgs_per_s": 412.5, "eta_s": 1840,
@@ -326,7 +396,8 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
 // Epoch (epoch is 1-based, as everywhere in this API: Run.epoch, Run.best.epoch, Step.epoch, ?epoch= queries)
 { "epoch": 12, "train_loss": { "box": 1.18, "cls": 0.80, "dfl": 1.00, "total": 2.98 },
   "val": { "map50": 0.82, "map50_95": 0.61, "precision": 0.84, "recall": 0.77,
-           "per_class": [{ "class": 0, "map50": 0.85, "map50_95": 0.64, "precision": 0.86, "recall": 0.80 }] },
+           "per_class": [{ "class": 0, "map50": 0.85, "map50_95": 0.64, "precision": 0.86, "recall": 0.80 }],
+           "best_f1_conf": 0.312 | null },   // precision / recall are at this confidence (Operating point, above)
   "duration_s": 31.2 }
 ```
 
@@ -391,9 +462,10 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   previous process left `queued`, `running` or `stopping` become `stopped` (with a `warn` log line) and can be
   resumed with `resume_run_id`. On a graceful shutdown the active run stops after its current batch.
 - `models/`: `.folo` files listed as models (scanned on every listing; metadata read once per file version).
-- `exports/`: exported models. `cache/eval/`: cached `/eval` results. `cache/weights/<model id>.<hash>.f16.folo`:
-  the f16 weights of `/weights?format=f16` (the hash is of the source file's path, size and modification time;
-  older copies are removed when a new one is made, and a run's when the run is deleted).
+- `exports/`: exported models. `cache/eval/`: cached `/eval` results. `cache/weights/<model id>.<hash>.<variant>`:
+  the exports of `/weights?format=…`: `f16.folo`, and `onnx` / `decode.onnx` / `decode-dynamic-half.onnx` / … (the
+  ONNX switches that are on). The hash is of the source file's path, size and modification time; copies made from
+  an older version of the file are removed when a new one is made, and a run's when the run is deleted.
 
 ## Validation
 - `POST /api/val` body `{ "model_id", "dataset_id", "split": "val", "imgsz": null, "conf": 0.001, "iou": 0.7 }` →
@@ -437,7 +509,10 @@ start, except live-run timestamps):
   other states, start the mock with `FOLO_MOCK_TENSOR_CORES=off` (tensor cores available but not requested, no
   `amp`) or `FOLO_MOCK_TENSOR_CORES=none` (also `0` / `false`: the adapter through DX12, `gpus[0].backend` `dx12`,
   no tensor cores, no `amp`; `shader_f16` stays true). The reasons are worded as the real server's.
-- `POST /api/runs` starts a simulated run (6 s per epoch) that can be stopped; when it completes, its model appears
-  in `/api/models`. `POST /api/datasets` scans real folders; `POST /api/datasets/synthetic` makes a procedural
+- `POST /api/runs` queues a simulated run (6 s per epoch) that can be stopped and moved in the queue; runs created
+  this way train one at a time (the first after 2 s in `queued`), like the real server's. When one completes, its
+  model appears in `/api/models`. Every mock run has `resolved` (the real trainer's resolution of its config) once
+  it started, and every `val` / `/eval` / model metric has a deterministic `best_f1_conf`. `/weights?format=onnx`
+  is the real exporter's graph of the generated `.folo` file. `POST /api/datasets` scans real folders; `POST /api/datasets/synthetic` makes a procedural
   dataset. Predictions are deterministic in the image bytes (or dataset image) and the model. `POST /api/val` derives
   per-class metrics from the model's metrics (deterministic per model, dataset and split).

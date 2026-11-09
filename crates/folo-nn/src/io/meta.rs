@@ -195,10 +195,14 @@ pub struct Metrics {
     pub map50: f64,
     /// mAP@0.5:0.95.
     pub map50_95: f64,
-    /// Precision.
+    /// Precision at `best_f1_conf`.
     pub precision: f64,
-    /// Recall.
+    /// Recall at `best_f1_conf`.
     pub recall: f64,
+    /// The confidence threshold precision and recall are taken at (the best class-mean F1, docs/METRICS.md).
+    /// Absent in files written before it; never written as `null`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub best_f1_conf: Option<f64>,
 }
 
 /// The metadata every `.folo` file has, typed. Keys this struct does not model (checkpoint contracts, unknown

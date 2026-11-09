@@ -1,7 +1,8 @@
 //! Mock weights (`GET /api/models/{id}/weights`): real `.folo` files of the folo-n architecture with seeded random
 //! weights and the model's classes, image size and head, generated on first request and kept in memory (one file per
 //! class list, image size, head and format), so Studio's in-browser detector can load them. Random weights detect nothing
-//! useful; the point is a file that loads and runs exactly like a trained one.
+//! useful; the point is a file that loads and runs exactly like a trained one. `format=onnx` is the real exporter's
+//! graph of that file.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -64,6 +65,12 @@ impl MockWeights {
                 let mut out = Vec::new();
                 file.export_to(&mut out, FloatDType::F16).map_err(internal)?;
                 out
+            }
+            // The real server's ONNX export of the generated file (a loadable graph of random weights).
+            WeightsFormat::Onnx(switches) => {
+                let (f32_bytes, _) = self.file(classes, imgsz, head, WeightsFormat::Stored)?;
+                let file = ModelFile::from_bytes(f32_bytes.to_vec()).map_err(internal)?;
+                crate::models::onnx_export(&file, switches)?.bytes
             }
         };
         let etag = format!("\"{:x}-{:016x}\"", bytes.len(), fnv1a(&bytes));

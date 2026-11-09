@@ -2,7 +2,7 @@
 
 use folo_core::Device;
 use folo_data::AugmentConfig;
-use folo_nn::optim::{OptimKind, auto_optimizer};
+use folo_nn::optim::{OptimKind, auto_optimizer, effective_weight_decay};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
@@ -255,6 +255,15 @@ impl TrainConfig {
         if self.val_batch == 0 { 2 * self.batch } else { self.val_batch }
     }
 
+    /// docs/API.md's `Run.resolved`: what this config trains with on `n_train` images of `num_classes` classes
+    /// (the optimizer of [`TrainConfig::resolve_optimizer`], the scaled weight decay, accumulation and warmup), as
+    /// [`super::Trainer::resolved_train`] reports it once built.
+    pub fn resolved_train(&self, n_train: usize, num_classes: usize) -> folo_api::ResolvedTrain {
+        let accumulate = self.accumulate();
+        let spe = n_train.div_ceil(self.batch.max(1)).div_ceil(accumulate);
+        self.resolve_optimizer(n_train, num_classes).to_api(self, accumulate, spe as u64)
+    }
+
     /// The optimizer this config trains with on `n_train` images of `num_classes` classes (§8.2 `auto`).
     pub fn resolve_optimizer(&self, n_train: usize, num_classes: usize) -> ResolvedOptim {
         match self.optimizer {
@@ -277,6 +286,70 @@ impl TrainConfig {
     }
 }
 
+impl ResolvedOptim {
+    /// docs/API.md's `Run.resolved` of a run with `cfg` that resolved to `self`, accumulating `accumulate` batches
+    /// over `steps_per_epoch` optimizer steps per epoch.
+    pub fn to_api(
+        &self,
+        cfg: &TrainConfig,
+        accumulate: usize,
+        steps_per_epoch: u64,
+    ) -> folo_api::ResolvedTrain {
+        let adamw = self.kind == OptimKind::AdamW;
+        folo_api::ResolvedTrain {
+            optimizer: if adamw {
+                folo_api::ResolvedOptimizer::Adamw
+            } else {
+                folo_api::ResolvedOptimizer::Sgd
+            },
+            lr0: self.lr0,
+            lrf: cfg.lrf,
+            cos_lr: cfg.cos_lr,
+            momentum: self.momentum,
+            betas: adamw.then_some([self.momentum, folo_nn::optim::DEFAULT_BETA2]),
+            weight_decay: effective_weight_decay(cfg.weight_decay, cfg.batch, accumulate, cfg.nbs),
+            batch: cfg.batch as u32,
+            accumulate: accumulate as u32,
+            nbs: cfg.nbs as u32,
+            optimizer_steps_per_epoch: steps_per_epoch,
+            warmup_iters: folo_nn::warmup_iters(cfg.warmup_epochs, cfg.epochs as u64, steps_per_epoch),
+            warmup_epochs: cfg.warmup_epochs,
+            warmup_momentum: cfg.warmup_momentum,
+            warmup_bias_lr: self.warmup_bias_lr,
+        }
+    }
+
+    /// The `Run.resolved` of a run folder's `config.json` ([`super::Trainer::run_config`]): its `resolved` object,
+    /// or, in files written before it, the same numbers rebuilt from `optimizer`, `accumulate`, `steps_per_epoch`,
+    /// `warmup_iters` and `train`. `None` when the file has neither.
+    pub fn from_run_config(v: &serde_json::Value) -> Option<folo_api::ResolvedTrain> {
+        if let Some(r) = v.get("resolved").and_then(|r| serde_json::from_value(r.clone()).ok()) {
+            return Some(r);
+        }
+        let o = v.get("optimizer")?;
+        let train: TrainConfig = serde_json::from_value(v.get("train")?.clone()).ok()?;
+        let f = |obj: &serde_json::Value, k: &str| obj.get(k).and_then(|x| x.as_f64());
+        let n = |k: &str| v.get(k).and_then(|x| x.as_u64());
+        let kind = match o.get("type")?.as_str()? {
+            "sgd" => OptimKind::Sgd,
+            "adamw" => OptimKind::AdamW,
+            _ => return None,
+        };
+        let resolved = ResolvedOptim {
+            kind,
+            lr0: f(o, "lr0")?,
+            momentum: f(o, "momentum")?,
+            warmup_bias_lr: f(o, "warmup_bias_lr")?,
+        };
+        let accumulate = n("accumulate")? as usize;
+        let mut r = resolved.to_api(&train, accumulate, n("steps_per_epoch")?);
+        // The numbers the run trained with, where the file has them.
+        r.weight_decay = f(o, "weight_decay").unwrap_or(r.weight_decay);
+        r.warmup_iters = n("warmup_iters").unwrap_or(r.warmup_iters);
+        Some(r)
+    }
+}
+
 /// Parse a device string: `cpu`, `gpu` (= `gpu:0`), `gpu:<n>`, or `auto` (the first GPU with a registered
 /// folo-core backend, else the CPU). A GPU without a registered backend is an error.
 pub fn resolve_device(s: &str) -> Result<Device> {
@@ -294,6 +367,51 @@ pub fn resolve_device(s: &str) -> Result<Device> {
                 Some(i) => gpu(i),
                 None => Err(Error::Config(format!("device must be auto, cpu or gpu:<n>, got `{s}`"))),
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `Run.resolved`: `auto` resolved for a short run, and the same numbers back from a `config.json` with the
+    /// `resolved` object and from one written before it (rebuilt from its other keys).
+    #[test]
+    fn resolved_train_and_run_config() {
+        let cfg = TrainConfig { epochs: 30, batch: 8, ..TrainConfig::default() };
+        let r = cfg.resolved_train(1000, 3);
+        // 125 batches · 30 epochs over max(batch, nbs) = 64 is 480 iterations: a short run, so AdamW at
+        // 0.002 · 5 / (4 + 3), its β1 0.9 and β2 0.999, no warmup bias LR.
+        assert_eq!(r.optimizer, folo_api::ResolvedOptimizer::Adamw);
+        assert_eq!((r.lr0, r.momentum, r.betas, r.warmup_bias_lr), (0.001429, 0.9, Some([0.9, 0.999]), 0.0));
+        // accumulate round(64 / 8) = 8; 125 batches → 16 optimizer steps; weight decay 0.0005 · 8 · 8 / 64.
+        assert_eq!((r.batch, r.accumulate, r.nbs, r.optimizer_steps_per_epoch), (8, 8, 64, 16));
+        assert!((r.weight_decay - 0.0005).abs() < 1e-12, "{}", r.weight_decay);
+        // 3 warmup epochs of 16 steps = 48 < the 100-step floor (30% of 480 = 144 allows it).
+        assert_eq!(r.warmup_iters, 100);
+        assert_eq!((r.warmup_epochs, r.warmup_momentum, r.lrf, r.cos_lr), (3.0, 0.8, 0.01, false));
+        // An explicit optimizer keeps the config's LR and momentum; SGD has no betas.
+        let sgd =
+            TrainConfig { optimizer: OptimizerChoice::Sgd, lr0: 0.02, ..cfg.clone() }.resolved_train(1000, 3);
+        assert_eq!(
+            (sgd.optimizer, sgd.lr0, sgd.momentum, sgd.betas),
+            (folo_api::ResolvedOptimizer::Sgd, 0.02, 0.937, None)
+        );
+
+        let new = serde_json::json!({ "resolved": r, "optimizer": { "type": "sgd" } });
+        assert_eq!(ResolvedOptim::from_run_config(&new), Some(r.clone()), "the resolved object wins");
+        let old = serde_json::json!({
+            "train": cfg,
+            "optimizer": { "type": "adamw", "lr0": 0.001429, "momentum": 0.9, "warmup_bias_lr": 0.0,
+                           "weight_decay": 0.0005 },
+            "batches_per_epoch": 125, "accumulate": 8, "steps_per_epoch": 16, "warmup_iters": 100,
+        });
+        assert_eq!(ResolvedOptim::from_run_config(&old), Some(r));
+        for broken in
+            [serde_json::json!({}), serde_json::json!({ "optimizer": { "type": "auto" }, "train": {} })]
+        {
+            assert_eq!(ResolvedOptim::from_run_config(&broken), None, "{broken}");
         }
     }
 }

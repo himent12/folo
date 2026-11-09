@@ -13,8 +13,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use folo_api::{
     API_VERSION, DatasetList, ExportSpec, Health, ImagePage, IssuePage, LogLevel, LogLine, ModelList,
-    PredictRequest, RegisterDataset, RunEvent, RunList, RunLogs, Split, SyntheticDataset, SystemInfo,
-    SystemResponse, TrainConfig, ValReport, ValRequest,
+    OnnxSwitches, PredictRequest, QueueRequest, RegisterDataset, RunEvent, RunList, RunLogs, Split,
+    SyntheticDataset, SystemInfo, SystemResponse, TrainConfig, ValReport, ValRequest,
 };
 use futures_util::{Stream, StreamExt, stream};
 use serde::Deserialize;
@@ -23,7 +23,9 @@ use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 use crate::AppState;
 use crate::error::{ApiJson, ApiPath, ApiQuery, Error, Result};
-use crate::store::{ImageQuery, IssueQuery, PredictInput, PredictSource, Store, WeightsBody, WeightsFormat};
+use crate::store::{
+    ImageQuery, IssueQuery, PredictInput, PredictSource, QueueMove, Store, WeightsBody, WeightsFormat,
+};
 use crate::util::{rfc3339, unix_now};
 
 /// Largest accepted request body for `POST /api/predict` uploads.
@@ -56,6 +58,7 @@ pub fn api() -> Router<AppState> {
         .route("/runs", get(list_runs).post(create_run))
         .route("/runs/{id}", get(get_run).delete(delete_run))
         .route("/runs/{id}/stop", post(stop_run))
+        .route("/runs/{id}/queue", post(move_run))
         .route("/runs/{id}/metrics", get(run_metrics))
         .route("/runs/{id}/samples", get(run_samples))
         .route("/runs/{id}/logs", get(run_logs))
@@ -115,7 +118,13 @@ async fn system(State(st): State<AppState>) -> Result<Json<SystemResponse>> {
             .await
             .map_err(|e| Error::internal(format!("task failed: {e}")))?;
     let data_dir = st.store.data_dir().map(folo_api::json::path);
-    let features = vec![folo_api::FEATURE_EXPORT_ONNX_SWITCHES.to_string()];
+    let features = [
+        folo_api::FEATURE_EXPORT_ONNX_SWITCHES,
+        folo_api::FEATURE_QUEUE_CONTROL,
+        folo_api::FEATURE_WEIGHTS_ONNX,
+    ]
+    .map(String::from)
+    .to_vec();
     Ok(Json(SystemResponse {
         system: SystemInfo { cpu, memory, gpus: st.store.gpus() },
         data_dir,
@@ -266,6 +275,12 @@ async fn export_model(
 #[derive(Deserialize)]
 struct WeightsParams {
     format: Option<String>,
+    /// `format=onnx` only: `folo export --decode`.
+    decode: Option<bool>,
+    /// `format=onnx` only: `folo export --dynamic`.
+    dynamic: Option<bool>,
+    /// `format=onnx` only: `folo export --half`.
+    half: Option<bool>,
 }
 
 /// True when the conditional headers say the client's copy is current (RFC 9110 §13.2.2 for GET / HEAD):
@@ -291,18 +306,27 @@ async fn model_weights(
     ApiQuery(p): ApiQuery<WeightsParams>,
     headers: HeaderMap,
 ) -> Result<Response> {
+    let bad = |m: String| Error::new(StatusCode::BAD_REQUEST, "invalid_query", m);
+    let switches = OnnxSwitches {
+        decode: p.decode.unwrap_or(false),
+        dynamic: p.dynamic.unwrap_or(false),
+        half: p.half.unwrap_or(false),
+    };
     let format = match p.format.as_deref() {
         None | Some("") => WeightsFormat::Stored,
         Some("f16") => WeightsFormat::F16,
+        Some("onnx") => WeightsFormat::Onnx(switches),
         Some(f) => {
-            return Err(Error::new(
-                StatusCode::BAD_REQUEST,
-                "invalid_query",
-                format!("unknown format '{f}'"),
-            )
-            .hint("format is f16, or leave it out for the stored file"));
+            return Err(bad(format!("unknown format '{f}'"))
+                .hint("format is f16 or onnx, or leave it out for the stored file"));
         }
     };
+    if !matches!(format, WeightsFormat::Onnx(_))
+        && (p.decode.is_some() || p.dynamic.is_some() || p.half.is_some())
+    {
+        return Err(bad("decode, dynamic and half only apply to format=onnx".into())
+            .hint("format=f16 is already the half-precision .folo file; leave the switches out"));
+    }
     let w = blocking(&st, move |s| s.model_weights(&id, format)).await?;
     let etag = HeaderValue::from_str(&w.etag).map_err(|e| Error::internal(format!("bad ETag: {e}")))?;
     let validators = [
@@ -379,6 +403,16 @@ async fn get_run(State(st): State<AppState>, ApiPath(id): ApiPath<String>) -> Re
 
 async fn stop_run(State(st): State<AppState>, ApiPath(id): ApiPath<String>) -> Result<Response> {
     Ok(Json(blocking(&st, move |s| s.stop_run(&id)).await?).into_response())
+}
+
+/// `POST /api/runs/{id}/queue`: moves a waiting run in the training queue (or starts it next).
+async fn move_run(
+    State(st): State<AppState>,
+    ApiPath(id): ApiPath<String>,
+    ApiJson(req): ApiJson<QueueRequest>,
+) -> Result<Response> {
+    let mv = QueueMove::parse(req)?;
+    Ok(Json(blocking(&st, move |s| s.move_run(&id, mv)).await?).into_response())
 }
 
 async fn delete_run(State(st): State<AppState>, ApiPath(id): ApiPath<String>) -> Result<StatusCode> {

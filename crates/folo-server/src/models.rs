@@ -24,7 +24,7 @@ use crate::engine::{self, FileKey, engine_error, nn_error};
 use crate::error::{Error, Result};
 use crate::index::write_atomic;
 use crate::runs::{DatasetRef, data_format};
-use crate::store::weights_io;
+use crate::store::{WeightsFormat, weights_io};
 use crate::util::{fnv1a, rfc3339};
 
 /// Validation batch of `/eval`.
@@ -163,6 +163,7 @@ fn read_meta(path: &Path) -> Result<FileMeta> {
             map50_95: x.map50_95 as f32,
             precision: x.precision as f32,
             recall: x.recall as f32,
+            best_f1_conf: x.best_f1_conf.map(|c| c as f32),
         }),
         head: if m.config.has_o2o() { Head::O2o } else { Head::O2m },
         trained_with: trained_with(m.extra.get("folo.train")),
@@ -216,6 +217,9 @@ pub fn file_model_id(path: &Path) -> String {
     format!("m_{:08x}", (h >> 32) as u32 ^ h as u32)
 }
 
+/// Bumped when [`ModelEval`] gains a field the engine computes, so older `cache/eval/` files are recomputed.
+const EVAL_CACHE_VERSION: &str = "v2";
+
 #[derive(Serialize, Deserialize)]
 struct CachedEval {
     key: String,
@@ -227,25 +231,27 @@ pub struct Models {
     data_dir: PathBuf,
     meta: Mutex<HashMap<PathBuf, (FileKey, Arc<FileMeta>)>>,
     evals: Mutex<HashMap<String, (String, ModelEval)>>,
-    /// Held while an f16 weights file is written, so concurrent first requests export once.
-    f16: Mutex<()>,
+    /// Held while a derived weights file (f16, ONNX) is written, so concurrent first requests export once.
+    derived: Mutex<()>,
 }
 
 impl Models {
     /// Caches rooted at `data_dir`.
     pub fn new(data_dir: PathBuf) -> Models {
-        Models { data_dir, meta: Mutex::default(), evals: Mutex::default(), f16: Mutex::default() }
+        Models { data_dir, meta: Mutex::default(), evals: Mutex::default(), derived: Mutex::default() }
     }
 
     fn weights_cache(&self) -> PathBuf {
         self.data_dir.join("cache").join("weights")
     }
 
-    /// The `folo-f16` export of `m` for `GET /api/models/{id}/weights?format=f16`, opened (so removing an older
-    /// copy never pulls it from under a request): `cache/weights/<model id>.<hash of the weights file's path, size
-    /// and mtime>.f16.folo`, written by the export code of `POST /api/models/{id}/export` the first time it is asked
-    /// for (older versions of the model's file are then removed).
-    pub fn f16_weights(&self, m: &ModelRef) -> Result<(PathBuf, std::fs::File)> {
+    /// The derived weights of `m` for `GET /api/models/{id}/weights?format=f16|onnx`, opened (so removing an
+    /// older copy never pulls it from under a request): `cache/weights/<model id>.<hash of the weights file's
+    /// path, size and mtime>.<variant>` (`f16.folo`, or `onnx` with the switches, e.g. `decode-half.onnx`), written
+    /// by the export code of `POST /api/models/{id}/export` the first time it is asked for (copies made from
+    /// older versions of the model's file are then removed). `format` is [`WeightsFormat::F16`] or
+    /// [`WeightsFormat::Onnx`].
+    pub fn derived_weights(&self, m: &ModelRef, format: WeightsFormat) -> Result<(PathBuf, std::fs::File)> {
         let id = m.model.id.as_str();
         let fk = FileKey::of(&m.path).map_err(|e| weights_io(e, &m.path, id))?;
         let mtime = fk
@@ -255,7 +261,8 @@ impl Models {
         let key = fnv1a(format!("{}|{}|{mtime}", fk.path.display(), fk.len).as_bytes());
         let dir = self.weights_cache();
         // Model ids have no dots, so `<id>.` never prefixes another model's files.
-        let out = dir.join(format!("{id}.{key:016x}.f16.folo"));
+        let version = format!("{id}.{key:016x}.");
+        let out = dir.join(format!("{version}{}", cache_variant(format)));
         let open = || match std::fs::File::open(&out) {
             Ok(f) => Ok(Some(f)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -264,7 +271,7 @@ impl Models {
         if let Some(f) = open()? {
             return Ok((out, f));
         }
-        let _guard = self.f16.lock().unwrap();
+        let _guard = self.derived.lock().unwrap();
         if let Some(f) = open()? {
             return Ok((out, f));
         }
@@ -277,28 +284,34 @@ impl Models {
         let file = engine::read_model_file(&m.path)
             .map_err(|e| if m.path.exists() { e } else { Error::not_found("model", id) })?;
         // Written to a temporary file and renamed into place, so a reader never sees a partial export.
-        file.export(&out, FloatDType::F16).map_err(nn_error)?;
+        match format {
+            WeightsFormat::Onnx(switches) => {
+                onnx_export(&file, switches)?.write_to(&out).map_err(engine_error)?
+            }
+            _ => file.export(&out, FloatDType::F16).map_err(nn_error)?,
+        }
         // Opened before the lock is released: a newer export's cleanup may remove the file, not this handle.
         let f = open()?.ok_or_else(|| Error::internal(format!("{} vanished", out.display())))?;
-        self.remove_weights(id, Some(&out));
+        self.remove_weights(id, Some(&version));
         Ok((out, f))
     }
 
-    /// Removes the cached f16 weights of model `id` (when its run is deleted). Waits for an export in progress, so
-    /// none is left behind.
+    /// Removes the cached derived weights of model `id` (when its run is deleted). Waits for an export in
+    /// progress, so none is left behind.
     pub fn forget_weights(&self, id: &str) {
-        let _guard = self.f16.lock().unwrap();
+        let _guard = self.derived.lock().unwrap();
         self.remove_weights(id, None);
     }
 
-    /// Removes the cached f16 weights of model `id` except `keep`; the caller holds the export lock.
-    fn remove_weights(&self, id: &str, keep: Option<&Path>) {
+    /// Removes the cached derived weights of model `id` except those named `keep…` (the current version of its
+    /// file); the caller holds the export lock.
+    fn remove_weights(&self, id: &str, keep: Option<&str>) {
         let prefix = format!("{id}.");
         let Ok(entries) = std::fs::read_dir(self.weights_cache()) else { return };
         for e in entries.flatten() {
             let name = e.file_name();
             let name = name.to_string_lossy();
-            if name.starts_with(&prefix) && name.ends_with(".f16.folo") && keep != Some(e.path().as_path()) {
+            if name.starts_with(&prefix) && !keep.is_some_and(|k| name.starts_with(k)) {
                 let _ = std::fs::remove_file(e.path());
             }
         }
@@ -364,7 +377,9 @@ impl Models {
             .modified
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map_or(0, |d| d.as_nanos());
-        let key = format!("{}|{}|{mtime}|{}|{ds_key}", fk.path.display(), fk.len, dataset.id);
+        // `EVAL_CACHE_VERSION` first: results cached before `best_f1_conf` existed are computed again.
+        let key =
+            format!("{EVAL_CACHE_VERSION}|{}|{}|{mtime}|{}|{ds_key}", fk.path.display(), fk.len, dataset.id);
         if let Some((k, e)) = self.evals.lock().unwrap().get(&m.model.id)
             && *k == key
         {
@@ -416,11 +431,7 @@ impl Models {
         let written = match format {
             ExportFormat::FoloF16 => file.export(&out, FloatDType::F16).map_err(nn_error),
             ExportFormat::Onnx => {
-                let mut opts = OnnxOptions::new(file.metadata().imgsz);
-                (opts.decode, opts.dynamic, opts.half) =
-                    (spec.onnx.decode, spec.onnx.dynamic, spec.onnx.half);
-                opts.metadata = file.metadata().for_weights().to_map();
-                onnx::export_file(&file, &opts).and_then(|x| x.write_to(&out)).map_err(engine_error)
+                onnx_export(&file, spec.onnx).and_then(|x| x.write_to(&out).map_err(engine_error))
             }
         };
         if let Err(e) = written {
@@ -429,6 +440,33 @@ impl Models {
         }
         let bytes = std::fs::metadata(&out).map(|x| x.len()).unwrap_or(0);
         Ok(ExportResult { path: folo_api::json::path(&out), bytes })
+    }
+}
+
+/// The `onnx` export of `POST /api/models/{id}/export` (and `/weights?format=onnx`): `folo export --format onnx`'s
+/// defaults (f32, batch 1, the model's training imgsz, raw head outputs) unless a switch says otherwise, with the
+/// file's metadata. A model the exporter cannot map is `501 not_implemented`.
+pub fn onnx_export(
+    file: &folo_nn::io::ModelFile,
+    switches: folo_api::OnnxSwitches,
+) -> Result<onnx::OnnxExport> {
+    let mut opts = OnnxOptions::new(file.metadata().imgsz);
+    (opts.decode, opts.dynamic, opts.half) = (switches.decode, switches.dynamic, switches.half);
+    opts.metadata = file.metadata().for_weights().to_map();
+    onnx::export_file(file, &opts).map_err(engine_error)
+}
+
+/// The variant part of a derived weights file's name in `cache/weights/` (after `<model id>.<hash>.`).
+fn cache_variant(format: WeightsFormat) -> String {
+    match format {
+        WeightsFormat::Onnx(s) => {
+            let on: Vec<&str> = [("decode", s.decode), ("dynamic", s.dynamic), ("half", s.half)]
+                .into_iter()
+                .filter_map(|(n, on)| on.then_some(n))
+                .collect();
+            if on.is_empty() { "onnx".into() } else { format!("{}.onnx", on.join("-")) }
+        }
+        _ => "f16.folo".into(),
     }
 }
 
@@ -556,6 +594,7 @@ pub fn eval_of(r: &folo_vision::EvalReport) -> ModelEval {
         confusion,
         per_class: val_metrics(r).per_class,
         images: r.num_images.min(u32::MAX as u64) as u32,
+        best_f1_conf: val_metrics(r).best_f1_conf,
     }
 }
 

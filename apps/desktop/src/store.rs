@@ -482,6 +482,13 @@ impl Store {
                     *s = Load::Idle;
                 }
             }
+            RunEvent::Queue(q) => {
+                if let Some(runs) = self.runs.ready_mut()
+                    && let Some(r) = runs.iter_mut().find(|r| r.id == run_id)
+                {
+                    r.queue_position = Some(q.position);
+                }
+            }
             RunEvent::Log(l) => {
                 if let Some(Load::Ready(lines)) = self.logs.get_mut(run_id) {
                     lines.push(l);
@@ -496,6 +503,10 @@ impl Store {
                     && let Some(r) = runs.iter_mut().find(|r| r.id == run_id)
                 {
                     r.status = st.status;
+                    // Only a waiting run has a place in the queue (`queue` events set it).
+                    if st.status != RunStatus::Queued {
+                        r.queue_position = None;
+                    }
                     if st.error.is_some() {
                         r.error = st.error;
                     }
@@ -625,6 +636,7 @@ mod tests {
                 precision: 0.5,
                 recall: 0.5,
                 per_class: vec![],
+                best_f1_conf: None,
             },
             duration_s: 1.,
         };

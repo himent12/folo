@@ -20,8 +20,8 @@ use std::time::{Duration, Instant};
 
 use axum::http::StatusCode;
 use folo_api::{
-    BestEpoch, DatasetFormat, Epoch, LogLevel, LogLine, ModelMetrics, Run, RunEvent, RunMetrics, RunStatus,
-    StatusEvent, Step, TrainConfig,
+    BestEpoch, DatasetFormat, Epoch, LogLevel, LogLine, ModelMetrics, QueueEvent, Run, RunEvent, RunMetrics,
+    RunStatus, StatusEvent, Step, TrainConfig,
 };
 use folo_data::{Dataset as _, Split};
 use folo_vision::train::ResumeOverrides;
@@ -32,7 +32,7 @@ use tokio::sync::broadcast;
 use crate::engine;
 use crate::error::{Error, Result};
 use crate::index::write_atomic;
-use crate::store::Subscription;
+use crate::store::{QueueMove, Subscription};
 use crate::util::{fnv1a, rfc3339, unique_id, unix_now};
 
 /// Events buffered per SSE subscriber before it counts as lagging.
@@ -239,12 +239,7 @@ impl RunEntry {
                 st.tail.clear();
                 st.file.epochs_done = e.epoch;
                 let v = &e.val;
-                st.file.last_metrics = Some(ModelMetrics {
-                    map50: v.map50,
-                    map50_95: v.map50_95,
-                    precision: v.precision,
-                    recall: v.recall,
-                });
+                st.file.last_metrics = Some(model_metrics(v));
                 let r = &mut st.file.run;
                 r.epoch = e.epoch;
                 if r.best.is_none_or(|b| e.val.map50_95 > b.map50_95) {
@@ -253,9 +248,22 @@ impl RunEntry {
                 self.persist(&st);
             }
             RunEvent::Log(l) => self.write_log(l),
+            // The trainer never sends these; the queue does (`Runs::notify_queue`).
+            RunEvent::Queue(_) => {}
         }
         // Sent under the state lock, so subscribers see transitions in the order they happen.
         self.send(ev.clone());
+    }
+}
+
+/// The model metrics of an epoch's validation.
+fn model_metrics(v: &folo_api::ValMetrics) -> ModelMetrics {
+    ModelMetrics {
+        map50: v.map50,
+        map50_95: v.map50_95,
+        precision: v.precision,
+        recall: v.recall,
+        best_f1_conf: v.best_f1_conf,
     }
 }
 
@@ -321,6 +329,15 @@ impl Runs {
                         continue;
                     }
                 };
+                let mut file = file;
+                // Runs from before `Run.resolved`: the trainer's config.json has the same numbers.
+                if file.run.resolved.is_none() {
+                    file.run.resolved = std::fs::read(d.join("config.json"))
+                        .ok()
+                        .and_then(|b| serde_json::from_slice(&b).ok())
+                        .and_then(|v| folo_vision::train::ResolvedOptim::from_run_config(&v));
+                }
+                file.run.queue_position = None;
                 let id = file.run.id.clone();
                 let e = RunEntry::new(id, d, file);
                 {
@@ -378,9 +395,89 @@ impl Runs {
         v.into_iter().map(|(_, _, e)| e).collect()
     }
 
-    /// Every run, newest first.
+    /// Every run, newest first, with its place in the queue.
     pub fn list(&self) -> Vec<Run> {
-        self.entries().iter().map(|e| e.run()).collect()
+        let entries = self.entries();
+        let waiting: Vec<String> = self.queue.lock().unwrap().runs.iter().map(|e| e.id.clone()).collect();
+        entries
+            .iter()
+            .map(|e| {
+                let mut r = e.run();
+                r.queue_position = position_in(&waiting, &e.id);
+                r
+            })
+            .collect()
+    }
+
+    /// The API record of run `id` with its place in the queue ([`Run::queue_position`]).
+    pub fn snapshot(&self, id: &str) -> Result<Run> {
+        let e = self.get(id)?;
+        let mut r = e.run();
+        r.queue_position = self.position(&e.id);
+        Ok(r)
+    }
+
+    /// The 1-based place of run `id` among the waiting runs.
+    fn position(&self, id: &str) -> Option<u32> {
+        let q = self.queue.lock().unwrap();
+        q.runs.iter().position(|e| e.id == id).map(|i| i as u32 + 1)
+    }
+
+    /// Sends every waiting run its place in the queue (the SSE `queue` event). Called with the queue locked, after
+    /// every change to it, so a run's events arrive in the order of the changes, and before the `running` status
+    /// of the worker taking it.
+    fn notify_queue(q: &Queue) {
+        let waiting = q.runs.len() as u32;
+        for (i, e) in q.runs.iter().enumerate() {
+            e.send(RunEvent::Queue(QueueEvent { position: i as u32 + 1, waiting }));
+        }
+    }
+
+    /// `POST /api/runs/{id}/queue`: moves a waiting run within the queue (`start` moves it to the front and wakes
+    /// the worker, which takes it as soon as no run is training; the active run is never preempted). A run that is
+    /// not waiting (the worker took it and is starting it, or it is running or finished) is `409 run_not_queued`.
+    pub fn move_queued(&self, id: &str, mv: QueueMove) -> Result<Run> {
+        let e = self.get(id)?;
+        // Lock order: a run's state, then the queue (as `stop`), so the run cannot start, stop or be deleted
+        // while it moves.
+        let st = e.state.lock().unwrap();
+        if st.deleted {
+            return Err(Error::not_found("run", id));
+        }
+        let mut q = self.queue.lock().unwrap();
+        let Some(from) = q.runs.iter().position(|x| x.id == id) else {
+            return Err(not_queued(id, st.file.run.status));
+        };
+        let n = q.runs.len();
+        let to = mv.target(from, n);
+        if to != from {
+            let item = q.runs.remove(from).expect("position is in range");
+            q.runs.insert(to, item);
+            Self::notify_queue(&q);
+        }
+        let training = self.active.lock().unwrap().is_some();
+        drop(q);
+        let mut run = st.file.run.clone();
+        run.queue_position = Some(to as u32 + 1);
+        drop(st);
+        if mv == QueueMove::Start {
+            self.wake.notify_all();
+        }
+        let place = format!("{} of {n}", to + 1);
+        e.log(
+            LogLevel::Info,
+            match (mv, to == from) {
+                (QueueMove::Start, _) if training => {
+                    format!(
+                        "start requested: moved to the front ({place}); it starts when the active run ends"
+                    )
+                }
+                (QueueMove::Start, _) => "start requested: starting now".to_string(),
+                (_, true) => format!("queue position unchanged ({place})"),
+                (_, false) => format!("moved in the queue to position {place}"),
+            },
+        );
+        Ok(run)
     }
 
     /// Registers a new run (status `queued`) and queues it. `config` is already validated, its name filled in.
@@ -417,6 +514,8 @@ impl Runs {
             model_id: None,
             error: None,
             error_code: None,
+            resolved: None,
+            queue_position: None,
         };
         let file =
             RunFile { run: run.clone(), dataset, weights, val_offset, epochs_done: 0, last_metrics: None };
@@ -425,7 +524,7 @@ impl Runs {
         list.push(entry.clone());
         drop(list);
         self.enqueue(&entry)?;
-        Ok(run)
+        Ok(Run { queue_position: self.position(&run.id), ..run })
     }
 
     /// `503 shutting_down` once [`Runs::shutdown`] has started.
@@ -450,6 +549,7 @@ impl Runs {
                 return Err(shutting_down());
             }
             q.runs.push_back(entry.clone());
+            Self::notify_queue(&q);
             q.runs.len() - 1 + usize::from(self.active.lock().unwrap().is_some())
         };
         entry.log(
@@ -482,6 +582,7 @@ impl Runs {
                         return;
                     }
                     if let Some(e) = q.runs.pop_front() {
+                        Self::notify_queue(&q);
                         break e;
                     }
                     q = self.wake.wait(q).unwrap();
@@ -536,7 +637,11 @@ impl Runs {
         }
         match st.file.run.status {
             RunStatus::Queued if !st.claimed => {
-                self.queue.lock().unwrap().runs.retain(|q| q.id != id);
+                {
+                    let mut q = self.queue.lock().unwrap();
+                    q.runs.retain(|q| q.id != id);
+                    Self::notify_queue(&q);
+                }
                 e.finish(&mut st, RunStatus::Stopped, None);
                 let run = st.file.run.clone();
                 drop(st);
@@ -653,7 +758,7 @@ impl Runs {
             },
         );
         self.enqueue(&e)?;
-        Ok(run)
+        Ok(Run { queue_position: self.position(id), ..run })
     }
 
     /// Subscribes to a run's events.
@@ -719,6 +824,22 @@ impl Runs {
     }
 }
 
+/// `409 run_not_queued`: moving a run that is not waiting in the queue.
+fn not_queued(id: &str, status: RunStatus) -> Error {
+    let what = match status {
+        // Taken off the queue by the worker, which has not reported `running` yet.
+        RunStatus::Queued => "is starting".to_string(),
+        s => format!("is {}", serde_json::to_value(s).unwrap().as_str().unwrap_or("not queued")),
+    };
+    Error::conflict("run_not_queued", format!("run '{id}' {what}, not waiting in the queue"))
+        .hint("only runs waiting in the queue (with a queue_position) can be moved")
+}
+
+/// The 1-based place of `id` in `waiting` (the queue's run ids, front first).
+fn position_in(waiting: &[String], id: &str) -> Option<u32> {
+    waiting.iter().position(|w| w == id).map(|i| i as u32 + 1)
+}
+
 fn shutting_down() -> Error {
     Error::new(StatusCode::SERVICE_UNAVAILABLE, "shutting_down", "the server is shutting down")
         .hint("start the run again once the server has restarted")
@@ -752,12 +873,7 @@ fn reconcile(file: &mut RunFile, dir: &Path) {
         best = Some(BestEpoch { epoch: (b.epoch + 1).max(1) as u32, map50_95: f as f32 });
     }
     file.run.best = best;
-    file.last_metrics = m.epochs.last().filter(|e| e.epoch == done).map(|e| ModelMetrics {
-        map50: e.val.map50,
-        map50_95: e.val.map50_95,
-        precision: e.val.precision,
-        recall: e.val.recall,
-    });
+    file.last_metrics = m.epochs.last().filter(|e| e.epoch == done).map(|e| model_metrics(&e.val));
     file.epochs_done = done;
 }
 
@@ -809,6 +925,7 @@ fn execute(e: &Arc<RunEntry>) {
         let mut st = e.state.lock().unwrap();
         st.file.run.steps_per_epoch = trainer.batches_per_epoch() as u64;
         st.file.run.device = engine::describe(trainer.device());
+        st.file.run.resolved = Some(trainer.resolved_train());
         e.persist(&st);
     }
     // The trainer reports the outcome itself (the final `status` event, the error as a log line); the worker
@@ -919,6 +1036,8 @@ mod tests {
             model_id: None,
             error: None,
             error_code: None,
+            resolved: None,
+            queue_position: None,
         };
         let dataset = DatasetRef {
             id: "ds_1".into(),

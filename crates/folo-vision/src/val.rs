@@ -215,9 +215,11 @@ pub fn validate(model: &FoloModel, ds: Arc<dyn Dataset>, cfg: &ValConfig) -> Res
     Ok(ValResult { report: ev.compute(), samples, detections: kept, seconds: t0.elapsed().as_secs_f64() })
 }
 
-/// docs/API.md's `ValMetrics` of a report.
+/// docs/API.md's `ValMetrics` of a report. `best_f1_conf` is the report's `best_conf`, `None` when no class has
+/// ground truth (there is no operating point then).
 pub fn val_metrics(r: &EvalReport) -> folo_api::ValMetrics {
     folo_api::ValMetrics {
+        best_f1_conf: (!r.per_class.is_empty()).then_some(r.best_conf),
         map50: r.map50,
         map50_95: r.map50_95,
         precision: r.precision,

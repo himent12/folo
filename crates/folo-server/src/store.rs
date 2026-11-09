@@ -81,6 +81,9 @@ pub enum WeightsFormat {
     Stored,
     /// The `folo-f16` export (fused EMA weights in F16), created on first request and cached.
     F16,
+    /// The ONNX export with these switches (`POST /api/models/{id}/export` with `format: onnx`), created on first
+    /// request and cached.
+    Onnx(folo_api::OnnxSwitches),
 }
 
 /// Where the bytes of a [`Weights`] come from.
@@ -162,7 +165,8 @@ pub fn weights_io(e: std::io::Error, path: &std::path::Path, id: &str) -> crate:
 }
 
 /// The file name a model's weights are offered under: its name reduced to `A-Z a-z 0-9 . _ -` (anything else
-/// becomes `_`, outer dots are dropped), `-f16` for the export, and `.folo`.
+/// becomes `_`, outer dots are dropped), then `.folo`, `-f16.folo` for the f16 export, or, as
+/// `POST /api/models/{id}/export` names its files, `.onnx` (`-f16.onnx` with `half`).
 pub fn weights_file_name(model_name: &str, format: WeightsFormat) -> String {
     let stem: String = model_name
         .chars()
@@ -176,6 +180,8 @@ pub fn weights_file_name(model_name: &str, format: WeightsFormat) -> String {
     match format {
         WeightsFormat::Stored => format!("{stem}.folo"),
         WeightsFormat::F16 => format!("{stem}-f16.folo"),
+        WeightsFormat::Onnx(s) if s.half => format!("{stem}-f16.onnx"),
+        WeightsFormat::Onnx(_) => format!("{stem}.onnx"),
     }
 }
 
@@ -206,6 +212,60 @@ pub enum PredictSource {
         /// Image id.
         image_id: String,
     },
+}
+
+/// A validated `POST /api/runs/{id}/queue` body ([`QueueMove::parse`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QueueMove {
+    /// To the front.
+    Top,
+    /// One place forward.
+    Up,
+    /// One place back.
+    Down,
+    /// To the back.
+    Bottom,
+    /// To the front, starting it at once when nothing trains (never preempting).
+    Start,
+    /// To this 1-based place (at least 1; past the end means the end).
+    To(u32),
+}
+
+impl QueueMove {
+    /// The move a request asks for: exactly one of `action` and `position`, `position` at least 1; anything
+    /// else is `400 invalid_body`.
+    pub fn parse(req: folo_api::QueueRequest) -> Result<QueueMove> {
+        use folo_api::QueueAction as A;
+        let bad = |m: &str| {
+            crate::error::Error::new(axum::http::StatusCode::BAD_REQUEST, "invalid_body", m)
+                .hint(r#"send {"action": "top" | "up" | "down" | "bottom" | "start"} or {"position": 1}"#)
+        };
+        match (req.action, req.position) {
+            (Some(_), Some(_)) => Err(bad("give either action or position, not both")),
+            (None, None) => Err(bad("give action or position")),
+            (None, Some(0)) => Err(bad("position is 1-based (1 starts next)")),
+            (None, Some(p)) => Ok(QueueMove::To(p)),
+            (Some(a), None) => Ok(match a {
+                A::Top => QueueMove::Top,
+                A::Up => QueueMove::Up,
+                A::Down => QueueMove::Down,
+                A::Bottom => QueueMove::Bottom,
+                A::Start => QueueMove::Start,
+            }),
+        }
+    }
+
+    /// The 0-based index a run at index `from` of a queue of `len` (> `from`) moves to.
+    pub fn target(self, from: usize, len: usize) -> usize {
+        let last = len.saturating_sub(1);
+        match self {
+            QueueMove::Top | QueueMove::Start => 0,
+            QueueMove::Up => from.saturating_sub(1),
+            QueueMove::Down => (from + 1).min(last),
+            QueueMove::Bottom => last,
+            QueueMove::To(p) => (p.max(1) as usize - 1).min(last),
+        }
+    }
 }
 
 /// A live subscription to a run's events.
@@ -281,6 +341,13 @@ pub trait Store: Send + Sync + 'static {
     fn get_run(&self, id: &str) -> Result<Run>;
     /// Requests a stop.
     fn stop_run(&self, id: &str) -> Result<Run>;
+    /// Moves a run that waits in the training queue (`POST /api/runs/{id}/queue`): `409 run_not_queued` when it
+    /// does not wait there. Stores without a queue answer `501 not_implemented` (the default).
+    fn move_run(&self, id: &str, mv: QueueMove) -> Result<Run> {
+        let _ = mv;
+        self.get_run(id)?;
+        Err(crate::error::Error::not_implemented("moving queued runs"))
+    }
     /// Deletes a run that is not active.
     fn delete_run(&self, id: &str) -> Result<()>;
     /// Full metric history; `every > 1` keeps every `every`-th step (and always the last one).
