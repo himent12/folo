@@ -97,26 +97,34 @@ pub fn train_command(
     CliCommand { cli: shell_join(&argv), argv }
 }
 
-/// `argv` as one command line that POSIX shells and PowerShell both read back as `argv`. An argument with
-/// characters either shell treats specially is single-quoted; one that holds a `'` is double-quoted instead, when it
-/// has none of the characters double quotes expand in either shell (`$`, a backtick, `"`, a backslash, `!`). Only
-/// an argument with both falls back to POSIX quoting (`'\''`), which PowerShell does not read; `argv` is exact
-/// either way.
+/// `argv` as one command line, quoted for PowerShell (as Studio shows commands): an argument with characters a shell
+/// treats specially is single-quoted, with each quote inside doubled (`'O''Brien'`; PowerShell also reads the
+/// typographic quotes U+2018 to U+201B as single quotes, so they are doubled too). POSIX shells read the same words
+/// unless an argument holds a quote; `argv` is exact either way.
 pub fn shell_join(argv: &[String]) -> String {
     argv.iter().map(|a| quote(a)).collect::<Vec<_>>().join(" ")
+}
+
+/// A single quote to PowerShell.
+fn is_quote(c: char) -> bool {
+    matches!(c, '\'' | '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}')
 }
 
 fn quote(a: &str) -> String {
     let plain = !a.is_empty() && a.chars().all(|c| c.is_ascii_alphanumeric() || "-_./:=".contains(c));
     if plain {
-        a.to_string()
-    } else if !a.contains('\'') {
-        format!("'{a}'")
-    } else if !a.contains(['$', '`', '"', '\\', '!']) {
-        format!("\"{a}\"")
-    } else {
-        format!("'{}'", a.replace('\'', r"'\''"))
+        return a.to_string();
     }
+    let mut q = String::with_capacity(a.len() + 2);
+    q.push('\'');
+    for c in a.chars() {
+        q.push(c);
+        if is_quote(c) {
+            q.push(c);
+        }
+    }
+    q.push('\'');
+    q
 }
 
 #[cfg(test)]
@@ -145,12 +153,12 @@ mod tests {
     }
 
     #[test]
-    fn quoting_reads_the_same_in_posix_shells_and_powershell() {
+    fn quoting_is_powershells() {
         assert_eq!(quote("D:/a-b_c.folo"), "D:/a-b_c.folo");
         assert_eq!(quote("a b"), "'a b'");
         assert_eq!(quote("0,0.5"), "'0,0.5'", "a bare comma list is an array in PowerShell");
-        assert_eq!(quote("it's"), "\"it's\"");
-        assert_eq!(quote("it's $HOME"), r"'it'\''s $HOME'");
+        assert_eq!(quote("O'Brien $HOME"), "'O''Brien $HOME'");
+        assert_eq!(quote("it\u{2019}s"), "'it\u{2019}\u{2019}s'");
         assert_eq!(quote(""), "''");
     }
 }

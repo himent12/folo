@@ -538,10 +538,11 @@ i7-14700KF, scaled by compute to other sizes; `note` says which and how).
   one (so a folder holding both reads the same); `--weights` is the published name for published weights,
   else the `.folo` file the run started from (so no `--model`: the CLI takes the architecture from the weights,
   and `--head` is always given, since the CLI's default is the weights file's head); settings equal to the
-  defaults are left out, and a value starting with `-` is attached (`--name=--amp`). `cli` reads the same in POSIX
-  shells and PowerShell: arguments with spaces or shell characters are single-quoted, or double-quoted when they
-  hold a `'` (and none of `$`, a backtick, `"`, a backslash, `!`; only an argument with both is quoted the POSIX
-  way). `argv` is the same command unquoted, for spawning without a shell. `run_not_found` for an unknown run;
+  defaults are left out, and a value starting with `-` is attached (`--name=--amp`). `cli` is quoted for PowerShell,
+  as Studio shows commands: arguments with spaces or shell characters are single-quoted, a quote inside doubled
+  (`'O''Brien'`, also for the typographic quotes PowerShell reads as quotes); POSIX shells read the same words
+  unless an argument holds a quote. `argv` is the same command unquoted, for spawning without a shell (the
+  folo-cli tests split `cli` by PowerShell's rules, compare it with `argv` and parse it with the real arguments). `run_not_found` for an unknown run;
   the mock server answers too, with made-up weights paths.
 - `POST /api/system/benchmark` body `BenchmarkRequest` (all optional: `{ "arch": "folo-n", "imgsz": 320, "batch":
   16, "amp": false, "budget_s": 4 }`) → `BenchmarkReport`. An explicit quick probe on the server's inference device
