@@ -91,8 +91,10 @@ describe('healthChecks with the check counts', () => {
     const broken = healthChecks(ds(), st({ broken_labels: 3 }), counts(3, 0));
     expect(broken.map((x) => x.id)).toEqual(['broken']);
     expect(broken[0]?.issues).toBe('error');
-    // Three broken labels among five check errors: the other two (unreadable images) are a finding of their own.
-    const mixed = healthChecks(ds(), st({ broken_labels: 3 }), { ...counts(5, 0), by_kind: { broken_label: 3 } });
+    // Label errors of every kind are the broken files; only image errors (unreadable, missing) are a finding of their own.
+    const labels = healthChecks(ds(), st({ broken_labels: 3 }), { ...counts(3, 0), by_kind: { broken_label: 1, class_overflow: 1, out_of_range_box: 1 } });
+    expect(labels.map((x) => x.id)).toEqual(['broken']);
+    const mixed = healthChecks(ds(), st({ broken_labels: 3 }), { ...counts(5, 0), by_kind: { broken_label: 3, corrupt_image: 1, missing_image: 1 } });
     expect(mixed.map((x) => x.id)).toEqual(['broken', 'check-errors']);
     expect(mixed.map((x) => x.files)).toEqual([3, 2]);
   });

@@ -48,8 +48,8 @@ describe('Dataset stats: health findings', () => {
       return { sum: s?.querySelector('.htitles')?.textContent?.trim(), count: s?.querySelector('.hcount')?.textContent?.trim() };
     };
     expect(line('warning')).toEqual({ sum: '3 file issues · 35% tiny boxes', count: '3 file issues · 1 dataset-wide' });
-    // The check's 5 errors: the 3 broken labels and 2 others (unreadable images), each counted once.
-    expect(line('danger')).toEqual({ sum: '3 broken label files · 2 other file errors', count: '5 file issues' });
-    expect(target.querySelector('#ds-health')?.textContent).toContain('4 issue categories · 8 file issues · 1 note');
+    // shapes-hard's 3 check errors are all label errors (broken_label, class_overflow, out_of_range_box): the 3 broken files.
+    expect(line('danger')).toEqual({ sum: '3 broken label files', count: '3 file issues' });
+    expect(target.querySelector('#ds-health')?.textContent).toContain('3 issue categories · 6 file issues · 1 note');
   });
 });

@@ -149,14 +149,15 @@ export function healthChecks(d: Dataset, s: DatasetStats, counts?: IssueCounts):
       issues: 'error',
       files: s.broken_labels,
     });
-    // The check's other errors (unreadable images, …) count too, once: its broken_label issues are the files above.
-    const other = counts ? counts.error - (counts.by_kind.broken_label ?? s.broken_labels) : 0;
+    // The check's image errors count too: unreadable or missing images. Its label errors (broken_label,
+    // class_overflow, out_of_range_box) are per line, and already the broken files above, so they are not added again.
+    const other = counts ? (counts.by_kind.corrupt_image ?? 0) + (counts.by_kind.missing_image ?? 0) : 0;
     if (other > 0) {
       out.push({
         id: 'check-errors',
         severity: 'danger',
-        title: `${int(other)} other file ${other === 1 ? 'error' : 'errors'} from the dataset check`,
-        short: `${int(other)} other file ${other === 1 ? 'error' : 'errors'}`,
+        title: `${int(other)} unreadable or missing ${other === 1 ? 'image' : 'images'}`,
+        short: `${int(other)} unreadable ${other === 1 ? 'image' : 'images'}`,
         detail: 'Images that cannot be read are left out of training. Fix or remove them.',
         issues: 'error',
         files: other,

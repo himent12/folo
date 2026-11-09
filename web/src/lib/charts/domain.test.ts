@@ -127,3 +127,12 @@ describe('tiny ranges', () => {
     expect(stepDecimals(5)).toBe(0);
   });
 });
+
+describe('invalid ranges', () => {
+  it('returns no ticks for a non-finite or non-positive log range, and never hangs', () => {
+    expect(capTicks(0, Infinity)).toEqual([]);
+    expect(capTicks(NaN, 1)).toEqual([]);
+    expect(logTicks(0, 1)).toEqual([]);
+    expect(logTicks(1, Infinity)).toEqual([]);
+  });
+});

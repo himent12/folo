@@ -85,6 +85,8 @@ export function niceDomain(lo: number, hi: number): Fit {
 
 /** Ticks inside a domain the caller fixed: the smallest nice step that leaves 3 to `max` (at most 5) of them. */
 export function capTicks(lo: number, hi: number, max = MAX_TICKS): number[] {
+  // A non-finite end has no ticks to space (and would never end the loop below).
+  if (!Number.isFinite(lo) || !Number.isFinite(hi)) return [];
   if (!(hi > lo)) return [lo];
   let fallback: number[] = [];
   for (const step of candidates(hi - lo)) {
@@ -102,6 +104,8 @@ export function capTicks(lo: number, hi: number, max = MAX_TICKS): number[] {
  * between them (every other power if those are still too many), so the scale reads in decades and both ends are named.
  */
 export function logTicks(lo: number, hi: number): number[] {
+  // A log axis needs a positive, finite range.
+  if (!(lo > 0) || !Number.isFinite(hi) || !(hi >= lo)) return [];
   const all: number[] = [];
   const decades: number[] = [];
   for (let e = Math.floor(Math.log10(lo)); e <= Math.ceil(Math.log10(hi)); e++)
