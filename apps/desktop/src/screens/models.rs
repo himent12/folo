@@ -457,6 +457,12 @@ impl FoloApp {
         let body = match self.store.evals.get(id) {
             Some(Load::Ready(ev)) => {
                 let ev = ev.clone();
+                // Side by side only while the PR panel keeps 520 px beside the matrix (46 %, 440 px
+                // minimum), so its plot stays ~240 px wide; else one above the other.
+                let stacked = {
+                    let row = self.content_width(window) - 16.;
+                    row - (row * 0.46).max(440.) < 520.
+                };
                 let pr = self.pr_panel(&m, &ev, window, cx);
                 let cm = self.confusion_panel(&m, &ev, window, cx);
                 let table = self.class_table(&m, &ev, window, cx);
@@ -465,7 +471,7 @@ impl FoloApp {
                     .flex_col()
                     .gap(px(16.))
                     .child(kpis)
-                    .child(if window.viewport_size().width < px(1120.) {
+                    .child(if stacked {
                         // Narrow: one above the other, each full width.
                         div()
                             .flex()
