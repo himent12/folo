@@ -873,7 +873,12 @@ impl Backend for MockBackend {
         Ok(SystemResponse {
             system,
             data_dir: None,
-            features: vec!["queue_control".into(), "weights_onnx".into(), "run_estimate".into()],
+            features: vec![
+                "queue_control".into(),
+                "weights_onnx".into(),
+                "run_estimate".into(),
+                "run_cli".into(),
+            ],
             capabilities: Some(capabilities),
             gpu_pool: None,
         })
@@ -1144,6 +1149,49 @@ impl Backend for MockBackend {
         let run = Self::snapshot(&f);
         runs.insert(0, f);
         Ok(run)
+    }
+
+    fn run_cli(&self, id: &str) -> ApiResult<CliCommand> {
+        self.check()?;
+        let runs = self.runs.lock().unwrap();
+        let f = runs
+            .iter()
+            .find(|f| f.run.id == id)
+            .ok_or_else(|| ApiError::new("run_not_found", format!("No run {id}")))?;
+        let c = &f.run.config;
+        let ds = self
+            .datasets
+            .iter()
+            .find(|d| d.ds.id == c.dataset_id)
+            .map_or(c.dataset_id.clone(), |d| d.ds.path.clone());
+        let mut argv: Vec<String> = vec![
+            "folo".into(),
+            "train".into(),
+            "--data".into(),
+            ds.replace('\\', "/"),
+            "--arch".into(),
+            c.arch.as_str().into(),
+            "--epochs".into(),
+            c.epochs.to_string(),
+            "--batch".into(),
+            c.batch.to_string(),
+            "--imgsz".into(),
+            c.imgsz.to_string(),
+            "--device".into(),
+            c.device.clone(),
+        ];
+        if c.amp {
+            argv.push("--amp".into());
+        }
+        if c.head == Head::O2o {
+            argv.extend(["--head".into(), "o2o".into()]);
+        }
+        let cli = argv
+            .iter()
+            .map(|a| if a.contains(' ') { format!("'{a}'") } else { a.clone() })
+            .collect::<Vec<_>>()
+            .join(" ");
+        Ok(CliCommand { cli, argv })
     }
 
     fn estimate_run(&self, config: &TrainConfig) -> ApiResult<RunEstimate> {

@@ -104,6 +104,12 @@ pub trait Backend: Send + Sync + 'static {
     /// How long a config would train (`POST /api/runs/estimate`, servers with `run_estimate`): from
     /// the server's measured throughput when it has one, else its reference rates, with a range and
     /// a confidence.
+    /// The `folo train` command that trains a run's config on the server's machine
+    /// (`GET /api/runs/{id}/cli`, servers with `run_cli`).
+    fn run_cli(&self, _id: &str) -> ApiResult<CliCommand> {
+        Err(ApiError::new("not_supported", "This server can't build the run's command"))
+    }
+
     fn estimate_run(&self, _config: &TrainConfig) -> ApiResult<RunEstimate> {
         Err(ApiError::new("not_supported", "This server can't estimate a run"))
     }

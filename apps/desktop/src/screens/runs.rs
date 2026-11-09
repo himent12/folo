@@ -571,7 +571,7 @@ impl FoloApp {
         // Samples, then the log, each full width: an epoch's log line (~52 mono characters) reads on
         // one line, as in a terminal, instead of wrapping in a 2/5 column at every window size.
         body = body.child(div().flex().child(samples)).child(div().flex().child(logs));
-        body = body.child(self.config_panel(&r, &ds_name, cx));
+        body = body.child(self.config_panel(&r, &ds_name, window, cx));
         self.page_frame(&t, header, body, cx)
     }
 
@@ -1504,7 +1504,22 @@ impl FoloApp {
             .into_any_element()
     }
 
-    fn config_panel(&self, r: &Run, ds_name: &str, cx: &mut Context<Self>) -> AnyElement {
+    /// Fetches the run's `folo train` command and puts it on the clipboard.
+    fn copy_run_cli(&mut self, id: String, cx: &mut Context<Self>) {
+        self.fetch(
+            cx,
+            move |api| api.run_cli(&id),
+            |this, r, cx| match r {
+                Ok(c) => {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(c.cli.clone()));
+                    this.toast(Tone::Neutral, "Copied the training command", Some(c.cli.into()), cx);
+                }
+                Err(e) => this.toast(Tone::Danger, "Couldn't get the command", Some(e.message.into()), cx),
+            },
+        );
+    }
+
+    fn config_panel(&self, r: &Run, ds_name: &str, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
         let c = &r.config;
         let a = &c.augment;
@@ -1590,8 +1605,33 @@ impl FoloApp {
             .flex()
             .flex_col()
             .child(
-                panel_header(&t, "Configuration")
-                    .child(text(ty::SM, t.text_tertiary).font_family(crate::theme::MONO).child(r.id.clone())),
+                panel_header(&t, "Configuration").child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(12.))
+                        .child(text(ty::SM, t.text_tertiary).font_family(crate::theme::MONO).child(r.id.clone()))
+                        // The `folo train` command for this config on the server's machine (servers
+                        // with `run_cli`): train it again from a terminal.
+                        .when(self.store.features.iter().any(|f| f == "run_cli"), |d| {
+                            let rid = r.id.clone();
+                            d.child(
+                                self.button(
+                                    "run-copy-cli",
+                                    "Copy command",
+                                    Btn::Secondary,
+                                    Some("icons/copy.svg"),
+                                    window,
+                                    cx,
+                                    act(move |this, _, cx| this.copy_run_cli(rid.clone(), cx)),
+                                )
+                                .tooltip(crate::controls::tip(
+                                    "The folo train command for this run's settings, for a terminal on the server's machine",
+                                    None,
+                                )),
+                            )
+                        }),
+                ),
             )
             .child(div().flex().gap(px(32.)).px(px(16.)).py(px(8.)).child(col1).child(col2).child(col3))
             .into_any_element()
