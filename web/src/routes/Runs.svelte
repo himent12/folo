@@ -182,7 +182,7 @@
             <th class="r" style:width="128px">Best mAP50-95</th>
             <th class="hide-lg" style:width="120px">mAP trend</th>
             <th class="r hide-md" style:width="96px">Created</th>
-            <th class="act" style:width="48px"><span class="sr-only">Actions</span></th>
+            <th class="act" style:width="40px"><span class="sr-only">Actions</span></th>
           </tr>
         </thead>
         <tbody>
