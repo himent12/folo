@@ -431,9 +431,10 @@
     </div>
 
     <aside>
-      <section>
+      <section class="labels-sec">
         <h3>Labels <span class="meta num">{img?.boxes.length ?? 0}</span></h3>
         {#if img && img.boxes.length}
+          <div class="labels-scroll scroll-shade">
           <ul class="labels" onpointerleave={() => (hovered = null)}>
             {#each img.boxes as b, i (i)}
               <li>
@@ -465,6 +466,7 @@
               </li>
             {/each}
           </ul>
+          </div>
         {:else if img}
           <p class="none">No boxes. This image is a background example.</p>
         {/if}
@@ -702,10 +704,30 @@
       opacity: 0;
     }
   }
+  /* The rail: the label list scrolls inside it (with the shade at an edge that has more), while Classes and the image's
+     facts stay pinned under it, so the legend is never cut at the dialog's foot however many labels an image has. */
   aside {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    overflow-y: auto; /* only when even the pinned parts outgrow a short window */
     border-left: 1px solid var(--line-subtle);
-    overflow-y: auto;
     padding: var(--space-2) 0 var(--space-4);
+  }
+  aside > section {
+    flex: none;
+  }
+  aside > section.labels-sec {
+    flex: 0 1 auto;
+    display: flex;
+    flex-direction: column;
+    min-height: 84px; /* grid-ok: the heading and two label rows */
+  }
+  .labels-scroll {
+    min-height: 0;
+    overflow-y: auto;
+    margin: 0 calc(var(--space-4) * -1);
+    padding: 0 var(--space-4);
   }
   section {
     padding: var(--space-2) var(--space-4);
@@ -864,6 +886,15 @@
       --rail: 248px;
     }
   }
+  /* Tablets and laptops (768–1279 px): the dialog takes the viewport's height less 24 px above and below, whatever the
+     image's shape. Sized to the image alone it was ~480 px tall in an 1180 px window, the rail cut after two of its
+     classes; a dialog is sized to its content and the viewport, never to a fixed or image-only height
+     (DESIGN_DIRECTION §2.2). The canvas letterboxes on its darkroom well instead. */
+  @media (min-width: 768px) and (max-width: 1279px) {
+    .insp {
+      height: var(--box-h);
+    }
+  }
   @media (max-width: 767px) {
     .insp {
       width: 100vw;
@@ -904,12 +935,19 @@
       min-width: 56px;
       height: 44px;
     }
+    .labels-scroll {
+      overflow: visible;
+      background: none;
+    }
     .touch-hint {
       font-size: var(--type-sm-size);
       line-height: var(--type-sm-line);
       color: var(--text-tertiary);
     }
+    /* Phones: the rail under the image is short, so it scrolls as one list (labels, classes, facts) rather than
+       pinning Classes under a two-row label list. */
     aside {
+      display: block;
       flex: 1;
       min-height: 0;
       border-left: 0;

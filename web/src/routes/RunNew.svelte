@@ -1405,11 +1405,16 @@
       background-color var(--dur-fast) var(--ease-standard),
       box-shadow var(--dur-fast) var(--ease-standard);
   }
+  /* The class strip on the card's bottom edge (the label takes the slack), so the strips of a row line up whatever
+     each card's meta line wraps to (fasteners-mini's "2 classes" on a line of its own). */
   .card {
     display: grid;
+    grid-template-rows: 1fr auto;
     gap: 6px;
-    align-content: start;
     padding: var(--space-3);
+  }
+  .c-hit {
+    align-content: start;
   }
   .card:hover,
   .arch:hover {
@@ -1579,9 +1584,16 @@
     font-size: var(--type-sm-size);
     color: var(--text-tertiary);
   }
+  /* Start from on the same half column as the fields below it (Epochs, Device): one grid of two tracks with the same
+     gap, the field in the first; one column on phones. */
   .row2 {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    column-gap: var(--space-5);
     margin-top: var(--space-4);
-    max-width: 420px;
+  }
+  .row2 > :global(*) {
+    grid-column: 1;
   }
   /* Two fields a row on one grid: a label row, a control row of one height, then help. Each field spans the three rows
      (subgrid), so labels, controls and help line up across the pair whatever each one holds. */
@@ -2626,7 +2638,8 @@
       border-top: 1px solid var(--line-subtle);
     }
     .fields,
-    .aug {
+    .aug,
+    .row2 {
       grid-template-columns: minmax(0, 1fr);
     }
     /* One column: no neighbour to line up with, so a switch field is one row of its own height. */

@@ -62,8 +62,11 @@
     ['Image size', plain(`${config.imgsz} px`)],
     ['Device', config.device === 'auto' ? plain('auto') : id(config.device)],
   ]);
+  // Under its own group heading ("Optimizer settings") the optimizer's row is "Type", never "Optimizer" twice; in one
+  // list (the rail, a phone's fold) it keeps its name.
+  const grouped = $derived(!essential && !compact);
   const optim = $derived<[string, Setting][]>([
-    ['Optimizer', optimizerSetting(config, resolved)],
+    [grouped ? 'Type' : 'Optimizer', optimizerSetting(config, resolved)],
     ['Initial LR', lrSetting(config, resolved)],
     ...(resolved ? resolvedRows(resolved) : []),
   ]);
@@ -101,7 +104,7 @@
   <dl>
     <!-- A heading only beside another group's; alone in the rail it would name the panel twice. -->
     {#if heading}<p class="group group-label">{heading}</p>{/if}
-    {#each items as [k, v] (k)}{@const long = isLong(v)}<dt class:long>{k}</dt>{#if k === 'Weights' && weights}<dd>{#if weights.kind === 'scratch'}{FROM_SCRATCH}{:else}<Lineage origin={weights} />{/if}</dd>{:else}<dd class="num" class:long><span class:mono={v.ident}>{v.value}</span>{#if v.note}<Note text={v.note} />{/if}</dd>{/if}{/each}
+    {#each items as [k, v] (k)}{@const long = isLong(v)}<dt class:long>{k}{#if v.about}<span class="sub">{v.about}</span>{/if}</dt>{#if k === 'Weights' && weights}<dd>{#if weights.kind === 'scratch'}{FROM_SCRATCH}{:else}<Lineage origin={weights} />{/if}</dd>{:else}<dd class="num" class:long><span class:mono={v.ident}>{v.value}</span>{#if v.note}<Note text={v.note} />{/if}</dd>{/if}{/each}
   </dl>
 {/snippet}
 {#snippet fold(title: string, items: [string, Setting][])}
@@ -125,7 +128,7 @@
     <div class="cols">
       {@render list('Training', [...core, ...setup])}
       <div class="col">
-        {@render list('Optimizer', optim)}
+        {@render list('Optimizer settings', optim)}
         {@render list('Augmentation', aug)}
       </div>
     </div>
@@ -223,6 +226,14 @@
   }
   dt {
     color: var(--text-tertiary);
+  }
+  /* What a short value means ("Auto": AdamW for short runs, else SGD), under its label at 12 px: a value cell holds one
+     short value and an explanation goes under the label, so every value stays on its row's right edge. */
+  dt .sub {
+    display: block;
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--text-secondary);
   }
   dd {
     padding-left: var(--space-4);

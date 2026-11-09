@@ -395,7 +395,7 @@
         <!-- What runs on `device: auto` can use: each feature's state as a mark and a word, and in a sentence why not. -->
         <Panel title="System" id="system" divided>
           <div class="stack">
-            <div class="setting">
+            <div class="setting fact">
               <div class="setting-text">
                 <p>Default device</p>
                 <p class="note">{deviceSummary(caps, sys.data.gpus, sys.data.cpu.name)}</p>
@@ -404,7 +404,7 @@
             </div>
             {#if pool}
               <!-- What FOLO itself holds on the GPU (in the one size format): in use, kept for reuse, and the peak. -->
-              <div class="setting">
+              <div class="setting fact">
                 <div class="setting-text">
                   <p>FOLO's GPU memory</p>
                   <p class="pool num">
@@ -794,6 +794,11 @@
   .setting-text .note {
     margin-top: 2px;
   }
+  /* A value that states a fact (System's "gpu:0", a capability's "✓ Available") sits on its row's first line, beside
+     the name it answers, never centred on a four-line description; a control (a switch, a button) stays centred. */
+  .setting.fact {
+    align-items: baseline;
+  }
   .cap .setting-text {
     min-width: 0;
   }
@@ -815,7 +820,7 @@
   .cap {
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
-    align-items: center;
+    align-items: baseline;
     gap: var(--space-3) var(--space-4);
     padding: var(--space-3) 0;
     border-top: 1px solid var(--line-subtle);
@@ -827,12 +832,16 @@
   .cap:last-child {
     padding-bottom: 0;
   }
+  /* The word sets the baseline the row aligns to (the icon is centred on it), so "Available" sits on the name's line. */
   .cap-state {
     flex-shrink: 0;
     display: inline-flex;
-    align-items: center;
+    align-items: baseline;
     gap: var(--space-1-5);
     color: var(--text-secondary);
+  }
+  .cap-state > :global(svg) {
+    align-self: center;
   }
   .cap-state[data-state='on'] {
     color: var(--text-primary);
