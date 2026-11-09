@@ -340,7 +340,7 @@
           <dt>Server</dt>
           <dd class="num">{#if hub.mode === 'live'}<span class="mono">folo serve</span> {hub.version}{:else if hub.mode === 'mock'}Built-in demo {hub.version}{:else}—{/if}</dd>
           <dt>Documentation</dt>
-          <dd>The quickstart, HTTP API and command-line guides in FOLO's repository</dd>
+          <dd>Guides in FOLO's repository</dd>
           <dt>Command line</dt>
           <dd class="mono">folo --help</dd>
         </dl>
