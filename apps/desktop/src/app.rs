@@ -3266,6 +3266,7 @@ impl FoloApp {
         // Estimates are the old server's (and a pending one's answer will be dropped).
         self.nr_estimate = None;
         self.nr_estimate_last = None;
+        self.nr_estimate_gen += 1;
         // A draft's dataset belongs to the old server.
         self.new_run_draft = None;
         self.new_run_draft_ds = None;
