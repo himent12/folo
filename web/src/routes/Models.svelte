@@ -3,6 +3,7 @@
   import Plus from '@lucide/svelte/icons/plus';
   import Search from '@lucide/svelte/icons/search';
   import { hub } from '$lib/api/index.svelte';
+  import { bestMark, bestWord } from '$lib/bestMark';
   import { Resource } from '$lib/api/resource.svelte';
   import type { Dataset, Model, Run } from '$lib/api/types';
   import { ago, bytes, compact, date, metric, num, sizeIn, sizeUnit } from '$lib/format';
@@ -142,18 +143,24 @@
   const hasData = $derived(models.data ? models.data.length > 0 : !models.error);
 
   /**
-   * Each comparable group's best model (highest mAP50-95), marked with tertiary "best" text whatever the sort: within
-   * a group the scores compare, across groups they do not, so no mark spans groups (and none on an unranked one).
+   * Each comparable group's best model (highest mAP50-95), marked with tertiary "best" text whatever the sort, "joint
+   * best" on every model of an exact tie (lib/bestMark): within a group the scores compare, across groups they do not,
+   * so no mark spans groups (and none on an unranked one). A group whose best differs from another score only past
+   * three decimals shows its scores with as many as tell them apart.
    */
   const best = $derived.by(() => {
-    const ids = new Set<string>();
+    const marks = new Map<string, string>();
+    const decimals = new Map<string, number>();
     for (const g of groups) {
       if (!g.ranked || g.rows.length < 2) continue;
-      const top = g.rows.reduce<Model | null>((b, m) => ((m.metrics?.map50_95 ?? -1) > (b?.metrics?.map50_95 ?? -1) ? m : b), null);
-      if (top?.metrics) ids.add(top.id);
+      const m = bestMark(g.rows.map((r) => r.metrics?.map50_95));
+      for (const i of m.best) marks.set(g.rows[i]!.id, bestWord(m));
+      if (m.decimals > 3) for (const r of g.rows) decimals.set(r.id, m.decimals);
     }
-    return ids;
+    return { marks, decimals };
   });
+  /** A model's mAP50-95 as the list shows it: three decimals, more where its group needs them to tell the best apart. */
+  const score = (m: Model) => (m.metrics && best.decimals.has(m.id) ? m.metrics.map50_95.toFixed(best.decimals.get(m.id)) : metric(m.metrics?.map50_95));
 
 
   const dsOptions = $derived.by(() => {
@@ -297,7 +304,7 @@
                   <td class="r spec">{compact(m.params)}</td>
                   <td class="r spec hide-lg">{num(m.flops_g, 1)}</td>
                   <td class="r spec hide-md">{sizeIn(m.bytes, prefs.units)}</td>
-                  <td class="r score" class:strong={strongScore === 'map50_95'}>{#if best.has(m.id)}<span class="best">best</span>{/if}{metric(m.metrics?.map50_95)}</td>
+                  <td class="r score" class:strong={strongScore === 'map50_95'}>{#if best.marks.has(m.id)}<span class="best">{best.marks.get(m.id)}</span>{/if}{score(m)}</td>
                   <td class="r score" class:strong={strongScore === 'map50'}>{metric(m.metrics?.map50)}</td>
                   <td class="hide-md">
                     {#if m.run_id}
@@ -358,7 +365,7 @@
                     <span class="name truncate">{m.name}</span>
                     <span class="m-meta num"><Meta line><Ident value={m.arch} /><span>{m.imgsz} px</span><span>{compact(m.params)}</span><span>{bytes(m.bytes, prefs.units)}</span></Meta></span>
                   </span>
-                  <span class="m-side"><span class="num map">{#if best.has(m.id)}<span class="best">best</span>{/if}<span class="sr-only">mAP50-95 </span>{metric(m.metrics?.map50_95)}</span></span>
+                  <span class="m-side"><span class="num map">{#if best.marks.has(m.id)}<span class="best">{best.marks.get(m.id)}</span>{/if}<span class="sr-only">mAP50-95 </span>{score(m)}</span></span>
                 </a>
               </li>
             {/each}

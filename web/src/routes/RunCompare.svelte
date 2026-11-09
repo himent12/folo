@@ -25,6 +25,7 @@
   import ChevronLeft from '@lucide/svelte/icons/chevron-left';
   import ArrowLeftRight from '@lucide/svelte/icons/arrow-left-right';
   import { hub } from '$lib/api/index.svelte';
+  import { bestMark, bestWord } from '$lib/bestMark';
   import { Resource } from '$lib/api/resource.svelte';
   import type { Epoch, Run, RunMetrics } from '$lib/api/types';
   import LineChart, { type Series } from '$lib/charts/LineChart.svelte';
@@ -197,7 +198,24 @@
 
   // mAP is only comparable on the same data: no winner across datasets.
   const sameData = $derived(new Set(chosen.map((r) => r.config.dataset_id)).size <= 1);
-  const bestIdx = $derived(chosen.reduce((b, r, i) => ((r.best?.map50_95 ?? -1) > (chosen[b]?.best?.map50_95 ?? -1) ? i : b), 0));
+  const dsName = (id: string) => datasets.data?.find((d) => d.id === id)?.name ?? id;
+  /**
+   * The best mAP50-95 of each dataset the runs share (lib/bestMark, as the Models list ranks within a group): "best", or
+   * "joint best" on every run of an exact tie, and "on <dataset>" when the comparison spans datasets, since scores
+   * compare only on the same data. A dataset with one run here has no best. Values that differ only past three
+   * decimals are shown with as many as tell them apart.
+   */
+  const bestOf = $derived.by(() => {
+    const marks = new Map<string, { word: string; decimals: number }>();
+    for (const id of new Set(chosen.map((r) => r.config.dataset_id))) {
+      const group = chosen.filter((r) => r.config.dataset_id === id);
+      const m = bestMark(group.map((r) => r.best?.map50_95));
+      for (const r of group) if (m.decimals > 3) marks.set(r.id, { word: '', decimals: m.decimals });
+      for (const i of m.best) marks.set(group[i]!.id, { word: sameData ? bestWord(m) : `${bestWord(m)} on ${dsName(id)}`, decimals: m.decimals });
+    }
+    return marks;
+  });
+  const bestScore = (r: Run) => (r.best && bestOf.get(r.id) ? r.best.map50_95.toFixed(bestOf.get(r.id)!.decimals) : metric(r.best?.map50_95));
 
   const startOf = (r: Run) => startFrom(r.config.weights, models.data);
   const startLine = (r: Run) => {
@@ -312,8 +330,8 @@
   const other = $derived(others[Math.min(otherAt, others.length - 1)]);
   const shown = $derived(pairMode && base && other ? [base, other] : chosen);
   const stepOther = (d: number) => (otherAt = (Math.min(otherAt, others.length - 1) + d + others.length) % others.length);
-  /** In pair mode, whether a run's value differs from the baseline's (the full table marks whole rows instead). */
-  const offBase = (r: Run, f: (r: Run) => Setting) => pairMode && r !== base && !!base && settingText(f(r)) !== settingText(f(base));
+  /** Whether a run's value differs from the baseline's: marked (a dot and the weight); an equal one is tertiary. */
+  const offBase = (r: Run, f: (r: Run) => Setting) => r !== base && !!base && settingText(f(r)) !== settingText(f(base));
 
   const candidates = $derived((runs.data ?? []).filter((r) => !ids.includes(r.id) && r.status !== 'queued'));
 </script>
@@ -419,15 +437,18 @@
                   <!-- The key in a column of its own beside the name, so a name that wraps (at its hyphens) keeps its
                        left edge and never squeezes the key. -->
                   <th style:width={bounded ? `${RUN_COL_BOUND}px` : undefined}>
-                    <span class="th" style:--c={fill(r.id)}
-                      ><i data-pattern={SLOT_PATTERN[slotOf(r.id)]}></i><span class="th-name" class:truncate={!pairMode} title={pairMode ? undefined : r.name}>{r.name}</span
-                      >{#if pairMode && r === base}<span class="base-tag">Baseline</span>{:else if pairMode}<button
-                          type="button"
-                          class="set-base"
-                          aria-label="Make {r.name} the baseline"
-                          title="Make this run the baseline"
-                          onclick={() => setBaseline(r)}><ArrowLeftRight size={12} aria-hidden="true" />Swap</button
-                        >{/if}</span
+                    <!-- The run's name over its role: the baseline every other column is read against, or Swap to make
+                         it the baseline. No key here: the chips above are the legend, and a swatch at the column's
+                         edge could not line up with its chip's. -->
+                    <span class="th"
+                      ><span class="th-name" class:truncate={!pairMode} title={pairMode ? undefined : r.name}>{r.name}</span
+                      >{#if chosen.length > 1}{#if r === base}<span class="base-tag">Baseline</span>{:else}<button
+                            type="button"
+                            class="set-base"
+                            aria-label="Make {r.name} the baseline"
+                            title="Make this run the baseline"
+                            onclick={() => setBaseline(r)}><ArrowLeftRight size={12} aria-hidden="true" />Swap</button
+                          >{/if}{/if}</span
                     >
                   </th>
                 {/each}
@@ -441,10 +462,12 @@
                 {@render rest()}
               </tr>
               <tr>
-                <td class="k">Best mAP50-95</td>
+                <!-- The best epoch's score, which the chips' latest value need not be (a stopped run's 0.595 · stopped
+                     against its best 0.606): the row says so. -->
+                <td class="k">Best mAP50-95<span class="k-sub">any epoch</span></td>
                 {#each shown as r (r.id)}
-                  {@const win = sameData && r === chosen[bestIdx] && chosen.length > 1}
-                  <td class="num" class:winner={win}>{metric(r.best?.map50_95)}{#if win}<span class="tag">best</span>{/if}</td>
+                  {@const win = bestOf.get(r.id)?.word}
+                  <td class="num" class:winner={!!win}>{bestScore(r)}{#if win}<span class="tag">{win}</span>{/if}</td>
                 {/each}
                 {@render rest()}
               </tr>
@@ -464,11 +487,11 @@
                 <tr>
                   <td class="k">{k}</td>
                   {#each shown as r (r.id)}
-                    <!-- Pair mode: a value that differs from the baseline's is marked (a dot and the weight) and an equal
-                         one recedes; the full table marks the whole row instead. -->
+                    <!-- Read against the baseline: a value that differs is marked (a dot and the weight), an equal one
+                         recedes to tertiary, so "11 settings differ" shows where they differ. -->
                     {@const off = offBase(r, f)}
-                    <td class="num cfg" class:diff={!pairMode || off} class:same={pairMode && r !== base && !off}
-                      class:base={pairMode && r === base}
+                    <td class="num cfg" class:diff={off} class:same={r !== base && !off}
+                      class:base={r === base}
                       >{#if off}<span class="chg-row"><span class="chg" aria-hidden="true"></span><span
                             >{@render cell(f(r))}<span class="sr-only">, differs from the baseline</span></span
                           ></span
@@ -879,17 +902,7 @@
     height: auto;
     padding-block: var(--space-2);
   }
-  table.two .th {
-    display: grid;
-    grid-template-columns: 16px minmax(0, 1fr);
-    align-items: start;
-  }
-  /* On the name's first line (16 px line). */
-  table.two .th i {
-    margin-top: 6px;
-  }
   .base-tag {
-    grid-column: 2;
     font-size: var(--type-sm-size);
     font-weight: var(--weight-regular);
     color: var(--text-tertiary);
@@ -1185,17 +1198,29 @@
   .val.whole {
     white-space: nowrap;
   }
+  /* A run's head: its name over its role (Baseline, or Swap), each on a line of its own. */
   .th {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
+    display: grid;
+    justify-items: start;
     color: var(--text-primary);
+    font-size: var(--type-sm-size);
+  }
+  .th-name {
+    max-width: 100%;
+  }
+  #cmp-table thead th {
+    height: auto;
+    padding-block: var(--space-2);
+    vertical-align: top;
+  }
+  /* The row's label over what it measures ("any epoch"): 12 px tertiary. */
+  .k-sub {
+    display: block;
     font-size: var(--type-sm-size);
   }
   /* Same patterns as the lines, so a run's key matches its curve without relying on colour. A key is a fill: the
      palette hue (--c is chart.fill) with the swatch hairline, which the pattern's mask cuts along with the dashes. */
-  .chip i,
-  .th i {
+  .chip i {
     flex-shrink: 0;
     width: 16px;
     height: 4px;
@@ -1218,9 +1243,6 @@
     color: var(--text-primary);
     font-weight: var(--weight-medium);
   }
-  td.cfg:not(.diff) {
-    color: var(--text-tertiary);
-  }
   /* The best run's value: ink at 600 and a tertiary "best", never a lime value or chip (DESIGN_DIRECTION §2.6: status
      hue on the mark, not the metric; the Models list marks its best rows the same way). */
   .winner {
@@ -1242,7 +1264,6 @@
   /* The pair's other column: "Swap" makes it the baseline, the old baseline taking its place (the baseline never
      follows the legend's emphasis). One short word, so it stays on one line in the narrow column. */
   .set-base {
-    grid-column: 2;
     justify-self: start;
     display: inline-flex;
     align-items: center;

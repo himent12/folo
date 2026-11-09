@@ -315,6 +315,21 @@ describe('Models: groups by evaluation dataset and split (lib/scoreSummary)', ()
   });
 });
 
+describe('Models: joint best (lib/bestMark)', () => {
+  it('marks both models of an exact tie "joint best", never one of them by list order', async () => {
+    // Round 25: fasteners-n-best and fasteners-n-f16 have identical scores, and only one was marked "best".
+    await open(Models as Component, '/models', new MockApi('normal', 0));
+    await vi.waitFor(() => {
+      flushSync();
+      if (!target.querySelector('table.models tr.group th')?.textContent?.includes('split of')) throw new Error('rows not loaded');
+    });
+    const row = (name: string) => [...target.querySelectorAll('table.models tbody tr')].find((tr) => tr.querySelector('a.name')?.textContent === name)!;
+    const mark = (name: string) => row(name).querySelector('.best')?.textContent ?? null;
+    expect(mark('fasteners-n-best')).toBe('joint best');
+    expect(mark('fasteners-n-f16')).toBe('joint best');
+  });
+});
+
 describe('Models: published weights (server PR #140)', () => {
   it('are a group of their own after the datasets, never ranked, what they are in the name tooltip', async () => {
     await open(Models as Component, '/models', new MockApi('normal', 0));
