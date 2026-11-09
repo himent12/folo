@@ -96,6 +96,17 @@
     cursor: pointer;
     white-space: nowrap;
   }
+  /* Touch: a 48 px tall target around the 16 px line (DESIGN_DIRECTION §2.9). */
+  @media (pointer: coarse) {
+    .fix {
+      position: relative;
+    }
+    .fix::after {
+      content: '';
+      position: absolute;
+      inset: -16px -4px;
+    }
+  }
   @media (hover: hover) {
     .fix:hover {
       text-decoration-color: currentColor;

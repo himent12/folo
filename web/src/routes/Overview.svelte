@@ -476,8 +476,15 @@
   .m-map .num {
     font-weight: var(--weight-medium);
   }
-  /* "Training split", "Split unknown": a label beside a score that is not on a validation split. */
+  /* "Training split", "Split unknown": a label beside a score that is not on a validation split. It hangs under the
+     score, so every score keeps the same place in its row with or without one. */
+  .m-map {
+    position: relative;
+  }
   .m-tag {
+    position: absolute;
+    top: 100%;
+    right: 0;
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
     color: var(--text-tertiary);
