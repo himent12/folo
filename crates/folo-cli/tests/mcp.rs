@@ -1193,7 +1193,7 @@ fn real_store_end_to_end() {
     c.tool_error(
         "export",
         json!({ "model_id": model_id, "format": "folo-f16", "half": true }),
-        "invalid_body",
+        "invalid_arguments",
     );
 
     // Stop a longer run after its first epoch, resume it (same id, from its checkpoint), and disconnect while it
@@ -1303,7 +1303,7 @@ fn proxy_mode_forwards_to_folo_serve() {
     c.tool_error(
         "export",
         json!({ "model_id": "m_31aa", "format": "folo-f16", "decode": true }),
-        "invalid_body",
+        "invalid_arguments",
     );
     c.tool_error("get_dataset", json!({ "dataset_id": "nope" }), "dataset_not_found");
     // A run started through the proxy belongs to `folo serve` and outlives this MCP session.
