@@ -25,6 +25,8 @@
   import Skeleton from '$lib/ui/Skeleton.svelte';
   import StatusBadge from '$lib/ui/StatusBadge.svelte';
   import TableState from '$lib/ui/TableState.svelte';
+  import Gate from '$lib/ui/Gate.svelte';
+  import { isOffline, OFFLINE_REASON } from '$lib/ui/offline';
   import { origin } from '$lib/lineage';
 
   setCrumbs({ label: 'Runs' });
@@ -83,18 +85,26 @@
     failed: 'Failed',
   };
   const tone = (r: Run) => (r.status === 'running' ? 'accent' : 'neutral');
+  // Nothing answers: the actions that need the server are disabled and say why (as on Datasets).
+  const offline = $derived(!runs.data && isOffline(runs.error));
 </script>
 
 <Page title="Runs">
   {#snippet sub()}<span>Training runs, newest first. Select up to four to compare their curves.</span>{/snippet}
   {#snippet actions()}
     {#if runs.data?.length !== 0}
-      <span title={selected.length < 2 ? 'Select 2–4 runs to compare' : undefined}>
-        <Button icon={GitCompare} disabled={selected.length < 2} href={href(`/runs/compare?ids=${selected.join(',')}`)}>
-          Compare{#if selected.length}<span class="num faint">{selected.length}</span>{/if}
-        </Button>
-      </span>
-      <Button variant="primary" icon={Plus} href={href('/runs/new')}>New run</Button>
+      <Gate reason={offline ? OFFLINE_REASON : selected.length < 2 ? 'Select 2–4 runs to compare' : null}>
+        {#snippet children(why)}
+          <Button icon={GitCompare} disabled={!!why} aria-describedby={why} href={href(`/runs/compare?ids=${selected.join(',')}`)}>
+            Compare{#if selected.length}<span class="num faint">{selected.length}</span>{/if}
+          </Button>
+        {/snippet}
+      </Gate>
+      <Gate reason={offline ? OFFLINE_REASON : null}>
+        {#snippet children(why)}
+          <Button variant="primary" icon={Plus} disabled={!!why} aria-describedby={why} href={href('/runs/new')}>New run</Button>
+        {/snippet}
+      </Gate>
     {/if}
   {/snippet}
 
@@ -115,15 +125,22 @@
   <Panel pad="none">
     <!-- One table frame for every state: the header row stays, and an empty or failed list says so inside it. -->
     <div class="scroll" class:state={!runs.data?.length || shown.length === 0}>
-      <table class="table runs" aria-label="Runs" aria-busy={!runs.data} use:rowNav={{ toggle: (row) => toggle(row.dataset.id ?? '') }}>
+      <!-- Row checkboxes show on hover and focus, on selected rows, and on every row once one is selected (picking). -->
+      <table
+        class="table runs"
+        class:picking={selected.length > 0}
+        aria-label="Runs"
+        aria-busy={!runs.data}
+        use:rowNav={{ toggle: (row) => toggle(row.dataset.id ?? '') }}
+      >
         <thead>
           <tr>
             <th class="check"><span class="sr-only">Select for comparison</span></th>
             <th>Run</th>
             <th>Status</th>
-            <th class="hide-md">Dataset</th>
-            <th class="hide-md">Model</th>
-            <th class="hide-md">Started from</th>
+            <th class="hide-lg">Dataset</th>
+            <th class="hide-lg">Model</th>
+            <th class="hide-lg">Started from</th>
             <th>Progress</th>
             <th class="r">Best mAP50-95</th>
             <th class="hide-lg">mAP trend</th>
@@ -140,9 +157,9 @@
                 <td class="check"></td>
                 <td class="lead"><Skeleton w="112px" h="12px" /></td>
                 <td><Skeleton w="72px" h="12px" /></td>
-                <td class="hide-md"><Skeleton w="64px" h="12px" /></td>
-                <td class="hide-md"><Skeleton w="48px" h="12px" /></td>
-                <td class="hide-md"><Skeleton w="88px" h="12px" /></td>
+                <td class="hide-lg"><Skeleton w="64px" h="12px" /></td>
+                <td class="hide-lg"><Skeleton w="48px" h="12px" /></td>
+                <td class="hide-lg"><Skeleton w="88px" h="12px" /></td>
                 <td><div class="prog"><Skeleton h="4px" /><span><Skeleton w="40px" h="10px" /></span></div></td>
                 <td class="r"><Skeleton w="72px" h="12px" /></td>
                 <td class="hide-lg"><Skeleton w="96px" h="12px" /></td>
@@ -167,24 +184,26 @@
               {@const on = selected.includes(r.id)}
               {@const from = origin(r.config.weights, modelById)}
               <tr class="link" class:on data-row data-id={r.id} aria-label={r.name} onclick={() => router.go(`/runs/${r.id}`)}>
-                <td class="check">
-                  <input
-                    type="checkbox"
-                    checked={on}
-                    disabled={!on && selected.length >= 4}
-                    aria-label="Select {r.name} for comparison"
-                    onclick={(e) => e.stopPropagation()}
-                    onchange={() => toggle(r.id)}
-                  />
+                <!-- The whole cell is the checkbox's target (44 px on touch); a click in it never opens the run. -->
+                <td class="check" onclick={(e) => e.stopPropagation()}>
+                  <label class="hit">
+                    <input
+                      type="checkbox"
+                      checked={on}
+                      disabled={!on && selected.length >= 4}
+                      aria-label="Select {r.name} for comparison"
+                      onchange={() => toggle(r.id)}
+                    />
+                  </label>
                 </td>
                 <td class="lead">
                   <a class="name" href={href(`/runs/${r.id}`)} onclick={(e) => e.stopPropagation()}>{r.name}</a>
                   <span class="sub ctx">{dsName.get(r.config.dataset_id) ?? r.config.dataset_id} · <span class="mono">{r.config.arch}</span> · from {from.label}</span>
                 </td>
                 <td use:tooltip={failureCause(r)}><StatusBadge status={r.status} plain /></td>
-                <td class="hide-md muted">{dsName.get(r.config.dataset_id) ?? r.config.dataset_id}</td>
-                <td class="hide-md"><span class="mono muted">{r.config.arch}</span></td>
-                <td class="hide-md from">
+                <td class="hide-lg muted">{dsName.get(r.config.dataset_id) ?? r.config.dataset_id}</td>
+                <td class="hide-lg"><span class="mono muted">{r.config.arch}</span></td>
+                <td class="hide-lg from">
                   {#if from.kind === 'model' && modelById.has(from.id)}
                     <a href={href(`/models/${from.id}`)} onclick={(e) => e.stopPropagation()}>{from.label}</a>
                   {:else if from.kind === 'file'}
@@ -265,23 +284,57 @@
   .scroll {
     overflow-x: auto;
   }
-  .check {
-    width: 36px;
-    padding-right: 0 !important;
+  /* The checkbox column keeps its width while its boxes are hidden, so names never shift when they appear. */
+  .runs .check {
+    width: 32px;
+    padding: 0;
+  }
+  .hit {
+    display: flex;
+    align-items: center;
+    height: 100%;
+    min-height: var(--size-row);
+    padding-left: var(--space-4);
+    cursor: pointer;
   }
   input[type='checkbox'] {
     width: 14px;
     height: 14px;
+    margin: 0;
+    accent-color: var(--accent-line);
+    cursor: pointer;
   }
+  .runs .check input {
+    opacity: 0;
+    transition: opacity var(--dur-fast) var(--ease-standard);
+  }
+  /* Shown on the row under the pointer or the keyboard (so X is discoverable), on selected rows, and on every row once
+     any is selected. */
+  .runs tbody tr:is(:hover, :focus-within, .on) .check input,
+  .runs.picking .check input,
+  .runs .check input:focus-visible {
+    opacity: 1;
+  }
+  /* Touch: no hover to reveal them, so always shown, 20 px, in a 44 px wide cell of a 48 px row. */
   @media (pointer: coarse) {
+    .runs .check {
+      width: 44px;
+    }
+    .runs .check input {
+      opacity: 1;
+    }
+    .hit {
+      justify-content: center;
+      min-height: 48px;
+      padding-left: 0;
+    }
     input[type='checkbox'] {
       width: 20px;
       height: 20px;
     }
-  }
-  input[type='checkbox'] {
-    accent-color: var(--accent-line);
-    cursor: pointer;
+    .runs td {
+      height: 48px;
+    }
   }
   .name {
     display: block;
@@ -320,20 +373,8 @@
   .ctx {
     display: none;
   }
-  @media (max-width: 1439px) {
-    .hide-xl {
-      display: none;
-    }
-  }
+  /* Below 1280 the Dataset, Model and Started from columns hide (.hide-lg, base.css). */
   @media (max-width: 1279px) {
-    .hide-lg {
-      display: none;
-    }
-  }
-  @media (max-width: 1199px) {
-    .hide-md {
-      display: none;
-    }
     .ctx {
       display: block;
     }

@@ -464,9 +464,6 @@
     }
   }
   @media (max-width: 767px) {
-    .hide-sm {
-      display: none;
-    }
     /* The button fills the class cell, so every row's chevron sits on one edge. */
     .cls {
       width: 100%;

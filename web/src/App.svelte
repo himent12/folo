@@ -134,8 +134,9 @@
     .app :global(.sidebar) {
       display: none;
     }
+    /* Clear of the tab bar (56 px + 8), or of nothing but 8 px while a page's dock replaces it (shell/dock.ts). */
     main {
-      padding-bottom: calc(64px + env(safe-area-inset-bottom));
+      padding-bottom: calc(var(--tabbar-h) + var(--space-2) + env(safe-area-inset-bottom));
     }
   }
 </style>

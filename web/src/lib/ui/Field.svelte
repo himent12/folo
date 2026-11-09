@@ -1,6 +1,11 @@
 <script lang="ts">
-  /** Label + control + hint/error, laid out consistently. The control is the child snippet; pass `for` = its id. */
+  /**
+   * Label + control + hint/error, laid out consistently. The control is the child snippet; pass `for` = its id, and
+   * mark the control invalid (`invalid` on Input / Select / Segmented) while `error` is set. The error carries a danger
+   * icon as well as its colour, so it is never red text alone.
+   */
   import type { Snippet } from 'svelte';
+  import CircleAlert from '@lucide/svelte/icons/circle-alert';
 
   let {
     label,
@@ -19,7 +24,9 @@
   </div>
   {@render children()}
   {#if error}
-    <p class="msg error" id={htmlFor ? `${htmlFor}-error` : undefined} role="alert">{error}</p>
+    <p class="msg error" id={htmlFor ? `${htmlFor}-error` : undefined} role="alert">
+      <CircleAlert size={14} strokeWidth={1.75} aria-hidden="true" /><span>{error}</span>
+    </p>
   {:else if hint}
     <p class="msg" id={htmlFor ? `${htmlFor}-hint` : undefined}>{hint}</p>
   {/if}
@@ -51,6 +58,14 @@
     color: var(--text-tertiary);
   }
   .msg.error {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-1);
     color: var(--danger-text);
+  }
+  /* The icon sits on the first line's centre (16 px line, 14 px icon). */
+  .msg.error :global(svg) {
+    flex-shrink: 0;
+    margin-top: 1px;
   }
 </style>

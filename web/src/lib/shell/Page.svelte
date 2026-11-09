@@ -1,11 +1,22 @@
 <script lang="ts">
-  /** Standard page frame: title row (title, optional meta line and actions) above the content. */
+  /**
+   * Standard page frame: title row (title, optional meta line and actions) above the content.
+   *
+   * One rule for the actions on every page: from 768 px up they sit on the title row, right-aligned, whatever the
+   * length of the lead and meta lines (which run the full width under and above it). Below 768 px a page passes its
+   * secondary actions as `more`: they are buttons on wider screens and one ⋯ menu on phones, beside `actions` (the
+   * primary, which keeps a short word there).
+   */
   import type { Snippet } from 'svelte';
+  import Button from '$lib/ui/Button.svelte';
+  import Menu, { type MenuItem } from '$lib/ui/Menu.svelte';
 
   let {
     title,
     sub,
     actions,
+    more = [],
+    moreLabel = 'More actions',
     lead,
     children,
     wide = false,
@@ -15,7 +26,12 @@
     title: string;
     /** A meta line under the title (snippet for rich content). */
     sub?: Snippet;
+    /** The page's own actions (its primary last). */
     actions?: Snippet;
+    /** Secondary actions: secondary buttons before `actions` from 768 px up, one ⋯ menu after them on phones. */
+    more?: MenuItem[];
+    /** The ⋯ menu's accessible name, e.g. "More model actions". */
+    moreLabel?: string;
     /** Something before the title, e.g. a status badge row. */
     lead?: Snippet;
     children: Snippet;
@@ -26,8 +42,9 @@
     inlineActions?: boolean;
   } = $props();
 
+  const hasActions = $derived(!!actions || more.length > 0);
   /** Only the title: on phones the top bar shows it, so the header takes no room and content starts at the gutter. */
-  const bare = $derived(!sub && !actions && !lead);
+  const bare = $derived(!sub && !hasActions && !lead);
 </script>
 
 <div class="page" class:wide class:narrow>
@@ -38,7 +55,19 @@
       <h1 tabindex="-1" data-route-focus>{title}</h1>
       {#if sub}<div class="sub">{@render sub()}</div>{/if}
     </div>
-    {#if actions}<div class="actions">{@render actions()}</div>{/if}
+    {#if hasActions}
+      <div class="actions">
+        {#if more.length}
+          {#each more as it (it.label)}
+            <span class="more-wide">
+              <Button icon={it.icon} href={it.href} onclick={it.onclick} variant={it.danger ? 'danger' : 'secondary'}>{it.label}</Button>
+            </span>
+          {/each}
+        {/if}
+        {@render actions?.()}
+        {#if more.length}<span class="more-phone"><Menu label={moreLabel} items={more} /></span>{/if}
+      </div>
+    {/if}
   </header>
   {@render children()}
 </div>
@@ -60,17 +89,27 @@
   .page.narrow {
     max-width: calc(920px + 2 * var(--space-6));
   }
+  /* Title row: the title on the left, the actions on its right edge (centred on the title's line); the lead and meta
+     lines span the whole width, so a long meta line never pushes the actions down or to the left. Dense placement puts
+     the actions back up beside the title, after the meta line in the source. The title keeps at least 40 % (240 px),
+     and a long action row wraps right-aligned instead of squeezing it. */
   header {
-    display: flex;
-    align-items: flex-end;
-    justify-content: space-between;
-    gap: var(--space-4);
-    flex-wrap: wrap;
+    display: grid;
+    grid-template-columns: minmax(min(40%, 240px), 1fr) auto;
+    grid-auto-flow: row dense;
+    align-items: center;
+    column-gap: var(--space-4);
+    row-gap: var(--space-1);
   }
   .titles {
-    display: grid;
-    gap: var(--space-1);
-    min-width: 0;
+    display: contents;
+  }
+  .lead,
+  .sub {
+    grid-column: 1 / -1;
+  }
+  h1 {
+    grid-column: 1;
   }
   .lead {
     display: flex;
@@ -90,13 +129,23 @@
     align-items: center;
     flex-wrap: wrap;
     gap: var(--space-1) var(--space-3);
+    min-width: 0;
     color: var(--text-secondary);
   }
   .actions {
+    grid-column: 2;
     display: flex;
     align-items: center;
+    justify-content: flex-end;
     gap: var(--space-2);
     flex-wrap: wrap;
+    min-width: 0;
+  }
+  .more-wide {
+    display: contents;
+  }
+  .more-phone {
+    display: none;
   }
   @keyframes in {
     from {
@@ -108,8 +157,28 @@
       padding: var(--space-4) var(--space-4) var(--space-8);
       gap: var(--space-4);
     }
+    /* Phones: the title block, then the actions on a row of their own (or beside it with inlineActions); secondary
+       actions fold into the ⋯ menu. */
     header {
+      display: flex;
       align-items: flex-start;
+      justify-content: space-between;
+      gap: var(--space-4);
+      flex-wrap: wrap;
+    }
+    .titles {
+      display: grid;
+      gap: var(--space-1);
+      min-width: 0;
+    }
+    .actions {
+      justify-content: flex-start;
+    }
+    .more-wide {
+      display: none;
+    }
+    .more-phone {
+      display: contents;
     }
     header.inline {
       flex-wrap: nowrap;

@@ -1675,8 +1675,5 @@
     .vfoot .faint {
       display: none;
     }
-    .hide-sm {
-      display: none;
-    }
   }
 </style>
