@@ -1029,8 +1029,44 @@ impl FoloApp {
                     )
                     .child(switch)
             })
-            // Optimizer first: the learning rate beside it depends on it (Auto sets it).
+            // Epochs first (how long it trains, in view at the minimum size), then the optimizer
+            // and the learning rate beside it, which depends on it (Auto sets it).
             .child(section("Schedule"))
+            .child(
+                div()
+                    .flex()
+                    .gap(px(16.))
+                    .child(div().flex_1().child(typed(
+                        "Epochs",
+                        epochs_box,
+                        epochs_slider,
+                        epochs_bad.then_some("Enter a whole number from 1 to 10,000"),
+                    )))
+                    .child(
+                        div().flex_1().child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(8.))
+                                .child(typed(
+                                    "Final epochs without mosaic",
+                                    close_box,
+                                    close_slider,
+                                    close_bad.then_some("Enter a whole number up to the epoch count"),
+                                ))
+                                // Which epochs those are (the label already says what they do).
+                                .child(text(ty::XS, t.text_tertiary).child({
+                                    let last = epochs.round().max(1.) as u32;
+                                    let n = (close_mosaic.round() as u32).min(last);
+                                    match n {
+                                        0 => "Off: mosaic all the way through".to_string(),
+                                        1 => format!("Epoch {last} trains on whole images"),
+                                        _ => format!("Epochs {}–{last} train on whole images", last - n + 1),
+                                    }
+                                })),
+                        ),
+                    ),
+            )
             .child(
                 div()
                     .flex()
@@ -1097,41 +1133,6 @@ impl FoloApp {
                                     "3-epoch warmup, then linear decay to 1%"
                                 }))
                             }),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .gap(px(16.))
-                    .child(div().flex_1().child(typed(
-                        "Epochs",
-                        epochs_box,
-                        epochs_slider,
-                        epochs_bad.then_some("Enter a whole number from 1 to 10,000"),
-                    )))
-                    .child(
-                        div().flex_1().child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap(px(8.))
-                                .child(typed(
-                                    "Final epochs without mosaic",
-                                    close_box,
-                                    close_slider,
-                                    close_bad.then_some("Enter a whole number up to the epoch count"),
-                                ))
-                                // Which epochs those are (the label already says what they do).
-                                .child(text(ty::XS, t.text_tertiary).child({
-                                    let last = epochs.round().max(1.) as u32;
-                                    let n = (close_mosaic.round() as u32).min(last);
-                                    match n {
-                                        0 => "Off: mosaic all the way through".to_string(),
-                                        1 => format!("Epoch {last} trains on whole images"),
-                                        _ => format!("Epochs {}–{last} train on whole images", last - n + 1),
-                                    }
-                                })),
-                        ),
                     ),
             )
             // Mixed precision: f16 on tensor cores. The server says whether its GPU can

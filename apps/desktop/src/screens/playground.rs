@@ -524,7 +524,8 @@ impl FoloApp {
                         Some(SharedString::from(format!(
                             "{}{}{}",
                             m.arch.as_str(),
-                            if self.model_e2e(m) { " · end-to-end" } else { "" },
+                            // Both heads named: each says how its boxes are made.
+                            if self.model_e2e(m) { " · end-to-end" } else { " · NMS" },
                             m.metrics.as_ref().map_or(String::new(), |x| format!(" · {:.3}", x.map50_95)),
                         ))),
                     )
@@ -614,6 +615,15 @@ impl FoloApp {
                         } else {
                             d.child(select)
                         }
+                    })
+                    // What's running, without opening the menu: architecture, input size and head.
+                    .when_some(model.as_ref(), |d, m| {
+                        d.child(text(ty::XS, t.text_tertiary).child(format!(
+                            "{} · {} px · {}",
+                            m.arch.as_str(),
+                            m.imgsz,
+                            if e2e { "end-to-end, no NMS" } else { "boxes filtered by NMS" }
+                        )))
                     })
                     .when(no_models, |d| {
                         d.child(
