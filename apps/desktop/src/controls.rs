@@ -648,7 +648,7 @@ impl FoloApp {
         key: &str,
         label: impl Into<SharedString>,
         on: bool,
-        swatch_color: Option<Hsla>,
+        swatch_class: Option<u32>,
         count: Option<u64>,
         window: &Window,
         cx: &mut Context<Self>,
@@ -683,12 +683,12 @@ impl FoloApp {
             })
             // Selected: a check in the class colour takes the swatch's slot, so selection isn't
             // colour alone and nothing shifts.
-            .when_some(swatch_color, |d, c| {
+            .when_some(swatch_class, |d, c| {
                 d.child(if on {
                     div().size(px(12.)).flex().items_center().justify_center().child(icon(
                         "icons/check.svg",
                         12.,
-                        c,
+                        t.class_on(c, crate::theme::Surface::Panel),
                     ))
                 } else {
                     div()

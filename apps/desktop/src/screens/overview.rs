@@ -805,15 +805,38 @@ impl FoloApp {
                         let id = r.id.clone();
                         let key = format!("ov-run-{}", r.id);
                         // Keyboard focus shows what hover does: the full name and the exact time.
+                        let e2e = r.config.head == crate::api::Head::O2o;
                         let focus_text = self.ring(&self.fh(key.clone(), cx), window).then(|| {
-                            created_at.map_or(r.name.clone(), |c| {
+                            let base = created_at.map_or(r.name.clone(), |c| {
                                 format!("{} · created {}", r.name, time::local_datetime(c))
-                            })
+                            });
+                            if e2e { base + " · end-to-end head: predicts without NMS" } else { base }
                         });
+                        // Architecture first (short, so it survives a narrow cell), then the
+                        // dataset, then the e2e tag for an end-to-end run.
+                        let meta = |w: f32| {
+                            div()
+                                .w(px(w))
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .gap(px(6.))
+                                .child(
+                                    text(ty::XS, t.text_tertiary)
+                                        .min_w_0()
+                                        .truncate()
+                                        .child(format!("{} · {ds}", r.config.arch.as_str())),
+                                )
+                                .when(e2e, |d| d.child(e2e_tag(&t, format!("e2e-ovr-{}", r.id))))
+                        };
                         let row = div()
                             .id(SharedString::from(key.clone()))
-                            .when_some(focus_text, |d, s| d.child(crate::controls::focus_tip(&t, s, 36.)))
-                            .h(px(36.))
+                            .when_some(focus_text, |d, s| {
+                                d.child(crate::controls::focus_tip(&t, s, if wide { 36. } else { 44. }))
+                            })
+                            // Narrow: the dataset and architecture go under the name (a 44 px row)
+                            // rather than out of the list.
+                            .h(px(if wide { 36. } else { 44. }))
                             .mx(px(4.))
                             .px(px(12.))
                             .flex()
@@ -840,24 +863,11 @@ impl FoloApp {
                                             .w_full()
                                             .truncate()
                                             .child(r.name.clone()),
-                                    ),
+                                    )
+                                    .when(!wide, |d| d.child(meta(name_w))),
                             )
-                            // Room for the dataset and architecture only on wide windows.
-                            .when(wide, |d| {
-                                d.child(
-                                    text(ty::XS, t.text_tertiary).w(px(meta_w)).flex_none().truncate().child(
-                                        format!(
-                                            "{ds} · {}{}",
-                                            r.config.arch.as_str(),
-                                            if r.config.head == crate::api::Head::O2o {
-                                                " · e2e"
-                                            } else {
-                                                ""
-                                            }
-                                        ),
-                                    ),
-                                )
-                            })
+                            // Wide: the dataset and architecture in their own column.
+                            .when(wide, |d| d.child(meta(meta_w)))
                             .child(div().w(px(96.)).flex_none().child(status_dot(
                                 &t,
                                 r.status,
@@ -908,8 +918,9 @@ impl FoloApp {
     fn top_models(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
         let all = self.view_all("ov-models-all", Route::Models, window, cx);
-        // The mAP50-95 column head says what ranks them.
-        let header = panel_header(&t, "Best models").child(all);
+        // mAP compares only within one dataset's validation split, so the card ranks within each
+        // dataset and shows its best: one row per dataset, never one list across them.
+        let header = panel_header(&t, "Best model per dataset").child(all);
         let body = match &self.store.models {
             Load::Ready(models) if models.is_empty() => div()
                 .child(empty_state(
@@ -920,14 +931,45 @@ impl FoloApp {
                     Tone::Neutral,
                 ))
                 .into_any_element(),
-            Load::Ready(models) => {
-                let mut models = models.clone();
-                models.sort_by(|a, b| {
-                    b.metrics
-                        .as_ref()
-                        .map_or(0., |m| m.map50_95)
-                        .total_cmp(&a.metrics.as_ref().map_or(0., |m| m.map50_95))
-                });
+            Load::Ready(models) => 'card: {
+                // Each evaluated model's dataset (from the run that trained it; an imported model
+                // without one is left out: there's nothing to compare it with).
+                let ds_of = |m: &crate::api::Model| {
+                    m.run_id.as_ref().and_then(|r| self.store.run(r)).map(|r| r.config.dataset_id.clone())
+                };
+                let mut best: Vec<(String, crate::api::Model)> = Vec::new();
+                for m in models.iter().filter(|m| m.metrics.is_some()) {
+                    let Some(ds) = ds_of(m) else { continue };
+                    let map = |m: &crate::api::Model| m.metrics.as_ref().map_or(0., |x| x.map50_95);
+                    match best.iter_mut().find(|(d, _)| *d == ds) {
+                        Some((_, b)) if map(m) > map(b) => *b = m.clone(),
+                        Some(_) => {}
+                        None => best.push((ds, m.clone())),
+                    }
+                }
+                // Datasets in name order (their mAPs aren't comparable, so no rank between rows).
+                let name_of =
+                    |ds: &str| self.store.dataset_summary(ds).map_or(ds.to_string(), |d| d.name.clone());
+                best.sort_by_key(|(ds, _)| name_of(ds));
+                let models: Vec<(String, crate::api::Model)> =
+                    best.into_iter().map(|(ds, m)| (name_of(&ds), m)).collect();
+                // Models, but none to rank yet: unevaluated, imported, or their runs still loading.
+                if models.is_empty() {
+                    let body = if self.store.runs.ready().is_none() {
+                        "Waiting for runs to say which dataset each model was trained on."
+                    } else {
+                        "Evaluated models trained here show up per dataset."
+                    };
+                    break 'card div()
+                        .child(empty_state(
+                            &t,
+                            "icons/box.svg",
+                            "Nothing to compare yet",
+                            body,
+                            Tone::Neutral,
+                        ))
+                        .into_any_element();
+                }
                 // Column heads like Recent runs beside it, so the two lists share row lines.
                 let heads = div()
                     .h(px(28.))
@@ -939,14 +981,14 @@ impl FoloApp {
                     .border_b_1()
                     .border_color(t.line_subtle)
                     .child(th(&t, "Model").w(px(150.)).flex_none())
-                    .child(th(&t, "Arch").flex_1())
-                    .child(div().w(px(96.)).flex_none().flex().justify_end().child(th(&t, "mAP50-95")));
+                    .child(th(&t, "Dataset").flex_1())
+                    .child(div().w(px(64.)).flex_none().flex().justify_end().child(th(&t, "mAP50-95")));
                 div()
                     .flex()
                     .flex_col()
                     .pb(px(4.))
                     .child(heads)
-                    .children(models.into_iter().take(5).map(|m| {
+                    .children(models.into_iter().take(5).map(|(ds_name, m)| {
                         let id = m.id.clone();
                         let key = format!("ov-model-{}", m.id);
                         let map = m.metrics.as_ref().map_or(0., |m| m.map50_95);
@@ -970,8 +1012,8 @@ impl FoloApp {
                                     .truncate()
                                     .child(m.name.clone()),
                             )
-                            // Architecture and size (400 px column at every width; the parameter
-                            // count didn't fit).
+                            // The dataset it was evaluated on (the e2e tag after; the name and its page
+                            // give the architecture).
                             .child(
                                 div()
                                     .flex_1()
@@ -979,24 +1021,27 @@ impl FoloApp {
                                     .flex()
                                     .items_center()
                                     .gap(px(6.))
-                                    // Whole ("folo-s · 640 px"), then the tag.
                                     .child(
                                         text(ty::XS, t.text_tertiary)
-                                            .flex_none()
-                                            .whitespace_nowrap()
-                                            .child(format!("{} · {} px", m.arch.as_str(), m.imgsz)),
+                                            .min_w_0()
+                                            .truncate()
+                                            .child(ds_name.clone()),
                                     )
                                     // The same compact tag as the Models table.
                                     .when(self.model_e2e(&m), |d| {
                                         d.child(e2e_tag(&t, format!("e2e-ov-{}", m.id)))
                                     }),
                             )
-                            .child(div().w(px(96.)).flex_none().flex().justify_end().child(bar_value(
-                                &t,
-                                map,
-                                f3(map),
-                                t.text_tertiary,
-                            )));
+                            // The number alone: a bar would set rows from different datasets against
+                            // each other, which their mAPs can't support.
+                            .child(
+                                div()
+                                    .w(px(64.))
+                                    .flex_none()
+                                    .flex()
+                                    .justify_end()
+                                    .child(text(ty::SM, t.text_secondary).tnum().child(f3(map))),
+                            );
                         self.bind(
                             row,
                             &key,

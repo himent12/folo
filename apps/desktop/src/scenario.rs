@@ -147,6 +147,7 @@ pub fn apply(app: &mut FoloApp, s: &Spec, window: &mut Window, cx: &mut Context<
             // Mixed precision on, scrolled to the dialog's end: the switch and the f16 estimate.
             if let Some(f) = app.new_run.as_mut() {
                 f.amp = true;
+                f.advanced = true;
             }
             app.dialog_scroll.set_offset(gpui::point(gpui::px(0.), gpui::px(-4000.)));
         }

@@ -1845,3 +1845,42 @@ Round 45 changes:
 - **e2e tag:** it has a tooltip and appears in the Runs list and Recent runs.
 - **Dimmed boxes:** no chip in thumbnails, and stepped-back text in larger views.
 - **Light theme:** swatches use their bars' stroke shade.
+
+## Round 45
+
+| Reviewer | avg |
+|----------|-----|
+| Opus 5.5 | 8.4 |
+| GPT-6.1 Sol | 8.6 |
+
+The first round under the orchestrator's new rule: take the larger items, and fix each reviewer's lowest lines at their root. Round 45 shipped collision-aware chip placement, a steady Playground rail and one e2e marker.
+
+Both reviewers were asked to name root causes, and they converged.
+
+Opus: each shared rule (class colour, e2e tag, slider row, label chip) is written separately at each place it's used, so fixing one version leaves another.
+
+Sol's root causes:
+- Comparison without evaluation scope: "Best models" ranked across datasets.
+- Context discarded at breakpoints.
+- Annotation placement with no ownership guarantee.
+- One long flat New run form.
+
+Neither found a line blocked on API data, except measured throughput and a measured training estimate, which need engine profiling. Stored precision waits on `Model.precision`.
+
+Round 46 changes:
+- **Class colour (root fix):**
+  - `Theme::class_on(class, Surface::Photo | Panel)` picks the shade by surface.
+  - `class_swatch` takes the class index and draws the photo hue with a panel-shade ring in light theme, so a swatch matches both its boxes and its bars.
+  - A test bans raw `t.class(` outside the renderer.
+- **Thumbnails:**
+  - A chip only on boxes at least two chips tall, at most four per tile.
+  - No spots below a box, anywhere.
+  - A chip that would sit on a neighbour's outline is dropped.
+- **New run:** an Advanced group (head, optimizer, mixed precision, augmentation), collapsed, with a summary of what differs from the defaults. Epochs gets a help line, so the paired row ends level.
+- **Overview:**
+  - "Best model per dataset": one row per dataset.
+  - Recent runs keeps architecture, dataset and the e2e tag under the name when narrow.
+- **Focused rows** explain the e2e head.
+- **Playground:**
+  - "Simulated latency" in the demo, and "one image" instead of fps.
+  - Short windows carry the latency total in the Detections header.

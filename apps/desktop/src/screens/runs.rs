@@ -211,10 +211,12 @@ impl FoloApp {
                 let key = format!("run-row-{}", r.id);
                 let ids_up = ids.clone();
                 // Keyboard focus shows what hover does: the full name and the exact time.
+                let e2e = r.config.head == crate::api::Head::O2o;
                 let focus_text = self.ring(&self.fh(key.clone(), cx), window).then(|| {
-                    created_at.map_or(r.name.clone(), |c| {
+                    let base = created_at.map_or(r.name.clone(), |c| {
                         format!("{} · created {}", r.name, time::local_datetime(c))
-                    })
+                    });
+                    if e2e { base + " · end-to-end head: predicts without NMS" } else { base }
                 });
                 let row = div()
                     .id(SharedString::from(key.clone()))
@@ -1288,7 +1290,7 @@ impl FoloApp {
                                 .flex()
                                 .items_center()
                                 .gap(px(6.))
-                                .child(crate::ui::class_swatch(&t, t.class(i as u32), 8.))
+                                .child(crate::ui::class_swatch(&t, i as u32, 8.))
                                 .child(text(ty::XS, t.text_secondary).child(name))
                         }),
                 ),
