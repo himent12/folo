@@ -41,6 +41,9 @@ async function until<T>(get: () => T | null | undefined | false, what: string): 
   return v as T;
 }
 
+/** The mock answering as a server would (its exports and features), not as the demo, which creates no file. */
+const asServer = (api: MockApi) => Object.defineProperty(api, 'mock', { value: false }) as MockApi;
+
 const buttons = () => [...target.ownerDocument.querySelectorAll<HTMLButtonElement>('dialog button')];
 const button = (text: string) => buttons().find((b) => b.textContent?.trim().startsWith(text));
 
@@ -82,7 +85,7 @@ describe('ExportDialog', () => {
   });
 
   it('says "Export finished" once: no toast on top of the open dialog', async () => {
-    hub.api = new MockApi('normal', 0);
+    hub.api = asServer(new MockApi('normal', 0));
     vi.spyOn(hub.api, 'exportModel').mockResolvedValue({ path: 'D:/folo/exports/shapes-n-best-f16.folo', bytes: 5_300_000 });
     const success = vi.spyOn(toast, 'success');
     c = mount(ExportDialog, { target, props: { model, open: true } });
@@ -92,13 +95,13 @@ describe('ExportDialog', () => {
     expect(target.ownerDocument.querySelector('dialog')?.textContent).toContain('Export finished');
     expect(success).not.toHaveBeenCalled();
     // Without the toast, a live region in the dialog announces it.
-    const live = target.ownerDocument.querySelectorAll('dialog [role="status"]');
+    const live = target.ownerDocument.querySelectorAll('dialog p[role="status"]');
     expect(live).toHaveLength(1);
     expect(live[0]!.textContent).toBe('Export finished: shapes-n-best-f16.folo, 5.1 MiB.');
   });
 
   it('says plainly that ONNX cannot be downloaded, and shows where it is', async () => {
-    hub.api = new MockApi('normal', 0);
+    hub.api = asServer(new MockApi('normal', 0));
     // An older server: no ONNX download.
     vi.spyOn(hub.api, 'system').mockResolvedValue({ ...SYS, features: ['export_onnx_switches'] });
     vi.spyOn(hub.api, 'exportModel').mockResolvedValue({ path: 'D:/folo/exports/shapes-n-best.onnx', bytes: 10_700_000 });
@@ -114,7 +117,7 @@ describe('ExportDialog', () => {
   });
 
   it('sends the ONNX switches the server says it takes', async () => {
-    hub.api = new MockApi('normal', 0);
+    hub.api = asServer(new MockApi('normal', 0));
     // A server with the switches but no ONNX download: the export writes the file on the server.
     vi.spyOn(hub.api, 'system').mockResolvedValue({ ...SYS, features: ['export_onnx_switches'] });
     const run = vi.spyOn(hub.api, 'exportModel');
@@ -139,7 +142,7 @@ describe('ExportDialog', () => {
   });
 
   it('hides the ONNX switches from servers without them, and never sends them', async () => {
-    hub.api = new MockApi('normal', 0);
+    hub.api = asServer(new MockApi('normal', 0));
     vi.spyOn(hub.api, 'system').mockResolvedValue({ cpu: { name: 'cpu', threads: 1, util: 0 }, memory: { used_bytes: 0, total_bytes: 1 }, gpus: [], features: [] });
     const run = vi.spyOn(hub.api, 'exportModel').mockResolvedValue({ path: 'D:/folo/exports/shapes-n-best.onnx', bytes: 10_700_000 });
     c = mount(ExportDialog, { target, props: { model, open: true } });
@@ -195,15 +198,39 @@ describe('ExportDialog: ONNX download (weights_onnx)', () => {
     expect(target.ownerDocument.querySelector('dialog [role="status"]')?.textContent).toBe('Downloaded shapes-n-best-f16.onnx, 2.0 KiB.');
   });
 
-  it('saves nothing in the demo, and says why', async () => {
-    hub.api = new MockApi('normal', 0);
-    const clicked = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
-    c = mount(ExportDialog, { target, props: { model: { ...model, id: 'm_fast_n', name: 'fasteners-n-best' }, open: true } });
-    flushSync();
-    await pickOnnx();
-    (await until(() => button('Download fasteners-n-best.onnx'), 'the download button')).click();
-    await until(() => button('Done'), 'the finished state');
-    expect(clicked).not.toHaveBeenCalled();
-    expect(target.ownerDocument.querySelector('dialog .done')?.textContent).toContain('Nothing to download in the demo');
-  });
+});
+
+describe('ExportDialog: the demo creates no file', () => {
+  const dialogText = () => target.ownerDocument.querySelector('dialog')?.textContent?.replace(/\s+/g, ' ') ?? '';
+  const links = () => [...target.ownerDocument.querySelectorAll<HTMLAnchorElement>('dialog a')];
+
+  for (const format of ['folo-f16', 'onnx'] as const) {
+    it(`says so before and after, for ${format}: a neutral preview, no saved file, no Download, a way to a server`, async () => {
+      hub.api = new MockApi('normal', 0);
+      const clicked = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+      const success = vi.spyOn(toast, 'success');
+      c = mount(ExportDialog, { target, props: { model: { ...model, id: 'm_fast_n', name: 'fasteners-n-best' }, open: true } });
+      flushSync();
+      if (format === 'onnx') target.ownerDocument.querySelector<HTMLInputElement>('input[value="onnx"]')!.click();
+      // The server lists weights_onnx, but the demo has no graph: never "Download <file>".
+      await new Promise((r) => setTimeout(r, 20));
+      flushSync();
+      expect(dialogText()).toContain('Demo: no file is created.');
+      expect(button('Download')).toBeUndefined();
+      button('Export')!.click();
+      await until(() => button('Done'), 'the preview');
+      const text = dialogText();
+      expect(text).toContain('Demo preview: no file was created');
+      expect(text).toContain(format === 'onnx' ? 'fasteners-n-best.onnx' : '.folo');
+      expect(text).not.toMatch(/Export finished|Saved on the server|Downloaded/);
+      expect(target.ownerDocument.querySelector('dialog .ok:not(.quiet)')).toBeNull();
+      expect(button('Download')).toBeUndefined();
+      const connect = links().find((a) => a.textContent?.includes('Connect to a server'))!;
+      expect(connect.classList.contains('primary')).toBe(true);
+      expect(connect.getAttribute('href')).toMatch(/settings$/);
+      expect(clicked).not.toHaveBeenCalled();
+      expect(success).not.toHaveBeenCalled();
+      expect(target.ownerDocument.querySelector('dialog [role="status"]')?.textContent).toBe('Demo preview: no file was created.');
+    });
+  }
 });

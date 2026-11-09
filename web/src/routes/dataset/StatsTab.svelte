@@ -12,7 +12,6 @@
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import CircleAlert from '@lucide/svelte/icons/circle-alert';
   import CircleCheck from '@lucide/svelte/icons/circle-check';
-  import Info from '@lucide/svelte/icons/info';
   import TriangleAlert from '@lucide/svelte/icons/triangle-alert';
   import type { Dataset, DatasetStats, IssueCounts, IssueSeverity } from '$lib/api/types';
   import Histogram from '$lib/charts/Histogram.svelte';
@@ -20,7 +19,8 @@
   import { num } from '$lib/format';
   import { href } from '$lib/router.svelte';
   import Panel from '$lib/ui/Panel.svelte';
-  import { tooltip } from '$lib/ui/tooltip';
+  import Info from '@lucide/svelte/icons/info';
+  import InfoButton from '$lib/ui/InfoButton.svelte';
   import { swatchStyle } from './swatch';
   import { countBinLabel, findingLabel, healthChecks, imageCount, sizeBinLabel, TINY_SIZE, type Severity } from './health';
 
@@ -87,7 +87,7 @@
               {#each findings as h (h.id)}
                 {@const Icon = icons[h.severity]}
                 <span class="h-sev {h.severity}">
-                  <Icon size={14} strokeWidth={2} aria-hidden="true" /><span class="sr-only">{sevWord[h.severity]}:</span>{h.short}
+                  <Icon size={14} strokeWidth={2} aria-hidden="true" /><span class="sr-only">{sevWord[h.severity]}:</span><span class="wide">{h.short}</span><span class="narrow">{h.tiny}</span>
                 </span>
               {/each}
             </span>
@@ -162,8 +162,13 @@
     </div>
     <div class="kpi">
       <span class="k-label">Broken labels</span>
-      <span class="k-value num" class:bad={stats.broken_labels > 0}>{num(stats.broken_labels)}</span>
-      <span class="k-sub">{stats.broken_labels > 0 ? 'not trained on' : 'all labels parse'}</span>
+      <!-- The count is a metric, in ink; the status is the mark and its words in the caption (§2.6). -->
+      <span class="k-value num">{num(stats.broken_labels)}</span>
+      {#if stats.broken_labels > 0}
+        <span class="k-sub k-status"><CircleAlert size={12} strokeWidth={2} aria-hidden="true" />not trained on</span>
+      {:else}
+        <span class="k-sub">all labels parse</span>
+      {/if}
     </div>
   </section>
 
@@ -185,16 +190,13 @@
   </Panel>
 
   <div class="two">
-    <Panel title="Box size" meta="% of the image side" id="ds-size">
+    <Panel title="Box size" meta="boxes by size, % of the image side" id="ds-size">
       {#snippet actions()}
         <!-- The precise reading, one step away: the plain line above is what most readers need. -->
-        <button
-          type="button"
-          class="how"
-          aria-label="How box size is measured"
-          use:tooltip={{ text: "Size = √(box area ÷ image area): 10% is a box about a tenth of the image's side. One bar per size range, finer near the 5% tiny-box line; a bar's height is its number of boxes.", side: 'bottom' }}
-          ><Info size={14} aria-hidden="true" /></button
-        >
+        <InfoButton
+          label="How box size is measured"
+          text="Size = √(box area ÷ image area): 10% is a box about a tenth of the image's side. One bar per size range, finer near the 5% tiny-box line; a bar's height is its number of boxes."
+        />
       {/snippet}
       <Histogram
         edges={stats.box_size_hist.edges}
@@ -206,10 +208,9 @@
         hoverColor="var(--text-primary)"
         height={180}
         marker={{ x: TINY_SIZE, label: 'tiny' }}
-        yLabel="Boxes"
       />
     </Panel>
-    <Panel title="Boxes per image" meta="how many images have each count" id="ds-per">
+    <Panel title="Boxes per image" meta="images by their number of boxes" id="ds-per">
       <Histogram
         edges={stats.boxes_per_image_hist.edges}
         counts={stats.boxes_per_image_hist.counts}
@@ -219,7 +220,6 @@
         hoverColor="var(--text-primary)"
         unit="images"
         height={180}
-        yLabel="Images"
       />
     </Panel>
   </div>
@@ -373,7 +373,7 @@
     font-weight: var(--weight-medium);
   }
   .hdetail {
-    max-width: 60ch;
+    max-inline-size: var(--measure);
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
     color: var(--text-secondary);
@@ -409,18 +409,6 @@
     border-radius: var(--radius-lg);
     overflow: hidden;
   }
-  .how {
-    display: grid;
-    place-items: center;
-    width: 24px;
-    height: 24px;
-    border-radius: var(--radius-sm);
-    color: var(--text-tertiary);
-  }
-  .how:hover {
-    background: var(--bg-hover);
-    color: var(--text-primary);
-  }
   .kpi {
     display: grid;
     grid-template-rows: 16px 32px minmax(16px, auto);
@@ -454,7 +442,13 @@
   .splits:global(.wrap) .sep {
     display: none;
   }
-  .k-value.bad {
+  .k-status {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+  }
+  .k-status > :global(svg) {
+    flex-shrink: 0;
     color: var(--danger-text);
   }
   .two {
@@ -528,10 +522,6 @@
     display: none;
   }
   @media (pointer: coarse) {
-    .how {
-      width: 44px;
-      height: 44px;
-    }
     .bars button,
     summary {
       min-height: 44px;
@@ -545,7 +535,9 @@
     }
   }
   /* Tablets and phones: the histograms stack, each at full width; Health takes the full width too. The KPI captions
-     take their short form (the split counts are in the page header's meta line), so every cell stays one line. */
+     take their short form (the split counts are in the page header's meta line), so every cell stays one line, and the
+     folded Health line its findings' fewest words (`tiny`: "3 broken · 3 warnings · 35% tiny · 42 empty"), so it
+     stays one line on a tablet. */
   @media (max-width: 1023px) {
     .two {
       grid-template-columns: minmax(0, 1fr);

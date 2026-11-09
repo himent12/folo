@@ -24,9 +24,9 @@
    * chart the selected tab names. A single run is drawn in ink (primary metric in text.primary, secondary ones
    * tertiary with dash patterns); hue is reserved for entities (runs in Compare, classes).
    */
+  import InfoButton from '$lib/ui/InfoButton.svelte';
   import { tooltip } from '$lib/ui/tooltip';
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
-  import Info from '@lucide/svelte/icons/info';
   import ChartSkeleton from '$lib/charts/ChartSkeleton.svelte';
   import { BestPulse } from '$lib/charts/bestPulse';
   import LossOptions, { type Scale, type Smoothing } from '$lib/charts/LossOptions.svelte';
@@ -36,6 +36,7 @@
   import { runHorizon } from '$lib/charts/horizon';
   import type { Epoch, Run, Step } from '$lib/api/types';
   import { runProgress, stepsPerEpoch } from '$lib/api/progress';
+  import { effectiveCloseMosaic } from './resolved';
   import { conf, duration, eta, metric, num } from '$lib/format';
   import Segmented from '$lib/ui/Segmented.svelte';
   import Meta from '$lib/ui/Meta.svelte';
@@ -90,7 +91,9 @@
 
   const live = $derived(['queued', 'running', 'stopping'].includes(run.status));
   const progress = $derived(runProgress(run));
-  const closeFrom = $derived(1 - run.config.augment.close_mosaic / run.epochs);
+  /** Epochs without mosaic as the trainer runs them (capped at half the run: 7 of a 15-epoch run asked for 10). */
+  const closeN = $derived(effectiveCloseMosaic(run));
+  const closeFrom = $derived(1 - closeN / run.epochs);
   /** The run's last epochs train without mosaic: the bar hatches them and every chart marks where they start. */
   const mosaicOff = $derived(closeFrom > 0 && closeFrom < 1);
   const elapsed = $derived(run.started ? ((run.finished ? Date.parse(run.finished) : Date.now()) - Date.parse(run.started)) / 1000 : null);
@@ -202,7 +205,7 @@
     const [lo, hi] = extent;
     let next: Fit & { log?: boolean };
     if (unit) next = unitDomain(hi, plotPx);
-    else if (tab === 'loss' && scale === 'log') next = { domain: logDomain(lo, hi), ticks: [], log: true };
+    else if (tab === 'loss' && scale === 'log') next = { domain: logDomain(lo, hi), ticks: [], decimals: 0, log: true };
     // Throughput starts at 0 (a rate), with a little headroom over its peak.
     else if (tab === 'ips') next = niceDomain(0, hi * 1.05);
     else next = niceDomain(lo, hi);
@@ -320,13 +323,16 @@
   ]);
   /** The legend's note: the latest value's epoch, per epoch for validation metrics, per step for the rest. */
   /** The loss terms in plain words (DESIGN_DIRECTION §2.3: no jargon without its definition). */
-  const LOSS_TERMS =
-    'Box: how far predicted boxes are from the true ones. Classification (cls): how wrong the class scores are. ' +
-    'Distribution focal (dfl): how sharply each box edge is placed. EMA 0.9: smoothing; a higher value reacts more slowly.';
+  const LOSS_TERMS: [term: string, means: string][] = [
+    ['Box', 'how far predicted boxes are from the true ones.'],
+    ['Classification (cls)', 'how wrong the class scores are.'],
+    ['Distribution focal (dfl)', 'how sharply each box edge is placed.'],
+    ['EMA 0.9', 'smoothing; a higher value reacts more slowly.'],
+  ];
   const legendNote = $derived(unit ? (lastEpoch ? latestEp : undefined) : lastStep ? stepEp : undefined);
 
   // The last epochs train without mosaic (the hatched end of the progress bar): marked where they start, on every chart.
-  const xMark = $derived(mosaicOff ? { x: run.epochs - run.config.augment.close_mosaic, label: 'mosaic off' } : undefined);
+  const xMark = $derived(mosaicOff ? { x: run.epochs - closeN, label: 'mosaic off' } : undefined);
   const current = $derived(tabs.find((t) => t.id === tab)!);
 
 
@@ -365,7 +371,7 @@
   />
 {/snippet}
 
-<section class="metrics" aria-label="Run metrics">
+<section class="metrics" aria-label="Run metrics" data-tip-bounds>
   {#if queued && narrow}
     <!-- Phones, queued: one line until there is something to chart; the banner above says when it starts. -->
     <button type="button" class="pending" aria-expanded={queuedOpen} aria-controls="run-metrics-body" onclick={() => (queuedOpen = !queuedOpen)}>
@@ -388,9 +394,9 @@
           {#if mosaicOff}<div class="close" class:over={run.status === 'completed' || progress >= closeFrom} style:left="{closeFrom * 100}%"></div>{/if}
         </div>
         <!-- The hatched end explains itself on hover: a hit area over it, taller than the 4 px bar. -->
-        {#if mosaicOff}<span class="close-hit" aria-hidden="true" style:left="{closeFrom * 100}%" use:tooltip={`Last ${run.config.augment.close_mosaic} epochs train without mosaic`}></span>{/if}
+        {#if mosaicOff}<span class="close-hit" aria-hidden="true" style:left="{closeFrom * 100}%" use:tooltip={`Last ${closeN} ${closeN === 1 ? 'epoch trains' : 'epochs train'} without mosaic`}></span>{/if}
       </div>
-      {#if mosaicOff}<span class="sr-only">The hatched end of the bar marks the last {run.config.augment.close_mosaic} epochs, trained without mosaic.</span>{/if}
+      {#if mosaicOff}<span class="sr-only">The hatched end of the bar marks the last {closeN} {closeN === 1 ? 'epoch' : 'epochs'}, trained without mosaic.</span>{/if}
       <span class="cap num">
         {#if run.status === 'queued'}Not started{:else if live}<Meta line><span>{(progress * 100).toFixed(1)}%</span><span>{run.eta_s !== null ? `${eta(run.eta_s)} left` : 'estimating…'}</span></Meta>{:else}{elapsed !== null ? `${duration(elapsed)} total` : '—'}{/if}
       </span>
@@ -437,12 +443,13 @@
             <!-- One control for the loss view (smoothing and y scale behind one button), so the header keeps at most one
                  segmented group. -->
             {#if tab === 'loss'}
-              <!-- What the terms mean, for anyone who has not trained a detector before: on hover and focus, and read
-                   with the button. -->
-              <button type="button" class="terms" aria-label="What the loss terms mean" aria-describedby="loss-terms" use:tooltip={LOSS_TERMS}
-                ><Info size={14} aria-hidden="true" /></button
-              >
-              <span class="sr-only" id="loss-terms">{LOSS_TERMS}</span>
+              <!-- What the terms mean, for anyone who has not trained a detector before: a tap, a click or Enter opens
+                   it (ui/InfoButton). -->
+              <InfoButton label="What the loss terms mean">
+                <span class="terms-list">
+                  {#each LOSS_TERMS as [term, means] (term)}<span><b>{term}</b>: {means}</span>{/each}
+                </span>
+              </InfoButton>
               <LossOptions bind:smoothing bind:scale />
             {/if}
             {#if live && run.status !== 'queued'}
@@ -471,6 +478,7 @@
               xInteger
               yDomain={fit?.domain}
               yTickValues={fit && !fit.log ? fit.ticks : undefined}
+              yDecimals={fit && !fit.log ? fit.decimals : undefined}
               yLog={tab === 'loss' && scale === 'log'}
               yFormat={tab === 'lr' ? (v) => String(+(v / 10 ** lrExp).toFixed(2)) : undefined}
               valueFormat={tab === 'lr' ? (v) => (v / 10 ** lrExp).toFixed(2) : tab === 'ips' ? (v) => `${num(v, 0)} img/s` : (v) => metric(v)}
@@ -790,17 +798,9 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .terms {
+  .terms-list {
     display: grid;
-    place-items: center;
-    width: var(--control-sm);
-    height: var(--control-sm);
-    border-radius: var(--radius-sm);
-    color: var(--text-tertiary);
-  }
-  .terms:hover {
-    color: var(--text-primary);
-    background: var(--bg-hover);
+    gap: var(--space-1);
   }
   .ctl {
     display: flex;

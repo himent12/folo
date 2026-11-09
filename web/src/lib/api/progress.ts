@@ -22,3 +22,11 @@ export function runProgress(run: Pick<Run, 'step' | 'epoch' | 'epochs' | 'steps_
       : (run.status === 'completed' ? planned : Math.max(0, run.epoch - 1)) / planned;
   return Math.min(1, Math.max(0, p));
 }
+
+/**
+ * The epochs at the end of a run with mosaic off: `min(close_mosaic, floor(epochs / 2))`, so at least half of a short
+ * run keeps mosaic (docs/MODEL.md §8.6; folo-data `close_mosaic_epochs`, which the trainer applies itself).
+ */
+export function closeMosaicEpochs(closeMosaic: number, epochs: number): number {
+  return Math.max(0, Math.min(closeMosaic, Math.floor(Math.max(0, epochs) / 2)));
+}

@@ -22,8 +22,9 @@
   );
 </script>
 
-<!-- Collapsed, the state is a glyph as well as a colour (offline: no signal, demo: a flask), named in the tooltip and
-     the accessible name, so colour is never the only cue. -->
+<!-- Collapsed, the state is a glyph as well as a colour (offline: no signal), named in the tooltip and the accessible
+     name, so colour is never the only cue. Demo data is a mode, not a degraded state: a neutral flask at every width,
+     never the warning hue (DESIGN_DIRECTION §2.6). -->
 <a
   href={href('/settings')}
   class="conn {hub.offline ? 'offline' : hub.mode}"
@@ -32,7 +33,7 @@
   use:tooltip={{ text: collapsed ? `${label}. ${detail}` : detail, side: collapsed ? 'right' : 'top' }}
 >
   {#if collapsed && hub.offline}<WifiOff class="glyph" size={14} strokeWidth={2} aria-hidden="true" />
-  {:else if collapsed && hub.mode === 'mock'}<FlaskConical class="glyph" size={14} strokeWidth={2} aria-hidden="true" />
+  {:else if hub.mode === 'mock' && !hub.offline}<FlaskConical class="glyph" size={14} strokeWidth={2} aria-hidden="true" />
   {:else}<span class="dot" aria-hidden="true"></span>{/if}
   {#if !collapsed}<span class="label">{label}</span>{/if}
   <span class="sr-only">{detail}</span>
@@ -76,15 +77,12 @@
     background: var(--danger-solid);
     box-shadow: 0 0 0 3px var(--danger-muted);
   }
-  .mock .dot {
-    background: var(--warning-solid);
-    box-shadow: 0 0 0 3px var(--warning-muted);
-  }
   .offline :global(.glyph) {
     color: var(--danger-text);
   }
   .mock :global(.glyph) {
-    color: var(--warning-text);
+    flex-shrink: 0;
+    color: var(--text-tertiary);
   }
   .label {
     white-space: nowrap;

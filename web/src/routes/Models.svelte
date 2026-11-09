@@ -165,7 +165,8 @@
       ...[...named, ...rest].map(([value, { label, n }]) => ({ value, label, meta: String(n) })),
     ];
   });
-  const totalBytes = $derived((models.data ?? []).reduce((a, m) => a + m.bytes, 0));
+  // What the rows shown hold, said once at the list's end (base.css .list-foot).
+  const shownBytes = $derived(groups.reduce((a, g) => a + g.rows.reduce((b, m) => b + m.bytes, 0), 0));
   const hideCls = (c: Col) => (c.hide ? `hide-${c.hide}` : '');
   /** Medium weight goes to the name and the score the list is ranked by; specs stay regular. */
   const strongScore = $derived<Key>(sortKey === 'map50' ? 'map50' : 'map50_95');
@@ -175,7 +176,7 @@
 </script>
 
 <Page title="Models">
-  <!-- One fixed line: the counts live in the toolbar, so nothing here changes as the list loads. -->
+  <!-- One fixed line: the counts live at the list's end, so nothing here changes as the list loads. -->
   {#snippet sub()}<span>Trained weights and imported <span class="mono">.folo</span> files, ranked per evaluation dataset.</span>{/snippet}
   <!-- Phones: one line, so the list starts 16 px under it. -->
   {#snippet subPhone()}<span>Ranked per evaluation dataset.</span>{/snippet}
@@ -200,9 +201,6 @@
         </div>
       {/if}
       </div>
-        <span class="lt-count num">
-          {#if models.data}{models.data.length} {models.data.length === 1 ? 'model' : 'models'} · {bytes(totalBytes, prefs.units)}{:else}<Skeleton inline w="104px" h="10px" />{/if}
-        </span>
         <div class="lt-search"><Input bind:value={query} icon={Search} placeholder="Filter by name, arch or run" aria-label="Filter models" type="search" /></div>
     </div>
   {/if}
@@ -342,7 +340,7 @@
                 <a href={href(`/models/${m.id}`)}>
                   <span class="m-main">
                     <span class="name truncate">{m.name}</span>
-                    <span class="m-meta num truncate"><Meta line><Ident value={m.arch} /><span>{m.imgsz} px</span><span>{compact(m.params)}</span><span>{bytes(m.bytes, prefs.units)}</span></Meta></span>
+                    <span class="m-meta num"><Meta line><Ident value={m.arch} /><span>{m.imgsz} px</span><span>{compact(m.params)}</span><span>{bytes(m.bytes, prefs.units)}</span></Meta></span>
                   </span>
                   <span class="m-side"><span class="num map">{#if best.has(m.id)}<span class="best">best</span>{/if}<span class="sr-only">mAP50-95 </span>{metric(m.metrics?.map50_95)}</span></span>
                 </a>
@@ -353,6 +351,14 @@
       {/each}
     </div>
   </Panel>
+  {#if models.data && shownCount}
+    <p class="list-foot num">
+      <Meta>
+        <span>{shownCount < models.data.length ? `${shownCount} of ${models.data.length}` : shownCount} {models.data.length === 1 ? 'model' : 'models'}</span>
+        <span>{bytes(shownBytes, prefs.units)}</span>
+      </Meta>
+    </p>
+  {/if}
 
   <!-- Only with models to look at. The engine comparison is reference: one line until it is asked for. -->
   {#if models.data?.length}

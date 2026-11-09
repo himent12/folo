@@ -57,9 +57,12 @@ describe('Dataset stats: health findings', () => {
     const counts = (await hub.api.datasetIssues('ds_shapes_hard', { limit: 1 })).counts;
     c = mount(StatsTab, { target, props: { dataset, stats: dataset.stats!, counts, onclass: () => {} } });
     flushSync();
-    const items = [...target.querySelectorAll('#ds-health summary .h-sev')].map((e) => e.textContent?.replace(/\s+/g, ' ').trim());
+    const sev = [...target.querySelectorAll('#ds-health summary .h-sev')];
+    const items = sev.map((e) => `${e.querySelector('.sr-only')?.textContent}${e.querySelector('.wide')?.textContent}`);
     // shapes-hard's 3 check errors are all label errors (broken_label, class_overflow, out_of_range_box): the 3 broken files.
     expect(items).toEqual(['Error:3 broken label files', 'Warning:3 check warnings', 'Warning:35% tiny boxes', 'Note:42 empty images (0.8%)']);
+    // Tablets (and phones) say the same findings in their fewest words, so the folded line stays one line there.
+    expect(sev.map((e) => e.querySelector('.narrow')?.textContent)).toEqual(['3 broken', '3 warnings', '35% tiny', '42 empty']);
     const text = target.querySelector('#ds-health')?.textContent ?? '';
     expect(text).not.toMatch(/categor|dataset-wide|file issues/);
     expect(target.querySelector('#ds-health details')?.hasAttribute('open')).toBe(false);

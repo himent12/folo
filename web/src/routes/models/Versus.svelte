@@ -4,7 +4,7 @@
    * docs/BENCHMARKS.md's summary where both have a number, including the ones FOLO trails. Values in ink; the lead is a
    * word ("1.66× faster", "17% less memory"), never a colour, and a row where FOLO is behind says so plainly. Only rows
    * measured under the same conditions state a winner: a row whose engines ran at different precision or did different
-   * work keeps both measurements, and its conclusion is "—" over the specific difference ("f32 vs TensorFloat-32"),
+   * work keeps both measurements, and its conclusion is "—" beside the specific difference ("f32 vs TensorFloat-32"),
    * with one footnote under the table saying what "—" means. Units sit in the row's header, never in the cells. Each row
    * keeps one short qualifier, and the method and caveats sit in a "How this was measured" fold.
    * Phones stack each row (the metric, then its three values, each with its engine named in the markup); the header
@@ -184,7 +184,7 @@
   }
   /* The footnote for "—", under the rows it explains, one step quieter. */
   .foot p {
-    max-width: 60ch;
+    max-inline-size: var(--measure);
   }
   .foot {
     padding: var(--space-3) var(--space-4);
@@ -247,18 +247,17 @@
     font-weight: var(--weight-regular);
     color: var(--text-secondary);
   }
-  /* No winner: the conclusion in secondary ink, over the specific difference on the qualifier's 12 px line. */
+  /* No winner: one line like every other cell of the column, "—" in secondary ink and the specific difference beside
+     it at 12 px tertiary; what "—" means is the one footnote under the table. */
   .unlike .lead {
     font-weight: var(--weight-regular);
   }
   .dc {
-    display: block;
     color: var(--text-secondary);
   }
   .why {
-    display: block;
+    margin-left: var(--space-2);
     font-size: var(--type-sm-size);
-    line-height: var(--type-sm-line);
     color: var(--text-tertiary);
   }
   /* The server's own rows: a group heading over them, the values in the folo-n column. */
@@ -324,7 +323,7 @@
   .how-body {
     display: grid;
     gap: var(--space-2);
-    max-width: calc(60ch + var(--space-4) * 2 + 18px);
+    max-width: calc(var(--measure) + var(--space-4) * 2 + 18px);
     padding: 0 var(--space-4) var(--space-4) calc(var(--space-4) + 18px);
     color: var(--text-secondary);
   }

@@ -3,7 +3,8 @@
 // fetched once; each model is loaded once per backend (loading parses and fuses it and, on WebGPU, compiles the
 // kernels, which takes seconds) and reused for every image. Results have /api/predict's shape plus `backend`.
 import { ApiError } from '$lib/api/client';
-import type { Prediction } from '$lib/api/types';
+import { hasFeature } from '$lib/api/queue';
+import type { Prediction, SystemInfo } from '$lib/api/types';
 
 export type Backend = 'webgpu' | 'cpu';
 
@@ -45,7 +46,7 @@ function loadWasm(): Promise<WasmModule> {
         throw new ApiError(
           0,
           'wasm_not_built',
-          'This build of Studio does not include the in-browser runtime.',
+          NO_WASM,
           'Run scripts/build-wasm.sh (or scripts\\build-wasm.ps1) before building or serving Studio.',
         );
       }
@@ -59,6 +60,53 @@ function loadWasm(): Promise<WasmModule> {
   }
   return wasm;
 }
+
+/**
+ * Whether `/api/system` says this Studio build includes folo-wasm: `true` where it lists the feature (its name is
+ * requested of the API, so this is the one place that reads it), `null` where it does not say (then `probeWasm`).
+ */
+export function wasmFromSystem(system: SystemInfo | null | undefined): true | null {
+  return hasFeature(system, 'web_wasm') ? true : null;
+}
+
+/** The runtime's files (folo-server `FOLO_WASM_FILES`): the module and its JS glue. */
+const WASM_FILES = [
+  ['folo-wasm/folo_wasm.js', /javascript/],
+  ['folo-wasm/folo_wasm_bg.wasm', /wasm/],
+] as const;
+
+let probe: Promise<boolean | null> | null = null;
+
+/**
+ * Whether this build serves the in-browser runtime: `true` when both files answer with their own type, `false` when
+ * one is confirmed missing (a 404 or 410, or another type: a build without them gets the SPA's index.html), `null`
+ * when that is not known (offline, a server error). Only a confirmed answer is kept for the session; an unknown one
+ * is asked again on the next call (the next visit to Playground, or on reconnecting). `fetcher` is for tests.
+ */
+export function probeWasm(fetcher: typeof fetch = fetch): Promise<boolean | null> {
+  if (probe) return probe;
+  const p = Promise.all(
+    WASM_FILES.map(([path, type]): Promise<boolean | null> =>
+      fetcher(`${import.meta.env.BASE_URL}${path}`, { method: 'HEAD' }).then(
+        (r) => (r.ok ? type.test(r.headers.get('content-type') ?? '') : r.status === 404 || r.status === 410 ? false : null),
+        () => null,
+      ),
+    ),
+  ).then((ok) => (ok.includes(false) ? false : ok.includes(null) ? null : true));
+  probe = p;
+  void p.then((v) => {
+    if (v === null && probe === p) probe = null;
+  });
+  return p;
+}
+
+/** Forgets the probe's answer (tests). */
+export function resetWasmProbe() {
+  probe = null;
+}
+
+/** Said where the runtime is missing: the browser choices are off, with this as their reason. */
+export const NO_WASM = 'This build of Studio does not include the in-browser runtime.';
 
 /** Whether the browser exposes WebGPU at all (a usable device is only known once a model loads on it). */
 export function hasWebGpu(): boolean {

@@ -1,7 +1,7 @@
 // Measured throughput and run estimates (docs/API.md, Throughput and estimates): which numbers come from this server
 // and which are the reference, in words every screen shares. Every figure shown from here names its source: "measured
 // here" only for a row of this very adapter or CPU; a row from another adapter under the same ordinal says where it
-// was measured; everything else is the reference (docs/BENCHMARKS.md).
+// was measured; everything else is the reference (docs/BENCHMARKS.md), named to people as `referenceSource` words it.
 // The rules every screen follows: a measured figure is the primary one and the reference stays secondary beside it
 // (or under it), each labelled; a run's time is a range (`timeRange`), never one precise figure; a rough estimate
 // (low confidence) reads one step quieter; and a server without these features keeps the reference figures, said to
@@ -100,15 +100,25 @@ export function roughTime(s: number): string {
 export const thisDevice = (device: string) => (device === 'cpu' ? 'this CPU' : 'this GPU');
 
 /**
+ * The basis of a reference estimate, saying why its range is wide: "Reference benchmarks · not run here yet"
+ * on the reference machine's GPU or CPU model (-30% / +60%), "Wide range: not run on this GPU yet" elsewhere
+ * (-60% / +200%).
+ */
+export const referenceBasis = (sameModel: boolean, cpu: boolean) =>
+  sameModel ? 'Reference benchmarks · not run here yet' : `Wide range: not run on this ${cpu ? 'CPU' : 'GPU'} yet`;
+
+/**
  * What an estimate stands on, in plain words, short enough for one line under the figure:
- * "Measured on this GPU · 226 samples", "Scaled from folo-n at 640 px on this GPU", "Reference figures, same GPU
- * model" (the reference machine's adapter or CPU) or "Reference figures, not measured here".
+ * "Measured on this GPU · 226 samples", "Scaled from folo-n at 640 px on this GPU" ("Wide range: scaled from folo-n at
+ * 640 px" when that is far from these settings), or a reference basis (`referenceBasis`): a wide range says why.
  */
 export function basisLine(e: RunEstimate): string {
   const b = e.basis;
   if (b.source === 'measured' && b.exact) return `Measured on ${thisDevice(e.device)} · ${num(b.samples)} ${b.samples === 1 ? 'sample' : 'samples'}`;
-  if (b.source === 'measured') return `Scaled from ${b.arch} at ${b.imgsz} px on ${thisDevice(e.device)}`;
-  return b.measured_on === e.device_name ? `Reference figures, same ${e.device === 'cpu' ? 'CPU' : 'GPU'} model` : 'Reference figures, not measured here';
+  // Carried far from what was measured (low confidence), the range is wide, and the line says so and why.
+  if (b.source === 'measured')
+    return e.confidence === 'low' ? `Wide range: scaled from ${b.arch} at ${b.imgsz} px` : `Scaled from ${b.arch} at ${b.imgsz} px on ${thisDevice(e.device)}`;
+  return referenceBasis(b.measured_on === e.device_name, e.device === 'cpu');
 }
 
 /** What the range means, for the disclosure under the estimate. */

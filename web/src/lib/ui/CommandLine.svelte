@@ -8,20 +8,22 @@
   import Copy from '@lucide/svelte/icons/copy';
   import Button from './Button.svelte';
   import { fadeScroll } from './fadeScroll';
-  import { toast } from './toast.svelte';
+  import { feedback } from './feedback.svelte';
 
   let {
     command,
     label = 'Command',
     copied,
-  }: { command: string; label?: string; /** What the copied command does, said in the toast. */ copied?: string } = $props();
+  }: { command: string; label?: string; /** What the copied command does, said with the result. */ copied?: string } = $props();
+  // The page's toaster, or the status region of the dialog this line sits in.
+  const notify = feedback();
 
   async function copy() {
     try {
       await navigator.clipboard.writeText(command);
-      toast.success('Command copied', copied);
+      notify.success('Command copied', copied);
     } catch (e) {
-      toast.error(e, 'Could not copy the command');
+      notify.error(e, 'Could not copy the command');
     }
   }
 </script>

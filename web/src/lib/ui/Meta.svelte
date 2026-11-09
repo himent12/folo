@@ -5,8 +5,11 @@
    * never a bare text node, and never write the dot by hand.
    *
    * The dot hangs at the start of every item, so a line that wraps never ends on a "·": the dot that would lead the
-   * next line falls outside the line's left edge and is clipped. `line` keeps the items on one line, cut with an
-   * ellipsis at the end (table rows, list rows).
+   * next line falls outside the line's left edge and is clipped. Every item is a fact (a count, a unit, a status, an
+   * identifier), and a fact is never cut (DESIGN_DIRECTION §2.3): a line wraps between items, never inside one. `line`
+   * keeps a desktop table row's items on one line (cut with an ellipsis only as a last resort, which the shoot's QA
+   * reports); on phones (< 768 px) it wraps whole items like any meta line, so a phone row grows a line instead of
+   * losing its last fact.
    */
   import type { Snippet } from 'svelte';
 
@@ -32,7 +35,8 @@
     margin-left: -20px;
     clip-path: inset(-8px -8px -8px 16px);
   }
-  /* A line breaks between items, never inside one; an item that may be too long for the line truncates itself. */
+  /* A line breaks between items, never inside one; only a free-text name longer than the whole line may truncate
+     itself (with its full text reachable), never a fact. */
   .ui-meta > :global(*) {
     min-width: 0;
     white-space: nowrap;
@@ -48,22 +52,29 @@
     color: var(--text-tertiary);
     text-decoration: none;
   }
-  /* An item's content is inline (it follows its dot); a one-line meta nested in an item sits after the dot too. */
+  /* An item's content is inline (it follows its dot); a meta nested in an item sits after that dot too, and on phones
+     wraps its own items whole. */
   :global(.ui-meta) .ui-meta.line {
-    display: inline-block;
+    display: inline-flex;
     max-width: calc(100% - 20px);
     vertical-align: top;
   }
-  /* One line: inline flow cut with an ellipsis; the first item has no dot. */
-  .ui-meta.line {
-    display: block;
-    margin-left: 0;
-    clip-path: none;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  .ui-meta.line > :global(*:first-child)::before {
-    content: none;
+  /* From 768 px up (table rows): one line, inline flow; the first item has no dot. Phones keep the wrapping flow
+     above: a fact is never cut, the row grows a line instead. */
+  @media (min-width: 768px) {
+    :global(.ui-meta) .ui-meta.line {
+      display: inline-block;
+    }
+    .ui-meta.line {
+      display: block;
+      margin-left: 0;
+      clip-path: none;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .ui-meta.line > :global(*:first-child)::before {
+      content: none;
+    }
   }
 </style>

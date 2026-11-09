@@ -23,6 +23,7 @@
   import Badge from '$lib/ui/Badge.svelte';
   import Button from '$lib/ui/Button.svelte';
   import Dialog from '$lib/ui/Dialog.svelte';
+  import { DialogStatus } from '$lib/ui/feedback.svelte';
   import EmptyState from '$lib/ui/EmptyState.svelte';
   import Menu, { type MenuItem } from '$lib/ui/Menu.svelte';
   import Tabs from '$lib/ui/Tabs.svelte';
@@ -34,6 +35,7 @@
   import { toast } from '$lib/ui/toast.svelte';
   import { tooltip } from '$lib/ui/tooltip';
   import ConfigPanel from './run/ConfigPanel.svelte';
+  import { HEAD_LABEL } from './run/resolved';
   import Logs from './run/Logs.svelte';
   import Outcome from './run/Outcome.svelte';
   import PerClass from './run/PerClass.svelte';
@@ -41,7 +43,7 @@
   import Meta from '$lib/ui/Meta.svelte';
   import RunMetrics from './run/RunMetrics.svelte';
   import Samples from './run/Samples.svelte';
-  import { moveQueued, queueItems, startHint, startLabel } from './run/queueActions';
+  import { moveQueued, queueItems, REMOVE_DESCRIPTION, REMOVE_LABEL, removeTitle, startHint, startLabel } from './run/queueActions';
   import { scheduleWarnings } from './run/warnings';
   import Copy from '@lucide/svelte/icons/copy';
   import Play from '@lucide/svelte/icons/play';
@@ -112,10 +114,10 @@
     void others.refresh();
   }
 
-  // A queued run waits in a layout of its own from 768 px up: its place and the way to the front, what it waits for,
-  // then its config; the outputs it will have are one quiet list instead of empty frames. Phones keep their sections.
-  const phone = new MediaQuery(media.phone, false);
-  const waitingLayout = $derived(queuedOnly && !phone.current);
+  // A queued run waits in a layout of its own at every width: its place and the way to the front, what it waits for,
+  // then its config; the outputs it will have are one quiet list instead of empty frames. Phones show the callout and
+  // the config alone: no section picker over sections with nothing behind them, no folded chart that opens empty.
+  const waitingLayout = $derived(queuedOnly);
   const active = $derived(run ? ['queued', 'running', 'stopping'].includes(run.status) : false);
   const epochsDone = $derived.by(() => {
     void live.version;
@@ -141,6 +143,10 @@
   let stopOpen = $state(false);
   let deleteOpen = $state(false);
   let busy = $state(false);
+  // A confirm that fails says so in its dialog, which stays open for Retry (the toaster sits behind the modal); one
+  // that succeeds closes it and the page says what happened.
+  const stopStatus = new DialogStatus();
+  const deleteStatus = new DialogStatus();
 
   async function stop() {
     if (!run) return;
@@ -151,7 +157,7 @@
       stopOpen = false;
       toast.info(`Stopping ${r.name}`, `The checkpoint from epoch ${r.epoch} is kept.`);
     } catch (e) {
-      toast.error(e, 'Could not stop the run');
+      stopStatus.error(e, run.status === 'queued' ? 'Could not remove the run from the queue' : 'Could not stop the run');
     } finally {
       busy = false;
     }
@@ -166,7 +172,7 @@
       toast.success(`Deleted ${run.name}`, 'Checkpoints on disk were left in place.');
       router.go('/runs');
     } catch (e) {
-      toast.error(e, 'Could not delete the run');
+      deleteStatus.error(e, 'Could not delete the run');
     } finally {
       busy = false;
     }
@@ -179,15 +185,16 @@
       if (run.status !== 'completed') out.push({ label: 'Try model', icon: ScanSearch, href: href(`/playground?model=${run.model_id}`) });
       out.push({ label: 'Open model', icon: Box, href: href(`/models/${run.model_id}`) });
     }
-    // Phones: the queued run's one action keeps its one name, in the menu (the status and its time keep the row); its
-    // moves come first (Start next is in the banner).
-    if (place !== null) out.push(...queueItems(place, waitingCount, ahead, move, { start: false }));
-    if (run.status === 'queued') out.push({ label: 'Remove from queue', icon: X, danger: true, onclick: () => (stopOpen = true) });
+    // Phones: the queue actions in their one order (Start next is the banner's button), Remove from queue last under the
+    // same name (the status and its time keep the row).
+    const removeQueued = () => (stopOpen = true);
+    if (place !== null) out.push(...queueItems(place, waitingCount, ahead, move, { start: false, remove: removeQueued }));
+    else if (run.status === 'queued') out.push({ label: REMOVE_LABEL, icon: X, danger: true, onclick: removeQueued });
     if (!active) out.push({ label: 'Delete run', icon: Trash, danger: true, onclick: () => (deleteOpen = true) });
     return out;
   });
 
-  /** Wider screens: the queued run's moves behind ⋯, next to Remove from queue (Start next is in the banner). */
+  /** Wider screens: the queued run's moves behind ⋯; Remove from queue is the button beside it, Start next the banner's. */
   const wideQueueItems = $derived(place !== null ? queueItems(place, waitingCount, ahead, move, { start: false }) : []);
 
   /** What the run will have once it trains, in place of the empty frames (the waiting layout). */
@@ -214,6 +221,7 @@
   });
 
   let resuming = $state(false);
+  // page-level: Resume is a header and palette action, never inside a dialog.
   async function resume() {
     if (!run) return;
     resuming = true;
@@ -222,6 +230,7 @@
       const r = await live.resume(() => hub.api.resumeRun(id));
       toast.success(`Resuming ${r.name}`, r.epoch > 0 ? `From the checkpoint of epoch ${r.epoch}.` : 'No epoch had finished, so it starts over.');
     } catch (e) {
+      // page-level: as above.
       toast.error(e, 'Could not resume the run');
     } finally {
       resuming = false;
@@ -235,7 +244,7 @@
 {#snippet waiting()}
   {#if place !== null && place > 1}
     <!-- Behind other waiting runs: the one in front of it, then what trains now. -->
-    Starts after {#if before}<a class="link" href={href(`/runs/${before.id}`)}>{before.name}</a>{#if place > 2} and {place - 2} more{/if}{:else}{place - 1} queued {place === 2 ? 'run' : 'runs'}{/if}.
+    Starts after {#if before}<a class="link" href={href(`/runs/${before.id}`)}>{before.name}</a>{#if place > 2}{' '}and {place - 2} more{/if}{:else}{place - 1} queued {place === 2 ? 'run' : 'runs'}{/if}.
     {#if ahead}<a class="link" href={href(`/runs/${ahead.id}`)}>{ahead.name}</a> is training{#if ahead.eta_s !== null}, about {eta(ahead.eta_s)} left{/if}.{/if}
   {:else if ahead}
     Starts when <a class="link" href={href(`/runs/${ahead.id}`)}>{ahead.name}</a> finishes{#if ahead.eta_s !== null}, in about {eta(ahead.eta_s)}{/if}.
@@ -337,6 +346,9 @@
         <span class="cfg num">{run.config.imgsz} px</span>
         <span class="cfg num">batch {run.config.batch}</span>
         <span class="cfg lineage">{#if !lineage || lineage.kind === 'scratch'}From scratch{:else}Fine-tuned from <Lineage origin={lineage} />{/if}</span>
+        <!-- Only where they differ from the defaults (f32, the NMS head); Config always says both. -->
+        {#if run.config.amp}<span class="cfg">Mixed precision</span>{/if}
+        {#if run.config.head === 'o2o'}<span class="cfg">{HEAD_LABEL.o2o}</span>{/if}
         <span class="truncate dev" title={run.device}>{deviceName(run.device)}</span>
         <span class="faint when">{run.started ? `started ${ago(run.started)}` : `created ${ago(run.created)}`}</span>
       </Meta>
@@ -354,7 +366,8 @@
       {:else if run.status === 'queued'}
         <!-- Phones: in the ⋯ menu under the same name, so the status and its time keep one line beside it. -->
         <span class="wide-only">
-          <Button variant="ghost" icon={X} onclick={() => (stopOpen = true)}>Remove from queue</Button>
+          <!-- The quiet destructive control, styled as Stop is on a running run (DESIGN_DIRECTION 13). -->
+          <Button variant="danger" icon={X} onclick={() => (stopOpen = true)}>{REMOVE_LABEL}</Button>
           {#if wideQueueItems.length}<Menu label="More run actions" items={wideQueueItems} />{/if}
         </span>
       {:else if !active}
@@ -373,13 +386,14 @@
       waitingTitle={place !== null ? queuePlace(place) : undefined}
       waitingActions={canStart ? startNext : undefined}
       {warnings}
+      system={system.data ?? (system.error ? null : undefined)}
     />
 
     {#if waitingLayout}
-      <!-- Waiting (768 px up): the config as asked for, beside the queue and what the run will have. Nothing here is an
+      <!-- Waiting: the config as asked for, beside the queue and what the run will have. Nothing here is an
            empty frame, and no panel stretches to its neighbour's height. -->
       <div class="waiting">
-        <div class="w-main"><ConfigPanel config={run.config} resolved={run.resolved} datasetName={dataset?.name} /></div>
+        <div class="w-main"><ConfigPanel config={run.config} resolved={run.resolved} datasetName={dataset?.name} weights={lineage} /></div>
         <div class="w-side">
           {#if place !== null && queue.length}
             <Panel title="Queue" meta="{waitingCount} waiting" pad="none" id="queue">
@@ -454,18 +468,19 @@
 
   <Dialog
     bind:open={stopOpen}
-    title={run.status === 'queued' ? `Remove ${run.name} from the queue?` : `Stop ${run.name}?`}
+    title={run.status === 'queued' ? removeTitle(run.name) : `Stop ${run.name}?`}
     description={run.status === 'queued'
-      ? 'It has not started yet, so nothing is lost. You can start it again from New run.'
+      ? REMOVE_DESCRIPTION
       : 'Training stops after the current step. The last checkpoint is kept and saved as a model.'}
     size="sm"
+    status={stopStatus}
   >
     {#snippet footer()}
       <Button onclick={() => (stopOpen = false)}>{run.status === 'queued' ? 'Keep it queued' : 'Keep training'}</Button>
-      <Button variant="destructive" icon={run.status === 'queued' ? X : Square} loading={busy} onclick={stop}>{run.status === 'queued' ? 'Remove from queue' : 'Stop run'}</Button>
+      <Button variant="destructive" icon={run.status === 'queued' ? X : Square} loading={busy} onclick={stop}>{run.status === 'queued' ? REMOVE_LABEL : 'Stop run'}</Button>
     {/snippet}
   </Dialog>
-  <Dialog bind:open={deleteOpen} title="Delete {run.name}?" description="Removes the run and its metric history from Studio. Checkpoint files on disk are not touched." size="sm">
+  <Dialog bind:open={deleteOpen} title="Delete {run.name}?" description="Removes the run and its metric history from Studio. Checkpoint files on disk are not touched." size="sm" status={deleteStatus}>
     {#snippet footer()}
       <Button onclick={() => (deleteOpen = false)}>Cancel</Button>
       <Button variant="destructive" icon={Trash} loading={busy} onclick={remove}>Delete run</Button>
@@ -477,7 +492,7 @@
   .loading {
     display: grid;
     gap: var(--space-4);
-    max-width: var(--size-content-max);
+    max-width: calc(var(--size-content-max) + 2 * var(--space-6));
     margin: 0 auto;
     padding: var(--space-6);
   }
@@ -723,6 +738,12 @@
     }
     .w-side :global(#queue) {
       order: -1;
+    }
+  }
+  /* Phones: the callout above says the place and what it waits for; the config is the page. */
+  @media (max-width: 767px) {
+    .w-side {
+      display: none;
     }
   }
   .queue,

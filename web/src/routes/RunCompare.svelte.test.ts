@@ -54,9 +54,16 @@ describe('Compare runs on a phone: two at a time', () => {
 
     /** Every body row has the setting cell and one cell per shown run; header names say which runs they are. */
     function check(baseline: string, other: string) {
-      const heads = [...table.querySelectorAll('thead th')].slice(1).map((th) => th.querySelector('.th')?.textContent);
+      const heads = [...table.querySelectorAll('thead th')].slice(1).map((th) => th.querySelector('.th-name')?.textContent);
       expect(heads).toEqual([baseline, other]);
-      expect(table.querySelectorAll('colgroup col')).toHaveLength(3);
+      // One geometry from the first render: the widths live on the header row (no colgroup whose keyed columns could
+      // outlive a page of runs), the setting column fixed, the two run columns sharing the rest.
+      expect(table.querySelector('colgroup')).toBeNull();
+      const ths = [...table.querySelectorAll<HTMLElement>('thead th')];
+      expect(ths).toHaveLength(3);
+      expect(ths[0]!.style.width).toBe('104px');
+      expect(ths.slice(1).every((th) => !th.style.width)).toBe(true);
+      expect(ths[1]!.querySelector('.base-tag')?.textContent).toBe('Baseline');
       const rows = [...table.querySelectorAll('tbody tr:not(.fold)')];
       expect(rows.length).toBeGreaterThan(3);
       for (const tr of rows) expect(tr.querySelectorAll('td'), tr.querySelector('td.k')?.textContent ?? '').toHaveLength(3);
@@ -79,11 +86,11 @@ describe('Compare runs on a phone: two at a time', () => {
     const chip = [...target.querySelectorAll<HTMLButtonElement>('.chip button.key')].find((b) => b.textContent === names[3])!;
     chip.click();
     flushSync();
-    const other = target.querySelectorAll('#cmp-table thead th .th')[1]?.textContent ?? '';
+    const other = target.querySelectorAll('#cmp-table thead th .th-name')[1]?.textContent ?? '';
     expect(other).not.toBe(names[3]);
     check(names[3]!, other);
     target.querySelector<HTMLButtonElement>('button[aria-label="Previous run"]')!.click();
     flushSync();
-    check(names[3]!, target.querySelectorAll('#cmp-table thead th .th')[1]?.textContent ?? '');
+    check(names[3]!, target.querySelectorAll('#cmp-table thead th .th-name')[1]?.textContent ?? '');
   });
 });

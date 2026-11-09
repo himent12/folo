@@ -2,6 +2,7 @@
 // features) or while its answer loads: docs/BENCHMARKS.md's reference figures, the same ones the server falls back
 // to, carried over to the run's settings the same way (lib/reference.ts). Shown as a range, labelled as reference.
 
+import { closeMosaicEpochs } from '$lib/api/progress';
 import type { Arch } from '$lib/api/types';
 import { e2eMs } from '$lib/benchmarks';
 import { archSpec, REF_STARTUP_S, referenceRates, referenceSpread, referenceVram } from '$lib/reference';
@@ -83,14 +84,8 @@ export function estimate(arch: Arch, trainImages: number, epochs: number, batch:
   };
 }
 
-/**
- * The factor that makes the estimate agree with a run that ran out of GPU memory: when the estimate for its settings
- * (`failedBytes`) fit in `gpuBytes`, it was low, so estimates are scaled until those settings exceed the memory by 5%.
- * 1 when the estimate already said they would not fit.
- */
-export function oomScale(failedBytes: number, gpuBytes: number): number {
-  return failedBytes > 0 && failedBytes < gpuBytes * 1.05 ? (gpuBytes * 1.05) / failedBytes : 1;
-}
+/** Lives with the other out-of-memory rules (lib/oom); here for the form's tests. */
+export { oomScale } from '$lib/oom';
 
 /** docs/MODEL.md §8.3: gradients accumulate up to a nominal batch of 64. */
 const NOMINAL_BATCH = 64;
@@ -171,13 +166,8 @@ export function shortRun(trainImages: number, epochs: number, batch: number, fro
   return { ...now, epochs: e };
 }
 
-/**
- * The epochs at the end of a run with mosaic off: `min(close_mosaic, floor(epochs / 2))`, so at least half of a short
- * run keeps mosaic (docs/MODEL.md §8.6; the trainer applies the cap itself).
- */
-export function closeMosaicEpochs(closeMosaic: number, epochs: number): number {
-  return Math.max(0, Math.min(closeMosaic, Math.floor(Math.max(0, epochs) / 2)));
-}
+// The trainer's cap of close mosaic, kept with the run's progress (one formula for New run, Run and the mock).
+export { closeMosaicEpochs };
 
 /** Close mosaic's default: the trainer's 10 epochs under its own cap. */
 export function autoCloseMosaic(epochs: number): number {

@@ -3,7 +3,8 @@
    * A run's config. With `resolved` (docs/API.md, `Run.resolved`) the settings it trains with are the values shown,
    * the request a note where it differs ("AdamW (auto)", "0.001429 (requested 0.01)"), plus the batch it accumulates,
    * the LR decay, the warmup and the optimizer's momentum and weight decay; without it, the request as asked for.
-   * Copy JSON copies the request: it is what `folo train --config` and New run take, and resolves the same way again.
+   * Close mosaic is the trainer's capped count ("last 7 epochs (requested 10)"). Copy JSON copies the request: the
+   * TrainConfig `POST /api/runs` and MCP `train` take, which resolves the same way again.
    */
   import Copy from '@lucide/svelte/icons/copy';
   import type { ResolvedTrain, TrainConfig } from '$lib/api/types';
@@ -12,7 +13,7 @@
   import Lineage from '$lib/ui/Lineage.svelte';
   import Panel from '$lib/ui/Panel.svelte';
   import { toast } from '$lib/ui/toast.svelte';
-  import { batchSetting, lrSetting, optimizerSetting, resolvedRows, type Setting } from './resolved';
+  import { batchSetting, closeMosaicSetting, headSetting, lrSetting, optimizerSetting, precisionSetting, resolvedRows, type Setting } from './resolved';
 
   let {
     config,
@@ -46,23 +47,25 @@
     ['Optimizer', optimizerSetting(config, resolved)],
     ['Initial LR', lrSetting(config, resolved)],
     ...(resolved ? resolvedRows(resolved) : []),
+    ['Precision', precisionSetting(config)],
+    ['Head', headSetting(config)],
     ['Weights', config.weights ? id(config.weights) : plain('From scratch')],
     ['Seed', plain(String(config.seed))],
   ]);
-  const aug = $derived<[string, string][]>([
-    ['Mosaic', String(a.mosaic)],
-    ['Mixup', String(a.mixup)],
-    ['HSV h · s · v', a.hsv.join(' · ')],
-    ['Flip LR', String(a.fliplr)],
-    ['Scale', `±${a.scale}`],
-    ['Translate', `±${a.translate}`],
-    ['Close mosaic', `last ${a.close_mosaic} epochs`],
+  const aug = $derived<[string, Setting][]>([
+    ['Mosaic', plain(String(a.mosaic))],
+    ['Mixup', plain(String(a.mixup))],
+    ['HSV h · s · v', plain(a.hsv.join(' · '))],
+    ['Flip LR', plain(String(a.fliplr))],
+    ['Scale', plain(`±${a.scale}`)],
+    ['Translate', plain(`±${a.translate}`)],
+    ['Close mosaic', closeMosaicSetting({ config, resolved })],
   ]);
 
   async function copy() {
     try {
       await navigator.clipboard.writeText(JSON.stringify(config, null, 2));
-      toast.success('Config copied', 'Paste it into folo train --config or a new run.');
+      toast.success('Config copied', 'The request as POST /api/runs and MCP train take it.');
     } catch (e) {
       toast.error(e, 'Could not copy');
     }
@@ -79,7 +82,7 @@
 {#snippet augmentation(heading: boolean)}
   <dl>
     {#if heading}<p class="group">Augmentation</p>{/if}
-    {#each aug as [k, v] (k)}<dt>{k}</dt><dd class="num">{v}</dd>{/each}
+    {#each aug as [k, v] (k)}<dt>{k}</dt><dd class="num">{v.value}{#if v.note}<span class="note">{v.note}</span>{/if}</dd>{/each}
   </dl>
 {/snippet}
 

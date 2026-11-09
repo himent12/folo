@@ -83,7 +83,8 @@
     </div>
     <p class="meta">
       {#if run}
-        <Meta line>
+        <!-- Whole items wrap to a second line rather than lose the last one (DESIGN_DIRECTION §2.3). -->
+        <Meta>
           <span>{dataset?.name ?? run.config.dataset_id}</span>
           <Ident value={run.config.arch} />
           <span class="num">{run.config.imgsz} px</span>
@@ -136,6 +137,7 @@
           xInteger
           yDomain={fit?.domain ?? [0, 1]}
           yTickValues={fit?.ticks}
+          yDecimals={fit?.decimals}
           yLabel={zoomed ? UNIT_ZOOM_NOTE : undefined}
           valueFormat={(v) => metric(v)}
           xTitle={(x) => `Epoch ${Math.round(x)}`}

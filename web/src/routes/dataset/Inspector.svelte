@@ -22,9 +22,10 @@
   import { classColor } from '$lib/design/tokens';
   import { num } from '$lib/format';
   import Button from '$lib/ui/Button.svelte';
+  import DialogStatusRegion from '$lib/ui/DialogStatus.svelte';
+  import { DialogStatus } from '$lib/ui/feedback.svelte';
   import Kbd from '$lib/ui/Kbd.svelte';
   import Spinner from '$lib/ui/Spinner.svelte';
-  import { toast } from '$lib/ui/toast.svelte';
   import { tooltip } from '$lib/ui/tooltip';
   import type { ImagePager } from './pager.svelte';
   import { swatchStyle } from './swatch';
@@ -65,8 +66,20 @@
 
   // ---------- open / close ----------
   $effect(() => {
-    if (id && !dialog.open) dialog.showModal();
+    if (id && !dialog.open) {
+      dialog.showModal();
+      // The dialog takes focus as a container (as ui/Dialog does): no control or label row starts focused, so nothing
+      // in the list looks picked before anything is.
+      dialog.focus();
+    }
     else if (!id && dialog.open) dialog.close();
+  });
+
+  /** A copy's result, said beside the path in the dialog (the toaster sits behind the modal); it is about one image. */
+  const status = new DialogStatus();
+  $effect(() => {
+    void id;
+    status.clear();
   });
 
   // Resolve a linked id that is not loaded yet.
@@ -301,9 +314,9 @@
   async function copyFile(f: string) {
     try {
       await navigator.clipboard.writeText(f);
-      toast.success('Path copied', f);
+      status.success('Path copied', f);
     } catch {
-      toast.error(new Error('The browser blocked clipboard access.'), 'Could not copy the path');
+      status.error(new Error('The browser blocked clipboard access; select the path and copy it by hand.'), 'Could not copy the path');
     }
   }
 </script>
@@ -320,7 +333,9 @@
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 <dialog
   bind:this={dialog}
+  tabindex="-1"
   class="insp"
+  style:--ar={img ? img.width / img.height : undefined}
   aria-label={img ? `Image ${stem(img.file)}` : 'Image'}
   onclose={() => id && onclose()}
   {onkeydown}
@@ -348,7 +363,9 @@
   </header>
 
   <div class="body">
-    <!-- svelte-ignore a11y_no_noninteractive_tabindex: the canvas takes focus so Shift + arrows can pan it. -->
+    <!-- An image viewer, not an image: a focusable group that takes keys (pan, zoom, step), so never role="img" (whose
+         content is flattened to its name); its keys are its description. -->
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions: the viewer takes focus so its keys work. -->
     <div
       class="viewport"
       class:zoomed={z > 1}
@@ -356,8 +373,8 @@
       bind:this={viewport}
       bind:clientWidth={vw}
       bind:clientHeight={vh}
-      style:--ar={img ? `${img.width} / ${img.height}` : undefined}
-      role="img"
+      role="group"
+      aria-roledescription="image viewer"
       tabindex="0"
       aria-label={img ? `${stem(img.file)} with ${img.boxes.length} labelled boxes` : 'Loading image'}
       aria-describedby="insp-keys"
@@ -490,6 +507,7 @@
             <dt>ID</dt>
             <dd class="mono">{img.id}</dd>
           </dl>
+          <DialogStatusRegion {status} class="copy-status" />
         </section>
       {/if}
     </aside>
@@ -497,9 +515,14 @@
 </dialog>
 
 <style>
+  /* Sized to the image (`--ar`, its width over height): the largest box of the canvas's shape plus the rail that fits
+     the viewport, so a 4:3 photo on a laptop never sits between letterbox bands (the dialog is shorter instead). */
   .insp {
-    width: min(1480px, calc(100vw - 48px));
-    height: min(960px, calc(100dvh - 48px));
+    --rail: 288px;
+    --box-w: min(1480px, calc(100vw - 48px));
+    --box-h: min(960px, calc(100dvh - 48px));
+    width: min(var(--box-w), max(640px, calc((var(--box-h) - 48px) * var(--ar, 1.3333) + var(--rail))));
+    height: min(var(--box-h), max(480px, calc((var(--box-w) - var(--rail)) / var(--ar, 1.3333) + 48px)));
     max-width: none;
     max-height: none;
     margin: auto;
@@ -510,6 +533,10 @@
     color: var(--text-primary);
     box-shadow: var(--shadow-lg);
     overflow: hidden;
+  }
+  .insp:focus,
+  .insp:focus-visible {
+    outline: none;
   }
   .insp[open] {
     display: flex;
@@ -593,7 +620,7 @@
     flex: 1;
     min-height: 0;
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 288px;
+    grid-template-columns: minmax(0, 1fr) var(--rail);
   }
   /* The canvas is a darkroom well in both themes: photos (mostly dark) never sit in light-grey letterbox bands. The
      dark theme's bg.inset; in light, the ink token mixed into bg.inset gives the same near-black. */
@@ -779,6 +806,10 @@
   dd {
     overflow-wrap: anywhere;
   }
+  /* The copy's result, under the image's facts and beside the button that made it. */
+  section :global(.copy-status.on) {
+    margin-top: var(--space-2);
+  }
   .path {
     position: relative;
     display: flex;
@@ -829,8 +860,8 @@
     }
   }
   @media (max-width: 1023px) {
-    .body {
-      grid-template-columns: minmax(0, 1fr) 248px;
+    .insp {
+      --rail: 248px;
     }
   }
   @media (max-width: 767px) {

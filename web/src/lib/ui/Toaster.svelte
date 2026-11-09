@@ -128,15 +128,21 @@
     color: var(--text-secondary);
     overflow-wrap: anywhere;
   }
+  /* A toast's action is a secondary button in ink ("Open run"): lime is the page's one primary, and an action is not
+     a status, so it takes neither the accent nor the toast's hue (DESIGN_DIRECTION §2.6). */
   .action {
+    flex-shrink: 0;
     height: var(--control-sm);
     padding: 0 var(--space-2);
     border-radius: var(--radius-sm);
+    border: 1px solid var(--line-default);
+    background: var(--bg-raised);
     font-weight: var(--weight-medium);
-    color: var(--accent-text);
+    color: var(--text-primary);
   }
   .action:hover {
-    background: var(--bg-hover);
+    border-color: var(--line-strong);
+    background: color-mix(in srgb, var(--bg-raised), var(--text-primary) 4%);
   }
   .close {
     position: relative;
