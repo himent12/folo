@@ -534,7 +534,7 @@ export const scenes = [
     // Details section.
     name: 'model-detail-details',
     path: '/models/m_fast_n',
-    viewports: ['laptop', 'mobile'],
+    viewports: ['tablet', 'mobile'],
     fullPage: true,
     setup: async (page, { vp }) => {
       if (vp === 'mobile') {
@@ -548,7 +548,7 @@ export const scenes = [
   },
   {
     // An o2o model (shapes-s-best, as the server mock's m_31ab): Details says Head "End-to-end (no NMS)" and how it was
-    // trained. Laptop folds the details: opened. Phones: the Details section.
+    // trained. Tablets fold the details (laptops and desktops show the rail): opened. Phones: the Details section.
     name: 'model-o2o',
     path: '/models/m_shapes_s',
     viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
@@ -556,7 +556,7 @@ export const scenes = [
     setup: async (page, { vp }) => {
       await until(page, '#pr svg');
       if (vp === 'mobile') await page.getByRole('radio', { name: 'Details' }).click();
-      else if (vp !== 'desktop') await page.locator('.d-line').click();
+      else if (vp === 'tablet') await page.locator('.d-line').click();
     },
   },
   {
