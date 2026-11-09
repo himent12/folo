@@ -22,7 +22,9 @@ Names: screen first, then modifiers (`-light` light theme, `-loading`, `-empty`,
 `-hover` (a chart hover readout), `-filter`). `palette`, `new-run`, `stop-confirm`, `inspector`, `toast` are overlays;
 `kb-focus` shows keyboard focus on the New run button. The other `-focus` shots (`run-live-charts-focus`,
 `run-done-sample-focus`, `model-table-focus`, `playground-canvas-focus`) show keyboard focus on a control with its own keys and
-its key hint; `run-done-bottom` is the run page scrolled to its end (log and configuration). **Open every PNG**, at full resolution where details matter
+its key hint; `run-done-bottom` is the run page scrolled to its end (log and configuration). A focused control with its own keys names them in a
+strip under the page (the `-focus` shots). `inspector-sample` is the inspector opened from a run's sample tile (that epoch's
+predictions over the dashed labels). **Open every PNG**, at full resolution where details matter
 (zoom in before calling something clipped).
 
 Also read the source (path in your task) for states screenshots can't show: hover, pressed, focus rings, keyboard
