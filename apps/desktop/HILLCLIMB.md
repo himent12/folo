@@ -1705,3 +1705,39 @@ Round 41 changes:
 - **Disabled switch:** an edged inset track and a tertiary knob.
 - **Latency:** Pre at 70 % tertiary.
 - **First run:** "Add dataset" plus "Generate synthetic". Step 1 says "or generate a sample", and the terminal hint reads "start it, then Connect in Settings".
+
+## Round 41
+
+| Reviewer | avg |
+|----------|-----|
+| Opus 5.5 | 8.6 |
+| GPT-6.1 Sol | 8.4 |
+
+Opus gave eight lines a 9. It asked for:
+- Mixed precision's estimate to respond to the switch.
+- The Overview loading skeleton to match the loaded card's height (about 20 px short).
+- First-run step copy short enough to leave no orphans.
+- Light disabled labels: not taken, it needs a `design/` token.
+- One page-width cap: not taken, Settings' cap is settled.
+
+Sol asked for:
+- Name tips by width, not character count.
+- The same conditional name tips in all three tables.
+- Detection chips kept attached to their boxes, and name-only chips bounded.
+- Light Pre at 3:1.
+
+The code review of #115 found one blocking bug, fixed before merge. Header actions required all three lists Ready, so a failed models or datasets list hid New run or Open image for good. Actions now wait only for lists still loading, and a failed list counts as settled.
+
+Round 42 changes:
+- **Detection head (#109):**
+  - New run has "End-to-end (no NMS)" (`head: o2o`). A prefilled form keeps the base run's head.
+  - Model and run pages name an end-to-end head.
+  - The Playground replaces the NMS IoU slider with "NMS: None: an end-to-end model".
+  - The demo's shapes-hard-s run is end-to-end.
+- **Mixed precision:** the estimate's memory drops to 0.58× (docs/BENCHMARKS.md; no faster at 640 px), and the caption says f16.
+- **Name tips:** `ui::may_overflow` gates them in Runs, Recent runs, Models, the inspector and the Playground.
+- **Detection chips:** chips inside a box stay inside it, and a name-only chip wider than the view is dropped.
+- **Overview:**
+  - The loading skeleton's chart section opens on the live card's rule and inset.
+  - New run's tip says when datasets didn't load.
+- **First-run copy:** "A YOLO or COCO folder." and "Watch loss and mAP live."

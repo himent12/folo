@@ -348,6 +348,8 @@ impl MockBackend {
             created: time::format(h(hours)),
             run_id: Some(run.into()),
             metrics: Some(ModelMetrics { map50: m[0], map50_95: m[1], precision: m[2], recall: m[3] }),
+            head: folo_api::Head::O2m,
+            trained_with: None,
         };
         let models = vec![
             model(
@@ -486,7 +488,11 @@ impl MockBackend {
             },
             Spec {
                 id: "run_52e8",
-                config: cfg("shapes-hard-s", "ds_3b91", "folo-s", 120, 32, 640, "gpu:0", 0.01),
+                // The end-to-end head (no NMS), so its model shows the head and the Playground its rule.
+                config: TrainConfig {
+                    head: Head::O2o,
+                    ..cfg("shapes-hard-s", "ds_3b91", "folo-s", 120, 32, 640, "gpu:0", 0.01)
+                },
                 status: RunStatus::Completed,
                 step: 120 * 100,
                 spe: 100,

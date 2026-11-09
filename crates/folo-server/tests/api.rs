@@ -242,6 +242,21 @@ async fn models() {
     )
     .await;
     err(&app, get("/api/models/m_none"), StatusCode::NOT_FOUND, "model_not_found").await;
+
+    // Head and training settings: shapes-s is an o2o model, r6-n was trained with AMP, its f16 export has no
+    // `folo.train`; each matches its run's config.
+    let by_id = |id: &str| list.models.iter().find(|m| m.id == id).unwrap();
+    assert_eq!(by_id("m_31ab").head, Head::O2o);
+    assert_eq!(by_id("m_53d1").trained_with, Some(TrainedWith { amp: true, imgsz: 640, epochs: 80 }));
+    assert_eq!((by_id("m_53d2").head, by_id("m_53d2").trained_with), (Head::O2m, None));
+    for m in list.models.iter().filter(|m| m.trained_with.is_some()) {
+        let run: Run = ok(&app, get(&format!("/api/runs/{}", m.run_id.as_deref().unwrap()))).await;
+        let t = m.trained_with.unwrap();
+        assert_eq!(
+            (m.head, t.amp, t.imgsz, t.epochs),
+            (run.config.head, run.config.amp, run.config.imgsz, run.epochs)
+        );
+    }
 }
 
 #[tokio::test]

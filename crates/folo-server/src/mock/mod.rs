@@ -15,9 +15,9 @@ use std::sync::{Arc, RwLock};
 use axum::http::StatusCode;
 use folo_api::{
     AmpSupport, Arch, BBox, Capabilities, ClassMetrics, Dataset, DatasetFormat, DatasetIssue, ExportFormat,
-    ExportResult, ExportSpec, GpuBackend, GpuInfo, ImageInfo, ImagePage, IssuePage, IssueSeverity, LogLine,
-    Model, ModelEval, ModelMetrics, PrCurve, PredictResponse, RegisterDataset, Run, RunSamples, Sample,
-    ScoredBox, Split, Splits, SyntheticDataset, TensorCoreSupport, TrainConfig,
+    ExportResult, ExportSpec, GpuBackend, GpuInfo, Head, ImageInfo, ImagePage, IssuePage, IssueSeverity,
+    LogLine, Model, ModelEval, ModelMetrics, PrCurve, PredictResponse, RegisterDataset, Run, RunSamples,
+    Sample, ScoredBox, Split, Splits, SyntheticDataset, TensorCoreSupport, TrainConfig, TrainedWith,
 };
 
 use crate::error::{Error, Result};
@@ -564,6 +564,10 @@ struct RunDef {
     created: &'static str,
     end: End,
     model: Option<(&'static str, &'static str)>,
+    /// `TrainConfig.amp`.
+    amp: bool,
+    /// `TrainConfig.head`.
+    head: Head,
 }
 
 enum End {
@@ -636,6 +640,8 @@ impl MockStore {
                 created: "2026-10-13T08:05:00Z",
                 end: End::Completed,
                 model: Some(("m_31aa", "shapes-n-best")),
+                amp: false,
+                head: Head::O2m,
             },
             RunDef {
                 id: "run_1a02",
@@ -648,6 +654,8 @@ impl MockStore {
                 created: "2026-10-14T10:30:00Z",
                 end: End::Completed,
                 model: Some(("m_31ab", "shapes-s-best")),
+                amp: false,
+                head: Head::O2o,
             },
             RunDef {
                 id: "run_2b01",
@@ -660,6 +668,8 @@ impl MockStore {
                 created: "2026-10-20T07:45:00Z",
                 end: End::Completed,
                 model: Some(("m_42c1", "traffic-s-best")),
+                amp: false,
+                head: Head::O2m,
             },
             RunDef {
                 id: "run_2b02",
@@ -672,6 +682,8 @@ impl MockStore {
                 created: "2026-10-22T18:10:00Z",
                 end: End::Stopped(87 * 119 + 31),
                 model: Some(("m_42c2", "traffic-m-last")),
+                amp: false,
+                head: Head::O2m,
             },
             RunDef {
                 id: "run_2b03",
@@ -684,6 +696,8 @@ impl MockStore {
                 created: "2026-10-24T09:00:00Z",
                 end: End::Failed(2 * 60 + 17, oom),
                 model: None,
+                amp: false,
+                head: Head::O2m,
             },
             RunDef {
                 id: "run_3c01",
@@ -696,6 +710,8 @@ impl MockStore {
                 created: "2026-10-28T11:20:00Z",
                 end: End::Completed,
                 model: Some(("m_53d1", "r6-n-best")),
+                amp: true,
+                head: Head::O2m,
             },
         ];
         let mut runs = Vec::new();
@@ -709,6 +725,8 @@ impl MockStore {
                 arch: d.arch,
                 epochs: d.epochs,
                 batch: d.batch,
+                amp: d.amp,
+                head: d.head,
                 ..serde_json::from_str(r#"{"dataset_id":""}"#).expect("defaults")
             };
             let spe = steps_per_epoch(meta.splits.train, d.batch);
@@ -742,6 +760,7 @@ impl MockStore {
                 };
                 let (params, flops_g, ..) = arch_spec(d.arch);
                 let finished = snap.finished.unwrap_or(created);
+                let trained_with = TrainedWith { amp: d.amp, imgsz: run.config.imgsz, epochs: d.epochs };
                 let base = Model {
                     id: mid.into(),
                     name: mname.into(),
@@ -754,6 +773,8 @@ impl MockStore {
                     created: rfc3339(finished),
                     run_id: Some(d.id.into()),
                     metrics: Some(metrics),
+                    head: d.head,
+                    trained_with: Some(trained_with),
                 };
                 let basis = EvalBasis::new(&run, entry);
                 if mid == "m_53d1" {
@@ -764,6 +785,8 @@ impl MockStore {
                             name: "r6-n-best-f16".into(),
                             bytes: model_bytes(params, true),
                             created: rfc3339(finished + 3600.0),
+                            // An export: `folo.train` is a checkpoint key, so the f16 file has none.
+                            trained_with: None,
                             ..base.clone()
                         },
                     });
@@ -857,6 +880,12 @@ impl MockStore {
                     map50_95: val.map50_95,
                     precision: val.precision,
                     recall: val.recall,
+                }),
+                head: run.config.head,
+                trained_with: Some(TrainedWith {
+                    amp: run.config.amp,
+                    imgsz: run.config.imgsz,
+                    epochs: run.config.epochs,
                 }),
             });
         }

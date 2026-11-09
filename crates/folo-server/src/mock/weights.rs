@@ -1,6 +1,6 @@
 //! Mock weights (`GET /api/models/{id}/weights`): real `.folo` files of the folo-n architecture with seeded random
-//! weights and the model's classes and image size, generated on first request and kept in memory (one file per
-//! class list, image size and format), so Studio's in-browser detector can load them. Random weights detect nothing
+//! weights and the model's classes, image size and head, generated on first request and kept in memory (one file per
+//! class list, image size, head and format), so Studio's in-browser detector can load them. Random weights detect nothing
 //! useful; the point is a file that loads and runs exactly like a trained one.
 
 use std::collections::HashMap;
@@ -8,7 +8,7 @@ use std::sync::Mutex;
 use std::time::SystemTime;
 
 use axum::body::Bytes;
-use folo_api::Model;
+use folo_api::{Head, Model};
 use folo_core::rng::Rng;
 use folo_nn::io::{FloatDType, ModelConfig, ModelFile, write_weights};
 use folo_vision::FoloModel;
@@ -17,7 +17,7 @@ use crate::error::{Error, Result};
 use crate::store::{Weights, WeightsBody, WeightsFormat, weights_file_name};
 use crate::util::fnv1a;
 
-type Key = (Vec<String>, u32, WeightsFormat);
+type Key = (Vec<String>, u32, Head, WeightsFormat);
 
 /// The generated files (bytes and their ETag).
 pub(super) struct MockWeights {
@@ -34,7 +34,7 @@ impl MockWeights {
 
     /// The weights of `model` in `format`.
     pub(super) fn get(&self, model: &Model, format: WeightsFormat) -> Result<Weights> {
-        let (bytes, etag) = self.file(&model.classes, model.imgsz, format)?;
+        let (bytes, etag) = self.file(&model.classes, model.imgsz, model.head, format)?;
         Ok(Weights {
             len: bytes.len() as u64,
             body: WeightsBody::Bytes(bytes),
@@ -44,15 +44,21 @@ impl MockWeights {
         })
     }
 
-    fn file(&self, classes: &[String], imgsz: u32, format: WeightsFormat) -> Result<(Bytes, String)> {
-        let key = (classes.to_vec(), imgsz, format);
+    fn file(
+        &self,
+        classes: &[String],
+        imgsz: u32,
+        head: Head,
+        format: WeightsFormat,
+    ) -> Result<(Bytes, String)> {
+        let key = (classes.to_vec(), imgsz, head, format);
         if let Some(f) = self.files.lock().unwrap().get(&key) {
             return Ok(f.clone());
         }
         let bytes = match format {
-            WeightsFormat::Stored => generate(classes, imgsz)?,
+            WeightsFormat::Stored => generate(classes, imgsz, head)?,
             WeightsFormat::F16 => {
-                let (f32_bytes, _) = self.file(classes, imgsz, WeightsFormat::Stored)?;
+                let (f32_bytes, _) = self.file(classes, imgsz, head, WeightsFormat::Stored)?;
                 let file = ModelFile::from_bytes(f32_bytes.to_vec()).map_err(internal)?;
                 let mut out = Vec::new();
                 file.export_to(&mut out, FloatDType::F16).map_err(internal)?;
@@ -70,9 +76,11 @@ fn internal(e: folo_nn::Error) -> Error {
     Error::internal(format!("generating mock weights: {e}"))
 }
 
-/// A folo-n weights file with `classes` and `imgsz`, its weights drawn from a seed derived from the class names.
-fn generate(classes: &[String], imgsz: u32) -> Result<Vec<u8>> {
-    let config = ModelConfig::new("n", classes.len()).map_err(internal)?;
+/// A folo-n weights file with `classes`, `imgsz` and `head`, its weights drawn from a seed derived from the class
+/// names.
+fn generate(classes: &[String], imgsz: u32, head: Head) -> Result<Vec<u8>> {
+    let mut config = ModelConfig::new("n", classes.len()).map_err(internal)?;
+    config.head = head.as_str().into();
     let seed = fnv1a(classes.join("\n").as_bytes());
     let mut model = FoloModel::with_rng(config, &mut Rng::seed(seed)).map_err(internal)?;
     model.set_classes(classes.to_vec()).map_err(internal)?;

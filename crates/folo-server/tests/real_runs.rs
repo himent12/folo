@@ -286,8 +286,36 @@ async fn train_evaluate_predict_and_reload() {
     assert_eq!(model.run_id.as_deref(), Some(run.id.as_str()));
     assert!(model.params > 2_000_000 && model.bytes > 0 && model.flops_g > 0.0);
     assert_eq!(model.metrics.unwrap().map50_95, best.map50_95);
+    // The head comes from `folo.config`, `trained_with` from the checkpoint's `folo.train`.
+    let trained = TrainedWith { amp: false, imgsz: 64, epochs: 2 };
+    assert_eq!((model.head, model.trained_with), (Head::O2m, Some(trained)));
     let last: Model = ok(&app, get(&format!("/api/models/{model_id}-last"))).await;
     assert_eq!(last.metrics.unwrap().map50_95, m.epochs[1].val.map50_95);
+    assert_eq!((last.head, last.trained_with), (Head::O2m, Some(trained)));
+
+    // The models folder reads the same metadata: the checkpoint copied there keeps `trained_with`; an o2o weights
+    // file (no `folo.train`) has none.
+    let zoo = home.join("models");
+    std::fs::create_dir_all(&zoo).unwrap();
+    std::fs::copy(home.join("runs").join(&run.id).join("weights/best.folo"), zoo.join("copied.folo"))
+        .unwrap();
+    let mut config = folo_nn::io::ModelConfig::new("n", 2).unwrap();
+    config.head = "o2o".into();
+    let mut o2o = folo_vision::FoloModel::with_rng(config, &mut folo_core::rng::Rng::seed(3)).unwrap();
+    o2o.set_classes(vec!["circle".into(), "square".into()]).unwrap();
+    o2o.save(zoo.join("nms-free.folo")).unwrap();
+    let listed: ModelList = ok(&app, get("/api/models")).await;
+    let by_name = |n: &str| listed.models.iter().find(|m| m.name == n).unwrap_or_else(|| panic!("{n}"));
+    let copied = by_name("copied");
+    assert_eq!(
+        (copied.head, copied.trained_with, copied.run_id.as_deref()),
+        (Head::O2m, Some(trained), None)
+    );
+    let nms_free = by_name("nms-free");
+    assert_eq!((nms_free.head, nms_free.trained_with), (Head::O2o, None));
+    for p in ["copied.folo", "nms-free.folo"] {
+        std::fs::remove_file(zoo.join(p)).unwrap();
+    }
     err(&app, get("/api/models/m_none"), StatusCode::NOT_FOUND, "model_not_found").await;
 
     // Its weights: the checkpoint as stored, and the f16 export (cached under cache/weights/).
