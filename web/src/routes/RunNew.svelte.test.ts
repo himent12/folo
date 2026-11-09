@@ -646,6 +646,23 @@ describe('New run on a phone', () => {
     expect(target.querySelector('.a-sel')?.textContent).toBe('folo-m More accuracy on busy scenes.');
     expect(compare.querySelector<HTMLInputElement>('input[name="arch"]:checked')?.value).toBe('folo-m');
   });
+
+  it('keeps one size selector: open, the comparison rows replace the compact pick until it closes', async () => {
+    setWidth(390);
+    await open();
+    const compare = target.querySelector<HTMLDetailsElement>('details.a-compare')!;
+    compare.open = true;
+    compare.dispatchEvent(new Event('toggle'));
+    flushSync();
+    expect(target.querySelector('#arch-pick')).toBeNull();
+    expect(target.querySelector('.a-sel')).toBeNull();
+    compare.querySelectorAll<HTMLInputElement>('input[name="arch"]')[0]!.click();
+    flushSync();
+    compare.open = false;
+    compare.dispatchEvent(new Event('toggle'));
+    flushSync();
+    expect(target.querySelector('#arch-pick [aria-checked="true"]')?.textContent?.trim()).toBe('N');
+  });
 });
 
 describe('New run: image size', () => {

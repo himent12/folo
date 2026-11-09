@@ -60,6 +60,8 @@
   /** Where the architectures' reference latency was measured (docs/BENCHMARKS.md), where the line already says 640 px
    *  and end to end. */
   const REF_WHERE = 'RTX 4080 SUPER, f32';
+  /** Phones: whether Compare sizes is open (its rows are then the one size picker). */
+  let sizesOpen = $state(false);
   // Phones pick the model size from a segmented control; the full specification table folds behind "Compare sizes".
   const phone = new MediaQuery(media.phone, false);
 
@@ -886,8 +888,8 @@
         <span class="a-size">{a.size}</span>
         <Ident value={a.arch} class="a-name" />
         <span class="a-note">{a.note}</span>
-        <span class="a-v num">{compact(a.params)}</span>
-        <span class="a-v num">{num(a.flops, 1)}</span>
+        <span class="a-v a-params num">{compact(a.params)}</span>
+        <span class="a-v a-flops num">{num(a.flops, 1)}</span>
         <!-- Each figure says where it comes from in its own cell (a tertiary word), so the caption under the table
              stays one line: "measured" on this GPU, "reference" for the architecture's benchmark. A dash is
              explained once, in the caption (DESIGN_DIRECTION 23), its word slot kept empty so dashes and figures share
@@ -982,11 +984,15 @@
             <!-- Phones: the size as one segmented pick and one short recommendation in words; its figures (params,
                  compute, latency and where each was measured) fold into "Compare sizes", so the section stays the
                  pick, the recommendation and Start from. -->
-            <div class="a-pick">
-              <Segmented id="arch-pick" label="Model size" bind:value={arch} options={arches.map((a) => ({ value: a.arch, label: a.size }))} />
-              {#if selArch}<p class="a-sel"><Ident value={selArch.arch} /> {selArch.note}</p>{/if}
-            </div>
-            <details class="advanced a-compare">
+            <!-- One selection surface at a time: while Compare sizes is open its rows are the selector, and the compact
+                 pick and its sentence step aside until it closes. -->
+            {#if !sizesOpen}
+              <div class="a-pick">
+                <Segmented id="arch-pick" label="Model size" bind:value={arch} options={arches.map((a) => ({ value: a.arch, label: a.size }))} />
+                {#if selArch}<p class="a-sel"><Ident value={selArch.arch} /> {selArch.note}</p>{/if}
+              </div>
+            {/if}
+            <details class="advanced a-compare" bind:open={sizesOpen}>
               <summary><ChevronRight size={14} aria-hidden="true" /> Compare sizes <span class="faint">params, compute, latency</span></summary>
               {@render archTable()}
               {#if selArch}
@@ -1547,12 +1553,14 @@
     grid-auto-rows: auto minmax(var(--control-md), auto) auto;
     gap: 0 var(--space-5);
   }
+  /* Every field of a row starts on the row's shared tracks at their top (align-items: start): a two-line hint under
+     Batch and none under Epochs never shifts one field's label or control against its neighbour's. */
   .fields > :global(div.field) {
     grid-row: span 3;
     display: grid;
     grid-template-rows: subgrid;
     row-gap: 6px;
-    align-items: center;
+    align-items: start;
     padding-bottom: var(--space-4);
   }
   .fields > :global(div.field > :first-child) {
@@ -1860,6 +1868,21 @@
     text-align: right;
     white-space: nowrap;
   }
+  /* Below 1280 the rail (300 px) and the summary block are too narrow for a term and its value side by side ("90
+     epochs, / mosaic" wrapped while its value held one line): each phase is its term over its value, one column. */
+  @media (max-width: 1279px) {
+    .how-list {
+      grid-template-columns: minmax(0, 1fr);
+      row-gap: 0;
+    }
+    .how-list dd {
+      text-align: left;
+      white-space: normal;
+    }
+    .how-list > div + div > dt {
+      margin-top: 6px;
+    }
+  }
   .how-note {
     max-inline-size: var(--measure);
     margin-top: var(--space-2);
@@ -1876,19 +1899,23 @@
   .est dd.sched {
     overflow: visible;
   }
-  /* Accumulation, beside the schedule: a meta line under its value, across the row, wrapping rather than cut. */
+  /* Accumulation, beside the schedule: a meta line under the row, across the rail from its label's edge, wrapping
+     rather than cut. Left-aligned, as prose is: a right-aligned sentence that wraps leaves an orphan at the far edge. */
   .est dd.sched-acc {
     grid-column: 1 / -1;
     margin-top: -2px;
     color: var(--text-tertiary);
+    text-align: left;
     white-space: normal;
   }
-  /* The batches behind the steps: one quiet line under the row, at the value's right edge, across the row. */
+  /* The batches behind the steps: one quiet sentence under the row, from the label's edge across the rail. */
   .est dd.steps-why {
     grid-column: 1 / -1;
     margin-top: -2px;
     color: var(--text-secondary);
+    text-align: left;
     white-space: normal;
+    text-wrap: pretty;
   }
   /* A switch field (Mixed precision, End-to-end): the Switch is the label's line, its track at the field's right edge,
      and the label reads as every field label (text.secondary, medium), also while only the control is disabled. */
@@ -2482,23 +2509,53 @@
     .cards {
       display: none;
     }
-    /* Model rows: the note gives way (it sits under the rows) so the three specs keep their columns; 44 px rows. */
+    /* Model rows: the note gives way (it sits under the rows) so params and compute keep their columns; latency and
+       its source are the name's meta line ("5.90 ms measured"), so every row is the same two lines, never a figure
+       wrapping its source word in some rows and not others (round 26). */
     .arches {
-      grid-template-columns: 28px minmax(0, 1fr) repeat(2, 52px) auto 28px;
+      grid-template-columns: 28px minmax(0, 1fr) repeat(2, 52px) 28px;
       column-gap: var(--space-2);
     }
-    /* The source word under its figure: the row grows a line rather than squeeze the size's name. */
-    .a-src {
-      display: block;
-      min-width: 0;
-      margin-left: 0;
-      text-align: right;
+    .a-head-lat {
+      display: none;
     }
     .a-head-lead {
       grid-column: 1 / 3;
     }
     .arch {
-      min-height: 44px;
+      min-height: 56px;
+      grid-template-rows: auto auto;
+      row-gap: 0;
+      padding-block: 6px;
+    }
+    .a-size {
+      grid-column: 1;
+      grid-row: 1 / 3;
+    }
+    .arch :global(.a-name) {
+      grid-column: 2;
+      grid-row: 1;
+    }
+    .a-params {
+      grid-column: 3;
+      grid-row: 1 / 3;
+    }
+    .a-flops {
+      grid-column: 4;
+      grid-row: 1 / 3;
+    }
+    .a-v.lat {
+      grid-column: 2;
+      grid-row: 2;
+      text-align: left;
+    }
+    .tick {
+      grid-column: 5;
+      grid-row: 1 / 3;
+    }
+    .a-src {
+      min-width: 0;
+      margin-left: var(--space-1);
     }
     .a-note {
       display: none;

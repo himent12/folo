@@ -339,6 +339,8 @@
   }
   const other = $derived(others[Math.min(otherAt, others.length - 1)]);
   const shown = $derived(pairMode && base && other ? [base, other] : chosen);
+  /** The phone pager's height: the pair's sticky head row holds just under it. */
+  let pairH = $state(0);
   const stepOther = (d: number) => (otherAt = (Math.min(otherAt, others.length - 1) + d + others.length) % others.length);
   /** Whether a run's value differs from the baseline's: marked (a dot and the weight); an equal one is tertiary. */
   const offBase = (r: Run, f: (r: Run) => Setting) => r !== base && !!base && settingText(f(r)) !== settingText(f(base));
@@ -351,16 +353,20 @@
 <!-- Phones lead with the plot: the explanation sits in the disclosure under the legend. -->
 <Page title="Compare runs" sub={narrow ? undefined : lede}>
   {#if runs.error && !runs.data}
-    <ErrorState error={runs.error} retry={() => runs.refresh()} />
+    <!-- The page's states sit in the chart's frame at the chart's height (DESIGN_DIRECTION 8), the shape the page will
+         have, never a frameless block in the corner of an empty canvas. -->
+    <section class="compare c-state" aria-label="Curves" style:min-height="{height}px">
+      <ErrorState error={runs.error} retry={() => runs.refresh()} compact />
+    </section>
   {:else if ids.length === 0}
-    <!-- Nothing to compare yet: the frameless empty state on the page's content edge, not a card stretched across an
-         empty canvas (DESIGN_DIRECTION 8). -->
-    <EmptyState icon={GitCompare} title="Pick runs to compare" description="Add two to four runs, or select them on the Runs page.">
-      {#snippet actions()}
-        <!-- One action: pick runs here when there are any, else go and make some. -->
-        {#if candidates.length}{@render adder()}{:else}<Button href={href('/runs')}>Go to Runs</Button>{/if}
-      {/snippet}
-    </EmptyState>
+    <section class="compare c-state" aria-label="Curves" style:min-height="{height}px">
+      <EmptyState icon={GitCompare} title="Pick runs to compare" description="Add two to four runs, or select them on the Runs page.">
+        {#snippet actions()}
+          <!-- One action: pick runs here when there are any, else go and make some. -->
+          {#if candidates.length}{@render adder()}{:else}<Button href={href('/runs')}>Go to Runs</Button>{/if}
+        {/snippet}
+      </EmptyState>
+    </section>
 
   {:else}
     <section class="compare" aria-label="Curves">
@@ -414,8 +420,10 @@
     {#if chosen.length}
       <Panel title="Side by side" meta={sameRows.length ? `${diffRows.length} settings differ` : undefined} pad="none" id="cmp-table">
         {#if pairMode && other}
-          <!-- Phones: the baseline and one run beside it; the pager steps through the others. -->
-          <div class="pair num">
+          <!-- Phones: the baseline and one run beside it; the pager steps through the others. The pager and the pair's
+               head row (both names, Baseline, Swap) hold under the top bar while the table is in view, so the names
+               never scroll away from the settings being read. -->
+          <div class="pair num" bind:offsetHeight={pairH}>
             <button type="button" class="pg" aria-label="Previous run" onclick={() => stepOther(-1)}><ChevronLeft size={16} aria-hidden="true" /></button>
             <span class="pair-what" aria-live="polite">Run {chosen.indexOf(other) + 1} of {chosen.length}<span class="faint">{' '}vs baseline</span></span>
             <button type="button" class="pg" aria-label="Next run" onclick={() => stepOther(1)}><ChevronRight size={16} aria-hidden="true" /></button>
@@ -438,7 +446,7 @@
               >{/if}
           </p>
         {/if}
-        <div class="scroll" class:more={tableMore} bind:this={tableEl} onscroll={measureTable}>
+        <div class="scroll" class:more={tableMore} class:pairing={pairMode && !!other} style:--pair-h="{pairH}px" bind:this={tableEl} onscroll={measureTable}>
           <!-- Fixed layout: every run column the same width, so each header's key sits over its own values. The widths
                live on the header row (no colgroup, whose keyed columns could outlive a page of runs), so the setting
                column is fixed and the run columns share the rest equally from the first render. -->
@@ -680,6 +688,12 @@
     border-radius: var(--radius-lg);
     min-width: 0;
   }
+  /* Nothing to draw yet (no runs picked, or the runs could not load): the chart panel's frame at the plot's height,
+     the message centred where the curves will be. */
+  .compare.c-state {
+    place-content: center;
+    justify-items: center;
+  }
   /* The legend: one card per run (key, name, value under the cursor; how it started below), side by side. */
   .chips {
     display: grid;
@@ -873,6 +887,24 @@
   }
   .pair-what {
     text-align: center;
+  }
+  /* Two at a time, the pair fits the width: no sideways scroller (which would also trap the sticky head), and the
+     pager and the head row stick under the top bar while the table is in view. */
+  .pair {
+    position: sticky;
+    top: var(--size-topbar);
+    z-index: var(--z-sticky);
+    background: var(--bg-panel);
+  }
+  .scroll.pairing {
+    overflow: visible;
+  }
+  .scroll.pairing :global(thead th) {
+    position: sticky;
+    top: calc(var(--size-topbar) + var(--pair-h, 0px));
+    z-index: var(--z-sticky);
+    background: var(--bg-panel);
+    box-shadow: inset 0 -1px 0 var(--line-subtle);
   }
   .pair .more {
     margin-left: auto;

@@ -297,6 +297,24 @@ async function blankCheck(page) {
       const reach = reachBelow(main, y);
       if (reach < 80) out.push({ selector: `main: ${Math.round(reach)}px of content under the page header`, text: '' });
     }
+
+    // A page header's actions are one row at every tier (shell/Page, DESIGN_DIRECTION §10): a second row leaves the
+    // title floating between them. Only the visible leaves count (Gate and Menu wrappers are `display: contents`).
+    for (const acts of document.querySelectorAll('.page > header .actions')) {
+      if (!shown(acts)) continue;
+      // An open menu's sheet or popover is not the header's row.
+      const floating = (/** @type {Element} */ el) => {
+        for (let e = el.parentElement; e && e !== acts; e = e.parentElement) {
+          if (e.matches('[role=menu], [role=dialog], dialog') || ['fixed', 'absolute'].includes(getComputedStyle(e).position)) return true;
+        }
+        return false;
+      };
+      const tops = [...acts.querySelectorAll('.btn, [data-gate-why]')]
+        .filter((el) => shown(el) && el.getBoundingClientRect().width > 0 && !floating(el))
+        .map((el) => el.getBoundingClientRect());
+      const rows = tops.filter((r, i) => tops.findIndex((q) => Math.abs(q.top + q.height / 2 - (r.top + r.height / 2)) < 8) === i).length;
+      if (rows > 1) out.push({ selector: `page header: its actions wrap onto ${rows} rows`, text: '' });
+    }
     return out;
   });
 }
@@ -419,6 +437,8 @@ async function shoot(scene, theme, vp) {
   return picker;
 }
 
+/** --qa's sizes: tablet and mobile; FOLO_QA_SIZES=laptop,tablet (comma-separated) checks others on demand. */
+const qaSizes = (process.env.FOLO_QA_SIZES ?? 'tablet,mobile').split(',').map((v) => v.trim());
 /** --qa's states, run by a small pool below. @type {(() => Promise<void>)[]} */
 const qaJobs = [];
 try {
@@ -435,7 +455,7 @@ try {
     }
     // --qa: the tablet and phone sizes in dark (or the one theme a scene is made for), and light too behind a picker.
     const first = themes.includes('dark') ? 'dark' : themes[0];
-    for (const vp of viewports.filter((v) => v === 'tablet' || v === 'mobile')) {
+    for (const vp of viewports.filter((v) => qaSizes.includes(v))) {
       if (only && !`${scene.name}--${first}--${vp}`.includes(only)) continue;
       qaJobs.push(async () => {
         if ((await shoot(scene, first, vp)) && first === 'dark' && themes.includes('light')) await shoot(scene, 'light', vp);

@@ -259,10 +259,11 @@
     { label: 'Recall', value: m.metrics?.recall, sub: atBestF1(m.metrics?.best_f1_conf) },
   ];
   // Phones: the work before the summary (DESIGN_DIRECTION 12). The section picker sits right under the header, so it
-  // never moves between sections; Curves, the overview, opens on the 2 × 2 grid, and the other sections on one line,
-  // the headline and "All metrics", which unfolds the same grid. What the numbers mean is behind the grid's ⓘ.
+  // never moves between sections; every section, Curves included, opens on one line, the headline and "All metrics",
+  // which unfolds the 2 × 2 grid, so the chart is the first thing under the picker. What the numbers mean is behind
+  // the grid's ⓘ.
   let kpiOpen = $state(false);
-  const kpiFolded = $derived(phone.current && section !== 'curves');
+  const kpiFolded = $derived(phone.current);
   /**
    * How the weights are stored (the file's folo.dtype and folo.fused, docs/API.md): "f16 · fused, inference only".
    * Null when the server does not say; a dtype this client has no name for reads as unknown, as the API asks.
@@ -360,11 +361,13 @@
           </div>
         {/if}
       {:else}
+        <!-- One line, its last item ("created yesterday") never alone on a second one (DESIGN_DIRECTION §10): on tablets
+             the file size steps out (Details has it). -->
         <Meta>
           <Ident value={m.arch} />
           <span class="num">{m.classes.length} classes</span>
           <span class="num">{m.imgsz} px</span>
-          <span class="num">{bytes(m.bytes, prefs.units)}</span>
+          <span class="num file-size">{bytes(m.bytes, prefs.units)}</span>
           {@render provenance()}
         </Meta>
       {/if}
@@ -410,7 +413,7 @@
     <!-- The parts, in one frame: on phones it is the sections' tab panel; wider, a column with the page's own gap. -->
     <div class="parts" id="model-sec-panel" role={phone.current ? 'tabpanel' : undefined} aria-labelledby={phone.current ? `model-sec-${section}` : undefined}>
     {#if phone.current}
-      <!-- Phones: the summary heads its section. Curves shows the grid; elsewhere one line that unfolds it. -->
+      <!-- Phones: the summary heads its section, one line that unfolds the grid. -->
       <section class="kpi-grid num" class:folded={kpiFolded} aria-label={metricsLabel(source)}>
         {#if kpiFolded}
           <button type="button" class="kpi-line" aria-expanded={kpiOpen} aria-controls="kpi-cells" onclick={() => (kpiOpen = !kpiOpen)}>
@@ -1545,6 +1548,11 @@
     .k-body > div {
       grid-template-columns: minmax(0, 1fr);
       gap: 2px;
+    }
+  }
+  @media (min-width: 768px) and (max-width: 1023px) {
+    .file-size {
+      display: none;
     }
   }
 </style>
