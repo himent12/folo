@@ -611,17 +611,17 @@
               {#if here}
                 <dd class="latency">
                   <span class="num">{latencyMs(here.latency_ms)}</span>
-                  <span class="faint num">measured here · {latencyRange(here.latency_ms_low, here.latency_ms_high)} · {num(here.samples)} predictions · {m.imgsz} px · {here.precision}</span>
+                  <Meta class="figs num"><span>measured here</span><span>{latencyRange(here.latency_ms_low, here.latency_ms_high)}</span><span>{num(here.samples)} predictions</span><span>{m.imgsz} px</span><span>{here.precision}</span></Meta>
                 </dd>
               {/if}
               <dd class="latency" class:second={!!here}>
                 {#if here && latency(m) !== undefined}
-                  <span class="faint num">Reference {latency(m)!.toFixed(2)} ms · <Ident value={m.arch} /> · 640 px · RTX 4080 SUPER</span>
+                  <Meta class="figs num"><span>Reference {latency(m)!.toFixed(2)} ms</span><Ident value={m.arch} /><span>640 px</span><span>RTX 4080 SUPER</span></Meta>
                 {:else if here}
                   <span class="faint">No reference for <Ident value={m.arch} /> yet</span>
                 {:else if latency(m) !== undefined}
                   <span class="num">{latency(m)!.toFixed(2)} ms</span>
-                  <span class="faint"><Meta><Ident value={m.arch} /><span>640 px</span><span>RTX 4080 SUPER</span><span>end to end</span></Meta></span>
+                  <Meta class="figs"><Ident value={m.arch} /><span>640 px</span><span>RTX 4080 SUPER</span><span>end to end</span></Meta>
                 {:else}
                   <span class="faint">Not measured for <Ident value={m.arch} /> yet</span>
                 {/if}
@@ -805,6 +805,10 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+  /* The caption is read ("at conf 0.39 (best F1)"): secondary, like every KPI caption (ui/Stat, Run's tabs). */
+  .k-sub {
+    color: var(--text-secondary);
   }
   .kpis {
     position: relative;
@@ -1052,7 +1056,7 @@
     padding-left: calc(8px + var(--space-2));
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
-    color: var(--text-tertiary);
+    color: var(--text-secondary);
   }
   .rank-foot {
     display: grid;
@@ -1409,16 +1413,22 @@
     padding-top: var(--space-3);
     border-top: 1px solid var(--line-subtle);
   }
+  /* The value, then each line of its conditions as its own meta line: items wrap whole, so a fact ("RTX 4080 SUPER")
+     never breaks inside (dd's overflow-wrap would split it). Figures people read are secondary (§2.3). */
   .latency {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: baseline;
-    gap: 0 var(--space-2);
+    display: grid;
+    justify-items: start;
+    gap: 2px;
     text-align: left;
+    overflow-wrap: normal;
   }
-  .latency .faint {
+  .latency .faint,
+  .latency :global(.figs) {
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
+  }
+  .latency :global(.figs) {
+    color: var(--text-secondary);
   }
   .latency.second {
     margin-top: 2px;

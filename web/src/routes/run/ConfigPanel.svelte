@@ -11,6 +11,7 @@
   import type { Origin } from '$lib/lineage';
   import Button from '$lib/ui/Button.svelte';
   import Lineage from '$lib/ui/Lineage.svelte';
+  import Note from '$lib/ui/Note.svelte';
   import Panel from '$lib/ui/Panel.svelte';
   import { toast } from '$lib/ui/toast.svelte';
   import { batchSetting, closeMosaicSetting, headSetting, lrSetting, optimizerSetting, precisionSetting, resolvedRows, type Setting } from './resolved';
@@ -86,7 +87,7 @@
   <dl>
     <!-- A heading only beside another group's; alone in the rail it would name the panel twice. -->
     {#if heading}<p class="group">{heading}</p>{/if}
-    {#each items as [k, v] (k)}<dt>{k}</dt>{#if k === 'Weights' && weights}<dd>{#if weights.kind === 'scratch'}From scratch{:else}<Lineage origin={weights} />{/if}</dd>{:else}<dd class="num"><span class:mono={v.ident}>{v.value}</span>{#if v.note}<span class="note">{v.note}</span>{/if}</dd>{/if}{/each}
+    {#each items as [k, v] (k)}<dt>{k}</dt>{#if k === 'Weights' && weights}<dd>{#if weights.kind === 'scratch'}From scratch{:else}<Lineage origin={weights} />{/if}</dd>{:else}<dd class="num"><span class:mono={v.ident}>{v.value}</span>{#if v.note}<Note text={v.note} />{/if}</dd>{/if}{/each}
   </dl>
 {/snippet}
 {#snippet fold(title: string, items: [string, Setting][])}
@@ -186,14 +187,6 @@
     color: var(--text-primary);
   }
   dt {
-    color: var(--text-tertiary);
-  }
-  /* The request beside the value it resolved to, in sans: "(auto)", "(requested 0.01)". */
-  .note {
-    margin-left: var(--space-1);
-    /* It wraps as a whole, never inside "(requested 0.01)". */
-    white-space: nowrap;
-    font-size: var(--type-sm-size);
     color: var(--text-tertiary);
   }
   dd {

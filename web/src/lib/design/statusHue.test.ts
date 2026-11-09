@@ -2,7 +2,9 @@
 // Status colour marks status; lime is for the one action (DESIGN_DIRECTION §2.6). Round 22 broke it four ways: a KPI's
 // number in danger red, a toast's "Open run" as a lime link, demo data with the warning dot, and the meter and the line
 // of one out-of-memory forecast in two hues. These scans keep the first three out of every component's styles; the
-// fourth is RunNew.svelte.test.ts's.
+// fourth is RunNew.svelte.test.ts's. Round 23 found two more: Compare's best value as lime text in a lime chip ("0.604
+// best"), and New run's Summary showing a device it cannot find ("gpu:1") in red; and an inline action ("Lower the
+// threshold") as a lime link.
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -46,5 +48,27 @@ describe('status hue', () => {
     for (const file of svelteFiles(SRC))
       for (const r of rules(readFileSync(file, 'utf8'))) if (/\.mock\b|data-mode='mock'|\.demo\b/.test(r.selector) && warn.test(r.body)) hits.push(`${relative(SRC, file)}: ${r.selector}`);
     expect(hits).toEqual([]);
+  });
+
+  it('never colours a value: a table value, a winner or a summary value stays in ink, its status a mark beside it', () => {
+    // Value slots: a table's number cell (`.num`), a winner, New run's summary value (`.rv-v`), a `.v` / `-v` readout.
+    const value = /(?:^|[\s.,])(?:num|winner|best|rv-v|v|val|[\w-]+-v)(?![\w-])/;
+    expect(scan((s) => value.test(s) && !/:global\(svg\)|>\s*:global|\.(?:sw|dot|mark|glyph|icon)\b/.test(s))).toEqual([]);
+  });
+
+  it('marks a best value with a word, never an accent chip: an accent tint is a badge, not a tag on a value', () => {
+    // A success tint behind a status glyph (Export's check) is a mark; lime behind text is what this rules out.
+    const tint = /background:\s*var\(--accent-muted\)/;
+    const hits: string[] = [];
+    for (const file of svelteFiles(SRC)) {
+      if (/[\\/]ui[\\/](?:Badge|StatusBadge)\.svelte$/.test(file)) continue;
+      for (const r of rules(readFileSync(file, 'utf8'))) if (tint.test(r.body)) hits.push(`${relative(SRC, file)}: ${r.selector}`);
+    }
+    expect(hits).toEqual([]);
+  });
+
+  it('never colours an inline link or action in lime: links are ink', () => {
+    const lime = /(?:^|;|\s)color:\s*var\(--accent-(?:text|solid|line)\)/;
+    expect(scan((s) => /\b(?:inline|link|more|go)\b|(?:^|\s)a\b/.test(s), lime)).toEqual([]);
   });
 });

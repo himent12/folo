@@ -97,7 +97,7 @@ app: chart plots, image canvases, code/log views. In light mode panels are white
   always labelled. Light series are ≥ 3:1 on both plot surfaces (`bg.panel`, `bg.inset`). Under tritan deficiency
   amber and magenta are the closest pair, which is why lines also carry legends with values. `chart.series` is the
   line ink; a series' fills (legend swatches, run chips, table keys) use `chart.fill`, the exact palette hue in both
-  themes with the `chart.swatch_edge` hairline, as class swatches do, so a light theme's amber run never reads brown. Grid lines `chart.grid`, axis lines `chart.axis`, tick labels `chart.label` (11 px, `type.xs`
+  themes with the `chart.swatch_edge` hairline, as class swatches do, so a light theme's amber run never reads brown. Text in a series' hue (direct end labels, JSON tokens) uses `chart.text`, held to 4.5:1 on every surface in both themes (in dark it is the series hue itself; in light a darker step of it): `chart.series` is a 3:1 mark, too pale for 12 px text in light (sky 3.55:1 on white). A dashed or dotted series also draws in `chart.text`, 2 px in light, since a pattern carries less ink than a line. Grid lines `chart.grid`, axis lines `chart.axis`, tick labels `chart.label` (11 px, `type.xs`
   Geist, tabular; decimals follow the tick step: "0 2 4 6", "0 0.2 0.4"; tiny values share one power of ten shown
   once, "× 10⁻³"), hover cursor `chart.cursor`. Context curves (many thin lines of one kind under an emphasised one, e.g. every
   class under the mean PR curve) are 1 px `chart.context`, ≥ 3:1 on the panel in both themes and never faded with

@@ -214,13 +214,14 @@
       margin-block: calc(var(--space-3) * -1);
     }
   }
-  /* One 12 px tertiary line per row (qualifiers are ≤ 60 characters, tested). */
+  /* One 12 px line per row (qualifiers are ≤ 60 characters, tested), in secondary: it holds figures people read
+     ("YOLO26n with AMP: 252", "5.50–6.40 ms · 214 predictions"), not a label to skim (DESIGN_DIRECTION §2.3). */
   .note {
     display: block;
     font-weight: var(--weight-regular);
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
-    color: var(--text-tertiary);
+    color: var(--text-secondary);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;

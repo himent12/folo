@@ -626,10 +626,12 @@
     line-height: 0;
     vertical-align: baseline;
   }
+  /* A tab's caption holds figures people read ("best 0.604 · ep 150", "warmup 360 steps · linear"): secondary, not
+     the tertiary of labels people skim (DESIGN_DIRECTION §2.3). */
   .cap {
     font-size: var(--type-sm-size);
     line-height: 16px;
-    color: var(--text-tertiary);
+    color: var(--text-secondary);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -751,7 +753,7 @@
   .r-c {
     flex: 1;
     min-width: 0;
-    color: var(--text-tertiary);
+    color: var(--text-secondary);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

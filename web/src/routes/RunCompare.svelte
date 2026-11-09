@@ -40,6 +40,7 @@
   import EmptyState from '$lib/ui/EmptyState.svelte';
   import ErrorState from '$lib/ui/ErrorState.svelte';
   import Panel from '$lib/ui/Panel.svelte';
+  import Note from '$lib/ui/Note.svelte';
   import Segmented from '$lib/ui/Segmented.svelte';
   import Select from '$lib/ui/Select.svelte';
   import StatusBadge from '$lib/ui/StatusBadge.svelte';
@@ -478,7 +479,7 @@
   {/if}
 </Page>
 
-{#snippet cell(v: Setting)}{#if v.ident}<Ident value={v.value} />{:else}<span class="val" class:whole={v.value.length <= 14} data-fact>{v.value}</span>{/if}{#if v.note}<span class="note" data-fact>{v.note}</span>{/if}{/snippet}
+{#snippet cell(v: Setting)}{#if v.ident}<Ident value={v.value} />{:else}<span class="val" class:whole={v.value.length <= 14} data-fact>{v.value}</span>{/if}{#if v.note}<Note text={v.note} fact />{/if}{/snippet}
 
 {#snippet chips()}
   <!-- The run chips are the legend: colour key, value under the cursor, link and remove. -->
@@ -516,8 +517,9 @@
         <span class="v num">{v === null ? '—' : metric(v)}{#if runEnd(r.status)}<span class="st"><span class="sep">{' · '}</span>{runEnd(r.status)}</span>{/if}</span>
         <!-- How the run started: fine-tuned vs from scratch often explains a gap between two curves. It lies over the
              toggle's lower half (clicks pass through to it) and runs on under the value. Phones show it in the Edit
-             sheet. -->
-        <span class="from" class:tuned={!!from} title={startLine(r)}>{#if from}Fine-tuned from <Ident value={from} class="src" />{:else}From scratch{/if}</span>
+             sheet, on a full-width line of its own. "From <checkpoint>" (the tooltip says "Fine-tuned from"): the checkpoint
+             is an identifier, a fact, so it is never cut; a narrow chip breaks it after a hyphen onto a second line. -->
+        <span class="from" class:tuned={!!from} title={startLine(r)} data-fact>{#if from}From <Ident value={from} class="src" />{:else}From scratch{/if}</span>
         <span class="acts">
           <a class="open" href={href(`/runs/${r.id}`)} aria-label="Open {r.name}" title="Open run"><ArrowUpRight size={12} /></a>
           <button class="rm" aria-label="Remove {r.name}" onclick={() => setIds(ids.filter((id) => id !== r.id))}><X size={12} /></button>
@@ -728,16 +730,15 @@
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
     color: var(--text-tertiary);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
   .from.tuned {
     color: var(--text-secondary);
   }
+  /* Breaks only after a hyphen (fasteners-n-/best), never mid-word and never with an ellipsis. */
   .from :global(.ident) {
     font-size: var(--type-sm-size);
-    white-space: nowrap;
+    overflow-wrap: normal;
+    word-break: normal;
   }
   .acts {
     grid-column: 3;
@@ -1193,26 +1194,19 @@
   td.cfg:not(.diff) {
     color: var(--text-tertiary);
   }
+  /* The best run's value: ink at 600 and a tertiary "best", never a lime value or chip (DESIGN_DIRECTION §2.6: status
+     hue on the mark, not the metric; the Models list marks its best rows the same way). */
   .winner {
-    color: var(--accent-text);
-    font-weight: var(--weight-medium);
+    color: var(--text-primary);
+    font-weight: var(--weight-semibold);
   }
   .tag {
     margin-left: 6px;
-    padding: 1px 6px;
-    border-radius: var(--radius-xs);
-    background: var(--accent-muted);
-    font-size: var(--type-sm-size);
-  }
-  /* The request beside what the run resolved it to ("(auto)", "(requested 0.01)"), and where P · R were read. */
-  /* After a space (where a narrow column breaks, so a wrapped note starts on the value's edge, not indented). */
-  .note {
-    /* It wraps as a whole, never inside "(requested 0.01)". */
-    white-space: nowrap;
+    color: var(--text-tertiary);
     font-size: var(--type-sm-size);
     font-weight: var(--weight-regular);
-    color: var(--text-tertiary);
   }
+  /* Where P · R were read. A setting's request beside its value is ui/Note. */
   .pr-at {
     display: block;
     font-size: var(--type-sm-size);

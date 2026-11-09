@@ -47,6 +47,20 @@ async function openEstimate(page, vp, served) {
   await page.mouse.move(0, 0);
 }
 
+/**
+ * Presses Tab until `selector` holds focus, as a keyboard user reaches it (so `:focus-visible` is the keyboard's).
+ * @param {import('playwright-core').Page} page
+ * @param {string} selector
+ */
+async function tabTo(page, selector, max = 60) {
+  await until(page, selector);
+  for (let i = 0; i < max; i++) {
+    if (await page.evaluate((sel) => !!document.activeElement?.matches(sel), selector)) return;
+    await page.keyboard.press('Tab');
+  }
+  throw new Error(`Tab never reached ${selector}`);
+}
+
 /** Starts New run on a GPU the mock then reports gone (404 device_not_found) and waits for the Device error. */
 async function unplugGpu(/** @type {import('playwright-core').Page} */ page) {
   // An <option> is never "visible": wait for it to exist, running the mock's clock meanwhile.
@@ -584,6 +598,45 @@ export const scenes = [
     setup: async (page) => {
       await page.getByRole('button', { name: 'Add dataset' }).first().click();
       await page.locator('dialog[open]').waitFor();
+    },
+  },
+  {
+    // Keyboard focus on fields: the one global 2 px ring on the field's frame (a text field), on a native select, and
+    // on the class chips' frame, never a lime edge or halo (DESIGN_DIRECTION §2.9).
+    name: 'datasets-add-focus',
+    path: '/datasets',
+    fullPage: false,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page) => {
+      await page.getByRole('button', { name: 'Add dataset' }).first().click();
+      await page.locator('dialog[open]').waitFor();
+      await page.getByRole('tab', { name: 'Generate sample set' }).click();
+      await tabTo(page, 'dialog[open] .chips input');
+    },
+  },
+  {
+    name: 'run-new-focus-field',
+    path: '/runs/new',
+    fullPage: false,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page) => {
+      await until(page, 'input#name');
+      await page.locator('input#name').focus();
+      await page.keyboard.press('Shift+Tab');
+      await tabTo(page, 'input#name');
+    },
+  },
+  {
+    name: 'run-new-focus-select',
+    path: '/runs/new',
+    fullPage: false,
+    viewports: ['desktop'],
+    setup: async (page) => {
+      await until(page, 'select#weights');
+      await page.locator('select#weights').focus();
+      await page.keyboard.press('Shift+Tab');
+      await tabTo(page, 'select#weights');
+      await page.evaluate(() => window.scrollTo(0, 0));
     },
   },
   { name: 'dataset-stats', path: '/datasets/ds_shapes_hard?tab=stats', viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },

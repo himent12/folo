@@ -46,11 +46,11 @@ describe('ConfigPanel', () => {
   it('shows the resolved optimizer, LR, accumulation and warmup as the truth', () => {
     // fasteners: 1920 images at batch 16 over 100 epochs is 3000 iterations: AdamW at 0.002 · 5 / (4 + 8).
     const r = rows(resolveTrain(config, 1920, 8, 120));
-    expect(r['Optimizer']?.textContent).toBe('AdamW(auto)');
+    expect(r['Optimizer']?.textContent).toBe('AdamW (auto)');
     expect(r['Optimizer']?.querySelector('.mono')?.textContent).toBe('AdamW');
-    expect(r['Initial LR']?.textContent).toBe('0.000833(requested 0.01)');
+    expect(r['Initial LR']?.textContent).toBe('0.000833 (requested 0.01)');
     expect(r['Batch × accumulate']?.textContent).toBe('16 × 4 = 64');
-    expect(r['Warmup']?.textContent).toBe('360 steps(3 epochs)');
+    expect(r['Warmup']?.textContent).toBe('360 steps (3 epochs)');
     expect(r['LR decay']?.textContent).toBe('Linear to 1%');
     expect(r['Betas']?.textContent).toBe('0.9 · 0.999');
     expect(r['Weight decay']?.textContent).toBe('0.0005');
@@ -68,8 +68,8 @@ describe('ConfigPanel', () => {
   it('shows the capped close mosaic, the precision and the head (DOGFOOD-3 S2, S4)', () => {
     const short = { ...config, epochs: 15, amp: true, head: 'o2o' as const };
     const r = rows(resolveTrain(short, 1920, 8, 120), short);
-    expect(r['Close mosaic']?.textContent).toBe('last 7 epochs(requested 10)');
-    expect(r['Close mosaic']?.querySelector('.note')?.textContent).toBe('(requested 10)');
+    expect(r['Close mosaic']?.textContent).toBe('last 7 epochs (requested 10)');
+    expect(r['Close mosaic']?.querySelector('.ui-note')?.textContent).toBe('(requested 10)');
     expect(r['Precision']?.textContent).toBe('Mixed precision (f16)');
     expect(r['Head']?.textContent).toBe('End-to-end (no NMS)');
     // The defaults are said too.

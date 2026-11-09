@@ -52,8 +52,8 @@ function themeVars(t: Json, name: string): [string, string][] {
       const where = `color.${name}.${group}.${k}`;
       if (group === 'chart' && k === 'series') {
         (v as string[]).forEach((s, i) => out.push([`--chart-${i + 1}`, hex(s, `${where}[${i}]`)]));
-      } else if (group === 'chart' && k === 'fill') {
-        (v as string[]).forEach((s, i) => out.push([`--chart-fill-${i + 1}`, hex(s, `${where}[${i}]`)]));
+      } else if (group === 'chart' && (k === 'fill' || k === 'text')) {
+        (v as string[]).forEach((s, i) => out.push([`--chart-${k}-${i + 1}`, hex(s, `${where}[${i}]`)]));
       } else if (typeof v === 'number') {
         out.push([`--${kebab(group)}-${kebab(k)}`, String(v)]);
       } else {

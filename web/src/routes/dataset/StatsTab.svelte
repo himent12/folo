@@ -421,7 +421,7 @@
   .k-sub {
     font-size: var(--type-sm-size);
     line-height: 16px;
-    color: var(--text-tertiary);
+    color: var(--text-secondary);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
