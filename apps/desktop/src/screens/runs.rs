@@ -79,7 +79,8 @@ impl FoloApp {
                     RunFilter::Completed => "Finished",
                     RunFilter::Failed => "Failed",
                 };
-                format!("{name}  {}", count(*f))
+                // A no-break space marks the count for the segmented control's quieter style.
+                format!("{name}\u{a0}{}", count(*f))
             })
             .collect();
         let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
@@ -123,7 +124,7 @@ impl FoloApp {
             .border_b_1()
             .border_color(t.line_subtle)
             .child(th(&t, "Run").flex_1().min_w(px(180.)))
-            .child(th(&t, "Model").w(px(64.)).flex_none())
+            .child(th(&t, "Arch").w(px(64.)).flex_none())
             .when(show_ds, |d| d.child(th(&t, "Dataset").w(px(120.)).flex_none()))
             .when(wide, |d| d.child(th(&t, "Size · batch").w(px(104.)).flex_none()))
             .child(th(&t, "Status").w(px(96.)).flex_none())
@@ -1056,14 +1057,12 @@ impl FoloApp {
         // In the axis's power of ten ("× 10⁻³" is printed once, on the axis).
         let lr_hi = (d.lr_max * 1.15).max(1e-4);
         let lr_pow = crate::charts::axis_pow(0., lr_hi, 3);
-        // The legend value reads on its own, normalised ("6.58×10⁻³", "1.00×10⁻⁴": its own power,
-        // not the axis's, so it never shows "0.10×10⁻³").
+        // The legend value is in the axis's power, written out ("6.58×10⁻³", "0.10×10⁻³"): one
+        // power per card, and the value still reads on its own (the dogfood report's ask).
         let lr_value = crate::charts::value_at(&d.lr, hover, 0., total).map(|x| match lr_pow {
-            // In f64: a tiny valid rate (1e-40) would overflow 10^-p in f32.
-            Some(_) if x > 0. && x.is_finite() => {
-                let x = x as f64;
-                let p = x.log10().floor() as i32;
-                format!("{:.2}×10{}", x * 10f64.powi(-p), crate::charts::superscript(p))
+            // In f64: a tiny valid rate would overflow 10^-p in f32.
+            Some(p) if x.is_finite() => {
+                format!("{:.2}×10{}", x as f64 * 10f64.powi(-p), crate::charts::superscript(p))
             }
             _ => format!("{x:.4}"),
         });

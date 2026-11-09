@@ -42,6 +42,10 @@ impl FoloApp {
             _ if self.store.runs.error().is_some() => {
                 format!("Not connected · {}", self.store.api.describe())
             }
+            // Runs came back but something else failed: not "Loading…" for ever.
+            _ if self.store.models.error().is_some() || self.store.datasets.error().is_some() => {
+                "Some data didn't load · retry in its panel".to_string()
+            }
             _ => "Loading…".to_string(),
         };
         // Training needs a server and a dataset; until then the action explains itself instead.
@@ -297,6 +301,20 @@ impl FoloApp {
                     .gap(px(12.))
                     .child(crate::ui::legend_value(&t, "mAP50-95", t.chart_series[0], false, v(&d.map50_95)))
                     .child(crate::ui::legend_value(&t, "mAP50", t.chart_series[1], true, v(&d.map50)))
+                    // The lime dot on the chart, keyed as on the run dashboard.
+                    .children(best.as_ref().map(|b| {
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(5.))
+                            .child(div().size(px(6.)).rounded_full().bg(t.accent_fill()))
+                            .child(text(ty::XS, t.text_secondary).child("best"))
+                            .child(text(ty::XS, t.text_primary).tnum().child(format!(
+                                "{} @ {}",
+                                f3(b.map50_95),
+                                b.epoch
+                            )))
+                    }))
                     .into_any_element();
                 // One Tab stop with the dashboard's keyboard cursor (← / →, Home / End, Esc), ending
                 // at the latest validated epoch.
@@ -956,11 +974,7 @@ impl FoloApp {
                     Some("icons/refresh-cw.svg"),
                     window,
                     cx,
-                    act(|this, _, cx| {
-                        this.store.models = Load::Idle;
-                        this.ensure_core(cx);
-                        cx.notify();
-                    }),
+                    act(|this, _, cx| this.retry_models(cx)),
                 );
                 div()
                     .p(px(16.))

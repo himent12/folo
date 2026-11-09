@@ -95,7 +95,19 @@ impl FoloApp {
         if self.play_image.is_none() {
             // Every enabled action does something: with no datasets either, the first step is one.
             let no_datasets = self.store.datasets.ready().is_some_and(|d| d.is_empty());
-            let pick = if no_models && no_datasets {
+            // The model list failed: the step is fetching it again, not picking an image.
+            let models_failed = self.store.models.error().is_some();
+            let pick = if models_failed {
+                self.button(
+                    "play-pick",
+                    "Retry",
+                    Btn::Primary,
+                    Some("icons/refresh-cw.svg"),
+                    window,
+                    cx,
+                    act(|this, _, cx| this.retry_models(cx)),
+                )
+            } else if no_models && no_datasets {
                 self.button(
                     "play-pick",
                     "Add a dataset",
@@ -167,14 +179,18 @@ impl FoloApp {
                                 .items_center()
                                 .gap(px(4.))
                                 // Headline, body and button name the same next step.
-                                .child(text(ty::LG, t.text_primary).child(if no_models && no_datasets {
+                                .child(text(ty::LG, t.text_primary).child(if models_failed {
+                                    "The model list didn't load"
+                                } else if no_models && no_datasets {
                                     "Add a dataset to get started"
                                 } else if no_models {
                                     "Train a model to start detecting"
                                 } else {
                                     "Drop an image to detect objects"
                                 }))
-                                .child(text(ty::SM, t.text_secondary).child(if no_models && no_datasets {
+                                .child(text(ty::SM, t.text_secondary).child(if models_failed {
+                                    "Check the connection, then try again."
+                                } else if no_models && no_datasets {
                                     "Then train a model on it and come back with an image."
                                 } else if no_models {
                                     "The Playground runs your trained models. Start a run, then come back with an image."
@@ -182,7 +198,7 @@ impl FoloApp {
                                     "JPEG or PNG · or pick a validation image on the right"
                                 })),
                         )
-                        .child(div().flex().items_center().gap(px(12.)).child(pick).when(!no_models, |d| {
+                        .child(div().flex().items_center().gap(px(12.)).child(pick).when(!no_models && !models_failed, |d| {
                             d.child(
                                 div()
                                     .flex()
@@ -485,7 +501,15 @@ impl FoloApp {
         let ids: Vec<String> = models.iter().map(|m| m.id.clone()).collect();
         let select = self.select(
             "play-model",
-            model.as_ref().map_or("No models".into(), |m| SharedString::from(m.name.clone())),
+            // A failed list isn't an empty one.
+            model.as_ref().map_or(
+                if self.store.models.error().is_some() {
+                    "Models didn't load".into()
+                } else {
+                    "No models".into()
+                },
+                |m| SharedString::from(m.name.clone()),
+            ),
             models
                 .iter()
                 .map(|m| {
@@ -719,18 +743,22 @@ impl FoloApp {
                             .child(seg(p.timing.postprocess_ms, c_nms)),
                     )
                     .child(
-                        div().flex().gap(px(12.)).justify_between().children(
+                        // Whole entries wrap (the 280 px rail fits two of three stage names a line);
+                        // an entry never breaks inside.
+                        div().flex().flex_wrap().gap_x(px(12.)).gap_y(px(4.)).justify_between().children(
                             [
-                                ("pre", p.timing.preprocess_ms, c_pre),
-                                ("model", p.timing.inference_ms, c_model),
+                                ("Preprocess", p.timing.preprocess_ms, c_pre),
+                                ("Inference", p.timing.inference_ms, c_model),
                                 ("NMS", p.timing.postprocess_ms, c_nms),
                             ]
                             .into_iter()
                             .map(|(n, v, c)| {
                                 div()
                                     .flex()
+                                    .flex_none()
                                     .items_center()
                                     .gap(px(5.))
+                                    .whitespace_nowrap()
                                     .child(swatch(c, 6.))
                                     .child(text(ty::XS, t.text_tertiary).child(n))
                                     .child(text(ty::XS, t.text_secondary).tnum().child(format!("{v:.1} ms")))

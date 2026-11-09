@@ -134,10 +134,10 @@ impl Theme {
     }
 
     /// Loss components (box, cls, dfl, total), per design/README: box = series 1, cls = series 4
-    /// (dashed), dfl = series 5 (dotted), total = text.primary (thicker).
+    /// (dashed), dfl = series 3 (teal, dotted: far from box's amber), total = text.primary (thicker).
     pub fn loss_colors(&self) -> [Hsla; 4] {
         let s = self.chart_series;
-        [s[1], s[4], s[5], self.text_primary]
+        [s[1], s[4], s[3], self.text_primary]
     }
 }
 
@@ -173,6 +173,24 @@ mod tests {
                 assert!(contrast(t.accent_text, surface) >= 4.5, "{:?} accent text", t.mode);
             }
             assert!(contrast(t.accent_on, t.accent_solid) >= 7.0, "{:?} on-accent", t.mode);
+        }
+    }
+
+    #[test]
+    fn control_line_meets_3_to_1_on_every_surface() {
+        // WCAG 1.4.11: a line that is the only mark of a control (switch track, slider rail,
+        // input border) needs 3:1 against what it sits on.
+        for t in [Theme::new(Mode::Dark), Theme::new(Mode::Light)] {
+            for (name, bg) in [
+                ("app", t.bg_app),
+                ("panel", t.bg_panel),
+                ("raised", t.bg_raised),
+                ("overlay", t.bg_overlay),
+                ("inset", t.bg_inset),
+            ] {
+                let c = contrast(over(bg, t.line_control), bg);
+                assert!(c >= 3.0, "{:?} line.control on {name}: {c:.2}:1", t.mode);
+            }
         }
     }
 

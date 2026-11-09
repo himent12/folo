@@ -677,12 +677,12 @@ impl FoloApp {
                         d.child(crate::controls::focus_tip(&t, format!("{tile_tip} · ← → adjust"), 20.))
                     })
                     .child(div().w(px(14.)).flex().justify_center().child(icon(
-                        "icons/square.svg",
+                        "icons/image.svg",
                         9.,
                         t.text_tertiary,
                     )))
                     .child(size_slider)
-                    .child(icon("icons/square.svg", 14., t.text_tertiary)),
+                    .child(icon("icons/image.svg", 14., t.text_tertiary)),
             );
         self.ds_view_controls = Some(view_controls.into_any_element());
         if self.store.images.get(&id).is_none_or(|l| l.is_loading()) {

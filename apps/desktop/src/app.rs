@@ -749,6 +749,13 @@ impl FoloApp {
         .detach();
     }
 
+    /// Fetch the model list again after it failed (nothing else retries a failed load).
+    pub fn retry_models(&mut self, cx: &mut Context<Self>) {
+        self.store.models = Load::Idle;
+        self.ensure_core(cx);
+        cx.notify();
+    }
+
     pub fn ensure_core(&mut self, cx: &mut Context<Self>) {
         if self.store.runs.needs_fetch() {
             self.store.runs = Load::Loading;
@@ -2734,10 +2741,21 @@ impl Render for FoloApp {
             .on_action(cx.listener(|this, _: &NextRegion, w, cx| this.cycle_region(true, w, cx)))
             .on_action(cx.listener(|this, _: &PrevRegion, w, cx| this.cycle_region(false, w, cx)))
             .on_action(cx.listener(|this, _: &Dismiss, w, cx| this.dismiss(w, cx)))
+            // Keyboard mode turns on in the capture phase, before a focused control (a slider, a
+            // segmented group) consumes the key, so its first keyboard step already shows the ring.
+            .capture_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _, cx| {
+                let nav = matches!(
+                    ev.keystroke.key.as_str(),
+                    "up" | "down" | "left" | "right" | "home" | "end" | "pageup" | "pagedown"
+                );
+                if nav && !this.kb {
+                    this.kb = true;
+                    cx.notify();
+                }
+            }))
             .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _, cx| {
-                if matches!(ev.keystroke.key.as_str(), "up" | "down" | "left" | "right" | "enter" | "space")
-                    && !this.kb
-                {
+                // Enter and Space only when nothing took them (typed into a field they're text).
+                if matches!(ev.keystroke.key.as_str(), "enter" | "space") && !this.kb {
                     this.kb = true;
                     cx.notify();
                 }

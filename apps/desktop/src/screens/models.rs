@@ -26,13 +26,16 @@ impl FoloApp {
     pub fn models(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
         let models = self.store.models.ready().cloned();
-        let subtitle = models.as_ref().map_or("Loading…".to_string(), |m| {
-            format!("{} · best and last checkpoints, plus exports", plural(m.len(), "model"))
-        });
+        let subtitle = match (&models, self.store.models.error()) {
+            (Some(m), _) => format!("{} · best and last checkpoints, plus exports", plural(m.len(), "model")),
+            (None, Some(_)) => "The model list didn't load".to_string(),
+            (None, None) => "Loading…".to_string(),
+        };
         let open = self
             .button(
                 "models-open",
-                "Try in Playground",
+                // No model in hand on the index: it opens Playground (a model's page tries that one).
+                "Open Playground",
                 Btn::Secondary,
                 Some("icons/scan-eye.svg"),
                 window,
@@ -177,6 +180,27 @@ impl FoloApp {
             let header = page_header(&t, "Model", "", vec![]);
             let body = if self.store.models.is_loading() {
                 panel(&t).child(loading_rows(&t, "model", 5)).into_any_element()
+            } else if let Some(e) = self.store.models.error().cloned() {
+                // The list failed to load: say that (not "not found", which suggests a deletion).
+                let retry = self.button(
+                    "model-retry",
+                    "Retry",
+                    Btn::Secondary,
+                    Some("icons/refresh-cw.svg"),
+                    window,
+                    cx,
+                    act(|this, _, cx| this.retry_models(cx)),
+                );
+                panel(&t)
+                    .child(empty_state(
+                        &t,
+                        "icons/circle-alert.svg",
+                        "Models didn't load",
+                        &e.message,
+                        Tone::Danger,
+                    ))
+                    .child(div().pb(px(24.)).flex().justify_center().child(retry))
+                    .into_any_element()
             } else {
                 panel(&t)
                     .child(empty_state(
@@ -711,9 +735,17 @@ impl FoloApp {
                 let on = iso == Some(class);
                 let pinned = self.pr_pin == Some(class);
                 let name = m.classes.get(class as usize).cloned().unwrap_or_default();
-                // The full name (the 68 px slot, 54 beside the pin, can cut it short) and what a
-                // click does, on hover and on keyboard focus.
-                let tip_text = format!("{name} · {}", if pinned { "click to unpin" } else { "click to pin" });
+                // The full name (the 68 px slot, 54 beside the pin, can cut it short), the operating
+                // point's P and R (the row has room for P only), and what a click does, on hover and
+                // on keyboard focus.
+                let op = ev
+                    .per_class
+                    .iter()
+                    .find(|p| p.class == class)
+                    .map(|p| format!(" · P {:.3} · R {:.3}", p.precision, p.recall))
+                    .unwrap_or_default();
+                let tip_text =
+                    format!("{name}{op} · {}", if pinned { "click to unpin" } else { "click to pin" });
                 let ring = self.ring(&self.fh(key.clone(), cx), window);
                 let el = div()
                     .id(SharedString::from(key.clone()))

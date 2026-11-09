@@ -79,7 +79,7 @@ impl FoloApp {
             .rounded(px(radius::MD))
             .bg(t.bg_raised)
             .border_1()
-            .border_color(if url_fh.is_focused(window) { t.accent_line } else { t.line_default })
+            .border_color(if url_fh.is_focused(window) { t.accent_line } else { t.line_control })
             .font_family(crate::theme::MONO)
             .text_size(px(ty::SM.size))
             .when(url_ring, |d| d.child(crate::app::focus_ring(&t, radius::MD)))
