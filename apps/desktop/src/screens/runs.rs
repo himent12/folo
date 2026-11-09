@@ -1512,7 +1512,12 @@ impl FoloApp {
             |this, r, cx| match r {
                 Ok(c) => {
                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(c.cli.clone()));
-                    this.toast(Tone::Neutral, "Copied the training command", Some(c.cli.into()), cx);
+                    this.toast(
+                        Tone::Neutral,
+                        "Copied the training command",
+                        Some("Paste it in a terminal on the server's machine.".into()),
+                        cx,
+                    );
                 }
                 Err(e) => this.toast(Tone::Danger, "Couldn't get the command", Some(e.message.into()), cx),
             },

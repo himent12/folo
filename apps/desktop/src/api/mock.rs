@@ -1158,40 +1158,7 @@ impl Backend for MockBackend {
             .iter()
             .find(|f| f.run.id == id)
             .ok_or_else(|| ApiError::new("run_not_found", format!("No run {id}")))?;
-        let c = &f.run.config;
-        let ds = self
-            .datasets
-            .iter()
-            .find(|d| d.ds.id == c.dataset_id)
-            .map_or(c.dataset_id.clone(), |d| d.ds.path.clone());
-        let mut argv: Vec<String> = vec![
-            "folo".into(),
-            "train".into(),
-            "--data".into(),
-            ds.replace('\\', "/"),
-            "--arch".into(),
-            c.arch.as_str().into(),
-            "--epochs".into(),
-            c.epochs.to_string(),
-            "--batch".into(),
-            c.batch.to_string(),
-            "--imgsz".into(),
-            c.imgsz.to_string(),
-            "--device".into(),
-            c.device.clone(),
-        ];
-        if c.amp {
-            argv.push("--amp".into());
-        }
-        if c.head == Head::O2o {
-            argv.extend(["--head".into(), "o2o".into()]);
-        }
-        let cli = argv
-            .iter()
-            .map(|a| if a.contains(' ') { format!("'{a}'") } else { a.clone() })
-            .collect::<Vec<_>>()
-            .join(" ");
-        Ok(CliCommand { cli, argv })
+        Ok(self.cli_for(&f.run.config))
     }
 
     fn estimate_run(&self, config: &TrainConfig) -> ApiResult<RunEstimate> {
@@ -1274,7 +1241,7 @@ impl Backend for MockBackend {
             est_peak_vram_bytes: (!cpu).then_some((vram_gib as f64 * (1u64 << 30) as f64) as u64),
             vram_source: (!cpu).then_some(ThroughputSource::Reference),
             close_mosaic: close,
-            cli: None,
+            cli: Some(self.cli_for(config).cli),
         })
     }
 
@@ -1633,6 +1600,45 @@ fn resolve(config: &TrainConfig, train_images: u64, classes: usize) -> ResolvedT
         warmup_bias_lr: if auto { 0.0 } else { 0.1 },
         // The trainer's cap: at most half the run.
         close_mosaic: Some(config.augment.close_mosaic.min(config.epochs / 2)),
+    }
+}
+
+impl MockBackend {
+    /// The demo's `folo train` command for a config (the flags the CLI takes for what the form sets).
+    fn cli_for(&self, c: &TrainConfig) -> CliCommand {
+        let ds = self
+            .datasets
+            .iter()
+            .find(|d| d.ds.id == c.dataset_id)
+            .map_or(c.dataset_id.clone(), |d| d.ds.path.replace('\\', "/"));
+        let mut argv: Vec<String> = vec![
+            "folo".into(),
+            "train".into(),
+            "--data".into(),
+            ds,
+            "--arch".into(),
+            c.arch.as_str().into(),
+            "--epochs".into(),
+            c.epochs.to_string(),
+            "--batch".into(),
+            c.batch.to_string(),
+            "--imgsz".into(),
+            c.imgsz.to_string(),
+            "--device".into(),
+            c.device.clone(),
+        ];
+        if c.amp {
+            argv.push("--amp".into());
+        }
+        if c.head == Head::O2o {
+            argv.extend(["--head".into(), "o2o".into()]);
+        }
+        let cli = argv
+            .iter()
+            .map(|a| if a.contains(' ') { format!("'{a}'") } else { a.clone() })
+            .collect::<Vec<_>>()
+            .join(" ");
+        CliCommand { cli, argv }
     }
 }
 
