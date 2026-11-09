@@ -1741,3 +1741,35 @@ Round 42 changes:
   - The loading skeleton's chart section opens on the live card's rule and inset.
   - New run's tip says when datasets didn't load.
 - **First-run copy:** "A YOLO or COCO folder." and "Watch loss and mAP live."
+
+## Round 42
+
+| Reviewer | avg |
+|----------|-----|
+| Opus 5.5 | 8.2 |
+| GPT-6.1 Sol | 8.6 |
+
+Opus found a real ordering bug. Chips were placed in paint order, dimmed first, so with a class filter on, dimmed boxes took the free spots and the matching class's own boxes went unlabelled.
+
+Both reviewers asked for:
+- End-to-end shown one way across screens, and from the model rather than its run (`Model.head` is coming on api/model-head).
+- A keyboard route to the badge's explanation.
+- Shots with an ordinary NMS model, and with Mixed precision on.
+
+Sol also asked for larger switch targets with clickable labels. Opus also asked for exact skeleton geometry and lighter dimmed chips. Opus's ask for the first-run Overview to fill a wide window reverses an earlier round, so the brief now records the 1040 px cap as settled.
+
+The code review of #116 found nothing blocking. A selected box keeps its chip however long its name; this was fixed before merge.
+
+Round 43 changes:
+- **Chips:** placed selected and matching first, dimmed last; dimmed chips mix at 25 %.
+- **End-to-end:** `FoloApp::model_e2e` drives one marker everywhere:
+  - a badge with a keyboard help icon on the model and run titles;
+  - a line under the architecture in Models;
+  - the Playground picker.
+- **End-to-end copy:**
+  - Postprocess's tip drops NMS for such models.
+  - The Playground row reads "Not used · end-to-end model".
+  - New run's help reads "Predicts boxes directly, without non-maximum suppression (NMS)".
+- **Switches:** a 36 × 28 target, and their labels toggle too.
+- **Skeleton:** KPI strip +8 px, chart −6 px.
+- **Scenarios:** `new-run+amp` and `playground+nms` (40 shots).
