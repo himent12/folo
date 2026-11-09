@@ -272,6 +272,17 @@
   const stem = (f: string) => f.split('/').pop() ?? f;
   /** The folders of a path ("images/train"): the part a middle ellipsis shortens. */
   const dir = (f: string) => f.slice(0, Math.max(0, f.length - stem(f).length - 1));
+  /** The path's room, and one mono cell, so the folders shorten to whole characters with "…" set tight against "/". */
+  let pathW = $state(0);
+  let ch10 = $state(0);
+  const chW = $derived(ch10 / 10);
+  function shortDir(f: string): { text: string; cut: boolean } {
+    const d = dir(f);
+    if (!d || !pathW || !chW) return { text: d, cut: false };
+    // 24 px copy button and 4 px gap beside the path; the ellipsis takes about one cell.
+    const fit = Math.floor((pathW - 28) / chW) - stem(f).length - 1;
+    return d.length <= fit ? { text: d, cut: false } : { text: d.slice(0, Math.max(1, fit - 1)), cut: true };
+  }
 
   async function copyFile(f: string) {
     try {
@@ -429,15 +440,17 @@
       </section>
 
       {#if img}
+        {@const sd = shortDir(img.file)}
         <section>
           <h3>Image</h3>
           <dl>
             <dt>File</dt>
             <!-- One line with the middle shortened (images/…/000001.jpg): the folders give way, the file name stays
                  whole; the full path is in the tooltip and one click from the clipboard. -->
-            <dd class="path">
-              <span class="mono mid" use:tooltip={{ text: img.file }}
-                >{#if dir(img.file)}<span class="dir">{dir(img.file)}</span>/{/if}<span class="base">{stem(img.file)}</span></span
+            <dd class="path" bind:clientWidth={pathW}>
+              <span class="mono ch" aria-hidden="true" bind:clientWidth={ch10}>0000000000</span>
+              <span class="mono mid" aria-label={img.file} use:tooltip={{ text: img.file }}
+                >{#if sd.text}<span class="dir">{sd.text}</span>{#if sd.cut}<span class="ell">…</span>{/if}/{/if}<span class="base">{stem(img.file)}</span></span
               >
               <button type="button" class="copy" aria-label="Copy the path {img.file}" use:tooltip={{ text: 'Copy path' }} onclick={() => copyFile(img.file)}
                 ><Copy size={12} strokeWidth={2} aria-hidden="true" /></button
@@ -737,6 +750,7 @@
     overflow-wrap: anywhere;
   }
   .path {
+    position: relative;
     display: flex;
     align-items: center;
     gap: var(--space-1);
@@ -750,7 +764,17 @@
   .dir {
     min-width: 0;
     overflow: hidden;
-    text-overflow: ellipsis;
+    text-overflow: clip;
+  }
+  /* The cut folders end in a sans "…" (the mono one sits in a full cell and reads as "images… /"). */
+  .ell {
+    font-family: var(--font-sans);
+  }
+  /* One mono cell, measured (font and size as the path), out of the flow. */
+  .ch {
+    position: absolute;
+    visibility: hidden;
+    pointer-events: none;
   }
   .base {
     flex-shrink: 0;

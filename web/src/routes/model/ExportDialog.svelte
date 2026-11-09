@@ -25,14 +25,14 @@
       value: 'folo-f16',
       label: 'FOLO f16',
       ext: '.folo',
-      desc: 'Native weights in half precision. Loads instantly in folo predict and folo serve.',
+      desc: 'Native weights in half precision. Loads instantly in `folo predict` and `folo serve`.',
       bytesPerParam: 2.03,
     },
     {
       value: 'onnx',
       label: 'ONNX',
       ext: '.onnx',
-      desc: 'Open standard graph for ONNX Runtime, TensorRT or OpenVINO. float32 unless you pick half precision.',
+      desc: 'Open standard graph for ONNX Runtime, TensorRT or OpenVINO. Full precision (float32) unless you pick half precision.',
       bytesPerParam: 4.1,
     },
   ];
@@ -63,17 +63,8 @@
   });
   /** The estimate follows the switches: an f16 ONNX file is about half the size. */
   const perParam = (f: (typeof formats)[number]) => (f.value === 'onnx' && switchesOk && switches.half ? 2.05 : f.bytesPerParam);
-  /** The size estimates share one precision, one decimal ("≈ 18.3 MiB", "≈ 37.0 MiB"), so the column reads evenly. */
-  function estimate(b: number): string {
-    const [k, names] = prefs.units === 'binary' ? [1024, ['B', 'KiB', 'MiB', 'GiB']] : [1000, ['B', 'kB', 'MB', 'GB']];
-    let i = 0;
-    let v = b;
-    while (v >= k && i < names.length - 1) {
-      v /= k;
-      i++;
-    }
-    return `${i === 0 ? Math.round(v) : v.toFixed(1)} ${names[i]}`;
-  }
+  /** The app's one size format (`bytes`: one decimal, "≈ 18.3 MiB", "≈ 37.0 MiB"). */
+  const estimate = (b: number) => bytes(b, prefs.units);
   /** The format of the finished export (the radio may not be shown any more). */
   let done = $state<ExportFormat | null>(null);
   let phase = $state<'idle' | 'running' | 'done' | 'error'>('idle');
@@ -166,7 +157,7 @@
       </div>
       {#if done === 'onnx'}
         <p class="note">
-          Studio cannot download ONNX files yet: the file stays on the machine running folo serve. Copy it from there, or
+          Studio cannot download ONNX files yet: the file stays on the machine running <span class="mono">folo serve</span>. Copy it from there, or
           run <span class="mono">folo export --format onnx</span> where you need it.
         </p>
       {/if}
@@ -184,7 +175,8 @@
               <span class="ext mono">{f.ext}</span>
               <span class="est num">≈ {estimate(model.params * perParam(f))}</span>
             </span>
-            <span class="opt-desc">{f.desc}</span>
+            <!-- Commands in `backticks` are code: mono. -->
+            <span class="opt-desc">{#each f.desc.split('`') as part, i (i)}{#if i % 2}<span class="mono">{part}</span>{:else}{part}{/if}{/each}</span>
           </span>
         </label>
         {#if f.value === 'onnx' && format === 'onnx' && switchesOk}

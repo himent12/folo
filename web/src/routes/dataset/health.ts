@@ -41,26 +41,20 @@ export function bySeverity(items: readonly HealthItem[]): SeverityGroup[] {
   return groups.filter((g) => g.items.length > 0);
 }
 
-const review = (h: HealthItem) => h.severity === 'danger' || h.severity === 'warning';
-
-/** Findings that need attention (errors and warnings): the one issue total, on the Stats tab. */
-export function reviewCount(items: readonly HealthItem[]): number {
-  return items.filter(review).length;
+/**
+ * How many findings there are: errors, warnings and notes alike (not the `ok` item), each one finding whatever it
+ * counts inside (files, boxes, classes). The one count, said one way everywhere: the Stats tab, Health's heading, and
+ * its folded line, which shows each finding once.
+ */
+export function findingCount(items: readonly HealthItem[]): number {
+  return items.filter((h) => h.severity !== 'ok').length;
 }
 
 const plural = (n: number, one: string, many: string) => `${int(n)} ${n === 1 ? one : many}`;
 
-/**
- * "3 issues" (each finding that needs attention is one issue, whatever it counts inside: files, boxes, classes), or
- * undefined when nothing needs review. Said once, on the Stats tab; Health shows the findings themselves.
- */
-export function issueLabel(n: number): string | undefined {
-  return n > 0 ? plural(n, 'issue', 'issues') : undefined;
-}
-
-/** The folded line of one severity: each finding's short form, so it reads whole ("3 file issues · 35% tiny boxes"). */
-export function groupSummary(g: SeverityGroup): string {
-  return g.items.map((h) => h.short).join(' · ');
+/** "4 findings", or undefined when there are none. */
+export function findingLabel(n: number): string | undefined {
+  return n > 0 ? plural(n, 'finding', 'findings') : undefined;
 }
 
 /** Image size suggested for datasets with many tiny boxes (1.5× the 640 default). */

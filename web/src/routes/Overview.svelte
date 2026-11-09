@@ -25,6 +25,7 @@
   import StatusBadge from '$lib/ui/StatusBadge.svelte';
   import TableState from '$lib/ui/TableState.svelte';
   import Ident from '$lib/ui/Ident.svelte';
+  import Meta from '$lib/ui/Meta.svelte';
   import LivePreview from './overview/LivePreview.svelte';
   import LiveRunCard from './overview/LiveRunCard.svelte';
 
@@ -216,7 +217,7 @@
                     <span class="m-text">
                       <span class="m-ds truncate">{ds}</span>
                       <span class="m-name truncate">{m.name}</span>
-                      <span class="m-sub num"><Ident value={m.arch} /> · {m.classes.length} classes · {bytes(m.bytes, prefs.units)}</span>
+                      <span class="m-sub num"><Meta line><Ident value={m.arch} /><span>{m.classes.length} classes</span><span>{bytes(m.bytes, prefs.units)}</span></Meta></span>
                     </span>
                     <span class="m-map"><span class="num"><span class="sr-only">mAP50-95 </span>{metric(m.metrics?.map50_95)}</span></span>
                   </a>
@@ -251,7 +252,7 @@
                   <a href={href(`/datasets/${d.id}`)}>
                     <span class="d-row">
                       <span class="d-name truncate">{d.name}</span>
-                      <span class="d-nums num">{compact(total(d))} images · {d.classes.length} classes</span>
+                      <span class="d-nums num"><Meta line><span>{compact(total(d))} images</span><span>{d.classes.length} classes</span></Meta></span>
                     </span>
                     {#if d.stats}<ClassStrip counts={d.stats.class_counts} classes={d.classes} height={4} />{/if}
                   </a>

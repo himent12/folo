@@ -2,19 +2,24 @@
   /**
    * A command to run, as one line that never wraps (a shell command broken mid-token, `'vulkan` / `';`, cannot be
    * read or pasted): full width, it scrolls sideways with a fade on the clipped edge (`fadeScroll`), and Copy copies
-   * it whole.
+   * it whole. Every command the app shows to be run goes through it (or ui/Remedy, which holds one), never a truncated
+   * `<code>`.
    */
   import Copy from '@lucide/svelte/icons/copy';
   import Button from './Button.svelte';
   import { fadeScroll } from './fadeScroll';
   import { toast } from './toast.svelte';
 
-  let { command, label = 'Command' }: { command: string; label?: string } = $props();
+  let {
+    command,
+    label = 'Command',
+    copied,
+  }: { command: string; label?: string; /** What the copied command does, said in the toast. */ copied?: string } = $props();
 
   async function copy() {
     try {
       await navigator.clipboard.writeText(command);
-      toast.success('Command copied');
+      toast.success('Command copied', copied);
     } catch (e) {
       toast.error(e, 'Could not copy the command');
     }

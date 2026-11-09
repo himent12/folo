@@ -53,7 +53,17 @@ export function bytes(x: number | null | undefined, units: 'binary' | 'metric' =
     v /= k;
     i++;
   }
-  return `${i === 0 ? nf(0).format(v) : trim(v)} ${names[i]}`;
+  // One format for every size in the app: one decimal above bytes ("37.0 MiB", "16.0 GiB"), so columns read evenly.
+  return `${i === 0 ? nf(0).format(v) : nf(1).format(v)} ${names[i]}`;
+}
+
+/** The one unit a table's size column uses, named in its header ("Size, MiB"); the cells are `sizeIn`. */
+export const sizeUnit = (units: 'binary' | 'metric' = 'binary') => (units === 'binary' ? 'MiB' : 'MB');
+
+/** A size in the column's unit, one decimal, no unit: 38_797_312 → "37.0". */
+export function sizeIn(x: number | null | undefined, units: 'binary' | 'metric' = 'binary'): string {
+  if (!ok(x)) return '—';
+  return nf(1).format(x / (units === 'binary' ? 2 ** 20 : 1e6));
 }
 
 /** Seconds → "1h 04m", "12m 30s", "42s". */

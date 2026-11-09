@@ -3,7 +3,7 @@
    * Dataset statistics. Health comes first, only when there are findings: one compact line across the page (each
    * severity's icon and a short summary of its findings, units named; Details at its right end) that opens to every
    * finding with its next step, in two columns from the laptop tier. Open, the line is a plain heading ("Health ·
-   * 4 checks"): the findings under it say what the summary said, so it is never said twice. A finding backed by `folo dataset check` issues opens them under itself: the one issue
+   * 4 findings"): the findings under it say what the summary said, so it is never said twice. A finding backed by `folo dataset check` issues opens them under itself: the one issue
    * list, filtered to that finding's severity (and inside it, by check type). Then four numbers, the class balance as
    * the focal chart, and the two histograms in ink.
    */
@@ -22,7 +22,7 @@
   import Panel from '$lib/ui/Panel.svelte';
   import { tooltip } from '$lib/ui/tooltip';
   import { swatchStyle } from './swatch';
-  import { bySeverity, countBinLabel, groupSummary, healthChecks, imageCount, sizeBinLabel, TINY_SIZE, type Severity } from './health';
+  import { countBinLabel, findingLabel, healthChecks, imageCount, sizeBinLabel, TINY_SIZE, type Severity } from './health';
 
   let {
     dataset,
@@ -33,7 +33,6 @@
 
   const images = $derived(imageCount(dataset));
   const health = $derived(healthChecks(dataset, stats, counts));
-  const groups = $derived(bySeverity(health));
   const findings = $derived(health.filter((h) => h.severity !== 'ok'));
   // The line is the point; the evidence is one tap away.
   let healthOpen = $state(false);
@@ -74,20 +73,21 @@
 </script>
 
 <div class="stats">
-  {#if groups.length}
+  {#if findings.length}
     <!-- One line at rest: each severity's icon and what its findings are; it opens to every finding and its next step. -->
     <section class="health" id="ds-health" aria-labelledby="ds-health-title">
       <details bind:open={healthOpen}>
         <summary>
           <span class="h-title" id="ds-health-title">Health</span>
           {#if healthOpen}
-            <span class="h-count num">{findings.length} {findings.length === 1 ? 'check' : 'checks'}</span>
+            <span class="h-count num">{findingLabel(findings.length)}</span>
           {:else}
+            <!-- Each finding once, with its own severity mark: the same findings, in the same order, as open. -->
             <span class="h-sum">
-              {#each groups as g (g.severity)}
-                {@const Icon = icons[g.severity]}
-                <span class="h-sev {g.severity}">
-                  <Icon size={14} strokeWidth={2} aria-hidden="true" /><span class="sr-only">{g.label}:</span>{groupSummary(g)}
+              {#each findings as h (h.id)}
+                {@const Icon = icons[h.severity]}
+                <span class="h-sev {h.severity}">
+                  <Icon size={14} strokeWidth={2} aria-hidden="true" /><span class="sr-only">{sevWord[h.severity]}:</span>{h.short}
                 </span>
               {/each}
             </span>

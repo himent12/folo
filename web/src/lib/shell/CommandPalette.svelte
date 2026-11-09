@@ -17,7 +17,9 @@
   import type { Dataset, Model, Run } from '$lib/api/types';
   import { prefs } from '$lib/prefs.svelte';
   import { router } from '$lib/router.svelte';
+  import Ident from '$lib/ui/Ident.svelte';
   import Kbd from '$lib/ui/Kbd.svelte';
+  import Meta from '$lib/ui/Meta.svelte';
   import { keyPrefs } from '$lib/ui/keyPrefs.svelte';
   import type { IconType } from '$lib/ui/types';
   import { rememberFocus } from '$lib/ui/focus';
@@ -31,7 +33,8 @@
     id: string;
     group: string;
     label: string;
-    hint?: string;
+    /** Facts about the entity, one meta item each; `{ ident }` is an identifier (an architecture), set mono (ui/Ident). */
+    hint?: string | (string | { ident: string })[];
     /**
      * The hint restates what the label already says (an action's description), where other hints are facts about the
      * entity (status, model, size). Phones, short of width, leave it out instead of cutting it to a fragment.
@@ -108,7 +111,7 @@
       id: `run-${x.id}`,
       group: 'Runs',
       label: x.name,
-      hint: `${failureCause(x) ? 'failed, out of GPU memory' : x.status} · ${x.config.arch} · epoch ${x.epoch}/${x.epochs}`,
+      hint: [failureCause(x) ? 'failed, out of GPU memory' : x.status, { ident: x.config.arch }, `epoch ${x.epoch}/${x.epochs}`],
       icon: Activity,
       run: go(`/runs/${x.id}`),
     }));
@@ -116,7 +119,7 @@
       id: `ds-${x.id}`,
       group: 'Datasets',
       label: x.name,
-      hint: `${x.classes.length} classes · ${(x.splits.train + x.splits.val + x.splits.test).toLocaleString('en-US')} images`,
+      hint: [`${x.classes.length} classes`, `${(x.splits.train + x.splits.val + x.splits.test).toLocaleString('en-US')} images`],
       icon: Images,
       run: go(`/datasets/${x.id}`),
     }));
@@ -124,7 +127,7 @@
       id: `model-${x.id}`,
       group: 'Models',
       label: x.name,
-      hint: `${x.arch} · mAP ${x.metrics?.map50_95.toFixed(3) ?? '—'}`,
+      hint: [{ ident: x.arch }, `mAP ${x.metrics?.map50_95.toFixed(3) ?? '—'}`],
       icon: Box,
       run: go(`/models/${x.id}`),
     }));
@@ -154,7 +157,7 @@
       })),
     ];
     // With no query: navigation, the actions and the runs in flight.
-    const idle = (i: Item) => i.group === 'Go to' || i.group === 'Actions' || (i.group === 'Runs' && /running|queued/.test(i.hint ?? ''));
+    const idle = (i: Item) => i.group === 'Go to' || i.group === 'Actions' || (i.group === 'Runs' && (i.hint?.[0] === 'running' || i.hint?.[0] === 'queued'));
     return [...nav, ...actions, ...onEntity, ...r.map((i) => ({ ...i, scoped: !idle(i) })), ...d.map((i) => ({ ...i, scoped: true })), ...m.map((i) => ({ ...i, scoped: true }))];
   });
 
@@ -259,7 +262,10 @@
             <span class="label">
               {#each highlight(query, item.label) as part, k (k)}{#if part.m}<mark>{part.s}</mark>{:else}{part.s}{/if}{/each}
             </span>
-            {#if item.hint}<span class="hint" class:describes={item.describes}>{item.hint}</span>{/if}
+            {#if typeof item.hint === 'string'}<span class="hint" class:describes={item.describes}>{item.hint}</span>
+            {:else if item.hint}<span class="hint num"
+                ><Meta line>{#each item.hint as part, k (k)}{#if typeof part === 'string'}<span>{part}</span>{:else}<Ident value={part.ident} />{/if}{/each}</Meta></span
+              >{/if}
             <!-- Every hint here is a single key: none while those are off (Settings). -->
             {#if item.keys && keyPrefs.singleKeys}<Kbd keys={item.keys} subtle />{/if}
           </li>
@@ -353,9 +359,6 @@
   .item.on {
     background: var(--bg-active);
     color: var(--text-primary);
-  }
-  .item.on :global(svg) {
-    color: var(--accent-text);
   }
   .item > :global(svg) {
     flex-shrink: 0;

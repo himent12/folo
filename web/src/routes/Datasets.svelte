@@ -20,6 +20,7 @@
   import TableState from '$lib/ui/TableState.svelte';
   import Gate from '$lib/ui/Gate.svelte';
   import { isOffline, OFFLINE_REASON } from '$lib/ui/offline';
+  import Meta from '$lib/ui/Meta.svelte';
   import { rowNav } from '$lib/ui/rowNav';
   import AddDatasetDialog from './datasets/AddDatasetDialog.svelte';
   import { imageCount } from './dataset/health';
@@ -141,7 +142,7 @@
                 <td><a class="name" href={href(`/datasets/${d.id}`)} onclick={(e) => e.stopPropagation()}>{d.name}</a></td>
                 <td class="hide-md faint">{d.format}</td>
                 <td class="hide-lg path-cell"><span class="path mono truncate" title={d.path}>{d.path}</span></td>
-                <td class="r num">{num(d.splits.train)}</td>
+                <td class="r num muted">{num(d.splits.train)}</td>
                 <td class="r num muted">{num(d.splits.val)}</td>
                 <td class="r num muted">{num(d.splits.test)}</td>
                 <td title={classTip(d)}>
@@ -164,7 +165,7 @@
             <a href={href(`/datasets/${d.id}`)}>
               <span class="m-main">
                 <span class="name truncate">{d.name}</span>
-                <span class="m-meta num truncate">{num(d.splits.train)} train · {num(d.splits.val)} val · {num(d.splits.test)} test · {d.classes.length} classes</span>
+                <span class="m-meta num truncate"><Meta line><span>{num(d.splits.train)} train</span><span>{num(d.splits.val)} val</span><span>{num(d.splits.test)} test</span><span>{d.classes.length} classes</span></Meta></span>
               </span>
               <span class="m-side">
                 <span class="num">{num(imageCount(d))}<span class="faint">&nbsp;img</span></span>

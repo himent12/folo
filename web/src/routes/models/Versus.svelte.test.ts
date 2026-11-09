@@ -43,7 +43,7 @@ describe('Engine speed table', () => {
     flushSync();
     const leads = [...target.querySelectorAll('tbody td.lead')].map((td) => [...td.childNodes].slice(1).map((n) => n.textContent?.trim()).filter(Boolean).join(' | '));
     versusYolo26n.forEach((v, i) => {
-      if (!comparable(v)) expect(leads[i]).toBe(`Different conditions | ${unlike[v.metric]!.differs}`);
+      if (!comparable(v)) expect(leads[i]).toBe(`— | ${unlike[v.metric]!.differs}`);
       else if (v.unit === 'MiB') expect(leads[i]).toMatch(/^\d+% (less|more) memory$/);
       else expect(leads[i]).toMatch(/^\d+\.\d\d× (faster|slower)$/);
     });
@@ -59,21 +59,21 @@ describe('Engine speed table', () => {
     c = mount(Versus, { target });
     flushSync();
     const flagged = [...target.querySelectorAll('tbody tr.unlike')].map((tr) => ({
-      m: tr.querySelector('.m')?.textContent,
+      m: tr.querySelector('.m')?.firstChild?.textContent,
       why: tr.querySelector('.lead .why')?.textContent,
     }));
     expect(flagged).toEqual([
-      { m: 'GPU forward throughput, batch 16', why: 'f32 vs TF32' },
+      { m: 'GPU forward throughput, batch 16', why: 'f32 vs TensorFloat-32' },
       { m: 'GPU end to end, batch 1', why: 'less NMS work for FOLO' },
       { m: 'GPU end-to-end throughput, batch 16', why: 'f32 vs fp16' },
       { m: 'CPU forward, batch 1', why: 'FOLO under other load' },
       { m: 'CPU end to end, batch 1', why: 'less NMS work for FOLO' },
       { m: 'Training peak GPU memory', why: 'train step vs trainer' },
     ]);
-    expect(target.querySelector('.lede .qual')?.textContent).toContain(`6 of ${versusYolo26n.length} rows ran under different conditions`);
+    expect(target.querySelector('.foot')?.textContent).toContain(`6 of ${versusYolo26n.length} rows ran under different conditions`);
     const how = target.querySelector<HTMLDetailsElement>('details.how')!;
     expect(how.open).toBe(false);
-    target.querySelector<HTMLButtonElement>('.lede button')!.click();
+    target.querySelector<HTMLButtonElement>('.foot button')!.click();
     await tick();
     expect(how.open).toBe(true);
     expect(document.activeElement).toBe(how.querySelector('summary'));

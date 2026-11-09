@@ -15,7 +15,7 @@ describe('format', () => {
     expect(compact(20_000)).toBe('20k');
   });
   it('formats bytes in both unit systems', () => {
-    expect(bytes(16 * 2 ** 30)).toBe('16 GiB');
+    expect(bytes(16 * 2 ** 30)).toBe('16.0 GiB');
     expect(bytes(5_400_000, 'metric')).toBe('5.4 MB');
     expect(bytes(512)).toBe('512 B');
   });

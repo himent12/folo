@@ -206,7 +206,7 @@
                 </dd>
               {/if}
               <dt>A blank URL</dt>
-              <dd>Uses the address this page was served from{origin ? ` (${origin})` : ''}.</dd>
+              <dd>Uses the address this page was served from{#if origin} (<span class="mono">{origin}</span>){/if}.</dd>
             </dl>
           </details>
 
@@ -330,7 +330,7 @@
           <dt>FOLO Studio</dt>
           <dd class="num">{pkg.version}</dd>
           <dt>Server</dt>
-          <dd class="num">{hub.mode === 'live' ? `folo serve ${hub.version}` : hub.mode === 'mock' ? `built-in demo ${hub.version}` : '—'}</dd>
+          <dd class="num">{#if hub.mode === 'live'}<span class="mono">folo serve</span> {hub.version}{:else if hub.mode === 'mock'}Built-in demo {hub.version}{:else}—{/if}</dd>
           <dt>HTTP API</dt>
           <dd class="mono">docs/API.md</dd>
           <dt>Architecture</dt>

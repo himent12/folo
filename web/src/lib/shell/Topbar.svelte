@@ -31,9 +31,9 @@
   {:else}
     <a href={href('/')} class="mobile-logo" aria-label="FOLO Studio home"><Logo wordmark={false} /></a>
   {/if}
-  <!-- Desktop: a top-level page's H1 already names it, so a one-item trail is not repeated here. Phones: the bar
-       carries the page title (the H1 is visually hidden there). -->
-  <ol class="crumbs" class:single={page.crumbs.length < 2} aria-label="Breadcrumb">
+  <!-- Every page has its trail, a top-level page its root crumb alone ("Datasets"), so the bar's left half is never
+       blank on one screen and filled on the next. Phones: the bar carries the page title (the H1 is visually hidden). -->
+  <ol class="crumbs" aria-label="Breadcrumb">
     {#each page.crumbs as c, i (i)}
       {@const last = i === page.crumbs.length - 1}
       <li class:last>
@@ -124,9 +124,6 @@
   .sep {
     flex-shrink: 0;
   }
-  .crumbs.single li {
-    visibility: hidden;
-  }
   .crumbs li:not(.last):not(.sep) {
     flex-shrink: 0;
   }
@@ -202,10 +199,8 @@
     .crumbs li {
       display: none;
     }
-    .crumbs li.last,
-    .crumbs.single li.last {
+    .crumbs li.last {
       display: flex;
-      visibility: visible;
       font-size: var(--type-lg-size);
       line-height: 20px;
       font-weight: var(--weight-semibold);

@@ -116,6 +116,8 @@
     });
 
   type MetricId = 'm95' | 'm50' | 'loss' | 'rec';
+  /** The one caveat that changes how to read the plot: one wording on every screen. */
+  const DATA_CAVEAT = 'Different datasets: compare the shape of the curves, not their values.';
   const METRICS: { id: MetricId; label: string; f: (e: Epoch) => number; unit?: boolean }[] = [
     { id: 'm95', label: 'mAP50-95', f: (e) => e.val.map50_95, unit: true },
     { id: 'm50', label: 'mAP50', f: (e) => e.val.map50, unit: true },
@@ -271,7 +273,7 @@
           <Segmented size="sm" label="X axis" value={x} onchange={setX} options={X_OPTIONS} />
         </header>
         {@render chips()}
-        {#if !sameData && chosen.length > 1}<p class="caveat">Different datasets: scores are not directly comparable</p>{/if}
+        {#if !sameData && chosen.length > 1}<p class="caveat">{DATA_CAVEAT}</p>{/if}
         {@render plot()}
         <details class="about">
           <summary>
@@ -279,7 +281,6 @@
             <span>How to read this</span>
           </summary>
           <div class="about-body">
-            {#if !sameData && chosen.length > 1}<p>The runs use different datasets: compare the shape of the curves, not their values.</p>{/if}
             {#if x === 'progress'}<p>By progress puts each run over its planned epochs, so a short plan and a long one compare by shape.</p>{/if}
             <p>Each line ends in its run's status: a ringed dot while it trains, a square where it was stopped, a cross
               where it failed.</p>
@@ -291,7 +292,7 @@
       {:else}
         {@render chips()}
         <!-- One line, and only when it changes how to read the plot; the axis names itself (and why it was chosen). -->
-        {#if !sameData && chosen.length > 1}<p class="caveat">Different datasets: compare the shape of the curves, not their values.</p>{/if}
+        {#if !sameData && chosen.length > 1}<p class="caveat">{DATA_CAVEAT}</p>{/if}
         <header class="c-head">
           <Segmented label="Metric" bind:value={metricId} options={METRICS.map((m) => ({ value: m.id, label: m.label }))} />
           <Segmented size="sm" label="X axis" value={x} onchange={setX} options={X_OPTIONS} />

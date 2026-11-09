@@ -51,11 +51,10 @@
       line-height: var(--type-sm-line);
       font-weight: var(--weight-medium);
     }
+    /* The current section: text.primary on bg.active, like the sidebar; lime is for action, focus and live only. */
     a.active {
+      background: var(--bg-active);
       color: var(--text-primary);
-    }
-    a.active :global(svg) {
-      color: var(--accent-text);
     }
   }
 </style>

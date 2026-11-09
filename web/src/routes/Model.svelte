@@ -24,12 +24,14 @@
   import ErrorState from '$lib/ui/ErrorState.svelte';
   import Menu from '$lib/ui/Menu.svelte';
   import Panel from '$lib/ui/Panel.svelte';
-  import Segmented from '$lib/ui/Segmented.svelte';
+  import Tabs from '$lib/ui/Tabs.svelte';
   import Skeleton from '$lib/ui/Skeleton.svelte';
   import Ident from '$lib/ui/Ident.svelte';
   import { cmIndex, rankConfusions, type ConfusionEntry } from './model/confusion';
   import ExportDialog from './model/ExportDialog.svelte';
   import { origin } from '$lib/lineage';
+  import Lineage from '$lib/ui/Lineage.svelte';
+  import Meta from '$lib/ui/Meta.svelte';
   import PrCurves from './model/PrCurves.svelte';
   import { MODEL_SECTIONS, sectionShown, type ModelSection } from './model/sections';
   import { media } from '$lib/design/tokens';
@@ -235,11 +237,8 @@
   {@const head = m.head ?? 'o2m'}
   {#snippet lineageNote()}
     <!-- Where the weights started: the run's `weights`, a model (linked), an imported file, or nothing. -->
-    {#if lineage?.kind === 'model'}
-      {@const lid = lineage.id}
-      <span>fine-tuned from <Ident value={context.data?.parent?.name ?? lid} class="link" href={href(`/models/${encodeURIComponent(lid)}`)} /></span>
-    {:else if lineage?.kind === 'file'}
-      <span>fine-tuned from <Ident value={lineage.label} title={lineage.path} /></span>
+    {#if lineage && lineage.kind !== 'scratch'}
+      <span>fine-tuned from <Lineage origin={lineage} /></span>
     {:else if lineage?.kind === 'scratch'}
       <span>from scratch</span>
     {/if}
@@ -288,19 +287,25 @@
     {#snippet sub()}
       {#if phone.current}
         <button type="button" class="meta-line num" aria-expanded={metaOpen} aria-controls="model-meta" onclick={() => (metaOpen = !metaOpen)}>
-          <span class="truncate"><Ident value={m.arch} /> · {m.classes.length} classes · {m.imgsz} px</span>
+          <Meta line><Ident value={m.arch} /><span>{m.classes.length} classes</span><span>{m.imgsz} px</span></Meta>
           <ChevronDown size={14} aria-hidden="true" />
         </button>
         {#if metaOpen}
           <div class="meta-more" id="model-meta">
-            <span class="num">{bytes(m.bytes, prefs.units)}</span>
-            {@render provenance()}
+            <Meta>
+              <span class="num">{bytes(m.bytes, prefs.units)}</span>
+              {@render provenance()}
+            </Meta>
           </div>
         {/if}
       {:else}
-        <Ident value={m.arch} />
-        <span class="num">{m.classes.length} classes · {m.imgsz} px · {bytes(m.bytes, prefs.units)}</span>
-        {@render provenance()}
+        <Meta>
+          <Ident value={m.arch} />
+          <span class="num">{m.classes.length} classes</span>
+          <span class="num">{m.imgsz} px</span>
+          <span class="num">{bytes(m.bytes, prefs.units)}</span>
+          {@render provenance()}
+        </Meta>
       {/if}
     {/snippet}
     {#snippet actions()}
@@ -343,9 +348,12 @@
     {#if phone.current}
       <!-- Stays reachable under the top bar while a section scrolls. -->
       <div class="phone-pick">
-        <Segmented label="Show" bind:value={section} options={MODEL_SECTIONS} />
+        <Tabs label="Model sections" idPrefix="model-sec" bind:value={section} tabs={MODEL_SECTIONS} />
       </div>
     {/if}
+
+    <!-- The parts, in one frame: on phones it is the sections' tab panel; wider, a column with the page's own gap. -->
+    <div class="parts" id="model-sec-panel" role={phone.current ? 'tabpanel' : undefined} aria-labelledby={phone.current ? `model-sec-${section}` : undefined}>
 
     <!-- Evidence beside reference: the curves (8 columns) and the Details rail (4) stretch to one height, the plot
          taking what the rail adds; the per-class table, the curves' legend, follows in a row of its own. Up to 1199 px
@@ -466,10 +474,8 @@
               <div class="kv">
                 <dt>Started from</dt>
                 <dd>
-                  {#if lineage.kind === 'model'}
-                    <Ident value={context.data?.parent?.name ?? lineage.id} class="link" href={href(`/models/${encodeURIComponent(lineage.id)}`)} />
-                  {:else if lineage.kind === 'file'}
-                    <Ident value={lineage.label} title={lineage.path} />
+                  {#if lineage.kind !== 'scratch'}
+                    <Lineage origin={lineage} />
                   {:else}
                     <span class="muted">From scratch</span>
                   {/if}
@@ -491,7 +497,7 @@
               <dd class="latency">
                 {#if latency(m) !== undefined}
                   <span class="num">{latency(m)!.toFixed(2)} ms</span>
-                  <span class="faint"><Ident value={m.arch} /> · 640 px · RTX 4080 SUPER · end to end</span>
+                  <span class="faint"><Meta><Ident value={m.arch} /><span>640 px</span><span>RTX 4080 SUPER</span><span>end to end</span></Meta></span>
                 {:else}
                   <span class="faint">Not measured for <Ident value={m.arch} /> yet</span>
                 {/if}
@@ -500,15 +506,14 @@
           </dl>
         {/snippet}
         {#if phone.current}
-          <!-- Its own section on phones: the whole list, no fold. -->
-          <Panel title="Details" id="details">{@render detailList(true)}</Panel>
+          <!-- Its own section on phones: the whole list, no fold, and no title repeating the Details picker above it. -->
+          <Panel id="details">{@render detailList(true)}</Panel>
         {:else if narrow.current}
           <Panel pad="none" id="details">
             <button type="button" class="d-line" aria-expanded={detailsOpen} aria-controls="model-details" onclick={() => (detailsOpen = !detailsOpen)}>
-              <span class="d-sum num truncate">
-                <Ident value={m.arch} /><span class="sep" aria-hidden="true">·</span>{m.imgsz} px<span class="sep" aria-hidden="true">·</span
-                >{num(m.flops_g, 1)} GFLOPs<span class="sep" aria-hidden="true">·</span>{bytes(m.bytes, prefs.units)}
-              </span>
+              <span class="d-sum num"
+                ><Meta line><Ident value={m.arch} /><span>{m.imgsz} px</span><span>{num(m.flops_g, 1)} GFLOPs</span><span>{bytes(m.bytes, prefs.units)}</span></Meta></span
+              >
               <span class="d-verb">Details <ChevronRight size={14} aria-hidden="true" /></span>
             </button>
             {#if detailsOpen}<div class="d-body">{@render detailList(true)}</div>{/if}
@@ -566,7 +571,7 @@
           </div>
         {:else if cm}
           {#if phone.current}
-            <button type="button" class="to-list" onclick={closeMatrix}><ArrowLeft size={14} aria-hidden="true" />Confusions and misses</button>
+            <button type="button" class="to-list" onclick={closeMatrix}><ArrowLeft size={14} aria-hidden="true" />Back to lists</button>
           {/if}
           <!-- The matrix at its own size (cells up to 48 px) with a sticky rail beside it taking the rest of the width:
                what goes wrong most, ranked (each line shows its cell), and how to read the matrix. With under 300 px
@@ -631,6 +636,7 @@
           <Skeleton h="300px" />
         {/if}
       </Panel>
+    </div>
     </div>
   </Page>
   <ExportDialog model={m} bind:open={exportOpen} />
@@ -943,20 +949,23 @@
   .off {
     display: none;
   }
-  /* As on the run page: full width, just under the top bar, segments sharing the width. */
+  /* As on the run page: full width, just under the top bar, the tabs sharing the width. */
   .phone-pick {
     position: sticky;
-    top: calc(var(--size-topbar) + var(--space-2));
+    top: var(--size-topbar);
     z-index: var(--z-sticky);
-    margin-bottom: calc(-1 * var(--space-1));
+    margin-top: calc(-1 * var(--space-2));
+    background: var(--bg-app);
   }
-  .phone-pick :global(.seg) {
-    display: flex;
-    width: 100%;
-  }
-  .phone-pick :global(.seg > *) {
+  .phone-pick :global([role='tab']) {
     flex: 1;
     justify-content: center;
+  }
+  .parts {
+    display: flex;
+    flex-direction: column;
+    gap: inherit;
+    min-width: 0;
   }
   .sk {
     display: grid;
@@ -1167,10 +1176,6 @@
   }
   .d-sum :global(.ident) {
     color: var(--text-primary);
-  }
-  .sep {
-    margin-inline: var(--space-2);
-    color: var(--text-tertiary);
   }
   .d-verb {
     display: inline-flex;

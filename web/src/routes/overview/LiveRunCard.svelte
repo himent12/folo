@@ -18,6 +18,7 @@
   import StatusBadge from '$lib/ui/StatusBadge.svelte';
   import { media } from '$lib/design/tokens';
   import Ident from '$lib/ui/Ident.svelte';
+  import Meta from '$lib/ui/Meta.svelte';
 
   /** `run: null` while the runs load: the same card with real labels and placeholder values, so nothing moves. */
   let { run: initial, dataset }: { run: Run | null; dataset?: Dataset } = $props();
@@ -72,10 +73,13 @@
     </div>
     <p class="meta">
       {#if run}
-        <span>{dataset?.name ?? run.config.dataset_id}</span><span class="sep">·</span>
-        <Ident value={run.config.arch} /><span class="sep">·</span>
-        <span>{run.config.imgsz} px · batch {run.config.batch}</span><span class="sep">·</span>
-        <span class="truncate num">{deviceText}</span>
+        <Meta line>
+          <span>{dataset?.name ?? run.config.dataset_id}</span>
+          <Ident value={run.config.arch} />
+          <span class="num">{run.config.imgsz} px</span>
+          <span class="num">batch {run.config.batch}</span>
+          <span class="dev num">{deviceText}</span>
+        </Meta>
       {:else}
         <!-- The trailing span takes the place of the device, which phones hide. -->
         <span>&#8203;<Skeleton inline w="min(280px, 48vw)" h="10px" /></span><span></span>
@@ -175,9 +179,6 @@
     min-width: 0;
     color: var(--text-tertiary);
     font-size: var(--type-sm-size);
-  }
-  .sep {
-    color: var(--text-disabled);
   }
   .cta {
     grid-column: 2;
@@ -280,8 +281,8 @@
     header {
       padding: var(--space-3) var(--space-3) var(--space-2) var(--space-4);
     }
-    .meta span:last-child,
-    .meta .sep:nth-last-child(2) {
+    .meta :global(.dev),
+    .meta > span:last-child:not(:first-child) {
       display: none;
     }
     .body {

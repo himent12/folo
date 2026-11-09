@@ -658,7 +658,7 @@
       <Select
         label="Model"
         value={modelId ?? ''}
-        options={ranked.map((m) => ({ value: m.id, label: `${m.name} · ${m.arch}${m.metrics ? ` · mAP ${metric(m.metrics.map50_95)}` : ''}` }))}
+        options={ranked.map((m) => ({ value: m.id, label: `${m.name}${m.metrics ? ` · mAP ${metric(m.metrics.map50_95)}` : ''}` }))}
         onchange={chooseModel}
       />
       {#if model}<Button icon={ArrowUpRight} href={href(`/models/${model.id}`)} aria-label="Open {model.name}" />{/if}

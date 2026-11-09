@@ -5,19 +5,17 @@
    * list sits under one finding and its severity is fixed) narrows it, and inside a severity with several
    * kinds a sub-filter by check type; a caption above the rows says exactly which rows they are. The same check from a terminal is offered as a copyable command.
    */
-  import Copy from '@lucide/svelte/icons/copy';
   import { untrack } from 'svelte';
   import { hub } from '$lib/api/index.svelte';
   import { Resource } from '$lib/api/resource.svelte';
   import type { DatasetIssue, IssueCounts, IssueKind, IssueSeverity } from '$lib/api/types';
   import { issueCaption, KIND_LABEL, KINDS, loadIssues } from './issues';
   import { num } from '$lib/format';
-  import Button from '$lib/ui/Button.svelte';
+  import CommandLine from '$lib/ui/CommandLine.svelte';
   import ErrorState from '$lib/ui/ErrorState.svelte';
   import Segmented from '$lib/ui/Segmented.svelte';
   import Select from '$lib/ui/Select.svelte';
   import Skeleton from '$lib/ui/Skeleton.svelte';
-  import { toast } from '$lib/ui/toast.svelte';
 
   let {
     datasetId,
@@ -74,14 +72,6 @@
   // --json lists every issue (the plain report stops at 200), --fix-dry-run adds each one's fix; nothing is modified.
   const cli = $derived(`folo dataset check ${/\s/.test(path) ? `"${path}"` : path} --fix-dry-run --json`);
 
-  async function copyCli() {
-    try {
-      await navigator.clipboard.writeText(cli);
-      toast.success('Command copied', 'It prints every issue with its fix as JSON, and changes nothing.');
-    } catch (e) {
-      toast.error(e, 'Could not copy');
-    }
-  }
 </script>
 
 <div class="issues">
@@ -113,7 +103,9 @@
   {:else if total === 0}
     <p class="none">No {NAMES[sev][1]} in the latest check.</p>
   {:else}
-    <p class="caption num">{issueCaption(sev, total, kind === 'all' ? undefined : kind)}</p>
+    <!-- Under its finding (no severity filter), the finding's own paragraph already says what these rows are: a caption
+         only names a picked check type, without repeating what it means. -->
+    {#if severityFilter || kind !== 'all'}<p class="caption num">{issueCaption(sev, total, kind === 'all' ? undefined : kind, !severityFilter)}</p>{/if}
     <ul>
       {#each list.slice(0, shown) as i, k (k)}
         <li>
@@ -129,10 +121,8 @@
       <p class="none">Showing the first {num(list.length)} of {num(total)}; the command below lists them all.</p>
     {/if}
   {/if}
-  <div class="cli">
-    <code class="mono">{cli}</code>
-    <Button size="sm" variant="ghost" icon={Copy} onclick={copyCli}>Copy command</Button>
-  </div>
+  <!-- The same check from a terminal: one line that scrolls, never cut with an ellipsis (ui/CommandLine). -->
+  <CommandLine command={cli} label="The dataset check command" copied="It prints every issue with its fix as JSON, and changes nothing." />
 </div>
 
 <style>
@@ -193,21 +183,6 @@
   }
   .more:hover {
     color: var(--text-primary);
-  }
-  .cli {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--space-2);
-    min-width: 0;
-  }
-  .cli code {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    font-size: var(--type-sm-size);
-    color: var(--text-tertiary);
   }
   .caption {
     font-size: var(--type-sm-size);
