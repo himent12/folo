@@ -62,9 +62,28 @@ describe('Playground: a failed prediction', () => {
     // The ways out: this browser first (primary), then the smaller model, then Retry.
     expect([...notice.querySelectorAll('button')].map((b) => b.textContent?.trim()).filter((t) => t !== 'Technical details')).toEqual([
       'Run in this browser',
-      'Use shapes-n-best folo-n',
+      'Use shapes-n-best',
       'Retry',
     ]);
+    // One typeface in the label; the architecture is in its title.
+    const smaller = [...notice.querySelectorAll('button')].find((b) => b.textContent?.trim() === 'Use shapes-n-best')!;
+    expect(smaller.querySelector('.mono')).toBeNull();
+    expect(smaller.getAttribute('title')).toBe('shapes-n-best is folo-n: a smaller model of the same classes');
+  });
+
+  it('moves focus to the notice without scrolling, and keeps it there when the notice re-renders', async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, 'focus');
+    await run('oom', 'm_shapes_s');
+    const notice = await until(() => target.querySelector<HTMLElement>('.notice'), 'the notice');
+    const title = notice.querySelector<HTMLElement>('.title')!;
+    expect(document.activeElement).toBe(title);
+    const call = focus.mock.calls.find((_, i) => focus.mock.contexts[i] === title);
+    expect(call?.[0]).toEqual({ preventScroll: true });
+    focus.mockRestore();
+    // Whatever re-renders the heading (here, by hand), focus comes back to it instead of falling to the page start.
+    const again = title.cloneNode(true) as HTMLElement;
+    title.replaceWith(again);
+    await until(() => document.activeElement === again, 'focus back on the heading');
   });
 });
 
@@ -105,6 +124,13 @@ describe('Playground: detections', () => {
     flushSync();
     expect(row.getAttribute('aria-label')).toContain(`score ${cell},`);
     expect(target.querySelector('.pick-line')?.textContent).toContain(cell);
+  });
+
+  it('draws score bars in neutral ink, with the class hue on the swatch only', async () => {
+    await run('normal', 'm_hard_s');
+    const row = await until(() => target.querySelector<HTMLTableRowElement>('#pg-panel tbody tr'), 'the detections');
+    expect(row.querySelector<HTMLElement>('.s-track span')!.style.background).toBe('');
+    expect(row.querySelector<HTMLElement>('.sw')!.style.background).not.toBe('');
   });
 
   it('describes IoU as suppression', async () => {

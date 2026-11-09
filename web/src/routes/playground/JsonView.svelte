@@ -4,11 +4,13 @@
   import Copy from '@lucide/svelte/icons/copy';
   import Button from '$lib/ui/Button.svelte';
   import { toast } from '$lib/ui/toast.svelte';
-  import { jsonText, jsonTokens } from './json';
+  import { jsonLines, jsonText, jsonTokens } from './json';
 
   let { value, label = 'JSON' }: { value: unknown; label?: string } = $props();
 
-  const tokens = $derived(jsonTokens(value));
+  const lines = $derived(jsonLines(jsonTokens(value)));
+  /** A key stays with its value when a line wraps: the space after the colon does not break (Copy keeps plain JSON). */
+  const COLON = ':\u00a0';
   let copied = $state(false);
 
   async function copy() {
@@ -27,8 +29,11 @@
     <Button size="sm" icon={copied ? Check : Copy} onclick={copy}>{copied ? 'Copied' : 'Copy'}</Button>
   </div>
   <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-  <pre tabindex="0" aria-label={label} data-scrolls><code
-      >{#each tokens as tk, i (i)}{#if tk.t === 'ws'}{tk.v}{:else}<span class={tk.t}>{tk.v}</span>{/if}{/each}</code
+  <!-- Long lines wrap at a space (never cut at the panel's edge) and hang 4 characters deeper than their own indent. -->
+  <pre tabindex="0" aria-label={label}><code
+      >{#each lines as ln, i (i)}<span class="ln" style:--ind="{ln.indent}ch"
+          >{' '.repeat(ln.indent)}{#each ln.tokens as tk, j (j)}{#if tk.t === 'ws'}{tk.v}{:else}<span class={tk.t}>{tk.v === ': ' ? COLON : tk.v}</span>{/if}{/each}</span
+        >{/each}</code
     ></pre>
 </div>
 
@@ -57,6 +62,14 @@
     line-height: var(--type-sm-line);
     color: var(--text-secondary);
     tab-size: 2;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  /* One block per line: a wrapped line's continuation starts two steps (4 ch) right of the line's own indent. */
+  .ln {
+    display: block;
+    padding-left: calc(var(--ind) + 4ch);
+    text-indent: calc(-1 * (var(--ind) + 4ch));
   }
   pre:focus-visible {
     outline-offset: 2px;

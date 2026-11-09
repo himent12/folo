@@ -113,8 +113,8 @@ export const scenes = [
     },
   },
   {
-    // A short run on fasteners (5 epochs, 1,920 images): warmup would take 100 of its 150 optimizer steps. The Summary
-    // warns with the fix; below 960 px the dock says so too.
+    // A short run on fasteners from scratch (5 epochs, 1,920 images): 150 optimizer steps, 90 of them warmup. The Summary
+    // warns as the trainer does (schedule_warnings) with one fix; below 960 px the dock says so too.
     name: 'run-new-short',
     path: '/runs/new',
     fullPage: false,
@@ -158,6 +158,17 @@ export const scenes = [
       await page.locator('#sec-aug input[type="range"]').first().focus();
       await until(page, '.aug-row.focused');
       await page.clock.runFor(500);
+    },
+  },
+  {
+    // Phones: the size is a segmented pick with the chosen model in words; the five-row comparison opens on demand.
+    name: 'run-new-compare-sizes',
+    path: '/runs/new',
+    fullPage: true,
+    viewports: ['mobile'],
+    setup: async (page) => {
+      await until(page, 'details.a-compare > summary');
+      await page.locator('details.a-compare > summary').click();
     },
   },
   {
@@ -379,6 +390,20 @@ export const scenes = [
       await page.locator('.cell img').evaluateAll((imgs) => [1, 4].forEach((i) => imgs[i]?.dispatchEvent(new Event('error'))));
       await until(page, '.cell .failed');
       await page.waitForTimeout(200);
+    },
+  },
+  {
+    // Small thumbnails of pastel photos: every class stroke (amber on beige, sky on blue-grey) holds in its 2 px halo.
+    name: 'dataset-images-pastel',
+    path: '/datasets/ds_shapes_hard',
+    fullPage: false,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page) => {
+      await page.evaluate(() => localStorage.setItem('folo.datasets.density', 's'));
+      await page.reload({ waitUntil: 'networkidle' });
+      await page.clock.runFor(2000);
+      await page.locator('.cell img.loaded').nth(6).waitFor();
+      await page.waitForTimeout(400);
     },
   },
   {
@@ -664,7 +689,7 @@ export const scenes = [
     name: 'playground-oom',
     path: '/playground?model=m_shapes_s',
     search: 'scenario=oom',
-    viewports: ['desktop', 'laptop', 'mobile'],
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
     setup: async (page) => {
       await until(page, 'button.sample');
       await page.locator('button.sample').first().click();
@@ -680,7 +705,7 @@ export const scenes = [
     name: 'playground-no-webgpu',
     path: '/playground?model=m_hard_s',
     fullPage: false,
-    viewports: ['desktop', 'mobile'],
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
     setup: async (page) => {
       await page.addInitScript(() => {
         delete (/** @type {any} */ (Navigator.prototype)).gpu;
@@ -727,7 +752,7 @@ export const scenes = [
   {
     name: 'playground-json',
     path: '/playground?model=m_hard_s',
-    viewports: ['desktop'],
+    viewports: ['desktop', 'laptop', 'mobile'],
     setup: async (page) => {
       await playgroundResult(page);
       await page.locator('#pg-json').click();

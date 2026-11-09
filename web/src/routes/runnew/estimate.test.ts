@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { autoCloseMosaic, defaultImgsz, oomScale, shortRun, warmup } from './estimate';
+import { autoCloseMosaic, closeMosaicEpochs, defaultImgsz, oomScale, shortRun, warmup, warmupIters } from './estimate';
 
 const GiB = 2 ** 30;
 
@@ -17,17 +17,30 @@ describe('oomScale', () => {
   });
 });
 
+describe('warmupIters', () => {
+  it("matches the engine's own examples (folo_nn::sched)", () => {
+    expect(warmupIters(3, 30, 13)).toBe(100); // docs/MODEL.md §10.4: T = 390, the full floor
+    expect(warmupIters(0, 30, 13)).toBe(0);
+    expect(warmupIters(3, 1, 13)).toBe(0); // epochs − 1 = 0
+    expect(warmupIters(3, 10, 13)).toBe(39); // T = 130: floor 39, 3 epochs = 39
+    expect(warmupIters(3, 12, 3)).toBe(10); // T = 36: floor 10
+    expect(warmupIters(0.5, 37, 9)).toBe(99); // T = 333: floor 99
+    expect(warmupIters(0.5, 334, 1)).toBe(100); // T = 334: the full floor
+    expect(warmupIters(3, 4, 3)).toBe(9); // 3 epochs of 4, capped at epochs − 1
+  });
+});
+
 describe('warmup', () => {
   it("follows docs/MODEL.md's worked example (800 images, batch 16, 10 epochs)", () => {
-    // nb = 50, accumulate = 4, spe = 13; W = min(max(39, 100), 9 · 13) = 100.
-    expect(warmup(800, 10, 16)).toEqual({ stepsPerEpoch: 13, steps: 130, warmup: 100 });
+    // nb = 50, accumulate = 4, spe = 13, T = 130; F = min(100, 39) = 39, so W = min(max(39, 39), 9 · 13) = 39.
+    expect(warmup(800, 10, 16)).toEqual({ stepsPerEpoch: 13, accumulate: 4, steps: 130, warmup: 39 });
   });
   it('counts optimizer steps, not batches: a large batch accumulates nothing', () => {
     expect(warmup(1000, 100, 64).stepsPerEpoch).toBe(16);
     expect(warmup(1000, 100, 128).stepsPerEpoch).toBe(8);
   });
   it('never warms up past the last epoch, and not at all in a one-epoch run', () => {
-    expect(warmup(64, 5, 16)).toEqual({ stepsPerEpoch: 1, steps: 5, warmup: 4 });
+    expect(warmup(64, 5, 16)).toEqual({ stepsPerEpoch: 1, accumulate: 4, steps: 5, warmup: 3 });
     expect(warmup(64, 1, 16).warmup).toBe(0);
   });
   it('is three epochs on a large dataset', () => {
@@ -37,28 +50,40 @@ describe('warmup', () => {
 
 describe('shortRun', () => {
   it('says nothing about a normal run', () => {
-    expect(shortRun(1920, 100, 16, 10, 1)).toBeNull();
+    expect(shortRun(1920, 100, 16, true)).toBeNull();
   });
-  it('flags a run that is mostly warmup, with the fewest epochs that bring warmup to half', () => {
-    // 1,920 images at batch 16: spe = 30, W = 100 from 5 epochs on; 100 ≤ 15 · E needs E ≥ 7.
-    expect(shortRun(1920, 5, 16, 2, 1)).toEqual({ kind: 'warmup', warmup: 100, steps: 150, epochs: 7 });
-    expect(shortRun(1920, 7, 16, 3, 1)).toBeNull();
-    // A tiny dataset steps once an epoch: warmup is 100 steps, so 200 epochs.
-    expect(shortRun(64, 20, 16, 10, 1)).toMatchObject({ kind: 'warmup', warmup: 19, steps: 20, epochs: 200 });
+  it('flags a run from scratch under 200 optimizer steps, with the fewest epochs that reach them', () => {
+    // 800 images at batch 16: spe = 13; 10 epochs are 130 steps (W = 39). 200 steps take 16 epochs.
+    expect(shortRun(800, 10, 16, true)).toEqual({ stepsPerEpoch: 13, accumulate: 4, steps: 130, warmup: 39, scratch: true, warmupHeavy: false, epochs: 16 });
+    // From trained weights a short run is fine.
+    expect(shortRun(800, 10, 16, false)).toBeNull();
+    expect(shortRun(800, 16, 16, true)).toBeNull();
   });
-  it('flags close mosaic covering the whole run, with a value that leaves mosaic on', () => {
-    expect(shortRun(100_000, 10, 16, 10, 1)).toEqual({ kind: 'mosaic', close: 10, epochs: 10, suggest: 5 });
-    // Without mosaic there is nothing to close.
-    expect(shortRun(100_000, 10, 16, 10, 0)).toBeNull();
+  it('flags a warmup longer than half the run, from weights too', () => {
+    // 1,920 images at batch 16: spe = 30. 5 epochs are 150 steps, W = min(max(90, 45), 120) = 90 > 75.
+    expect(shortRun(1920, 5, 16, false)).toEqual({ stepsPerEpoch: 30, accumulate: 4, steps: 150, warmup: 90, scratch: false, warmupHeavy: true, epochs: 6 });
+    // Three warmup epochs are at most half the run from 6 epochs on, whatever the dataset (the floor stays under 30%).
+    expect(shortRun(1920, 6, 16, false)).toBeNull();
+    expect(shortRun(64, 4, 16, false)).toMatchObject({ warmup: 3, steps: 4, warmupHeavy: true, epochs: 6 });
+    expect(shortRun(64, 20, 16, false)).toBeNull();
+  });
+  it('offers one epoch count that clears both', () => {
+    // From scratch as well: 150 steps; 6 epochs clear warmup (180 steps) but 200 steps need 7.
+    expect(shortRun(1920, 5, 16, true)).toMatchObject({ scratch: true, warmupHeavy: true, epochs: 7 });
   });
   it('ignores invalid input', () => {
-    expect(shortRun(0, 10, 16, 0, 1)).toBeNull();
-    expect(shortRun(1920, Number.NaN, 16, 0, 1)).toBeNull();
+    expect(shortRun(0, 10, 16, true)).toBeNull();
+    expect(shortRun(1920, Number.NaN, 16, true)).toBeNull();
   });
 });
 
-describe('autoCloseMosaic', () => {
-  it('is 10 epochs, at most half the run', () => {
+describe('close mosaic', () => {
+  it("is capped at half the run, as the trainer does (docs/MODEL.md §8.6's examples)", () => {
+    // close_mosaic = 10 closes mosaic for 10 epochs of 20 or 30, 6 of 12, 4 of 8 and none of 1.
+    expect([20, 30, 12, 8, 1].map((e) => closeMosaicEpochs(10, e))).toEqual([10, 10, 6, 4, 0]);
+    expect(closeMosaicEpochs(3, 100)).toBe(3);
+  });
+  it('defaults to 10 epochs under the same cap', () => {
     expect([1, 2, 5, 20, 100].map(autoCloseMosaic)).toEqual([0, 1, 2, 10, 10]);
   });
 });

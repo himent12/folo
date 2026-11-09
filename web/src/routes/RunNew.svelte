@@ -11,6 +11,7 @@
   import CircleAlert from '@lucide/svelte/icons/circle-alert';
   import TriangleAlert from '@lucide/svelte/icons/triangle-alert';
   import { tick, untrack } from 'svelte';
+  import { MediaQuery } from 'svelte/reactivity';
   import { ApiError, hub } from '$lib/api/index.svelte';
   import { Resource } from '$lib/api/resource.svelte';
   import type { Arch, Augment, DatasetImage, Device, Optimizer, TrainConfig } from '$lib/api/types';
@@ -36,9 +37,12 @@
   import Slider from '$lib/ui/Slider.svelte';
   import { toast } from '$lib/ui/toast.svelte';
   import AugPreview, { type AugKey } from './runnew/AugPreview.svelte';
-  import { arches, autoCloseMosaic, defaultImgsz, estimate, oomScale, shortRun } from './runnew/estimate';
+  import { arches, autoCloseMosaic, closeMosaicEpochs, defaultImgsz, estimate, oomScale, shortRun } from './runnew/estimate';
 
   setCrumbs({ label: 'Runs', path: '/runs' }, { label: 'New run' });
+
+  // Phones pick the model size from a segmented control; the full specification table folds behind "Compare sizes".
+  const phone = new MediaQuery('max-width: 767px', false);
 
   const q = router.route.query;
   const defaults: Augment = { mosaic: 1, mixup: 0, hsv: [0.015, 0.7, 0.4], fliplr: 0.5, scale: 0.5, translate: 0.1, close_mosaic: 10 };
@@ -72,8 +76,8 @@
   let name = $state('');
   let nameEdited = $state(false);
   let augment = $state<Augment>(structuredClone(defaults));
-  // Close mosaic follows the epoch count (default 10, never more than half the run) until it is set by hand, so a
-  // short run still trains with mosaic.
+  // Close mosaic follows the epoch count (default 10, never more than half the run, the trainer's own cap) until it is
+  // set by hand; the trainer caps a hand-set value the same way, so a short run always trains with mosaic.
   let closeEdited = $state(false);
   $effect(() => {
     const e = epochs;
@@ -205,7 +209,6 @@
   const batchN = $derived(Math.max(1, Math.round(Number(batch) || 16)));
   const imgszN = $derived(Number(imgsz) || 640);
   const onCpu = $derived(device === 'cpu' || (device === 'auto' && !gpu));
-  const archNote = $derived(arches.find((a) => a.arch === arch)?.note ?? '');
   const est = $derived(estimate(arch, dataset?.splits.train ?? 0, epochs, batchN, imgszN, onCpu));
   // wgpu cannot report adapter memory (real servers send 0): then there is no meter and no out-of-memory guess.
   const gpuMem = $derived(gpu && gpu.memory_bytes > 0 ? gpu.memory_bytes : null);
@@ -285,8 +288,11 @@
     return null;
   });
   const showWhy = $derived(!valid && !!why && prefilled);
-  // A short run that would mostly warm up, or never see mosaic: not an error, a warning with what to change.
-  const short = $derived(errors.epochs || errors.close ? null : shortRun(dataset?.splits.train ?? 0, epochs, batchN, augment.close_mosaic, augment.mosaic));
+  // The trainer's own short-run warnings (too few steps from scratch, mostly warmup): not errors, a warning with the fix.
+  const short = $derived(errors.epochs ? null : shortRun(dataset?.splits.train ?? 0, epochs, batchN, weights === 'none'));
+  /** Close mosaic as the trainer applies it: at most half the run. */
+  const closeEff = $derived(errors.close || errors.epochs ? null : closeMosaicEpochs(augment.close_mosaic, epochs));
+  const selArch = $derived(arches.find((a) => a.arch === arch));
   // A folded section must not hide its own error: while one is shown the section stays open whatever was toggled.
   const augShown = $derived(augOpen || errors.close !== null);
 
@@ -412,7 +418,7 @@
       case 'data':
         return visible(document.getElementById('dataset-pick')) ?? document.querySelector<HTMLElement>('input[name="dataset"]:checked');
       case 'model':
-        return document.querySelector<HTMLElement>('input[name="arch"]:checked');
+        return visible(document.querySelector<HTMLElement>('#arch-pick [aria-checked="true"]')) ?? document.querySelector<HTMLElement>('input[name="arch"]:checked');
       case 'batch':
       case 'imgsz':
         return document.querySelector<HTMLElement>(`#${key} [aria-checked="true"]`);
@@ -430,7 +436,7 @@
     requestAnimationFrame(() => {
       const el = jumpTarget(key);
       if (!el) return;
-      const box = el.closest<HTMLElement>('.field, .card, .arch, .ds-pick') ?? el;
+      const box = el.closest<HTMLElement>('.field, .card, .arch, .ds-pick, .a-pick') ?? el;
       const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
       box.scrollIntoView({ block: 'center', behavior: reduce ? 'auto' : 'smooth' });
       el.focus({ preventScroll: true, focusVisible: true } as FocusOptions);
@@ -480,14 +486,18 @@
   {#if short}
     <div class="warning soft short">
       <TriangleAlert size={14} />
+      <!-- The trainer's warnings in its own terms (folo_vision::train::schedule_warnings), with one fix for both. -->
       <div>
-        {#if short.kind === 'warmup'}
-          <p>Warmup takes {num(short.warmup)} of the run's {num(short.steps)} optimizer steps, so the learning rate barely settles.</p>
-          <button type="button" class="fix" onclick={() => (epochs = short.epochs)}>Train {num(short.epochs)} epochs</button>
-        {:else}
-          <p>Close mosaic covers all {num(short.epochs)} epochs, so mosaic never runs.</p>
-          <button type="button" class="fix" onclick={() => (closeEdited = false)}>Close mosaic for {short.suggest} {short.suggest === 1 ? 'epoch' : 'epochs'}</button>
+        {#if short.scratch}
+          <p>
+            Only {num(short.steps)} optimizer steps ({num(epochs)} epochs × {num(short.stepsPerEpoch)}{short.accumulate > 1 ? `, batch ${batchN} × accumulate ${short.accumulate}` : ''}).
+            From scratch a detector needs a few hundred, so expect an mAP near 0.
+          </p>
         {/if}
+        {#if short.warmupHeavy}
+          <p>Warmup takes {num(short.warmup)} of the {num(short.steps)} steps, so the learning rate peaks only in the second half.</p>
+        {/if}
+        <button type="button" class="fix" onclick={() => (epochs = short.epochs)}>Train {num(short.epochs)} epochs</button>
       </div>
     </div>
   {/if}
@@ -501,6 +511,32 @@
       <CircleAlert size={14} strokeWidth={2} aria-hidden="true" /><button type="button" class="why-go" onclick={() => why && jump(why.key)}>{why.text}<ArrowRight size={12} strokeWidth={2} aria-hidden="true" /></button>
     </p>
   {/if}
+{/snippet}
+
+<!-- The model sizes, one specification row each (a table on wide screens; behind "Compare sizes" on phones). -->
+{#snippet archTable()}
+  <!-- One specification row per size, the column header on the same grid (subgrid), so every value sits
+       under its heading at every width. -->
+  <div class="arches" role="radiogroup" aria-label="Model size">
+    <div class="a-head" aria-hidden="true"><span class="a-head-lead">Size</span><span>Params</span><span>GFLOPs</span><span>Latency</span><span></span></div>
+    {#each arches as a (a.arch)}
+      {@const on = a.arch === arch}
+      <label class="arch" class:on>
+        <input type="radio" name="arch" value={a.arch} bind:group={arch} class="sr-only" />
+        <span class="a-size">{a.size}</span>
+        <span class="a-name mono">{a.arch}</span>
+        <span class="a-note">{a.note}</span>
+        <span class="a-v num">{compact(a.params)}</span>
+        <span class="a-v num">{num(a.flops, 1)}</span>
+        {#if a.ms !== undefined}<span class="a-v num">{num(a.ms, 2)} ms</span>{:else}<span class="a-v faint" title="Not measured yet">—</span>{/if}
+        <span class="tick" aria-hidden="true">{#if on}<Check size={14} strokeWidth={2.25} />{/if}</span>
+      </label>
+    {/each}
+  </div>
+  <p class="ref">
+    Latency: end to end on an RTX 4080 SUPER, a decoded 640 px image in, boxes out, NMS included (fp32). A dash:
+    not measured yet.
+  </p>
 {/snippet}
 
 {#snippet estimates(withName: boolean)}
@@ -562,30 +598,24 @@
         </Panel>
 
         <Panel title="2 · Model" id="sec-model" meta={was('model') ? `was ${oomRun?.config.arch}` : undefined}>
-          <!-- One specification row per size, the column header on the same grid (subgrid), so every value sits
-               under its heading at every width. -->
-          <div class="arches" role="radiogroup" aria-label="Model size">
-            <div class="a-head" aria-hidden="true"><span class="a-head-lead">Size</span><span>Params</span><span>GFLOPs</span><span>Latency</span><span></span></div>
-            {#each arches as a (a.arch)}
-              {@const on = a.arch === arch}
-              <label class="arch" class:on>
-                <input type="radio" name="arch" value={a.arch} bind:group={arch} class="sr-only" />
-                <span class="a-size">{a.size}</span>
-                <span class="a-name mono">{a.arch}</span>
-                <span class="a-note">{a.note}</span>
-                <span class="a-v num">{compact(a.params)}</span>
-                <span class="a-v num">{num(a.flops, 1)}</span>
-                {#if a.ms !== undefined}<span class="a-v num">{num(a.ms, 2)} ms</span>{:else}<span class="a-v faint" title="Not measured yet">—</span>{/if}
-                <span class="tick" aria-hidden="true">{#if on}<Check size={14} strokeWidth={2.25} />{/if}</span>
-              </label>
-            {/each}
-          </div>
-          <!-- Phones: the rows have no room for the notes, so the chosen size's purpose sits under them. -->
-          <p class="a-sel"><span class="mono">{arch}</span> {archNote}</p>
-          <p class="ref">
-            Latency: end to end on an RTX 4080 SUPER, a decoded 640 px image in, boxes out, NMS included (fp32). A dash:
-            not measured yet.
-          </p>
+          {#if phone.current}
+            <!-- Phones: the size as one segmented pick and the chosen model in words; the full comparison folds away. -->
+            <div class="a-pick">
+              <Segmented id="arch-pick" label="Model size" bind:value={arch} options={arches.map((a) => ({ value: a.arch, label: a.size }))} />
+              {#if selArch}
+                <p class="a-sel"><span class="mono">{selArch.arch}</span> {selArch.note}</p>
+                <p class="a-specs num">
+                  {compact(selArch.params)} params · {num(selArch.flops, 1)} GFLOPs · {selArch.ms !== undefined ? `${num(selArch.ms, 2)} ms` : 'latency not measured yet'}
+                </p>
+              {/if}
+            </div>
+            <details class="advanced a-compare">
+              <summary><ChevronRight size={14} aria-hidden="true" /> Compare sizes <span class="faint">params, compute, latency</span></summary>
+              {@render archTable()}
+            </details>
+          {:else}
+            {@render archTable()}
+          {/if}
           <div class="row2">
             <Field label="Start from" for="weights" hint="Fine-tuning from a trained model converges much faster." error={errors.weights}>
               <Select
@@ -605,8 +635,11 @@
               <Input id="epochs" type="number" min="1" max="10000" step="1" bind:value={epochs} invalid={!!errors.epochs} aria-describedby={errors.epochs ? 'epochs-error' : undefined} suffix="epochs" />
             </Field>
             <Field label="Batch size" for="batch" hint="Per step. Lower it if you run out of GPU memory.">
-              {#snippet aside()}{#if was('batch')}<span class="was">was {oomRun?.config.batch}</span>{/if}{/snippet}
-              <Segmented id="batch" label="Batch size" bind:value={batch} options={withValue(BATCHES, batch).map((v) => ({ value: v, label: v }))} />
+              <!-- A retry's change sits beside the new value: "16 · was 32". -->
+              <span class="with-was">
+                <Segmented id="batch" label="Batch size" bind:value={batch} options={withValue(BATCHES, batch).map((v) => ({ value: v, label: v }))} />
+                {#if was('batch')}<span class="was">was {oomRun?.config.batch}</span>{/if}
+              </span>
             </Field>
             <Field
               label="Image size"
@@ -615,8 +648,10 @@
                 ? `Longer side in pixels. ${dataset?.name}'s images are all ${datasetImgsz} px.`
                 : 'Longer side in pixels, letterboxed.'}
             >
-              {#snippet aside()}{#if was('imgsz')}<span class="was">was {oomRun?.config.imgsz}</span>{/if}{/snippet}
-              <Segmented id="imgsz" label="Image size" bind:value={imgsz} onchange={() => (imgszChosen = true)} options={withValue(IMGSZ, imgsz).map((v) => ({ value: v, label: v }))} />
+              <span class="with-was">
+                <Segmented id="imgsz" label="Image size" bind:value={imgsz} onchange={() => (imgszChosen = true)} options={withValue(IMGSZ, imgsz).map((v) => ({ value: v, label: v }))} />
+                {#if was('imgsz')}<span class="was">was {oomRun?.config.imgsz}</span>{/if}
+              </span>
             </Field>
             <!-- Not a Field: a device the server cannot use gets a line with a way out and folded details. -->
             <div class="field dev" class:invalid={!!deviceMsg}>
@@ -713,7 +748,14 @@
               {@render ctl('translate', translateCtl)}
               {@render ctl('hsv', hsvCtl)}
               <div class="aug-row">
-                <Field label="Close mosaic" for="close" hint="Train the last N epochs without mosaic to settle the boxes." error={errors.close}>
+                <Field
+                  label="Close mosaic"
+                  for="close"
+                  hint={closeEff !== null && closeEff < augment.close_mosaic && augment.mosaic > 0
+                    ? `At most half the run: mosaic closes for the last ${num(closeEff)} ${closeEff === 1 ? 'epoch' : 'epochs'}.`
+                    : 'Train the last N epochs without mosaic to settle the boxes.'}
+                  error={errors.close}
+                >
                   <Input id="close" type="number" min="0" step="1" max={epochs} bind:value={augment.close_mosaic} oninput={() => (closeEdited = true)} suffix="epochs" invalid={!!errors.close} aria-describedby={errors.close ? 'close-error' : 'close-hint'} />
                 </Field>
               </div>
@@ -786,7 +828,7 @@
           <button type="button" class="dock-est num" aria-haspopup="dialog" aria-label="Show the run summary" onclick={() => (sumOpen = true)}>
             <span>{roughDuration(est.totalSeconds)}</span>
             {#if !onCpu && gpu}<span class:warn={vramPct > 0.9}>{roughBytes(vram)} VRAM</span>{/if}
-            {#if short}<span class="dock-warn"><TriangleAlert size={12} aria-hidden="true" />{short.kind === 'warmup' ? 'Mostly warmup' : 'No mosaic'}</span>{/if}
+            {#if short}<span class="dock-warn"><TriangleAlert size={12} aria-hidden="true" />{short.scratch ? 'Too few steps' : 'Mostly warmup'}</span>{/if}
             {#if dataset}<span class="faint">{dataset.name} · {arch}</span>{/if}
             <span class="dock-more"><ChevronUp size={14} strokeWidth={1.75} aria-hidden="true" /></span>
           </button>
@@ -1245,9 +1287,37 @@
   .vram i.warn {
     background: var(--warning-solid);
   }
-  .ds-pick,
-  .a-sel {
+  .ds-pick {
     display: none;
+  }
+  /* Phones: the chosen size in words under its segmented pick, its specs in one line. */
+  .a-sel {
+    margin-top: var(--space-2);
+    color: var(--text-primary);
+  }
+  .a-sel .mono {
+    margin-right: var(--space-1);
+    font-size: var(--type-sm-size);
+    color: var(--text-tertiary);
+  }
+  .a-specs {
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--text-tertiary);
+  }
+  .a-compare[open] .arches {
+    margin-top: var(--space-3);
+  }
+  /* A retry's change beside the control it changed. */
+  .with-was {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    min-width: 0;
+  }
+  .with-was .was {
+    font-size: var(--type-sm-size);
+    white-space: nowrap;
   }
   .ds-line {
     margin-top: var(--space-2);
@@ -1477,6 +1547,11 @@
   .advanced[open] .fields {
     margin-top: var(--space-3);
   }
+  @media (pointer: coarse) {
+    .advanced summary {
+      height: 44px;
+    }
+  }
   .dock {
     display: none;
   }
@@ -1630,17 +1705,6 @@
     }
     .a-note {
       display: none;
-    }
-    .a-sel {
-      display: block;
-      margin-top: var(--space-2);
-      font-size: var(--type-sm-size);
-      line-height: var(--type-sm-line);
-      color: var(--text-secondary);
-    }
-    .a-sel .mono {
-      margin-right: var(--space-1);
-      color: var(--text-tertiary);
     }
     .summary .sum {
       grid-template-columns: minmax(0, 1fr);

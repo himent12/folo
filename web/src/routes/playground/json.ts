@@ -51,3 +51,20 @@ export const jsonText = (v: unknown) =>
   jsonTokens(v)
     .map((t) => t.v)
     .join('');
+
+export interface JsonLine {
+  /** Leading spaces: a wrapped line's continuation hangs one step deeper than this. */
+  indent: number;
+  tokens: JsonToken[];
+}
+
+/** The tokens split into lines (no newline tokens), each with its indent, for a view that wraps long lines. */
+export function jsonLines(tokens: readonly JsonToken[]): JsonLine[] {
+  const lines: JsonLine[] = [{ indent: 0, tokens: [] }];
+  for (const tk of tokens) {
+    if (tk.t === 'ws' && tk.v === '\n') lines.push({ indent: 0, tokens: [] });
+    else if (tk.t === 'ws' && lines.at(-1)!.tokens.length === 0) lines.at(-1)!.indent += tk.v.length;
+    else lines.at(-1)!.tokens.push(tk);
+  }
+  return lines;
+}
