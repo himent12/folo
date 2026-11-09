@@ -1125,19 +1125,19 @@ impl FoloApp {
                 div()
                     .flex()
                     .gap(px(12.))
-                    .child(div().flex_1().min_w_0().child(step(
+                    .child(div().flex_1().flex_basis(px(0.)).min_w_0().child(step(
                         "1",
                         "Add a dataset",
                         "Point FOLO at a YOLO folder, or generate one with `folo dataset synth`",
                         true,
                     )))
-                    .child(div().flex_1().min_w_0().child(step(
+                    .child(div().flex_1().flex_basis(px(0.)).min_w_0().child(step(
                         "2",
                         "Train a model",
                         "Start a run; loss, mAP and throughput stream in live.",
                         false,
                     )))
-                    .child(div().flex_1().min_w_0().child(step(
+                    .child(div().flex_1().flex_basis(px(0.)).min_w_0().child(step(
                         "3",
                         "Try it",
                         "Open any image in the Playground and tune the thresholds.",
