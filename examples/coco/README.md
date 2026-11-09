@@ -269,7 +269,7 @@ steps and backs off on each overflow), and no batch was non-finite.
 | 40 | 1.334 | 1.760 | 1.350 | 0.550 | 0.393 | 0.424 | 0.292 | 0.298 | 412 s |
 | 50 | 1.321 | 1.722 | 1.333 | 0.555 | 0.408 | 0.442 | 0.304 | 0.310 (v1's last) | 442 s |
 | 60 | 1.310 | 1.697 | 1.322 | 0.554 | 0.424 | 0.451 | 0.312 | | 478 s |
-| **62** (paused, best) | 1.310 | 1.692 | 1.321 | 0.536 | 0.435 | 0.453 | **0.313** | | 504 s |
+| **62** (paused, best) | 1.310 | 1.692 | 1.321 | 0.536 | 0.435 | 0.452 | **0.313** | | 504 s |
 
 Every epoch improved on the one before. Up to epoch 50, v1 is slightly ahead at the same epoch: its cosine schedule
 decays six times faster, and it closed mosaic for its last 10 epochs, which lowers the training loss and lifts
@@ -305,9 +305,11 @@ to YOLO11n (0.395) and YOLO26n (0.409) is still 0.08–0.09 AP.
 ### Publish (v2)
 
 ```sh
+mkdir -p D:/folo-weights/weights-v2
 folo export --model D:/folo-data/runs-coco/coco-folo-n-long/weights/best.folo --format weights \
-  --output D:/folo-weights/folo-n-coco-v2.folo
-folo export --model D:/folo-weights/folo-n-coco-v2.folo --format folo-f16 --output D:/folo-weights/folo-n-coco-v2-f16.folo
+  --output D:/folo-weights/weights-v2/folo-n-coco-v2.folo
+folo export --model D:/folo-weights/weights-v2/folo-n-coco-v2.folo --format folo-f16 \
+  --output D:/folo-weights/weights-v2/folo-n-coco-v2-f16.folo
 cd D:/folo-weights/weights-v2 && sha256sum folo-n-coco-v2.folo folo-n-coco-v2-f16.folo > SHA256SUMS
 gh release create weights-v2 --draft --repo himent12/folo --title "FOLO pretrained weights v2 (interim)" \
   --notes-file notes.md folo-n-coco-v2.folo folo-n-coco-v2-f16.folo SHA256SUMS
@@ -329,7 +331,7 @@ The checkpoint holds the optimizer, the schedule, the EMA and the loss scaler, s
 epoch 63:
 
 ```sh
-folo train --resume D:\folo-data\runs-coco\coco-folo-n-long\weights\last.folo --data D:\folo-data\coco --workers 16 --device gpu:0
+folo train --resume D:/folo-data/runs-coco/coco-folo-n-long/weights/last.folo --data D:/folo-data/coco --workers 16 --device gpu:0
 ```
 
 Checked on a copy of the run folder: it resumes "after epoch 62 (optimizer step 114590)" with mixed precision and the
