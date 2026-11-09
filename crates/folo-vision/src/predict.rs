@@ -531,15 +531,60 @@ pub fn letterbox_on_device_as(
     }
     let n = taps.len();
     let taps = Tensor::from_vec(taps, [n])?.to_device(device)?;
-    // Host copies in parallel; the uploads (one per image) are queued in order.
-    let host: Vec<Tensor> = imgs
-        .par_iter()
-        .map(|im| Tensor::from_vec(im.data.clone(), [im.height as usize, im.width as usize, 3]))
-        .collect::<folo_core::Result<_>>()?;
-    let dev_imgs = host.iter().map(|t| t.to_device(device)).collect::<folo_core::Result<Vec<_>>>()?;
+    let dev_imgs = upload_images(imgs, device)?;
     let refs: Vec<&Tensor> = dev_imgs.iter().collect();
     let out = [h as usize, w as usize];
     Ok(Tensor::letterbox_rgb8(&refs, &taps, &geoms, out, folo_data::PAD_VALUE, INV_255, dtype)?)
+}
+
+/// The `u8` images as `[H, W, 3]` tensors on `device`. On a folo-gpu device all of them share one upload: the
+/// pixels are copied in parallel straight into reused, mapped staging memory ([`folo_gpu::GpuContext::upload_with`])
+/// and each image is a view of the one device buffer (at a 4-byte aligned offset, which the letterbox kernel
+/// reads in place). Elsewhere each image is uploaded on its own.
+fn upload_images(imgs: &[Image], device: Device) -> Result<Vec<Tensor>> {
+    let Some(ctx) = folo_gpu::context_for(device) else {
+        let host: Vec<Tensor> = imgs
+            .par_iter()
+            .map(|im| Tensor::from_vec(im.data.clone(), [im.height as usize, im.width as usize, 3]))
+            .collect::<folo_core::Result<_>>()?;
+        return Ok(host.iter().map(|t| t.to_device(device)).collect::<folo_core::Result<_>>()?);
+    };
+    let mut offsets = Vec::with_capacity(imgs.len());
+    let mut total = 0usize;
+    for im in imgs {
+        offsets.push(total);
+        total += im.data.len().next_multiple_of(4);
+    }
+    // `WriteOnly<[u8]>` is not `Send`, its fixed-size chunks are: the mapping is filled in 64 KiB chunks in
+    // parallel, each from the image bytes it covers (the padding between images stays unwritten).
+    const CHUNK: usize = 64 * 1024;
+    let fill = |start: usize, mut dst: folo_gpu::WriteOnly<'_, [u8]>| {
+        let end = start + dst.len();
+        for (im, &off) in imgs.iter().zip(&offsets) {
+            let (a, b) = (start.max(off), end.min(off + im.data.len()));
+            if a < b {
+                dst.slice(a - start..b - start).copy_from_slice(&im.data[a - off..b - off]);
+            }
+        }
+    };
+    let (buf, ()) = ctx
+        .upload_with(total as u64, |dst| {
+            let body = dst.len() / CHUNK * CHUNK;
+            let (chunks, tail) = dst.split_at(body);
+            let (chunks, _) = chunks.into_chunks::<CHUNK>();
+            let chunks: Vec<_> = chunks.into_iter().enumerate().collect();
+            chunks.into_par_iter().for_each(|(i, c)| fill(i * CHUNK, c.into()));
+            fill(body, tail);
+        })
+        .map_err(folo_core::Error::from)?;
+    let all = folo_gpu::tensor_from_buffer(device, DType::U8, [total], buf)?;
+    Ok(imgs
+        .iter()
+        .zip(offsets)
+        .map(|(im, off)| {
+            all.narrow(0, off, im.data.len())?.reshape([im.height as usize, im.width as usize, 3])
+        })
+        .collect::<folo_core::Result<_>>()?)
 }
 
 /// The common canvas `[width, height]` of a letterbox batch: one geometry per image, computed for its size,

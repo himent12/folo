@@ -51,6 +51,8 @@ pub use error::{GpuError, Result};
 pub use kernels::elementwise::{BinaryOp, UnaryOp};
 pub use pool::{GpuBuffer, PoolStats};
 pub use tensor::GpuTensor;
+/// The write-only view of mapped staging memory that [`GpuContext::upload_with`] hands its `fill` closure.
+pub use wgpu::WriteOnly;
 
 #[cfg(test)]
 mod tests;

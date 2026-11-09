@@ -429,8 +429,10 @@ println!("{}", loss.item::<f32>()?);                  // the only wait for the G
   absolute term for accumulations), and `crates/folo-vision/tests/gpu_f16.rs` the detector (decoded boxes and
   scores, the end-to-end predictor, f16 exports loading as f16, the CPU fallback).
 - **Prediction** (folo-core's detector hooks): `letterbox_rgb8` and `detect_candidates` are the two kernels above.
-  `folo_vision::predict::Predictor` on the GPU uploads each decoded image as raw `u8` (a quarter of the f32
-  bytes), letterboxes on the device, runs the forward, decodes into candidates, and downloads the per-image counts
+  `folo_vision::predict::Predictor` on the GPU uploads the decoded images as raw `u8` (a quarter of the f32
+  bytes) in one `upload_with` (below: the pixels copied in parallel straight into reused mapped staging memory, each
+  image at a 4-byte aligned offset of one device buffer, which the letterbox kernel reads in place), letterboxes on
+  the device, runs the forward, decodes into candidates, and downloads the per-image counts
   plus up to `CANDIDATE_READBACK` (1024) records per image in one readback (a second one only for an image with
   more): about 28 KiB per image instead of the 2.8 MB of a decoded `[A, 4 + nc]` head. Nothing waits on the GPU
   before that readback. `src/tests` has no tests for these two; they are tested against the CPU path in
@@ -469,6 +471,13 @@ println!("{}", loss.item::<f32>()?);                  // the only wait for the G
   touches neither the command batch nor the queue, so another thread can prepare the next batch while the GPU runs;
   `upload_staged` then encodes one buffer copy into a pooled buffer in stream order (no flush, no wait). The
   trainer's feeder thread stages each `u8` batch this way (docs/MODEL.md §8.3).
+- **Reused staging.** `GpuContext::upload_with(len, fill)` hands `fill` the mapped bytes of a host-visible staging
+  buffer (`wgpu::WriteOnly`, re-exported as `folo_gpu::WriteOnly`; its fixed-size chunks are `Send`, so a caller
+  can fill it from several threads), encodes the copy into a pooled buffer, submits, and maps the staging buffer
+  again once the GPU is done with it; the last few (`STAGING_KEEP` = 4) stay mapped for the next upload of the same
+  size class, and `release_memory` drops them. Against `upload` (`Queue::write_buffer`: a fresh wgpu staging
+  allocation and a serial copy per call) the predictor's batch-16 upload went from about 12 ms to 3 ms
+  (docs/hill/gpu-infer.md).
 
 ### Benchmark: a YOLOv8n-shaped network
 

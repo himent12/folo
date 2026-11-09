@@ -1148,9 +1148,16 @@ impl Backend for GpuBackend {
         let out = self.alloc(dtype, len)?;
         let td = self.dense(&taps)?;
         for (i, (im, g)) in images.iter().zip(geoms).enumerate() {
+            // A contiguous view (one image of a shared upload) is read in place at its byte offset.
+            let (src, src_offset) = if im.layout.is_contiguous() {
+                (Dense::Borrowed(self.buf(im)?), im.layout.offset() * im.storage.dtype().size_in_bytes())
+            } else {
+                (self.dense(im)?, 0)
+            };
             let d = LetterboxDesc {
                 out: [ow, oh],
                 src: g.src,
+                src_offset,
                 pad: g.pad,
                 resized: g.resized,
                 prefilter: g.prefilter,
@@ -1159,7 +1166,6 @@ impl Backend for GpuBackend {
                 out_offset: i * per,
                 taps: g.taps,
             };
-            let src = self.dense(im)?;
             vision::letterbox_rgb8(&self.ctx, src.raw(), td.raw(), out.raw(), &d, kdt(dtype)).core()?;
         }
         Ok(self.wrap(dtype, len, out))

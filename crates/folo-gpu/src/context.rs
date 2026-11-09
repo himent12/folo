@@ -53,6 +53,8 @@ const MAX_DISPATCHES_PER_BATCH: u32 = 1024;
 /// rest (a synchronised batch-1 forward otherwise spends a third of its latency encoding and submitting before
 /// the GPU has anything to do), and a long pass still costs only a handful of submissions.
 const FIRST_DISPATCHES_PER_BATCH: u32 = 16;
+/// Idle staging buffers [`GpuContext::upload_with`] keeps mapped for reuse.
+const STAGING_KEEP: usize = 4;
 /// Size of one uniform arena chunk (256 parameter slots).
 const UNIFORM_CHUNK: u64 = 64 * 1024;
 
@@ -284,6 +286,8 @@ struct Inner {
     /// Set while [`GpuContext::trace_begin`] records dispatches into `trace`.
     tracing: AtomicBool,
     trace: Mutex<Vec<TracedOp>>,
+    /// Mapped, idle staging buffers of [`GpuContext::upload_with`], ready for the next upload.
+    staging: Arc<Mutex<Vec<wgpu::Buffer>>>,
 }
 
 /// Host data in a staging buffer, made by [`GpuContext::stage`] (on any thread) and copied to the device with
@@ -319,7 +323,7 @@ pub struct TracedOp {
 }
 
 enum TracedKind {
-    Dispatch { kernel: Kernel, buffers: Vec<wgpu::Buffer>, params: Params },
+    Dispatch { kernel: Kernel, buffers: Vec<wgpu::Buffer>, params: Box<Params> },
     Copy { src: wgpu::Buffer, src_off: u64, dst: wgpu::Buffer, dst_off: u64, len: u64 },
 }
 
@@ -616,6 +620,7 @@ impl GpuContext {
                 experimental: coop,
                 tracing: AtomicBool::new(false),
                 trace: Mutex::default(),
+                staging: Arc::default(),
             }),
         };
         if !coop {
@@ -806,7 +811,7 @@ impl GpuContext {
 
     /// Gives the pool's cached buffers back to the driver now: [`GpuContext::trim_pool`], then submits the open
     /// batch and waits for the GPU, so wgpu frees the dropped buffers instead of holding them until the next
-    /// submission. Returns the bytes the pool released.
+    /// submission, and drops the idle staging buffers of [`GpuContext::upload_with`]. Returns the bytes released.
     ///
     /// For a long-lived process between jobs (`folo serve` after a training run, or once inference has been idle):
     /// the pool otherwise keeps up to the job's high-water mark of buffers, gigabytes after a training run, which
@@ -824,10 +829,13 @@ impl GpuContext {
                 cached
             };
             self.submit(&mut b);
+            // The idle upload staging buffers (host memory the driver pins).
+            let staged: u64 =
+                self.inner.staging.lock().expect("staging lock").drain(..).map(|b| b.size()).sum();
             // The uniform arena too (recreated on the next dispatch): its 64 KiB chunks are allocated mid-job, and a
             // live one keeps the driver allocator's whole memory block (up to 256 MiB) from being freed.
             b.chunks.clear();
-            released
+            released + staged
         };
         self.wait_idle()?;
         Ok(released)
@@ -899,6 +907,61 @@ impl GpuContext {
         buf.unmap();
         copied?;
         Ok(Staged { buf, len })
+    }
+
+    /// Uploads `len` bytes that `fill` writes straight into host-visible staging memory, into a new pooled storage
+    /// buffer. `fill` gets the mapped bytes as a [`wgpu::WriteOnly`] slice (it can be split and written from
+    /// several threads; bytes it leaves unwritten are unspecified). The copy is encoded after all work so far
+    /// and the open batch is submitted (no wait).
+    ///
+    /// Unlike [`GpuContext::upload`] (`Queue::write_buffer`, which copies into a fresh staging allocation of
+    /// wgpu's) and [`GpuContext::stage`] (a new buffer per call), the staging buffers are reused: once the GPU
+    /// has copied out of one it is mapped again and kept for the next upload of the same size class (the
+    /// last few are kept), so a stream of predictions writes its pixels once, into memory that is already mapped and
+    /// paged in.
+    pub fn upload_with<R>(
+        &self,
+        len: u64,
+        fill: impl FnOnce(wgpu::WriteOnly<'_, [u8]>) -> R,
+    ) -> Result<(GpuBuffer, R)> {
+        let len4 = len.next_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT).max(wgpu::COPY_BUFFER_ALIGNMENT);
+        let class = size_class(len4);
+        let reused = {
+            let mut free = self.inner.staging.lock().expect("staging lock");
+            free.iter().position(|b| b.size() == class).map(|i| free.swap_remove(i))
+        };
+        let buf = reused.unwrap_or_else(|| {
+            self.inner.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("folo-gpu upload staging"),
+                size: class,
+                usage: wgpu::BufferUsages::MAP_WRITE | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: true,
+            })
+        });
+        let written = buf
+            .slice(..len4)
+            .get_mapped_range_mut()
+            .map(|mut view| fill(view.slice(..len as usize)))
+            .map_err(|e| self.or_lost(GpuError::Map(e.to_string())));
+        buf.unmap();
+        let r = written?;
+        let out = self.alloc(len4)?;
+        self.copy(&buf, 0, out.raw(), 0, len4);
+        // A buffer may only be mapped again once the work that reads it is submitted.
+        self.flush();
+        let free = self.inner.staging.clone();
+        let again = buf.clone();
+        buf.slice(..).map_async(wgpu::MapMode::Write, move |mapped| {
+            let mut free = free.lock().expect("staging lock");
+            if mapped.is_ok() {
+                // The most recently used sizes stay.
+                if free.len() == STAGING_KEEP {
+                    free.remove(0);
+                }
+                free.push(again);
+            }
+        });
+        Ok((out, r))
     }
 
     /// A pooled storage buffer holding the bytes of `staged`, filled by a copy encoded after all work so far
@@ -1223,7 +1286,7 @@ impl GpuContext {
             kind: TracedKind::Dispatch {
                 kernel: kernel.clone(),
                 buffers: buffers.iter().map(|&b| b.clone()).collect(),
-                params: params.clone(),
+                params: Box::new(params.clone()),
             },
         });
         let mut guard = self.inner.batch.lock().expect("batch lock");
