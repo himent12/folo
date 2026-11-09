@@ -14,6 +14,15 @@ export function scheduleWarnings(logs: readonly LogLine[]): string[] {
   return out;
 }
 
+/** The epochs the trainer suggests ("Train for at least N epochs"), if any warning names them. */
+export function suggestedEpochs(warnings: readonly string[]): number | null {
+  for (const w of warnings) {
+    const m = /\bTrain for at least (\d+) epochs\b/i.exec(w);
+    if (m) return Number(m[1]);
+  }
+  return null;
+}
+
 /** An engine message as sentences: "a; b" becomes "A. B.", capitalised, ending on a full stop. */
 export function sentences(message: string): string {
   const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);

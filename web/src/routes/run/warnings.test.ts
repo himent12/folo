@@ -27,3 +27,11 @@ describe('sentences', () => {
     expect(sentences('')).toBe('');
   });
 });
+
+describe('suggestedEpochs', () => {
+  it('reads the epochs the trainer suggests, or null', async () => {
+    const { suggestedEpochs } = await import('./warnings');
+    expect(suggestedEpochs(['this run takes only 125 optimizer steps (5 epochs × 25: …); … Train for at least 8 epochs, add images, or start from pretrained weights'])).toBe(8);
+    expect(suggestedEpochs(["warmup takes 70 of the run's 125 optimizer steps, …; lower warmup_epochs (now 3) or train for more epochs"])).toBeNull();
+  });
+});

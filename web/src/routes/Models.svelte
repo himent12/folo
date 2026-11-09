@@ -326,7 +326,7 @@
       <summary>
         <span class="chev" aria-hidden="true"></span>
         <span class="b-title">Engine benchmarks</span>
-        <span class="b-sum">folo-n leads YOLO26n on {benchLead} of {versusYolo26n.length} measurements, same GPU</span>
+        <span class="b-sum">folo-n leads YOLO26n on {benchLead} of {versusYolo26n.length} measurements, same GPU · mixed precision and workloads</span>
       </summary>
       <div class="b-body"><Versus /></div>
     </details>

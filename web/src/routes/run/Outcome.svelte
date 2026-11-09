@@ -19,7 +19,7 @@
   import { isOom, oomDetail, oomFixes, retryPath } from '$lib/oom';
   import { href } from '$lib/router.svelte';
   import Button from '$lib/ui/Button.svelte';
-  import { sentences } from './warnings';
+  import { sentences, suggestedEpochs } from './warnings';
 
   let {
     run,
@@ -43,6 +43,8 @@
   const oom = $derived(run.status === 'failed' && isOom(run.error));
   const fixes = $derived(oom ? oomFixes(run.config) : []);
   const driver = $derived(oom ? oomDetail(run.error) : null);
+  /** "Train for at least N epochs" from the trainer: the warning's action opens New run with N filled in. */
+  const suggested = $derived(suggestedEpochs(warnings));
 </script>
 
 {#if run.status === 'failed' && oom}
@@ -112,7 +114,13 @@
       <p class="c-title">This run may be too short to learn</p>
       {#each warnings as w (w)}<p class="c-msg w-msg">{sentences(w)}</p>{/each}
     </div>
-    <div class="c-acts"><Button size="sm" icon={RotateCcw} href={href(retryPath(run.id))}>New run like this</Button></div>
+    <div class="c-acts">
+      {#if suggested && suggested > run.config.epochs}
+        <Button size="sm" icon={RotateCcw} href={href(`${retryPath(run.id)}&epochs=${suggested}`)}>Train {suggested} epochs</Button>
+      {:else}
+        <Button size="sm" icon={RotateCcw} href={href(retryPath(run.id))}>New run like this</Button>
+      {/if}
+    </div>
   </div>
 {/if}
 

@@ -119,7 +119,7 @@
     };
     datasetId = c.dataset_id;
     arch = arches.find((a) => a.arch === q.get('arch'))?.arch ?? c.arch;
-    epochs = c.epochs;
+    epochs = Number(whole('epochs', 1, 10000) ?? c.epochs); // e.g. a short run's "Train N epochs"
     batch = whole('batch', 1, 1024) ?? String(c.batch);
     imgsz = whole('imgsz', 64, 4096, 32) ?? String(c.imgsz); // the trainer's limits (docs/API.md, runs)
     imgszChosen = true;

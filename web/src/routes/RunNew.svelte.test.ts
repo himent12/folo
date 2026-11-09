@@ -334,3 +334,10 @@ describe('New run: the form', () => {
     expect(document.documentElement.hasAttribute('data-dock')).toBe(false);
   });
 });
+
+describe('New run from a link', () => {
+  it("takes the epochs a short run's warning suggests", async () => {
+    await open('?from=run_a2f0&epochs=40');
+    await until(() => target.querySelector<HTMLInputElement>('input#epochs')?.value === '40', 'epochs 40');
+  });
+});
