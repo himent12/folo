@@ -488,7 +488,7 @@ impl FoloApp {
                     "icons/chart-line.svg",
                     // The server can't evaluate here (not a model without results): say which.
                     "Evaluation isn't available on this server",
-                    "Its PR curves and confusion matrix need a server that evaluates models. `folo val` prints them in a terminal.",
+                    "Its PR curves and confusion matrix need a server that evaluates models. `folo val` prints its metrics in a terminal.",
                     Tone::Neutral,
                 )))
                 .into_any_element(),

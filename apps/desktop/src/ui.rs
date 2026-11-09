@@ -264,9 +264,8 @@ pub fn meta_row(
     rest: &[String],
 ) -> Div {
     let rest: Vec<&str> = rest.iter().map(String::as_str).filter(|s| !s.is_empty()).collect();
-    let last = rest.len().saturating_sub(1);
-    // Every part its own element with a dot between: one spacing rule for every separator. The
-    // row fills its parent, so the last part's ellipsis has a width to work against.
+    // The lead and its tag hold their width; everything after them is one group that gives way
+    // as a whole, ending in "…", so no part can push the row past its bounds.
     div()
         .w_full()
         .flex()
@@ -275,15 +274,10 @@ pub fn meta_row(
         .min_w_0()
         .child(text(size, color).flex_none().whitespace_nowrap().child(lead.into()))
         .children(tag)
-        .children(rest.into_iter().enumerate().flat_map(|(i, part)| {
-            let part_el = if i == last {
-                // The room left, ending in "…" (see `Ellipsis`).
-                text(size, color).flex_1().min_w_0().ellipsis().child(part.to_string())
-            } else {
-                text(size, color).flex_none().whitespace_nowrap().child(part.to_string())
-            };
-            [text(size, color).flex_none().child("·"), part_el]
-        }))
+        .when(!rest.is_empty(), |d| {
+            d.child(text(size, color).flex_none().child("·"))
+                .child(text(size, color).flex_1().min_w_0().ellipsis().child(rest.join(" · ")))
+        })
 }
 
 /// The compact end-to-end tag in tables (the title rows carry the full badge and its help).

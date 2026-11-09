@@ -532,7 +532,11 @@ impl FoloApp {
             .items_center()
             .gap(px(12.))
             .child(text(ty::XL, t.text_primary).child(r.name.clone()))
-            .child(status_badge(&t, r.status, &format!("hdr-{}", r.id)));
+            .child(status_badge(&t, r.status, &format!("hdr-{}", r.id)))
+            // The subtitle's e2e tag explains itself on hover; this help gives it a keyboard route.
+            .when(r.config.head == crate::api::Head::O2o, |d| {
+                d.child(self.help_icon("run-head-help", FoloApp::E2E_HELP, window, cx))
+            });
         let header = detail_header(&t, title, subtitle, actions);
 
         let mut body = div().flex().flex_col().gap(px(16.));

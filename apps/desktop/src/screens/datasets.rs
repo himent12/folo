@@ -876,6 +876,13 @@ impl FoloApp {
             }),
         )
         .track_scroll(self.grid_scroll.clone())
+        // A scroll moves tiles under a still pointer (and recycles the hovered one away), which
+        // `on_hover` never hears: drop the hovered tile, so the next pointer move sets it afresh.
+        .on_scroll_wheel(cx.listener(|this, _, _, cx| {
+            if this.ds_hover_tile.take().is_some() {
+                cx.notify();
+            }
+        }))
         .flex_1();
         div()
             .flex()
