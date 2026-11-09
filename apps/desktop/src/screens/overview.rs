@@ -402,9 +402,17 @@ impl FoloApp {
                     .flex()
                     .items_center()
                     .gap(px(10.))
-                    .child(text(ty::LG, t.text_primary).flex_none().child(r.name.clone()))
+                    // A long name gives way (with "…") before it can push the meta under the
+                    // action; the meta's own box clips as the last line of defence.
+                    .child(
+                        text(ty::LG, t.text_primary)
+                            .flex_shrink()
+                            .min_w(px(80.))
+                            .ellipsis()
+                            .child(r.name.clone()),
+                    )
                     .child(status_badge(&t, r.status, &r.id))
-                    .child(div().flex_1().min_w_0().child(self.run_subtitle(
+                    .child(div().flex_1().min_w_0().overflow_hidden().child(self.run_subtitle(
                         &t,
                         r,
                         ty::SM,
