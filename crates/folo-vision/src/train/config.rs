@@ -33,6 +33,9 @@ pub struct TrainConfig {
     /// The dataset: a path or a registered id (informational: the caller opens it and passes [`super::TrainData`];
     /// `folo train --resume` reopens it from here).
     pub dataset: String,
+    /// How `dataset` is read (informational, like `dataset`: `folo train --resume` reopens it so, and a folder that
+    /// holds both YOLO and COCO labels reads the same). Missing in configs from before it: `auto`.
+    pub data_format: folo_data::Format,
     /// Architecture, `folo-n` … `folo-x`.
     pub arch: String,
     /// Epochs, `1..=10000`.
@@ -92,6 +95,7 @@ impl Default for TrainConfig {
         TrainConfig {
             name: String::new(),
             dataset: String::new(),
+            data_format: folo_data::Format::Auto,
             arch: "folo-n".into(),
             epochs: 100,
             batch: 16,

@@ -433,3 +433,61 @@ fn stop_resume_and_epoch_only_records() {
     assert_eq!(lines.last().unwrap()["status"], "completed");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// `--format` picks the labels of a folder that has both YOLO (`data.yaml`) and COCO (`annotations/`) labels, and a
+/// resume reads the folder the same way without repeating it (the checkpoint keeps it).
+#[test]
+fn format_picks_the_labels_and_resume_keeps_it() {
+    use std::io::BufRead;
+    let root = std::env::temp_dir().join(format!("folo-cli-format-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let data = root.join("both");
+    let cfg = SyntheticConfig {
+        images: 16,
+        classes: vec!["circle".into(), "square".into()],
+        imgsz: 64,
+        vary_aspect: false,
+        val_fraction: 0.25,
+        ..SyntheticConfig::default()
+    };
+    write_yolo(&cfg, &data, ImageFormat::Png).unwrap();
+    // The same images as COCO, next to the YOLO labels, with one class renamed so the two read differently.
+    let conv = root.join("conv");
+    let (code, _, stderr) = folo(&["dataset", "convert", s(&data), s(&conv), "--to", "coco", "--json"]);
+    assert_eq!(code, 0, "{stderr}");
+    std::fs::create_dir_all(data.join("annotations")).unwrap();
+    for e in std::fs::read_dir(conv.join("annotations")).unwrap().flatten() {
+        let text = std::fs::read_to_string(e.path()).unwrap().replace("\"circle\"", "\"ring\"");
+        std::fs::write(data.join("annotations").join(e.file_name()), text).unwrap();
+    }
+    let project = root.join("runs");
+    let run = project.join("coco");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_folo"))
+        .args(["train", "--json", "--device", "cpu", "--data", s(&data), "--format", "coco", "--imgsz", "64"])
+        .args(["--batch", "4", "--epochs", "4", "--workers", "1", "--project", s(&project), "--name", "coco"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let stdout = std::io::BufReader::new(child.stdout.take().unwrap());
+    let mut last = Value::Null;
+    for line in stdout.lines() {
+        let v: Value = serde_json::from_str(&line.unwrap()).unwrap();
+        if v["event"] == "epoch" && last["event"] != "epoch" {
+            let (code, _, stderr) = folo(&["stop", "--json", s(&run)]);
+            assert_eq!(code, 0, "{stderr}");
+        }
+        last = v;
+    }
+    assert!(child.wait().unwrap().success());
+    assert_eq!(last["status"], "stopped", "{last}");
+    let config: Value =
+        serde_json::from_str(&std::fs::read_to_string(run.join("config.json")).unwrap()).unwrap();
+    assert_eq!(config["classes"], serde_json::json!(["ring", "square"]), "read as COCO");
+    // Resumed without --format: still COCO (as auto, the folder reads as YOLO, with another class list).
+    let ckpt = run.join("weights/last.folo");
+    let (code, lines, stderr) = folo(&["train", "--json", "--resume", s(&ckpt), "--json-events", "epoch"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(lines.last().unwrap()["status"], "completed", "{:?}", lines.last());
+    let _ = std::fs::remove_dir_all(&root);
+}

@@ -1137,6 +1137,7 @@ fn build(
     let device =
         engine::resolve(&config.device).map_err(|err| (err.body.code.to_string(), err.body.message))?;
     let opts = folo_data::OpenOptions { format: data_format(dataset.format), verify_images: true };
+    let format = opts.format;
     let ds = folo_data::open_with(Path::new(&dataset.path), &opts)
         .map_err(|err| ("data_error".to_string(), format!("opening the dataset {}: {err}", dataset.path)))?;
     if ds.train.is_empty() {
@@ -1163,6 +1164,7 @@ fn build(
         let mut cfg = folo_vision::TrainConfig::from_api(config);
         cfg.device = device.to_string();
         cfg.dataset = dataset.id.clone();
+        cfg.data_format = format;
         Trainer::new(cfg, data, opts)
     };
     t.map_err(|err| (err.code().to_string(), err.summary()))

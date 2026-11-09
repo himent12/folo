@@ -200,6 +200,7 @@ fn config_of(
     TrainConfig {
         name,
         dataset,
+        data_format: crate::dataset::format_of(args.format),
         arch,
         epochs: args.epochs,
         batch: args.batch as usize,
@@ -301,7 +302,13 @@ fn resume(
             .hint("pass --data with the dataset the run was started on"));
         }
     };
-    let (ds, _) = open_dataset(&data_arg, crate::dataset::format_of(args.format))?;
+    // The format the run was started with, unless --format says otherwise (as --data may).
+    let format = if args.explicit.iter().any(|f| f == "format") {
+        crate::dataset::format_of(args.format)
+    } else {
+        stored.data_format
+    };
+    let (ds, _) = open_dataset(&data_arg, format)?;
     let data = train_data(&ds)?;
     let epochs = stored.epochs;
     let opts = TrainOptions {
@@ -745,7 +752,7 @@ mod tests {
             let arch = if weights.is_some() { api.arch.as_str().to_string() } else { args.model.clone() };
             let got = super::config_of(&args, args.name.clone().unwrap(), data.into(), arch, file_head);
             let mut want = folo_vision::TrainConfig::from_api(&api);
-            (want.dataset, want.workers) = (data.into(), got.workers);
+            (want.dataset, want.data_format, want.workers) = (data.into(), want_format, got.workers);
             assert_eq!(got, want, "{}", cmd.cli);
         }
     }
