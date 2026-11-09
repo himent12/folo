@@ -41,6 +41,7 @@
   import DropZone from './playground/DropZone.svelte';
   import { looksLikeFolo } from './playground/folo';
   import JsonView from './playground/JsonView.svelte';
+  import { holdNoticeFocus } from './playground/noticeFocus';
   import TimingBar from './playground/TimingBar.svelte';
 
   setCrumbs({ label: 'Playground' });
@@ -392,13 +393,12 @@
     void modelId;
     badFile = null;
   });
-  // Focus moves to the notice's heading as it appears, so it is announced and its actions are next in tab order.
+  // Focus moves to the notice's heading as it appears, so it is announced and its actions are next in tab order. The
+  // move never scrolls the page, and the heading keeps focus while the notice stays (./playground/noticeFocus).
   let noticeEl = $state<HTMLElement>();
   $effect(() => {
-    const h = noticeEl?.querySelector<HTMLElement>('.n-title, .title');
-    if (!h) return;
-    h.tabIndex = -1;
-    h.focus();
+    const el = noticeEl;
+    if (el) return holdNoticeFocus(el);
   });
 
   // ---------- client-side filtering ----------
@@ -634,7 +634,7 @@
             {#snippet actions()}
               {#if oom}
                 <Button size="sm" variant="primary" onclick={() => (runOn = localBackend)}>Run in this browser</Button>
-                {#if smaller}<Button size="sm" onclick={() => chooseModel(smaller.id)}>Use {smaller.name} <span class="mono">{smaller.arch}</span></Button>{/if}
+                {#if smaller}<Button size="sm" title="{smaller.name} is {smaller.arch}: a smaller model of the same classes" onclick={() => chooseModel(smaller.id)}>Use {smaller.name}</Button>{/if}
               {/if}
             {/snippet}
           </ErrorState>
@@ -663,18 +663,21 @@
       </div>
       <div class="runon" role="group" aria-label="Run on" aria-describedby={webgpu ? undefined : 'runon-note'}>
         <span class="pick-label" aria-hidden="true">Run on</span>
-        <Segmented
-          label="Run the model on"
-          size="sm"
-          bind:value={runOn}
-          options={[
-            { value: 'server', label: 'Server' },
-            { value: 'webgpu', label: 'WebGPU', disabled: !webgpu },
-            { value: 'cpu', label: 'CPU' },
-          ]}
-        />
-        <!-- A choice that is off says why, and what is left. -->
-        {#if !webgpu}<span class="runon-note" id="runon-note">WebGPU isn't available in this browser; use Server or CPU.</span>{/if}
+        <!-- A choice that is off says why, in a line under the control that starts at its left edge; the controls stay
+             on the title row. -->
+        <span class="runon-seg">
+          <Segmented
+            label="Run the model on"
+            size="sm"
+            bind:value={runOn}
+            options={[
+              { value: 'server', label: 'Server' },
+              { value: 'webgpu', label: 'WebGPU', disabled: !webgpu },
+              { value: 'cpu', label: 'CPU' },
+            ]}
+          />
+          {#if !webgpu}<span class="runon-note" id="runon-note">No WebGPU in this browser</span>{/if}
+        </span>
       </div>
     {/if}
   {/snippet}
@@ -881,7 +884,7 @@
                           </td>
                           <td>
                             <span class="score">
-                              <span class="s-track" aria-hidden="true"><span style:transform="scaleX({b.score})" style:background={classColor(b.class)}></span></span>
+                              <span class="s-track" aria-hidden="true"><span style:transform="scaleX({b.score})"></span></span>
                               <span class="num">{score(b.score)}</span>
                             </span>
                           </td>
@@ -980,9 +983,19 @@
     color: var(--text-tertiary);
     font-size: var(--type-sm-size);
   }
+  /* Under the segmented control, out of the row's flow (the title row keeps its height); as wide as the control. */
+  .runon-seg {
+    position: relative;
+    display: flex;
+  }
   .runon-note {
+    position: absolute;
+    top: calc(100% + var(--space-1));
+    left: 0;
+    right: 0;
     color: var(--text-tertiary);
     font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
   }
   .layout {
     display: grid;
@@ -1290,7 +1303,6 @@
   }
   /* Class marks keep the palette hue in both themes; a hairline edge holds pale hues on light surfaces. */
   :global([data-theme='light']) .sw,
-  :global([data-theme='light']) .s-track span,
   :global([data-theme='light']) .c-bar span {
     box-shadow: inset 0 0 0 1px #0a0e1433;
   }
@@ -1314,6 +1326,16 @@
     inset: 0;
     transform-origin: left;
     border-radius: inherit;
+  }
+  /* The table's one inline bar is neutral ink (the hue is on the swatch); the hovered or selected row's in primary. */
+  .s-track span {
+    background: var(--text-tertiary);
+    transition: background-color var(--dur-fast) var(--ease-standard);
+  }
+  tbody tr:hover .s-track span,
+  tbody tr.hot .s-track span,
+  tbody tr.on .s-track span {
+    background: var(--text-primary);
   }
   .sliders {
     display: grid;
@@ -1554,9 +1576,13 @@
       flex-wrap: wrap;
       justify-content: space-between;
     }
+    /* Phones: the note is a row of its own under the label and the control, from the left edge. */
+    .runon-seg {
+      display: contents;
+    }
     .runon-note {
+      position: static;
       flex-basis: 100%;
-      text-align: right;
     }
     /* The ways out stack full width, the primary first, 44 px each. */
     .notice :global(.acts),

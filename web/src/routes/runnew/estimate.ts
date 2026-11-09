@@ -56,53 +56,85 @@ const NOMINAL_BATCH = 64;
 export interface Warmup {
   /** Optimizer steps per epoch (`spe`; the trainer steps once per accumulated window, not per batch). */
   stepsPerEpoch: number;
-  /** Optimizer steps in the run. */
+  /** Batches accumulated into one optimizer step, `round(64 / batch)` (at least 1). */
+  accumulate: number;
+  /** Optimizer steps in the run, `T`. */
   steps: number;
   /** Warmup steps, `W`. */
   warmup: number;
 }
 
+/** The trainer's default `warmup_epochs` (docs/MODEL.md §8.3); the form does not change it. */
+export const WARMUP_EPOCHS = 3;
+
 /**
- * The trainer's warmup (docs/MODEL.md §8.3 and §8.4): `nb = ceil(N / batch)` batches an epoch, accumulated
- * `round(64 / batch)` at a time into `spe = ceil(nb / accumulate)` optimizer steps, and
- * `W = min(max(round(3 · spe), 100), (epochs − 1) · spe)` of them warming up.
+ * docs/MODEL.md §8.4 (`folo_nn::sched::warmup_iters`): `W = 0` when `warmup_epochs <= 0`, else
+ * `min(max(round(warmup_epochs · spe), F), max(epochs − 1, 0) · spe)` with the floor `F = min(100, floor(0.3 · T))`
+ * and `T = epochs · spe`. The floor never takes more than 30% of a short run.
+ */
+export function warmupIters(warmupEpochs: number, epochs: number, spe: number): number {
+  if (!(warmupEpochs > 0)) return 0;
+  const total = epochs * spe;
+  const floor = Math.min(100, Math.floor((total * 3) / 10));
+  return Math.min(Math.max(Math.round(warmupEpochs * spe), floor), Math.max(epochs - 1, 0) * spe);
+}
+
+/**
+ * The trainer's schedule for a run (docs/MODEL.md §8.3 and §8.4): `nb = ceil(N / batch)` batches an epoch, accumulated
+ * `round(64 / batch)` at a time into `spe = ceil(nb / accumulate)` optimizer steps, `W` of them warming up.
  */
 export function warmup(trainImages: number, epochs: number, batch: number): Warmup {
   const nb = Math.ceil(Math.max(0, trainImages) / Math.max(1, batch));
   const accumulate = Math.max(Math.round(NOMINAL_BATCH / Math.max(1, batch)), 1);
   const spe = Math.ceil(nb / accumulate);
   const e = Math.max(0, Math.floor(epochs));
-  return { stepsPerEpoch: spe, steps: e * spe, warmup: Math.min(Math.max(Math.round(3 * spe), 100), Math.max(e - 1, 0) * spe) };
+  return { stepsPerEpoch: spe, accumulate, steps: e * spe, warmup: warmupIters(WARMUP_EPOCHS, e, spe) };
 }
 
-export type ShortRun =
-  | { kind: 'warmup'; warmup: number; steps: number; epochs: number }
-  | { kind: 'mosaic'; close: number; epochs: number; suggest: number };
+/** Runs from scratch with fewer optimizer steps than this get a warning (`folo_vision::train::SHORT_RUN_STEPS`). */
+export const SHORT_RUN_STEPS = 200;
+
+export interface ShortRun extends Warmup {
+  /** From scratch with fewer than `SHORT_RUN_STEPS` optimizer steps: expect an mAP near 0. */
+  scratch: boolean;
+  /** Warmup takes more than half the run: the learning rate reaches lr0 only in its second half. */
+  warmupHeavy: boolean;
+  /** The fewest epochs that clear both. */
+  epochs: number;
+}
 
 /**
- * Why a short run would mostly not train as configured: warmup takes more than half its optimizer steps (`epochs`
- * is then the fewest epochs that bring it to half), or close mosaic turns mosaic off for the whole run (`suggest` is
- * a close-mosaic value that leaves it on for at least half). Warmup first: more epochs also answers mosaic.
+ * The trainer's short-run warnings (`folo_vision::train::schedule_warnings`, docs/MODEL.md §8.4), before the run
+ * starts: a run from scratch (`fromScratch`, no start weights) with fewer than 200 optimizer steps, or a warmup longer
+ * than half the run. Null when neither applies.
  */
-export function shortRun(trainImages: number, epochs: number, batch: number, closeMosaic: number, mosaic: number): ShortRun | null {
+export function shortRun(trainImages: number, epochs: number, batch: number, fromScratch: boolean): ShortRun | null {
   if (!(trainImages > 0) || !Number.isInteger(epochs) || epochs < 1) return null;
-  const w = warmup(trainImages, epochs, batch);
-  if (w.warmup * 2 > w.steps) {
-    let e = epochs + 1;
-    while (e < 100_000) {
-      const n = warmup(trainImages, e, batch);
-      if (n.warmup * 2 <= n.steps) break;
-      e++;
-    }
-    return { kind: 'warmup', warmup: w.warmup, steps: w.steps, epochs: e };
+  const check = (e: number) => {
+    const w = warmup(trainImages, e, batch);
+    return { ...w, scratch: fromScratch && w.steps < SHORT_RUN_STEPS, warmupHeavy: w.warmup * 2 > w.steps };
+  };
+  const now = check(epochs);
+  if (!now.scratch && !now.warmupHeavy) return null;
+  let e = epochs + 1;
+  for (; e < 100_000; e++) {
+    const n = check(e);
+    if (!n.scratch && !n.warmupHeavy) break;
   }
-  if (mosaic > 0 && closeMosaic >= epochs) return { kind: 'mosaic', close: closeMosaic, epochs, suggest: autoCloseMosaic(epochs) };
-  return null;
+  return { ...now, epochs: e };
 }
 
-/** Close mosaic's default: 10 epochs, but never more than half the run, so a short run still sees mosaic. */
+/**
+ * The epochs at the end of a run with mosaic off: `min(close_mosaic, floor(epochs / 2))`, so at least half of a short
+ * run keeps mosaic (docs/MODEL.md §8.6; the trainer applies the cap itself).
+ */
+export function closeMosaicEpochs(closeMosaic: number, epochs: number): number {
+  return Math.max(0, Math.min(closeMosaic, Math.floor(Math.max(0, epochs) / 2)));
+}
+
+/** Close mosaic's default: the trainer's 10 epochs under its own cap. */
 export function autoCloseMosaic(epochs: number): number {
-  return Math.min(10, Math.floor(Math.max(0, epochs) / 2));
+  return closeMosaicEpochs(10, epochs);
 }
 
 /**

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { jsonText, jsonTokens } from './json';
+import { jsonLines, jsonText, jsonTokens } from './json';
 
 describe('jsonText', () => {
   const v = {
@@ -29,5 +29,12 @@ describe('jsonText', () => {
     expect(t.filter((x) => x.t === 'key').map((x) => x.v)).toEqual(['"a"', '"b"', '"c"']);
     expect(t.find((x) => x.t === 'num')?.v).toBe('1');
     expect(t.find((x) => x.t === 'lit')?.v).toBe('false');
+  });
+
+  it('splits into lines with their indents, for a view that wraps long ones', () => {
+    const lines = jsonLines(jsonTokens(v));
+    expect(lines.map((l) => ' '.repeat(l.indent) + l.tokens.map((t) => t.v).join(''))).toEqual(jsonText(v).split('\n'));
+    expect(lines.find((l) => l.tokens.some((t) => t.v === '"bolt"'))?.indent).toBe(4);
+    expect(lines.every((l) => l.tokens.every((t) => !t.v.includes('\n')))).toBe(true);
   });
 });
