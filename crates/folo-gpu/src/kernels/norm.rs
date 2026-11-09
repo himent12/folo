@@ -1,4 +1,6 @@
-//! Train-mode BatchNorm over the channels of NCHW f32 data, with a fused activation, forward and backward.
+//! Train-mode BatchNorm over the channels of NCHW data, with a fused activation, forward and backward. The data
+//! (`x`, `y`, the gradients `g` and `dx`) is f32 or f16 ([`BnDesc::dtype`], mixed-precision training); the
+//! parameters, the statistics and every sum are f32.
 //!
 //! Forward, three dispatches:
 //! 1. `bn_stats`: each workgroup takes one channel and one chunk of its `N·H·W` values and writes a Welford
@@ -21,7 +23,7 @@
 //! So a forward reads `x` twice and writes `y` once, and a backward reads `x` and `g` twice and writes `dx`
 //! once, against about ten passes forward and twenty backward for BatchNorm + SiLU as separate ops.
 
-use super::{check_buf, prod, vec_prelude};
+use super::{check_buf, prod, vec_prelude, vec_prelude_f16};
 use crate::DType;
 use crate::context::GpuContext;
 use crate::error::{GpuError, Result, shape_err};
@@ -60,7 +62,7 @@ impl BnAct {
     }
 }
 
-/// A BatchNorm problem: `[n, c, hw]` f32 values, normalised per channel over `n · hw`.
+/// A BatchNorm problem: `[n, c, hw]` values, normalised per channel over `n · hw`.
 #[derive(Clone, Copy, Debug)]
 pub struct BnDesc {
     /// Batch size.
@@ -71,6 +73,9 @@ pub struct BnDesc {
     pub hw: usize,
     /// Activation after the affine transform.
     pub act: BnAct,
+    /// Storage type of the data (`x`, `y`, `g`, `dx`): f32 or f16. Weight, bias, statistics and running statistics
+    /// are always f32.
+    pub dtype: DType,
 }
 
 /// The running statistics the forward updates in place.
@@ -91,8 +96,14 @@ fn gen_finalize(_: &Spec) -> String {
     format!("{COMMON}{WELFORD}{}", include_str!("../shaders/bn_finalize.wgsl"))
 }
 
+/// The element prelude of the elementwise passes: f32 or f16 storage (`spec.is_f16()`), scalar or vec4.
+fn prelude(spec: &Spec) -> &'static str {
+    let vec = spec.get_bool("VEC4");
+    if spec.is_f16() { vec_prelude_f16(vec) } else { vec_prelude(vec) }
+}
+
 fn gen_apply(spec: &Spec) -> String {
-    format!("{}{COMMON}{}", vec_prelude(spec.get_bool("VEC4")), include_str!("../shaders/bn_apply.wgsl"))
+    format!("{}{COMMON}{}", prelude(spec), include_str!("../shaders/bn_apply.wgsl"))
 }
 
 fn gen_bwd_reduce(_: &Spec) -> String {
@@ -104,7 +115,7 @@ fn gen_bwd_finalize(_: &Spec) -> String {
 }
 
 fn gen_bwd_dx(spec: &Spec) -> String {
-    format!("{}{COMMON}{}", vec_prelude(spec.get_bool("VEC4")), include_str!("../shaders/bn_bwd_dx.wgsl"))
+    format!("{}{COMMON}{}", prelude(spec), include_str!("../shaders/bn_bwd_dx.wgsl"))
 }
 
 use Access::{Read as R, ReadWrite as RW};
@@ -141,8 +152,9 @@ fn plan(m: usize, c: usize) -> (usize, usize) {
 }
 
 impl BnDesc {
-    /// Validates the sizes and returns `(total elements, n · hw)`.
-    fn check(&self) -> Result<(usize, usize)> {
+    /// Validates the sizes and the dtype and returns `(total elements, n · hw)`.
+    fn check(&self, ctx: &GpuContext) -> Result<(usize, usize)> {
+        super::gemm::check_dtype(ctx, self.dtype, "batch_norm")?;
         let total = prod(&[self.n, self.c, self.hw])?;
         let m = self.n * self.hw;
         if m == 0 || self.c == 0 {
@@ -187,9 +199,9 @@ pub fn batch_norm_forward(
     mean: &wgpu::Buffer,
     invstd: &wgpu::Buffer,
 ) -> Result<()> {
-    let (total, m) = d.check()?;
-    check_buf(x, total, DType::F32, "batch_norm input")?;
-    check_buf(y, total, DType::F32, "batch_norm output")?;
+    let (total, m) = d.check(ctx)?;
+    check_buf(x, total, d.dtype, "batch_norm input")?;
+    check_buf(y, total, d.dtype, "batch_norm output")?;
     for (buf, what) in [(w, "weight"), (b, "bias"), (mean, "mean"), (invstd, "invstd")] {
         check_buf(buf, d.c, DType::F32, what)?;
     }
@@ -201,7 +213,8 @@ pub fn batch_norm_forward(
     let part = ctx.alloc(DType::F32.bytes(prod(&[d.c, chunks, 3])?))?;
     let coef = ctx.alloc(DType::F32.bytes(4 * d.c))?;
 
-    let k = ctx.kernel(&STATS, Spec::new().u32("ACT", 0))?;
+    let half = d.dtype == DType::F16;
+    let k = ctx.kernel(&STATS, Spec::new().u32("ACT", 0).f16(half))?;
     ctx.dispatch(&k, &[x, part.raw()], &d.walk_params(m, chunks, len)?, [chunks as u32, d.c as u32, 1])?;
 
     let k = ctx.kernel(&FINALIZE, Spec::new().u32("ACT", 0).bool("RUNNING", running.is_some()))?;
@@ -212,7 +225,7 @@ pub fn batch_norm_forward(
     ctx.dispatch(&k, &[part.raw(), w, b, mean, invstd, coef.raw(), rm, rv], &p, [d.c as u32, 1, 1])?;
 
     let (vec, units) = d.elementwise(total);
-    let k = ctx.kernel(&APPLY, Spec::new().u32("ACT", d.act.code()).bool("VEC4", vec))?;
+    let k = ctx.kernel(&APPLY, Spec::new().u32("ACT", d.act.code()).bool("VEC4", vec).f16(half))?;
     let p = Params::new().uz(units)?.uz(d.c)?.uz(d.hw)?;
     ctx.dispatch(&k, &[x, coef.raw(), y], &p, ctx.grid_1d(units as u64, 256)?)
 }
@@ -233,9 +246,9 @@ pub fn batch_norm_backward(
     dw: &wgpu::Buffer,
     db: &wgpu::Buffer,
 ) -> Result<()> {
-    let (total, m) = d.check()?;
+    let (total, m) = d.check(ctx)?;
     for (buf, what) in [(x, "input"), (g, "output gradient"), (dx, "input gradient")] {
-        check_buf(buf, total, DType::F32, what)?;
+        check_buf(buf, total, d.dtype, what)?;
     }
     for (buf, what) in
         [(w, "weight"), (b, "bias"), (mean, "mean"), (invstd, "invstd"), (dw, "dw"), (db, "db")]
@@ -246,8 +259,9 @@ pub fn batch_norm_backward(
     let part = ctx.alloc(DType::F32.bytes(prod(&[d.c, chunks, 2])?))?;
     let coef = ctx.alloc(DType::F32.bytes(6 * d.c))?;
     let act = d.act.code();
+    let half = d.dtype == DType::F16;
 
-    let k = ctx.kernel(&BWD_REDUCE, Spec::new().u32("ACT", act))?;
+    let k = ctx.kernel(&BWD_REDUCE, Spec::new().u32("ACT", act).f16(half))?;
     let p = d.walk_params(m, chunks, len)?;
     ctx.dispatch(&k, &[x, g, mean, invstd, w, b, part.raw()], &p, [chunks as u32, d.c as u32, 1])?;
 
@@ -256,7 +270,7 @@ pub fn batch_norm_backward(
     ctx.dispatch(&k, &[part.raw(), mean, invstd, w, b, dw, db, coef.raw()], &p, [d.c as u32, 1, 1])?;
 
     let (vec, units) = d.elementwise(total);
-    let k = ctx.kernel(&BWD_DX, Spec::new().u32("ACT", act).bool("VEC4", vec))?;
+    let k = ctx.kernel(&BWD_DX, Spec::new().u32("ACT", act).bool("VEC4", vec).f16(half))?;
     let p = Params::new().uz(units)?.uz(d.c)?.uz(d.hw)?;
     ctx.dispatch(&k, &[x, g, coef.raw(), dx], &p, ctx.grid_1d(units as u64, 256)?)
 }

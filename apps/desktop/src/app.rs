@@ -287,6 +287,7 @@ pub fn carry_over(base: Option<&TrainConfig>, mut c: TrainConfig) -> TrainConfig
         c.seed = b.seed;
         c.augment.hsv = b.augment.hsv;
         c.augment.translate = b.augment.translate;
+        c.amp = b.amp;
     }
     c
 }
@@ -1717,6 +1718,7 @@ impl FoloApp {
                     ..Augment::default()
                 },
                 seed: 0,
+                amp: false,
             },
         );
         let _ = window;
@@ -3242,6 +3244,7 @@ mod retry_tests {
             weights: Some("runs/a/best.folo".into()),
             augment: Augment { hsv: [0.1, 0.2, 0.3], translate: 0.25, ..Augment::default() },
             seed: 42,
+            amp: false,
         };
         let edited = TrainConfig {
             name: "a-2".into(),

@@ -257,6 +257,8 @@ export interface TrainConfig {
   weights: string | null;
   augment: Augment;
   seed: number;
+  /** Mixed-precision training (docs/MODEL.md §8.8); missing from older servers (= false). */
+  amp?: boolean;
 }
 
 export interface Run {
@@ -276,6 +278,8 @@ export interface Run {
   device: string;
   model_id: string | null;
   error: string | null;
+  /** Stable error code when failed (e.g. `not_supported`); missing otherwise and from older servers. */
+  error_code?: string;
 }
 
 export interface Loss {
@@ -347,7 +351,7 @@ export interface RunLogs {
 /** SSE events on GET /api/runs/{id}/events, keyed by the SSE `event:` name. */
 export interface RunEventMap {
   /** steps_per_epoch is 0 until the run is built; both are absent from older servers. */
-  status: { status: RunStatus; error: string | null; steps_per_epoch?: number; epochs?: number };
+  status: { status: RunStatus; error: string | null; steps_per_epoch?: number; epochs?: number; error_code?: string };
   step: Step;
   epoch: Epoch;
   log: LogLine;

@@ -734,6 +734,10 @@ pub struct TrainConfig {
     /// RNG seed.
     #[serde(default)]
     pub seed: u64,
+    /// Mixed-precision training (f16 on GPU tensor cores, docs/MODEL.md §8.8). Needs a GPU whose context has tensor
+    /// cores (`folo serve --tensor-cores`); otherwise the run fails with `not_supported`.
+    #[serde(default)]
+    pub amp: bool,
 }
 
 fn default_epochs() -> u32 {
@@ -863,6 +867,10 @@ pub struct Run {
     pub model_id: Option<String>,
     /// Error message when `failed`.
     pub error: Option<String>,
+    /// The stable error code (`folo_api::codes`) when `failed`, e.g. `not_supported` or `training_failed`; absent
+    /// otherwise and from servers that predate the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
 }
 
 /// The best epoch of a run.
@@ -1021,12 +1029,21 @@ pub struct StatusEvent {
     /// Total epochs of the run (`Run.epochs`); 0 from servers that predate the field.
     #[serde(default)]
     pub epochs: u32,
+    /// The stable error code when `failed` (`Run.error_code`); absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
 }
 
 impl StatusEvent {
-    /// A status event with unknown run length (`steps_per_epoch` and `epochs` 0).
+    /// A status event with unknown run length (`steps_per_epoch` and `epochs` 0) and no error code.
     pub fn new(status: RunStatus, error: Option<String>) -> StatusEvent {
-        StatusEvent { status, error, steps_per_epoch: 0, epochs: 0 }
+        StatusEvent { status, error, steps_per_epoch: 0, epochs: 0, error_code: None }
+    }
+
+    /// Sets the error code (`failed` events).
+    pub fn with_error_code(mut self, code: Option<String>) -> StatusEvent {
+        self.error_code = code;
+        self
     }
 
     /// Sets the run's length.

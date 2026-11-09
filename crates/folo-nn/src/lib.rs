@@ -45,6 +45,7 @@
 //! # }
 //! ```
 
+pub mod amp;
 mod ema;
 mod error;
 pub mod init;
@@ -54,6 +55,7 @@ mod module;
 pub mod optim;
 mod sched;
 
+pub use amp::{AmpContract, GradScaler, ScaleUpdate, unscale_, usable_scale};
 pub use ema::{EMA_DECAY, EMA_TAU, EmaContract, EmaState, ModelEma};
 pub use error::{Error, Result};
 pub use layers::{

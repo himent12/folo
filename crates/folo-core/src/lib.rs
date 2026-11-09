@@ -40,6 +40,7 @@
 //!
 //! See `docs/ARCHITECTURE.md` for how this crate fits into FOLO.
 
+pub mod autocast;
 pub mod autograd;
 pub mod backend;
 pub mod cpu;
@@ -54,6 +55,7 @@ mod storage;
 mod tensor;
 pub mod testing;
 
+pub use autocast::{AutocastGuard, autocast, autocast_dtype};
 pub use autograd::{Grads, NoGradGuard, is_grad_enabled, no_grad, with_no_grad};
 pub use backend::{BinaryOp, Conv2dParams, DetectDecode, LetterboxImage, Pool2dParams, ReduceOp, UnaryOp};
 pub use device::Device;
