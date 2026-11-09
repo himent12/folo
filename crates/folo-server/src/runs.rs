@@ -399,6 +399,8 @@ pub struct Runs {
 
 /// Test support: while `on`, a run's trainer waits after each epoch (its checkpoint written and its `epoch` event
 /// sent) until the hold is lifted or the run is asked to stop, so a test's stop always lands before the next epoch.
+/// After the last epoch there is no next one: a run stopped there still completes, so tests stop runs that have
+/// epochs left.
 #[derive(Default)]
 struct EpochHold {
     on: Mutex<bool>,
