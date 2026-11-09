@@ -62,7 +62,8 @@ impl FoloApp {
             let side = if vw < px(1120.) { tsize::SIDEBAR_COLLAPSED } else { tsize::SIDEBAR };
             let pad = if self.narrow { 16. } else { 24. };
             let content = (f32::from(vw) - side - 2. * pad).min(tsize::CONTENT_MAX);
-            let fixed = [110., 130., 72., 72., 84.].iter().sum::<f32>()
+            // Architecture is 150 px (its "folo-s · 640 px" plus the e2e tag).
+            let fixed = [150., 130., 72., 72., 84.].iter().sum::<f32>()
                 + if wide { 150. } else { 0. }
                 + if params_col { 72. } else { 0. };
             let columns = 6. + f32::from(u8::from(wide)) + f32::from(u8::from(params_col));
