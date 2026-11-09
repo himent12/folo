@@ -473,13 +473,17 @@ const INV_255: f32 = 1.0 / 255.0;
 
 /// The `[B, 3, H, W]` network input (`0..1`) of `imgs` letterboxed with `boxes`, built on the host. Every
 /// geometry must have the same output size (the predictor uses `rect` only for single images).
+///
+/// One fused pass per image ([`Letterbox::apply_planar_f32`]: resize, padding and the `u8` → `f32` scaling,
+/// rows in parallel) writes straight into the tensor's buffer, which comes from folo-core's buffer cache
+/// ([`folo_core::cpu::take_buffer`]), so a steady stream of predictions reuses the same input memory instead
+/// of faulting in fresh pages every call. Bit for bit the planes of [`Letterbox::apply`] times `1 / 255`.
 pub fn letterbox_on_host(imgs: &[Image], boxes: &[Letterbox]) -> Result<Tensor> {
     let [w, h] = check_letterbox(imgs, boxes)?;
     let plane = (w * h) as usize;
-    let mut input = vec![0f32; imgs.len() * 3 * plane];
+    let mut input = folo_core::cpu::take_buffer(imgs.len() * 3 * plane);
     input.par_chunks_mut(3 * plane).zip(imgs.par_iter().zip(boxes)).for_each(|(dst, (img, lb))| {
-        let canvas = lb.apply(img, folo_data::PAD_VALUE);
-        to_chw(&canvas.data, dst, plane);
+        lb.apply_planar_f32(img, folo_data::PAD_VALUE, INV_255, dst);
     });
     Ok(Tensor::from_vec(input, [imgs.len(), 3, h as usize, w as usize])?)
 }
@@ -549,17 +553,6 @@ fn check_letterbox(imgs: &[Image], boxes: &[Letterbox]) -> Result<[u32; 2]> {
         }
     }
     Ok(first.out)
-}
-
-/// Interleaved RGB `u8` → planar `f32` in `0..1`.
-fn to_chw(rgb: &[u8], dst: &mut [f32], plane: usize) {
-    let (r, rest) = dst.split_at_mut(plane);
-    let (g, b) = rest.split_at_mut(plane);
-    for (i, px) in rgb.as_chunks::<3>().0.iter().enumerate() {
-        r[i] = px[0] as f32 * INV_255;
-        g[i] = px[1] as f32 * INV_255;
-        b[i] = px[2] as f32 * INV_255;
-    }
 }
 
 fn ms(t: Instant) -> f64 {

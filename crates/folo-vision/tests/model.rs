@@ -566,20 +566,24 @@ fn config_serde_and_seeds() {
     assert!(d.set_classes(vec!["a".into()]).is_err());
 }
 
-/// `HeadOutput::detections` on the CPU (anchors prefiltered by their largest logit, only candidates decoded)
-/// is bit for bit the full decode + `non_max_suppression`.
+/// `HeadOutput::detections` on the CPU (anchors prefiltered by their largest logit, only candidates decoded,
+/// in blocks of 1024 anchors on the rayon pool) is bit for bit the full decode + `non_max_suppression`, on a
+/// small grid (one block) and on a 640×384 one (5040 anchors, five blocks).
 #[test]
 fn cpu_detections_match_full_decode() {
     use folo_vision::nms::{NmsConfig, non_max_suppression};
     let rng = &mut folo_core::rng::Rng::seed(11);
     let m = model("n", 7);
-    let anchors = m.anchors(96, 64);
-    let a = anchors.len();
-    for (b, nc, mean, cfg) in [
+    let cases = [
         (2usize, 7usize, -2.5f32, NmsConfig::default()),
         (1, 7, 0.0, NmsConfig { conf: 0.6, iou: 0.4, max_det: 9, ..NmsConfig::default() }),
         (3, 7, -4.0, NmsConfig { conf: 0.05, classes: Some(vec![0, 3, 6]), ..NmsConfig::default() }),
-    ] {
+    ];
+    for ((b, nc, mean, cfg), [h, w]) in
+        cases.iter().cloned().map(|c| (c, [96, 64])).chain(cases.iter().cloned().map(|c| (c, [640, 384])))
+    {
+        let anchors = m.anchors(h, w);
+        let a = anchors.len();
         let out = folo_vision::model::HeadOutput {
             box_raw: Tensor::randn([b, 64, a], 0.0, 2.0, rng),
             cls_raw: Tensor::randn([b, nc, a], mean, 2.0, rng),
@@ -598,6 +602,16 @@ fn cpu_detections_match_full_decode() {
         let got = out.detections(&cfg).unwrap();
         assert!(want.iter().any(|d| !d.is_empty()), "the case should keep some detections");
         assert_eq!(got, want, "{cfg:?}");
+        // The same outputs as channel slices of one `[B, 64 + nc, A]` tensor (one storage, strided views for
+        // B > 1): same detections.
+        let joint = Tensor::cat(&[&out.box_raw, &out.cls_raw], 1).unwrap();
+        let shared = folo_vision::model::HeadOutput {
+            box_raw: joint.narrow(1, 0, 64).unwrap(),
+            cls_raw: joint.narrow(1, 64, nc).unwrap(),
+            ..out.clone()
+        };
+        assert!(shared.box_raw.same_storage(&shared.cls_raw));
+        assert_eq!(shared.detections(&cfg).unwrap(), want, "{cfg:?}, one storage");
     }
 }
 
