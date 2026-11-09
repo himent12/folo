@@ -100,6 +100,15 @@ describe('single-key shortcuts preference', () => {
     expect(space.some((l) => l.includes('per class'))).toBe(true);
   });
 
+  it('lists an action once: a second key set is its `also`, never a second row of the same name', () => {
+    const names = shortcutList.map((s) => s.label.replace(/\s*\(.*\)$/, ''));
+    // "Next / previous row" and "Next / previous row (focused list)" were two rows (J K, ↓ ↑) for one action.
+    const rows = shortcutList.filter((s) => s.group === 'Lists').map((s) => s.label.replace(/\s*\(.*\)$/, ''));
+    expect(new Set(rows).size).toBe(rows.length);
+    expect(names.filter((n) => n === 'Next / previous row')).toHaveLength(1);
+    expect(shortcutList.find((s) => s.label === 'Next / previous row')?.also).toBe('ArrowDown ArrowUp');
+  });
+
   it('the dialog lists every group, Datasets included', () => {
     expect([...new Set(shortcutList.map((s) => s.group))]).toEqual(['General', 'Navigation', 'Lists', 'Charts', 'Datasets']);
   });

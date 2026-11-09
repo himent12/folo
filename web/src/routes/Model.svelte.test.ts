@@ -55,6 +55,8 @@ describe('Model: what was evaluated', () => {
     expect(text('#per-class .foot')).toContain('Evaluated on 360 validation images of fasteners at IoU 0.50.');
     const notes = text('#cm .cm-notes');
     expect(notes).toContain('Counted at conf 0.25, IoU 0.45 on 360 validation images of fasteners.');
+    // Its header names them too, as the curves' header names theirs: the KPIs above are at another operating point.
+    expect(text('#cm-title .meta')).toBe('share of each true class · conf 0.25 · IoU 0.45');
     // The matrix no longer claims precision and recall's IoU, and says the two thresholds differ.
     expect(notes).not.toContain('IoU 0.5,');
     const conf = (await hub.api.modelEval('m_fast_n')).best_f1_conf!;

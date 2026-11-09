@@ -1,5 +1,9 @@
 <script lang="ts">
-  /** Pick an image from a registered dataset: dataset + split, then a page of thumbnails. */
+  /**
+   * Pick an image from a registered dataset: dataset + split, then a page of thumbnails. A tile is never blank without a
+   * reason: while it loads it is the viewfinder skeleton (detect/DatasetImage), and an image with no boxes (a background
+   * example, often a plain surface) says "No boxes" on it, so it never reads as a tile that failed to load (round 27).
+   */
   import ChevronLeft from '@lucide/svelte/icons/chevron-left';
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
   import { untrack } from 'svelte';
@@ -106,7 +110,7 @@
           {#each { length: 12 } as _, i (i)}<Skeleton h="auto" r="var(--radius-sm)" class="thumb-sk" image />{/each}
         {:else}
           {#each images.data.images as img (img.id)}
-            <button type="button" class="thumb" onclick={() => pick(img)} aria-label="Use {img.file}" title={img.file}>
+            <button type="button" class="thumb" onclick={() => pick(img)} aria-label="Use {img.file}{img.boxes.length ? '' : ', no boxes'}" title={img.file}>
               <DatasetImage
                 datasetId={ds?.id ?? ''}
                 imageId={img.id}
@@ -117,6 +121,7 @@
                 fit="cover"
                 compact
               />
+              {#if !img.boxes.length}<span class="bare" aria-hidden="true">No boxes</span>{/if}
             </button>
           {/each}
         {/if}
@@ -166,6 +171,22 @@
   }
   .thumb:focus-visible {
     outline-offset: 2px;
+  }
+  /* A background example's mark, as the image chips are drawn: on a scrim, at the tile's bottom left. */
+  .bare {
+    position: absolute;
+    left: 4px;
+    bottom: 4px;
+    padding: 0 var(--space-1);
+    border-radius: var(--radius-xs);
+    background: var(--bg-scrim);
+    color: var(--text-primary);
+    font-size: var(--type-sm-size);
+    line-height: 18px;
+    pointer-events: none;
+  }
+  :global([data-theme='light']) .bare {
+    background: color-mix(in srgb, var(--bg-overlay) 88%, transparent);
   }
   .range {
     margin-right: auto;

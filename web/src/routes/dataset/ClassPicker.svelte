@@ -1,7 +1,10 @@
 <script lang="ts">
   /**
    * The image filter's class picker: a toolbar button naming the active class that opens a list of classes with their
-   * swatches and box counts. One class at a time (the images endpoint filters by a single class).
+   * swatches and box counts. One class at a time (the images endpoint filters by a single class). `block` (phones) makes
+   * it the row's select: it takes the width its neighbours leave, with ui/Select's face (the raised field, its edge, the
+   * value in ink, the one down chevron at its end, 44 px with 16 px text on touch), so the button after it ends on the
+   * content edge whatever the class's name.
    */
   import Check from '@lucide/svelte/icons/check';
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
@@ -15,12 +18,15 @@
     counts,
     value,
     onchange,
+    block = false,
   }: {
     classes: readonly string[];
     /** Boxes per class, when the dataset has statistics. */
     counts?: readonly number[];
     value: number | undefined;
     onchange: (cls: number | undefined) => void;
+    /** Fill the row as a select does (phones' one-row toolbar). */
+    block?: boolean;
   } = $props();
 
   const uid = $props.id();
@@ -71,7 +77,7 @@
   });
 </script>
 
-<div class="picker" bind:this={root}>
+<div class="picker" class:block bind:this={root}>
   <button
     type="button"
     class="trigger"
@@ -86,7 +92,7 @@
       <span class="sw" style:background={classInk(value)} aria-hidden="true"></span>
       <span class="truncate">{classes[value]}</span>
     {:else}
-      All classes
+      <span class="truncate">All classes</span>
     {/if}
     <ChevronDown size={14} strokeWidth={1.75} aria-hidden="true" />
   </button>
@@ -217,10 +223,34 @@
   .n {
     color: var(--text-tertiary);
   }
+  /* The row's select (phones): ui/Select's field, the chevron at its far end. */
+  .block {
+    display: flex;
+  }
+  .block .trigger {
+    flex: 1;
+    max-width: none;
+    padding: 0 var(--space-2);
+    background: var(--bg-raised);
+    border-color: var(--line-control);
+    color: var(--text-primary);
+    font-weight: var(--weight-regular);
+  }
+  .block .trigger:hover,
+  .block .trigger[aria-expanded='true'] {
+    border-color: var(--line-control-hover);
+  }
+  .block .trigger :global(svg) {
+    margin-left: auto;
+  }
   @media (pointer: coarse) {
     .trigger,
     [role='option'] {
       height: 44px;
+    }
+    /* A select's value at 16 px touch text, as ui/Select. */
+    .block .trigger {
+      font-size: var(--type-lg-size);
     }
   }
   @keyframes in {

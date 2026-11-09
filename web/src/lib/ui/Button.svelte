@@ -221,25 +221,27 @@
     :global(.cta-row) .btn.square {
       padding: 0;
     }
-    /* A block of ways out on a phone (`.cta-links`: run/Callout's actions, ui/ErrorState's, the Playground's notice) is
-       one button and a row of text links (DESIGN_DIRECTION §12): the lime primary, when there is one, across the block;
-       every other action a text link after it, so three stacked 44 px buttons never push the content 200 px down
-       (round 26). With no primary the first action stays a button and the rest are links. */
-    :global(.cta-links) > .primary {
+    /* One phone remedy layout (`.cta-stack`: every run/Callout with actions, ui/ErrorState's, the Playground's notice;
+       DESIGN_DIRECTION §12): the lime primary first, across the block, then every other way out as a full-width
+       secondary under it, each 44 px with a 16 px label, so a fix never reads as a link on one screen and a button on
+       the next (round 27: the Playground's OOM was a lime button and underlined links, Run's failure two full-width
+       secondaries). More than two fixes go behind "More fixes" (run/Outcome), so the stack stays short. A ghost action
+       (an error card's Connection settings) takes the secondary face here, never bare text the width of the screen. */
+    :global(.cta-stack) > .btn {
+      --h: 44px;
       flex: 1 0 100%;
+      padding: 0 var(--space-4);
+      font-size: var(--type-lg-size);
+      border-radius: var(--radius-md);
     }
-    :global(.cta-links:has(> .primary) > .btn:not(.primary)),
-    :global(.cta-links:not(:has(> .primary)) > .btn ~ .btn) {
-      --h: 32px;
-      padding: 0;
-      background: none;
-      border-color: transparent;
-      box-shadow: none;
+    :global(.cta-stack) > .primary {
+      order: -1;
+    }
+    :global(.cta-stack) > .ghost {
+      background: var(--bg-raised);
+      border-color: var(--line-default);
+      box-shadow: var(--shadow-sm);
       color: var(--text-primary);
-      font-size: var(--type-base-size);
-      text-decoration: underline;
-      text-decoration-color: var(--line-strong);
-      text-underline-offset: 3px;
     }
   }
 </style>

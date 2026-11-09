@@ -5,6 +5,7 @@
    */
   import { href } from '$lib/router.svelte';
   import { asOf, etaText, Now } from '$lib/api/freshness.svelte';
+  import { streamedRun } from '$lib/api/live.svelte';
   import { runProgress } from '$lib/api/progress';
   import Progress from '$lib/ui/Progress.svelte';
   import { tooltip } from '$lib/ui/tooltip';
@@ -12,11 +13,18 @@
 
   let { collapsed }: { collapsed: boolean } = $props();
 
-  const live = $derived(watched.runs?.find((r) => r.status === 'running' || r.status === 'stopping'));
+  const training = (r: { status: string }) => r.status === 'running' || r.status === 'stopping';
+  const listed = $derived(watched.runs?.find(training));
+  // The page's own stream of this run, while it is up (Overview's hero, the run page): the card reads the same source
+  // as the page, so the two never disagree and the card stays live when only the lists stopped refreshing. A stream
+  // that reports the run finished hides the card before the list catches up.
+  const streamed = $derived(streamedRun(listed?.id));
+  const live = $derived(streamed ? (training(streamed) ? streamed : undefined) : listed);
   const queued = $derived(watched.runs?.filter((r) => r.status === 'queued').length ?? 0);
   const progress = $derived(live ? runProgress(live) : 0);
-  // The list stopped refreshing: the card is its last known state (lib/api/freshness), so it says so and stops pulsing.
-  const since = $derived(watched.since);
+  // The list stopped refreshing and no stream covers the run: the card is its last known state (lib/api/freshness), so
+  // it says so and stops pulsing. "Last known" only when both clocks are down.
+  const since = $derived(streamed ? null : watched.since);
   const now = new Now(() => since !== null);
 
   // Said once, when a run starts training while Studio is open (not for the run already training at load).
@@ -59,7 +67,7 @@
       <Progress value={progress} size="xs" label="Training progress" tone={since !== null ? 'neutral' : 'accent'} />
       <span class="meta num">
         <span>Epoch {live.epoch}/{live.epochs}</span>
-        {#if live.best}<span>mAP {live.best.map50_95.toFixed(3)}</span>{/if}
+        {#if live.best}<span>mAP50-95 {live.best.map50_95.toFixed(3)}</span>{/if}
       </span>
       {#if queued > 0}<span class="queued">+{queued} queued</span>{/if}
     </a>

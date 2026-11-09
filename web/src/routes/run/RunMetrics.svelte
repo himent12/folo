@@ -31,9 +31,22 @@
    * `exp` ("−4") is the exponent in plain digits, for a real superscript at a legible size (Unicode superscripts render
    * at about 8 px in a 12 px unit).
    */
-  /** What a progress bar's hatched end means (the last epochs train without mosaic), with the trainer's capped count. */
-  export function mosaicOffText(n: number): string {
-    return `Last ${n} ${n === 1 ? 'epoch' : 'epochs'}: mosaic off`;
+  /**
+   * What a progress bar's hatched end means (the last `n` of `epochs` train without mosaic, the trainer's capped count),
+   * said for where the run is (`epoch` done, `live`), so a phase still ahead never reads as the current state (round
+   * 27's "mosaic off" at epoch 38 of 100): before it, "Mosaic off after epoch 90"; while a live run is in it, "Mosaic off
+   * · final 10 epochs"; once past, "Last 10 epochs: mosaic off". `cap` is the caption under the hatch, `full` its tooltip
+   * and the bar's accessible description.
+   */
+  export function mosaicOffText(n: number, epochs: number, epoch: number, live: boolean): { cap: string; full: string } {
+    const from = epochs - n;
+    const last = `${n} ${n === 1 ? 'epoch' : 'epochs'}`;
+    if (epoch < from) return { cap: `Mosaic off after epoch ${from}`, full: `Mosaic off after epoch ${from}: the last ${last} train without mosaic` };
+    if (live) {
+      const final = n === 1 ? 'final epoch' : `final ${n} epochs`;
+      return { cap: `Mosaic off · ${final}`, full: `Mosaic off now: the ${final} train without mosaic` };
+    }
+    return { cap: `Last ${last}: mosaic off`, full: `Last ${last}: mosaic off` };
   }
 
   export function lrParts(v: number | null | undefined): { value: string; unit?: string; exp?: string } {
@@ -67,10 +80,13 @@
   import { provideInfoSlot } from '$lib/ui/infoSlot.svelte';
   import { tooltip } from '$lib/ui/tooltip';
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
+  import ChevronUp from '@lucide/svelte/icons/chevron-up';
+  import { tick } from 'svelte';
+  import Button from '$lib/ui/Button.svelte';
   import ChartSkeleton from '$lib/charts/ChartSkeleton.svelte';
   import { BestPulse, CompleteFocus } from '$lib/charts/bestPulse';
   import { scoresTitle, type EvalSource } from '$lib/evaluated';
-  import LossOptions, { type Scale, type Smoothing } from '$lib/charts/LossOptions.svelte';
+  import LossOptions, { DEFAULT_SMOOTHING, type Scale, type Smoothing } from '$lib/charts/LossOptions.svelte';
   import { holdDomain, logDomain, niceDomain, unitDomain, unitTop, UNIT_ZOOM_BELOW, UNIT_ZOOM_NOTE, type Fit, type Held } from '$lib/charts/domain';
   import { smooth, type Pt } from '$lib/charts/downsample';
   import LineChart, { type Marker, type Series } from '$lib/charts/LineChart.svelte';
@@ -134,8 +150,8 @@
   const closeFrom = $derived(1 - closeN / run.epochs);
   /** The run's last epochs train without mosaic: the bar hatches them and every chart marks where they start. */
   const mosaicOff = $derived(closeFrom > 0 && closeFrom < 1);
-  /** What the hatch means, in one wording: its caption's tooltip and the bar's accessible description. */
-  const closeText = $derived(mosaicOffText(closeN));
+  /** What the hatch means, for where the run is: its caption, and in full its tooltip and the bar's description. */
+  const closeText = $derived(mosaicOffText(closeN, run.epochs, run.epoch, live));
   const uid = $props.id();
   const closeId = `${uid}-close`;
   const elapsed = $derived(run.started ? ((run.finished ? Date.parse(run.finished) : Date.now()) - Date.parse(run.started)) / 1000 : null);
@@ -150,7 +166,7 @@
   });
 
   // ---- chart data ----
-  let smoothing = $state<Smoothing>('0.9');
+  let smoothing = $state<Smoothing>(DEFAULT_SMOOTHING);
   // Log by default: the total starts near 8 while box / cls / dfl sit between 0.4 and 3, which a linear axis squashes
   // into its bottom quarter.
   let scale = $state<Scale>('log');
@@ -396,13 +412,33 @@
     ['box', 'box regression: how far predicted boxes are from the true ones.'],
     ['cls', 'classification: how wrong the class scores are.'],
     ['dfl', 'distribution focal: how sharply each box edge is placed.'],
-    ['EMA 0.9', 'smoothing; a higher value reacts more slowly. The Loss tab shows the last raw step and the smoothed total.'],
+    ['EMA', 'smoothing over steps (0.98: about the last 50); a higher value reacts more slowly. The Loss tab shows the last raw step and the smoothed total.'],
   ];
   const legendNote = $derived(unit ? (lastEpoch ? latestEp : undefined) : lastStep ? stepEp : undefined);
 
   // The last epochs train without mosaic (the hatched end of the progress bar): marked where they start, on every chart.
   const xMark = $derived(mosaicOff ? { x: run.epochs - closeN, label: 'mosaic off' } : undefined);
   const current = $derived(tabs.find((t) => t.id === tab)!);
+  /**
+   * Phones, the chart open: the one line between the metric picker and the legend. A value appears once above its chart
+   * (DESIGN_DIRECTION §12): the legend reads the latest value (or the cursor's), so the best is stated here only where
+   * it differs from it ("○ best 0.599 · ep 36"); a run whose best is its last epoch says where ("○ best · ep 150").
+   */
+  const phoneQualifier = $derived(
+    tab === 'map' && run.best
+      ? `by epoch · ○ best${run.best.epoch === lastEpoch?.epoch ? '' : ` ${metric(run.best.map50_95)}`} · ep ${run.best.epoch}`
+      : current.qualifier,
+  );
+
+  // Phones: folding hands focus to the control that reopens it, and opening to the one that folds it again, so a
+  // keyboard never lands on <body> when the button it pressed goes away.
+  let readoutEl = $state<HTMLButtonElement>();
+  let hideEl = $state<HTMLElement>();
+  async function setFold(open: boolean) {
+    setChartOpen(open);
+    await tick();
+    (open ? hideEl?.querySelector<HTMLElement>('button') : readoutEl)?.focus();
+  }
 
 
   // 1–6 pick a metric tab from anywhere on the page (a single-key shortcut: off with the others in Settings).
@@ -440,11 +476,8 @@
 {/snippet}
 
 {#snippet picker()}
-  <Select
-    label="Metric to chart"
-    bind:value={tab}
-    options={tabs.map((t) => ({ value: t.id, label: `${t.label} · ${t.value}${t.unit && t.value !== '—' ? ` ${t.unit}` : ''}` }))}
-  />
+  <!-- The metric's name only: its value is the legend's, under the picker (a value appears once above its chart). -->
+  <Select label="Metric to chart" bind:value={tab} options={tabs.map((t) => ({ value: t.id, label: t.label }))} />
 {/snippet}
 
 <section class="metrics" aria-label="Run metrics" data-tip-bounds>
@@ -480,9 +513,9 @@
         <!-- The hatched end says what it is: a caption under it, the same words on hover (a hit area taller than the
              4 px bar) and as the bar's accessible description, with the trainer's capped count. -->
         {#if mosaicOff}
-          <span class="close-hit" aria-hidden="true" style:left="{closeFrom * 100}%" use:tooltip={closeText}></span>
-          <span class="close-cap" aria-hidden="true" use:tooltip={closeText}>mosaic off</span>
-          <span class="sr-only" id={closeId}>{closeText}</span>
+          <span class="close-hit" aria-hidden="true" style:left="{closeFrom * 100}%" use:tooltip={closeText.full}></span>
+          <span class="close-cap" aria-hidden="true" use:tooltip={closeText.full}>{closeText.cap}</span>
+          <span class="sr-only" id={closeId}>{closeText.full}</span>
         {/if}
       </div>
       <span class="cap num">
@@ -512,21 +545,30 @@
   </div>
 
   <div class="chart" class:folded={fold} id="run-chart" role="tabpanel" aria-label={current.title}>
-    {#if narrow && !queued}
-      <!-- Phones: the chart's one-line readout, which folds or opens it, one state in every section. -->
-      <button type="button" class="readout" aria-expanded={!fold} aria-controls="run-chart-body" onclick={() => setChartOpen(fold)}>
+    {#if fold}
+      <!-- Phones, folded: the chart's one-line readout, which opens it, one state in every section. Open, the picker,
+           the qualifier and the legend say all of this, so the row goes and "Hide chart" sits in the chart's header. -->
+      <button type="button" class="readout" aria-expanded="false" aria-controls="run-chart-body" bind:this={readoutEl} onclick={() => setFold(true)}>
         <span class="r-l">{current.label}</span>
         <span class="r-v num">{current.value}{#if current.unit && current.value !== '—'}{@render unitOf(current)}{/if}</span>
         <span class="r-c">{current.caption}</span>
-        <span class="r-a">{fold ? 'Show chart' : 'Hide chart'}<ChevronDown size={14} aria-hidden="true" /></span>
+        <span class="r-a">Show chart<ChevronDown size={14} aria-hidden="true" /></span>
       </button>
     {/if}
     {#if !fold}
       <div class="chart-body" id="run-chart-body">
         <header>
-          <!-- Phones: the picker names the metric in place of the title (the tabs above are hidden). -->
-          {#if narrow}<div class="pick">{@render picker()}</div>{/if}
-          <h2><span class="t">{current.title}</span><span class="q">{current.qualifier}{#if current.qExp}<sup class="exp">{current.qExp}</sup>{/if}</span></h2>
+          <!-- Phones: the picker names the metric in place of the title (the tabs above are hidden), and "Hide chart"
+               folds the chart from its own header row. -->
+          {#if narrow}
+            <div class="pick">{@render picker()}</div>
+            {#if !queued}
+              <span class="hide" bind:this={hideEl}>
+                <Button size="sm" variant="ghost" iconRight={ChevronUp} aria-expanded="true" aria-controls="run-chart-body" onclick={() => setFold(false)}>Hide chart</Button>
+              </span>
+            {/if}
+          {/if}
+          <h2><span class="t">{current.title}</span><span class="q">{narrow ? phoneQualifier : current.qualifier}{#if current.qExp}<sup class="exp">{current.qExp}</sup>{/if}</span></h2>
           <div class="ctl">
             <!-- One control for the loss view (smoothing and y scale behind one button), so the header keeps at most one
                  segmented group. -->
@@ -755,8 +797,8 @@
     bottom: -12px;
     right: 0;
   }
-  /* "mosaic off" under the hatch, right-aligned to the bar's end: in the epoch row's spare height from the tablet up,
-     in a line the bar keeps for it on phones. */
+  /* The hatch's caption ("Mosaic off after epoch 90") under it, right-aligned to the bar's end: in the epoch row's spare
+     height from the tablet up, in a line the bar keeps for it on phones. */
   .close-cap {
     position: absolute;
     top: calc(100% + var(--space-1));
@@ -871,9 +913,6 @@
   }
   .r-a :global(svg) {
     transition: transform var(--dur-fast) var(--ease-standard);
-  }
-  .readout[aria-expanded='true'] .r-a :global(svg) {
-    transform: rotate(180deg);
   }
   .chart header {
     display: flex;
@@ -1004,24 +1043,38 @@
     .chart {
       padding: 0 var(--space-3) var(--space-3);
     }
-    /* One row: the metric picker and the range control; the qualifier (best value and epoch) on a line below. */
+    /* Two rows, 12 px under the epoch row (or the panel's top): the metric picker, with "Hide chart" at the row's end;
+       then the one summary line (what the x axis is, the best where the legend does not already show it) with the
+       chart's range control on its right. The legend follows: a value appears once above its chart. */
     .chart header {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: center;
+      gap: var(--space-2) var(--space-3);
       min-height: 0;
     }
     .pick {
-      flex: 1 1 160px;
       min-width: 0;
-      max-width: 240px;
     }
-    .ctl {
-      margin-left: auto;
+    .hide {
+      display: flex;
     }
     h2 {
-      order: 1;
-      flex-basis: 100%;
+      grid-column: 1;
+      grid-row: 2;
     }
+    .ctl {
+      grid-column: 2;
+      grid-row: 2;
+      justify-content: flex-end;
+    }
+    .chart header:not(:has(.ctl > *)) h2 {
+      grid-column: 1 / -1;
+    }
+    /* Figures people read (the best and its epoch): secondary, as a KPI caption (DESIGN_DIRECTION §2.3). */
     .q {
       white-space: normal;
+      color: var(--text-secondary);
     }
   }
   /* The fading wrapper of a swapped chart: it takes the chart's place in the layout. */

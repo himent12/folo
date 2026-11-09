@@ -6,12 +6,24 @@
    * tiny segment, and no native hover titles (round 26: the names and counts were only in them). It is a button, so a
    * caller never puts it inside a link or a label: the card's link sits beside it (a stretched link), with the strip
    * above it.
+   *
+   * **It looks like a control at rest** (DESIGN_DIRECTION §2.9, round 27: a thin multicolour bar read as decoration, and
+   * hover thickening never reaches touch): a small neutral chevron sits inside the hit area at the strip's end and turns
+   * while open. `named` adds the visible words "Class balance" over the strip (with the chevron beside them) where no
+   * column heading names it (Overview's and New run's dataset cards, the phone Datasets list); a table under a "Class
+   * balance" heading keeps the bare strip and its chevron.
    */
+  import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import { classInk } from '$lib/design/classInk.svelte';
   import { num } from '$lib/format';
   import InfoButton from '$lib/ui/InfoButton.svelte';
 
-  let { counts, classes, height = 6 }: { counts: number[]; classes: readonly string[]; height?: number } = $props();
+  let {
+    counts,
+    classes,
+    height = 6,
+    named = false,
+  }: { counts: number[]; classes: readonly string[]; height?: number; named?: boolean } = $props();
 
   /** The most classes the breakdown lists by name; the rest are one line. */
   const BREAKDOWN_MAX = 10;
@@ -32,10 +44,15 @@
 </script>
 
 {#snippet strip()}
-  <span class="strip" style:height="{height}px" aria-hidden="true">
-    {#each counts as c, i (i)}
-      {#if c > 0}<span style:flex-grow={c} style:background={classInk(i)}></span>{/if}
-    {/each}
+  <!-- The words are the button's name already (InfoButton's label, read once): what shows here is for the eye. -->
+  {#if named}<span class="cs-head" aria-hidden="true">Class balance<ChevronDown class="cs-chev" size={12} strokeWidth={2} /></span>{/if}
+  <span class="cs-line" aria-hidden="true">
+    <span class="strip" style:height="{height}px">
+      {#each counts as c, i (i)}
+        {#if c > 0}<span style:flex-grow={c} style:background={classInk(i)}></span>{/if}
+      {/each}
+    </span>
+    {#if !named}<ChevronDown class="cs-chev" size={12} strokeWidth={2} />{/if}
   </span>
 {/snippet}
 
@@ -87,7 +104,42 @@
     text-decoration: none;
     cursor: pointer;
   }
+  /* Full width by hand: a button's content box shrink-wraps its children, even block ones. */
+  .cs-head,
+  .cs-line {
+    width: 100%;
+  }
+  .cs-head {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    margin-bottom: var(--space-1);
+    font-size: var(--type-sm-size);
+    line-height: 16px;
+    color: var(--text-tertiary);
+    white-space: nowrap;
+  }
+  .cs-line {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+  }
+  /* The disclosure's mark: neutral, in the hit area, turned while open (the breakdown is below or beside it). */
+  .cs :global(.cs-chev) {
+    flex-shrink: 0;
+    color: var(--text-tertiary);
+    transition: transform var(--dur-fast) var(--ease-standard);
+  }
+  .cs :global(.info-btn.cs-btn[aria-expanded='true'] .cs-chev) {
+    transform: rotate(180deg);
+  }
+  .cs :global(.info-btn.cs-btn:hover .cs-chev),
+  .cs :global(.info-btn.cs-btn:hover .cs-head) {
+    color: var(--text-secondary);
+  }
   .strip {
+    flex: 1;
+    min-width: 0;
     display: flex;
     gap: 1px;
     width: 100%;

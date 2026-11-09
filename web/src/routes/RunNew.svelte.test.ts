@@ -815,6 +815,41 @@ describe('New run: the estimate', () => {
     expect(rough()).toBe(true);
   });
 
+  it("marks the last answer as not current while the new settings' estimate is out, and the memory row states its figure", async () => {
+    hub.api = api = new MockApi('normal', 0);
+    const real = api.estimateRun.bind(api);
+    let release: () => void = () => {};
+    const held = new Promise<void>((r) => (release = r));
+    let hold = false;
+    vi.spyOn(api, 'estimateRun').mockImplementation(async (b) => {
+      if (hold) await held;
+      return real(b);
+    });
+    await open();
+    await until(() => basis().startsWith('Measured'), "the server's estimate");
+    const memDd = () => [...target.querySelectorAll('.summary .est dt')].find((d) => d.textContent === 'Est. GPU memory')?.nextElementSibling;
+    const memory = memDd()!.textContent!.split(' / ')[0]!;
+    // The breakdown's memory row is the Summary's figure with its source, never a source alone.
+    const peak = [...target.querySelectorAll('.summary .how-list dt')].find((d) => d.textContent === 'Peak GPU memory')?.nextElementSibling;
+    expect(peak?.textContent).toBe(`${memory} measured`);
+    expect(timeDd()?.classList.contains('stale')).toBe(false);
+
+    hold = true;
+    target.querySelector<HTMLInputElement>('input[name="arch"][value="folo-n"]')!.click();
+    flushSync();
+    // The old figures stay, dimmed, and the basis line says the answer is on its way.
+    await until(() => basis() === 'Updating…', 'the updating line');
+    expect(timeDd()?.classList.contains('stale')).toBe(true);
+    expect(memDd()?.classList.contains('stale')).toBe(true);
+    expect(target.querySelector('.dock-est .stale')).not.toBeNull();
+
+    release();
+    await until(() => basis().startsWith('Measured') || basis().includes('caled'), 'the new estimate');
+    expect(timeDd()?.classList.contains('stale')).toBe(false);
+    expect(memDd()?.classList.contains('stale')).toBe(false);
+    expect(target.querySelector('.dock-est .stale')).toBeNull();
+  });
+
   it('falls back to the reference figures on a server without run_estimate, and says so', async () => {
     hub.api = api = new MockApi('no-throughput', 0);
     const ask = vi.spyOn(api, 'estimateRun');
@@ -987,12 +1022,12 @@ describe('New run: published weights (server PR #140)', () => {
     const group = await until(() => sel().querySelector('optgroup[label="Published weights"]'), 'the published group');
     const opt = group.querySelector<HTMLOptionElement>('option[value="folo-n-coco"]')!;
     // A score never without what it is on: published weights' split is not known here.
-    expect(opt.textContent).toBe('folo-n-coco · mAP 0.314 · split unknown');
+    expect(opt.textContent).toBe('folo-n-coco · mAP50-95 0.314 · split unknown');
     expect(opt.title).toMatch(/^folo-n trained from scratch on COCO/);
     // The run models of the chosen size are grouped by what their scores are on, outside the published group.
     const own = await until(() => sel().querySelector('option[value="m_shapes_s"]'), 'the run models');
     expect(own.parentElement?.getAttribute('label')).toBe('Validation split of shapes');
-    expect(own.textContent).toBe('shapes-s-best · mAP 0.854 on shapes');
+    expect(own.textContent).toBe('shapes-s-best · mAP50-95 0.854 on shapes');
   });
 
   it('take their size when picked, say so, and drop out when another size is picked', async () => {
@@ -1010,7 +1045,7 @@ describe('New run: published weights (server PR #140)', () => {
     expect(target.querySelector('#weights-about')).toBeNull();
     target.querySelector<HTMLButtonElement>('button[aria-controls="weights-about"]')!.click();
     flushSync();
-    expect(target.querySelector('#weights-about')?.textContent).toMatch(/^folo-n trained from scratch on COCO.* · mAP 0\.314/);
+    expect(target.querySelector('#weights-about')?.textContent).toMatch(/^folo-n trained from scratch on COCO.* · mAP50-95 0\.314/);
     const rv = (k: string) => [...target.querySelectorAll('.summary .rv')].find((r) => r.querySelector('.rv-k')?.textContent === k)?.querySelector('.rv-v')?.textContent;
     expect(rv('Model')).toBe('folo-n');
     expect(rv('Start from')).toBe('folo-n-coco');
@@ -1042,7 +1077,7 @@ describe('New run: the server’s figures and refusals (server PR #140)', () => 
     expect(target.querySelector('#close-hint')?.textContent).toBe('At most half the run: mosaic closes for the last 3 epochs.');
   });
 
-  it('shows a 501 for mixed precision at its field, not as a toast, with what works now', async () => {
+  it('shows a 501 for mixed precision at its field, not as a toast; once the switch is off, only a quiet note stays', async () => {
     hub.api = api = new MockApi('amp-refused', 0);
     const { toast } = await import('$lib/ui/toast.svelte');
     const err = vi.spyOn(toast, 'error');
@@ -1051,27 +1086,22 @@ describe('New run: the server’s figures and refusals (server PR #140)', () => 
     sw.click();
     flushSync();
     await start();
-    const msg = await until(() => target.querySelector('#amp-error'), 'the refusal');
-    expect(msg.getAttribute('role')).toBe('alert');
     expect(err).not.toHaveBeenCalled();
-    // The capabilities read again: one short cause, then the ways out, and the cause is said once.
+    // The capabilities read again: the switch is off and held off, so the refusal is answered. No alert, no danger
+    // line and no button that repeats Start: the field's one sentence and the way back to tensor cores.
     await until(() => target.querySelector('#amp-why'), 'the remedy');
-    expect(msg.textContent?.trim()).toBe('Mixed precision is unavailable: tensor cores are off on this server.');
-    expect(target.querySelector('#amp-why')?.textContent).toBe('Or restart the server with tensor cores on:');
+    expect(target.querySelector<HTMLInputElement>('input#amp')!.disabled).toBe(true);
+    expect(target.querySelector<HTMLInputElement>('input#amp')!.checked).toBe(false);
+    expect(target.querySelector('#amp-error')).toBeNull();
+    expect(target.querySelector('.amp [role="alert"]')).toBeNull();
+    expect([...target.querySelectorAll('.amp button')].some((b) => /full precision/i.test(b.textContent ?? ''))).toBe(false);
+    expect(target.querySelector('#amp-why')?.textContent).toBe('Tensor cores are off on this server; restart it with them on:');
     expect(target.querySelector('.amp pre.line')?.textContent).toBe('folo serve --tensor-cores');
     // The server's whole message, folded and copyable, never inline.
     const report = target.querySelector<HTMLDetailsElement>('.amp details.report')!;
     expect(report.open).toBe(false);
     expect(report.querySelector('pre')?.textContent).toMatch(/^Mixed-precision training \(amp\) needs a GPU with tensor cores/i);
-    expect(msg.textContent).not.toMatch(/FOLO_GPU_TENSOR_CORES|--amp/);
-    expect(target.querySelector<HTMLInputElement>('input#amp')!.disabled).toBe(true);
     expect(target.querySelector('#start-why')).toBeNull();
-    // Full precision is one click, and answers the refusal.
-    const full = [...target.querySelectorAll<HTMLButtonElement>('.amp button')].find((b) => b.textContent?.trim() === 'Train in full precision')!;
-    full.click();
-    flushSync();
-    expect(target.querySelector('#amp-error')).toBeNull();
-    expect(target.querySelector('#amp-why')?.textContent).toBe('Tensor cores are off on this server; restart it with them on:');
   });
 
   it('holds Start while the switch is still on after a refusal, and lets go once it is off', async () => {
@@ -1084,11 +1114,14 @@ describe('New run: the server’s figures and refusals (server PR #140)', () => 
     await start();
     await until(() => target.querySelector('#amp-error'), 'the refusal');
     expect(target.querySelector('#start-why')?.textContent).toBe('Mixed precision: Not available on this server now.');
-    expect(target.querySelector('#amp-error')?.textContent?.trim()).toBe('Mixed precision is unavailable: the server cannot use it now.');
-    expect([...target.querySelectorAll('.amp button')].some((b) => b.textContent?.trim() === 'Train in full precision')).toBe(true);
+    expect(target.querySelector('#amp-error')?.textContent?.trim()).toBe('Mixed precision is unavailable: the server cannot use it now. Turn it off to train in full precision.');
+    // The way out is the switch beside it; no button repeats what Start does once it is off.
+    expect([...target.querySelectorAll('.amp button')].some((b) => /full precision/i.test(b.textContent ?? ''))).toBe(false);
     sw.click();
     flushSync();
+    // Off: the refusal steps down to a quiet note, and Start lets go.
     expect(target.querySelector('#amp-error')).toBeNull();
+    expect(target.querySelector('.amp [role="alert"]')).toBeNull();
     expect(target.querySelector('#start-why')).toBeNull();
   });
 });

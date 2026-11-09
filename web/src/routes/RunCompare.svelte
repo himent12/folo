@@ -29,7 +29,7 @@
   import { Resource } from '$lib/api/resource.svelte';
   import type { Epoch, Run, RunMetrics } from '$lib/api/types';
   import LineChart, { type Series } from '$lib/charts/LineChart.svelte';
-  import { fitFloorNote, niceDomain, unitDomain, unitFitDomain, unitTop, UNIT_ZOOM_BELOW, UNIT_ZOOM_NOTE, withLabelRow } from '$lib/charts/domain';
+  import { fitFloor, fitFloorNote, niceDomain, unitDomain, unitFitDomain, unitTop, UNIT_ZOOM_BELOW, UNIT_ZOOM_NOTE, withLabelRow } from '$lib/charts/domain';
   import { nearest } from '$lib/charts/downsample';
   import { axisReason, AXIS_REASON, runEnd, runX } from '$lib/charts/runAxis';
   import { conf, deviceName, duration, metric } from '$lib/format';
@@ -85,6 +85,11 @@
   const X_OPTIONS: { value: Axis; label: string }[] = [
     { value: 'epoch', label: 'By epoch' },
     { value: 'progress', label: 'By progress' },
+  ];
+  /** Phones: the x axis as a compact select ("X axis": Epoch, Progress), so the metric's select keeps its whole name. */
+  const X_PHONE: { value: Axis; label: string }[] = [
+    { value: 'epoch', label: 'Epoch' },
+    { value: 'progress', label: 'Progress' },
   ];
   // Phones: the axis ⓘ opens in place under the control row (ui/infoSlot).
   const axisInfo = provideInfoSlot('cmp-axis-info');
@@ -172,21 +177,27 @@
   const plotPx = $derived(narrow ? 210 : 360);
   // The y axis: "Fit" (the default) starts under the values the runs spend most of their length in, so the differences
   // people came to compare fill the plot (round 26: 0–0.6 with the runs between 0.45 and 0.61, in its top quarter);
-  // "From 0" shows the whole climb. The top is fitted either way (./domain).
+  // "From 0" shows the whole climb. The top is fitted either way (./domain). On a phone, by progress, the default is
+  // From 0: its 210 px plot has no end labels, and a fitted floor cut the first ~18 % of every curve, the four lines
+  // entering from the bottom edge within a few px of each other with no cue (round 27), where a mark per entry would
+  // only pile up. A choice made by hand holds at every width.
   type YAxis = 'fit' | 'zero';
-  let yAxis = $state<YAxis>('fit');
+  let yChoice = $state<YAxis | null>(null);
+  const yAxis = $derived<YAxis>(yChoice ?? (narrow && x === 'progress' ? 'zero' : 'fit'));
+  const setY = (v: YAxis) => (yChoice = v);
   const Y_OPTIONS: { value: YAxis; label: string }[] = [
     { value: 'fit', label: 'Axis: Fit' },
     { value: 'zero', label: 'Axis: From 0' },
   ];
   const ys = $derived(series.flatMap((s) => s.points.map((p) => p.y)));
   const lastYs = $derived(series.map((s) => s.points.at(-1)?.y ?? NaN));
-  // Where the lines carry direct labels (768 px up) the top leaves a label row over the highest end (`withLabelRow`).
+  // Where the lines carry direct labels (768 px up) the top leaves a label row over the highest end (`withLabelRow`;
+  // `unitFitDomain`'s on the fitted span).
   const fit = $derived.by(() => {
     if (!extent) return undefined;
     if (!metricDef.unit) return niceDomain(yAxis === 'zero' ? Math.min(0, extent[0]) : extent[0], extent[1]);
-    const max = narrow ? extent[1] : withLabelRow(extent[1], plotPx);
-    return yAxis === 'fit' ? unitFitDomain(ys, lastYs, max, plotPx) : unitDomain(max, plotPx);
+    if (yAxis === 'fit') return unitFitDomain(ys, lastYs, extent[1], plotPx, !narrow);
+    return unitDomain(narrow ? extent[1] : withLabelRow(extent[1], plotPx), plotPx);
   });
   /** A fitted axis's floor, said where the axis is named ("y from 0.40"), as a zoomed axis says its full scale. */
   const floorNote = $derived(fitFloorNote(fit, metricDef.unit ? 2 : 0));
@@ -325,9 +336,9 @@
   const SETTING_COL = 152;
   const PAIR_SETTING_COL = 104;
   const RUN_COL_MIN = 136;
-  /** A few runs across a wide panel: bounded run columns and an empty last one (`.rest`, DESIGN_DIRECTION §2.7), so two
-   *  runs' values sit side by side, never 500 px apart across 1,200 px. */
-  const RUN_COL_BOUND = 224;
+  /** A few runs across a wide panel (two or three, from 1024 px): the setting column and the run columns share the width
+   *  equally, so the table uses its panel (DESIGN_DIRECTION §2.2) and two runs' values sit a third of the panel apart,
+   *  never packed at the left over an empty right half, nor 500 px apart beside a 152 px setting column. */
   const laptopUp = new MediaQuery(media.laptopUp, true);
 
   // Phones compare two runs at a time: a baseline and one other, fully in view and paged with ‹ ›; values that differ
@@ -346,7 +357,7 @@
     });
   });
   const pairMode = $derived(narrow && chosen.length > 2 && !allRuns);
-  const bounded = $derived(!pairMode && laptopUp.current && chosen.length <= 3);
+  const shared = $derived(!pairMode && laptopUp.current && chosen.length <= 3);
   const base = $derived(chosen.find((r) => r.id === baselineId) ?? chosen[0]);
   const others = $derived(chosen.filter((r) => r !== base));
   /** Makes `r` the baseline; the run it replaces takes the other column, so the pair on screen stays the same two. */
@@ -398,12 +409,18 @@
         <!-- Phones: one control row, the runs (two columns of compact keys whose values follow a tap or scrub on the
              plot), the one caveat that changes how to read it right above the plot, then the plot. Opening, removing and
              adding runs sit in a sheet (Edit); the longer explanation sits in the disclosure. -->
+        <!-- One row of three compact groups: the metric (the row's remaining width, its whole name at 16 px touch text),
+             the x axis as a select of two short words, and its ⓘ in a 44 px slot of its own, so no control's target
+             lies over its neighbour. -->
         <header class="c-row">
-          <Select label="Metric" bind:value={metricId} options={METRICS.map((m) => ({ value: m.id, label: m.label }))} />
-          <Segmented size="sm" label="X axis" value={x} onchange={setX} options={X_OPTIONS} />
-          <!-- The normalised axis, and why it was chosen, one tap away beside its control: the ticks say "%", so the
-               line of words under the controls went (it pushed the plot down). -->
-          {#if x === 'progress'}<InfoButton chart label="About the progress axis" text={progressWhy} how={PROGRESS_HOW} />{/if}
+          <span class="c-metric"><Select label="Metric" bind:value={metricId} options={METRICS.map((m) => ({ value: m.id, label: m.label }))} /></span>
+          <!-- The x axis and its ⓘ move together: on the narrowest phones both wrap under the metric, never the ⓘ alone. -->
+          <span class="c-xi">
+            <span class="c-x"><Select label="X axis" bind:value={() => x, setX} options={X_PHONE} /></span>
+            <!-- The normalised axis, and why it was chosen, one tap away beside its control: the ticks say "%", so the
+                 line of words under the controls went (it pushed the plot down). -->
+            {#if x === 'progress'}<span class="i-slot"><InfoButton chart label="About the progress axis" text={progressWhy} how={PROGRESS_HOW} /></span>{/if}
+          </span>
         </header>
         <!-- The ⓘ opens here, under the controls, never as a popover over the legend and plot (ui/infoSlot). -->
         <InfoRegion slot={axisInfo} />
@@ -418,8 +435,8 @@
           <div class="about-body">
             <!-- The y axis's choice: the control row has no room for it on a phone. -->
             <div class="about-axis">
-              <p>{floorNote ? `The y axis starts at ${fit!.domain[0].toFixed(Math.max(2, fit!.decimals))}, under where the runs spend most of their length.` : 'The y axis starts at 0.'}</p>
-              <Segmented size="sm" label="Y axis" bind:value={yAxis} options={[
+              <p>{floorNote ? `The y axis starts at ${fitFloor(fit)}, under where the runs spend most of their length.` : 'The y axis starts at 0.'}</p>
+              <Segmented size="sm" label="Y axis" value={yAxis} onchange={setY} options={[
                 { value: 'fit', label: 'Fit' },
                 { value: 'zero', label: 'From 0' },
               ]} />
@@ -445,7 +462,7 @@
             <span class="qual">{floorNote ? `${xQual} · ${floorNote}` : xQual}</span>
           </span>
           <span class="c-ctl">
-            <Select size="sm" label="Y axis" bind:value={yAxis} options={Y_OPTIONS} />
+            <Select size="sm" label="Y axis" value={yAxis} onchange={setY} options={Y_OPTIONS} />
             <Segmented size="sm" label="X axis" value={x} onchange={setX} options={X_OPTIONS} />
           </span>
         </header>
@@ -485,15 +502,16 @@
         <div class="scroll" class:more={tableMore} class:pairing={pairMode && !!other} style:--pair-h="{pairH}px" bind:this={tableEl} onscroll={measureTable}>
           <!-- Fixed layout: every run column the same width, so each header's key sits over its own values. The widths
                live on the header row (no colgroup, whose keyed columns could outlive a page of runs), so the setting
-               column is fixed and the run columns share the rest equally from the first render. -->
+               column is fixed and the run columns share the rest equally from the first render (two or three runs
+               from 1024 px: the setting column takes an equal share too, `shared`). -->
           <table class="table fixed" class:two={pairMode} style:min-width={pairMode ? undefined : `${SETTING_COL + chosen.length * RUN_COL_MIN}px`}>
             <thead>
               <tr>
-                <th style:width="{pairMode ? PAIR_SETTING_COL : SETTING_COL}px"></th>
+                <th style:width={shared ? undefined : `${pairMode ? PAIR_SETTING_COL : SETTING_COL}px`}></th>
                 {#each shown as r (r.id)}
                   <!-- The key in a column of its own beside the name, so a name that wraps (at its hyphens) keeps its
                        left edge and never squeezes the key. -->
-                  <th style:width={bounded ? `${RUN_COL_BOUND}px` : undefined}>
+                  <th>
                     <!-- The run's name over its role: the baseline every other column is read against, or Swap to make
                          it the baseline. No key here: the chips above are the legend, and a swatch at the column's
                          edge could not line up with its chip's. -->
@@ -509,14 +527,12 @@
                     >
                   </th>
                 {/each}
-                {#if bounded}<th class="rest" aria-hidden="true"></th>{/if}
               </tr>
             </thead>
             <tbody>
               <tr>
                 <td class="k">Status</td>
                 {#each shown as r (r.id)}<td><StatusBadge status={r.status} plain /></td>{/each}
-                {@render rest()}
               </tr>
               <tr>
                 <!-- The best epoch's score, which the chips' latest value need not be (a stopped run's 0.595 · stopped
@@ -526,7 +542,6 @@
                   {@const win = bestOf.get(r.id)?.word}
                   <td class="num" class:winner={!!win}>{bestScore(r)}{#if win}{' '}<span class="tag" data-fact>{win}</span>{/if}</td>
                 {/each}
-                {@render rest()}
               </tr>
               <tr>
                 <td class="k">Precision · recall</td>
@@ -538,7 +553,6 @@
                       >{:else}—{/if}
                   </td>
                 {/each}
-                {@render rest()}
               </tr>
               {#each diffRows as [k, f] (k)}
                 <tr>
@@ -555,12 +569,11 @@
                         >{:else}{@render cell(f(r))}{/if}</td
                     >
                   {/each}
-                  {@render rest()}
-                </tr>
+                  </tr>
               {/each}
               {#if sameRows.length}
                 <tr class="fold">
-                  <td colspan={shown.length + 1 + (bounded ? 1 : 0)}>
+                  <td colspan={shown.length + 1}>
                     <button aria-expanded={showSame} onclick={() => (showSame = !showSame)}>
                       {showSame ? 'Hide' : 'Show'} {sameRows.length} identical {sameRows.length === 1 ? 'setting' : 'settings'}
                     </button>
@@ -571,8 +584,7 @@
                     <tr>
                       <td class="k">{k}</td>
                       {#each shown as r (r.id)}<td class="num cfg">{@render cell(f(r))}</td>{/each}
-                      {@render rest()}
-                    </tr>
+                          </tr>
                   {/each}
                 {/if}
               {/if}
@@ -584,9 +596,8 @@
   {/if}
 </Page>
 
-{#snippet rest()}{#if bounded}<td class="rest" aria-hidden="true"></td>{/if}{/snippet}
 
-{#snippet cell(v: Setting)}{#if v.ident}<Ident value={v.value} />{:else}<span class="val" class:whole={v.value.length <= 14} data-fact>{v.value}</span>{/if}{#if v.note}<Note text={v.note} fact />{/if}{/snippet}
+{#snippet cell(v: Setting)}{#if v.ident}<Ident value={v.value} />{:else}<span class="val" class:whole={v.value.length <= 14 && !/\s/.test(v.value)} data-fact>{v.value}</span>{/if}{#if v.note}<Note text={v.note} fact />{/if}{#if v.about}<span class="k-sub v-about">{v.about}</span>{/if}{/snippet}
 
 {#snippet chips()}
   <!-- The run chips are the legend: colour key, value under the cursor, link and remove. -->
@@ -1024,25 +1035,25 @@
        area is the card. Opening, removing and adding runs live in the Edit sheet. */
     .chips {
       grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: var(--space-1) var(--space-2);
+      gap: 0 var(--space-2);
     }
+    /* The legend's caption ("Latest · ep 37", or how to read it on a first touch) and Edit: the first line of the
+       legend, not a row of its own. Edit is a real 32 px target (44 on touch), never a hit area over the controls above. */
     .chips-head {
-      min-height: 24px;
+      min-height: 32px;
     }
     .manage {
-      position: relative;
       display: inline-flex;
       align-items: center;
-      height: 24px;
-      padding-left: var(--space-3);
+      height: 32px;
+      padding: 0 var(--space-2);
+      margin-right: calc(-1 * var(--space-2));
+      border-radius: var(--radius-sm);
       font-size: var(--type-sm-size);
       color: var(--text-secondary);
     }
-    /* A 48 px target around the 24 px label, over the panel's padding above it. */
-    .manage::after {
-      content: '';
-      position: absolute;
-      inset: -12px -8px;
+    .manage:hover {
+      color: var(--text-primary);
     }
     /* A hanging indent: a wrapped line starts under the name, past the swatch (12 px and its 6 px gap). */
     .chips .chip {
@@ -1063,10 +1074,11 @@
       bottom: 0;
       left: 0;
     }
+    /* The space before the value is the name's margin, so a value wrapped under the name starts on its left edge. */
     .chips .chip .key {
       display: inline;
       position: static;
-      margin: 0;
+      margin: 0 var(--space-1) 0 0;
       padding: 0;
       font: inherit;
     }
@@ -1098,22 +1110,17 @@
       overflow: visible;
       overflow-wrap: break-word;
     }
+    /* The value and how the line ended ("0.494 · failed") are one unit that never breaks: beside the name when they
+       fit, else together on the line under it, never the status alone under the name with its value above. */
     .chips .chip .v {
-      display: inline;
+      display: inline-block;
       min-width: 0;
-      margin-left: var(--space-1-5);
+      margin: 0;
       padding: 0;
       text-align: left;
-      white-space: normal;
-      pointer-events: none;
-    }
-    /* How the line ended ("stopped") on a line of its own under the name: beside the value it would not fit a column. */
-    .chips .chip .st {
-      display: block;
       text-indent: 0;
-    }
-    .chips .chip .st .sep {
-      display: none;
+      white-space: nowrap;
+      pointer-events: none;
     }
     .chips .chip .from,
     .chips .chip .acts {
@@ -1131,8 +1138,17 @@
       z-index: 1;
       background: var(--bg-panel);
     }
+    /* Compact groups 8 px apart (controls, legend, caveat, plot), so the plot starts within ~200 px of the controls. */
     .compare {
+      gap: var(--space-2);
       padding: var(--space-3);
+    }
+  }
+  /* Touch: Edit is a real 44 px target (no invisible hit area over the controls above or the keys below). */
+  @media (max-width: 767px) and (pointer: coarse) {
+    .chips-head,
+    .manage {
+      min-height: 44px;
     }
   }
   /* The axis ⓘ's region sits on the frame's own edges; the section's gap spaces it. */
@@ -1140,17 +1156,40 @@
     --info-inset: 0;
     --info-after: 0;
   }
-  /* Phones: metric picker and x axis share one row above the legend. */
+  /* Phones: metric picker and x axis share one row above the legend. The metric takes what is left (at least 140 px,
+     so "mAP50-95" shows whole at 16 px touch text); the x axis is as wide as its longest word; the ⓘ has a real 44 px
+     slot, its touch target inside it rather than over the select beside it. On the narrowest phones (320 px) the x axis
+     and its ⓘ wrap to a second line rather than overflow. */
   .c-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2);
+  }
+  .c-metric {
+    flex: 1 1 140px;
+    min-width: 140px;
+    display: flex;
+  }
+  .c-metric > :global(.select) {
+    flex: 1;
+  }
+  .c-xi {
+    flex: 0 0 auto;
     display: flex;
     align-items: center;
     gap: var(--space-2);
   }
-  .c-row > :global(.select) {
-    flex: 1;
+  .c-x {
+    display: flex;
+  }
+  .i-slot {
+    flex: 0 0 44px;
+    display: grid;
+    place-items: center;
+    height: 44px;
   }
   .about {
-    margin-top: calc(-1 * var(--space-2));
     border-top: 1px solid var(--line-subtle);
   }
   .about summary {
@@ -1306,10 +1345,14 @@
     white-space: normal;
     overflow-wrap: break-word;
   }
-  /* A short value ("360 steps", "0.000833") stays whole; a value in words ("Mixed precision (f16)", "End-to-end (no
-     NMS)") wraps at its spaces in a narrow column, never cut. */
+  /* A short value of one word ("0.000833", "AdamW") stays whole; a value in words ("360 steps", "last 10 epochs",
+     "Mixed precision (f16)") wraps at its spaces in a narrow column (a 320 px phone), never cut. So does the request
+     beside a value ("(requested 0.01)"), which elsewhere keeps to one line. */
   .val.whole {
     white-space: nowrap;
+  }
+  .fixed td.cfg :global(.ui-note) {
+    white-space: normal;
   }
   /* A run's head: its name over its role (Baseline, or Swap), each on a line of its own. */
   .th {
@@ -1330,6 +1373,11 @@
   .k-sub {
     display: block;
     font-size: var(--type-sm-size);
+  }
+  /* What a short value means ("Auto": AdamW for short runs, else SGD), under the value it explains. */
+  .v-about {
+    font-weight: var(--weight-regular);
+    color: var(--text-tertiary);
   }
   /* Same patterns as the lines, so a run's key matches its curve without relying on colour. A key is a fill: the
      palette hue (--c is chart.fill) with the swatch hairline, which the pattern's mask cuts along with the dashes. */

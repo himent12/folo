@@ -57,6 +57,8 @@ Lines: 1 hierarchy & layout · 2 typography · 3 colour & theming · 4 spacing r
 | r25 | Claude Opus 5.5 (192 sheets, 33 full-size) | 8.5 | 8.5 | 8.5 | 8.5 | 8.5 | 8.5 | 8.5 | 8.5 | 9 | 9 | 8 | 8.5 | 8 |
 | r26 | GPT-6.1 Sol (195 sheets, 50 full-size) | 8.5 | 9 | 9 | 9 | 9 | 8.5 | 8.5 | 9 | 8.5 | 8.5 | 8.5 | 8.5 | 8.5 |
 | r26 | Claude Opus 5.5 (195 sheets, 33 full-size) | 8 | 8.5 | 9 | 8.5 | 8.5 | 8.5 | 8.5 | 8.5 | 9 | 9 | 8 | 8.5 | 8 |
+| r27 | GPT-6.1 Sol (204 sheets, 52 full-size) | 8 | 8.5 | 9 | 9 | 8.5 | 8.5 | 8.5 | 9 | 8.5 | 8.5 | 8 | 8 | 8 |
+| r27 | Claude Opus 5.5 (204 sheets, 30 full-size) | 8.5 | 8.5 | 9 | 8.5 | 8.5 | 8 | 8 | 8.5 | 9 | 9 | 8 | 8.5 | 8 |
 
 ## Per-line minimum (lower of the two reviewers)
 
@@ -88,6 +90,7 @@ Rounds with one reviewer are marked; their minimum is that reviewer's row.
 | r24 | 8 | 8 | 8 | 8 ↓ | 8 ↓ | 8.5 | 8 | 8 | 8.5 | 8.5 | 8 | 8 | 8 |
 | r25 | 8 | 8.5 ↑ | 8.5 ↑ | 8.5 ↑ | 8.5 ↑ | 8.5 | 8 | 8.5 ↑ | 9 ↑ | 8.5 | 8 | 8.5 ↑ | 8 |
 | r26 | 8 | 8.5 | 9 ↑ | 8.5 | 8.5 | 8.5 | 8.5 ↑ | 8.5 | 8.5 ↓ | 8.5 | 8 | 8.5 | 8 |
+| r27 | 8 | 8.5 | 9 | 8.5 | 8.5 | 8 ↓ | 8 ↓ | 8.5 | 8.5 | 8.5 | 8 | 8 ↓ | 8 |
 
 r4 lowest lines: 6 data visualisation (5.5), 2 typography, 3 colour, 8 consistency (6). Diagnosis: 2, 3 and 8 are
 structural (no single rule for mono vs sans, class colours that changed between legend and box, two accents in light),
@@ -210,3 +213,38 @@ error callouts stacking three buttons under a lime primary on a red tint, framel
 states, New run's rail wrapping raggedly at 1024, and mostly empty panels for few classes or a near-perfect curve.
 Sol adds the stale Overview not saying what is current, touch inputs under 16 px, grey PR curves that cannot be
 identified where they are drawn, and the palette's idle list losing active runs to a case mismatch.
+
+r27 (#158: headers, callouts, frames and tiers; charts that show the differences; states that say what is current):
+colour is 9 for both, and Opus gives 9 on interaction and accessibility, but the floor of 8 widened to lines 1, 6, 7,
+11 and 12. Both reviewers name the same defects: Compare's stopped and failed runs labelled in the right gutter far
+from where their lines end, the published Model's Band / All curves toggle clipped under the Trace bar on phones,
+"mAP50-…" in the phone Compare select and "shapes-har…" in the Models list, the phone Run page repeating one value
+three times above its chart, Compare's phone header stack, and one narrow column of findings in tablet Health. Opus
+adds New run showing the previous settings' estimate as current, the sidebar's "Last known" beside a live hero,
+"mAP" unnamed in four places, Fit's domain leaving a quarter of the plot empty, and the tablet inspector and
+Playground empty state; Sol adds class strips that do not look like disclosures, "mosaic off" read as current, and
+the live log announcing without its own pause.
+
+## Final state (stopped after round 28)
+
+The hill-climb was stopped at the user's request after round 28 (#163), with the UI accepted as it is. Round 28 was
+merged without new design reviews, so the last scored round is 27:
+
+| Line | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| GPT-6.1 Sol | 8 | 8.5 | 9 | 9 | 8.5 | 8.5 | 8.5 | 9 | 8.5 | 8.5 | 8 | 8 |
+| Claude Opus 5.5 | 8.5 | 8.5 | 9 | 8.5 | 8.5 | 8 | 8 | 8.5 | 9 | 9 | 8 | 8.5 |
+| Minimum | 8 | 8.5 | 9 | 8.5 | 8.5 | 8 | 8 | 8.5 | 8.5 | 8.5 | 8 | 8 |
+
+Round 28 addressed the round-27 reviews' items (listed in #163), but no reviewer has scored it. Still open, as named
+by the reviewers and not verified since:
+- Compare: a failed run that ends inside the bundle of other lines gets a swatch entry in the gutter, not a label at
+  its end; the phone chart keeps ~45 px of headroom between the caveat and the top tick.
+- The Inspector at 820 letterboxes the image heavily now that the dialog takes the viewport's height.
+- The stuck Compare pair header's edge is `line.subtle`; if it still reads as edgeless, it needs a stronger line.
+- Phone Playground's out-of-memory notice is three stacked 44 px buttons (the one remedy layout), taller than before.
+- Sol's round-27 code-review note: the vite client's "ResizeObserver loop completed with undelivered notifications"
+  during `npm run qa` is not attributed (a lead: `dataset/StatsTab.svelte`'s observer, which predates round 27).
+- Sol's round-28 code-review nit: `touchText.test.ts` builds its DOM with every `class:` directive on, so a 16 px rule
+  under a conditional class (`.invalid input`) still satisfies it; the default state is not checked on its own.
+- Lines 1, 6, 7, 11 and 12 were last scored 8; nothing was scored 9 or above on every line by both reviewers.

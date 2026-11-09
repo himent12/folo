@@ -171,7 +171,7 @@
                   <th style:width="112px">Status</th>
                   <th class="hide-sm" style:width="136px">Progress</th>
                   <th class="r" style:width="88px">mAP50-95</th>
-                  <th class="hide-sm" style:width="120px">mAP trend</th>
+                  <th class="hide-sm" style:width="120px">mAP50-95 trend</th>
                   <th class="r hide-sm" style:width="96px">Created</th>
                 </tr>
               </thead>{/if}
@@ -300,7 +300,7 @@
                       <span class="d-nums num"><Meta line><span>{compact(total(d))} images</span><span>{d.classes.length} classes</span></Meta></span>
                     </span>
                   </a>
-                  {#if d.stats}<span class="d-strip"><ClassStrip counts={d.stats.class_counts} classes={d.classes} height={4} /></span>{/if}
+                  {#if d.stats}<span class="d-strip"><ClassStrip counts={d.stats.class_counts} classes={d.classes} height={4} named /></span>{/if}
                 </li>
               {/each}
             </ul>
@@ -514,7 +514,10 @@
     color: var(--text-tertiary);
     white-space: nowrap;
   }
+  /* The list's foot: on the panel's bottom edge (the body is a flex column, ui/Panel), so a panel stretched to Recent
+     runs' height ends on its note, never on 70 px of nothing under it. */
   .unranked {
+    margin-top: auto;
     padding: 0 var(--space-4) var(--space-4);
     font-size: var(--type-sm-size);
     color: var(--text-secondary);

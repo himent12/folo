@@ -148,7 +148,7 @@
       icon: Images,
       run: go(`/datasets/${x.id}`),
     }));
-    // A model's score with what it is on (lib/scoreSummary): "mAP 0.604 on fasteners", "mAP 0.701 · split unknown".
+    // A model's score with what it is on (lib/scoreSummary): "mAP50-95 0.604 on fasteners", "mAP50-95 0.701 · split unknown".
     const runById = new Map(runs.map((x) => [x.id, x]));
     const dsById = new Map(datasets.map((x) => [x.id, x]));
     const m: Item[] = models.map((x) => ({

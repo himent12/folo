@@ -7,6 +7,7 @@
   import { cubicOut } from 'svelte/easing';
   import { toast } from './toast.svelte';
   import { motion } from './motion';
+  import Meta from './Meta.svelte';
 
   const icons = { success: CircleCheck, error: CircleAlert, info: Info };
 
@@ -63,10 +64,13 @@
       {@const Icon = icons[t.tone]}
       <li class="toast {t.tone}" data-toast={t.id} role={t.tone === 'error' ? 'alert' : 'status'} transition:fly={{ y: 8, duration: motion(160), easing: cubicOut }}>
         <span class="icon"><Icon size={16} strokeWidth={1.75} /></span>
-        <div class="text">
-          <p class="title">{t.title}</p>
-          {#if t.detail}<p class="detail">{t.detail}</p>{/if}
-        </div>
+        <!-- Line 1 the title beside the action and close; line 2 the detail under all three, the toast's full width, so
+             "Finished training · best mAP50-95 0.535 at epoch 60" stays one line on a phone instead of four beside
+             "Open run". Facts are a ui/Meta line: they wrap whole, never "at / epoch 60". -->
+        <p class="title">{t.title}</p>
+        {#if t.detail}
+          <p class="detail">{#if typeof t.detail === 'string'}{t.detail}{:else}<Meta>{#each t.detail as d (d)}<span>{d}</span>{/each}</Meta>{/if}</p>
+        {/if}
         {#if t.action}
           {@const a = t.action}
           <button class="action" onmousedown={keepFocus} onclick={() => close(t.id, a.run)}>{a.label}</button>
@@ -93,19 +97,27 @@
     flex-direction: column;
     gap: var(--space-2);
   }
+  /* Two rows: the icon, the title, the action and close on the first (centred on one another); the detail on the
+     second, from the title's left edge to the toast's padding. */
   .toast {
     pointer-events: auto;
-    display: flex;
-    align-items: flex-start;
-    gap: 12px;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto auto;
+    align-items: center;
+    column-gap: 12px;
+    row-gap: 2px;
     padding: var(--space-3) var(--space-2) var(--space-3) var(--space-3);
     border-radius: var(--radius-lg);
     background: var(--bg-overlay);
     box-shadow: var(--shadow-lg);
   }
+  /* No action: three columns, so the close button keeps its place with no empty gap before it. */
+  .toast:not(:has(.action)) {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+  }
   .icon {
+    grid-row: 1;
     display: flex;
-    padding-top: 2px;
     color: var(--text-secondary);
   }
   .success .icon {
@@ -117,25 +129,28 @@
   .info .icon {
     color: var(--info-text);
   }
-  .text {
-    flex: 1;
-    min-width: 0;
-    display: grid;
-    gap: 2px;
-  }
+  /* Title on line 1 (13/500): a run's name, which may break at its hyphens but never mid-word. */
   .title {
+    grid-row: 1;
+    grid-column: 2;
+    min-width: 0;
     font-weight: var(--weight-medium);
   }
-  /* Title on line 1 (13/500), the detail on line 2 at 12 px secondary. */
+  /* The detail on line 2 at 12 px secondary, under the title and running on under the action. */
   .detail {
+    grid-row: 2;
+    grid-column: 2 / -1;
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
     color: var(--text-secondary);
+    text-wrap: pretty;
     overflow-wrap: anywhere;
   }
   /* A toast's action is a secondary button in ink ("Open run"): lime is the page's one primary, and an action is not
      a status, so it takes neither the accent nor the toast's hue (DESIGN_DIRECTION §2.6). */
   .action {
+    grid-row: 1;
+    grid-column: 3;
     flex-shrink: 0;
     height: var(--control-sm);
     padding: 0 var(--space-2);
@@ -150,6 +165,8 @@
     background: color-mix(in srgb, var(--bg-raised), var(--text-primary) 4%);
   }
   .close {
+    grid-row: 1;
+    grid-column: -2;
     position: relative;
     display: grid;
     place-items: center;
@@ -171,12 +188,6 @@
   /* Touch: both buttons are real 44 px boxes side by side (no invisible targets overlapping), pulled into the toast's
      padding so the card keeps its height. */
   @media (pointer: coarse) {
-    .toast {
-      align-items: center;
-    }
-    .icon {
-      align-self: flex-start;
-    }
     .action,
     .close {
       height: 44px;

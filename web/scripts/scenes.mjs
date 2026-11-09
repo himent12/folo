@@ -2,8 +2,10 @@
 // (default: dark + light, desktop + mobile). `setup(page)` drives the UI into the state before the shot.
 // `search` adds query params to the page URL (e.g. `scenario=empty` for the mock), next to `mock=1`.
 
-/** @typedef {{ name: string, path: string, themes?: ('dark' | 'light')[], viewports?: ('desktop' | 'laptop' | 'tablet' | 'mobile')[], advance?: number, search?: string,
- *   fullPage?: boolean, keepScroll?: boolean, setup?: (page: import('playwright-core').Page, ctx: { vp: string, theme: string }) => Promise<void> }} Scene */
+/** @typedef {{ name: string, path: string, themes?: ('dark' | 'light')[], viewports?: ('desktop' | 'laptop' | 'tablet' | 'mobile' | 'small')[], advance?: number, search?: string,
+ *   fullPage?: boolean, keepScroll?: boolean, touch?: false, setup?: (page: import('playwright-core').Page, ctx: { vp: string, theme: string }) => Promise<void> }} Scene */
+// `touch: false` keeps a scene out of --qa's coarse-pointer pass over phone states: a scene about a keyboard feature
+// (shortcuts) or one that sets up touch itself (the touch hint).
 
 /**
  * Advances the page's fake clock until `selector` is visible (the mock's latency runs on that clock).
@@ -275,6 +277,25 @@ export const scenes = [
       await page.locator('.amp .switch').click();
       await page.locator('.summary details.cli > summary').click();
       await page.locator('.summary details.cli').scrollIntoViewIfNeeded();
+      // The estimate for these settings lands (300 ms after the last change, then the server's answer), so the Summary
+      // is current; run-new-estimate-updating shows the moment before.
+      await page.clock.runFor(1000);
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // The settings just changed and their estimate is still out: the last answer stays, dimmed to tertiary in the
+    // Summary and the dock, and the basis line reads "Updating…" with a spinner (a figure is current or marked as not).
+    name: 'run-new-estimate-updating',
+    path: '/runs/new',
+    viewports: ['desktop', 'laptop', 'mobile'],
+    setup: async (page) => {
+      await until(page, 'input#name');
+      await page.clock.runFor(1000);
+      await until(page, '.summary .est-how summary');
+      if (await page.locator('#arch-pick').isVisible()) await page.locator('#arch-pick button', { hasText: 'N' }).click();
+      else await page.locator('input[name="arch"][value="folo-n"]').check({ force: true });
+      await until(page, '.est-how.stale');
       await page.mouse.move(0, 0);
     },
   },
@@ -298,8 +319,8 @@ export const scenes = [
   },
   {
     // Server PR #140: a POST refused with `501 not_supported` (the server restarted without tensor cores after the page
-    // loaded): the server's words at the Mixed precision field, never a toast, and, from the capabilities read again,
-    // the switch off with the way to turn tensor cores back on.
+    // loaded): never a toast; from the capabilities read again, the switch off and held off, so the refusal is answered
+    // and the field says quietly why and how to turn tensor cores back on (no danger line, no button repeating Start).
     name: 'run-new-amp-refused',
     path: '/runs/new',
     search: 'scenario=amp-refused',
@@ -309,7 +330,6 @@ export const scenes = [
       await until(page, 'input#amp');
       await page.locator('.amp .switch').click();
       await page.locator('form.layout').evaluate((f) => /** @type {HTMLFormElement} */ (f).requestSubmit());
-      await until(page, '#amp-error');
       await until(page, '#amp-why');
       await page.clock.runFor(1000);
       await page.mouse.move(0, 0);
@@ -451,7 +471,8 @@ export const scenes = [
   // One run trained 150 epochs, the others 23 to 61: the x axis defaults to "By progress" (the header says why, "one run
   // trained far longer"), so the three shorter runs are not squeezed into the first 40 % of an epoch axis; each line ends
   // in its run's status mark.
-  { name: 'run-compare', path: '/runs/compare?ids=run_7d1e,run_c19a,run_5be3,run_a2f0', viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
+  // `small` (320 px): the phone control row must hold at the narrowest phone too, its values whole.
+  { name: 'run-compare', path: '/runs/compare?ids=run_7d1e,run_c19a,run_5be3,run_a2f0', viewports: ['desktop', 'laptop', 'tablet', 'mobile', 'small'] },
   {
     // Phones: the automatic axis's reason opened from the ⓘ beside the axis control, in place under the controls (the
     // legend and the plot move down, never covered).
@@ -466,28 +487,30 @@ export const scenes = [
     },
   },
   {
-    // Phones: the y axis's choice (Fit / From 0) in How to read this, the control row having no room; From 0 chosen,
-    // so the plot shows the whole climb and the y caption no floor.
+    // Phones: the y axis's choice (Fit / From 0) in How to read this, the control row having no room. By progress a
+    // phone opens on From 0 (the whole climb); Fit chosen by hand, so the plot starts at its floor and says so.
     name: 'run-compare-yaxis-phone',
     path: '/runs/compare?ids=run_7d1e,run_c19a,run_5be3,run_a2f0',
     viewports: ['mobile'],
     setup: async (page) => {
       await until(page, '.chip .key');
       await page.locator('details.about > summary').click();
-      await page.locator('.about-axis').getByRole('radio', { name: 'From 0' }).click();
+      await page.locator('.about-axis').getByRole('radio', { name: 'Fit' }).click();
       await page.mouse.move(0, 0);
     },
   },
   {
     // "By epoch", chosen by hand over the default "By progress": one epoch scale to the longest plan. On a tablet the
-    // header keeps one layout whatever the axis (the qualifier wraps under the metric tabs, the control on their row).
+    // header keeps one layout whatever the axis (the qualifier wraps under the metric tabs, the control on their row);
+    // a phone picks it in its compact X axis select.
     name: 'run-compare-epoch',
     path: '/runs/compare?ids=run_7d1e,run_c19a,run_5be3,run_a2f0',
     fullPage: false,
     viewports: ['desktop', 'tablet', 'mobile'],
-    setup: async (page) => {
+    setup: async (page, { vp }) => {
       await until(page, '.chip .key');
-      await page.getByRole('radio', { name: 'By epoch' }).click();
+      if (vp === 'mobile') await page.getByRole('combobox', { name: 'X axis' }).selectOption('epoch');
+      else await page.getByRole('radio', { name: 'By epoch' }).click();
       await page.mouse.move(0, 0);
     },
   },
@@ -567,11 +590,12 @@ export const scenes = [
   // A queued run, first of two waiting: its place, what it waits for and when it should start lead; from 768 px up the
   // config beside the queue and one quiet list of what the run will have (no empty frames). Phones keep their sections.
   { name: 'run-queued', path: '/runs/run_q4n2', viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
-  // Second in the queue (queue control): "2nd in queue", the run in front of it, and Start next (it never interrupts the
-  // live run, so not "now").
+  // Second in the queue (queue control): "2nd in queue", when it should start ("Starts in about …", each run in front with
+  // its own time), and Start next (it never interrupts the live run, so not "now").
   { name: 'run-queued-second', path: '/runs/run_q7c5', viewports: ['desktop', 'laptop', 'tablet', 'mobile'], setup: (page) => until(page, '.callout button') },
   {
-    // The queued run's ⋯: Move up (it is last, so no Move down), then Remove from queue, last under a hairline.
+    // The queued run's ⋯: the queue's one action set, as on its Runs row: Start next, Move up (it is last, so no Move
+    // down), then Remove from queue, last under a hairline.
     name: 'run-queued-menu',
     path: '/runs/run_q7c5',
     fullPage: false,
@@ -687,6 +711,7 @@ export const scenes = [
     name: 'chart-touch-hint',
     path: '/runs/compare?ids=run_7d1e,run_c19a,run_5be3,run_a2f0',
     fullPage: false,
+    touch: false,
     viewports: ['mobile'],
     setup: async (page) => {
       const cdp = await page.context().newCDPSession(page);
@@ -1751,6 +1776,7 @@ export const scenes = [
   {
     // Single-key shortcuts turned off in Settings; the dialog (from the Settings button) says so.
     name: 'shortcuts-off',
+    touch: false,
     path: '/settings',
     fullPage: false,
     themes: ['light'],

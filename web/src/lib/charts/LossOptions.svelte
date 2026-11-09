@@ -1,8 +1,16 @@
 <script lang="ts" module>
-  export type Smoothing = '0' | '0.6' | '0.9' | '0.97';
+  export type Smoothing = '0' | '0.6' | '0.9' | '0.98';
   export type Scale = 'lin' | 'log';
 
-  /** The trigger's text: what the chart shows now, e.g. "EMA 0.9 · Log". */
+  /**
+   * The smoothing a per-step loss opens with: an EMA weight is per step, so 0.9 averages ~10 steps, a fraction of an
+   * epoch, and the line kept the batch-to-batch noise (round 27: "EMA 0.9 still looks raw"); 0.98 averages ~50, so the
+   * trend and the terms' gaps read while the mosaic-off drop still shows within an epoch or two. The raw last step is
+   * always stated beside it (the Loss tab's "raw · smoothed").
+   */
+  export const DEFAULT_SMOOTHING: Smoothing = '0.98';
+
+  /** The trigger's text: what the chart shows now, e.g. "EMA 0.98 · Log". */
   export function lossSummary(smoothing: Smoothing, scale: Scale): string {
     return `${smoothing === '0' ? 'Raw' : `EMA ${smoothing}`} · ${scale === 'log' ? 'Log' : 'Linear'}`;
   }
@@ -10,7 +18,7 @@
 
 <script lang="ts">
   /**
-   * The loss chart's one control: a compact button naming the current view ("EMA 0.9 · Log") that opens a small panel
+   * The loss chart's one control: a compact button naming the current view ("EMA 0.98 · Log") that opens a small panel
    * with the two choices behind it, smoothing and y scale, as native radio groups (arrow keys move within a group, Tab
    * between them). On wider screens the panel is a non-modal popover: Escape, Tab away or a click outside closes it
    * and Escape returns focus to the button. On phones it is the shared modal sheet (ui/Dialog: one dismiss, its Close,
@@ -38,7 +46,7 @@
     { value: '0', label: 'Raw' },
     { value: '0.6', label: 'EMA 0.6' },
     { value: '0.9', label: 'EMA 0.9' },
-    { value: '0.97', label: 'EMA 0.97' },
+    { value: '0.98', label: 'EMA 0.98' },
   ];
   const SCALE: { value: Scale; label: string }[] = [
     { value: 'log', label: 'Log' },

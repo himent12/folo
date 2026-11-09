@@ -1,16 +1,20 @@
-// Direct labels at the ends of lines (comparisons). With a gutter (the column right of the plot, every chart's case): a
-// label sits right beside its line's end marker when a spot there covers no curve and no other label (or, failing
-// that, only its own line); every other label goes into the gutter column (`stack`), as do a line that ends at the
-// plot's right edge and one that has ended (`gutter`: failed, stopped), like the completed run's. The column is a list
-// in the order of the lines' last heights, each label in its own GUTTER_SLOT (14 px) at its line's last height where it
-// can be, so two lines ending together get neighbouring labels with no leaders. A leader is drawn only inside the
-// gutter, where no line runs, from an edge line's end to its moved label; a line ending inside the plot is read by the
-// height of its gutter label, never by a leader across the lines between (round 26: "shapes-hard-m · failed" above
-// "fasteners-s · live", its leader through that label and the blue line). Labels in the plot keep at least LABEL_GAP
-// (12 px) between their drawn boxes and from the column, a box being the label's measured width by its 16 px line
-// (`LABEL_H`). Other runs' lines are obstacles with a margin: a label in the plot keeps CLEAR (6 px) off every line but
-// its own. Without a gutter, labels step further out on leaders, then to the free height nearest their end, and
-// last to the clear spot whose leader crosses the fewest other lines (`lastResort`, a bounded search). Curves are
+// Direct labels at the ends of lines (comparisons). **A line's label sits where the line ends.** With a gutter (the
+// column right of the plot, every chart's case): a label sits right beside its line's end marker when a spot there
+// covers no curve and no other label (or, failing that, only its own line), a line that has ended short of the plot's
+// edge (failed, stopped) included, so it is read where the line stops (round 27: "shapes-hard-s · stopped" ending at
+// 63 % was labelled at 100 %). Every other label goes into the gutter column (`stack`), as does a line that ends at
+// the plot's right edge. The column is a list in the order of the lines' last heights, each label in its own
+// GUTTER_SLOT (its whole 16 px line) at its line's last height where it can be, so two lines ending together get
+// neighbouring labels that never touch, with no leaders. A leader is drawn only inside the gutter, where no line runs,
+// from an edge line's end to its moved label. A line ending inside the plot whose label could not sit beside its end
+// is keyed instead (`detached`: the caller draws the line's swatch, its hue and dash, before the name, KEY_W), never
+// tied by a leader across the lines between (round 26: "shapes-hard-m · failed" above "fasteners-s · live", its leader
+// through that label and the blue line). A column taller than the plot keeps the labels that come first and folds the
+// rest into one "+N more" entry (`MORE_ID`), so no label ever leaves the bounds. Labels in the plot keep at least
+// LABEL_GAP (12 px) between their drawn boxes and from the column, a box being the label's measured width by its 16 px
+// line (`LABEL_H`). Other runs' lines are obstacles with a margin: a label in the plot keeps CLEAR (6 px) off every
+// line but its own. Without a gutter, labels step further out on leaders, then to the free height nearest their end,
+// and last to the clear spot whose leader crosses the fewest other lines (`lastResort`, a bounded search). Curves are
 // tested through an index by x (`Obstacles`), and `memoPlaceEndLabels` places again only when what it places changes.
 
 export interface EndPoint {
@@ -23,11 +27,6 @@ export interface EndPoint {
   curve?: number;
   /** The label's measured width, px; `labelWidth` estimates it when absent. */
   w?: number;
-  /**
-   * Label this line in the gutter column at its last height, never beside its end inside the plot: a line that has
-   * ended (failed, stopped) is read with the completed ones in the column right of the plot (`GUTTER_SLOT`).
-   */
-  gutter?: boolean;
 }
 
 export interface Placed {
@@ -39,13 +38,16 @@ export interface Placed {
   /** The line's end the label names, in pixels: a caller draws a leader from it when the label sits away from it. */
   ax: number;
   ay: number;
-  /** The label's width, px (`labelWidth`). */
+  /** The label's width, px (`labelWidth`), its key (KEY_W) included when `detached`. */
   w: number;
   /**
    * In the gutter column for a line that ends inside the plot: the label sits at its line's last height and has no
-   * leader, which would cross the lines between its end and the gutter (`leaderOf` returns null).
+   * leader, which would cross the lines between its end and the gutter (`leaderOf` returns null). It is keyed instead:
+   * the caller draws the line's swatch (its hue and dash pattern) in the first KEY_W px and the name after it.
    */
   detached?: boolean;
+  /** The column's "+N more" entry (`MORE_ID`, a plot too short for every label): the ids of the lines it stands for. */
+  more?: string[];
 }
 
 export interface PlaceOptions {
@@ -72,10 +74,20 @@ export const END_LABELS_MIN = 560;
 export const CLEAR = 6;
 
 /**
- * The gutter column's pitch, px: each label in it has its own 14 px slot, a list read top to bottom, so two lines
- * that end together (Loss's box and dfl) are labelled one above the other right at their ends, with no leaders.
+ * The gutter column's pitch, px: each label in it has its own slot, its whole 16 px line (`LABEL_H`), a list read top
+ * to bottom, so two lines that end together (Loss's box and dfl) are labelled one above the other right at their ends
+ * with no leaders, and two labels' boxes never overlap (round 27: at a 14 px pitch "box" and "dfl" read as touching).
  */
-export const GUTTER_SLOT = 14;
+export const GUTTER_SLOT = 16;
+
+/** The key before a keyed (`detached`) gutter label, px: the line's 12 px swatch and 6 px to the name. */
+export const KEY_W = 18;
+
+/** The id of the column's "+N more" entry, which stands for the labels a plot too short for its column leaves out. */
+export const MORE_ID = '…more';
+
+/** How many labels the gutter column of a plot `px` tall holds, one GUTTER_SLOT apart, each box inside the bounds. */
+export const columnCapacity = (px: number) => (px < LABEL_H ? 0 : Math.floor((px - LABEL_H) / GUTTER_SLOT + 1e-9) + 1);
 
 /** A label whose box is further than this (px) from its line's end marker gets a leader. */
 const BESIDE = 8;
@@ -282,7 +294,8 @@ const TRIES = 400;
  * Places labels in rounds, nearest spots first: every label tries its near spots before any label takes a spot
  * further out, so one crowded line cannot take the spot another line's label needed. Within a round the caller's
  * order is the priority. `curves` are every drawn line in pixels; `bounds` is where labels may go (the plot plus the
- * right gutter); `gutter`, the x where the plot ends and the gutter starts. Output follows the input order.
+ * right gutter); `gutter`, the x where the plot ends and the gutter starts. Output follows the input order, a
+ * column's "+N more" entry (`MORE_ID`) last.
  */
 export function placeEndLabels(
   ends: readonly EndPoint[],
@@ -296,6 +309,8 @@ export function placeEndLabels(
   const taken: Box[] = [];
   const spots = new Map<number, Box>();
   const placed = new Map<number, Placed>();
+  /** The column's "+N more" entry, when the plot is too short for every label in it (`stack`). */
+  let moreEntry: Placed | undefined;
   const clear = Math.max(opts.clear ?? CLEAR, pad);
   // Labels stay inside the bounds and the furthest margin is `clear`: the index covers that much either side.
   const obstacles = new Obstacles(curves, bounds.x0 - clear - COL, bounds.x1 + clear + COL);
@@ -342,8 +357,9 @@ export function placeEndLabels(
   };
   const LEVELS = 5;
   // With a gutter, a label goes beside its line's end or into the gutter column (`stack`), nothing else: a line that
-  // ends at the plot's right edge, or has ended (`gutter`: failed, stopped), straight into the column.
-  const toColumn = (e: EndPoint) => gutter !== undefined && (e.x >= gutter - 1 || !!e.gutter);
+  // ends at the plot's right edge straight into the column. A line that has ended inside the plot (failed, stopped) is
+  // labelled beside its end like any other.
+  const toColumn = (e: EndPoint) => gutter !== undefined && e.x >= gutter - 1;
   // Rounds: each level clear of every curve; then the near spots allowing a label over its own line (never
   // another's). Without a gutter the further levels step out on leaders; with one only level 0 (beside the marker).
   const rounds: ((e: EndPoint, w: number) => Box | undefined)[] = [];
@@ -368,7 +384,8 @@ export function placeEndLabels(
     // leader across other lines (round 26: "shapes-hard-m · failed" above "fasteners-s · live", its leader through
     // that label and the blue line).
     stack(gutter);
-    return ends.flatMap((_, i) => placed.get(i) ?? []);
+    const out = ends.flatMap((_, i) => placed.get(i) ?? []);
+    return moreEntry ? [...out, moreEntry] : out;
   }
   // Whatever is still without a spot: the free height nearest its line's end, within reach.
   run((e, w) => {
@@ -471,24 +488,37 @@ export function placeEndLabels(
    * whose box reaches into the column and comes within LABEL_GAP of it joins the column instead, so no two labels
    * ever overlap. Labels sit level with their ends where they can; a line ending at the plot's edge whose label had to
    * move gets a short leader inside the gutter, where no line runs; a line that ends inside the plot gets none
-   * (`detached`), as it would cross the lines between.
+   * (`detached`), as it would cross the lines between, and is keyed by its swatch instead (KEY_W). A column with more
+   * labels than the plot holds (`columnCapacity`) keeps the first in the caller's order (its priority) and folds the
+   * rest into one "+N more" entry, ordered last, so every label stays inside the bounds (round 27 review: 30 labels in
+   * 300 px put the first one's centre at −114 px).
    */
   function stack(x: number) {
     const members = new Set(ends.map((_, i) => i).filter((i) => !placed.has(i)));
     if (!members.size) return;
     const lo = bounds.y0 + H / 2;
     const hi = bounds.y1 - H / 2;
-    const width = (i: number) => ends[i]!.w ?? labelWidth(ends[i]!.label);
+    const cap = columnCapacity(bounds.y1 - bounds.y0);
+    /** Index -1 is the "+N more" entry. */
+    const edge = (i: number) => i >= 0 && ends[i]!.x >= x - 1;
+    const width = (i: number) => (i < 0 ? labelWidth(`+${members.size} more`) : (ends[i]!.w ?? labelWidth(ends[i]!.label)) + (edge(i) ? 0 : KEY_W));
     for (;;) {
-      const order = [...members].sort((a, b) => ends[a]!.y - ends[b]!.y || a - b);
+      // Over capacity: the members after the first cap - 1 (the caller's order) fold into the entry at the column's foot.
+      const byPriority = [...members].sort((a, b) => a - b);
+      const kept = byPriority.length > cap ? byPriority.slice(0, Math.max(0, cap - 1)) : byPriority;
+      const folded = byPriority.slice(kept.length);
+      const yOf = (i: number) => (i < 0 ? hi : ends[i]!.y);
+      const order = [...kept].sort((a, b) => yOf(a) - yOf(b) || a - b);
+      if (folded.length && cap > 0) order.push(-1);
       type Group = { items: number[]; sum: number };
+      // A group of at most `cap` labels always fits between lo and hi.
       const top = (g: Group) => {
         const n = g.items.length;
-        return Math.min(Math.max(g.sum / n - ((n - 1) * GUTTER_SLOT) / 2, lo), hi - (n - 1) * GUTTER_SLOT);
+        return Math.max(lo, Math.min(Math.max(g.sum / n - ((n - 1) * GUTTER_SLOT) / 2, lo), hi - (n - 1) * GUTTER_SLOT));
       };
       const groups: Group[] = [];
       for (const i of order) {
-        groups.push({ items: [i], sum: Math.min(Math.max(ends[i]!.y, lo), hi) });
+        groups.push({ items: [i], sum: Math.min(Math.max(yOf(i), lo), hi) });
         // Merge backwards while the newest group runs into the one above it.
         while (groups.length > 1) {
           const b = groups[groups.length - 1]!;
@@ -499,12 +529,11 @@ export function placeEndLabels(
       }
       const ys = new Map<number, number>();
       for (const g of groups) g.items.forEach((i, k) => ys.set(i, top(g) + k * GUTTER_SLOT));
-      const edge = (i: number) => ends[i]!.x >= x - 1;
       // Beside the line's end when every edge label sits near its own; further out when any needs a leader, so it has
       // room. One column, one left edge, inside the bounds.
       const near = (i: number) => leaderOf({ id: '', label: '', x: x + 6, y: ys.get(i)!, ax: ends[i]!.x, ay: ends[i]!.y, w: width(i) }) === null;
       const lead = [...ys.keys()].some((i) => edge(i) && !near(i));
-      const x0 = Math.max(x, Math.min(x + (lead ? (opts.lead ?? 6) : 6), bounds.x1 - Math.max(...[...members].map(width))));
+      const x0 = Math.max(x, Math.min(x + (lead ? (opts.lead ?? 6) : 6), bounds.x1 - Math.max(...[...ys.keys()].map(width))));
       const boxes = new Map<number, Box>();
       for (const [i, y] of ys) boxes.set(i, { x0, y0: y - H / 2, x1: x0 + width(i), y1: y + H / 2 });
       // Labels beside their markers that the column runs into join it.
@@ -522,7 +551,15 @@ export function placeEndLabels(
         }
         continue;
       }
-      for (const [i, b] of boxes) take(i, b, !edge(i));
+      for (const [i, b] of boxes) {
+        if (i >= 0) {
+          take(i, b, !edge(i));
+          continue;
+        }
+        const y = (b.y0 + b.y1) / 2;
+        taken.push(b);
+        moreEntry = { id: MORE_ID, label: `+${folded.length} more`, x: b.x0, y, ax: b.x0, ay: y, w: b.x1 - b.x0, detached: true, more: folded.map((k) => ends[k]!.id) };
+      }
       return;
     }
   }
@@ -537,7 +574,7 @@ export function memoPlaceEndLabels(): typeof placeEndLabels {
   let last: { args: Parameters<typeof placeEndLabels>; out: Placed[] } | undefined;
   const samePt = (a: Pt, b: Pt) => a.x === b.x && a.y === b.y;
   const sameEnd = (a: EndPoint, b: EndPoint) =>
-    a.id === b.id && a.label === b.label && a.x === b.x && a.y === b.y && a.curve === b.curve && a.w === b.w && a.gutter === b.gutter;
+    a.id === b.id && a.label === b.label && a.x === b.x && a.y === b.y && a.curve === b.curve && a.w === b.w;
   const sameList = <T>(a: readonly T[], b: readonly T[], eq: (p: T, q: T) => boolean) =>
     a === b || (a.length === b.length && a.every((v, i) => eq(v, b[i]!)));
   const same = (a: Parameters<typeof placeEndLabels>, b: Parameters<typeof placeEndLabels>) =>

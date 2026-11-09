@@ -8,10 +8,12 @@
 // After each scene's setup, the QA lists every element whose content is wider than its box (and the page wider than the
 // viewport), skipping deliberate scrollers, every fact an ellipsis cuts (a `ui/Meta` item or a `data-fact` span inside a
 // truncated box, or clipped past its box without one: DESIGN_DIRECTION §2.3, never cut a fact), and every blank section: a selected tab or section picker whose content
-// renders nothing, a page with almost nothing under its header. The list prints at the end and goes to qa.txt.
+// renders nothing, a page with almost nothing under its header, every control another element paints over, and every
+// select too narrow for its current value. The list prints at the end and goes to qa.txt.
 // --qa runs only those checks, where phone layouts break: every scene at the tablet and mobile sizes it lists, in dark
-// (or the one theme a scene is made for), and in light too where the page shows a phone section picker (Run, Model).
-// Each state gets its scene's setup; nothing is captured or saved.
+// (or the one theme a scene is made for), and in light too where the page shows a phone section picker (Run, Model);
+// phone states once more under a coarse pointer (touch: 44 px targets, 16 px field text), where controls grow and
+// rows that fit with a mouse can collide. Each state gets its scene's setup; nothing is captured or saved.
 import { createServer } from 'vite';
 import { chromium } from 'playwright-core';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
@@ -35,6 +37,8 @@ const VIEWPORTS = {
   // Below the 960 px laptop tier: one column, the section picker, the New run dock.
   tablet: { width: 820, height: 1180 },
   mobile: { width: 390, height: 844 },
+  // The narrowest phone a layout must hold (iPhone SE, 1st gen): only the scenes that list it, for --qa's checks.
+  small: { width: 320, height: 640 },
 };
 // Fixed wall clock so relative times ("3 min ago") and the mock's live run are identical every round.
 const FIXED_NOW = new Date('2026-11-08T14:30:00Z');
@@ -175,8 +179,14 @@ async function overflowCheck(page) {
       if (hits.some((o) => o !== h && h.el.contains(o.el) && o.px >= h.px - 1)) continue;
       const d = culprit(h.el);
       if (d && deliberate(h.el, d)) continue;
-      // Nothing inside spills: a positioned ::before / ::after (a 44 px hit area around a small control) is the cause.
-      if (!d && ['::before', '::after'].some((p) => getComputedStyle(h.el, p).position === 'absolute')) continue;
+      // Nothing inside spills: a positioned ::before / ::after (a 44 px hit area around a small control, a touch target
+      // around a small box on a thumbnail) on the box or inside it is the cause.
+      const pseudo = (/** @type {Element} */ e) =>
+        ['::before', '::after'].some((p) => {
+          const ps = getComputedStyle(e, p);
+          return ps.position === 'absolute' && ps.content !== 'none';
+        });
+      if (!d && (pseudo(h.el) || [...h.el.querySelectorAll('*')].slice(0, 3000).some(pseudo))) continue;
       const text = ((d ?? h.el) instanceof HTMLElement ? /** @type {HTMLElement} */ (d ?? h.el).innerText : (d ?? h.el).textContent) ?? '';
       out.push({
         selector: describe(h.el) + (d ? `  [widest: ${describe(d).split(' > ').pop()}]` : ''),
@@ -320,6 +330,103 @@ async function blankCheck(page) {
 }
 
 /**
+ * Covered controls: a control whose own box another element paints over (DESIGN_DIRECTION §12, a control is never
+ * covered by its neighbour; round 27: Model's Band / All curves lost its bottom 6 px to the Trace bar's negative
+ * margin). Every visible button, select, input, tab, radio and segmented group is hit-tested 3 px inside its edges' midpoints and at its
+ * centre; a hit that is neither the control, inside it nor one of its ancestors (a scroller clipping it) covers it.
+ * Not a fault: fixed chrome and overlays (the tab bar, toasts, sheets, popovers), and a sticky bar that is stuck (the
+ * content scrolls under it by design). A neighbour's enlarged hit area (a `::after` over the control) counts, since a
+ * tap there goes to the neighbour.
+ * @param {import('playwright-core').Page} page
+ * @returns {Promise<{ selector: string, text: string }[]>}
+ */
+async function coverCheck(page) {
+  return page.evaluate(() => {
+    /** @type {{ selector: string, text: string }[]} */
+    const out = [];
+    const describe = (/** @type {Element} */ e) => {
+      const cls = [...e.classList].filter((c) => !c.startsWith('svelte-')).slice(0, 2);
+      return `${e.tagName.toLowerCase()}${cls.length ? `.${cls.join('.')}` : ''}`;
+    };
+    const name = (/** @type {Element} */ el) =>
+      (el.getAttribute('aria-label') ?? (el instanceof HTMLElement ? el.innerText : el.textContent) ?? '').replace(/\s+/g, ' ').trim().slice(0, 32);
+    /** Overlays and fixed chrome, and sticky bars stuck at their offset: allowed to lie over content. */
+    const allowed = (/** @type {Element} */ cover) => {
+      for (let e = /** @type {Element | null} */ (cover); e && e !== document.body; e = e.parentElement) {
+        if (e.matches('dialog, [popover], [role=menu], [role=dialog], [role=tooltip]')) return true;
+        const cs = getComputedStyle(e);
+        if (cs.position === 'fixed') return true;
+        if (cs.position === 'sticky') {
+          const top = parseFloat(cs.top);
+          if (Number.isFinite(top) && Math.abs(e.getBoundingClientRect().top - top) < 1.5) return true;
+        }
+      }
+      return false;
+    };
+    // A segmented group's frame (its radiogroup) is part of the control: round 27 cut that, not the radios inside.
+    const controls = document.querySelectorAll(
+      'main button, main select, main input:not([type=hidden]), main [role=tab], main [role=radio], main [role=radiogroup], main a.btn',
+    );
+    for (const el of controls) {
+      if (!el.checkVisibility({ checkVisibilityCSS: true, checkOpacity: true })) continue;
+      const cs = getComputedStyle(el);
+      if (cs.pointerEvents === 'none') continue;
+      const r = el.getBoundingClientRect();
+      if (r.width < 8 || r.height < 8) continue;
+      const inset = 3;
+      const points = [
+        [r.left + r.width / 2, r.top + r.height / 2],
+        [r.left + r.width / 2, r.top + inset],
+        [r.left + r.width / 2, r.bottom - inset],
+        [r.left + inset, r.top + r.height / 2],
+        [r.right - inset, r.top + r.height / 2],
+      ];
+      for (const [x, y] of points) {
+        if (x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) continue;
+        const hit = document.elementFromPoint(x, y);
+        if (!hit || hit === el || el.contains(hit) || hit.contains(el) || allowed(hit)) continue;
+        out.push({ selector: `covered: ${describe(el)} "${name(el)}" under ${describe(hit)} "${name(hit)}"`, text: '' });
+        break;
+      }
+    }
+    return out;
+  });
+}
+
+/**
+ * Cut selects: a closed select whose current value does not fit its field (DESIGN_DIRECTION §12, a select shows its
+ * whole current value at 16 px touch text; round 27: Compare's "mAP50-…" beside the axis toggle). A native select
+ * draws its own text, which no scrollWidth reports, so the selected option's text is measured in the select's font
+ * against the field's content box; a select showing a `short` label (ui/Select) is checked on that label's box.
+ * @param {import('playwright-core').Page} page
+ * @returns {Promise<{ selector: string, text: string }[]>}
+ */
+async function selectCheck(page) {
+  return page.evaluate(() => {
+    /** @type {{ selector: string, text: string }[]} */
+    const out = [];
+    const ctx = document.createElement('canvas').getContext('2d');
+    if (!ctx) return out;
+    for (const el of document.querySelectorAll('main select')) {
+      if (!(el instanceof HTMLSelectElement) || !el.checkVisibility({ checkVisibilityCSS: true, checkOpacity: true })) continue;
+      const name = el.getAttribute('aria-label') ?? '';
+      const shown = el.parentElement?.querySelector('.shown');
+      if (shown instanceof HTMLElement) {
+        if (shown.scrollWidth > shown.clientWidth + 1) out.push({ selector: `cut select: "${name}" shows "${shown.textContent?.trim()}"`, text: '' });
+        continue;
+      }
+      const text = el.selectedOptions[0]?.textContent?.trim() ?? '';
+      if (!text) continue;
+      const cs = getComputedStyle(el);
+      ctx.font = `${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+      const room = el.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+      if (ctx.measureText(text).width > room + 1) out.push({ selector: `cut select: "${name}" shows "${text}"`, text: '' });
+    }
+    return out;
+  });
+}
+
+/**
  * The installed Chrome, else the Chromium `npx playwright-core install chromium` downloads (CI's Linux runners have no
  * Chrome). FOLO_SHOOT_BROWSER=chrome or chromium picks one and fails if it is missing.
  */
@@ -356,14 +463,16 @@ const overflows = [];
  * Opens one scene in one theme and viewport, sets it up, runs both checks and (without --qa) takes the shot.
  * @param {import('./scenes.mjs').Scene} scene
  * @param {'dark' | 'light'} theme
- * @param {'desktop' | 'laptop' | 'tablet' | 'mobile'} vp
+ * @param {'desktop' | 'laptop' | 'tablet' | 'mobile' | 'small'} vp
+ * @param {boolean} [touch] a touch screen (`pointer: coarse`, `hover: none`): --qa's second pass over phone states
  * @returns {Promise<boolean>} whether the page showed a phone section picker
  */
-async function shoot(scene, theme, vp) {
-  const name = `${scene.name}--${theme}--${vp}`;
+async function shoot(scene, theme, vp, touch = false) {
+  const name = `${scene.name}--${theme}--${vp}${touch ? '+touch' : ''}`;
   const context = await browser.newContext({
     viewport: VIEWPORTS[vp],
-    deviceScaleFactor: vp === 'mobile' ? 2 : 1,
+    hasTouch: touch,
+    deviceScaleFactor: vp === 'mobile' || vp === 'small' ? 2 : 1,
     colorScheme: theme === 'light' ? 'light' : 'dark',
     reducedMotion: 'reduce',
   });
@@ -396,12 +505,18 @@ async function shoot(scene, theme, vp) {
       overflows.push({ name, px: 0, ...b });
       console.warn(`${yellow('! blank')} ${name}  ${b.selector}`);
     }
+    // A control another element paints over (a sticky bar pulled up over a header, a neighbour's hit area), and a
+    // select too narrow for its own value.
+    for (const c of [...(await coverCheck(page)), ...(await selectCheck(page))]) {
+      overflows.push({ name, px: 0, ...c });
+      console.warn(`${yellow('! covered')} ${name}  ${c.selector}`);
+    }
     picker = await page.evaluate(() =>
       [...document.querySelectorAll('.phone-pick, [role=radiogroup][aria-label="Show"]')].some((el) => el.checkVisibility({ checkVisibilityCSS: true })),
     );
     count++;
     if (qa) return picker;
-    const full = scene.fullPage ?? vp !== 'mobile';
+    const full = scene.fullPage ?? (vp !== 'mobile' && vp !== 'small');
     // Capture what a user sees: from the top, with no stray focus ring on the skip link. For full-page shots the
     // viewport grows to the document's height, so sticky and fixed bars (top bar, tab bar, docks) sit where they
     // belong instead of wherever the viewport happened to be when the image was stitched.
@@ -437,8 +552,8 @@ async function shoot(scene, theme, vp) {
   return picker;
 }
 
-/** --qa's sizes: tablet and mobile; FOLO_QA_SIZES=laptop,tablet (comma-separated) checks others on demand. */
-const qaSizes = (process.env.FOLO_QA_SIZES ?? 'tablet,mobile').split(',').map((v) => v.trim());
+/** --qa's sizes: tablet, mobile and small (the scenes listing it); FOLO_QA_SIZES=laptop,tablet (comma-separated) checks others on demand. */
+const qaSizes = (process.env.FOLO_QA_SIZES ?? 'tablet,mobile,small').split(',').map((v) => v.trim());
 /** --qa's states, run by a small pool below. @type {(() => Promise<void>)[]} */
 const qaJobs = [];
 try {
@@ -460,6 +575,8 @@ try {
       qaJobs.push(async () => {
         if ((await shoot(scene, first, vp)) && first === 'dark' && themes.includes('light')) await shoot(scene, 'light', vp);
       });
+      // A scene about a fine or a coarse pointer in particular (keyboard shortcuts, the touch hint) sets `touch: false`.
+      if ((vp === 'mobile' || vp === 'small') && scene.touch !== false) qaJobs.push(async () => void (await shoot(scene, first, vp, true)));
     }
   }
   // Each state has its own context and paused clock, so --qa runs several at once: FOLO_QA_JOBS, default up to 8 (most
@@ -477,7 +594,7 @@ try {
 
 const secs = Math.round((Date.now() - started) / 1000);
 console.log(qa ? `QA: ${count} scene states checked in ${secs} s` : `${count} shots -> ${outDir} (${secs} s)`);
-// The QA list (overflow and blank sections): printed last, boxed in yellow. The shoot saves it next to the shots and
+// The QA list (overflow, blank sections and covered controls): printed last, boxed in yellow. The shoot saves it next to the shots and
 // never fails on it; --qa fails on it.
 const report = resolve(outDir, only ? `qa-${only.replace(/[^\w-]+/g, '_')}.txt` : 'qa.txt');
 // The pool finishes states out of order: list them in scene order.
@@ -486,10 +603,10 @@ overflows.sort((a, b) => order(a.name) - order(b.name) || a.name.localeCompare(b
 if (overflows.length) {
   const shots = new Set(overflows.map((o) => o.name)).size;
   const wide = overflows.filter((o) => o.px > 0).length;
-  const head = `SHOOT QA: ${wide} element(s) overflow horizontally, ${overflows.length - wide} blank section(s), in ${shots} ${qa ? 'state' : 'shot'}(s)`;
+  const head = `SHOOT QA: ${wide} element(s) overflow horizontally, ${overflows.length - wide} blank section(s) or covered control(s), in ${shots} ${qa ? 'state' : 'shot'}(s)`;
   const lines = overflows.map((o) => {
     const [scene, theme, vp] = o.name.split('--');
-    const what = o.px > 0 ? `+${String(o.px).padStart(4)}px` : ' blank';
+    const what = o.px > 0 ? `+${String(o.px).padStart(4)}px` : o.selector.startsWith('covered') ? 'covered' : o.selector.startsWith('cut select') ? '    cut' : ' blank';
     return `${scene.padEnd(28)} ${theme.padEnd(5)} ${vp.padEnd(7)} ${what}  ${o.selector}${o.text ? `  "${o.text}"` : ''}`;
   });
   if (!qa) writeFileSync(report, [head, ...lines, ''].join(EOL));
@@ -498,7 +615,7 @@ if (overflows.length) {
   if (qa) process.exitCode = 1;
 } else {
   if (!qa) rmSync(report, { force: true });
-  console.log('Shoot QA: nothing overflows horizontally, no blank sections.');
+  console.log('Shoot QA: nothing overflows horizontally, no blank sections, no covered controls.');
 }
 if (failures.length) {
   console.error(`${failures.length} problem(s):\n  ${failures.join('\n  ')}`);

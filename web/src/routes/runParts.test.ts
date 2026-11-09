@@ -27,9 +27,16 @@ describe('Run metrics: lrParts', () => {
 });
 
 describe('Run metrics: mosaicOffText', () => {
-  it("names the hatched end of the bar with the trainer's capped count", () => {
-    expect(mosaicOffText(7)).toBe('Last 7 epochs: mosaic off');
-    expect(mosaicOffText(1)).toBe('Last 1 epoch: mosaic off');
+  it("names the hatched end of the bar with the trainer's capped count, for where the run is", () => {
+    // Ahead of the phase: when it starts, never "mosaic off" as if it were the current state.
+    expect(mosaicOffText(10, 100, 38, true).cap).toBe('Mosaic off after epoch 90');
+    expect(mosaicOffText(10, 100, 38, false).cap).toBe('Mosaic off after epoch 90');
+    // In it, live.
+    expect(mosaicOffText(10, 100, 93, true).cap).toBe('Mosaic off · final 10 epochs');
+    expect(mosaicOffText(1, 20, 19, true).cap).toBe('Mosaic off · final epoch');
+    // Past it.
+    expect(mosaicOffText(7, 15, 15, false).cap).toBe('Last 7 epochs: mosaic off');
+    expect(mosaicOffText(1, 20, 20, false).full).toBe('Last 1 epoch: mosaic off');
   });
 });
 

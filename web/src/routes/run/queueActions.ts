@@ -58,20 +58,36 @@ export const REMOVE_DESCRIPTION = 'It has not started yet, so nothing is lost. Y
 /**
  * A waiting run's queue actions, one set in one order wherever they appear (the Runs row's ⋯ and the run page's):
  * Start next (unless it already is next), Move up, Move down (none at the end they move towards), Remove from queue.
- * A page that already shows one of them as a button leaves it out of its menu (`start: false`, no `remove`), so a menu
- * never repeats a visible button. `position` is its 1-based place, `waiting` how many runs wait.
+ * The set is whole in every menu, even where the page also shows Start next as a button (the run page's callout): an
+ * open menu covers that button, and an object has one action set (DESIGN_DIRECTION §2.13). `position` is its 1-based
+ * place, `waiting` how many runs wait, `remove` opens the one confirm.
  */
 export function queueItems(
   position: number,
   waiting: number,
   training: Pick<Run, 'name'> | null | undefined,
   move: (req: QueueRequest) => void,
-  opts: { start?: boolean; remove?: () => void } = {},
+  remove: () => void,
 ): MenuItem[] {
   const out: MenuItem[] = [];
-  if ((opts.start ?? true) && (position > 1 || !training)) out.push({ label: startLabel(training), icon: ChevronsUp, onclick: () => move({ action: 'start' }) });
+  if (position > 1 || !training) out.push({ label: startLabel(training), icon: ChevronsUp, onclick: () => move({ action: 'start' }) });
   if (position > 1) out.push({ label: 'Move up', icon: ArrowUp, onclick: () => move({ action: 'up' }) });
   if (position < waiting) out.push({ label: 'Move down', icon: ArrowDown, onclick: () => move({ action: 'down' }) });
-  if (opts.remove) out.push({ label: REMOVE_LABEL, icon: X, danger: true, onclick: opts.remove });
+  out.push({ label: REMOVE_LABEL, icon: X, danger: true, onclick: remove });
   return out;
+}
+
+/** A run's expected length: the server's estimate of its settings (seconds, low and high), null where it gives none. */
+export type Length = { lo: number; hi: number } | null;
+
+/**
+ * How long a waiting run waits: what the training run has left (`left`; undefined when nothing trains, null when its
+ * time left is unknown) plus the length of each queued run in front of it. `known: false` when any part is unknown:
+ * the sum is then a floor ("more than 7m"), never an estimate of the whole. Null when no part is known.
+ */
+export function queueWait(left: number | null | undefined, lengths: readonly Length[]): { lo: number; hi: number; known: boolean } | null {
+  const parts: Length[] = [...(left === undefined ? [] : [left === null ? null : { lo: left, hi: left }]), ...lengths];
+  const got = parts.filter((p): p is { lo: number; hi: number } => p !== null);
+  if (!got.length) return null;
+  return { lo: got.reduce((a, p) => a + p.lo, 0), hi: got.reduce((a, p) => a + p.hi, 0), known: got.length === parts.length };
 }

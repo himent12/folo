@@ -106,7 +106,7 @@
     const dsById = new Map<string, Dataset>((datasets.data ?? []).map((d) => [d.id, d]));
     return modelChoices(models.data, (m) => scoreContext(m, runById, dsById));
   });
-  /** The chosen model's score and what it is on, under the select: "mAP 0.606 · shapes-hard, validation split". */
+  /** The chosen model's score and what it is on, under the select: "mAP50-95 0.606 · shapes-hard, validation split". */
   const pickedMeta = $derived(choices.find((c) => c.model.id === modelId)?.meta ?? null);
   const ranked = $derived(choices.map((c) => c.model));
   const queryModel = $derived(router.route.query.get('model'));
@@ -680,7 +680,7 @@
                   in the run's folder), or run it on the server.
                 </p>
               {/if}
-              <div class="nf-actions cta-links">
+              <div class="nf-actions cta-stack">
                 <Button size="sm" variant="primary" icon={FileUp} onclick={() => weightsInput.click()}>Choose .folo file</Button>
                 <Button size="sm" onclick={() => (runOn = 'server')}>Run on the server</Button>
               </div>
@@ -1152,12 +1152,16 @@
   }
   /* Why a Run on choice is off, said once on the image panel's status line, at its right end, before an image is in
      (its tip says it at the control). */
+  /* It yields to the control beside it: on a phone under a coarse pointer the 44 px segments leave it less than a line,
+     so it wraps (right-aligned, at a space) rather than run past the panel's edge. */
   .vbar-note {
+    min-width: 0;
     margin-left: auto;
     padding-right: var(--space-2);
     font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
     color: var(--text-tertiary);
-    white-space: nowrap;
+    text-align: right;
   }
   .show {
     display: flex;
@@ -1835,11 +1839,6 @@
     }
     .pg-tools .runon {
       justify-content: space-between;
-    }
-    /* The ways out (ui/Button's .cta-links): the primary full width, 44 px, the others one row of text links under it. */
-    .notice :global(.acts),
-    .nf-actions {
-      gap: var(--space-1) var(--space-4);
     }
     /* The image goes edge to edge; its bars keep the 16 px gutter inside. */
     .viewer.loaded {

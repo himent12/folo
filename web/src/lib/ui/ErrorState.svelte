@@ -61,10 +61,11 @@
         {#if code}<span class="line">{code}</span>{/if}
       </details>
     {/if}
-    <!-- The ways out sit under the cause they answer, not at the far edge of the panel; on phones one button and a row
-         of text links (ui/Button's .cta-links). -->
+    <!-- The ways out sit under the cause they answer, not at the far edge of the panel: one row of buttons of one height,
+         centred on each other (Connection settings a ghost button beside Retry, never a text link off its baseline);
+         on phones the one remedy layout (ui/Button's .cta-stack), each a full-width 44 px button, the primary first. -->
     {#if retry || offline || actions}
-      <div class="acts cta-links">
+      <div class="acts cta-stack">
         {@render actions?.()}
         {#if retry}<Button size="sm" icon={RotateCw} onclick={retry}>Retry</Button>{/if}
         {#if offline}<Button size="sm" variant="ghost" icon={Settings} href={href('/settings')}>Connection settings</Button>{/if}
@@ -161,12 +162,8 @@
   .acts {
     display: flex;
     flex-wrap: wrap;
+    align-items: center;
     gap: var(--space-2);
     margin-top: var(--space-2);
-  }
-  @media (max-width: 767px) {
-    .acts {
-      gap: var(--space-1) var(--space-4);
-    }
   }
 </style>

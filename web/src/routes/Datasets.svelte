@@ -196,7 +196,7 @@
                 <span class="m-meta num"><Meta><span>{num(d.splits.train)} train</span><span>{num(d.splits.val)} val</span><span>{num(d.splits.test)} test</span></Meta></span>
               </span>
             </a>
-            {#if d.stats}<span class="m-side"><span class="m-strip"><ClassStrip counts={d.stats.class_counts} classes={d.classes} height={4} /></span></span>{/if}
+            {#if d.stats}<span class="m-side"><span class="m-strip"><ClassStrip counts={d.stats.class_counts} classes={d.classes} height={4} named /></span></span>{/if}
           </li>
         {/each}
       </ul>
@@ -207,7 +207,7 @@
           <li>
             <span class="row-sk">
               <span class="m-main"><Skeleton w="55%" h="14px" /><Skeleton w="45%" h="10px" /><Skeleton w="65%" h="10px" /></span>
-              <span class="m-side"><Skeleton w="64px" h="4px" /></span>
+              <span class="m-side"><Skeleton w="104px" h="4px" /></span>
             </span>
           </li>
         {/each}
@@ -319,8 +319,9 @@
       gap: var(--space-1);
       flex-shrink: 0;
     }
+    /* Wide enough for the strip's "Class balance" words over it (no column heading names it on phones). */
     .m-strip {
-      width: 64px;
+      width: 104px;
     }
   }
 </style>

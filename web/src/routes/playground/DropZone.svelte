@@ -90,8 +90,8 @@
     background: var(--bg-inset);
     transition: background-color var(--dur-fast) var(--ease-standard);
   }
-  /* The drop target: a sparse state's compact composition (DESIGN_DIRECTION 8) at every width, 280–480 px tall, so the
-     samples under it sit in the first screen. Beside the rail (from 1024 px) it is 480 px where the window has room
+  /* The drop target: a sparse state's compact composition (DESIGN_DIRECTION 8) at every width, so the samples under it
+     sit in the first screen. Beside the rail (from 1024 px) it is 480 px where the window has room
      for it and the samples under the page header (about 420 px of chrome), and gives way in a shorter one. Its message
      is centred between the corners. */
   .finder {
@@ -235,9 +235,16 @@
     font-size: var(--type-sm-size);
     line-height: 16px;
   }
-  @media (max-width: 1023px) {
+  /* Tablets: no rail beside it, so the whole empty frame (the prompt and the sample strip) is capped at about 360 px
+     and Thresholds, Classes and Timing start in the first screen. The finder is as tall as its message and buttons;
+     the frame grows only once an image is loaded (Playground's stage). */
+  @media (min-width: 768px) and (max-width: 1023px) {
+    .zone {
+      padding-bottom: var(--space-4);
+    }
     .finder {
-      height: clamp(280px, 40dvh, 480px);
+      height: auto;
+      padding: var(--space-6);
     }
   }
   @media (max-width: 767px) {

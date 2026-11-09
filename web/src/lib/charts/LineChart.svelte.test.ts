@@ -327,6 +327,25 @@ describe('LineChart round 18', () => {
     unmount(c);
   });
 
+  it("keys a label the column holds for a line that ended inside the plot: the line's swatch, then its name", () => {
+    // A failed dotted run ending inside a bundle of flat lines: no clear spot beside its end, so it goes to the column.
+    const flat = (k: number) => ({ id: `l${k}`, label: `l${k}`, color: 'var(--chart-1)', endLabel: false as const, points: pts(() => 0.3 + k * 0.03) });
+    const series = [
+      ...Array.from({ length: 12 }, (_, k) => flat(k)),
+      { id: 'f', label: 'shapes-hard-m', color: 'var(--chart-4)', pattern: 'dot' as const, end: 'failed' as const, points: pts((x) => 0.45 + x / 2000).slice(0, 15) },
+    ];
+    const { target, c } = mountAt({ series, label: 'cmp', endLabels: true, endDots: true, xDomain: [0, 29], yDomain: [0, 1] }, 900);
+    const label = [...target.querySelectorAll<SVGElement>('.end-label')].find((t) => t.textContent === 'shapes-hard-m · failed')!;
+    const key = target.querySelector<SVGElement>('line.end-key')!;
+    expect(key).toBeTruthy();
+    expect(key.style.stroke).toBe('var(--chart-text-4)');
+    expect(key.style.strokeDasharray).toBeTruthy();
+    expect(Number(label.getAttribute('x'))).toBe(Number(key.getAttribute('x1')) - 1 + 18);
+    expect(Number(key.getAttribute('y1'))).toBe(Number(label.getAttribute('y')));
+    expect(target.querySelector('line.leader')).toBeNull();
+    unmount(c);
+  });
+
   it('keeps long labels off a narrow plot', () => {
     const series = [{ id: 'a', label: 'fasteners-s', color: 'red', points: pts((x) => x / 30) }];
     const { target, c } = mountAt({ series, label: 'cmp', endLabels: true }, 340);
@@ -448,13 +467,29 @@ describe('LineChart end marks (DESIGN_DIRECTION §2.4: one thing per mark)', () 
     unmount(c);
   });
 
-  it("draws a failed run's cross in the danger ink in a comparison too", () => {
+  it("draws a failed run's cross in its own hue in a comparison: the glyph says it failed, the hue whose run it is", () => {
+    // Round 27: Compare's failed teal run ended in a danger-red cross, which on a plot of hues read as another run.
     const series = [
-      { id: 'a', label: 'a', color: 'red', end: 'failed' as const, points: pts(10) },
-      { id: 'b', label: 'b', color: 'blue', points: pts(30) },
+      { id: 'a', label: 'a', color: 'var(--chart-4)', pattern: 'dot' as const, end: 'failed' as const, points: pts(10) },
+      { id: 'b', label: 'b', color: 'var(--chart-1)', end: 'stopped' as const, points: pts(20) },
+      { id: 'c', label: 'c', color: 'var(--chart-2)', points: pts(30) },
     ];
     const { target, c } = mountAt({ series, label: 'cmp', endDots: true, xDomain: [0, 30] });
-    expect((target.querySelector('path.end-x') as SVGElement).style.stroke).toBe('var(--danger-text)');
+    // A dotted line takes its hue's text ink (./ink), and so does its cross; the stopped square its line's hue.
+    expect((target.querySelector('path.end-x') as SVGElement).style.stroke).toBe('var(--chart-text-4)');
+    expect((target.querySelector('rect.end-dot') as SVGElement).style.fill).toBe('var(--chart-1)');
+    unmount(c);
+  });
+
+  it('paints failed and stopped runs over the runs that ran on, so none is hidden under the others', () => {
+    const series = [
+      { id: 'f', label: 'f', color: 'var(--chart-4)', end: 'failed' as const, points: pts(10) },
+      { id: 'd', label: 'd', color: 'var(--chart-2)', pattern: 'dash' as const, points: pts(30) },
+      { id: 'n', label: 'n', color: 'var(--chart-1)', points: pts(30) },
+    ];
+    const { target, c } = mountAt({ series, label: 'cmp', endDots: true, xDomain: [0, 30] });
+    const order = [...target.querySelectorAll<SVGElement>('path.line')].map((p) => p.style.stroke);
+    expect(order).toEqual(['var(--chart-1)', 'var(--chart-text-2)', 'var(--chart-4)']);
     unmount(c);
   });
 });

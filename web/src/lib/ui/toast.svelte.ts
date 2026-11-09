@@ -17,7 +17,8 @@ export interface Toast {
   id: number;
   tone: ToastTone;
   title: string;
-  detail?: string;
+  /** Line 2: a sentence, or facts (each one a ui/Meta item: "Finished training · best mAP50-95 0.535 at epoch 60"). */
+  detail?: string | string[];
   action?: { label: string; run: () => void };
   /** ms before auto-dismiss; 0 keeps it until closed (errors and toasts with an action, by default: WCAG 2.2.1). */
   timeout: number;

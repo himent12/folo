@@ -28,6 +28,35 @@ describe('ClassStrip', () => {
     unmount(c);
   });
 
+  it('looks like a control at rest: a neutral chevron in its hit area, and the words where no heading names it', () => {
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    const bare = mount(ClassStrip, { target, props: { counts: [3, 1], classes: ['a', 'b'] } });
+    flushSync();
+    const b = target.querySelector('button')!;
+    expect(b.querySelector('.cs-chev')).not.toBeNull();
+    expect(b.querySelector('.cs-head')).toBeNull();
+    unmount(bare);
+    const named = mount(ClassStrip, { target, props: { counts: [3, 1], classes: ['a', 'b'], named: true } });
+    flushSync();
+    const n = target.querySelector('button')!;
+    expect(n.querySelector('.cs-head')?.textContent).toBe('Class balance');
+    // Said once to assistive tech: the visible words are hidden, the button's own label names it.
+    expect(n.querySelector('.cs-head')?.getAttribute('aria-hidden')).toBe('true');
+    expect(n.querySelectorAll('.cs-chev')).toHaveLength(1);
+    unmount(named);
+    target.remove();
+  });
+
+  it('names itself wherever no "Class balance" column heading does', () => {
+    const src = (f: string) => readFileSync(resolve(__dirname, '../../routes', f), 'utf8');
+    for (const f of ['Overview.svelte', 'RunNew.svelte']) expect(src(f)).toMatch(/<ClassStrip [^>]*\bnamed\b/);
+    // Datasets: the table's column heading names it; the phone list has no heading, so its strip is named.
+    const ds = src('Datasets.svelte');
+    expect(ds).toMatch(/<th [^>]*class="bal"><span class="bal-h">Class balance</);
+    expect(ds.match(/<ClassStrip [^>]*>/g)?.map((t) => /\bnamed\b/.test(t))).toEqual([false, true]);
+  });
+
   it('is never put inside a link or a label (a button cannot nest there)', () => {
     const root = resolve(__dirname, '../..');
     const files: string[] = [];

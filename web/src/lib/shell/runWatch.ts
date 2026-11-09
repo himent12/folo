@@ -28,13 +28,17 @@ export function runEnds(prev: readonly Run[] | undefined, next: readonly Run[]):
   return out;
 }
 
-/** The toast for a run that ended: a title naming the run and the outcome, and one line of detail. */
-export function runEndMessage(e: RunEnd): { tone: 'success' | 'error'; title: string; detail: string } {
+/**
+ * The toast for a run that ended: the run's name as the title (line 1), and what happened as a meta line of facts
+ * (line 2): "Finished training · best mAP50-95 0.535 at epoch 60". The name never shares its line with the outcome, so
+ * a long name wraps alone and the outcome's facts wrap whole (ui/Toaster).
+ */
+export function runEndMessage(e: RunEnd): { tone: 'success' | 'error'; title: string; detail: string[] } {
   const { run } = e;
   if (e.kind === 'completed') {
-    const best = run.best ? `Best mAP50-95 ${metric(run.best.map50_95)} at epoch ${run.best.epoch}.` : `${run.epochs} epochs done.`;
-    return { tone: 'success', title: `${run.name} finished training`, detail: best };
+    const best = run.best ? `best mAP50-95 ${metric(run.best.map50_95)} at epoch ${run.best.epoch}` : `${run.epochs} epochs`;
+    return { tone: 'success', title: run.name, detail: ['Finished training', best] };
   }
-  if (e.kind === 'oom') return { tone: 'error', title: `${run.name} ran out of GPU memory`, detail: `At epoch ${run.epoch}. Its page has smaller settings to retry with.` };
-  return { tone: 'error', title: `${run.name} failed`, detail: `At epoch ${run.epoch}. Its page has the error and the log.` };
+  if (e.kind === 'oom') return { tone: 'error', title: run.name, detail: [`Ran out of GPU memory at epoch ${run.epoch}`, 'its page has smaller settings'] };
+  return { tone: 'error', title: run.name, detail: [`Failed at epoch ${run.epoch}`, 'its page has the error and the log'] };
 }

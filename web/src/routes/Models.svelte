@@ -25,6 +25,8 @@
   import Ident from '$lib/ui/Ident.svelte';
   import Meta from '$lib/ui/Meta.svelte';
   import { rowNav } from '$lib/ui/rowNav';
+  import { MediaQuery } from 'svelte/reactivity';
+  import { media } from '$lib/design/tokens';
   import { unlike, versusYolo26n } from '$lib/benchmarks';
   import { FROM_SCRATCH, origin, originTip } from '$lib/lineage';
   import { filterLabel, groupKey, groupLabel, rankKey, scoreContext, splitLabel, type ScoreContext } from '$lib/scoreSummary';
@@ -44,7 +46,7 @@
   const throughput = new Resource((s) => loadThroughput(hub.api, s));
   const benchHere = $derived([measuredLatency(throughput.data, 'folo-n'), measuredTraining(throughput.data, 'folo-n')].filter(Boolean).length);
 
-  type Key = 'name' | 'arch' | 'classes' | 'imgsz' | 'params' | 'flops' | 'bytes' | 'map50_95' | 'map50' | 'source' | 'parent' | 'created';
+  type Key = 'name' | 'arch' | 'classes' | 'params' | 'flops' | 'bytes' | 'map50_95' | 'map50' | 'source' | 'parent' | 'created';
   interface Col {
     key: Key;
     label: string;
@@ -86,18 +88,24 @@
     (a.ctx.datasetName ?? '').localeCompare(b.ctx.datasetName ?? '') ||
     splitRank(a.ctx.split) - splitRank(b.ctx.split);
 
+  // Source run: a run's name ends in what tells it from its siblings ("shapes-hard-s" beside "shapes-hard-m"), so it is
+  // never cut (DESIGN_DIRECTION §2.3). The widths add up to the 1,160 px panel with the longest model name whole: the
+  // input size (the same 640 on almost every model, and on each model's page) is not a column, which pays for
+  // mAP50-95's "joint best" (120 px, its real width) and a 128 px Source run (104 px of text) from 1280 px; between
+  // 1024 and 1279 Classes, GFLOPs and Started from step out and Source run takes 144. A longer name wraps at its
+  // hyphens, never cut.
+  const laptopOnly = new MediaQuery(`${media.laptopUp} and ${media.upToDesktop}`, false);
   // Sizes in one unit for the column, named in its header (prefs.units: MiB or MB).
   const cols: Col[] = $derived([
     { key: 'name', label: 'Model', get: (m) => m.name.toLowerCase() },
     { key: 'arch', label: 'Arch', get: (m) => m.arch, w: '72px' },
     { key: 'classes', label: 'Classes', num: true, get: (m) => m.classes.length, hide: 'lg', w: '84px' },
-    { key: 'imgsz', label: 'Input px', num: true, get: (m) => m.imgsz, hide: 'md', w: '88px' },
     { key: 'params', label: 'Params', num: true, get: (m) => m.params, w: '80px' },
     { key: 'flops', label: 'GFLOPs', num: true, get: (m) => m.flops_g, hide: 'lg', w: '84px' },
     { key: 'bytes', label: `Size, ${sizeUnit(prefs.units)}`, num: true, get: (m) => m.bytes, hide: 'md', w: '80px' },
-    { key: 'map50_95', label: 'mAP50-95', num: true, get: (m) => m.metrics?.map50_95 ?? -1, w: '96px' },
+    { key: 'map50_95', label: 'mAP50-95', num: true, get: (m) => m.metrics?.map50_95 ?? -1, w: '120px' },
     { key: 'map50', label: 'mAP50', num: true, get: (m) => m.metrics?.map50 ?? -1, w: '80px' },
-    { key: 'source', label: 'Source run', get: (m) => sourceName(m) || '~', hide: 'md', w: '112px' },
+    { key: 'source', label: 'Source run', get: (m) => sourceName(m) || '~', hide: 'md', w: laptopOnly.current ? '144px' : '128px' },
     { key: 'parent', label: 'Started from', get: (m) => parentOf(m)?.label ?? '~', hide: 'lg', w: '120px' },
     { key: 'created', label: 'Created', num: true, get: (m) => Date.parse(m.created), w: '112px' },
   ]);
@@ -305,7 +313,6 @@
                   <td><a class="name" href={href(`/models/${m.id}`)} title={m.about ?? m.id} onclick={(e) => e.stopPropagation()}>{m.name}</a></td>
                   <td><Ident value={m.arch} class="faint" /></td>
                   <td class="r spec hide-lg" title={m.classes.slice(0, 12).join(', ') + (m.classes.length > 12 ? ', …' : '')}>{m.classes.length}</td>
-                  <td class="r spec hide-md">{m.imgsz}</td>
                   <td class="r spec">{compact(m.params)}</td>
                   <td class="r spec hide-lg">{num(m.flops_g, 1)}</td>
                   <td class="r spec hide-md">{sizeIn(m.bytes, prefs.units)}</td>
@@ -486,14 +493,14 @@
   td :global(.ident.src) {
     color: var(--text-secondary);
   }
-  /* A run's name is free text with its own page (the link) and its whole name in the tooltip, so a long one shortens
-     with an ellipsis inside its 112 px column rather than widening the table past its panel (DESIGN_DIRECTION §2.3). */
+  /* A run's name is never cut: its suffix is what tells it from its siblings ("shapes-hard-s" beside "shapes-hard-m",
+     DESIGN_DIRECTION §2.3). The column holds the usual names on one line (the widths above); a longer one wraps after
+     a hyphen and the row grows a line, never an ellipsis and never wider than its column. */
   a.src {
-    display: block;
-    max-width: 80px; /* grid-ok: the column's 112 px less its 16 px sides */
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    display: inline-block;
+    max-width: 100%;
+    white-space: normal;
+    overflow-wrap: break-word;
   }
   /* The engine benchmarks: a collapsed row with a one-line summary; the comparison opens beneath it. */
   .bench {

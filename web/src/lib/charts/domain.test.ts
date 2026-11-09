@@ -199,23 +199,47 @@ describe('unitFitDomain: the Fit axis of Compare', () => {
   const ends = runs.map((r) => r.at(-1)!);
 
   it('starts the axis under the values most of the lines spend their length in, not at 0', () => {
-    const f = unitFitDomain(values, ends, withLabelRow(0.606, 360), 360);
+    const f = unitFitDomain(values, ends, 0.606, 360, true);
     expect(f.domain[0]).toBeGreaterThan(0.3);
     // Every line's end shows, with room under the lowest.
     for (const e of ends) expect(e).toBeGreaterThan(f.domain[0]);
-    // At most FIT_BELOW of the values fall under the floor, give or take the rounding down to a tick.
+    // At most FIT_BELOW of the values fall under the floor, give or take the rounding down to a half step.
     const under = values.filter((v) => v < f.domain[0]).length / values.length;
     expect(under).toBeLessThanOrEqual(FIT_BELOW + 0.02);
-    expect(f.domain[1]).toBe(unitDomain(withLabelRow(0.606, 360), 360).domain[1]);
     expect(fitFloorNote(f)).toBe(`y from ${f.domain[0].toFixed(2)}`);
   });
 
-  it('reads "y from 0.40" for runs whose 30th percentile is 0.425', () => {
-    const vs = [...Array(30).fill(0.2), ...Array(70).fill(0.425), 0.606];
-    const f = unitFitDomain(vs, [0.5, 0.606], withLabelRow(0.606, 360), 360);
-    expect(f.domain[0]).toBe(0.4);
-    expect(f.ticks).toEqual([0.4, 0.5, 0.6, 0.7]);
+  it('hugs the data: the top at most one minor step over the highest value, the floor one under the percentile', () => {
+    // Round 27, Compare at 1440 and 1024: data peaking at 0.61 on a 0.40–0.70 axis, a quarter of the plot empty. The
+    // top is 0.625 (half of the 0.05 step), the plot's edge rather than a tick; the floor a tick, as it is written out.
+    const vs = [...Array(30).fill(0.2), ...Array(70).fill(0.425), 0.61];
+    const f = unitFitDomain(vs, [0.5, 0.604], 0.61, 360, true);
+    expect(f.domain).toEqual([0.4, 0.625]);
+    expect(f.ticks).toEqual([0.4, 0.45, 0.5, 0.55, 0.6]);
+    // Under a 0.1 step the half step is 0.05: data peaking at 0.53 from 0.31 reads on 0.30–0.55.
+    expect(unitFitDomain([...Array(30).fill(0.1), ...Array(70).fill(0.31), 0.53], [0.53], 0.53, 360)).toMatchObject({ domain: [0.3, 0.55], ticks: [0.3, 0.4, 0.5] });
     expect(fitFloorNote(f)).toBe('y from 0.40');
+    // The highest end keeps its label row (24 px of 360) under the top.
+    expect(((f.domain[1] - 0.604) / (f.domain[1] - f.domain[0])) * 360).toBeGreaterThanOrEqual(24);
+    // A floor on a half step: runs whose 30th percentile is 0.47 start at 0.45, not 0.40.
+    const g = unitFitDomain([...Array(30).fill(0.2), ...Array(70).fill(0.47), 0.61], [0.5, 0.604], 0.61, 360, true);
+    expect(g.domain).toEqual([0.45, 0.625]);
+    expect(fitFloorNote(g)).toBe('y from 0.45');
+    // Generally: each end within one minor step (half the gridlines' step) of the data's, and never cutting it.
+    for (const lo of [0.31, 0.42, 0.47, 0.55, 0.68, 0.81])
+      for (const max of [lo + 0.06, lo + 0.11, lo + 0.17, Math.min(0.97, lo + 0.33)]) {
+        const w = [...Array(30).fill(lo * 0.5), ...Array(70).fill(lo), max];
+        const h = unitFitDomain(w, [max], max, 360);
+        if (!(h.domain[0] > 0)) continue;
+        const step = h.ticks[1]! - h.ticks[0]!;
+        // The floor's minor step: half the step, or the step where a half would need a third decimal (0.025 of 0.05).
+        const minor = stepDecimals(step / 2) <= Math.max(2, h.decimals) ? step / 2 : step;
+        const at = `${lo}–${max}`;
+        expect(h.domain[1], at).toBeGreaterThan(max);
+        expect(h.domain[1] - max, at).toBeLessThanOrEqual(step / 2 + 0.02 * (max - lo) + 1e-9);
+        expect(h.domain[0], at).toBeLessThan(lo);
+        expect(lo - h.domain[0], at).toBeLessThanOrEqual(minor + 0.02 * (max - lo) + 1e-9);
+      }
   });
 
   it("keeps round 23's tick rule: 3–5 ticks of the same nice steps, the same step at every height", () => {
@@ -226,10 +250,13 @@ describe('unitFitDomain: the Fit axis of Compare', () => {
         const at = `${lo}–${max}`;
         expect(wide.ticks.length, at).toBeGreaterThanOrEqual(3);
         expect(wide.ticks.length, at).toBeLessThanOrEqual(5);
-        expect(wide.ticks[0], at).toBe(wide.domain[0]);
+        expect(wide.ticks[0], at).toBeGreaterThanOrEqual(wide.domain[0]);
+        expect(wide.ticks.at(-1), at).toBeLessThanOrEqual(wide.domain[1]);
         expect(wide.domain[0], at).toBeLessThanOrEqual(lo);
         const step = wide.ticks[1]! - wide.ticks[0]!;
         expect([0.001, 0.002, 0.0025, 0.005, 0.01, 0.02, 0.025, 0.05, 0.1, 0.2, 0.25, 0.5].some((s) => Math.abs(s - step) < 1e-9), at).toBe(true);
+        // The floor, which is written out, never has more decimals than two or the ticks' own.
+        expect(stepDecimals(wide.domain[0]), at).toBeLessThanOrEqual(Math.max(2, wide.decimals));
         for (const px of [96, 122, 210, 290]) {
           const f = unitFitDomain(vs, [max], max, px);
           expect(f.domain, `${at} @ ${px}`).toEqual(wide.domain);
