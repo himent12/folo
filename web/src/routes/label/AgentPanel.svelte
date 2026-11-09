@@ -1,8 +1,9 @@
 <script lang="ts">
   /**
-   * The job page's rail: who labels (agent, model, effort), what it is told (the instructions, the classes), and the
-   * run: "Label N images" while some have no labels, live progress with Stop while an agent works, and how the last run
-   * ended. A run that failed shows its cause and the fix the server gives, with Try again.
+   * The job page's rail: first the run, "Label N images" while some have no labels (naming the agent, model and effort
+   * it will use), live progress with Stop while an agent works, and how the last run ended (a failed one with its cause,
+   * the fix the server gives, and Try again); then who labels (agent, model, effort) and what it is told (the
+   * instructions, the classes).
    */
   import CircleAlert from '@lucide/svelte/icons/circle-alert';
   import Pencil from '@lucide/svelte/icons/pencil';
@@ -95,76 +96,11 @@
 </script>
 
 <Panel title="Agent" pad="none">
-  <div class="sec">
-    {#if agentsError && !agents}
-      <ErrorState error={agentsError} title="Could not ask which agents are installed" retry={retryAgents} compact />
-    {:else if !agents}
-      <div class="sk" aria-hidden="true"><Skeleton w="64px" h="12px" /><Skeleton h="32px" r="var(--radius-md)" /><Skeleton w="64px" h="12px" /><Skeleton h="32px" r="var(--radius-md)" /></div>
-    {:else}
-      <Field label="Agent" hint={notReady.map((a) => `${a.name}: ${a.hint}`).join(' ') || undefined}>
-        <Segmented
-          label="Agent"
-          value={agent?.id ?? 'claude'}
-          disabled={running}
-          options={agents.map((a) => ({ value: a.id, label: a.name, disabled: !a.available, tip: a.hint ?? undefined }))}
-          onchange={(id) => choice.pick(id)}
-        />
-      </Field>
-      {#if agent}
-        <Field label="Model" for="{uid}-model" hint={agent.id === 'claude' && agent.default_model === 'haiku' ? 'Haiku is the default: about as accurate as the larger models here, at a fraction of the cost.' : undefined}>
-          <Select id="{uid}-model" bind:value={choice.model} options={modelOptions} disabled={running} />
-        </Field>
-        <Field label="Effort" hint="More effort means more reasoning tokens per call and a slower run. The default, {agent.default_effort}, is the best value for {agent.name}.">
-          <Segmented
-            label="Effort"
-            bind:value={choice.effort}
-            disabled={running}
-            options={[
-              { value: 'low', label: 'Low' },
-              { value: 'medium', label: 'Medium' },
-              { value: 'high', label: 'High' },
-            ]}
-          />
-        </Field>
-      {/if}
-    {/if}
-  </div>
-
-  <div class="sec">
-    <Field
-      label="Instructions"
-      for="{uid}-instructions"
-      error={instructionsError}
-      hint={running ? 'The agent has these for this run; change them once it is done.' : 'What counts as each class and what to leave out, in your own words. Sent with every image.'}
-    >
-      <TextArea
-        id="{uid}-instructions"
-        bind:value={instructions}
-        rows={5}
-        disabled={running}
-        placeholder="Label every car and pedestrian, also partly hidden ones. Ignore reflections and posters."
-        onblur={onsaveinstructions}
-      />
-    </Field>
-    <Field label="Classes">
-      {#snippet aside()}
-        <Gate reason={running ? 'Classes can be changed once the agent is done' : null}>
-          {#snippet children(reason)}
-            <Button variant="ghost" size="sm" icon={Pencil} disabled={!!reason} aria-describedby={reason} onclick={onedit}>Edit</Button>
-          {/snippet}
-        </Gate>
-      {/snippet}
-      <ul class="chips" aria-label="Classes">
-        {#each job.classes as c, i (i)}<li class="chip"><span class="sw" style:background={classColor(i)}></span>{c}</li>{/each}
-      </ul>
-    </Field>
-  </div>
-
-  <div class="sec run" aria-live="polite">
+  <div class="sec run">
     {#if running && run}
       <div class="progress">
-        <p class="p-head num"><b>{num(done)} of {images(run.total)}</b>{#if run.failed}<span class="faint">{num(run.failed)} failed</span>{/if}</p>
-        <Progress value={run.total ? done / run.total : 0} size="md" tone={lost ? 'neutral' : 'accent'} label="{done} of {run.total} images" />
+        <p class="p-head num"><b>{num(run.done)} of {images(run.total)} labeled</b>{#if run.failed}<span class="faint">{num(run.failed)} failed</span>{/if}</p>
+        <Progress value={run.total ? done / run.total : 0} size="md" tone={lost ? 'neutral' : 'accent'} label="{done} of {run.total} images done" />
         <p class="p-meta"><Meta>{#each runAgent(run, agents) as f (f)}<span>{f}</span>{/each}<span>{run.effort} effort</span></Meta></p>
       </div>
       {#if job.status === 'stopping'}
@@ -196,6 +132,72 @@
       {#if run && !failed}<LastRun {job} {run} {agents} />{/if}
     {/if}
   </div>
+  <!-- The settings are for the next run: while one runs, its own line above says what it uses. -->
+  {#if !running}
+    <div class="sec">
+      {#if agentsError && !agents}
+        <ErrorState error={agentsError} title="Could not ask which agents are installed" retry={retryAgents} compact />
+      {:else if !agents}
+        <div class="sk" aria-hidden="true"><Skeleton w="64px" h="12px" /><Skeleton h="32px" r="var(--radius-md)" /><Skeleton w="64px" h="12px" /><Skeleton h="32px" r="var(--radius-md)" /></div>
+      {:else}
+        <Field label="Agent" hint={notReady.map((a) => `${a.name}: ${a.hint}`).join(' ') || undefined}>
+          <Segmented
+            label="Agent"
+            value={agent?.id ?? 'claude'}
+            options={agents.map((a) => ({ value: a.id, label: a.name, disabled: !a.available, tip: a.hint ?? undefined }))}
+            onchange={(id) => choice.pick(id)}
+          />
+        </Field>
+        {#if agent}
+          <Field label="Model" for="{uid}-model" hint={agent.id === 'claude' && agent.default_model === 'haiku' ? 'Haiku is the default: about as accurate as the larger models here, at a fraction of the cost.' : undefined}>
+            <Select id="{uid}-model" bind:value={choice.model} options={modelOptions} />
+          </Field>
+          <Field label="Effort" hint="More effort means more reasoning tokens per call and a slower run. The default, {agent.default_effort}, is the best value for {agent.name}.">
+            <Segmented
+              label="Effort"
+              bind:value={choice.effort}
+              options={[
+                { value: 'low', label: 'Low' },
+                { value: 'medium', label: 'Medium' },
+                { value: 'high', label: 'High' },
+              ]}
+            />
+          </Field>
+        {/if}
+      {/if}
+    </div>
+  {/if}
+
+  <div class="sec">
+    <Field
+      label="Instructions"
+      for="{uid}-instructions"
+      error={instructionsError}
+      hint={running ? 'The agent has these for this run; change them once it is done.' : 'What counts as each class and what to leave out, in your own words. Sent with every image.'}
+    >
+      <TextArea
+        id="{uid}-instructions"
+        bind:value={instructions}
+        rows={5}
+        readonly={running}
+        placeholder="Label every car and pedestrian, also partly hidden ones. Ignore reflections and posters."
+        onblur={onsaveinstructions}
+      />
+    </Field>
+    <Field label="Classes">
+      {#snippet aside()}
+        <Gate reason={running ? 'Classes can be changed once the agent is done' : null}>
+          {#snippet children(reason)}
+            <Button variant="ghost" size="sm" icon={Pencil} disabled={!!reason} aria-describedby={reason} onclick={onedit}>Edit</Button>
+          {/snippet}
+        </Gate>
+      {/snippet}
+      <ul class="chips" aria-label="Classes">
+        {#each job.classes as c, i (i)}<li class="chip"><span class="sw" style:background={classColor(i)}></span>{c}</li>{/each}
+      </ul>
+    </Field>
+  </div>
+
 </Panel>
 
 <style>
@@ -207,7 +209,7 @@
   }
   .sec:first-child {
     border-top: 0;
-    padding-top: var(--space-1);
+    padding-top: 0;
   }
   .sec.run {
     gap: var(--space-3);

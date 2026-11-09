@@ -18,7 +18,7 @@
   import { AGENT_NAME, INSTRUCTIONS_MAX } from '$lib/label';
   import { href, router } from '$lib/router.svelte';
   import Page from '$lib/shell/Page.svelte';
-  import { setCrumbs } from '$lib/shell/crumbs.svelte';
+  import { ownCreateAction, setCrumbs } from '$lib/shell/crumbs.svelte';
   import { pageCommands, type PageCommand } from '$lib/shell/pageCommands.svelte';
   import Badge from '$lib/ui/Badge.svelte';
   import Button from '$lib/ui/Button.svelte';
@@ -60,6 +60,9 @@
   const job = $derived(live.job);
   const running = $derived(isActive(job));
   const unsupported = $derived(cannotLabel(system.data, live.error));
+
+  // The header's Create dataset is this page's create action: the top bar's New run steps aside.
+  ownCreateAction();
 
   $effect(() => {
     setCrumbs({ label: 'Datasets', path: '/datasets' }, { label: 'Label images', path: '/datasets/label' }, { label: job?.name ?? id });
@@ -261,7 +264,7 @@
         {#if datasetWhy && !running}<span class="faint" data-gate-why>Create dataset: {datasetWhy.toLowerCase()}</span>{/if}
       </Meta>
     {/snippet}
-    {#snippet subPhone()}<span class="num">{num(job.counts.labeled)} of {imagesText(job.counts.images)} labeled</span>{/snippet}
+    {#snippet subPhone()}<span class="num">{job.counts.images ? `${num(job.counts.labeled)} of ${imagesText(job.counts.images)} labeled` : 'No images yet'}</span>{/snippet}
     {#snippet actions()}
       {#if phone.current}
         {#if datasetNext}<Button variant="primary" icon={Database} onclick={() => (datasetOpen = true)}>Create dataset</Button>{/if}

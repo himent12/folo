@@ -73,6 +73,13 @@ async function unplugGpu(/** @type {import('playwright-core').Page} */ page) {
   await page.clock.runFor(1000);
 }
 
+/** A labeling job's page with its first tiles loaded (on phones the agent panel comes first and the grid is out of view). */
+async function tiles(/** @type {import('playwright-core').Page} */ page, /** @type {{ vp: string }} */ { vp }) {
+  await until(page, '.agent');
+  if (vp !== 'mobile' && (await page.locator('.cell').count())) await page.locator('.cell img.loaded').nth(3).waitFor();
+  await page.mouse.move(0, 0);
+}
+
 /** @type {Scene[]} */
 export const scenes = [
   // The live run at the moment run-live shows it (the same `advance`), so the two screens' epoch and progress agree.
@@ -1864,10 +1871,14 @@ export const scenes = [
       await page.mouse.move(0, 0);
     },
   },
-  { name: 'label-job-pending', path: '/datasets/label/lb_7c21', viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
-  { name: 'label-job-running', path: '/datasets/label/lb_3f9a', viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
-  { name: 'label-job-review', path: '/datasets/label/lb_51d0', viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
-  { name: 'label-job-failed', path: '/datasets/label/lb_9e44', viewports: ['desktop', 'tablet', 'mobile'] },
+  // A job's page: its images (a virtualised grid, so shot in the viewport, as a dataset's), the agent rail and its log.
+  { name: 'label-job-pending', path: '/datasets/label/lb_7c21', fullPage: false, viewports: ['desktop', 'laptop', 'tablet', 'mobile'], setup: tiles },
+  // An agent labeling now: tiles with the agent, live progress, Stop.
+  { name: 'label-job-running', path: '/datasets/label/lb_3f9a?show=pending', fullPage: false, viewports: ['desktop', 'laptop', 'tablet', 'mobile'], setup: tiles },
+  // Everything labeled and partly corrected by hand: Create dataset is the one action.
+  { name: 'label-job-review', path: '/datasets/label/lb_51d0', fullPage: false, viewports: ['desktop', 'laptop', 'tablet', 'mobile'], setup: tiles },
+  // The last run failed (Claude Code not signed in): its cause, the fix and Try again.
+  { name: 'label-job-failed', path: '/datasets/label/lb_9e44', fullPage: false, viewports: ['desktop', 'tablet', 'mobile'], setup: tiles },
   {
     // The editor on an image corrected by hand, one box selected: its handles, its class, Delete box.
     name: 'label-editor',

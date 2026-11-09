@@ -42,8 +42,15 @@
   :global([data-theme='light']) .ta {
     background: var(--bg-panel);
   }
-  .ta:hover:not(:disabled) {
+  .ta:hover:not(:disabled, :read-only) {
     border-color: var(--line-control-hover);
+  }
+  /* Read-only (an agent run has them): the text stays readable, on the panel surface, without an edge to type in. */
+  .ta:read-only:not(:disabled) {
+    background: transparent;
+    border-color: var(--line-subtle);
+    color: var(--text-secondary);
+    resize: none;
   }
   .ta:disabled {
     color: var(--text-disabled);

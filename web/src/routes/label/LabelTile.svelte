@@ -69,7 +69,7 @@
     align-items: center;
     gap: 4px;
     height: 18px;
-    padding: 0 5px;
+    padding: 0 4px;
     border-radius: var(--radius-xs);
     background: var(--bg-scrim);
     color: var(--text-primary);

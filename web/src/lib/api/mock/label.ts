@@ -136,6 +136,8 @@ interface Job {
   datasetId: string | null;
   logs: LogLine[];
   nextImage: number;
+  /** Runs started so far: what seeds a run's boxes (never the clock, so every load draws the same ones). */
+  runs: number;
 }
 
 const zeroUsage = (): LabelUsage => ({ calls: 0, input_tokens: 0, cached_input_tokens: 0, output_tokens: 0, cost_usd: null });
@@ -231,7 +233,7 @@ export class MockLabeling {
   }
 
   #make(id: string, name: string, classes: string[], instructions: string, at: number): Job {
-    const job: Job = { id, name, classes, instructions, createdAt: at, images: [], run: null, usage: zeroUsage(), datasetId: null, logs: [], nextImage: 1 };
+    const job: Job = { id, name, classes, instructions, createdAt: at, images: [], run: null, usage: zeroUsage(), datasetId: null, logs: [], nextImage: 1, runs: 0 };
     this.#jobs.unshift(job);
     return job;
   }
@@ -559,6 +561,7 @@ export class MockLabeling {
       : j.images.filter((i) => body.scope === 'all' || i.status === 'pending' || i.status === 'failed').map((i) => i.id);
     const r: Run = { ...this.#blankRun(body, at), ids };
     j.run = r;
+    j.runs++;
     if (!ids.length) return;
     this.#log(
       j,
@@ -703,12 +706,12 @@ export class MockLabeling {
       'info',
       `call ${k + 1}: ${ids.length} ${ids.length === 1 ? 'image' : 'images'}, ${boxes} ${boxes === 1 ? 'box' : 'boxes'} · ${n(usage.input_tokens)} tokens in (${n(usage.cached_input_tokens)} cached), ${n(usage.output_tokens)} out`,
     );
-    if (hash(`${j.id}:drop:${k}:${r.startedAt}`) % 6 === 0) this.#log(j, at, 'warn', `call ${k + 1}: 1 box dropped: its label is not one of the job's classes`);
+    if (hash(`${j.id}:drop:${k}:${j.runs}`) % 6 === 0) this.#log(j, at, 'warn', `call ${k + 1}: 1 box dropped: its label is not one of the job's classes`);
   }
 
   /** The agent's boxes for an image: its objects as a decent model finds them, in the job's classes. */
   #draft(j: Job, im: Img, r: Run): Box[] {
-    const seed = hash(`${j.id}:${im.id}:${r.startedAt}`);
+    const seed = hash(`${j.id}:${im.id}:${j.runs}`);
     const quality = Math.min(0.97, (r.model ? (QUALITY[r.model] ?? 0.85) : 0.85) + (r.effort === 'high' ? 0.04 : r.effort === 'medium' ? 0.02 : 0) + (r.note ? 0.03 : 0));
     let drawn;
     if ('spec' in im.from) {

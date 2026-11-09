@@ -1,10 +1,12 @@
 <script lang="ts">
+  import { MediaQuery } from 'svelte/reactivity';
   import Plus from '@lucide/svelte/icons/plus';
   import Search from '@lucide/svelte/icons/search';
   import Tags from '@lucide/svelte/icons/tags';
   import { hub } from '$lib/api/index.svelte';
   import { Resource } from '$lib/api/resource.svelte';
   import type { LabelJob } from '$lib/api/types';
+  import { media } from '$lib/design/tokens';
   import { ago, num } from '$lib/format';
   import { href, router } from '$lib/router.svelte';
   import Page from '$lib/shell/Page.svelte';
@@ -56,17 +58,18 @@
   const offline = $derived(!jobs.data && isOffline(jobs.error));
   const hasData = $derived(jobs.data ? jobs.data.length > 0 : !jobs.error);
   const hasRows = $derived(jobs.data ? shown.length > 0 : !jobs.error);
+  const phone = new MediaQuery(media.phone, false);
   const open = (j: LabelJob) => router.go(`/datasets/label/${j.id}`);
 </script>
 
 <Page title="Label images">
   {#snippet sub()}<span>Unlabeled images, boxed by Claude Code or Codex, reviewed by you, then a dataset.</span>{/snippet}
-  {#snippet subPhone()}<span>Boxed by an agent, reviewed by you.</span>{/snippet}
+  {#snippet subPhone()}<span>Agent-drawn boxes.</span>{/snippet}
   {#snippet actions()}
     {#if !unsupported}
       <Gate reason={offline ? OFFLINE_REASON : null}>
         {#snippet children(why)}
-          <Button variant="primary" icon={Plus} disabled={!!why} aria-describedby={why} onclick={() => (creating = true)}>New labeling job</Button>
+          <Button variant="primary" icon={Plus} disabled={!!why} aria-describedby={why} onclick={() => (creating = true)}>{phone.current ? 'New job' : 'New labeling job'}</Button>
         {/snippet}
       </Gate>
     {/if}

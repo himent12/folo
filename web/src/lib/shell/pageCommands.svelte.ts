@@ -29,8 +29,13 @@ export function pageCommands(get: () => PageCommand[]) {
   $effect(() => {
     const mine = get();
     // Only `get` is tracked: the list is read and written here, so reading it as a dependency would loop.
-    untrack(() => (pageCommandList.items = [...pageCommandList.items.filter((c) => !mine.some((m) => m.id === c.id)), ...mine]));
-    return () => untrack(() => (pageCommandList.items = pageCommandList.items.filter((c) => !mine.includes(c))));
+    untrack(() => {
+      pageCommandList.items = [...pageCommandList.items.filter((c) => !mine.some((m) => m.id === c.id)), ...mine];
+    });
+    return () =>
+      untrack(() => {
+        pageCommandList.items = pageCommandList.items.filter((c) => !mine.includes(c));
+      });
   });
 }
 
