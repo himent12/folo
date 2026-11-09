@@ -44,7 +44,7 @@ Status keys: `[ ]` todo, `[~]` in progress, `[x]` merged. The orchestrator keeps
 - [x] `Model.head` / `trained_with` (#117); [x] `Model.precision` / `fused` (#123); [x] operating-point conf, resolved optimizer/LR, queue control, ONNX download (#129); [x] measured throughput, run estimates, benchmark probe (#130)
 
 - [x] agent labeling: unlabeled images → boxes by Claude Code or Codex (one tool-free model request per batch) →
-  review in Studio → a registered YOLO dataset (`/api/label`, docs/LABELING.md). Next: the same screen in FOLO
+  review in Studio → a registered YOLO dataset (`/api/label`, docs/LABELING.md; #165). Next: the same screen in FOLO
   Desktop, `folo label` and MCP tools
 
 ## M5 — polish
