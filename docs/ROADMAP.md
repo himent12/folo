@@ -12,8 +12,8 @@ Status keys: `[ ]` todo, `[~]` in progress, `[x]` merged. The orchestrator keeps
 - [x] vision-post: box ops, IoU family, NMS, mAP / PR metrics, confusion matrix, TAL assigner (#5, #15); pycocotools parity (#20)
 - [x] server + CLI skeleton with `--mock` (#7); real dataset commands and store (#29)
 - [x] gpu: wgpu device, buffer pool, WGSL kernels (SGEMM ~31 TFLOPS on RTX 4080 SUPER) (#10)
-- [~] Studio (web/): all screens, in-browser Playground, real-server smoke, mixed-precision and capability-aware New run; hill-climb round 18 (r16 per-line min 7.5, first 9s)
-- [~] Desktop (apps/desktop, GPUI): all screens, real server, local GPU inference, capability-aware New run; hill-climb round 40 (r36: Opus 8.75 / Sol 8.6)
+- [~] Studio (web/): all screens, in-browser Playground, real-server smoke, mixed-precision and capability-aware New run; hill-climb round 21 (r19 Opus per-line min 6.5 on responsiveness; one breakpoint system + blank-section QA in CI next)
+- [~] Desktop (apps/desktop, GPUI): all screens, real server, local GPU inference, capability-aware New run; hill-climb round 46 (best: Opus 8.75 / Sol 8.9; r45: Opus 8.4 / Sol 8.6)
 
 ## M2 — learning end to end
 - [x] nn: layers, init, SGD/AdamW, schedules, EMA, .folo IO (#21)
@@ -28,6 +28,7 @@ Status keys: `[ ]` todo, `[~]` in progress, `[x]` merged. The orchestrator keeps
 - [x] f16 whole-model inference (#80); tensor-core f16 GEMM/conv, opt-in (#89)
 - [x] AMP training on tensor cores: folo-n 307 img/s vs yolo26n AMP 252 (#101); /api/system capabilities (#108)
 - [x] NMS-free one-to-one head, `--head o2o` (#109)
+- [~] CPU end-to-end latency below yolo26n (26.9 vs 24.8 ms at b1): fused letterbox, warm pool, buffer reuse
 
 ## M4 — real use
 - [x] real datasets from disk (YOLO, COCO), export folo-f16
@@ -36,9 +37,10 @@ Status keys: `[ ]` todo, `[~]` in progress, `[x]` merged. The orchestrator keeps
 - [x] release pipeline: tagged binaries with embedded Studio, install scripts (#22)
 - [x] dogfooding: reports 1 (#59 → #69) and 2 (#93 → #99)
 - [x] ONNX export with onnxruntime parity in CI (#87)
-- [~] COCO-pretrained folo-n: loader + COCOeval + `folo weights` (#72); 50-epoch run at epoch 43 (mAP50-95 ~0.28), results + weights-v1 release next
+- [~] COCO-pretrained folo-n: loader + COCOeval + `folo weights` (#72); 50-epoch run from scratch done (internal val mAP50-95 0.310 / mAP50 0.449); val2017 COCOeval, R6 fine-tune vs scratch and weights-v1 draft release in progress
+- [x] `Model.head` / `trained_with` (#117); [x] `Model.precision` / `fused` (#123); [~] operating-point conf, resolved optimizer/LR, queue reorder, ONNX download (api/studio-asks)
 
 ## M5 — polish
 - [x] README showcase, QUICKSTART, screenshots, llms.txt (#71); R6 example (examples/r6)
-- [x] docs site: `site/`, generated from docs/, README.md and the examples (search, link checking, llms.txt); build
+- [x] docs site: `site/`, generated from docs/, README.md and the examples (search, link checking, llms.txt); (#122); build
   and serve it locally with `cd site && npm ci && npm run dev` (site/README.md)
