@@ -110,11 +110,15 @@ impl State {
         let mut counts = LabelCounts { images: self.file.images.len() as u64, ..Default::default() };
         for r in &self.file.images {
             match r.status {
-                LabelImageStatus::Labeled => counts.labeled += 1,
+                // Only a labeled image's boxes count: one whose relabeling failed keeps its old boxes, but they
+                // are not labels (and go into no dataset) until it is labeled again.
+                LabelImageStatus::Labeled => {
+                    counts.labeled += 1;
+                    counts.boxes += r.boxes.len() as u64;
+                }
                 LabelImageStatus::Failed => counts.failed += 1,
                 _ => counts.pending += 1,
             }
-            counts.boxes += r.boxes.len() as u64;
         }
         LabelJob {
             id: self.file.id.clone(),
@@ -388,7 +392,7 @@ mod tests {
         file.images = vec![
             record("1", LabelImageStatus::Pending, 0),
             record("2", LabelImageStatus::Labeled, 2),
-            record("3", LabelImageStatus::Failed, 0),
+            record("3", LabelImageStatus::Failed, 5),
             record("4", LabelImageStatus::Labeled, 1),
         ];
         let mut state = State { file, active: None, logs: VecDeque::new(), deleted: false };
