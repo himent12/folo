@@ -13,3 +13,19 @@ export class BestPulse {
     return this.count;
   }
 }
+
+/**
+ * When a run completes while its chart is open, the best epoch's ring is focused once (LineChart's Marker.focus: lime
+ * viewfinder corners close in on it). A run that was already complete when the page opened is not news.
+ */
+export class CompleteFocus {
+  count = 0;
+  #last: string | undefined = undefined;
+
+  /** Feeds the run's status and returns the focus count, bumped when a run seen running or stopping completes. */
+  see(status: string): number {
+    if (status === 'completed' && (this.#last === 'running' || this.#last === 'stopping')) this.count++;
+    this.#last = status;
+    return this.count;
+  }
+}

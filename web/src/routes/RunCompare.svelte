@@ -356,7 +356,7 @@
           </summary>
           <div class="about-body">
             {#if x === 'progress'}<p>By progress puts each run over its planned epochs, so a short plan and a long one compare by shape.</p>{/if}
-            <p>Each line ends in its run's status: a ringed dot while it trains, a square where it was stopped, a cross
+            <p>Each line ends in its run's status: a lime dot while it trains, a square where it was stopped, a cross
               where it failed.</p>
             <p>Colours follow the run, not its rank. Tap a run to keep its line in front; Edit shows how each run
               started (fine-tuned, or from scratch). The table's baseline stays until you make another run the baseline.</p>

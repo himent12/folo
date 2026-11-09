@@ -28,7 +28,7 @@
   import { tooltip } from '$lib/ui/tooltip';
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import ChartSkeleton from '$lib/charts/ChartSkeleton.svelte';
-  import { BestPulse } from '$lib/charts/bestPulse';
+  import { BestPulse, CompleteFocus } from '$lib/charts/bestPulse';
   import { scoresTitle, type EvalSource } from '$lib/evaluated';
   import LossOptions, { type Scale, type Smoothing } from '$lib/charts/LossOptions.svelte';
   import { holdDomain, logDomain, niceDomain, unitDomain, unitTop, UNIT_ZOOM_BELOW, UNIT_ZOOM_NOTE, type Fit, type Held } from '$lib/charts/domain';
@@ -134,9 +134,9 @@
   };
 
   /**
-   * How the focal line ends, in StatusBadge's marks (LineChart `end`): a ringed dot while the run trains, a square once
-   * stopped, a cross when it failed, a plain dot when it completed. With the lime ring on the best epoch this is the
-   * focal chart's vocabulary, shared with Overview's live card.
+   * How the focal line ends, in StatusBadge's marks (LineChart `end`): a filled lime dot with the heartbeat while the run
+   * trains, a square once stopped, a cross when it failed, a plain dot when it completed. With the hollow ink ring on
+   * the best epoch (the header's "○ best") this is the focal chart's vocabulary, shared with Overview's live card.
    */
   const endMark = $derived(run.status === 'running' ? ('live' as const) : run.status === 'stopped' ? ('stopped' as const) : run.status === 'failed' ? ('failed' as const) : undefined);
   /** The total loss as the chart draws it (smoothed at the chosen EMA), whose last value the Loss tab's caption states. */
@@ -237,6 +237,12 @@
   $effect.pre(() => {
     pulse = pulser.see(run.best?.epoch ?? null, run.status === 'running');
   });
+  // The run completing while the page is open focuses its best ring once (lime viewfinder corners; none under reduced motion).
+  const focuser = new CompleteFocus();
+  let focus = $state(0);
+  $effect.pre(() => {
+    focus = focuser.see(run.status);
+  });
   const best = $derived<Marker[]>(
     run.best && (tab === 'map' || tab === 'map50')
       ? [
@@ -244,9 +250,9 @@
             x: run.best.epoch,
             y: tab === 'map' ? run.best.map50_95 : (epochs.find((e) => e.epoch === run.best!.epoch)?.val.map50 ?? 0),
             label: 'best',
-            color: 'var(--accent-line)',
             quiet: true,
             pulse,
+            focus,
           },
         ]
       : [],

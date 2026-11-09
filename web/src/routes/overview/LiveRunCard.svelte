@@ -66,15 +66,15 @@
   const horizon = $derived<[number, number]>(run ? [0, Math.max(1, lastEpoch)] : [0, 1]);
   const progress = $derived(run ? runProgress(run) : 0);
 
-  // The focal chart's vocabulary, as on the run page (run/RunMetrics): the best epoch a lime ring, pulsed once when a
-  // new best lands, and the line's end the live mark (a ringed dot).
+  // The focal chart's vocabulary, as on the run page (run/RunMetrics): the best epoch a hollow ink ring (the title's
+  // "○ best"), pulsed once when a new best lands, and the line's end the live mark (a filled lime dot, the heartbeat).
   const pulser = new BestPulse();
   let pulse = $state(0);
   $effect.pre(() => {
     pulse = pulser.see(run?.best?.epoch ?? null, run?.status === 'running');
   });
   const best = $derived<Marker[]>(
-    run?.best ? [{ x: run.best.epoch, y: run.best.map50_95, label: 'best', color: 'var(--accent-line)', quiet: true, pulse }] : [],
+    run?.best ? [{ x: run.best.epoch, y: run.best.map50_95, label: 'best', quiet: true, pulse }] : [],
   );
 
   // The device this run is using, live: its own label, plus load only from the GPU it actually trains on.

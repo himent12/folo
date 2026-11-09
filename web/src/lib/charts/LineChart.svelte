@@ -29,7 +29,7 @@
     /** The direct label at the line's end (with `endLabels`): a short name instead of `label`, or false for none. */
     endLabel?: string | false;
     /**
-     * How the line ends, drawn at its last point with `endDots` in the status marks of StatusBadge: a ringed dot while
+     * How the line ends, drawn at its last point with `endDots` (./endMarks): a filled lime dot with the heartbeat while
      * live, a square when stopped, a cross when failed (a plain dot otherwise). The end label then names it too.
      */
     end?: 'live' | 'stopped' | 'failed';
@@ -40,11 +40,14 @@
     lower?: Pt[];
   }
 
+  /**
+   * The best epoch: a hollow ring in `text.primary`, 1.5 px, the "○ best" glyph of the chart's header (./endMarks). It
+   * has one ink on every run, so it never reads as the live mark (a filled lime dot).
+   */
   export interface Marker {
     x: number;
     y: number;
     label: string;
-    color?: string;
     /** Ring only: the label is stated elsewhere (e.g. the panel header), not floated over the data. */
     quiet?: boolean;
     /**
@@ -52,6 +55,11 @@
      * chart duration. Nothing moves under reduced motion. 0 or unset: no pulse.
      */
     pulse?: number;
+    /**
+     * Bump to focus the marker once (the run just completed): lime viewfinder brackets close in on it over 200 ms, hold
+     * and fade, the one moment the brand's mark is drawn on a chart. Skipped under reduced motion. 0 or unset: none.
+     */
+    focus?: number;
   }
 
   /**
@@ -72,7 +80,7 @@
   import { downsample, nearest, ticks as niceTicks } from './downsample';
   import { capTicks, logMinors, logTicks, MAX_TICKS, stepDecimals } from './domain';
   import { END_LABELS_MIN, LABEL_GAP, labelWidth, leaderOf, placeEndLabels } from './endLabels';
-  import { endMarkInk, endRingInk, mergedEnds } from './endMarks';
+  import { endMarkInk, LIVE_GROW, mergedEnds } from './endMarks';
   import { seriesText } from './ink';
   import { prefs } from '$lib/prefs.svelte';
   import { chartHint, claimOnce, TAP_HINT_KEY } from './hint';
@@ -181,6 +189,7 @@
   }: Props = $props();
   // A pulse the chart was mounted with is old news (a tab switch, a return to a finished run): only a newer one plays.
   const pulseBase = untrack(() => Math.max(0, ...markers.map((m) => m.pulse ?? 0)));
+  const focusBase = untrack(() => Math.max(0, ...markers.map((m) => m.focus ?? 0)));
 
   const uid = $props.id();
   let width = $state(0);
@@ -357,7 +366,9 @@
   const endR = (id: string) => {
     if (!endDots) return 3;
     const r = receding && id === highlight ? 4 : 3;
-    return (visible.find((s) => s.id === id)?.end === 'live' ? r + 3 : r) + 2;
+    const mark = visible.find((s) => s.id === id)?.end === 'live' ? r + LIVE_GROW : r;
+    // A best ring around the end mark (./endMarks) is part of it: the leader starts outside the ring.
+    return (merges.includes(id) ? mark + 3.75 : mark) + 2;
   };
   const ends = $derived.by(() => {
     if (!showEnds) return [];
@@ -619,14 +630,14 @@
     return null;
   };
 
-  // A best ring that touches its line's end mark is drawn with it as one mark (./endMarks): the end mark inside the
-  // ring, at the line's end. Only markers in the x domain, and only where end marks are drawn.
+  // A best ring on its line's end (or so close that the two would overlap) is drawn around the end mark, as one mark
+  // (./endMarks); apart, each keeps its own shape. Only markers in the x domain, and only where end marks are drawn.
   const merges = $derived.by((): (string | null)[] => {
     if (!endDots || !hasData) return markers.map(() => null);
     const ends = keyed.flatMap((s) => {
       const p = s.points[s.points.length - 1];
-      // Outer radii as drawn below: the live ring (6 px, 1.5 wide), else the 3 px mark with its halo.
-      return p && Number.isFinite(p.y) ? [{ id: s.id, end: s.end, x: x(p.x), y: y(p.y), r: s.end === 'live' ? 6.75 : 4.25 }] : [];
+      // Outer radii as drawn below: the mark (3 px, the live dot LIVE_GROW more) with its 0.75 px halo.
+      return p && Number.isFinite(p.y) ? [{ id: s.id, end: s.end, x: x(p.x), y: y(p.y), r: (s.end === 'live' ? 3 + LIVE_GROW : 3) + 0.75 }] : [];
     });
     const inDomain = (m: Marker) => m.x >= xExtent[0] && m.x <= xExtent[1];
     return mergedEnds(
@@ -643,6 +654,12 @@
   let tipWidth = $state(160);
   const tipLeft = $derived(hover ? hover.px + 12 + tipWidth > width - 4 : false);
 </script>
+
+<!-- The run just completed: lime viewfinder corners (the product's mark) close in on the best ring and fade. -->
+{#snippet brackets(h: number)}
+  {@const k = 3.5}
+  <path class="focus" d="M{-h} {-h + k}V{-h}H{-h + k}M{h - k} {-h}H{h}V{-h + k}M{h} {h - k}V{h}H{h - k}M{-h + k} {h}H{-h}V{h - k}" />
+{/snippet}
 
 {#snippet swatch(s: Series)}
   <svg class="swatch" width="14" height="6" viewBox="0 0 14 6" aria-hidden="true">
@@ -783,22 +800,27 @@
                 {@const ink = contextual(s) ? 'var(--chart-context)' : inkOf(s)}
                 {@const best = mergedInto(s.id)}
                 {#if best}
-                  <!-- The best ring and the end mark as one: the status mark inside the ring, lime while live or
-                       completed, ink on a failed or stopped run (./endMarks). -->
-                  {@const ring = endRingInk(s.end, best.color ?? 'var(--chart-1)')}
+                  <!-- The best is the line's end: its ink ring around the end mark, one mark (./endMarks). -->
+                  {@const rr = (s.end === 'live' ? r + LIVE_GROW : r) + 3}
                   <g class="marker" data-merged={s.id} transform="translate({x(p.x)},{y(p.y)})">
                     {#if best.pulse && best.pulse > pulseBase}
-                      {#key best.pulse}<circle class="pulse" r={r + 3.5} style:stroke={ring} />{/key}
+                      {#key best.pulse}<circle class="pulse" r={rr} />{/key}
                     {/if}
-                    <circle class="ring" r={r + 3.5} style:stroke={ring} />
+                    <circle class="ring" r={rr} />
+                    {#if best.focus && best.focus > focusBase}
+                      {#key best.focus}{@render brackets(rr + 4)}{/key}
+                    {/if}
                   </g>
                 {/if}
                 {#if s.end === 'failed'}
                   <path class="end-x" d="M{x(p.x) - r} {y(p.y) - r}l{2 * r} {2 * r}m0 {-2 * r}l{-2 * r} {2 * r}" style:stroke={endMarkInk(s.end, ink)} />
                 {:else if s.end === 'stopped'}
                   <rect class="end-dot" x={x(p.x) - r} y={y(p.y) - r} width={2 * r} height={2 * r} style:fill={ink} />
+                {:else if s.end === 'live'}
+                  <!-- Still training: a filled lime dot with the heartbeat, StatusBadge's running mark. -->
+                  <circle class="end-beat" cx={x(p.x)} cy={y(p.y)} r={r + LIVE_GROW} />
+                  <circle class="end-dot end-live" cx={x(p.x)} cy={y(p.y)} r={r + LIVE_GROW} style:fill={endMarkInk(s.end, ink)} />
                 {:else}
-                  {#if s.end === 'live' && !best}<circle class="end-live" cx={x(p.x)} cy={y(p.y)} r={r + 3} />{/if}
                   <circle class="end-dot" cx={x(p.x)} cy={y(p.y)} {r} style:fill={ink} />
                 {/if}
               {/if}
@@ -818,9 +840,12 @@
             {#if m.x >= xExtent[0] && m.x <= xExtent[1] && merges[i] == null}
               <g class="marker" transform="translate({x(m.x)},{y(m.y)})">
                 {#if m.pulse && m.pulse > pulseBase}
-                  {#key m.pulse}<circle class="pulse" r="4.5" style:stroke={m.color ?? 'var(--chart-1)'} />{/key}
+                  {#key m.pulse}<circle class="pulse" r="4.5" />{/key}
                 {/if}
-                <circle class="ring" r="4.5" style:stroke={m.color ?? 'var(--chart-1)'} />
+                <circle class="ring" r="4.5" />
+                {#if m.focus && m.focus > focusBase}
+                  {#key m.focus}{@render brackets(8.5)}{/key}
+                {/if}
                 {#if !m.quiet}
                   <text
                     y="-10"
@@ -1007,11 +1032,32 @@
     stroke-linecap: round;
     filter: drop-shadow(0 0 1px var(--bg-panel));
   }
-  /* Still training: the run's dot in a lime ring, the status bar's running mark. */
-  .end-live {
+  /* Still training: a filled lime dot (style:fill) whose heartbeat, a ring every 2.4 s, is StatusBadge's `live-pulse`
+     drawn in SVG; off under reduced motion, where the dot still says "now". */
+  .end-beat {
     fill: none;
     stroke: var(--accent-line);
     stroke-width: 1.5;
+    opacity: 0;
+    transform-box: fill-box;
+    transform-origin: center;
+    animation: end-beat 2.4s var(--ease-out) infinite;
+  }
+  @keyframes end-beat {
+    0% {
+      opacity: 0.55;
+      transform: scale(1);
+    }
+    33%,
+    100% {
+      opacity: 0;
+      transform: scale(2.2);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .end-beat {
+      display: none;
+    }
   }
   .halo {
     fill: none;
@@ -1071,14 +1117,21 @@
     stroke-width: 1;
     stroke-linecap: round;
   }
+  /* The best epoch: a hollow ink ring, 1.5 px, the header's "○ best" glyph (./endMarks). On its own it is filled with
+     the panel, so the line does not run through it; around an end mark it is only the ring. */
   .marker .ring {
+    fill: none;
+    stroke: var(--text-primary);
+    stroke-width: 1.5;
+  }
+  .marker:not([data-merged]) .ring {
     fill: var(--bg-panel);
-    stroke-width: 2;
   }
   /* A new best: a ring grows out of the marker and fades, once, over the chart duration. */
   .marker .pulse {
     fill: none;
-    stroke-width: 2;
+    stroke: var(--text-primary);
+    stroke-width: 1.5;
     opacity: 0;
     transform-box: fill-box;
     transform-origin: center;
@@ -1094,8 +1147,35 @@
       transform: scale(2.4);
     }
   }
+  /* The run completed: four lime corners close in on the best ring over 200 ms, hold, then fade (1 s in all). */
+  .marker .focus {
+    fill: none;
+    stroke: var(--accent-line);
+    stroke-width: 1.5;
+    stroke-linecap: square;
+    opacity: 0;
+    transform-box: fill-box;
+    transform-origin: center;
+    animation: best-focus 1s var(--ease-out);
+  }
+  @keyframes best-focus {
+    0% {
+      opacity: 0;
+      transform: scale(1.8);
+    }
+    20%,
+    70% {
+      opacity: 1;
+      transform: scale(1);
+    }
+    100% {
+      opacity: 0;
+      transform: scale(1);
+    }
+  }
   @media (prefers-reduced-motion: reduce) {
-    .marker .pulse {
+    .marker .pulse,
+    .marker .focus {
       display: none;
     }
   }
