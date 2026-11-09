@@ -41,6 +41,18 @@ fn doctor_json() {
         assert!(g["name"].is_string() && g["backend"].is_string() && g["shader_f16"].is_boolean(), "{g}");
     }
     assert!(v["gpu_selected"].is_object());
+    // The same `capabilities` as `/api/system`: available iff no reason.
+    let c = &v["capabilities"];
+    assert!(c["device"].is_string() && c["shader_f16"].is_boolean(), "{c}");
+    for k in ["tensor_cores", "amp"] {
+        assert!(c[k]["available"].is_boolean(), "{c}");
+    }
+    assert_eq!(c["amp"]["available"].as_bool().unwrap(), c["amp"]["reason"].is_null(), "{c}");
+    assert_eq!(c["tensor_cores"]["enabled"].as_bool().unwrap(), c["tensor_cores"]["reason"].is_null(), "{c}");
+    if let Some(tc) = v["gpu_selected"]["tensor_cores"].as_str().filter(|s| *s != "on") {
+        assert_eq!(c["tensor_cores"]["reason"], tc, "the status doctor prints");
+    }
+    assert!(stderr.contains("amp "), "{stderr}");
     assert!(stderr.contains("cpu"), "human text goes to stderr in --json mode");
     assert!(stderr.contains("gpu"), "{stderr}");
 }
