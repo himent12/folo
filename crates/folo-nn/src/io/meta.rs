@@ -103,7 +103,8 @@ pub struct ModelConfig {
     pub strides: Vec<u32>,
     /// DFL bins, 16.
     pub reg_max: u32,
-    /// Head type, `"o2m"` (`"dual"` is reserved).
+    /// Head type: `"o2m"` (one-to-many + NMS, v1's), or `"o2o"`: both branches (docs/MODEL.md §6.6, trained with
+    /// dual assignment), predicting with the one-to-one branch and no NMS. [`ModelConfig::has_o2o`].
     pub head: String,
     /// BatchNorm ε.
     #[serde(default = "default_bn_eps")]
@@ -135,6 +136,11 @@ impl ModelConfig {
         };
         c.validate()?;
         Ok(c)
+    }
+
+    /// Whether the model has the one-to-one (NMS-free) branch, `head = "o2o"` (docs/MODEL.md §6.6).
+    pub fn has_o2o(&self) -> bool {
+        self.head == "o2o"
     }
 
     /// The v1 rules of docs/MODEL.md §3.
@@ -170,9 +176,8 @@ impl ModelConfig {
             bad.push(format!("reg_max {} (v1 requires 16)", self.reg_max));
         }
         match self.head.as_str() {
-            "o2m" => {}
-            "dual" => bad.push("head `dual` (NMS-free) is reserved and not supported in v1".into()),
-            h => bad.push(format!("unknown head `{h}`")),
+            "o2m" | "o2o" => {}
+            h => bad.push(format!("unknown head `{h}` (expected `o2m` or `o2o`)")),
         }
         if !(self.bn_eps > 0.0 && self.bn_eps.is_finite())
             || !(self.bn_momentum > 0.0 && self.bn_momentum < 1.0)
@@ -386,7 +391,9 @@ mod tests {
         assert!(bad.validate().is_err());
         bad = c.clone();
         bad.head = "dual".into();
-        assert!(bad.validate().unwrap_err().to_string().contains("reserved"));
+        assert!(bad.validate().unwrap_err().to_string().contains("unknown head `dual`"));
+        bad.head = "o2o".into();
+        assert!(bad.validate().is_ok() && bad.has_o2o() && !c.has_o2o());
         assert!(serde_json::from_str::<ModelConfig>(&s.replace("\"family\"", "\"x\":1,\"family\"")).is_err());
         assert!(Metadata::new(FileKind::Weights, c.clone(), vec!["a".into()], 640).is_err());
         let m = Metadata::new(

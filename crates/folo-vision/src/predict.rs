@@ -36,8 +36,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::boxes::Xyxy;
 use crate::error::{Error, Result};
-use crate::model::{FoloModel, HeadOutput};
-use crate::nms::{Detection, NmsConfig, non_max_suppression};
+use crate::model::{FoloModel, HeadMode, HeadOutput};
+use crate::nms::{Detection, NmsConfig, postprocess};
 
 /// Prediction settings; the defaults are MODEL.md §9.3's `predict` column at `imgsz = 640`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -53,11 +53,15 @@ pub struct PredictConfig {
     pub max_det: usize,
     /// Single images: pad only to the next multiple of 32 (`rect`, the default) instead of `S × S`.
     pub rect: bool,
+    /// The head branch to predict with (docs/MODEL.md §6.6): `None` (the default) uses the model's
+    /// ([`FoloModel::head_mode`]: `o2o`, no NMS, for a `head = "o2o"` model), `o2m` forces the one-to-many branch
+    /// and NMS, `o2o` requires a model with the one-to-one branch.
+    pub head: Option<HeadMode>,
 }
 
 impl Default for PredictConfig {
     fn default() -> Self {
-        PredictConfig { imgsz: 640, conf: 0.25, iou: 0.7, max_det: 300, rect: true }
+        PredictConfig { imgsz: 640, conf: 0.25, iou: 0.7, max_det: 300, rect: true, head: None }
     }
 }
 
@@ -243,6 +247,9 @@ impl Predictor {
     /// (an f16 model, from [`Module::to_dtype`], predicts in f16).
     pub fn new(mut model: FoloModel, cfg: PredictConfig) -> Result<Self> {
         cfg.validate()?;
+        if let Some(h) = cfg.head {
+            model.set_head_mode(h)?;
+        }
         model.fuse()?;
         Ok(Predictor { model, cfg, fallback: None })
     }
@@ -288,9 +295,12 @@ impl Predictor {
         &self.cfg
     }
 
-    /// Change the settings.
+    /// Change the settings. `head: None` keeps the branch the predictor runs now.
     pub fn set_config(&mut self, cfg: PredictConfig) -> Result<()> {
         cfg.validate()?;
+        if let Some(h) = cfg.head {
+            self.model.set_head_mode(h)?;
+        }
         self.cfg = cfg;
         Ok(())
     }
@@ -397,7 +407,8 @@ impl Predictor {
         Ok(self.model.forward(&batch.input)?)
     }
 
-    /// The last step: class-aware NMS (with the current [`PredictConfig`]) on each image's decoded
+    /// The last step: class-aware NMS (with the current [`PredictConfig`]; the top-k of docs/MODEL.md §6.6 when
+    /// the model predicts with its `o2o` head, [`FoloModel::head_mode`]) on each image's decoded
     /// `(boxes, scores)` (from [`HeadOutput::decode_images`] or [`HeadOutput::split_decoded`]), then the boxes
     /// mapped back through the letterbox into original-image pixels. `nc` is the head's class count.
     pub fn finish(
@@ -406,8 +417,8 @@ impl Predictor {
         decoded: Vec<(Vec<Xyxy>, Vec<f32>)>,
         nc: usize,
     ) -> Vec<Vec<Detection>> {
-        let nms = self.cfg.nms();
-        let dets = decoded.into_par_iter().map(|(b, sc)| non_max_suppression(&b, &sc, nc, &nms)).collect();
+        let (nms, mode) = (self.cfg.nms(), self.model.head_mode());
+        let dets = decoded.into_par_iter().map(|(b, sc)| postprocess(&b, &sc, nc, &nms, mode)).collect();
         self.finish_detections(batch, dets)
     }
 

@@ -40,6 +40,7 @@ use folo_nn::{ConvBnAct, Error, Forward, Mode, Module, Result};
 use crate::decode::{Anchors, make_anchors};
 use blocks::{C2Psa, C3k2, Fuse, Init, Sppf};
 use head::Detect;
+pub use head::HeadMode;
 
 pub use folo_nn::io::ModelConfig;
 pub use predict::{ImagePrediction, RawPrediction};
@@ -212,10 +213,17 @@ impl Fuse for Neck {
 /// The training output of the model (MODEL.md §6.3), the loss's input.
 #[derive(Clone)]
 pub struct HeadOutput {
-    /// `[B, 4·reg_max, A]`: DFL logits, channel `side · reg_max + bin`, sides `(left, top, right, bottom)`.
+    /// `[B, 4·reg_max, A]`: DFL logits, channel `side · reg_max + bin`, sides `(left, top, right, bottom)`, of
+    /// the branch [`HeadOutput::mode`] names.
     pub box_raw: Tensor,
-    /// `[B, nc, A]`: class logits.
+    /// `[B, nc, A]`: class logits of the same branch.
     pub cls_raw: Tensor,
+    /// The branch `box_raw` and `cls_raw` come from. It also picks the post-processing of
+    /// [`HeadOutput::detections`]: NMS for `o2m`, the top-k selection of MODEL.md §6.6 for `o2o`.
+    pub mode: HeadMode,
+    /// In training mode, the one-to-one branch's `(box_raw, cls_raw)` next to the one-to-many outputs (a
+    /// `head = "o2o"` model, MODEL.md §6.6: the second term of the dual loss); `None` otherwise.
+    pub o2o: Option<(Tensor, Tensor)>,
     /// The anchor points (grid units, cell centres), per-anchor strides and level shapes for this input size
     /// (MODEL.md §6.2: level-major, row-major within a level).
     pub anchors: Anchors,
@@ -252,6 +260,7 @@ pub struct FoloModel {
     imgsz: u32,
     mode: Mode,
     fused: bool,
+    head_mode: HeadMode,
     /// Layers 0–10.
     pub backbone: Backbone,
     /// Layers 11–22.
@@ -302,9 +311,12 @@ impl FoloModel {
             out5: C3k2::new(c20 + c10, c22, rep(2), s.c3k(true), 0.5, i),
         };
         let strides = [config.strides[0], config.strides[1], config.strides[2]];
-        let head = Detect::new([c16, c19, c22], strides, config.num_classes, config.reg_max as usize, i)?;
+        let (nc, reg_max, o2o) = (config.num_classes, config.reg_max as usize, config.has_o2o());
+        let head = Detect::new([c16, c19, c22], strides, nc, reg_max, o2o, i)?;
         let classes = (0..config.num_classes).map(|c| format!("class{c}")).collect();
-        Ok(FoloModel { config, classes, imgsz: 640, mode: Mode::new(), fused: false, backbone, neck, head })
+        let head_mode = if o2o { HeadMode::O2o } else { HeadMode::O2m };
+        let (mode, fused) = (Mode::new(), false);
+        Ok(FoloModel { config, classes, imgsz: 640, mode, fused, head_mode, backbone, neck, head })
     }
 
     /// The model config (`folo.config`).
@@ -360,6 +372,31 @@ impl FoloModel {
         make_anchors(h as u32, w as u32, &self.config.strides, 0.5)
     }
 
+    /// Whether the model has the one-to-one (NMS-free) branch (`head = "o2o"`, MODEL.md §6.6).
+    pub fn has_o2o(&self) -> bool {
+        self.head.o2o.is_some()
+    }
+
+    /// The branch an eval-mode forward computes and predicts with: the config's (`o2o` for a `head = "o2o"`
+    /// model, else `o2m`) unless [`FoloModel::set_head_mode`] changed it.
+    pub fn head_mode(&self) -> HeadMode {
+        self.head_mode
+    }
+
+    /// Predict with the one-to-many branch and NMS (`O2m`, any model) or with the one-to-one branch and no NMS
+    /// (`O2o`, only a model that has it). Training is unaffected: a training-mode forward computes both.
+    pub fn set_head_mode(&mut self, mode: HeadMode) -> Result<()> {
+        if mode == HeadMode::O2o && !self.has_o2o() {
+            return Err(Error::Invalid(format!(
+                "{} has no one-to-one (NMS-free) head (folo.config head is `{}`); train with head o2o for one",
+                self.arch(),
+                self.config.head
+            )));
+        }
+        self.head_mode = mode;
+        Ok(())
+    }
+
     /// True once [`FoloModel::fuse`] has run (or the model was loaded from a fused file).
     pub fn is_fused(&self) -> bool {
         self.fused
@@ -381,20 +418,40 @@ impl FoloModel {
     }
 
     /// The raw outputs (MODEL.md §6.3) of an `[B, 3, H, W]` batch with `H` and `W` positive multiples of 32.
-    /// In training mode BatchNorm uses (and updates) batch statistics; in eval mode its running statistics.
+    /// In training mode BatchNorm uses (and updates) batch statistics, and the output holds the one-to-many
+    /// branch plus, in a `head = "o2o"` model, the one-to-one branch ([`HeadOutput::o2o`]). In eval mode
+    /// BatchNorm uses its running statistics and only the [`FoloModel::head_mode`] branch runs.
     pub fn forward(&self, x: &Tensor) -> Result<HeadOutput> {
-        self.forward_impl(x, None)
+        self.forward_impl(x, None, self.head_mode)
+    }
+
+    /// [`FoloModel::forward`] in eval mode with the `mode` branch, whatever [`FoloModel::head_mode`] says
+    /// (`o2o` needs a model that has it). In training mode it is [`FoloModel::forward`].
+    pub fn forward_head(&self, x: &Tensor, mode: HeadMode) -> Result<HeadOutput> {
+        if mode == HeadMode::O2o && !self.has_o2o() {
+            return Err(Error::Invalid(format!(
+                "{} has no one-to-one (NMS-free) head (folo.config head is `{}`)",
+                self.arch(),
+                self.config.head
+            )));
+        }
+        self.forward_impl(x, None, mode)
     }
 
     /// [`FoloModel::forward`], calling `trace(layer, output)` with the output of every layer 0–22 of
     /// MODEL.md §4 (see [`LAYER_NAMES`]) as it is computed.
     pub fn forward_traced(&self, x: &Tensor, trace: &mut dyn FnMut(usize, &Tensor)) -> Result<HeadOutput> {
-        self.forward_impl(x, Some(trace))
+        self.forward_impl(x, Some(trace), self.head_mode)
     }
 
     /// The forward pass. Without a trace, the neck's Concat layers (12, 15, 18, 21) are never written: the
     /// C3k2 after each reads both parts in place ([`C3k2::forward_cat`]).
-    fn forward_impl(&self, x: &Tensor, mut trace: Option<&mut LayerTrace<'_>>) -> Result<HeadOutput> {
+    fn forward_impl(
+        &self,
+        x: &Tensor,
+        mut trace: Option<&mut LayerTrace<'_>>,
+        head_mode: HeadMode,
+    ) -> Result<HeadOutput> {
         let (h, w) = self.check_input(x)?;
         let b = &self.backbone;
         let n = &self.neck;
@@ -442,10 +499,21 @@ impl FoloModel {
         let x22 = cat_c3k2(&mut t, 21, &n.out5, &y, &x10)?;
         drop(x10);
         drop(y);
-        let (box_raw, cls_raw) = self.head.forward([&x16, &x19, &x22])?;
+        let feats = [&x16, &x19, &x22];
+        let (mode, (box_raw, cls_raw), o2o) = if self.is_training() {
+            (HeadMode::O2m, self.head.forward(feats)?, self.head.forward_o2o(feats)?)
+        } else if head_mode == HeadMode::O2o
+            && let Some(raw) = self.head.forward_o2o(feats)?
+        {
+            (HeadMode::O2o, raw, None)
+        } else {
+            (HeadMode::O2m, self.head.forward(feats)?, None)
+        };
         Ok(HeadOutput {
             box_raw,
             cls_raw,
+            mode,
+            o2o,
             anchors: self.anchors(h, w),
             reg_max: self.head.reg_max,
             num_classes: self.head.num_classes,

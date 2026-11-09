@@ -184,6 +184,11 @@ pub struct TrainArgs {
     /// (cooperative matrices; asked for automatically); anything else is `not_supported`.
     #[arg(long)]
     pub amp: bool,
+    /// Detection head: o2m (one-to-many, NMS at inference) or o2o (also the NMS-free one-to-one branch, trained
+    /// with dual assignment: the model then predicts end to end without NMS; `end2end` is an alias)
+    /// [default: the --weights file's head, else o2m].
+    #[arg(long, value_enum)]
+    pub head: Option<HeadArg>,
     /// Warmup length in epochs.
     #[arg(long, default_value_t = 3.0)]
     pub warmup_epochs: f64,
@@ -230,6 +235,25 @@ pub struct TrainArgs {
     pub explicit: Vec<String>,
 }
 
+/// Detection head (docs/MODEL.md §6.6).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum HeadArg {
+    /// One-to-many head with NMS.
+    O2m,
+    /// One-to-one (NMS-free) head.
+    #[value(alias = "end2end")]
+    O2o,
+}
+
+impl From<HeadArg> for folo_vision::model::HeadMode {
+    fn from(h: HeadArg) -> Self {
+        match h {
+            HeadArg::O2m => folo_vision::model::HeadMode::O2m,
+            HeadArg::O2o => folo_vision::model::HeadMode::O2o,
+        }
+    }
+}
+
 /// Dataset split.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum SplitArg {
@@ -265,6 +289,10 @@ pub struct ValArgs {
     /// NMS IoU threshold.
     #[arg(long, default_value_t = 0.7)]
     pub iou: f32,
+    /// Head to evaluate [default: the model's: o2o, without NMS, for a model trained with --head o2o]; `o2m`
+    /// evaluates such a model's one-to-many branch with NMS.
+    #[arg(long, value_enum)]
+    pub head: Option<HeadArg>,
     /// Device: auto, cpu or gpu:<n>.
     #[arg(long, default_value = "auto")]
     pub device: String,
@@ -307,6 +335,10 @@ pub struct PredictArgs {
     /// Maximum detections per image.
     #[arg(long, default_value_t = 300)]
     pub max_det: u32,
+    /// Head to predict with [default: the model's: o2o, without NMS, for a model trained with --head o2o]; `o2m`
+    /// uses such a model's one-to-many branch with NMS.
+    #[arg(long, value_enum)]
+    pub head: Option<HeadArg>,
     /// Letterbox size in pixels [default: the model's training size].
     #[arg(long)]
     pub imgsz: Option<u32>,
@@ -368,9 +400,18 @@ pub struct ExportArgs {
     #[arg(long)]
     pub half: bool,
     /// Decode in the graph (ONNX only): one `detections` output `[B, A, 4 + nc]` (x1 y1 x2 y2 in input pixels,
-    /// then sigmoid class scores; NMS not included) instead of the raw `box_raw` / `cls_raw` head outputs.
+    /// then sigmoid class scores; NMS not included) instead of the raw `box_raw` / `cls_raw` head outputs. A model
+    /// trained with --head o2o exports end-to-end detections instead: `[B, K, 6]` (x1 y1 x2 y2 score class, by
+    /// score, no NMS needed), K = min(--max-det, anchors).
     #[arg(long)]
     pub decode: bool,
+    /// With --decode on an o2o model (ONNX only): detections per image.
+    #[arg(long, default_value_t = 300)]
+    pub max_det: usize,
+    /// Head to export (ONNX only) [default: the model's]; `o2m` exports an o2o model's one-to-many branch
+    /// (raw, or decoded for NMS) instead of its one-to-one branch.
+    #[arg(long, value_enum)]
+    pub head: Option<HeadArg>,
 }
 
 /// What `folo bench` measures.

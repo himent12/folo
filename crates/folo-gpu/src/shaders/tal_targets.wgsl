@@ -2,7 +2,9 @@
 // A pick is a final positive iff the gt owns its anchor after step 4; over those, m_max and u_max give the soft
 // target t = m · u_max / (m_max + eps). Writes per pick slot SLOT = (t bits or 0, 1 if positive) and, for each
 // positive, the dense per-anchor map DENSE = [label + 1 | t bits] (zeroed before: 0 means background).
-// Spec: K (<= 64). Params: 0 = A, 1 = G, 2 = B·A, 3 = label word offset, 4 = eps.
+// With K2 > 0 (the one-to-one assignment's second filter) only the gt's first K2 positives stay positive: the picks
+// are in (m descending, anchor ascending) order, so those are its highest-metric ones.
+// Spec: K (<= 64), K2 (0 = off). Params: 0 = A, 1 = G, 2 = B·A, 3 = label word offset, 4 = eps.
 @group(0) @binding(1) var<storage, read> PICK: array<u32>;
 @group(0) @binding(2) var<storage, read> OWN: array<u32>;
 @group(0) @binding(3) var<storage, read> META: array<u32>;
@@ -11,6 +13,7 @@
 
 var<workgroup> MM: array<f32, 64>;
 var<workgroup> UM: array<f32, 64>;
+var<workgroup> POS: array<u32, 64>;
 
 @compute @workgroup_size(64)
 fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) lid: u32) {
@@ -31,6 +34,15 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) 
             u = bitcast<f32>(PICK[3u * s + 2u]);
             pos = OWN[pu(2u) + b * na + a] == ~g;
         }
+    }
+    if (K2 > 0u) {
+        POS[lid] = select(0u, 1u, pos);
+        workgroupBarrier();
+        var before = 0u;
+        for (var j = 0u; j < lid; j = j + 1u) {
+            before = before + POS[j];
+        }
+        pos = pos && before < K2;
     }
     MM[lid] = select(0.0, m, pos);
     UM[lid] = select(0.0, u, pos);

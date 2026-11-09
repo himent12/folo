@@ -6,7 +6,8 @@
 //! - **Batches** (§8.3): the loader shuffles with `(seed, epoch)` and augments each sample from
 //!   `(seed, epoch, position)`, so a resumed epoch reproduces its batches exactly. `accumulate =
 //!   max(round(nbs / batch), 1)` batches form a window; windows never cross an epoch boundary.
-//! - **Step** (§8.3–8.5): train-mode forward, [`detection_loss`], and (only if the loss and every BatchNorm
+//! - **Step** (§8.3–8.5): train-mode forward, [`detection_loss`] (for a `head = "o2o"` model the [`dual_loss`] of
+//!   both branches, §6.6), and (only if the loss and every BatchNorm
 //!   statistic are finite) backward into a [`GradAccumulator`]. At the end of a window with at least one finite
 //!   batch: the schedule sets each group's LR and momentum for iteration `t`, the global gradient norm is clipped,
 //!   the optimizer steps, the EMA updates and `t` advances. A non-finite batch restores the running statistics it
@@ -57,7 +58,7 @@ use folo_nn::optim::{
 use folo_nn::{DecayKind, EmaState, GradScaler, LrSchedule, ModelEma, Module, RunningStats, ScaleUpdate};
 
 use crate::error::{Error, Result};
-use crate::loss::{LossConfig, LossItems, detection_loss, targets_from_normalized};
+use crate::loss::{LossConfig, LossItems, detection_loss, dual_loss, o2m_weight, targets_from_normalized};
 use crate::model::FoloModel;
 use crate::val::{ValConfig, ValResult, ValSample, batch_tensor, val_metrics, validate};
 use events::Emitter;
@@ -487,7 +488,8 @@ impl Trainer {
         if cfg.amp {
             amp_support(device)?;
         }
-        let mconf = ModelConfig::new(cfg.scale()?, nc)?;
+        let mut mconf = ModelConfig::new(cfg.scale()?, nc)?;
+        mconf.head = cfg.head.as_str().into();
         let mut init = Rng::seed(cfg.seed);
         let mut model = FoloModel::with_rng(mconf.clone(), &mut init)?;
         model.set_classes(data.classes.clone())?;
@@ -760,6 +762,14 @@ impl Trainer {
                 c.warmup_iters
             ),
         );
+        if self.model.has_o2o() {
+            self.emitter.log(
+                LogLevel::Info,
+                "head o2o: dual assignment (one-to-many + one-to-one losses, weights 0.8 / 0.2 → 0.1 / 0.9 over the \
+                 run); validation uses the one-to-one head without NMS"
+                    .to_string(),
+            );
+        }
         for w in &self.warnings {
             self.emitter.log(LogLevel::Warn, w.clone());
         }
@@ -926,8 +936,20 @@ impl Trainer {
             // Mixed precision: the loss (assigner, BCE, CIoU + DFL) runs in f32 on f32 copies of the f16 head.
             let f32_head = |t: &folo_core::Tensor| t.to_dtype(folo_core::DType::F32);
             let (box_raw, cls_raw) = (f32_head(&out.box_raw)?, f32_head(&out.cls_raw)?);
-            let loss = detection_loss(&box_raw, &cls_raw, &out.anchors, &targets, &self.loss_cfg)?;
+            let mut loss = detection_loss(&box_raw, &cls_raw, &out.anchors, &targets, &self.loss_cfg)?;
             drop((box_raw, cls_raw));
+            if let Some((b, c)) = &out.o2o {
+                // Dual assignment (MODEL.md §6.6): the one-to-one branch's own loss, weighted in by epoch.
+                let (box_raw, cls_raw) = (f32_head(b)?, f32_head(c)?);
+                let o2o = detection_loss(
+                    &box_raw,
+                    &cls_raw,
+                    &out.anchors,
+                    &targets,
+                    &LossConfig { tal: crate::assign::TalConfig::o2o(), ..self.loss_cfg },
+                )?;
+                loss = dual_loss(&loss, &o2o, o2m_weight(e, self.cfg.epochs))?;
+            }
             let finite = loss.is_finite() && RunningStats::all_finite(&self.model)?;
             let items = loss.items;
             if finite {

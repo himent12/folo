@@ -6,6 +6,7 @@ use folo_nn::optim::{OptimKind, auto_optimizer};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
+use crate::model::HeadMode;
 
 /// `optimizer`: `auto`, `sgd` or `adamw` (docs/MODEL.md §8.2).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,6 +72,9 @@ pub struct TrainConfig {
     /// dynamic loss scaling. Needs a GPU whose context has tensor cores (folo-gpu's cooperative matrices); anything
     /// else fails with `not_supported`.
     pub amp: bool,
+    /// Detection head (docs/MODEL.md §6.6): `o2m`, or `o2o` for a model with the NMS-free one-to-one branch too,
+    /// trained with dual assignment (`L = w_m · L_o2m + w_o · L_o2o`) and predicting without NMS.
+    pub head: HeadMode,
     /// Stop after this many epochs without a fitness gain.
     pub patience: u32,
     /// Seed of the initial weights, the epoch order and the augmentation.
@@ -106,6 +110,7 @@ impl Default for TrainConfig {
             ema: true,
             clip_grad_norm: 10.0,
             amp: false,
+            head: HeadMode::O2m,
             patience: 100,
             seed: 0,
             workers: default_workers(),
@@ -158,6 +163,10 @@ impl TrainConfig {
             },
             lr0: f32_decimal(c.lr0),
             amp: c.amp,
+            head: match c.head {
+                folo_api::Head::O2m => HeadMode::O2m,
+                folo_api::Head::O2o => HeadMode::O2o,
+            },
             seed: c.seed,
             augment: AugmentConfig {
                 mosaic: a.mosaic,

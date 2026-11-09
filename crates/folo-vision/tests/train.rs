@@ -622,3 +622,69 @@ fn resume_preserves_unknown_metadata() {
     assert_eq!(meta.extra.get("folo.dataset_hash").map(String::as_str), Some("abc123"));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A dual-assignment run (`head: o2o`, docs/MODEL.md §6.6): the loss falls, the checkpoints hold an `o2o` model
+/// (both branches), the run's models predict with the one-to-one head, and a resume continues bit for bit.
+#[test]
+fn o2o_run_trains_checkpoints_and_resumes() {
+    use folo_vision::model::{FoloModel, HeadMode};
+    let ds = shapes(18, 4, 64);
+    let cfg = TrainConfig { head: HeadMode::O2o, ..resume_config() };
+    let (dir_a, dir_b) = (temp_dir("o2o-a"), temp_dir("o2o-b"));
+    let (opts, log_a) = options(Some(&dir_a));
+    let sum = Trainer::new(cfg.clone(), data(&ds), opts).unwrap().run().unwrap();
+    assert_eq!((sum.status, sum.epochs_completed), (RunStatus::Completed, 2));
+    let epochs = epochs_of(&log_a);
+    assert!(epochs.iter().all(|e| e.train_loss.total.is_finite() && e.train_loss.total > 0.0));
+    let last = dir_a.join("weights/last.folo");
+    let file = ModelFile::open(&last).unwrap();
+    assert_eq!(file.metadata().config.head, "o2o");
+    let m = FoloModel::open(&last).unwrap();
+    assert!(m.has_o2o() && m.head_mode() == HeadMode::O2o);
+    // The o2o branch trained: it no longer equals its initialisation.
+    let init = FoloModel::with_rng(m.config().clone(), &mut folo_core::rng::Rng::seed(cfg.seed)).unwrap();
+    let get = |m: &FoloModel, n: &str| {
+        m.state().into_iter().find(|(k, _)| k == n).unwrap().1.to_vec::<f32>().unwrap()
+    };
+    assert_ne!(get(&m, "head.o2o.cls.p3.out.weight"), get(&init, "head.o2o.cls.p3.out.weight"));
+
+    // B: the same run stopped after epoch 1 and resumed: the same epoch-2 numbers and final tensors (the
+    // dual-loss weight depends only on the completed epochs).
+    let (opts, _) = options(Some(&dir_b));
+    let stop = opts.stop.clone();
+    let opts = TrainOptions {
+        events: Some(Box::new(move |e| {
+            if matches!(e, RunEvent::Epoch(_)) {
+                stop.store(true, Ordering::Relaxed);
+            }
+        })),
+        ..opts
+    };
+    let s1 = Trainer::new(cfg, data(&ds), opts).unwrap().run().unwrap();
+    assert_eq!((s1.status, s1.epochs_completed), (RunStatus::Stopped, 1));
+    let (opts, log_b) = options(Some(&dir_b));
+    let mut b = Trainer::resume(dir_b.join("weights/last.folo"), data(&ds), opts, ResumeOverrides::default())
+        .unwrap();
+    assert!(b.model().has_o2o());
+    b.run().unwrap();
+    let (ea, eb) = (&epochs[1], &epochs_of(&log_b)[0]);
+    assert_eq!((ea.epoch, ea.train_loss, &ea.val), (eb.epoch, eb.train_loss, &eb.val));
+    let (ta, tb) = (tensors(&last), tensors(&dir_b.join("weights/last.folo")));
+    assert_eq!(ta.len(), tb.len());
+    for ((na, va), (nb, vb)) in ta.iter().zip(&tb) {
+        assert!(na == nb && va == vb, "tensor {na} differs after resume");
+    }
+
+    // The run's best weights predict end to end (no NMS), boxes inside the image.
+    let p = Predictor::open(
+        dir_a.join("weights/best.folo"),
+        PredictConfig { imgsz: 64, conf: 0.001, ..Default::default() },
+    )
+    .unwrap();
+    assert_eq!(p.model().head_mode(), HeadMode::O2o);
+    let sample = folo_data::synthetic::generate(&ds, 0).unwrap().image;
+    let pred = p.predict(&sample).unwrap();
+    assert!(pred.detections.windows(2).all(|w| w[0].score >= w[1].score));
+    let _ = std::fs::remove_dir_all(&dir_a);
+    let _ = std::fs::remove_dir_all(&dir_b);
+}

@@ -163,7 +163,7 @@ model size.
 | 5 | GPU end to end, batch 1 (decoded image in, boxes on host) | **6.92 ms** fp32 / 7.11 ms fp16 | f32 or f16, with NMS | **5.18 ms** f32 (beats; was 8.69); f16 ties f32 (8.5–9.4 vs 9.1–9.6 ms under load); tensor cores 8.35 ms median, 6.95 ms back to back under load (regular f16 8.67 / 9.38) | **7.87 ms** (yolo26s 8.59: beats; was 10.91); tensor cores 9.37 ms under load (regular f16 13.69) |
 | 6 | GPU end to end throughput, batch 16 | **615 img/s** fp16 / 536 img/s fp32 | best FOLO precision | **722 img/s** f32 (beats both; was 299); f16 +7–13% over f32 under load (427–456 vs 375–401 img/s back to back); tensor cores 548 img/s back to back under 67–81% load (regular f16 436, f32 367 in the same session) | 394 img/s f32 (yolo26s 446 fp16: behind; beats its 317 fp32; was 226); tensor cores 328 img/s back to back under load (regular f16 249), not measured quietly yet |
 | 7 | CPU forward latency, batch 1, f32 (best thread count) | **22.8 ms** (8 threads; 25.1 ms at 20) | f32, best thread count | **21.4 ms** (fused, 28 threads, with 44–76% CPU load from other jobs; 35.8 ms for `main` in the same session; `cargo bench -p folo-vision --bench model`) | |
-| 8 | CPU end to end latency, batch 1 | **24.8 ms** (Ultralytics default, 8 threads) | f32, with NMS | 26.9 ms (the predictor on a `u8` image, 28 threads, same contended run as row 7: behind) | |
+| 8 | CPU end to end latency, batch 1 | **24.8 ms** (Ultralytics default, 8 threads) | f32, with NMS | 26.9 ms (the predictor on a `u8` image, 28 threads, same contended run as row 7: behind). The NMS-free head does not close it: 26.59 vs 26.66 ms with NMS on the same trained model ([NMS-free head](#nms-free-head-o2o)) | |
 | 9 | Training compute, batch 16 (step only, no data loader) | **202 img/s** fp32 (TF32) / 252 img/s AMP | f32, and AMP | **219 img/s** f32 (73.0 ms; beats; 143 before the loss moved to the GPU); **307 img/s AMP** (52.2 ms, `--amp` on tensor cores; beats 252; f32 247 in the same quiet session, see [Mixed-precision training](#mixed-precision-training-amp)) | **109 img/s** f32 (146.6 ms; yolo26s 105 fp32: beats; was 68); **183 img/s AMP** (87.5 ms; yolo26s AMP 188: ties) |
 | 10 | Trainer sustained images/s (epoch-2 wall), batch 16, mosaic, 8 workers, best of 3 | **199 img/s** fp32 / 224 img/s AMP | f32 | | |
 | 11 | Training peak GPU memory, batch 16, f32 | **4353 MiB** allocated (5148 MiB reserved); 2435 MiB AMP | f32, and AMP | **3474 MiB** (train step; yolo26n train step 4517: beats); **2022 MiB AMP** (yolo26n AMP train step 2646, trainer 2435: beats) | **6541 MiB** (yolo26s train step 8245: beats); **3713 MiB AMP** (yolo26s AMP 4614: beats) |
@@ -375,6 +375,75 @@ against TF32 convolutions; 307 vs 252 img/s with AMP) and on training memory (3.
 vs 1454 img/s) while doing 19% more FLOPs. folo-s beats yolo26s end to end at batch 1 (7.87 vs 8.59 ms) and on the
 training step (109 vs 105 img/s fp32; ties with AMP, 183 vs 188), ties batch-16 forward, and is behind on batch-1 forward (5.5 vs 4.9 ms) and
 batch-16 end to end against fp16 (394 vs 446 img/s; it beats the fp32 317).
+
+## NMS-free head (o2o)
+
+`folo train --head o2o` (docs/MODEL.md §6.6, as in YOLOv10 / YOLO26's end-to-end mode): a one-to-one copy of the
+head on detached features, trained with dual assignment (TAL top-7, then one positive per gt) next to the usual
+one-to-many loss, predicting with a top-k selection and no NMS. Branch `vision/nms-free`, 2026-11-09, RTX 4080 SUPER
+shared with a long COCO training run (**78–86% GPU utilisation** from that job during every measurement below; the
+CPU was shared with builds too).
+
+**Accuracy: the shapes gate** (docs/MODEL.md §10.6: folo-n, 320 px, 30 epochs, batch 16, seed 0, `--device gpu:0`,
+`--head o2o`). The dual-head model has 3,022,040 parameters (the o2o branch adds 431,436 to folo-n's 2,590,604 at
+nc = 4; inference runs one branch, so the inference cost is unchanged). 30 epochs in 340 s (8.8–19.7 s per epoch,
+shared GPU), no non-finite batch.
+
+| folo-n, shapes val (EMA, `folo val`) | mAP50 | mAP50-95 | P | R | gate first met |
+|---|---:|---:|---:|---:|---|
+| dual-head model, **o2o head, top-k, no NMS** (its default) | **0.954** | **0.865** | 0.910 | 0.878 | epoch 14 (0.911 / 0.780) |
+| the same model, o2m head + NMS (`--head o2m`) | 0.977 | 0.879 | 0.978 | 0.913 | |
+| o2m-only model (the f32 gate run above, for reference) | 0.978 | 0.898 | | | epoch 10 (0.932 / 0.782) |
+
+The o2o head **passes** the gate (≥ 0.90 / 0.75) with margin, but it is behind NMS on the same model by 0.023 mAP50
+and 0.015 mAP50-95, and the dual-trained o2m branch ends 0.019 mAP50-95 below the o2m-only run: the one-to-many loss
+weight falls to 0.1 by the last epoch, as MODEL.md specifies. One-to-one training also converges more slowly early
+on (mAP50-95 0.344 vs 0.465 at epoch 5), the cost MODEL.md §1 anticipated for short runs on small data. Curve
+(epoch: train loss, which is the weighted sum of both branches, so it is not comparable with an o2m run's;
+mAP50; mAP50-95):
+
+| epoch | 1 | 3 | 5 | 7 | 10 | 14 | 18 | 22 | 26 | 30 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| loss | 13.212 | 6.371 | 4.385 | 3.543 | 3.037 | 2.727 | 2.571 | 2.486 | 2.070 | 2.002 |
+| mAP50 | 0.000 | 0.188 | 0.484 | 0.702 | 0.864 | 0.911 | 0.931 | 0.943 | 0.952 | 0.954 |
+| mAP50-95 | 0.000 | 0.096 | 0.344 | 0.553 | 0.718 | 0.780 | 0.812 | 0.843 | 0.842 | 0.865 |
+
+**Speed: end to end** (`FOLO_BENCH_WEIGHTS=<the shapes o2o best.folo> FOLO_BENCH_IMAGES=<shapes val> cargo bench -p
+folo-vision --bench head`): the predictor on decoded `u8` images at 640 px (the 320 px shapes frames upscaled),
+predict defaults (conf 0.25, max_det 300), the two heads of the same model alternating call by call. Batch 1 is
+`predict` (rect), batch 16 `predict_batch`. Medians:
+
+| | o2o (top-k, no NMS) | o2m + NMS | postprocess per image (o2o / NMS) |
+|---|---:|---:|---|
+| CPU b1, 28 threads | 26.59 ms | 26.66 ms | 0.70 / 0.75 ms |
+| CPU b16, 28 threads | 37.7 img/s | 36.2 img/s | 0.76 / 0.79 ms |
+| CPU b1, 8 threads | 38.00 ms | 38.07 ms | 0.68 / 0.67 ms |
+| CPU b16, 8 threads | 26.4 img/s | 25.9 img/s | 0.58 / 0.71 ms |
+| GPU b1 (f32) | 9.10 ms | 9.22 ms | 0.63 / 0.62 ms |
+| GPU b16 (f32) | 484 img/s | 504 img/s | 0.09 / 0.09 ms |
+
+Honest reading: **at predict settings the NMS-free head buys nothing measurable** on either device. All the
+differences are inside the run-to-run noise of the shared machine (the GPU b16 one even goes the other way). With
+a confidence threshold of 0.25 a trained model leaves a few candidates per image (4–5 here), and NMS over them takes
+microseconds. The post-processing time is the decode (the per-anchor class maximum and the DFL boxes of the
+candidates), which both heads pay. The CPU end-to-end gap to yolo26n (row 8: 26.9 vs 24.8 ms) is in the forward
+pass and letterbox, not in NMS, so this head does not close it.
+
+Where it does pay is **many candidates**: validation (conf 0.001, multi-label) and crowded scenes. Post-processing
+alone on one 640 px image's decoded head, 8400 anchors × 80 classes (`cargo bench -p folo-vision --bench post`, CPU):
+
+| | NMS (o2m) | top-k (o2o) |
+|---|---:|---:|
+| predict (conf 0.25, best class) → 300 | 0.63 ms | 0.64 ms |
+| val (conf 0.001, multi-label) → 300 | 6.60 ms | **0.75 ms** |
+| val, uniform scores (672k pairs above conf, 30k cap for NMS) → 300 | 10.46 ms | **0.70 ms** |
+
+So the top-k is 9–15x faster than NMS when candidates are plentiful, and its cost does not grow with them. On these
+validation sets the whole `folo val` call is too short to show it (0.25–0.31 s for 200 images either way).
+
+**ONNX.** `folo export --format onnx --decode` of an o2o model has the selection in the graph (`detections:
+[B, K, 6]`, final, no NMS for the consumer). Parity with onnxruntime (`crates/folo-cli/tests/onnx.rs`) is score error
+7e-7 and box error 2e-5 relative in f32 (fixed and dynamic shapes), 7e-4 / 1.5e-2 in f16.
 
 ## FOLO on the CPU
 

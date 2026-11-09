@@ -14,6 +14,7 @@
 //! | Attention | `Reshape`, `Split`, `Transpose`, `MatMul`, `Mul` (scale), `Softmax`, `Shape` |
 //! | head flatten | `Reshape` to `[B, C, −1]`, `Concat` along the anchor axis |
 //! | `--decode` (MODEL.md §6.4) | `Reshape`, `Softmax`, `Mul` + `ReduceSum` (DFL), `Split`, `Sub` / `Add` / `Mul` (anchors), `Sigmoid`, `Concat`, `Transpose` |
+//! | `--decode`, `o2o` head (§6.6 top-k) | `ReduceMax`, `TopK` (twice), `GatherND` (`batch_dims = 1`), `Div` / `Mod`, `Cast`, `Unsqueeze`, `Concat` |
 //!
 //! The input is `images: [B, 3, H, W]`, RGB in `[0, 1]` (docs/MODEL.md conventions). Outputs are either the raw
 //! head (`box_raw: [B, 4·reg_max, A]`, `cls_raw: [B, nc, A]`, MODEL.md §6.3) or, with
@@ -21,6 +22,12 @@
 //! scores after the sigmoid; NMS is left to the caller). With [`OnnxOptions::dynamic`] the batch, height and
 //! width are symbolic (`batch`, `height`, `width`; H and W must be multiples of 32 at run time) and the decode
 //! computes its anchor grid in the graph; otherwise everything is fixed and the anchors are constants.
+//!
+//! A model whose [`FoloModel::head_mode`] is `o2o` (a `head = "o2o"` model, docs/MODEL.md §6.6) exports its
+//! one-to-one branch only (the one-to-many tensors are dropped), and its decoded output is end to end, with no
+//! NMS needed: `detections: [B, K, 6]` with `K = min(max_det, A)`, rows `x1, y1, x2, y2, score, class` sorted
+//! by score (the top-k selection of §6.6: the `K` anchors with the highest max-class score, then the `K` best
+//! (anchor, class) pairs among them). The caller applies its confidence threshold.
 //!
 //! Every model tensor becomes an initializer under its `.folo` name (`backbone.stem.conv.weight`, ...), in `F32`
 //! or, with [`OnnxOptions::half`], `F16` (then the input, outputs and every activation are `F16` too). Anything
@@ -36,9 +43,9 @@ use folo_core::{DType, Tensor, f16};
 use folo_nn::io::{ModelFile, Purpose};
 use folo_nn::{Activation, Conv2d, ConvBnAct, Module};
 
-use crate::model::FoloModel;
 use crate::model::blocks::{Attention, Bottleneck, C2Psa, C3k, C3k2, C3k2Block, PsaBlock, Sppf};
 use crate::model::head::LEVELS;
+use crate::model::{FoloModel, HeadMode};
 use crate::{Error, Result};
 use proto::{AttrValue, DataType, Dim, Msg};
 
@@ -62,8 +69,14 @@ pub struct OnnxOptions {
     pub dynamic: bool,
     /// `F16` weights, input, activations and outputs.
     pub half: bool,
-    /// Decode inside the graph: one `detections: [B, A, 4 + nc]` output instead of the raw head.
+    /// Decode inside the graph: one `detections: [B, A, 4 + nc]` output instead of the raw head (`[B, K, 6]`
+    /// end-to-end detections for an `o2o` head).
     pub decode: bool,
+    /// `o2o` head with `decode`: the detections per image, `K = min(max_det, A)` (300 by default).
+    pub max_det: usize,
+    /// [`export_file`]: the head branch to export, `None` for the file's ([`FoloModel::head_mode`]).
+    /// [`export`] exports the model's own mode.
+    pub head: Option<HeadMode>,
     /// Extra `metadata_props` (for example the source file's `folo.metrics`); the exporter's own keys win.
     pub metadata: BTreeMap<String, String>,
 }
@@ -78,6 +91,8 @@ impl OnnxOptions {
             dynamic: false,
             half: false,
             decode: false,
+            max_det: 300,
+            head: None,
             metadata: BTreeMap::new(),
         }
     }
@@ -91,6 +106,9 @@ impl OnnxOptions {
         }
         if self.batch == 0 {
             return bad("ONNX export: batch must be at least 1".into());
+        }
+        if self.max_det == 0 {
+            return bad("ONNX export: max_det must be at least 1".into());
         }
         Ok(())
     }
@@ -171,6 +189,9 @@ impl FoloModel {
 /// docs/FORMAT.md loading rules) on the CPU, fuse it in `F32` and export it.
 pub fn export_file(file: &ModelFile, opts: &OnnxOptions) -> Result<OnnxExport> {
     let (mut model, _) = FoloModel::from_file(file, Purpose::Inference)?;
+    if let Some(h) = opts.head {
+        model.set_head_mode(h).map_err(|e| Error::Config(format!("ONNX export: {e}")))?;
+    }
     model.fuse()?;
     export(&model, opts)
 }
@@ -183,9 +204,7 @@ pub fn export(model: &FoloModel, opts: &OnnxOptions) -> Result<OnnxExport> {
         ));
     }
     let cfg = model.config();
-    if cfg.head != "o2m" {
-        return Err(Error::Unsupported(format!("ONNX export: head `{}` is not mapped", cfg.head)));
-    }
+    let e2e = model.head_mode() == HeadMode::O2o;
     let stride = *model.strides().iter().max().expect("three strides");
     opts.validate(stride)?;
 
@@ -210,8 +229,17 @@ pub fn export(model: &FoloModel, opts: &OnnxOptions) -> Result<OnnxExport> {
     } else {
         Dim::Value(model.anchors(opts.height as usize, opts.width as usize).len())
     };
-    let outputs = if opts.decode {
-        g.decode(model, opts, &feats, &box_raw, &cls_raw)?;
+    let outputs = if opts.decode && e2e {
+        let k = match &a {
+            Dim::Value(a) => Dim::Value(opts.max_det.min(*a)),
+            Dim::Param(_) => Dim::Param("max_det".into()),
+        };
+        let all = g.decode(model, opts, &feats, &box_raw, &cls_raw)?;
+        g.topk(&all, nc, opts);
+        vec![OnnxValue { name: "detections".into(), dtype: elem.name(), shape: vec![bdim, k, Dim::Value(6)] }]
+    } else if opts.decode {
+        let all = g.decode(model, opts, &feats, &box_raw, &cls_raw)?;
+        g.transpose("detections", &all, &[0, 2, 1]);
         vec![OnnxValue {
             name: "detections".into(),
             dtype: elem.name(),
@@ -228,9 +256,17 @@ pub fn export(model: &FoloModel, opts: &OnnxOptions) -> Result<OnnxExport> {
         ]
     };
 
-    // Every model tensor must have been consumed by exactly the node that maps it.
+    // Every model tensor must have been consumed by exactly the node that maps it, except the head branch that
+    // does not predict.
+    let dropped = |n: &str| {
+        if e2e {
+            n.starts_with("head.box.") || n.starts_with("head.cls.")
+        } else {
+            n.starts_with("head.o2o.")
+        }
+    };
     for t in model.named_tensors() {
-        if !g.used.contains(&t.name) {
+        if !g.used.contains(&t.name) && !dropped(&t.name) {
             return Err(Error::Unsupported(format!("ONNX export: tensor `{}` is not mapped", t.name)));
         }
     }
@@ -243,8 +279,9 @@ pub fn export(model: &FoloModel, opts: &OnnxOptions) -> Result<OnnxExport> {
 }
 
 /// The `metadata_props`: the model's `folo.*` weights metadata (`folo.dtype` the export's, `folo.fused`
-/// `"true"`), `names` (`{"0": "<class 0>", ...}`) and `folo.onnx.*`: `outputs` (`"raw"` or `"decoded"`),
-/// `imgsz` (`[H, W]`), `batch` (a number, or `"dynamic"`), `dynamic`, `opset`, `strides`, `reg_max`.
+/// `"true"`), `names` (`{"0": "<class 0>", ...}`) and `folo.onnx.*`: `outputs` (`"raw"`, `"decoded"`, or
+/// `"end2end"` for a decoded `o2o` head), `head` (`"o2m"` or `"o2o"`, the exported branch), `max_det` (end to
+/// end only), `imgsz` (`[H, W]`), `batch` (a number, or `"dynamic"`), `dynamic`, `opset`, `strides`, `reg_max`.
 fn metadata(
     model: &FoloModel,
     opts: &OnnxOptions,
@@ -259,7 +296,17 @@ fn metadata(
         model.classes().iter().enumerate().map(|(i, c)| (i.to_string(), c.clone().into())).collect();
     m.insert("names".into(), serde_json::Value::Object(names).to_string());
     let s = |v: serde_json::Value| v.to_string();
-    m.insert("folo.onnx.outputs".into(), if opts.decode { "decoded" } else { "raw" }.into());
+    let e2e = model.head_mode() == HeadMode::O2o;
+    let kind = match (opts.decode, e2e) {
+        (false, _) => "raw",
+        (true, false) => "decoded",
+        (true, true) => "end2end",
+    };
+    m.insert("folo.onnx.outputs".into(), kind.into());
+    m.insert("folo.onnx.head".into(), model.head_mode().as_str().into());
+    if opts.decode && e2e {
+        m.insert("folo.onnx.max_det".into(), opts.max_det.to_string());
+    }
     m.insert("folo.onnx.output_names".into(), s(outputs.iter().map(|o| o.name.clone()).collect()));
     m.insert("folo.onnx.imgsz".into(), s(serde_json::json!([opts.height, opts.width])));
     m.insert("folo.onnx.batch".into(), if opts.dynamic { "dynamic".into() } else { opts.batch.to_string() });
@@ -609,19 +656,24 @@ impl Graph {
         Ok([x16, x19, x22])
     }
 
-    /// Layer 23: the raw head outputs `(box_raw, cls_raw)`, named so when they are graph outputs.
+    /// Layer 23: the raw head outputs `(box_raw, cls_raw)` of the predicting branch ([`FoloModel::head_mode`]),
+    /// named so when they are graph outputs.
     fn head(&mut self, m: &FoloModel, feats: &[String; 3], are_outputs: bool) -> Result<(String, String)> {
         let h = &m.head;
         let (r4, nc) = ((4 * h.reg_max) as i64, h.num_classes as i64);
+        let (levels, root) = match (&h.o2o, m.head_mode()) {
+            (Some(o2o), HeadMode::O2o) => (o2o, "head.o2o"),
+            _ => (&h.levels, "head"),
+        };
         let (mut boxes, mut classes) = (vec![], vec![]);
-        for ((l, name), x) in h.levels.iter().zip(LEVELS).zip(feats) {
-            let p = format!("head.box.{name}");
+        for ((l, name), x) in levels.iter().zip(LEVELS).zip(feats) {
+            let p = format!("{root}.box.{name}");
             let bb = &l.box_branch;
             let y = self.conv(&format!("{p}.conv0"), &bb.conv0, x)?;
             let y = self.conv(&format!("{p}.conv1"), &bb.conv1, &y)?;
             let y = self.conv2d(&format!("{p}.out"), &bb.out, &y)?;
             boxes.push(self.reshape(&format!("{p}.flat"), &y, &[0, r4, -1]));
-            let p = format!("head.cls.{name}");
+            let p = format!("{root}.cls.{name}");
             let cb = &l.cls_branch;
             let y = self.conv(&format!("{p}.dw0"), &cb.dw0, x)?;
             let y = self.conv(&format!("{p}.pw0"), &cb.pw0, &y)?;
@@ -694,7 +746,7 @@ impl Graph {
         (self.concat("decode.anchors", &pr, 1), self.concat("decode.strides", &sr, 1))
     }
 
-    /// MODEL.md §6.4 in the graph: the `detections: [B, A, 4 + nc]` output.
+    /// MODEL.md §6.4 in the graph: the decoded `[B, 4 + nc, A]` (boxes in input pixels, then class scores).
     fn decode(
         &mut self,
         m: &FoloModel,
@@ -702,7 +754,7 @@ impl Graph {
         feats: &[String; 3],
         box_raw: &str,
         cls_raw: &str,
-    ) -> Result<()> {
+    ) -> Result<String> {
         let r = m.head.reg_max;
         let logits = self.reshape("decode.dfl_logits", box_raw, &[0, 4, r as i64, -1]); // [B, 4, R, A]
         let prob =
@@ -726,9 +778,66 @@ impl Graph {
         let x2y2 = self.node("Mul", "decode.x2y2", &[&x2y2, &strides], vec![]);
         let boxes = self.concat("decode.boxes", &[&x1y1, &x2y2], 1); // [B, 4, A]
         let scores = self.node("Sigmoid", "decode.scores", &[cls_raw], vec![]);
-        let all = self.concat("decode.channels", &[&boxes, &scores], 1); // [B, 4 + nc, A]
-        self.transpose("detections", &all, &[0, 2, 1]);
-        Ok(())
+        Ok(self.concat("decode.channels", &[&boxes, &scores], 1)) // [B, 4 + nc, A]
+    }
+
+    /// MODEL.md §6.6's selection in the graph, from the decoded `all: [B, 4 + nc, A]`: the end-to-end
+    /// `detections: [B, K, 6]` output (`x1, y1, x2, y2, score, class`, by descending score). `TopK` puts equal
+    /// values in index order, the tie rule of [`crate::nms::topk_detections`]. An `F16` graph selects in `F32`
+    /// (the CPU `TopK` and `ReduceMax` of onnxruntime take no `float16`) and casts the rows back.
+    fn topk(&mut self, all: &str, nc: usize, opts: &OnnxOptions) {
+        let half = self.elem == DataType::Float16;
+        let to_f32 = || vec![("to".to_string(), AttrValue::Int(DataType::Float.code()))];
+        let dets = self.transpose("e2e.anchor_major", all, &[0, 2, 1]); // [B, A, 4 + nc]
+        let dets = if half { self.node("Cast", "e2e.f32", &[&dets], to_f32()) } else { dets };
+        let [_, scores]: [String; 2] =
+            self.split("e2e.split_anchors", &dets, &[4, nc as i64], 2).try_into().expect("two parts");
+        let best = self.node(
+            "ReduceMax",
+            "e2e.best_score",
+            &[&scores],
+            attrs([("axes", ints(&[2])), ("keepdims", AttrValue::Int(0))]),
+        ); // [B, A]
+        // K = min(max_det, A), as a 1-element int64 tensor.
+        let max_det = self.i64_const(&[opts.max_det as i64], false);
+        let shape = self.node("Shape", "e2e.best_shape", &[&best], vec![]);
+        let (one, two) = (self.i64_const(&[1], false), self.i64_const(&[2], false));
+        let count = self.node("Slice", "e2e.anchor_count", &[&shape, &one, &two], vec![]);
+        let k = self.node("Min", "e2e.k", &[&count, &max_det], vec![]);
+        let top = |g: &mut Self, name: &str, x: &str| -> [String; 2] {
+            let a = attrs([
+                ("axis", AttrValue::Int(-1)),
+                ("largest", AttrValue::Int(1)),
+                ("sorted", AttrValue::Int(1)),
+            ]);
+            g.node_n("TopK", name, &[x, &k], a, 2).try_into().expect("values and indices")
+        };
+        let gather = |g: &mut Self, name: &str, data: &str, idx: &str| -> String {
+            let ax = g.i64_const(&[2], false);
+            let idx = g.node("Unsqueeze", &format!("{name}.index"), &[idx, &ax], vec![]); // [B, K, 1]
+            g.node("GatherND", name, &[data, &idx], attrs([("batch_dims", AttrValue::Int(1))]))
+        };
+        let [_, anchors] = top(self, "e2e.top_anchors", &best); // [B, K]
+        let sel = gather(self, "e2e.selected", &dets, &anchors); // [B, K, 4 + nc]
+        let [sel_boxes, sel_scores]: [String; 2] =
+            self.split("e2e.split_selected", &sel, &[4, nc as i64], 2).try_into().expect("two parts");
+        let flat = self.reshape("e2e.pairs", &sel_scores, &[0, -1]); // [B, K · nc]
+        let [score, pair] = top(self, "e2e.top_pairs", &flat); // [B, K]
+        let ncs = self.i64_const(&[nc as i64], true);
+        let slot = self.node("Div", "e2e.pair_anchor", &[&pair, &ncs], vec![]);
+        let class = self.node("Mod", "e2e.pair_class", &[&pair, &ncs], vec![]);
+        let class = self.node("Cast", "e2e.class_f32", &[&class], to_f32());
+        let boxes = gather(self, "e2e.boxes", &sel_boxes, &slot); // [B, K, 4]
+        let ax = self.i64_const(&[2], false);
+        let score = self.node("Unsqueeze", "e2e.score_col", &[&score, &ax], vec![]);
+        let class = self.node("Unsqueeze", "e2e.class_col", &[&class, &ax], vec![]);
+        if half {
+            let rows = self.concat("e2e.rows", &[&boxes, &score, &class], 2);
+            let to = vec![("to".to_string(), AttrValue::Int(DataType::Float16.code()))];
+            self.node("Cast", "detections", &[&rows], to);
+        } else {
+            self.concat("detections", &[&boxes, &score, &class], 2);
+        }
     }
 
     /// Encode the `ModelProto`.

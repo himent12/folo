@@ -12,7 +12,9 @@
 //! 3. **Top-k.** Each gt selects its `min(topk, #candidates)` candidates with the largest `m`, ties broken by the
 //!    smaller anchor index. Zero-metric candidates are eligible.
 //! 4. **Conflicts.** An anchor selected by several gts goes to the one with the largest `u` **among the gts that
-//!    selected it**, ties broken by the smaller gt index.
+//!    selected it**, ties broken by the smaller gt index. With [`TalConfig::topk2`] (the one-to-one head's
+//!    assignment, MODEL.md §6.6: `topk = 7`, `topk2 = 1`), each gt then keeps only its `topk2` highest-metric
+//!    positives (ties: smaller anchor); the anchors it drops become background.
 //! 5. **Soft targets.** Over each gt's final positives `P_g`: `t[a] = m(g, a) * u_max / (m_max + eps)` with
 //!    `m_max`, `u_max` the maxima of `m` and `u` over `P_g`, so the best-aligned anchor of each gt gets (about) that
 //!    gt's best overlap.
@@ -48,11 +50,21 @@ pub struct TalConfig {
     /// Candidate selection widens every gt side shorter than this (pixels) to this length about the box centre
     /// (16, the P4 stride). `0` disables the enlargement.
     pub min_box_size: f32,
+    /// After conflict resolution each gt keeps only this many of its positives, the highest-metric ones
+    /// (`Some(1)` for the one-to-one head, MODEL.md §6.6). `None` (the default) keeps them all.
+    pub topk2: Option<usize>,
 }
 
 impl Default for TalConfig {
     fn default() -> Self {
-        Self { topk: 10, alpha: 0.5, beta: 6.0, eps: 1e-9, min_box_size: 16.0 }
+        Self { topk: 10, alpha: 0.5, beta: 6.0, eps: 1e-9, min_box_size: 16.0, topk2: None }
+    }
+}
+
+impl TalConfig {
+    /// The one-to-one head's assignment (MODEL.md §6.6): §7.3 with `topk = 7`, then `topk2 = 1`.
+    pub fn o2o() -> Self {
+        Self { topk: 7, topk2: Some(1), ..Self::default() }
     }
 }
 
@@ -185,6 +197,25 @@ pub fn assign(
             let slot = &mut owner[p.anchor as usize];
             if slot.is_none_or(|(_, q)| p.u > q.u) {
                 *slot = Some((g as u32, p));
+            }
+        }
+    }
+
+    // The second filter (one-to-one assignment): each gt keeps its `topk2` best positives by (m descending, anchor
+    // ascending), the order the picks were ranked in.
+    if let Some(k2) = cfg.topk2 {
+        let mut mine: Vec<Vec<(f32, u32)>> = vec![Vec::new(); n_g];
+        for (a, o) in owner.iter().enumerate() {
+            if let Some((g, p)) = o {
+                mine[*g as usize].push((p.m, a as u32));
+            }
+        }
+        for list in &mut mine {
+            if list.len() > k2 {
+                list.sort_unstable_by(|x, y| y.0.total_cmp(&x.0).then(x.1.cmp(&y.1)));
+                for &(_, a) in &list[k2..] {
+                    owner[a as usize] = None;
+                }
             }
         }
     }

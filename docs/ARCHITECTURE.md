@@ -166,8 +166,10 @@ The exact block definitions, layer tables, parameter names, head, loss, training
 - **Architecture** (per scale `n/s/m/l/x` via depth and width multipliers): a CSP-style backbone (Conv-BN-SiLU stem,
   C3k2 blocks with split + bottlenecks + concat), SPPF, one C2PSA attention block at P5, a PAN-FPN neck, and an
   anchor-free decoupled head on three scales (strides 8 / 16 / 32). Box regression uses distribution focal loss bins
-  (`reg_max`, default 16). An NMS-free one-to-one head (dual assignment during training, as in YOLOv10) is specified
-  in MODEL.md but reserved for a later milestone. Implemented in `folo_vision::model`: `FoloModel::new(config)` for
+  (`reg_max`, default 16). `head = "o2o"` adds the NMS-free one-to-one branch (`head.o2o.*`, MODEL.md §6.6, as in
+  YOLOv10 / YOLO26): trained with dual assignment on detached features, it predicts with a top-k selection instead
+  of NMS (`nms::topk_detections`), and only the predicting branch runs in eval mode (`FoloModel::head_mode`).
+  Implemented in `folo_vision::model`: `FoloModel::new(config)` for
   any scale and class count, `forward` → `HeadOutput { box_raw [B, 64, A], cls_raw [B, nc, A], anchors }`, `fuse()`,
   `predict_raw` (forward + decode + NMS; decode runs on the outputs' device, NMS on the CPU),
   `predict_detections` / `HeadOutput::detections` (on a GPU the decode runs in one kernel that keeps only the
@@ -207,7 +209,8 @@ The exact block definitions, layer tables, parameter names, head, loss, training
   work, one small readback. On the CPU the head's six branch chains run side by side and the neck's Concat layers
   are never written (`C3k2::forward_cat`).
 - **ONNX export** (`folo_vision::export::onnx`): `FoloModel::to_onnx` turns a fused model into an opset-17 graph
-  that mirrors `forward` op for op (raw head outputs, or the MODEL.md §6.4 decode in the graph; fixed or dynamic
+  that mirrors `forward` op for op (raw head outputs, or the MODEL.md §6.4 decode in the graph, which for an `o2o`
+  model ends in the §6.6 top-k: end-to-end `[B, K, 6]` detections; fixed or dynamic
   shapes; f32 or f16), encoded by a small hand-written protobuf writer (`export::onnx::proto`), with the class names
   and `folo.*` metadata in `metadata_props`. Any model tensor no node consumed, or an unfused BatchNorm, is an error
   naming it. `folo export --format onnx` and `POST /api/models/{id}/export` call `export_file`; parity with

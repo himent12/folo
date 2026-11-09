@@ -86,7 +86,7 @@ impl LoadOptions {
 }
 
 /// docs/MODEL.md §5: the class-dependent output layers `head.cls.{p3,p4,p5}.out.{weight,bias}` (and the
-/// reserved one-to-one branch's `head.o2o.cls.*.out.*`).
+/// one-to-one branch's `head.o2o.cls.*.out.*`, §6.6).
 pub fn is_class_output(name: &str) -> bool {
     let rest = name.strip_prefix("head.o2o.cls.").or_else(|| name.strip_prefix("head.cls."));
     match rest {

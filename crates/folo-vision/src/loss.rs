@@ -71,6 +71,39 @@ impl Default for LossConfig {
     }
 }
 
+impl LossConfig {
+    /// The one-to-one branch's loss (MODEL.md §6.6): §7 with the assignment of [`TalConfig::o2o`]
+    /// (`topk = 7`, then `topk2 = 1`).
+    pub fn o2o() -> Self {
+        Self { tal: TalConfig::o2o(), ..Self::default() }
+    }
+}
+
+/// The weight `w_m` of the one-to-many loss after `completed` epochs of a run of `epochs` (MODEL.md §6.6):
+/// `max(1 − e / max(E − 1, 1), 0) · (0.8 − 0.1) + 0.1`, from 0.8 in the first epoch to 0.1 in the last. The
+/// one-to-one loss gets `1 − w_m`.
+pub fn o2m_weight(completed: u32, epochs: u32) -> f32 {
+    let e = completed as f64;
+    let d = epochs.saturating_sub(1).max(1) as f64;
+    ((1.0 - e / d).max(0.0) * (0.8 - 0.1) + 0.1) as f32
+}
+
+/// The dual-assignment loss of a `head = "o2o"` model (MODEL.md §6.6): `L = w_m · L_o2m + (1 − w_m) · L_o2o`.
+/// The reported items are the same weighted sums of the two branches' items; `num_fg` and `target_score_sum`
+/// are the one-to-many branch's. Non-finite when either part is.
+pub fn dual_loss(o2m: &LossOutput, o2o: &LossOutput, w_m: f32) -> Result<LossOutput> {
+    let w_o = 1.0 - w_m;
+    let mix = |a: f32, b: f32| w_m * a + w_o * b;
+    let (m, o) = (&o2m.items, &o2o.items);
+    Ok(LossOutput {
+        total: o2m.total.mul_scalar(w_m)?.add(&o2o.total.mul_scalar(w_o)?)?,
+        total_value: mix(o2m.total_value, o2o.total_value),
+        items: LossItems { box_: mix(m.box_, o.box_), cls: mix(m.cls, o.cls), dfl: mix(m.dfl, o.dfl) },
+        num_fg: o2m.num_fg,
+        target_score_sum: o2m.target_score_sum,
+    })
+}
+
 /// The ground truth of one image: boxes in input pixels and their class ids.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ImageTargets {
@@ -721,6 +754,7 @@ pub fn detection_loss(
 pub fn device_loss_supported(box_raw: &Tensor, cfg: &LossConfig) -> bool {
     folo_gpu::detect::supported(box_raw.device())
         && (1..=folo_gpu::detect::MAX_TOPK).contains(&cfg.tal.topk)
+        && cfg.tal.topk2 != Some(0)
         && (2..=folo_gpu::detect::MAX_REG_MAX).contains(&cfg.reg_max)
 }
 
@@ -763,6 +797,7 @@ fn gpu_tal(cfg: &LossConfig) -> folo_gpu::detect::TalSettings {
     let t = &cfg.tal;
     folo_gpu::detect::TalSettings {
         topk: t.topk,
+        topk2: t.topk2,
         alpha: t.alpha,
         beta: t.beta,
         eps: t.eps,

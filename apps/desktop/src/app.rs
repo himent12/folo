@@ -290,6 +290,8 @@ pub fn carry_over(base: Option<&TrainConfig>, mut c: TrainConfig) -> TrainConfig
         c.augment.hsv = b.augment.hsv;
         c.augment.translate = b.augment.translate;
         // Not `amp`: the form shows it (prefilled from the base) and the CPU guard decides it.
+        // `head` is not in the form: a retry keeps the base run's.
+        c.head = b.head;
     }
     c
 }
@@ -1733,6 +1735,7 @@ impl FoloApp {
                 seed: 0,
                 // Only where it can run: not the CPU, nor a server that says it can't.
                 amp: form.amp && amp_ok,
+                head: Default::default(),
             },
         );
         let _ = window;
@@ -3314,6 +3317,7 @@ mod retry_tests {
             augment: Augment { hsv: [0.1, 0.2, 0.3], translate: 0.25, ..Augment::default() },
             seed: 42,
             amp: true,
+            head: Default::default(),
         };
         let edited = TrainConfig {
             name: "a-2".into(),

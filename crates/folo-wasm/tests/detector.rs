@@ -94,7 +94,14 @@ fn cpu_matches_predictor() {
     let file = ModelFile::from_bytes(bytes).unwrap();
     let (mut m, _) = FoloModel::from_file(&file, Purpose::Inference).unwrap();
     m.fuse().unwrap();
-    let cfg = PredictConfig { imgsz: 256, conf: OPTS.conf, iou: OPTS.iou, max_det: OPTS.max_det, rect: true };
+    let cfg = PredictConfig {
+        imgsz: 256,
+        conf: OPTS.conf,
+        iou: OPTS.iou,
+        max_det: OPTS.max_det,
+        rect: true,
+        head: None,
+    };
     let p = Predictor::new(m, cfg).unwrap();
     let want = p.predict(&rgba_to_image(&img, w, h).unwrap()).unwrap();
     assert!(!want.detections.is_empty(), "the test needs some detections");

@@ -22,7 +22,7 @@ Conventions used throughout:
 |---|---|
 | topology | YOLO11-class: Conv stem, C3k2 stages, SPPF, C2PSA (attention at P5 only), PAN-FPN neck, 3 levels (P3/P4/P5, strides 8/16/32) |
 | scales | `n s m l x` = YOLO11 depth/width/max-channel multipliers; parameter shapes identical to YOLO11 (verified, §4) |
-| head | anchor-free, decoupled box/class branches, DFL box regression with `reg_max = 16`, one-to-many + NMS. The NMS-free one-to-one branch is specified but reserved for later (§6.6) |
+| head | anchor-free, decoupled box/class branches, DFL box regression with `reg_max = 16`, one-to-many + NMS by default; `head = "o2o"` adds the NMS-free one-to-one branch (dual assignment, predicts without NMS, §6.6) |
 | assigner | task-aligned (TAL): `top_k = 10`, `alpha = 0.5`, `beta = 6.0`, CIoU overlaps, small-target box enlargement to 16 px, deterministic ties |
 | loss | `7.5 · CIoU + 0.5 · BCE + 1.5 · DFL`, each normalised by the target-score sum, times the batch size |
 | optimizer | `auto`: AdamW for short runs, SGD + Nesterov for long ones. No MuSGD |
@@ -56,10 +56,11 @@ bounded, non-negative distances (`0..15` strides), a well-conditioned cross-entr
 cost is a 1×1 conv to 64 instead of 4 channels plus a 16-way softmax per side, about 1% of folo-n's FLOPs. `reg_max` stays a config
 field so direct regression can be added later without a format break.
 
-**One-to-many head + NMS in v1; NMS-free head later.** Dual assignment (YOLOv10/YOLO26) doubles head compute in
-training and converges more slowly on small data, and our M2 gate is fast convergence on the synthetic shapes set.
-NMS is already being built in folo-vision and costs well under 1 ms on CPU at `conf = 0.25`. The one-to-one branch is
-fully specified in §6.6 with reserved parameter names so it can land without changing v1 files.
+**One-to-many head + NMS by default; NMS-free head opt-in.** Dual assignment (YOLOv10/YOLO26) doubles head compute
+in training and converges more slowly on small data, and our M2 gate is fast convergence on the synthetic shapes
+set. NMS costs well under 1 ms on CPU at `conf = 0.25`. So `head = "o2m"` stays the default and `head = "o2o"`
+(§6.6, `folo train --head o2o`) adds the one-to-one branch under names reserved from the start, so v1 files are
+unchanged and still load.
 
 **Assigner tweaks.** The TAL values (`top_k 10, alpha 0.5, beta 6.0`) are the reference ones. Two changes: (1) ground
 truths smaller than 16 px on a side are enlarged to 16 px *for candidate selection only*, so a tiny object always
@@ -200,8 +201,8 @@ concrete ones:
 | x | 1.00 | 1.50 | 512 | 6 | 384 / 768 / 768 | 96 | 384 |
 
 **Model config** (`folo.config` in `.folo` files, see docs/FORMAT.md). v1 readers require `depth`, `width` and
-`max_channels` to equal the row for `scale`, `strides = [8, 16, 32]`, `reg_max = 16`, `head = "o2m"` and
-`in_channels = 3`:
+`max_channels` to equal the row for `scale`, `strides = [8, 16, 32]`, `reg_max = 16`, `head` one of `"o2m"` and
+`"o2o"` (§6.6), and `in_channels = 3`:
 ```json
 { "family": "folo", "spec": 1, "scale": "n", "depth": 0.5, "width": 0.25, "max_channels": 1024,
   "num_classes": 80, "in_channels": 3, "strides": [8, 16, 32], "reg_max": 16, "head": "o2m",
@@ -410,6 +411,7 @@ the head names below. Sub-block names come from the block definitions in §2 (th
 | SPPF | `<p>.cv1.*`, `<p>.cv2.*` |
 | C2PSA | `<p>.cv1.*`, `<p>.cv2.*`, `<p>.block{i}.attn.qkv.*`, `.attn.proj.*`, `.attn.pe.*`, `.ffn1.*`, `.ffn2.*` |
 | Detect, per level `L ∈ {p3, p4, p5}` | box: `head.box.L.conv0.*`, `head.box.L.conv1.*` (Conv), `head.box.L.out.*` (Conv2d). Class: `head.cls.L.dw0.*`, `head.cls.L.pw0.*`, `head.cls.L.dw1.*`, `head.cls.L.pw1.*` (Conv), `head.cls.L.out.*` (Conv2d) |
+| One-to-one branch (`head = "o2o"`, §6.6), per level `L` | the same tensors under `head.o2o.`: `head.o2o.box.L.{conv0,conv1,out}.*`, `head.o2o.cls.L.{dw0,pw0,dw1,pw1,out}.*` |
 
 Examples: `backbone.stem.conv.weight [16, 3, 3, 3]`, `backbone.stage2.block0.cv1.conv.weight [8, 16, 3, 3]` (folo-n),
 `backbone.stage4.block0.block1.cv2.bn.running_var [32]` (folo-n, C3k inside C3k2),
@@ -418,11 +420,13 @@ Examples: `backbone.stem.conv.weight [16, 3, 3, 3]`, `backbone.stage2.block0.cv1
 Canonical order (initialisation, `named_parameters()` iteration, golden-file tests) is the table order, and within a
 block the order its sub-blocks appear in §2: `cv1, cv2, block0, …` for C3k2 and C2PSA; `cv1, cv2, cv3, block0,
 block1` for C3k; `attn.qkv, attn.proj, attn.pe, ffn1, ffn2` for PSABlock; for each head level `p3, p4, p5` in turn,
-`box.conv0, box.conv1, box.out, cls.dw0, cls.pw0, cls.dw1, cls.pw1, cls.out`. Within a Conv: `conv.weight,
+`box.conv0, box.conv1, box.out, cls.dw0, cls.pw0, cls.dw1, cls.pw1, cls.out`, then (with `head = "o2o"`) the same
+for `o2o.box.*` / `o2o.cls.*`, level by level; so the first tensors of an `o2o` model are drawn exactly as those of
+the `o2m` model with the same seed. Within a Conv: `conv.weight,
 bn.weight, bn.bias, bn.running_mean, bn.running_var`. Within a Conv2d: `weight, bias`. Weight files sort tensors by
 the safetensors layout rule of FORMAT.md, which is unrelated to this order.
 
-**Class-dependent tensors.** `head.cls.{p3,p4,p5}.out.{weight,bias}` are the classification output layers referred to
+**Class-dependent tensors.** `head.cls.{p3,p4,p5}.out.{weight,bias}` (and `head.o2o.cls.*.out.*`) are the classification output layers referred to
 by FORMAT.md's partial-loading rule. When `nc` changes `c_cls`, `head.cls.*.pw0/dw1/pw1/out` change shape too, and
 the shape check of partial loading skips them.
 
@@ -477,15 +481,34 @@ After random init (§2.9):
   over the level's cells. For `nc = 80`: −11.5366 (P3), −10.1503 (P4), −8.7641 (P5). For `nc = 4`: −8.5409,
   −7.1546, −5.7683. The 640 is a constant, independent of the training image size.
 
-### 6.6 Reserved: one-to-one (NMS-free) branch, `head = "dual"`
-Not implemented in v1. Readers reject `head != "o2m"`. Specified here so a later PR does not change v1 files.
-- A second copy of both branches, `head.o2o.box.L.*` and `head.o2o.cls.L.*`, with the same structure and priors. Its
-  input features are detached (stop-gradient) during training, so only the o2m branch trains the backbone and neck.
+### 6.6 One-to-one (NMS-free) branch, `head = "o2o"`
+As in YOLOv10 / YOLO26's end-to-end mode. `head = "o2o"` models (`folo train --head o2o`, `TrainConfig.head`) have
+both branches and are trained with dual assignment; `head = "o2m"` files (every v1 file) are unchanged.
+- A second copy of both branches, `head.o2o.box.L.*` and `head.o2o.cls.L.*`, with the same structure and priors
+  (drawn after the o2m branch, §5). Its input features are detached (stop-gradient) during training, so only the
+  o2m branch trains the backbone and neck. Fine-tuning an `o2o` model from `o2m` weights copies the o2m head into the
+  o2o branch (as YOLOv10 initialises it).
 - Loss: `L = w_m · L_o2m + w_o · L_o2o`. `L_o2o` is §7 with `top_k = 7` and a second filter `top_k2 = 1` after
-  conflict resolution: each ground truth keeps only its highest-metric positive. Weights after `e` completed epochs:
-  `w_m = max(1 − e / max(E − 1, 1), 0) · (0.8 − 0.1) + 0.1`, `w_o = 1 − w_m` (starting at `w_m = 0.8`).
-- Inference uses o2o only, with no NMS: take the `k = min(max_det, A)` anchors with the highest max-class score, then
-  the top `k` (anchor, class) pairs among them, then apply `conf`. Export may drop the o2m branch.
+  conflict resolution: each ground truth keeps only its highest-metric positive (ties: smaller anchor); the anchors
+  it drops become background, and its soft target (§7.3 step 5, over that single positive) is about its IoU.
+  Weights after `e` completed epochs: `w_m = max(1 − e / max(E − 1, 1), 0) · (0.8 − 0.1) + 0.1`, `w_o = 1 − w_m`
+  (starting at `w_m = 0.8`, ending at 0.1). The reported loss items (§7.4) are the same weighted sums of the two
+  branches' items.
+- Inference uses o2o only, with no NMS, and computes only that branch: take the `k = min(max_det, A)` anchors with
+  the highest max-class score (ties: smaller anchor), then the top `k` (anchor, class) pairs among them (ties: the
+  anchor's rank, then the class), then apply `conf` (validation: `conf = 0.001`, §9.3). Single-label prediction
+  (`predict`, §9.3's `multi-label: no`) keeps each of the `k` anchors once, with its best class (first maximum),
+  then applies `conf`: the same detections, minus the second class of an anchor, exactly as o2m prediction is
+  single-label. `iou` is unused. Anchors whose best score is not `> conf` are dropped before ranking, which changes
+  nothing (they contribute no pair above `conf`).
+- The branch is a switch on the model (`FoloModel::set_head_mode`, `folo predict/val --head o2m`), so the same
+  `o2o` model can also predict with its o2m branch and NMS (to compare them). An `o2m` model has no o2o branch.
+- Export: `.folo` exports keep both branches. ONNX exports the predicting branch only; `--decode` of an o2o model
+  writes end-to-end `detections: [B, k, 6]` (`x1, y1, x2, y2, score, class`, the multi-label selection above
+  without `conf`), docs/CLI.md.
+- Implementation: `folo_vision::model::head` (`Detect::forward_o2o`, `HeadMode`), `assign::TalConfig::o2o` /
+  `topk2`, `loss::dual_loss` / `o2m_weight`, `nms::topk_detections`; on a GPU the second filter is a step of the
+  device assigner (`tal_targets.wgsl`, `K2`). Tests: `crates/folo-vision/tests/o2o.rs`.
 
 ## 7. Loss
 

@@ -16,7 +16,7 @@ use serde::Serialize;
 use crate::boxes::Xyxy;
 use crate::error::{Error, Result};
 use crate::metrics::{EvalReport, Evaluator, Truth};
-use crate::model::FoloModel;
+use crate::model::{FoloModel, HeadMode};
 use crate::nms::{Detection, NmsConfig};
 
 /// Validation settings. [`ValConfig::new`] gives MODEL.md §8.7's.
@@ -37,6 +37,9 @@ pub struct ValConfig {
     /// Also return every image's detections in original-image pixels ([`ValResult::detections`]), e.g. for
     /// [`crate::cocoeval::CocoEval`] or a COCO results file.
     pub keep_detections: bool,
+    /// The head branch to evaluate (docs/MODEL.md §6.6): `None` uses the model's ([`FoloModel::head_mode`]),
+    /// `o2m` the one-to-many branch with NMS, `o2o` the one-to-one branch with its top-k (no NMS; `iou` unused).
+    pub head: Option<HeadMode>,
 }
 
 impl ValConfig {
@@ -50,6 +53,7 @@ impl ValConfig {
             samples: 16,
             sample_conf: 0.25,
             keep_detections: false,
+            head: None,
         }
     }
 }
@@ -129,6 +133,14 @@ pub fn validate(model: &FoloModel, ds: Arc<dyn Dataset>, cfg: &ValConfig) -> Res
             n.conf, n.iou, cfg.sample_conf, n.max_det, n.max_candidates
         )));
     }
+    let head = cfg.head.unwrap_or(model.head_mode());
+    if head == HeadMode::O2o && !model.has_o2o() {
+        return Err(Error::Config(format!(
+            "validation with head o2o needs a model with the one-to-one head; {} has head `{}`",
+            model.arch(),
+            model.config().head
+        )));
+    }
     let nc = model.num_classes();
     if ds.class_names().len() > nc {
         return Err(Error::Dataset(format!(
@@ -168,7 +180,7 @@ pub fn validate(model: &FoloModel, ds: Arc<dyn Dataset>, cfg: &ValConfig) -> Res
         let mut batch = batch?;
         let truths = batch_truths(&batch);
         let x = batch_tensor(&mut batch, device, model.dtype())?;
-        let pred = model.predict_raw(&x, &cfg.nms)?;
+        let pred = model.predict_raw_as(&x, &cfg.nms, head)?;
         for (i, img) in pred.images.iter().enumerate() {
             ev.add_image(&img.detections, &truths[i]);
             let meta = &batch.meta[i];

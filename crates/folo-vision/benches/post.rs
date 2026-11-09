@@ -1,6 +1,7 @@
 //! Post-processing and evaluation benchmarks. Run with `cargo bench -p folo-vision --bench post`.
 //!
 //! - decode + NMS on one 640x640 image's head output (8400 anchors x 80 classes), predict and val settings;
+//! - the NMS-free top-k of the one-to-one head (docs/MODEL.md §6.6) on the same decoded outputs;
 //! - batched NMS alone on 8400 boxes;
 //! - the task-aligned assigner on 8400 anchors x 20 gts;
 //! - the evaluator on 5,000 images of random data.
@@ -11,7 +12,7 @@ mod common;
 use common::Rng;
 use folo_vision::assign::{TalConfig, assign};
 use folo_vision::decode::{decode_head, make_anchors};
-use folo_vision::nms::{batched_nms, non_max_suppression};
+use folo_vision::nms::{batched_nms, non_max_suppression, topk_detections};
 use folo_vision::{Detection, EvalConfig, Evaluator, NmsConfig, Truth, Xyxy};
 use std::hint::black_box;
 use std::time::{Duration, Instant};
@@ -75,6 +76,20 @@ fn main() {
     let n = non_max_suppression(&boxes, &uniform, nc, &val).len();
     bench(&format!("nms val, uniform scores (672k pairs -> 30k) -> {n}"), 20, || {
         non_max_suppression(&boxes, &uniform, nc, &val)
+    });
+
+    // The one-to-one head's selection (no NMS) on the same outputs.
+    let n = topk_detections(&boxes, &scores, nc, &predict).len();
+    bench(&format!("o2o top-k predict (conf 0.25, best class) -> {n}"), 50, || {
+        topk_detections(&boxes, &scores, nc, &predict)
+    });
+    let n = topk_detections(&boxes, &scores, nc, &val).len();
+    bench(&format!("o2o top-k val (conf 0.001, pairs) -> {n}"), 50, || {
+        topk_detections(&boxes, &scores, nc, &val)
+    });
+    let n = topk_detections(&boxes, &uniform, nc, &val).len();
+    bench(&format!("o2o top-k val, uniform scores -> {n}"), 20, || {
+        topk_detections(&boxes, &uniform, nc, &val)
     });
 
     // Batched NMS alone on 8400 random boxes / classes.

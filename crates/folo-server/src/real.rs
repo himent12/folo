@@ -916,6 +916,8 @@ impl Store for RealStore {
             iou: input.iou,
             max_det: input.max_det as usize,
             rect: true,
+            // The model's own head: o2o models predict without NMS.
+            head: None,
         };
         p.set_config(cfg).map_err(engine_error)?;
         let pred = p.predict(&decoded).map_err(engine_error)?;
