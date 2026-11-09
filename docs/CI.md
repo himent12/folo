@@ -20,10 +20,12 @@ bypass the guard by accident. (Before this, `cargo test --workspace` runs left `
 about 20 GB, once filled the dev PC's C: drive.)
 
 CI runs `cargo test` (the `rust` and `onnx` jobs) through `tools/test-tmp.sh`. The script points `FOLO_TEST_TMP` and
-the temp dir itself (`TMPDIR`, `TMP`, `TEMP`) at a fresh `$RUNNER_TEMP/folo-test-tmp`, so test files land on the
-runner's work drive (D: on the dev PC), not in the user's %TEMP%. After the run it fails the step, listing the
-entries, if any `folo-*` entry is left there. Because the temp dir is redirected too, the check also catches a binary
-that writes to the temp dir. Locally: `TEST_TMP=D:/folo-build/test-tmp bash tools/test-tmp.sh cargo test --workspace`.
+the temp dir itself (`TMPDIR`, `TMP`, `TEMP`) at a new `$RUNNER_TEMP/test-tmp.XXXXXX`, one per run, so concurrent runs
+never share it. Test files therefore land on the runner's work drive (D: on the dev PC), not in the user's %TEMP%.
+After the run it fails the step, listing the entries, if any `folo-*` entry is left there. Because the temp dir is
+redirected too, the check also catches a binary that writes to the temp dir. Locally:
+`TEST_TMP=D:/folo-build/test-tmp bash tools/test-tmp.sh cargo test --workspace` (`TEST_TMP` is the parent folder).
+`FOLO_TEST_TMP` must be an absolute path, since cargo runs each test binary in its own package folder.
 
 ## Runners
 The repository is private, so GitHub-hosted minutes are limited (Windows counts double). FOLO therefore runs CI on its

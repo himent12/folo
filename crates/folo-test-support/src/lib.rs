@@ -19,11 +19,13 @@ use std::time::Duration;
 pub const ROOT_ENV: &str = "FOLO_TEST_TMP";
 
 /// The folder test directories go in: `FOLO_TEST_TMP` when it is set and not empty (created if missing), else
-/// [`std::env::temp_dir`].
+/// [`std::env::temp_dir`]. Panics when `FOLO_TEST_TMP` is relative: cargo runs each test binary in its own package
+/// folder, so a relative path would scatter test folders across the workspace.
 pub fn root() -> PathBuf {
     match std::env::var_os(ROOT_ENV) {
         Some(p) if !p.is_empty() => {
             let p = PathBuf::from(p);
+            assert!(p.is_absolute(), "{ROOT_ENV}={} must be an absolute path", p.display());
             std::fs::create_dir_all(&p).unwrap_or_else(|e| panic!("{ROOT_ENV}={}: {e}", p.display()));
             p
         }

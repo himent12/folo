@@ -3,7 +3,7 @@
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 
-use folo_test_support::TestDir;
+use folo_test_support::{ChildGuard, TestDir};
 use serde_json::Value;
 
 fn folo(args: &[&str]) -> (i32, String, String) {
@@ -151,12 +151,13 @@ fn version_has_sha_and_build_date() {
 
 #[test]
 fn serve_mock_prints_the_url_as_json() {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_folo"))
+    let mut child: ChildGuard = Command::new(env!("CARGO_BIN_EXE_folo"))
         .args(["serve", "--mock", "--port", "0", "--json", "--web-dir", "does/not/exist"])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-        .unwrap();
+        .unwrap()
+        .into();
     let mut line = String::new();
     BufReader::new(child.stdout.take().unwrap()).read_line(&mut line).unwrap();
     child.kill().unwrap();

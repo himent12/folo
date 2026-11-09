@@ -5,13 +5,16 @@
 # TestDir, and a `folo` binary that writes to the temp dir.
 #   bash tools/test-tmp.sh cargo test --workspace
 #   TEST_TMP=D:/folo-build/test-tmp bash tools/test-tmp.sh cargo test -p folo-cli
-# The folder is $TEST_TMP, else $RUNNER_TEMP/folo-test-tmp (CI), else $TMPDIR/folo-test-tmp. It is emptied first and
-# removed afterwards when nothing was left behind.
+# The folder is a new `test-tmp.XXXXXX` (mktemp) under $TEST_TMP, else $RUNNER_TEMP (CI), else $TMPDIR, so concurrent
+# runs never share one. It is removed afterwards when nothing was left behind.
 set -uo pipefail
-dir="${TEST_TMP:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/folo-test-tmp}"
-dir="${dir//\\//}"
-rm -rf "$dir" && mkdir -p "$dir" || exit 1
-# The native form for the processes under test (on Windows, cygpath -w turns D:/a/b into D:\a\b).
+parent="${TEST_TMP:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}}"
+parent="${parent//\\//}"
+mkdir -p "$parent" || exit 1
+# Absolute: cargo runs each test binary in its own package folder, where a relative path would point elsewhere.
+parent="$(cd "$parent" && pwd)" || exit 1
+dir="$(mktemp -d "$parent/test-tmp.XXXXXX")" || exit 1
+# The native form for the processes under test (on Windows, cygpath -w turns /d/a/b into D:\a\b).
 native="$dir"
 command -v cygpath >/dev/null && native="$(cygpath -w "$dir")"
 FOLO_TEST_TMP="$native" TMPDIR="$native" TMP="$native" TEMP="$native" "$@"
