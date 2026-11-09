@@ -36,6 +36,14 @@ export function suggestedEpochs(warnings: readonly string[]): number | null {
   return null;
 }
 
+/**
+ * The banner's title: "Too short to learn" only when the engine says so (too few optimizer steps from scratch); a
+ * run warned only about its warmup (e.g. fine-tuned, with enough steps) is "Mostly warmup".
+ */
+export function scheduleTitle(warnings: readonly string[]): string {
+  return warnings.some((w) => SHORT.test(w)) ? 'Too short to learn:' : 'Mostly warmup:';
+}
+
 /** The banner's one-line cause: "125 optimizer steps", or the warmup's share when only that warning is present. */
 export function shortCause(warnings: readonly string[]): string {
   for (const w of warnings) {

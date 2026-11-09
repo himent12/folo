@@ -20,7 +20,7 @@
   import { href } from '$lib/router.svelte';
   import Button from '$lib/ui/Button.svelte';
   import Callout from './Callout.svelte';
-  import { plain, shortCause, suggestedEpochs } from './warnings';
+  import { plain, scheduleTitle, shortCause, suggestedEpochs } from './warnings';
 
   let {
     run,
@@ -100,7 +100,7 @@
 
 {#if warnings.length}
   <!-- One line: the cause in numbers and the fix; the engine's sentences, in plain words, behind "Why?". -->
-  <Callout tone="warning" icon={TriangleAlert} title="Too short to learn:" role="note" label="Schedule warning" moreLabel="Why?" runIn>
+  <Callout tone="warning" icon={TriangleAlert} title={scheduleTitle(warnings)} role="note" label="Schedule warning" moreLabel="Why?" runIn>
     {shortCause(warnings)}
     {#snippet actions()}
       {#if suggested && suggested > run.config.epochs}

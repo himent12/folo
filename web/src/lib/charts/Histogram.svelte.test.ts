@@ -22,6 +22,21 @@ function render(props: Record<string, unknown> = {}) {
   flushSync();
 }
 
+/** Mounts with a layout width: happy-dom has none, so every element reports `px` while the chart measures itself. */
+function renderWide(px: number, props: Record<string, unknown> = {}) {
+  const proto = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth');
+  Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, get: () => px });
+  try {
+    render(props);
+    window.dispatchEvent(new Event('resize'));
+    target.querySelector('.hist')?.dispatchEvent(new Event('resize'));
+    flushSync();
+  } finally {
+    if (proto) Object.defineProperty(HTMLElement.prototype, 'clientWidth', proto);
+    else delete (HTMLElement.prototype as { clientWidth?: number }).clientWidth;
+  }
+}
+
 const readout = () => target.querySelector('.readout')?.textContent?.replace(/\s+/g, ' ').trim();
 
 describe('Histogram', () => {
@@ -31,13 +46,9 @@ describe('Histogram', () => {
   });
 
   it('draws the bins as evenly spaced categories, each named, with bar height as the count', () => {
-    render({ binLabel: (lo: number, hi: number) => (hi >= 1 ? `≥${lo * 100}%` : `${lo * 100}–${hi * 100}%`) });
-    const box = target.querySelector<HTMLElement>('.hist')!;
-    Object.defineProperty(box, 'clientWidth', { value: 340, configurable: true });
-    box.dispatchEvent(new Event('resize'));
-    flushSync();
-    const svg = target.querySelector<SVGElement>('svg[role=img]');
-    if (!svg) return; // no layout in this environment
+    renderWide(340, { binLabel: (lo: number, hi: number) => (hi >= 1 ? `≥${lo * 100}%` : `${lo * 100}–${hi * 100}%`) });
+    const svg = target.querySelector<SVGElement>('svg[role=img]')!;
+    expect(svg).not.toBeNull();
     expect(svg.querySelector('.y-label')?.textContent).toBe('Boxes');
     const ticks = [...svg.querySelectorAll('text.tick')].map((t) => t.textContent);
     expect(ticks).toEqual(expect.arrayContaining(['0–5%', '5–10%', '≥10%']));
@@ -53,14 +64,9 @@ describe('Histogram', () => {
   });
 
   it('reads a bin out in the row when the keyboard moves to it, with its actual count', () => {
-    render();
-    // The plot renders once it has a width; happy-dom reports none, so give it one.
-    const box = target.querySelector<HTMLElement>('.hist')!;
-    Object.defineProperty(box, 'clientWidth', { value: 400, configurable: true });
-    box.dispatchEvent(new Event('resize'));
-    flushSync();
-    const svg = target.querySelector<SVGElement>('svg[role=img]');
-    if (!svg) return; // no layout in this environment: the pure parts are covered in histogram.test.ts
+    renderWide(400);
+    const svg = target.querySelector<SVGElement>('svg[role=img]')!;
+    expect(svg).not.toBeNull();
     svg.dispatchEvent(new FocusEvent('focus'));
     svg.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
     flushSync();

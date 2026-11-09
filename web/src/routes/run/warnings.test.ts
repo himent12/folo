@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { LogLine } from '$lib/api/types';
-import { plain, scheduleWarnings, sentences, shortCause, suggestedEpochs } from './warnings';
+import { plain, scheduleTitle, scheduleWarnings, sentences, shortCause, suggestedEpochs } from './warnings';
 
 const SHORT =
   'this run takes only 125 optimizer steps (5 epochs × 25: 800 training images, batch 32); a detector trained from scratch usually needs a few hundred steps to learn anything, so expect an mAP near 0. Train for at least 8 epochs, add images, or start from pretrained weights';
@@ -56,5 +56,14 @@ describe('shortCause', () => {
     expect(shortCause([SHORT, WARMUP])).toBe('125 optimizer steps');
     expect(shortCause([WARMUP])).toBe('warmup takes 75 of 125 optimizer steps');
     expect(shortCause([])).toBe('');
+  });
+});
+
+describe('scheduleTitle', () => {
+  it('says too short only when the engine does; a warmup-only warning is "Mostly warmup"', () => {
+    const short = 'this run takes only 65 optimizer steps (5 epochs × 13: …); … Train for at least 16 epochs, add images, or start from pretrained weights';
+    const warm = "warmup takes 300 of the run's 500 optimizer steps, so the learning rate reaches lr0 only in the second half of the run; lower warmup_epochs (now 3) or train for more epochs";
+    expect(scheduleTitle([short, warm])).toBe('Too short to learn:');
+    expect(scheduleTitle([warm])).toBe('Mostly warmup:');
   });
 });
