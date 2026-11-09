@@ -6,6 +6,7 @@
   import Copy from '@lucide/svelte/icons/copy';
   import { copyText, pageCommands, type PageCommand } from '$lib/shell/pageCommands.svelte';
   import ScanSearch from '@lucide/svelte/icons/scan-search';
+  import TriangleAlert from '@lucide/svelte/icons/triangle-alert';
   import { tick } from 'svelte';
   import { MediaQuery } from 'svelte/reactivity';
   import { hub } from '$lib/api/index.svelte';
@@ -16,6 +17,7 @@
   import ConfusionMatrix from '$lib/charts/ConfusionMatrix.svelte';
   import { sharePct } from '$lib/charts/confusionInk';
   import { classInk } from '$lib/design/classInk.svelte';
+  import { evaluatedOn, fallbackNotice, matrixCounted, matrixVsPr, metricsLabel, sourceShort, splitWord, type EvalSource } from '$lib/evaluated';
   import { ago, atBestF1, bytes, compact, conf, date, metric, num } from '$lib/format';
   import { latencyMs, latencyRange, loadThroughput, measuredLatency } from '$lib/throughput';
   import { prefs } from '$lib/prefs.svelte';
@@ -37,6 +39,7 @@
   import Lineage from '$lib/ui/Lineage.svelte';
   import Meta from '$lib/ui/Meta.svelte';
   import PrCurves from './model/PrCurves.svelte';
+  import Callout from './run/Callout.svelte';
   import { MODEL_SECTIONS, sectionShown, type ModelSection } from './model/sections';
   // The head and precision in the words Run's Config and Compare use.
   import { HEAD_LABEL, PRECISION_LABEL } from './run/resolved';
@@ -76,7 +79,41 @@
   const evaluation = new Resource((s) => hub.api.modelEval(id, s));
   // This server's measured latency for the architecture (GET /api/system/throughput), where it has predicted with it.
   const tp = new Resource((s) => loadThroughput(hub.api, s));
-  const ev = $derived(evaluation.data ? fromModelEval(evaluation.data) : null);
+  const ev = $derived.by(() => {
+    if (!evaluation.data) return null;
+    const e = fromModelEval(evaluation.data);
+    // An older server leaves the dataset out; /eval runs on the run's (docs/API.md), so its name stands in. The split
+    // stays unknown: a missing split is not `val`.
+    const ds = context.data?.dataset;
+    if (ds && e.source.datasetId === null && e.source.datasetName === null) e.source = { ...e.source, datasetId: ds.id, datasetName: ds.name };
+    return e;
+  });
+  /**
+   * What the page's numbers were measured on. Before the evaluation loads (or when it fails), the run's dataset: its
+   * validation split, or its training split when it has no validation images, as training and /eval both fall back.
+   */
+  const source = $derived.by((): EvalSource => {
+    if (ev) return ev.source;
+    const ds = context.data?.dataset ?? null;
+    if (!ds) return { datasetId: null, datasetName: null, split: null, fallback: null };
+    const empty = ds.splits.val === 0;
+    return {
+      datasetId: ds.id,
+      datasetName: ds.name,
+      split: empty ? 'train' : 'val',
+      fallback: empty ? { requested: 'val', reason: 'empty_split', message: '' } : null,
+    };
+  });
+  /** Said once on the page, under the headline metrics, when the numbers are not on the validation split. */
+  const notice = $derived(fallbackNotice(source));
+  // The curves' qualifier names what was evaluated ("fasteners · validation split · IoU 0.5"); phones keep the split.
+  const prMeta = $derived.by(() => {
+    const where = phone.current ? (source.split ? `${splitWord(source.split)} split` : null) : sourceShort(source);
+    return `${where ?? 'precision by recall'} · IoU 0.5`;
+  });
+  // The matrix's own thresholds and what it counted, never precision and recall's operating point.
+  const matrixLine = $derived(ev ? matrixCounted(source, ev.images, ev.matrixAt) : '');
+  const matrixHow = $derived(ev ? matrixVsPr(ev.matrixAt, atBestF1(ev.bestF1Conf)) : '');
 
   // Large class sets (COCO) get a readable matrix of the most frequent classes.
   const CM_MAX = 12;
@@ -289,9 +326,7 @@
       <div>
         <dt>Evaluated on</dt>
         <dd>
-          {#if context.data?.dataset}The validation split of {context.data.dataset.name}{:else}The validation split of the model's dataset{/if}{ev
-            ? ` (${num(ev.images)} images)`
-            : ''}, at {m.imgsz} px, {head === 'o2o' ? 'end to end (the one-to-one head, no NMS)' : 'with NMS IoU 0.7'}.
+          {evaluatedOn(source, ev ? ev.images : null)}, at {m.imgsz} px, {head === 'o2o' ? 'end to end (the one-to-one head, no NMS)' : 'with NMS IoU 0.7'}.
         </dd>
       </div>
     </dl>
@@ -343,7 +378,7 @@
     <!-- One strip of numbers in ink: the headline metric, then the ones that support it, each with a short qualifier;
          the ⓘ opens what they mean. Phones: a 2 × 2 summary of label over value, the headline first. -->
     {#if kpiGrid}
-      <section class="kpi-grid num" aria-label="Validation metrics">
+      <section class="kpi-grid num" aria-label={metricsLabel(source)}>
         <dl class="kg">
           {#each kpis(m) as k, i (k.label)}
             <div class="kg-cell" class:hero={i === 0}>
@@ -355,7 +390,7 @@
         {#if helpOpen}{@render metricHelp()}{/if}
       </section>
     {:else}
-    <section class="kpis" aria-label="Validation metrics">
+    <section class="kpis" aria-label={metricsLabel(source)}>
       {#each kpis(m) as k, i (k.label)}
         <div class="kpi" class:hero={i === 0}>
           <span class="k-label"><span class="truncate">{k.label}</span>{#if i === 0}{@render kHelp()}{/if}</span>
@@ -365,6 +400,11 @@
       {/each}
       {#if helpOpen}{@render metricHelp()}{/if}
     </section>
+    {/if}
+
+    {#if notice}
+      <!-- Once on the page, in every layout and phone section: these are not validation numbers. -->
+      <Callout tone="warning" icon={TriangleAlert} title={notice.title} role="note" label="Evaluation split">{notice.why}</Callout>
     {/if}
 
     {#if phone.current}
@@ -387,7 +427,7 @@
       style:--pick-bottom={phone.current ? `calc(var(--size-topbar) + var(--space-2) + ${pickH}px)` : undefined}
     >
       <div class="main-col" class:off={!showing('curves')}>
-        <Panel title="Precision–recall" meta="precision by recall · IoU 0.5" pad="none" id="pr">
+        <Panel title="Precision–recall" meta={prMeta} pad="none" id="pr">
           <!-- Many classes: the band / every-curve switch is the chart's one header control, so the legend row keeps one
                line in the laptop's narrower column. -->
           {#snippet actions()}
@@ -513,6 +553,21 @@
                 {/if}
               </dd>
             </div>
+            <!-- What the curves, the per-class table and the matrix were measured on (/eval's provenance). -->
+            <div class="kv">
+              <dt>Evaluated on</dt>
+              <!-- The dataset as the value, the split and its images under it, so the row keeps the rail's alignment. -->
+              <dd class="evald">
+                {#if source.datasetName && source.datasetId}
+                  <a class="link" href={href(`/datasets/${encodeURIComponent(source.datasetId)}`)}>{source.datasetName}</a>
+                {:else if source.datasetName}
+                  <span>{source.datasetName}</span>
+                {/if}
+                <span class="num" class:faint={!!source.datasetName}
+                  >{source.split ? `${splitWord(source.split)} split` : 'split not reported'}{ev ? `, ${num(ev.images)} ${ev.images === 1 ? 'image' : 'images'}` : ''}</span
+                >
+              </dd>
+            </div>
             {#if lineage}
               <div class="kv">
                 <dt>Started from</dt>
@@ -621,7 +676,7 @@
             </p>
           {/each}
           <div class="rank-foot">
-            {#if missed}<p><span class="num">{sharePct(missed.v) || '0'}%</span> of all objects missed overall, at IoU 0.5.</p>{/if}
+            <p>{#if missed}<span class="num">{sharePct(missed.v) || '0'}%</span> of all objects missed overall.{' '}{/if}{matrixLine}</p>
             <Button class="explore" onclick={openMatrix}>Explore the matrix</Button>
           </div>
         {:else if cm}
@@ -666,13 +721,14 @@
                   {/each}
                 {/if}
                 <div class="cm-notes">
-                  {#if missed && !phone.current}<p><span class="num strong">{sharePct(missed.v) || '0'}%</span> of all objects missed overall, at IoU 0.5.</p>{/if}
-                  <p>Each row is one true class, split by what the model predicted for its objects. The diagonal is right;
-                    the background column is objects it missed.</p>
+                  {#if missed && !phone.current}<p><span class="num strong">{sharePct(missed.v) || '0'}%</span> of all objects missed overall.</p>{/if}
+                  <p>{matrixLine} Each row is one true class, split by what the model predicted for its objects. The diagonal
+                    is right; the background column is objects it missed.</p>
                   <details class="how">
                     <summary><ChevronDown size={14} aria-hidden="true" />How the shares are computed</summary>
                     <div class="how-body">
-                      <p>Each row sums to 100% of that class's ground-truth boxes at IoU 0.5, in whole percentages ("&lt;1"
+                      <p>{matrixHow}</p>
+                      <p>Each row sums to 100% of that class's ground-truth boxes, in whole percentages ("&lt;1"
                         under half a percent). A cell too small for its number shows a dot instead; hover, tap or focus any cell
                         for its count. An empty cell had no objects at all.</p>
                       <p>The background row splits the false detections (boxes on no object) by the class they were given.</p>
@@ -1221,6 +1277,19 @@
   }
   .two .classes {
     justify-content: flex-start;
+  }
+  .evald {
+    display: grid;
+    justify-items: end;
+    text-align: right;
+  }
+  .evald .faint {
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+  }
+  .two .evald {
+    justify-items: start;
+    text-align: left;
   }
   .d-line {
     display: flex;

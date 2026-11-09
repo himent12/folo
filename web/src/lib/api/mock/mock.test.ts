@@ -320,6 +320,28 @@ describe('mock operating point', () => {
     expect((await api.modelEval('m_coco_s')).best_f1_conf).toBeNull();
   });
 
+  it("says what /eval ran on: the run's dataset and val split, a train-only dataset's training split, the matrix's thresholds", async () => {
+    const api = new MockApi('normal', 0);
+    const run = await api.modelEval('m_fast_n');
+    expect(run).toMatchObject({ dataset_id: 'ds_fasteners', dataset_name: 'fasteners', split: 'val', split_fallback: null, images: 360 });
+    expect(run).toMatchObject({ confusion_conf: 0.25, confusion_iou: 0.45 });
+    // fasteners-mini has no val images: the imported model with its classes is evaluated on its training split.
+    expect((await api.dataset('ds_fasteners_mini')).splits.val).toBe(0);
+    const mini = await api.modelEval('m_mini_n');
+    expect(mini).toMatchObject({ dataset_id: 'ds_fasteners_mini', dataset_name: 'fasteners-mini', split: 'train', images: 24 });
+    expect(mini.split_fallback).toEqual({
+      requested: 'val',
+      reason: 'empty_split',
+      message: "dataset 'fasteners-mini' has no val images, so this is its train split (24 images): training-set numbers, not held-out ones",
+    });
+    // The matrix's rows count the training split's boxes.
+    const boxes = (await api.dataset('ds_fasteners_mini')).stats!.class_counts;
+    expect(mini.confusion.slice(0, 2).map((r) => r.reduce((a, b) => a + b, 0))).toEqual(boxes);
+    // No registered dataset has folo-s-coco80's classes: the demo answers as an older server, without provenance.
+    const coco = await api.modelEval('m_coco_s');
+    for (const k of ['dataset_id', 'dataset_name', 'split', 'split_fallback', 'confusion_conf', 'confusion_iou'] as const) expect(coco[k]).toBeUndefined();
+  });
+
   it('names the ONNX file as the server does', async () => {
     const api = new MockApi('normal', 0);
     expect((await api.onnxFile('m_fast_n', {})).name).toBe('fasteners-n-best.onnx');
