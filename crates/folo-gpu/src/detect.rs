@@ -29,6 +29,9 @@ pub use crate::kernels::detect::{MAX_REG_MAX, MAX_TOPK};
 pub struct TalSettings {
     /// Candidates kept per gt (at most [`MAX_TOPK`]).
     pub topk: usize,
+    /// Positives each gt keeps after conflict resolution (its highest-metric ones; folo-vision's
+    /// `TalConfig::topk2`); `None` keeps them all.
+    pub topk2: Option<usize>,
     /// Exponent of the score in the alignment metric.
     pub alpha: f32,
     /// Exponent of the IoU in the alignment metric.
@@ -199,12 +202,17 @@ fn check(
     if tal.topk == 0 || tal.topk > MAX_TOPK {
         return Err(err(format!("topk {} must be in 1..={MAX_TOPK}", tal.topk)));
     }
+    if tal.topk2 == Some(0) {
+        return Err(err("topk2 must be at least 1"));
+    }
     Ok(DetectDesc {
         b,
         a,
         nc,
         g: gts.iter().map(|g| g.boxes.len()).max().unwrap_or(0),
         k: tal.topk,
+        // A second filter at least as wide as the first keeps everything.
+        k2: tal.topk2.filter(|&k2| k2 < tal.topk).unwrap_or(0),
         reg_max,
         alpha: tal.alpha,
         beta: tal.beta,

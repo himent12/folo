@@ -109,10 +109,12 @@ pub fn val(args: ValArgs, out: Out) -> Result<(), CliError> {
         samples: 0,
         workers: args.workers.unwrap_or_else(folo_vision::train::default_workers),
         keep_detections: coco_gt.is_some(),
+        head: args.head.map(Into::into),
         ..ValConfig::new(imgsz, args.batch.max(1) as usize)
     };
     let device = model.device().to_string();
     let precision = precision_of(&model);
+    let head = cfg.head.unwrap_or(model.head_mode());
     let r = validate(&model, Arc::new(part.clone()), &cfg).map_err(engine_error)?;
     let m = val_metrics(&r.report);
     let names = model.classes();
@@ -158,11 +160,12 @@ pub fn val(args: ValArgs, out: Out) -> Result<(), CliError> {
         })).collect::<Vec<_>>(),
         "device": device,
         "dtype": precision,
+        "head": head,
         "seconds": r.seconds,
         "coco": coco,
     }));
     out.human(format!(
-        "{} on {} ({} images, {} boxes) at {imgsz}px on {device} ({precision}) in {:.1}s",
+        "{} on {} ({} images, {} boxes) at {imgsz}px on {device} ({precision}, head {head}) in {:.1}s",
         folo_api::json::path(&args.model),
         split.as_str(),
         r.report.num_images,
@@ -302,6 +305,7 @@ pub fn predict(args: PredictArgs, out: Out) -> Result<(), CliError> {
         iou: args.iou,
         max_det: args.max_det.max(1) as usize,
         rect: true,
+        head: args.head.map(Into::into),
     };
     let predictor = Predictor::new(model, cfg).map_err(engine_error)?;
     let destinations = match &args.save {
@@ -416,6 +420,7 @@ pub fn export(mut args: ExportArgs, out: Out) -> Result<(), CliError> {
             ("--dynamic", args.dynamic),
             ("--half", args.half),
             ("--decode", args.decode),
+            ("--head", args.head.is_some()),
         ];
         if let Some((flag, _)) = given.iter().find(|(_, on)| *on) {
             return Err(CliError::new(
@@ -521,6 +526,8 @@ pub fn export(mut args: ExportArgs, out: Out) -> Result<(), CliError> {
             dynamic: args.dynamic,
             half: args.half,
             decode: args.decode,
+            max_det: args.max_det.max(1),
+            head: args.head.map(Into::into),
             // The source's other keys (folo.metrics, folo.created, unknown folo.* keys) travel along.
             metadata: meta.for_weights().to_map(),
         };
@@ -557,6 +564,7 @@ pub fn export(mut args: ExportArgs, out: Out) -> Result<(), CliError> {
             "batch": if args.dynamic { json!("dynamic") } else { json!(opts.batch) },
             "dynamic": args.dynamic,
             "decode": args.decode,
+            "head": x.metadata.get("folo.onnx.head"),
             "inputs": x.inputs.iter().map(value).collect::<Vec<_>>(),
             "outputs": x.outputs.iter().map(value).collect::<Vec<_>>(),
             "seconds": t.elapsed().as_secs_f64(),

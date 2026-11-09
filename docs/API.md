@@ -278,9 +278,13 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   "augment": { "mosaic": 1.0, "mixup": 0.0, "hsv": [0.015, 0.7, 0.4], "fliplr": 0.5, "scale": 0.5, "translate": 0.1,
                "close_mosaic": 10 },
   "seed": 0,
-  "amp": false }               // mixed-precision training (docs/MODEL.md §8.8): f16 on GPU tensor cores, f32 master
+  "amp": false,                // mixed-precision training (docs/MODEL.md §8.8): f16 on GPU tensor cores, f32 master
                                // weights; needs `folo serve --tensor-cores` on a GPU with them, else the run fails
                                // with `not_supported`
+  "head": "o2m" }              // o2m | o2o: o2o adds the NMS-free one-to-one head (docs/MODEL.md §6.6), trained with
+                               // dual assignment; the run's models then predict and validate without NMS (predict
+                               // and val pick the head from the model, no request field needed). Additive: missing
+                               // means o2m
 // An empty name becomes "<dataset name>-<arch suffix>", e.g. "shapes-1k-n". Limits: epochs 1..=10000,
 // batch 1..=1024, imgsz a multiple of 32 in 32..=4096 (real mode trains at 64 or more), 0 < lr0 < 10.
 // POST /api/runs also takes "resume_run_id": "run_…" (see above); it is not part of Run.config.

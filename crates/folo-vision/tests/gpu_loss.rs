@@ -82,17 +82,25 @@ fn assert_same_assignment(got: &BatchAssignment, want: &BatchAssignment) {
 }
 
 /// The device assigner picks the same positives, gts and labels as the host assigner, with the same soft targets
-/// to float rounding, on several sizes and class counts.
+/// to float rounding, on several sizes and class counts, for the one-to-many assignment and the one-to-one one
+/// (docs/MODEL.md §6.6: topk 7, then one positive per gt after conflicts).
 #[test]
 fn assigner_matches_host() {
     let dev = gpu!();
-    for (seed, size, nc) in [(1, 96, 3), (2, 160, 5), (3, 128, 1), (4, 224, 12)] {
-        let (anchors, box_raw, cls_raw, targets) = case(seed, size, nc);
-        let cfg = LossConfig::default();
-        let want = assign_batch(&box_raw, &cls_raw, &anchors, &targets, &cfg).unwrap();
-        let (bd, cd) = (box_raw.to_device(dev).unwrap(), cls_raw.to_device(dev).unwrap());
-        let got = assign_batch_device(&bd, &cd, &anchors, &targets, &cfg).unwrap();
-        assert_same_assignment(&got, &want);
+    for cfg in [LossConfig::default(), LossConfig::o2o()] {
+        for (seed, size, nc) in [(1, 96, 3), (2, 160, 5), (3, 128, 1), (4, 224, 12)] {
+            let (anchors, box_raw, cls_raw, targets) = case(seed, size, nc);
+            let want = assign_batch(&box_raw, &cls_raw, &anchors, &targets, &cfg).unwrap();
+            let (bd, cd) = (box_raw.to_device(dev).unwrap(), cls_raw.to_device(dev).unwrap());
+            let got = assign_batch_device(&bd, &cd, &anchors, &targets, &cfg).unwrap();
+            assert_same_assignment(&got, &want);
+            if cfg.tal.topk2 == Some(1) {
+                // At most one positive per gt: no image has more positives than gts.
+                for (i, t) in targets.iter().enumerate() {
+                    assert!(want.image.iter().filter(|&&j| j as usize == i).count() <= t.len());
+                }
+            }
+        }
     }
 }
 
@@ -134,9 +142,12 @@ fn close_vec(got: &[f32], want: &[f32], atol: f32, rtol: f32, what: &str) {
 #[test]
 fn loss_and_gradients_match_host() {
     let dev = gpu!();
-    for (seed, size, nc) in [(11, 96, 3), (12, 160, 7)] {
+    for (seed, size, nc, cfg) in [
+        (11, 96, 3, LossConfig::default()),
+        (12, 160, 7, LossConfig::default()),
+        (13, 160, 7, LossConfig::o2o()),
+    ] {
         let (anchors, box_raw, cls_raw, targets) = case(seed, size, nc);
-        let cfg = LossConfig::default();
         // Device leaves first: a transfer of a tensor that requires grad is recorded (not a leaf).
         let (bd, cd) = (
             box_raw.to_device(dev).unwrap().requires_grad_(),
@@ -220,6 +231,7 @@ fn returned_stats_do_not_feed_the_backward() {
         gains: [cfg.box_gain, cfg.cls_gain, cfg.dfl_gain],
         tal: folo_gpu::detect::TalSettings {
             topk: cfg.tal.topk,
+            topk2: cfg.tal.topk2,
             alpha: cfg.tal.alpha,
             beta: cfg.tal.beta,
             eps: cfg.tal.eps,

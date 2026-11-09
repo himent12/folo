@@ -792,6 +792,33 @@ pub struct TrainConfig {
     /// cores (`folo serve --tensor-cores`); otherwise the run fails with `not_supported`.
     #[serde(default)]
     pub amp: bool,
+    /// Detection head (docs/MODEL.md §6.6): `o2m` (one-to-many, NMS at inference) or `o2o` (adds the NMS-free
+    /// one-to-one branch, trained with dual assignment; the model predicts end to end without NMS).
+    #[serde(default)]
+    pub head: Head,
+}
+
+/// The detection head of a model (docs/MODEL.md §6.6), `TrainConfig.head`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum Head {
+    /// One-to-many head; predictions go through NMS.
+    #[default]
+    O2m,
+    /// One-to-many plus one-to-one (NMS-free) head, trained with dual assignment; predicts with the one-to-one
+    /// branch and no NMS.
+    O2o,
+}
+
+impl Head {
+    /// `"o2m"` or `"o2o"`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Head::O2m => "o2m",
+            Head::O2o => "o2o",
+        }
+    }
 }
 
 fn default_epochs() -> u32 {

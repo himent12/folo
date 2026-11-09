@@ -586,6 +586,8 @@ fn cpu_detections_match_full_decode() {
             anchors: anchors.clone(),
             reg_max: 16,
             num_classes: nc,
+            mode: folo_vision::model::HeadMode::O2m,
+            o2o: None,
         };
         let want: Vec<_> = out
             .decode_images()

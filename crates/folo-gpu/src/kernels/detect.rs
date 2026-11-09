@@ -69,6 +69,9 @@ pub struct DetectDesc {
     pub g: usize,
     /// Candidates kept per gt (`topk`, at most [`MAX_TOPK`]).
     pub k: usize,
+    /// Positives each gt keeps after conflict resolution, its highest-metric ones (`topk2`, the one-to-one
+    /// assignment of docs/MODEL.md §6.6); `0` keeps them all.
+    pub k2: usize,
     /// DFL bins per side.
     pub reg_max: usize,
     /// Exponent of the score in the alignment metric.
@@ -202,7 +205,7 @@ pub fn assign(
         let k = ctx.kernel(&OWNER, Spec::new().u32("MODE", mode).u32("K", d.k as u32))?;
         ctx.dispatch(&k, &[pick, own], &p, ctx.grid_1d(d.slots() as u64, 256)?)?;
     }
-    let k = ctx.kernel(&TARGETS, Spec::new().u32("K", d.k as u32))?;
+    let k = ctx.kernel(&TARGETS, Spec::new().u32("K", d.k as u32).u32("K2", d.k2 as u32))?;
     let p = Params::new().uz(d.a)?.uz(d.g)?.uz(ba)?.uz(d.gt_label_offset())?.f(d.eps);
     ctx.dispatch(&k, &[pick, own, meta, slot, dense], &p, [d.g as u32, d.b as u32, 1])
 }
@@ -295,6 +298,7 @@ mod tests {
             nc: 2,
             g: 1,
             k,
+            k2: 0,
             reg_max: 16,
             alpha: 0.5,
             beta: 6.0,

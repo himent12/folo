@@ -285,6 +285,8 @@ export interface TrainConfig {
   seed: number;
   /** Mixed-precision training (docs/MODEL.md §8.8); missing from older servers (= false). */
   amp?: boolean;
+  /** Detection head (docs/MODEL.md §6.6): `o2o` adds the NMS-free one-to-one branch; missing = `o2m`. */
+  head?: 'o2m' | 'o2o';
 }
 
 export interface Run {

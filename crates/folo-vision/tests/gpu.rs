@@ -218,6 +218,8 @@ fn random_head(b: usize, a_side: usize, nc: usize, seed: u64) -> folo_vision::mo
         anchors,
         reg_max: 16,
         num_classes: nc,
+        mode: folo_vision::model::HeadMode::O2m,
+        o2o: None,
     }
 }
 

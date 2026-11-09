@@ -14,7 +14,8 @@ use std::process::Command;
 use folo_core::rng::Rng;
 use folo_core::{Tensor, no_grad};
 use folo_nn::{Module, init};
-use folo_vision::model::{FoloModel, ModelConfig};
+use folo_vision::model::{FoloModel, HeadMode, ModelConfig};
+use folo_vision::nms::{NmsConfig, topk_detections};
 use serde_json::{Value, json};
 
 /// Element-wise relative tolerance (max, mean) of an f32 graph against FOLO's f32 forward: docs/MODEL.md §9.1's
@@ -50,7 +51,14 @@ fn s(p: &Path) -> &str {
 /// γ ≈ 0.45: at γ ≈ 1 the normalised random network is close to chaotic and amplifies f32 rounding about 3000×
 /// (onnxruntime with and without graph optimisations then differs from itself by 2e-4), at γ ≈ 0.45 about 300×.
 fn calibrated(scale: &str, nc: usize, seed: u64) -> FoloModel {
+    calibrated_head(scale, nc, seed, "o2m")
+}
+
+/// [`calibrated`] with a `head` (`o2o`: the training-mode pass also normalises the one-to-one branch).
+fn calibrated_head(scale: &str, nc: usize, seed: u64, head: &str) -> FoloModel {
     let mut cfg = ModelConfig::new(scale, nc).unwrap();
+    cfg.head = head.into();
+    let base = cfg.clone();
     cfg.bn_momentum = 0.999; // the running statistics become (almost exactly) the batch statistics
     let cal = FoloModel::new(cfg).unwrap(); // training mode
     let mut rng = Rng::seed(seed);
@@ -71,7 +79,7 @@ fn calibrated(scale: &str, nc: usize, seed: u64) -> FoloModel {
         let _g = no_grad();
         cal.forward(&Tensor::rand_uniform([4, 3, 128, 128], 0.0, 1.0, &mut rng)).unwrap();
     }
-    let m = FoloModel::new(ModelConfig::new(scale, nc).unwrap()).unwrap();
+    let m = FoloModel::new(base).unwrap();
     let src: HashMap<String, Tensor> = cal.named_tensors().into_iter().map(|t| (t.name, t.tensor)).collect();
     for t in m.named_tensors() {
         init::copy_(&t.tensor, &src[&t.name]).unwrap();
@@ -86,8 +94,14 @@ fn dump(dir: &Path, name: &str, t: &Tensor) -> Value {
     json!({ "file": name, "shape": t.dims() })
 }
 
-/// FOLO's outputs for `x`: the raw head, or the `[B, A, 4 + nc]` decode.
+/// FOLO's outputs for `x`: the raw head, or the `[B, A, 4 + nc]` decode; for a model predicting with its `o2o`
+/// head, the decode is the end-to-end `[B, K, 6]` of docs/MODEL.md §6.6 (`K = min(max_det, A)`, no `conf`),
+/// compared row by row (`"match": "rows"`).
 fn reference(m: &FoloModel, x: &Tensor, decode: bool, dir: &Path, tag: &str) -> Value {
+    reference_k(m, x, decode, dir, tag, 300)
+}
+
+fn reference_k(m: &FoloModel, x: &Tensor, decode: bool, dir: &Path, tag: &str, max_det: usize) -> Value {
     let _g = no_grad();
     let out = m.forward(x).unwrap();
     // The outputs must depend on the image, or the comparison proves little (see `calibrated`).
@@ -98,7 +112,29 @@ fn reference(m: &FoloModel, x: &Tensor, decode: bool, dir: &Path, tag: &str) -> 
     };
     let (db, dc) = (delta(&out.box_raw, &other.box_raw), delta(&out.cls_raw, &other.cls_raw));
     assert!(db > 0.1 && dc > 0.1, "{tag}: the outputs barely depend on the image ({db}, {dc})");
-    if decode {
+    if decode && m.head_mode() == HeadMode::O2o {
+        let nc = out.num_classes;
+        let k = max_det.min(out.num_anchors());
+        // The top K, and a longer pool (the selection with K + 16) that rows swapped across the cutoff come from.
+        let pool_k = (k + 16).min(out.num_anchors());
+        let select = |max_det: usize| -> Tensor {
+            let nms =
+                NmsConfig { conf: f32::NEG_INFINITY, max_det, multi_label: true, ..NmsConfig::default() };
+            let mut rows = Vec::new();
+            for (boxes, scores) in out.decode_images().unwrap() {
+                let d = topk_detections(&boxes, &scores, nc, &nms);
+                assert_eq!(d.len(), max_det, "{tag}: {max_det} rows");
+                for d in d {
+                    rows.extend([d.bbox.x1, d.bbox.y1, d.bbox.x2, d.bbox.y2, d.score, d.class as f32]);
+                }
+            }
+            Tensor::from_vec(rows, [out.batch(), max_det, 6]).unwrap()
+        };
+        let mut spec = dump(dir, &format!("{tag}-detections.f32"), &select(k));
+        spec["match"] = json!("rows");
+        spec["pool"] = dump(dir, &format!("{tag}-pool.f32"), &select(pool_k));
+        json!({ "detections": spec })
+    } else if decode {
         json!({ "detections": dump(dir, &format!("{tag}-detections.f32"), &out.decode().unwrap()) })
     } else {
         json!({
@@ -198,6 +234,54 @@ fn onnx_matches_folo_in_onnxruntime() {
             }
         }
     }
+    // An `o2o` model (docs/MODEL.md §6.6): its one-to-one branch raw and end to end (f32, f16, dynamic, a small
+    // max_det), and its one-to-many branch with `--head o2m`.
+    let mut m = calibrated_head("n", classes.len(), 9, "o2o");
+    m.set_classes(classes.clone()).unwrap();
+    m.set_imgsz(128);
+    let weights = dir.join("folo-n-o2o.folo");
+    m.save(&weights).unwrap();
+    let mut r = FoloModel::open(&weights).unwrap();
+    r.fuse().unwrap();
+    assert_eq!(r.head_mode(), HeadMode::O2o);
+    let x = Tensor::rand_uniform([2, 3, 128, 128], 0.0, 1.0, &mut Rng::seed(300));
+    let xs = [x.clone(), Tensor::rand_uniform([1, 3, 96, 160], 0.0, 1.0, &mut Rng::seed(301))];
+    for (name, flags, max_det, inputs) in [
+        ("folo-n-o2o-f32-raw", vec!["--batch", "2"], 300, &xs[..1]),
+        ("folo-n-o2o-f32-e2e", vec!["--batch", "2", "--decode"], 300, &xs[..1]),
+        ("folo-n-o2o-f32-e2e-k20", vec!["--batch", "2", "--decode", "--max-det", "20"], 20, &xs[..1]),
+        ("folo-n-o2o-f16-e2e", vec!["--batch", "2", "--decode", "--half"], 300, &xs[..1]),
+        ("folo-n-o2o-f32-dynamic-e2e", vec!["--dynamic", "--decode"], 300, &xs[..]),
+    ] {
+        let half = flags.contains(&"--half");
+        let decode = flags.contains(&"--decode");
+        let rec = export(&weights, &dir.join(format!("{name}.onnx")), &flags);
+        assert_eq!(rec["head"], "o2o");
+        let ins: Vec<Value> =
+            inputs.iter().enumerate().map(|(i, x)| dump(&dir, &format!("{name}-in{i}.f32"), x)).collect();
+        let expected: Vec<Value> = inputs
+            .iter()
+            .enumerate()
+            .map(|(i, x)| reference_k(&r, x, decode, &dir, &format!("{name}-{i}"), max_det))
+            .collect();
+        let tol = if half { TOL_F16 } else { TOL_F32 };
+        cases.push(json!({
+            "name": name, "model": format!("{name}.onnx"),
+            "dtype": if half { "float16" } else { "float32" },
+            "tolerance": tol.0, "mean_tolerance": tol.1,
+            "inputs": ins, "expected": expected,
+        }));
+    }
+    let rec = export(&weights, &dir.join("folo-n-o2o-as-o2m.onnx"), &["--batch", "2", "--head", "o2m"]);
+    assert_eq!(rec["head"], "o2m");
+    r.set_head_mode(HeadMode::O2m).unwrap();
+    cases.push(json!({
+        "name": "folo-n-o2o-as-o2m-raw", "model": "folo-n-o2o-as-o2m.onnx", "dtype": "float32",
+        "tolerance": TOL_F32.0, "mean_tolerance": TOL_F32.1,
+        "inputs": [dump(&dir, "o2m-in.f32", &x)],
+        "expected": [reference(&r, &x, false, &dir, "folo-n-o2o-as-o2m")],
+    }));
+
     let manifest = dir.join("manifest.json");
     std::fs::write(&manifest, serde_json::to_vec_pretty(&json!({ "cases": cases })).unwrap()).unwrap();
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bench/parity/onnx_check.py");
@@ -208,6 +292,6 @@ fn onnx_matches_folo_in_onnxruntime() {
     });
     eprintln!("{}", serde_json::to_string_pretty(&report).unwrap());
     assert!(o.status.success() && report["ok"] == true, "ONNX parity failed: {report}");
-    assert_eq!(report["cases"].as_array().unwrap().len(), 11);
+    assert_eq!(report["cases"].as_array().unwrap().len(), 17);
     let _ = std::fs::remove_dir_all(&dir);
 }

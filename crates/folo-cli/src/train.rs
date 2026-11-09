@@ -131,6 +131,7 @@ fn start(
     let data_arg = args.data.as_deref().expect("clap requires --data without --resume");
     let (ds, ds_name) = open_dataset(data_arg)?;
     let mut weights = None;
+    let mut weights_head = folo_vision::model::HeadMode::O2m;
     // Initial weights: --weights, or --model naming a .folo file or published weights rather than an arch.
     let init = match &args.weights {
         Some(w) => Some(w.as_str()),
@@ -143,6 +144,9 @@ fn start(
         let p = crate::weights::resolve(Path::new(init))?;
         let file = folo_nn::io::ModelFile::open(&p).map_err(|e| engine_error(e.into()))?;
         weights = Some(p);
+        if file.metadata().config.has_o2o() {
+            weights_head = folo_vision::model::HeadMode::O2o;
+        }
         file.metadata().arch.clone()
     } else {
         args.model.clone()
@@ -166,6 +170,7 @@ fn start(
         lrf: args.lrf,
         cos_lr: args.cos_lr,
         amp: args.amp,
+        head: args.head.map_or(weights_head, Into::into),
         warmup_epochs: args.warmup_epochs,
         patience: args.patience,
         seed: args.seed,
@@ -311,6 +316,7 @@ fn check_resume_flags(args: &TrainArgs, stored: &TrainConfig) -> Result<(), CliE
             "lrf" => (field("lrf"), json!(args.lrf)),
             "cos_lr" => (field("cos_lr"), json!(args.cos_lr)),
             "amp" => (field("amp"), json!(args.amp)),
+            "head" => (field("head"), json!(args.head.map(folo_vision::model::HeadMode::from))),
             "warmup_epochs" => (field("warmup_epochs"), json!(args.warmup_epochs)),
             "patience" => (field("patience"), json!(args.patience)),
             "seed" => (field("seed"), json!(args.seed)),

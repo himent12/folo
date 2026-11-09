@@ -6,10 +6,10 @@ use folo_core::{DType, DetectDecode, Device, Tensor, no_grad};
 use folo_nn::{Error, Module, Result};
 use rayon::prelude::*;
 
-use super::{FoloModel, HeadOutput};
+use super::{FoloModel, HeadMode, HeadOutput};
 use crate::boxes::Xyxy;
 use crate::decode::{decode_head, dist2bbox, sigmoid, softmax_expectation};
-use crate::nms::{Candidate, Detection, NmsConfig, nms_candidates, non_max_suppression};
+use crate::nms::{Candidate, Detection, NmsConfig, nms_candidates, postprocess, topk_candidates};
 
 /// Records per image in the first download of [`HeadOutput::detections`]' device path: the counts and up to
 /// this many candidates of every image come back in one readback; an image with more takes a second one.
@@ -22,7 +22,7 @@ pub struct ImagePrediction {
     pub boxes: Vec<Xyxy>,
     /// `[A, nc]` row-major class scores (post-sigmoid).
     pub scores: Vec<f32>,
-    /// The NMS output, sorted by descending score.
+    /// The post-processing output (NMS, or the top-k of an `o2o` head), sorted by descending score.
     pub detections: Vec<Detection>,
 }
 
@@ -31,7 +31,7 @@ pub struct ImagePrediction {
 pub struct RawPrediction {
     /// The raw head outputs.
     pub output: HeadOutput,
-    /// Per image: decoded boxes and scores, and the detections after NMS.
+    /// Per image: decoded boxes and scores, and the detections after post-processing.
     pub images: Vec<ImagePrediction>,
 }
 
@@ -127,8 +127,9 @@ impl HeadOutput {
             .collect()
     }
 
-    /// The detections of every image (MODEL.md §6.4 decode, then §9.3 NMS with `nms`), in network-input
-    /// pixels, highest score first.
+    /// The detections of every image (MODEL.md §6.4 decode, then §9.3 NMS with `nms`, or for one-to-one
+    /// outputs, [`HeadOutput::mode`] `o2o`, §6.6's top-k with `nms.conf` and `nms.max_det` and no NMS), in
+    /// network-input pixels, highest score first.
     ///
     /// On a device with the candidate kernel (the GPU) and without `multi_label`, the decode runs there in
     /// one kernel ([`Tensor::detect_candidates`], which reads `F16` outputs as they are and decodes in `F32`)
@@ -137,7 +138,8 @@ impl HeadOutput {
     /// one only for an image with more. On the CPU (single-label) the anchors are prefiltered by their largest
     /// logit and only the candidates are decoded, with the same functions as [`HeadOutput::decode_images`], so
     /// the result is bit for bit that of the full decode. Everything else decodes every anchor and runs
-    /// [`non_max_suppression`]. All paths give the same detections up to the device's float rounding.
+    /// [`crate::nms::non_max_suppression`] (or [`crate::nms::topk_detections`]). All paths give the same
+    /// detections up to the device's float rounding.
     pub fn detections(&self, nms: &NmsConfig) -> Result<Vec<Vec<Detection>>> {
         let _g = no_grad();
         if !nms.multi_label {
@@ -150,8 +152,16 @@ impl HeadOutput {
                 return Ok(d);
             }
         }
-        let nc = self.num_classes;
-        Ok(self.decode_images()?.into_par_iter().map(|(b, s)| non_max_suppression(&b, &s, nc, nms)).collect())
+        let (nc, mode) = (self.num_classes, self.mode);
+        Ok(self.decode_images()?.into_par_iter().map(|(b, s)| postprocess(&b, &s, nc, nms, mode)).collect())
+    }
+
+    /// The single-label post-process of one image's candidates (sorted by anchor) for this output's branch.
+    fn finish_candidates(&self, cands: &[Candidate], nms: &NmsConfig) -> Vec<Detection> {
+        match self.mode {
+            HeadMode::O2m => nms_candidates(cands, nms),
+            HeadMode::O2o => topk_candidates(cands, nms),
+        }
     }
 
     /// The CPU half of [`HeadOutput::detections`]: straight from the channel-major outputs, a running maximum
@@ -208,7 +218,7 @@ impl HeadOutput {
                 let bbox = dist2bbox(d, anchors.points[j]).scale(st, st);
                 cands.push(Candidate { anchor: j as u32, class: bc as u32, score: bs, bbox });
             }
-            nms_candidates(&cands, nms)
+            self.finish_candidates(&cands, nms)
         };
         Ok(Some((0..b).into_par_iter().map(image).collect()))
     }
@@ -272,7 +282,7 @@ impl HeadOutput {
                         .collect();
                     // The kernel appends in arrival order; NMS tie-breaks by anchor.
                     c.sort_unstable_by_key(|c| c.anchor);
-                    nms_candidates(&c, nms)
+                    self.finish_candidates(&c, nms)
                 })
                 .collect(),
         ))
@@ -295,25 +305,31 @@ impl HeadOutput {
 }
 
 impl FoloModel {
-    /// The predictor's model step: an eval-mode forward under `no_grad`, then decode and class-aware NMS
-    /// (`nms`, MODEL.md §9.3) on the host, images in parallel; outputs on a GPU are decoded there and downloaded
+    /// The predictor's model step: an eval-mode forward under `no_grad` (of the [`FoloModel::head_mode`]
+    /// branch), then decode and class-aware NMS (`nms`, MODEL.md §9.3; for an `o2o` head the top-k of §6.6) on
+    /// the host, images in parallel; outputs on a GPU are decoded there and downloaded
     /// once ([`HeadOutput::decode_on_device`]). Boxes are in network-input
     /// pixels; mapping back through the letterbox is the caller's job. Fails in training mode, where the
     /// forward would update the BatchNorm statistics.
     pub fn predict_raw(&self, x: &Tensor, nms: &NmsConfig) -> Result<RawPrediction> {
+        self.predict_raw_as(x, nms, self.head_mode())
+    }
+
+    /// [`FoloModel::predict_raw`] with the `mode` branch and its post-processing ([`FoloModel::forward_head`]).
+    pub fn predict_raw_as(&self, x: &Tensor, nms: &NmsConfig, mode: HeadMode) -> Result<RawPrediction> {
         if self.is_training() {
             return Err(Error::Invalid(
                 "FoloModel::predict_raw: the model is in training mode; call eval() or fuse() first".into(),
             ));
         }
         let _g = no_grad();
-        let output = self.forward(x)?;
-        let nc = output.num_classes;
+        let output = self.forward_head(x, mode)?;
+        let (nc, mode) = (output.num_classes, output.mode);
         let images = output
             .decode_images()?
             .into_par_iter()
             .map(|(boxes, scores)| {
-                let detections = non_max_suppression(&boxes, &scores, nc, nms);
+                let detections = postprocess(&boxes, &scores, nc, nms, mode);
                 ImagePrediction { boxes, scores, detections }
             })
             .collect();

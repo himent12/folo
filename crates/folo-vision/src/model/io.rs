@@ -118,8 +118,30 @@ impl FoloModel {
     /// Transfer learning: partial loading for training. Every tensor whose name, shape and dtype match is
     /// loaded; with a different class list the class-output layers are skipped (keeping this model's
     /// initialisation and priors), and so is anything whose shape changed with the class count.
+    ///
+    /// Into a model with the one-to-one head (`head = "o2o"`) from a file without one (an `o2m` model), the
+    /// one-to-one branch starts as a copy of the one-to-many head tensors that loaded (as YOLOv10 initialises it);
+    /// they are listed in the report's `loaded` as `head.o2o.*`.
     pub fn transfer_from(&self, file: &ModelFile) -> Result<LoadReport> {
-        self.load(file, LoadOptions::partial(Purpose::Training))
+        let mut report = self.load(file, LoadOptions::partial(Purpose::Training))?;
+        if self.has_o2o() && !report.loaded.iter().any(|n| n.starts_with("head.o2o.")) {
+            let tensors: std::collections::HashMap<String, folo_core::Tensor> =
+                self.state().into_iter().collect();
+            let mut copied = Vec::new();
+            for name in &report.loaded {
+                let Some(rest) = name.strip_prefix("head.") else { continue };
+                let target = format!("head.o2o.{rest}");
+                if let (Some(src), Some(dst)) = (tensors.get(name), tensors.get(&target))
+                    && src.shape() == dst.shape()
+                {
+                    folo_nn::init::copy_(dst, src)?;
+                    copied.push(target);
+                }
+            }
+            report.missing.retain(|n| !copied.contains(n));
+            report.loaded.extend(copied);
+        }
+        Ok(report)
     }
 
     /// Every tensor (parameters and buffers) with its name, in canonical order: what a weights file holds.
