@@ -246,6 +246,8 @@ pub struct NewRunForm {
     pub lr_invalid: bool,
     pub close_input: Entity<TextInput>,
     pub close_invalid: bool,
+    /// Mixed-precision training (f16 on tensor cores). Sent only for a GPU device.
+    pub amp: bool,
     _subs: Vec<Subscription>,
     pub submitting: bool,
     pub error: Option<ApiError>,
@@ -1540,6 +1542,7 @@ impl FoloApp {
             f.fliplr = config.augment.fliplr;
             f.close_mosaic = config.augment.close_mosaic as f32;
             f.scale = config.augment.scale;
+            f.amp = config.amp;
             f.note = note;
             f.base = Some(config.clone());
             let input = f.name.clone();
@@ -1664,6 +1667,7 @@ impl FoloApp {
             lr_input,
             close_input,
             close_invalid: false,
+            amp: false,
             epochs_invalid: false,
             lr_invalid: false,
             _subs: subs,
@@ -1718,7 +1722,8 @@ impl FoloApp {
                     ..Augment::default()
                 },
                 seed: 0,
-                amp: false,
+                // The CPU has no tensor cores: the switch is inert there and never sent.
+                amp: form.amp && DEVICES[form.device] != "cpu",
             },
         );
         let _ = window;

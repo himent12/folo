@@ -694,6 +694,7 @@ impl FoloApp {
         let note = self.new_run.as_ref().and_then(|f| f.note.clone());
         let flip_slider = self.slider("nr-fliplr", fliplr, 0., 1., 0.05, window, cx).into_any_element();
         let close_mosaic = self.new_run.as_ref().map_or(10., |f| f.close_mosaic);
+        let amp = self.new_run.as_ref().is_some_and(|f| f.amp);
         let close_slider = self
             .slider("nr-close", close_mosaic, 0., 30f32.max(close_mosaic), 1., window, cx)
             .into_any_element();
@@ -1065,6 +1066,48 @@ impl FoloApp {
                         ),
                     ),
             )
+            // Mixed precision: f16 on tensor cores. Whether the server's GPU has them shows only when
+            // the run starts (it fails with not_supported), so the requirement is stated here.
+            .child({
+                let on_cpu = DEVICES[device] == "cpu";
+                let amp_on = amp && !on_cpu;
+                let switch = self
+                    .switch(
+                        "nr-amp",
+                        amp_on,
+                        window,
+                        cx,
+                        act(move |this, _, cx| {
+                            if let Some(f) = this.new_run.as_mut()
+                                && !on_cpu
+                            {
+                                f.amp = !f.amp;
+                                cx.notify();
+                            }
+                        }),
+                    )
+                    .into_any_element();
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(16.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.))
+                            .child(label("Mixed precision"))
+                            .child(text(ty::XS, t.text_tertiary).child(if on_cpu {
+                                "Off on the CPU: it needs a GPU with tensor cores"
+                            } else {
+                                "Trains in f16 on tensor cores; needs folo serve --tensor-cores"
+                            })),
+                    )
+                    .child(switch)
+            })
             .child(section("Augmentation"))
             .child(
                 div()

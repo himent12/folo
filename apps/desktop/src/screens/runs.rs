@@ -444,14 +444,25 @@ impl FoloApp {
                 // OOM failure would hit the same limit (the config can't change), so it isn't offered.
                 let mut cfg = r.config.clone();
                 let oom = r.error.as_deref().is_some_and(is_gpu_oom);
-                if !oom {
+                // Mixed precision refused (no tensor cores): the new run trains in f32, and resuming
+                // would hit the same refusal.
+                let no_amp = r.error_code.as_deref() == Some("not_supported") && cfg.amp;
+                if !oom && !no_amp {
                     actions.push(self.resume_button(&r, window, cx));
                 }
-                let note = oom.then(|| crate::app::retry_batch(cfg.batch)).flatten().map(|to| {
-                    let from = cfg.batch;
-                    cfg.batch = to;
-                    format!("Batch lowered from {from} to {to} so the run fits in GPU memory.")
-                });
+                let note = if no_amp {
+                    cfg.amp = false;
+                    Some(
+                        "Mixed precision turned off: this server's GPU has no tensor cores enabled."
+                            .to_string(),
+                    )
+                } else {
+                    oom.then(|| crate::app::retry_batch(cfg.batch)).flatten().map(|to| {
+                        let from = cfg.batch;
+                        cfg.batch = to;
+                        format!("Batch lowered from {from} to {to} so the run fits in GPU memory.")
+                    })
+                };
                 actions.push(
                     self.button(
                         "run-retry-cfg",
@@ -520,7 +531,9 @@ impl FoloApp {
     fn failure_banner(&self, r: &Run, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
         let msg = r.error.clone().unwrap_or_else(|| "The run failed.".into());
-        let hint = if is_gpu_oom(&msg) {
+        let hint = if r.error_code.as_deref() == Some("not_supported") && r.config.amp {
+            "Mixed precision needs tensor cores (start folo serve with --tensor-cores on such a GPU). New run from this config trains without it.".to_string()
+        } else if is_gpu_oom(&msg) {
             match crate::app::retry_batch(r.config.batch) {
                 Some(to) => format!(
                     "The batch didn't fit in GPU memory. New run from this config starts with batch {to}; a smaller image size or architecture also helps."
