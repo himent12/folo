@@ -104,9 +104,10 @@
     display: grid;
     gap: 2px;
   }
+  /* The title in ink: the danger shows through the icon (DESIGN_DIRECTION §2.6, titles and links are ink). */
   .title {
     font-weight: var(--weight-medium);
-    color: var(--danger-text);
+    color: var(--text-primary);
   }
   .msg {
     color: var(--text-secondary);
@@ -165,8 +166,5 @@
     flex-wrap: wrap;
     gap: var(--space-2);
     margin-top: var(--space-2);
-  }
-  .title {
-    color: var(--danger-text);
   }
 </style>

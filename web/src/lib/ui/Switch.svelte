@@ -79,13 +79,15 @@
       transform var(--dur-base) var(--ease-out),
       background-color var(--dur-fast) var(--ease-standard);
   }
+  /* On: the ink track with an inverse knob, as the checkboxes are ink (DESIGN_DIRECTION §2.6). Lime is for "now" and
+     the one action, never a control's state, so a switch never competes with Start training. */
   input:checked + .track {
-    background: var(--accent-line);
+    background: var(--text-primary);
     box-shadow: none;
   }
   input:checked + .track .thumb {
     transform: translateX(12px);
-    background: var(--accent-on);
+    background: var(--text-inverse);
   }
   /* Disabled: the label and thumb in text.disabled, the edge kept so the control still reads as a switch; the hint stays
      readable (it may be the reason). */

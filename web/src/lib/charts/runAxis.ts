@@ -26,10 +26,36 @@ export function lengthRatio(runs: readonly RunLength[]): number {
   return Math.max(...ls) / Math.min(...ls);
 }
 
-/** The default x axis: "By progress" when the runs' plans differ by more than LENGTH_RATIO. */
-export function defaultAxis(runs: readonly RunLength[]): 'epoch' | 'progress' {
-  return lengthRatio(runs) > LENGTH_RATIO ? 'progress' : 'epoch';
+/** Above this ratio between the epochs the longest run trained and those of every other run, see `defaultAxis`. */
+export const SPAN_RATIO = 2;
+
+/**
+ * Why the comparison defaults to "By progress", or null when "By epoch" is the default:
+ * - `plans`: the plans differ by more than LENGTH_RATIO (a 30- and a 150-epoch schedule);
+ * - `span`: one run trained more than SPAN_RATIO times the epochs of every other, so an epoch axis (to the longest
+ *   plan) squeezes the others into its first part, and their shorter plans give them more of a progress axis. Round
+ *   24's comparison ran to epoch 150 for one run while three ended by 61: they filled 40 % of the plot, 61 % by
+ *   progress. A run that failed early on the same plan is not helped by progress, so it does not switch the axis.
+ */
+export function axisReason(runs: readonly RunLength[]): 'plans' | 'span' | null {
+  if (lengthRatio(runs) > LENGTH_RATIO) return 'plans';
+  if (runs.length < 2) return null;
+  const done = runs.map((r) => Math.max(0, r.epoch));
+  const top = Math.max(...done);
+  const i = done.indexOf(top);
+  const others = runs.filter((_, k) => k !== i);
+  const plan = Math.max(...runs.map(runLength));
+  const rest = Math.max(...others.map((r) => Math.max(0, r.epoch)));
+  return top > SPAN_RATIO * rest && others.some((r) => runLength(r) < plan) ? 'span' : null;
 }
+
+/** The default x axis: "By progress" when `axisReason` gives one, else "By epoch". */
+export function defaultAxis(runs: readonly RunLength[]): 'epoch' | 'progress' {
+  return axisReason(runs) ? 'progress' : 'epoch';
+}
+
+/** The header's note on an axis chosen for the reader: why it is "By progress". */
+export const AXIS_REASON = { plans: 'plans differ in length', span: 'one run trained far longer' } as const;
 
 /** x of `epoch` on the chosen axis. */
 export function runX(epoch: number, r: RunLength, axis: 'epoch' | 'progress'): number {

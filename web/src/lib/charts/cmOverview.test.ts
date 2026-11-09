@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { overviewGeometry, overviewHit, overviewWindow } from './cmOverview';
+import { overviewGeometry, overviewHit, overviewWindow, pageFit, pageRange } from './cmOverview';
 
 describe('confusion overview', () => {
   it('fits every cell into the size it is given', () => {
@@ -27,5 +27,30 @@ describe('confusion overview', () => {
     const g = overviewGeometry(14, 168);
     expect(overviewWindow(1, 6, g)).toEqual({ x: 0, w: 71 });
     expect(overviewWindow(9, 14, g)).toEqual({ x: 96, w: 71 });
+  });
+});
+
+describe('matrix pages', () => {
+  it('fits whole columns beside the row labels, so no column is half in view', () => {
+    // A 390 px phone: the matrix box is 324 px, 96 px of row labels, 32 px cells and 2 px gaps: six whole columns.
+    const fit = pageFit(324, 98, 32, 2, 9)!;
+    expect(fit.cols).toBe(6);
+    // Six columns fill the width exactly: nothing of a seventh shows.
+    expect(98 + fit.cols * (fit.cell + 2)).toBeLessThanOrEqual(324);
+    expect(98 + fit.cols * (fit.cell + 2)).toBeGreaterThan(324 - 0.1 * fit.cols);
+    expect(fit.cell).toBeGreaterThanOrEqual(32);
+    // On touch (44 px cells), four.
+    expect(pageFit(324, 98, 44, 2, 9)!.cols).toBe(4);
+    // Every column fits: no paging.
+    expect(pageFit(1200, 98, 32, 2, 9)).toBeNull();
+  });
+
+  it('counts the columns in view from the scroll offset, the last page ending on the last column', () => {
+    const step = 36;
+    expect(pageRange(0, step, 6, 9)).toEqual({ first: 1, last: 6 });
+    expect(pageRange(3 * step, step, 6, 9)).toEqual({ first: 4, last: 9 });
+    // Mid-snap the counter names the columns nearest the offset, and never runs past the matrix.
+    expect(pageRange(1.4 * step, step, 6, 9)).toEqual({ first: 2, last: 7 });
+    expect(pageRange(99 * step, step, 6, 9)).toEqual({ first: 4, last: 9 });
   });
 });

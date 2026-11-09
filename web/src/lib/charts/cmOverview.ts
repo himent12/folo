@@ -30,3 +30,22 @@ export function overviewWindow(first: number, last: number, g: OverviewGeometry)
   const step = g.cell + g.gap;
   return { x: (first - 1) * step, w: (last - first + 1) * step - g.gap };
 }
+
+/**
+ * Whole columns per page of a matrix that scrolls sideways: how many columns of at least `minCell` px fit beside the
+ * pinned row labels (`head` px, then a `gap`), and the cell size that makes exactly that many fill the width, so no
+ * column is ever half in view (round 24: "Columns 1–6 of 9" with column 7 cut through its "71"). Null when every
+ * column fits without scrolling.
+ */
+export function pageFit(width: number, head: number, minCell: number, gap: number, n: number): { cols: number; cell: number } | null {
+  const room = width - head;
+  const cols = Math.max(1, Math.floor(room / (minCell + gap)));
+  if (cols >= n) return null;
+  return { cols, cell: Math.floor((room / cols - gap) * 100) / 100 };
+}
+
+/** The columns in view (1-based, inclusive) at a scroll offset, when pages hold `cols` whole columns of `step` px. */
+export function pageRange(scrollLeft: number, step: number, cols: number, n: number): { first: number; last: number } {
+  const first = Math.min(Math.max(1, n - cols + 1), Math.max(1, Math.round(scrollLeft / step) + 1));
+  return { first, last: Math.min(n, first + cols - 1) };
+}
