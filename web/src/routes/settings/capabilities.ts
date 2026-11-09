@@ -58,7 +58,7 @@ export function capabilityRows(c: Capabilities): CapRow[] {
       state: c.shader_f16 ? 'on' : 'none',
       word: c.shader_f16 ? 'Available' : 'Not available',
       note: c.shader_f16
-        ? 'Inference with precision f16 runs in half precision on the GPU.'
+        ? 'f16 models run in half precision on the GPU.'
         : c.device === 'cpu'
           ? 'The CPU computes in f32, so f16 inference runs in f32.'
           : 'This GPU computes in f32 only, so f16 inference runs in f32.',
