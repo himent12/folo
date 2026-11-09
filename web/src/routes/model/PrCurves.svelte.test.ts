@@ -109,3 +109,27 @@ describe('PrCurves on phones', () => {
     expect(back).toBe(1);
   });
 });
+
+describe('PrCurves: the operating point (docs/API.md, best_f1_conf)', () => {
+  it('names the threshold the evaluation read precision and recall at, under the table and in a class’s details', async () => {
+    phone = true;
+    await render('classes');
+    const conf = (await new MockApi('normal', 0).modelEval('m_fast_n')).best_f1_conf!;
+    const at = `at conf ${conf.toFixed(2)} (best F1)`;
+    expect(target.querySelector('.foot')?.textContent).toContain(`Precision and recall ${at};`);
+    target.querySelector<HTMLButtonElement>('table.table tbody tr button.disc')!.click();
+    flushSync();
+    expect(target.querySelector('tr.detail .ctx')?.textContent).toBe(`${at}, IoU 0.50`);
+  });
+
+  it('keeps the plain wording when the evaluation does not say (older servers)', async () => {
+    phone = false;
+    const api = new MockApi('normal', 0);
+    const ev = fromModelEval({ ...(await api.modelEval('m_fast_n')), best_f1_conf: null });
+    expect(ev.bestF1Conf).toBeNull();
+    const model = await api.model('m_fast_n');
+    c = mount(PrCurves, { target, props: { classes: model.classes, ev, map50: null, view: 'all' } });
+    flushSync();
+    expect(target.querySelector('.foot')?.textContent).toContain('Precision and recall at the confidence that maximises mean F1;');
+  });
+});

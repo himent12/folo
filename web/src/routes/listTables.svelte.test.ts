@@ -218,7 +218,8 @@ describe('Runs: row checkboxes', () => {
     expect(heads()).toEqual(before);
     expect(before[0]).toBe('Select for comparison');
     expect(before).not.toContain('Created');
-    expect(before).toEqual(['Select for comparison', 'Run', 'Status', 'Progress', 'Best mAP50-95']);
+    // The last column holds a waiting run's queue menu (empty on the other rows).
+    expect(before).toEqual(['Select for comparison', 'Run', 'Status', 'Progress', 'Best mAP50-95', 'Actions']);
     for (const n of columns(table).rows) expect(n).toBe(before.length);
   });
 

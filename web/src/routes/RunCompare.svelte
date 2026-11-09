@@ -27,7 +27,8 @@
   import { niceDomain, unitDomain } from '$lib/charts/domain';
   import { nearest } from '$lib/charts/downsample';
   import { defaultAxis, runEnd, runX } from '$lib/charts/runAxis';
-  import { deviceName, duration, metric } from '$lib/format';
+  import { conf, deviceName, duration, metric } from '$lib/format';
+  import { batchSetting, lrSetting, optimizerSetting, settingText, warmupSetting, type Setting } from './run/resolved';
   import { href, router } from '$lib/router.svelte';
   import { setCrumbs } from '$lib/shell/crumbs.svelte';
   import Page from '$lib/shell/Page.svelte';
@@ -165,7 +166,11 @@
     const [only] = lastEps;
     return lastEps.size === 1 && only !== null && only !== undefined ? `Latest · ep ${only}` : "Latest · each run's last epoch";
   });
-  const readoutAt = $derived(cursor === null ? latestNote : x === 'epoch' ? `Epoch ${Math.round(cursor)}` : `${Math.round(cursor)}% through`);
+  // Recall is read at each epoch's own best-F1 confidence (docs/API.md, Operating point): the readout says so.
+  const readoutAt = $derived(
+    (cursor === null ? latestNote : x === 'epoch' ? `Epoch ${Math.round(cursor)}` : `${Math.round(cursor)}% through`) +
+      (metricId === 'rec' ? ' · at best-F1 conf' : ''),
+  );
   const xDomain = $derived<[number, number]>(x === 'epoch' ? [0, Math.max(1, ...chosen.map((r) => r.epochs))] : [0, 100]);
 
   // mAP is only comparable on the same data: no winner across datasets.
@@ -179,24 +184,29 @@
   };
   const setX = (v: Axis) => (xChoice = v);
 
-  // The third field marks a row of identifiers (an architecture, a checkpoint, a named optimizer), set in mono like
-  // the chips and every other screen (ui/Ident); prose values ("From scratch", "auto") stay in sans.
-  const ID_PROSE = new Set(['From scratch', 'auto']);
-  const rows = $derived<[string, (r: Run) => string, boolean?][]>([
-    ['Dataset', (r) => datasets.data?.find((d) => d.id === r.config.dataset_id)?.name ?? r.config.dataset_id],
-    ['Model', (r) => r.config.arch, true],
-    ['Start from', (r) => startOf(r) ?? 'From scratch', true],
-    ['Epochs', (r) => `${r.epoch}/${r.epochs}`],
-    ['Batch', (r) => String(r.config.batch)],
-    ['Image size', (r) => `${r.config.imgsz} px`],
-    ['Optimizer', (r) => r.config.optimizer, true],
-    ['LR', (r) => String(r.config.lr0)],
-    ['Mosaic / mixup', (r) => `${r.config.augment.mosaic} / ${r.config.augment.mixup}`],
-    ['Close mosaic', (r) => (r.config.augment.close_mosaic > 0 ? `last ${r.config.augment.close_mosaic} epochs` : 'never')],
-    ['Device', (r) => deviceName(r.device)],
-    ['Duration', (r) => (r.started ? duration(((r.finished ? Date.parse(r.finished) : Date.now()) - Date.parse(r.started)) / 1000) : '—')],
+  // A cell is a Setting (./run/resolved): identifiers (an architecture, a checkpoint, a named optimizer) in mono like
+  // the chips and every other screen (ui/Ident), prose ("From scratch", "auto") in sans. Where the server resolved a
+  // run's config (`Run.resolved`), the optimizer, LR and batch are what it trains with, the request a note beside them.
+  const plain = (value: string): Setting => ({ value });
+  const ident = (value: string): Setting => ({ value, ident: true });
+  const rows = $derived<[string, (r: Run) => Setting][]>([
+    ['Dataset', (r) => plain(datasets.data?.find((d) => d.id === r.config.dataset_id)?.name ?? r.config.dataset_id)],
+    ['Model', (r) => ident(r.config.arch)],
+    ['Start from', (r) => (startOf(r) ? ident(startOf(r) ?? '') : plain('From scratch'))],
+    ['Epochs', (r) => plain(`${r.epoch}/${r.epochs}`)],
+    ['Batch', (r) => batchSetting(r.config, r.resolved)],
+    ['Image size', (r) => plain(`${r.config.imgsz} px`)],
+    ['Optimizer', (r) => optimizerSetting(r.config, r.resolved)],
+    ['LR', (r) => lrSetting(r.config, r.resolved)],
+    ['Warmup', (r) => (r.resolved ? warmupSetting(r.resolved) : plain('—'))],
+    ['Mosaic / mixup', (r) => plain(`${r.config.augment.mosaic} / ${r.config.augment.mixup}`)],
+    ['Close mosaic', (r) => plain(r.config.augment.close_mosaic > 0 ? `last ${r.config.augment.close_mosaic} epochs` : 'never')],
+    ['Device', (r) => plain(deviceName(r.device))],
+    ['Duration', (r) => plain(r.started ? duration(((r.finished ? Date.parse(r.finished) : Date.now()) - Date.parse(r.started)) / 1000) : '—')],
   ]);
-  const differs = (f: (r: Run) => string) => new Set(chosen.map(f)).size > 1;
+  const differs = (f: (r: Run) => Setting) => new Set(chosen.map((r) => settingText(f(r)))).size > 1;
+  /** Precision and recall of the epoch Best names (the run's model), with the threshold they were read at. */
+  const bestVal = (r: Run) => (r.best ? metrics.data?.get(r.id)?.epochs.find((e) => e.epoch === r.best?.epoch)?.val : undefined);
   // What differs is the comparison; identical settings fold into one row that can be opened.
   const diffRows = $derived(chosen.length > 1 ? rows.filter(([, f]) => differs(f)) : rows);
   const sameRows = $derived(chosen.length > 1 ? rows.filter(([, f]) => !differs(f)) : []);
@@ -338,10 +348,19 @@
                   <td class="num" class:winner={sameData && i === bestIdx && chosen.length > 1}>{metric(r.best?.map50_95)}{#if sameData && i === bestIdx && chosen.length > 1}<span class="tag">best</span>{/if}</td>
                 {/each}
               </tr>
-              {#each diffRows as [k, f, id] (k)}
+              <tr>
+                <td class="k">Precision · recall</td>
+                {#each chosen as r (r.id)}
+                  {@const v = bestVal(r)}
+                  <td class="num">
+                    {#if v}{metric(v.precision)} · {metric(v.recall)}<span class="pr-at">{v.best_f1_conf != null ? `conf ${conf(v.best_f1_conf)}` : 'best-F1 conf'} · ep {r.best?.epoch}</span>{:else}—{/if}
+                  </td>
+                {/each}
+              </tr>
+              {#each diffRows as [k, f] (k)}
                 <tr>
                   <td class="k">{k}</td>
-                  {#each chosen as r (r.id)}<td class="num cfg diff">{@render cell(f(r), id)}</td>{/each}
+                  {#each chosen as r (r.id)}<td class="num cfg diff">{@render cell(f(r))}</td>{/each}
                 </tr>
               {/each}
               {#if sameRows.length}
@@ -353,10 +372,10 @@
                   </td>
                 </tr>
                 {#if showSame}
-                  {#each sameRows as [k, f, id] (k)}
+                  {#each sameRows as [k, f] (k)}
                     <tr>
                       <td class="k">{k}</td>
-                      {#each chosen as r (r.id)}<td class="num cfg">{@render cell(f(r), id)}</td>{/each}
+                      {#each chosen as r (r.id)}<td class="num cfg">{@render cell(f(r))}</td>{/each}
                     </tr>
                   {/each}
                 {/if}
@@ -369,7 +388,7 @@
   {/if}
 </Page>
 
-{#snippet cell(v: string, id: boolean | undefined)}{#if id && !ID_PROSE.has(v)}<Ident value={v} />{:else}{v}{/if}{/snippet}
+{#snippet cell(v: Setting)}{#if v.ident}<Ident value={v.value} />{:else}{v.value}{/if}{#if v.note}<span class="note">{v.note}</span>{/if}{/snippet}
 
 {#snippet chips()}
   <!-- The run chips are the legend: colour key, value under the cursor, link and remove. -->
@@ -949,5 +968,17 @@
     border-radius: var(--radius-xs);
     background: var(--accent-muted);
     font-size: var(--type-sm-size);
+  }
+  /* The request beside what the run resolved it to ("(auto)", "(requested 0.01)"), and where P · R were read. */
+  .note {
+    margin-left: var(--space-1);
+    font-size: var(--type-sm-size);
+    font-weight: var(--weight-regular);
+    color: var(--text-tertiary);
+  }
+  .pr-at {
+    display: block;
+    font-size: var(--type-sm-size);
+    color: var(--text-tertiary);
   }
 </style>

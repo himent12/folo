@@ -2,7 +2,7 @@
 // be reconstructed at any instant (page reloads, screenshots with a frozen clock) and its SSE stream simply reports
 // the state at "now" as time passes.
 
-import type { ClassMetrics, Epoch, LogLine, Loss, Run, RunStatus, Step, TrainConfig } from '../types';
+import type { ClassMetrics, Epoch, LogLine, Loss, ResolvedTrain, Run, RunStatus, Step, TrainConfig } from '../types';
 import { gauss, hash, rng, smoothNoise } from './rng';
 
 export interface RunProfile {
@@ -39,6 +39,10 @@ export interface RunProfile {
   loop?: boolean;
   modelId?: string;
   device: string;
+  /** What the trainer resolves `config` to ([`resolveTrain`]); `Run.resolved` once the run has started. */
+  resolved?: ResolvedTrain;
+  /** Stopped while it waited: its trainer was never built, so it has no `resolved`. */
+  neverStarted?: boolean;
 }
 
 export const GPU_NAME = 'NVIDIA GeForce RTX 4080 SUPER';
@@ -74,12 +78,16 @@ export function loopStart(p: RunProfile, now: number): number {
 
 const seedOf = (p: RunProfile) => hash(p.id);
 
+/** The LR the resolved schedule gives at fractional epoch `epochF`: warmup, then linear (or cosine) decay to `lrf`. */
 export function lrAt(p: RunProfile, epochF: number): number {
-  const warm = 3;
-  const lr0 = p.config.lr0;
+  const r = p.resolved;
+  const warm = r ? r.warmup_iters / Math.max(1, r.optimizer_steps_per_epoch) : 3;
+  const lr0 = r?.lr0 ?? p.config.lr0;
+  const lrf = r?.lrf ?? 0.01;
   if (epochF < warm) return lr0 * (0.1 + 0.9 * (epochF / warm));
-  const t = (epochF - warm) / Math.max(1, p.config.epochs - warm);
-  return lr0 * (0.01 + 0.99 * 0.5 * (1 + Math.cos(Math.PI * Math.min(1, t))));
+  const t = Math.min(1, epochF / Math.max(1, p.config.epochs));
+  const decay = r?.cos_lr ? 0.5 * (1 + Math.cos(Math.PI * t)) : 1 - t;
+  return lr0 * (lrf + (1 - lrf) * decay);
 }
 
 /** Smooth training loss at fractional epoch, plus step noise. */
@@ -122,10 +130,13 @@ export function epochAt(p: RunProfile, e: number): Epoch {
       recall: r4(Math.min(0.99, 0.16 + cm * 1.0 + (cr() - 0.5) * 0.03)),
     };
   });
+  // The best-F1 confidence on the 0.001 grid, as folo-server's mock derives it: low while the model is unsure,
+  // settling near 0.3-0.45.
+  const best_f1_conf = r3(Math.max(0.001, Math.min(0.999, 0.12 + 0.35 * map50 + 0.02 * smoothNoise(seedOf(p) + 22, e))));
   return {
     epoch: e + 1,
     train_loss: lossAt(p, e + 1, false),
-    val: { map50: r4(map50), map50_95: r4(m), precision: r4(precision), recall: r4(recall), per_class },
+    val: { map50: r4(map50), map50_95: r4(m), precision: r4(precision), recall: r4(recall), per_class, best_f1_conf },
     duration_s: Math.round((p.epochSeconds + gauss(r) * 0.25) * 10) / 10,
   };
 }
@@ -146,6 +157,7 @@ export function stepAt(p: RunProfile, globalStep: number): Step {
   };
 }
 
+const r3 = (x: number) => Math.round(x * 1000) / 1000;
 const r4 = (x: number) => Math.round(x * 10000) / 10000;
 const r6 = (x: number) => Math.round(x * 1e6) / 1e6;
 
@@ -175,6 +187,8 @@ export function toRun(p: RunProfile, now: number): Run {
     device: p.device,
     model_id: status === 'completed' || status === 'stopped' ? (p.modelId ?? null) : null,
     error: p.terminal?.error ?? null,
+    // Set once the trainer is built (by the time the run is `running`); never for a run stopped while it waited.
+    resolved: p.resolved && started !== null && now >= started && !p.neverStarted ? p.resolved : null,
   };
 }
 
@@ -231,6 +245,56 @@ export const optimizerSteps = (images: number, batch: number) =>
   Math.max(1, Math.ceil(Math.ceil(images / Math.max(1, batch)) / accumulate(batch)));
 
 /**
+ * Warmup in optimizer steps (folo_nn::warmup_iters, 3 epochs): at least min(100, 30 % of the run), at most every
+ * epoch but the last.
+ */
+export function warmupIters(epochs: number, stepsPerEpoch: number, warmupEpochs = 3): number {
+  const total = epochs * stepsPerEpoch;
+  const floor = Math.min(100, Math.floor(0.3 * total));
+  return Math.min(Math.max(Math.round(warmupEpochs * stepsPerEpoch), floor), Math.max(epochs - 1, 0) * stepsPerEpoch);
+}
+
+/**
+ * `Run.resolved` as the real trainer resolves `config` on `images` training images of `classes` classes (folo-vision
+ * `TrainConfig::resolved_train`, docs/MODEL.md §8.2): `auto` is SGD at 0.01 above 10000 iterations (`ceil(images /
+ * max(batch, 64)) · epochs`), else AdamW at `round(0.002 · 5 / (4 + classes), 6)`, both with momentum 0.9 and no
+ * warmup bias LR; a named optimizer keeps `lr0` and the recipe's momentum 0.937. `stepsPerEpoch` is the run's own
+ * count, so the two never disagree.
+ */
+export function resolveTrain(c: TrainConfig, images: number, classes: number, stepsPerEpoch: number): ResolvedTrain {
+  const nbs = 64;
+  const acc = accumulate(c.batch);
+  let kind: ResolvedTrain['optimizer'];
+  let lr0 = c.lr0;
+  let momentum = 0.937;
+  let warmupBias = 0.1;
+  if (c.optimizer === 'auto') {
+    const iterations = Math.ceil(images / Math.max(c.batch, nbs, 1)) * c.epochs;
+    kind = iterations > 10_000 ? 'sgd' : 'adamw';
+    lr0 = kind === 'sgd' ? 0.01 : Math.round(((0.002 * 5) / (4 + classes)) * 1e6) / 1e6;
+    momentum = 0.9;
+    warmupBias = 0;
+  } else kind = c.optimizer;
+  return {
+    optimizer: kind,
+    lr0,
+    lrf: 0.01,
+    cos_lr: false,
+    momentum,
+    betas: kind === 'adamw' ? [momentum, 0.999] : null,
+    weight_decay: r6((0.0005 * c.batch * acc) / nbs),
+    batch: c.batch,
+    accumulate: acc,
+    nbs,
+    optimizer_steps_per_epoch: stepsPerEpoch,
+    warmup_iters: warmupIters(c.epochs, stepsPerEpoch),
+    warmup_epochs: 3,
+    warmup_momentum: 0.8,
+    warmup_bias_lr: warmupBias,
+  };
+}
+
+/**
  * The trainer's schedule warnings for a run, worded as folo_vision::train::schedule_warnings words them (docs/MODEL.md
  * §8.4): a run from scratch shorter than 200 optimizer steps, and a warmup longer than half the run.
  */
@@ -238,8 +302,7 @@ export function scheduleWarnings(p: RunProfile, images: number): string[] {
   const c = p.config;
   const spe = p.stepsPerEpoch;
   const total = c.epochs * spe;
-  const floor = Math.min(100, Math.floor(0.3 * total));
-  const warmup = Math.min(Math.max(Math.round(3 * spe), floor), Math.max(c.epochs - 1, 0) * spe);
+  const warmup = warmupIters(c.epochs, spe);
   const out: string[] = [];
   const acc = accumulate(c.batch);
   if (!c.weights && total < SHORT_RUN_STEPS)
@@ -265,7 +328,15 @@ export function startLogs(p: RunProfile, startedAt: number, datasetName: string,
     ...scheduleWarnings(p, images).map((message): LogLine => ({ t: t(0), level: 'warn', message })),
     { t: t(40), level: 'info', message: `dataset ${datasetName}: ${images} train images, ${p.classes} classes, imgsz ${c.imgsz}` },
     { t: t(90), level: 'debug', message: `model ${c.arch}: params ${archInfo[c.arch].params.toLocaleString('en-US')}, ${archInfo[c.arch].flops} GFLOPs` },
-    { t: t(120), level: 'info', message: `optimizer ${c.optimizer === 'auto' ? 'AdamW' : c.optimizer} lr0 ${c.lr0}  batch ${c.batch}  warmup 3 epochs, cosine to ${c.lr0 * 0.01}` },
+    ...(p.resolved
+      ? [
+          {
+            t: t(120),
+            level: 'info',
+            message: `optimizer ${p.resolved.optimizer === 'adamw' ? 'AdamW' : 'SGD'}${c.optimizer === 'auto' ? ' (auto)' : ''} lr0 ${p.resolved.lr0}  batch ${c.batch} × accumulate ${p.resolved.accumulate}  warmup ${p.resolved.warmup_iters} steps, ${p.resolved.cos_lr ? 'cosine' : 'linear'} to ${r6(p.resolved.lr0 * p.resolved.lrf)}`,
+          } satisfies LogLine,
+        ]
+      : []),
     { t: t(200), level: 'info', message: `augment mosaic ${c.augment.mosaic} mixup ${c.augment.mixup} fliplr ${c.augment.fliplr} scale ${c.augment.scale}` },
     { t: t(260), level: 'info', message: `training ${c.epochs} epochs, ${p.stepsPerEpoch} steps/epoch` },
     // folo_vision::train, for a `head: "o2o"` run (docs/MODEL.md §6.6).

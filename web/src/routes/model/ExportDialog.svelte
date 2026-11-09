@@ -1,14 +1,16 @@
 <script lang="ts">
   /**
    * Export a model to a deployable file: pick a format and run it on the server. The f16 file can then be downloaded
-   * to this computer (GET /api/models/{id}/weights?format=f16), under the name the server gave it; ONNX has no
-   * download endpoint, so its path on the server is shown, and the dialog says so. Servers that list
-   * `export_onnx_switches` in /api/system's `features` get folo export's three ONNX switches as checkboxes.
+   * to this computer (GET /api/models/{id}/weights?format=f16), under the name the server gave it. Servers that list
+   * `export_onnx_switches` in /api/system's `features` get folo export's three ONNX switches as checkboxes. Servers
+   * that list `weights_onnx` serve the ONNX graph itself (GET /api/models/{id}/weights?format=onnx, the switches as
+   * query parameters): ONNX then downloads straight to this computer, the button naming the file
+   * ("Download fasteners-n-best.onnx"). On older servers ONNX is written on the server and its path shown.
    */
   import Check from '@lucide/svelte/icons/check';
   import Copy from '@lucide/svelte/icons/copy';
   import Download from '@lucide/svelte/icons/download';
-  import { HttpApi } from '$lib/api/client';
+  import { HttpApi, onnxFileName } from '$lib/api/client';
   import { hub } from '$lib/api/index.svelte';
   import type { ExportFormat, ExportResult, Model, OnnxSwitches } from '$lib/api/types';
   import { bytes } from '$lib/format';
@@ -48,12 +50,16 @@
   let switches = $state<Required<OnnxSwitches>>({ decode: false, dynamic: false, half: false });
   /** Whether the server takes the switches (older ones would ignore them): asked once the dialog opens. */
   let switchesOk = $state(false);
+  /** Whether the server serves the ONNX graph for download (`weights_onnx`), so ONNX skips the server-side file. */
+  let onnxDirect = $state(false);
   $effect(() => {
     if (!open) return;
     let live = true;
     hub.api.system().then(
       (s) => {
-        if (live) switchesOk = !!s.features?.includes('export_onnx_switches');
+        if (!live) return;
+        switchesOk = !!s.features?.includes('export_onnx_switches');
+        onnxDirect = !!s.features?.includes('weights_onnx');
       },
       () => {},
     );
@@ -74,16 +80,28 @@
     }
     return `${i === 0 ? Math.round(v) : v.toFixed(1)} ${names[i]}`;
   }
-  /** The format of the finished export (the radio may not be shown any more). */
-  let done = $state<ExportFormat | null>(null);
+  /** The format of the finished export (the radio may not be shown any more); `onnx-file` a direct ONNX download. */
+  let done = $state<ExportFormat | 'onnx-file' | null>(null);
+  /** The ONNX switches go with the request when the server takes them (`weights_onnx` takes them as query parameters). */
+  const onnxSwitches = $derived(switchesOk || onnxDirect);
+  /** Direct ONNX download: the file it will be, by the server's naming rule, and the file once it arrived. */
+  const onnxName = $derived(onnxFileName(model.name, onnxSwitches && switches.half));
+  const direct = $derived(format === 'onnx' && onnxDirect);
+  let file = $state<File | null>(null);
   let phase = $state<'idle' | 'running' | 'done' | 'error'>('idle');
   let result = $state<ExportResult | null>(null);
   const announcement = $derived(
     phase === 'running'
-      ? `Exporting ${model.name}…`
-      : phase === 'done' && result
-        ? `Export finished: ${result.path.split('/').pop() ?? result.path}, ${bytes(result.bytes, prefs.units)}.`
-        : '',
+      ? direct
+        ? `Preparing ${onnxName}…`
+        : `Exporting ${model.name}…`
+      : phase === 'done' && file
+        ? hub.api.mock
+          ? `${file.name}: nothing to download in the demo.`
+          : `Downloaded ${file.name}, ${bytes(file.size, prefs.units)}.`
+        : phase === 'done' && result
+          ? `Export finished: ${result.path.split('/').pop() ?? result.path}, ${bytes(result.bytes, prefs.units)}.`
+          : '',
   );
   /** The file's name as the server wrote it, which is also the name it downloads under. */
   const fileName = $derived(result ? (result.path.split('/').pop() ?? result.path) : '');
@@ -91,12 +109,44 @@
   let copied = $state(false);
   let run = 0;
 
-  async function start() {
+  /**
+   * ONNX on a server with `weights_onnx`: asks for the graph (built on the first request, about as long as an export)
+   * and saves it through the browser under the server's name. The demo's models have no graph, so nothing is saved.
+   */
+  async function downloadOnnx() {
     const id = ++run;
     phase = 'running';
     error = null;
     try {
-      const r = await hub.api.exportModel(model.id, format, format === 'onnx' && switchesOk ? { ...switches } : undefined);
+      const api = hub.api;
+      const f = await api.onnxFile(model.id, onnxSwitches ? { ...switches } : {});
+      if (id !== run) return;
+      file = f;
+      done = 'onnx-file';
+      phase = 'done';
+      if (api.mock) return;
+      const url = URL.createObjectURL(f);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = f.name;
+      a.rel = 'noopener';
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+      if (!open) toast.success(`Downloaded ${f.name}`, bytes(f.size, prefs.units));
+    } catch (e) {
+      if (id !== run) return;
+      error = e;
+      phase = 'error';
+    }
+  }
+
+  async function start() {
+    if (direct) return downloadOnnx();
+    const id = ++run;
+    phase = 'running';
+    error = null;
+    try {
+      const r = await hub.api.exportModel(model.id, format, format === 'onnx' && onnxSwitches ? { ...switches } : undefined);
       if (id !== run) return;
       result = r;
       done = format;
@@ -141,6 +191,7 @@
     switches = { decode: false, dynamic: false, half: false };
     phase = 'idle';
     result = null;
+    file = null;
     error = null;
     copied = false;
   }
@@ -150,7 +201,21 @@
   <!-- One live region that stays in the dialog, so the start and the end of an export are both announced (the toast is
        held back while the dialog is open). Failures announce themselves through ErrorState's alert. -->
   <p class="sr-only" role="status">{announcement}</p>
-  {#if phase === 'done' && result}
+  {#if phase === 'done' && file}
+    <!-- The ONNX graph, downloaded straight to this computer (servers with weights_onnx). -->
+    <div class="done">
+      <div class="done-head">
+        <span class="ok" aria-hidden="true"><Check size={14} strokeWidth={2.25} /></span>
+        <span>{hub.api.mock ? 'Nothing to download in the demo' : 'Downloaded'}</span>
+        {#if !hub.api.mock}<span class="size num">{bytes(file.size, prefs.units)}</span>{/if}
+      </div>
+      <div class="path"><code class="mono">{file.name}</code></div>
+      <p class="note">
+        {#if hub.api.mock}Demo models are not real networks, so they have no ONNX graph to save. Connect to folo serve to
+          download it.{:else}Your browser saved it to its downloads folder. Nothing was written on the server.{/if}
+      </p>
+    </div>
+  {:else if phase === 'done' && result}
     <div class="done">
       <div class="done-head">
         <span class="ok" aria-hidden="true"><Check size={14} strokeWidth={2.25} /></span>
@@ -187,7 +252,7 @@
             <span class="opt-desc">{f.desc}</span>
           </span>
         </label>
-        {#if f.value === 'onnx' && format === 'onnx' && switchesOk}
+        {#if f.value === 'onnx' && format === 'onnx' && onnxSwitches}
           <!-- folo export's switches, under the format they belong to. -->
           <div class="switches" role="group" aria-label="ONNX options">
             {#each switchOptions as o (o.key)}
@@ -207,7 +272,8 @@
     {#if phase === 'running'}
       <div class="progress">
         <div class="bar" aria-hidden="true"><span></span></div>
-        <span class="faint">Exporting {model.name}…</span>
+        <!-- The server builds the graph on its first request (about as long as an export), then sends it. -->
+        <span class="faint">{#if direct}Preparing <span class="mono">{onnxName}</span>…{:else}Exporting {model.name}…{/if}</span>
       </div>
     {:else if phase === 'error'}
       <div class="err"><ErrorState {error} title="Export failed" compact /></div>
@@ -227,7 +293,7 @@
     {:else}
       <Button variant="ghost" onclick={() => (open = false)}>Cancel</Button>
       <Button variant="primary" icon={Download} loading={phase === 'running'} onclick={start}>
-        {phase === 'error' ? 'Retry' : 'Export'}
+        {#if phase === 'error'}Retry{:else if direct}Download <span class="mono file">{onnxName}</span>{:else}Export{/if}
       </Button>
     {/if}
   {/snippet}
@@ -465,6 +531,10 @@
   .where {
     display: grid;
     gap: var(--space-1);
+  }
+  /* The file the button downloads, by name: mono (a file name), in the button's own colour. */
+  .file {
+    font-size: var(--type-sm-size);
   }
   .where-label {
     font-size: var(--type-sm-size);

@@ -15,7 +15,7 @@
   import ConfusionMatrix from '$lib/charts/ConfusionMatrix.svelte';
   import { sharePct } from '$lib/charts/confusionInk';
   import { classInk } from '$lib/design/classInk.svelte';
-  import { ago, bytes, compact, date, metric, num } from '$lib/format';
+  import { ago, atBestF1, bytes, compact, conf, date, metric, num } from '$lib/format';
   import { prefs } from '$lib/prefs.svelte';
   import { href, router } from '$lib/router.svelte';
   import Page from '$lib/shell/Page.svelte';
@@ -193,8 +193,9 @@
   const kpis = (m: Model) => [
     { label: 'mAP50-95', value: m.metrics?.map50_95, sub: 'IoU 0.50:0.95' },
     { label: 'mAP50', value: m.metrics?.map50, sub: 'IoU 0.50' },
-    { label: 'Precision', value: m.metrics?.precision, sub: 'at the best-F1 confidence' },
-    { label: 'Recall', value: m.metrics?.recall, sub: 'at the best-F1 confidence' },
+    // The stored metrics' own threshold (the epoch that wrote the weights), never /eval's: one source per strip.
+    { label: 'Precision', value: m.metrics?.precision, sub: atBestF1(m.metrics?.best_f1_conf) },
+    { label: 'Recall', value: m.metrics?.recall, sub: atBestF1(m.metrics?.best_f1_conf) },
   ];
   // Phones: the four numbers as one compact 2 × 2 summary in every section (Curves too), so it never changes shape
   // between sections and each section starts on the first screen; what they mean is behind the ⓘ.
@@ -263,7 +264,9 @@
       </div>
       <div>
         <dt>Precision, recall</dt>
-        <dd>Measured at the confidence that gives the best F1 (precision and recall balanced, averaged over classes, at IoU 0.50): the model's best trade-off between missed objects and false boxes.</dd>
+        <dd>Measured at the confidence that gives the best F1 (precision and recall balanced, averaged over classes, at IoU 0.50): the model's best trade-off between missed objects and false boxes.{#if m.metrics?.best_f1_conf != null}
+            Here conf {conf(m.metrics.best_f1_conf)}, from the epoch that wrote these weights.{:else} This model's file does not say which
+            threshold that was.{/if}</dd>
       </div>
       <div>
         <dt>Evaluated on</dt>

@@ -22,6 +22,8 @@ export interface Evaluation {
   /** (n+1)×(n+1) counts; rows true class, columns predicted, last row/column background. */
   confusion: number[][];
   images: number;
+  /** The confidence per-class precision and recall are taken at (`/eval`'s `best_f1_conf`); null when unknown. */
+  bestF1Conf: number | null;
 }
 
 export function fromModelEval(e: ModelEval): Evaluation {
@@ -40,7 +42,7 @@ export function fromModelEval(e: ModelEval): Evaluation {
     recall: c.recall,
     instances: (e.confusion[c.class] ?? []).reduce((a, b) => a + b, 0),
   }));
-  return { perClass, curves, mean, confusion: e.confusion, images: e.images };
+  return { perClass, curves, mean, confusion: e.confusion, images: e.images, bestF1Conf: e.best_f1_conf ?? null };
 }
 
 /**

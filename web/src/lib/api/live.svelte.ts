@@ -79,6 +79,8 @@ export class LiveRun {
   error = $state.raw<unknown>(undefined);
   loading = $state(true);
   connection = $state<'idle' | 'open' | 'reconnecting'>('idle');
+  /** How many runs wait in the training queue, this one included, from its latest `queue` event (null: none yet). */
+  waiting = $state<number | null>(null);
   /** Bumps when steps/epochs/logs change (at most once per frame). */
   version = $state(0);
   steps: Step[] = [];
@@ -105,6 +107,7 @@ export class LiveRun {
       this.#lastStatus = null;
       this.#replay = null;
       untrack(() => {
+        this.waiting = null;
         this.loading = true;
         this.error = undefined;
         this.run = undefined;
@@ -167,6 +170,7 @@ export class LiveRun {
       let syncTimer: ReturnType<typeof setTimeout> | undefined;
       let replayTimer: ReturnType<typeof setTimeout> | undefined;
       let speAsked = false;
+      let resolvedAsked = false;
       const sync = (attempt = 0) => {
         clearTimeout(syncTimer);
         load().catch(() => {
@@ -194,6 +198,19 @@ export class LiveRun {
             sync();
           }
           if (this.run) this.run = withLength({ ...this.run, status, error }, steps_per_epoch, epochs);
+          // Only a waiting run has a place in the queue.
+          if (this.run && status !== 'queued' && this.run.queue_position != null) this.run = { ...this.run, queue_position: null };
+          // The trainer resolved the config by the time it reports `running` (docs/API.md): ask once for `resolved`.
+          if (status === 'running' && this.run && this.run.resolved == null && !resolvedAsked) {
+            resolvedAsked = true;
+            api.run(runId).then(
+              (r) => {
+                if (closed || !this.run || !r.resolved) return void (resolvedAsked = false);
+                this.run = { ...this.run, resolved: r.resolved };
+              },
+              () => (resolvedAsked = false),
+            );
+          }
           if (!ACTIVE.includes(status)) {
             // The run ended: the server's final history settles it. Requests issued before may hold a partial
             // history (or, during a replay, the interrupted attempt), even when a snapshot already said it ended
@@ -260,6 +277,12 @@ export class LiveRun {
           if (this.run && (!best || e.val.map50_95 > best.map50_95))
             this.run = { ...this.run, best: { epoch: e.epoch, map50_95: e.val.map50_95 } };
           this.#bump();
+        },
+        queue: ({ position, waiting }) => {
+          if (closed) return;
+          // State, not a change: the latest event is the run's place (docs/API.md, SSE `queue`).
+          this.waiting = waiting;
+          if (this.run && this.run.status === 'queued') this.run = { ...this.run, queue_position: position };
         },
         log: (l) => {
           if (closed) return;

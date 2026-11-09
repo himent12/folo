@@ -583,3 +583,46 @@ describe('LiveRun resume', () => {
     stop();
   });
 });
+
+describe('LiveRun: the training queue (docs/API.md, SSE queue)', () => {
+  let handlers: RunEventHandlers = {};
+  const saved = hub.api;
+  afterEach(() => {
+    hub.api = saved;
+    vi.useRealTimers();
+  });
+
+  it('keeps the latest queue event as the run’s place, drops it once the run starts, then reads `resolved`', async () => {
+    vi.useFakeTimers();
+    const queued = await new MockApi('normal', 0).run('run_q7c5');
+    const started = { ...queued, status: 'running' as const, queue_position: null, resolved: { optimizer: 'adamw', lr0: 0.000833 } as Run['resolved'] };
+    let snap: Run = queued;
+    hub.api = {
+      mock: false,
+      run: () => Promise.resolve(snap),
+      runMetrics: () => Promise.resolve({ steps: [], epochs: [] }),
+      runLogs: () => Promise.resolve({ lines: [] }),
+      runEvents: (_id: string, h: RunEventHandlers) => {
+        handlers = h;
+        return () => {};
+      },
+    } as unknown as Api;
+    hub.mode = 'live';
+    let live!: LiveRun;
+    const stop = $effect.root(() => {
+      live = new LiveRun(() => 'run_q7c5');
+    });
+    flushSync();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.run?.queue_position).toBe(2);
+    handlers.queue?.({ position: 1, waiting: 2 });
+    expect(live.run?.queue_position).toBe(1);
+    expect(live.waiting).toBe(2);
+    snap = started;
+    handlers.status?.({ status: 'running', error: null });
+    expect(live.run?.queue_position).toBeNull();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.run?.resolved?.lr0).toBe(0.000833);
+    stop();
+  });
+});
