@@ -48,6 +48,16 @@
      */
     pulse?: number;
   }
+
+  /**
+   * A phase change on the x axis (e.g. "mosaic off" for a run's last epochs): a thin vertical line at `x` with its 12 px
+   * label above the plot, and the span from `x` to the end of the domain hatched along the axis, in the hatch the run's
+   * progress bar marks that span with.
+   */
+  export interface XMark {
+    x: number;
+    label: string;
+  }
 </script>
 
 <script lang="ts">
@@ -56,7 +66,7 @@
   import { area as d3area, curveLinear, curveMonotoneX, line as d3line } from 'd3-shape';
   import { downsample, nearest, ticks as niceTicks } from './downsample';
   import { capTicks, logMinors, logTicks, MAX_TICKS, stepDecimals } from './domain';
-  import { needsLeader, placeEndLabels } from './endLabels';
+  import { labelWidth, needsLeader, placeEndLabels } from './endLabels';
   import { chartHint, claimOnce, TAP_HINT_KEY } from './hint';
   import { paintOrder } from './layers';
   import { TouchGesture, type PinAction } from './pin';
@@ -78,6 +88,8 @@
     /** Title row for the tooltip, given the hovered x. */
     xTitle?: (x: number) => string;
     markers?: Marker[];
+    /** A phase change on x (XMark). The plot keeps room for its label whenever it is set, in or out of the domain. */
+    xMark?: XMark;
     legend?: boolean;
     /** The most y ticks (3–5 are drawn; never more than five gridlines). */
     yTicks?: number;
@@ -95,7 +107,7 @@
     xLabel?: string;
     /** Short y-axis caption drawn above the y tick labels, e.g. "Precision". */
     yLabel?: string;
-    /** Leading legend caption saying which value the legend shows, e.g. "Last". Replaced by the x title on hover. */
+    /** Leading legend caption saying which value the legend shows, e.g. "Latest · ep 37". Replaced by the x title on hover. */
     legendNote?: string;
     /** A floating tooltip at the cursor. Off by default: the legend is the readout (cursor values on hover). */
     tooltip?: boolean;
@@ -105,8 +117,9 @@
      */
     highlight?: string | null;
     /**
-     * While a series is highlighted, draw it at 3 px over a panel-colour halo and the others at 1 px in their own
-     * colour (never faded, so each keeps >= 3:1): the comparison's "keep this line in front".
+     * While a series is highlighted, draw it at 3 px in its hue over a panel-colour halo, painted last, and the others
+     * as context curves: 1 px in `--chart-context` (>= 3:1 on the plot, no opacity), keeping their line pattern, with
+     * their end dots and labels in ink. The comparison's "keep this line in front"; its legend keeps every hue.
      */
     recede?: boolean;
     /** A small dot at each line's last point, so every series stays findable where lines overlap. */
@@ -131,6 +144,7 @@
     valueFormat,
     xTitle,
     markers = [],
+    xMark,
     legend = true,
     yTicks = MAX_TICKS,
     xTicks = 6,
@@ -221,8 +235,8 @@
     // Plus room for a leader, when labels are moved apart (LEAD).
     const labelW = showEnds ? Math.min(130, Math.max(0, ...series.map((s) => Math.min(18, endText(s)?.length ?? 0))) * 6.8 + 10) + LEAD - 6 : 0;
     const left = Math.ceil(longest * 7) + 14;
-    // An x-axis title gets its own line under the tick labels.
-    return { top: yLabel ? 24 : 8, right: 12 + labelW, bottom: xLabel ? 36 : 22, left };
+    // An x-axis title gets its own line under the tick labels; a y-axis name or an x mark's label one above the plot.
+    return { top: yLabel || xMark ? 24 : 8, right: 12 + labelW, bottom: xLabel ? 36 : 22, left };
   });
 
   const x = $derived(scaleLinear().domain(xExtent).range([margin.left, Math.max(margin.left + 1, width - margin.right)]));
@@ -283,10 +297,10 @@
     });
   });
 
-  /** End labels keep this much clear space between them (their glyphs end up >= 12 px apart). */
-  const LABEL_GAP = 10;
-  /** How far right of the plot the label column moves when it needs leaders. */
-  const LEAD = 20;
+  /** End labels keep at least this much clear space between their boxes, so a stack of them never touches. */
+  const LABEL_GAP = 12;
+  /** How far right of the plot the label column moves when it needs leaders: short ones, fanning from each line's end. */
+  const LEAD = 14;
   const ends = $derived.by(() => {
     if (!showEnds) return [];
     const drawn = visible.filter((s) => endText(s) !== null);
@@ -306,9 +320,20 @@
     const bounds = { x0: margin.left, y0: margin.top, x1: width - 2, y1: height - margin.bottom };
     return placeEndLabels(points, curves, bounds, 2, width - margin.right, { gap: LABEL_GAP, lead: LEAD }).map((e) => ({
       ...e,
-      color: color.get(e.id) ?? 'var(--text-secondary)',
+      // A receded run is a context curve: its label in ink, so the one hue left on the plot is the run in front.
+      color: receding && e.id !== highlight ? 'var(--text-tertiary)' : (color.get(e.id) ?? 'var(--text-secondary)'),
       lead: needsLeader(e),
     }));
+  });
+
+  // The x mark: its line, its span hatched along the axis to the end of the domain, and its label above the plot beside
+  // the line (on its left when the right has no room).
+  const mark = $derived.by(() => {
+    if (!xMark || !(xMark.x > xExtent[0] && xMark.x < xExtent[1])) return null;
+    const px = x(xMark.x);
+    const end = width - margin.right;
+    const before = px + 4 + labelWidth(xMark.label) > end;
+    return { px, end, label: xMark.label, tx: before ? px - 4 : px + 4, anchor: before ? 'end' : 'start' };
   });
 
   // ---- hover / keyboard cursor ----
@@ -430,7 +455,7 @@
     if (!touchy(e) && !pinned) cursor = null;
   }
 
-  // Narrow plots: the legend keeps one line of whole items (no leading note), and the cursor's x reads out on the axis.
+  // Narrow plots: the cursor's x reads out on the axis, not in the legend's note.
   const compact = $derived(width > 0 && width < 480);
   const pill = $derived.by(() => {
     if (!compact || !hover) return null;
@@ -501,13 +526,15 @@
     if (s.ghost || s.context || s.thin) return 1;
     const p = patternOf(s);
     if (receding && s.id === highlight) return p === 'dot' ? 3.5 : 3;
-    // Receded: 1 px, dots a little heavier so a dotted run stays as findable as a solid one.
+    // Receded: a 1 px context curve, dots a little heavier so a dotted run keeps its rhythm.
     if (receding) return p === 'dot' ? 1.75 : 1;
     if (s.emphasis || (highlight !== null && s.id === highlight)) return p === 'dot' ? 3.25 : 2.75;
     return p === 'dot' ? 2.25 : p ? 1.5 : 1.75;
   }
-  /** A highlighted series with `recede`: it alone keeps weight. */
+  /** A highlighted series with `recede`: it alone keeps weight and hue. */
   const receding = $derived(recede && highlight !== null && visible.some((s) => s.id === highlight));
+  /** Drawn as a context curve: a series of that kind, or a run receded behind the highlighted one. */
+  const contextual = (s: Series) => !!s.context || (receding && s.id !== highlight && !s.ghost);
   /** `items` with the highlighted series moved to the end, so it is painted over every other line. */
   function lifted<T>(items: T[], id: (t: T) => string): T[] {
     if (highlight === null) return items;
@@ -535,8 +562,11 @@
 <div class="chart">
   {#if legend && keyed.length > 0}
     <ul class="legend" aria-hidden="true">
+      <!-- The note says which value the legend shows: the cursor's x, or at rest `legendNote` (narrow plots too, where
+           the cursor's x reads out on the axis instead). -->
       {#if hintText}<li class="note hint">{hintText}</li>
-      {:else if (legendNote || hover) && !compact}<li class="note" class:at={!!hover}>{hover ? hover.title : legendNote}</li>{/if}
+      {:else if hover && !compact}<li class="note at">{hover.title}</li>
+      {:else if legendNote && !hover}<li class="note">{legendNote}</li>{/if}
       {#each keyed as s (s.id)}
         {@const v = hover ? hover.rows.find((r) => r.s.id === s.id)?.p.y : latest(s)}
         <li>
@@ -595,6 +625,17 @@
           {/each}
         </g>
         <line class="axis" x1={margin.left} x2={width - margin.right} y1={height - margin.bottom} y2={height - margin.bottom} />
+        {#if mark}
+          <!-- The span after the mark hatched along the axis (the progress bar's hatch), the line, its label above the plot. -->
+          <defs>
+            <pattern id="{uid}-hatch" width="4" height="4" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+              <line class="hatch" x1="0" y1="0" x2="0" y2="4" />
+            </pattern>
+          </defs>
+          <rect x={mark.px} y={height - margin.bottom - 6} width={Math.max(0, mark.end - mark.px)} height="6" fill="url(#{uid}-hatch)" />
+          <line class="mark-line" x1={mark.px} x2={mark.px} y1={margin.top - 4} y2={height - margin.bottom} />
+          <text class="mark-label" x={mark.tx} y={margin.top - 8} text-anchor={mark.anchor}>{mark.label}</text>
+        {/if}
         <g class="ticks">
           {#each yTickValues as t (t)}
             <text x={margin.left - 8} y={y(t)} dy="0.32em" text-anchor="end">{yFormat(t)}</text>
@@ -622,7 +663,7 @@
           {/each}
           {#each lifted(paintOrder(paths.filter((p) => !p.b), (p) => p.s), (p) => p.s.id) as { s, d, a } (s.id)}
             {#if a}<path class="area" d={a} fill="url(#{uid}-{s.id})" />{/if}
-            {#if (patternOf(s) || (receding && s.id === highlight)) && !s.ghost && !s.context}
+            {#if (patternOf(s) || (receding && s.id === highlight)) && !s.ghost && !contextual(s)}
               <!-- Patterned lines are painted over solid ones (./layers). A 1.5 px halo in the panel colour around each
                    dash or dot keeps the pattern readable where it runs along a solid line, which still shows between
                    them. -->
@@ -634,10 +675,10 @@
               class:dotted={s.pattern === 'dot'}
               class:thin={s.thin}
               class:ghost={s.ghost}
-              class:context={s.context}
+              class:context={contextual(s)}
               class:emphasis={s.emphasis || (highlight !== null && s.id === highlight)}
               {d}
-              style:stroke={s.context ? undefined : s.color}
+              style:stroke={contextual(s) ? undefined : s.color}
               style:stroke-width={receding && !s.ghost && !s.context ? `${widthOf(s)}px` : undefined}
               style:stroke-dasharray={dashOf(s, s.id === highlight ? 1.4 : 1)}
             />
@@ -646,7 +687,7 @@
             {#each lifted(paintOrder(keyed, (s) => s), (s) => s.id) as s (s.id)}
               {@const p = s.points[s.points.length - 1]}
               {#if p && Number.isFinite(p.y)}
-                <circle class="end-dot" cx={x(p.x)} cy={y(p.y)} r={receding && s.id === highlight ? 4 : 3} style:fill={s.color} />
+                <circle class="end-dot" cx={x(p.x)} cy={y(p.y)} r={receding && s.id === highlight ? 4 : 3} style:fill={contextual(s) ? 'var(--chart-context)' : s.color} />
               {/if}
             {/each}
           {/if}
@@ -682,7 +723,7 @@
             <line class="cursor" class:pinned x1={hover.px} x2={hover.px} y1={margin.top} y2={height - margin.bottom} />
             {#each hover.rows as r (r.s.id)}
               {#if Number.isFinite(r.p.y) && (!yLog || r.p.y > 0)}
-                <circle class="dot" cx={x(r.p.x)} cy={y(r.p.y)} r="3.5" style:fill={r.s.color} />
+                <circle class="dot" cx={x(r.p.x)} cy={y(r.p.y)} r="3.5" style:fill={contextual(r.s) ? 'var(--chart-context)' : r.s.color} />
               {/if}
             {/each}
             {#if pill}
@@ -797,6 +838,20 @@
   .axis {
     stroke: var(--chart-axis);
     shape-rendering: crispEdges;
+  }
+  /* The x mark: a hairline in the axis ink, its span hatched along the axis, its label a 12 px caption. */
+  .mark-line {
+    stroke: var(--chart-axis);
+    stroke-width: 1;
+    shape-rendering: crispEdges;
+  }
+  .hatch {
+    stroke: var(--line-strong);
+    stroke-width: 1.5;
+  }
+  .mark-label {
+    fill: var(--text-tertiary);
+    font-size: var(--type-sm-size);
   }
   .ticks text {
     fill: var(--chart-label);

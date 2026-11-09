@@ -156,8 +156,8 @@ function profiles(t0: number, scenario: Scenario = 'normal'): RunProfile[] {
     {
       id: 'run_c19a',
       name: 'fasteners-n',
-      // Fine-tuned from shapes-n (the Model page's lineage line).
-      config: config('fasteners-n', 'ds_fasteners', 'folo-n', 150, { weights: 'm_shapes_n' }),
+      // Fine-tuned from shapes-n (the Model page's lineage line), in mixed precision (as the server mock's m_53d1).
+      config: config('fasteners-n', 'ds_fasteners', 'folo-n', 150, { weights: 'm_shapes_n', amp: true }),
       classes: 8,
       classEase: FASTENER_EASE,
       stepsPerEpoch: 120,
@@ -213,7 +213,8 @@ function profiles(t0: number, scenario: Scenario = 'normal'): RunProfile[] {
     {
       id: 'run_0e77',
       name: 'shapes-s',
-      config: config('shapes-s', 'ds_shapes', 'folo-s', 100),
+      // The NMS-free one-to-one head (as the server mock's m_31ab, also shapes-s-best).
+      config: config('shapes-s', 'ds_shapes', 'folo-s', 100, { head: 'o2o' }),
       classes: 3,
       classEase: [1.04, 1.0, 0.95],
       stepsPerEpoch: 50,
@@ -481,6 +482,9 @@ export class MockApi implements Api {
         created: run.finished ?? run.created,
         run_id: p.id,
         metrics: ep ? { map50: ep.val.map50, map50_95: ep.val.map50_95, precision: ep.val.precision, recall: ep.val.recall } : null,
+        // As a server reads them from the checkpoint: folo.config's head, folo.train's settings (planned epochs).
+        head: p.config.head ?? 'o2m',
+        trained_with: { amp: p.config.amp ?? false, imgsz: p.config.imgsz, epochs: p.config.epochs },
       });
     }
     if (this.scenario !== 'empty') {
@@ -496,6 +500,9 @@ export class MockApi implements Api {
         created: new Date(this.#t0 - 20 * DAY).toISOString(),
         run_id: null,
         metrics: { map50: 0.611, map50_95: 0.448, precision: 0.672, recall: 0.571 },
+        // Imported weights: no training record.
+        head: 'o2m',
+        trained_with: null,
       });
     }
     return out.sort((a, b) => b.created.localeCompare(a.created));
@@ -569,6 +576,9 @@ export class MockApi implements Api {
       if (this.scenario === 'gpu-unplugged' && c.device === 'gpu:1') this.#unplugged = true;
       const gpu = /^gpu:(\d+)$/.exec(c.device);
       if (gpu && !this.#gpus().some((g) => g.ordinal === Number(gpu[1]))) throw this.#noDevice(c.device);
+      // The real server's body error for a head it does not know (serde: `o2m` or `o2o`; missing means `o2m`).
+      if (c.head !== undefined && c.head !== 'o2m' && c.head !== 'o2o')
+        throw new ApiError(400, 'invalid_body', `field \`head\`: unknown variant \`${String(c.head)}\`, expected \`o2m\` or \`o2o\``);
       const now = Date.now();
       const id = `run_${(hash(c.name + now + this.#nextId++) & 0xffff).toString(16).padStart(4, '0')}`;
       const sizeIdx = ['folo-n', 'folo-s', 'folo-m', 'folo-l', 'folo-x'].indexOf(c.arch);

@@ -37,6 +37,7 @@
   import Slider from '$lib/ui/Slider.svelte';
   import Switch from '$lib/ui/Switch.svelte';
   import { toast } from '$lib/ui/toast.svelte';
+  import { tooltip } from '$lib/ui/tooltip';
   import AugPreview, { type AugKey } from './runnew/AugPreview.svelte';
   import { AMP_SPEEDUP, arches, autoCloseMosaic, closeMosaicEpochs, defaultImgsz, estimate, oomScale, shortRun, warmup } from './runnew/estimate';
 
@@ -75,6 +76,8 @@
   let optimizer = $state<Optimizer>('auto');
   /** Mixed precision as asked for; what the run gets is `ampOn` (off where the server cannot train that way). */
   let amp = $state(false);
+  /** The end-to-end head (TrainConfig.head `o2o`, docs/MODEL.md §6.6): predicts without NMS. */
+  let e2e = $state(false);
   let lr0 = $state(0.01);
   let seed = $state(0);
   let weights = $state<string>('none');
@@ -133,6 +136,7 @@
     device = q.get('device') === 'cpu' ? 'cpu' : c.device;
     optimizer = c.optimizer;
     amp = c.amp ?? false;
+    e2e = c.head === 'o2o';
     lr0 = c.lr0;
     seed = c.seed;
     weights = c.weights ?? 'none';
@@ -219,17 +223,31 @@
   const onCpu = $derived(device === 'cpu' || (device === 'auto' && !gpu));
 
   // Mixed precision (TrainConfig.amp): shown only when the server says what `auto` can use (`capabilities`, absent from
-  // older servers), and off with the reason where a run would fail with `not_supported`.
+  // older servers), and off where a run would fail with `not_supported`: one plain sentence and one action that works
+  // (identifiers in backticks), the server's own words kept verbatim behind "Driver report".
   const caps = $derived(system.data?.capabilities);
-  const ampBlock = $derived.by((): { line: string; cmd?: string; detail?: string } | null => {
+  const ampBlock = $derived.by((): { why: string; raw?: string } | null => {
     if (!caps) return null;
-    if (device === 'cpu') return { line: "Needs a GPU's tensor cores: on the CPU a run trains in f32." };
+    if (device === 'cpu') return { why: 'The CPU has no tensor cores. Pick a GPU to train in mixed precision.' };
+    // Auto on a server without a usable GPU is the CPU too: no GPU advice.
+    if (device === 'auto' && caps.device === 'cpu') return { why: 'This server has no usable GPU, so runs train on the CPU in f32.' };
     // `capabilities` describe the device `auto` resolves to; another GPU is left to the server.
     if (caps.amp.available || (device !== 'auto' && device !== caps.device)) return null;
-    const detail = caps.amp.reason ? sentence(caps.amp.reason, true) : undefined;
-    if (caps.tensor_cores.available && !caps.tensor_cores.enabled) return { line: 'Tensor cores are off on this server. Start it with', cmd: 'folo serve --tensor-cores', detail };
-    if (!caps.tensor_cores.available) return { line: "This server's GPU has no tensor cores FOLO can use, so runs train in f32.", detail };
-    return { line: 'Not available on this server: runs train in f32.', detail };
+    const raw = caps.amp.reason ?? caps.tensor_cores.reason ?? undefined;
+    const t = caps.tensor_cores;
+    if (t.available && !t.enabled) {
+      if (/self-test/i.test(t.reason ?? '')) return { why: "The server's tensor-core self-test failed. Train in f32 on this GPU.", raw };
+      return { why: 'Tensor cores are off on this server. Restart it with `folo serve --tensor-cores`.', raw };
+    }
+    if (!t.available) {
+      // docs/GPU.md: wgpu has cooperative matrices on Vulkan only (NVIDIA tensor cores through SPV_KHR_cooperative_matrix;
+      // an RTX 4080 SUPER has them there), none on DX12 or Metal. So only an NVIDIA RTX card seen through DX12 has a way.
+      const g = system.data?.gpus.find((x) => `gpu:${x.ordinal}` === caps.device);
+      if (g?.backend === 'dx12' && /nvidia/i.test(g.name) && /\brtx\b/i.test(g.name))
+        return { why: "DirectX 12 does not reach this GPU’s tensor cores. Restart the server on Vulkan, in PowerShell: `$env:FOLO_GPU_BACKEND='vulkan'; folo serve --tensor-cores`.", raw };
+      return { why: 'This GPU has no tensor cores FOLO can use. Train in f32 on this GPU.', raw };
+    }
+    return { why: 'Not available on this server. Train in f32 on this GPU.', raw };
   });
   const ampOn = $derived(amp && !!caps && !ampBlock);
   /** What the switch does, with the speed measured for this size (docs/BENCHMARKS.md), where there is one. */
@@ -241,6 +259,12 @@
   const est = $derived(estimate(arch, dataset?.splits.train ?? 0, epochs, batchN, imgszN, onCpu, ampOn));
   /** The trainer's schedule: optimizer steps an epoch, fewer than batches when gradients accumulate. */
   const sched = $derived(warmup(dataset?.splits.train ?? 0, Number.isInteger(epochs) && epochs > 0 ? epochs : 1, batchN));
+  /** The batches behind the steps, for the Summary's tooltip and its accessible description. */
+  const stepsWhy = $derived(
+    sched.accumulate > 1
+      ? `${num(est.stepsPerEpoch)} batches of ${batchN} images; ${sched.accumulate} make one optimizer step.`
+      : `${num(est.stepsPerEpoch)} batches of ${batchN} images, one optimizer step each.`,
+  );
   // wgpu cannot report adapter memory (real servers send 0): then there is no meter and no out-of-memory guess.
   const gpuMem = $derived(gpu && gpu.memory_bytes > 0 ? gpu.memory_bytes : null);
 
@@ -271,8 +295,8 @@
   // (they name its backends) fold into the field's technical details.
   let deviceError = $state<{ device: string; gone: boolean; detail: string } | null>(null);
   const deviceErr = $derived(deviceError && deviceError.device === device ? deviceError : null);
-  /** A device in words: "Auto", "GPU 1", "CPU". */
-  const devWord = (d: string) => (d === 'auto' ? 'Auto' : d === 'cpu' ? 'CPU' : d.replace(/^gpu:/, 'GPU '));
+  /** A device in a sentence, named once with its value: "Auto", "GPU 1 (gpu:1)", "CPU" (values elsewhere: `gpu:1`). */
+  const devWord = (d: string) => (d === 'auto' ? 'Auto' : d === 'cpu' ? 'CPU' : `${d.replace(/^gpu:/, 'GPU ')} (${d})`);
   const deviceMsg = $derived.by(() => {
     const e = deviceErr;
     if (!e) return null;
@@ -354,6 +378,8 @@
     seed,
     // Only to servers that report capabilities (older ones predate `amp`).
     ...(caps ? { amp: ampOn } : {}),
+    // Left out for the default (missing means `o2m`, docs/API.md), so older servers see the request they know.
+    ...(e2e ? { head: 'o2o' as const } : {}),
   });
 
   const cliParts = $derived(
@@ -367,6 +393,8 @@
       device !== 'auto' ? `--device ${device}` : '',
       ampOn ? '--amp' : '',
       weights !== 'none' ? `--weights ${weights}` : '',
+      // The CLI's default head is the weights file's own (docs/CLI.md); the API's is o2m, so a fine-tune says which.
+      e2e ? '--head o2o' : weights !== 'none' ? '--head o2m' : '',
       `--name ${name.trim()}`,
     ].filter(Boolean),
   );
@@ -405,10 +433,10 @@
     document.getElementById('device')?.focus();
   }
 
-  async function copyCli() {
+  async function copy(text: string, done: string) {
     try {
-      await navigator.clipboard.writeText(cli);
-      toast.success('Command copied');
+      await navigator.clipboard.writeText(text);
+      toast.success(done);
     } catch (err) {
       toast.error(err, 'Could not copy');
     }
@@ -426,8 +454,8 @@
     const g = system.data?.gpus.find((x) => `gpu:${x.ordinal}` === device);
     return g ? `${device} · ${shortGpu(g.name)}` : device;
   });
-  type Jump = 'name' | 'data' | 'model' | 'epochs' | 'batch' | 'imgsz' | 'device' | 'amp' | 'weights' | 'opt' | 'lr0' | 'seed' | 'close';
-  /** The settings that shape the run, each a way back to its control. Optimizer only once it is not the default. */
+  type Jump = 'name' | 'data' | 'model' | 'epochs' | 'batch' | 'imgsz' | 'device' | 'amp' | 'weights' | 'opt' | 'lr0' | 'seed' | 'head' | 'close';
+  /** The settings that shape the run, each a way back to its control. Optimizer and head only once not the default. */
   const review = $derived<{ key: Jump; label: string; value: string; mono?: boolean; warn?: boolean }[]>([
     { key: 'data', label: 'Data', value: dataset ? `${dataset.name} · ${compact(dataset.splits.train)} images` : '—', warn: !!errors.dataset },
     { key: 'model', label: 'Model', value: arch, mono: true },
@@ -444,6 +472,7 @@
       warn: !!errors.weights,
     },
     ...(optimizer !== 'auto' ? [{ key: 'opt' as const, label: 'Optimizer', value: optimizer === 'sgd' ? 'SGD + momentum' : 'AdamW' }] : []),
+    ...(e2e ? [{ key: 'head' as const, label: 'Head', value: 'End-to-end, no NMS' }] : []),
   ]);
 
   /** The control a review row returns to; the picker that is on screen (cards or the phone select). */
@@ -464,14 +493,14 @@
 
   async function jump(key: Jump) {
     sumOpen = false;
-    if (key === 'opt' || key === 'lr0' || key === 'seed') advancedOpen = true;
+    if (key === 'opt' || key === 'lr0' || key === 'seed' || key === 'head') advancedOpen = true;
     if (key === 'close') augOpen = true;
     await tick();
     // A closing dialog hands focus back to its opener; move on after that.
     requestAnimationFrame(() => {
       const el = jumpTarget(key);
       if (!el) return;
-      const box = el.closest<HTMLElement>('.field, .card, .arch, .ds-pick, .a-pick, .amp') ?? el;
+      const box = el.closest<HTMLElement>('.field, .card, .arch, .ds-pick, .a-pick') ?? el;
       const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
       box.scrollIntoView({ block: 'center', behavior: reduce ? 'auto' : 'smooth' });
       el.focus({ preventScroll: true, focusVisible: true } as FocusOptions);
@@ -500,9 +529,13 @@
 
 {#snippet figures(where: string)}
   <dl class="est">
-    <!-- The trainer's count (the short-run warning's unit), and the batches behind it when several make one step. -->
-    <dt>Optimizer steps / epoch</dt><dd class="num">{num(sched.stepsPerEpoch)}</dd>
-    {#if sched.accumulate > 1}<dd class="est-sub num">{num(est.stepsPerEpoch)} batches, accumulate {sched.accumulate}</dd>{/if}
+    <!-- The trainer's count (the short-run warning's unit). The batches behind it: a tooltip on hover and focus (which
+         also describes the value to a screen reader), and read after it in browse mode. -->
+    <dt>Schedule</dt>
+    <dd class="num sched">
+      <!-- svelte-ignore a11y_no_noninteractive_tabindex: focusable so keyboard users get the tooltip too. -->
+      <span class="steps" tabindex="0" use:tooltip={stepsWhy}>{num(sched.stepsPerEpoch)} steps <span class="faint">/ epoch</span></span><span class="sr-only">. {stepsWhy}</span>
+    </dd>
     <dt>Est. time</dt><dd class="num">{roughDuration(est.totalSeconds)} <span class="faint">(~{num(Math.round(est.imgsPerS / 10) * 10, 0)} img/s)</span></dd>
     {#if !onCpu && gpu}
       <dt>Est. GPU memory</dt>
@@ -736,32 +769,33 @@
                 <p class="dev-hint">Auto uses the GPU when there is one, else the CPU.</p>
               {/if}
             </div>
-          </div>
-          {#if caps}
-            <!-- Off, with the reason, where the server cannot train in mixed precision; hidden when the server does not say. -->
-            <div class="amp">
-              <Switch
-                id="amp"
-                label="Mixed precision"
-                hint={ampBlock ? undefined : ampHint}
-                checked={ampOn}
-                onchange={(v) => (amp = v)}
-                disabled={!!ampBlock}
-                describedby={ampBlock ? 'amp-why' : undefined}
-              />
-              {#if ampBlock}
-                <p class="amp-why" id="amp-why">{ampBlock.line}{#if ampBlock.cmd}{' '}<span class="mono">{ampBlock.cmd}</span>.{/if}</p>
-                {#if ampBlock.detail}
-                  <details class="dev-detail">
-                    <summary><ChevronRight size={12} aria-hidden="true" />Technical details</summary>
-                    <p>{ampBlock.detail}</p>
-                  </details>
+            {#if caps}
+              <!-- A field on the same grid: the label's line carries the switch at the field's right edge, the hint (or,
+                   where the server cannot train in mixed precision, why not and what to do) under it. Only the control
+                   is disabled; the label keeps the field labels' colour. Hidden when the server does not say. -->
+              <div class="field sw-field amp" class:off={!!ampBlock}>
+                <Switch id="amp" label="Mixed precision" checked={ampOn} onchange={(v) => (amp = v)} disabled={!!ampBlock} describedby={ampBlock ? 'amp-why' : 'amp-hint'} />
+                {#if ampBlock}
+                  <div class="sw-why">
+                    <p id="amp-why">{#each ampBlock.why.split('`') as text, i (i)}{#if i % 2}<span class="mono">{#each text.split(' ') as w, j (j)}{#if j > 0}{' '}{/if}<span class="word">{w}</span>{/each}</span>{:else}{text}{/if}{/each}</p>
+                    {#if ampBlock.raw}
+                      <details class="dev-detail">
+                        <summary><ChevronRight size={12} aria-hidden="true" />Driver report</summary>
+                        <div class="cli-body">
+                          <code>{ampBlock.raw}</code>
+                          <span class="cli-copy"><Button size="sm" variant="ghost" icon={Copy} aria-label="Copy driver report" title="Copy driver report" onclick={() => ampBlock?.raw && copy(ampBlock.raw, 'Driver report copied')} /></span>
+                        </div>
+                      </details>
+                    {/if}
+                  </div>
+                {:else}
+                  <p class="sw-hint" id="amp-hint">{ampHint}</p>
                 {/if}
-              {/if}
-            </div>
-          {/if}
+              </div>
+            {/if}
+          </div>
           <details class="advanced" open={advancedOpen} ontoggle={(e) => (advancedOpen = (e.currentTarget as HTMLDetailsElement).open)}>
-            <summary><ChevronRight size={14} /> Advanced <span class="faint">optimizer, learning rate, seed</span></summary>
+            <summary><ChevronRight size={14} /> Advanced <span class="faint">optimizer, learning rate, seed, head</span></summary>
             <div class="fields">
             <Field label="Optimizer" for="opt">
               <Select id="opt" bind:value={optimizer} options={[{ value: 'auto', label: 'Auto (AdamW for short runs, else SGD)' }, { value: 'sgd', label: 'SGD + momentum' }, { value: 'adamw', label: 'AdamW' }]} />
@@ -772,6 +806,11 @@
             <Field label="Seed" for="seed" hint="Same seed, same run." error={errors.seed}>
               <Input id="seed" type="number" min="0" step="1" bind:value={seed} invalid={!!errors.seed} aria-describedby={errors.seed ? 'seed-error' : 'seed-hint'} />
             </Field>
+            <!-- TrainConfig.head `o2o` (docs/MODEL.md §6.6); the cost measured on the shapes gate (docs/BENCHMARKS.md). -->
+            <div class="field sw-field">
+              <Switch id="head" label="End-to-end (no NMS)" checked={e2e} onchange={(v) => (e2e = v)} describedby="head-hint" />
+              <p class="sw-hint" id="head-hint">No NMS step at inference; about 0.015 lower mAP50-95 than NMS on the same model.</p>
+            </div>
             </div>
           </details>
         </Panel>
@@ -871,7 +910,7 @@
               <summary><ChevronRight size={14} aria-hidden="true" />CLI command <span class="faint">the same run from a terminal</span></summary>
               <div class="cli-body">
                 <code>{cliParts.join(CONT)}</code>
-                <span class="cli-copy"><Button size="sm" variant="ghost" icon={Copy} aria-label="Copy command" title="Copy command" onclick={copyCli} /></span>
+                <span class="cli-copy"><Button size="sm" variant="ghost" icon={Copy} aria-label="Copy command" title="Copy command" onclick={() => copy(cli, 'Command copied')} /></span>
               </div>
             </details>
             </div>
@@ -1340,33 +1379,59 @@
   .est dd.warn {
     color: var(--warning-text);
   }
-  /* The batches behind the optimizer steps, a line under their row. */
-  .est .est-sub {
-    grid-column: 1 / -1;
-    margin-top: calc(-1 * var(--space-1));
-    text-align: left;
-    color: var(--text-tertiary);
+  /* The steps carry their batches in a tooltip: focusable, so the value keeps room for its focus ring. */
+  .est dd.sched {
+    overflow: visible;
   }
-  /* Mixed precision: a switch row in the left column's measure, its reason (when off) under it. */
-  .amp {
+  .steps {
+    border-radius: var(--radius-xs);
+    text-decoration: underline dotted var(--line-strong);
+    text-underline-offset: 3px;
+    cursor: help;
+  }
+  /* A switch field (Mixed precision, End-to-end): the Switch is the label's line, its track at the field's right edge,
+     and the label reads as every field label (text.secondary, medium), also while only the control is disabled. */
+  .fields > .sw-field :global(.switch .label) {
+    color: var(--text-secondary);
+    font-weight: var(--weight-medium);
+  }
+  /* Mixed precision has no neighbour on its row: one row of its own height, not the pair's three (whose control row
+     would hold 32 px for a one-line hint). */
+  .fields > .sw-field.amp {
+    grid-row: auto;
+    grid-template-rows: none;
+  }
+  .fields > .sw-field > .sw-why {
+    align-self: start;
     display: grid;
     gap: var(--space-1);
-    max-width: calc(50% - var(--space-5) / 2);
-    padding-bottom: var(--space-4);
   }
-  @media (pointer: coarse) {
-    .amp :global(.switch) {
-      min-height: 44px;
-    }
+  .sw-hint {
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--text-tertiary);
+    text-wrap: pretty;
   }
-  .amp-why {
+  .sw-why p {
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
     color: var(--text-secondary);
     text-wrap: pretty;
   }
-  .amp-why .mono {
+  /* A command breaks only between its words (never after the dashes of `--tensor-cores`). */
+  .sw-why .mono {
     color: var(--text-primary);
+  }
+  .sw-why .word {
+    white-space: nowrap;
+  }
+  .sw-why .cli-body {
+    margin-top: var(--space-1);
+  }
+  @media (pointer: coarse) {
+    .sw-field :global(.switch) {
+      min-height: 44px;
+    }
   }
   /* A neutral meter; the warning colour only above 90 % of the GPU's memory. */
   .vram {
@@ -1844,8 +1909,10 @@
     .aug {
       grid-template-columns: minmax(0, 1fr);
     }
-    .amp {
-      max-width: none;
+    /* One column: no neighbour to line up with, so a switch field is one row of its own height. */
+    .fields > .sw-field {
+      grid-row: auto;
+      grid-template-rows: none;
     }
     .aug-preview {
       position: static;

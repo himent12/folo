@@ -1,5 +1,6 @@
 <script lang="ts">
   import Check from '@lucide/svelte/icons/check';
+  import Copy from '@lucide/svelte/icons/copy';
   import CircleCheck from '@lucide/svelte/icons/circle-check';
   import CircleMinus from '@lucide/svelte/icons/circle-minus';
   import CircleSlash from '@lucide/svelte/icons/circle-slash';
@@ -26,7 +27,7 @@
   import Segmented from '$lib/ui/Segmented.svelte';
   import Switch from '$lib/ui/Switch.svelte';
   import { toast } from '$lib/ui/toast.svelte';
-  import { capabilityRows, deviceSummary, type CapState } from './settings/capabilities';
+  import { capabilityRows, deviceSummary, driverReport, type CapState } from './settings/capabilities';
   import ThemePreview from './settings/ThemePreview.svelte';
 
   setCrumbs({ label: 'Settings' });
@@ -35,7 +36,7 @@
   // sits low on the page: a real server answers once its GPU is up, and the panel must not push the forms down.
   const sys = new Resource((s) => hub.api.system(s));
   const caps = $derived(sys.data?.capabilities);
-  const capRows = $derived(caps ? capabilityRows(caps) : []);
+  const capRows = $derived(caps ? capabilityRows(caps, sys.data?.gpus ?? []) : []);
   const capMarks: Record<CapState, typeof CircleCheck> = { on: CircleCheck, off: CircleMinus, none: CircleSlash };
 
   const sections = $derived([
@@ -50,6 +51,16 @@
   const paletteKeys = isApple ? '⌘ K' : 'Ctrl K';
   /** A note in parts, identifiers (in backticks) set as code. */
   const parts = (t: string) => t.split('`').map((text, i) => ({ text, code: i % 2 === 1 }));
+  /** The server's own reasons as plain text, for an issue or a terminal. */
+  const report = $derived(caps && sys.data ? driverReport(capRows, caps.device, deviceSummary(caps, sys.data.gpus, sys.data.cpu.name)) : '');
+  async function copyReport() {
+    try {
+      await navigator.clipboard.writeText(report);
+      toast.success('Driver report copied');
+    } catch (e) {
+      toast.error(e, 'Could not copy the driver report');
+    }
+  }
 
   // Scroll-spy from geometry: the current section is the last one whose top has passed just below the top bar
   // (the first while nothing has; the last once the page is scrolled to the bottom).
@@ -227,9 +238,11 @@
                   <ThemePreview theme={t.value} />
                 {/if}
               </span>
+              <!-- The selection said in words too ("Current"), not only by the ring. -->
               <span class="theme-label">
                 <t.icon size={14} strokeWidth={1.75} aria-hidden="true" />
                 {t.label}
+                {#if on}<span class="current"><Check size={12} strokeWidth={2.25} aria-hidden="true" />Current</span>{/if}
               </span>
             </label>
           {/each}
@@ -297,20 +310,22 @@
                   <div class="setting-text">
                     <p>{c.label}</p>
                     <p class="note">{#each parts(c.note) as p, i (i)}{#if p.code}<code>{p.text}</code>{:else}{p.text}{/if}{/each}</p>
+                    {#if c.action}
+                      <p class="note action">{#each parts(c.action) as p, i (i)}{#if p.code}<code>{p.text}</code>{:else}{p.text}{/if}{/each}</p>
+                    {/if}
                   </div>
                   <span class="cap-state" data-state={c.state}><Mark size={14} strokeWidth={1.75} aria-hidden="true" />{c.word}</span>
                 </li>
               {/each}
             </ul>
             {#if capRows.some((c) => c.raw)}
+              <!-- The server's words, verbatim, for an issue or a terminal: folded, and copied whole. -->
               <details class="tech">
-                <summary>Technical details</summary>
-                <dl>
-                  {#each capRows.filter((c) => c.raw) as c (c.id)}
-                    <dt>{c.label}</dt>
-                    <dd class="mono">{c.raw}</dd>
-                  {/each}
-                </dl>
+                <summary>Driver report</summary>
+                <div class="report">
+                  <pre class="mono" aria-label="Driver report">{report}</pre>
+                  <Button size="sm" icon={Copy} onclick={copyReport}>Copy</Button>
+                </div>
               </details>
             {/if}
           </div>
@@ -555,6 +570,8 @@
     position: relative;
     display: grid;
     gap: var(--space-2);
+    /* Rows pack to the top: a card whose label has a second line ("Current") never pushes the others' names down. */
+    align-content: start;
     cursor: pointer;
   }
   .theme input {
@@ -603,7 +620,19 @@
   .on .theme-label {
     color: var(--text-primary);
   }
+  .current {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    flex-shrink: 0;
+    margin-left: auto;
+    font-size: var(--type-sm-size);
+    font-weight: var(--weight-regular);
+    color: var(--text-secondary);
+  }
+  /* Helper text keeps a readable measure (DESIGN_DIRECTION §2.3: ≤ 60 characters a line). */
   .note {
+    max-width: 60ch;
     margin-top: var(--space-3);
     font-size: var(--type-sm-size);
     color: var(--text-tertiary);
@@ -617,6 +646,37 @@
   }
   .setting-text .note {
     margin-top: 2px;
+  }
+  .note.action {
+    color: var(--text-secondary);
+  }
+  /* An action's command may break between its words, and inside a long one (a phone cannot fit
+     $env:FOLO_GPU_BACKEND='vulkan'; whole). */
+  .note.action code {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  .cap .setting-text {
+    flex: 1;
+    min-width: 0;
+  }
+  .report {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: start;
+    gap: var(--space-3);
+    margin-top: var(--space-2);
+    padding: var(--space-3);
+    border-radius: var(--radius-md);
+    background: var(--bg-inset);
+    border: 1px solid var(--line-subtle);
+  }
+  .report pre {
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--text-secondary);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
   }
   .device {
     font-size: var(--type-sm-size);
@@ -687,6 +747,15 @@
   @media (max-width: 767px) {
     .themes {
       gap: var(--space-2);
+    }
+    /* A third of a phone is too narrow for the name and "Current" side by side: "Current" goes under the name. */
+    .theme-label {
+      flex-wrap: wrap;
+      row-gap: 0;
+    }
+    .current {
+      flex-basis: 100%;
+      margin-left: 0;
     }
     .row-actions :global(.btn) {
       width: 100%;

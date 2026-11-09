@@ -178,8 +178,9 @@
             {/each}
           {:else if runs.data.length === 0}
             <TableState cols={COLS}>
+              <!-- The header steps its actions aside over an empty list, so this is the page's one primary. -->
               <EmptyState icon={Activity} title="No runs yet" description="Start one to watch its loss, mAP and samples stream in live.">
-                {#snippet actions()}<Button icon={Plus} href={href('/runs/new')}>New run</Button>{/snippet}
+                {#snippet actions()}<Button variant="primary" icon={Plus} href={href('/runs/new')}>New run</Button>{/snippet}
               </EmptyState>
             </TableState>
           {:else if shown.length === 0}
@@ -309,17 +310,20 @@
   .scroll {
     overflow-x: auto;
   }
-  /* The checkbox column keeps its width while its boxes are hidden, so names never shift when they appear. */
+  /* The checkbox column is a 12 px gutter (the name starts 24 px in, not 44): the box is laid over the gutter and the
+     name cell's leading padding when it shows, so revealing it never moves a thing. */
   .runs .check {
-    width: 32px;
+    position: relative;
+    width: 12px;
     padding: 0;
   }
   .hit {
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: 24px;
     display: flex;
     align-items: center;
-    height: 100%;
-    min-height: var(--size-row);
-    padding-left: var(--space-4);
+    justify-content: center;
     cursor: pointer;
   }
   input[type='checkbox'] {
@@ -350,9 +354,9 @@
       opacity: 1;
     }
     .hit {
-      justify-content: center;
+      position: static;
+      width: auto;
       min-height: 48px;
-      padding-left: 0;
     }
     input[type='checkbox'] {
       width: 20px;
@@ -409,8 +413,8 @@
       height: 48px;
     }
   }
-  /* Below 1024 Created hides too (.hide-md) and the bar narrows, so the table fits from 768 px up, checkbox column
-     included (its width is reserved whether or not any run is selected). */
+  /* Below 1024 Created hides too (.hide-md) and the bar narrows, so the table fits from 768 px up, checkbox gutter
+     included. */
   @media (max-width: 1023px) {
     .prog {
       width: 112px;

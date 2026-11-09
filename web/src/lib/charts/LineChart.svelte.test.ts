@@ -68,21 +68,22 @@ describe('LineChart touch readout', () => {
       { id: 'a', label: 'long', color: 'red', points: [0, 1, 2, 3, 4].map((x) => ({ x, y: x / 10 })) },
       { id: 'b', label: 'short', color: 'blue', points: [0, 1].map((x) => ({ x, y: x / 5 })) },
     ];
-    const c = mount(LineChart, { target, props: { series, label: 'touch', legendNote: 'Latest', xTitle: (x: number) => `Epoch ${x}` } });
+    const c = mount(LineChart, { target, props: { series, label: 'touch', legendNote: 'Latest · ep 4', xTitle: (x: number) => `Epoch ${x}` } });
     Object.defineProperty(target.querySelector('.plot')!, 'clientWidth', { value: 400 });
     target.querySelector('.plot')!.dispatchEvent(new Event('resize'));
     flushSync();
     const svg = target.querySelector('svg[role=img]')!;
     const touch = (type: string, clientX: number, clientY = 50) =>
       svg.dispatchEvent(new PointerEvent(type, { pointerType: 'touch', clientX, clientY, bubbles: true }));
-    // Narrow plot: no leading note at rest, so the legend is one line of whole items.
-    expect(target.querySelector('.legend .note')).toBeNull();
+    // At rest the note says which value the legend shows, on a narrow plot too.
+    expect(target.querySelector('.legend .note')?.textContent).toBe('Latest · ep 4');
     touch('pointerdown', 300);
     touch('pointerup', 300);
     touch('pointerleave', 300);
     flushSync();
     expect(target.querySelector('.cursor.pinned')).toBeTruthy();
-    // The cursor's x reads out on the axis.
+    // The cursor's x reads out on the axis, not in a note.
+    expect(target.querySelector('.legend .note')).toBeNull();
     expect(target.querySelector('.pill text')!.textContent).toMatch(/^Epoch \d$/);
     // The shorter series is painted last (on top).
     const lines = [...target.querySelectorAll('path.line')].map((p) => (p as SVGElement).style.stroke);
@@ -152,6 +153,27 @@ describe('LineChart layering and ticks', () => {
     const sky = target.querySelectorAll('path.line')[0] as SVGElement;
     expect(sky.classList.contains('emphasis')).toBe(false);
     expect(target.querySelector('.faded')).toBeNull();
+    unmount(c);
+  });
+
+  it('with recede, draws the other runs as context curves and the highlighted one in its hue, until it is let go', async () => {
+    const props = $state({ series, label: 'cmp', highlight: 'sky' as string | null, recede: true, endLabels: true });
+    const { target, c } = mountAt(props);
+    const lines = () => [...target.querySelectorAll('path.line')] as SVGElement[];
+    // The context run first, in chart.context (no inline hue) and keeping its dotted rhythm; the pinned run last in its hue.
+    expect(lines().map((l) => [l.classList.contains('context'), l.style.stroke])).toEqual([
+      [true, ''],
+      [false, 'red'],
+    ]);
+    expect(lines()[0]!.style.strokeDasharray).not.toBe('');
+    expect(lines()[1]!.style.strokeWidth).toBe('3px');
+    const label = (id: string) => [...target.querySelectorAll<SVGElement>('.end-label')].find((t) => t.textContent === id)!;
+    expect(label('teal').style.fill).toBe('var(--text-tertiary)');
+    expect(label('sky').classList.contains('hl')).toBe(true);
+    props.highlight = null;
+    flushSync();
+    expect(lines().map((l) => l.style.stroke)).toEqual(['red', 'blue']);
+    expect(target.querySelector('path.line.context')).toBeNull();
     unmount(c);
   });
 
@@ -227,10 +249,28 @@ describe('LineChart round 18', () => {
     unmount(c);
   });
 
-  it('thins a log axis to at most five ticks: the ends and the decades', () => {
-    const { target, c } = mountAt({ series: [{ id: 'a', label: 'a', color: 'red', points: pts((x) => 0.3 + x / 3) }], label: 't', yLog: true, yDomain: [0.2, 10] });
-    expect(yTicks(target)).toEqual(['0.2', '1', '10']);
+  it('labels every 1-2-5 value of a log axis up to six, each with its gridline; past that the ends and the decades', () => {
+    const one = (d: [number, number]) => mountAt({ series: [{ id: 'a', label: 'a', color: 'red', points: pts((x) => 0.3 + x / 3) }], label: 't', yLog: true, yDomain: d });
+    const a = one([0.2, 10]);
+    expect(yTicks(a.target)).toEqual(['0.2', '0.5', '1', '2', '5', '10']);
+    expect(a.target.querySelectorAll('.grid line').length).toBe(6);
+    unmount(a.c);
+    const b = one([0.01, 10]);
+    expect(yTicks(b.target)).toEqual(['0.01', '0.1', '1', '10']);
+    expect(b.target.querySelectorAll('.grid line.minor').length).toBe(6);
+    unmount(b.c);
+  });
+
+  it('marks a phase change on x: its line, its label above the plot, its span hatched along the axis', () => {
+    const { target, c } = mountAt({ series: [{ id: 'a', label: 'a', color: 'red', points: pts((x) => x) }], label: 't', xMark: { x: 25, label: 'mosaic off' } });
+    expect(target.querySelector('.mark-label')?.textContent).toBe('mosaic off');
+    expect(target.querySelector('.mark-line')).not.toBeNull();
+    expect(target.querySelector('rect[fill^="url("]')).not.toBeNull();
     unmount(c);
+    // Outside the domain: nothing drawn.
+    const out = mountAt({ series: [{ id: 'a', label: 'a', color: 'red', points: pts((x) => x) }], label: 't', xMark: { x: 40, label: 'mosaic off' } });
+    expect(out.target.querySelector('.mark-line')).toBeNull();
+    unmount(out.c);
   });
 
   it('labels short-named lines at their ends even on a phone, and paints a front line over a dotted one', () => {

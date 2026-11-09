@@ -28,14 +28,13 @@
   const touch = new MediaQuery('pointer: coarse', false);
 </script>
 
-<!-- The viewfinder is the drop target, capped in height; the samples sit right under it, not at the panel's foot. -->
+<!-- The viewfinder is the drop target and fills the canvas; the samples sit right under it, at the panel's foot. -->
 <div class="zone" class:dragging>
   <div class="finder">
     <span class="corner tl" aria-hidden="true"></span>
     <span class="corner tr" aria-hidden="true"></span>
     <span class="corner bl" aria-hidden="true"></span>
     <span class="corner br" aria-hidden="true"></span>
-    <span class="cross" aria-hidden="true"></span>
 
     <div class="center">
       {#if touch.current}
@@ -79,17 +78,21 @@
     flex-direction: column;
     align-items: center;
     gap: var(--space-4);
+    height: 100%;
     padding: var(--space-4) var(--space-4) var(--space-8);
     background: var(--bg-inset);
     transition: background-color var(--dur-fast) var(--ease-standard);
   }
-  /* The drop target: about 280 px tall at most, its message centred between the corners. */
+  /* The drop target: the canvas's height less the samples (280 px where the canvas follows its content), its message
+     centred between the corners. */
   .finder {
     position: relative;
     display: grid;
     place-items: center;
     width: 100%;
-    height: 280px;
+    flex: 1 1 280px;
+    /* Gives way in a short window (down to 160 px) before the samples under it would be pushed out. */
+    min-height: 160px;
     padding: var(--space-8) var(--space-6);
   }
   .zone.dragging {
@@ -146,15 +149,6 @@
   .dragging .br {
     bottom: var(--space-3);
     right: var(--space-3);
-  }
-  /* The focus dot at the centre of the viewfinder. */
-  .cross {
-    position: absolute;
-    top: 0;
-    left: 50%;
-    width: 1px;
-    height: 10px;
-    background: var(--line-strong);
   }
   .center {
     position: relative;
@@ -240,7 +234,7 @@
     }
     /* Phones: as tall as the message and buttons need. */
     .finder {
-      height: auto;
+      flex: none;
       padding: var(--space-8) var(--space-4);
     }
     .samples ul {

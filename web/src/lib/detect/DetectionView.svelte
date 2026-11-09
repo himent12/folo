@@ -12,8 +12,9 @@
 <script lang="ts">
   /**
    * An image with detection boxes drawn over it in screen pixels (crisp at any size). Boxes: a 2 px class-colour
-   * stroke inside a 1 px dark halo (2 px in compact thumbnails); label chips with the class name (and score) sit on the
-   * top-left corner, or elsewhere next to their own box (see ./chips).
+   * stroke wrapped in a dark halo, 1.5 px outside and 1 px inside (a 2 px ring in compact thumbnails), so a stroke holds
+   * on any colour under it; label chips with the class name (and score) sit on the top-left corner, or elsewhere next
+   * to their own box (see ./chips).
    * Ground truth, when given, is drawn dashed underneath the predictions: in the class colour at full size, neutral and
    * just outside the prediction's stroke in compact thumbnails (where the two would otherwise coincide).
    */
@@ -212,13 +213,16 @@
     pointer-events: none;
   }
   /* Strokes sit outside the box (content-box plus a negative margin of the border width), so the object inside stays
-     fully visible: a small circle no longer reads as a filled square under a 2 px border. */
+     fully visible: a small circle no longer reads as a filled square under a 2 px border. The halo wraps the stroke on
+     both sides (1.5 px out, 1 px in): a low-contrast pair (violet over an orange disc) still reads at 1x. */
   .box {
     position: absolute;
     box-sizing: content-box;
     margin: -2px;
     border: 2px solid var(--c);
-    box-shadow: 0 0 0 1px var(--class-halo);
+    box-shadow:
+      0 0 0 1.5px var(--class-halo),
+      inset 0 0 0 1px var(--class-halo);
     pointer-events: auto;
     transition:
       opacity var(--dur-fast) var(--ease-standard),
@@ -241,14 +245,16 @@
   .box.selected .chip {
     z-index: 6;
   }
-  /* With a selection, the rest of the scene steps back so the selected detection is unmistakable. */
-  .box.recede {
-    opacity: 0.3;
-  }
+  /* Keep context readable: fade the stroke, never the label. Hovering one box fades the others' strokes a little... */
   .box.dim {
-    /* Keep context readable: fade the stroke, never the label. */
     border-color: color-mix(in srgb, var(--c) 55%, transparent);
-    box-shadow: 0 0 0 1px color-mix(in srgb, var(--class-halo) 50%, transparent);
+    box-shadow: 0 0 0 1.5px color-mix(in srgb, var(--class-halo) 50%, transparent);
+  }
+  /* ...and with a selection the rest of the scene steps back to 30 %, so the selected detection is unmistakable; their
+     chips (and leaders) stay whole, so every label still reads. */
+  .box.recede {
+    border-color: color-mix(in srgb, var(--c) 30%, transparent);
+    box-shadow: 0 0 0 1.5px color-mix(in srgb, var(--class-halo) 30%, transparent);
   }
   /* Touch: a box smaller than a fingertip still gets a 32 px target, centred on it. */
   @media (pointer: coarse) {

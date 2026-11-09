@@ -139,9 +139,10 @@
     margin-top: var(--space-2);
   }
   @media (max-width: 767px) {
-    /* Phones: the other fixes as one row of equal secondary buttons. */
+    /* Phones: the other fixes as one row of equal 40 px secondary buttons, side by side (touch grows each hit area to
+       44 px, ui/Button), matching the fix above them. */
     .alts > :global(.btn.btn) {
-      --h: 44px;
+      --h: var(--control-xl);
       flex: 1 1 0;
       min-width: 0;
     }

@@ -44,7 +44,9 @@
   .label {
     color: var(--text-primary);
   }
+  /* Helper text keeps a readable measure (DESIGN_DIRECTION §2.3: ≤ 60 characters a line). */
   .hint {
+    max-width: 60ch;
     font-size: var(--type-sm-size);
     color: var(--text-tertiary);
   }

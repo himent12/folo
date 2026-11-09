@@ -107,11 +107,12 @@
         <Stat label="mAP50-95" value={metric(run?.best?.map50_95)} sub={run?.best ? `best · ep ${run.best.epoch}` : 'best, after the first epoch'} loading={!run} />
         <Stat label="Throughput" value={num(charts.lastStep?.imgs_per_s, 0)} unit="img/s" loading={!run} />
         <Stat label="Learning rate" value={lr(charts.lastStep?.lr)} loading={!run} />
-        <Stat label="Loss" value={num(charts.lastStep?.loss.total, 3)} sub="last step, unsmoothed" loading={!run} />
+        <Stat label="Loss" value={num(charts.lastStep?.loss.total, 3)} sub="last step, raw" loading={!run} />
       </div>
     </div>
     <div class="chart">
-      <p class="chart-title">Validation mAP <span class="faint">by epoch, so far</span></p>
+      <!-- Phones: the legend has no room for its "Latest · ep N" note, so the title carries it. -->
+      <p class="chart-title">Validation mAP <span class="faint">{narrow && lastEpoch ? `Latest · ep ${lastEpoch}` : 'by epoch, so far'}</span></p>
       {#if !run || live.loading}
         <!-- Phones: the legend (note and two values) wraps to two rows. -->
         <ChartSkeleton height={narrow ? 140 : 200} legendRows={narrow ? 2 : 1} />

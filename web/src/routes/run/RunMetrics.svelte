@@ -1,10 +1,16 @@
 <script lang="ts" module>
   import { lr as fmtLr } from '$lib/format';
 
-  /** "3.42" and "× 10⁻⁴" from 3.42e-4: the value set large, its power of ten as the unit, so a tab never cuts it off. */
-  export function lrParts(v: number | null | undefined): { value: string; unit?: string } {
+  const PLAIN: Record<string, string> = { '⁻': '−', '⁰': '0', '¹': '1', '²': '2', '³': '3', '⁴': '4', '⁵': '5', '⁶': '6', '⁷': '7', '⁸': '8', '⁹': '9' };
+
+  /**
+   * "3.42" and "× 10⁻⁴" from 3.42e-4: the value set large, its power of ten as the unit, so a tab never cuts it off.
+   * `exp` ("−4") is the exponent in plain digits, for a real superscript at a legible size (Unicode superscripts render
+   * at about 8 px in a 12 px unit).
+   */
+  export function lrParts(v: number | null | undefined): { value: string; unit?: string; exp?: string } {
     const [m, e] = fmtLr(v).split(' × ');
-    return e ? { value: m!, unit: `× ${e}` } : { value: m! };
+    return e ? { value: m!, unit: `× ${e}`, exp: [...e.slice(2)].map((c) => PLAIN[c] ?? c).join('') } : { value: m! };
   }
 </script>
 
@@ -25,7 +31,7 @@
   import { runHorizon } from '$lib/charts/horizon';
   import type { Epoch, Run, Step } from '$lib/api/types';
   import { runProgress, stepsPerEpoch } from '$lib/api/progress';
-  import { duration, eta, metric, num, pow10 } from '$lib/format';
+  import { duration, eta, metric, num } from '$lib/format';
   import Segmented from '$lib/ui/Segmented.svelte';
   import Select from '$lib/ui/Select.svelte';
 
@@ -83,6 +89,8 @@
   const live = $derived(['queued', 'running', 'stopping'].includes(run.status));
   const progress = $derived(runProgress(run));
   const closeFrom = $derived(1 - run.config.augment.close_mosaic / run.epochs);
+  /** The run's last epochs train without mosaic: the bar hatches them and every chart marks where they start. */
+  const mosaicOff = $derived(closeFrom > 0 && closeFrom < 1);
   const elapsed = $derived(run.started ? ((run.finished ? Date.parse(run.finished) : Date.now()) - Date.parse(run.started)) / 1000 : null);
 
   const lastStep = $derived.by(() => {
@@ -170,8 +178,8 @@
   // Fitted to the data and "nice" (it ends on a gridline): a failed run's mAP of 0.5 fills the plot instead of half
   // of a 0–1 axis. A live chart re-fits at most once per epoch (./domain holdDomain), and values never tween.
   const unit = $derived(tab === 'map' || tab === 'map50' || tab === 'pr');
-  // The plot inside LineChart's margins (8 px top, 22 px bottom).
-  const plotPx = $derived(height - 30);
+  // The plot inside LineChart's margins (8 px top, 24 with the mosaic mark's label; 22 px bottom).
+  const plotPx = $derived(height - (mosaicOff ? 46 : 30));
   let held: Held<Fit & { log?: boolean }> | null = null;
   const fit = $derived.by((): (Fit & { log?: boolean }) | null => {
     let lo = Infinity;
@@ -219,13 +227,20 @@
     id: Tab;
     label: string;
     value: string;
+    /** Set one step smaller after the value; plain text (the phone picker's option reads it as is). */
     unit?: string;
+    /** A power of ten's exponent ("−4"): the tab draws the unit "× 10" with a real superscript instead. */
+    exp?: string;
     caption: string;
     title: string;
     qualifier: string;
-    /** The value is the last step's raw reading (the chart may draw it smoothed): the phone picker says so. */
-    raw?: boolean;
+    /** The qualifier's power-of-ten exponent, drawn as a superscript after it. */
+    qExp?: string;
   }
+  // The one live-value label, as in the chart's legend: "Latest · ep 37". Per-epoch values come from the last
+  // validation; per-step values from the epoch the last step is in.
+  const latestEp = $derived(lastEpoch ? `Latest · ep ${lastEpoch.epoch}` : 'after the first epoch');
+  const stepEp = $derived(lastStep ? `Latest · ep ${Math.max(1, Math.ceil(observed - 1e-9))}` : 'after the first step');
   const tabs = $derived.by((): TabDef[] => [
     {
       id: 'map',
@@ -235,12 +250,12 @@
       title: 'Validation mAP50-95',
       qualifier: run.best ? `by epoch · ○ best ${metric(run.best.map50_95)} at epoch ${run.best.epoch}` : 'by epoch',
     },
-    { id: 'map50', label: 'mAP50', value: metric(lastEpoch?.val.map50), caption: 'last epoch', title: 'Validation mAP50', qualifier: 'by epoch' },
+    { id: 'map50', label: 'mAP50', value: metric(lastEpoch?.val.map50), caption: latestEp, title: 'Validation mAP50', qualifier: 'by epoch' },
     {
       id: 'pr',
       label: 'Precision · Recall',
       value: lastEpoch ? `${metric(lastEpoch.val.precision)} · ${metric(lastEpoch.val.recall)}` : '—',
-      caption: 'last epoch',
+      caption: latestEp,
       title: 'Precision and recall',
       qualifier: 'by epoch',
     },
@@ -248,8 +263,9 @@
       id: 'loss',
       label: 'Loss',
       value: num(lastStep?.loss.total, 3),
-      caption: 'last step, raw',
-      raw: true,
+      // The last step's raw reading, which the chart may draw smoothed: "raw" is its qualifier, set as a unit.
+      unit: 'raw',
+      caption: stepEp,
       title: 'Training loss',
       qualifier: 'by epoch',
     },
@@ -260,18 +276,24 @@
       ...lrParts(lastStep?.lr),
       caption: 'warmup 3 · cosine',
       title: 'Learning rate',
-      qualifier: `by epoch · × ${pow10(lrExp)}`,
+      qualifier: 'by epoch · × 10',
+      qExp: String(lrExp).replace('-', '−'),
     },
     {
       id: 'ips',
       label: 'Throughput',
       value: num(lastStep?.imgs_per_s, 0),
       unit: 'img/s',
-      caption: 'last step',
+      caption: stepEp,
       title: 'Throughput',
       qualifier: 'images/s by epoch',
     },
   ]);
+  /** The legend's note: the latest value's epoch, per epoch for validation metrics, per step for the rest. */
+  const legendNote = $derived(unit ? (lastEpoch ? latestEp : undefined) : lastStep ? stepEp : undefined);
+
+  // The last epochs train without mosaic (the hatched end of the progress bar): marked where they start, on every chart.
+  const xMark = $derived(mosaicOff ? { x: run.epochs - run.config.augment.close_mosaic, label: 'mosaic off' } : undefined);
   const current = $derived(tabs.find((t) => t.id === tab)!);
 
 
@@ -289,11 +311,16 @@
   }
 </script>
 
+<!-- A power of ten as "× 10" with a real 11 px superscript; other units as they are. -->
+{#snippet unitOf(t: TabDef)}
+  {#if t.exp}<span class="unit" aria-label={t.unit}>× 10<sup class="exp">{t.exp}</sup></span>{:else}<span class="unit">{t.unit}</span>{/if}
+{/snippet}
+
 {#snippet picker()}
   <Select
     label="Metric to chart"
     bind:value={tab}
-    options={tabs.map((t) => ({ value: t.id, label: `${t.label} · ${t.value}${t.unit && t.value !== '—' ? ` ${t.unit}` : ''}${t.raw && t.value !== '—' ? ' raw' : ''}` }))}
+    options={tabs.map((t) => ({ value: t.id, label: `${t.label} · ${t.value}${t.unit && t.value !== '—' ? ` ${t.unit}` : ''}` }))}
   />
 {/snippet}
 
@@ -308,21 +335,23 @@
   {#if !queuedFold}
   <div class="metrics-body" id="run-metrics-body">
   <!-- Phones: a finished run's strip only repeats the completed banner above it (status, duration), so it goes. -->
+  <!-- One structure at every width: the epoch as a full-width row (count, bar, caption) over the KPI tabs. -->
   <div class="strip" class:finished={run.status === 'completed'}>
     <div class="epoch">
-      <span class="label">Epoch</span>
+      <span class="sr-only">Epoch</span>
       <span class="big num">{run.epoch}<span class="of">/ {run.epochs}</span></span>
       <div
         class="track"
         aria-hidden="true"
-        use:tooltip={closeFrom < 1 && live ? `Hatched: the last ${run.config.augment.close_mosaic} epochs train without mosaic` : ''}
+        use:tooltip={mosaicOff ? `Hatched: the last ${run.config.augment.close_mosaic} epochs train without mosaic ("mosaic off" on the chart)` : ''}
       >
         <div class="fill" class:done={run.status === 'completed'} class:bad={run.status === 'failed'} style:transform="scaleX({run.status === 'completed' ? 1 : progress})"></div>
-        {#if closeFrom < 1 && live}<div class="close" style:left="{closeFrom * 100}%"></div>{/if}
+        <!-- Over the filled part of the bar (a finished run) the hatch is cut out of the fill in the panel colour. -->
+        {#if mosaicOff}<div class="close" class:over={run.status === 'completed' || progress >= closeFrom} style:left="{closeFrom * 100}%"></div>{/if}
       </div>
-      {#if closeFrom < 1 && live}<span class="sr-only">The hatched end of the bar marks the last {run.config.augment.close_mosaic} epochs, trained without mosaic.</span>{/if}
+      {#if mosaicOff}<span class="sr-only">The hatched end of the bar marks the last {run.config.augment.close_mosaic} epochs, trained without mosaic.</span>{/if}
       <span class="cap num">
-        {#if run.status === 'queued'}Not started{#if closeFrom < 1}<span class="hatch-key">&nbsp;· <i aria-hidden="true"></i>no mosaic</span>{/if}{:else if live}{(progress * 100).toFixed(1)}% · {run.eta_s !== null ? `${eta(run.eta_s)} left` : 'estimating…'}{#if closeFrom < 1}<span class="hatch-key">&nbsp;· <i aria-hidden="true"></i>no mosaic</span>{/if}{:else}{elapsed !== null ? `${duration(elapsed)} total` : '—'}{/if}
+        {#if run.status === 'queued'}Not started{:else if live}{(progress * 100).toFixed(1)}% · {run.eta_s !== null ? `${eta(run.eta_s)} left` : 'estimating…'}{:else}{elapsed !== null ? `${duration(elapsed)} total` : '—'}{/if}{#if mosaicOff}<span class="hatch-key">&nbsp;· <i aria-hidden="true"></i>no mosaic</span>{/if}
       </span>
     </div>
     <!-- Queued: the tabs read "—" until the first step, so the frame is the one a running run fills. -->
@@ -340,7 +369,7 @@
             onclick={() => (tab = t.id)}
           >
             <span class="label">{t.label}</span>
-            <span class="val num">{t.value}{#if t.unit && t.value !== '—'}<span class="unit">{t.unit}</span>{/if}</span>
+            <span class="val num">{t.value}{#if t.unit && t.value !== '—'}{@render unitOf(t)}{/if}</span>
             <span class="cap num">{t.caption}</span>
           </button>
         {/each}
@@ -352,7 +381,7 @@
       <!-- Phones, another section picked: the chart as its one-line readout, which opens it in place. -->
       <button type="button" class="readout" aria-expanded={!fold} aria-controls="run-chart-body" onclick={() => (peek = !peek)}>
         <span class="r-l">{current.label}</span>
-        <span class="r-v num">{current.value}{#if current.unit && current.value !== '—'}<span class="unit">{current.unit}</span>{/if}</span>
+        <span class="r-v num">{current.value}{#if current.unit && current.value !== '—'}{@render unitOf(current)}{/if}</span>
         <span class="r-c">{current.caption}</span>
         <span class="r-a">{fold ? 'Show chart' : 'Hide chart'}<ChevronDown size={14} aria-hidden="true" /></span>
       </button>
@@ -362,7 +391,7 @@
         <header>
           <!-- Below 960 px the picker names the metric in place of the title (the tabs above are hidden). -->
           {#if picking}<div class="pick">{@render picker()}</div>{/if}
-          <h2><span class="t">{current.title}</span><span class="q">{current.qualifier}</span></h2>
+          <h2><span class="t">{current.title}</span><span class="q">{current.qualifier}{#if current.qExp}<sup class="exp">{current.qExp}</sup>{/if}</span></h2>
           <div class="ctl">
             <!-- One control for the loss view (smoothing and y scale behind one button), so the header keeps at most one
                  segmented group. -->
@@ -397,7 +426,8 @@
               xTitle={epochTitle}
               curve={unit ? 'monotone' : 'linear'}
               markers={best}
-              legendNote={live ? 'Latest' : 'Last'}
+              {xMark}
+              {legendNote}
               label="{current.title} by epoch"
               endLabels={tab === 'loss'}
               empty={queued ? 'Curves appear here once training starts' : unit ? 'Waiting for the first validation…' : 'Waiting for the first step…'}
@@ -423,15 +453,17 @@
   }
   .strip {
     display: grid;
-    grid-template-columns: 240px minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr);
     border-bottom: 1px solid var(--line-subtle);
   }
+  /* The epoch: one full-width row over the tabs at every width, "38 / 100", the bar, and its caption. */
   .epoch {
     display: grid;
-    grid-template-rows: 16px 40px auto 16px;
-    gap: 6px;
-    padding: var(--space-4);
-    border-right: 1px solid var(--line-subtle);
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    column-gap: var(--space-4);
+    padding: var(--space-3) var(--space-4);
+    border-bottom: 1px solid var(--line-subtle);
   }
   /* Each tab is at least as wide as its value and caption, so no value is ever cut off; spare width is shared. */
   .tabs {
@@ -488,10 +520,9 @@
     color: var(--text-primary);
   }
   .big {
-    align-self: end;
-    font-size: var(--type-3xl-size);
-    line-height: 40px;
-    letter-spacing: var(--type-3xl-tracking);
+    font-size: var(--type-2xl-size);
+    line-height: 32px;
+    letter-spacing: var(--type-2xl-tracking);
     font-weight: var(--weight-semibold);
   }
   .of {
@@ -519,6 +550,15 @@
     font-weight: var(--weight-regular);
     color: var(--text-tertiary);
     letter-spacing: 0;
+  }
+  /* A power of ten's exponent at 11 px, raised without opening up the line. */
+  .exp {
+    position: relative;
+    top: -0.45em;
+    margin-left: 1px;
+    font-size: var(--type-xs-size);
+    line-height: 0;
+    vertical-align: baseline;
   }
   .cap {
     font-size: var(--type-sm-size);
@@ -568,6 +608,10 @@
     right: 0;
     background: repeating-linear-gradient(135deg, transparent 0 3px, var(--line-strong) 3px 4px);
     border-left: 1px solid var(--line-strong);
+  }
+  .close.over {
+    background: repeating-linear-gradient(135deg, transparent 0 3px, var(--bg-panel) 3px 4.5px);
+    border-left-color: var(--bg-panel);
   }
   .chart {
     display: grid;
@@ -696,11 +740,8 @@
     flex-wrap: wrap;
   }
   @media (min-width: 1200px) and (max-width: 1299px) {
-    /* The narrow end of the wide tier: a slimmer epoch cell and tab sides keep every value whole beside it; a
-       scroll is the fallback for values wider than the mock's. */
-    .strip {
-      grid-template-columns: 200px minmax(0, 1fr);
-    }
+    /* The narrow end of the wide tier: slimmer tab sides keep every value whole; a scroll is the fallback for values
+       wider than the mock's. */
     .tabs {
       overflow-x: auto;
       scrollbar-width: thin;
@@ -713,27 +754,7 @@
     }
   }
   @media (max-width: 1199px) {
-    /* Laptops: the epoch becomes a one-line row over the six tabs, which keep their values in one row (scrolling
-       sideways only if a narrow window cannot fit them). */
-    .strip {
-      grid-template-columns: minmax(0, 1fr);
-    }
-    .epoch {
-      grid-template-columns: auto minmax(0, 1fr) auto;
-      grid-template-rows: auto;
-      align-items: center;
-      column-gap: var(--space-4);
-      border-right: 0;
-      border-bottom: 1px solid var(--line-subtle);
-      padding: var(--space-3) var(--space-4);
-    }
-    .epoch .label {
-      display: none;
-    }
-    .big {
-      font-size: var(--type-2xl-size);
-      line-height: 32px;
-    }
+    /* Laptops: the six tabs keep their values in one row, scrolling sideways only if a narrow window cannot fit them. */
     /* A window too narrow for all six scrolls them sideways rather than cutting a value off. */
     .tabs {
       overflow-x: auto;

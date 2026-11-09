@@ -45,6 +45,20 @@ export const versusYolo26n: Versus[] = [
   { metric: 'Training peak GPU memory', unit: 'MiB', better: 'lower', folo: 3474, yolo: 4353, note: 'f32 vs f32; YOLO26n with AMP: 2,435', caveat: "FOLO's train step against YOLO26n's whole trainer; YOLO26n's train step alone peaks at 4,517 MiB." }, // row 11
 ];
 
+/**
+ * What keeps a row from being like for like (docs/BENCHMARKS.md, the rows' notes and caveats): the two engines ran at
+ * different numeric precision, or did different work (NMS over untrained weights' few candidates, a train step against
+ * a whole trainer, a machine under other load). Models' one-line summary counts these rather than wins.
+ */
+export const unlike: Record<string, ('precision' | 'workload')[]> = {
+  'GPU forward throughput, batch 16': ['precision'],
+  'GPU end to end, batch 1': ['workload'],
+  'GPU end-to-end throughput, batch 16': ['precision', 'workload'],
+  'CPU forward, batch 1': ['workload'],
+  'CPU end to end, batch 1': ['workload'],
+  'Training peak GPU memory': ['workload'],
+};
+
 /** FOLO's factor over the incumbent (> 1: FOLO is ahead), in the metric's own direction. */
 export function advantage(v: Versus): number {
   return v.better === 'lower' ? v.yolo / v.folo : v.folo / v.yolo;

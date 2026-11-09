@@ -407,7 +407,7 @@
   tr.hot {
     background: var(--bg-hover);
   }
-  tr.on {
+  tr.on:not(.detail) {
     background: var(--bg-active);
   }
   tr.on.hot {
@@ -479,14 +479,18 @@
     transform: rotate(180deg);
   }
   /* Phones: every metric of an opened class, under its row (precision and recall have no column there). Indented to
-     the class names (past the swatch), like the Class heading; a traced class keeps its selection fill and bar. */
+     the class names (past the swatch), like the Class heading. One layer in both themes: a raised well under a hairline,
+     never a second selection fill; a traced class's leading bar runs on through it. */
   tr.detail td {
     height: auto;
     padding: var(--space-2) var(--space-4) var(--space-3) calc(var(--space-4) + var(--space-4));
+    background: var(--bg-raised);
+    box-shadow: inset 0 1px 0 var(--line-subtle);
   }
   tr.detail.on td {
-    background: var(--bg-active);
-    box-shadow: inset 2px 0 0 var(--accent-line);
+    box-shadow:
+      inset 2px 0 0 var(--accent-line),
+      inset 0 1px 0 var(--line-subtle);
   }
   .detail dl {
     display: grid;

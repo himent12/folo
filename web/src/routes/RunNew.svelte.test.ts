@@ -77,8 +77,9 @@ describe('New run: a device the server cannot use', () => {
     await start();
     const msg = await until(() => target.querySelector('#device-error'), 'the device error');
     expect(create).toHaveBeenCalledOnce();
-    // One short line from the devices listed now; the server's words (backends and all) fold into the details.
-    await until(() => msg.textContent === 'GPU 1 is no longer available. Pick Auto, GPU 0 or CPU.', 'the short line');
+    // One short line from the devices listed now, each named once with its value; the server's words (backends and
+    // all) fold into the details.
+    await until(() => msg.textContent === 'GPU 1 (gpu:1) is no longer available. Pick Auto, GPU 0 (gpu:0) or CPU.', 'the short line');
     const detail = target.querySelector('.dev-detail')!;
     expect(detail.querySelector('summary')?.textContent).toBe('Technical details');
     expect(detail.textContent).toContain('This machine has gpu:0 (NVIDIA GeForce RTX 4080 SUPER, vulkan), cpu');
@@ -92,9 +93,9 @@ describe('New run: a device the server cannot use', () => {
     expect(target.querySelector<HTMLInputElement>('input#name')!.value).toBe(name);
     // Start says why it is off, briefly and without repeating the field, until another device is picked.
     expect([...target.querySelectorAll<HTMLButtonElement>('button[type="submit"]')].every((b) => b.disabled)).toBe(true);
-    expect(target.querySelector('#start-why')?.textContent).toBe('Device: GPU 1 is not available.');
+    expect(target.querySelector('#start-why')?.textContent).toBe('Device: GPU 1 (gpu:1) is not available.');
     // Both Start buttons (summary and phone dock) carry the reason, and the select is tied to its error.
-    expect(target.querySelector('#dock-why')?.textContent).toBe('Device: GPU 1 is not available.');
+    expect(target.querySelector('#dock-why')?.textContent).toBe('Device: GPU 1 (gpu:1) is not available.');
     // In the dock the reason takes the estimate's place (one row of chrome), and it is an ink link behind a danger mark.
     expect(target.querySelector('.dock .dock-est')).toBeNull();
     for (const id of ['#start-why', '#dock-why']) {
@@ -138,7 +139,7 @@ describe('New run: a device the server cannot use', () => {
     );
     await start();
     const msg = await until(() => target.querySelector('#device-error'));
-    expect(msg.textContent).toBe('This server cannot train on GPU 0. Pick Auto or CPU.');
+    expect(msg.textContent).toBe('This server cannot train on GPU 0 (gpu:0). Pick Auto or CPU.');
     expect(target.querySelector('.dev-detail p')?.textContent).toBe(
       'Device gpu:0 cannot be used by this build. Use device cpu (or auto, which falls back to the CPU).',
     );
@@ -242,13 +243,28 @@ describe('New run: short runs', () => {
 });
 
 describe('New run: the schedule in the Summary', () => {
-  it('counts optimizer steps, with the batches behind them when several make one step', async () => {
+  it('counts optimizer steps in plain words, with the batches behind them in a tooltip and the description', async () => {
     await open();
     // fasteners: 1,920 images at batch 16 are 120 batches, 4 per optimizer step.
     const est = target.querySelector('.summary .est')!;
-    expect(est.querySelector('dt')?.textContent).toBe('Optimizer steps / epoch');
-    expect(est.querySelector('dd')?.textContent).toBe('30');
-    expect(est.querySelector('.est-sub')?.textContent).toBe('120 batches, accumulate 4');
+    expect(est.querySelector('dt')?.textContent).toBe('Schedule');
+    const steps = est.querySelector<HTMLElement>('dd .steps')!;
+    expect(steps.textContent).toBe('30 steps / epoch');
+    expect(steps.tabIndex).toBe(0);
+    const why = '120 batches of 16 images; 4 make one optimizer step.';
+    expect(est.querySelector('dd .sr-only')?.textContent).toBe(`. ${why}`);
+    // Keyboard focus shows the tooltip and describes the value with it.
+    // happy-dom has no :focus-visible; the tooltip shows on keyboard focus only.
+    const matches = steps.matches.bind(steps);
+    vi.spyOn(steps, 'matches').mockImplementation(((sel: string) => sel === ':focus-visible' || matches(sel)) as typeof steps.matches);
+    steps.focus();
+    steps.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+    await until(() => document.getElementById('folo-tooltip')?.textContent === why, 'the tooltip');
+    expect(steps.getAttribute('aria-describedby')).toBe('folo-tooltip');
+    // Batch 64 is one batch a step.
+    target.querySelector<HTMLButtonElement>('#batch button[role="radio"]:nth-child(4)')!.click();
+    flushSync();
+    expect(est.querySelector('dd .sr-only')?.textContent).toBe('. 30 batches of 64 images, one optimizer step each.');
   });
 
   it("matches the short-run scenario's run: shapes at batch 32 for 5 epochs suggests its 16 epochs", async () => {
@@ -277,9 +293,12 @@ describe('New run: mixed precision', () => {
     expect(s.checked).toBe(false);
     expect(s.disabled).toBe(false);
     expect(s.getAttribute('role')).toBe('switch');
-    // folo-s, measured: about 1.6× faster.
-    expect(s.closest('.switch')?.textContent).toContain('Mixed precision');
-    expect(s.closest('.switch')?.textContent).toContain('about 1.6× faster, 40% less memory');
+    // A field on the Training grid: the label's line carries the switch; the hint (folo-s, measured: about 1.6×
+    // faster) under it describes the switch.
+    const field = s.closest('.fields > .field')!;
+    expect(field.querySelector('.switch')?.textContent?.trim()).toBe('Mixed precision');
+    expect(field.querySelector('#amp-hint')?.textContent).toBe('f16 on tensor cores: about 1.6× faster, 40% less memory.');
+    expect(s.getAttribute('aria-describedby')).toBe('amp-hint');
     expect(row()?.querySelector('.rv-v')?.textContent).toBe('Off');
     expect(cli()).not.toContain('--amp');
     const f32 = time();
@@ -293,27 +312,64 @@ describe('New run: mixed precision', () => {
     expect(create.mock.calls[0]![0].amp).toBe(true);
   });
 
-  it("is off with the server's reason where it has no tensor cores, and the run is sent without it", async () => {
+  it("is off where the GPU has no tensor cores through DX12, with the way to Vulkan and the server's own words", async () => {
     hub.api = api = new MockApi('no-tensor-cores', 0);
     await open();
     const s = await until(sw, 'the switch');
     expect(s.disabled).toBe(true);
     expect(s.checked).toBe(false);
+    // Only the control is disabled: the label stays a field label, not disabled text.
+    expect(s.closest('.field')?.classList.contains('sw-field')).toBe(true);
     expect(s.getAttribute('aria-describedby')).toBe('amp-why');
-    expect(target.querySelector('#amp-why')?.textContent).toBe("This server's GPU has no tensor cores FOLO can use, so runs train in f32.");
-    const detail = target.querySelector('.amp .dev-detail')!;
-    expect(detail.textContent).toContain('NVIDIA GeForce RTX 4080 SUPER (Dx12) has no cooperative matrices in wgpu');
-    expect(detail.textContent).not.toContain('`');
+    // One plain sentence and one action docs/GPU.md confirms (an RTX 4080 SUPER has cooperative matrices on Vulkan).
+    expect(target.querySelector('#amp-why')?.textContent).toBe(
+      "DirectX 12 does not reach this GPU’s tensor cores. Restart the server on Vulkan, in PowerShell: $env:FOLO_GPU_BACKEND='vulkan'; folo serve --tensor-cores.",
+    );
+    expect(target.querySelector('#amp-why .mono')?.textContent).toBe("$env:FOLO_GPU_BACKEND='vulkan'; folo serve --tensor-cores");
+    // The server's reason, verbatim and copyable, behind "Driver report".
+    const report = target.querySelector('.amp .dev-detail')!;
+    expect(report.querySelector('summary')?.textContent).toBe('Driver report');
+    expect(report.querySelector('code')?.textContent).toBe((await api.system()).capabilities!.amp.reason);
+    expect(report.querySelector('code')?.textContent).toContain('NVIDIA GeForce RTX 4080 SUPER (Dx12) has no cooperative matrices in wgpu');
+    const write = vi.fn(async () => {});
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText: write }, configurable: true });
+    report.querySelector<HTMLButtonElement>('button[aria-label="Copy driver report"]')!.click();
+    expect(write).toHaveBeenCalledWith((await api.system()).capabilities!.amp.reason);
     const create = vi.spyOn(api, 'createRun');
     await start();
     expect(create.mock.calls[0]![0].amp).toBe(false);
+  });
+
+  it('says to train in f32 where no backend gives this GPU tensor cores', async () => {
+    hub.api = api = new MockApi('no-tensor-cores', 0);
+    const sys = api.system.bind(api);
+    api.system = async () => {
+      const r = await sys();
+      return { ...r, gpus: r.gpus.map((g) => ({ ...g, name: 'AMD Radeon RX 7900 XTX' })) };
+    };
+    await open();
+    await until(sw, 'the switch');
+    expect(target.querySelector('#amp-why')?.textContent).toBe('This GPU has no tensor cores FOLO can use. Train in f32 on this GPU.');
+    expect(target.querySelector('#amp-why')?.textContent).not.toContain('FOLO_GPU_BACKEND');
+  });
+
+  it('treats Auto on a server without a usable GPU as the CPU, with no GPU advice', async () => {
+    hub.api = api = new MockApi('no-tensor-cores', 0);
+    const sys = api.system.bind(api);
+    api.system = async () => {
+      const r = await sys();
+      return { ...r, capabilities: { ...r.capabilities!, device: 'cpu' } };
+    };
+    await open();
+    await until(sw, 'the switch');
+    expect(target.querySelector('#amp-why')?.textContent).toBe('This server has no usable GPU, so runs train on the CPU in f32.');
   });
 
   it('says how to turn tensor cores on when the server has them off', async () => {
     hub.api = api = new MockApi('tensor-cores-off', 0);
     await open();
     await until(sw, 'the switch');
-    expect(target.querySelector('#amp-why')?.textContent).toBe('Tensor cores are off on this server. Start it with folo serve --tensor-cores.');
+    expect(target.querySelector('#amp-why')?.textContent).toBe('Tensor cores are off on this server. Restart it with folo serve --tensor-cores.');
     expect(target.querySelector('#amp-why .mono')?.textContent).toBe('folo serve --tensor-cores');
   });
 
@@ -326,6 +382,8 @@ describe('New run: mixed precision', () => {
     pick('cpu');
     expect(sw()!.disabled).toBe(true);
     expect(sw()!.checked).toBe(false);
+    expect(target.querySelector('#amp-why')?.textContent).toBe('The CPU has no tensor cores. Pick a GPU to train in mixed precision.');
+    expect(target.querySelector('.amp .dev-detail')).toBeNull();
     expect(cli()).not.toContain('--amp');
     pick('auto');
     expect(sw()!.checked).toBe(true);
@@ -340,6 +398,86 @@ describe('New run: mixed precision', () => {
     const create = vi.spyOn(api, 'createRun');
     await start();
     expect('amp' in create.mock.calls[0]![0]).toBe(false);
+  });
+});
+
+describe('New run: the end-to-end head', () => {
+  const sw = () => target.querySelector<HTMLInputElement>('input#head');
+  const cli = () => target.querySelector('.cli code')!.textContent!;
+  const row = () => [...target.querySelectorAll('.summary .rv')].find((r) => r.querySelector('.rv-k')?.textContent === 'Head');
+
+  it('is an Advanced switch, off by default: the run leaves head out (o2m) and the Summary and command say nothing', async () => {
+    hub.api = api = new MockApi('normal', 0);
+    await open();
+    const s = sw()!;
+    expect(s.closest('details.advanced')).not.toBeNull();
+    expect(s.checked).toBe(false);
+    expect(s.closest('.field')?.querySelector('.switch')?.textContent?.trim()).toBe('End-to-end (no NMS)');
+    // One line, with the cost measured on the shapes gate (docs/BENCHMARKS.md: 0.015 mAP50-95 behind NMS).
+    expect(s.getAttribute('aria-describedby')).toBe('head-hint');
+    expect(target.querySelector('#head-hint')?.textContent).toBe('No NMS step at inference; about 0.015 lower mAP50-95 than NMS on the same model.');
+    expect(row()).toBeUndefined();
+    expect(cli()).not.toContain('--head');
+    const create = vi.spyOn(api, 'createRun');
+    await start();
+    expect('head' in create.mock.calls[0]![0]).toBe(false);
+  });
+
+  it('on, sends head o2o, shows it in the Summary and as --head o2o, and the run logs the dual head', async () => {
+    hub.api = api = new MockApi('normal', 0);
+    await open();
+    sw()!.click();
+    flushSync();
+    expect(row()?.querySelector('.rv-v')?.textContent).toBe('End-to-end, no NMS');
+    expect(cli()).toContain('--head o2o');
+    const create = vi.spyOn(api, 'createRun');
+    await start();
+    expect(create.mock.calls[0]![0].head).toBe('o2o');
+    const run = await create.mock.results[0]!.value;
+    expect(run.config.head).toBe('o2o');
+    const { lines } = await api.runLogs(run.id, 50);
+    expect(lines.some((l) => l.message.startsWith('head o2o: dual assignment'))).toBe(true);
+  });
+
+  it("names o2m in the command when fine-tuning, since the CLI's default is the weights file's head", async () => {
+    hub.api = api = new MockApi('normal', 0);
+    await open();
+    const sel = target.querySelector<HTMLSelectElement>('select#weights')!;
+    const opt = await until(() => sel.querySelector<HTMLOptionElement>('option:not([value="none"])'), 'trained weights');
+    opt.selected = true;
+    sel.dispatchEvent(new Event('change', { bubbles: true }));
+    flushSync();
+    expect(cli()).toContain('--head o2m');
+    sw()!.click();
+    flushSync();
+    expect(cli()).toContain('--head o2o');
+    expect(cli()).not.toContain('--head o2m');
+  });
+
+  it('opens Advanced from its Summary row', async () => {
+    hub.api = api = new MockApi('normal', 0);
+    await open();
+    sw()!.click();
+    flushSync();
+    const adv = target.querySelector<HTMLDetailsElement>('details.advanced')!;
+    expect(adv.open).toBe(false);
+    (row() as HTMLButtonElement).click();
+    await until(() => adv.open, 'Advanced open');
+  });
+
+  it('comes back on in a copy of an o2o run', async () => {
+    hub.api = api = new MockApi('normal', 0);
+    const base = (await api.runs())[0]!.config;
+    const run = await api.createRun({ ...base, name: 'e2e-src', head: 'o2o' });
+    await open(`?from=${run.id}`);
+    await until(() => sw()?.checked, 'the switch on');
+    expect(row()).toBeDefined();
+  });
+
+  it('is refused by the mock as by the server when the head is not o2m or o2o', async () => {
+    hub.api = api = new MockApi('normal', 0);
+    const base = (await api.runs())[0]!.config;
+    await expect(api.createRun({ ...base, name: 'bad-head', head: 'nms' as 'o2o' })).rejects.toMatchObject({ status: 400, code: 'invalid_body' });
   });
 });
 

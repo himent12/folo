@@ -151,13 +151,20 @@
     if (cursor < first.x - 0.5 || cursor > last.x + 0.5) return null;
     return pts[nearest(pts, cursor)]?.y ?? null;
   }
-  // Hover, focus or tap a run chip to bring its line forward: 3 px over a halo, painted last with a bold end label; the
-  // others drop to 1 px in their own colour (never faded, so each keeps >= 3:1).
+  // Hover, focus or tap a run chip to bring its line forward: 3 px in its hue over a halo, painted last with a bold end
+  // label; the others become context curves, 1 px in chart.context (>= 3:1, never faded), while their chips keep their
+  // hue. Unpinning restores every hue.
   let hovered = $state<string | null>(null);
   let pinned = $state<string | null>(null);
   // Only runs still in the comparison count (a removed run must not leave every line faded).
   const highlight = $derived([hovered, pinned].find((x) => x !== null && ids.includes(x)) ?? null);
-  const readoutAt = $derived(cursor === null ? 'Latest' : x === 'epoch' ? `Epoch ${Math.round(cursor)}` : `${Math.round(cursor)}% through`);
+  // At rest the chips read each run's latest value: "Latest · ep 37" when the runs share that epoch, else per run.
+  const lastEps = $derived(new Set(chosen.map((r) => metrics.data?.get(r.id)?.epochs.at(-1)?.epoch ?? null)));
+  const latestNote = $derived.by(() => {
+    const [only] = lastEps;
+    return lastEps.size === 1 && only !== null && only !== undefined ? `Latest · ep ${only}` : "Latest · each run's last epoch";
+  });
+  const readoutAt = $derived(cursor === null ? latestNote : x === 'epoch' ? `Epoch ${Math.round(cursor)}` : `${Math.round(cursor)}% through`);
   const xDomain = $derived<[number, number]>(x === 'epoch' ? [0, Math.max(1, ...chosen.map((r) => r.epochs))] : [0, 100]);
 
   // mAP is only comparable on the same data: no winner across datasets.

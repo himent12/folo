@@ -39,7 +39,7 @@ async function unplugGpu(/** @type {import('playwright-core').Page} */ page) {
 
 /** @type {Scene[]} */
 export const scenes = [
-  { name: 'overview', path: '/', viewports: ['desktop', 'laptop', 'mobile'] },
+  { name: 'overview', path: '/', viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
   { name: 'datasets', path: '/datasets', viewports: ['desktop', 'laptop', 'mobile'] },
   { name: 'runs', path: '/runs', viewports: ['desktop', 'laptop', 'mobile'] },
   { name: 'run-live', path: '/runs/run_7d1e', advance: 4000, viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
@@ -142,7 +142,7 @@ export const scenes = [
     name: 'run-new-amp',
     path: '/runs/new',
     fullPage: true,
-    viewports: ['desktop', 'tablet', 'mobile'],
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
     setup: async (page) => {
       await until(page, 'input#amp');
       await page.locator('.amp .switch').click();
@@ -150,17 +150,44 @@ export const scenes = [
     },
   },
   {
-    // A server whose GPU has no tensor cores (the DX12 adapter): the switch is off and disabled, with the reason, and the
-    // server's own words under Technical details (opened).
+    // A server whose GPU has no tensor cores through DX12: the switch is off and disabled (its label a field label), one
+    // sentence and the way to Vulkan, and the server's own words under Driver report (opened, copyable).
     name: 'run-new-amp-off',
     path: '/runs/new',
     search: 'scenario=no-tensor-cores',
     fullPage: true,
-    viewports: ['desktop', 'tablet', 'mobile'],
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
     setup: async (page) => {
       await until(page, '#amp-why');
       await page.locator('.amp .dev-detail summary').click();
       await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // The end-to-end head (TrainConfig.head "o2o"): Advanced opened and the switch on, with its one line; the Summary's
+    // Head row and the CLI command (opened) carry it.
+    name: 'run-new-e2e',
+    path: '/runs/new',
+    fullPage: true,
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
+    setup: async (page) => {
+      await until(page, '#sec-train details.advanced > summary');
+      await page.locator('#sec-train details.advanced > summary').click();
+      await page.locator('.switch:has(#head)').click();
+      await page.locator('.summary details.cli > summary').click();
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // The Summary's schedule in plain words ("30 steps / epoch"); the batches behind it in a tooltip, here hovered.
+    name: 'run-new-steps',
+    path: '/runs/new',
+    fullPage: false,
+    viewports: ['desktop', 'laptop'],
+    setup: async (page) => {
+      await until(page, '.summary .steps');
+      await page.locator('.summary .steps').hover();
+      await page.clock.runFor(600);
     },
   },
   {
@@ -350,17 +377,17 @@ export const scenes = [
     },
   },
   {
-    // "Dataset check findings", its own section: the severity filter moved to warnings from the warning finding's
-    // "Show the warnings", so the caption and rows are the warnings.
+    // The warning finding's "Show the warnings": the check's warnings open under that finding (the one issue list,
+    // filtered to its severity), so the caption and rows are the warnings.
     name: 'dataset-issues',
     path: '/datasets/ds_shapes_hard?tab=stats',
     fullPage: true,
-    viewports: ['desktop', 'laptop', 'mobile'],
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
     setup: async (page) => {
       await until(page, '#ds-health summary');
       await page.locator('#ds-health summary').click();
       await page.getByRole('button', { name: 'Show the warnings' }).click();
-      await until(page, '#ds-check .issues .fix');
+      await until(page, '#ds-health .evidence .fix');
       await page.clock.runFor(500);
     },
   },
@@ -491,7 +518,7 @@ export const scenes = [
     },
   },
   { name: 'runs', path: '/runs' },
-  { name: 'models', path: '/models', viewports: ['desktop', 'laptop', 'mobile'] },
+  { name: 'models', path: '/models', viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
   { name: 'models-empty', path: '/models', search: 'scenario=empty' },
   { name: 'models-error', path: '/models', search: 'scenario=error', viewports: ['desktop', 'laptop', 'mobile'] },
   { name: 'models-loading', path: '/models', search: 'scenario=loading', viewports: ['desktop', 'laptop', 'mobile'] },
@@ -517,6 +544,19 @@ export const scenes = [
       }
       await until(page, '#cm .cell');
       await page.locator('.d-line').click();
+    },
+  },
+  {
+    // An o2o model (shapes-s-best, as the server mock's m_31ab): Details says Head "End-to-end (no NMS)" and how it was
+    // trained. Laptop folds the details: opened. Phones: the Details section.
+    name: 'model-o2o',
+    path: '/models/m_shapes_s',
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
+    fullPage: true,
+    setup: async (page, { vp }) => {
+      await until(page, '#pr svg');
+      if (vp === 'mobile') await page.getByRole('radio', { name: 'Details' }).click();
+      else if (vp !== 'desktop') await page.locator('.d-line').click();
     },
   },
   {
@@ -805,7 +845,7 @@ export const scenes = [
       await page.clock.runFor(1000);
     },
   },
-  { name: 'settings', path: '/settings', viewports: ['desktop', 'laptop', 'mobile'] },
+  { name: 'settings', path: '/settings', viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
   { name: 'overview-empty', path: '/', search: 'scenario=empty', viewports: ['desktop', 'mobile'] },
   { name: 'overview-loading', path: '/', search: 'scenario=loading', viewports: ['desktop', 'laptop', 'mobile'] },
   { name: 'overview-error', path: '/', search: 'scenario=error', viewports: ['desktop', 'mobile'] },
@@ -860,6 +900,9 @@ export const scenes = [
     setup: async (page) => {
       await page.getByRole('button', { name: 'Add dataset' }).first().click();
       await page.locator('dialog[open]').waitFor();
+      // Register stays disabled until there is a folder path; a name the server would refuse is checked on submit.
+      await page.locator('dialog[open] input[placeholder="e.g. D:/data/my-dataset"]').fill('D:/data/my dataset');
+      await page.locator('dialog[open] input[id$="-name"]').fill('my dataset!');
       await page.locator('dialog[open] button[type="submit"]').click();
       await page.locator('dialog[open] input[aria-invalid="true"]').first().focus();
     },
