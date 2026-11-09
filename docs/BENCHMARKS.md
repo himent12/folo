@@ -421,13 +421,20 @@ predict defaults (conf 0.25, max_det 300), the two heads of the same model alter
 | CPU b16, 8 threads | 26.4 img/s | 25.9 img/s | 0.58 / 0.71 ms |
 | GPU b1 (f32) | 9.10 ms | 9.22 ms | 0.63 / 0.62 ms |
 | GPU b16 (f32) | 484 img/s | 504 img/s | 0.09 / 0.09 ms |
+| *rerun after the COCO job had ended (GPU 2–12% before each run):* | | | |
+| CPU b1, 28 threads | 24.58 ms | 25.13 ms | 0.58 / 0.62 ms |
+| CPU b16, 28 threads | 53.8 img/s | 53.4 img/s | 0.50 / 0.48 ms |
+| GPU b1 (f32) | 4.37 ms | 4.34 ms | 0.33 / 0.32 ms |
+| GPU b16 (f32) | 1025 img/s | 1010 img/s | 0.06 / 0.05 ms |
 
 Honest reading: **at predict settings the NMS-free head buys nothing measurable** on either device. All the
 differences are inside the run-to-run noise of the shared machine (the GPU b16 one even goes the other way). With
 a confidence threshold of 0.25 a trained model leaves a few candidates per image (4–5 here), and NMS over them takes
 microseconds. The post-processing time is the decode (the per-anchor class maximum and the DFL boxes of the
 candidates), which both heads pay. The CPU end-to-end gap to yolo26n (row 8: 26.9 vs 24.8 ms) is in the forward
-pass and letterbox, not in NMS, so this head does not close it.
+pass and letterbox, not in NMS, so this head does not close it. The quieter rerun's 24.58 ms is a 4-class model on
+easy images with a lighter machine load, not row 8's 80-class setting, and its 0.55 ms gap between the heads is ten
+times the post-processing difference, i.e. noise.
 
 Where it does pay is **many candidates**: validation (conf 0.001, multi-label) and crowded scenes. Post-processing
 alone on one 640 px image's decoded head, 8400 anchors × 80 classes (`cargo bench -p folo-vision --bench post`, CPU):
@@ -441,9 +448,26 @@ alone on one 640 px image's decoded head, 8400 anchors × 80 classes (`cargo ben
 So the top-k is 9–15x faster than NMS when candidates are plentiful, and its cost does not grow with them. On these
 validation sets the whole `folo val` call is too short to show it (0.25–0.31 s for 200 images either way).
 
+**Accuracy on real data: R6** (examples/r6). A short run, to keep the shared GPU free: 20 epochs fine-tuning from the
+R6 folo-n o2m model (`--weights D:/folo-data/runs-r6/r6-folo-n/weights/best.folo --head o2o`, 640 px, batch 16,
+`auto` → AdamW). The o2o branch starts as a copy of the o2m head (MODEL.md §6.6). The run was killed once at epoch 8
+(the process vanished, along with the COCO job sharing the GPU) and resumed from its epoch-7 checkpoint. Test splits,
+best (EMA) weights:
+
+| folo-n | r6-clean test mAP50 / mAP50-95 | r6-fresh test (held out) mAP50 / mAP50-95 |
+|---|---|---|
+| dual-head model, **o2o, no NMS** | 0.667 / 0.371 | 0.232 / 0.113 |
+| the same model, o2m + NMS | 0.706 / 0.392 | 0.281 / 0.132 |
+| the o2m-only model it started from (410 epochs) | 0.710 / 0.397 | 0.260 / 0.130 |
+
+On R6 too, the one-to-one head trails NMS on the same model (−0.021 / −0.019 mAP50-95). Twenty epochs is far from
+the hundreds the o2m model trained for, so this is a lower bound on what a full dual-assignment run gives. The o2m
+branch of the dual model stays level with the model it came from.
+
 **ONNX.** `folo export --format onnx --decode` of an o2o model has the selection in the graph (`detections:
-[B, K, 6]`, final, no NMS for the consumer). Parity with onnxruntime (`crates/folo-cli/tests/onnx.rs`) is score error
-7e-7 and box error 2e-5 relative in f32 (fixed and dynamic shapes), 7e-4 / 1.5e-2 in f16.
+[B, K, 6]`, final, no NMS for the consumer; f32 rows even in an f16 graph). Parity with onnxruntime
+(`crates/folo-cli/tests/onnx.rs`) is score error 7e-7 and box error 2e-5 relative in f32 (fixed and dynamic shapes),
+7e-4 / 1.5e-2 in f16.
 
 ## FOLO on the CPU
 
