@@ -49,6 +49,8 @@ Lines: 1 hierarchy & layout · 2 typography · 3 colour & theming · 4 spacing r
 | r21 | Claude Opus 5.5 (134 sheets, ~106 full-size) | 7.5 | 8 | 8 | 7.5 | 8 | 7.5 | 7.5 | 7.5 | 8 | 8.5 | 8 | 8 | 7.5 |
 | r22 | GPT-6.1 Sol (152 sheets, 42 full-size) | 8 | 8 | 9 | 9 | 8 | 8 | 8 | 8.5 | 8.5 | 8 | 8 | 8 | 8 |
 | r22 | Claude Opus 5.5 (152 sheets, 8 full-size) | 8 | 8 | 8.5 | 8.5 | 8.5 | 8.5 | 8 | 8.5 | 8.5 | 8.5 | 8.5 | 8 | 8 |
+| r23 | GPT-6.1 Sol (169 sheets, 50 full-size) | 8 | 8.5 | 8.5 | 9 | 9 | 8.5 | 8 | 8.5 | 8.5 | 8.5 | 8 | 8.5 | 8 |
+| r23 | Claude Opus 5.5 (169 sheets, 32 full-size) | 8 | 8 | 8 | 8.5 | 8.5 | 8.5 | 8 | 8 | 8.5 | 8.5 | 8.5 | 8 | 8 |
 
 ## Per-line minimum (lower of the two reviewers)
 
@@ -76,6 +78,7 @@ Rounds with one reviewer are marked; their minimum is that reviewer's row.
 | r20 | 8 ↑ | 8 ↑ | 8.5 ↑ | 8 ↑ | 8.5 ↑ | 8 | 8.5 ↑ | 8.5 ↑ | 8.5 ↑ | 8.5 ↑ | 8.5 ↑ | 8.5 ↑ | 8 |
 | r21 | 7.5 ↓ | 8 | 8 ↓ | 7.5 ↓ | 8 ↓ | 7.5 ↓ | 7.5 ↓ | 7.5 ↓ | 8 ↓ | 8.5 | 8 ↓ | 8 ↓ | 7.5 |
 | r22 | 8 ↑ | 8 | 8.5 ↑ | 8.5 ↑ | 8 | 8 ↑ | 8 ↑ | 8.5 ↑ | 8.5 ↑ | 8 ↓ | 8 | 8 | 8 |
+| r23 | 8 | 8 | 8 ↓ | 8.5 | 8.5 ↑ | 8.5 ↑ | 8 | 8 ↓ | 8.5 | 8.5 ↑ | 8 | 8 | 8 |
 
 r4 lowest lines: 6 data visualisation (5.5), 2 typography, 3 colour, 8 consistency (6). Diagnosis: 2, 3 and 8 are
 structural (no single rule for mono vs sans, class colours that changed between legend and box, two accents in light),
@@ -164,3 +167,12 @@ mostly truth and fit, not styling: an out-of-memory retry that the estimator say
 claim a saved file; per-class AP that does not average to the headline; phone rows that cut facts ("8 clas…",
 "shapes-hard…", Compare's first pair headers broken per letter); feedback and tooltips that sit behind an open
 dialog; help that needs hover; desktop canvases left half empty (lists, Settings, the empty Playground).
+
+r23 (#141: one primary per state, the out-of-memory fit, truthful demo exports, class means in the mock, facts never
+cut on phones, one tick family, dialog-contained feedback and tooltips, tap-to-open help, dogfood-3's CLI command and
+close-mosaic cap): craft, data visualisation and accessibility rose to 8.5 (Sol 9 on 4 and 5), but 1, 2, 3, 7, 8, 11
+and 12 stay at 8. What remains is narrower and more specific: small coloured text under AA in light (JSON tokens,
+end labels, a lime metric, a red value), a second focus style on inputs, phone sections that put summaries before
+the work (the KPI grid above every Model section, Compare's legend, a queued run's full config), prose columns in
+wide frames, a New run preset that its own forecast says will not fit (the oom-retry scene's hard-coded batch), and
+demo facts that disagree on one screen (a toast against the live run, 37.5 % against 37.9 %).
