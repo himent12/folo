@@ -143,7 +143,8 @@ hid every `.rail` left Model's Details, Run's Classes and a queued run's Config 
 - every selected tab (`[role=tab][aria-selected=true]`) and every checked radio with `aria-controls`: the element it
   controls must exist, be visible (not `display: none`, itself or through an ancestor) and be taller than 40 px;
 - every checked radio of a section picker without `aria-controls` (a Segmented labelled "Show", or one in
-  `.phone-pick`): the content under the picker in `main` must reach 40 px;
+  `.phone-pick`): the content under the picker in `main` must reach 40 px, and start 12 px under the picker (sections
+  share one geometry: a hidden section leaves no grid track or gap behind);
 - `main`: the content under the page header (`.page > header`, or main's top when the header takes no room) must reach
   80 px.
 

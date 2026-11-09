@@ -111,6 +111,8 @@
   // Phones: after the headline metrics, one section at a time (as on the run page) instead of a 4,000 px column.
   const phone = new MediaQuery(media.phone, false);
   let section = $state<ModelSection>('curves');
+  /** The sticky picker's height: a section's own sticky bar (Classes' selection) holds just under it. */
+  let pickH = $state(0);
   const showing = (part: ModelSection) => sectionShown(phone.current, section, part);
 
   // What goes wrong most, ranked: beside the matrix in a rail on wider screens; on phones the Confusion section opens on
@@ -342,7 +344,7 @@
 
     {#if phone.current}
       <!-- Stays reachable under the top bar while a section scrolls. -->
-      <div class="phone-pick">
+      <div class="phone-pick" bind:offsetHeight={pickH}>
         <Segmented label="Show" bind:value={section} options={MODEL_SECTIONS} />
       </div>
     {/if}
@@ -351,7 +353,11 @@
          taking what the rail adds; the per-class table, the curves' legend, follows in a row of its own. Up to 1199 px
          the table follows the curves and the details fold into one line under it. Both PR panels share the traced and
          pointed-at classes. -->
-    <div class="detail" class:off={!showing('curves') && !showing('classes') && !showing('details')}>
+    <div
+      class="detail"
+      class:off={!showing('curves') && !showing('classes') && !showing('details')}
+      style:--pick-bottom={phone.current ? `calc(var(--size-topbar) + var(--space-2) + ${pickH}px)` : undefined}
+    >
       <div class="main-col" class:off={!showing('curves')}>
         <Panel title="Precision–recall" meta="precision by recall · IoU 0.5" pad="none" id="pr">
           {#if ev}
@@ -795,7 +801,8 @@
     display: grid;
     grid-template-rows: 16px 28px;
     gap: 2px;
-    padding: var(--space-2) var(--space-3);
+    /* The phone panels' one 16 px inset, so labels line up with the sections' titles and bodies below. */
+    padding: var(--space-2) var(--space-4);
     background: var(--bg-panel);
     min-width: 0;
   }
@@ -1256,6 +1263,17 @@
     }
   }
   @media (max-width: 767px) {
+    /* One section at a time behind the picker: no named rows, so the hidden sections leave no empty tracks or gaps
+       and every section starts 12 px under the picker (as on Run; the shoot's QA checks it). */
+    .detail {
+      grid-template-areas: none;
+      gap: 0;
+    }
+    .main-col,
+    .rail,
+    .cls-part {
+      grid-area: auto;
+    }
     /* "View curve" and "Back to Classes" land the curves panel under the top bar and the section picker. */
     .main-col :global(#pr) {
       scroll-margin-top: calc(var(--size-topbar) + var(--space-16));

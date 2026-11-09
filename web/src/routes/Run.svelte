@@ -522,12 +522,15 @@
   @media (max-width: 1023px) {
     /* Tablets and phones: the rail no longer fits beside the samples, so one section at a time, picked above. */
     /* The section picker stays reachable while the section scrolls (just under the top bar). */
+    /* Flex, not block: the segmented group is inline, and a line box would add its descender under it (16 px to the
+       section at the tablet tier instead of 12). */
     .phone-pick {
-      display: block;
+      display: flex;
       position: sticky;
       top: calc(var(--size-topbar) + var(--space-2));
       z-index: var(--z-sticky);
-      margin-bottom: calc(-1 * var(--space-1));
+      /* 12 px to the section under the page's 20 px gap (16 on phones, below). */
+      margin-bottom: calc(var(--space-3) - var(--space-5));
     }
     /* One part is visible at a time, so the empty columns must not add gaps. */
     .detail,
@@ -550,6 +553,9 @@
     }
   }
   @media (max-width: 767px) {
+    .phone-pick {
+      margin-bottom: calc(var(--space-3) - var(--space-4));
+    }
     .phone-pick :global(.seg) {
       display: flex;
       width: 100%;
