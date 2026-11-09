@@ -17,6 +17,8 @@ use std::sync::Arc;
 use folo_api::{CloudOffer, CloudProvider};
 
 pub mod bootstrap;
+#[cfg(test)]
+mod fixture;
 mod http;
 pub mod remote;
 pub mod runpod;
