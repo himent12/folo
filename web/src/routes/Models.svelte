@@ -21,6 +21,7 @@
   import Skeleton from '$lib/ui/Skeleton.svelte';
   import SortHeader from '$lib/ui/SortHeader.svelte';
   import TableState from '$lib/ui/TableState.svelte';
+  import Ident from '$lib/ui/Ident.svelte';
   import { rowNav } from '$lib/ui/rowNav';
   import { unlike, versusYolo26n } from '$lib/benchmarks';
   import { origin } from '$lib/lineage';
@@ -248,7 +249,7 @@
                 {@const parent = parentOf(m)}
                 <tr class="link" data-row aria-label={m.name} onclick={() => router.go(`/models/${m.id}`)}>
                   <td><a class="name" href={href(`/models/${m.id}`)} title={m.id} onclick={(e) => e.stopPropagation()}>{m.name}</a></td>
-                  <td class="mono faint">{m.arch}</td>
+                  <td><Ident value={m.arch} class="faint" /></td>
                   <td class="r spec hide-lg" title={m.classes.slice(0, 12).join(', ') + (m.classes.length > 12 ? ', …' : '')}>{m.classes.length}</td>
                   <td class="r spec hide-md">{m.imgsz}</td>
                   <td class="r spec">{compact(m.params)}</td>
@@ -265,11 +266,11 @@
                   </td>
                   <td class="hide-lg">
                     {#if parent?.kind === 'model' && modelById.has(parent.id)}
-                      <a class="src" href={href(`/models/${parent.id}`)} onclick={(e) => e.stopPropagation()}>{parent.label}</a>
+                      <Ident value={parent.label} class="src" href={href(`/models/${parent.id}`)} onclick={(e) => e.stopPropagation()} />
                     {:else if parent?.kind === 'file'}
-                      <span class="mono src" title={parent.path}>{parent.label}</span>
+                      <Ident value={parent.label} class="src" title={parent.path} />
                     {:else}
-                      <span class="faint">{parent?.kind === 'scratch' ? 'From scratch' : (parent?.label ?? '—')}</span>
+                      {#if parent && parent.kind !== 'scratch'}<Ident value={parent.label} class="faint" />{:else}<span class="faint">{parent ? 'From scratch' : '—'}</span>{/if}
                     {/if}
                   </td>
                   <td class="r faint" title={date(m.created)}>{ago(m.created)}</td>
@@ -313,7 +314,7 @@
                 <a href={href(`/models/${m.id}`)}>
                   <span class="m-main">
                     <span class="name truncate">{m.name}</span>
-                    <span class="m-meta truncate"><span class="mono">{m.arch}</span> · <span class="num">{m.imgsz} px · {compact(m.params)} · {bytes(m.bytes, prefs.units)}</span></span>
+                    <span class="m-meta truncate"><Ident value={m.arch} /> · <span class="num">{m.imgsz} px · {compact(m.params)} · {bytes(m.bytes, prefs.units)}</span></span>
                   </span>
                   <span class="m-side"><span class="num map"><span class="sr-only">mAP50-95 </span>{metric(m.metrics?.map50_95)}</span></span>
                 </a>
@@ -439,7 +440,8 @@
     color: var(--text-primary);
     font-weight: var(--weight-medium);
   }
-  .src {
+  .src,
+  td :global(.ident.src) {
     color: var(--text-secondary);
   }
   .end {
@@ -462,15 +464,12 @@
     gap: var(--space-2);
     min-height: 40px;
     padding: var(--space-2) var(--space-4);
-    border: 1px solid var(--line-default);
+    border: 1px solid var(--line-panel);
     border-radius: var(--radius-lg);
     background: var(--bg-panel);
     cursor: pointer;
     list-style: none;
     transition: border-color var(--dur-fast) var(--ease-standard);
-  }
-  :global([data-theme='dark']) .bench summary {
-    border-color: var(--line-subtle);
   }
   .bench summary:hover {
     border-color: var(--line-strong);

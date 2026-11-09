@@ -13,8 +13,3 @@ export const MODEL_SECTIONS: { value: ModelSection; label: string }[] = [
 export function sectionShown(phone: boolean, section: ModelSection, part: ModelSection): boolean {
   return !phone || section === part;
 }
-
-/** Which half of the PR panel to show: both on wider screens; on a phone the curves or the class table. */
-export function prView(phone: boolean, section: ModelSection): 'all' | 'curves' | 'classes' {
-  return phone && (section === 'curves' || section === 'classes') ? section : 'all';
-}

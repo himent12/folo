@@ -583,8 +583,8 @@ export const scenes = [
     setup: async (page) => {
       await until(page, '#pr svg');
       await page.getByRole('radio', { name: 'Classes' }).click();
-      await page.locator('#pr button.cls').first().click();
-      await page.locator('#pr button.disc').first().click();
+      await page.locator('#per-class button.cls').first().click();
+      await page.locator('#per-class button.disc').first().click();
     },
   },
   {
@@ -596,8 +596,8 @@ export const scenes = [
     setup: async (page) => {
       await until(page, '#pr svg');
       await page.getByRole('radio', { name: 'Classes' }).click();
-      await page.locator('#pr button.disc').nth(2).click();
-      await page.locator('#pr tr.detail button', { hasText: 'View curve' }).click();
+      await page.locator('#per-class button.disc').nth(2).click();
+      await page.locator('#per-class tr.detail button', { hasText: 'View curve' }).click();
       await until(page, '#pr .legend .back');
       await page.clock.runFor(500);
     },
@@ -736,8 +736,8 @@ export const scenes = [
     viewports: ['desktop', 'laptop'],
     setup: async (page) => {
       await until(page, '#cm .cell');
-      await page.locator('#pr button.cls').nth(1).click();
-      await page.locator('#pr button.cls').nth(4).click();
+      await page.locator('#per-class button.cls').nth(1).click();
+      await page.locator('#per-class button.cls').nth(4).click();
       await page.mouse.move(0, 0);
     },
   },

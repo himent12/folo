@@ -26,6 +26,7 @@
   import StatusBadge from '$lib/ui/StatusBadge.svelte';
   import TableState from '$lib/ui/TableState.svelte';
   import Gate from '$lib/ui/Gate.svelte';
+  import Ident from '$lib/ui/Ident.svelte';
   import { isOffline, OFFLINE_REASON } from '$lib/ui/offline';
   import { origin } from '$lib/lineage';
 
@@ -87,8 +88,6 @@
     failed: 'Failed',
   };
   const tone = (r: Run) => (r.status === 'running' ? 'accent' : 'neutral');
-  /** "From scratch" as a value of its own (capital F), "from <model>" after the dataset and model. */
-  const fromText = (from: ReturnType<typeof origin>) => (from.kind === 'scratch' ? 'from scratch' : `from ${from.label}`);
   // Nothing answers: the actions that need the server are disabled and say why (as on Datasets).
   const offline = $derived(!runs.data && isOffline(runs.error));
 </script>
@@ -208,20 +207,20 @@
                 </td>
                 <td class="lead">
                   <a class="name" href={href(`/runs/${r.id}`)} onclick={(e) => e.stopPropagation()}>{r.name}</a>
-                  <span class="sub ctx">{dsName.get(r.config.dataset_id) ?? r.config.dataset_id} · <span class="mono">{r.config.arch}</span> · {fromText(from)}</span>
+                  <span class="sub ctx">{dsName.get(r.config.dataset_id) ?? r.config.dataset_id} · <Ident value={r.config.arch} /> · {#if from.kind === 'scratch'}from scratch{:else}from <Ident value={from.label} />{/if}</span>
                 </td>
                 <td use:tooltip={failureCause(r)}><StatusBadge status={r.status} plain /></td>
                 <td class="hide-lg muted">{dsName.get(r.config.dataset_id) ?? r.config.dataset_id}</td>
-                <td class="hide-lg"><span class="mono muted">{r.config.arch}</span></td>
+                <td class="hide-lg"><Ident value={r.config.arch} class="muted" /></td>
                 <td class="hide-lg from">
                   {#if from.kind === 'model' && modelById.has(from.id)}
-                    <a href={href(`/models/${from.id}`)} onclick={(e) => e.stopPropagation()}>{from.label}</a>
+                    <Ident value={from.label} href={href(`/models/${from.id}`)} onclick={(e) => e.stopPropagation()} />
                   {:else if from.kind === 'file'}
-                    <span class="mono" title={from.path}>{from.label}</span>
+                    <Ident value={from.label} title={from.path} />
                   {:else if from.kind === 'scratch'}
                     <span class="faint">From scratch</span>
                   {:else}
-                    <span class="faint">{from.label}</span>
+                    <Ident value={from.label} class="faint" />
                   {/if}
                 </td>
                 <td>
@@ -369,8 +368,7 @@
   .name {
     display: block;
   }
-  .from a,
-  .from .mono {
+  .from :global(.ident) {
     color: var(--text-secondary);
   }
   .prog {

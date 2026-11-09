@@ -37,14 +37,13 @@
 <style>
   .panel {
     background: var(--bg-panel);
-    border: 1px solid var(--line-default);
+    border: 1px solid var(--line-panel);
     border-radius: var(--radius-lg);
     min-width: 0;
     display: flex;
     flex-direction: column;
   }
   :global([data-theme='dark']) .panel {
-    border-color: var(--line-subtle);
     box-shadow: inset 0 1px 0 #ffffff06;
   }
   header {

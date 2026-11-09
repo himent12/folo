@@ -57,3 +57,25 @@ describe('ConfusionMatrix labels', () => {
     unmount(cm);
   });
 });
+
+describe('ConfusionMatrix scale', () => {
+  it('labels every key as a share, with None as a swatch of its own', () => {
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    const cm = mount(ConfusionMatrix, { target, props: { classes: ['a'], matrix: [[1, 0], [0, 0]], minCell: 32, scale: true } });
+    flushSync();
+    const ticks = [...target.querySelectorAll('.scale .tick')].flatMap((t) => (t.children.length ? [...t.children] : [t])).map((t) => t.textContent?.trim());
+    expect(ticks).toEqual(['None', '<1%', '1%', '5%', '10%', '100%']);
+    expect(target.querySelector('.scale .none')).not.toBeNull();
+    unmount(cm);
+  });
+
+  it('caps its cells at maxCell', () => {
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    const cm = mount(ConfusionMatrix, { target, props: { classes: ['a'], matrix: [[1, 0], [0, 0]], minCell: 32, maxCell: 48 } });
+    flushSync();
+    expect(target.querySelector<HTMLElement>('.cm')!.style.getPropertyValue('--max-cell')).toBe('48px');
+    unmount(cm);
+  });
+});

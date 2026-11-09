@@ -72,7 +72,7 @@
     min-height: 44px;
     padding: var(--space-2) var(--space-2) var(--space-2) var(--space-4);
     background: var(--bg-panel);
-    border: 1px solid var(--line-default);
+    border: 1px solid var(--line-panel);
     border-radius: var(--radius-lg);
   }
   .callout > :global(svg) {

@@ -36,6 +36,7 @@
   import Skeleton from '$lib/ui/Skeleton.svelte';
   import Slider from '$lib/ui/Slider.svelte';
   import Switch from '$lib/ui/Switch.svelte';
+  import Ident from '$lib/ui/Ident.svelte';
   import { toast } from '$lib/ui/toast.svelte';
   import { tooltip } from '$lib/ui/tooltip';
   import AugPreview, { type AugKey } from './runnew/AugPreview.svelte';
@@ -515,7 +516,7 @@
 {#snippet reviewList(withName: boolean)}
   <ul class="review" aria-label="Settings">
     {#if withName}
-      <li><button type="button" class="rv" class:warn={!!errors.name} onclick={() => jump('name')}><span class="rv-k">Run name</span><span class="rv-v mono">{name.trim() || '—'}</span></button></li>
+      <li><button type="button" class="rv" class:warn={!!errors.name} onclick={() => jump('name')}><span class="rv-k">Run name</span><span class="rv-v">{name.trim() || '—'}</span></button></li>
     {/if}
     {#each review as r (r.key)}
       <li>
@@ -604,7 +605,7 @@
       <label class="arch" class:on>
         <input type="radio" name="arch" value={a.arch} bind:group={arch} class="sr-only" />
         <span class="a-size">{a.size}</span>
-        <span class="a-name mono">{a.arch}</span>
+        <Ident value={a.arch} class="a-name" />
         <span class="a-note">{a.note}</span>
         <span class="a-v num">{compact(a.params)}</span>
         <span class="a-v num">{num(a.flops, 1)}</span>
@@ -683,7 +684,7 @@
             <div class="a-pick">
               <Segmented id="arch-pick" label="Model size" bind:value={arch} options={arches.map((a) => ({ value: a.arch, label: a.size }))} />
               {#if selArch}
-                <p class="a-sel"><span class="mono">{selArch.arch}</span> {selArch.note}</p>
+                <p class="a-sel"><Ident value={selArch.arch} /> {selArch.note}</p>
                 <p class="a-specs num">
                   {compact(selArch.params)} params · {num(selArch.flops, 1)} GFLOPs · {selArch.ms !== undefined ? `${num(selArch.ms, 2)} ms` : 'latency not measured yet'}
                 </p>
@@ -938,7 +939,7 @@
             <span>{roughDuration(est.totalSeconds)}</span>
             {#if !onCpu && gpu}<span class:warn={vramPct > 0.9}>{roughBytes(vram)} VRAM</span>{/if}
             {#if short}<span class="dock-warn"><TriangleAlert size={12} aria-hidden="true" />{short.scratch ? 'Too short to learn' : 'Mostly warmup'}</span>{/if}
-            {#if dataset}<span class="faint">{dataset.name} · {arch}</span>{/if}
+            {#if dataset}<span class="faint">{dataset.name} · <Ident value={arch} /></span>{/if}
             <span class="dock-more"><ChevronUp size={14} strokeWidth={1.75} aria-hidden="true" /></span>
           </button>
         {/if}
@@ -1087,11 +1088,11 @@
     line-height: var(--type-md-line);
     font-weight: var(--weight-semibold);
   }
-  .a-name {
+  .arch :global(.a-name) {
     font-size: var(--type-sm-size);
     color: var(--text-tertiary);
   }
-  .arch.on .a-name {
+  .arch.on :global(.a-name) {
     color: var(--text-secondary);
   }
   .a-note {
@@ -1458,7 +1459,7 @@
     margin-top: var(--space-2);
     color: var(--text-primary);
   }
-  .a-sel .mono {
+  .a-sel :global(.ident) {
     margin-right: var(--space-1);
     font-size: var(--type-sm-size);
     color: var(--text-tertiary);
@@ -1624,7 +1625,7 @@
     gap: var(--space-3);
     padding: var(--space-3) var(--space-4);
     background: var(--bg-panel);
-    border: 1px solid var(--line-default);
+    border: 1px solid var(--line-panel);
     border-radius: var(--radius-lg);
     color: var(--text-secondary);
   }
