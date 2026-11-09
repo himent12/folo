@@ -185,6 +185,7 @@
         <!-- svelte-ignore a11y_click_events_have_key_events -->
         <div
           class="cell"
+          class:bare={!!img && img.boxes.length === 0}
           role="gridcell"
           data-i={i}
           tabindex={i === tabIdx ? 0 : -1}
@@ -300,6 +301,15 @@
   .cell:focus-visible .meta {
     opacity: 1;
     transform: none;
+  }
+  /* An image with no boxes (a background example) keeps its "0" at rest, so a plain surface never reads as a tile that
+     failed to load; its name still waits for hover or focus. */
+  .cell.bare .meta {
+    opacity: 1;
+    transform: none;
+  }
+  .cell.bare:not(:hover, :focus-visible) .meta .file {
+    visibility: hidden;
   }
   .d-s .meta {
     display: none;

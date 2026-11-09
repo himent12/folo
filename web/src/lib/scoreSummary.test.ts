@@ -79,9 +79,9 @@ describe('the tags and labels', () => {
     expect(filterLabel(train)).toBe('fasteners-mini · training split');
   });
   it('carries the context in one line of text', () => {
-    expect(scoreText(0.604, val)).toBe('mAP 0.604 on fasteners');
-    expect(scoreText(0.701, train)).toBe('mAP 0.701 on fasteners-mini · training split');
-    expect(scoreText(0.448, imported)).toBe('mAP 0.448 · split unknown');
+    expect(scoreText(0.604, val)).toBe('mAP50-95 0.604 on fasteners');
+    expect(scoreText(0.701, train)).toBe('mAP50-95 0.701 on fasteners-mini · training split');
+    expect(scoreText(0.448, imported)).toBe('mAP50-95 0.448 · split unknown');
   });
   it('gives only a known dataset and split a rank key', () => {
     expect(rankKey(val)).toBe('ds_fasteners:val');
@@ -122,15 +122,15 @@ describe('modelChoices', () => {
   it('lists the ranked groups first, then the unranked ones, each label carrying its context', () => {
     const c = modelChoices([model('mini-n', null, 0.701), model('fast-a', 'r_fast', 0.6), model('mini-run', 'r_mini', 0.74)], ctx);
     expect(c.map((x) => [x.group, x.label])).toEqual([
-      ['Validation split of fasteners', 'fast-a · mAP 0.600 on fasteners'],
-      ['Training split of fasteners-mini', 'mini-run · mAP 0.740 on fasteners-mini · training split'],
-      ['Imported · split unknown', 'mini-n · mAP 0.701 · split unknown'],
+      ['Validation split of fasteners', 'fast-a · mAP50-95 0.600 on fasteners'],
+      ['Training split of fasteners-mini', 'mini-run · mAP50-95 0.740 on fasteners-mini · training split'],
+      ['Imported · split unknown', 'mini-n · mAP50-95 0.701 · split unknown'],
     ]);
     // Closed, a select shows the name alone; the score and all of its context go in the meta line under it.
     expect(c.map((x) => [x.short, x.meta])).toEqual([
-      ['fast-a', 'mAP 0.600 · fasteners, validation split'],
-      ['mini-run', 'mAP 0.740 · fasteners-mini, training split'],
-      ['mini-n', 'mAP 0.701 · imported, split unknown'],
+      ['fast-a', 'mAP50-95 0.600 · fasteners, validation split'],
+      ['mini-run', 'mAP50-95 0.740 · fasteners-mini, training split'],
+      ['mini-n', 'mAP50-95 0.701 · imported, split unknown'],
     ]);
   });
 });
@@ -138,5 +138,5 @@ describe('modelChoices', () => {
 it('a context type with no split is never shown as validation', () => {
   const c: ScoreContext = { kind: 'run', datasetId: 'ds_x', datasetName: 'x', split: null };
   expect(scoreTag(c)).toBe('Split unknown');
-  expect(scoreText(0.5, c)).toBe('mAP 0.500 · split unknown');
+  expect(scoreText(0.5, c)).toBe('mAP50-95 0.500 · split unknown');
 });

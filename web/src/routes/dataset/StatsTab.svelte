@@ -4,8 +4,8 @@
    * severity's icon and a short summary of its findings, units named; Details at its right end) that opens to every
    * finding with its next step, in two columns from the laptop tier. Open, the line is a plain heading ("Health ·
    * 4 findings"): the findings under it say what the summary said, so it is never said twice. A finding backed by `folo dataset check` issues opens them under itself: the one issue
-   * list, filtered to that finding's severity (and inside it, by check type). Then four numbers, the class balance as
-   * the focal chart, and the two histograms in ink.
+   * list, filtered to that finding's severity (and inside it, by check type). Then four numbers (none that Health already
+   * states), the class balance as the focal chart, and the two histograms in ink.
    */
   import IssueList from './IssueList.svelte';
   import ArrowRight from '@lucide/svelte/icons/arrow-right';
@@ -57,6 +57,22 @@
   const classCount = $derived(`${dataset.classes.length} ${dataset.classes.length === 1 ? 'class' : 'classes'}`);
   const pct = (x: number) => (images ? `${((x / images) * 100).toFixed(1)}% of images` : '');
   const evidenceNoun = (sev: IssueSeverity) => (sev === 'error' ? 'files' : sev === 'warning' ? 'warnings' : 'images');
+
+  // A count is said once on a page (DESIGN_DIRECTION §2.23): once Health lists the empty images or the broken labels, the
+  // strip under it gives that tile to a figure Health never states (Boxes per image, Classes), and the Boxes caption
+  // drops what those tiles now say. With nothing to report, the zero tiles stay: they are the "all clear" Health omits.
+  const listsEmpty = $derived(findings.some((h) => h.id === 'empty'));
+  const listsBroken = $derived(findings.some((h) => h.id === 'broken'));
+  const perImage = $derived(images ? (stats.boxes / images).toFixed(1) : '—');
+  // The busiest images' bin ("busiest 16–31"): the highest boxes-per-image bin that holds an image.
+  const perImageMax = $derived.by(() => {
+    const h = stats.boxes_per_image_hist;
+    for (let i = h.counts.length - 1; i >= 0; i--)
+      if ((h.counts[i] ?? 0) > 0) return countBinLabel(h.edges[i] ?? 0, h.edges[i + 1] ?? 0, i === h.counts.length - 1);
+    return null;
+  });
+  const presentClasses = $derived(stats.class_counts.filter((c) => c > 0).length);
+  const perClass = $derived(presentClasses ? Math.round(stats.boxes / presentClasses) : 0);
 
   /**
    * Sets `wrap` on a line that would not fit its box on one line, so it can break between its parts instead of being
@@ -142,34 +158,50 @@
       <span class="k-label">Images</span>
       <span class="k-value num">{num(images)}</span>
       <!-- The split counts break between train and the rest where one line would cut them off; tablets and phones show
-           the class count instead. -->
+           the class count instead (the training split's where the Classes tile has it). -->
       <span class="k-sub num splits" use:wrapWhenNarrow
         ><span class="wide"><span class="seg">{num(dataset.splits.train)} train<span class="sep">{' · '}</span></span><span class="seg"
             >{num(dataset.splits.val)} val · {num(dataset.splits.test)} test</span
           ></span
-        ><span class="narrow">{classCount}</span></span
+        ><span class="narrow">{listsBroken ? `${num(dataset.splits.train)} train` : classCount}</span></span
       >
     </div>
     <div class="kpi">
       <span class="k-label">Boxes</span>
       <span class="k-value num">{num(stats.boxes)}</span>
-      <span class="k-sub num">{images ? (stats.boxes / images).toFixed(1) : '—'} per image<span class="wide">{` · ${classCount}`}</span></span>
-    </div>
-    <div class="kpi">
-      <span class="k-label">Empty images</span>
-      <span class="k-value num">{num(stats.empty_images)}</span>
-      <span class="k-sub num">{pct(stats.empty_images)}</span>
-    </div>
-    <div class="kpi">
-      <span class="k-label">Broken labels</span>
-      <!-- The count is a metric, in ink; the status is the mark and its words in the caption (§2.6). -->
-      <span class="k-value num">{num(stats.broken_labels)}</span>
-      {#if stats.broken_labels > 0}
-        <span class="k-sub k-status"><CircleAlert size={12} strokeWidth={2} aria-hidden="true" />not trained on</span>
+      {#if listsEmpty}
+        <span class="k-sub num">{num(images - stats.empty_images)} images with boxes</span>
       {:else}
-        <span class="k-sub">all labels parse</span>
+        <span class="k-sub num">{perImage} per image{#if !listsBroken}<span class="wide">{` · ${classCount}`}</span>{/if}</span>
       {/if}
     </div>
+    {#if listsEmpty}
+      <div class="kpi">
+        <span class="k-label">Boxes per image</span>
+        <span class="k-value num">{perImage}</span>
+        <span class="k-sub num">{perImageMax ? `mean · busiest ${perImageMax}` : 'mean'}</span>
+      </div>
+    {:else}
+      <div class="kpi">
+        <span class="k-label">Empty images</span>
+        <span class="k-value num">{num(stats.empty_images)}</span>
+        <span class="k-sub num">{pct(stats.empty_images)}</span>
+      </div>
+    {/if}
+    {#if listsBroken}
+      <div class="kpi">
+        <span class="k-label">Classes</span>
+        <span class="k-value num">{num(dataset.classes.length)}</span>
+        <span class="k-sub num">~{num(perClass)} boxes per class</span>
+      </div>
+    {:else}
+      <div class="kpi">
+        <span class="k-label">Broken labels</span>
+        <!-- Zero here: a count Health would list is never shown twice (`listsBroken`). -->
+        <span class="k-value num">{num(stats.broken_labels)}</span>
+        <span class="k-sub">all labels parse</span>
+      </div>
+    {/if}
   </section>
 
   <Panel title="Class balance" meta="boxes per class · {ratio.toFixed(1)}× largest / smallest" pad="none" id="ds-balance">
@@ -443,15 +475,6 @@
   }
   .splits:global(.wrap) .sep {
     display: none;
-  }
-  .k-status {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--space-1);
-  }
-  .k-status > :global(svg) {
-    flex-shrink: 0;
-    color: var(--danger-text);
   }
   .two {
     display: grid;

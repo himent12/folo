@@ -81,10 +81,10 @@ export function groupKey(c: ScoreContext): string {
 
 /**
  * A score with its context in one line of text, for places that hold no markup (a native option, a palette hint):
- * "mAP 0.604 on fasteners", "mAP 0.701 on fasteners-mini · training split", "mAP 0.448 · split unknown".
+ * "mAP50-95 0.604 on fasteners", "mAP50-95 0.701 on fasteners-mini · training split", "mAP50-95 0.448 · split unknown".
  */
 export function scoreText(score: number | null | undefined, c: ScoreContext): string {
-  const s = `mAP ${metric(score)}`;
+  const s = `mAP50-95 ${metric(score)}`;
   const tag = scoreTag(c)?.toLowerCase();
   if (c.kind === 'run' && c.datasetName && c.split) return `${s} on ${c.datasetName}${tag ? ` · ${tag}` : ''}`;
   return `${s} · ${tag ?? 'split unknown'}`;
@@ -92,7 +92,7 @@ export function scoreText(score: number | null | undefined, c: ScoreContext): st
 
 /**
  * A score with its whole context, as the meta line under a picker that shows the model's name alone:
- * "mAP 0.606 · shapes-hard, validation split", "mAP 0.701 · imported, split unknown". Null without a score.
+ * "mAP50-95 0.606 · shapes-hard, validation split", "mAP50-95 0.701 · imported, split unknown". Null without a score.
  */
 export function scoreMeta(score: number | null | undefined, c: ScoreContext): string | null {
   if (score == null) return null;
@@ -102,7 +102,7 @@ export function scoreMeta(score: number | null | undefined, c: ScoreContext): st
       : c.kind === 'imported'
         ? 'imported, split unknown'
         : `${c.datasetName ?? 'unknown dataset'}, ${c.split ? `${splitWord(c.split)} split` : 'split unknown'}`;
-  return `mAP ${metric(score)} · ${on}`;
+  return `mAP50-95 ${metric(score)} · ${on}`;
 }
 
 export interface ScoreGroup<T> {
@@ -148,11 +148,11 @@ export interface ModelChoice<M> {
   ctx: ScoreContext;
   /** The `<optgroup>` it is listed under: what its score is on ("Validation split of fasteners"). */
   group: string;
-  /** "fasteners-n-best · mAP 0.604 on fasteners": the open list's option, the score never without its context. */
+  /** "fasteners-n-best · mAP50-95 0.604 on fasteners": the open list's option, the score never without its context. */
   label: string;
   /** The closed select's text, the model's name alone; `meta` says the rest under it. */
   short: string;
-  /** "mAP 0.604 · fasteners, validation split" (null without a score): the meta line under the closed select. */
+  /** "mAP50-95 0.604 · fasteners, validation split" (null without a score): the meta line under the closed select. */
   meta: string | null;
 }
 

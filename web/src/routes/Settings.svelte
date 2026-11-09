@@ -54,7 +54,7 @@
     { id: 'connection', label: 'Connection' },
     { id: 'appearance', label: 'Appearance' },
     { id: 'units', label: 'Units' },
-    { id: 'shortcuts', label: 'Shortcuts' },
+    { id: 'shortcuts', label: 'Keyboard shortcuts' },
     ...(caps ? [{ id: 'system', label: 'System' }] : []),
     { id: 'about', label: 'About' },
   ]);

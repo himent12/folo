@@ -106,7 +106,7 @@
     const dsById = new Map<string, Dataset>((datasets.data ?? []).map((d) => [d.id, d]));
     return modelChoices(models.data, (m) => scoreContext(m, runById, dsById));
   });
-  /** The chosen model's score and what it is on, under the select: "mAP 0.606 · shapes-hard, validation split". */
+  /** The chosen model's score and what it is on, under the select: "mAP50-95 0.606 · shapes-hard, validation split". */
   const pickedMeta = $derived(choices.find((c) => c.model.id === modelId)?.meta ?? null);
   const ranked = $derived(choices.map((c) => c.model));
   const queryModel = $derived(router.route.query.get('model'));

@@ -27,10 +27,12 @@ export const TOUCH_ONLY = '(hover: none) and (pointer: coarse)';
 export const touchOnly = () => typeof matchMedia !== 'undefined' && matchMedia(TOUCH_ONLY).matches;
 
 /**
- * Every shortcut the reference lists. `single`: a single-character key that Settings can turn off (ui/keyPrefs); the
- * rest (Mod+K, the arrow keys and Enter of a focused list or chart, the image inspector's own keys) always work.
+ * Every shortcut the reference lists, one row per action. `single`: `keys` is a single-character key that Settings can
+ * turn off (ui/keyPrefs); the rest (Mod+K, the arrow keys and Enter of a focused list or chart, the image inspector's
+ * own keys) always work. `also`: other keys for the same action, which always work (a row's J K and its ↓ ↑), so an
+ * action is listed once with both, never as two rows with one name.
  */
-export const shortcutList: { keys: string; label: string; group: string; single?: boolean }[] = [
+export const shortcutList: { keys: string; also?: string; label: string; group: string; single?: boolean }[] = [
   { keys: 'Mod+K', label: 'Command palette', group: 'General' },
   { keys: '?', label: 'Keyboard shortcuts', group: 'General', single: true },
   { keys: '[', label: 'Collapse or expand the sidebar', group: 'General', single: true },
@@ -38,9 +40,9 @@ export const shortcutList: { keys: string; label: string; group: string; single?
   ...[...mainNav, settingsNav].map((n) => ({ keys: n.keys, label: `Go to ${n.label}`, group: 'Navigation', single: true })),
   // A run, model or dataset page (and Compare): back to its list, when nothing on the page is using Escape.
   { keys: 'Escape', label: 'Back to the list (detail pages)', group: 'Navigation', single: true },
-  // Rows of the Runs, Models and Datasets tables (ui/rowNav.ts). J / K enter the list when nothing has focus.
-  { keys: 'J K', label: 'Next / previous row', group: 'Lists', single: true },
-  { keys: 'ArrowDown ArrowUp', label: 'Next / previous row (focused list)', group: 'Lists' },
+  // Rows of the Runs, Models and Datasets tables (ui/rowNav.ts). J / K enter the list when nothing has focus; the
+  // arrows move within a focused one.
+  { keys: 'J K', also: 'ArrowDown ArrowUp', label: 'Next / previous row', group: 'Lists', single: true },
   { keys: 'Enter', label: 'Open the row', group: 'Lists' },
   { keys: 'X', label: 'Select the run to compare (Runs)', group: 'Lists', single: true },
   { keys: 'ArrowLeft ArrowRight', label: 'Move the chart cursor (focused chart)', group: 'Charts' },

@@ -89,7 +89,7 @@
   }
   const rowItems = (r: Run) => {
     const at = placeOf(r);
-    return at === null ? [] : queueItems(at, waiting, training, (req) => move(r, req), { remove: () => (removing = r) });
+    return at === null ? [] : queueItems(at, waiting, training, (req) => move(r, req), () => (removing = r));
   };
 
   /** The waiting run Remove from queue asks about (the same confirm as on its own page). */
@@ -225,7 +225,7 @@
             <th class="hide-lg" style:width="128px">Started from</th>
             <th style:width="136px">Progress</th>
             <th class="r" style:width="128px">Best mAP50-95</th>
-            <th class="hide-lg" style:width="120px">mAP trend</th>
+            <th class="hide-lg" style:width="120px">mAP50-95 trend</th>
             <th class="r hide-md" style:width="96px">Created</th>
             <th class="act" style:width="40px"><span class="sr-only">Actions</span></th>
           </tr>

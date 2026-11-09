@@ -84,4 +84,20 @@ describe('copy', () => {
     }
     expect(hits).toEqual([]);
   });
+
+  it('names the score it prints: "mAP50-95 0.604" or "mAP50 0.812", never a bare "mAP 0.604"', () => {
+    // DESIGN_DIRECTION §2.23, one name per measure: the sidebar's live card, the palette, the Playground and New run's
+    // Start from all printed "mAP 0.6…" beside screens that say mAP50-95 for the same figure. Prose about the metric
+    // ("expect an mAP near 0") names no figure, so only "mAP" before a value is caught.
+    const hits: string[] = [];
+    for (const file of files(SRC, /\.(svelte|ts)$/)) {
+      uncommented(readFileSync(file, 'utf8'))
+        .split('\n')
+        .forEach((line, i) => {
+          // "mAP" then a space and a figure, an interpolation (`${`) or a Svelte expression (`{`).
+          if (/\bmAP (?:\d|\$\{|\{)/.test(line)) hits.push(`${relative(SRC, file)}:${i + 1}: ${line.trim()}`);
+        });
+    }
+    expect(hits).toEqual([]);
+  });
 });

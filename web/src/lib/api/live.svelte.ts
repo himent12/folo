@@ -16,6 +16,7 @@
 // steps beyond it (an attempt this client saw but the server replaced) are dropped.
 
 import { untrack } from 'svelte';
+import { SvelteSet } from 'svelte/reactivity';
 import { hub } from './index.svelte';
 import type { Epoch, LogLine, Run, Step } from './types';
 
@@ -79,6 +80,20 @@ function mergeLogs(a: LogLine[], b: LogLine[]): LogLine[] {
   return out.slice(-MAX_LOGS);
 }
 
+/** Every mounted view's stream (Overview's live card, the run page), so the shell can read the one already open. */
+const streams = new SvelteSet<LiveRun>();
+
+/**
+ * The run as a mounted view's stream currently has it, while that stream is up (loaded, not `lost`): the sidebar's live
+ * card reads it in place of the polled list, so it never says "Last known" beside a hero that is still live, nor
+ * trails it by a poll (DESIGN_DIRECTION §2.8: two clocks, one reading per source). Undefined when no view streams `id`.
+ */
+export function streamedRun(id: string | undefined): Run | undefined {
+  if (!id) return undefined;
+  for (const s of streams) if (s.run?.id === id && s.lost === null && !s.loading) return s.run;
+  return undefined;
+}
+
 export class LiveRun {
   run = $state.raw<Run | undefined>(undefined);
   error = $state.raw<unknown>(undefined);
@@ -113,6 +128,10 @@ export class LiveRun {
   #replay: { until: number; steps: Step[]; epochs: Epoch[] } | null = null;
 
   constructor(id: () => string | null) {
+    $effect(() => {
+      streams.add(this);
+      return () => void streams.delete(this);
+    });
     $effect(() => {
       const runId = id();
       if (hub.mode === 'connecting' || !runId) return;

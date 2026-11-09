@@ -275,6 +275,25 @@ export const scenes = [
       await page.locator('.amp .switch').click();
       await page.locator('.summary details.cli > summary').click();
       await page.locator('.summary details.cli').scrollIntoViewIfNeeded();
+      // The estimate for these settings lands (300 ms after the last change, then the server's answer), so the Summary
+      // is current; run-new-estimate-updating shows the moment before.
+      await page.clock.runFor(1000);
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // The settings just changed and their estimate is still out: the last answer stays, dimmed to tertiary in the
+    // Summary and the dock, and the basis line reads "Updating…" with a spinner (a figure is current or marked as not).
+    name: 'run-new-estimate-updating',
+    path: '/runs/new',
+    viewports: ['desktop', 'laptop', 'mobile'],
+    setup: async (page) => {
+      await until(page, 'input#name');
+      await page.clock.runFor(1000);
+      await until(page, '.summary .est-how summary');
+      if (await page.locator('#arch-pick').isVisible()) await page.locator('#arch-pick button', { hasText: 'N' }).click();
+      else await page.locator('input[name="arch"][value="folo-n"]').check({ force: true });
+      await until(page, '.est-how.stale');
       await page.mouse.move(0, 0);
     },
   },
@@ -298,8 +317,8 @@ export const scenes = [
   },
   {
     // Server PR #140: a POST refused with `501 not_supported` (the server restarted without tensor cores after the page
-    // loaded): the server's words at the Mixed precision field, never a toast, and, from the capabilities read again,
-    // the switch off with the way to turn tensor cores back on.
+    // loaded): never a toast; from the capabilities read again, the switch off and held off, so the refusal is answered
+    // and the field says quietly why and how to turn tensor cores back on (no danger line, no button repeating Start).
     name: 'run-new-amp-refused',
     path: '/runs/new',
     search: 'scenario=amp-refused',
@@ -309,7 +328,6 @@ export const scenes = [
       await until(page, 'input#amp');
       await page.locator('.amp .switch').click();
       await page.locator('form.layout').evaluate((f) => /** @type {HTMLFormElement} */ (f).requestSubmit());
-      await until(page, '#amp-error');
       await until(page, '#amp-why');
       await page.clock.runFor(1000);
       await page.mouse.move(0, 0);
@@ -567,11 +585,12 @@ export const scenes = [
   // A queued run, first of two waiting: its place, what it waits for and when it should start lead; from 768 px up the
   // config beside the queue and one quiet list of what the run will have (no empty frames). Phones keep their sections.
   { name: 'run-queued', path: '/runs/run_q4n2', viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
-  // Second in the queue (queue control): "2nd in queue", the run in front of it, and Start next (it never interrupts the
-  // live run, so not "now").
+  // Second in the queue (queue control): "2nd in queue", when it should start ("Starts in about …", each run in front with
+  // its own time), and Start next (it never interrupts the live run, so not "now").
   { name: 'run-queued-second', path: '/runs/run_q7c5', viewports: ['desktop', 'laptop', 'tablet', 'mobile'], setup: (page) => until(page, '.callout button') },
   {
-    // The queued run's ⋯: Move up (it is last, so no Move down), then Remove from queue, last under a hairline.
+    // The queued run's ⋯: the queue's one action set, as on its Runs row: Start next, Move up (it is last, so no Move
+    // down), then Remove from queue, last under a hairline.
     name: 'run-queued-menu',
     path: '/runs/run_q7c5',
     fullPage: false,
