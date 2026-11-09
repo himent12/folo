@@ -50,7 +50,9 @@ next an empty band when capped; the PR legend keeps its "P @ best F1" column bes
 there, the next to drop P as a repeat of the class table); the learning-rate legend value is written in the axis's
 power ("0.10×10⁻³"), so a card has one power and the value still reads alone (the dogfood report asked for that);
 New run's section heads stay 14 px semibold and the dialog title is 20 px semibold above them (one round asked for
-larger heads, the next said they outweighed the title).
+larger heads, the next said they outweighed the title). The run page's "Precision / Recall" card and the model page's
+"Precision–recall" card are different charts: two metrics over epochs, and one curve of precision against recall.
+Their names differ on purpose.
 
 ## Scoring
 Use `REVIEW_RUBRIC.md` (path in your task): 12 lines, 1–10, where **9 means "would ship as-is at Linear / Raycast / Zed

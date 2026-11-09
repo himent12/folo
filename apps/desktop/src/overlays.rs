@@ -600,6 +600,16 @@ impl FoloApp {
         let error = f.error.clone();
         let submitting = f.submitting;
         let ds = datasets.get(ds_i).cloned();
+        // A Mixed precision switch that held focus when it became blocked (the device changed by
+        // key, or the server's answer arrived) has no focus stop any more: focus moves to the
+        // control before it, so keys keep working. Before the controls are built, so that one
+        // draws its ring this frame.
+        if self.amp_blocked(DEVICES[device]).is_some()
+            && self.focus.borrow().get("nr-amp").is_some_and(|f| f.is_focused(window))
+        {
+            let prev = self.fh("nr-close", cx);
+            window.focus(&prev);
+        }
         let label =
             |s: &str| text(ty::SM, t.text_secondary).font_weight(FontWeight::MEDIUM).child(s.to_string());
         let field = |name: &str, control: AnyElement, help: Option<String>| {
@@ -1079,22 +1089,24 @@ impl FoloApp {
                 let blocked = self.amp_blocked(DEVICES[device]);
                 let off = blocked.is_some();
                 let amp_on = amp && !off;
-                let switch = self
-                    .switch(
+                // Blocked: a disabled switch (no hover, press or focus stop); the reason is beside it.
+                let switch = if off {
+                    self.switch_disabled("nr-amp", cx).into_any_element()
+                } else {
+                    self.switch(
                         "nr-amp",
                         amp_on,
                         window,
                         cx,
                         act(move |this, _, cx| {
-                            if let Some(f) = this.new_run.as_mut()
-                                && !off
-                            {
+                            if let Some(f) = this.new_run.as_mut() {
                                 f.amp = !f.amp;
                                 cx.notify();
                             }
                         }),
                     )
-                    .into_any_element();
+                    .into_any_element()
+                };
                 div()
                     .flex()
                     .items_center()
@@ -1916,8 +1928,11 @@ impl FoloApp {
             .map(|(i, b)| {
                 let hot = hover == Some(i);
                 let key = format!("insp-box-{i}");
+                let full_name = classes.get(b.class as usize).cloned().unwrap_or_default();
                 let row = div()
                     .id(SharedString::from(key.clone()))
+                    // The class column is 70 px; the full name on hover.
+                    .tooltip(crate::controls::tip(full_name, None))
                     .h(px(30.))
                     .px(px(8.))
                     .flex()

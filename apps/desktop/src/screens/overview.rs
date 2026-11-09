@@ -117,34 +117,9 @@ impl FoloApp {
         let nothing_yet = no_ds
             && self.store.runs.ready().is_some_and(|r| r.is_empty())
             && self.store.models.ready().is_some_and(|m| m.is_empty());
-        // First run: the getting-started panel owns the call to action; the header keeps its
-        // buttons in place, disabled with the reason (the same rule as every other non-ready state).
-        let actions = if nothing_yet {
-            vec![
-                self.button_disabled(
-                    "ov-open",
-                    "Open image",
-                    Btn::Secondary,
-                    Some("icons/image-up.svg"),
-                    "Train a model first",
-                    window,
-                    cx,
-                )
-                .into_any_element(),
-                self.button_disabled(
-                    "ov-new",
-                    "New run",
-                    Btn::Primary,
-                    Some("icons/plus.svg"),
-                    "Add a dataset first",
-                    window,
-                    cx,
-                )
-                .into_any_element(),
-            ]
-        } else {
-            actions
-        };
+        // First run: the getting-started panel's "Add a dataset" is the one call to action, so the
+        // header shows no inert buttons beside it.
+        let actions = if nothing_yet { Vec::new() } else { actions };
         let header = page_header(&t, "Overview", text(ty::BASE, t.text_secondary).child(subtitle), actions);
 
         if let Some(e) = self.store.runs.error().cloned() {
@@ -768,7 +743,8 @@ impl FoloApp {
                             .store
                             .dataset_summary(&r.config.dataset_id)
                             .map_or(r.config.dataset_id.clone(), |d| d.name.clone());
-                        let when = time::parse(&r.created).map_or(String::new(), |c| time::ago(c, now));
+                        let created_at = time::parse(&r.created);
+                        let when = created_at.map_or(String::new(), |c| time::ago(c, now));
                         // Progress (training runs only) right after Status; best mAP50-95 at the end.
                         let training = r.status.is_active() && r.status != crate::api::RunStatus::Queued;
                         let progress_el =
@@ -849,9 +825,18 @@ impl FoloApp {
                             .child(div().flex_1())
                             .child(best)
                             .when(created, |d| {
-                                d.child(div().w(px(when_w)).flex_none().flex().justify_end().child(
-                                    text(ty::XS, t.text_tertiary).tnum().whitespace_nowrap().child(when),
-                                ))
+                                d.child(
+                                    div().w(px(when_w)).flex_none().flex().justify_end().child(
+                                        text(ty::XS, t.text_tertiary)
+                                            .id(SharedString::from(format!("ov-rc-{}", r.id)))
+                                            .when_some(created_at, |d, c| {
+                                                d.tooltip(crate::controls::tip(time::local_datetime(c), None))
+                                            })
+                                            .tnum()
+                                            .whitespace_nowrap()
+                                            .child(when),
+                                    ),
+                                )
                             });
                         self.bind(
                             row,
@@ -1070,9 +1055,7 @@ impl FoloApp {
                 }),
             )
             .into_any_element();
-        // `cmd`: a command on its own line as a chip (GPUI breaks lines at any non-word character,
-        // no-break spaces included, so an inline one could split across lines).
-        let step = |n: &str, title: &str, body: &str, cmd: Option<&str>, active: bool| {
+        let step = |n: &str, title: &str, body: &str, active: bool| {
             div()
                 // Fills its wrapper, so the three cards end at one height whichever wraps most; may
                 // shrink below its text (which then wraps).
@@ -1113,21 +1096,7 @@ impl FoloApp {
                                 .font_weight(FontWeight::MEDIUM)
                                 .child(title.to_string()),
                         )
-                        .child(rich(&t, ty::SM, t.text_tertiary, body).text_left())
-                        .children(cmd.map(|c| {
-                            div().mt(px(4.)).flex().child(
-                                div()
-                                    .px(px(6.))
-                                    .rounded(px(radius::XS))
-                                    .bg(t.bg_active)
-                                    .font_family(crate::theme::MONO)
-                                    .text_size(px(ty::SM.size))
-                                    .line_height(px(ty::SM.line + 2.))
-                                    .text_color(t.text_primary)
-                                    .whitespace_nowrap()
-                                    .child(c.to_string()),
-                            )
-                        })),
+                        .child(rich(&t, ty::SM, t.text_tertiary, body).text_left()),
                 )
         };
         let steps = panel(&t)
@@ -1156,22 +1125,19 @@ impl FoloApp {
                     .child(div().flex().flex_1().flex_basis(px(0.)).min_w_0().child(step(
                         "1",
                         "Add a dataset",
-                        "Add a YOLO or COCO folder, or generate a sample:",
-                        Some("folo dataset synth"),
+                        "Add a YOLO or COCO folder, or generate one below.",
                         true,
                     )))
                     .child(div().flex().flex_1().flex_basis(px(0.)).min_w_0().child(step(
                         "2",
                         "Train a model",
                         "Start a run and watch loss and mAP live.",
-                        None,
                         false,
                     )))
                     .child(div().flex().flex_1().flex_basis(px(0.)).min_w_0().child(step(
                         "3",
                         "Try it",
                         "Open any image in the Playground.",
-                        None,
                         false,
                     ))),
             )
