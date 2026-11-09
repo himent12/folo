@@ -81,6 +81,8 @@ Fastest path for an agent:
 - [Releasing](docs/RELEASE.md): versioning, the tag → draft release workflow, the install scripts
   (`scripts/install.sh`, `scripts/install.ps1`) and the embedded Studio
 - [CI](docs/CI.md): the CI jobs and the self-hosted runners
+- [Docs site](site/README.md): the static site generated from these docs (`cd site && npm run build`), with search,
+  link checking, and this file plus llms-full.txt (every page's Markdown in one file)
 - [boat.dev](docs/BOAT.md): CPU-only cloud sandboxes for offloading Linux builds and CPU-heavy work
 - [Dogfood report 1](docs/DOGFOOD-1.md): a fresh agent's friction report from driving FOLO via the CLI and MCP
 - [Dogfood report 2](docs/DOGFOOD-2.md): the README quickstart, Studio (Playwright), MCP on real data and Desktop,
