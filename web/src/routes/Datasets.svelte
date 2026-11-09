@@ -233,7 +233,7 @@
      hides, it is the flexible one. */
   @media (min-width: 1280px) {
     .bal {
-      width: 224px;
+      width: 184px;
     }
   }
   .rest {

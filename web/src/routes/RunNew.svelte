@@ -774,7 +774,7 @@
   <!-- One specification row per size, the column header on the same grid (subgrid), so every value sits
        under its heading at every width. -->
   <div class="arches" role="radiogroup" aria-label="Model size">
-    <div class="a-head" aria-hidden="true"><span class="a-head-lead">Size</span><span>Params</span><span>GFLOPs</span><span>Latency</span><span></span></div>
+    <div class="a-head" aria-hidden="true"><span class="a-head-lead">Size</span><span>Params</span><span>GFLOPs</span><span class="a-head-lat">Latency</span><span></span></div>
     {#each arches as a (a.arch)}
       {@const on = a.arch === arch}
       {@const here = measuredLatency(tp.data, a.arch)}
@@ -789,9 +789,9 @@
              stays one line: "measured" on this GPU, "reference" for the architecture's benchmark. A dash is
              explained once, in the caption (DESIGN_DIRECTION 23), its word slot kept empty so dashes and figures share
              one edge. -->
-        {#if here}<span class="a-v lat"><span class="num here">{num(here.latency_ms, 2)} ms</span> <span class="a-src">measured</span></span
-          >{:else if a.ms !== undefined}<span class="a-v lat"><span class="num">{num(a.ms, 2)} ms</span> <span class="a-src">reference</span></span
-          >{:else}<span class="a-v lat"><span class="faint" title="Not measured yet">—</span> <span class="a-src" aria-hidden="true"></span></span>{/if}
+        {#if here}<span class="a-v lat"><span class="num here">{num(here.latency_ms, 2)} ms</span><span class="a-src">measured</span></span
+          >{:else if a.ms !== undefined}<span class="a-v lat"><span class="num">{num(a.ms, 2)} ms</span><span class="a-src">reference</span></span
+          >{:else}<span class="a-v lat"><span class="faint" title="Not measured yet">—</span><span class="a-src" aria-hidden="true"></span></span>{/if}
         <span class="tick" aria-hidden="true">{#if on}<Check size={14} strokeWidth={2.25} />{/if}</span>
       </label>
     {/each}
@@ -1312,6 +1312,13 @@
     grid-column: 1 / 4;
     text-align: left;
   }
+  /* The latency column holds a figure and its source word side by side: its heading starts where the column does
+     (phones stack the word under its figure, right-aligned, and keep the heading on the right). */
+  @media (min-width: 768px) {
+    .a-head-lat {
+      text-align: left;
+    }
+  }
   .arch {
     min-height: 36px;
     padding: 0 var(--space-3);
@@ -1357,7 +1364,7 @@
   .a-src {
     display: inline-block;
     min-width: 10ch;
-    margin-left: var(--space-1);
+    margin-left: var(--space-2);
     text-align: left;
     color: var(--text-tertiary);
   }
