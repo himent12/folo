@@ -1397,3 +1397,71 @@ Round 34 changes:
   - The Overview KPI is "mAP50-95 · latest", as on the run page.
   - The palette says "N commands" with an empty query.
   - Queued runs read "Waiting to start", not "Waiting for GPU" (the queue waits on the current run).
+
+## Round 34
+
+| Line | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | avg |
+|------|---|---|---|---|---|---|---|---|---|----|----|----|-----|
+| Opus 5.5 | 9 | 8 | 9 | 8 | 8 | 8 | 8 | 9 | 9 | 9 | 9 | 9 | 8.6 |
+| GPT-6.1 Sol | 9 | 8 | 9 | 9 | 8 | 8 | 8 | 8 | 8 | 8 | 9 | 8 | 8.3 |
+
+Opus matched its best, 8.6, with polish at 9 for the first time ("feels like an instrument"). Its remaining items:
+- New run's section heads outweighing the title.
+- An axis-power legend mismatch on the learning-rate card.
+- The PR legend's P column repeating the class table.
+- The Auto rate drawn as an input well.
+- Checkbox-like slider end icons.
+- Counts reading as part of segment labels.
+
+Opus also caught that five round-34 shots predated the last commit. A partial reshoot had mixed builds; round 35 is one build again.
+
+Sol's 8.3 was mostly mixed-input focus:
+- A slider's own arrow handler swallowed keys before keyboard mode turned on.
+- Clicks didn't move focus to the clicked control.
+
+Sol also flagged:
+- Unbounded palette titles.
+- Optimizer placed after the rate it governs.
+- R missing from the PR operating point.
+- An unkeyed best dot on Overview.
+- "Try in Playground" on the index.
+- "Model" over architecture names.
+- A play icon on Queue training.
+- "pre / model / NMS".
+
+#100's re-review listed three places where a failed model list read as loading, not found or empty.
+
+Design #98 (Studio round 16) landed `line.control`, at 3:1 or better on every surface, and moved dfl to series 3 (teal).
+
+Three more reversals were settled in the brief:
+- The PR legend keeps P.
+- The LR legend is written in the axis's power.
+- Section heads stay 14 px and the dialog title grows to 20 px.
+
+Round 35 changes:
+- **Tokens:**
+  - Switch tracks, slider rails, input and select borders and unselected chip outlines use `line.control` (a new test checks 3:1 on app, panel, raised, overlay and inset in both themes). Hover steps to text.tertiary.
+  - dfl is teal (series 3), dotted.
+- **Focus:**
+  - Keyboard mode turns on in the capture phase for arrows, Home, End and Page keys, so a slider's first keyboard step shows its ring.
+  - A click focuses the clicked control before its action.
+- **New run:**
+  - The title is 20 px semibold.
+  - Optimizer leads the Schedule, with the rate beside it.
+  - Auto's rate reads "Auto · 1.11×10⁻³" in an outline.
+  - Queue training shows a clock.
+- **Learning rate:** the legend is in the axis's power ("0.10×10⁻³"), one power per card.
+- **Failed model list:**
+  - The page subtitles say so.
+  - The model page shows "Models didn't load" with Retry, not "not found".
+  - Playground offers Retry and its picker says the models didn't load.
+- **Copy:**
+  - Palette titles truncate.
+  - Overview keys its best dot ("best 0.656 @ 41").
+  - The Models index says "Open Playground".
+  - The Runs column reads "Arch".
+  - Latency stages read Preprocess / Inference / NMS.
+  - Legend tooltips give the operating point's P and R.
+- **Controls:**
+  - Segment counts the caller marks ("All 9") use tertiary tabular digits.
+  - The thumbnail slider ends in image glyphs.
