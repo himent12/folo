@@ -12,6 +12,7 @@
   import Topbar from '$lib/shell/Topbar.svelte';
   import { holdRouteFocus, isNewPage } from '$lib/shell/routeFocus';
   import { installShortcuts } from '$lib/shell/shortcuts';
+  import RunWatch from '$lib/shell/RunWatch.svelte';
   import Toaster from '$lib/ui/Toaster.svelte';
   import Dataset from './routes/Dataset.svelte';
   import Datasets from './routes/Datasets.svelte';
@@ -98,6 +99,7 @@
 <CommandPalette bind:open={paletteOpen} onshortcuts={() => (shortcutsOpen = true)} />
 <ShortcutsDialog bind:open={shortcutsOpen} />
 <Toaster />
+<RunWatch />
 
 <style>
   .app {

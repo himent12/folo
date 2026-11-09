@@ -11,12 +11,19 @@
 
 <script lang="ts">
   /**
-   * An image with detection boxes drawn over it in screen pixels (crisp at any size). Boxes: a 2 px class-colour
-   * stroke wrapped in a dark halo, 1.5 px outside and 1 px inside (a 2 px ring in compact thumbnails), so a stroke holds
-   * on any colour under it; label chips with the class name (and score) sit on the top-left corner, or elsewhere next
-   * to their own box (see ./chips).
-   * Ground truth, when given, is drawn dashed underneath the predictions: in the class colour at full size, neutral and
-   * just outside the prediction's stroke in compact thumbnails (where the two would otherwise coincide).
+   * An image with detection boxes drawn over it in screen pixels (crisp at any size). Two styles, one per job:
+   * - Full size (the inspector, the Playground): a 2 px class-colour stroke wrapped in a dark halo, 1.5 px outside and
+   *   1 px inside, so a stroke holds on any colour under it; label chips with the class name (and score) sit on the
+   *   top-left corner, or elsewhere next to their own box (see ./chips).
+   * - Compact thumbnails: a 1 px stroke in a 1 px halo and no chips, so a small object is not buried under its frame.
+   *   Only a hovered or selected box gets the full-size weight. A thumbnail that draws boxes shows the whole image
+   *   (`fit="contain"`, letterboxed on bg.inset): a cropped one would cut boxes in half at its edge
+   *   (./thumbFit.test.ts).
+   * Ground truth, when given, is dashed (predictions are solid) and drawn underneath: in the class colour at full size,
+   * neutral and just outside the prediction's halo in compact thumbnails (where the two would otherwise coincide).
+   * A selection: the selected box takes a 3 px accent stroke and its chip an accent edge; every other box, chip and
+   * truth mark recedes to 30 %; a selected box under 32 px on screen is also framed by lime viewfinder corners (the
+   * product's mark), so it cannot be lost among bigger ones.
    */
   import { classColor } from '$lib/design/tokens';
   import { CHIP_H, placeChips } from './chips';
@@ -83,6 +90,8 @@
   const small = $derived(cw > 0 && cw < 480);
   const chipH = $derived(small ? 14 : CHIP_H);
   const tiny = (b: ViewBox) => !!geo && Math.min(b.x2 - b.x1, b.y2 - b.y1) * geo.s < 20;
+  /** Under 32 px on screen: a selected box this small also gets viewfinder corners. */
+  const small32 = (b: ViewBox) => !!geo && Math.min(b.x2 - b.x1, b.y2 - b.y1) * geo.s < 32;
   const name = (c: number) => classes[c] ?? `class ${c}`;
 
   /** Label chips placed in screen pixels (see ./chips). Widths are estimated from the text (11 px Geist). */
@@ -140,6 +149,7 @@
         {#if shown(b)}
           <div
             class="box truth"
+            class:fade={selected !== null}
             style:--c={classColor(b.class)}
             style:left="{geo.ox + b.x1 * geo.s}px"
             style:top="{geo.oy + b.y1 * geo.s}px"
@@ -168,14 +178,17 @@
             onpointerleave={onhover ? () => onhover(null) : undefined}
             onclick={onselect ? () => onselect(i) : undefined}
           >
+            {#if selected === i && small32(b)}<span class="vf"></span>{/if}
             {#if labels && !compact && ((!chips[i]?.hidden && !tiny(b)) || active === i || selected === i)}
               {@const c = chips[i]}
+              <!-- With viewfinder corners, the chip steps 8 px further from the box so it never covers them. -->
+              {@const clear = selected === i && small32(b) && !c?.inside ? (c?.side === 'below' ? 8 : -8) : 0}
               {#if c && c.leader > 0}
                 <!-- Hung below its box: a leader from the box's bottom stroke keeps ownership readable. -->
                 {@const bh = (b.y2 - b.y1) * geo.s}
-                <span class="leader" style:left="{Math.max(0, c.dx + 6) - 2}px" style:top="{bh + 2}px" style:height="{c.dy - bh - 4}px"></span>
+                <span class="leader" style:left="{Math.max(0, c.dx + 6) - 2}px" style:top="{bh + 2}px" style:height="{c.dy - bh - 4 + clear}px"></span>
               {/if}
-              <span class="chip" class:inside={c?.inside} class:below={c?.side === 'below'} style:left="{(c?.dx ?? 0) - 2}px" style:top="{(c?.dy ?? -17) - 2}px">
+              <span class="chip" class:inside={c?.inside} class:below={c?.side === 'below'} style:left="{(c?.dx ?? 0) - 2}px" style:top="{(c?.dy ?? -17) - 2 + clear}px">
                 {name(b.class)}{#if scores && b.score !== undefined}<span class="score">{b.score.toFixed(2)}</span>{/if}
               </span>
             {/if}
@@ -242,19 +255,48 @@
       0 0 0 3px color-mix(in srgb, var(--class-halo) 50%, transparent);
     z-index: 5;
   }
+  /* The selected box's chip: an accent edge, so its label is found as fast as its box. */
   .box.selected .chip {
     z-index: 6;
+    box-shadow:
+      0 0 0 1.5px var(--accent-solid),
+      0 0 0 2.5px var(--class-halo);
+  }
+  /* A selected box under 32 px on screen: lime viewfinder corners 4 px outside its stroke, in a dark halo. */
+  .vf {
+    position: absolute;
+    inset: -8px;
+    pointer-events: none;
+    --arm: 6px;
+    background:
+      linear-gradient(var(--accent-solid) 0 0) left top / var(--arm) 2px,
+      linear-gradient(var(--accent-solid) 0 0) left top / 2px var(--arm),
+      linear-gradient(var(--accent-solid) 0 0) right top / var(--arm) 2px,
+      linear-gradient(var(--accent-solid) 0 0) right top / 2px var(--arm),
+      linear-gradient(var(--accent-solid) 0 0) left bottom / var(--arm) 2px,
+      linear-gradient(var(--accent-solid) 0 0) left bottom / 2px var(--arm),
+      linear-gradient(var(--accent-solid) 0 0) right bottom / var(--arm) 2px,
+      linear-gradient(var(--accent-solid) 0 0) right bottom / 2px var(--arm);
+    background-repeat: no-repeat;
+    filter: drop-shadow(0 0 1px var(--class-halo)) drop-shadow(0 0 1px var(--class-halo));
   }
   /* Keep context readable: fade the stroke, never the label. Hovering one box fades the others' strokes a little... */
   .box.dim {
     border-color: color-mix(in srgb, var(--c) 55%, transparent);
     box-shadow: 0 0 0 1.5px color-mix(in srgb, var(--class-halo) 50%, transparent);
   }
-  /* ...and with a selection the rest of the scene steps back to 30 %, so the selected detection is unmistakable; their
-     chips (and leaders) stay whole, so every label still reads. */
+  /* ...and with a selection the rest of the scene steps back to 30 %, strokes, chips, leaders and truth alike, so a
+     small selected detection is never lost among full-strength chips. Hovering one of them brings it back. */
   .box.recede {
     border-color: color-mix(in srgb, var(--c) 30%, transparent);
     box-shadow: 0 0 0 1.5px color-mix(in srgb, var(--class-halo) 30%, transparent);
+  }
+  .box.recede .chip,
+  .box.recede .leader {
+    opacity: 0.3;
+  }
+  .box.truth.fade {
+    opacity: 0.3;
   }
   /* Touch: a box smaller than a fingertip still gets a 32 px target, centred on it. */
   @media (pointer: coarse) {
@@ -277,23 +319,31 @@
     opacity: 0.85;
     pointer-events: none;
   }
-  /* Thumbnails: a thin stroke on a small, often pale photo (amber on beige, sky on blue-grey), so its halo is 2 px, the
-     inner pixel darker, and every class edge holds against the local background. */
+  /* Thumbnails: the compact style, a 1 px stroke in a 1 px halo, so a small object is not buried under nested frames;
+     the halo still holds every class edge against a pale photo. */
   .compact .box {
-    margin: -1.5px; /* grid-ok: equals the stroke width */
-    border-width: 1.5px;
-    box-shadow:
-      0 0 0 1px var(--class-halo),
-      0 0 0 2px var(--class-halo);
+    margin: -1px;
+    border-width: 1px;
+    box-shadow: 0 0 0 1px var(--class-halo);
+  }
+  /* The strongest outline in a thumbnail is the hovered or selected object's: the full-size weight. */
+  .compact .box.active,
+  .compact .box.selected {
+    margin: -2px;
+    border-width: 2px;
+    box-shadow: 0 0 0 1.5px var(--class-halo);
+  }
+  .compact .box.selected {
+    border-color: var(--accent-solid);
   }
   /* Thumbnails: a prediction and its matching truth share a class colour and nearly the same rectangle, so a coloured
-     dash would vanish under the solid stroke. Truth is neutral there (white dashes in their dark halo) and ringed just
-     outside the prediction's stroke and its 2 px halo, so a match reads as two marks and a miss as a lone white ring. */
+     dash would vanish under the solid stroke. Truth is neutral there (white 1 px dashes) and sits right outside the
+     prediction's stroke and halo, so a match reads as one solid line with a dashed shadow and a miss as a lone ring. */
   .compact .box.truth {
     margin: 0;
     border: 0;
     outline: 1px dashed #ffffff;
-    outline-offset: 3.5px;
+    outline-offset: 2px;
     opacity: 1;
   }
   .chip {

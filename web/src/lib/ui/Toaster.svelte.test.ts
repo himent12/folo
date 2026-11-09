@@ -98,3 +98,24 @@ describe('Toaster and focus', () => {
     expect(document.activeElement).toBe(closeA);
   });
 });
+
+describe('Toast timing and announcement', () => {
+  it('errors and toasts with an action stay until closed; plain ones time out', () => {
+    const plain = toast.info('Saved');
+    const err = toast.error(new Error('nope'));
+    const act = toast.success('Run finished', undefined, { label: 'Open run', run: () => {} });
+    const by = (id: number) => toast.items.find((t) => t.id === id)?.timeout;
+    expect(by(plain)).toBe(4000);
+    expect(by(err)).toBe(0);
+    expect(by(act)).toBe(0);
+  });
+
+  it('each toast is its own live region; the list is not one', () => {
+    setup();
+    toast.info('Saved');
+    toast.error(new Error('nope'));
+    flushSync();
+    expect(document.querySelector('.toaster ol')?.hasAttribute('aria-live')).toBe(false);
+    expect([...document.querySelectorAll('.toast')].map((t) => t.getAttribute('role'))).toEqual(['status', 'alert']);
+  });
+});

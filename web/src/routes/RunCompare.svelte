@@ -13,6 +13,8 @@
 
 <script lang="ts">
   import { MediaQuery } from 'svelte/reactivity';
+  import { fade } from 'svelte/transition';
+  import { motion } from '$lib/ui/motion';
   import ChartSkeleton from '$lib/charts/ChartSkeleton.svelte';
   import { untrack } from 'svelte';
   import GitCompare from '@lucide/svelte/icons/git-compare-arrows';
@@ -20,14 +22,16 @@
   import ArrowUpRight from '@lucide/svelte/icons/arrow-up-right';
   import Plus from '@lucide/svelte/icons/plus';
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
+  import ChevronLeft from '@lucide/svelte/icons/chevron-left';
   import { hub } from '$lib/api/index.svelte';
   import { Resource } from '$lib/api/resource.svelte';
   import type { Epoch, Run, RunMetrics } from '$lib/api/types';
   import LineChart, { type Series } from '$lib/charts/LineChart.svelte';
-  import { niceDomain, unitDomain } from '$lib/charts/domain';
+  import { niceDomain, unitDomain, unitTop, UNIT_ZOOM_BELOW, UNIT_ZOOM_NOTE } from '$lib/charts/domain';
   import { nearest } from '$lib/charts/downsample';
   import { defaultAxis, runEnd, runX } from '$lib/charts/runAxis';
-  import { deviceName, duration, metric } from '$lib/format';
+  import { conf, deviceName, duration, metric } from '$lib/format';
+  import { batchSetting, lrSetting, optimizerSetting, settingText, warmupSetting, type Setting } from './run/resolved';
   import { href, router } from '$lib/router.svelte';
   import { setCrumbs } from '$lib/shell/crumbs.svelte';
   import Page from '$lib/shell/Page.svelte';
@@ -96,6 +100,9 @@
   const SLOT_PATTERN = [undefined, undefined, 'dash', 'dot'] as const;
   const slotOf = (id: string) => slots[id] ?? Math.max(0, ids.indexOf(id));
   const color = (id: string) => `var(--chart-${RUN_SLOTS[slotOf(id)] ?? 1})`;
+  // Keys (chips, table header) are fills: the exact palette hue with the swatch edge, never the light theme's darker
+  // line ink, so a light amber run reads amber, not brown (design/README.md, chart.fill).
+  const fill = (id: string) => `var(--chart-fill-${RUN_SLOTS[slotOf(id)] ?? 1})`;
 
   function setIds(next: string[]) {
     router.go(`/runs/compare${next.length ? `?ids=${next.join(',')}` : ''}`, { replace: true });
@@ -116,6 +123,8 @@
     });
 
   type MetricId = 'm95' | 'm50' | 'loss' | 'rec';
+  /** The one caveat that changes how to read the plot: one wording on every screen. */
+  const DATA_CAVEAT = 'Different datasets: compare the shape of the curves, not their values.';
   const METRICS: { id: MetricId; label: string; f: (e: Epoch) => number; unit?: boolean }[] = [
     { id: 'm95', label: 'mAP50-95', f: (e) => e.val.map50_95, unit: true },
     { id: 'm50', label: 'mAP50', f: (e) => e.val.map50, unit: true },
@@ -126,10 +135,7 @@
   let metricId = $state<MetricId>('m95');
   const metricDef = $derived(METRICS.find((m) => m.id === metricId)!);
   const series = $derived(curve(metricDef.f));
-  // The run page's main-chart size; phones a shorter plot.
-  const height = $derived(narrow ? 240 : 320);
-  // Fitted to the runs (./domain): four runs between 0.45 and 0.62 spread over 0–0.7, not bunched in a 0–1 axis.
-  const fit = $derived.by(() => {
+  const extent = $derived.by((): [number, number] | null => {
     let lo = Infinity;
     let hi = -Infinity;
     for (const s of series)
@@ -138,10 +144,16 @@
         if (p.y < lo) lo = p.y;
         if (p.y > hi) hi = p.y;
       }
-    if (!Number.isFinite(lo)) return undefined;
-    // LineChart's plot sits inside 8 px top and 22 px bottom margins (36 under an axis name).
-    return metricDef.unit ? unitDomain(hi, height - (xLabel ? 44 : 30)) : niceDomain(lo, hi);
+    return Number.isFinite(lo) ? [lo, hi] : null;
   });
+  // Runs that all scored low get a zoomed axis whose caption names the full 0–1 scale (./domain UNIT_ZOOM_BELOW).
+  const zoomed = $derived(!!metricDef.unit && !!extent && unitTop(extent[1]) < UNIT_ZOOM_BELOW);
+  // The plot itself is at least 360 px tall from 768 px up, so four curves that climb together still separate; phones
+  // a 210 px plot. LineChart's margins add 8 px on top (24 under an axis caption) and 22 px below (36 under an x name).
+  const plotPx = $derived(narrow ? 210 : 360);
+  const height = $derived(plotPx + (zoomed ? 24 : 8) + (xLabel ? 36 : 22));
+  // Fitted to the runs (./domain): four runs between 0.45 and 0.62 spread over 0–0.64, not bunched in a 0–1 axis.
+  const fit = $derived(extent ? (metricDef.unit ? unitDomain(extent[1], plotPx) : niceDomain(extent[0], extent[1])) : undefined);
   // The chips are the legend: each shows its run's value under the cursor, or its latest value at rest.
   function valueOf(id: string): number | null {
     const pts = series.find((s) => s.id === id)?.points ?? [];
@@ -165,7 +177,11 @@
     const [only] = lastEps;
     return lastEps.size === 1 && only !== null && only !== undefined ? `Latest · ep ${only}` : "Latest · each run's last epoch";
   });
-  const readoutAt = $derived(cursor === null ? latestNote : x === 'epoch' ? `Epoch ${Math.round(cursor)}` : `${Math.round(cursor)}% through`);
+  // Recall is read at each epoch's own best-F1 confidence (docs/API.md, Operating point): the readout says so.
+  const readoutAt = $derived(
+    (cursor === null ? latestNote : x === 'epoch' ? `Epoch ${Math.round(cursor)}` : `${Math.round(cursor)}% through`) +
+      (metricId === 'rec' ? ' · at best-F1 conf' : ''),
+  );
   const xDomain = $derived<[number, number]>(x === 'epoch' ? [0, Math.max(1, ...chosen.map((r) => r.epochs))] : [0, 100]);
 
   // mAP is only comparable on the same data: no winner across datasets.
@@ -179,24 +195,29 @@
   };
   const setX = (v: Axis) => (xChoice = v);
 
-  // The third field marks a row of identifiers (an architecture, a checkpoint, a named optimizer), set in mono like
-  // the chips and every other screen (ui/Ident); prose values ("From scratch", "auto") stay in sans.
-  const ID_PROSE = new Set(['From scratch', 'auto']);
-  const rows = $derived<[string, (r: Run) => string, boolean?][]>([
-    ['Dataset', (r) => datasets.data?.find((d) => d.id === r.config.dataset_id)?.name ?? r.config.dataset_id],
-    ['Model', (r) => r.config.arch, true],
-    ['Start from', (r) => startOf(r) ?? 'From scratch', true],
-    ['Epochs', (r) => `${r.epoch}/${r.epochs}`],
-    ['Batch', (r) => String(r.config.batch)],
-    ['Image size', (r) => `${r.config.imgsz} px`],
-    ['Optimizer', (r) => r.config.optimizer, true],
-    ['LR', (r) => String(r.config.lr0)],
-    ['Mosaic / mixup', (r) => `${r.config.augment.mosaic} / ${r.config.augment.mixup}`],
-    ['Close mosaic', (r) => (r.config.augment.close_mosaic > 0 ? `last ${r.config.augment.close_mosaic} epochs` : 'never')],
-    ['Device', (r) => deviceName(r.device)],
-    ['Duration', (r) => (r.started ? duration(((r.finished ? Date.parse(r.finished) : Date.now()) - Date.parse(r.started)) / 1000) : '—')],
+  // A cell is a Setting (./run/resolved): identifiers (an architecture, a checkpoint, a named optimizer) in mono like
+  // the chips and every other screen (ui/Ident), prose ("From scratch", "auto") in sans. Where the server resolved a
+  // run's config (`Run.resolved`), the optimizer, LR and batch are what it trains with, the request a note beside them.
+  const plain = (value: string): Setting => ({ value });
+  const ident = (value: string): Setting => ({ value, ident: true });
+  const rows = $derived<[string, (r: Run) => Setting][]>([
+    ['Dataset', (r) => plain(datasets.data?.find((d) => d.id === r.config.dataset_id)?.name ?? r.config.dataset_id)],
+    ['Model', (r) => ident(r.config.arch)],
+    ['Start from', (r) => (startOf(r) ? ident(startOf(r) ?? '') : plain('From scratch'))],
+    ['Epochs', (r) => plain(`${r.epoch}/${r.epochs}`)],
+    ['Batch', (r) => batchSetting(r.config, r.resolved)],
+    ['Image size', (r) => plain(`${r.config.imgsz} px`)],
+    ['Optimizer', (r) => optimizerSetting(r.config, r.resolved)],
+    ['LR', (r) => lrSetting(r.config, r.resolved)],
+    ['Warmup', (r) => (r.resolved ? warmupSetting(r.resolved) : plain('—'))],
+    ['Mosaic / mixup', (r) => plain(`${r.config.augment.mosaic} / ${r.config.augment.mixup}`)],
+    ['Close mosaic', (r) => plain(r.config.augment.close_mosaic > 0 ? `last ${r.config.augment.close_mosaic} epochs` : 'never')],
+    ['Device', (r) => plain(deviceName(r.device))],
+    ['Duration', (r) => plain(r.started ? duration(((r.finished ? Date.parse(r.finished) : Date.now()) - Date.parse(r.started)) / 1000) : '—')],
   ]);
-  const differs = (f: (r: Run) => string) => new Set(chosen.map(f)).size > 1;
+  const differs = (f: (r: Run) => Setting) => new Set(chosen.map((r) => settingText(f(r)))).size > 1;
+  /** Precision and recall of the epoch Best names (the run's model), with the threshold they were read at. */
+  const bestVal = (r: Run) => (r.best ? metrics.data?.get(r.id)?.epochs.find((e) => e.epoch === r.best?.epoch)?.val : undefined);
   // What differs is the comparison; identical settings fold into one row that can be opened.
   const diffRows = $derived(chosen.length > 1 ? rows.filter(([, f]) => differs(f)) : rows);
   const sameRows = $derived(chosen.length > 1 ? rows.filter(([, f]) => !differs(f)) : []);
@@ -243,6 +264,19 @@
   const SETTING_COL = 152;
   const RUN_COL_MIN = 136;
 
+  // Phones compare two runs at a time: a baseline (the pinned run, else the first) and one other, fully in view and
+  // paged with ‹ ›; values that differ from the baseline's are marked. "All runs" opens the whole table (it scrolls).
+  let allRuns = $state(false);
+  let otherAt = $state(0);
+  const pairMode = $derived(narrow && chosen.length > 2 && !allRuns);
+  const base = $derived(chosen.find((r) => r.id === pinned) ?? chosen[0]);
+  const others = $derived(chosen.filter((r) => r !== base));
+  const other = $derived(others[Math.min(otherAt, others.length - 1)]);
+  const shown = $derived(pairMode && base && other ? [base, other] : chosen);
+  const stepOther = (d: number) => (otherAt = (Math.min(otherAt, others.length - 1) + d + others.length) % others.length);
+  /** In pair mode, whether a run's value differs from the baseline's (the full table marks whole rows instead). */
+  const offBase = (r: Run, f: (r: Run) => Setting) => pairMode && r !== base && !!base && settingText(f(r)) !== settingText(f(base));
+
   const candidates = $derived((runs.data ?? []).filter((r) => !ids.includes(r.id) && r.status !== 'queued'));
 </script>
 
@@ -253,14 +287,15 @@
   {#if runs.error && !runs.data}
     <ErrorState error={runs.error} retry={() => runs.refresh()} />
   {:else if ids.length === 0}
-    <Panel>
-      <EmptyState icon={GitCompare} title="Pick runs to compare" description="Add two to four runs, or select them on the Runs page.">
-        {#snippet actions()}
-          <!-- One action: pick runs here when there are any, else go and make some. -->
-          {#if candidates.length}{@render adder()}{:else}<Button href={href('/runs')}>Go to Runs</Button>{/if}
-        {/snippet}
-      </EmptyState>
-    </Panel>
+    <!-- Nothing to compare yet: the frameless empty state on the page's content edge, not a card stretched across an
+         empty canvas (DESIGN_DIRECTION 8). -->
+    <EmptyState icon={GitCompare} title="Pick runs to compare" description="Add two to four runs, or select them on the Runs page.">
+      {#snippet actions()}
+        <!-- One action: pick runs here when there are any, else go and make some. -->
+        {#if candidates.length}{@render adder()}{:else}<Button href={href('/runs')}>Go to Runs</Button>{/if}
+      {/snippet}
+    </EmptyState>
+
   {:else}
     <section class="compare" aria-label="Curves">
       {#if narrow}
@@ -271,7 +306,7 @@
           <Segmented size="sm" label="X axis" value={x} onchange={setX} options={X_OPTIONS} />
         </header>
         {@render chips()}
-        {#if !sameData && chosen.length > 1}<p class="caveat">Different datasets: scores are not directly comparable</p>{/if}
+        {#if !sameData && chosen.length > 1}<p class="caveat">{DATA_CAVEAT}</p>{/if}
         {@render plot()}
         <details class="about">
           <summary>
@@ -279,7 +314,6 @@
             <span>How to read this</span>
           </summary>
           <div class="about-body">
-            {#if !sameData && chosen.length > 1}<p>The runs use different datasets: compare the shape of the curves, not their values.</p>{/if}
             {#if x === 'progress'}<p>By progress puts each run over its planned epochs, so a short plan and a long one compare by shape.</p>{/if}
             <p>Each line ends in its run's status: a ringed dot while it trains, a square where it was stopped, a cross
               where it failed.</p>
@@ -291,7 +325,7 @@
       {:else}
         {@render chips()}
         <!-- One line, and only when it changes how to read the plot; the axis names itself (and why it was chosen). -->
-        {#if !sameData && chosen.length > 1}<p class="caveat">Different datasets: compare the shape of the curves, not their values.</p>{/if}
+        {#if !sameData && chosen.length > 1}<p class="caveat">{DATA_CAVEAT}</p>{/if}
         <header class="c-head">
           <Segmented label="Metric" bind:value={metricId} options={METRICS.map((m) => ({ value: m.id, label: m.label }))} />
           <Segmented size="sm" label="X axis" value={x} onchange={setX} options={X_OPTIONS} />
@@ -302,7 +336,22 @@
 
     {#if chosen.length}
       <Panel title="Side by side" meta={sameRows.length ? `${diffRows.length} settings differ` : undefined} pad="none" id="cmp-table">
-        {#if tableRange}
+        {#if pairMode && other}
+          <!-- Phones: the baseline and one run beside it; the pager steps through the others. -->
+          <div class="pair num">
+            <button type="button" class="pg" aria-label="Previous run" onclick={() => stepOther(-1)}><ChevronLeft size={16} aria-hidden="true" /></button>
+            <span class="pair-what" aria-live="polite">Run {others.indexOf(other) + 2} of {chosen.length}<span class="faint">{' '}vs baseline</span></span>
+            <button type="button" class="pg" aria-label="Next run" onclick={() => stepOther(1)}><ChevronRight size={16} aria-hidden="true" /></button>
+            <button type="button" class="more" onclick={() => (allRuns = true)}>All {chosen.length} runs</button>
+          </div>
+        {:else if narrow && allRuns && chosen.length > 2}
+          <p class="t-range num">
+            {#if tableRange}{tableRange.first === tableRange.last ? `Run ${tableRange.first}` : `Runs ${tableRange.first}–${tableRange.last}`} of {chosen.length}<span
+                class="sep"
+                aria-hidden="true">·</span
+              >{/if}<button type="button" class="more" onclick={() => (allRuns = false)}>Two at a time</button>
+          </p>
+        {:else if tableRange}
           <!-- What the sideways scroll hides: the runs in view, and a way to the others. -->
           <p class="t-range num">
             {tableRange.first === tableRange.last ? `Run ${tableRange.first}` : `Runs ${tableRange.first}–${tableRange.last}`} of {chosen.length}{#if tableRange.last < chosen.length}<span class="sep" aria-hidden="true">·</span><button
@@ -314,49 +363,72 @@
         {/if}
         <div class="scroll" class:more={tableMore} bind:this={tableEl} onscroll={measureTable}>
           <!-- Fixed layout: every run column the same width, so each header's key sits over its own values. -->
-          <table class="table fixed" style:min-width="{SETTING_COL + chosen.length * RUN_COL_MIN}px">
+          <table class="table fixed" class:two={pairMode} style:min-width={pairMode ? undefined : `${SETTING_COL + chosen.length * RUN_COL_MIN}px`}>
             <colgroup>
-              <col style:width="{SETTING_COL}px" />
-              {#each chosen as r (r.id)}<col />{/each}
+              <col class="c-set" style:width={pairMode ? undefined : `${SETTING_COL}px`} />
+              {#each shown as r (r.id)}<col />{/each}
             </colgroup>
             <thead>
               <tr>
                 <th></th>
-                {#each chosen as r (r.id)}
-                  <th><span class="th" style:--c={color(r.id)}><i data-pattern={SLOT_PATTERN[slotOf(r.id)]}></i>{r.name}</span></th>
+                {#each shown as r (r.id)}
+                  <th>
+                    <span class="th" style:--c={fill(r.id)}><i data-pattern={SLOT_PATTERN[slotOf(r.id)]}></i><span class:truncate={!pairMode}>{r.name}</span></span>
+                    {#if pairMode && r === base}<span class="base-tag">Baseline</span>{/if}
+                  </th>
                 {/each}
               </tr>
             </thead>
             <tbody>
               <tr>
                 <td class="k">Status</td>
-                {#each chosen as r (r.id)}<td><StatusBadge status={r.status} plain /></td>{/each}
+                {#each shown as r (r.id)}<td><StatusBadge status={r.status} plain /></td>{/each}
               </tr>
               <tr>
                 <td class="k">Best mAP50-95</td>
-                {#each chosen as r, i (r.id)}
-                  <td class="num" class:winner={sameData && i === bestIdx && chosen.length > 1}>{metric(r.best?.map50_95)}{#if sameData && i === bestIdx && chosen.length > 1}<span class="tag">best</span>{/if}</td>
+                {#each shown as r (r.id)}
+                  {@const win = sameData && r === chosen[bestIdx] && chosen.length > 1}
+                  <td class="num" class:winner={win}>{metric(r.best?.map50_95)}{#if win}<span class="tag">best</span>{/if}</td>
                 {/each}
               </tr>
-              {#each diffRows as [k, f, id] (k)}
+              <tr>
+                <td class="k">Precision · recall</td>
+                {#each shown as r (r.id)}
+                  {@const v = bestVal(r)}
+                  <td class="num">
+                    {#if v}{metric(v.precision)} · {metric(v.recall)}<span class="pr-at">{v.best_f1_conf != null ? `conf ${conf(v.best_f1_conf)}` : 'best-F1 conf'} · ep {r.best?.epoch}</span>{:else}—{/if}
+                  </td>
+                {/each}
+              </tr>
+              {#each diffRows as [k, f] (k)}
                 <tr>
                   <td class="k">{k}</td>
-                  {#each chosen as r (r.id)}<td class="num cfg diff">{@render cell(f(r), id)}</td>{/each}
+                  {#each shown as r (r.id)}
+                    <!-- Pair mode: a value that differs from the baseline's is marked (a dot and the weight) and an equal
+                         one recedes; the full table marks the whole row instead. -->
+                    {@const off = offBase(r, f)}
+                    <td class="num cfg" class:diff={!pairMode || off} class:same={pairMode && r !== base && !off}
+                      class:base={pairMode && r === base}
+                      >{#if off}<span class="chg" aria-hidden="true"></span>{/if}{@render cell(f(r))}{#if off}<span class="sr-only"
+                          >, differs from the baseline</span
+                        >{/if}</td
+                    >
+                  {/each}
                 </tr>
               {/each}
               {#if sameRows.length}
                 <tr class="fold">
-                  <td colspan={chosen.length + 1}>
+                  <td colspan={shown.length + 1}>
                     <button aria-expanded={showSame} onclick={() => (showSame = !showSame)}>
                       {showSame ? 'Hide' : 'Show'} {sameRows.length} identical {sameRows.length === 1 ? 'setting' : 'settings'}
                     </button>
                   </td>
                 </tr>
                 {#if showSame}
-                  {#each sameRows as [k, f, id] (k)}
+                  {#each sameRows as [k, f] (k)}
                     <tr>
                       <td class="k">{k}</td>
-                      {#each chosen as r (r.id)}<td class="num cfg">{@render cell(f(r), id)}</td>{/each}
+                      {#each shown as r (r.id)}<td class="num cfg">{@render cell(f(r))}</td>{/each}
                     </tr>
                   {/each}
                 {/if}
@@ -369,7 +441,7 @@
   {/if}
 </Page>
 
-{#snippet cell(v: string, id: boolean | undefined)}{#if id && !ID_PROSE.has(v)}<Ident value={v} />{:else}{v}{/if}{/snippet}
+{#snippet cell(v: Setting)}{#if v.ident}<Ident value={v.value} />{:else}{v.value}{/if}{#if v.note}<span class="note">{v.note}</span>{/if}{/snippet}
 
 {#snippet chips()}
   <!-- The run chips are the legend: colour key, value under the cursor, link and remove. -->
@@ -388,7 +460,7 @@
       <span
         class="chip"
         class:pinned={pinned === r.id}
-        style:--c={color(r.id)}
+        style:--c={fill(r.id)}
         onpointerenter={() => (hovered = r.id)}
         onpointerleave={() => (hovered = null)}
         onfocusin={() => (hovered = r.id)}
@@ -402,7 +474,9 @@
           title={pinned === r.id ? 'Let the line fall back' : 'Keep this line in front'}
           onclick={() => (pinned = pinned === r.id ? null : r.id)}
         ><i aria-hidden="true" data-pattern={SLOT_PATTERN[slotOf(r.id)]}></i><span class="nm">{r.name}</span></button>
-        <span class="v num">{v === null ? '—' : metric(v)}</span>
+        <!-- How the line ended (live, stopped, failed) in words beside its value: the end label's fallback, and on phones,
+             which have no end labels, the only word for the end marker's shape. -->
+        <span class="v num">{v === null ? '—' : metric(v)}{#if runEnd(r.status)}<span class="st"><span class="sep">{' · '}</span>{runEnd(r.status)}</span>{/if}</span>
         <!-- How the run started: fine-tuned vs from scratch often explains a gap between two curves. It lies over the
              toggle's lower half (clicks pass through to it) and runs on under the value. Phones show it only in Edit,
              on a full-width line of its own. -->
@@ -423,6 +497,9 @@
   {:else if !metrics.data || !runs.data}
     <ChartSkeleton {height} legend={false} />
   {:else}
+    <!-- A metric swap fades the new chart in over 160 ms (0 under reduced motion); within a metric the domain eases. -->
+    {#key metricId}
+    <div class="swap" in:fade={{ duration: motion(160) }}>
     <LineChart
       {series}
       {height}
@@ -435,6 +512,7 @@
       xFormat={(v) => (x === 'epoch' ? String(Math.round(v)) : `${Math.round(v)}%`)}
       xTitle={(v) => (x === 'epoch' ? `Epoch ${Math.round(v)}` : `${v.toFixed(0)}% through`)}
       {xLabel}
+      yLabel={zoomed ? UNIT_ZOOM_NOTE : undefined}
       bind:cursor
       bind:hint
       legend={false}
@@ -444,6 +522,8 @@
       endLabels
       label="{metricDef.label} for the compared runs"
     />
+    </div>
+    {/key}
   {/if}
 {/snippet}
 
@@ -569,6 +649,12 @@
     font-weight: var(--weight-medium);
     font-variant-numeric: tabular-nums;
     text-align: right;
+    white-space: nowrap;
+  }
+  .chip .st {
+    font-size: var(--type-sm-size);
+    font-weight: var(--weight-regular);
+    color: var(--text-tertiary);
   }
   /* Indented under the name, past the key (16 px swatch + 8 px gap); clicks fall through to the toggle. */
   .from {
@@ -650,6 +736,91 @@
   }
   .at.hint {
     color: var(--text-secondary);
+  }
+  /* Phones, two at a time: what is shown, the pager (44 px targets), and the way to the whole table. */
+  .pair {
+    display: flex;
+    align-items: center;
+    /* The ‹ chevron's glyph on the content edge; its 44 px target reaches into the padding. */
+    padding: 0 var(--space-4) 0 calc(var(--space-4) - 14px);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--text-secondary);
+  }
+  .pair-what {
+    text-align: center;
+  }
+  .pair .more {
+    margin-left: auto;
+  }
+  .pair .pg {
+    flex-shrink: 0;
+    display: grid;
+    place-items: center;
+    width: 44px;
+    height: 44px;
+    border-radius: var(--radius-md);
+    color: var(--text-secondary);
+  }
+  .pair .pg:hover {
+    color: var(--text-primary);
+    background: var(--bg-hover);
+  }
+  .pair .more,
+  .t-range .more {
+    min-height: 44px;
+  }
+  .pair .more {
+    color: var(--text-secondary);
+    text-decoration: underline;
+    text-decoration-color: var(--line-strong);
+    text-underline-offset: 3px;
+  }
+  .pair .more:hover {
+    color: var(--text-primary);
+  }
+  /* Two run columns share what the setting column leaves; the setting labels keep one column on every page. */
+  table.two .c-set {
+    width: 104px;
+  }
+  /* Nothing truncates: labels and run names wrap, and the two headers start on one line. */
+  table.two th,
+  table.two td {
+    white-space: normal;
+    overflow-wrap: anywhere;
+    vertical-align: top;
+  }
+  table.two th {
+    height: auto;
+    padding-block: var(--space-2);
+  }
+  table.two .th {
+    align-items: baseline;
+  }
+  table.two .th i {
+    transform: translateY(-3px);
+  }
+  .base-tag {
+    display: block;
+    font-size: var(--type-sm-size);
+    font-weight: var(--weight-regular);
+    color: var(--text-tertiary);
+  }
+  .chg {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    margin-right: var(--space-1-5);
+    border-radius: 50%;
+    background: var(--text-primary);
+    vertical-align: 2px;
+  }
+  td.same {
+    color: var(--text-tertiary);
+  }
+  /* The baseline is the reference the other column is read against: plain body text. */
+  td.cfg.base {
+    color: var(--text-primary);
   }
   /* The one caveat that changes how to read the plot, always in view, on one line above it. */
   .caveat {
@@ -741,6 +912,17 @@
     .chips:not(.managing) .chip .v {
       min-width: 2.8em;
       padding-right: 0;
+    }
+    /* The status word under the value (right-aligned), so the name keeps the row's width. */
+    .chips .chip .v {
+      display: grid;
+      justify-items: end;
+    }
+    .chips .chip .st {
+      line-height: var(--type-sm-line);
+    }
+    .chips .chip .st .sep {
+      display: none;
     }
     /* Edit: the start line under the whole row, past the key; the identifier keeps whole and ellipsizes (title has it). */
     .chips .chip .from {
@@ -912,21 +1094,23 @@
     color: var(--text-primary);
     font-size: var(--type-sm-size);
   }
-  /* Same patterns as the lines, so a run's key matches its curve without relying on colour. */
+  /* Same patterns as the lines, so a run's key matches its curve without relying on colour. A key is a fill: the
+     palette hue (--c is chart.fill) with the swatch hairline, which the pattern's mask cuts along with the dashes. */
   .chip i,
   .th i {
     flex-shrink: 0;
     width: 16px;
-    height: 3px;
+    height: 4px;
     border-radius: 2px;
     background: var(--c);
+    box-shadow: inset 0 0 0 1px var(--chart-swatch-edge);
   }
   i[data-pattern='dash'] {
-    background: repeating-linear-gradient(90deg, var(--c) 0 5px, transparent 5px 7px);
+    mask-image: repeating-linear-gradient(90deg, #000 0 5px, transparent 5px 7px);
     border-radius: 0;
   }
   i[data-pattern='dot'] {
-    background: repeating-linear-gradient(90deg, var(--c) 0 2px, transparent 2px 4px);
+    mask-image: repeating-linear-gradient(90deg, #000 0 3px, transparent 3px 5px);
     border-radius: 0;
   }
   .k {
@@ -949,5 +1133,23 @@
     border-radius: var(--radius-xs);
     background: var(--accent-muted);
     font-size: var(--type-sm-size);
+  }
+  /* The request beside what the run resolved it to ("(auto)", "(requested 0.01)"), and where P · R were read. */
+  .note {
+    margin-left: var(--space-1);
+    /* It wraps as a whole, never inside "(requested 0.01)". */
+    white-space: nowrap;
+    font-size: var(--type-sm-size);
+    font-weight: var(--weight-regular);
+    color: var(--text-tertiary);
+  }
+  .pr-at {
+    display: block;
+    font-size: var(--type-sm-size);
+    color: var(--text-tertiary);
+  }
+  /* The fading wrapper of a swapped chart: it takes the chart's place in the layout. */
+  .swap {
+    min-width: 0;
   }
 </style>

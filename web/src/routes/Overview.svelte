@@ -25,7 +25,7 @@
   import StatusBadge from '$lib/ui/StatusBadge.svelte';
   import TableState from '$lib/ui/TableState.svelte';
   import Ident from '$lib/ui/Ident.svelte';
-  import LivePreview from './overview/LivePreview.svelte';
+  import Meta from '$lib/ui/Meta.svelte';
   import LiveRunCard from './overview/LiveRunCard.svelte';
 
   setCrumbs({ label: 'Overview' });
@@ -94,8 +94,6 @@
         </li>
       </ol>
     </section>
-    <!-- What the page becomes: the live card's frame, still and muted, instead of an empty screen under the steps. -->
-    <LivePreview />
   {:else}
     <div class="live">
       {#if offline}
@@ -128,14 +126,16 @@
           <div class="scroll">
             <table class="table tall" aria-busy={!runs.data} aria-label="Recent runs">
               <thead>
+                <!-- Fixed widths on the shared header row: one geometry loading, empty, offline and loaded. -->
                 <tr>
                   <th>Run</th>
-                  <th>Status</th>
-                  <th class="hide-sm">Progress</th>
-                  <th class="r">mAP50-95</th>
-                  <th class="hide-sm">mAP trend</th>
-                  <th class="r hide-sm">Created</th>
+                  <th style:width="112px">Status</th>
+                  <th class="hide-sm" style:width="136px">Progress</th>
+                  <th class="r" style:width="88px">mAP50-95</th>
+                  <th class="hide-sm" style:width="120px">mAP trend</th>
+                  <th class="r hide-sm" style:width="96px">Created</th>
                 </tr>
+
               </thead>
               <tbody>
                 {#if offline}
@@ -162,7 +162,7 @@
                     <tr class="link" onclick={() => router.go(`/runs/${r.id}`)}>
                       <td>
                         <a class="run-name" href={href(`/runs/${r.id}`)} onclick={(e) => e.stopPropagation()}>{r.name}</a>
-                        <span class="sub">{dsById.get(r.config.dataset_id)?.name ?? r.config.dataset_id} · <Ident value={r.config.arch} /></span>
+                        <span class="sub"><Meta line><span>{dsById.get(r.config.dataset_id)?.name ?? r.config.dataset_id}</span><Ident value={r.config.arch} /></Meta></span>
                       </td>
                       <td use:tooltip={failureCause(r)}><StatusBadge status={r.status} plain /></td>
                       <td class="hide-sm">
@@ -216,7 +216,7 @@
                     <span class="m-text">
                       <span class="m-ds truncate">{ds}</span>
                       <span class="m-name truncate">{m.name}</span>
-                      <span class="m-sub num"><Ident value={m.arch} /> · {m.classes.length} classes · {bytes(m.bytes, prefs.units)}</span>
+                      <span class="m-sub num"><Meta line><Ident value={m.arch} /><span>{m.classes.length} classes</span><span>{bytes(m.bytes, prefs.units)}</span></Meta></span>
                     </span>
                     <span class="m-map"><span class="num"><span class="sr-only">mAP50-95 </span>{metric(m.metrics?.map50_95)}</span></span>
                   </a>
@@ -251,7 +251,7 @@
                   <a href={href(`/datasets/${d.id}`)}>
                     <span class="d-row">
                       <span class="d-name truncate">{d.name}</span>
-                      <span class="d-nums num">{compact(total(d))} images · {d.classes.length} classes</span>
+                      <span class="d-nums num"><Meta line><span>{compact(total(d))} images</span><span>{d.classes.length} classes</span></Meta></span>
                     </span>
                     {#if d.stats}<ClassStrip counts={d.stats.class_counts} classes={d.classes} height={4} />{/if}
                   </a>
@@ -272,7 +272,7 @@
     container-type: inline-size;
     display: grid;
     gap: var(--space-5);
-    padding: var(--space-6);
+    padding: var(--space-4);
     border-radius: var(--radius-lg);
     background: var(--bg-panel);
     border: 1px solid var(--line-panel);
@@ -288,10 +288,12 @@
     display: grid;
     gap: var(--space-2);
   }
+  /* The number sits on the title's line, top-aligned however tall the step's sentence and actions run. */
   .steps li {
     display: grid;
     grid-template-columns: 28px 1fr;
-    align-items: center;
+    align-items: start;
+    align-content: start;
     gap: var(--space-3);
     padding: var(--space-3) var(--space-4) var(--space-3) var(--space-3);
     border-radius: var(--radius-md);
@@ -303,9 +305,11 @@
     background: var(--bg-raised);
     color: var(--text-secondary);
   }
+  /* The title's first line on the number's centre (28 px circle, 20 px line). */
   .steps li div:not(.ob-actions) {
     display: grid;
     gap: 2px;
+    padding-top: var(--space-1);
   }
   .steps b {
     color: var(--text-primary);
@@ -342,24 +346,14 @@
       gap: var(--space-3);
     }
     .steps li {
-      align-items: start;
-      align-content: start;
       padding: var(--space-4);
-    }
-    /* The title's first line on the number's centre (28 px circle, 20 px line). */
-    .steps li div:not(.ob-actions) {
-      padding-top: var(--space-1);
     }
     .ob-actions {
       margin-top: var(--space-2);
     }
   }
-  @media (max-width: 767px) {
-    .onboard {
-      padding: var(--space-4);
-    }
-  }
-  /* Two independent stacks, so a short side panel never leaves a hole in a shared row. */
+  /* Two independent
+ stacks, so a short side panel never leaves a hole in a shared row. */
   .cols {
     display: grid;
     grid-template-columns: minmax(0, 1fr) 340px;

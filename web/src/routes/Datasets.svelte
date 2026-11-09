@@ -20,6 +20,7 @@
   import TableState from '$lib/ui/TableState.svelte';
   import Gate from '$lib/ui/Gate.svelte';
   import { isOffline, OFFLINE_REASON } from '$lib/ui/offline';
+  import Meta from '$lib/ui/Meta.svelte';
   import { rowNav } from '$lib/ui/rowNav';
   import AddDatasetDialog from './datasets/AddDatasetDialog.svelte';
   import { imageCount } from './dataset/health';
@@ -94,15 +95,18 @@
       <table class="table ds" aria-busy={!datasets.data} aria-label="Datasets" use:rowNav>
         <thead>
           <tr>
-            <th scope="col">Dataset</th>
-            <th scope="col" class="hide-md">Format</th>
-            <th scope="col" class="hide-lg">Path</th>
-            <th scope="col" class="r">Train</th>
-            <th scope="col" class="r">Val</th>
-            <th scope="col" class="r">Test</th>
-            <th scope="col">Class balance</th>
-            <th scope="col" class="r hide-md">Boxes</th>
-            <th scope="col" class="r hide-md">Created</th>
+            <!-- One geometry in every state (DESIGN_DIRECTION 7): fixed widths on the header row that loading, empty,
+                 error and loaded share. The path takes what is left; where it hides (below 1280) the class balance
+                 does, at least 160 px (minmax(160px, 1fr)). -->
+            <th scope="col" style:width="160px">Dataset</th>
+            <th scope="col" class="hide-md" style:width="80px">Format</th>
+            <th scope="col" class="hide-lg path-cell">Path</th>
+            <th scope="col" class="r" style:width="80px">Train</th>
+            <th scope="col" class="r" style:width="72px">Val</th>
+            <th scope="col" class="r" style:width="72px">Test</th>
+            <th scope="col"><span class="bal-h">Class balance</span></th>
+            <th scope="col" class="r hide-md" style:width="88px">Boxes</th>
+            <th scope="col" class="r hide-md" style:width="104px">Created</th>
           </tr>
         </thead>
         <tbody>
@@ -130,7 +134,7 @@
                 <td class="r"><Skeleton w="36px" h="12px" /></td>
                 <td class="r"><Skeleton w="28px" h="12px" /></td>
                 <td class="r"><Skeleton w="28px" h="12px" /></td>
-                <td><Skeleton w="160px" h="6px" r="999px" /></td>
+                <td><Skeleton h="6px" r="999px" /></td>
                 <td class="r hide-md"><Skeleton w="36px" h="12px" /></td>
                 <td class="r hide-md"><Skeleton w="44px" h="12px" /></td>
               </tr>
@@ -141,11 +145,12 @@
                 <td><a class="name" href={href(`/datasets/${d.id}`)} onclick={(e) => e.stopPropagation()}>{d.name}</a></td>
                 <td class="hide-md faint">{d.format}</td>
                 <td class="hide-lg path-cell"><span class="path mono truncate" title={d.path}>{d.path}</span></td>
-                <td class="r num">{num(d.splits.train)}</td>
+                <td class="r num muted">{num(d.splits.train)}</td>
                 <td class="r num muted">{num(d.splits.val)}</td>
                 <td class="r num muted">{num(d.splits.test)}</td>
                 <td title={classTip(d)}>
-                  {#if d.stats}<div class="strip"><ClassStrip counts={d.stats.class_counts} classes={d.classes} /></div>{:else}<span class="faint">—</span>{/if}
+                  {#if d.stats}<ClassStrip counts={d.stats.class_counts} classes={d.classes} />{:else}
+<span class="faint">—</span>{/if}
                 </td>
                 <!-- Full numbers, like the split columns beside it: one format per column. -->
                 <td class="r num hide-md">{num(d.stats?.boxes)}</td>
@@ -164,7 +169,7 @@
             <a href={href(`/datasets/${d.id}`)}>
               <span class="m-main">
                 <span class="name truncate">{d.name}</span>
-                <span class="m-meta num truncate">{num(d.splits.train)} train · {num(d.splits.val)} val · {num(d.splits.test)} test · {d.classes.length} classes</span>
+                <span class="m-meta num truncate"><Meta line><span>{num(d.splits.train)} train</span><span>{num(d.splits.val)} val</span><span>{num(d.splits.test)} test</span><span>{d.classes.length} classes</span></Meta></span>
               </span>
               <span class="m-side">
                 <span class="num">{num(imageCount(d))}<span class="faint">&nbsp;img</span></span>
@@ -205,9 +210,12 @@
     display: block;
     color: var(--text-tertiary);
   }
-  .strip {
-    width: 160px;
+  /* The class balance column: never under 160 px (the header holds it open in every state), the strip filling it. */
+  .bal-h {
+    display: block;
+    min-width: 160px;
   }
+
   .rows {
     display: none;
   }

@@ -5,11 +5,16 @@
 // `loading` (calls never resolve), `oom` (server inference runs out of GPU memory for every model but folo-n),
 // `gpu-unplugged` (a second GPU is listed until a run asks for it, then `404 device_not_found`), `short-run` (adds a
 // finished 5-epoch run the trainer warns is too short to learn from), `tensor-cores-off` and `no-tensor-cores` (no
-// mixed-precision training: the server's `FOLO_MOCK_TENSOR_CORES=off` / `none`), for screenshots of those states.
+// mixed-precision training: the server's `FOLO_MOCK_TENSOR_CORES=off` / `none`), `finishing` (the live run reaches its
+// last epoch 3 s after load, for the toast that says so) and `no-throughput` (a server from before measured throughput:
+// no `throughput`, `run_estimate` or `benchmark` feature, and those endpoints answer 404), for screenshots of those
+// states.
 
 import { ApiError, type Api, type RunEventHandlers } from '../client';
 import type {
   Arch,
+  BenchmarkReport,
+  BenchmarkRequest,
   Box,
   Capabilities,
   ClassMetrics,
@@ -32,12 +37,15 @@ import type {
   PredictInput,
   PredictOptions,
   Prediction,
+  QueueRequest,
   Run,
   RunLogs,
+  RunEstimate,
   RunMetrics,
   RunSamples,
   Sample,
   SystemInfo,
+  ThroughputTable,
   TrainConfig,
 } from '../types';
 import { image, imageIndex, indices, issues, specs, stats, toDataset, total, type MockDatasetSpec } from './datasets';
@@ -54,14 +62,29 @@ import {
   loopStart,
   optimizerSteps,
   progressAt,
+  resolveTrain,
   startLogs,
   stepAt,
   toRun,
   type RunProfile,
 } from './runs';
 import { COCO80 } from './coco';
+import { applyQueueMove } from '../queue';
+import { onnxFileName } from '../client';
+import { CPU_NAME, MockThroughput } from './throughput';
 
-export type Scenario = 'normal' | 'empty' | 'error' | 'loading' | 'oom' | 'gpu-unplugged' | 'short-run' | 'tensor-cores-off' | 'no-tensor-cores';
+export type Scenario =
+  | 'normal'
+  | 'empty'
+  | 'error'
+  | 'loading'
+  | 'oom'
+  | 'gpu-unplugged'
+  | 'short-run'
+  | 'tensor-cores-off'
+  | 'no-tensor-cores'
+  | 'finishing'
+  | 'no-throughput';
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -133,6 +156,22 @@ function profiles(t0: number, scenario: Scenario = 'normal'): RunProfile[] {
       tau: 16,
       imgsPerS: 140,
       createdAt: t0 - 40_000,
+      startedAt: null,
+      device: DEVICE,
+    },
+    {
+      // Second in the training queue, behind shapes-hard-l: moving it means something.
+      id: 'run_q7c5',
+      name: 'fasteners-m',
+      config: config('fasteners-m', 'ds_fasteners', 'folo-m', 80),
+      classes: 8,
+      classEase: FASTENER_EASE,
+      stepsPerEpoch: 120,
+      epochSeconds: 14,
+      mapMax: 0.69,
+      tau: 15,
+      imgsPerS: 170,
+      createdAt: t0 - 25_000,
       startedAt: null,
       device: DEVICE,
     },
@@ -269,7 +308,16 @@ function profiles(t0: number, scenario: Scenario = 'normal'): RunProfile[] {
         ]
       : []),
   ];
-  return list.map((p) => ({ ...p, classNames: names(p.config.dataset_id) }));
+  // `finishing`: the live run started so long ago that it completes 3 s from now, and does not loop.
+  const finish = (p: Omit<RunProfile, 'classNames'>) =>
+    scenario === 'finishing' && p.id === 'run_7d1e' ? { ...p, loop: false, startedAt: t0 - p.config.epochs * p.epochSeconds * 1000 + 3000 } : p;
+  return list.map(finish).map((p) => withResolved({ ...p, classNames: names(p.config.dataset_id) }));
+}
+
+/** The profile with `resolved`: what the real trainer resolves its config to on its dataset's training split. */
+function withResolved(p: RunProfile, train?: number): RunProfile {
+  const images = train ?? specs.find((s) => s.id === p.config.dataset_id)?.splits.train ?? 0;
+  return { ...p, resolved: resolveTrain(p.config, images, p.classes, p.stepsPerEpoch) };
 }
 
 /** A prediction before it gets its class name. */
@@ -285,6 +333,19 @@ export class MockApi implements Api {
   #extraModels: Model[] = [];
   #images = new Map<string, Promise<string>>();
   #nextId = 1;
+  /**
+   * The training queue: ids of the runs waiting for the one training slot, front first (docs/API.md, POST
+   * /api/runs/{id}/queue). Runs train one at a time; the worker takes the front run once the slot is free.
+   */
+  #queue: string[];
+  /** Live subscribers per run, for log lines of actions outside a run's timeline (queue moves). */
+  #subs = new Map<string, Set<RunEventHandlers>>();
+  /** Those log lines, kept for `/logs`. */
+  #notes = new Map<string, LogLine[]>();
+  #throughput: MockThroughput;
+  /** Runs created through the API: while one is queued or running, a benchmark probe answers `409 run_active`. */
+  #created = new Set<string>();
+  #probing = false;
 
   constructor(
     readonly scenario: Scenario = 'normal',
@@ -293,6 +354,39 @@ export class MockApi implements Api {
     this.#t0 = Date.now();
     this.#runs = scenario === 'empty' ? [] : profiles(this.#t0, scenario);
     this.#datasets = scenario === 'empty' ? [] : [...specs];
+    this.#throughput = new MockThroughput(this.#t0);
+    this.#queue = this.#runs
+      .filter((p) => p.startedAt === null && !p.terminal)
+      .sort((a, b) => a.createdAt - b.createdAt)
+      .map((p) => p.id);
+  }
+
+  /**
+   * The worker: once no run holds the training slot (running, stopping, or taken and still being built), it takes
+   * the front of the queue, which starts 1.5 s later (at the earliest 1.5 s after it was created).
+   */
+  #schedule(now: number) {
+    if (!this.#queue.length) return;
+    const busy = this.#runs.some(
+      (p) => !this.#queue.includes(p.id) && ((p.startedAt !== null && p.startedAt > now) || ['running', 'stopping'].includes(progressAt(p, now).status)),
+    );
+    if (busy) return;
+    const p = this.#runs.find((r) => r.id === this.#queue[0]);
+    this.#queue.shift();
+    if (p) p.startedAt = Math.max(now + 1500, p.createdAt + 1500);
+  }
+
+  /** A run snapshot with its place in the queue. */
+  #toRun(p: RunProfile, now: number): Run {
+    const i = this.#queue.indexOf(p.id);
+    return { ...toRun(p, now), queue_position: i < 0 ? null : i + 1 };
+  }
+
+  /** Logs `message` for run `id`: kept for `/logs` and sent to its live subscribers. */
+  #note(id: string, message: string) {
+    const line: LogLine = { t: new Date().toISOString(), level: 'info', message };
+    this.#notes.set(id, [...(this.#notes.get(id) ?? []), line]);
+    for (const h of this.#subs.get(id) ?? []) h.log?.(line);
   }
 
   /** Runs `fn` after a simulated network delay (`latency` overrides the default; a mock built with 0 never waits). */
@@ -301,6 +395,7 @@ export class MockApi implements Api {
     if (this.latency > 0 && (latency ?? this.latency) > 0) await sleep((latency ?? this.latency) * (0.7 + 0.6 * Math.random()));
     if (this.scenario === 'error')
       throw new ApiError(0, 'network', 'Cannot reach the FOLO server.', 'Is folo serve running? Check the server URL in Settings.');
+    this.#schedule(Date.now());
     return fn();
   }
 
@@ -346,13 +441,52 @@ export class MockApi implements Api {
     return this.#call(() => {
       const t = Date.now() / 1000;
       return {
-        cpu: { name: 'AMD Ryzen 9 7950X 16-Core Processor', threads: 32, util: round(0.27 + 0.08 * smoothNoise(3, t / 4), 3) },
+        cpu: { name: CPU_NAME, threads: 32, util: round(0.27 + 0.08 * smoothNoise(3, t / 4), 3) },
         memory: { used_bytes: Math.round((21.4 + 0.3 * smoothNoise(4, t / 9)) * 2 ** 30), total_bytes: 64 * 2 ** 30 },
         gpus: this.#gpus(),
-        features: ['export_onnx_switches'],
+        features:
+          this.scenario === 'no-throughput'
+            ? ['export_onnx_switches', 'queue_control', 'weights_onnx']
+            : ['export_onnx_switches', 'queue_control', 'weights_onnx', 'throughput', 'run_estimate', 'benchmark'],
         capabilities: capabilities(this.scenario),
       };
     }, 60);
+  }
+
+  /** A server from before these endpoints: an unknown route. */
+  #noRoute(path: string): ApiError {
+    return new ApiError(404, 'not_found', `No route for ${path}.`);
+  }
+
+  throughput(): Promise<ThroughputTable> {
+    return this.#call(() => {
+      if (this.scenario === 'no-throughput') throw this.#noRoute('GET /api/system/throughput');
+      return this.#throughput.table();
+    }, 80);
+  }
+
+  /** About 1.5 s, the shortest a real probe takes (docs/API.md: the budget, 1–10 s, plus setup). */
+  async benchmark(body: BenchmarkRequest = {}): Promise<BenchmarkReport> {
+    if (this.scenario === 'no-throughput') return this.#call(() => Promise.reject(this.#noRoute('POST /api/system/benchmark')));
+    const busy = () => {
+      const now = Date.now();
+      const active = this.#runs.find((p) => this.#created.has(p.id) && ['queued', 'running', 'stopping'].includes(progressAt(p, now).status));
+      if (this.#probing) return new ApiError(409, 'run_active', 'A benchmark probe is already running.', 'Wait for it to finish.');
+      if (active) return new ApiError(409, 'run_active', `Run ${active.name} is ${progressAt(active, now).status}.`, 'Measure when it has finished, or stop it first.');
+      return null;
+    };
+    const err = busy();
+    if (err) return this.#call(() => Promise.reject(err), 60);
+    this.#probing = true;
+    const t = Date.now();
+    try {
+      if (this.scenario === 'loading') return await new Promise<BenchmarkReport>(() => {});
+      if (this.latency > 0) await sleep(1500);
+      if (this.scenario === 'error') throw new ApiError(0, 'network', 'Cannot reach the FOLO server.', 'Is folo serve running? Check the server URL in Settings.');
+      return this.#throughput.probe(body, Date.now(), (Date.now() - t) / 1000);
+    } finally {
+      this.#probing = false;
+    }
   }
 
   // ---------- datasets ----------
@@ -481,7 +615,9 @@ export class MockApi implements Api {
         bytes: Math.round(info.params * 2.06),
         created: run.finished ?? run.created,
         run_id: p.id,
-        metrics: ep ? { map50: ep.val.map50, map50_95: ep.val.map50_95, precision: ep.val.precision, recall: ep.val.recall } : null,
+        metrics: ep
+          ? { map50: ep.val.map50, map50_95: ep.val.map50_95, precision: ep.val.precision, recall: ep.val.recall, best_f1_conf: ep.val.best_f1_conf ?? null }
+          : null,
         // As a server reads them from the checkpoint: folo.config's head, folo.train's settings (planned epochs).
         head: p.config.head ?? 'o2m',
         trained_with: { amp: p.config.amp ?? false, imgsz: p.config.imgsz, epochs: p.config.epochs },
@@ -515,8 +651,9 @@ export class MockApi implements Api {
         bytes: 18_870_000,
         created: new Date(this.#t0 - 20 * DAY).toISOString(),
         run_id: null,
-        metrics: { map50: 0.611, map50_95: 0.448, precision: 0.672, recall: 0.571 },
-        // Imported weights: no training record.
+        // Imported weights from before `best_f1_conf` (docs/FORMAT.md): no training record, and no word on the
+        // threshold precision and recall were read at.
+        metrics: { map50: 0.611, map50_95: 0.448, precision: 0.672, recall: 0.571, best_f1_conf: null },
         head: 'o2m',
         trained_with: null,
         precision: 'f32',
@@ -556,8 +693,24 @@ export class MockApi implements Api {
           images = ds.splits.val;
         }
       }
-      return toModelEval(synthEvaluation({ seed: m.id, classes: m.classes, metrics: m.metrics, perClass, instances }), images);
+      // The same operating point as the model's metrics (the epoch that wrote its weights), as on folo-server's mock.
+      return {
+        ...toModelEval(synthEvaluation({ seed: m.id, classes: m.classes, metrics: m.metrics, perClass, instances }), images),
+        best_f1_conf: m.metrics?.best_f1_conf ?? null,
+      };
     }, 180);
+  }
+
+  /**
+   * `/weights?format=onnx`, named as the server names it. The demo's models are not real networks, so the file is
+   * empty: Studio says so instead of saving it.
+   */
+  onnxFile(id: string, switches: OnnxSwitches): Promise<File> {
+    return this.#call(() => {
+      const m = this.#models().find((x) => x.id === id);
+      if (!m) throw new ApiError(404, 'model_not_found', `No model with id ${id}.`);
+      return new File([], onnxFileName(m.name, !!switches.half), { type: 'application/octet-stream' });
+    }, 1200);
   }
 
   exportModel(id: string, format: ExportFormat, switches?: OnnxSwitches): Promise<ExportResult> {
@@ -579,12 +732,12 @@ export class MockApi implements Api {
   runs(): Promise<Run[]> {
     return this.#call(() => {
       const now = Date.now();
-      return this.#runs.map((p) => toRun(p, now)).sort((a, b) => b.created.localeCompare(a.created));
+      return this.#runs.map((p) => this.#toRun(p, now)).sort((a, b) => b.created.localeCompare(a.created));
     });
   }
 
   run(id: string): Promise<Run> {
-    return this.#call(() => toRun(this.#profile(id), Date.now()));
+    return this.#call(() => this.#toRun(this.#profile(id), Date.now()));
   }
 
   createRun(c: TrainConfig): Promise<Run> {
@@ -600,7 +753,7 @@ export class MockApi implements Api {
       const now = Date.now();
       const id = `run_${(hash(c.name + now + this.#nextId++) & 0xffff).toString(16).padStart(4, '0')}`;
       const sizeIdx = ['folo-n', 'folo-s', 'folo-m', 'folo-l', 'folo-x'].indexOf(c.arch);
-      const p: RunProfile = {
+      const p: RunProfile = withResolved({
         id,
         name: c.name,
         config: c,
@@ -613,13 +766,29 @@ export class MockApi implements Api {
         tau: Math.max(4, c.epochs / 7),
         imgsPerS: [520, 320, 170, 130, 70][sizeIdx] ?? 200,
         createdAt: now,
-        startedAt: now + 1500,
+        // Queued: the worker starts it once the training slot is free (#schedule).
+        startedAt: null,
         modelId: `m_${id.slice(4)}`,
         device: c.device === 'cpu' ? 'cpu (AMD Ryzen 9 7950X)' : DEVICE,
-      };
+      }, ds.splits.train);
       this.#runs.unshift(p);
-      return toRun(p, now);
+      this.#created.add(p.id);
+      this.#queue.push(p.id);
+      this.#schedule(now);
+      return this.#toRun(p, now);
     }, 300);
+  }
+
+  estimateRun(c: TrainConfig): Promise<RunEstimate> {
+    return this.#call(() => {
+      if (this.scenario === 'no-throughput') throw this.#noRoute('POST /api/runs/estimate');
+      // The same checks as POST /api/runs; nothing is created.
+      const ds = this.#spec(c.dataset_id);
+      const gpu = /^gpu:(\d+)$/.exec(c.device);
+      if (gpu && !this.#gpus().some((g) => g.ordinal === Number(gpu[1]))) throw this.#noDevice(c.device);
+      if (c.weights && !this.#models().some((m) => m.id === c.weights)) throw new ApiError(404, 'model_not_found', `No model with id ${c.weights}.`);
+      return this.#throughput.estimate(c, ds.splits.train, ds.splits.val);
+    }, 120);
   }
 
   /** `404 device_not_found` in the real server's words. */
@@ -648,11 +817,15 @@ export class MockApi implements Api {
       const { done, status } = progressAt(p, now);
       if (status !== 'running' && status !== 'queued')
         throw new ApiError(409, 'run_not_running', `Run ${p.name} is ${status}; only queued or running runs can be stopped.`);
+      // A run that waits leaves the queue and stops at once; its trainer was never built.
+      const waiting = status === 'queued';
+      this.#queue = this.#queue.filter((x) => x !== p.id);
       const startedAt = loopStart(p, now);
       p.startedAt = startedAt;
       p.loop = false;
-      p.terminal = { status: 'stopped', atEpoch: done, at: now + 1200, stoppingUntil: now + 1200 };
-      return toRun(p, now);
+      p.neverStarted = waiting;
+      p.terminal = waiting ? { status: 'stopped', atEpoch: 0, at: now } : { status: 'stopped', atEpoch: done, at: now + 1200, stoppingUntil: now + 1200 };
+      return this.#toRun(p, now);
     });
   }
 
@@ -660,10 +833,50 @@ export class MockApi implements Api {
     return this.#call(() => {
       const p = this.#profile(id);
       const status = progressAt(p, Date.now()).status;
-      if (status === 'running' || status === 'stopping')
+      if (status === 'queued' || status === 'running' || status === 'stopping')
         throw new ApiError(409, 'run_active', `Run ${p.name} is ${status}.`, 'Stop it first.');
       this.#runs = this.#runs.filter((r) => r.id !== id);
     });
+  }
+
+  /** POST /api/runs/{id}/queue, with the real server's errors and log lines (docs/API.md). */
+  moveRun(id: string, req: QueueRequest): Promise<Run> {
+    return this.#call(() => {
+      const p = this.#profile(id);
+      const action = 'action' in req;
+      const position = 'position' in req;
+      if (action === position || (position && !(Number.isInteger(req.position) && req.position >= 1)))
+        throw new ApiError(400, 'invalid_body', 'give exactly one of `action` and `position` (a place from 1)');
+      const now = Date.now();
+      const from = this.#queue.indexOf(id);
+      const order = applyQueueMove(this.#queue, id, req);
+      if (!order) {
+        const status = progressAt(p, now).status;
+        throw new ApiError(
+          409,
+          'run_not_queued',
+          `run '${id}' ${status === 'queued' ? 'is starting' : `is ${status}`}, not waiting in the queue`,
+          'only runs waiting in the queue (with a queue_position) can be moved',
+        );
+      }
+      this.#queue = order;
+      const start = action && req.action === 'start';
+      // `start` on a free slot: the worker takes it now.
+      if (start) this.#schedule(now);
+      const to = this.#queue.indexOf(id);
+      const place = `${to + 1} of ${this.#queue.length}`;
+      this.#note(
+        id,
+        start
+          ? to < 0
+            ? 'start requested: starting now'
+            : `start requested: moved to the front (${place}); it starts when the active run ends`
+          : from === to
+            ? `queue position unchanged (${place})`
+            : `moved in the queue to position ${place}`,
+      );
+      return this.#toRun(p, now);
+    }, 160);
   }
 
   runMetrics(id: string, _signal?: AbortSignal, every = 4): Promise<RunMetrics> {
@@ -720,6 +933,15 @@ export class MockApi implements Api {
       return () => {};
     }
     const ds = specs.find((s) => s.id === p.config.dataset_id);
+    const subs = this.#subs.get(id) ?? new Set<RunEventHandlers>();
+    this.#subs.set(id, subs);
+    subs.add(h);
+    // The run's place in the queue and how many wait, as last reported (the snapshot carries the first one).
+    const place = () => {
+      const i = this.#queue.indexOf(id);
+      return i < 0 ? null : { position: i + 1, waiting: this.#queue.length };
+    };
+    let lastPlace = JSON.stringify(place());
     let last = progressAt(p, Date.now());
     let lastStart = loopStart(p, Date.now());
     let lastStep = Math.floor(last.done * p.stepsPerEpoch);
@@ -730,6 +952,13 @@ export class MockApi implements Api {
     }, 30);
     const timer = setInterval(() => {
       const now = Date.now();
+      this.#schedule(now);
+      // A `queue` event whenever the place or the count changed (docs/API.md: state, not changes); before `running`.
+      const q = place();
+      if (JSON.stringify(q) !== lastPlace) {
+        lastPlace = JSON.stringify(q);
+        if (q) h.queue?.(q);
+      }
       const cur = progressAt(p, now);
       const start = loopStart(p, now);
       if (p.loop && p.startedAt !== null && start !== lastStart) {
@@ -766,6 +995,7 @@ export class MockApi implements Api {
     return () => {
       clearTimeout(t0);
       clearInterval(timer);
+      subs.delete(h);
     };
   }
 
@@ -779,7 +1009,8 @@ export class MockApi implements Api {
   /** Log lines so far for a run, reconstructed from its profile and the clock. */
   #logHistory(id: string): LogLine[] {
     const p = this.#runs.find((r) => r.id === id);
-    if (!p || p.startedAt === null) return [];
+    const notes = this.#notes.get(id) ?? [];
+    if (!p || p.startedAt === null) return [...notes];
     const now = Date.now();
     const start = loopStart(p, now);
     const ds = specs.find((s) => s.id === p.config.dataset_id);
@@ -787,7 +1018,7 @@ export class MockApi implements Api {
     const done = Math.floor(progressAt(p, now).done);
     for (let e = 0; e < done; e++) lines.push(...epochLog(p, epochAt(p, e), start));
     if (p.terminal?.status === 'failed') lines.push({ t: new Date(start + done * p.epochSeconds * 1000).toISOString(), level: 'error', message: p.terminal.error ?? 'failed' });
-    return lines;
+    return [...lines, ...notes].sort((a, b) => a.t.localeCompare(b.t));
   }
 
   // ---------- inference ----------

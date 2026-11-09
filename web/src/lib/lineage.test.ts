@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Model } from '$lib/api/types';
-import { origin } from './lineage';
+import { origin, originTip } from './lineage';
 
 const model = (id: string, name: string) => ({ id, name }) as Model;
 const models = [model('m_coco_s', 'folo-s-coco80'), model('m_7d1e', 'fasteners-s-best')];
@@ -24,5 +24,12 @@ describe('origin', () => {
 
   it('keeps an unknown id (the models list may not have loaded yet)', () => {
     expect(origin('m_gone', [])).toEqual({ kind: 'model', id: 'm_gone', label: 'm_gone' });
+  });
+
+  it('puts the id or path in the tooltip beside the name', () => {
+    expect(originTip(origin('m_coco_s', models))).toBe('Model m_coco_s');
+    expect(originTip(origin('m_gone', []))).toBeUndefined();
+    expect(originTip(origin('/w/last.folo'))).toBe('/w/last.folo');
+    expect(originTip(origin(null))).toBeUndefined();
   });
 });

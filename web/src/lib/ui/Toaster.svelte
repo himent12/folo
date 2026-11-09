@@ -57,7 +57,8 @@
   {onfocusin}
   {onfocusout}
 >
-  <ol aria-live="polite">
+  <!-- No live region on the list: each toast is its own (role status, or alert for errors), so it is announced once. -->
+  <ol>
     {#each toast.items as t (t.id)}
       {@const Icon = icons[t.tone]}
       <li class="toast {t.tone}" data-toast={t.id} role={t.tone === 'error' ? 'alert' : 'status'} transition:fly={{ y: 8, duration: motion(160), easing: cubicOut }}>
@@ -138,12 +139,19 @@
     background: var(--bg-hover);
   }
   .close {
+    position: relative;
     display: grid;
     place-items: center;
     width: var(--control-sm);
     height: var(--control-sm);
     border-radius: var(--radius-sm);
     color: var(--text-tertiary);
+  }
+  /* At least a 44 × 44 px target around the small button (a real 44 px box on touch, below). */
+  .close::after {
+    content: '';
+    position: absolute;
+    inset: min(0px, calc((var(--control-sm) - 44px) / 2));
   }
   .close:hover {
     background: var(--bg-hover);
@@ -168,6 +176,9 @@
     }
     .close {
       width: 44px;
+    }
+    .close::after {
+      content: none;
     }
   }
   @media (max-width: 767px) {

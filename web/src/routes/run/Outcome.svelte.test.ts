@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { flushSync, mount, unmount } from 'svelte';
+import { createRawSnippet, flushSync, mount, unmount } from 'svelte';
 import { describe, expect, it, vi } from 'vitest';
 import type { Run, TrainConfig } from '$lib/api/types';
 import Outcome from './Outcome.svelte';
@@ -152,5 +152,36 @@ describe('Outcome', () => {
     expect(note.querySelector('.c-msg')?.textContent?.trim()).toBe('125 optimizer steps');
     expect(r.labels).toEqual(['Train 8 epochs', 'Why?']);
     r.done();
+  });
+});
+
+describe('Outcome: a queued run', () => {
+  const queued: Run = { ...failed(''), status: 'queued', started: null, finished: null, epoch: 0, step: 0, best: null, error: null, queue_position: 2 };
+  const snippet = (html: string) => createRawSnippet(() => ({ render: () => html }));
+
+  function show(props: Record<string, unknown>) {
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    const c = mount(Outcome, { target, props: { run: queued, elapsed: null, onresume: vi.fn(), waiting: snippet('<span>Starts after shapes-hard-l.</span>'), ...props } });
+    flushSync();
+    return {
+      title: target.querySelector('.c-title')?.textContent,
+      acts: [...target.querySelectorAll('.c-acts button')].map((b) => b.textContent?.trim()),
+      done: () => (unmount(c), target.remove()),
+    };
+  }
+
+  it('leads with its place in the queue and the way to the front, where the server reports them', () => {
+    const v = show({ waitingTitle: '2nd in queue', waitingActions: snippet('<button>Start next</button>') });
+    expect(v.title).toBe('2nd in queue');
+    expect(v.acts).toEqual(['Start next']);
+    v.done();
+  });
+
+  it('says "Waiting to start" with no action on servers without queue control', () => {
+    const v = show({});
+    expect(v.title).toBe('Waiting to start');
+    expect(v.acts).toEqual([]);
+    v.done();
   });
 });

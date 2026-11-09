@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ago, bytes, compact, deviceName, duration, eta, lr, metric, ms, pct } from './format';
+import { ago, atBestF1, bytes, compact, conf, deviceName, duration, eta, lr, metric, ms, pct } from './format';
 
 describe('format', () => {
   it('formats metrics and percents', () => {
@@ -15,7 +15,7 @@ describe('format', () => {
     expect(compact(20_000)).toBe('20k');
   });
   it('formats bytes in both unit systems', () => {
-    expect(bytes(16 * 2 ** 30)).toBe('16 GiB');
+    expect(bytes(16 * 2 ** 30)).toBe('16.0 GiB');
     expect(bytes(5_400_000, 'metric')).toBe('5.4 MB');
     expect(bytes(512)).toBe('512 B');
   });
@@ -59,5 +59,15 @@ describe('deviceName', () => {
     expect(deviceName('cpu')).toBe('CPU');
     expect(deviceName('CPU (24 threads)')).toBe('CPU');
     expect(deviceName('AMD Ryzen 9 7950X (cpu)')).toBe('Ryzen 9 7950X (CPU)');
+  });
+});
+
+describe('operating point (docs/API.md, best_f1_conf)', () => {
+  it('names the threshold to two decimals, three below 0.1, and falls back honestly', () => {
+    expect(conf(0.312)).toBe('0.31');
+    expect(conf(0.045)).toBe('0.045');
+    expect(atBestF1(0.312)).toBe('at conf 0.31 (best F1)');
+    expect(atBestF1(null)).toBe('at the best-F1 confidence');
+    expect(atBestF1(undefined)).toBe('at the best-F1 confidence');
   });
 });

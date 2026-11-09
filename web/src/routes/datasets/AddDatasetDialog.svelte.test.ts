@@ -58,7 +58,29 @@ describe('AddDatasetDialog', () => {
     expect(submit.hasAttribute('aria-describedby')).toBe(false);
   });
 
+  it('gates Register while the name shows an error, and lifts it once the name is fixed', () => {
+    c = mount(AddDatasetDialog, { target, props: { open: true } });
+    flushSync();
+    const type = (sel: string, v: string) => {
+      const el = document.querySelector<HTMLInputElement>(sel)!;
+      el.value = v;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      flushSync();
+      return el;
+    };
+    const path = type('input[placeholder="e.g. D:/data/my-dataset"]', 'D:/data/my dataset');
+    type('input[id$="-name"]', 'my dataset!');
+    path.form!.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+    flushSync();
+    const submit = document.querySelector<HTMLButtonElement>('button[type="submit"]')!;
+    expect(submit.disabled).toBe(true);
+    expect(document.getElementById(submit.getAttribute('aria-describedby') ?? '')?.textContent).toBe('Fix the name first');
+    type('input[id$="-name"]', 'my-dataset');
+    expect(submit.disabled).toBe(false);
+  });
+
   it('says a folder is already registered, and opens it, instead of announcing a new dataset', async () => {
+
     const go = await register('D:\\data\\shapes\\', [{ id: 'ds_fasteners' }, { id: 'ds_shapes' }]);
     expect(toast.items[0]).toMatchObject({ tone: 'info', title: 'Already registered as shapes' });
     expect(go).toHaveBeenCalledWith('/datasets/ds_shapes');

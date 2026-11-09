@@ -583,3 +583,113 @@ describe('LiveRun resume', () => {
     stop();
   });
 });
+
+describe('LiveRun: the training queue (docs/API.md, SSE queue)', () => {
+  let handlers: RunEventHandlers = {};
+  const saved = hub.api;
+  afterEach(() => {
+    hub.api = saved;
+    vi.useRealTimers();
+  });
+
+  it('keeps the latest queue event as the run’s place, drops it once the run starts, then reads `resolved`', async () => {
+    vi.useFakeTimers();
+    const queued = await new MockApi('normal', 0).run('run_q7c5');
+    const started = { ...queued, status: 'running' as const, queue_position: null, resolved: { optimizer: 'adamw', lr0: 0.000833 } as Run['resolved'] };
+    let snap: Run = queued;
+    hub.api = {
+      mock: false,
+      run: () => Promise.resolve(snap),
+      runMetrics: () => Promise.resolve({ steps: [], epochs: [] }),
+      runLogs: () => Promise.resolve({ lines: [] }),
+      runEvents: (_id: string, h: RunEventHandlers) => {
+        handlers = h;
+        return () => {};
+      },
+    } as unknown as Api;
+    hub.mode = 'live';
+    let live!: LiveRun;
+    const stop = $effect.root(() => {
+      live = new LiveRun(() => 'run_q7c5');
+    });
+    flushSync();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.run?.queue_position).toBe(2);
+    handlers.queue?.({ position: 1, waiting: 2 });
+    expect(live.run?.queue_position).toBe(1);
+    expect(live.waiting).toBe(2);
+    snap = started;
+    handlers.status?.({ status: 'running', error: null });
+    expect(live.run?.queue_position).toBeNull();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.run?.resolved?.lr0).toBe(0.000833);
+    stop();
+  });
+  /** A live run whose snapshots resolve only when the test says so (each `run()` call queues one). */
+  async function waitingRun() {
+    vi.useFakeTimers();
+    const queued = await new MockApi('normal', 0).run('run_q7c5');
+    const snaps: ReturnType<typeof deferred<Run>>[] = [];
+    hub.api = {
+      mock: false,
+      run: () => {
+        const d = deferred<Run>();
+        snaps.push(d);
+        return d.promise;
+      },
+      runMetrics: () => Promise.resolve({ steps: [], epochs: [] }),
+      runLogs: () => Promise.resolve({ lines: [] }),
+      runEvents: (_id: string, h: RunEventHandlers) => {
+        handlers = h;
+        return () => {};
+      },
+    } as unknown as Api;
+    hub.mode = 'live';
+    let live!: LiveRun;
+    const stop = $effect.root(() => {
+      live = new LiveRun(() => 'run_q7c5');
+    });
+    flushSync();
+    return { queued, snaps, live, stop };
+  }
+
+  it('keeps a queue event that arrives before the first snapshot, over the older place it holds', async () => {
+    const { queued, snaps, live, stop } = await waitingRun();
+    expect(queued.queue_position).toBe(2);
+    // The stream reports the new place while no run is loaded yet; the snapshot was taken before it.
+    handlers.queue?.({ position: 1, waiting: 2 });
+    expect(live.run).toBeUndefined();
+    snaps[0]!.resolve(queued);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.run?.status).toBe('queued');
+    expect(live.run?.queue_position).toBe(1);
+    expect(live.waiting).toBe(2);
+    stop();
+  });
+
+  it('keeps a queue event that arrives while a reconnect reloads, over the place its snapshot captured', async () => {
+    const { queued, snaps, live, stop } = await waitingRun();
+    snaps[0]!.resolve(queued);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.run?.queue_position).toBe(2);
+    // The reconnect's snapshot is read at place 2; the run moves up before it lands.
+    handlers.reconnect?.();
+    expect(snaps).toHaveLength(2);
+    handlers.queue?.({ position: 1, waiting: 2 });
+    expect(live.run?.queue_position).toBe(1);
+    snaps[1]!.resolve(queued);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.run?.queue_position).toBe(1);
+    stop();
+  });
+
+  it('drops the place a snapshot holds once a newer status says the run started', async () => {
+    const { queued, snaps, live, stop } = await waitingRun();
+    handlers.status?.({ status: 'running', error: null });
+    snaps[0]!.resolve(queued);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.run?.status).toBe('running');
+    expect(live.run?.queue_position).toBeNull();
+    stop();
+  });
+});

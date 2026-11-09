@@ -3,10 +3,12 @@
   import { hub } from '$lib/api/index.svelte';
   import { href } from '$lib/router.svelte';
   import { tooltip } from '$lib/ui/tooltip';
+  import WifiOff from '@lucide/svelte/icons/wifi-off';
+  import FlaskConical from '@lucide/svelte/icons/flask-conical';
 
   let { collapsed }: { collapsed: boolean } = $props();
 
-  const label = $derived(hub.offline ? 'Offline' : hub.mode === 'live' ? 'Connected' : hub.mode === 'mock' ? 'Demo data' : 'Connecting…');
+  const label = $derived(hub.offline ? 'Server offline' : hub.mode === 'live' ? 'Connected' : hub.mode === 'mock' ? 'Demo data' : 'Connecting…');
   const detail = $derived(
     hub.offline
       ? `No answer from ${hub.serverUrl}`
@@ -20,8 +22,18 @@
   );
 </script>
 
-<a href={href('/settings')} class="conn {hub.offline ? 'offline' : hub.mode}" class:collapsed use:tooltip={{ text: detail, side: collapsed ? 'right' : 'top' }}>
-  <span class="dot" aria-hidden="true"></span>
+<!-- Collapsed, the state is a glyph as well as a colour (offline: no signal, demo: a flask), named in the tooltip and
+     the accessible name, so colour is never the only cue. -->
+<a
+  href={href('/settings')}
+  class="conn {hub.offline ? 'offline' : hub.mode}"
+  class:collapsed
+  aria-label={collapsed ? label : undefined}
+  use:tooltip={{ text: collapsed ? `${label}. ${detail}` : detail, side: collapsed ? 'right' : 'top' }}
+>
+  {#if collapsed && hub.offline}<WifiOff class="glyph" size={14} strokeWidth={2} aria-hidden="true" />
+  {:else if collapsed && hub.mode === 'mock'}<FlaskConical class="glyph" size={14} strokeWidth={2} aria-hidden="true" />
+  {:else}<span class="dot" aria-hidden="true"></span>{/if}
   {#if !collapsed}<span class="label">{label}</span>{/if}
   <span class="sr-only">{detail}</span>
 </a>
@@ -67,6 +79,12 @@
   .mock .dot {
     background: var(--warning-solid);
     box-shadow: 0 0 0 3px var(--warning-muted);
+  }
+  .offline :global(.glyph) {
+    color: var(--danger-text);
+  }
+  .mock :global(.glyph) {
+    color: var(--warning-text);
   }
   .label {
     white-space: nowrap;

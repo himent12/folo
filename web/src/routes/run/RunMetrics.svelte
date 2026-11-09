@@ -16,6 +16,9 @@
 
 <script lang="ts">
   import { MediaQuery } from 'svelte/reactivity';
+  import { fade } from 'svelte/transition';
+  import { motion } from '$lib/ui/motion';
+  import { pageKeys } from '$lib/shell/pageCommands.svelte';
   /**
    * The run's metrics as one instrument: the epoch progress, a row of KPI tabs (each with its current value) and the one
    * chart the selected tab names. A single run is drawn in ink (primary metric in text.primary, secondary ones
@@ -23,17 +26,19 @@
    */
   import { tooltip } from '$lib/ui/tooltip';
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
+  import Info from '@lucide/svelte/icons/info';
   import ChartSkeleton from '$lib/charts/ChartSkeleton.svelte';
   import { BestPulse } from '$lib/charts/bestPulse';
   import LossOptions, { type Scale, type Smoothing } from '$lib/charts/LossOptions.svelte';
-  import { holdDomain, logDomain, niceDomain, unitDomain, UNIT_MIN_TOP, type Fit, type Held } from '$lib/charts/domain';
+  import { holdDomain, logDomain, niceDomain, unitDomain, unitTop, UNIT_ZOOM_BELOW, UNIT_ZOOM_NOTE, type Fit, type Held } from '$lib/charts/domain';
   import { smooth, type Pt } from '$lib/charts/downsample';
   import LineChart, { type Marker, type Series } from '$lib/charts/LineChart.svelte';
   import { runHorizon } from '$lib/charts/horizon';
   import type { Epoch, Run, Step } from '$lib/api/types';
   import { runProgress, stepsPerEpoch } from '$lib/api/progress';
-  import { duration, eta, metric, num } from '$lib/format';
+  import { conf, duration, eta, metric, num } from '$lib/format';
   import Segmented from '$lib/ui/Segmented.svelte';
+  import Meta from '$lib/ui/Meta.svelte';
   import Select from '$lib/ui/Select.svelte';
   import { media } from '$lib/design/tokens';
 
@@ -69,9 +74,9 @@
   const phoneQuery = new MediaQuery(media.phone, false);
   const narrow = $derived(phoneQuery.current);
   // Phones: a queued run's plot is the axes and one line, folded until asked for. An ended run that learned almost
-  // nothing (its best mAP50-95 sits under the 0–1 axis's lowest top, ../../lib/charts/domain UNIT_MIN_TOP) gets a
+  // nothing (its best mAP50-95 gets a zoomed 0–1 axis, ../../lib/charts/domain UNIT_ZOOM_BELOW) gets a
   // shorter plot on every tab, so its few low samples are not a thin line along the floor of a 320 px frame.
-  const flat = $derived(!['queued', 'running', 'stopping'].includes(run.status) && (run.best?.map50_95 ?? 0) + 0.02 < UNIT_MIN_TOP);
+  const flat = $derived(!['queued', 'running', 'stopping'].includes(run.status) && unitTop(run.best?.map50_95 ?? 0) < UNIT_ZOOM_BELOW);
   const height = $derived(queued && narrow ? 120 : narrow ? 168 : flat ? 200 : 320);
   let queuedOpen = $state(false);
   const queuedFold = $derived(queued && narrow && !queuedOpen);
@@ -149,9 +154,10 @@
           // The components as design/README.md maps them in both apps: box amber, cls violet dashed, dfl teal dotted.
           // Box and dfl run together late in a run (0.85 vs 0.83): box is painted over dfl's dots, and each line is
           // labelled at its end, so both stay readable where they meet.
-          { id: 'box', label: 'box', color: 'var(--chart-2)', front: true, points: smooth(perStep((s) => s.loss.box), a) },
-          { id: 'cls', label: 'cls', color: 'var(--chart-5)', pattern: 'dash', points: smooth(perStep((s) => s.loss.cls), a) },
-          { id: 'dfl', label: 'dfl', color: 'var(--chart-4)', pattern: 'dot', points: smooth(perStep((s) => s.loss.dfl), a) },
+          // Full names where the legend has room; the short ones at the lines' ends and on phones (defined under ⓘ).
+          { id: 'box', label: narrow ? 'box' : 'Box', endLabel: 'box', color: 'var(--chart-2)', front: true, points: smooth(perStep((s) => s.loss.box), a) },
+          { id: 'cls', label: narrow ? 'cls' : 'Classification', endLabel: 'cls', color: 'var(--chart-5)', pattern: 'dash', points: smooth(perStep((s) => s.loss.cls), a) },
+          { id: 'dfl', label: narrow ? 'dfl' : 'Distribution focal', endLabel: 'dfl', color: 'var(--chart-4)', pattern: 'dot', points: smooth(perStep((s) => s.loss.dfl), a) },
         ];
       }
       case 'lr': {
@@ -172,13 +178,11 @@
   });
 
   // ---- y domain ----
-  // Fitted to the data and "nice" (it ends on a gridline): a failed run's mAP of 0.5 fills the plot instead of half
-  // of a 0–1 axis. A live chart re-fits at most once per epoch (./domain holdDomain), and values never tween.
+  // Fitted to the data: a failed run's mAP of 0.5 fills the plot instead of half of a 0–1 axis, and a run that learned
+  // almost nothing gets a zoomed axis that says so (its caption names the full 0–1 scale). A live chart re-fits at
+  // most once per epoch (./domain holdDomain), and values never tween.
   const unit = $derived(tab === 'map' || tab === 'map50' || tab === 'pr');
-  // The plot inside LineChart's margins (8 px top, 24 with the mosaic mark's label; 22 px bottom).
-  const plotPx = $derived(height - (mosaicOff ? 46 : 30));
-  let held: Held<Fit & { log?: boolean }> | null = null;
-  const fit = $derived.by((): (Fit & { log?: boolean }) | null => {
+  const extent = $derived.by((): [number, number] | null => {
     let lo = Infinity;
     let hi = -Infinity;
     for (const s of series)
@@ -187,7 +191,15 @@
         if (p.y < lo) lo = p.y;
         if (p.y > hi) hi = p.y;
       }
-    if (!Number.isFinite(lo)) return null;
+    return Number.isFinite(lo) ? [lo, hi] : null;
+  });
+  const zoomed = $derived(unit && !!extent && unitTop(extent[1]) < UNIT_ZOOM_BELOW);
+  // The plot inside LineChart's margins (8 px top, 24 with the mosaic mark's label or the zoom caption; 22 px bottom).
+  const plotPx = $derived(height - (mosaicOff || zoomed ? 46 : 30));
+  let held: Held<Fit & { log?: boolean }> | null = null;
+  const fit = $derived.by((): (Fit & { log?: boolean }) | null => {
+    if (!extent) return null;
+    const [lo, hi] = extent;
     let next: Fit & { log?: boolean };
     if (unit) next = unitDomain(hi, plotPx);
     else if (tab === 'loss' && scale === 'log') next = { domain: logDomain(lo, hi), ticks: [], log: true };
@@ -229,6 +241,9 @@
     /** A power of ten's exponent ("−4"): the tab draws the unit "× 10" with a real superscript instead. */
     exp?: string;
     caption: string;
+    /** Tablets (768–1023 px): a shorter label and caption, so all six tabs fit without clipping. */
+    short?: string;
+    capShort?: string;
     title: string;
     qualifier: string;
     /** The qualifier's power-of-ten exponent, drawn as a superscript after it. */
@@ -238,23 +253,36 @@
   // validation; per-step values from the epoch the last step is in.
   const latestEp = $derived(lastEpoch ? `Latest · ep ${lastEpoch.epoch}` : 'after the first epoch');
   const stepEp = $derived(lastStep ? `Latest · ep ${Math.max(1, Math.ceil(observed - 1e-9))}` : 'after the first step');
+  // Tablets: the same readings in fewer words ("ep 37", "not yet").
+  const latestShort = $derived(lastEpoch ? `ep ${lastEpoch.epoch}` : 'not yet');
+  const stepShort = $derived(lastStep ? `ep ${Math.max(1, Math.ceil(observed - 1e-9))}` : 'not yet');
+  /** Precision and recall are read at each epoch's best-F1 confidence (docs/API.md, Operating point): the latest one. */
+  const prConf = $derived(lastEpoch?.val.best_f1_conf);
+  /** The LR schedule the trainer resolved (`Run.resolved`), else what the recipe defaults to. */
+  const schedule = $derived(
+    run.resolved ? `warmup ${run.resolved.warmup_iters} steps · ${run.resolved.cos_lr ? 'cosine' : 'linear'}` : 'warmup 3 epochs · linear',
+  );
   const tabs = $derived.by((): TabDef[] => [
     {
       id: 'map',
       label: 'mAP50-95',
       value: metric(lastEpoch?.val.map50_95),
       caption: run.best ? `best ${metric(run.best.map50_95)} · ep ${run.best.epoch}` : 'after the first epoch',
+      capShort: run.best ? `best · ep ${run.best.epoch}` : 'not yet',
       title: 'Validation mAP50-95',
       qualifier: run.best ? `by epoch · ○ best ${metric(run.best.map50_95)} at epoch ${run.best.epoch}` : 'by epoch',
     },
-    { id: 'map50', label: 'mAP50', value: metric(lastEpoch?.val.map50), caption: latestEp, title: 'Validation mAP50', qualifier: 'by epoch' },
+    { id: 'map50', label: 'mAP50', value: metric(lastEpoch?.val.map50), caption: latestEp, capShort: latestShort, title: 'Validation mAP50', qualifier: 'by epoch' },
     {
       id: 'pr',
       label: 'Precision · Recall',
+      short: 'P · R',
       value: lastEpoch ? `${metric(lastEpoch.val.precision)} · ${metric(lastEpoch.val.recall)}` : '—',
-      caption: latestEp,
+      // The latest epoch's threshold: "conf 0.31 · ep 37" (each epoch has its own, so the chart says "each at").
+      caption: lastEpoch ? (prConf != null ? `conf ${conf(prConf)} · ep ${lastEpoch.epoch}` : `best-F1 conf · ep ${lastEpoch.epoch}`) : 'after the first epoch',
+      capShort: lastEpoch && prConf != null ? `conf ${conf(prConf)}` : latestShort,
       title: 'Precision and recall',
-      qualifier: 'by epoch',
+      qualifier: prConf != null ? `by epoch · at each epoch's best-F1 conf (latest ${conf(prConf)})` : "by epoch · at each epoch's best-F1 confidence",
     },
     {
       id: 'loss',
@@ -263,15 +291,18 @@
       // The last step's raw reading, which the chart may draw smoothed: "raw" is its qualifier, set as a unit.
       unit: 'raw',
       caption: stepEp,
+      capShort: stepShort,
       title: 'Training loss',
       qualifier: 'by epoch',
     },
     {
       id: 'lr',
       label: 'Learning rate',
+      short: 'LR',
       // The power of ten is the value's unit, set smaller, so the tab never cuts the value off.
       ...lrParts(lastStep?.lr),
-      caption: 'warmup 3 · cosine',
+      caption: schedule,
+      capShort: run.resolved ? (run.resolved.cos_lr ? 'cosine' : 'linear') : 'linear',
       title: 'Learning rate',
       qualifier: 'by epoch · × 10',
       qExp: String(lrExp).replace('-', '−'),
@@ -282,17 +313,30 @@
       value: num(lastStep?.imgs_per_s, 0),
       unit: 'img/s',
       caption: stepEp,
+      capShort: stepShort,
       title: 'Throughput',
       qualifier: 'images/s by epoch',
     },
   ]);
   /** The legend's note: the latest value's epoch, per epoch for validation metrics, per step for the rest. */
+  /** The loss terms in plain words (DESIGN_DIRECTION §2.3: no jargon without its definition). */
+  const LOSS_TERMS =
+    'Box: how far predicted boxes are from the true ones. Classification (cls): how wrong the class scores are. ' +
+    'Distribution focal (dfl): how sharply each box edge is placed. EMA 0.9: smoothing; a higher value reacts more slowly.';
   const legendNote = $derived(unit ? (lastEpoch ? latestEp : undefined) : lastStep ? stepEp : undefined);
 
   // The last epochs train without mosaic (the hatched end of the progress bar): marked where they start, on every chart.
   const xMark = $derived(mosaicOff ? { x: run.epochs - run.config.augment.close_mosaic, label: 'mosaic off' } : undefined);
   const current = $derived(tabs.find((t) => t.id === tab)!);
 
+
+  // 1–6 pick a metric tab from anywhere on the page (a single-key shortcut: off with the others in Settings).
+  pageKeys((k) => {
+    const t = /^[1-9]$/.test(k) ? tabs[Number(k) - 1] : undefined;
+    if (!t) return false;
+    tab = t.id;
+    return true;
+  });
 
   function onkeydown(e: KeyboardEvent) {
     const i = tabs.findIndex((t) => t.id === tab);
@@ -337,18 +381,18 @@
     <div class="epoch">
       <span class="sr-only">Epoch</span>
       <span class="big num">{run.epoch}<span class="of">/ {run.epochs}</span></span>
-      <div
-        class="track"
-        aria-hidden="true"
-        use:tooltip={mosaicOff ? `Hatched: the last ${run.config.augment.close_mosaic} epochs train without mosaic ("mosaic off" on the chart)` : ''}
-      >
-        <div class="fill" class:done={run.status === 'completed'} class:bad={run.status === 'failed'} style:transform="scaleX({run.status === 'completed' ? 1 : progress})"></div>
-        <!-- Over the filled part of the bar (a finished run) the hatch is cut out of the fill in the panel colour. -->
-        {#if mosaicOff}<div class="close" class:over={run.status === 'completed' || progress >= closeFrom} style:left="{closeFrom * 100}%"></div>{/if}
+      <div class="bar">
+        <div class="track" aria-hidden="true">
+          <div class="fill" class:done={run.status === 'completed'} class:bad={run.status === 'failed'} style:transform="scaleX({run.status === 'completed' ? 1 : progress})"></div>
+          <!-- Over the filled part of the bar (a finished run) the hatch is cut out of the fill in the panel colour. -->
+          {#if mosaicOff}<div class="close" class:over={run.status === 'completed' || progress >= closeFrom} style:left="{closeFrom * 100}%"></div>{/if}
+        </div>
+        <!-- The hatched end explains itself on hover: a hit area over it, taller than the 4 px bar. -->
+        {#if mosaicOff}<span class="close-hit" aria-hidden="true" style:left="{closeFrom * 100}%" use:tooltip={`Last ${run.config.augment.close_mosaic} epochs train without mosaic`}></span>{/if}
       </div>
       {#if mosaicOff}<span class="sr-only">The hatched end of the bar marks the last {run.config.augment.close_mosaic} epochs, trained without mosaic.</span>{/if}
       <span class="cap num">
-        {#if run.status === 'queued'}Not started{:else if live}{(progress * 100).toFixed(1)}% · {run.eta_s !== null ? `${eta(run.eta_s)} left` : 'estimating…'}{:else}{elapsed !== null ? `${duration(elapsed)} total` : '—'}{/if}{#if mosaicOff}<span class="hatch-key">&nbsp;· <i aria-hidden="true"></i>no mosaic</span>{/if}
+        {#if run.status === 'queued'}Not started{:else if live}<Meta line><span>{(progress * 100).toFixed(1)}%</span><span>{run.eta_s !== null ? `${eta(run.eta_s)} left` : 'estimating…'}</span></Meta>{:else}{elapsed !== null ? `${duration(elapsed)} total` : '—'}{/if}
       </span>
     </div>
     <!-- Queued: the tabs read "—" until the first step, so the frame is the one a running run fills. -->
@@ -365,9 +409,9 @@
             data-tab={t.id}
             onclick={() => (tab = t.id)}
           >
-            <span class="label">{t.label}</span>
+            <span class="label"><span class="full">{t.label}</span><span class="short" aria-hidden="true">{t.short ?? t.label}</span></span>
             <span class="val num">{t.value}{#if t.unit && t.value !== '—'}{@render unitOf(t)}{/if}</span>
-            <span class="cap num">{t.caption}</span>
+            <span class="cap num"><span class="full">{t.caption}</span><span class="short" aria-hidden="true">{t.capShort ?? t.caption}</span></span>
           </button>
         {/each}
       </div>
@@ -392,7 +436,15 @@
           <div class="ctl">
             <!-- One control for the loss view (smoothing and y scale behind one button), so the header keeps at most one
                  segmented group. -->
-            {#if tab === 'loss'}<LossOptions bind:smoothing bind:scale />{/if}
+            {#if tab === 'loss'}
+              <!-- What the terms mean, for anyone who has not trained a detector before: on hover and focus, and read
+                   with the button. -->
+              <button type="button" class="terms" aria-label="What the loss terms mean" aria-describedby="loss-terms" use:tooltip={LOSS_TERMS}
+                ><Info size={14} aria-hidden="true" /></button
+              >
+              <span class="sr-only" id="loss-terms">{LOSS_TERMS}</span>
+              <LossOptions bind:smoothing bind:scale />
+            {/if}
             {#if live && run.status !== 'queued'}
               <Segmented
                 size="sm"
@@ -409,7 +461,9 @@
         {#if loading}
           <ChartSkeleton {height} />
         {:else}
+          <!-- A tab swap fades the new chart in over 160 ms (0 under reduced motion, ui/motion). -->
           {#key tab}
+            <div class="swap" in:fade={{ duration: motion(160) }}>
             <LineChart
               {series}
               {height}
@@ -424,11 +478,13 @@
               curve={unit ? 'monotone' : 'linear'}
               markers={best}
               {xMark}
+              yLabel={zoomed ? UNIT_ZOOM_NOTE : undefined}
               {legendNote}
               label="{current.title} by epoch"
               endLabels={tab === 'loss'}
               empty={queued ? 'Curves appear here once training starts' : unit ? 'Waiting for the first validation…' : 'Waiting for the first step…'}
             />
+            </div>
           {/key}
         {/if}
       </div>
@@ -529,8 +585,12 @@
     color: var(--text-tertiary);
     letter-spacing: 0;
   }
+  /* A fixed line box: the value's baseline sits at the same height in every tab, with or without a unit, an exponent or
+     a fallback glyph (the unit's own line-height is 1, so a 12 px span can never deepen the line). */
   .val {
     align-self: end;
+    height: 32px;
+    overflow: visible;
     font-size: var(--type-2xl-size);
     line-height: 32px;
     letter-spacing: var(--type-2xl-tracking);
@@ -542,6 +602,7 @@
     color: var(--text-primary);
   }
   .unit {
+    line-height: 1;
     margin-left: 4px;
     font-size: var(--type-sm-size);
     font-weight: var(--weight-regular);
@@ -567,7 +628,6 @@
   }
   .track {
     position: relative;
-    align-self: center;
     height: 4px;
     border-radius: 2px;
     background: var(--bg-active);
@@ -587,16 +647,16 @@
   .fill.bad {
     background: var(--danger-solid);
   }
-  /* A key for the hatched end of the bar, in the caption beside it. */
-  .hatch-key i {
-    display: inline-block;
-    width: 10px;
-    height: 6px;
-    margin: 0 4px 0 2px;
-    vertical-align: 1px;
-    border-radius: 1px;
-    background: repeating-linear-gradient(135deg, transparent 0 2px, var(--line-strong) 2px 3px);
-    box-shadow: inset 0 0 0 1px var(--line-strong);
+  .bar {
+    position: relative;
+    align-self: center;
+    min-width: 0;
+  }
+  .close-hit {
+    position: absolute;
+    top: -12px;
+    bottom: -12px;
+    right: 0;
   }
   .close {
     position: absolute;
@@ -730,6 +790,18 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
+  .terms {
+    display: grid;
+    place-items: center;
+    width: var(--control-sm);
+    height: var(--control-sm);
+    border-radius: var(--radius-sm);
+    color: var(--text-tertiary);
+  }
+  .terms:hover {
+    color: var(--text-primary);
+    background: var(--bg-hover);
+  }
   .ctl {
     display: flex;
     align-items: center;
@@ -748,6 +820,24 @@
       font-size: var(--type-xl-size);
       line-height: 32px;
       letter-spacing: var(--type-xl-tracking);
+    }
+  }
+  /* Tablets: six tabs share about 700 px, so each says it in fewer words ("P · R", "ep 37"), the full words their
+     accessible name; nothing clips. */
+  .short {
+    display: none;
+  }
+  @media (min-width: 768px) and (max-width: 1023px) {
+    .tab .full {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip-path: inset(50%);
+      white-space: nowrap;
+    }
+    .tab .short {
+      display: inline;
     }
   }
   @media (max-width: 767px) {
@@ -792,12 +882,13 @@
       align-self: baseline;
       text-align: right;
     }
-    .epoch .track {
+    .epoch .bar {
       grid-row: 2;
       grid-column: 1 / -1;
       align-self: center;
     }
     .val {
+      height: 28px;
       font-size: var(--type-lg-size);
       line-height: 28px;
     }
@@ -826,5 +917,9 @@
     .q {
       white-space: normal;
     }
+  }
+  /* The fading wrapper of a swapped chart: it takes the chart's place in the layout. */
+  .swap {
+    min-width: 0;
   }
 </style>

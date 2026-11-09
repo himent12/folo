@@ -145,6 +145,8 @@ async function overflowCheck(page) {
       if (hits.some((o) => o !== h && h.el.contains(o.el) && o.px >= h.px - 1)) continue;
       const d = culprit(h.el);
       if (d && deliberate(h.el, d)) continue;
+      // Nothing inside spills: a positioned ::before / ::after (a 44 px hit area around a small control) is the cause.
+      if (!d && ['::before', '::after'].some((p) => getComputedStyle(h.el, p).position === 'absolute')) continue;
       const text = ((d ?? h.el) instanceof HTMLElement ? /** @type {HTMLElement} */ (d ?? h.el).innerText : (d ?? h.el).textContent) ?? '';
       out.push({
         selector: describe(h.el) + (d ? `  [widest: ${describe(d).split(' > ').pop()}]` : ''),
@@ -163,7 +165,7 @@ async function overflowCheck(page) {
  * - `[role=tab][aria-selected=true]` and a checked radio with `aria-controls`: the controlled element must be visible
  *   (not `display: none` itself or through an ancestor) and taller than 40 px.
  * - A checked radio in a section picker without `aria-controls` (a Segmented labelled "Show", `.phone-pick`): the
- *   content under the picker in `main` must reach 40 px.
+ *   content under the picker in `main` must reach 40 px, and start 12 px under it (every section, one geometry).
  * - `main`: the visible content below the page header (or main's top) must reach 80 px.
  * "Content" is what a reader can see: text, images, canvases, SVG, form controls, and boxes with a fill or an edge
  * (panel frames, skeleton blocks); fixed bars (the tab bar, docks) don't count.
@@ -177,8 +179,9 @@ async function blankCheck(page) {
     const shown = (/** @type {Element} */ el) => el.checkVisibility({ checkVisibilityCSS: true, checkOpacity: true });
     const replaced = new Set(['IMG', 'SVG', 'CANVAS', 'VIDEO', 'INPUT', 'SELECT', 'TEXTAREA', 'BUTTON']);
     /** Visible content boxes inside `scope`: things a reader sees, not empty wrappers. */
-    const contentRects = (/** @type {Element} */ scope) => {
-      /** @type {DOMRect[]} */
+    const contentRects = (/** @type {Element} */ scope) => contentBoxes(scope).map((b) => b.r);
+    const contentBoxes = (/** @type {Element} */ scope) => {
+      /** @type {{ el: Element, r: DOMRect }[]} */
       const rects = [];
       for (const el of scope.querySelectorAll('*')) {
         const r = el.getBoundingClientRect();
@@ -199,7 +202,7 @@ async function blankCheck(page) {
             break;
           }
         }
-        if (!fixed) rects.push(r);
+        if (!fixed) rects.push({ el, r });
       }
       return rects;
     };
@@ -237,8 +240,25 @@ async function blankCheck(page) {
       }
       const picker = group?.getAttribute('aria-label') === 'Show' || !!ctl.closest('.phone-pick');
       if (!picker || !main || !group) continue;
-      const reach = reachBelow(main, group.getBoundingClientRect().bottom);
+      const pickBottom = group.getBoundingClientRect().bottom;
+      const reach = reachBelow(main, pickBottom);
       if (reach < 40) out.push({ selector: `section picker "${groupName}" › ${name(ctl)}: ${Math.round(reach)}px of content under it`, text: '' });
+      // Every section starts 12 px under its picker: a hidden section must not leave a track or a gap behind. Only at
+      // the page's top: once scrolled, the sticky picker sits over the section's middle.
+      // Rows a scroller has moved out of its box above (a log scrolled to its end) are not where the section starts.
+      const clippedAbove = (/** @type {Element} */ el, /** @type {DOMRect} */ r) => {
+        for (let e = el.parentElement; e && e !== main; e = e.parentElement) {
+          if (getComputedStyle(e).overflowY !== 'visible' && r.top < e.getBoundingClientRect().top - 0.5) return true;
+        }
+        return false;
+      };
+      const first =
+        window.scrollY > 0
+          ? Infinity
+          : Math.min(...contentBoxes(main).filter(({ el, r }) => r.top >= pickBottom - 1 && !clippedAbove(el, r)).map(({ r }) => r.top));
+      if (Number.isFinite(first) && Math.abs(first - pickBottom - 12) > 1) {
+        out.push({ selector: `section picker "${groupName}" › ${name(ctl)}: the section starts ${Math.round(first - pickBottom)}px under it, not 12`, text: '' });
+      }
     }
 
     if (main && shown(main)) {

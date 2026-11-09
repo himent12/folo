@@ -33,6 +33,9 @@ html {
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   text-rendering: optimizeLegibility;
+  /* Prose never ends on an orphan ("shapes.", "of 32."): every hint, help line, dialog, banner and description
+     inherits it. One-line labels are unaffected. */
+  text-wrap: pretty;
 }
 
 body {
@@ -169,6 +172,11 @@ a.ident:hover {
 
 .faint {
   color: var(--text-tertiary);
+}
+
+/* Words that must stay on one line: a key group and the punctuation after it ("Ctrl V."), a value and its unit. */
+.nowrap {
+  white-space: nowrap;
 }
 
 .truncate {
@@ -326,12 +334,21 @@ a.ident:hover {
 .table .r {
   text-align: right;
 }
+/* A loading row's placeholder bar (ui/Skeleton, a block) sits where the number will: on the right edge of a .r cell. */
+.table td.r > .sk {
+  margin-left: auto;
+}
+
 :where(.table) tbody tr.link {
   cursor: pointer;
   transition: background-color var(--dur-fast) var(--ease-standard);
 }
-:where(.table) tbody tr.link:hover {
-  background: var(--bg-hover);
+/* Hover fills only where a pointer can hover (a tap never leaves one behind), and never over a selection's fill: a
+   list shows one highlighted row per meaning (DESIGN_DIRECTION §2.7). */
+@media (hover: hover) {
+  :where(.table) tbody tr.link:hover:not(.on, [aria-selected='true']) {
+    background: var(--bg-hover);
+  }
 }
 /* The selection rule: bg.active and a 2 px accent bar on the row's leading edge. */
 :where(.table) tbody tr:is(.on, [aria-selected='true']) {

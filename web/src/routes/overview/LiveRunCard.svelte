@@ -5,6 +5,7 @@
   import { LiveRun } from '$lib/api/live.svelte';
   import type { Dataset, Run } from '$lib/api/types';
   import LineChart from '$lib/charts/LineChart.svelte';
+  import { unitDomain, unitZoomed, UNIT_ZOOM_NOTE } from '$lib/charts/domain';
   import { hub } from '$lib/api/index.svelte';
   import { Resource } from '$lib/api/resource.svelte';
   import { runProgress } from '$lib/api/progress';
@@ -18,6 +19,7 @@
   import StatusBadge from '$lib/ui/StatusBadge.svelte';
   import { media } from '$lib/design/tokens';
   import Ident from '$lib/ui/Ident.svelte';
+  import Meta from '$lib/ui/Meta.svelte';
 
   /** `run: null` while the runs load: the same card with real labels and placeholder values, so nothing moves. */
   let { run: initial, dataset }: { run: Run | null; dataset?: Dataset } = $props();
@@ -50,6 +52,15 @@
     void live.version;
     return live.epochs[live.epochs.length - 1]?.epoch ?? 0;
   });
+  // The y axis fits the run's scores (../../lib/charts/domain): 0 up to just over the best, never a mostly empty 0–1;
+  // a run still near 0 gets a zoomed axis whose caption names the full scale. Epochs arrive one at a time, and the top
+  // moves in whole steps, so it re-fits at most once per epoch. The plot is the chart's height less its 30 px margins.
+  const chartH = $derived(narrow ? 140 : 200);
+  const fit = $derived.by(() => {
+    const hi = Math.max(-Infinity, ...charts.map.flatMap((s) => s.points.map((p) => p.y)).filter(Number.isFinite));
+    return Number.isFinite(hi) ? unitDomain(hi, chartH - 30) : undefined;
+  });
+  const zoomed = $derived(unitZoomed(fit));
   const horizon = $derived<[number, number]>(run ? [0, Math.max(1, lastEpoch)] : [0, 1]);
   const progress = $derived(run ? runProgress(run) : 0);
 
@@ -72,10 +83,13 @@
     </div>
     <p class="meta">
       {#if run}
-        <span>{dataset?.name ?? run.config.dataset_id}</span><span class="sep">·</span>
-        <Ident value={run.config.arch} /><span class="sep">·</span>
-        <span>{run.config.imgsz} px · batch {run.config.batch}</span><span class="sep">·</span>
-        <span class="truncate num">{deviceText}</span>
+        <Meta line>
+          <span>{dataset?.name ?? run.config.dataset_id}</span>
+          <Ident value={run.config.arch} />
+          <span class="num">{run.config.imgsz} px</span>
+          <span class="num">batch {run.config.batch}</span>
+          <span class="dev num">{deviceText}</span>
+        </Meta>
       {:else}
         <!-- The trailing span takes the place of the device, which phones hide. -->
         <span>&#8203;<Skeleton inline w="min(280px, 48vw)" h="10px" /></span><span></span>
@@ -113,14 +127,16 @@
            so the legend holds only the two series and their values, on one row. -->
       <p class="chart-title">Validation mAP <span class="faint">{narrow && lastEpoch ? `Latest · ep ${lastEpoch}` : 'by epoch, so far'}</span></p>
       {#if !run || live.loading}
-        <ChartSkeleton height={narrow ? 140 : 200} />
+        <ChartSkeleton height={chartH} />
       {:else}
         <LineChart
           series={charts.map}
-          height={narrow ? 140 : 200}
+          height={chartH + (zoomed ? 16 : 0)}
           xDomain={horizon}
           xInteger
-          yDomain={[0, 1]}
+          yDomain={fit?.domain ?? [0, 1]}
+          yTickValues={fit?.ticks}
+          yLabel={zoomed ? UNIT_ZOOM_NOTE : undefined}
           valueFormat={(v) => metric(v)}
           xTitle={(x) => `Epoch ${Math.round(x)}`}
           curve="monotone"
@@ -175,9 +191,6 @@
     min-width: 0;
     color: var(--text-tertiary);
     font-size: var(--type-sm-size);
-  }
-  .sep {
-    color: var(--text-disabled);
   }
   .cta {
     grid-column: 2;
@@ -280,8 +293,8 @@
     header {
       padding: var(--space-3) var(--space-3) var(--space-2) var(--space-4);
     }
-    .meta span:last-child,
-    .meta .sep:nth-last-child(2) {
+    .meta :global(.dev),
+    .meta > span:last-child:not(:first-child) {
       display: none;
     }
     .body {

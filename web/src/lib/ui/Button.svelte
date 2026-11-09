@@ -175,7 +175,8 @@
   .ghost:disabled:not([aria-busy='true']) {
     color: var(--text-disabled);
   }
-  /* Touch: grow the hit area to at least 44 px without changing the visual size. */
+  /* Touch: grow the hit area to at least 44 × 44 px without changing the visual size (a short label's button is
+     narrower than 44 px, so the width grows too, centred). */
   @media (pointer: coarse) {
     .btn {
       position: relative;
@@ -183,7 +184,10 @@
     .btn::after {
       content: '';
       position: absolute;
-      inset: min(0px, calc((var(--h) - 44px) / 2)) 0;
+      inset: min(0px, calc((var(--h) - 44px) / 2)) auto;
+      left: 50%;
+      width: max(100%, 44px);
+      translate: -50% 0;
     }
     /* Icon buttons get a real 44 × 44 box (no overlapping invisible targets). */
     .btn.square {

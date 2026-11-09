@@ -22,6 +22,9 @@ const model: Model = {
   metrics: null,
 };
 
+/** `/api/system` without optional features; tests add the ones they need. */
+const SYS = { cpu: { name: 'cpu', threads: 1, util: 0 }, memory: { used_bytes: 0, total_bytes: 1 }, gpus: [] };
+
 let target: HTMLElement;
 let c: ReturnType<typeof mount> | undefined;
 
@@ -91,11 +94,13 @@ describe('ExportDialog', () => {
     // Without the toast, a live region in the dialog announces it.
     const live = target.ownerDocument.querySelectorAll('dialog [role="status"]');
     expect(live).toHaveLength(1);
-    expect(live[0]!.textContent).toBe('Export finished: shapes-n-best-f16.folo, 5.05 MiB.');
+    expect(live[0]!.textContent).toBe('Export finished: shapes-n-best-f16.folo, 5.1 MiB.');
   });
 
   it('says plainly that ONNX cannot be downloaded, and shows where it is', async () => {
     hub.api = new MockApi('normal', 0);
+    // An older server: no ONNX download.
+    vi.spyOn(hub.api, 'system').mockResolvedValue({ ...SYS, features: ['export_onnx_switches'] });
     vi.spyOn(hub.api, 'exportModel').mockResolvedValue({ path: 'D:/folo/exports/shapes-n-best.onnx', bytes: 10_700_000 });
     c = mount(ExportDialog, { target, props: { model, open: true } });
     flushSync();
@@ -110,6 +115,8 @@ describe('ExportDialog', () => {
 
   it('sends the ONNX switches the server says it takes', async () => {
     hub.api = new MockApi('normal', 0);
+    // A server with the switches but no ONNX download: the export writes the file on the server.
+    vi.spyOn(hub.api, 'system').mockResolvedValue({ ...SYS, features: ['export_onnx_switches'] });
     const run = vi.spyOn(hub.api, 'exportModel');
     c = mount(ExportDialog, { target, props: { model: { ...model, id: 'm_fast_n' }, open: true } });
     flushSync();
@@ -144,5 +151,59 @@ describe('ExportDialog', () => {
     button('Export')!.click();
     await until(() => target.ownerDocument.querySelector('dialog .where code'), 'the path');
     expect(run).toHaveBeenCalledWith('m_x', 'onnx', undefined);
+  });
+});
+
+describe('ExportDialog: ONNX download (weights_onnx)', () => {
+  const pickOnnx = async () => {
+    target.ownerDocument.querySelector<HTMLInputElement>('input[value="onnx"]')!.click();
+    return until(() => {
+      const all = [...target.ownerDocument.querySelectorAll<HTMLInputElement>('dialog [role="group"] input[type="checkbox"]')];
+      return all.length === 3 ? all : null;
+    }, 'the switches');
+  };
+
+  it('downloads the graph straight away, the button naming the file and the switches in the query', async () => {
+    const api = new HttpApi('http://folo.test');
+    vi.spyOn(api, 'system').mockResolvedValue({ ...SYS, features: ['export_onnx_switches', 'weights_onnx'] });
+    const exp = vi.spyOn(api, 'exportModel');
+    const get = vi.spyOn(api, 'onnxFile').mockResolvedValue(new File([new Uint8Array(2048)], 'shapes-n-best-f16.onnx'));
+    hub.api = api;
+    c = mount(ExportDialog, { target, props: { model, open: true } });
+    flushSync();
+    const boxes = await pickOnnx();
+    await until(() => button('Download shapes-n-best.onnx'), 'the download button');
+    boxes[2]!.click(); // half
+    flushSync();
+    const dl = await until(() => button('Download shapes-n-best-f16.onnx'), 'the f16 name');
+    expect(dl.classList.contains('primary')).toBe(true);
+    expect(button('Export')).toBeUndefined();
+    let saved = '';
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) {
+      saved = this.download;
+    });
+    vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:x');
+    dl.click();
+    await until(() => button('Done'), 'the finished state');
+    expect(get).toHaveBeenCalledWith('m_x', { decode: false, dynamic: false, half: true });
+    expect(exp).not.toHaveBeenCalled();
+    expect(saved).toBe('shapes-n-best-f16.onnx');
+    const text = target.ownerDocument.querySelector('dialog .done')?.textContent ?? '';
+    expect(text).toContain('Downloaded');
+    expect(text).toContain('shapes-n-best-f16.onnx');
+    expect(text).toContain('Nothing was written on the server.');
+    expect(target.ownerDocument.querySelector('dialog [role="status"]')?.textContent).toBe('Downloaded shapes-n-best-f16.onnx, 2.0 KiB.');
+  });
+
+  it('saves nothing in the demo, and says why', async () => {
+    hub.api = new MockApi('normal', 0);
+    const clicked = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+    c = mount(ExportDialog, { target, props: { model: { ...model, id: 'm_fast_n', name: 'fasteners-n-best' }, open: true } });
+    flushSync();
+    await pickOnnx();
+    (await until(() => button('Download fasteners-n-best.onnx'), 'the download button')).click();
+    await until(() => button('Done'), 'the finished state');
+    expect(clicked).not.toHaveBeenCalled();
+    expect(target.ownerDocument.querySelector('dialog .done')?.textContent).toContain('Nothing to download in the demo');
   });
 });

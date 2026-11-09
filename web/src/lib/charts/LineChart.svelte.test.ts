@@ -14,8 +14,10 @@ describe('LineChart announcements', () => {
     target.querySelector('.plot')!.dispatchEvent(new Event('resize'));
     flushSync();
     const live = target.querySelector('[aria-live]')!;
-    const svg = target.querySelector('svg[role=img]');
+    const svg = target.querySelector('svg[aria-roledescription=chart]');
     expect(svg).toBeTruthy();
+    // Focusable and interactive, so a group with a chart role description, not an image (whose content is opaque).
+    expect(svg?.getAttribute('role')).toBe('group');
     if (svg) {
       svg.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true }));
       flushSync();
@@ -72,7 +74,7 @@ describe('LineChart touch readout', () => {
     Object.defineProperty(target.querySelector('.plot')!, 'clientWidth', { value: 400 });
     target.querySelector('.plot')!.dispatchEvent(new Event('resize'));
     flushSync();
-    const svg = target.querySelector('svg[role=img]')!;
+    const svg = target.querySelector('svg[aria-roledescription=chart]')!;
     const touch = (type: string, clientX: number, clientY = 50) =>
       svg.dispatchEvent(new PointerEvent(type, { pointerType: 'touch', clientX, clientY, bubbles: true }));
     // At rest the note says which value the legend shows, on a narrow plot too.
@@ -102,7 +104,7 @@ describe('LineChart touch readout', () => {
     Object.defineProperty(target.querySelector('.plot')!, 'clientWidth', { value: 600 });
     target.querySelector('.plot')!.dispatchEvent(new Event('resize'));
     flushSync();
-    const svg = target.querySelector('svg[role=img]')!;
+    const svg = target.querySelector('svg[aria-roledescription=chart]')!;
     const tap = (clientX: number) => {
       svg.dispatchEvent(new PointerEvent('pointerdown', { pointerType: 'touch', clientX, clientY: 50, bubbles: true }));
       svg.dispatchEvent(new PointerEvent('pointerup', { pointerType: 'touch', clientX, clientY: 50, bubbles: true }));
@@ -316,7 +318,7 @@ describe('LineChart round 18', () => {
   it('hints at the arrow keys while the plot has keyboard focus, until a value is read out', async () => {
     const props = $state({ series: [{ id: 'a', label: 'a', color: 'red', points: pts((x) => x / 30) }], label: 't', legendNote: 'Last', hint: null as string | null });
     const { target, c } = mountAt(props);
-    const svg = target.querySelector('svg[role=img]') as SVGSVGElement;
+    const svg = target.querySelector('svg[aria-roledescription=chart]') as SVGSVGElement;
     // happy-dom has no :focus-visible; a keyboard focus is what it would match.
     svg.matches = ((sel: string) => sel === ':focus-visible') as unknown as typeof svg.matches;
     svg.dispatchEvent(new FocusEvent('focus'));
@@ -334,7 +336,7 @@ describe('LineChart round 18', () => {
 
   it('shows no hint on a mouse focus or hover', () => {
     const { target, c } = mountAt({ series: [{ id: 'a', label: 'a', color: 'red', points: pts((x) => x / 30) }], label: 't', legendNote: 'Last' });
-    const svg = target.querySelector('svg[role=img]') as SVGSVGElement;
+    const svg = target.querySelector('svg[aria-roledescription=chart]') as SVGSVGElement;
     svg.matches = (() => false) as unknown as typeof svg.matches;
     svg.dispatchEvent(new FocusEvent('focus'));
     flushSync();

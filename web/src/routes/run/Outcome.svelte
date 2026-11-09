@@ -3,7 +3,7 @@
    * A run's outcome under the header, every state in one pattern (./Callout): icon, title, cause, one action, and a
    * disclosure for the rest. Out of GPU memory says so plainly, with the likeliest smaller setting as the action and
    * the other fixes and the driver's report behind "More fixes". A queued run leads with what it waits for and when it
-   * should start. The trainer's warning that a run is too short to learn from (./warnings) is one line, "Too short to
+   * should start; on servers with queue control, with its place ("2nd in queue") and the way to the front. The trainer's warning that a run is too short to learn from (./warnings) is one line, "Too short to
    * learn: 125 optimizer steps", with the engine's sentences in plain words behind "Why?"; never a toast. Once the run
    * has an outcome, that line joins the outcome's callout as its second line ("Completed in 30s · best …", then "Too
    * short to learn: …"), so one run never stacks two banners.
@@ -31,6 +31,8 @@
     resuming = false,
     onresume,
     waiting,
+    waitingTitle = 'Waiting to start',
+    waitingActions,
     warnings = [],
   }: {
     run: Run;
@@ -39,6 +41,10 @@
     onresume: () => void;
     /** A queued run: what it waits for and when it should start. */
     waiting?: Snippet;
+    /** A queued run's place, "2nd in queue", where the server reports it. */
+    waitingTitle?: string;
+    /** A queued run's action: Start next. */
+    waitingActions?: Snippet;
     /** The trainer's schedule warnings, as it wrote them (./warnings). */
     warnings?: string[];
   } = $props();
@@ -121,7 +127,7 @@
   </Callout>
 {:else if run.status === 'queued' && waiting}
   <!-- The dependency and the start estimate lead; the frames below stay compact until there is data. -->
-  <Callout tone="neutral" icon={Clock} title="Waiting to start">{@render waiting()}</Callout>
+  <Callout tone="neutral" icon={Clock} title={waitingTitle} actions={waitingActions}>{@render waiting()}</Callout>
 {:else if short}
   <!-- No outcome yet (a live run): the warning alone, one line: the cause in numbers and the fix; the engine's
        sentences, in plain words, behind "Why?". -->

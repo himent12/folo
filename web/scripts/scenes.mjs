@@ -27,6 +27,26 @@ async function playgroundResult(/** @type {import('playwright-core').Page} */ pa
   await page.clock.runFor(500);
 }
 
+/**
+ * New run's estimate with what it stands on opened: in the Summary rail on wide screens, in the summary sheet (from the
+ * dock) below 960 px. `served`: wait for the server's estimate to replace the reference.
+ * @param {import('playwright-core').Page} page
+ * @param {string} vp
+ * @param {boolean} served
+ */
+async function openEstimate(page, vp, served) {
+  await until(page, '.summary .est-how > summary');
+  if (served) await until(page, '.summary .est-how > summary:has-text("Measured")');
+  if (vp === 'mobile' || vp === 'tablet') {
+    await page.locator('.dock-est').click();
+    await page.locator('dialog[open]').waitFor();
+    await page.locator('dialog[open] details.est-how > summary').click();
+  } else {
+    await page.locator('.summary details.est-how > summary').click();
+  }
+  await page.mouse.move(0, 0);
+}
+
 /** Starts New run on a GPU the mock then reports gone (404 device_not_found) and waits for the Device error. */
 async function unplugGpu(/** @type {import('playwright-core').Page} */ page) {
   // An <option> is never "visible": wait for it to exist, running the mock's clock meanwhile.
@@ -67,7 +87,7 @@ export const scenes = [
     viewports: ['mobile'],
     fullPage: true,
     setup: async (page) => {
-      await page.getByRole('radio', { name: 'Classes' }).click();
+      await page.getByRole('tab', { name: 'Classes', exact: true }).click();
       await page.mouse.move(0, 0);
     },
   },
@@ -238,6 +258,25 @@ export const scenes = [
     },
   },
   {
+    // The server's estimate (POST /api/runs/estimate): folo-s at 640, batch 16, f32 was measured on the mock's GPU, so
+    // the time is a narrow range on "Measured on this GPU"; opened, the phases, validation and startup behind it.
+    name: 'run-new-estimate',
+    path: '/runs/new',
+    fullPage: false,
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
+    setup: (page, { vp }) => openEstimate(page, vp, true),
+  },
+  {
+    // A server from before measured throughput (no `run_estimate`): the reference figures, as a wide range said to be
+    // the reference, in secondary ink.
+    name: 'run-new-reference',
+    path: '/runs/new',
+    search: 'scenario=no-throughput',
+    fullPage: false,
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
+    setup: (page, { vp }) => openEstimate(page, vp, false),
+  },
+  {
     // Below 960 px the dock's estimate opens the run summary as a dialog (a bottom sheet on phones).
     name: 'run-new-summary',
     fullPage: false,
@@ -306,10 +345,52 @@ export const scenes = [
     },
   },
   // Nothing picked: the inline empty state with the standard secondary "Add run…" button.
+  {
+    // Phones: the side-by-side table two runs at a time, the baseline and the next run (paged once), differing values
+    // marked.
+    name: 'run-compare-pair-phone',
+    path: '/runs/compare?ids=run_7d1e,run_c19a,run_5be3,run_a2f0',
+    viewports: ['mobile'],
+    fullPage: true,
+    setup: async (page) => {
+      await until(page, '#cmp-table .pair');
+      await page.getByRole('button', { name: 'Next run' }).click();
+      await page.mouse.move(0, 0);
+    },
+  },
   { name: 'run-compare-empty', path: '/runs/compare', viewports: ['desktop', 'mobile'] },
-  // A queued run in the loaded frame: KPIs at "—", the chart's axes with what it waits for, the config in its rail.
-  // A queued run: the dependency and start estimate lead, the empty frames stay compact until there is data.
+  // A queued run, first of two waiting: its place, what it waits for and when it should start lead; from 768 px up the
+  // config beside the queue and one quiet list of what the run will have (no empty frames). Phones keep their sections.
   { name: 'run-queued', path: '/runs/run_q4n2', viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
+  // Second in the queue (queue control): "2nd in queue", the run in front of it, and Start next (it never interrupts the
+  // live run, so not "now").
+  { name: 'run-queued-second', path: '/runs/run_q7c5', viewports: ['desktop', 'laptop', 'tablet', 'mobile'], setup: (page) => until(page, '.callout button') },
+  {
+    // The queued run's ⋯: Move up (it is last, so no Move down); phones also keep Remove from queue there.
+    name: 'run-queued-menu',
+    path: '/runs/run_q7c5',
+    fullPage: false,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page) => {
+      await until(page, 'button[aria-label="More run actions"]:visible');
+      await page.locator('button[aria-label="More run actions"]:visible').click();
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // What the run trains with (Run.resolved): "AdamW (auto)", "0.000833 (requested 0.01)", batch × accumulate, warmup.
+    // Phones: the Config section.
+    name: 'run-config-resolved',
+    path: '/runs/run_c19a',
+    fullPage: true,
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
+    setup: async (page, { vp }) => {
+      if (vp === 'desktop' || vp === 'laptop') await until(page, '#config dd');
+      else await page.getByRole('tab', { name: 'Config' }).click();
+      await page.locator('#config').scrollIntoViewIfNeeded();
+      await page.mouse.move(0, 0);
+    },
+  },
   {
     // A 5-epoch run from scratch: the trainer's warnings that it is too short to learn, as one callout.
     name: 'run-short-warning',
@@ -325,18 +406,19 @@ export const scenes = [
     fullPage: false,
     viewports: ['mobile'],
     setup: async (page) => {
-      await page.getByRole('radio', { name: 'Logs' }).click();
+      await page.getByRole('tab', { name: 'Logs', exact: true }).click();
       await page.mouse.move(0, 0);
     },
   },
   {
     // Keyboard focus on a chart: the readout row says how to read it.
+    // From the tablet tier up: phones and touch-only devices get no key hint.
     name: 'chart-key-hint',
     path: '/runs/run_c19a',
     fullPage: false,
-    viewports: ['desktop', 'mobile'],
+    viewports: ['desktop', 'tablet'],
     setup: async (page) => {
-      const svg = page.locator('#run-chart svg[role="img"]').first();
+      const svg = page.locator('#run-chart svg[aria-roledescription="chart"]').first();
       await svg.scrollIntoViewIfNeeded();
       await page.keyboard.press('Tab');
       await svg.focus();
@@ -422,7 +504,7 @@ export const scenes = [
     viewports: ['desktop', 'laptop', 'mobile'],
     setup: async (page, { vp }) => {
       await until(page, '#ds-size svg');
-      const svg = page.locator('#ds-size svg[role=img]');
+      const svg = page.locator('#ds-size svg[aria-roledescription=chart]');
       await svg.evaluate((el, touch) => {
         const r = el.getBoundingClientRect();
         const p = { clientX: r.left + r.width * 0.4, clientY: r.top + r.height * 0.6, bubbles: true };
@@ -432,6 +514,19 @@ export const scenes = [
       // The readout row switches from the total to the bin.
       await page.locator('#ds-size .readout.at').waitFor({ state: 'visible', timeout: 3000 });
       await page.clock.runFor(300);
+    },
+  },
+  {
+    // The watched run finished while another page was open: a toast says so, with "Open run" (no timer: it has an
+    // action). Mock scenario `finishing`: the live run's last epoch lands 3 s after load.
+    name: 'toast-run-finished',
+    path: '/models',
+    search: 'scenario=finishing',
+    fullPage: false,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page) => {
+      await until(page, 'text=finished training', 12000);
+      await page.mouse.move(0, 0);
     },
   },
   {
@@ -446,8 +541,15 @@ export const scenes = [
       await page.locator('dialog[open] input[placeholder="e.g. D:/data/my-dataset"]').fill('D:/data/shapes');
       await page.locator('dialog[open] form').evaluate((f) => /** @type {HTMLFormElement} */ (f).requestSubmit());
       await until(page, 'text=Already registered as shapes');
-      // The thumbnails render in real time (the page clock, which would close the toast, stays put).
-      await page.locator('.cell img.loaded').nth(17).waitFor({ timeout: 15000 }).catch(() => {});
+      // Hold the page clock (the shoot's runs in real time) so the toast is still up when the thumbnails have loaded:
+      // they decode in real time but wait on the mock's latency, so the clock steps 250 ms at a time, at most 2.5 s of
+      // the toast's 4.
+      await page.clock.pauseAt((await page.evaluate(() => Date.now())) + 100);
+      for (let t = 0; t < 2500; t += 250) {
+        if (await page.locator('.cell img.loaded').nth(17).isVisible().catch(() => false)) break;
+        await page.clock.runFor(250);
+        await page.waitForTimeout(600);
+      }
     },
   },
   {
@@ -534,11 +636,26 @@ export const scenes = [
       await page.locator('.cell').nth(1).click();
       await page.locator('dialog[open] .stage img.loaded').waitFor();
       await page.locator('dialog[open] .labels button').nth(0).click();
-      await page.locator('dialog[open] .labels button').nth(1).hover();
+      // The selection alone, as the Playground's selected scene: the pointer leaves the list, so no row keeps a hover
+      // (and on touch there is none to keep).
+      await page.mouse.move(0, 0);
       await page.waitForTimeout(300);
     },
   },
   { name: 'runs', path: '/runs' },
+  {
+    // The waiting runs say their place ("1st in queue", "2nd in queue"); the second's ⋯ opened: Start next, Move up.
+    name: 'runs-queue-menu',
+    path: '/runs',
+    fullPage: false,
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
+    setup: async (page) => {
+      const menu = 'button[aria-label="Queue actions for fasteners-m"]:visible';
+      await until(page, menu);
+      await page.locator(menu).click();
+      await page.mouse.move(0, 0);
+    },
+  },
   { name: 'models', path: '/models', viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
   { name: 'models-empty', path: '/models', search: 'scenario=empty' },
   { name: 'models-error', path: '/models', search: 'scenario=error', viewports: ['desktop', 'laptop', 'mobile'] },
@@ -560,7 +677,7 @@ export const scenes = [
     setup: async (page, { vp }) => {
       if (vp === 'mobile') {
         await until(page, '#pr svg');
-        await page.getByRole('radio', { name: 'Details' }).click();
+        await page.getByRole('tab', { name: 'Details', exact: true }).click();
         return;
       }
       await until(page, '#cm .cell');
@@ -576,7 +693,7 @@ export const scenes = [
     fullPage: true,
     setup: async (page, { vp }) => {
       await until(page, '#pr svg');
-      if (vp === 'mobile') await page.getByRole('radio', { name: 'Details' }).click();
+      if (vp === 'mobile') await page.getByRole('tab', { name: 'Details', exact: true }).click();
       else if (vp === 'tablet') await page.locator('.d-line').click();
     },
   },
@@ -589,7 +706,7 @@ export const scenes = [
     fullPage: true,
     setup: async (page, { vp }) => {
       await until(page, '#pr svg');
-      if (vp === 'mobile') await page.getByRole('radio', { name: 'Details' }).click();
+      if (vp === 'mobile') await page.getByRole('tab', { name: 'Details', exact: true }).click();
     },
   },
   {
@@ -615,7 +732,7 @@ export const scenes = [
     fullPage: true,
     setup: async (page) => {
       await until(page, '#pr svg');
-      await page.getByRole('radio', { name: 'Classes' }).click();
+      await page.getByRole('tab', { name: 'Classes', exact: true }).click();
       await page.locator('#per-class button.cls').first().click();
       await page.locator('#per-class button.disc').first().click();
     },
@@ -628,7 +745,7 @@ export const scenes = [
     fullPage: false,
     setup: async (page) => {
       await until(page, '#pr svg');
-      await page.getByRole('radio', { name: 'Classes' }).click();
+      await page.getByRole('tab', { name: 'Classes', exact: true }).click();
       await page.locator('#per-class button.disc').nth(2).click();
       await page.locator('#per-class tr.detail button', { hasText: 'View curve' }).click();
       await until(page, '#pr .legend .back');
@@ -643,7 +760,7 @@ export const scenes = [
     fullPage: true,
     setup: async (page) => {
       await until(page, '#pr svg');
-      await page.getByRole('radio', { name: 'Confusion' }).click();
+      await page.getByRole('tab', { name: 'Confusion', exact: true }).click();
       await until(page, '#cm .rk');
     },
   },
@@ -655,7 +772,7 @@ export const scenes = [
     fullPage: true,
     setup: async (page) => {
       await until(page, '#pr svg');
-      await page.getByRole('radio', { name: 'Confusion' }).click();
+      await page.getByRole('tab', { name: 'Confusion', exact: true }).click();
       await page.getByRole('button', { name: 'Explore the matrix' }).click();
       await until(page, '#cm .cell');
     },
@@ -668,7 +785,7 @@ export const scenes = [
     fullPage: true,
     setup: async (page) => {
       await until(page, '#pr svg');
-      await page.getByRole('radio', { name: 'Confusion' }).click();
+      await page.getByRole('tab', { name: 'Confusion', exact: true }).click();
       await page.getByRole('button', { name: 'Explore the matrix' }).click();
       await until(page, '#cm .cell');
     },
@@ -733,18 +850,50 @@ export const scenes = [
     },
   },
   {
-    // ONNX has no download endpoint: the dialog says so next to the server path.
-    name: 'model-export-onnx',
-    path: '/models/m_shapes_s',
+    // ONNX on a server that serves it (weights_onnx): the primary names the file it downloads, the switches mapped to
+    // the query (half: "-f16.onnx").
+    name: 'model-export-onnx-download',
+    path: '/models/m_fast_n',
     fullPage: false,
-    viewports: ['desktop'],
-    setup: async (page) => {
-      await until(page, 'button:has-text("Export")');
-      await page.locator('button:has-text("Export")').first().click();
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
+    setup: async (page, { vp }) => {
+      if (vp === 'mobile') {
+        await until(page, 'button[aria-label="More model actions"]');
+        await page.locator('button[aria-label="More model actions"]').click();
+        await page.getByRole('menuitem', { name: 'Export' }).click();
+      } else {
+        await until(page, 'button:has-text("Export")');
+        await page.locator('button:has-text("Export")').first().click();
+      }
       await until(page, 'dialog[open] fieldset');
       await page.locator('dialog[open] label:has-text("ONNX")').first().click();
-      await page.locator('dialog[open] footer button:has-text("Export")').click();
-      await until(page, 'dialog[open] .where');
+      await until(page, 'dialog[open] .switches');
+      await page.locator('dialog[open] .switches label').nth(2).click();
+      await until(page, 'dialog[open] footer button:has-text("Download")');
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // The download asked for: in the demo there is no graph to save, and the dialog says so by the file's name.
+    name: 'model-export-onnx',
+    path: '/models/m_fast_n',
+    fullPage: false,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page, { vp }) => {
+      if (vp === 'mobile') {
+        await until(page, 'button[aria-label="More model actions"]');
+        await page.locator('button[aria-label="More model actions"]').click();
+        await page.getByRole('menuitem', { name: 'Export' }).click();
+      } else {
+        await until(page, 'button:has-text("Export")');
+        await page.locator('button:has-text("Export")').first().click();
+      }
+      await until(page, 'dialog[open] fieldset');
+      await page.locator('dialog[open] label:has-text("ONNX")').first().click();
+      // The server's features arrive on the mock's clock: Download replaces Export once they do.
+      await until(page, 'dialog[open] footer button:has-text("Download")');
+      await page.locator('dialog[open] footer button:has-text("Download")').click();
+      await until(page, 'dialog[open] .done');
     },
   },
   {
@@ -935,7 +1084,8 @@ export const scenes = [
     setup: async (page) => {
       await page.getByRole('button', { name: 'Add dataset' }).first().click();
       await page.locator('dialog[open]').waitFor();
-      // Register stays disabled until there is a folder path; a name the server would refuse is checked on submit.
+      // Register stays disabled until there is a folder path; a name the server would refuse is checked on submit,
+      // and Register is then gated on it ("Fix the name first") until the name is fixed.
       await page.locator('dialog[open] input[placeholder="e.g. D:/data/my-dataset"]').fill('D:/data/my dataset');
       await page.locator('dialog[open] input[id$="-name"]').fill('my dataset!');
       await page.locator('dialog[open] button[type="submit"]').click();
@@ -992,10 +1142,11 @@ export const scenes = [
   },
   {
     // Every group, General to Datasets: two columns where wide, one with an edge shadow on phones.
+    // Touch-only devices (phones) get no shortcuts reference (DESIGN_DIRECTION §9): a laptop's narrow tier instead.
     name: 'shortcuts-open',
     fullPage: false,
     path: '/runs',
-    viewports: ['desktop', 'mobile'],
+    viewports: ['desktop', 'laptop'],
     setup: async (page) => {
       await page.keyboard.press('Shift+?');
     },
@@ -1018,7 +1169,7 @@ export const scenes = [
     fullPage: false,
     setup: async (page) => {
       // Scroll the chart into view first: the pointer cannot hover outside the viewport. Then require the tooltip.
-      const svg = page.locator('#run-chart svg[role="img"]').first();
+      const svg = page.locator('#run-chart svg[aria-roledescription="chart"]').first();
       await svg.scrollIntoViewIfNeeded();
       const box = await svg.boundingBox();
       if (!box) throw new Error('chart-hover: no chart');
@@ -1090,6 +1241,33 @@ export const scenes = [
     setup: async (page) => {
       await until(page, '#system');
       await page.locator('#system details.report summary').click();
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // Settings › System › Throughput: the rows this server measured (training, predictions; one from another adapter),
+    // their spread, samples and age, and Measure now.
+    name: 'settings-throughput',
+    path: '/settings',
+    // The whole page: the harness shoots from the top, and the block sits near the bottom.
+    fullPage: true,
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
+    setup: async (page) => {
+      await until(page, '.tp-row');
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // Measure now running: the button busy, the elapsed seconds counted against "up to 10 s".
+    name: 'settings-measuring',
+    path: '/settings',
+    // The whole page: the harness shoots from the top, and the block sits near the bottom.
+    fullPage: true,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page) => {
+      await until(page, '.tp-row');
+      await page.getByRole('button', { name: 'Measure now' }).click();
+      await page.clock.runFor(1100);
       await page.mouse.move(0, 0);
     },
   },

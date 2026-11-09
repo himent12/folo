@@ -93,8 +93,15 @@ describe('mock runs', () => {
     expect(statuses).toEqual(['queued']);
   });
 
+  /** Frees the one training slot: stops the live run and the two waiting ones. */
+  async function idle(api: MockApi) {
+    for (const id of ['run_7d1e', 'run_q4n2', 'run_q7c5']) await api.stopRun(id);
+    vi.advanceTimersByTime(1300);
+  }
+
   it('emits the final epoch before the completed status', async () => {
     const api = new MockApi('normal', 0);
+    await idle(api);
     const ds = await api.createSyntheticDataset({ name: 'tiny', images: 20, classes: ['a', 'b'], imgsz: 320, seed: 0 });
     const cfg = (await api.run('run_31aa')).config;
     const run = await api.createRun({ ...cfg, name: 'tiny-n', dataset_id: ds.id, epochs: 2 });
@@ -111,6 +118,7 @@ describe('mock runs', () => {
 
   it('keeps synthetic classes, weights and samples consistent', async () => {
     const api = new MockApi('normal', 0);
+    await idle(api);
     const ds = await api.createSyntheticDataset({ name: 'many', images: 10, classes: ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'], imgsz: 320, seed: 0 });
     const full = await api.dataset(ds.id);
     expect(full.classes).toHaveLength(6);
@@ -225,5 +233,96 @@ describe('mock models', () => {
     const exp = models.find((m) => m.id === 'm_fast_n_f16')!;
     expect(exp).toMatchObject({ precision: 'f16', fused: true, trained_with: null, arch: 'folo-n' });
     expect(models.filter((m) => m.id !== exp.id).every((m) => m.precision === 'f32' && m.fused === false)).toBe(true);
+  });
+});
+
+describe('mock queue (docs/API.md, POST /api/runs/{id}/queue)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+  });
+  afterEach(() => vi.useRealTimers());
+
+  const places = async (api: MockApi) =>
+    Object.fromEntries((await api.runs()).filter((r) => r.queue_position != null).map((r) => [r.id, r.queue_position]));
+
+  it('has two runs waiting behind the live one, front first, and lists queue control and the ONNX download', async () => {
+    const api = new MockApi('normal', 0);
+    expect(await places(api)).toEqual({ run_q4n2: 1, run_q7c5: 2 });
+    expect((await api.run('run_7d1e')).queue_position).toBeNull();
+    expect((await api.system()).features).toEqual(expect.arrayContaining(['queue_control', 'weights_onnx']));
+  });
+
+  it('moves a waiting run, logs it, and tells its subscribers where it is now', async () => {
+    const api = new MockApi('normal', 0);
+    const queue: { position: number; waiting: number }[] = [];
+    const logs: string[] = [];
+    const off = api.runEvents('run_q7c5', { queue: (q) => queue.push(q), log: (l) => logs.push(l.message) });
+    const r = await api.moveRun('run_q7c5', { action: 'up' });
+    expect(r.queue_position).toBe(1);
+    expect(await places(api)).toEqual({ run_q7c5: 1, run_q4n2: 2 });
+    vi.advanceTimersByTime(250);
+    off();
+    expect(queue).toEqual([{ position: 1, waiting: 2 }]);
+    expect(logs).toEqual(['moved in the queue to position 1 of 2']);
+    expect((await api.runLogs('run_q7c5')).lines.map((l) => l.message)).toEqual(['moved in the queue to position 1 of 2']);
+  });
+
+  it('start never interrupts the live run: the run goes to the front and waits', async () => {
+    const api = new MockApi('normal', 0);
+    const r = await api.moveRun('run_q7c5', { action: 'start' });
+    expect(r).toMatchObject({ status: 'queued', queue_position: 1 });
+    expect((await api.run('run_7d1e')).status).toBe('running');
+    expect((await api.runLogs('run_q7c5')).lines.at(-1)?.message).toBe('start requested: moved to the front (1 of 2); it starts when the active run ends');
+  });
+
+  it('starts the front run once the slot is free, with the resolved config, and refuses to move it then', async () => {
+    const api = new MockApi('normal', 0);
+    expect((await api.run('run_q4n2')).resolved).toBeNull();
+    await api.stopRun('run_7d1e');
+    vi.advanceTimersByTime(1300);
+    expect((await api.run('run_q4n2')).queue_position).toBeNull();
+    // Taken by the worker, still queued while its trainer is built.
+    await expect(api.moveRun('run_q4n2', { action: 'down' })).rejects.toMatchObject({ status: 409, code: 'run_not_queued' });
+    vi.advanceTimersByTime(2000);
+    const r = await api.run('run_q4n2');
+    expect(r.status).toBe('running');
+    // shapes-hard: 4000 images at batch 32 over 120 epochs is 7560 iterations: auto picks AdamW at 0.002 · 5 / 10.
+    expect(r.resolved).toMatchObject({ optimizer: 'adamw', lr0: 0.001, batch: 32, accumulate: 2 });
+    expect(await places(api)).toEqual({ run_q7c5: 1 });
+    await expect(api.moveRun('run_31aa', { action: 'up' })).rejects.toMatchObject({ status: 409, code: 'run_not_queued' });
+    await expect(api.moveRun('run_q7c5', { position: 0 })).rejects.toMatchObject({ status: 400, code: 'invalid_body' });
+  });
+
+  it('leaves a run stopped while it waited without a resolved config, and queues new runs at the back', async () => {
+    const api = new MockApi('normal', 0);
+    const stopped = await api.stopRun('run_q4n2');
+    expect(stopped).toMatchObject({ status: 'stopped', queue_position: null, resolved: null });
+    expect(await places(api)).toEqual({ run_q7c5: 1 });
+    const cfg = (await api.run('run_31aa')).config;
+    const r = await api.createRun({ ...cfg, name: 'shapes-n-2' });
+    expect(r).toMatchObject({ status: 'queued', queue_position: 2 });
+  });
+});
+
+describe('mock operating point', () => {
+  it('reports best_f1_conf on every epoch and run model, the same in /eval, and none for the imported COCO file', async () => {
+    const api = new MockApi('normal', 0);
+    const m = await api.model('m_fast_n');
+    const c = m.metrics?.best_f1_conf ?? 0;
+    expect(c).toBeGreaterThan(0.1);
+    expect(c).toBeLessThan(0.6);
+    expect(Math.abs(c * 1000 - Math.round(c * 1000))).toBeLessThan(1e-6);
+    expect((await api.modelEval('m_fast_n')).best_f1_conf).toBe(m.metrics?.best_f1_conf);
+    const { epochs } = await api.runMetrics('run_c19a');
+    expect(epochs.every((e) => typeof e.val.best_f1_conf === 'number')).toBe(true);
+    expect((await api.model('m_coco_s')).metrics?.best_f1_conf).toBeNull();
+    expect((await api.modelEval('m_coco_s')).best_f1_conf).toBeNull();
+  });
+
+  it('names the ONNX file as the server does', async () => {
+    const api = new MockApi('normal', 0);
+    expect((await api.onnxFile('m_fast_n', {})).name).toBe('fasteners-n-best.onnx');
+    expect((await api.onnxFile('m_fast_n', { half: true })).name).toBe('fasteners-n-best-f16.onnx');
   });
 });

@@ -30,6 +30,8 @@
   import { toast } from '$lib/ui/toast.svelte';
   import { capabilityRows, deviceSummary, driverReport, type CapState } from './settings/capabilities';
   import ThemePreview from './settings/ThemePreview.svelte';
+  import Throughput from './settings/Throughput.svelte';
+  import { hasFeature } from '$lib/throughput';
 
   setCrumbs({ label: 'Settings' });
 
@@ -206,7 +208,7 @@
                 </dd>
               {/if}
               <dt>A blank URL</dt>
-              <dd>Uses the address this page was served from{origin ? ` (${origin})` : ''}.</dd>
+              <dd>Uses the address this page was served from{#if origin} (<span class="mono">{origin}</span>){/if}.</dd>
             </dl>
           </details>
 
@@ -321,6 +323,10 @@
               <!-- The server's words, verbatim, for an issue or a terminal: folded, and copied whole. -->
               <DriverReport {report} />
             {/if}
+            {#if hasFeature(sys.data, 'throughput')}
+              <!-- What this server has measured of its own speed (servers before #130 list no such feature). -->
+              <Throughput benchmark={hasFeature(sys.data, 'benchmark')} />
+            {/if}
           </div>
         </Panel>
       {/if}
@@ -330,7 +336,7 @@
           <dt>FOLO Studio</dt>
           <dd class="num">{pkg.version}</dd>
           <dt>Server</dt>
-          <dd class="num">{hub.mode === 'live' ? `folo serve ${hub.version}` : hub.mode === 'mock' ? `built-in demo ${hub.version}` : '—'}</dd>
+          <dd class="num">{#if hub.mode === 'live'}<span class="mono">folo serve</span> {hub.version}{:else if hub.mode === 'mock'}Built-in demo {hub.version}{:else}—{/if}</dd>
           <dt>HTTP API</dt>
           <dd class="mono">docs/API.md</dd>
           <dt>Architecture</dt>
@@ -359,15 +365,17 @@
 </Page>
 
 <style>
-  /* The form column (720) on the shared content edge, and a sticky rail of section anchors at the content's right
-     edge: on a wide canvas the space between them is a margin the two frame, not a hole beside a stranded rail. */
+  /* Form page (DESIGN_DIRECTION 15): the form column (720) on the shared content edge and the sticky rail of section
+     anchors 24 px after it, the two one block; what a wide canvas has left over stays to their right, never a hole
+     between the form and its rail. */
   .layout {
     display: grid;
     grid-template-columns: minmax(0, 720px) 168px;
-    justify-content: space-between;
-    column-gap: var(--space-8);
+    justify-content: start;
+    column-gap: var(--space-6);
     align-items: start;
   }
+
   .toc {
     position: sticky;
     top: calc(var(--size-topbar) + var(--space-6));

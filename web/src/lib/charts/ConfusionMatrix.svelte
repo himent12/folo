@@ -146,8 +146,8 @@
     return id >= 0 ? classColor(id) : 'var(--text-tertiary)';
   };
 
-  // Small: a navigator under the matrix, not a second figure.
-  const geo = $derived(overviewGeometry(n, 112));
+  // Small: a thumbnail at the start of the pager row (one 44 px row), not a second figure.
+  const geo = $derived(overviewGeometry(n, 44, 2));
   const band = $derived(range ? overviewWindow(range.first, range.last, geo) : null);
   /**
    * A tap on the overview centres the tapped column in the full matrix (sideways only, so the page does not jump).
@@ -181,9 +181,10 @@
 {/snippet}
 
 {#if range && band}
-  <!-- Above the matrix, so it is in reach before the tall grid: the whole matrix at a glance (a pointer shortcut; the grid
-       stays the keyboard and screen-reader path), the columns in view with a way to page through them and a direct
-       jump to the background column (the misses, last), and the active cell's figures. -->
+  <!-- Above the matrix, so it is in reach before the tall grid, and one row so the first cell starts soon: the whole
+       matrix as a thumbnail (a pointer shortcut; the grid stays the keyboard and screen-reader path), the columns in
+       view with a way to page through them, and a direct jump to the background column (the misses, last). The active
+       cell's figures follow on one line. -->
   <div class="ov">
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
     <svg class="ov-map" width={geo.size} height={geo.size} viewBox="0 0 {geo.size} {geo.size}" aria-hidden="true" onclick={onmap}>
@@ -205,14 +206,15 @@
           ><ChevronRight size={16} aria-hidden="true" /></button
         >
       </div>
+      <span class="sep" aria-hidden="true">·</span>
       {#if range.last < n}
-        <button type="button" class="jump" onclick={() => toEdge(1)}>Misses / background<ChevronsRight size={14} aria-hidden="true" /></button>
+        <button type="button" class="jump" aria-label="Jump to the background column (misses)" onclick={() => toEdge(1)}>Background<ChevronsRight size={14} aria-hidden="true" /></button>
       {:else}
         <button type="button" class="jump" onclick={() => toEdge(-1)}><ChevronsLeft size={14} aria-hidden="true" />First columns</button>
       {/if}
-      {@render readout()}
     </div>
   </div>
+  {@render readout()}
 {/if}
 <!-- svelte-ignore a11y_interactive_supports_focus -->
 <div class="cm" class:fixed class:more-r={moreRight} style:--n={n} style:--min-cell={minCell !== undefined ? `${minCell}px` : undefined} style:--max-cell="{maxCell}px" role="grid" aria-label={label} aria-describedby="{uid}-readout" bind:this={root} {onkeydown} {onscroll}>
@@ -450,20 +452,25 @@
   .range {
     display: flex;
     align-items: center;
-    gap: var(--space-1);
-    margin-left: calc(var(--space-2) * -1);
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
     color: var(--text-secondary);
     white-space: nowrap;
   }
   .pg {
+    position: relative;
     display: grid;
     place-items: center;
     width: 28px;
     height: 28px;
     border-radius: var(--radius-sm);
     color: var(--text-secondary);
+  }
+  /* A 44 × 44 px hit area around the 28 px chevron (as ui/Button does), on any pointer. */
+  .pg::after {
+    content: '';
+    position: absolute;
+    inset: -8px;
   }
   .pg:hover:not(:disabled) {
     background: var(--bg-hover);
@@ -472,27 +479,24 @@
   .pg:disabled {
     color: var(--text-disabled);
   }
-  @media (pointer: coarse) {
-    .pg {
-      width: 44px;
-      height: 44px;
-    }
-    .range {
-      margin-left: calc(var(--space-3) * -1);
-    }
-  }
   .readout {
     margin-top: var(--space-3);
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
     color: var(--text-secondary);
   }
+  /* One row (it wraps only where the jump does not fit): thumbnail, pager, jump; the readout under it. */
   .ov {
-    display: grid;
-    grid-template-columns: auto minmax(0, 1fr);
-    gap: var(--space-4);
-    align-items: start;
-    margin-bottom: var(--space-4);
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    min-height: 44px;
+  }
+  .ov + .readout {
+    margin: var(--space-1) 0 var(--space-3);
+  }
+  .ov .sep {
+    color: var(--text-tertiary);
   }
   /* A text button, aligned with the range's label (past the paging button's inset). */
   .jump {
@@ -514,17 +518,18 @@
   @media (pointer: coarse) {
     .jump {
       min-height: 44px;
-      margin-left: calc(var(--space-3) * -1);
-      padding: 0 var(--space-3);
     }
   }
   .ov-side {
-    display: grid;
-    gap: var(--space-1);
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0 var(--space-1);
     min-width: 0;
   }
-  .ov .readout {
-    margin-top: 0;
+  .ov-side .jump {
+    margin-left: 0;
+    padding: 0 var(--space-1);
   }
   .ov-map {
     display: block;

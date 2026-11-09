@@ -27,8 +27,14 @@
   import TableState from '$lib/ui/TableState.svelte';
   import Gate from '$lib/ui/Gate.svelte';
   import Ident from '$lib/ui/Ident.svelte';
+  import Lineage from '$lib/ui/Lineage.svelte';
+  import Meta from '$lib/ui/Meta.svelte';
   import { isOffline, OFFLINE_REASON } from '$lib/ui/offline';
   import { origin } from '$lib/lineage';
+  import Menu from '$lib/ui/Menu.svelte';
+  import { hasFeature, queuePlace, withQueueMove } from '$lib/api/queue';
+  import type { QueueRequest } from '$lib/api/types';
+  import { moveQueued, queueItems } from './run/queueActions';
 
   setCrumbs({ label: 'Runs' });
   // The header's create action is the one in the top-right corner (the top bar's New run steps aside).
@@ -49,7 +55,36 @@
   const models = new Resource((s) => hub.api.models(s));
   const modelById = $derived(new Map<string, Model>((models.data ?? []).map((m) => [m.id, m])));
   /** Columns of the desktop table (for state rows that span it). */
-  const COLS = 10;
+  const COLS = 11;
+
+  // Queue control (servers that list `queue_control`): a waiting run's row says its place and has a ⋯ menu with
+  // Start next, Move up and Move down. The new order shows at once; a refusal puts the old one back.
+  const system = new Resource((s) => hub.api.system(s));
+  const queueCtl = $derived(hasFeature(system.data, 'queue_control'));
+  const waiting = $derived((runs.data ?? []).filter((r) => r.status === 'queued' && r.queue_position != null).length);
+  const training = $derived(runs.data?.find((r) => r.status === 'running' || r.status === 'stopping') ?? null);
+  const placeOf = (r: Run) => (queueCtl && r.status === 'queued' ? (r.queue_position ?? null) : null);
+  function move(r: Run, req: QueueRequest) {
+    void moveQueued(
+      r,
+      req,
+      () => {
+        const list = runs.data;
+        if (list) runs.set(withQueueMove(list, r.id, req));
+        return () => {
+          if (list) runs.set(list);
+        };
+      },
+      () => void runs.refresh(),
+      training,
+    ).then((done) => {
+      if (done) void runs.refresh();
+    });
+  }
+  const rowItems = (r: Run) => {
+    const at = placeOf(r);
+    return at === null ? [] : queueItems(at, waiting, training, (req) => move(r, req));
+  };
 
   let filter = $state<Filter>((router.route.query.get('status') as Filter | null) ?? 'all');
   let query = $state('');
@@ -95,15 +130,16 @@
       <span class="compare">
         <Gate reason={offline ? OFFLINE_REASON : selected.length < 2 ? 'Select 2–4 runs to compare' : null}>
           {#snippet children(why)}
-            <Button icon={GitCompare} disabled={!!why} aria-describedby={why} href={href(`/runs/compare?ids=${selected.join(',')}`)}>
-              Compare{#if selected.length}<span class="num faint">{selected.length}</span>{/if}
+            <Button variant={selected.length ? 'primary' : 'secondary'} icon={GitCompare} disabled={!!why} aria-describedby={why} href={href(`/runs/compare?ids=${selected.join(',')}`)}>
+              Compare{#if selected.length}<span class="num count">{selected.length}</span>{/if}
             </Button>
           {/snippet}
         </Gate>
       </span>
       <Gate reason={offline ? OFFLINE_REASON : null}>
         {#snippet children(why)}
-          <Button variant="primary" icon={Plus} disabled={!!why} aria-describedby={why} href={href('/runs/new')}>New run</Button>
+          <!-- While runs are selected, Compare is the page's one primary action and New run steps back. -->
+          <Button variant={selected.length ? 'secondary' : 'primary'} icon={Plus} disabled={!!why} aria-describedby={why} href={href('/runs/new')}>New run</Button>
         {/snippet}
       </Gate>
     {/if}
@@ -137,16 +173,19 @@
       >
         <thead>
           <tr>
+            <!-- One geometry in every state (DESIGN_DIRECTION 7): each column's width is fixed here, on the header row
+                 that loading, empty, error and loaded share; the run's name takes what is left. -->
             <th class="check"><span class="sr-only">Select for comparison</span></th>
             <th>Run</th>
-            <th>Status</th>
-            <th class="hide-lg">Dataset</th>
-            <th class="hide-lg">Model</th>
-            <th class="hide-lg">Started from</th>
-            <th>Progress</th>
-            <th class="r">Best mAP50-95</th>
-            <th class="hide-lg">mAP trend</th>
-            <th class="r hide-md">Created</th>
+            <th style:width="112px">Status</th>
+            <th class="hide-lg" style:width="112px">Dataset</th>
+            <th class="hide-lg" style:width="80px">Model</th>
+            <th class="hide-lg" style:width="128px">Started from</th>
+            <th style:width="136px">Progress</th>
+            <th class="r" style:width="128px">Best mAP50-95</th>
+            <th class="hide-lg" style:width="120px">mAP trend</th>
+            <th class="r hide-md" style:width="96px">Created</th>
+            <th class="act" style:width="40px"><span class="sr-only">Actions</span></th>
           </tr>
         </thead>
         <tbody>
@@ -165,6 +204,7 @@
                 <td class="r"><Skeleton w="72px" h="12px" /></td>
                 <td class="hide-lg"><Skeleton w="96px" h="12px" /></td>
                 <td class="r hide-md"><Skeleton w="56px" h="12px" /></td>
+                <td class="act"></td>
               </tr>
             {/each}
           {:else if runs.data.length === 0}
@@ -199,7 +239,7 @@
                 </td>
                 <td class="lead">
                   <a class="name" href={href(`/runs/${r.id}`)} onclick={(e) => e.stopPropagation()}>{r.name}</a>
-                  <span class="sub ctx">{dsName.get(r.config.dataset_id) ?? r.config.dataset_id} · <Ident value={r.config.arch} /> · {#if from.kind === 'scratch'}from scratch{:else}from <Ident value={from.label} />{/if}</span>
+                  <span class="sub ctx"><Meta line><span>{dsName.get(r.config.dataset_id) ?? r.config.dataset_id}</span><Ident value={r.config.arch} /><span>from <Lineage origin={from} link={false} scratch="scratch" /></span></Meta></span>
                 </td>
                 <td use:tooltip={failureCause(r)}><StatusBadge status={r.status} plain /></td>
                 <td class="hide-lg muted">{dsName.get(r.config.dataset_id) ?? r.config.dataset_id}</td>
@@ -216,10 +256,15 @@
                   {/if}
                 </td>
                 <td>
-                  <div class="prog">
-                    <Progress value={r.status === 'running' ? runProgress(r) : r.epoch / r.epochs} size="xs" tone={tone(r)} label="{r.name} progress" />
-                    <span class="num faint">{r.epoch}/{r.epochs}</span>
-                  </div>
+                  {#if placeOf(r) !== null}
+                    <!-- A waiting run has no progress yet: its place in the queue instead. -->
+                    <span class="prog place">{queuePlace(placeOf(r) ?? 0)}</span>
+                  {:else}
+                    <div class="prog">
+                      <Progress value={r.status === 'running' ? runProgress(r) : r.epoch / r.epochs} size="xs" tone={tone(r)} label="{r.name} progress" />
+                      <span class="num faint">{r.epoch}/{r.epochs}</span>
+                    </div>
+                  {/if}
                 </td>
                 <td class="r num best">
                   {metric(r.best?.map50_95)}
@@ -227,6 +272,10 @@
                 </td>
                 <td class="hide-lg"><RunSpark run={r} width={96} /></td>
                 <td class="r faint hide-md">{ago(r.created)}</td>
+                <!-- A click in the cell never opens the run. -->
+                <td class="act" onclick={(e) => e.stopPropagation()}>
+                  {#if rowItems(r).length}<Menu label="Queue actions for {r.name}" items={rowItems(r)} variant="ghost" fixed />{/if}
+                </td>
               </tr>
             {/each}
           {/if}
@@ -235,14 +284,15 @@
     </div>
     {#if shown.length}
       <!-- Phones: stacked rows with the essentials (selection, name, status, score, progress). -->
-      <!-- Select mode: Compare (with its count) a secondary button, Cancel a ghost one, both 44 px targets on touch. -->
+      <!-- Select mode: Compare (with its count) the primary once a run is selected, Cancel a ghost one, both 44 px targets
+           on touch. -->
       <div class="rows-head">
         {#if choosing}
           <Button variant="ghost" onclick={() => ((picking = false), (selected = []))}>Cancel</Button>
           <Gate reason={offline ? OFFLINE_REASON : selected.length < 2 ? 'Select 2–4 runs to compare' : null}>
             {#snippet children(why)}
-              <Button icon={GitCompare} disabled={!!why} aria-describedby={why} href={href(`/runs/compare?ids=${selected.join(',')}`)}>
-                Compare{#if selected.length}<span class="num faint">{selected.length}</span>{/if}
+              <Button variant={selected.length ? 'primary' : 'secondary'} icon={GitCompare} disabled={!!why} aria-describedby={why} href={href(`/runs/compare?ids=${selected.join(',')}`)}>
+                Compare{#if selected.length}<span class="num count">{selected.length}</span>{/if}
               </Button>
             {/snippet}
           </Gate>
@@ -268,10 +318,11 @@
               <span class="r-text">
                 <span class="r-name"><StatusBadge status={r.status} plain dotOnly /><span class="name truncate">{r.name}</span></span>
                 <!-- With the checkboxes in, the dataset steps out so the cause and progress keep the line. -->
-                <span class="r-meta num truncate">{failureCause(r) ?? STATUS[r.status]} · {r.epoch}/{r.epochs}{choosing ? '' : ` · ${dsName.get(r.config.dataset_id) ?? r.config.dataset_id}`}</span>
+                <span class="r-meta num truncate"><Meta line><span>{failureCause(r) ?? (placeOf(r) !== null ? queuePlace(placeOf(r) ?? 0) : STATUS[r.status])}</span><span>{r.epoch}/{r.epochs}</span>{#if !choosing}<span>{dsName.get(r.config.dataset_id) ?? r.config.dataset_id}</span>{/if}</Meta></span>
               </span>
               <span class="r-end"><span class="r-val num">{metric(r.best?.map50_95)}</span><span class="r-age">{ago(r.created)}</span></span>
             </a>
+            {#if !choosing && rowItems(r).length}<span class="r-menu"><Menu label="Queue actions for {r.name}" items={rowItems(r)} variant="ghost" fixed /></span>{/if}
             {#if r.status === 'running'}
               <span class="r-prog" aria-hidden="true" style:transform="scaleX({runProgress(r)})"></span>
             {/if}
@@ -295,26 +346,36 @@
 </Page>
 
 <style>
+  /* Compare's count: part of the label, one weight lighter. */
+  .count {
+    font-weight: var(--weight-regular);
+  }
   .compare {
     display: contents;
   }
   .scroll {
     overflow-x: auto;
   }
-  /* The checkbox column is a 12 px gutter (the name starts 24 px in, not 44): the box is laid over the gutter and the
-     name cell's leading padding when it shows, so revealing it never moves a thing. */
+  /* The checkbox has a real 32 px column, there whether the boxes show or not, so revealing them never moves a thing:
+     the box 12 px from the panel's edge, the name 14 px after it (its cell's leading padding 8). The whole cell is the
+     box's target. */
   .runs .check {
     position: relative;
-    width: 12px;
+    /* A real 32 px column: never squeezed below it when the table is tight (tablet). */
+    width: 32px;
+    min-width: 32px;
     padding: 0;
+  }
+
+  .runs :is(th, td):nth-child(2) {
+    padding-left: var(--space-2);
   }
   .hit {
     position: absolute;
-    inset: 0 auto 0 0;
-    width: 24px;
+    inset: 0;
     display: flex;
     align-items: center;
-    justify-content: center;
+    padding-left: var(--space-3);
     cursor: pointer;
   }
   input[type='checkbox'] {
@@ -346,9 +407,9 @@
     }
     .hit {
       position: static;
-      width: auto;
       min-height: 48px;
     }
+
     input[type='checkbox'] {
       width: 20px;
       height: 20px;
@@ -377,6 +438,16 @@
   }
   .best {
     font-weight: var(--weight-medium);
+  }
+  .place {
+    font-size: var(--type-sm-size);
+    color: var(--text-secondary);
+  }
+  /* The row menu's column: as wide as its ⋯ button, so rows without one keep the same edge. */
+  .runs .act {
+    width: 40px;
+    padding: 0 var(--space-2) 0 0;
+    text-align: right;
   }
   .best span {
     /* A fixed slot so 'ep 36' and 'ep 150' never shift the decimals. */
@@ -453,6 +524,10 @@
     .rows li.on {
       background: var(--bg-active);
       box-shadow: inset 2px 0 0 var(--accent-line);
+    }
+    .r-menu {
+      flex-shrink: 0;
+      margin-left: var(--space-2);
     }
     .r-check {
       display: grid;

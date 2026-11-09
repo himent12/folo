@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Dataset, DatasetStats } from '$lib/api/types';
-import { bySeverity, countBinLabel, groupSummary, healthChecks, issueLabel, reviewCount, shareBelow, sizeBinLabel } from './health';
+import { bySeverity, countBinLabel, findingCount, findingLabel, healthChecks, shareBelow, sizeBinLabel } from './health';
 
 const ds = (over: Partial<Dataset> = {}): Dataset => ({
   id: 'ds_x',
@@ -23,12 +23,12 @@ const st = (over: Partial<DatasetStats> = {}): DatasetStats => ({
   ...over,
 });
 
-describe('reviewCount', () => {
-  it('counts exactly the error and warning findings', () => {
+describe('findingCount', () => {
+  it('counts every finding, notes included, never the ok item', () => {
     const h = healthChecks(ds(), st({ broken_labels: 3, empty_images: 20, box_size_hist: { edges: [0, 0.05, 1], counts: [500, 2500] } }));
     expect(h.map((x) => x.severity)).toEqual(['danger', 'warning', 'info']);
-    expect(reviewCount(h)).toBe(2);
-    expect(reviewCount(healthChecks(ds(), st()))).toBe(0);
+    expect(findingCount(h)).toBe(3);
+    expect(findingCount(healthChecks(ds(), st()))).toBe(0);
   });
 
   it('gives tiny boxes a concrete action', () => {
@@ -83,7 +83,7 @@ describe('healthChecks with the check counts', () => {
     expect(w?.title).toBe('4 warnings from the dataset check');
     expect(w?.short).toBe('4 check warnings');
     expect(w?.issues).toBe('warning');
-    expect(reviewCount(h)).toBe(1);
+    expect(findingCount(h)).toBe(1);
   });
 
   it('counts errors the stats do not (unreadable images), but never twice', () => {
@@ -137,23 +137,17 @@ describe('bySeverity', () => {
 });
 
 describe('summary copy', () => {
-  it('says the issue total once, as issues (each finding that needs attention is one)', () => {
-    expect(issueLabel(0)).toBeUndefined();
-    expect(issueLabel(1)).toBe('1 issue');
-    expect(issueLabel(3)).toBe('3 issues');
+  it('says the finding total one way, as findings (each finding is one, notes too)', () => {
+    expect(findingLabel(0)).toBeUndefined();
+    expect(findingLabel(1)).toBe('1 finding');
+    expect(findingLabel(4)).toBe('4 findings');
     const h = healthChecks(
       ds(),
       st({ broken_labels: 3, empty_images: 20, box_size_hist: { edges: [0, 0.05, 1], counts: [1050, 1950] } }),
       { error: 3, warning: 3, info: 20, by_kind: {} },
     );
-    // Errors: the broken files; warnings: the check's warnings and the tiny boxes; the note is not an issue.
-    expect(reviewCount(h)).toBe(3);
-    expect(issueLabel(reviewCount(healthChecks(ds(), st({ empty_images: 1 }))))).toBeUndefined();
-  });
-
-  it('folds a severity into a complete short line, units named, not the joined titles', () => {
-    const h = healthChecks(ds(), st({ box_size_hist: { edges: [0, 0.05, 1], counts: [1050, 1950] } }), { error: 0, warning: 3, info: 0, by_kind: {} });
-    const warnings = bySeverity(h).find((g) => g.severity === 'warning')!;
-    expect(groupSummary(warnings)).toBe('3 check warnings · 35% tiny boxes');
+    // The broken files, the check's warnings, the tiny boxes and the empty-images note: four findings.
+    expect(findingCount(h)).toBe(4);
+    expect(h.filter((x) => x.severity !== 'ok').map((x) => x.short)).toEqual(['3 broken label files', '3 check warnings', '35% tiny boxes', expect.any(String)]);
   });
 });

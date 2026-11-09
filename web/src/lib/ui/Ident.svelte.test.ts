@@ -43,6 +43,45 @@ describe('identifiers', () => {
     expect(bare).toEqual([]);
   });
 
+  it('never ride inside a plain-text label: a select option, a palette hint or a meta string', () => {
+    // Text that cannot hold markup (a native <option>, a palette hint string) would set an architecture in sans: such
+    // labels name the entity only (the select) or pass the identifier as its own part (`{ ident }` in the palette).
+    const ARCH_IN_LABEL = /\b(?:label|hint)\s*:\s*`[^`]*\$\{[^}]*\.arch\b[^}]*\}/;
+    const bare: string[] = [];
+    for (const file of svelteFiles(SRC)) {
+      readFileSync(file, 'utf8')
+        .split('\n')
+        .forEach((line, i) => {
+          if (ARCH_IN_LABEL.test(line)) bare.push(`${relative(SRC, file)}:${i + 1}: ${line.trim()}`);
+        });
+    }
+    expect(bare).toEqual([]);
+  });
+
+  it('commands in markup are code: mono, or a ui/CommandLine', () => {
+    // `folo serve`, `folo export …` in a sentence sits in a mono span or <code> of its own. Attribute values are left
+    // out (a Field hint renders `backticks` as code); only text a reader sees in sans is a failure.
+    const CMD = /folo (?:serve|train|predict|export|doctor|dataset|mcp|val)\b/g;
+    const bare: string[] = [];
+    for (const file of svelteFiles(SRC)) {
+      readFileSync(file, 'utf8')
+        .replace(/<script[\s\S]*?<\/script>/g, '')
+        .replace(/<style[\s\S]*?<\/style>/g, '')
+        .replace(/<!--[\s\S]*?-->/g, '')
+        .split('\n')
+        .forEach((raw, i) => {
+          // Keep class attributes (they say mono), drop every other attribute value.
+          const line = raw.replace(/\s(?!class=)[\w:-]+=("[^"]*"|\{[^}]*\})/g, '');
+          for (const m of line.matchAll(CMD)) {
+            const open = [...line.slice(0, m.index).matchAll(/<(\w+)([^>]*)>/g)].at(-1);
+            const code = open && (open[1] === 'code' || /class="[^"]*\bmono\b/.test(open[2] ?? ''));
+            if (!code) bare.push(`${relative(SRC, file)}:${i + 1}: ${raw.trim()}`);
+          }
+        });
+    }
+    expect(bare).toEqual([]);
+  });
+
   it('render mono, as a link when given an href', () => {
     const target = document.createElement('div');
     const a = mount(Ident, { target, props: { value: 'folo-s', title: 'arch' } });

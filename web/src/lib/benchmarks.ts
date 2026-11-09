@@ -36,7 +36,7 @@ export interface Versus {
  */
 export const versusYolo26n: Versus[] = [
   { metric: 'GPU forward, batch 1', unit: 'ms', better: 'lower', folo: 2.99, yolo: 4.95, note: 'f32' }, // row 1
-  { metric: 'GPU forward throughput, batch 16', unit: 'img/s', better: 'higher', folo: 1385, yolo: 1454, note: 'FOLO f32 vs YOLO26n TF32 convs', caveat: 'YOLO26n in strict fp32 does 1,334 img/s; FOLO did 1,461 in the previous run.' }, // row 3
+  { metric: 'GPU forward throughput, batch 16', unit: 'img/s', better: 'higher', folo: 1385, yolo: 1454, note: 'FOLO f32 vs YOLO26n TensorFloat-32 convolutions', caveat: 'YOLO26n in strict fp32 does 1,334 img/s; FOLO did 1,461 in the previous run.' }, // row 3
   { metric: 'GPU end to end, batch 1', unit: 'ms', better: 'lower', folo: 5.18, yolo: 6.92, note: 'f32, NMS included' }, // row 5
   { metric: 'GPU end-to-end throughput, batch 16', unit: 'img/s', better: 'higher', folo: 722, yolo: 615, note: 'FOLO f32 vs YOLO26n fp16, its best' }, // row 6
   { metric: 'CPU forward, batch 1', unit: 'ms', better: 'lower', folo: 21.4, yolo: 22.8, note: 'f32, best thread count; FOLO under load from other jobs' }, // row 7
@@ -59,7 +59,7 @@ export interface Unlike {
 }
 
 export const unlike: Record<string, Unlike> = {
-  'GPU forward throughput, batch 16': { kinds: ['precision'], differs: 'f32 vs TF32' },
+  'GPU forward throughput, batch 16': { kinds: ['precision'], differs: 'f32 vs TensorFloat-32' },
   'GPU end to end, batch 1': { kinds: ['workload'], differs: 'less NMS work for FOLO' },
   'GPU end-to-end throughput, batch 16': { kinds: ['precision', 'workload'], differs: 'f32 vs fp16' },
   'CPU forward, batch 1': { kinds: ['workload'], differs: 'FOLO under other load' },

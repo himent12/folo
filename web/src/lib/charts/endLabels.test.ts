@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { labelWidth, needsLeader, placeEndLabels } from './endLabels';
+import { labelWidth, leaderOf, MAX_REACH, needsLeader, placeEndLabels } from './endLabels';
 
 const bounds = { x0: 0, y0: 0, x1: 600, y1: 300 };
 const line = (pts: [number, number][]) => pts.map(([x, y]) => ({ x, y }));
@@ -8,7 +8,24 @@ describe('placeEndLabels', () => {
   it('puts a label right of its line when that spot is clear', () => {
     const c = line([[0, 200], [300, 100]]);
     const [p] = placeEndLabels([{ id: 'a', label: 'run-a', x: 300, y: 100 }], [c], bounds);
-    expect(p).toEqual({ id: 'a', label: 'run-a', x: 306, y: 100, ax: 300, ay: 100 });
+    expect(p).toEqual({ id: 'a', label: 'run-a', x: 306, y: 100, ax: 300, ay: 100, w: labelWidth('run-a') });
+    // Right beside its end marker: no leader.
+    expect(needsLeader(p!)).toBe(false);
+  });
+
+  it("ties a label moved off its line's end to the end marker with a leader, from the marker to the label's edge", () => {
+    // b runs flat through a's end and c, d just above and below it, so a's label steps further out.
+    const a = line([[0, 200], [300, 100]]);
+    const b = line([[0, 100], [600, 100]]);
+    const c = line([[0, 85], [600, 85]]);
+    const d = line([[0, 115], [600, 115]]);
+    const [p] = placeEndLabels([{ id: 'a', label: 'shapes-hard-m · failed', x: 300, y: 100 }], [a, b, c, d], bounds);
+    expect(p).toBeDefined();
+    const l = leaderOf(p!, 5)!;
+    expect(l).not.toBeNull();
+    // It starts just outside the marker and ends on the label's box edge.
+    expect(Math.hypot(l.x1 - 300, l.y1 - 100)).toBeCloseTo(5, 5);
+    expect(Math.abs(l.y2 - p!.y)).toBeLessThanOrEqual(9);
   });
 
   it('moves off another line that runs through the right-hand spot', () => {
@@ -41,10 +58,13 @@ describe('placeEndLabels', () => {
     expect(tight.length).toBeLessThan(3);
   });
 
-  it('labels every line of a four-run comparison: further out, then in the clear gutter, when near spots are taken', () => {
-    // Horizontal lines every 10 px across the plot (x 0..500) leave no free spot near the point; the gutter is clear.
+  it('labels every line of a four-run comparison, and leaves out a label with no free spot within reach', () => {
+    // Horizontal lines every 10 px across the plot (x 0..500) leave no free spot near the point; the clear gutter is
+    // further than MAX_REACH from it, so the label is left out (the marker and the legend's status say how it ended).
     const hatch = Array.from({ length: 31 }, (_, i) => line([[0, i * 10], [500, i * 10]]));
-    const [p] = placeEndLabels([{ id: 'a', label: 'run-a', x: 300, y: 150 }], hatch, bounds);
+    expect(placeEndLabels([{ id: 'a', label: 'run-a', x: 300, y: 150 }], hatch, bounds)).toEqual([]);
+    // Near the gutter, it goes there, with a leader.
+    const [p] = placeEndLabels([{ id: 'a', label: 'run-a', x: 600 - labelWidth('run-a') - MAX_REACH + 10, y: 150 }], hatch, bounds);
     expect(p).toBeDefined();
     expect(p!.x).toBeGreaterThanOrEqual(500);
     expect(p!.x + labelWidth('run-a')).toBeLessThanOrEqual(600);

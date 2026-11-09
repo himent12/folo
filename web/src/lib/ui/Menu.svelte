@@ -11,24 +11,67 @@
 </script>
 
 <script lang="ts">
-  /** An overflow menu: a "⋯" button that opens a short list of actions (links or buttons). */
+  /**
+   * An overflow menu: a "⋯" button that opens a short list of actions (links or buttons). Keyboard (WAI-ARIA menu
+   * button): Enter, Space or ArrowDown on the button opens it on the first item (ArrowUp on the last); in the list,
+   * the arrows wrap, Home and End go to the ends, typing a letter moves to the next item starting with it (typeahead),
+   * Escape closes it back to the button, Tab closes it and moves on.
+   */
   import Ellipsis from '@lucide/svelte/icons/ellipsis';
   import { tick } from 'svelte';
   import Button from './Button.svelte';
 
-  let { label, items }: { label: string; items: MenuItem[] } = $props();
+  let {
+    label,
+    items,
+    variant = 'secondary',
+    fixed = false,
+  }: {
+    label: string;
+    items: MenuItem[];
+    variant?: 'secondary' | 'ghost';
+    /** A row's menu inside a box that clips (a table that scrolls sideways): the list is placed on the viewport. */
+    fixed?: boolean;
+  } = $props();
 
   const uid = $props.id();
   let open = $state(false);
   let root = $state<HTMLElement>();
   let list = $state<HTMLElement>();
+  /** `fixed`: where the list sits, under the trigger's right edge. */
+  let at = $state<{ top: number; right: number } | null>(null);
+
+  function place() {
+    const r = root?.getBoundingClientRect();
+    if (r) at = { top: r.bottom + 6, right: Math.max(8, window.innerWidth - r.right) };
+  }
 
   const entries = () => [...(list?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? [])];
 
-  async function show() {
+  async function show(at: 'first' | 'last' = 'first') {
+    if (fixed) place();
     open = true;
     await tick();
-    entries()[0]?.focus();
+    const all = entries();
+    (at === 'first' ? all[0] : all.at(-1))?.focus();
+  }
+  function ontrigger(e: KeyboardEvent) {
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+    e.preventDefault();
+    void show(e.key === 'ArrowDown' ? 'first' : 'last');
+  }
+  // Typeahead: the letters typed within half a second, matched against the start of each label. A new search starts
+  // after the focused item; a word being typed may stay on it; one letter pressed again cycles through its items.
+  let typed = '';
+  let typedAt = 0;
+  function typeahead(key: string, all: HTMLElement[], i: number) {
+    const now = Date.now();
+    const k = key.toLowerCase();
+    typed = now - typedAt < 500 && typed !== k ? typed + k : k;
+    typedAt = now;
+    const start = typed.length > 1 ? Math.max(0, i) : i + 1;
+    const order = [...all.slice(start), ...all.slice(0, start)];
+    order.find((el) => el.textContent?.trim().toLowerCase().startsWith(typed))?.focus();
   }
   function hide(refocus = true) {
     open = false;
@@ -45,8 +88,14 @@
       e.preventDefault();
       const d = e.key === 'ArrowDown' ? 1 : -1;
       all[(i + d + all.length) % all.length]?.focus();
+    } else if (e.key === 'Home' || e.key === 'End') {
+      e.preventDefault();
+      (e.key === 'Home' ? all[0] : all.at(-1))?.focus();
     } else if (e.key === 'Tab') {
       hide(false);
+    } else if (e.key.length === 1 && e.key !== ' ' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      e.preventDefault();
+      typeahead(e.key, all, i);
     }
   }
 
@@ -56,13 +105,26 @@
       if (root && !root.contains(e.target as Node)) hide(false);
     };
     document.addEventListener('pointerdown', away);
-    return () => document.removeEventListener('pointerdown', away);
+    // A list placed on the viewport would drift from its row: scrolling or resizing closes it.
+    const drift = (e: Event) => {
+      if (!list?.contains(e.target as Node)) hide(false);
+    };
+    if (fixed) {
+      window.addEventListener('scroll', drift, true);
+      window.addEventListener('resize', drift);
+    }
+    return () => {
+      document.removeEventListener('pointerdown', away);
+      window.removeEventListener('scroll', drift, true);
+      window.removeEventListener('resize', drift);
+    };
   });
 </script>
 
 <div class="menu" bind:this={root}>
   <Button
-    variant="secondary"
+    {variant}
+    size={variant === 'ghost' ? 'sm' : undefined}
     icon={Ellipsis}
     aria-label={label}
     title={label}
@@ -70,10 +132,21 @@
     aria-expanded={open}
     aria-controls="{uid}-list"
     onclick={() => (open ? hide() : show())}
+    onkeydown={ontrigger}
   />
   {#if open}
     <!-- svelte-ignore a11y_interactive_supports_focus -->
-    <div class="list" id="{uid}-list" role="menu" aria-label={label} bind:this={list} {onkeydown}>
+    <div
+      class="list"
+      class:fixed
+      id="{uid}-list"
+      role="menu"
+      aria-label={label}
+      bind:this={list}
+      style:top={fixed && at ? `${at.top}px` : undefined}
+      style:right={fixed && at ? `${at.right}px` : undefined}
+      {onkeydown}
+    >
       {#each items as it (it.label)}
         {#if it.href}
           <a role="menuitem" tabindex="-1" href={it.href} class:danger={it.danger} onclick={() => hide(false)}>
@@ -116,6 +189,9 @@
     box-shadow: var(--shadow-md);
     display: grid;
     animation: in var(--dur-fast) var(--ease-out);
+  }
+  .list.fixed {
+    position: fixed;
   }
   [role='menuitem'] {
     display: flex;

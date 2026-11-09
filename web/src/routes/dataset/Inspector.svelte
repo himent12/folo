@@ -6,6 +6,9 @@
    * (`?image=`), so it is linkable.
    */
   import { untrack } from 'svelte';
+  import { fly } from 'svelte/transition';
+  import { cubicOut } from 'svelte/easing';
+  import { motion } from '$lib/ui/motion';
   import ChevronLeft from '@lucide/svelte/icons/chevron-left';
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
   import Copy from '@lucide/svelte/icons/copy';
@@ -93,8 +96,11 @@
     }
   });
 
+  /** The last step's direction: the next image slides in from that side (120 ms, none under reduced motion). */
+  let stepDir = $state(0);
   async function step(d: number) {
     if (idx < 0) return;
+    stepDir = d;
     const j = idx + d;
     if (j < 0 || j >= total) return;
     const n = await pager.at(j);
@@ -128,7 +134,11 @@
     });
   });
 
-  function zoomAt(f: number, px = vw / 2, py = vh / 2) {
+  // Discrete moves (the buttons, + - 0, a double-click, a label's zoom) glide over 120 ms; continuous input (wheel,
+  // pinch, drag) follows the hand with no transition. The CSS reduced-motion rule turns the glide off.
+  let glide = $state(false);
+  function zoomAt(f: number, px = vw / 2, py = vh / 2, eased = true) {
+    glide = eased;
     const nz = Math.min(maxZ, Math.max(1, z * f));
     const ux = (px - x) / (s0 * z);
     const uy = (py - y) / (s0 * z);
@@ -138,6 +148,7 @@
   }
 
   function fit() {
+    glide = true;
     z = 1;
   }
 
@@ -159,6 +170,7 @@
     const bw = Math.max(8, b.x2 - b.x1);
     const bh = Math.max(8, b.y2 - b.y1);
     const nz = Math.min(maxZ, Math.max(1, Math.min((vw * 0.45) / (bw * s0), (vh * 0.45) / (bh * s0))));
+    glide = true;
     z = nz;
     tx = vw / 2 - ((b.x1 + b.x2) / 2) * s0 * nz;
     ty = vh / 2 - ((b.y1 + b.y2) / 2) * s0 * nz;
@@ -177,7 +189,7 @@
       e.preventDefault();
       const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? vh : 1;
       const [px, py] = local(e);
-      zoomAt(Math.exp(-e.deltaY * unit * (e.ctrlKey ? 0.01 : 0.002)), px, py);
+      zoomAt(Math.exp(-e.deltaY * unit * (e.ctrlKey ? 0.01 : 0.002)), px, py, false);
     };
     v.addEventListener('wheel', onwheel, { passive: false });
     return () => v.removeEventListener('wheel', onwheel);
@@ -203,6 +215,7 @@
     pointers.set(e.pointerId, { x: px, y: py });
     pinch = pointers.size === 2 ? pinchState() : null;
     dragging = true;
+    glide = false;
   }
 
   function onpointermove(e: PointerEvent) {
@@ -215,7 +228,7 @@
       if (now && pinch && pinch.d > 0) {
         tx = x + (now.mx - pinch.mx);
         ty = y + (now.my - pinch.my);
-        zoomAt(now.d / pinch.d, now.mx, now.my);
+        zoomAt(now.d / pinch.d, now.mx, now.my, false);
       }
       pinch = now;
     } else {
@@ -243,6 +256,7 @@
     if (!d || !e.shiftKey || e.metaKey || e.ctrlKey || e.altKey) return;
     e.preventDefault();
     e.stopPropagation();
+    glide = true;
     tx = x + d[0] * Math.max(24, vw / 10);
     ty = y + d[1] * Math.max(24, vh / 10);
   }
@@ -272,6 +286,17 @@
   const stem = (f: string) => f.split('/').pop() ?? f;
   /** The folders of a path ("images/train"): the part a middle ellipsis shortens. */
   const dir = (f: string) => f.slice(0, Math.max(0, f.length - stem(f).length - 1));
+  /** The path's room, and one mono cell, so the folders shorten to whole characters with "…" set tight against "/". */
+  let pathW = $state(0);
+  let ch10 = $state(0);
+  const chW = $derived(ch10 / 10);
+  function shortDir(f: string): { text: string; cut: boolean } {
+    const d = dir(f);
+    if (!d || !pathW || !chW) return { text: d, cut: false };
+    // 24 px copy button and 4 px gap beside the path; the ellipsis takes about one cell.
+    const fit = Math.floor((pathW - 28) / chW) - stem(f).length - 1;
+    return d.length <= fit ? { text: d, cut: false } : { text: d.slice(0, Math.max(1, fit - 1)), cut: true };
+  }
 
   async function copyFile(f: string) {
     try {
@@ -345,7 +370,14 @@
     >
       {#if img}
         {#key img.id}
-          <div class="stage" style:width="{dw}px" style:height="{dh}px" style:transform="translate3d({x}px, {y}px, 0)">
+          <div
+            class="stage"
+            class:glide
+            style:width="{dw}px"
+            style:height="{dh}px"
+            style:transform="translate3d({x}px, {y}px, 0)"
+            in:fly={{ x: 16 * stepDir, duration: motion(120), easing: cubicOut }}
+          >
             <DatasetImage
               datasetId={pager.datasetId}
               imageId={img.id}
@@ -398,7 +430,13 @@
                     // A tap is not a hover: on touch the selection alone marks the row.
                     if (e.pointerType !== 'touch') hovered = i;
                   }}
-                  onfocus={() => (hovered = i)}
+                  onpointerleave={() => {
+                    if (hovered === i) hovered = null;
+                  }}
+                  onfocus={(e) => {
+                    // Keyboard focus previews its box; a click or tap's focus does not, so it never leaves a hover behind.
+                    if (e.currentTarget.matches(':focus-visible')) hovered = i;
+                  }}
                   onblur={() => (hovered = null)}
                   onclick={() => pick(i)}
                   aria-label="{name(b.class)}, {Math.round(b.x2 - b.x1)} by {Math.round(b.y2 - b.y1)} pixels. {selected === i ? 'Selected; show the whole image' : 'Zoom to box'}"
@@ -429,15 +467,17 @@
       </section>
 
       {#if img}
+        {@const sd = shortDir(img.file)}
         <section>
           <h3>Image</h3>
           <dl>
             <dt>File</dt>
             <!-- One line with the middle shortened (images/…/000001.jpg): the folders give way, the file name stays
                  whole; the full path is in the tooltip and one click from the clipboard. -->
-            <dd class="path">
-              <span class="mono mid" use:tooltip={{ text: img.file }}
-                >{#if dir(img.file)}<span class="dir">{dir(img.file)}</span>/{/if}<span class="base">{stem(img.file)}</span></span
+            <dd class="path" bind:clientWidth={pathW}>
+              <span class="mono ch" aria-hidden="true" bind:clientWidth={ch10}>0000000000</span>
+              <span class="mono mid" aria-label={img.file} use:tooltip={{ text: img.file }}
+                >{#if sd.text}<span class="dir">{sd.text}</span>{#if sd.cut}<span class="ell">…</span>{/if}/{/if}<span class="base">{stem(img.file)}</span></span
               >
               <button type="button" class="copy" aria-label="Copy the path {img.file}" use:tooltip={{ text: 'Copy path' }} onclick={() => copyFile(img.file)}
                 ><Copy size={12} strokeWidth={2} aria-hidden="true" /></button
@@ -586,6 +626,12 @@
     top: 0;
     will-change: transform;
   }
+  .stage.glide {
+    transition:
+      transform var(--dur-fast) var(--ease-out),
+      width var(--dur-fast) var(--ease-out),
+      height var(--dur-fast) var(--ease-out);
+  }
   .loading {
     position: absolute;
     inset: 0;
@@ -670,15 +716,12 @@
     text-align: left;
     transition: background-color var(--dur-fast) var(--ease-standard);
   }
-  /* Hover is a light neutral step (only where a pointer can hover, so a tap never leaves one behind); the selection
-     takes the one rule (bg.active and a 2 px accent bar on the leading edge), and hovering a selected row adds to its
-     fill, so the two never look alike. */
+  /* Hover is a light neutral step (only where a pointer can hover, cleared when the pointer leaves the row, so a tap
+     never leaves one behind); the selection takes the one rule (bg.active and a 2 px accent bar on the leading edge),
+     which hover never changes. */
   @media (hover: hover) {
-    .labels button.hot {
+    .labels button.hot:not(.on) {
       background: var(--bg-hover);
-    }
-    .labels button.on.hot {
-      background: linear-gradient(var(--bg-hover), var(--bg-hover)), var(--bg-active);
     }
   }
   .labels button.on {
@@ -737,6 +780,7 @@
     overflow-wrap: anywhere;
   }
   .path {
+    position: relative;
     display: flex;
     align-items: center;
     gap: var(--space-1);
@@ -750,7 +794,17 @@
   .dir {
     min-width: 0;
     overflow: hidden;
-    text-overflow: ellipsis;
+    text-overflow: clip;
+  }
+  /* The cut folders end in a sans "…" (the mono one sits in a full cell and reads as "images… /"). */
+  .ell {
+    font-family: var(--font-sans);
+  }
+  /* One mono cell, measured (font and size as the path), out of the flow. */
+  .ch {
+    position: absolute;
+    visibility: hidden;
+    pointer-events: none;
   }
   .base {
     flex-shrink: 0;

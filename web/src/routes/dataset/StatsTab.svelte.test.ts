@@ -39,7 +39,10 @@ describe('Dataset stats: health findings', () => {
     const ev = target.querySelector(`#${shows[1]!.getAttribute('aria-controls')}`);
     expect(shows[1]!.getAttribute('aria-expanded')).toBe('true');
     expect(shows[1]!.textContent?.trim()).toBe('Hide the warnings');
-    expect(ev?.closest('li')?.classList.contains('warning')).toBe(true);
+    // A full-width row of its own, right after its finding (the grid packs the next finding beside that one).
+    expect(ev?.matches('li.evidence')).toBe(true);
+    expect(ev?.previousElementSibling?.classList.contains('warning')).toBe(true);
+
     // Filtered: no severity control inside a finding.
     expect(ev?.querySelector('[role="radio"]')).toBeNull();
     shows[0]!.click();
@@ -49,16 +52,14 @@ describe('Dataset stats: health findings', () => {
     await tick();
   });
 
-  it('rests on one line with each severity summed up, units named, and no second accounting', async () => {
+  it('rests on one line with each finding once, units named, and no second accounting', async () => {
     const dataset = await hub.api.dataset('ds_shapes_hard');
     const counts = (await hub.api.datasetIssues('ds_shapes_hard', { limit: 1 })).counts;
     c = mount(StatsTab, { target, props: { dataset, stats: dataset.stats!, counts, onclass: () => {} } });
     flushSync();
-    const sev = (s: string) => target.querySelector(`#ds-health summary .h-sev.${s}`)?.textContent?.replace(/\s+/g, ' ').trim();
+    const items = [...target.querySelectorAll('#ds-health summary .h-sev')].map((e) => e.textContent?.replace(/\s+/g, ' ').trim());
     // shapes-hard's 3 check errors are all label errors (broken_label, class_overflow, out_of_range_box): the 3 broken files.
-    expect(sev('danger')).toBe('Errors:3 broken label files');
-    expect(sev('warning')).toBe('Warnings:3 check warnings · 35% tiny boxes');
-    expect(sev('info')).toBe('Notes:42 empty images (0.8%)');
+    expect(items).toEqual(['Error:3 broken label files', 'Warning:3 check warnings', 'Warning:35% tiny boxes', 'Note:42 empty images (0.8%)']);
     const text = target.querySelector('#ds-health')?.textContent ?? '';
     expect(text).not.toMatch(/categor|dataset-wide|file issues/);
     expect(target.querySelector('#ds-health details')?.hasAttribute('open')).toBe(false);
@@ -88,7 +89,7 @@ describe('Dataset stats: Health heading', () => {
     details.dispatchEvent(new Event('toggle'));
     flushSync();
     const n = target.querySelectorAll('.hitems > li').length;
-    expect(summary.querySelector('.h-count')?.textContent).toBe(`${n} checks`);
+    expect(summary.querySelector('.h-count')?.textContent).toBe(`${n} findings`);
     expect(summary.querySelectorAll('.h-sev').length).toBe(0);
   });
 });

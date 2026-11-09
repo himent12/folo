@@ -47,7 +47,7 @@ describe('Histogram', () => {
 
   it('draws the bins as evenly spaced categories, each named, with bar height as the count', () => {
     renderWide(340, { binLabel: (lo: number, hi: number) => (hi >= 1 ? `≥${lo * 100}%` : `${lo * 100}–${hi * 100}%`) });
-    const svg = target.querySelector<SVGElement>('svg[role=img]')!;
+    const svg = target.querySelector<SVGElement>('svg[aria-roledescription=chart]')!;
     expect(svg).not.toBeNull();
     expect(svg.querySelector('.y-label')?.textContent).toBe('Boxes');
     const ticks = [...svg.querySelectorAll('text.tick')].map((t) => t.textContent);
@@ -65,7 +65,7 @@ describe('Histogram', () => {
 
   it('reads a bin out in the row when the keyboard moves to it, with its actual count', () => {
     renderWide(400);
-    const svg = target.querySelector<SVGElement>('svg[role=img]')!;
+    const svg = target.querySelector<SVGElement>('svg[aria-roledescription=chart]')!;
     expect(svg).not.toBeNull();
     svg.dispatchEvent(new FocusEvent('focus'));
     svg.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));

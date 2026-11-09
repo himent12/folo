@@ -23,7 +23,7 @@
   import ArrowRight from '@lucide/svelte/icons/arrow-right';
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import Search from '@lucide/svelte/icons/search';
-  import { classMetrics, matchesClass, PR_CONTEXT, prEnvelope, trimPrTail } from './pr';
+  import { classMetrics, matchesClass, prContext, prEnvelope, trimPrTail } from './pr';
   import { media } from '$lib/design/tokens';
 
   let {
@@ -36,6 +36,8 @@
     fill = false,
     selected = $bindable([]),
     hovered = $bindable(null),
+    allCurves = $bindable(false),
+    modeInHeader = false,
   }: {
     classes: readonly string[];
     ev: Evaluation;
@@ -51,6 +53,10 @@
     selected?: number[];
     /** The class under the pointer or keyboard focus in the table. */
     hovered?: number | null;
+    /** Many classes: every curve instead of the 10th–90th percentile band. */
+    allCurves?: boolean;
+    /** The band / all-curves switch sits in the panel's header (the page renders it), not at the legend row's end. */
+    modeInHeader?: boolean;
   } = $props();
   /** The plot's box when it fills its panel: the chart is drawn at that height. */
   let plotH = $state(0);
@@ -78,7 +84,6 @@
   // Curves end at their last recall point with precision > 0; the zero padding up to recall 1 is not data.
   // Many classes: by default a band (10th–90th percentile of the classes' precision) instead of 80 lines; every
   // curve is one click away. Few classes: every curve, as context lines.
-  let allCurves = $state(false);
   const banded = $derived(many && !allCurves);
   const envelope = $derived(many ? prEnvelope(classes.map((_, i) => trimPrTail(ev.curves[i] ?? []))) : null);
   const series = $derived<Series[]>([
@@ -145,8 +150,9 @@
           <span class="hint">Tap a class in Classes to trace its curve.</span>
         {/if}
       {/if}
-      {#if many}
-        <button type="button" class="clear mode" aria-pressed={allCurves} onclick={() => (allCurves = !allCurves)}>{allCurves ? 'Show the band' : `All ${classes.length} curves`}</button>
+      {#if many && !modeInHeader}
+        <button type="button" class="clear mode" aria-pressed={allCurves} onclick={() => (allCurves = !allCurves)}>{allCurves ? 'Show band' : 'All curves'}</button>
+
       {/if}
     </div>
     <div class="plot" class:fill bind:clientHeight={plotH}>
@@ -171,7 +177,9 @@
 
   <div class="part" class:off={view === 'curves'}>
     <!-- The rows are the curves' controls: say so, and how many are traced, with a way back. -->
-    <div class="tools">
+    <!-- Phones: with classes traced, this row is the selection's action bar ("View curve"), held under the section
+         picker while the table scrolls. -->
+    <div class="tools" class:bar={narrow && !!onviewcurve && selected.length > 0}>
       {#if many}
         <div class="filter">
           <Input bind:value={query} icon={Search} size="sm" type="search" placeholder="Find a class" aria-label="Find a class" />
@@ -180,6 +188,11 @@
       <p class="pick num" aria-live="polite">
         {#if selected.length}
           <span>{selected.length} {selected.length === 1 ? 'class' : 'classes'} traced</span>
+          {#if onviewcurve}
+            <button type="button" class="view to-curve" onclick={() => viewCurve(selected[selected.length - 1]!)}
+              >{selected.length === 1 ? 'View curve' : 'View curves'}<ArrowRight size={14} aria-hidden="true" /></button
+            >
+          {/if}
           <button type="button" class="clear" onclick={() => (selected = [])}>Clear</button>
         {:else}
           <span class="hint">{narrow ? 'Tap a class to trace its curve, the arrow for its details' : 'Select classes to trace their curves'}</span>
@@ -198,14 +211,18 @@
             <col class="c-inst" />
           </colgroup>
         {/if}
+        <!-- Wider screens: bounded columns (the class 224 px, each number 96 px) and an empty last column that takes
+             what is left, so 3 or 80 classes read as one compact block on the left, never figures strewn across the
+             panel. -->
         <thead>
           <tr>
-            <th scope="col" class="cls-h">Class</th>
-            <th scope="col" class="r">AP50</th>
-            <th scope="col" class="r">AP50-95</th>
-            <th scope="col" class="r hide-sm">Precision</th>
-            <th scope="col" class="r hide-sm">Recall</th>
-            <th scope="col" class="r">Instances</th>
+            <th scope="col" class="cls-h" style:width={narrow ? undefined : '224px'}>Class</th>
+            <th scope="col" class="r" style:width={narrow ? undefined : '96px'}>AP50</th>
+            <th scope="col" class="r" style:width={narrow ? undefined : '96px'}>AP50-95</th>
+            <th scope="col" class="r hide-sm" style:width={narrow ? undefined : '96px'}>Precision</th>
+            <th scope="col" class="r hide-sm" style:width={narrow ? undefined : '96px'}>Recall</th>
+            <th scope="col" class="r" style:width={narrow ? undefined : '96px'}>Instances</th>
+            {#if !narrow}<th class="rest" aria-hidden="true"></th>{/if}
           </tr>
         </thead>
         <tbody>
@@ -257,6 +274,7 @@
               <td class="r hide-sm muted">{metric(c.precision)}</td>
               <td class="r hide-sm muted">{metric(c.recall)}</td>
               <td class="r muted">{num(c.instances)}</td>
+              {#if !narrow}<td class="rest" aria-hidden="true"></td>{/if}
             </tr>
             {#if open}
               <tr class="detail" class:on id="pr-detail-{c.class}">
@@ -266,7 +284,7 @@
                       <div><dt>{d.label}</dt><dd class="num">{d.value}</dd></div>
                     {/each}
                   </dl>
-                  <p class="ctx">{PR_CONTEXT}</p>
+                  <p class="ctx">{prContext(ev.bestF1Conf)}</p>
                   {#if onviewcurve}
                     <button type="button" class="view" onclick={() => viewCurve(c.class)}>View curve<ArrowRight size={14} aria-hidden="true" /></button>
                   {/if}
@@ -274,7 +292,7 @@
               </tr>
             {/if}
           {:else}
-            <tr><td colspan="6" class="none">No class matches “{query.trim()}”</td></tr>
+            <tr><td colspan={narrow ? COLS_NARROW : 7} class="none">No class matches “{query.trim()}”</td></tr>
           {/each}
         </tbody>
       </table>
@@ -285,7 +303,7 @@
       </button>
     {/if}
     <p class="foot">
-      Evaluated on {num(ev.images)} validation images at IoU 0.50. Precision and recall {PR_CONTEXT.replace(', IoU 0.50', '')}; instances are
+      Evaluated on {num(ev.images)} validation images at IoU 0.50. Precision and recall {prContext(ev.bestF1Conf, false)}; instances are
       ground-truth boxes per class.
     </p>
   </div>
@@ -405,6 +423,18 @@
     gap: var(--space-2) var(--space-4);
     padding: 0 var(--space-4) var(--space-2);
   }
+  /* Under the sticky section picker (the page sets --pick-bottom), on the panel's fill. */
+  .tools.bar {
+    position: sticky;
+    top: var(--pick-bottom, var(--size-topbar));
+    z-index: 1;
+    padding-top: var(--space-2);
+    margin-top: calc(var(--space-2) * -1);
+    background: var(--bg-panel);
+  }
+  .view.to-curve {
+    margin-top: 0;
+  }
   .filter {
     width: 240px;
     max-width: 100%;
@@ -439,7 +469,11 @@
   .cls-h {
     padding-left: calc(var(--space-4) + var(--space-4));
   }
+  .rest {
+    padding: 0;
+  }
   .cls-cell {
+
     display: flex;
     align-items: center;
     min-width: 0;
@@ -610,11 +644,6 @@
     }
     .c-inst {
       width: 88px;
-    }
-    .legend,
-    .plot,
-    .tools {
-      padding-inline: var(--space-3);
     }
   }
 </style>

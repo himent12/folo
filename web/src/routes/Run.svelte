@@ -1,6 +1,8 @@
 <script lang="ts">
+  import { MediaQuery } from 'svelte/reactivity';
   import ChartSkeleton from '$lib/charts/ChartSkeleton.svelte';
   import Box from '@lucide/svelte/icons/box';
+  import ChevronsUp from '@lucide/svelte/icons/chevrons-up';
   import GitCompare from '@lucide/svelte/icons/git-compare-arrows';
   import ScanSearch from '@lucide/svelte/icons/scan-search';
   import Square from '@lucide/svelte/icons/square';
@@ -10,6 +12,9 @@
   import { hub } from '$lib/api/index.svelte';
   import { LiveRun } from '$lib/api/live.svelte';
   import { Resource } from '$lib/api/resource.svelte';
+  import { hasFeature, ordinal, queuePlace, withQueueMove } from '$lib/api/queue';
+  import type { QueueRequest } from '$lib/api/types';
+  import { media } from '$lib/design/tokens';
   import { ago, deviceName, eta } from '$lib/format';
   import { origin } from '$lib/lineage';
   import { href, router } from '$lib/router.svelte';
@@ -20,19 +25,28 @@
   import Dialog from '$lib/ui/Dialog.svelte';
   import EmptyState from '$lib/ui/EmptyState.svelte';
   import Menu, { type MenuItem } from '$lib/ui/Menu.svelte';
-  import Segmented from '$lib/ui/Segmented.svelte';
+  import Tabs from '$lib/ui/Tabs.svelte';
   import ErrorState from '$lib/ui/ErrorState.svelte';
   import Skeleton from '$lib/ui/Skeleton.svelte';
   import StatusBadge from '$lib/ui/StatusBadge.svelte';
   import Ident from '$lib/ui/Ident.svelte';
+  import Panel from '$lib/ui/Panel.svelte';
   import { toast } from '$lib/ui/toast.svelte';
+  import { tooltip } from '$lib/ui/tooltip';
   import ConfigPanel from './run/ConfigPanel.svelte';
   import Logs from './run/Logs.svelte';
   import Outcome from './run/Outcome.svelte';
   import PerClass from './run/PerClass.svelte';
+  import Lineage from '$lib/ui/Lineage.svelte';
+  import Meta from '$lib/ui/Meta.svelte';
   import RunMetrics from './run/RunMetrics.svelte';
   import Samples from './run/Samples.svelte';
+  import { moveQueued, queueItems, startHint, startLabel } from './run/queueActions';
   import { scheduleWarnings } from './run/warnings';
+  import Copy from '@lucide/svelte/icons/copy';
+  import Play from '@lucide/svelte/icons/play';
+  import { isOom } from '$lib/oom';
+  import { copyText, pageCommands, type PageCommand } from '$lib/shell/pageCommands.svelte';
 
   const id = $derived(router.route.params.id ?? '');
   const live = new LiveRun(() => id || null);
@@ -47,6 +61,61 @@
   const others = new Resource((s) => hub.api.runs(s), { poll: 5000 });
   const queuedOnly = $derived(run?.status === 'queued' && live.steps.length === 0);
   const ahead = $derived(others.data?.find((r) => r.status === 'running' || r.status === 'stopping'));
+
+  // Queue control (servers that list `queue_control`, docs/API.md): the run's place, Start next, Move up / down.
+  const system = new Resource((s) => hub.api.system(s));
+  const queueCtl = $derived(hasFeature(system.data, 'queue_control'));
+  const place = $derived(run?.status === 'queued' && queueCtl ? (run.queue_position ?? null) : null);
+  /** The runs waiting, front first (this one among them). */
+  const queue = $derived(
+    (others.data ?? []).filter((r) => r.status === 'queued' && r.queue_position != null).sort((a, b) => (a.queue_position ?? 0) - (b.queue_position ?? 0)),
+  );
+  const waitingCount = $derived(Math.max(live.waiting ?? 0, queue.length, place ?? 0));
+  /** The waiting run just in front of this one. */
+  const before = $derived(place && place > 1 ? queue.find((r) => r.id !== run?.id && r.queue_position === place - 1) : undefined);
+  /** Start next is a move only when something is in front (or nothing trains, and it starts at once). */
+  const canStart = $derived(place !== null && (place > 1 || !ahead));
+
+  /** Moves this run in the queue: the new order at once (here and in the queue list), the old one back on a refusal. */
+  async function move(req: QueueRequest) {
+    const cur = run;
+    if (!cur) return;
+    const id = cur.id;
+    const refresh = () => {
+      void others.refresh();
+      hub.api.run(id).then(
+        (r) => {
+          if (live.run?.id === id) live.run = { ...live.run, status: r.status, started: r.started, queue_position: r.queue_position ?? null, resolved: r.resolved ?? live.run.resolved };
+        },
+        () => {},
+      );
+    };
+    const r = await moveQueued(
+      cur,
+      req,
+      () => {
+        const list = others.data;
+        const prev = live.run?.queue_position ?? null;
+        if (list) others.set(withQueueMove(list, id, req));
+        const next = others.data?.find((x) => x.id === id)?.queue_position;
+        if (live.run?.id === id && next != null) live.run = { ...live.run, queue_position: next };
+        return () => {
+          if (list) others.set(list);
+          if (live.run?.id === id) live.run = { ...live.run, queue_position: prev };
+        };
+      },
+      refresh,
+      ahead,
+    );
+    if (!r) return;
+    if (live.run?.id === id) live.run = { ...live.run, queue_position: r.queue_position ?? null };
+    void others.refresh();
+  }
+
+  // A queued run waits in a layout of its own from 768 px up: its place and the way to the front, what it waits for,
+  // then its config; the outputs it will have are one quiet list instead of empty frames. Phones keep their sections.
+  const phone = new MediaQuery(media.phone, false);
+  const waitingLayout = $derived(queuedOnly && !phone.current);
   const active = $derived(run ? ['queued', 'running', 'stopping'].includes(run.status) : false);
   const epochsDone = $derived.by(() => {
     void live.version;
@@ -66,6 +135,8 @@
   const section = $derived<Section>(picked ?? (queuedOnly ? 'config' : 'samples'));
   const models = new Resource((s) => hub.api.models(s));
   /** Where the run started: "From scratch", or the model / file it was fine-tuned from (one reading, $lib/lineage). */
+  /** Below 1024 px the parts are one section at a time behind tabs: then the parts' frame is their tab panel. */
+  const stacked = new MediaQuery(media.upToLaptop, false);
   const lineage = $derived(run ? origin(run.config.weights, models.data ?? []) : null);
   let stopOpen = $state(false);
   let deleteOpen = $state(false);
@@ -108,13 +179,40 @@
       if (run.status !== 'completed') out.push({ label: 'Try model', icon: ScanSearch, href: href(`/playground?model=${run.model_id}`) });
       out.push({ label: 'Open model', icon: Box, href: href(`/models/${run.model_id}`) });
     }
-    // Phones: the queued run's one action keeps its one name, in the menu (the status and its time keep the row).
+    // Phones: the queued run's one action keeps its one name, in the menu (the status and its time keep the row); its
+    // moves come first (Start next is in the banner).
+    if (place !== null) out.push(...queueItems(place, waitingCount, ahead, move, { start: false }));
     if (run.status === 'queued') out.push({ label: 'Remove from queue', icon: X, danger: true, onclick: () => (stopOpen = true) });
     if (!active) out.push({ label: 'Delete run', icon: Trash, danger: true, onclick: () => (deleteOpen = true) });
     return out;
   });
 
+  /** Wider screens: the queued run's moves behind ⋯, next to Remove from queue (Start next is in the banner). */
+  const wideQueueItems = $derived(place !== null ? queueItems(place, waitingCount, ahead, move, { start: false }) : []);
+
+  /** What the run will have once it trains, in place of the empty frames (the waiting layout). */
+  const later = $derived([
+    { name: 'Metrics', what: 'mAP, precision and recall, loss, LR and throughput, by epoch' },
+    { name: 'Samples', what: 'Predictions on 16 validation images after every epoch' },
+    { name: 'Per class', what: `AP for each of ${dataset?.classes.length ?? 'its'} classes` },
+    { name: 'Logs', what: "The trainer's output, live" },
+  ]);
+
   // Resume: the same run continues from weights/last.folo (POST /api/runs with resume_run_id, docs/API.md).
+  // The palette's This page: the state action the header shows (Stop, Resume), Compare and the id.
+  pageCommands((): PageCommand[] => {
+    const r = run;
+    if (!r) return [];
+    const out: PageCommand[] = [];
+    if (r.status === 'running') out.push({ id: 'run-stop', label: `Stop ${r.name}`, match: ['Stop run'], icon: Square, run: () => (stopOpen = true) });
+    // As the run's banner: anything but out of memory continues from the last checkpoint.
+    if (r.status === 'stopped' || (r.status === 'failed' && !isOom(r.error)))
+      out.push({ id: 'run-resume', label: `Resume ${r.name}`, match: ['Resume run'], icon: Play, run: () => void resume() });
+    out.push({ id: 'run-compare', label: `Compare ${r.name}`, match: ['Compare run'], icon: GitCompare, run: () => router.go(`/runs/compare?ids=${r.id}`) });
+    out.push({ id: 'run-copy-id', label: 'Copy run id', match: [r.id], icon: Copy, run: () => void copyText(r.id, 'run id') });
+    return out;
+  });
+
   let resuming = $state(false);
   async function resume() {
     if (!run) return;
@@ -135,10 +233,22 @@
 <!-- A queued run leads with what it waits for and when it should start (the callout under the header); the frames it
      will fill stay compact until there is data, and the config is in its rail. -->
 {#snippet waiting()}
-  {#if ahead}
+  {#if place !== null && place > 1}
+    <!-- Behind other waiting runs: the one in front of it, then what trains now. -->
+    Starts after {#if before}<a class="link" href={href(`/runs/${before.id}`)}>{before.name}</a>{#if place > 2} and {place - 2} more{/if}{:else}{place - 1} queued {place === 2 ? 'run' : 'runs'}{/if}.
+    {#if ahead}<a class="link" href={href(`/runs/${ahead.id}`)}>{ahead.name}</a> is training{#if ahead.eta_s !== null}, about {eta(ahead.eta_s)} left{/if}.{/if}
+  {:else if ahead}
     Starts when <a class="link" href={href(`/runs/${ahead.id}`)}>{ahead.name}</a> finishes{#if ahead.eta_s !== null}, in about {eta(ahead.eta_s)}{/if}.
   {:else}
     Starts as soon as the device is free.
+  {/if}
+{/snippet}
+
+{#snippet startNext()}
+  {#if canStart}
+    <span class="start" use:tooltip={startHint(ahead)}>
+      <Button size="sm" icon={ChevronsUp} onclick={() => move({ action: 'start' })}>{startLabel(ahead)}</Button>
+    </span>
   {/if}
 {/snippet}
 
@@ -166,15 +276,28 @@
           {#each [0, 1, 2, 3, 4, 5] as i (i)}<div class="sk-cell"><Skeleton w="56%" h="12px" /><Skeleton w="48%" h="24px" /><Skeleton w="68%" h="12px" /></div>{/each}
         </div>
       </div>
-      <div class="sk-chart"><ChartSkeleton height={320} /></div>
+      <!-- The chart's own header row (title, range control) over its legend and plot, as RunMetrics lays them out. -->
+      <div class="sk-chart">
+        <div class="sk-ch"><Skeleton w="200px" h="14px" /><Skeleton w="104px" h="24px" r="var(--radius-md)" /></div>
+        <ChartSkeleton height={320} />
+      </div>
     </div>
     <div class="sk-pick"><Skeleton w="280px" h="28px" r="var(--radius-md)" /></div>
     <div class="sk-detail">
-      <div class="sk-panel">
-        <div class="sk-ph"><Skeleton w="128px" h="14px" /><span class="sk-ctl"><Skeleton w="160px" h="24px" r="var(--radius-md)" /><Skeleton w="120px" h="24px" r="var(--radius-md)" /></span></div>
-        <div class="sk-pb">
-          <div class="sk-bar"><Skeleton w="min(300px, 60%)" h="12px" /><Skeleton w="200px" h="12px" /></div>
-          <div class="sk-tiles">{#each [0, 1, 2, 3, 4, 5, 6, 7, 8] as i (i)}<Skeleton h="auto" class="sk-tile" r="var(--radius-md)" />{/each}</div>
+      <div class="sk-main">
+        <div class="sk-panel">
+          <div class="sk-ph"><Skeleton w="128px" h="14px" /><span class="sk-ctl"><Skeleton w="160px" h="24px" r="var(--radius-md)" /><Skeleton w="120px" h="24px" r="var(--radius-md)" /></span></div>
+          <div class="sk-pb">
+            <div class="sk-bar"><Skeleton w="min(300px, 60%)" h="12px" /><Skeleton w="200px" h="12px" /></div>
+            <div class="sk-tiles">{#each [0, 1, 2, 3, 4, 5, 6, 7, 8] as i (i)}<Skeleton h="auto" class="sk-tile" r="var(--radius-md)" />{/each}</div>
+          </div>
+        </div>
+        <!-- Logs under the samples (desktop and laptop), growing to the rail's foot like the loaded log. -->
+        <div class="sk-panel sk-logs">
+          <div class="sk-ph"><Skeleton w="56px" h="14px" /><Skeleton w="128px" h="24px" r="var(--radius-md)" /></div>
+          <div class="sk-lines">
+            {#each [0, 1, 2, 3, 4, 5, 6, 7, 8] as i (i)}<Skeleton w="{46 + ((i * 13) % 24)}%" h="10px" />{/each}
+          </div>
         </div>
       </div>
       <div class="sk-rail">
@@ -207,13 +330,16 @@
       {#if live.connection === 'reconnecting'}<Badge tone="warning"><WifiOff size={12} /> Reconnecting</Badge>{/if}
     {/snippet}
     {#snippet sub()}
-      <a class="link" href={href(`/datasets/${run.config.dataset_id}`)}>{dataset?.name ?? run.config.dataset_id}</a>
-      <Ident value={run.config.arch} />
-      <!-- Phones: size, batch and device are in the Config section; the id is in the URL. -->
-      <span class="cfg">{run.config.imgsz} px · batch {run.config.batch}</span>
-      <span class="cfg lineage">{#if !lineage || lineage.kind === 'scratch'}From scratch{:else}Fine-tuned from <Ident value={lineage.label} title={lineage.kind === 'file' ? lineage.path : undefined} />{/if}</span>
-      <span class="truncate dev" title={run.device}>{deviceName(run.device)}</span>
-      <span class="faint when">{run.started ? `started ${ago(run.started)}` : `created ${ago(run.created)}`}</span>
+      <Meta>
+        <a class="link" href={href(`/datasets/${run.config.dataset_id}`)}>{dataset?.name ?? run.config.dataset_id}</a>
+        <Ident value={run.config.arch} />
+        <!-- Phones: size, batch and device are in the Config section; the id is in the URL. -->
+        <span class="cfg num">{run.config.imgsz} px</span>
+        <span class="cfg num">batch {run.config.batch}</span>
+        <span class="cfg lineage">{#if !lineage || lineage.kind === 'scratch'}From scratch{:else}Fine-tuned from <Lineage origin={lineage} />{/if}</span>
+        <span class="truncate dev" title={run.device}>{deviceName(run.device)}</span>
+        <span class="faint when">{run.started ? `started ${ago(run.started)}` : `created ${ago(run.created)}`}</span>
+      </Meta>
     {/snippet}
     {#snippet actions()}
       <span class="wide-only">
@@ -227,7 +353,10 @@
         <Button variant="danger" icon={Square} onclick={() => (stopOpen = true)}>Stop</Button>
       {:else if run.status === 'queued'}
         <!-- Phones: in the ⋯ menu under the same name, so the status and its time keep one line beside it. -->
-        <span class="wide-only"><Button variant="ghost" icon={X} onclick={() => (stopOpen = true)}>Remove from queue</Button></span>
+        <span class="wide-only">
+          <Button variant="ghost" icon={X} onclick={() => (stopOpen = true)}>Remove from queue</Button>
+          {#if wideQueueItems.length}<Menu label="More run actions" items={wideQueueItems} />{/if}
+        </span>
       {:else if !active}
         <span class="wide-only"><Button variant="ghost" icon={Trash} aria-label="Delete run" title="Delete run" onclick={() => (deleteOpen = true)} /></span>
       {/if}
@@ -235,8 +364,51 @@
       <span class="phone-only"><Menu label="More run actions" items={moreItems} /></span>
     {/snippet}
 
-    <Outcome {run} {elapsed} {resuming} onresume={resume} waiting={queuedOnly ? waiting : undefined} {warnings} />
+    <Outcome
+      {run}
+      {elapsed}
+      {resuming}
+      onresume={resume}
+      waiting={queuedOnly ? waiting : undefined}
+      waitingTitle={place !== null ? queuePlace(place) : undefined}
+      waitingActions={canStart ? startNext : undefined}
+      {warnings}
+    />
 
+    {#if waitingLayout}
+      <!-- Waiting (768 px up): the config as asked for, beside the queue and what the run will have. Nothing here is an
+           empty frame, and no panel stretches to its neighbour's height. -->
+      <div class="waiting">
+        <div class="w-main"><ConfigPanel config={run.config} resolved={run.resolved} datasetName={dataset?.name} /></div>
+        <div class="w-side">
+          {#if place !== null && queue.length}
+            <Panel title="Queue" meta="{waitingCount} waiting" pad="none" id="queue">
+              <ol class="queue">
+                {#if ahead}
+                  <li class="q-row">
+                    <span class="q-n"><span class="live-dot" aria-hidden="true"></span><span class="sr-only">Training</span></span>
+                    <a class="q-name" href={href(`/runs/${ahead.id}`)}>{ahead.name}</a>
+                    <span class="q-meta num">{ahead.eta_s !== null ? `${eta(ahead.eta_s)} left` : 'training'}</span>
+                  </li>
+                {/if}
+                {#each queue as q (q.id)}
+                  {@const self = q.id === run.id}
+                  <li class="q-row" class:self aria-current={self ? 'true' : undefined}>
+                    <span class="q-n num" aria-label={ordinal(q.queue_position ?? 0)}>{q.queue_position}</span>
+                    {#if self}<span class="q-name">{q.name}</span><span class="q-meta">this run</span>{:else}<a class="q-name" href={href(`/runs/${q.id}`)}>{q.name}</a><span class="q-meta"></span>{/if}
+                  </li>
+                {/each}
+              </ol>
+            </Panel>
+          {/if}
+          <Panel title="When training starts" pad="none" id="later">
+            <ul class="later">
+              {#each later as l (l.name)}<li><span class="l-name">{l.name}</span><span class="l-what">{l.what}</span></li>{/each}
+            </ul>
+          </Panel>
+        </div>
+      </div>
+    {:else}
     <!-- Phones: while another section is picked, the chart folds to its one-line readout so that section starts in
          the first screen. -->
     <RunMetrics
@@ -251,12 +423,15 @@
 
     <!-- Evidence on the left (what the model sees, what the trainer says); reference in a rail on the right, the two
          columns ending together. -->
-    <!-- Below 960 px one of these shows at a time, chosen here; wider screens show them all beside a rail. -->
+    <!-- Below 1024 px one of these shows at a time, chosen here; wider screens show them all beside a rail. They switch
+         content, so they are underline tabs (DESIGN_DIRECTION §2.22), not a segmented control. -->
     <div class="phone-pick">
-      <Segmented
-        label="Show"
-        bind:value={() => section, (v) => (picked = v)}
-        options={[
+      <Tabs
+        label="Run sections"
+        idPrefix="run-sec"
+        value={section}
+        onchange={(v) => (picked = v)}
+        tabs={[
           { value: 'samples', label: 'Samples' },
           { value: 'classes', label: 'Classes' },
           { value: 'logs', label: 'Logs' },
@@ -264,16 +439,17 @@
         ]}
       />
     </div>
-    <div class="detail" data-show={section}>
+    <div class="detail" data-show={section} id="run-sec-panel" role={stacked.current ? 'tabpanel' : undefined} aria-labelledby={stacked.current ? `run-sec-${section}` : undefined}>
       <div class="main-col">
         <div class="part" data-part="samples"><Samples runId={run.id} classes={dataset?.classes ?? []} {epochsDone} /></div>
         <div class="part" data-part="logs"><Logs logs={live.logs} version={live.version} live={active} /></div>
       </div>
       <aside class="rail" aria-label="Per-class results and config">
         <div class="part" data-part="classes"><PerClass classes={dataset?.classes ?? []} epochs={live.epochs} version={live.version} loading={live.loading} compact /></div>
-        <div class="part" data-part="config"><ConfigPanel config={run.config} datasetName={dataset?.name} compact /></div>
+        <div class="part" data-part="config"><ConfigPanel config={run.config} resolved={run.resolved} datasetName={dataset?.name} weights={lineage} compact /></div>
       </aside>
     </div>
+    {/if}
   </Page>
 
   <Dialog
@@ -347,21 +523,42 @@
   .sk-tabs .sk-cell:first-child {
     border-left: 0;
   }
+  /* RunMetrics' chart: 0 16 16 padding, a 48 px header row (8 px above the title), 8 px to the legend. */
   .sk-chart {
-    padding: var(--space-4);
+    display: grid;
+    gap: var(--space-2);
+    padding: 0 var(--space-4) var(--space-4);
+  }
+  .sk-ch {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    min-height: 48px;
+    padding-top: var(--space-2);
   }
   .sk-pick {
     display: none;
   }
+  /* The loaded detail row: samples over logs beside per-class over config, the columns ending together. */
   .sk-detail {
     display: grid;
     grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
     gap: var(--space-4);
-    align-items: start;
+    align-items: stretch;
   }
+  .sk-main,
   .sk-rail {
     display: grid;
+    grid-template-rows: auto minmax(0, 1fr);
     gap: var(--space-4);
+    min-width: 0;
+  }
+  .sk-lines {
+    display: grid;
+    align-content: start;
+    gap: 8px;
+    min-height: 200px;
+    padding: var(--space-2) var(--space-4) var(--space-4);
   }
   .sk-panel {
     background: var(--bg-panel);
@@ -443,9 +640,11 @@
     .sk-detail {
       grid-template-columns: minmax(0, 1fr);
     }
-    .sk-rail {
+    .sk-rail,
+    .sk-logs {
       display: none;
     }
+
     .sk-tiles :global(.sk-tile:nth-child(9)) {
       display: none;
     }
@@ -495,6 +694,105 @@
   .dev {
     max-width: 320px;
   }
+  .start {
+    display: inline-flex;
+  }
+  /* The waiting layout: the config (8 columns) beside the queue and the outputs to come (4), each panel its own
+     height; stacked under 1024 px. */
+  .waiting {
+    display: grid;
+    grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+    gap: var(--space-4);
+    align-items: start;
+  }
+  .w-side {
+    display: grid;
+    gap: var(--space-4);
+    min-width: 0;
+  }
+  .w-main {
+    min-width: 0;
+  }
+  @media (max-width: 1023px) {
+    .waiting {
+      grid-template-columns: minmax(0, 1fr);
+    }
+    /* Tablets: the queue leads, then the config, then the outputs to come. */
+    .w-side {
+      display: contents;
+    }
+    .w-side :global(#queue) {
+      order: -1;
+    }
+  }
+  .queue,
+  .later {
+    list-style: none;
+    margin: 0;
+    padding: 0 0 var(--space-2);
+  }
+  .q-row {
+    display: grid;
+    grid-template-columns: 24px minmax(0, 1fr) auto;
+    align-items: center;
+    gap: var(--space-2);
+    height: 36px;
+    padding: 0 var(--space-4);
+    border-top: 1px solid var(--line-subtle);
+  }
+  .q-row:first-child {
+    border-top: 0;
+  }
+  .q-n {
+    color: var(--text-tertiary);
+    font-size: var(--type-sm-size);
+  }
+  .live-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--accent-line);
+  }
+  .q-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text-primary);
+  }
+  a.q-name:hover {
+    text-decoration: underline;
+    text-decoration-color: var(--line-strong);
+    text-underline-offset: 3px;
+  }
+  .q-row.self {
+    background: var(--bg-active);
+  }
+  .q-row.self .q-name {
+    font-weight: var(--weight-medium);
+  }
+  .q-meta {
+    font-size: var(--type-sm-size);
+    color: var(--text-tertiary);
+    white-space: nowrap;
+  }
+  .later li {
+    display: grid;
+    gap: 2px;
+    padding: var(--space-2) var(--space-4);
+    border-top: 1px solid var(--line-subtle);
+  }
+  .later li:first-child {
+    border-top: 0;
+  }
+  .l-name {
+    font-weight: var(--weight-medium);
+  }
+  .l-what {
+    font-size: var(--type-sm-size);
+    color: var(--text-tertiary);
+  }
   /* The two columns end together: each column's last panel takes what the other column adds. Usually the rail is the
      taller, and the log (at least 200 px) grows to its bottom; under a short rail (few classes) Config's frame runs
      down to the log's end, as a properties rail runs the page's height. No fixed heights. */
@@ -522,12 +820,17 @@
   @media (max-width: 1023px) {
     /* Tablets and phones: the rail no longer fits beside the samples, so one section at a time, picked above. */
     /* The section picker stays reachable while the section scrolls (just under the top bar). */
+    /* Flex, not block: the segmented group is inline, and a line box would add its descender under it (16 px to the
+       section at the tablet tier instead of 12). */
     .phone-pick {
-      display: block;
+      display: flex;
       position: sticky;
-      top: calc(var(--size-topbar) + var(--space-2));
+      top: var(--size-topbar);
       z-index: var(--z-sticky);
-      margin-bottom: calc(-1 * var(--space-1));
+      margin-top: calc(-1 * var(--space-2));
+      background: var(--bg-app);
+      /* 12 px to the section under the page's 20 px gap (16 on phones, below). */
+      margin-bottom: calc(var(--space-3) - var(--space-5));
     }
     /* One part is visible at a time, so the empty columns must not add gaps. */
     .detail,
@@ -550,11 +853,10 @@
     }
   }
   @media (max-width: 767px) {
-    .phone-pick :global(.seg) {
-      display: flex;
-      width: 100%;
+    .phone-pick {
+      margin-bottom: calc(var(--space-3) - var(--space-4));
     }
-    .phone-pick :global(.seg > *) {
+    .phone-pick :global([role='tab']) {
       flex: 1;
       justify-content: center;
     }

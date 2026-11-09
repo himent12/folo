@@ -53,7 +53,17 @@ export function bytes(x: number | null | undefined, units: 'binary' | 'metric' =
     v /= k;
     i++;
   }
-  return `${i === 0 ? nf(0).format(v) : trim(v)} ${names[i]}`;
+  // One format for every size in the app: one decimal above bytes ("37.0 MiB", "16.0 GiB"), so columns read evenly.
+  return `${i === 0 ? nf(0).format(v) : nf(1).format(v)} ${names[i]}`;
+}
+
+/** The one unit a table's size column uses, named in its header ("Size, MiB"); the cells are `sizeIn`. */
+export const sizeUnit = (units: 'binary' | 'metric' = 'binary') => (units === 'binary' ? 'MiB' : 'MB');
+
+/** A size in the column's unit, one decimal, no unit: 38_797_312 → "37.0". */
+export function sizeIn(x: number | null | undefined, units: 'binary' | 'metric' = 'binary'): string {
+  if (!ok(x)) return '—';
+  return nf(1).format(x / (units === 'binary' ? 2 ** 20 : 1e6));
 }
 
 /** Seconds → "1h 04m", "12m 30s", "42s". */
@@ -158,4 +168,18 @@ export function sentence(s: string, plain = false): string {
   if (!t) return t;
   const cap = t[0]!.toUpperCase() + t.slice(1);
   return /[.!?]$/.test(cap) ? cap : `${cap}.`;
+}
+
+/** A confidence threshold on the 0.001 grid, as people set one: 0.312 → "0.31" (three decimals below 0.1: "0.045"). */
+export function conf(x: number | null | undefined): string {
+  return ok(x) ? num(x, x < 0.1 ? 3 : 2) : '—';
+}
+
+/**
+ * Where precision and recall were read (docs/API.md, Operating point): "at conf 0.31 (best F1)" when the server says
+ * which threshold (`best_f1_conf`), else the honest "at the best-F1 confidence" (older servers and files, or no class
+ * with ground truth).
+ */
+export function atBestF1(c: number | null | undefined): string {
+  return ok(c) ? `at conf ${conf(c)} (best F1)` : 'at the best-F1 confidence';
 }

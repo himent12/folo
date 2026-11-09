@@ -3,6 +3,8 @@
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
   import Download from '@lucide/svelte/icons/download';
+  import Copy from '@lucide/svelte/icons/copy';
+  import { copyText, pageCommands, type PageCommand } from '$lib/shell/pageCommands.svelte';
   import Info from '@lucide/svelte/icons/info';
   import ScanSearch from '@lucide/svelte/icons/scan-search';
   import { tick } from 'svelte';
@@ -15,7 +17,8 @@
   import ConfusionMatrix from '$lib/charts/ConfusionMatrix.svelte';
   import { sharePct } from '$lib/charts/confusionInk';
   import { classInk } from '$lib/design/classInk.svelte';
-  import { ago, bytes, compact, date, metric, num } from '$lib/format';
+  import { ago, atBestF1, bytes, compact, conf, date, metric, num } from '$lib/format';
+  import { latencyMs, latencyRange, loadThroughput, measuredLatency } from '$lib/throughput';
   import { prefs } from '$lib/prefs.svelte';
   import { href, router } from '$lib/router.svelte';
   import Page from '$lib/shell/Page.svelte';
@@ -24,12 +27,15 @@
   import ErrorState from '$lib/ui/ErrorState.svelte';
   import Menu from '$lib/ui/Menu.svelte';
   import Panel from '$lib/ui/Panel.svelte';
+  import Tabs from '$lib/ui/Tabs.svelte';
   import Segmented from '$lib/ui/Segmented.svelte';
   import Skeleton from '$lib/ui/Skeleton.svelte';
   import Ident from '$lib/ui/Ident.svelte';
   import { cmIndex, rankConfusions, type ConfusionEntry } from './model/confusion';
   import ExportDialog from './model/ExportDialog.svelte';
   import { origin } from '$lib/lineage';
+  import Lineage from '$lib/ui/Lineage.svelte';
+  import Meta from '$lib/ui/Meta.svelte';
   import PrCurves from './model/PrCurves.svelte';
   import { MODEL_SECTIONS, sectionShown, type ModelSection } from './model/sections';
   import { media } from '$lib/design/tokens';
@@ -43,6 +49,16 @@
 
   // The source run, its dataset and the model it was fine-tuned from (its `weights`), for the provenance links.
   const runId = $derived(model.data?.run_id ?? null);
+  // The palette's This page: the header's actions and the id.
+  pageCommands((): PageCommand[] => {
+    const m = model.data;
+    if (!m) return [];
+    return [
+      { id: 'model-export', label: `Export ${m.name}`, match: ['Export model', 'ONNX'], icon: Download, run: () => (exportOpen = true) },
+      { id: 'model-try', label: `Try ${m.name} in Playground`, match: ['Try model'], icon: ScanSearch, run: () => router.go(`/playground?model=${encodeURIComponent(m.id)}`) },
+      { id: 'model-copy-id', label: 'Copy model id', match: [m.id], icon: Copy, run: () => void copyText(m.id, 'model id') },
+    ];
+  });
   const context = new Resource<{ run: Run | null; dataset: Dataset | null; parent: Model | null }>(async (s) => {
     const rid = runId;
     if (!rid) return { run: null, dataset: null, parent: null };
@@ -56,6 +72,8 @@
 
   // PR curves, confusion matrix and per-class metrics from GET /api/models/{id}/eval.
   const evaluation = new Resource((s) => hub.api.modelEval(id, s));
+  // This server's measured latency for the architecture (GET /api/system/throughput), where it has predicted with it.
+  const tp = new Resource((s) => loadThroughput(hub.api, s));
   const ev = $derived(evaluation.data ? fromModelEval(evaluation.data) : null);
 
   // Large class sets (COCO) get a readable matrix of the most frequent classes.
@@ -104,6 +122,8 @@
   // The ranked lists point into the matrix: each line is a button that reveals its cell (on a phone the matrix scrolls
   // sideways, so the background column starts out of view).
   let matrixView = $state<ConfusionMatrix>();
+  /** The curves panel's band / every-curve switch (many classes). */
+  let allCurves = $state(false);
   let exportOpen = $state(false);
   // Below the desktop tier the rail stacks under the PR panel: the details fold into one line so the matrix follows soon.
   const narrow = new MediaQuery(media.upToLaptop, false);
@@ -111,6 +131,8 @@
   // Phones: after the headline metrics, one section at a time (as on the run page) instead of a 4,000 px column.
   const phone = new MediaQuery(media.phone, false);
   let section = $state<ModelSection>('curves');
+  /** The sticky picker's height: a section's own sticky bar (Classes' selection) holds just under it. */
+  let pickH = $state(0);
   const showing = (part: ModelSection) => sectionShown(phone.current, section, part);
 
   // What goes wrong most, ranked: beside the matrix in a rail on wider screens; on phones the Confusion section opens on
@@ -193,8 +215,9 @@
   const kpis = (m: Model) => [
     { label: 'mAP50-95', value: m.metrics?.map50_95, sub: 'IoU 0.50:0.95' },
     { label: 'mAP50', value: m.metrics?.map50, sub: 'IoU 0.50' },
-    { label: 'Precision', value: m.metrics?.precision, sub: 'at the best-F1 confidence' },
-    { label: 'Recall', value: m.metrics?.recall, sub: 'at the best-F1 confidence' },
+    // The stored metrics' own threshold (the epoch that wrote the weights), never /eval's: one source per strip.
+    { label: 'Precision', value: m.metrics?.precision, sub: atBestF1(m.metrics?.best_f1_conf) },
+    { label: 'Recall', value: m.metrics?.recall, sub: atBestF1(m.metrics?.best_f1_conf) },
   ];
   // Phones: the four numbers as one compact 2 × 2 summary in every section (Curves too), so it never changes shape
   // between sections and each section starts on the first screen; what they mean is behind the ⓘ.
@@ -235,11 +258,8 @@
   {@const head = m.head ?? 'o2m'}
   {#snippet lineageNote()}
     <!-- Where the weights started: the run's `weights`, a model (linked), an imported file, or nothing. -->
-    {#if lineage?.kind === 'model'}
-      {@const lid = lineage.id}
-      <span>fine-tuned from <Ident value={context.data?.parent?.name ?? lid} class="link" href={href(`/models/${encodeURIComponent(lid)}`)} /></span>
-    {:else if lineage?.kind === 'file'}
-      <span>fine-tuned from <Ident value={lineage.label} title={lineage.path} /></span>
+    {#if lineage && lineage.kind !== 'scratch'}
+      <span>fine-tuned from <Lineage origin={lineage} /></span>
     {:else if lineage?.kind === 'scratch'}
       <span>from scratch</span>
     {/if}
@@ -263,7 +283,9 @@
       </div>
       <div>
         <dt>Precision, recall</dt>
-        <dd>Measured at the confidence that gives the best F1 (precision and recall balanced, averaged over classes, at IoU 0.50): the model's best trade-off between missed objects and false boxes.</dd>
+        <dd>Measured at the confidence that gives the best F1 (precision and recall balanced, averaged over classes, at IoU 0.50): the model's best trade-off between missed objects and false boxes.{' '}{#if m.metrics?.best_f1_conf != null}Here
+            conf {conf(m.metrics.best_f1_conf)}, from the epoch that wrote these weights.{:else}This model's file does not say which
+            threshold that was.{/if}</dd>
       </div>
       <div>
         <dt>Evaluated on</dt>
@@ -288,19 +310,25 @@
     {#snippet sub()}
       {#if phone.current}
         <button type="button" class="meta-line num" aria-expanded={metaOpen} aria-controls="model-meta" onclick={() => (metaOpen = !metaOpen)}>
-          <span class="truncate"><Ident value={m.arch} /> · {m.classes.length} classes · {m.imgsz} px</span>
+          <Meta line><Ident value={m.arch} /><span>{m.classes.length} classes</span><span>{m.imgsz} px</span></Meta>
           <ChevronDown size={14} aria-hidden="true" />
         </button>
         {#if metaOpen}
           <div class="meta-more" id="model-meta">
-            <span class="num">{bytes(m.bytes, prefs.units)}</span>
-            {@render provenance()}
+            <Meta>
+              <span class="num">{bytes(m.bytes, prefs.units)}</span>
+              {@render provenance()}
+            </Meta>
           </div>
         {/if}
       {:else}
-        <Ident value={m.arch} />
-        <span class="num">{m.classes.length} classes · {m.imgsz} px · {bytes(m.bytes, prefs.units)}</span>
-        {@render provenance()}
+        <Meta>
+          <Ident value={m.arch} />
+          <span class="num">{m.classes.length} classes</span>
+          <span class="num">{m.imgsz} px</span>
+          <span class="num">{bytes(m.bytes, prefs.units)}</span>
+          {@render provenance()}
+        </Meta>
       {/if}
     {/snippet}
     {#snippet actions()}
@@ -342,25 +370,48 @@
 
     {#if phone.current}
       <!-- Stays reachable under the top bar while a section scrolls. -->
-      <div class="phone-pick">
-        <Segmented label="Show" bind:value={section} options={MODEL_SECTIONS} />
+      <div class="phone-pick" bind:offsetHeight={pickH}>
+        <Tabs label="Model sections" idPrefix="model-sec" bind:value={section} tabs={MODEL_SECTIONS} />
       </div>
     {/if}
+
+    <!-- The parts, in one frame: on phones it is the sections' tab panel; wider, a column with the page's own gap. -->
+    <div class="parts" id="model-sec-panel" role={phone.current ? 'tabpanel' : undefined} aria-labelledby={phone.current ? `model-sec-${section}` : undefined}>
 
     <!-- Evidence beside reference: the curves (8 columns) and the Details rail (4) stretch to one height, the plot
          taking what the rail adds; the per-class table, the curves' legend, follows in a row of its own. Up to 1199 px
          the table follows the curves and the details fold into one line under it. Both PR panels share the traced and
          pointed-at classes. -->
-    <div class="detail" class:off={!showing('curves') && !showing('classes') && !showing('details')}>
+    <div
+      class="detail"
+      class:off={!showing('curves') && !showing('classes') && !showing('details')}
+      style:--pick-bottom={phone.current ? `calc(var(--size-topbar) + var(--space-2) + ${pickH}px)` : undefined}
+    >
       <div class="main-col" class:off={!showing('curves')}>
         <Panel title="Precision–recall" meta="precision by recall · IoU 0.5" pad="none" id="pr">
+          <!-- Many classes: the band / every-curve switch is the chart's one header control, so the legend row keeps one
+               line in the laptop's narrower column. -->
+          {#snippet actions()}
+            {#if ev && m.classes.length > 10}
+              <Segmented
+                size="sm"
+                label="Curves shown"
+                bind:value={() => (allCurves ? 'all' : 'band'), (v) => (allCurves = v === 'all')}
+                options={[
+                  { value: 'band', label: 'Band' },
+                  { value: 'all', label: 'All curves' },
+                ]}
+              />
+            {/if}
+          {/snippet}
           {#if ev}
             <PrCurves
               classes={m.classes}
               {ev}
               map50={m.metrics?.map50 ?? null}
               view="curves"
-              fill={!narrow.current}
+              bind:allCurves
+              modeInHeader
               bind:selected={prSelected}
               bind:hovered={prHovered}
               onback={backTo !== null ? backToClasses : undefined}
@@ -399,6 +450,7 @@
 
       <aside class="rail" class:off={!showing('details')} aria-label="Model details">
         {#snippet detailList(two: boolean)}
+          {@const here = measuredLatency(tp.data, m.arch, m.imgsz)}
           <dl class="details" class:two id="model-details">
             <div class="kv">
               <dt>Architecture</dt>
@@ -466,10 +518,8 @@
               <div class="kv">
                 <dt>Started from</dt>
                 <dd>
-                  {#if lineage.kind === 'model'}
-                    <Ident value={context.data?.parent?.name ?? lineage.id} class="link" href={href(`/models/${encodeURIComponent(lineage.id)}`)} />
-                  {:else if lineage.kind === 'file'}
-                    <Ident value={lineage.label} title={lineage.path} />
+                  {#if lineage.kind !== 'scratch'}
+                    <Lineage origin={lineage} />
                   {:else}
                     <span class="muted">From scratch</span>
                   {/if}
@@ -484,14 +534,26 @@
               <dt>Created</dt>
               <dd>{date(m.created)}</dd>
             </div>
-            <!-- The architecture's number (docs/BENCHMARKS.md), never this model's timing: the label says whose it is,
-                 and the conditions sit beside the value. Last, apart from the facts about this model. -->
+            <!-- The architecture's number, never this model's own timing: measured on this server where it has
+                 predicted with the architecture at the model's size (its spread and count beside it), the reference
+                 (docs/BENCHMARKS.md) otherwise or under it. The label says whose it is; the conditions sit beside the
+                 value. Last, apart from the facts about this model. -->
             <div class="kv wide ref">
-              <dt>Architecture reference latency</dt>
-              <dd class="latency">
-                {#if latency(m) !== undefined}
+              <dt>{here ? 'Architecture latency on this server' : 'Architecture reference latency'}</dt>
+              {#if here}
+                <dd class="latency">
+                  <span class="num">{latencyMs(here.latency_ms)}</span>
+                  <span class="faint num">measured here · {latencyRange(here.latency_ms_low, here.latency_ms_high)} · {num(here.samples)} predictions · {m.imgsz} px · {here.precision}</span>
+                </dd>
+              {/if}
+              <dd class="latency" class:second={!!here}>
+                {#if here && latency(m) !== undefined}
+                  <span class="faint num">Reference {latency(m)!.toFixed(2)} ms · <Ident value={m.arch} /> · 640 px · RTX 4080 SUPER</span>
+                {:else if here}
+                  <span class="faint">No reference for <Ident value={m.arch} /> yet</span>
+                {:else if latency(m) !== undefined}
                   <span class="num">{latency(m)!.toFixed(2)} ms</span>
-                  <span class="faint"><Ident value={m.arch} /> · 640 px · RTX 4080 SUPER · end to end</span>
+                  <span class="faint"><Meta><Ident value={m.arch} /><span>640 px</span><span>RTX 4080 SUPER</span><span>end to end</span></Meta></span>
                 {:else}
                   <span class="faint">Not measured for <Ident value={m.arch} /> yet</span>
                 {/if}
@@ -500,15 +562,14 @@
           </dl>
         {/snippet}
         {#if phone.current}
-          <!-- Its own section on phones: the whole list, no fold. -->
-          <Panel title="Details" id="details">{@render detailList(true)}</Panel>
+          <!-- Its own section on phones: the whole list, no fold, and no title repeating the Details picker above it. -->
+          <Panel id="details">{@render detailList(true)}</Panel>
         {:else if narrow.current}
           <Panel pad="none" id="details">
             <button type="button" class="d-line" aria-expanded={detailsOpen} aria-controls="model-details" onclick={() => (detailsOpen = !detailsOpen)}>
-              <span class="d-sum num truncate">
-                <Ident value={m.arch} /><span class="sep" aria-hidden="true">·</span>{m.imgsz} px<span class="sep" aria-hidden="true">·</span
-                >{num(m.flops_g, 1)} GFLOPs<span class="sep" aria-hidden="true">·</span>{bytes(m.bytes, prefs.units)}
-              </span>
+              <span class="d-sum num"
+                ><Meta line><Ident value={m.arch} /><span>{m.imgsz} px</span><span>{num(m.flops_g, 1)} GFLOPs</span><span>{bytes(m.bytes, prefs.units)}</span></Meta></span
+              >
               <span class="d-verb">Details <ChevronRight size={14} aria-hidden="true" /></span>
             </button>
             {#if detailsOpen}<div class="d-body">{@render detailList(true)}</div>{/if}
@@ -566,7 +627,7 @@
           </div>
         {:else if cm}
           {#if phone.current}
-            <button type="button" class="to-list" onclick={closeMatrix}><ArrowLeft size={14} aria-hidden="true" />Confusions and misses</button>
+            <button type="button" class="to-list" onclick={closeMatrix}><ArrowLeft size={14} aria-hidden="true" />Back to lists</button>
           {/if}
           <!-- The matrix at its own size (cells up to 48 px) with a sticky rail beside it taking the rest of the width:
                what goes wrong most, ranked (each line shows its cell), and how to read the matrix. With under 300 px
@@ -631,6 +692,7 @@
           <Skeleton h="300px" />
         {/if}
       </Panel>
+    </div>
     </div>
   </Page>
   <ExportDialog model={m} bind:open={exportOpen} />
@@ -795,7 +857,8 @@
     display: grid;
     grid-template-rows: 16px 28px;
     gap: 2px;
-    padding: var(--space-2) var(--space-3);
+    /* The phone panels' one 16 px inset, so labels line up with the sections' titles and bodies below. */
+    padding: var(--space-2) var(--space-4);
     background: var(--bg-panel);
     min-width: 0;
   }
@@ -905,14 +968,27 @@
   .to-list:hover {
     color: var(--text-primary);
   }
-  /* Curves (8) and Details (4) in one row, stretched to one height (DESIGN_DIRECTION §2.2); the per-class table under
-     both. Each column's single panel fills its grid cell. */
+  /* One rule at every class count, decided by structure, not by stretching: the curves (8) at their fixed plot height,
+     the per-class table (their legend) under them in the same column, and Details (4) a sticky properties rail beside
+     both (DESIGN_DIRECTION §2.2, as on Linear's issue view). No panel is stretched to its neighbour, so the plot never
+     grows to a long rail and no frame holds empty space. */
   .detail {
     display: grid;
     grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
-    grid-template-areas: 'pr rail' 'cls cls';
+    grid-template-areas: 'pr rail' 'cls rail';
+    align-items: start;
     gap: var(--space-4);
   }
+  @media (min-width: 1024px) {
+    .detail {
+      grid-template-rows: auto 1fr;
+    }
+    .rail {
+      position: sticky;
+      top: calc(var(--size-topbar) + var(--space-4));
+    }
+  }
+
   .main-col {
     grid-area: pr;
   }
@@ -943,20 +1019,23 @@
   .off {
     display: none;
   }
-  /* As on the run page: full width, just under the top bar, segments sharing the width. */
+  /* As on the run page: full width, just under the top bar, the tabs sharing the width. */
   .phone-pick {
     position: sticky;
-    top: calc(var(--size-topbar) + var(--space-2));
+    top: var(--size-topbar);
     z-index: var(--z-sticky);
-    margin-bottom: calc(-1 * var(--space-1));
+    margin-top: calc(-1 * var(--space-2));
+    background: var(--bg-app);
   }
-  .phone-pick :global(.seg) {
-    display: flex;
-    width: 100%;
-  }
-  .phone-pick :global(.seg > *) {
+  .phone-pick :global([role='tab']) {
     flex: 1;
     justify-content: center;
+  }
+  .parts {
+    display: flex;
+    flex-direction: column;
+    gap: inherit;
+    min-width: 0;
   }
   .sk {
     display: grid;
@@ -964,8 +1043,9 @@
     padding: 0 var(--space-4) var(--space-4);
   }
   /* The matrix takes the width its cells want (up to 48 px each); the rail follows 32 px after it and takes the rest,
-     sticking under the top bar while a tall matrix scrolls past. Where under 300 px would be left beside the matrix
-     (many classes at the laptop tier, phones), the rail wraps under it at full width instead of squeezing the cells. */
+     sticking under the top bar while a tall matrix scrolls past. Decided by the width left, never by class count: the
+     lists sit beside the matrix whenever their 280 px fits (a pair, its counts and its share on one line), and only
+     wrap under it at full width where it does not (many classes at the laptop tier, phones). */
   .cm-layout {
     display: flex;
     flex-wrap: wrap;
@@ -978,7 +1058,8 @@
     max-width: 100%;
   }
   .cm-rail {
-    flex: 1 1 300px;
+    flex: 1 1 280px;
+
     position: sticky;
     top: calc(var(--size-topbar) + var(--space-4));
     min-width: 0;
@@ -1168,10 +1249,6 @@
   .d-sum :global(.ident) {
     color: var(--text-primary);
   }
-  .sep {
-    margin-inline: var(--space-2);
-    color: var(--text-tertiary);
-  }
   .d-verb {
     display: inline-flex;
     align-items: center;
@@ -1219,6 +1296,9 @@
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
   }
+  .latency.second {
+    margin-top: 2px;
+  }
   .classes {
     display: flex;
     flex-wrap: wrap;
@@ -1256,6 +1336,17 @@
     }
   }
   @media (max-width: 767px) {
+    /* One section at a time behind the picker: no named rows, so the hidden sections leave no empty tracks or gaps
+       and every section starts 12 px under the picker (as on Run; the shoot's QA checks it). */
+    .detail {
+      grid-template-areas: none;
+      gap: 0;
+    }
+    .main-col,
+    .rail,
+    .cls-part {
+      grid-area: auto;
+    }
     /* "View curve" and "Back to Classes" land the curves panel under the top bar and the section picker. */
     .main-col :global(#pr) {
       scroll-margin-top: calc(var(--size-topbar) + var(--space-16));
