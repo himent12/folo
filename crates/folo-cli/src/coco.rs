@@ -13,8 +13,11 @@ use crate::output::{CliError, ExitCode};
 /// The ground truth of `split` of the COCO dataset at `data`, image paths resolved like the loader's.
 pub fn ground_truth(data: &str, split: Split) -> Result<CocoGroundTruth, CliError> {
     folo_data::open_coco_ground_truth(data, split).map_err(|e| match e {
-        folo_data::DataError::Format(m) => CliError::new(ExitCode::Usage, "usage", format!("--coco: {m}"))
-            .hint("pass a COCO folder (annotations/instances_<split>.json) or the split's instances JSON"),
+        folo_data::DataError::Format(m) => CliError::new(ExitCode::Usage, "usage", format!("--coco: {m}")).hint(
+            format!(
+                "--coco and --save-json need COCO annotations: pass a COCO folder (annotations/instances_<split>.json)                  or the split's instances JSON; `folo dataset convert {data} <out> --to coco` writes one from a YOLO                  dataset"
+            ),
+        ),
         e => CliError::new(ExitCode::Runtime, "invalid_dataset", e.to_string()),
     })
 }

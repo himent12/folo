@@ -71,6 +71,7 @@ export const NAV: NavGroup[] = [
       { src: 'docs/BOAT.md', label: 'boat.dev sandboxes' },
       { src: 'docs/DOGFOOD-1.md', label: 'Dogfood report 1' },
       { src: 'docs/DOGFOOD-2.md', label: 'Dogfood report 2' },
+      { src: 'docs/DOGFOOD-3.md', label: 'Dogfood report 3' },
     ],
   },
 ];

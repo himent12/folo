@@ -415,6 +415,7 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
     "device": "gpu:0" }
   ```
   `conf` and `iou` must be in `0..=1`, `max_det >= 1`. Uploads up to 64 MiB; JPEG, PNG, BMP and WebP are accepted.
+  `timing` values (here, in `folo predict --json` and in MCP) are milliseconds rounded to 0.1 µs (4 decimals).
   Boxes only use the model's classes: on a dataset image, ground-truth classes the model does not know (by name) are
   never predicted.
   Real mode runs folo-vision's `Predictor` (docs/MODEL.md §9: EMA weights, fused, letterboxed `rect` at the model's
@@ -499,8 +500,11 @@ counts all of them:
 - **Inference**: every `/api/predict` call's `timing` (`total_ms`, image decode included, and `inference_ms`),
   except a model's first after it is loaded and calls that overlap a run (one queued or training when the call
   starts or ends, or the worker taking up or letting go of a run during it).
-- **ETA of running runs**: `Run.eta_s` (and `Step.eta_s`) is the run's own measured rate: the batches left at the
-  run's mean batch time, loader waits included, plus the validations left at their mean.
+- **ETA of running runs**: `Run.eta_s` (and `Step.eta_s`) is the run's own measured rate, per mosaic phase: the
+  batches left in mosaic epochs at the run's mean mosaic batch time, loader waits included; those in close-mosaic
+  epochs at their own mean once they have started, before that at the mosaic batches' step time without the loader
+  waits (without mosaic the loader keeps up); plus the validations left at their mean. On R6 (1080p JPEGs) a mosaic
+  epoch of folo-n took 24 s and a close-mosaic one 10 s, so one rate for both is off by up to 2x.
 
 The mock (`folo serve --mock`) has measured rows on its GPU for folo-n and folo-s at 640 (f32, from its runs), a
 folo-n 320 px amp probe and folo-n 640 predictions; everything else is the reference, so both sources show. Its

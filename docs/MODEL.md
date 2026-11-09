@@ -865,6 +865,13 @@ Padding is split `left = floor(dw / 2)`, `right = dw − left` (same for top/bot
 pad as §8.6. Predicted boxes map back with the per-axis ratios, `x = (x' − left) · w0 / nw` and
 `y = (y' − top) · h0 / nh`, then are clipped to `[0, w0] × [0, h0]`.
 
+The resize (`folo_data::resize`, used by training, `val`, `predict`, the server and the browser) aligns pixel
+centres (`src = (dst + 0.5) · scale − 0.5`) with 11-bit fixed-point weights, and when an axis shrinks by 2× or more
+it first averages `fx × fy` blocks, `fx = floor(w0 / nw)` and `fy = floor(h0 / nh)` (an integer box filter), then
+resamples bilinearly. So a 1920×1080 frame at 640 is an exact 3×3 block average. Another runtime fed by an ONNX
+export should resize the same way: PIL's antialiased `BILINEAR` gives the same boxes on R6 frames but scores up to
+0.15 apart, and OpenCV's `INTER_LINEAR` (no prefilter) aliases on large reductions.
+
 ### 9.3 Post-processing (NMS)
 | | predict | val |
 |---|---|---|

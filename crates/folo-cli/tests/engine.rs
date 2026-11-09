@@ -130,7 +130,14 @@ fn train_val_predict_export_with_json() {
         }
         assert!(PathBuf::from(p["saved"].as_str().unwrap()).is_file());
     }
-    assert_eq!(lines.last().unwrap()["event"], "done");
+    let done = lines.last().unwrap();
+    assert_eq!(done["event"], "done");
+    // Timings are rounded to 0.1 µs, so they print with at most 4 decimals (no f64 noise).
+    let timings = preds.iter().map(|p| &p["timing"]).chain([&done["mean_timing"]]);
+    for (k, v) in timings.flat_map(|t| t.as_object().unwrap()) {
+        let decimals = v.to_string().split_once('.').map_or(0, |(_, d)| d.len());
+        assert!(v.as_f64().unwrap() >= 0.0 && decimals <= 4, "{k}: {v}");
+    }
     // --save never overwrites a source, and same-named sources get distinct outputs.
     let (code, lines, _) =
         folo(&["predict", "--json", "--model", s(&best), s(&images), "--save", s(&images)]);

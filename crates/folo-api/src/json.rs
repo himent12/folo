@@ -52,10 +52,43 @@ pub fn path(p: impl AsRef<Path>) -> String {
     if cfg!(windows) { s.replace('\\', "/") } else { s }
 }
 
+/// A duration in milliseconds as FOLO reports it: rounded to 0.1 µs, so a sum of stage times reads `10.5163` rather
+/// than `10.516300000000001`. Timers are not that precise anyway.
+pub fn round_ms(ms: f64) -> f64 {
+    if ms.is_finite() { (ms * 1e4).round() / 1e4 } else { ms }
+}
+
+/// `#[serde(serialize_with = ...)]` for millisecond fields: [`round_ms`].
+pub fn serialize_ms<S: serde::Serializer>(ms: &f64, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_f64(round_ms(*ms))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn milliseconds_print_without_f64_noise() {
+        assert_eq!(round_ms(10.516300000000001), 10.5163);
+        assert_eq!(round_ms(0.6174000000000001), 0.6174);
+        assert_eq!(round_ms(81.48469999999999), 81.4847);
+        assert_eq!(round_ms(0.000_04), 0.0);
+        assert!(round_ms(f64::NAN).is_nan());
+        let t = crate::Timing {
+            preprocess_ms: 10.5163,
+            inference_ms: 3.3925,
+            postprocess_ms: 0.1 + 0.2,
+            total_ms: 0.0,
+        };
+        let t = crate::Timing { total_ms: t.preprocess_ms + t.inference_ms + t.postprocess_ms, ..t };
+        assert_eq!(
+            serde_json::to_string(&t).unwrap(),
+            r#"{"preprocess_ms":10.5163,"inference_ms":3.3925,"postprocess_ms":0.3,"total_ms":14.2088}"#
+        );
+        let v = crate::ValTiming { total_s: 0.4, per_image_ms: 4.3 * 3.0 };
+        assert_eq!(serde_json::to_string(&v).unwrap(), r#"{"total_s":0.4,"per_image_ms":12.9}"#);
+    }
 
     #[test]
     fn floats_lose_their_f32_noise() {
