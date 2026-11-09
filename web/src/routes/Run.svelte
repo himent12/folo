@@ -164,7 +164,7 @@
          rail. -->
     <div class="sk-metrics">
       <div class="sk-strip">
-        <div class="sk-cell sk-epoch"><Skeleton w="40px" h="12px" /><Skeleton w="88px" h="32px" /><Skeleton h="4px" /><Skeleton w="64%" h="12px" /></div>
+        <div class="sk-cell sk-epoch"><Skeleton w="88px" h="32px" /><Skeleton h="4px" /><Skeleton w="160px" h="12px" /></div>
         <div class="sk-tabs">
           {#each [0, 1, 2, 3, 4, 5] as i (i)}<div class="sk-cell"><Skeleton w="56%" h="12px" /><Skeleton w="48%" h="24px" /><Skeleton w="68%" h="12px" /></div>{/each}
         </div>
@@ -320,7 +320,7 @@
   }
   .sk-strip {
     display: grid;
-    grid-template-columns: 240px minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr);
     border-bottom: 1px solid var(--line-subtle);
   }
   .sk-tabs {
@@ -336,8 +336,17 @@
     padding: var(--space-4);
     border-left: 1px solid var(--line-subtle);
   }
+  /* The epoch row over the tabs, at every width. */
   .sk-epoch {
-    grid-template-rows: 16px 40px auto 16px;
+    grid-template-columns: 88px minmax(0, 1fr) 160px;
+    grid-template-rows: 32px;
+    align-items: center;
+    gap: var(--space-4);
+    padding: var(--space-3) var(--space-4);
+    border-left: 0;
+    border-bottom: 1px solid var(--line-subtle);
+  }
+  .sk-tabs .sk-cell:first-child {
     border-left: 0;
   }
   .sk-chart {
@@ -417,27 +426,10 @@
     justify-content: space-between;
   }
   @media (max-width: 1199px) {
-    .sk-strip {
-      grid-template-columns: minmax(0, 1fr);
-    }
-    .sk-epoch {
-      grid-template-columns: 88px minmax(0, 1fr) 160px;
-      grid-template-rows: 32px;
-      align-items: center;
-      gap: var(--space-4);
-      padding: var(--space-3) var(--space-4);
-      border-bottom: 1px solid var(--line-subtle);
-    }
-    .sk-epoch > :global(:first-child) {
-      display: none;
-    }
     .sk-tabs .sk-cell {
       grid-template-rows: 16px 32px 16px;
       gap: var(--space-1);
       padding: var(--space-3) var(--space-4);
-    }
-    .sk-tabs .sk-cell:first-child {
-      border-left: 0;
     }
     .sk-tiles :global(.sk-tile:nth-child(9)) {
       display: block;

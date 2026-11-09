@@ -192,7 +192,7 @@
       grid-column: 1 / -1;
     }
     .stack .c-acts > :global(.btn:first-child) {
-      --h: var(--control-lg);
+      --h: var(--control-xl);
       flex: 1 0 100%;
       font-size: var(--type-base-size);
     }
