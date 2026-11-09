@@ -164,11 +164,14 @@ impl Container {
         let mut f = f.take(8);
         f.read_to_end(&mut prefix).map_err(|e| Error::io(path, e))?;
         if let Ok(len) = <[u8; 8]>::try_from(prefix.as_slice()) {
-            // At most MAX_HEADER more bytes: a larger N is refused by `parse_header` without reading it.
-            let n = u64::from_le_bytes(len).min(MAX_HEADER).min(file_len.saturating_sub(8));
-            f.set_limit(n);
-            prefix.reserve(n as usize);
-            f.read_to_end(&mut prefix).map_err(|e| Error::io(path, e))?;
+            // An N over the limit or past the end of the file is refused by `parse_header` without reading or
+            // allocating for it.
+            let n = u64::from_le_bytes(len);
+            if n <= MAX_HEADER && n <= file_len.saturating_sub(8) {
+                f.set_limit(n);
+                prefix.reserve(n as usize);
+                f.read_to_end(&mut prefix).map_err(|e| Error::io(path, e))?;
+            }
         }
         Self::parse_header(&prefix, file_len)
     }

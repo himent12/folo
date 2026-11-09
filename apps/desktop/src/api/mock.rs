@@ -438,6 +438,11 @@ impl MockBackend {
             m.head = folo_api::Head::O2o;
             m.trained_with = Some(folo_api::TrainedWith { amp: true, imgsz: 640, epochs: 120 });
         }
+        // shapes-n-f16 is the fused f16 export of shapes-n-best.
+        if let Some(m) = models.iter_mut().find(|m| m.id == "m_31ab") {
+            m.precision = Some(folo_api::ModelPrecision::F16);
+            m.fused = Some(true);
+        }
 
         let cfg = |name: &str, ds: &str, arch: &str, epochs, batch, imgsz, device: &str, lr0| TrainConfig {
             name: name.into(),
