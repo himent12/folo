@@ -13,7 +13,7 @@ export interface TabHistory {
   /** The hashes of the entries, oldest first, and which one the tab is on. */
   hashes(): string[];
   at(): number;
-  /** Lets the moves under way happen. */
+  /** Lets the moves under way happen, and the ones they cause in turn. */
   settle(): Promise<void>;
 }
 
@@ -26,6 +26,8 @@ export function tabHistory(before: string[] = []): TabHistory {
     { url: location.href, state: history.state },
   ];
   let at = before.length;
+  /** Traversals asked for that have not happened yet. */
+  let moving = 0;
 
   const add = (state: unknown, url: string | URL | null | undefined) => {
     push(state, '', url);
@@ -40,7 +42,9 @@ export function tabHistory(before: string[] = []): TabHistory {
   vi.spyOn(history, 'go').mockImplementation((delta = 0) => {
     const to = at + delta;
     if (to < 0 || to >= entries.length || delta === 0) return;
+    moving++;
     setTimeout(() => {
+      moving--;
       const before = location.hash;
       const entry = entries[(at = to)]!;
       replace(entry.state, '', entry.url);
@@ -58,6 +62,9 @@ export function tabHistory(before: string[] = []): TabHistory {
     forward: () => history.go(1),
     hashes: () => entries.map((e) => new URL(e.url).hash),
     at: () => at,
-    settle: () => new Promise((done) => setTimeout(done, 20)),
+    async settle() {
+      // Until a turn of the event loop passes with nothing left to move (timers are coarse: no fixed wait will do).
+      for (let quiet = 0; quiet < 2; quiet = moving ? 0 : quiet + 1) await new Promise((done) => setTimeout(done, 0));
+    },
   };
 }

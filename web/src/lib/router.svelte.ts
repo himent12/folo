@@ -132,7 +132,7 @@ class Router {
   /** The place of the entry the app is on. */
   #pos = 0;
   /** A traversal of the router's own is under way, to the entry at `pos`: back to the page that holds a navigation, or `on` to the held one. */
-  #travelling: { pos: number; on: boolean; timer: ReturnType<typeof setTimeout> } | null = null;
+  #travelling: { pos: number; on: boolean; timer: ReturnType<typeof setTimeout>; then: (() => void)[] } | null = null;
 
   constructor() {
     if (typeof window === 'undefined') return;
@@ -154,7 +154,17 @@ class Router {
   go(path: string, opts: { replace?: boolean } = {}) {
     const hash = `#${path}`;
     if (!opts.replace && location.hash === hash) return;
-    if (this.#allowed(parse(hash), () => this.#navigate(hash, opts.replace))) this.#navigate(hash, opts.replace);
+    const navigate = () => this.#settled(() => this.#navigate(hash, opts.replace));
+    if (this.#allowed(parse(hash), navigate)) navigate();
+  }
+
+  /**
+   * Runs `step` now, or, while a traversal of the router's own is under way, once it has arrived: a navigation made in
+   * between (the page letting go at once, a `go`) would be undone by that arrival. Steps keep their order.
+   */
+  #settled(step: () => void) {
+    if (this.#travelling) this.#travelling.then.push(step);
+    else step();
   }
 
   #allowed(to: Route, proceed: () => void): boolean {
@@ -194,6 +204,7 @@ class Router {
       this.#arrived();
       this.#pos = travel.pos;
       if (travel.on) this.route = parse(hash);
+      travel.then.forEach((step) => this.#settled(step));
       return;
     }
     // An entry without a place is taken for a new one, right after this one (it can also be one from before the
@@ -201,11 +212,8 @@ class Router {
     const pos = known ?? this.#pos + 1;
     if (pos === this.#pos && hash === hashOf(this.route)) return;
     const from = this.#pos;
-    const proceed = () => {
-      // A new entry is made again (the held one was left behind); an old one is travelled to.
-      if (known === null) this.#navigate(hash);
-      else this.#travel(pos, true);
-    };
+    // A new entry is made again (the held one was left behind); an old one is travelled to.
+    const proceed = () => this.#settled(() => (known === null ? this.#navigate(hash) : this.#travel(pos, true)));
     if (this.#allowed(parse(hash), proceed)) {
       if (known === null) this.#stamp(pos);
       this.#pos = pos;
@@ -235,8 +243,10 @@ class Router {
         this.#pos = pos;
         history.replaceState({ pos }, '', page);
       }
+      then.forEach((step) => this.#settled(step));
     }, TRAVERSAL_MS);
-    this.#travelling = { pos, on, timer };
+    const then: (() => void)[] = [];
+    this.#travelling = { pos, on, timer, then };
     history.go(pos - this.#pos);
   }
 

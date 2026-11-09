@@ -109,6 +109,35 @@ describe('router guards', () => {
     expect(tab.at()).toBe(0);
   });
 
+  it('goes through with a held Back that is let go before the tab is back on the page', async () => {
+    // The page answers at once (nothing to ask): the way back to it is still under way when it lets go.
+    let asked = 0;
+    remove = router.guard((_to, proceed) => {
+      if (asked++) return true;
+      queueMicrotask(proceed);
+      return false;
+    });
+    tab.back();
+    await tab.settle();
+    expect(router.route.path).toBe('/datasets');
+    expect(location.hash).toBe('#/datasets');
+    expect(tab.hashes()).toEqual(['#/', '#/datasets', `#${JOB}?image=3`]);
+    expect(tab.at()).toBe(1);
+
+    // And a `go` made in that moment lands after it, not under it.
+    asked = 0;
+    remove();
+    remove = router.guard((_to, proceed) => {
+      if (asked++) return true;
+      queueMicrotask(() => (proceed(), router.go('/models')));
+      return false;
+    });
+    tab.back();
+    await tab.settle();
+    expect(router.route.path).toBe('/models');
+    expect(location.hash).toBe('#/models');
+  });
+
   it('holds Back to an entry from before the app kept places, wherever that entry is', async () => {
     // A tab whose first entry has no place (the app was updated under it), then the job's page.
     vi.restoreAllMocks();
