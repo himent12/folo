@@ -2594,7 +2594,7 @@ impl FoloApp {
                             .gap(px(5.))
                             .child(dot(t.accent_fill(), 6., true, "nav-live"))
                             .child(
-                                text(ty::XS, t.accent_text)
+                                text(ty::SM, t.accent_text)
                                     .tnum()
                                     .font_weight(FontWeight::MEDIUM)
                                     .child(format!("{n} live")),
@@ -2647,7 +2647,7 @@ impl FoloApp {
                     .child(text(ty::SM, t.text_primary).w(px(140.)).ellipsis().child(r.name.clone()))
                     .child(div().flex_1())
                     .child(
-                        text(ty::XS, t.text_secondary).tnum().child(format!("{:.0}%", r.progress() * 100.0)),
+                        text(ty::SM, t.text_secondary).tnum().child(format!("{:.0}%", r.progress() * 100.0)),
                     ),
             )
             .child(progress(&t, r.progress(), t.accent_fill(), 2.))
@@ -2677,7 +2677,7 @@ impl FoloApp {
             .active(|s| s.bg(t.bg_active))
             .tooltip(crate::controls::tip(format!("{} · epoch {} / {}", r.name, r.epoch, r.epochs), None))
             .child(dot(t.accent_fill(), 6., true, "rail"))
-            .child(text(ty::MICRO, t.text_secondary).tnum().child(format!("{:.0}%", r.progress() * 100.)));
+            .child(text(ty::SM, t.text_secondary).tnum().child(format!("{:.0}%", r.progress() * 100.)));
         self.bind(
             el,
             "live-rail",
@@ -2732,7 +2732,7 @@ impl FoloApp {
             })
             .when(!compact, |d| {
                 d.child(div().size(px(6.)).rounded_full().bg(color))
-                    .child(text(ty::XS, t.text_tertiary).ellipsis().child(label))
+                    .child(text(ty::SM, t.text_tertiary).ellipsis().child(label))
             });
         self.bind(el, "connection", 0., window, cx, act(|this, w, cx| this.navigate(Route::Settings, w, cx)))
     }

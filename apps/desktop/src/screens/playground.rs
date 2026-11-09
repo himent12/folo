@@ -205,7 +205,7 @@ impl FoloApp {
                                     .flex()
                                     .items_center()
                                     .gap(px(6.))
-                                    .child(text(ty::XS, t.text_tertiary).child("or press"))
+                                    .child(text(ty::SM, t.text_tertiary).child("or press"))
                                     .child(shortcut(&t, &["Ctrl", "O"])),
                             )
                         })),
@@ -382,10 +382,10 @@ impl FoloApp {
                         )
                     })
                     .when(show_size, |d| {
-                        d.child(text(ty::XS, t.text_tertiary).flex_none().tnum().child(size_text.clone()))
+                        d.child(text(ty::SM, t.text_tertiary).flex_none().tnum().child(size_text.clone()))
                     })
                     .child(div().flex_1().min_w(px(8.)))
-                    .when(loading, |d| d.child(text(ty::XS, t.text_tertiary).flex_none().child("Detecting…")))
+                    .when(loading, |d| d.child(text(ty::SM, t.text_tertiary).flex_none().child("Detecting…")))
                     // The latency always reads here, beside the count (the rail's breakdown is
                     // below the fold at most window sizes).
                     // The built-in demo's number is simulated, and says so wherever it shows.
@@ -395,7 +395,7 @@ impl FoloApp {
                         // a narrow toolbar's spacer never reads as a missing divider.
                         d.child(div().flex_none().w(px(1.)).h(px(16.)).bg(t.line_subtle))
                             .child(
-                                text(ty::XS, t.text_secondary)
+                                text(ty::SM, t.text_secondary)
                                     .flex_none()
                                     .tnum()
                                     .child(latency_text(ms, sim)),
@@ -404,7 +404,7 @@ impl FoloApp {
                     })
                     .when_some(count, |d, n| {
                         d.child(div().flex_none().flex().items_center().gap(px(6.)).child(
-                            text(ty::XS, t.text_secondary).tnum().child(format!(
+                            text(ty::SM, t.text_secondary).tnum().child(format!(
                                 "{n} {} ≥ {:.2}",
                                 if n == 1 { "detection" } else { "detections" },
                                 self.play_conf
@@ -644,7 +644,7 @@ impl FoloApp {
                     // What's running, without opening the menu: architecture, input size and head.
                     .when_some(model.as_ref(), |d, m| {
                         // Identity and storage; the head is the NMS row's to say (once).
-                        d.child(text(ty::XS, t.text_tertiary).child(format!(
+                        d.child(text(ty::SM, t.text_tertiary).child(format!(
                             "{} · {} px{}",
                             m.arch.as_str(),
                             m.imgsz,
@@ -653,7 +653,7 @@ impl FoloApp {
                     })
                     .when(no_models, |d| {
                         d.child(
-                            text(ty::XS, t.text_tertiary)
+                            text(ty::SM, t.text_tertiary)
                                 .child("No models yet. Finished runs add their best weights here."),
                         )
                     }),
@@ -670,7 +670,7 @@ impl FoloApp {
                         let row = div().h(px(20.)).flex().justify_end().items_center();
                         if at {
                             return d.child(row.child(
-                                text(ty::XS, t.text_tertiary).child(format!("At best F1 ({})", fmt_conf(c))),
+                                text(ty::SM, t.text_tertiary).child(format!("At best F1 ({})", fmt_conf(c))),
                             ));
                         }
                         let link = div()
@@ -714,7 +714,7 @@ impl FoloApp {
                                             .child("NMS"),
                                     )
                                     .child(
-                                        text(ty::XS, t.text_tertiary).child("Not used · end-to-end model"),
+                                        text(ty::SM, t.text_tertiary).child("Not used · end-to-end model"),
                                     ),
                             )
                         } else {
@@ -775,7 +775,7 @@ impl FoloApp {
                             // Size tells apart two boxes of the same class.
                             .child(
                                 // On the active row's fill, tertiary falls under AA: secondary there.
-                                text(ty::XS, if hot { t.text_secondary } else { t.text_tertiary })
+                                text(ty::SM, if hot { t.text_secondary } else { t.text_tertiary })
                                     .tnum()
                                     .w(px(52.))
                                     .flex_none()
@@ -854,7 +854,7 @@ impl FoloApp {
                                             .flex_none()
                                             .child(if simulated { "Simulated latency" } else { "Latency" }),
                                     )
-                                    .child(text(ty::XS, t.text_tertiary).tnum().min_w_0().ellipsis().child(
+                                    .child(text(ty::SM, t.text_tertiary).tnum().min_w_0().ellipsis().child(
                                         // The demo has no device of its own to name.
                                         if simulated {
                                             "one image".to_string()
@@ -866,7 +866,7 @@ impl FoloApp {
                                         },
                                     )),
                             )
-                            .child(metric(&t, format!("{:.1}", p.timing.total_ms), "ms", ty::LG, ty::XS)),
+                            .child(metric(&t, format!("{:.1}", p.timing.total_ms), "ms", ty::LG, ty::SM)),
                     )
                     .child(
                         div()
@@ -916,8 +916,8 @@ impl FoloApp {
                                             d.border_1().border_color(t.text_tertiary)
                                         }),
                                     )
-                                    .child(text(ty::XS, t.text_tertiary).child(n))
-                                    .child(text(ty::XS, t.text_secondary).tnum().child(format!("{v:.1} ms")))
+                                    .child(text(ty::SM, t.text_tertiary).child(n))
+                                    .child(text(ty::SM, t.text_secondary).tnum().child(format!("{v:.1} ms")))
                             }),
                         ),
                     );
@@ -928,7 +928,7 @@ impl FoloApp {
                     .flex_none()
                     // While a rerun (an IoU change) is out, the rows are the previous answer: say so.
                     .child(panel_header(&t, "Detections").h(px(32.)).child(
-                        text(ty::XS, t.text_tertiary).tnum().child(if self.play_pred_pending {
+                        text(ty::SM, t.text_tertiary).tnum().child(if self.play_pred_pending {
                             "Updating…".to_string()
                         // The total latency reads in the toolbar at every size; the count stays a count.
                         } else if hidden > 0 {
@@ -1001,7 +1001,7 @@ impl FoloApp {
                     .gap(px(6.))
                     .child(text(ty::SM, t.danger_text).whitespace_normal().child(e.message.clone()))
                     .when_some(e.hint.clone(), |d, h| {
-                        d.child(text(ty::XS, t.text_tertiary).whitespace_normal().child(h))
+                        d.child(text(ty::SM, t.text_tertiary).whitespace_normal().child(h))
                     })
                     // Retry (same image, model and thresholds), with the CPU beside it after an OOM.
                     .child(div().pt(px(4.)).flex().gap(px(8.)).child(retry).children(to_cpu))
@@ -1012,7 +1012,7 @@ impl FoloApp {
                 .child(
                     panel_header(&t, "Detections")
                         .h(px(32.))
-                        .child(text(ty::XS, t.text_tertiary).child("Detecting…")),
+                        .child(text(ty::SM, t.text_tertiary).child("Detecting…")),
                 )
                 .child(loading_rows(&t, "det", 4))
                 .into_any_element(),
@@ -1249,7 +1249,7 @@ impl FoloApp {
             .child(control)
             // Wraps rather than truncating: GPUI only ellipsizes against a known width, so a
             // w_full note would hard-clip mid-word in a narrow rail.
-            .child(text(ty::XS, t.text_tertiary).w_full().whitespace_normal().child(note))
+            .child(text(ty::SM, t.text_tertiary).w_full().whitespace_normal().child(note))
             .into_any_element()
     }
 

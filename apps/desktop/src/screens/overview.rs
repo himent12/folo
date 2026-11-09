@@ -283,8 +283,8 @@ impl FoloApp {
                             .items_center()
                             .gap(px(5.))
                             .child(div().size(px(6.)).rounded_full().bg(t.accent_fill()))
-                            .child(text(ty::XS, t.text_secondary).child("best"))
-                            .child(text(ty::XS, t.text_primary).tnum().child(format!(
+                            .child(text(ty::SM, t.text_secondary).child("best"))
+                            .child(text(ty::SM, t.text_primary).tnum().child(format!(
                                 "{} @ {}",
                                 f3(b.map50_95),
                                 b.epoch
@@ -322,7 +322,7 @@ impl FoloApp {
                 .min_w_0()
                 .child(caption(&t, label))
                 .child(value)
-                .when_some(detail, |d, s| d.child(text(ty::XS, t.text_tertiary).tnum().child(s)))
+                .when_some(detail, |d, s| d.child(text(ty::SM, t.text_tertiary).tnum().child(s)))
         };
         // One row of four KPIs above a full-width chart: no column beside the chart to leave a
         // gap in, whatever the chart's height.
@@ -449,9 +449,9 @@ impl FoloApp {
                 .flex()
                 .items_center()
                 .gap(px(8.))
-                .child(text(ty::XS, t.text_tertiary).whitespace_nowrap().child(label))
+                .child(text(ty::SM, t.text_tertiary).whitespace_nowrap().child(label))
                 .child(div().w(px(48.)).child(progress(&t, frac, color, 3.)))
-                .child(text(ty::XS, t.text_secondary).tnum().whitespace_nowrap().child(value))
+                .child(text(ty::SM, t.text_secondary).tnum().whitespace_nowrap().child(value))
         };
         let mut row = div()
             .h(px(36.))
@@ -738,7 +738,7 @@ impl FoloApp {
                                 if r.status == crate::api::RunStatus::Queued {
                                     // The Runs table's phrase, so a queued run reads the same everywhere.
                                     return d.child(
-                                        text(ty::XS, t.text_tertiary)
+                                        text(ty::SM, t.text_tertiary)
                                             .whitespace_nowrap()
                                             .child(queue_text(r.queue_position)),
                                     );
@@ -754,7 +754,7 @@ impl FoloApp {
                                     d.child(div().flex_1().child(progress(&t, r.progress(), fill, 4.)))
                                 })
                                 .child(
-                                    text(ty::XS, t.text_secondary)
+                                    text(ty::SM, t.text_secondary)
                                         .tnum()
                                         .w(px(56.))
                                         .flex_none()
@@ -791,7 +791,7 @@ impl FoloApp {
                             .map_or(r.config.dataset_id.clone(), |d| d.name.clone());
                         let meta = |w: f32| {
                             div().w(px(w)).flex_none().child(meta_row(
-                                ty::XS,
+                                ty::SM,
                                 t.text_tertiary,
                                 r.config.arch.as_str(),
                                 e2e.then(|| e2e_tag(&t, format!("e2e-ovr-{}-{w}", r.id))),
@@ -843,7 +843,7 @@ impl FoloApp {
                             .when(created, |d| {
                                 d.child(
                                     div().w(px(when_w)).flex_none().flex().justify_end().child(
-                                        text(ty::XS, t.text_tertiary)
+                                        text(ty::SM, t.text_tertiary)
                                             .id(SharedString::from(format!("ov-rc-{}", r.id)))
                                             .when_some(created_at, |d, c| {
                                                 d.tooltip(crate::controls::tip(time::local_datetime(c), None))
@@ -1158,7 +1158,7 @@ impl FoloApp {
                         .justify_center()
                         .bg(if active { t.accent_fill() } else { t.bg_active })
                         .child(
-                            text(ty::XS, if active { t.accent_on } else { t.text_tertiary })
+                            text(ty::SM, if active { t.accent_on } else { t.text_tertiary })
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .child(n.to_string()),
                         ),
@@ -1404,7 +1404,7 @@ impl FoloApp {
             .cursor_pointer()
             .hover(|s| s.bg(t.bg_hover))
             .active(|s| s.bg(t.bg_active))
-            .child(text(ty::XS, t.text_secondary).child("View all"))
+            .child(text(ty::SM, t.text_secondary).child("View all"))
             .child(icon("icons/chevron-right.svg", 12., t.text_tertiary));
         self.bind(
             el,

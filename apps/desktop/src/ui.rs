@@ -73,12 +73,12 @@ pub fn text(s: TypeStep, color: Hsla) -> Div {
 /// A group heading (palette groups, form sections). Sentence case: GPUI has no letter-spacing, and
 /// untracked capitals look cramped next to sentence-case titles.
 pub fn overline(t: &Theme, label: &str) -> Div {
-    text(ty::XS, t.text_tertiary).font_weight(FontWeight::MEDIUM).child(label.to_string())
+    text(ty::SM, t.text_tertiary).font_weight(FontWeight::MEDIUM).child(label.to_string())
 }
 
 /// A metric or field label: `xs` medium, tertiary, in its own case.
 pub fn caption(t: &Theme, label: &str) -> Div {
-    text(ty::XS, t.text_tertiary).font_weight(FontWeight::MEDIUM).whitespace_nowrap().child(label.to_string())
+    text(ty::SM, t.text_tertiary).font_weight(FontWeight::MEDIUM).whitespace_nowrap().child(label.to_string())
 }
 
 /// Centred text (`.text_left()` to align it left) where `backticked` spans render as inline code:
@@ -269,7 +269,7 @@ pub fn inline_link(t: &Theme, label: impl Into<SharedString>) -> Div {
         .flex()
         .items_center()
         .gap(px(2.))
-        .child(text(ty::XS, t.text_secondary).child(label.into()))
+        .child(text(ty::SM, t.text_secondary).child(label.into()))
         .child(icon("icons/chevron-right.svg", 12., t.text_secondary))
 }
 
@@ -376,12 +376,12 @@ pub fn e2e_tag(t: &Theme, id: impl Into<SharedString>) -> gpui::Stateful<Div> {
         .px(px(4.))
         .rounded(px(crate::theme::radius::XS))
         .bg(t.bg_active)
-        .child(text(ty::XS, t.text_secondary).child("e2e"))
+        .child(text(ty::SM, t.text_secondary).child("e2e"))
 }
 
 pub fn badge(t: &Theme, label: impl Into<SharedString>, tone: Tone) -> Div {
     let (bg, fg, _) = tone.colors(t);
-    text(ty::XS, fg)
+    text(ty::SM, fg)
         .font_weight(FontWeight::MEDIUM)
         .h(px(20.))
         .px(px(6.))
@@ -410,7 +410,7 @@ pub fn status_dot(t: &Theme, s: RunStatus, id: &str) -> Div {
             dot(dotc, 6., s == RunStatus::Running, format!("sd-{id}")).into_any_element()
         })
         .child(
-            text(ty::XS, if s == RunStatus::Running { t.accent_text } else { fg })
+            text(ty::SM, if s == RunStatus::Running { t.accent_text } else { fg })
                 .whitespace_nowrap()
                 .child(s.label()),
         )
@@ -420,7 +420,7 @@ pub fn status_badge(t: &Theme, s: RunStatus, id: &str) -> Div {
     let tone = status_tone(s);
     let (_, _, dotc) = tone.colors(t);
     let (bg, fg, _) = tone.colors(t);
-    text(ty::XS, fg)
+    text(ty::SM, fg)
         .font_weight(FontWeight::MEDIUM)
         .h(px(20.))
         .pl(px(6.))
@@ -438,7 +438,7 @@ pub fn status_badge(t: &Theme, s: RunStatus, id: &str) -> Div {
 
 /// Keycap for shortcut hints.
 pub fn kbd(t: &Theme, key: impl Into<SharedString>) -> Div {
-    text(ty::XS, t.text_secondary)
+    text(ty::SM, t.text_secondary)
         .font_weight(FontWeight::MEDIUM)
         .h(px(18.))
         .min_w(px(18.))
@@ -526,7 +526,7 @@ pub fn stat_at(
 /// A KPI tile's first detail line, at the caption line's height, for a graphic (a progress or
 /// split bar) that stands in for text, so its tile's later lines stay on the strip's grid.
 pub fn detail_line(content: impl IntoElement) -> Div {
-    div().h(px(ty::XS.line)).w_full().flex().items_center().child(content)
+    div().h(px(ty::SM.line)).w_full().flex().items_center().child(content)
 }
 
 /// A duration as a metric: numbers at value size, units ("h", "m", "s") one step smaller.
@@ -665,8 +665,8 @@ pub fn legend_value(t: &Theme, name: &str, color: Hsla, dashed: bool, value: Opt
         .items_center()
         .gap(px(5.))
         .child(swatch)
-        .child(text(ty::XS, t.text_secondary).whitespace_nowrap().child(name.to_string()))
-        .when_some(value, |d, v| d.child(text(ty::XS, t.text_primary).tnum().whitespace_nowrap().child(v)))
+        .child(text(ty::SM, t.text_secondary).whitespace_nowrap().child(name.to_string()))
+        .when_some(value, |d, v| d.child(text(ty::SM, t.text_primary).tnum().whitespace_nowrap().child(v)))
 }
 
 /// A class swatch: a small square in the class colour.

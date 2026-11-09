@@ -55,7 +55,7 @@ impl Render for Tip {
                 .border_color(t.line_default)
                 .shadow(t.shadow_md())
                 .child(text(ty::SM, t.text_primary).max_w(px(280.)).child(self.0.clone()))
-                .when_some(self.1.clone(), |d, k| d.child(text(ty::XS, t.text_tertiary).child(k))),
+                .when_some(self.1.clone(), |d, k| d.child(text(ty::SM, t.text_tertiary).child(k))),
         )
     }
 }
@@ -210,7 +210,7 @@ impl FoloApp {
                         .border_1()
                         .border_color(t.line_default)
                         .shadow(t.shadow_lg())
-                        .child(text(ty::XS, t.text_secondary).whitespace_nowrap().child(reason)),
+                        .child(text(ty::SM, t.text_secondary).whitespace_nowrap().child(reason)),
                 )
             })
     }
@@ -266,7 +266,7 @@ impl FoloApp {
                 .flex_none()
                 .items_center()
                 .justify_center()
-                .child(text(ty::XS, t.text_tertiary).child("Fit"));
+                .child(text(ty::SM, t.text_tertiary).child("Fit"));
         }
         let tooltip = "Fit to the view (0)";
         let el = div()
@@ -282,7 +282,7 @@ impl FoloApp {
             .hover(move |s| s.bg(t.bg_hover))
             .active(move |s| s.bg(t.bg_active))
             .tooltip(tip(tooltip, None))
-            .child(text(ty::XS, t.text_secondary).tnum().child(format!("{zoom:.1}×")));
+            .child(text(ty::SM, t.text_secondary).tnum().child(format!("{zoom:.1}×")));
         let ring = self.ring(&self.fh(key.to_string(), cx), window);
         let el = el.when(ring, |d| d.child(focus_tip(&t, tooltip, tsize::CONTROL_MD)));
         self.bind(el, key, radius::MD, window, cx, action)
@@ -361,7 +361,7 @@ impl FoloApp {
                         .border_1()
                         .border_color(t.line_default)
                         .child(
-                            text(ty::XS, t.text_secondary)
+                            text(ty::SM, t.text_secondary)
                                 .child("← → inspect · Shift ×10 · Home / End · Esc clears"),
                         ),
                 )
@@ -752,7 +752,7 @@ impl FoloApp {
             )
             .when_some(count, |d, c| {
                 d.child(
-                    text(ty::XS, if on { t.text_secondary } else { t.text_tertiary }).tnum().child(int(c)),
+                    text(ty::SM, if on { t.text_secondary } else { t.text_tertiary }).tnum().child(int(c)),
                 )
             });
         self.bind(el, key, radius::SM, window, cx, action)
@@ -1249,7 +1249,7 @@ impl FoloApp {
                                     }))
                                     .child(text(ty::BASE, t.text_primary).flex_1().ellipsis().child(label))
                                     .when_some(detail, |d, s| {
-                                        d.child(text(ty::XS, t.text_tertiary).tnum().child(s))
+                                        d.child(text(ty::SM, t.text_tertiary).tnum().child(s))
                                     })
                                     .child(
                                         div().w(px(14.)).when(on, |d| {
@@ -1304,7 +1304,7 @@ pub fn focus_tip(t: &Theme, text_: impl Into<SharedString>, below: f32) -> Div {
                     .shadow(t.shadow_lg())
                     // Short tips stay on one line; long ones wrap at 320 px, not across the window.
                     .max_w(px(320.))
-                    .child(text(ty::XS, t.text_secondary).whitespace_normal().child(text_)),
+                    .child(text(ty::SM, t.text_secondary).whitespace_normal().child(text_)),
             ),
         )
         .with_priority(3),

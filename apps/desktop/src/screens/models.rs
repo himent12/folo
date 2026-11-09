@@ -181,7 +181,7 @@ impl FoloApp {
                                     cx.stop_propagation();
                                 }
                             }))
-                            .child(div().id(SharedString::from(format!("m-name-{}", m.id))).flex_1().min_w(px(200.)).when(crate::ui::may_overflow(&m.name, ty::SM.size, name_w), |d| d.tooltip(crate::controls::tip(m.name.clone(), None))).child(text(ty::SM, t.text_primary).font_weight(FontWeight::MEDIUM).w(px(name_w)).ellipsis().child(m.name.clone())).child(text(ty::XS, t.text_tertiary).w(px(name_w)).ellipsis().child(eval_on)))
+                            .child(div().id(SharedString::from(format!("m-name-{}", m.id))).flex_1().min_w(px(200.)).when(crate::ui::may_overflow(&m.name, ty::SM.size, name_w), |d| d.tooltip(crate::controls::tip(m.name.clone(), None))).child(text(ty::SM, t.text_primary).font_weight(FontWeight::MEDIUM).w(px(name_w)).ellipsis().child(m.name.clone())).child(text(ty::SM, t.text_tertiary).w(px(name_w)).ellipsis().child(eval_on)))
                             .child(div().w(px(150.)).flex_none().flex().items_center().gap(px(6.)).child(text(ty::SM, t.text_secondary).tnum().whitespace_nowrap().child(format!("{} · {} px", m.arch.as_str(), m.imgsz))).when(self.model_e2e(m), |d| d.child(e2e_tag(&t, format!("e2e-m-{}", m.id)))))
                             .when(wide, |d| d.child(text(ty::SM, t.text_tertiary).w(px(150.)).flex_none().ellipsis().child(run.trim_start_matches("from ").to_string())))
                             .child(num_cell(130., metrics.as_ref().map_or(text(ty::SM, t.text_tertiary).child("–"), |mm| text(ty::SM, t.text_primary).tnum().child(f3(mm.map50_95)))))
@@ -393,7 +393,7 @@ impl FoloApp {
                                 .tnum()
                                 .child(mm.as_ref().map_or("–".into(), |x| f3(x.map50_95))),
                         )
-                        .child(text(ty::XS, t.text_tertiary).whitespace_nowrap().ellipsis().child(
+                        .child(text(ty::SM, t.text_tertiary).whitespace_nowrap().ellipsis().child(
                             match &head_ds {
                                 Some((d, split)) => {
                                     format!("IoU 0.50–0.95 · {}", split_label(d, split, None))
@@ -408,7 +408,7 @@ impl FoloApp {
                 "mAP50",
                 mm.as_ref().map_or("–".into(), |x| f3(x.map50)),
                 "",
-                Some(text(ty::XS, t.text_tertiary).child("IoU 0.50")),
+                Some(text(ty::SM, t.text_tertiary).child("IoU 0.50")),
             )))
             .child(vline(&t))
             // The same pair and caption as the run page (ui::metric_pair, ui::pr_caption); a wider
@@ -431,14 +431,14 @@ impl FoloApp {
                             .pb(px(baseline_lift(ty::X3XL, ty::XL))),
                         ),
                     )
-                    .child(text(ty::XS, t.text_tertiary).ellipsis().child(op_point.clone())),
+                    .child(text(ty::SM, t.text_tertiary).ellipsis().child(op_point.clone())),
             ))
             .child(vline(&t))
             .child(tile(small(
                 "Parameters",
                 p,
                 pu,
-                Some(text(ty::XS, t.text_tertiary).tnum().child(format!("{:.1} GFLOPs", m.flops_g))),
+                Some(text(ty::SM, t.text_tertiary).tnum().child(format!("{:.1} GFLOPs", m.flops_g))),
             )))
             .child(vline(&t))
             .child(tile(small(
@@ -446,7 +446,7 @@ impl FoloApp {
                 b,
                 bu,
                 Some(
-                    text(ty::XS, t.text_tertiary)
+                    text(ty::SM, t.text_tertiary)
                         // The record's stored precision (as the header says), never a guess from size.
                         // The format; the stored precision is the subtitle's to say (once).
                         .child(".folo"),
@@ -643,7 +643,7 @@ impl FoloApp {
                             .child(
                                 text(ty::BASE, t.text_primary).font_weight(FontWeight::MEDIUM).child(label),
                             )
-                            .child(text(ty::XS, t.text_tertiary).tnum().child(detail))
+                            .child(text(ty::SM, t.text_tertiary).tnum().child(detail))
                             .into_any_element()
                     })),
             )
@@ -710,7 +710,7 @@ impl FoloApp {
             // Unsorted columns show a faint one, so they read as sortable before the first click.
             .when(right, |d| d.child(mark(on)))
             .child(
-                text(ty::XS, if on.is_some() { t.text_primary } else { t.text_tertiary })
+                text(ty::SM, if on.is_some() { t.text_primary } else { t.text_tertiary })
                     .font_weight(FontWeight::MEDIUM)
                     .whitespace_nowrap()
                     .child(label),
@@ -1084,11 +1084,11 @@ impl FoloApp {
                                     .flex_col()
                                     .gap(px(4.))
                                     .child(
-                                        text(ty::XS, t.text_tertiary)
+                                        text(ty::SM, t.text_tertiary)
                                             .whitespace_normal()
                                             .child("Dots: P and R at the best F1 threshold."),
                                     )
-                                    .child(text(ty::XS, t.text_tertiary).whitespace_normal().child(pr_hint)),
+                                    .child(text(ty::SM, t.text_tertiary).whitespace_normal().child(pr_hint)),
                             ),
                     ),
             )
@@ -1159,7 +1159,7 @@ impl FoloApp {
         let cols = self.cm_cols.clone();
         // A heading may use its whole cell less a 2 px gap to the next one (medium weight measures
         // ~4 % wider than the regular face `text_width` sets).
-        let wide = |window: &mut Window, s: &str| crate::charts::text_width(window, s, ty::XS.size) * 1.04;
+        let wide = |window: &mut Window, s: &str| crate::charts::text_width(window, s, ty::SM.size) * 1.04;
         // "Missed" is never shortened: when an even share can't hold it, it takes the width it needs
         // and the class columns share the rest.
         let missed_need = wide(window, "Missed") + px(4.);
@@ -1215,7 +1215,7 @@ impl FoloApp {
                         .justify_center()
                         .when(!fits, |d| d.tooltip(crate::controls::tip(l.clone(), None)))
                         .child(
-                            text(ty::XS, if i == n - 1 { t.text_tertiary } else { t.text_secondary })
+                            text(ty::SM, if i == n - 1 { t.text_tertiary } else { t.text_secondary })
                                 .font_weight(FontWeight::MEDIUM)
                                 .whitespace_nowrap()
                                 // A name that passed the fit check renders whole (a few px into the gap at most);
@@ -1264,7 +1264,7 @@ impl FoloApp {
                 .items_center()
                 .when(r == n - 1, |d| d.mt(px(8.)))
                 .child(
-                    text(ty::XS, if r == n - 1 { t.text_tertiary } else { t.text_secondary })
+                    text(ty::SM, if r == n - 1 { t.text_tertiary } else { t.text_secondary })
                         .font_weight(FontWeight::MEDIUM)
                         .w(px(LABEL_W))
                         .flex_none()
@@ -1352,7 +1352,7 @@ impl FoloApp {
                                 .items_center()
                                 .justify_center()
                                 .child(
-                                    text(ty::XS, ink)
+                                    text(ty::SM, ink)
                                         .tnum()
                                         .when(strong, |d| d.font_weight(FontWeight::MEDIUM))
                                         .child(label),
@@ -1374,8 +1374,8 @@ impl FoloApp {
                     .border_1()
                     .border_color(alpha(base, 0.9)),
             )
-            .child(text(ty::XS, t.text_tertiary).mr(px(6.)).child("correct"))
-            .child(text(ty::XS, t.text_tertiary).ml(px(2.)).child(if norm {
+            .child(text(ty::SM, t.text_tertiary).mr(px(6.)).child("correct"))
+            .child(text(ty::SM, t.text_tertiary).ml(px(2.)).child(if norm {
                 "Error share 0%"
             } else {
                 "Errors 0"
@@ -1389,7 +1389,7 @@ impl FoloApp {
                         .bg(crate::theme::over(t.bg_inset, alpha(t.danger_solid, err_alpha(f))))
                 },
             )))
-            .child(text(ty::XS, t.text_tertiary).tnum().child(if norm {
+            .child(text(ty::SM, t.text_tertiary).tnum().child(if norm {
                 format!("{:.0}% max", max_err * 100.)
             } else {
                 format!("{} max", int((max_err * max_count as f32).round() as u64))
@@ -1454,13 +1454,13 @@ impl FoloApp {
                             .flex()
                             .items_center()
                             .child(
-                                text(ty::XS, t.text_tertiary)
+                                text(ty::SM, t.text_tertiary)
                                     .w(px(LABEL_W))
                                     .pr(px(8.))
                                     .text_right()
                                     .child("Actual ↓"),
                             )
-                            .child(text(ty::XS, t.text_tertiary).flex_1().child("Predicted →")),
+                            .child(text(ty::SM, t.text_tertiary).flex_1().child("Predicted →")),
                     )
                     .child(header_row)
                     .child(grid)
@@ -1468,8 +1468,8 @@ impl FoloApp {
                     .child(div().pt(px(10.)).child(key))
                     // The selected cell in words, else what the rows mean.
                     .child(div().pt(px(4.)).w_full().min_w_0().child(match readout {
-                        Some(r) => text(ty::XS, t.text_primary).tnum().whitespace_normal().child(r),
-                        None => text(ty::XS, t.text_tertiary).whitespace_normal().child(if norm {
+                        Some(r) => text(ty::SM, t.text_primary).tnum().whitespace_normal().child(r),
+                        None => text(ty::SM, t.text_tertiary).whitespace_normal().child(if norm {
                             "Rows are actual objects; the bottom row splits false positives by class. Hover or focus a cell to read it."
                         } else {
                             "Counts of objects and unmatched detections. Hover or focus a cell to read it."
@@ -1480,12 +1480,12 @@ impl FoloApp {
                         d.child(
                             div()
                                 .pt(px(2.))
-                                .child(text(ty::XS, t.text_tertiary).child("Arrows move · Home / End row ends · Esc clears")),
+                                .child(text(ty::SM, t.text_tertiary).child("Arrows move · Home / End row ends · Esc clears")),
                         )
                     })
                     .child(
                         div().pt(px(4.)).child(
-                            text(ty::XS, t.text_tertiary)
+                            text(ty::SM, t.text_tertiary)
                                 .tnum()
                                 .child(match &eval_ds {
                                     Some((d, split)) => {
@@ -1498,7 +1498,7 @@ impl FoloApp {
                     )
                     // Evaluated on another split than validation: the server's sentence says why.
                     .when_some(ev.split_fallback.as_ref(), |d, f| {
-                        d.child(text(ty::XS, t.text_secondary).child(f.message.clone()))
+                        d.child(text(ty::SM, t.text_secondary).child(f.message.clone()))
                     }),
             )
             .into_any_element()

@@ -235,12 +235,12 @@ pub fn cell2(t: &Theme, primary: impl Into<SharedString>, secondary: impl Into<S
         .child(
             text(ty::BASE, t.text_primary).font_weight(FontWeight::MEDIUM).ellipsis().child(primary.into()),
         )
-        .child(text(ty::XS, t.text_tertiary).ellipsis().child(secondary.into()))
+        .child(text(ty::SM, t.text_tertiary).ellipsis().child(secondary.into()))
 }
 
 /// Table header cell.
 pub fn th(t: &Theme, label: &str) -> Div {
-    text(ty::XS, t.text_tertiary).font_weight(FontWeight::MEDIUM).whitespace_nowrap().child(label.to_string())
+    text(ty::SM, t.text_tertiary).font_weight(FontWeight::MEDIUM).whitespace_nowrap().child(label.to_string())
 }
 
 /// A small inline bar (0..1) with its value, for metric columns.

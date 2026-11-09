@@ -799,6 +799,7 @@ fn paint_line_chart(
     window: &mut Window,
     cx: &mut App,
 ) {
+    // small: chart tick labels, the one place design/README allows `xs`.
     let label_size = ty::XS.size - 0.5;
     // Data extents.
     let mut x0 = f32::INFINITY;
@@ -928,15 +929,15 @@ fn paint_line_chart(
         size(plot_w, bounds.size.height - px(top_pad) - px(bottom_pad)),
     );
     if let Some((xt, yt)) = spec.axis_titles {
-        paint_text(window, cx, yt, point(bounds.left(), bounds.top()), t.text_tertiary, ty::XS.size, false);
-        let w = text_width(window, xt, ty::XS.size);
+        paint_text(window, cx, yt, point(bounds.left(), bounds.top()), t.text_tertiary, ty::SM.size, false);
+        let w = text_width(window, xt, ty::SM.size);
         paint_text(
             window,
             cx,
             xt,
             point(plot.left() + (plot.size.width - w) / 2., plot.bottom() + px(22.)),
             t.text_tertiary,
-            ty::XS.size,
+            ty::SM.size,
             false,
         );
     }
@@ -1252,7 +1253,7 @@ fn paint_line_chart(
         format!("{} {}{}", spec.x_name, (spec.x_fmt)(snap), if smoothed_any { " · smoothed" } else { "" })
             .trim()
             .to_string();
-    let fs = ty::XS.size;
+    let fs = ty::SM.size;
     let title_w = text_width(window, &title, fs);
     let name_w = rows.iter().map(|r| text_width(window, &r.1, fs)).fold(title_w, |a, b| a.max(b));
     let val_w = rows.iter().map(|r| text_width(window, &r.2, fs)).fold(px(0.), |a, b| a.max(b));
@@ -1462,6 +1463,7 @@ pub fn histogram(
                             ),
                         );
                         if let Some(l) = labels.get(i) {
+                            // small: category tick labels under the bars.
                             let fs = ty::XS.size - 0.5;
                             let w = text_width(window, l, fs);
                             if w < bw + gap * 2. || i % 2 == 0 {
@@ -1478,14 +1480,14 @@ pub fn histogram(
                         }
                         if hot {
                             let s = crate::ui::int(c);
-                            let w = text_width(window, &s, ty::XS.size);
+                            let w = text_width(window, &s, ty::SM.size);
                             paint_text(
                                 window,
                                 cx,
                                 &s,
                                 point(x + bw / 2. - w / 2., plot.bottom() - h - px(15.)),
                                 t.text_primary,
-                                ty::XS.size,
+                                ty::SM.size,
                                 false,
                             );
                         }

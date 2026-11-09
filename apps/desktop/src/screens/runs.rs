@@ -195,7 +195,7 @@ impl FoloApp {
                             4.,
                         )))
                         .child(
-                            text(ty::XS, t.text_secondary)
+                            text(ty::SM, t.text_secondary)
                                 .tnum()
                                 .w(px(72.))
                                 .flex_none()
@@ -662,8 +662,8 @@ impl FoloApp {
                     div()
                         .flex()
                         .gap(px(4.))
-                        .child(text(ty::XS, c).tnum().child(format!("{s} vs last")))
-                        .child(text(ty::XS, t.text_tertiary).tnum().child(best)),
+                        .child(text(ty::SM, c).tnum().child(format!("{s} vs last")))
+                        .child(text(ty::SM, t.text_tertiary).tnum().child(best)),
                 )
             }
             _ => None,
@@ -687,7 +687,7 @@ impl FoloApp {
             duration_tile(
                 "Time left",
                 r.eta_s,
-                text(ty::XS, t.text_tertiary).tnum().child(
+                text(ty::SM, t.text_tertiary).tnum().child(
                     duration_of(r, now).map_or(String::new(), |d| format!("{} elapsed", time::duration(d))),
                 ),
             )
@@ -695,7 +695,7 @@ impl FoloApp {
             duration_tile(
                 "Duration",
                 duration_of(r, now),
-                text(ty::XS, t.text_tertiary).child(
+                text(ty::SM, t.text_tertiary).child(
                     r.finished
                         .as_deref()
                         .and_then(time::parse)
@@ -730,7 +730,7 @@ impl FoloApp {
                 big,
                 delta.or_else(|| {
                     r.best.as_ref().map(|b| {
-                        text(ty::XS, t.text_tertiary).tnum().child(format!(
+                        text(ty::SM, t.text_tertiary).tnum().child(format!(
                             "best {} @ {}",
                             f3(b.map50_95),
                             b.epoch
@@ -751,7 +751,7 @@ impl FoloApp {
                 ))
                 // The epoch's own operating point once the engine reports it (`best_f1_conf`); the
                 // P/R chart below states the match rule, so the tile's line fits at 1280.
-                .child(text(ty::XS, t.text_tertiary).ellipsis().child(pr_caption(
+                .child(text(ty::SM, t.text_tertiary).ellipsis().child(pr_caption(
                     last.and_then(|e| e.val.best_f1_conf),
                     "val",
                     false,
@@ -794,7 +794,7 @@ impl FoloApp {
                                 }),
                         ),
                 )
-                .child(text(ty::XS, t.text_tertiary).tnum().child(
+                .child(text(ty::SM, t.text_tertiary).tnum().child(
                     ips_avg.map_or(String::new(), |a| format!("avg {a:.0} · last {} steps", ips.len())),
                 )),
             time_tile,
@@ -1056,9 +1056,9 @@ impl FoloApp {
                         .map(|d| if on { d.bg(color) } else { d.border_1().border_color(color) })
                 })
                 .child(
-                    text(ty::XS, if on { t.text_secondary } else { t.text_tertiary }).child(name.to_string()),
+                    text(ty::SM, if on { t.text_secondary } else { t.text_tertiary }).child(name.to_string()),
                 )
-                .when_some(value, |d, val| d.child(text(ty::XS, t.text_primary).tnum().child(val)));
+                .when_some(value, |d, val| d.child(text(ty::SM, t.text_primary).tnum().child(val)));
             legend.push(
                 self.bind(
                     el,
@@ -1111,8 +1111,8 @@ impl FoloApp {
                     .items_center()
                     .gap(px(5.))
                     .child(div().size(px(6.)).rounded_full().bg(t.accent_fill()))
-                    .child(text(ty::XS, t.text_secondary).child("best"))
-                    .child(text(ty::XS, t.text_primary).tnum().child(format!(
+                    .child(text(ty::SM, t.text_secondary).child("best"))
+                    .child(text(ty::SM, t.text_primary).tnum().child(format!(
                         "{} @ {}",
                         f3(b.map50_95),
                         b.epoch
@@ -1280,7 +1280,7 @@ impl FoloApp {
                     .p(px(16.))
                     .child(div().flex().items_start().gap(px(8.)).children(row1))
                     .child(div().flex().items_start().gap(px(8.)).children(row2))
-                    .child(text(ty::XS, t.text_tertiary).tnum().child(format!(
+                    .child(text(ty::SM, t.text_tertiary).tnum().child(format!(
                         "Epoch {epoch} · 8 of 16 fixed validation images · predictions with score ≥ 0.30"
                     )))
                     .into_any_element()
@@ -1319,7 +1319,7 @@ impl FoloApp {
                                 .items_center()
                                 .gap(px(6.))
                                 .child(crate::ui::class_swatch(&t, i as u32, 8.))
-                                .child(text(ty::XS, t.text_secondary).child(name))
+                                .child(text(ty::SM, t.text_secondary).child(name))
                         }),
                 ),
             )
@@ -1387,7 +1387,7 @@ impl FoloApp {
                                     .px(px(16.))
                                     .py(px(2.))
                                     .font_family(crate::theme::MONO)
-                                    .text_size(px(ty::XS.size))
+                                    .text_size(px(ty::SM.size))
                                     .line_height(px(17.))
                                     .when(l.level == LogLevel::Error, |d| d.bg(t.danger_muted))
                                     .child(div().flex_none().text_color(t.text_tertiary).child(clock))
@@ -1446,7 +1446,7 @@ impl FoloApp {
                 .items_center()
                 .gap(px(6.))
                 .child(dot(t.accent_fill(), 6., true, "log-live"))
-                .child(text(ty::XS, t.text_tertiary).child("Following"))
+                .child(text(ty::SM, t.text_tertiary).child("Following"))
                 .into_any_element()
         } else {
             let el = div()
@@ -1460,7 +1460,7 @@ impl FoloApp {
                 .cursor_pointer()
                 .hover(|s| s.bg(t.bg_hover))
                 .active(|s| s.bg(t.bg_active))
-                .child(text(ty::XS, t.text_secondary).child("Resume following"))
+                .child(text(ty::SM, t.text_secondary).child("Resume following"))
                 .child(icon("icons/chevron-down.svg", 12., t.text_secondary));
             self.bind(
                 el,
@@ -1528,7 +1528,7 @@ impl FoloApp {
             .flex_col()
             .child(
                 panel_header(&t, "Configuration")
-                    .child(text(ty::XS, t.text_tertiary).font_family(crate::theme::MONO).child(r.id.clone())),
+                    .child(text(ty::SM, t.text_tertiary).font_family(crate::theme::MONO).child(r.id.clone())),
             )
             .child(div().flex().gap(px(32.)).px(px(16.)).py(px(8.)).child(col1).child(col2).child(col3))
             .into_any_element()

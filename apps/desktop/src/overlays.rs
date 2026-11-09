@@ -436,7 +436,7 @@ impl FoloApp {
                                     .items_center()
                                     .gap(px(6.))
                                     .child(shortcut(&t, &["↑", "↓"]))
-                                    .child(text(ty::XS, t.text_tertiary).child("navigate")),
+                                    .child(text(ty::SM, t.text_tertiary).child("navigate")),
                             )
                             .child(
                                 div()
@@ -444,10 +444,10 @@ impl FoloApp {
                                     .items_center()
                                     .gap(px(6.))
                                     .child(kbd(&t, "Enter"))
-                                    .child(text(ty::XS, t.text_tertiary).child("open")),
+                                    .child(text(ty::SM, t.text_tertiary).child("open")),
                             )
                             .child(div().flex_1())
-                            .child(text(ty::XS, t.text_tertiary).tnum().child(if searching {
+                            .child(text(ty::SM, t.text_tertiary).tnum().child(if searching {
                                 format!("{n} results")
                             } else {
                                 format!("{n} items")
@@ -639,7 +639,7 @@ impl FoloApp {
                 .gap(px(8.))
                 .child(label(name))
                 .child(control)
-                .when_some(help, |d, h| d.child(text(ty::XS, t.text_tertiary).tnum().child(h)))
+                .when_some(help, |d, h| d.child(text(ty::SM, t.text_tertiary).tnum().child(h)))
         };
         let name_fh = name_input.read(cx).focus_handle(cx);
         let name_ring = self.ring(&name_fh, window);
@@ -845,7 +845,7 @@ impl FoloApp {
                         .child(div().flex_1().min_w_0().child(control))
                         .child(field),
                 )
-                .when_some(bad, |d, msg| d.child(text(ty::XS, t.danger_text).child(msg.to_string())))
+                .when_some(bad, |d, msg| d.child(text(ty::SM, t.danger_text).child(msg.to_string())))
         };
         // Short windows drop the helper rows; the two that explain a choice stay one hover or
         // focus away.
@@ -902,7 +902,7 @@ impl FoloApp {
                                 .min_w_0()
                                 .child(text(ty::SM, t.danger_text).whitespace_normal().child(e.message))
                                 .when_some(e.hint, |d, h| {
-                                    d.child(text(ty::XS, t.text_secondary).whitespace_normal().child(h))
+                                    d.child(text(ty::SM, t.text_secondary).whitespace_normal().child(h))
                                 }),
                         ),
                 )
@@ -933,7 +933,7 @@ impl FoloApp {
                                     .child(label("Dataset"))
                                     .children(
                                         summary.map(|s| {
-                                            text(ty::XS, t.text_tertiary).tnum().ellipsis().child(s)
+                                            text(ty::SM, t.text_tertiary).tnum().ellipsis().child(s)
                                         }),
                                     ),
                             )
@@ -1018,7 +1018,7 @@ impl FoloApp {
                                 epochs_slider,
                                 epochs_bad.then_some("Enter a whole number from 1 to 10,000"),
                             ))
-                            .child(text(ty::XS, t.text_tertiary).child(match ds.as_ref() {
+                            .child(text(ty::SM, t.text_tertiary).child(match ds.as_ref() {
                                 Some(d) => format!("One epoch = one pass over {} training images", int(d.splits.train)),
                                 None => "One epoch = one pass over the training images".to_string(),
                             })),
@@ -1036,7 +1036,7 @@ impl FoloApp {
                                     close_bad.then_some("Enter a whole number up to the epoch count"),
                                 ))
                                 // Which epochs those are (the label already says what they do).
-                                .child(text(ty::XS, t.text_tertiary).child({
+                                .child(text(ty::SM, t.text_tertiary).child({
                                     let last = epochs.round().max(1.) as u32;
                                     let n = (close_mosaic.round() as u32).min(last);
                                     match n {
@@ -1066,7 +1066,7 @@ impl FoloApp {
                         t.text_secondary,
                     ))
                     .child(text(ty::MD, t.text_primary).font_weight(FontWeight::SEMIBOLD).child("Advanced"))
-                    .child(text(ty::XS, t.text_tertiary).min_w_0().ellipsis().child(adv_summary.clone()));
+                    .child(text(ty::SM, t.text_tertiary).min_w_0().ellipsis().child(adv_summary.clone()));
                 self.bind(
                     hdr,
                     "nr-adv",
@@ -1141,7 +1141,7 @@ impl FoloApp {
                                 .gap(px(2.))
                                 .child(label("End-to-end (no NMS)"))
                                 .child(
-                                    text(ty::XS, t.text_tertiary)
+                                    text(ty::SM, t.text_tertiary)
                                         .whitespace_normal()
                                         .child("Predicts boxes directly, with no NMS step"),
                                 ),
@@ -1208,7 +1208,7 @@ impl FoloApp {
                                 })
                                 // The schedule (short windows keep the Schedule above the footer).
                                 .when(!short && !lr_bad, |d| {
-                                    d.child(text(ty::XS, t.text_tertiary).child(if opt == 0 {
+                                    d.child(text(ty::SM, t.text_tertiary).child(if opt == 0 {
                                         "Set by Auto; pick SGD or AdamW to choose your own"
                                     } else {
                                         "3-epoch warmup, then linear decay to 1%"
@@ -1272,16 +1272,16 @@ impl FoloApp {
                                     // The server's reason is plain text (a backtick in it is literal); only
                                     // the stated need carries a code chip.
                                     match blocked {
-                                        Some(why) => text(ty::XS, t.text_tertiary).whitespace_normal().child(why),
+                                        Some(why) => text(ty::SM, t.text_tertiary).whitespace_normal().child(why),
                                         // The server confirmed it can; an older one can't say, so the need is stated.
                                         None if self.store.capabilities.is_some() => {
-                                            text(ty::XS, t.text_tertiary).whitespace_normal().child(
+                                            text(ty::SM, t.text_tertiary).whitespace_normal().child(
                                                 "Trains in f16 on this server's tensor cores: about 40% less GPU memory (at 640 px, not faster)",
                                             )
                                         }
                                         None => rich(
                                             &t,
-                                            ty::XS,
+                                            ty::SM,
                                             t.text_tertiary,
                                             "Trains in f16 on tensor cores; needs `folo serve --tensor-cores`",
                                         )
@@ -1371,7 +1371,7 @@ impl FoloApp {
                                 format!("≈ {vram:.0} GiB needed, {gpu_gb:.0} GiB on this GPU")
                             }),
                     )
-                    .child(text(ty::XS, t.text_tertiary).whitespace_nowrap().child(if cpu {
+                    .child(text(ty::SM, t.text_tertiary).whitespace_nowrap().child(if cpu {
                         "Expect many times slower than a GPU"
                     } else if fits && f16 {
                         "Reference estimate in f16, not measured on this GPU"
@@ -1525,7 +1525,7 @@ impl FoloApp {
                         .flex_col()
                         .gap(px(2.))
                         .child(label(name))
-                        .child(text(ty::XS, t.text_tertiary).child(help.to_string())),
+                        .child(text(ty::SM, t.text_tertiary).child(help.to_string())),
                 )
                 .child(control)
         };
@@ -1752,7 +1752,7 @@ impl FoloApp {
                     .cursor_pointer()
                     .hover(|s| s.bg(t.bg_hover))
                     .active(|s| s.bg(t.bg_active))
-                    .child(text(ty::XS, t.text_secondary).child(label));
+                    .child(text(ty::SM, t.text_secondary).child(label));
                 this.bind(el, key, radius::SM, window, cx, a)
             };
         let folded = (older > 0).then(|| {
@@ -2129,7 +2129,7 @@ impl FoloApp {
                             .child(classes.get(b.class as usize).cloned().unwrap_or_default()),
                     )
                     .child(
-                        text(ty::XS, if hot { t.text_secondary } else { t.text_tertiary })
+                        text(ty::SM, if hot { t.text_secondary } else { t.text_tertiary })
                             .tnum()
                             .flex_1()
                             .text_right()
@@ -2227,7 +2227,7 @@ impl FoloApp {
                     .flex()
                     .justify_between()
                     .child(overline(&t, "Labels"))
-                    .child(text(ty::XS, t.text_tertiary).child("top-left x, y · w×h (px)")),
+                    .child(text(ty::SM, t.text_tertiary).child("top-left x, y · w×h (px)")),
             )
             .child(
                 div()
@@ -2263,7 +2263,15 @@ impl FoloApp {
                             .flex()
                             .items_center()
                             .child(div().w(px(96.)).flex_none().flex().items_center().gap(px(4.)).child(keys))
-                            .child(text(ty::XS, t.text_tertiary).child(what))
+                            // At 12 px the longest hint needs two lines in the 300 px panel: it
+                            // wraps inside its column rather than running past the edge.
+                            .child(
+                                text(ty::SM, t.text_tertiary)
+                                    .flex_1()
+                                    .min_w_0()
+                                    .whitespace_normal()
+                                    .child(what),
+                            )
                     };
                     div()
                         .p(px(12.))
