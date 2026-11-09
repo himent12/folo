@@ -794,10 +794,15 @@ impl FoloApp {
                                             .child(if simulated { "Simulated latency" } else { "Latency" }),
                                     )
                                     .child(text(ty::XS, t.text_tertiary).tnum().min_w_0().truncate().child(
-                                        format!(
-                                            "{} · one image",
-                                            device_name(&p.device, self.store.system.ready()),
-                                        ),
+                                        // The demo has no device of its own to name.
+                                        if simulated {
+                                            "one image".to_string()
+                                        } else {
+                                            format!(
+                                                "{} · one image",
+                                                device_name(&p.device, self.store.system.ready()),
+                                            )
+                                        },
                                     )),
                             )
                             .child(metric(&t, format!("{:.1}", p.timing.total_ms), "ms", ty::LG, ty::XS)),

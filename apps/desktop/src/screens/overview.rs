@@ -965,7 +965,7 @@ impl FoloApp {
                     .border_color(t.line_subtle)
                     .child(th(&t, "Model").w(px(150.)).flex_none())
                     .child(th(&t, "Dataset").flex_1())
-                    .child(div().w(px(96.)).flex_none().flex().justify_end().child(th(&t, "mAP50-95")));
+                    .child(div().w(px(64.)).flex_none().flex().justify_end().child(th(&t, "mAP50-95")));
                 div()
                     .flex()
                     .flex_col()
@@ -1015,12 +1015,16 @@ impl FoloApp {
                                         d.child(e2e_tag(&t, format!("e2e-ov-{}", m.id)))
                                     }),
                             )
-                            .child(div().w(px(96.)).flex_none().flex().justify_end().child(bar_value(
-                                &t,
-                                map,
-                                f3(map),
-                                t.text_tertiary,
-                            )));
+                            // The number alone: a bar would set rows from different datasets against
+                            // each other, which their mAPs can't support.
+                            .child(
+                                div()
+                                    .w(px(64.))
+                                    .flex_none()
+                                    .flex()
+                                    .justify_end()
+                                    .child(text(ty::SM, t.text_secondary).tnum().child(f3(map))),
+                            );
                         self.bind(
                             row,
                             &key,
