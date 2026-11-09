@@ -162,6 +162,46 @@ pub trait Backend: Send + Sync + 'static {
     fn dataset_issues(&self, _id: &str) -> ApiResult<IssuePage> {
         Err(ApiError::new("not_supported", "Issue counts need folo serve"))
     }
+    /// The kinds of compute the server can train on, with the fields a connection to each takes
+    /// (`GET /api/cloud/providers`, servers with `cloud`).
+    fn cloud_providers(&self) -> ApiResult<Vec<CloudProvider>> {
+        Err(no_cloud())
+    }
+    /// The server's cloud connections, oldest first (`GET /api/cloud/connections`).
+    fn cloud_connections(&self) -> ApiResult<Vec<CloudConnection>> {
+        Err(no_cloud())
+    }
+    /// Checks credentials with the provider and stores them (`POST /api/cloud/connections`):
+    /// `422 cloud_auth_failed` when the provider rejects them, `400 invalid_body` naming a field.
+    fn connect_cloud(&self, _req: &ConnectCloud) -> ApiResult<CloudConnection> {
+        Err(no_cloud())
+    }
+    /// Checks a connection's stored credentials again (`POST /api/cloud/connections/{id}/check`); a
+    /// failed check is a connection with `status: error`, not an error.
+    fn check_cloud(&self, _id: &str) -> ApiResult<CloudConnection> {
+        Err(no_cloud())
+    }
+    /// Forgets a connection's credentials (`DELETE /api/cloud/connections/{id}`): `409
+    /// connection_in_use` while it has live instances or active runs.
+    fn disconnect_cloud(&self, _id: &str) -> ApiResult<()> {
+        Err(no_cloud())
+    }
+    /// What a connection can run on now, cheapest first (`GET /api/cloud/connections/{id}/offers`);
+    /// `refresh` asks the provider again instead of the server's minute-long cache.
+    fn cloud_offers(&self, _connection: &str, _refresh: bool) -> ApiResult<CloudOfferList> {
+        Err(no_cloud())
+    }
+    /// The instances the server launched: alive first, then those that ended in the last 7 days
+    /// (`GET /api/cloud/instances`).
+    fn cloud_instances(&self) -> ApiResult<Vec<CloudInstance>> {
+        Err(no_cloud())
+    }
+    /// Terminates an instance now (`DELETE /api/cloud/instances/{id}`); its run fails with
+    /// `cloud_instance_lost`.
+    fn terminate_instance(&self, _id: &str) -> ApiResult<CloudInstance> {
+        Err(no_cloud())
+    }
+
     /// Whether models can be downloaded and run in this process ([`Backend::model_weights`]).
     fn local_inference(&self) -> bool {
         false
@@ -172,6 +212,11 @@ pub trait Backend: Send + Sync + 'static {
         Err(ApiError::new("not_supported", "The built-in demo has no weights to run here")
             .with_hint("Connect to folo serve in Settings to run models in this app."))
     }
+}
+
+/// What a server without the `cloud` feature answers to every cloud call.
+fn no_cloud() -> ApiError {
+    ApiError::new("not_supported", "This server can't train in the cloud")
 }
 
 /// A `.folo` file and its ETag.

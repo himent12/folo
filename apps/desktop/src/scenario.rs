@@ -59,6 +59,20 @@ pub const ALL: &[&str] = &[
     "playground+canvas-focus",
     "settings",
     "settings+reference",
+    "settings+cloud",
+    "settings+cloud+light",
+    "settings+cloud+empty",
+    "settings+cloud+trouble",
+    "cloud-connect",
+    "cloud-connect+rejected",
+    "cloud-disconnect",
+    "cloud-terminate",
+    "new-run+cloud",
+    "new-run+cloud+light",
+    "run-cloud+syncing",
+    "run-cloud+training",
+    "run-cloud+training+light",
+    "run-cloud+released",
     "toast",
     "kb-focus",
 ];
@@ -178,6 +192,67 @@ pub fn apply(app: &mut FoloApp, s: &Spec, window: &mut Window, cx: &mut Context<
                 app.tp_view = 1;
             }
         }
+        // Settings › Cloud's dialogs, over the section.
+        "cloud-connect" | "cloud-disconnect" | "cloud-terminate" => {
+            app.route = Route::Settings;
+            app.throughput = app.store.api.throughput().into();
+        }
+        // A cloud run uploading its data, training on its instance, released with its final cost.
+        "run-cloud" => {
+            let id = if s.has("syncing") {
+                "run_c1d0"
+            } else if s.has("released") {
+                "run_c9f1"
+            } else {
+                "run_c2e1"
+            };
+            app.route = Route::Run(id.into());
+        }
+        _ => {}
+    }
+    // The cloud states read the server's lists up front (the section, the run's provider, the
+    // dialog's fields), as they are once loaded.
+    let cloud = s.has("cloud") || screen.starts_with("cloud-") || screen == "run-cloud";
+    if cloud && !s.fail {
+        preload_cloud(app);
+    }
+    match screen {
+        "cloud-connect" => {
+            app.open_connect(window, cx);
+            if s.has("rejected") {
+                // A key RunPod turns down, sent as Connect sends it: the answer lands on its field.
+                if let Some(f) = app.cloud.connect.as_ref() {
+                    let key = f.fields[0].clone();
+                    key.update(cx, |i, cx| i.set_text("rpa_bad3kQ9xV2", cx));
+                }
+                let runpod = app.cloud.providers.ready().and_then(|p| p.first()).cloned();
+                let req = crate::api::ConnectCloud {
+                    provider: "runpod".into(),
+                    name: String::new(),
+                    values: [("api_key".to_string(), "rpa_bad3kQ9xV2".to_string())].into(),
+                };
+                if let (Some(p), Err(e)) = (runpod, app.store.api.connect_cloud(&req))
+                    && let Some(f) = app.cloud.connect.as_mut()
+                {
+                    f.error = Some(crate::cloud::connect_error(&p, e));
+                }
+            }
+        }
+        "cloud-disconnect" => {
+            // Its runs still use it: the server's refusal shows in the dialog.
+            app.ask_disconnect("cc_4d2a".into(), window, cx);
+            let refused = app.store.api.disconnect_cloud("cc_4d2a").err();
+            if let Some(c) = app.cloud.disconnect.as_mut() {
+                c.error = refused;
+            }
+        }
+        "cloud-terminate" => {
+            let alive =
+                app.cloud.instances.ready().and_then(|l| l.iter().find(|i| i.status.is_alive()).cloned());
+            if let Some(i) = alive {
+                app.ask_terminate(i.id, window, cx);
+            }
+        }
         _ => {}
     }
     if screen == "palette" {
@@ -187,6 +262,16 @@ pub fn apply(app: &mut FoloApp, s: &Spec, window: &mut Window, cx: &mut Context<
         // The form needs the dataset list; load it synchronously from the frozen mock.
         app.store.datasets = app.store.api.datasets().into();
         app.open_new_run(Some("ds_3b91"), window, cx);
+        if s.has("cloud") {
+            // RunPod's RTX 4090 (Secure Cloud) chosen with its offers in; Stop after follows the
+            // estimate.
+            let offers = app.store.api.cloud_offers("cc_4d2a", false);
+            app.cloud.offers.insert("cc_4d2a".into(), offers.into());
+            if let Some(f) = app.new_run.as_mut() {
+                f.run_on = Some("cc_4d2a".into());
+                f.offer = Some("NVIDIA GeForce RTX 4090@secure".into());
+            }
+        }
         if s.has("amp") {
             // Mixed precision on, scrolled to the dialog's end: the switch and the f16 estimate.
             if let Some(f) = app.new_run.as_mut() {
@@ -241,4 +326,18 @@ pub fn apply(app: &mut FoloApp, s: &Spec, window: &mut Window, cx: &mut Context<
         app.reveal_pending = 90;
     }
     let _ = Load::<()>::Idle;
+}
+
+/// The system answer (its `cloud` feature), the runs and the server's cloud lists, read at once.
+fn preload_cloud(app: &mut FoloApp) {
+    let api = app.store.api.clone();
+    if let Ok(s) = api.system() {
+        app.store.features = s.features;
+        app.store.capabilities = s.capabilities;
+        app.store.system = Load::Ready(s.system);
+    }
+    app.store.runs = api.runs().into();
+    app.cloud.providers = api.cloud_providers().into();
+    app.cloud.connections = api.cloud_connections().into();
+    app.cloud.instances = api.cloud_instances().into();
 }

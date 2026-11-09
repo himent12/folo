@@ -1056,6 +1056,23 @@ impl FoloApp {
         cx: &mut Context<Self>,
         on_select: OnSelect,
     ) -> AnyElement {
+        self.select_with(key, current, options, selected, &[], window, cx, on_select)
+    }
+
+    /// [`Self::select`] with options that can't be chosen now: `disabled[i]` says why option `i`
+    /// can't (its tooltip); it shows dimmed, the pointer can't pick it and the arrows skip it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn select_with(
+        &self,
+        key: &'static str,
+        current: SharedString,
+        options: Vec<(SharedString, Option<SharedString>)>,
+        selected: usize,
+        disabled: &[Option<SharedString>],
+        window: &Window,
+        cx: &mut Context<Self>,
+        on_select: OnSelect,
+    ) -> AnyElement {
         let t = theme(cx);
         let open = self.menu_open == Some(key);
         let fh = self.fh(key, cx);
@@ -1063,9 +1080,19 @@ impl FoloApp {
         let n = options.len();
         let empty = n == 0;
         let keys = on_select.clone();
+        let off: Vec<Option<SharedString>> = (0..n).map(|i| disabled.get(i).cloned().flatten()).collect();
+        let usable: Vec<usize> = (0..n).filter(|&i| off[i].is_none()).collect();
+        let (first, last) = (usable.first().copied().unwrap_or(0), usable.last().copied().unwrap_or(0));
+        // The usable option after (or before) `i`, staying put at the ends.
+        let step = move |i: usize, down: bool| {
+            let next =
+                if down { usable.iter().find(|&&u| u > i) } else { usable.iter().rev().find(|&&u| u < i) };
+            next.copied().unwrap_or(i)
+        };
         // While open, arrows move a highlight; Enter commits it, Esc closes without a change.
         let hl = if open { self.menu_hl.min(n.saturating_sub(1)) } else { selected };
         let menu_scroll = self.menu_scroll.clone();
+        let dead: Vec<bool> = off.iter().map(Option::is_some).collect();
         let trigger = div()
             .id(key)
             .track_focus(&fh)
@@ -1118,7 +1145,7 @@ impl FoloApp {
                     "enter" | "space" if is_open => {
                         let pick = this.menu_hl.min(n - 1);
                         this.menu_open = None;
-                        if pick != selected {
+                        if pick != selected && !dead[pick] {
                             keys(this, pick, window, cx);
                         }
                     }
@@ -1128,20 +1155,20 @@ impl FoloApp {
                         this.menu_scroll.scroll_to_item(selected);
                     }
                     "down" => {
-                        this.menu_hl = (this.menu_hl + 1).min(n - 1);
+                        this.menu_hl = step(this.menu_hl.min(n - 1), true);
                         this.menu_scroll.scroll_to_item(this.menu_hl);
                     }
                     "up" => {
-                        this.menu_hl = this.menu_hl.saturating_sub(1);
+                        this.menu_hl = step(this.menu_hl.min(n - 1), false);
                         this.menu_scroll.scroll_to_item(this.menu_hl);
                     }
                     "home" if is_open => {
-                        this.menu_hl = 0;
-                        this.menu_scroll.scroll_to_item(0);
+                        this.menu_hl = first;
+                        this.menu_scroll.scroll_to_item(first);
                     }
                     "end" if is_open => {
-                        this.menu_hl = n - 1;
-                        this.menu_scroll.scroll_to_item(n - 1);
+                        this.menu_hl = last;
+                        this.menu_scroll.scroll_to_item(last);
                     }
                     "escape" if is_open => this.menu_open = None,
                     "tab" if is_open => {
@@ -1215,6 +1242,8 @@ impl FoloApp {
                                 let f = on_select.clone();
                                 let on = i == selected;
                                 let lit = i == hl;
+                                let why = off[i].clone();
+                                let dead = why.is_some();
                                 div()
                                     .id(SharedString::from(format!("{key}-opt-{i}")))
                                     .flex_none()
@@ -1224,18 +1253,26 @@ impl FoloApp {
                                     .items_center()
                                     .gap(px(8.))
                                     .rounded(px(radius::SM))
-                                    .cursor_pointer()
+                                    .when_some(why, |d, why| d.tooltip(tip(why, None)))
                                     .when(on, |d| d.bg(t.bg_selected))
                                     .when(lit && !on, |d| d.bg(t.bg_hover))
                                     .when(lit && on, |d| d.bg(crate::theme::over(t.bg_selected, t.bg_hover)))
-                                    .hover(|s| s.bg(t.bg_hover))
-                                    .active(|s| s.bg(t.bg_active))
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        f(this, i, window, cx);
-                                        this.menu_open = None;
-                                        cx.notify();
-                                    }))
-                                    .child(text(ty::BASE, t.text_primary).flex_1().ellipsis().child(label))
+                                    .when(!dead, |d| {
+                                        d.cursor_pointer()
+                                            .hover(|s| s.bg(t.bg_hover))
+                                            .active(|s| s.bg(t.bg_active))
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                f(this, i, window, cx);
+                                                this.menu_open = None;
+                                                cx.notify();
+                                            }))
+                                    })
+                                    .child(
+                                        text(ty::BASE, if dead { t.text_tertiary } else { t.text_primary })
+                                            .flex_1()
+                                            .ellipsis()
+                                            .child(label),
+                                    )
                                     .when_some(detail, |d, s| {
                                         d.child(text(ty::SM, t.text_tertiary).tnum().child(s))
                                     })

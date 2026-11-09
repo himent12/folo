@@ -9,6 +9,7 @@
 mod api;
 mod app;
 mod charts;
+mod cloud;
 mod controls;
 mod input;
 mod local;
@@ -146,7 +147,10 @@ fn main() {
             mock = mock.failing();
         }
         if spec.as_ref().is_some_and(|s| s.empty) {
-            mock = mock.empty();
+            mock = mock.empty().without_cloud();
+        }
+        if spec.as_ref().is_some_and(|s| s.has("trouble")) {
+            mock = mock.cloud_trouble();
         }
         let auto = spec.is_none() && !use_mock && server.is_none();
         let api: Arc<dyn api::Backend> = match (&spec, &server) {

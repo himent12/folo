@@ -74,6 +74,27 @@ pub struct TextInput {
     is_selecting: bool,
     /// Horizontal scroll of the text, so the caret stays visible in long values.
     scroll_x: Pixels,
+    /// A secret: shown as one bullet per character, never copied or cut, and moved through as a
+    /// single word.
+    masked: bool,
+}
+
+/// What a masked field shows for each character.
+const BULLET: char = '•';
+
+/// The text a masked field shows for `s`: one bullet per character.
+fn mask(s: &str) -> String {
+    std::iter::repeat_n(BULLET, s.chars().count()).collect()
+}
+
+/// A byte offset in `s` (a character boundary) as the same boundary in `mask(s)`.
+fn masked_offset(s: &str, offset: usize) -> usize {
+    s.get(..offset).map_or(s.chars().count(), |head| head.chars().count()) * BULLET.len_utf8()
+}
+
+/// A byte offset in `mask(s)` back in `s`, at the start of the bullet it falls in.
+fn unmasked_offset(s: &str, offset: usize) -> usize {
+    s.char_indices().nth(offset / BULLET.len_utf8()).map_or(s.len(), |(i, _)| i)
 }
 
 impl EventEmitter<InputEvent> for TextInput {}
@@ -91,11 +112,29 @@ impl TextInput {
             last_bounds: None,
             is_selecting: false,
             scroll_x: px(0.),
+            masked: false,
         }
+    }
+
+    /// Makes this a field for a secret (an API key, a token): bullets on screen, no copy or cut,
+    /// and word moves go to its ends.
+    pub fn masked(mut self) -> Self {
+        self.masked = true;
+        self
     }
 
     pub fn text(&self) -> SharedString {
         self.content.clone()
+    }
+
+    /// An offset in the content as an offset in the text on screen (the bullets of a masked field).
+    fn shown(&self, offset: usize) -> usize {
+        if self.masked { masked_offset(&self.content, offset) } else { offset }
+    }
+
+    /// An offset in the text on screen back in the content.
+    fn unshown(&self, offset: usize) -> usize {
+        if self.masked { unmasked_offset(&self.content, offset) } else { offset }
     }
 
     /// Replace the content, select all of it (so typing replaces it) and notify.
@@ -204,7 +243,8 @@ impl TextInput {
     }
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.selected_range.is_empty() {
+        // A secret never reaches the clipboard.
+        if !self.selected_range.is_empty() && !self.masked {
             cx.write_to_clipboard(ClipboardItem::new_string(
                 self.content[self.selected_range.clone()].to_string(),
             ));
@@ -212,7 +252,7 @@ impl TextInput {
     }
 
     fn cut(&mut self, _: &Cut, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.selected_range.is_empty() {
+        if !self.selected_range.is_empty() && !self.masked {
             cx.write_to_clipboard(ClipboardItem::new_string(
                 self.content[self.selected_range.clone()].to_string(),
             ));
@@ -242,7 +282,7 @@ impl TextInput {
         if position.y > bounds.bottom() {
             return self.content.len();
         }
-        line.closest_index_for_x(position.x - bounds.left() + self.scroll_x)
+        self.unshown(line.closest_index_for_x(position.x - bounds.left() + self.scroll_x))
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
@@ -292,6 +332,10 @@ impl TextInput {
     }
 
     fn previous_word(&self, offset: usize) -> usize {
+        // A secret has no words to show: it is one.
+        if self.masked {
+            return 0;
+        }
         let s = &self.content[..offset];
         let trimmed = s.trim_end_matches(|c: char| !c.is_alphanumeric());
         trimmed
@@ -300,6 +344,9 @@ impl TextInput {
     }
 
     fn next_word(&self, offset: usize) -> usize {
+        if self.masked {
+            return self.content.len();
+        }
         let s = &self.content[offset..];
         let skip = s.len() - s.trim_start_matches(|c: char| !c.is_alphanumeric()).len();
         let rest = &s[skip..];
@@ -322,7 +369,9 @@ impl EntityInputHandler for TextInput {
     ) -> Option<String> {
         let range = self.range_from_utf16(&range_utf16);
         actual_range.replace(self.range_to_utf16(&range));
-        Some(self.content[range].to_string())
+        // The platform's text services see a secret as its bullets.
+        let text = &self.content[range];
+        Some(if self.masked { mask(text) } else { text.to_string() })
     }
 
     fn selected_text_range(
@@ -399,10 +448,8 @@ impl EntityInputHandler for TextInput {
     ) -> Option<Bounds<Pixels>> {
         let last_layout = self.last_layout.as_ref()?;
         let range = self.range_from_utf16(&range_utf16);
-        Some(Bounds::from_corners(
-            point(bounds.left() + last_layout.x_for_index(range.start) - self.scroll_x, bounds.top()),
-            point(bounds.left() + last_layout.x_for_index(range.end) - self.scroll_x, bounds.bottom()),
-        ))
+        let x = |o: usize| bounds.left() + last_layout.x_for_index(self.shown(o)) - self.scroll_x;
+        Some(Bounds::from_corners(point(x(range.start), bounds.top()), point(x(range.end), bounds.bottom())))
     }
 
     fn character_index_for_point(
@@ -413,7 +460,7 @@ impl EntityInputHandler for TextInput {
     ) -> Option<usize> {
         let line_point = self.last_bounds?.localize(&point)?;
         let last_layout = self.last_layout.as_ref()?;
-        let utf8_index = last_layout.index_for_x(point.x - line_point.x)?;
+        let utf8_index = self.unshown(last_layout.index_for_x(point.x - line_point.x)?);
         Some(self.offset_to_utf16(utf8_index))
     }
 }
@@ -489,11 +536,15 @@ impl Element for TextElement {
         let t = theme(cx);
         let input = self.input.read(cx);
         let content = input.content.clone();
-        let selected_range = input.selected_range.clone();
-        let cursor = input.cursor_offset();
+        // Offsets below are on screen: a masked field's bullets are longer than its characters.
+        let selected_range = input.shown(input.selected_range.start)..input.shown(input.selected_range.end);
+        let cursor = input.shown(input.cursor_offset());
+        let marked_range = input.marked_range.as_ref().map(|r| input.shown(r.start)..input.shown(r.end));
         let style = window.text_style();
         let (display_text, text_color) = if content.is_empty() {
             (input.placeholder.clone(), t.text_tertiary)
+        } else if input.masked {
+            (mask(&content).into(), style.color)
         } else {
             (content, style.color)
         };
@@ -505,7 +556,7 @@ impl Element for TextElement {
             underline: None,
             strikethrough: None,
         };
-        let runs = if let Some(marked) = input.marked_range.as_ref() {
+        let runs = if let Some(marked) = marked_range.as_ref() {
             vec![
                 TextRun { len: marked.start, ..run.clone() },
                 TextRun {
@@ -662,7 +713,26 @@ fn utf16_to_utf8(s: &str, offset: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::utf16_to_utf8;
+    use super::{mask, masked_offset, unmasked_offset, utf16_to_utf8};
+
+    #[test]
+    fn a_masked_field_maps_offsets_between_text_and_bullets() {
+        let s = "ab中d😀";
+        assert_eq!(mask(s), "•••••");
+        assert_eq!(mask(""), "");
+        // Every character boundary maps to a bullet boundary and back.
+        let bounds: Vec<usize> = s.char_indices().map(|(i, _)| i).chain([s.len()]).collect();
+        for (n, &b) in bounds.iter().enumerate() {
+            let shown = masked_offset(s, b);
+            assert_eq!(shown, n * '•'.len_utf8(), "boundary {b}");
+            assert!(mask(s).is_char_boundary(shown));
+            assert_eq!(unmasked_offset(s, shown), b);
+        }
+        // Inside a bullet (a pointer between its bytes): its start.
+        assert_eq!(unmasked_offset(s, 7), 2);
+        // Past the end: the end.
+        assert_eq!(unmasked_offset(s, 99), s.len());
+    }
 
     #[test]
     fn caret_stays_in_view() {

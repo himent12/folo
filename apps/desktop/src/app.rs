@@ -257,6 +257,19 @@ pub struct NewRunForm {
     pub e2e: bool,
     /// The Advanced group (head, optimizer, mixed precision, augmentation) is open.
     pub advanced: bool,
+    /// Run on (servers with `cloud`): `None` trains on this machine, else on this cloud connection.
+    pub run_on: Option<String>,
+    /// The connection's offer to train on.
+    pub offer: Option<String>,
+    /// Stop after, hours (`compute.max_hours`): it follows the estimate until it is typed.
+    pub max_hours: f32,
+    pub hours_input: Entity<TextInput>,
+    pub hours_invalid: bool,
+    pub hours_edited: bool,
+    /// What the server said about the compute choice, on the control it is about.
+    pub compute_error: Option<(crate::cloud::ComputeField, String)>,
+    /// New run from a cloud run's config: its offer, chosen once the connection's offers are in.
+    pub want_offer: Option<String>,
     _subs: Vec<Subscription>,
     pub submitting: bool,
     pub error: Option<ApiError>,
@@ -493,6 +506,8 @@ pub struct FoloApp {
     pub nr_estimate_last: Option<crate::api::RunEstimate>,
     /// Settings' device throughput table (`GET /api/system/throughput`).
     pub throughput: Load<crate::api::ThroughputTable>,
+    /// Cloud connections, instances and offers, and their dialogs (servers with `cloud`).
+    pub cloud: crate::cloud::CloudState,
     /// Which half of it shows: training (0) or inference (1); reference rows too or measured only.
     pub tp_view: usize,
     pub tp_all: bool,
@@ -662,6 +677,7 @@ impl FoloApp {
             nr_estimate: None,
             nr_estimate_last: None,
             throughput: Load::Idle,
+            cloud: Default::default(),
             tp_view: 0,
             tp_all: false,
             bench_busy: false,
@@ -768,9 +784,13 @@ impl FoloApp {
     }
 
     fn after_navigate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // Settings shows the throughput table as the server has it now (also when going back).
+        // Settings shows the throughput table and the cloud as the server has them now (also when
+        // going back).
         if self.route == Route::Settings && !self.throughput.is_loading() {
             self.throughput = Load::Idle;
+        }
+        if self.route == Route::Settings {
+            self.reload_cloud();
         }
         self.page_scroll.set_offset(gpui::point(px(0.), px(0.)));
         self.chart_hover = None;
@@ -1118,7 +1138,7 @@ impl FoloApp {
     }
 
     /// Reload the run list in place (no loading state) and subscribe to whatever is active.
-    fn refresh_runs(&mut self, cx: &mut Context<Self>) {
+    pub fn refresh_runs(&mut self, cx: &mut Context<Self>) {
         self.fetch(
             cx,
             |api| api.runs(),
@@ -1199,6 +1219,10 @@ impl FoloApp {
                         }
                         if tick.is_multiple_of(50) && matches!(this.store.runs, Load::Ready(_)) {
                             this.refresh_runs(cx);
+                        }
+                        // A rented instance costs money: its row stays current while it lives.
+                        if tick.is_multiple_of(50) && this.instance_alive() {
+                            this.refresh_instances(cx);
                         }
                         if changed {
                             cx.notify();
@@ -1594,6 +1618,7 @@ impl FoloApp {
         self.open_new_run(Some(&config.dataset_id), window, cx);
         let idx = |list: &[u32], v: u32| list.iter().position(|x| *x == v);
         let name = format!("{}-2", config.name);
+        let cloud_on = self.cloud_on();
         if let Some(f) = self.new_run.as_mut() {
             f.arch = ARCHS.iter().position(|a| *a == config.arch).unwrap_or(f.arch);
             f.epochs = config.epochs as f32;
@@ -1617,9 +1642,20 @@ impl FoloApp {
             f.e2e = config.head == Head::O2o;
             f.note = note;
             f.base = Some(config.clone());
+            // A cloud run's connection and offer, when they still exist (checked once the
+            // connections and offers are in), and its time limit as it was.
+            if let Some(c) = config.compute.as_ref().filter(|_| cloud_on) {
+                f.run_on = Some(c.connection_id.clone());
+                f.want_offer = Some(c.offer_id.clone());
+                f.max_hours = c.max_hours;
+                f.hours_edited = true;
+                let (hi, hv) = (f.hours_input.clone(), crate::ui::hours_value(c.max_hours));
+                hi.update(cx, |i, cx| i.set_text(hv, cx));
+            }
             let input = f.name.clone();
             input.update(cx, |i, cx| i.set_text(name, cx));
         }
+        self.sync_compute(cx);
         cx.notify();
     }
 
@@ -1680,7 +1716,30 @@ impl FoloApp {
             i.set_text("10", cx);
             i
         });
+        let hours_input = cx.new(|cx| {
+            let mut i = TextInput::new("12", cx);
+            i.set_text(crate::ui::hours_value(folo_api::DEFAULT_MAX_HOURS), cx);
+            i
+        });
         let subs = vec![
+            cx.subscribe(&hours_input, |this: &mut Self, _, ev: &InputEvent, cx| {
+                let InputEvent::Changed(s) = ev;
+                if let Some(f) = this.new_run.as_mut() {
+                    match crate::cloud::parse_hours(s) {
+                        Some(v) => {
+                            // Any other value than the one the form put there is the user's.
+                            if crate::ui::hours_value(v) != crate::ui::hours_value(f.max_hours) {
+                                f.hours_edited = true;
+                            }
+                            f.max_hours = v;
+                            f.hours_invalid = false;
+                        }
+                        None => f.hours_invalid = true,
+                    }
+                    f.compute_error.take_if(|(c, _)| *c == crate::cloud::ComputeField::StopAfter);
+                    cx.notify();
+                }
+            }),
             cx.subscribe(&close_input, |this: &mut Self, _, ev: &InputEvent, cx| {
                 let InputEvent::Changed(s) = ev;
                 if let Some(f) = this.new_run.as_mut() {
@@ -1747,6 +1806,14 @@ impl FoloApp {
             amp: false,
             e2e: false,
             advanced: false,
+            run_on: None,
+            offer: None,
+            max_hours: folo_api::DEFAULT_MAX_HOURS,
+            hours_input,
+            hours_invalid: false,
+            hours_edited: false,
+            compute_error: None,
+            want_offer: None,
             epochs_invalid: false,
             lr_invalid: false,
             _subs: subs,
@@ -1761,7 +1828,14 @@ impl FoloApp {
     /// form or dataset. Submitting and the server's estimate both use it.
     pub fn form_config(&self, cx: &App) -> Option<TrainConfig> {
         let form = self.new_run.as_ref()?;
-        let amp_ok = self.amp_blocked(DEVICES[form.device]).is_none();
+        let compute = crate::cloud::form_compute(
+            self.cloud_on(),
+            form.run_on.as_deref(),
+            form.offer.as_deref(),
+            form.max_hours,
+        );
+        // On a cloud instance mixed precision is checked when it boots, not against this machine.
+        let amp_ok = compute.is_some() || self.amp_blocked(DEVICES[form.device]).is_none();
         let ds = self.store.datasets.ready().and_then(|d| d.get(form.dataset))?;
         Some(carry_over(
             form.base.as_ref(),
@@ -1772,7 +1846,8 @@ impl FoloApp {
                 epochs: form.epochs.round() as u32,
                 batch: BATCHES[form.batch],
                 imgsz: IMGSZ[form.imgsz],
-                device: DEVICES[form.device].into(),
+                // The worker picks its GPU.
+                device: if compute.is_some() { "auto".into() } else { DEVICES[form.device].into() },
                 optimizer: OPTIMIZERS[form.optimizer],
                 lr0: form.lr0,
                 weights: None,
@@ -1788,8 +1863,25 @@ impl FoloApp {
                 // Only where it can run: not the CPU, nor a server that says it can't.
                 amp: form.amp && amp_ok,
                 head: if form.e2e { Head::O2o } else { Head::O2m },
+                compute,
             },
         ))
+    }
+
+    /// Why New run can't send its config yet because of its compute choice: a connection chosen
+    /// whose offers are still out, no offer picked, or a Stop after that doesn't parse.
+    pub fn compute_blocked(&self) -> Option<&'static str> {
+        let f = self.new_run.as_ref()?;
+        let conn = f.run_on.as_deref().filter(|_| self.cloud_on())?;
+        if f.hours_invalid {
+            Some("Fix the highlighted fields first")
+        } else if f.offer.is_some() {
+            None
+        } else if self.cloud.offers.get(conn).is_none_or(|l| l.is_loading()) {
+            Some("Loading offers…")
+        } else {
+            Some("Choose a GPU first")
+        }
     }
 
     /// Asks the server how long the New run form's config would take (servers with
@@ -1799,10 +1891,12 @@ impl FoloApp {
             return;
         }
         // A value being typed that doesn't parse yet: no estimate for the last good one.
+        // Nor for a cloud run without its offer yet (the config would be this machine's).
         if self
             .new_run
             .as_ref()
             .is_some_and(|f| f.epochs_invalid || f.close_invalid || (f.lr_invalid && f.optimizer != 0))
+            || self.compute_blocked().is_some()
         {
             // Cancel a pending ask; an unanswered key would otherwise stay "loading" for good.
             self.nr_estimate_gen += 1;
@@ -1851,6 +1945,8 @@ impl FoloApp {
                     this.nr_estimate_last = Some(e.clone());
                 }
                 this.nr_estimate = Some((key, r.map_or_else(Load::Failed, Load::Ready)));
+                // Stop after follows the estimate (until typed).
+                this.sync_compute(cx);
                 cx.notify();
             },
         );
@@ -1858,10 +1954,11 @@ impl FoloApp {
 
     pub fn submit_new_run(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let config = self.form_config(cx);
+        let compute_blocked = self.compute_blocked().is_some();
         let Some(form) = self.new_run.as_mut() else { return };
         // Auto sets its own rate, so an unparsed rate entry doesn't block it.
         let lr_invalid = form.lr_invalid && form.optimizer != 0;
-        if form.submitting || form.epochs_invalid || lr_invalid || form.close_invalid {
+        if form.submitting || form.epochs_invalid || lr_invalid || form.close_invalid || compute_blocked {
             return;
         }
         let Some(config) = config else { return };
@@ -1892,9 +1989,19 @@ impl FoloApp {
                             runs.insert(0, run);
                         }
                         this.subscribe_active(cx);
-                        let queued =
-                            this.store.run(&id).is_some_and(|r| r.status == crate::api::RunStatus::Queued);
-                        if queued {
+                        let run = this.store.run(&id).cloned();
+                        let cloud = run.as_ref().and_then(|r| Some(this.cloud_device(r, r.cloud.as_ref()?)));
+                        let queued = run.is_some_and(|r| r.status == crate::api::RunStatus::Queued);
+                        if let Some(on) = cloud {
+                            // It waits on its instance, not in the queue.
+                            this.toast(
+                                Tone::Accent,
+                                format!("Launching {name}"),
+                                Some(format!("On {on}: the instance starts, then the data uploads.").into()),
+                                cx,
+                            );
+                            this.refresh_instances(cx);
+                        } else if queued {
                             // The run's page opens next, so the action is the queue it waits in.
                             this.toast_with(
                                 Tone::Info,
@@ -1930,7 +2037,20 @@ impl FoloApp {
                     Err(e) => {
                         if mine && let Some(f) = this.new_run.as_mut() {
                             f.submitting = false;
-                            f.error = Some(e);
+                            // A refused compute choice shows on its control (Run on, GPU, Stop
+                            // after); a GPU that went away or is out of stock gets fresh offers.
+                            match crate::cloud::compute_error_field(&e).filter(|_| f.run_on.is_some()) {
+                                Some(field) => {
+                                    let conn = f.run_on.clone();
+                                    f.compute_error = Some((field, e.message));
+                                    if field == crate::cloud::ComputeField::Gpu
+                                        && let Some(conn) = conn
+                                    {
+                                        this.ensure_offers(&conn, true, cx);
+                                    }
+                                }
+                                None => f.error = Some(e),
+                            }
                             // The error leads the form: scroll it into view.
                             this.dialog_scroll.set_offset(point(px(0.), px(0.)));
                         } else {
@@ -2298,7 +2418,12 @@ impl FoloApp {
             .store
             .dataset_summary(&r.config.dataset_id)
             .map_or(r.config.dataset_id.clone(), |d| d.name.clone());
-        let mut rest = vec![ds, crate::ui::device_label(&r.device)];
+        // A cloud run's device is where it rents it ("RunPod · RTX 4090").
+        let device = match &r.cloud {
+            Some(c) => self.cloud_device(r, c),
+            None => crate::ui::device_label(&r.device),
+        };
+        let mut rest = vec![ds, device];
         // Precision is part of what trains (the e2e tag names the head).
         if r.config.amp {
             rest.push("mixed precision".into());
@@ -3035,6 +3160,7 @@ impl Render for FoloApp {
         self.narrow = window.viewport_size().width < px(1120.);
         let t = theme(cx);
         self.ensure_core(cx);
+        self.ensure_cloud(cx);
         let titlebar = self.titlebar(window, cx).into_any_element();
         let sidebar = self.sidebar(window, cx).into_any_element();
         *self.key_hint.borrow_mut() = None;
@@ -3080,7 +3206,9 @@ impl Render for FoloApp {
                 }
             }))
             .on_action(cx.listener(|this, _: &Submit, w, cx| {
-                if this.new_run.is_some() {
+                if this.cloud.connect.is_some() {
+                    this.submit_connect(w, cx);
+                } else if this.new_run.is_some() {
                     this.submit_new_run(w, cx);
                 } else if this.synth.is_some() {
                     this.submit_synth(w, cx);
@@ -3229,6 +3357,9 @@ impl FoloApp {
             || self.synth.is_some()
             || self.confirm_stop.is_some()
             || self.inspector.is_some()
+            || self.cloud.connect.is_some()
+            || self.cloud.disconnect.is_some()
+            || self.cloud.terminate.is_some()
     }
 
     fn nav_shortcut(&mut self, route: Route, window: &mut Window, cx: &mut Context<Self>) {
@@ -3242,6 +3373,12 @@ impl FoloApp {
     fn focus_in_scope(&self, window: &Window, cx: &App) -> bool {
         let prefixes: &[&str] = if self.confirm_stop.is_some() {
             &["stop-", "dialog-close"]
+        } else if self.cloud.disconnect.is_some() {
+            &["cd-", "dialog-close"]
+        } else if self.cloud.terminate.is_some() {
+            &["ct-", "dialog-close"]
+        } else if self.cloud.connect.is_some() {
+            &["cc-", "dialog-close"]
         } else if self.new_run.is_some() {
             &["nr-", "dialog-close"]
         } else if self.synth.is_some() {
@@ -3259,9 +3396,16 @@ impl FoloApp {
         }
         if let Some(f) = &self.new_run
             && self.confirm_stop.is_none()
-            && [&f.name, &f.epochs_input, &f.lr_input, &f.close_input]
+            && [&f.name, &f.epochs_input, &f.lr_input, &f.close_input, &f.hours_input]
                 .iter()
                 .any(|i| i.read(cx).focus_handle(cx).is_focused(window))
+        {
+            return true;
+        }
+        if let Some(f) = &self.cloud.connect
+            && self.cloud.disconnect.is_none()
+            && self.cloud.terminate.is_none()
+            && f.fields.iter().chain([&f.name]).any(|i| i.read(cx).focus_handle(cx).is_focused(window))
         {
             return true;
         }
@@ -3325,7 +3469,7 @@ impl FoloApp {
         // The newly focused control scrolls into view inside whichever of these holds it.
         let containers = if self.inspector.is_some() {
             vec![self.insp_list_scroll.clone()]
-        } else if self.new_run.is_some() || self.synth.is_some() {
+        } else if self.new_run.is_some() || self.synth.is_some() || self.cloud.connect.is_some() {
             vec![self.dialog_scroll.clone()]
         } else if matches!(self.route, Route::Playground) {
             vec![self.play_side_scroll.clone(), self.page_scroll.clone()]
@@ -3560,6 +3704,10 @@ impl FoloApp {
         } else if self.confirm_stop.is_some() {
             self.confirm_stop = None;
             self.restore_focus(window);
+        } else if self.cloud.disconnect.is_some() || self.cloud.terminate.is_some() {
+            self.close_confirm(window, cx);
+        } else if self.cloud.connect.is_some() {
+            self.close_connect(window, cx);
         } else if self.new_run.is_some() {
             // Kept as a draft, like Cancel.
             self.new_run_draft = self.new_run.take().and_then(|f| self.keep_draft(f));
@@ -3677,6 +3825,7 @@ mod retry_tests {
             seed: 42,
             amp: true,
             head: Default::default(),
+            compute: None,
         };
         let edited = TrainConfig {
             name: "a-2".into(),
