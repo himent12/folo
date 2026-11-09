@@ -116,6 +116,40 @@ describe('Create dataset', () => {
   });
 });
 
+describe('the dialogs while the job changes', () => {
+  it("Create dataset keeps what was typed when the job moves on while it is open (a run's progress)", async () => {
+    const job = await hub.api.labelJob('lb_51d0');
+    const props = $state({ open: true, job, oncreated: () => {} });
+    open(DatasetDialog, props);
+    type(document.querySelector('input[id$="-name"]')!, 'my-set');
+    document.querySelector<HTMLButtonElement>('dialog[open] [role="radio"]:not([aria-checked="true"])')?.click();
+    flushSync();
+    const share = document.querySelector('dialog[open] [role="radio"][aria-checked="true"]')?.textContent;
+    props.job = { ...job, counts: { ...job.counts, labeled: job.counts.labeled - 1, pending: job.counts.pending + 1 } };
+    flushSync();
+    expect(document.querySelector<HTMLInputElement>('input[id$="-name"]')!.value).toBe('my-set');
+    expect(document.querySelector('dialog[open] [role="radio"][aria-checked="true"]')?.textContent).toBe(share);
+    // Opened again, it starts afresh.
+    props.open = false;
+    flushSync();
+    props.open = true;
+    flushSync();
+    expect(document.querySelector<HTMLInputElement>('input[id$="-name"]')!.value).toBe('fasteners-review');
+  });
+
+  it('Edit job keeps the edits when the job changes while it is open (an upload finishing)', async () => {
+    const job = await hub.api.labelJob('lb_7c21');
+    const props = $state({ open: true, job, onsave: async () => {} });
+    open(JobDialog, props);
+    type(document.querySelector('input[id$="-name"]')!, 'bins-renamed');
+    type(document.querySelector<HTMLInputElement>('dialog[open] input[aria-label="Class 1"]')!, 'hex bolt');
+    props.job = { ...job, counts: { ...job.counts, images: job.counts.images + 50, pending: job.counts.pending + 50 } };
+    flushSync();
+    expect(document.querySelector<HTMLInputElement>('input[id$="-name"]')!.value).toBe('bins-renamed');
+    expect(document.querySelector<HTMLInputElement>('dialog[open] input[aria-label="Class 1"]')!.value).toBe('hex bolt');
+  });
+});
+
 describe('the job page', () => {
   async function page(path: string, scenario: Scenario = 'normal') {
     hub.api = new MockApi(scenario, 0);

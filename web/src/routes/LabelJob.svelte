@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { MediaQuery } from 'svelte/reactivity';
   import ArrowLeft from '@lucide/svelte/icons/arrow-left';
   import Database from '@lucide/svelte/icons/database';
@@ -42,6 +43,7 @@
   import { cannotLabel } from './label/support';
   import Unsupported from './label/Unsupported.svelte';
   import { Uploads } from './label/uploads.svelte';
+  import { Instructions } from './label/instructions.svelte';
   import { images as imagesText, jobStatus, toLabel } from './label/words';
 
   const id = $derived(router.route.params.id ?? '');
@@ -80,35 +82,17 @@
   }
   const shown = $derived(show === 'all' ? live.images : live.images.filter((i) => inFilter(i, show)));
 
-  // ---------- the instructions: saved when the field is left, and before a run starts ----------
-  let instructions = $state('');
-  /** What the field last took from the job: a change on the server shows unless the field holds an edit. */
-  let taken = '';
-  let instructionsError = $state<string | null>(null);
+  // ---------- the instructions: saved when the field is left, and before a run starts (label/instructions) ----------
+  const instructions = new Instructions(
+    () => live.job,
+    (jobId, text) => live.act(() => hub.api.updateLabelJob(jobId, { instructions: text })),
+  );
   $effect(() => {
     const server = job?.instructions ?? '';
-    if (instructions === taken) instructions = server;
-    taken = server;
+    untrack(() => instructions.sync(server));
   });
-  async function saveInstructions(): Promise<boolean> {
-    if (!job || running || instructions === job.instructions) return true;
-    if (instructions.length > INSTRUCTIONS_MAX) {
-      instructionsError = `At most ${num(INSTRUCTIONS_MAX)} characters (now ${num(instructions.length)}).`;
-      return false;
-    }
-    const jobId = job.id;
-    try {
-      await live.act(() => hub.api.updateLabelJob(jobId, { instructions }));
-      taken = instructions;
-      instructionsError = null;
-      return true;
-    } catch (e) {
-      instructionsError = `Not saved: ${e instanceof Error ? e.message : String(e)}`;
-      return false;
-    }
-  }
   $effect(() => {
-    if (instructions.length <= INSTRUCTIONS_MAX && instructionsError?.startsWith('At most')) instructionsError = null;
+    if (instructions.text.length <= INSTRUCTIONS_MAX && instructions.error?.startsWith('At most')) instructions.error = null;
   });
 
   // ---------- runs ----------
@@ -120,7 +104,8 @@
     starting = true;
     startError = undefined;
     try {
-      if (!(await saveInstructions())) return;
+      // After the saves asked before it, with the field's latest text: the run uses what the field says.
+      if (!(await instructions.save())) return;
       const jobId = job.id;
       await live.act(() => hub.api.startLabeling(jobId, { ...req, scope }));
       againOpen = false;
@@ -301,12 +286,12 @@
             agentsError={agents.error}
             retryAgents={() => agents.refresh()}
             {choice}
-            bind:instructions
-            {instructionsError}
+            bind:instructions={instructions.text}
+            instructionsError={instructions.error}
             {starting}
             {startError}
             lost={live.lost !== null}
-            onsaveinstructions={() => void saveInstructions()}
+            onsaveinstructions={() => void instructions.save()}
             onstart={() => void start()}
             onagain={() => (againOpen = true)}
             onstop={() => (stopOpen = true)}

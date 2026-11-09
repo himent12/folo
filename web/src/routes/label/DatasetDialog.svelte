@@ -3,6 +3,7 @@
    * "Create dataset": the job's labeled images written as a YOLO dataset that trains like any other. Says plainly what
    * goes in and what is left out; the name follows the Datasets rules (one click to the nearest valid one).
    */
+  import { untrack } from 'svelte';
   import Database from '@lucide/svelte/icons/database';
   import { hub } from '$lib/api/index.svelte';
   import type { Dataset, LabelJob } from '$lib/api/types';
@@ -26,12 +27,18 @@
   let busy = $state(false);
   let touched = $state(false);
 
+  // Every opening (or another job) starts afresh; a change of the job while it is open (a run's progress) keeps what was
+  // typed, and a submit in flight.
+  const jobId = $derived(job.id);
   $effect(() => {
     if (!open) return;
-    name = NAME_RE.test(job.name) ? job.name : (suggestName(job.name) ?? '');
-    val = '0.2';
-    touched = false;
-    busy = false;
+    void jobId;
+    untrack(() => {
+      name = NAME_RE.test(job.name) ? job.name : (suggestName(job.name) ?? '');
+      val = '0.2';
+      touched = false;
+      busy = false;
+    });
   });
 
   const nameError = $derived(!name.trim() ? 'Required.' : NAME_RE.test(name.trim()) ? null : 'Letters, digits, ".", "_" and "-" only (max 64).');

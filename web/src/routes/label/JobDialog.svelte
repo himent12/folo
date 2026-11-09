@@ -4,6 +4,7 @@
    * images have boxes, which refer to classes by their place in the list, the edit form renames and appends classes
    * and never removes one, and says why. Validation, gating and feedback as Add dataset's.
    */
+  import { untrack } from 'svelte';
   import Plus from '@lucide/svelte/icons/plus';
   import X from '@lucide/svelte/icons/x';
   import { hub } from '$lib/api/index.svelte';
@@ -44,16 +45,21 @@
   let draft = $state('');
   let instructions = $state('');
 
-  // Every opening starts from the job as it is (or blank).
+  // Every opening (or another job) starts from the job as it is (or blank); a change of the job while it is open (an
+  // upload, a run's progress) keeps the edits, and a submit in flight.
+  const jobId = $derived(job?.id);
   $effect(() => {
     if (!open) return;
-    name = job?.name ?? '';
-    classes = job ? [...job.classes] : [];
-    draft = '';
-    instructions = '';
-    error = undefined;
-    touched = false;
-    busy = false;
+    void jobId;
+    untrack(() => {
+      name = job?.name ?? '';
+      classes = job ? [...job.classes] : [];
+      draft = '';
+      instructions = '';
+      error = undefined;
+      touched = false;
+      busy = false;
+    });
   });
 
   const all = $derived(editing ? classes.map((c) => c.trim()) : addClasses(classes, draft, CLASSES_MAX));
