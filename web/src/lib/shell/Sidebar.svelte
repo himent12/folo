@@ -8,11 +8,23 @@
   import { keyPrefs } from '$lib/ui/keyPrefs.svelte';
   import Logo from './Logo.svelte';
   import { mainNav, settingsNav, type NavItem } from './nav';
+  import { reducedMotion } from '$lib/ui/motion';
 
   let { footer, live }: { footer?: Snippet<[boolean]>; live?: Snippet<[boolean]> } = $props();
 
   const current = $derived(section(router.route.name));
-  const collapsed = $derived(sidebar.collapsed);
+  // Collapse and expand move the page once: the rail takes its new width at once (so charts re-measure one time, not
+  // every frame of a width transition), and the navigation clips open or closed over the page (a clip-path animation,
+  // composited). Closing keeps the wide look until its clip has run, then collapses.
+  const slim = $derived(sidebar.collapsed);
+  let anim = $state<'open' | 'close' | null>(null);
+  let seen: boolean | undefined;
+  $effect(() => {
+    const c = slim;
+    if (seen !== undefined && c !== seen) anim = reducedMotion() ? null : c ? 'close' : 'open';
+    seen = c;
+  });
+  const collapsed = $derived(slim && anim !== 'close');
 </script>
 
 {#snippet item(n: NavItem)}
@@ -34,8 +46,8 @@
 
 <!-- The rail is the shell's column: it runs the page's full height (its fill and edge reach the bottom of a long page,
      full-page captures included), and the navigation sticks to the viewport inside it. -->
-<div class="shell-rail" class:collapsed>
-<nav class="sidebar" aria-label="Main">
+<div class="shell-rail" class:slim class:collapsed class:anim-open={anim === 'open'} class:anim-close={anim === 'close'}>
+<nav class="sidebar" aria-label="Main" onanimationend={(e) => e.target === e.currentTarget && (anim = null)}>
   <div class="head">
     <a href={href('/')} class="brand" aria-label="FOLO Studio home"><Logo wordmark={!collapsed} /></a>
   </div>
@@ -75,10 +87,36 @@
     background: var(--bg-app);
     border-right: 1px solid var(--line-subtle);
     z-index: var(--z-sidebar);
-    transition: width var(--dur-slow) var(--ease-standard);
   }
-  .shell-rail.collapsed {
+  .shell-rail.slim {
     width: var(--size-sidebar-collapsed);
+  }
+  /* Opening: the wide navigation is revealed from the icon column's edge. Closing: it stays wide over the page while its
+     clip closes to the icon column, then takes the collapsed look. */
+  .anim-open .sidebar {
+    animation: rail-open var(--dur-slow) var(--ease-standard);
+  }
+  .anim-close .sidebar {
+    width: var(--size-sidebar);
+    background: var(--bg-app);
+    border-right: 1px solid var(--line-subtle);
+    animation: rail-close var(--dur-slow) var(--ease-standard) forwards;
+  }
+  @keyframes rail-open {
+    from {
+      clip-path: inset(0 calc(100% - var(--size-sidebar-collapsed)) 0 0);
+    }
+    to {
+      clip-path: inset(0);
+    }
+  }
+  @keyframes rail-close {
+    from {
+      clip-path: inset(0);
+    }
+    to {
+      clip-path: inset(0 calc(100% - var(--size-sidebar-collapsed)) 0 0);
+    }
   }
   .sidebar {
     position: sticky;

@@ -13,6 +13,8 @@
 
 <script lang="ts">
   import { MediaQuery } from 'svelte/reactivity';
+  import { fade } from 'svelte/transition';
+  import { motion } from '$lib/ui/motion';
   import ChartSkeleton from '$lib/charts/ChartSkeleton.svelte';
   import { untrack } from 'svelte';
   import GitCompare from '@lucide/svelte/icons/git-compare-arrows';
@@ -466,6 +468,9 @@
   {:else if !metrics.data || !runs.data}
     <ChartSkeleton {height} legend={false} />
   {:else}
+    <!-- A metric swap fades the new chart in over 160 ms (0 under reduced motion); within a metric the domain eases. -->
+    {#key metricId}
+    <div class="swap" in:fade={{ duration: motion(160) }}>
     <LineChart
       {series}
       {height}
@@ -487,6 +492,8 @@
       endLabels
       label="{metricDef.label} for the compared runs"
     />
+    </div>
+    {/key}
   {/if}
 {/snippet}
 
@@ -1077,5 +1084,9 @@
     border-radius: var(--radius-xs);
     background: var(--accent-muted);
     font-size: var(--type-sm-size);
+  }
+  /* The fading wrapper of a swapped chart: it takes the chart's place in the layout. */
+  .swap {
+    min-width: 0;
   }
 </style>

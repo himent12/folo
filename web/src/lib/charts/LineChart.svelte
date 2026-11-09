@@ -76,6 +76,9 @@
   import { paintOrder } from './layers';
   import { TouchGesture, type PinAction } from './pin';
   import { MediaQuery } from 'svelte/reactivity';
+  import { Tween } from 'svelte/motion';
+  import { cubicOut } from 'svelte/easing';
+  import { motion } from '$lib/ui/motion';
   import { media } from '$lib/design/tokens';
 
   interface Props {
@@ -254,8 +257,18 @@
   });
 
   const x = $derived(scaleLinear().domain(xExtent).range([margin.left, Math.max(margin.left + 1, width - margin.right)]));
+  // A y domain change eases over 240 ms (callers re-fit at most once per epoch, ./domain holdDomain; values themselves
+  // never tween): the lines and gridlines glide to the new scale instead of jumping. Instant under reduced motion and
+  // on a log scale.
+  const yEase = new Tween<[number, number]>(untrack(() => yExtent), { easing: cubicOut });
+  $effect(() => {
+    const d = yExtent;
+    const log = yLog;
+    untrack(() => void yEase.set(d, { duration: log ? 0 : motion(240) }));
+  });
+  const yShown = $derived(yLog ? yExtent : yEase.current);
   const y = $derived(
-    (yLog ? scaleLog().domain(yExtent) : scaleLinear().domain(yExtent)).range([height - margin.bottom, margin.top]),
+    (yLog ? scaleLog().domain(yShown) : scaleLinear().domain(yShown)).range([height - margin.bottom, margin.top]),
   );
   // When the x domain is fixed (e.g. 0..epochs), prefer a tick step that lands exactly on the end.
   // Default x labels: integers, or one decimal when the domain is too short for distinct integers.
