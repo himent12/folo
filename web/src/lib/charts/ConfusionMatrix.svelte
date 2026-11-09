@@ -2,7 +2,7 @@
   /**
    * Confusion matrix: rows are true classes, columns predicted, plus a "background" row/column for misses and false
    * positives. Cells are row-normalised and shaded on one sequential luminance ramp in ink (the diagonal is told apart
-   * by position, not hue), counts on hover. An empty cell is the panel with a hairline grid; any share above zero starts
+   * by position, not hue), labelled in whole percentages ("<1" for small shares, ./confusionInk), counts on hover. An empty cell is the panel with a hairline grid; any share above zero starts
    * at a clearly visible first step (./confusionInk), so a 2 % confusion never looks like nothing. `reveal(r, c)` lets a summary elsewhere point at one cell: it scrolls the
    * cell into view and makes it the active cell, whose counts the readout states. A matrix that scrolls sideways
    * (phones) also gets a whole-matrix overview: every cell as a small square and a band over the columns in view. A tap
@@ -11,7 +11,7 @@
   import { classColor } from '$lib/design/tokens';
   import { prefs } from '$lib/prefs.svelte';
   import { overviewGeometry, overviewHit, overviewWindow } from './cmOverview';
-  import { CONFUSION_FLIP } from './confusionInk';
+  import { CONFUSION_FLIP, sharePct } from './confusionInk';
   // Cell labels are pure white or black, switched near the ramp's luminance crossover (see ./confusionInk).
   const flip = $derived(CONFUSION_FLIP[prefs.resolvedTheme]);
   /** With sparse labels, the smallest share that is labelled. */
@@ -154,7 +154,7 @@
       <b>{names[h.r]}</b> predicted as <b>{names[h.c]}</b>:
       <span class="num">{(matrix[h.r]?.[h.c] ?? 0).toLocaleString('en-US')}</span> of
       <span class="num">{(rowSums[h.r] ?? 0).toLocaleString('en-US')}</span>
-      (<span class="num">{(norm(h.r, h.c) * 100).toFixed(1)}%</span>)
+      (<span class="num">{sharePct(norm(h.r, h.c)) || '0'}%</span>)
     {:else if range}
       Tap the map to move to those columns, or a cell for its counts.
     {:else}
@@ -218,7 +218,7 @@
           tabindex={focus.r === r && focus.c === c ? 0 : -1}
           data-r={r}
           data-c={c}
-          aria-label="{rname} predicted as {cname}: {(matrix[r]?.[c] ?? 0).toLocaleString('en-US')} of {(rowSums[r] ?? 0).toLocaleString('en-US')}, {(v * 100).toFixed(1)}%"
+          aria-label="{rname} predicted as {cname}: {(matrix[r]?.[c] ?? 0).toLocaleString('en-US')} of {(rowSums[r] ?? 0).toLocaleString('en-US')}, {sharePct(v) || '0'}%"
           style:--v={v}
           onpointerenter={() => (hovered = { r, c })}
           onpointerleave={() => (hovered = pinned)}
@@ -227,7 +227,7 @@
           onclick={() => (hovered = pinned = { r, c })}
           onkeydown={() => {}}
         >
-          {#if v >= (sparseLabels ? SPARSE_MIN : 0.005)}<span class:hi={v > flip}>{(v * 100).toFixed(v >= 0.1 ? 0 : 1)}</span>{/if}
+          {#if v > 0 && v >= (sparseLabels ? SPARSE_MIN : 0)}<span class:hi={v > flip}>{sharePct(v)}</span>{/if}
         </div>
       {/each}
     </div>

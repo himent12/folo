@@ -14,6 +14,7 @@ import type {
   Health,
   Model,
   ModelEval,
+  OnnxSwitches,
   PredictInput,
   PredictOptions,
   Prediction,
@@ -68,7 +69,8 @@ export interface Api {
   model(id: string, signal?: AbortSignal): Promise<Model>;
   /** PR curves, confusion matrix and per-class metrics on the model's validation split. */
   modelEval(id: string, signal?: AbortSignal): Promise<ModelEval>;
-  exportModel(id: string, format: ExportFormat): Promise<ExportResult>;
+  /** `switches` apply to `onnx` only (and only on servers whose `system().features` has `export_onnx_switches`). */
+  exportModel(id: string, format: ExportFormat, switches?: OnnxSwitches): Promise<ExportResult>;
 
   runs(signal?: AbortSignal): Promise<Run[]>;
   run(id: string, signal?: AbortSignal): Promise<Run>;
@@ -192,8 +194,10 @@ export class HttpApi implements Api {
   modelEval(id: string, signal?: AbortSignal) {
     return this.#req<ModelEval>('GET', `/models/${encodeURIComponent(id)}/eval`, undefined, signal);
   }
-  exportModel(id: string, format: ExportFormat) {
-    return this.#req<ExportResult>('POST', `/models/${encodeURIComponent(id)}/export`, { format });
+  exportModel(id: string, format: ExportFormat, switches?: OnnxSwitches) {
+    // With `folo-f16` any switch is a 400: send them for ONNX only.
+    const body = format === 'onnx' && switches ? { format, ...switches } : { format };
+    return this.#req<ExportResult>('POST', `/models/${encodeURIComponent(id)}/export`, body);
   }
 
   async runs(signal?: AbortSignal) {

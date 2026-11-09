@@ -13,6 +13,7 @@
   import { Resource } from '$lib/api/resource.svelte';
   import type { Dataset, Model, Run } from '$lib/api/types';
   import ConfusionMatrix from '$lib/charts/ConfusionMatrix.svelte';
+  import { sharePct } from '$lib/charts/confusionInk';
   import { classInk } from '$lib/design/classInk.svelte';
   import { ago, bytes, compact, date, metric, num } from '$lib/format';
   import { prefs } from '$lib/prefs.svelte';
@@ -25,7 +26,7 @@
   import Panel from '$lib/ui/Panel.svelte';
   import Segmented from '$lib/ui/Segmented.svelte';
   import Skeleton from '$lib/ui/Skeleton.svelte';
-  import { cmIndex } from './model/confusion';
+  import { cmIndex, rankConfusions, type ConfusionEntry } from './model/confusion';
   import ExportDialog from './model/ExportDialog.svelte';
   import { origin } from '$lib/lineage';
   import PrCurves from './model/PrCurves.svelte';
@@ -144,13 +145,61 @@
   let section = $state<ModelSection>('curves');
   const showing = (part: ModelSection) => sectionShown(phone.current, section, part);
 
-  /** Points the matrix at a cell, first bringing the Confusion section up on a phone. */
-  async function reveal(at: { r: number; c: number }) {
-    if (phone.current && section !== 'confusion') {
+  // Phones: the Confusion section opens on a ranked list of what goes wrong; the full matrix is one step further.
+  let cmExplore = $state(false);
+  // Two short groups, so misses (usually the larger shares) never crowd out the confusions between classes.
+  const RANK_MAX = 5;
+  const ranked = $derived.by(() => {
+    const all = ev ? rankConfusions(ev.confusion, Infinity) : [];
+    return [
+      { kind: 'confused', title: 'Taken for another class', rows: all.filter((e) => e.kind === 'confused').slice(0, RANK_MAX) },
+      { kind: 'missed', title: 'Missed', rows: all.filter((e) => e.kind === 'missed').slice(0, RANK_MAX) },
+    ].filter((g) => g.rows.length);
+  });
+  /** A ranked line's cell in the shown matrix (null when its class is folded into Other). */
+  function cellOf(e: ConfusionEntry): { r: number; c: number } | null {
+    if (!cm) return null;
+    const r = cmIndex(e.r, cm.ids);
+    const c = e.kind === 'missed' ? cm.classes.length : cmIndex(e.c, cm.ids);
+    return r === null || c === null ? null : { r, c };
+  }
+  const smooth = (): ScrollBehavior => (matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth');
+
+  /** Points the matrix at a cell, first bringing the Confusion section and its matrix up on a phone. */
+  async function reveal(at: { r: number; c: number } | null) {
+    if (phone.current && (section !== 'confusion' || !cmExplore)) {
       section = 'confusion';
+      cmExplore = true;
       await tick();
     }
-    matrixView?.reveal(at.r, at.c);
+    if (at) matrixView?.reveal(at.r, at.c);
+  }
+  /** Back from the matrix to the ranked list, keeping the reader's place at the section's top. */
+  async function closeMatrix() {
+    cmExplore = false;
+    await tick();
+    document.querySelector<HTMLElement>('#cm .explore')?.focus({ preventScroll: true });
+  }
+
+  // Phones: a class's "View curve" (in Classes) shows its traced curve, with a way back to the class it came from.
+  let backTo = $state<number | null>(null);
+  $effect(() => {
+    if (section !== 'curves') backTo = null;
+  });
+  async function viewCurve(cls: number) {
+    section = 'curves';
+    backTo = cls;
+    await tick();
+    document.getElementById('pr')?.scrollIntoView({ block: 'start', behavior: smooth() });
+    document.querySelector<HTMLElement>('#pr .back')?.focus({ preventScroll: true });
+  }
+  async function backToClasses() {
+    const cls = backTo;
+    section = 'classes';
+    await tick();
+    const row = document.querySelector<HTMLElement>(`#pr .disc[data-cls="${cls}"]`);
+    row?.focus({ preventScroll: true });
+    row?.scrollIntoView({ block: 'center', behavior: smooth() });
   }
 
   /**
@@ -159,11 +208,13 @@
    */
   const latency = (m: Model): number | undefined => e2eMs[m.arch];
   const kpis = (m: Model) => [
-    { label: 'mAP50-95', value: m.metrics?.map50_95, sub: 'IoU 0.50:0.95' },
-    { label: 'mAP50', value: m.metrics?.map50, sub: 'IoU 0.50' },
-    { label: 'Precision', value: m.metrics?.precision, sub: 'at the best-F1 confidence' },
-    { label: 'Recall', value: m.metrics?.recall, sub: 'at the best-F1 confidence' },
+    { label: 'mAP50-95', short: 'mAP50-95', value: m.metrics?.map50_95, sub: 'IoU 0.50:0.95' },
+    { label: 'mAP50', short: 'mAP50', value: m.metrics?.map50, sub: 'IoU 0.50' },
+    { label: 'Precision', short: 'P', value: m.metrics?.precision, sub: 'at the best-F1 confidence' },
+    { label: 'Recall', short: 'R', value: m.metrics?.recall, sub: 'at the best-F1 confidence' },
   ];
+  // Phones past the first section: the four numbers fold into one line, so the section starts on the first screen.
+  const kpiLine = $derived(phone.current && section !== 'curves');
   // What the four numbers mean, one tap away (the strip itself keeps to values and a short qualifier).
   let helpOpen = $state(false);
   // Phones: one summary line under the top bar; the rest of the provenance behind it.
@@ -235,6 +286,19 @@
 
     <!-- One strip of numbers in ink: the headline metric, then the ones that support it, each with a short qualifier;
          the ⓘ opens what they mean. Phones: the headline on its own row at 32 px, the other three as a row under it. -->
+    {#if kpiLine}
+      <section class="kpi-line num" aria-label="Validation metrics">
+        {#each kpis(m) as k, i (k.label)}
+          {#if i}<span class="sep" aria-hidden="true">·</span>{/if}
+          <span class="kl-item"
+            >{#if k.short !== k.label}<span class="kl" aria-hidden="true">{k.short}</span><span class="sr-only">{k.label}</span>{:else}<span class="kl"
+                >{k.label}</span
+              >{/if}
+            <b>{metric(k.value)}</b></span
+          >
+        {/each}
+      </section>
+    {:else}
     <section class="kpis" aria-label="Validation metrics">
       {#each kpis(m) as k, i (k.label)}
         <div class="kpi" class:hero={i === 0}>
@@ -271,6 +335,7 @@
         </dl>
       {/if}
     </section>
+    {/if}
 
     {#if phone.current}
       <!-- Stays reachable under the top bar while a section scrolls. -->
@@ -289,7 +354,14 @@
           id="pr"
         >
           {#if ev}
-            <PrCurves classes={m.classes} {ev} map50={m.metrics?.map50 ?? null} view={prView(phone.current, section)} />
+            <PrCurves
+              classes={m.classes}
+              {ev}
+              map50={m.metrics?.map50 ?? null}
+              view={prView(phone.current, section)}
+              onviewcurve={phone.current ? viewCurve : undefined}
+              onback={backTo !== null ? backToClasses : undefined}
+            />
           {:else if evaluation.error}
             <ErrorState error={evaluation.error} retry={() => evaluation.refresh()} compact title="Could not load the evaluation" />
           {:else}
@@ -399,8 +471,50 @@
     </div>
     <!-- Full width: the matrix grows with the class count, and the rail beside it would sit empty. -->
     <div class="cm-part" class:off={!showing('confusion')}>
-      <Panel title="Confusion matrix" meta={cm?.partial ? (phone.current ? `${CM_MAX} most common + Other` : `${CM_MAX} most common classes + Other + background`) : 'share of each true class'} id="cm">
-        {#if cm}
+      <Panel
+        title={phone.current && !cmExplore ? 'Confusions and misses' : 'Confusion matrix'}
+        meta={phone.current && !cmExplore
+          ? 'largest share of a class first'
+          : cm?.partial
+            ? phone.current
+              ? `${CM_MAX} most common + Other`
+              : `${CM_MAX} most common classes + Other + background`
+            : 'share of each true class'}
+        id="cm"
+      >
+        {#if cm && phone.current && !cmExplore}
+          <!-- Phones: what goes wrong most, as a list (share of the true class and the counts behind it); each line
+               opens the matrix at its cell, and the whole matrix is one explicit step away. -->
+          {#each ranked as g (g.kind)}
+            <h3 class="rank-h" id="cm-rank-{g.kind}">{g.title}</h3>
+            <ol class="rank" aria-labelledby="cm-rank-{g.kind}">
+              {#each g.rows as e (`${e.r}-${e.c}`)}
+                <li>
+                  <button type="button" class="rk" onclick={() => reveal(cellOf(e))}>
+                    <span class="rk-what">
+                      <span class="sw" style:background={classInk(e.r)} aria-hidden="true"></span>
+                      {#if e.kind === 'missed'}<b>{m.classes[e.r]}</b> missed{:else}<b>{m.classes[e.r]}</b> → <b>{m.classes[e.c]}</b>{/if}
+                    </span>
+                    <span class="rk-pct num">{sharePct(e.v)}%</span>
+                    <span class="rk-sub num">
+                      {num(e.count)} of {num(e.total)}
+                      {e.kind === 'missed' ? 'objects found no box' : `objects predicted as ${m.classes[e.c]}`}
+                    </span>
+                  </button>
+                </li>
+              {/each}
+            </ol>
+          {:else}
+            <p class="none">No class is confused with another or missed.</p>
+          {/each}
+          <div class="rank-foot">
+            {#if missed}<p><span class="num">{sharePct(missed.v)}%</span> of all objects missed overall, at IoU 0.5.</p>{/if}
+            <Button class="explore" onclick={() => (cmExplore = true)}>Explore the matrix</Button>
+          </div>
+        {:else if cm}
+          {#if phone.current}
+            <button type="button" class="to-list" onclick={closeMatrix}><ArrowLeft size={14} aria-hidden="true" />Confusions and misses</button>
+          {/if}
           <!-- The matrix at its own size (cells up to 72 px), what to read from it directly beside it, so the panel has
                no dead middle. Up to 1199 px the two consequential cells lead (a phone's matrix scrolls sideways,
                hiding the background column), and the reading notes follow the matrix. -->
@@ -412,7 +526,7 @@
                   <div>
                     <dt>Most confused</dt>
                     <dd>
-                      {#snippet pair()}<b>{m.classes[confused.r]}</b> → <b>{m.classes[confused.c]}</b> <span class="num">{num(confused.v * 100, 1)}%</span>{/snippet}
+                      {#snippet pair()}<b>{m.classes[confused.r]}</b> → <b>{m.classes[confused.c]}</b> <span class="num">{sharePct(confused.v)}%</span>{/snippet}
                       {#if confusedCell}
                         {@const at = confusedCell}
                         <button type="button" class="go" title="Show in the matrix" onclick={() => reveal(at)}>{@render pair()}</button>
@@ -426,13 +540,13 @@
                     <dd>
                       {#if missed.worst}
                         {@const w = missed.worst}
-                        {#snippet worst()}<b>{m.classes[w.r]}</b> <span class="num">{num(w.v * 100, 1)}%</span>{/snippet}
+                        {#snippet worst()}<b>{m.classes[w.r]}</b> <span class="num">{sharePct(w.v)}%</span>{/snippet}
                         {#if missedCell}
                           {@const at = missedCell}
                           <button type="button" class="go" title="Show in the matrix" onclick={() => reveal(at)}>{@render worst()}</button>
                         {:else}{@render worst()}{/if}<span class="sep" aria-hidden="true">·</span>
                       {/if}<span
-                        class="num">{num(missed.v * 100, 1)}%</span> overall
+                        class="num">{sharePct(missed.v)}%</span> overall
                     </dd>
                   </div>
                 {/if}
@@ -444,8 +558,9 @@
               <details class="how">
                 <summary><ChevronDown size={14} aria-hidden="true" />How the shares are computed</summary>
                 <div class="how-body">
-                  <p>Each row sums to 100% of that class's ground-truth boxes at IoU 0.5. Cells under 5% are not
-                    labelled; hover or tap one for its count. An empty cell had no objects at all.</p>
+                  <p>Each row sums to 100% of that class's ground-truth boxes at IoU 0.5, in whole percentages ("&lt;1"
+                    under half a percent). Cells under 5% are not labelled; hover or tap one for its count. An empty cell
+                    had no objects at all.</p>
                   <p>The background row splits the false detections (boxes on no object) by the class they were given.</p>
                   {#if cm.partial}
                     <p>The {CM_MAX} classes with the most ground-truth boxes are shown by name; the other {m.classes.length - CM_MAX} are folded into Other.</p>
@@ -596,6 +711,116 @@
     line-height: 40px;
     letter-spacing: var(--type-3xl-tracking);
   }
+  /* Phones past the first section: the four numbers on one 40 px line, the same frame as the strip. */
+  .kpi-line {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0 var(--space-2);
+    min-height: 40px;
+    padding: var(--space-2) var(--space-3);
+    border: 1px solid var(--line-default);
+    border-radius: var(--radius-lg);
+    background: var(--bg-panel);
+  }
+  :global([data-theme='dark']) .kpi-line {
+    border-color: var(--line-subtle);
+  }
+  .kl-item {
+    white-space: nowrap;
+  }
+  .kl {
+    font-size: var(--type-sm-size);
+    color: var(--text-tertiary);
+  }
+  .kpi-line b {
+    font-weight: var(--weight-semibold);
+  }
+  .kpi-line .sep {
+    margin: 0;
+  }
+  /* Phones' confusion list: two-line 56 px rows (the pair and its share, then the counts behind it). */
+  .rank-h {
+    display: flex;
+    align-items: center;
+    min-height: 32px;
+    margin: 0 calc(var(--space-4) * -1);
+    padding: 0 var(--space-4);
+    border-top: 1px solid var(--line-subtle);
+    background: var(--bg-raised);
+    font-size: var(--type-sm-size);
+    font-weight: var(--weight-medium);
+    color: var(--text-secondary);
+  }
+  .rank {
+    margin: 0 calc(var(--space-4) * -1);
+    border-top: 1px solid var(--line-subtle);
+  }
+  .rank li + li {
+    border-top: 1px solid var(--line-subtle);
+  }
+  .rk {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: baseline;
+    gap: 2px var(--space-3);
+    width: 100%;
+    min-height: 56px;
+    padding: var(--space-2) var(--space-4);
+    text-align: left;
+  }
+  .rk:hover {
+    background: var(--bg-hover);
+  }
+  .rk:focus-visible {
+    outline-offset: -2px;
+  }
+  .rk-what {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    min-width: 0;
+    color: var(--text-secondary);
+  }
+  .rk-what b {
+    color: var(--text-primary);
+    font-weight: var(--weight-medium);
+  }
+  .rk-pct {
+    font-weight: var(--weight-medium);
+  }
+  .rk-sub {
+    grid-column: 1 / -1;
+    padding-left: calc(8px + var(--space-2));
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--text-tertiary);
+  }
+  .rank-foot {
+    display: grid;
+    justify-items: start;
+    gap: var(--space-3);
+    padding-top: var(--space-3);
+    border-top: 1px solid var(--line-subtle);
+    margin: 0 calc(var(--space-4) * -1);
+    padding-inline: var(--space-4);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--text-secondary);
+  }
+  .to-list {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    min-height: 44px;
+    margin: calc(var(--space-2) * -1) 0 var(--space-1);
+    font-size: var(--type-sm-size);
+    font-weight: var(--weight-medium);
+    color: var(--text-secondary);
+  }
+  .to-list:hover {
+    color: var(--text-primary);
+  }
   /* The rail is as tall as its content and sticks under the top bar while the long class table scrolls past. */
   .detail {
     display: grid;
@@ -612,6 +837,27 @@
   .rail {
     position: sticky;
     top: calc(var(--size-topbar) + var(--space-4));
+  }
+  /* Desktop: the Details panel stretches to the row, so its bottom meets the PR panel's; its title and list stay at the
+     top and stick under the top bar while the class table scrolls past. */
+  @media (min-width: 1200px) {
+    .detail {
+      align-items: stretch;
+    }
+    .rail {
+      position: static;
+    }
+    .rail :global(#details > header) {
+      position: sticky;
+      top: calc(var(--size-topbar) + var(--space-4));
+      z-index: 1;
+      border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+      background: var(--bg-panel);
+    }
+    .rail .details {
+      position: sticky;
+      top: calc(var(--size-topbar) + var(--space-4) + 40px);
+    }
   }
   /* Phones: the sections the picker is not showing. */
   .cm-part {
@@ -906,6 +1152,10 @@
     }
   }
   @media (max-width: 767px) {
+    /* "View curve" and "Back to Classes" land the curves panel under the top bar and the section picker. */
+    .main-col :global(#pr) {
+      scroll-margin-top: calc(var(--size-topbar) + var(--space-16));
+    }
     .details.two {
       grid-template-columns: minmax(0, 1fr);
     }

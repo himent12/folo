@@ -15,6 +15,11 @@ export interface HealthItem {
   action?: { label: string; path: string };
   /** The `folo dataset check` issues behind it, listed from this severity on. */
   issues?: IssueSeverity;
+  /**
+   * How many file issues it stands for (one per broken label file; the check's count otherwise). Findings without it
+   * are dataset-wide observations (class balance, box sizes, splits), counted apart from the files.
+   */
+  files?: number;
 }
 
 /** One line of the health summary: the findings of one severity, most severe first. */
@@ -36,19 +41,53 @@ export function bySeverity(items: readonly HealthItem[]): SeverityGroup[] {
   return groups.filter((g) => g.items.length > 0);
 }
 
-/** Findings that need attention (errors and warnings): the "N findings to review" count, everywhere it is shown. */
+const review = (h: HealthItem) => h.severity === 'danger' || h.severity === 'warning';
+
+/** Findings that need attention (errors and warnings): the "N issue categories" count, everywhere it is shown. */
 export function reviewCount(items: readonly HealthItem[]): number {
-  return items.filter((h) => h.severity === 'danger' || h.severity === 'warning').length;
+  return items.filter(review).length;
 }
 
-/** "1 finding", "3 findings": a finding is one health line, whatever it counts inside (files, issues, boxes). */
-export function findings(n: number): string {
-  return `${n} ${n === 1 ? 'finding' : 'findings'}`;
+/** File issues behind the findings that need attention (the check's errors and warnings, broken label files). */
+export function reviewFiles(items: readonly HealthItem[]): number {
+  return items.filter(review).reduce((a, h) => a + (h.files ?? 0), 0);
 }
 
-/** "3 findings to review" (the tab and the Health panel say the same), or undefined when nothing needs review. */
+const plural = (n: number, one: string, many: string) => `${int(n)} ${n === 1 ? one : many}`;
+
+/**
+ * "3 issue categories" (the tab and the Health panel say the same), or undefined when nothing needs review. A
+ * category is one health finding, whatever it counts inside (files, boxes, classes).
+ */
 export function reviewLabel(n: number): string | undefined {
-  return n > 0 ? `${findings(n)} to review` : undefined;
+  return n > 0 ? plural(n, 'issue category', 'issue categories') : undefined;
+}
+
+/**
+ * The Health panel's line: the categories to review and the file issues behind them, then the notes, each quantity
+ * named ("3 issue categories · 6 file issues · 1 note").
+ */
+export function healthSummary(items: readonly HealthItem[]): string {
+  const n = reviewCount(items);
+  const files = reviewFiles(items);
+  const notes = items.filter((h) => h.severity === 'info').length;
+  return [
+    reviewLabel(n) ?? 'nothing to fix',
+    files ? plural(files, 'file issue', 'file issues') : '',
+    notes ? plural(notes, 'note', 'notes') : '',
+  ]
+    .filter(Boolean)
+    .join(' · ');
+}
+
+/**
+ * The count on a severity line's right edge, in the same two quantities: the file issues behind its findings and,
+ * apart, its dataset-wide observations ("3 file issues · 1 dataset-wide").
+ */
+export function groupCount(g: SeverityGroup): string {
+  const files = g.items.reduce((a, h) => a + (h.files ?? 0), 0);
+  const wide = g.items.filter((h) => h.files === undefined).length;
+  return [files ? plural(files, 'file issue', 'file issues') : '', wide ? `${int(wide)} dataset-wide` : ''].filter(Boolean).join(' · ');
 }
 
 /** The folded line of one severity: each finding's short form, so it reads whole ("3 file issues · 35% tiny boxes"). */
@@ -108,6 +147,7 @@ export function healthChecks(d: Dataset, s: DatasetStats, counts?: IssueCounts):
       short: `${int(s.broken_labels)} broken label ${s.broken_labels === 1 ? 'file' : 'files'}`,
       detail: 'These labels could not be parsed, so their images are skipped in training. Fix or delete them, then re-register the dataset.',
       issues: 'error',
+      files: s.broken_labels,
     });
   } else if (counts && counts.error > 0) {
     out.push({
@@ -117,6 +157,7 @@ export function healthChecks(d: Dataset, s: DatasetStats, counts?: IssueCounts):
       short: `${int(counts.error)} file ${counts.error === 1 ? 'error' : 'errors'}`,
       detail: 'Images that cannot be read and labels that cannot be parsed are left out of training. Fix or remove them.',
       issues: 'error',
+      files: counts.error,
     });
   }
   if (counts && counts.warning > 0) {
@@ -127,6 +168,7 @@ export function healthChecks(d: Dataset, s: DatasetStats, counts?: IssueCounts):
       short: `${int(counts.warning)} file ${counts.warning === 1 ? 'issue' : 'issues'}`,
       detail: 'Training still uses these files: boxes past the image edge, duplicate labels or images. Each says what a cleanup would do.',
       issues: 'warning',
+      files: counts.warning,
     });
   }
 
