@@ -1217,6 +1217,7 @@ impl Backend for MockBackend {
         if !req.imgsz.is_multiple_of(32)
             || !(64..=1280).contains(&req.imgsz)
             || !(1..=64).contains(&req.batch)
+            || !(req.budget_s.is_finite() && (1.0..=10.0).contains(&req.budget_s))
         {
             return Err(ApiError::new(
                 "invalid_body",
@@ -1261,6 +1262,8 @@ impl Backend for MockBackend {
             },
         };
         m.0.insert(0, train.clone());
+        // Inference counts predictions (training counts one sample per probe).
+        let predictions = (req.budget_s * 0.4 * 1000. / lat).round() as u64;
         let precision = if req.amp { InferPrecision::F16 } else { InferPrecision::F32 };
         let same_infer = |i: &InferThroughput| {
             i.device == "gpu:0" && i.arch == req.arch && i.imgsz == req.imgsz && i.precision == precision
@@ -1268,14 +1271,15 @@ impl Backend for MockBackend {
         let infer = match m.1.iter().position(same_infer) {
             Some(i) => {
                 let mut row = m.1.remove(i);
-                row.latency_ms = (row.latency_ms * row.samples as f64 + lat) / (row.samples + 1) as f64;
+                let n = row.samples as f64;
+                row.latency_ms = (row.latency_ms * n + lat * predictions as f64) / (n + predictions as f64);
                 row.imgs_per_s = 1000. / row.latency_ms;
-                row.samples += 1;
+                row.samples += predictions;
                 row.updated = Some(now.clone());
                 row
             }
             None => InferThroughput {
-                samples: 1,
+                samples: predictions,
                 updated: Some(now),
                 ..infer_row("gpu:0", GPU_NAME, req.arch, req.imgsz, req.amp, lat, ThroughputSource::Measured)
             },
@@ -1287,7 +1291,7 @@ impl Backend for MockBackend {
             train_imgs_per_s: r,
             train_batches: (r * req.budget_s * 0.42 / req.batch as f64).round() as u64,
             latency_ms: lat,
-            predictions: (req.budget_s * 0.4 * 1000. / lat).round() as u64,
+            predictions,
             elapsed_s: req.budget_s + 4.0,
             training: train,
             inference: infer,
@@ -1304,8 +1308,9 @@ impl Backend for MockBackend {
         let train = ds.ds.splits.train;
         // No validation split: validation runs on the training images (docs/API.md).
         let val = if ds.ds.splits.val > 0 { ds.ds.splits.val } else { train };
-        // The demo has never trained here: reference rates (the app's own reference model),
-        // so the estimate says so and claims low confidence.
+        // Reference rates (the app's own reference model) unless the table has a measured row of
+        // this device with the run's arch, image size, batch and precision (docs/API.md: the
+        // measured row first).
         let arch = match config.arch.as_str() {
             "folo-n" => 0,
             "folo-s" => 1,
@@ -1323,14 +1328,37 @@ impl Backend for MockBackend {
         let close =
             if config.augment.mosaic <= 0. { epochs } else { config.augment.close_mosaic.min(epochs / 2) };
         let startup = 6.0;
-        let epoch_s = secs / epochs as f64;
-        let rate = train as f64 / (epoch_s * 0.92);
+        let (device, here) = if cpu { ("cpu", CPU_NAME) } else { ("gpu:0", GPU_NAME) };
+        let measured = self
+            .measured
+            .lock()
+            .unwrap()
+            .0
+            .iter()
+            .find(|t| {
+                t.device == device
+                    && t.measured_on == here
+                    && t.arch == config.arch
+                    && t.imgsz == config.imgsz
+                    && t.batch == config.batch
+                    && t.amp == config.amp
+            })
+            .cloned();
+        let ref_epoch_s = secs / epochs as f64;
+        // Validation stays at the reference rate (the table's rows time training).
+        let val_s = ref_epoch_s * 0.08;
+        let (rate, train_s) = match &measured {
+            Some(m) => (m.imgs_per_s, train as f64 / m.imgs_per_s.max(1e-6)),
+            None => (train as f64 / (ref_epoch_s * 0.92), ref_epoch_s * 0.92),
+        };
+        let epoch_s = train_s + val_s;
+        let secs = epoch_s * epochs as f64;
         let phase = |kind: PhaseKind, n: u32| EstimatePhase {
             phase: kind,
             epochs: n,
             train_imgs_per_s: rate,
-            train_s: epoch_s * 0.92,
-            val_s: epoch_s * 0.08,
+            train_s,
+            val_s,
             epoch_s,
         };
         let phases = [(PhaseKind::Mosaic, epochs - close), (PhaseKind::CloseMosaic, close)]
@@ -1338,8 +1366,46 @@ impl Backend for MockBackend {
             .filter(|p| p.1 > 0)
             .map(|(k, n)| phase(k, n))
             .collect();
-        let device_name =
-            if cpu { "AMD Ryzen 9 7950X".to_string() } else { "NVIDIA GeForce RTX 4080 SUPER".to_string() };
+        let device_name = here.to_string();
+        // An exact measured row: high confidence from 3 samples (±10 %), else medium (-20 / +30 %);
+        // the reference: low (-30 / +50 %).
+        let (source, confidence, lo, hi) = match &measured {
+            Some(m) if m.samples >= 3 => (ThroughputSource::Measured, Confidence::High, 0.9, 1.1),
+            Some(_) => (ThroughputSource::Measured, Confidence::Medium, 0.8, 1.3),
+            None => (ThroughputSource::Reference, Confidence::Low, 0.7, 1.5),
+        };
+        let basis = match &measured {
+            Some(m) => EstimateBasis {
+                source: ThroughputSource::Measured,
+                arch: m.arch,
+                imgsz: m.imgsz,
+                batch: m.batch,
+                amp: m.amp,
+                measured_on: m.measured_on.clone(),
+                samples: m.samples,
+                updated: m.updated.clone(),
+                exact: true,
+                note: format!(
+                    "Measured on this machine at these settings ({} {}).",
+                    m.samples,
+                    if m.samples == 1 { "sample" } else { "samples" }
+                ),
+            },
+            None => EstimateBasis {
+                source: ThroughputSource::Reference,
+                arch: config.arch,
+                imgsz: 640,
+                batch: 16,
+                amp: false,
+                measured_on: REF_GPU.into(),
+                samples: 0,
+                updated: None,
+                exact: false,
+                note: "Reference rates for this architecture at 640 px and batch 16, scaled to this \
+                       config; nothing has been measured at these settings on this machine."
+                    .into(),
+            },
+        };
         Ok(RunEstimate {
             device: if cpu { "cpu".into() } else { "gpu:0".into() },
             device_name,
@@ -1352,24 +1418,11 @@ impl Backend for MockBackend {
             startup_s: startup,
             est_epoch_s: epoch_s,
             est_total_s: secs + startup,
-            est_total_s_low: (secs + startup) * 0.7,
-            est_total_s_high: (secs + startup) * 1.5,
-            source: ThroughputSource::Reference,
-            confidence: Confidence::Low,
-            basis: EstimateBasis {
-                source: ThroughputSource::Reference,
-                arch: config.arch,
-                imgsz: 640,
-                batch: 16,
-                amp: false,
-                measured_on: "reference (RTX 4090)".into(),
-                samples: 0,
-                updated: None,
-                exact: false,
-                note: "Reference rates for this architecture at 640 px and batch 16, scaled to this \
-                       config; nothing has been measured on this machine yet."
-                    .into(),
-            },
+            est_total_s_low: (secs + startup) * lo,
+            est_total_s_high: (secs + startup) * hi,
+            source,
+            confidence,
+            basis,
             val_source: ThroughputSource::Reference,
             est_peak_vram_bytes: (!cpu).then_some((vram_gib as f64 * (1u64 << 30) as f64) as u64),
             vram_source: (!cpu).then_some(ThroughputSource::Reference),
@@ -1824,6 +1877,7 @@ fn fake_predictions(truth: &[BBoxT], w: u32, h: u32, q: f32, names: &[String], s
 type BBoxT = super::types::BBox;
 
 const GPU_NAME: &str = "NVIDIA GeForce RTX 4080 SUPER";
+const CPU_NAME: &str = "AMD Ryzen 9 7950X";
 /// The reference machine (docs/BENCHMARKS.md), named on every reference row.
 const REF_GPU: &str = "NVIDIA GeForce RTX 4080 SUPER";
 const REF_CPU: &str = "Intel Core i7-14700KF";
@@ -1961,6 +2015,9 @@ fn with_reference(
     let mut ref_infer = Vec::new();
     for (device, cpu) in [("gpu:0", false), ("cpu", true)] {
         let on = if cpu { REF_CPU } else { REF_GPU };
+        // Only a row measured on this very adapter / CPU replaces the reference (one from
+        // another adapter under the same ordinal stays listed beside it).
+        let here = if cpu { CPU_NAME } else { GPU_NAME };
         for arch in Arch::ALL {
             for imgsz in [640, 320] {
                 for amp in [false, true] {
@@ -1969,6 +2026,7 @@ fn with_reference(
                     }
                     let have = training.iter().any(|t| {
                         t.device == device
+                            && t.measured_on == here
                             && t.arch == arch
                             && t.imgsz == imgsz
                             && t.batch == 16
@@ -1989,7 +2047,11 @@ fn with_reference(
                     }
                     let precision = if amp { InferPrecision::F16 } else { InferPrecision::F32 };
                     let have = inference.iter().any(|i| {
-                        i.device == device && i.arch == arch && i.imgsz == imgsz && i.precision == precision
+                        i.device == device
+                            && i.measured_on == here
+                            && i.arch == arch
+                            && i.imgsz == imgsz
+                            && i.precision == precision
                     });
                     if !have {
                         let l = reference_latency(arch, imgsz, amp, cpu);

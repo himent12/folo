@@ -339,11 +339,26 @@ impl FoloApp {
             .into_any_element()
         };
         let table = self.throughput.ready().cloned();
+        // The adapter or CPU each device is on this server now: a measured row from other hardware
+        // under the same name (a moved data dir, a new GPU) isn't "measured here", and says where.
+        let system = self.store.system.ready().cloned();
+        let current = |device: &str| -> Option<String> {
+            if device == "cpu" {
+                return system.as_ref().map(|s| s.cpu.name.clone());
+            }
+            let ordinal: u32 = device.strip_prefix("gpu:")?.parse().ok()?;
+            system
+                .as_ref()
+                .and_then(|s| s.gpus.iter().find(|g| g.ordinal == ordinal).map(|g| g.name.clone()))
+                .or_else(|| table.as_ref().filter(|tb| tb.device == device).map(|tb| tb.device_name.clone()))
+        };
+        // Measured on this device's current hardware (unknown hardware counts as here).
+        let here = |device: &str, on: &str| current(device).is_none_or(|c| c == on);
         let (n_train, n_infer) = table.as_ref().map_or((0, 0), |tb| {
             let measured = |s: ThroughputSource| s == ThroughputSource::Measured;
             (
-                tb.training.iter().filter(|r| measured(r.source)).count(),
-                tb.inference.iter().filter(|r| measured(r.source)).count(),
+                tb.training.iter().filter(|r| measured(r.source) && here(&r.device, &r.measured_on)).count(),
+                tb.inference.iter().filter(|r| measured(r.source) && here(&r.device, &r.measured_on)).count(),
             )
         });
         let view_seg = self.segmented(
@@ -409,7 +424,15 @@ impl FoloApp {
                 .px(px(16.))
                 .border_b_1()
                 .border_color(t.line_subtle)
-                .when_some(note, |d, n| d.tooltip(crate::controls::tip(n, None)))
+                // The whole source on hover (it can end in "…" at small widths), with the
+                // server's note on how a reference was derived.
+                .tooltip(crate::controls::tip(
+                    match note {
+                        Some(n) => format!("{source} · {n}"),
+                        None => source.clone(),
+                    },
+                    None,
+                ))
                 .child(cell(
                     64.,
                     false,
@@ -444,7 +467,7 @@ impl FoloApp {
                         .child(
                             text(ty::SM, if measured { t.text_secondary } else { t.text_tertiary })
                                 .ellipsis()
-                                .child(source),
+                                .child(source.clone()),
                         ),
                 )
                 .child(cell(
@@ -460,7 +483,7 @@ impl FoloApp {
         };
         // Measured: how many samples, and probes among them; on another adapter than this server's
         // (a moved data dir), it says so: estimates don't use those rows.
-        let source = |measured: bool, samples: u64, probes: u64, on: &str, this_gpu: bool| {
+        let source = |measured: bool, samples: u64, probes: u64, on: &str, device: &str| {
             if !measured {
                 return "Reference · not measured here".to_string();
             }
@@ -472,14 +495,12 @@ impl FoloApp {
             } else {
                 n(samples, "sample", "samples")
             };
-            match &device_name {
-                Some(d) if this_gpu && on != d => {
-                    format!("Measured on {} · {what}", crate::ui::short_gpu(on))
-                }
-                _ => format!("Measured · {what}"),
+            if here(device, on) {
+                format!("Measured · {what}")
+            } else {
+                format!("Measured on {} · {what}", crate::ui::short_gpu(on))
             }
         };
-        let this_device = table.as_ref().map(|tb| tb.device.clone()).unwrap_or_default();
         let rows: Vec<AnyElement> = match &table {
             None => Vec::new(),
             Some(tb) if infer => tb
@@ -498,7 +519,7 @@ impl FoloApp {
                         if r.precision == crate::api::InferPrecision::F16 { "f16" } else { "f32" },
                         Some(r.latency_ms),
                         r.imgs_per_s,
-                        source(measured, r.samples, 0, &r.measured_on, r.device == this_device),
+                        source(measured, r.samples, 0, &r.measured_on, &r.device),
                         measured,
                         r.note.clone(),
                         r.updated.as_deref(),
@@ -521,7 +542,7 @@ impl FoloApp {
                         if r.amp { "mixed (f16)" } else { "f32" },
                         None,
                         r.imgs_per_s,
-                        source(measured, r.samples, r.probes, &r.measured_on, r.device == this_device),
+                        source(measured, r.samples, r.probes, &r.measured_on, &r.device),
                         measured,
                         r.note.clone(),
                         r.updated.as_deref(),
@@ -533,7 +554,23 @@ impl FoloApp {
         let body = match &self.throughput {
             Load::Failed(e) => div()
                 .p(px(16.))
-                .child(text(ty::SM, t.danger_text).child(e.message.clone()))
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(16.))
+                .child(text(ty::SM, t.danger_text).flex_1().min_w_0().child(format!(
+                    "Couldn't load the table: {}",
+                    e.message
+                )))
+                .child(self.button(
+                    "tp-retry",
+                    "Retry",
+                    crate::controls::Btn::Secondary,
+                    Some("icons/refresh-cw.svg"),
+                    window,
+                    cx,
+                    act(|this, _, cx| this.load_throughput(cx)),
+                ))
                 .into_any_element(),
             Load::Ready(_) if rows.is_empty() => div()
                 .p(px(16.))
@@ -566,6 +603,15 @@ impl FoloApp {
                             .when_some(device_name.clone(), |d, n| {
                                 d.child(text(ty::SM, t.text_tertiary).child(crate::ui::short_gpu(&n)))
                             })
+                            // The table as the server has it now (a run may have added rows).
+                            .child(self.icon_button(
+                                "tp-reload",
+                                "icons/refresh-cw.svg",
+                                "Reload the table",
+                                window,
+                                cx,
+                                act(|this, _, cx| this.load_throughput(cx)),
+                            ))
                             .when(can_measure, |d| d.child(measure)),
                     ),
             )

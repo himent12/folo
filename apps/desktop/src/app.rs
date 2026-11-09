@@ -740,6 +740,10 @@ impl FoloApp {
         if route == self.route {
             return;
         }
+        // Settings shows the throughput table as the server has it now.
+        if route == Route::Settings && !self.throughput.is_loading() {
+            self.throughput = Load::Idle;
+        }
         let prev = std::mem::replace(&mut self.route, route);
         self.history.push(prev);
         if self.history.len() > 50 {
