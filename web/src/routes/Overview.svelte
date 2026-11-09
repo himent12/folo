@@ -33,6 +33,8 @@
   import LiveRunCard from './overview/LiveRunCard.svelte';
   import Callout from './run/Callout.svelte';
   import WifiOff from '@lucide/svelte/icons/wifi-off';
+  import RefreshCwOff from '@lucide/svelte/icons/refresh-cw-off';
+  import { asOf, Now } from '$lib/api/freshness.svelte';
 
   setCrumbs({ label: 'Overview' });
 
@@ -50,9 +52,15 @@
   // Nothing loaded and every request failed: one page-level block says why and how to recover, instead of four panels
   // each saying the same thing (DESIGN_DIRECTION §2.8).
   const down = $derived(all.every((r) => !!r.error && !r.data));
-  // Something loaded, then the server stopped answering: keep it, and say once that it is stale.
+  // Something loaded, then the server stopped answering: keep it, and say once that it is stale. Two clocks, never
+  // confused (lib/api/freshness): the lists' snapshots and the live run's stream. While the stream still streams, only
+  // the lists are behind, and the notice says exactly that; the live card stays live. When the stream went quiet too,
+  // the server is not answering, and the card shows its last known state.
   const stale = $derived(!down && all.some((r) => r.stale !== undefined));
   const staleSince = $derived(Math.min(...all.map((r) => r.updated ?? Infinity)));
+  let streamLost = $state<number | null>(null);
+  const streaming = $derived(!!live && streamLost === null);
+  const now = new Now(() => stale);
   const fresh = $derived(datasets.data?.length === 0 && runs.data?.length === 0 && models.data?.length === 0);
   function retryAll() {
     void runs.refresh();
@@ -106,10 +114,17 @@
          settings), never four panels each saying the server has not answered. -->
     <ErrorState error={runs.error} retry={retryAll} title="Could not load the overview" />
   {:else}
-    {#if stale}
+    {#if stale && streaming}
+      <div class="stale">
+        <Callout tone="warning" icon={RefreshCwOff} title="Lists not refreshing">
+          The lists below show what loaded {asOf(staleSince, now.current)}; the run training now is still live.
+          {#snippet actions()}<Button size="sm" onclick={retryAll}>Retry</Button>{/snippet}
+        </Callout>
+      </div>
+    {:else if stale}
       <div class="stale">
         <Callout tone="warning" icon={WifiOff} title="Server not answering">
-          Showing what loaded {ago(new Date(staleSince).toISOString())}.
+          Showing what loaded {asOf(staleSince, now.current)}.
           {#snippet actions()}<Button size="sm" onclick={retryAll}>Retry</Button>{/snippet}
         </Callout>
       </div>
@@ -121,7 +136,11 @@
         <!-- The live card itself with placeholder values, so nothing jumps when it arrives. -->
         <LiveRunCard run={null} />
       {:else if live}
-        {#key live.id}<LiveRunCard run={live} dataset={dsById.get(live.config.dataset_id)} />{/key}
+        {#key live.id}<LiveRunCard
+            run={live}
+            dataset={datasets.data ? (dsById.get(live.config.dataset_id) ?? null) : datasets.error ? null : undefined}
+            bind:lost={streamLost}
+          />{/key}
       {:else}
         <Panel title="Training">
           <EmptyState

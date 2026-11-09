@@ -375,6 +375,14 @@
     background: none;
     outline: none;
   }
+  /* Touch: the typed class at 16 px (type.lg), under which iOS zooms into the field (touchText.test.ts); the chips keep
+     their size. */
+  @media (pointer: coarse) {
+    .chips input {
+      height: 24px;
+      font-size: var(--type-lg-size);
+    }
+  }
   .chips input::placeholder {
     color: var(--text-tertiary);
   }

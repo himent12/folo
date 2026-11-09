@@ -9,8 +9,8 @@ export const COMPARE_MAX = 4;
 export function compareHint(n: number): string {
   if (n === 0) return `Select ${COMPARE_MIN}–${COMPARE_MAX} runs to compare`;
   if (n < COMPARE_MIN) return `Select one more run to compare · ${COMPARE_MIN}–${COMPARE_MAX} runs`;
-  if (n < COMPARE_MAX) return `${n} runs selected · up to ${COMPARE_MAX - n} more`;
-  return `${n} runs selected · the most Compare takes`;
+  if (n < COMPARE_MAX) return `${n} selected · up to ${COMPARE_MAX - n} more`;
+  return `${n} selected (the maximum)`;
 }
 
 /** Why Compare is disabled, or null once it can run: the same words as the visible line. */

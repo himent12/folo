@@ -1,6 +1,29 @@
 <script lang="ts" module>
   import { lr as fmtLr } from '$lib/format';
 
+  const CHART_KEY = 'folo.run.chartOpen';
+  /**
+   * Phones: whether the run's chart is open, one state for every section (Samples, Classes, Logs, Config) and every run
+   * this session: the chart never opens on one section and folds on the next (round 26). Open until the person folds it;
+   * a tap on its readout row folds or opens it, wherever they are.
+   */
+  export const chartFold = $state({ open: readChartOpen() });
+  function readChartOpen(): boolean {
+    try {
+      return sessionStorage.getItem(CHART_KEY) !== '0';
+    } catch {
+      return true;
+    }
+  }
+  export function setChartOpen(open: boolean) {
+    chartFold.open = open;
+    try {
+      sessionStorage.setItem(CHART_KEY, open ? '1' : '0');
+    } catch {
+      // Storage off (a private window): the state still holds for this page.
+    }
+  }
+
   const PLAIN: Record<string, string> = { '⁻': '−', '⁰': '0', '¹': '1', '²': '2', '³': '3', '⁴': '4', '⁵': '5', '⁶': '6', '⁷': '7', '⁸': '8', '⁹': '9' };
 
   /**
@@ -70,7 +93,6 @@
     version,
     loading,
     queued = false,
-    folded = false,
     evalOn = null,
   }: {
     run: Run;
@@ -85,8 +107,6 @@
     queued?: boolean;
     /** What the epochs' scores are on (lib/evaluated `runEvalSource`): the titles name the split when it is not validation. */
     evalOn?: EvalSource | null;
-    /** Phones: another section is picked, so the chart folds to its one-line readout (it opens on a tap). */
-    folded?: boolean;
   } = $props();
 
   type Tab = 'map' | 'map50' | 'pr' | 'loss' | 'lr' | 'ips';
@@ -104,13 +124,8 @@
   const height = $derived(queued && narrow ? 120 : narrow ? 168 : flat ? 200 : 320);
   let queuedOpen = $state(false);
   const queuedFold = $derived(queued && narrow && !queuedOpen);
-  // Folded on phones while another section is picked; a tap on the readout opens it until the section changes.
-  let peek = $state(false);
-  $effect(() => {
-    void folded;
-    peek = false;
-  });
-  const fold = $derived(folded && narrow && !peek && !queued);
+  // Phones: folded to its readout row while the person has folded it, the same in every section (chartFold).
+  const fold = $derived(narrow && !queued && !chartFold.open);
 
   const live = $derived(['queued', 'running', 'stopping'].includes(run.status));
   const progress = $derived(runProgress(run));
@@ -413,6 +428,13 @@
 </script>
 
 <!-- A power of ten as "× 10" with a real 12 px superscript; other units as they are. -->
+<!-- The loss terms in full, behind the ⓘ's short line ("How it's computed"). -->
+{#snippet lossHow()}
+  <span class="terms-list">
+    {#each LOSS_TERMS as [term, means] (term)}<span><b>{term}</b>: {means}</span>{/each}
+  </span>
+{/snippet}
+
 {#snippet unitOf(t: TabDef)}
   {#if t.exp}<span class="unit" aria-label={t.unit}>× 10<sup class="exp">{t.exp}</sup></span>{:else}<span class="unit">{t.unit}</span>{/if}
 {/snippet}
@@ -490,9 +512,9 @@
   </div>
 
   <div class="chart" class:folded={fold} id="run-chart" role="tabpanel" aria-label={current.title}>
-    {#if folded && narrow && !queued}
-      <!-- Phones, another section picked: the chart as its one-line readout, which opens it in place. -->
-      <button type="button" class="readout" aria-expanded={!fold} aria-controls="run-chart-body" onclick={() => (peek = !peek)}>
+    {#if narrow && !queued}
+      <!-- Phones: the chart's one-line readout, which folds or opens it, one state in every section. -->
+      <button type="button" class="readout" aria-expanded={!fold} aria-controls="run-chart-body" onclick={() => setChartOpen(fold)}>
         <span class="r-l">{current.label}</span>
         <span class="r-v num">{current.value}{#if current.unit && current.value !== '—'}{@render unitOf(current)}{/if}</span>
         <span class="r-c">{current.caption}</span>
@@ -511,11 +533,7 @@
             {#if tab === 'loss'}
               <!-- What the terms mean, for anyone who has not trained a detector before: a tap, a click or Enter opens
                    it (ui/InfoButton). -->
-              <InfoButton chart label="What the loss terms mean">
-                <span class="terms-list">
-                  {#each LOSS_TERMS as [term, means] (term)}<span><b>{term}</b>: {means}</span>{/each}
-                </span>
-              </InfoButton>
+              <InfoButton chart label="What the loss terms mean" text="What training lowers: total, the weighted sum of box (placement), cls (class) and dfl (edges)." how={lossHow} />
               <LossOptions bind:smoothing bind:scale />
             {/if}
             {#if live && run.status !== 'queued'}
@@ -804,7 +822,7 @@
   .pending[aria-expanded='true'] .r-a :global(svg) {
     transform: rotate(180deg);
   }
-  /* Phones, another section picked: the chart folded to one 44 px readout row that opens it. */
+  /* Phones, the chart folded: one 44 px readout row that opens it. */
   .chart.folded {
     padding-bottom: var(--space-1);
   }

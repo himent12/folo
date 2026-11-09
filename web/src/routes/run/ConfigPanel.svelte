@@ -10,7 +10,7 @@
    */
   import Copy from '@lucide/svelte/icons/copy';
   import type { ResolvedTrain, TrainConfig } from '$lib/api/types';
-  import type { Origin } from '$lib/lineage';
+  import { FROM_SCRATCH, type Origin } from '$lib/lineage';
   import Button from '$lib/ui/Button.svelte';
   import CommandLine from '$lib/ui/CommandLine.svelte';
   import Lineage from '$lib/ui/Lineage.svelte';
@@ -70,7 +70,7 @@
   const setup = $derived<[string, Setting][]>([
     ['Precision', precisionSetting(config)],
     ['Head', headSetting(config)],
-    ['Weights', config.weights ? id(config.weights) : plain('From scratch')],
+    ['Weights', config.weights ? id(config.weights) : plain(FROM_SCRATCH)],
     ['Seed', plain(String(config.seed))],
   ]);
   const aug = $derived<[string, Setting][]>([
@@ -97,7 +97,7 @@
   <dl>
     <!-- A heading only beside another group's; alone in the rail it would name the panel twice. -->
     {#if heading}<p class="group group-label">{heading}</p>{/if}
-    {#each items as [k, v] (k)}<dt>{k}</dt>{#if k === 'Weights' && weights}<dd>{#if weights.kind === 'scratch'}From scratch{:else}<Lineage origin={weights} />{/if}</dd>{:else}<dd class="num"><span class:mono={v.ident}>{v.value}</span>{#if v.note}<Note text={v.note} />{/if}</dd>{/if}{/each}
+    {#each items as [k, v] (k)}<dt>{k}</dt>{#if k === 'Weights' && weights}<dd>{#if weights.kind === 'scratch'}{FROM_SCRATCH}{:else}<Lineage origin={weights} />{/if}</dd>{:else}<dd class="num"><span class:mono={v.ident}>{v.value}</span>{#if v.note}<Note text={v.note} />{/if}</dd>{/if}{/each}
   </dl>
 {/snippet}
 {#snippet fold(title: string, items: [string, Setting][])}

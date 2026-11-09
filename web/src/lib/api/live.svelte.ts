@@ -21,6 +21,11 @@ import type { Epoch, LogLine, Run, Step } from './types';
 
 const MAX_LOGS = 2000;
 const ACTIVE = ['queued', 'running', 'stopping'];
+/**
+ * How long the stream may be down before the view stops calling itself live. EventSource retries a dropped connection
+ * on its own within a few seconds; a blip that short is not worth a "Last known" state.
+ */
+export const STREAM_GRACE_MS = 5000;
 
 /** Union of two lists sorted by `key`, preferring `b` (newer) on equal keys. Exported for tests. */
 export function mergeBy<T>(a: T[], b: T[], key: (x: T) => number): T[] {
@@ -79,6 +84,12 @@ export class LiveRun {
   error = $state.raw<unknown>(undefined);
   loading = $state(true);
   connection = $state<'idle' | 'open' | 'reconnecting'>('idle');
+  /**
+   * When the stream was last heard from (ms since the epoch), set once it has been down for `STREAM_GRACE_MS`; null
+   * while it is open (or has not opened yet). What the view shows is then the last known state, as of this time: the
+   * page says so and stops its live marks (DESIGN_DIRECTION §2.8, freshness).
+   */
+  lost = $state<number | null>(null);
   /** How many runs wait in the training queue, this one included, from its latest `queue` event (null: none yet). */
   waiting = $state<number | null>(null);
   /** Bumps when steps/epochs/logs change (at most once per frame). */
@@ -88,6 +99,8 @@ export class LiveRun {
   logs: LogLine[] = [];
   #raf = 0;
   #retry = $state(0);
+  /** The last time anything arrived from the stream or a history load (plain: steps arrive up to ~10/s). */
+  #heard = 0;
   /** Increments with every status event, so a snapshot can tell whether one arrived while it was in flight. */
   #statusSeq = 0;
   #lastStatus: Pick<Run, 'status' | 'error'> | null = null;
@@ -110,7 +123,10 @@ export class LiveRun {
       this.#lastStatus = null;
       this.#lastQueue = null;
       this.#replay = null;
+      let lostTimer: ReturnType<typeof setTimeout> | undefined;
+      this.#heard = Date.now();
       untrack(() => {
+        this.lost = null;
         this.waiting = null;
         this.loading = true;
         this.error = undefined;
@@ -192,9 +208,23 @@ export class LiveRun {
           // history load and the stream opening would be lost, so load (and merge) again once it opens.
           if (s === 'open' && this.connection === 'idle') sync();
           this.connection = s;
+          if (s === 'open') {
+            clearTimeout(lostTimer);
+            lostTimer = undefined;
+            this.#heard = Date.now();
+            this.lost = null;
+          } else if (s === 'reconnecting' && this.lost === null && lostTimer === undefined) {
+            // Timed from the first error: EventSource reports one per failed retry, which must not restart the grace.
+            const heard = this.#heard;
+            lostTimer = setTimeout(() => {
+              lostTimer = undefined;
+              if (!closed && this.connection === 'reconnecting') this.lost = heard;
+            }, STREAM_GRACE_MS);
+          }
         },
         status: ({ status, error, steps_per_epoch, epochs }) => {
           if (closed) return;
+          this.#heard = Date.now();
           this.#statusSeq++;
           this.#lastStatus = { status, error };
           // Finished → active again: the run was resumed (here or elsewhere).
@@ -234,6 +264,7 @@ export class LiveRun {
         },
         step: (s) => {
           if (closed) return;
+          this.#heard = Date.now();
           const last = this.steps[this.steps.length - 1];
           if (this.#replay) {
             // The new attempt's step: it replaces whatever is held from it on (the server's rule).
@@ -270,6 +301,7 @@ export class LiveRun {
         },
         epoch: (e) => {
           if (closed) return;
+          this.#heard = Date.now();
           const last = this.epochs[this.epochs.length - 1];
           if (this.#replay) {
             this.#replay.epochs.push(e);
@@ -285,6 +317,7 @@ export class LiveRun {
         },
         queue: ({ position, waiting }) => {
           if (closed) return;
+          this.#heard = Date.now();
           // State, not a change: the latest event is the run's place (docs/API.md, SSE `queue`). It is kept for the
           // snapshots still in flight (#absorb), which may hold an older place or arrive before any run is loaded.
           this.#queueSeq++;
@@ -294,6 +327,7 @@ export class LiveRun {
         },
         log: (l) => {
           if (closed) return;
+          this.#heard = Date.now();
           this.logs.push(l);
           if (this.logs.length > MAX_LOGS) this.logs.splice(0, this.logs.length - MAX_LOGS);
           this.#bump();
@@ -312,6 +346,7 @@ export class LiveRun {
 
       return () => {
         closed = true;
+        clearTimeout(lostTimer);
         clearTimeout(syncTimer);
         clearTimeout(replayTimer);
         unsub();

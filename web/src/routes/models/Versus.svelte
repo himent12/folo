@@ -5,17 +5,19 @@
    * word ("1.66× faster", "17% less memory"), never a colour, and a row where FOLO is behind says so plainly. Only rows
    * measured under the same conditions state a winner: a row whose engines ran at different precision or did different
    * work keeps both measurements, and its conclusion is "—" beside the specific difference ("f32 vs TensorFloat-32"),
-   * with one footnote under the table saying what "—" means. Units sit in the row's header, never in the cells. Each row
-   * keeps one short qualifier, and the method and caveats sit in a "How this was measured" fold.
-   * Phones stack each row (the metric, then its three values, each with its engine named in the markup); the header
-   * row stays for assistive tech, every value names its metric and column through `headers`, and explicit cell roles
-   * keep the table's semantics through the grid layout.
+   * with one legend over the table saying what "—" means ("No winner: conditions differ"), never the same words in every
+   * row. Units sit in the row's header, never in the cells. Each row keeps one short qualifier, and the method and
+   * caveats sit in a "How this was measured" fold.
+   * Phones are a compact three-column table: one header row (folo-n, YOLO26n, the lead), then each row's metric over
+   * its three values on the header's edges, and a no-winner row's own condition on a line under them. Every value
+   * names its metric and column through `headers`, and explicit cell roles keep the table's semantics through the grid
+   * layout.
    * Every value in the table is docs/BENCHMARKS.md's (the reference); where this server has measured folo-n itself
    * (`table`, GET /api/system/throughput), those figures follow the table under their own heading, never mixed into
    * it: YOLO26n was not run here, so they compare with nothing.
    */
   import { tick } from 'svelte';
-  import { advantage, BENCH_SOURCE, comparable, unlike, unlikeSentence, versusYolo26n, type Versus } from '$lib/benchmarks';
+  import { advantage, BENCH_SOURCE, comparable, unlike, unlikeCondition, versusYolo26n, type Versus } from '$lib/benchmarks';
   import type { ThroughputTable } from '$lib/api/types';
   import { deviceName, num } from '$lib/format';
   import { latencyMs, latencyRange, measuredLatency, measuredTraining } from '$lib/throughput';
@@ -72,6 +74,13 @@
   <p class="lede">
     folo-n vs YOLO26n on the same RTX 4080 SUPER, 640 px{#if hereLat || hereTrain}: the reference figures, with this server's own folo-n figures last{/if}.
   </p>
+  <!-- What "—" means, said once over every row that has it: those rows then carry only their own condition. -->
+  {#if mixed}
+    <p class="legend">
+      <span class="dc" aria-hidden="true">—</span>&nbsp;No winner: conditions differ<span class="lg-n">{' · '}{mixed} of {versusYolo26n.length} rows</span
+      >{' · '}<button type="button" class="see" onclick={showHow}>How this was measured</button>
+    </p>
+  {/if}
   <table class="table vs">
     <thead>
       <tr>
@@ -90,12 +99,11 @@
             <span class="m">{v.metric}<span class="unit">, {v.unit}</span></span>
             {#if v.note}<span class="note">{v.note}</span>{/if}
           </th>
-          <!-- The engine's name over each value is for the stacked phone rows; screen readers get it from `headers`. -->
-          <td role="cell" class="r num v" headers="vs-r-{i} vs-h-folo"><span class="cl" aria-hidden="true">folo-n</span>{fmt(v, v.folo)}</td>
-          <td role="cell" class="r num v yolo" headers="vs-r-{i} vs-h-yolo"><span class="cl" aria-hidden="true">YOLO26n</span>{fmt(v, v.yolo)}</td>
+          <td role="cell" class="r num v" headers="vs-r-{i} vs-h-folo">{fmt(v, v.folo)}</td>
+          <td role="cell" class="r num v yolo" headers="vs-r-{i} vs-h-yolo">{fmt(v, v.yolo)}</td>
           <td role="cell" class="r lead" headers="vs-r-{i} vs-h-lead"
-            ><span class="cl" aria-hidden="true">folo-n vs YOLO26n</span>{#if diff}<span class="dc" aria-label="No winner: different conditions">—</span><span class="why">{diff.differs}</span><span class="cond" data-fact
-                >{unlikeSentence(diff)}</span
+            >{#if diff}<span class="dc" aria-label="No winner: different conditions">—</span><span class="why">{diff.differs}</span><span class="cond" data-fact
+                ><span aria-hidden="true">—&nbsp;</span>{unlikeCondition(diff)}</span
               >{:else}{lead(v)}{/if}</td
           >
         </tr>
@@ -114,21 +122,14 @@
               <span class="m">{h.metric}</span>
               <span class="note num">{h.note}</span>
             </th>
-            <td role="cell" class="r num v" headers="vs-here-{h.id} vs-h-folo"><span class="cl" aria-hidden="true">folo-n</span>{h.value}</td>
-            <td role="cell" class="r yolo nr" headers="vs-here-{h.id} vs-h-yolo"><span class="cl" aria-hidden="true">YOLO26n</span>not run here</td>
-            <td role="cell" class="r lead here-src" headers="vs-here-{h.id} vs-h-lead"><span class="cl" aria-hidden="true">folo-n vs YOLO26n</span>Measured here</td>
+            <td role="cell" class="r num v" headers="vs-here-{h.id} vs-h-folo">{h.value}</td>
+            <td role="cell" class="r yolo nr" headers="vs-here-{h.id} vs-h-yolo">not run here</td>
+            <td role="cell" class="r lead here-src" headers="vs-here-{h.id} vs-h-lead">Measured here</td>
           </tr>
         {/each}
       </tbody>
     {/if}
   </table>
-  <!-- What "—" means, said once for every row that has it. -->
-  {#if mixed}
-    <div class="foot">
-      <p><span aria-hidden="true">—&nbsp;</span>{mixed} of {versusYolo26n.length} rows ran under different conditions, so they name no winner;
-        <button type="button" class="see" onclick={showHow}>see how this was measured</button>.</p>
-    </div>
-  {/if}
   <!-- How the rows were made and what qualifies them, one step away. -->
   <details class="how" bind:this={how}>
     <summary><ChevronDown size={14} aria-hidden="true" />How this was measured</summary>
@@ -180,9 +181,6 @@
   .vs tbody tr:last-child th {
     border-bottom: 0;
   }
-  .cl {
-    display: none;
-  }
   .m {
     display: block;
     font-weight: var(--weight-medium);
@@ -191,13 +189,9 @@
     padding: 0 var(--space-4) var(--space-3);
     color: var(--text-secondary);
   }
-  /* The footnote for "—", under the rows it explains, one step quieter. */
-  .foot p {
-    max-inline-size: var(--measure);
-  }
-  .foot {
-    padding: var(--space-3) var(--space-4);
-    border-top: 1px solid var(--line-subtle);
+  /* The legend for "—", over the rows it explains, one step quieter than the lede. */
+  .legend {
+    padding: 0 var(--space-4) var(--space-3);
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
     color: var(--text-tertiary);
@@ -379,17 +373,10 @@
       min-height: 44px;
     }
   }
-  /* Phones: the metric on its own line, then the three values in a row. */
+  /* Phones: a compact three-column table. One header row names the columns; each row is its metric on a line of its
+     own, then its three values on the header's edges. */
   @media (max-width: 767px) {
-    /* The header row is read, not seen: each value shows its engine above it instead. */
-    .vs thead {
-      position: absolute;
-      width: 1px;
-      height: 1px;
-      overflow: hidden;
-      clip-path: inset(50%);
-      white-space: nowrap;
-    }
+    .vs thead tr,
     .vs tbody tr {
       display: grid;
       /* One column template for every row, so folo-n, YOLO26n and the lead sit on the same three edges all the way
@@ -401,6 +388,28 @@
     }
     .vs tbody tr:last-child {
       border-bottom: 0;
+    }
+    .vs thead tr {
+      padding: 0 var(--space-4);
+      border-bottom: 1px solid var(--line-subtle);
+    }
+    .vs thead th {
+      height: 32px;
+      padding: 0;
+      border: 0;
+      text-align: left;
+    }
+    /* The row headers' column has no cell of its own on phones: its name is read, not seen. */
+    .vs thead th:first-child {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip-path: inset(50%);
+      white-space: nowrap;
+    }
+    .vs tbody tr {
+      padding-block: var(--space-2);
     }
     /* Rows grow with their lines (the table's fixed row height would let a note run into the divider). */
     .vs tbody :is(td, th) {
@@ -424,7 +433,7 @@
     .vs tbody tr.unlike .lead {
       grid-column: 1 / -1;
     }
-    .unlike .lead :is(.cl, .dc, .why) {
+    .unlike .lead :is(.dc, .why) {
       display: none;
     }
     .cond {
@@ -433,12 +442,9 @@
       line-height: var(--type-sm-line);
       color: var(--text-secondary);
     }
-    .cl {
-      display: block;
-      font-size: var(--type-sm-size);
-      line-height: var(--type-sm-line);
-      color: var(--text-tertiary);
-      font-weight: var(--weight-regular);
+    /* The legend's count is the least useful part on a phone: "— No winner: conditions differ · How this was measured". */
+    .lg-n {
+      display: none;
     }
   }
 </style>

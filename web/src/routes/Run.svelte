@@ -16,7 +16,7 @@
   import type { QueueRequest } from '$lib/api/types';
   import { media } from '$lib/design/tokens';
   import { ago, deviceName, eta } from '$lib/format';
-  import { origin } from '$lib/lineage';
+  import { FROM_SCRATCH_META, origin } from '$lib/lineage';
   import { href, router } from '$lib/router.svelte';
   import { setCrumbs } from '$lib/shell/crumbs.svelte';
   import Page from '$lib/shell/Page.svelte';
@@ -370,7 +370,7 @@
         <!-- Phones: size, batch and device are in the Config section; the id is in the URL. -->
         <span class="cfg num">{run.config.imgsz} px</span>
         <span class="cfg num">batch {run.config.batch}</span>
-        <span class="cfg lineage">{#if !lineage || lineage.kind === 'scratch'}From scratch{:else}Fine-tuned from <Lineage origin={lineage} />{/if}</span>
+        <span class="cfg lineage">{#if !lineage || lineage.kind === 'scratch'}{FROM_SCRATCH_META}{:else}fine-tuned from <Lineage origin={lineage} />{/if}</span>
         <!-- Only where they differ from the defaults (f32, the NMS head); Config always says both. -->
         {#if run.config.amp}<span class="cfg">Mixed precision</span>{/if}
         {#if run.config.head === 'o2o'}<span class="cfg">{HEAD_LABEL.o2o}</span>{/if}
@@ -443,8 +443,8 @@
         </div>
       </div>
     {:else}
-    <!-- Phones: while another section is picked, the chart folds to its one-line readout so that section starts in
-         the first screen. -->
+    <!-- Phones: the chart is open or folded to its one-line readout by one remembered state, the same in every section
+         (RunMetrics chartFold). -->
     <RunMetrics
       {run}
       steps={live.steps}
@@ -452,7 +452,6 @@
       version={live.version}
       loading={live.loading}
       queued={queuedOnly}
-      folded={section !== 'samples'}
       {evalOn}
     />
 

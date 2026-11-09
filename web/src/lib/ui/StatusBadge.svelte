@@ -24,6 +24,7 @@
     size = 'md',
     plain = false,
     dotOnly = false,
+    lastKnown,
   }: {
     status: RunStatus;
     size?: 'sm' | 'md';
@@ -31,12 +32,17 @@
     plain?: boolean;
     /** The dot alone, where the word is written next to it (still announced to assistive tech). */
     dotOnly?: boolean;
+    /**
+     * The status is no longer current (its source went quiet): the whole words to show instead, "Last known: Running ·
+     * 2m ago" (`lib/api/freshness`). The pill turns neutral and the heartbeat stops: nothing here says "now" any more.
+     */
+    lastKnown?: string;
   } = $props();
 
   const labels = STATUS_LABEL;
 </script>
 
-<span class="badge {status} {size}" class:plain>
+<span class="badge {status} {size}" class:plain class:held={!!lastKnown}>
   <!-- Each status has its own mark as well as its hue (running and completed are both green-ish): a ringed dot
        while running, a check when completed, a cross when failed, hollow while queued, a square when stopped. -->
   {#if status === 'completed'}
@@ -45,7 +51,7 @@
     <svg class="mark" viewBox="0 0 8 8" aria-hidden="true"><path d="M1.8 1.8 6.2 6.2M6.2 1.8 1.8 6.2" /></svg>
   {:else}
     <span class="dot" aria-hidden="true"></span>
-  {/if}{#if dotOnly}<span class="sr-only">{labels[status]}</span>{:else}{labels[status]}{/if}
+  {/if}{#if dotOnly}<span class="sr-only">{lastKnown ?? labels[status]}</span>{:else}{lastKnown ?? labels[status]}{/if}
 </span>
 
 <style>
@@ -151,6 +157,15 @@
   }
   .plain.running {
     color: var(--text-primary);
+  }
+  /* A last known status: neutral, still. Its mark keeps its shape (the ringed dot still says which status it was), but
+     neither lime nor a heartbeat claims it is current. */
+  .held {
+    --c: var(--text-secondary);
+    --bg: var(--bg-active);
+  }
+  .held .dot {
+    animation: none;
   }
   /* The live heartbeat (`live-pulse`, base.css): one ring every 2.4 s; off under reduced motion, where the ringed dot
      and the word still say "running". */

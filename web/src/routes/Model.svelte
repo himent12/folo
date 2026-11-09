@@ -26,6 +26,7 @@
   import { setCrumbs } from '$lib/shell/crumbs.svelte';
   import Button from '$lib/ui/Button.svelte';
   import InfoButton from '$lib/ui/InfoButton.svelte';
+  import { publishedSummary } from '$lib/published';
   import ErrorState from '$lib/ui/ErrorState.svelte';
   import Menu from '$lib/ui/Menu.svelte';
   import Panel from '$lib/ui/Panel.svelte';
@@ -35,7 +36,7 @@
   import Ident from '$lib/ui/Ident.svelte';
   import { cmIndex, rankConfusions, type ConfusionEntry } from './model/confusion';
   import ExportDialog from './model/ExportDialog.svelte';
-  import { origin } from '$lib/lineage';
+  import { FROM_SCRATCH, FROM_SCRATCH_META, origin } from '$lib/lineage';
   import Lineage from '$lib/ui/Lineage.svelte';
   import Meta from '$lib/ui/Meta.svelte';
   import PrCurves from './model/PrCurves.svelte';
@@ -276,6 +277,7 @@
   });
   // What the four numbers mean, one tap away (the strip itself keeps to values and a short qualifier).
   let helpOpen = $state(false);
+  let aboutOpen = $state(false);
   // Phones: one summary line under the top bar; the rest of the provenance behind it.
   let metaOpen = $state(false);
 </script>
@@ -301,7 +303,7 @@
     {#if lineage && lineage.kind !== 'scratch'}
       <span>fine-tuned from <Lineage origin={lineage} /></span>
     {:else if lineage?.kind === 'scratch'}
-      <span>from scratch</span>
+      <span>{FROM_SCRATCH_META}</span>
     {/if}
   {/snippet}
   {#snippet kHelp()}
@@ -558,7 +560,7 @@
                 {#if m.classes.length > 10}<span class="faint">+{m.classes.length - 10} more</span>{/if}
               </dd>
             </div>
-            <div class="kv" class:stack={!m.run_id && m.source === 'published' && !!m.about}>
+            <div class="kv" class:stack={!m.run_id && m.source === 'published'}>
               <dt>Source</dt>
               <dd>
                 {#if m.run_id}
@@ -566,8 +568,10 @@
                   {#if context.data?.dataset}<span class="faint">{' on '}</span><a class="link" href={href(`/datasets/${context.data.dataset.id}`)}>{context.data.dataset.name}</a>{/if}
                 {:else if m.source === 'published'}
                   <!-- `folo weights pull` weights: what they are, in the words `folo weights list` prints. -->
-                  <span>Published weights</span>
-                  {#if m.about}<span class="about">{m.about}</span>{/if}
+                  <!-- What they are for in plain words; the server's own description, its provenance, in the ⓘ. -->
+                  <span class="pub">Published weights{#if m.about}<InfoButton label="Where these weights come from" controls="model-about" bind:open={aboutOpen} />{/if}</span>
+                  <span class="about">{publishedSummary(m)}</span>
+                  {#if m.about && aboutOpen}<span class="about" id="model-about">{m.about}</span>{/if}
                 {:else}
                   <span class="muted">Imported .folo file</span>
                 {/if}
@@ -595,7 +599,7 @@
                   {#if lineage.kind !== 'scratch'}
                     <Lineage origin={lineage} />
                   {:else}
-                    <span class="muted">From scratch</span>
+                    <span class="muted">{FROM_SCRATCH}</span>
                   {/if}
                 </dd>
               </div>
@@ -1352,6 +1356,11 @@
     display: grid;
     gap: 2px;
     text-align: left;
+  }
+  .pub {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
   }
   .about {
     max-inline-size: var(--measure);

@@ -1,3 +1,4 @@
+/// <reference types="node" />
 import { describe, expect, it } from 'vitest';
 import type { Model } from '$lib/api/types';
 import { origin, originTip } from './lineage';
@@ -31,5 +32,32 @@ describe('origin', () => {
     expect(originTip(origin('m_gone', []))).toBeUndefined();
     expect(originTip(origin('/w/last.folo'))).toBe('/w/last.folo');
     expect(originTip(origin(null))).toBeUndefined();
+  });
+});
+
+describe('one wording for "from scratch"', () => {
+  it('is a label spelled only in lib/lineage (FROM_SCRATCH as a value, FROM_SCRATCH_META in a meta line)', async () => {
+    const { readdirSync, readFileSync, statSync } = await import('node:fs');
+    const { join, relative, resolve } = await import('node:path');
+    const SRC = resolve(process.cwd(), 'src');
+    const walk = (dir: string): string[] =>
+      readdirSync(dir).flatMap((f) => {
+        const p = join(dir, f);
+        if (statSync(p).isDirectory()) return p.endsWith('mock') ? [] : walk(p);
+        return /\.(svelte|ts)$/.test(p) && !/\.test\.ts$/.test(p) && !p.endsWith('lineage.ts') ? [p] : [];
+      });
+    const hits: string[] = [];
+    for (const file of walk(SRC)) {
+      const src = readFileSync(file, 'utf8')
+        .replace(/<!--[\s\S]*?-->/g, '')
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/(^|[^:'"`\w])\/\/.*$/gm, '$1');
+      src.split('\n').forEach((line, i) => {
+        // The label on its own (a string, or markup text alone between tags or blocks); prose that says it in a sentence
+        // ("another size starts from scratch") is not the label.
+        if (/(['"`])[Ff]rom scratch\1|[>}]\s*[Ff]rom scratch\s*[<{]/.test(line)) hits.push(`${relative(SRC, file)}:${i + 1}: ${line.trim()}`);
+      });
+    }
+    expect(hits).toEqual([]);
   });
 });

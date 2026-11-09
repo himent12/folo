@@ -1377,9 +1377,13 @@ export const scenes = [
   { name: 'overview-loading', path: '/', search: 'scenario=loading', viewports: ['desktop', 'laptop', 'mobile'] },
   // Nothing loads: one recovery block on the page (Retry, Connection settings), not four panels each saying so.
   { name: 'overview-error', path: '/', search: 'scenario=error', viewports: ['desktop', 'laptop', 'mobile'] },
-  // The server stops answering after the first loads: the page keeps what it has under one stale-data notice (the runs
-  // poll every 5 s, so the first failed poll is past 5 s).
-  { name: 'overview-stale', path: '/', search: 'scenario=stale', advance: 7000, viewports: ['desktop', 'mobile'] },
+  // The server stops answering after the first loads, its live stream too: the page keeps what it has under one
+  // stale-data notice, and the live card shows its last known state ("Last known: Running · 2m ago", "~7m left, as of
+  // 2m ago", no heartbeat). Two minutes on, so the ages read as minutes.
+  { name: 'overview-stale', path: '/', search: 'scenario=stale', advance: 125_000, viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
+  // Only the lists stop refreshing; the live run's stream still streams: the notice says the lists are behind and the
+  // live card stays live.
+  { name: 'overview-stale-lists', path: '/', search: 'scenario=stale-lists', advance: 125_000, viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
   // A model scored on its training split (fasteners-mini has no validation images): Best models tags its score
   // ("Training split"), ranks it only within its own dataset and split, and counts imported and published weights apart.
   { name: 'overview-train-split', path: '/', search: 'scenario=train-split', viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
