@@ -1652,7 +1652,12 @@ impl FoloApp {
                             f.lr0 = v;
                             f.lr_invalid = false;
                         }
-                        None => f.lr_invalid = true,
+                        None => {
+                            f.lr_invalid = true;
+                            // The rate lives under Advanced: keep the group open while it's being
+                            // fixed, so the first valid keystroke doesn't fold the field away.
+                            f.advanced = true;
+                        }
                     }
                     cx.notify();
                 }

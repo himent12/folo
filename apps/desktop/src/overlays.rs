@@ -619,7 +619,8 @@ impl FoloApp {
             }
             if changed.is_empty() { "Defaults".to_string() } else { changed.join(" · ") }
         };
-        let adv_open = f.advanced || f.lr_invalid;
+        // An invalid rate (only with a chosen optimizer: Auto ignores the field) keeps it open.
+        let adv_open = f.advanced || (f.lr_invalid && opt != 0);
         // A Mixed precision switch that held focus when it became blocked (the device changed by
         // key, or the server's answer arrived) has no focus stop any more: focus moves to the
         // control before it, so keys keep working. Before the controls are built, so that one
@@ -1076,7 +1077,10 @@ impl FoloApp {
                     window,
                     cx,
                     act(|this, _, cx| {
-                        if let Some(f) = this.new_run.as_mut() {
+                        // A field in the group that needs fixing keeps it open.
+                        if let Some(f) = this.new_run.as_mut()
+                            && !(f.lr_invalid && f.optimizer != 0)
+                        {
                             f.advanced = !f.advanced;
                             cx.notify();
                         }

@@ -876,8 +876,12 @@ impl FoloApp {
                                 vis.len().to_string()
                             };
                             // Short windows: the latency breakdown may scroll away below, so its total
-                            // rides here too.
-                            if tight { format!("{n} · {:.1} ms", p.timing.total_ms) } else { n }
+                            // rides here too (said to be simulated in the demo, as the section is).
+                            match (tight, simulated) {
+                                (true, true) => format!("{n} · {:.1} ms simulated", p.timing.total_ms),
+                                (true, false) => format!("{n} · {:.1} ms", p.timing.total_ms),
+                                _ => n,
+                            }
                         }),
                     ))
                     .child(
