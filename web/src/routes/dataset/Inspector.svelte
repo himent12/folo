@@ -65,7 +65,12 @@
 
   // ---------- open / close ----------
   $effect(() => {
-    if (id && !dialog.open) dialog.showModal();
+    if (id && !dialog.open) {
+      dialog.showModal();
+      // The dialog takes focus as a container (as ui/Dialog does): no control or label row starts focused, so nothing
+      // in the list looks picked before anything is.
+      dialog.focus();
+    }
     else if (!id && dialog.open) dialog.close();
   });
 
@@ -320,7 +325,9 @@
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 <dialog
   bind:this={dialog}
+  tabindex="-1"
   class="insp"
+  style:--ar={img ? img.width / img.height : undefined}
   aria-label={img ? `Image ${stem(img.file)}` : 'Image'}
   onclose={() => id && onclose()}
   {onkeydown}
@@ -356,7 +363,6 @@
       bind:this={viewport}
       bind:clientWidth={vw}
       bind:clientHeight={vh}
-      style:--ar={img ? `${img.width} / ${img.height}` : undefined}
       role="img"
       tabindex="0"
       aria-label={img ? `${stem(img.file)} with ${img.boxes.length} labelled boxes` : 'Loading image'}
@@ -497,9 +503,14 @@
 </dialog>
 
 <style>
+  /* Sized to the image (`--ar`, its width over height): the largest box of the canvas's shape plus the rail that fits
+     the viewport, so a 4:3 photo on a laptop never sits between letterbox bands (the dialog is shorter instead). */
   .insp {
-    width: min(1480px, calc(100vw - 48px));
-    height: min(960px, calc(100dvh - 48px));
+    --rail: 288px;
+    --box-w: min(1480px, calc(100vw - 48px));
+    --box-h: min(960px, calc(100dvh - 48px));
+    width: min(var(--box-w), max(640px, calc((var(--box-h) - 48px) * var(--ar, 1.3333) + var(--rail))));
+    height: min(var(--box-h), max(480px, calc((var(--box-w) - var(--rail)) / var(--ar, 1.3333) + 48px)));
     max-width: none;
     max-height: none;
     margin: auto;
@@ -510,6 +521,10 @@
     color: var(--text-primary);
     box-shadow: var(--shadow-lg);
     overflow: hidden;
+  }
+  .insp:focus,
+  .insp:focus-visible {
+    outline: none;
   }
   .insp[open] {
     display: flex;
@@ -593,7 +608,7 @@
     flex: 1;
     min-height: 0;
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 288px;
+    grid-template-columns: minmax(0, 1fr) var(--rail);
   }
   /* The canvas is a darkroom well in both themes: photos (mostly dark) never sit in light-grey letterbox bands. The
      dark theme's bg.inset; in light, the ink token mixed into bg.inset gives the same near-black. */
@@ -829,8 +844,8 @@
     }
   }
   @media (max-width: 1023px) {
-    .body {
-      grid-template-columns: minmax(0, 1fr) 248px;
+    .insp {
+      --rail: 248px;
     }
   }
   @media (max-width: 767px) {

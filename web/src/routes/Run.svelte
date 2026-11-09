@@ -41,7 +41,7 @@
   import Meta from '$lib/ui/Meta.svelte';
   import RunMetrics from './run/RunMetrics.svelte';
   import Samples from './run/Samples.svelte';
-  import { moveQueued, queueItems, startHint, startLabel } from './run/queueActions';
+  import { moveQueued, queueItems, REMOVE_DESCRIPTION, REMOVE_LABEL, removeTitle, startHint, startLabel } from './run/queueActions';
   import { scheduleWarnings } from './run/warnings';
   import Copy from '@lucide/svelte/icons/copy';
   import Play from '@lucide/svelte/icons/play';
@@ -112,10 +112,10 @@
     void others.refresh();
   }
 
-  // A queued run waits in a layout of its own from 768 px up: its place and the way to the front, what it waits for,
-  // then its config; the outputs it will have are one quiet list instead of empty frames. Phones keep their sections.
-  const phone = new MediaQuery(media.phone, false);
-  const waitingLayout = $derived(queuedOnly && !phone.current);
+  // A queued run waits in a layout of its own at every width: its place and the way to the front, what it waits for,
+  // then its config; the outputs it will have are one quiet list instead of empty frames. Phones show the callout and
+  // the config alone: no section picker over sections with nothing behind them, no folded chart that opens empty.
+  const waitingLayout = $derived(queuedOnly);
   const active = $derived(run ? ['queued', 'running', 'stopping'].includes(run.status) : false);
   const epochsDone = $derived.by(() => {
     void live.version;
@@ -179,15 +179,16 @@
       if (run.status !== 'completed') out.push({ label: 'Try model', icon: ScanSearch, href: href(`/playground?model=${run.model_id}`) });
       out.push({ label: 'Open model', icon: Box, href: href(`/models/${run.model_id}`) });
     }
-    // Phones: the queued run's one action keeps its one name, in the menu (the status and its time keep the row); its
-    // moves come first (Start next is in the banner).
-    if (place !== null) out.push(...queueItems(place, waitingCount, ahead, move, { start: false }));
-    if (run.status === 'queued') out.push({ label: 'Remove from queue', icon: X, danger: true, onclick: () => (stopOpen = true) });
+    // Phones: the queue actions in their one order (Start next is the banner's button), Remove from queue last under the
+    // same name (the status and its time keep the row).
+    const removeQueued = () => (stopOpen = true);
+    if (place !== null) out.push(...queueItems(place, waitingCount, ahead, move, { start: false, remove: removeQueued }));
+    else if (run.status === 'queued') out.push({ label: REMOVE_LABEL, icon: X, danger: true, onclick: removeQueued });
     if (!active) out.push({ label: 'Delete run', icon: Trash, danger: true, onclick: () => (deleteOpen = true) });
     return out;
   });
 
-  /** Wider screens: the queued run's moves behind ⋯, next to Remove from queue (Start next is in the banner). */
+  /** Wider screens: the queued run's moves behind ⋯; Remove from queue is the button beside it, Start next the banner's. */
   const wideQueueItems = $derived(place !== null ? queueItems(place, waitingCount, ahead, move, { start: false }) : []);
 
   /** What the run will have once it trains, in place of the empty frames (the waiting layout). */
@@ -354,7 +355,8 @@
       {:else if run.status === 'queued'}
         <!-- Phones: in the ⋯ menu under the same name, so the status and its time keep one line beside it. -->
         <span class="wide-only">
-          <Button variant="ghost" icon={X} onclick={() => (stopOpen = true)}>Remove from queue</Button>
+          <!-- The quiet destructive control, styled as Stop is on a running run (DESIGN_DIRECTION 13). -->
+          <Button variant="danger" icon={X} onclick={() => (stopOpen = true)}>{REMOVE_LABEL}</Button>
           {#if wideQueueItems.length}<Menu label="More run actions" items={wideQueueItems} />{/if}
         </span>
       {:else if !active}
@@ -376,7 +378,7 @@
     />
 
     {#if waitingLayout}
-      <!-- Waiting (768 px up): the config as asked for, beside the queue and what the run will have. Nothing here is an
+      <!-- Waiting: the config as asked for, beside the queue and what the run will have. Nothing here is an
            empty frame, and no panel stretches to its neighbour's height. -->
       <div class="waiting">
         <div class="w-main"><ConfigPanel config={run.config} resolved={run.resolved} datasetName={dataset?.name} /></div>
@@ -454,15 +456,15 @@
 
   <Dialog
     bind:open={stopOpen}
-    title={run.status === 'queued' ? `Remove ${run.name} from the queue?` : `Stop ${run.name}?`}
+    title={run.status === 'queued' ? removeTitle(run.name) : `Stop ${run.name}?`}
     description={run.status === 'queued'
-      ? 'It has not started yet, so nothing is lost. You can start it again from New run.'
+      ? REMOVE_DESCRIPTION
       : 'Training stops after the current step. The last checkpoint is kept and saved as a model.'}
     size="sm"
   >
     {#snippet footer()}
       <Button onclick={() => (stopOpen = false)}>{run.status === 'queued' ? 'Keep it queued' : 'Keep training'}</Button>
-      <Button variant="destructive" icon={run.status === 'queued' ? X : Square} loading={busy} onclick={stop}>{run.status === 'queued' ? 'Remove from queue' : 'Stop run'}</Button>
+      <Button variant="destructive" icon={run.status === 'queued' ? X : Square} loading={busy} onclick={stop}>{run.status === 'queued' ? REMOVE_LABEL : 'Stop run'}</Button>
     {/snippet}
   </Dialog>
   <Dialog bind:open={deleteOpen} title="Delete {run.name}?" description="Removes the run and its metric history from Studio. Checkpoint files on disk are not touched." size="sm">
@@ -477,7 +479,7 @@
   .loading {
     display: grid;
     gap: var(--space-4);
-    max-width: var(--size-content-max);
+    max-width: calc(var(--size-content-max) + 2 * var(--space-6));
     margin: 0 auto;
     padding: var(--space-6);
   }
@@ -723,6 +725,12 @@
     }
     .w-side :global(#queue) {
       order: -1;
+    }
+  }
+  /* Phones: the callout above says the place and what it waits for; the config is the page. */
+  @media (max-width: 767px) {
+    .w-side {
+      display: none;
     }
   }
   .queue,

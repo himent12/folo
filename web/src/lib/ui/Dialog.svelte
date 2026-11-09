@@ -38,6 +38,10 @@
     if (open && !el.open) {
       restore = rememberFocus();
       el.showModal();
+      // The dialog itself takes focus (DESIGN_DIRECTION 9), not its first control: the close button would wear the
+      // ring when opened from the keyboard. The first Tab reaches the controls; a component that wants a control
+      // focused (a picker's checked option) focuses it after the dialog has opened.
+      el.focus();
     } else if (!open && el.open) el.close();
   });
 
@@ -62,6 +66,7 @@
 
 <dialog
   bind:this={el}
+  tabindex="-1"
   class="{size} {klass}"
   aria-labelledby="{uid}-title"
   aria-describedby={description ? `${uid}-desc` : undefined}
@@ -101,6 +106,11 @@
   }
   dialog.lg {
     width: min(720px, calc(100vw - 32px));
+  }
+  /* Focused on open as a container: no ring of its own (its controls have theirs). */
+  dialog:focus,
+  dialog:focus-visible {
+    outline: none;
   }
   dialog[open] {
     animation: enter var(--dur-slow) var(--ease-out);

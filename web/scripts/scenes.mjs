@@ -102,6 +102,8 @@ export const scenes = [
       // "More fixes": the other smaller settings and the driver's report.
       await until(page, 'button.c-more');
       await page.locator('button.c-more').first().click();
+      // The pointer leaves the label it clicked: the shot shows the opened disclosure, not its hover fill.
+      await page.mouse.move(0, 0);
     },
   },
   { name: 'run-completed', path: '/runs/run_c19a', viewports: ['desktop', 'laptop', 'mobile'] },
@@ -613,13 +615,15 @@ export const scenes = [
   {
     name: 'dataset-inspector',
     path: '/datasets/ds_fasteners',
-    viewports: ['desktop', 'laptop', 'mobile'],
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
     fullPage: false,
     setup: async (page) => {
       await page.locator('.cell img.loaded').first().waitFor();
       await page.locator('.cell').nth(1).click();
       await page.locator('dialog[open] .stage img.loaded').waitFor();
-      await page.locator('dialog[open] .labels button').nth(1).hover();
+      // Nothing selected and nothing hovered: the pointer that clicked the cell leaves the dialog, so no label row
+      // carries a highlight of a state the scene does not show (round 22's stray "rivet" row was this hover).
+      await page.mouse.move(0, 0);
       await page.waitForTimeout(200);
     },
   },
@@ -644,7 +648,8 @@ export const scenes = [
   },
   { name: 'runs', path: '/runs' },
   {
-    // The waiting runs say their place ("1st in queue", "2nd in queue"); the second's ⋯ opened: Start next, Move up.
+    // The waiting runs say their place ("1st in queue", "2nd in queue"); the second's ⋯ opened: Start next, Move up,
+    // Remove from queue (the queue's one action set).
     name: 'runs-queue-menu',
     path: '/runs',
     fullPage: false,
@@ -746,8 +751,9 @@ export const scenes = [
     setup: async (page) => {
       await until(page, '#pr svg');
       await page.getByRole('tab', { name: 'Classes', exact: true }).click();
-      await page.locator('#per-class button.disc').nth(2).click();
-      await page.locator('#per-class tr.detail button', { hasText: 'View curve' }).click();
+      // Trace the third class, then the selection bar's View curve (the one place it lives).
+      await page.locator('#per-class button.cls').nth(2).click();
+      await page.locator('#per-class .to-curve').click();
       await until(page, '#pr .legend .back');
       await page.clock.runFor(500);
     },
@@ -1282,6 +1288,19 @@ export const scenes = [
       await page.getByRole('switch', { name: /Single-key shortcuts/ }).click({ force: true });
       await page.getByRole('button', { name: 'Show shortcuts' }).click();
       await page.locator('dialog[open]').waitFor();
+    },
+  },
+  {
+    // Phones: one run picked. Compare (disabled, "Select 2–4 runs") stays secondary and New run keeps the one primary.
+    name: 'runs-selected-phone',
+    path: '/runs',
+    fullPage: false,
+    viewports: ['mobile'],
+    setup: async (page) => {
+      await until(page, '.rows li');
+      await page.getByRole('button', { name: 'Select to compare' }).click();
+      await page.locator('.rows li .r-check').nth(1).click();
+      await page.mouse.move(0, 0);
     },
   },
   {

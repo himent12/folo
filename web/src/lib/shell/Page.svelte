@@ -81,9 +81,10 @@
 </div>
 
 <style>
+  /* The content column is `size.content_max` (1200, DESIGN_DIRECTION 2) wide at most; the side gutters are outside it. */
   .page {
     width: 100%;
-    max-width: var(--size-content-max);
+    max-width: calc(var(--size-content-max) + 2 * var(--space-6));
     margin: 0 auto;
     padding: var(--space-6) var(--space-6) var(--space-12);
     display: flex;

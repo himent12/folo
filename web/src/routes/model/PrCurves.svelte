@@ -7,12 +7,12 @@
    * the class hue, clicking keeps it highlighted (the selection rule: bg.active and a 2 px accent bar), and a line
    * above the table says so and offers Clear. The legend row above the plot is the readout. Phones hide the precision
    * and recall columns: each row has two controls there, the class name traces its curve (`aria-pressed`) and the
-   * chevron opens a details row with those two at their operating point (`aria-expanded`), with "View curve"
-   * (`onviewcurve`). `view` shows only the curves or only the table: the model page renders them as two panels (the
+   * chevron opens a details row with those two at their operating point (`aria-expanded`); "View curve"
+   * (`onviewcurve`) is the selection bar's, once a class is traced. `view` shows only the curves or only the table: the model page renders them as two panels (the
    * curves beside the Details rail, the table in a row of its own; on a phone, two sections) that share `selected` and
    * `hovered` (bindable), so a class picked or pointed at in the table is traced in the other panel's curves, and
    * `onback` puts a way back to the table in the curves' legend row. `fill` lets the plot grow to the panel's height
-   * (a panel stretched to its row), from 300 px.
+   * (a panel stretched to its row), from a 300 px plot.
    */
   import type { Evaluation } from '$lib/api/evaluation';
   import LineChart, { type Series } from '$lib/charts/LineChart.svelte';
@@ -61,6 +61,11 @@
   /** The plot's box when it fills its panel: the chart is drawn at that height. */
   let plotH = $state(0);
 
+  /** The plot itself is 300 px (DESIGN_DIRECTION, Model detail); the chart is that plus its axes, LineChart's margins:
+   *  the y caption above (24) and the x ticks and name below (36). Round 22 drew 300 for the whole chart, so the plot
+   *  was 240 and read smaller than the class table under it. */
+  const PLOT_H = 300;
+  const AXES_H = 24 + 36;
   // Phones get a shorter plot so the table (the legend) starts on the first screen.
   const phoneQuery = new MediaQuery(media.phone, false);
   const narrow = $derived(phoneQuery.current);
@@ -158,7 +163,7 @@
     <div class="plot" class:fill bind:clientHeight={plotH}>
       <LineChart
         {series}
-        height={narrow ? 220 : fill ? Math.max(300, plotH - 24) : 300}
+        height={narrow ? 220 : fill ? Math.max(PLOT_H + AXES_H, plotH - 24) : PLOT_H + AXES_H}
         xDomain={[0, 1]}
         yDomain={[0, 1]}
         xFormat={(x) => x.toFixed(1)}
@@ -284,10 +289,8 @@
                       <div><dt>{d.label}</dt><dd class="num">{d.value}</dd></div>
                     {/each}
                   </dl>
+                  <!-- The way to the curve is the selection bar's "View curve" alone (one action, one place). -->
                   <p class="ctx">{prContext(ev.bestF1Conf)}</p>
-                  {#if onviewcurve}
-                    <button type="button" class="view" onclick={() => viewCurve(c.class)}>View curve<ArrowRight size={14} aria-hidden="true" /></button>
-                  {/if}
                 </td>
               </tr>
             {/if}
@@ -404,7 +407,8 @@
   .plot.fill {
     flex: 1;
     position: relative;
-    min-height: 324px;
+    /* The chart (plot and axes, 360) and the box's 8 + 16 px padding. */
+    min-height: 384px;
   }
   .plot.fill > :global(*) {
     position: absolute;

@@ -40,7 +40,26 @@
   const gap = $derived(GAP[density]);
   const cols = $derived(Math.max(1, Math.floor((width + gap) / (MIN[density] + gap))));
   const cellW = $derived(width ? (width - gap * (cols - 1)) / cols : MIN[density]);
-  const cellH = $derived(Math.round(cellW * 0.75));
+  /**
+   * The cells take the dataset's dominant shape (the commonest width / height among the first 64 images, within 3:4 to
+   * 16:9; 4:3 until they load), so a set of square photos fills square cells instead of sitting in letterboxed 4:3
+   * ones, whose bands read as uneven gaps (wide beside each image, narrow between rows). An image of another shape is
+   * still shown whole on the cell's bg.inset well.
+   */
+  const aspect = $derived.by(() => {
+    const seen = new Map<number, number>();
+    for (let i = 0; i < Math.min(pager.total ?? 0, 64); i++) {
+      const im = pager.get(i);
+      if (!im?.width || !im.height) continue;
+      const a = Math.round((im.width / im.height) * 100) / 100;
+      seen.set(a, (seen.get(a) ?? 0) + 1);
+    }
+    let best = 4 / 3;
+    let n = 0;
+    for (const [a, c] of seen) if (c > n) [best, n] = [a, c];
+    return Math.min(16 / 9, Math.max(3 / 4, best));
+  });
+  const cellH = $derived(Math.round(cellW / aspect));
   const rowH = $derived(cellH + gap);
   const total = $derived(pager.total ?? 0);
   const rows = $derived(Math.ceil(total / cols));

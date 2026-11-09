@@ -6,6 +6,7 @@
 import ArrowDown from '@lucide/svelte/icons/arrow-down';
 import ArrowUp from '@lucide/svelte/icons/arrow-up';
 import ChevronsUp from '@lucide/svelte/icons/chevrons-up';
+import X from '@lucide/svelte/icons/x';
 import { ApiError } from '$lib/api/client';
 import { hub } from '$lib/api/index.svelte';
 import type { QueueRequest, Run } from '$lib/api/types';
@@ -49,20 +50,28 @@ export async function moveQueued(
   }
 }
 
+/** Taking a waiting run out of the queue: one name, and one confirm, on the Runs list and the run's page. */
+export const REMOVE_LABEL = 'Remove from queue';
+export const removeTitle = (name: string) => `Remove ${name} from the queue?`;
+export const REMOVE_DESCRIPTION = 'It has not started yet, so nothing is lost. You can start it again from New run.';
+
 /**
- * A waiting run's menu items: Start next (unless it already is next), Move up, Move down (none at the end they move
- * towards). `position` is its 1-based place, `waiting` how many runs wait.
+ * A waiting run's queue actions, one set in one order wherever they appear (the Runs row's ⋯ and the run page's):
+ * Start next (unless it already is next), Move up, Move down (none at the end they move towards), Remove from queue.
+ * A page that already shows one of them as a button leaves it out of its menu (`start: false`, no `remove`), so a menu
+ * never repeats a visible button. `position` is its 1-based place, `waiting` how many runs wait.
  */
 export function queueItems(
   position: number,
   waiting: number,
   training: Pick<Run, 'name'> | null | undefined,
   move: (req: QueueRequest) => void,
-  opts: { start?: boolean } = {},
+  opts: { start?: boolean; remove?: () => void } = {},
 ): MenuItem[] {
   const out: MenuItem[] = [];
   if ((opts.start ?? true) && (position > 1 || !training)) out.push({ label: startLabel(training), icon: ChevronsUp, onclick: () => move({ action: 'start' }) });
   if (position > 1) out.push({ label: 'Move up', icon: ArrowUp, onclick: () => move({ action: 'up' }) });
   if (position < waiting) out.push({ label: 'Move down', icon: ArrowDown, onclick: () => move({ action: 'down' }) });
+  if (opts.remove) out.push({ label: REMOVE_LABEL, icon: X, danger: true, onclick: opts.remove });
   return out;
 }

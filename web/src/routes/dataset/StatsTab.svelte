@@ -87,7 +87,7 @@
               {#each findings as h (h.id)}
                 {@const Icon = icons[h.severity]}
                 <span class="h-sev {h.severity}">
-                  <Icon size={14} strokeWidth={2} aria-hidden="true" /><span class="sr-only">{sevWord[h.severity]}:</span>{h.short}
+                  <Icon size={14} strokeWidth={2} aria-hidden="true" /><span class="sr-only">{sevWord[h.severity]}:</span><span class="wide">{h.short}</span><span class="narrow">{h.tiny}</span>
                 </span>
               {/each}
             </span>
@@ -545,7 +545,9 @@
     }
   }
   /* Tablets and phones: the histograms stack, each at full width; Health takes the full width too. The KPI captions
-     take their short form (the split counts are in the page header's meta line), so every cell stays one line. */
+     take their short form (the split counts are in the page header's meta line), so every cell stays one line, and the
+     folded Health line its findings' fewest words (`tiny`: "3 broken · 3 warnings · 35% tiny · 42 empty"), so it
+     stays one line on a tablet. */
   @media (max-width: 1023px) {
     .two {
       grid-template-columns: minmax(0, 1fr);

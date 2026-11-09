@@ -44,7 +44,7 @@ boundaries, and each tier has one structure per page:
 
 | Tier | Width | Nav | Columns and rails | Dialogs | Toolbars and KPI rows |
 |---|---|---|---|---|---|
-| Phone | < 768 | top bar (title, back) + bottom tab bar | one column; rails and secondary panels become sections behind a picker | bottom sheets | list toolbars two rows (filter and count, then the field); KPI rows 2 × 2 or a picker |
+| Phone | < 768 | top bar (title, back) + bottom tab bar | one column; rails and secondary panels become sections behind a picker | bottom sheets | list toolbars two rows (filter, then the field; what the list holds is its footer line); KPI rows 2 × 2 or a picker |
 | Tablet | 768–1023 | icon sidebar (56 px) | one column; rails stack under the main column or become sections behind a picker | centred | list toolbars two rows; Run's metrics a picker in the chart header; short KPI captions |
 | Laptop | 1024–1279 | icon sidebar (opens over the page) | main column + sticky rail (Run, Model, New run, Playground, Settings) | centred | one row; Run's six metric tabs compact (20 px values) |
 | Desktop | ≥ 1280 (designed at 1440) | full sidebar (232 px, collapsible) | the same main + rail, wider panels side by side (Overview's Recent runs and Best models) | centred | one row; full-size tabs (24 px values); every table column |

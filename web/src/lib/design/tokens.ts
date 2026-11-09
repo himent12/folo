@@ -114,7 +114,7 @@ export const size = {
   "focus_offset": 2,
   "box_stroke": 2,
   "box_halo": 1,
-  "content_max": 1440
+  "content_max": 1200
 } as const;
 
 export const breakpoint = {

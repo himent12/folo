@@ -44,8 +44,9 @@
     adding = true;
   }
 
+  // What the rows shown hold, said once at the list's end (base.css .list-foot).
   const totals = $derived.by(() => {
-    const list = datasets.data ?? [];
+    const list = shown;
     return {
       images: list.reduce((a, d) => a + imageCount(d), 0),
       boxes: list.reduce((a, d) => a + (d.stats?.boxes ?? 0), 0),
@@ -67,7 +68,7 @@
 </script>
 
 <Page title="Datasets">
-  <!-- One fixed line: the counts live in the toolbar, so nothing here changes as the list loads. -->
+  <!-- One fixed line: the counts live at the list's end, so nothing here changes as the list loads. -->
   {#snippet sub()}<span>YOLO and COCO folders registered with the server.</span>{/snippet}
   <!-- Phones: one header row, this line beside Add dataset. -->
   {#snippet subPhone()}<span>YOLO and COCO folders.</span>{/snippet}
@@ -81,11 +82,6 @@
 
   {#if !datasets.error && (!datasets.data || datasets.data.length > 0)}
     <div class="list-toolbar">
-      <span class="lt-count num">
-        {#if datasets.data}
-          {datasets.data.length} {datasets.data.length === 1 ? 'dataset' : 'datasets'} · {num(totals.images)} images · {num(totals.boxes)} boxes
-        {:else}<Skeleton inline w="200px" h="10px" />{/if}
-      </span>
       <div class="lt-search"><Input bind:value={query} icon={Search} placeholder="Filter by name or path" aria-label="Filter datasets" type="search" /></div>
     </div>
   {/if}
@@ -193,6 +189,15 @@
       </ul>
     {/if}
   </Panel>
+  {#if datasets.data && shown.length}
+    <p class="list-foot num">
+      <Meta>
+        <span>{shown.length < datasets.data.length ? `${shown.length} of ${datasets.data.length}` : shown.length} {datasets.data.length === 1 ? 'dataset' : 'datasets'}</span>
+        <span>{num(totals.images)} images</span>
+        <span>{num(totals.boxes)} boxes</span>
+      </Meta>
+    </p>
+  {/if}
 </Page>
 
 <AddDatasetDialog bind:open={adding} bind:mode={addMode} known={datasets.data} />
