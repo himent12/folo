@@ -117,9 +117,14 @@ impl FoloApp {
         let nothing_yet = no_ds
             && self.store.runs.ready().is_some_and(|r| r.is_empty())
             && self.store.models.ready().is_some_and(|m| m.is_empty());
-        // First run: the getting-started panel's "Add a dataset" is the one call to action, so the
-        // header shows no inert buttons beside it.
-        let actions = if nothing_yet { Vec::new() } else { actions };
+        // One rule for the header: actions show once the page has loaded and has a body of its own
+        // to act on. First run (the getting-started panel's "Add dataset" is the call to action),
+        // not connected (the error panel's Retry is) and loading show none, so nothing flashes in
+        // disabled and then vanishes.
+        let loaded = self.store.runs.ready().is_some()
+            && self.store.models.ready().is_some()
+            && self.store.datasets.ready().is_some();
+        let actions = if nothing_yet || !loaded { Vec::new() } else { actions };
         let header = page_header(&t, "Overview", text(ty::BASE, t.text_secondary).child(subtitle), actions);
 
         if let Some(e) = self.store.runs.error().cloned() {
@@ -606,7 +611,7 @@ impl FoloApp {
         } else {
             self.button(
                 "ov-empty-ds",
-                "Add a dataset",
+                "Add dataset",
                 Btn::Primary,
                 Some("icons/plus.svg"),
                 window,
@@ -784,8 +789,15 @@ impl FoloApp {
                         );
                         let id = r.id.clone();
                         let key = format!("ov-run-{}", r.id);
+                        // Keyboard focus shows what hover does: the full name and the exact time.
+                        let focus_text = self.ring(&self.fh(key.clone(), cx), window).then(|| {
+                            created_at.map_or(r.name.clone(), |c| {
+                                format!("{} · created {}", r.name, time::local_datetime(c))
+                            })
+                        });
                         let row = div()
                             .id(SharedString::from(key.clone()))
+                            .when_some(focus_text, |d, s| d.child(crate::controls::focus_tip(&t, s, 36.)))
                             .h(px(36.))
                             .mx(px(4.))
                             .px(px(12.))
@@ -1042,7 +1054,7 @@ impl FoloApp {
         let add = self
             .button(
                 "gs-add",
-                "Add a dataset",
+                "Add dataset",
                 Btn::Primary,
                 Some("icons/plus.svg"),
                 window,
@@ -1052,6 +1064,22 @@ impl FoloApp {
                     // can't register folders, and says so there instead).
                     this.navigate(Route::Datasets, w, cx);
                     this.add_dataset_folder(cx);
+                }),
+            )
+            .into_any_element();
+        // The app makes a sample itself (Datasets' generator), so a first run needn't leave for a
+        // terminal to have something to train on.
+        let synth = self
+            .button(
+                "gs-synth",
+                "Generate synthetic",
+                Btn::Secondary,
+                Some("icons/zap.svg"),
+                window,
+                cx,
+                act(|this, w, cx| {
+                    this.navigate(Route::Datasets, w, cx);
+                    this.open_synth(w, cx);
                 }),
             )
             .into_any_element();
@@ -1125,7 +1153,7 @@ impl FoloApp {
                     .child(div().flex().flex_1().flex_basis(px(0.)).min_w_0().child(step(
                         "1",
                         "Add a dataset",
-                        "Add a YOLO or COCO folder, or generate one below.",
+                        "Add a YOLO or COCO folder, or generate a sample.",
                         true,
                     )))
                     .child(div().flex().flex_1().flex_basis(px(0.)).min_w_0().child(step(
@@ -1141,7 +1169,7 @@ impl FoloApp {
                         false,
                     ))),
             )
-            .child(div().flex().child(add));
+            .child(div().flex().gap(px(8.)).child(add).child(synth));
         // The same path from a terminal, for people who live there (docs/CLI.md).
         const CMDS: [&str; 3] =
             ["folo serve", "folo dataset synth shapes --images 1000", "folo train --data shapes --epochs 50"];
@@ -1202,7 +1230,7 @@ impl FoloApp {
             .child(text(ty::BASE, t.text_primary).font_weight(FontWeight::MEDIUM).child("Or from a terminal"))
             // Honest about what reaches this app: the server and the datasets registered with it;
             // `folo train` runs on its own (runs/ in the working folder).
-            .child(cmd(0, "start it, then Settings → folo serve → Connect"))
+            .child(cmd(0, "start it, then Connect in Settings"))
             .child(cmd(1, "then Add a dataset → choose ./shapes"))
             // Training from the terminal stands apart from the sequence above.
             .child(div().pt(px(6.)).child(caption(&t, "Independent CLI training")))

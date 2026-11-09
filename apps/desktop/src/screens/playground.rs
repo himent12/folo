@@ -69,7 +69,8 @@ impl FoloApp {
             } else {
                 "Run a model on any image. Drop a file anywhere in the window."
             },
-            vec![open],
+            // No models: the body's call to action is the only one (no inert button beside it).
+            if no_models_hdr { Vec::new() } else { vec![open] },
         );
         let stage = self.stage(window, cx);
         self.probe_local_gpu(cx);
@@ -110,7 +111,7 @@ impl FoloApp {
             } else if no_models && no_datasets {
                 self.button(
                     "play-pick",
-                    "Add a dataset",
+                    "Add dataset",
                     Btn::Primary,
                     Some("icons/plus.svg"),
                     window,
@@ -711,11 +712,11 @@ impl FoloApp {
                 let hidden = p.boxes.len() - vis.len();
                 let total = p.timing.total_ms.max(0.001);
                 let seg = |v: f64, c| div().h_full().w(relative((v / total) as f32)).bg(c);
-                // One neutral ramp: Inference (the bulk) in secondary ink, Preprocess tertiary at half
-                // strength, and Postprocess an outline (a faint fill in a tertiary edge), in the bar
-                // and its key alike, so the three stages tell apart at a glance.
+                // One neutral ramp: Inference (the bulk) in secondary ink, Preprocess tertiary at 70 %
+                // (a step below it, still 3:1 on the panel), and Postprocess an outline (a faint fill
+                // in a tertiary edge), in the bar and its key alike.
                 let (c_pre, c_model, c_nms) = (
-                    crate::theme::alpha(t.text_tertiary, 0.5),
+                    crate::theme::alpha(t.text_tertiary, 0.7),
                     t.text_secondary,
                     crate::theme::alpha(t.text_tertiary, 0.3),
                 );
