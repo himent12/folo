@@ -6,7 +6,8 @@
    * measured under the same conditions state a winner: a row whose engines ran at different precision or did different
    * work keeps both measurements, and its conclusion is "—" beside the specific difference ("f32 vs TensorFloat-32"),
    * with one legend over the table saying what "—" means ("No winner: conditions differ"), never the same words in every
-   * row. Units sit in the row's header, never in the cells. Each row keeps one short qualifier, and the method and
+   * row. Units sit in the row's header, never in the cells. The table's default (both in f32) is said once, over the
+   * columns; a row keeps a short qualifier only where it differs from that default, and the method and
    * caveats sit in a "How this was measured" fold.
    * Phones are a compact three-column table: one header row (folo-n, YOLO26n, the lead), then each row's metric over
    * its three values on the header's edges, and a no-winner row's own condition on a line under them. Every value
@@ -73,6 +74,7 @@
 <Panel title="Engine speed" pad="none" id="engine-speed">
   <p class="lede">
     folo-n vs YOLO26n on the same RTX 4080 SUPER, 640 px{#if hereLat || hereTrain}: the reference figures, with this server's own folo-n figures last{/if}.
+    Both in f32 unless a row says otherwise.
   </p>
   <!-- What "—" means, said once over every row that has it: those rows then carry only their own condition. -->
   {#if mixed}
@@ -140,7 +142,9 @@
       <dl class="facts">
         <div><dt>Hardware</dt><dd>RTX 4080 SUPER; an i7-14700KF for the CPU rows</dd></div>
         <div><dt>Input</dt><dd class="num">640 × 640 px</dd></div>
-        <div><dt>Precision</dt><dd>FOLO f32 throughout; YOLO26n f32, TensorFloat-32 or fp16, as each row says</dd></div>
+        <div><dt>Precision</dt><dd>FOLO f32 throughout; YOLO26n f32 unless a row names TensorFloat-32 or fp16, its fastest</dd></div>
+        <div><dt>End to end</dt><dd>Decoded image in, boxes out, NMS included</dd></div>
+        <div><dt>CPU threads</dt><dd>Each engine at its best thread count</dd></div>
         <div><dt>Weights</dt><dd>folo-n untrained; YOLO26n COCO-pretrained</dd></div>
         <div><dt>Load</dt><dd>FOLO's CPU forward ran under load from other jobs</dd></div>
         <div><dt>Reading</dt><dd>Times and memory: lower is better. Images per second: higher is better.</dd></div>
@@ -163,7 +167,8 @@
 </Panel>
 
 <style>
-  /* Two-line rows (metric + qualifier): 8 px above and below, values on the metric's line. The row header looks like
+  /* Rows of one or two lines (metric, and a qualifier where the row differs): 8 px above and below, values on the
+     metric's line. The row header looks like
      the table system's first cell (13 / 500 primary), not a column header. */
   .vs tbody :is(td, th) {
     vertical-align: top;

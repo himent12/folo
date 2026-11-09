@@ -7,14 +7,21 @@ import { closeMosaicEpochs } from '$lib/api/progress';
 import type { Optimizer, ResolvedTrain, TrainConfig } from '$lib/api/types';
 import { pct } from '$lib/format';
 
-/** One setting: its value, whether that value is an identifier (mono, `ui/Ident`), and a sans note after it. */
+/**
+ * One setting: its value, whether that value is an identifier (mono, `ui/Ident`), a sans note after it, and what the
+ * value means. A value cell holds one short value ("Auto"); an explanation of it ("AdamW for short runs, else SGD") is
+ * `about`, set as a `.sub` line under the setting's label, never a long value that wraps to a second line of its own.
+ */
 export interface Setting {
   value: string;
   ident?: boolean;
   note?: string;
+  about?: string;
 }
 
 const OPTIMIZER: Record<ResolvedTrain['optimizer'], string> = { sgd: 'SGD', adamw: 'AdamW' };
+/** What "Auto" picks, in the words of the picker's option (`optimizerLabel`). */
+export const AUTO_OPTIMIZER_ABOUT = 'AdamW for short runs, else SGD';
 
 /**
  * An optimizer as every screen names it (New run's picker and Summary, a run's Config, Compare): "Auto (AdamW for short
@@ -22,12 +29,15 @@ const OPTIMIZER: Record<ResolvedTrain['optimizer'], string> = { sgd: 'SGD', adam
  * struck W of "AdamW" reads as "₩" (DESIGN_DIRECTION §2.3, identifiers vs names).
  */
 export function optimizerLabel(o: Optimizer | ResolvedTrain['optimizer']): string {
-  return o === 'auto' ? 'Auto (AdamW for short runs, else SGD)' : OPTIMIZER[o];
+  return o === 'auto' ? `Auto (${AUTO_OPTIMIZER_ABOUT})` : OPTIMIZER[o];
 }
 
-/** "AdamW (auto)", "SGD" (asked for by name); unresolved, the request in the picker's words. Never an identifier. */
+/**
+ * "AdamW (auto)", "SGD" (asked for by name); unresolved, the request: "Auto", what it picks under the label (`about`).
+ * Never an identifier.
+ */
 export function optimizerSetting(config: TrainConfig, resolved: ResolvedTrain | null | undefined): Setting {
-  if (!resolved) return { value: optimizerLabel(config.optimizer) };
+  if (!resolved) return config.optimizer === 'auto' ? { value: 'Auto', about: AUTO_OPTIMIZER_ABOUT } : { value: optimizerLabel(config.optimizer) };
   return { value: optimizerLabel(resolved.optimizer), note: config.optimizer === 'auto' ? '(auto)' : undefined };
 }
 

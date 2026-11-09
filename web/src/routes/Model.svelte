@@ -1542,9 +1542,14 @@
     font-size: var(--type-sm-size);
     color: var(--text-secondary);
   }
-  @media (max-width: 1279px) {
-    .k-body {
+  /* The definitions keep their two columns down to the tablet tier (a panel at 768–1279 px uses its width,
+     DESIGN_DIRECTION §2.2); on a tablet each term sits over its definition, so a definition keeps the column's width
+     instead of a 200 px strip beside a 112 px term. Phones: one column. */
+  @media (max-width: 1023px) {
+    .k-body > div {
       grid-template-columns: minmax(0, 1fr);
+      gap: 2px;
+      max-width: var(--measure);
     }
   }
   /* Tablets: the rail is folded to one line of facts (Details ›), so it sits right under the KPI strip, the reference

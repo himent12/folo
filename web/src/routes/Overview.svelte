@@ -514,7 +514,10 @@
     color: var(--text-tertiary);
     white-space: nowrap;
   }
+  /* The list's foot: on the panel's bottom edge (the body is a flex column, ui/Panel), so a panel stretched to Recent
+     runs' height ends on its note, never on 70 px of nothing under it. */
   .unranked {
+    margin-top: auto;
     padding: 0 var(--space-4) var(--space-4);
     font-size: var(--type-sm-size);
     color: var(--text-secondary);

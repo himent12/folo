@@ -187,3 +187,30 @@ describe('Compare: the keyboard', () => {
     expect(baseline()).toBe(runs[0]!.name);
   });
 });
+
+describe('Compare: a few runs use the panel', () => {
+  // Round 27 at 1440 and 1024: two 224 px run columns packed at the left and an empty last column over the right 45 %
+  // of the panel. From 1024 px, two or three runs share the width with the setting column (DESIGN_DIRECTION §2.2).
+  it('shares the width between the setting column and two runs, with no empty last column', async () => {
+    const runs = (await hub.api.runs()).filter((r) => r.status !== 'queued').slice(0, 2);
+    setWidth(1440);
+    router.route = parse(`#/runs/compare?ids=${runs.map((r) => r.id).join(',')}`);
+    c = mount(RunCompare, { target });
+    const table = await until(() => target.querySelector<HTMLTableElement>('#cmp-table table'), 'the table');
+    const ths = [...table.querySelectorAll<HTMLElement>('thead th')];
+    expect(ths).toHaveLength(3);
+    expect(table.querySelector('.rest')).toBeNull();
+    expect(ths.every((th) => !th.style.width)).toBe(true);
+  });
+
+  it('keeps the setting column fixed with four runs', async () => {
+    const runs = (await hub.api.runs()).filter((r) => r.status !== 'queued').slice(0, 4);
+    setWidth(1440);
+    router.route = parse(`#/runs/compare?ids=${runs.map((r) => r.id).join(',')}`);
+    c = mount(RunCompare, { target });
+    const table = await until(() => target.querySelector<HTMLTableElement>('#cmp-table table'), 'the table');
+    const ths = [...table.querySelectorAll<HTMLElement>('thead th')];
+    expect(ths[0]!.style.width).toBe('152px');
+    expect(ths.slice(1).every((th) => !th.style.width)).toBe(true);
+  });
+});

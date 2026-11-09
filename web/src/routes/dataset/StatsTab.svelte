@@ -335,10 +335,13 @@
     gap: var(--space-3);
     align-items: start;
   }
-  /* From the laptop tier, the findings in two columns (row by row, so severity order still reads left to right, top to
-     bottom). Open evidence is a full-width row of its own under its finding's row: dense packing moves the next
-     finding up beside the opened one, so the cards keep their two-column grid. */
-  @media (min-width: 1024px) {
+  /* From the tablet tier, the findings in two columns (row by row, so severity order still reads left to right, top to
+     bottom): a panel at 768–1279 px uses its width (DESIGN_DIRECTION §2.2), never four findings in a 350 px column of
+     a 715 px panel. The 32 px column gap puts the second column's icon on the KPI strip's third cell (16 px padding +
+     half the inner width), so the 2 × 2 sits on the strip's grid. Open evidence is a full-width row of its own under
+     its finding's row: dense packing moves the next finding up beside the opened one, so the cards keep their
+     two-column grid. Phones: one column. */
+  @media (min-width: 768px) {
     .hitems {
       grid-template-columns: repeat(2, minmax(0, 1fr));
       grid-auto-flow: row dense;

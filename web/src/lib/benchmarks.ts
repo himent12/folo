@@ -24,7 +24,11 @@ export interface Versus {
   folo: number;
   /** The incumbent's best configuration in the document (its bar), not a weaker one. */
   yolo: number;
-  /** How each side was run, when it matters for the comparison: one short line (at most 60 characters). */
+  /**
+   * What sets this row apart from the table's default (both engines in f32; an end-to-end time includes NMS, the
+   * "How this was measured" fold), in one short line (at most 60 characters). A row run under the default has none,
+   * and a difference the conclusion column already names ("f32 vs fp16") is not repeated here.
+   */
   note?: string;
   /** Anything longer about the row (other configurations, earlier runs), for the "How this was measured" fold. */
   caveat?: string;
@@ -35,14 +39,14 @@ export interface Versus {
  * both have a number, including where FOLO is behind.
  */
 export const versusYolo26n: Versus[] = [
-  { metric: 'GPU forward, batch 1', unit: 'ms', better: 'lower', folo: 2.99, yolo: 4.95, note: 'f32' }, // row 1
-  { metric: 'GPU forward throughput, batch 16', unit: 'img/s', better: 'higher', folo: 1385, yolo: 1454, note: 'FOLO f32 vs YOLO26n TensorFloat-32 convolutions', caveat: 'YOLO26n in strict fp32 does 1,334 img/s; FOLO did 1,461 in the previous run.' }, // row 3
-  { metric: 'GPU end to end, batch 1', unit: 'ms', better: 'lower', folo: 5.18, yolo: 6.92, note: 'f32, NMS included' }, // row 5
-  { metric: 'GPU end-to-end throughput, batch 16', unit: 'img/s', better: 'higher', folo: 722, yolo: 615, note: 'FOLO f32 vs YOLO26n fp16, its best' }, // row 6
-  { metric: 'CPU forward, batch 1', unit: 'ms', better: 'lower', folo: 21.4, yolo: 22.8, note: 'f32, best thread count; FOLO under load from other jobs' }, // row 7
-  { metric: 'CPU end to end, batch 1', unit: 'ms', better: 'lower', folo: 26.9, yolo: 24.8, note: 'f32, NMS included' }, // row 8
-  { metric: 'Training step, batch 16', unit: 'img/s', better: 'higher', folo: 219, yolo: 202, note: 'f32 vs f32; YOLO26n with AMP: 252' }, // row 9
-  { metric: 'Training peak GPU memory', unit: 'MiB', better: 'lower', folo: 3474, yolo: 4353, note: 'f32 vs f32; YOLO26n with AMP: 2,435', caveat: "FOLO's train step against YOLO26n's whole trainer; YOLO26n's train step alone peaks at 4,517 MiB." }, // row 11
+  { metric: 'GPU forward, batch 1', unit: 'ms', better: 'lower', folo: 2.99, yolo: 4.95 }, // row 1
+  { metric: 'GPU forward throughput, batch 16', unit: 'img/s', better: 'higher', folo: 1385, yolo: 1454, caveat: 'YOLO26n in strict fp32 does 1,334 img/s; FOLO did 1,461 in the previous run.' }, // row 3
+  { metric: 'GPU end to end, batch 1', unit: 'ms', better: 'lower', folo: 5.18, yolo: 6.92 }, // row 5
+  { metric: 'GPU end-to-end throughput, batch 16', unit: 'img/s', better: 'higher', folo: 722, yolo: 615 }, // row 6
+  { metric: 'CPU forward, batch 1', unit: 'ms', better: 'lower', folo: 21.4, yolo: 22.8 }, // row 7
+  { metric: 'CPU end to end, batch 1', unit: 'ms', better: 'lower', folo: 26.9, yolo: 24.8 }, // row 8
+  { metric: 'Training step, batch 16', unit: 'img/s', better: 'higher', folo: 219, yolo: 202, note: 'YOLO26n with AMP: 252 img/s' }, // row 9
+  { metric: 'Training peak GPU memory', unit: 'MiB', better: 'lower', folo: 3474, yolo: 4353, note: 'YOLO26n with AMP: 2,435 MiB', caveat: "FOLO's train step against YOLO26n's whole trainer; YOLO26n's train step alone peaks at 4,517 MiB." }, // row 11
 ];
 
 /**

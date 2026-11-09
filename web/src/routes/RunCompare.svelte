@@ -325,9 +325,9 @@
   const SETTING_COL = 152;
   const PAIR_SETTING_COL = 104;
   const RUN_COL_MIN = 136;
-  /** A few runs across a wide panel: bounded run columns and an empty last one (`.rest`, DESIGN_DIRECTION §2.7), so two
-   *  runs' values sit side by side, never 500 px apart across 1,200 px. */
-  const RUN_COL_BOUND = 224;
+  /** A few runs across a wide panel (two or three, from 1024 px): the setting column and the run columns share the width
+   *  equally, so the table uses its panel (DESIGN_DIRECTION §2.2) and two runs' values sit a third of the panel apart,
+   *  never packed at the left over an empty right half, nor 500 px apart beside a 152 px setting column. */
   const laptopUp = new MediaQuery(media.laptopUp, true);
 
   // Phones compare two runs at a time: a baseline and one other, fully in view and paged with ‹ ›; values that differ
@@ -346,7 +346,7 @@
     });
   });
   const pairMode = $derived(narrow && chosen.length > 2 && !allRuns);
-  const bounded = $derived(!pairMode && laptopUp.current && chosen.length <= 3);
+  const shared = $derived(!pairMode && laptopUp.current && chosen.length <= 3);
   const base = $derived(chosen.find((r) => r.id === baselineId) ?? chosen[0]);
   const others = $derived(chosen.filter((r) => r !== base));
   /** Makes `r` the baseline; the run it replaces takes the other column, so the pair on screen stays the same two. */
@@ -485,15 +485,16 @@
         <div class="scroll" class:more={tableMore} class:pairing={pairMode && !!other} style:--pair-h="{pairH}px" bind:this={tableEl} onscroll={measureTable}>
           <!-- Fixed layout: every run column the same width, so each header's key sits over its own values. The widths
                live on the header row (no colgroup, whose keyed columns could outlive a page of runs), so the setting
-               column is fixed and the run columns share the rest equally from the first render. -->
+               column is fixed and the run columns share the rest equally from the first render (two or three runs
+               from 1024 px: the setting column takes an equal share too, `shared`). -->
           <table class="table fixed" class:two={pairMode} style:min-width={pairMode ? undefined : `${SETTING_COL + chosen.length * RUN_COL_MIN}px`}>
             <thead>
               <tr>
-                <th style:width="{pairMode ? PAIR_SETTING_COL : SETTING_COL}px"></th>
+                <th style:width={shared ? undefined : `${pairMode ? PAIR_SETTING_COL : SETTING_COL}px`}></th>
                 {#each shown as r (r.id)}
                   <!-- The key in a column of its own beside the name, so a name that wraps (at its hyphens) keeps its
                        left edge and never squeezes the key. -->
-                  <th style:width={bounded ? `${RUN_COL_BOUND}px` : undefined}>
+                  <th>
                     <!-- The run's name over its role: the baseline every other column is read against, or Swap to make
                          it the baseline. No key here: the chips above are the legend, and a swatch at the column's
                          edge could not line up with its chip's. -->
@@ -509,14 +510,12 @@
                     >
                   </th>
                 {/each}
-                {#if bounded}<th class="rest" aria-hidden="true"></th>{/if}
               </tr>
             </thead>
             <tbody>
               <tr>
                 <td class="k">Status</td>
                 {#each shown as r (r.id)}<td><StatusBadge status={r.status} plain /></td>{/each}
-                {@render rest()}
               </tr>
               <tr>
                 <!-- The best epoch's score, which the chips' latest value need not be (a stopped run's 0.595 · stopped
@@ -526,7 +525,6 @@
                   {@const win = bestOf.get(r.id)?.word}
                   <td class="num" class:winner={!!win}>{bestScore(r)}{#if win}{' '}<span class="tag" data-fact>{win}</span>{/if}</td>
                 {/each}
-                {@render rest()}
               </tr>
               <tr>
                 <td class="k">Precision · recall</td>
@@ -538,7 +536,6 @@
                       >{:else}—{/if}
                   </td>
                 {/each}
-                {@render rest()}
               </tr>
               {#each diffRows as [k, f] (k)}
                 <tr>
@@ -555,12 +552,11 @@
                         >{:else}{@render cell(f(r))}{/if}</td
                     >
                   {/each}
-                  {@render rest()}
-                </tr>
+                  </tr>
               {/each}
               {#if sameRows.length}
                 <tr class="fold">
-                  <td colspan={shown.length + 1 + (bounded ? 1 : 0)}>
+                  <td colspan={shown.length + 1}>
                     <button aria-expanded={showSame} onclick={() => (showSame = !showSame)}>
                       {showSame ? 'Hide' : 'Show'} {sameRows.length} identical {sameRows.length === 1 ? 'setting' : 'settings'}
                     </button>
@@ -571,8 +567,7 @@
                     <tr>
                       <td class="k">{k}</td>
                       {#each shown as r (r.id)}<td class="num cfg">{@render cell(f(r))}</td>{/each}
-                      {@render rest()}
-                    </tr>
+                          </tr>
                   {/each}
                 {/if}
               {/if}
@@ -584,9 +579,8 @@
   {/if}
 </Page>
 
-{#snippet rest()}{#if bounded}<td class="rest" aria-hidden="true"></td>{/if}{/snippet}
 
-{#snippet cell(v: Setting)}{#if v.ident}<Ident value={v.value} />{:else}<span class="val" class:whole={v.value.length <= 14} data-fact>{v.value}</span>{/if}{#if v.note}<Note text={v.note} fact />{/if}{/snippet}
+{#snippet cell(v: Setting)}{#if v.ident}<Ident value={v.value} />{:else}<span class="val" class:whole={v.value.length <= 14} data-fact>{v.value}</span>{/if}{#if v.note}<Note text={v.note} fact />{/if}{#if v.about}<span class="k-sub v-about">{v.about}</span>{/if}{/snippet}
 
 {#snippet chips()}
   <!-- The run chips are the legend: colour key, value under the cursor, link and remove. -->
@@ -1330,6 +1324,11 @@
   .k-sub {
     display: block;
     font-size: var(--type-sm-size);
+  }
+  /* What a short value means ("Auto": AdamW for short runs, else SGD), under the value it explains. */
+  .v-about {
+    font-weight: var(--weight-regular);
+    color: var(--text-tertiary);
   }
   /* Same patterns as the lines, so a run's key matches its curve without relying on colour. A key is a fill: the
      palette hue (--c is chart.fill) with the swatch hairline, which the pattern's mask cuts along with the dashes. */

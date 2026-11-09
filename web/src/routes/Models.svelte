@@ -25,6 +25,8 @@
   import Ident from '$lib/ui/Ident.svelte';
   import Meta from '$lib/ui/Meta.svelte';
   import { rowNav } from '$lib/ui/rowNav';
+  import { MediaQuery } from 'svelte/reactivity';
+  import { media } from '$lib/design/tokens';
   import { unlike, versusYolo26n } from '$lib/benchmarks';
   import { FROM_SCRATCH, origin, originTip } from '$lib/lineage';
   import { filterLabel, groupKey, groupLabel, rankKey, scoreContext, splitLabel, type ScoreContext } from '$lib/scoreSummary';
@@ -86,6 +88,11 @@
     (a.ctx.datasetName ?? '').localeCompare(b.ctx.datasetName ?? '') ||
     splitRank(a.ctx.split) - splitRank(b.ctx.split);
 
+  // Source run: a run's name ends in what tells it from its siblings ("shapes-hard-s" beside "shapes-hard-m"), so it is
+  // never cut (DESIGN_DIRECTION §2.3). From 1280 px every column is in use and 112 px (88 of text) holds the usual
+  // names, a longer one wrapping at its hyphens; between 1024 and 1279 Classes, GFLOPs and Started from step out and the
+  // name column has room to spare, so Source run takes 136.
+  const laptopOnly = new MediaQuery(`${media.laptopUp} and ${media.upToDesktop}`, false);
   // Sizes in one unit for the column, named in its header (prefs.units: MiB or MB).
   const cols: Col[] = $derived([
     { key: 'name', label: 'Model', get: (m) => m.name.toLowerCase() },
@@ -97,7 +104,7 @@
     { key: 'bytes', label: `Size, ${sizeUnit(prefs.units)}`, num: true, get: (m) => m.bytes, hide: 'md', w: '80px' },
     { key: 'map50_95', label: 'mAP50-95', num: true, get: (m) => m.metrics?.map50_95 ?? -1, w: '96px' },
     { key: 'map50', label: 'mAP50', num: true, get: (m) => m.metrics?.map50 ?? -1, w: '80px' },
-    { key: 'source', label: 'Source run', get: (m) => sourceName(m) || '~', hide: 'md', w: '112px' },
+    { key: 'source', label: 'Source run', get: (m) => sourceName(m) || '~', hide: 'md', w: laptopOnly.current ? '136px' : '112px' },
     { key: 'parent', label: 'Started from', get: (m) => parentOf(m)?.label ?? '~', hide: 'lg', w: '120px' },
     { key: 'created', label: 'Created', num: true, get: (m) => Date.parse(m.created), w: '112px' },
   ]);
@@ -486,14 +493,14 @@
   td :global(.ident.src) {
     color: var(--text-secondary);
   }
-  /* A run's name is free text with its own page (the link) and its whole name in the tooltip, so a long one shortens
-     with an ellipsis inside its 112 px column rather than widening the table past its panel (DESIGN_DIRECTION §2.3). */
+  /* A run's name is never cut: its suffix is what tells it from its siblings ("shapes-hard-s" beside "shapes-hard-m",
+     DESIGN_DIRECTION §2.3). The column holds the usual names on one line (the widths above); a longer one wraps after
+     a hyphen and the row grows a line, never an ellipsis and never wider than its column. */
   a.src {
-    display: block;
-    max-width: 80px; /* grid-ok: the column's 112 px less its 16 px sides */
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    display: inline-block;
+    max-width: 100%;
+    white-space: normal;
+    overflow-wrap: break-word;
   }
   /* The engine benchmarks: a collapsed row with a one-line summary; the comparison opens beneath it. */
   .bench {

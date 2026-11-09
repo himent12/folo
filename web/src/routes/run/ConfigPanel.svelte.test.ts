@@ -39,7 +39,8 @@ function rows(resolved: ResolvedTrain | null, cfg: TrainConfig = config) {
   c = mount(ConfigPanel, { target, props: { config: cfg, resolved, compact: true } });
   flushSync();
   const dts = [...target.querySelectorAll('dt')];
-  return Object.fromEntries(dts.map((dt) => [dt.textContent?.trim(), dt.nextElementSibling as HTMLElement]));
+  // Keyed by the label alone (its first text), not the explanation under it.
+  return Object.fromEntries(dts.map((dt) => [dt.firstChild?.textContent?.trim(), dt.nextElementSibling as HTMLElement]));
 }
 
 describe('ConfigPanel', () => {
@@ -61,7 +62,9 @@ describe('ConfigPanel', () => {
 
   it('keeps the request as today without a resolution', () => {
     const r = rows(null);
-    expect(r['Optimizer']?.textContent).toBe('Auto (AdamW for short runs, else SGD)');
+    // One short value; what Auto picks is a line under the label, never a long value wrapping in the value column.
+    expect(r['Optimizer']?.textContent).toBe('Auto');
+    expect(r['Optimizer']?.previousElementSibling?.querySelector('.sub')?.textContent).toBe('AdamW for short runs, else SGD');
     expect(r['Optimizer']?.querySelector('.mono')).toBeNull();
     expect(r['Initial LR']?.textContent).toBe('0.01');
     expect(r['Batch']?.textContent).toBe('16');
@@ -128,7 +131,7 @@ describe('ConfigPanel: the work before the reference', () => {
     return lists.map((dl) => ({
       fold: dl.closest('details')?.querySelector('summary')?.textContent ?? null,
       group: dl.querySelector('.group')?.textContent ?? null,
-      keys: [...dl.querySelectorAll('dt')].map((dt) => dt.textContent?.trim()),
+      keys: [...dl.querySelectorAll('dt')].map((dt) => dt.firstChild?.textContent?.trim()),
     }));
   }
 
@@ -141,7 +144,9 @@ describe('ConfigPanel: the work before the reference', () => {
 
   it('balances the two columns: setup on the left, the optimizer over augmentation on the right', () => {
     const lists = mountWith({});
-    expect(lists.map((l) => l.group)).toEqual(['Training', 'Optimizer', 'Augmentation']);
+    expect(lists.map((l) => l.group)).toEqual(['Training', 'Optimizer settings', 'Augmentation']);
+    // Under its own heading the optimizer's row is "Type", never "Optimizer" twice.
+    expect(lists[1]!.keys[0]).toBe('Type');
     const left = lists[0]!.keys.length;
     const right = lists[1]!.keys.length + lists[2]!.keys.length;
     // The right column carries one heading more: within a few rows of the left, never a hollow of six.
