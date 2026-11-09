@@ -347,12 +347,12 @@
     />
   {/if}
 
-  <Dialog bind:open={confirmDelete} title="Delete dataset?" size="sm" status={deleteStatus}>
+  <Dialog bind:open={confirmDelete} title="Delete {d.name}?" size="sm" status={deleteStatus}>
     <p class="confirm">
       <b>{d.name}</b> will be unregistered from FOLO. The files in <span class="mono">{d.path}</span> stay on disk, and runs that used it keep their results.
     </p>
     {#snippet footer()}
-      <Button variant="ghost" onclick={() => (confirmDelete = false)}>Cancel</Button>
+      <Button onclick={() => (confirmDelete = false)}>Cancel</Button>
       <Button variant="destructive" icon={Trash} loading={deleting} onclick={remove}>Delete dataset</Button>
     {/snippet}
   </Dialog>

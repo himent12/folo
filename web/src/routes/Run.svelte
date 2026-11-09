@@ -194,24 +194,28 @@
     }
   }
 
-  const moreItems = $derived.by((): MenuItem[] => {
+  /**
+   * The header's ⋯ (DESIGN_DIRECTION §13, one action set): the header shows one secondary, Compare (in the menu on
+   * phones), and a running run's state action, Stop; the rest is here, the destructive action last on every detail
+   * page (Remove from queue for a waiting run, Delete run for a finished one), each behind its confirm dialog. Try model
+   * is here only for a run that did not complete: a completed run's callout offers Try in Playground.
+   */
+  const menuItems = (compare: boolean): MenuItem[] => {
     if (!run) return [];
-    const out: MenuItem[] = [{ label: 'Compare', icon: GitCompare, href: href(`/runs/compare?ids=${run.id}`) }];
+    const out: MenuItem[] = compare ? [{ label: 'Compare', icon: GitCompare, href: href(`/runs/compare?ids=${run.id}`) }] : [];
     if (run.model_id) {
       if (run.status !== 'completed') out.push({ label: 'Try model', icon: ScanSearch, href: href(`/playground?model=${run.model_id}`) });
       out.push({ label: 'Open model', icon: Box, href: href(`/models/${run.model_id}`) });
     }
-    // Phones: the queue actions in their one order (Start next is the banner's button), Remove from queue last under the
-    // same name (the status and its time keep the row).
+    // The queue actions in their one order (Start next is the banner's button), Remove from queue last.
     const removeQueued = () => (stopOpen = true);
     if (place !== null) out.push(...queueItems(place, waitingCount, ahead, move, { start: false, remove: removeQueued }));
     else if (run.status === 'queued') out.push({ label: REMOVE_LABEL, icon: X, danger: true, onclick: removeQueued });
     if (!active) out.push({ label: 'Delete run', icon: Trash, danger: true, onclick: () => (deleteOpen = true) });
     return out;
-  });
-
-  /** Wider screens: the queued run's moves behind ⋯; Remove from queue is the button beside it, Start next the banner's. */
-  const wideQueueItems = $derived(place !== null ? queueItems(place, waitingCount, ahead, move, { start: false }) : []);
+  };
+  const moreItems = $derived(menuItems(true));
+  const wideItems = $derived(menuItems(false));
 
   /** What the run will have once it trains, in place of the empty frames (the waiting layout). */
   const later = $derived([
@@ -375,26 +379,13 @@
       </Meta>
     {/snippet}
     {#snippet actions()}
-      <span class="wide-only">
-        <Button icon={GitCompare} href={href(`/runs/compare?ids=${run.id}`)}>Compare</Button>
-        {#if run.model_id}
-          {#if run.status !== 'completed'}<Button icon={ScanSearch} href={href(`/playground?model=${run.model_id}`)}>Try model</Button>{/if}
-          <Button icon={Box} href={href(`/models/${run.model_id}`)}>Model</Button>
-        {/if}
-      </span>
+      <!-- One secondary (Compare), a running run's state action (Stop), and ⋯ with the rest, the destructive action last
+           (DESIGN_DIRECTION §13). Phones: Compare joins the ⋯. -->
+      <span class="wide-only"><Button icon={GitCompare} href={href(`/runs/compare?ids=${run.id}`)}>Compare</Button></span>
       {#if run.status === 'running'}
         <Button variant="danger" icon={Square} onclick={() => (stopOpen = true)}>Stop</Button>
-      {:else if run.status === 'queued'}
-        <!-- Phones: in the ⋯ menu under the same name, so the status and its time keep one line beside it. -->
-        <span class="wide-only">
-          <!-- The quiet destructive control, styled as Stop is on a running run (DESIGN_DIRECTION 13). -->
-          <Button variant="danger" icon={X} onclick={() => (stopOpen = true)}>{REMOVE_LABEL}</Button>
-          {#if wideQueueItems.length}<Menu label="More run actions" items={wideQueueItems} />{/if}
-        </span>
-      {:else if !active}
-        <span class="wide-only"><Button variant="danger" icon={Trash} aria-label="Delete run" title="Delete run" onclick={() => (deleteOpen = true)} /></span>
       {/if}
-      <!-- Phones: the state action stays visible, everything else goes behind one overflow button. -->
+      {#if wideItems.length}<span class="wide-only"><Menu label="More run actions" items={wideItems} /></span>{/if}
       <span class="phone-only"><Menu label="More run actions" items={moreItems} /></span>
     {/snippet}
 

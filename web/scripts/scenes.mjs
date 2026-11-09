@@ -515,7 +515,7 @@ export const scenes = [
   // live run, so not "now").
   { name: 'run-queued-second', path: '/runs/run_q7c5', viewports: ['desktop', 'laptop', 'tablet', 'mobile'], setup: (page) => until(page, '.callout button') },
   {
-    // The queued run's ⋯: Move up (it is last, so no Move down); phones also keep Remove from queue there.
+    // The queued run's ⋯: Move up (it is last, so no Move down), then Remove from queue, last under a hairline.
     name: 'run-queued-menu',
     path: '/runs/run_q7c5',
     fullPage: false,

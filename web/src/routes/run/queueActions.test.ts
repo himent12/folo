@@ -11,7 +11,7 @@ describe('queueItems: one queue action set, one order, wherever it appears', () 
 
   it('leaves out the moves that do not apply and the actions the page already shows as buttons', () => {
     expect(labels(1, 2, { name: 'live' }, noop, { remove: noop })).toEqual(['Move down', REMOVE_LABEL]);
-    // The run page: Start next is the banner's button and Remove from queue the header's.
+    // Without a remove callback (a caller that shows Remove elsewhere): the moves alone.
     expect(labels(2, 3, { name: 'live' }, noop, { start: false })).toEqual(['Move up', 'Move down']);
   });
 
