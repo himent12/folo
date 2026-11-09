@@ -34,7 +34,9 @@ describe('runEnds', () => {
 
   it('names the run and the outcome', () => {
     const m = runEndMessage({ run: run('fasteners-s', 'completed', { best: { epoch: 37, map50_95: 0.6041 } }), kind: 'completed' });
-    expect(m).toEqual({ tone: 'success', title: 'fasteners-s finished training', detail: 'Best mAP50-95 0.604 at epoch 37.' });
-    expect(runEndMessage({ run: run('x', 'failed'), kind: 'oom' }).title).toBe('x ran out of GPU memory');
+    expect(m).toEqual({ tone: 'success', title: 'fasteners-s', detail: ['Finished training', 'best mAP50-95 0.604 at epoch 37'] });
+    const oom = runEndMessage({ run: run('x', 'failed'), kind: 'oom' });
+    expect(oom.title).toBe('x');
+    expect(oom.detail[0]).toMatch(/^Ran out of GPU memory at epoch \d+$/);
   });
 });

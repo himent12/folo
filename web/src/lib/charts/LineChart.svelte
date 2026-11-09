@@ -300,8 +300,20 @@
     // The gutter column holds the widest label whole (a failed or stopped run's "name · failed" goes there).
     const labelW = showEnds ? Math.min(GUTTER_MAX, widest + 6) + LEAD - 6 : 0;
     const left = Math.ceil(longest * 7) + 14;
-    // An x-axis title gets its own line under the tick labels; a y-axis name or an x mark's label one above the plot.
-    return { top: yLabel || xMark ? 24 : 8, right: 12 + labelW, bottom: xLabel ? 36 : 22, left };
+    // An x-axis title gets its own line under the tick labels; a y-axis name or an x mark's label one above the plot,
+    // unless the y caption fits over the top tick (capInPlot).
+    return { top: (yLabel && !capInPlot) || xMark ? 24 : 8, right: 12 + labelW, bottom: xLabel ? 36 : 22, left };
+  });
+  /**
+   * A y caption ("y from 0.40", the zoom note) sits right over its axis's top tick label, never a row higher with the
+   * plot's headroom between them: where the domain leaves at least a line (16 px) above the top tick, the caption goes
+   * there and the plot keeps the row. Linear axes only; an x mark's label keeps the row above the plot.
+   */
+  const capInPlot = $derived.by(() => {
+    if (!yLabel || xMark || yLog || !yTickValues.length) return false;
+    const span = yExtent[1] - yExtent[0];
+    const room = span > 0 ? ((yExtent[1] - Math.max(...yTickValues)) / span) * (height - 8 - (xLabel ? 36 : 22)) : 0;
+    return room >= 16;
   });
 
   const x = $derived(scaleLinear().domain(xExtent).range([margin.left, Math.max(margin.left + 1, width - margin.right)]));
@@ -832,7 +844,7 @@
             <text x={x(t)} y={height - margin.bottom + 16} text-anchor="middle">{xFormat(t)}</text>
           {/each}
           {#if xLabel}<text class="x-label" x={(margin.left + width - margin.right) / 2} y={height - 4} text-anchor="middle">{xLabel}</text>{/if}
-          {#if yLabel}<text class="x-label" x="0" y="10" dy="0.32em" text-anchor="start">{yLabel}</text>{/if}
+          {#if yLabel}<text class="x-label" x="0" y={capInPlot ? y(Math.max(...yTickValues)) - 14 : 10} dy="0.32em" text-anchor="start">{yLabel}</text>{/if}
         </g>
 
         {#if hasData}

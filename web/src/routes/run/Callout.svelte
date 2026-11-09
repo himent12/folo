@@ -3,11 +3,9 @@
    * A run banner, one line (web/DESIGN_DIRECTION.md §4.4, the Vercel callout): status icon, title, cause, one action,
    * and a disclosure for the details. Only the icon and the title take the status hue; the cause stays in
    * text.secondary. Below the laptop tier the actions go under the text (on a row of their own, every callout, never
-   * beside a title they would cut); on phones the cause also wraps under the title, and the actions are one button and
-   * a row of text links (ui/Button's `.cta-links`): the lime primary across the callout, every other action a link
-   * after it, never a stack of full-width buttons before the content; a `stack` callout gives its first action the
-   * full width even when it is not the primary, the disclosure under it. An actions snippet that renders nothing leaves
-   * no row. Danger and warning callouts are the panel surface with a 2 px status edge, never a tint under the lime
+   * beside a title they would cut); on phones the cause also wraps under the title, and the actions are the one phone
+   * remedy layout (ui/Button's `.cta-stack`): the lime primary across the callout, then each other way out as a
+   * full-width secondary under it, the disclosure last. An actions snippet that renders nothing leaves no row. Danger and warning callouts are the panel surface with a 2 px status edge, never a tint under the lime
    * primary. An `also` line under the
    * first, with its own mark and hue, joins a second finding about the same run (a completed run's outcome, then the
    * trainer's warning that it was too short to learn), so one run never stacks two banners.
@@ -78,7 +76,7 @@
     </p>
   {/if}
   {#if actions || more}
-    <div class="c-acts cta-row cta-links">
+    <div class="c-acts cta-row cta-stack">
       {#if actions}{@render actions()}{/if}
       {#if more}
         <button type="button" class="c-more" aria-expanded={open} aria-controls="{uid}-more" onclick={() => (open = !open)}>{moreLabel}</button>
@@ -284,15 +282,15 @@
       font-size: inherit;
       line-height: inherit;
     }
-    /* One button and a row of text links (ui/Button's .cta-links): the primary across the callout, the other ways out
-       as links after it, never a stack of full-width buttons before the content. */
+    /* The one phone remedy layout (ui/Button's .cta-stack): the buttons across the callout, the primary first, each
+       other way out a full-width secondary under it, 8 px apart; a disclosure alone keeps the text's column. */
     .c-acts {
       grid-column: 2;
       justify-content: flex-start;
       flex-wrap: wrap;
-      gap: var(--space-1) var(--space-4);
+      gap: var(--space-2);
     }
-    .c-acts:has(> :global(.btn.primary)) {
+    .c-acts:has(> :global(.btn)) {
       grid-column: 1 / -1;
     }
     .c-detail {
@@ -306,14 +304,7 @@
     .c-also-mark {
       margin-top: 2px;
     }
-    /* The one fix to take, across the callout; the disclosure under it. */
-    .stack .c-acts {
-      grid-column: 1 / -1;
-    }
-    /* The one phone button size (ui/Button's .cta-row), across the callout. */
-    .stack .c-acts > :global(.btn:first-child) {
-      flex: 1 0 100%;
-    }
+    /* The disclosure's body under the stack, across the callout too. */
     .stack .c-detail {
       grid-column: 1 / -1;
     }

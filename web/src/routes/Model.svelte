@@ -450,9 +450,10 @@
       <div class="main-col" class:off={!showing('curves')}>
         <Panel title="Precision–recall" meta={prMeta} pad="none" id="pr">
           <!-- Many classes: the band / every-curve switch is the chart's one header control, so the legend row keeps one
-               line in the laptop's narrower column. -->
+               line in the laptop's narrower column. Phones put it on the Trace row (PrCurves), never on a header row of
+               its own that wraps under the title. -->
           {#snippet actions()}
-            {#if ev && m.classes.length > 10}
+            {#if ev && m.classes.length > 10 && !phone.current}
               <Segmented
                 size="sm"
                 label="Curves shown"
@@ -910,12 +911,13 @@
   .meta-line[aria-expanded='true'] :global(svg) {
     transform: rotate(180deg);
   }
+  /* Under the button that opens it, never pulled up over it (a control is never covered by its neighbour: a -8 px
+     margin here lay over the meta line's lower half, so a tap there missed it). */
   .meta-more {
     flex-basis: 100%;
     display: flex;
     flex-wrap: wrap;
     gap: var(--space-1) var(--space-3);
-    margin-top: calc(var(--space-2) * -1);
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
   }

@@ -3,7 +3,9 @@
 // `search` adds query params to the page URL (e.g. `scenario=empty` for the mock), next to `mock=1`.
 
 /** @typedef {{ name: string, path: string, themes?: ('dark' | 'light')[], viewports?: ('desktop' | 'laptop' | 'tablet' | 'mobile')[], advance?: number, search?: string,
- *   fullPage?: boolean, keepScroll?: boolean, setup?: (page: import('playwright-core').Page, ctx: { vp: string, theme: string }) => Promise<void> }} Scene */
+ *   fullPage?: boolean, keepScroll?: boolean, touch?: false, setup?: (page: import('playwright-core').Page, ctx: { vp: string, theme: string }) => Promise<void> }} Scene */
+// `touch: false` keeps a scene out of --qa's coarse-pointer pass over phone states: a scene about a keyboard feature
+// (shortcuts) or one that sets up touch itself (the touch hint).
 
 /**
  * Advances the page's fake clock until `selector` is visible (the mock's latency runs on that clock).
@@ -480,14 +482,16 @@ export const scenes = [
   },
   {
     // "By epoch", chosen by hand over the default "By progress": one epoch scale to the longest plan. On a tablet the
-    // header keeps one layout whatever the axis (the qualifier wraps under the metric tabs, the control on their row).
+    // header keeps one layout whatever the axis (the qualifier wraps under the metric tabs, the control on their row);
+    // a phone picks it in its compact X axis select.
     name: 'run-compare-epoch',
     path: '/runs/compare?ids=run_7d1e,run_c19a,run_5be3,run_a2f0',
     fullPage: false,
     viewports: ['desktop', 'tablet', 'mobile'],
-    setup: async (page) => {
+    setup: async (page, { vp }) => {
       await until(page, '.chip .key');
-      await page.getByRole('radio', { name: 'By epoch' }).click();
+      if (vp === 'mobile') await page.getByRole('combobox', { name: 'X axis' }).selectOption('epoch');
+      else await page.getByRole('radio', { name: 'By epoch' }).click();
       await page.mouse.move(0, 0);
     },
   },
@@ -687,6 +691,7 @@ export const scenes = [
     name: 'chart-touch-hint',
     path: '/runs/compare?ids=run_7d1e,run_c19a,run_5be3,run_a2f0',
     fullPage: false,
+    touch: false,
     viewports: ['mobile'],
     setup: async (page) => {
       const cdp = await page.context().newCDPSession(page);
@@ -1751,6 +1756,7 @@ export const scenes = [
   {
     // Single-key shortcuts turned off in Settings; the dialog (from the Settings button) says so.
     name: 'shortcuts-off',
+    touch: false,
     path: '/settings',
     fullPage: false,
     themes: ['light'],
