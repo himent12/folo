@@ -233,8 +233,11 @@ pub fn paint_image_with_boxes(
                         );
                     }
                     // A name-only chip wider than the view would run off it: none (the inspector
-                    // and the detection list name the box in full).
-                    if score.is_empty() && name_line.width + px(10.) > bounds.size.width - px(4.) {
+                    // and the detection list name the box in full). The selected box keeps its chip.
+                    if score.is_empty()
+                        && !b.highlight
+                        && name_line.width + px(10.) > bounds.size.width - px(4.)
+                    {
                         continue;
                     }
                     let gap = if score.is_empty() || name.is_empty() { px(0.) } else { px(5.) };
