@@ -1063,8 +1063,14 @@ impl FoloApp {
                 }),
             )
             .into_any_element();
-        let step = |n: &str, title: &str, body: &str, active: bool| {
+        // `cmd`: a command on its own line as a chip (GPUI breaks lines at any non-word character,
+        // no-break spaces included, so an inline one could split across lines).
+        let step = |n: &str, title: &str, body: &str, cmd: Option<&str>, active: bool| {
             div()
+                // Fills its wrapper, so the three cards end at one height whichever wraps most; may
+                // shrink below its text (which then wraps).
+                .flex_1()
+                .min_w_0()
                 .flex()
                 .gap(px(14.))
                 .p(px(16.))
@@ -1100,7 +1106,21 @@ impl FoloApp {
                                 .font_weight(FontWeight::MEDIUM)
                                 .child(title.to_string()),
                         )
-                        .child(rich(&t, ty::SM, t.text_tertiary, body).text_left()),
+                        .child(rich(&t, ty::SM, t.text_tertiary, body).text_left())
+                        .children(cmd.map(|c| {
+                            div().mt(px(4.)).flex().child(
+                                div()
+                                    .px(px(6.))
+                                    .rounded(px(radius::XS))
+                                    .bg(t.bg_active)
+                                    .font_family(crate::theme::MONO)
+                                    .text_size(px(ty::SM.size))
+                                    .line_height(px(ty::SM.line + 2.))
+                                    .text_color(t.text_primary)
+                                    .whitespace_nowrap()
+                                    .child(c.to_string()),
+                            )
+                        })),
                 )
         };
         let steps = panel(&t)
@@ -1123,24 +1143,28 @@ impl FoloApp {
             )
             .child(
                 div()
+                    // Children stretch to the row's height (the flex default).
                     .flex()
                     .gap(px(12.))
-                    .child(div().flex_1().flex_basis(px(0.)).min_w_0().child(step(
+                    .child(div().flex().flex_1().flex_basis(px(0.)).min_w_0().child(step(
                         "1",
                         "Add a dataset",
-                        "Point FOLO at a YOLO folder, or generate one with `folo dataset synth`",
+                        "Add a YOLO or COCO folder, or generate a sample:",
+                        Some("folo dataset synth"),
                         true,
                     )))
-                    .child(div().flex_1().flex_basis(px(0.)).min_w_0().child(step(
+                    .child(div().flex().flex_1().flex_basis(px(0.)).min_w_0().child(step(
                         "2",
                         "Train a model",
                         "Start a run; loss, mAP and throughput stream in live.",
+                        None,
                         false,
                     )))
-                    .child(div().flex_1().flex_basis(px(0.)).min_w_0().child(step(
+                    .child(div().flex().flex_1().flex_basis(px(0.)).min_w_0().child(step(
                         "3",
                         "Try it",
                         "Open any image in the Playground and tune the thresholds.",
+                        None,
                         false,
                     ))),
             )
@@ -1205,10 +1229,14 @@ impl FoloApp {
             .child(text(ty::BASE, t.text_primary).font_weight(FontWeight::MEDIUM).child("Or from a terminal"))
             // Honest about what reaches this app: the server and the datasets registered with it;
             // `folo train` runs on its own (runs/ in the working folder).
-            .child(cmd(0, "start the server this app connects to"))
-            .child(cmd(1, "then Add dataset → choose ./shapes"))
-            .child(cmd(2, "or train in the terminal, separate from this app"));
-        div().flex().flex_col().gap(px(16.)).child(steps).child(terminal).into_any_element()
+            .child(cmd(0, "start it, then Settings → folo serve → Connect"))
+            .child(cmd(1, "then Add a dataset → choose ./shapes"))
+            // Training from the terminal stands apart from the sequence above.
+            .child(div().pt(px(6.)).child(caption(&t, "Independent CLI training")))
+            .child(cmd(2, "trains here in the terminal; this run won't appear in Desktop"));
+        // Capped like Settings, so a wide window doesn't stretch three short steps and the
+        // commands' captions across 1,600 px of panel.
+        div().flex().flex_col().gap(px(16.)).max_w(px(1040.)).child(steps).child(terminal).into_any_element()
     }
 
     /// Dataset card: a 2×2 mosaic of its first images, name and counts.

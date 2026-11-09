@@ -93,7 +93,9 @@ pub fn rich(t: &Theme, s: TypeStep, color: Hsla, content: &str) -> Div {
             continue;
         }
         let code = i % 2 == 1;
-        let seg = if code { format!("\u{a0}{part}\u{a0}") } else { part.to_string() };
+        // A code span never breaks inside (its chip would split into two boxes across the line).
+        let seg =
+            if code { format!("\u{a0}{}\u{a0}", part.replace(' ', "\u{a0}")) } else { part.to_string() };
         runs.push(gpui::TextRun {
             len: seg.len(),
             font: if code { mono.clone() } else { sans.clone() },
