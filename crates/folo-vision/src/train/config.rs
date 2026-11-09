@@ -2,7 +2,7 @@
 
 use folo_core::Device;
 use folo_data::AugmentConfig;
-use folo_nn::optim::{OptimKind, auto_optimizer, effective_weight_decay};
+use folo_nn::optim::{AUTO_RULE, OptimKind, auto_optimizer_rule, effective_weight_decay};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
@@ -49,6 +49,10 @@ pub struct TrainConfig {
     pub device: String,
     /// Optimizer.
     pub optimizer: OptimizerChoice,
+    /// Version of the `auto` rule (MODEL.md §8.2): 2, the current one, floors its AdamW `lr0` at 0.001; 1 is the
+    /// reference trainer's. Missing in configs from before it: 1, so a run resumes with the rule it started with.
+    #[serde(default = "legacy_auto_rule")]
+    pub auto_rule: u32,
     /// Base LR (ignored by `auto`).
     pub lr0: f64,
     /// Final LR fraction: the last iteration runs at `lr0 · lrf`.
@@ -106,6 +110,7 @@ impl Default for TrainConfig {
             imgsz: 640,
             device: "auto".into(),
             optimizer: OptimizerChoice::Auto,
+            auto_rule: AUTO_RULE,
             lr0: 0.01,
             lrf: 0.01,
             momentum: 0.937,
@@ -132,6 +137,11 @@ impl Default for TrainConfig {
 /// An `f32` as the `f64` of its shortest decimal form (`0.01f32` → `0.01`, not `0.009999999776482582`).
 pub fn f32_decimal(v: f32) -> f64 {
     v.to_string().parse().unwrap_or(v as f64)
+}
+
+/// The `auto_rule` of settings written before the key existed.
+fn legacy_auto_rule() -> u32 {
+    1
 }
 
 /// `min(available cores, 8)`.
@@ -247,6 +257,9 @@ impl TrainConfig {
             return bad(format!("val_batch must be at most 4096, got {}", self.val_batch));
         }
         self.augment.validate().map_err(|e| Error::Config(format!("augment: {e}")))?;
+        if !(1..=AUTO_RULE).contains(&self.auto_rule) {
+            return bad(format!("auto_rule must be in 1..={AUTO_RULE}, got {}", self.auto_rule));
+        }
         let l = &self.loss;
         for (name, v) in [
             ("loss.box_gain", l.box_gain),
@@ -293,7 +306,14 @@ impl TrainConfig {
     pub fn resolve_optimizer(&self, n_train: usize, num_classes: usize) -> ResolvedOptim {
         match self.optimizer {
             OptimizerChoice::Auto => {
-                let a = auto_optimizer(n_train, self.batch, self.nbs, self.epochs as usize, num_classes);
+                let a = auto_optimizer_rule(
+                    self.auto_rule,
+                    n_train,
+                    self.batch,
+                    self.nbs,
+                    self.epochs as usize,
+                    num_classes,
+                );
                 ResolvedOptim {
                     kind: a.kind,
                     lr0: a.lr0,
@@ -406,6 +426,23 @@ pub fn resolve_device(s: &str) -> Result<Device> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `auto_rule`: new configs use rule 2 (the AdamW lr0 floored at 0.001), settings stored before the key
+    /// existed (a checkpoint's `folo.train`) resume with rule 1, the reference fit; other versions are invalid.
+    #[test]
+    fn auto_rule_versions() {
+        let cfg = TrainConfig { epochs: 30, batch: 16, ..TrainConfig::default() };
+        assert_eq!(cfg.auto_rule, AUTO_RULE);
+        assert_eq!(cfg.resolve_optimizer(2000, 80).lr0, 0.001);
+        assert_eq!(cfg.resolve_optimizer(2000, 4).lr0, 0.00125, "4 classes are above the floor");
+        let mut old = serde_json::to_value(&cfg).unwrap();
+        old.as_object_mut().unwrap().remove("auto_rule");
+        let old: TrainConfig = serde_json::from_value(old).unwrap();
+        assert_eq!(old.auto_rule, 1);
+        assert_eq!(old.resolve_optimizer(2000, 80).lr0, 0.000119);
+        assert!(TrainConfig { auto_rule: 0, ..cfg.clone() }.validate().is_err());
+        assert!(TrainConfig { auto_rule: AUTO_RULE + 1, ..cfg }.validate().is_err());
+    }
 
     /// `Run.resolved`: `auto` resolved for a short run, and the same numbers back from a `config.json` with the
     /// `resolved` object and from one written before it (rebuilt from its other keys).

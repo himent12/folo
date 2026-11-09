@@ -160,7 +160,8 @@ fn start(
     };
     let suffix = arch.strip_prefix("folo-").unwrap_or(&arch).to_string();
     let name = args.name.clone().unwrap_or_else(|| format!("{ds_name}-{suffix}"));
-    let mut cfg = apply_sets(config_of(args, name.clone(), absolute(data_arg), arch, weights_head), &args.set)?;
+    let mut cfg =
+        apply_sets(config_of(args, name.clone(), absolute(data_arg), arch, weights_head), &args.set)?;
     // Validate before creating the run folder, so a typo leaves nothing behind.
     cfg.validate().map_err(engine_error)?;
     let data = train_data(&ds)?;
@@ -698,9 +699,29 @@ fn read_classes(run_dir: &Path) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::same;
+    use super::{apply_sets, same};
     use folo_test_support::TestDir;
+    use folo_vision::TrainConfig;
     use serde_json::json;
+
+    /// `--set KEY=VALUE`: dotted keys of the `train` object, JSON values (or strings), errors for unknown keys
+    /// and mistyped values.
+    #[test]
+    fn set_overrides_train_keys() {
+        let sets = |s: &[&str]| s.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let c = apply_sets(
+            TrainConfig::default(),
+            &sets(&["momentum=0.9", "loss.tal.topk = 13", "augment.degrees=5", "auto_rule=1", "name=abc"]),
+        )
+        .unwrap();
+        assert_eq!((c.momentum, c.loss.tal.topk, c.augment.degrees, c.auto_rule), (0.9, 13, 5.0, 1));
+        assert_eq!(c.name, "abc");
+        assert_eq!(apply_sets(TrainConfig::default(), &[]).unwrap(), TrainConfig::default());
+        for bad in ["momentum", "nope=1", "loss.tal.nope=1", "momentum=fast", "loss.tal.topk=-1"] {
+            let e = apply_sets(TrainConfig::default(), &sets(&[bad])).unwrap_err();
+            assert_eq!(e.code, "invalid_config", "{bad}");
+        }
+    }
 
     #[test]
     fn resume_settings_compare_integers_exactly() {

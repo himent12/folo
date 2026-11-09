@@ -479,9 +479,30 @@ pub struct AutoChoice {
     pub warmup_bias_lr: f64,
 }
 
-/// docs/MODEL.md §8.2 `auto`: `iterations = ceil(n_train / max(batch, nbs)) · epochs`; above 10000, SGD at
-/// `lr0 = 0.01`, else AdamW at `round(0.002 · 5 / (4 + nc), 6)`; momentum 0.9 and `warmup_bias_lr = 0`.
+/// The current version of the `auto` rule (docs/MODEL.md §8.2). A run's settings record the rule it started with
+/// (`TrainConfig.auto_rule`), so a resume keeps it; settings written before the key existed mean rule 1.
+pub const AUTO_RULE: u32 = 2;
+
+/// Rule 2's floor on the AdamW `lr0`: the reference's fit `0.002 · 5 / (4 + nc)` falls below it from 7 classes on
+/// (0.000119 for 80 classes), where it trains from scratch about 5x slower than SGD (docs/hill/learn.md).
+pub const AUTO_ADAMW_MIN_LR0: f64 = 0.001;
+
+/// docs/MODEL.md §8.2 `auto`, the current rule ([`AUTO_RULE`]); see [`auto_optimizer_rule`].
 pub fn auto_optimizer(
+    n_train: usize,
+    batch: usize,
+    nbs: usize,
+    epochs: usize,
+    num_classes: usize,
+) -> AutoChoice {
+    auto_optimizer_rule(AUTO_RULE, n_train, batch, nbs, epochs, num_classes)
+}
+
+/// docs/MODEL.md §8.2 `auto` by rule version: `iterations = ceil(n_train / max(batch, nbs)) · epochs`; above
+/// 10000, SGD at `lr0 = 0.01`, else AdamW at `round(0.002 · 5 / (4 + nc), 6)` (rule 1, the reference trainer's),
+/// raised to at least [`AUTO_ADAMW_MIN_LR0`] by rule 2 (any other version); momentum 0.9 and `warmup_bias_lr = 0`.
+pub fn auto_optimizer_rule(
+    rule: u32,
     n_train: usize,
     batch: usize,
     nbs: usize,
@@ -492,7 +513,8 @@ pub fn auto_optimizer(
     if iterations > 10_000 {
         AutoChoice { kind: OptimKind::Sgd, lr0: 0.01, momentum: 0.9, warmup_bias_lr: 0.0 }
     } else {
-        let lr0 = (0.002 * 5.0 / (4.0 + num_classes as f64) * 1e6).round() / 1e6;
+        let fit = (0.002 * 5.0 / (4.0 + num_classes as f64) * 1e6).round() / 1e6;
+        let lr0 = if rule == 1 { fit } else { fit.max(AUTO_ADAMW_MIN_LR0) };
         AutoChoice { kind: OptimKind::AdamW, lr0, momentum: 0.9, warmup_bias_lr: 0.0 }
     }
 }
@@ -534,7 +556,12 @@ mod tests {
         assert_eq!(effective_weight_decay(0.0005, 16, 4, 64), 0.0005);
         let a = auto_optimizer(2000, 16, 64, 30, 4);
         assert_eq!((a.kind, a.lr0, a.momentum, a.warmup_bias_lr), (OptimKind::AdamW, 0.00125, 0.9, 0.0));
-        assert_eq!(auto_optimizer(2000, 16, 64, 30, 80).lr0, 0.000119);
+        // Rule 2 floors the AdamW lr0 at 0.001 (from 7 classes on); rule 1 is the reference fit.
+        assert_eq!(auto_optimizer(2000, 16, 64, 30, 80).lr0, 0.001);
+        assert_eq!(auto_optimizer(2000, 16, 64, 30, 6).lr0, 0.001);
+        assert_eq!(auto_optimizer(2000, 16, 64, 30, 2).lr0, 0.001667);
+        assert_eq!(auto_optimizer_rule(1, 2000, 16, 64, 30, 80).lr0, 0.000119);
+        assert_eq!(auto_optimizer_rule(1, 2000, 16, 64, 30, 4), a);
         assert_eq!(auto_optimizer(118_287, 16, 64, 100, 80).kind, OptimKind::Sgd);
     }
 }
