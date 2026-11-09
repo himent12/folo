@@ -413,13 +413,13 @@ impl FoloApp {
                             .child(input)
                             .child(kbd(&t, "Esc")),
                     )
-                    .child(div().relative().child(list).child(self.scrollbar(scroll_bar, cx)).child(
-                        div().absolute().bottom_0().left_0().right_0().h(px(16.)).bg(gpui::linear_gradient(
-                            0.,
-                            gpui::linear_color_stop(t.bg_overlay, 0.),
-                            gpui::linear_color_stop(crate::theme::alpha(t.bg_overlay, 0.), 1.),
-                        )),
-                    ))
+                    .child(div().relative().child(list).children(self.scroll_chrome(
+                        scroll_bar,
+                        t.bg_overlay,
+                        0.,
+                        0.,
+                        cx,
+                    )))
                     .child(
                         div()
                             .h(px(36.))
@@ -480,10 +480,6 @@ impl FoloApp {
         let close_btn =
             self.icon_button("dialog-close", "icons/x.svg", "Close (Esc)", window, cx, on_close.clone());
         // From the last layout, as the run log's follow state is.
-        let more_below = {
-            let s = &self.dialog_scroll;
-            s.max_offset().height + s.offset().y > px(1.)
-        };
         // Scrolled: a hairline under the fixed header, so rows passing beneath it read as scrolled
         // away, not cut.
         let scrolled = self.dialog_scroll.offset().y < px(-1.);
@@ -563,23 +559,15 @@ impl FoloApp {
                                                 .track_scroll(&self.dialog_scroll)
                                                 .child(body),
                                         )
-                                        .child(self.scrollbar(self.dialog_scroll.clone(), cx))
-                                        // Only while more of the form lies below: at the end, the last
-                                        // row's controls show undimmed.
-                                        .when(more_below, |d| {
-                                            d.child(
-                                                div().absolute().bottom_0().left_0().right_0().h(px(16.)).bg(
-                                                    gpui::linear_gradient(
-                                                        0.,
-                                                        gpui::linear_color_stop(t.bg_overlay, 0.),
-                                                        gpui::linear_color_stop(
-                                                            crate::theme::alpha(t.bg_overlay, 0.),
-                                                            1.,
-                                                        ),
-                                                    ),
-                                                ),
-                                            )
-                                        }),
+                                        // Fades only where more of the form lies (a row half under
+                                        // the header reads as scrolled away; the ends show undimmed).
+                                        .children(self.scroll_chrome(
+                                            self.dialog_scroll.clone(),
+                                            t.bg_overlay,
+                                            0.,
+                                            0.,
+                                            cx,
+                                        )),
                                 )
                                 .child(footer),
                         ),
@@ -781,8 +769,7 @@ impl FoloApp {
             } else {
                 let lr = (0.01 / (4. + d.classes.len() as f64) * 1e6).round() / 1e6;
                 // Its six decimals, written as the run dashboard writes rates (1.11×10⁻³).
-                let p = lr.log10().floor() as i32;
-                ("AdamW", format!("{:.2}×10{}", lr * 10f64.powi(-p), crate::charts::superscript(p)))
+                ("AdamW", crate::charts::in_pow(lr, lr.log10().floor() as i32))
             }
         });
         // The adapter behind "GPU 0", named as the other screens name it.
@@ -891,7 +878,8 @@ impl FoloApp {
             .flex_col()
             .gap(px(if short { 8. } else { 14. }))
             .px(px(20.))
-            // 16 px past the last control for the footer's fade, so it never dims a control.
+            // Room past the last control (the bottom fade shows only while more of the form lies
+            // below, so at the end every control reads undimmed).
             .pb(px(36.))
             // Errors lead the form, where a failed submit is seen (the dialog scrolls to the top).
             .when_some(error.clone(), |d, e| {
@@ -2094,6 +2082,7 @@ impl FoloApp {
             let area = |x: &crate::api::BBox| (x.x2 - x.x1) * (x.y2 - x.y1);
             a.class.cmp(&b.class).then(area(b).total_cmp(&area(a)))
         });
+        let insp_chrome = self.scroll_chrome(self.insp_list_scroll.clone(), t.bg_overlay, 0., 0., cx);
         let box_rows: Vec<AnyElement> = box_order
             .into_iter()
             .map(|(i, b)| {
@@ -2103,11 +2092,17 @@ impl FoloApp {
                 // keyboard focus (short ones need neither).
                 let full_name = classes.get(b.class as usize).cloned().unwrap_or_default();
                 let long = crate::ui::may_overflow(&full_name, ty::SM.size, 70.);
-                let focused = long && self.ring(&self.fh(key.clone(), cx), window);
-                let row = div()
-                    .id(SharedString::from(key.clone()))
-                    .when(long, |d| d.tooltip(crate::controls::tip(full_name.clone(), None)))
-                    .when(focused, |d| d.child(crate::controls::focus_tip(&t, full_name.clone(), 30.)))
+                let row = self
+                    .disclose(
+                        div().id(SharedString::from(key.clone())),
+                        &key,
+                        full_name,
+                        long,
+                        30.,
+                        false,
+                        window,
+                        cx,
+                    )
                     .h(px(30.))
                     .px(px(8.))
                     .flex()
@@ -2203,12 +2198,18 @@ impl FoloApp {
                     .p(px(16.))
                     .border_b_1()
                     .border_color(t.line_subtle)
-                    .child(
-                        text(ty::BASE, t.text_primary)
-                            .font_family(crate::theme::MONO)
-                            .ellipsis()
-                            .child(meta.file.clone()),
-                    )
+                    .child({
+                        // The panel's 268 px hold ~33 monospace glyphs (0.6 em each); a longer
+                        // path ends in "…" and shows in full on hover.
+                        let long = meta.file.chars().count() as f32 * 0.6 * ty::BASE.size > 268.;
+                        let el = div().id("insp-file");
+                        self.disclose(el, "insp-file", meta.file.clone(), long, 24., true, window, cx).child(
+                            text(ty::BASE, t.text_primary)
+                                .font_family(crate::theme::MONO)
+                                .ellipsis()
+                                .child(meta.file.clone()),
+                        )
+                    })
                     .child(
                         div()
                             .flex()
@@ -2230,21 +2231,29 @@ impl FoloApp {
             )
             .child(
                 div()
-                    .id("insp-boxes")
-                    // As tall as its rows (up to the room left), so the key hints sit right under it.
+                    .relative()
                     .flex_shrink()
                     .min_h_0()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.insp_list_scroll)
-                    .px(px(8.))
-                    .children(box_rows)
-                    .when(meta.boxes.is_empty(), |d| {
-                        d.child(
-                            div()
-                                .p(px(8.))
-                                .child(text(ty::SM, t.text_tertiary).child("No labels: a background image.")),
-                        )
-                    }),
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .id("insp-boxes")
+                            // As tall as its rows (up to the room left), so the key hints sit right
+                            // under it.
+                            .flex_shrink()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.insp_list_scroll)
+                            .px(px(8.))
+                            .children(box_rows)
+                            .when(meta.boxes.is_empty(), |d| {
+                                d.child(div().p(px(8.)).child(
+                                    text(ty::SM, t.text_tertiary).child("No labels: a background image."),
+                                ))
+                            }),
+                    )
+                    .children(insp_chrome),
             )
             .child(
                 // One action per row on a fixed key column, so the keys line up and nothing wraps.

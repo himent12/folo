@@ -632,6 +632,24 @@ async fn static_files_spa_fallback() {
     let (s, _, b) = send(&app, get("/runs/run_1a01")).await;
     assert_eq!(s, StatusCode::OK);
     assert!(String::from_utf8_lossy(&b).contains("Studio"), "SPA fallback");
+    // `web_wasm` only when the served build has the in-browser runtime.
+    let wasm = |app: &axum::Router| {
+        let app = app.clone();
+        async move {
+            let s: SystemResponse = ok(&app, get("/api/system")).await;
+            s.features.iter().any(|f| f == FEATURE_WEB_WASM)
+        }
+    };
+    assert!(!wasm(&app).await);
+    std::fs::create_dir_all(dir.join("folo-wasm")).unwrap();
+    for f in ["folo-wasm/folo_wasm.js", "folo-wasm/folo_wasm_bg.wasm"] {
+        std::fs::write(dir.join(f), "x").unwrap();
+    }
+    let with = Server::new(
+        Arc::new(MockStore::new()),
+        Options { web: WebSource::Dir(dir.clone()), cors: Cors::Loopback },
+    );
+    assert!(wasm(&with.router()).await);
     err(&app, get("/api/not-a-route"), StatusCode::NOT_FOUND, "route_not_found").await;
 
     // Without a built web app: a plain 404 with a hint, API unaffected.
@@ -1322,6 +1340,13 @@ async fn mock_run_estimates() {
     assert!(e.basis.note.contains("docs/BENCHMARKS.md"), "{}", e.basis.note);
     assert_eq!((e.est_peak_vram_bytes, e.vram_source), (None, None));
     assert_eq!(e.phases.iter().map(|p| p.epochs).collect::<Vec<_>>(), [5, 5], "close_mosaic capped at half");
+    // The capped value, and the CLI command of the same config (defaults left out).
+    assert_eq!(e.close_mosaic, 5);
+    let cli = e.cli.unwrap();
+    assert!(
+        cli.starts_with("folo train --data ") && cli.ends_with("--epochs 10 --imgsz 320 --device cpu"),
+        "{cli}"
+    );
     // Validation as for POST /api/runs.
     err(
         &app,
@@ -1340,6 +1365,16 @@ async fn mock_run_estimates() {
     )
     .await;
     assert_eq!(ok::<RunList>(&app, get("/api/runs")).await.runs.len(), 7, "an estimate creates no run");
+    // A run's command: GET /api/runs/{id}/cli, the same mapping, also as argv.
+    let run: Run =
+        ok(&app, post_json("/api/runs", json!({ "dataset_id": "ds_5a1e", "epochs": 3, "name": "a b" })))
+            .await;
+    let c: CliCommand = ok(&app, get(&format!("/api/runs/{}/cli", run.id))).await;
+    assert_eq!(&c.argv[..2], ["folo", "train"]);
+    assert!(c.cli.ends_with("--name 'a b' --epochs 3"), "{}", c.cli);
+    err(&app, get("/api/runs/run_nope/cli"), StatusCode::NOT_FOUND, "run_not_found").await;
+    let s: SystemResponse = ok(&app, get("/api/system")).await;
+    assert!(s.features.iter().any(|f| f == FEATURE_RUN_CLI), "{:?}", s.features);
 }
 
 /// `POST /api/system/benchmark` in mock mode: it updates the table (as a probe), checks its settings and is

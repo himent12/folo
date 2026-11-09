@@ -142,6 +142,9 @@ pub struct TrainArgs {
     /// Dataset: a folder (YOLO or COCO) or a data.yaml.
     #[arg(long, required_unless_present = "resume")]
     pub data: Option<String>,
+    /// Format of --data: auto (detect from the files), or yolo / coco for a folder that has both.
+    #[arg(long, value_enum, default_value_t = FormatArg::Auto)]
+    pub format: FormatArg,
     /// Architecture (folo-n, folo-s, folo-m, folo-l, folo-x), or .folo weights / a published name to fine-tune.
     #[arg(long, visible_alias = "arch", default_value = "folo-n")]
     pub model: String,
@@ -204,8 +207,8 @@ pub struct TrainArgs {
     /// Mixup augmentation probability.
     #[arg(long, default_value_t = 0.0)]
     pub mixup: f32,
-    /// HSV jitter gains h,s,v.
-    #[arg(long, value_delimiter = ',', num_args = 3, default_values_t = [0.015, 0.7, 0.4])]
+    /// HSV jitter gains h,s,v (`--hsv 0.015,0.7,0.4` or `--hsv 0.015 0.7 0.4`).
+    #[arg(long, value_delimiter = ',', num_args = 1..=3, default_values_t = [0.015, 0.7, 0.4])]
     pub hsv: Vec<f32>,
     /// Horizontal flip probability.
     #[arg(long, default_value_t = 0.5)]
@@ -223,7 +226,7 @@ pub struct TrainArgs {
     #[arg(long, default_value = "runs")]
     pub project: PathBuf,
     /// Continue an interrupted run from its checkpoint (runs/<name>/weights/last.folo). The run's stored settings
-    /// are used: only --workers, --device, --data, --project and --json-events may differ, other flags must match or
+    /// are used: only --workers, --device, --data, --format, --project and --json-events may differ, other flags must match or
     /// be left out. A run that completed cannot be resumed; start a new run with --model <run>/weights/best.folo
     /// instead.
     #[arg(long)]
@@ -625,4 +628,9 @@ pub struct McpArgs {
     /// else the CPU), cpu or gpu:<n>. Training runs use their own `device` setting.
     #[arg(long, env = "FOLO_DEVICE", default_value = "auto")]
     pub device: String,
+    /// Embedded mode: ask for the GPU's tensor cores, as `folo serve --tensor-cores` does, so `train` with
+    /// `"amp": true` (mixed precision) can run and f16 inference uses them (the same as FOLO_GPU_TENSOR_CORES=1).
+    /// With --server, the `folo serve` decides.
+    #[arg(long, env = "FOLO_GPU_TENSOR_CORES", value_parser = clap::builder::BoolishValueParser::new())]
+    pub tensor_cores: bool,
 }

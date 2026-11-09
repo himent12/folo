@@ -743,24 +743,18 @@ impl FoloApp {
                 .flex_col()
                 .gap(px(6.))
                 .child(caption(&t, "Precision / Recall"))
+                .child(metric_pair(
+                    &t,
+                    big,
+                    last.map_or("–".into(), |e| format!("{:.3}", e.val.precision)),
+                    last.map_or("–".into(), |e| format!("{:.3}", e.val.recall)),
+                ))
+                // The epoch's own operating point once the engine reports it (`best_f1_conf`).
                 .child(
-                    div()
-                        .flex()
-                        .items_baseline()
-                        .gap(px(4.))
-                        .child(
-                            text(big, t.text_primary)
-                                .tnum()
-                                .child(last.map_or("–".into(), |e| format!("{:.3}", e.val.precision))),
-                        )
-                        .child(text(ty::LG, t.text_tertiary).child("/"))
-                        .child(
-                            text(big, t.text_primary)
-                                .tnum()
-                                .child(last.map_or("–".into(), |e| format!("{:.3}", e.val.recall))),
-                        ),
-                )
-                .child(text(ty::XS, t.text_tertiary).child("best F1 · IoU 0.50 · val")),
+                    text(ty::XS, t.text_tertiary)
+                        .ellipsis()
+                        .child(pr_caption(last.and_then(|e| e.val.best_f1_conf), "val")),
+                ),
             div()
                 .flex()
                 .flex_col()
@@ -984,7 +978,12 @@ impl FoloApp {
             vec![Series::new("lr", t.text_tertiary, d.lr.clone()).area().live(live)],
             secondary_h,
         );
-        lr.y_range = Some((0., (d.lr_max * 1.15).max(1e-4)));
+        // The top on a nice tick above the peak, so the top gridline is labelled and the warm-up
+        // peak sits under it (a padded max left an unlabelled line and a peak above the last tick).
+        let top = (d.lr_max * 1.05).max(1e-4);
+        let step = crate::charts::nice_step(top, 3);
+        let lr_top = (top / step).ceil() * step;
+        lr.y_range = Some((0., lr_top));
         // Its "× 10⁻ⁿ" goes in the panel caption, once, beside the legend that uses it.
         lr.pow_caption = false;
         lr.y_ticks = 3;
@@ -1123,15 +1122,13 @@ impl FoloApp {
             .child(crate::ui::legend_value(&t, "recall", t.chart_series[3], true, v(&d.recall, f3v)))
             .into_any_element();
         // In the axis's power of ten ("× 10⁻³" is printed once, on the axis).
-        let lr_hi = (d.lr_max * 1.15).max(1e-4);
-        let lr_pow = crate::charts::axis_pow(0., lr_hi, 3);
+        // The axis's own top, so caption, ticks and legend share one power.
+        let lr_pow = crate::charts::axis_pow(0., lr_top, 3);
         // The legend value is in the axis's power, written out ("6.58×10⁻³", "0.10×10⁻³"): one
         // power per card, and the value still reads on its own (the dogfood report's ask).
         let lr_value = crate::charts::value_at(&d.lr, hover, 0., total).map(|x| match lr_pow {
             // In f64: a tiny valid rate would overflow 10^-p in f32.
-            Some(p) if x.is_finite() => {
-                format!("{:.2}×10{}", x as f64 * 10f64.powi(-p), crate::charts::superscript(p))
-            }
+            Some(p) if x.is_finite() => crate::charts::in_pow(x as f64, p),
             _ => format!("{x:.4}"),
         });
         let lr_legend =
@@ -1185,7 +1182,7 @@ impl FoloApp {
                 if pair_a { 0.5 } else { 0.4 },
             ))
             .child(row(
-                card("Precision / Recall", "best F1 · IoU 0.50 · val", pr_legend, line_chart(&t, pr))
+                card("Precision / Recall", &pr_caption(None, "val"), pr_legend, line_chart(&t, pr))
                     .into_any_element(),
                 card("Learning rate", &lr_caption, lr_legend, line_chart(&t, lr)).into_any_element(),
                 0.6,
@@ -1328,6 +1325,7 @@ impl FoloApp {
         // The scrollback is one Tab stop: arrows step a line, Page Up/Down a screen, Home/End the ends.
         let log_fh = self.fh("log-scroll", cx);
         let log_ring = self.ring(&log_fh, window);
+        let log_chrome = self.scroll_chrome(self.log_scroll.clone(), t.bg_inset, 0., 0., cx);
         let body = match self.store.logs.get(&r.id) {
             Some(Load::Ready(lines)) => {
                 let start = lines.len().saturating_sub(300);
@@ -1403,11 +1401,8 @@ impl FoloApp {
                                     )
                             })),
                     )
-                    .child(div().absolute().top_0().left_0().right_0().h(px(20.)).bg(gpui::linear_gradient(
-                        180.,
-                        gpui::linear_color_stop(t.bg_inset, 0.),
-                        gpui::linear_color_stop(crate::theme::alpha(t.bg_inset, 0.), 1.),
-                    )))
+                    // Lines above the window fade at its top; at the start of the log, none do.
+                    .children(log_chrome)
                     .when(log_ring, |d| d.child(crate::app::focus_ring(&t, radius::SM)))
                     .into_any_element()
             }

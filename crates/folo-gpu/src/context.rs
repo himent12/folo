@@ -721,9 +721,39 @@ impl GpuContext {
         self.inner.pool.lock().expect("pool lock").reset_peak();
     }
 
-    /// Drops every cached (free) buffer in the pool.
+    /// Drops every cached (free) buffer in the pool and lowers its cap back to the live bytes (wgpu frees the memory
+    /// at its next submission or poll; [`GpuContext::release_memory`] also makes it happen now).
     pub fn trim_pool(&self) {
         self.inner.pool.lock().expect("pool lock").clear();
+    }
+
+    /// Gives the pool's cached buffers back to the driver now: [`GpuContext::trim_pool`], then submits the open
+    /// batch and waits for the GPU, so wgpu frees the dropped buffers instead of holding them until the next
+    /// submission. Returns the bytes the pool released.
+    ///
+    /// For a long-lived process between jobs (`folo serve` after a training run, or once inference has been idle):
+    /// the pool otherwise keeps up to the job's high-water mark of buffers, gigabytes after a training run, which
+    /// other processes on the same GPU then have to page around. Buffers still in use stay; a dropped buffer still
+    /// read by encoded work is freed only once that work is done (wgpu keeps it alive until then).
+    pub fn release_memory(&self) -> Result<u64> {
+        let released = {
+            // The batch lock first (the order `alloc` inside an encode takes them in), so nothing encodes between
+            // the trim and the submission below.
+            let mut b = self.inner.batch.lock().expect("batch lock");
+            let released = {
+                let mut pool = self.inner.pool.lock().expect("pool lock");
+                let cached = pool.stats().cached_bytes;
+                pool.clear();
+                cached
+            };
+            self.submit(&mut b);
+            // The uniform arena too (recreated on the next dispatch): its 64 KiB chunks are allocated mid-job, and a
+            // live one keeps the driver allocator's whole memory block (up to 256 MiB) from being freed.
+            b.chunks.clear();
+            released
+        };
+        self.wait_idle()?;
+        Ok(released)
     }
 
     /// Number of compiled pipelines in the cache.

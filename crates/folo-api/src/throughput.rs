@@ -257,6 +257,14 @@ pub struct RunEstimate {
     pub est_peak_vram_bytes: Option<u64>,
     /// Source of `est_peak_vram_bytes` (`null` with it).
     pub vram_source: Option<ThroughputSource>,
+    /// Close-mosaic epochs the run would train with (`augment.close_mosaic` capped at half the run; the
+    /// `close_mosaic` phase's epochs). Additive: 0 from older servers.
+    #[serde(default)]
+    pub close_mosaic: u32,
+    /// The `folo train` command that trains this config on the server's machine (dataset and weights as paths
+    /// there, published weights by name; docs/API.md, CLI command). Left out by older servers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cli: Option<String>,
 }
 
 /// `POST /api/system/benchmark` body. Every field has a default.

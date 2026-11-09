@@ -2033,3 +2033,133 @@ Round 49 changes:
 - **Playground:** a fixed best-F1 row ("Use 0.31 (best F1)", then "At best F1 (0.31)"), and `ui::fmt_conf` keeps a meaningful third decimal.
 - **Overview:** a taller hero in tall, wide windows.
 - **Brief:** settles New run's switch rows.
+
+## Round 49
+
+| Line | Opus 5.5 | GPT-6.1 Sol |
+|------|----------|-------------|
+| Hierarchy | 9 | 9 |
+| Typography | 7 | 8 |
+| Colour | 9 | 9 |
+| Spacing | 8 | 8 |
+| Components | 8 | 9 |
+| Dataviz | 8 | 8 |
+| Info/copy | 8 | 8 |
+| Consistency | 7 | 8 |
+| Interaction | 8 | 9 |
+| Accessibility | 9 | 8 |
+| Responsiveness | 8 | 8 |
+| Polish | 8 | 8 |
+| **Average** | **8.1** | **8.4** |
+
+Round 49's largest root fix was `ui::Ellipsis`. GPUI 0.2.2's `truncate()` caches the first, unbounded measure of no-wrap text, so flex-sized text everywhere clipped without "…". Clamped one-line wrapping re-measures at each width. It now covers 33 sites, and a test keeps `.truncate()` out.
+
+Both reviewers then found where the ellipsis fired too early:
+- `cell2` didn't grow, so dataset cards cut "circl…" with room to spare and lost "+N".
+- `meta_row`'s middle parts couldn't shrink. The code review found this blocking twice; it was fixed before merge by grouping the rest, and by letting the hero's run name shrink while its meta clips.
+
+Opus also asked for:
+- The Overview tables stacked at 1280.
+- One metric pair and Precision / Recall caption.
+- One split label.
+- A nice-tick LR top.
+- One inline-link look.
+- Overlay scroll thumbs.
+
+Sol also asked for full disclosure for thumbnails and dataset cards.
+
+Round 50 changes:
+- **`cell2`** grows with basis 0.
+- **Dataset cards:**
+  - They say "4,400 images · 5 classes".
+  - Their name, size and every class are a hover and focus tip.
+- **Overview:** the tables stack below 1500, so Recent runs keeps its Arch · dataset column at 1280.
+- **Shared formatters:** `ui::metric_pair`, `ui::pr_caption` ("best F1 · conf 0.31 · IoU 0.50 · val") and `ui::split_label` ("shapes-hard · val · 800 images") on the run and model pages.
+- **Learning-rate chart:** its top is the next nice tick.
+- **`ui::inline_link`:** used for "Show them" and "Use 0.31 (best F1)".
+- **Dataset tiles:** list every class on hover and focus.
+- **Copy:** "6.4 ms simulated".
+- **Scroll thumbs:** shown while dragged, hovered or just scrolled.
+
+## Round 50
+
+| Line | Opus 5.5 | GPT-6.1 Sol |
+|------|----------|-------------|
+| Hierarchy | 9 | 9 |
+| Typography | 8 | 8 |
+| Colour | 9 | 8 |
+| Spacing | 8 | 9 |
+| Components | 8 | 8 |
+| Dataviz | 8 | 9 |
+| Info/copy | 8 | 9 |
+| Consistency | 8 | 9 |
+| Interaction | 9 | 8 |
+| Accessibility | 9 | 8 |
+| Responsiveness | 9 | 8 |
+| Polish | 8 | 8 |
+| **Average** | **8.4** | **8.4** |
+
+The code review blocked twice on Recent runs clipping its Created column.
+
+At 960 px, it took the full column set while stacked. At 1120–1197 px the sidebar widens, which left the list short. Both came from choosing columns by window width.
+
+`FoloApp::content_width` (the window less the sidebar, capped, less the gutters) now replaces three hand-rolled copies. Recent runs takes the wide set only when its measured list has the 918 px it needs.
+
+Opus's root causes for round 51:
+- Every scroll area wrote its own fade, or none.
+- `meta_row` spaced its first dot with a flex gap and the rest with font spaces.
+- `axis_pow` took the step's power, so the LR card read ×10⁻⁴ while New run read ×10⁻³.
+- The KPI tile had one free-form caption area.
+- Tables gave all spare width to one column.
+
+## Round 51
+
+| Line | Opus 5.5 | GPT-6.1 Sol |
+|------|----------|-------------|
+| Hierarchy | 8 | 9 |
+| Typography | 8 | 8 |
+| Colour | 9 | 9 |
+| Spacing | 8 | 9 |
+| Components | 8 | 9 |
+| Dataviz | 8 | 8 |
+| Info/copy | 8 | 8 |
+| Consistency | 8 | 9 |
+| Interaction | 8 | 9 |
+| Accessibility | 8 | 8 |
+| Responsiveness | 8 | 9 |
+| Polish | 8 | 8 |
+| **Average** | **8.1** | **8.6** |
+
+Round 51 changes:
+- **Scroll areas:** `ui::scroll_edges` and `FoloApp::scroll_chrome` give every scroll area but the page the same treatment.
+  - A 24 px fade appears only on an edge with hidden content. Its outer 6 px are solid, so no sliver of glyphs shows.
+  - The overlay thumb comes with it.
+  - The New run dialog, palette, Playground rail, run log, inspector labels and select menus use it. The last two had no thumb before.
+- **Separators:** `meta_row` writes every dot as the font's " · ". The Playground toolbar has one rule between every group.
+- **Learning-rate chart:**
+  - `charts::axis_pow` takes the top tick's power, so the LR card reads "0 0.5 1.0 1.5 × 10⁻³".
+  - `charts::in_pow` writes legend and New run rates (two decimals, two significant figures below 0.1).
+- **KPI captions:** `ui::detail_line` puts the dataset split bar on the shared caption line.
+- **Spare width:**
+  - `ui::share_spare` (measured) and `ui::grow_col` (flex) share a table's spare width by weight up to caps.
+  - Recent runs uses it only when stacked; see below. The model Class table uses `grow_col`.
+- **Filtered dataset grid:** tiles at rest show the matches' outlines without chips. Hover or focus names every box.
+- **Truncated text:** `FoloApp::disclose` handles every cut label: full text on hover and on keyboard focus, and a Tab stop for plain text such as the inspector's file path.
+- **Run on caption:** it says why Local GPU and CPU are off: "Simulated demo · local runs need folo serve".
+
+Two bugs found while shooting:
+- **Black `overview-wide`.**
+  - A tick-label `clamp(min, max)` panicked once a chart was narrower than its label. `charts::clamp_in` replaces it.
+  - The chart was narrow because widening Recent runs while it sits beside Best model made GPUI 0.2.2 lay out the page at min-content width. The hero chart collapsed to its axis, and nothing in the frame painted after it.
+  - Widened only when stacked, it renders at every width from 960 to 1920. Recent runs also keeps 8 px of slack.
+  - `tools/shoot.ps1` now retries an all-black capture.
+- **Missing rule above Detections.** At 1.5× a 1 px `hairline` child sat at a half-pixel offset and painted nothing. The rule is now the block's top border, and `hairline` is gone.
+
+Open:
+- **11 px `ty::XS`:** a token decision, now with the orchestrator.
+- **Blocked on the API:** the run P/R confidence (`ValMetrics.best_f1_conf`) and the confusion-matrix conf / IoU (`ModelEval`).
+- **Opus's larger items:**
+  - one `chart_card` for Overview and Run;
+  - one `kpi_strip` anatomy;
+  - a priority drop order in the Playground toolbar;
+  - a compact Run on below 700 px tall.

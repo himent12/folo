@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 pub mod codes;
 pub mod json;
 mod throughput;
+pub mod weights;
 
 pub use throughput::*;
 
@@ -99,6 +100,31 @@ pub struct SystemResponse {
     /// older than this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<Capabilities>,
+    /// FOLO's GPU buffer pool on this server, when the GPU is in use (absent before the server touched it, on a
+    /// CPU-only server, in mock mode and from servers older than this field).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu_pool: Option<GpuPool>,
+}
+
+/// [`SystemResponse::gpu_pool`]: the GPU memory FOLO's buffer pool holds. A finished run gives its cached buffers
+/// back to the driver, and so does inference once it has been idle for a while, so with nothing running
+/// `cached_bytes` drops to 0.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct GpuPool {
+    /// The device, e.g. `gpu:0`.
+    #[serde(default)]
+    pub device: String,
+    /// Bytes in buffers in use (loaded models, a run's tensors).
+    #[serde(default)]
+    pub live_bytes: u64,
+    /// Bytes in free buffers kept for reuse.
+    #[serde(default)]
+    pub cached_bytes: u64,
+    /// The largest `live_bytes` since the last training run or benchmark probe started (since start-up before
+    /// one).
+    #[serde(default)]
+    pub peak_live_bytes: u64,
 }
 
 /// [`SystemResponse::capabilities`]: what the device `device: auto` resolves to can do. Every field defaults, so a
@@ -161,6 +187,23 @@ pub const FEATURE_QUEUE_CONTROL: &str = "queue_control";
 /// [`SystemResponse::features`]: `GET /api/models/{id}/weights?format=onnx` exists (older servers answer `400
 /// invalid_query`).
 pub const FEATURE_WEIGHTS_ONNX: &str = "weights_onnx";
+
+/// [`SystemResponse::features`]: `GET /api/runs/{id}/cli` exists ([`CliCommand`]) and `RunEstimate.cli` is set.
+pub const FEATURE_RUN_CLI: &str = "run_cli";
+
+/// [`SystemResponse::features`]: the Studio this server serves includes the in-browser runtime (folo-wasm,
+/// docs/WASM.md), so its Playground can run models with WebGPU or the wasm CPU.
+pub const FEATURE_WEB_WASM: &str = "web_wasm";
+
+/// `GET /api/runs/{id}/cli`: the `folo train` command that trains a run's config on this machine.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct CliCommand {
+    /// The command line, arguments quoted for a POSIX shell or PowerShell (single quotes where needed).
+    pub cli: String,
+    /// The same command as separate arguments (`argv[0]` is `folo`), for clients that spawn it without a shell.
+    pub argv: Vec<String>,
+}
 
 /// CPU name, logical thread count and current utilisation.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -605,6 +648,31 @@ pub struct Model {
     /// `"true"` / `"false"`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fused: Option<bool>,
+    /// Where the model comes from: a run, a file under the server's models folder, or published weights
+    /// downloaded with `folo weights pull` (their id is the published name, e.g. `folo-n-coco`). Left out by older
+    /// servers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<ModelSource>,
+    /// What published weights are (the line `folo weights list` prints); absent for other models.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub about: Option<String>,
+    /// The weights file on the server's machine (`/` separators): what `folo train --weights`, `val --model` and
+    /// `export --model` take there. Left out by the mock server and older servers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
+/// [`Model::source`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum ModelSource {
+    /// The `best.folo` / `last.folo` of a run.
+    Run,
+    /// A `.folo` file under `<data dir>/models`.
+    File,
+    /// Published weights from the local `folo weights` cache ([`weights::cache_dir`]).
+    Published,
 }
 
 /// [`Model::precision`]: the floating dtype a model's weights are stored in.
@@ -1136,6 +1204,11 @@ pub struct ResolvedTrain {
     pub warmup_momentum: f64,
     /// The bias group's LR at the start of warmup (`0` under `auto`).
     pub warmup_bias_lr: f64,
+    /// Close-mosaic epochs the run trains with: `TrainConfig.augment.close_mosaic` capped at half the run
+    /// (docs/MODEL.md §8.4), so mosaic is off for the last `close_mosaic` epochs. Left out by servers older than the
+    /// field and for runs recorded before it whose `config.json` lacks the value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub close_mosaic: Option<u32>,
 }
 
 /// [`ResolvedTrain::optimizer`].
@@ -1637,6 +1710,12 @@ mod tests {
             data_dir: None,
             features: vec![],
             capabilities: Some(Capabilities::default()),
+            gpu_pool: Some(GpuPool {
+                device: "gpu:0".into(),
+                live_bytes: 1,
+                cached_bytes: 2,
+                peak_live_bytes: 3,
+            }),
         };
         let back: SystemInfo = serde_json::from_value(serde_json::to_value(&new).unwrap()).unwrap();
         assert_eq!(back, new.system);

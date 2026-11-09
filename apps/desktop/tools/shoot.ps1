@@ -57,12 +57,27 @@ try {
         if ($w -gt 100 -and $hh -gt 100) { break }
         Start-Sleep -Milliseconds 100
     }
-    $bmp = New-Object System.Drawing.Bitmap $w, $hh
-    $g = [System.Drawing.Graphics]::FromImage($bmp)
-    $hdc = $g.GetHdc()
-    [FoloWin]::PrintWindow($h, $hdc, 3) | Out-Null   # PW_CLIENTONLY | PW_RENDERFULLCONTENT
-    $g.ReleaseHdc($hdc)
-    $g.Dispose()
+    # A capture can catch the swap chain before its first frame (an all-black image): sample a
+    # grid of pixels and capture again, up to three times, before giving up on the scenario.
+    for ($try = 0; $try -lt 4; $try++) {
+        $bmp = New-Object System.Drawing.Bitmap $w, $hh
+        $g = [System.Drawing.Graphics]::FromImage($bmp)
+        $hdc = $g.GetHdc()
+        [FoloWin]::PrintWindow($h, $hdc, 3) | Out-Null   # PW_CLIENTONLY | PW_RENDERFULLCONTENT
+        $g.ReleaseHdc($hdc)
+        $g.Dispose()
+        $lit = $false
+        for ($y = 8; $y -lt $hh -and -not $lit; $y += [Math]::Max(1, [int]($hh / 12))) {
+            for ($x = 8; $x -lt $w; $x += [Math]::Max(1, [int]($w / 12))) {
+                $c = $bmp.GetPixel($x, $y)
+                if ($c.R + $c.G + $c.B -gt 0) { $lit = $true; break }
+            }
+        }
+        if ($lit) { break }
+        $bmp.Dispose()
+        if ($try -eq 3) { throw "capture of $Scenario stayed black" }
+        Start-Sleep -Milliseconds 800
+    }
     $dir = Split-Path -Parent $Out
     if ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Force $dir | Out-Null }
     $bmp.Save($Out, [System.Drawing.Imaging.ImageFormat]::Png)

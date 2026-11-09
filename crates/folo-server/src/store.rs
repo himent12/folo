@@ -7,9 +7,10 @@
 use std::path::Path;
 
 use folo_api::{
-    BenchmarkReport, BenchmarkRequest, Capabilities, Dataset, ExportResult, ExportSpec, GpuInfo, LogLine,
-    Model, ModelEval, PredictResponse, RegisterDataset, Run, RunEstimate, RunEvent, RunMetrics, RunSamples,
-    Split, StatusEvent, SyntheticDataset, ThroughputTable, TrainConfig, ValReport, ValRequest,
+    BenchmarkReport, BenchmarkRequest, Capabilities, CliCommand, Dataset, ExportResult, ExportSpec, GpuInfo,
+    GpuPool, LogLine, Model, ModelEval, PredictResponse, RegisterDataset, Run, RunEstimate, RunEvent,
+    RunMetrics, RunSamples, Split, StatusEvent, SyntheticDataset, ThroughputTable, TrainConfig, ValReport,
+    ValRequest,
 };
 use tokio::sync::broadcast;
 
@@ -287,6 +288,10 @@ pub trait Store: Send + Sync + 'static {
     fn capabilities(&self) -> Option<Capabilities> {
         None
     }
+    /// FOLO's GPU buffer pool, for `/api/system`'s `gpu_pool` (`None`: no GPU in use, or the mock store).
+    fn gpu_pool(&self) -> Option<GpuPool> {
+        None
+    }
     /// The data dir to report in `/api/system` (`None`: the mock store).
     fn data_dir(&self) -> Option<&Path> {
         None
@@ -356,6 +361,12 @@ pub trait Store: Send + Sync + 'static {
     }
     /// One run.
     fn get_run(&self, id: &str) -> Result<Run>;
+    /// `GET /api/runs/{id}/cli`: the `folo train` command of the run's config on this machine
+    /// ([`crate::cli::train_command`]). Stores without one answer `501 not_implemented` (the default).
+    fn run_cli(&self, id: &str) -> Result<CliCommand> {
+        let _ = id;
+        Err(crate::error::Error::not_implemented("the CLI command of a run"))
+    }
     /// Requests a stop.
     fn stop_run(&self, id: &str) -> Result<Run>;
     /// Moves a run that waits in the training queue (`POST /api/runs/{id}/queue`): `409 run_not_queued` when it

@@ -26,7 +26,7 @@ pub fn run(cmd: DatasetCommand, out: Out) -> Result<(), CliError> {
     }
 }
 
-fn format_of(f: FormatArg) -> Format {
+pub(crate) fn format_of(f: FormatArg) -> Format {
     match f {
         FormatArg::Auto => Format::Auto,
         FormatArg::Yolo => Format::Yolo,

@@ -16,7 +16,7 @@ use crate::app::{FoloApp, Route, act};
 use crate::charts::{HoverFn, LineChart, Series, line_chart};
 use crate::controls::Btn;
 use crate::store::Load;
-use crate::theme::{alpha, radius, size as tsize, theme, ty};
+use crate::theme::{alpha, radius, theme, ty};
 use crate::ui::*;
 
 /// Row-label column of the confusion matrix (fits "Share of all FP").
@@ -59,9 +59,7 @@ impl FoloApp {
         // The name takes what the other columns leave (GPUI truncates against a known width, so
         // it's computed: content width less the fixed columns, their 16 px gaps, row padding).
         let name_w = {
-            let side = if vw < px(1120.) { tsize::SIDEBAR_COLLAPSED } else { tsize::SIDEBAR };
-            let pad = if self.narrow { 16. } else { 24. };
-            let content = (f32::from(vw) - side - 2. * pad).min(tsize::CONTENT_MAX);
+            let content = self.content_width(window);
             // Architecture is 150 px (its "folo-s · 640 px" plus the e2e tag).
             let fixed = [150., 130., 72., 72., 84.].iter().sum::<f32>()
                 + if wide { 150. } else { 0. }
@@ -334,22 +332,29 @@ impl FoloApp {
         );
 
         let mm = m.metrics;
-        // Where precision and recall are taken: the best-F1 confidence, named when the record has it.
-        let op_point = match mm.as_ref().and_then(|x| x.best_f1_conf) {
-            Some(c) => format!("at conf {} (best F1)", fmt_conf(c)),
-            None => "at the best-F1 confidence".to_string(),
-        };
         // The dataset the headline numbers were measured on (the run's), named beside them.
         // The split evaluation used: validation, or train when the dataset has no validation
         // images (the server falls back to them).
         let head_ds = run
             .as_ref()
             .and_then(|r| self.store.dataset_summary(&r.config.dataset_id))
-            .map(|d| (d.name.clone(), if d.splits.val == 0 { "train" } else { "validation" }));
+            .map(|d| (d.name.clone(), if d.splits.val == 0 { "train" } else { "val" }));
+        // Where precision and recall are taken: the best-F1 confidence, named when the record has it.
+        // The headline names the split; this tile's narrow caption says where on the curve.
+        let op_point = pr_caption(mm.as_ref().and_then(|x| x.best_f1_conf), "");
         let tile = |content: gpui::Div| {
             div()
                 .flex_grow()
                 .flex_basis(gpui::relative(0.144))
+                .min_w_0()
+                .px(px(16.))
+                .py(px(14.))
+                .child(content)
+        };
+        let wide_tile = |content: gpui::Div| {
+            div()
+                .flex_grow()
+                .flex_basis(gpui::relative(0.21))
                 .min_w_0()
                 .px(px(16.))
                 .py(px(14.))
@@ -390,8 +395,10 @@ impl FoloApp {
                         )
                         .child(text(ty::XS, t.text_tertiary).whitespace_nowrap().ellipsis().child(
                             match &head_ds {
-                                Some((d, split)) => format!("IoU 0.50–0.95 · {d} {split}"),
-                                None => "IoU 0.50–0.95 · validation split".to_string(),
+                                Some((d, split)) => {
+                                    format!("IoU 0.50–0.95 · {}", split_label(d, split, None))
+                                }
+                                None => "IoU 0.50–0.95".to_string(),
                             },
                         )),
                 ),
@@ -404,20 +411,28 @@ impl FoloApp {
                 Some(text(ty::XS, t.text_tertiary).child("IoU 0.50")),
             )))
             .child(vline(&t))
-            // One tile for the pair, as on the run page; its caption stays on one line.
-            .child(tile(small(
-                "Precision / Recall",
-                mm.as_ref().map_or("–".into(), |x| format!("{:.3} / {:.3}", x.precision, x.recall)),
-                "",
-                // Two deliberate lines: where on the curve, then the match rule.
-                Some(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .child(text(ty::XS, t.text_tertiary).whitespace_nowrap().child(op_point.clone()))
-                        .child(text(ty::XS, t.text_tertiary).whitespace_nowrap().child("IoU 0.50")),
-                ),
-            )))
+            // The same pair and caption as the run page (ui::metric_pair, ui::pr_caption); a wider
+            // share than the other small tiles, as it holds two values and the operating point.
+            .child(wide_tile(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.))
+                    .min_w_0()
+                    .child(caption(&t, "Precision / Recall"))
+                    .child(
+                        div().h(px(ty::X3XL.line)).flex().items_end().child(
+                            metric_pair(
+                                &t,
+                                ty::XL,
+                                mm.as_ref().map_or("–".into(), |x| format!("{:.3}", x.precision)),
+                                mm.as_ref().map_or("–".into(), |x| format!("{:.3}", x.recall)),
+                            )
+                            .pb(px(baseline_lift(ty::X3XL, ty::XL))),
+                        ),
+                    )
+                    .child(text(ty::XS, t.text_tertiary).ellipsis().child(op_point.clone())),
+            ))
             .child(vline(&t))
             .child(tile(small(
                 "Parameters",
@@ -1095,7 +1110,7 @@ impl FoloApp {
             .as_ref()
             .and_then(|r| self.store.run(r))
             .and_then(|r| self.store.dataset_summary(&r.config.dataset_id))
-            .map(|d| (d.name.clone(), if d.splits.val == 0 { "Train" } else { "Validation" }));
+            .map(|d| (d.name.clone(), if d.splits.val == 0 { "train" } else { "val" }));
         let seg = self.segmented(
             "cm-norm",
             &["Row %", "Counts"],
@@ -1465,7 +1480,7 @@ impl FoloApp {
                             text(ty::XS, t.text_tertiary)
                                 .tnum()
                                 .child(match &eval_ds {
-                                    Some((d, split)) => format!("{split} · {d} · {} images", int(ev.images as u64)),
+                                    Some((d, split)) => split_label(d, split, Some(ev.images as u64)),
                                     // Unknown dataset: the split isn't known either.
                                     None => format!("Evaluation · {} images", int(ev.images as u64)),
                                 }),
@@ -1492,17 +1507,17 @@ impl FoloApp {
             .h(px(36.))
             .border_b_1()
             .border_color(t.line_subtle)
-            // Class takes the width; the metrics sit in fixed 120 px columns at the right, close
-            // enough to read across (spread over the whole row they stood ~190 px apart).
-            .child(th(&t, "Class").flex_1().min_w(px(200.)))
-            .child(th(&t, "AP50").w(px(120.)).flex_none().text_right())
-            .child(th(&t, "AP50-95").w(px(120.)).flex_none().text_right())
-            .child(th(&t, "Precision").w(px(120.)).flex_none().text_right())
-            .child(th(&t, "Recall").w(px(120.)).flex_none().text_right());
+            // Spare width is shared (Class 2 : each metric 1, to 360 / 160 px); past the caps it
+            // opens before the metrics, which stay close enough to read across.
+            .child(grow_col(th(&t, "Class"), 200., 2., 360.))
+            .child(grow_col(th(&t, "AP50"), 120., 1., 160.).ml_auto().text_right())
+            .child(grow_col(th(&t, "AP50-95"), 120., 1., 160.).text_right())
+            .child(grow_col(th(&t, "Precision"), 120., 1., 160.).text_right())
+            .child(grow_col(th(&t, "Recall"), 120., 1., 160.).text_right());
         let focus = self.pr_isolated(ev, window);
         let pin = self.pr_pin;
         let num =
-            |v: String| text(ty::SM, t.text_secondary).tnum().w(px(120.)).flex_none().text_right().child(v);
+            |v: String| grow_col(text(ty::SM, t.text_secondary).tnum(), 120., 1., 160.).text_right().child(v);
         let mut per: Vec<_> = ev.per_class.iter().collect();
         // Class order, as the PR legend and the confusion matrix run.
         per.sort_by_key(|c| c.class);
@@ -1543,9 +1558,7 @@ impl FoloApp {
                         }
                     }))
                     .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(200.))
+                        grow_col(div(), 200., 2., 360.)
                             .flex()
                             .items_center()
                             .gap(px(8.))
@@ -1562,8 +1575,8 @@ impl FoloApp {
                     )
                     // Only the headline metric carries a comparison bar; the others are plain
                     // numbers, so AP50-95 leads the row.
-                    .child(num(f3(c.map50)))
-                    .child(div().w(px(120.)).flex_none().flex().justify_end().child(bar_value(
+                    .child(num(f3(c.map50)).ml_auto())
+                    .child(grow_col(div(), 120., 1., 160.).flex().justify_end().child(bar_value(
                         &t,
                         c.map50_95,
                         f3(c.map50_95),

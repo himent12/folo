@@ -41,6 +41,52 @@ fn pool_reuses_freed_buffers() {
 }
 
 #[test]
+fn release_memory_empties_the_pool_and_lowers_its_cap() {
+    // A context of its own: releasing the shared one would empty the pool under concurrent tests that count on
+    // reusing a buffer they just freed.
+    let _skip_without_adapter = gpu!();
+    let ctx = match crate::GpuContext::new() {
+        Ok(c) => c,
+        Err(e) => return eprintln!("note: skipping, no second context: {e}"),
+    };
+    let bytes = 5 * 1024 * 1024 + 4 * 1013;
+    let held: Vec<_> = (0..4).map(|_| ctx.alloc(bytes).unwrap()).collect();
+    let size = held[0].size();
+    drop(held);
+    assert!(ctx.pool_stats().cached_bytes >= 4 * size);
+    let released = ctx.release_memory().unwrap();
+    assert!(released >= 4 * size, "released {released}, cached {} before", 4 * size);
+    // The buffers are gone: the same size is allocated afresh.
+    let before = ctx.pool_stats();
+    let again = ctx.alloc(bytes).unwrap();
+    let after = ctx.pool_stats();
+    assert!(after.allocated_bytes >= before.allocated_bytes + size, "{before:?} -> {after:?}");
+    drop(again);
+}
+
+#[test]
+fn a_cleared_pool_forgets_its_old_high_water_mark() {
+    let ctx = gpu!();
+    let usage = wgpu::BufferUsages::STORAGE;
+    let mut pool = crate::pool::BufferPool::new(1024);
+    let held: Vec<_> = (0..4).map(|_| pool.take(ctx.wgpu_device(), 2048, usage)).collect();
+    for b in held {
+        pool.give(b, 2048);
+    }
+    // A training step's worth (8 KiB live at once) stays cached although the cap is 1 KiB.
+    assert_eq!(pool.stats().cached_bytes, 8192);
+    pool.clear();
+    assert_eq!(pool.stats().cached_bytes, 0);
+    // After the clear the cap follows the new high-water mark (2 KiB), not the old 8 KiB: a 1 KiB buffer freed
+    // after a cached 2 KiB one evicts it (with the old mark both would stay, 3 KiB).
+    let b = pool.take(ctx.wgpu_device(), 2048, usage);
+    pool.give(b, 2048);
+    let b = pool.take(ctx.wgpu_device(), 1024, usage);
+    pool.give(b, 1024);
+    assert_eq!(pool.stats().cached_bytes, 1024, "{:?}", pool.stats());
+}
+
+#[test]
 fn pool_evicts_least_recently_freed_and_caches_up_to_the_high_water_mark() {
     let ctx = gpu!();
     let usage = wgpu::BufferUsages::STORAGE;

@@ -5,8 +5,8 @@ use std::collections::BTreeMap;
 
 use folo_api::{
     Arch, BBox, BestEpoch, Capabilities, DatasetFormat, DatasetIssue, Epoch, ExportFormat, GpuInfo, Head,
-    IssueCounts, IssueSeverity, LogLine, Loss, ModelMetrics, ModelPrecision, Run, RunStatus, Split, Splits,
-    Step, TrainConfig, TrainedWith, ValMetrics,
+    IssueCounts, IssueSeverity, LogLine, Loss, ModelMetrics, ModelPrecision, ModelSource, Run, RunStatus,
+    Split, Splits, Step, TrainConfig, TrainedWith, ValMetrics,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -510,6 +510,13 @@ pub struct ModelSummary {
     /// Conv+BN fused (`folo.fused`, an inference-only export); run checkpoints are unfused. Left out when unknown.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fused: Option<bool>,
+    /// `run`, `file` (the models folder) or `published` (weights from `folo weights pull`; the id is the published
+    /// name, e.g. `folo-n-coco`). Left out by older servers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<ModelSource>,
+    /// What published weights are; left out for other models.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub about: Option<String>,
 }
 
 /// CPU of the machine running `folo mcp`.

@@ -122,3 +122,28 @@ fn model_with_weights_is_a_usage_error() {
     let e = Cli::try_parse_from(argv).unwrap_err();
     assert_eq!(e.kind(), clap::error::ErrorKind::ArgumentConflict);
 }
+
+/// The server's command (`RunEstimate.cli`, `GET /api/runs/{id}/cli`) splits by the same PowerShell rules into its
+/// `argv`, including names with straight and typographic quotes, and parses.
+#[test]
+fn server_commands_split_like_studios() {
+    let mut c: folo_api::TrainConfig =
+        serde_json::from_value(serde_json::json!({ "dataset_id": "ds_1" })).unwrap();
+    c.augment.hsv = [0.0, 0.5, 0.3];
+    for name in ["r6 n", "O'Brien's run", "it\u{2019}s", "--amp", "plain"] {
+        c.name = name.into();
+        for weights in [None, Some("folo-n-coco"), Some("C:/Users/Ann O'Neil/best.folo")] {
+            let cmd = folo_server::cli::train_command(
+                &c,
+                "C:/data sets/r6",
+                folo_api::DatasetFormat::Coco,
+                weights,
+            );
+            assert_eq!(split(&cmd.cli), cmd.argv, "{}", cmd.cli);
+            let cli = Cli::try_parse_from(&cmd.argv).unwrap_or_else(|e| panic!("`{}`: {e}", cmd.cli));
+            let Command::Train(t) = cli.command else { panic!("not train") };
+            assert_eq!((t.name.as_deref(), t.weights.as_deref()), (Some(name), weights), "{}", cmd.cli);
+            assert_eq!(t.hsv, [0.0, 0.5, 0.3], "{}", cmd.cli);
+        }
+    }
+}

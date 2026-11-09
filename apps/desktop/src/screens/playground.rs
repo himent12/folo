@@ -336,17 +336,8 @@ impl FoloApp {
                                     // crumb, size, latency, count, zoom). A long name ends in "…" at that
                                     // known width, as GPUI needs; the full name is on hover.
                                     let vw = f32::from(window.viewport_size().width);
-                                    let side = if vw < 1120. {
-                                        crate::theme::size::SIDEBAR_COLLAPSED
-                                    } else {
-                                        crate::theme::size::SIDEBAR
-                                    };
                                     let rail = if vw < 1100. { 280. } else { 320. };
-                                    let stage = vw.min(crate::theme::size::CONTENT_MAX + side)
-                                        - side
-                                        - 2. * self.gutter()
-                                        - rail
-                                        - 16.;
+                                    let stage = self.content_width(window) - rail - 16.;
                                     let budget =
                                         (stage - 584.).clamp(if compact { 120. } else { 160. }, 520.);
                                     // Monospace: the measured width is the glyph count times the advance.
@@ -387,10 +378,16 @@ impl FoloApp {
                     // The built-in demo's number is simulated, and says so wherever it shows.
                     .when_some(self.play_pred.ready().map(|p| p.timing.total_ms), |d, ms| {
                         let sim = self.play_target.is_none() && !self.store.api.local_inference();
-                        d.child(
-                            text(ty::XS, t.text_secondary).flex_none().tnum().child(latency_text(ms, sim)),
-                        )
-                        .child(div().flex_none().w(px(1.)).h(px(16.)).bg(t.line_subtle))
+                        // One rule between every group, the image's own (name, size) included, so
+                        // a narrow toolbar's spacer never reads as a missing divider.
+                        d.child(div().flex_none().w(px(1.)).h(px(16.)).bg(t.line_subtle))
+                            .child(
+                                text(ty::XS, t.text_secondary)
+                                    .flex_none()
+                                    .tnum()
+                                    .child(latency_text(ms, sim)),
+                            )
+                            .child(div().flex_none().w(px(1.)).h(px(16.)).bg(t.line_subtle))
                     })
                     .when_some(count, |d, n| {
                         d.child(div().flex_none().flex().items_center().gap(px(6.)).child(
@@ -670,10 +667,9 @@ impl FoloApp {
                             .cursor_pointer()
                             .hover(|s| s.bg(t.bg_hover))
                             .active(|s| s.bg(t.bg_active))
-                            .child(
-                                text(ty::XS, t.text_secondary)
-                                    .child(format!("Use {} (best F1)", fmt_conf(c))),
-                            );
+                            // The shared inline-link look; -4 px so its text ends on the value above.
+                            .mr(px(-4.))
+                            .child(inline_link(&t, format!("Use {} (best F1)", fmt_conf(c))));
                         d.child(row.child(self.bind(
                             link,
                             "play-best-conf",
@@ -733,12 +729,17 @@ impl FoloApp {
                         let key = format!("det-{i}");
                         // A cut class name shows in full on hover and on keyboard focus.
                         let long = may_overflow(&b.name, ty::SM.size, 68.);
-                        let focused = long && self.ring(&self.fh(key.clone(), cx), window);
-                        let full = b.name.clone();
-                        let row = div()
-                            .id(SharedString::from(key.clone()))
-                            .when(long, |d| d.tooltip(crate::controls::tip(full.clone(), None)))
-                            .when(focused, |d| d.child(crate::controls::focus_tip(&t, full.clone(), 28.)))
+                        let row = self
+                            .disclose(
+                                div().id(SharedString::from(key.clone())),
+                                &key,
+                                b.name.clone(),
+                                long,
+                                28.,
+                                false,
+                                window,
+                                cx,
+                            )
                             .flex_none()
                             .h(px(28.))
                             .px(px(8.))
@@ -1123,10 +1124,6 @@ impl FoloApp {
         // One scrolling column: controls and sample images, then detections and their latency (no
         // pinned footer, so no dead band and nothing hidden on short windows).
         let rail = if window.viewport_size().width < px(1100.) { 280. } else { 320. };
-        let more_below = {
-            let s = &self.play_side_scroll;
-            s.max_offset().height + s.offset().y > px(1.)
-        };
         panel(&t)
             .relative()
             .w(px(rail))
@@ -1151,8 +1148,16 @@ impl FoloApp {
                             // Inputs first (the model, its settings, an image to try), then the
                             // results and their latency.
                             .children(picker)
-                            .child(hairline(&t))
-                            .child(detections)
+                            // The rule above the results is the block's own top border: a separate
+                            // 1 px child at a fractional device offset (1.5x) could paint nothing.
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .border_t_1()
+                                    .border_color(t.line_subtle)
+                                    .child(detections),
+                            )
                             .children(timing)
                             // Breathing room after the last row (the fade below shows only while more
                             // lies under it); 8 px, so the rail fits without a scroll at 1280 × 800.
@@ -1161,23 +1166,7 @@ impl FoloApp {
             )
             // A row cut by the rail's bottom edge fades out instead of stopping mid-glyph; at the end
             // of the scroll there's nothing below, so no fade dims the last line.
-            .when(more_below, |d| {
-                d.child(
-                    div()
-                        .absolute()
-                        .bottom(px(1.))
-                        .left_0()
-                        .right_0()
-                        .h(px(20.))
-                        .rounded_b(px(radius::LG))
-                        .bg(gpui::linear_gradient(
-                            0.,
-                            gpui::linear_color_stop(t.bg_panel, 0.),
-                            gpui::linear_color_stop(crate::theme::alpha(t.bg_panel, 0.), 1.),
-                        )),
-                )
-            })
-            .child(self.scrollbar(self.play_side_scroll.clone(), cx))
+            .children(self.scroll_chrome(self.play_side_scroll.clone(), t.bg_panel, 0., radius::LG - 1., cx))
             .into_any_element()
     }
 
@@ -1222,7 +1211,9 @@ impl FoloApp {
             cx,
         );
         let note = match (self.play_target, &self.local_gpu) {
-            (None, _) if !local => "Built-in demo · simulated inference".into(),
+            // The caption also says why Local GPU and CPU are off, so keyboard users (whose arrows
+            // skip disabled options) learn it without the tooltip.
+            (None, _) if !local => "Simulated demo · local runs need folo serve".into(),
             (None, _) => format!("On folo serve at {}", self.store.api.describe()),
             (Some(Target::Gpu), Load::Ready(name)) => {
                 format!("In this app, on {}", crate::ui::short_gpu(name))

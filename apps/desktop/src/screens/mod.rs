@@ -224,7 +224,11 @@ pub fn loading_rows(t: &Theme, id: &str, rows: usize) -> Div {
 
 /// A two-line table cell: primary text over a tertiary detail.
 pub fn cell2(t: &Theme, primary: impl Into<SharedString>, secondary: impl Into<SharedString>) -> Div {
+    // It takes the row's remaining width (basis 0), so its ellipses cut only where the row ends,
+    // not at the text's own minimum.
     div()
+        .flex_1()
+        .flex_basis(px(0.))
         .flex()
         .flex_col()
         .min_w_0()

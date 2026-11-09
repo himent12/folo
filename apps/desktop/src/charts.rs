@@ -320,7 +320,27 @@ pub fn pow2_ticks_every(y0: f32, y1: f32, k: i32) -> Vec<f32> {
 /// (tick step under 0.01). Legends of that chart format their values in the same power.
 pub fn axis_pow(y0: f32, y1: f32, ticks: usize) -> Option<i32> {
     let step = nice_step(y1 - y0, ticks);
-    (step > 0. && step < 0.01).then(|| step.log10().floor() as i32)
+    // The top tick's power, not the step's: a 1.5×10⁻³ top reads "0 0.5 1.0 1.5 × 10⁻³", in the
+    // power its values are written in elsewhere (New run's "1.11×10⁻³"), not "0 5 10 15 × 10⁻⁴".
+    let top = y0.abs().max(y1.abs());
+    (step > 0. && step < 0.01 && top > 0.).then(|| top.log10().floor() as i32)
+}
+
+/// A value in a given power of ten, as legends write it: two decimals ("6.71×10⁻⁴" reads
+/// "0.67×10⁻³"), or two significant figures once it's below 0.1 ("0.011×10⁻³"), so a small
+/// value never rounds to "0.00".
+pub fn in_pow(x: f64, p: i32) -> String {
+    let v = x * 10f64.powi(-p);
+    let a = v.abs();
+    let digits = if a == 0. || a >= 0.1 { 2 } else { (1 - a.log10().floor() as i32).max(2) as usize };
+    format!("{v:.digits$}×10{}", superscript(p))
+}
+
+/// A label's start, kept between `lo` and `hi` (its last fitting start). Unlike `clamp`, a span
+/// narrower than the label (a chart mid-resize, laid out at a few px) pins it to `lo` rather
+/// than panicking.
+fn clamp_in(v: Pixels, lo: Pixels, hi: Pixels) -> Pixels {
+    v.min(hi).max(lo)
 }
 
 /// An exponent in superscript digits ("-3" → "⁻³").
@@ -1008,7 +1028,7 @@ fn paint_line_chart(
         .and_then(|f| cursor_x(&spec.series, x0 + (x1 - x0) * f, x1 - x0))
         .map(|v| {
             let w = text_width(window, &chip_label(spec, v), label_size) + px(10.);
-            let left = (sx(v) - w / 2.).clamp(plot.left() - px(4.), plot.right() - w);
+            let left = clamp_in(sx(v) - w / 2., plot.left() - px(4.), plot.right() - w);
             (left, left + w)
         });
     for v in &xt {
@@ -1018,7 +1038,7 @@ fn paint_line_chart(
         let w = text_width(window, &l, label_size);
         // Centred on its tick (the end labels too: "0.00" / "1.00" flush with the tick read as
         // belonging beside it); only the chart's own edges push a label inward.
-        let lx = (x - w / 2.).clamp(bounds.left(), bounds.right() - w);
+        let lx = clamp_in(x - w / 2., bounds.left(), bounds.right() - w);
         if chip_span.is_some_and(|(cl, cr)| lx < cr + px(4.) && lx + w > cl - px(4.)) {
             continue;
         }
@@ -1211,7 +1231,7 @@ fn paint_line_chart(
         let l = chip_label(spec, snap);
         let w = text_width(window, &l, label_size) + px(10.);
         let chip = Bounds::new(
-            point((cx_px - w / 2.).clamp(plot.left() - px(4.), plot.right() - w), plot.bottom() + px(3.)),
+            point(clamp_in(cx_px - w / 2., plot.left() - px(4.), plot.right() - w), plot.bottom() + px(3.)),
             size(w, px(16.)),
         );
         window.paint_quad(fill(chip, t.text_primary).corner_radii(px(3.)));
@@ -1616,8 +1636,13 @@ mod tests {
     #[test]
     fn small_values_share_a_power_of_ten() {
         assert_eq!(superscript(-3), "⁻³");
-        assert_eq!(axis_pow(0., 0.012, 3), Some(-3));
+        assert_eq!(axis_pow(0., 0.012, 3), Some(-2));
+        assert_eq!(axis_pow(0., 0.0015, 3), Some(-3));
         assert_eq!(axis_pow(0., 1., 4), None);
+        assert_eq!(in_pow(6.71e-4, -3), "0.67×10⁻³");
+        assert_eq!(in_pow(1.11e-3, -3), "1.11×10⁻³");
+        assert_eq!(in_pow(1.1e-5, -3), "0.011×10⁻³");
+        assert_eq!(in_pow(6.7e-6, -3), "0.0067×10⁻³");
     }
 
     #[test]

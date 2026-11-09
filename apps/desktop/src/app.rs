@@ -3351,6 +3351,15 @@ impl FoloApp {
         if self.narrow { 16. } else { 24. }
     }
 
+    /// The page's content width: the window less the sidebar (an icon rail below 1120), capped
+    /// at `CONTENT_MAX` (border-box, so the cap includes the gutters), less the gutters. Layouts
+    /// that pick columns by the room they get measure it here, not by the window width.
+    pub fn content_width(&self, window: &Window) -> f32 {
+        let vw = f32::from(window.viewport_size().width);
+        let side = if vw < 1120. { tsize::SIDEBAR_COLLAPSED } else { tsize::SIDEBAR };
+        (vw - side).min(tsize::CONTENT_MAX) - 2. * self.gutter()
+    }
+
     pub fn page_frame(
         &self,
         t: &Theme,

@@ -138,10 +138,6 @@ pub fn panel_header(t: &Theme, title: &str) -> Div {
         .child(text(ty::SM, t.text_primary).font_weight(FontWeight::MEDIUM).child(title.to_string()))
 }
 
-pub fn hairline(t: &Theme) -> Div {
-    div().h(px(1.)).w_full().flex_none().bg(t.line_subtle)
-}
-
 pub fn vline(t: &Theme) -> Div {
     div().w(px(1.)).h_full().flex_none().bg(t.line_subtle)
 }
@@ -228,10 +224,21 @@ pub fn fmt_conf(c: f32) -> String {
     if three.ends_with('0') { format!("{c:.2}") } else { three }
 }
 
-/// One inference's total latency as every readout writes it: "6.4 ms", or "Sim. 6.4 ms" when the
+/// One inference's total latency as every readout writes it: "6.4 ms", or "6.4 ms simulated" when the
 /// built-in demo simulated it.
 pub fn latency_text(ms: f64, simulated: bool) -> String {
-    if simulated { format!("Sim. {ms:.1} ms") } else { format!("{ms:.1} ms") }
+    if simulated { format!("{ms:.1} ms simulated") } else { format!("{ms:.1} ms") }
+}
+
+/// An action inside a line of text ("Show them ›", "Use 0.31 (best F1) ›"): secondary ink and a
+/// trailing chevron, so every inline action reads as one at rest, not only on hover.
+pub fn inline_link(t: &Theme, label: impl Into<SharedString>) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(2.))
+        .child(text(ty::XS, t.text_secondary).child(label.into()))
+        .child(icon("icons/chevron-right.svg", 12., t.text_secondary))
 }
 
 /// How a model's weights are stored, from its own record (`precision`, `fused`): "f16, fused",
@@ -252,6 +259,41 @@ pub trait Ellipsis: Styled + Sized {
 }
 
 impl<T: Styled> Ellipsis for T {}
+
+/// Two values as one figure, "0.861 / 0.792": both at `size`, the slash a step down in tertiary
+/// ink. The run and model pages' Precision / Recall both use it.
+pub fn metric_pair(t: &Theme, size: TypeStep, a: String, b: String) -> Div {
+    div()
+        .flex()
+        .items_baseline()
+        .gap(px(4.))
+        .child(text(size, t.text_primary).tnum().child(a))
+        .child(text(ty::LG, t.text_tertiary).child("/"))
+        .child(text(size, t.text_primary).tnum().child(b))
+}
+
+/// The data a model was evaluated on, one way everywhere: "shapes-hard · val · 800 images" (the
+/// count when known).
+pub fn split_label(dataset: &str, split: &str, images: Option<u64>) -> String {
+    match images {
+        Some(n) => format!("{dataset} · {split} · {} images", int(n)),
+        None => format!("{dataset} · {split}"),
+    }
+}
+
+/// Where precision and recall were taken, as both pages caption them: the best-F1 confidence when
+/// known, the match rule, and the split ("best F1 · conf 0.31 · IoU 0.50 · val").
+pub fn pr_caption(conf: Option<f32>, split: &str) -> String {
+    let mut s = match conf {
+        Some(c) => format!("best F1 · conf {} · IoU 0.50", fmt_conf(c)),
+        None => "best F1 · IoU 0.50".to_string(),
+    };
+    // A surface that names the split elsewhere (the model page's headline) leaves it out.
+    if !split.is_empty() {
+        s += &format!(" · {split}");
+    }
+    s
+}
 
 /// One metadata line: `lead` (an architecture, say), an optional tag right after it, then the rest
 /// as " · "-joined text. The line owns its separators (4 px either side of each dot) and only the
@@ -274,9 +316,17 @@ pub fn meta_row(
         .min_w_0()
         .child(text(size, color).flex_none().whitespace_nowrap().child(lead.into()))
         .children(tag)
+        // One separator rule: every dot is the font's " · " inside the group, the first included
+        // (a flex gap beside a lone "·" spaced it wider than the rest).
         .when(!rest.is_empty(), |d| {
-            d.child(text(size, color).flex_none().child("·"))
-                .child(text(size, color).flex_1().min_w_0().ellipsis().child(rest.join(" · ")))
+            d.child(
+                text(size, color)
+                    .flex_1()
+                    .min_w_0()
+                    .ml(px(-4.))
+                    .ellipsis()
+                    .child(format!(" · {}", rest.join(" · "))),
+            )
         })
 }
 
@@ -435,6 +485,12 @@ pub fn stat_at(
         .child(caption(t, label))
         .child(metric(t, value, unit, step, ty::SM))
         .children(detail)
+}
+
+/// A KPI tile's first detail line, at the caption line's height, for a graphic (a progress or
+/// split bar) that stands in for text, so its tile's later lines stay on the strip's grid.
+pub fn detail_line(content: impl IntoElement) -> Div {
+    div().h(px(ty::XS.line)).w_full().flex().items_center().child(content)
 }
 
 /// A duration as a metric: numbers at value size, units ("h", "m", "s") one step smaller.
@@ -621,6 +677,26 @@ pub fn int(n: u64) -> String {
 /// 5_400_000 → "5.1 MiB".
 /// Whether `s` set at `size` px in Geist may be wider than `width` px: a per-glyph estimate that
 /// errs wide (capitals and w / m count as wide), so a name that might be cut gets its full-name tip.
+/// A table's spare width, shared by weight: each column takes `weight` shares of `spare` on top
+/// of its base, up to its cap. What the caps leave stays where the table keeps its gap (before the
+/// numbers), so wide windows fill the columns first rather than open one dead band.
+pub fn share_spare<const N: usize>(spare: f32, cols: [(f32, f32, f32); N]) -> [f32; N] {
+    let weights: f32 = cols.iter().map(|c| c.1).sum();
+    let share = if weights > 0. { spare.max(0.) / weights } else { 0. };
+    // Whole pixels: a fractional column width can leave text measured at one width and laid out
+    // at another.
+    cols.map(|(base, weight, cap)| (base + share * weight).min(cap.max(base)).floor())
+}
+
+/// A flex table column on the same rule as `share_spare`, for rows whose cells need no known
+/// width: `basis` px, growing by `weight` up to `max`. Spare width past every cap goes to the
+/// first column given `.ml_auto()`.
+pub fn grow_col(d: Div, basis: f32, weight: f32, max: f32) -> Div {
+    let mut d = d.flex_basis(px(basis)).flex_shrink_0().min_w(px(basis)).max_w(px(max));
+    d.style().flex_grow = Some(weight);
+    d
+}
+
 pub fn may_overflow(s: &str, size: f32, width: f32) -> bool {
     let em: f32 = s
         .chars()
@@ -761,11 +837,90 @@ impl ThumbGeo {
 /// Paint the thumb (GPUI draws none), so overflow is visible.
 pub fn paint_thumb(t: &Theme, handle: &ScrollHandle, hot: bool, window: &mut gpui::Window) {
     let Some(g) = ThumbGeo::of(handle) else { return };
-    let color = crate::theme::alpha(t.text_tertiary, if hot { 0.7 } else { 0.45 });
+    // An overlay thumb: shown while dragged, while the pointer is over its area, and for a moment
+    // after the content scrolls; otherwise the content has the space to itself. Movement is
+    // recorded on every paint, whatever else shows the thumb.
+    let scrolled = recently_scrolled(handle);
+    let over = handle.bounds().contains(&window.mouse_position());
+    if !(hot || over || scrolled) {
+        return;
+    }
+    // Shown only by a recent scroll: keep painting until that lapses, so it hides on time.
+    if scrolled && !hot && !over {
+        window.request_animation_frame();
+    }
+    // 3:1 against the surface in both themes (45 % read about 1.9:1).
+    let color = crate::theme::alpha(t.text_tertiary, if hot { 1.0 } else { 0.8 });
     window.paint_quad(
         fill(Bounds::new(point(g.right - px(6.), g.y + px(2.)), size(px(4.), g.thumb - px(4.))), color)
             .corner_radii(px(2.)),
     );
+}
+
+/// A scroll area's origin, its last vertical offset, and when that last changed.
+type ScrollSeen = ((f32, f32), f32, std::time::Instant);
+
+thread_local! {
+    static SCROLLED: std::cell::RefCell<Vec<ScrollSeen>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// A scroll area's edge fades: 24 px of its surface `bg` over an edge only while content lies
+/// past it, so a row cut by the edge reads as "more", and at either end the rows show undimmed.
+/// With the thumbs hidden at rest, these are the scroll cue. Absolute children sit inside a
+/// parent's border already, so `inset` is extra room, and `radius` is the parent's inner radius. Every scroll area but the page uses them, through
+/// `FoloApp::scroll_chrome`.
+pub fn scroll_edges(handle: &ScrollHandle, bg: Hsla, inset: f32, radius: f32) -> impl Iterator<Item = Div> {
+    let y = handle.offset().y;
+    let above = y < px(-1.);
+    let below = handle.max_offset().height + y > px(1.);
+    // 24 px: the gradient holds its full colour for the outer 6 px (its first stop at 25%), so a
+    // row cut at the edge leaves no sliver of glyphs, then ramps out. It paints its own rounded
+    // corners (`overflow_hidden` would clip square).
+    let fade = move |top: bool| {
+        let d = div().absolute().left(px(inset)).right(px(inset)).h(px(24.));
+        let d = if top {
+            d.top(px(inset)).rounded_t(px(radius))
+        } else {
+            d.bottom(px(inset)).rounded_b(px(radius))
+        };
+        d.bg(gpui::linear_gradient(
+            if top { 180. } else { 0. },
+            gpui::linear_color_stop(bg, 0.25),
+            gpui::linear_color_stop(crate::theme::alpha(bg, 0.), 1.),
+        ))
+    };
+    above.then(|| fade(true)).into_iter().chain(below.then(|| fade(false)))
+}
+
+/// Whether `handle`'s content moved in the last 800 ms.
+fn recently_scrolled(handle: &ScrollHandle) -> bool {
+    let b = handle.bounds();
+    let key = (f32::from(b.origin.x), f32::from(b.origin.y));
+    let y = f32::from(handle.offset().y);
+    let now = std::time::Instant::now();
+    SCROLLED.with(|s| {
+        let mut s = s.borrow_mut();
+        match s.iter_mut().find(|(k, _, _)| *k == key) {
+            // A jump back to the top is a page change resetting its scroll, not the user scrolling.
+            Some(e) if (e.1 - y).abs() > 0.5 && y.abs() < 0.5 => {
+                *e = (key, y, now - std::time::Duration::from_secs(1));
+                false
+            }
+            Some(e) if (e.1 - y).abs() > 0.5 => {
+                *e = (key, y, now);
+                true
+            }
+            Some(e) => now.duration_since(e.2) < std::time::Duration::from_millis(800),
+            None => {
+                // First sight: not a scroll.
+                s.push((key, y, now - std::time::Duration::from_secs(1)));
+                if s.len() > 64 {
+                    s.remove(0);
+                }
+                false
+            }
+        }
+    })
 }
 
 /// A run's device as shown: "RTX 4080 SUPER · Vulkan" from "NVIDIA GeForce RTX 4080 SUPER (vulkan)".
