@@ -50,6 +50,8 @@ struct Scripted {
     steps: Mutex<VecDeque<Step>>,
     asked: Mutex<Vec<Asked>>,
     calls: AtomicUsize,
+    /// When set, the next probe ([`Agent::info`]) says it has begun (`.0`) and waits to be let go (`.1`).
+    slow_probe: Mutex<Option<(Arc<AtomicBool>, Arc<AtomicBool>)>>,
 }
 
 impl Scripted {
@@ -60,6 +62,7 @@ impl Scripted {
             steps: Mutex::new(steps.into()),
             asked: Mutex::new(Vec::new()),
             calls: AtomicUsize::new(0),
+            slow_probe: Mutex::default(),
         })
     }
 
@@ -82,6 +85,12 @@ impl Agent for Scripted {
     }
 
     fn info(&self) -> LabelAgent {
+        if let Some((begun, go)) = self.slow_probe.lock().unwrap().take() {
+            begun.store(true, Ordering::SeqCst);
+            while !go.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
         LabelAgent {
             id: self.id,
             name: self.id.display_name().into(),
@@ -159,6 +168,7 @@ fn fixture(home: &Path, steps: Vec<Step>) -> Fixture {
         steps: Mutex::default(),
         asked: Mutex::default(),
         calls: AtomicUsize::new(0),
+        slow_probe: Mutex::default(),
     });
     let store = Arc::new(
         RealStore::open(home.to_path_buf())
@@ -293,6 +303,7 @@ async fn upload_label_review_and_make_a_dataset() {
     // A job, with its inputs checked.
     for (bad, field) in [
         (json!({ "name": " ", "classes": ["car"] }), "name"),
+        (json!({ "name": "street\npath: D:/other", "classes": ["car"] }), "name"),
         (json!({ "name": "x", "classes": [] }), "classes"),
         (json!({ "name": "x", "classes": ["car", "CAR"] }), "class"),
         (json!({ "name": "x", "classes": ["a,b"] }), "class"),
@@ -655,6 +666,60 @@ async fn a_cli_error_ends_the_run_before_more_calls_are_made() {
 }
 
 #[tokio::test]
+async fn an_agent_that_only_returns_garbage_is_given_up_on_after_three_calls() {
+    let t = TestDir::new("label-garbage");
+    let garbage = || Step::Reply("Sure! Here are the boxes you asked for.".into());
+    let f = fixture(&t.join("home"), vec![garbage(), garbage(), garbage(), garbage(), garbage(), garbage()]);
+    let app = &f.app;
+    let job = job_with_images(app, 6).await;
+
+    let body = json!({ "agent": "claude", "batch": 1, "parallel": 1 });
+    ok::<LabelJob>(app, post(&format!("/api/label/jobs/{}/start", job.id), body)).await;
+    let done = idle(app, &job.id).await;
+    let run = done.run.unwrap();
+    // Three calls, not three batches of two: the first image's call and its retry, then the second image's.
+    assert_eq!((run.outcome, f.agent.calls(), run.usage.calls), (Some(LabelOutcome::Failed), 3, 3));
+    assert!(
+        run.error.unwrap().starts_with("3 calls in a row failed; the last one: the reply has no JSON object")
+    );
+    assert_eq!(done.counts, LabelCounts { images: 6, pending: 4, labeled: 0, failed: 2, boxes: 0 });
+}
+
+#[tokio::test]
+async fn a_job_deleted_while_its_start_waits_for_the_agent_does_not_run() {
+    let t = TestDir::new("label-start-delete");
+    let f = fixture(&t.join("home"), vec![]);
+    let job = job_with_images(&f.app, 2).await;
+    let uri = format!("/api/label/jobs/{}", job.id);
+
+    // The start request finds the job, then asks the agent whether it is there, which takes a while.
+    let (begun, go) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
+    *f.agent.slow_probe.lock().unwrap() = Some((begun.clone(), go.clone()));
+    let (app, start) = (f.app.clone(), format!("{uri}/start"));
+    let starting = tokio::spawn(async move { send(&app, post(&start, json!({ "agent": "claude" }))).await });
+    for _ in 0..2000 {
+        if begun.load(Ordering::SeqCst) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(begun.load(Ordering::SeqCst));
+    // Meanwhile the job is deleted.
+    let (status, _) = send(&f.app, delete(&uri)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    go.store(true, Ordering::SeqCst);
+
+    // The start finds no job, and no call is ever made for it.
+    let (status, body) = starting.await.unwrap();
+    assert_eq!(status, StatusCode::NOT_FOUND, "{}", String::from_utf8_lossy(&body));
+    let e: ErrorBody = serde_json::from_slice(&body).unwrap();
+    assert_eq!(e.error.code, "label_job_not_found");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(f.agent.calls(), 0);
+    err(&f.app, post(&format!("{uri}/stop"), json!({})), StatusCode::NOT_FOUND, "label_job_not_found").await;
+}
+
+#[tokio::test]
 async fn calls_that_time_out_in_a_row_end_the_run() {
     let t = TestDir::new("label-timeouts");
     let f = fixture(&t.join("home"), vec![Step::Timeout, Step::Timeout, Step::Timeout]);
@@ -891,6 +956,7 @@ async fn start_refuses_what_it_cannot_run() {
     // Nothing labeled yet: no dataset.
     let dataset = format!("/api/label/jobs/{}/dataset", job.id);
     err(app, post(&dataset, json!({})), StatusCode::BAD_REQUEST, "invalid_dataset").await;
+    err(app, post(&dataset, json!({ "name": "a\nb" })), StatusCode::BAD_REQUEST, "invalid_body").await;
 
     // A model named in the request reaches the agent; an empty job has nothing to label.
     ok::<LabelJob>(app, post(&start, json!({ "agent": "claude", "model": "claude-opus-5-5[1m]" }))).await;

@@ -78,8 +78,8 @@ tokens for that one image, where Claude Code's call costs little more than the i
 
 A run stops spending as soon as spending is pointless. If the CLI is missing, signed out, refuses the model or
 hits a rate limit, the run ends on that call with the CLI's own message, and the images it did not reach stay as
-they were. A reply that cannot be read is asked for once more, never in a loop. Three calls in a row that time
-out or return garbage end the run.
+they were. A reply that cannot be read is asked for once more, never in a loop, and one bad box in a reply costs
+only that box. Three calls in a row that time out or return garbage end the run.
 
 ## How good the labels are
 Measured through `folo serve` on 24 COCO val2017 photos with 73 objects of 10 everyday classes (person, car,

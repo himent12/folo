@@ -644,8 +644,9 @@ exported more than once.
   them).
 - `GET /api/label/jobs` → `{ "jobs": [LabelJob] }` (newest first)
 - `POST /api/label/jobs` body `{ "name", "classes": ["car", "person"], "instructions"?: "", "path"?: "D:/photos" }`
-  → `201 LabelJob`. `name` must not be blank (at most 100 characters); `classes`: 1 to 80 distinct, non-blank
-  names of at most 64 characters (no line breaks, `,` or `:`; they are compared without case); `instructions`:
+  → `201 LabelJob`. `name` must not be blank (one line of at most 100 characters); `classes`: 1 to 80 distinct,
+  non-blank names of at most 64 characters (no `,`, `:`, line breaks or other control characters; they are
+  compared without case); `instructions`:
   at most 4000 characters. With `path`, the images of that folder are added as by `POST …/images`
   (`path_not_found` creates nothing). Anything else wrong is `400 invalid_body`, naming the field.
 - `GET /api/label/jobs/{id}` → `LabelJob`
@@ -724,12 +725,14 @@ exported more than once.
   Code 2 calls and 3500 input tokens in all, Codex 1 call and 9200.
 - A reply's boxes are checked before they are stored: a label that is not one of the job's classes (compared
   without case), a malformed box, or one that is empty after clipping is dropped (the log says how many), and an
-  image the reply does not mention is `failed`. A reply that is not the JSON asked for is retried once; then
+  image the reply does not mention is `failed`. One bad box costs only itself, and the JSON is found with text
+  around it or split into one object per image. A reply with no such JSON at all is asked for once more; then
   its images are `failed` with the reason.
 - A run never burns tokens on a broken setup: when the CLI cannot be started or exits with an error (not signed
-  in, an unknown model, a rate limit), or three calls in a row time out (5 minutes each) or return garbage, the
-  run ends with `outcome: "failed"`, the CLI's message in `run.error` and the images it did not get to
-  unchanged. `POST …/start` again continues with what is left.
+  in, an unknown model, a rate limit), or three calls in a row time out (5 minutes each) or return garbage
+  (every call counts, a retry too), the run ends with `outcome: "failed"`, the CLI's message in `run.error` and
+  the images it did not get to unchanged. Once a run is stopped or has failed, no further call is started and
+  the ones in flight are killed. `POST …/start` again continues with what is left.
 - `usage` adds up what the CLIs report per call. `cost_usd` is Claude Code's own figure (list prices, also on a
   subscription); Codex reports none.
 
@@ -742,7 +745,8 @@ exported more than once.
   image (an empty label file). The images are shuffled with `seed` and `round(n · val_fraction)` of them go to
   `val` (`val_fraction` in `0..=0.5`, else `400 invalid_body`; at least one image always stays in `train`).
   `name` defaults to the job's. `400 invalid_dataset` when no image is labeled, `409 label_job_active` while a
-  run is active. The job keeps existing and remembers the dataset as `dataset_id`; exporting again makes
+  run is active. While the dataset is written the job cannot be changed, deleted or given to an agent (`409
+  label_job_active`). The job keeps existing and remembers the dataset as `dataset_id`; exporting again makes
   another dataset.
 
 ```jsonc

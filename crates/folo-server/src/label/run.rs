@@ -191,6 +191,10 @@ impl Run<'_> {
         };
         let mut retried = false;
         let outcomes = loop {
+            // Decoding the images took a moment, and so did a first attempt: the run may have ended meanwhile.
+            if self.cancelled() {
+                break all(untouched, "");
+            }
             let reply = match self.plan.agent.label(&request) {
                 Ok(reply) => reply,
                 Err(AgentError::Cancelled) => break all(untouched, ""),
@@ -222,14 +226,16 @@ impl Run<'_> {
                         })
                         .collect();
                 }
-                Err(why) if !retried && !self.cancelled() => {
+                Err(why) => {
+                    // Every unreadable reply counts towards the cutoff, the first of a batch too: an agent that
+                    // only returns garbage is given up on after three calls, not three batches.
+                    self.soft_failure(&why);
+                    if retried || self.cancelled() {
+                        break all(Outcome::Failed, &why);
+                    }
                     retried = true;
                     let mut state = self.job.lock();
                     self.job.log(&mut state, LogLevel::Warn, format!("call {n}: {why}; asking once more"));
-                }
-                Err(why) => {
-                    self.soft_failure(&why);
-                    break all(Outcome::Failed, &why);
                 }
             }
         };

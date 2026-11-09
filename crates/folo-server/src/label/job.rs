@@ -100,6 +100,9 @@ pub struct State {
     pub file: JobFile,
     pub active: Option<Active>,
     logs: VecDeque<LogLine>,
+    /// A dataset is being written from the job ([`Exporting`]): like a run, that keeps the job from being changed
+    /// or deleted meanwhile.
+    pub exporting: bool,
     /// Set when the job is deleted, so work still in flight writes nothing back.
     pub deleted: bool,
 }
@@ -170,16 +173,23 @@ impl State {
         self.file.images.iter_mut().find(|r| r.id == image_id)
     }
 
-    /// `409 label_job_active` while a run is active.
+    /// `409 label_job_active` while a run is active, or a dataset is being written from the job.
     pub fn check_idle(&self, doing: &str) -> Result<()> {
-        match &self.active {
-            None => Ok(()),
-            Some(_) => Err(Error::conflict(
+        let id = &self.file.id;
+        if self.active.is_some() {
+            return Err(Error::conflict(
                 "label_job_active",
-                format!("labeling job '{}' has an agent run in progress; {doing} once it ends", self.file.id),
+                format!("labeling job '{id}' has an agent run in progress; {doing} once it ends"),
             )
-            .hint("POST /api/label/jobs/{id}/stop ends the run")),
+            .hint("POST /api/label/jobs/{id}/stop ends the run"));
         }
+        if self.exporting {
+            return Err(Error::conflict(
+                "label_job_active",
+                format!("a dataset is being made from labeling job '{id}'; {doing} once it is written"),
+            ));
+        }
+        Ok(())
     }
 
     /// Takes image `image_id` for a change by hand. `409 label_job_active` while it is in an agent call; an image
@@ -227,7 +237,7 @@ impl Job {
         Job {
             id: file.id.clone(),
             dir,
-            state: Mutex::new(State { file, active: None, logs: lines, deleted: false }),
+            state: Mutex::new(State { file, active: None, logs: lines, exporting: false, deleted: false }),
             events: broadcast::channel(EVENT_BUFFER).0,
         }
     }
@@ -263,6 +273,16 @@ impl Job {
     /// take the job down with it: every change is a few plain assignments, so the state stays usable.
     pub fn lock(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The state of a job that still exists, for a request: `404 label_job_not_found` once the job was deleted
+    /// (a request that looked it up a moment before still holds it, and must not bring it back to life).
+    pub fn live(&self) -> Result<MutexGuard<'_, State>> {
+        let state = self.lock();
+        if state.deleted {
+            return Err(Error::not_found("label_job", &self.id));
+        }
+        Ok(state)
     }
 
     /// Where an image's file is.
@@ -323,6 +343,28 @@ impl Job {
     }
 }
 
+/// A dataset being written from a job: while this lives, the job counts as busy ([`State::check_idle`]), so it
+/// is still there, unchanged, when the dataset is registered.
+pub struct Exporting(pub Arc<Job>);
+
+impl Exporting {
+    /// Marks `job` as being exported: `409 label_job_active` while a run is active or another export is.
+    pub fn begin(job: Arc<Job>) -> Result<Exporting> {
+        {
+            let mut state = job.live()?;
+            state.check_idle("make a dataset")?;
+            state.exporting = true;
+        }
+        Ok(Exporting(job))
+    }
+}
+
+impl Drop for Exporting {
+    fn drop(&mut self) {
+        self.0.lock().exporting = false;
+    }
+}
+
 /// A file name for an image called `name` that no image of the job has yet: `name` without folders, reduced to
 /// letters, digits, `.`, `_` and `-`, with `-2`, `-3`, ... on its stem while that stem is in `taken` (lower-cased
 /// stems; the new one is added). Stems are unique, not just names, because a dataset's label files are named by
@@ -374,6 +416,10 @@ mod tests {
         assert!(taken.contains("cat_1") && taken.contains("cat_1-2") && taken.contains("cat_1-3"));
     }
 
+    fn state_of(file: JobFile) -> State {
+        State { file, active: None, logs: VecDeque::new(), exporting: false, deleted: false }
+    }
+
     #[test]
     fn counts_and_the_labeling_view() {
         let mut file = JobFile::new("lb_1".into(), "j".into(), vec!["a".into()], String::new());
@@ -395,7 +441,7 @@ mod tests {
             record("3", LabelImageStatus::Failed, 5),
             record("4", LabelImageStatus::Labeled, 1),
         ];
-        let mut state = State { file, active: None, logs: VecDeque::new(), deleted: false };
+        let mut state = State { file, active: None, logs: VecDeque::new(), exporting: false, deleted: false };
         let job = state.job();
         assert_eq!(job.status, LabelJobStatus::Idle);
         assert_eq!(job.counts, LabelCounts { images: 4, pending: 1, labeled: 2, failed: 1, boxes: 3 });
@@ -414,6 +460,12 @@ mod tests {
         assert_eq!((shown.status, shown.boxes.len()), (LabelImageStatus::Labeling, 2));
         assert_eq!(state.job().counts.labeled, 2);
         assert_eq!(state.check_idle("x").unwrap_err().body.code, "label_job_active");
+        let exporting = State {
+            exporting: true,
+            active: None,
+            ..state_of(JobFile::new("lb_2".into(), "j".into(), vec![], String::new()))
+        };
+        assert_eq!(exporting.check_idle("x").unwrap_err().body.code, "label_job_active");
         // An image in a call cannot be taken; one that waits leaves the run; the others are free.
         assert_eq!(state.claim("2").unwrap_err().body.code, "label_job_active");
         assert!(state.claim("4").is_ok() && state.claim("1").is_ok());

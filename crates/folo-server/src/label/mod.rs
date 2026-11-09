@@ -37,7 +37,7 @@ use crate::error::{Error, Result};
 use crate::index::{absolute, read_image_with, write_atomic};
 use crate::store::ImageData;
 use crate::util::{claim_dir, fnv1a, rfc3339, slug, unique_id, unix_now};
-use job::{Active, Job, JobFile, Record, stem_key, unique_file_name};
+use job::{Active, Exporting, Job, JobFile, Record, stem_key, unique_file_name};
 
 /// Most images a job holds.
 pub const MAX_IMAGES: usize = 10_000;
@@ -70,12 +70,14 @@ pub struct Upload {
     pub bytes: Vec<u8>,
 }
 
-/// A dataset folder [`Labeler::write_dataset`] wrote, to be registered.
+/// A dataset folder [`Labeler::write_dataset`] wrote, to be registered. While it lives, its job stays as it is
+/// (no run, no change, no deletion), so [`Labeler::set_dataset`] finds the job the dataset was made from.
 pub struct WrittenDataset {
     /// The dataset's name.
     pub name: String,
     /// Its folder.
     pub path: PathBuf,
+    export: Exporting,
 }
 
 /// The labeling jobs of a data dir and the agents that can work on them. See the module docs.
@@ -104,11 +106,14 @@ fn path_not_found(path: &Path) -> Error {
         .hint("give a folder (or an image file) on the machine the server runs on")
 }
 
-/// A display name: trimmed, not blank, at most [`MAX_NAME_CHARS`].
+/// A display name: trimmed, not blank, one line of at most [`MAX_NAME_CHARS`].
 fn check_name(name: &str) -> Result<String> {
     let name = name.trim();
     if name.is_empty() {
         return Err(invalid("name must not be empty"));
+    }
+    if name.chars().any(char::is_control) {
+        return Err(invalid("name must not contain line breaks or other control characters"));
     }
     if name.chars().count() > MAX_NAME_CHARS {
         return Err(invalid(format!("name must be at most {MAX_NAME_CHARS} characters")));
@@ -132,9 +137,10 @@ fn check_classes(classes: &[String]) -> Result<Vec<String>> {
         if class.chars().count() > MAX_CLASS_CHARS {
             return Err(invalid(format!("class '{class}' is longer than {MAX_CLASS_CHARS} characters")));
         }
-        if class.contains([',', ':', '\n', '\r']) {
+        if class.contains([',', ':']) || class.chars().any(char::is_control) {
             return Err(invalid(format!(
-                "class '{class}' must not contain a comma, a colon or a line break"
+                "class '{}' must not contain a comma, a colon, a line break or another control character",
+                class.escape_debug()
             )));
         }
         if !seen.insert(class.to_lowercase()) {
@@ -268,7 +274,7 @@ impl Labeler {
 
     /// `GET /api/label/jobs/{id}`.
     pub fn get(&self, id: &str) -> Result<LabelJob> {
-        Ok(self.job(id)?.lock().job())
+        Ok(self.job(id)?.live()?.job())
     }
 
     /// `PUT /api/label/jobs/{id}`.
@@ -281,7 +287,7 @@ impl Labeler {
             .map(|t| check_text("instructions", t, MAX_INSTRUCTION_CHARS))
             .transpose()?;
         let job = self.job(id)?;
-        let mut state = job.lock();
+        let mut state = job.live()?;
         state.check_idle("change the job")?;
         if let Some(classes) = classes {
             let has_boxes = state.file.images.iter().any(|r| !r.boxes.is_empty());
@@ -310,7 +316,7 @@ impl Labeler {
     pub fn delete(&self, id: &str) -> Result<()> {
         let job = self.job(id)?;
         {
-            let mut state = job.lock();
+            let mut state = job.live()?;
             state.check_idle("delete the job")?;
             // The job's file goes first: without it the folder is not a job, whatever else of it is still there.
             let file = job.dir.join("job.json");
@@ -507,7 +513,7 @@ impl Labeler {
         limit: u64,
     ) -> Result<LabelImagePage> {
         let job = self.job(id)?;
-        let state = job.lock();
+        let state = job.live()?;
         let matching = state.file.images.iter().filter(|r| status.is_none_or(|s| s == state.status(r)));
         let (mut total, mut images) = (0u64, Vec::new());
         for record in matching {
@@ -524,7 +530,7 @@ impl Labeler {
     pub fn image(&self, id: &str, image_id: &str, thumb: Option<u32>) -> Result<ImageData> {
         let job = self.job(id)?;
         let path = {
-            let state = job.lock();
+            let state = job.live()?;
             job.image_path(state.record(image_id)?)
         };
         let cache = thumb.map(|_| self.thumbs.join(id));
@@ -541,7 +547,7 @@ impl Labeler {
     /// `PUT /api/label/jobs/{id}/images/{image_id}`: boxes drawn by hand.
     pub fn update_image(&self, id: &str, image_id: &str, req: UpdateLabelImage) -> Result<LabelImage> {
         let job = self.job(id)?;
-        let mut state = job.lock();
+        let mut state = job.live()?;
         let classes = state.file.classes.len();
         let record = state.record(image_id)?;
         let boxes = check_boxes(&req.boxes, classes, (record.width, record.height))?;
@@ -561,7 +567,7 @@ impl Labeler {
     /// `DELETE /api/label/jobs/{id}/images/{image_id}`: an upload's file goes too, a folder image's never.
     pub fn delete_image(&self, id: &str, image_id: &str) -> Result<()> {
         let job = self.job(id)?;
-        let mut state = job.lock();
+        let mut state = job.live()?;
         let record = state.record(image_id)?.clone();
         state.claim(image_id)?;
         state.file.images.retain(|r| r.id != image_id);
@@ -598,7 +604,8 @@ impl Labeler {
         let model = model.map(str::to_string).or(info.default_model);
         let effort = req.effort.unwrap_or(info.default_effort);
 
-        let mut state = job.lock();
+        // Looked up before the agent was probed, which can take a while: the job may be gone by now.
+        let mut state = job.live()?;
         state.check_idle("start another run")?;
         let ids = match &req.image_ids {
             Some(ids) => {
@@ -708,7 +715,7 @@ impl Labeler {
     /// `POST /api/label/jobs/{id}/stop`: ends the run's calls; the run's thread closes the run.
     pub fn stop(&self, id: &str) -> Result<LabelJob> {
         let job = self.job(id)?;
-        let mut state = job.lock();
+        let mut state = job.live()?;
         let Some(active) = state.active.as_mut() else {
             return Err(Error::conflict(
                 "label_job_not_active",
@@ -729,13 +736,13 @@ impl Labeler {
     pub fn subscribe(&self, id: &str) -> Result<(LabelJob, broadcast::Receiver<LabelEvent>)> {
         let job = self.job(id)?;
         // Subscribed under the lock every change is made under, so no event falls between the two.
-        let state = job.lock();
+        let state = job.live()?;
         Ok((state.job(), job.subscribe()))
     }
 
     /// `GET /api/label/jobs/{id}/logs`: the last `limit` lines, oldest first.
     pub fn logs(&self, id: &str, limit: usize) -> Result<Vec<LogLine>> {
-        Ok(self.job(id)?.lock().logs(limit))
+        Ok(self.job(id)?.live()?.logs(limit))
     }
 
     /// Writes the job's labeled images as a YOLO dataset into a new folder under `<data dir>/datasets`
@@ -744,10 +751,10 @@ impl Labeler {
         if !(0.0..=0.5).contains(&req.val_fraction) {
             return Err(invalid("val_fraction must be in 0..=0.5"));
         }
-        let job = self.job(id)?;
+        let export = Exporting::begin(self.job(id)?)?;
+        let job = &export.0;
         let (name, classes, items) = {
             let state = job.lock();
-            state.check_idle("make the dataset")?;
             let name = match req.name.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
                 Some(name) => check_name(name)?,
                 None => state.file.name.clone(),
@@ -777,16 +784,18 @@ impl Labeler {
         }
         let path = claim_dir(&self.datasets, &slug(&name, "labeled"))
             .map_err(|e| io_error("creating a folder in", &self.datasets, e))?;
-        if let Err(e) = dataset::write(&path, &name, &classes, &items, req.val_fraction, req.seed) {
+        if let Err(e) = dataset::write(&path, &classes, &items, req.val_fraction, req.seed) {
             let _ = std::fs::remove_dir_all(&path);
             return Err(io_error("writing the dataset", &path, e));
         }
-        Ok(WrittenDataset { name, path })
+        Ok(WrittenDataset { name, path, export })
     }
 
-    /// Remembers the dataset made from job `id` (the second half of `POST /api/label/jobs/{id}/dataset`).
-    pub fn set_dataset(&self, id: &str, dataset: &Dataset) -> Result<()> {
-        let job = self.job(id)?;
+    /// Remembers the registered `dataset` on the job `written` was made from (the second half of
+    /// `POST /api/label/jobs/{id}/dataset`), and lets the job go. The dataset exists either way: a job file that
+    /// cannot be written is logged, not an error of the request.
+    pub fn set_dataset(&self, written: WrittenDataset, dataset: &Dataset) {
+        let job = &written.export.0;
         let mut state = job.lock();
         state.file.dataset_id = Some(dataset.id.clone());
         let message = format!(
@@ -794,9 +803,10 @@ impl Labeler {
             dataset.name, dataset.splits.train, dataset.splits.val
         );
         job.log(&mut state, LogLevel::Info, message);
-        job.save(&state)?;
+        if let Err(e) = job.save(&state) {
+            tracing::warn!(job = %job.id, "{e}");
+        }
         job.emit_job(&state);
-        Ok(())
     }
 
     /// Ends every active run (their agent calls are killed) and waits for them to close.
@@ -849,11 +859,12 @@ mod tests {
     fn names_classes_and_boxes_are_checked() {
         assert_eq!(check_name("  street  ").unwrap(), "street");
         assert!(check_name(" ").is_err() && check_name(&"x".repeat(MAX_NAME_CHARS + 1)).is_err());
+        assert!(check_name("street\npath: D:/other").is_err() && check_name("a\tb").is_err());
 
         let classes =
             |names: &[&str]| check_classes(&names.iter().map(|s| s.to_string()).collect::<Vec<_>>());
         assert_eq!(classes(&[" car ", "Traffic light"]).unwrap(), ["car", "Traffic light"]);
-        for bad in [&[][..], &["car", "Car"], &["a,b"], &["a: b"], &[""], &["a\nb"]] {
+        for bad in [&[][..], &["car", "Car"], &["a,b"], &["a: b"], &[""], &["a\nb"], &["a\u{7}b"]] {
             assert_eq!(classes(bad).unwrap_err().body.code, "invalid_body", "{bad:?}");
         }
         assert!(check_classes(&vec!["c".to_string(); 1]).is_ok());

@@ -3,6 +3,7 @@
 
 use folo_api::BBox;
 use serde::Deserialize;
+use serde_json::Value;
 
 /// Coordinates in a reply run from 0 to this, relative to the image's width and height, so they do not depend on
 /// the size the image was sent at.
@@ -66,24 +67,11 @@ pub fn reply_schema(classes: &[String]) -> serde_json::Value {
     })
 }
 
+/// A reply object. Its entries stay untyped until they are read one by one, so that a malformed box costs that
+/// box and a malformed image entry that image, never the whole reply (and the call that paid for it).
 #[derive(Deserialize)]
 struct Reply {
-    images: Vec<ReplyImage>,
-}
-
-#[derive(Deserialize)]
-struct ReplyImage {
-    #[serde(alias = "index")]
-    image: u64,
-    #[serde(default)]
-    boxes: Vec<ReplyBox>,
-}
-
-#[derive(Deserialize)]
-struct ReplyBox {
-    label: String,
-    #[serde(rename = "box")]
-    coords: Vec<f64>,
+    images: Vec<Value>,
 }
 
 /// The labels a reply gives one image.
@@ -104,16 +92,24 @@ pub fn parse_reply(
 ) -> Result<Vec<Option<Labels>>, String> {
     let mut out: Vec<Option<Labels>> = vec![None; sizes.len()];
     for image in reply_images(text)? {
-        // The first entry for an image wins; entries for images that were not sent are ignored.
-        let Some(i) = image.image.checked_sub(1).map(|i| i as usize).filter(|&i| i < sizes.len()) else {
+        // Entries for images that were not sent are ignored, and so is one whose `boxes` is not a list (the image
+        // then counts as left out); the first entry for an image wins.
+        let number = image.get("image").or_else(|| image.get("index")).and_then(Value::as_u64);
+        let Some(i) = number.and_then(|n| n.checked_sub(1)).map(|i| i as usize).filter(|&i| i < sizes.len())
+        else {
             continue;
+        };
+        let boxes = match image.get("boxes") {
+            None => &[][..],
+            Some(Value::Array(boxes)) => boxes,
+            Some(_) => continue,
         };
         if out[i].is_some() {
             continue;
         }
         let mut labels = Labels::default();
-        for b in image.boxes {
-            match to_pixels(&b, classes, sizes[i]) {
+        for b in boxes {
+            match to_pixels(b, classes, sizes[i]) {
                 Some(bbox) if labels.boxes.len() < MAX_BOXES => labels.boxes.push(bbox),
                 _ => labels.dropped += 1,
             }
@@ -126,7 +122,7 @@ pub fn parse_reply(
 /// The image entries of every reply object in `text`. Models wrap the JSON in a code fence or a sentence now and
 /// then, add a remark after it, or answer with one object per image: the objects are what counts, wherever they
 /// are (a reply read this way is a call that need not be made again).
-fn reply_images(text: &str) -> Result<Vec<ReplyImage>, String> {
+fn reply_images(text: &str) -> Result<Vec<Value>, String> {
     /// Braces that may fail to open a reply before the text is given up on.
     const MAX_MISSES: usize = 64;
     let (mut images, mut found, mut misses, mut first_error) = (Vec::new(), false, 0, None);
@@ -154,11 +150,13 @@ fn reply_images(text: &str) -> Result<Vec<ReplyImage>, String> {
     }
 }
 
-/// A reply box in pixels of a `width` x `height` image, or `None` when it fails a check.
-fn to_pixels(b: &ReplyBox, classes: &[String], (width, height): (u32, u32)) -> Option<BBox> {
-    let label = b.label.trim().to_lowercase();
+/// A reply box (`{"label": "car", "box": [x1, y1, x2, y2]}`) in pixels of a `width` x `height` image, or `None`
+/// when it is not one or fails a check.
+fn to_pixels(b: &Value, classes: &[String], (width, height): (u32, u32)) -> Option<BBox> {
+    let label = b.get("label")?.as_str()?.trim().to_lowercase();
     let class = classes.iter().position(|c| c.to_lowercase() == label)?;
-    let &[x1, y1, x2, y2] = b.coords.as_slice() else { return None };
+    let coords: Vec<f64> = b.get("box")?.as_array()?.iter().map(Value::as_f64).collect::<Option<_>>()?;
+    let &[x1, y1, x2, y2] = coords.as_slice() else { return None };
     if ![x1, y1, x2, y2].iter().all(|v| v.is_finite()) {
         return None;
     }
@@ -283,6 +281,29 @@ mod tests {
         assert_eq!(parse_reply(text, &classes(), &[(10, 10)]).unwrap(), vec![Some(Labels::default())]);
         // A text that is all braces is given up on, not scanned forever.
         assert!(parse_reply(&"{".repeat(10_000), &classes(), &[(10, 10)]).is_err());
+    }
+
+    #[test]
+    fn a_malformed_box_or_entry_costs_only_itself() {
+        let text = r#"{"images":[
+            {"image":1,"boxes":[
+                {"label":"car","box":[0,null,500,500]},
+                {"label":"car"},
+                {"label":7,"box":[0,0,500,500]},
+                {"label":"car","box":"0,0,500,500"},
+                "car at 0,0",
+                {"label":"car","box":[0,0,500]},
+                {"label":"car","box":[0,0,500,500]}]},
+            {"image":"2","boxes":[]},
+            {"image":3,"boxes":"none"},
+            {"image":4},
+            7]}"#;
+        let out = parse_reply(text, &classes(), &[(10, 10); 4]).unwrap();
+        // Image 1 keeps its one good box; 2 (no number) and 3 (boxes not a list) are left out; 4 has none.
+        let first = out[0].as_ref().unwrap();
+        assert_eq!((first.boxes.len(), first.dropped), (1, 6));
+        assert_eq!((&out[1], &out[2]), (&None, &None));
+        assert_eq!(out[3], Some(Labels::default()));
     }
 
     #[test]

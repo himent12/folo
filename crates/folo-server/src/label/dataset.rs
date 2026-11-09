@@ -30,7 +30,6 @@ pub fn val_count(n: usize, val_fraction: f32) -> usize {
 /// without boxes) and a `data.yaml` naming `classes`. Returns `[train, val]` image counts.
 pub fn write(
     dir: &Path,
-    name: &str,
     classes: &[String],
     items: &[Item],
     val_fraction: f32,
@@ -56,7 +55,7 @@ pub fn write(
             std::fs::write(labels.join(format!("{stem}.txt")), label_text(item))?;
         }
     }
-    let mut yaml = format!("# labeled with FOLO agent labeling: {name}\ntrain: images/train\n");
+    let mut yaml = String::from("# made with FOLO agent labeling\ntrain: images/train\n");
     if val > 0 {
         yaml.push_str("val: images/val\n");
     }
@@ -150,7 +149,7 @@ mod tests {
         let out = dir.join("out");
         std::fs::create_dir_all(&out).unwrap();
         let classes = vec!["cat".to_string(), "traffic: \"light\"".to_string()];
-        assert_eq!(write(&out, "street", &classes, &items, 0.2, 7).unwrap(), [8, 2]);
+        assert_eq!(write(&out, &classes, &items, 0.2, 7).unwrap(), [8, 2]);
 
         let ds = folo_data::open(&out).unwrap();
         assert_eq!(ds.classes, classes);
@@ -164,7 +163,7 @@ mod tests {
         let split_of = |seed: u64| {
             let again = dir.join(format!("again{seed}"));
             std::fs::create_dir_all(&again).unwrap();
-            write(&again, "street", &classes, &items, 0.2, seed).unwrap();
+            write(&again, &classes, &items, 0.2, seed).unwrap();
             let mut val: Vec<String> = std::fs::read_dir(again.join("images/val"))
                 .unwrap()
                 .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
@@ -185,7 +184,7 @@ mod tests {
         let out = dir.join("out");
         std::fs::create_dir_all(&out).unwrap();
         let items = [Item { source, file: "only.png".into(), width: 8, height: 8, boxes: vec![] }];
-        assert_eq!(write(&out, "one", &["a".to_string()], &items, 0.5, 0).unwrap(), [1, 0]);
+        assert_eq!(write(&out, &["a".to_string()], &items, 0.5, 0).unwrap(), [1, 0]);
         assert!(!out.join("images/val").exists());
         let ds = folo_data::open(&out).unwrap();
         assert_eq!(ds.split_sizes(), [1, 0, 0]);

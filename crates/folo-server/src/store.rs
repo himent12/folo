@@ -408,14 +408,14 @@ pub trait Store: Send + Sync + 'static {
         let labeler = self.labeler()?;
         let written = labeler.write_dataset(id, &req)?;
         let registered = self.register_dataset(RegisterDataset {
-            name: Some(written.name),
+            name: Some(written.name.clone()),
             path: written.path.to_string_lossy().into_owned(),
             format: DatasetFormat::Yolo,
         });
         let dataset = registered.inspect_err(|_| {
             let _ = std::fs::remove_dir_all(&written.path);
         })?;
-        labeler.set_dataset(id, &dataset)?;
+        labeler.set_dataset(written, &dataset);
         Ok(dataset)
     }
 

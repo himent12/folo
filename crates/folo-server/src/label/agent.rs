@@ -4,8 +4,8 @@
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use folo_api::{LabelAgent, LabelAgentId, LabelEffort, LabelUsage};
@@ -18,6 +18,9 @@ pub const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 const PROBE_TTL: Duration = Duration::from_secs(60);
 /// How often a running child is checked for its exit, the deadline and the cancel switch.
 const POLL: Duration = Duration::from_millis(40);
+/// How long a child's output pipes may stay open after it exited (a process it started still holds them) before
+/// what has been read is taken as its output.
+const PIPE_GRACE: Duration = Duration::from_secs(2);
 
 /// One call: a prompt and the images it is about.
 pub struct AgentRequest<'a> {
@@ -190,9 +193,42 @@ pub struct Output {
     pub stderr: String,
 }
 
-/// Runs `cmd` to its end, feeding it `stdin` (then closing it), and returns what it printed. The child and the
-/// processes it started are killed when `timeout` passes or `cancel` is set. Output is read on threads of its own
-/// while the input is written, so neither side can block the other on a full pipe.
+/// What a pipe has delivered so far, read on a thread of its own.
+#[derive(Default)]
+struct Piped {
+    bytes: Mutex<Vec<u8>>,
+    /// The pipe reached its end: every process that held it is gone.
+    ended: AtomicBool,
+}
+
+impl Piped {
+    fn read(mut pipe: impl Read + Send + 'static) -> Arc<Piped> {
+        let piped = Arc::new(Piped::default());
+        let out = piped.clone();
+        std::thread::spawn(move || {
+            let mut chunk = [0u8; 16 * 1024];
+            while let Ok(n @ 1..) = pipe.read(&mut chunk) {
+                out.bytes.lock().unwrap().extend_from_slice(&chunk[..n]);
+            }
+            out.ended.store(true, Ordering::Release);
+        });
+        piped
+    }
+
+    fn ended(&self) -> bool {
+        self.ended.load(Ordering::Acquire)
+    }
+
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.bytes.lock().unwrap()).into_owned()
+    }
+}
+
+/// Runs `cmd` to its end, feeding it `stdin` (then closing it), and returns what it printed. Nothing is started
+/// once `cancel` is set, and the child and the processes it started are killed when `timeout` passes or `cancel`
+/// is set. Input and output move on threads of their own, so neither side can block the other on a full pipe, and
+/// none of them is waited for without a limit: a process the child left behind may hold its pipes open, but not
+/// this call (after [`PIPE_GRACE`], what was read is the output).
 pub fn run(
     mut cmd: Command,
     stdin: Option<Vec<u8>>,
@@ -209,48 +245,43 @@ pub fn run(
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
+    if cancel.load(Ordering::Relaxed) {
+        return Err(AgentError::Cancelled);
+    }
     let program = cmd.get_program().to_string_lossy().into_owned();
     let mut child = cmd.spawn().map_err(|e| AgentError::Unavailable(format!("starting `{program}`: {e}")))?;
-    let writer = stdin.map(|bytes| {
+    if let Some(bytes) = stdin {
         let mut pipe = child.stdin.take().expect("stdin is piped");
         // A child that exits early closes the pipe; its exit status tells the story, not the write error.
-        std::thread::spawn(move || drop(pipe.write_all(&bytes)))
-    });
-    let reader = |mut pipe: Box<dyn Read + Send>| {
-        std::thread::spawn(move || {
-            let mut text = Vec::new();
-            let _ = pipe.read_to_end(&mut text);
-            String::from_utf8_lossy(&text).into_owned()
-        })
-    };
-    let stdout = reader(Box::new(child.stdout.take().expect("stdout is piped")));
-    let stderr = reader(Box::new(child.stderr.take().expect("stderr is piped")));
-    let deadline = Instant::now() + timeout;
-    let ended = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break Ok(status.success()),
-            Ok(None) if cancel.load(Ordering::Relaxed) => break Err(AgentError::Cancelled),
-            Ok(None) if Instant::now() >= deadline => break Err(AgentError::Timeout),
-            Ok(None) => std::thread::sleep(POLL),
-            Err(e) => break Err(AgentError::Unavailable(format!("waiting for `{program}`: {e}"))),
-        }
-    };
-    let success = match ended {
-        Ok(success) => success,
-        Err(e) => {
-            // The pipe threads end by themselves once every process holding the pipes is gone.
-            kill_tree(&mut child);
-            return Err(e);
-        }
-    };
-    if let Some(w) = writer {
-        let _ = w.join();
+        std::thread::spawn(move || drop(pipe.write_all(&bytes)));
     }
-    Ok(Output {
-        success,
-        stdout: stdout.join().unwrap_or_default(),
-        stderr: stderr.join().unwrap_or_default(),
-    })
+    let stdout = Piped::read(child.stdout.take().expect("stdout is piped"));
+    let stderr = Piped::read(child.stderr.take().expect("stderr is piped"));
+    let deadline = Instant::now() + timeout;
+    // The child's exit status and when it was seen.
+    let mut exited: Option<(bool, Instant)> = None;
+    let ended = loop {
+        if exited.is_none() {
+            match child.try_wait() {
+                Ok(Some(status)) => exited = Some((status.success(), Instant::now())),
+                Ok(None) => {}
+                Err(e) => break Err(AgentError::Unavailable(format!("waiting for `{program}`: {e}"))),
+            }
+        }
+        match exited {
+            Some((success, at)) if (stdout.ended() && stderr.ended()) || at.elapsed() >= PIPE_GRACE => {
+                break Ok(success);
+            }
+            _ if cancel.load(Ordering::Relaxed) => break Err(AgentError::Cancelled),
+            _ if Instant::now() >= deadline => break Err(AgentError::Timeout),
+            _ => std::thread::sleep(POLL),
+        }
+    };
+    if ended.is_err() || !(stdout.ended() && stderr.ended()) {
+        // Whatever still runs (the child, or what it started and left holding a pipe) goes.
+        kill_tree(&mut child);
+    }
+    Ok(Output { success: ended?, stdout: stdout.text(), stderr: stderr.text() })
 }
 
 /// Keeps a console child from opening a window of its own when the server has none (started by a desktop app).
@@ -337,9 +368,35 @@ mod tests {
         let t0 = Instant::now();
         let r = run(shell(sleep), None, Duration::from_millis(200), &AtomicBool::new(false));
         assert_eq!(r.err(), Some(AgentError::Timeout));
-        let r = run(shell(sleep), None, PROBE_TIMEOUT, &AtomicBool::new(true));
+        assert!(t0.elapsed() < Duration::from_secs(10), "the child was not killed");
+        // Cancelled while it runs: killed. Cancelled before it starts: never started (the program is not even
+        // looked for).
+        let cancel = Arc::new(AtomicBool::new(false));
+        let switch = cancel.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            switch.store(true, Ordering::Relaxed);
+        });
+        let r = run(shell(sleep), None, PROBE_TIMEOUT, &cancel);
         assert_eq!(r.err(), Some(AgentError::Cancelled));
-        assert!(t0.elapsed() < Duration::from_secs(10), "the children were not killed");
+        let r = run(Command::new("folo-no-such-agent-cli"), None, PROBE_TIMEOUT, &cancel);
+        assert_eq!(r.err(), Some(AgentError::Cancelled));
+        assert!(t0.elapsed() < Duration::from_secs(10), "the child was not killed");
+    }
+
+    #[test]
+    fn a_process_left_holding_the_pipes_does_not_hold_the_call() {
+        // The shell starts a long-lived process that inherits its output pipes, prints and exits.
+        let script = if cfg!(windows) {
+            "start /B ping -n 20 127.0.0.1 > NUL & echo done"
+        } else {
+            "sleep 20 & echo done"
+        };
+        let t0 = Instant::now();
+        let out = run(shell(script), None, Duration::from_secs(60), &AtomicBool::new(false)).unwrap();
+        assert!(out.success);
+        assert_eq!(out.stdout.trim(), "done");
+        assert!(t0.elapsed() < Duration::from_secs(15), "waited {:?} for the pipes", t0.elapsed());
     }
 
     #[test]
