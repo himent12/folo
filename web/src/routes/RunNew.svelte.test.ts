@@ -245,28 +245,24 @@ describe('New run: short runs', () => {
 });
 
 describe('New run: the schedule in the Summary', () => {
-  it('counts optimizer steps in plain words, with the batches behind them in a tooltip and the description', async () => {
+  it('counts optimizer steps in plain words, with the batches behind them one tap away (ui/InfoButton)', async () => {
     await open();
     // fasteners: 1,920 images at batch 16 are 120 batches, 4 per optimizer step.
     const est = target.querySelector('.summary .est')!;
     expect(est.querySelector('dt')?.textContent).toBe('Schedule');
-    const steps = est.querySelector<HTMLElement>('dd .steps')!;
-    expect(steps.textContent).toBe('30 steps / epoch');
-    expect(steps.tabIndex).toBe(0);
-    const why = '120 batches of 16; 4 per optimizer step.';
-    expect(est.querySelector('dd .sr-only')?.textContent).toBe(`. ${why}`);
-    // Keyboard focus shows the tooltip and describes the value with it.
-    // happy-dom has no :focus-visible; the tooltip shows on keyboard focus only.
-    const matches = steps.matches.bind(steps);
-    vi.spyOn(steps, 'matches').mockImplementation(((sel: string) => sel === ':focus-visible' || matches(sel)) as typeof steps.matches);
-    steps.focus();
-    steps.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
-    await until(() => document.getElementById('folo-tooltip')?.textContent === why, 'the tooltip');
-    expect(steps.getAttribute('aria-describedby')).toBe('folo-tooltip');
+    // The value is the button: a tap, a click, Enter or Space opens the batches behind it (touch has no hover).
+    const steps = est.querySelector<HTMLButtonElement>('dd button.steps')!;
+    expect(steps.textContent).toBe('30 steps / epoch. How the steps are counted');
+    expect(steps.getAttribute('aria-expanded')).toBe('false');
+    const why = () => document.getElementById(steps.getAttribute('aria-controls')!)?.textContent?.trim();
+    expect(why()).toBe('120 batches of 16; 4 per optimizer step.');
+    steps.click();
+    flushSync();
+    expect(steps.getAttribute('aria-expanded')).toBe('true');
     // Batch 64 is one batch a step.
     target.querySelector<HTMLButtonElement>('#batch button[role="radio"]:nth-child(4)')!.click();
     flushSync();
-    expect(est.querySelector('dd .sr-only')?.textContent).toBe('. 30 batches of 64, one step each.');
+    expect(why()).toBe('30 batches of 64, one step each.');
   });
 
   it("matches the short-run scenario's run: shapes at batch 32 for 5 epochs suggests its 16 epochs", async () => {

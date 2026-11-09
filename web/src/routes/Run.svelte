@@ -23,6 +23,7 @@
   import Badge from '$lib/ui/Badge.svelte';
   import Button from '$lib/ui/Button.svelte';
   import Dialog from '$lib/ui/Dialog.svelte';
+  import { DialogStatus } from '$lib/ui/feedback.svelte';
   import EmptyState from '$lib/ui/EmptyState.svelte';
   import Menu, { type MenuItem } from '$lib/ui/Menu.svelte';
   import Tabs from '$lib/ui/Tabs.svelte';
@@ -141,6 +142,10 @@
   let stopOpen = $state(false);
   let deleteOpen = $state(false);
   let busy = $state(false);
+  // A confirm that fails says so in its dialog, which stays open for Retry (the toaster sits behind the modal); one
+  // that succeeds closes it and the page says what happened.
+  const stopStatus = new DialogStatus();
+  const deleteStatus = new DialogStatus();
 
   async function stop() {
     if (!run) return;
@@ -151,7 +156,7 @@
       stopOpen = false;
       toast.info(`Stopping ${r.name}`, `The checkpoint from epoch ${r.epoch} is kept.`);
     } catch (e) {
-      toast.error(e, 'Could not stop the run');
+      stopStatus.error(e, run.status === 'queued' ? 'Could not remove the run from the queue' : 'Could not stop the run');
     } finally {
       busy = false;
     }
@@ -166,7 +171,7 @@
       toast.success(`Deleted ${run.name}`, 'Checkpoints on disk were left in place.');
       router.go('/runs');
     } catch (e) {
-      toast.error(e, 'Could not delete the run');
+      deleteStatus.error(e, 'Could not delete the run');
     } finally {
       busy = false;
     }
@@ -214,6 +219,7 @@
   });
 
   let resuming = $state(false);
+  // page-level: Resume is a header and palette action, never inside a dialog.
   async function resume() {
     if (!run) return;
     resuming = true;
@@ -222,6 +228,7 @@
       const r = await live.resume(() => hub.api.resumeRun(id));
       toast.success(`Resuming ${r.name}`, r.epoch > 0 ? `From the checkpoint of epoch ${r.epoch}.` : 'No epoch had finished, so it starts over.');
     } catch (e) {
+      // page-level: as above.
       toast.error(e, 'Could not resume the run');
     } finally {
       resuming = false;
@@ -459,13 +466,14 @@
       ? 'It has not started yet, so nothing is lost. You can start it again from New run.'
       : 'Training stops after the current step. The last checkpoint is kept and saved as a model.'}
     size="sm"
+    status={stopStatus}
   >
     {#snippet footer()}
       <Button onclick={() => (stopOpen = false)}>{run.status === 'queued' ? 'Keep it queued' : 'Keep training'}</Button>
       <Button variant="destructive" icon={run.status === 'queued' ? X : Square} loading={busy} onclick={stop}>{run.status === 'queued' ? 'Remove from queue' : 'Stop run'}</Button>
     {/snippet}
   </Dialog>
-  <Dialog bind:open={deleteOpen} title="Delete {run.name}?" description="Removes the run and its metric history from Studio. Checkpoint files on disk are not touched." size="sm">
+  <Dialog bind:open={deleteOpen} title="Delete {run.name}?" description="Removes the run and its metric history from Studio. Checkpoint files on disk are not touched." size="sm" status={deleteStatus}>
     {#snippet footer()}
       <Button onclick={() => (deleteOpen = false)}>Cancel</Button>
       <Button variant="destructive" icon={Trash} loading={busy} onclick={remove}>Delete run</Button>

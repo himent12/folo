@@ -208,11 +208,28 @@ a.ident:hover {
   }
 }
 
-/* Tooltip (see ui/tooltip.ts) */
+/* The live heartbeat (a running run's dot: ui/StatusBadge, shell/SidebarLive): one ring leaves the dot and fades over
+   the first 0.8 s of every 2.4 s, then the dot rests, so "live" reads as a calm signal and never as a blinking light.
+   The dot itself and every value hold still. `--pulse` is the ring's colour. Components turn it off under reduced
+   motion (`animation: none`); the ringed dot and the word still say "running". */
+@keyframes live-pulse {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--pulse) 55%, transparent);
+  }
+  33%,
+  100% {
+    box-shadow: 0 0 0 4px transparent;
+  }
+}
+
+/* Tooltip (see ui/tooltip.ts). It is a manual popover (the top layer, so it draws above an open modal dialog that
+   holds its anchor): the popover's UA box (centred, bordered, scrolling) is reset to the tooltip's own. */
 .folo-tooltip {
   position: fixed;
-  top: 0;
-  left: 0;
+  inset: 0 auto auto 0;
+  margin: 0;
+  border: 0;
+  overflow: visible;
   z-index: var(--z-tooltip);
   display: flex;
   align-items: center;
@@ -233,6 +250,12 @@ a.ident:hover {
   opacity: 1;
   /* Hoverable while shown (WCAG 1.4.13): the pointer can move onto it to read it. */
   pointer-events: auto;
+}
+/* A popover enters from display: none; it still fades in from 0. */
+@starting-style {
+  .folo-tooltip[data-show] {
+    opacity: 0;
+  }
 }
 /* The arrow: a square turned 45°, in the tooltip's fill, half of it out on the anchor's side and centred on the
    anchor (--arrow, from ui/tooltip.ts placeTip), wherever the tooltip had to shift to stay inside its bounds. */

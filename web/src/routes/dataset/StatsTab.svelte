@@ -12,7 +12,6 @@
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import CircleAlert from '@lucide/svelte/icons/circle-alert';
   import CircleCheck from '@lucide/svelte/icons/circle-check';
-  import Info from '@lucide/svelte/icons/info';
   import TriangleAlert from '@lucide/svelte/icons/triangle-alert';
   import type { Dataset, DatasetStats, IssueCounts, IssueSeverity } from '$lib/api/types';
   import Histogram from '$lib/charts/Histogram.svelte';
@@ -20,7 +19,8 @@
   import { num } from '$lib/format';
   import { href } from '$lib/router.svelte';
   import Panel from '$lib/ui/Panel.svelte';
-  import { tooltip } from '$lib/ui/tooltip';
+  import Info from '@lucide/svelte/icons/info';
+  import InfoButton from '$lib/ui/InfoButton.svelte';
   import { swatchStyle } from './swatch';
   import { countBinLabel, findingLabel, healthChecks, imageCount, sizeBinLabel, TINY_SIZE, type Severity } from './health';
 
@@ -188,13 +188,10 @@
     <Panel title="Box size" meta="% of the image side" id="ds-size">
       {#snippet actions()}
         <!-- The precise reading, one step away: the plain line above is what most readers need. -->
-        <button
-          type="button"
-          class="how"
-          aria-label="How box size is measured"
-          use:tooltip={{ text: "Size = √(box area ÷ image area): 10% is a box about a tenth of the image's side. One bar per size range, finer near the 5% tiny-box line; a bar's height is its number of boxes.", side: 'bottom' }}
-          ><Info size={14} aria-hidden="true" /></button
-        >
+        <InfoButton
+          label="How box size is measured"
+          text="Size = √(box area ÷ image area): 10% is a box about a tenth of the image's side. One bar per size range, finer near the 5% tiny-box line; a bar's height is its number of boxes."
+        />
       {/snippet}
       <Histogram
         edges={stats.box_size_hist.edges}
@@ -409,18 +406,6 @@
     border-radius: var(--radius-lg);
     overflow: hidden;
   }
-  .how {
-    display: grid;
-    place-items: center;
-    width: 24px;
-    height: 24px;
-    border-radius: var(--radius-sm);
-    color: var(--text-tertiary);
-  }
-  .how:hover {
-    background: var(--bg-hover);
-    color: var(--text-primary);
-  }
   .kpi {
     display: grid;
     grid-template-rows: 16px 32px minmax(16px, auto);
@@ -528,10 +513,6 @@
     display: none;
   }
   @media (pointer: coarse) {
-    .how {
-      width: 44px;
-      height: 44px;
-    }
     .bars button,
     summary {
       min-height: 44px;

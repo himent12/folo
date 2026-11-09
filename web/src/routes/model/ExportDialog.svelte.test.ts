@@ -92,9 +92,30 @@ describe('ExportDialog', () => {
     expect(target.ownerDocument.querySelector('dialog')?.textContent).toContain('Export finished');
     expect(success).not.toHaveBeenCalled();
     // Without the toast, a live region in the dialog announces it.
-    const live = target.ownerDocument.querySelectorAll('dialog [role="status"]');
+    const live = target.ownerDocument.querySelectorAll('dialog p[role="status"]');
     expect(live).toHaveLength(1);
     expect(live[0]!.textContent).toBe('Export finished: shapes-n-best-f16.folo, 5.1 MiB.');
+  });
+
+  it('says in the dialog, not in a toast behind it, that the demo has no file to download', async () => {
+    hub.api = new MockApi('normal', 0);
+    vi.spyOn(hub.api, 'exportModel').mockResolvedValue({ path: 'D:/folo/exports/shapes-n-best-f16.folo', bytes: 5_300_000 });
+    const info = vi.spyOn(toast, 'info');
+    c = mount(ExportDialog, { target, props: { model, open: true } });
+    flushSync();
+    button('Export')!.click();
+    (await until(() => button('Download'), 'the download button')).click();
+    flushSync();
+    expect(info).not.toHaveBeenCalled();
+    const status = target.ownerDocument.querySelector('dialog .dialog-status [role="status"]');
+    expect(status?.textContent).toContain('Nothing to download in the demo');
+    // Dismiss clears it and keeps focus in the dialog.
+    const dismiss = status!.querySelector<HTMLButtonElement>('button[aria-label="Dismiss"]')!;
+    dismiss.focus();
+    dismiss.click();
+    flushSync();
+    expect(status?.textContent).toBe('');
+    expect(target.ownerDocument.querySelector('dialog')?.contains(document.activeElement)).toBe(true);
   });
 
   it('says plainly that ONNX cannot be downloaded, and shows where it is', async () => {

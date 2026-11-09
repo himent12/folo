@@ -887,11 +887,7 @@
     overflow: visible;
     touch-action: pan-y;
   }
-  svg:focus-visible {
-    outline: 2px solid var(--focus);
-    outline-offset: 4px;
-    border-radius: var(--radius-sm);
-  }
+  /* Focus: the global :focus-visible ring (base.css), never a halo of its own (DESIGN_DIRECTION §2.9). */
   .grid line {
     stroke: var(--chart-grid);
     stroke-width: 1;

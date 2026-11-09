@@ -1,10 +1,17 @@
-// Toast notifications. `toast.success('Saved')`, `toast.error(err)`; <Toaster /> renders them.
+// Toast notifications. `toast.success('Saved')`, `toast.error(err)`; <Toaster /> renders them. The toaster is for
+// page-level events; an action taken inside an open dialog reports in the dialog (`ui/feedback.svelte.ts`).
 
 import { ApiError } from '$lib/api/client';
 import { sentence } from '$lib/format';
 import { isOom } from '$lib/oom';
 
 export type ToastTone = 'success' | 'error' | 'info';
+
+/** An error in a sentence or two: an ApiError's message and hint, out of GPU memory in plain words (as ErrorState). */
+export function errorDetail(err: unknown): string {
+  const message = err instanceof ApiError && isOom(err) ? 'The GPU ran out of memory.' : err instanceof Error ? err.message : String(err);
+  return err instanceof ApiError ? [message, err.hint].filter((x): x is string => !!x).map((x) => sentence(x, true)).join(' ') : message;
+}
 
 export interface Toast {
   id: number;
@@ -43,10 +50,7 @@ class Toasts {
 
   /** Shows an error; ApiErrors contribute their message and hint. */
   error(err: unknown, title = 'Something went wrong') {
-    // As ErrorState: out of GPU memory in plain words (the driver's report is for the place that shows details).
-    const message = err instanceof ApiError && isOom(err) ? 'The GPU ran out of memory.' : err instanceof Error ? err.message : String(err);
-    const detail = err instanceof ApiError ? [message, err.hint].filter((x): x is string => !!x).map((x) => sentence(x, true)).join(' ') : message;
-    return this.show({ tone: 'error', title, detail });
+    return this.show({ tone: 'error', title, detail: errorDetail(err) });
   }
 
   dismiss(id: number) {
