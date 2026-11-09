@@ -1557,3 +1557,51 @@ Round 37 changes:
   - Rows with an (i) stay as tall as plain label rows, so neighbours line up.
 - **Run page:** the failure banner's text column shrinks, so long backend messages wrap.
 - **Capture set:** the empty Overview at 960 × 620 and 1680 × 1050.
+
+## Round 37
+
+| Line | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | avg |
+|------|---|---|---|---|---|---|---|---|---|----|----|----|-----|
+| Opus 5.5 | 9 | 8 | 9 | 8 | 9 | 9 | 9 | 9 | 9 | 9 | 8 | 8 | 8.7 |
+| GPT-6.1 Sol | 9 | 8 | 8 | 8 | 9 | 8 | 8 | 9 | 9 | 8 | 8 | 8 | 8.3 |
+
+The new empty-Overview captures (960 and 1680) showed two first-run defects:
+- The inline `folo dataset synth` chip split across lines into two boxes. GPUI's line wrapper breaks at any non-word character, no-break spaces included, so no character keeps a run whole.
+- The step cards ended at different heights.
+
+Opus also flagged:
+- The Latency key wrapping 2 + 1, so its last line sits under the fade at 1280 × 800.
+- The empty page stretching across 1660 px.
+- Queued and Stopped sharing a grey dot.
+- "Loading…" against the sidebar's "Connecting…".
+
+Sol flagged:
+- Tertiary text on active fills (palette detail 3.87:1, active detection sizes 4.41:1).
+- No dataset named on the model's evaluation.
+- Terminal steps that didn't say how to connect.
+- The CLI training row reading as part of the sequence.
+- "YOLO folder" leaving out COCO.
+- Awkward PR and stop-dialog copy.
+
+The code review caught two blocking AMP bugs, fixed on #106 before merge:
+- `carry_over` copied `amp` over the form.
+- Live status events dropped `error_code`.
+
+Round 38 changes:
+- **Getting started:**
+  - Step 1's command is a chip on its own line.
+  - The step cards stretch to one height (each card `flex_1().min_w_0()` inside a flex wrapper).
+  - The empty page is capped at 1040 px.
+  - Code spans in `rich` use no-break spaces, though GPUI may still wrap at them.
+- **Terminal panel:**
+  - "start it, then Settings → folo serve → Connect".
+  - An "Independent CLI training" caption, saying that run won't appear in Desktop.
+  - Step 1 says "YOLO or COCO".
+- **Contrast:** the selected palette detail and the active detection size use secondary ink.
+- **Status:** Queued is a hollow ring.
+- **Model page:** names the evaluated dataset ("Validation · shapes-hard · 800 images").
+- **Overview:** says "Connecting…" until the server answers.
+- **Copy:**
+  - The PR legend says "Hover a legend or table row".
+  - The stop dialog says "Progress after epoch N is lost".
+- **Runs:** an active status event clears a run's old error and code.
