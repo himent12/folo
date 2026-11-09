@@ -3,7 +3,10 @@
 //! The desktop app uses the same serde types as `folo-server`, so a contract change is a compile
 //! error here rather than a runtime surprise.
 
-pub use folo_api::{AmpSupport, Capabilities, Head, SystemResponse, TensorCoreSupport};
+pub use folo_api::{
+    AmpSupport, Capabilities, Head, QueueAction, QueueRequest, ResolvedOptimizer, ResolvedTrain,
+    SystemResponse, TensorCoreSupport,
+};
 pub use folo_api::{
     Arch, Augment, BBox, BestEpoch, ClassMetrics, CpuInfo, Dataset, DatasetFormat, DatasetStats, Epoch,
     ExportResult, GpuBackend, GpuInfo, Health, Histogram, ImageInfo, ImagePage, ImageSize, IssueCounts,

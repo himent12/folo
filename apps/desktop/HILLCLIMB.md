@@ -1929,3 +1929,53 @@ Round 47 changes:
   - The Epochs help reads "One epoch = one pass over 3,200 training images".
 - **Playground:** "Sim. 6.4 ms" in the toolbar.
 - **Dataset tiles** name their classes ("2 square · 1 triangle · +2").
+
+## Round 47
+
+| Line | Opus 5.5 | GPT-6.1 Sol |
+|------|----------|-------------|
+| Hierarchy | 9 | 9 |
+| Typography | 9 | 9 |
+| Colour | 9 | 9 |
+| Spacing | 9 | 9 |
+| Components | 8 | 9 |
+| Dataviz | 7 | 8 |
+| Info/copy | 8 | 8 |
+| Consistency | 8 | 8 |
+| Interaction | 9 | 9 |
+| Accessibility | 8 | 8 |
+| Responsiveness | 9 | 9 |
+| Polish | 8 | 8 |
+| **Average** | **8.4** | **8.6** |
+
+Both reviewers found the same two defects:
+- The drop-only ambiguity rule left overlapping Playground detections, including the most confident one, with no label.
+- The model page's File size caption still guessed precision from file size ("f16") under a header saying "f32 weights".
+
+Opus also asked for:
+- One latency formatter, and no duplicate total in the narrow rail.
+- The e2e tag tied to the architecture everywhere.
+- One run subtitle for the hero and the run page.
+- A scroll edge in New run.
+
+Sol also asked for class names on dataset cards and the evaluation dataset beside the model page's headline metrics.
+
+The code review of #131 found nothing blocking. #129 then added the resolved optimizer, queue control and the best-F1 confidence, all used below.
+
+Round 48 changes:
+- **viz:**
+  - Chips are placed by importance: selected, matches, confidence, then area.
+  - With no clear spot, a box (up to 32 in a view) keeps a chip inside its own top-left corner, sharing its stroke. Thumbnails stay strict.
+- **Model page:**
+  - The File size caption uses `model_storage`, and `weight_dtype` is deleted.
+  - The headline mAP names its dataset.
+  - Precision and Recall say "at conf 0.31 (best F1)".
+- **Shared formatters:** `ui::latency_text`, `FoloApp::run_subtitle` and `ui::queue_text`.
+- **Overview and Runs:**
+  - Dataset cards name their classes.
+  - The Recent runs e2e tag rides the architecture.
+  - Queued runs read "Next to start" or "2nd in queue". "Start next" appears on servers with `queue_control`.
+- **Run page:** the Learning rate card reads "SGD (auto) · linear to 1%".
+- **Playground:** a "Use 0.31, the model's best F1" shortcut.
+- **New run:** a hairline under the header while the body is scrolled.
+- **Brief:** inline Playground sliders are settled.

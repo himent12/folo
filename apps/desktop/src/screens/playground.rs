@@ -387,11 +387,9 @@ impl FoloApp {
                     // The built-in demo's number is simulated, and says so wherever it shows.
                     .when_some(self.play_pred.ready().map(|p| p.timing.total_ms), |d, ms| {
                         let sim = self.play_target.is_none() && !self.store.api.local_inference();
-                        d.child(text(ty::XS, t.text_secondary).flex_none().tnum().child(if sim {
-                            format!("Sim. {ms:.1} ms")
-                        } else {
-                            format!("{ms:.1} ms")
-                        }))
+                        d.child(
+                            text(ty::XS, t.text_secondary).flex_none().tnum().child(latency_text(ms, sim)),
+                        )
                         .child(div().flex_none().w(px(1.)).h(px(16.)).bg(t.line_subtle))
                     })
                     .when_some(count, |d, n| {
@@ -506,6 +504,7 @@ impl FoloApp {
         // An end-to-end model (the run that trained it had the one-to-one head) predicts without NMS,
         // so its IoU setting does nothing.
         let e2e = model.as_ref().is_some_and(|m| self.model_e2e(m));
+        let best_conf = model.as_ref().and_then(|m| m.metrics.as_ref()).and_then(|x| x.best_f1_conf);
         // The built-in demo's numbers are simulated: its timing says so.
         let simulated = self.play_target.is_none() && !self.store.api.local_inference();
         let ids: Vec<String> = models.iter().map(|m| m.id.clone()).collect();
@@ -547,7 +546,16 @@ impl FoloApp {
                 }
             }),
         );
-        let conf = self.slider("play-conf", self.play_conf, 0.05, 0.95, 0.01, window, cx);
+        // The range widens to an applied threshold below the usual floor (a best-F1 confidence).
+        let conf = self.slider(
+            "play-conf",
+            self.play_conf,
+            crate::app::PLAY_CONF_FLOOR.min(self.play_conf),
+            0.95,
+            0.01,
+            window,
+            cx,
+        );
         let iou = self.slider("play-iou", self.play_iou, 0.3, 0.95, 0.01, window, cx);
         let conf_help = self.help_icon(
             "help-conf",
@@ -647,6 +655,34 @@ impl FoloApp {
                         conf.into_any_element(),
                         conf_help,
                     ))
+                    // The model's best-F1 threshold (where its precision and recall were taken), one
+                    // click away while the slider is elsewhere.
+                    .when_some(best_conf.filter(|c| (c - self.play_conf).abs() > 0.005), |d, c| {
+                        let link = div()
+                            .id("play-best-conf")
+                            .px(px(4.))
+                            .rounded(px(radius::SM))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(t.bg_hover))
+                            .active(|s| s.bg(t.bg_active))
+                            .child(
+                                text(ty::XS, t.accent_text).child(format!("Use {c:.2}, the model's best F1")),
+                            );
+                        d.child(div().flex().justify_end().child(self.bind(
+                            link,
+                            "play-best-conf",
+                            radius::SM,
+                            window,
+                            cx,
+                            act(move |this, w, cx| {
+                                // Below what's been fetched: set_play_conf fetches down to it.
+                                this.set_play_conf(c, cx);
+                                // The link goes once used: focus moves to the slider it set.
+                                this.focus_key("play-conf", w, cx);
+                                cx.notify();
+                            }),
+                        )))
+                    })
                     // "NMS IoU": the suppression overlap, not the evaluation's IoU 0.50. An end-to-end
                     // model has no suppression step: the row says so instead of offering an inert slider.
                     .map(|d| {
@@ -874,19 +910,11 @@ impl FoloApp {
                     .child(panel_header(&t, "Detections").h(px(32.)).child(
                         text(ty::XS, t.text_tertiary).tnum().child(if self.play_pred_pending {
                             "Updating…".to_string()
+                        // The total latency reads in the toolbar at every size; the count stays a count.
+                        } else if hidden > 0 {
+                            format!("{} shown · {hidden} below threshold", vis.len())
                         } else {
-                            let n = if hidden > 0 {
-                                format!("{} shown · {hidden} below threshold", vis.len())
-                            } else {
-                                vis.len().to_string()
-                            };
-                            // Short windows: the latency breakdown may scroll away below, so its total
-                            // rides here too (said to be simulated in the demo, as the section is).
-                            match (tight, simulated) {
-                                (true, true) => format!("{n} · {:.1} ms simulated", p.timing.total_ms),
-                                (true, false) => format!("{n} · {:.1} ms", p.timing.total_ms),
-                                _ => n,
-                            }
+                            vis.len().to_string()
                         }),
                     ))
                     .child(

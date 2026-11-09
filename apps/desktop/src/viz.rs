@@ -142,7 +142,24 @@ pub fn paint_image_with_boxes(
         // dimmed chip never sits over a matching box.
         for pass in 0..2 {
             let n = order.len();
-            let seq: Vec<usize> = if pass == 0 { (0..n).rev().collect() } else { (0..n).collect() };
+            // Placement by importance: the selected box, then matches before dimmed ones, then
+            // the more confident (predictions) or the larger (ground truth) first, so a cluster's
+            // best detection gets the clear spot. Painting keeps `order`.
+            let seq: Vec<usize> = if pass == 0 {
+                let area = |b: &DrawBox| (b.x2 - b.x1) * (b.y2 - b.y1);
+                let mut s: Vec<usize> = (0..n).collect();
+                s.sort_by(|&x, &y| {
+                    let (a, b) = (order[x], order[y]);
+                    b.highlight
+                        .cmp(&a.highlight)
+                        .then(a.dim.cmp(&b.dim))
+                        .then(b.score.unwrap_or(0.).total_cmp(&a.score.unwrap_or(0.)))
+                        .then(area(b).total_cmp(&area(a)))
+                });
+                s
+            } else {
+                (0..n).collect()
+            };
             for &i in &seq {
                 let b = order[i];
                 // Painting: the previous group is done, so its chips go on before this one starts.
@@ -352,8 +369,21 @@ pub fn paint_image_with_boxes(
                     // A chip on a neighbour's outline can read as the neighbour's, at any size: such
                     // a box goes unlabelled (the list beside the image, the inspector and hover name
                     // it). The selected box always keeps its chip; very dense images skip the check.
-                    let free_spot =
-                        clear.or_else(|| (dense || b.highlight).then(|| spots.clone().find(open)).flatten());
+                    // No clear spot: inside one of the box's own corners, flush with its stroke, so
+                    // the chip shares a corner with its box and reads as its own even where it
+                    // crosses a neighbour (up to 32 boxes; beyond, an unlabelled box is named by the
+                    // list beside the image). The selected box and dense images take any free spot.
+                    // Any of its four inside corners shares the box's stroke; the first free one.
+                    let free_spot = clear.or_else(|| {
+                        if dense || b.highlight {
+                            spots.clone().find(open)
+                        } else if !compact && order.len() <= 32 {
+                            // Thumbnails stay strict: too small for a shared corner to read.
+                            candidates[2..].iter().copied().find(open)
+                        } else {
+                            None
+                        }
+                    });
                     // Nowhere free: skip this chip (the selected box's chip always shows), so two
                     // chips never paint over each other.
                     let Some(origin) = free_spot.or_else(|| {

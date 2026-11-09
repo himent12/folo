@@ -297,6 +297,9 @@ pub fn carry_over(base: Option<&TrainConfig>, mut c: TrainConfig) -> TrainConfig
     }
     c
 }
+/// The Playground's lowest default confidence: predictions are fetched down to it once, and the
+/// slider filters above it locally.
+pub const PLAY_CONF_FLOOR: f32 = 0.05;
 pub const IMGSZ: [u32; 5] = [320, 480, 640, 800, 1024];
 pub const DEVICES: [&str; 3] = ["auto", "gpu:0", "cpu"];
 pub const OPTIMIZERS: [Optimizer; 3] = [Optimizer::Auto, Optimizer::Sgd, Optimizer::Adamw];
@@ -419,6 +422,8 @@ pub struct FoloApp {
     // Playground
     pub play_model: Option<String>,
     pub play_conf: f32,
+    /// The confidence the current predictions were fetched down to: a threshold below it refetches.
+    pub play_fetched_floor: f32,
     /// Short windows fold the validation-image picker to one line; this opens it.
     pub play_picker_open: bool,
     pub play_iou: f32,
@@ -587,6 +592,7 @@ impl FoloApp {
             cm_cell: None,
             play_model: None,
             play_conf: 0.25,
+            play_fetched_floor: PLAY_CONF_FLOOR,
             play_picker_open: false,
             play_iou: 0.7,
             play_target: None,
@@ -815,6 +821,7 @@ impl FoloApp {
                     }
                     let r = r.map(|s| {
                         this.store.capabilities = s.capabilities;
+                        this.store.features = s.features;
                         s.system
                     });
                     this.store.system = r.into();
@@ -1814,6 +1821,37 @@ impl FoloApp {
         cx.notify();
     }
 
+    /// Moves a waiting run in the training queue (servers with `queue_control`).
+    pub fn move_queued(&mut self, id: String, action: crate::api::QueueAction, cx: &mut Context<Self>) {
+        let req = crate::api::QueueRequest { action: Some(action), position: None };
+        self.fetch(
+            cx,
+            move |api| api.queue_run(&id, req),
+            move |this, r, cx| match r {
+                Ok(run) => {
+                    let name = run.name.clone();
+                    let started = run.status != RunStatus::Queued;
+                    if let Some(runs) = this.store.runs.ready_mut()
+                        && let Some(slot) = runs.iter_mut().find(|r| r.id == run.id)
+                    {
+                        *slot = run;
+                    }
+                    let title =
+                        if started { format!("Started {name}") } else { format!("{name} starts next") };
+                    this.toast(Tone::Neutral, title, None, cx);
+                }
+                Err(e) => {
+                    let msg = if e.code == "run_not_queued" {
+                        "It has already left the queue.".to_string()
+                    } else {
+                        e.message.clone()
+                    };
+                    this.toast(Tone::Danger, "Couldn't move the run", Some(msg.into()), cx);
+                }
+            },
+        );
+    }
+
     pub fn stop_run(&mut self, id: String, cx: &mut Context<Self>) {
         self.confirm_stop = None;
         let rid = id.clone();
@@ -2039,16 +2077,29 @@ impl FoloApp {
         self.run_predict(cx);
     }
 
+    /// Sets the Playground threshold, refetching when it drops below what was fetched (filtering
+    /// is local only above that floor).
+    pub fn set_play_conf(&mut self, conf: f32, cx: &mut Context<Self>) {
+        self.play_conf = conf;
+        if conf < self.play_fetched_floor - 1e-6 {
+            self.run_predict(cx);
+        }
+    }
+
     pub fn run_predict(&mut self, cx: &mut Context<Self>) {
         let (Some(model), Some(img)) = (self.play_model.clone(), self.play_image.as_ref()) else { return };
-        // Fetch everything above the lowest threshold once; the conf slider filters locally.
+        // Fetch everything above the lowest threshold once; the conf slider filters locally. The
+        // floor is 0.05, or lower when the threshold is (a model's best-F1 confidence can be), so
+        // local filtering never claims a threshold the fetch cut off.
+        let floor = self.play_conf.min(PLAY_CONF_FLOOR);
         let req = PredictRequest {
             model_id: model.clone(),
             input: img.input.clone(),
-            conf: 0.05,
+            conf: floor,
             iou: self.play_iou,
             max_det: 300,
         };
+        self.play_fetched_floor = floor;
         let key = (self.play_image_gen, model);
         // Same image and model (an IoU change): keep showing the old boxes until the new ones land.
         if self.play_pred_for.as_ref() != Some(&key) {
@@ -2095,6 +2146,16 @@ impl FoloApp {
             .dataset_summary(&r.config.dataset_id)
             .map_or(r.config.dataset_id.clone(), |d| d.name.clone());
         format!("{} · {ds}", r.config.arch.as_str())
+    }
+
+    /// A run's subtitle, the same in the Overview hero and on its page: identity, device, start.
+    pub fn run_subtitle(&self, r: &Run) -> String {
+        let device = crate::ui::device_label(&r.device);
+        let now = self.store.api.now();
+        match r.started.as_deref().and_then(crate::api::time::parse) {
+            Some(s) => format!("{} · {device} · started {}", self.run_meta(r), crate::api::time::ago(s, now)),
+            None => format!("{} · {device}", self.run_meta(r)),
+        }
     }
 
     /// Whether `m` is end-to-end (the one-to-one head: it predicts without NMS). The model's own

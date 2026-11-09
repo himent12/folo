@@ -967,7 +967,12 @@ impl FoloApp {
             if frac <= 0. || frac >= 1. { v } else { q(v, step) }
         };
         match key {
-            "play-conf" => self.play_conf = q(at(0.05, 0.95), 0.01),
+            // Quantised but never below the slider's own low end (a widened range keeps it exact).
+            "play-conf" => {
+                let lo = range.map_or(0.05, |r| r.0);
+                let v = q(at(0.05, 0.95), 0.01).max(lo);
+                self.set_play_conf(v, cx);
+            }
             "play-iou" => self.play_iou = q(at(0.3, 0.95), 0.01),
             "ds-tile" => self.ds_tile = q(at(112., 272.), 8.),
             _ => {

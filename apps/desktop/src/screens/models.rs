@@ -332,6 +332,16 @@ impl FoloApp {
         );
 
         let mm = m.metrics;
+        // Where precision and recall are taken: the best-F1 confidence, named when the record has it.
+        let op_point = match mm.as_ref().and_then(|x| x.best_f1_conf) {
+            Some(c) => format!("at conf {c:.2} (best F1) · IoU 0.50"),
+            None => "best-F1 · IoU 0.50".to_string(),
+        };
+        // The dataset the headline numbers were measured on (the run's), named beside them.
+        let head_ds = run
+            .as_ref()
+            .and_then(|r| self.store.dataset_summary(&r.config.dataset_id))
+            .map(|d| d.name.clone());
         let tile = |content: gpui::Div| {
             div()
                 .flex_grow()
@@ -374,7 +384,10 @@ impl FoloApp {
                                 .tnum()
                                 .child(mm.as_ref().map_or("–".into(), |x| f3(x.map50_95))),
                         )
-                        .child(text(ty::XS, t.text_tertiary).child("IoU 0.50–0.95 · validation split")),
+                        .child(text(ty::XS, t.text_tertiary).truncate().child(match &head_ds {
+                            Some(d) => format!("IoU 0.50–0.95 · {d} validation"),
+                            None => "IoU 0.50–0.95 · validation split".to_string(),
+                        })),
                 ),
             )
             .child(vline(&t))
@@ -389,14 +402,14 @@ impl FoloApp {
                 "Precision",
                 mm.as_ref().map_or("–".into(), |x| format!("{:.3}", x.precision)),
                 "",
-                Some(text(ty::XS, t.text_tertiary).child("best-F1 · IoU 0.50")),
+                Some(text(ty::XS, t.text_tertiary).child(op_point.clone())),
             )))
             .child(vline(&t))
             .child(tile(small(
                 "Recall",
                 mm.as_ref().map_or("–".into(), |x| format!("{:.3}", x.recall)),
                 "",
-                Some(text(ty::XS, t.text_tertiary).child("best-F1 · IoU 0.50")),
+                Some(text(ty::XS, t.text_tertiary).child(op_point.clone())),
             )))
             .child(vline(&t))
             .child(tile(small(
@@ -412,7 +425,8 @@ impl FoloApp {
                 bu,
                 Some(
                     text(ty::XS, t.text_tertiary)
-                        .child(format!(".folo · {}", weight_dtype(m.bytes, m.params))),
+                        // The record's stored precision (as the header says), never a guess from size.
+                        .child(model_storage(&m).map_or(".folo".to_string(), |s| format!(".folo · {s}"))),
                 ),
             )));
 
@@ -1604,13 +1618,4 @@ fn short_name(name: &str) -> String {
 /// off-diagonal read as alarm.
 fn err_alpha(frac: f32) -> f32 {
     0.1 + 0.7 * frac.clamp(0., 1.)
-}
-
-/// Weight precision inferred from file size per parameter (the API doesn't report it).
-fn weight_dtype(bytes: u64, params: u64) -> &'static str {
-    match bytes as f64 / params.max(1) as f64 {
-        b if b < 1.5 => "int8",
-        b if b < 3.0 => "f16",
-        _ => "f32",
-    }
 }

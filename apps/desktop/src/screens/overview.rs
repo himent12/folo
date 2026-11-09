@@ -189,13 +189,6 @@ impl FoloApp {
         let card_pad_y = if hero_h < 120. { 12. } else { 16. };
         let t = theme(cx);
         self.ensure_run_data(&r.id, cx);
-        let now = self.store.api.now();
-        let started = r
-            .started
-            .as_deref()
-            .and_then(time::parse)
-            .map_or(String::new(), |s| format!("started {}", time::ago(s, now)));
-        let device = crate::ui::short_gpu(r.device.split(" (").next().unwrap_or(&r.device));
         let id = r.id.clone();
         let open = self.button(
             "ov-dash",
@@ -416,7 +409,7 @@ impl FoloApp {
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .child(format!("{} · {device} · {started}", self.run_meta(r))),
+                            .child(self.run_subtitle(r)),
                     )
                     .child(open),
             )
@@ -766,7 +759,7 @@ impl FoloApp {
                                     return d.child(
                                         text(ty::XS, t.text_tertiary)
                                             .whitespace_nowrap()
-                                            .child("Waiting to start"),
+                                            .child(queue_text(r.queue_position)),
                                     );
                                 }
                                 let fill = match r.status {
@@ -809,10 +802,29 @@ impl FoloApp {
                         });
                         // Architecture first (short, so it survives a narrow cell), then the
                         // dataset, then the e2e tag for an end-to-end run.
+                        // The e2e tag rides its architecture, as in the Runs and Models lists; the
+                        // dataset after them gives way first.
+                        let ds_name = self
+                            .store
+                            .dataset_summary(&r.config.dataset_id)
+                            .map_or(r.config.dataset_id.clone(), |d| d.name.clone());
                         let meta = |w: f32| {
-                            div().w(px(w)).flex_none().flex().items_center().gap(px(6.)).child(
-                                text(ty::XS, t.text_tertiary).min_w_0().truncate().child(self.run_meta(&r)),
-                            )
+                            div()
+                                .w(px(w))
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .gap(px(6.))
+                                .child(
+                                    text(ty::XS, t.text_tertiary).flex_none().child(r.config.arch.as_str()),
+                                )
+                                .when(e2e, |d| d.child(e2e_tag(&t, format!("e2e-ovr-{}-{w}", r.id))))
+                                .child(
+                                    text(ty::XS, t.text_tertiary)
+                                        .min_w_0()
+                                        .truncate()
+                                        .child(format!("· {ds_name}")),
+                                )
                         };
                         let row = div()
                             .id(SharedString::from(key.clone()))
@@ -839,30 +851,15 @@ impl FoloApp {
                                     .id(SharedString::from(format!("ov-rn-{}", r.id)))
                                     .w(px(name_w))
                                     .flex_none()
-                                    // The e2e tag and its gap take ~36 px of the name's line.
-                                    .when(
-                                        crate::ui::may_overflow(
-                                            &r.name,
-                                            ty::SM.size,
-                                            name_w - if e2e { 36. } else { 0. },
-                                        ),
-                                        |d| d.tooltip(crate::controls::tip(r.name.clone(), None)),
-                                    )
-                                    // The name, then the e2e tag on its line (so the meta below keeps
-                                    // its full width for architecture and dataset).
+                                    .when(crate::ui::may_overflow(&r.name, ty::SM.size, name_w), |d| {
+                                        d.tooltip(crate::controls::tip(r.name.clone(), None))
+                                    })
                                     .child(
-                                        div()
-                                            .flex()
-                                            .items_center()
-                                            .gap(px(6.))
-                                            .child(
-                                                text(ty::SM, t.text_primary)
-                                                    .font_weight(FontWeight::MEDIUM)
-                                                    .min_w_0()
-                                                    .truncate()
-                                                    .child(r.name.clone()),
-                                            )
-                                            .when(e2e, |d| d.child(e2e_tag(&t, format!("e2e-ovr-{}", r.id)))),
+                                        text(ty::SM, t.text_primary)
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .w_full()
+                                            .truncate()
+                                            .child(r.name.clone()),
                                     )
                                     .when(!wide, |d| d.child(meta(name_w))),
                             )
@@ -1395,7 +1392,12 @@ impl FoloApp {
                     .child(cell2(
                         &t,
                         d.name.clone(),
-                        format!("{} images · {} classes", int(d.splits.total()), d.classes.len()),
+                        // The classes by name (as the dataset's Classes tile says them), not a count.
+                        format!(
+                            "{} images · {}",
+                            int(d.splits.total()),
+                            crate::screens::datasets::names_summary(&d.classes, 28)
+                        ),
                     ))
                     .child(badge(&t, d.format.label(), Tone::Neutral)),
             );

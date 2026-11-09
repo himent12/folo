@@ -150,8 +150,9 @@ impl Curve {
         if frac < warm {
             self.lr0 * (0.1 + 0.9 * frac / warm)
         } else {
+            // Linear decay to 1% (lrf 0.01, cos_lr off), as the run's resolved settings say.
             let t = ((frac - warm) / (self.epochs as f32 - warm)).clamp(0.0, 1.0);
-            self.lr0 * (0.01 + 0.99 * 0.5 * (1.0 + (std::f32::consts::PI * t).cos()))
+            self.lr0 * (1.0 - 0.99 * t)
         }
     }
 
@@ -353,7 +354,8 @@ impl MockBackend {
                 map50_95: m[1],
                 precision: m[2],
                 recall: m[3],
-                best_f1_conf: None,
+                // Where F1 peaks: lower for the stronger models (their scores sit higher).
+                best_f1_conf: Some(((0.42 - 0.18 * m[1]) * 100.).round() / 100.),
             }),
             head: folo_api::Head::O2m,
             trained_with: None,
@@ -598,6 +600,8 @@ impl MockBackend {
             },
         ];
         let now = Instant::now();
+        // Each run resolved against its own dataset's class count (Auto's AdamW rate depends on it).
+        let nc = |ds: &str| datasets.iter().find(|d| d.ds.id == ds).map_or(5, |d| d.ds.classes.len());
         let runs = specs
             .into_iter()
             .map(|s| {
@@ -605,7 +609,9 @@ impl MockBackend {
                     seed: hash(s.id),
                     epochs: s.config.epochs,
                     spe: s.spe,
-                    lr0: s.config.lr0,
+                    // The rate the run resolves to (Auto's pick), not the form's.
+                    lr0: resolve(&s.config, s.spe * s.config.batch as u64, nc(&s.config.dataset_id)).lr0
+                        as f32,
                     batch: s.config.batch,
                     map_max: s.map_max,
                     ips: s.ips,
@@ -645,8 +651,10 @@ impl MockBackend {
                         model_id: s.model.map(Into::into),
                         error: s.error.map(Into::into),
                         error_code: s.error.map(|_| "training_failed".into()),
-                        resolved: None,
-                        queue_position: None,
+                        resolved: (s.status != RunStatus::Queued).then(|| {
+                            resolve(&s.config, s.spe * s.config.batch as u64, nc(&s.config.dataset_id))
+                        }),
+                        queue_position: (s.status == RunStatus::Queued).then_some(1),
                         config: s.config,
                     },
                     curve,
@@ -844,7 +852,12 @@ impl Backend for MockBackend {
             tensor_cores: TensorCoreSupport { available: true, enabled: true, reason: None },
             amp: AmpSupport { available: true, reason: None },
         };
-        Ok(SystemResponse { system, data_dir: None, features: Vec::new(), capabilities: Some(capabilities) })
+        Ok(SystemResponse {
+            system,
+            data_dir: None,
+            features: vec!["queue_control".into(), "weights_onnx".into()],
+            capabilities: Some(capabilities),
+        })
     }
 
     fn datasets(&self) -> ApiResult<Vec<Dataset>> {
@@ -988,7 +1001,7 @@ impl Backend for MockBackend {
             confusion[t][n] = left;
             confusion[n][t] = (count as f32 * (1.0 - per_class[t].precision) * 0.6) as u32;
         }
-        Ok(ModelEval { pr, confusion, per_class, images, best_f1_conf: None })
+        Ok(ModelEval { pr, confusion, per_class, images, best_f1_conf: metrics.best_f1_conf })
     }
 
     fn export_model(&self, id: &str, format: &str) -> ApiResult<ExportResult> {
@@ -1034,7 +1047,7 @@ impl Backend for MockBackend {
             seed: hash(&id),
             epochs: config.epochs,
             spe,
-            lr0: config.lr0,
+            lr0: resolve(&config, ds.ds.splits.train, ds.ds.classes.len()).lr0 as f32,
             batch: config.batch,
             map_max: 0.66,
             ips: 380.0,
@@ -1077,6 +1090,21 @@ impl Backend for MockBackend {
         let run = Self::snapshot(&f);
         runs.insert(0, f);
         Ok(run)
+    }
+
+    fn queue_run(&self, id: &str, _req: QueueRequest) -> ApiResult<Run> {
+        self.check()?;
+        let mut runs = self.runs.lock().unwrap();
+        let f = runs
+            .iter_mut()
+            .find(|f| f.run.id == id)
+            .ok_or_else(|| ApiError::new("run_not_found", format!("No run {id}")))?;
+        if f.run.status != RunStatus::Queued {
+            return Err(ApiError::new("run_not_queued", "This run is no longer waiting in the queue"));
+        }
+        // The demo queues one run at a time: every move leaves it first.
+        f.run.queue_position = Some(1);
+        Ok(f.run.clone())
     }
 
     fn stop_run(&self, id: &str) -> ApiResult<Run> {
@@ -1379,6 +1407,47 @@ impl Backend for MockBackend {
 
 /// Plausible detections for known ground truth at model quality `q` (0..1): jittered hits,
 /// occasional class confusions and misses, and a few low-score false positives.
+/// The settings a run resolves to, as the trainer would (docs/MODEL.md §8.2 and §8.4).
+fn resolve(config: &TrainConfig, train_images: u64, classes: usize) -> ResolvedTrain {
+    let nbs = 64u32;
+    let batch = config.batch.max(1);
+    let accumulate = ((nbs as f64 / batch as f64).round() as u32).max(1);
+    let batches = train_images.div_ceil(batch as u64).max(1);
+    let steps = train_images.div_ceil(batch.max(nbs) as u64) as f64 * config.epochs as f64;
+    let (optimizer, lr0) = match config.optimizer {
+        Optimizer::Sgd => (ResolvedOptimizer::Sgd, config.lr0 as f64),
+        Optimizer::Adamw => (ResolvedOptimizer::Adamw, config.lr0 as f64),
+        Optimizer::Auto if steps > 10_000. => (ResolvedOptimizer::Sgd, 0.01),
+        Optimizer::Auto => {
+            let lr = 0.01 / (4.0 + classes as f64);
+            (ResolvedOptimizer::Adamw, (lr * 1e6).round() / 1e6)
+        }
+    };
+    let auto = config.optimizer == Optimizer::Auto;
+    // Auto's momentum (AdamW β1) is 0.9; a chosen optimizer keeps the configured 0.937.
+    let momentum = if auto { 0.9 } else { 0.937 };
+    // Warmup in optimizer steps: the trainer's own rule (docs/MODEL.md §8.4).
+    let spe = batches.div_ceil(accumulate as u64);
+    let warmup_iters = folo_nn::warmup_iters(3.0, config.epochs as u64, spe);
+    ResolvedTrain {
+        optimizer,
+        lr0,
+        lrf: 0.01,
+        cos_lr: false,
+        momentum,
+        betas: (optimizer == ResolvedOptimizer::Adamw).then_some([momentum, 0.999]),
+        weight_decay: 0.0005 * batch as f64 * accumulate as f64 / nbs as f64,
+        batch,
+        accumulate,
+        nbs,
+        optimizer_steps_per_epoch: spe,
+        warmup_iters,
+        warmup_epochs: 3.0,
+        warmup_momentum: 0.8,
+        warmup_bias_lr: if auto { 0.0 } else { 0.1 },
+    }
+}
+
 fn fake_predictions(truth: &[BBoxT], w: u32, h: u32, q: f32, names: &[String], seed: u64) -> Vec<ScoredBox> {
     let classes = names.len().max(1) as u32;
     let name = |c: u32| names.get(c as usize).cloned().unwrap_or_default();
@@ -1430,6 +1499,35 @@ type BBoxT = super::types::BBox;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolves_as_the_trainer_does() {
+        let cfg = |batch, epochs, optimizer| TrainConfig {
+            name: "r".into(),
+            dataset_id: "ds".into(),
+            arch: Arch::N,
+            epochs,
+            batch,
+            imgsz: 640,
+            device: "auto".into(),
+            optimizer,
+            lr0: 0.01,
+            weights: None,
+            augment: Augment::default(),
+            seed: 0,
+            amp: false,
+            head: Default::default(),
+        };
+        // Warmup in optimizer steps, as folo_nn computes it.
+        assert_eq!(resolve(&cfg(16, 30, Optimizer::Auto), 800, 3).warmup_iters, 100);
+        assert_eq!(resolve(&cfg(16, 10, Optimizer::Auto), 800, 3).warmup_iters, 39);
+        assert_eq!(resolve(&cfg(16, 1, Optimizer::Auto), 800, 3).warmup_iters, 0);
+        // Auto: AdamW at 0.01 / (4 + nc) for short runs, with β1 0.9; SGD past 10,000 iterations
+        // (the iteration count rounds batches up).
+        let short = resolve(&cfg(16, 100, Optimizer::Auto), 3200, 3);
+        assert_eq!((short.optimizer, short.lr0, short.momentum), (ResolvedOptimizer::Adamw, 0.001429, 0.9));
+        assert_eq!(resolve(&cfg(32, 527, Optimizer::Auto), 1200, 3).optimizer, ResolvedOptimizer::Sgd);
+    }
 
     #[test]
     fn frozen_mock_is_deterministic() {
