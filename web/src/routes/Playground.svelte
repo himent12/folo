@@ -1663,6 +1663,9 @@
       height: auto;
       aspect-ratio: var(--ar);
       max-height: var(--stage-h);
+      /* Edge to edge, inset by the boxes' halo (lib/detect/DetectionView): a box on the image's edge keeps its outer
+         stroke inside the frame, never cut by the viewport or the panel's edge. */
+      padding: var(--space-1);
     }
     .stage.empty {
       height: auto;
@@ -1925,6 +1928,10 @@
       height: auto;
       aspect-ratio: var(--ar, 4 / 3);
       max-height: 70vh;
+    }
+    /* Full bleed: the image inset by the boxes' halo, so a box on its edge keeps its outer stroke on screen. */
+    .stage:not(.empty) {
+      padding: var(--space-1);
     }
     .stage.empty {
       aspect-ratio: auto;

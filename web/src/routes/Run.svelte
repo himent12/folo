@@ -383,7 +383,10 @@
         {/if}
       </span>
       {#if run.status === 'running'}
-        <Button variant="danger" icon={Square} onclick={() => (stopOpen = true)}>Stop</Button>
+        <!-- Phones: a quiet icon button the size of ⋯ beside it, so Stop is never the largest control above the progress
+             hero; its name says what it does, and the confirm stays. -->
+        <span class="wide-only"><Button variant="danger" icon={Square} onclick={() => (stopOpen = true)}>Stop</Button></span>
+        <span class="phone-only"><Button variant="danger" icon={Square} aria-label="Stop {run.name}" title="Stop run" onclick={() => (stopOpen = true)} /></span>
       {:else if run.status === 'queued'}
         <!-- Phones: in the ⋯ menu under the same name, so the status and its time keep one line beside it. -->
         <span class="wide-only">

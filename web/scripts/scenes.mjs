@@ -1478,11 +1478,12 @@ export const scenes = [
     },
   },
   {
+    // Stop's confirm; on phones Stop is the icon button beside ⋯ (named "Stop <run>") and the confirm a bottom sheet.
     name: 'run-stop-dialog',
     fullPage: false,
     path: '/runs/run_7d1e',
     themes: ['light'],
-    viewports: ['desktop'],
+    viewports: ['desktop', 'mobile'],
     setup: async (page) => {
       await page.getByRole('button', { name: 'Stop' }).click();
     },
