@@ -20,9 +20,10 @@ and, when the case has a `mean_tolerance`, the mean of that element-wise error m
 
 An expected output with `"match": "rows"` is an end-to-end detection list `[B, K, 6]` (`x1, y1, x2, y2, score,
 class`, sorted by score; the one-to-one head, docs/MODEL.md §6.6), compared so that runtimes may order near-equal
-scores differently: per image the sorted score columns must agree element-wise, and every FOLO row must have an
-unused ONNX row of the same class whose score and box agree (the same relative rule); a FOLO row may only be missing
-when its score is within the tolerance of the list's last score (it may have dropped out of the top K).
+scores differently: per image the sorted score columns must agree element-wise; every ONNX row must be a row of
+FOLO's longer list (`"pool"`: the top K plus a few more, same class, score and box under the same relative rule),
+and every FOLO row of the top K must be in the ONNX output, except one whose score is within the tolerance of the
+K-th (it may have swapped with a pool row just past the cutoff). `bench/parity/test_onnx_check.py` tests this.
 
 `--bench N` also times N onnxruntime CPU runs of each case's first input (after 5 warm-up runs) and reports the
 median latency in milliseconds.
@@ -73,38 +74,58 @@ def rel_err(a, b):
     return np.abs(a - b) / np.maximum(np.maximum(np.abs(a), np.abs(b)), 1.0)
 
 
-def compare_rows(got, want, tol):
+def match_rows(rows, pool, tol):
+    """Greedily pairs each of `rows` with an unused row of `pool` of the same class whose score and box agree within
+    `tol`. Returns (pairs, unmatched row indices, worst box error of the pairs)."""
+    used = np.zeros(len(pool), dtype=bool)
+    pairs, missing, worst = [], [], 0.0
+    for i, row in enumerate(rows):
+        cand = np.flatnonzero((~used) & (pool[:, 5] == row[5]) & (rel_err(pool[:, 4], row[4]) <= tol))
+        good = [(float(np.max(rel_err(pool[j, :4], row[:4]))), j) for j in cand]
+        good = [(e, j) for e, j in good if e <= tol]
+        if good:
+            e, j = min(good)
+            used[j] = True
+            pairs.append((i, j))
+            worst = max(worst, e)
+        else:
+            missing.append(i)
+    return pairs, missing, worst
+
+
+def compare_rows(got, want, tol, pool=None):
+    """End-to-end rows (see the module docs). `pool` is FOLO's longer list (the top K + extra rows, same order): every
+    ONNX row must be one of its rows, and every FOLO row of the top K must be in the ONNX output unless its score is
+    within `tol` of the K-th (it may have swapped with a row just past the cutoff, which the pool then holds)."""
     got = got.astype(np.float64)
     want = want.astype(np.float64)
-    if got.shape != want.shape or got.ndim != 3 or got.shape[2] != 6:
+    pool = want if pool is None else pool.astype(np.float64)
+    if got.shape != want.shape or got.ndim != 3 or got.shape[2] != 6 or pool.shape[0] != want.shape[0]:
         return {"ok": False, "why": f"shape {list(got.shape)} != {list(want.shape)} (or not [B, K, 6])"}
     if not np.all(np.isfinite(got)):
         return {"ok": False, "why": "non-finite ONNX output"}
     worst_score = float(np.max(rel_err(got[..., 4], want[..., 4]), initial=0.0))
-    worst_box, unmatched, boundary = 0.0, [], 0
+    worst_box, problems, boundary = 0.0, [], 0
     for b in range(want.shape[0]):
-        g, w = got[b], want[b]
-        last = min(g[-1, 4], w[-1, 4]) if len(w) else 0.0
-        used = np.zeros(len(g), dtype=bool)
-        for i, row in enumerate(w):
-            ok = (~used) & (g[:, 5] == row[5]) & (rel_err(g[:, 4], row[4]) <= tol)
-            cand = np.flatnonzero(ok)
-            errs = [float(np.max(rel_err(g[j, :4], row[:4]))) for j in cand]
-            good = [(e, j) for e, j in zip(errs, cand) if e <= tol]
-            if good:
-                e, j = min(good)
-                used[j] = True
-                worst_box = max(worst_box, e)
-            elif rel_err(row[4], last) <= tol:
+        g, w, p = got[b], want[b], pool[b]
+        # Every ONNX row is a FOLO row (class, score and box), from the top K or just past it.
+        _, foreign, e1 = match_rows(g, p, tol)
+        problems += [["onnx row not in the FOLO pool", b, int(i), g[i].tolist()] for i in foreign]
+        # Every FOLO row of the top K is in the ONNX output, unless it sits at the cutoff.
+        _, missing, e2 = match_rows(w, g, tol)
+        last = w[-1, 4] if len(w) else 0.0
+        for i in missing:
+            if rel_err(w[i, 4], last) <= tol and len(p) > len(w):
                 boundary += 1
             else:
-                unmatched.append([b, i, row.tolist(), (min(errs) if errs else None)])
+                problems.append(["folo row missing from the onnx output", b, int(i), w[i].tolist()])
+        worst_box = max(worst_box, e1, e2)
     return {
-        "ok": bool(worst_score <= tol and not unmatched),
+        "ok": bool(worst_score <= tol and not problems),
         "max_rel_err_score": worst_score,
         "max_rel_err_box": worst_box,
         "boundary_rows": boundary,
-        "unmatched": unmatched[:5],
+        "problems": problems[:5],
     }
 
 
@@ -130,7 +151,8 @@ def check_case(base, case, bench):
         run = {"shape": list(x.shape)}
         for name, spec in expected.items():
             if spec.get("match") == "rows":
-                c = compare_rows(outs[name], load(base, spec), case["tolerance"])
+                pool = load(base, spec["pool"]) if "pool" in spec else None
+                c = compare_rows(outs[name], load(base, spec), case["tolerance"], pool)
             else:
                 c = compare(outs[name], load(base, spec), case["tolerance"], case.get("mean_tolerance"))
             run[name] = c

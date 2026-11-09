@@ -27,7 +27,8 @@
 //! one-to-one branch only (the one-to-many tensors are dropped), and its decoded output is end to end, with no
 //! NMS needed: `detections: [B, K, 6]` with `K = min(max_det, A)`, rows `x1, y1, x2, y2, score, class` sorted
 //! by score (the top-k selection of §6.6: the `K` anchors with the highest max-class score, then the `K` best
-//! (anchor, class) pairs among them). The caller applies its confidence threshold.
+//! (anchor, class) pairs among them). The caller applies its confidence threshold. These rows are `F32` in an
+//! [`OnnxOptions::half`] graph too (class ids above 2048 have no exact `F16`).
 //!
 //! Every model tensor becomes an initializer under its `.folo` name (`backbone.stem.conv.weight`, ...), in `F32`
 //! or, with [`OnnxOptions::half`], `F16` (then the input, outputs and every activation are `F16` too). Anything
@@ -236,7 +237,9 @@ pub fn export(model: &FoloModel, opts: &OnnxOptions) -> Result<OnnxExport> {
         };
         let all = g.decode(model, opts, &feats, &box_raw, &cls_raw)?;
         g.topk(&all, nc, opts);
-        vec![OnnxValue { name: "detections".into(), dtype: elem.name(), shape: vec![bdim, k, Dim::Value(6)] }]
+        // Always f32: an f16 class id is exact only up to 2048.
+        let dtype = DataType::Float.name();
+        vec![OnnxValue { name: "detections".into(), dtype, shape: vec![bdim, k, Dim::Value(6)] }]
     } else if opts.decode {
         let all = g.decode(model, opts, &feats, &box_raw, &cls_raw)?;
         g.transpose("detections", &all, &[0, 2, 1]);
@@ -784,7 +787,8 @@ impl Graph {
     /// MODEL.md §6.6's selection in the graph, from the decoded `all: [B, 4 + nc, A]`: the end-to-end
     /// `detections: [B, K, 6]` output (`x1, y1, x2, y2, score, class`, by descending score). `TopK` puts equal
     /// values in index order, the tie rule of [`crate::nms::topk_detections`]. An `F16` graph selects in `F32`
-    /// (the CPU `TopK` and `ReduceMax` of onnxruntime take no `float16`) and casts the rows back.
+    /// (the CPU `TopK` and `ReduceMax` of onnxruntime take no `float16`) and its rows stay `F32`, so class ids above
+    /// 2048 stay exact.
     fn topk(&mut self, all: &str, nc: usize, opts: &OnnxOptions) {
         let half = self.elem == DataType::Float16;
         let to_f32 = || vec![("to".to_string(), AttrValue::Int(DataType::Float.code()))];
@@ -831,13 +835,7 @@ impl Graph {
         let ax = self.i64_const(&[2], false);
         let score = self.node("Unsqueeze", "e2e.score_col", &[&score, &ax], vec![]);
         let class = self.node("Unsqueeze", "e2e.class_col", &[&class, &ax], vec![]);
-        if half {
-            let rows = self.concat("e2e.rows", &[&boxes, &score, &class], 2);
-            let to = vec![("to".to_string(), AttrValue::Int(DataType::Float16.code()))];
-            self.node("Cast", "detections", &[&rows], to);
-        } else {
-            self.concat("detections", &[&boxes, &score, &class], 2);
-        }
+        self.concat("detections", &[&boxes, &score, &class], 2);
     }
 
     /// Encode the `ModelProto`.
@@ -861,7 +859,9 @@ impl Graph {
         }
         graph.msg(11, &vi(input, self.elem));
         for o in outputs {
-            graph.msg(12, &vi(o, self.elem));
+            // End-to-end rows are `F32` in any graph.
+            let elem = if o.dtype == DataType::Float.name() { DataType::Float } else { self.elem };
+            graph.msg(12, &vi(o, elem));
         }
 
         let mut model = Msg::default();
@@ -987,6 +987,49 @@ mod tests {
         assert_eq!(d.outputs[0].shape, [p("batch"), p("anchors"), Dim::Value(8)]);
         assert!(d.ops.contains(&"Range".to_string()));
         assert_eq!(d.metadata["folo.onnx.batch"], "dynamic");
+    }
+
+    /// An `o2o` model exports one branch (the other's tensors are not initializers), and its decoded output is the
+    /// end-to-end `[B, K, 6]`, `F32` even in a half graph (an `F16` class id is exact only up to 2048).
+    #[test]
+    fn o2o_exports_one_branch_and_end_to_end_rows() {
+        let mut cfg = ModelConfig::new("n", 4).unwrap();
+        cfg.head = "o2o".into();
+        let mut m = FoloModel::new(cfg).unwrap();
+        m.fuse().unwrap();
+        let o2m = fused("n", 4).to_onnx(&OnnxOptions::new(96)).unwrap();
+        let raw = m.to_onnx(&OnnxOptions::new(96)).unwrap();
+        assert_eq!(raw.initializers, o2m.initializers, "one head branch, as many tensors as an o2m model");
+        assert_eq!(
+            (raw.metadata["folo.onnx.head"].as_str(), raw.metadata["folo.onnx.outputs"].as_str()),
+            ("o2o", "raw")
+        );
+        let a = 144 + 36 + 9;
+        for (half, max_det, k) in [(false, 300, a), (true, 300, a), (false, 20, 20)] {
+            let x = m.to_onnx(&OnnxOptions { decode: true, half, max_det, ..OnnxOptions::new(96) }).unwrap();
+            assert_eq!(x.outputs.len(), 1);
+            let o = &x.outputs[0];
+            assert_eq!(
+                (o.name.as_str(), o.dtype, &o.shape),
+                ("detections", "float", &[1, k, 6].map(Dim::Value).to_vec())
+            );
+            assert_eq!(x.metadata["folo.onnx.outputs"], "end2end");
+            assert_eq!(x.metadata["folo.onnx.max_det"], max_det.to_string());
+            assert_eq!(x.ops.iter().filter(|op| *op == "TopK").count(), 2);
+        }
+        let d = m.to_onnx(&OnnxOptions { decode: true, dynamic: true, ..OnnxOptions::new(96) }).unwrap();
+        assert_eq!(
+            d.outputs[0].shape,
+            [Dim::Param("batch".into()), Dim::Param("max_det".into()), Dim::Value(6)]
+        );
+        // `head: o2m` on the model exports its one-to-many branch and the usual decode.
+        m.set_head_mode(HeadMode::O2m).unwrap();
+        let x = m.to_onnx(&OnnxOptions { decode: true, ..OnnxOptions::new(96) }).unwrap();
+        assert_eq!(
+            (x.outputs[0].shape[2].clone(), x.metadata["folo.onnx.head"].as_str()),
+            (Dim::Value(8), "o2m")
+        );
+        assert!(OnnxOptions { max_det: 0, ..OnnxOptions::new(96) }.validate(32).is_err());
     }
 
     #[test]

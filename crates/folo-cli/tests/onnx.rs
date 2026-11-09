@@ -115,19 +115,24 @@ fn reference_k(m: &FoloModel, x: &Tensor, decode: bool, dir: &Path, tag: &str, m
     if decode && m.head_mode() == HeadMode::O2o {
         let nc = out.num_classes;
         let k = max_det.min(out.num_anchors());
-        let nms =
-            NmsConfig { conf: f32::NEG_INFINITY, max_det: k, multi_label: true, ..NmsConfig::default() };
-        let mut rows = Vec::new();
-        for (boxes, scores) in out.decode_images().unwrap() {
-            let d = topk_detections(&boxes, &scores, nc, &nms);
-            assert_eq!(d.len(), k, "{tag}: K rows");
-            for d in d {
-                rows.extend([d.bbox.x1, d.bbox.y1, d.bbox.x2, d.bbox.y2, d.score, d.class as f32]);
+        // The top K, and a longer pool (the selection with K + 16) that rows swapped across the cutoff come from.
+        let pool_k = (k + 16).min(out.num_anchors());
+        let select = |max_det: usize| -> Tensor {
+            let nms =
+                NmsConfig { conf: f32::NEG_INFINITY, max_det, multi_label: true, ..NmsConfig::default() };
+            let mut rows = Vec::new();
+            for (boxes, scores) in out.decode_images().unwrap() {
+                let d = topk_detections(&boxes, &scores, nc, &nms);
+                assert_eq!(d.len(), max_det, "{tag}: {max_det} rows");
+                for d in d {
+                    rows.extend([d.bbox.x1, d.bbox.y1, d.bbox.x2, d.bbox.y2, d.score, d.class as f32]);
+                }
             }
-        }
-        let t = Tensor::from_vec(rows, [out.batch(), k, 6]).unwrap();
-        let mut spec = dump(dir, &format!("{tag}-detections.f32"), &t);
+            Tensor::from_vec(rows, [out.batch(), max_det, 6]).unwrap()
+        };
+        let mut spec = dump(dir, &format!("{tag}-detections.f32"), &select(k));
         spec["match"] = json!("rows");
+        spec["pool"] = dump(dir, &format!("{tag}-pool.f32"), &select(pool_k));
         json!({ "detections": spec })
     } else if decode {
         json!({ "detections": dump(dir, &format!("{tag}-detections.f32"), &out.decode().unwrap()) })

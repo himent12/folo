@@ -124,7 +124,7 @@ With `--decode` the graph also does the NMS-free selection of docs/MODEL.md §6.
 `x1, y1, x2, y2, score, class` (class as a float) sorted by descending score, the `K` anchors with the highest
 max-class score, then the `K` best (anchor, class) pairs among them (`ReduceMax`, `TopK`, `GatherND`). Apply your
 `conf` (keep rows with `score > conf`) and map the boxes back through the letterbox; there is no NMS to run. An
-`--half` graph does the selection in f32 and casts the rows to f16.
+`--half` graph does the selection in f32 and its `detections` stay f32 (an f16 class id is exact only up to 2048).
 
 `metadata_props` hold the model's `folo.*` metadata (`folo.arch`, `folo.config`, `folo.classes`, `folo.imgsz`,
 `folo.dtype`, `folo.fused = "true"`, and `folo.metrics` / `folo.created` and unknown `folo.*` keys of the source),
@@ -143,7 +143,7 @@ also runs `onnx.checker.check_model` with `full_check`) and compares with FOLO's
 `|onnx − folo| ≤ tol · max(|onnx|, |folo|, 1)`: f32 within `1e-4` (max) and `1e-5` (mean), f16 within `1e-1` (max)
 and `5e-3` (mean), since an f16 graph rounds every activation to half precision while FOLO computes in f32.
 End-to-end outputs are compared row by row, so that near-equal scores may come out in either order (the score
-columns must agree, and every FOLO row needs an ONNX row of the same class with the same score and box). The test
+columns must agree, every ONNX row must be one of FOLO's rows, the same class, score and box, and every FOLO row must be in the ONNX output unless it ties at the cutoff; `bench/parity/test_onnx_check.py` tests the comparison). The test
 needs a Python with `onnx`, `onnxruntime` and `numpy` (`FOLO_ONNX_PYTHON`, or the venv at `FOLO_ONNX_VENV`, default
 `D:/folo-venvs/onnx`) and skips without one, unless `FOLO_ONNX_REQUIRED=1`, which CI's `onnx` job sets (docs/CI.md).
 
