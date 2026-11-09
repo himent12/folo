@@ -356,6 +356,14 @@ impl RealStore {
         self
     }
 
+    /// Test support: while `on`, every training run waits after each epoch (checkpoint written, `epoch` event sent)
+    /// until this is turned off or the run is asked to stop. Tests use it to stop a run deterministically before it
+    /// could finish on its own; nothing else turns it on.
+    #[doc(hidden)]
+    pub fn hold_runs_after_epochs(&self, on: bool) {
+        self.runs.hold_after_epochs(on);
+    }
+
     /// Changes how often dataset files are re-checked for changes (default [`RECHECK_EVERY`]; zero checks on
     /// every request).
     pub fn recheck_every(mut self, every: Duration) -> RealStore {

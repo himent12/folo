@@ -614,6 +614,9 @@ async fn queue_stop_resume_and_restart() {
     let s = store(&home);
     let app = app(&s);
     let ds = dataset(&app, "stoppy", 12).await;
+    // Runs wait after each epoch until stopped (or the hold is lifted), so the stops below always land before a
+    // run could finish on its own.
+    s.hold_runs_after_epochs(true);
 
     // One run at a time: the second waits in the queue, and stopping it there is immediate.
     let a: Run = ok(&app, post_json("/api/runs", tiny(&ds, 3))).await;
@@ -644,6 +647,7 @@ async fn queue_stop_resume_and_restart() {
     assert!((1..3).contains(&a1.epoch), "{}", a1.epoch);
     assert!(a1.model_id.is_some(), "stopped after a validated epoch");
     err(&app, post(&format!("/api/runs/{}/stop", a.id)), StatusCode::CONFLICT, "run_not_active").await;
+    s.hold_runs_after_epochs(false);
 
     // Resume: same id, the stored config (only `device` may change), on to the last epoch.
     let resume = |fields: Value| post_json("/api/runs", fields);
@@ -673,7 +677,8 @@ async fn queue_stop_resume_and_restart() {
     assert!(logs.lines.iter().any(|l| l.message.starts_with("resumed from")));
     err(&app, resume(json!({ "resume_run_id": a.id })), StatusCode::CONFLICT, "run_not_resumable").await;
 
-    // A run that was never trained resumes from scratch.
+    // A run that was never trained resumes from scratch (held after its first epoch, for the shutdown below).
+    s.hold_runs_after_epochs(true);
     let (status, body) = send(&app, resume(json!({ "resume_run_id": b.id }))).await;
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
     let mut sse_b = Events::open(&app, &b.id).await;
@@ -741,6 +746,8 @@ async fn queue_moves_and_resolved_config() {
     let s = store(&home);
     let app = app(&s);
     let ds = dataset(&app, "queued", 12).await;
+    // Runs wait after each epoch until stopped, so every run below is still active when the test stops it.
+    s.hold_runs_after_epochs(true);
     let mv = |id: &str, body: Value| post_json(&format!("/api/runs/{id}/queue"), body);
     let run = |id: &str| {
         let (app, id) = (app.clone(), id.to_string());
@@ -875,8 +882,9 @@ async fn auto_trains_and_predicts_on_the_gpu() {
     );
     let app = app(&s);
     let ds = dataset(&app, "gpu", 12).await;
-    // A long run, stopped after its first epoch (so it has a model).
-    let mut cfg = tiny(&ds, 200);
+    // A run stopped after its first epoch (so it has a model): held there until the stop.
+    s.hold_runs_after_epochs(true);
+    let mut cfg = tiny(&ds, 3);
     cfg["device"] = json!("auto");
     let run: Run = ok(&app, post_json("/api/runs", cfg)).await;
     let gpu = folo_gpu::GpuContext::shared().unwrap().summary().name.clone();
@@ -949,7 +957,9 @@ async fn no_runs_start_after_shutdown() {
     let s = store(&t.0.join("home"));
     let app = app(&s);
     let ds = dataset(&app, "tiny", 4).await;
-    let stopped: Run = ok(&app, post_json("/api/runs", tiny(&ds, 1))).await;
+    // Held after its first epoch of two, so the stop always wins (it cannot complete first).
+    s.hold_runs_after_epochs(true);
+    let stopped: Run = ok(&app, post_json("/api/runs", tiny(&ds, 2))).await;
     ok::<Run>(&app, post(&format!("/api/runs/{}/stop", stopped.id))).await;
     let s2 = s.clone();
     tokio::task::spawn_blocking(move || s2.shutdown()).await.unwrap();
@@ -986,9 +996,13 @@ async fn amp_run_without_tensor_cores_is_refused_up_front() {
     // Mixed-precision runs from a server that had tensor cores (their `amp` flag set in run.json): a stopped one is
     // refused on resume with resume advice (`amp` must match), but only once it would otherwise resume; a completed
     // one stays `run_not_resumable`.
-    let stopped: Run = ok(&app, post_json("/api/runs", tiny(&ds, 1))).await;
-    ok::<Run>(&app, post(&format!("/api/runs/{}/stop", stopped.id))).await;
+    // `done` is held after its epoch, so `stopped` waits in the queue behind it and stops there.
+    s.hold_runs_after_epochs(true);
     let done: Run = ok(&app, post_json("/api/runs", tiny(&ds, 1))).await;
+    let stopped: Run = ok(&app, post_json("/api/runs", tiny(&ds, 1))).await;
+    let stopped_now: Run = ok(&app, post(&format!("/api/runs/{}/stop", stopped.id))).await;
+    assert_eq!(stopped_now.status, RunStatus::Stopped, "stopped while queued");
+    s.hold_runs_after_epochs(false);
     let mut sse = Events::open(&app, &done.id).await;
     let events = sse.until_status(&["completed", "failed"]).await;
     assert_eq!(events.last().unwrap().1["status"], "completed", "{events:?}");

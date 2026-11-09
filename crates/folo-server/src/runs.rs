@@ -393,6 +393,26 @@ pub struct Runs {
     /// so the two never share the device.
     gate: Mutex<()>,
     throughput: Arc<Throughput>,
+    /// Test support ([`Runs::hold_after_epochs`]).
+    hold: Arc<EpochHold>,
+}
+
+/// Test support: while `on`, a run's trainer waits after each epoch (its checkpoint written and its `epoch` event
+/// sent) until the hold is lifted or the run is asked to stop, so a test's stop always lands before the next epoch.
+#[derive(Default)]
+struct EpochHold {
+    on: Mutex<bool>,
+    lifted: Condvar,
+}
+
+impl EpochHold {
+    /// Blocks while the hold is on and `stop` is unset (a stop does not signal the condvar, so it is polled).
+    fn wait(&self, stop: &AtomicBool) {
+        let mut on = self.on.lock().unwrap_or_else(|p| p.into_inner());
+        while *on && !stop.load(Ordering::Relaxed) {
+            on = self.lifted.wait_timeout(on, Duration::from_millis(20)).unwrap_or_else(|p| p.into_inner()).0;
+        }
+    }
 }
 
 impl Runs {
@@ -459,6 +479,7 @@ impl Runs {
             gate: Mutex::new(()),
             throughput,
             activity: AtomicU64::new(0),
+            hold: Arc::default(),
         })
     }
 
@@ -749,8 +770,9 @@ impl Runs {
                 }
                 st.claimed = true;
             }
-            let ran =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| execute(&entry, &self.throughput)));
+            let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                execute(&entry, &self.throughput, &self.hold)
+            }));
             *entry.measure.lock().unwrap() = None;
             let mut st = entry.state.lock().unwrap();
             let internal = || Some("internal".to_string());
@@ -774,6 +796,13 @@ impl Runs {
             self.activity.fetch_add(1, Ordering::SeqCst);
             self.idle.notify_all();
         }
+    }
+
+    /// Test support: while `on`, every run waits after each epoch until this is turned off or the run is asked to
+    /// stop ([`EpochHold`]), so a test can stop a run that would otherwise finish first.
+    pub fn hold_after_epochs(&self, on: bool) {
+        *self.hold.on.lock().unwrap_or_else(|p| p.into_inner()) = on;
+        self.hold.lifted.notify_all();
     }
 
     /// Requests a stop: a queued run stops at once, a running one after its current batch (keeping the last
@@ -1065,12 +1094,12 @@ fn read_metrics(path: &Path) -> RunMetrics {
 }
 
 /// Trains one run on the worker thread.
-fn execute(e: &Arc<RunEntry>, throughput: &Arc<Throughput>) {
+fn execute(e: &Arc<RunEntry>, throughput: &Arc<Throughput>, hold: &Arc<EpochHold>) {
     let (config, dataset, weights) = {
         let st = e.state.lock().unwrap();
         (st.file.run.config.clone(), st.file.dataset.clone(), st.file.weights.clone())
     };
-    let trainer = build(e, &config, &dataset, weights);
+    let trainer = build(e, &config, &dataset, weights, hold);
     let mut trainer = match trainer {
         Ok(t) => t,
         Err((code, msg)) => {
@@ -1133,6 +1162,7 @@ fn build(
     config: &TrainConfig,
     dataset: &DatasetRef,
     weights: Option<PathBuf>,
+    hold: &Arc<EpochHold>,
 ) -> std::result::Result<Trainer, (String, String)> {
     let device =
         engine::resolve(&config.device).map_err(|err| (err.body.code.to_string(), err.body.message))?;
@@ -1148,10 +1178,15 @@ fn build(
         val: Arc::new(ds.split(Split::Val).clone()),
         classes: ds.classes.clone(),
     };
-    let sink = e.clone();
+    let (sink, hold, stop) = (e.clone(), hold.clone(), e.stop.clone());
     let opts = TrainOptions {
         run_dir: Some(e.dir.clone()),
-        events: Some(Box::new(move |ev: &RunEvent| sink.on_event(ev))),
+        events: Some(Box::new(move |ev: &RunEvent| {
+            sink.on_event(ev);
+            if matches!(ev, RunEvent::Epoch(_)) {
+                hold.wait(&stop);
+            }
+        })),
         stop: e.stop.clone(),
         weights,
         ..TrainOptions::default()
