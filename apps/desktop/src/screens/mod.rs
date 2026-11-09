@@ -161,6 +161,8 @@ impl FoloApp {
         s.run_data.clear();
         s.samples.clear();
         s.logs.clear();
+        // The throughput table reloads too (a probe in flight keeps its own state).
+        self.throughput = Load::Idle;
         cx.notify();
     }
 }

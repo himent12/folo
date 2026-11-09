@@ -113,6 +113,19 @@ pub trait Backend: Send + Sync + 'static {
     fn estimate_run(&self, _config: &TrainConfig) -> ApiResult<RunEstimate> {
         Err(ApiError::new("not_supported", "This server can't estimate a run"))
     }
+    /// The server's speed table (`GET /api/system/throughput`, servers with `throughput`): what it
+    /// measured on its own devices, and the reference rows for everything it hasn't.
+    fn throughput(&self) -> ApiResult<ThroughputTable> {
+        Err(ApiError::new("not_supported", "This server doesn't keep a throughput table"))
+    }
+
+    /// A quick probe on the server's device (`POST /api/system/benchmark`, servers with
+    /// `benchmark`): a few seconds of training and predictions, added to the table as measured.
+    /// `409 run_active` while a run is queued or training.
+    fn benchmark(&self, _req: &BenchmarkRequest) -> ApiResult<BenchmarkReport> {
+        Err(ApiError::new("not_supported", "This server can't measure its speed"))
+    }
+
     /// Moves a waiting run in the training queue (`POST /api/runs/{id}/queue`, servers with the
     /// `queue_control` feature): `409 run_not_queued` once the worker has taken it.
     fn queue_run(&self, _id: &str, _req: QueueRequest) -> ApiResult<Run> {
