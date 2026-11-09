@@ -45,10 +45,12 @@ fn format_name(f: Format) -> &'static str {
 /// Maps a folo-data error to the CLI's codes and exit codes.
 fn data_error(e: DataError, path: &Path) -> CliError {
     match e {
-        DataError::Io { source, .. } if source.kind() == std::io::ErrorKind::NotFound => {
-            CliError::new(ExitCode::NotFound, "path_not_found", format!("{} does not exist", path.display()))
-                .hint("pass a dataset folder, a data.yaml or a COCO instances .json")
-        }
+        DataError::Io { source, .. } if source.kind() == std::io::ErrorKind::NotFound => CliError::new(
+            ExitCode::NotFound,
+            "path_not_found",
+            format!("{} does not exist", folo_api::json::path(path)),
+        )
+        .hint("pass a dataset folder, a data.yaml or a COCO instances .json"),
         DataError::Format(m) if m.starts_with(folo_data::UNDETECTED) => {
             CliError::new(ExitCode::Runtime, "unknown_format", m).hint(
                 "expected data.yaml or images/ + labels/ (YOLO), or annotations/instances_*.json (COCO)",
@@ -73,7 +75,7 @@ fn ensure_empty_output(dir: &Path) -> Result<(), CliError> {
         return Err(CliError::new(
             ExitCode::Runtime,
             "output_exists",
-            format!("{} exists and is not an empty folder", dir.display()),
+            format!("{} exists and is not an empty folder", folo_api::json::path(dir)),
         )
         .hint("pick a new folder, or delete this one first"));
     }
@@ -171,7 +173,7 @@ fn stats_table(name: &str, ds: &LoadedDataset, s: &DatasetStats) -> Vec<String> 
     let [train, val, test] = ds.split_sizes();
     let images = train + val + test;
     let mut l = vec![
-        format!("{name}  ({}, {})", format_name(ds.format), ds.root.display()),
+        format!("{name}  ({}, {})", format_name(ds.format), folo_api::json::path(&ds.root)),
         format!(
             "images   {images} (train {train} · val {val} · test {test})   boxes {}   empty {}   broken labels {}{}",
             s.boxes,
@@ -278,7 +280,7 @@ fn check(args: CheckArgs, out: Out) -> Result<(), CliError> {
     Err(CliError::new(
         ExitCode::Runtime,
         "dataset_issues",
-        format!("{} has {errors} error(s) and {warnings} warning(s)", args.path.display()),
+        format!("{} has {errors} error(s) and {warnings} warning(s)", folo_api::json::path(&args.path)),
     )
     .hint(if args.fix_dry_run {
         "nothing was changed; the `fix` of each issue says what a cleanup would do"
@@ -302,7 +304,7 @@ fn check_lines(r: &CheckReport, fixes: bool, secs: f64) -> Vec<String> {
         "checked {} images ({}, {}) in {secs:.1}s",
         r.images(),
         format_name(r.format),
-        r.root.display()
+        folo_api::json::path(&r.root)
     )];
     let problems: Vec<_> = r.issues.iter().filter(|i| i.severity() != Severity::Info).collect();
     if !problems.is_empty() {
@@ -430,7 +432,7 @@ fn synth(args: SynthArgs, out: Out) -> Result<(), CliError> {
         "wrote {} images ({train} train / {val} val, {} boxes) to {} in {secs:.1}s",
         cfg.images,
         written.boxes,
-        written.root.display()
+        folo_api::json::path(&written.root)
     ));
     let mapping: Vec<String> = names
         .iter()
@@ -438,8 +440,8 @@ fn synth(args: SynthArgs, out: Out) -> Result<(), CliError> {
         .map(|(n, s)| if n.eq_ignore_ascii_case(s) { n.clone() } else { format!("{n} ({s})") })
         .collect();
     out.human(format!("  classes  {}", mapping.join(", ")));
-    out.human(format!("  yaml     {}", written.yaml.display()));
-    out.human(format!("next: folo dataset stats {}", args.out_dir.display()));
+    out.human(format!("  yaml     {}", folo_api::json::path(&written.yaml)));
+    out.human(format!("next: folo dataset stats {}", folo_api::json::path(&args.out_dir)));
     Ok(())
 }
 
@@ -475,15 +477,15 @@ fn convert(args: ConvertArgs, out: Out) -> Result<(), CliError> {
     out.human(format!(
         "converted {} {} → {} at {} ({train} train / {val} val / {test} test images, {} boxes) in {secs:.1}s",
         format_name(ds.format),
-        args.input.display(),
+        folo_api::json::path(&args.input),
         format_name(to),
-        done.root.display(),
+        folo_api::json::path(&done.root),
         done.boxes
     ));
     if skipped > 0 {
         out.human(format!(
             "  {skipped} image(s) were skipped (unreadable or broken labels); run `folo dataset check {}`",
-            args.input.display()
+            folo_api::json::path(&args.input)
         ));
     }
     Ok(())

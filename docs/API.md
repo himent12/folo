@@ -47,8 +47,12 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
 ## System
 - `GET /api/health` → `{ "status": "ok", "version": "0.1.0", "api": "v1", "mock": false }`
 - `GET /api/system` → `{ "cpu": { "name", "threads", "util" }, "memory": { "used_bytes", "total_bytes" },
-  "gpus": [{ "ordinal", "name", "backend": "vulkan|dx12|metal", "memory_bytes", "util" | null }] }`
-  (`util` in `0..1`; CPU utilisation is measured since the previous call.) In real mode `gpus` comes from folo-gpu
+  "gpus": [{ "ordinal", "name", "backend": "vulkan|dx12|metal", "memory_bytes", "util" | null }],
+  "data_dir"?: "D:/folo-data", "features": ["export_onnx_switches"] }`
+  (`util` in `0..1`; CPU utilisation is measured since the previous call. `data_dir` is the real server's
+  `--data-dir`, with `/` separators, where its runs, models and exports live; the mock server leaves it out. `features` lists optional API features
+  the server implements, so a client can check before relying on one: `export_onnx_switches` (the export switches
+  below; older servers accept and ignore them). `folo mcp --server` refuses the switches without it.) In real mode `gpus` comes from folo-gpu
   (wgpu): every physical adapter once, through its preferred backend (software adapters are left out), best first,
   so ordinal 0 is the adapter `gpu:0` and `device: auto` use. wgpu reports neither memory size nor load, so
   `memory_bytes` is `0` and `util` `null`.
@@ -153,11 +157,14 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   §8.7 settings: `conf 0.001`, `iou 0.7`, the model's `imgsz`) on the server's `--device`, then cached (in memory and
   in `cache/eval/<model id>.json`) until the weights file or the dataset's files change. `pr` has curves for the
   classes with ground truth.
-- `POST /api/models/{id}/export` body `{ "format": "folo-f16|onnx" }` → `{ "path", "bytes" }`. Real mode writes
+- `POST /api/models/{id}/export` body `{ "format": "folo-f16|onnx", "decode"?: false, "dynamic"?: false,
+  "half"?: false }` → `{ "path", "bytes" }`. The three switches are `folo export`'s `--decode`, `--dynamic` and
+  `--half` and only apply to `onnx` (with `folo-f16` any of them is `400 invalid_body`). Real mode writes
   the fused EMA weights to `<data dir>/exports/`: `folo-f16` as f16 `.folo` (as `folo export` does, docs/FORMAT.md)
   to `<model name>-f16.folo`; `onnx` as an ONNX graph (opset 17) to `<model name>.onnx`, with the defaults of
   `folo export --format onnx` (docs/CLI.md, ONNX export): f32, a fixed batch of 1, the model's training imgsz
-  (square), and the raw head outputs `box_raw` / `cls_raw`. Names get `-2`, `-3`, ... when taken (exports never
+  (square), and the raw head outputs `box_raw` / `cls_raw`, unless a switch says otherwise (`half` writes
+  `<model name>-f16.onnx`). Names get `-2`, `-3`, ... when taken (exports never
   overwrite). `path` uses `/` separators. A model the ONNX exporter cannot map is `501 not_implemented` naming the
   part (no FOLO v1 model hits this).
 - `GET /api/models/{id}/weights` (optional `?format=f16`) → the model's `.folo` file (docs/FORMAT.md), for loading
@@ -295,8 +302,16 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   `folo serve --tensor-cores` the f16 convolutions and matrix products run on the GPU's tensor cores where it has
   them).
   Loaded models stay in an LRU of 4 (keyed by the weights file's path, size and modification time, and the precision,
-  so retrained weights are reloaded); `timing` is measured:
-  `preprocess_ms` includes decoding the image, `postprocess_ms` covers decoding the head outputs, NMS and rescaling.
+  so retrained weights are reloaded); `timing` is measured wall time, and on a GPU each stage ends only once the
+  device has finished the work it queued (the predictor waits for the device after the letterbox and after the
+  forward pass), so no stage is billed for another's GPU time:
+  - `preprocess_ms`: decoding the image file, the letterbox and the upload (on a GPU the letterbox runs there);
+  - `inference_ms`: the forward pass, until the device has finished it;
+  - `postprocess_ms`: decoding the head outputs into candidates (on a GPU, a small kernel), reading them back, NMS
+    and mapping the boxes to image pixels;
+  - `total_ms`: their sum.
+  The browser runtime (docs/WASM.md) cannot wait for WebGPU mid-pipeline, so there `inference_ms` also holds the
+  on-device head decode and its readback. FOLO Desktop's Local GPU uses the same predictor as the server.
 - `GET /api/predict/stream?model_id=..&conf=..` — WebSocket: the client sends JPEG frames (binary), the server
   answers each with the same JSON as `/api/predict` (for webcam / screen demos). Later milestone; answers
   `501 not_implemented` for now.

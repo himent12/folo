@@ -62,9 +62,65 @@ pub const MAX_NONFINITE_BATCHES: usize = 10;
 /// The extra `folo.train` key holding the number of training images, checked on resume.
 pub const TRAIN_IMAGES_KEY: &str = "train_images";
 
+/// The extra `folo.train` key holding the epochs at the end of the run with mosaic off
+/// ([`folo_data::AugmentConfig::close_mosaic_epochs`]), so a resume keeps them. A checkpoint without it predates
+/// the cap of docs/MODEL.md §8.6 ([`resumed_close_mosaic`]).
+pub const CLOSE_MOSAIC_KEY: &str = "close_mosaic_epochs";
+
+/// The closing epochs a resumed run keeps: [`CLOSE_MOSAIC_KEY`] of its `folo.train`, or for a checkpoint from
+/// before the cap, the old rule `min(close_mosaic, epochs)`.
+pub fn resumed_close_mosaic(train: &serde_json::Value, cfg: &TrainConfig) -> u32 {
+    match train.get(CLOSE_MOSAIC_KEY).and_then(|v| v.as_u64()) {
+        Some(n) => u32::try_from(n).unwrap_or(u32::MAX).min(cfg.epochs),
+        None => cfg.augment.close_mosaic.min(cfg.epochs),
+    }
+}
+
 /// Checkpoint metadata key (FORMAT.md: unknown `folo.*` keys are preserved) holding the run of non-finite batches
 /// at the end of the checkpoint's epoch, so a streak crossing a resume still fails at [`MAX_NONFINITE_BATCHES`].
 pub const NONFINITE_STREAK_KEY: &str = "folo.nonfinite_streak";
+
+/// Runs from scratch with fewer optimizer steps than this get a warning ([`schedule_warnings`]).
+pub const SHORT_RUN_STEPS: u64 = 200;
+
+/// Warnings for a run too short to learn from, emitted as `warn` log lines after the run's first log line and
+/// kept in `config.json` (`warnings`):
+/// - a run from scratch (`from_scratch`) with fewer than [`SHORT_RUN_STEPS`] optimizer steps;
+/// - a warmup longer than half of the run (docs/MODEL.md §8.4 caps only its 100-step floor, at 30% of the run,
+///   so this takes an explicit `warmup_epochs` close to `epochs`).
+pub fn schedule_warnings(
+    cfg: &TrainConfig,
+    sched: &LrSchedule,
+    train_images: usize,
+    from_scratch: bool,
+) -> Vec<String> {
+    let c = sched.contract();
+    let (total, warmup, spe) = (sched.total_iters(), c.warmup_iters, c.steps_per_epoch);
+    let mut out = Vec::new();
+    if from_scratch && total < SHORT_RUN_STEPS {
+        let acc = cfg.accumulate();
+        let batch = if acc > 1 {
+            format!("batch {} × accumulate {acc}", cfg.batch)
+        } else {
+            format!("batch {}", cfg.batch)
+        };
+        out.push(format!(
+            "this run takes only {total} optimizer steps ({} epochs × {spe}: {train_images} training images, {batch}); \
+             a detector trained from scratch usually needs a few hundred steps to learn anything, so expect an mAP \
+             near 0. Train for at least {} epochs, add images, or start from pretrained weights",
+            cfg.epochs,
+            SHORT_RUN_STEPS.div_ceil(spe.max(1)),
+        ));
+    }
+    if warmup.saturating_mul(2) > total {
+        out.push(format!(
+            "warmup takes {warmup} of the run's {total} optimizer steps, so the learning rate reaches lr0 only in the \
+             second half of the run; lower warmup_epochs (now {}) or train for more epochs",
+            cfg.warmup_epochs
+        ));
+    }
+    out
+}
 
 /// Early stopping (§8.7): record `fitness` of 0-based epoch `e` in `best`. Returns `(improved, stop)`: whether it
 /// is a new best, and whether the run stops after this epoch (`e − best.epoch >= patience`).
@@ -198,6 +254,8 @@ pub struct Trainer {
     opts_dir: Option<PathBuf>,
     stop: Arc<AtomicBool>,
     pending_logs: Vec<(LogLevel, String)>,
+    /// [`schedule_warnings`], logged after the run's first log line.
+    warnings: Vec<String>,
     /// The live state is exactly that of `epoch` completed epochs (false while an epoch runs, and for good once
     /// one was interrupted or failed): checkpoints may only be written then.
     at_boundary: bool,
@@ -216,6 +274,7 @@ impl Trainer {
     pub fn new(cfg: TrainConfig, data: TrainData, opts: TrainOptions) -> Result<Self> {
         let weights = opts.weights.clone();
         let mut t = Self::build(cfg, data, opts)?;
+        t.warnings = schedule_warnings(&t.cfg, &t.sched, t.data.train.len(), weights.is_none());
         if let Some(w) = weights {
             let file = ModelFile::open(&w)?;
             let report = t.model.transfer_from(&file)?;
@@ -228,7 +287,7 @@ impl Trainer {
                     "transferred {} of {} tensors from {} ({} skipped, {} missing)",
                     report.loaded.len(),
                     t.model.named_tensors().len(),
-                    w.display(),
+                    folo_api::json::path(&w),
                     report.skipped.len(),
                     report.missing.len()
                 ),
@@ -248,10 +307,13 @@ impl Trainer {
         let path = checkpoint.as_ref();
         let file = ModelFile::open(path)?;
         let c = file.checkpoint().ok_or_else(|| {
-            Error::Config(format!("{} is a weights file, not a training checkpoint", path.display()))
+            Error::Config(format!(
+                "{} is a weights file, not a training checkpoint",
+                folo_api::json::path(path)
+            ))
         })?;
         let mut cfg: TrainConfig = serde_json::from_value(c.train.clone()).map_err(|e| {
-            Error::Config(format!("{}: folo.train is not a TrainConfig: {e}", path.display()))
+            Error::Config(format!("{}: folo.train is not a TrainConfig: {e}", folo_api::json::path(path)))
         })?;
         if let Some(w) = overrides.workers {
             cfg.workers = w;
@@ -259,6 +321,7 @@ impl Trainer {
         if let Some(d) = overrides.device {
             cfg.device = d;
         }
+        cfg.augment.close_mosaic_fixed = Some(resumed_close_mosaic(&c.train, &cfg));
         if let Some(n) = c.train.get(TRAIN_IMAGES_KEY).and_then(|v| v.as_u64())
             && n != data.train.len() as u64
         {
@@ -287,6 +350,8 @@ impl Trainer {
             )));
         }
         t.sched = r.schedule;
+        // Whether the run started from weights is not recorded, so a resume repeats only the warmup warning.
+        t.warnings = schedule_warnings(&t.cfg, &t.sched, t.data.train.len(), false);
         t.epoch = u32::try_from(r.epoch).map_err(|_| Error::Config("folo.epoch out of range".into()))?;
         t.best = r.best;
         t.extra_meta = file.metadata().extra.clone();
@@ -308,7 +373,7 @@ impl Trainer {
             LogLevel::Info,
             format!(
                 "resumed from {} after epoch {} (optimizer step {})",
-                path.display(),
+                folo_api::json::path(path),
                 t.epoch,
                 t.sched.step()
             ),
@@ -333,6 +398,17 @@ impl Trainer {
             )));
         }
         let mut pending_logs = Vec::new();
+        let (close, close_eff) = (cfg.augment.close_mosaic, cfg.augment.close_mosaic_epochs(cfg.epochs));
+        if cfg.augment.mosaic > 0.0 && cfg.augment.close_mosaic_fixed.is_none() && close > close_eff {
+            pending_logs.push((
+                LogLevel::Info,
+                format!(
+                    "close_mosaic {close} is more than half of the {} epochs: mosaic closes for the last {close_eff} \
+                     instead",
+                    cfg.epochs
+                ),
+            ));
+        }
         let mut device = resolve_device(&cfg.device)?;
         if !device.is_cpu() && cfg.device.trim().eq_ignore_ascii_case("auto") {
             // `auto` must never pick a device the model cannot be placed on.
@@ -431,6 +507,7 @@ impl Trainer {
             opts_dir: opts.run_dir,
             stop: opts.stop,
             pending_logs,
+            warnings: Vec::new(),
             at_boundary: true,
             consecutive_bad: 0,
             extra_meta: BTreeMap::new(),
@@ -493,6 +570,11 @@ impl Trainer {
         self.consecutive_bad
     }
 
+    /// The [`schedule_warnings`] of this run.
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
+    }
+
     /// The flag [`TrainOptions::stop`] that stops this run.
     pub fn stop_flag(&self) -> Arc<AtomicBool> {
         self.stop.clone()
@@ -525,6 +607,8 @@ impl Trainer {
             "steps_per_epoch": c.steps_per_epoch,
             "total_iters": self.sched.total_iters(),
             "warmup_iters": c.warmup_iters,
+            "close_mosaic_epochs": self.cfg.augment.close_mosaic_epochs(self.cfg.epochs),
+            "warnings": self.warnings,
         })
     }
 
@@ -600,6 +684,9 @@ impl Trainer {
                 c.warmup_iters
             ),
         );
+        for w in &self.warnings {
+            self.emitter.log(LogLevel::Warn, w.clone());
+        }
         if self.data.val.is_empty() {
             self.emitter.log(
                 LogLevel::Warn,
@@ -645,8 +732,10 @@ impl Trainer {
             let e = self.epoch;
             let a = &self.cfg.augment;
             if e > 0 && a.mosaic > 0.0 && a.mosaic_active(e - 1, epochs) && !a.mosaic_active(e, epochs) {
-                self.emitter
-                    .log(LogLevel::Info, format!("closing mosaic for the last {} epochs", a.close_mosaic));
+                self.emitter.log(
+                    LogLevel::Info,
+                    format!("closing mosaic for the last {} epochs", a.close_mosaic_epochs(epochs)),
+                );
             }
             let t0 = Instant::now();
             self.at_boundary = false;
@@ -938,6 +1027,7 @@ impl Trainer {
         let rng = RngState { seed: self.cfg.seed, streams };
         let mut train = serde_json::to_value(&self.cfg).expect("config serialises");
         train[TRAIN_IMAGES_KEY] = serde_json::json!(self.data.train.len());
+        train[CLOSE_MOSAIC_KEY] = serde_json::json!(self.cfg.augment.close_mosaic_epochs(self.cfg.epochs));
         let parts = CheckpointParts {
             model: &self.model,
             ema: self.ema.as_ref().map(|e| e as &dyn EmaState),
@@ -967,8 +1057,8 @@ fn device_loss_message(e: &Error, last: Option<(&Path, u32)>) -> String {
     let resume = match last {
         Some((p, n)) => format!(
             "{} holds the state after epoch {n}: resume with `folo train --resume {}`",
-            p.display(),
-            p.display()
+            folo_api::json::path(p),
+            folo_api::json::path(p)
         ),
         None => "no checkpoint was written yet: start the run again".into(),
     };
@@ -991,6 +1081,19 @@ struct Clock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A resumed run keeps the closing epochs its checkpoint records; one from before the cap keeps the old rule.
+    #[test]
+    fn resumes_keep_their_close_mosaic() {
+        let cfg = TrainConfig { epochs: 8, ..TrainConfig::default() };
+        let old = serde_json::to_value(&cfg).unwrap();
+        assert_eq!(resumed_close_mosaic(&old, &cfg), 8, "close_mosaic 10 of 8 epochs: no mosaic at all");
+        let mut new = old.clone();
+        new[CLOSE_MOSAIC_KEY] = serde_json::json!(cfg.augment.close_mosaic_epochs(cfg.epochs));
+        assert_eq!(resumed_close_mosaic(&new, &cfg), 4);
+        // The key is not a TrainConfig field: folo.train with it still parses.
+        assert!(serde_json::from_value::<TrainConfig>(new).is_ok());
+    }
 
     /// A lost GPU device is recognised wherever it surfaces (tensor work, a layer, the batch feeder) and the
     /// message names the checkpoint that was actually written; other errors are left alone.

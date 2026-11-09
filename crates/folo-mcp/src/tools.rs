@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 use base64::Engine as _;
 use folo_api::IssuePage;
 use folo_api::{
-    Arch, Dataset, ExportResult, IssueSeverity, Model, PredictResponse, RegisterDataset, Run, RunMetrics,
-    SyntheticDataset, ValReport, ValRequest,
+    Arch, Dataset, ExportResult, ExportSpec, IssueSeverity, LogLevel, LogLine, Model, OnnxSwitches,
+    PredictResponse, RegisterDataset, Run, RunMetrics, SyntheticDataset, ValReport, ValRequest,
 };
 use folo_server::store::{ImageQuery, IssueQuery, PredictInput, PredictSource};
 use rmcp::handler::server::common::{schema_for_input, schema_for_output};
@@ -298,7 +298,7 @@ pub const TOOLS: &[ToolDef] = &[
     ToolDef {
         name: "list_dataset_images",
         description: "Lists a dataset's images (optionally one split or class, optionally with boxes). Paged. \
-                      Read folo://datasets/{dataset_id}/images/{image_id} to look at an image.",
+                      Read folo://datasets/{dataset_id}/images/{image_id} (a 512 px JPEG; ?size=original: the file) to look at an image.",
         mutating: false,
         input: input::<ListImagesArgs>,
         output: output::<Page<ImageSummary>>,
@@ -938,6 +938,9 @@ impl Inner {
         let a: TrainArgs = parse_args(args).map_err(|mut e| {
             if !e.body.message.contains("missing field") {
                 e.body.code = "invalid_config".into();
+                if let Some(rest) = e.body.message.strip_prefix("invalid arguments: ") {
+                    e.body.message = format!("invalid train config: {rest}");
+                }
             }
             e
         })?;
@@ -986,18 +989,22 @@ impl Inner {
         }
         let id = a.run_id.clone();
         let n = a.log_lines as usize;
-        let (run, metrics, log) = self
+        let (run, metrics, mut log) = self
             .blocking(move |s| {
                 let run = s.get_run(&id)?;
                 let metrics = s.run_metrics(&id, u64::MAX)?;
-                let log = if n == 0 { Vec::new() } else { s.run_logs(&id, n)? };
+                // The whole log (as far as /logs serves it), for the warnings; `log` keeps the last n lines.
+                let log = s.run_logs(&id, WARNING_SCAN_LINES)?;
                 Ok((run, metrics, log))
             })
             .await?;
+        let warnings = log_warnings(&log);
+        log.drain(..log.len().saturating_sub(n));
         let mut r = RunStatusResult {
             run,
             last_step: metrics.steps.last().copied(),
             last_epoch: metrics.epochs.last().cloned(),
+            warnings,
             log,
         };
         while json_len(&r) > MAX_RESULT_BYTES && !r.log.is_empty() {
@@ -1008,7 +1015,14 @@ impl Inner {
         {
             e.val.per_class.clear();
         }
-        out(&r, run_line(&r.run))
+        let mut line = run_line(&r.run);
+        if let Some(w) = r.warnings.first() {
+            line.push_str(&format!("; warning: {w}"));
+            if r.warnings.len() > 1 {
+                line.push_str(&format!(" (+{} more in `warnings`)", r.warnings.len() - 1));
+            }
+        }
+        out(&r, line)
     }
 
     async fn list_runs(&self, a: ListRunsArgs) -> Result<Output, Error> {
@@ -1062,8 +1076,11 @@ impl Inner {
         if !(1..=300).contains(&a.max_det) {
             return Err(invalid_arguments(format!("max_det must be in 1..=300, got {}", a.max_det)));
         }
+        // The file an `image_path` names, for a decode error (the server only sees the uploaded bytes).
+        let mut file = None;
         let source = match (a.image_path, a.image_base64, a.dataset_id, a.image_id) {
             (Some(p), None, None, None) => {
+                file = Some(folo_api::json::path(&p));
                 let paths = self.paths.clone();
                 let read = move || read_image(&paths.resolve(&p)?);
                 PredictSource::Upload(tokio::task::spawn_blocking(read).await.map_err(join)??)
@@ -1091,7 +1108,14 @@ impl Inner {
         };
         let input =
             PredictInput { model_id: a.model_id, source, conf: a.conf, iou: a.iou, max_det: a.max_det };
-        let mut r = self.blocking(move |s| s.predict(input)).await?;
+        let mut r = self.blocking(move |s| s.predict(input)).await.map_err(|mut e| {
+            if let Some(f) = &file
+                && e.body.code == "image_decode_failed"
+            {
+                e.body.message = format!("{f}: {}", e.body.message);
+            }
+            e
+        })?;
         r.boxes.truncate(a.max_det as usize);
         let mut dropped = 0;
         while json_len(&r) > MAX_RESULT_BYTES && r.boxes.pop().is_some() {
@@ -1223,7 +1247,11 @@ impl Inner {
     }
 
     async fn export(&self, a: ExportArgs) -> Result<Output, Error> {
-        let r = self.blocking(move |s| s.export_model(&a.model_id, a.format)).await?;
+        let spec = ExportSpec {
+            format: a.format,
+            onnx: OnnxSwitches { decode: a.decode, dynamic: a.dynamic, half: a.half },
+        };
+        let r = self.blocking(move |s| s.export_model(&a.model_id, spec)).await?;
         out(&r, format!("wrote {} ({} bytes)", r.path, r.bytes))
     }
 
@@ -1283,16 +1311,18 @@ impl Inner {
 
     /// The `folo_info` record.
     pub async fn info(&self) -> Result<FoloInfo, Error> {
-        let (cpu, gpus) = match &self.proxy {
+        let (cpu, gpus, data_dir) = match &self.proxy {
             Some(p) => {
                 let p = p.clone();
                 let sys = tokio::task::spawn_blocking(move || p.system()).await.map_err(join)??;
+                let (data_dir, sys) = (sys.data_dir, sys.system);
                 let cpu = CpuDevice {
                     name: sys.cpu.name,
                     threads: sys.cpu.threads,
                     memory_bytes: sys.memory.total_bytes,
                 };
-                (cpu, sys.gpus)
+                // The server's data dir: runs, models and exports live there, not under this process's default.
+                (cpu, sys.gpus, data_dir)
             }
             None => {
                 let store = self.store.clone();
@@ -1306,6 +1336,7 @@ impl Inner {
                     (cpu, store.gpus())
                 })
                 .await
+                .map(|(cpu, gpus)| (cpu, gpus, Some(folo_api::json::path(&self.paths.data_dir))))
                 .map_err(join)?
             }
         };
@@ -1320,7 +1351,7 @@ impl Inner {
             }
             .to_string(),
             server: self.proxy.as_ref().map(|p| p.base().to_string()),
-            data_dir: Some(self.paths.data_dir.to_string_lossy().into_owned()),
+            data_dir,
             read_only: self.opts.read_only,
             confine: self.paths.confine,
             devices: Devices { cpu, gpus },
@@ -1360,6 +1391,28 @@ impl StatusStr for Run {
 }
 
 /// One line describing a run.
+/// Log lines `run_status` reads for its `warnings` (the server's `/logs` maximum).
+const WARNING_SCAN_LINES: usize = 5000;
+
+/// Distinct `warn` lines `run_status` reports.
+const MAX_WARNINGS: usize = 5;
+
+/// The distinct `warn`-level messages of a run's log, oldest first, at most [`MAX_WARNINGS`] (each capped at 400
+/// characters).
+fn log_warnings(log: &[LogLine]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for l in log.iter().filter(|l| l.level == LogLevel::Warn) {
+        let m = folo_api::codes::cap(&l.message, 400);
+        if !out.contains(&m) {
+            out.push(m);
+            if out.len() == MAX_WARNINGS {
+                break;
+            }
+        }
+    }
+    out
+}
+
 fn run_line(r: &Run) -> String {
     let mut s =
         format!("{} ({}): {}, epoch {}/{}, step {}", r.id, r.name, r.status_str(), r.epoch, r.epochs, r.step);
@@ -1388,20 +1441,20 @@ fn read_image(path: &Path) -> Result<Vec<u8>, Error> {
         Error::new(
             http::StatusCode::NOT_FOUND,
             "path_not_found",
-            format!("{} does not exist", path.display()),
+            format!("{} does not exist", folo_api::json::path(path)),
         )
     })?;
     if !meta.is_file() {
-        return Err(invalid_arguments(format!("{} is not a file", path.display())));
+        return Err(invalid_arguments(format!("{} is not a file", folo_api::json::path(path))));
     }
     if meta.len() > MAX_IMAGE_BYTES {
         return Err(Error::new(
             http::StatusCode::PAYLOAD_TOO_LARGE,
             "payload_too_large",
-            format!("{} is larger than 64 MiB", path.display()),
+            format!("{} is larger than 64 MiB", folo_api::json::path(path)),
         ));
     }
-    std::fs::read(path).map_err(|e| Error::internal(format!("reading {}: {e}", path.display())))
+    std::fs::read(path).map_err(|e| Error::internal(format!("reading {}: {e}", folo_api::json::path(path))))
 }
 
 /// Dotted-path fields whose values differ between `configs`, with one value per config.
@@ -1441,6 +1494,23 @@ fn config_diff(configs: &[Value]) -> BTreeMap<String, Vec<Value>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn run_status_lists_distinct_warnings() {
+        let line = |level, m: &str| LogLine { t: String::new(), level, message: m.into() };
+        let mut log = vec![
+            line(LogLevel::Info, "folo-n on gpu:0 …"),
+            line(LogLevel::Warn, "this run takes only 36 optimizer steps"),
+            line(LogLevel::Warn, "this run takes only 36 optimizer steps"),
+            line(LogLevel::Error, "run failed"),
+        ];
+        log.extend((0..10).map(|i| line(LogLevel::Warn, &format!("epoch 1 batch {i}: non-finite loss"))));
+        let w = log_warnings(&log);
+        assert_eq!(w.len(), MAX_WARNINGS);
+        assert_eq!(w[0], "this run takes only 36 optimizer steps");
+        assert_eq!(w[1], "epoch 1 batch 0: non-finite loss");
+        assert!(log_warnings(&log[..1]).is_empty());
+    }
 
     #[test]
     fn every_schema_is_an_object() {

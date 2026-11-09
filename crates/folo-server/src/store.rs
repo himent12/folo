@@ -4,10 +4,12 @@
 //! [`crate::real::RealStore`] (datasets on disk, training runs, models and inference on the FOLO engine). Methods
 //! are synchronous; handlers run the ones that may touch the disk or burn CPU on tokio's blocking pool.
 
+use std::path::Path;
+
 use folo_api::{
-    Dataset, ExportFormat, ExportResult, GpuInfo, LogLine, Model, ModelEval, PredictResponse,
-    RegisterDataset, Run, RunEvent, RunMetrics, RunSamples, Split, StatusEvent, SyntheticDataset,
-    TrainConfig, ValReport, ValRequest,
+    Dataset, ExportResult, ExportSpec, GpuInfo, LogLine, Model, ModelEval, PredictResponse, RegisterDataset,
+    Run, RunEvent, RunMetrics, RunSamples, Split, StatusEvent, SyntheticDataset, TrainConfig, ValReport,
+    ValRequest,
 };
 use tokio::sync::broadcast;
 
@@ -137,6 +139,19 @@ impl Weights {
     }
 }
 
+/// `400 invalid_body` for ONNX switches on a `folo-f16` export (every [`Store::export_model`] checks this).
+pub fn check_export(spec: &ExportSpec) -> Result<()> {
+    if spec.format != folo_api::ExportFormat::Onnx && spec.onnx.any() {
+        return Err(crate::error::Error::new(
+            axum::http::StatusCode::BAD_REQUEST,
+            "invalid_body",
+            "decode, dynamic and half only apply to format onnx",
+        )
+        .hint("folo-f16 is already the half-precision .folo export; leave the switches out"));
+    }
+    Ok(())
+}
+
 /// An IO error on the weights file of model `id`: `model_not_found` when the file is gone, else `internal`.
 pub fn weights_io(e: std::io::Error, path: &std::path::Path, id: &str) -> crate::error::Error {
     if e.kind() == std::io::ErrorKind::NotFound {
@@ -207,6 +222,10 @@ pub trait Store: Send + Sync + 'static {
     fn is_mock(&self) -> bool;
     /// GPUs to report in `/api/system`.
     fn gpus(&self) -> Vec<GpuInfo>;
+    /// The data dir to report in `/api/system` (`None`: the mock store).
+    fn data_dir(&self) -> Option<&Path> {
+        None
+    }
 
     /// All datasets (without stats), oldest first.
     fn list_datasets(&self) -> Result<Vec<Dataset>>;
@@ -232,7 +251,7 @@ pub trait Store: Send + Sync + 'static {
     /// Validation results of a model.
     fn model_eval(&self, id: &str) -> Result<ModelEval>;
     /// Exports a model.
-    fn export_model(&self, id: &str, format: ExportFormat) -> Result<ExportResult>;
+    fn export_model(&self, id: &str, spec: ExportSpec) -> Result<ExportResult>;
     /// A model's weights file (`GET /api/models/{id}/weights`). Stores without files answer
     /// `501 not_implemented` (the default).
     fn model_weights(&self, id: &str, format: WeightsFormat) -> Result<Weights> {

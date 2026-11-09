@@ -22,7 +22,7 @@ pub fn check(path: &Path) -> std::io::Result<()> {
     match GUARD.get() {
         Some(allow) if !allow(path) => Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
-            format!("{} {DENIED}", path.display()),
+            format!("{} {DENIED}", crate::paths::shown(path)),
         )),
         _ => Ok(()),
     }

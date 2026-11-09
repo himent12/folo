@@ -6,10 +6,10 @@
 use std::time::Duration;
 
 use folo_api::{
-    Dataset, DatasetList, ErrorBody, ExportFormat, ExportRequest, ExportResult, GpuInfo, Health, ImagePage,
-    IssuePage, LogLine, Model, ModelEval, ModelList, PredictRequest, PredictResponse, RegisterDataset, Run,
-    RunList, RunLogs, RunMetrics, RunSamples, SyntheticDataset, SystemInfo, TrainConfig, ValReport,
-    ValRequest,
+    Dataset, DatasetList, ErrorBody, ExportResult, ExportSpec, FEATURE_EXPORT_ONNX_SWITCHES, GpuInfo, Health,
+    ImagePage, IssuePage, LogLine, Model, ModelEval, ModelList, PredictRequest, PredictResponse,
+    RegisterDataset, Run, RunList, RunLogs, RunMetrics, RunSamples, SyntheticDataset, SystemInfo,
+    SystemResponse, TrainConfig, ValReport, ValRequest,
 };
 use folo_server::store::{
     ImageData, ImageQuery, IssueQuery, PredictInput, PredictSource, Store, Subscription,
@@ -61,7 +61,7 @@ impl HttpStore {
     }
 
     /// `GET /api/system` of the server.
-    pub fn system(&self) -> Result<SystemInfo, Error> {
+    pub fn system(&self) -> Result<SystemResponse, Error> {
         self.get("/system")
     }
 
@@ -226,8 +226,21 @@ impl Store for HttpStore {
         self.get(&format!("/models/{}/eval", encode(id)))
     }
 
-    fn export_model(&self, id: &str, format: ExportFormat) -> Result<ExportResult, Error> {
-        self.post(&format!("/models/{}/export", encode(id)), &ExportRequest { format })
+    fn export_model(&self, id: &str, spec: ExportSpec) -> Result<ExportResult, Error> {
+        folo_server::store::check_export(&spec)?;
+        // An older server accepts the switches and ignores them, which would export the defaults silently.
+        if spec.onnx.any() && !self.system()?.features.iter().any(|f| f == FEATURE_EXPORT_ONNX_SWITCHES) {
+            return Err(Error::new(
+                StatusCode::NOT_IMPLEMENTED,
+                "not_implemented",
+                format!(
+                    "the folo serve at {} is too old for the ONNX switches (decode, dynamic, half)",
+                    self.base
+                ),
+            )
+            .hint("update folo serve, or export without the switches and use `folo export --format onnx`"));
+        }
+        self.post(&format!("/models/{}/export", encode(id)), &spec)
     }
 
     fn list_runs(&self) -> Result<Vec<Run>, Error> {

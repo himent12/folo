@@ -12,9 +12,9 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use folo_api::{
-    API_VERSION, DatasetList, ExportRequest, Health, ImagePage, IssuePage, LogLevel, LogLine, ModelList,
+    API_VERSION, DatasetList, ExportSpec, Health, ImagePage, IssuePage, LogLevel, LogLine, ModelList,
     PredictRequest, RegisterDataset, RunEvent, RunList, RunLogs, Split, SyntheticDataset, SystemInfo,
-    TrainConfig, ValReport, ValRequest,
+    SystemResponse, TrainConfig, ValReport, ValRequest,
 };
 use futures_util::{Stream, StreamExt, stream};
 use serde::Deserialize;
@@ -107,12 +107,14 @@ async fn health(State(st): State<AppState>) -> Json<Health> {
     })
 }
 
-async fn system(State(st): State<AppState>) -> Result<Json<SystemInfo>> {
+async fn system(State(st): State<AppState>) -> Result<Json<SystemResponse>> {
     let probe = st.probe.clone();
     let (cpu, memory) = tokio::task::spawn_blocking(move || probe.sample())
         .await
         .map_err(|e| Error::internal(format!("task failed: {e}")))?;
-    Ok(Json(SystemInfo { cpu, memory, gpus: st.store.gpus() }))
+    let data_dir = st.store.data_dir().map(folo_api::json::path);
+    let features = vec![folo_api::FEATURE_EXPORT_ONNX_SWITCHES.to_string()];
+    Ok(Json(SystemResponse { system: SystemInfo { cpu, memory, gpus: st.store.gpus() }, data_dir, features }))
 }
 
 // ---- datasets ----------------------------------------------------------------------------------------------------
@@ -249,9 +251,9 @@ async fn model_eval(State(st): State<AppState>, ApiPath(id): ApiPath<String>) ->
 async fn export_model(
     State(st): State<AppState>,
     ApiPath(id): ApiPath<String>,
-    ApiJson(req): ApiJson<ExportRequest>,
+    ApiJson(spec): ApiJson<ExportSpec>,
 ) -> Result<Response> {
-    Ok(Json(blocking(&st, move |s| s.export_model(&id, req.format)).await?).into_response())
+    Ok(Json(blocking(&st, move |s| s.export_model(&id, spec)).await?).into_response())
 }
 
 #[derive(Deserialize)]

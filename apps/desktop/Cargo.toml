@@ -55,6 +55,10 @@ opt-level = 1
 [profile.dev.package."*"]
 opt-level = 2
 
-[profile.release]
+# `release` keeps cargo's defaults (no LTO, 16 codegen units) for development (`cargo run --release`): thin LTO with
+# one codegen unit over GPUI crashed rustc on a loaded 32 GB machine (docs/DOGFOOD-2.md D1). The shipped binary is
+# `dist` (.github/workflows/release.yml: `cargo build --profile dist`, output in `target/dist/`).
+[profile.dist]
+inherits = "release"
 lto = "thin"
 codegen-units = 1

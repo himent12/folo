@@ -32,7 +32,7 @@ pub fn train(args: TrainArgs, out: Out) -> Result<(), CliError> {
     watch_stop_file(&run_dir, stop);
     nb.store(trainer.batches_per_epoch() as u64, Ordering::Relaxed);
     if !out.json {
-        out.human(format!("Run folder: {}", run_dir.display()));
+        out.human(format!("Run folder: {}", folo_api::json::path(&run_dir)));
     }
     let summary = match trainer.run() {
         Ok(s) => s,
@@ -52,7 +52,7 @@ pub fn train(args: TrainArgs, out: Out) -> Result<(), CliError> {
 /// (the error says what happened).
 fn discard_if_empty(run_dir: &Path, out: Out) {
     if !run_dir.join("weights").join("last.folo").exists() && std::fs::remove_dir_all(run_dir).is_ok() {
-        out.human(format!("removed {} (no epoch finished)", run_dir.display()));
+        out.human(format!("removed {} (no epoch finished)", folo_api::json::path(run_dir)));
     }
 }
 
@@ -65,7 +65,10 @@ fn watch_stop_file(run_dir: &Path, stop: Arc<AtomicBool>) {
         while !stop.load(Ordering::Relaxed) {
             if file.exists() {
                 let _ = std::fs::remove_file(&file);
-                eprintln!("stop requested ({}); stopping after the current batch…", file.display());
+                eprintln!(
+                    "stop requested ({}); stopping after the current batch…",
+                    folo_api::json::path(&file)
+                );
                 stop.store(true, Ordering::Relaxed);
                 return;
             }
@@ -80,16 +83,20 @@ pub fn request_stop(run_dir: &Path, out: Out) -> Result<(), CliError> {
         CliError::new(exit, code, msg).hint("pass the run_dir that `folo train` printed, e.g. runs/shapes-n")
     };
     if !run_dir.is_dir() {
-        let msg = format!("{} does not exist", run_dir.display());
+        let msg = format!("{} does not exist", folo_api::json::path(run_dir));
         return Err(not_a_run("path_not_found", ExitCode::NotFound, msg));
     }
     if !run_dir.join("config.json").is_file() && !run_dir.join("weights").is_dir() {
-        let msg = format!("{} is not a run folder (it has no config.json)", run_dir.display());
+        let msg = format!("{} is not a run folder (it has no config.json)", folo_api::json::path(run_dir));
         return Err(not_a_run("run_not_found", ExitCode::NotFound, msg));
     }
     let file = run_dir.join(STOP_FILE);
     std::fs::write(&file, b"stop\n").map_err(|e| {
-        CliError::new(ExitCode::Runtime, "io_error", format!("cannot write {}: {e}", file.display()))
+        CliError::new(
+            ExitCode::Runtime,
+            "io_error",
+            format!("cannot write {}: {e}", folo_api::json::path(&file)),
+        )
     })?;
     out.record(&json!({
         "event": "stop_requested",
@@ -98,7 +105,7 @@ pub fn request_stop(run_dir: &Path, out: Out) -> Result<(), CliError> {
     }));
     out.human(format!(
         "Asked the run in {} to stop after its current batch; its `folo train` ends with status `stopped`.",
-        run_dir.display()
+        folo_api::json::path(run_dir)
     ));
     Ok(())
 }
@@ -169,7 +176,7 @@ fn start(
         CliError::new(
             ExitCode::Runtime,
             "io_error",
-            format!("cannot create a run folder under {}: {e}", args.project.display()),
+            format!("cannot create a run folder under {}: {e}", folo_api::json::path(&args.project)),
         )
     })?;
     cfg.name = run_dir.file_name().map_or(name, |n| n.to_string_lossy().into_owned());
@@ -200,7 +207,7 @@ fn resume(
         return Err(CliError::new(
             ExitCode::NotFound,
             "path_not_found",
-            format!("{} does not exist", ckpt.display()),
+            format!("{} does not exist", folo_api::json::path(ckpt)),
         ));
     }
     let file = folo_nn::io::ModelFile::open(ckpt).map_err(|e| engine_error(e.into()))?;
@@ -208,7 +215,7 @@ fn resume(
         return Err(CliError::new(
             ExitCode::Usage,
             "invalid_config",
-            format!("{} is a weights file, not a training checkpoint", ckpt.display()),
+            format!("{} is a weights file, not a training checkpoint", folo_api::json::path(ckpt)),
         )
         .hint("resume from runs/<name>/weights/last.folo"));
     };
@@ -225,7 +232,7 @@ fn resume(
             "run_not_resumable",
             format!(
                 "the run of {} already completed ({} of {} epochs{})",
-                ckpt.display(),
+                folo_api::json::path(ckpt),
                 c.epoch,
                 stored.epochs,
                 if early_stopped { ", stopped early" } else { "" }
@@ -354,7 +361,7 @@ fn show(v: &serde_json::Value) -> String {
 
 /// `p` made absolute (so a resume from another folder finds the dataset).
 fn absolute(p: &str) -> String {
-    std::path::absolute(p).map_or_else(|_| p.to_string(), |a| a.display().to_string())
+    std::path::absolute(p).map_or_else(|_| p.to_string(), folo_api::json::path)
 }
 
 fn train_data(ds: &folo_data::LoadedDataset) -> Result<TrainData, CliError> {
@@ -579,7 +586,7 @@ fn finish(s: &TrainSummary, run_dir: &Path, cfg: &TrainConfig, out: Out) {
         }
     }
     if let Some(b) = &s.best_weights {
-        out.human(format!("Weights: {} (and last.folo)", b.display()));
+        out.human(format!("Weights: {} (and last.folo)", folo_api::json::path(b)));
     }
 }
 

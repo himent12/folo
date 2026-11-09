@@ -161,6 +161,7 @@ names are in the model's metadata (`names`). Details: [CLI.md, ONNX export](CLI.
 ```sh
 folo export --model runs/shapes-n/weights/best.folo --format onnx --decode --output best-decoded.onnx
 # the shapes model is 320 px and the graph is static, so the input is [1, 3, 320, 320]; this prints (1, 2100, 7)
+pip install onnxruntime numpy   # the check below needs them
 python -c "import onnxruntime as ort, numpy as np; s = ort.InferenceSession('best-decoded.onnx'); print(s.run(None, {'images': np.zeros((1, 3, 320, 320), np.float32)})[0].shape)"
 ```
 

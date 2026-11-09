@@ -136,7 +136,8 @@ fn standard_groups_and_schedule_application() {
     let groups = sg.into_groups(0.01, 0.937, 5e-4);
     assert_eq!(groups.iter().map(|g| g.weight_decay).collect::<Vec<_>>(), [5e-4, 0.0, 0.0]);
     let mut opt = Sgd::new(groups).unwrap();
-    let mut sched = LrSchedule::new(DecayKind::Linear, 10, 13, 0.01, 3.0, 0.1, 0.8).unwrap();
+    // 30 epochs of 13 steps: T = 390, W = 100 (docs/MODEL.md §10.4).
+    let mut sched = LrSchedule::new(DecayKind::Linear, 30, 13, 0.01, 3.0, 0.1, 0.8).unwrap();
     sched.apply(&mut opt);
     let g = opt.groups();
     assert_eq!((g[0].lr, g[1].lr, g[2].lr), (0.0, 0.0, 0.1));
@@ -145,7 +146,7 @@ fn standard_groups_and_schedule_application() {
         sched.advance();
     }
     sched.apply(&mut opt);
-    let target = 0.01 * ((1.0 - 50.0 / 129.0) * 0.99 + 0.01);
+    let target = 0.01 * ((1.0 - 50.0 / 389.0) * 0.99 + 0.01);
     assert!((opt.groups()[0].lr - target * 0.5).abs() < 1e-15);
     assert!((opt.groups()[2].lr - (0.1 + (target - 0.1) * 0.5)).abs() < 1e-15);
     assert!((opt.groups()[1].momentum - (0.8 + 0.137 * 0.5)).abs() < 1e-15);

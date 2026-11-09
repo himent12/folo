@@ -284,7 +284,10 @@ pub(crate) fn open_jsons(
         parsed.push(Parsed { split, path, images: imgs, anns });
     }
     if parsed.is_empty() {
-        return Err(DataError::Format(format!("no readable COCO annotation file in {}", root.display())));
+        return Err(DataError::Format(format!(
+            "no readable COCO annotation file in {}",
+            crate::paths::shown(root)
+        )));
     }
     let remap: HashMap<u64, u32> = categories.keys().enumerate().map(|(i, &id)| (id, i as u32)).collect();
     let classes: Vec<String> = categories.into_values().collect();

@@ -24,21 +24,59 @@ const DOCS: &[(&str, &str)] = &[
     ("AGENT_COOKBOOK", include_str!("../../../docs/AGENT_COOKBOOK.md")),
 ];
 
+/// Long side of `folo://datasets/{id}/images/{image_id}` without `?size` (a JPEG thumbnail, tens of KB instead of
+/// the original's hundreds).
+pub const DEFAULT_IMAGE_SIZE: u32 = 512;
+
+/// `?size` range of an image resource (as `GET /api/datasets/{id}/images/{image_id}?thumb=`).
+pub const IMAGE_SIZES: std::ops::RangeInclusive<u32> = 16..=2048;
+
+/// Cell size of `folo://runs/{id}/samples/{epoch}` without `?tile` (a 4-column grid: 640 px wide).
+pub const DEFAULT_TILE: u32 = 160;
+
+/// `?tile` range of a sample grid.
+pub const TILES: std::ops::RangeInclusive<u32> = 64..=512;
+
+/// The size an image resource is read at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImageSize {
+    /// The original file (`?size=original`).
+    Original,
+    /// A JPEG whose long side is at most this (`?size=<px>`, clamped to [`IMAGE_SIZES`]; never upscaled).
+    Max(u32),
+}
+
+impl Default for ImageSize {
+    fn default() -> Self {
+        ImageSize::Max(DEFAULT_IMAGE_SIZE)
+    }
+}
+
+impl ImageSize {
+    /// The `thumb` argument of [`Store::image`].
+    pub fn thumb(self) -> Option<u32> {
+        match self {
+            ImageSize::Original => None,
+            ImageSize::Max(px) => Some(px),
+        }
+    }
+}
+
 /// A parsed `folo://` URI. Ids are percent-decoded.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FoloUri {
     /// `folo://datasets/{id}`
     Dataset(String),
-    /// `folo://datasets/{id}/images/{image_id}`
-    Image(String, String),
+    /// `folo://datasets/{id}/images/{image_id}{?size}`
+    Image(String, String, ImageSize),
     /// `folo://runs/{id}`
     Run(String),
     /// `folo://runs/{id}/metrics`
     Metrics(String),
     /// `folo://runs/{id}/epochs`
     Epochs(String),
-    /// `folo://runs/{id}/samples/{epoch}`
-    Samples(String, u32),
+    /// `folo://runs/{id}/samples/{epoch}{?tile}`: the epoch and the grid's cell size in pixels.
+    Samples(String, u32, u32),
     /// `folo://predictions/{batch_id}`
     Predictions(String),
     /// `folo://docs/{name}`
@@ -64,17 +102,49 @@ fn decode(s: &str) -> Option<String> {
 }
 
 impl FoloUri {
-    /// Parses a URI; `None` for anything that is not one of the forms above.
+    /// Parses a URI; `None` for anything that is not one of the forms above. Images take `?size=<px>|original`
+    /// and sample grids `?tile=<px>`; any other query is `None`.
     pub fn parse(uri: &str) -> Option<FoloUri> {
         let rest = uri.strip_prefix("folo://")?;
-        let parts: Vec<&str> = rest.split('/').collect();
+        let (path, query) = match rest.split_once('?') {
+            Some((p, q)) => (p, Some(q)),
+            None => (rest, None),
+        };
+        // The value of the one query parameter `key` a form accepts: `Some(None)` without a query, `None` for
+        // any other query.
+        let param = |key: &str| -> Option<Option<&str>> {
+            match query {
+                None => Some(None),
+                Some(q) => match q.split_once('=') {
+                    Some((k, v)) if k == key && !v.is_empty() && !v.contains('&') => Some(Some(v)),
+                    _ => None,
+                },
+            }
+        };
+        let parts: Vec<&str> = path.split('/').collect();
         Some(match parts.as_slice() {
+            ["datasets", id, "images", image] => {
+                let size = match param("size")? {
+                    None => ImageSize::default(),
+                    Some("original") => ImageSize::Original,
+                    Some(px) => ImageSize::Max(
+                        px.parse::<u32>().ok()?.clamp(*IMAGE_SIZES.start(), *IMAGE_SIZES.end()),
+                    ),
+                };
+                FoloUri::Image(decode(id)?, decode(image)?, size)
+            }
+            ["runs", id, "samples", epoch] => {
+                let tile = match param("tile")? {
+                    None => DEFAULT_TILE,
+                    Some(px) => px.parse::<u32>().ok()?.clamp(*TILES.start(), *TILES.end()),
+                };
+                FoloUri::Samples(decode(id)?, epoch.parse().ok()?, tile)
+            }
+            _ if query.is_some() => return None,
             ["datasets", id] => FoloUri::Dataset(decode(id)?),
-            ["datasets", id, "images", image] => FoloUri::Image(decode(id)?, decode(image)?),
             ["runs", id] => FoloUri::Run(decode(id)?),
             ["runs", id, "metrics"] => FoloUri::Metrics(decode(id)?),
             ["runs", id, "epochs"] => FoloUri::Epochs(decode(id)?),
-            ["runs", id, "samples", epoch] => FoloUri::Samples(decode(id)?, epoch.parse().ok()?),
             ["predictions", id] => FoloUri::Predictions(decode(id)?),
             ["docs", name] => FoloUri::Doc(decode(name)?),
             _ => return None,
@@ -91,11 +161,21 @@ impl fmt::Display for FoloUri {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             FoloUri::Dataset(id) => write!(f, "folo://datasets/{}", encode(id)),
-            FoloUri::Image(id, image) => write!(f, "folo://datasets/{}/images/{}", encode(id), encode(image)),
+            FoloUri::Image(id, image, size) => {
+                write!(f, "folo://datasets/{}/images/{}", encode(id), encode(image))?;
+                match size {
+                    s if *s == ImageSize::default() => Ok(()),
+                    ImageSize::Original => write!(f, "?size=original"),
+                    ImageSize::Max(px) => write!(f, "?size={px}"),
+                }
+            }
             FoloUri::Run(id) => write!(f, "folo://runs/{}", encode(id)),
             FoloUri::Metrics(id) => write!(f, "folo://runs/{}/metrics", encode(id)),
             FoloUri::Epochs(id) => write!(f, "folo://runs/{}/epochs", encode(id)),
-            FoloUri::Samples(id, e) => write!(f, "folo://runs/{}/samples/{e}", encode(id)),
+            FoloUri::Samples(id, e, tile) => {
+                write!(f, "folo://runs/{}/samples/{e}", encode(id))?;
+                if *tile != DEFAULT_TILE { write!(f, "?tile={tile}") } else { Ok(()) }
+            }
             FoloUri::Predictions(id) => write!(f, "folo://predictions/{}", encode(id)),
             FoloUri::Doc(name) => write!(f, "folo://docs/{}", encode(name)),
         }
@@ -155,9 +235,10 @@ pub fn templates() -> Vec<ResourceTemplate> {
     vec![
         t("folo://datasets/{id}", "dataset", "A dataset with statistics.", "application/json"),
         t(
-            "folo://datasets/{id}/images/{image_id}",
+            "folo://datasets/{id}/images/{image_id}{?size}",
             "dataset image",
-            "The image file itself (JPEG / PNG blob), for looking at it.",
+            "The image as a JPEG whose long side is at most 512 px (`?size=16..2048`), or the original file \
+             (`?size=original`, JPEG / PNG), for looking at it.",
             "image/jpeg",
         ),
         t(
@@ -179,9 +260,10 @@ pub fn templates() -> Vec<ResourceTemplate> {
             "application/json",
         ),
         t(
-            "folo://runs/{id}/samples/{epoch}",
+            "folo://runs/{id}/samples/{epoch}{?tile}",
             "validation samples",
-            "Validation samples of an epoch as an annotated JPEG grid (truth white, predictions in class colours).",
+            "Validation samples of an epoch as an annotated JPEG grid (truth white, predictions in class colours), \
+             4 cells of 160 px per row (`?tile=64..512`).",
             "image/jpeg",
         ),
         t(
@@ -214,17 +296,32 @@ mod tests {
     fn uris_roundtrip() {
         for u in [
             FoloUri::Dataset("ds_1".into()),
-            FoloUri::Image("ds_1".into(), "train/0 1".into()),
+            FoloUri::Image("ds_1".into(), "train/0 1".into(), ImageSize::default()),
+            FoloUri::Image("ds_1".into(), "a".into(), ImageSize::Original),
+            FoloUri::Image("ds_1".into(), "a".into(), ImageSize::Max(64)),
             FoloUri::Run("run_1".into()),
             FoloUri::Metrics("run_1".into()),
             FoloUri::Epochs("run_1".into()),
-            FoloUri::Samples("run_1".into(), 3),
+            FoloUri::Samples("run_1".into(), 3, DEFAULT_TILE),
+            FoloUri::Samples("run_1".into(), 3, 256),
             FoloUri::Predictions("pb_1".into()),
             FoloUri::Doc("API".into()),
         ] {
             assert_eq!(FoloUri::parse(&u.to_string()), Some(u));
         }
         assert_eq!(FoloUri::parse("folo://runs/x/samples/nope"), None);
+        let img = |q: &str| FoloUri::parse(&format!("folo://datasets/d/images/i{q}"));
+        assert_eq!(img(""), Some(FoloUri::Image("d".into(), "i".into(), ImageSize::Max(512))));
+        assert_eq!(img("?size=9999"), Some(FoloUri::Image("d".into(), "i".into(), ImageSize::Max(2048))));
+        assert_eq!(img("?size=original"), Some(FoloUri::Image("d".into(), "i".into(), ImageSize::Original)));
+        for bad in ["?size=", "?size=big", "?thumb=64", "?size=64&x=1", "?"] {
+            assert_eq!(img(bad), None, "{bad}");
+        }
+        assert_eq!(
+            FoloUri::parse("folo://runs/r/samples/2?tile=8"),
+            Some(FoloUri::Samples("r".into(), 2, 64))
+        );
+        assert_eq!(FoloUri::parse("folo://runs/r?tile=8"), None);
         assert_eq!(FoloUri::parse("folo://nothing"), None);
         assert_eq!(FoloUri::parse("file:///etc/passwd"), None);
         assert!(doc("MCP").unwrap().contains("folo mcp"));

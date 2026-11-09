@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 
 use axum::http::StatusCode;
 use folo_api::{
-    BBox, Dataset, DatasetFormat, ExportFormat, ExportResult, GpuInfo, ImagePage, ImageSize, LogLine, Model,
+    BBox, Dataset, DatasetFormat, ExportResult, ExportSpec, GpuInfo, ImagePage, ImageSize, LogLine, Model,
     ModelEval, PredictResponse, RegisterDataset, Run, RunMetrics, RunSamples, Sample, ScoredBox, Splits,
     SyntheticDataset, TrainConfig, ValReport, ValRequest,
 };
@@ -647,6 +647,10 @@ impl Store for RealStore {
         engine::gpus()
     }
 
+    fn data_dir(&self) -> Option<&Path> {
+        Some(&self.data_dir)
+    }
+
     fn list_datasets(&self) -> Result<Vec<Dataset>> {
         let list = self.entries.read().unwrap().clone();
         Ok(list
@@ -782,9 +786,10 @@ impl Store for RealStore {
         self.models.eval(&m, &ds, key.as_deref(), device)
     }
 
-    fn export_model(&self, id: &str, format: ExportFormat) -> Result<ExportResult> {
+    fn export_model(&self, id: &str, spec: ExportSpec) -> Result<ExportResult> {
+        crate::store::check_export(&spec)?;
         let m = self.model(id)?;
-        self.models.export(&m, format)
+        self.models.export(&m, spec)
     }
 
     fn model_weights(&self, id: &str, format: WeightsFormat) -> Result<Weights> {
@@ -883,10 +888,15 @@ impl Store for RealStore {
         let t0 = Instant::now();
         let decoded = match (&input.source, &path) {
             (PredictSource::Upload(bytes), _) => folo_data::decode(bytes).map_err(|err| {
+                // An upload has no path, so the codec's message stands alone.
+                let why = match err {
+                    folo_data::DataError::Image { message, .. } => message,
+                    e => e.to_string(),
+                };
                 Error::new(
                     StatusCode::UNPROCESSABLE_ENTITY,
                     "image_decode_failed",
-                    format!("not an image: {err}"),
+                    format!("not an image: {why}"),
                 )
                 .hint("send a JPEG, PNG, BMP or WebP file")
             })?,

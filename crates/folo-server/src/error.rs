@@ -55,6 +55,12 @@ impl Error {
         Error::new(StatusCode::CONFLICT, code, message)
     }
 
+    /// `409 run_not_active`: stopping a run that is not queued or running.
+    pub fn run_not_active(id: &str, status: &str) -> Error {
+        Error::conflict("run_not_active", format!("run '{id}' is already {status}"))
+            .hint("nothing to stop: the run has finished; run_status (GET /api/runs/{id}) has its result")
+    }
+
     /// `501 not_implemented`.
     pub fn not_implemented(what: &str) -> Error {
         Error::new(StatusCode::NOT_IMPLEMENTED, "not_implemented", format!("{what} is not implemented yet"))

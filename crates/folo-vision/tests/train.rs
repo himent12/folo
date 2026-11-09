@@ -164,6 +164,8 @@ fn micro_run_learns_checkpoints_and_resumes_bit_exactly() {
     let file = ModelFile::open(&last).unwrap();
     let c = file.checkpoint().expect("last.folo is a checkpoint");
     assert_eq!((c.epoch, c.optim.step, c.sched.step, c.ema_updates), (2, 6, 6, Some(6)));
+    // The closing epochs a resume keeps (close_mosaic 1 of 2 epochs).
+    assert_eq!(c.train[folo_vision::train::CLOSE_MOSAIC_KEY], 1);
     assert!(file.has_ema());
     assert!(!file.names(Namespace::Optim).is_empty());
     assert_eq!(file.metadata().classes, ds.classes);
@@ -241,20 +243,30 @@ fn micro_run_learns_checkpoints_and_resumes_bit_exactly() {
     let _ = std::fs::remove_dir_all(&dir_b);
 }
 
-/// docs/MODEL.md §10.4: N = 800, batch 16, 10 epochs → nb 50, accumulate 4, spe 13, T 130, W 100; and `auto`
-/// picks AdamW at `round(0.002 · 5 / (4 + nc), 6)`.
+/// docs/MODEL.md §10.4: N = 800, batch 16, 30 epochs → nb 50, accumulate 4, spe 13, T 390, W 100; and `auto`
+/// picks AdamW at `round(0.002 · 5 / (4 + nc), 6)`. The same data for 10 epochs is a short run: W 39, a warning.
 #[test]
 fn schedule_numbers_match_the_spec() {
     let img = folo_data::Image::new(64, 64, [0; 3]);
     let samples = (0..800).map(|_| folo_data::Sample { image: img.clone(), boxes: vec![] }).collect();
     let classes: Vec<String> = ["a", "b", "c", "d"].map(String::from).to_vec();
     let ds = Arc::new(InMemoryDataset { samples, classes: classes.clone(), split: Split::Train });
-    let cfg = TrainConfig { epochs: 10, batch: 16, imgsz: 64, workers: 0, ..TrainConfig::default() };
+    let cfg = TrainConfig { epochs: 30, batch: 16, imgsz: 64, workers: 0, ..TrainConfig::default() };
     let data = TrainData { train: ds.clone(), val: ds, classes };
-    let t = Trainer::new(cfg, data, TrainOptions::default()).unwrap();
+    let t = Trainer::new(cfg.clone(), data.clone(), TrainOptions::default()).unwrap();
     assert_eq!((t.batches_per_epoch(), t.accumulate()), (50, 4));
     let c = t.schedule().contract();
-    assert_eq!((c.steps_per_epoch, t.schedule().total_iters(), c.warmup_iters), (13, 130, 100));
+    assert_eq!((c.steps_per_epoch, t.schedule().total_iters(), c.warmup_iters), (13, 390, 100));
+    assert!(t.warnings().is_empty(), "{:?}", t.warnings());
+    assert_eq!(t.config().augment.close_mosaic_epochs(30), 10);
+
+    let short = Trainer::new(TrainConfig { epochs: 10, ..cfg }, data, TrainOptions::default()).unwrap();
+    let c = short.schedule().contract();
+    assert_eq!((short.schedule().total_iters(), c.warmup_iters), (130, 39));
+    assert_eq!(short.config().augment.close_mosaic_epochs(10), 5);
+    let w = short.warnings();
+    assert_eq!(w.len(), 1, "{w:?}");
+    assert!(w[0].contains("130 optimizer steps") && w[0].contains("16 epochs"), "{}", w[0]);
     let o = t.optimizer();
     assert_eq!(
         (o.kind, o.lr0, o.momentum, o.warmup_bias_lr),
@@ -300,7 +312,7 @@ fn non_finite_batches_are_skipped_then_fail_the_run() {
     assert!(!events.iter().any(|e| matches!(e, RunEvent::Step(_))));
     let warns = events
         .iter()
-        .filter(|e| matches!(e, RunEvent::Log(l) if l.level == folo_api::LogLevel::Warn))
+        .filter(|e| matches!(e, RunEvent::Log(l) if l.level == folo_api::LogLevel::Warn && l.message.contains("non-finite")))
         .count();
     assert_eq!(warns, folo_vision::train::MAX_NONFINITE_BATCHES);
     assert!(
@@ -440,6 +452,7 @@ fn non_finite_batch_recovers_and_resumes() {
             events: Some(Box::new(move |e| {
                 if let RunEvent::Log(l) = e
                     && l.level == folo_api::LogLevel::Warn
+                    && l.message.contains("non-finite")
                     && let Some((t, clean)) = w2.lock().unwrap().take()
                 {
                     let _g = no_grad();
@@ -474,7 +487,7 @@ fn non_finite_batch_recovers_and_resumes() {
     assert_eq!(steps, [2, 3, 4]);
     let warns = events
         .iter()
-        .filter(|e| matches!(e, RunEvent::Log(l) if l.level == folo_api::LogLevel::Warn))
+        .filter(|e| matches!(e, RunEvent::Log(l) if l.level == folo_api::LogLevel::Warn && l.message.contains("non-finite")))
         .count();
     assert_eq!(warns, 1);
     let c = ModelFile::open(dir_a.join("weights/last.folo")).unwrap();
@@ -524,6 +537,7 @@ fn nonfinite_streak_crosses_a_checkpoint() {
             }
             if let RunEvent::Log(l) = e
                 && l.level == folo_api::LogLevel::Warn
+                && l.message.contains("non-finite")
                 && let Some((t, clean)) = slot.take()
             {
                 let _g = no_grad();
@@ -551,7 +565,7 @@ fn nonfinite_streak_crosses_a_checkpoint() {
         log.lock()
             .unwrap()
             .iter()
-            .any(|e| matches!(e, RunEvent::Log(l) if l.level == folo_api::LogLevel::Warn))
+            .any(|e| matches!(e, RunEvent::Log(l) if l.level == folo_api::LogLevel::Warn && l.message.contains("non-finite")))
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

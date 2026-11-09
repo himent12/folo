@@ -72,7 +72,7 @@ git push origin :refs/tags/dryrun-0.2.0 && git tag -d dryrun-0.2.0     # once th
 | `plan` | ubuntu-latest | the version, the tag check (tag builds, and dispatches with `tag`) and the build matrix |
 | `web` | ubuntu-latest | `web/dist`: folo-wasm first (`scripts/build-wasm.sh` with SIMD128, wasm-bindgen-cli at the `Cargo.lock` version, binaryen's `wasm-opt` pinned by version and checksum), then `npm ci && npm run build`; fails unless `dist/folo-wasm/` has the module. Shared with every CLI build |
 | `cli` | windows-latest, ubuntu-22.04, macos-latest | `folo-<target>.zip` (Windows) / `.tar.gz`: a `folo-<target>/` folder with the binary (built with `--features embed-web`), `README.md` and the licenses |
-| `desktop` | windows-latest | `folo-desktop-x86_64-pc-windows-msvc.zip` with `folo-desktop.exe` (skipped while `apps/desktop/Cargo.toml` does not exist) |
+| `desktop` | windows-latest | `folo-desktop-x86_64-pc-windows-msvc.zip` with `folo-desktop.exe`, built with `--profile dist` (thin LTO, one codegen unit; apps/desktop's plain `release` profile is the faster-building development one) (skipped while `apps/desktop/Cargo.toml` does not exist) |
 | `release` | ubuntu-latest | checks every `.sha256`, writes `SHA256SUMS`, uploads everything as the `release-<version>` artifact, creates the draft release (tags only) or previews it (dispatches with `tag`) |
 | `install-test` | ubuntu-22.04, windows-latest | runs `scripts/install.sh` / `scripts/install.ps1` against those assets (`--base-url`), checks the installed `folo` (and `folo-desktop`), and checks that a tampered archive is refused |
 

@@ -57,24 +57,34 @@ pub struct SchedContract {
 ///
 /// ```
 /// use folo_nn::{DecayKind, LrSchedule};
-/// // docs/MODEL.md §10.4: 10 epochs of 13 steps, 3 warmup epochs (floored to 100 iterations).
-/// let s = LrSchedule::new(DecayKind::Linear, 10, 13, 0.01, 3.0, 0.1, 0.8).unwrap();
-/// assert_eq!((s.total_iters(), s.warmup_iters()), (130, 100));
+/// // docs/MODEL.md §10.4: 30 epochs of 13 steps, 3 warmup epochs (floored to 100 iterations).
+/// let s = LrSchedule::new(DecayKind::Linear, 30, 13, 0.01, 3.0, 0.1, 0.8).unwrap();
+/// assert_eq!((s.total_iters(), s.warmup_iters()), (390, 100));
 /// assert_eq!(s.lf(0), 1.0);
-/// assert!((s.lf(129) - 0.01).abs() < 1e-15);
+/// assert!((s.lf(389) - 0.01).abs() < 1e-15);
 /// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct LrSchedule {
     c: SchedContract,
 }
 
+/// The warmup floor of docs/MODEL.md §8.4 in iterations, before it is capped to
+/// [`WARMUP_FLOOR_TENTHS`] of the run.
+const WARMUP_FLOOR: u64 = 100;
+
+/// The largest share of the run, in tenths, that [`WARMUP_FLOOR`] may stretch the warmup to (3: 30%).
+const WARMUP_FLOOR_TENTHS: u64 = 3;
+
 /// docs/MODEL.md §8.4: `W = 0` if `warmup_epochs <= 0`, else
-/// `min(max(round(warmup_epochs · spe), 100), max(epochs − 1, 0) · spe)`.
+/// `min(max(round(warmup_epochs · spe), min(100, floor(0.3 · T))), max(epochs − 1, 0) · spe)` with
+/// `T = epochs · spe`. The floor applies in full from `T = 334` on, so a short run is not all warmup.
 pub fn warmup_iters(warmup_epochs: f64, epochs: u64, steps_per_epoch: u64) -> u64 {
     if warmup_epochs.is_nan() || warmup_epochs <= 0.0 {
         return 0;
     }
-    let w = (warmup_epochs * steps_per_epoch as f64).round().max(100.0) as u64;
+    let total = epochs.saturating_mul(steps_per_epoch);
+    let floor = WARMUP_FLOOR.min(total.saturating_mul(WARMUP_FLOOR_TENTHS) / 10);
+    let w = ((warmup_epochs * steps_per_epoch as f64).round() as u64).max(floor);
     w.min(epochs.saturating_sub(1).saturating_mul(steps_per_epoch))
 }
 
@@ -205,22 +215,28 @@ mod tests {
 
     #[test]
     fn docs_model_10_4() {
-        // N_train = 800, batch 16, E = 10: nb = 50, accumulate 4, spe = 13, T = 130, W = 100.
+        // N_train = 800, batch 16, E = 30: nb = 50, accumulate 4, spe = 13, T = 390, W = 100.
         let nb = 800usize.div_ceil(16);
         let acc = crate::optim::accumulate_steps(64, 16);
         let spe = nb.div_ceil(acc) as u64;
         assert_eq!((nb, acc, spe), (50, 4, 13));
-        let s = LrSchedule::new(DecayKind::Linear, 10, spe, 0.01, 3.0, 0.1, 0.8).unwrap();
-        assert_eq!((s.total_iters(), s.warmup_iters()), (130, 100));
-        assert_eq!(warmup_iters(0.0, 10, 13), 0);
+        let s = LrSchedule::new(DecayKind::Linear, 30, spe, 0.01, 3.0, 0.1, 0.8).unwrap();
+        assert_eq!((s.total_iters(), s.warmup_iters()), (390, 100));
+        assert_eq!(warmup_iters(0.0, 30, 13), 0);
         assert_eq!(warmup_iters(3.0, 1, 13), 0); // epochs − 1 = 0
+        // Short runs: the floor shrinks to 30% of T, the epoch-based warmup stays.
+        assert_eq!(warmup_iters(3.0, 10, 13), 39); // T = 130: floor 39, 3 epochs = 39
+        assert_eq!(warmup_iters(3.0, 12, 3), 10); // T = 36: floor 10 (was 33 of 36)
+        assert_eq!(warmup_iters(0.5, 37, 9), 99); // T = 333: floor 99
+        assert_eq!(warmup_iters(0.5, 334, 1), 100); // T = 334: the full floor
+        assert_eq!(warmup_iters(3.0, 4, 3), 9); // 3 epochs of 4, capped at epochs − 1
         let lr0 = 0.01;
         let mk = |name: &str| {
             ParamGroup::new(name, vec![("w".into(), Tensor::zeros([1]))]).lr(lr0).momentum(0.937)
         };
         let (decay, bias) = (mk("decay"), mk("bias"));
-        let lf = |t: f64| (1.0 - t / 129.0) * (1.0 - 0.01) + 0.01;
-        for t in [0u64, 50, 99, 100, 129] {
+        let lf = |t: f64| (1.0 - t / 389.0) * (1.0 - 0.01) + 0.01;
+        for t in [0u64, 50, 99, 100, 389] {
             let target = lr0 * lf(t as f64);
             let (want_d, want_b, want_m) = if t < 100 {
                 let f = t as f64 / 100.0;
@@ -235,7 +251,7 @@ mod tests {
         assert_eq!(s.lr_at(0, &decay), 0.0);
         assert_eq!(s.lr_at(0, &bias), 0.1);
         assert_eq!(s.lf(0), 1.0);
-        assert!((s.lf(129) - 0.01).abs() < 1e-15);
+        assert!((s.lf(389) - 0.01).abs() < 1e-15);
 
         let c = LrSchedule::new(DecayKind::Cosine, 10, 13, 0.01, 0.0, 0.0, 0.8).unwrap();
         assert_eq!(c.lf(0), 1.0);

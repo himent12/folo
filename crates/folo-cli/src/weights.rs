@@ -66,7 +66,7 @@ fn not_downloaded(p: &Published, path: &Path) -> CliError {
     CliError::new(
         ExitCode::NotFound,
         "weights_not_found",
-        format!("weights `{}` are not downloaded ({} does not exist)", p.name, path.display()),
+        format!("weights `{}` are not downloaded ({} does not exist)", p.name, folo_api::json::path(path)),
     )
     .hint(format!("run `folo weights pull {}`", p.name))
 }
@@ -81,7 +81,7 @@ pub fn resolve(arg: &Path) -> Result<PathBuf, CliError> {
         return Err(CliError::new(
             ExitCode::NotFound,
             "model_not_found",
-            format!("{} does not exist", arg.display()),
+            format!("{} does not exist", folo_api::json::path(arg)),
         )
         .hint(format!(
             "pass a .folo file, e.g. runs/<name>/weights/best.folo from `folo train`, or a published name ({})",
@@ -116,7 +116,7 @@ fn list(out: Out) {
             if cached { "downloaded" } else { "-" },
             p.about,
             "",
-            path.display()
+            folo_api::json::path(&path)
         ));
     }
 }
@@ -162,15 +162,17 @@ fn pull(args: WeightsPullArgs, out: Out) -> Result<(), CliError> {
         out.human(format!(
             "{} is already downloaded: {} (--force downloads it again)",
             p.name,
-            dest.display()
+            folo_api::json::path(&dest)
         ));
         return Ok(());
     }
-    std::fs::create_dir_all(&dir).map_err(|e| io(&format!("cannot create {}", dir.display()), e))?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| io(&format!("cannot create {}", folo_api::json::path(&dir)), e))?;
     // Download into a fresh folder next to the cache, verify, then move into place.
     let tmp = dir.join(format!(".pull-{}-{}", p.name, std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
-    std::fs::create_dir_all(&tmp).map_err(|e| io(&format!("cannot create {}", tmp.display()), e))?;
+    std::fs::create_dir_all(&tmp)
+        .map_err(|e| io(&format!("cannot create {}", folo_api::json::path(&tmp)), e))?;
     let result = (|| {
         out.human(format!("downloading {} from {} release {} ...", p.asset, args.repo, p.release));
         let status = Command::new("gh")
@@ -196,7 +198,8 @@ fn pull(args: WeightsPullArgs, out: Out) -> Result<(), CliError> {
         let want = expected_sha256(&sums, p.asset).ok_or_else(|| {
             CliError::new(ExitCode::Runtime, "checksum_missing", format!("{SUMS} does not list {}", p.asset))
         })?;
-        let got = sha256_file(&file).map_err(|e| io(&format!("cannot read {}", file.display()), e))?;
+        let got =
+            sha256_file(&file).map_err(|e| io(&format!("cannot read {}", folo_api::json::path(&file)), e))?;
         if got != want {
             return Err(CliError::new(
                 ExitCode::Runtime,
@@ -209,7 +212,8 @@ fn pull(args: WeightsPullArgs, out: Out) -> Result<(), CliError> {
         folo_nn::io::ModelFile::open(&file)
             .map_err(|e| CliError::new(ExitCode::Runtime, "invalid_weights", format!("{}: {e}", p.asset)))?;
         let _ = std::fs::remove_file(&dest);
-        std::fs::rename(&file, &dest).map_err(|e| io(&format!("cannot move into {}", dest.display()), e))?;
+        std::fs::rename(&file, &dest)
+            .map_err(|e| io(&format!("cannot move into {}", folo_api::json::path(&dest)), e))?;
         Ok(got)
     })();
     let _ = std::fs::remove_dir_all(&tmp);
@@ -219,7 +223,7 @@ fn pull(args: WeightsPullArgs, out: Out) -> Result<(), CliError> {
     out.human(format!(
         "{} → {} ({:.1} MB, sha256 {sha} verified)",
         p.name,
-        dest.display(),
+        folo_api::json::path(&dest),
         bytes as f64 / 1e6
     ));
     Ok(())

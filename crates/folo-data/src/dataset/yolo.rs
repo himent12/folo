@@ -81,9 +81,12 @@ pub(crate) fn scan_yaml(yaml: &Path) -> Result<YoloScan> {
         .and_then(|_| std::fs::read_to_string(yaml))
         .map_err(|e| DataError::io(yaml, e))?;
     let v: Value = serde_yaml::from_str(&text)
-        .map_err(|e| DataError::Format(format!("{}: invalid YAML: {e}", yaml.display())))?;
+        .map_err(|e| DataError::Format(format!("{}: invalid YAML: {e}", crate::paths::shown(yaml))))?;
     if !v.is_mapping() {
-        return Err(DataError::Format(format!("{}: expected a mapping at the top level", yaml.display())));
+        return Err(DataError::Format(format!(
+            "{}: expected a mapping at the top level",
+            crate::paths::shown(yaml)
+        )));
     }
     let yaml_dir = yaml.parent().unwrap_or(Path::new(".")).to_path_buf();
     let mut report = LoadReport::default();
@@ -98,7 +101,10 @@ pub(crate) fn scan_yaml(yaml: &Path) -> Result<YoloScan> {
                 report.push(
                     IssueKind::Other,
                     yaml,
-                    format!("`path` {} does not exist; using the YAML's directory", candidate.display()),
+                    format!(
+                        "`path` {} does not exist; using the YAML's directory",
+                        crate::paths::shown(&candidate)
+                    ),
                 );
                 // Watched anyway: creating it changes the dataset.
                 deps.push(candidate);
@@ -156,7 +162,7 @@ pub(crate) fn scan_yaml(yaml: &Path) -> Result<YoloScan> {
             .map(|i| format!(" ({})", i.message));
         return Err(DataError::Format(format!(
             "{}: no train or val images found{}",
-            yaml.display(),
+            crate::paths::shown(yaml),
             why.unwrap_or_default()
         )));
     }
@@ -244,7 +250,7 @@ fn parse_names(v: &Value, yaml: &Path) -> Result<Option<Vec<String>>> {
     if let Some(n) = nc
         && n > MAX_CLASSES
     {
-        return Err(DataError::Format(format!("{}: nc {n} is implausibly large", yaml.display())));
+        return Err(DataError::Format(format!("{}: nc {n} is implausibly large", crate::paths::shown(yaml))));
     }
     let names = match v.get("names") {
         Some(Value::Sequence(seq)) => {
@@ -254,12 +260,17 @@ fn parse_names(v: &Value, yaml: &Path) -> Result<Option<Vec<String>>> {
             let mut by_id = BTreeMap::new();
             for (k, name) in map {
                 let id = k.as_u64().or_else(|| k.as_str().and_then(|s| s.trim().parse().ok())).ok_or_else(
-                    || DataError::Format(format!("{}: names key {k:?} is not a class id", yaml.display())),
+                    || {
+                        DataError::Format(format!(
+                            "{}: names key {k:?} is not a class id",
+                            crate::paths::shown(yaml)
+                        ))
+                    },
                 )?;
                 if id as usize >= MAX_CLASSES {
                     return Err(DataError::Format(format!(
                         "{}: class id {id} is implausibly large",
-                        yaml.display()
+                        crate::paths::shown(yaml)
                     )));
                 }
                 by_id.insert(id as usize, scalar_string(name).unwrap_or_default());
@@ -271,14 +282,14 @@ fn parse_names(v: &Value, yaml: &Path) -> Result<Option<Vec<String>>> {
         Some(other) => {
             return Err(DataError::Format(format!(
                 "{}: `names` must be a list or a map, got {other:?}",
-                yaml.display()
+                crate::paths::shown(yaml)
             )));
         }
     };
     match (names, nc) {
         (Some(n), Some(c)) if n.len() != c => Err(DataError::Format(format!(
             "{}: `nc` is {c} but `names` has {} entries",
-            yaml.display(),
+            crate::paths::shown(yaml),
             n.len()
         ))),
         (Some(n), _) => Ok(Some(n)),

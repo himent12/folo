@@ -8,7 +8,8 @@ use std::sync::{Arc, Mutex};
 
 use axum::http::StatusCode;
 use folo_api::{
-    Arch, ExportFormat, ExportResult, Model, ModelEval, ModelMetrics, PrCurve, ValReport, ValTiming,
+    Arch, ExportFormat, ExportResult, ExportSpec, Model, ModelEval, ModelMetrics, PrCurve, ValReport,
+    ValTiming,
 };
 use folo_core::Device;
 use folo_data::{Dataset as _, Split};
@@ -315,7 +316,8 @@ impl Models {
     /// Exports `m` to `<data dir>/exports/`: `folo-f16` as `<name>-f16.folo`, `onnx` as `<name>.onnx` (the
     /// defaults of `folo export --format onnx`: f32, batch 1, the model's imgsz, raw head outputs). `-2`, `-3`,
     /// ... when the name is taken; never overwriting.
-    pub fn export(&self, m: &ModelRef, format: ExportFormat) -> Result<ExportResult> {
+    pub fn export(&self, m: &ModelRef, spec: ExportSpec) -> Result<ExportResult> {
+        let format = spec.format;
         let file = engine::read_model_file(&m.path)?;
         let dir = self.data_dir.join("exports");
         std::fs::create_dir_all(&dir)
@@ -323,6 +325,7 @@ impl Models {
         let base = m.model.name.replace(['/', '\\', ':'], "-");
         let (suffix, ext) = match format {
             ExportFormat::FoloF16 => ("-f16", "folo"),
+            ExportFormat::Onnx if spec.onnx.half => ("-f16", "onnx"),
             ExportFormat::Onnx => ("", "onnx"),
         };
         // create_new claims the name, so two exports never share a file; the export then replaces it atomically.
@@ -340,6 +343,8 @@ impl Models {
             ExportFormat::FoloF16 => file.export(&out, FloatDType::F16).map_err(nn_error),
             ExportFormat::Onnx => {
                 let mut opts = OnnxOptions::new(file.metadata().imgsz);
+                (opts.decode, opts.dynamic, opts.half) =
+                    (spec.onnx.decode, spec.onnx.dynamic, spec.onnx.half);
                 opts.metadata = file.metadata().for_weights().to_map();
                 onnx::export_file(&file, &opts).and_then(|x| x.write_to(&out)).map_err(engine_error)
             }

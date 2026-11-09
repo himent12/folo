@@ -472,12 +472,12 @@ impl ServerHandler for FoloMcp {
                     .map_err(|e| resource_error(&uri, e))?;
                 json_contents(&serde_json::to_value(d).unwrap_or_default())
             }
-            FoloUri::Image(id, image_id) => {
+            FoloUri::Image(id, image_id, size) => {
                 let img = self
                     .inner
                     .blocking(move |s| {
                         c.dataset(s, &id)?;
-                        s.image(&id, &image_id, None)
+                        s.image(&id, &image_id, size.thumb())
                     })
                     .await
                     .map_err(|e| resource_error(&uri, e))?;
@@ -511,12 +511,12 @@ impl ServerHandler for FoloMcp {
                     .map_err(|e| resource_error(&uri, e))?;
                 json_contents(&json!({ "epochs": m.epochs, "last_step": m.steps.last() }))
             }
-            FoloUri::Samples(id, epoch) => {
+            FoloUri::Samples(id, epoch, tile) => {
                 let jpeg = self
                     .inner
                     .blocking(move |s| {
                         c.dataset(s, &s.get_run(&id)?.config.dataset_id)?;
-                        crate::render::sample_grid(s, &id, epoch)
+                        crate::render::sample_grid(s, &id, epoch, tile)
                     })
                     .await
                     .map_err(|e| resource_error(&uri, e))?;

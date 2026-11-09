@@ -607,7 +607,7 @@ Implementation: `folo_vision::loss` (`detection_loss`, `LossConfig` with these w
 | `warmup_momentum` | 0.8 | |
 | `warmup_bias_lr` | 0.1 | 0.0 when `auto` chooses |
 | `cos_lr` | false | linear decay by default |
-| `close_mosaic` | 10 | epochs at the end with mosaic off |
+| `close_mosaic` | 10 | epochs at the end with mosaic off, at most half of the run (§8.6) |
 | `ema` | true | `false`: no EMA (§8.5) |
 | `clip_grad_norm` | 10.0 | max global gradient L2 norm; `0` disables clipping |
 | `patience` | 100 | early stop after this many epochs without a fitness gain |
@@ -699,7 +699,8 @@ The schedule is a function of the iteration `t` (optimizer steps, FORMAT.md's `u
 `T = epochs · spe` iterations in total:
 ```
 warmup_iters W = 0                                                     if warmup_epochs <= 0
-               = min(max(round(warmup_epochs · spe), 100), max(epochs − 1, 0) · spe)   otherwise
+               = min(max(round(warmup_epochs · spe), F), max(epochs − 1, 0) · spe)     otherwise
+             F = min(100, floor(0.3 · T))                              the warmup floor
 lf(t) = (1 − t / max(T − 1, 1)) · (1 − lrf) + lrf                      linear (default)
 lf(t) = lrf + (1 − lrf) · (1 + cos(π · t / max(T − 1, 1))) / 2         cosine (`cos_lr`)
 target_g = lr0 · lf(t)                                                 every group
@@ -707,6 +708,14 @@ t <  W:  lr_g = interp(t, [0, W], [start_g, target_g]),   start_g = warmup_bias_
          momentum = interp(t, [0, W], [warmup_momentum, momentum])     (SGD μ, or AdamW β1)
 t >= W:  lr_g = target_g,  momentum = momentum
 ```
+The 100-iteration floor is the reference trainer's. A run of fewer than about 100 iterations (a small dataset: 160
+images at the nominal batch of 64 are 3 iterations per epoch) would spend all but its last epoch in warmup, so the
+floor never takes more than 30% of the run. From `T = 334` on, `F = 100` and the schedule is the reference one;
+the floor only ever shrinks, and `warmup_epochs · spe` is never cut below what it asks for (only by
+`(epochs − 1) · spe`). The trainer warns when the run is short anyway: a run from scratch with `T < 200`, or
+`W > T / 2` (`folo_vision::train::schedule_warnings`; `warn` log lines after the first one, and `warnings` in the
+run's `config.json`).
+
 `interp` is linear interpolation. When `T ≥ 2`, the first iteration's target is `lr0` and the last one's exactly
 `lr0 · lrf`. A run with `T = 1` takes its single step at `lr0` (and `W = 0`, since `epochs − 1 = 0`). This
 fills FORMAT.md's `folo.sched` as `type`, `epochs`, `steps_per_epoch = spe`, `lrf`, `warmup_iters = W`,
@@ -759,8 +768,12 @@ Training pipeline per sample, in order:
    (Ultralytics ≥ 8.3.79). Any standard RGB↔HSV conversion with these ranges is acceptable.
 5. **Flips**: vertical with `flipud = 0.0`, horizontal with `fliplr = 0.5` (`x1' = s − x2`, `x2' = s − x1`).
 
-Finally boxes are converted to the loader's normalised `cx, cy, w, h`. For the last `close_mosaic = 10` epochs
-(`e >= epochs − close_mosaic`), mosaic and mixup are 0 and steps 2, 4 and 5 stay on. Validation uses no
+Finally boxes are converted to the loader's normalised `cx, cy, w, h`. For the last `c = min(close_mosaic,
+floor(epochs / 2))` epochs (`e >= epochs − c`; `close_mosaic = 10`), mosaic and mixup are 0 and steps 2, 4 and 5
+stay on. The cap keeps mosaic on for at least half of a short run (with `close_mosaic >= epochs` a run would never
+see a mosaic); runs of at least `2 · close_mosaic` epochs are unaffected. To train without mosaic, set
+`mosaic = 0`. Checkpoints record the closing epochs in `folo.train` (`close_mosaic_epochs`), and a resume keeps
+them; a checkpoint without the key predates the cap and resumes with `min(close_mosaic, epochs)`. Validation uses no
 augmentation: resize as above and pad to a square `s × s` (§9.2) only.
 
 ### 8.7 Validation schedule and checkpoints
@@ -864,10 +877,13 @@ batch 2, in train mode so BN uses batch statistics).
   batch duplicated doubles the reported `cls` and quadruples `L`.
 
 ### 10.4 Training-loop tests
-- Batching and schedule: for `N_train = 800`, `batch = 16`, `E = 10`: `nb = 50`, `accumulate = 4`,
-  `spe = 13` (the last window of each epoch has 2 batches), `T = 130`, `W = 100` (the 100 floor applies, since
-  `round(3 · 13) = 39`). Check the LR and momentum of every group at `t ∈ {0, 50, 99, 100, 129}`, that
-  `lf(0) = 1` and `lf(129) = lrf`, and that `warmup_epochs = 0` gives `W = 0`.
+- Batching and schedule: for `N_train = 800`, `batch = 16`, `E = 30`: `nb = 50`, `accumulate = 4`,
+  `spe = 13` (the last window of each epoch has 2 batches), `T = 390`, `W = 100` (the 100 floor applies, since
+  `round(3 · 13) = 39`). Check the LR and momentum of every group at `t ∈ {0, 50, 99, 100, 389}`, that
+  `lf(0) = 1` and `lf(389) = lrf`, and that `warmup_epochs = 0` gives `W = 0`.
+- Short runs: the same data for `E = 10` (`T = 130`) gives `W = 39` (the floor is `floor(0.3 · 130) = 39`) and a
+  short-run warning; `E = 12` of `spe = 3` (`T = 36`) gives `W = 10`; `T = 333` has floor 99 and `T = 334` the full
+  100. `close_mosaic = 10` closes mosaic for 10 epochs of 20 or 30, 6 of 12, 4 of 8 and none of 1.
 - Accumulation never crosses an epoch boundary: after each epoch the gradient buffers are zero.
 - A forward that produces NaN in a BN layer (inject it), followed by a valid batch: the BN running statistics,
   the EMA and eval-mode outputs stay finite, and no `step` event carries a non-finite value.

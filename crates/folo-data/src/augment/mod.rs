@@ -42,7 +42,8 @@ pub struct AugmentConfig {
     pub degrees: f32,
     /// Random shear range in degrees, `± shear` (default 0.0).
     pub shear: f32,
-    /// Turn mosaic (and mixup) off for the last `close_mosaic` epochs (default 10).
+    /// Turn mosaic (and mixup) off for the last `close_mosaic` epochs (default 10), at most half of the run
+    /// ([`AugmentConfig::close_mosaic_epochs`]).
     pub close_mosaic: u32,
     /// Drop boxes narrower or shorter than this many output pixels (default 2.0).
     pub min_box_px: f32,
@@ -50,6 +51,11 @@ pub struct AugmentConfig {
     pub min_area_ratio: f32,
     /// Drop boxes with a larger aspect ratio than this (default 100).
     pub max_aspect: f32,
+    /// The closing epochs to use instead of the capped `close_mosaic` (never serialised). The trainer sets it when
+    /// it resumes a run, so the run keeps the closing epochs it started with: a checkpoint from before the cap
+    /// closes mosaic for `min(close_mosaic, epochs)`.
+    #[serde(skip)]
+    pub close_mosaic_fixed: Option<u32>,
 }
 
 impl Default for AugmentConfig {
@@ -68,6 +74,7 @@ impl Default for AugmentConfig {
             min_box_px: 2.0,
             min_area_ratio: 0.1,
             max_aspect: 100.0,
+            close_mosaic_fixed: None,
         }
     }
 }
@@ -90,10 +97,17 @@ impl AugmentConfig {
         }
     }
 
-    /// Whether mosaic is still on in `epoch` (0-based) of a run of `epochs` epochs. With `epochs == 0` (unknown
-    /// length) it is always on.
+    /// The epochs at the end of a run of `epochs` with mosaic off: `min(close_mosaic, floor(epochs / 2))`, so at
+    /// least half of a short run keeps mosaic (docs/MODEL.md §8.6). Runs of `2 · close_mosaic` epochs or more
+    /// close it for exactly `close_mosaic` epochs.
+    pub fn close_mosaic_epochs(&self, epochs: u32) -> u32 {
+        self.close_mosaic_fixed.unwrap_or(self.close_mosaic.min(epochs / 2)).min(epochs)
+    }
+
+    /// Whether mosaic is still on in `epoch` (0-based) of a run of `epochs` epochs
+    /// ([`AugmentConfig::close_mosaic_epochs`]). With `epochs == 0` (unknown length) it is always on.
     pub fn mosaic_active(&self, epoch: u32, epochs: u32) -> bool {
-        epochs == 0 || epoch.saturating_add(self.close_mosaic) < epochs
+        epochs == 0 || epoch.saturating_add(self.close_mosaic_epochs(epochs)) < epochs
     }
 
     /// The box filter these parameters describe.
@@ -157,6 +171,15 @@ mod tests {
         assert!(cfg.mosaic_active(89, 100));
         assert!(!cfg.mosaic_active(90, 100));
         assert!(cfg.mosaic_active(1000, 0));
+        // Short runs keep mosaic for at least half of their epochs.
+        assert_eq!((cfg.close_mosaic_epochs(30), cfg.close_mosaic_epochs(20)), (10, 10));
+        assert_eq!((cfg.close_mosaic_epochs(12), cfg.close_mosaic_epochs(8)), (6, 4));
+        assert_eq!(cfg.close_mosaic_epochs(1), 0);
+        assert!(cfg.mosaic_active(3, 8) && !cfg.mosaic_active(4, 8));
+        // A resumed run keeps its closing epochs (the pre-cap rule: no mosaic at all in 8 epochs).
+        let legacy = AugmentConfig { close_mosaic_fixed: Some(8), ..cfg };
+        assert!(!legacy.mosaic_active(0, 8));
+        assert_eq!(AugmentConfig { close_mosaic_fixed: Some(99), ..cfg }.close_mosaic_epochs(8), 8);
         assert!(AugmentConfig { mosaic: 2.0, ..cfg }.validate().is_err());
     }
 }

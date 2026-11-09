@@ -151,6 +151,10 @@ pub struct RunStatusResult {
     pub last_step: Option<Step>,
     /// The latest validated epoch, if any.
     pub last_epoch: Option<Epoch>,
+    /// The run's distinct `warn` log lines, oldest first (at most 5): for example a run too short to learn
+    /// from (docs/MODEL.md §8.4) or skipped non-finite batches. Left out when there are none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
     /// The most recent log lines, oldest first (fewer than asked when the result would exceed the size limit).
     pub log: Vec<LogLine>,
 }
@@ -304,6 +308,15 @@ pub struct ExportArgs {
     pub model_id: String,
     /// Target format.
     pub format: ExportFormat,
+    /// ONNX only: decode inside the graph (one `detections` output instead of the raw head).
+    #[serde(default)]
+    pub decode: bool,
+    /// ONNX only: symbolic batch, height and width.
+    #[serde(default)]
+    pub dynamic: bool,
+    /// ONNX only: f16 weights, input and outputs (the file name gets `-f16`).
+    #[serde(default)]
+    pub half: bool,
 }
 
 /// `compare_runs`.
@@ -428,7 +441,7 @@ pub struct IssuesPage {
 /// `list_dataset_images` item.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ImageSummary {
-    /// Image id (`folo://datasets/{dataset_id}/images/{image_id}` is the image itself).
+    /// Image id (`folo://datasets/{dataset_id}/images/{image_id}` is the image: a 512 px JPEG, `?size=original` for the file).
     pub image_id: String,
     /// Path relative to the dataset root.
     pub file: String,
@@ -504,7 +517,8 @@ pub struct FoloInfo {
     pub mode: String,
     /// The `folo serve` this server forwards to (proxy mode).
     pub server: Option<String>,
-    /// Where FOLO writes (`null` in proxy mode, where the server decides).
+    /// Where FOLO keeps datasets, runs, models and exports, with `/` separators. In proxy mode the server's
+    /// (`/api/system`'s `data_dir`; `null` for a server too old to report it).
     pub data_dir: Option<String>,
     /// Mutating tools are disabled.
     pub read_only: bool,

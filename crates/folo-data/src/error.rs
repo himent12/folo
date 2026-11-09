@@ -9,7 +9,7 @@ pub type Result<T, E = DataError> = std::result::Result<T, E>;
 #[derive(Debug, thiserror::Error)]
 pub enum DataError {
     /// A filesystem operation failed.
-    #[error("io error at {path}: {source}")]
+    #[error("io error at {}: {source}", crate::paths::shown(path))]
     Io {
         /// The file or directory involved.
         path: PathBuf,
@@ -17,8 +17,8 @@ pub enum DataError {
         #[source]
         source: std::io::Error,
     },
-    /// An image could not be decoded or encoded.
-    #[error("image error at {path}: {message}")]
+    /// An image could not be decoded or encoded (`image error: …` for in-memory data, which has no path).
+    #[error("{}", image_message(path, message))]
     Image {
         /// The image file (empty for in-memory data).
         path: PathBuf,
@@ -26,7 +26,7 @@ pub enum DataError {
         message: String,
     },
     /// A label file is malformed.
-    #[error("bad label {path}:{line}: {message}")]
+    #[error("bad label {}:{line}: {message}", crate::paths::shown(path))]
     Label {
         /// The label file.
         path: PathBuf,
@@ -49,6 +49,14 @@ pub enum DataError {
         /// The dataset length.
         len: usize,
     },
+}
+
+fn image_message(path: &std::path::Path, message: &str) -> String {
+    if path.as_os_str().is_empty() {
+        format!("image error: {message}")
+    } else {
+        format!("image error at {}: {message}", crate::paths::shown(path))
+    }
 }
 
 impl DataError {
