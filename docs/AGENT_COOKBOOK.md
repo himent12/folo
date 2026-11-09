@@ -5,7 +5,7 @@ the **CLI with `--json`** (docs/CLI.md). Tool calls are written `→ tool { argu
 of the result after `←`; every result also has a one-line text summary. Errors are `isError` results whose text is
 `{ "code", "message", "hint" }` (MCP) or the last stdout line `{"error":{...}}` plus a non-zero exit code (CLI).
 
-Setup: `folo mcp --data-dir D:/folo-data` (README, "Use FOLO from Claude Code / Codex"). That is the real engine:
+Setup: `folo mcp --data-dir D:/folo-data` ([README, "Use FOLO from an agent"](../README.md#use-folo-from-an-agent)). That is the real engine:
 training, `val`, `predict` and `export` run in the `folo mcp` process, and runs persist under
 `D:/folo-data/runs/`. Add `--device cpu` to keep inference off the GPU, `--mock` to try the tools on simulated
 data, or `--server http://127.0.0.1:7878` to share runs with FOLO Studio.

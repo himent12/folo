@@ -108,7 +108,8 @@ fn list(out: Out) {
         let path = dir.join(p.asset);
         let cached = path.is_file();
         out.record(&json!({
-            "name": p.name, "release": p.release, "asset": p.asset, "path": path, "cached": cached, "about": p.about,
+            "name": p.name, "release": p.release, "asset": p.asset, "path": folo_api::json::path(&path),
+            "cached": cached, "about": p.about,
         }));
         out.human(format!(
             "{:<18} {:<11} {}\n{:<18} {}",
@@ -158,7 +159,13 @@ fn pull(args: WeightsPullArgs, out: Out) -> Result<(), CliError> {
     let io =
         |what: &str, e: std::io::Error| CliError::new(ExitCode::Runtime, "io_error", format!("{what}: {e}"));
     if dest.is_file() && !args.force {
-        out.record(&json!({"event": "done", "name": p.name, "path": dest, "downloaded": false}));
+        let sha =
+            sha256_file(&dest).map_err(|e| io(&format!("cannot read {}", folo_api::json::path(&dest)), e))?;
+        let bytes = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
+        out.record(&json!({
+            "event": "done", "name": p.name, "path": folo_api::json::path(&dest), "downloaded": false,
+            "sha256": sha, "bytes": bytes,
+        }));
         out.human(format!(
             "{} is already downloaded: {} (--force downloads it again)",
             p.name,
@@ -219,7 +226,10 @@ fn pull(args: WeightsPullArgs, out: Out) -> Result<(), CliError> {
     let _ = std::fs::remove_dir_all(&tmp);
     let sha = result?;
     let bytes = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
-    out.record(&json!({"event": "done", "name": p.name, "path": dest, "downloaded": true, "sha256": sha, "bytes": bytes}));
+    out.record(&json!({
+        "event": "done", "name": p.name, "path": folo_api::json::path(&dest), "downloaded": true, "sha256": sha,
+        "bytes": bytes,
+    }));
     out.human(format!(
         "{} → {} ({:.1} MB, sha256 {sha} verified)",
         p.name,

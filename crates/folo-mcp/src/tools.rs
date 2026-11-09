@@ -1531,6 +1531,23 @@ fn config_diff(configs: &[Value]) -> BTreeMap<String, Vec<Value>> {
 mod tests {
     use super::*;
 
+    /// The tool count the docs state, and llms.txt's tool list, follow [`TOOLS`] (DOGFOOD-1, -2 and -3 each found
+    /// a stale count).
+    #[test]
+    fn docs_name_every_tool() {
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let count = format!("{} tools", TOOLS.len());
+        for doc in ["README.md", "docs/QUICKSTART.md", "docs/MCP.md", "llms.txt"] {
+            let text = std::fs::read_to_string(repo.join(doc)).unwrap();
+            assert!(text.contains(&count), "{doc} does not say \"{count}\"");
+        }
+        let llms = std::fs::read_to_string(repo.join("llms.txt")).unwrap();
+        let list = llms.split_once(&count).unwrap().1.split_once("- **CLI:**").unwrap().0;
+        for t in TOOLS {
+            assert!(list.contains(t.name), "llms.txt's tool list leaves out {}", t.name);
+        }
+    }
+
     #[test]
     fn run_status_lists_distinct_warnings() {
         let line = |level, m: &str| LogLine { t: String::new(), level, message: m.into() };

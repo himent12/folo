@@ -7,9 +7,9 @@
 > source).
 
 Fastest path for an agent:
-- **MCP:** `folo mcp --data-dir DIR` (stdio). It has 17 tools: folo_info, list_datasets, get_dataset,
+- **MCP:** `folo mcp --data-dir DIR` (stdio). It has 18 tools: folo_info, list_datasets, get_dataset,
   list_dataset_issues, list_dataset_images, register_dataset, create_synthetic_dataset, list_models, train,
-  run_status, list_runs, stop_run, val, predict, predict_batch, export and compare_runs.
+  run_status, list_runs, stop_run, reorder_run, val, predict, predict_batch, export and compare_runs.
 - **CLI:** `folo <command> --json`. stdout is then JSON Lines only. Errors end with
   `{"error":{"code","message","hint"}}`. Exit codes: 0 ok, 1 runtime, 2 usage, 3 not found, 4 not implemented.
 - **Discovery:** `folo describe --json` prints every command, argument and default, plus every MCP tool's input and
@@ -87,3 +87,5 @@ Fastest path for an agent:
 - [Dogfood report 1](docs/DOGFOOD-1.md): a fresh agent's friction report from driving FOLO via the CLI and MCP
 - [Dogfood report 2](docs/DOGFOOD-2.md): the README quickstart, Studio (Playwright), MCP on real data and Desktop,
   plus which DOGFOOD-1 fixes held
+- [Dogfood report 3](docs/DOGFOOD-3.md): the docs site, pretrained weights, AMP, the NMS-free head, ONNX and the
+  queue and estimates on real data (CLI, MCP, Studio, Desktop), plus which DOGFOOD-2 fixes held

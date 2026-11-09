@@ -1472,12 +1472,16 @@ pub struct ImageSize {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Timing {
     /// Decode + letterbox.
+    #[serde(serialize_with = "json::serialize_ms")]
     pub preprocess_ms: f64,
     /// Forward pass.
+    #[serde(serialize_with = "json::serialize_ms")]
     pub inference_ms: f64,
     /// Decode + NMS + rescale.
+    #[serde(serialize_with = "json::serialize_ms")]
     pub postprocess_ms: f64,
     /// Sum of the above.
+    #[serde(serialize_with = "json::serialize_ms")]
     pub total_ms: f64,
 }
 
@@ -1543,6 +1547,7 @@ pub struct ValTiming {
     /// Whole validation, seconds.
     pub total_s: f64,
     /// Mean per image (preprocess + inference + postprocess), milliseconds.
+    #[serde(serialize_with = "json::serialize_ms")]
     pub per_image_ms: f64,
 }
 

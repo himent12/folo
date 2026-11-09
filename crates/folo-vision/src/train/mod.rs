@@ -924,10 +924,13 @@ impl Trainer {
             None => Box::new(iter.map(|r| r.map(|b| (b, None)).map_err(Error::from))),
         };
         let mut k = 0usize;
-        // A batch's time runs from the end of the previous one, so waits for the loader count in the ETA.
+        // A batch's wall time starts when the previous one ends, so the ETA counts the wait for the loader too:
+        // with mosaic on large JPEGs the loader, not the step, often sets the pace.
+        let phase = self.mosaic_phase(e);
         let mut batch_start = Instant::now();
         for item in source.by_ref() {
             let (mut batch, staged) = item?;
+            let received = Instant::now();
             let n = batch.len();
             let targets = targets_from_normalized(&batch.targets, n, s, s)?;
             let x = match (&ctx, staged) {
@@ -1010,8 +1013,9 @@ impl Trainer {
             }
 
             epoch_images += n;
-            clock.batches += 1;
-            clock.train_time += batch_start.elapsed().as_secs_f64();
+            clock.batches[phase] += 1;
+            clock.wall[phase] += batch_start.elapsed().as_secs_f64();
+            clock.step[phase] += received.elapsed().as_secs_f64();
             batch_start = Instant::now();
             if finite {
                 let elapsed = epoch_start.elapsed().as_secs_f64().max(1e-9);
@@ -1098,17 +1102,15 @@ impl Trainer {
         Ok(())
     }
 
-    /// Remaining seconds: batches left at the run's mean batch time, plus the validations left at their mean.
+    /// Remaining seconds after batch `k` of epoch `e` ([`eta_s`]), to 0.1 s (`70.2`, not `70.1722331406015`).
     fn eta(&self, e: u32, k: usize, clock: &Clock) -> f64 {
-        let per_batch = clock.train_time / clock.batches.max(1) as f64;
-        let left_epochs = (self.cfg.epochs - e - 1) as f64;
-        let left_batches = (self.nb - k - 1) as f64 + left_epochs * self.nb as f64;
-        let per_val = if clock.val_count > 0 {
-            clock.val_time / clock.val_count as f64
-        } else {
-            0.1 * per_batch * self.nb as f64
-        };
-        left_batches * per_batch + (left_epochs + 1.0) * per_val
+        (eta_s(clock, self.nb, e, k, self.cfg.epochs, |ep| self.mosaic_phase(ep)) * 10.0).round() / 10.0
+    }
+
+    /// The [`Clock`] phase of epoch `e`: 0 while mosaic is on, 1 once it is closed (or when it is off).
+    fn mosaic_phase(&self, e: u32) -> usize {
+        let a = &self.cfg.augment;
+        usize::from(!(a.mosaic > 0.0 && a.mosaic_active(e, self.cfg.epochs)))
     }
 
     /// Validate the EMA model (or the live model in eval mode) on the validation split.
@@ -1247,18 +1249,78 @@ fn loss_json(i: &LossItems) -> folo_api::Loss {
     folo_api::Loss { box_: i.box_, cls: i.cls, dfl: i.dfl, total: i.total() }
 }
 
-/// Wall-clock accounting for the ETA.
+/// Wall-clock accounting for the ETA, per mosaic phase (index 0: mosaic on, 1: closed or off), because the two
+/// can differ several times over: on 1080p frames a mosaic epoch of folo-n took 24 s and a closed one 10 s.
 #[derive(Default)]
 struct Clock {
-    batches: usize,
-    train_time: f64,
+    batches: [usize; 2],
+    /// Wall time of the batches, the wait for the loader included.
+    wall: [f64; 2],
+    /// Time from receiving each batch to the end of its step: what the batches cost when the loader keeps up.
+    step: [f64; 2],
     val_count: usize,
     val_time: f64,
+}
+
+impl Clock {
+    /// Expected seconds per batch in `phase`: its measured wall time once it has run. Before the closed phase
+    /// starts, the mosaic phase's step time, since without mosaic the loader keeps up and the step sets the pace;
+    /// before any batch, 0.
+    fn per_batch(&self, phase: usize) -> f64 {
+        let other = 1 - phase;
+        if self.batches[phase] > 0 {
+            self.wall[phase] / self.batches[phase] as f64
+        } else if self.batches[other] > 0 {
+            let time = if phase == 1 { self.step[other] } else { self.wall[other] };
+            time / self.batches[other] as f64
+        } else {
+            0.0
+        }
+    }
+}
+
+/// Remaining seconds of a run after batch `k` (0-based) of epoch `e` (0-based) of `epochs`, with `nb` batches per
+/// epoch and `phase(epoch)` its [`Clock`] phase: each batch left at its phase's [`Clock::per_batch`], plus the
+/// validations left at their mean (a tenth of an epoch before the first).
+fn eta_s(clock: &Clock, nb: usize, e: u32, k: usize, epochs: u32, phase: impl Fn(u32) -> usize) -> f64 {
+    let train = (nb - k - 1) as f64 * clock.per_batch(phase(e))
+        + (e + 1..epochs).map(|ep| nb as f64 * clock.per_batch(phase(ep))).sum::<f64>();
+    let per_val = if clock.val_count > 0 {
+        clock.val_time / clock.val_count as f64
+    } else {
+        0.1 * clock.per_batch(phase(e)) * nb as f64
+    };
+    train + (epochs - e) as f64 * per_val
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The ETA counts the loader's wait, and does not charge the mosaic-free epochs at mosaic speed.
+    #[test]
+    fn eta_by_mosaic_phase() {
+        // 10 epochs of 100 batches, the last 2 without mosaic. After epoch 0: 0.2 s per batch of wall time, of
+        // which 0.08 s is the step (the rest is waiting for the loader), and a 1 s validation.
+        let mut c = Clock { batches: [100, 0], wall: [20.0, 0.0], step: [8.0, 0.0], ..Clock::default() };
+        c.val_count = 1;
+        c.val_time = 1.0;
+        let phase = |ep: u32| usize::from(ep >= 8);
+        let eta = eta_s(&c, 100, 1, 0, 10, phase);
+        // Epoch 1's 99 batches and epochs 2..8 at 0.2 s, epochs 8 and 9 at the step time, 9 validations.
+        let want = 99.0 * 0.2 + 6.0 * 100.0 * 0.2 + 2.0 * 100.0 * 0.08 + 9.0;
+        assert!((eta - want).abs() < 1e-9, "{eta} vs {want}");
+        // Once the closed phase has run, its own wall time counts.
+        c.batches[1] = 50;
+        c.wall[1] = 5.0;
+        c.step[1] = 4.0;
+        let eta = eta_s(&c, 100, 8, 49, 10, phase);
+        let want = 50.0 * 0.1 + 100.0 * 0.1 + 2.0;
+        assert!((eta - want).abs() < 1e-9, "{eta} vs {want}");
+        // No mosaic at all (phase 1 throughout), and nothing measured yet.
+        let c = Clock::default();
+        assert_eq!(eta_s(&c, 100, 0, 0, 10, |_| 1), 0.0);
+    }
 
     /// A resumed run keeps the closing epochs its checkpoint records; one from before the cap keeps the old rule.
     #[test]

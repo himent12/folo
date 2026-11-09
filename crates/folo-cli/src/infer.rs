@@ -386,12 +386,14 @@ pub fn predict(args: PredictArgs, out: Out) -> Result<(), CliError> {
         ));
     }
     let n = (images.len() - failed).max(1) as f64;
+    // Rounded like the per-image timings (`folo_api::json::round_ms`): `49.0546`, not `49.054555000000015`.
+    let mean = |i: usize| folo_api::json::round_ms(sum[i] / n);
     out.record(&json!({
         "event": "done",
         "images": images.len() - failed,
         "failed": failed,
         "boxes": boxes,
-        "mean_timing": { "preprocess_ms": sum[0] / n, "inference_ms": sum[1] / n, "postprocess_ms": sum[2] / n, "total_ms": sum[3] / n },
+        "mean_timing": { "preprocess_ms": mean(0), "inference_ms": mean(1), "postprocess_ms": mean(2), "total_ms": mean(3) },
         "seconds": t_all.elapsed().as_secs_f64(),
         "saved_to": args.save,
     }));

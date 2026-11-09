@@ -510,14 +510,14 @@ pub fn read_coco_ground_truth(path: impl AsRef<Path>) -> Result<CocoGroundTruth>
 /// split has no annotation file or several.
 pub fn open_coco_ground_truth(path: impl AsRef<Path>, split: Split) -> Result<CocoGroundTruth> {
     let path = path.as_ref();
-    let super::Source::Coco { root, jsons } = super::detect(path, Format::Coco)? else {
-        return Err(DataError::Format(format!("{} is not a COCO dataset", path.display())));
+    let super::Source::Coco { root, jsons } = detect_coco(path)? else {
+        return Err(DataError::Format(format!("{} is not a COCO dataset", crate::paths::shown(path))));
     };
     let mut of_split = jsons.into_iter().filter(|(s, _)| *s == split).map(|(_, p)| p);
     let (Some(json), None) = (of_split.next(), of_split.next()) else {
         return Err(DataError::Format(format!(
             "{}: expected exactly one COCO annotation file for the {} split",
-            path.display(),
+            crate::paths::shown(path),
             split.as_str()
         )));
     };
@@ -533,10 +533,21 @@ pub fn open_coco_ground_truth(path: impl AsRef<Path>, split: Split) -> Result<Co
 /// The COCO annotation files of the dataset at `path` (a COCO `.json` or a COCO dataset folder, as
 /// [`open`](crate::open) finds them) with the split each one feeds.
 pub fn coco_annotation_files(path: impl AsRef<Path>) -> Result<Vec<(Split, PathBuf)>> {
-    match super::detect(path.as_ref(), Format::Coco)? {
+    match detect_coco(path.as_ref())? {
         super::Source::Coco { jsons, .. } => Ok(jsons),
-        _ => Err(DataError::Format(format!("{} is not a COCO dataset", path.as_ref().display()))),
+        _ => Err(DataError::Format(format!("{} is not a COCO dataset", crate::paths::shown(path.as_ref())))),
     }
+}
+
+/// [`super::detect`] restricted to COCO. When there is no COCO dataset at `path` but a YOLO one, the error says
+/// so (rather than that no dataset was found), so a caller can point at `folo dataset convert`.
+fn detect_coco(path: &Path) -> Result<super::Source> {
+    super::detect(path, Format::Coco).map_err(|e| match (&e, super::detect(path, Format::Yolo)) {
+        (DataError::Format(_), Ok(_)) => {
+            DataError::Format(format!("{} is a YOLO dataset, not a COCO one", crate::paths::shown(path)))
+        }
+        _ => e,
+    })
 }
 
 #[cfg(test)]

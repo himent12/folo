@@ -12,7 +12,7 @@ scraping. It exposes the same operations as the CLI and `docs/API.md`, with the 
 `folo mcp [--data-dir DIR] [--mock] [--read-only] [--confine] [--server http://127.0.0.1:7878] [--device auto]`.
 `--device` (env `FOLO_DEVICE`: `auto`, `cpu`, `gpu:<n>`) is where the embedded real store runs `predict`,
 `predict_batch` and `val`; each training run has its own `device`. Setup snippets for
-Claude Code and Codex are in the README ("Use FOLO from Claude Code / Codex"). The implementation is the
+Claude Code and Codex are in the README ([Use FOLO from an agent](../README.md#use-folo-from-an-agent)). The implementation is the
 `folo-mcp` crate; the end-to-end tests are `crates/folo-cli/tests/mcp.rs`.
 
 ## Status

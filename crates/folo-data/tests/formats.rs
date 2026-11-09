@@ -365,3 +365,24 @@ fn coco_ground_truth_paths_match_the_loader() {
     assert!(crowd.iscrowd && crowd.area == 20.0 && crowd.bbox == [1.0, 1.0, 5.0, 5.0]);
     assert!(folo_data::open_coco_ground_truth(r, Split::Train).is_err());
 }
+
+#[test]
+fn coco_ground_truth_of_a_yolo_dataset_says_it_is_yolo() {
+    // `folo val --coco` on a YOLO folder: the error names the format it found, not "could not detect a dataset".
+    let t = TempDir::new("coco-gt-of-yolo");
+    let r = t.path();
+    write_png(&r.join("images/val/a.png"), 8, 8, [0; 3]);
+    write(&r.join("labels/val/a.txt"), "0 0.5 0.5 0.2 0.2\n");
+    write(&r.join("data.yaml"), "val: images/val\nnames: [a]\n");
+    for err in [
+        folo_data::open_coco_ground_truth(r, Split::Val).unwrap_err().to_string(),
+        folo_data::coco_annotation_files(r).unwrap_err().to_string(),
+    ] {
+        assert!(err.contains("is a YOLO dataset, not a COCO one"), "{err}");
+        assert!(!err.contains(folo_data::UNDETECTED), "{err}");
+    }
+    // Nothing that looks like a dataset still says so.
+    let empty = TempDir::new("coco-gt-of-nothing");
+    let err = folo_data::open_coco_ground_truth(empty.path(), Split::Val).unwrap_err().to_string();
+    assert!(err.contains(folo_data::UNDETECTED), "{err}");
+}

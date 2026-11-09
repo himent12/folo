@@ -39,8 +39,8 @@ folo train --data datasets/shapes --model folo-n --imgsz 320 --epochs 30
   in about 1 s. `--classes` takes up to 8 names, and `circle`, `square`, `triangle`, `star`, `ring`, `cross`,
   `hexagon` and `heart` each get their own shape.
 - `train` uses the GPU when it finds one. Each epoch shows a progress bar (losses, img/s, ETA) and then one row of
-  validation metrics. On the dev machine this run took 137 s and ended at **mAP50 0.948, mAP50-95 0.814**. The GPU
-  was shared with other jobs, which slowed some epochs.
+  validation metrics. On the dev machine this run took 83 s and ended at **mAP50 0.955, mAP50-95 0.823** (two runs
+  a day apart, DOGFOOD-2 and -3, gave the same numbers; with the GPU shared with other jobs it took up to 139 s).
 
 The run folder is `runs/<dataset>-<size>/`, here `runs/shapes-n/`. If that folder already exists, a numeric suffix
 is added (`--project` and `--name` override both parts). It contains:
@@ -67,7 +67,9 @@ folo val --model runs/shapes-n/weights/best.folo --data datasets/shapes
 --max-det 300`. On the 200 val images above, the mean was 9.2 ms per image end to end.
 
 `val` reports mAP50, mAP50-95, precision and recall, overall and per class, computed as pycocotools does
-([METRICS.md](METRICS.md)). Add `--split test` to evaluate on a test split.
+([METRICS.md](METRICS.md)). Add `--split test` to evaluate on a test split. On a COCO dataset, `--coco` adds the
+full COCOeval table (AP small / medium / large, AR); a YOLO dataset converts with `folo dataset convert`. `--half`
+runs `val` and `predict` in f16 on the GPU (`--tensor-cores` puts it on the tensor cores), within 0.002 mAP of f32.
 
 ## 4. Train on your own data
 
@@ -115,8 +117,13 @@ Things to know:
   640 px costs on far-away targets.
 - **Data loading**: with large JPEGs and mosaic, the data loader can set the pace. `--workers N` (default
   `min(cores, 8)`) adds decode threads.
-- **Device**: `--device cpu` or `--device gpu:<n>` pins the device. `gpu:<n>` exits with code 4 when no usable
-  adapter is found.
+- **Device**: `--device cpu` or `--device gpu:<n>` pins the device. `gpu:<n>` without a usable adapter fails with
+  `device_not_found` (exit 3), and the hint lists the devices this machine has.
+- **Mixed precision**: `--amp` trains with f16 activations on the GPU's tensor cores and f32 master weights, about
+  1.25× (folo-n) to 1.6× (folo-s) faster per step with 40% less memory ([MODEL.md](MODEL.md) §8.8). On a machine
+  without tensor cores it fails with `not_supported` (exit 4) before anything is written.
+- **NMS-free head**: `--head o2o` also trains a one-to-one head, so the model predicts end to end without NMS
+  ([MODEL.md](MODEL.md) §6.6); `val`, `predict` and `export` use it automatically.
 - **Watching a run**: add `--json` and read stdout line by line. Each `epoch` record carries the validation metrics,
   and the run ends with a `done` record that names the weights.
 
@@ -134,7 +141,18 @@ folo train --data my-data --model runs/shapes-n/weights/best.folo --epochs 30 --
 The tensors that match are loaded. If your dataset's class list differs from the weights' classes, the class outputs
 are re-initialised, and everything else is kept. As a check: fine-tuning the shapes model above on a new
 `star, ring, heart` dataset reached mAP50 0.32 after 2 epochs, while a from-scratch model is near 0 at that point.
-FOLO ships **no pretrained weights yet**, so for now you fine-tune from your own runs.
+
+**Pretrained weights.** `folo-n-coco` is folo-n trained on COCO ([examples/coco](../examples/coco/README.md)). It is
+in a **draft** GitHub release for now, so only people with write access to the repository can download it:
+
+```sh
+folo weights pull folo-n-coco                                    # into ~/.folo/weights/, checksum verified
+folo train --data my-data --weights folo-n-coco --epochs 20      # takes the weights' architecture (folo-n)
+```
+
+On the dev machine, 20 epochs from `folo-n-coco` on the 2,030 R6 frames ([examples/r6](../examples/r6/README.md))
+took 6 min 14 s and reached mAP50-95 0.432 on its val split. Studio and MCP do not resolve published names yet: copy
+the file into `<data dir>/models/` and it shows up as a model to start from ([CLI.md, Weights](CLI.md#weights)).
 
 `--resume` is different: it continues an *interrupted* run with its stored settings. To train further after a run
 **completed**, start a new run with `--model .../best.folo`.
@@ -215,12 +233,13 @@ or, without WebGPU, on the wasm CPU (single-threaded, about 0.5 s) ([WASM.md](WA
   node crates/folo-wasm/demo/test.mjs --model runs/shapes-n/weights/best.folo --image img.jpg --imgsz 640 --expect native.json
   ```
 
-  `test.mjs` uses `playwright-core` from `web/node_modules`, so run `npm ci` in `web/` first.
+  `test.mjs` serves the wasm module that `sh scripts/build-wasm.sh` builds and uses `playwright-core` from
+  `web/node_modules`, so run both (the script, then `npm ci` in `web/`) first.
 
 ## 9. From an agent
 
 Everything above is also available to agents in two ways:
-- **MCP**: `folo mcp --data-dir D:/folo-data`, with 17 tools, `folo://` resources and prompts. To register it:
+- **MCP**: `folo mcp --data-dir D:/folo-data`, with 18 tools, `folo://` resources and prompts. To register it:
   `claude mcp add folo -- folo mcp --data-dir D:/folo-data`.
 - **CLI**: any command with `--json`. stdout then carries JSON Lines only, and the exit codes are stable.
 

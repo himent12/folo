@@ -83,7 +83,12 @@ fn weights_names_export_and_coco_val() {
     let names: Vec<&str> = lines.iter().map(|l| l["name"].as_str().unwrap()).collect();
     assert!(names.contains(&"folo-n-coco") && names.contains(&"folo-n-coco-f16"), "{names:?}");
     assert!(lines.iter().all(|l| l["cached"] == false));
-    assert!(lines[0]["path"].as_str().unwrap().starts_with(s(&cache)));
+    // JSON paths use `/` on every OS (the cache dir from the environment has `\` on Windows).
+    for l in &lines {
+        let asset = l["asset"].as_str().unwrap();
+        assert_eq!(l["path"].as_str().unwrap(), folo_api::json::path(cache.join(asset)), "{l}");
+        assert!(!l["path"].as_str().unwrap().contains('\\'), "{l}");
+    }
 
     // A published name that is not downloaded: not found, with the pull hint.
     let (code, lines, _) = tiny_train(&cache, &data, &project, "nope", &["--weights", "folo-n-coco"]);
@@ -140,6 +145,14 @@ fn weights_names_export_and_coco_val() {
     std::fs::copy(&exported, cache.join("folo-n-coco.folo")).unwrap();
     let (_, lines, _) = folo(&cache, &["weights", "list", "--json"]);
     assert!(lines.iter().any(|l| l["name"] == "folo-n-coco" && l["cached"] == true));
+    // `pull` of a cached name downloads nothing and reports the file like a download would.
+    let (code, lines, stderr) = folo(&cache, &["weights", "pull", "folo-n-coco", "--json"]);
+    assert_eq!(code, 0, "{stderr}");
+    let done = lines.last().unwrap();
+    assert_eq!((done["event"].as_str(), done["downloaded"].as_bool()), (Some("done"), Some(false)));
+    assert_eq!(done["path"].as_str().unwrap(), folo_api::json::path(cache.join("folo-n-coco.folo")));
+    assert_eq!(done["bytes"].as_u64(), Some(std::fs::metadata(&exported).unwrap().len()));
+    assert_eq!(done["sha256"].as_str().map(str::len), Some(64));
     let (code, lines, stderr) = tiny_train(&cache, &data, &project, "tuned", &["--weights", "folo-n-coco"]);
     assert_eq!(code, 0, "{stderr}");
     let transferred = lines.iter().any(|l| {
