@@ -123,7 +123,7 @@ impl FoloApp {
             .border_b_1()
             .border_color(t.line_subtle)
             .child(th(&t, "Run").flex_1().min_w(px(180.)))
-            .child(th(&t, "Model").w(px(64.)).flex_none())
+            .child(th(&t, "Arch").w(px(64.)).flex_none())
             .when(show_ds, |d| d.child(th(&t, "Dataset").w(px(120.)).flex_none()))
             .when(wide, |d| d.child(th(&t, "Size · batch").w(px(104.)).flex_none()))
             .child(th(&t, "Status").w(px(96.)).flex_none())

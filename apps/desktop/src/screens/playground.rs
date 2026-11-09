@@ -721,8 +721,8 @@ impl FoloApp {
                     .child(
                         div().flex().gap(px(12.)).justify_between().children(
                             [
-                                ("pre", p.timing.preprocess_ms, c_pre),
-                                ("model", p.timing.inference_ms, c_model),
+                                ("Preprocess", p.timing.preprocess_ms, c_pre),
+                                ("Inference", p.timing.inference_ms, c_model),
                                 ("NMS", p.timing.postprocess_ms, c_nms),
                             ]
                             .into_iter()

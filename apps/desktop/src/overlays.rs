@@ -315,7 +315,11 @@ impl FoloApp {
                             ty::BASE,
                             if it.icon == "icons/stop.svg" { t.danger_text } else { t.text_primary },
                         )
-                        .flex_none()
+                        // Shrinks (a 100-character run name ends in "…"), after the detail does.
+                        .flex_shrink()
+                        .min_w(px(80.))
+                        .max_w(px(360.))
+                        .truncate()
                         .child(it.title),
                     )
                     .child(text(ty::SM, t.text_tertiary).flex_1().min_w_0().truncate().child(it.detail))
@@ -924,16 +928,23 @@ impl FoloApp {
                         }),
                     ),
             )
+            // Optimizer first: the learning rate beside it depends on it (Auto sets it).
             .child(section("Schedule"))
             .child(
                 div()
                     .flex()
                     .gap(px(16.))
-                    .child(div().flex_1().child(typed(
-                        "Epochs",
-                        epochs_box,
-                        epochs_slider,
-                        epochs_bad.then_some("Enter a whole number from 1 to 10,000"),
+                    .child(div().flex_1().child(field(
+                        "Optimizer",
+                        opt_seg,
+                        Some(match (opt, &auto_pick) {
+                            (0, Some((kind, _))) => {
+                                format!("Auto: {kind} for this run, at its own learning rate")
+                            }
+                            (0, None) => "Auto: SGD for long runs, else AdamW".to_string(),
+                            (1, _) => "SGD with Nesterov momentum 0.937".to_string(),
+                            _ => "AdamW with weight decay".to_string(),
+                        }),
                     )))
                     .child(
                         div()
@@ -989,17 +1000,11 @@ impl FoloApp {
                 div()
                     .flex()
                     .gap(px(16.))
-                    .child(div().flex_1().child(field(
-                        "Optimizer",
-                        opt_seg,
-                        Some(match (opt, auto_pick) {
-                            (0, Some((kind, _))) => {
-                                format!("Auto: {kind} for this run, at its own learning rate")
-                            }
-                            (0, None) => "Auto: SGD for long runs, else AdamW".to_string(),
-                            (1, _) => "SGD with Nesterov momentum 0.937".to_string(),
-                            _ => "AdamW with weight decay".to_string(),
-                        }),
+                    .child(div().flex_1().child(typed(
+                        "Epochs",
+                        epochs_box,
+                        epochs_slider,
+                        epochs_bad.then_some("Enter a whole number from 1 to 10,000"),
                     )))
                     .child(
                         div().flex_1().child(
@@ -1125,12 +1130,14 @@ impl FoloApp {
         let busy = busy_with.is_some();
         let (go, going) =
             if busy { ("Queue training", "Queuing…") } else { ("Start training", "Starting…") };
+        // Queueing waits (a clock); starting plays.
+        let go_icon = if busy { "icons/clock.svg" } else { "icons/play.svg" };
         let start = if submitting {
             self.button_disabled(
                 "nr-start",
                 going,
                 Btn::Primary,
-                Some("icons/play.svg"),
+                Some(go_icon),
                 "Creating the run…",
                 window,
                 cx,
@@ -1140,7 +1147,7 @@ impl FoloApp {
                 "nr-start",
                 go,
                 Btn::Primary,
-                Some("icons/play.svg"),
+                Some(go_icon),
                 "Fix the highlighted fields first",
                 window,
                 cx,
@@ -1150,7 +1157,7 @@ impl FoloApp {
                 "nr-start",
                 go,
                 Btn::Primary,
-                Some("icons/play.svg"),
+                Some(go_icon),
                 window,
                 cx,
                 act(|this, w, cx| this.submit_new_run(w, cx)),

@@ -297,6 +297,20 @@ impl FoloApp {
                     .gap(px(12.))
                     .child(crate::ui::legend_value(&t, "mAP50-95", t.chart_series[0], false, v(&d.map50_95)))
                     .child(crate::ui::legend_value(&t, "mAP50", t.chart_series[1], true, v(&d.map50)))
+                    // The lime dot on the chart, keyed as on the run dashboard.
+                    .children(best.as_ref().map(|b| {
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(5.))
+                            .child(div().size(px(6.)).rounded_full().bg(t.accent_fill()))
+                            .child(text(ty::XS, t.text_secondary).child("best"))
+                            .child(text(ty::XS, t.text_primary).tnum().child(format!(
+                                "{} @ {}",
+                                f3(b.map50_95),
+                                b.epoch
+                            )))
+                    }))
                     .into_any_element();
                 // One Tab stop with the dashboard's keyboard cursor (← / →, Home / End, Esc), ending
                 // at the latest validated epoch.
