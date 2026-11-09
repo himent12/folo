@@ -970,8 +970,11 @@ unsafe fn depthwise_s1_avx2(
     let wpd = (owp + dw * (g.kw - 1)).max(pw + w);
     pad.clear();
     pad.resize(h * wpd, 0.0);
-    for (prow, xrow) in pad.chunks_exact_mut(wpd).zip(xp.chunks_exact(w)) {
-        prow[pw..pw + w].copy_from_slice(xrow);
+    // A zero-width input (all padding) has nothing to copy.
+    if w > 0 {
+        for (prow, xrow) in pad.chunks_exact_mut(wpd).zip(xp.chunks_exact(w)) {
+            prow[pw..pw + w].copy_from_slice(xrow);
+        }
     }
     // In registers: bias + SiLU / bias; otherwise a pass after the plane.
     let (reg, bias) = match epi {
@@ -1343,6 +1346,9 @@ mod kernel_tests {
             (1, 3, [10, 10], 3, [3, 3], params([1, 1], [0, 0], [1, 1], 3)),
             (1, 3, [12, 17], 3, [3, 3], params([2, 2], [1, 1], [1, 1], 3)),
             (1, 2, [9, 8], 4, [3, 3], params([2, 1], [1, 1], [1, 1], 2)),
+            // Zero-width inputs: every output is padding (then bias and activation).
+            (1, 2, [3, 0], 2, [1, 1], params([1, 1], [0, 1], [1, 1], 2)),
+            (2, 2, [3, 0], 4, [3, 3], params([1, 1], [1, 2], [1, 1], 2)),
         ];
         check(&cases);
     }
