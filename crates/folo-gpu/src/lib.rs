@@ -37,6 +37,7 @@ pub mod error;
 pub mod kernels;
 pub(crate) mod pipeline;
 pub mod pool;
+pub mod profile;
 pub mod tensor;
 
 pub use backend::{

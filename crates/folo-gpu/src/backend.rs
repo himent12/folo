@@ -49,6 +49,7 @@ use crate::kernels::reduce::{self, ReduceOp as GpuReduce};
 use crate::kernels::strided::{self, Elem, Indices, Strided};
 use crate::kernels::vision::{self, LetterboxDesc};
 use crate::pool::GpuBuffer;
+use crate::profile;
 
 /// Name used in errors.
 pub const BACKEND_NAME: &str = "wgpu";
@@ -286,6 +287,14 @@ fn pool2d(p: &Pool2dParams) -> Pool2d {
     }
 }
 
+/// A conv problem as a profile label: channels, kernel, stride, groups, input size, dtype.
+fn conv_label(d: &Conv2dDesc) -> String {
+    format!(
+        "{}->{} k{} s{} g{} {}x{}x{} {:?}",
+        d.c_in, d.c_out, d.win.kernel.0, d.win.stride.0, d.groups, d.n, d.h, d.w, d.dtype
+    )
+}
+
 /// The conv epilogue's form of a fused activation, if it has one.
 fn conv_act(act: Option<UnaryOp>) -> Option<GpuUnary> {
     Some(match act {
@@ -410,6 +419,7 @@ impl GpuBackend {
 
     fn ew(&self, op: EwOp, out_shape: &Shape, inputs: &[View<'_>]) -> Result<Storage> {
         let n = out_shape.numel();
+        let _p = profile::scope(|| format!("ew {op:?} {:?}", out_shape.dims()));
         // The values' dtype (a `where` condition is input 0): the output's too.
         let value = if matches!(op, EwOp::Where { .. }) { &inputs[1] } else { &inputs[0] };
         let dtype = value.storage.dtype();
@@ -530,6 +540,7 @@ impl Backend for GpuBackend {
     }
 
     fn full(&self, _device: Device, dtype: CoreDType, len: usize, value: f64) -> Result<Storage> {
+        let _p = profile::scope(|| format!("full {len}"));
         let buf = self.alloc(dtype, len)?;
         let (p0, p1) = match dtype {
             CoreDType::F32 => ((value as f32).to_bits(), (value as f32).to_bits()),
@@ -577,6 +588,7 @@ impl Backend for GpuBackend {
 
     fn copy_strided(&self, src: View<'_>) -> Result<Storage> {
         self.check_fits(&src, "copy_strided")?;
+        let _p = profile::scope(|| format!("copy_strided {:?}", src.shape().dims()));
         let dtype = src.storage.dtype();
         let n = src.layout.numel();
         let out = self.alloc(dtype, n)?;
@@ -615,6 +627,7 @@ impl Backend for GpuBackend {
             });
         }
         let dtype = dst.dtype();
+        let _p = profile::scope(|| format!("copy_into {:?}", src.shape().dims()));
         let db = self.buf(&View::new(dst, dst_layout))?;
         let sb = self.buf(&src)?;
         strided::scatter_strided(
@@ -631,6 +644,7 @@ impl Backend for GpuBackend {
     fn cast(&self, src: View<'_>, dtype: CoreDType) -> Result<Storage> {
         self.check_fits(&src, "cast")?;
         let from = src.storage.dtype();
+        let _p = profile::scope(|| format!("cast {from}->{dtype} {:?}", src.shape().dims()));
         if from == dtype {
             return self.copy_strided(src);
         }
@@ -668,6 +682,7 @@ impl Backend for GpuBackend {
 
     fn reduce(&self, op: ReduceOp, x: View<'_>, dim: usize) -> Result<Storage> {
         let (outer, r, inner) = split3(x.shape().dims(), dim);
+        let _p = profile::scope(|| format!("reduce {op:?} {:?} dim {dim}", x.shape().dims()));
         let n = outer * inner;
         let arg = matches!(op, ReduceOp::ArgMax | ReduceOp::ArgMin);
         let xdt = x.storage.dtype();
@@ -704,6 +719,7 @@ impl Backend for GpuBackend {
     }
 
     fn softmax(&self, x: View<'_>, dim: usize, log: bool) -> Result<Storage> {
+        let _p = profile::scope(|| format!("softmax {:?}", x.shape().dims()));
         let n = x.layout.numel();
         let dtype = x.storage.dtype();
         let out = self.alloc(dtype, n)?;
@@ -719,6 +735,7 @@ impl Backend for GpuBackend {
         let r = a.layout.rank();
         let (m, k, n) = (a.layout.dims()[r - 2], a.layout.dims()[r - 1], b.layout.dims()[r - 1]);
         let batch: usize = a.layout.dims()[..r - 2].iter().product();
+        let _p = profile::scope(|| format!("matmul {batch}x{m}x{k}x{n}"));
         let len = batch * m * n;
         let dtype = a.storage.dtype();
         let out = self.alloc(dtype, len)?;
@@ -754,6 +771,7 @@ impl Backend for GpuBackend {
     ) -> Result<Storage> {
         let dtype = grad.storage.dtype();
         let d = self.conv_desc(input_shape, w.shape(), p, dtype);
+        let _p = profile::scope(|| format!("conv_bwd_in {}", conv_label(&d)));
         let len = input_shape.numel();
         let out = self.alloc(dtype, len)?;
         let (gd, wd) = (self.dense(&grad)?, self.dense(&w)?);
@@ -781,6 +799,7 @@ impl Backend for GpuBackend {
         out_dtype: CoreDType,
     ) -> Result<Storage> {
         let d = self.conv_desc(x.shape(), weight_shape, p, x.storage.dtype());
+        let _p = profile::scope(|| format!("conv_bwd_w {}", conv_label(&d)));
         let len = weight_shape.numel();
         let out = self.alloc(out_dtype, len)?;
         let (xd, gd) = (self.dense(&x)?, self.dense(&grad)?);
@@ -791,6 +810,7 @@ impl Backend for GpuBackend {
 
     fn max_pool2d(&self, x: View<'_>, p: &Pool2dParams) -> Result<(Storage, Storage)> {
         let (n, c, h, w) = nchw(x.shape());
+        let _p = profile::scope(|| format!("max_pool {:?}", x.shape().dims()));
         let win = pool2d(p);
         let (oh, ow) = win.output(h, w).core()?;
         let len = n * c * oh * ow;
@@ -818,6 +838,7 @@ impl Backend for GpuBackend {
             });
         }
         let dtype = grad.storage.dtype();
+        let _p = profile::scope(|| format!("max_pool_bwd {:?}", input_shape.dims()));
         let (n, c, h, w) = nchw(input_shape);
         let len = input_shape.numel();
         let out = self.alloc(dtype, len)?;
@@ -885,6 +906,7 @@ impl Backend for GpuBackend {
     }
 
     fn upsample_nearest2d(&self, x: View<'_>, scale: [usize; 2]) -> Result<Storage> {
+        let _p = profile::scope(|| format!("upsample {:?}", x.shape().dims()));
         let (n, c, h, w) = nchw(x.shape());
         let (oh, ow) = (h * scale[0], w * scale[1]);
         let len = n * c * oh * ow;
@@ -899,6 +921,7 @@ impl Backend for GpuBackend {
     }
 
     fn upsample_nearest2d_backward(&self, grad: View<'_>, scale: [usize; 2]) -> Result<Storage> {
+        let _p = profile::scope(|| format!("upsample_bwd {:?}", grad.shape().dims()));
         let dtype = grad.storage.dtype();
         let (n, c, oh, ow) = nchw(grad.shape());
         let (h, w) = (oh / scale[0], ow / scale[1]);
@@ -991,6 +1014,7 @@ impl Backend for GpuBackend {
         let dtype = x.storage.dtype();
         let mut d = self.conv_desc(x.shape(), w.shape(), p, dtype);
         d.act = conv_act(act).ok_or(Error::NotSupported { op: "conv2d_act", backend: BACKEND_NAME })?;
+        let _p = profile::scope(|| format!("conv {}", conv_label(&d)));
         let (oh, ow) = d.output().core()?;
         let len = d.n * d.c_out * oh * ow;
         let out = self.alloc(dtype, len)?;
@@ -1010,6 +1034,7 @@ impl Backend for GpuBackend {
         running: Option<RunningUpdate<'_>>,
     ) -> Result<(Storage, Storage, Storage)> {
         let d = self.bn_desc(&x, act, "batch_norm_act")?;
+        let _p = profile::scope(|| format!("bn_fwd {:?} {:?}", x.shape().dims(), d.dtype));
         let len = x.layout.numel();
         let dtype = x.storage.dtype();
         let (y, mean, invstd) =
@@ -1054,6 +1079,7 @@ impl Backend for GpuBackend {
         act: Option<UnaryOp>,
     ) -> Result<(Storage, Storage, Storage)> {
         let d = self.bn_desc(&x, act, "batch_norm_act_backward")?;
+        let _p = profile::scope(|| format!("bn_bwd {:?} {:?}", x.shape().dims(), d.dtype));
         let len = x.layout.numel();
         let dtype = x.storage.dtype();
         let (dx, dw, db) =
@@ -1090,6 +1116,7 @@ impl Backend for GpuBackend {
         step: &OptimStep,
     ) -> Result<()> {
         let n = grad.layout.numel();
+        let _p = profile::scope(|| "optim".to_string());
         let u = match *step {
             OptimStep::Sgd { lr, momentum, weight_decay, nesterov } => {
                 OptimUpdate::Sgd { lr, momentum, weight_decay, nesterov }
@@ -1124,6 +1151,7 @@ impl Backend for GpuBackend {
     }
 
     fn unscale_check(&self, x: &mut Storage, n: usize, factor: f32, flag: &mut Storage) -> Result<()> {
+        let _p = profile::scope(|| "unscale".to_string());
         let (xb, fb) = (self.storage_buf(x)?, self.storage_buf(flag)?);
         optim::unscale_check(&self.ctx, xb, n, factor, fb).core()
     }

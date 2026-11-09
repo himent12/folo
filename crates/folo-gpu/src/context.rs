@@ -3,13 +3,14 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::task::{Context, Poll, Waker};
 
 use crate::error::{GpuError, Result};
 use crate::pipeline::{Kernel, KernelDef, KernelKey, Params, Spec, UNIFORM_SLOT};
 use crate::pool::{BufferPool, GpuBuffer, PoolStats, size_class};
+use crate::profile::{ProfileRow, Profiler};
 
 /// Environment variable that picks the adapter: an index into [`GpuContext::enumerate`] or a case-insensitive
 /// substring of the adapter name (for example `FOLO_GPU_ADAPTER=4080` or `FOLO_GPU_ADAPTER=1`).
@@ -46,8 +47,9 @@ pub fn request_tensor_cores() -> bool {
     }
 }
 
-/// Dispatches encoded before the open batch is submitted on its own.
-const MAX_DISPATCHES_PER_BATCH: u32 = 1024;
+/// Dispatches encoded before the open batch is submitted on its own (the default of
+/// [`GpuContext::set_flush_interval`]).
+pub const MAX_DISPATCHES_PER_BATCH: u32 = 1024;
 /// Size of one uniform arena chunk (256 parameter slots).
 const UNIFORM_CHUNK: u64 = 64 * 1024;
 
@@ -261,6 +263,10 @@ struct Inner {
     tensor_cores_status: Mutex<String>,
     /// The device was created with wgpu's experimental cooperative matrices (see [`GpuContext::device`]).
     experimental: bool,
+    /// Dispatches after which the open batch is submitted on its own ([`GpuContext::set_flush_interval`]).
+    flush_every: AtomicU32,
+    /// Per-kernel timestamp queries (`FOLO_GPU_PROFILE=1`, see [`crate::profile`]).
+    profiler: Option<Mutex<Profiler>>,
 }
 
 /// Host data in a staging buffer, made by [`GpuContext::stage`] (on any thread) and copied to the device with
@@ -484,6 +490,10 @@ impl GpuContext {
         if options.enable_f16 && adapter.features().contains(wgpu::Features::SHADER_F16) {
             features |= wgpu::Features::SHADER_F16;
         }
+        let profile = Profiler::wanted(&adapter);
+        if profile {
+            features |= Profiler::features();
+        }
         let mut status = String::from(TENSOR_CORES_NOT_REQUESTED);
         let want_coop = options.tensor_cores
             && match crate::kernels::coop::unavailable_reason(&adapter, features) {
@@ -549,6 +559,7 @@ impl GpuContext {
             max_workgroups_per_dim: dl.max_compute_workgroups_per_dimension,
             uniform_align: dl.min_uniform_buffer_offset_alignment,
         };
+        let profiler = profile.then(|| Mutex::new(Profiler::new(&device, &queue)));
         let dummy = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("folo-gpu dummy"),
             size: 256,
@@ -573,6 +584,14 @@ impl GpuContext {
                 tensor_cores: AtomicBool::new(false),
                 tensor_cores_status: Mutex::new(status),
                 experimental: coop,
+                flush_every: AtomicU32::new(
+                    std::env::var("FOLO_GPU_FLUSH_EVERY")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(MAX_DISPATCHES_PER_BATCH)
+                        .clamp(1, MAX_DISPATCHES_PER_BATCH),
+                ),
+                profiler,
             }),
         };
         if !coop {
@@ -754,6 +773,26 @@ impl GpuContext {
         };
         self.wait_idle()?;
         Ok(released)
+    }
+
+    fn profiler(&self) -> Option<std::sync::MutexGuard<'_, Profiler>> {
+        self.inner.profiler.as_ref().map(|p| p.lock().expect("profiler lock"))
+    }
+
+    /// Whether this context times every kernel (`FOLO_GPU_PROFILE=1` on an adapter with timestamp queries inside
+    /// passes; see [`crate::profile`]).
+    pub fn profiling(&self) -> bool {
+        self.inner.profiler.is_some()
+    }
+
+    /// Submits the open batch, waits for it, and returns the GPU time per label since the last call (largest
+    /// first), resetting the totals. Empty unless [`GpuContext::profiling`].
+    pub fn profile_take(&self) -> Vec<ProfileRow> {
+        if !self.profiling() {
+            return Vec::new();
+        }
+        self.flush();
+        self.profiler().map(|mut p| p.take()).unwrap_or_default()
     }
 
     /// Number of compiled pipelines in the cache.
@@ -948,7 +987,17 @@ impl GpuContext {
             return;
         }
         let mut b = self.inner.batch.lock().expect("batch lock");
-        self.encoder(&mut b).copy_buffer_to_buffer(src, src_off, dst, dst_off, len);
+        let mut prof = self.profiler();
+        let q = prof.as_mut().map(|p| p.begin("copy"));
+        let enc = self.encoder(&mut b);
+        if let (Some(p), Some(q)) = (&prof, q) {
+            enc.write_timestamp(&p.set, q);
+        }
+        enc.copy_buffer_to_buffer(src, src_off, dst, dst_off, len);
+        if let (Some(p), Some(q)) = (&prof, q) {
+            enc.write_timestamp(&p.set, q + 1);
+        }
+        drop(prof);
         self.bump(&mut b);
     }
 
@@ -959,7 +1008,17 @@ impl GpuContext {
             return;
         }
         let mut b = self.inner.batch.lock().expect("batch lock");
-        self.encoder(&mut b).clear_buffer(buf, 0, Some(bytes));
+        let mut prof = self.profiler();
+        let q = prof.as_mut().map(|p| p.begin("clear"));
+        let enc = self.encoder(&mut b);
+        if let (Some(p), Some(q)) = (&prof, q) {
+            enc.write_timestamp(&p.set, q);
+        }
+        enc.clear_buffer(buf, 0, Some(bytes));
+        if let (Some(p), Some(q)) = (&prof, q) {
+            enc.write_timestamp(&p.set, q + 1);
+        }
+        drop(prof);
         self.bump(&mut b);
     }
 
@@ -1071,14 +1130,16 @@ impl GpuContext {
 
     fn bump(&self, b: &mut Batch) {
         b.dispatches += 1;
-        if b.dispatches >= MAX_DISPATCHES_PER_BATCH {
+        if b.dispatches >= self.inner.flush_every.load(Ordering::Relaxed) {
             self.submit(b);
         }
     }
 
     fn submit(&self, b: &mut Batch) {
         b.pass = None;
-        let Some(enc) = b.encoder.take() else { return };
+        let Some(mut enc) = b.encoder.take() else { return };
+        let mut prof = self.profiler();
+        let timed = prof.as_ref().and_then(|p| p.resolve(&mut enc));
         let used = if b.cursor == 0 { b.chunk } else { b.chunk + 1 };
         for (i, c) in b.chunks.iter().enumerate().take(used) {
             let len = if i == b.chunk { b.cursor } else { UNIFORM_CHUNK } as usize;
@@ -1088,6 +1149,9 @@ impl GpuContext {
         }
         self.inner.queue.submit([enc.finish()]);
         self.inner.submissions.fetch_add(1, Ordering::Relaxed);
+        if let (Some(p), Some(bytes)) = (prof.as_mut(), timed) {
+            p.collect(&self.inner.device, bytes);
+        }
         b.dispatches = 0;
         b.chunk = 0;
         b.cursor = 0;
@@ -1177,7 +1241,16 @@ impl GpuContext {
         let pass = b.pass.as_mut().expect("pass");
         pass.set_pipeline(&kernel.pipeline);
         pass.set_bind_group(0, &bind, &[]);
+        let mut prof = self.profiler();
+        let q = prof.as_mut().map(|p| p.begin(kernel.name));
+        if let (Some(p), Some(q)) = (&prof, q) {
+            pass.write_timestamp(&p.set, q);
+        }
         pass.dispatch_workgroups(groups[0], groups[1], groups[2]);
+        if let (Some(p), Some(q)) = (&prof, q) {
+            pass.write_timestamp(&p.set, q + 1);
+        }
+        drop(prof);
         self.inner.dispatches.fetch_add(1, Ordering::Relaxed);
         self.bump(b);
         Ok(())

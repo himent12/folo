@@ -258,11 +258,21 @@ fn bench_train(scale: &str, dev: Device, ctx: &GpuContext, amp: bool) {
     // as training does, with the loss's one readback as its only wait, and is synchronised at the end. `host`
     // takes the host assigner (the previous loss, `detection_loss_host`) for comparison. Returns the step time
     // and the four phase times.
+    // `FOLO_GPU_PROFILE=1`: GPU time per kernel label, per phase (the context's timestamp queries).
+    let profile: std::cell::RefCell<[Profile; 4]> = Default::default();
     let mut step = |split: bool, host: bool| {
-        let sync = |on: bool| {
+        let mut phase = 0;
+        let mut sync = |on: bool| {
             if on {
                 synchronize(dev).expect("sync");
             }
+            for r in ctx.profile_take() {
+                let mut p = profile.borrow_mut();
+                let e = p[phase].entry(r.label).or_default();
+                e.0 += r.count;
+                e.1 += r.ms;
+            }
+            phase += 1;
         };
         let t0 = Instant::now();
         let out = {
@@ -330,12 +340,65 @@ fn bench_train(scale: &str, dev: Device, ctx: &GpuContext, amp: bool) {
         (w1.submissions - w0.submissions) / 3,
         mib(peak)
     );
+    if !amp && !ctx.profiling() {
+        let (_, l, b, _) = split(true);
+        println!("    host assigner instead (detection_loss_host): loss {l:.1} ms, backward {b:.1} ms");
+    }
+    if ctx.profiling() {
+        // Every step above was timed (profiling waits at each submission, so the wall-clock rows above are not
+        // the real ones); count these steps only.
+        profile.take();
+        const STEPS: usize = 5;
+        for _ in 0..STEPS {
+            step(true, false);
+        }
+        print_profile(&profile.borrow(), STEPS);
+    }
     if amp {
         println!("    loss scale {} after {skipped} skipped steps", scaler.scale());
-        return;
     }
-    let (_, l, b, _) = split(true);
-    println!("    host assigner instead (detection_loss_host): loss {l:.1} ms, backward {b:.1} ms");
+}
+
+/// GPU milliseconds and dispatch counts per kernel label.
+type Profile = std::collections::HashMap<String, (u64, f64)>;
+
+/// The per-phase kernel timings of `steps` profiled training steps, per step: totals by label group (the label's
+/// first word), then the largest single labels.
+fn print_profile(profile: &[Profile; 4], steps: usize) {
+    let per = 1.0 / steps as f64;
+    for (name, rows) in ["forward", "loss", "backward", "optimizer"].iter().zip(profile) {
+        let total: f64 = rows.values().map(|r| r.1).sum();
+        let count: u64 = rows.values().map(|r| r.0).sum();
+        println!(
+            "    profile {name}: {:.2} ms GPU time in {} dispatches per step",
+            total * per,
+            count / steps as u64
+        );
+        let mut groups: Vec<(String, u64, f64)> = Vec::new();
+        for (label, &(n, ms)) in rows {
+            // `tag args/kernel` -> `tag/kernel`.
+            let tag = label.split(' ').next().unwrap_or(label);
+            let kernel = label.rsplit('/').next().unwrap_or("");
+            let key = if label.contains('/') { format!("{tag}/{kernel}") } else { tag.to_string() };
+            match groups.iter_mut().find(|g| g.0 == key) {
+                Some(g) => {
+                    g.1 += n;
+                    g.2 += ms;
+                }
+                None => groups.push((key, n, ms)),
+            }
+        }
+        groups.sort_by(|a, b| b.2.total_cmp(&a.2));
+        for (key, n, ms) in groups.iter().filter(|g| g.2 * per >= 0.02) {
+            println!("      {:>7.2} ms {:>5} x  {key}", ms * per, n / steps as u64);
+        }
+        let mut top: Vec<(&String, &(u64, f64))> = rows.iter().collect();
+        top.sort_by(|a, b| b.1.1.total_cmp(&a.1.1));
+        println!("      largest labels:");
+        for (label, (n, ms)) in top.iter().take(45).filter(|r| r.1.1 * per >= 0.05) {
+            println!("        {:>7.2} ms {:>4} x  {label}", ms * per, n / steps as u64);
+        }
+    }
 }
 
 fn main() {
