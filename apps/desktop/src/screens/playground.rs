@@ -485,6 +485,7 @@ impl FoloApp {
                                     zoom,
                                     pan,
                                     true,
+                                    false,
                                     0.,
                                 );
                             },
@@ -1049,6 +1050,7 @@ impl FoloApp {
                             (m.width as f32, m.height as f32),
                             Vec::new(),
                             Fit::Cover,
+                            false,
                             false,
                         ),
                     ));

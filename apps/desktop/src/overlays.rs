@@ -2080,6 +2080,7 @@ impl FoloApp {
                                 zoom,
                                 pan,
                                 true,
+                                false,
                                 0.,
                             );
                         });

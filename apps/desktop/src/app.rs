@@ -368,6 +368,8 @@ pub struct FoloApp {
     /// Per-class box counts of one split, keyed by (dataset, split, image count).
     pub ds_split_counts: RefCell<Option<SplitCounts>>,
     pub ds_tile: f32,
+    /// The grid tile under the pointer (it reveals every label, as a focused one does).
+    pub ds_hover_tile: Option<String>,
     /// Filtered image indices keyed by (dataset, split, class, list length).
     pub ds_filter_cache: RefCell<Option<FilterCache>>,
     pub grid_scroll: gpui::UniformListScrollHandle,
@@ -560,6 +562,7 @@ impl FoloApp {
             ds_fill: true,
             ds_split_counts: RefCell::new(None),
             ds_tile: 168.,
+            ds_hover_tile: None,
             ds_filter_cache: RefCell::new(None),
             grid_scroll: gpui::UniformListScrollHandle::new(),
             grid_width: Rc::new(std::cell::Cell::new(px(900.))),

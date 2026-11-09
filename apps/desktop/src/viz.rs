@@ -98,6 +98,7 @@ pub fn paint_image_with_boxes(
     zoom: f32,
     pan: (f32, f32),
     labels: bool,
+    reveal: bool,
     corner: f32,
 ) {
     let rect = image_rect(bounds, w.max(1.), h.max(1.), fit, zoom, pan);
@@ -233,6 +234,9 @@ pub fn paint_image_with_boxes(
                 {
                     // Small views (< 480 px): 14 px chips with 10 px text (design/README).
                     let compact = bounds.size.width < px(480.);
+                    // Small views label sparingly at rest; hovered or focused (`reveal`), they label
+                    // like full views, so no box is known by its colour alone.
+                    let strict = compact && !reveal;
                     let fs = if compact { 10. } else { ty::XS.size };
                     // Narrow views (thumbnails under 140 px) show the score only; the key names the hue.
                     let name = if bounds.size.width < px(140.) {
@@ -246,7 +250,7 @@ pub fn paint_image_with_boxes(
                     } else if b.dim {
                         // Thumbnails: a dimmed box keeps only its faded outline, so the filtered
                         // class's chips carry the tile.
-                        if compact {
+                        if strict {
                             continue;
                         }
                         // Larger views: muted but opaque (a translucent chip over a photo can't be
@@ -308,7 +312,7 @@ pub fn paint_image_with_boxes(
                     let area = |x: &Bounds<Pixels>| f32::from(x.size.width) * f32::from(x.size.height);
                     let half_in = area(&visible) >= area(&r) * 0.5;
                     if !b.highlight
-                        && (!half_in || compact && (visible.size.height < ch * 2. || placed.len() >= 4))
+                        && (!half_in || strict && (visible.size.height < ch * 2. || placed.len() >= 4))
                     {
                         continue;
                     }
@@ -383,8 +387,8 @@ pub fn paint_image_with_boxes(
                     let free_spot = clear.or_else(|| {
                         if dense || b.highlight {
                             spots.clone().find(open)
-                        } else if !compact {
-                            // Thumbnails stay strict: too small for a shared corner to read.
+                        } else if !strict {
+                            // Thumbnails at rest stay strict: too small for a shared corner to read.
                             candidates[2..].iter().copied().find(open)
                         } else {
                             None

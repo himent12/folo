@@ -740,8 +740,10 @@ impl FoloApp {
                             row = row.child(div().w(px(cell_w)).flex_none());
                             continue;
                         };
-                        let tile_el = this.tile(&ds_id, meta, this.ds_boxes, true, fit, cx);
                         let key = format!("tile-{}", meta.id);
+                        let reveal = this.fh(key.clone(), cx).is_focused(window)
+                            || this.ds_hover_tile.as_deref() == Some(meta.id.as_str());
+                        let tile_el = this.tile(&ds_id, meta, this.ds_boxes, true, fit, reveal, cx);
                         // "2 square · 1 triangle · +2": the two commonest classes, then the rest as a
                         // count, so the box colours aren't the only way to tell what a tile holds.
                         let what = {
@@ -779,6 +781,16 @@ impl FoloApp {
                             // Over an image a fill wouldn't show: the edge answers instead.
                             .hover(|s| s.border_color(t.line_strong))
                             .active(|s| s.border_color(t.text_tertiary))
+                            .on_hover({
+                                let mid = meta.id.clone();
+                                cx.listener(move |this, h: &bool, _, cx| {
+                                    let next = h.then(|| mid.clone());
+                                    if *h || this.ds_hover_tile.as_deref() == Some(mid.as_str()) {
+                                        this.ds_hover_tile = next;
+                                        cx.notify();
+                                    }
+                                })
+                            })
                             .child(
                                 div()
                                     .absolute()

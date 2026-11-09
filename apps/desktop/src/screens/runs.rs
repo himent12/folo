@@ -1257,7 +1257,7 @@ impl FoloApp {
                             .rounded(px(radius::MD))
                             .overflow_hidden()
                             .bg(t.bg_inset)
-                            .child(image_canvas(&t, img, dims, boxes, Fit::Cover, true));
+                            .child(image_canvas(&t, img, dims, boxes, Fit::Cover, true, false));
                         square.style().aspect_ratio = Some(1.0);
                         div().flex_1().min_w(px(0.)).child(square).into_any_element()
                     })

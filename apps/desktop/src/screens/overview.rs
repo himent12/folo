@@ -182,7 +182,7 @@ impl FoloApp {
     fn live_panel(&mut self, r: &Run, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         // Short windows trade chart height for the sections below.
         // Short windows (620 px minimum): a lower plot, so two Recent runs rows show under the hero.
-        let hero_h = if window.viewport_size().height < px(700.) { 108. } else { 132. };
+        let hero_h = hero_height(window);
         // The card's inset: 16 px at the sides always, tighter above and below with the short chart.
         // The chart section's rule spans it.
         let card_pad = 16.;
@@ -527,7 +527,7 @@ impl FoloApp {
         if self.store.runs.is_loading() {
             // Same anatomy and heights as the live panel: header, rail, a row of four KPIs above the
             // chart (its title row, then the plot), meter footer. Nothing moves when data lands.
-            let hero_h = if window.viewport_size().height < px(700.) { 108. } else { 132. };
+            let hero_h = hero_height(window);
             let sk = |id: &str| skeleton(&t, id.to_string());
             return panel(&t)
                 .flex_1()
@@ -1336,7 +1336,7 @@ impl FoloApp {
             .map(|i| match metas.get(i) {
                 Some(m) => {
                     // Outlines only: the card previews the data, its page names every box.
-                    let tile = self.tile(&d.id, m, true, false, crate::viz::Fit::Cover, cx);
+                    let tile = self.tile(&d.id, m, true, false, crate::viz::Fit::Cover, false, cx);
                     div().flex_1().h_full().overflow_hidden().child(tile).into_any_element()
                 }
                 None => div().flex_1().h_full().bg(t.bg_raised).into_any_element(),
@@ -1428,5 +1428,19 @@ impl FoloApp {
             act(move |this, w, cx| this.navigate(route.clone(), w, cx)),
         )
         .into_any_element()
+    }
+}
+
+/// The Overview hero chart's plot height: lower in short windows (620 px minimum, so two Recent
+/// runs rows show under it), taller in tall, wide ones so the curve isn't a flat band across 1,100
+/// px. The skeleton and the live card share it.
+fn hero_height(window: &Window) -> f32 {
+    let v = window.viewport_size();
+    if v.height < px(700.) {
+        108.
+    } else if v.width >= px(1600.) && v.height >= px(960.) {
+        180.
+    } else {
+        132.
     }
 }

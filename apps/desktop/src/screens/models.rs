@@ -340,10 +340,12 @@ impl FoloApp {
             None => "best F1 · IoU 0.50".to_string(),
         };
         // The dataset the headline numbers were measured on (the run's), named beside them.
+        // The split evaluation used: validation, or train when the dataset has no validation
+        // images (the server falls back to them).
         let head_ds = run
             .as_ref()
             .and_then(|r| self.store.dataset_summary(&r.config.dataset_id))
-            .map(|d| d.name.clone());
+            .map(|d| (d.name.clone(), if d.splits.val == 0 { "train" } else { "validation" }));
         let tile = |content: gpui::Div| {
             div()
                 .flex_grow()
@@ -388,7 +390,7 @@ impl FoloApp {
                         )
                         .child(text(ty::XS, t.text_tertiary).whitespace_nowrap().truncate().child(
                             match &head_ds {
-                                Some(d) => format!("IoU 0.50–0.95 · {d} validation"),
+                                Some((d, split)) => format!("IoU 0.50–0.95 · {d} {split}"),
                                 None => "IoU 0.50–0.95 · validation split".to_string(),
                             },
                         )),
@@ -477,8 +479,9 @@ impl FoloApp {
                 .child(panel(&t).child(empty_state(
                     &t,
                     "icons/chart-line.svg",
-                    "No evaluation yet",
-                    "Run `folo val` on this model to see PR curves and the confusion matrix.",
+                    // The server can't evaluate here (not a model without results): say which.
+                    "Evaluation isn't available on this server",
+                    "Its PR curves and confusion matrix need a server that evaluates models. `folo val` prints them in a terminal.",
                     Tone::Neutral,
                 )))
                 .into_any_element(),
@@ -1085,7 +1088,7 @@ impl FoloApp {
             .as_ref()
             .and_then(|r| self.store.run(r))
             .and_then(|r| self.store.dataset_summary(&r.config.dataset_id))
-            .map(|d| d.name.clone());
+            .map(|d| (d.name.clone(), if d.splits.val == 0 { "Train" } else { "Validation" }));
         let seg = self.segmented(
             "cm-norm",
             &["Row %", "Counts"],
@@ -1455,8 +1458,9 @@ impl FoloApp {
                             text(ty::XS, t.text_tertiary)
                                 .tnum()
                                 .child(match &eval_ds {
-                                    Some(d) => format!("Validation · {d} · {} images", int(ev.images as u64)),
-                                    None => format!("Validation split · {} images", int(ev.images as u64)),
+                                    Some((d, split)) => format!("{split} · {d} · {} images", int(ev.images as u64)),
+                                    // Unknown dataset: the split isn't known either.
+                                    None => format!("Evaluation · {} images", int(ev.images as u64)),
                                 }),
                         ),
                     ),

@@ -71,6 +71,7 @@ impl FoloApp {
         boxes: bool,
         labels: bool,
         fit: Fit,
+        reveal: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let t = theme(cx);
@@ -96,7 +97,7 @@ impl FoloApp {
         };
         // Class names on the boxes (14 px chips in small views; none on boxes under 20 px), so a
         // class never has to be matched by colour alone.
-        image_canvas(&t, img, dims, draw, fit, labels)
+        image_canvas(&t, img, dims, draw, fit, labels, reveal)
     }
 
     /// A centred error panel with retry.
@@ -168,6 +169,7 @@ pub fn image_canvas(
     boxes: Vec<DrawBox>,
     fit: Fit,
     labels: bool,
+    reveal: bool,
 ) -> AnyElement {
     let t = *t;
     canvas(
@@ -185,6 +187,7 @@ pub fn image_canvas(
                 1.0,
                 (0., 0.),
                 labels,
+                reveal,
                 0.,
             );
         },
