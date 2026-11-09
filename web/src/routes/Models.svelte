@@ -22,7 +22,7 @@
   import SortHeader from '$lib/ui/SortHeader.svelte';
   import TableState from '$lib/ui/TableState.svelte';
   import { rowNav } from '$lib/ui/rowNav';
-  import { advantage, versusYolo26n } from '$lib/benchmarks';
+  import { unlike, versusYolo26n } from '$lib/benchmarks';
   import { origin } from '$lib/lineage';
 
   setCrumbs({ label: 'Models' });
@@ -143,8 +143,9 @@
   const hideCls = (c: Col) => (c.hide ? `hide-${c.hide}` : '');
   /** Medium weight goes to the name and the score the list is ranked by; specs stay regular. */
   const strongScore = $derived<Key>(sortKey === 'map50' ? 'map50' : 'map50_95');
-  /** One line for the collapsed engine benchmarks: how many of the measurements folo-n leads. */
-  const benchLead = versusYolo26n.filter((v) => advantage(v) >= 1).length;
+  /** One line for the collapsed engine benchmarks: what is measured and how many rows are not like for like (a win
+   *  count would add up unlike conditions; each row's own qualifier says which way it goes). */
+  const benchUnlike = versusYolo26n.filter((v) => unlike[v.metric]?.length).length;
 </script>
 
 <Page title="Models">
@@ -154,9 +155,10 @@
   {#snippet subPhone()}<span>Ranked per evaluation dataset.</span>{/snippet}
 
   {#if !models.error && (!models.data || models.data.length > 0)}
-    <div class="toolbar">
+    <!-- One row where it fits; narrower, two rows: the dataset chips, then the count and the filter on the right. -->
+    <div class="toolbar-frame"><div class="toolbar">
       {#if models.data}
-        <div class="seg"><Segmented label="Evaluation dataset" bind:value={dsFilter} options={dsOptions} /></div>
+        <div class="seg" data-scrolls><Segmented label="Evaluation dataset" bind:value={dsFilter} options={dsOptions} /></div>
         <!-- Phones: every dataset in a native picker; a strip that scrolls sideways hides the last ones. -->
         <div class="ds-pick">
           <label for="models-ds">Dataset</label>
@@ -176,7 +178,7 @@
         </span>
         <div class="search"><Input bind:value={query} icon={Search} placeholder="Filter by name, arch or run" aria-label="Filter models" type="search" /></div>
       </div>
-    </div>
+    </div></div>
   {/if}
 
   <Panel pad="none">
@@ -202,7 +204,8 @@
           <tbody>
             <TableState cols={cols.length}>
               <EmptyState icon={Box} title="No models yet" description="A training run saves its best weights here when it finishes.">
-                {#snippet actions()}<Button icon={Plus} href={href('/runs/new')}>New run</Button>{/snippet}
+                <!-- The page's only action (its header has none), so primary. -->
+                {#snippet actions()}<Button variant="primary" icon={Plus} href={href('/runs/new')}>New run</Button>{/snippet}
               </EmptyState>
             </TableState>
           </tbody>
@@ -328,7 +331,7 @@
       <summary>
         <span class="chev" aria-hidden="true"></span>
         <span class="b-title">Engine benchmarks</span>
-        <span class="b-sum">folo-n leads YOLO26n on {benchLead} of {versusYolo26n.length} measurements, same GPU · mixed precision and workloads</span>
+        <span class="b-sum">{versusYolo26n.length} engine measurements · {benchUnlike} use different precision or workloads</span>
       </summary>
       <div class="b-body"><Versus /></div>
     </details>
@@ -336,12 +339,30 @@
 </Page>
 
 <style>
+  .toolbar-frame {
+    container-type: inline-size;
+  }
   .toolbar {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: var(--space-3);
     flex-wrap: wrap;
+  }
+  /* Too narrow for chips, count and filter on one line (820 px, or a wide sidebar at 1024): two deliberate rows rather
+     than a wrap that strands the count and the filter on a half-empty second line. The chips scroll sideways if they
+     must. */
+  @container (max-width: 879px) {
+    .toolbar {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
+    }
+    .seg {
+      justify-self: start;
+    }
+    .end {
+      justify-content: flex-end;
+    }
   }
   .search {
     width: 280px;

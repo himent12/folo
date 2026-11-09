@@ -1,4 +1,4 @@
-// Fuzzy matching for the command palette.
+// Fuzzy matching and ranking for the command palette.
 
 /**
  * Scores how well `query` matches `text` (higher is better), or -1 for no match. Characters must appear in order;
@@ -49,4 +49,32 @@ export function highlight(query: string, text: string): { s: string; m: boolean 
     else out.push({ s: text[i] as string, m: marks[i] as boolean });
   }
   return out;
+}
+
+/** What the palette ranks: a label, and the other phrasings it answers to ("toggle theme", a dataset's own name). */
+export interface Rankable {
+  group: string;
+  label: string;
+  /** More texts to match, e.g. the entity an action is about; the best of these and the label wins. */
+  match?: string[];
+  /** Only offered for a query: an action about one entity ("New run on shapes") would flood the empty palette. */
+  scoped?: boolean;
+}
+
+/**
+ * Orders palette items for `query`: with none, everything not `scoped`; with one, every item that matches, best first,
+ * actions about an entity ranked with the entities themselves (an action a hair below its entity, so "shapes" lists
+ * the dataset, then "New run on shapes").
+ */
+export function rank<T extends Rankable>(items: T[], query: string, limit = 40): T[] {
+  if (!query.trim()) return items.filter((i) => !i.scoped);
+  return items
+    .map((i) => ({
+      i,
+      s: Math.max(fuzzy(query, i.label), fuzzy(query, `${i.group} ${i.label}`) - 20, ...(i.match ?? []).map((m) => fuzzy(query, m) - (i.scoped ? 10 : 0))),
+    }))
+    .filter((x) => x.s >= 0)
+    .sort((a, b) => b.s - a.s)
+    .slice(0, limit)
+    .map((x) => x.i);
 }

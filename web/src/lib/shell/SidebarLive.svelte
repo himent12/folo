@@ -83,7 +83,7 @@
     height: 6px;
     border-radius: 50%;
     background: var(--accent-solid);
-    animation: pulse 1.6s var(--ease-out) infinite;
+    animation: pulse 1s var(--ease-out) infinite;
   }
   :global([data-theme='light']) .pulse {
     background: var(--accent-line);
@@ -131,12 +131,19 @@
   .core {
     fill: var(--accent-line);
   }
+  /* The live heartbeat: a 1 Hz ring that leaves the dot and fades (the dot itself and every value hold still). Off under
+     reduced motion; the ringed dot and the word still say "running". */
   @keyframes pulse {
     0% {
-      box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent-solid) 60%, transparent);
+      box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent-line) 55%, transparent);
     }
     100% {
-      box-shadow: 0 0 0 5px transparent;
+      box-shadow: 0 0 0 4px transparent;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .pulse {
+      animation: none;
     }
   }
 </style>

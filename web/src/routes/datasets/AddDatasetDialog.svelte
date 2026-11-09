@@ -11,6 +11,7 @@
   import Dialog from '$lib/ui/Dialog.svelte';
   import ErrorState from '$lib/ui/ErrorState.svelte';
   import Field from '$lib/ui/Field.svelte';
+  import Gate from '$lib/ui/Gate.svelte';
   import Input from '$lib/ui/Input.svelte';
   import Segmented from '$lib/ui/Segmented.svelte';
   import Tabs from '$lib/ui/Tabs.svelte';
@@ -68,6 +69,9 @@
         },
   );
   const valid = $derived(Object.values(errs).every((e) => !e));
+  /** Nothing to submit yet: the action is disabled and says what it needs (as New run's Start does). Mistakes in what
+   *  was typed are still checked on submit, next to their fields. */
+  const missing = $derived(mode === 'folder' ? (path.trim() ? null : 'Enter a folder path') : classes.length || classDraft.trim() ? null : 'Add at least one class');
   const show = (e: string | null | undefined) => (touched ? (e ?? null) : null);
 
   function addClasses(raw: string) {
@@ -219,9 +223,13 @@
   </div>
   {#snippet footer()}
     <Button variant="ghost" onclick={() => (open = false)}>Cancel</Button>
-    <Button variant="primary" type="submit" form="{uid}-form" loading={busy} icon={mode === 'synthetic' ? Sparkles : FolderOpen}>
-      {mode === 'folder' ? 'Register' : 'Generate'}
-    </Button>
+    <Gate reason={missing}>
+      {#snippet children(why)}
+        <Button variant="primary" type="submit" form="{uid}-form" loading={busy} disabled={!!why} aria-describedby={why} icon={mode === 'synthetic' ? Sparkles : FolderOpen}>
+          {mode === 'folder' ? 'Register' : 'Generate'}
+        </Button>
+      {/snippet}
+    </Gate>
   {/snippet}
 </Dialog>
 

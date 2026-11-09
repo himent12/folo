@@ -44,6 +44,20 @@ async function register(path: string, known?: { id: string }[]) {
 }
 
 describe('AddDatasetDialog', () => {
+  it('keeps Register disabled, saying why, until there is a folder path', () => {
+    c = mount(AddDatasetDialog, { target, props: { open: true } });
+    flushSync();
+    const submit = document.querySelector<HTMLButtonElement>('button[type="submit"]')!;
+    expect(submit.disabled).toBe(true);
+    expect(document.getElementById(submit.getAttribute('aria-describedby') ?? '')?.textContent).toBe('Enter a folder path');
+    const input = document.querySelector<HTMLInputElement>('input[placeholder="e.g. D:/data/my-dataset"]')!;
+    input.value = 'D:/data/shapes';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    expect(submit.disabled).toBe(false);
+    expect(submit.hasAttribute('aria-describedby')).toBe(false);
+  });
+
   it('says a folder is already registered, and opens it, instead of announcing a new dataset', async () => {
     const go = await register('D:\\data\\shapes\\', [{ id: 'ds_fasteners' }, { id: 'ds_shapes' }]);
     expect(toast.items[0]).toMatchObject({ tone: 'info', title: 'Already registered as shapes' });

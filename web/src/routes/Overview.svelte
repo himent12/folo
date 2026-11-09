@@ -24,6 +24,7 @@
   import Skeleton from '$lib/ui/Skeleton.svelte';
   import StatusBadge from '$lib/ui/StatusBadge.svelte';
   import TableState from '$lib/ui/TableState.svelte';
+  import LivePreview from './overview/LivePreview.svelte';
   import LiveRunCard from './overview/LiveRunCard.svelte';
 
   setCrumbs({ label: 'Overview' });
@@ -92,6 +93,8 @@
         </li>
       </ol>
     </section>
+    <!-- What the page becomes: the live card's frame, still and muted, instead of an empty screen under the steps. -->
+    <LivePreview />
   {:else}
     <div class="live">
       {#if offline}
@@ -183,7 +186,7 @@
         <Panel title="Best models" meta="mAP50-95" pad="none" id="best-models">
           {#snippet actions()}<Button size="sm" variant="ghost" iconRight={ArrowRight} href={href('/models')}>All models</Button>{/snippet}
           {#if offline}
-            <p class="quiet pad">The best model of each dataset shows here.</p>
+            <p class="quiet pad">The best model of each dataset shows here once the server answers.</p>
           {:else if models.error && !models.data}
             <ErrorState error={models.error} retry={() => models.refresh()} />
           {:else if !models.data}
@@ -224,7 +227,7 @@
         <Panel title="Datasets" meta={datasets.data ? String(datasets.data.length) : undefined} pad="none" id="datasets">
           {#snippet actions()}<Button size="sm" variant="ghost" iconRight={ArrowRight} href={href('/datasets')}>All datasets</Button>{/snippet}
           {#if offline}
-            <p class="quiet pad">Registered datasets show here with their class balance.</p>
+            <p class="quiet pad">Registered datasets show here once the server answers.</p>
           {:else if datasets.error && !datasets.data}
             <ErrorState error={datasets.error} retry={() => datasets.refresh()} compact />
           {:else if !datasets.data}
