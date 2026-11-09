@@ -112,16 +112,25 @@ function mapCurve(p: RunProfile, e: number): number {
   return Math.max(0.001, Math.min(0.97, p.mapMax * Math.pow(x, 1.35) + closingBoost + wobble * x));
 }
 
+/**
+ * A run's validation after epoch `e + 1`. As folo-server's mock (and the engine, docs/METRICS.md) reports them, the
+ * overall numbers are class means: each class's mAP50-95 deviates from the epoch's by a zero-mean factor (its
+ * `classEase` re-centred on 1, plus a little noise), scaled down where a class would pass 0.98 or drop under 0.001 so
+ * no clamp moves the mean; mAP50, precision and recall are the means of the classes' own (`mock.test.ts` checks it).
+ */
 export function epochAt(p: RunProfile, e: number): Epoch {
   const m = mapCurve(p, e);
   const r = rng(seedOf(p) + e * 101);
-  const map50 = Math.min(0.995, m * 1.3 + 0.035 * (1 - m) + (r() - 0.5) * 0.008);
-  const precision = Math.min(0.995, 0.25 + m * 1.02 + (r() - 0.5) * 0.02);
-  const recall = Math.min(0.99, 0.18 + m * 1.0 + (r() - 0.5) * 0.02);
-  const per_class: ClassMetrics[] = Array.from({ length: p.classes }, (_, c) => {
-    const ease = p.classEase[c] ?? 1;
-    const cr = rng(seedOf(p) + e * 101 + c * 7);
-    const cm = Math.max(0.001, Math.min(0.98, m * ease + (cr() - 0.5) * 0.02));
+  const n = p.classes;
+  const easeMean = Array.from({ length: n }, (_, c) => p.classEase[c] ?? 1).reduce((a, b) => a + b, 0) / Math.max(1, n);
+  const noise = Array.from({ length: n }, (_, c) => rng(seedOf(p) + e * 101 + c * 7));
+  const raw = noise.map((cr, c) => (p.classEase[c] ?? 1) / easeMean - 1 + (cr() - 0.5) * 0.03);
+  const rawMean = raw.reduce((a, b) => a + b, 0) / Math.max(1, n);
+  const dev = raw.map((d) => d - rawMean);
+  const room = dev.reduce((k, d) => (d > 0 ? Math.min(k, (0.98 - m) / (m * d)) : d < 0 ? Math.min(k, (1 - 0.001 / m) / -d) : k), 1);
+  const per_class: ClassMetrics[] = dev.map((d, c) => {
+    const cr = noise[c]!;
+    const cm = m * (1 + room * d);
     return {
       class: c,
       map50: r4(Math.min(0.995, cm * 1.28 + 0.03)),
@@ -130,6 +139,12 @@ export function epochAt(p: RunProfile, e: number): Epoch {
       recall: r4(Math.min(0.99, 0.16 + cm * 1.0 + (cr() - 0.5) * 0.03)),
     };
   });
+  // Without classes, the old overall curves (their draws also keep the epoch durations where they were).
+  const flat = { map50: Math.min(0.995, m * 1.3 + 0.035 * (1 - m) + (r() - 0.5) * 0.008), precision: Math.min(0.995, 0.25 + m * 1.02 + (r() - 0.5) * 0.02), recall: Math.min(0.99, 0.18 + m * 1.0 + (r() - 0.5) * 0.02) };
+  const mean = (k: 'map50' | 'precision' | 'recall') => (n ? per_class.reduce((a, c) => a + c[k], 0) / n : flat[k]);
+  const map50 = mean('map50');
+  const precision = mean('precision');
+  const recall = mean('recall');
   // The best-F1 confidence on the 0.001 grid, as folo-server's mock derives it: low while the model is unsure,
   // settling near 0.3-0.45.
   const best_f1_conf = r3(Math.max(0.001, Math.min(0.999, 0.12 + 0.35 * map50 + 0.02 * smoothNoise(seedOf(p) + 22, e))));
