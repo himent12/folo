@@ -37,6 +37,7 @@ use serde::{Deserialize, Serialize};
 use crate::engine::{self, Predictors, engine_error};
 use crate::error::{Error, Result};
 use crate::index::{Fingerprint, INDEX_VERSION, Index, absolute, data_error, read_image_with, write_atomic};
+use crate::label::Labeler;
 use crate::models::{ModelRef, Models, model_of};
 use crate::runs::{DatasetRef, Runs, run_model_id};
 use crate::store::{
@@ -44,7 +45,7 @@ use crate::store::{
     WeightsFormat, weights_file_name,
 };
 use crate::throughput::{EstimateInput, InferKey, InferSample, Throughput};
-use crate::util::{fnv1a, rfc3339, unique_id, unix_now};
+use crate::util::{claim_dir, fnv1a, rfc3339, slug, unique_id, unix_now};
 
 /// How often a dataset's files are re-checked for changes (on `GET /api/datasets/{id}` and image listings).
 pub const RECHECK_EVERY: Duration = Duration::from_secs(5);
@@ -271,6 +272,7 @@ pub struct RealStore {
     device: String,
     precision: folo_vision::Precision,
     throughput: Arc<Throughput>,
+    labeler: Labeler,
 }
 
 impl RealStore {
@@ -310,6 +312,7 @@ impl RealStore {
         let models = Models::new(data_dir.clone());
         let predictors = Arc::new(Predictors::default());
         let idle = Arc::new(GpuIdle::new());
+        let labeler = Labeler::open(&data_dir);
         spawn_idle_sweeper(Arc::downgrade(&idle), Arc::downgrade(&predictors), Arc::downgrade(&runs));
         RealStore {
             data_dir,
@@ -322,6 +325,7 @@ impl RealStore {
             device: "auto".into(),
             precision: folo_vision::Precision::F32,
             throughput,
+            labeler,
         }
     }
 
@@ -362,6 +366,14 @@ impl RealStore {
     #[doc(hidden)]
     pub fn hold_runs_after_epochs(&self, on: bool) {
         self.runs.hold_after_epochs(on);
+    }
+
+    /// Test support: replaces the labeling agents (Claude Code and Codex) with scripted ones, so tests exercise
+    /// agent labeling without a CLI or an account.
+    #[doc(hidden)]
+    pub fn label_agents(mut self, agents: Vec<Arc<dyn crate::label::Agent>>) -> RealStore {
+        self.labeler.set_agents(agents);
+        self
     }
 
     /// Changes how often dataset files are re-checked for changes (default [`RECHECK_EVERY`]; zero checks on
@@ -702,6 +714,7 @@ impl RealStore {
 
 impl Drop for RealStore {
     fn drop(&mut self) {
+        self.labeler.shutdown();
         self.runs.shutdown(None);
     }
 }
@@ -737,7 +750,7 @@ struct BoxRecord {
 /// The server's own files in the data dir, left out of dataset fingerprints (the data dir may sit inside a
 /// registered dataset folder; caching an index must not make it stale).
 fn own_state(dir: &Path) -> Vec<PathBuf> {
-    vec![dir.join("cache"), registry_path(dir)]
+    vec![dir.join("cache"), dir.join("label"), registry_path(dir)]
 }
 
 fn registry_path(dir: &Path) -> PathBuf {
@@ -813,20 +826,6 @@ fn load_or_build(dir: &Path, e: &Entry) {
             e.set(State::Failed(err));
         }
     }
-}
-
-/// A folder name for a dataset name: lowercase ASCII letters, digits and `-`.
-fn slug(name: &str) -> String {
-    let mut s = String::new();
-    for c in name.trim().chars() {
-        if c.is_ascii_alphanumeric() {
-            s.push(c.to_ascii_lowercase());
-        } else if !s.ends_with('-') && !s.is_empty() {
-            s.push('-');
-        }
-    }
-    let s = s.trim_end_matches('-').chars().take(48).collect::<String>();
-    if s.is_empty() { "synthetic".into() } else { s }
 }
 
 impl Store for RealStore {
@@ -970,22 +969,8 @@ impl Store for RealStore {
             ..Default::default()
         };
         let parent = self.data_dir.join("datasets");
-        let base = slug(&req.name);
-        std::fs::create_dir_all(&parent)
-            .map_err(|e| Error::internal(format!("creating {}: {e}", parent.display())))?;
-        // create_dir claims the folder atomically, so concurrent requests with the same name never share one.
-        let mut dir = parent.join(&base);
-        let mut n = 1;
-        loop {
-            match std::fs::create_dir(&dir) {
-                Ok(()) => break,
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    n += 1;
-                    dir = parent.join(format!("{base}-{n}"));
-                }
-                Err(e) => return Err(Error::internal(format!("creating {}: {e}", dir.display()))),
-            }
-        }
+        let dir = claim_dir(&parent, &slug(&req.name, "synthetic"))
+            .map_err(|e| Error::internal(format!("creating a folder in {}: {e}", parent.display())))?;
         let t0 = Instant::now();
         if let Err(e) = folo_data::synthetic::write_yolo(&cfg, &dir, folo_data::ImageFormat::Jpeg(90)) {
             let _ = std::fs::remove_dir_all(&dir);
@@ -1261,20 +1246,13 @@ impl Store for RealStore {
         crate::models::val(&m, &ds, req.split, req.imgsz, req.conf, req.iou, device, p)
     }
 
+    fn labeler(&self) -> Result<&Labeler> {
+        Ok(&self.labeler)
+    }
+
     fn shutdown(&self) {
+        self.labeler.shutdown();
         self.runs.shutdown(Some(SHUTDOWN_WAIT));
         self.throughput.flush();
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn slugs() {
-        assert_eq!(slug("Shapes 1k!"), "shapes-1k");
-        assert_eq!(slug("  --  "), "synthetic");
-        assert_eq!(slug("a__b"), "a-b");
     }
 }

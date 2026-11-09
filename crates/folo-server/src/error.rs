@@ -45,9 +45,11 @@ impl Error {
             "image" => {
                 "list_dataset_images (MCP) or GET /api/datasets/{id}/images lists a dataset's images".into()
             }
+            "label_job" => "GET /api/label/jobs lists the labeling jobs that exist".into(),
             _ => format!("list_{what}s (MCP) or GET /api/{what}s lists the {what}s that exist"),
         };
-        Error::new(StatusCode::NOT_FOUND, &code, format!("{what} '{id}' does not exist")).hint(hint)
+        let noun = what.replace('_', " ");
+        Error::new(StatusCode::NOT_FOUND, &code, format!("{noun} '{id}' does not exist")).hint(hint)
     }
 
     /// `409 conflict`-style error with a specific code.

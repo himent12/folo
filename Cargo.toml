@@ -61,6 +61,8 @@ http = "1"
 ureq = { version = "3", default-features = false }
 # `folo weights pull` verifies downloads against the release's SHA256SUMS.
 sha2 = "0.11"
+# Job objects, to end an agent CLI's whole process tree on Windows (crates/folo-server/src/label/tree.rs).
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Diagnostics_ToolHelp", "Win32_System_JobObjects", "Win32_System_Threading"] }
 # Test-only: validates MCP tool results against their outputSchema.
 jsonschema = { version = "0.60", default-features = false }
 # folo-wasm. wasm-bindgen must match the wasm-bindgen CLI exactly (scripts/build-wasm.sh checks that).

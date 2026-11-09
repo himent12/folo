@@ -12,10 +12,12 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use folo_api::{
-    API_VERSION, BenchmarkReport, BenchmarkRequest, CliCommand, DatasetList, ExportSpec, Health, ImagePage,
-    IssuePage, LogLevel, LogLine, ModelList, OnnxSwitches, PredictRequest, QueueRequest, RegisterDataset,
-    RunEstimate, RunEvent, RunList, RunLogs, Split, SyntheticDataset, SystemInfo, SystemResponse,
-    ThroughputTable, TrainConfig, ValReport, ValRequest,
+    API_VERSION, BenchmarkReport, BenchmarkRequest, CliCommand, CreateLabelJob, DatasetList, ExportSpec,
+    Health, ImagePage, ImportLabelImages, IssuePage, LabelAgentList, LabelDatasetRequest, LabelEvent,
+    LabelImage, LabelImagePage, LabelImageStatus, LabelImagesAdded, LabelJob, LabelJobList, LogLevel,
+    LogLine, ModelList, OnnxSwitches, PredictRequest, QueueRequest, RegisterDataset, RunEstimate, RunEvent,
+    RunList, RunLogs, Split, StartLabeling, SyntheticDataset, SystemInfo, SystemResponse, ThroughputTable,
+    TrainConfig, UpdateLabelImage, UpdateLabelJob, ValReport, ValRequest,
 };
 use futures_util::{Stream, StreamExt, stream};
 use serde::Deserialize;
@@ -24,12 +26,14 @@ use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 use crate::AppState;
 use crate::error::{ApiJson, ApiPath, ApiQuery, Error, Result};
+use crate::label::Upload;
 use crate::store::{
-    ImageQuery, IssueQuery, PredictInput, PredictSource, QueueMove, Store, WeightsBody, WeightsFormat,
+    ImageData, ImageQuery, IssueQuery, PredictInput, PredictSource, QueueMove, Store, WeightsBody,
+    WeightsFormat,
 };
 use crate::util::{rfc3339, unix_now};
 
-/// Largest accepted request body for `POST /api/predict` uploads.
+/// Largest accepted request body for uploads (`POST /api/predict`, images of a labeling job).
 pub const MAX_UPLOAD_BYTES: usize = 64 * 1024 * 1024;
 /// Default and maximum page size of `GET /api/datasets/{id}/images`.
 pub const DEFAULT_LIMIT: u64 = 100;
@@ -71,6 +75,22 @@ pub fn api() -> Router<AppState> {
         .route("/predict", post(predict).layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)))
         .route("/predict/stream", get(predict_stream))
         .route("/val", post(val))
+        .route("/label/agents", get(label_agents))
+        .route("/label/jobs", get(label_jobs).post(create_label_job))
+        .route("/label/jobs/{id}", get(label_job).put(update_label_job).delete(delete_label_job))
+        .route(
+            "/label/jobs/{id}/images",
+            get(label_images).post(add_label_images).layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
+        )
+        .route(
+            "/label/jobs/{id}/images/{image_id}",
+            get(label_image).put(update_label_image).delete(delete_label_image),
+        )
+        .route("/label/jobs/{id}/start", post(start_labeling))
+        .route("/label/jobs/{id}/stop", post(stop_labeling))
+        .route("/label/jobs/{id}/events", get(label_events))
+        .route("/label/jobs/{id}/logs", get(label_logs))
+        .route("/label/jobs/{id}/dataset", post(label_dataset))
         .fallback(api_not_found)
         .method_not_allowed_fallback(method_not_allowed)
 }
@@ -134,11 +154,14 @@ async fn system(State(st): State<AppState>) -> Result<Json<SystemResponse>> {
     ]
     .map(String::from)
     .to_vec();
-    let features = if st.web_wasm {
-        features.into_iter().chain([folo_api::FEATURE_WEB_WASM.to_string()]).collect()
-    } else {
-        features
-    };
+    let optional = [
+        (st.web_wasm, folo_api::FEATURE_WEB_WASM),
+        (st.store.labeler().is_ok(), folo_api::FEATURE_AGENT_LABELING),
+    ];
+    let features = features
+        .into_iter()
+        .chain(optional.into_iter().filter(|(on, _)| *on).map(|(_, f)| f.to_string()))
+        .collect();
     Ok(Json(SystemResponse {
         system: SystemInfo { cpu, memory, gpus: st.store.gpus() },
         data_dir,
@@ -265,15 +288,20 @@ async fn image(
 ) -> Result<Response> {
     let thumb = p.thumb.map(|t| t.clamp(16, 2048));
     let img = blocking(&st, move |s| s.image(&id, &image_id, thumb)).await?;
+    Ok(image_response(img))
+}
+
+/// An image as a response: its bytes with their type, cacheable forever when they never change.
+fn image_response(img: ImageData) -> Response {
     let cache = if img.immutable { "public, max-age=31536000, immutable" } else { "no-cache" };
-    Ok((
+    (
         [
             (header::CONTENT_TYPE, HeaderValue::from_static(img.content_type)),
             (header::CACHE_CONTROL, HeaderValue::from_static(cache)),
         ],
         img.bytes,
     )
-        .into_response())
+        .into_response()
 }
 
 // ---- models ------------------------------------------------------------------------------------------------------
@@ -532,6 +560,173 @@ async fn run_events(
     Ok(Sse::new(events).keep_alive(KeepAlive::new().interval(KEEP_ALIVE).text("keep-alive")))
 }
 
+// ---- agent labeling ------------------------------------------------------------------------------------------------
+
+async fn label_agents(State(st): State<AppState>) -> Result<Json<LabelAgentList>> {
+    // Probing runs each CLI's `--version`.
+    Ok(Json(LabelAgentList { agents: blocking(&st, |s| Ok(s.labeler()?.agents())).await? }))
+}
+
+async fn label_jobs(State(st): State<AppState>) -> Result<Json<LabelJobList>> {
+    Ok(Json(LabelJobList { jobs: st.store.labeler()?.list() }))
+}
+
+async fn create_label_job(
+    State(st): State<AppState>,
+    ApiJson(req): ApiJson<CreateLabelJob>,
+) -> Result<Response> {
+    let job = blocking(&st, move |s| s.labeler()?.create(req)).await?;
+    Ok((StatusCode::CREATED, Json(job)).into_response())
+}
+
+async fn label_job(State(st): State<AppState>, ApiPath(id): ApiPath<String>) -> Result<Json<LabelJob>> {
+    Ok(Json(st.store.labeler()?.get(&id)?))
+}
+
+async fn update_label_job(
+    State(st): State<AppState>,
+    ApiPath(id): ApiPath<String>,
+    ApiJson(req): ApiJson<UpdateLabelJob>,
+) -> Result<Json<LabelJob>> {
+    Ok(Json(blocking(&st, move |s| s.labeler()?.update(&id, req)).await?))
+}
+
+async fn delete_label_job(State(st): State<AppState>, ApiPath(id): ApiPath<String>) -> Result<StatusCode> {
+    blocking(&st, move |s| s.labeler()?.delete(&id)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /api/label/jobs/{id}/images`: multipart uploads (one `image` part per file), or JSON naming a folder on
+/// the server's machine.
+async fn add_label_images(
+    State(st): State<AppState>,
+    ApiPath(id): ApiPath<String>,
+    req: Request,
+) -> Result<Json<LabelImagesAdded>> {
+    st.store.labeler()?.get(&id)?;
+    if !is_multipart(&req) {
+        let ApiJson(body) = ApiJson::<ImportLabelImages>::from_request(req, &st).await?;
+        return Ok(Json(blocking(&st, move |s| s.labeler()?.add_folder(&id, &body.path)).await?));
+    }
+    let mut mp = Multipart::from_request(req, &st).await?;
+    let mut uploads = Vec::new();
+    while let Some(field) = mp.next_field().await.map_err(|e| Error::multipart("multipart", e))? {
+        if field.name() != Some("image") {
+            continue;
+        }
+        let name = field.file_name().unwrap_or("image").to_string();
+        let bytes = field.bytes().await.map_err(|e| Error::multipart("image", e))?.to_vec();
+        uploads.push(Upload { name, bytes });
+    }
+    if uploads.is_empty() {
+        return Err(field_err("image", "missing (send one `image` file part per image)"));
+    }
+    Ok(Json(blocking(&st, move |s| s.labeler()?.add_uploads(&id, uploads)).await?))
+}
+
+#[derive(Deserialize)]
+struct LabelImagesParams {
+    status: Option<String>,
+    #[serde(default)]
+    offset: u64,
+    limit: Option<u64>,
+}
+
+async fn label_images(
+    State(st): State<AppState>,
+    ApiPath(id): ApiPath<String>,
+    ApiQuery(p): ApiQuery<LabelImagesParams>,
+) -> Result<Json<LabelImagePage>> {
+    let status = match p.status.as_deref() {
+        None => None,
+        Some(s) => Some(LabelImageStatus::parse(s).ok_or_else(|| {
+            Error::new(StatusCode::BAD_REQUEST, "invalid_query", format!("unknown image status '{s}'"))
+                .hint("status is one of pending, labeling, labeled, failed")
+        })?),
+    };
+    let limit = p.limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT);
+    Ok(Json(st.store.labeler()?.images(&id, status, p.offset, limit)?))
+}
+
+async fn label_image(
+    State(st): State<AppState>,
+    ApiPath((id, image_id)): ApiPath<(String, String)>,
+    ApiQuery(p): ApiQuery<ThumbParams>,
+) -> Result<Response> {
+    let thumb = p.thumb.map(|t| t.clamp(16, 2048));
+    let img = blocking(&st, move |s| s.labeler()?.image(&id, &image_id, thumb)).await?;
+    Ok(image_response(img))
+}
+
+async fn update_label_image(
+    State(st): State<AppState>,
+    ApiPath((id, image_id)): ApiPath<(String, String)>,
+    ApiJson(req): ApiJson<UpdateLabelImage>,
+) -> Result<Json<LabelImage>> {
+    Ok(Json(blocking(&st, move |s| s.labeler()?.update_image(&id, &image_id, req)).await?))
+}
+
+async fn delete_label_image(
+    State(st): State<AppState>,
+    ApiPath((id, image_id)): ApiPath<(String, String)>,
+) -> Result<StatusCode> {
+    blocking(&st, move |s| s.labeler()?.delete_image(&id, &image_id)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn start_labeling(
+    State(st): State<AppState>,
+    ApiPath(id): ApiPath<String>,
+    ApiJson(req): ApiJson<StartLabeling>,
+) -> Result<Json<LabelJob>> {
+    Ok(Json(blocking(&st, move |s| s.labeler()?.start(&id, req)).await?))
+}
+
+async fn stop_labeling(State(st): State<AppState>, ApiPath(id): ApiPath<String>) -> Result<Json<LabelJob>> {
+    Ok(Json(st.store.labeler()?.stop(&id)?))
+}
+
+async fn label_logs(
+    State(st): State<AppState>,
+    ApiPath(id): ApiPath<String>,
+    ApiQuery(p): ApiQuery<LogsParams>,
+) -> Result<Json<RunLogs>> {
+    let limit = p.limit.unwrap_or(DEFAULT_LOG_LINES).clamp(1, MAX_LOG_LINES);
+    Ok(Json(RunLogs { lines: st.store.labeler()?.logs(&id, limit)? }))
+}
+
+/// `GET /api/label/jobs/{id}/events`: a `job` event, then live events until the client disconnects, the job is
+/// deleted or the server shuts down. A subscriber that falls behind is told to `reload`.
+async fn label_events(
+    State(st): State<AppState>,
+    ApiPath(id): ApiPath<String>,
+) -> Result<Sse<impl Stream<Item = std::result::Result<Event, Infallible>>>> {
+    let (job, events) = st.store.labeler()?.subscribe(&id)?;
+    let mut shutdown = st.shutdown.subscribe();
+    let first = stream::once(std::future::ready(LabelEvent::Job(Box::new(job))));
+    let rest = BroadcastStream::new(events).map(|r| match r {
+        Ok(ev) => ev,
+        Err(BroadcastStreamRecvError::Lagged(_)) => LabelEvent::Reload,
+    });
+    let stopped = async move {
+        let _ = shutdown.wait_for(|v| *v).await;
+    };
+    let events = first
+        .chain(rest)
+        .map(|ev| Ok(Event::default().event(ev.name()).data(ev.data_json())))
+        .take_until(stopped);
+    Ok(Sse::new(events).keep_alive(KeepAlive::new().interval(KEEP_ALIVE).text("keep-alive")))
+}
+
+async fn label_dataset(
+    State(st): State<AppState>,
+    ApiPath(id): ApiPath<String>,
+    ApiJson(req): ApiJson<LabelDatasetRequest>,
+) -> Result<Response> {
+    let ds = blocking(&st, move |s| s.label_dataset(&id, req)).await?;
+    Ok((StatusCode::CREATED, Json(ds)).into_response())
+}
+
 // ---- inference ---------------------------------------------------------------------------------------------------
 
 fn field_err(name: &str, e: impl std::fmt::Display) -> Error {
@@ -583,14 +778,14 @@ fn check_thresholds(p: &PredictInput) -> Result<()> {
     Ok(())
 }
 
+/// True for a `multipart/form-data` request (the endpoints that take uploads also take JSON).
+fn is_multipart(req: &Request) -> bool {
+    let ct = req.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("");
+    ct.to_ascii_lowercase().starts_with("multipart/form-data")
+}
+
 async fn predict(State(st): State<AppState>, req: Request) -> Result<Response> {
-    let ct = req
-        .headers()
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    let input = if ct.starts_with("multipart/form-data") {
+    let input = if is_multipart(&req) {
         let mp = Multipart::from_request(req, &st).await?;
         parse_multipart(mp).await?
     } else {

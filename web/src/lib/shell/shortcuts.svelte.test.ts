@@ -139,11 +139,13 @@ describe('Escape on a detail page', () => {
   });
 
   it('knows where each detail page goes back to', () => {
-    expect(['run', 'run-compare', 'model', 'dataset', 'runs', 'settings'].map((name) => backPath({ name }))).toEqual([
+    expect(['run', 'run-compare', 'model', 'dataset', 'label-jobs', 'label-job', 'runs', 'settings'].map((name) => backPath({ name }))).toEqual([
       '/runs',
       '/runs',
       '/models',
       '/datasets',
+      '/datasets',
+      '/datasets/label',
       null,
       null,
     ]);

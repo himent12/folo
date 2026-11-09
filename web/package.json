@@ -13,6 +13,7 @@
     "shoot": "node scripts/shoot.mjs",
     "smoke": "node scripts/smoke.mjs",
     "live-smoke": "node scripts/live-smoke.mjs",
+    "label-smoke": "node scripts/label-smoke.mjs",
     "qa": "node scripts/shoot.mjs --qa"
   },
   "devDependencies": {
