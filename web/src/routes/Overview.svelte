@@ -262,11 +262,12 @@
 </Page>
 
 <style>
-  /* One reading measure (720 px): each step's actions sit under its sentence, not at the far edge of a wide row. */
+  /* The content width, the three steps across it where they fit (a stack below that): each step's actions sit under its
+     sentence, never at the far edge of a wide row, and the card never sits alone in a corner of an empty page. */
   .onboard {
+    container-type: inline-size;
     display: grid;
     gap: var(--space-5);
-    max-width: 720px;
     padding: var(--space-6);
     border-radius: var(--radius-lg);
     background: var(--bg-panel);
@@ -331,6 +332,24 @@
     gap: var(--space-2);
     flex-wrap: wrap;
     margin-top: var(--space-1);
+  }
+  @container (min-width: 840px) {
+    .steps {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: var(--space-3);
+    }
+    .steps li {
+      align-items: start;
+      align-content: start;
+      padding: var(--space-4);
+    }
+    /* The title's first line on the number's centre (28 px circle, 20 px line). */
+    .steps li div:not(.ob-actions) {
+      padding-top: var(--space-1);
+    }
+    .ob-actions {
+      margin-top: var(--space-2);
+    }
   }
   @media (max-width: 767px) {
     .onboard {

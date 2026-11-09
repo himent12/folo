@@ -38,18 +38,27 @@ describe('Dataset stats: health findings', () => {
     expect(document.activeElement?.id).toBe('ds-check-title');
   });
 
-  it('folds each severity into a complete summary with what it counts, and names the units', async () => {
+  it('rests on one line with each severity summed up, units named, and no second accounting', async () => {
     const dataset = await hub.api.dataset('ds_shapes_hard');
     const counts = (await hub.api.datasetIssues('ds_shapes_hard', { limit: 1 })).counts;
     c = mount(StatsTab, { target, props: { dataset, stats: dataset.stats!, counts, onclass: () => {} } });
     flushSync();
-    const line = (sev: string) => {
-      const s = target.querySelector(`#ds-health li.${sev} summary`);
-      return { sum: s?.querySelector('.htitles')?.textContent?.trim(), count: s?.querySelector('.hcount')?.textContent?.trim() };
-    };
-    expect(line('warning')).toEqual({ sum: '3 file issues · 35% tiny boxes', count: '3 file issues · 1 dataset-wide' });
+    const sev = (s: string) => target.querySelector(`#ds-health summary .h-sev.${s}`)?.textContent?.replace(/\s+/g, ' ').trim();
     // shapes-hard's 3 check errors are all label errors (broken_label, class_overflow, out_of_range_box): the 3 broken files.
-    expect(line('danger')).toEqual({ sum: '3 broken label files', count: '3 file issues' });
-    expect(target.querySelector('#ds-health')?.textContent).toContain('3 issue categories · 6 file issues · 1 note');
+    expect(sev('danger')).toBe('Errors:3 broken label files');
+    expect(sev('warning')).toBe('Warnings:3 check warnings · 35% tiny boxes');
+    expect(sev('info')).toBe('Notes:42 empty images (0.8%)');
+    const text = target.querySelector('#ds-health')?.textContent ?? '';
+    expect(text).not.toMatch(/categor|dataset-wide|file issues/);
+    expect(target.querySelector('#ds-health details')?.hasAttribute('open')).toBe(false);
+  });
+
+  it('leaves Health out when there is nothing to report', async () => {
+    const dataset = await hub.api.dataset('ds_shapes_hard');
+    const stats = { ...dataset.stats!, broken_labels: 0, empty_images: 0, class_counts: dataset.stats!.class_counts.map(() => 1000), box_size_hist: { edges: [0, 0.05, 1], counts: [0, 6000] } };
+    c = mount(StatsTab, { target, props: { dataset, stats, onclass: () => {} } });
+    flushSync();
+    expect(target.querySelector('#ds-health')).toBeNull();
+    expect(target.querySelector('.kpis')).not.toBeNull();
   });
 });

@@ -1,12 +1,14 @@
 <script lang="ts">
   /**
-   * Full-size image inspector: zoom (wheel / pinch / + - / double-click) and pan (drag) over the image with its
-   * labels, a label list that highlights boxes, a class legend and image meta. J/K or arrows step through the
-   * current filter; Esc closes. The open image lives in the URL (`?image=`), so it is linkable.
+   * Full-size image inspector: zoom (wheel / pinch / + - / double-click) and pan (drag, or Shift + arrows on the
+   * focused canvas) over the image with its labels, a label list that highlights boxes, a class legend and image meta.
+   * J/K or arrows step through the current filter; 0 fits the whole image; Esc closes. The open image lives in the URL
+   * (`?image=`), so it is linkable.
    */
   import { untrack } from 'svelte';
   import ChevronLeft from '@lucide/svelte/icons/chevron-left';
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
+  import Copy from '@lucide/svelte/icons/copy';
   import Maximize from '@lucide/svelte/icons/maximize';
   import Minus from '@lucide/svelte/icons/minus';
   import Plus from '@lucide/svelte/icons/plus';
@@ -19,6 +21,7 @@
   import Button from '$lib/ui/Button.svelte';
   import Kbd from '$lib/ui/Kbd.svelte';
   import Spinner from '$lib/ui/Spinner.svelte';
+  import { toast } from '$lib/ui/toast.svelte';
   import { tooltip } from '$lib/ui/tooltip';
   import type { ImagePager } from './pager.svelte';
   import { swatchStyle } from './swatch';
@@ -233,8 +236,21 @@
     else zoomAt(2.5, px, py);
   }
 
+  /** Shift + arrows on the focused canvas pan by a tenth of the view (clamped to the image like a drag). */
+  const PAN: Record<string, [number, number]> = { ArrowLeft: [1, 0], ArrowRight: [-1, 0], ArrowUp: [0, 1], ArrowDown: [0, -1] };
+  function onviewportkey(e: KeyboardEvent) {
+    const d = PAN[e.key];
+    if (!d || !e.shiftKey || e.metaKey || e.ctrlKey || e.altKey) return;
+    e.preventDefault();
+    e.stopPropagation();
+    tx = x + d[0] * Math.max(24, vw / 10);
+    ty = y + d[1] * Math.max(24, vh / 10);
+  }
+
   function onkeydown(e: KeyboardEvent) {
     if (e.metaKey || e.ctrlKey || e.altKey) return;
+    // Shift + arrows pan (on the canvas); they never step to another image.
+    if (e.shiftKey && e.key in PAN) return;
     const k = e.key;
     if (k === 'j' || k === 'J' || k === 'ArrowRight') step(1);
     else if (k === 'k' || k === 'K' || k === 'ArrowLeft') step(-1);
@@ -254,6 +270,17 @@
   const legend = $derived(classes.map((name, i) => ({ i, name, n: counts.get(i) ?? 0 })));
   const name = (c: number) => classes[c] ?? `class ${c}`;
   const stem = (f: string) => f.split('/').pop() ?? f;
+  /** The folders of a path ("images/train"): the part a middle ellipsis shortens. */
+  const dir = (f: string) => f.slice(0, Math.max(0, f.length - stem(f).length - 1));
+
+  async function copyFile(f: string) {
+    try {
+      await navigator.clipboard.writeText(f);
+      toast.success('Path copied', f);
+    } catch {
+      toast.error(new Error('The browser blocked clipboard access.'), 'Could not copy the path');
+    }
+  }
 </script>
 
 {#snippet zoomTools()}
@@ -296,6 +323,7 @@
   </header>
 
   <div class="body">
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex: the canvas takes focus so Shift + arrows can pan it. -->
     <div
       class="viewport"
       class:zoomed={z > 1}
@@ -305,7 +333,10 @@
       bind:clientHeight={vh}
       style:--ar={img ? `${img.width} / ${img.height}` : undefined}
       role="img"
+      tabindex="0"
       aria-label={img ? `${stem(img.file)} with ${img.boxes.length} labelled boxes` : 'Loading image'}
+      aria-describedby="insp-keys"
+      onkeydown={onviewportkey}
       {onpointerdown}
       {onpointermove}
       {onpointerup}
@@ -335,10 +366,14 @@
       {/if}
       <div class="hint" class:touched aria-hidden="true">
         <span class="fine"><Kbd keys="J" subtle /><Kbd keys="K" subtle /> step</span>
-        <span class="fine">scroll to zoom · drag to pan</span>
+        <span class="fine">scroll to zoom · drag or <Kbd keys="Shift" subtle /> arrows to pan</span>
         <span class="touch">Pinch to zoom · drag to pan</span>
       </div>
     </div>
+    <p id="insp-keys" class="sr-only">
+      Left and right arrows, or J and K: previous and next image. Shift and arrows: pan. Plus and minus: zoom. 0: fit the
+      whole image.
+    </p>
     <!-- Narrow screens: the zoom controls get their own 44 px bar under the image (never over the labels), with the
          gesture hint beneath it. -->
     <div class="zoom-bar">
@@ -359,7 +394,10 @@
                   class:on={selected === i}
                   class:dim={only !== null && !only.has(b.class)}
                   aria-current={selected === i ? 'true' : undefined}
-                  onpointerenter={() => (hovered = i)}
+                  onpointerenter={(e) => {
+                    // A tap is not a hover: on touch the selection alone marks the row.
+                    if (e.pointerType !== 'touch') hovered = i;
+                  }}
                   onfocus={() => (hovered = i)}
                   onblur={() => (hovered = null)}
                   onclick={() => pick(i)}
@@ -395,7 +433,16 @@
           <h3>Image</h3>
           <dl>
             <dt>File</dt>
-            <dd class="mono" title={img.file}>{img.file}</dd>
+            <!-- One line with the middle shortened (images/…/000001.jpg): the folders give way, the file name stays
+                 whole; the full path is in the tooltip and one click from the clipboard. -->
+            <dd class="path">
+              <span class="mono mid" use:tooltip={{ text: img.file }}
+                >{#if dir(img.file)}<span class="dir">{dir(img.file)}</span>/{/if}<span class="base">{stem(img.file)}</span></span
+              >
+              <button type="button" class="copy" aria-label="Copy the path {img.file}" use:tooltip={{ text: 'Copy path' }} onclick={() => copyFile(img.file)}
+                ><Copy size={12} strokeWidth={2} aria-hidden="true" /></button
+              >
+            </dd>
             <dt>Split</dt>
             <dd>{img.split}</dd>
             <dt>Size</dt>
@@ -508,12 +555,24 @@
     display: grid;
     grid-template-columns: minmax(0, 1fr) 288px;
   }
+  /* The canvas is a darkroom well in both themes: photos (mostly dark) never sit in light-grey letterbox bands. The
+     dark theme's bg.inset; in light, the ink token mixed into bg.inset gives the same near-black. */
   .viewport {
     position: relative;
     overflow: hidden;
     background: var(--bg-inset);
     touch-action: none;
     cursor: zoom-in;
+  }
+  :global([data-theme='light']) .viewport {
+    background: color-mix(in srgb, var(--text-primary) 96%, var(--bg-inset));
+  }
+  .viewport:focus {
+    outline: none;
+  }
+  .viewport:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: -2px;
   }
   .viewport.zoomed {
     cursor: grab;
@@ -611,18 +670,21 @@
     text-align: left;
     transition: background-color var(--dur-fast) var(--ease-standard);
   }
-  /* Hover is a light neutral step; the selection takes the one rule (bg.active and a 2 px accent bar on the leading
-     edge), and hovering a selected row adds to its fill, so the two never look alike. */
-  .labels button.hot {
-    background: var(--bg-hover);
+  /* Hover is a light neutral step (only where a pointer can hover, so a tap never leaves one behind); the selection
+     takes the one rule (bg.active and a 2 px accent bar on the leading edge), and hovering a selected row adds to its
+     fill, so the two never look alike. */
+  @media (hover: hover) {
+    .labels button.hot {
+      background: var(--bg-hover);
+    }
+    .labels button.on.hot {
+      background: linear-gradient(var(--bg-hover), var(--bg-hover)), var(--bg-active);
+    }
   }
   .labels button.on {
     background: var(--bg-active);
     box-shadow: inset 2px 0 0 var(--accent-line);
     border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
-  }
-  .labels button.on.hot {
-    background: linear-gradient(var(--bg-hover), var(--bg-hover)), var(--bg-active);
   }
   .labels button.dim {
     opacity: 0.5;
@@ -673,6 +735,38 @@
   }
   dd {
     overflow-wrap: anywhere;
+  }
+  .path {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    min-width: 0;
+  }
+  .mid {
+    display: flex;
+    min-width: 0;
+    white-space: nowrap;
+  }
+  .dir {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .base {
+    flex-shrink: 0;
+  }
+  .copy {
+    display: grid;
+    place-items: center;
+    flex-shrink: 0;
+    width: 24px;
+    height: 24px;
+    border-radius: var(--radius-sm);
+    color: var(--text-tertiary);
+  }
+  .copy:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
   }
   @keyframes enter {
     from {
@@ -742,6 +836,11 @@
   @media (pointer: coarse) {
     .labels button {
       height: 44px;
+    }
+    .copy {
+      width: 44px;
+      height: 44px;
+      margin-block: calc(var(--space-2) * -1);
     }
   }
 </style>

@@ -223,6 +223,13 @@ export function epochLog(p: RunProfile, ep: Epoch, startedAt: number): LogLine[]
 /** Steps a run from scratch needs before the trainer stops warning (folo_vision::train::SHORT_RUN_STEPS). */
 const SHORT_RUN_STEPS = 200;
 
+/** Batches accumulated into one optimizer step: `round(64 / batch)`, at least 1 (docs/MODEL.md §8.3). */
+export const accumulate = (batch: number) => Math.max(1, Math.round(64 / Math.max(1, batch)));
+
+/** The trainer's optimizer steps an epoch: `ceil(ceil(images / batch) / accumulate)`. */
+export const optimizerSteps = (images: number, batch: number) =>
+  Math.max(1, Math.ceil(Math.ceil(images / Math.max(1, batch)) / accumulate(batch)));
+
 /**
  * The trainer's schedule warnings for a run, worded as folo_vision::train::schedule_warnings words them (docs/MODEL.md
  * §8.4): a run from scratch shorter than 200 optimizer steps, and a warmup longer than half the run.
@@ -234,9 +241,10 @@ export function scheduleWarnings(p: RunProfile, images: number): string[] {
   const floor = Math.min(100, Math.floor(0.3 * total));
   const warmup = Math.min(Math.max(Math.round(3 * spe), floor), Math.max(c.epochs - 1, 0) * spe);
   const out: string[] = [];
+  const acc = accumulate(c.batch);
   if (!c.weights && total < SHORT_RUN_STEPS)
     out.push(
-      `this run takes only ${total} optimizer steps (${c.epochs} epochs × ${spe}: ${images} training images, batch ${c.batch}); ` +
+      `this run takes only ${total} optimizer steps (${c.epochs} epochs × ${spe}: ${images} training images, ${acc > 1 ? `batch ${c.batch} × accumulate ${acc}` : `batch ${c.batch}`}); ` +
         'a detector trained from scratch usually needs a few hundred steps to learn anything, so expect an mAP near 0. ' +
         `Train for at least ${Math.ceil(SHORT_RUN_STEPS / Math.max(1, spe))} epochs, add images, or start from pretrained weights`,
     );

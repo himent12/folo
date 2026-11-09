@@ -31,7 +31,7 @@ async function register(path: string, known?: { id: string }[]) {
   const go = vi.spyOn(router, 'go').mockImplementation(() => {});
   c = mount(AddDatasetDialog, { target, props: { open: true, known } });
   flushSync();
-  const input = document.querySelector<HTMLInputElement>('input[placeholder="D:/data/my-dataset"]')!;
+  const input = document.querySelector<HTMLInputElement>('input[placeholder="e.g. D:/data/my-dataset"]')!;
   input.value = path;
   input.dispatchEvent(new Event('input', { bubbles: true }));
   flushSync();

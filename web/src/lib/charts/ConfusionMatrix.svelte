@@ -2,20 +2,26 @@
   /**
    * Confusion matrix: rows are true classes, columns predicted, plus a "background" row/column for misses and false
    * positives. Cells are row-normalised and shaded on one sequential luminance ramp in ink (the diagonal is told apart
-   * by position, not hue), labelled in whole percentages ("<1" for small shares, ./confusionInk), counts on hover. An empty cell is the panel with a hairline grid; any share above zero starts
-   * at a clearly visible first step (./confusionInk), so a 2 % confusion never looks like nothing. `reveal(r, c)` lets a summary elsewhere point at one cell: it scrolls the
-   * cell into view and makes it the active cell, whose counts the readout states. A matrix that scrolls sideways
-   * (phones) also gets a whole-matrix overview: every cell as a small square and a band over the columns in view. A tap
-   * on it brings those columns into view; cells are picked in the full matrix, whose cells are large enough to hit.
+   * by position, not hue), labelled in whole percentages ("<1" for small shares, ./confusionInk), counts on hover. An
+   * empty cell is the panel with a hairline grid; the ramp's floor is stepped (under 1 %, 1 %, 5 %, then even from
+   * 10 %, ./confusionInk), so a 2 % and an 8 % confusion never look alike. `reveal(r, c)` lets a summary elsewhere
+   * point at one cell: it scrolls the cell into view and makes it the active cell, whose counts the readout states. A
+   * matrix that scrolls sideways (phones) leads with the labelled matrix; under it, a small whole-matrix overview (every
+   * cell as a square, a band over the columns in view; a tap brings those columns into view) beside a column-range
+   * control that pages through the columns, and the readout. Cells are picked in the full matrix, large enough to hit.
    */
+  import ChevronLeft from '@lucide/svelte/icons/chevron-left';
+  import ChevronRight from '@lucide/svelte/icons/chevron-right';
   import { classColor } from '$lib/design/tokens';
   import { prefs } from '$lib/prefs.svelte';
   import { overviewGeometry, overviewHit, overviewWindow } from './cmOverview';
-  import { CONFUSION_FLIP, sharePct } from './confusionInk';
-  // Cell labels are pure white or black, switched near the ramp's luminance crossover (see ./confusionInk).
-  const flip = $derived(CONFUSION_FLIP[prefs.resolvedTheme]);
-  /** With sparse labels, the smallest share that is labelled. */
+  import { FLOOR, labelHigh, rampShare, sharePct } from './confusionInk';
+  // Cells take their ink share from the ramp; labels are pure white or black, switched near the ramp's luminance
+  // crossover (see ./confusionInk).
+  const theme = $derived(prefs.resolvedTheme);
+  /** With sparse labels, the smallest share labelled in a cell of 32 px; cells of 72 px also label shares from 3 %. */
   const SPARSE_MIN = 0.05;
+  const SPARSE_WIDE = 0.03;
 
   let {
     classes,
@@ -31,7 +37,8 @@
     matrix: number[][];
     label?: string;
     /**
-     * Label only cells of at least 5% that are at least 32 px wide, so dense matrices don't run numerals together;
+     * Label only cells of at least 5% that are at least 32 px wide (from 3% in cells of 72 px), so dense matrices don't
+     * run numerals together;
      * every cell still states its value in its accessible name and in the readout on hover or focus.
      */
     sparseLabels?: boolean;
@@ -79,7 +86,15 @@
     range = { first, last };
   }
   const behavior = (): ScrollBehavior => (matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth');
-  const scrollEnd = () => root.scrollTo({ left: root.scrollWidth, behavior: behavior() });
+  /** Pages the columns: the next (or previous) screenful, sideways only. */
+  function page(dir: 1 | -1) {
+    const head = root.querySelector<HTMLElement>('.rowhead');
+    const cell = root.querySelector<HTMLElement>('.cell');
+    if (!head || !cell) return;
+    const step = cell.offsetWidth + 2;
+    const cols = Math.max(1, Math.floor((root.clientWidth - head.offsetWidth - 12) / step));
+    root.scrollTo({ left: Math.max(0, root.scrollLeft + dir * cols * step), behavior: behavior() });
+  }
 
   /**
    * Shows the cell at row `r`, column `c` (indices into `classes`; `classes.length` is background) and makes it the
@@ -130,7 +145,8 @@
     return id >= 0 ? classColor(id) : 'var(--text-tertiary)';
   };
 
-  const geo = $derived(overviewGeometry(n));
+  // Small: a navigator under the matrix, not a second figure.
+  const geo = $derived(overviewGeometry(n, 112));
   const band = $derived(range ? overviewWindow(range.first, range.last, geo) : null);
   /**
    * A tap on the overview centres the tapped column in the full matrix (sideways only, so the page does not jump).
@@ -156,40 +172,13 @@
       <span class="num">{(rowSums[h.r] ?? 0).toLocaleString('en-US')}</span>
       (<span class="num">{sharePct(norm(h.r, h.c)) || '0'}%</span>)
     {:else if range}
-      Tap the map to move to those columns, or a cell for its counts.
+      Tap a cell for its counts.
     {:else}
       Hover, tap or arrow through the cells for counts.
     {/if}
   </p>
 {/snippet}
 
-{#if range && band}
-  <!-- The whole matrix at a glance, with the selected cell's figures beside it: the full matrix below shows only a
-       few columns at a time. A pointer shortcut; the grid itself stays the keyboard and screen-reader path. -->
-  <div class="ov">
-    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-    <svg class="ov-map" width={geo.size} height={geo.size} viewBox="0 0 {geo.size} {geo.size}" aria-hidden="true" onclick={onmap}>
-      {#each names as _, r (r)}
-        {#each names as _, c (c)}
-          <rect class="ov-cell" class:zero={!matrix[r]?.[c]} x={c * (geo.cell + geo.gap)} y={r * (geo.cell + geo.gap)} width={geo.cell} height={geo.cell} rx="1" style:--v={norm(r, c)} />
-        {/each}
-      {/each}
-      <rect class="ov-band" x={band.x - 1.5} y="-1.5" width={band.w + 3} height={geo.size + 3} rx="2" />
-      {#if pinned}
-        <rect class="ov-pin" x={pinned.c * (geo.cell + geo.gap) - 1} y={pinned.r * (geo.cell + geo.gap) - 1} width={geo.cell + 2} height={geo.cell + 2} rx="2" />
-      {/if}
-    </svg>
-    {@render readout()}
-  </div>
-{/if}
-{#if range}
-  <!-- What the sideways scroll hides: the columns in view, and a way to the last ones (background = missed objects). -->
-  <p class="range num">
-    Columns {range.first}–{range.last} of {n}{#if range.last < n}<span class="sep" aria-hidden="true">·</span><button type="button" class="more" onclick={scrollEnd}
-        >Scroll for {n - range.last} more, incl. background →</button
-      >{/if}
-  </p>
-{/if}
 <!-- svelte-ignore a11y_interactive_supports_focus -->
 <div class="cm" class:sparse={sparseLabels} class:fixed class:more-r={moreRight} style:--n={n} style:--min-cell={minCell !== undefined ? `${minCell}px` : undefined} role="grid" aria-label={label} aria-describedby="{uid}-readout" bind:this={root} {onkeydown} {onscroll}>
   <div class="row" role="row">
@@ -219,7 +208,7 @@
           data-r={r}
           data-c={c}
           aria-label="{rname} predicted as {cname}: {(matrix[r]?.[c] ?? 0).toLocaleString('en-US')} of {(rowSums[r] ?? 0).toLocaleString('en-US')}, {sharePct(v) || '0'}%"
-          style:--v={v}
+          style:--s={rampShare(v, theme)}
           onpointerenter={() => (hovered = { r, c })}
           onpointerleave={() => (hovered = pinned)}
           onfocus={() => ((focus = { r, c }), (hovered = pinned = { r, c }))}
@@ -227,20 +216,54 @@
           onclick={() => (hovered = pinned = { r, c })}
           onkeydown={() => {}}
         >
-          {#if v > 0 && v >= (sparseLabels ? SPARSE_MIN : 0)}<span class:hi={v > flip}>{sharePct(v)}</span>{/if}
+          {#if v > 0 && v >= (sparseLabels ? SPARSE_WIDE : 0)}<span class:hi={labelHigh(v, theme)} class:low={sparseLabels && v < SPARSE_MIN}>{sharePct(v)}</span>{/if}
         </div>
       {/each}
     </div>
   {/each}
 </div>
+{#if range && band}
+  <!-- Under the matrix: the whole matrix at a glance (a pointer shortcut; the grid stays the keyboard and screen-reader
+       path), the columns in view with a way to page through them (background, the misses, is the last), and the
+       selected cell's figures. -->
+  <div class="ov">
+    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+    <svg class="ov-map" width={geo.size} height={geo.size} viewBox="0 0 {geo.size} {geo.size}" aria-hidden="true" onclick={onmap}>
+      {#each names as _, r (r)}
+        {#each names as _, c (c)}
+          <rect class="ov-cell" class:zero={!matrix[r]?.[c]} x={c * (geo.cell + geo.gap)} y={r * (geo.cell + geo.gap)} width={geo.cell} height={geo.cell} rx="1" style:--s={rampShare(norm(r, c), theme)} />
+        {/each}
+      {/each}
+      <rect class="ov-band" x={band.x - 1.5} y="-1.5" width={band.w + 3} height={geo.size + 3} rx="2" />
+      {#if pinned}
+        <rect class="ov-pin" x={pinned.c * (geo.cell + geo.gap) - 1} y={pinned.r * (geo.cell + geo.gap) - 1} width={geo.cell + 2} height={geo.cell + 2} rx="2" />
+      {/if}
+    </svg>
+    <div class="ov-side">
+      <div class="range num" role="group" aria-label="Columns in view">
+        <button type="button" class="pg" aria-label="Previous columns" disabled={range.first <= 1} onclick={() => page(-1)}><ChevronLeft size={16} aria-hidden="true" /></button>
+        <span aria-live="polite">Columns {range.first}–{range.last} of {n}</span>
+        <button type="button" class="pg" aria-label="Next columns{range.last < n ? ', up to background' : ''}" disabled={range.last >= n} onclick={() => page(1)}
+          ><ChevronRight size={16} aria-hidden="true" /></button
+        >
+      </div>
+      {@render readout()}
+    </div>
+  </div>
+{/if}
 {#if scale}
   <div class="scale" aria-hidden="true">
     <span class="scale-name">Share of the true class</span>
     <span class="keys">
       <span class="none-key"><i></i>None</span>
+      <!-- The stepped floor (under 1 %, 1 %, 5 %) as three blocks, then the even ramp from 10 % to 100 %. -->
       <span class="ramp-key">
-        <span class="ramp"></span>
-        <span class="ticks"><span>&gt;0%</span><span>50%</span><span>100%</span></span>
+        {#each [0.005, FLOOR[0], FLOOR[1]] as v, i (i)}
+          <span class="step" style:--s={rampShare(v, theme)}></span>
+        {/each}
+        <span class="ramp" style:--s0={rampShare(FLOOR[2], theme)} style:--s1={rampShare(1, theme)}></span>
+        {#each ['>0', '1', '5'] as t (t)}<span class="tick">{t}</span>{/each}
+        <span class="tick ramp-ticks"><span>10%</span><span>100%</span></span>
       </span>
     </span>
   </div>
@@ -250,17 +273,6 @@
 <style>
   .row {
     display: contents;
-  }
-  /* The ramp's first step and span (RAMP in ./confusionInk): lighter in light, where white makes any grey loud. */
-  .cell,
-  .ov-cell,
-  .ramp {
-    --cm-start: 20%;
-    --cm-span: 74%;
-  }
-  :global([data-theme='light']) :is(.cell, .ov-cell, .ramp) {
-    --cm-start: 12%;
-    --cm-span: 82%;
   }
   .cm {
     display: grid;
@@ -358,7 +370,7 @@
     border-radius: 3px;
     /* One ramp in ink over the panel, perceptually even (oklab), from a visible first step to 94 %. Empty cells
        override it below. */
-    background: color-mix(in oklab, var(--text-primary) calc(var(--v) * var(--cm-span) + var(--cm-start)), var(--bg-panel));
+    background: color-mix(in oklab, var(--text-primary) calc(var(--s) * 100%), var(--bg-panel));
     font-size: var(--type-sm-size);
     font-variant-numeric: tabular-nums;
     color: var(--text-secondary);
@@ -371,6 +383,12 @@
   }
   @container (max-width: 31.98px) {
     .sparse .cell span {
+      display: none;
+    }
+  }
+  /* Shares of 3–4 % are labelled only in full-size (72 px) cells. */
+  @container (max-width: 71.98px) {
+    .sparse .cell span.low {
       display: none;
     }
   }
@@ -390,7 +408,7 @@
       inset 0 0 0 2px var(--accent-line),
       inset 0 0 0 3px var(--bg-panel);
   }
-  /* Low cells sit near the well, high cells near the ink; the label takes the far extreme (see `flip`). */
+  /* Low cells sit near the well, high cells near the ink; the label takes the far extreme (labelHigh in ./confusionInk). */
   :global([data-theme='dark']) .cell span {
     color: #ffffff;
   }
@@ -404,27 +422,40 @@
   .cell span.hi {
     font-weight: var(--weight-medium);
   }
+  /* The column-range control: the columns in view between two paging buttons. */
   .range {
     display: flex;
-    flex-wrap: wrap;
     align-items: center;
-    min-height: 24px;
-    margin-bottom: var(--space-2);
+    gap: var(--space-1);
+    margin-left: calc(var(--space-2) * -1);
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
-    color: var(--text-tertiary);
-  }
-  .range .sep {
-    margin-inline: var(--space-2);
-  }
-  .more {
     color: var(--text-secondary);
-    text-decoration: underline;
-    text-decoration-color: var(--line-strong);
-    text-underline-offset: 3px;
+    white-space: nowrap;
   }
-  .more:hover {
+  .pg {
+    display: grid;
+    place-items: center;
+    width: 28px;
+    height: 28px;
+    border-radius: var(--radius-sm);
+    color: var(--text-secondary);
+  }
+  .pg:hover:not(:disabled) {
+    background: var(--bg-hover);
     color: var(--text-primary);
+  }
+  .pg:disabled {
+    color: var(--text-disabled);
+  }
+  @media (pointer: coarse) {
+    .pg {
+      width: 44px;
+      height: 44px;
+    }
+    .range {
+      margin-left: calc(var(--space-3) * -1);
+    }
   }
   .readout {
     margin-top: var(--space-3);
@@ -435,9 +466,14 @@
   .ov {
     display: grid;
     grid-template-columns: auto minmax(0, 1fr);
-    gap: var(--space-3);
+    gap: var(--space-4);
     align-items: start;
-    margin-bottom: var(--space-3);
+    margin-top: var(--space-4);
+  }
+  .ov-side {
+    display: grid;
+    gap: var(--space-1);
+    min-width: 0;
   }
   .ov .readout {
     margin-top: 0;
@@ -449,7 +485,7 @@
     touch-action: manipulation;
   }
   .ov-cell {
-    fill: color-mix(in oklab, var(--text-primary) calc(var(--v) * var(--cm-span) + var(--cm-start)), var(--bg-panel));
+    fill: color-mix(in oklab, var(--text-primary) calc(var(--s) * 100%), var(--bg-panel));
   }
   .ov-cell.zero {
     fill: var(--bg-panel);
@@ -507,21 +543,31 @@
   .ramp-key {
     flex: 1;
     display: grid;
-    gap: var(--space-1);
+    grid-template-columns: 24px 24px 24px minmax(96px, 1fr);
+    column-gap: 2px;
+    row-gap: var(--space-1);
     padding-top: 4px;
   }
+  .step,
   .ramp {
     height: 8px;
     border-radius: 2px;
+  }
+  .step {
+    background: color-mix(in oklab, var(--text-primary) calc(var(--s) * 100%), var(--bg-panel));
+  }
+  .ramp {
     background: linear-gradient(
       to right in oklab,
-      color-mix(in oklab, var(--text-primary) var(--cm-start), var(--bg-panel)),
-      color-mix(in oklab, var(--text-primary) 94%, var(--bg-panel))
+      color-mix(in oklab, var(--text-primary) calc(var(--s0) * 100%), var(--bg-panel)),
+      color-mix(in oklab, var(--text-primary) calc(var(--s1) * 100%), var(--bg-panel))
     );
   }
-  .ticks {
+  .tick {
+    font-variant-numeric: tabular-nums;
+  }
+  .ramp-ticks {
     display: flex;
     justify-content: space-between;
-    font-variant-numeric: tabular-nums;
   }
 </style>

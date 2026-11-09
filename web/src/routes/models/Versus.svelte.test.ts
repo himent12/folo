@@ -25,7 +25,7 @@ describe('Engine speed table', () => {
       const metric = tr.querySelector('th[scope="row"]');
       expect(metric?.textContent).toContain(versusYolo26n[i]!.metric);
       const cells = [...tr.querySelectorAll('td')];
-      expect(cells.map((td) => td.querySelector('.cl')?.textContent)).toEqual(['folo-n', 'YOLO26n', 'FOLO']);
+      expect(cells.map((td) => td.querySelector('.cl')?.textContent)).toEqual(['folo-n', 'YOLO26n', 'folo-n vs YOLO26n']);
       for (const td of cells) {
         const ids = (td.getAttribute('headers') ?? '').split(' ');
         expect(ids[0]).toBe(metric?.id);
@@ -33,6 +33,18 @@ describe('Engine speed table', () => {
         expect(col?.getAttribute('scope')).toBe('col');
         expect(col?.textContent).toBe(td.querySelector('.cl')?.textContent);
       }
+    });
+  });
+
+  it('states every lead in one format: × for speed, % for memory', () => {
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    c = mount(Versus, { target });
+    flushSync();
+    const leads = [...target.querySelectorAll('tbody td.lead')].map((td) => td.lastChild?.textContent?.trim() ?? '');
+    versusYolo26n.forEach((v, i) => {
+      if (v.unit === 'MiB') expect(leads[i]).toMatch(/^\d+% (less|more) memory$/);
+      else expect(leads[i]).toMatch(/^\d+\.\d\d× (faster|slower)$/);
     });
   });
 

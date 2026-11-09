@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { LogLine } from '$lib/api/types';
-import { scheduleWarnings, sentences } from './warnings';
+import { plain, scheduleWarnings, sentences, shortCause, suggestedEpochs } from './warnings';
 
 const SHORT =
   'this run takes only 125 optimizer steps (5 epochs × 25: 800 training images, batch 32); a detector trained from scratch usually needs a few hundred steps to learn anything, so expect an mAP near 0. Train for at least 8 epochs, add images, or start from pretrained weights';
@@ -29,9 +29,32 @@ describe('sentences', () => {
 });
 
 describe('suggestedEpochs', () => {
-  it('reads the epochs the trainer suggests, or null', async () => {
-    const { suggestedEpochs } = await import('./warnings');
+  it('is the engine rule, ⌈200 / steps per epoch⌉, from the warning numbers', () => {
+    expect(suggestedEpochs([SHORT])).toBe(8);
+    // 30 steps an epoch: 200 / 30 = 6.67, so 7 epochs (the engine's div_ceil), whatever the sentence says.
+    expect(suggestedEpochs(['this run takes only 90 optimizer steps (3 epochs × 30: 480 training images, batch 16); …'])).toBe(7);
+  });
+
+  it('reads the epochs the trainer suggests, or null', () => {
     expect(suggestedEpochs(['this run takes only 125 optimizer steps (5 epochs × 25: …); … Train for at least 8 epochs, add images, or start from pretrained weights'])).toBe(8);
     expect(suggestedEpochs(["warmup takes 70 of the run's 125 optimizer steps, …; lower warmup_epochs (now 3) or train for more epochs"])).toBeNull();
+  });
+});
+
+describe('plain', () => {
+  it('says the engine warnings without config keys', () => {
+    expect(plain(WARMUP)).toBe(
+      "Warmup takes 75 of the run's 125 optimizer steps, so the learning rate reaches its initial value only in the second half of the run. Shorten the warmup (now 3 epochs) or train for more epochs.",
+    );
+    expect(plain(SHORT)).toMatch(/^This run takes only 125 optimizer steps \(25 per epoch: 800 training images, batch 32\)\. A detector /);
+    for (const w of [SHORT, WARMUP]) expect(plain(w)).not.toMatch(/lr0|warmup_epochs/);
+  });
+});
+
+describe('shortCause', () => {
+  it('is the run optimizer steps, or the warmup share when that is the only warning', () => {
+    expect(shortCause([SHORT, WARMUP])).toBe('125 optimizer steps');
+    expect(shortCause([WARMUP])).toBe('warmup takes 75 of 125 optimizer steps');
+    expect(shortCause([])).toBe('');
   });
 });

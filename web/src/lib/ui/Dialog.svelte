@@ -16,6 +16,7 @@
     footer,
     size = 'md',
     onclose,
+    class: klass = '',
   }: {
     open?: boolean;
     title: string;
@@ -24,6 +25,8 @@
     footer?: Snippet;
     size?: 'sm' | 'md' | 'lg';
     onclose?: () => void;
+    /** Extra classes on the <dialog>, e.g. to set a width of its own. */
+    class?: string;
   } = $props();
 
   const uid = $props.id();
@@ -59,7 +62,7 @@
 
 <dialog
   bind:this={el}
-  class={size}
+  class="{size} {klass}"
   aria-labelledby="{uid}-title"
   aria-describedby={description ? `${uid}-desc` : undefined}
   onclose={onDialogClose}

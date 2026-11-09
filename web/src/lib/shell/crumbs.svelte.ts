@@ -32,11 +32,13 @@ export function setCrumbs(...crumbs: Crumb[]) {
 /**
  * Called from the script of a page whose header holds a create action (Runs' New run, Datasets' Add dataset): while it
  * is mounted the top bar hides its own New run, so one corner never holds two create buttons (or, offline, two disabled
- * ones with the reason between them).
+ * ones with the reason between them). `when`: only while it holds (Models' empty state carries New run).
  */
-export function ownCreateAction() {
-  // Untracked: the effect writes the count, so reading it as a dependency would re-run it forever.
+export function ownCreateAction(when: () => boolean = () => true) {
+  // `when` is tracked (Models owns the action only while its list is empty); the count is not, since the effect writes
+  // it and reading it as a dependency would re-run it forever.
   $effect(() => {
+    if (!when()) return;
     untrack(() => page.creators++);
     return () => {
       untrack(() => page.creators--);

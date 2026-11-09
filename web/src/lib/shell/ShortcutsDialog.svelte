@@ -2,11 +2,16 @@
   import Dialog from '$lib/ui/Dialog.svelte';
   import Kbd from '$lib/ui/Kbd.svelte';
   import { keyPrefs } from '$lib/ui/keyPrefs.svelte';
+  import { isApple } from '$lib/keys';
   import { shortcutList } from './shortcuts';
 
   let { open = $bindable(false) }: { open?: boolean } = $props();
 
-  const groups = [...new Set(shortcutList.map((s) => s.group))];
+  /** Off in Settings: the single keys leave their groups for one section of their own, marked as such. */
+  const working = $derived(keyPrefs.singleKeys ? shortcutList : shortcutList.filter((s) => !s.single));
+  const off = $derived(keyPrefs.singleKeys ? [] : shortcutList.filter((s) => s.single));
+  const groups = $derived([...new Set(working.map((s) => s.group))]);
+  const paletteKeys = isApple ? '⌘ K' : 'Ctrl K';
 </script>
 
 <!-- Every group (General to Datasets): two columns where the dialog is wide, one on phones; the body scrolls with a
@@ -16,28 +21,42 @@
   title="Keyboard shortcuts"
   description={keyPrefs.singleKeys
     ? 'Everything in Studio works from the keyboard.'
-    : 'Single-key shortcuts are off (Settings). Ctrl or ⌘ K and the arrow keys still work.'}
+    : `Single-key shortcuts are off in Settings. ${paletteKeys}, the arrow keys and the image inspector's keys still work.`}
   size="lg"
+  class="shortcuts"
 >
   <div class="groups">
     {#each groups as g (g)}
       <section>
         <h3 class="overline">{g}</h3>
         <ul>
-          {#each shortcutList.filter((s) => s.group === g) as s (s.keys + s.label)}
+          {#each working.filter((s) => s.group === g) as s (s.keys + s.label)}
             <li><span>{s.label}</span><Kbd keys={s.keys} /></li>
           {/each}
         </ul>
       </section>
     {/each}
+    {#if off.length}
+      <section class="off">
+        <h3 class="overline">Disabled in Settings</h3>
+        <ul>
+          {#each off as s (s.keys + s.label)}
+            <li><span>{s.label}<span class="sr-only">, disabled in Settings</span></span><Kbd keys={s.keys} subtle /></li>
+          {/each}
+        </ul>
+      </section>
+    {/if}
   </div>
 </Dialog>
 
 <style>
-  /* Two columns from 2 × 280 px up; a group never splits across them. */
+  /* A reference card, not a page: 640 px, two columns of 13 px rows, a group never split across them. */
+  :global(dialog.shortcuts.lg) {
+    width: min(640px, calc(100vw - 32px));
+  }
   .groups {
-    columns: 280px 2;
-    column-gap: var(--space-8);
+    columns: 260px 2;
+    column-gap: var(--space-6);
     /* Each group's own bottom space would add to the dialog's padding after the last one. */
     margin-bottom: calc(-1 * var(--space-5));
   }
@@ -58,9 +77,19 @@
     gap: var(--space-4);
     min-height: 32px;
     border-bottom: 1px solid var(--line-subtle);
+    font-size: var(--type-base-size);
+    line-height: var(--type-base-line);
     color: var(--text-secondary);
   }
   li:last-child {
     border-bottom: 0;
+  }
+  .off li {
+    color: var(--text-tertiary);
+  }
+  @media (max-width: 640px) {
+    :global(dialog.shortcuts.lg) {
+      width: 100%;
+    }
   }
 </style>

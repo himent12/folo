@@ -147,8 +147,8 @@
   <div id="{uid}-mode-panel" class="form" role="tabpanel" aria-labelledby="{uid}-mode-{mode}">
     <form id="{uid}-form" class="panel" onsubmit={submit} novalidate>
       {#if mode === 'folder'}
-        <Field label="Folder" for="{uid}-path" error={show(errs.path)} hint="Absolute path on the machine running folo serve. Files are never modified.">
-          <Input id="{uid}-path" bind:value={path} placeholder="D:/data/my-dataset" icon={FolderOpen} class="mono-input" autocomplete="off" spellcheck={false} invalid={!!show(errs.path)} aria-describedby={show(errs.path) ? `${uid}-path-error` : `${uid}-path-hint`} />
+        <Field label="Folder" for="{uid}-path" error={show(errs.path)} hint="Absolute path on the machine running `folo serve`. Files are never modified.">
+          <Input id="{uid}-path" bind:value={path} placeholder="e.g. D:/data/my-dataset" icon={FolderOpen} class="mono-input" autocomplete="off" spellcheck={false} invalid={!!show(errs.path)} aria-describedby={show(errs.path) ? `${uid}-path-error` : `${uid}-path-hint`} />
         </Field>
         <Field label="Name" for="{uid}-name" error={show(errs.name)}>
           <Input id="{uid}-name" bind:value={name} placeholder={derivedName || 'my-dataset'} autocomplete="off" spellcheck={false} invalid={!!show(errs.name)} aria-describedby={show(errs.name) ? `${uid}-name-error` : undefined} />
@@ -252,6 +252,12 @@
   .panel :global(.mono-input input) {
     font-family: var(--font-mono);
     font-size: var(--type-sm-size);
+  }
+  /* The example is a sentence, not a value: Geist in text.tertiary, so it never reads as a path already filled in. */
+  .panel :global(.mono-input input::placeholder) {
+    font-family: var(--font-sans);
+    font-size: var(--type-base-size);
+    color: var(--text-tertiary);
   }
   .chips {
     display: flex;

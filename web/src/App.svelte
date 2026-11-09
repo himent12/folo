@@ -131,7 +131,7 @@
     transform: none;
   }
   @media (max-width: 767px) {
-    .app :global(.sidebar) {
+    .app :global(.rail) {
       display: none;
     }
     /* Clear of the tab bar (56 px + 8), or of nothing but 8 px while a page's dock replaces it (shell/dock.ts). */

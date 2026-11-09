@@ -12,8 +12,11 @@
   }: { config: TrainConfig; datasetName?: string; /** One column for a rail, augmentation folded away. */ compact?: boolean } = $props();
 
   const a = $derived(config.augment);
-  // Identifiers (model names, weight paths, devices) are mono; numbers and prose are sans with tabular numerals.
+  // Identifiers (model names, weight paths, devices, a named optimizer) are mono; numbers and prose ("auto", "From
+  // scratch") are sans with tabular numerals (design/README.md, Type).
   const MONO = new Set(['Model', 'Weights', 'Device', 'Optimizer']);
+  const PROSE = new Set(['auto', 'From scratch']);
+  const mono = (k: string, v: string) => MONO.has(k) && !PROSE.has(v);
   const rows = $derived<[string, string][]>([
     ['Dataset', datasetName ?? config.dataset_id],
     ['Model', config.arch],
@@ -23,7 +26,7 @@
     ['Device', config.device],
     ['Optimizer', config.optimizer],
     ['Initial LR', String(config.lr0)],
-    ['Weights', config.weights ?? 'from scratch'],
+    ['Weights', config.weights ?? 'From scratch'],
     ['Seed', String(config.seed)],
   ]);
   const aug = $derived<[string, string][]>([
@@ -49,7 +52,7 @@
 {#snippet training()}
   <dl>
     <p class="group">Training</p>
-    {#each rows as [k, v] (k)}<dt>{k}</dt><dd class="num" class:mono={MONO.has(k) && !(k === 'Weights' && !config.weights)}>{v}</dd>{/each}
+    {#each rows as [k, v] (k)}<dt>{k}</dt><dd class="num" class:mono={mono(k, v)}>{v}</dd>{/each}
   </dl>
 {/snippet}
 {#snippet augmentation(heading: boolean)}

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import raw from '../../../../design/tokens.json?raw';
-import { CONFUSION_FLIP, rampShare, sharePct } from './confusionInk';
+import { labelHigh, rampShare, sharePct } from './confusionInk';
 
 const tokens = JSON.parse(raw);
 
@@ -44,9 +44,18 @@ describe('confusion-matrix ramp', () => {
       let worst = Infinity;
       for (let i = 1; i <= 1000; i++) {
         const v = i / 1000;
-        worst = Math.min(worst, contrast(v > CONFUSION_FLIP[theme] ? hi! : lo!, cell(v)));
+        worst = Math.min(worst, contrast(labelHigh(v, theme) ? hi! : lo!, cell(v)));
       }
       expect(worst).toBeGreaterThanOrEqual(4.5);
+    });
+
+    it(`steps the floor visibly: under 1 %, 1 %, 5 % and 10 % are four tones (${theme})`, () => {
+      const tones = [0.005, 0.02, 0.07, 0.1].map(cell);
+      for (let i = 1; i < tones.length; i++) expect(contrast(tones[i]!, tones[i - 1]!)).toBeGreaterThanOrEqual(1.15);
+      // Inside a step the tone holds; from 10 % the ramp keeps rising to the end.
+      expect(rampShare(0.02, theme)).toBe(rampShare(0.04, theme));
+      expect(rampShare(0.5, theme)).toBeGreaterThan(rampShare(0.1, theme));
+      expect(rampShare(1, theme)).toBeCloseTo(0.94);
     });
 
     it(`tells the smallest share apart from an empty cell (${theme})`, () => {

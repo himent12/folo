@@ -18,7 +18,15 @@ export const arches: { arch: Arch; size: string; params: number; flops: number; 
 const gpuImgsPerS: Record<Arch, number> = { 'folo-n': 520, 'folo-s': 320, 'folo-m': 170, 'folo-l': 130, 'folo-x': 70 };
 const gibPerImage: Record<Arch, number> = { 'folo-n': 0.11, 'folo-s': 0.19, 'folo-m': 0.36, 'folo-l': 0.47, 'folo-x': 0.8 };
 
+/**
+ * Mixed precision (`amp`) against f32, measured on the training step (docs/BENCHMARKS.md, Mixed-precision training:
+ * batch 16 at 640 on an RTX 4080 SUPER): speed for the sizes measured, and the peak memory, about 40% less for both.
+ */
+export const AMP_SPEEDUP: Partial<Record<Arch, number>> = { 'folo-n': 1.24, 'folo-s': 1.61 };
+const AMP_MEMORY = 0.6;
+
 export interface Estimate {
+  /** Batches an epoch (`ceil(N / batch)`); the optimizer steps are fewer when batches accumulate (`warmup`). */
   stepsPerEpoch: number;
   imgsPerS: number;
   epochSeconds: number;
@@ -26,12 +34,17 @@ export interface Estimate {
   vramBytes: number;
 }
 
-export function estimate(arch: Arch, trainImages: number, epochs: number, batch: number, imgsz: number, cpu: boolean): Estimate {
+/**
+ * `amp`: mixed precision on the GPU. Its speed-up applies only where it was measured (`AMP_SPEEDUP`); its memory saving
+ * to the activations (the per-image part).
+ */
+export function estimate(arch: Arch, trainImages: number, epochs: number, batch: number, imgsz: number, cpu: boolean, amp = false): Estimate {
   const area = (imgsz / 640) ** 2;
-  const imgsPerS = (gpuImgsPerS[arch] / area) * (cpu ? 1 / 14 : 1);
+  const mixed = amp && !cpu;
+  const imgsPerS = (gpuImgsPerS[arch] / area) * (cpu ? 1 / 14 : 1) * (mixed ? (AMP_SPEEDUP[arch] ?? 1) : 1);
   const epochSeconds = trainImages / imgsPerS + Math.min(30, trainImages * 0.002 + 1);
   const params = arches.find((a) => a.arch === arch)?.params ?? 10_000_000;
-  const vram = 0.6 * 2 ** 30 + params * 16 + batch * area * gibPerImage[arch] * 2 ** 30;
+  const vram = 0.6 * 2 ** 30 + params * 16 + batch * area * gibPerImage[arch] * 2 ** 30 * (mixed ? AMP_MEMORY : 1);
   return {
     stepsPerEpoch: Math.max(1, Math.ceil(trainImages / Math.max(1, batch))),
     imgsPerS,
@@ -99,7 +112,11 @@ export interface ShortRun extends Warmup {
   scratch: boolean;
   /** Warmup takes more than half the run: the learning rate reaches lr0 only in its second half. */
   warmupHeavy: boolean;
-  /** The fewest epochs that clear both. */
+  /**
+   * The epochs to suggest: for a short run from scratch the trainer's own, `ceil(200 / spe)` (`SHORT_RUN_STEPS
+   * .div_ceil(spe)` in folo_vision::train::schedule_warnings, so the run page suggests the same), else the fewest that
+   * clear the warmup warning.
+   */
   epochs: number;
 }
 
@@ -116,6 +133,7 @@ export function shortRun(trainImages: number, epochs: number, batch: number, fro
   };
   const now = check(epochs);
   if (!now.scratch && !now.warmupHeavy) return null;
+  if (now.scratch) return { ...now, epochs: Math.ceil(SHORT_RUN_STEPS / Math.max(1, now.stepsPerEpoch)) };
   let e = epochs + 1;
   for (; e < 100_000; e++) {
     const n = check(e);

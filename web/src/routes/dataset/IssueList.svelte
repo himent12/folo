@@ -1,8 +1,8 @@
 <script lang="ts">
   /**
    * The `folo dataset check` issues, as `file:line`, the message and what a cleanup would do, paged 50 at a time. A
-   * severity filter (with the server's counts, where it sends them) and a kind filter narrow it; a caption above the
-   * rows says exactly which rows they are. The same check from a terminal is offered as a copyable command.
+   * severity filter (with the server's counts, where it sends them) narrows it, and inside a severity with several
+   * kinds a sub-filter by check type; a caption above the rows says exactly which rows they are. The same check from a terminal is offered as a copyable command.
    */
   import Copy from '@lucide/svelte/icons/copy';
   import { untrack } from 'svelte';
@@ -89,11 +89,11 @@
       <span class="kind">
         <Select
           size="sm"
-          label="Kind"
+          label="Check type"
           bind:value={kind}
           onchange={() => (shown = PAGE)}
           options={[
-            { value: 'all', label: `All ${NAMES[sev][1]}` },
+            { value: 'all', label: `All ${NAMES[sev][0]} types` },
             ...kinds.map((k) => ({ value: k, label: `${KIND_LABEL[k]} · ${num(byKind[k])}` })),
           ]}
         />

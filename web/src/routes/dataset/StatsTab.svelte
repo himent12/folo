@@ -1,9 +1,9 @@
 <script lang="ts">
   /**
-   * Dataset statistics. A compact health summary comes first: one line per severity (errors, warnings, notes) with a
-   * short summary of its findings and, on the right edge, what they count (file issues, apart from dataset-wide
-   * observations), each opening to the evidence: every finding under the level's label, its next step under it. Then four numbers, the class balance as the focal chart, the two
-   * histograms in ink, and last the `folo dataset check` issues in their own section with severity and kind filters.
+   * Dataset statistics. Health comes first, only when there are findings: one compact line (each severity's icon and a
+   * short summary of its findings, units named) that opens to the evidence, every finding with its next step. Then four
+   * numbers, the class balance as the focal chart, the two histograms in ink, and last the `folo dataset check` issues
+   * in their own section with a severity filter and, inside it, a filter by check type.
    */
   import { tick } from 'svelte';
   import IssueList from './IssueList.svelte';
@@ -22,7 +22,7 @@
   import Panel from '$lib/ui/Panel.svelte';
   import { tooltip } from '$lib/ui/tooltip';
   import { swatchStyle } from './swatch';
-  import { bySeverity, countBinLabel, groupCount, groupSummary, healthChecks, healthSummary, imageCount, sizeBinLabel, TINY_SIZE, type Severity } from './health';
+  import { bySeverity, countBinLabel, groupSummary, healthChecks, imageCount, sizeBinLabel, TINY_SIZE, type Severity } from './health';
 
   let {
     dataset,
@@ -34,10 +34,8 @@
   const images = $derived(imageCount(dataset));
   const health = $derived(healthChecks(dataset, stats, counts));
   const groups = $derived(bySeverity(health));
-  const ok = $derived(health.find((h) => h.severity === 'ok'));
-  const summary = $derived(healthSummary(health));
-  // Each severity line starts folded: the summary is the point, the evidence one tap away.
-  let open = $state<Partial<Record<Severity, boolean>>>({});
+  // The line is the point; the evidence is one tap away.
+  let healthOpen = $state(false);
 
   // The check's issues get a section of their own (where the server ran the check, or labels are broken); its filter
   // starts on the most severe level that has issues, and a finding backed by them moves it there.
@@ -55,11 +53,6 @@
     heading?.focus({ preventScroll: true });
     document.getElementById('ds-check')?.scrollIntoView({ block: 'start', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
   }
-  const sizeEdges = $derived(stats.box_size_hist.edges);
-  // The server's size bins are unequal (finer near the tiny threshold) and do not merge into equal ones, so they keep
-  // their true widths on a linear axis. The open last bin (e.g. ≥ 50%) stands apart, drawn 10 points wide.
-  const sizeMax = $derived(Math.min((sizeEdges[sizeEdges.length - 2] ?? 0.9) + 0.1, sizeEdges[sizeEdges.length - 1] ?? 1));
-  const pctEdge = (v: number) => `${+(v * 100).toFixed(1)}%`;
   const balance = $derived(
     stats.class_counts
       .map((count, cls) => ({ cls, count, name: dataset.classes[cls] ?? `class ${cls}` }))
@@ -72,6 +65,7 @@
   });
   const share = (x: number) => (stats.boxes ? (x / stats.boxes) * 100 : 0);
   const icons = { danger: CircleAlert, warning: TriangleAlert, info: Info, ok: CircleCheck } satisfies Record<Severity, unknown>;
+  const sevWord: Record<Severity, string> = { danger: 'Error', warning: 'Warning', info: 'Note', ok: 'OK' };
   const perLast = $derived(stats.boxes_per_image_hist.counts.length - 1);
   const splitLine = $derived(`${num(dataset.splits.train)} train · ${num(dataset.splits.val)} val · ${num(dataset.splits.test)} test`);
   const classCount = $derived(`${dataset.classes.length} ${dataset.classes.length === 1 ? 'class' : 'classes'}`);
@@ -80,59 +74,50 @@
 </script>
 
 <div class="stats">
-  <Panel title="Health" meta={summary} pad="none" id="ds-health">
-    <ul class="health">
-      {#each groups as g (g.severity)}
-        {@const Icon = icons[g.severity]}
-        <li class={g.severity}>
-          <details open={open[g.severity] ?? false} ontoggle={(e) => (open[g.severity] = e.currentTarget.open)}>
-            <summary>
+  {#if groups.length}
+    <!-- One line at rest: each severity's icon and what its findings are; it opens to every finding and its next step. -->
+    <section class="health" id="ds-health" aria-labelledby="ds-health-title">
+      <details bind:open={healthOpen}>
+        <summary>
+          <span class="h-title" id="ds-health-title">Health</span>
+          <span class="h-sum">
+            {#each groups as g (g.severity)}
+              {@const Icon = icons[g.severity]}
+              <span class="h-sev {g.severity}">
+                <Icon size={14} strokeWidth={2} aria-hidden="true" /><span class="sr-only">{g.label}:</span>{groupSummary(g)}
+              </span>
+            {/each}
+          </span>
+          <span class="h-more" aria-hidden="true">{healthOpen ? 'Hide' : 'Details'}<ChevronDown size={14} strokeWidth={1.75} /></span>
+        </summary>
+        <ul class="hitems">
+          {#each health.filter((h) => h.severity !== 'ok') as h (h.id)}
+            {@const Icon = icons[h.severity]}
+            <li class={h.severity}>
               <span class="hicon"><Icon size={16} strokeWidth={1.75} aria-hidden="true" /></span>
-              <span class="hlabel">{g.label}</span>
-              <!-- Folded: a short summary of the findings (units named). Open: the titles head the evidence below. What
-                   they count sits on the right edge either way: file issues, and dataset-wide observations apart. -->
-              <span class="htitles">{groupSummary(g)}</span>
-              <span class="hcount num">{groupCount(g)}</span>
-              <span class="hchev" aria-hidden="true"><ChevronDown size={14} strokeWidth={1.75} /></span>
-            </summary>
-            <ul class="hitems">
-              {#each g.items as h (h.id)}
-                <li>
-                  <div class="htext">
-                    <p class="htitle">{h.title}</p>
-                    <p class="hdetail">{h.detail}</p>
-                  </div>
-                  {#if h.issues || h.action}
-                    <p class="hacts">
-                      {#if h.issues}
-                        {@const sev = h.issues}
-                        <button type="button" class="haction" onclick={() => showIssues(sev)}
-                          >{showLabel(sev)}<ArrowDown size={12} strokeWidth={2} aria-hidden="true" /></button
-                        >
-                      {/if}
-                      {#if h.action}
-                        <a class="haction" href={href(h.action.path)}>{h.action.label}<ArrowRight size={12} strokeWidth={2} aria-hidden="true" /></a>
-                      {/if}
-                    </p>
-                  {/if}
-                </li>
-              {/each}
-            </ul>
-          </details>
-        </li>
-      {:else}
-        {#if ok}
-          <li class="ok">
-            <div class="okrow">
-              <span class="hicon"><CircleCheck size={16} strokeWidth={1.75} aria-hidden="true" /></span>
-              <span class="hlabel">{ok.title}</span>
-              <span class="htitles truncate">{ok.detail}</span>
-            </div>
-          </li>
-        {/if}
-      {/each}
-    </ul>
-  </Panel>
+              <div class="htext">
+                <p class="htitle"><span class="sr-only">{sevWord[h.severity]}: </span>{h.title}</p>
+                <p class="hdetail">{h.detail}</p>
+                {#if h.issues || h.action}
+                  <p class="hacts">
+                    {#if h.issues}
+                      {@const sev = h.issues}
+                      <button type="button" class="haction" onclick={() => showIssues(sev)}
+                        >{showLabel(sev)}<ArrowDown size={12} strokeWidth={2} aria-hidden="true" /></button
+                      >
+                    {/if}
+                    {#if h.action}
+                      <a class="haction" href={href(h.action.path)}>{h.action.label}<ArrowRight size={12} strokeWidth={2} aria-hidden="true" /></a>
+                    {/if}
+                  </p>
+                {/if}
+              </div>
+            </li>
+          {/each}
+        </ul>
+      </details>
+    </section>
+  {/if}
 
   <!-- 1 px gaps over a hairline-coloured background draw the dividers in any column count. -->
   <section class="kpis" aria-label="Summary">
@@ -176,32 +161,28 @@
   </Panel>
 
   <div class="two">
-    <Panel title="Box size" meta="how big objects are next to the image" id="ds-size">
+    <Panel title="Box size" meta="% of the image side" id="ds-size">
       {#snippet actions()}
         <!-- The precise reading, one step away: the plain line above is what most readers need. -->
         <button
           type="button"
           class="how"
           aria-label="How box size is measured"
-          use:tooltip={{ text: "Size = √(box area ÷ image area): 10% is a box about a tenth of the image's side. Bars span their real size range and their height is boxes per 1% of size, so a bar's area is its count. The last bar, set apart, holds every larger box.", side: 'bottom' }}
+          use:tooltip={{ text: "Size = √(box area ÷ image area): 10% is a box about a tenth of the image's side. One bar per size range, finer near the 5% tiny-box line; a bar's height is its number of boxes.", side: 'bottom' }}
           ><Info size={14} aria-hidden="true" /></button
         >
       {/snippet}
       <Histogram
-        edges={sizeEdges}
+        edges={stats.box_size_hist.edges}
         counts={stats.box_size_hist.counts}
         binLabel={(lo, hi) => sizeBinLabel(lo, hi)}
-        label="Histogram of box sizes relative to the image side (square root of the area share), with bins drawn at their true widths, the largest boxes in a bar set apart, and a marker at the 5% tiny-box threshold"
+        tickLabel={(lo, hi) => sizeBinLabel(lo, hi).replace('%', '')}
+        label="Histogram of box sizes relative to the image side (square root of the area share), one bar per size range, with a marker at the 5% tiny-box threshold"
         color="var(--text-tertiary)"
         hoverColor="var(--text-primary)"
         height={180}
-        proportional
-        xMax={sizeMax}
-        edgeLabel={pctEdge}
-        densityPer={0.01}
         marker={{ x: TINY_SIZE, label: 'tiny' }}
-        yLabel="Boxes per 1% of size"
-        note="bar area is the count"
+        yLabel="Boxes"
       />
     </Panel>
     <Panel title="Boxes per image" meta="how many images have each count" id="ds-per">
@@ -227,7 +208,6 @@
   {/if}
 </div>
 
-
 <style>
   .stats {
     display: grid;
@@ -236,6 +216,148 @@
   /* "Show the files" scrolls the check's section to just under the top bar. */
   .stats :global(#ds-check) {
     scroll-margin-top: calc(var(--size-topbar) + var(--space-4));
+  }
+  /* Health: a compact card, at most 8 of the 12 columns, its summary right after the title (no dead middle). */
+  .health {
+    width: 100%;
+    max-width: calc((100% + var(--space-4)) * 2 / 3 - var(--space-4));
+    background: var(--bg-panel);
+    border: 1px solid var(--line-default);
+    border-radius: var(--radius-lg);
+  }
+  :global([data-theme='dark']) .health {
+    border-color: var(--line-subtle);
+  }
+  /* Baseline: when the summaries wrap at the laptop tier, the title and Details stay on the first line. */
+  summary {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-2) var(--space-4);
+    min-height: 40px;
+    padding: var(--space-2) var(--space-3) var(--space-2) var(--space-4);
+    border-radius: calc(var(--radius-lg) - 1px);
+    cursor: pointer;
+    list-style: none;
+    transition: background-color var(--dur-fast) var(--ease-standard);
+  }
+  summary::-webkit-details-marker {
+    display: none;
+  }
+  summary:hover {
+    background: var(--bg-hover);
+  }
+  summary:focus-visible {
+    outline-offset: -2px;
+  }
+  details[open] summary {
+    border-radius: calc(var(--radius-lg) - 1px) calc(var(--radius-lg) - 1px) 0 0;
+  }
+  .h-title {
+    font-size: var(--type-md-size);
+    line-height: var(--type-md-line);
+    font-weight: var(--weight-medium);
+    white-space: nowrap;
+  }
+  .h-sum {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-1) var(--space-4);
+    min-width: 0;
+  }
+  .h-sev {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text-secondary);
+    white-space: nowrap;
+  }
+  .h-sev :global(svg),
+  .hicon {
+    flex-shrink: 0;
+  }
+  .h-sev.danger {
+    color: var(--text-primary);
+  }
+  .danger .hicon,
+  .h-sev.danger :global(svg) {
+    color: var(--danger-text);
+  }
+  .warning .hicon,
+  .h-sev.warning :global(svg) {
+    color: var(--warning-text);
+  }
+  .info .hicon,
+  .h-sev.info :global(svg) {
+    color: var(--text-tertiary);
+  }
+  .h-more {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    margin-left: auto;
+    font-size: var(--type-sm-size);
+    color: var(--text-tertiary);
+    white-space: nowrap;
+  }
+  .h-more :global(svg) {
+    transition: transform var(--dur-fast) var(--ease-standard);
+  }
+  details[open] .h-more :global(svg) {
+    transform: rotate(180deg);
+  }
+  /* The evidence: each finding with its severity icon, its body at a 60-character measure, its next step under it. */
+  .hitems {
+    display: grid;
+    gap: var(--space-4);
+    padding: var(--space-3) var(--space-4) var(--space-4);
+    border-top: 1px solid var(--line-subtle);
+  }
+  .hitems li {
+    display: grid;
+    grid-template-columns: 16px minmax(0, 1fr);
+    gap: var(--space-3);
+    align-items: start;
+  }
+  .hicon {
+    display: grid;
+    place-items: center;
+    height: 20px;
+  }
+  .htext {
+    display: grid;
+    justify-items: start;
+    gap: 2px;
+  }
+  .htitle {
+    font-weight: var(--weight-medium);
+  }
+  .hdetail {
+    max-width: 60ch;
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--text-secondary);
+  }
+  .hacts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0 var(--space-4);
+    margin-top: 2px;
+  }
+  .haction {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    min-height: 24px;
+    font-size: var(--type-sm-size);
+    font-weight: var(--weight-medium);
+    color: var(--text-primary);
+    white-space: nowrap;
+  }
+  .haction:hover {
+    text-decoration: underline;
+    text-underline-offset: 3px;
+    text-decoration-color: var(--line-strong);
   }
   .kpis {
     display: grid;
@@ -260,12 +382,6 @@
   .how:hover {
     background: var(--bg-hover);
     color: var(--text-primary);
-  }
-  @media (pointer: coarse) {
-    .how {
-      width: 44px;
-      height: 44px;
-    }
   }
   .kpi {
     display: grid;
@@ -298,6 +414,7 @@
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: var(--space-4);
   }
+  /* The focal panel: the bars a step taller than the list rows around them. */
   .bars {
     padding: 0 var(--space-2) var(--space-2);
   }
@@ -307,7 +424,7 @@
     grid-template-columns: 10px minmax(72px, 160px) minmax(0, 1fr) 64px 48px 12px;
     align-items: center;
     gap: var(--space-3);
-    height: 32px;
+    height: 36px;
     padding: 0 var(--space-2);
     border-radius: var(--radius-md);
     text-align: left;
@@ -328,7 +445,7 @@
     font-weight: var(--weight-medium);
   }
   .track {
-    height: 8px;
+    height: 12px;
     border-radius: 2px;
     background: var(--bg-active);
     overflow: hidden;
@@ -359,146 +476,15 @@
   .bars button:focus-visible .go {
     opacity: 1;
   }
-  /* One 40 px line per severity: icon, the level as a word, a short summary, the count of findings on the right edge;
-     it opens to the evidence. */
-  .health > li {
-    border-top: 1px solid var(--line-subtle);
-  }
-  summary,
-  .okrow {
-    display: grid;
-    grid-template-columns: 16px 72px minmax(0, 1fr) auto 14px;
-    align-items: center;
-    gap: var(--space-3);
-    min-height: 40px;
-    padding: 0 var(--space-4);
-  }
-  .okrow {
-    grid-template-columns: 16px auto minmax(0, 1fr);
-  }
-  summary {
-    cursor: pointer;
-    list-style: none;
-    transition: background-color var(--dur-fast) var(--ease-standard);
-  }
-  summary::-webkit-details-marker {
-    display: none;
-  }
-  summary:hover {
-    background: var(--bg-hover);
-  }
-  summary:focus-visible {
-    outline-offset: -2px;
-  }
-  .health > li:last-child details:not([open]) summary {
-    border-radius: 0 0 calc(var(--radius-lg) - 1px) calc(var(--radius-lg) - 1px);
-  }
-  .hicon {
-    display: grid;
-    place-items: center;
-  }
-  .danger .hicon {
-    color: var(--danger-text);
-  }
-  .warning .hicon {
-    color: var(--warning-text);
-  }
-  .info .hicon {
-    color: var(--text-tertiary);
-  }
-  .ok .hicon {
-    color: var(--success-text);
-  }
-  .hlabel {
-    font-weight: var(--weight-medium);
-    white-space: nowrap;
-  }
-  .htitles {
-    min-width: 0;
-    overflow: hidden;
-    white-space: nowrap;
-    text-overflow: ellipsis;
-    color: var(--text-secondary);
-  }
-  .hcount {
-    font-size: var(--type-sm-size);
-    color: var(--text-tertiary);
-    white-space: nowrap;
-  }
-  /* Errors keep their weight in the summary: the titles in ink, not grey. */
-  .danger .htitles {
-    color: var(--text-primary);
-  }
-  .info .hlabel,
-  .ok .htitles {
-    color: var(--text-secondary);
-  }
-  /* Open, the titles below say it: the line keeps the level and the count. */
-  details[open] .htitles {
-    visibility: hidden;
-  }
-  .hchev {
-    display: flex;
-    color: var(--text-tertiary);
-    transition: transform var(--dur-fast) var(--ease-standard);
-  }
-  details[open] .hchev {
-    transform: rotate(180deg);
-  }
-  /* The evidence starts at the level label's left edge (16 px padding + 16 px icon + a 12 px gap), not in a gutter
-     past it. */
-  .hitems {
-    display: grid;
-    gap: var(--space-4);
-    padding: var(--space-1) var(--space-4) var(--space-4) calc(var(--space-4) + 16px + var(--space-3));
-  }
-  /* The title, its body at a 60-character measure, and its next step directly under them, as on phones. */
-  .hitems li {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr);
-    justify-items: start;
-    gap: var(--space-1);
-  }
-  .htext {
-    display: grid;
-    gap: 2px;
-  }
-  .htitle {
-    font-weight: var(--weight-medium);
-  }
-  .hdetail {
-    max-width: 60ch;
-    font-size: var(--type-sm-size);
-    line-height: var(--type-sm-line);
-    color: var(--text-secondary);
-  }
-  .hacts {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0 var(--space-4);
-  }
-  .haction {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    min-height: 24px;
-    font-size: var(--type-sm-size);
-    font-weight: var(--weight-medium);
-    color: var(--text-primary);
-    white-space: nowrap;
-  }
-  .haction:hover {
-    text-decoration: underline;
-    text-underline-offset: 3px;
-    text-decoration-color: var(--line-strong);
-  }
   .narrow {
     display: none;
   }
   @media (pointer: coarse) {
-    .bars button {
+    .how {
+      width: 44px;
       height: 44px;
     }
+    .bars button,
     summary {
       min-height: 44px;
     }
@@ -507,78 +493,61 @@
     }
     .hacts {
       margin-top: calc(var(--space-2) * -1);
+      margin-bottom: calc(var(--space-2) * -1);
     }
   }
+  /* Below the laptop tier the histograms stack, each at full width; Health takes the full width too. */
   @media (max-width: 1023px) {
-    .kpis {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
-  }
-  @media (max-width: 767px) {
-    .kpi {
-      gap: 2px;
-      padding: var(--space-3);
-    }
     .two {
       grid-template-columns: minmax(0, 1fr);
     }
-    /* Phones: the level, its count and the chevron on the first line; the summary under them, whole (up to two
-       lines, never cut mid-phrase); the evidence starts under the icon's right edge. */
+    .health {
+      max-width: none;
+    }
+  }
+  @media (max-width: 767px) {
+    /* Phones: the title and Details on the first line, the severity summaries wrapping under them. */
     summary {
-      grid-template-columns: 16px auto minmax(0, 1fr) 14px;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
       grid-template-areas:
-        'icon label count chev'
-        '. sum sum .';
-      gap: 0 var(--space-2);
-      padding-block: var(--space-2);
+        'title more'
+        'sum sum';
+      gap: var(--space-1) var(--space-3);
+      padding-block: var(--space-2) var(--space-3);
     }
-    summary .hicon {
-      grid-area: icon;
+    .h-title {
+      grid-area: title;
     }
-    summary .hlabel {
-      grid-area: label;
+    .h-more {
+      grid-area: more;
     }
-    summary .hcount {
-      grid-area: count;
-      justify-self: end;
-    }
-    summary .hchev {
-      grid-area: chev;
-    }
-    summary .htitles {
+    .h-sum {
       grid-area: sum;
-      display: -webkit-box;
-      -webkit-box-orient: vertical;
-      -webkit-line-clamp: 2;
-      line-clamp: 2;
+      gap: var(--space-1) var(--space-3);
+    }
+    .h-sev {
       white-space: normal;
     }
-    details[open] summary .htitles {
-      display: none;
-    }
-    .okrow {
-      gap: var(--space-2);
-    }
-    .hitems {
-      padding-left: 40px;
-    }
+    /* A compact 2 × 2 grid: no hero tile, so the class balance starts on the first screen. */
     .kpi {
       grid-template-rows: 16px 28px 16px;
+      gap: 2px;
+      padding: var(--space-3);
     }
     .k-value {
       font-size: var(--type-xl-size);
       line-height: 28px;
       letter-spacing: var(--type-xl-tracking);
     }
-    /* Phones: Images spans the grid so the split counts stay inside their tile; the other three share one row. */
     .kpis {
-      grid-template-columns: repeat(3, minmax(0, 1fr));
+      grid-template-columns: repeat(2, minmax(0, 1fr));
     }
-    .kpi:first-child {
-      grid-column: 1 / -1;
-    }
-    .kpi:not(:first-child) .wide {
+    .wide {
       display: none;
+    }
+    .narrow {
+      display: inline;
     }
     .bars button {
       grid-template-columns: 10px minmax(56px, 88px) minmax(0, 1fr) 48px 44px;

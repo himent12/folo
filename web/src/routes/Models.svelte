@@ -9,7 +9,7 @@
   import { prefs } from '$lib/prefs.svelte';
   import { href, router } from '$lib/router.svelte';
   import Page from '$lib/shell/Page.svelte';
-  import { setCrumbs } from '$lib/shell/crumbs.svelte';
+  import { ownCreateAction, setCrumbs } from '$lib/shell/crumbs.svelte';
   import Button from '$lib/ui/Button.svelte';
   import EmptyState from '$lib/ui/EmptyState.svelte';
   import ErrorState from '$lib/ui/ErrorState.svelte';
@@ -28,6 +28,8 @@
   setCrumbs({ label: 'Models' });
 
   const models = new Resource((s) => hub.api.models(s));
+  // No models yet: the empty state's New run is the page's create action, so the top bar's steps aside.
+  ownCreateAction(() => models.data?.length === 0);
   /** Loading: placeholder dataset groups (models per group), so the list keeps its grouped rhythm when it arrives. */
   const SK_GROUPS = [2, 3, 2];
   // Only for source-run names and evaluation datasets; the list still renders if these fail.
@@ -264,7 +266,7 @@
                     {:else if parent?.kind === 'file'}
                       <span class="mono src" title={parent.path}>{parent.label}</span>
                     {:else}
-                      <span class="faint">{parent?.label ?? '—'}</span>
+                      <span class="faint">{parent?.kind === 'scratch' ? 'From scratch' : (parent?.label ?? '—')}</span>
                     {/if}
                   </td>
                   <td class="r faint" title={date(m.created)}>{ago(m.created)}</td>

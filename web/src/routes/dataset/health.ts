@@ -8,7 +8,7 @@ export interface HealthItem {
   id: string;
   severity: Severity;
   title: string;
-  /** A few words for the folded severity line, with the unit named ("3 file issues", "35% tiny boxes"). */
+  /** A few words for the folded Health line, with the unit named ("3 check warnings", "35% tiny boxes"). */
   short: string;
   detail: string;
   /** A concrete next step where the data allows one: a label and an app path (without the leading #). */
@@ -43,51 +43,19 @@ export function bySeverity(items: readonly HealthItem[]): SeverityGroup[] {
 
 const review = (h: HealthItem) => h.severity === 'danger' || h.severity === 'warning';
 
-/** Findings that need attention (errors and warnings): the "N issue categories" count, everywhere it is shown. */
+/** Findings that need attention (errors and warnings): the one issue total, on the Stats tab. */
 export function reviewCount(items: readonly HealthItem[]): number {
   return items.filter(review).length;
-}
-
-/** File issues behind the findings that need attention (the check's errors and warnings, broken label files). */
-export function reviewFiles(items: readonly HealthItem[]): number {
-  return items.filter(review).reduce((a, h) => a + (h.files ?? 0), 0);
 }
 
 const plural = (n: number, one: string, many: string) => `${int(n)} ${n === 1 ? one : many}`;
 
 /**
- * "3 issue categories" (the tab and the Health panel say the same), or undefined when nothing needs review. A
- * category is one health finding, whatever it counts inside (files, boxes, classes).
+ * "3 issues" (each finding that needs attention is one issue, whatever it counts inside: files, boxes, classes), or
+ * undefined when nothing needs review. Said once, on the Stats tab; Health shows the findings themselves.
  */
-export function reviewLabel(n: number): string | undefined {
-  return n > 0 ? plural(n, 'issue category', 'issue categories') : undefined;
-}
-
-/**
- * The Health panel's line: the categories to review and the file issues behind them, then the notes, each quantity
- * named ("3 issue categories · 6 file issues · 1 note").
- */
-export function healthSummary(items: readonly HealthItem[]): string {
-  const n = reviewCount(items);
-  const files = reviewFiles(items);
-  const notes = items.filter((h) => h.severity === 'info').length;
-  return [
-    reviewLabel(n) ?? 'nothing to fix',
-    files ? plural(files, 'file issue', 'file issues') : '',
-    notes ? plural(notes, 'note', 'notes') : '',
-  ]
-    .filter(Boolean)
-    .join(' · ');
-}
-
-/**
- * The count on a severity line's right edge, in the same two quantities: the file issues behind its findings and,
- * apart, its dataset-wide observations ("3 file issues · 1 dataset-wide").
- */
-export function groupCount(g: SeverityGroup): string {
-  const files = g.items.reduce((a, h) => a + (h.files ?? 0), 0);
-  const wide = g.items.filter((h) => h.files === undefined).length;
-  return [files ? plural(files, 'file issue', 'file issues') : '', wide ? `${int(wide)} dataset-wide` : ''].filter(Boolean).join(' · ');
+export function issueLabel(n: number): string | undefined {
+  return n > 0 ? plural(n, 'issue', 'issues') : undefined;
 }
 
 /** The folded line of one severity: each finding's short form, so it reads whole ("3 file issues · 35% tiny boxes"). */
@@ -178,8 +146,8 @@ export function healthChecks(d: Dataset, s: DatasetStats, counts?: IssueCounts):
     out.push({
       id: 'check-warnings',
       severity: 'warning',
-      title: `${int(counts.warning)} file ${counts.warning === 1 ? 'issue' : 'issues'} from the dataset check`,
-      short: `${int(counts.warning)} file ${counts.warning === 1 ? 'issue' : 'issues'}`,
+      title: `${int(counts.warning)} ${counts.warning === 1 ? 'warning' : 'warnings'} from the dataset check`,
+      short: `${int(counts.warning)} check ${counts.warning === 1 ? 'warning' : 'warnings'}`,
       detail: 'Training still uses these files: boxes past the image edge, duplicate labels or images. Each says what a cleanup would do.',
       issues: 'warning',
       files: counts.warning,

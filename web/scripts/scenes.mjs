@@ -76,8 +76,9 @@ export const scenes = [
     fullPage: false,
     viewports: ['desktop', 'laptop', 'mobile'],
     setup: async (page) => {
-      await until(page, '.c-detail summary');
-      await page.locator('.c-detail summary').click();
+      // "More fixes": the other smaller settings and the driver's report.
+      await until(page, 'button.c-more');
+      await page.locator('button.c-more').first().click();
     },
   },
   { name: 'run-completed', path: '/runs/run_c19a', viewports: ['desktop', 'laptop', 'mobile'] },
@@ -113,21 +114,53 @@ export const scenes = [
     },
   },
   {
-    // A short run on fasteners from scratch (5 epochs, 1,920 images): 150 optimizer steps, 90 of them warmup. The Summary
-    // warns as the trainer does (schedule_warnings) with one fix; below 960 px the dock says so too.
+    // The short-run scenario's run (run_s5q1) set up again: shapes, folo-n from scratch, batch 32, 5 epochs. 25 batches an epoch
+    // make 13 optimizer steps, 65 in all: the Summary warns in one line with the trainer's fix (16 epochs, as the run
+    // page says), the reasons behind Why? (opened on desktop); below 960 px the dock says so too.
     name: 'run-new-short',
-    path: '/runs/new',
+    path: '/runs/new?dataset=ds_shapes',
     fullPage: false,
     viewports: ['desktop', 'tablet', 'mobile'],
     setup: async (page, { vp }) => {
       await until(page, 'input#epochs');
+      if (vp === 'mobile') await page.locator('#arch-pick [role="radio"]', { hasText: 'N' }).click();
+      else await page.locator('label.arch', { hasText: 'folo-n' }).click();
+      await page.locator('#batch [role="radio"]', { hasText: '32' }).click();
       await page.locator('input#epochs').fill('5');
       await page.mouse.move(0, 0);
       if (vp === 'mobile') {
         await page.locator('.dock-est').click();
         await page.locator('dialog[open]').waitFor();
-      } else if (vp === 'desktop') await until(page, '.summary .short');
-      else await until(page, '.dock-warn');
+      } else if (vp === 'desktop') {
+        await until(page, '.summary .short');
+        await page.locator('.summary .short button.more').click();
+      } else await until(page, '.dock-warn');
+    },
+  },
+  {
+    // Mixed precision switched on: the Training section's switch, the Summary's row, a faster estimate.
+    name: 'run-new-amp',
+    path: '/runs/new',
+    fullPage: true,
+    viewports: ['desktop', 'tablet', 'mobile'],
+    setup: async (page) => {
+      await until(page, 'input#amp');
+      await page.locator('.amp .switch').click();
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // A server whose GPU has no tensor cores (the DX12 adapter): the switch is off and disabled, with the reason, and the
+    // server's own words under Technical details (opened).
+    name: 'run-new-amp-off',
+    path: '/runs/new',
+    search: 'scenario=no-tensor-cores',
+    fullPage: true,
+    viewports: ['desktop', 'tablet', 'mobile'],
+    setup: async (page) => {
+      await until(page, '#amp-why');
+      await page.locator('.amp .dev-detail summary').click();
+      await page.mouse.move(0, 0);
     },
   },
   {
@@ -303,9 +336,9 @@ export const scenes = [
       await page.locator('dialog[open]').waitFor();
     },
   },
-  { name: 'dataset-stats', path: '/datasets/ds_shapes_hard?tab=stats', viewports: ['desktop', 'laptop', 'mobile'] },
+  { name: 'dataset-stats', path: '/datasets/ds_shapes_hard?tab=stats', viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
   {
-    // The health summary with every severity line opened: the findings, their evidence and next steps.
+    // The health line opened: every finding, its evidence and next step.
     name: 'dataset-health-open',
     path: '/datasets/ds_shapes_hard?tab=stats',
     fullPage: false,
@@ -317,7 +350,7 @@ export const scenes = [
     },
   },
   {
-    // "Dataset check findings", its own section: the severity filter moved to warnings from the Warnings line's
+    // "Dataset check findings", its own section: the severity filter moved to warnings from the warning finding's
     // "Show the warnings", so the caption and rows are the warnings.
     name: 'dataset-issues',
     path: '/datasets/ds_shapes_hard?tab=stats',
@@ -325,7 +358,7 @@ export const scenes = [
     viewports: ['desktop', 'laptop', 'mobile'],
     setup: async (page) => {
       await until(page, '#ds-health summary');
-      await page.locator('#ds-health li.warning summary').click();
+      await page.locator('#ds-health summary').click();
       await page.getByRole('button', { name: 'Show the warnings' }).click();
       await until(page, '#ds-check .issues .fix');
       await page.clock.runFor(500);
@@ -344,7 +377,7 @@ export const scenes = [
       const svg = page.locator('#ds-size svg[role=img]');
       await svg.evaluate((el, touch) => {
         const r = el.getBoundingClientRect();
-        const p = { clientX: r.left + r.width * 0.22, clientY: r.top + r.height * 0.6, bubbles: true };
+        const p = { clientX: r.left + r.width * 0.4, clientY: r.top + r.height * 0.6, bubbles: true };
         const types = touch ? ['pointerdown', 'pointerup'] : ['pointermove'];
         for (const type of types) el.dispatchEvent(new PointerEvent(type, { ...p, pointerType: touch ? 'touch' : 'mouse' }));
       }, vp === 'mobile');
@@ -362,7 +395,7 @@ export const scenes = [
     setup: async (page) => {
       await page.getByRole('button', { name: 'Add dataset' }).first().click();
       await page.locator('dialog[open]').waitFor();
-      await page.locator('dialog[open] input[placeholder="D:/data/my-dataset"]').fill('D:/data/shapes');
+      await page.locator('dialog[open] input[placeholder="e.g. D:/data/my-dataset"]').fill('D:/data/shapes');
       await page.locator('dialog[open] form').evaluate((f) => /** @type {HTMLFormElement} */ (f).requestSubmit());
       await until(page, 'text=Already registered as shapes');
       // The thumbnails render in real time (the page clock, which would close the toast, stays put).
@@ -682,10 +715,10 @@ export const scenes = [
       await page.locator('#engine-speed summary', { hasText: 'How this was measured' }).click();
     },
   },
-  { name: 'playground-empty', path: '/playground', setup: (page) => until(page, 'button.sample') },
+  { name: 'playground-empty', path: '/playground', viewports: ['desktop', 'laptop', 'tablet', 'mobile'], setup: (page) => until(page, 'button.sample') },
   {
     // Server inference ran out of GPU memory (507): the cause, the hint, and the ways out (this browser, a smaller model),
-    // in a strip under the image, which stays whole.
+    // in a strip above the image (where the result would be), which stays whole.
     name: 'playground-oom',
     path: '/playground?model=m_shapes_s',
     search: 'scenario=oom',
@@ -699,7 +732,8 @@ export const scenes = [
       await page.clock.runFor(6000);
     },
   },
-  { name: 'playground-result', path: '/playground?model=m_hard_s', viewports: ['desktop', 'laptop', 'mobile'], setup: playgroundResult },
+  // Tablet: the model and Run on in a toolbar row under the title, the rail a two-column block under the image.
+  { name: 'playground-result', path: '/playground?model=m_hard_s', viewports: ['desktop', 'laptop', 'tablet', 'mobile'], setup: playgroundResult },
   {
     // A browser without WebGPU: the option is off and the header says why, and what is left.
     name: 'playground-no-webgpu',
@@ -947,6 +981,28 @@ export const scenes = [
       await page.mouse.move(0, 0);
     },
   },
+  // Settings' System panel (GET /api/system capabilities): tensor cores on (default), available but off, and absent.
+  ...[
+    { name: 'settings-system', search: '' },
+    { name: 'settings-system-tc-off', search: 'scenario=tensor-cores-off' },
+    { name: 'settings-system-no-tc', search: 'scenario=no-tensor-cores' },
+  ].map(
+    ({ name, search }) =>
+      /** @type {Scene} */ ({
+        name,
+        path: '/settings',
+        search,
+        // The whole page: the harness shoots from the top, and the panel sits near the bottom.
+        fullPage: true,
+        viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
+        setup: async (page) => {
+          await until(page, '#system');
+          const details = page.locator('#system details.tech summary');
+          if (await details.count()) await details.click();
+          await page.mouse.move(0, 0);
+        },
+      }),
+  ),
   {
     // Single-key shortcuts turned off in Settings; the dialog (from the Settings button) says so.
     name: 'shortcuts-off',
