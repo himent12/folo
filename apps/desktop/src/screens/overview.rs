@@ -936,6 +936,10 @@ impl FoloApp {
                         ))
                         .into_any_element();
                 }
+                // Stacked under Recent runs (full width), the table carries the Models list's
+                // architecture, mAP50 and age too, rather than three columns across 1,100 px.
+                let wide = !self.tables_beside(window);
+                let now = self.store.api.now();
                 // Column heads like Recent runs beside it, so the two lists share row lines.
                 let heads = div()
                     .h(px(28.))
@@ -949,7 +953,12 @@ impl FoloApp {
                     // The dataset leads: it's what the rows are, one each, in name order.
                     .child(th(&t, "Dataset").w(px(120.)).flex_none())
                     .child(th(&t, "Best model").flex_1())
-                    .child(div().w(px(64.)).flex_none().flex().justify_end().child(th(&t, "mAP50-95")));
+                    .when(wide, |d| d.child(th(&t, "Architecture").w(px(120.)).flex_none()))
+                    .child(div().w(px(64.)).flex_none().flex().justify_end().child(th(&t, "mAP50-95")))
+                    .when(wide, |d| {
+                        d.child(div().w(px(64.)).flex_none().flex().justify_end().child(th(&t, "mAP50")))
+                            .child(div().w(px(80.)).flex_none().flex().justify_end().child(th(&t, "Created")))
+                    });
                 div()
                     .flex()
                     .flex_col()
@@ -959,6 +968,9 @@ impl FoloApp {
                         let id = m.id.clone();
                         let key = format!("ov-model-{}", m.id);
                         let map = m.metrics.as_ref().map_or(0., |m| m.map50_95);
+                        let map50 = m.metrics.as_ref().map(|m| m.map50);
+                        let arch = format!("{} · {} px", m.arch.as_str(), m.imgsz);
+                        let created = time::parse(&m.created).map_or(String::new(), |c| time::ago(c, now));
                         let row = div()
                             .id(SharedString::from(key.clone()))
                             .h(px(36.))
@@ -997,6 +1009,16 @@ impl FoloApp {
                                         d.child(e2e_tag(&t, format!("e2e-ov-{}", m.id)))
                                     }),
                             )
+                            .when(wide, |d| {
+                                d.child(
+                                    text(ty::SM, t.text_secondary)
+                                        .tnum()
+                                        .w(px(120.))
+                                        .flex_none()
+                                        .ellipsis()
+                                        .child(arch),
+                                )
+                            })
                             // The number alone: a bar would set rows from different datasets against
                             // each other, which their mAPs can't support.
                             .child(
@@ -1006,7 +1028,17 @@ impl FoloApp {
                                     .flex()
                                     .justify_end()
                                     .child(text(ty::SM, t.text_secondary).tnum().child(f3(map))),
-                            );
+                            )
+                            .when(wide, |d| {
+                                d.child(div().w(px(64.)).flex_none().flex().justify_end().child(
+                                    text(ty::SM, t.text_tertiary).tnum().child(map50.map_or("–".into(), f3)),
+                                ))
+                                .child(
+                                    div().w(px(80.)).flex_none().flex().justify_end().child(
+                                        text(ty::SM, t.text_tertiary).whitespace_nowrap().child(created),
+                                    ),
+                                )
+                            });
                         self.bind(
                             row,
                             &key,
