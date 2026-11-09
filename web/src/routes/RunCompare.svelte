@@ -41,6 +41,7 @@
   import ErrorState from '$lib/ui/ErrorState.svelte';
   import Panel from '$lib/ui/Panel.svelte';
   import Note from '$lib/ui/Note.svelte';
+  import InfoButton from '$lib/ui/InfoButton.svelte';
   import Segmented from '$lib/ui/Segmented.svelte';
   import Select from '$lib/ui/Select.svelte';
   import StatusBadge from '$lib/ui/StatusBadge.svelte';
@@ -83,6 +84,10 @@
   ];
   // The x axis is named in the chart's header, as on every chart (DESIGN_DIRECTION §2.4), never under the plot: the
   // normalised axis names its unit; chosen for you, it also says why.
+  /** Phones: the progress axis explained in the ⓘ beside its control, with why it was chosen when it was. */
+  const progressWhy = $derived(
+    `By progress puts each run over its planned epochs (% of the plan), so a short plan and a long one compare by shape.${xAuto && reason ? ` Chosen for you: ${AXIS_REASON[reason]}.` : ''}`,
+  );
   const xQual = $derived(x === 'progress' ? `by progress, % of planned epochs${xAuto && reason ? ` · ${AXIS_REASON[reason]}` : ''}` : 'by epoch');
   let hint = $state<string | null>(null);
   // Colours follow the run, not its position: removing one run never repaints the others.
@@ -343,9 +348,10 @@
         <header class="c-row">
           <Select label="Metric" bind:value={metricId} options={METRICS.map((m) => ({ value: m.id, label: m.label }))} />
           <Segmented size="sm" label="X axis" value={x} onchange={setX} options={X_OPTIONS} />
+          <!-- The normalised axis, and why it was chosen, one tap away beside its control: the ticks say "%", so the
+               line of words under the controls went (it pushed the plot down). -->
+          {#if x === 'progress'}<InfoButton label="About the progress axis" text={progressWhy} />{/if}
         </header>
-        <!-- The normalised axis's unit, under the header's controls (an epoch axis needs no word: the control says it). -->
-        {#if x === 'progress'}<p class="qual phone">{xQual}</p>{/if}
         {@render chips()}
         {#if !sameData && chosen.length > 1}<p class="caveat">{DATA_CAVEAT}</p>{/if}
         {@render plot()}
@@ -355,7 +361,6 @@
             <span>How to read this</span>
           </summary>
           <div class="about-body">
-            {#if x === 'progress'}<p>By progress puts each run over its planned epochs, so a short plan and a long one compare by shape.</p>{/if}
             <p>Each line ends in its run's status: a ringed dot while it trains, a square where it was stopped, a cross
               where it failed.</p>
             <p>Colours follow the run, not its rank. Tap a run to keep its line in front; Edit shows how each run
@@ -540,7 +545,7 @@
           onclick={() => (pinned = pinned === r.id ? null : r.id)}
         ><i aria-hidden="true" data-pattern={SLOT_PATTERN[slotOf(r.id)]}></i><span class="nm">{r.name}</span></button>
         <!-- How the line ended (live, stopped, failed) in words beside its value: the end label's fallback, and on phones,
-             which have no end labels, the only word for the end marker's shape (under the name, "0.494 · failed"). -->
+             which have no end labels, the only word for the end marker's shape (beside the value, or under the name on phones). -->
         <span class="v num">{v === null ? '—' : metric(v)}{#if runEnd(r.status)}<span class="st"><span class="sep">{' · '}</span>{runEnd(r.status)}</span>{/if}</span>
         <!-- How the run started: fine-tuned vs from scratch often explains a gap between two curves. It lies over the
              toggle's lower half (clicks pass through to it) and runs on under the value. Phones show it in the Edit
@@ -923,33 +928,43 @@
     color: var(--text-secondary);
   }
   @media (max-width: 767px) {
-    /* Phones: the legend is two columns of compact keys above the plot, the run's whole name on the first line (wrapping
-       at its hyphens, never cut: "shapes-hard-s" beside "shapes-hard-m") and its value with how the line ended on the
-       second ("0.494 · failed"), so four runs take two rows and the plot with its axis sits in the first screen. The
-       whole key is the toggle that keeps a line in front. Opening, removing and adding runs live in the Edit sheet. */
+    /* Phones: the legend is two columns of compact keys above the plot, each one line of text that wraps only where it
+       must: the swatch, the run's whole name (wrapping at its hyphens, never cut: "shapes-hard-s" beside
+       "shapes-hard-m"), its value right after it, and how the line ended ("failed") under the name, so name and value
+       read together and four runs take two short rows. The whole key is the toggle that keeps a line in front; its hit
+       area is the card. Opening, removing and adding runs live in the Edit sheet. */
     .chips {
       grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: var(--space-1) var(--space-2);
     }
     .chips-head {
-      margin-top: calc(-1 * var(--space-2));
+      min-height: 24px;
     }
     .manage {
+      position: relative;
       display: inline-flex;
       align-items: center;
-      height: 44px;
+      height: 24px;
       padding-left: var(--space-3);
       font-size: var(--type-sm-size);
       color: var(--text-secondary);
     }
+    /* A 44 px target around the 24 px label, over the panel's padding above it. */
+    .manage::after {
+      content: '';
+      position: absolute;
+      inset: -10px -8px;
+    }
+    /* A hanging indent: a wrapped line starts under the name, past the swatch (12 px and its 6 px gap). */
     .chips .chip {
-      grid-template-columns: minmax(0, 1fr);
-      grid-template-rows: auto auto;
-      align-content: start;
-      min-height: 44px;
-      padding: var(--space-1-5) var(--space-2);
+      display: block;
+      min-height: 32px;
+      padding: var(--space-1-5) var(--space-2) var(--space-1-5) calc(var(--space-2) + 18px);
+      text-indent: -18px;
       border: 0;
       background: none;
+      font-size: var(--type-sm-size);
+      line-height: var(--type-sm-line);
     }
     .chips .chip.pinned {
       background: var(--bg-active);
@@ -959,15 +974,12 @@
       bottom: 0;
       left: 0;
     }
-    /* The key (swatch and name) is the toggle; its hit area is the whole card (an ::after on the card), so a tap on
-       the value toggles too, and its focus ring is the card's. */
     .chips .chip .key {
-      grid-row: 1;
+      display: inline;
       position: static;
-      align-items: flex-start;
-      gap: 6px;
       margin: 0;
       padding: 0;
+      font: inherit;
     }
     .chips .chip .key:hover {
       background: none;
@@ -985,26 +997,34 @@
       outline: 2px solid var(--focus);
       outline-offset: -2px;
     }
-    /* On the name's first line (16 px line). */
+    /* On the text's centre line (16 px line). */
     .chips .chip .key i {
+      display: inline-block;
       width: 12px;
-      margin-top: 6px;
+      margin: 0 6px 0 0;
+      vertical-align: middle;
     }
     .chips .nm {
-      font-size: var(--type-sm-size);
-      line-height: var(--type-sm-line);
       white-space: normal;
       overflow: visible;
       overflow-wrap: break-word;
     }
-    /* Under the name, past the key (12 px swatch + 6 px gap). */
     .chips .chip .v {
-      grid-column: 1;
-      grid-row: 2;
+      display: inline;
       min-width: 0;
-      padding: 0 0 0 18px; /* grid-ok: past the 12 px key and its 6 px gap */
+      margin-left: var(--space-1-5);
+      padding: 0;
       text-align: left;
+      white-space: normal;
       pointer-events: none;
+    }
+    /* How the line ended ("stopped") on a line of its own under the name: beside the value it would not fit a column. */
+    .chips .chip .st {
+      display: block;
+      text-indent: 0;
+    }
+    .chips .chip .st .sep {
+      display: none;
     }
     .chips .chip .from,
     .chips .chip .acts {
@@ -1099,9 +1119,6 @@
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
     color: var(--text-tertiary);
-  }
-  .qual.phone {
-    margin-top: calc(-1 * var(--space-1));
   }
   .fold td {
     padding-top: 0;
