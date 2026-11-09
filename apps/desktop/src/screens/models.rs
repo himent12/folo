@@ -489,7 +489,7 @@ impl FoloApp {
                 let ev = ev.clone();
                 // Side by side only while the PR panel keeps 600 px beside the matrix (46 %, 440 px
                 // minimum): its plot and side legend both fit. Else one above the other, each full
-                // width (at the 1200 content cap that's below a ~1430 px window).
+                // width (below a ~1410 px window: content width under ~1127 px).
                 let stacked = {
                     let row = self.content_width(window) - 16.;
                     row - (row * 0.46).max(440.) < 600.

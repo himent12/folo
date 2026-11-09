@@ -59,8 +59,8 @@ in round 44; round 47 asked for stacked rows again). New run's End-to-end and Mi
 switch beside the label (round 42 asked for that; round 48 asked for them to span the dialog again). A dialog's destructive commit
 (`Btn::DangerCommit`) is the danger tint with a danger edge, not a solid red fill: white on the danger red fails AA in
 both themes and the tokens have no on-danger ink (round 52 asked for a solid fill). Run log lines wrap rather than
-truncate: every line stays readable without a tooltip. Pages cap at `content_max` (design/tokens.json, now 1200) and
-centre; a wider desktop cap is the orchestrator's call, not a per-round fix.
+truncate: every line stays readable without a tooltip. Pages cap at Desktop's own `layout.desktop_content_max` (design/tokens.json, 1440) and
+centre; Studio's `size.content_max` no longer applies to Desktop.
 
 ## Scoring
 Use `REVIEW_RUBRIC.md` (path in your task): 12 lines, 1–10, where **9 means "would ship as-is at Linear / Raycast / Zed
