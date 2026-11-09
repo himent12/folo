@@ -143,6 +143,7 @@ impl FoloApp {
         s.health = Load::Idle;
         s.system = Load::Idle;
         s.capabilities = None;
+        s.features.clear();
         s.datasets = Load::Idle;
         s.models = Load::Idle;
         s.runs = Load::Idle;

@@ -203,6 +203,24 @@ pub fn dot(color: Hsla, size: f32, live: bool, id: impl Into<SharedString>) -> i
 }
 
 /// Tinted label chip, 20 px tall.
+/// A waiting run's place, as every list writes it: "Next to start", "2nd in queue", or (a server
+/// without queue positions) "Waiting to start".
+pub fn queue_text(position: Option<u32>) -> String {
+    match position {
+        Some(1) => "Next to start".to_string(),
+        Some(n) => {
+            let suffix = match (n % 10, n % 100) {
+                (1, x) if x != 11 => "st",
+                (2, x) if x != 12 => "nd",
+                (3, x) if x != 13 => "rd",
+                _ => "th",
+            };
+            format!("{n}{suffix} in queue")
+        }
+        None => "Waiting to start".to_string(),
+    }
+}
+
 /// One inference's total latency as every readout writes it: "6.4 ms", or "Sim. 6.4 ms" when the
 /// built-in demo simulated it.
 pub fn latency_text(ms: f64, simulated: bool) -> String {
@@ -608,6 +626,16 @@ pub fn f3(v: f32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn queue_places_read_as_ordinals() {
+        assert_eq!(queue_text(Some(1)), "Next to start");
+        assert_eq!(queue_text(Some(2)), "2nd in queue");
+        assert_eq!(queue_text(Some(3)), "3rd in queue");
+        assert_eq!(queue_text(Some(11)), "11th in queue");
+        assert_eq!(queue_text(Some(22)), "22nd in queue");
+        assert_eq!(queue_text(None), "Waiting to start");
+    }
 
     #[test]
     fn overflow_is_by_width() {

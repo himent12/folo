@@ -353,7 +353,8 @@ impl MockBackend {
                 map50_95: m[1],
                 precision: m[2],
                 recall: m[3],
-                best_f1_conf: None,
+                // Where F1 peaks: lower for the stronger models (their scores sit higher).
+                best_f1_conf: Some(((0.42 - 0.18 * m[1]) * 100.).round() / 100.),
             }),
             head: folo_api::Head::O2m,
             trained_with: None,
@@ -645,8 +646,9 @@ impl MockBackend {
                         model_id: s.model.map(Into::into),
                         error: s.error.map(Into::into),
                         error_code: s.error.map(|_| "training_failed".into()),
-                        resolved: None,
-                        queue_position: None,
+                        resolved: (s.status != RunStatus::Queued)
+                            .then(|| resolve(&s.config, s.spe * s.config.batch as u64, 5)),
+                        queue_position: (s.status == RunStatus::Queued).then_some(1),
                         config: s.config,
                     },
                     curve,
@@ -988,7 +990,7 @@ impl Backend for MockBackend {
             confusion[t][n] = left;
             confusion[n][t] = (count as f32 * (1.0 - per_class[t].precision) * 0.6) as u32;
         }
-        Ok(ModelEval { pr, confusion, per_class, images, best_f1_conf: None })
+        Ok(ModelEval { pr, confusion, per_class, images, best_f1_conf: metrics.best_f1_conf })
     }
 
     fn export_model(&self, id: &str, format: &str) -> ApiResult<ExportResult> {
@@ -1077,6 +1079,21 @@ impl Backend for MockBackend {
         let run = Self::snapshot(&f);
         runs.insert(0, f);
         Ok(run)
+    }
+
+    fn queue_run(&self, id: &str, _req: QueueRequest) -> ApiResult<Run> {
+        self.check()?;
+        let mut runs = self.runs.lock().unwrap();
+        let f = runs
+            .iter_mut()
+            .find(|f| f.run.id == id)
+            .ok_or_else(|| ApiError::new("run_not_found", format!("No run {id}")))?;
+        if f.run.status != RunStatus::Queued {
+            return Err(ApiError::new("run_not_queued", "This run is no longer waiting in the queue"));
+        }
+        // The demo queues one run at a time: every move leaves it first.
+        f.run.queue_position = Some(1);
+        Ok(f.run.clone())
     }
 
     fn stop_run(&self, id: &str) -> ApiResult<Run> {
@@ -1379,6 +1396,45 @@ impl Backend for MockBackend {
 
 /// Plausible detections for known ground truth at model quality `q` (0..1): jittered hits,
 /// occasional class confusions and misses, and a few low-score false positives.
+/// The settings a run resolves to, as the trainer would (docs/MODEL.md §8.2 and §8.4).
+fn resolve(config: &TrainConfig, train_images: u64, classes: usize) -> ResolvedTrain {
+    let nbs = 64u32;
+    let batch = config.batch.max(1);
+    let accumulate = ((nbs as f64 / batch as f64).round() as u32).max(1);
+    let batches = train_images.div_ceil(batch as u64).max(1);
+    let steps = train_images as f64 / batch.max(nbs) as f64 * config.epochs as f64;
+    let (optimizer, lr0) = match config.optimizer {
+        Optimizer::Sgd => (ResolvedOptimizer::Sgd, config.lr0 as f64),
+        Optimizer::Adamw => (ResolvedOptimizer::Adamw, config.lr0 as f64),
+        Optimizer::Auto if steps > 10_000. => (ResolvedOptimizer::Sgd, 0.01),
+        Optimizer::Auto => {
+            let lr = 0.01 / (4.0 + classes as f64);
+            (ResolvedOptimizer::Adamw, (lr * 1e6).round() / 1e6)
+        }
+    };
+    let momentum = 0.937;
+    let auto = config.optimizer == Optimizer::Auto;
+    let warmup_iters =
+        ((3.0 * batches as f64).round() as u64).max(100).min(batches * config.epochs as u64 * 3 / 10);
+    ResolvedTrain {
+        optimizer,
+        lr0,
+        lrf: 0.01,
+        cos_lr: false,
+        momentum,
+        betas: (optimizer == ResolvedOptimizer::Adamw).then_some([momentum, 0.999]),
+        weight_decay: 0.0005 * batch as f64 * accumulate as f64 / nbs as f64,
+        batch,
+        accumulate,
+        nbs,
+        optimizer_steps_per_epoch: batches.div_ceil(accumulate as u64),
+        warmup_iters,
+        warmup_epochs: 3.0,
+        warmup_momentum: 0.8,
+        warmup_bias_lr: if auto { 0.0 } else { 0.1 },
+    }
+}
+
 fn fake_predictions(truth: &[BBoxT], w: u32, h: u32, q: f32, names: &[String], seed: u64) -> Vec<ScoredBox> {
     let classes = names.len().max(1) as u32;
     let name = |c: u32| names.get(c as usize).cloned().unwrap_or_default();

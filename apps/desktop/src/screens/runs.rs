@@ -177,7 +177,7 @@ impl FoloApp {
                 let created_at = time::parse(&r.created);
                 let created = created_at.map_or(String::new(), |c| time::ago(c, now));
                 let progress_cell = match r.status {
-                    RunStatus::Queued => text(ty::SM, t.text_tertiary).child("Waiting to start"),
+                    RunStatus::Queued => text(ty::SM, t.text_tertiary).child(queue_text(r.queue_position)),
                     _ => div()
                         .flex()
                         .items_center()
@@ -416,6 +416,27 @@ impl FoloApp {
         let mut actions = Vec::new();
         match r.status {
             RunStatus::Running | RunStatus::Queued => {
+                if r.status == RunStatus::Queued
+                    && r.queue_position.is_some_and(|p| p > 1)
+                    && self.store.features.iter().any(|f| f == "queue_control")
+                {
+                    let rid = r.id.clone();
+                    actions.push(
+                        self.button(
+                            "run-next",
+                            "Start next",
+                            Btn::Secondary,
+                            Some("icons/play.svg"),
+                            window,
+                            cx,
+                            act(move |this, _, cx| {
+                                this.move_queued(rid.clone(), crate::api::QueueAction::Top, cx)
+                            }),
+                        )
+                        .tooltip(crate::controls::tip("Move it to the front of the queue", None))
+                        .into_any_element(),
+                    );
+                }
                 let rid = r.id.clone();
                 actions.push(
                     self.button(
@@ -1122,9 +1143,22 @@ impl FoloApp {
         });
         let lr_legend =
             crate::ui::legend_value(&t, "lr", t.text_tertiary, false, lr_value).into_any_element();
-        let lr_caption = match lr_pow {
-            Some(p) => format!("per step · by epoch · × 10{}", crate::charts::superscript(p)),
-            None => "per step · by epoch".to_string(),
+        // What the run actually trains with (Run.resolved, once the trainer is built): the
+        // optimizer Auto picked and the decay, so the curve's shape has its reason beside it.
+        let resolved = r.resolved.as_ref().map(|s| {
+            let opt = match s.optimizer {
+                crate::api::ResolvedOptimizer::Sgd => "SGD",
+                crate::api::ResolvedOptimizer::Adamw => "AdamW",
+            };
+            let auto = if r.config.optimizer == crate::api::Optimizer::Auto { " (auto)" } else { "" };
+            let decay = if s.cos_lr { "cosine" } else { "linear" };
+            format!("{opt}{auto} · {decay} to {:.0}%", s.lrf * 100.)
+        });
+        let lr_caption = match (resolved, lr_pow) {
+            (Some(s), Some(p)) => format!("{s} · × 10{}", crate::charts::superscript(p)),
+            (Some(s), None) => s,
+            (None, Some(p)) => format!("per step · by epoch · × 10{}", crate::charts::superscript(p)),
+            (None, None) => "per step · by epoch".to_string(),
         };
         // The mAP chart is the focal point: wider and first. Narrow windows stack each row.
         let stack = window.viewport_size().width < px(1120.);

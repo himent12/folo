@@ -276,6 +276,8 @@ pub struct Store {
     pub system: Load<SystemInfo>,
     /// What runs can use on the server (from the same `/system` answer; absent from older servers).
     pub capabilities: Option<crate::api::Capabilities>,
+    /// Optional API features the server reports (`/system` `features`, e.g. `queue_control`).
+    pub features: Vec<String>,
     pub datasets: Load<Vec<Dataset>>,
     pub dataset: HashMap<String, Load<Dataset>>,
     /// All image metadata of a dataset (cheap: boxes only), for filtering and the grid.
@@ -310,6 +312,7 @@ impl Store {
             health: Load::Idle,
             system: Load::Idle,
             capabilities: None,
+            features: Vec::new(),
             datasets: Load::Idle,
             dataset: HashMap::new(),
             images: HashMap::new(),

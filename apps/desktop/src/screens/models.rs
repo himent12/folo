@@ -332,6 +332,11 @@ impl FoloApp {
         );
 
         let mm = m.metrics;
+        // Where precision and recall are taken: the best-F1 confidence, named when the record has it.
+        let op_point = match mm.as_ref().and_then(|x| x.best_f1_conf) {
+            Some(c) => format!("at conf {c:.2} (best F1) · IoU 0.50"),
+            None => "best-F1 · IoU 0.50".to_string(),
+        };
         // The dataset the headline numbers were measured on (the run's), named beside them.
         let head_ds = run
             .as_ref()
@@ -397,14 +402,14 @@ impl FoloApp {
                 "Precision",
                 mm.as_ref().map_or("–".into(), |x| format!("{:.3}", x.precision)),
                 "",
-                Some(text(ty::XS, t.text_tertiary).child("best-F1 · IoU 0.50")),
+                Some(text(ty::XS, t.text_tertiary).child(op_point.clone())),
             )))
             .child(vline(&t))
             .child(tile(small(
                 "Recall",
                 mm.as_ref().map_or("–".into(), |x| format!("{:.3}", x.recall)),
                 "",
-                Some(text(ty::XS, t.text_tertiary).child("best-F1 · IoU 0.50")),
+                Some(text(ty::XS, t.text_tertiary).child(op_point.clone())),
             )))
             .child(vline(&t))
             .child(tile(small(

@@ -101,6 +101,11 @@ pub trait Backend: Send + Sync + 'static {
     fn run(&self, id: &str) -> ApiResult<Run>;
     fn create_run(&self, config: TrainConfig) -> ApiResult<Run>;
     fn stop_run(&self, id: &str) -> ApiResult<Run>;
+    /// Moves a waiting run in the training queue (`POST /api/runs/{id}/queue`, servers with the
+    /// `queue_control` feature): `409 run_not_queued` once the worker has taken it.
+    fn queue_run(&self, _id: &str, _req: QueueRequest) -> ApiResult<Run> {
+        Err(ApiError::new("not_supported", "This server can't reorder its queue"))
+    }
     fn metrics(&self, id: &str) -> ApiResult<RunMetrics>;
     fn samples(&self, id: &str, epoch: Option<u32>) -> ApiResult<RunSamples>;
     /// Log history of a run. Not in API v1 yet (proposed as `GET /api/runs/{id}/logs`); the SSE

@@ -815,6 +815,7 @@ impl FoloApp {
                     }
                     let r = r.map(|s| {
                         this.store.capabilities = s.capabilities;
+                        this.store.features = s.features;
                         s.system
                     });
                     this.store.system = r.into();
@@ -1812,6 +1813,37 @@ impl FoloApp {
             },
         );
         cx.notify();
+    }
+
+    /// Moves a waiting run in the training queue (servers with `queue_control`).
+    pub fn move_queued(&mut self, id: String, action: crate::api::QueueAction, cx: &mut Context<Self>) {
+        let req = crate::api::QueueRequest { action: Some(action), position: None };
+        self.fetch(
+            cx,
+            move |api| api.queue_run(&id, req),
+            move |this, r, cx| match r {
+                Ok(run) => {
+                    let name = run.name.clone();
+                    let started = run.status != RunStatus::Queued;
+                    if let Some(runs) = this.store.runs.ready_mut()
+                        && let Some(slot) = runs.iter_mut().find(|r| r.id == run.id)
+                    {
+                        *slot = run;
+                    }
+                    let title =
+                        if started { format!("Started {name}") } else { format!("{name} starts next") };
+                    this.toast(Tone::Neutral, title, None, cx);
+                }
+                Err(e) => {
+                    let msg = if e.code == "run_not_queued" {
+                        "It has already left the queue.".to_string()
+                    } else {
+                        e.message.clone()
+                    };
+                    this.toast(Tone::Danger, "Couldn't move the run", Some(msg.into()), cx);
+                }
+            },
+        );
     }
 
     pub fn stop_run(&mut self, id: String, cx: &mut Context<Self>) {

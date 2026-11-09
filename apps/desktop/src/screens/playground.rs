@@ -504,6 +504,7 @@ impl FoloApp {
         // An end-to-end model (the run that trained it had the one-to-one head) predicts without NMS,
         // so its IoU setting does nothing.
         let e2e = model.as_ref().is_some_and(|m| self.model_e2e(m));
+        let best_conf = model.as_ref().and_then(|m| m.metrics.as_ref()).and_then(|x| x.best_f1_conf);
         // The built-in demo's numbers are simulated: its timing says so.
         let simulated = self.play_target.is_none() && !self.store.api.local_inference();
         let ids: Vec<String> = models.iter().map(|m| m.id.clone()).collect();
@@ -645,6 +646,31 @@ impl FoloApp {
                         conf.into_any_element(),
                         conf_help,
                     ))
+                    // The model's best-F1 threshold (where its precision and recall were taken), one
+                    // click away while the slider is elsewhere.
+                    .when_some(best_conf.filter(|c| (c - self.play_conf).abs() > 0.005), |d, c| {
+                        let link = div()
+                            .id("play-best-conf")
+                            .px(px(4.))
+                            .rounded(px(radius::SM))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(t.bg_hover))
+                            .active(|s| s.bg(t.bg_active))
+                            .child(
+                                text(ty::XS, t.accent_text).child(format!("Use {c:.2}, the model's best F1")),
+                            );
+                        d.child(div().flex().justify_end().child(self.bind(
+                            link,
+                            "play-best-conf",
+                            radius::SM,
+                            window,
+                            cx,
+                            act(move |this, _, cx| {
+                                this.play_conf = c;
+                                cx.notify();
+                            }),
+                        )))
+                    })
                     // "NMS IoU": the suppression overlap, not the evaluation's IoU 0.50. An end-to-end
                     // model has no suppression step: the row says so instead of offering an inert slider.
                     .map(|d| {

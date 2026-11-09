@@ -276,6 +276,10 @@ impl Backend for HttpBackend {
         self.post_empty(&format!("/runs/{}/stop", seg(id)))
     }
 
+    fn queue_run(&self, id: &str, req: QueueRequest) -> ApiResult<Run> {
+        self.post(&format!("/runs/{}/queue", seg(id)), &req)
+    }
+
     fn resume_run(&self, id: &str) -> ApiResult<Run> {
         #[derive(Serialize)]
         struct Resume<'a> {

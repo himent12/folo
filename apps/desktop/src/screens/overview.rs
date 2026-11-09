@@ -759,7 +759,7 @@ impl FoloApp {
                                     return d.child(
                                         text(ty::XS, t.text_tertiary)
                                             .whitespace_nowrap()
-                                            .child("Waiting to start"),
+                                            .child(queue_text(r.queue_position)),
                                     );
                                 }
                                 let fill = match r.status {
