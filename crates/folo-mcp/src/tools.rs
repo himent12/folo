@@ -923,6 +923,8 @@ impl Inner {
                 num_classes: m.classes.len(),
                 classes: summary_classes(&m.classes),
                 metrics: m.metrics,
+                head: m.head,
+                trained_with: m.trained_with,
             })
             .collect();
         let page = page_of(items, a.cursor.as_deref(), a.limit)?;

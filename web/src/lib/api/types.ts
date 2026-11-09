@@ -211,6 +211,17 @@ export interface Model {
   created: Time;
   run_id: string | null;
   metrics: ModelMetrics | null;
+  /** Detection head, from the file's `folo.config` (docs/MODEL.md §6.6); missing (older servers) = `o2m`. */
+  head?: 'o2m' | 'o2o';
+  /** Training settings from the file's `folo.train`; `null` for exports and imported weights (missing: older server). */
+  trained_with?: TrainedWith | null;
+}
+
+/** `Model.trained_with`. */
+export interface TrainedWith {
+  amp: boolean;
+  imgsz: number;
+  epochs: number;
 }
 
 export type ExportFormat = 'folo-f16' | 'onnx';

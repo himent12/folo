@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex};
 
 use axum::http::StatusCode;
 use folo_api::{
-    Arch, ExportFormat, ExportResult, ExportSpec, Model, ModelEval, ModelMetrics, PrCurve, ValReport,
-    ValTiming,
+    Arch, ExportFormat, ExportResult, ExportSpec, Head, Model, ModelEval, ModelMetrics, PrCurve, TrainedWith,
+    ValReport, ValTiming,
 };
 use folo_core::Device;
 use folo_data::{Dataset as _, Split};
@@ -46,6 +46,27 @@ pub struct FileMeta {
     pub created: String,
     /// `folo.metrics`.
     pub metrics: Option<ModelMetrics>,
+    /// `folo.config`'s head.
+    pub head: Head,
+    /// From `folo.train`, when the file has it.
+    pub trained_with: Option<TrainedWith>,
+}
+
+/// The parts of `folo.train` (the trainer's resolved config) that [`TrainedWith`] shows. Files written before
+/// mixed precision have no `amp`.
+#[derive(Deserialize)]
+struct TrainMeta {
+    #[serde(default)]
+    amp: bool,
+    imgsz: u32,
+    epochs: u32,
+}
+
+/// [`TrainedWith`] from a file's `folo.train`; `None` when it is missing or unreadable (the key is informational,
+/// so a file with an odd one still lists).
+fn trained_with(train: Option<&String>) -> Option<TrainedWith> {
+    let t: TrainMeta = serde_json::from_str(train?).ok()?;
+    Some(TrainedWith { amp: t.amp, imgsz: t.imgsz, epochs: t.epochs })
 }
 
 /// GFLOPs per image at 640 px (docs/MODEL.md §3, 80 classes); the class count changes them by well under 1%.
@@ -98,6 +119,8 @@ fn read_meta(path: &Path) -> Result<FileMeta> {
             precision: x.precision as f32,
             recall: x.recall as f32,
         }),
+        head: if m.config.has_o2o() { Head::O2o } else { Head::O2m },
+        trained_with: trained_with(m.extra.get("folo.train")),
     })
 }
 
@@ -132,6 +155,8 @@ pub fn model_of(
         created: meta.created.clone(),
         run_id,
         metrics,
+        head: meta.head,
+        trained_with: meta.trained_with,
     }
 }
 
@@ -482,5 +507,32 @@ pub fn eval_of(r: &folo_vision::EvalReport) -> ModelEval {
         confusion,
         per_class: val_metrics(r).per_class,
         images: r.num_images.min(u32::MAX as u64) as u32,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trained_with_reads_folo_train_leniently() {
+        let t = |s: &str| trained_with(Some(&s.to_string()));
+        // The trainer's resolved config: the three fields, other keys ignored.
+        let full = r#"{"name":"a","epochs":80,"imgsz":512,"amp":true,"head":"o2o","augment":{"mosaic":1.0}}"#;
+        assert_eq!(t(full), Some(TrainedWith { amp: true, imgsz: 512, epochs: 80 }));
+        // Written before mixed precision: no `amp`.
+        assert_eq!(t(r#"{"epochs":3,"imgsz":64}"#), Some(TrainedWith { amp: false, imgsz: 64, epochs: 3 }));
+        // Missing, unparsable or without the fields: none, never an error.
+        assert_eq!(trained_with(None), None);
+        for bad in [
+            "",
+            "not json",
+            "[]",
+            r#"{"epochs":3}"#,
+            r#"{"epochs":-1,"imgsz":64}"#,
+            r#"{"amp":"yes","epochs":3,"imgsz":64}"#,
+        ] {
+            assert_eq!(t(bad), None, "{bad}");
+        }
     }
 }

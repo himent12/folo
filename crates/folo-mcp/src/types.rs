@@ -4,9 +4,9 @@
 use std::collections::BTreeMap;
 
 use folo_api::{
-    Arch, BBox, BestEpoch, Capabilities, DatasetFormat, DatasetIssue, Epoch, ExportFormat, GpuInfo,
+    Arch, BBox, BestEpoch, Capabilities, DatasetFormat, DatasetIssue, Epoch, ExportFormat, GpuInfo, Head,
     IssueCounts, IssueSeverity, LogLine, Loss, ModelMetrics, Run, RunStatus, Split, Splits, Step,
-    TrainConfig, ValMetrics,
+    TrainConfig, TrainedWith, ValMetrics,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -474,6 +474,10 @@ pub struct ModelSummary {
     pub classes: Vec<String>,
     /// Validation metrics, if known.
     pub metrics: Option<ModelMetrics>,
+    /// Detection head: `o2o` models predict with the NMS-free one-to-one branch.
+    pub head: Head,
+    /// Training settings from the file's `folo.train` (`null` for exports and imported weights).
+    pub trained_with: Option<TrainedWith>,
 }
 
 /// CPU of the machine running `folo mcp`.

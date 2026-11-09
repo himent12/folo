@@ -175,6 +175,11 @@ async fn mock_weights_are_a_real_folo_n_file() {
     let etag16 = check_validators(&app, uri16, &h16, &b16).await;
     assert_ne!(etag16, etag);
 
+    // An o2o model's file has the one-to-one branch.
+    let (status, _, o2o, _) = send(&app, get("/api/models/m_31ab/weights", &[])).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(load(&o2o).metadata().config.has_o2o() && !meta.config.has_o2o());
+
     assert_eq!(
         error_code(&app, "/api/models/m_none/weights", StatusCode::NOT_FOUND).await,
         "model_not_found"

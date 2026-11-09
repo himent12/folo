@@ -348,6 +348,8 @@ impl MockBackend {
             created: time::format(h(hours)),
             run_id: Some(run.into()),
             metrics: Some(ModelMetrics { map50: m[0], map50_95: m[1], precision: m[2], recall: m[3] }),
+            head: folo_api::Head::O2m,
+            trained_with: None,
         };
         let models = vec![
             model(
