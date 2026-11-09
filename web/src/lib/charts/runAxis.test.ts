@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { defaultAxis, lengthRatio, runEnd, runLength, runX } from './runAxis';
+import { axisReason, defaultAxis, lengthRatio, runEnd, runLength, runX } from './runAxis';
 
 // The demo comparison: a live run at 38 of 100 epochs, one completed at 150, one stopped at 61, one failed at 23.4.
 const live = { status: 'running', epoch: 38, epochs: 100 };
@@ -17,11 +17,16 @@ describe('run comparison axis', () => {
     expect(runLength({ status: 'completed', epoch: 12, epochs: 0 })).toBe(12);
   });
 
-  it('defaults to "By progress" only when the plans differ by more than 3x', () => {
+  it('defaults to "By progress" when the plans differ by more than 3x, or one run trained over twice as long', () => {
     expect(lengthRatio([live, done, stopped, failed])).toBeCloseTo(1.5);
-    expect(defaultAxis([live, done, stopped, failed])).toBe('epoch');
-    expect(defaultAxis([done, { status: 'completed', epoch: 50, epochs: 50 }])).toBe('epoch');
-    expect(defaultAxis([done, { status: 'completed', epoch: 49, epochs: 49 }])).toBe('progress');
+    // Round 24: 150 epochs against 38, 61 and 23 squeezed three runs into the first 40 % of an epoch axis.
+    expect(axisReason([live, done, stopped, failed])).toBe('span');
+    expect(defaultAxis([live, done, stopped, failed])).toBe('progress');
+    // Without the long run, by epoch.
+    expect(defaultAxis([live, stopped, failed])).toBe('epoch');
+    expect(axisReason([done, { status: 'completed', epoch: 49, epochs: 49 }])).toBe('plans');
+    expect(defaultAxis([done, { status: 'completed', epoch: 80, epochs: 80 }])).toBe('epoch');
+    expect(defaultAxis([done, { status: 'completed', epoch: 70, epochs: 70 }])).toBe('progress');
     // An early failure is not a short plan: it does not switch the axis.
     expect(defaultAxis([done, { status: 'failed', epoch: 3, epochs: 150 }])).toBe('epoch');
     expect(defaultAxis([failed])).toBe('epoch');

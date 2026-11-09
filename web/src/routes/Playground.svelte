@@ -2,6 +2,7 @@
   import ArrowUpRight from '@lucide/svelte/icons/arrow-up-right';
   import Box from '@lucide/svelte/icons/box';
   import FileUp from '@lucide/svelte/icons/file-up';
+  import TriangleAlert from '@lucide/svelte/icons/triangle-alert';
   import Check from '@lucide/svelte/icons/check';
   import Eye from '@lucide/svelte/icons/eye';
   import EyeOff from '@lucide/svelte/icons/eye-off';
@@ -660,11 +661,12 @@
     {#key notice}
       <div class="notice cta-row" bind:this={noticeEl}>
         {#if notice === 'file'}
-          <div class="need-file" role="alert">
-            <FileUp size={16} strokeWidth={1.75} aria-hidden="true" />
+          <div class="need-file" class:bad={!!badFile} role="alert">
+            <!-- A file that failed says so through its icon; the title stays ink (DESIGN_DIRECTION §2.6). -->
+            {#if badFile}<TriangleAlert size={16} strokeWidth={1.75} aria-hidden="true" />{:else}<FileUp size={16} strokeWidth={1.75} aria-hidden="true" />{/if}
             <div class="nf-body">
               {#if badFile}
-                <p class="n-title bad">{badFile.why ? `${badFile.name} could not be loaded` : `${badFile.name} is not a .folo weights file`}</p>
+                <p class="n-title">{badFile.why ? `${badFile.name} could not be loaded` : `${badFile.name} is not a .folo weights file`}</p>
                 <p class="nf-text">
                   {#if badFile.why}{badFile.why} {/if}Choose {model?.name}'s <span class="mono">weights/best.folo</span> from its run's folder, or run it on the
                   server.
@@ -1255,6 +1257,9 @@
     margin-top: 2px;
     color: var(--text-tertiary);
   }
+  .need-file.bad > :global(svg) {
+    color: var(--danger-text);
+  }
   .nf-body {
     display: grid;
     gap: 2px;
@@ -1262,9 +1267,6 @@
   }
   .n-title {
     font-weight: var(--weight-medium);
-  }
-  .n-title.bad {
-    color: var(--danger-text);
   }
   .n-title:focus,
   .notice :global(.title:focus) {

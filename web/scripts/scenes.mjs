@@ -435,18 +435,20 @@ export const scenes = [
       await page.locator('.aug-toggle').click();
     },
   },
-  // Plans of 100 and 150 epochs: the x axis stays "By epoch"; each line ends in its run's status mark.
+  // One run trained 150 epochs, the others 23 to 61: the x axis defaults to "By progress" (the header says why, "one run
+  // trained far longer"), so the three shorter runs are not squeezed into the first 40 % of an epoch axis; each line ends
+  // in its run's status mark.
   { name: 'run-compare', path: '/runs/compare?ids=run_7d1e,run_c19a,run_5be3,run_a2f0', viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
   {
-    // "By progress": every run over its planned epochs, so the failed and stopped runs end where they ended. On a tablet
-    // the longer qualifier wraps under the metric tabs and the axis control stays on their row, as with "By epoch".
-    name: 'run-compare-progress',
+    // "By epoch", chosen by hand over the default "By progress": one epoch scale to the longest plan. On a tablet the
+    // header keeps one layout whatever the axis (the qualifier wraps under the metric tabs, the control on their row).
+    name: 'run-compare-epoch',
     path: '/runs/compare?ids=run_7d1e,run_c19a,run_5be3,run_a2f0',
     fullPage: false,
     viewports: ['desktop', 'tablet', 'mobile'],
     setup: async (page) => {
       await until(page, '.chip .key');
-      await page.getByRole('radio', { name: 'By progress' }).click();
+      await page.getByRole('radio', { name: 'By epoch' }).click();
       await page.mouse.move(0, 0);
     },
   },

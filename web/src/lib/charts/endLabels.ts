@@ -7,8 +7,9 @@
 // box being the label's measured width by its 16 px line (`LABEL_H`, the 12 px text's own line box, not the glyphs'
 // height), so the clear space a reader sees is the space the rule names. Every label is anchored to its
 // line's end marker: one that does not sit right beside it gets a leader from the marker to the label's nearest edge
-// (`leaderOf`), so a label never floats free over another line. A label with no free spot within reach is left out:
-// the end marker's shape and the legend's status word still say how the line ended.
+// (`leaderOf`), so a label never floats free over another line. Other runs' lines are obstacles with a margin: a
+// label keeps CLEAR (6 px) off every line but its own, and its leader crosses none of them. A label with no free
+// spot within reach is left out: the end marker's shape and the legend's status word still say how the line ended.
 
 export interface EndPoint {
   id: string;
@@ -40,6 +41,8 @@ export interface PlaceOptions {
   gap?: number;
   /** How far right of the plot the gutter column starts when a label there sits off its line's end (room for a leader). */
   lead?: number;
+  /** Clear space between a label's box and any other line, px: CLEAR, or more. */
+  clear?: number;
 }
 
 /** The least clear space between two end labels' boxes, px (DESIGN_DIRECTION §2.4). */
@@ -49,6 +52,12 @@ export const LABEL_GAP = 12;
 export const LABEL_H = 16;
 /** The narrowest plot that draws direct labels: below it (every phone) the legend carries names, values and status. */
 export const END_LABELS_MIN = 560;
+
+/**
+ * The least clear space between a label's box and another line, px: a label 2 px off another run's line reads as
+ * sitting on it (round 24: "fasteners-s · live" on shapes-hard-s's line). Its own line may come as close as `pad`.
+ */
+export const CLEAR = 6;
 
 /** A label whose box is further than this (px) from its line's end marker gets a leader. */
 const BESIDE = 8;
@@ -108,6 +117,12 @@ function segmentHits(a: Pt, b: Pt, r: Box): boolean {
   return true;
 }
 
+/** Whether segments a–b and c–d cross (or touch). */
+function segmentsCross(a: Pt, b: Pt, c: Pt, d: Pt): boolean {
+  const o = (p: Pt, q: Pt, r: Pt) => Math.sign((q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x));
+  return o(a, b, c) !== o(a, b, d) && o(c, d, a) !== o(c, d, b);
+}
+
 const overlaps = (a: Box, b: Box) => a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1;
 
 /**
@@ -128,15 +143,40 @@ export function placeEndLabels(
   const taken: Box[] = [];
   const spots = new Map<number, Box>();
   const placed = new Map<number, Placed>();
-  const fits = (b: Box, skip?: number) => {
+  const clear = Math.max(opts.clear ?? CLEAR, pad);
+  /** The label's own line: `curve`, else the curve that ends at its point. */
+  const ownOf = (e: EndPoint) => {
+    if (e.curve !== undefined) return e.curve;
+    const k = curves.findIndex((c) => {
+      const p = c[c.length - 1];
+      return !!p && Math.abs(p.x - e.x) < 0.5 && Math.abs(p.y - e.y) < 0.5;
+    });
+    return k < 0 ? undefined : k;
+  };
+  /**
+   * Whether box `b` can hold `e`'s label: inside the bounds, LABEL_GAP from every other label, `pad` px off its own
+   * line (or over it, with `overOwn`) and `clear` px off every other line, so a label never sits on another run's line;
+   * and the leader from its line's end, where it needs one, crosses no other line.
+   */
+  const fits = (b: Box, e: EndPoint, overOwn = false) => {
     if (b.x0 < bounds.x0 || b.x1 > bounds.x1 || b.y0 < bounds.y0 || b.y1 > bounds.y1) return false;
-    const g = { x0: b.x0 - pad, y0: b.y0 - pad, x1: b.x1 + pad, y1: b.y1 + pad };
     const room = { x0: b.x0 - gap, y0: b.y0 - gap, x1: b.x1 + gap, y1: b.y1 + gap };
     if (taken.some((t) => overlaps(t, room))) return false;
+    const own = ownOf(e);
+    const lead = leaderOf({ id: e.id, label: e.label, x: b.x0, y: (b.y0 + b.y1) / 2, ax: e.x, ay: e.y, w: b.x1 - b.x0 });
+    // Where the plot's edge is known, a label inside the plot sits beside its marker: only the gutter column, right of
+    // every line, ties a label to its line with a leader (round 24: a label floating mid-plot on a leader).
+    if (lead && gutter !== undefined && b.x0 < gutter) return false;
     for (let k = 0; k < curves.length; k++) {
-      if (k === skip) continue;
+      if (k === own && overOwn) continue;
+      // In the gutter, right of where every line ends, the lines' ends are beside the column, not under it: `pad`.
+      const m = k === own || (gutter !== undefined && b.x0 >= gutter) ? pad : clear;
+      const g = { x0: b.x0 - m, y0: b.y0 - m, x1: b.x1 + m, y1: b.y1 + m };
       const c = curves[k]!;
-      for (let i = 1; i < c.length; i++) if (segmentHits(c[i - 1]!, c[i]!, g)) return false;
+      for (let i = 1; i < c.length; i++) {
+        if (segmentHits(c[i - 1]!, c[i]!, g)) return false;
+        if (lead && k !== own && segmentsCross(c[i - 1]!, c[i]!, { x: lead.x1, y: lead.y1 }, { x: lead.x2, y: lead.y2 })) return false;
+      }
     }
     return true;
   };
@@ -159,8 +199,8 @@ export function placeEndLabels(
   const away = (e: EndPoint, b: Box, k: number) => gutter !== undefined && k > 0 && (b.x0 >= gutter || atEdge(e));
   // A line ending at the plot's edge is labelled in the gutter column (below), never above or below its end inside the
   // plot, where it would sit beside another line's label.
-  for (let k = 0; k < LEVELS; k++) rounds.push((e, w) => (atEdge(e) ? undefined : ring(e, w, k).find((b) => !away(e, b, k) && fits(b))));
-  rounds.push((e, w) => (e.curve === undefined || atEdge(e) ? undefined : ring(e, w, 0).find((b) => fits(b, e.curve))));
+  for (let k = 0; k < LEVELS; k++) rounds.push((e, w) => (atEdge(e) ? undefined : ring(e, w, k).find((b) => !away(e, b, k) && fits(b, e))));
+  rounds.push((e, w) => (ownOf(e) === undefined || atEdge(e) ? undefined : ring(e, w, 0).find((b) => fits(b, e, true))));
   const take = (i: number, spot: Box) => {
     const e = ends[i]!;
     taken.push(spot);
@@ -183,7 +223,7 @@ export function placeEndLabels(
     for (let d = 0; d <= Math.min(MAX_REACH, bounds.y1 - bounds.y0); d += 2)
       for (const y of d ? [e.y - d, e.y + d] : [e.y]) {
         const b = { x0, y0: y - H / 2, x1: x0 + w, y1: y + H / 2 };
-        if (fits(b)) return b;
+        if (fits(b, e)) return b;
       }
     return undefined;
   });
@@ -226,7 +266,7 @@ export function placeEndLabels(
     const x0 = x + (moved ? (opts.lead ?? 6) : 6);
     const next = new Map<number, Box>();
     for (const [i, y] of ys) next.set(i, { x0, y0: y - H / 2, x1: x0 + (ends[i]!.w ?? labelWidth(ends[i]!.label)), y1: y + H / 2 });
-    const ok = [...next.values()].every((b) => fits(b));
+    const ok = [...next].every(([i, b]) => fits(b, ends[i]!));
     if (!ok) {
       taken.push(...old);
       return;

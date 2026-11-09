@@ -788,8 +788,8 @@
   {#if !onCpu && gpuMem}
     <div class="vram" aria-hidden="true"><i class={vramLevel} style:width={pct2(Math.min(1, vramPct))}></i></div>
   {/if}
-  <!-- Warnings in the rail are one-line callouts in the status's text colour with its icon, no tinted fill (fills are
-       for banners), right above Start. -->
+  <!-- Warnings in the rail are one-line callouts: the status's icon in its hue, the words and the Why? link in ink, no
+       tinted fill (fills are for banners), right above Start. -->
   {#if noFit}
     <!-- The change that fits is the action under it (Use batch 8); with none, the line says what to lower. -->
     <p class="callout danger" id="{where}-nofit" role="alert">
@@ -2040,17 +2040,21 @@
   .aug-toggle[aria-expanded='true'] {
     margin-bottom: var(--space-3);
   }
-  /* A callout: one line in the status's text colour after its icon, at 12 px, no fill (tinted fills are for banners). */
+  /* A callout: one line at 12 px after its icon, no fill (tinted fills are for banners). The status shows through the
+     icon alone: the words are ink and Why? an ink link (DESIGN_DIRECTION §2.6), so no amber text turns weak in light. */
   .callout {
     display: flex;
     align-items: flex-start;
     gap: var(--space-2);
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
-    color: var(--warning-text);
+    color: var(--text-primary);
     text-wrap: pretty;
   }
-  .callout.danger {
+  .callout > :global(svg) {
+    color: var(--warning-text);
+  }
+  .callout.danger > :global(svg) {
     color: var(--danger-text);
   }
   .callout > :global(svg) {
@@ -2079,7 +2083,7 @@
   /* "Why?" opens the reasons and the fix, right after the line's text. */
   .more {
     flex-shrink: 0;
-    color: var(--warning-text);
+    color: var(--text-primary);
     text-decoration: underline;
     text-decoration-color: color-mix(in srgb, currentColor 40%, transparent);
     text-underline-offset: 3px;
@@ -2349,10 +2353,14 @@
       display: grid;
       color: var(--text-tertiary);
     }
+    /* The dock's warning word in ink; its icon carries the status's hue. */
     .dock-warn {
+      color: var(--text-secondary);
+    }
+    .dock-warn > :global(svg) {
       color: var(--warning-text);
     }
-    .dock-warn.danger {
+    .dock-warn.danger > :global(svg) {
       color: var(--danger-text);
     }
     .dock-warn {

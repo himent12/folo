@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { LABEL_GAP, LABEL_H, labelWidth, leaderOf, MAX_REACH, needsLeader, placeEndLabels, type Placed } from './endLabels';
+import { CLEAR, LABEL_GAP, LABEL_H, labelWidth, leaderOf, MAX_REACH, needsLeader, placeEndLabels, type Placed } from './endLabels';
 
 const bounds = { x0: 0, y0: 0, x1: 600, y1: 300 };
 const line = (pts: [number, number][]) => pts.map(([x, y]) => ({ x, y }));
@@ -14,11 +14,12 @@ describe('placeEndLabels', () => {
   });
 
   it("ties a label moved off its line's end to the end marker with a leader, from the marker to the label's edge", () => {
-    // b runs flat through a's end and c, d just above and below it, so a's label steps further out.
+    // b runs flat through a's end, and c, d just above and below it to its right, so a's label steps further out,
+    // up and to the left, where its leader crosses no other line.
     const a = line([[0, 200], [300, 100]]);
     const b = line([[0, 100], [600, 100]]);
-    const c = line([[0, 85], [600, 85]]);
-    const d = line([[0, 115], [600, 115]]);
+    const c = line([[300, 85], [600, 85]]);
+    const d = line([[300, 115], [600, 115]]);
     const [p] = placeEndLabels([{ id: 'a', label: 'shapes-hard-m · failed', x: 300, y: 100 }], [a, b, c, d], bounds);
     expect(p).toBeDefined();
     const l = leaderOf(p!, 5)!;
@@ -199,5 +200,68 @@ describe('placeEndLabels: the 12 px gap', () => {
     const at = Object.fromEntries(placed.map((p) => [p.id, p]));
     expect(clearance(at.box!, at.dfl!)).toBeGreaterThanOrEqual(LABEL_GAP);
     expect(needsLeader(at.box!) || needsLeader(at.dfl!)).toBe(true);
+  });
+});
+
+describe("placeEndLabels: other runs' lines are obstacles", () => {
+  /** Least distance from a placed label's box to a polyline, px. */
+  function distance(p: Placed, c: { x: number; y: number }[]): number {
+    const box = { x0: p.x, x1: p.x + p.w, y0: p.y - LABEL_H / 2, y1: p.y + LABEL_H / 2 };
+    let d = Infinity;
+    for (let i = 1; i < c.length; i++) {
+      const a = c[i - 1]!;
+      const b = c[i]!;
+      for (let t = 0; t <= 1; t += 1 / 200) {
+        const x = a.x + (b.x - a.x) * t;
+        const y = a.y + (b.y - a.y) * t;
+        d = Math.min(d, Math.hypot(Math.max(box.x0 - x, 0, x - box.x1), Math.max(box.y0 - y, 0, y - box.y1)));
+      }
+    }
+    return d;
+  }
+
+  it("keeps a label at least 6 px off another run's line", () => {
+    // Round 24: "fasteners-s · live" sat 2 px over shapes-hard-s's line, which runs on past its end just below.
+    const own = line([[0, 280], [200, 100]]);
+    const other = line([[0, 290], [190, 120], [300, 112], [600, 112]]);
+    const [p] = placeEndLabels([{ id: 'a', label: 'fasteners-s · live', x: 200, y: 100, curve: 0 }], [own, other], bounds, 2);
+    expect(CLEAR).toBe(6);
+    expect(p).toBeDefined();
+    expect(distance(p!, other)).toBeGreaterThanOrEqual(CLEAR - 1e-6);
+  });
+
+  it("never ties a label to its line with a leader that crosses another run's line, and leaves it out instead", () => {
+    // Round 24: "shapes-hard-m · failed" floated mid-plot, its leader running across two other runs' lines.
+    const own = line([[0, 280], [200, 150]]);
+    const fan = Array.from({ length: 12 }, (_, i) => line([[0, 285 - i], [200, 150 - 30 + i * 5], [600, 150 - 30 + i * 5]]));
+    const placed = placeEndLabels([{ id: 'a', label: 'shapes-hard-m · failed', x: 200, y: 150, curve: 0 }], [own, ...fan], bounds, 2);
+    for (const p of placed) {
+      const l = leaderOf(p, 5);
+      if (!l) continue;
+      for (const c of fan)
+        for (let i = 1; i < c.length; i++) {
+          const a = c[i - 1]!;
+          const b = c[i]!;
+          const o = (p1: { x: number; y: number }, q: { x: number; y: number }, r: { x: number; y: number }) => Math.sign((q.x - p1.x) * (r.y - p1.y) - (q.y - p1.y) * (r.x - p1.x));
+          const L1 = { x: l.x1, y: l.y1 };
+          const L2 = { x: l.x2, y: l.y2 };
+          expect(o(a, b, L1) !== o(a, b, L2) && o(L1, L2, a) !== o(L1, L2, b)).toBe(false);
+        }
+    }
+    // Lines every 5 px around the end leave no clear spot: no label (the legend chip carries the status).
+    expect(placed).toEqual([]);
+  });
+});
+
+describe('placeEndLabels: leaders only from the gutter', () => {
+  it('keeps a label inside the plot beside its marker, never on a leader, where the plot edge is known', () => {
+    // A line ending mid-plot with others crowding every spot beside its end: it gets no floating label.
+    const own = line([[0, 280], [200, 150]]);
+    const crowd = [line([[100, 150], [500, 150]]), line([[100, 132], [500, 132]]), line([[100, 168], [500, 168]])];
+    const placed = placeEndLabels([{ id: 'a', label: 'shapes-hard-m · failed', x: 200, y: 150, curve: 0 }], [own, ...crowd], bounds, 2, 500);
+    for (const p of placed) expect(needsLeader(p) ? p.x >= 500 : true).toBe(true);
+    // Without the crowd, beside its end.
+    const [p] = placeEndLabels([{ id: 'a', label: 'shapes-hard-m · failed', x: 200, y: 150, curve: 0 }], [own], bounds, 2, 500);
+    expect(needsLeader(p!)).toBe(false);
   });
 });

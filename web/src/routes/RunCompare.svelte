@@ -30,7 +30,7 @@
   import LineChart, { type Series } from '$lib/charts/LineChart.svelte';
   import { niceDomain, unitDomain, unitTop, UNIT_ZOOM_BELOW, UNIT_ZOOM_NOTE, withLabelRow } from '$lib/charts/domain';
   import { nearest } from '$lib/charts/downsample';
-  import { defaultAxis, runEnd, runX } from '$lib/charts/runAxis';
+  import { axisReason, AXIS_REASON, runEnd, runX } from '$lib/charts/runAxis';
   import { conf, deviceName, duration, metric } from '$lib/format';
   import { batchSetting, closeMosaicSetting, headSetting, lrSetting, optimizerSetting, precisionSetting, settingText, warmupSetting, type Setting } from './run/resolved';
   import { href, router } from '$lib/router.svelte';
@@ -68,11 +68,14 @@
   let cursor = $state<number | null>(null);
 
   const chosen = $derived(ids.map((id) => runs.data?.find((r) => r.id === id)).filter((r): r is Run => !!r));
-  // Runs planned for very different lengths (30 vs 150 epochs) would crush the short ones into the start of an epoch
-  // axis: then the axis defaults to "By progress" (each run over its planned epochs, ../lib/charts/runAxis), and the axis
-  // says why. Every run is divided by its plan, so a run that failed or stopped early ends where it ended.
+  // Runs planned for very different lengths (30 vs 150 epochs), or one run that trained over twice as long as every
+  // other (150 epochs against 38, 61 and 23), would crush the short ones into the start of an epoch axis: then the axis
+  // defaults to "By progress" (each run over its planned epochs, ../lib/charts/runAxis), and the header says why. Every
+  // run is divided by its plan, so a run that failed or stopped early ends where it ended. Chosen over fitting the axis
+  // to the shorter runs: no run's line is cut off, and the same toggle switches back to "By epoch".
   let xChoice = $state<Axis | null>(null);
-  const x = $derived<Axis>(xChoice ?? defaultAxis(chosen));
+  const reason = $derived(axisReason(chosen));
+  const x = $derived<Axis>(xChoice ?? (reason ? 'progress' : 'epoch'));
   const xAuto = $derived(xChoice === null && x === 'progress');
   const X_OPTIONS: { value: Axis; label: string }[] = [
     { value: 'epoch', label: 'By epoch' },
@@ -80,7 +83,7 @@
   ];
   // The x axis is named in the chart's header, as on every chart (DESIGN_DIRECTION §2.4), never under the plot: the
   // normalised axis names its unit; chosen for you, it also says why.
-  const xQual = $derived(x === 'progress' ? `by progress, % of planned epochs${xAuto ? ' · plans differ in length' : ''}` : 'by epoch');
+  const xQual = $derived(x === 'progress' ? `by progress, % of planned epochs${xAuto && reason ? ` · ${AXIS_REASON[reason]}` : ''}` : 'by epoch');
   let hint = $state<string | null>(null);
   // Colours follow the run, not its position: removing one run never repaints the others.
   let slots = $state<Record<string, number>>({});

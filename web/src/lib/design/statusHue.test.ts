@@ -5,6 +5,9 @@
 // fourth is RunNew.svelte.test.ts's. Round 23 found two more: Compare's best value as lime text in a lime chip ("0.604
 // best"), and New run's Summary showing a device it cannot find ("gpu:1") in red; and an inline action ("Lower the
 // threshold") as a lime link.
+// Round 24 found three more: New run's switches solid lime when on (a toggle competing with Start training), a
+// callout's "Too short to learn:" and "Why?" in amber text (weak in light), and "Ran out of GPU memory" and
+// "Prediction failed" as red titles. A status shows through its icon and its callout's tint; titles and links are ink.
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -70,5 +73,18 @@ describe('status hue', () => {
   it('never colours an inline link or action in lime: links are ink', () => {
     const lime = /(?:^|;|\s)color:\s*var\(--accent-(?:text|solid|line)\)/;
     expect(scan((s) => /\b(?:inline|link|more|go)\b|(?:^|\s)a\b/.test(s), lime)).toEqual([]);
+  });
+
+  it('never sets a title or a link in a status hue: the status shows through the icon and the callout tint', () => {
+    const status = /(?:^|;|\s)color:\s*var\(--(?:danger|warning|success|info|accent)-(?:text|solid|line)\)/;
+    const words = /(?:^|[\s.,])(?:title|c-title|n-title|heading|more|link|why|dock-warn)(?![\w-])|(?:^|\s)a\b/;
+    // Each selector of a list on its own: ".danger > :global(svg), .danger .c-title" is a mark and a title.
+    const part = (p: string) => words.test(p) && !/:global\(svg\)|\.(?:icon|mark|glyph|sw|dot)\b/.test(p);
+    expect(scan((s) => s.split(',').some(part), status)).toEqual([]);
+  });
+
+  it("never colours a control's state in lime: a switch, checkbox or pressed toggle that is on is ink", () => {
+    const lime = /(?:background(?:-color)?|accent-color|border-color):\s*var\(--accent-(?:solid|line|text)\)/;
+    expect(scan((s) => /:checked|aria-(?:checked|pressed)=.true.|\.on\b/.test(s), lime)).toEqual([]);
   });
 });

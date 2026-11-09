@@ -100,10 +100,17 @@
   .callout > :global(svg) {
     flex-shrink: 0;
   }
-  /* The status hue on the mark and the title only; the cause reads in text.secondary. */
-  .danger > :global(svg),
-  .danger > .c-text:not(.c-also) .c-title {
+  /* The status shows through the mark and the callout's tint only: titles and links are ink (DESIGN_DIRECTION §2.6),
+     so a red title never shouts over the cause and an amber one never turns weak in light; the cause reads in
+     text.secondary. A callout that needs action (danger, warning) is a banner, so it takes its status's muted tint. */
+  .danger > :global(svg) {
     color: var(--danger-text);
+  }
+  .callout.danger {
+    background: linear-gradient(var(--danger-muted) 0 0), var(--bg-panel);
+  }
+  .callout.warning {
+    background: linear-gradient(var(--warning-muted) 0 0), var(--bg-panel);
   }
   .success > :global(svg) {
     color: var(--success-text);
@@ -111,29 +118,22 @@
   .neutral > :global(svg) {
     color: var(--text-tertiary);
   }
-  .warning > :global(svg),
-  .warning > .c-text:not(.c-also) .c-title {
+  .warning > :global(svg) {
     color: var(--warning-text);
   }
-  /* The second line's mark and title take its own hue; its cause stays in text.secondary. */
+  /* The second line's mark takes its own hue; its title is ink and its cause text.secondary, as on the first. */
   .c-also-mark {
     display: inline-flex;
     color: var(--text-tertiary);
   }
-  .c-also-mark.warning,
-  .c-also.warning .c-title {
+  .c-also-mark.warning {
     color: var(--warning-text);
   }
-  .c-also-mark.danger,
-  .c-also.danger .c-title {
+  .c-also-mark.danger {
     color: var(--danger-text);
   }
   .c-also-mark.success {
     color: var(--success-text);
-  }
-  .c-also.success .c-title,
-  .c-also.neutral .c-title {
-    color: var(--text-primary);
   }
   /* Two lines: the actions serve both, on the right across them. */
   .two .c-acts {

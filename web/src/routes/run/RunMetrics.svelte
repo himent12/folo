@@ -139,6 +139,12 @@
    * focal chart's vocabulary, shared with Overview's live card.
    */
   const endMark = $derived(run.status === 'running' ? ('live' as const) : run.status === 'stopped' ? ('stopped' as const) : run.status === 'failed' ? ('failed' as const) : undefined);
+  /** The total loss as the chart draws it (smoothed at the chosen EMA), whose last value the Loss tab's caption states. */
+  const smoothedTotal = $derived.by(() => {
+    void version;
+    return smooth(perStep((s) => s.loss.total), Number(smoothing));
+  });
+  const smoothedLast = $derived(smoothing !== '0' ? smoothedTotal.at(-1)?.y : undefined);
   const series = $derived.by((): Series[] => {
     void version;
     switch (tab) {
@@ -162,15 +168,16 @@
         const total = perStep((s) => s.loss.total);
         return [
           { id: 'raw', label: 'total (raw)', color: INK, ghost: true, points: a > 0 ? total : [] },
-          // Said in the legend, so the smoothed total never seems to contradict the KPI's raw last step.
-          { id: 'total', label: a > 0 ? `Total, smoothed (EMA ${smoothing})` : 'Total, raw', endLabel: 'total', color: INK, emphasis: true, points: smooth(total, a) },
+          // One name per series (DESIGN_DIRECTION §2.23): the legend, the end labels and the phone legend all say
+          // total, box, cls and dfl, with the full names under ⓘ (LOSS_TERMS). Raw vs smoothed is said once, in the
+          // Loss tab's caption ("raw · smoothed 2.075"); the smoothing itself in the loss view's control.
+          { id: 'total', label: 'total', color: INK, emphasis: true, points: smoothedTotal },
           // The components as design/README.md maps them in both apps: box amber, cls violet dashed, dfl teal dotted.
           // Box and dfl run together late in a run (0.85 vs 0.83): box is painted over dfl's dots, and each line is
           // labelled at its end, so both stay readable where they meet.
-          // Full names where the legend has room; the short ones at the lines' ends and on phones (defined under ⓘ).
-          { id: 'box', label: narrow ? 'box' : 'Box', endLabel: 'box', color: 'var(--chart-2)', front: true, points: smooth(perStep((s) => s.loss.box), a) },
-          { id: 'cls', label: narrow ? 'cls' : 'Classification', endLabel: 'cls', color: 'var(--chart-5)', pattern: 'dash', points: smooth(perStep((s) => s.loss.cls), a) },
-          { id: 'dfl', label: narrow ? 'dfl' : 'Distribution focal', endLabel: 'dfl', color: 'var(--chart-4)', pattern: 'dot', points: smooth(perStep((s) => s.loss.dfl), a) },
+          { id: 'box', label: 'box', color: 'var(--chart-2)', front: true, points: smooth(perStep((s) => s.loss.box), a) },
+          { id: 'cls', label: 'cls', color: 'var(--chart-5)', pattern: 'dash', points: smooth(perStep((s) => s.loss.cls), a) },
+          { id: 'dfl', label: 'dfl', color: 'var(--chart-4)', pattern: 'dot', points: smooth(perStep((s) => s.loss.dfl), a) },
         ];
       }
       case 'lr': {
@@ -301,10 +308,10 @@
       id: 'loss',
       label: 'Loss',
       value: num(lastStep?.loss.total, 3),
-      // The last step's raw reading, which the chart may draw smoothed: "raw" is its qualifier, set as a unit.
-      unit: 'raw',
-      caption: stepEp,
-      capShort: stepShort,
+      // The last step's raw reading; the chart draws the total smoothed. The caption is the one place that says which
+      // is which ("raw · smoothed 2.075", the legend's total), so the two numbers never seem to disagree.
+      caption: lastStep ? (smoothedLast !== undefined ? `raw · smoothed ${num(smoothedLast, 3)}` : `raw · ep ${Math.max(1, Math.ceil(observed - 1e-9))}`) : 'after the first step',
+      capShort: lastStep ? (smoothedLast !== undefined ? `raw · smoothed ${num(smoothedLast, 3)}` : `raw · ${stepShort}`) : stepShort,
       title: 'Training loss',
       qualifier: 'by epoch',
     },
@@ -334,10 +341,11 @@
   /** The legend's note: the latest value's epoch, per epoch for validation metrics, per step for the rest. */
   /** The loss terms in plain words (DESIGN_DIRECTION §2.3: no jargon without its definition). */
   const LOSS_TERMS: [term: string, means: string][] = [
-    ['Box', 'how far predicted boxes are from the true ones.'],
-    ['Classification (cls)', 'how wrong the class scores are.'],
-    ['Distribution focal (dfl)', 'how sharply each box edge is placed.'],
-    ['EMA 0.9', 'smoothing; a higher value reacts more slowly.'],
+    ['total', 'box, cls and dfl weighted and added: what training lowers.'],
+    ['box', 'box regression: how far predicted boxes are from the true ones.'],
+    ['cls', 'classification: how wrong the class scores are.'],
+    ['dfl', 'distribution focal: how sharply each box edge is placed.'],
+    ['EMA 0.9', 'smoothing; a higher value reacts more slowly. The Loss tab shows the last raw step and the smoothed total.'],
   ];
   const legendNote = $derived(unit ? (lastEpoch ? latestEp : undefined) : lastStep ? stepEp : undefined);
 
