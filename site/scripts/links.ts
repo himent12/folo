@@ -137,27 +137,35 @@ export function resolveHref(href: string, ctx: LinkContext, where: string): stri
 /** Site URL and repository path of a local image; null for remote images and (with an error) for missing ones. */
 function resolveImage(src: string, ctx: LinkContext, where: string): { url: string; repoPath: string } | null {
   if (/^[a-z][a-z0-9+.-]*:/i.test(src) || src.startsWith('//')) return null;
-  const repoPath = resolveRepoPath(ctx.src, splitRef(src).path);
+  const { path, query, hash } = splitRef(src);
+  const repoPath = resolveRepoPath(ctx.src, path);
   if (repoPath === null || repoPathKind(repoPath) !== 'file') {
     ctx.errors.push(`${ctx.src}${where}: missing image "${src}"`);
     return null;
   }
   ctx.media.set(repoPath, `media/${repoPath}`);
-  return { url: relUrl(ctx.slug, `media/${encodePath(repoPath)}`), repoPath };
+  // The query and fragment (an SVG view, a media fragment) stay on the URL; only the path names the file.
+  return { url: `${relUrl(ctx.slug, `media/${encodePath(repoPath)}`)}${query}${hash ? `#${hash}` : ''}`, repoPath };
 }
 
-const HTML_REF = /(\s)(href|src)(\s*=\s*)(?:"([^"]*)"|'([^']*)')/gi;
+/** Comments, and start tags (attributes may be double-quoted, single-quoted or unquoted). */
+const HTML_PART = /<!--[\s\S]*?(?:-->|$)|<[a-zA-Z][^\s/>]*(?:\s+[^\s"'>\/=]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'=<>`]+))?)*\s*\/?>/g;
+const HTML_ATTR = /(\s)(href|src)(\s*=\s*)(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/gi;
 
 /**
  * Links and images in raw HTML (`<a href>`, `<img src>`, ...) get the same checks and rewriting as Markdown ones, so
- * HTML can't slip a broken or GitHub-only `.md` link past the build.
+ * HTML can't slip a broken or GitHub-only `.md` link past the build. Only attributes inside start tags count: a link
+ * in an HTML comment renders nothing and is left alone.
  */
 function rewriteHtml(html: string, ctx: LinkContext, where: string): string {
-  return html.replace(HTML_REF, (whole, sp: string, name: string, eq: string, dq?: string, sq?: string) => {
-    const value = dq ?? sq ?? '';
-    const quote = dq !== undefined ? '"' : "'";
-    const url = name.toLowerCase() === 'href' ? resolveHref(value, ctx, where) : (resolveImage(value, ctx, where)?.url ?? null);
-    return url === null ? whole : `${sp}${name}${eq}${quote}${url}${quote}`;
+  return html.replace(HTML_PART, (part) => {
+    if (part.startsWith('<!--')) return part;
+    return part.replace(HTML_ATTR, (whole, sp: string, name: string, eq: string, dq?: string, sq?: string, bare?: string) => {
+      const value = dq ?? sq ?? bare ?? '';
+      const quote = dq !== undefined ? '"' : sq !== undefined ? "'" : '"';
+      const url = name.toLowerCase() === 'href' ? resolveHref(value, ctx, where) : (resolveImage(value, ctx, where)?.url ?? null);
+      return url === null ? whole : `${sp}${name}${eq}${quote}${url}${quote}`;
+    });
   });
 }
 

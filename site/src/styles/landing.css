@@ -307,6 +307,11 @@
   line-height: var(--type-sm-line);
 }
 
+/* Tertiary text loses AA on the hover overlay. */
+.doc-group a:hover .doc-link-blurb {
+  color: var(--text-secondary);
+}
+
 @media (max-width: 1099px) {
   .hero {
     grid-template-columns: minmax(0, 1fr);

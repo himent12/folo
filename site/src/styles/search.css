@@ -125,6 +125,12 @@
   line-height: var(--type-xs-line);
 }
 
+/* On the hover and active overlays tertiary text drops below AA, so the breadcrumb steps up to secondary. */
+.search-result a:hover .sr-path,
+.search-result[aria-selected='true'] .sr-path {
+  color: var(--text-secondary);
+}
+
 .sr-title {
   display: block;
   color: var(--text-primary);

@@ -80,7 +80,7 @@ ${THEME_INIT}
 <header class="topbar">
   <button class="icon-btn nav-toggle" type="button" aria-controls="sidebar" aria-expanded="false" aria-label="Open navigation"><span class="i-menu">${ICONS.menu}</span><span class="i-close">${ICONS.close}</span></button>
   <a class="brand" href="${root}" aria-label="FOLO docs home">${LOGO}<span class="brand-name">FOLO</span><span class="brand-product">Docs</span></a>
-  <button class="search-trigger" type="button" aria-haspopup="dialog" aria-controls="search">${ICONS.search}<span class="search-trigger-label">Search docs</span><kbd class="kbd">/</kbd></button>
+  <button class="search-trigger" type="button" aria-haspopup="dialog" aria-controls="search" aria-label="Search docs" aria-keyshortcuts="/ Control+K Meta+K">${ICONS.search}<span class="search-trigger-label">Search docs</span><kbd class="kbd">/</kbd></button>
   <div class="topbar-end">
     <a class="icon-btn" href="${REPO_URL}" aria-label="FOLO on GitHub">${ICONS.github}</a>
     <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme"><span class="i-sun">${ICONS.sun}</span><span class="i-moon">${ICONS.moon}</span></button>
