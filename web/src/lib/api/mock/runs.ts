@@ -310,6 +310,8 @@ export function resolveTrain(c: TrainConfig, images: number, classes: number, st
     warmup_epochs: 3,
     warmup_momentum: 0.8,
     warmup_bias_lr: warmupBias,
+    // After the trainer's cap at half the run (docs/API.md, `Run.resolved.close_mosaic`).
+    close_mosaic: closeMosaicEpochs(c.augment.close_mosaic, c.epochs),
   };
 }
 

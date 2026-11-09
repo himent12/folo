@@ -26,6 +26,7 @@
   import StatusBadge from '$lib/ui/StatusBadge.svelte';
   import TableState from '$lib/ui/TableState.svelte';
   import Gate from '$lib/ui/Gate.svelte';
+  import { compareHint, compareReason } from './runs/compareHint';
   import Ident from '$lib/ui/Ident.svelte';
   import Lineage from '$lib/ui/Lineage.svelte';
   import Meta from '$lib/ui/Meta.svelte';
@@ -154,16 +155,22 @@
   const tone = (r: Run) => (r.status === 'running' ? 'accent' : 'neutral');
   // Nothing answers: the actions that need the server are disabled and say why (as on Datasets).
   const offline = $derived(!runs.data && isOffline(runs.error));
+  /** Runs to filter, or on their way: the toolbar is live (else it stays in place, disabled). */
+  const filterable = $derived(runs.data ? runs.data.length > 0 : !runs.error);
+  /** Rows to head (or their skeleton): the column heads show; with none the frame holds the state alone. */
+  const rowsOrLoading = $derived(runs.data ? shown.length > 0 : !runs.error);
 </script>
 
 <Page title="Runs">
-  {#snippet sub()}<span>Training runs, newest first. Select up to four to compare their curves.</span>{/snippet}
+  {#snippet sub()}<span>Training runs, newest first.</span>{/snippet}
   <!-- Phones: one header row (this line and New run); Compare lives in the list's own header row, by the checkboxes. -->
   {#snippet subPhone()}<span>Training runs, newest first.</span>{/snippet}
   {#snippet actions()}
     {#if runs.data?.length !== 0}
       <span class="compare">
-        <Gate reason={offline ? OFFLINE_REASON : selected.length < 2 ? 'Select 2–4 runs to compare' : null}>
+        <!-- What Compare needs, in words beside it (a disabled button's tooltip never shows to touch or the keyboard). -->
+        {#if runs.data && !offline}<span class="cmp-hint" role="status" data-gate-why>{compareHint(selected.length)}</span>{/if}
+        <Gate reason={offline ? OFFLINE_REASON : compareReason(selected.length)}>
           {#snippet children(why)}
             <Button variant={comparing ? 'primary' : 'secondary'} icon={GitCompare} disabled={!!why} aria-describedby={why} href={href(`/runs/compare?ids=${selected.join(',')}`)}>
               Compare{#if selected.length}<span class="num count">{selected.length}</span>{/if}
@@ -181,24 +188,27 @@
     {/if}
   {/snippet}
 
-  <!-- Filters only with runs to filter (or while they load): not over an empty or failed list, as on Models and Datasets. -->
-  {#if runs.data ? runs.data.length > 0 : !runs.error}<div class="list-toolbar">
+  <!-- The toolbar is always here, so the table never moves between states (DESIGN_DIRECTION §2.8): over an empty or
+       failed list it is disabled and shows no counts. -->
+  <div class="list-toolbar">
     <div class="lt-filter"><Segmented
       label="Filter runs by status"
       bind:value={filter}
+      disabled={!filterable}
       options={[
-        { value: 'all', label: 'All', meta: runs.data ? String(count('all')) : undefined },
-        { value: 'active', label: 'Active', meta: runs.data ? String(count('active')) : undefined },
-        { value: 'completed', label: 'Finished', meta: runs.data ? String(count('completed')) : undefined },
-        { value: 'failed', label: 'Failed', meta: runs.data ? String(count('failed')) : undefined },
+        { value: 'all', label: 'All', meta: runs.data?.length ? String(count('all')) : undefined },
+        { value: 'active', label: 'Active', meta: runs.data?.length ? String(count('active')) : undefined },
+        { value: 'completed', label: 'Finished', meta: runs.data?.length ? String(count('completed')) : undefined },
+        { value: 'failed', label: 'Failed', meta: runs.data?.length ? String(count('failed')) : undefined },
       ]}
     /></div>
-    <div class="lt-search"><Input icon={Search} bind:value={query} placeholder="Filter by name, model or dataset" aria-label="Filter runs" /></div>
-  </div>{/if}
+    <div class="lt-search"><Input icon={Search} bind:value={query} placeholder="Filter by name, model or dataset" aria-label="Filter runs" disabled={!filterable} /></div>
+  </div>
 
   <Panel pad="none">
-    <!-- One table frame for every state: the header row stays, and an empty or failed list says so inside it. -->
-    <div class="scroll" class:state={runs.data ? shown.length === 0 : !!runs.error}>
+    <!-- One table frame for every state: with no rows (empty, no match, an error) it drops its column heads and says
+         so inside it, so no header row of eleven columns sits over a one-line message. -->
+    <div class="scroll" class:state={!rowsOrLoading}>
       <!-- Row checkboxes show on hover and focus, on selected rows, and on every row once one is selected (picking). -->
       <table
         class="table runs"
@@ -207,10 +217,10 @@
         aria-busy={!runs.data}
         use:rowNav={{ toggle: (row) => toggle(row.dataset.id ?? '') }}
       >
-        <thead>
+        {#if rowsOrLoading}<thead>
           <tr>
             <!-- One geometry in every state (DESIGN_DIRECTION 7): each column's width is fixed here, on the header row
-                 that loading, empty, error and loaded share; the run's name takes what is left. -->
+                 that loading and loaded share; the run's name takes what is left. -->
             <th class="check"><span class="sr-only">Select for comparison</span></th>
             <th>Run</th>
             <th style:width="112px">Status</th>
@@ -223,7 +233,7 @@
             <th class="r hide-md" style:width="96px">Created</th>
             <th class="act" style:width="40px"><span class="sr-only">Actions</span></th>
           </tr>
-        </thead>
+        </thead>{/if}
         <tbody>
           {#if runs.error && !runs.data}
             <TableState cols={COLS}><ErrorState error={runs.error} retry={() => runs.refresh()} title="Could not load runs" /></TableState>
@@ -325,7 +335,7 @@
       <div class="rows-head" class:slot={menuSlot && !choosing}>
         {#if choosing}
           <Button variant="ghost" onclick={() => ((picking = false), (selected = []))}>Cancel</Button>
-          <Gate reason={offline ? OFFLINE_REASON : selected.length < 2 ? 'Select 2–4 runs to compare' : null}>
+          <Gate reason={offline ? OFFLINE_REASON : compareReason(selected.length)}>
             {#snippet children(why)}
               <Button variant={comparing ? 'primary' : 'secondary'} icon={GitCompare} disabled={!!why} aria-describedby={why} href={href(`/runs/compare?ids=${selected.join(',')}`)}>
                 Compare{#if selected.length}<span class="num count">{selected.length}</span>{/if}
@@ -337,6 +347,7 @@
         {/if}
         <span class="col" aria-hidden="true">Best mAP50-95</span>
       </div>
+      {#if choosing && !offline}<p class="rows-hint" role="status" data-gate-why>{compareHint(selected.length)}</p>{/if}
       <ul class="rows" class:choosing>
         {#each shown as r (r.id)}
           {@const on = selected.includes(r.id)}
@@ -407,6 +418,20 @@
   }
   .compare {
     display: contents;
+  }
+  /* The prerequisite, beside the action it gates: 12 px secondary, one line. */
+  .cmp-hint,
+  .rows-hint {
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--text-secondary);
+  }
+  .cmp-hint {
+    align-self: center;
+    white-space: nowrap;
+  }
+  .rows-hint {
+    display: none;
   }
   .scroll {
     overflow-x: auto;
@@ -532,9 +557,8 @@
   }
   /* Below 1024 Created hides too (.hide-md), so the table fits from 768 px up, checkbox gutter included. */
   @media (max-width: 767px) {
-    /* Phones show the stacked rows below; the table frame stays only to hold an empty or error state. */
-    .scroll:not(.state),
-    .scroll.state thead {
+    /* Phones show the stacked rows below; the table frame stays only to hold an empty or error state (no column heads at any width). */
+    .scroll:not(.state) {
       display: none;
     }
     .rows {
@@ -569,6 +593,15 @@
     }
     .compare {
       display: none;
+    }
+    /* Phones: under Cancel and Compare, on the rows' edge, before the first row (one rule under both). */
+    .rows-head:has(+ .rows-hint) {
+      border-bottom: 0;
+    }
+    .rows-hint {
+      display: block;
+      padding: 0 var(--space-4) var(--space-3);
+      border-bottom: 1px solid var(--line-subtle);
     }
     .col {
       margin-left: auto;

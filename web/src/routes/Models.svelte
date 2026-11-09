@@ -4,7 +4,7 @@
   import Search from '@lucide/svelte/icons/search';
   import { hub } from '$lib/api/index.svelte';
   import { Resource } from '$lib/api/resource.svelte';
-  import type { Model, Run } from '$lib/api/types';
+  import type { Dataset, Model, Run } from '$lib/api/types';
   import { ago, bytes, compact, date, metric, num, sizeIn, sizeUnit } from '$lib/format';
   import { prefs } from '$lib/prefs.svelte';
   import { href, router } from '$lib/router.svelte';
@@ -26,6 +26,7 @@
   import { rowNav } from '$lib/ui/rowNav';
   import { unlike, versusYolo26n } from '$lib/benchmarks';
   import { origin, originTip } from '$lib/lineage';
+  import { filterLabel, groupKey, groupLabel, rankKey, scoreContext, splitLabel, type ScoreContext } from '$lib/scoreSummary';
   import { loadThroughput, measuredLatency, measuredTraining } from '$lib/throughput';
 
   setCrumbs({ label: 'Models' });
@@ -62,17 +63,22 @@
     return run ? origin(run.config.weights, modelById) : null;
   };
 
-  // mAP is only comparable on the same validation data: a model is evaluated on its run's dataset, so the list is
-  // grouped by it and each group is ranked on its own. Imported weights carry no dataset and are never ranked.
-  const IMPORTED = '~imported';
-  const UNKNOWN = '~unknown';
-  const dsName = $derived(new Map((datasets.data ?? []).map((d) => [d.id, d.name])));
-  const evalSet = (m: Model): { key: string; label: string } => {
-    if (!m.run_id) return { key: IMPORTED, label: 'Imported' };
-    const dsId = runById.get(m.run_id)?.config.dataset_id;
-    if (!dsId) return { key: UNKNOWN, label: 'Unknown dataset' };
-    return { key: dsId, label: dsName.get(dsId) ?? dsId };
+  // A score compares only with scores on the same dataset and split (lib/scoreSummary): a trained model is scored on
+  // its run's dataset, on its validation split or, when the dataset has none, its training split. The list is grouped
+  // by that, each group headed by what its scores are on ("Validation split of fasteners") and ranked on its own.
+  // Published weights and imported files have no known split here: a group each, after the datasets, never ranked.
+  const dsById = $derived(new Map<string, Dataset>((datasets.data ?? []).map((d) => [d.id, d])));
+  const evalSet = (m: Model) => {
+    const ctx = scoreContext(m, runById, dsById);
+    return { key: groupKey(ctx), label: groupLabel(ctx), filter: filterLabel(ctx), ctx, ranked: rankKey(ctx) !== null };
   };
+  /** Groups that are not ranked (published, imported, unknown split): no "best", after the ranked ones, in this order. */
+  const otherRank = (k: string) => (k === '~published' ? 1 : k === '~imported' ? 2 : k.startsWith('~') ? 3 : 0);
+  const splitRank = (s: string | null) => (s === 'val' ? 0 : s === 'test' ? 1 : 2);
+  const groupOrder = (a: { key: string; ctx: ScoreContext }, b: { key: string; ctx: ScoreContext }) =>
+    otherRank(a.key) - otherRank(b.key) ||
+    (a.ctx.datasetName ?? '').localeCompare(b.ctx.datasetName ?? '') ||
+    splitRank(a.ctx.split) - splitRank(b.ctx.split);
 
   // Sizes in one unit for the column, named in its header (prefs.units: MiB or MB).
   const cols: Col[] = $derived([
@@ -105,22 +111,21 @@
   }
 
   const matches = (m: Model, q: string) =>
-    !q || `${m.name} ${m.arch} ${m.id} ${sourceName(m)} ${evalSet(m).label}`.toLowerCase().includes(q);
+    !q || `${m.name} ${m.arch} ${m.id} ${sourceName(m)} ${evalSet(m).ctx.datasetName ?? ''}`.toLowerCase().includes(q);
 
-  /** Groups in display order (named datasets A–Z, then imported, then unknown), each with its rows sorted. */
+  /** Groups in display order (datasets A–Z, validation first, then published, imported, unknown), rows sorted. */
   const groups = $derived.by(() => {
     const q = query.trim().toLowerCase();
     const col = cols.find((c) => c.key === sortKey) ?? cols[0]!;
     const sign = sortDir === 'asc' ? 1 : -1;
-    const by = new Map<string, { key: string; label: string; rows: Model[] }>();
+    const by = new Map<string, ReturnType<typeof evalSet> & { rows: Model[] }>();
     for (const m of models.data ?? []) {
       const e = evalSet(m);
       if ((dsFilter !== 'all' && e.key !== dsFilter) || !matches(m, q)) continue;
       if (!by.has(e.key)) by.set(e.key, { ...e, rows: [] });
       by.get(e.key)!.rows.push(m);
     }
-    const rank = (k: string) => (k === IMPORTED ? 1 : k === UNKNOWN ? 2 : 0);
-    const out = [...by.values()].sort((a, b) => rank(a.key) - rank(b.key) || a.label.localeCompare(b.label));
+    const out = [...by.values()].sort(groupOrder);
     for (const g of out)
       g.rows.sort((a, b) => {
         const x = col.get(a);
@@ -133,16 +138,17 @@
   const shownCount = $derived(groups.reduce((a, g) => a + g.rows.length, 0));
   /** Rows to sort, or their skeleton: the sort mark shows only then. */
   const hasRows = $derived(models.data ? shownCount > 0 : !models.error);
+  /** Models to filter, or on their way: the toolbar is live (else it stays in place, disabled). */
+  const hasData = $derived(models.data ? models.data.length > 0 : !models.error);
 
   /**
-   * Each evaluation dataset's best model (highest mAP50-95), marked with tertiary "best" text whatever the sort: within
-   * a group the scores compare, across groups they do not, so no mark spans datasets (and none on Imported, whose
-   * models were evaluated on different data).
+   * Each comparable group's best model (highest mAP50-95), marked with tertiary "best" text whatever the sort: within
+   * a group the scores compare, across groups they do not, so no mark spans groups (and none on an unranked one).
    */
   const best = $derived.by(() => {
     const ids = new Set<string>();
     for (const g of groups) {
-      if (g.key === IMPORTED || g.key === UNKNOWN || g.rows.length < 2) continue;
+      if (!g.ranked || g.rows.length < 2) continue;
       const top = g.rows.reduce<Model | null>((b, m) => ((m.metrics?.map50_95 ?? -1) > (b?.metrics?.map50_95 ?? -1) ? m : b), null);
       if (top?.metrics) ids.add(top.id);
     }
@@ -151,18 +157,16 @@
 
 
   const dsOptions = $derived.by(() => {
-    const keys = new Map<string, { label: string; n: number }>();
+    const keys = new Map<string, ReturnType<typeof evalSet> & { n: number }>();
     for (const m of models.data ?? []) {
       const e = evalSet(m);
-      const k = keys.get(e.key) ?? { label: e.label, n: 0 };
+      const k = keys.get(e.key) ?? { ...e, n: 0 };
       k.n++;
       keys.set(e.key, k);
     }
-    const named = [...keys].filter(([k]) => k !== IMPORTED && k !== UNKNOWN).sort((a, b) => a[1].label.localeCompare(b[1].label));
-    const rest = [...keys].filter(([k]) => k === IMPORTED || k === UNKNOWN);
     return [
       { value: 'all', label: 'All', meta: String(models.data?.length ?? 0) },
-      ...[...named, ...rest].map(([value, { label, n }]) => ({ value, label, meta: String(n) })),
+      ...[...keys.values()].sort(groupOrder).map((k) => ({ value: k.key, label: k.filter, meta: String(k.n) })),
     ];
   });
   // What the rows shown hold, said once at the list's end (base.css .list-foot).
@@ -175,56 +179,73 @@
   const benchUnlike = versusYolo26n.filter((v) => unlike[v.metric]).length;
 </script>
 
+<!-- What a group's scores are on: "Validation split of fasteners" (the dataset linked), or an unranked group's name. -->
+{#snippet groupHead(g: { label: string; ctx: ScoreContext; ranked: boolean; rows: Model[] })}
+  {#if g.ranked && g.ctx.split && g.ctx.datasetId}
+    <span>{splitLabel(g.ctx.split)} of <a class="g-name" href={href(`/datasets/${g.ctx.datasetId}`)}>{g.ctx.datasetName}</a></span>
+  {:else}
+    <span>{g.label}</span>
+  {/if}
+  <span class="faint num">{g.rows.length}</span>
+  {#if !g.ranked}<span class="faint">not ranked</span>{/if}
+{/snippet}
+
 <Page title="Models">
   <!-- One fixed line: the counts live at the list's end, so nothing here changes as the list loads. -->
-  {#snippet sub()}<span>Trained weights and imported <span class="mono">.folo</span> files, ranked per evaluation dataset.</span>{/snippet}
+  {#snippet sub()}<span>Trained, published and imported weights, ranked within each evaluation dataset and split.</span>{/snippet}
   <!-- Phones: one line, so the list starts 16 px under it. -->
-  {#snippet subPhone()}<span>Ranked per evaluation dataset.</span>{/snippet}
+  {#snippet subPhone()}<span>Ranked per dataset and split.</span>{/snippet}
 
-  {#if !models.error && (!models.data || models.data.length > 0)}
-    <!-- The list toolbar (base.css): one row on laptops and up; tablets and phones put the filter field on a row of its own. -->
-    <div class="list-toolbar">
-      <div class="lt-filter">
-      {#if models.data}
-        <div class="seg" data-scrolls><Segmented label="Evaluation dataset" bind:value={dsFilter} options={dsOptions} /></div>
-        <!-- Phones: every dataset in a native picker; a strip that scrolls sideways hides the last ones. -->
-        <div class="ds-pick">
-          <label for="models-ds">Dataset</label>
-          <Select id="models-ds" bind:value={dsFilter} options={dsOptions.map((o) => ({ value: o.value, label: `${o.label} · ${o.meta}` }))} />
-        </div>
-      {:else}
-        <!-- The same two controls at their loaded size: the dataset strip (a picker on phones). -->
-        <div class="seg ctl-sk" style:width="320px"><Skeleton h="100%" r="var(--radius-md)" /></div>
-        <div class="ds-pick" aria-hidden="true">
-          <span class="ds-label">Dataset</span>
-          <span class="ctl-sk"><Skeleton h="100%" r="var(--radius-md)" /></span>
-        </div>
-      {/if}
+  <!-- The list toolbar (base.css): one row on laptops and up; tablets and phones put the filter field on a row of its
+       own. It is always here, so the table never moves between states (DESIGN_DIRECTION §2.8): over an empty or failed
+       list it is disabled, "All" alone and no counts. -->
+  <div class="list-toolbar">
+    <div class="lt-filter">
+    {#if models.data?.length}
+      <div class="seg" data-scrolls><Segmented label="Evaluation dataset" bind:value={dsFilter} options={dsOptions} /></div>
+      <!-- Phones: every dataset in a native picker; a strip that scrolls sideways hides the last ones. -->
+      <div class="ds-pick">
+        <label for="models-ds">Dataset</label>
+        <Select id="models-ds" bind:value={dsFilter} options={dsOptions.map((o) => ({ value: o.value, label: `${o.label} · ${o.meta}` }))} />
       </div>
-        <div class="lt-search"><Input bind:value={query} icon={Search} placeholder="Filter by name, arch or run" aria-label="Filter models" type="search" /></div>
+    {:else if models.data || models.error}
+      <div class="seg"><Segmented label="Evaluation dataset" value="all" disabled options={[{ value: 'all', label: 'All' }]} /></div>
+      <div class="ds-pick">
+        <label for="models-ds">Dataset</label>
+        <Select id="models-ds" value="all" disabled options={[{ value: 'all', label: 'All' }]} />
+      </div>
+    {:else}
+      <!-- The same two controls at their loaded size: the dataset strip (a picker on phones). -->
+      <div class="seg ctl-sk" style:width="320px"><Skeleton h="100%" r="var(--radius-md)" /></div>
+      <div class="ds-pick" aria-hidden="true">
+        <span class="ds-label">Dataset</span>
+        <span class="ctl-sk"><Skeleton h="100%" r="var(--radius-md)" /></span>
+      </div>
+    {/if}
     </div>
-  {/if}
+    <div class="lt-search"><Input bind:value={query} icon={Search} placeholder="Filter by name, arch or run" aria-label="Filter models" type="search" disabled={!hasData} /></div>
+  </div>
 
   <Panel pad="none">
-    <div class="scroll" class:state={(!!models.data && shownCount === 0) || (!!models.error && !models.data)}>
+    <!-- With no rows (empty, no match, an error) the frame drops its column heads and holds the state alone. -->
+    <div class="scroll" class:state={!hasRows}>
       <table class="table models" aria-busy={!models.data} aria-label="Models by evaluation dataset" use:rowNav>
-        <thead>
+        {#if hasRows}<thead>
           <tr>
-            <!-- With no rows (empty, no match, an error) the headers are plain labels: no sort mark over a message. -->
             {#each cols as c (c.key)}
               <SortHeader
                 label={c.label}
                 class={hideCls(c)}
                 align={c.num ? 'right' : 'left'}
                 width={c.w}
-                dir={sortKey === c.key && hasRows ? sortDir : null}
-                disabled={!models.data || shownCount === 0}
+                dir={sortKey === c.key ? sortDir : null}
+                disabled={!models.data}
                 onsort={() => sortBy(c)}
               />
             {/each}
 
           </tr>
-        </thead>
+        </thead>{/if}
         {#if models.error && !models.data}
           <tbody><TableState cols={cols.length}><ErrorState error={models.error} retry={() => models.refresh()} title="Could not load models" /></TableState></tbody>
         {:else if models.data?.length === 0}
@@ -263,18 +284,13 @@
             <tbody>
               <tr class="group">
                 <th colspan={cols.length} scope="colgroup">
-                  {#if g.key === IMPORTED || g.key === UNKNOWN}
-                    <span>{g.label}</span>
-                  {:else}
-                    <a class="g-name" href={href(`/datasets/${g.key}`)}>{g.label}</a>
-                  {/if}
-                  <span class="faint num">{g.rows.length}</span>
+                  {@render groupHead(g)}
                 </th>
               </tr>
               {#each g.rows as m (m.id)}
                 {@const parent = parentOf(m)}
                 <tr class="link" data-row aria-label={m.name} onclick={() => router.go(`/models/${m.id}`)}>
-                  <td><a class="name" href={href(`/models/${m.id}`)} title={m.id} onclick={(e) => e.stopPropagation()}>{m.name}</a></td>
+                  <td><a class="name" href={href(`/models/${m.id}`)} title={m.about ?? m.id} onclick={(e) => e.stopPropagation()}>{m.name}</a></td>
                   <td><Ident value={m.arch} class="faint" /></td>
                   <td class="r spec hide-lg" title={m.classes.slice(0, 12).join(', ') + (m.classes.length > 12 ? ', …' : '')}>{m.classes.length}</td>
                   <td class="r spec hide-md">{m.imgsz}</td>
@@ -331,13 +347,13 @@
         <section aria-label={g.label}>
           <!-- The value column is named once, on the first group's header, not under every value. -->
           <h2 class="m-group">
-            {g.label} <span class="faint num">{g.rows.length}</span>
+            <span class="g-head">{@render groupHead(g)}</span>
             {#if gi === 0}<span class="m-col">mAP50-95</span>{/if}
           </h2>
           <ul>
             {#each g.rows as m (m.id)}
               <li>
-                <a href={href(`/models/${m.id}`)}>
+                <a href={href(`/models/${m.id}`)} title={m.about}>
                   <span class="m-main">
                     <span class="name truncate">{m.name}</span>
                     <span class="m-meta num"><Meta line><Ident value={m.arch} /><span>{m.imgsz} px</span><span>{compact(m.params)}</span><span>{bytes(m.bytes, prefs.units)}</span></Meta></span>
@@ -534,9 +550,8 @@
     display: none;
   }
   @media (max-width: 767px) {
-    /* Phones show the grouped rows below; the table frame stays only to hold an empty or error state. */
-    .scroll:not(.state),
-    .scroll.state thead {
+    /* Phones show the grouped rows below; the table frame stays only to hold an empty or error state (no column heads at any width). */
+    .scroll:not(.state) {
       display: none;
     }
     /* The summary wraps under the title, on the title's edge (past the chevron). */
@@ -577,6 +592,12 @@
     }
     .m-group .faint {
       font-weight: var(--weight-regular);
+    }
+    .g-head {
+      min-width: 0;
+    }
+    .g-head .faint {
+      margin-left: var(--space-2);
     }
     li + li {
       border-top: 1px solid var(--line-subtle);

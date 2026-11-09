@@ -266,6 +266,43 @@ export const scenes = [
     },
   },
   {
+    // Server PR #140: published weights (folo-n-coco, `folo weights pull`) in Start from, a group of their own. Picked,
+    // they set the size ("folo-n, from folo-n-coco" above the picker), their `about` is the field's hint, and the
+    // command names them by their published name.
+    name: 'run-new-published',
+    path: '/runs/new',
+    fullPage: true,
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
+    setup: async (page) => {
+      await until(page, 'input#name');
+      for (let t = 0; t < 8000 && !(await page.locator('select#weights option[value="folo-n-coco"]').count()); t += 250) await page.clock.runFor(250);
+      await page.selectOption('select#weights', 'folo-n-coco');
+      await until(page, '.a-from');
+      if (await page.locator('.summary details.cli > summary').isVisible()) await page.locator('.summary details.cli > summary').click();
+      await page.clock.runFor(1000);
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // Server PR #140: a POST refused with `501 not_supported` (the server restarted without tensor cores after the page
+    // loaded): the server's words at the Mixed precision field, never a toast, and, from the capabilities read again,
+    // the switch off with the way to turn tensor cores back on.
+    name: 'run-new-amp-refused',
+    path: '/runs/new',
+    search: 'scenario=amp-refused',
+    fullPage: true,
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
+    setup: async (page) => {
+      await until(page, 'input#amp');
+      await page.locator('.amp .switch').click();
+      await page.locator('form.layout').evaluate((f) => /** @type {HTMLFormElement} */ (f).requestSubmit());
+      await until(page, '#amp-error');
+      await until(page, '#amp-why');
+      await page.clock.runFor(1000);
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
     // The end-to-end head (TrainConfig.head "o2o"): Advanced opened and the switch on, with its one line; the Summary's
     // Head row and the CLI command (opened) carry it.
     name: 'run-new-e2e',
@@ -398,18 +435,20 @@ export const scenes = [
       await page.locator('.aug-toggle').click();
     },
   },
-  // Plans of 100 and 150 epochs: the x axis stays "By epoch"; each line ends in its run's status mark.
+  // One run trained 150 epochs, the others 23 to 61: the x axis defaults to "By progress" (the header says why, "one run
+  // trained far longer"), so the three shorter runs are not squeezed into the first 40 % of an epoch axis; each line ends
+  // in its run's status mark.
   { name: 'run-compare', path: '/runs/compare?ids=run_7d1e,run_c19a,run_5be3,run_a2f0', viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
   {
-    // "By progress": every run over its planned epochs, so the failed and stopped runs end where they ended. On a tablet
-    // the longer qualifier wraps under the metric tabs and the axis control stays on their row, as with "By epoch".
-    name: 'run-compare-progress',
+    // "By epoch", chosen by hand over the default "By progress": one epoch scale to the longest plan. On a tablet the
+    // header keeps one layout whatever the axis (the qualifier wraps under the metric tabs, the control on their row).
+    name: 'run-compare-epoch',
     path: '/runs/compare?ids=run_7d1e,run_c19a,run_5be3,run_a2f0',
     fullPage: false,
     viewports: ['desktop', 'tablet', 'mobile'],
     setup: async (page) => {
       await until(page, '.chip .key');
-      await page.getByRole('radio', { name: 'By progress' }).click();
+      await page.getByRole('radio', { name: 'By epoch' }).click();
       await page.mouse.move(0, 0);
     },
   },
@@ -498,6 +537,20 @@ export const scenes = [
       if (vp === 'desktop' || vp === 'laptop') await until(page, '#config dd');
       else await page.getByRole('tab', { name: 'Config' }).click();
       await page.locator('#config').scrollIntoViewIfNeeded();
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // Server PR #140 (`run_cli`): the run's `folo train` command (GET /api/runs/{id}/cli) closes its Config, under
+    // "In PowerShell:" on one copyable line. Phones and tablets: the Config section. The whole page: the harness shoots
+    // from the top, and Config sits below the charts.
+    name: 'run-cli',
+    path: '/runs/run_c19a',
+    fullPage: true,
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
+    setup: async (page, { vp }) => {
+      if (vp !== 'desktop' && vp !== 'laptop') await page.getByRole('tab', { name: 'Config' }).click();
+      await until(page, '#config .cli pre.line');
       await page.mouse.move(0, 0);
     },
   },
@@ -1143,7 +1196,22 @@ export const scenes = [
       await page.locator('#engine-speed summary', { hasText: 'How this was measured' }).click();
     },
   },
-  { name: 'playground-empty', path: '/playground', viewports: ['desktop', 'laptop', 'tablet', 'mobile'], setup: (page) => until(page, 'button.sample') },
+  {
+    // The empty Playground. Phones are shot as the touch-only devices they are: "Choose an image to detect objects", no
+    // drag-and-drop or Ctrl V hint (DropZone, the shared touch detection).
+    name: 'playground-empty',
+    path: '/playground',
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
+    setup: async (page, { vp }) => {
+      if (vp === 'mobile') {
+        const cdp = await page.context().newCDPSession(page);
+        await cdp.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
+        await page.reload({ waitUntil: 'networkidle' });
+        await page.clock.runFor(2000);
+      }
+      await until(page, 'button.sample');
+    },
+  },
   {
     // Server inference ran out of GPU memory (507): the cause, the hint, and the ways out (this browser, a smaller model),
     // in a strip above the image (where the result would be), which stays whole.
@@ -1174,7 +1242,7 @@ export const scenes = [
       });
       await page.reload({ waitUntil: 'networkidle' });
       await page.clock.runFor(2000);
-      await until(page, '.runon-note');
+      await until(page, '.vbar-note');
     },
   },
   {
@@ -1186,7 +1254,7 @@ export const scenes = [
     fullPage: false,
     viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
     setup: async (page, { vp }) => {
-      await until(page, '.runon-note');
+      await until(page, '.vbar-note');
       if (vp === 'desktop' || vp === 'laptop') await page.locator('.runon .tip').last().hover();
       else await page.mouse.move(0, 0);
       await page.clock.runFor(800);
@@ -1265,7 +1333,15 @@ export const scenes = [
   { name: 'settings', path: '/settings', viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
   { name: 'overview-empty', path: '/', search: 'scenario=empty', viewports: ['desktop', 'mobile'] },
   { name: 'overview-loading', path: '/', search: 'scenario=loading', viewports: ['desktop', 'laptop', 'mobile'] },
-  { name: 'overview-error', path: '/', search: 'scenario=error', viewports: ['desktop', 'mobile'] },
+  // Nothing loads: one recovery block on the page (Retry, Connection settings), not four panels each saying so.
+  { name: 'overview-error', path: '/', search: 'scenario=error', viewports: ['desktop', 'laptop', 'mobile'] },
+  // The server stops answering after the first loads: the page keeps what it has under one stale-data notice (the runs
+  // poll every 5 s, so the first failed poll is past 5 s).
+  { name: 'overview-stale', path: '/', search: 'scenario=stale', advance: 7000, viewports: ['desktop', 'mobile'] },
+  // A model scored on its training split (fasteners-mini has no validation images): Best models tags its score
+  // ("Training split"), ranks it only within its own dataset and split, and counts imported and published weights apart.
+  { name: 'overview-train-split', path: '/', search: 'scenario=train-split', viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
+  { name: 'models-train-split', path: '/models', search: 'scenario=train-split', viewports: ['desktop', 'mobile'] },
   { name: 'runs-empty', path: '/runs', search: 'scenario=empty', viewports: ['desktop', 'mobile'] },
   // Empty and error states sit in the table frame (header row, the message inside, a few rows tall).
   { name: 'runs-error', path: '/runs', search: 'scenario=error', viewports: ['desktop', 'laptop', 'mobile'] },
@@ -1467,6 +1543,31 @@ export const scenes = [
       }),
   ),
   {
+    // Server PR #140 (`gpu_pool`): FOLO's GPU memory in Settings › System: in use, cached and the peak, in the one size
+    // format, the device beside it (the whole page: the panel sits near the bottom).
+    name: 'settings-gpu-pool',
+    path: '/settings',
+    fullPage: true,
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
+    setup: async (page) => {
+      await until(page, '#system .pool');
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // Server PR #140: published weights listed as models, their own group ("Published weights") after the datasets.
+    name: 'models-published',
+    path: '/models',
+    viewports: ['desktop', 'laptop', 'mobile'],
+  },
+  {
+    // The published weights' page: "published weights" in its meta line, its Source what they are.
+    name: 'model-published',
+    path: '/models/folo-n-coco',
+    fullPage: true,
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
+  },
+  {
     // The server's own words opened under Driver report: wrapped prose in a well, copyable whole.
     name: 'settings-system-report',
     path: '/settings',
@@ -1529,6 +1630,24 @@ export const scenes = [
       await until(page, '.rows li');
       await page.getByRole('button', { name: 'Select to compare' }).click();
       await page.locator('.rows li .r-check').nth(1).click();
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // Four runs picked, the most Compare takes: the line under the selection says so, and the other boxes are off.
+    name: 'runs-selected-four',
+    path: '/runs',
+    fullPage: false,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page, { vp }) => {
+      if (vp === 'mobile') {
+        await until(page, '.rows li');
+        await page.getByRole('button', { name: 'Select to compare' }).click();
+        for (let i = 0; i < 4; i++) await page.locator('.rows li .r-check').nth(i).click();
+      } else {
+        await until(page, 'tr[data-row]');
+        for (let i = 0; i < 4; i++) await page.locator('tr[data-row] .check label').nth(i).click();
+      }
       await page.mouse.move(0, 0);
     },
   },

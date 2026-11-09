@@ -762,5 +762,52 @@
       "seed": 0,
       "name": "r6-n-2"
     }
+  },
+  {
+    "name": "fine-tune from published weights",
+    "command": "folo train --data D:/folo-dogfood3/r6 --weights folo-n-coco --epochs 15 --batch 16 --imgsz 640 --head o2m --name r6-n-2",
+    "argv": [
+      "train",
+      "--data",
+      "D:/folo-dogfood3/r6",
+      "--weights",
+      "folo-n-coco",
+      "--epochs",
+      "15",
+      "--batch",
+      "16",
+      "--imgsz",
+      "640",
+      "--head",
+      "o2m",
+      "--name",
+      "r6-n-2"
+    ],
+    "expect": {
+      "data": "D:/folo-dogfood3/r6",
+      "model": null,
+      "weights": "folo-n-coco",
+      "epochs": 15,
+      "batch": 16,
+      "imgsz": 640,
+      "device": "auto",
+      "optimizer": "auto",
+      "lr0": 0.01,
+      "amp": false,
+      "head": "o2m",
+      "mosaic": 1,
+      "mixup": 0,
+      "hsv": [
+        0.015,
+        0.7,
+        0.4
+      ],
+      "fliplr": 0.5,
+      "scale": 0.5,
+      "translate": 0.1,
+      "close_mosaic": 10,
+      "seed": 0,
+      "name": "r6-n-2"
+    }
   }
 ]

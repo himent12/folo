@@ -30,7 +30,7 @@
   import LineChart, { type Series } from '$lib/charts/LineChart.svelte';
   import { niceDomain, unitDomain, unitTop, UNIT_ZOOM_BELOW, UNIT_ZOOM_NOTE, withLabelRow } from '$lib/charts/domain';
   import { nearest } from '$lib/charts/downsample';
-  import { defaultAxis, runEnd, runX } from '$lib/charts/runAxis';
+  import { axisReason, AXIS_REASON, runEnd, runX } from '$lib/charts/runAxis';
   import { conf, deviceName, duration, metric } from '$lib/format';
   import { batchSetting, closeMosaicSetting, headSetting, lrSetting, optimizerSetting, precisionSetting, settingText, warmupSetting, type Setting } from './run/resolved';
   import { href, router } from '$lib/router.svelte';
@@ -68,11 +68,14 @@
   let cursor = $state<number | null>(null);
 
   const chosen = $derived(ids.map((id) => runs.data?.find((r) => r.id === id)).filter((r): r is Run => !!r));
-  // Runs planned for very different lengths (30 vs 150 epochs) would crush the short ones into the start of an epoch
-  // axis: then the axis defaults to "By progress" (each run over its planned epochs, ../lib/charts/runAxis), and the axis
-  // says why. Every run is divided by its plan, so a run that failed or stopped early ends where it ended.
+  // Runs planned for very different lengths (30 vs 150 epochs), or one run that trained over twice as long as every
+  // other (150 epochs against 38, 61 and 23), would crush the short ones into the start of an epoch axis: then the axis
+  // defaults to "By progress" (each run over its planned epochs, ../lib/charts/runAxis), and the header says why. Every
+  // run is divided by its plan, so a run that failed or stopped early ends where it ended. Chosen over fitting the axis
+  // to the shorter runs: no run's line is cut off, and the same toggle switches back to "By epoch".
   let xChoice = $state<Axis | null>(null);
-  const x = $derived<Axis>(xChoice ?? defaultAxis(chosen));
+  const reason = $derived(axisReason(chosen));
+  const x = $derived<Axis>(xChoice ?? (reason ? 'progress' : 'epoch'));
   const xAuto = $derived(xChoice === null && x === 'progress');
   const X_OPTIONS: { value: Axis; label: string }[] = [
     { value: 'epoch', label: 'By epoch' },
@@ -80,7 +83,7 @@
   ];
   // The x axis is named in the chart's header, as on every chart (DESIGN_DIRECTION §2.4), never under the plot: the
   // normalised axis names its unit; chosen for you, it also says why.
-  const xQual = $derived(x === 'progress' ? `by progress, % of planned epochs${xAuto ? ' · plans differ in length' : ''}` : 'by epoch');
+  const xQual = $derived(x === 'progress' ? `by progress, % of planned epochs${xAuto && reason ? ` · ${AXIS_REASON[reason]}` : ''}` : 'by epoch');
   let hint = $state<string | null>(null);
   // Colours follow the run, not its position: removing one run never repaints the others.
   let slots = $state<Record<string, number>>({});
@@ -203,8 +206,8 @@
   };
   const setX = (v: Axis) => (xChoice = v);
 
-  // A cell is a Setting (./run/resolved): identifiers (an architecture, a checkpoint, a named optimizer) in mono like
-  // the chips and every other screen (ui/Ident), prose ("From scratch", "auto") in sans. Where the server resolved a
+  // A cell is a Setting (./run/resolved): identifiers (an architecture, a checkpoint) in mono like the chips and every
+  // other screen (ui/Ident), prose ("From scratch") and named optimizers ("AdamW") in sans. Where the server resolved a
   // run's config (`Run.resolved`), the optimizer, LR and batch are what it trains with, the request a note beside them.
   const plain = (value: string): Setting => ({ value });
   const ident = (value: string): Setting => ({ value, ident: true });
@@ -276,6 +279,10 @@
   const SETTING_COL = 152;
   const PAIR_SETTING_COL = 104;
   const RUN_COL_MIN = 136;
+  /** A few runs across a wide panel: bounded run columns and an empty last one (`.rest`, DESIGN_DIRECTION §2.7), so two
+   *  runs' values sit side by side, never 500 px apart across 1,200 px. */
+  const RUN_COL_BOUND = 224;
+  const laptopUp = new MediaQuery(media.laptopUp, true);
 
   // Phones compare two runs at a time: a baseline and one other, fully in view and paged with ‹ ›; values that differ
   // from the baseline's are marked. "All runs" opens the whole table (it scrolls). The baseline is its own choice (the
@@ -293,6 +300,7 @@
     });
   });
   const pairMode = $derived(narrow && chosen.length > 2 && !allRuns);
+  const bounded = $derived(!pairMode && laptopUp.current && chosen.length <= 3);
   const base = $derived(chosen.find((r) => r.id === baselineId) ?? chosen[0]);
   const others = $derived(chosen.filter((r) => r !== base));
   /** Makes `r` the baseline; the run it replaces takes the other column, so the pair on screen stays the same two. */
@@ -410,7 +418,7 @@
                 {#each shown as r (r.id)}
                   <!-- The key in a column of its own beside the name, so a name that wraps (at its hyphens) keeps its
                        left edge and never squeezes the key. -->
-                  <th>
+                  <th style:width={bounded ? `${RUN_COL_BOUND}px` : undefined}>
                     <span class="th" style:--c={fill(r.id)}
                       ><i data-pattern={SLOT_PATTERN[slotOf(r.id)]}></i><span class="th-name" class:truncate={!pairMode} title={pairMode ? undefined : r.name}>{r.name}</span
                       >{#if pairMode && r === base}<span class="base-tag">Baseline</span>{:else if pairMode}<button
@@ -423,12 +431,14 @@
                     >
                   </th>
                 {/each}
+                {#if bounded}<th class="rest" aria-hidden="true"></th>{/if}
               </tr>
             </thead>
             <tbody>
               <tr>
                 <td class="k">Status</td>
                 {#each shown as r (r.id)}<td><StatusBadge status={r.status} plain /></td>{/each}
+                {@render rest()}
               </tr>
               <tr>
                 <td class="k">Best mAP50-95</td>
@@ -436,6 +446,7 @@
                   {@const win = sameData && r === chosen[bestIdx] && chosen.length > 1}
                   <td class="num" class:winner={win}>{metric(r.best?.map50_95)}{#if win}<span class="tag">best</span>{/if}</td>
                 {/each}
+                {@render rest()}
               </tr>
               <tr>
                 <td class="k">Precision · recall</td>
@@ -447,6 +458,7 @@
                       >{:else}—{/if}
                   </td>
                 {/each}
+                {@render rest()}
               </tr>
               {#each diffRows as [k, f] (k)}
                 <tr>
@@ -463,11 +475,12 @@
                         >{:else}{@render cell(f(r))}{/if}</td
                     >
                   {/each}
+                  {@render rest()}
                 </tr>
               {/each}
               {#if sameRows.length}
                 <tr class="fold">
-                  <td colspan={shown.length + 1}>
+                  <td colspan={shown.length + 1 + (bounded ? 1 : 0)}>
                     <button aria-expanded={showSame} onclick={() => (showSame = !showSame)}>
                       {showSame ? 'Hide' : 'Show'} {sameRows.length} identical {sameRows.length === 1 ? 'setting' : 'settings'}
                     </button>
@@ -478,6 +491,7 @@
                     <tr>
                       <td class="k">{k}</td>
                       {#each shown as r (r.id)}<td class="num cfg">{@render cell(f(r))}</td>{/each}
+                      {@render rest()}
                     </tr>
                   {/each}
                 {/if}
@@ -489,6 +503,8 @@
     {/if}
   {/if}
 </Page>
+
+{#snippet rest()}{#if bounded}<td class="rest" aria-hidden="true"></td>{/if}{/snippet}
 
 {#snippet cell(v: Setting)}{#if v.ident}<Ident value={v.value} />{:else}<span class="val" class:whole={v.value.length <= 14} data-fact>{v.value}</span>{/if}{#if v.note}<Note text={v.note} fact />{/if}{/snippet}
 

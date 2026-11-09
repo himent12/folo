@@ -31,6 +31,9 @@ function rules(theme) {
     // Status: text on every surface and on its own tint (badges, banners); solid dots and icons are marks.
     ...STATUS.map((s) => ({ fg: `${s}.text`, on: [...SURFACES, ...tinted(`${s}.muted`)], min: TEXT })),
     ...STATUS.map((s) => ({ fg: `${s}.solid`, on: SURFACES, min: MARK })),
+    // The solid destructive button (ui/Button `destructive`, a dialog's confirm): its label on its fill, at rest and on
+    // hover (round 24: white on danger.solid was 4.37:1 in light, and the hover mix made it worse).
+    { fg: 'text.inverse', on: ['danger.fill', 'danger.fill_hover'], min: TEXT },
     // Waiting states: text.secondary on bg.active.
     { fg: 'text.secondary', on: tinted('bg.active'), min: TEXT },
     // Charts: tick labels are text on both plot surfaces; light series and context curves are lines.

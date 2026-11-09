@@ -23,7 +23,8 @@ export function showShortcuts() {
  * A touch-only device (`(hover: none) and (pointer: coarse)`: a phone or tablet without a mouse). It gets no shortcuts
  * reference (DESIGN_DIRECTION §9): no palette entry, no "Show shortcuts", and `?` does not open it.
  */
-export const touchOnly = () => typeof matchMedia !== 'undefined' && matchMedia('(hover: none) and (pointer: coarse)').matches;
+export const TOUCH_ONLY = '(hover: none) and (pointer: coarse)';
+export const touchOnly = () => typeof matchMedia !== 'undefined' && matchMedia(TOUCH_ONLY).matches;
 
 /**
  * Every shortcut the reference lists. `single`: a single-character key that Settings can turn off (ui/keyPrefs); the

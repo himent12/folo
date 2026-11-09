@@ -74,6 +74,14 @@
   // Queue control (servers that list `queue_control`, docs/API.md): the run's place, Start next, Move up / down.
   const system = new Resource((s) => hub.api.system(s));
   const queueCtl = $derived(hasFeature(system.data, 'queue_control'));
+  // The run's `folo train` command on the server's machine (servers that list `run_cli`): Config shows it under "In
+  // PowerShell:", and the palette copies it. Keyed by run, so another run's command never shows while it loads.
+  const cli = new Resource(async (s) => {
+    const rid = id;
+    if (!rid || !hasFeature(system.data, 'run_cli')) return null;
+    return { id: rid, cli: (await hub.api.runCli(rid, s)).cli };
+  });
+  const runCli = $derived(cli.data && cli.data.id === id ? cli.data.cli : null);
   const place = $derived(run?.status === 'queued' && queueCtl ? (run.queue_position ?? null) : null);
   /** The runs waiting, front first (this one among them). */
   const queue = $derived(
@@ -225,6 +233,8 @@
       out.push({ id: 'run-resume', label: `Resume ${r.name}`, match: ['Resume run'], icon: Play, run: () => void resume() });
     out.push({ id: 'run-compare', label: `Compare ${r.name}`, match: ['Compare run'], icon: GitCompare, run: () => router.go(`/runs/compare?ids=${r.id}`) });
     out.push({ id: 'run-copy-id', label: 'Copy run id', match: [r.id], icon: Copy, run: () => void copyText(r.id, 'run id') });
+    const line = runCli;
+    if (line) out.push({ id: 'run-copy-cli', label: 'Copy CLI command', match: ['folo train', 'PowerShell'], icon: Copy, run: () => void copyText(line, 'CLI command') });
     return out;
   });
 
@@ -251,9 +261,12 @@
      will fill stay compact until there is data, and the config is in its rail. -->
 {#snippet waiting()}
   {#if place !== null && place > 1}
-    <!-- Behind other waiting runs: the one in front of it, then what trains now. -->
-    Starts after {#if before}<a class="link" href={href(`/runs/${before.id}`)}>{before.name}</a>{#if place > 2}{' '}and {place - 2} more{/if}{:else}{place - 1} queued {place === 2 ? 'run' : 'runs'}{/if}.
-    {#if ahead}<a class="link" href={href(`/runs/${ahead.id}`)}>{ahead.name}</a> is training{#if ahead.eta_s !== null}, about {eta(ahead.eta_s)} left{/if}.{/if}
+    <!-- Behind other waiting runs: the one in front of it, and in brackets what trains now, so two run names never
+         run together as two sentences ("…shapes-hard-l. fasteners-s is training"). -->
+    Starts after {#if before}<a class="link" href={href(`/runs/${before.id}`)}>{before.name}</a>{#if place > 2}{' '}and {place - 2} more{/if}{:else}{place - 1} queued {place === 2 ? 'run' : 'runs'}{/if}{#if ahead}{' '}(<a
+        class="link"
+        href={href(`/runs/${ahead.id}`)}>{ahead.name}</a
+      >{' '}is training now{#if ahead.eta_s !== null}, about {eta(ahead.eta_s)} left{/if}){/if}.
   {:else if ahead}
     Starts when <a class="link" href={href(`/runs/${ahead.id}`)}>{ahead.name}</a> finishes{#if ahead.eta_s !== null}, in about {eta(ahead.eta_s)}{/if}.
   {:else}
@@ -379,7 +392,7 @@
           {#if wideQueueItems.length}<Menu label="More run actions" items={wideQueueItems} />{/if}
         </span>
       {:else if !active}
-        <span class="wide-only"><Button variant="ghost" icon={Trash} aria-label="Delete run" title="Delete run" onclick={() => (deleteOpen = true)} /></span>
+        <span class="wide-only"><Button variant="danger" icon={Trash} aria-label="Delete run" title="Delete run" onclick={() => (deleteOpen = true)} /></span>
       {/if}
       <!-- Phones: the state action stays visible, everything else goes behind one overflow button. -->
       <span class="phone-only"><Menu label="More run actions" items={moreItems} /></span>
@@ -406,7 +419,7 @@
            empty frame, and no panel stretches to its neighbour's height. Below 1024 px the queue leads; phones show
            the config's essentials, the rest folded (the work before the reference). -->
       <div class="waiting">
-        <div class="w-main"><ConfigPanel config={run.config} resolved={run.resolved} datasetName={dataset?.name} weights={lineage} essential={phone.current} /></div>
+        <div class="w-main"><ConfigPanel config={run.config} resolved={run.resolved} datasetName={dataset?.name} weights={lineage} essential={phone.current} cli={runCli} /></div>
         <div class="w-side">
           {#if place !== null && queue.length}
             <Panel title="Queue" meta="{waitingCount} waiting" pad="none" id="queue">
@@ -474,7 +487,7 @@
       </div>
       <aside class="rail" aria-label="Per-class results and config">
         <div class="part" data-part="classes"><PerClass classes={dataset?.classes ?? []} epochs={live.epochs} version={live.version} loading={live.loading} compact /></div>
-        <div class="part" data-part="config"><ConfigPanel config={run.config} resolved={run.resolved} datasetName={dataset?.name} weights={lineage} compact /></div>
+        <div class="part" data-part="config"><ConfigPanel config={run.config} resolved={run.resolved} datasetName={dataset?.name} weights={lineage} compact cli={runCli} /></div>
       </aside>
     </div>
     {/if}

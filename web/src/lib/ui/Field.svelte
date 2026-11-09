@@ -2,7 +2,8 @@
   /**
    * Label + control + hint/error, laid out consistently. The control is the child snippet; pass `for` = its id, and
    * mark the control invalid (`invalid` on Input / Select / Segmented) while `error` is set. The error carries a danger
-   * icon as well as its colour, so it is never red text alone.
+   * icon as well as its colour, so it is never red text alone. Where a valid value can be derived from what was typed,
+   * `fix` offers it as one click after the message ("Try my-dataset"), an inline action in ink.
    */
   import type { Snippet } from 'svelte';
   import CircleAlert from '@lucide/svelte/icons/circle-alert';
@@ -14,6 +15,7 @@
     error,
     children,
     aside,
+    fix,
   }: {
     label: string;
     for?: string;
@@ -22,6 +24,8 @@
     error?: string | null;
     children: Snippet;
     aside?: Snippet;
+    /** A one-click correction shown after the error: `label` is the whole button text ("Try my-dataset"). */
+    fix?: { label: string; apply: () => void } | null;
   } = $props();
 </script>
 
@@ -33,7 +37,9 @@
   {@render children()}
   {#if error}
     <p class="msg error" id={htmlFor ? `${htmlFor}-error` : undefined} role="alert">
-      <CircleAlert size={14} strokeWidth={1.75} aria-hidden="true" /><span>{error}</span>
+      <CircleAlert size={14} strokeWidth={1.75} aria-hidden="true" /><span
+        >{error}{#if fix}{' '}<button type="button" class="fix" onclick={fix.apply}>{fix.label}</button>{/if}</span
+      >
     </p>
   {:else if hint}
     <p class="msg" id={htmlFor ? `${htmlFor}-hint` : undefined}>{#each hint.split('`') as text, i (i)}{#if i % 2}<code>{text}</code>{:else}{text}{/if}{/each}</p>
@@ -75,6 +81,36 @@
     align-items: flex-start;
     gap: var(--space-1);
     color: var(--danger-text);
+  }
+  /* The offered correction: an inline action in ink (never a status hue), underlined so it reads as one. */
+  .fix {
+    display: inline;
+    padding: 0;
+    border: 0;
+    background: none;
+    font: inherit;
+    color: var(--text-primary);
+    text-decoration: underline;
+    text-underline-offset: 3px;
+    text-decoration-color: var(--line-strong);
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  /* Touch: a 48 px tall target around the 16 px line (DESIGN_DIRECTION §2.9). */
+  @media (pointer: coarse) {
+    .fix {
+      position: relative;
+    }
+    .fix::after {
+      content: '';
+      position: absolute;
+      inset: -16px -4px;
+    }
+  }
+  @media (hover: hover) {
+    .fix:hover {
+      text-decoration-color: currentColor;
+    }
   }
   /* The icon sits on the first line's centre (16 px line, 14 px icon). */
   .msg.error :global(svg) {

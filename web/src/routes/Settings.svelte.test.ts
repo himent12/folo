@@ -38,6 +38,23 @@ afterEach(() => {
 });
 
 describe('Settings', () => {
+  it('jumps to a section from the strip below 1024 px: every section listed, focus moved onto the one chosen', async () => {
+    hub.api = new MockApi('normal', 0);
+    c = mount(Settings, { target });
+    const jump = target.querySelector<HTMLElement>('nav.jump')!;
+    await until(() => jump.textContent?.includes('System'), 'the System section');
+    expect([...jump.querySelectorAll('a')].map((a) => a.textContent)).toEqual(['Connection', 'Appearance', 'Units', 'Shortcuts', 'System', 'About']);
+    const scroll = vi.fn();
+    const system = target.querySelector<HTMLElement>('#system')!;
+    system.scrollIntoView = scroll;
+    [...jump.querySelectorAll('a')].find((a) => a.textContent === 'System')!.click();
+    flushSync();
+    expect(scroll).toHaveBeenCalledWith({ block: 'start' });
+    expect(document.activeElement).toBe(system);
+    expect(jump.querySelector('a.on')?.textContent).toBe('System');
+    expect(jump.querySelector('a.on')?.getAttribute('aria-current')).toBe('location');
+  });
+
   it('says which theme is current in its own card and in its radio’s name', () => {
     hub.api = new MockApi('normal', 0);
     prefs.theme = 'light';
@@ -76,6 +93,30 @@ describe('Settings', () => {
     const recs = [...pre.querySelectorAll('.rec')];
     expect(recs.length).toBeGreaterThan(1);
     expect(pre.textContent).toBe(recs.map((r) => r.textContent).join('\n'));
+  });
+});
+
+describe("Settings › System: FOLO's GPU memory (gpu_pool)", () => {
+  it('shows what FOLO holds on the GPU, in use, cached and the peak, in the one size format', async () => {
+    hub.api = new MockApi('normal', 0);
+    prefs.units = 'binary';
+    c = mount(Settings, { target });
+    const row = await until(() => [...target.querySelectorAll('#system .setting')].find((r) => r.querySelector('p')?.textContent === "FOLO's GPU memory"), 'the GPU memory row');
+    // One meta item each (ui/Meta draws the separators); under 1 GiB the format steps down to MiB, as everywhere.
+    expect([...row.querySelectorAll('.pool .ui-meta > span')].map((x) => x.textContent)).toEqual([
+      '4.6 GiB in use',
+      '901.1 MiB cached',
+      'peak 5.3 GiB',
+    ]);
+    expect(row.querySelector('.device')?.textContent).toBe('gpu:0');
+    expect(row.textContent).not.toMatch(/VRAM/);
+  });
+
+  it('shows nothing where the server reports no pool', async () => {
+    hub.api = new MockApi('empty', 0);
+    c = mount(Settings, { target });
+    await until(() => target.querySelector('#system'), 'the System panel');
+    expect(target.textContent).not.toContain("FOLO's GPU memory");
   });
 });
 

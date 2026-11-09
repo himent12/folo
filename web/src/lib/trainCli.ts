@@ -9,10 +9,12 @@ import type { Model, TrainConfig } from '$lib/api/types';
 export type WeightsRef = { kind: 'path'; value: string } | { kind: 'placeholder'; value: string; file: string };
 
 /**
- * The model's weights as `folo train --weights` takes them: its file on the server (`Model.path`, an additive field),
- * else a placeholder naming the file. The CLI takes a path or a published name, never a server model id.
+ * The model's weights as `folo train --weights` takes them: published weights by their name (`folo weights pull` caches
+ * them where the CLI looks, as the server's own command names them), else its file on the server (`Model.path`, an
+ * additive field), else a placeholder naming the file. The CLI takes a path or a published name, never a server id.
  */
 export function weightsRef(id: string, model: Model | undefined): WeightsRef {
+  if (model?.source === 'published') return { kind: 'path', value: model.id };
   const path = modelPath(model);
   if (path) return { kind: 'path', value: path };
   const file = `${model?.name ?? id}.folo`;

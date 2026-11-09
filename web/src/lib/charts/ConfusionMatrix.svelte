@@ -7,10 +7,12 @@
    * empty cell is the panel with a hairline grid; the ramp's floor is stepped (under 1 %, 1 %, 5 %, then even from
    * 10 %, ./confusionInk), so a 2 % and an 8 % confusion never look alike. `reveal(r, c)` lets a summary elsewhere
    * point at one cell: it scrolls the cell into view and makes it the active cell, whose counts the readout states. A
-   * matrix that scrolls sideways (phones) has its navigation above the grid: a small whole-matrix overview (every cell
-   * as a square, a band over the columns in view; a tap brings those columns into view) beside a column-range control
-   * that pages through the columns, a jump to the background column (the misses) and the readout. Cells are picked in
-   * the full matrix, large enough to hit.
+   * matrix that scrolls sideways (phones) pages through whole columns: its cells are sized so a page fills the width
+   * exactly and the scroll snaps to column starts, so no column is half in view and "Columns 1–6 of 9" is what is seen
+   * (./cmOverview pageFit); the rotated label row is as tall as the longest label in view. Its navigation is one 44 px
+   * row above the grid: a small whole-matrix overview (every cell as a square, a band over the columns in view; a tap
+   * brings those columns into view) beside the column-range control and a jump to the background column (the misses).
+   * The readout, a tap hint at rest, sits under the grid. Cells are picked in the full matrix, large enough to hit.
    */
   import ChevronLeft from '@lucide/svelte/icons/chevron-left';
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
@@ -18,7 +20,8 @@
   import ChevronsRight from '@lucide/svelte/icons/chevrons-right';
   import { classColor } from '$lib/design/tokens';
   import { prefs } from '$lib/prefs.svelte';
-  import { overviewGeometry, overviewHit, overviewWindow } from './cmOverview';
+  import { tick } from 'svelte';
+  import { overviewGeometry, overviewHit, overviewWindow, pageFit, pageRange } from './cmOverview';
   import { FLOOR, labelHigh, rampShare, sharePct } from './confusionInk';
   // Cells take their ink share from the ramp; labels are pure white or black, switched near the ramp's luminance
   // crossover (see ./confusionInk).
@@ -65,32 +68,45 @@
   /** Fully visible prediction columns (1-based) while the matrix scrolls sideways; null when every column fits. */
   let range = $state<{ first: number; last: number } | null>(null);
   const fixed = $derived(minCell !== undefined);
+  /** Row labels (96 px) plus the grid gap: where the columns start. */
+  const HEAD = 98;
+  /**
+   * Pages of whole columns while the matrix scrolls sideways (./cmOverview pageFit): the cell size that fits exactly
+   * `cols` columns beside the row labels, so no column is ever half in view and the counter names what is seen. The
+   * scroll snaps to column starts. Null when every column fits.
+   */
+  let fit = $state<{ cols: number; cell: number } | null>(null);
+  /** Height of the longest column label in view, px: the rotated label row is sized to it, not to one off-screen. */
+  let labelH = $state<number | null>(null);
+  function measure() {
+    const min = parseFloat(getComputedStyle(root).getPropertyValue('--min-cell')) || minCell || 22;
+    const next = pageFit(root.clientWidth, HEAD, min, 2, n);
+    if (next?.cols !== fit?.cols || next?.cell !== fit?.cell) fit = next;
+  }
   function onscroll() {
-    moreRight = root.scrollLeft + root.clientWidth < root.scrollWidth - 1;
-    const head = root.querySelector<HTMLElement>('.rowhead');
-    const cell = root.querySelector<HTMLElement>('.cell');
-    if (!head || !cell || root.scrollWidth <= root.clientWidth + 1) {
+    // A deferred call (the next tick, an observer) can land after the matrix has gone.
+    if (!root) return;
+    if (!fit) {
+      moreRight = root.scrollLeft + root.clientWidth < root.scrollWidth - 1;
       range = null;
+      labelH = null;
       return;
     }
-    // Columns start after the pinned row labels; each is one cell plus the 2 px grid gap. The faded right edge
-    // (24 px) does not count as visible.
-    const step = cell.offsetWidth + 2;
-    const left = root.scrollLeft;
-    const end = left + root.clientWidth - head.offsetWidth - (moreRight ? 12 : 0);
-    const first = Math.min(n, Math.ceil(left / step - 0.05) + 1);
-    const last = Math.max(first, Math.min(n, Math.floor(end / step + 0.05)));
-    range = { first, last };
+    moreRight = false;
+    const step = fit.cell + 2;
+    range = pageRange(root.scrollLeft, step, fit.cols, n);
+    // Partly visible columns count while a page slides in, so a label coming into view is never cut at the top.
+    const lo = Math.max(0, Math.floor(root.scrollLeft / step));
+    const hi = Math.min(n - 1, Math.ceil((root.scrollLeft + root.clientWidth - HEAD) / step) - 1);
+    const lbls = [...root.querySelectorAll<HTMLElement>('.colhead .lbl')].slice(lo, hi + 1);
+    labelH = Math.max(0, ...lbls.map((l) => Math.min(l.scrollHeight, 72)));
   }
   const behavior = (): ScrollBehavior => (matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth');
-  /** Pages the columns: the next (or previous) screenful, sideways only. */
+  /** Pages the columns: the next (or previous) page of whole columns, sideways only. */
   function page(dir: 1 | -1) {
-    const head = root.querySelector<HTMLElement>('.rowhead');
-    const cell = root.querySelector<HTMLElement>('.cell');
-    if (!head || !cell) return;
-    const step = cell.offsetWidth + 2;
-    const cols = Math.max(1, Math.floor((root.clientWidth - head.offsetWidth - 12) / step));
-    root.scrollTo({ left: Math.max(0, root.scrollLeft + dir * cols * step), behavior: behavior() });
+    if (!fit || !range) return;
+    const step = fit.cell + 2;
+    root.scrollTo({ left: Math.max(0, (range.first - 1 + dir * fit.cols) * step), behavior: behavior() });
   }
   /** Scrolls to the last columns (the background column, the misses) or back to the first. */
   function toEdge(dir: 1 | -1) {
@@ -113,9 +129,26 @@
   }
   $effect(() => {
     if (!fixed) return;
-    onscroll();
-    const ro = new ResizeObserver(onscroll);
+    measure();
+    const ro = new ResizeObserver(() => measure());
     ro.observe(root);
+    return () => ro.disconnect();
+  });
+  // A new page size lays the grid out again; the range and the label row follow once it has.
+  $effect(() => {
+    if (!fixed) return;
+    void fit;
+    void n;
+    let live = true;
+    void tick().then(() => live && onscroll());
+    return () => (live = false);
+  });
+  // A label's length changes when the font settles: the label row is measured again, so it never cuts a name short.
+  $effect(() => {
+    if (!fixed) return;
+    void n;
+    const ro = new ResizeObserver(() => onscroll());
+    for (const l of root.querySelectorAll('.colhead .lbl')) ro.observe(l);
     return () => ro.disconnect();
   });
 
@@ -165,7 +198,7 @@
 </script>
 
 {#snippet readout()}
-  <p class="readout" class:faint={!hovered} id="{uid}-readout">
+  <p class="readout" class:faint={!hovered} class:below={!!range} id="{uid}-readout">
     {#if hovered}
       {@const h = hovered}
       <b>{names[h.r]}</b> predicted as <b>{names[h.c]}</b>:
@@ -181,10 +214,10 @@
 {/snippet}
 
 {#if range && band}
-  <!-- Above the matrix, so it is in reach before the tall grid, and one row so the first cell starts soon: the whole
-       matrix as a thumbnail (a pointer shortcut; the grid stays the keyboard and screen-reader path), the columns in
-       view with a way to page through them, and a direct jump to the background column (the misses, last). The active
-       cell's figures follow on one line. -->
+  <!-- Above the matrix, so it is in reach before the tall grid, and one 44 px row so the first cell starts soon: the
+       whole matrix as a thumbnail (a pointer shortcut; the grid stays the keyboard and screen-reader path), the columns
+       in view with a way to page through them, and a direct jump to the background column (the misses, last). The
+       active cell's figures are under the grid. -->
   <div class="ov">
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
     <svg class="ov-map" width={geo.size} height={geo.size} viewBox="0 0 {geo.size} {geo.size}" aria-hidden="true" onclick={onmap}>
@@ -214,10 +247,11 @@
       {/if}
     </div>
   </div>
-  {@render readout()}
 {/if}
 <!-- svelte-ignore a11y_interactive_supports_focus -->
-<div class="cm" class:fixed class:more-r={moreRight} style:--n={n} style:--min-cell={minCell !== undefined ? `${minCell}px` : undefined} style:--max-cell="{maxCell}px" role="grid" aria-label={label} aria-describedby="{uid}-readout" bind:this={root} {onkeydown} {onscroll}>
+<!-- A paged matrix is a deliberate scroller (`data-scrolls`): whole columns, with the pager and the overview saying
+     what is beyond the edge instead of a fade over a half column. -->
+<div class="cm" data-scrolls={fit ? true : undefined} class:fixed class:paged={!!fit} class:more-r={moreRight} style:--fit={fit ? `${fit.cell}px` : undefined} style:--label-h={labelH !== null ? `${labelH}px` : undefined} style:--n={n} style:--min-cell={minCell !== undefined ? `${minCell}px` : undefined} style:--max-cell="{maxCell}px" role="grid" aria-label={label} aria-describedby="{uid}-readout" bind:this={root} {onkeydown} {onscroll}>
   <div class="row" role="row">
     <div class="corner" role="columnheader"><span>Predicted →</span><span>True ↓</span></div>
     {#each names as name, c (c)}
@@ -264,6 +298,7 @@
     </div>
   {/each}
 </div>
+{#if range}{@render readout()}{/if}
 {#if scale}
   <div class="scale" aria-hidden="true">
     <span class="scale-name">Share of the true class</span>
@@ -281,6 +316,8 @@
     </span>
   </div>
 {/if}
+<!-- Under the scale where every column fits; directly under the grid while it pages, so the controls above the cells are
+     one row and the hint at rest sits where the counts will be. -->
 {#if !range}{@render readout()}{/if}
 
 <style>
@@ -302,6 +339,26 @@
     overscroll-behavior-x: contain;
     /* Scrolling a cell into view stops short of the pinned labels (96 + 2 px gap) and the 24 px fade. */
     scroll-padding-inline: 98px 24px;
+  }
+  /* Pages of whole columns (pageFit): cells sized so the page fills the width, the scroll snapping to column starts,
+     and the rotated label row as tall as the longest label in view (an off-screen "background" no longer leaves an
+     empty band over short labels). */
+  .cm.paged {
+    grid-template-columns: 96px repeat(var(--n), var(--fit));
+    scroll-snap-type: x mandatory;
+    scroll-padding-inline: 98px 0;
+  }
+  .cm.paged .colhead {
+    scroll-snap-align: start;
+    min-height: 0;
+    height: calc(var(--label-h, 48px) + 16px);
+  }
+  /* A label keeps its own length (never squeezed to an ellipsis by a row measured a moment before). */
+  .cm.paged .colhead .lbl {
+    flex-shrink: 0;
+  }
+  .cm.paged .cell {
+    min-width: 0;
   }
   .cm.more-r {
     mask-image: linear-gradient(to left, transparent, #000 24px);
@@ -492,8 +549,12 @@
     gap: var(--space-2);
     min-height: 44px;
   }
-  .ov + .readout {
-    margin: var(--space-1) 0 var(--space-3);
+  /* Under a paging grid: two lines kept, so tapping a cell never moves what follows. */
+  .readout.below {
+    min-height: calc(2 * var(--type-sm-line));
+  }
+  .ov {
+    margin-bottom: var(--space-3);
   }
   .ov .sep {
     color: var(--text-tertiary);

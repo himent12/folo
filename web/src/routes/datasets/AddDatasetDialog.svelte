@@ -16,6 +16,7 @@
   import Segmented from '$lib/ui/Segmented.svelte';
   import Tabs from '$lib/ui/Tabs.svelte';
   import { toast } from '$lib/ui/toast.svelte';
+  import { NAME_RE, suggestName } from './names';
 
   type Mode = 'folder' | 'synthetic';
   let {
@@ -47,9 +48,13 @@
   let imgsz = $state<'320' | '480' | '640' | '1024'>('640');
   let seed = $state<number | null>(0);
 
-  const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
   const nameError = (v: string) =>
     !v.trim() ? 'Required.' : NAME_RE.test(v.trim()) ? null : 'Letters, digits, ".", "_" and "-" only (max 64).';
+  /** A name in error offers its nearest valid form as one click ("Try my-dataset"). */
+  const nameFix = (v: string, set: (n: string) => void) => {
+    const n = suggestName(v);
+    return n && n !== v.trim() ? { label: `Try ${n}`, apply: () => set(n) } : null;
+  };
 
   /** A folder's last path segment, as a default name. */
   const derivedName = $derived(path.trim().replace(/[\\/]+$/, '').split(/[\\/]/).pop()?.replace(/[^A-Za-z0-9._-]/g, '-') ?? '');
@@ -161,7 +166,7 @@
         <Field label="Folder" for="{uid}-path" error={show(errs.path)} hint="Absolute path on the machine running `folo serve`. Files are never modified.">
           <Input id="{uid}-path" bind:value={path} placeholder="e.g. D:/data/my-dataset" icon={FolderOpen} class="mono-input" autocomplete="off" spellcheck={false} invalid={!!show(errs.path)} aria-describedby={show(errs.path) ? `${uid}-path-error` : `${uid}-path-hint`} />
         </Field>
-        <Field label="Name" for="{uid}-name" error={show(errs.name)}>
+        <Field label="Name" for="{uid}-name" error={show(errs.name)} fix={show(errs.name) ? nameFix(folderName, (n) => (name = n)) : null}>
           <Input id="{uid}-name" bind:value={name} placeholder={derivedName || 'my-dataset'} autocomplete="off" spellcheck={false} invalid={!!show(errs.name)} aria-describedby={show(errs.name) ? `${uid}-name-error` : undefined} />
         </Field>
         <Field label="Format" hint={format === 'auto' ? 'Detects data.yaml (YOLO) or annotations/*.json (COCO).' : undefined}>
@@ -176,7 +181,7 @@
           />
         </Field>
       {:else}
-        <Field label="Name" for="{uid}-sname" error={show(errs.name)}>
+        <Field label="Name" for="{uid}-sname" error={show(errs.name)} fix={show(errs.name) ? nameFix(sName, (n) => (sName = n)) : null}>
           <Input id="{uid}-sname" bind:value={sName} autocomplete="off" spellcheck={false} invalid={!!show(errs.name)} aria-describedby={show(errs.name) ? `${uid}-sname-error` : undefined} />
         </Field>
         <Field label="Classes" for="{uid}-classes" error={show(errs.classes)} hint="Press Enter or comma to add. Up to 16.">
@@ -229,9 +234,11 @@
     </form>
   </div>
   {#snippet footer()}
+    <!-- What Register still needs, in words (a disabled button's tooltip never shows to touch or the keyboard). A field
+         in error says its own reason beside it, so this line is only for what has not been entered yet. -->
+    {#if missing}<p class="why" data-gate-why>{missing}</p>{/if}
     <Button variant="ghost" onclick={() => (open = false)}>Cancel</Button>
     <Gate {reason}>
-
       {#snippet children(why)}
         <Button variant="primary" type="submit" form="{uid}-form" loading={busy} disabled={!!why} aria-describedby={why} icon={mode === 'synthetic' ? Sparkles : FolderOpen}>
           {mode === 'folder' ? 'Register' : 'Generate'}
@@ -242,6 +249,18 @@
 </Dialog>
 
 <style>
+  .why {
+    margin-right: auto;
+    align-self: center;
+    font-size: var(--type-sm-size);
+    color: var(--text-secondary);
+  }
+  /* Phones: the footer's buttons share its width; the line goes above them. */
+  @media (max-width: 767px) {
+    .why {
+      flex-basis: 100%;
+    }
+  }
   .tabs {
     margin: 0 calc(var(--space-5) * -1);
     padding: 0 var(--space-5);

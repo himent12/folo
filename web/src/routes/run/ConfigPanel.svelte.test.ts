@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 // Run › Config with `Run.resolved` (docs/API.md): what the run trains with, the request beside it where it differs.
 import { flushSync, mount, unmount } from 'svelte';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { resolveTrain } from '$lib/api/mock/runs';
 import type { ResolvedTrain, TrainConfig } from '$lib/api/types';
 import ConfigPanel from './ConfigPanel.svelte';
@@ -47,7 +47,8 @@ describe('ConfigPanel', () => {
     // fasteners: 1920 images at batch 16 over 100 epochs is 3000 iterations: AdamW at 0.002 · 5 / (4 + 8).
     const r = rows(resolveTrain(config, 1920, 8, 120));
     expect(r['Optimizer']?.textContent).toBe('AdamW (auto)');
-    expect(r['Optimizer']?.querySelector('.mono')?.textContent).toBe('AdamW');
+    // A named optimizer is a name, in sans (Geist Mono's struck W reads as "₩").
+    expect(r['Optimizer']?.querySelector('.mono')).toBeNull();
     expect(r['Initial LR']?.textContent).toBe('0.000833 (requested 0.01)');
     expect(r['Batch × accumulate']?.textContent).toBe('16 × 4 = 64');
     expect(r['Warmup']?.textContent).toBe('360 steps (3 epochs)');
@@ -58,7 +59,7 @@ describe('ConfigPanel', () => {
 
   it('keeps the request as today without a resolution', () => {
     const r = rows(null);
-    expect(r['Optimizer']?.textContent).toBe('auto');
+    expect(r['Optimizer']?.textContent).toBe('Auto (AdamW for short runs, else SGD)');
     expect(r['Optimizer']?.querySelector('.mono')).toBeNull();
     expect(r['Initial LR']?.textContent).toBe('0.01');
     expect(r['Batch']?.textContent).toBe('16');
@@ -77,6 +78,40 @@ describe('ConfigPanel', () => {
     expect(d['Close mosaic']?.textContent).toBe('last 10 epochs');
     expect(d['Precision']?.textContent).toBe('f32');
     expect(d['Head']?.textContent).toBe('NMS (one-to-many)');
+  });
+});
+
+describe("ConfigPanel: the run's CLI command (servers that list run_cli)", () => {
+  const line = "folo train --data D:/data/fasteners --model folo-s --name 'Bob''s run'";
+  function mountWith(props: Record<string, unknown>) {
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    c = mount(ConfigPanel, { target, props: { config, ...props } });
+    flushSync();
+  }
+
+  it('shows the server’s command under "In PowerShell:" on one copyable line, in every layout', async () => {
+    for (const layout of [{}, { compact: true }, { essential: true }]) {
+      if (c) {
+        unmount(c);
+        target.remove();
+      }
+      mountWith({ cli: line, ...layout });
+      expect(target.querySelector('.cli .shell')?.textContent).toBe('In PowerShell:');
+      expect(target.querySelector('.cli pre.line')?.textContent).toBe(line);
+      expect(target.querySelector('.cli pre.line')?.getAttribute('aria-label')).toBe('PowerShell command');
+    }
+    // Copy gives `cli` exactly, quotes and all.
+    const write = vi.fn(async () => {});
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText: write }, configurable: true });
+    target.querySelector<HTMLButtonElement>('.cli button[aria-label="Copy command"]')!.click();
+    await Promise.resolve();
+    expect(write).toHaveBeenCalledWith(line);
+  });
+
+  it('shows none where the server has none', () => {
+    mountWith({ cli: null });
+    expect(target.querySelector('.cli')).toBeNull();
   });
 });
 

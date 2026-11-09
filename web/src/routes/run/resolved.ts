@@ -4,7 +4,7 @@
 // request as today.
 
 import { closeMosaicEpochs } from '$lib/api/progress';
-import type { ResolvedTrain, TrainConfig } from '$lib/api/types';
+import type { Optimizer, ResolvedTrain, TrainConfig } from '$lib/api/types';
 import { pct } from '$lib/format';
 
 /** One setting: its value, whether that value is an identifier (mono, `ui/Ident`), and a sans note after it. */
@@ -16,10 +16,19 @@ export interface Setting {
 
 const OPTIMIZER: Record<ResolvedTrain['optimizer'], string> = { sgd: 'SGD', adamw: 'AdamW' };
 
-/** "AdamW (auto)", "SGD" (asked for by name); unresolved, the request: "auto" (prose) or a named one. */
+/**
+ * An optimizer as every screen names it (New run's picker and Summary, a run's Config, Compare): "Auto (AdamW for short
+ * runs, else SGD)", "SGD", "AdamW". Named optimizers are names, set in sans like any other word: in Geist Mono the
+ * struck W of "AdamW" reads as "₩" (DESIGN_DIRECTION §2.3, identifiers vs names).
+ */
+export function optimizerLabel(o: Optimizer | ResolvedTrain['optimizer']): string {
+  return o === 'auto' ? 'Auto (AdamW for short runs, else SGD)' : OPTIMIZER[o];
+}
+
+/** "AdamW (auto)", "SGD" (asked for by name); unresolved, the request in the picker's words. Never an identifier. */
 export function optimizerSetting(config: TrainConfig, resolved: ResolvedTrain | null | undefined): Setting {
-  if (!resolved) return { value: config.optimizer, ident: config.optimizer !== 'auto' };
-  return { value: OPTIMIZER[resolved.optimizer], ident: true, note: config.optimizer === 'auto' ? '(auto)' : undefined };
+  if (!resolved) return { value: optimizerLabel(config.optimizer) };
+  return { value: optimizerLabel(resolved.optimizer), note: config.optimizer === 'auto' ? '(auto)' : undefined };
 }
 
 /** "0.001429 (requested 0.01)" when the trainer's LR differs from the request, else the one value. */

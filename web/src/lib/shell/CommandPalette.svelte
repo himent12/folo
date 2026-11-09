@@ -9,6 +9,7 @@
   import Activity from '@lucide/svelte/icons/activity';
   import Images from '@lucide/svelte/icons/images';
   import Box from '@lucide/svelte/icons/box';
+  import { scoreContext, scoreText } from '$lib/scoreSummary';
   import GitCompare from '@lucide/svelte/icons/git-compare-arrows';
   import Keyboard from '@lucide/svelte/icons/keyboard';
   import ScanSearch from '@lucide/svelte/icons/scan-search';
@@ -140,11 +141,14 @@
       icon: Images,
       run: go(`/datasets/${x.id}`),
     }));
+    // A model's score with what it is on (lib/scoreSummary): "mAP 0.604 on fasteners", "mAP 0.701 · split unknown".
+    const runById = new Map(runs.map((x) => [x.id, x]));
+    const dsById = new Map(datasets.map((x) => [x.id, x]));
     const m: Item[] = models.map((x) => ({
       id: `model-${x.id}`,
       group: 'Models',
       label: x.name,
-      hint: [{ ident: x.arch }, `mAP ${x.metrics?.map50_95.toFixed(3) ?? '—'}`],
+      hint: [{ ident: x.arch }, x.metrics ? scoreText(x.metrics.map50_95, scoreContext(x, runById, dsById)) : 'not scored'],
       icon: Box,
       run: go(`/models/${x.id}`),
     }));
@@ -272,9 +276,9 @@
       <span class="esc"><Kbd keys="Escape" subtle /></span>
       <button class="close" type="button" aria-label="Close" onclick={() => el.close()}><X size={18} /></button>
     </div>
-    <ul id="palette-list" role="listbox" bind:this={list} aria-label="Results">
+    <ul id="palette-list" class="scroll-shade" role="listbox" bind:this={list} aria-label="Results">
       {#each grouped as g (g.group)}
-        <li role="presentation" class="group">{g.group}</li>
+        <li role="presentation" class="group group-label">{g.group}</li>
         {#each g.items as { item, n } (item.id)}
           <li
             id="pi-{item.id}"
@@ -363,17 +367,17 @@
   input:focus-visible {
     outline: none;
   }
+  /* The results scroll with the dialog's edge shades (base.css .scroll-shade); 8 px under the last item, so the end of
+     the list reads as its end, clear of the footer. */
   ul {
     flex: 1;
-    overflow-y: auto;
+    min-height: 0;
     padding: var(--space-2);
     scroll-padding: var(--space-8);
   }
+  /* Type and ink: the shared group label (base.css .group-label). */
   .group {
     padding: var(--space-2) var(--space-2) var(--space-1);
-    font-size: var(--type-sm-size);
-    color: var(--text-tertiary);
-    font-weight: var(--weight-medium);
   }
   .group:not(:first-child) {
     margin-top: var(--space-1);

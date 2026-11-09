@@ -3,6 +3,8 @@ import { flushSync, mount, unmount } from 'svelte';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { hub } from '$lib/api/index.svelte';
 import { MockApi, type Scenario } from '$lib/api/mock';
+import { resetWasmProbe } from '$lib/inference/browser.svelte';
+import { prefs } from '$lib/prefs.svelte';
 import { parse, router } from '$lib/router.svelte';
 import Playground from './Playground.svelte';
 
@@ -115,6 +117,31 @@ describe('Playground on a phone', () => {
   });
 });
 
+describe('Playground on a tablet', () => {
+  const width = window.innerWidth;
+  afterEach(() => {
+    (window as unknown as { happyDOM: { setViewport(v: { width: number }): void } }).happyDOM.setViewport({ width });
+  });
+
+  // Bottom sheets are for phones (DESIGN_DIRECTION 9): round 24's tablet sheet covered Classes and Timing, clipped at
+  // the viewport. More settings is a popover anchored under its button; focus moves in, and Escape brings it back.
+  it('opens More settings as an anchored popover, not a sheet, and Escape returns focus to the button', async () => {
+    (window as unknown as { happyDOM: { setViewport(v: { width: number }): void } }).happyDOM.setViewport({ width: 820 });
+    await run('normal', 'm_hard_s');
+    await until(() => target.querySelector('#pg-panel tbody tr'), 'the detections');
+    const btn = [...target.querySelectorAll<HTMLButtonElement>('.more-btn button')].find((b) => b.textContent?.includes('More settings'))!;
+    btn.click();
+    const pop = await until(() => target.querySelector<HTMLElement>('#pg-more'), 'the popover');
+    expect(pop.classList.contains('pop')).toBe(true);
+    expect(pop.querySelector('.sheet-handle')).toBeNull();
+    await until(() => document.activeElement === pop, 'focus in the popover');
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    flushSync();
+    expect(target.querySelector('#pg-more')).toBeNull();
+    expect(document.activeElement).toBe(btn);
+  });
+});
+
 describe('Playground: detections', () => {
   it('shows scores with one precision in the table and the picked line', async () => {
     await run('normal', 'm_hard_s');
@@ -182,5 +209,36 @@ describe('Playground without the in-browser runtime (DOGFOOD-3 S5)', () => {
     flushSync();
     expect(option(g, 'CPU').disabled).toBe(false);
     expect(target.querySelector('#runon-note')?.textContent ?? '').not.toContain('runtime');
+  });
+
+  // Review of round 25: a Studio without its own runtime files, connected to another server whose build lists
+  // `web_wasm`, kept the browser choices on and failed when a model loaded. That server's word is not this page's: the
+  // page asks its own files, and they are missing.
+  it("asks its own files when another server lists web_wasm", async () => {
+    const url = prefs.serverUrl;
+    prefs.serverUrl = 'http://gpu-box:7878';
+    resetWasmProbe();
+    const fetch = vi.fn(async () => new Response(null, { status: 404 }));
+    vi.stubGlobal('fetch', fetch);
+    try {
+      const api = new MockApi('normal', 0);
+      Object.defineProperty(api, 'mock', { value: false });
+      hub.api = api;
+      hub.mode = 'live';
+      target = document.createElement('div');
+      document.body.appendChild(target);
+      router.route = parse('#/playground?model=m_shapes_s');
+      c = mount(Playground, { target });
+      const g = await until(() => target.querySelector('[role="radiogroup"][aria-label="Run the model on"]'), 'Run on');
+      expect((await api.system()).features).toContain('web_wasm');
+      await until(() => option(g, 'CPU').disabled, 'the CPU choice to turn off');
+      expect(fetch).toHaveBeenCalledWith(expect.stringContaining('folo-wasm/folo_wasm_bg.wasm'), { method: 'HEAD' });
+      expect(option(g, 'WebGPU').disabled).toBe(true);
+      expect(target.querySelector('#runon-note')?.textContent).toBe('No in-browser runtime');
+    } finally {
+      vi.unstubAllGlobals();
+      resetWasmProbe();
+      prefs.serverUrl = url;
+    }
   });
 });

@@ -18,10 +18,12 @@
   import Page from '$lib/shell/Page.svelte';
   import { setCrumbs } from '$lib/shell/crumbs.svelte';
   import { showShortcuts } from '$lib/shell/shortcuts';
+  import { fadeScroll } from '$lib/ui/fadeScroll';
   import Button from '$lib/ui/Button.svelte';
   import DriverReport from '$lib/ui/DriverReport.svelte';
   import Field from '$lib/ui/Field.svelte';
   import Kbd from '$lib/ui/Kbd.svelte';
+  import Meta from '$lib/ui/Meta.svelte';
   import { keyPrefs } from '$lib/ui/keyPrefs.svelte';
   import Input from '$lib/ui/Input.svelte';
   import Panel from '$lib/ui/Panel.svelte';
@@ -40,6 +42,8 @@
   // sits low on the page: a real server answers once its GPU is up, and the panel must not push the forms down.
   const sys = new Resource((s) => hub.api.system(s));
   const caps = $derived(sys.data?.capabilities);
+  /** FOLO's own GPU buffer pool (`gpu_pool`): absent until the server has used the GPU, and from older servers. */
+  const pool = $derived(sys.data?.gpu_pool);
   const capRows = $derived(caps ? capabilityRows(caps, sys.data?.gpus ?? []) : []);
   const capMarks: Record<CapState, typeof CircleCheck> = { on: CircleCheck, off: CircleMinus, none: CircleSlash };
 
@@ -61,11 +65,15 @@
   // Scroll-spy from geometry: the current section is the last one whose top has passed just below the top bar
   // (the first while nothing has; the last once the page is scrolled to the bottom).
   let current = $state<string>('connection');
+  /** Below 1024 px: the sticky jump strip under the top bar (the rail's place on wider screens). */
+  let jumpEl = $state<HTMLElement>();
   $effect(() => {
     let raf = 0;
     const update = () => {
       raf = 0;
-      const line = 56 + 24;
+      // Just under the sticky chrome: the top bar, and below 1024 px the jump strip under it.
+      const strip = jumpEl && jumpEl.offsetParent ? jumpEl.getBoundingClientRect().bottom : 48;
+      const line = strip + 24;
       const els = sections.map((x) => document.getElementById(x.id)).filter((e): e is HTMLElement => !!e);
       let id = els[0]?.id ?? 'connection';
       for (const e of els) if (e.getBoundingClientRect().top <= line) id = e.id;
@@ -84,6 +92,27 @@
       window.removeEventListener('resize', onscroll);
     };
   });
+
+  // The jump strip keeps the current section's link in view as the page scrolls.
+  $effect(() => {
+    void current;
+    const on = jumpEl?.querySelector<HTMLElement>('a.on');
+    if (!jumpEl || !on || !jumpEl.offsetParent) return;
+    const left = on.offsetLeft - jumpEl.offsetLeft;
+    if (left < jumpEl.scrollLeft || left + on.offsetWidth > jumpEl.scrollLeft + jumpEl.clientWidth)
+      jumpEl.scrollTo({ left: Math.max(0, left - 16), behavior: 'instant' });
+  });
+
+  /** Goes to a section: its heading clear of the sticky chrome (scroll-margin-top), and focus on the section, so the
+   *  keyboard and a screen reader continue from there. */
+  function goTo(id: string) {
+    current = id;
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.scrollIntoView({ block: 'start' });
+    if (!el.hasAttribute('tabindex')) el.setAttribute('tabindex', '-1');
+    el.focus({ preventScroll: true });
+  }
 
   // ---- connection ----
   const origin = typeof location === 'undefined' ? '' : location.origin;
@@ -135,6 +164,20 @@
 
 <Page title="Settings" narrow>
   {#snippet sub()}<span>Preferences are stored in this browser.</span>{/snippet}
+
+  <!-- Below 1024 px the rail goes: its sections as one sticky strip under the top bar, so System and About are a tap
+       away from the top of a long page. It scrolls sideways where the links do not fit (a phone). -->
+  <nav class="jump" aria-label="Settings sections" data-scrolls use:fadeScroll bind:this={jumpEl}>
+    {#each sections as s (s.id)}<a
+        href="#/settings"
+        class:on={current === s.id}
+        aria-current={current === s.id ? 'location' : undefined}
+        onclick={(e) => {
+          e.preventDefault();
+          goTo(s.id);
+        }}>{s.label}</a
+      >{/each}
+  </nav>
 
   <div class="layout">
     <div class="col">
@@ -307,6 +350,22 @@
               </div>
               <span class="mono device">{caps.device}</span>
             </div>
+            {#if pool}
+              <!-- What FOLO itself holds on the GPU (in the one size format): in use, kept for reuse, and the peak. -->
+              <div class="setting">
+                <div class="setting-text">
+                  <p>FOLO's GPU memory</p>
+                  <p class="pool num">
+                    <Meta><span>{bytes(pool.live_bytes, prefs.units)} in use</span><span>{bytes(pool.cached_bytes, prefs.units)} cached</span><span
+                        >peak {bytes(pool.peak_live_bytes, prefs.units)}</span
+                      ></Meta
+                    >
+                  </p>
+                  <p class="note">The peak is since the last run started. Cached memory goes back to the driver when a run ends, and after 30 s without predictions.</p>
+                </div>
+                <span class="mono device">{pool.device}</span>
+              </div>
+            {/if}
             <ul class="caps" aria-label="Capabilities">
               {#each capRows as c (c.id)}
                 {@const Mark = capMarks[c.state]}
@@ -354,8 +413,7 @@
           aria-current={current === s.id ? 'location' : undefined}
           onclick={(e) => {
             e.preventDefault();
-            current = s.id;
-            document.getElementById(s.id)?.scrollIntoView({ block: 'start' });
+            goTo(s.id);
           }}>{s.label}</a
         >{/each}
     </nav>
@@ -379,9 +437,10 @@
     grid-column: span 4;
   }
 
+  /* The rail sticks 16 px under the top bar (top 64), as every page's rail (DESIGN_DIRECTION §2.2). */
   .toc {
     position: sticky;
-    top: calc(var(--size-topbar) + var(--space-6));
+    top: calc(var(--size-topbar) + var(--space-4));
     display: grid;
     gap: 2px;
     padding-left: var(--space-3);
@@ -577,7 +636,6 @@
     position: relative;
     display: grid;
     gap: var(--space-2);
-    /* Rows pack to the top: a card whose label has a second line ("Current") never pushes the others' names down. */
     align-content: start;
     cursor: pointer;
   }
@@ -617,8 +675,11 @@
   .light-half {
     clip-path: polygon(100% 0, 100% 100%, 0 100%);
   }
+  /* Every card reserves the "Current" line under its name, so the three names sit at one height whichever is chosen
+     (round 24: only the chosen card's label grew a line). */
   .theme-label {
     display: grid;
+    grid-template-rows: auto var(--type-sm-line);
     justify-items: start;
   }
   .theme-name {
@@ -669,6 +730,13 @@
   }
   .device {
     font-size: var(--type-sm-size);
+    color: var(--text-secondary);
+  }
+  /* Figures people read: secondary ink (§2.3, tertiary is for skimming). */
+  .pool {
+    margin-top: 2px;
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
     color: var(--text-secondary);
   }
   .caps {
@@ -730,6 +798,9 @@
     text-align: right;
     color: var(--text-secondary);
   }
+  .jump {
+    display: none;
+  }
   @media (max-width: 1023px) {
     .layout {
       grid-template-columns: minmax(0, 1fr);
@@ -739,6 +810,78 @@
     }
     .toc {
       display: none;
+    }
+    /* A full-bleed strip on the page's background, just under the top bar: the sections as links, the current one
+       neutral (bg.active, as the rail's), a hairline under it once content scrolls beneath. */
+    .jump {
+      position: sticky;
+      top: var(--size-topbar);
+      z-index: var(--z-sticky);
+      display: flex;
+      align-items: center;
+      gap: var(--space-1);
+      height: 44px;
+      /* Full bleed: out over the page's side gutters (24 px; 16 on phones). */
+      margin: 0 calc(-1 * var(--space-6));
+      padding: 0 var(--space-5);
+      overflow-x: auto;
+      scrollbar-width: none;
+      background: var(--bg-app);
+      border-bottom: 1px solid var(--line-subtle);
+    }
+    .jump::-webkit-scrollbar {
+      display: none;
+    }
+    .jump:global([data-fade='end']) {
+      mask-image: linear-gradient(to right, #000 calc(100% - 32px), transparent);
+    }
+    .jump:global([data-fade='start']) {
+      mask-image: linear-gradient(to left, #000 calc(100% - 32px), transparent);
+    }
+    .jump:global([data-fade='both']) {
+      mask-image: linear-gradient(to right, transparent, #000 32px, #000 calc(100% - 32px), transparent);
+    }
+    .jump a {
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      height: 32px;
+      padding: 0 var(--space-3);
+      border-radius: var(--radius-md);
+      color: var(--text-secondary);
+      white-space: nowrap;
+    }
+    .jump a.on {
+      background: var(--bg-active);
+      color: var(--text-primary);
+    }
+    @media (hover: hover) {
+      .jump a:hover {
+        background: var(--bg-hover);
+        color: var(--text-primary);
+      }
+    }
+    /* A section's heading lands clear of the top bar and the strip. */
+    .col :global(section.panel) {
+      scroll-margin-top: calc(var(--size-topbar) + 44px + var(--space-4));
+    }
+  }
+  @media (max-width: 767px) {
+    .jump {
+      margin: 0 calc(-1 * var(--space-4));
+      padding: 0 var(--space-3);
+    }
+  }
+  /* Touch: 44 px targets, so the strip is 52 px. */
+  @media (max-width: 1023px) and (pointer: coarse) {
+    .jump {
+      height: 52px;
+    }
+    .jump a {
+      height: 44px;
+    }
+    .col :global(section.panel) {
+      scroll-margin-top: calc(var(--size-topbar) + 52px + var(--space-4));
     }
   }
   @media (max-width: 767px) {

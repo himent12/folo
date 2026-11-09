@@ -88,3 +88,65 @@ describe('Menu keyboard', () => {
     target.remove();
   });
 });
+
+describe('Menu on a phone', () => {
+  const width = window.innerWidth;
+  const viewport = (w: number) => (window as unknown as { happyDOM: { setViewport(v: { width: number }): void } }).happyDOM.setViewport({ width: w });
+
+  // Round 24: the queued run's ⋯ opened a popover over its callout's text. On phones a menu is the shared bottom sheet
+  // (ui/Dialog), as the loss view's options are; the action still runs and focus comes back to the trigger.
+  it('opens as the shared sheet, never a popover, and runs the action', async () => {
+    viewport(390);
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    const run = vi.fn();
+    const c = mount(Menu, { target, props: { label: 'More run actions', items: [{ label: 'Remove from queue', onclick: run }] } });
+    const trigger = target.querySelector<HTMLButtonElement>('button[aria-haspopup="menu"]')!;
+    trigger.click();
+    flushSync();
+    await tick();
+    expect(target.querySelector('.list')).toBeNull();
+    const menu = target.querySelector('dialog [role="menu"]')!;
+    expect(menu).not.toBeNull();
+    expect(menu.closest('dialog')?.querySelector('h2')?.textContent).toBe('More run actions');
+    menu.querySelector<HTMLElement>('[role="menuitem"]')!.click();
+    await tick();
+    flushSync();
+    expect(run).toHaveBeenCalledOnce();
+    unmount(c);
+    target.remove();
+    viewport(width);
+  });
+
+  // Review of round 25: every item sat at tabindex -1, so once Tab had gone from an action to the sheet's Close, neither
+  // Tab nor Shift+Tab came back to the actions (the modal sheet keeps focus inside). The item last focused stays in
+  // the tab order (roving tabindex), so the sheet's tab sequence is Close and that item.
+  it('Tab from the sheet’s Close comes back to the actions', async () => {
+    viewport(390);
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    const items = ['Start next', 'Remove from queue', 'Duplicate'].map((label) => ({ label, onclick: () => {} }));
+    const c = mount(Menu, { target, props: { label: 'More run actions', items } });
+    target.querySelector<HTMLButtonElement>('button[aria-haspopup="menu"]')!.click();
+    flushSync();
+    await tick();
+    const dialog = target.querySelector('dialog')!;
+    const menu = dialog.querySelector('[role="menu"]')!;
+    const text = (el: Element | null) => el?.textContent?.trim() || el?.getAttribute('aria-label');
+    // The modal sheet's tab sequence, in document order: what Tab and Shift+Tab cycle through.
+    const sequence = () => [...dialog.querySelectorAll<HTMLElement>('button, a[href]')].filter((el) => el.tabIndex >= 0).map(text);
+    expect(text(document.activeElement)).toBe('Start next');
+    expect(sequence()).toEqual(['Close', 'Start next']);
+    menu.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }));
+    flushSync();
+    expect(text(document.activeElement)).toBe('Remove from queue');
+    expect(sequence()).toEqual(['Close', 'Remove from queue']);
+    // Tab to Close: the action focused last keeps its place, so Tab (or Shift+Tab) from Close lands on it again.
+    dialog.querySelector<HTMLElement>('button[aria-label="Close"]')!.focus();
+    flushSync();
+    expect(sequence()).toEqual(['Close', 'Remove from queue']);
+    unmount(c);
+    target.remove();
+    viewport(width);
+  });
+});

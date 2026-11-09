@@ -73,8 +73,8 @@
   .success .icon {
     color: var(--success-text);
   }
-  .error .icon,
-  .error .title {
+  /* The error shows through its icon; the title stays ink (DESIGN_DIRECTION §2.6). */
+  .error .icon {
     color: var(--danger-text);
   }
   .info .icon {

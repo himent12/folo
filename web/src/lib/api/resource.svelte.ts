@@ -15,6 +15,13 @@ export class Resource<T> {
   loading = $state(true);
   /** True while a background refresh (poll / manual) is in flight with data already shown. */
   refreshing = $state(false);
+  /**
+   * The error of the last refresh that failed while data was shown (the data is kept, now stale); cleared by the next
+   * success. A page says it once (Overview's stale-data notice) instead of dropping what it has.
+   */
+  stale = $state.raw<unknown>(undefined);
+  /** When the data shown last arrived (ms since the epoch); null before the first success. */
+  updated = $state<number | null>(null);
   #fetcher: (signal: AbortSignal) => Promise<T>;
   #ctrl: AbortController | null = null;
   #seq = 0;
@@ -87,9 +94,12 @@ export class Resource<T> {
       if (seq !== this.#seq) return;
       this.data = v;
       this.error = undefined;
+      this.stale = undefined;
+      this.updated = Date.now();
     } catch (e) {
       if (seq !== this.#seq || (e instanceof DOMException && e.name === 'AbortError')) return;
       if (!quiet || this.data === undefined) this.error = e;
+      else this.stale = e;
     } finally {
       if (seq === this.#seq) {
         this.loading = false;

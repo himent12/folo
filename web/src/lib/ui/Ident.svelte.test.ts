@@ -43,6 +43,16 @@ describe('identifiers', () => {
     expect(bare).toEqual([]);
   });
 
+  it('never include a named optimizer, which is a name in sans ("AdamW": its struck W reads as "₩" in mono)', () => {
+    const OPTIMIZER_AS_IDENT = /<Ident[^>]*optimi[sz]/i;
+    const bare: string[] = [];
+    for (const file of svelteFiles(SRC))
+      markup(readFileSync(file, 'utf8')).forEach((line, i) => {
+        if (OPTIMIZER_AS_IDENT.test(line)) bare.push(`${relative(SRC, file)}:${i + 1}: ${line.trim()}`);
+      });
+    expect(bare).toEqual([]);
+  });
+
   it('never ride inside a plain-text label: a select option, a palette hint or a meta string', () => {
     // Text that cannot hold markup (a native <option>, a palette hint string) would set an architecture in sans: such
     // labels name the entity only (the select) or pass the identifier as its own part (`{ ident }` in the palette).

@@ -337,6 +337,8 @@
     {#if m.run_id}
       <span>trained by <a class="link" href={href(`/runs/${m.run_id}`)}>{run?.name ?? m.run_id}</a></span>
       {@render lineageNote()}
+    {:else if m.source === 'published'}
+      <span title={m.about}>published weights</span>
     {:else}
       <span>imported</span>
     {/if}
@@ -556,12 +558,16 @@
                 {#if m.classes.length > 10}<span class="faint">+{m.classes.length - 10} more</span>{/if}
               </dd>
             </div>
-            <div class="kv">
+            <div class="kv" class:stack={!m.run_id && m.source === 'published' && !!m.about}>
               <dt>Source</dt>
               <dd>
                 {#if m.run_id}
                   <a class="link" href={href(`/runs/${m.run_id}`)}>{run?.name ?? m.run_id}</a>
                   {#if context.data?.dataset}<span class="faint">{' on '}</span><a class="link" href={href(`/datasets/${context.data.dataset.id}`)}>{context.data.dataset.name}</a>{/if}
+                {:else if m.source === 'published'}
+                  <!-- `folo weights pull` weights: what they are, in the words `folo weights list` prints. -->
+                  <span>Published weights</span>
+                  {#if m.about}<span class="about">{m.about}</span>{/if}
                 {:else}
                   <span class="muted">Imported .folo file</span>
                 {/if}
@@ -647,6 +653,9 @@
         {/if}
       </aside>
     </div>
+    <!-- Phones, exploring the matrix: the way back is in the panel's heading row, so the only control row above the
+         cells is the matrix's own (overview and pages). -->
+    {#snippet cmBack()}<button type="button" class="to-list" onclick={closeMatrix}><ArrowLeft size={14} aria-hidden="true" />Back to lists</button>{/snippet}
     <!-- Full width: the matrix grows with the class count, and the rail beside it would sit empty. -->
     <div class="cm-part" class:off={!showing('confusion')}>
       <Panel
@@ -655,9 +664,12 @@
           ? 'largest share of a class first'
           : cm?.partial
             ? phone.current
-              ? `${CM_MAX} most common + Other`
+              ? `top ${CM_MAX} + Other`
               : `${CM_MAX} most common classes + Other + background`
-            : 'share of each true class'}
+            : phone.current
+              ? undefined
+              : 'share of each true class'}
+        actions={phone.current && cmExplore && cm ? cmBack : undefined}
         id="cm"
       >
         {#if cm && phone.current && !cmExplore}
@@ -694,9 +706,6 @@
             <Button class="explore" onclick={openMatrix}>Explore the matrix</Button>
           </div>
         {:else if cm}
-          {#if phone.current}
-            <button type="button" class="to-list" onclick={closeMatrix}><ArrowLeft size={14} aria-hidden="true" />Back to lists</button>
-          {/if}
           <!-- The matrix at its own size (cells up to 48 px) with a sticky rail beside it taking the rest of the width:
                what goes wrong most, ranked (each line shows its cell), and how to read the matrix. With under 300 px
                left beside the matrix the rail wraps under it; a rail 560 px or wider sets its two lists side by side.
@@ -1075,7 +1084,9 @@
     align-items: center;
     gap: var(--space-1);
     min-height: 44px;
-    margin: calc(var(--space-2) * -1) 0 var(--space-1);
+    /* A 44 px target in the 40 px heading row: it overhangs the row instead of deepening it. */
+    margin: -6px calc(var(--space-1) * -1) -6px 0;
+    padding: 0 var(--space-1);
     font-size: var(--type-sm-size);
     font-weight: var(--weight-medium);
     color: var(--text-secondary);
@@ -1320,6 +1331,25 @@
     justify-content: space-between;
     align-items: baseline;
     gap: var(--space-4);
+  }
+  /* A value with a sentence under it (published weights and what they are): the label over it, the sentence at the
+     measure, in the rail; the folded rail keeps its label column (`.two .kv` below). */
+  .kv.stack {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px;
+  }
+  .kv.stack dd {
+    display: grid;
+    gap: 2px;
+    text-align: left;
+  }
+  .about {
+    max-inline-size: var(--measure);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--text-secondary);
+    text-wrap: pretty;
   }
   /* Folded rail (up to 1199 px): labels beside their values, in two columns. */
   .details.two {

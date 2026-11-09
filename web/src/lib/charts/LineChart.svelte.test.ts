@@ -159,7 +159,9 @@ describe('LineChart layering and ticks', () => {
   });
 
   it('with recede, draws the other runs as context curves and the highlighted one in its hue, until it is let go', async () => {
-    const props = $state({ series, label: 'cmp', highlight: 'sky' as string | null, recede: true, endLabels: true });
+    // The two lines apart, so each label has a clear spot beside its end (another run's line is an obstacle).
+    const apart = [series[0]!, { ...series[1]!, points: series[1]!.points.map((p) => ({ x: p.x, y: 0.05 + p.x / 40 })) }];
+    const props = $state({ series: apart, label: 'cmp', highlight: 'sky' as string | null, recede: true, endLabels: true });
     const { target, c } = mountAt(props);
     const lines = () => [...target.querySelectorAll('path.line')] as SVGElement[];
     // The context run first, in chart.context (no inline hue) and keeping its dotted rhythm; the pinned run last in its hue.
@@ -358,6 +360,80 @@ describe('LineChart round 18', () => {
     svg.dispatchEvent(new FocusEvent('focus'));
     flushSync();
     expect(target.querySelector('.legend .hint')).toBeNull();
+    unmount(c);
+  });
+});
+
+describe('LineChart end marks (DESIGN_DIRECTION §2.4: one thing per mark)', () => {
+  const mountAt = (props: Record<string, unknown>, w = 640) => {
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    const c = mount(LineChart, { target, props: props as never });
+    Object.defineProperty(target.querySelector('.plot')!, 'clientWidth', { value: w });
+    target.querySelector('.plot')!.dispatchEvent(new Event('resize'));
+    flushSync();
+    return { target, c };
+  };
+  const pts = (n: number) => Array.from({ length: n }, (_, i) => ({ x: i + 1, y: 0.1 + i / 100 }));
+  const ring = (target: Element) => [...target.querySelectorAll('.marker .ring')].map((r) => (r as SVGElement).style.stroke);
+
+  it('draws a best ring next to the live end as one mark: the live dot inside the lime ring', () => {
+    // Round 24: best at epoch 36, live at 37, a lime "oo" on Run and Overview's live card.
+    const series = [{ id: 'm', label: 'mAP50-95', color: 'ink', end: 'live' as const, points: pts(37) }];
+    const markers = [{ x: 36, y: 0.1 + 35 / 100, label: 'best', quiet: true, color: 'lime' }];
+    const { target, c } = mountAt({ series, label: 'live', endDots: true, markers, xDomain: [0, 100] });
+    expect(target.querySelectorAll('.marker')).toHaveLength(1);
+    expect(target.querySelector('.marker[data-merged="m"]')).toBeTruthy();
+    expect(target.querySelector('.end-live')).toBeNull();
+    expect(target.querySelector('circle.end-dot')).toBeTruthy();
+    expect(ring(target)).toEqual(['lime']);
+    unmount(c);
+  });
+
+  it('draws both marks where the best epoch is well clear of the end', () => {
+    const series = [{ id: 'm', label: 'mAP50-95', color: 'ink', end: 'live' as const, points: pts(37) }];
+    const markers = [{ x: 20, y: 0.29, label: 'best', quiet: true, color: 'lime' }];
+    const { target, c } = mountAt({ series, label: 'live', endDots: true, markers, xDomain: [0, 100] });
+    expect(target.querySelectorAll('.marker')).toHaveLength(1);
+    expect(target.querySelector('.marker[data-merged]')).toBeNull();
+    expect(target.querySelector('.end-live')).toBeTruthy();
+    unmount(c);
+  });
+
+  it("never hides a failed run's cross: a best on its last epoch is an ink ring around the danger cross", () => {
+    // Round 24: run-failed ended on a lime best ring with no failure mark.
+    const series = [{ id: 'm', label: 'mAP50-95', color: 'ink', end: 'failed' as const, points: pts(23) }];
+    const markers = [{ x: 23, y: 0.1 + 22 / 100, label: 'best', quiet: true, color: 'lime' }];
+    const { target, c } = mountAt({ series, label: 'failed', endDots: true, markers, xDomain: [0, 100] });
+    const cross = target.querySelector('path.end-x') as SVGElement | null;
+    expect(cross).toBeTruthy();
+    expect(cross!.style.stroke).toBe('var(--danger-text)');
+    expect(ring(target)).toEqual(['var(--text-primary)']);
+    // The cross is painted over the ring, never under it.
+    const marks = [...target.querySelectorAll('.marker, path.end-x')];
+    expect(marks.map((m) => m.tagName.toLowerCase())).toEqual(['g', 'path']);
+    unmount(c);
+  });
+
+  it('keeps a stopped run square inside an ink ring, and a completed run end in the lime one', () => {
+    const markers = [{ x: 30, y: 0.1 + 29 / 100, label: 'best', quiet: true, color: 'lime' }];
+    const stopped = mountAt({ series: [{ id: 's', label: 's', color: 'ink', end: 'stopped' as const, points: pts(30) }], label: 's', endDots: true, markers, xDomain: [0, 100] });
+    expect(stopped.target.querySelector('rect.end-dot')).toBeTruthy();
+    expect(ring(stopped.target)).toEqual(['var(--text-primary)']);
+    unmount(stopped.c);
+    const done = mountAt({ series: [{ id: 'd', label: 'd', color: 'ink', points: pts(30) }], label: 'd', endDots: true, markers, xDomain: [0, 100] });
+    expect(done.target.querySelector('circle.end-dot')).toBeTruthy();
+    expect(ring(done.target)).toEqual(['lime']);
+    unmount(done.c);
+  });
+
+  it("draws a failed run's cross in the danger ink in a comparison too", () => {
+    const series = [
+      { id: 'a', label: 'a', color: 'red', end: 'failed' as const, points: pts(10) },
+      { id: 'b', label: 'b', color: 'blue', points: pts(30) },
+    ];
+    const { target, c } = mountAt({ series, label: 'cmp', endDots: true, xDomain: [0, 30] });
+    expect((target.querySelector('path.end-x') as SVGElement).style.stroke).toBe('var(--danger-text)');
     unmount(c);
   });
 });

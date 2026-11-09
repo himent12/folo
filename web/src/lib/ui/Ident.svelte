@@ -2,7 +2,8 @@
   /**
    * A model, checkpoint or run identifier: an architecture (`folo-s`), the checkpoint a run started from
    * (`folo-s-coco80`, `best.folo`) or a server id (`r_…`). Always mono, wherever it appears (DESIGN_DIRECTION §2.3);
-   * a run's, model's or dataset's own name, as its row, title or chip label, stays in sans. With `href` it is a link.
+   * a run's, model's or dataset's own name, as its row, title or chip label, stays in sans, and so does a named optimizer
+   * ("AdamW", through `run/resolved` `optimizerLabel`): a name, not an identifier. With `href` it is a link.
    */
   let {
     value,

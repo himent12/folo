@@ -9,6 +9,7 @@
    * trainer's warning that it was too short to learn), so one run never stacks two banners.
    */
   import type { Snippet } from 'svelte';
+  import Meta from '$lib/ui/Meta.svelte';
   import type { IconType } from '$lib/ui/types';
 
   let {
@@ -21,6 +22,7 @@
     brief = false,
     runIn = false,
     children,
+    facts,
     actions,
     more,
     moreLabel = 'Details',
@@ -39,6 +41,9 @@
     runIn?: boolean;
     /** The cause, after the title. */
     children?: Snippet;
+    /** Facts after the title instead of a sentence ("Completed in 53m 30s · best mAP50-95 0.604 at epoch 150"): one
+     *  span each, one ui/Meta line with the title, so the separator is the shared one at every width. */
+    facts?: Snippet;
     actions?: Snippet;
     /** What the disclosure opens. */
     more?: Snippet;
@@ -53,9 +58,13 @@
 
 <div class="callout {tone}" class:stack class:brief class:run-in={runIn} class:two={!!also} {role} aria-label={label}>
   <Icon size={16} aria-hidden="true" />
-  <p class="c-text">
-    <span class="c-title">{title}</span>{#if children}<span class="c-msg">{@render children()}</span>{/if}
-  </p>
+  {#if facts}
+    <p class="c-text facts"><Meta><span class="c-title">{title}</span>{@render facts()}</Meta></p>
+  {:else}
+    <p class="c-text">
+      <span class="c-title">{title}</span>{#if children}<span class="c-msg">{@render children()}</span>{/if}
+    </p>
+  {/if}
   {#if also}
     {@const AlsoIcon = also.icon}
     <span class="c-also-mark {also.tone}" aria-hidden="true"><AlsoIcon size={16} /></span>
@@ -64,7 +73,7 @@
     </p>
   {/if}
   {#if actions || more}
-    <div class="c-acts">
+    <div class="c-acts cta-row">
       {#if actions}{@render actions()}{/if}
       {#if more}
         <button type="button" class="c-more" aria-expanded={open} aria-controls="{uid}-more" onclick={() => (open = !open)}>{moreLabel}</button>
@@ -91,10 +100,17 @@
   .callout > :global(svg) {
     flex-shrink: 0;
   }
-  /* The status hue on the mark and the title only; the cause reads in text.secondary. */
-  .danger > :global(svg),
-  .danger > .c-text:not(.c-also) .c-title {
+  /* The status shows through the mark and the callout's tint only: titles and links are ink (DESIGN_DIRECTION §2.6),
+     so a red title never shouts over the cause and an amber one never turns weak in light; the cause reads in
+     text.secondary. A callout that needs action (danger, warning) is a banner, so it takes its status's muted tint. */
+  .danger > :global(svg) {
     color: var(--danger-text);
+  }
+  .callout.danger {
+    background: linear-gradient(var(--danger-muted) 0 0), var(--bg-panel);
+  }
+  .callout.warning {
+    background: linear-gradient(var(--warning-muted) 0 0), var(--bg-panel);
   }
   .success > :global(svg) {
     color: var(--success-text);
@@ -102,29 +118,22 @@
   .neutral > :global(svg) {
     color: var(--text-tertiary);
   }
-  .warning > :global(svg),
-  .warning > .c-text:not(.c-also) .c-title {
+  .warning > :global(svg) {
     color: var(--warning-text);
   }
-  /* The second line's mark and title take its own hue; its cause stays in text.secondary. */
+  /* The second line's mark takes its own hue; its title is ink and its cause text.secondary, as on the first. */
   .c-also-mark {
     display: inline-flex;
     color: var(--text-tertiary);
   }
-  .c-also-mark.warning,
-  .c-also.warning .c-title {
+  .c-also-mark.warning {
     color: var(--warning-text);
   }
-  .c-also-mark.danger,
-  .c-also.danger .c-title {
+  .c-also-mark.danger {
     color: var(--danger-text);
   }
   .c-also-mark.success {
     color: var(--success-text);
-  }
-  .c-also.success .c-title,
-  .c-also.neutral .c-title {
-    color: var(--text-primary);
   }
   /* Two lines: the actions serve both, on the right across them. */
   .two .c-acts {
@@ -144,8 +153,13 @@
     font-weight: var(--weight-medium);
     color: var(--text-primary);
   }
-  .c-msg :global(.num) {
+  .c-msg :global(.num),
+  .facts :global(.num) {
     color: var(--text-primary);
+  }
+  /* Facts: the title is the line's first item; ui/Meta draws the gap and the dot. */
+  .facts .c-title {
+    margin-right: 0;
   }
   .c-acts {
     display: flex;
@@ -271,10 +285,9 @@
     .stack .c-acts {
       grid-column: 1 / -1;
     }
+    /* The one phone button size (ui/Button's .cta-row), across the callout. */
     .stack .c-acts > :global(.btn:first-child) {
-      --h: var(--control-xl);
       flex: 1 0 100%;
-      font-size: var(--type-base-size);
     }
     .stack .c-detail {
       grid-column: 1 / -1;
@@ -288,7 +301,8 @@
     .brief > :global(svg) {
       margin-top: 0;
     }
-    .brief .c-msg {
+    .brief .c-msg,
+    .brief .facts :global(.ui-meta > :not(:first-child)) {
       display: none;
     }
     .brief .c-acts {

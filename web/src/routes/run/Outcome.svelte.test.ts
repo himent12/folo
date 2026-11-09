@@ -156,7 +156,10 @@ describe('Outcome', () => {
     const c = callouts[0]!;
     const titles = [...c.querySelectorAll('.c-title')].map((t) => t.textContent);
     expect(titles).toEqual(['Completed in 16m 00s', 'Too short to learn:']);
-    expect(c.querySelector('.c-msg')?.textContent?.replace(/\s+/g, ' ').trim()).toBe('· best mAP50-95 0.410 at epoch 22');
+    // One ui/Meta line (round 24: a hand-written dot and a double gap on phones, no separator on desktop).
+    const items = [...c.querySelectorAll('.c-text:not(.c-also) .ui-meta > *')].map((e) => e.textContent?.replace(/\s+/g, ' ').trim());
+    expect(items).toEqual(['Completed in 16m 00s', 'best mAP50-95 0.410 at epoch 22']);
+    expect(c.querySelector('.c-text:not(.c-also)')?.textContent).not.toContain('·');
     expect(c.querySelector('.c-also .c-msg')?.textContent?.trim()).toBe('125 optimizer steps');
     // The fix is the one action (no Playground for a model that learned nothing); the reasons behind Why?.
     expect(r.labels).toEqual(['Train 8 epochs', 'Why?']);

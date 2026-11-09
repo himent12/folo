@@ -72,6 +72,7 @@
   import { downsample, nearest, ticks as niceTicks } from './downsample';
   import { capTicks, logMinors, logTicks, MAX_TICKS, stepDecimals } from './domain';
   import { END_LABELS_MIN, LABEL_GAP, labelWidth, leaderOf, placeEndLabels } from './endLabels';
+  import { endMarkInk, endRingInk, mergedEnds } from './endMarks';
   import { seriesText } from './ink';
   import { prefs } from '$lib/prefs.svelte';
   import { chartHint, claimOnce, TAP_HINT_KEY } from './hint';
@@ -618,6 +619,27 @@
     return null;
   };
 
+  // A best ring that touches its line's end mark is drawn with it as one mark (./endMarks): the end mark inside the
+  // ring, at the line's end. Only markers in the x domain, and only where end marks are drawn.
+  const merges = $derived.by((): (string | null)[] => {
+    if (!endDots || !hasData) return markers.map(() => null);
+    const ends = keyed.flatMap((s) => {
+      const p = s.points[s.points.length - 1];
+      // Outer radii as drawn below: the live ring (6 px, 1.5 wide), else the 3 px mark with its halo.
+      return p && Number.isFinite(p.y) ? [{ id: s.id, end: s.end, x: x(p.x), y: y(p.y), r: s.end === 'live' ? 6.75 : 4.25 }] : [];
+    });
+    const inDomain = (m: Marker) => m.x >= xExtent[0] && m.x <= xExtent[1];
+    return mergedEnds(
+      markers.map((m) => (inDomain(m) ? { x: x(m.x), y: y(m.y) } : { x: -1e9, y: -1e9 })),
+      ends,
+    );
+  });
+  /** The marker drawn inside series `id`'s end mark, if any. */
+  const mergedInto = (id: string): Marker | null => {
+    const i = merges.indexOf(id);
+    return i < 0 ? null : (markers[i] ?? null);
+  };
+
   let tipWidth = $state(160);
   const tipLeft = $derived(hover ? hover.px + 12 + tipWidth > width - 4 : false);
 </script>
@@ -759,12 +781,24 @@
               {#if p && Number.isFinite(p.y)}
                 {@const r = receding && s.id === highlight ? 4 : 3}
                 {@const ink = contextual(s) ? 'var(--chart-context)' : inkOf(s)}
+                {@const best = mergedInto(s.id)}
+                {#if best}
+                  <!-- The best ring and the end mark as one: the status mark inside the ring, lime while live or
+                       completed, ink on a failed or stopped run (./endMarks). -->
+                  {@const ring = endRingInk(s.end, best.color ?? 'var(--chart-1)')}
+                  <g class="marker" data-merged={s.id} transform="translate({x(p.x)},{y(p.y)})">
+                    {#if best.pulse && best.pulse > pulseBase}
+                      {#key best.pulse}<circle class="pulse" r={r + 3.5} style:stroke={ring} />{/key}
+                    {/if}
+                    <circle class="ring" r={r + 3.5} style:stroke={ring} />
+                  </g>
+                {/if}
                 {#if s.end === 'failed'}
-                  <path class="end-x" d="M{x(p.x) - r} {y(p.y) - r}l{2 * r} {2 * r}m0 {-2 * r}l{-2 * r} {2 * r}" style:stroke={ink} />
+                  <path class="end-x" d="M{x(p.x) - r} {y(p.y) - r}l{2 * r} {2 * r}m0 {-2 * r}l{-2 * r} {2 * r}" style:stroke={endMarkInk(s.end, ink)} />
                 {:else if s.end === 'stopped'}
                   <rect class="end-dot" x={x(p.x) - r} y={y(p.y) - r} width={2 * r} height={2 * r} style:fill={ink} />
                 {:else}
-                  {#if s.end === 'live'}<circle class="end-live" cx={x(p.x)} cy={y(p.y)} r={r + 3} />{/if}
+                  {#if s.end === 'live' && !best}<circle class="end-live" cx={x(p.x)} cy={y(p.y)} r={r + 3} />{/if}
                   <circle class="end-dot" cx={x(p.x)} cy={y(p.y)} {r} style:fill={ink} />
                 {/if}
               {/if}
@@ -780,8 +814,8 @@
               <text class="end-label" class:hl={e.id === highlight} x={e.x} y={e.y} dy="0.32em" style:fill={e.text}>{e.label}</text>
             {/each}
           {/if}
-          {#each markers as m (m.label + m.x)}
-            {#if m.x >= xExtent[0] && m.x <= xExtent[1]}
+          {#each markers as m, i (m.label + m.x)}
+            {#if m.x >= xExtent[0] && m.x <= xExtent[1] && merges[i] == null}
               <g class="marker" transform="translate({x(m.x)},{y(m.y)})">
                 {#if m.pulse && m.pulse > pulseBase}
                   {#key m.pulse}<circle class="pulse" r="4.5" style:stroke={m.color ?? 'var(--chart-1)'} />{/key}

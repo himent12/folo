@@ -14,7 +14,8 @@
   import { MediaQuery } from 'svelte/reactivity';
   import { ApiError, hub } from '$lib/api/index.svelte';
   import { Resource } from '$lib/api/resource.svelte';
-  import type { Arch, Augment, DatasetImage, Device, Optimizer, RunEstimate, TrainConfig } from '$lib/api/types';
+  import type { Arch, Augment, Dataset, DatasetImage, Device, Model, Optimizer, Run, RunEstimate, TrainConfig } from '$lib/api/types';
+  import { modelChoices, scoreContext, scoreText } from '$lib/scoreSummary';
   import ClassStrip from '$lib/detect/ClassStrip.svelte';
   import { bytes, compact, deviceName, duration, num, sentence } from '$lib/format';
   import { fitFix, IMGSZ_STEPS, isOom, oomCalibration, useLabel, vramForecaster, type OomFix } from '$lib/oom';
@@ -44,8 +45,10 @@
   import Meta from '$lib/ui/Meta.svelte';
   import { toast } from '$lib/ui/toast.svelte';
   import InfoButton from '$lib/ui/InfoButton.svelte';
+  import CodeText from '$lib/ui/CodeText.svelte';
   import { VULKAN } from './settings/capabilities';
-  import { HEAD_LABEL } from './run/resolved';
+  import { HEAD_LABEL, optimizerLabel } from './run/resolved';
+  import { balanced } from '$lib/ui/balancedGrid';
   import AugPreview, { type AugKey } from './runnew/AugPreview.svelte';
   import { AMP_SPEEDUP, arches, autoCloseMosaic, closeMosaicEpochs, defaultImgsz, estimate, shortRun, warmup } from './runnew/estimate';
   import { media } from '$lib/design/tokens';
@@ -176,14 +179,38 @@
 
   const dataset = $derived(datasets.data?.find((d) => d.id === datasetId));
 
-  // Pretrained weights must match the architecture; switching size drops an incompatible choice. Fused weights (an
-  // export) load for inference only, so they are never a starting point.
-  const weightOptions = $derived((models.data ?? []).filter((m) => m.arch === arch && m.fused !== true));
-  $effect(() => {
-    const opts = weightOptions;
-    if (!models.data) return;
-    if (untrack(() => weights) !== 'none' && !opts.some((m) => m.id === untrack(() => weights))) weights = 'none';
+  // A fine-tune trains the weights' own architecture (docs/API.md, TrainConfig.weights), so the weights listed are the
+  // chosen size's and switching size drops another size's choice. Published weights (`folo weights pull`, `source:
+  // published`) are listed whatever the size, in a group of their own: picking them sets the size to theirs. Fused
+  // weights (an export) load for inference only, so they are never a starting point.
+  const isPublished = (m: Model) => m.source === 'published';
+  const startable = $derived((models.data ?? []).filter((m) => m.fused !== true));
+  const weightOptions = $derived(startable.filter((m) => !isPublished(m) && m.arch === arch));
+  const publishedOptions = $derived(startable.filter(isPublished));
+  // Each starting point's score with what it is on (lib/scoreSummary): grouped by dataset and split, best first.
+  const scoreCtx = $derived.by(() => {
+    const runById = new Map<string, Run>((runs.data ?? []).map((r) => [r.id, r]));
+    const dsById = new Map<string, Dataset>((datasets.data ?? []).map((d) => [d.id, d]));
+    return (m: Model) => scoreContext(m, runById, dsById);
   });
+  const weightChoices = $derived(modelChoices(weightOptions, scoreCtx));
+  const picked = $derived(weights === 'none' ? undefined : startable.find((m) => m.id === weights));
+  /** Published weights picked: the run's size is theirs, said under the size picker. */
+  const pickedPublished = $derived(picked && isPublished(picked) ? picked : null);
+  $effect(() => {
+    const a = arch;
+    const list = startable;
+    if (!models.data) return;
+    const w = untrack(() => weights);
+    if (w === 'none') return;
+    const m = list.find((x) => x.id === w);
+    if (!m || m.arch !== a) weights = 'none';
+  });
+  /** Start from picked: published weights of another size bring their size (the size picker follows). */
+  function pickWeights(id: string) {
+    const m = startable.find((x) => x.id === id);
+    if (m && isPublished(m) && m.arch !== arch) arch = m.arch;
+  }
   const gpu = $derived(system.data?.gpus[0]);
 
   // The suggested name is unique among existing runs (dataset-size, then -2, -3, …), so runs stay tellable apart.
@@ -280,8 +307,9 @@
   );
   /** The trainer's schedule: optimizer steps an epoch, fewer than batches when gradients accumulate. */
   const sched = $derived(warmup(dataset?.splits.train ?? 0, Number.isInteger(epochs) && epochs > 0 ? epochs : 1, batchN));
-  /** The batches behind the steps, in the Summary's popover (ui/InfoButton): one line in the rail. */
+  /** The batches behind the steps, opened under the Summary's Schedule row (ui/InfoButton): one line in the rail. */
   const batchesOf = $derived(`${num(est.stepsPerEpoch)} ${est.stepsPerEpoch === 1 ? 'batch' : 'batches'} of ${batchN}`);
+  let stepsOpen = $state(false);
   const stepsWhy = $derived(sched.accumulate > 1 ? `${batchesOf}; ${sched.accumulate} per optimizer step.` : `${batchesOf}, one step each.`);
   // The figures wait for the server's devices and the dataset: until then "Estimating…", never a CPU guess or 0 steps.
   const estReady = $derived(!!dataset && (system.data !== undefined || system.error !== undefined));
@@ -307,6 +335,13 @@
   // The run page forecasts its fixes with the same correction (lib/oom), so the retry it offers is shown here as fitting.
   const scale = $derived(oomRun ? oomCalibration(oomRun.config, gpuMem) : 1);
 
+  // Start answered `501 not_supported` for mixed precision: the server cannot train that way after all (restarted
+  // without tensor cores since it said it could). Its message stays at the Mixed precision field until the switch or
+  // the device changes; the capabilities are read again, so the field shows what works now (off, with the remedy).
+  // While the switch is still on, Start waits (a field in error gates the form).
+  let ampRefused = $state<{ device: string; message: string } | null>(null);
+  const ampErr = $derived(ampRefused && ampRefused.device === device ? ampRefused : null);
+
   // Start answered `404 device_not_found` (`501 not_implemented` from servers before it): said at the Device field in
   // one line built from the devices this machine lists now, until another device is picked. The server's own words
   // (they name its backends) fold into the field's technical details.
@@ -329,9 +364,10 @@
     seed: !isInt(seed, 0, 2 ** 32 - 1) ? 'A whole number, 0 or more.' : null,
     close: !isInt(augment.close_mosaic, 0, Number.isFinite(epochs) ? epochs : 0) ? 'A whole number up to the epoch count.' : null,
     dataset: !dataset ? 'Pick a dataset.' : null,
-    weights: weights !== 'none' && !weightOptions.some((m) => m.id === weights) ? 'Pick weights of the same model size.' : null,
+    weights: weights !== 'none' && picked?.arch !== arch ? 'Pick weights of the same model size.' : null,
     // The field says what to pick; the line beside Start only names the problem and leads there.
     device: deviceErr ? `${devWord(device)} is not available.` : null,
+    amp: ampErr && ampOn ? 'Not available on this server now.' : null,
   });
   const valid = $derived(prefilled && Object.values(errors).every((e) => e === null));
   const FIELD: Record<keyof typeof errors, string> = {
@@ -343,6 +379,7 @@
     dataset: 'Dataset',
     weights: 'Start from',
     device: 'Device',
+    amp: 'Mixed precision',
   };
   const JUMP: Record<keyof typeof errors, Jump> = {
     name: 'name',
@@ -353,6 +390,7 @@
     dataset: 'data',
     weights: 'weights',
     device: 'device',
+    amp: 'amp',
   };
   /** The first problem, named by its field (shown beside a disabled Start, as a way to that field). */
   const why = $derived.by(() => {
@@ -362,8 +400,6 @@
   const showWhy = $derived(!valid && !!why && prefilled);
   // The trainer's own short-run warnings (too few steps from scratch, mostly warmup): not errors, a warning with the fix.
   const short = $derived(errors.epochs ? null : shortRun(dataset?.splits.train ?? 0, epochs, batchN, weights === 'none'));
-  /** Close mosaic as the trainer applies it: at most half the run. */
-  const closeEff = $derived(errors.close || errors.epochs ? null : closeMosaicEpochs(augment.close_mosaic, epochs));
   const selArch = $derived(arches.find((a) => a.arch === arch));
   // A folded section must not hide its own error: while one is shown the section stays open whatever was toggled.
   const augShown = $derived(augOpen || errors.close !== null);
@@ -453,6 +489,15 @@
       clearTimeout(t);
       ctrl.abort();
     };
+  });
+  /**
+   * Close mosaic as the trainer applies it: the server's count for these settings (`RunEstimate.close_mosaic`), else
+   * the trainer's cap of the request (at most half the run), which the server's agrees with.
+   */
+  const closeEff = $derived.by(() => {
+    if (errors.close || errors.epochs) return null;
+    const n = served?.key === estKey ? served.est.close_mosaic : undefined;
+    return typeof n === 'number' && Number.isFinite(n) ? n : closeMosaicEpochs(augment.close_mosaic, epochs);
   });
   /** What the Summary and the dock show: the server's estimate when there is one, else the reference's. */
   const shown = $derived.by(() => {
@@ -565,6 +610,11 @@
         void system.refresh();
         void jump('device');
         // page-level: the sheet closed when the form was sent.
+      } else if (err instanceof ApiError && err.code === 'not_supported' && config.amp) {
+        // At the field, not a toast: the message, then what the server can do now (the capabilities read again).
+        ampRefused = { device, message: err.message };
+        void system.refresh();
+        void jump('amp');
       } else toast.error(err, 'Could not start the run');
     } finally {
       submitting = false;
@@ -612,11 +662,11 @@
     {
       key: 'weights',
       label: 'Start from',
-      value: weights === 'none' ? 'From scratch' : (weightOptions.find((m) => m.id === weights)?.name ?? weights),
+      value: weights === 'none' ? 'From scratch' : (picked?.name ?? weights),
       mono: weights !== 'none',
       warn: !!errors.weights,
     },
-    ...(optimizer !== 'auto' ? [{ key: 'opt' as const, label: 'Optimizer', value: optimizer === 'sgd' ? 'SGD + momentum' : 'AdamW' }] : []),
+    ...(optimizer !== 'auto' ? [{ key: 'opt' as const, label: 'Optimizer', value: optimizerLabel(optimizer) }] : []),
     ...(e2e ? [{ key: 'head' as const, label: 'Head', value: HEAD_LABEL.o2o }] : []),
   ]);
 
@@ -689,20 +739,23 @@
   {:else}
   <dl class="est">
     <!-- The trainer's count (the short-run warning's unit). The batches behind it, one tap, click or Enter away
-         (ui/InfoButton: the value is its button; a popover over the Summary sheet too). -->
+         (ui/InfoButton: the value is its button), as a line under the row: in a list of rows a popover would cover
+         its neighbours (round 24's covered Start from), so it opens in place and pushes the rows below down. -->
     <dt>Schedule</dt>
     <dd class="num sched">
-      <InfoButton label="How the steps are counted" text={stepsWhy} side="top" class="steps"
+      <InfoButton label="How the steps are counted" controls="{where}-steps-why" bind:open={stepsOpen} class="steps"
         >{#snippet trigger()}{num(sched.stepsPerEpoch)} steps <span class="faint">/ epoch</span>{/snippet}</InfoButton
       >
     </dd>
+    {#if stepsOpen}<dd class="steps-why" id="{where}-steps-why">{stepsWhy}</dd>{/if}
     <!-- A range, never one precise figure; a rough one (low confidence) in secondary ink. What it stands on is the
          line under it, which opens the phases behind it. -->
     <dt>Est. time</dt><dd class="num" class:rough={shown.rough} aria-busy={estimating || undefined}>{timeRange(shown.lo, shown.hi)}</dd>
     <dd class="basis">
       <details class="est-how">
         <summary><span>{shown.basis}</span><ChevronRight size={12} strokeWidth={2} aria-hidden="true" /></summary>
-        <!-- One row each, the value at the right; on a narrow rail it wraps under its label, still at the right. -->
+        <!-- One grid for every row: the term wraps in its own column, the value sits on the term's first line at the
+             right (never pushed to a line of its own), one word for a source, never a phrase in the value column. -->
         <dl class="how-list num">
           {#each shown.phases as p (p.phase)}
             <div>
@@ -716,7 +769,7 @@
           </div>
           <div><dt>First epoch</dt><dd>+{num(shown.startup, 1)} s startup</dd></div>
           {#if !onCpu && gpu}
-            <div><dt>Peak GPU memory</dt><dd>{shown.vramMeasured ? 'measured here' : 'reference model'}</dd></div>
+            <div><dt>Peak GPU memory</dt><dd>{shown.vramMeasured ? 'measured' : 'reference'}</dd></div>
           {/if}
         </dl>
         <p class="how-note">{shown.how}{#if shown.updated}{' '}Last measured {shown.updated}.{/if}</p>
@@ -735,8 +788,8 @@
   {#if !onCpu && gpuMem}
     <div class="vram" aria-hidden="true"><i class={vramLevel} style:width={pct2(Math.min(1, vramPct))}></i></div>
   {/if}
-  <!-- Warnings in the rail are one-line callouts in the status's text colour with its icon, no tinted fill (fills are
-       for banners), right above Start. -->
+  <!-- Warnings in the rail are one-line callouts: the status's icon in its hue, the words and the Why? link in ink, no
+       tinted fill (fills are for banners), right above Start. -->
   {#if noFit}
     <!-- The change that fits is the action under it (Use batch 8); with none, the line says what to lower. -->
     <p class="callout danger" id="{where}-nofit" role="alert">
@@ -759,7 +812,7 @@
       {#if shortWhy}
         <div class="short-why" id="{where}-short-why">
           {#if short.scratch}
-            <!-- Two short sentences: the batches behind the steps are the Schedule row's tooltip. -->
+            <!-- Two short sentences: the batches behind the steps open under the Schedule row. -->
             <p>{num(epochs)} epochs × {num(short.stepsPerEpoch)} steps. From scratch, a detector needs a few hundred, so expect an mAP near&nbsp;0.</p>
           {/if}
           {#if short.warmupHeavy}
@@ -849,7 +902,7 @@
       <div class="form">
         <Panel title="1 · Dataset" id="sec-data">
           {#if !datasets.data}
-            <div class="cards">{#each [0, 1, 2] as i (i)}<Skeleton h="88px" r="var(--radius-md)" />{/each}</div>
+            <div class="cards" use:balanced={{ n: 3, min: 184, gap: 8 }}>{#each [0, 1, 2] as i (i)}<Skeleton h="88px" r="var(--radius-md)" />{/each}</div>
           {:else}
             <!-- Phones: a compact picker and a one-line summary; the cards are for wider screens. -->
             <div class="ds-pick">
@@ -860,7 +913,7 @@
                 </p>
               {/if}
             </div>
-            <div class="cards" role="radiogroup" aria-label="Dataset" aria-invalid={errors.dataset ? 'true' : undefined}>
+            <div class="cards" role="radiogroup" aria-label="Dataset" aria-invalid={errors.dataset ? 'true' : undefined} use:balanced={{ n: datasets.data.length, min: 184, gap: 8 }}>
               {#each datasets.data as d (d.id)}
                 {@const on = d.id === datasetId}
                 <label class="card" class:on>
@@ -881,6 +934,13 @@
         </Panel>
 
         <Panel title="2 · Model" id="sec-model" meta={was('model') ? `was ${oomRun?.config.arch}` : undefined}>
+          {#if pickedPublished}
+            <!-- Published weights set the size (a fine-tune trains the weights' own): said where the size is picked. -->
+            <p class="a-from" role="status">
+              <Ident value={pickedPublished.arch} />, from <Ident value={pickedPublished.name} />.
+              <span class="faint">The run trains the weights' size; another size starts from scratch.</span>
+            </p>
+          {/if}
           {#if phone.current}
             <!-- Phones: the size as one segmented pick and the chosen model in words; the full comparison folds away. -->
             <div class="a-pick">
@@ -912,13 +972,24 @@
             {@render archTable()}
           {/if}
           <div class="row2">
-            <Field label="Start from" for="weights" hint="Fine-tuning from a trained model converges much faster." error={errors.weights}>
+            <!-- Published weights' hint is what they are (`Model.about`), also each option's tooltip. -->
+            <Field label="Start from" for="weights" hint={pickedPublished?.about ?? 'Fine-tuning from a trained model converges much faster.'} error={errors.weights}>
               <Select
                 id="weights"
                 bind:value={weights}
+                onchange={pickWeights}
                 invalid={!!errors.weights}
                 describedby={errors.weights ? 'weights-error' : 'weights-hint'}
-                options={[{ value: 'none', label: 'From scratch' }, ...weightOptions.map((m) => ({ value: m.id, label: `${m.name} · mAP ${m.metrics?.map50_95.toFixed(3) ?? '—'}` }))]}
+                options={[
+                  { value: 'none', label: 'From scratch' },
+                  ...weightChoices.map((c) => ({ value: c.model.id, label: c.label, group: c.group })),
+                  ...publishedOptions.map((m) => ({
+                    value: m.id,
+                    label: m.metrics ? `${m.name} · ${scoreText(m.metrics.map50_95, scoreCtx(m))}` : m.name,
+                    group: 'Published weights',
+                    title: m.about,
+                  })),
+                ]}
               />
             </Field>
           </div>
@@ -989,9 +1060,25 @@
                    where the server cannot train in mixed precision, why not and what to do) under it. Only the control
                    is disabled; the label keeps the field labels' colour. Hidden when the server does not say. -->
               <div class="field sw-field amp" class:off={!!ampBlock}>
-                <Switch id="amp" label="Mixed precision" checked={ampOn} onchange={(v) => (amp = v)} disabled={!!ampBlock} describedby={ampBlock ? 'amp-why' : 'amp-hint'} />
+                <Switch
+                  id="amp"
+                  label="Mixed precision"
+                  checked={ampOn}
+                  onchange={(v) => ((amp = v), (ampRefused = null))}
+                  disabled={!!ampBlock}
+                  describedby={ampErr ? 'amp-error' : ampBlock ? 'amp-why' : 'amp-hint'}
+                />
+                {#if ampErr}
+                  <!-- The server's own words, where the setting is (never a toast), as one plain sentence. -->
+                  <p class="sw-err" id="amp-error" role="alert">
+                    <CircleAlert size={14} strokeWidth={1.75} aria-hidden="true" /><span>Start was refused: <CodeText text={sentence(ampErr.message)} /></span>
+                  </p>
+                {/if}
                 {#if ampBlock}
-                  <div class="sw-why"><Remedy compact id="amp-why" cause={ampBlock.why} shell={ampBlock.shell} command={ampBlock.command} report={ampBlock.raw} /></div>
+                  <!-- After a refusal the report would repeat the message above it. -->
+                  <div class="sw-why"><Remedy compact id="amp-why" cause={ampBlock.why} shell={ampBlock.shell} command={ampBlock.command} report={ampErr ? undefined : ampBlock.raw} /></div>
+                {:else if ampErr}
+                  <p class="sw-hint" id="amp-hint">Turn it off to train in f32.</p>
                 {:else}
                   <p class="sw-hint" id="amp-hint">{ampHint}</p>
                 {/if}
@@ -1002,7 +1089,7 @@
             <summary><ChevronRight size={14} /> Advanced <span class="faint">optimizer, learning rate, seed, head</span></summary>
             <div class="fields">
             <Field label="Optimizer" for="opt">
-              <Select id="opt" bind:value={optimizer} options={[{ value: 'auto', label: 'Auto (AdamW for short runs, else SGD)' }, { value: 'sgd', label: 'SGD + momentum' }, { value: 'adamw', label: 'AdamW' }]} />
+              <Select id="opt" bind:value={optimizer} options={(['auto', 'sgd', 'adamw'] as const).map((value) => ({ value, label: optimizerLabel(value) }))} />
             </Field>
             <Field label="Initial learning rate" for="lr0" error={errors.lr0} hint="Warmup 3 epochs, then cosine to 1%.">
               <Input id="lr0" type="number" step="0.001" min="0" bind:value={lr0} invalid={!!errors.lr0} aria-describedby={errors.lr0 ? 'lr0-error' : 'lr0-hint'} />
@@ -1159,7 +1246,8 @@
       <!-- use:dock: the phone tab bar steps aside while this bar is on the page (lib/shell/dock.ts). -->
       <div
         use:dock
-        class="dock"
+        data-tip-chrome
+        class="dock cta-row"
         class:away={startVisible}
         role="region"
         aria-label="Start training"
@@ -1232,9 +1320,11 @@
     position: sticky;
     top: calc(var(--size-topbar) + var(--space-4));
   }
+  /* As many cards across as fit at 184 px, never one alone on a row (ui/balancedGrid sets --cols): four datasets are
+     one row on a desktop and 2 × 2 on a laptop or tablet, never 3 + 1. */
   .cards {
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(var(--cols, 1), minmax(0, 1fr));
     gap: var(--space-2);
   }
   .card,
@@ -1349,13 +1439,33 @@
   .arch.on :global(.a-name) {
     color: var(--text-secondary);
   }
+  /* A sentence is never cut (DESIGN_DIRECTION 2.3): where its column is short it wraps, and below 1280 it takes a line
+     of its own under the size's name, so the row grows instead (round 24's "Fastest; edge devices, qâ€¦" at 1024). */
   .a-note {
     min-width: 0;
     font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
     color: var(--text-tertiary);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+  }
+  @media (min-width: 768px) and (max-width: 1279px) {
+    .arch {
+      grid-template-rows: auto auto;
+      row-gap: 0;
+      padding-block: 6px;
+    }
+    .a-size,
+    .a-v,
+    .tick {
+      grid-row: 1 / 3;
+    }
+    .arch :global(.a-name) {
+      grid-column: 2 / 4;
+      grid-row: 1;
+    }
+    .a-note {
+      grid-column: 2 / 4;
+      grid-row: 2;
+    }
   }
   .a-v {
     font-size: var(--type-sm-size);
@@ -1693,7 +1803,8 @@
   }
   .how-list {
     display: grid;
-    gap: 2px;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 2px var(--space-3);
     margin-top: var(--space-2);
     padding: var(--space-2) var(--space-3);
     border-radius: var(--radius-md);
@@ -1701,16 +1812,13 @@
     text-align: left;
   }
   .how-list > div {
-    display: flex;
-    flex-wrap: wrap;
-    justify-content: space-between;
-    gap: 0 var(--space-3);
+    display: contents;
   }
   .how-list dt {
     color: var(--text-tertiary);
   }
   .how-list dd {
-    margin-left: auto;
+    align-self: start;
     color: var(--text-secondary);
     text-align: right;
     white-space: nowrap;
@@ -1731,6 +1839,13 @@
   .est dd.sched {
     overflow: visible;
   }
+  /* The batches behind the steps: one quiet line under the row, at the value's right edge, across the row. */
+  .est dd.steps-why {
+    grid-column: 1 / -1;
+    margin-top: -2px;
+    color: var(--text-secondary);
+    white-space: normal;
+  }
   /* A switch field (Mixed precision, End-to-end): the Switch is the label's line, its track at the field's right edge,
      and the label reads as every field label (text.secondary, medium), also while only the control is disabled. */
   .fields > .sw-field :global(.switch .label) {
@@ -1749,6 +1864,31 @@
   .fields > .sw-field > .sw-why {
     align-self: start;
     min-width: 0;
+  }
+  /* Start's refusal at the field (`501 not_supported`): danger ink with its icon, never red text alone (§2.11). */
+  .sw-err {
+    display: flex;
+    gap: var(--space-1);
+    align-items: flex-start;
+    max-inline-size: var(--measure);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--danger-text);
+    text-wrap: pretty;
+    overflow-wrap: anywhere;
+  }
+  /* As a Field's error: the icon on the first line's centre (16 px line, 14 px icon). */
+  .sw-err :global(svg) {
+    flex: none;
+    margin-top: 1px;
+  }
+  /* Published weights set the size: one line above the picker, the identifiers mono (ui/Ident). */
+  .a-from {
+    margin-bottom: var(--space-3);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--text-secondary);
+    text-wrap: pretty;
   }
   .sw-hint {
     font-size: var(--type-sm-size);
@@ -1900,17 +2040,21 @@
   .aug-toggle[aria-expanded='true'] {
     margin-bottom: var(--space-3);
   }
-  /* A callout: one line in the status's text colour after its icon, at 12 px, no fill (tinted fills are for banners). */
+  /* A callout: one line at 12 px after its icon, no fill (tinted fills are for banners). The status shows through the
+     icon alone: the words are ink and Why? an ink link (DESIGN_DIRECTION §2.6), so no amber text turns weak in light. */
   .callout {
     display: flex;
     align-items: flex-start;
     gap: var(--space-2);
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
-    color: var(--warning-text);
+    color: var(--text-primary);
     text-wrap: pretty;
   }
-  .callout.danger {
+  .callout > :global(svg) {
+    color: var(--warning-text);
+  }
+  .callout.danger > :global(svg) {
     color: var(--danger-text);
   }
   .callout > :global(svg) {
@@ -1939,7 +2083,7 @@
   /* "Why?" opens the reasons and the fix, right after the line's text. */
   .more {
     flex-shrink: 0;
-    color: var(--warning-text);
+    color: var(--text-primary);
     text-decoration: underline;
     text-decoration-color: color-mix(in srgb, currentColor 40%, transparent);
     text-underline-offset: 3px;
@@ -2209,10 +2353,14 @@
       display: grid;
       color: var(--text-tertiary);
     }
+    /* The dock's warning word in ink; its icon carries the status's hue. */
     .dock-warn {
+      color: var(--text-secondary);
+    }
+    .dock-warn > :global(svg) {
       color: var(--warning-text);
     }
-    .dock-warn.danger {
+    .dock-warn.danger > :global(svg) {
       color: var(--danger-text);
     }
     .dock-warn {
@@ -2271,9 +2419,6 @@
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
-    }
-    .dock :global(.btn.lg) {
-      --h: 44px;
     }
     .ds-pick {
       display: block;

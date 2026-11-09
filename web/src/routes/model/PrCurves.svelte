@@ -65,9 +65,12 @@
   let plotH = $state(0);
 
   /** The plot itself is 300 px (DESIGN_DIRECTION, Model detail); the chart is that plus its axes, LineChart's margins:
-   *  the y caption above (24) and the x ticks and name below (36). Round 22 drew 300 for the whole chart, so the plot
-   *  was 240 and read smaller than the class table under it. */
+   *  the y axis name above (24) and the x ticks and name below (36). Round 22 drew 300 for the whole chart, so the plot
+   *  was 240 and read smaller than the class table under it. Both axes run 0–1, so each is named at the axis
+   *  ("Recall", "Precision"), with that room kept at every width, phones included (§2.4). */
   const PLOT_H = 300;
+  /** A phone's plot: shorter, so the table (the legend) starts on the first screen. */
+  const PHONE_PLOT_H = 190;
   const AXES_H = 24 + 36;
   // Phones get a shorter plot so the table (the legend) starts on the first screen.
   const phoneQuery = new MediaQuery(media.phone, false);
@@ -172,13 +175,15 @@
     <div class="plot" class:fill bind:clientHeight={plotH}>
       <LineChart
         {series}
-        height={narrow ? 220 : fill ? Math.max(PLOT_H + AXES_H, plotH - 24) : PLOT_H + AXES_H}
+        height={narrow ? PHONE_PLOT_H + AXES_H : fill ? Math.max(PLOT_H + AXES_H, plotH - 24) : PLOT_H + AXES_H}
         xDomain={[0, 1]}
         yDomain={[0, 1]}
         xFormat={(x) => x.toFixed(1)}
         valueFormat={(y) => y.toFixed(3)}
         xTicks={6}
         yTicks={5}
+        xLabel="Recall"
+        yLabel="Precision"
         legend={false}
         bind:cursor
         empty="No correct detections yet: precision is 0 at every recall."

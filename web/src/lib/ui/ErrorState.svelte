@@ -9,6 +9,7 @@
   import { isOom, oomDetail } from '$lib/oom';
   import { href } from '$lib/router.svelte';
   import Button from './Button.svelte';
+  import CodeText from './CodeText.svelte';
   import { isOffline } from './offline';
 
   let {
@@ -39,8 +40,6 @@
   );
   const serverHint = $derived(error instanceof ApiError && error.hint ? sentence(error.hint) : undefined);
   const hint = $derived(offline ? 'Start `folo serve`, or check the server URL.' : (ownHint ?? serverHint));
-  /** The hint in parts, identifiers (in backticks, as the server writes them) set in mono. */
-  const hintParts = $derived((hint ?? '').split('`').map((text, i) => ({ text, code: i % 2 === 1 })));
   const code = $derived(error instanceof ApiError ? `${error.code}${error.status ? ` · HTTP ${error.status}` : ''}` : undefined);
   const detail = $derived(oom ? oomDetail(raw) : null);
   /** The server's own hint, kept with the details when the screen says what applies here. */
@@ -51,8 +50,9 @@
   <div class="icon"><TriangleAlert size={16} strokeWidth={1.75} /></div>
   <div class="text">
     <p class="title">{heading}</p>
-    <p class="msg">{message}</p>
-    {#if hint}<p class="hint">{#each hintParts as p, i (i)}{#if p.code}<code>{p.text}</code>{:else}{p.text}{/if}{/each}</p>{/if}
+    <!-- Identifiers in backticks, as the server writes them, set in mono and never broken inside (ui/CodeText). -->
+    <p class="msg"><CodeText text={message} /></p>
+    {#if hint}<p class="hint"><CodeText text={hint} /></p>{/if}
     {#if code || detail || hiddenHint}
       <details class="code">
         <summary>Technical details</summary>
@@ -104,19 +104,16 @@
     display: grid;
     gap: 2px;
   }
+  /* The title in ink: the danger shows through the icon (DESIGN_DIRECTION §2.6, titles and links are ink). */
   .title {
     font-weight: var(--weight-medium);
-    color: var(--danger-text);
+    color: var(--text-primary);
   }
   .msg {
     color: var(--text-secondary);
   }
   .hint {
     color: var(--text-tertiary);
-  }
-  .hint code {
-    font-family: var(--font-mono);
-    font-size: var(--type-sm-size);
   }
   .code {
     margin-top: 2px;
@@ -165,8 +162,5 @@
     flex-wrap: wrap;
     gap: var(--space-2);
     margin-top: var(--space-2);
-  }
-  .title {
-    color: var(--danger-text);
   }
 </style>
