@@ -2045,13 +2045,16 @@ impl FoloApp {
         );
     }
 
-    /// Why Open image can't run now, if it can't: no server, the model list failed or is still
-    /// loading, or there's no model yet. The button, Ctrl+O and the palette share this.
+    /// Why Open image can't run now, if it can't: the model list failed (with the runs list too:
+    /// not connected) or is still loading, or there's no model yet. Only the models decide: a
+    /// failed runs list alone doesn't stop inference. The button, Ctrl+O and the palette share this.
     pub fn open_image_blocked(&self) -> Option<&'static str> {
-        if self.store.runs.error().is_some() {
-            Some("Not connected")
-        } else if self.store.models.error().is_some() {
-            Some("Models didn't load: retry under Best models")
+        if self.store.models.error().is_some() {
+            Some(if self.store.runs.error().is_some() {
+                "Not connected"
+            } else {
+                "Models didn't load: retry under Best models"
+            })
         } else if self.store.models.ready().is_none() {
             Some("Loading models…")
         } else if self.store.models.ready().is_some_and(|m| m.is_empty()) {

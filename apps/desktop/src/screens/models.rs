@@ -1185,8 +1185,8 @@ impl FoloApp {
                     } else if v == 0 {
                         crate::theme::over(t.bg_panel, t.bg_hover)
                     } else {
-                        // Correct cells on the success ramp; errors on a danger ramp (square root up
-                        // to the largest error), so small and large confusions stay apart.
+                        // Correct cells on the success ramp; errors on a danger ramp (linear from a
+                        // faint floor up to the largest error), so small and large confusions stay apart.
                         if diag {
                             crate::theme::over(t.bg_inset, alpha(base, (0.35 + 0.6 * frac).min(0.95)))
                         } else if r == n - 1 {
