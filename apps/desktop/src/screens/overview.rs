@@ -1055,8 +1055,6 @@ impl FoloApp {
                 }),
             )
             .into_any_element();
-        // `cmd`: a command on its own line as a chip (GPUI breaks lines at any non-word character,
-        // no-break spaces included, so an inline one could split across lines).
         let step = |n: &str, title: &str, body: &str, active: bool| {
             div()
                 // Fills its wrapper, so the three cards end at one height whichever wraps most; may
