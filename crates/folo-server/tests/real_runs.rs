@@ -222,6 +222,11 @@ async fn train_evaluate_predict_and_reload() {
     assert_eq!(last["status"], "completed", "{last}: {events:?}");
     assert_eq!(count(&events, "epoch"), 2);
     assert!(count(&events, "step") >= 2 && count(&events, "log") >= 1);
+    // Every validated epoch says which confidence its precision / recall are at, not only the best one's.
+    let conf_ok = |c: &Value| c.as_f64().is_some_and(|c| (0.0..=1.0).contains(&c));
+    for (_, v) in events.iter().filter(|(n, _)| n == "epoch") {
+        assert!(conf_ok(&v["val"]["best_f1_conf"]), "SSE epoch {v}");
+    }
     // Steps and the trainer's statuses carry the run's length (3 batches of 4 out of 10 images, 2 epochs).
     for (name, v) in events.iter().filter(|(n, v)| n == "step" || (n == "status" && v["status"] != "queued"))
     {
@@ -246,6 +251,15 @@ async fn train_evaluate_predict_and_reload() {
     let m: RunMetrics = ok(&app, get(&format!("/api/runs/{}/metrics", run.id))).await;
     assert_eq!(m.steps.iter().map(|s| s.step).collect::<Vec<_>>(), [1, 2, 3, 4, 5, 6]);
     assert_eq!(m.epochs.iter().map(|e| e.epoch).collect::<Vec<_>>(), [1, 2]);
+    assert!(m.epochs.iter().all(|e| e.val.best_f1_conf.is_some()), "/metrics {:?}", m.epochs);
+    let jsonl = std::fs::read_to_string(home.join("runs").join(&run.id).join("metrics.jsonl")).unwrap();
+    let lines: Vec<Value> = jsonl.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    let epoch_lines: Vec<&Value> = lines.iter().filter(|v| v["event"] == "epoch").collect();
+    assert_eq!(epoch_lines.len(), 2);
+    for (v, e) in epoch_lines.iter().zip(&m.epochs) {
+        assert!(conf_ok(&v["val"]["best_f1_conf"]), "metrics.jsonl {v}");
+        assert_eq!(v["val"]["best_f1_conf"].as_f64().map(|c| c as f32), e.val.best_f1_conf);
+    }
     let best_epoch = &m.epochs[best.epoch as usize - 1];
     assert_eq!(best_epoch.val.map50_95, best.map50_95);
     let thin: RunMetrics = ok(&app, get(&format!("/api/runs/{}/metrics?every=4", run.id))).await;
@@ -381,6 +395,13 @@ async fn train_evaluate_predict_and_reload() {
     // Eval on the validation split (cached), export.
     let eval: ModelEval = ok(&app, get(&format!("/api/models/{model_id}/eval"))).await;
     assert_eq!(eval.images, 2);
+    // What was evaluated: the run's dataset, its validation split, and the confusion matrix's thresholds.
+    assert_eq!(
+        (eval.dataset_id.as_deref(), eval.dataset_name.as_deref()),
+        (Some(ds.id.as_str()), Some("tiny"))
+    );
+    assert_eq!((eval.split, eval.split_fallback.as_ref()), (Some(Split::Val), None));
+    assert_eq!((eval.confusion_conf, eval.confusion_iou), (Some(0.25), Some(0.45)));
     assert_eq!(eval.confusion.len(), 3);
     assert!(eval.confusion.iter().all(|r| r.len() == 3) && eval.confusion[2][2] == 0);
     for c in &eval.pr {
@@ -394,6 +415,7 @@ async fn train_evaluate_predict_and_reload() {
     let v: ValReport =
         ok(&app, post_json("/api/val", json!({ "model_id": model_id, "dataset_id": ds.id }))).await;
     assert_eq!((v.split, v.images, v.imgsz), (Split::Val, 2, 64));
+    assert_eq!((v.dataset_id.as_str(), v.dataset_name.as_deref()), (ds.id.as_str(), Some("tiny")));
     assert_eq!(v.val.per_class, eval.per_class);
     // Precision and recall come with their confidence threshold, the same in both.
     assert!(eval.best_f1_conf.is_some_and(|c| (0.0..=1.0).contains(&c)), "{:?}", eval.best_f1_conf);
@@ -525,9 +547,21 @@ async fn train_evaluate_predict_and_reload() {
     let uri = format!("/api/models/{tuned_model}/weights");
     err(&app, get(&uri), StatusCode::NOT_FOUND, "model_not_found").await;
 
-    // A dataset whose classes changed order since training is not evaluated against the old labels.
+    // A dataset whose validation split is empty now: `/eval` falls back to the training split, and says so.
     let yaml = home.join("datasets/tiny/data.yaml");
     let text = std::fs::read_to_string(&yaml).unwrap();
+    std::fs::create_dir_all(home.join("datasets/tiny/images/none")).unwrap();
+    std::fs::write(&yaml, text.replace("val: images/val", "val: images/none")).unwrap();
+    let fell: ModelEval = ok(&app, get(&format!("/api/models/{model_id}/eval"))).await;
+    assert_eq!((fell.split, fell.images), (Some(Split::Train), 10));
+    let fb = fell.split_fallback.expect("a fallback is reported");
+    assert_eq!((fb.requested, fb.reason.as_str()), (Split::Val, "empty_split"));
+    assert!(fb.message.contains("'tiny' has no val images") && fb.message.contains("training-set"), "{fb:?}");
+    std::fs::write(&yaml, &text).unwrap();
+    let back: ModelEval = ok(&app, get(&format!("/api/models/{model_id}/eval"))).await;
+    assert_eq!((back.split, back.split_fallback), (Some(Split::Val), None));
+
+    // A dataset whose classes changed order since training is not evaluated against the old labels.
     std::fs::write(
         &yaml,
         text.replace("\"circle\"", "\"tmp\"")

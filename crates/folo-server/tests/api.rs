@@ -1006,24 +1006,40 @@ async fn val_endpoint() {
 async fn mock_metrics_carry_the_operating_point() {
     let (server, _) = mock();
     let app = server.router();
-    let conf_ok =
-        |c: Option<f32>| c.is_some_and(|c| (0.001..1.0).contains(&c) && (c * 1000.0).fract() < 1e-3);
+    let conf_ok = |c: Option<f32>| {
+        c.is_some_and(|c| (0.001..1.0).contains(&c) && (c * 1000.0 - (c * 1000.0).round()).abs() < 1e-3)
+    };
     let models: ModelList = ok(&app, get("/api/models")).await;
     for m in &models.models {
         let metrics = m.metrics.unwrap();
         assert!(conf_ok(metrics.best_f1_conf), "{}: {metrics:?}", m.id);
         let ev: ModelEval = ok(&app, get(&format!("/api/models/{}/eval", m.id))).await;
         assert_eq!(ev.best_f1_conf, metrics.best_f1_conf, "{}: /eval and the model agree", m.id);
+        // What was evaluated: the run's dataset (every mock dataset has a validation split) and the confusion
+        // matrix's thresholds, the real evaluator's.
+        let run: Run = ok(&app, get(&format!("/api/runs/{}", m.run_id.as_deref().unwrap()))).await;
+        let ds: Dataset = ok(&app, get(&format!("/api/datasets/{}", run.config.dataset_id))).await;
+        assert_eq!((ev.dataset_id.as_deref(), ev.dataset_name.as_deref()), (Some(&*ds.id), Some(&*ds.name)));
+        assert_eq!((ev.split, ev.split_fallback.as_ref()), (Some(Split::Val), None), "{}", m.id);
+        assert_eq!((ev.confusion_conf, ev.confusion_iou), (Some(0.25), Some(0.45)), "{}", m.id);
     }
-    let done = "run_1a01";
-    let hist: RunMetrics = ok(&app, get(&format!("/api/runs/{done}/metrics"))).await;
-    assert!(hist.epochs.iter().all(|e| conf_ok(e.val.best_f1_conf)));
+    // Every epoch of every run, finished or live, carries its operating point (not only the best one).
+    let runs: RunList = ok(&app, get("/api/runs")).await;
+    for r in &runs.runs {
+        let hist: RunMetrics = ok(&app, get(&format!("/api/runs/{}/metrics", r.id))).await;
+        assert!(!hist.epochs.is_empty() || r.epoch == 0, "{}", r.id);
+        for e in &hist.epochs {
+            assert!(conf_ok(e.val.best_f1_conf), "{} epoch {}: {:?}", r.id, e.epoch, e.val);
+        }
+    }
+    let hist: RunMetrics = ok(&app, get("/api/runs/run_1a01/metrics")).await;
     let v = serde_json::to_value(&hist.epochs[0]).unwrap();
     assert!(v["val"]["best_f1_conf"].is_number(), "{v}");
-    // POST /api/val: never below the request's NMS threshold.
+    // POST /api/val: never below the request's NMS threshold; names the dataset.
     let req = json!({ "model_id": "m_31aa", "dataset_id": "ds_5a1e", "conf": 0.6 });
     let r: ValReport = ok(&app, post_json("/api/val", req)).await;
     assert!(r.val.best_f1_conf.unwrap() >= 0.6, "{:?}", r.val.best_f1_conf);
+    assert_eq!(r.dataset_name.as_deref(), Some("shapes-1k"));
 }
 
 /// docs/API.md `POST /api/runs/{id}/queue` in mock mode: runs created through the API share one training slot;

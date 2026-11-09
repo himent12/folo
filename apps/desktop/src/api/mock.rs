@@ -227,11 +227,17 @@ impl Curve {
                 precision: (0.42 + 0.52 * q).min(0.98),
                 recall: (0.33 + 0.56 * q).min(0.97),
                 per_class,
-                best_f1_conf: None,
+                best_f1_conf: Some(best_f1_conf(map50, self.noise(epoch as u64, 22))),
             },
             duration_s: (self.spe * self.batch as u64) as f64 / self.ips as f64 + 2.4,
         }
     }
+}
+
+/// The best-F1 confidence (docs/METRICS.md) of a validation with mAP@0.5 `map50`, on the server's 0.001 grid:
+/// low while the model is unsure, settling near 0.3-0.45 (as `folo serve --mock`'s).
+fn best_f1_conf(map50: f32, jitter: f32) -> f32 {
+    ((0.12 + 0.35 * map50 + 0.02 * jitter).clamp(0.001, 0.999) * 1000.0).round() / 1000.0
 }
 
 struct RunFixture {
@@ -958,6 +964,29 @@ impl Backend for MockBackend {
             recall: 0.5,
             best_f1_conf: None,
         });
+        // What is evaluated: the model's run's dataset (else one with its classes), its val split (train when
+        // it has none, saying so).
+        let run_ds = {
+            let runs = self.runs.lock().unwrap();
+            runs.iter()
+                .find(|f| m.run_id.as_deref() == Some(&*f.run.id))
+                .map(|f| f.run.config.dataset_id.clone())
+        };
+        let ds = run_ds
+            .and_then(|id| self.fixture(&id).ok())
+            .or_else(|| self.datasets.iter().find(|d| d.ds.classes == m.classes))
+            .map(|d| &d.ds);
+        let split = if ds.is_some_and(|d| d.splits.val == 0) { Split::Train } else { Split::Val };
+        let images =
+            ds.map_or(800, |d| if split == Split::Val { d.splits.val } else { d.splits.train }) as u32;
+        let split_fallback = (split != Split::Val).then(|| {
+            folo_api::SplitFallback::empty_split(
+                Split::Val,
+                split,
+                ds.map_or("?", |d| &d.name),
+                images as u64,
+            )
+        });
         let n = m.classes.len();
         let mut rng = Rng::new(hash(id));
         let per_class: Vec<ClassMetrics> = (0..n as u32)
@@ -983,7 +1012,6 @@ impl Backend for MockBackend {
                 PrCurve { class: cm.class, recall, precision, ap50: cm.map50 }
             })
             .collect();
-        let images = 800;
         let mut confusion = vec![vec![0u32; n + 1]; n + 1];
         for t in 0..n {
             let count = 900 + rng.below(500);
@@ -1001,7 +1029,20 @@ impl Backend for MockBackend {
             confusion[t][n] = left;
             confusion[n][t] = (count as f32 * (1.0 - per_class[t].precision) * 0.6) as u32;
         }
-        Ok(ModelEval { pr, confusion, per_class, images, best_f1_conf: metrics.best_f1_conf })
+        Ok(ModelEval {
+            pr,
+            confusion,
+            per_class,
+            images,
+            best_f1_conf: metrics.best_f1_conf,
+            dataset_id: ds.map(|d| d.id.clone()),
+            dataset_name: ds.map(|d| d.name.clone()),
+            split: Some(split),
+            split_fallback,
+            // folo-vision's confusion thresholds (docs/METRICS.md §7).
+            confusion_conf: Some(0.25),
+            confusion_iou: Some(0.45),
+        })
     }
 
     fn export_model(&self, id: &str, format: &str) -> ApiResult<ExportResult> {
@@ -1539,6 +1580,32 @@ mod tests {
         assert_eq!(live.status, RunStatus::Running);
         assert_eq!(live.epoch, 42);
         assert_eq!(a.metrics(LIVE_ID).unwrap().epochs.len(), 42);
+    }
+
+    #[test]
+    fn every_epoch_and_eval_says_its_operating_point_and_source() {
+        let m = MockBackend::new(4200, true);
+        for r in m.runs().unwrap() {
+            for e in m.metrics(&r.id).unwrap().epochs {
+                let c = e
+                    .val
+                    .best_f1_conf
+                    .unwrap_or_else(|| panic!("{} epoch {}: no best_f1_conf", r.id, e.epoch));
+                assert!((0.001..1.0).contains(&c) && (c * 1000.0 - (c * 1000.0).round()).abs() < 1e-3, "{c}");
+            }
+        }
+        for model in m.models().unwrap() {
+            let ev = m.model_eval(&model.id).unwrap();
+            assert_eq!(ev.best_f1_conf, model.metrics.unwrap().best_f1_conf, "{}", model.id);
+            assert!(ev.best_f1_conf.is_some(), "{}", model.id);
+            let run = m.run(model.run_id.as_deref().unwrap()).unwrap();
+            assert_eq!(ev.dataset_id.as_deref(), Some(&*run.config.dataset_id), "{}", model.id);
+            let ds = m.fixture(&run.config.dataset_id).unwrap();
+            assert_eq!(ev.dataset_name.as_deref(), Some(&*ds.ds.name));
+            assert_eq!((ev.split, ev.split_fallback.as_ref()), (Some(Split::Val), None));
+            assert_eq!(ev.images as u64, ds.ds.splits.val);
+            assert_eq!((ev.confusion_conf, ev.confusion_iou), (Some(0.25), Some(0.45)));
+        }
     }
 
     #[test]

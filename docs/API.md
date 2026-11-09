@@ -174,13 +174,19 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   per file version; a file whose header is invalid is skipped with a warning in the server log.
 - `GET /api/models/{id}` → `Model`
 - `GET /api/models/{id}/eval` → validation results of the model on its dataset's `val` split (`train` when there is
-  none), for the PR curves and confusion matrix of the Models view:
+  none, see Split fallback below), for the PR curves and confusion matrix of the Models view:
   ```jsonc
   { "pr": [{ "class": 0, "recall": [0.0, 0.01, ..., 1.0], "precision": [1.0, ..., 0.0], "ap50": 0.91 }],
     "confusion": [[412, 3, 1, 21], [2, 398, 4, 30], [0, 6, 405, 25], [9, 14, 7, 0]],
     "per_class": [ClassMetrics],   // as in Epoch.val.per_class; map50 equals pr[class].ap50
-    "images": 200,
-    "best_f1_conf": 0.312 }        // the confidence per_class precision / recall are taken at (null: unknown)
+    "images": 200,                 // images of `split` evaluated
+    "best_f1_conf": 0.312,         // the confidence per_class precision / recall are taken at (null: unknown)
+    // What was evaluated (provenance):
+    "dataset_id": "ds_5a1e", "dataset_name": "shapes-1k",
+    "split": "val",                // the split actually evaluated: "val", or "train" on a fallback
+    "split_fallback": null,        // or { "requested": "val", "reason": "empty_split", "message": "..." }
+    "confusion_conf": 0.25,        // the confusion matrix counts detections with score > confusion_conf
+    "confusion_iou": 0.45 }        // ... matched to a ground truth at IoU > confusion_iou (docs/METRICS.md §7)
   ```
   `pr` has one curve per class, in class order, sampled at 101 recall points (`0.00` to `1.00`, IoU 0.5).
   `precision` is the COCO-interpolated envelope (it never rises with recall), and `ap50` is its mean.
@@ -193,12 +199,30 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   are no longer the model's. Computed with folo-vision's validator (docs/METRICS.md; MODEL.md
   §8.7 settings: `conf 0.001`, `iou 0.7`, the model's `imgsz`) on the server's `--device`, then cached (in memory and
   in `cache/eval/<model id>.json`) until the weights file or the dataset's files change (results cached by servers
-  from before `best_f1_conf` are computed again once). `pr` has curves for the classes with ground truth.
+  from before `best_f1_conf` or `split` are computed again once). `pr` has curves for the classes with ground truth.
+- **Provenance.** `dataset_id` / `dataset_name` are the dataset evaluated (above: the run's, or for a models-folder
+  model the first registered one with its classes; a run whose dataset is no longer registered reports the id and
+  name it had). `confusion_conf` / `confusion_iou` are the evaluator's confusion-matrix settings (`score > 0.25`,
+  `IoU > 0.45`, class-agnostic matching; docs/METRICS.md §7), not the NMS `conf 0.001` / `iou 0.7` and not
+  `best_f1_conf`: the matrix and the precision / recall columns are at different thresholds, so a view that shows
+  both says so ("matrix at conf > 0.25, IoU > 0.45"). Every field is `null` when unknown (older servers leave them
+  out: read missing as `null`, and a missing `split` as unknown, not as `val`).
+- **Split fallback.** `/eval` is defined on the validation split. A dataset whose `val` split has no images is
+  evaluated on its `train` split instead (rather than failing, so a model of a train-only dataset still gets curves),
+  and the response says so: `split: "train"` and `split_fallback: { "requested": "val", "reason": "empty_split",
+  "message": "dataset 'tiny' has no val images, so this is its train split (10 images): training-set numbers, not
+  held-out ones" }` (the server also logs a warning). These numbers measure fit on training images, not
+  generalisation, so clients must not label them "validation": show the split (or `message`) next to them.
+  `reason` is a stable code (`empty_split`, the only one today); treat an unknown code as a fallback too.
+  `split_fallback` is `null` whenever `split` is `val`. Training does the same: an epoch's `val` (`Epoch.val`,
+  model `metrics`) is on the training split when the dataset has no validation images, and the
+  run's log says so; `POST /api/val` never falls back (an empty split is `400 invalid_dataset`).
 - **Operating point (`best_f1_conf`).** Precision and recall (overall and per class) are taken at one confidence
   threshold: the one on the `0.000, 0.001, ..., 1.000` grid that maximises the class-mean F1 at IoU 0.5 (the highest
   on ties; detections with `score >= best_f1_conf` count; docs/METRICS.md). Every object with precision and recall
   says which threshold that was, as `best_f1_conf` next to them: `/eval` (top level), `Model.metrics`,
-  `Epoch.val` (so `/metrics`, SSE `epoch` events and `metrics.jsonl`) and `POST /api/val`'s `val`. It is `null`
+  `Epoch.val` of every validated epoch, not only the best one's (so `/metrics`, SSE `epoch` events and
+  `metrics.jsonl`, the same value in all three) and `POST /api/val`'s `val`. It is `null`
   when unknown: no class has ground truth, an epoch recorded before the field, and `.folo` files whose
   `folo.metrics` predate it (docs/FORMAT.md; newer checkpoints store it there). Additive: clients of older servers
   read a missing field as `null`. Studio and Desktop can show it as "P 0.84 / R 0.77 at conf 0.31".
@@ -590,7 +614,9 @@ run does not block it, runs created through the API do).
 
 ## Validation
 - `POST /api/val` body `{ "model_id", "dataset_id", "split": "val", "imgsz": null, "conf": 0.001, "iou": 0.7 }` →
-  `{ "model_id", "dataset_id", "split", "imgsz", "images", "val": Epoch.val, "timing": { "total_s", "per_image_ms" } }`.
+  `{ "model_id", "dataset_id", "dataset_name", "split", "imgsz", "images", "val": Epoch.val, "timing": { "total_s", "per_image_ms" } }`.
+  `split` is the requested one (no fallback); `dataset_name` is the dataset's name (`null`, or missing, from older
+  servers).
   Only `model_id` and `dataset_id` are required; `imgsz: null` uses the model's size. Errors: `model_not_found`,
   `dataset_not_found`, `invalid_body` (`conf` / `iou` outside `0..=1`, an `imgsz` that is not a multiple of 32
   in `32..=4096`), `invalid_dataset` (an empty split, as `folo val` reports it; real mode: the dataset's classes
@@ -616,7 +642,10 @@ start, except live-run timestamps):
   `trained_with` match the run's config: `m_31ab` / `run_1a02` is an `o2o` model, `m_53d1` / `run_3c01` was trained
   with `amp`, and `m_53d2`, its f16 export, has `trained_with: null`; `m_53d2` is `precision: "f16"`,
   `fused: true`, every other model `"f32"` and `false`), with
-  deterministic `/eval` results consistent with its metrics (smooth PR curves, a mostly diagonal confusion matrix).
+  deterministic `/eval` results consistent with its metrics (smooth PR curves, a mostly diagonal confusion matrix),
+  with the provenance of a real one: the run's dataset id and name, `split` (`val`; `train` with a `split_fallback`
+  for a dataset without validation images: a user-made synthetic dataset of one or two images) and the
+  real evaluator's `confusion_conf` / `confusion_iou`.
   `/weights` serves a real, loadable `.folo` file: always the **folo-n** architecture (whatever the model's `arch`)
   with the model's classes, `imgsz` and `head` and deterministic random weights (about 10 MB, 5 MB as `f16`; an
   `f16` model's file as stored is its fused f16 export, matching its `precision` and `fused`), generated on

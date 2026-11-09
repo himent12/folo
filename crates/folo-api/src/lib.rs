@@ -736,6 +736,60 @@ pub struct ModelEval {
     /// Additive: missing (older servers) reads as `null`.
     #[serde(default)]
     pub best_f1_conf: Option<f32>,
+    /// The dataset evaluated: its registered id (for a run model whose dataset is no longer registered, the id it
+    /// had when the run started). Additive: missing (older servers) reads as `null`.
+    #[serde(default)]
+    pub dataset_id: Option<String>,
+    /// The evaluated dataset's name. Additive: missing reads as `null`.
+    #[serde(default)]
+    pub dataset_name: Option<String>,
+    /// The split actually evaluated: `val`, or `train` when the dataset has no validation images (then
+    /// `split_fallback` is set). Additive: missing (older servers) reads as `null`, which means unknown, not `val`.
+    #[serde(default)]
+    pub split: Option<Split>,
+    /// Set when `split` is not the split `/eval` evaluates (`val`): which split was wanted and why it was not
+    /// used. `null` when the validation split was evaluated. Additive: missing reads as `null`.
+    #[serde(default)]
+    pub split_fallback: Option<SplitFallback>,
+    /// The confusion matrix counts predictions with `score > confusion_conf` (docs/METRICS.md §7: 0.25).
+    /// Additive: missing reads as `null`.
+    #[serde(default)]
+    pub confusion_conf: Option<f32>,
+    /// The confusion matrix matches a prediction to a ground truth when their IoU is `> confusion_iou`
+    /// (docs/METRICS.md §7: 0.45). Additive: missing reads as `null`.
+    #[serde(default)]
+    pub confusion_iou: Option<f32>,
+}
+
+/// [`ModelEval::split_fallback`]: the evaluation used another split than the one it is defined on.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct SplitFallback {
+    /// The split that was wanted (`/eval`: `val`).
+    pub requested: Split,
+    /// Why it was not used, a stable code: [`SplitFallback::EMPTY_SPLIT`] (it has no images). Clients treat a code
+    /// they do not know like this one.
+    pub reason: String,
+    /// One sentence for people, naming the dataset and both splits.
+    pub message: String,
+}
+
+impl SplitFallback {
+    /// [`SplitFallback::reason`] when the requested split has no images.
+    pub const EMPTY_SPLIT: &'static str = "empty_split";
+
+    /// `requested` of dataset `dataset` (its name) is empty, so `used` (with `images` images) was evaluated.
+    pub fn empty_split(requested: Split, used: Split, dataset: &str, images: u64) -> SplitFallback {
+        let (r, u) = (requested.as_str(), used.as_str());
+        let held_out = if used == Split::Train { ": training-set numbers, not held-out ones" } else { "" };
+        SplitFallback {
+            requested,
+            reason: Self::EMPTY_SPLIT.into(),
+            message: format!(
+                "dataset '{dataset}' has no {r} images, so this is its {u} split ({images} images){held_out}"
+            ),
+        }
+    }
 }
 
 /// A precision-recall curve at IoU 0.5, sampled at 101 recall points (`0.00, 0.01, ..., 1.00`). Precision is the
@@ -1528,7 +1582,10 @@ pub struct ValReport {
     pub model_id: String,
     /// Dataset it was evaluated on.
     pub dataset_id: String,
-    /// Split.
+    /// That dataset's name. Additive: missing (older servers) reads as `null`.
+    #[serde(default)]
+    pub dataset_name: Option<String>,
+    /// Split (the requested one: `POST /api/val` never falls back, an empty split is `invalid_dataset`).
     pub split: Split,
     /// Input size used.
     pub imgsz: u32,
@@ -1683,5 +1740,46 @@ mod tests {
         assert_eq!((step.steps_per_epoch, step.epochs), (0, 0));
         let v = serde_json::to_value(StatusEvent::new(RunStatus::Queued, None).with_length(3, 7)).unwrap();
         assert_eq!((v["epochs"].as_u64(), v["steps_per_epoch"].as_u64()), (Some(3), Some(7)));
+    }
+
+    #[test]
+    fn eval_provenance_is_additive() {
+        // A server older than the provenance fields (and `best_f1_conf`).
+        let old = r#"{"pr":[],"confusion":[[0]],"per_class":[],"images":3}"#;
+        let e: ModelEval = serde_json::from_str(old).unwrap();
+        assert_eq!((e.dataset_id.as_deref(), e.dataset_name.as_deref(), e.split), (None, None, None));
+        assert_eq!((e.split_fallback.as_ref(), e.confusion_conf, e.confusion_iou), (None, None, None));
+        // Unknown fields are sent as `null`, never left out.
+        let v = serde_json::to_value(&e).unwrap();
+        for k in ["dataset_id", "dataset_name", "split", "split_fallback", "confusion_conf", "confusion_iou"]
+        {
+            assert!(v.as_object().unwrap().contains_key(k) && v[k].is_null(), "{k}: {v}");
+        }
+        let fb = SplitFallback::empty_split(Split::Val, Split::Train, "shapes", 80);
+        assert_eq!(fb.reason, "empty_split");
+        assert!(fb.message.contains("'shapes'") && fb.message.contains("no val images"), "{}", fb.message);
+        assert!(fb.message.contains("train split (80 images)") && fb.message.contains("training-set"));
+        let e = ModelEval {
+            dataset_id: Some("ds_1".into()),
+            dataset_name: Some("shapes".into()),
+            split: Some(Split::Train),
+            split_fallback: Some(fb),
+            confusion_conf: Some(0.25),
+            confusion_iou: Some(0.45),
+            ..e
+        };
+        // Through text, as on the wire: f32 thresholds print as written.
+        let v: serde_json::Value = serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
+        assert_eq!(
+            (v["split"].as_str(), v["split_fallback"]["requested"].as_str()),
+            (Some("train"), Some("val"))
+        );
+        assert_eq!((v["confusion_conf"].as_f64(), v["confusion_iou"].as_f64()), (Some(0.25), Some(0.45)));
+        assert_eq!(serde_json::from_value::<ModelEval>(v).unwrap(), e);
+        // `ValReport.dataset_name` too.
+        let old = r#"{"model_id":"m","dataset_id":"d","split":"test","imgsz":64,"images":1,
+            "val":{"map50":0,"map50_95":0,"precision":0,"recall":0,"per_class":[]},
+            "timing":{"total_s":0,"per_image_ms":0}}"#;
+        assert_eq!(serde_json::from_str::<ValReport>(old).unwrap().dataset_name, None);
     }
 }
