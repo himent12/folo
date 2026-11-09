@@ -1034,6 +1034,21 @@ export const scenes = [
     },
   },
   {
+    // Phones: tracing classes from Curves itself: the picker open under the bar, two classes traced (each a tap to
+    // remove), the graph and its legend still in view.
+    name: 'model-phone-trace',
+    path: '/models/m_fast_n',
+    viewports: ['mobile'],
+    fullPage: false,
+    setup: async (page) => {
+      await until(page, '#pr svg');
+      await page.locator('#pr .trace').click();
+      await page.locator('#pr .t-chip').nth(1).click();
+      await page.locator('#pr .t-chip').nth(3).click();
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
     // Phones: the Confusion section opens on the ranked confusions and misses, the matrix one step away.
     name: 'model-phone-confusion',
     path: '/models/m_fast_n',
