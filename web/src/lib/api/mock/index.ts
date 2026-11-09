@@ -569,6 +569,9 @@ export class MockApi implements Api {
       if (this.scenario === 'gpu-unplugged' && c.device === 'gpu:1') this.#unplugged = true;
       const gpu = /^gpu:(\d+)$/.exec(c.device);
       if (gpu && !this.#gpus().some((g) => g.ordinal === Number(gpu[1]))) throw this.#noDevice(c.device);
+      // The real server's body error for a head it does not know (serde: `o2m` or `o2o`; missing means `o2m`).
+      if (c.head !== undefined && c.head !== 'o2m' && c.head !== 'o2o')
+        throw new ApiError(400, 'invalid_body', `field \`head\`: unknown variant \`${String(c.head)}\`, expected \`o2m\` or \`o2o\``);
       const now = Date.now();
       const id = `run_${(hash(c.name + now + this.#nextId++) & 0xffff).toString(16).padStart(4, '0')}`;
       const sizeIdx = ['folo-n', 'folo-s', 'folo-m', 'folo-l', 'folo-x'].indexOf(c.arch);
