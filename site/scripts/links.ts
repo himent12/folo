@@ -150,7 +150,9 @@ function resolveImage(src: string, ctx: LinkContext, where: string): { url: stri
 
 /** Comments, and start tags (attributes may be double-quoted, single-quoted or unquoted). */
 const HTML_PART = /<!--[\s\S]*?(?:-->|$)|<[a-zA-Z][^\s/>]*(?:\s+[^\s"'>\/=]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'=<>`]+))?)*\s*\/?>/g;
-const HTML_ATTR = /(\s)(href|src)(\s*=\s*)(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/gi;
+const HTML_TAG_NAME = /^<[a-zA-Z][^\s/>]*/;
+/** One attribute, its whole value consumed, so text inside another attribute's value is never read as an attribute. */
+const HTML_ATTR = /(\s+)([^\s"'>\/=]+)(?:(\s*=\s*)(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/y;
 
 /**
  * Links and images in raw HTML (`<a href>`, `<img src>`, ...) get the same checks and rewriting as Markdown ones, so
@@ -160,12 +162,27 @@ const HTML_ATTR = /(\s)(href|src)(\s*=\s*)(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))
 function rewriteHtml(html: string, ctx: LinkContext, where: string): string {
   return html.replace(HTML_PART, (part) => {
     if (part.startsWith('<!--')) return part;
-    return part.replace(HTML_ATTR, (whole, sp: string, name: string, eq: string, dq?: string, sq?: string, bare?: string) => {
+    // Walk the attributes one after another from the end of the tag name; HTML_PART guarantees they all parse.
+    const head = HTML_TAG_NAME.exec(part)![0];
+    let out = head;
+    let at = head.length;
+    for (;;) {
+      HTML_ATTR.lastIndex = at;
+      const m = HTML_ATTR.exec(part);
+      if (!m) break;
+      at = HTML_ATTR.lastIndex;
+      const [whole, sp, name, eq, dq, sq, bare] = m;
+      const lower = name.toLowerCase();
+      if (!eq || (lower !== 'href' && lower !== 'src')) {
+        out += whole;
+        continue;
+      }
       const value = dq ?? sq ?? bare ?? '';
-      const quote = dq !== undefined ? '"' : sq !== undefined ? "'" : '"';
-      const url = name.toLowerCase() === 'href' ? resolveHref(value, ctx, where) : (resolveImage(value, ctx, where)?.url ?? null);
-      return url === null ? whole : `${sp}${name}${eq}${quote}${url}${quote}`;
-    });
+      const quote = sq !== undefined ? "'" : '"';
+      const url = lower === 'href' ? resolveHref(value, ctx, where) : (resolveImage(value, ctx, where)?.url ?? null);
+      out += url === null ? whole : `${sp}${name}${eq}${quote}${url}${quote}`;
+    }
+    return out + part.slice(at);
   });
 }
 
