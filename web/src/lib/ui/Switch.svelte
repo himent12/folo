@@ -4,15 +4,27 @@
     label,
     hint,
     onchange,
-  }: { checked?: boolean; label: string; hint?: string; onchange?: (v: boolean) => void } = $props();
+    disabled = false,
+    id,
+    describedby,
+  }: {
+    checked?: boolean;
+    label: string;
+    hint?: string;
+    onchange?: (v: boolean) => void;
+    /** Off and not operable; say why next to it and pass that element's id as `describedby`. */
+    disabled?: boolean;
+    id?: string;
+    describedby?: string;
+  } = $props();
 </script>
 
-<label class="switch">
+<label class="switch" class:disabled>
   <span class="text">
     <span class="label">{label}</span>
     {#if hint}<span class="hint">{hint}</span>{/if}
   </span>
-  <input type="checkbox" role="switch" bind:checked onchange={() => onchange?.(checked)} />
+  <input type="checkbox" role="switch" {id} {disabled} aria-describedby={describedby} bind:checked onchange={() => onchange?.(checked)} />
   <span class="track" aria-hidden="true"><span class="thumb"></span></span>
 </label>
 
@@ -72,6 +84,17 @@
   input:checked + .track .thumb {
     transform: translateX(12px);
     background: var(--accent-on);
+  }
+  /* Disabled: the label and thumb in text.disabled, the edge kept so the control still reads as a switch; the hint stays
+     readable (it may be the reason). */
+  .disabled {
+    cursor: not-allowed;
+  }
+  .disabled .label {
+    color: var(--text-disabled);
+  }
+  .disabled .thumb {
+    background: var(--text-disabled);
   }
   input:focus-visible + .track {
     outline: 2px solid var(--focus);

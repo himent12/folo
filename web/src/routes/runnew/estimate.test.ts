@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { autoCloseMosaic, closeMosaicEpochs, defaultImgsz, oomScale, shortRun, warmup, warmupIters } from './estimate';
+import { AMP_SPEEDUP, autoCloseMosaic, closeMosaicEpochs, defaultImgsz, estimate, oomScale, shortRun, warmup, warmupIters } from './estimate';
 
 const GiB = 2 ** 30;
 
@@ -67,9 +67,14 @@ describe('shortRun', () => {
     expect(shortRun(64, 4, 16, false)).toMatchObject({ warmup: 3, steps: 4, warmupHeavy: true, epochs: 6 });
     expect(shortRun(64, 20, 16, false)).toBeNull();
   });
-  it('offers one epoch count that clears both', () => {
+  it("suggests the trainer's epochs for a short run from scratch, ceil(200 / spe), so the run page says the same", () => {
     // From scratch as well: 150 steps; 6 epochs clear warmup (180 steps) but 200 steps need 7.
     expect(shortRun(1920, 5, 16, true)).toMatchObject({ scratch: true, warmupHeavy: true, epochs: 7 });
+    // The short-run scenario's run (800 images, batch 32: 25 batches, 2 per step): 65 steps, 16 epochs.
+    expect(shortRun(800, 5, 32, true)).toMatchObject({ stepsPerEpoch: 13, accumulate: 2, steps: 65, warmup: 39, epochs: 16 });
+    // 50 steps an epoch: the trainer's 4 epochs, even though warmup still takes over half of those 200 steps.
+    expect(shortRun(3200, 3, 64, true)).toMatchObject({ stepsPerEpoch: 50, scratch: true, epochs: 4 });
+    expect(shortRun(3200, 4, 64, true)).toMatchObject({ scratch: false, warmupHeavy: true, epochs: 6 });
   });
   it('ignores invalid input', () => {
     expect(shortRun(0, 10, 16, true)).toBeNull();
@@ -98,5 +103,18 @@ describe('defaultImgsz', () => {
     expect(defaultImgsz([[320, 320], [480, 480]])).toBe(640);
     expect(defaultImgsz([])).toBe(640);
     expect(defaultImgsz(null)).toBe(640);
+  });
+});
+
+describe('estimate with mixed precision', () => {
+  it('speeds up only the sizes measured, and trims the activation memory', () => {
+    const f32 = estimate('folo-s', 1000, 10, 16, 640, false);
+    const amp = estimate('folo-s', 1000, 10, 16, 640, false, true);
+    expect(amp.imgsPerS / f32.imgsPerS).toBeCloseTo(AMP_SPEEDUP['folo-s']!);
+    expect(amp.vramBytes).toBeLessThan(f32.vramBytes);
+    expect(estimate('folo-m', 1000, 10, 16, 640, false, true).imgsPerS).toBe(estimate('folo-m', 1000, 10, 16, 640, false).imgsPerS);
+  });
+  it('changes nothing on the CPU', () => {
+    expect(estimate('folo-n', 1000, 10, 16, 640, true, true)).toEqual(estimate('folo-n', 1000, 10, 16, 640, true));
   });
 });

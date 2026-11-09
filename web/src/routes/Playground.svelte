@@ -55,6 +55,8 @@
   // and the display toggles open in a non-modal bottom sheet, so the image stays in view (and live) while tuning;
   // classes and timing fold into two disclosures under the detections.
   const phone = new MediaQuery('max-width: 767px', false);
+  // Below 1024 px the model and Run on leave the title row for a toolbar row of their own under it, full width.
+  const narrow = new MediaQuery('max-width: 1023px', false);
   let moreOpen = $state(false);
   let sheetEl = $state<HTMLElement>();
   let moreBtn = $state<HTMLElement>();
@@ -549,7 +551,7 @@
 
 {#snippet secondarySliders(inline: boolean)}
   <div title="Non-max suppression: a lower-scoring box of the same class is dropped when it overlaps a kept one by more than this.">
-    <Slider {inline} label={inline ? 'Overlap (IoU)' : 'Overlap threshold (IoU)'} bind:value={iou} min={0.05} max={0.95} step={0.05} hint="Suppress same-class overlaps above this." />
+    <Slider {inline} label="Overlap (IoU)" bind:value={iou} min={0.05} max={0.95} step={0.05} hint="Suppress same-class overlaps above this." />
   </div>
   <Slider {inline} label="Max detections" bind:value={maxDet} min={1} max={300} step={1} format={(v) => String(Math.round(v))} hint="Keep at most this many boxes." />
 {/snippet}
@@ -595,8 +597,8 @@
 {/snippet}
 
 {#snippet noticeStrip()}
-  <!-- What went wrong and the ways out, in one block: under the image (which stays whole) on wide screens, above it on
-       phones so the failure and its recovery are in the first screen. -->
+  <!-- What went wrong and the ways out, in one block above the image, where the result would be, at every width: the
+     image stays whole, and the failure and its recovery are in the first screen. -->
   {#if notice}
     {#key notice}
       <div class="notice" bind:this={noticeEl}>
@@ -648,39 +650,42 @@
   <span>Run a model on any image. Thresholds re-filter instantly in the browser.</span>
 {/snippet}
 
-<Page title="Playground" wide sub={source && phone.current ? undefined : intro}>
-  {#snippet actions()}
-    {#if ranked.length}
-      <div class="model-pick" class:compact={!!source}>
-        <span class="pick-label">Model</span>
-        <Select
-          label="Model"
-          value={modelId ?? ''}
-          options={ranked.map((m) => ({ value: m.id, label: `${m.name} · ${m.arch}${m.metrics ? ` · mAP ${metric(m.metrics.map50_95)}` : ''}` }))}
-          onchange={chooseModel}
+<!-- The model and where it runs: on the title row from 1024 px up, a toolbar row under the title below that. -->
+{#snippet pickers()}
+  {#if ranked.length}
+    <div class="model-pick">
+      <span class="pick-label">Model</span>
+      <Select
+        label="Model"
+        value={modelId ?? ''}
+        options={ranked.map((m) => ({ value: m.id, label: `${m.name} · ${m.arch}${m.metrics ? ` · mAP ${metric(m.metrics.map50_95)}` : ''}` }))}
+        onchange={chooseModel}
+      />
+      {#if model}<Button icon={ArrowUpRight} href={href(`/models/${model.id}`)} aria-label="Open {model.name}" />{/if}
+    </div>
+    <div class="runon" role="group" aria-label="Run on" aria-describedby={webgpu ? undefined : 'runon-note'}>
+      <span class="pick-label" aria-hidden="true">Run on</span>
+      <!-- A choice that is off says why: on the title row in a line under the control, from its left edge; in the
+           toolbar row beside it. -->
+      <span class="runon-seg">
+        <Segmented
+          label="Run the model on"
+          size="sm"
+          bind:value={runOn}
+          options={[
+            { value: 'server', label: 'Server' },
+            { value: 'webgpu', label: 'WebGPU', disabled: !webgpu },
+            { value: 'cpu', label: 'CPU' },
+          ]}
         />
-        {#if model}<Button icon={ArrowUpRight} href={href(`/models/${model.id}`)} aria-label="Open {model.name}" />{/if}
-      </div>
-      <div class="runon" role="group" aria-label="Run on" aria-describedby={webgpu ? undefined : 'runon-note'}>
-        <span class="pick-label" aria-hidden="true">Run on</span>
-        <!-- A choice that is off says why, in a line under the control that starts at its left edge; the controls stay
-             on the title row. -->
-        <span class="runon-seg">
-          <Segmented
-            label="Run the model on"
-            size="sm"
-            bind:value={runOn}
-            options={[
-              { value: 'server', label: 'Server' },
-              { value: 'webgpu', label: 'WebGPU', disabled: !webgpu },
-              { value: 'cpu', label: 'CPU' },
-            ]}
-          />
-          {#if !webgpu}<span class="runon-note" id="runon-note">No WebGPU in this browser</span>{/if}
-        </span>
-      </div>
-    {/if}
-  {/snippet}
+        {#if !webgpu}<span class="runon-note" id="runon-note">No WebGPU in this browser</span>{/if}
+      </span>
+    </div>
+  {/if}
+{/snippet}
+
+<Page title="Playground" wide sub={source && phone.current ? undefined : intro} actions={narrow.current || !ranked.length ? undefined : pickers}>
+  {#if narrow.current && ranked.length}<div class="pg-tools">{@render pickers()}</div>{/if}
 
   {#if models.error && !models.data}
     <Panel><ErrorState error={models.error} retry={() => models.refresh()} title="Could not load models" compact /></Panel>
@@ -718,7 +723,7 @@
                 <Button size="sm" variant="ghost" class="clear" icon={X} aria-label="Clear image" onclick={clear} />
               {/if}
             </div>
-            {#if phone.current}{@render noticeStrip()}{/if}
+            {@render noticeStrip()}
             <div class="stage" class:empty={!source} style:--ar={dims ? `${dims.width} / ${dims.height}` : undefined}>
               {#if !source}
                 <DropZone {dragging} {samples} onbrowse={() => fileInput.click()} onpick={() => (pickerOpen = true)} onsample={(ds, img) => setSource({ kind: 'dataset', ds, img })} />
@@ -746,7 +751,6 @@
                 {#if dragging}<div class="drop-hint"><span>Drop to replace</span></div>{/if}
               {/if}
             </div>
-            {#if !phone.current}{@render noticeStrip()}{/if}
             {#if source}
               <!-- Phones: the threshold tuned most sits right under the image; the rest is one tap away below it. -->
               <div class="qconf" class:covered={sheetShown}><Slider inline label="Confidence" bind:value={conf} min={0.01} max={0.95} step={0.01} /></div>
@@ -867,7 +871,7 @@
                           tabindex={i === tabRow ? 0 : -1}
                           class:hot={activeIdx === i}
                           class:on={selectedIdx === i}
-                          aria-current={selectedIdx === i ? 'true' : undefined}
+                          aria-selected={selectedIdx === i ? 'true' : undefined}
                           aria-label="{b.name}, score {score(b.score)}, {px(b.x2 - b.x1)} by {px(b.y2 - b.y1)} pixels"
                           onpointerenter={() => (hover = b)}
                           onpointerleave={() => (hover = null)}
@@ -970,6 +974,29 @@
     align-items: center;
     gap: var(--space-2);
     width: 400px;
+  }
+  /* Below 1024 px: one full-width toolbar row under the title; the model select takes what Run on leaves, and the
+     WebGPU note sits beside the control (wrapping under it when the row is full). */
+  .pg-tools {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2) var(--space-6);
+  }
+  .pg-tools .model-pick {
+    flex: 1 1 320px;
+    width: auto;
+    min-width: 0;
+  }
+  .pg-tools .runon {
+    flex-wrap: wrap;
+    row-gap: var(--space-1);
+  }
+  .pg-tools .runon-seg {
+    display: contents;
+  }
+  .pg-tools .runon-note {
+    position: static;
   }
   .model-pick :global(.select) {
     flex: 1;
@@ -1100,16 +1127,11 @@
     height: var(--stage-h);
     background: var(--bg-inset);
   }
+  /* Empty: as tall as its content (a capped drop target and the samples), not the canvas height. */
   .stage.empty {
     border-radius: 0 0 calc(var(--radius-lg) - 1px) calc(var(--radius-lg) - 1px);
     overflow: hidden;
     height: auto;
-    min-height: max(360px, calc(100dvh - 220px));
-    display: flex;
-    flex-direction: column;
-  }
-  .stage.empty > :global(*) {
-    flex: 1;
   }
   .scan {
     position: absolute;
@@ -1151,10 +1173,10 @@
     font-size: var(--type-sm-size);
     color: var(--text-secondary);
   }
-  /* A strip between the image and its caption: the image stays whole, the notice reads on the panel, not a photo. */
+  /* A strip between the toolbar and the image: the image stays whole, the notice reads on the panel, not a photo. */
   .notice {
     padding: 0 var(--space-4);
-    border-top: 1px solid var(--line-subtle);
+    border-bottom: 1px solid var(--line-subtle);
   }
   .need-file {
     display: flex;
@@ -1546,6 +1568,10 @@
     .layout.fit {
       grid-template-columns: minmax(0, 1fr);
     }
+    /* The toolbar row takes the title row's place for the controls; no extra gap under the title. */
+    .pg-tools {
+      margin-top: calc(-1 * var(--space-1));
+    }
     /* One column: interleave the panels so the controls sit right under the image. */
     .main,
     .aside {
@@ -1567,38 +1593,54 @@
       order: 5;
     }
   }
+  /* Tablets: the rail is a two-column block under the image, Thresholds beside Classes over Timing, then the
+     detections full width. */
+  @media (min-width: 768px) and (max-width: 1023px) {
+    .aside {
+      order: 2;
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      grid-template-rows: auto 1fr;
+      gap: var(--space-4);
+    }
+    .thresholds {
+      grid-row: span 2;
+    }
+    .thresholds,
+    .timing {
+      display: grid;
+    }
+  }
   @media (max-width: 767px) {
-    .model-pick {
-      width: calc(100vw - 2 * var(--space-4));
-    }
-    .runon {
-      width: calc(100vw - 2 * var(--space-4));
-      flex-wrap: wrap;
-      justify-content: space-between;
-    }
-    /* Phones: the note is a row of its own under the label and the control, from the left edge. */
-    .runon-seg {
-      display: contents;
-    }
-    .runon-note {
-      position: static;
-      flex-basis: 100%;
-    }
-    /* The ways out stack full width, the primary first, 44 px each. */
-    .notice :global(.acts),
-    .nf-actions {
+    /* Phones: two rows, the model, then Run on with its control on the right; the note a row of its own under them. */
+    .pg-tools {
       flex-direction: column;
       align-items: stretch;
+      gap: var(--space-2);
+      margin-top: 0;
+    }
+    .pg-tools .model-pick {
+      flex: none;
+    }
+    .pg-tools .runon {
+      justify-content: space-between;
+    }
+    .pg-tools .runon-note {
+      flex-basis: 100%;
+    }
+    /* The ways out: the primary full width, the others in one row of secondary buttons under it, 44 px each. */
+    .notice :global(.acts),
+    .nf-actions {
       gap: var(--space-2);
     }
     .notice :global(.acts .btn),
     .nf-actions :global(.btn) {
       --h: 44px;
-      width: 100%;
+      flex: 1 1 auto;
     }
-    /* With an image the intro line is gone; the empty title row must not leave a gap above the model picker. */
-    :global(.page > header:has(.model-pick.compact)) {
-      row-gap: 0;
+    .notice :global(.acts .btn:first-child),
+    .nf-actions :global(.btn:first-child) {
+      flex-basis: 100%;
     }
     /* The image goes edge to edge; its bars keep the 16 px gutter inside. */
     .viewer.loaded {
@@ -1616,11 +1658,6 @@
     .viewer.loaded .qconf {
       padding-left: var(--space-4);
       padding-right: var(--space-4);
-    }
-    /* Above the image here: the toolbar's edge is over it, its own edge under it. */
-    .notice {
-      border-top: 0;
-      border-bottom: 1px solid var(--line-subtle);
     }
     .viewer.loaded .vbar {
       padding-right: var(--space-2);

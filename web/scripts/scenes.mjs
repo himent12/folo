@@ -113,21 +113,53 @@ export const scenes = [
     },
   },
   {
-    // A short run on fasteners from scratch (5 epochs, 1,920 images): 150 optimizer steps, 90 of them warmup. The Summary
-    // warns as the trainer does (schedule_warnings) with one fix; below 960 px the dock says so too.
+    // The short-run scenario's run (run_s5q1) set up again: shapes, folo-n from scratch, batch 32, 5 epochs. 25 batches an epoch
+    // make 13 optimizer steps, 65 in all: the Summary warns in one line with the trainer's fix (16 epochs, as the run
+    // page says), the reasons behind Why? (opened on desktop); below 960 px the dock says so too.
     name: 'run-new-short',
-    path: '/runs/new',
+    path: '/runs/new?dataset=ds_shapes',
     fullPage: false,
     viewports: ['desktop', 'tablet', 'mobile'],
     setup: async (page, { vp }) => {
       await until(page, 'input#epochs');
+      if (vp === 'mobile') await page.locator('#arch-pick [role="radio"]', { hasText: 'N' }).click();
+      else await page.locator('label.arch', { hasText: 'folo-n' }).click();
+      await page.locator('#batch [role="radio"]', { hasText: '32' }).click();
       await page.locator('input#epochs').fill('5');
       await page.mouse.move(0, 0);
       if (vp === 'mobile') {
         await page.locator('.dock-est').click();
         await page.locator('dialog[open]').waitFor();
-      } else if (vp === 'desktop') await until(page, '.summary .short');
-      else await until(page, '.dock-warn');
+      } else if (vp === 'desktop') {
+        await until(page, '.summary .short');
+        await page.locator('.summary .short button.more').click();
+      } else await until(page, '.dock-warn');
+    },
+  },
+  {
+    // Mixed precision switched on: the Training section's switch, the Summary's row, a faster estimate.
+    name: 'run-new-amp',
+    path: '/runs/new',
+    fullPage: true,
+    viewports: ['desktop', 'tablet', 'mobile'],
+    setup: async (page) => {
+      await until(page, 'input#amp');
+      await page.locator('.amp .switch').click();
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // A server whose GPU has no tensor cores (the DX12 adapter): the switch is off and disabled, with the reason, and the
+    // server's own words under Technical details (opened).
+    name: 'run-new-amp-off',
+    path: '/runs/new',
+    search: 'scenario=no-tensor-cores',
+    fullPage: true,
+    viewports: ['desktop', 'tablet', 'mobile'],
+    setup: async (page) => {
+      await until(page, '#amp-why');
+      await page.locator('.amp .dev-detail summary').click();
+      await page.mouse.move(0, 0);
     },
   },
   {
@@ -682,10 +714,10 @@ export const scenes = [
       await page.locator('#engine-speed summary', { hasText: 'How this was measured' }).click();
     },
   },
-  { name: 'playground-empty', path: '/playground', setup: (page) => until(page, 'button.sample') },
+  { name: 'playground-empty', path: '/playground', viewports: ['desktop', 'laptop', 'tablet', 'mobile'], setup: (page) => until(page, 'button.sample') },
   {
     // Server inference ran out of GPU memory (507): the cause, the hint, and the ways out (this browser, a smaller model),
-    // in a strip under the image, which stays whole.
+    // in a strip above the image (where the result would be), which stays whole.
     name: 'playground-oom',
     path: '/playground?model=m_shapes_s',
     search: 'scenario=oom',
@@ -699,7 +731,8 @@ export const scenes = [
       await page.clock.runFor(6000);
     },
   },
-  { name: 'playground-result', path: '/playground?model=m_hard_s', viewports: ['desktop', 'laptop', 'mobile'], setup: playgroundResult },
+  // Tablet: the model and Run on in a toolbar row under the title, the rail a two-column block under the image.
+  { name: 'playground-result', path: '/playground?model=m_hard_s', viewports: ['desktop', 'laptop', 'tablet', 'mobile'], setup: playgroundResult },
   {
     // A browser without WebGPU: the option is off and the header says why, and what is left.
     name: 'playground-no-webgpu',

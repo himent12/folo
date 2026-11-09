@@ -20,7 +20,7 @@
   import { IMGSZ_STEPS, isOom } from '$lib/oom';
   import { prefs } from '$lib/prefs.svelte';
   import { href, router } from '$lib/router.svelte';
-  import { setCrumbs } from '$lib/shell/crumbs.svelte';
+  import { ownCreateAction, setCrumbs } from '$lib/shell/crumbs.svelte';
   import { dock } from '$lib/shell/dock';
   import { sidebar } from '$lib/shell/sidebarState.svelte';
   import Page from '$lib/shell/Page.svelte';
@@ -35,11 +35,14 @@
   import Select from '$lib/ui/Select.svelte';
   import Skeleton from '$lib/ui/Skeleton.svelte';
   import Slider from '$lib/ui/Slider.svelte';
+  import Switch from '$lib/ui/Switch.svelte';
   import { toast } from '$lib/ui/toast.svelte';
   import AugPreview, { type AugKey } from './runnew/AugPreview.svelte';
-  import { arches, autoCloseMosaic, closeMosaicEpochs, defaultImgsz, estimate, oomScale, shortRun } from './runnew/estimate';
+  import { AMP_SPEEDUP, arches, autoCloseMosaic, closeMosaicEpochs, defaultImgsz, estimate, oomScale, shortRun, warmup } from './runnew/estimate';
 
   setCrumbs({ label: 'Runs', path: '/runs' }, { label: 'New run' });
+  // This page is the create action: the top bar's New run steps aside instead of showing a pressed, disabled copy.
+  ownCreateAction();
 
   // Phones pick the model size from a segmented control; the full specification table folds behind "Compare sizes".
   const phone = new MediaQuery('max-width: 767px', false);
@@ -70,6 +73,8 @@
   let imgszChosen = $state(queryImgsz);
   let device = $state<string>('auto');
   let optimizer = $state<Optimizer>('auto');
+  /** Mixed precision as asked for; what the run gets is `ampOn` (off where the server cannot train that way). */
+  let amp = $state(false);
   let lr0 = $state(0.01);
   let seed = $state(0);
   let weights = $state<string>('none');
@@ -88,6 +93,8 @@
   let focus = $state<AugKey | null>(null);
   let shuffle = $state(1);
   let submitting = $state(false);
+  /** The short-run warning's reasons, folded behind its "Why?". */
+  let shortWhy = $state(false);
   let advancedOpen = $state(false);
   /** The augmentation settings fold behind a one-line summary at every width until opened. */
   let augOpen = $state(false);
@@ -125,6 +132,7 @@
     imgszChosen = true;
     device = q.get('device') === 'cpu' ? 'cpu' : c.device;
     optimizer = c.optimizer;
+    amp = c.amp ?? false;
     lr0 = c.lr0;
     seed = c.seed;
     weights = c.weights ?? 'none';
@@ -209,7 +217,30 @@
   const batchN = $derived(Math.max(1, Math.round(Number(batch) || 16)));
   const imgszN = $derived(Number(imgsz) || 640);
   const onCpu = $derived(device === 'cpu' || (device === 'auto' && !gpu));
-  const est = $derived(estimate(arch, dataset?.splits.train ?? 0, epochs, batchN, imgszN, onCpu));
+
+  // Mixed precision (TrainConfig.amp): shown only when the server says what `auto` can use (`capabilities`, absent from
+  // older servers), and off with the reason where a run would fail with `not_supported`.
+  const caps = $derived(system.data?.capabilities);
+  const ampBlock = $derived.by((): { line: string; cmd?: string; detail?: string } | null => {
+    if (!caps) return null;
+    if (device === 'cpu') return { line: "Needs a GPU's tensor cores: on the CPU a run trains in f32." };
+    // `capabilities` describe the device `auto` resolves to; another GPU is left to the server.
+    if (caps.amp.available || (device !== 'auto' && device !== caps.device)) return null;
+    const detail = caps.amp.reason ? sentence(caps.amp.reason, true) : undefined;
+    if (caps.tensor_cores.available && !caps.tensor_cores.enabled) return { line: 'Tensor cores are off on this server. Start it with', cmd: 'folo serve --tensor-cores', detail };
+    if (!caps.tensor_cores.available) return { line: "This server's GPU has no tensor cores FOLO can use, so runs train in f32.", detail };
+    return { line: 'Not available on this server: runs train in f32.', detail };
+  });
+  const ampOn = $derived(amp && !!caps && !ampBlock);
+  /** What the switch does, with the speed measured for this size (docs/BENCHMARKS.md), where there is one. */
+  const ampHint = $derived.by(() => {
+    const x = AMP_SPEEDUP[arch];
+    return x ? `f16 on tensor cores: about ${x.toFixed(1)}× faster, 40% less memory.` : 'f16 on tensor cores: faster, about 40% less memory.';
+  });
+
+  const est = $derived(estimate(arch, dataset?.splits.train ?? 0, epochs, batchN, imgszN, onCpu, ampOn));
+  /** The trainer's schedule: optimizer steps an epoch, fewer than batches when gradients accumulate. */
+  const sched = $derived(warmup(dataset?.splits.train ?? 0, Number.isInteger(epochs) && epochs > 0 ? epochs : 1, batchN));
   // wgpu cannot report adapter memory (real servers send 0): then there is no meter and no out-of-memory guess.
   const gpuMem = $derived(gpu && gpu.memory_bytes > 0 ? gpu.memory_bytes : null);
 
@@ -321,6 +352,8 @@
     weights: weights === 'none' ? null : weights,
     augment: { ...augment, hsv: [...augment.hsv] as [number, number, number], close_mosaic: Math.min(augment.close_mosaic, epochs) },
     seed,
+    // Only to servers that report capabilities (older ones predate `amp`).
+    ...(caps ? { amp: ampOn } : {}),
   });
 
   const cliParts = $derived(
@@ -332,6 +365,7 @@
       `--batch ${batchN}`,
       `--imgsz ${imgszN}`,
       device !== 'auto' ? `--device ${device}` : '',
+      ampOn ? '--amp' : '',
       weights !== 'none' ? `--weights ${weights}` : '',
       `--name ${name.trim()}`,
     ].filter(Boolean),
@@ -392,7 +426,7 @@
     const g = system.data?.gpus.find((x) => `gpu:${x.ordinal}` === device);
     return g ? `${device} · ${shortGpu(g.name)}` : device;
   });
-  type Jump = 'name' | 'data' | 'model' | 'epochs' | 'batch' | 'imgsz' | 'device' | 'weights' | 'opt' | 'lr0' | 'seed' | 'close';
+  type Jump = 'name' | 'data' | 'model' | 'epochs' | 'batch' | 'imgsz' | 'device' | 'amp' | 'weights' | 'opt' | 'lr0' | 'seed' | 'close';
   /** The settings that shape the run, each a way back to its control. Optimizer only once it is not the default. */
   const review = $derived<{ key: Jump; label: string; value: string; mono?: boolean; warn?: boolean }[]>([
     { key: 'data', label: 'Data', value: dataset ? `${dataset.name} · ${compact(dataset.splits.train)} images` : '—', warn: !!errors.dataset },
@@ -401,10 +435,11 @@
     { key: 'batch', label: 'Batch', value: String(batchN) },
     { key: 'imgsz', label: 'Image size', value: `${imgszN} px` },
     { key: 'device', label: 'Device', value: deviceLabel, warn: !!deviceMsg },
+    ...(caps ? [{ key: 'amp' as const, label: 'Mixed precision', value: ampOn ? 'On' : 'Off' }] : []),
     {
       key: 'weights',
       label: 'Start from',
-      value: weights === 'none' ? 'Random init' : (weightOptions.find((m) => m.id === weights)?.name ?? weights),
+      value: weights === 'none' ? 'From scratch' : (weightOptions.find((m) => m.id === weights)?.name ?? weights),
       mono: weights !== 'none',
       warn: !!errors.weights,
     },
@@ -436,7 +471,7 @@
     requestAnimationFrame(() => {
       const el = jumpTarget(key);
       if (!el) return;
-      const box = el.closest<HTMLElement>('.field, .card, .arch, .ds-pick, .a-pick') ?? el;
+      const box = el.closest<HTMLElement>('.field, .card, .arch, .ds-pick, .a-pick, .amp') ?? el;
       const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
       box.scrollIntoView({ block: 'center', behavior: reduce ? 'auto' : 'smooth' });
       el.focus({ preventScroll: true, focusVisible: true } as FocusOptions);
@@ -463,9 +498,11 @@
   </ul>
 {/snippet}
 
-{#snippet figures()}
+{#snippet figures(where: string)}
   <dl class="est">
-    <dt>Steps / epoch</dt><dd class="num">{num(est.stepsPerEpoch)}</dd>
+    <!-- The trainer's count (the short-run warning's unit), and the batches behind it when several make one step. -->
+    <dt>Optimizer steps / epoch</dt><dd class="num">{num(sched.stepsPerEpoch)}</dd>
+    {#if sched.accumulate > 1}<dd class="est-sub num">{num(est.stepsPerEpoch)} batches, accumulate {sched.accumulate}</dd>{/if}
     <dt>Est. time</dt><dd class="num">{roughDuration(est.totalSeconds)} <span class="faint">(~{num(Math.round(est.imgsPerS / 10) * 10, 0)} img/s)</span></dd>
     {#if !onCpu && gpu}
       <dt>Est. GPU memory</dt>
@@ -484,20 +521,30 @@
     <p class="warning soft"><TriangleAlert size={14} /> Training on the CPU is roughly 14× slower than on a GPU.</p>
   {/if}
   {#if short}
+    <!-- The trainer's warnings (folo_vision::train::schedule_warnings) as one line and its fix; the reasons behind Why?. -->
     <div class="warning soft short">
       <TriangleAlert size={14} />
-      <!-- The trainer's warnings in its own terms (folo_vision::train::schedule_warnings), with one fix for both. -->
-      <div>
-        {#if short.scratch}
-          <p>
-            Only {num(short.steps)} optimizer steps ({num(epochs)} epochs × {num(short.stepsPerEpoch)}{short.accumulate > 1 ? `, batch ${batchN} × accumulate ${short.accumulate}` : ''}).
-            From scratch a detector needs a few hundred, so expect an mAP near 0.
-          </p>
+      <div class="short-body">
+        <p>
+          {#if short.scratch}Too short to learn: {num(short.steps)} optimizer steps.{:else}Mostly warmup: {num(short.warmup)} of {num(short.steps)} optimizer steps.{/if}
+        </p>
+        <div class="short-acts">
+          <button type="button" class="fix" onclick={() => (epochs = short.epochs)}>Train {num(short.epochs)} epochs</button>
+          <button type="button" class="more" aria-expanded={shortWhy} aria-controls="{where}-short-why" onclick={() => (shortWhy = !shortWhy)}>Why?</button>
+        </div>
+        {#if shortWhy}
+          <div class="short-why" id="{where}-short-why">
+            {#if short.scratch}
+              <p>
+                {num(short.steps)} optimizer steps: {num(epochs)} epochs × {num(short.stepsPerEpoch)}{#if short.accumulate > 1}{' '}({num(est.stepsPerEpoch)} batches of {batchN}, {short.accumulate} per step){/if}.
+                Trained from scratch, a detector needs a few hundred steps to learn anything, so expect an mAP near&nbsp;0.
+              </p>
+            {/if}
+            {#if short.warmupHeavy}
+              <p>Warmup takes {num(short.warmup)} of the {num(short.steps)} steps, so the learning rate peaks only in the second half of the run.</p>
+            {/if}
+          </div>
         {/if}
-        {#if short.warmupHeavy}
-          <p>Warmup takes {num(short.warmup)} of the {num(short.steps)} steps, so the learning rate peaks only in the second half.</p>
-        {/if}
-        <button type="button" class="fix" onclick={() => (epochs = short.epochs)}>Train {num(short.epochs)} epochs</button>
       </div>
     </div>
   {/if}
@@ -541,7 +588,7 @@
 
 {#snippet estimates(withName: boolean)}
   {@render reviewList(withName)}
-  {@render figures()}
+  {@render figures('sheet')}
 {/snippet}
 
 <Page title="New training run">
@@ -623,7 +670,7 @@
                 bind:value={weights}
                 invalid={!!errors.weights}
                 describedby={errors.weights ? 'weights-error' : 'weights-hint'}
-                options={[{ value: 'none', label: 'Random init (from scratch)' }, ...weightOptions.map((m) => ({ value: m.id, label: `${m.name} · mAP ${m.metrics?.map50_95.toFixed(3) ?? '—'}` }))]}
+                options={[{ value: 'none', label: 'From scratch' }, ...weightOptions.map((m) => ({ value: m.id, label: `${m.name} · mAP ${m.metrics?.map50_95.toFixed(3) ?? '—'}` }))]}
               />
             </Field>
           </div>
@@ -690,6 +737,29 @@
               {/if}
             </div>
           </div>
+          {#if caps}
+            <!-- Off, with the reason, where the server cannot train in mixed precision; hidden when the server does not say. -->
+            <div class="amp">
+              <Switch
+                id="amp"
+                label="Mixed precision"
+                hint={ampBlock ? undefined : ampHint}
+                checked={ampOn}
+                onchange={(v) => (amp = v)}
+                disabled={!!ampBlock}
+                describedby={ampBlock ? 'amp-why' : undefined}
+              />
+              {#if ampBlock}
+                <p class="amp-why" id="amp-why">{ampBlock.line}{#if ampBlock.cmd}{' '}<span class="mono">{ampBlock.cmd}</span>.{/if}</p>
+                {#if ampBlock.detail}
+                  <details class="dev-detail">
+                    <summary><ChevronRight size={12} aria-hidden="true" />Technical details</summary>
+                    <p>{ampBlock.detail}</p>
+                  </details>
+                {/if}
+              {/if}
+            </div>
+          {/if}
           <details class="advanced" open={advancedOpen} ontoggle={(e) => (advancedOpen = (e.currentTarget as HTMLDetailsElement).open)}>
             <summary><ChevronRight size={14} /> Advanced <span class="faint">optimizer, learning rate, seed</span></summary>
             <div class="fields">
@@ -783,7 +853,7 @@
               {@render reviewList(false)}
             </div>
             <div class="sum-col">
-            {@render figures()}
+            {@render figures('rail')}
             <div class="start" bind:this={startEl}>
               <Button
                 type="submit"
@@ -828,7 +898,7 @@
           <button type="button" class="dock-est num" aria-haspopup="dialog" aria-label="Show the run summary" onclick={() => (sumOpen = true)}>
             <span>{roughDuration(est.totalSeconds)}</span>
             {#if !onCpu && gpu}<span class:warn={vramPct > 0.9}>{roughBytes(vram)} VRAM</span>{/if}
-            {#if short}<span class="dock-warn"><TriangleAlert size={12} aria-hidden="true" />{short.scratch ? 'Too few steps' : 'Mostly warmup'}</span>{/if}
+            {#if short}<span class="dock-warn"><TriangleAlert size={12} aria-hidden="true" />{short.scratch ? 'Too short to learn' : 'Mostly warmup'}</span>{/if}
             {#if dataset}<span class="faint">{dataset.name} · {arch}</span>{/if}
             <span class="dock-more"><ChevronUp size={14} strokeWidth={1.75} aria-hidden="true" /></span>
           </button>
@@ -1270,6 +1340,34 @@
   .est dd.warn {
     color: var(--warning-text);
   }
+  /* The batches behind the optimizer steps, a line under their row. */
+  .est .est-sub {
+    grid-column: 1 / -1;
+    margin-top: calc(-1 * var(--space-1));
+    text-align: left;
+    color: var(--text-tertiary);
+  }
+  /* Mixed precision: a switch row in the left column's measure, its reason (when off) under it. */
+  .amp {
+    display: grid;
+    gap: var(--space-1);
+    max-width: calc(50% - var(--space-5) / 2);
+    padding-bottom: var(--space-4);
+  }
+  @media (pointer: coarse) {
+    .amp :global(.switch) {
+      min-height: 44px;
+    }
+  }
+  .amp-why {
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--text-secondary);
+    text-wrap: pretty;
+  }
+  .amp-why .mono {
+    color: var(--text-primary);
+  }
   /* A neutral meter; the warning colour only above 90 % of the GPU's memory. */
   .vram {
     height: 4px;
@@ -1395,10 +1493,38 @@
     background: var(--warning-muted);
     color: var(--warning-text);
   }
-  .short > div {
+  /* Callouts break lines evenly, never leaving one short word (or "0.") alone on the last line. */
+  .warning,
+  .warning p {
+    text-wrap: pretty;
+  }
+  .short-body {
     display: grid;
-    justify-items: start;
     gap: var(--space-1);
+    min-width: 0;
+  }
+  .short-acts {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-1) var(--space-4);
+  }
+  .short-why {
+    display: grid;
+    gap: var(--space-1);
+    margin-top: var(--space-1);
+    color: var(--text-secondary);
+  }
+  /* "Why?" opens the reasons: quieter than the fix beside it. */
+  .more {
+    color: var(--warning-text);
+    text-decoration: underline;
+    text-decoration-color: color-mix(in srgb, currentColor 40%, transparent);
+    text-underline-offset: 3px;
+    border-radius: var(--radius-xs);
+  }
+  .more:hover {
+    text-decoration-color: currentColor;
   }
   /* The fix a short-run warning suggests, one click away. */
   .fix {
@@ -1414,7 +1540,8 @@
     text-decoration-color: currentColor;
   }
   @media (pointer: coarse) {
-    .fix {
+    .fix,
+    .more {
       min-height: 44px;
     }
   }
@@ -1716,6 +1843,9 @@
     .fields,
     .aug {
       grid-template-columns: minmax(0, 1fr);
+    }
+    .amp {
+      max-width: none;
     }
     .aug-preview {
       position: static;
