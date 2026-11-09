@@ -1884,3 +1884,48 @@ Round 46 changes:
 - **Playground:**
   - "Simulated latency" in the demo, and "one image" instead of fps.
   - Short windows carry the latency total in the Detections header.
+
+## Round 46
+
+| Reviewer | avg |
+|----------|-----|
+| Opus 5.5 | 8.3 |
+| GPT-6.1 Sol | 8.7 |
+
+Sol gave 9s on eight lines. Its root causes:
+- Large views still kept ambiguous chips; ownership was checked only in thumbnails.
+- Models lists without their evaluation context.
+- Overflow disclosure built per call site.
+- An error capture that showed loading.
+
+Opus also named two kinds of root cause:
+- **Duplicated formatting:** run meta in two orders; latency provenance missing in compact readouts.
+- **Half-applied policies:** chips measured on the full box rather than what's in view, and the ambiguity drop gated to thumbnails.
+
+Opus also asked for a real container for Advanced, the dataset first in "Best model per dataset", one class order across the model page, and tiles that name their classes.
+
+The error capture was a timing flake on a busy machine: round 45's was right. The scenario now settles the failure before the first frame.
+
+The code review of #124 found one blocking bug, fixed before merge: Advanced could fold while its learning-rate input had focus, storing a half-typed rate. An invalid rate now keeps the group open.
+
+Round 47 changes:
+- **viz:**
+  - An unselected chip that would sit on a neighbour's outline is dropped at any size.
+  - A box less than half in view goes unchipped.
+  - Thumbnails measure their two-chip minimum on the visible height.
+- **Run meta:** `FoloApp::run_meta` ("folo-m · shapes-hard") is used by the hero, Recent runs, the run page and focus tips.
+- **Models:**
+  - Rows say what they were measured on ("on shapes-hard"), plus the stored precision (#123: "f16, fused").
+  - The mAP column has no cross-dataset bars.
+- **Model page:**
+  - The PR legend and class table run in class order.
+  - The meta line adds the stored weights.
+- **Stored precision:** `ui::model_storage` also feeds the Playground model line.
+- **Overview:**
+  - Best model per dataset leads with Dataset.
+  - The Recent runs e2e tag rides the name line, and the focus tip carries the full meta. The header reads "Arch · dataset".
+- **New run:**
+  - Advanced is a contained, indented body, with Augmentation as a sub-head.
+  - The Epochs help reads "One epoch = one pass over 3,200 training images".
+- **Playground:** "Sim. 6.4 ms" in the toolbar.
+- **Dataset tiles** name their classes ("2 square · 1 triangle · +2").
