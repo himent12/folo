@@ -67,7 +67,7 @@ export const scenes = [
     viewports: ['mobile'],
     fullPage: true,
     setup: async (page) => {
-      await page.getByRole('radio', { name: 'Classes' }).click();
+      await page.getByRole('tab', { name: 'Classes', exact: true }).click();
       await page.mouse.move(0, 0);
     },
   },
@@ -354,7 +354,7 @@ export const scenes = [
     fullPage: false,
     viewports: ['mobile'],
     setup: async (page) => {
-      await page.getByRole('radio', { name: 'Logs' }).click();
+      await page.getByRole('tab', { name: 'Logs', exact: true }).click();
       await page.mouse.move(0, 0);
     },
   },
@@ -604,7 +604,7 @@ export const scenes = [
     setup: async (page, { vp }) => {
       if (vp === 'mobile') {
         await until(page, '#pr svg');
-        await page.getByRole('radio', { name: 'Details' }).click();
+        await page.getByRole('tab', { name: 'Details', exact: true }).click();
         return;
       }
       await until(page, '#cm .cell');
@@ -620,7 +620,7 @@ export const scenes = [
     fullPage: true,
     setup: async (page, { vp }) => {
       await until(page, '#pr svg');
-      if (vp === 'mobile') await page.getByRole('radio', { name: 'Details' }).click();
+      if (vp === 'mobile') await page.getByRole('tab', { name: 'Details', exact: true }).click();
       else if (vp === 'tablet') await page.locator('.d-line').click();
     },
   },
@@ -633,7 +633,7 @@ export const scenes = [
     fullPage: true,
     setup: async (page, { vp }) => {
       await until(page, '#pr svg');
-      if (vp === 'mobile') await page.getByRole('radio', { name: 'Details' }).click();
+      if (vp === 'mobile') await page.getByRole('tab', { name: 'Details', exact: true }).click();
     },
   },
   {
@@ -659,7 +659,7 @@ export const scenes = [
     fullPage: true,
     setup: async (page) => {
       await until(page, '#pr svg');
-      await page.getByRole('radio', { name: 'Classes' }).click();
+      await page.getByRole('tab', { name: 'Classes', exact: true }).click();
       await page.locator('#per-class button.cls').first().click();
       await page.locator('#per-class button.disc').first().click();
     },
@@ -672,7 +672,7 @@ export const scenes = [
     fullPage: false,
     setup: async (page) => {
       await until(page, '#pr svg');
-      await page.getByRole('radio', { name: 'Classes' }).click();
+      await page.getByRole('tab', { name: 'Classes', exact: true }).click();
       await page.locator('#per-class button.disc').nth(2).click();
       await page.locator('#per-class tr.detail button', { hasText: 'View curve' }).click();
       await until(page, '#pr .legend .back');
@@ -687,7 +687,7 @@ export const scenes = [
     fullPage: true,
     setup: async (page) => {
       await until(page, '#pr svg');
-      await page.getByRole('radio', { name: 'Confusion' }).click();
+      await page.getByRole('tab', { name: 'Confusion', exact: true }).click();
       await until(page, '#cm .rk');
     },
   },
@@ -699,7 +699,7 @@ export const scenes = [
     fullPage: true,
     setup: async (page) => {
       await until(page, '#pr svg');
-      await page.getByRole('radio', { name: 'Confusion' }).click();
+      await page.getByRole('tab', { name: 'Confusion', exact: true }).click();
       await page.getByRole('button', { name: 'Explore the matrix' }).click();
       await until(page, '#cm .cell');
     },
@@ -712,7 +712,7 @@ export const scenes = [
     fullPage: true,
     setup: async (page) => {
       await until(page, '#pr svg');
-      await page.getByRole('radio', { name: 'Confusion' }).click();
+      await page.getByRole('tab', { name: 'Confusion', exact: true }).click();
       await page.getByRole('button', { name: 'Explore the matrix' }).click();
       await until(page, '#cm .cell');
     },

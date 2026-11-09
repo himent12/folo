@@ -33,6 +33,9 @@ html {
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   text-rendering: optimizeLegibility;
+  /* Prose never ends on an orphan ("shapes.", "of 32."): every hint, help line, dialog, banner and description
+     inherits it. One-line labels are unaffected. */
+  text-wrap: pretty;
 }
 
 body {
@@ -169,6 +172,11 @@ a.ident:hover {
 
 .faint {
   color: var(--text-tertiary);
+}
+
+/* Words that must stay on one line: a key group and the punctuation after it ("Ctrl V."), a value and its unit. */
+.nowrap {
+  white-space: nowrap;
 }
 
 .truncate {

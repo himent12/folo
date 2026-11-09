@@ -25,7 +25,7 @@
   import Dialog from '$lib/ui/Dialog.svelte';
   import EmptyState from '$lib/ui/EmptyState.svelte';
   import Menu, { type MenuItem } from '$lib/ui/Menu.svelte';
-  import Segmented from '$lib/ui/Segmented.svelte';
+  import Tabs from '$lib/ui/Tabs.svelte';
   import ErrorState from '$lib/ui/ErrorState.svelte';
   import Skeleton from '$lib/ui/Skeleton.svelte';
   import StatusBadge from '$lib/ui/StatusBadge.svelte';
@@ -37,6 +37,8 @@
   import Logs from './run/Logs.svelte';
   import Outcome from './run/Outcome.svelte';
   import PerClass from './run/PerClass.svelte';
+  import Lineage from '$lib/ui/Lineage.svelte';
+  import Meta from '$lib/ui/Meta.svelte';
   import RunMetrics from './run/RunMetrics.svelte';
   import Samples from './run/Samples.svelte';
   import { moveQueued, queueItems, startHint, startLabel } from './run/queueActions';
@@ -129,6 +131,8 @@
   const section = $derived<Section>(picked ?? (queuedOnly ? 'config' : 'samples'));
   const models = new Resource((s) => hub.api.models(s));
   /** Where the run started: "From scratch", or the model / file it was fine-tuned from (one reading, $lib/lineage). */
+  /** Below 1024 px the parts are one section at a time behind tabs: then the parts' frame is their tab panel. */
+  const stacked = new MediaQuery(media.upToLaptop, false);
   const lineage = $derived(run ? origin(run.config.weights, models.data ?? []) : null);
   let stopOpen = $state(false);
   let deleteOpen = $state(false);
@@ -308,13 +312,16 @@
       {#if live.connection === 'reconnecting'}<Badge tone="warning"><WifiOff size={12} /> Reconnecting</Badge>{/if}
     {/snippet}
     {#snippet sub()}
-      <a class="link" href={href(`/datasets/${run.config.dataset_id}`)}>{dataset?.name ?? run.config.dataset_id}</a>
-      <Ident value={run.config.arch} />
-      <!-- Phones: size, batch and device are in the Config section; the id is in the URL. -->
-      <span class="cfg">{run.config.imgsz} px · batch {run.config.batch}</span>
-      <span class="cfg lineage">{#if !lineage || lineage.kind === 'scratch'}From scratch{:else}Fine-tuned from <Ident value={lineage.label} title={lineage.kind === 'file' ? lineage.path : undefined} />{/if}</span>
-      <span class="truncate dev" title={run.device}>{deviceName(run.device)}</span>
-      <span class="faint when">{run.started ? `started ${ago(run.started)}` : `created ${ago(run.created)}`}</span>
+      <Meta>
+        <a class="link" href={href(`/datasets/${run.config.dataset_id}`)}>{dataset?.name ?? run.config.dataset_id}</a>
+        <Ident value={run.config.arch} />
+        <!-- Phones: size, batch and device are in the Config section; the id is in the URL. -->
+        <span class="cfg num">{run.config.imgsz} px</span>
+        <span class="cfg num">batch {run.config.batch}</span>
+        <span class="cfg lineage">{#if !lineage || lineage.kind === 'scratch'}From scratch{:else}Fine-tuned from <Lineage origin={lineage} />{/if}</span>
+        <span class="truncate dev" title={run.device}>{deviceName(run.device)}</span>
+        <span class="faint when">{run.started ? `started ${ago(run.started)}` : `created ${ago(run.created)}`}</span>
+      </Meta>
     {/snippet}
     {#snippet actions()}
       <span class="wide-only">
@@ -398,12 +405,15 @@
 
     <!-- Evidence on the left (what the model sees, what the trainer says); reference in a rail on the right, the two
          columns ending together. -->
-    <!-- Below 960 px one of these shows at a time, chosen here; wider screens show them all beside a rail. -->
+    <!-- Below 1024 px one of these shows at a time, chosen here; wider screens show them all beside a rail. They switch
+         content, so they are underline tabs (DESIGN_DIRECTION §2.22), not a segmented control. -->
     <div class="phone-pick">
-      <Segmented
-        label="Show"
-        bind:value={() => section, (v) => (picked = v)}
-        options={[
+      <Tabs
+        label="Run sections"
+        idPrefix="run-sec"
+        value={section}
+        onchange={(v) => (picked = v)}
+        tabs={[
           { value: 'samples', label: 'Samples' },
           { value: 'classes', label: 'Classes' },
           { value: 'logs', label: 'Logs' },
@@ -411,14 +421,14 @@
         ]}
       />
     </div>
-    <div class="detail" data-show={section}>
+    <div class="detail" data-show={section} id="run-sec-panel" role={stacked.current ? 'tabpanel' : undefined} aria-labelledby={stacked.current ? `run-sec-${section}` : undefined}>
       <div class="main-col">
         <div class="part" data-part="samples"><Samples runId={run.id} classes={dataset?.classes ?? []} {epochsDone} /></div>
         <div class="part" data-part="logs"><Logs logs={live.logs} version={live.version} live={active} /></div>
       </div>
       <aside class="rail" aria-label="Per-class results and config">
         <div class="part" data-part="classes"><PerClass classes={dataset?.classes ?? []} epochs={live.epochs} version={live.version} loading={live.loading} compact /></div>
-        <div class="part" data-part="config"><ConfigPanel config={run.config} resolved={run.resolved} datasetName={dataset?.name} compact /></div>
+        <div class="part" data-part="config"><ConfigPanel config={run.config} resolved={run.resolved} datasetName={dataset?.name} weights={lineage} compact /></div>
       </aside>
     </div>
     {/if}
@@ -795,9 +805,10 @@
     .phone-pick {
       display: block;
       position: sticky;
-      top: calc(var(--size-topbar) + var(--space-2));
+      top: var(--size-topbar);
       z-index: var(--z-sticky);
-      margin-bottom: calc(-1 * var(--space-1));
+      margin-top: calc(-1 * var(--space-2));
+      background: var(--bg-app);
     }
     /* One part is visible at a time, so the empty columns must not add gaps. */
     .detail,
@@ -820,11 +831,7 @@
     }
   }
   @media (max-width: 767px) {
-    .phone-pick :global(.seg) {
-      display: flex;
-      width: 100%;
-    }
-    .phone-pick :global(.seg > *) {
+    .phone-pick :global([role='tab']) {
       flex: 1;
       justify-content: center;
     }

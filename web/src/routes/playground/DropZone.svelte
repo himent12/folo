@@ -251,7 +251,4 @@
       height: 20px;
     }
   }
-  .nowrap {
-    white-space: nowrap;
-  }
 </style>

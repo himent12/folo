@@ -27,6 +27,8 @@
   import TableState from '$lib/ui/TableState.svelte';
   import Gate from '$lib/ui/Gate.svelte';
   import Ident from '$lib/ui/Ident.svelte';
+  import Lineage from '$lib/ui/Lineage.svelte';
+  import Meta from '$lib/ui/Meta.svelte';
   import { isOffline, OFFLINE_REASON } from '$lib/ui/offline';
   import { origin } from '$lib/lineage';
   import Menu from '$lib/ui/Menu.svelte';
@@ -128,15 +130,16 @@
       <span class="compare">
         <Gate reason={offline ? OFFLINE_REASON : selected.length < 2 ? 'Select 2–4 runs to compare' : null}>
           {#snippet children(why)}
-            <Button icon={GitCompare} disabled={!!why} aria-describedby={why} href={href(`/runs/compare?ids=${selected.join(',')}`)}>
-              Compare{#if selected.length}<span class="num faint">{selected.length}</span>{/if}
+            <Button variant={selected.length ? 'primary' : 'secondary'} icon={GitCompare} disabled={!!why} aria-describedby={why} href={href(`/runs/compare?ids=${selected.join(',')}`)}>
+              Compare{#if selected.length}<span class="num count">{selected.length}</span>{/if}
             </Button>
           {/snippet}
         </Gate>
       </span>
       <Gate reason={offline ? OFFLINE_REASON : null}>
         {#snippet children(why)}
-          <Button variant="primary" icon={Plus} disabled={!!why} aria-describedby={why} href={href('/runs/new')}>New run</Button>
+          <!-- While runs are selected, Compare is the page's one primary action and New run steps back. -->
+          <Button variant={selected.length ? 'secondary' : 'primary'} icon={Plus} disabled={!!why} aria-describedby={why} href={href('/runs/new')}>New run</Button>
         {/snippet}
       </Gate>
     {/if}
@@ -236,7 +239,7 @@
                 </td>
                 <td class="lead">
                   <a class="name" href={href(`/runs/${r.id}`)} onclick={(e) => e.stopPropagation()}>{r.name}</a>
-                  <span class="sub ctx">{dsName.get(r.config.dataset_id) ?? r.config.dataset_id} · <Ident value={r.config.arch} /> · {#if from.kind === 'scratch'}from scratch{:else}from <Ident value={from.label} />{/if}</span>
+                  <span class="sub ctx"><Meta line><span>{dsName.get(r.config.dataset_id) ?? r.config.dataset_id}</span><Ident value={r.config.arch} /><span>from <Lineage origin={from} link={false} scratch="scratch" /></span></Meta></span>
                 </td>
                 <td use:tooltip={failureCause(r)}><StatusBadge status={r.status} plain /></td>
                 <td class="hide-lg muted">{dsName.get(r.config.dataset_id) ?? r.config.dataset_id}</td>
@@ -281,14 +284,15 @@
     </div>
     {#if shown.length}
       <!-- Phones: stacked rows with the essentials (selection, name, status, score, progress). -->
-      <!-- Select mode: Compare (with its count) a secondary button, Cancel a ghost one, both 44 px targets on touch. -->
+      <!-- Select mode: Compare (with its count) the primary once a run is selected, Cancel a ghost one, both 44 px targets
+           on touch. -->
       <div class="rows-head">
         {#if choosing}
           <Button variant="ghost" onclick={() => ((picking = false), (selected = []))}>Cancel</Button>
           <Gate reason={offline ? OFFLINE_REASON : selected.length < 2 ? 'Select 2–4 runs to compare' : null}>
             {#snippet children(why)}
-              <Button icon={GitCompare} disabled={!!why} aria-describedby={why} href={href(`/runs/compare?ids=${selected.join(',')}`)}>
-                Compare{#if selected.length}<span class="num faint">{selected.length}</span>{/if}
+              <Button variant={selected.length ? 'primary' : 'secondary'} icon={GitCompare} disabled={!!why} aria-describedby={why} href={href(`/runs/compare?ids=${selected.join(',')}`)}>
+                Compare{#if selected.length}<span class="num count">{selected.length}</span>{/if}
               </Button>
             {/snippet}
           </Gate>
@@ -314,7 +318,7 @@
               <span class="r-text">
                 <span class="r-name"><StatusBadge status={r.status} plain dotOnly /><span class="name truncate">{r.name}</span></span>
                 <!-- With the checkboxes in, the dataset steps out so the cause and progress keep the line. -->
-                <span class="r-meta num truncate">{failureCause(r) ?? (placeOf(r) !== null ? queuePlace(placeOf(r) ?? 0) : STATUS[r.status])} · {r.epoch}/{r.epochs}{choosing ? '' : ` · ${dsName.get(r.config.dataset_id) ?? r.config.dataset_id}`}</span>
+                <span class="r-meta num truncate"><Meta line><span>{failureCause(r) ?? (placeOf(r) !== null ? queuePlace(placeOf(r) ?? 0) : STATUS[r.status])}</span><span>{r.epoch}/{r.epochs}</span>{#if !choosing}<span>{dsName.get(r.config.dataset_id) ?? r.config.dataset_id}</span>{/if}</Meta></span>
               </span>
               <span class="r-end"><span class="r-val num">{metric(r.best?.map50_95)}</span><span class="r-age">{ago(r.created)}</span></span>
             </a>
@@ -342,6 +346,10 @@
 </Page>
 
 <style>
+  /* Compare's count: part of the label, one weight lighter. */
+  .count {
+    font-weight: var(--weight-regular);
+  }
   .compare {
     display: contents;
   }

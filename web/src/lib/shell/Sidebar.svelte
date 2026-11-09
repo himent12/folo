@@ -131,9 +131,6 @@
     background: var(--bg-active);
     color: var(--text-primary);
   }
-  .item.active :global(svg) {
-    color: var(--accent-text);
-  }
   .item :global(svg) {
     flex-shrink: 0;
   }

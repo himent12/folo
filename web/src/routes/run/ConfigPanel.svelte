@@ -7,7 +7,9 @@
    */
   import Copy from '@lucide/svelte/icons/copy';
   import type { ResolvedTrain, TrainConfig } from '$lib/api/types';
+  import type { Origin } from '$lib/lineage';
   import Button from '$lib/ui/Button.svelte';
+  import Lineage from '$lib/ui/Lineage.svelte';
   import Panel from '$lib/ui/Panel.svelte';
   import { toast } from '$lib/ui/toast.svelte';
   import { batchSetting, lrSetting, optimizerSetting, resolvedRows, type Setting } from './resolved';
@@ -17,6 +19,7 @@
     resolved = null,
     datasetName,
     compact = false,
+    weights,
   }: {
     config: TrainConfig;
     /** What the trainer resolved `config` to; null until it is built, missing from older servers. */
@@ -24,6 +27,8 @@
     datasetName?: string;
     /** One column for a rail, augmentation folded away. */
     compact?: boolean;
+    /** Where the run started, read once ($lib/lineage): the checkpoint by name, its id in the tooltip, as the header says it. */
+    weights?: Origin | null;
   } = $props();
 
   const a = $derived(config.augment);
@@ -64,10 +69,11 @@
   }
 </script>
 
-{#snippet training()}
+{#snippet training(heading: boolean)}
   <dl>
-    <p class="group">Training</p>
-    {#each rows as [k, v] (k)}<dt>{k}</dt><dd class="num"><span class:mono={v.ident}>{v.value}</span>{#if v.note}<span class="note">{v.note}</span>{/if}</dd>{/each}
+    <!-- A heading only beside Augmentation's; alone in the rail it would name the panel twice. -->
+    {#if heading}<p class="group">Training</p>{/if}
+    {#each rows as [k, v] (k)}<dt>{k}</dt>{#if k === 'Weights' && weights}<dd>{#if weights.kind === 'scratch'}From scratch{:else}<Lineage origin={weights} />{/if}</dd>{:else}<dd class="num"><span class:mono={v.ident}>{v.value}</span>{#if v.note}<span class="note">{v.note}</span>{/if}</dd>{/if}{/each}
   </dl>
 {/snippet}
 {#snippet augmentation(heading: boolean)}
@@ -80,14 +86,14 @@
 <Panel title="Config" id="config">
   {#snippet actions()}<Button size="sm" variant="ghost" icon={Copy} onclick={copy}>Copy JSON</Button>{/snippet}
   {#if compact}
-    {@render training()}
+    {@render training(false)}
     <details>
       <summary>Augmentation</summary>
       {@render augmentation(false)}
     </details>
   {:else}
     <div class="cols">
-      {@render training()}
+      {@render training(true)}
       {@render augmentation(true)}
     </div>
   {/if}

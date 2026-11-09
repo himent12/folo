@@ -103,9 +103,10 @@ const MEANS: Record<IssueSeverity, string> = {
  * The line above the issue list, saying exactly what its rows are: "3 warnings: training still uses these files",
  * "2 clipped box warnings: …" with a kind picked. Null when there are none (the list says so itself).
  */
-export function issueCaption(severity: IssueSeverity, total: number, kind?: IssueKind): string | null {
+export function issueCaption(severity: IssueSeverity, total: number, kind?: IssueKind, bare = false): string | null {
   if (total <= 0) return null;
   const noun = NOUN[severity][total === 1 ? 0 : 1];
   const what = kind ? `${KIND_LABEL[kind].toLowerCase()} ${noun}` : noun;
-  return `${total.toLocaleString('en-US')} ${what}: ${MEANS[severity]}.`;
+  // `bare`: under a finding that already says what they mean, only the count and what they are.
+  return bare ? `${total.toLocaleString('en-US')} ${what}` : `${total.toLocaleString('en-US')} ${what}: ${MEANS[severity]}.`;
 }

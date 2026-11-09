@@ -41,7 +41,7 @@
         <h3 class="overline">Disabled in Settings</h3>
         <ul>
           {#each off as s (s.keys + s.label)}
-            <li><span>{s.label}<span class="sr-only">, disabled in Settings</span></span><Kbd keys={s.keys} subtle /></li>
+            <li><span>{s.label}<span class="sr-only">, disabled in Settings</span></span><Kbd keys={s.keys} off /></li>
           {/each}
         </ul>
       </section>
@@ -79,11 +79,12 @@
     border-bottom: 1px solid var(--line-subtle);
     font-size: var(--type-base-size);
     line-height: var(--type-base-line);
-    color: var(--text-secondary);
+    color: var(--text-primary);
   }
   li:last-child {
     border-bottom: 0;
   }
+  /* Keys that do nothing now: tertiary labels and outlined caps, a step back from the working ones in both themes. */
   .off li {
     color: var(--text-tertiary);
   }

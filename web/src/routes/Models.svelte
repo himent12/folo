@@ -5,7 +5,7 @@
   import { hub } from '$lib/api/index.svelte';
   import { Resource } from '$lib/api/resource.svelte';
   import type { Model, Run } from '$lib/api/types';
-  import { ago, bytes, compact, date, metric, num } from '$lib/format';
+  import { ago, bytes, compact, date, metric, num, sizeIn, sizeUnit } from '$lib/format';
   import { prefs } from '$lib/prefs.svelte';
   import { href, router } from '$lib/router.svelte';
   import Page from '$lib/shell/Page.svelte';
@@ -22,9 +22,10 @@
   import SortHeader from '$lib/ui/SortHeader.svelte';
   import TableState from '$lib/ui/TableState.svelte';
   import Ident from '$lib/ui/Ident.svelte';
+  import Meta from '$lib/ui/Meta.svelte';
   import { rowNav } from '$lib/ui/rowNav';
   import { unlike, versusYolo26n } from '$lib/benchmarks';
-  import { origin } from '$lib/lineage';
+  import { origin, originTip } from '$lib/lineage';
 
   setCrumbs({ label: 'Models' });
 
@@ -69,20 +70,21 @@
     return { key: dsId, label: dsName.get(dsId) ?? dsId };
   };
 
-  const cols: Col[] = [
+  // Sizes in one unit for the column, named in its header (prefs.units: MiB or MB).
+  const cols: Col[] = $derived([
     { key: 'name', label: 'Model', get: (m) => m.name.toLowerCase() },
     { key: 'arch', label: 'Arch', get: (m) => m.arch, w: '72px' },
     { key: 'classes', label: 'Classes', num: true, get: (m) => m.classes.length, hide: 'lg', w: '84px' },
     { key: 'imgsz', label: 'Input px', num: true, get: (m) => m.imgsz, hide: 'md', w: '88px' },
     { key: 'params', label: 'Params', num: true, get: (m) => m.params, w: '80px' },
     { key: 'flops', label: 'GFLOPs', num: true, get: (m) => m.flops_g, hide: 'lg', w: '84px' },
-    { key: 'bytes', label: 'Size', num: true, get: (m) => m.bytes, hide: 'md', w: '80px' },
+    { key: 'bytes', label: `Size, ${sizeUnit(prefs.units)}`, num: true, get: (m) => m.bytes, hide: 'md', w: '80px' },
     { key: 'map50_95', label: 'mAP50-95', num: true, get: (m) => m.metrics?.map50_95 ?? -1, w: '96px' },
     { key: 'map50', label: 'mAP50', num: true, get: (m) => m.metrics?.map50 ?? -1, w: '80px' },
     { key: 'source', label: 'Source run', get: (m) => sourceName(m) || '~', hide: 'md', w: '112px' },
     { key: 'parent', label: 'Started from', get: (m) => parentOf(m)?.label ?? '~', hide: 'lg', w: '120px' },
     { key: 'created', label: 'Created', num: true, get: (m) => Date.parse(m.created), w: '112px' },
-  ];
+  ]);
 
   // Default: best first within each dataset.
   let sortKey = $state<Key>('map50_95');
@@ -128,6 +130,20 @@
   /** Rows to sort, or their skeleton: the sort mark shows only then. */
   const hasRows = $derived(models.data ? shownCount > 0 : !models.error);
 
+  /**
+   * Each evaluation dataset's best model (highest mAP50-95), marked with tertiary "best" text whatever the sort: within
+   * a group the scores compare, across groups they do not, so no mark spans datasets (and none on Imported, whose
+   * models were evaluated on different data).
+   */
+  const best = $derived.by(() => {
+    const ids = new Set<string>();
+    for (const g of groups) {
+      if (g.key === IMPORTED || g.key === UNKNOWN || g.rows.length < 2) continue;
+      const top = g.rows.reduce<Model | null>((b, m) => ((m.metrics?.map50_95 ?? -1) > (b?.metrics?.map50_95 ?? -1) ? m : b), null);
+      if (top?.metrics) ids.add(top.id);
+    }
+    return ids;
+  });
 
 
   const dsOptions = $derived.by(() => {
@@ -262,8 +278,8 @@
                   <td class="r spec hide-md">{m.imgsz}</td>
                   <td class="r spec">{compact(m.params)}</td>
                   <td class="r spec hide-lg">{num(m.flops_g, 1)}</td>
-                  <td class="r spec hide-md">{bytes(m.bytes, prefs.units)}</td>
-                  <td class="r score" class:strong={strongScore === 'map50_95'}>{metric(m.metrics?.map50_95)}</td>
+                  <td class="r spec hide-md">{sizeIn(m.bytes, prefs.units)}</td>
+                  <td class="r score" class:strong={strongScore === 'map50_95'}>{#if best.has(m.id)}<span class="best">best</span>{/if}{metric(m.metrics?.map50_95)}</td>
                   <td class="r score" class:strong={strongScore === 'map50'}>{metric(m.metrics?.map50)}</td>
                   <td class="hide-md">
                     {#if m.run_id}
@@ -274,11 +290,11 @@
                   </td>
                   <td class="hide-lg">
                     {#if parent?.kind === 'model' && modelById.has(parent.id)}
-                      <Ident value={parent.label} class="src" href={href(`/models/${parent.id}`)} onclick={(e) => e.stopPropagation()} />
+                      <Ident value={parent.label} class="src" title={originTip(parent)} href={href(`/models/${parent.id}`)} onclick={(e) => e.stopPropagation()} />
                     {:else if parent?.kind === 'file'}
                       <Ident value={parent.label} class="src" title={parent.path} />
                     {:else}
-                      {#if parent && parent.kind !== 'scratch'}<Ident value={parent.label} class="faint" />{:else}<span class="faint">{parent ? 'From scratch' : '—'}</span>{/if}
+                      {#if parent && parent.kind !== 'scratch'}<Ident value={parent.label} class="faint" title={originTip(parent)} />{:else}<span class="faint">{parent ? 'From scratch' : '—'}</span>{/if}
                     {/if}
                   </td>
                   <td class="r faint" title={date(m.created)}>{ago(m.created)}</td>
@@ -322,9 +338,9 @@
                 <a href={href(`/models/${m.id}`)}>
                   <span class="m-main">
                     <span class="name truncate">{m.name}</span>
-                    <span class="m-meta truncate"><Ident value={m.arch} /> · <span class="num">{m.imgsz} px · {compact(m.params)} · {bytes(m.bytes, prefs.units)}</span></span>
+                    <span class="m-meta num truncate"><Meta line><Ident value={m.arch} /><span>{m.imgsz} px</span><span>{compact(m.params)}</span><span>{bytes(m.bytes, prefs.units)}</span></Meta></span>
                   </span>
-                  <span class="m-side"><span class="num map"><span class="sr-only">mAP50-95 </span>{metric(m.metrics?.map50_95)}</span></span>
+                  <span class="m-side"><span class="num map">{#if best.has(m.id)}<span class="best">best</span>{/if}<span class="sr-only">mAP50-95 </span>{metric(m.metrics?.map50_95)}</span></span>
                 </a>
               </li>
             {/each}
@@ -418,6 +434,13 @@
   .score.strong {
     color: var(--text-primary);
     font-weight: var(--weight-medium);
+  }
+  /* The group's top model: a word in tertiary, never a colour (scores compare only within a dataset). */
+  .best {
+    margin-right: var(--space-2);
+    font-size: var(--type-sm-size);
+    font-weight: var(--weight-regular);
+    color: var(--text-tertiary);
   }
   .src,
   td :global(.ident.src) {

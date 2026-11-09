@@ -23,6 +23,7 @@
    */
   import { tooltip } from '$lib/ui/tooltip';
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
+  import Info from '@lucide/svelte/icons/info';
   import ChartSkeleton from '$lib/charts/ChartSkeleton.svelte';
   import { BestPulse } from '$lib/charts/bestPulse';
   import LossOptions, { type Scale, type Smoothing } from '$lib/charts/LossOptions.svelte';
@@ -34,6 +35,7 @@
   import { runProgress, stepsPerEpoch } from '$lib/api/progress';
   import { conf, duration, eta, metric, num } from '$lib/format';
   import Segmented from '$lib/ui/Segmented.svelte';
+  import Meta from '$lib/ui/Meta.svelte';
   import Select from '$lib/ui/Select.svelte';
   import { media } from '$lib/design/tokens';
 
@@ -149,9 +151,10 @@
           // The components as design/README.md maps them in both apps: box amber, cls violet dashed, dfl teal dotted.
           // Box and dfl run together late in a run (0.85 vs 0.83): box is painted over dfl's dots, and each line is
           // labelled at its end, so both stay readable where they meet.
-          { id: 'box', label: 'box', color: 'var(--chart-2)', front: true, points: smooth(perStep((s) => s.loss.box), a) },
-          { id: 'cls', label: 'cls', color: 'var(--chart-5)', pattern: 'dash', points: smooth(perStep((s) => s.loss.cls), a) },
-          { id: 'dfl', label: 'dfl', color: 'var(--chart-4)', pattern: 'dot', points: smooth(perStep((s) => s.loss.dfl), a) },
+          // Full names where the legend has room; the short ones at the lines' ends and on phones (defined under ⓘ).
+          { id: 'box', label: narrow ? 'box' : 'Box', endLabel: 'box', color: 'var(--chart-2)', front: true, points: smooth(perStep((s) => s.loss.box), a) },
+          { id: 'cls', label: narrow ? 'cls' : 'Classification', endLabel: 'cls', color: 'var(--chart-5)', pattern: 'dash', points: smooth(perStep((s) => s.loss.cls), a) },
+          { id: 'dfl', label: narrow ? 'dfl' : 'Distribution focal', endLabel: 'dfl', color: 'var(--chart-4)', pattern: 'dot', points: smooth(perStep((s) => s.loss.dfl), a) },
         ];
       }
       case 'lr': {
@@ -313,6 +316,10 @@
     },
   ]);
   /** The legend's note: the latest value's epoch, per epoch for validation metrics, per step for the rest. */
+  /** The loss terms in plain words (DESIGN_DIRECTION §2.3: no jargon without its definition). */
+  const LOSS_TERMS =
+    'Box: how far predicted boxes are from the true ones. Classification (cls): how wrong the class scores are. ' +
+    'Distribution focal (dfl): how sharply each box edge is placed. EMA 0.9: smoothing; a higher value reacts more slowly.';
   const legendNote = $derived(unit ? (lastEpoch ? latestEp : undefined) : lastStep ? stepEp : undefined);
 
   // The last epochs train without mosaic (the hatched end of the progress bar): marked where they start, on every chart.
@@ -363,18 +370,18 @@
     <div class="epoch">
       <span class="sr-only">Epoch</span>
       <span class="big num">{run.epoch}<span class="of">/ {run.epochs}</span></span>
-      <div
-        class="track"
-        aria-hidden="true"
-        use:tooltip={mosaicOff ? `Hatched: the last ${run.config.augment.close_mosaic} epochs train without mosaic ("mosaic off" on the chart)` : ''}
-      >
-        <div class="fill" class:done={run.status === 'completed'} class:bad={run.status === 'failed'} style:transform="scaleX({run.status === 'completed' ? 1 : progress})"></div>
-        <!-- Over the filled part of the bar (a finished run) the hatch is cut out of the fill in the panel colour. -->
-        {#if mosaicOff}<div class="close" class:over={run.status === 'completed' || progress >= closeFrom} style:left="{closeFrom * 100}%"></div>{/if}
+      <div class="bar">
+        <div class="track" aria-hidden="true">
+          <div class="fill" class:done={run.status === 'completed'} class:bad={run.status === 'failed'} style:transform="scaleX({run.status === 'completed' ? 1 : progress})"></div>
+          <!-- Over the filled part of the bar (a finished run) the hatch is cut out of the fill in the panel colour. -->
+          {#if mosaicOff}<div class="close" class:over={run.status === 'completed' || progress >= closeFrom} style:left="{closeFrom * 100}%"></div>{/if}
+        </div>
+        <!-- The hatched end explains itself on hover: a hit area over it, taller than the 4 px bar. -->
+        {#if mosaicOff}<span class="close-hit" aria-hidden="true" style:left="{closeFrom * 100}%" use:tooltip={`Last ${run.config.augment.close_mosaic} epochs train without mosaic`}></span>{/if}
       </div>
       {#if mosaicOff}<span class="sr-only">The hatched end of the bar marks the last {run.config.augment.close_mosaic} epochs, trained without mosaic.</span>{/if}
       <span class="cap num">
-        {#if run.status === 'queued'}Not started{:else if live}{(progress * 100).toFixed(1)}% · {run.eta_s !== null ? `${eta(run.eta_s)} left` : 'estimating…'}{:else}{elapsed !== null ? `${duration(elapsed)} total` : '—'}{/if}{#if mosaicOff}<span class="hatch-key">&nbsp;· <i aria-hidden="true"></i>no mosaic</span>{/if}
+        {#if run.status === 'queued'}Not started{:else if live}<Meta line><span>{(progress * 100).toFixed(1)}%</span><span>{run.eta_s !== null ? `${eta(run.eta_s)} left` : 'estimating…'}</span></Meta>{:else}{elapsed !== null ? `${duration(elapsed)} total` : '—'}{/if}
       </span>
     </div>
     <!-- Queued: the tabs read "—" until the first step, so the frame is the one a running run fills. -->
@@ -418,7 +425,15 @@
           <div class="ctl">
             <!-- One control for the loss view (smoothing and y scale behind one button), so the header keeps at most one
                  segmented group. -->
-            {#if tab === 'loss'}<LossOptions bind:smoothing bind:scale />{/if}
+            {#if tab === 'loss'}
+              <!-- What the terms mean, for anyone who has not trained a detector before: on hover and focus, and read
+                   with the button. -->
+              <button type="button" class="terms" aria-label="What the loss terms mean" aria-describedby="loss-terms" use:tooltip={LOSS_TERMS}
+                ><Info size={14} aria-hidden="true" /></button
+              >
+              <span class="sr-only" id="loss-terms">{LOSS_TERMS}</span>
+              <LossOptions bind:smoothing bind:scale />
+            {/if}
             {#if live && run.status !== 'queued'}
               <Segmented
                 size="sm"
@@ -556,8 +571,12 @@
     color: var(--text-tertiary);
     letter-spacing: 0;
   }
+  /* A fixed line box: the value's baseline sits at the same height in every tab, with or without a unit, an exponent or
+     a fallback glyph (the unit's own line-height is 1, so a 12 px span can never deepen the line). */
   .val {
     align-self: end;
+    height: 32px;
+    overflow: visible;
     font-size: var(--type-2xl-size);
     line-height: 32px;
     letter-spacing: var(--type-2xl-tracking);
@@ -569,6 +588,7 @@
     color: var(--text-primary);
   }
   .unit {
+    line-height: 1;
     margin-left: 4px;
     font-size: var(--type-sm-size);
     font-weight: var(--weight-regular);
@@ -594,7 +614,6 @@
   }
   .track {
     position: relative;
-    align-self: center;
     height: 4px;
     border-radius: 2px;
     background: var(--bg-active);
@@ -614,16 +633,16 @@
   .fill.bad {
     background: var(--danger-solid);
   }
-  /* A key for the hatched end of the bar, in the caption beside it. */
-  .hatch-key i {
-    display: inline-block;
-    width: 10px;
-    height: 6px;
-    margin: 0 4px 0 2px;
-    vertical-align: 1px;
-    border-radius: 1px;
-    background: repeating-linear-gradient(135deg, transparent 0 2px, var(--line-strong) 2px 3px);
-    box-shadow: inset 0 0 0 1px var(--line-strong);
+  .bar {
+    position: relative;
+    align-self: center;
+    min-width: 0;
+  }
+  .close-hit {
+    position: absolute;
+    top: -12px;
+    bottom: -12px;
+    right: 0;
   }
   .close {
     position: absolute;
@@ -757,6 +776,18 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
+  .terms {
+    display: grid;
+    place-items: center;
+    width: var(--control-sm);
+    height: var(--control-sm);
+    border-radius: var(--radius-sm);
+    color: var(--text-tertiary);
+  }
+  .terms:hover {
+    color: var(--text-primary);
+    background: var(--bg-hover);
+  }
   .ctl {
     display: flex;
     align-items: center;
@@ -837,12 +868,13 @@
       align-self: baseline;
       text-align: right;
     }
-    .epoch .track {
+    .epoch .bar {
       grid-row: 2;
       grid-column: 1 / -1;
       align-self: center;
     }
     .val {
+      height: 28px;
       font-size: var(--type-lg-size);
       line-height: 28px;
     }

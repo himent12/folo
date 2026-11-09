@@ -38,6 +38,7 @@
   import Slider from '$lib/ui/Slider.svelte';
   import Switch from '$lib/ui/Switch.svelte';
   import Ident from '$lib/ui/Ident.svelte';
+  import Meta from '$lib/ui/Meta.svelte';
   import { toast } from '$lib/ui/toast.svelte';
   import { tooltip } from '$lib/ui/tooltip';
   import { VULKAN } from './settings/capabilities';
@@ -219,8 +220,7 @@
   // Estimates are rough (architecture constants, a reference GPU): show them with matching precision.
   const roughDuration = (s: number) =>
     s < 3600 ? `~${Math.max(1, Math.round(s / 60))} min` : `~${(s / 3600).toFixed(s < 36000 ? 1 : 0)} h`;
-  const roughBytes = (b: number) =>
-    prefs.units === 'binary' ? `~${(b / 2 ** 30).toFixed(1)} GiB` : `~${(b / 1e9).toFixed(1)} GB`;
+  const roughBytes = (b: number) => `~${bytes(b, prefs.units)}`;
 
   /** Number inputs bind `null` when cleared; accept only finite whole numbers in range. */
   const isInt = (v: unknown, lo: number, hi: number) => typeof v === 'number' && Number.isInteger(v) && v >= lo && v <= hi;
@@ -660,7 +660,7 @@
               <Select id="dataset-pick" label="Dataset" bind:value={datasetId} invalid={!!errors.dataset} options={datasets.data.map((d) => ({ value: d.id, label: d.name }))} />
               {#if dataset}
                 <p class="ds-line num">
-                  {num(dataset.splits.train)} train · {num(dataset.splits.val)} val · {dataset.classes.length} classes · <span class="mono">{dataset.format}</span>
+                  <Meta><span>{num(dataset.splits.train)} train</span><span>{num(dataset.splits.val)} val</span><span>{dataset.classes.length} classes</span><span>{dataset.format}</span></Meta>
                 </p>
               {/if}
             </div>
@@ -669,10 +669,10 @@
                 {@const on = d.id === datasetId}
                 <label class="card" class:on>
                   <input type="radio" name="dataset" value={d.id} bind:group={datasetId} class="sr-only" />
-                  <span class="c-top"><span class="c-name">{d.name}</span><span class="c-fmt mono">{d.format}</span></span>
+                  <span class="c-top"><span class="c-name">{d.name}</span><span class="c-fmt">{d.format}</span></span>
                   {#if on}<span class="tick" aria-hidden="true"><Check size={14} strokeWidth={2.25} /></span>{/if}
-                  <!-- Breaks only between the parts, so a narrow card never leaves "classes" alone on a line. -->
-                  <span class="c-meta num"><span>{compact(d.splits.train)} train</span> · <span>{compact(d.splits.val)} val</span> · <span>{d.classes.length} classes</span></span>
+                  <!-- Breaks only between the parts, and a wrapped line never ends on "·" (ui/Meta). -->
+                  <span class="c-meta num"><Meta><span>{compact(d.splits.train)} train</span><span>{compact(d.splits.val)} val</span><span>{d.classes.length} classes</span></Meta></span>
                   {#if d.stats}<ClassStrip counts={d.stats.class_counts} classes={d.classes} height={4} />{/if}
                 </label>
               {/each}
@@ -933,10 +933,12 @@
           {@render whyLine('dock-why', 'dock-why')}
         {:else}
           <button type="button" class="dock-est num" aria-haspopup="dialog" aria-label="Show the run summary" onclick={() => (sumOpen = true)}>
-            <span>{roughDuration(est.totalSeconds)}</span>
-            {#if !onCpu && gpu}<span class:warn={vramPct > 0.9}>{roughBytes(vram)} VRAM</span>{/if}
-            {#if short}<span class="dock-warn"><TriangleAlert size={12} aria-hidden="true" />{short.scratch ? 'Too short to learn' : 'Mostly warmup'}</span>{/if}
-            {#if dataset}<span class="faint">{dataset.name} · <Ident value={arch} /></span>{/if}
+            <Meta>
+              <span>{roughDuration(est.totalSeconds)}</span>
+              {#if !onCpu && gpu}<span class:warn={vramPct > 0.9}>{roughBytes(vram)} GPU memory</span>{/if}
+              {#if short}<span class="dock-warn"><TriangleAlert size={12} aria-hidden="true" />{short.scratch ? 'Too short to learn' : 'Mostly warmup'}</span>{/if}
+              {#if dataset}<span class="faint"><Meta line><span>{dataset.name}</span><Ident value={arch} /></Meta></span>{/if}
+            </Meta>
             <span class="dock-more"><ChevronUp size={14} strokeWidth={1.75} aria-hidden="true" /></span>
           </button>
         {/if}
@@ -1047,9 +1049,6 @@
   .c-meta {
     font-size: var(--type-sm-size);
     color: var(--text-secondary);
-  }
-  .c-meta > span {
-    white-space: nowrap;
   }
   /* Model sizes: single-line rows (letter, name, note, the three specs, the check) on one grid with their header.
      A subgrid's edge tracks hold its border and padding, so the first and last are 12 + 1 px wider than their content. */
@@ -1481,9 +1480,6 @@
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
     color: var(--text-secondary);
-  }
-  .ds-line .mono {
-    color: var(--text-tertiary);
   }
   .aug-toggle {
     display: flex;

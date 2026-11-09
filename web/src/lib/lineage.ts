@@ -25,3 +25,13 @@ export function origin(weights: string | null | undefined, models: Map<string, M
   }
   return { kind: 'model', id: w, label: w };
 }
+
+/**
+ * The tooltip beside an origin's name, so a checkpoint reads the same everywhere: a model's server id ("m_shapes_n")
+ * when its name differs, a file's full path. Screens show `label` and put this in its tooltip (`ui/Lineage`).
+ */
+export function originTip(o: Origin): string | undefined {
+  if (o.kind === 'model') return o.label === o.id ? undefined : `Model ${o.id}`;
+  if (o.kind === 'file') return o.path;
+  return undefined;
+}

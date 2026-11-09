@@ -4,9 +4,9 @@
    * docs/BENCHMARKS.md's summary where both have a number, including the ones FOLO trails. Values in ink; the lead is a
    * word ("1.66× faster", "17% less memory"), never a colour, and a row where FOLO is behind says so plainly. Only rows
    * measured under the same conditions state a winner: a row whose engines ran at different precision or did different
-   * work keeps both measurements, and its conclusion is "Different conditions" over the specific difference ("f32 vs
-   * TF32"). One sentence says what is compared and how many rows are not like for like; each row keeps one short
-   * qualifier, and the method and caveats sit in a "How this was measured" fold.
+   * work keeps both measurements, and its conclusion is "—" over the specific difference ("f32 vs TensorFloat-32"),
+   * with one footnote under the table saying what "—" means. Units sit in the row's header, never in the cells. Each row
+   * keeps one short qualifier, and the method and caveats sit in a "How this was measured" fold.
    * Phones stack each row (the metric, then its three values, each with its engine named in the markup); the header
    * row stays for assistive tech, every value names its metric and column through `headers`, and explicit cell roles
    * keep the table's semantics through the grid layout.
@@ -17,7 +17,7 @@
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import Panel from '$lib/ui/Panel.svelte';
 
-  const fmt = (v: Versus, x: number) => `${num(x, v.unit === 'ms' ? (x < 10 ? 2 : 1) : 0)} ${v.unit}`;
+  const fmt = (v: Versus, x: number) => num(x, v.unit === 'ms' ? (x < 10 ? 2 : 1) : 0);
   /** One format per kind: speed as a ratio ("1.66× faster", "1.09× slower"), memory as a share ("17% less memory"). */
   function lead(v: Versus): string {
     const a = advantage(v);
@@ -43,15 +43,7 @@
 </script>
 
 <Panel title="Engine speed" pad="none" id="engine-speed">
-  <p class="lede">
-    folo-n vs YOLO26n on the same RTX 4080 SUPER, 640 px.
-    {#if mixed}
-      <span class="qual"
-        >{mixed} of {versusYolo26n.length} rows ran under different conditions and name no winner; <button type="button" class="see" onclick={showHow}>see how this was measured</button
-        >.</span
-      >
-    {/if}
-  </p>
+  <p class="lede">folo-n vs YOLO26n on the same RTX 4080 SUPER, 640 px.</p>
   <table class="table vs">
     <thead>
       <tr>
@@ -67,19 +59,26 @@
         {@const diff = unlike[v.metric]}
         <tr class:behind={!diff && !ahead} class:unlike={!!diff}>
           <th scope="row" role="rowheader" id="vs-r-{i}" headers="vs-h-m">
-            <span class="m">{v.metric}</span>
+            <span class="m">{v.metric}<span class="unit">, {v.unit}</span></span>
             {#if v.note}<span class="note">{v.note}</span>{/if}
           </th>
           <!-- The engine's name over each value is for the stacked phone rows; screen readers get it from `headers`. -->
           <td role="cell" class="r num v" headers="vs-r-{i} vs-h-folo"><span class="cl" aria-hidden="true">folo-n</span>{fmt(v, v.folo)}</td>
           <td role="cell" class="r num v yolo" headers="vs-r-{i} vs-h-yolo"><span class="cl" aria-hidden="true">YOLO26n</span>{fmt(v, v.yolo)}</td>
           <td role="cell" class="r lead" headers="vs-r-{i} vs-h-lead"
-            ><span class="cl" aria-hidden="true">folo-n vs YOLO26n</span>{#if diff}<span class="dc">Different conditions</span><span class="why">{diff.differs}</span>{:else}{lead(v)}{/if}</td
+            ><span class="cl" aria-hidden="true">folo-n vs YOLO26n</span>{#if diff}<span class="dc" aria-label="No winner: different conditions">—</span><span class="why">{diff.differs}</span>{:else}{lead(v)}{/if}</td
           >
         </tr>
       {/each}
     </tbody>
   </table>
+  <!-- What "—" means, said once for every row that has it. -->
+  {#if mixed}
+    <div class="foot">
+      <p><span aria-hidden="true">—&nbsp;</span>{mixed} of {versusYolo26n.length} rows ran under different conditions, so they name no winner;
+        <button type="button" class="see" onclick={showHow}>see how this was measured</button>.</p>
+    </div>
+  {/if}
   <!-- How the rows were made and what qualifies them, one step away. -->
   <details class="how" bind:this={how}>
     <summary><ChevronDown size={14} aria-hidden="true" />How this was measured</summary>
@@ -91,7 +90,7 @@
       </p>
       <p>Times and memory: lower is better. Images per second: higher is better.</p>
       <p>
-        <span class="cv-m">Different conditions:</span> the engines ran at different numeric precision (f32, TF32, fp16),
+        <span class="cv-m">Rows marked —:</span> the engines ran at different numeric precision (f32, TensorFloat-32, f16),
         did different work, or ran under different load. Those rows keep both measurements and name the difference, but
         no winner: the ratio would mix the engine with its conditions.
       </p>
@@ -135,12 +134,19 @@
     padding: 0 var(--space-4) var(--space-3);
     color: var(--text-secondary);
   }
-  /* The comparability caveat sits beside the claim, one step quieter. */
-  .qual {
-    display: block;
+  /* The footnote for "—", under the rows it explains, one step quieter. */
+  .foot p {
     max-width: 60ch;
+  }
+  .foot {
+    padding: var(--space-3) var(--space-4);
+    border-top: 1px solid var(--line-subtle);
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
+    color: var(--text-tertiary);
+  }
+  .unit {
+    font-weight: var(--weight-regular);
     color: var(--text-tertiary);
   }
   .see {

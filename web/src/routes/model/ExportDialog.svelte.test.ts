@@ -94,7 +94,7 @@ describe('ExportDialog', () => {
     // Without the toast, a live region in the dialog announces it.
     const live = target.ownerDocument.querySelectorAll('dialog [role="status"]');
     expect(live).toHaveLength(1);
-    expect(live[0]!.textContent).toBe('Export finished: shapes-n-best-f16.folo, 5.05 MiB.');
+    expect(live[0]!.textContent).toBe('Export finished: shapes-n-best-f16.folo, 5.1 MiB.');
   });
 
   it('says plainly that ONNX cannot be downloaded, and shows where it is', async () => {
@@ -192,7 +192,7 @@ describe('ExportDialog: ONNX download (weights_onnx)', () => {
     expect(text).toContain('Downloaded');
     expect(text).toContain('shapes-n-best-f16.onnx');
     expect(text).toContain('Nothing was written on the server.');
-    expect(target.ownerDocument.querySelector('dialog [role="status"]')?.textContent).toBe('Downloaded shapes-n-best-f16.onnx, 2 KiB.');
+    expect(target.ownerDocument.querySelector('dialog [role="status"]')?.textContent).toBe('Downloaded shapes-n-best-f16.onnx, 2.0 KiB.');
   });
 
   it('saves nothing in the demo, and says why', async () => {
