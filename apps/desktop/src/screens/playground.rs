@@ -524,7 +524,8 @@ impl FoloApp {
                         Some(SharedString::from(format!(
                             "{}{}{}",
                             m.arch.as_str(),
-                            if self.model_e2e(m) { " · end-to-end" } else { "" },
+                            // Both heads named: each says how its boxes are made.
+                            if self.model_e2e(m) { " · end-to-end" } else { " · NMS" },
                             m.metrics.as_ref().map_or(String::new(), |x| format!(" · {:.3}", x.map50_95)),
                         ))),
                     )
@@ -553,7 +554,7 @@ impl FoloApp {
         let tight = window.viewport_size().height < px(700.);
         // Sliders on one line ("label · slider · value") in short windows, and whenever both show,
         // so the latency breakdown fits at 1280 x 800.
-        let inline = tight || !e2e;
+        let inline = true;
         let field = |label: &str, value: String, control: AnyElement, help: AnyElement| {
             let name = div()
                 .flex()
@@ -615,6 +616,15 @@ impl FoloApp {
                             d.child(select)
                         }
                     })
+                    // What's running, without opening the menu: architecture, input size and head.
+                    .when_some(model.as_ref(), |d, m| {
+                        d.child(text(ty::XS, t.text_tertiary).child(format!(
+                            "{} · {} px · {}",
+                            m.arch.as_str(),
+                            m.imgsz,
+                            if e2e { "end-to-end, no NMS" } else { "boxes filtered by NMS" }
+                        )))
+                    })
                     .when(no_models, |d| {
                         d.child(
                             text(ty::XS, t.text_tertiary)
@@ -671,7 +681,8 @@ impl FoloApp {
                     .enumerate()
                     .map(|(i, b)| {
                         let hot = active == Some(i);
-                        let color = t.class(b.class);
+                        // The bar's shade (darkened in light mode), so swatch and bar read as one class.
+                        let color = t.class_stroke(b.class);
                         let key = format!("det-{i}");
                         // A cut class name shows in full on hover and on keyboard focus.
                         let long = may_overflow(&b.name, ty::SM.size, 68.);

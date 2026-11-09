@@ -166,7 +166,7 @@ impl FoloApp {
                                 }
                             }))
                             .child(div().id(SharedString::from(format!("m-name-{}", m.id))).flex_1().min_w(px(200.)).when(crate::ui::may_overflow(&m.name, ty::SM.size, name_w), |d| d.tooltip(crate::controls::tip(m.name.clone(), None))).child(text(ty::SM, t.text_primary).font_weight(FontWeight::MEDIUM).w(px(name_w)).truncate().child(m.name.clone())))
-                            .child(div().w(px(150.)).flex_none().flex().items_center().gap(px(6.)).child(text(ty::SM, t.text_secondary).tnum().whitespace_nowrap().child(format!("{} · {} px", m.arch.as_str(), m.imgsz))).when(self.model_e2e(m), |d| d.child(e2e_tag(&t))))
+                            .child(div().w(px(150.)).flex_none().flex().items_center().gap(px(6.)).child(text(ty::SM, t.text_secondary).tnum().whitespace_nowrap().child(format!("{} · {} px", m.arch.as_str(), m.imgsz))).when(self.model_e2e(m), |d| d.child(e2e_tag(&t, format!("e2e-m-{}", m.id)))))
                             .when(wide, |d| d.child(text(ty::SM, t.text_tertiary).w(px(150.)).flex_none().truncate().child(run.trim_start_matches("from ").to_string())))
                             .child(num_cell(130., metrics.as_ref().map_or(text(ty::SM, t.text_tertiary).child("–"), |mm| bar_value(&t, mm.map50_95, f3(mm.map50_95), t.text_tertiary))))
                             .child(num_cell(72., text(ty::SM, t.text_secondary).tnum().child(metrics.as_ref().map_or("–".into(), |mm| f3(mm.map50)))))
@@ -1464,7 +1464,8 @@ impl FoloApp {
         let rows: Vec<AnyElement> = per
             .into_iter()
             .map(|c| {
-                let color = t.class(c.class);
+                // The PR curve's shade (darkened in light mode), so table, legend and curve agree.
+                let color = t.class_stroke(c.class);
                 let class = c.class;
                 let key = format!("pc-row-{class}");
                 let hot = focus == Some(class);
