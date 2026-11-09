@@ -570,6 +570,8 @@
     position: relative;
     display: grid;
     gap: var(--space-2);
+    /* Rows pack to the top: a card whose label has a second line ("Current") never pushes the others' names down. */
+    align-content: start;
     cursor: pointer;
   }
   .theme input {
@@ -622,6 +624,7 @@
     display: inline-flex;
     align-items: center;
     gap: var(--space-1);
+    flex-shrink: 0;
     margin-left: auto;
     font-size: var(--type-sm-size);
     font-weight: var(--weight-regular);
@@ -646,6 +649,14 @@
   }
   .note.action {
     color: var(--text-secondary);
+  }
+  /* An action's command may break between its words (a phone cannot fit FOLO_GPU_BACKEND=vulkan folo serve … whole). */
+  .note.action code {
+    white-space: normal;
+  }
+  .cap .setting-text {
+    flex: 1;
+    min-width: 0;
   }
   .report {
     display: grid;
@@ -734,6 +745,15 @@
   @media (max-width: 767px) {
     .themes {
       gap: var(--space-2);
+    }
+    /* A third of a phone is too narrow for the name and "Current" side by side: "Current" goes under the name. */
+    .theme-label {
+      flex-wrap: wrap;
+      row-gap: 0;
+    }
+    .current {
+      flex-basis: 100%;
+      margin-left: 0;
     }
     .row-actions :global(.btn) {
       width: 100%;
