@@ -1,4 +1,11 @@
 <script lang="ts">
+  /**
+   * A labelled on/off switch. Its name is the label alone; its own hint, and an enclosing Field's message, are its
+   * accessible description (`ui/field`), so a hint is never folded into the name nor left unannounced.
+   */
+  import { describedBy, getField } from './field';
+
+  const uid = $props.id();
   let {
     checked = $bindable(false),
     label,
@@ -17,14 +24,26 @@
     id?: string;
     describedby?: string;
   } = $props();
+
+  const field = getField();
+  const base = $derived(id ?? `switch-${uid}`);
 </script>
 
 <label class="switch" class:disabled>
   <span class="text">
-    <span class="label">{label}</span>
-    {#if hint}<span class="hint">{hint}</span>{/if}
+    <span class="label" id="{base}-label">{label}</span>
+    {#if hint}<span class="hint" id="{base}-desc">{hint}</span>{/if}
   </span>
-  <input type="checkbox" role="switch" {id} {disabled} aria-describedby={describedby} bind:checked onchange={() => onchange?.(checked)} />
+  <input
+    type="checkbox"
+    role="switch"
+    {id}
+    {disabled}
+    aria-labelledby="{base}-label"
+    aria-describedby={describedBy(describedby, hint && `${base}-desc`, field?.describedby)}
+    bind:checked
+    onchange={() => onchange?.(checked)}
+  />
   <span class="track" aria-hidden="true"><span class="thumb"></span></span>
 </label>
 

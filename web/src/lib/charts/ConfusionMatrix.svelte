@@ -249,6 +249,8 @@
   </div>
 {/if}
 <!-- svelte-ignore a11y_interactive_supports_focus -->
+<!-- The grid's keys are the grid's (arrows, Home, End, on the root): the focused cell is the roving tab stop, and focus
+     pins its readout, so a click (which focuses the cell) and a key reach the same state with no handler per cell. -->
 <!-- A paged matrix is a deliberate scroller (`data-scrolls`): whole columns, with the pager and the overview saying
      what is beyond the edge instead of a fade over a half column. -->
 <div class="cm" data-scrolls={fit ? true : undefined} class:fixed class:paged={!!fit} class:more-r={moreRight} style:--fit={fit ? `${fit.cell}px` : undefined} style:--label-h={labelH !== null ? `${labelH}px` : undefined} style:--n={n} style:--min-cell={minCell !== undefined ? `${minCell}px` : undefined} style:--max-cell="{maxCell}px" role="grid" aria-label={label} aria-describedby="{uid}-readout" bind:this={root} {onkeydown} {onscroll}>
@@ -284,8 +286,6 @@
           onpointerleave={() => (hovered = pinned)}
           onfocus={() => ((focus = { r, c }), (hovered = pinned = { r, c }))}
           onblur={() => (hovered = pinned = null)}
-          onclick={() => (hovered = pinned = { r, c })}
-          onkeydown={() => {}}
         >
           {#if v > 0}
             {@const t = sharePct(v)}
@@ -485,10 +485,11 @@
   .cell.zero.hl {
     box-shadow: inset 0 0 0 1px var(--line-strong);
   }
-  /* The active cell (tapped, or pointed at from a summary): a selection stroke; keyboard focus has its own ring. */
+  /* The active cell (tapped, or pointed at from a summary): the selection's 2 px ink stroke (never lime, §2.7);
+     keyboard focus has its own ring. */
   .cell.pin:not(:focus-visible) {
     box-shadow:
-      inset 0 0 0 2px var(--accent-line),
+      inset 0 0 0 2px var(--text-primary),
       inset 0 0 0 3px var(--bg-panel);
   }
   /* Low cells sit near the well, high cells near the ink; the label takes the far extreme (labelHigh in ./confusionInk). */

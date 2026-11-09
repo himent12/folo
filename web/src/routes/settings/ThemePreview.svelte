@@ -6,12 +6,14 @@
    */
   import tokens from '../../../../design/tokens.json';
 
-  let { theme }: { theme: 'dark' | 'light' } = $props();
+  /** `half`: half a card (System's two themes side by side), with tighter insets so the window still fits a phone's card. */
+  let { theme, half = false }: { theme: 'dark' | 'light'; half?: boolean } = $props();
   const c = $derived(tokens.color[theme]);
 </script>
 
 <span
   class="win"
+  class:half
   aria-hidden="true"
   style:--app={c.bg.app}
   style:--panel={c.bg.panel}
@@ -91,6 +93,23 @@
     border-radius: 3px;
     background: var(--panel);
     border: 1px solid var(--line);
+  }
+  .half .side {
+    padding: 6px 4px;
+  }
+  .half .logo {
+    width: 8px;
+    height: 8px;
+  }
+  .half .main {
+    padding: 6px;
+  }
+  .side,
+  .main {
+    min-width: 0;
+  }
+  .logo {
+    max-width: 100%;
   }
   svg {
     width: 100%;

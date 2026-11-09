@@ -191,7 +191,7 @@ describe('LineChart layering and ticks', () => {
   });
 
   it('pulses the best ring when its pulse count goes up, and not before', () => {
-    const marker = { x: 2, y: 0.2, label: 'best', quiet: true, color: 'lime' };
+    const marker = { x: 2, y: 0.2, label: 'best', quiet: true };
     const props = $state({ series, label: 'best', markers: [marker] as (typeof marker & { pulse?: number })[] });
     const { target, c } = mountAt(props);
     expect(target.querySelector('.marker .ring')).toBeTruthy();
@@ -203,7 +203,7 @@ describe('LineChart layering and ticks', () => {
   });
 
   it('does not replay a pulse it was mounted with (a tab switch, a finished run)', () => {
-    const marker = { x: 2, y: 0.2, label: 'best', quiet: true, color: 'lime', pulse: 3 };
+    const marker = { x: 2, y: 0.2, label: 'best', quiet: true, pulse: 3 };
     const { target, c } = mountAt({ series, label: 'best', markers: [marker] });
     expect(target.querySelector('.marker .ring')).toBeTruthy();
     expect(target.querySelector('.marker .pulse')).toBeNull();
@@ -375,56 +375,77 @@ describe('LineChart end marks (DESIGN_DIRECTION §2.4: one thing per mark)', () 
     return { target, c };
   };
   const pts = (n: number) => Array.from({ length: n }, (_, i) => ({ x: i + 1, y: 0.1 + i / 100 }));
-  const ring = (target: Element) => [...target.querySelectorAll('.marker .ring')].map((r) => (r as SVGElement).style.stroke);
+  const rings = (target: Element) => target.querySelectorAll('.marker .ring').length;
+  const live = (target: Element) => target.querySelector('circle.end-live') as SVGElement | null;
 
-  it('draws a best ring next to the live end as one mark: the live dot inside the lime ring', () => {
-    // Round 24: best at epoch 36, live at 37, a lime "oo" on Run and Overview's live card.
+  it('draws the best and the live end as two shapes: a hollow ink ring and a filled lime dot with the heartbeat', () => {
+    // Round 25: best at epoch 36, live at 37, two identical lime ringed dots side by side.
     const series = [{ id: 'm', label: 'mAP50-95', color: 'ink', end: 'live' as const, points: pts(37) }];
-    const markers = [{ x: 36, y: 0.1 + 35 / 100, label: 'best', quiet: true, color: 'lime' }];
-    const { target, c } = mountAt({ series, label: 'live', endDots: true, markers, xDomain: [0, 100] });
-    expect(target.querySelectorAll('.marker')).toHaveLength(1);
-    expect(target.querySelector('.marker[data-merged="m"]')).toBeTruthy();
-    expect(target.querySelector('.end-live')).toBeNull();
-    expect(target.querySelector('circle.end-dot')).toBeTruthy();
-    expect(ring(target)).toEqual(['lime']);
-    unmount(c);
-  });
-
-  it('draws both marks where the best epoch is well clear of the end', () => {
-    const series = [{ id: 'm', label: 'mAP50-95', color: 'ink', end: 'live' as const, points: pts(37) }];
-    const markers = [{ x: 20, y: 0.29, label: 'best', quiet: true, color: 'lime' }];
-    const { target, c } = mountAt({ series, label: 'live', endDots: true, markers, xDomain: [0, 100] });
+    const markers = [{ x: 36, y: 0.1 + 35 / 100, label: 'best', quiet: true }];
+    const { target, c } = mountAt({ series, label: 'live', endDots: true, markers, xDomain: [0, 37] });
     expect(target.querySelectorAll('.marker')).toHaveLength(1);
     expect(target.querySelector('.marker[data-merged]')).toBeNull();
-    expect(target.querySelector('.end-live')).toBeTruthy();
+    expect(rings(target)).toBe(1);
+    expect(live(target)!.style.fill).toBe('var(--accent-line)');
+    expect(target.querySelector('circle.end-beat')).toBeTruthy();
+    // The ring takes no colour of its own: its ink is the stylesheet's text.primary on every run.
+    expect((target.querySelector('.marker .ring') as SVGElement).style.stroke).toBe('');
     unmount(c);
   });
 
-  it("never hides a failed run's cross: a best on its last epoch is an ink ring around the danger cross", () => {
-    // Round 24: run-failed ended on a lime best ring with no failure mark.
+  it('draws the ring around the live dot when the best is the latest epoch', () => {
+    const series = [{ id: 'm', label: 'mAP50-95', color: 'ink', end: 'live' as const, points: pts(37) }];
+    const markers = [{ x: 37, y: 0.1 + 36 / 100, label: 'best', quiet: true }];
+    const { target, c } = mountAt({ series, label: 'live', endDots: true, markers, xDomain: [0, 100] });
+    expect(target.querySelector('.marker[data-merged="m"]')).toBeTruthy();
+    expect(rings(target)).toBe(1);
+    expect(live(target)).toBeTruthy();
+    // The dot is painted over the ring's centre, never under it.
+    const marks = [...target.querySelectorAll('.marker, circle.end-live')];
+    expect(marks.map((m) => m.tagName.toLowerCase())).toEqual(['g', 'circle']);
+    unmount(c);
+  });
+
+  it("never hides a failed run's cross: a best on its last epoch is the ink ring around the danger cross", () => {
     const series = [{ id: 'm', label: 'mAP50-95', color: 'ink', end: 'failed' as const, points: pts(23) }];
-    const markers = [{ x: 23, y: 0.1 + 22 / 100, label: 'best', quiet: true, color: 'lime' }];
+    const markers = [{ x: 23, y: 0.1 + 22 / 100, label: 'best', quiet: true }];
     const { target, c } = mountAt({ series, label: 'failed', endDots: true, markers, xDomain: [0, 100] });
     const cross = target.querySelector('path.end-x') as SVGElement | null;
     expect(cross).toBeTruthy();
     expect(cross!.style.stroke).toBe('var(--danger-text)');
-    expect(ring(target)).toEqual(['var(--text-primary)']);
-    // The cross is painted over the ring, never under it.
+    expect(rings(target)).toBe(1);
+    expect(live(target)).toBeNull();
     const marks = [...target.querySelectorAll('.marker, path.end-x')];
     expect(marks.map((m) => m.tagName.toLowerCase())).toEqual(['g', 'path']);
     unmount(c);
   });
 
-  it('keeps a stopped run square inside an ink ring, and a completed run end in the lime one', () => {
-    const markers = [{ x: 30, y: 0.1 + 29 / 100, label: 'best', quiet: true, color: 'lime' }];
+  it('keeps a stopped run square and a completed run dot in the line ink, with the ring around them', () => {
+    const markers = [{ x: 30, y: 0.1 + 29 / 100, label: 'best', quiet: true }];
     const stopped = mountAt({ series: [{ id: 's', label: 's', color: 'ink', end: 'stopped' as const, points: pts(30) }], label: 's', endDots: true, markers, xDomain: [0, 100] });
-    expect(stopped.target.querySelector('rect.end-dot')).toBeTruthy();
-    expect(ring(stopped.target)).toEqual(['var(--text-primary)']);
+    expect((stopped.target.querySelector('rect.end-dot') as SVGElement).style.fill).toBe('ink');
+    expect(rings(stopped.target)).toBe(1);
     unmount(stopped.c);
     const done = mountAt({ series: [{ id: 'd', label: 'd', color: 'ink', points: pts(30) }], label: 'd', endDots: true, markers, xDomain: [0, 100] });
-    expect(done.target.querySelector('circle.end-dot')).toBeTruthy();
-    expect(ring(done.target)).toEqual(['lime']);
+    expect((done.target.querySelector('circle.end-dot') as SVGElement).style.fill).toBe('ink');
+    expect(live(done.target)).toBeNull();
     unmount(done.c);
+  });
+
+  it('focuses the best ring once when its focus count goes up, and not for the count it mounted with', () => {
+    const series = [{ id: 'd', label: 'd', color: 'ink', points: pts(30) }];
+    const props = $state({ series, label: 'd', endDots: true, xDomain: [0, 100], markers: [{ x: 20, y: 0.29, label: 'best', quiet: true, focus: 1 }] });
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    const c = mount(LineChart, { target, props: props as never });
+    Object.defineProperty(target.querySelector('.plot')!, 'clientWidth', { value: 640 });
+    target.querySelector('.plot')!.dispatchEvent(new Event('resize'));
+    flushSync();
+    expect(target.querySelector('.marker .focus')).toBeNull();
+    props.markers = [{ x: 20, y: 0.29, label: 'best', quiet: true, focus: 2 }];
+    flushSync();
+    expect(target.querySelector('.marker .focus')).toBeTruthy();
+    unmount(c);
   });
 
   it("draws a failed run's cross in the danger ink in a comparison too", () => {

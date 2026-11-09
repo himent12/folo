@@ -1,6 +1,12 @@
 <script lang="ts" generics="T extends string">
-  /** A styled native <select>: the platform picker is the most accessible and fastest option on every device. */
+  /**
+   * A styled native <select>: the platform picker is the most accessible and fastest option on every device. An option
+   * may carry a `short` label: the closed select shows it (a model's name), while the open list and the accessible value
+   * keep the full one (the name with its score and what the score is on), so a closed select never cuts a fact off at
+   * its edge. Say the rest under the select, in a meta line it is described by (DESIGN_DIRECTION §2.23).
+   */
   import ChevronDown from '@lucide/svelte/icons/chevrons-up-down';
+  import { describedBy, getField } from './field';
 
   interface Option {
     value: T;
@@ -10,6 +16,8 @@
     group?: string;
     /** What the option is, as its tooltip (a native option holds no markup). */
     title?: string;
+    /** The closed select's text while this option is chosen; the open list shows `label`. */
+    short?: string;
   }
 
   let {
@@ -33,8 +41,12 @@
     disabled?: boolean;
     /** The field shows an error: announced, and tied to its message by `describedby` (Field's `<for>-error`). */
     invalid?: boolean;
+    /** More ids to describe it by; an enclosing Field's hint or error is added on its own (`ui/field`). */
     describedby?: string;
   } = $props();
+
+  const field = getField();
+  const shown = $derived(options.find((o) => o.value === value)?.short);
 
   /** Runs of options: the ungrouped ones as they are, each group's under its label. */
   const runs = $derived(
@@ -49,8 +61,8 @@
 
 {#snippet option(o: Option)}<option value={o.value} disabled={o.disabled} title={o.title}>{o.label}</option>{/snippet}
 
-<div class="select {size}">
-  <select {id} bind:value aria-label={label} {disabled} aria-invalid={invalid || undefined} aria-describedby={describedby} onchange={() => onchange?.(value)}>
+<div class="select {size}" class:closed-short={shown !== undefined}>
+  <select {id} bind:value aria-label={label} {disabled} aria-invalid={invalid || field?.invalid || undefined} aria-describedby={describedBy(describedby, field?.describedby)} onchange={() => onchange?.(value)}>
     {#each runs as r, i (i)}
       {#if r.group}
         <optgroup label={r.group}>{#each r.options as o (o.value)}{@render option(o)}{/each}</optgroup>
@@ -59,6 +71,7 @@
       {/if}
     {/each}
   </select>
+  {#if shown !== undefined}<span class="shown" aria-hidden="true">{shown}</span>{/if}
   <span class="chev" aria-hidden="true"><ChevronDown size={14} strokeWidth={1.75} /></span>
 </div>
 
@@ -99,6 +112,36 @@
   option {
     background: var(--bg-overlay);
     color: var(--text-primary);
+  }
+  /* A short label: the select's own text is hidden and the short one drawn in its place; the open list keeps ink. */
+  .closed-short select {
+    color: transparent;
+  }
+  .shown {
+    position: absolute;
+    /* Where the select's own text starts: its 1 px edge and 12 px padding. */
+    inset: 0 28px 0 12px;
+    padding-inline-start: 1px;
+    overflow: hidden;
+    color: var(--text-primary);
+    line-height: var(--control-md);
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    pointer-events: none;
+  }
+  .select:has(select:disabled) .shown {
+    opacity: 0.5;
+  }
+  .sm .shown {
+    inset-inline-start: 8px;
+    font-size: var(--type-sm-size);
+    line-height: var(--control-sm);
+  }
+  @media (pointer: coarse) {
+    .shown,
+    .sm .shown {
+      line-height: 44px;
+    }
   }
   .chev {
     position: absolute;

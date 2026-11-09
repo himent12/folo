@@ -744,7 +744,7 @@
     transition: background-color var(--dur-fast) var(--ease-standard);
   }
   /* Hover is a light neutral step (only where a pointer can hover, cleared when the pointer leaves the row, so a tap
-     never leaves one behind); the selection takes the one rule (bg.active and a 2 px accent bar on the leading edge),
+     never leaves one behind); the selection takes the one rule (bg.active and the 2 px ink bar, `--select-bar`, on the leading edge),
      which hover never changes. */
   @media (hover: hover) {
     .labels button.hot:not(.on) {
@@ -753,7 +753,7 @@
   }
   .labels button.on {
     background: var(--bg-active);
-    box-shadow: inset 2px 0 0 var(--accent-line);
+    box-shadow: var(--select-bar);
     border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
   }
   .labels button.dim {

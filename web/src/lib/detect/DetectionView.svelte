@@ -19,6 +19,9 @@
    *   Only a hovered or selected box gets the full-size weight. A thumbnail that draws boxes shows the whole image
    *   (`fit="contain"`, letterboxed on bg.inset): a cropped one would cut boxes in half at its edge
    *   (./thumbFit.test.ts).
+   * - The edges: a contained image clips only itself, never the overlay, so a box on the image's edge keeps its outer
+   *   stroke and halo (up to 4 px outside it); a frame that shows the image edge to edge (the phone Playground) insets
+   *   it by 4 px so that halo stays on screen. A cropped (`cover`) view clips everything at its edge.
    * Ground truth, when given, is dashed (predictions are solid) and drawn underneath: in the class colour at full size,
    * neutral and just outside the prediction's halo in compact thumbnails (where the two would otherwise coincide).
    * A selection: the selected box takes a 3 px accent stroke and its chip an accent edge; every other box, chip and
@@ -128,7 +131,7 @@
   });
 </script>
 
-<div class="view" class:compact class:small bind:clientWidth={cw} bind:clientHeight={ch}>
+<div class="view" class:compact class:small class:cover={fit === 'cover'} bind:clientWidth={cw} bind:clientHeight={ch}>
   {#if src}
     <img
       {src}
@@ -204,9 +207,12 @@
     position: relative;
     width: 100%;
     height: 100%;
-    overflow: hidden;
     background: var(--bg-inset);
     user-select: none;
+  }
+  /* Cropped: boxes run past the edge, so the view clips them with the image. */
+  .view.cover {
+    overflow: hidden;
   }
   img {
     position: absolute;

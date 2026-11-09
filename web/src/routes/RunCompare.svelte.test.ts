@@ -137,3 +137,32 @@ describe('Compare runs on a phone: two at a time', () => {
     expect(target.querySelector('#cmp-table thead th .base-tag')?.closest('th')?.querySelector('.th-name')?.textContent).toBe(names[0]);
   });
 });
+
+describe('Compare: the side by side reads against its baseline', () => {
+  it("marks each dataset's best, sets values equal to the baseline's in tertiary, and keeps the keys to the chips", async () => {
+    const runs = (await hub.api.runs()).filter((r) => r.status !== 'queued').slice(0, 4);
+    setWidth(1440);
+    router.route = parse(`#/runs/compare?ids=${runs.map((r) => r.id).join(',')}`);
+    c = mount(RunCompare, { target });
+    const table = await until(() => target.querySelector('#cmp-table table'), 'the table');
+    // Round 25: header swatches that could not line up with their chips. The chips are the legend.
+    expect(table.querySelector('thead i')).toBeNull();
+    expect(table.querySelector('thead .base-tag')?.closest('th')?.querySelector('.th-name')?.textContent).toBe(runs[0]!.name);
+    // The best row says it is any epoch's best, and each dataset with two runs here has its best marked.
+    const best = [...table.querySelectorAll('tbody tr')].find((tr) => tr.querySelector('td.k')?.textContent?.startsWith('Best mAP50-95'))!;
+    expect(best.querySelector('td.k .k-sub')?.textContent).toBe('any epoch');
+    const datasets = new Set(runs.map((r) => r.config.dataset_id));
+    const shared = [...datasets].filter((d) => runs.filter((r) => r.config.dataset_id === d).length > 1);
+    expect(best.querySelectorAll('.tag')).toHaveLength(shared.length);
+    if (datasets.size > 1) for (const t of best.querySelectorAll('.tag')) expect(t.textContent).toMatch(/^(joint )?best on /);
+    // Every other column's value is either marked as differing from the baseline's or tertiary as equal to it.
+    const rows = [...table.querySelectorAll('tbody tr')].filter((tr) => tr.querySelector('td.cfg'));
+    expect(rows.length).toBeGreaterThan(0);
+    for (const tr of rows) {
+      const cells = [...tr.querySelectorAll('td.cfg')];
+      expect(cells[0]!.classList.contains('base')).toBe(true);
+      for (const td of cells.slice(1)) expect(td.classList.contains('diff') !== td.classList.contains('same')).toBe(true);
+    }
+    expect(table.querySelector('td.cfg.same')).toBeTruthy();
+  });
+});

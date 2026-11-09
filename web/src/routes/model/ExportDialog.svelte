@@ -442,7 +442,9 @@
     width: 36%;
     border-radius: inherit;
     background: var(--accent-line);
-    animation: slide 1.1s var(--ease-standard) infinite;
+    /* Loading motion is bounded (DESIGN_DIRECTION §2.9): the bar exists only while the export runs (phase 'running'),
+       and even then it sweeps a minute at most (55 × 1.1 s, longer than an export takes) before it holds still. */
+    animation: slide 1.1s var(--ease-standard) 55;
   }
   @keyframes slide {
     from {

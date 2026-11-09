@@ -41,6 +41,26 @@ describe('Menu', () => {
   });
 });
 
+describe('Menu order', () => {
+  it('puts a destructive item last, under a separator, whatever order it was given in', async () => {
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    const items = [
+      { label: 'Delete run', danger: true, onclick: () => {} },
+      { label: 'Open model', onclick: () => {} },
+      { label: 'Try model', onclick: () => {} },
+    ];
+    const c = mount(Menu, { target, props: { label: 'More run actions', items } });
+    target.querySelector<HTMLButtonElement>('button[aria-haspopup="menu"]')!.click();
+    flushSync();
+    const list = target.querySelector('[role="menu"]')!;
+    expect([...list.querySelectorAll('[role="menuitem"]')].map((e) => e.textContent?.trim())).toEqual(['Open model', 'Try model', 'Delete run']);
+    expect(list.querySelector('[role="separator"] + [role="menuitem"]')?.textContent?.trim()).toBe('Delete run');
+    unmount(c);
+    target.remove();
+  });
+});
+
 describe('Menu keyboard', () => {
   const items = [{ label: 'Compare' }, { label: 'Delete run' }, { label: 'Duplicate' }, { label: 'Open model' }].map((i) => ({ ...i, onclick: () => {} }));
   const setup = () => {

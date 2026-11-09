@@ -318,7 +318,7 @@ a.ident:hover {
  *   rows   36 px single-line (.dense 28, .tall 48 for a name over one meta line); header 32 px
  *   header 12/500 tertiary, sentence case; numbers right-aligned (.r) and tabular, the unit in the header
  *   lead   the first cell of a row is 13/500 primary (the row's name); its second line is .sub (12/400 tertiary)
- *   rows that open something carry .link (hover fill, pointer); selected rows .on (bg.active + 2 px accent bar)
+ *   rows that open something carry .link (hover fill, pointer); selected rows .on (bg.active + the 2 px ink bar, --select-bar)
  */
 .table {
   width: 100%;
@@ -388,16 +388,22 @@ a.ident:hover {
     background: var(--bg-hover);
   }
 }
-/* The selection rule: bg.active and a 2 px accent bar on the row's leading edge. */
+/* The selection rule, for every list and option (tables, New run's sizes, the inspector's labels, Runs' phone rows,
+   Compare's pinned run, Model's traced classes): bg.active and a 2 px ink bar on the leading edge, `--select-bar`.
+   Lime is "now" or the one action, never a selection state: only a selected detection on an image is lime
+   (DESIGN_DIRECTION §2.7; design/statusHue.test.ts fails on an accent in a selection rule). */
+:root {
+  --select-bar: inset 2px 0 0 var(--text-primary);
+}
 :where(.table) tbody tr:is(.on, [aria-selected='true']) {
   background: var(--bg-active);
 }
 :where(.table) tbody tr:is(.on, [aria-selected='true']) > :first-child {
-  box-shadow: inset 2px 0 0 var(--accent-line);
+  box-shadow: var(--select-bar);
 }
 /* Arrow-key rows (rowNav): the ring sits inside the row, so the scroll box never clips it, and 4 px in from its edges,
    so on a selected row the ring (a closed rectangle) and the selection (a 2 px bar on the very edge, and the fill) stay
-   two different shapes with a gap between them, not one lime edge. */
+   two different shapes with a gap between them. */
 :where(.table) tbody tr[tabindex]:focus-visible {
   outline: var(--size-focus-ring) solid var(--focus);
   outline-offset: calc(-1 * (var(--size-focus-ring) + var(--space-1)));
@@ -405,11 +411,6 @@ a.ident:hover {
 }
 :where(.table) tbody tr[tabindex]:focus-visible:not(.on, [aria-selected='true']) {
   background: var(--bg-hover);
-}
-/* On a selected row the ring is ink: 4 px in, it is only 2 px clear of the 2 px lime bar, and two lime marks that
-   close read as one lime block. The row's one lime mark is its bar (DESIGN_DIRECTION §2.7). */
-:where(.table) tbody tr[tabindex]:focus-visible:is(.on, [aria-selected='true']) {
-  outline-color: var(--text-primary);
 }
 /* Links inside a row (the name, a source run) underline on hover; the row is the bigger target. */
 :where(.table) td a:hover {

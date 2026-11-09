@@ -43,6 +43,11 @@
 
   const uid = $props.id();
   let open = $state(false);
+  /**
+   * The items in the order shown: a destructive item (Delete, Remove from queue) always last, under a hairline, so
+   * every detail page's ⋯ ends the same way whatever order a caller gives (DESIGN_DIRECTION §13).
+   */
+  const shown = $derived([...items.filter((i) => !i.danger), ...items.filter((i) => i.danger)]);
   let root = $state<HTMLElement>();
   let list = $state<HTMLElement>();
   /** The item in the tab order (roving tabindex): the one focused last. */
@@ -60,7 +65,7 @@
 
   async function show(at: 'first' | 'last' = 'first') {
     if (fixed) place();
-    active = at === 'first' ? 0 : items.length - 1;
+    active = at === 'first' ? 0 : shown.length - 1;
     open = true;
     await tick();
     const all = entries();
@@ -181,8 +186,9 @@
 </div>
 
 {#snippet entriesList()}
-  {#each items as it, i (it.label)}
-    {@const tabindex = i === Math.min(active, items.length - 1) ? 0 : -1}
+  {#each shown as it, i (it.label)}
+    {@const tabindex = i === Math.min(active, shown.length - 1) ? 0 : -1}
+    {#if it.danger && i > 0 && !shown[i - 1]!.danger}<div class="sep" role="separator"></div>{/if}
     {#if it.href}
       <a role="menuitem" {tabindex} href={it.href} class:danger={it.danger} onclick={() => hide(false)}>
         {#if it.icon}<it.icon size={16} strokeWidth={1.75} aria-hidden="true" />{/if}{it.label}
@@ -250,10 +256,18 @@
     outline: var(--size-focus-ring) solid var(--focus);
     outline-offset: -2px;
   }
-  /* A destructive item is the page's quiet destructive style (ui/Button `danger`): the icon in the danger hue, the
-     label in ink; red text is the confirm dialog's alone. */
-  [role='menuitem'].danger :global(svg) {
+  /* A destructive item is last, under a hairline, its icon neutral at rest like every other item's and in the danger
+     hue only while it is pointed at or focused; the label stays ink, and red text is the confirm dialog's alone. */
+  [role='menuitem'].danger:is(:hover, :focus-visible) :global(svg) {
     color: var(--danger-text);
+  }
+  .sep {
+    height: 1px;
+    margin: var(--space-1) 0;
+    background: var(--line-subtle);
+  }
+  .sheet .sep {
+    margin: var(--space-1) var(--space-3);
   }
   @media (pointer: coarse) {
     [role='menuitem'] {

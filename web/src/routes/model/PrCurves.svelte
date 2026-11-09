@@ -4,7 +4,7 @@
    * Precision-recall curves with the per-class table as their legend. Every class is a 1 px context line
    * (`--chart-context`, >= 3:1 on the panel) and the mean over all classes a heavier line in ink; many classes are a
    * percentile band instead, so 80 classes read as one shape instead of spaghetti. Hovering a table row gives its curve
-   * the class hue, clicking keeps it highlighted (the selection rule: bg.active and a 2 px accent bar), and a line
+   * the class hue, clicking keeps it highlighted (the selection rule: bg.active and the 2 px ink bar), and a line
    * above the table says so and offers Clear. The legend row above the plot is the readout. Phones hide the precision
    * and recall columns: each row has two controls there, the class name traces its curve (`aria-pressed`) and the
    * chevron opens a details row with those two at their operating point (`aria-expanded`); "View curve"
@@ -13,7 +13,8 @@
    * `hovered` (bindable), so a class picked or pointed at in the table is traced in the other panel's curves, and
    * `onback` puts a way back to the table in the curves' selection bar. The legend row is a readout only (names and
    * values); on a phone, what acts on the selection (the way back, Clear) sits in a selection bar held under the section
-   * picker, as on the Classes section (DESIGN_DIRECTION §2.12). `fill` lets the plot grow to the panel's height
+   * picker, as on the Classes section (DESIGN_DIRECTION §2.12), with "Trace a class": the classes as chips right under
+   * the bar, traced first (a tap removes one), so a phone traces a class without leaving the graph. `fill` lets the plot grow to the panel's height
    * (a panel stretched to its row), from a 300 px plot.
    */
   import type { Evaluation } from '$lib/api/evaluation';
@@ -25,7 +26,9 @@
   import ArrowLeft from '@lucide/svelte/icons/arrow-left';
   import ArrowRight from '@lucide/svelte/icons/arrow-right';
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
+  import Plus from '@lucide/svelte/icons/plus';
   import Search from '@lucide/svelte/icons/search';
+  import X from '@lucide/svelte/icons/x';
   import { classMetrics, matchesClass, prContext, prEnvelope, trimPrTail } from './pr';
   import { media } from '$lib/design/tokens';
 
@@ -124,6 +127,16 @@
   const meanAp = $derived(map50 ?? ev.perClass.reduce((a, c) => a + c.ap50, 0) / Math.max(1, ev.perClass.length));
   const apOf = $derived(new Map(ev.perClass.map((c) => [c.class, c.ap50])));
 
+  // Phones' Curves: the classes to trace, picked beside the graph. The traced first (in the order they were traced),
+  // then the rest in the table's order; with many classes, the first 12 until a name is typed.
+  const uid = $props.id();
+  let tracing = $state(false);
+  let traceQuery = $state('');
+  const traceList = $derived.by(() => {
+    const rest = order.map((c) => c.class).filter((i) => !selected.includes(i) && matchesClass(name(i), traceQuery));
+    return [...selected, ...(many && !traceQuery ? rest.slice(0, 12) : rest)];
+  });
+
   // Phones show four columns: a selected (highlighted) class also opens a details row with all five metrics.
   const COLS_NARROW = 4;
 
@@ -141,17 +154,45 @@
          traced and carries the way back and Clear, so the legend below stays a readout. -->
     {#if view === 'curves' && narrow}
       <div class="tools bar">
+        <!-- The picker's disclosure says what is traced ("2 classes traced"), so the bar keeps one line. -->
         <p class="pick num" aria-live="polite">
-          {#if selected.length}
-            <span>{selected.length} {selected.length === 1 ? 'class' : 'classes'} traced</span>
-          {:else}
-            <span class="hint">Tap a class in Classes to trace its curve</span>
-          {/if}
+          <button type="button" class="view trace" aria-expanded={tracing} aria-controls="{uid}-trace" onclick={() => (tracing = !tracing)}
+            >{#if selected.length}{selected.length} {selected.length === 1 ? 'class' : 'classes'} traced{:else}<Plus size={14} aria-hidden="true" />Trace a class{/if}<span
+              class="chev"
+              class:open={tracing}
+              aria-hidden="true"><ChevronDown size={14} /></span
+            ></button
+          >
           {#if onback}
             <button type="button" class="view back" onclick={onback}><ArrowLeft size={14} aria-hidden="true" />Back to Classes</button>
           {/if}
           {#if selected.length}<button type="button" class="clear" onclick={() => (selected = [])}>Clear</button>{/if}
         </p>
+      </div>
+      <!-- Phones: the classes to trace, right here (the graph and its legend stay in view): the traced ones first, in
+           their hue, each a tap to remove; then the others in the table's order, a tap to trace; many classes are
+           found by name. The traced set is the one the Classes section shows. -->
+      <div class="tracer" id="{uid}-trace" role="group" aria-label="Classes to trace" hidden={!tracing}>
+        {#if many}
+          <div class="filter">
+            <Input bind:value={traceQuery} icon={Search} size="sm" type="search" placeholder="Find a class" aria-label="Find a class to trace" />
+          </div>
+        {/if}
+        <div class="t-chips">
+          {#each traceList as i (i)}
+            {@const on = selected.includes(i)}
+            <button
+              type="button"
+              class="t-chip"
+              aria-pressed={on}
+              aria-label={on ? `Stop tracing ${name(i)}` : `Trace ${name(i)}`}
+              style:--c={classStroke(i)}
+              onclick={() => toggle(i)}
+              ><span class="t-key" aria-hidden="true"></span><span class="t-name">{name(i)}</span>{#if on}<X size={14} aria-hidden="true" />{/if}</button
+            >
+          {/each}
+          {#if !traceList.length}<span class="hint">No class matches “{traceQuery}”</span>{/if}
+        </div>
       </div>
     {/if}
     <!-- At rest the legend states each curve's AP50 (a summary of the whole curve); under the cursor it switches to a
@@ -449,8 +490,76 @@
     margin-top: calc(var(--space-2) * -1);
     background: var(--bg-panel);
   }
-  .view.to-curve {
+  .view.to-curve,
+  .view.trace {
     margin-top: 0;
+  }
+  /* Phones' class picker under the Curves bar: wrapping chips, each a 32 px toggle (44 on touch). A traced class is
+     the selection rule (bg.active) with its hue as the key and a remove mark; the others a neutral hollow key (a class
+     takes its hue once traced, as its curve does). */
+  .tracer {
+    display: grid;
+    gap: var(--space-2);
+    padding: 0 var(--space-4) var(--space-2);
+  }
+  .tracer[hidden] {
+    display: none;
+  }
+  .tracer .filter {
+    width: 100%;
+  }
+  .t-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+  }
+  .t-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1-5);
+    min-height: 32px;
+    max-width: 100%;
+    padding: 0 var(--space-3);
+    border: 1px solid var(--line-default);
+    border-radius: var(--radius-md);
+    font-size: var(--type-sm-size);
+    color: var(--text-secondary);
+  }
+  .t-chip[aria-pressed='true'] {
+    padding-right: var(--space-2);
+    background: var(--bg-active);
+    border-color: transparent;
+    color: var(--text-primary);
+  }
+  .t-chip :global(svg) {
+    flex-shrink: 0;
+    color: var(--text-tertiary);
+  }
+  .t-key {
+    flex-shrink: 0;
+    width: 10px;
+    height: 10px;
+    border: 2px solid var(--text-tertiary);
+    border-radius: 50%;
+  }
+  .t-chip[aria-pressed='true'] .t-key {
+    border-color: var(--c);
+    background: var(--c);
+  }
+  .t-name {
+    overflow-wrap: anywhere;
+    text-align: left;
+  }
+  @media (hover: hover) {
+    .t-chip:hover {
+      border-color: var(--line-strong);
+      color: var(--text-primary);
+    }
+  }
+  @media (pointer: coarse) {
+    .t-chip {
+      min-height: 44px;
+    }
   }
   .filter {
     width: 240px;
@@ -468,7 +577,7 @@
     overflow-x: auto;
     border-top: 1px solid var(--line-subtle);
   }
-  /* The selection rule: a neutral bg.active fill and a 2 px accent bar on the row's leading edge. Hover is a lighter
+  /* The selection rule: a neutral bg.active fill and the 2 px ink bar on the row's leading edge. Hover is a lighter
      neutral step, and adds to the fill of a selected row, so the two stay distinct. */
   tr.hot {
     background: var(--bg-hover);
@@ -480,7 +589,7 @@
     background: linear-gradient(var(--bg-hover), var(--bg-hover)), var(--bg-active);
   }
   tr.on td:first-child {
-    box-shadow: inset 2px 0 0 var(--accent-line);
+    box-shadow: var(--select-bar);
   }
   /* The heading starts where the names do, past the swatch (8 px) and its gap (8 px). */
   .cls-h {
@@ -556,7 +665,7 @@
   }
   tr.detail.on td {
     box-shadow:
-      inset 2px 0 0 var(--accent-line),
+      var(--select-bar),
       inset 0 1px 0 var(--line-subtle);
   }
   .detail dl {

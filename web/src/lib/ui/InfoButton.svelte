@@ -7,10 +7,16 @@
    *   position next to the button, collision-aware like the tooltip), so it shows over a modal dialog too.
    * - `controls`: an inline disclosure the page renders itself under `open` (Model's metric help, a block under the KPI
    *   strip); the button toggles it and Escape or a tap outside both closes it.
+   * - `chart`: an ⓘ over a chart. On phones its definition opens in place, between the chart's heading and its readout
+   *   (the frame's ./InfoRegion: ui/Panel provides one), so it never covers the plot it explains; wider screens keep the
+   *   anchored popover. Every ⓘ in a chart's header takes it (DESIGN_DIRECTION §2.12).
    * `trigger` puts words in place of the icon (New run's "30 steps / epoch", dotted underline).
    */
   import Info from '@lucide/svelte/icons/info';
-  import type { Snippet } from 'svelte';
+  import { untrack, type Snippet } from 'svelte';
+  import { MediaQuery } from 'svelte/reactivity';
+  import { media } from '$lib/design/tokens';
+  import { infoSlot } from './infoSlot.svelte';
   import { boundsFor, placeTip, popovers, type Side } from './tooltip';
 
   let {
@@ -18,7 +24,8 @@
     text,
     children,
     trigger,
-    controls,
+    controls: controlsProp,
+    chart = false,
     open = $bindable(false),
     side = 'bottom',
     class: klass = '',
@@ -30,6 +37,8 @@
     trigger?: Snippet;
     /** Id of an inline region the page shows while `open` (disclosure mode: no popover). */
     controls?: string;
+    /** Over a chart: on phones the definition opens in place under the chart's heading, not over the plot. */
+    chart?: boolean;
     open?: boolean;
     side?: Side;
     class?: string;
@@ -37,6 +46,19 @@
 
   const uid = $props.id();
   const popId = `${uid}-info`;
+  // A chart's ⓘ on a phone: a disclosure of the frame's in-place region (./infoSlot), filled while open.
+  const slot = infoSlot();
+  const phone = new MediaQuery(media.phone, false);
+  const inPlace = $derived(chart && !!slot && phone.current);
+  const controls = $derived(inPlace ? slot!.id : controlsProp);
+  const me = {};
+  $effect(() => {
+    if (!slot) return;
+    const release = () => untrack(() => slot.content?.owner === me && (slot.content = null));
+    if (inPlace && open) slot.content = { owner: me, text, children };
+    else release();
+    return release;
+  });
   let btn: HTMLButtonElement;
   let pop = $state<HTMLElement>();
   const native = popovers();
@@ -60,6 +82,18 @@
     if (!controls && native && pop?.matches(':popover-open')) pop.hidePopover();
     open = false;
   }
+
+  // A chart's ⓘ left open across the phone breakpoint: its in-place region is gone and the popover takes over, so the
+  // popover is shown too (else the definition would vanish while aria-expanded still said it was open).
+  $effect(() => {
+    if (!open || controls || !native || !pop) return;
+    const el = pop;
+    untrack(() => {
+      if (el.matches(':popover-open')) return;
+      el.showPopover();
+      place();
+    });
+  });
 
   // A press on the button while it is open closes it. The popover's light dismiss closes it on the same press before
   // the click arrives, so the state is read on pointerdown, not on click (else the click would open it again).

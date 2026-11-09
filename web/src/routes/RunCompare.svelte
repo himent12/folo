@@ -25,6 +25,7 @@
   import ChevronLeft from '@lucide/svelte/icons/chevron-left';
   import ArrowLeftRight from '@lucide/svelte/icons/arrow-left-right';
   import { hub } from '$lib/api/index.svelte';
+  import { bestMark, bestWord } from '$lib/bestMark';
   import { Resource } from '$lib/api/resource.svelte';
   import type { Epoch, Run, RunMetrics } from '$lib/api/types';
   import LineChart, { type Series } from '$lib/charts/LineChart.svelte';
@@ -32,7 +33,7 @@
   import { nearest } from '$lib/charts/downsample';
   import { axisReason, AXIS_REASON, runEnd, runX } from '$lib/charts/runAxis';
   import { conf, deviceName, duration, metric } from '$lib/format';
-  import { batchSetting, closeMosaicSetting, headSetting, lrSetting, optimizerSetting, precisionSetting, settingText, warmupSetting, type Setting } from './run/resolved';
+  import { batchSetting, effectiveBatchSetting, closeMosaicSetting, headSetting, lrSetting, optimizerSetting, precisionSetting, settingText, warmupSetting, type Setting } from './run/resolved';
   import { href, router } from '$lib/router.svelte';
   import { setCrumbs } from '$lib/shell/crumbs.svelte';
   import Page from '$lib/shell/Page.svelte';
@@ -41,6 +42,9 @@
   import ErrorState from '$lib/ui/ErrorState.svelte';
   import Panel from '$lib/ui/Panel.svelte';
   import Note from '$lib/ui/Note.svelte';
+  import InfoButton from '$lib/ui/InfoButton.svelte';
+  import InfoRegion from '$lib/ui/InfoRegion.svelte';
+  import { provideInfoSlot } from '$lib/ui/infoSlot.svelte';
   import Segmented from '$lib/ui/Segmented.svelte';
   import Select from '$lib/ui/Select.svelte';
   import StatusBadge from '$lib/ui/StatusBadge.svelte';
@@ -81,6 +85,12 @@
     { value: 'epoch', label: 'By epoch' },
     { value: 'progress', label: 'By progress' },
   ];
+  // Phones: the axis ⓘ opens in place under the control row (ui/infoSlot).
+  const axisInfo = provideInfoSlot('cmp-axis-info');
+  /** Phones: the progress axis explained in the ⓘ beside its control, with why it was chosen when it was. */
+  const progressWhy = $derived(
+    `By progress puts each run over its planned epochs (% of the plan), so a short plan and a long one compare by shape.${xAuto && reason ? ` Chosen for you: ${AXIS_REASON[reason]}.` : ''}`,
+  );
   // The x axis is named in the chart's header, as on every chart (DESIGN_DIRECTION §2.4), never under the plot: the
   // normalised axis names its unit; chosen for you, it also says why.
   const xQual = $derived(x === 'progress' ? `by progress, % of planned epochs${xAuto && reason ? ` · ${AXIS_REASON[reason]}` : ''}` : 'by epoch');
@@ -197,7 +207,24 @@
 
   // mAP is only comparable on the same data: no winner across datasets.
   const sameData = $derived(new Set(chosen.map((r) => r.config.dataset_id)).size <= 1);
-  const bestIdx = $derived(chosen.reduce((b, r, i) => ((r.best?.map50_95 ?? -1) > (chosen[b]?.best?.map50_95 ?? -1) ? i : b), 0));
+  const dsName = (id: string) => datasets.data?.find((d) => d.id === id)?.name ?? id;
+  /**
+   * The best mAP50-95 of each dataset the runs share (lib/bestMark, as the Models list ranks within a group): "best", or
+   * "joint best" on every run of an exact tie, and "on <dataset>" when the comparison spans datasets, since scores
+   * compare only on the same data. A dataset with one run here has no best. Values that differ only past three
+   * decimals are shown with as many as tell them apart.
+   */
+  const bestOf = $derived.by(() => {
+    const marks = new Map<string, { word: string; decimals: number }>();
+    for (const id of new Set(chosen.map((r) => r.config.dataset_id))) {
+      const group = chosen.filter((r) => r.config.dataset_id === id);
+      const m = bestMark(group.map((r) => r.best?.map50_95));
+      for (const r of group) if (m.decimals > 3) marks.set(r.id, { word: '', decimals: m.decimals });
+      for (const i of m.best) marks.set(group[i]!.id, { word: sameData ? bestWord(m) : `${bestWord(m)} on ${dsName(id)}`, decimals: m.decimals });
+    }
+    return marks;
+  });
+  const bestScore = (r: Run) => (r.best && bestOf.get(r.id) ? r.best.map50_95.toFixed(bestOf.get(r.id)!.decimals) : metric(r.best?.map50_95));
 
   const startOf = (r: Run) => startFrom(r.config.weights, models.data);
   const startLine = (r: Run) => {
@@ -217,6 +244,7 @@
     ['Start from', (r) => (startOf(r) ? ident(startOf(r) ?? '') : plain('From scratch'))],
     ['Epochs', (r) => plain(`${r.epoch}/${r.epochs}`)],
     ['Batch', (r) => batchSetting(r.config, r.resolved)],
+    ['Effective batch', (r) => (r.resolved ? effectiveBatchSetting(r.resolved) : plain('—'))],
     ['Image size', (r) => plain(`${r.config.imgsz} px`)],
     ['Optimizer', (r) => optimizerSetting(r.config, r.resolved)],
     ['LR', (r) => lrSetting(r.config, r.resolved)],
@@ -312,8 +340,8 @@
   const other = $derived(others[Math.min(otherAt, others.length - 1)]);
   const shown = $derived(pairMode && base && other ? [base, other] : chosen);
   const stepOther = (d: number) => (otherAt = (Math.min(otherAt, others.length - 1) + d + others.length) % others.length);
-  /** In pair mode, whether a run's value differs from the baseline's (the full table marks whole rows instead). */
-  const offBase = (r: Run, f: (r: Run) => Setting) => pairMode && r !== base && !!base && settingText(f(r)) !== settingText(f(base));
+  /** Whether a run's value differs from the baseline's: marked (a dot and the weight); an equal one is tertiary. */
+  const offBase = (r: Run, f: (r: Run) => Setting) => r !== base && !!base && settingText(f(r)) !== settingText(f(base));
 
   const candidates = $derived((runs.data ?? []).filter((r) => !ids.includes(r.id) && r.status !== 'queued'));
 </script>
@@ -343,9 +371,12 @@
         <header class="c-row">
           <Select label="Metric" bind:value={metricId} options={METRICS.map((m) => ({ value: m.id, label: m.label }))} />
           <Segmented size="sm" label="X axis" value={x} onchange={setX} options={X_OPTIONS} />
+          <!-- The normalised axis, and why it was chosen, one tap away beside its control: the ticks say "%", so the
+               line of words under the controls went (it pushed the plot down). -->
+          {#if x === 'progress'}<InfoButton chart label="About the progress axis" text={progressWhy} />{/if}
         </header>
-        <!-- The normalised axis's unit, under the header's controls (an epoch axis needs no word: the control says it). -->
-        {#if x === 'progress'}<p class="qual phone">{xQual}</p>{/if}
+        <!-- The ⓘ opens here, under the controls, never as a popover over the legend and plot (ui/infoSlot). -->
+        <InfoRegion slot={axisInfo} />
         {@render chips()}
         {#if !sameData && chosen.length > 1}<p class="caveat">{DATA_CAVEAT}</p>{/if}
         {@render plot()}
@@ -356,7 +387,7 @@
           </summary>
           <div class="about-body">
             {#if x === 'progress'}<p>By progress puts each run over its planned epochs, so a short plan and a long one compare by shape.</p>{/if}
-            <p>Each line ends in its run's status: a ringed dot while it trains, a square where it was stopped, a cross
+            <p>Each line ends in its run's status: a lime dot while it trains, a square where it was stopped, a cross
               where it failed.</p>
             <p>Colours follow the run, not its rank. Tap a run to keep its line in front; Edit shows how each run
               started (fine-tuned, or from scratch). The table's baseline stays until you make another run the baseline.</p>
@@ -419,15 +450,18 @@
                   <!-- The key in a column of its own beside the name, so a name that wraps (at its hyphens) keeps its
                        left edge and never squeezes the key. -->
                   <th style:width={bounded ? `${RUN_COL_BOUND}px` : undefined}>
-                    <span class="th" style:--c={fill(r.id)}
-                      ><i data-pattern={SLOT_PATTERN[slotOf(r.id)]}></i><span class="th-name" class:truncate={!pairMode} title={pairMode ? undefined : r.name}>{r.name}</span
-                      >{#if pairMode && r === base}<span class="base-tag">Baseline</span>{:else if pairMode}<button
-                          type="button"
-                          class="set-base"
-                          aria-label="Make {r.name} the baseline"
-                          title="Make this run the baseline"
-                          onclick={() => setBaseline(r)}><ArrowLeftRight size={12} aria-hidden="true" />Swap</button
-                        >{/if}</span
+                    <!-- The run's name over its role: the baseline every other column is read against, or Swap to make
+                         it the baseline. No key here: the chips above are the legend, and a swatch at the column's
+                         edge could not line up with its chip's. -->
+                    <span class="th"
+                      ><span class="th-name" class:truncate={!pairMode} title={pairMode ? undefined : r.name}>{r.name}</span
+                      >{#if chosen.length > 1}{#if r === base}<span class="base-tag">Baseline</span>{:else}<button
+                            type="button"
+                            class="set-base"
+                            aria-label="Make {r.name} the baseline"
+                            title="Make this run the baseline"
+                            onclick={() => setBaseline(r)}><ArrowLeftRight size={12} aria-hidden="true" />Swap</button
+                          >{/if}{/if}</span
                     >
                   </th>
                 {/each}
@@ -441,10 +475,12 @@
                 {@render rest()}
               </tr>
               <tr>
-                <td class="k">Best mAP50-95</td>
+                <!-- The best epoch's score, which the chips' latest value need not be (a stopped run's 0.595 · stopped
+                     against its best 0.606): the row says so. -->
+                <td class="k">Best mAP50-95<span class="k-sub">any epoch</span></td>
                 {#each shown as r (r.id)}
-                  {@const win = sameData && r === chosen[bestIdx] && chosen.length > 1}
-                  <td class="num" class:winner={win}>{metric(r.best?.map50_95)}{#if win}<span class="tag">best</span>{/if}</td>
+                  {@const win = bestOf.get(r.id)?.word}
+                  <td class="num" class:winner={!!win}>{bestScore(r)}{#if win}{' '}<span class="tag" data-fact>{win}</span>{/if}</td>
                 {/each}
                 {@render rest()}
               </tr>
@@ -464,11 +500,11 @@
                 <tr>
                   <td class="k">{k}</td>
                   {#each shown as r (r.id)}
-                    <!-- Pair mode: a value that differs from the baseline's is marked (a dot and the weight) and an equal
-                         one recedes; the full table marks the whole row instead. -->
+                    <!-- Read against the baseline: a value that differs is marked (a dot and the weight), an equal one
+                         recedes to tertiary, so "11 settings differ" shows where they differ. -->
                     {@const off = offBase(r, f)}
-                    <td class="num cfg" class:diff={!pairMode || off} class:same={pairMode && r !== base && !off}
-                      class:base={pairMode && r === base}
+                    <td class="num cfg" class:diff={off} class:same={r !== base && !off}
+                      class:base={r === base}
                       >{#if off}<span class="chg-row"><span class="chg" aria-hidden="true"></span><span
                             >{@render cell(f(r))}<span class="sr-only">, differs from the baseline</span></span
                           ></span
@@ -540,7 +576,7 @@
           onclick={() => (pinned = pinned === r.id ? null : r.id)}
         ><i aria-hidden="true" data-pattern={SLOT_PATTERN[slotOf(r.id)]}></i><span class="nm">{r.name}</span></button>
         <!-- How the line ended (live, stopped, failed) in words beside its value: the end label's fallback, and on phones,
-             which have no end labels, the only word for the end marker's shape (under the name, "0.494 · failed"). -->
+             which have no end labels, the only word for the end marker's shape (beside the value, or under the name on phones). -->
         <span class="v num">{v === null ? '—' : metric(v)}{#if runEnd(r.status)}<span class="st"><span class="sep">{' · '}</span>{runEnd(r.status)}</span>{/if}</span>
         <!-- How the run started: fine-tuned vs from scratch often explains a gap between two curves. It lies over the
              toggle's lower half (clicks pass through to it) and runs on under the value. Phones show it in the Edit
@@ -687,7 +723,7 @@
   .chip:hover {
     border-color: var(--line-strong);
   }
-  /* The run kept in front: the one selection rule (bg.active and a 2 px accent bar). */
+  /* The run kept in front: the one selection rule (bg.active and the 2 px ink bar). */
   .chip.pinned {
     background: var(--bg-active);
   }
@@ -699,7 +735,7 @@
     bottom: -1px;
     width: 2px;
     border-radius: var(--radius-md) 0 0 var(--radius-md);
-    background: var(--accent-line);
+    background: var(--text-primary);
   }
   /* The legend entry is the toggle: key and name, over both lines of the card. */
   .key {
@@ -879,17 +915,7 @@
     height: auto;
     padding-block: var(--space-2);
   }
-  table.two .th {
-    display: grid;
-    grid-template-columns: 16px minmax(0, 1fr);
-    align-items: start;
-  }
-  /* On the name's first line (16 px line). */
-  table.two .th i {
-    margin-top: 6px;
-  }
   .base-tag {
-    grid-column: 2;
     font-size: var(--type-sm-size);
     font-weight: var(--weight-regular);
     color: var(--text-tertiary);
@@ -923,33 +949,43 @@
     color: var(--text-secondary);
   }
   @media (max-width: 767px) {
-    /* Phones: the legend is two columns of compact keys above the plot, the run's whole name on the first line (wrapping
-       at its hyphens, never cut: "shapes-hard-s" beside "shapes-hard-m") and its value with how the line ended on the
-       second ("0.494 · failed"), so four runs take two rows and the plot with its axis sits in the first screen. The
-       whole key is the toggle that keeps a line in front. Opening, removing and adding runs live in the Edit sheet. */
+    /* Phones: the legend is two columns of compact keys above the plot, each one line of text that wraps only where it
+       must: the swatch, the run's whole name (wrapping at its hyphens, never cut: "shapes-hard-s" beside
+       "shapes-hard-m"), its value right after it, and how the line ended ("failed") under the name, so name and value
+       read together and four runs take two short rows. The whole key is the toggle that keeps a line in front; its hit
+       area is the card. Opening, removing and adding runs live in the Edit sheet. */
     .chips {
       grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: var(--space-1) var(--space-2);
     }
     .chips-head {
-      margin-top: calc(-1 * var(--space-2));
+      min-height: 24px;
     }
     .manage {
+      position: relative;
       display: inline-flex;
       align-items: center;
-      height: 44px;
+      height: 24px;
       padding-left: var(--space-3);
       font-size: var(--type-sm-size);
       color: var(--text-secondary);
     }
+    /* A 48 px target around the 24 px label, over the panel's padding above it. */
+    .manage::after {
+      content: '';
+      position: absolute;
+      inset: -12px -8px;
+    }
+    /* A hanging indent: a wrapped line starts under the name, past the swatch (12 px and its 6 px gap). */
     .chips .chip {
-      grid-template-columns: minmax(0, 1fr);
-      grid-template-rows: auto auto;
-      align-content: start;
-      min-height: 44px;
-      padding: var(--space-1-5) var(--space-2);
+      display: block;
+      min-height: 32px;
+      padding: var(--space-1-5) var(--space-2) var(--space-1-5) calc(var(--space-2) + 18px);
+      text-indent: -18px;
       border: 0;
       background: none;
+      font-size: var(--type-sm-size);
+      line-height: var(--type-sm-line);
     }
     .chips .chip.pinned {
       background: var(--bg-active);
@@ -959,15 +995,12 @@
       bottom: 0;
       left: 0;
     }
-    /* The key (swatch and name) is the toggle; its hit area is the whole card (an ::after on the card), so a tap on
-       the value toggles too, and its focus ring is the card's. */
     .chips .chip .key {
-      grid-row: 1;
+      display: inline;
       position: static;
-      align-items: flex-start;
-      gap: 6px;
       margin: 0;
       padding: 0;
+      font: inherit;
     }
     .chips .chip .key:hover {
       background: none;
@@ -985,26 +1018,34 @@
       outline: 2px solid var(--focus);
       outline-offset: -2px;
     }
-    /* On the name's first line (16 px line). */
+    /* On the text's centre line (16 px line). */
     .chips .chip .key i {
+      display: inline-block;
       width: 12px;
-      margin-top: 6px;
+      margin: 0 6px 0 0;
+      vertical-align: middle;
     }
     .chips .nm {
-      font-size: var(--type-sm-size);
-      line-height: var(--type-sm-line);
       white-space: normal;
       overflow: visible;
       overflow-wrap: break-word;
     }
-    /* Under the name, past the key (12 px swatch + 6 px gap). */
     .chips .chip .v {
-      grid-column: 1;
-      grid-row: 2;
+      display: inline;
       min-width: 0;
-      padding: 0 0 0 18px; /* grid-ok: past the 12 px key and its 6 px gap */
+      margin-left: var(--space-1-5);
+      padding: 0;
       text-align: left;
+      white-space: normal;
       pointer-events: none;
+    }
+    /* How the line ended ("stopped") on a line of its own under the name: beside the value it would not fit a column. */
+    .chips .chip .st {
+      display: block;
+      text-indent: 0;
+    }
+    .chips .chip .st .sep {
+      display: none;
     }
     .chips .chip .from,
     .chips .chip .acts {
@@ -1025,6 +1066,11 @@
     .compare {
       padding: var(--space-3);
     }
+  }
+  /* The axis ⓘ's region sits on the frame's own edges; the section's gap spaces it. */
+  .compare {
+    --info-inset: 0;
+    --info-after: 0;
   }
   /* Phones: metric picker and x axis share one row above the legend. */
   .c-row {
@@ -1099,9 +1145,6 @@
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
     color: var(--text-tertiary);
-  }
-  .qual.phone {
-    margin-top: calc(-1 * var(--space-1));
   }
   .fold td {
     padding-top: 0;
@@ -1185,17 +1228,29 @@
   .val.whole {
     white-space: nowrap;
   }
+  /* A run's head: its name over its role (Baseline, or Swap), each on a line of its own. */
   .th {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
+    display: grid;
+    justify-items: start;
     color: var(--text-primary);
+    font-size: var(--type-sm-size);
+  }
+  .th-name {
+    max-width: 100%;
+  }
+  .fixed thead th {
+    height: auto;
+    padding-block: var(--space-2);
+    vertical-align: top;
+  }
+  /* The row's label over what it measures ("any epoch"): 12 px tertiary. */
+  .k-sub {
+    display: block;
     font-size: var(--type-sm-size);
   }
   /* Same patterns as the lines, so a run's key matches its curve without relying on colour. A key is a fill: the
      palette hue (--c is chart.fill) with the swatch hairline, which the pattern's mask cuts along with the dashes. */
-  .chip i,
-  .th i {
+  .chip i {
     flex-shrink: 0;
     width: 16px;
     height: 4px;
@@ -1218,17 +1273,23 @@
     color: var(--text-primary);
     font-weight: var(--weight-medium);
   }
-  td.cfg:not(.diff) {
-    color: var(--text-tertiary);
-  }
   /* The best run's value: ink at 600 and a tertiary "best", never a lime value or chip (DESIGN_DIRECTION §2.6: status
      hue on the mark, not the metric; the Models list marks its best rows the same way). */
   .winner {
     color: var(--text-primary);
     font-weight: var(--weight-semibold);
   }
+  /* A fact: in a narrow column the word moves, whole, under its value, never cut ("best on fast…" at 820). */
+  .fixed td.winner {
+    white-space: normal;
+  }
+  /* A phone's pair columns are narrower than "best on shapes-hard": there it wraps at its spaces. */
+  .two .tag {
+    white-space: normal;
+  }
   .tag {
-    margin-left: 6px;
+    display: inline-block;
+    white-space: nowrap;
     color: var(--text-tertiary);
     font-size: var(--type-sm-size);
     font-weight: var(--weight-regular);
@@ -1242,7 +1303,6 @@
   /* The pair's other column: "Swap" makes it the baseline, the old baseline taking its place (the baseline never
      follows the legend's emphasis). One short word, so it stays on one line in the narrow column. */
   .set-base {
-    grid-column: 2;
     justify-self: start;
     display: inline-flex;
     align-items: center;

@@ -1,3 +1,17 @@
+<script lang="ts" module>
+  import type { RunStatus } from '$lib/api/types';
+
+  /** A status's one word, in sentence case, wherever it is written (lists, meta lines, the palette): never "queued". */
+  export const STATUS_LABEL: Record<RunStatus, string> = {
+    queued: 'Queued',
+    running: 'Running',
+    stopping: 'Stopping',
+    stopped: 'Stopped',
+    completed: 'Completed',
+    failed: 'Failed',
+  };
+</script>
+
 <script lang="ts">
   /**
    * A run's status as its mark and word. Two forms, one rule (DESIGN_DIRECTION 6): the tinted pill is the title form,
@@ -5,8 +19,6 @@
    * screen; everywhere else (tables, lists, Compare, meta lines) it is `plain`, dot + word. `statusPill.test.ts` holds
    * the pill to those two places.
    */
-  import type { RunStatus } from '$lib/api/types';
-
   let {
     status,
     size = 'md',
@@ -21,14 +33,7 @@
     dotOnly?: boolean;
   } = $props();
 
-  const labels: Record<RunStatus, string> = {
-    queued: 'Queued',
-    running: 'Running',
-    stopping: 'Stopping',
-    stopped: 'Stopped',
-    completed: 'Completed',
-    failed: 'Failed',
-  };
+  const labels = STATUS_LABEL;
 </script>
 
 <span class="badge {status} {size}" class:plain>

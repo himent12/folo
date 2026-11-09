@@ -5,6 +5,7 @@ import { hub } from '$lib/api/index.svelte';
 import { MockApi } from '$lib/api/mock';
 import { prefs } from '$lib/prefs.svelte';
 import { parse, router } from '$lib/router.svelte';
+import { undescribedFields } from '$lib/ui/fieldA11y';
 import Settings from './Settings.svelte';
 import Throughput from './settings/Throughput.svelte';
 
@@ -38,7 +39,15 @@ afterEach(() => {
 });
 
 describe('Settings', () => {
-  it('jumps to a section from the strip below 1024 px: every section listed, focus moved onto the one chosen', async () => {
+  it('describes the server URL field by its hint', () => {
+    hub.api = new MockApi('normal', 0);
+    c = mount(Settings, { target });
+    flushSync();
+    expect(target.querySelector('#server-url')!.getAttribute('aria-describedby')).toBe('server-url-hint');
+    expect(undescribedFields(target)).toEqual([]);
+  });
+
+  it('jumps to a section from the strip below 1024 px: every section listed, focus moved onto its heading', async () => {
     hub.api = new MockApi('normal', 0);
     c = mount(Settings, { target });
     const jump = target.querySelector<HTMLElement>('nav.jump')!;
@@ -47,12 +56,73 @@ describe('Settings', () => {
     const scroll = vi.fn();
     const system = target.querySelector<HTMLElement>('#system')!;
     system.scrollIntoView = scroll;
-    [...jump.querySelectorAll('a')].find((a) => a.textContent === 'System')!.click();
+    const heading = target.querySelector<HTMLElement>('#system-title')!;
+    const focus = vi.spyOn(heading, 'focus');
+    // Taken with the mouse (a click with a pointer's detail): the heading is focused without a ring.
+    [...jump.querySelectorAll('a')].find((a) => a.textContent === 'System')!.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, detail: 1 }));
     flushSync();
     expect(scroll).toHaveBeenCalledWith({ block: 'start' });
-    expect(document.activeElement).toBe(system);
+    expect(document.activeElement).toBe(heading);
+    expect(heading.getAttribute('tabindex')).toBe('-1');
+    expect(focus).toHaveBeenLastCalledWith({ preventScroll: true, focusVisible: false });
+    // Taken with Enter (a click with no pointer detail): the browser decides, so the ring shows as after a Tab.
+    [...jump.querySelectorAll('a')].find((a) => a.textContent === 'System')!.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, detail: 0 }));
+    flushSync();
+    expect(focus).toHaveBeenLastCalledWith({ preventScroll: true });
     expect(jump.querySelector('a.on')?.textContent).toBe('System');
     expect(jump.querySelector('a.on')?.getAttribute('aria-current')).toBe('location');
+  });
+
+  it('keeps a chosen section current until the person scrolls, and opens on ?section=', async () => {
+    hub.api = new MockApi('normal', 0);
+    router.route = parse('#/settings?section=system');
+    c = mount(Settings, { target });
+    const jump = target.querySelector<HTMLElement>('nav.jump')!;
+    // The URL's section, once the server's capabilities add it.
+    await until(() => jump.querySelector('a.on')?.textContent === 'System', 'System chosen by the URL');
+    expect(jump.querySelector('a.on')?.getAttribute('href')).toBe('#/settings?section=system');
+    // A scroll the page makes itself (a resize, a full-page capture) keeps it.
+    window.dispatchEvent(new Event('scroll'));
+    await new Promise((r) => requestAnimationFrame(r));
+    flushSync();
+    expect(jump.querySelector('a.on')?.textContent).toBe('System');
+    // The person's own scroll releases it to the geometry (no layout here: every top is 0, so the last section).
+    window.dispatchEvent(new Event('wheel'));
+    await until(() => jump.querySelector('a.on')?.textContent !== 'System', 'the scroll-spy again');
+  });
+
+  it('opens the same ?section= again after the bare page, focusing its heading without a ring', async () => {
+    // Round 26 review: #/settings?section=system, then #/settings, then the same section URL again stayed at the top.
+    hub.api = new MockApi('normal', 0);
+    const jumps: string[] = [];
+    const real = HTMLElement.prototype.scrollIntoView;
+    HTMLElement.prototype.scrollIntoView = function (this: HTMLElement) {
+      jumps.push(this.id);
+    };
+    const focus = vi.spyOn(HTMLElement.prototype, 'focus');
+    try {
+      router.route = parse('#/settings?section=system');
+      c = mount(Settings, { target });
+      await until(() => jumps.length === 1, 'the first jump');
+      expect(jumps).toEqual(['system']);
+      // Opened from the URL: on its heading, no focus ring (nothing was tabbed to).
+      const heading = target.querySelector<HTMLElement>('#system-title')!;
+      expect(document.activeElement).toBe(heading);
+      expect(focus.mock.contexts.at(-1)).toBe(heading);
+      expect(focus).toHaveBeenLastCalledWith({ preventScroll: true, focusVisible: false });
+      heading.blur();
+      router.route = parse('#/settings');
+      flushSync();
+      await new Promise((r) => requestAnimationFrame(r));
+      expect(jumps).toHaveLength(1);
+      router.route = parse('#/settings?section=system');
+      await until(() => jumps.length === 2, 'the second jump to the same section');
+      expect(jumps).toEqual(['system', 'system']);
+      expect(document.activeElement).toBe(heading);
+    } finally {
+      HTMLElement.prototype.scrollIntoView = real;
+      focus.mockRestore();
+    }
   });
 
   it('says which theme is current in its own card and in its radio’s name', () => {

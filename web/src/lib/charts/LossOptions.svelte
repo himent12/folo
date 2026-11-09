@@ -212,7 +212,7 @@
     outline: 2px solid var(--focus);
     outline-offset: -2px;
   }
-  /* The chosen option of a radio group in a menu: its check mark, in ink (the lime bar is for selected rows in lists). */
+  /* The chosen option of a radio group in a menu: its check mark, in ink (the ink bar is for selected rows in lists). */
   .opt.on {
     color: var(--text-primary);
   }

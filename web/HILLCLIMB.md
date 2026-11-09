@@ -53,6 +53,8 @@ Lines: 1 hierarchy & layout · 2 typography · 3 colour & theming · 4 spacing r
 | r23 | Claude Opus 5.5 (169 sheets, 32 full-size) | 8 | 8 | 8 | 8.5 | 8.5 | 8.5 | 8 | 8 | 8.5 | 8.5 | 8.5 | 8 | 8 |
 | r24 | GPT-6.1 Sol (175 sheets, 47 full-size) | 8.5 | 8.5 | 8.5 | 9 | 8.5 | 8.5 | 8 | 8.5 | 8.5 | 8.5 | 8.5 | 8.5 | 8 |
 | r24 | Claude Opus 5.5 (175 sheets, 36 full-size) | 8 | 8 | 8 | 8 | 8 | 8.5 | 8.5 | 8 | 8.5 | 8.5 | 8 | 8 | 8 |
+| r25 | GPT-6.1 Sol (192 sheets, 50 full-size) | 8 | 8.5 | 9 | 8.5 | 8.5 | 8.5 | 8 | 9 | 9 | 8.5 | 8 | 8.5 | 8 |
+| r25 | Claude Opus 5.5 (192 sheets, 33 full-size) | 8.5 | 8.5 | 8.5 | 8.5 | 8.5 | 8.5 | 8.5 | 8.5 | 9 | 9 | 8 | 8.5 | 8 |
 
 ## Per-line minimum (lower of the two reviewers)
 
@@ -82,6 +84,7 @@ Rounds with one reviewer are marked; their minimum is that reviewer's row.
 | r22 | 8 ↑ | 8 | 8.5 ↑ | 8.5 ↑ | 8 | 8 ↑ | 8 ↑ | 8.5 ↑ | 8.5 ↑ | 8 ↓ | 8 | 8 | 8 |
 | r23 | 8 | 8 | 8 ↓ | 8.5 | 8.5 ↑ | 8.5 ↑ | 8 | 8 ↓ | 8.5 | 8.5 ↑ | 8 | 8 | 8 |
 | r24 | 8 | 8 | 8 | 8 ↓ | 8 ↓ | 8.5 | 8 | 8 | 8.5 | 8.5 | 8 | 8 | 8 |
+| r25 | 8 | 8.5 ↑ | 8.5 ↑ | 8.5 ↑ | 8.5 ↑ | 8.5 | 8 | 8.5 ↑ | 9 ↑ | 8.5 | 8 | 8.5 ↑ | 8 |
 
 r4 lowest lines: 6 data visualisation (5.5), 2 typography, 3 colour, 8 consistency (6). Diagnosis: 2, 3 and 8 are
 structural (no single rule for mono vs sans, class colours that changed between legend and box, two accents in light),
@@ -188,3 +191,11 @@ round's own changes: the best-epoch ring next to the live end ring (an "oo"), a 
 with no failure mark, a tablet bottom sheet without a scrim, list toolbars that vanish in empty and error states.
 The rest are laptop and tablet edges (cut model descriptions, the estimate box, wrapped callout buttons, tooltips
 over rows) and naming drift (loss series named three ways, raw vs smoothed unexplained).
+
+r25 (#148: scores keep their evaluation context, one mark per meaning, states and tiers, #140's final fields): the
+best round so far. Nine lines are at 8.5 or more for both reviewers and interaction is at 9 for both; Opus gives 9
+on 9 and 10, Sol on 3, 8 and 9. The floor of 8 is on 1, 7 and 11, and both reviewers' first issue is the same phone
+defect: the completion callout keeps "Try in Playground" on the text's row, which cuts "Completed in 53m 30s". The
+rest are phone structure (Compare's preamble before the plot, tracing a class from Curves, New run's long Model
+section, Settings' strip clipped and its scrollspy on the wrong section), facts cut in the Playground model select,
+two lime rings at best and latest, lime still marking selection, the raw amp refusal and "per step" batch wording.

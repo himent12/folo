@@ -213,7 +213,7 @@
               <span class="n num">{img.boxes.length}</span>
             </span>
           {:else}
-            <span class="ph"></span>
+            <span class="ph" class:still={!!pager.error}></span>
           {/if}
         </div>
       {/each}
@@ -309,7 +309,12 @@
     inset: 0;
     background: linear-gradient(90deg, transparent, var(--bg-hover), transparent);
     background-size: 200% 100%;
-    animation: shimmer 1.4s linear infinite;
+    /* Loading motion is bounded (DESIGN_DIRECTION §2.9): a few sweeps while the page of images is requested, none once
+       a request has failed (the grid says so), so a cell that never fills never shimmers forever. */
+    animation: shimmer 1.4s linear 6;
+  }
+  .ph.still {
+    animation: none;
   }
   @keyframes shimmer {
     from {

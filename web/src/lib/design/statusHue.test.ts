@@ -87,4 +87,32 @@ describe('status hue', () => {
     const lime = /(?:background(?:-color)?|accent-color|border-color):\s*var\(--accent-(?:solid|line|text)\)/;
     expect(scan((s) => /:checked|aria-(?:checked|pressed)=.true.|\.on\b/.test(s), lime)).toEqual([]);
   });
+
+  it('never marks a selection in lime: a selected row, option, chip or cell is ink (the 2 px --select-bar and bg.active)', () => {
+    // Round 25: New run's Model size row, Runs' checked rows, the inspector's label row, Compare's pinned run and Model's
+    // traced classes each carried a lime or olive bar. Lime is "now" or the one action; only a selected detection on an
+    // image (lib/detect/DetectionView, in the inspector's and the Playground's canvas) is lime.
+    const selection = /\.(?:on|pinned|pin|selected|sel|chosen|current|checked)\b|aria-(?:selected|checked|pressed|current)|:checked/;
+    const files = (dir: string): string[] =>
+      readdirSync(dir).flatMap((f) => {
+        const p = join(dir, f);
+        return statSync(p).isDirectory() ? files(p) : /\.(?:svelte|css)$/.test(p) ? [p] : [];
+      });
+    const hits: string[] = [];
+    for (const file of files(SRC)) {
+      const rel = relative(SRC, file).replaceAll('\\', '/');
+      if (rel === 'lib/detect/DetectionView.svelte' || rel.startsWith('lib/design/tokens')) continue;
+      const src = readFileSync(file, 'utf8');
+      const css = (file.endsWith('.css') ? src : (src.match(/<style[^>]*>([\s\S]*?)<\/style>/)?.[1] ?? '')).replace(/\/\*[\s\S]*?\*\//g, '');
+      for (const m of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+        const [sel, body] = [m[1]!.trim(), m[2]!];
+        if (selection.test(sel) && /--accent-/.test(body)) hits.push(`${rel}: ${sel}`);
+        // A leading bar in an accent, whatever the selector calls the state.
+        if (/inset\s+[23]px\s+0\s+0\s+var\(--accent-/.test(body)) hits.push(`${rel}: ${sel} (accent bar)`);
+      }
+    }
+    expect(hits).toEqual([]);
+    const base = readFileSync(join(SRC, 'lib/design/base.css'), 'utf8');
+    expect(base).toMatch(/--select-bar:\s*inset 2px 0 0 var\(--text-primary\)/);
+  });
 });

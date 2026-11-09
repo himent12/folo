@@ -164,10 +164,10 @@
     <form id="{uid}-form" class="panel" onsubmit={submit} novalidate>
       {#if mode === 'folder'}
         <Field label="Folder" for="{uid}-path" error={show(errs.path)} hint="Absolute path on the machine running `folo serve`. Files are never modified.">
-          <Input id="{uid}-path" bind:value={path} placeholder="e.g. D:/data/my-dataset" icon={FolderOpen} class="mono-input" autocomplete="off" spellcheck={false} invalid={!!show(errs.path)} aria-describedby={show(errs.path) ? `${uid}-path-error` : `${uid}-path-hint`} />
+          <Input id="{uid}-path" bind:value={path} placeholder="e.g. D:/data/my-dataset" icon={FolderOpen} class="mono-input" autocomplete="off" spellcheck={false} invalid={!!show(errs.path)} />
         </Field>
         <Field label="Name" for="{uid}-name" error={show(errs.name)} fix={show(errs.name) ? nameFix(folderName, (n) => (name = n)) : null}>
-          <Input id="{uid}-name" bind:value={name} placeholder={derivedName || 'my-dataset'} autocomplete="off" spellcheck={false} invalid={!!show(errs.name)} aria-describedby={show(errs.name) ? `${uid}-name-error` : undefined} />
+          <Input id="{uid}-name" bind:value={name} placeholder={derivedName || 'my-dataset'} autocomplete="off" spellcheck={false} invalid={!!show(errs.name)} />
         </Field>
         <Field label="Format" hint={format === 'auto' ? 'Detects data.yaml (YOLO) or annotations/*.json (COCO).' : undefined}>
           <Segmented
@@ -182,7 +182,7 @@
         </Field>
       {:else}
         <Field label="Name" for="{uid}-sname" error={show(errs.name)} fix={show(errs.name) ? nameFix(sName, (n) => (sName = n)) : null}>
-          <Input id="{uid}-sname" bind:value={sName} autocomplete="off" spellcheck={false} invalid={!!show(errs.name)} aria-describedby={show(errs.name) ? `${uid}-sname-error` : undefined} />
+          <Input id="{uid}-sname" bind:value={sName} autocomplete="off" spellcheck={false} invalid={!!show(errs.name)} />
         </Field>
         <Field label="Classes" for="{uid}-classes" error={show(errs.classes)} hint="Press Enter or comma to add. Up to 16.">
           <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
@@ -209,10 +209,10 @@
         </Field>
         <div class="row">
           <Field label="Images" for="{uid}-images" error={show(errs.images)}>
-            <Input id="{uid}-images" type="number" min={10} max={20000} step={100} bind:value={sImages} invalid={!!show(errs.images)} aria-describedby={show(errs.images) ? `${uid}-images-error` : undefined} />
+            <Input id="{uid}-images" type="number" min={10} max={20000} step={100} bind:value={sImages} invalid={!!show(errs.images)} />
           </Field>
           <Field label="Seed" for="{uid}-seed" error={show(errs.seed)}>
-            <Input id="{uid}-seed" type="number" min={0} step={1} bind:value={seed} invalid={!!show(errs.seed)} aria-describedby={show(errs.seed) ? `${uid}-seed-error` : undefined} />
+            <Input id="{uid}-seed" type="number" min={0} step={1} bind:value={seed} invalid={!!show(errs.seed)} />
           </Field>
         </div>
         <Field label="Image size" hint="Square images, {imgsz} × {imgsz} px. 80% train, 20% val.">

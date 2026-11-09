@@ -8,9 +8,24 @@
    * `exp` ("−4") is the exponent in plain digits, for a real superscript at a legible size (Unicode superscripts render
    * at about 8 px in a 12 px unit).
    */
+  /** What a progress bar's hatched end means (the last epochs train without mosaic), with the trainer's capped count. */
+  export function mosaicOffText(n: number): string {
+    return `Last ${n} ${n === 1 ? 'epoch' : 'epochs'}: mosaic off`;
+  }
+
   export function lrParts(v: number | null | undefined): { value: string; unit?: string; exp?: string } {
     const [m, e] = fmtLr(v).split(' × ');
     return e ? { value: m!, unit: `× ${e}`, exp: [...e.slice(2)].map((c) => PLAIN[c] ?? c).join('') } : { value: m! };
+  }
+
+  /**
+   * The epoch a per-step reading (loss, LR, throughput) comes from: "ep 24". A run that ended inside an epoch (failed or
+   * stopped part-way) has steps past its last finished epoch, so their epoch says so, "ep 24 (partial)", and never seems
+   * to contradict the run's 23 finished epochs. `observed` is the progress in epochs (23.4).
+   */
+  export function stepEpoch(status: string, observed: number, finished: number): string {
+    const n = Math.max(1, Math.ceil(observed - 1e-9));
+    return `ep ${n}${status !== 'running' && status !== 'queued' && n > finished ? ' (partial)' : ''}`;
   }
 </script>
 
@@ -25,10 +40,12 @@
    * tertiary with dash patterns); hue is reserved for entities (runs in Compare, classes).
    */
   import InfoButton from '$lib/ui/InfoButton.svelte';
+  import InfoRegion from '$lib/ui/InfoRegion.svelte';
+  import { provideInfoSlot } from '$lib/ui/infoSlot.svelte';
   import { tooltip } from '$lib/ui/tooltip';
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import ChartSkeleton from '$lib/charts/ChartSkeleton.svelte';
-  import { BestPulse } from '$lib/charts/bestPulse';
+  import { BestPulse, CompleteFocus } from '$lib/charts/bestPulse';
   import { scoresTitle, type EvalSource } from '$lib/evaluated';
   import LossOptions, { type Scale, type Smoothing } from '$lib/charts/LossOptions.svelte';
   import { holdDomain, logDomain, niceDomain, unitDomain, unitTop, UNIT_ZOOM_BELOW, UNIT_ZOOM_NOTE, type Fit, type Held } from '$lib/charts/domain';
@@ -37,12 +54,14 @@
   import { runHorizon } from '$lib/charts/horizon';
   import type { Epoch, Run, Step } from '$lib/api/types';
   import { progressText, runProgress, stepsPerEpoch } from '$lib/api/progress';
-  import { effectiveCloseMosaic } from './resolved';
+  import { effectiveCloseMosaic, warmupEpochs } from './resolved';
   import { conf, duration, eta, metric, num } from '$lib/format';
   import Segmented from '$lib/ui/Segmented.svelte';
   import Meta from '$lib/ui/Meta.svelte';
   import Select from '$lib/ui/Select.svelte';
   import { media } from '$lib/design/tokens';
+  // The loss terms' ⓘ opens in place on phones (ui/infoSlot), under the chart's heading.
+  const lossInfo = provideInfoSlot('run-chart-info');
 
   let {
     run,
@@ -100,6 +119,10 @@
   const closeFrom = $derived(1 - closeN / run.epochs);
   /** The run's last epochs train without mosaic: the bar hatches them and every chart marks where they start. */
   const mosaicOff = $derived(closeFrom > 0 && closeFrom < 1);
+  /** What the hatch means, in one wording: its caption's tooltip and the bar's accessible description. */
+  const closeText = $derived(mosaicOffText(closeN));
+  const uid = $props.id();
+  const closeId = `${uid}-close`;
   const elapsed = $derived(run.started ? ((run.finished ? Date.parse(run.finished) : Date.now()) - Date.parse(run.started)) / 1000 : null);
 
   const lastStep = $derived.by(() => {
@@ -134,9 +157,9 @@
   };
 
   /**
-   * How the focal line ends, in StatusBadge's marks (LineChart `end`): a ringed dot while the run trains, a square once
-   * stopped, a cross when it failed, a plain dot when it completed. With the lime ring on the best epoch this is the
-   * focal chart's vocabulary, shared with Overview's live card.
+   * How the focal line ends, in StatusBadge's marks (LineChart `end`): a filled lime dot with the heartbeat while the run
+   * trains, a square once stopped, a cross when it failed, a plain dot when it completed. With the hollow ink ring on
+   * the best epoch (the header's "○ best") this is the focal chart's vocabulary, shared with Overview's live card.
    */
   const endMark = $derived(run.status === 'running' ? ('live' as const) : run.status === 'stopped' ? ('stopped' as const) : run.status === 'failed' ? ('failed' as const) : undefined);
   /** The total loss as the chart draws it (smoothed at the chosen EMA), whose last value the Loss tab's caption states. */
@@ -237,6 +260,12 @@
   $effect.pre(() => {
     pulse = pulser.see(run.best?.epoch ?? null, run.status === 'running');
   });
+  // The run completing while the page is open focuses its best ring once (lime viewfinder corners; none under reduced motion).
+  const focuser = new CompleteFocus();
+  let focus = $state(0);
+  $effect.pre(() => {
+    focus = focuser.see(run.status);
+  });
   const best = $derived<Marker[]>(
     run.best && (tab === 'map' || tab === 'map50')
       ? [
@@ -244,9 +273,9 @@
             x: run.best.epoch,
             y: tab === 'map' ? run.best.map50_95 : (epochs.find((e) => e.epoch === run.best!.epoch)?.val.map50 ?? 0),
             label: 'best',
-            color: 'var(--accent-line)',
             quiet: true,
             pulse,
+            focus,
           },
         ]
       : [],
@@ -272,15 +301,22 @@
   // The one live-value label, as in the chart's legend: "Latest · ep 37". Per-epoch values come from the last
   // validation; per-step values from the epoch the last step is in.
   const latestEp = $derived(lastEpoch ? `Latest · ep ${lastEpoch.epoch}` : 'after the first epoch');
-  const stepEp = $derived(lastStep ? `Latest · ep ${Math.max(1, Math.ceil(observed - 1e-9))}` : 'after the first step');
+  // One label for every per-step reading (the Loss, LR and Throughput tabs and the legend), "(partial)" past the end.
+  const stepEpWord = $derived(stepEpoch(run.status, observed, lastEpoch?.epoch ?? 0));
+  const stepEp = $derived(lastStep ? `Latest · ${stepEpWord}` : 'after the first step');
   // Tablets: the same readings in fewer words ("ep 37", "not yet").
   const latestShort = $derived(lastEpoch ? `ep ${lastEpoch.epoch}` : 'not yet');
-  const stepShort = $derived(lastStep ? `ep ${Math.max(1, Math.ceil(observed - 1e-9))}` : 'not yet');
+  const stepShort = $derived(lastStep ? stepEpWord : 'not yet');
   /** Precision and recall are read at each epoch's best-F1 confidence (docs/API.md, Operating point): the latest one. */
   const prConf = $derived(lastEpoch?.val.best_f1_conf);
+  const warmupWords = (r: NonNullable<Run['resolved']>) => {
+    const e = warmupEpochs(r);
+    return r.warmup_iters <= 0 ? 'no warmup' : `warmup ${e} ${e === 1 ? 'epoch' : 'epochs'}`;
+  };
   /** The LR schedule the trainer resolved (`Run.resolved`), else what the recipe defaults to. */
   const schedule = $derived(
-    run.resolved ? `warmup ${run.resolved.warmup_iters} steps · ${run.resolved.cos_lr ? 'cosine' : 'linear'}` : 'warmup 3 epochs · linear',
+    // In epochs, as the chart's axis is (Config has the optimizer steps beside them): short, and never a bare "steps".
+    run.resolved ? `${warmupWords(run.resolved)} · ${run.resolved.cos_lr ? 'cosine' : 'linear'}` : 'warmup 3 epochs · linear',
   );
   const tabs = $derived.by((): TabDef[] => [
     {
@@ -310,7 +346,7 @@
       value: num(lastStep?.loss.total, 3),
       // The last step's raw reading; the chart draws the total smoothed. The caption is the one place that says which
       // is which ("raw · smoothed 2.075", the legend's total), so the two numbers never seem to disagree.
-      caption: lastStep ? (smoothedLast !== undefined ? `raw · smoothed ${num(smoothedLast, 3)}` : `raw · ep ${Math.max(1, Math.ceil(observed - 1e-9))}`) : 'after the first step',
+      caption: lastStep ? (smoothedLast !== undefined ? `raw · smoothed ${num(smoothedLast, 3)}` : `raw · ${stepEpWord}`) : 'after the first step',
       capShort: lastStep ? (smoothedLast !== undefined ? `raw · smoothed ${num(smoothedLast, 3)}` : `raw · ${stepShort}`) : stepShort,
       title: 'Training loss',
       qualifier: 'by epoch',
@@ -405,16 +441,28 @@
     <div class="epoch">
       <span class="sr-only">Epoch</span>
       <span class="big num">{run.epoch}<span class="of">/ {run.epochs}</span></span>
-      <div class="bar">
-        <div class="track" aria-hidden="true">
+      <div class="bar" class:has-close={mosaicOff}>
+        <div
+          class="track"
+          role="progressbar"
+          aria-label="Training progress"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={run.status === 'completed' ? 100 : Math.floor(progress * 100 + 1e-9)}
+          aria-describedby={mosaicOff ? closeId : undefined}
+        >
           <div class="fill" class:done={run.status === 'completed'} class:bad={run.status === 'failed'} style:transform="scaleX({run.status === 'completed' ? 1 : progress})"></div>
           <!-- Over the filled part of the bar (a finished run) the hatch is cut out of the fill in the panel colour. -->
           {#if mosaicOff}<div class="close" class:over={run.status === 'completed' || progress >= closeFrom} style:left="{closeFrom * 100}%"></div>{/if}
         </div>
-        <!-- The hatched end explains itself on hover: a hit area over it, taller than the 4 px bar. -->
-        {#if mosaicOff}<span class="close-hit" aria-hidden="true" style:left="{closeFrom * 100}%" use:tooltip={`Last ${closeN} ${closeN === 1 ? 'epoch trains' : 'epochs train'} without mosaic`}></span>{/if}
+        <!-- The hatched end says what it is: a caption under it, the same words on hover (a hit area taller than the
+             4 px bar) and as the bar's accessible description, with the trainer's capped count. -->
+        {#if mosaicOff}
+          <span class="close-hit" aria-hidden="true" style:left="{closeFrom * 100}%" use:tooltip={closeText}></span>
+          <span class="close-cap" aria-hidden="true" use:tooltip={closeText}>mosaic off</span>
+          <span class="sr-only" id={closeId}>{closeText}</span>
+        {/if}
       </div>
-      {#if mosaicOff}<span class="sr-only">The hatched end of the bar marks the last {closeN} {closeN === 1 ? 'epoch' : 'epochs'}, trained without mosaic.</span>{/if}
       <span class="cap num">
         {#if run.status === 'queued'}Not started{:else if live}<Meta line><span>{progressText(run)}</span><span>{run.eta_s !== null ? `${eta(run.eta_s)} left` : 'estimating…'}</span></Meta>{:else}{elapsed !== null ? `${duration(elapsed)} total` : '—'}{/if}
       </span>
@@ -463,7 +511,7 @@
             {#if tab === 'loss'}
               <!-- What the terms mean, for anyone who has not trained a detector before: a tap, a click or Enter opens
                    it (ui/InfoButton). -->
-              <InfoButton label="What the loss terms mean">
+              <InfoButton chart label="What the loss terms mean">
                 <span class="terms-list">
                   {#each LOSS_TERMS as [term, means] (term)}<span><b>{term}</b>: {means}</span>{/each}
                 </span>
@@ -483,6 +531,8 @@
             {/if}
           </div>
         </header>
+        <!-- Phones: the loss terms' ⓘ opens here, between the heading and the legend's readout, not over the plot. -->
+        <InfoRegion slot={lossInfo} />
         {#if loading}
           <ChartSkeleton {height} />
         {:else}
@@ -687,6 +737,17 @@
     bottom: -12px;
     right: 0;
   }
+  /* "mosaic off" under the hatch, right-aligned to the bar's end: in the epoch row's spare height from the tablet up,
+     in a line the bar keeps for it on phones. */
+  .close-cap {
+    position: absolute;
+    top: calc(100% + var(--space-1));
+    right: 0;
+    font-size: var(--type-sm-size);
+    line-height: 16px;
+    color: var(--text-tertiary);
+    white-space: nowrap;
+  }
   .close {
     position: absolute;
     top: 0;
@@ -709,6 +770,9 @@
     display: grid;
     gap: var(--space-2);
     min-width: 0;
+    /* The in-place ⓘ region (phones) on the chart's own edges; the grid's gap spaces it. */
+    --info-inset: 0;
+    --info-after: 0;
   }
   /* Phones, queued: the frame as one 48 px line that opens it. */
   .pending {
@@ -907,6 +971,9 @@
       grid-row: 2;
       grid-column: 1 / -1;
       align-self: center;
+    }
+    .epoch .bar.has-close {
+      margin-bottom: var(--space-5);
     }
     .val {
       height: 28px;
