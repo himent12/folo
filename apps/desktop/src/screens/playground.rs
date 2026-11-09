@@ -1166,7 +1166,7 @@ impl FoloApp {
             )
             // A row cut by the rail's bottom edge fades out instead of stopping mid-glyph; at the end
             // of the scroll there's nothing below, so no fade dims the last line.
-            .children(self.scroll_chrome(self.play_side_scroll.clone(), t.bg_panel, 1., radius::LG, cx))
+            .children(self.scroll_chrome(self.play_side_scroll.clone(), t.bg_panel, 0., radius::LG - 1., cx))
             .into_any_element()
     }
 

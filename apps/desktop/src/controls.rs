@@ -1188,7 +1188,7 @@ impl FoloApp {
             _ => (false, 288.),
         };
         let menu_chrome = if open && !empty {
-            self.scroll_chrome(menu_scroll.clone(), t.bg_overlay, 1., radius::LG, cx)
+            self.scroll_chrome(menu_scroll.clone(), t.bg_overlay, 0., radius::LG - 1., cx)
         } else {
             Vec::new()
         };

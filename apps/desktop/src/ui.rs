@@ -866,27 +866,28 @@ thread_local! {
 
 /// A scroll area's edge fades: 24 px of its surface `bg` over an edge only while content lies
 /// past it, so a row cut by the edge reads as "more", and at either end the rows show undimmed.
-/// With the thumbs hidden at rest, these are the scroll cue. `inset` keeps them inside a panel's
-/// border, `radius` follows its corners. Every scroll area but the page uses them, through
+/// With the thumbs hidden at rest, these are the scroll cue. Absolute children sit inside a
+/// parent's border already, so `inset` is extra room, and `radius` is the parent's inner radius. Every scroll area but the page uses them, through
 /// `FoloApp::scroll_chrome`.
 pub fn scroll_edges(handle: &ScrollHandle, bg: Hsla, inset: f32, radius: f32) -> impl Iterator<Item = Div> {
     let y = handle.offset().y;
     let above = y < px(-1.);
     let below = handle.max_offset().height + y > px(1.);
-    // 24 px: its outer 6 px solid, so a row cut at the edge leaves no sliver of glyphs, then an
-    // 18 px ramp (GPUI gradients take two stops, so the solid part is its own band).
+    // 24 px: the gradient holds its full colour for the outer 6 px (its first stop at 25%), so a
+    // row cut at the edge leaves no sliver of glyphs, then ramps out. It paints its own rounded
+    // corners (`overflow_hidden` would clip square).
     let fade = move |top: bool| {
-        let d = div().absolute().left(px(inset)).right(px(inset)).h(px(24.)).flex().overflow_hidden();
+        let d = div().absolute().left(px(inset)).right(px(inset)).h(px(24.));
         let d = if top {
-            d.top(px(inset)).flex_col().rounded_t(px(radius))
+            d.top(px(inset)).rounded_t(px(radius))
         } else {
-            d.bottom(px(inset)).flex_col_reverse().rounded_b(px(radius))
+            d.bottom(px(inset)).rounded_b(px(radius))
         };
-        d.child(div().h(px(6.)).flex_none().bg(bg)).child(div().flex_1().bg(gpui::linear_gradient(
+        d.bg(gpui::linear_gradient(
             if top { 180. } else { 0. },
-            gpui::linear_color_stop(bg, 0.),
+            gpui::linear_color_stop(bg, 0.25),
             gpui::linear_color_stop(crate::theme::alpha(bg, 0.), 1.),
-        )))
+        ))
     };
     above.then(|| fade(true)).into_iter().chain(below.then(|| fade(false)))
 }
