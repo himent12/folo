@@ -490,10 +490,7 @@ impl FoloApp {
                 // Side by side only while the PR panel keeps 600 px beside the matrix (46 %, 440 px
                 // minimum): its plot and side legend both fit. Else one above the other, each full
                 // width (below a ~1410 px window: content width under ~1127 px).
-                let stacked = {
-                    let row = self.content_width(window) - 16.;
-                    row - (row * 0.46).max(440.) < 600.
-                };
+                let stacked = self.eval_stacked(window);
                 let pr = self.pr_panel(&m, &ev, window, cx);
                 let cm = self.confusion_panel(&m, &ev, window, cx);
                 let table = self.class_table(&m, &ev, window, cx);
@@ -787,6 +784,13 @@ impl FoloApp {
         lead.or(self.pr_pin).filter(|c| ev.pr.iter().any(|p| p.class == *c))
     }
 
+    /// The PR panel sits above the matrix (each full width) unless it keeps 600 px beside it
+    /// (46 %, 440 px minimum): its plot and side legend both fit.
+    fn eval_stacked(&self, window: &Window) -> bool {
+        let row = self.content_width(window) - 16.;
+        row - (row * 0.46).max(440.) < 600.
+    }
+
     fn pr_panel(
         &mut self,
         m: &Model,
@@ -990,7 +994,10 @@ impl FoloApp {
         }
         chart.ease_key = crate::charts::ease_key(&m.id);
         // As tall as the confusion matrix beside it (its rows set the panel height).
-        chart.height = (32. * ev.confusion.len() as f32 + 136.).max(240.);
+        // Beside the matrix, as tall as it (its rows set the panel height); stacked above it, a
+        // compact 240 so the matrix starts within the first screen.
+        chart.height =
+            if self.eval_stacked(window) { 240. } else { (32. * ev.confusion.len() as f32 + 136.).max(240.) };
         chart.hover = self.pr_hover;
         chart.on_hover = Some(on_hover);
         // Values live in the legend beside the plot; the cursor shows a recall chip on the axis.
@@ -1326,9 +1333,12 @@ impl FoloApp {
                     let na = r == n - 1 && c == n - 1;
                     // Under 1 % reads as noise: leave those cells blank, like zero.
                     let tiny = norm && frac < 0.01;
+                    // An error under 2 % of its row is noise next to the ones that matter: it
+                    // keeps its number on the empty cells' fill, so the ramp marks real confusions.
+                    let faint = !diag && !na && (v as f32 / row_sums[r] as f32) < 0.02;
                     let fill = if na {
                         gpui::transparent_black()
-                    } else if v == 0 {
+                    } else if v == 0 || faint {
                         crate::theme::over(t.bg_panel, t.bg_hover)
                     } else {
                         // Correct cells on the success ramp; errors on a danger ramp (linear from a
@@ -1355,7 +1365,7 @@ impl FoloApp {
                     };
                     let strong = frac > 0.55;
                     // Pick the label colour from the composited cell, not the theme.
-                    let ink = if na || v == 0 {
+                    let ink = if na || v == 0 || faint {
                         t.text_tertiary
                     } else {
                         t.readable_on(crate::theme::over(t.bg_panel, fill))
@@ -1413,7 +1423,7 @@ impl FoloApp {
             )
             .child(text(ty::SM, t.text_tertiary).mr(px(6.)).child("correct"))
             .child(text(ty::SM, t.text_tertiary).ml(px(2.)).child(if norm {
-                "Error share 0%"
+                "Error share 2%"
             } else {
                 "Errors 0"
             }))
@@ -1701,12 +1711,13 @@ fn short_name(name: &str) -> String {
 }
 
 /// Fill opacity of an error cell: linear over `frac`, the cell's share of the largest
-/// class-to-class confusion shown, from a faint 0.1 (still apart from the empty cells) to 0.72.
+/// class-to-class confusion shown, from 0.18 (errors under 2 % of their row aren't filled at all,
+/// so the lightest fill is a real confusion) to 0.72.
 /// The square-root ramp it replaces lifted 1–4 % confusions toward full red, so the whole
 /// off-diagonal read as alarm. The top stops at 0.72 so the strongest cell's label (dark or white,
 /// whichever reads better) keeps 4.5:1 in both themes; at 0.8 neither did (4.36:1).
 fn err_alpha(frac: f32) -> f32 {
-    0.1 + 0.62 * frac.clamp(0., 1.)
+    0.18 + 0.54 * frac.clamp(0., 1.)
 }
 
 #[cfg(test)]

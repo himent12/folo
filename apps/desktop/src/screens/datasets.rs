@@ -717,6 +717,12 @@ impl FoloApp {
         let class_names: Vec<String> =
             self.store.dataset_summary(&id).map(|d| d.classes.clone()).unwrap_or_default();
         let fit = if self.ds_fill { crate::viz::Fit::Cover } else { crate::viz::Fit::Contain };
+        // A focused image tile names its keys (decided here: the list's rows render after the
+        // page has handed its hint to the strip).
+        if self.kb && self.focus.borrow().iter().any(|(k, f)| k.starts_with("tile-") && f.is_focused(window))
+        {
+            self.hint_keys("Arrows move between images · Enter opens one in the inspector");
+        }
         let grid = uniform_list(
             "ds-grid",
             rows,
@@ -772,9 +778,6 @@ impl FoloApp {
                         };
                         let dsid = ds_id.to_string();
                         let focused = this.fh(key.clone(), cx).is_focused(window);
-                        if focused && this.kb {
-                            this.hint_keys("Arrows move between images · Enter opens one in the inspector");
-                        }
                         let el = div()
                             .id(SharedString::from(key.clone()))
                             // Everything it holds, by class, on hover and keyboard focus (labels a

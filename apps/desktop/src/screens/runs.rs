@@ -1558,9 +1558,47 @@ impl FoloApp {
             .flex()
             .flex_col()
             .overflow_hidden()
-            .child(panel_header(&t, "Log").child(follow))
+            .child(panel_header(&t, "Log").child(
+                div().flex().items_center().gap(px(12.)).child(follow).when(
+                    self.store.logs.get(&r.id).is_some_and(|l| l.ready().is_some_and(|v| !v.is_empty())),
+                    |d| {
+                        let rid = r.id.clone();
+                        d.child(self.button(
+                            "log-copy",
+                            "Copy log",
+                            Btn::Secondary,
+                            Some("icons/copy.svg"),
+                            window,
+                            cx,
+                            act(move |this, _, cx| this.copy_log(&rid, cx)),
+                        ))
+                    },
+                ),
+            ))
             .child(body)
             .into_any_element()
+    }
+
+    /// Puts the run's whole log on the clipboard, a line per entry as the panel shows it (local
+    /// time, level, message).
+    fn copy_log(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(lines) = self.store.logs.get(id).and_then(|l| l.ready()) else { return };
+        let text: String = lines
+            .iter()
+            .map(|l| {
+                let clock = time::parse(&l.t).map(time::local_clock).unwrap_or_default();
+                let level = match l.level {
+                    LogLevel::Debug => "DBG",
+                    LogLevel::Info => "INF",
+                    LogLevel::Warn => "WRN",
+                    LogLevel::Error => "ERR",
+                };
+                format!("{clock} {level} {}\n", l.message)
+            })
+            .collect();
+        let n = lines.len();
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+        self.toast(Tone::Neutral, format!("Copied {} log lines", crate::ui::int(n as u64)), None, cx);
     }
 
     /// Fetches the run's `folo train` command and puts it on the clipboard.
@@ -1616,7 +1654,8 @@ impl FoloApp {
                     "one-to-many + NMS".into()
                 }),
             ))
-            .child(kv(&t, "Seed", mono_v(c.seed.to_string())));
+            .child(kv(&t, "Seed", mono_v(c.seed.to_string())))
+            .child(kv(&t, "Device", mono_v(c.device.clone())));
         let col2 = div()
             .flex_1()
             .flex()
@@ -1624,12 +1663,7 @@ impl FoloApp {
             .child(kv(&t, "Epochs", mono_v(c.epochs.to_string())))
             .child(kv(&t, "Batch", mono_v(c.batch.to_string())))
             .child(kv(&t, "Image size", mono_v(format!("{} px", c.imgsz))))
-            .child(kv(&t, "Device", mono_v(c.device.clone())))
-            .child(kv(&t, "Precision", mono_v(if c.amp { "mixed (f16)".into() } else { "f32".into() })));
-        let col3 = div()
-            .flex_1()
-            .flex()
-            .flex_col()
+            .child(kv(&t, "Precision", mono_v(if c.amp { "mixed (f16)".into() } else { "f32".into() })))
             // What the run trains with (`Run.resolved`): Auto's pick and its rate, not "auto · 0.01".
             .child(kv(
                 &t,
@@ -1645,43 +1679,40 @@ impl FoloApp {
                     }
                     None => format!("{} · lr0 {}", c.optimizer.label(), crate::ui::fmt_lr(c.lr0 as f64)),
                 }),
+            ));
+        // Augmentation, one setting per row.
+        let col3 = div()
+            .flex_1()
+            .flex()
+            .flex_col()
+            .child(kv(
+                &t,
+                "Mosaic",
+                mono_v(if a.mosaic <= 0. { "off".to_string() } else { crate::ui::fmt_aug(a.mosaic) }),
             ))
             .child(kv(
                 &t,
-                "Mosaic · close",
+                "Close mosaic",
                 mono_v({
                     let n = r.close_mosaic_epochs();
                     if a.mosaic <= 0. {
-                        "off".to_string()
+                        "–".to_string()
                     } else if n < a.close_mosaic {
-                        format!(
-                            "{} · last {n} epochs ({} capped at half)",
-                            crate::ui::fmt_aug(a.mosaic),
-                            a.close_mosaic
-                        )
+                        format!("last {n} epochs ({} capped at half)", a.close_mosaic)
                     } else {
-                        format!("{} · last {n} epochs", crate::ui::fmt_aug(a.mosaic))
+                        format!("last {n} epochs")
                     }
                 }),
             ))
+            .child(kv(&t, "Mixup", mono_v(crate::ui::fmt_aug(a.mixup))))
+            .child(kv(&t, "Horizontal flip", mono_v(crate::ui::fmt_aug(a.fliplr))))
             .child(kv(
                 &t,
-                "Mixup · flip",
-                mono_v(format!("{} · {}", crate::ui::fmt_aug(a.mixup), crate::ui::fmt_aug(a.fliplr))),
+                "HSV (h / s / v)",
+                // The hue's strength needs three decimals; saturation and value two.
+                mono_v(format!("{:.3} / {:.2} / {:.2}", a.hsv[0], a.hsv[1], a.hsv[2])),
             ))
-            .child(kv(
-                &t,
-                "HSV · scale",
-                // Each strength named (the hue's needs three decimals, so the others aren't read as
-                // the same precision).
-                mono_v(format!(
-                    "h {:.3} · s {:.2} · v {:.2} · {}",
-                    a.hsv[0],
-                    a.hsv[1],
-                    a.hsv[2],
-                    crate::ui::fmt_scale(a.scale)
-                )),
-            ));
+            .child(kv(&t, "Scale", mono_v(crate::ui::fmt_scale(a.scale))));
         panel(&t)
             .flex()
             .flex_col()

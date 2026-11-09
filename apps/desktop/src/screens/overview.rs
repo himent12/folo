@@ -650,7 +650,7 @@ impl FoloApp {
     }
 
     /// Whether Recent runs sits beside Best model: from 1500 px, and only while the list keeps its
-    /// narrow column set (778 px, plus 8 of slack) in what Best model leaves. A row wider than
+    /// narrow column set (798 px, plus 8 of slack) in what Best model leaves. A row wider than
     /// its slot makes GPUI lay the whole page out at its min-content width.
     fn tables_beside(&self, window: &Window) -> bool {
         window.viewport_size().width >= px(1500.) && self.content_width(window) - (SIDE_W + 40.) - 16. >= 806.

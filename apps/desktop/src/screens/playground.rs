@@ -229,8 +229,13 @@ impl FoloApp {
             None => (None, name.to_string()),
         };
         let file_w = f32::from(crate::charts::mono_width(window, &file, ty::SM.size));
-        // The crumb's "/" sits between 6 px gaps, a little wider than the shaped " / ".
-        let full_w = f32::from(crate::charts::mono_width(window, &name, ty::SM.size)) + 6.;
+        // The dataset in the UI sans (a name, as everywhere else), the file in mono; the crumb's
+        // "/" sits between 6 px gaps, a little wider than the shaped " / ".
+        let full_w = file_w
+            + prefix_all.as_ref().map_or(0., |p| {
+                f32::from(crate::charts::text_width(window, &format!("{p} / "), ty::SM.size))
+            })
+            + 6.;
         let room = {
             let rail = if window.viewport_size().width < px(1100.) { 280. } else { 320. };
             // The other items, measured: the latency and count texts as they'll read, plus the
@@ -366,22 +371,17 @@ impl FoloApp {
                                 .gap(px(6.))
                                 .min_w_0()
                                 .flex_shrink()
-                                // `text` sets the UI sans: each part names Geist Mono itself.
+                                // The dataset is a name (UI sans, as everywhere); the file is a path
+                                // (Geist Mono).
                                 .when_some(prefix, |d, p| {
                                     d.child(
                                         text(ty::SM, t.text_tertiary)
-                                            .font_family(crate::theme::MONO)
                                             .min_w_0()
                                             .flex_shrink()
                                             .ellipsis()
                                             .child(p),
                                     )
-                                    .child(
-                                        text(ty::SM, t.text_tertiary)
-                                            .font_family(crate::theme::MONO)
-                                            .flex_none()
-                                            .child("/"),
-                                    )
+                                    .child(text(ty::SM, t.text_tertiary).flex_none().child("/"))
                                 })
                                 .child(
                                     // A long file name ends in "…" at its known budget, as GPUI needs.

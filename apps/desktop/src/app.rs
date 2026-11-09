@@ -579,7 +579,8 @@ impl FoloApp {
             ds_class: None,
             ds_empty_only: false,
             ds_boxes: true,
-            ds_fill: true,
+            // Whole images by default: a crop can hide the very boxes a dataset review is for.
+            ds_fill: false,
             ds_split_counts: RefCell::new(None),
             ds_tile: 168.,
             ds_hover_tile: None,
@@ -2912,11 +2913,13 @@ thread_local! {
     static REVEAL: RefCell<Option<Vec<ScrollHandle>>> = const { RefCell::new(None) };
 }
 
-/// Scroll the first candidate container holding `b` (horizontally) so `b` is fully visible
-/// with an 8 px margin. Runs once per request.
+/// Scroll the first candidate container holding `b` (horizontally) so `b` is fully visible,
+/// clear of the edge fades (24 px, so 32 at the top) and of the key-hint strip over the page's
+/// bottom (32 px, so 40 there). Runs once per request.
 fn reveal(b: gpui::Bounds<Pixels>, window: &mut Window) {
     let Some(handles) = REVEAL.with(|r| r.borrow_mut().take()) else { return };
     let margin = px(8.);
+    let (top_m, bottom_m) = (px(32.), px(40.));
     // The innermost clip around the control: only a container that contains it owns the control
     // (a dialog's fixed header and footer sit outside the scrolling body).
     let mask = window.content_mask().bounds;
@@ -2930,15 +2933,19 @@ fn reveal(b: gpui::Bounds<Pixels>, window: &mut Window) {
         if vp.size.width <= px(0.) || !inside {
             continue;
         }
-        let tall = b.size.height + margin * 2. > vp.size.height;
-        let dy = if b.top() - margin < vp.top() {
-            b.top() - margin - vp.top()
+        let tall = b.size.height + top_m + bottom_m > vp.size.height;
+        let dy = if b.top() - top_m < vp.top() && !tall {
+            b.top() - top_m - vp.top()
         } else if tall {
             // Taller than the view (the run page's linked chart group at minimum size): its top
-            // leads. Already in view, it stays; below, it comes up to the top edge, never past.
-            if b.top() + margin > vp.bottom() - margin * 4. { b.top() - margin - vp.top() } else { px(0.) }
-        } else if b.bottom() + margin > vp.bottom() {
-            b.bottom() + margin - vp.bottom()
+            // leads. Already in view, it stays; elsewhere, it comes to the top edge, never past.
+            if b.top() < vp.top() || b.top() + margin > vp.bottom() - margin * 4. {
+                b.top() - margin - vp.top()
+            } else {
+                px(0.)
+            }
+        } else if b.bottom() + bottom_m > vp.bottom() {
+            b.bottom() + bottom_m - vp.bottom()
         } else {
             px(0.)
         };
@@ -2952,9 +2959,9 @@ fn reveal(b: gpui::Bounds<Pixels>, window: &mut Window) {
     }
 }
 
-/// Keyboard focus ring: 2 px in the focus colour, 2 px outside the control.
-/// The strip under the page that names the focused control's keys: 32 px, a hairline above,
-/// a keyboard glyph and the keys.
+/// The strip over the page's bottom edge that names the focused control's keys: 32 px, a
+/// hairline above, a keyboard glyph and the keys. An overlay, so focusing a control never moves
+/// the page (its last 32 px are the page's own bottom padding).
 fn key_hint_strip(t: &Theme, keys: SharedString) -> gpui::Stateful<gpui::Div> {
     div()
         .id("key-hint")
@@ -2971,6 +2978,7 @@ fn key_hint_strip(t: &Theme, keys: SharedString) -> gpui::Stateful<gpui::Div> {
         .child(crate::ui::text(ty::SM, t.text_secondary).whitespace_nowrap().child(keys))
 }
 
+/// Keyboard focus ring: 2 px in the focus colour, 2 px outside the control.
 pub fn focus_ring(t: &Theme, radius: f32) -> gpui::Div {
     let off = tsize::FOCUS_OFFSET + tsize::FOCUS_RING;
     div()
@@ -3186,9 +3194,11 @@ impl Render for FoloApp {
                             .flex_1()
                             .min_h_0()
                             .relative()
-                            .child(page),
-                    )
-                    .when_some(key_hint, |d, h| d.child(key_hint_strip(&t, h))),
+                            .child(page)
+                            .when_some(key_hint, |d, h| {
+                                d.child(key_hint_strip(&t, h).absolute().left_0().right_0().bottom_0())
+                            }),
+                    ),
             )
             .children(overlays)
     }
