@@ -1,21 +1,29 @@
-//! Data pipeline throughput at 640 on a synthetic JPEG dataset.
+//! Data pipeline throughput: stage timings and `DataLoader` images/s.
 //!
-//! `cargo bench -p folo-data --bench pipeline [-- --images N]`
+//! `cargo bench -p folo-data --bench pipeline [-- OPTIONS]`
 //!
-//! Prints single-thread stage timings (decode, letterbox, mosaic, affine, HSV) and end-to-end `DataLoader` images/s
-//! for the full training transform (decode + mosaic + affine + HSV + flip + collate) with 1 and N workers.
+//! - `--images N`: size of the synthetic 640 px JPEG dataset written when no `--data` is given (default 256).
+//! - `--data PATH [--split train|val]`: a real dataset instead (YOLO or COCO; default split `train`).
+//! - `--imgsz S`: network size (default 640).
+//! - `--workers A,B,..`: loader worker counts (default `1,8,<cores>`).
+//! - `--batches N`: stop each measured epoch after N batches (default: the whole epoch).
+//! - `--rounds N`: measured epochs per worker count; the median and the range are printed (default 3).
+//! - `--no-stages` / `--no-val`: skip the single-thread stage table / the validation loader table.
+//!
+//! Prints single-thread stage timings (decode, resize, letterbox, mosaic, affine, HSV, flip, collate) and
+//! end-to-end `DataLoader` images/s for the full training transform (decode + mosaic + affine + HSV + flip +
+//! collate to `u8`, as the GPU trainer asks for) and for validation (decode + letterbox + collate).
 
-use folo_data::augment::{mosaic4, random_affine, random_hsv, resize_long_side};
+use folo_data::augment::{flip_lr, mosaic4, random_affine, random_hsv, resize_long_side};
 use folo_data::synthetic::{SyntheticConfig, write_yolo};
 use folo_data::{
     AugmentConfig, DataLoader, Dataset, ImageFormat, LetterboxOptions, LoaderConfig, Rng, Split,
     letterbox_sample, open,
 };
 use std::hint::black_box;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
-
-const IMGSZ: u32 = 640;
 
 fn per_image(label: &str, n: usize, f: impl FnMut(usize)) {
     let mut f = f;
@@ -26,100 +34,199 @@ fn per_image(label: &str, n: usize, f: impl FnMut(usize)) {
         f(i);
     }
     let s = t.elapsed().as_secs_f64();
-    println!("| {label:<34} | {:>8.2} | {:>9.0} |", s * 1e3 / n as f64, n as f64 / s);
+    println!("| {label:<34} | {:>8.3} | {:>9.0} |", s * 1e3 / n as f64, n as f64 / s);
+}
+
+struct Args {
+    images: usize,
+    data: Option<PathBuf>,
+    split: Split,
+    imgsz: u32,
+    workers: Vec<usize>,
+    batches: usize,
+    rounds: usize,
+    stages: bool,
+    val: bool,
+}
+
+fn parse_args() -> Args {
+    let argv: Vec<String> = std::env::args().collect();
+    let value = |name: &str| argv.iter().position(|a| a == name).and_then(|i| argv.get(i + 1)).cloned();
+    let flag = |name: &str| argv.iter().any(|a| a == name);
+    let threads = std::thread::available_parallelism().map_or(8, |n| n.get());
+    let mut workers: Vec<usize> = match value("--workers") {
+        Some(w) => w.split(',').filter_map(|v| v.parse().ok()).collect(),
+        None => vec![1, 8.min(threads), threads],
+    };
+    workers.dedup();
+    Args {
+        images: value("--images").and_then(|v| v.parse().ok()).unwrap_or(256),
+        data: value("--data").map(PathBuf::from),
+        split: match value("--split").as_deref() {
+            Some("val") => Split::Val,
+            Some("test") => Split::Test,
+            _ => Split::Train,
+        },
+        imgsz: value("--imgsz").and_then(|v| v.parse().ok()).unwrap_or(640),
+        workers,
+        batches: value("--batches").and_then(|v| v.parse().ok()).unwrap_or(usize::MAX),
+        rounds: value("--rounds").and_then(|v| v.parse().ok()).unwrap_or(3).max(1),
+        stages: !flag("--no-stages"),
+        val: !flag("--no-val"),
+    }
+}
+
+/// Images per second of `batches` batches of one epoch (the wall time from the epoch's start, thread start-up
+/// included, to its last batch).
+fn epoch_rate(loader: &DataLoader, epoch: u32, batches: usize) -> folo_data::Result<f64> {
+    let t = Instant::now();
+    let mut images = 0usize;
+    for b in loader.epoch(epoch).take(batches) {
+        images += black_box(b?).len();
+    }
+    Ok(images as f64 / t.elapsed().as_secs_f64())
+}
+
+fn median(v: &mut [f64]) -> f64 {
+    v.sort_by(f64::total_cmp);
+    v[v.len() / 2]
 }
 
 fn main() -> folo_data::Result<()> {
-    let args: Vec<String> = std::env::args().collect();
-    let images =
-        args.iter().position(|a| a == "--images").and_then(|i| args.get(i + 1)?.parse().ok()).unwrap_or(256);
-    let threads = std::thread::available_parallelism().map_or(8, |n| n.get());
-
-    let dir = std::env::temp_dir().join(format!("folo-data-bench-{images}"));
-    let cfg = SyntheticConfig { images, imgsz: IMGSZ, seed: 0, val_fraction: 0.0, ..Default::default() };
+    let args = parse_args();
+    let s = args.imgsz;
+    let mut scratch = None;
+    let dir = match &args.data {
+        Some(p) => p.clone(),
+        None => {
+            // Off the system drive when the test scratch root is set (AGENTS.md, build hygiene).
+            let root = std::env::var_os("FOLO_TEST_TMP").map_or_else(std::env::temp_dir, PathBuf::from);
+            let dir = root.join(format!("folo-data-bench-{}-{}", args.images, std::process::id()));
+            let cfg = SyntheticConfig {
+                images: args.images,
+                imgsz: 640,
+                seed: 0,
+                val_fraction: 0.0,
+                ..Default::default()
+            };
+            let t = Instant::now();
+            let _ = std::fs::remove_dir_all(&dir);
+            write_yolo(&cfg, &dir, ImageFormat::Jpeg(90))?;
+            println!("wrote {} synthetic 640px JPEGs in {:.2}s\n", args.images, t.elapsed().as_secs_f64());
+            scratch = Some(dir.clone());
+            dir
+        }
+    };
     let t = Instant::now();
-    let _ = std::fs::remove_dir_all(&dir);
-    write_yolo(&cfg, &dir, ImageFormat::Jpeg(90))?;
+    let ds = open(&dir)?;
+    let train = Arc::new(ds.split(args.split).clone());
+    let n = train.len();
     println!(
-        "wrote {images} synthetic {IMGSZ}px JPEGs in {:.2}s ({threads} threads)\n",
+        "{}: {n} images ({} split), opened in {:.2}s; imgsz {s}\n",
+        dir.display(),
+        args.split,
         t.elapsed().as_secs_f64()
     );
-    let ds = open(&dir)?;
-    let train = Arc::new(ds.split(Split::Train).clone());
-    let n = train.len();
 
-    println!("Single thread, per image (stages)\n");
-    println!("| stage                              | ms/img   | img/s     |");
-    println!("|------------------------------------|----------|-----------|");
-    let samples: Vec<_> = (0..n.min(64)).map(|i| train.get(i).unwrap()).collect();
-    let m = samples.len();
-    folo_data::par::serial(|| {
-        per_image("decode JPEG (640 long side)", n.min(128), |i| {
-            black_box(train.get(i).unwrap());
+    if args.stages {
+        println!("Single thread, per image (stages)\n");
+        println!("| stage                              | ms/img   | img/s     |");
+        println!("|------------------------------------|----------|-----------|");
+        let samples: Vec<_> = (0..n.min(64)).map(|i| train.get(i).unwrap()).collect();
+        let m = samples.len();
+        let (w, h) = (samples[0].image.width, samples[0].image.height);
+        folo_data::par::serial(|| {
+            per_image(&format!("decode ({w}x{h} first image)"), n.min(128), |i| {
+                black_box(train.get(i).unwrap());
+            });
+            per_image(&format!("resize long side to {s}"), m, |i| {
+                black_box(resize_long_side(samples[i].clone(), s));
+            });
+            per_image("  (of which: clone the sample)", m, |i| {
+                black_box(samples[i].clone());
+            });
+            per_image(&format!("letterbox {s} (resize + pad)"), m, |i| {
+                black_box(letterbox_sample(&samples[i], s, s, &LetterboxOptions::default()));
+            });
+            let resized: Vec<_> = samples.iter().map(|x| resize_long_side(x.clone(), s)).collect();
+            let mut rng = Rng::new(1);
+            per_image(&format!("mosaic4 ({} canvas)", 2 * s), m, |i| {
+                let p = [&resized[i], &resized[(i + 1) % m], &resized[(i + 2) % m], &resized[(i + 3) % m]];
+                black_box(mosaic4(p, s, &mut rng));
+            });
+            let canvas = mosaic4(
+                [&resized[0], &resized[1 % m], &resized[2 % m], &resized[3 % m]],
+                s,
+                &mut rng,
+            );
+            let aug = AugmentConfig::default();
+            per_image(&format!("random affine {} -> {s} (default)", 2 * s), m, |_| {
+                black_box(random_affine(&canvas, s, s, &aug, &mut rng));
+            });
+            let rot = AugmentConfig { degrees: 10.0, shear: 2.0, ..AugmentConfig::default() };
+            per_image(&format!("random affine {} -> {s} (rotate)", 2 * s), m, |_| {
+                black_box(random_affine(&canvas, s, s, &rot, &mut rng));
+            });
+            let mut lb = letterbox_sample(&samples[0], s, s, &LetterboxOptions::default()).0;
+            per_image(&format!("HSV jitter {s}x{s}"), m, |_| {
+                random_hsv(&mut lb.image, [0.015, 0.7, 0.4], &mut rng);
+            });
+            per_image(&format!("flip left-right {s}x{s}"), m, |_| {
+                flip_lr(&mut lb);
+            });
         });
-        per_image("letterbox 640 (resize + pad)", m, |i| {
-            black_box(letterbox_sample(&samples[i], IMGSZ, IMGSZ, &LetterboxOptions::default()));
-        });
-        let resized: Vec<_> = samples.iter().map(|s| resize_long_side(s.clone(), IMGSZ)).collect();
-        let mut rng = Rng::new(1);
-        per_image("mosaic4 (1280 canvas)", m, |i| {
-            let p = [&resized[i], &resized[(i + 1) % m], &resized[(i + 2) % m], &resized[(i + 3) % m]];
-            black_box(mosaic4(p, IMGSZ, &mut rng));
-        });
-        let canvas = mosaic4([&resized[0], &resized[1], &resized[2], &resized[3]], IMGSZ, &mut rng);
-        let aug = AugmentConfig { degrees: 10.0, shear: 2.0, ..AugmentConfig::default() };
-        per_image("random affine 1280 -> 640", m, |_| {
-            black_box(random_affine(&canvas, IMGSZ, IMGSZ, &aug, &mut rng));
-        });
-        let mut img = letterbox_sample(&samples[0], IMGSZ, IMGSZ, &LetterboxOptions::default()).0.image;
-        per_image("HSV jitter 640x640", m, |_| {
-            random_hsv(&mut img, [0.015, 0.7, 0.4], &mut rng);
-        });
-    });
+        println!();
+    }
 
     println!(
-        "\nDataLoader, full train transform (decode + mosaic + affine + HSV + flip + collate), batch 16\n"
+        "DataLoader, full train transform (decode + mosaic + affine + HSV + flip + collate to u8), batch 16, \
+         median of {} epochs\n",
+        args.rounds
     );
-    println!("| workers | epoch images | seconds | img/s   |");
-    println!("|---------|--------------|---------|---------|");
-    let mut worker_counts = vec![1, threads / 2, threads];
-    worker_counts.dedup();
-    for workers in worker_counts.into_iter().filter(|&w| w > 0) {
+    println!("| workers | img/s   | range           |");
+    println!("|---------|---------|-----------------|");
+    for &workers in args.workers.iter().filter(|&&w| w > 0) {
         let loader = DataLoader::new(
             train.clone(),
             LoaderConfig {
                 batch_size: 16,
-                imgsz: IMGSZ,
+                imgsz: s,
                 workers,
                 seed: 0,
-                prefetch_batches: 4,
+                u8_images: true,
                 ..LoaderConfig::default()
             },
         )?;
-        // Warm-up epoch (page cache, allocator), then a measured one.
-        for b in loader.epoch(0) {
-            black_box(b?);
+        // Warm-up (page cache, allocator), then the measured epochs.
+        epoch_rate(&loader, 0, args.batches.min(8))?;
+        let mut rates = Vec::new();
+        for e in 0..args.rounds {
+            rates.push(epoch_rate(&loader, 1 + e as u32, args.batches)?);
         }
-        let mut it = loader.epoch(1);
-        for b in it.by_ref() {
-            black_box(b?);
-        }
-        let tp = it.throughput();
-        println!("| {workers:>7} | {:>12} | {:>7.2} | {:>7.1} |", tp.images, tp.seconds, tp.images_per_s);
+        let med = median(&mut rates);
+        println!("| {workers:>7} | {med:>7.1} | {:>6.1} - {:>6.1} |", rates[0], rates[rates.len() - 1]);
     }
 
-    println!("\nDataLoader, validation (decode + letterbox + collate), batch 16\n");
-    println!("| workers | img/s   |");
-    println!("|---------|---------|");
-    for workers in [1, threads] {
-        let loader =
-            DataLoader::new(train.clone(), LoaderConfig { workers, ..LoaderConfig::val(16, IMGSZ) })?;
-        let mut it = loader.epoch(0);
-        for b in it.by_ref() {
-            black_box(b?);
+    if args.val {
+        println!("\nDataLoader, validation (decode + letterbox + collate to u8), batch 32\n");
+        println!("| workers | img/s   | range           |");
+        println!("|---------|---------|-----------------|");
+        for &workers in args.workers.iter().filter(|&&w| w > 0) {
+            let loader = DataLoader::new(
+                train.clone(),
+                LoaderConfig { workers, u8_images: true, ..LoaderConfig::val(32, s) },
+            )?;
+            epoch_rate(&loader, 0, args.batches.min(4))?;
+            let mut rates = Vec::new();
+            for _ in 0..args.rounds {
+                rates.push(epoch_rate(&loader, 0, args.batches)?);
+            }
+            let med = median(&mut rates);
+            println!("| {workers:>7} | {med:>7.1} | {:>6.1} - {:>6.1} |", rates[0], rates[rates.len() - 1]);
         }
-        println!("| {workers:>7} | {:>7.1} |", it.throughput().images_per_s);
     }
-    let _ = std::fs::remove_dir_all(&dir);
+    if let Some(dir) = scratch {
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     Ok(())
 }
