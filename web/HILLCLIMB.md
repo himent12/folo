@@ -224,3 +224,25 @@ adds New run showing the previous settings' estimate as current, the sidebar's "
 "mAP" unnamed in four places, Fit's domain leaving a quarter of the plot empty, and the tablet inspector and
 Playground empty state; Sol adds class strips that do not look like disclosures, "mosaic off" read as current, and
 the live log announcing without its own pause.
+
+## Final state (stopped after round 28)
+
+The hill-climb was stopped at the user's request after round 28 (#163), with the UI accepted as it is. Round 28 was
+merged without new design reviews, so the last scored round is 27:
+
+| Line | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| GPT-6.1 Sol | 8 | 8.5 | 9 | 9 | 8.5 | 8.5 | 8.5 | 9 | 8.5 | 8.5 | 8 | 8 |
+| Claude Opus 5.5 | 8.5 | 8.5 | 9 | 8.5 | 8.5 | 8 | 8 | 8.5 | 9 | 9 | 8 | 8.5 |
+| Minimum | 8 | 8.5 | 9 | 8.5 | 8.5 | 8 | 8 | 8.5 | 8.5 | 8.5 | 8 | 8 |
+
+Round 28 addressed the round-27 reviews' items (listed in #163), but no reviewer has scored it. Still open, as named
+by the reviewers and not verified since:
+- Compare: a failed run that ends inside the bundle of other lines gets a swatch entry in the gutter, not a label at
+  its end; the phone chart keeps ~45 px of headroom between the caveat and the top tick.
+- The Inspector at 820 letterboxes the image heavily now that the dialog takes the viewport's height.
+- The stuck Compare pair header's edge is `line.subtle`; if it still reads as edgeless, it needs a stronger line.
+- Phone Playground's out-of-memory notice is three stacked 44 px buttons (the one remedy layout), taller than before.
+- Sol's round-27 code-review note: the vite client's "ResizeObserver loop completed with undelivered notifications"
+  during `npm run qa` is not attributed (a lead: `dataset/StatsTab.svelte`'s observer, which predates round 27).
+- Lines 1, 6, 7, 11 and 12 were last scored 8; nothing was scored 9 or above on every line by both reviewers.
