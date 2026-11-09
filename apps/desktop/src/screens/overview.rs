@@ -973,12 +973,12 @@ impl FoloApp {
                                     .flex()
                                     .items_center()
                                     .gap(px(6.))
+                                    // Whole ("folo-s · 640 px"), then the tag.
                                     .child(
-                                        text(ty::XS, t.text_tertiary).w(px(88.)).truncate().child(format!(
-                                            "{} · {} px",
-                                            m.arch.as_str(),
-                                            m.imgsz
-                                        )),
+                                        text(ty::XS, t.text_tertiary)
+                                            .flex_none()
+                                            .whitespace_nowrap()
+                                            .child(format!("{} · {} px", m.arch.as_str(), m.imgsz)),
                                     )
                                     // The same compact tag as the Models table.
                                     .when(self.model_e2e(&m), |d| d.child(e2e_tag(&t))),
