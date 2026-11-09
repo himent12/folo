@@ -651,6 +651,35 @@ fn conv2d_forward_and_backward() {
             groups: 1,
             bias: false,
         },
+        // Weight-gradient tiles picked by shape (`conv::pick_config_weight_grad`): 32×128 for few output
+        // channels, 128×128 and 64×128 for more, each with at least 128 columns (C_in·KH·KW).
+        ConvCase {
+            x: [2, 16, 20, 19],
+            w: [24, 16, 3, 3],
+            stride: 1,
+            padding: 1,
+            dilation: 1,
+            groups: 1,
+            bias: true,
+        },
+        ConvCase {
+            x: [2, 16, 12, 12],
+            w: [128, 16, 3, 3],
+            stride: 1,
+            padding: 1,
+            dilation: 1,
+            groups: 1,
+            bias: false,
+        },
+        ConvCase {
+            x: [1, 20, 10, 11],
+            w: [70, 20, 3, 3],
+            stride: 2,
+            padding: 1,
+            dilation: 1,
+            groups: 1,
+            bias: false,
+        },
     ];
     for (i, c) in cases.iter().enumerate() {
         let x = randn(&c.x, 30 + i as u64);

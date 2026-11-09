@@ -546,6 +546,23 @@ fn conv2d_backward_input_phased(
     Ok(())
 }
 
+/// 32×128 tiles, depth 32, 4×4 per thread: weight gradients with at most 32 output channels.
+pub(crate) const NARROW: TileConfig = TileConfig { bm: 32, bn: 128, bk: 32, tm: 4, tn: 4 };
+
+/// Tile configuration of a regular (not tensor-core) weight gradient with `m = C_out/groups` rows and
+/// `n = C_in/groups·KH·KW` columns, by the shape alone: split-K supplies the workgroups, so the tile is picked for
+/// arithmetic intensity (as [`coop`]'s weight gradients) rather than by [`gemm::pick_config`]'s occupancy rule,
+/// which always ended at the 64×64 tile with 4×4 outputs per thread here.
+pub(crate) fn pick_config_weight_grad(ctx: &GpuContext, m: usize, n: usize) -> TileConfig {
+    let cfg = match m {
+        _ if n < 128 => TileConfig::SMALL,
+        0..=32 => NARROW,
+        _ if m.div_ceil(128) * 128 * 4 <= m * 5 => TileConfig::LARGE,
+        _ => TileConfig::MEDIUM,
+    };
+    if cfg.workgroup_bytes() <= ctx.caps().max_workgroup_storage { cfg } else { TileConfig::SMALL }
+}
+
 /// Largest `KH · KW` the direct depthwise weight-gradient kernel unrolls; bigger kernels use the GEMM path.
 const MAX_DEPTHWISE_TAPS: usize = 49;
 /// Upper bound for split-K partial slabs, in f32 elements (64 MiB).
@@ -782,7 +799,7 @@ pub fn conv2d_backward_weight_as(
     if coop_grad(ctx, d) && coop::encode_conv_backward_weight(ctx, d, &g, out, grad, x, gw)? {
         return Ok(());
     }
-    let cfg = gemm::pick_config(ctx, &g);
+    let cfg = pick_config_weight_grad(ctx, cout_g, ncols);
     gemm::check_config(ctx, cfg)?;
     let bk = cfg.bk as usize;
     // Split K when the weight alone has too few tiles: aim for ~512 workgroups, each at least 16 K tiles deep.
