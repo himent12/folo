@@ -156,8 +156,8 @@ function profiles(t0: number, scenario: Scenario = 'normal'): RunProfile[] {
     {
       id: 'run_c19a',
       name: 'fasteners-n',
-      // Fine-tuned from shapes-n (the Model page's lineage line), with the NMS-free one-to-one head (its Details' Head).
-      config: config('fasteners-n', 'ds_fasteners', 'folo-n', 150, { weights: 'm_shapes_n', head: 'o2o' }),
+      // Fine-tuned from shapes-n (the Model page's lineage line), in mixed precision (as the server mock's m_53d1).
+      config: config('fasteners-n', 'ds_fasteners', 'folo-n', 150, { weights: 'm_shapes_n', amp: true }),
       classes: 8,
       classEase: FASTENER_EASE,
       stepsPerEpoch: 120,
@@ -213,7 +213,8 @@ function profiles(t0: number, scenario: Scenario = 'normal'): RunProfile[] {
     {
       id: 'run_0e77',
       name: 'shapes-s',
-      config: config('shapes-s', 'ds_shapes', 'folo-s', 100),
+      // The NMS-free one-to-one head (as the server mock's m_31ab, also shapes-s-best).
+      config: config('shapes-s', 'ds_shapes', 'folo-s', 100, { head: 'o2o' }),
       classes: 3,
       classEase: [1.04, 1.0, 0.95],
       stepsPerEpoch: 50,
@@ -481,6 +482,9 @@ export class MockApi implements Api {
         created: run.finished ?? run.created,
         run_id: p.id,
         metrics: ep ? { map50: ep.val.map50, map50_95: ep.val.map50_95, precision: ep.val.precision, recall: ep.val.recall } : null,
+        // As a server reads them from the checkpoint: folo.config's head, folo.train's settings (planned epochs).
+        head: p.config.head ?? 'o2m',
+        trained_with: { amp: p.config.amp ?? false, imgsz: p.config.imgsz, epochs: p.config.epochs },
       });
     }
     if (this.scenario !== 'empty') {
@@ -496,6 +500,9 @@ export class MockApi implements Api {
         created: new Date(this.#t0 - 20 * DAY).toISOString(),
         run_id: null,
         metrics: { map50: 0.611, map50_95: 0.448, precision: 0.672, recall: 0.571 },
+        // Imported weights: no training record.
+        head: 'o2m',
+        trained_with: null,
       });
     }
     return out.sort((a, b) => b.created.localeCompare(a.created));

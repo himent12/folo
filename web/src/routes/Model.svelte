@@ -194,11 +194,7 @@
   // Phones: the four numbers as one compact 2 × 2 summary in every section (Curves too), so it never changes shape
   // between sections and each section starts on the first screen; what they mean is behind the ⓘ.
   const kpiGrid = $derived(phone.current);
-  /**
-   * The detection head, from the run that trained the model (TrainConfig.head; missing means o2m), or null when no run
-   * says (an imported file).
-   */
-  const head = $derived(context.data?.run ? (context.data.run.config.head ?? 'o2m') : null);
+  /** The detection head, from the file (`Model.head`; missing, from older servers, means o2m). */
   const HEAD_LABEL = { o2m: 'NMS (one-to-many)', o2o: 'End-to-end (no NMS)' } as const;
   // What the four numbers mean, one tap away (the strip itself keeps to values and a short qualifier).
   let helpOpen = $state(false);
@@ -220,6 +216,7 @@
 {:else}
   {@const m = model.data}
   {@const run = context.data?.run}
+  {@const head = m.head ?? 'o2m'}
   {#snippet lineageNote()}
     <!-- Where the weights started: the run's `weights`, a model (linked), an imported file, or nothing. -->
     {#if lineage?.kind === 'model'}
@@ -378,10 +375,20 @@
               <dt>Compute</dt>
               <dd class="num">{num(m.flops_g, 1)} GFLOPs</dd>
             </div>
-            {#if head}
+            <div class="kv">
+              <dt>Head</dt>
+              <dd>{HEAD_LABEL[head]}</dd>
+            </div>
+            <!-- How it was trained, from the file's training record: none for exports, imported weights and older
+                 servers, so nothing is said then. -->
+            {#if m.trained_with}
               <div class="kv">
-                <dt>Head</dt>
-                <dd>{HEAD_LABEL[head]}</dd>
+                <dt>Trained in</dt>
+                <dd>{m.trained_with.amp ? 'Mixed precision (f16)' : 'f32'}</dd>
+              </div>
+              <div class="kv">
+                <dt>Trained for</dt>
+                <dd class="num">{num(m.trained_with.epochs)} {m.trained_with.epochs === 1 ? 'epoch' : 'epochs'} at {m.trained_with.imgsz} px</dd>
               </div>
             {/if}
             <div class="kv">
