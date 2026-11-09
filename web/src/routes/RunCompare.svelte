@@ -949,11 +949,11 @@
       font-size: var(--type-sm-size);
       color: var(--text-secondary);
     }
-    /* A 44 px target around the 24 px label, over the panel's padding above it. */
+    /* A 48 px target around the 24 px label, over the panel's padding above it. */
     .manage::after {
       content: '';
       position: absolute;
-      inset: -10px -8px;
+      inset: -12px -8px;
     }
     /* A hanging indent: a wrapped line starts under the name, past the swatch (12 px and its 6 px gap). */
     .chips .chip {

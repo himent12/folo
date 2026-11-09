@@ -47,9 +47,9 @@
   const uid = $props.id();
   const popId = `${uid}-info`;
   // A chart's ⓘ on a phone: a disclosure of the frame's in-place region (./infoSlot), filled while open.
-  const slot = chart ? infoSlot() : undefined;
+  const slot = infoSlot();
   const phone = new MediaQuery(media.phone, false);
-  const inPlace = $derived(!!slot && phone.current);
+  const inPlace = $derived(chart && !!slot && phone.current);
   const controls = $derived(inPlace ? slot!.id : controlsProp);
   const me = {};
   $effect(() => {
