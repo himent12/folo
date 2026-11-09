@@ -7,12 +7,14 @@ name: release
 #   Review the draft and publish it by hand; the install scripts only see published releases.
 # - Run it by hand (workflow_dispatch) for a dry run: the same builds, uploaded as run artifacts, no release. With
 #   the `tag` input it also rehearses that tag: the version check and a preview of the release notes, still without
-#   creating anything (docs/RELEASE.md).
+#   creating anything (docs/RELEASE.md). With `tag` and `draft` it creates (or refreshes) the draft release for that
+#   tag from the dispatched commit without creating the tag: GitHub creates it there when the draft is published.
 # - Pull requests that touch the release machinery get the same dry run (without macOS) plus an install-script test.
 #
 # Assets (names carry no version so `releases/latest/download/<asset>` URLs stay stable):
 #   folo-x86_64-pc-windows-msvc.zip, folo-x86_64-unknown-linux-gnu.tar.gz, folo-aarch64-apple-darwin.tar.gz,
-#   folo-desktop-x86_64-pc-windows-msvc.zip, each with a `<asset>.sha256`, plus SHA256SUMS.
+#   folo-desktop-x86_64-pc-windows-msvc.zip, folo-wasm.tar.gz (the browser module), install.sh and install.ps1,
+#   each with a `<asset>.sha256`, plus SHA256SUMS.
 # Each CLI archive holds one folder `folo-<target>/` with the binary, README.md and the licenses.
 #
 # Runners: as in ci.yml, the repo variables RUNS_ON_LINUX / RUNS_ON_WINDOWS (a JSON runs-on value) select FOLO's
@@ -41,6 +43,10 @@ on:
         description: Rehearse this tag (vX.Y.Z) - check it against the version and preview its notes; creates nothing
         type: string
         default: ""
+      draft:
+        description: With tag - create or refresh the draft release for it from this commit (the tag is created on publish)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -70,6 +76,7 @@ jobs:
           EVENT: ${{ github.event_name }}
           # The tag being released (push) or rehearsed (workflow_dispatch's `tag`, may be empty).
           TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+          DRAFT: ${{ github.event_name == 'workflow_dispatch' && inputs.draft }}
           # Tag builds and dispatches (unless `macos` is off) include macOS; PRs never do. The repository variable
           # FOLO_RELEASE_MACOS=false skips it everywhere, e.g. while GitHub-hosted runners are unavailable.
           MACOS: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch' && inputs.macos) && vars.FOLO_RELEASE_MACOS != 'false' }}
@@ -83,6 +90,10 @@ jobs:
           test -n "$version" || { echo "::error::no [workspace.package] version in Cargo.toml"; exit 1; }
           if [ -n "$TAG" ] && [ "$TAG" != "v$version" ]; then
             echo "::error::tag $TAG does not match the workspace version $version (expected v$version)"
+            exit 1
+          fi
+          if [ "$DRAFT" = true ] && [ -z "$TAG" ]; then
+            echo "::error::draft needs the tag input (the release's tag, v$version)"
             exit 1
           fi
           case "$version" in *-*) prerelease=true ;; *) prerelease=false ;; esac
@@ -107,7 +118,7 @@ jobs:
             echo "matrix=$(jq -c '{include: .}' <<<"$include")"
             echo "tag=$TAG"
           } >> "$GITHUB_OUTPUT"
-          echo "FOLO $version ($EVENT, tag: ${TAG:-none}, macOS: $MACOS, Linux: $linux, Windows: $windows)" >> "$GITHUB_STEP_SUMMARY"
+          echo "FOLO $version ($EVENT, tag: ${TAG:-none}, draft: $DRAFT, macOS: $MACOS, Linux: $linux, Windows: $windows)" >> "$GITHUB_STEP_SUMMARY"
 
   # FOLO Studio with folo-wasm (docs/WASM.md) in it, so the embedded Playground can run models in the browser:
   # scripts/build-wasm.sh writes web/public/folo-wasm/ (SIMD128, wasm-opt -O3) and `vite build` copies it to dist/.
@@ -167,12 +178,32 @@ jobs:
           # Exactly the module built above (vite copies public/ as is).
           cmp web/public/folo-wasm/folo_wasm_bg.wasm web/dist/folo-wasm/folo_wasm_bg.wasm
           wc -c web/dist/folo-wasm/* | tee -a "$GITHUB_STEP_SUMMARY"
+      # The browser module on its own (docs/WASM.md), for pages other than Studio: folo-wasm/ with the ES module,
+      # the .wasm, the TypeScript declarations, docs/WASM.md as its README and the licenses.
+      - name: package folo-wasm
+        run: |
+          set -euo pipefail
+          mkdir -p pkg/folo-wasm wasm-dist
+          cp web/public/folo-wasm/* pkg/folo-wasm/
+          cp docs/WASM.md pkg/folo-wasm/README.md
+          cp LICENSE-MIT LICENSE-APACHE pkg/folo-wasm/
+          tar -C pkg -czf wasm-dist/folo-wasm.tar.gz folo-wasm
+          cd wasm-dist
+          sum=$(sha256sum folo-wasm.tar.gz)
+          printf '%s  %s\n' "${sum%% *}" folo-wasm.tar.gz > folo-wasm.tar.gz.sha256
+          tar -tzf folo-wasm.tar.gz
+          cat folo-wasm.tar.gz.sha256
       - uses: actions/upload-artifact@v4
         with:
           name: web-dist
           path: web/dist
           if-no-files-found: error
           retention-days: 7
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wasm
+          path: wasm-dist/*
+          if-no-files-found: error
 
   cli:
     name: cli (${{ matrix.target }})
@@ -366,18 +397,41 @@ jobs:
     if: ${{ !cancelled() && needs.cli.result == 'success' }}
     runs-on: ${{ fromJSON(vars.RUNS_ON_LINUX || '"ubuntu-latest"') }}
     timeout-minutes: 15
+    # One writer per release at a time, whatever the ref: a tag push and dispatches from different branches for the
+    # same tag would otherwise edit, upload and prune the same draft at once and mix assets of different commits.
+    concurrency:
+      group: release-draft-${{ needs.plan.outputs.tag || github.ref }}
+      cancel-in-progress: false
     permissions:
       contents: write
     steps:
-      # No checkout here, so on a self-hosted runner the workspace still holds whatever an earlier job left in it:
-      # start from an empty dist/ so only this run's assets are checked and released.
+      # Only the install scripts are checked out (into src/), so on a self-hosted runner the workspace still holds
+      # whatever an earlier job left in it: start from an empty dist/ so only this run's assets are checked and released.
       - name: empty dist
         run: rm -rf dist
+      - uses: actions/checkout@v4
+        with:
+          path: src
+          sparse-checkout: scripts
       - uses: actions/download-artifact@v4
         with:
           pattern: cli-*
           path: dist
           merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: wasm
+          path: dist
+      # The install scripts ship as assets too, so a user can fetch one without cloning (README.md, Install).
+      - name: install scripts
+        run: |
+          set -euo pipefail
+          cp src/scripts/install.sh src/scripts/install.ps1 dist/
+          cd dist
+          for f in install.sh install.ps1; do
+            sum=$(sha256sum "$f")
+            printf '%s  %s\n' "${sum%% *}" "$f" > "$f.sha256"
+          done
       - uses: actions/download-artifact@v4
         if: needs.desktop.result == 'success'
         continue-on-error: true # the desktop job succeeds without an artifact when apps/desktop is absent
@@ -406,7 +460,7 @@ jobs:
           path: dist/*
       # workflow_dispatch with `tag`: what the tag build would do, without doing it.
       - name: rehearse the draft release
-        if: github.event_name == 'workflow_dispatch' && needs.plan.outputs.tag != ''
+        if: github.event_name == 'workflow_dispatch' && needs.plan.outputs.tag != '' && !inputs.draft
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -432,28 +486,54 @@ jobs:
             echo "$notes"
           } >> "$GITHUB_STEP_SUMMARY"
           echo "$notes"
+      # A tag push, or a dispatch with `tag` and `draft`: create the draft release, or refresh the assets of the
+      # existing draft (its notes are left alone, so hand-edited notes survive a re-run). A dispatch does not create
+      # the tag: the draft targets the dispatched commit, and GitHub creates the tag there when it is published.
       - name: draft release
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' && needs.plan.outputs.tag != '' && inputs.draft
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          TAG: ${{ github.ref_name }}
+          EVENT: ${{ github.event_name }}
+          TAG: ${{ needs.plan.outputs.tag }}
           VERSION: ${{ needs.plan.outputs.version }}
           PRERELEASE: ${{ needs.plan.outputs.prerelease }}
         run: |
           set -euo pipefail
+          if [ "$EVENT" = push ]; then
+            target=(--verify-tag)
+          else
+            # An existing tag decides where the release points, whatever the draft's target says: it must be this commit.
+            if tagged=$(gh api "repos/$GH_REPO/commits/refs/tags/$TAG" --jq .sha 2>/dev/null); then
+              if [ "$tagged" != "$GITHUB_SHA" ]; then
+                echo "::error::tag $TAG exists at $tagged, not at the dispatched commit $GITHUB_SHA"
+                exit 1
+              fi
+            fi
+            target=(--target "$GITHUB_SHA")
+          fi
           if draft=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null); then
             # A re-run: refresh the assets of the existing draft, but never touch a published release.
             if [ "$draft" != true ]; then
               echo "::error::release $TAG is already published; delete it or tag a new version instead of re-running"
               exit 1
             fi
+            if [ "$EVENT" != push ]; then gh release edit "$TAG" "${target[@]}"; fi
             gh release upload "$TAG" dist/* --clobber
+            # Drop assets this run did not build (e.g. a desktop build that failed this time), so the draft never
+            # mixes builds of different commits.
+            gh release view "$TAG" --json assets --jq '.assets[].name' | while read -r name; do
+              if [ ! -e "dist/$name" ]; then
+                echo "removing stale asset $name"
+                gh release delete-asset "$TAG" "$name" --yes
+              fi
+            done
           else
             flags=()
             if [ "$PRERELEASE" = true ]; then flags+=(--prerelease); fi
-            gh release create "$TAG" dist/* --draft --verify-tag --generate-notes --title "FOLO $VERSION" "${flags[@]}"
+            gh release create "$TAG" dist/* --draft "${target[@]}" --generate-notes --title "FOLO $VERSION" "${flags[@]}"
           fi
+          echo "draft release $TAG: $(gh release view "$TAG" --json url --jq .url)" >> "$GITHUB_STEP_SUMMARY"
 
   # Installs the archives just built with the install scripts, the way users will (from a local folder of assets).
   install-test:
@@ -484,13 +564,15 @@ jobs:
         if: runner.os != 'Windows'
         run: |
           set -eu
-          sh scripts/install.sh --base-url "$PWD/assets" --dir "$RUNNER_TEMP/bin"
+          # The install.sh asset (the one users download), checked against its .sha256 first.
+          (cd assets && sha256sum -c install.sh.sha256)
+          sh assets/install.sh --base-url "$PWD/assets" --dir "$RUNNER_TEMP/bin"
           "$RUNNER_TEMP/bin/folo" --version
           "$RUNNER_TEMP/bin/folo" doctor --json | grep -q '"web_source":"embedded"'
           "$RUNNER_TEMP/bin/folo" doctor --json | grep -q '"web_folo_wasm":true'
           # A tampered archive must be refused.
           cp -r assets bad && echo junk >> bad/folo-x86_64-unknown-linux-gnu.tar.gz
-          if sh scripts/install.sh --base-url "$PWD/bad" --dir "$RUNNER_TEMP/bad"; then exit 1; fi
+          if sh assets/install.sh --base-url "$PWD/bad" --dir "$RUNNER_TEMP/bad"; then exit 1; fi
           test ! -e "$RUNNER_TEMP/bad/folo"
       # The installed binary on the oldest supported glibc, whatever the runner's own distribution is. It must start
       # silently: a dynamic loader warning (e.g. a missing weak symbol version) on stderr fails the check.
@@ -512,7 +594,8 @@ jobs:
           $assets = Join-Path $PWD 'assets'
           $dir = Join-Path $env:RUNNER_TEMP 'bin'
           $withDesktop = Test-Path (Join-Path $assets 'folo-desktop-x86_64-pc-windows-msvc.zip')
-          ./scripts/install.ps1 -BaseUrl $assets -InstallDir $dir -NoModifyPath -Desktop:$withDesktop
+          # The install.ps1 asset (the one users download).
+          & (Join-Path $assets 'install.ps1') -BaseUrl $assets -InstallDir $dir -NoModifyPath -Desktop:$withDesktop
           if ($withDesktop -and -not (Test-Path (Join-Path $dir 'folo-desktop.exe'))) { throw 'folo-desktop.exe was not installed' }
           if ($withDesktop) {
             & (Join-Path $dir 'folo-desktop.exe') --version
