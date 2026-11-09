@@ -449,6 +449,19 @@ export const scenes = [
     },
   },
   {
+    // The watched run finished while another page was open: a toast says so, with "Open run" (no timer: it has an
+    // action). Mock scenario `finishing`: the live run's last epoch lands 3 s after load.
+    name: 'toast-run-finished',
+    path: '/models',
+    search: 'scenario=finishing',
+    fullPage: false,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page) => {
+      await until(page, 'text=finished training', 12000);
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
     // Registering a folder that is already in the list opens it and says so.
     name: 'datasets-add-existing',
     path: '/datasets',

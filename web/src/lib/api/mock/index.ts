@@ -5,7 +5,8 @@
 // `loading` (calls never resolve), `oom` (server inference runs out of GPU memory for every model but folo-n),
 // `gpu-unplugged` (a second GPU is listed until a run asks for it, then `404 device_not_found`), `short-run` (adds a
 // finished 5-epoch run the trainer warns is too short to learn from), `tensor-cores-off` and `no-tensor-cores` (no
-// mixed-precision training: the server's `FOLO_MOCK_TENSOR_CORES=off` / `none`), for screenshots of those states.
+// mixed-precision training: the server's `FOLO_MOCK_TENSOR_CORES=off` / `none`) and `finishing` (the live run reaches its
+// last epoch 3 s after load, for the toast that says so), for screenshots of those states.
 
 import { ApiError, type Api, type RunEventHandlers } from '../client';
 import type {
@@ -61,7 +62,17 @@ import {
 } from './runs';
 import { COCO80 } from './coco';
 
-export type Scenario = 'normal' | 'empty' | 'error' | 'loading' | 'oom' | 'gpu-unplugged' | 'short-run' | 'tensor-cores-off' | 'no-tensor-cores';
+export type Scenario =
+  | 'normal'
+  | 'empty'
+  | 'error'
+  | 'loading'
+  | 'oom'
+  | 'gpu-unplugged'
+  | 'short-run'
+  | 'tensor-cores-off'
+  | 'no-tensor-cores'
+  | 'finishing';
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -269,7 +280,10 @@ function profiles(t0: number, scenario: Scenario = 'normal'): RunProfile[] {
         ]
       : []),
   ];
-  return list.map((p) => ({ ...p, classNames: names(p.config.dataset_id) }));
+  // `finishing`: the live run started so long ago that it completes 3 s from now, and does not loop.
+  const finish = (p: Omit<RunProfile, 'classNames'>) =>
+    scenario === 'finishing' && p.id === 'run_7d1e' ? { ...p, loop: false, startedAt: t0 - p.config.epochs * p.epochSeconds * 1000 + 3000 } : p;
+  return list.map(finish).map((p) => ({ ...p, classNames: names(p.config.dataset_id) }));
 }
 
 /** A prediction before it gets its class name. */
