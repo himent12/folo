@@ -1313,8 +1313,9 @@
     color: var(--text-tertiary);
   }
 
+  /* An inline action is a link: text.primary, underlined on hover, never lime (DESIGN_DIRECTION §2.6). */
   .inline {
-    color: var(--accent-text);
+    color: var(--text-primary);
     font-weight: var(--weight-medium);
   }
   .inline:hover {

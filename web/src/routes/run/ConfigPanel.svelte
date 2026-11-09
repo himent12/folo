@@ -11,6 +11,7 @@
   import type { Origin } from '$lib/lineage';
   import Button from '$lib/ui/Button.svelte';
   import Lineage from '$lib/ui/Lineage.svelte';
+  import Note from '$lib/ui/Note.svelte';
   import Panel from '$lib/ui/Panel.svelte';
   import { toast } from '$lib/ui/toast.svelte';
   import { batchSetting, closeMosaicSetting, headSetting, lrSetting, optimizerSetting, precisionSetting, resolvedRows, type Setting } from './resolved';
@@ -76,13 +77,13 @@
   <dl>
     <!-- A heading only beside Augmentation's; alone in the rail it would name the panel twice. -->
     {#if heading}<p class="group">Training</p>{/if}
-    {#each rows as [k, v] (k)}<dt>{k}</dt>{#if k === 'Weights' && weights}<dd>{#if weights.kind === 'scratch'}From scratch{:else}<Lineage origin={weights} />{/if}</dd>{:else}<dd class="num"><span class:mono={v.ident}>{v.value}</span>{#if v.note}<span class="note">{v.note}</span>{/if}</dd>{/if}{/each}
+    {#each rows as [k, v] (k)}<dt>{k}</dt>{#if k === 'Weights' && weights}<dd>{#if weights.kind === 'scratch'}From scratch{:else}<Lineage origin={weights} />{/if}</dd>{:else}<dd class="num"><span class:mono={v.ident}>{v.value}</span>{#if v.note}<Note text={v.note} />{/if}</dd>{/if}{/each}
   </dl>
 {/snippet}
 {#snippet augmentation(heading: boolean)}
   <dl>
     {#if heading}<p class="group">Augmentation</p>{/if}
-    {#each aug as [k, v] (k)}<dt>{k}</dt><dd class="num">{v.value}{#if v.note}<span class="note">{v.note}</span>{/if}</dd>{/each}
+    {#each aug as [k, v] (k)}<dt>{k}</dt><dd class="num">{v.value}{#if v.note}<Note text={v.note} />{/if}</dd>{/each}
   </dl>
 {/snippet}
 
@@ -157,14 +158,6 @@
     color: var(--text-primary);
   }
   dt {
-    color: var(--text-tertiary);
-  }
-  /* The request beside the value it resolved to, in sans: "(auto)", "(requested 0.01)". */
-  .note {
-    margin-left: var(--space-1);
-    /* It wraps as a whole, never inside "(requested 0.01)". */
-    white-space: nowrap;
-    font-size: var(--type-sm-size);
     color: var(--text-tertiary);
   }
   dd {

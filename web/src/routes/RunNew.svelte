@@ -652,15 +652,23 @@
   }
 </script>
 
+<!-- A value stays in ink; a problem with it is the danger mark before it (DESIGN_DIRECTION §2.6: status hue on the
+     mark, never on the value), and the row's reason is the line under the summary. -->
+{#snippet rvValue(value: string, warn: boolean, mono: boolean)}
+  <span class="rv-end">
+    {#if warn}<CircleAlert class="rv-mark" size={14} strokeWidth={2} aria-hidden="true" />{/if}<span class="rv-v" class:mono>{value}</span>
+  </span>
+{/snippet}
+
 {#snippet reviewList(withName: boolean)}
   <ul class="review" aria-label="Settings">
     {#if withName}
-      <li><button type="button" class="rv" class:warn={!!errors.name} onclick={() => jump('name')}><span class="rv-k">Run name</span><span class="rv-v">{name.trim() || '—'}</span></button></li>
+      <li><button type="button" class="rv" class:warn={!!errors.name} onclick={() => jump('name')} aria-label="Run name: {name.trim() || 'none'}{errors.name ? ', needs attention' : ''}. Edit"><span class="rv-k">Run name</span>{@render rvValue(name.trim() || '—', !!errors.name, false)}</button></li>
     {/if}
     {#each review as r (r.key)}
       <li>
-        <button type="button" class="rv" class:warn={r.warn} onclick={() => jump(r.key)} aria-label="{r.label}: {r.value}. Edit">
-          <span class="rv-k">{r.label}</span><span class="rv-v" class:mono={r.mono}>{r.value}</span>
+        <button type="button" class="rv" class:warn={r.warn} onclick={() => jump(r.key)} aria-label="{r.label}: {r.value}{r.warn ? ', needs attention' : ''}. Edit">
+          <span class="rv-k">{r.label}</span>{@render rvValue(r.value, !!r.warn, !!r.mono)}
         </button>
       </li>
     {/each}
@@ -1574,8 +1582,15 @@
     white-space: nowrap;
     color: var(--text-primary);
   }
-  .rv.warn .rv-v {
-    color: var(--danger-text);
+  .rv-end {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    min-width: 0;
+  }
+  .rv-end :global(.rv-mark) {
+    flex-shrink: 0;
+    color: var(--danger-solid);
   }
   .layout :global([data-jumped]) {
     outline: 2px solid var(--focus);
