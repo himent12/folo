@@ -49,9 +49,12 @@ export const scenes = [
     path: '/runs/run_c19a',
     viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
     setup: async (page) => {
+      // Tabs from 768 px, a picker on phones; wait for either (the QA run's clock is paused, so data lands later).
       const tab = page.locator('[data-tab="loss"]');
+      const pick = page.locator('select[aria-label="Metric to chart"]:visible');
+      await page.locator('[data-tab="loss"]:visible, select[aria-label="Metric to chart"]:visible').first().waitFor();
       if (await tab.isVisible()) await tab.click();
-      else await page.locator('select[aria-label="Metric to chart"]:visible').selectOption('loss');
+      else await pick.selectOption('loss');
       await page.mouse.move(0, 0);
       await page.clock.runFor(500);
     },
@@ -361,9 +364,12 @@ export const scenes = [
     viewports: ['desktop', 'mobile'],
     fullPage: false,
     setup: async (page) => {
+      // Tabs from 768 px, a picker on phones; wait for either (the QA run's clock is paused, so data lands later).
       const tab = page.locator('[data-tab="loss"]');
+      const pick = page.locator('select[aria-label="Metric to chart"]:visible');
+      await page.locator('[data-tab="loss"]:visible, select[aria-label="Metric to chart"]:visible').first().waitFor();
       if (await tab.isVisible()) await tab.click();
-      else await page.locator('select[aria-label="Metric to chart"]:visible').selectOption('loss');
+      else await pick.selectOption('loss');
       await page.locator('button.trigger').click();
       await page.clock.runFor(500);
     },

@@ -67,10 +67,15 @@
     const el = box;
     const content = inner;
     if (!el || !content) return;
-    const ro = new ResizeObserver(() => follow && pin());
+    // Next frame: pinning changes the tail padding, which would resize what is observed inside this callback.
+    let frame = 0;
+    const ro = new ResizeObserver(() => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => follow && pin());
+    });
     ro.observe(el);
     ro.observe(content);
-    return () => ro.disconnect();
+    return () => (cancelAnimationFrame(frame), ro.disconnect());
   });
 
   function onscroll() {
