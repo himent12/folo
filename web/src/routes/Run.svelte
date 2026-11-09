@@ -166,15 +166,28 @@
           {#each [0, 1, 2, 3, 4, 5] as i (i)}<div class="sk-cell"><Skeleton w="56%" h="12px" /><Skeleton w="48%" h="24px" /><Skeleton w="68%" h="12px" /></div>{/each}
         </div>
       </div>
-      <div class="sk-chart"><ChartSkeleton height={320} /></div>
+      <!-- The chart's own header row (title, range control) over its legend and plot, as RunMetrics lays them out. -->
+      <div class="sk-chart">
+        <div class="sk-ch"><Skeleton w="200px" h="14px" /><Skeleton w="104px" h="24px" r="var(--radius-md)" /></div>
+        <ChartSkeleton height={320} />
+      </div>
     </div>
     <div class="sk-pick"><Skeleton w="280px" h="28px" r="var(--radius-md)" /></div>
     <div class="sk-detail">
-      <div class="sk-panel">
-        <div class="sk-ph"><Skeleton w="128px" h="14px" /><span class="sk-ctl"><Skeleton w="160px" h="24px" r="var(--radius-md)" /><Skeleton w="120px" h="24px" r="var(--radius-md)" /></span></div>
-        <div class="sk-pb">
-          <div class="sk-bar"><Skeleton w="min(300px, 60%)" h="12px" /><Skeleton w="200px" h="12px" /></div>
-          <div class="sk-tiles">{#each [0, 1, 2, 3, 4, 5, 6, 7, 8] as i (i)}<Skeleton h="auto" class="sk-tile" r="var(--radius-md)" />{/each}</div>
+      <div class="sk-main">
+        <div class="sk-panel">
+          <div class="sk-ph"><Skeleton w="128px" h="14px" /><span class="sk-ctl"><Skeleton w="160px" h="24px" r="var(--radius-md)" /><Skeleton w="120px" h="24px" r="var(--radius-md)" /></span></div>
+          <div class="sk-pb">
+            <div class="sk-bar"><Skeleton w="min(300px, 60%)" h="12px" /><Skeleton w="200px" h="12px" /></div>
+            <div class="sk-tiles">{#each [0, 1, 2, 3, 4, 5, 6, 7, 8] as i (i)}<Skeleton h="auto" class="sk-tile" r="var(--radius-md)" />{/each}</div>
+          </div>
+        </div>
+        <!-- Logs under the samples (desktop and laptop), growing to the rail's foot like the loaded log. -->
+        <div class="sk-panel sk-logs">
+          <div class="sk-ph"><Skeleton w="56px" h="14px" /><Skeleton w="128px" h="24px" r="var(--radius-md)" /></div>
+          <div class="sk-lines">
+            {#each [0, 1, 2, 3, 4, 5, 6, 7, 8] as i (i)}<Skeleton w="{46 + ((i * 13) % 24)}%" h="10px" />{/each}
+          </div>
         </div>
       </div>
       <div class="sk-rail">
@@ -347,21 +360,42 @@
   .sk-tabs .sk-cell:first-child {
     border-left: 0;
   }
+  /* RunMetrics' chart: 0 16 16 padding, a 48 px header row (8 px above the title), 8 px to the legend. */
   .sk-chart {
-    padding: var(--space-4);
+    display: grid;
+    gap: var(--space-2);
+    padding: 0 var(--space-4) var(--space-4);
+  }
+  .sk-ch {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    min-height: 48px;
+    padding-top: var(--space-2);
   }
   .sk-pick {
     display: none;
   }
+  /* The loaded detail row: samples over logs beside per-class over config, the columns ending together. */
   .sk-detail {
     display: grid;
     grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
     gap: var(--space-4);
-    align-items: start;
+    align-items: stretch;
   }
+  .sk-main,
   .sk-rail {
     display: grid;
+    grid-template-rows: auto minmax(0, 1fr);
     gap: var(--space-4);
+    min-width: 0;
+  }
+  .sk-lines {
+    display: grid;
+    align-content: start;
+    gap: 8px;
+    min-height: 200px;
+    padding: var(--space-2) var(--space-4) var(--space-4);
   }
   .sk-panel {
     background: var(--bg-panel);
@@ -443,9 +477,11 @@
     .sk-detail {
       grid-template-columns: minmax(0, 1fr);
     }
-    .sk-rail {
+    .sk-rail,
+    .sk-logs {
       display: none;
     }
+
     .sk-tiles :global(.sk-tile:nth-child(9)) {
       display: none;
     }

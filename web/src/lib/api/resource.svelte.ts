@@ -40,7 +40,7 @@ export class Resource<T> {
       $effect(() => {
         const t = setInterval(() => {
           if (hub.mode === 'connecting' || untrack(() => this.loading || this.refreshing)) return;
-          if (document.visibilityState === 'visible') void this.refresh();
+          if (document.visibilityState === 'visible') void this.#poll();
         }, every);
         return () => clearInterval(t);
       });
@@ -52,10 +52,19 @@ export class Resource<T> {
     });
   }
 
-  /** Refetch, keeping the current data visible. */
+  /** Refetch, keeping the current data visible (with no data yet, a Retry: back to loading, then the outcome). */
   refresh(): Promise<void> {
     const ctrl = new AbortController();
     return untrack(() => this.#settle(this.#fetcher(ctrl.signal), ctrl, true));
+  }
+
+  /**
+   * A poll: quiet whatever is shown. A known error stays on screen until a poll succeeds, so a page whose server is
+   * offline shows the error (and keeps its actions gated) the whole time, never a loading skeleton at every poll.
+   */
+  #poll(): Promise<void> {
+    const ctrl = new AbortController();
+    return untrack(() => this.#settle(this.#fetcher(ctrl.signal), ctrl, true, true));
   }
 
   /** Replace the data locally (optimistic updates). */
@@ -63,11 +72,12 @@ export class Resource<T> {
     this.data = v;
   }
 
-  async #settle(promise: Promise<T>, ctrl: AbortController, quiet: boolean): Promise<void> {
+  async #settle(promise: Promise<T>, ctrl: AbortController, quiet: boolean, poll = false): Promise<void> {
     this.#ctrl?.abort();
     this.#ctrl = ctrl;
     const seq = ++this.#seq;
-    if (quiet && this.data !== undefined) this.refreshing = true;
+    if (quiet && (this.data !== undefined || (poll && this.error !== undefined))) this.refreshing = true;
+
     else {
       this.loading = true;
       this.error = undefined;

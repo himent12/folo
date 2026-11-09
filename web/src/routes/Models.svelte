@@ -44,6 +44,8 @@
     num?: boolean;
     get: (m: Model) => number | string;
     hide?: 'md' | 'lg';
+    /** Fixed width (header label, sort mark and padding fit in it); the name column takes what is left. */
+    w?: string;
   }
 
   const runById = $derived(new Map<string, Run>((runs.data ?? []).map((r) => [r.id, r])));
@@ -69,17 +71,17 @@
 
   const cols: Col[] = [
     { key: 'name', label: 'Model', get: (m) => m.name.toLowerCase() },
-    { key: 'arch', label: 'Arch', get: (m) => m.arch },
-    { key: 'classes', label: 'Classes', num: true, get: (m) => m.classes.length, hide: 'lg' },
-    { key: 'imgsz', label: 'Input px', num: true, get: (m) => m.imgsz, hide: 'md' },
-    { key: 'params', label: 'Params', num: true, get: (m) => m.params },
-    { key: 'flops', label: 'GFLOPs', num: true, get: (m) => m.flops_g, hide: 'lg' },
-    { key: 'bytes', label: 'Size', num: true, get: (m) => m.bytes, hide: 'md' },
-    { key: 'map50_95', label: 'mAP50-95', num: true, get: (m) => m.metrics?.map50_95 ?? -1 },
-    { key: 'map50', label: 'mAP50', num: true, get: (m) => m.metrics?.map50 ?? -1 },
-    { key: 'source', label: 'Source run', get: (m) => sourceName(m) || '~', hide: 'md' },
-    { key: 'parent', label: 'Started from', get: (m) => parentOf(m)?.label ?? '~', hide: 'lg' },
-    { key: 'created', label: 'Created', num: true, get: (m) => Date.parse(m.created) },
+    { key: 'arch', label: 'Arch', get: (m) => m.arch, w: '72px' },
+    { key: 'classes', label: 'Classes', num: true, get: (m) => m.classes.length, hide: 'lg', w: '84px' },
+    { key: 'imgsz', label: 'Input px', num: true, get: (m) => m.imgsz, hide: 'md', w: '88px' },
+    { key: 'params', label: 'Params', num: true, get: (m) => m.params, w: '80px' },
+    { key: 'flops', label: 'GFLOPs', num: true, get: (m) => m.flops_g, hide: 'lg', w: '84px' },
+    { key: 'bytes', label: 'Size', num: true, get: (m) => m.bytes, hide: 'md', w: '80px' },
+    { key: 'map50_95', label: 'mAP50-95', num: true, get: (m) => m.metrics?.map50_95 ?? -1, w: '96px' },
+    { key: 'map50', label: 'mAP50', num: true, get: (m) => m.metrics?.map50 ?? -1, w: '80px' },
+    { key: 'source', label: 'Source run', get: (m) => sourceName(m) || '~', hide: 'md', w: '112px' },
+    { key: 'parent', label: 'Started from', get: (m) => parentOf(m)?.label ?? '~', hide: 'lg', w: '120px' },
+    { key: 'created', label: 'Created', num: true, get: (m) => Date.parse(m.created), w: '112px' },
   ];
 
   // Default: best first within each dataset.
@@ -123,6 +125,9 @@
     return out;
   });
   const shownCount = $derived(groups.reduce((a, g) => a + g.rows.length, 0));
+  /** Rows to sort, or their skeleton: the sort mark shows only then. */
+  const hasRows = $derived(models.data ? shownCount > 0 : !models.error);
+
 
 
   const dsOptions = $derived.by(() => {
@@ -187,16 +192,19 @@
       <table class="table models" aria-busy={!models.data} aria-label="Models by evaluation dataset" use:rowNav>
         <thead>
           <tr>
+            <!-- With no rows (empty, no match, an error) the headers are plain labels: no sort mark over a message. -->
             {#each cols as c (c.key)}
               <SortHeader
                 label={c.label}
                 class={hideCls(c)}
                 align={c.num ? 'right' : 'left'}
-                dir={sortKey === c.key ? sortDir : null}
-                disabled={!models.data}
+                width={c.w}
+                dir={sortKey === c.key && hasRows ? sortDir : null}
+                disabled={!models.data || shownCount === 0}
                 onsort={() => sortBy(c)}
               />
             {/each}
+
           </tr>
         </thead>
         {#if models.error && !models.data}

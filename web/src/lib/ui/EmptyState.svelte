@@ -43,7 +43,13 @@
   .empty > :not(.mark) {
     grid-column: -2;
   }
+  /* Frameless in a page's content slot (nothing to frame yet: Compare with no runs, a run that is gone), the page's
+     content edge is its edge, so the mark lines up with the title above it. */
+  :global(.page) > .empty {
+    padding: var(--space-1) 0;
+  }
   /* Inside a padded panel the panel's own padding is the edge. */
+
   :global(.pad-md > .body) > .empty,
   :global(.pad-sm > .body) > .empty {
     padding: var(--space-1) 0;

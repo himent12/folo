@@ -39,7 +39,10 @@ describe('Dataset stats: health findings', () => {
     const ev = target.querySelector(`#${shows[1]!.getAttribute('aria-controls')}`);
     expect(shows[1]!.getAttribute('aria-expanded')).toBe('true');
     expect(shows[1]!.textContent?.trim()).toBe('Hide the warnings');
-    expect(ev?.closest('li')?.classList.contains('warning')).toBe(true);
+    // A full-width row of its own, right after its finding (the grid packs the next finding beside that one).
+    expect(ev?.matches('li.evidence')).toBe(true);
+    expect(ev?.previousElementSibling?.classList.contains('warning')).toBe(true);
+
     // Filtered: no severity control inside a finding.
     expect(ev?.querySelector('[role="radio"]')).toBeNull();
     shows[0]!.click();

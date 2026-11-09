@@ -592,7 +592,7 @@
   {:else if predicting}
     <div class="t-sk"><Skeleton h="28px" w="50%" /><Skeleton h="8px" /><Skeleton h="14px" /><Skeleton h="14px" /></div>
   {:else}
-    <p class="hint">Time per stage of the last prediction.</p>
+    <p class="hint">Timing appears after a run.</p>
   {/if}
 {/snippet}
 
@@ -1566,7 +1566,8 @@
       grid-template-columns: minmax(0, 1fr);
     }
     /* One column: the canvas takes the image's aspect at the full width, up to the canvas height, so the image fills
-       it edge to edge; empty, it is as tall as its content (the drop target and the samples). */
+       it edge to edge; empty, it is as tall as its content (the drop target and the samples, DropZone), never held at
+       the viewport's height: a sparse state gets a compact composition, so the samples sit in the first screen. */
     .layout.fit .stage {
       height: auto;
       aspect-ratio: var(--ar);
@@ -1574,6 +1575,7 @@
     }
     .stage.empty {
       height: auto;
+      min-height: 0;
     }
     /* The toolbar row takes the title row's place for the controls; no extra gap under the title. */
     .pg-tools {
@@ -1613,9 +1615,13 @@
     .thresholds {
       grid-row: span 2;
     }
-    .thresholds,
-    .timing {
+    .thresholds {
       display: grid;
+    }
+    /* Content-sized: Timing sits right under Classes and is as tall as what it holds (one line before a run), never
+       stretched to Thresholds' height. */
+    .timing {
+      align-self: start;
     }
   }
   @media (max-width: 767px) {

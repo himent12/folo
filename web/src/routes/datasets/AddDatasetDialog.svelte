@@ -73,6 +73,12 @@
    *  was typed are still checked on submit, next to their fields. */
   const missing = $derived(mode === 'folder' ? (path.trim() ? null : 'Enter a folder path') : classes.length || classDraft.trim() ? null : 'Add at least one class');
   const show = (e: string | null | undefined) => (touched ? (e ?? null) : null);
+  const FIX: Record<string, string> = { name: 'Fix the name first', path: 'Enter a folder path', images: 'Fix the image count first', classes: 'Add at least one class', seed: 'Fix the seed first' };
+  /** Once a field shows its error, the action is gated on it too (a lime button beside a red field invites a press
+   *  that cannot work), saying which; it lifts as soon as the field is fixed. */
+  const shownError = $derived(touched ? Object.entries(errs).find(([, e]) => e)?.[0] : undefined);
+  const reason = $derived(missing ?? (shownError ? (FIX[shownError] ?? null) : null));
+
 
   function addClasses(raw: string) {
     const next = raw
@@ -223,7 +229,8 @@
   </div>
   {#snippet footer()}
     <Button variant="ghost" onclick={() => (open = false)}>Cancel</Button>
-    <Gate reason={missing}>
+    <Gate {reason}>
+
       {#snippet children(why)}
         <Button variant="primary" type="submit" form="{uid}-form" loading={busy} disabled={!!why} aria-describedby={why} icon={mode === 'synthetic' ? Sparkles : FolderOpen}>
           {mode === 'folder' ? 'Register' : 'Generate'}

@@ -146,7 +146,9 @@
         {/if}
       {/if}
       {#if many}
-        <button type="button" class="clear mode" aria-pressed={allCurves} onclick={() => (allCurves = !allCurves)}>{allCurves ? 'Show the band' : `All ${classes.length} curves`}</button>
+        <!-- Short, so the legend keeps one line in the laptop's narrower column (the count is in the panel's meta). -->
+        <button type="button" class="clear mode" aria-pressed={allCurves} onclick={() => (allCurves = !allCurves)}>{allCurves ? 'Show band' : 'All curves'}</button>
+
       {/if}
     </div>
     <div class="plot" class:fill bind:clientHeight={plotH}>
@@ -198,14 +200,18 @@
             <col class="c-inst" />
           </colgroup>
         {/if}
+        <!-- Wider screens: bounded columns (the class 224 px, each number 96 px) and an empty last column that takes
+             what is left, so 3 or 80 classes read as one compact block on the left, never figures strewn across the
+             panel. -->
         <thead>
           <tr>
-            <th scope="col" class="cls-h">Class</th>
-            <th scope="col" class="r">AP50</th>
-            <th scope="col" class="r">AP50-95</th>
-            <th scope="col" class="r hide-sm">Precision</th>
-            <th scope="col" class="r hide-sm">Recall</th>
-            <th scope="col" class="r">Instances</th>
+            <th scope="col" class="cls-h" style:width={narrow ? undefined : '224px'}>Class</th>
+            <th scope="col" class="r" style:width={narrow ? undefined : '96px'}>AP50</th>
+            <th scope="col" class="r" style:width={narrow ? undefined : '96px'}>AP50-95</th>
+            <th scope="col" class="r hide-sm" style:width={narrow ? undefined : '96px'}>Precision</th>
+            <th scope="col" class="r hide-sm" style:width={narrow ? undefined : '96px'}>Recall</th>
+            <th scope="col" class="r" style:width={narrow ? undefined : '96px'}>Instances</th>
+            {#if !narrow}<th class="rest" aria-hidden="true"></th>{/if}
           </tr>
         </thead>
         <tbody>
@@ -257,6 +263,7 @@
               <td class="r hide-sm muted">{metric(c.precision)}</td>
               <td class="r hide-sm muted">{metric(c.recall)}</td>
               <td class="r muted">{num(c.instances)}</td>
+              {#if !narrow}<td class="rest" aria-hidden="true"></td>{/if}
             </tr>
             {#if open}
               <tr class="detail" class:on id="pr-detail-{c.class}">
@@ -274,7 +281,7 @@
               </tr>
             {/if}
           {:else}
-            <tr><td colspan="6" class="none">No class matches “{query.trim()}”</td></tr>
+            <tr><td colspan={narrow ? COLS_NARROW : 7} class="none">No class matches “{query.trim()}”</td></tr>
           {/each}
         </tbody>
       </table>
@@ -439,7 +446,11 @@
   .cls-h {
     padding-left: calc(var(--space-4) + var(--space-4));
   }
+  .rest {
+    padding: 0;
+  }
   .cls-cell {
+
     display: flex;
     align-items: center;
     min-width: 0;

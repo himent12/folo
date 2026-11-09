@@ -1393,19 +1393,14 @@
     color: var(--text-secondary);
     font-weight: var(--weight-medium);
   }
-  /* Mixed precision has no neighbour on its row: one row of its own height, not the pair's three (whose control row
-     would hold 32 px for a one-line hint). */
+  /* Mixed precision is the fifth field of a two-column grid: a settings row across the full width (label and hint on
+     the left, the track at the section's right edge), one row of its own height, never a lone half-row beside a hole.
+     Where the server cannot train in mixed precision, its remedy (ui/Remedy: a sentence, the command on one line) has
+     the same full width, so the command fits whole. */
   .fields > .sw-field.amp {
+    grid-column: 1 / -1;
     grid-row: auto;
     grid-template-rows: none;
-  }
-  /* Where the server cannot train in mixed precision, its remedy (ui/Remedy: a sentence, the command on one line) takes
-     the row's full width, so the command fits whole; the switch keeps its column's width. */
-  .fields > .sw-field.amp.off {
-    grid-column: 1 / -1;
-  }
-  .fields > .sw-field.amp.off > :global(.switch) {
-    width: calc(50% - var(--space-5) / 2);
   }
   .fields > .sw-field > .sw-why {
     align-self: start;
@@ -1910,9 +1905,7 @@
       grid-row: auto;
       grid-template-rows: none;
     }
-    .fields > .sw-field.amp.off > :global(.switch) {
-      width: auto;
-    }
+
     .aug-preview {
       position: static;
       order: -1;
