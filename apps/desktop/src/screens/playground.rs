@@ -245,7 +245,7 @@ impl FoloApp {
         let prefix = prefix_all.clone().filter(|_| show_prefix);
         let file_budget =
             (room - if show_size { SIZE_W } else { 0. } - if show_prefix { full_w - file_w } else { 0. })
-                .clamp(80., 520.);
+                .clamp(room.clamp(40., 80.), 520.);
         // The tip carries everything the toolbar shed: the dataset, the size, a cut file name.
         let tip_text = {
             let base = if prefix_all.is_some() && !show_prefix { name.to_string() } else { file.clone() };
@@ -360,18 +360,24 @@ impl FoloApp {
                                 })
                                 .child(
                                     // A long file name ends in "…" at its known budget, as GPUI needs.
-                                    div()
-                                        .id("play-file-name")
-                                        .flex_none()
-                                        .when(file_tip, |d| {
-                                            d.tooltip(crate::controls::tip(tip_text.clone(), None))
-                                        })
-                                        .child(
-                                            text(ty::SM, t.text_primary)
-                                                .w(px(file_w.min(file_budget).ceil()))
-                                                .ellipsis()
-                                                .child(file.clone()),
-                                        ),
+                                    // What the toolbar shed shows on hover and on keyboard focus.
+                                    self.disclose(
+                                        div().id("play-file-name"),
+                                        "play-file-name",
+                                        tip_text.clone(),
+                                        file_tip,
+                                        28.,
+                                        true,
+                                        window,
+                                        cx,
+                                    )
+                                    .flex_none()
+                                    .child(
+                                        text(ty::SM, t.text_primary)
+                                            .w(px(file_w.min(file_budget).ceil()))
+                                            .ellipsis()
+                                            .child(file.clone()),
+                                    ),
                                 ),
                         )
                     })

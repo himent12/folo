@@ -849,25 +849,26 @@ impl FoloApp {
         let hover = self.chart_hover;
         // The P/R chart's operating point follows the cursor: each epoch's own best-F1 confidence.
         let pr_conf = {
-            let pts: Vec<(f32, f32)> = self
+            // Every validated epoch, its confidence optional: the cursor picks the epoch the P/R
+            // series picks (nearest x), then reads that epoch's own value, unknown included.
+            let epochs: Vec<(f32, Option<f32>)> = self
                 .store
                 .run_data
                 .get(&r.id)
                 .and_then(|x| x.ready())
-                .map(|x| {
-                    x.metrics
-                        .epochs
-                        .iter()
-                        .filter_map(|e| e.val.best_f1_conf.map(|c| (e.epoch as f32, c)))
-                        .collect()
-                })
+                .map(|x| x.metrics.epochs.iter().map(|e| (e.epoch as f32, e.val.best_f1_conf)).collect())
                 .unwrap_or_default();
             let total = if r.status.is_active() || r.status == RunStatus::Completed {
                 r.epochs as f32
             } else {
                 r.epoch.max(1) as f32
             };
-            crate::charts::value_at(&pts, hover, 0., total)
+            let xs: Vec<(f32, f32)> = epochs.iter().map(|e| (e.0, 0.)).collect();
+            let at = match hover {
+                Some(f) => crate::charts::nearest(&xs, total * f),
+                None => epochs.len().checked_sub(1),
+            };
+            at.and_then(|i| epochs[i].1)
         };
         let view = cx.entity().downgrade();
         let on_hover: HoverFn = Rc::new(move |f, _, cx| {
