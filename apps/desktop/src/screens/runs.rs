@@ -1587,18 +1587,12 @@ fn pr_floor(low: f32) -> f32 {
 /// `D:\data\x.folo` → `D:/data/x.folo`: only whitespace-separated words that start with a drive
 /// (a letter, `:`, a separator) change, so a Unix path or escaped text with `\` keeps it.
 /// A log message as shown: Windows paths with `/`, split into its " · " fields, each but the
-/// last keeping its dot. Rows lay the fields out unbroken in a wrapping row, so a long entry
+/// first led by its dot (a wrapped line starts "· mAP50 0.745" instead of ending on "·"). Rows lay the fields out unbroken in a wrapping row, so a long entry
 /// breaks between fields, never inside "mAP50 0.745" (GPUI's wrapper breaks before any
 /// non-word character, so a no-break space can't hold a pair together).
 fn log_fields(s: &str) -> Vec<String> {
     let s = slash_paths(s);
-    let parts: Vec<&str> = s.split(" · ").collect();
-    let n = parts.len();
-    parts
-        .into_iter()
-        .enumerate()
-        .map(|(i, f)| if i + 1 < n { format!("{f} ·") } else { f.to_string() })
-        .collect()
+    s.split(" · ").enumerate().map(|(i, f)| if i > 0 { format!("· {f}") } else { f.to_string() }).collect()
 }
 
 fn slash_paths(s: &str) -> String {
@@ -1620,7 +1614,7 @@ mod tests {
     #[test]
     fn log_lines_break_between_fields() {
         let f = super::log_fields("epoch 32/100 · mAP50-95 0.594 · mAP50 0.745 · 14.3 s");
-        assert_eq!(f, ["epoch 32/100 ·", "mAP50-95 0.594 ·", "mAP50 0.745 ·", "14.3 s"]);
+        assert_eq!(f, ["epoch 32/100", "· mAP50-95 0.594", "· mAP50 0.745", "· 14.3 s"]);
         assert_eq!(super::log_fields("loaded 3 classes"), ["loaded 3 classes"]);
     }
 
