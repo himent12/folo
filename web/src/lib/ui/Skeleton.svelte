@@ -40,10 +40,11 @@
     background: var(--bg-raised);
     animation: none;
   }
-  /* Light: bg.raised is a hair off white, so a grid of them reads as a blank page. The same step the dark raised fill
-     takes from its surface, the other way: a grey well a step below the app background, framed by its corners. */
+  /* Light: bg.raised is a hair off white, so a grid of them reads as a blank page. The step the dark raised fill takes
+     from the app background (about 1.1:1), taken the other way: bg.active over bg.raised, a grey a step below the app
+     background, framed by its corners. */
   :global([data-theme='light']) .image {
-    background: var(--bg-inset);
+    background: linear-gradient(var(--bg-active), var(--bg-active)) var(--bg-raised);
   }
   /* The viewfinder: four 12 px corners of a frame 8 px in from the edges (a mask keeps only the corners). */
   .image::before {

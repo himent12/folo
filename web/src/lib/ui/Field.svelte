@@ -67,7 +67,6 @@
   }
   .msg code {
     font-family: var(--font-mono);
-    color: var(--text-secondary);
   }
   .msg.error {
     display: flex;

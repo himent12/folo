@@ -652,7 +652,9 @@
   .cap-state:not([data-state='on']) :global(svg) {
     color: var(--text-tertiary);
   }
+  /* A command stays whole (never "--tensor-" / "cores"). */
   .note code {
+    white-space: nowrap;
     font-family: var(--font-mono);
     color: var(--text-secondary);
   }

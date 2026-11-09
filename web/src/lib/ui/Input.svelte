@@ -81,6 +81,15 @@
   input::placeholder {
     color: var(--text-tertiary);
   }
+  /* The browser's clear button of a search field: neutral ink, not the platform's blue. */
+  input::-webkit-search-cancel-button {
+    filter: grayscale(1);
+    opacity: 0.6;
+    cursor: pointer;
+  }
+  input::-webkit-search-cancel-button:hover {
+    opacity: 1;
+  }
   input:focus-visible {
     outline: none;
   }

@@ -277,7 +277,7 @@
               <span class="r-text">
                 <span class="r-name"><StatusBadge status={r.status} plain dotOnly /><span class="name truncate">{r.name}</span></span>
                 <!-- With the checkboxes in, the dataset steps out so the cause and progress keep the line. -->
-                <span class="r-meta num truncate">{failureCause(r) ?? STATUS[r.status]} · {r.epoch}/{r.epochs}{#if !choosing} · {dsName.get(r.config.dataset_id) ?? r.config.dataset_id}{/if}</span>
+                <span class="r-meta num truncate">{failureCause(r) ?? STATUS[r.status]} · {r.epoch}/{r.epochs}{choosing ? '' : ` · ${dsName.get(r.config.dataset_id) ?? r.config.dataset_id}`}</span>
               </span>
               <span class="r-end"><span class="r-val num">{metric(r.best?.map50_95)}</span><span class="r-age">{ago(r.created)}</span></span>
             </a>
