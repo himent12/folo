@@ -1,6 +1,6 @@
 <script lang="ts">
   /**
-   * Validation samples: the same 16 images every epoch, predictions (solid, class colour) over ground truth (dashed,
+   * Evaluation samples (lib/evaluated `scoresTitle`): the same 16 images every epoch, predictions (solid, class colour) over ground truth (dashed,
    * neutral in the thumbnails). Follows the
    * latest epoch while the run is live; pick any earlier epoch to see how detections improved.
    */
@@ -17,17 +17,18 @@
   import Slider from '$lib/ui/Slider.svelte';
   import { MediaQuery } from 'svelte/reactivity';
   import { media } from '$lib/design/tokens';
+  import { scoresTitle } from '$lib/evaluated';
 
   let {
     runId,
     classes,
     epochsDone,
-    title = 'Validation samples',
+    title = `${scoresTitle(null)} samples`,
   }: {
     runId: string;
     classes: string[];
     epochsDone: number;
-    /** "Validation samples", or the split they are really from ("Training-split samples", lib/evaluated). */
+    /** "Validation samples", or the split they are really from ("Training-split samples", lib/evaluated `scoresTitle`). */
     title?: string;
   } = $props();
 

@@ -499,6 +499,11 @@
    */
   const vramLevel = $derived(onCpu || !gpuMem ? null : vramPct > 1 ? ('danger' as const) : vramPct > 0.9 ? ('warning' as const) : null);
   const noFit = $derived(vramLevel === 'danger');
+  /**
+   * Whether these settings fit the GPU: `fits`, `no` (forecast over its memory) or `unknown` (the adapter does not report
+   * its memory, so nothing can be checked); null on the CPU, where GPU memory does not apply.
+   */
+  const vramFit = $derived(onCpu ? null : !gpuMem ? ('unknown' as const) : noFit ? ('no' as const) : ('fits' as const));
 
   // Settings forecast not to fit: the one primary becomes the change that fits ("Use batch 8"), chosen by lib/oom's
   // `fitFix` from the same forecast as the figure above (the server's estimate, else the reference model) with 10% of
@@ -835,8 +840,9 @@
             <a class="link" href={href(`/runs/${oomRun.id}`)}>{oomRun.name}</a> ran out of GPU memory at
             {#if oomChanges.length}{oomChanges.map((x) => x.was).join(', ')}.
               <!-- "Now …" claims a fix only when the forecast above says it fits; otherwise it says the change is not
-                   enough, and the rail's one primary ("Use batch 8") is the change that is. -->
-              {#if noFit}{capital(oomChanges.map((x) => x.now).join(', '))} still won't fit: {roughBytes(vram)} of {bytes(gpuMem, prefs.units)}.{:else if !onCpu && gpuMem}Now <span class="nowrap">{oomChanges.map((x) => x.now).join(', ')} · {roughBytes(vram)}</span>{vramLevel === 'warning' ? `, close to this GPU's ${bytes(gpuMem, prefs.units)}` : ''}.{:else}Now {oomChanges.map((x) => x.now).join(', ')}.{/if}{:else}batch {oomRun.config.batch}, {oomRun.config.imgsz} px. These are the same settings: lower the batch or image size, or pick a smaller model.{/if}
+                   enough, and the rail's one primary ("Use batch 8") is the change that is. A GPU that does not report
+                   its memory gets the figure and says the fit cannot be checked, never a fix it cannot vouch for. -->
+              {#if vramFit === 'no'}{capital(oomChanges.map((x) => x.now).join(', '))} still won't fit: {roughBytes(vram)} of {bytes(gpuMem, prefs.units)}.{:else if vramFit === 'fits'}Now <span class="nowrap">{oomChanges.map((x) => x.now).join(', ')} · {roughBytes(vram)}</span>{vramLevel === 'warning' ? `, close to this GPU's ${bytes(gpuMem, prefs.units)}` : ''}.{:else if vramFit === 'unknown'}Now <span class="nowrap">{oomChanges.map((x) => x.now).join(', ')} · {roughBytes(vram)}</span> · this GPU doesn't report its memory, so the fit can't be checked.{:else}Now {oomChanges.map((x) => x.now).join(', ')}.{/if}{:else}batch {oomRun.config.batch}, {oomRun.config.imgsz} px. These are the same settings: lower the batch or image size, or pick a smaller model.{/if}
           </span>
         </p>
       {/if}

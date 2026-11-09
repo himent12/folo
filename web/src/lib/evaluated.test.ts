@@ -114,6 +114,10 @@ describe('runEvalSource / scoresTitle', () => {
     const full = runEvalSource({ id: 'ds_f', name: 'fasteners', splits: { train: 1920, val: 360, test: 120 } });
     expect(scoresTitle(full)).toBe('Validation');
     expect(fallbackNotice(full!)).toBeNull();
-    expect(scoresTitle(runEvalSource(undefined))).toBe('Validation');
+    // Unknown provenance (the dataset is not registered, or not loaded yet) is never called validation.
+    expect(scoresTitle(runEvalSource(undefined))).toBe('Evaluation');
+    expect(scoresTitle(null)).toBe('Evaluation');
+    expect(scoresTitle({ datasetId: null, datasetName: null, split: null, fallback: null })).toBe('Evaluation');
+    expect(scoresTitle({ datasetId: 'ds_t', datasetName: 'test-only', split: 'test', fallback: null })).toBe('Test-split');
   });
 });

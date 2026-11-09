@@ -208,7 +208,7 @@
   /** What the run will have once it trains, in place of the empty frames (the waiting layout). */
   const later = $derived([
     { name: 'Metrics', what: 'mAP, precision and recall, loss, LR and throughput, by epoch' },
-    { name: 'Samples', what: 'Predictions on 16 validation images after every epoch' },
+    { name: 'Samples', what: `Predictions on 16 ${scoresTitle(evalOn).toLowerCase()} images after every epoch` },
     { name: 'Per class', what: `AP for each of ${dataset?.classes.length ?? 'its'} classes` },
     { name: 'Logs', what: "The trainer's output, live" },
   ]);

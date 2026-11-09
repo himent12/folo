@@ -41,19 +41,33 @@ export function sheetDrag(node: HTMLElement, opts: SheetDragOptions) {
     if (from === null || e.pointerId !== pointer) return;
     move(e.clientY - from);
   }
-  function up(e: PointerEvent) {
-    if (from === null || e.pointerId !== pointer) return;
+  /** Ends the drag: the sheet back in place, the pointer released. Returns how far it had been pulled. */
+  function end(e: PointerEvent): number | null {
+    if (from === null || e.pointerId !== pointer) return null;
+    const pulled = dy;
     from = null;
+    pointer = -1;
+    if (node.hasPointerCapture?.(e.pointerId)) node.releasePointerCapture(e.pointerId);
     const el = o.sheet();
     if (el) el.style.transition = '';
-    const far = dy > SHEET_CLOSE_PX;
     move(0);
-    if (far) o.close();
+    dy = 0;
+    return pulled;
+  }
+  function up(e: PointerEvent) {
+    const pulled = end(e);
+    if (pulled !== null && pulled > SHEET_CLOSE_PX) o.close();
+  }
+  // The browser or the system took the pointer (a scroll, a call, a lost capture): the sheet springs back and stays
+  // open whatever the pull, since nobody let go.
+  function cancel(e: PointerEvent) {
+    end(e);
   }
   node.addEventListener('pointerdown', down);
   node.addEventListener('pointermove', moved);
   node.addEventListener('pointerup', up);
-  node.addEventListener('pointercancel', up);
+  node.addEventListener('pointercancel', cancel);
+  node.addEventListener('lostpointercapture', cancel);
   return {
     update(next: SheetDragOptions) {
       o = next;
@@ -62,7 +76,8 @@ export function sheetDrag(node: HTMLElement, opts: SheetDragOptions) {
       node.removeEventListener('pointerdown', down);
       node.removeEventListener('pointermove', moved);
       node.removeEventListener('pointerup', up);
-      node.removeEventListener('pointercancel', up);
+      node.removeEventListener('pointercancel', cancel);
+      node.removeEventListener('lostpointercapture', cancel);
     },
   };
 }

@@ -47,11 +47,14 @@ export function runEvalSource(d: Pick<Dataset, 'id' | 'name' | 'splits'> | null 
 }
 
 /**
- * The scores' name where a title names them: "Validation" ("Validation mAP50-95", "Validation samples"), else the
- * split they are really on ("Training-split mAP50-95"). "Validation" while the split is unknown, as before.
+ * The scores' name where a title names them: "Validation" ("Validation mAP50-95", "Validation samples") on a known
+ * validation split, else the split they are really on ("Training-split mAP50-95"). "Evaluation" while the split is
+ * unknown (a run whose dataset is not registered may have trained without validation images): never "Validation"
+ * without knowing.
  */
 export function scoresTitle(s: EvalSource | null | undefined): string {
-  if (!s || s.split === null || s.split === 'val') return 'Validation';
+  if (!s || s.split === null) return 'Evaluation';
+  if (s.split === 'val') return 'Validation';
   const w = splitWord(s.split);
   return `${w.charAt(0).toUpperCase()}${w.slice(1)}-split`;
 }

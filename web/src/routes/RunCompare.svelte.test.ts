@@ -101,4 +101,39 @@ describe('Compare runs on a phone: two at a time', () => {
     check(names[2]!, target.querySelectorAll('#cmp-table thead th .th-name')[1]?.textContent ?? '');
     expect(target.querySelectorAll('#cmp-table thead th .th-name')[1]?.textContent).not.toBe(names[0]);
   });
+
+  it('forgets a baseline removed from the comparison: adding that run back does not make it the baseline again', async () => {
+    const runs = (await hub.api.runs()).filter((r) => r.status !== 'queued').slice(0, 4);
+    const names = runs.map((r) => r.name);
+    const all = runs.map((r) => r.id);
+    setWidth(390);
+    router.route = parse(`#/runs/compare?ids=${all.join(',')}`);
+    c = mount(RunCompare, { target });
+    await until(() => target.querySelector('#cmp-table table.two'), 'the paired table');
+    const heads = () => [...target.querySelectorAll('#cmp-table thead th .th-name')].map((th) => th.textContent);
+
+    // Run C becomes the baseline.
+    target.querySelector<HTMLButtonElement>('button[aria-label="Next run"]')!.click();
+    flushSync();
+    target.querySelector<HTMLButtonElement>(`#cmp-table button[aria-label="Make ${names[2]} the baseline"]`)!.click();
+    flushSync();
+    expect(heads()[0]).toBe(names[2]);
+
+    // Remove run C (its chip's Remove, in the phone's Edit sheet): run A is the baseline.
+    target.querySelector<HTMLButtonElement>('button.manage')!.click();
+    flushSync();
+    const rm = await until(() => document.querySelector<HTMLButtonElement>(`button[aria-label="Remove ${names[2]}"]`), 'the Remove button');
+    rm.click();
+    flushSync();
+    expect(router.route.query.get('ids')).toBe([all[0], all[1], all[3]].join(','));
+    await until(() => target.querySelector('#cmp-table table.two'), 'the paired table again');
+    expect(heads()[0]).toBe(names[0]);
+
+    // Add run C back: run A stays the baseline; C is just another run to page to.
+    router.go(`/runs/compare?ids=${all.join(',')}`, { replace: true });
+    flushSync();
+    await until(() => target.querySelectorAll('.chip').length === 4, 'four runs again');
+    expect(heads()[0]).toBe(names[0]);
+    expect(target.querySelector('#cmp-table thead th .base-tag')?.closest('th')?.querySelector('.th-name')?.textContent).toBe(names[0]);
+  });
 });

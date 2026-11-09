@@ -166,6 +166,20 @@ describe('New run after running out of GPU memory', () => {
     const note = await until(() => (target.querySelector('.oom-note')?.textContent?.includes('Now') ? target.querySelector('.oom-note') : null), 'the note');
     expect(note!.textContent?.replace(/\s+/g, ' ')).toMatch(/at batch 32\. Now batch 8 · ~13\.\d GiB\./);
   });
+  it("gives the figure and says the fit can't be checked where the GPU doesn't report its memory (memory_bytes 0)", async () => {
+    hub.api = api = new MockApi('normal', 0);
+    const sys = api.system.bind(api);
+    vi.spyOn(api, 'system').mockImplementation(async () => {
+      const r = await sys();
+      return { ...r, gpus: r.gpus.map((g) => ({ ...g, memory_bytes: 0 })) };
+    });
+    // Batch 16 is forecast over the mock's 16 GiB elsewhere; with no size reported, neither "fits" nor "won't fit".
+    await open('?from=run_a2f0&batch=16');
+    const note = await until(() => (target.querySelector('.oom-note')?.textContent?.includes('Now') ? target.querySelector('.oom-note') : null), 'the note');
+    const text = note!.textContent!.replace(/\s+/g, ' ');
+    expect(text).toMatch(/at batch 32\. Now batch 16 · ~[\d.]+ GiB · this GPU doesn't report its memory, so the fit can't be checked\./);
+    expect(text).not.toContain("won't fit");
+  });
   it('makes the change that fits the one primary while the settings are forecast not to fit, and Start a secondary', async () => {
     hub.api = api = new MockApi('normal', 0);
     // "Retry with batch 16" as round 22 offered it: folo-m at 960 px, ~26.9 GiB on the mock's 16 GiB GPU.

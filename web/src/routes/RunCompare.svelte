@@ -284,6 +284,14 @@
   let allRuns = $state(false);
   let otherAt = $state(0);
   let baselineId = $state<string | null>(null);
+  // A baseline removed from the comparison is forgotten, not latent: the table falls back to the first run, and adding
+  // that run again later must not quietly make it the baseline once more.
+  $effect(() => {
+    const cur = ids;
+    untrack(() => {
+      if (baselineId !== null && !cur.includes(baselineId)) baselineId = null;
+    });
+  });
   const pairMode = $derived(narrow && chosen.length > 2 && !allRuns);
   const base = $derived(chosen.find((r) => r.id === baselineId) ?? chosen[0]);
   const others = $derived(chosen.filter((r) => r !== base));
