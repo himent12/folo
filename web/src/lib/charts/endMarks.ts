@@ -47,7 +47,7 @@ export function mergedEnds(markers: readonly { x: number; y: number }[], ends: r
 }
 
 /** How much larger (px of radius) a live run's filled lime dot is than the 3 px end dot: the heartbeat's mark. */
-export const LIVE_GROW = 0.5;
+export const LIVE_GROW = 1;
 
 /** The latest value of a live run: the running mark's lime, whatever the line's own ink. */
 export const LIVE_INK = 'var(--accent-line)';

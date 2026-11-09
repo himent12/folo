@@ -3,7 +3,7 @@
 // `search` adds query params to the page URL (e.g. `scenario=empty` for the mock), next to `mock=1`.
 
 /** @typedef {{ name: string, path: string, themes?: ('dark' | 'light')[], viewports?: ('desktop' | 'laptop' | 'tablet' | 'mobile')[], advance?: number, search?: string,
- *   fullPage?: boolean, setup?: (page: import('playwright-core').Page, ctx: { vp: string, theme: string }) => Promise<void> }} Scene */
+ *   fullPage?: boolean, keepScroll?: boolean, setup?: (page: import('playwright-core').Page, ctx: { vp: string, theme: string }) => Promise<void> }} Scene */
 
 /**
  * Advances the page's fake clock until `selector` is visible (the mock's latency runs on that clock).
@@ -944,6 +944,7 @@ export const scenes = [
     path: '/models/m_fast_n',
     viewports: ['desktop', 'laptop'],
     fullPage: false,
+    keepScroll: true,
     setup: async (page) => {
       await until(page, '#cm .cell');
       await page.locator('.cls-part').first().evaluate((el) => el.scrollIntoView({ block: 'end' }));

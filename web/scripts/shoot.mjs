@@ -367,11 +367,12 @@ async function shoot(scene, theme, vp) {
     // Capture what a user sees: from the top, with no stray focus ring on the skip link. For full-page shots the
     // viewport grows to the document's height, so sticky and fixed bars (top bar, tab bar, docks) sit where they
     // belong instead of wherever the viewport happened to be when the image was stitched.
-    await page.evaluate(() => {
-      window.scrollTo(0, 0);
+    // A scene that scrolled on purpose (`keepScroll`, a viewport shot of a sticky rail) keeps its scroll.
+    await page.evaluate((keep) => {
+      if (!keep) window.scrollTo(0, 0);
       const a = document.activeElement;
       if (a instanceof HTMLElement && a.classList.contains('skip')) a.blur();
-    });
+    }, !!scene.keepScroll && !full);
     // Only pages with a visible fixed bar need it; others keep their real viewport (some size to 100dvh).
     const hasFixedBar = await page.evaluate(() =>
       [...document.querySelectorAll('body *')].some((el) => {

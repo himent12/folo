@@ -467,7 +467,7 @@
                 <td class="k">Best mAP50-95<span class="k-sub">any epoch</span></td>
                 {#each shown as r (r.id)}
                   {@const win = bestOf.get(r.id)?.word}
-                  <td class="num" class:winner={!!win}>{bestScore(r)}{#if win}<span class="tag">{win}</span>{/if}</td>
+                  <td class="num" class:winner={!!win}>{bestScore(r)}{#if win}{' '}<span class="tag" data-fact>{win}</span>{/if}</td>
                 {/each}
                 {@render rest()}
               </tr>
@@ -1249,8 +1249,17 @@
     color: var(--text-primary);
     font-weight: var(--weight-semibold);
   }
+  /* A fact: in a narrow column the word moves, whole, under its value, never cut ("best on fast…" at 820). */
+  .fixed td.winner {
+    white-space: normal;
+  }
+  /* A phone's pair columns are narrower than "best on shapes-hard": there it wraps at its spaces. */
+  .two .tag {
+    white-space: normal;
+  }
   .tag {
-    margin-left: 6px;
+    display: inline-block;
+    white-space: nowrap;
     color: var(--text-tertiary);
     font-size: var(--type-sm-size);
     font-weight: var(--weight-regular);

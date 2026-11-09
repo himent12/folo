@@ -280,7 +280,7 @@
               <span class="preview">
                 {#if t.value === 'system'}
                   <!-- Both themes, each a whole window of its own: dark on the left, light on the right, a 1 px seam. -->
-                  <span class="split"><ThemePreview theme="dark" /><span class="seam"></span><ThemePreview theme="light" /></span>
+                  <span class="split"><ThemePreview theme="dark" half /><span class="seam"></span><ThemePreview theme="light" half /></span>
                 {:else}
                   <ThemePreview theme={t.value} />
                 {/if}
