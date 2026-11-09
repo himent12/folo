@@ -89,7 +89,7 @@ loader and the GPU are close to balanced.
 | **50** (best) | 1.212 | 1.392 | 1.267 | 0.535 | 0.429 | 0.449 | **0.310** | 574 s |
 
 Every epoch improved on the one before, so the best epoch is the last. The gains shrink as the cosine LR decays:
-about 0.0023 mAP50-95 per epoch from epoch 30 to 40, 0.0009 per epoch from 45 to 50 (0.3055 → 0.3100), and 0.0005
+about 0.0022 mAP50-95 per epoch from epoch 30 to 40, 0.0009 per epoch from 45 to 50 (0.3055 → 0.3100), and 0.0005
 for the last epoch. The run ends at its schedule's floor, not at a measured plateau. A longer schedule would
 probably gain more, but how much has not been measured.
 

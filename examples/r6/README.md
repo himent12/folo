@@ -134,9 +134,11 @@ cargo folo train --data D:/folo-data/r6/r6-clean --model folo-n --imgsz 640 --ep
 100 epochs is short enough that `auto` picks AdamW at lr0 0.001667 for both (3200 optimizer steps ≤ 10,000), with
 100 warmup steps and mosaic closed for the last 10 epochs. `--weights folo-n-coco` resolves the name to the pulled
 file in `~/.folo/weights/` and logs `transferred 366 of 417 tensors`. The backbone, neck and box branch come from
-COCO. The class branch starts fresh: all of it, not just the last layer, because its width is
-`max(C_P3, min(nc, 100))` (docs/MODEL.md), 80 for COCO and 64 for R6's two classes. That accounts for all 51 skipped
-tensors. Ultralytics' Detect head has the same width rule, so its shape-matched transfer skips the same ones.
+COCO, and so does the class branch's first depthwise conv (`dw0`, which only depends on the input channels). The rest
+of the class branch starts fresh, not just its last layer. Its width is `max(C_P3, min(nc, 100))` (docs/MODEL.md), 80
+for COCO and 64 for R6's two classes, so `pw0`, `dw1`, `pw1` (each a conv and its BatchNorm) and `out` change shape:
+17 tensors per level, all 51 skipped tensors. Ultralytics' Detect head has the same width rule, so its shape-matched
+transfer skips the corresponding layers.
 
 2026-11-08 on the RTX 4080 SUPER, about 44 min of epochs each (13–37 s per epoch, loader-bound on a shared CPU). The
 two started side by side, but together they filled the card's memory (15.7 of 16 GB) and slowed to 100–230 s per
