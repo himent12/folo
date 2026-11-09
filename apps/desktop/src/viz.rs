@@ -121,6 +121,13 @@ pub fn paint_image_with_boxes(
         let mut placed: Vec<Bounds<Pixels>> = Vec::new();
         // Each box's chip, by its index in `order`, once placed.
         let mut chips: Vec<Option<Chip>> = order.iter().map(|_| None).collect();
+        // The boxes that matter (not dimmed): a dimmed box's chip keeps off them, so their strokes
+        // never cross its text; with nowhere clear, a dimmed box goes unlabelled.
+        let strong: Vec<Bounds<Pixels>> = order
+            .iter()
+            .filter(|b| !b.dim && !b.truth)
+            .map(|b| Bounds::from_corners(to(b.x1, b.y1), to(b.x2, b.y2)))
+            .collect();
         let group = |b: &DrawBox| (b.highlight, b.dim);
         // Two passes. First the chips are placed, the selected and matching boxes first, so they
         // claim the free spots before dimmed ones (a class filter must not leave its own boxes
@@ -280,7 +287,10 @@ pub fn paint_image_with_boxes(
                     let fits = |o: Point<Pixels>| {
                         o.y >= bounds.top().max(rect.top()) && o.y + ch <= bounds.bottom().min(rect.bottom())
                     };
-                    let free = |c: &Bounds<Pixels>| !placed.iter().any(|p| p.dilate(px(2.)).intersects(c));
+                    let free = |c: &Bounds<Pixels>| {
+                        !placed.iter().any(|p| p.dilate(px(2.)).intersects(c))
+                            && !(b.dim && strong.iter().any(|s| s.dilate(px(2.)).intersects(c)))
+                    };
                     // More spots down the inside of the box, one chip height (+2 px) apart, only
                     // while they stay inside it: a chip below its box would read as another's.
                     let inside = (1..4)
