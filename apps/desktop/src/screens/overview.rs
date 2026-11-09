@@ -839,9 +839,15 @@ impl FoloApp {
                                     .id(SharedString::from(format!("ov-rn-{}", r.id)))
                                     .w(px(name_w))
                                     .flex_none()
-                                    .when(crate::ui::may_overflow(&r.name, ty::SM.size, name_w), |d| {
-                                        d.tooltip(crate::controls::tip(r.name.clone(), None))
-                                    })
+                                    // The e2e tag and its gap take ~36 px of the name's line.
+                                    .when(
+                                        crate::ui::may_overflow(
+                                            &r.name,
+                                            ty::SM.size,
+                                            name_w - if e2e { 36. } else { 0. },
+                                        ),
+                                        |d| d.tooltip(crate::controls::tip(r.name.clone(), None)),
+                                    )
                                     // The name, then the e2e tag on its line (so the meta below keeps
                                     // its full width for architecture and dataset).
                                     .child(
