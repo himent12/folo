@@ -55,7 +55,8 @@ larger heads, the next said they outweighed the title). The run page's "Precisio
 Their names differ on purpose. The first-run Overview is capped at 1040 px and left-aligned like Settings. One round said the uncapped
 cards stretched three short steps across 1,600 px, the next asked them to fill a wide window. The Playground rail's sliders
 are inline rows ("label · slider · value") for every model, so the rail never reflows when the model changes (asked for
-in round 44; round 47 asked for stacked rows again).
+in round 44; round 47 asked for stacked rows again). New run's End-to-end and Mixed precision rows keep to the left column, their
+switch beside the label (round 42 asked for that; round 48 asked for them to span the dialog again).
 
 ## Scoring
 Use `REVIEW_RUBRIC.md` (path in your task): 12 lines, 1–10, where **9 means "would ship as-is at Linear / Raycast / Zed

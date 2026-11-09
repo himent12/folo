@@ -325,7 +325,7 @@ impl FoloApp {
                                         text(ty::SM, t.text_tertiary)
                                             .min_w_0()
                                             .flex_shrink()
-                                            .truncate()
+                                            .ellipsis()
                                             .child(p),
                                     )
                                     .child(text(ty::SM, t.text_tertiary).flex_none().child("/"))
@@ -366,7 +366,7 @@ impl FoloApp {
                                         .child(
                                             text(ty::SM, t.text_primary)
                                                 .w(px(width.min(budget).ceil()))
-                                                .truncate()
+                                                .ellipsis()
                                                 .child(file),
                                         )
                                 }),
@@ -485,6 +485,7 @@ impl FoloApp {
                                     zoom,
                                     pan,
                                     true,
+                                    false,
                                     0.,
                                 );
                             },
@@ -632,12 +633,12 @@ impl FoloApp {
                     })
                     // What's running, without opening the menu: architecture, input size and head.
                     .when_some(model.as_ref(), |d, m| {
+                        // Identity and storage; the head is the NMS row's to say (once).
                         d.child(text(ty::XS, t.text_tertiary).child(format!(
-                            "{} · {} px{} · {}",
+                            "{} · {} px{}",
                             m.arch.as_str(),
                             m.imgsz,
                             model_storage(m).map_or(String::new(), |s| format!(" · {s}")),
-                            if e2e { "end-to-end, no NMS" } else { "boxes filtered by NMS" }
                         )))
                     })
                     .when(no_models, |d| {
@@ -649,15 +650,19 @@ impl FoloApp {
             )
             .when(!no_models, |d| {
                 d.child(run_on)
-                    .child(field(
-                        "Confidence",
-                        format!("{:.2}", self.play_conf),
-                        conf.into_any_element(),
-                        conf_help,
-                    ))
+                    .child(field("Confidence", fmt_conf(self.play_conf), conf.into_any_element(), conf_help))
                     // The model's best-F1 threshold (where its precision and recall were taken), one
                     // click away while the slider is elsewhere.
-                    .when_some(best_conf.filter(|c| (c - self.play_conf).abs() > 0.005), |d, c| {
+                    // A fixed row, so using it moves nothing: a secondary link while the slider is
+                    // elsewhere, a quiet note once it's there (accent stays the slider's).
+                    .when_some(best_conf, |d, c| {
+                        let at = (c - self.play_conf).abs() < 0.0005;
+                        let row = div().h(px(20.)).flex().justify_end().items_center();
+                        if at {
+                            return d.child(row.child(
+                                text(ty::XS, t.text_tertiary).child(format!("At best F1 ({})", fmt_conf(c))),
+                            ));
+                        }
                         let link = div()
                             .id("play-best-conf")
                             .px(px(4.))
@@ -666,9 +671,10 @@ impl FoloApp {
                             .hover(|s| s.bg(t.bg_hover))
                             .active(|s| s.bg(t.bg_active))
                             .child(
-                                text(ty::XS, t.accent_text).child(format!("Use {c:.2}, the model's best F1")),
+                                text(ty::XS, t.text_secondary)
+                                    .child(format!("Use {} (best F1)", fmt_conf(c))),
                             );
-                        d.child(div().flex().justify_end().child(self.bind(
+                        d.child(row.child(self.bind(
                             link,
                             "play-best-conf",
                             radius::SM,
@@ -677,7 +683,7 @@ impl FoloApp {
                             act(move |this, w, cx| {
                                 // Below what's been fetched: set_play_conf fetches down to it.
                                 this.set_play_conf(c, cx);
-                                // The link goes once used: focus moves to the slider it set.
+                                // The link becomes a note: focus moves to the slider it set.
                                 this.focus_key("play-conf", w, cx);
                                 cx.notify();
                             }),
@@ -751,7 +757,7 @@ impl FoloApp {
                                 }
                             }))
                             .child(crate::ui::class_swatch(&t, b.class, 8.))
-                            .child(text(ty::SM, t.text_primary).w(px(68.)).truncate().child(b.name.clone()))
+                            .child(text(ty::SM, t.text_primary).w(px(68.)).ellipsis().child(b.name.clone()))
                             // Size tells apart two boxes of the same class.
                             .child(
                                 // On the active row's fill, tertiary falls under AA: secondary there.
@@ -834,7 +840,7 @@ impl FoloApp {
                                             .flex_none()
                                             .child(if simulated { "Simulated latency" } else { "Latency" }),
                                     )
-                                    .child(text(ty::XS, t.text_tertiary).tnum().min_w_0().truncate().child(
+                                    .child(text(ty::XS, t.text_tertiary).tnum().min_w_0().ellipsis().child(
                                         // The demo has no device of its own to name.
                                         if simulated {
                                             "one image".to_string()
@@ -1044,6 +1050,7 @@ impl FoloApp {
                             (m.width as f32, m.height as f32),
                             Vec::new(),
                             Fit::Cover,
+                            false,
                             false,
                         ),
                     ));

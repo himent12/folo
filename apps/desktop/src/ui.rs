@@ -221,6 +221,13 @@ pub fn queue_text(position: Option<u32>) -> String {
     }
 }
 
+/// A confidence threshold as every surface writes it: "0.31", or "0.314" when the third decimal
+/// carries information (the API's best-F1 grid is 0.001).
+pub fn fmt_conf(c: f32) -> String {
+    let three = format!("{c:.3}");
+    if three.ends_with('0') { format!("{c:.2}") } else { three }
+}
+
 /// One inference's total latency as every readout writes it: "6.4 ms", or "Sim. 6.4 ms" when the
 /// built-in demo simulated it.
 pub fn latency_text(ms: f64, simulated: bool) -> String {
@@ -232,6 +239,45 @@ pub fn latency_text(ms: f64, simulated: bool) -> String {
 pub fn model_storage(m: &crate::api::Model) -> Option<String> {
     let p = m.precision?.as_str();
     Some(if m.fused == Some(true) { format!("{p}, fused") } else { p.to_string() })
+}
+
+/// Truncation that ends in "…" wherever the element sits. GPUI 0.2.2's `truncate()` measures
+/// no-wrap text once at its unbounded width and keeps that, so a flex-sized text clips without
+/// an ellipsis; wrapping text clamped to one line re-measures at each width and truncates there.
+/// Every truncated text uses this (a test keeps `.truncate()` out).
+pub trait Ellipsis: Styled + Sized {
+    fn ellipsis(self) -> Self {
+        self.overflow_hidden().whitespace_normal().line_clamp(1).text_ellipsis()
+    }
+}
+
+impl<T: Styled> Ellipsis for T {}
+
+/// One metadata line: `lead` (an architecture, say), an optional tag right after it, then the rest
+/// as " · "-joined text. The line owns its separators (4 px either side of each dot) and only the
+/// rest gives way, with a real ellipsis, so every meta line spaces and truncates alike.
+pub fn meta_row(
+    size: TypeStep,
+    color: Hsla,
+    lead: impl Into<SharedString>,
+    tag: Option<gpui::Stateful<Div>>,
+    rest: &[String],
+) -> Div {
+    let rest: Vec<&str> = rest.iter().map(String::as_str).filter(|s| !s.is_empty()).collect();
+    // The lead and its tag hold their width; everything after them is one group that gives way
+    // as a whole, ending in "…", so no part can push the row past its bounds.
+    div()
+        .w_full()
+        .flex()
+        .items_center()
+        .gap(px(4.))
+        .min_w_0()
+        .child(text(size, color).flex_none().whitespace_nowrap().child(lead.into()))
+        .children(tag)
+        .when(!rest.is_empty(), |d| {
+            d.child(text(size, color).flex_none().child("·"))
+                .child(text(size, color).flex_1().min_w_0().ellipsis().child(rest.join(" · ")))
+        })
 }
 
 /// The compact end-to-end tag in tables (the title rows carry the full badge and its help).
@@ -626,6 +672,36 @@ pub fn f3(v: f32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn truncation_goes_through_ellipsis() {
+        // GPUI's `truncate()` clips flex-sized text without an ellipsis; `Ellipsis::ellipsis` doesn't.
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut stack = vec![src];
+        let mut bad = Vec::new();
+        while let Some(dir) = stack.pop() {
+            for e in std::fs::read_dir(&dir).unwrap() {
+                let p = e.unwrap().path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if p.extension().is_some_and(|x| x == "rs")
+                    && p.file_name().is_some_and(|n| n != "ui.rs")
+                    && std::fs::read_to_string(&p).unwrap().contains(".truncate()")
+                {
+                    bad.push(p.file_name().unwrap().to_string_lossy().to_string());
+                }
+            }
+        }
+        assert!(bad.is_empty(), ".truncate() in {bad:?}: use .ellipsis()");
+    }
+
+    #[test]
+    fn confidences_keep_a_meaningful_third_decimal() {
+        assert_eq!(fmt_conf(0.31), "0.31");
+        assert_eq!(fmt_conf(0.314), "0.314");
+        assert_eq!(fmt_conf(0.024), "0.024");
+        assert_eq!(fmt_conf(0.35), "0.35");
+    }
 
     #[test]
     fn queue_places_read_as_ordinals() {

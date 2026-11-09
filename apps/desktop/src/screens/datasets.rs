@@ -197,7 +197,7 @@ impl FoloApp {
         let path_el = || {
             text(ty::SM, t.text_tertiary)
                 .font_family(crate::theme::MONO)
-                .truncate()
+                .ellipsis()
                 .child(display_path(&ds.path))
         };
         let title = div()
@@ -216,7 +216,7 @@ impl FoloApp {
                     .child(
                         text(ty::XL, t.text_primary)
                             .max_w(px(if window.viewport_size().width < px(1280.) { 300. } else { 560. }))
-                            .truncate()
+                            .ellipsis()
                             .child(ds.name.clone()),
                     ),
             )
@@ -740,8 +740,10 @@ impl FoloApp {
                             row = row.child(div().w(px(cell_w)).flex_none());
                             continue;
                         };
-                        let tile_el = this.tile(&ds_id, meta, this.ds_boxes, true, fit, cx);
                         let key = format!("tile-{}", meta.id);
+                        let reveal = this.fh(key.clone(), cx).is_focused(window)
+                            || this.ds_hover_tile.as_deref() == Some(meta.id.as_str());
+                        let tile_el = this.tile(&ds_id, meta, this.ds_boxes, true, fit, reveal, cx);
                         // "2 square · 1 triangle · +2": the two commonest classes, then the rest as a
                         // count, so the box colours aren't the only way to tell what a tile holds.
                         let what = {
@@ -779,6 +781,16 @@ impl FoloApp {
                             // Over an image a fill wouldn't show: the edge answers instead.
                             .hover(|s| s.border_color(t.line_strong))
                             .active(|s| s.border_color(t.text_tertiary))
+                            .on_hover({
+                                let mid = meta.id.clone();
+                                cx.listener(move |this, h: &bool, _, cx| {
+                                    let next = h.then(|| mid.clone());
+                                    if *h || this.ds_hover_tile.as_deref() == Some(mid.as_str()) {
+                                        this.ds_hover_tile = next;
+                                        cx.notify();
+                                    }
+                                })
+                            })
                             .child(
                                 div()
                                     .absolute()
@@ -817,7 +829,7 @@ impl FoloApp {
                                             .child(
                                                 text(ty::XS, gpui::hsla(0., 0., 1., 0.75))
                                                     .tnum()
-                                                    .truncate()
+                                                    .ellipsis()
                                                     .child(what),
                                             ),
                                     ),
@@ -864,6 +876,13 @@ impl FoloApp {
             }),
         )
         .track_scroll(self.grid_scroll.clone())
+        // A scroll moves tiles under a still pointer (and recycles the hovered one away), which
+        // `on_hover` never hears: drop the hovered tile, so the next pointer move sets it afresh.
+        .on_scroll_wheel(cx.listener(|this, _, _, cx| {
+            if this.ds_hover_tile.take().is_some() {
+                cx.notify();
+            }
+        }))
         .flex_1();
         div()
             .flex()
@@ -920,7 +939,7 @@ impl FoloApp {
                             .items_center()
                             .gap(px(8.))
                             .child(crate::ui::class_swatch(&t, i as u32, 8.))
-                            .child(text(ty::SM, t.text_secondary).truncate().child(name.clone())),
+                            .child(text(ty::SM, t.text_secondary).ellipsis().child(name.clone())),
                     )
                     .child(
                         div().flex_1().h(px(16.)).rounded(px(3.)).bg(t.bg_inset).child(

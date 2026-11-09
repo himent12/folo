@@ -182,7 +182,7 @@ impl FoloApp {
     fn live_panel(&mut self, r: &Run, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         // Short windows trade chart height for the sections below.
         // Short windows (620 px minimum): a lower plot, so two Recent runs rows show under the hero.
-        let hero_h = if window.viewport_size().height < px(700.) { 108. } else { 132. };
+        let hero_h = hero_height(window);
         // The card's inset: 16 px at the sides always, tighter above and below with the short chart.
         // The chart section's rule spans it.
         let card_pad = 16.;
@@ -402,15 +402,23 @@ impl FoloApp {
                     .flex()
                     .items_center()
                     .gap(px(10.))
-                    .child(text(ty::LG, t.text_primary).flex_none().child(r.name.clone()))
-                    .child(status_badge(&t, r.status, &r.id))
+                    // A long name gives way (with "…") before it can push the meta under the
+                    // action; the meta's own box clips as the last line of defence.
                     .child(
-                        text(ty::SM, t.text_tertiary)
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .child(self.run_subtitle(r)),
+                        text(ty::LG, t.text_primary)
+                            .flex_shrink()
+                            .min_w(px(80.))
+                            .ellipsis()
+                            .child(r.name.clone()),
                     )
+                    .child(status_badge(&t, r.status, &r.id))
+                    .child(div().flex_1().min_w_0().overflow_hidden().child(self.run_subtitle(
+                        &t,
+                        r,
+                        ty::SM,
+                        t.text_tertiary,
+                        "hero",
+                    )))
                     .child(open),
             )
             // Progress as a hairline rail across the panel.
@@ -527,7 +535,7 @@ impl FoloApp {
         if self.store.runs.is_loading() {
             // Same anatomy and heights as the live panel: header, rail, a row of four KPIs above the
             // chart (its title row, then the plot), meter footer. Nothing moves when data lands.
-            let hero_h = if window.viewport_size().height < px(700.) { 108. } else { 132. };
+            let hero_h = hero_height(window);
             let sk = |id: &str| skeleton(&t, id.to_string());
             return panel(&t)
                 .flex_1()
@@ -809,22 +817,13 @@ impl FoloApp {
                             .dataset_summary(&r.config.dataset_id)
                             .map_or(r.config.dataset_id.clone(), |d| d.name.clone());
                         let meta = |w: f32| {
-                            div()
-                                .w(px(w))
-                                .flex_none()
-                                .flex()
-                                .items_center()
-                                .gap(px(6.))
-                                .child(
-                                    text(ty::XS, t.text_tertiary).flex_none().child(r.config.arch.as_str()),
-                                )
-                                .when(e2e, |d| d.child(e2e_tag(&t, format!("e2e-ovr-{}-{w}", r.id))))
-                                .child(
-                                    text(ty::XS, t.text_tertiary)
-                                        .min_w_0()
-                                        .truncate()
-                                        .child(format!("· {ds_name}")),
-                                )
+                            div().w(px(w)).flex_none().child(meta_row(
+                                ty::XS,
+                                t.text_tertiary,
+                                r.config.arch.as_str(),
+                                e2e.then(|| e2e_tag(&t, format!("e2e-ovr-{}-{w}", r.id))),
+                                std::slice::from_ref(&ds_name),
+                            ))
                         };
                         let row = div()
                             .id(SharedString::from(key.clone()))
@@ -858,7 +857,7 @@ impl FoloApp {
                                         text(ty::SM, t.text_primary)
                                             .font_weight(FontWeight::MEDIUM)
                                             .w_full()
-                                            .truncate()
+                                            .ellipsis()
                                             .child(r.name.clone()),
                                     )
                                     .when(!wide, |d| d.child(meta(name_w))),
@@ -1008,7 +1007,7 @@ impl FoloApp {
                                 text(ty::SM, t.text_secondary)
                                     .w(px(120.))
                                     .flex_none()
-                                    .truncate()
+                                    .ellipsis()
                                     .child(ds_name.clone()),
                             )
                             // Its best model, then the same compact e2e tag as the Models table.
@@ -1023,7 +1022,7 @@ impl FoloApp {
                                         text(ty::SM, t.text_primary)
                                             .font_weight(FontWeight::MEDIUM)
                                             .min_w_0()
-                                            .truncate()
+                                            .ellipsis()
                                             .child(m.name.clone()),
                                     )
                                     .when(self.model_e2e(&m), |d| {
@@ -1300,7 +1299,7 @@ impl FoloApp {
                                 .font_family(crate::theme::MONO)
                                 .flex_1()
                                 .min_w_0()
-                                .truncate()
+                                .ellipsis()
                                 .child(CMDS[i]),
                         )
                         .children(copy[i].take()),
@@ -1345,7 +1344,7 @@ impl FoloApp {
             .map(|i| match metas.get(i) {
                 Some(m) => {
                     // Outlines only: the card previews the data, its page names every box.
-                    let tile = self.tile(&d.id, m, true, false, crate::viz::Fit::Cover, cx);
+                    let tile = self.tile(&d.id, m, true, false, crate::viz::Fit::Cover, false, cx);
                     div().flex_1().h_full().overflow_hidden().child(tile).into_any_element()
                 }
                 None => div().flex_1().h_full().bg(t.bg_raised).into_any_element(),
@@ -1437,5 +1436,19 @@ impl FoloApp {
             act(move |this, w, cx| this.navigate(route.clone(), w, cx)),
         )
         .into_any_element()
+    }
+}
+
+/// The Overview hero chart's plot height: lower in short windows (620 px minimum, so two Recent
+/// runs rows show under it), taller in tall, wide ones so the curve isn't a flat band across 1,100
+/// px. The skeleton and the live card share it.
+fn hero_height(window: &Window) -> f32 {
+    let v = window.viewport_size();
+    if v.height < px(700.) {
+        108.
+    } else if v.width >= px(1600.) && v.height >= px(960.) {
+        180.
+    } else {
+        132.
     }
 }

@@ -1120,7 +1120,7 @@ impl FoloApp {
                 cx.notify();
             }))
             .when(ring, |d| d.child(focus_ring(&t, radius::MD)))
-            .child(text(ty::BASE, t.text_primary).flex_1().truncate().child(current))
+            .child(text(ty::BASE, t.text_primary).flex_1().ellipsis().child(current))
             .child(icon(
                 if open { "icons/chevron-up.svg" } else { "icons/chevron-down.svg" },
                 14.,
@@ -1196,7 +1196,7 @@ impl FoloApp {
                                         this.menu_open = None;
                                         cx.notify();
                                     }))
-                                    .child(text(ty::BASE, t.text_primary).flex_1().truncate().child(label))
+                                    .child(text(ty::BASE, t.text_primary).flex_1().ellipsis().child(label))
                                     .when_some(detail, |d, s| {
                                         d.child(text(ty::XS, t.text_tertiary).tnum().child(s))
                                     })

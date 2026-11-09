@@ -368,6 +368,8 @@ pub struct FoloApp {
     /// Per-class box counts of one split, keyed by (dataset, split, image count).
     pub ds_split_counts: RefCell<Option<SplitCounts>>,
     pub ds_tile: f32,
+    /// The grid tile under the pointer (it reveals every label, as a focused one does).
+    pub ds_hover_tile: Option<String>,
     /// Filtered image indices keyed by (dataset, split, class, list length).
     pub ds_filter_cache: RefCell<Option<FilterCache>>,
     pub grid_scroll: gpui::UniformListScrollHandle,
@@ -560,6 +562,7 @@ impl FoloApp {
             ds_fill: true,
             ds_split_counts: RefCell::new(None),
             ds_tile: 168.,
+            ds_hover_tile: None,
             ds_filter_cache: RefCell::new(None),
             grid_scroll: gpui::UniformListScrollHandle::new(),
             grid_width: Rc::new(std::cell::Cell::new(px(900.))),
@@ -2149,13 +2152,25 @@ impl FoloApp {
     }
 
     /// A run's subtitle, the same in the Overview hero and on its page: identity, device, start.
-    pub fn run_subtitle(&self, r: &Run) -> String {
-        let device = crate::ui::device_label(&r.device);
-        let now = self.store.api.now();
-        match r.started.as_deref().and_then(crate::api::time::parse) {
-            Some(s) => format!("{} · {device} · started {}", self.run_meta(r), crate::api::time::ago(s, now)),
-            None => format!("{} · {device}", self.run_meta(r)),
+    pub fn run_subtitle(
+        &self,
+        t: &crate::theme::Theme,
+        r: &Run,
+        size: crate::theme::TypeStep,
+        color: gpui::Hsla,
+        id: &str,
+    ) -> gpui::Div {
+        let ds = self
+            .store
+            .dataset_summary(&r.config.dataset_id)
+            .map_or(r.config.dataset_id.clone(), |d| d.name.clone());
+        let mut rest = vec![ds, crate::ui::device_label(&r.device)];
+        if let Some(s) = r.started.as_deref().and_then(crate::api::time::parse) {
+            rest.push(format!("started {}", crate::api::time::ago(s, self.store.api.now())));
         }
+        // The architecture leads, its e2e tag right after it, as in every list.
+        let tag = (r.config.head == Head::O2o).then(|| crate::ui::e2e_tag(t, format!("e2e-{id}-{}", r.id)));
+        crate::ui::meta_row(size, color, r.config.arch.as_str(), tag, &rest)
     }
 
     /// Whether `m` is end-to-end (the one-to-one head: it predicts without NMS). The model's own
@@ -2629,7 +2644,7 @@ impl FoloApp {
                     .items_center()
                     .gap(px(8.))
                     .child(dot(t.accent_fill(), 6., true, "mini"))
-                    .child(text(ty::SM, t.text_primary).w(px(140.)).truncate().child(r.name.clone()))
+                    .child(text(ty::SM, t.text_primary).w(px(140.)).ellipsis().child(r.name.clone()))
                     .child(div().flex_1())
                     .child(
                         text(ty::XS, t.text_secondary).tnum().child(format!("{:.0}%", r.progress() * 100.0)),
@@ -2717,7 +2732,7 @@ impl FoloApp {
             })
             .when(!compact, |d| {
                 d.child(div().size(px(6.)).rounded_full().bg(color))
-                    .child(text(ty::XS, t.text_tertiary).truncate().child(label))
+                    .child(text(ty::XS, t.text_tertiary).ellipsis().child(label))
             });
         self.bind(el, "connection", 0., window, cx, act(|this, w, cx| this.navigate(Route::Settings, w, cx)))
     }

@@ -98,6 +98,7 @@ pub fn paint_image_with_boxes(
     zoom: f32,
     pan: (f32, f32),
     labels: bool,
+    reveal: bool,
     corner: f32,
 ) {
     let rect = image_rect(bounds, w.max(1.), h.max(1.), fit, zoom, pan);
@@ -111,7 +112,11 @@ pub fn paint_image_with_boxes(
         }
         let sx = f32::from(rect.size.width) / w.max(1.);
         let sy = f32::from(rect.size.height) / h.max(1.);
-        let to = |x: f32, y: f32| point(rect.left() + px(x * sx), rect.top() + px(y * sy));
+        // Box corners land on whole device pixels: a fractional rect anti-aliases its halo and
+        // stroke into each other and leaves see-through pixels where they should meet.
+        let scale = window.scale_factor();
+        let snap = |v: Pixels| px((f32::from(v) * scale).round() / scale);
+        let to = |x: f32, y: f32| point(snap(rect.left() + px(x * sx)), snap(rect.top() + px(y * sy)));
         let halo = rgba(tokens::CLASS_HALO);
         let chip_text = rgba(tokens::CLASS_CHIP_TEXT);
         // Dimmed boxes first, highlighted last, so focus sits on top.
@@ -229,6 +234,9 @@ pub fn paint_image_with_boxes(
                 {
                     // Small views (< 480 px): 14 px chips with 10 px text (design/README).
                     let compact = bounds.size.width < px(480.);
+                    // Small views label sparingly at rest; hovered or focused (`reveal`), they label
+                    // like full views, so no box is known by its colour alone.
+                    let strict = compact && !reveal;
                     let fs = if compact { 10. } else { ty::XS.size };
                     // Narrow views (thumbnails under 140 px) show the score only; the key names the hue.
                     let name = if bounds.size.width < px(140.) {
@@ -242,7 +250,7 @@ pub fn paint_image_with_boxes(
                     } else if b.dim {
                         // Thumbnails: a dimmed box keeps only its faded outline, so the filtered
                         // class's chips carry the tile.
-                        if compact {
+                        if strict {
                             continue;
                         }
                         // Larger views: muted but opaque (a translucent chip over a photo can't be
@@ -304,7 +312,7 @@ pub fn paint_image_with_boxes(
                     let area = |x: &Bounds<Pixels>| f32::from(x.size.width) * f32::from(x.size.height);
                     let half_in = area(&visible) >= area(&r) * 0.5;
                     if !b.highlight
-                        && (!half_in || compact && (visible.size.height < ch * 2. || placed.len() >= 4))
+                        && (!half_in || strict && (visible.size.height < ch * 2. || placed.len() >= 4))
                     {
                         continue;
                     }
@@ -322,7 +330,10 @@ pub fn paint_image_with_boxes(
                     };
                     // Above the box (left, then right), then inside its top corners, then inside its
                     // bottom ones. Never below it: a chip under its box reads as the next one's.
-                    let (lx, rx) = (r.left() - px(1.), r.right() - cw + px(1.));
+                    // A right-anchored spot only when the chip fits the box's width: wider, it would
+                    // hang off the box's left edge and over a neighbour.
+                    let lx = r.left() - px(1.);
+                    let rx = if cw <= r.size.width { r.right() - cw + px(1.) } else { lx };
                     let candidates = [
                         point(clamp_x(lx), r.top() - ch - px(1.)),
                         point(clamp_x(rx), r.top() - ch - px(1.)),
@@ -371,14 +382,13 @@ pub fn paint_image_with_boxes(
                     // it). The selected box always keeps its chip; very dense images skip the check.
                     // No clear spot: inside one of the box's own corners, flush with its stroke, so
                     // the chip shares a corner with its box and reads as its own even where it
-                    // crosses a neighbour (up to 32 boxes; beyond, an unlabelled box is named by the
-                    // list beside the image). The selected box and dense images take any free spot.
+                    // crosses a neighbour. The selected box and dense images take any free spot.
                     // Any of its four inside corners shares the box's stroke; the first free one.
                     let free_spot = clear.or_else(|| {
                         if dense || b.highlight {
                             spots.clone().find(open)
-                        } else if !compact && order.len() <= 32 {
-                            // Thumbnails stay strict: too small for a shared corner to read.
+                        } else if !strict {
+                            // Thumbnails at rest stay strict: too small for a shared corner to read.
                             candidates[2..].iter().copied().find(open)
                         } else {
                             None
