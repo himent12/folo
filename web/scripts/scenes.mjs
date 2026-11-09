@@ -27,6 +27,26 @@ async function playgroundResult(/** @type {import('playwright-core').Page} */ pa
   await page.clock.runFor(500);
 }
 
+/**
+ * New run's estimate with what it stands on opened: in the Summary rail on wide screens, in the summary sheet (from the
+ * dock) below 960 px. `served`: wait for the server's estimate to replace the reference.
+ * @param {import('playwright-core').Page} page
+ * @param {string} vp
+ * @param {boolean} served
+ */
+async function openEstimate(page, vp, served) {
+  await until(page, '.summary .est-how > summary');
+  if (served) await until(page, '.summary .est-how > summary:has-text("Measured")');
+  if (vp === 'mobile' || vp === 'tablet') {
+    await page.locator('.dock-est').click();
+    await page.locator('dialog[open]').waitFor();
+    await page.locator('dialog[open] details.est-how > summary').click();
+  } else {
+    await page.locator('.summary details.est-how > summary').click();
+  }
+  await page.mouse.move(0, 0);
+}
+
 /** Starts New run on a GPU the mock then reports gone (404 device_not_found) and waits for the Device error. */
 async function unplugGpu(/** @type {import('playwright-core').Page} */ page) {
   // An <option> is never "visible": wait for it to exist, running the mock's clock meanwhile.
@@ -236,6 +256,25 @@ export const scenes = [
       await until(page, 'details.a-compare > summary');
       await page.locator('details.a-compare > summary').click();
     },
+  },
+  {
+    // The server's estimate (POST /api/runs/estimate): folo-s at 640, batch 16, f32 was measured on the mock's GPU, so
+    // the time is a narrow range on "Measured on this GPU"; opened, the phases, validation and startup behind it.
+    name: 'run-new-estimate',
+    path: '/runs/new',
+    fullPage: false,
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
+    setup: (page, { vp }) => openEstimate(page, vp, true),
+  },
+  {
+    // A server from before measured throughput (no `run_estimate`): the reference figures, as a wide range said to be
+    // the reference, in secondary ink.
+    name: 'run-new-reference',
+    path: '/runs/new',
+    search: 'scenario=no-throughput',
+    fullPage: false,
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
+    setup: (page, { vp }) => openEstimate(page, vp, false),
   },
   {
     // Below 960 px the dock's estimate opens the run summary as a dialog (a bottom sheet on phones).
@@ -1090,6 +1129,33 @@ export const scenes = [
     setup: async (page) => {
       await until(page, '#system');
       await page.locator('#system details.report summary').click();
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // Settings › System › Throughput: the rows this server measured (training, predictions; one from another adapter),
+    // their spread, samples and age, and Measure now.
+    name: 'settings-throughput',
+    path: '/settings',
+    // The whole page: the harness shoots from the top, and the block sits near the bottom.
+    fullPage: true,
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
+    setup: async (page) => {
+      await until(page, '.tp-row');
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // Measure now running: the button busy, the elapsed seconds counted against "up to 10 s".
+    name: 'settings-measuring',
+    path: '/settings',
+    // The whole page: the harness shoots from the top, and the block sits near the bottom.
+    fullPage: true,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page) => {
+      await until(page, '.tp-row');
+      await page.getByRole('button', { name: 'Measure now' }).click();
+      await page.clock.runFor(1100);
       await page.mouse.move(0, 0);
     },
   },

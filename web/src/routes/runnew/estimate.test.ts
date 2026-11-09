@@ -107,14 +107,43 @@ describe('defaultImgsz', () => {
 });
 
 describe('estimate with mixed precision', () => {
-  it('speeds up only the sizes measured, and trims the activation memory', () => {
+  it("uses the measured speed-up, carries the nearest size's to the others, and trims the activation memory", () => {
     const f32 = estimate('folo-s', 1000, 10, 16, 640, false);
     const amp = estimate('folo-s', 1000, 10, 16, 640, false, true);
     expect(amp.imgsPerS / f32.imgsPerS).toBeCloseTo(AMP_SPEEDUP['folo-s']!);
     expect(amp.vramBytes).toBeLessThan(f32.vramBytes);
-    expect(estimate('folo-m', 1000, 10, 16, 640, false, true).imgsPerS).toBe(estimate('folo-m', 1000, 10, 16, 640, false).imgsPerS);
+    // folo-m has no amp row: the nearest by compute (folo-s at 640) carries over, with its ratio.
+    expect(estimate('folo-m', 1000, 10, 16, 640, false, true).imgsPerS / estimate('folo-m', 1000, 10, 16, 640, false).imgsPerS).toBeCloseTo(AMP_SPEEDUP['folo-s']!);
   });
   it('changes nothing on the CPU', () => {
     expect(estimate('folo-n', 1000, 10, 16, 640, true, true)).toEqual(estimate('folo-n', 1000, 10, 16, 640, true));
+  });
+});
+
+describe('estimate from the reference figures (docs/BENCHMARKS.md)', () => {
+  it("reproduces the document's rows: folo-n at 640 trains at 208 img/s, and its step peak of 3474 MiB", () => {
+    const e = estimate('folo-n', 1000, 10, 16, 640, false);
+    expect(e.imgsPerS).toBeCloseTo(208);
+    expect(e.vramBytes / 2 ** 20).toBeCloseTo(3474, -1);
+  });
+  it('adds the startup once and the close-mosaic epochs at their own rate', () => {
+    const all = estimate('folo-n', 2000, 10, 16, 640, false, false, { valImages: 200 });
+    const closed = estimate('folo-n', 2000, 10, 16, 640, false, false, { valImages: 200, closeEpochs: 5 });
+    expect(all.totalSeconds).toBeCloseTo(6 + 10 * (2000 / 208 + 200 / 275));
+    expect(closed.totalSeconds).toBeLessThan(all.totalSeconds);
+  });
+  it('validates the training split when there is no val split', () => {
+    expect(estimate('folo-n', 2000, 10, 16, 640, false, false, { valImages: 0 }).totalSeconds).toBeCloseTo(6 + 10 * (2000 / 208 + 2000 / 275));
+  });
+  it("gives the reference's range: -30% / +60% on the reference machine, -60% / +200% elsewhere", () => {
+    const here = estimate('folo-s', 1000, 10, 16, 640, false, false, { sameMachine: true });
+    expect([here.lowSeconds / here.totalSeconds, here.highSeconds / here.totalSeconds]).toEqual([0.7, 1.6].map((x) => expect.closeTo(x)));
+    const other = estimate('folo-s', 1000, 10, 16, 640, false);
+    expect([other.lowSeconds / other.totalSeconds, other.highSeconds / other.totalSeconds]).toEqual([0.4, 3].map((x) => expect.closeTo(x)));
+  });
+  it('slows smaller images less than their compute (to the 0.55 within 4x)', () => {
+    const big = estimate('folo-s', 1000, 10, 16, 640, false).imgsPerS;
+    const small = estimate('folo-s', 1000, 10, 16, 480, false).imgsPerS;
+    expect(small / big).toBeCloseTo((640 / 480) ** (2 * 0.55));
   });
 });

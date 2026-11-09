@@ -2,6 +2,8 @@
 // same interface, so screens never know which one they talk to.
 
 import type {
+  BenchmarkReport,
+  BenchmarkRequest,
   CreateDataset,
   CreateSyntheticDataset,
   Dataset,
@@ -22,8 +24,10 @@ import type {
   RunEventMap,
   RunLogs,
   RunMetrics,
+  RunEstimate,
   RunSamples,
   SystemInfo,
+  ThroughputTable,
   TrainConfig,
 } from './types';
 import { openEventStream } from './sse';
@@ -53,6 +57,10 @@ export interface Api {
   readonly mock: boolean;
   health(signal?: AbortSignal): Promise<Health>;
   system(signal?: AbortSignal): Promise<SystemInfo>;
+  /** `GET /api/system/throughput` (servers whose `system().features` has `throughput`): measured and reference rows. */
+  throughput(signal?: AbortSignal): Promise<ThroughputTable>;
+  /** `POST /api/system/benchmark` (feature `benchmark`): a 1–10 s probe; `409 run_active` while a run is queued or running. */
+  benchmark(body?: BenchmarkRequest): Promise<BenchmarkReport>;
 
   datasets(signal?: AbortSignal): Promise<Dataset[]>;
   dataset(id: string, signal?: AbortSignal): Promise<Dataset>;
@@ -75,6 +83,8 @@ export interface Api {
   runs(signal?: AbortSignal): Promise<Run[]>;
   run(id: string, signal?: AbortSignal): Promise<Run>;
   createRun(config: TrainConfig): Promise<Run>;
+  /** `POST /api/runs/estimate` (feature `run_estimate`): the run's time and peak GPU memory; nothing is created. */
+  estimateRun(config: TrainConfig, signal?: AbortSignal): Promise<RunEstimate>;
   stopRun(id: string): Promise<Run>;
   /**
    * `POST /api/runs` with `resume_run_id`: continues a `stopped` or `failed` run from its last checkpoint (200, same
@@ -149,6 +159,12 @@ export class HttpApi implements Api {
   system(signal?: AbortSignal) {
     return this.#req<SystemInfo>('GET', '/system', undefined, signal);
   }
+  throughput(signal?: AbortSignal) {
+    return this.#req<ThroughputTable>('GET', '/system/throughput', undefined, signal);
+  }
+  benchmark(body: BenchmarkRequest = {}) {
+    return this.#req<BenchmarkReport>('POST', '/system/benchmark', body);
+  }
 
   async datasets(signal?: AbortSignal) {
     return (await this.#req<{ datasets: Dataset[] }>('GET', '/datasets', undefined, signal)).datasets;
@@ -208,6 +224,9 @@ export class HttpApi implements Api {
   }
   createRun(config: TrainConfig) {
     return this.#req<Run>('POST', '/runs', config);
+  }
+  estimateRun(config: TrainConfig, signal?: AbortSignal) {
+    return this.#req<RunEstimate>('POST', '/runs/estimate', config, signal);
   }
   stopRun(id: string) {
     return this.#req<Run>('POST', `/runs/${encodeURIComponent(id)}/stop`);

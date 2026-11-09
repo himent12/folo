@@ -10,10 +10,15 @@
    * Phones stack each row (the metric, then its three values, each with its engine named in the markup); the header
    * row stays for assistive tech, every value names its metric and column through `headers`, and explicit cell roles
    * keep the table's semantics through the grid layout.
+   * Every value in the table is docs/BENCHMARKS.md's (the reference); where this server has measured folo-n itself
+   * (`table`, GET /api/system/throughput), those figures follow the table under their own heading, never mixed into
+   * it: YOLO26n was not run here, so they compare with nothing.
    */
   import { tick } from 'svelte';
   import { advantage, BENCH_SOURCE, comparable, unlike, versusYolo26n, type Versus } from '$lib/benchmarks';
-  import { num } from '$lib/format';
+  import type { ThroughputTable } from '$lib/api/types';
+  import { deviceName, num } from '$lib/format';
+  import { latencyMs, latencyRange, measuredLatency, measuredTraining } from '$lib/throughput';
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import Panel from '$lib/ui/Panel.svelte';
 
@@ -26,6 +31,27 @@
     return ahead ? `${a.toFixed(2)}× faster` : `${(1 / a).toFixed(2)}× slower`;
   }
   const caveats = versusYolo26n.filter((v) => v.caveat);
+
+  let { table = null }: { table?: ThroughputTable | null } = $props();
+  /** folo-n at 640 px as this server measured it: end to end (any precision; the line says which) and training. */
+  const hereLat = $derived(measuredLatency(table, 'folo-n'));
+  const hereTrain = $derived(measuredTraining(table, 'folo-n'));
+  /** Those figures as rows of the table: the value in the folo-n column, its spread and count on the qualifier line. */
+  const hereRows = $derived([
+    ...(hereLat
+      ? [{ id: 'lat', metric: 'GPU end to end, batch 1', value: latencyMs(hereLat.latency_ms), note: `${latencyRange(hereLat.latency_ms_low, hereLat.latency_ms_high)} · ${num(hereLat.samples)} predictions · ${hereLat.precision}` }]
+      : []),
+    ...(hereTrain
+      ? [
+          {
+            id: 'train',
+            metric: `Training, batch ${hereTrain.batch}`,
+            value: `${num(hereTrain.imgs_per_s)} img/s`,
+            note: `${hereTrain.mosaic ? `${num(hereTrain.mosaic.low)}–${num(hereTrain.mosaic.high)} img/s · ` : ''}${num(hereTrain.samples)} samples · whole trainer, f32`,
+          },
+        ]
+      : []),
+  ]);
 
   // What keeps a row from being like for like: one list, lib/benchmarks.ts `unlike` (Models' summary counts it too).
   const mixed = versusYolo26n.filter((v) => !comparable(v)).length;
@@ -44,7 +70,7 @@
 
 <Panel title="Engine speed" pad="none" id="engine-speed">
   <p class="lede">
-    folo-n vs YOLO26n on the same RTX 4080 SUPER, 640 px.
+    folo-n vs YOLO26n on the same RTX 4080 SUPER, 640 px{#if hereLat || hereTrain}: the reference figures, with this server's own folo-n figures last{/if}.
     {#if mixed}
       <span class="qual"
         >{mixed} of {versusYolo26n.length} rows ran under different conditions and name no winner; <button type="button" class="see" onclick={showHow}>see how this was measured</button
@@ -79,6 +105,26 @@
         </tr>
       {/each}
     </tbody>
+    {#if table && hereRows.length}
+      <!-- This server's own folo-n figures under the same columns, each with its spread and count. YOLO26n was not run
+           here, so they state no comparison: the last column says where they come from. -->
+      <tbody class="here">
+        <tr class="here-h">
+          <th scope="colgroup" colspan="4" role="rowheader" id="vs-here">Measured on this server <span class="here-dev">{deviceName(table.device_name)}</span></th>
+        </tr>
+        {#each hereRows as h (h.id)}
+          <tr>
+            <th scope="row" role="rowheader" id="vs-here-{h.id}" headers="vs-h-m vs-here">
+              <span class="m">{h.metric}</span>
+              <span class="note num">{h.note}</span>
+            </th>
+            <td role="cell" class="r num v" headers="vs-here-{h.id} vs-h-folo"><span class="cl" aria-hidden="true">folo-n</span>{h.value}</td>
+            <td role="cell" class="r yolo nr" headers="vs-here-{h.id} vs-h-yolo"><span class="cl" aria-hidden="true">YOLO26n</span>not run here</td>
+            <td role="cell" class="r lead here-src" headers="vs-here-{h.id} vs-h-lead"><span class="cl" aria-hidden="true">folo-n vs YOLO26n</span>Measured here</td>
+          </tr>
+        {/each}
+      </tbody>
+    {/if}
   </table>
   <!-- How the rows were made and what qualifies them, one step away. -->
   <details class="how" bind:this={how}>
@@ -206,6 +252,32 @@
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
     color: var(--text-tertiary);
+  }
+  /* The server's own rows: a group heading over them, the values in the folo-n column. */
+  .vs tbody.here tr.here-h th {
+    max-width: none;
+    padding-top: var(--space-3);
+    padding-bottom: var(--space-1);
+    border-top: 1px solid var(--line-subtle);
+    border-bottom: 0;
+  }
+  .vs tbody.here tr:last-child th {
+    border-bottom: 0;
+  }
+  .here-dev {
+    margin-left: var(--space-2);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    font-weight: var(--weight-regular);
+    color: var(--text-tertiary);
+  }
+  .nr {
+    color: var(--text-tertiary);
+    white-space: nowrap;
+  }
+  .lead.here-src {
+    font-weight: var(--weight-regular);
+    color: var(--text-secondary);
   }
   .how {
     border-top: 1px solid var(--line-subtle);

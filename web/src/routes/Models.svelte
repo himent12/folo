@@ -25,6 +25,7 @@
   import { rowNav } from '$lib/ui/rowNav';
   import { unlike, versusYolo26n } from '$lib/benchmarks';
   import { origin } from '$lib/lineage';
+  import { loadThroughput, measuredLatency, measuredTraining } from '$lib/throughput';
 
   setCrumbs({ label: 'Models' });
 
@@ -36,6 +37,9 @@
   // Only for source-run names and evaluation datasets; the list still renders if these fail.
   const runs = new Resource((s) => hub.api.runs(s));
   const datasets = new Resource((s) => hub.api.datasets(s));
+  // This server's measured speed, for the engine benchmarks' "Measured on this server" lines (null on older servers).
+  const throughput = new Resource((s) => loadThroughput(hub.api, s));
+  const benchHere = $derived([measuredLatency(throughput.data, 'folo-n'), measuredTraining(throughput.data, 'folo-n')].filter(Boolean).length);
 
   type Key = 'name' | 'arch' | 'classes' | 'imgsz' | 'params' | 'flops' | 'bytes' | 'map50_95' | 'map50' | 'source' | 'parent' | 'created';
   interface Col {
@@ -332,9 +336,11 @@
       <summary>
         <span class="chev" aria-hidden="true"></span>
         <span class="b-title">Engine benchmarks</span>
-        <span class="b-sum">{versusYolo26n.length} engine measurements · {benchUnlike} under different conditions</span>
+        <span class="b-sum"
+          >{versusYolo26n.length} reference measurements · {benchUnlike} under different conditions{#if benchHere}{' '}· {benchHere} measured on this server{/if}</span
+        >
       </summary>
-      <div class="b-body"><Versus /></div>
+      <div class="b-body"><Versus table={throughput.data} /></div>
     </details>
   {/if}
 </Page>
