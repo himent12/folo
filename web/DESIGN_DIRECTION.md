@@ -101,6 +101,16 @@ densest screens a focal point. Do 1–4 before any further per-issue fixes.
 and saved to `qa.txt` beside the shots (`qa-<filter>.txt` with `--only`). The list never fails the shoot; review it with
 the screenshots. It must be empty before a round goes to review.
 
+**`npm run qa`** (`shoot --qa`, run by CI's `web` job after the build) runs the same two checks without the shots and
+exits 1 if they find anything, printing the list. It covers where phone layouts break: every scene at the `tablet` and
+`mobile` sizes it lists, in dark (or the one theme a scene is made for), and again in light wherever the page shows a
+phone section picker (Run's and Model's sections, chosen by the scene or by default). Each state gets the scene's own
+setup; the page clock is paused at the fixed time before the page loads, so a state never depends on how busy the
+machine is (in the shoot it keeps running in real time). Several states run at once (`FOLO_QA_JOBS`, default up to 8):
+about 1 to 2 minutes for some 150 states on the dev PC, a little over 1 minute on a boat.dev runner. It uses the
+installed Chrome, else Playwright's Chromium (`npx playwright-core install --only-shell chromium`;
+`FOLO_SHOOT_BROWSER=chromium` forces it, `chrome` refuses the fallback). Desktop and laptop are left to the shoot.
+
 **Blank sections.** A selected control whose content renders nothing is the bug round 19 shipped (the phone rule that
 hid every `.rail` left Model's Details, Run's Classes and a queued run's Config blank behind a selected picker):
 - every selected tab (`[role=tab][aria-selected=true]`) and every checked radio with `aria-controls`: the element it
@@ -113,8 +123,8 @@ hid every `.rail` left Model's Details, Run's Classes and a queued run's Config 
 Content is what a reader sees: text, images, canvases, SVG, form controls, and boxes with a fill or an edge (panel
 frames, skeleton blocks); fixed bars (the tab bar, docks) don't count. A section picker's sections should therefore keep
 their content in the page's own region, not in a column a breakpoint can hide. The check was proven against the round-19
-rule: put back `.app :global(.rail) { display: none }` in `App.svelte` and it flags `model-detail-details`,
-`run-live-phone-classes` and `run-queued` at mobile.
+rule: put back `.app :global(.rail) { display: none }` in `App.svelte` and `npm run qa` fails on `model-detail-details`,
+`run-live-phone-classes`, `run-queued` and `model-o2o` at mobile, in both themes.
 
 **Horizontal overflow.** The page wider than the viewport, and any element whose content is wider than its box
 (`scrollWidth > clientWidth + 1`, innermost box, naming its widest child). It skips hidden content, ellipsis truncation, negative-margin hit areas, positioned decorations and deliberate scrollers
