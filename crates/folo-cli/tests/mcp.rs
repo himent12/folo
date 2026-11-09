@@ -567,6 +567,7 @@ fn full_flow(c: &mut Client, data_dir: &std::path::Path) {
 
     let val = checked(c, &schemas, "val", json!({ "model_id": model_id, "dataset_id": ds_id }));
     assert_eq!(val["images"], 4);
+    assert!(val["dataset_name"].is_string(), "{val}");
     checked(c, &schemas, "export", json!({ "model_id": model_id, "format": "onnx" }));
     let models = checked(c, &schemas, "list_models", json!({ "limit": 2 }));
     assert_eq!(models["items"].as_array().unwrap().len(), 2);
@@ -1179,6 +1180,7 @@ fn real_store_end_to_end() {
 
     let val = checked(&mut c, &schemas, "val", json!({ "model_id": model_id, "dataset_id": ds_id }));
     assert_eq!((val["split"].as_str(), val["images"].as_u64()), (Some("val"), Some(2)));
+    assert_eq!(val["dataset_name"], "tiny");
     assert_eq!(val["imgsz"], 64);
     assert!(val["timing"]["per_image_ms"].as_f64().unwrap() > 0.0);
     let on_train = checked(

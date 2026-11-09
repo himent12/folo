@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use axum::http::StatusCode;
 use folo_api::{
     Arch, ExportFormat, ExportResult, ExportSpec, Head, Model, ModelEval, ModelMetrics, ModelPrecision,
-    PrCurve, TrainedWith, ValReport, ValTiming,
+    PrCurve, SplitFallback, TrainedWith, ValReport, ValTiming,
 };
 use folo_core::Device;
 use folo_data::{Dataset as _, Split};
@@ -218,7 +218,7 @@ pub fn file_model_id(path: &Path) -> String {
 }
 
 /// Bumped when [`ModelEval`] gains a field the engine computes, so older `cache/eval/` files are recomputed.
-const EVAL_CACHE_VERSION: &str = "v2";
+const EVAL_CACHE_VERSION: &str = "v3";
 
 #[derive(Serialize, Deserialize)]
 struct CachedEval {
@@ -363,8 +363,28 @@ impl Models {
 
     /// `/eval` of `m` on the validation split (training split when there is none) of `dataset`, whose index has
     /// fingerprint `ds_key`. Cached per (weights file version, dataset version); computed every time when the
-    /// dataset has no fingerprint (it is not registered, so a change to its files could not be noticed).
+    /// dataset has no fingerprint (it is not registered, so a change to its files could not be noticed). The
+    /// dataset's id and name (also in a fallback's message) are always `dataset`'s, not the cached ones (a rename
+    /// does not invalidate the cache).
     pub fn eval(
+        &self,
+        m: &ModelRef,
+        dataset: &DatasetRef,
+        ds_key: Option<&str>,
+        device: Device,
+    ) -> Result<ModelEval> {
+        self.eval_cached(m, dataset, ds_key, device).map(|e| ModelEval {
+            dataset_id: Some(dataset.id.clone()),
+            dataset_name: Some(dataset.name.clone()),
+            // Its message names the dataset too.
+            split_fallback: e.split_fallback.as_ref().zip(e.split).map(|(f, used)| {
+                SplitFallback::empty_split(f.requested, used, &dataset.name, u64::from(e.images))
+            }),
+            ..e
+        })
+    }
+
+    fn eval_cached(
         &self,
         m: &ModelRef,
         dataset: &DatasetRef,
@@ -377,7 +397,7 @@ impl Models {
             .modified
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map_or(0, |d| d.as_nanos());
-        // `EVAL_CACHE_VERSION` first: results cached before `best_f1_conf` existed are computed again.
+        // `EVAL_CACHE_VERSION` first: results cached before `best_f1_conf` or `split` existed are computed again.
         let key =
             format!("{EVAL_CACHE_VERSION}|{}|{}|{mtime}|{}|{ds_key}", fk.path.display(), fk.len, dataset.id);
         if let Some((k, e)) = self.evals.lock().unwrap().get(&m.model.id)
@@ -505,7 +525,19 @@ fn evaluate(path: &Path, dataset: &DatasetRef, device: Device) -> Result<ModelEv
     }
     let cfg = ValConfig { samples: 0, ..ValConfig::new(model.imgsz(), EVAL_BATCH) };
     let r = validate(&model, Arc::new(part.clone()), &cfg).map_err(engine_error)?;
-    Ok(eval_of(&r.report))
+    let used = if split == Split::Val { folo_api::Split::Val } else { folo_api::Split::Train };
+    let fallback = (used != folo_api::Split::Val).then(|| {
+        let f = SplitFallback::empty_split(folo_api::Split::Val, used, &dataset.name, part.len() as u64);
+        tracing::warn!(dataset = %dataset.id, "/eval: {}", f.message);
+        f
+    });
+    Ok(ModelEval {
+        dataset_id: Some(dataset.id.clone()),
+        dataset_name: Some(dataset.name.clone()),
+        split: Some(used),
+        split_fallback: fallback,
+        ..eval_of(&r.report)
+    })
 }
 
 /// `POST /api/val`: validates the weights of `m` on `split` of `dataset` at `imgsz` (the model's own size when
@@ -561,6 +593,7 @@ pub fn val(
     Ok(ValReport {
         model_id: m.model.id.clone(),
         dataset_id: dataset.id.clone(),
+        dataset_name: Some(dataset.name.clone()),
         split,
         imgsz,
         images,
@@ -573,7 +606,8 @@ pub fn val(
 }
 
 /// docs/API.md's `/eval` shape of an evaluation report: PR curves (class order, 101 recall points), the
-/// confusion matrix transposed to rows = truth, and the per-class metrics.
+/// confusion matrix transposed to rows = truth (with its thresholds), and the per-class metrics. The dataset and
+/// split are the caller's to fill.
 pub fn eval_of(r: &folo_vision::EvalReport) -> ModelEval {
     let recall = r.curves.recall.clone();
     let pr = r
@@ -595,6 +629,12 @@ pub fn eval_of(r: &folo_vision::EvalReport) -> ModelEval {
         per_class: val_metrics(r).per_class,
         images: r.num_images.min(u32::MAX as u64) as u32,
         best_f1_conf: val_metrics(r).best_f1_conf,
+        dataset_id: None,
+        dataset_name: None,
+        split: None,
+        split_fallback: None,
+        confusion_conf: Some(r.confusion.conf),
+        confusion_iou: Some(r.confusion.iou),
     }
 }
 

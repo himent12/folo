@@ -1088,10 +1088,15 @@ impl Inner {
         };
         let r = self.blocking(move |s| s.val(req)).await?;
         progress.report(1.0, Some(1.0), true).await;
+        // The dataset's name when the server reports it (older servers send only the id).
+        let dataset = match &r.dataset_name {
+            Some(name) => format!("{name} ({})", r.dataset_id),
+            None => r.dataset_id.clone(),
+        };
+        let at = r.val.best_f1_conf.map_or(String::new(), |c| format!(" at conf {c:.3}"));
         let summary = format!(
-            "{} on {}/{} ({} images): mAP50 {:.3}, mAP50-95 {:.3}, P {:.3}, R {:.3}",
+            "{} on {dataset}/{} ({} images): mAP50 {:.3}, mAP50-95 {:.3}, P {:.3}, R {:.3}{at}",
             r.model_id,
-            r.dataset_id,
             r.split.as_str(),
             r.images,
             r.val.map50,

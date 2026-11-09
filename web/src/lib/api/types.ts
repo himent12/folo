@@ -276,6 +276,25 @@ export interface ModelEval {
   images: number;
   /** The confidence `per_class` precision / recall are taken at; `null` when unknown, missing from older servers. */
   best_f1_conf?: number | null;
+  // Provenance (docs/API.md `/eval`); each is `null` when unknown and missing from older servers.
+  /** The evaluated dataset's id and name. */
+  dataset_id?: string | null;
+  dataset_name?: string | null;
+  /** The split actually evaluated: `val`, or `train` when the dataset has no val images (`split_fallback` set). */
+  split?: Split | null;
+  /** Set when `split` is not `val`: say so wherever the numbers are labelled "validation". */
+  split_fallback?: SplitFallback | null;
+  /** The confusion matrix counts predictions with `score > confusion_conf`, matched at IoU `> confusion_iou`. */
+  confusion_conf?: number | null;
+  confusion_iou?: number | null;
+}
+
+/** `ModelEval.split_fallback`: the split that was wanted, why it was not used, one sentence for people. */
+export interface SplitFallback {
+  requested: Split;
+  /** `empty_split` (it has no images); treat an unknown code the same way. */
+  reason: string;
+  message: string;
 }
 
 export interface ExportResult {
@@ -505,6 +524,9 @@ export interface ValRequest {
 export interface ValReport {
   model_id: string;
   dataset_id: string;
+  /** Missing from older servers. */
+  dataset_name?: string | null;
+  /** As requested: `POST /api/val` never falls back (an empty split is `invalid_dataset`). */
   split: Split;
   imgsz: number;
   images: number;
