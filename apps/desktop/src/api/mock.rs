@@ -846,7 +846,7 @@ impl Backend for MockBackend {
             tensor_cores: TensorCoreSupport { available: true, enabled: true, reason: None },
             amp: AmpSupport { available: true, reason: None },
         };
-        Ok(SystemResponse { system, data_dir: None, features: Vec::new(), capabilities: Some(capabilities) })
+        Ok(SystemResponse { system, data_dir: None, features: vec!["queue_control".into(), "weights_onnx".into()], capabilities: Some(capabilities) })
     }
 
     fn datasets(&self) -> ApiResult<Vec<Dataset>> {
