@@ -721,8 +721,8 @@ describe('New run: the estimate', () => {
     const radio = target.querySelector<HTMLInputElement>('input[name="arch"][value="folo-x"]')!;
     radio.click();
     flushSync();
-    await until(() => basis().startsWith('Scaled'), 'the folo-x estimate');
-    expect(basis()).toBe('Scaled from folo-s at 640 px on this GPU');
+    await until(() => basis().includes('caled'), 'the folo-x estimate');
+    expect(basis()).toBe('Wide range: scaled from folo-s at 640 px');
     // folo-x is 9x folo-s's compute: low confidence, the value one step quieter.
     expect(rough()).toBe(true);
   });
@@ -732,7 +732,7 @@ describe('New run: the estimate', () => {
     const ask = vi.spyOn(api, 'estimateRun');
     await open();
     await until(() => basis(), 'the estimate');
-    expect(basis()).toBe('Reference benchmarks · no run measured here yet');
+    expect(basis()).toBe('Reference benchmarks · not run here yet');
     expect(time()).toMatch(/^\d+–\d+ min$/);
     expect(rough()).toBe(true);
     expect(target.querySelector('.summary .how-note')?.textContent).toContain('does not estimate runs');

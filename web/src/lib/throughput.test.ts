@@ -66,12 +66,14 @@ describe('what an estimate stands on', () => {
   });
   it('names the setting a carried-over estimate comes from', () => {
     expect(basisLine(est({ exact: false, arch: 'folo-s' }))).toBe('Scaled from folo-s at 640 px on this GPU');
+    // Far from it (low confidence): a wide range, and why.
+    expect(basisLine(est({ exact: false, arch: 'folo-s' }, { confidence: 'low' }))).toBe('Wide range: scaled from folo-s at 640 px');
   });
   it('says when the reference is not from this kind of device', () => {
     // A reference range is wide, and the line says why.
-    expect(basisLine(est({ source: 'reference' }))).toBe('Reference benchmarks · no run measured here yet');
+    expect(basisLine(est({ source: 'reference' }))).toBe('Reference benchmarks · not run here yet');
     expect(basisLine(est({ source: 'reference', measured_on: 'Intel Core i7-14700KF' }, { device: 'cpu', device_name: 'AMD Ryzen 9' }))).toBe(
-      'Wide range: no run measured on this CPU yet',
+      'Wide range: not run on this CPU yet',
     );
   });
   it('says what each confidence means for the range', () => {

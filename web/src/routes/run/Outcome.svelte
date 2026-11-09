@@ -207,11 +207,14 @@
     margin-top: var(--space-2);
   }
   @media (max-width: 767px) {
-    /* Phones: the other fixes as one row of equal 40 px secondary buttons, side by side (touch grows each hit area to
-       44 px, ui/Button), matching the fix above them. */
+    /* Phones: the other fixes as full-width 40 px secondary buttons, one per row (each names its setting and its
+       forecast, "Retry at 640 px, batch 16 · ~12.1 GiB", too long to share a row), matching the fix above them. */
+    .alts {
+      flex-direction: column;
+      align-items: stretch;
+    }
     .alts > :global(.btn.btn) {
       --h: var(--control-xl);
-      flex: 1 1 0;
       min-width: 0;
     }
   }
