@@ -718,20 +718,26 @@ impl FoloApp {
         action: Action,
     ) -> Stateful<Div> {
         let t = theme(cx);
-        let el = div()
-            .id(SharedString::from(key.to_string()))
+        // A 36 x 28 target around the 30 x 18 track: the track answers its wrapper's hover and press.
+        let group = SharedString::from(format!("{key}-sw"));
+        let track = div()
+            .id(SharedString::from(format!("{key}-track")))
+            .relative()
             .w(px(30.))
             .h(px(18.))
             .flex_none()
             .rounded_full()
-            .cursor_pointer()
             .bg(if on { t.accent_fill() } else { t.line_control })
             // Hover and pressed are fills a step apart, like every other control.
-            .when(!on, |d| d.hover(|s| s.bg(t.text_tertiary)).active(|s| s.bg(t.text_secondary)))
+            .when(!on, |d| {
+                d.group_hover(group.clone(), |s| s.bg(t.text_tertiary))
+                    .group_active(group.clone(), |s| s.bg(t.text_secondary))
+            })
             .when(on, |d| {
                 let hot = crate::theme::over(t.accent_fill(), t.bg_hover);
                 let down = crate::theme::over(t.accent_fill(), t.bg_active);
-                d.hover(move |s| s.bg(hot)).active(move |s| s.bg(down))
+                d.group_hover(group.clone(), move |s| s.bg(hot))
+                    .group_active(group.clone(), move |s| s.bg(down))
             })
             .child({
                 // Dark: a dark knob on lime; light: white on olive. Off: a bright knob on grey.
@@ -766,25 +772,53 @@ impl FoloApp {
                     .into_any_element()
                 }
             });
-        self.bind(el, key, 9., window, cx, action)
+        let el = div()
+            .id(SharedString::from(key.to_string()))
+            .group(group)
+            .w(px(36.))
+            .h(px(28.))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(radius::SM))
+            .cursor_pointer()
+            .child(track);
+        self.bind(el, key, radius::SM, window, cx, action)
     }
 
     /// A switch that can't be used now: off, an edged inset track and a tertiary knob, with no
     /// pointer, hover or focus stop. The caller says why in the text beside it.
     pub fn switch_disabled(&self, key: &str, cx: &mut Context<Self>) -> Stateful<Div> {
         let t = theme(cx);
+        // The enabled switch's 36 x 28 footprint, so the row doesn't shift when it's blocked.
         div()
             .id(SharedString::from(format!("{key}-disabled")))
-            .w(px(30.))
-            .h(px(18.))
+            .w(px(36.))
+            .h(px(28.))
             .flex_none()
-            .rounded_full()
-            .bg(t.bg_inset)
-            .border_1()
-            .border_color(t.line_default)
+            .flex()
+            .items_center()
+            .justify_center()
             .child(
-                // Inside the 1 px edge: 1 px in, so the knob sits where an enabled one does.
-                div().absolute().top(px(1.)).left(px(1.)).size(px(14.)).rounded_full().bg(t.text_tertiary),
+                div()
+                    .relative()
+                    .w(px(30.))
+                    .h(px(18.))
+                    .rounded_full()
+                    .bg(t.bg_inset)
+                    .border_1()
+                    .border_color(t.line_default)
+                    .child(
+                        // Inside the 1 px edge: 1 px in, so the knob sits where an enabled one does.
+                        div()
+                            .absolute()
+                            .top(px(1.))
+                            .left(px(1.))
+                            .size(px(14.))
+                            .rounded_full()
+                            .bg(t.text_tertiary),
+                    ),
             )
     }
 

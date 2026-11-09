@@ -398,11 +398,9 @@ impl FoloApp {
             .map_or(r.config.dataset_id.clone(), |d| d.name.clone());
         let started = r.started.as_deref().and_then(time::parse).map(|s| time::ago(s, now));
         let device = crate::ui::device_label(&r.device);
-        // The architecture, with an end-to-end head named beside it (as the model page shows it).
-        let arch = match r.config.head {
-            crate::api::Head::O2o => format!("{} end-to-end", r.config.arch.as_str()),
-            crate::api::Head::O2m => r.config.arch.as_str().to_string(),
-        };
+        // The architecture; an end-to-end head is a badge by the title, as on the model page.
+        let arch = r.config.arch.as_str().to_string();
+        let e2e = r.config.head == crate::api::Head::O2o;
         let subtitle = text(ty::BASE, t.text_secondary).child(match started {
             Some(s) => format!("{arch} · {ds_name} · {device} · started {s}"),
             None => format!("{arch} · {ds_name} · {device}"),
@@ -507,7 +505,17 @@ impl FoloApp {
             .items_center()
             .gap(px(12.))
             .child(text(ty::XL, t.text_primary).child(r.name.clone()))
-            .child(status_badge(&t, r.status, &format!("hdr-{}", r.id)));
+            .child(status_badge(&t, r.status, &format!("hdr-{}", r.id)))
+            .when(e2e, |d| {
+                d.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(4.))
+                        .child(badge(&t, "end-to-end", Tone::Neutral))
+                        .child(self.help_icon("run-head-help", FoloApp::E2E_HELP, window, cx)),
+                )
+            });
         let header = detail_header(&t, title, subtitle, actions);
 
         let mut body = div().flex().flex_col().gap(px(16.));

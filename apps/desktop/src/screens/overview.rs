@@ -565,7 +565,7 @@ impl FoloApp {
                         .child(div().flex().children((0..4).map(|c| {
                             div()
                                 .flex_1()
-                                .h(px(64.))
+                                .h(px(72.))
                                 .pr(px(16.))
                                 .when(c > 0, |d| d.border_l_1().border_color(t.line_subtle).pl(px(16.)))
                                 .child(skeleton(&t, format!("hero-kpi-{c}")))
@@ -585,7 +585,7 @@ impl FoloApp {
                                 .border_color(t.line_subtle)
                                 .child(div().h(px(20.)).w(px(120.)).child(sk("hero-chart-title")))
                                 .child(div().mt(px(2.)).h(px(18.)).w(px(220.)).child(sk("hero-chart-legend")))
-                                .child(div().h(px(hero_h + 16.)).child(sk("hero-chart"))),
+                                .child(div().h(px(hero_h + 10.)).child(sk("hero-chart"))),
                         ),
                 )
                 .child(

@@ -501,11 +501,7 @@ impl FoloApp {
         let model = models.get(sel).cloned();
         // An end-to-end model (the run that trained it had the one-to-one head) predicts without NMS,
         // so its IoU setting does nothing.
-        let e2e = model
-            .as_ref()
-            .and_then(|m| m.run_id.as_ref())
-            .and_then(|r| self.store.run(r))
-            .is_some_and(|r| r.config.head == crate::api::Head::O2o);
+        let e2e = model.as_ref().is_some_and(|m| self.model_e2e(m));
         let ids: Vec<String> = models.iter().map(|m| m.id.clone()).collect();
         let select = self.select(
             "play-model",
@@ -523,9 +519,11 @@ impl FoloApp {
                 .map(|m| {
                     (
                         SharedString::from(m.name.clone()),
-                        m.metrics
-                            .as_ref()
-                            .map(|x| SharedString::from(format!("{} · {:.3}", m.arch.as_str(), x.map50_95))),
+                        m.metrics.as_ref().map(|x| {
+                            // End-to-end named in the picker: it's why the NMS row changes.
+                            let e2e = if self.model_e2e(m) { " · end-to-end" } else { "" };
+                            SharedString::from(format!("{}{e2e} · {:.3}", m.arch.as_str(), x.map50_95))
+                        }),
                     )
                 })
                 .collect(),
@@ -641,7 +639,9 @@ impl FoloApp {
                                             .font_weight(FontWeight::MEDIUM)
                                             .child("NMS"),
                                     )
-                                    .child(text(ty::XS, t.text_tertiary).child("None: an end-to-end model")),
+                                    .child(
+                                        text(ty::XS, t.text_tertiary).child("Not used · end-to-end model"),
+                                    ),
                             )
                         } else {
                             d.child(field(
@@ -804,10 +804,15 @@ impl FoloApp {
                             [
                                 ("Pre", "Preprocess", p.timing.preprocess_ms, c_pre),
                                 ("Infer", "Inference", p.timing.inference_ms, c_model),
-                                // The engine's postprocess: box decoding and NMS (named as Studio names it).
+                                // The engine's postprocess: box decoding, and NMS unless the model
+                                // is end-to-end (named as Studio names it).
                                 (
                                     "Post",
-                                    "Postprocess · box decoding and NMS",
+                                    if e2e {
+                                        "Postprocess · box decoding"
+                                    } else {
+                                        "Postprocess · box decoding and NMS"
+                                    },
                                     p.timing.postprocess_ms,
                                     c_nms,
                                 ),
