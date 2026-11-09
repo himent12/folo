@@ -336,6 +336,15 @@ impl Predictor {
     }
 
     fn run(&self, imgs: &[Image], rect: bool) -> Result<Vec<Prediction>> {
+        // On the CPU every stage (letterbox, forward, decode) runs from inside the rayon pool.
+        if self.model.device().is_cpu() {
+            folo_core::cpu::in_pool(|| self.run_here(imgs, rect))
+        } else {
+            self.run_here(imgs, rect)
+        }
+    }
+
+    fn run_here(&self, imgs: &[Image], rect: bool) -> Result<Vec<Prediction>> {
         let t0 = Instant::now();
         let batch = self.prepare(imgs, rect)?;
         self.wait_for_device()?;

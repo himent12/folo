@@ -42,6 +42,13 @@ pub fn autocast() -> AutocastGuard {
     AutocastGuard { prev, _not_send: PhantomData }
 }
 
+/// Set this thread's autocast dtype to `dtype` until the returned guard is dropped (carries a caller's state
+/// onto another thread, see [`crate::cpu::in_pool`]).
+pub(crate) fn autocast_as(dtype: Option<DType>) -> AutocastGuard {
+    let prev = AUTOCAST.with(|a| a.replace(dtype));
+    AutocastGuard { prev, _not_send: PhantomData }
+}
+
 /// The dtype matrix ops run in under the active [`autocast`] guard, if any.
 pub fn autocast_dtype() -> Option<DType> {
     AUTOCAST.with(|a| a.get())

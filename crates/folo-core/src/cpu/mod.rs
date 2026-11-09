@@ -32,6 +32,26 @@ pub fn take_buffer(n: usize) -> Vec<f32> {
     alloc_uninit(n)
 }
 
+/// Run `f` on a worker thread of the rayon pool (the calling thread waits for it), under the calling thread's
+/// grad mode and autocast state, and return its result.
+///
+/// A CPU forward pass makes a hundred or so parallel calls. Each started from a thread outside the pool is
+/// injected into the pool's queue, and the caller then sleeps until a worker wakes it; started from a worker,
+/// it is pushed on that worker's own queue and the worker takes part in it. Running the whole pass in the pool
+/// pays the injection once (a 64x400x64 GEMM, a 1x1 conv at 20x20, on 8 threads: 28 → 17 µs). Already on a worker, or with
+/// a one-thread pool, `f` runs right here.
+pub fn in_pool<R: Send>(f: impl FnOnce() -> R + Send) -> R {
+    if rayon::current_thread_index().is_some() || rayon::current_num_threads() == 1 {
+        return f();
+    }
+    let (grad, cast) = (crate::is_grad_enabled(), crate::autocast_dtype());
+    rayon::scope(move |_| {
+        let _g = crate::autograd::grad_mode(grad);
+        let _c = crate::autocast::autocast_as(cast);
+        f()
+    })
+}
+
 /// Element count above which kernels go parallel.
 pub(crate) const PAR_MIN: usize = 1 << 15;
 /// Elements per parallel task for streaming kernels.
@@ -349,9 +369,7 @@ impl Backend for CpuBackend {
         let bd = bias.map(|b| contiguous_f32(&b, "conv2d")).transpose()?;
         if !out.is_empty() {
             // Bias and activation are applied to each finished block of the output, while it is in cache.
-            let epi = |ch: usize, v: &mut [f32]| {
-                elementwise::bias_act_inplace(act, bd.as_ref().map_or(0.0, |b| b[ch]), v)
-            };
+            let epi = gemm::BiasAct { bias: bd.as_deref(), act };
             let fused = bd.is_some() || act.is_some();
             conv::conv2d_forward_parts(
                 conv::ConvInput { parts: &parts },
@@ -359,7 +377,7 @@ impl Backend for CpuBackend {
                 &mut out,
                 &g,
                 false,
-                fused.then_some(&epi as conv::ChannelEpilogue<'_>),
+                fused.then_some(epi),
             );
         }
         Ok(f32_storage(out))

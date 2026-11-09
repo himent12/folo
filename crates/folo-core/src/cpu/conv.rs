@@ -3,8 +3,10 @@
 use rayon::prelude::*;
 
 use super::elementwise::SendPtr;
-use super::gemm::{ColumnMap, Epilogue, NR, Operand, RowPtrs, Strided, gemm, gemm_ex, gemm_rows};
-use crate::backend::Conv2dParams;
+use super::gemm::{
+    BiasAct, ColumnMap, NR, Operand, RowPtrs, Strided, gemm, gemm_ex, gemm_rows, pack_rows_into_panels,
+};
+use crate::backend::{Conv2dParams, UnaryOp};
 
 /// Geometry shared by the kernels. All tensors are contiguous NCHW / OIHW.
 #[derive(Clone, Copy, Debug)]
@@ -138,6 +140,10 @@ impl Operand for PlaneRows<'_> {
             d[w..].fill(0.0);
         }
     }
+
+    fn pack_panels(&self, o0: usize, w: usize, k0: usize, kc: usize, dst: &mut [f32]) {
+        pack_rows_into_panels(w, kc, dst, |kk| &self.planes[k0 + kk][o0..o0 + w]);
+    }
 }
 
 /// One part of a conv input: `c` channels whose plane `(img, ci)` is `data[offset + img * img_stride + ci * h * w..]`
@@ -222,8 +228,8 @@ impl ShiftedRows {
         let mut buf = super::alloc_uninit(planes.len() * per_ci + wq + NR);
         let fill = |(ci, dst): (usize, &mut [f32])| {
             let src = planes[ci];
-            for &(a, b, s) in &phases {
-                {
+            if sx == 1 {
+                for &(a, _, s) in &phases {
                     let d = &mut dst[s * pstride..s * pstride + plane];
                     for (i, drow) in d.chunks_exact_mut(wq).enumerate() {
                         let y = (sy * i + a) as isize - ph as isize;
@@ -232,16 +238,54 @@ impl ShiftedRows {
                             continue;
                         }
                         let srow = &src[y as usize * w..(y as usize + 1) * w];
-                        if sx == 1 {
-                            // x = j - pw: zeros, the row, zeros.
-                            let (lo, hi) = (pw.min(wq), (pw + w).min(wq));
-                            drow[..lo].fill(0.0);
-                            drow[lo..hi].copy_from_slice(&srow[..hi - lo]);
-                            drow[hi..].fill(0.0);
+                        // x = j - pw: zeros, the row, zeros (short runs: plain stores, no memset calls).
+                        let (lo, hi) = (pw.min(wq), (pw + w).min(wq));
+                        drow[..lo].iter_mut().for_each(|v| *v = 0.0);
+                        drow[lo..hi].copy_from_slice(&srow[..hi - lo]);
+                        drow[hi..].iter_mut().for_each(|v| *v = 0.0);
+                    }
+                }
+                return;
+            }
+            // Column phases: each input row is zero-padded once into `padded` (`sx * wq >= pw + w` floats,
+            // `padded[x + pw] = row[x]`), then dealt out to the phases of its row parity, `T[b][j] =
+            // padded[sx·j + b]`, two at a time for stride 2.
+            let mut padded = vec![0f32; sx * wq];
+            let mut k = 0;
+            while k < phases.len() {
+                let a = phases[k].0;
+                let group = phases[k..].iter().take_while(|p| p.0 == a).count();
+                let bs = &phases[k..k + group];
+                k += group;
+                for i in 0..hq {
+                    let y = (sy * i + a) as isize - ph as isize;
+                    if y < 0 || y >= h as isize {
+                        for &(_, _, s) in bs {
+                            dst[s * pstride + i * wq..][..wq].fill(0.0);
+                        }
+                        continue;
+                    }
+                    let srow = &src[y as usize * w..(y as usize + 1) * w];
+                    padded[pw..pw + w].copy_from_slice(srow);
+                    if let [(_, 0, s0), (_, 1, s1)] = *bs
+                        && sx == 2
+                    {
+                        let (d0, d1) = if s0 < s1 {
+                            let (lo, hi) = dst.split_at_mut(s1 * pstride);
+                            (&mut lo[s0 * pstride + i * wq..][..wq], &mut hi[i * wq..][..wq])
                         } else {
-                            for (j, v) in drow.iter_mut().enumerate() {
-                                let x = (sx * j + b) as isize - pw as isize;
-                                *v = if x >= 0 && x < w as isize { srow[x as usize] } else { 0.0 };
+                            let (lo, hi) = dst.split_at_mut(s0 * pstride);
+                            (&mut hi[i * wq..][..wq], &mut lo[s1 * pstride + i * wq..][..wq])
+                        };
+                        for ((e, o), p) in d0.iter_mut().zip(d1.iter_mut()).zip(padded.as_chunks::<2>().0) {
+                            *e = p[0];
+                            *o = p[1];
+                        }
+                    } else {
+                        for &(_, b, s) in bs {
+                            let d = &mut dst[s * pstride + i * wq..][..wq];
+                            for (v, p) in d.iter_mut().zip(padded[b..].iter().step_by(sx)) {
+                                *v = *p;
                             }
                         }
                     }
@@ -250,27 +294,37 @@ impl ShiftedRows {
         };
         let (body, slack) = buf.split_at_mut(planes.len() * per_ci);
         slack.fill(0.0);
-        if parallel && body.len() >= super::PAR_MIN {
-            body.par_chunks_mut(per_ci).enumerate().for_each(fill);
+        // A copy this size takes tens of microseconds: in parallel only when it is large, a few channels a task.
+        if parallel && body.len() >= SHIFTED_PAR_MIN {
+            let per_task = SHIFTED_TASK.div_ceil(per_ci);
+            body.par_chunks_mut(per_task * per_ci).enumerate().for_each(|(t, chunk)| {
+                chunk.chunks_mut(per_ci).enumerate().for_each(|(c, dst)| fill((t * per_task + c, dst)))
+            });
         } else {
             body.chunks_mut(per_ci).enumerate().for_each(fill);
+        }
+        // Where each tap's run starts within a channel's block.
+        let mut taps = Vec::with_capacity(g.kh * g.kw);
+        for ky in 0..g.kh {
+            for kx in 0..g.kw {
+                let (a, rs) = ((ky * dy) % sy, (ky * dy) / sy);
+                let (b, cs) = ((kx * dx) % sx, (kx * dx) / sx);
+                taps.push(slot[&(a, b)] * pstride + rs * wq + cs);
+            }
         }
         let base = buf.as_ptr();
         let mut rows = Vec::with_capacity(planes.len() * g.kh * g.kw);
         for ci in 0..planes.len() {
-            for ky in 0..g.kh {
-                for kx in 0..g.kw {
-                    let (a, rs) = ((ky * dy) % sy, (ky * dy) / sy);
-                    let (b, cs) = ((kx * dx) % sx, (kx * dx) / sx);
-                    let off = ci * per_ci + slot[&(a, b)] * pstride + rs * wq + cs;
-                    // SAFETY: `off` is inside `buf` (rs < hq, cs < wq), which outlives `rows`.
-                    rows.push(unsafe { base.add(off) });
-                }
-            }
+            // SAFETY: every offset is inside `buf` (rs < hq, cs < wq), which outlives `rows`.
+            rows.extend(taps.iter().map(|&t| unsafe { base.add(ci * per_ci + t) }));
         }
         ShiftedRows { buf, rows, n: g.oh * wq, map: ColumnMap { wp: wq, ow: g.ow } }
     }
 }
+
+/// Floats from which [`ShiftedRows::new`] fills in parallel, and about how many each task fills.
+const SHIFTED_PAR_MIN: usize = 1 << 16;
+const SHIFTED_TASK: usize = 1 << 14;
 
 /// B operand of the weight-gradient GEMM: element `(kidx, t)` with `t = img * ohw + s` is `col_img[kidx][s]`.
 struct Im2ColT<'a> {
@@ -355,9 +409,9 @@ impl Operand for GradRows<'_> {
 /// Above this many flops per image, one image's GEMM is parallelised; below it, images run in parallel.
 const IMAGE_PAR_FLOPS: usize = 1 << 25;
 
-/// Applied to every finished run of output values of one channel: `f(channel, values)`. Each output element is
-/// passed exactly once (conv2d fuses bias + activation here).
-pub(crate) type ChannelEpilogue<'a> = &'a (dyn Fn(usize, &mut [f32]) + Sync);
+/// Bias (one per output channel) and activation applied to every output element once, as it is finished
+/// (conv2d fuses bias + activation here).
+pub(crate) type ChannelEpilogue<'a> = BiasAct<'a>;
 
 /// Run `f(img, out_img, threads)` for every image: one after another with the whole pool for large images, side
 /// by side otherwise, splitting the pool between the images when there are fewer images than threads.
@@ -421,8 +475,7 @@ pub(crate) fn conv2d_forward_parts(
             let a = Strided::lhs(wt, grp * og * kdim, kdim, 1);
             let c = &mut out_img[grp * og * ohw..(grp + 1) * og * ohw];
             let planes = &planes[grp * cg..(grp + 1) * cg];
-            let rows = epi.map(|f| move |i: usize, _: usize, row: &mut [f32]| f(grp * og + i, row));
-            let rows = rows.as_ref().map(|r| r as Epilogue<'_>);
+            let rows = epi.map(|e| e.rows_from(grp * og));
             // Pointwise convs pack B (a plain copy); every other conv reads shifted rows in place.
             if !accumulate && !g.is_pointwise() {
                 let sr = ShiftedRows::new(planes, g, threads > 1);
@@ -503,8 +556,8 @@ fn small_c_forward(
                     std::slice::from_raw_parts_mut(optr.0.add((img * g.o + oc) * ohw + oy * g.ow), g.ow)
                 };
                 dst.copy_from_slice(&orow[..g.ow]);
-                if let Some(f) = epi {
-                    f(oc, dst);
+                if let Some(e) = epi {
+                    e.apply(oc, dst);
                 }
             }
         }
@@ -831,6 +884,10 @@ unsafe fn depthwise_plane_avx2(xp: &[f32], wk: &[f32], op: &mut [f32], g: &ConvG
     depthwise_plane(xp, wk, op, g)
 }
 
+/// Output elements per [`depthwise_forward`] task (whole planes, at least one): small planes are grouped so a
+/// task is not dominated by scheduling.
+const DW_TASK_OUTPUTS: usize = 1 << 14;
+
 fn depthwise_forward(
     x: ConvInput<'_>,
     wt: &[f32],
@@ -844,26 +901,145 @@ fn depthwise_forward(
     let planes: Vec<Vec<&[f32]>> = (0..g.n).map(|img| x.planes(img, hw)).collect();
     #[cfg(target_arch = "x86_64")]
     let avx2 = std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma");
-    out.par_chunks_mut(ohw).enumerate().for_each(|(plane, op)| {
-        let (img, oc) = (plane / g.o, plane % g.o);
-        let xp = planes[img][oc / mult];
-        let wk = &wt[oc * khw..(oc + 1) * khw];
-        if !accumulate {
-            op.fill(0.0);
-        }
+    #[cfg(target_arch = "x86_64")]
+    let fast = avx2 && g.p.stride == [1, 1];
+    let total = g.n * g.o;
+    let per_task = DW_TASK_OUTPUTS.div_ceil(ohw).min(total.div_ceil(4 * rayon::current_num_threads())).max(1);
+    out.par_chunks_mut(per_task * ohw).enumerate().for_each(|(t, ops)| {
         #[cfg(target_arch = "x86_64")]
-        if avx2 {
-            // SAFETY: AVX2 and FMA were detected above.
-            unsafe { depthwise_plane_avx2(xp, wk, op, g) };
-        } else {
+        let mut pad = Vec::new();
+        for (p, op) in ops.chunks_mut(ohw).enumerate() {
+            let plane = t * per_task + p;
+            let (img, oc) = (plane / g.o, plane % g.o);
+            let xp = planes[img][oc / mult];
+            let wk = &wt[oc * khw..(oc + 1) * khw];
+            #[cfg(target_arch = "x86_64")]
+            if fast {
+                // SAFETY: AVX2 and FMA were detected above.
+                unsafe {
+                    depthwise_s1_avx2(xp, wk, op, g, accumulate, epi.map(|e| e.rows_from(oc)), &mut pad)
+                };
+                continue;
+            }
+            if !accumulate {
+                op.fill(0.0);
+            }
+            #[cfg(target_arch = "x86_64")]
+            if avx2 {
+                // SAFETY: AVX2 and FMA were detected above.
+                unsafe { depthwise_plane_avx2(xp, wk, op, g) };
+            } else {
+                depthwise_plane(xp, wk, op, g);
+            }
+            #[cfg(not(target_arch = "x86_64"))]
             depthwise_plane(xp, wk, op, g);
-        }
-        #[cfg(not(target_arch = "x86_64"))]
-        depthwise_plane(xp, wk, op, g);
-        if let Some(f) = epi {
-            f(oc, op);
+            if let Some(e) = epi {
+                e.apply(oc, op);
+            }
         }
     });
+}
+
+/// One output plane of a stride-1 depthwise conv with AVX2: `op = conv(xp, wk)` (plus the previous `op` if
+/// `accumulate`), then `epi` (its row 0 is this channel). The input plane is first copied into `pad` with its
+/// zero padding (and slack up to a whole number of vectors), so every output vector is the `kh·kw` taps'
+/// fused multiply-adds, in `(ky, kx)` order, of plain unaligned loads, held in registers four vectors at a
+/// time; the identity and SiLU epilogues are applied there too (the lanes of `silu_bias_inplace`), others as a
+/// pass over the finished plane.
+///
+/// # Safety
+/// The CPU supports AVX2 and FMA.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn depthwise_s1_avx2(
+    xp: &[f32],
+    wk: &[f32],
+    op: &mut [f32],
+    g: &ConvGeom,
+    accumulate: bool,
+    epi: Option<BiasAct<'_>>,
+    pad: &mut Vec<f32>,
+) {
+    use std::arch::x86_64::*;
+    let (ph, pw) = (g.p.padding[0], g.p.padding[1]);
+    let (dh, dw) = (g.p.dilation[0], g.p.dilation[1]);
+    let (h, w, ow) = (g.h, g.w, g.ow);
+    let owp = ow.div_ceil(8) * 8;
+    // Padded row: `prow[X] = x[X - pw]`, for every column a tap of a computed output column reads.
+    let wpd = (owp + dw * (g.kw - 1)).max(pw + w);
+    pad.clear();
+    pad.resize(h * wpd, 0.0);
+    for (prow, xrow) in pad.chunks_exact_mut(wpd).zip(xp.chunks_exact(w)) {
+        prow[pw..pw + w].copy_from_slice(xrow);
+    }
+    // In registers: bias + SiLU / bias; otherwise a pass after the plane.
+    let (reg, bias) = match epi {
+        Some(e) if matches!(e.act, None | Some(UnaryOp::Silu)) => (true, e.bias.map_or(0.0, |b| b[0])),
+        _ => (false, 0.0),
+    };
+    let silu = epi.is_some_and(|e| e.act == Some(UnaryOp::Silu));
+    // Without an activation `bias_act_inplace` skips a zero bias; `x + -0.0` is `x` bit for bit.
+    let bv = _mm256_set1_ps(if !silu && bias == 0.0 { -0.0 } else { bias });
+    for oy in 0..g.oh {
+        let orow = &mut op[oy * ow..(oy + 1) * ow];
+        let mut x0 = 0;
+        while x0 < owp {
+            let nv = ((owp - x0) / 8).min(4);
+            let mut acc = [_mm256_setzero_ps(); 4];
+            if accumulate {
+                for (v, a) in acc.iter_mut().enumerate().take(nv) {
+                    let c = x0 + 8 * v;
+                    let mut tmp = [0f32; 8];
+                    let len = ow.saturating_sub(c).min(8);
+                    tmp[..len].copy_from_slice(&orow[c..c + len]);
+                    // SAFETY: `tmp` holds 8 floats.
+                    *a = unsafe { _mm256_loadu_ps(tmp.as_ptr()) };
+                }
+            }
+            for ky in 0..g.kh {
+                let iy = (oy + ky * dh) as isize - ph as isize;
+                if iy < 0 || iy >= h as isize {
+                    continue;
+                }
+                let prow = &pad[iy as usize * wpd..(iy as usize + 1) * wpd];
+                for kx in 0..g.kw {
+                    let wv = _mm256_set1_ps(wk[ky * g.kw + kx]);
+                    let base = x0 + kx * dw;
+                    assert!(base + 8 * nv <= wpd);
+                    for (v, a) in acc.iter_mut().enumerate().take(nv) {
+                        // SAFETY: `base + 8 * nv <= wpd` (asserted), inside this padded row.
+                        *a = _mm256_fmadd_ps(
+                            wv,
+                            unsafe { _mm256_loadu_ps(prow.as_ptr().add(base + 8 * v)) },
+                            *a,
+                        );
+                    }
+                }
+            }
+            for (v, a) in acc.iter().enumerate().take(nv) {
+                let c = x0 + 8 * v;
+                let r = match (reg, silu) {
+                    (false, _) => *a,
+                    (true, false) => _mm256_add_ps(*a, bv),
+                    (true, true) => super::elementwise::silu8(_mm256_add_ps(*a, bv)),
+                };
+                if c + 8 <= ow {
+                    // SAFETY: columns c..c + 8 are inside `orow`.
+                    unsafe { _mm256_storeu_ps(orow.as_mut_ptr().add(c), r) };
+                } else if c < ow {
+                    let mut tmp = [0f32; 8];
+                    // SAFETY: `tmp` holds 8 floats.
+                    unsafe { _mm256_storeu_ps(tmp.as_mut_ptr(), r) };
+                    orow[c..].copy_from_slice(&tmp[..ow - c]);
+                }
+            }
+            x0 += 8 * nv;
+        }
+    }
+    if let (false, Some(e)) = (reg, epi) {
+        e.apply(0, op);
+    }
 }
 
 fn depthwise_backward_input(gy: &[f32], wt: &[f32], gx: &mut [f32], g: &ConvGeom) {
@@ -979,11 +1155,9 @@ mod small_c_tests {
         for (img, out_img) in out.chunks_mut(g.o * ohw).enumerate() {
             let planes = x.planes(img, hw);
             let a = Strided::lhs(wt, 0, kdim, 1);
-            let rows = epi.map(|f| move |i: usize, _: usize, row: &mut [f32]| f(i, row));
-            let rows = rows.as_ref().map(|r| r as Epilogue<'_>);
             let sr = ShiftedRows::new(&planes, g, true);
             let b = RowPtrs { rows: &sr.rows, n: sr.n };
-            gemm_rows(g.o, kdim, &a, &b, out_img, sr.map, rayon::current_num_threads(), rows);
+            gemm_rows(g.o, kdim, &a, &b, out_img, sr.map, rayon::current_num_threads(), epi);
         }
     }
 
@@ -1011,14 +1185,23 @@ mod small_c_tests {
             (2, 1, [4, 3], 3, [5, 7], p([1, 1], [2, 3], [1, 1])),
             (1, 3, [3, 2], 2, [3, 5], p([2, 2], [1, 3], [1, 1])),
         ];
-        let silu = |_: usize, v: &mut [f32]| v.iter_mut().for_each(|x| *x = *x / (1.0 + (-*x).exp()));
-        let bias = |c: usize, v: &mut [f32]| v.iter_mut().for_each(|x| *x += c as f32 * 0.25 - 1.0);
         for (i, (n, c, hw, o, k, prm)) in cases.into_iter().enumerate() {
             let g = geom(n, c, hw, o, k, prm);
             assert!(uses_small_c(&g), "case {i}");
             let x = data(n * c * hw[0] * hw[1], 1 + i as u32);
             let wt = data(o * g.kdim(), 100 + i as u32);
-            for epi in [None, Some(&silu as ChannelEpilogue<'_>), Some(&bias as ChannelEpilogue<'_>)] {
+            // Channel 4's bias is 0.0.
+            let bias: Vec<f32> = (0..o).map(|c| c as f32 * 0.25 - 1.0).collect();
+            let b = Some(&bias[..]);
+            // The GEMM applies the identity and SiLU in its micro-kernels, ReLU as a pass over finished rows.
+            let epis = [
+                None,
+                Some(BiasAct { bias: None, act: Some(UnaryOp::Silu) }),
+                Some(BiasAct { bias: b, act: None }),
+                Some(BiasAct { bias: b, act: Some(UnaryOp::Silu) }),
+                Some(BiasAct { bias: b, act: Some(UnaryOp::Relu) }),
+            ];
+            for epi in epis {
                 let mut want = vec![f32::NAN; n * o * g.ohw()];
                 gemm_path(&x, &wt, &mut want, &g, epi);
                 let mut got = vec![f32::NAN; want.len()];
@@ -1027,5 +1210,166 @@ mod small_c_tests {
                 assert!(same, "case {i} ({g:?}): not bit-identical with the GEMM path");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod kernel_tests {
+    use super::*;
+
+    fn data(len: usize, seed: u32) -> Vec<f32> {
+        (0..len)
+            .map(|i| {
+                (((i as u32).wrapping_mul(2654435761).wrapping_add(seed) >> 8) % 1000) as f32 / 500.0 - 1.0
+            })
+            .collect()
+    }
+
+    fn geom(n: usize, c: usize, hw: [usize; 2], o: usize, k: [usize; 2], p: Conv2dParams) -> ConvGeom {
+        let out =
+            |i: usize, k: usize| (hw[i] + 2 * p.padding[i] - p.dilation[i] * (k - 1) - 1) / p.stride[i] + 1;
+        let (oh, ow) = (out(0, k[0]), out(1, k[1]));
+        ConvGeom { n, c, h: hw[0], w: hw[1], o, kh: k[0], kw: k[1], oh, ow, p }
+    }
+
+    fn params(s: [usize; 2], pad: [usize; 2], d: [usize; 2], groups: usize) -> Conv2dParams {
+        Conv2dParams { stride: s, padding: pad, dilation: d, groups }
+    }
+
+    /// `(n, c, [h, w], o, [kh, kw], params)`.
+    type Case = (usize, usize, [usize; 2], usize, [usize; 2], Conv2dParams);
+
+    /// The conv in f64, per output element: `(sum, sum of |terms|)`.
+    fn reference(x: &[f32], wt: &[f32], g: &ConvGeom) -> Vec<(f64, f64)> {
+        let (cg, og) = (g.cg(), g.og());
+        let mut out = Vec::with_capacity(g.n * g.o * g.ohw());
+        for img in 0..g.n {
+            for oc in 0..g.o {
+                let grp = oc / og;
+                for oy in 0..g.oh {
+                    for ox in 0..g.ow {
+                        let (mut s, mut a) = (0f64, 0f64);
+                        for ci in 0..cg {
+                            let ic = grp * cg + ci;
+                            for ky in 0..g.kh {
+                                for kx in 0..g.kw {
+                                    let iy = (oy * g.p.stride[0] + ky * g.p.dilation[0]) as isize
+                                        - g.p.padding[0] as isize;
+                                    let ix = (ox * g.p.stride[1] + kx * g.p.dilation[1]) as isize
+                                        - g.p.padding[1] as isize;
+                                    if iy < 0 || ix < 0 || iy >= g.h as isize || ix >= g.w as isize {
+                                        continue;
+                                    }
+                                    let xv =
+                                        x[((img * g.c + ic) * g.h + iy as usize) * g.w + ix as usize] as f64;
+                                    let wv = wt[((oc * cg + ci) * g.kh + ky) * g.kw + kx] as f64;
+                                    s += xv * wv;
+                                    a += (xv * wv).abs();
+                                }
+                            }
+                        }
+                        out.push((s, a));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Runs `conv2d_forward` on every case with every epilogue (and accumulating into a prior output), against
+    /// the f64 reference. Tolerance: the f32 summation bound `K · 2^-23 · Σ|terms|` for a K-term dot product in
+    /// any order, carried through the activation (slope at most 1.1), plus SiLU's own relative error.
+    fn check(cases: &[Case]) {
+        let bias_of = |o: usize| (0..o).map(|c| c as f32 * 0.25 - 1.0).collect::<Vec<f32>>();
+        let silu = |v: f64| v / (1.0 + (-v).exp());
+        for (i, &(n, c, hw, o, k, prm)) in cases.iter().enumerate() {
+            let g = geom(n, c, hw, o, k, prm);
+            let x = data(n * c * hw[0] * hw[1], 7 + i as u32);
+            let wt = data(o * g.kdim(), 300 + i as u32);
+            let want = reference(&x, &wt, &g);
+            let bias = bias_of(o);
+            let ohw = g.ohw();
+            let kterms = g.kdim() as f64;
+            for (e, act) in [None, Some(UnaryOp::Silu), Some(UnaryOp::Relu)].into_iter().enumerate() {
+                for with_bias in [false, true] {
+                    let epi = BiasAct { bias: with_bias.then_some(&bias[..]), act };
+                    let epi = (with_bias || act.is_some()).then_some(epi);
+                    let mut got = vec![f32::NAN; n * o * ohw];
+                    conv2d_forward(&x, &wt, &mut got, &g, false, epi);
+                    for (q, (&y, &(s, a))) in got.iter().zip(&want).enumerate() {
+                        let b = if with_bias { bias[(q / ohw) % o] as f64 } else { 0.0 };
+                        let t = s + b;
+                        let (want, slope) = match act {
+                            None => (t, 1.0),
+                            Some(UnaryOp::Silu) => (silu(t), 1.1),
+                            _ => (t.max(0.0), 1.0),
+                        };
+                        let tol = slope * kterms * 1.2e-7 * (a + b.abs()) + 5e-7 * want.abs() + 1e-7;
+                        assert!(
+                            (y as f64 - want).abs() <= tol,
+                            "case {i} ({g:?}) epi {e}/{with_bias} at {q}: {y} vs {want} (tol {tol})"
+                        );
+                    }
+                }
+            }
+            // Accumulating into a prior output (no epilogue).
+            let prior = data(n * o * ohw, 900 + i as u32);
+            let mut got = prior.clone();
+            conv2d_forward(&x, &wt, &mut got, &g, true, None);
+            for (q, ((&y, &(s, a)), &p0)) in got.iter().zip(&want).zip(&prior).enumerate() {
+                let want = s + p0 as f64;
+                let tol = (kterms + 1.0) * 1.2e-7 * (a + (p0 as f64).abs()) + 1e-7;
+                assert!((y as f64 - want).abs() <= tol, "case {i} accumulate at {q}: {y} vs {want}");
+            }
+        }
+    }
+
+    #[test]
+    fn depthwise_matches_reference() {
+        // (n, c, [h, w], o, [kh, kw], params): the folo-n shapes, then rows narrower than one vector, ragged
+        // tails (ow % 8 != 0, more than four vectors), taps that see only padding, dilation, a channel
+        // multiplier, non-square kernels and the strided (non-fast) path.
+        let cases = [
+            (1, 64, [80, 80], 64, [3, 3], params([1, 1], [1, 1], [1, 1], 64)),
+            (1, 256, [20, 20], 256, [3, 3], params([1, 1], [1, 1], [1, 1], 256)),
+            (2, 3, [1, 1], 3, [3, 3], params([1, 1], [1, 1], [1, 1], 3)),
+            (1, 2, [5, 7], 2, [3, 3], params([1, 1], [1, 1], [1, 1], 2)),
+            (1, 3, [9, 37], 3, [3, 3], params([1, 1], [1, 1], [1, 1], 3)),
+            (1, 2, [6, 41], 2, [5, 5], params([1, 1], [2, 2], [1, 1], 2)),
+            (1, 2, [4, 3], 2, [5, 7], params([1, 1], [3, 4], [1, 1], 2)),
+            (1, 3, [11, 19], 3, [3, 3], params([1, 1], [2, 2], [2, 2], 3)),
+            (2, 2, [8, 9], 4, [3, 3], params([1, 1], [1, 1], [1, 1], 2)),
+            (1, 4, [7, 13], 4, [1, 5], params([1, 1], [0, 2], [1, 1], 4)),
+            (1, 3, [10, 10], 3, [3, 3], params([1, 1], [0, 0], [1, 1], 3)),
+            (1, 3, [12, 17], 3, [3, 3], params([2, 2], [1, 1], [1, 1], 3)),
+            (1, 2, [9, 8], 4, [3, 3], params([2, 1], [1, 1], [1, 1], 2)),
+        ];
+        check(&cases);
+    }
+
+    #[test]
+    fn gemm_paths_match_reference() {
+        let cases = [
+            // 1x1 (packed B, rows read once into panels): ragged M and N, K over one K block (the epilogue
+            // runs in the micro-kernel on the last one).
+            (1, 20, [7, 9], 13, [1, 1], params([1, 1], [0, 0], [1, 1], 1)),
+            (2, 300, [5, 7], 7, [1, 1], params([1, 1], [0, 0], [1, 1], 1)),
+            // Shifted rows, stride 1: ragged tiles, K = 360 over one block, two groups.
+            (2, 8, [11, 13], 10, [3, 3], params([1, 1], [1, 1], [1, 1], 1)),
+            (1, 40, [6, 7], 8, [3, 3], params([1, 1], [1, 1], [1, 1], 1)),
+            (1, 8, [9, 9], 6, [3, 3], params([1, 1], [1, 1], [1, 1], 2)),
+            // Stride-2 phases (both column phases dealt out together), odd sizes, no / wide padding.
+            (1, 6, [13, 15], 9, [3, 3], params([2, 2], [1, 1], [1, 1], 1)),
+            (1, 5, [12, 9], 7, [3, 3], params([2, 2], [0, 0], [1, 1], 1)),
+            (1, 6, [10, 11], 5, [5, 5], params([2, 2], [2, 2], [1, 1], 1)),
+            // One column phase only (dilation 2 at stride 2), stride 3, and mixed strides.
+            (1, 5, [15, 14], 4, [3, 3], params([2, 2], [2, 2], [2, 2], 1)),
+            (1, 5, [16, 17], 6, [3, 3], params([3, 3], [1, 1], [1, 1], 1)),
+            (1, 6, [12, 13], 5, [3, 3], params([2, 1], [1, 1], [1, 1], 1)),
+            (1, 6, [9, 14], 5, [3, 3], params([1, 2], [1, 1], [1, 1], 1)),
+            // The few-channel direct path.
+            (1, 3, [17, 19], 11, [3, 3], params([2, 2], [1, 1], [1, 1], 1)),
+        ];
+        check(&cases);
     }
 }

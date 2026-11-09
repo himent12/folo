@@ -586,8 +586,8 @@ exiting processes, so this one is approximate) `main` measured 25.08 ms and the 
 alternated normal-priority rounds the branch's 640×640 preprocess and postprocess stayed at 0.19–0.39 /
 0.12–0.19 ms, against `main`'s 1.5–2.6 / 1.3–2.3 ms. The 20 ms idle row costs 0.1 ms of preprocess over back-to-back calls in both
 builds, so waking the pool is not a factor. Thread count, High priority: 37.2 / 29.4 / 22.8 / 19.4 ms at 8 / 16 /
-20 / 28 threads, so 28 stays the default (FOLO's per-thread GEMM efficiency is below oneDNN's, whose 8 threads run
-the forward in 22.8 ms; that is the next CPU lever).
+20 / 28 threads, so 28 stays the default (FOLO's per-thread GEMM efficiency looked below oneDNN's, whose 8 threads run
+the forward in 22.8 ms; [Per-core efficiency](#per-core-efficiency) found that mostly the load, and what was left).
 
 What changed (results are bit for bit `main`'s; every new kernel has a bit-exactness test against the path it
 replaces):
@@ -609,6 +609,101 @@ replaces):
   (three tasks). The stem layer: 1.46 → 0.41 ms, so the forward is about 1 ms faster.
 - Not changed, after measuring: the rayon pool (the idle row above); NMS (a few microseconds at predict settings);
   the head's `cat` of the six branch outputs (0.3 ms, bandwidth-bound).
+
+### Per-core efficiency
+
+Branch `perf/cpu-gemm`, 2026-11-09. Question: at 8 threads the forward measured 37 ms against Ultralytics' 22.8 ms,
+so where do FOLO's convs lose per-core throughput? Two benches, each built from the same source for `main` and the
+branch in separate target directories and alternated run by run, at High process priority; 1 / 4 / 8 threads pinned
+one per P-core (logical CPUs 2, then 0, 2, 4, …), 28 threads unpinned. The machine is shared with other agents and
+CI; "busy" is the CPU time of all other processes over each run's wall time, in cores.
+
+- [`benches/conv_infer.rs`](../crates/folo-core/benches/conv_infer.rs) (`cargo bench -p folo-core --bench conv_infer`):
+  every distinct conv of the folo-n forward (640×640, batch 1, fused bias + SiLU), timed alone and weighted by how
+  often the forward runs it, grouped by kernel path. 6.48 GFLOP per forward.
+- `cpu_e2e` (above): the fused forward alone, and `Predictor::predict` end to end.
+
+**First, the 37 ms was the machine, not the kernels.** With 2–6 other cores busy instead of 9–13, `main` runs the
+forward in 17.6–20.9 ms on 8 P-cores (table below), already under Ultralytics' 22.8 ms (measured with 4 cores busy).
+Under load every 8-thread parallel region waits for its slowest thread, and with all 8 pinned threads sharing cores
+with other jobs, the median call of a small conv runs 1.5–2x its fastest.
+
+**Where per-core efficiency goes** (one P-core unless stated):
+- The 6×16 AVX2 micro-kernel is not it: a 256³ sgemm runs at 139 GFLOP/s, 79% of the core's 176 (2 FMA ports × 8
+  lanes × 2 flops × 5.5 GHz), and the 3×3 / 1×1 conv groups run at 100–110 GF/s when the machine is quiet.
+- **B packing order**: each B micro-panel read one cache line from each of up to 256 rows (`KC`), a pattern the
+  hardware prefetcher cannot follow once B is out of L2. A 64×6400×256 sgemm (a 1×1 256→64 conv at 80×80) ran at
+  57 GF/s against 106 for 64×512×256. Packing a whole `KC` block row by row (`Operand::pack_panels`) takes it to
+  101 GF/s. In the conv table this matters when other jobs evict the input from L3 (median-call 1×1 totals 38.2 /
+  35.9 / 25.8 → 33.1 / 30.4 / 26.0 ms over three rounds); on a quiet cache it is within noise (fastest calls 23.1 →
+  22.6 ms).
+- **Stride-2 phase split**: `ShiftedRows` filled each phase element by element with a bounds test. It now pads each
+  input row once and deals out both column phases in one pass (64 channels at 160×160: 1.2 → 0.66 ms, about one
+  core's bandwidth). The stride-2 group: 19.8 → 16.6 ms.
+- **Depthwise**: nine load/add/store passes over each output row, scalar tails on 20- and 40-wide rows, the epilogue
+  as another pass, one rayon task per 400-pixel plane. Now the plane is copied once with its zero padding and each
+  output vector is its taps' FMAs in registers, four vectors at a time, bias + SiLU applied before the store, planes
+  grouped into ≥ 16K-output tasks: 2.35 → 1.63 ms.
+- **The epilogue**: bias + SiLU now run on the micro-kernel's accumulators before the store at the last K block
+  (same `silu8` lanes, so bit for bit the old row pass) instead of as a pass over each finished tile. A small gain:
+  SiLU itself costs about a cycle per output (an AVX2 division), a quarter of a K = 64 conv's FMAs. Not changed,
+  because training shares it.
+- **Threading** (8 threads): every parallel call from outside the rayon pool is injected into the pool's queue and
+  the caller sleeps until a worker wakes it. A 64×400×64 GEMM (a 1×1 conv at 20×20) took 28 µs that way, 17 µs
+  started from a worker. `FoloModel::forward` and `Predictor::predict` on the CPU now run inside the pool
+  (`folo_core::cpu::in_pool`, which carries the caller's grad mode and autocast state), so the forward's hundred-odd
+  parallel calls start on a worker.
+- **Fresh allocations**: buffers under 256 KB bypassed folo-core's buffer cache, and on Windows a fresh 100–250 KB
+  block comes back zeroed through page faults. The 230 KB padded input of a 32-channel 40×40 conv took 80 µs to
+  build fresh and 13 µs reused; a SiLU over a 64×20×20 activation 85–110 µs against 47 µs. The cache now takes
+  buffers from 16 KB. `ShiftedRows` and A packing also go parallel only above 64K / 128K floats, a few channels
+  (panels) per task, instead of one task per channel: a 32-channel 40×40 copy made 32 tasks of about a microsecond.
+- Not changed, after measuring: the stem (3 → 16 at 640: memory- and epilogue-bound; running its 27 taps through
+  the GEMM micro-kernel, gathered or as phase rows, was no faster, so the direct kernel stays), weight pre-packing
+  (A packing is about 5 µs of a small conv), and the micro-kernel shape.
+
+**GFLOPS per core**, folo-n conv groups, sum over the forward of each shape's fastest call in three alternated
+rounds (`conv_infer`; per-forward GFLOP in brackets). 1 thread: 2–23 cores busy; 8 threads: 2–16 busy. The 8-thread
+k×k rows come from a second three-round run after the parallel-threshold change, the others from the first.
+
+| group | 1 thread, `main` | 1 thread, branch | 8 threads, `main` (per thread) | 8 threads, branch (per thread) |
+|---|---|---|---|---|
+| stem 3→16 s2 (0.09) | 2.36 ms, 37.6 GF/s | 2.28 ms, 38.8 GF/s | 0.39 ms, 28.4 | 0.43 ms, 25.8 |
+| 3×3 stride 2 (1.65) | 19.77 ms, 83.5 | **16.60 ms, 99.5** | 2.64 ms, 78.2 | **2.45 ms, 84.2** |
+| 3×3 stride 1 (2.39) | 21.86 ms, 109.3 | 21.73 ms, 109.9 | 4.09 ms, 73.0 | 4.03 ms, 74.1 |
+| 1×1 (2.33) | 23.08 ms, 100.8 | 22.61 ms, 102.9 | 5.95 ms, 48.9 | **5.47 ms, 53.2** |
+| depthwise 3×3 (0.03) | 2.35 ms, 11.0 | **1.63 ms, 15.9** | 0.51 ms, 6.3 | **0.36 ms, 9.0** |
+| all convs (6.48) | 69.73 ms, 92.9 | **64.85 ms, 99.9** | 13.58 ms, 59.6 | **12.74 ms, 63.6** |
+
+Median-call totals per forward, same rounds: 1 thread 108.5 / 95.4 / 76.3 → 97.7 / 85.6 / 73.3 ms; 8 threads 22.8 /
+21.7 / 23.3 → 19.0 / 19.3 / 22.4 ms. Per thread, 8 threads still run the convs at about 60% of one thread's rate:
+the 20×20 and 40×40 layers (about 60 of the forward's convs, 1–30 MFLOP each) give each thread only a few tiles of
+10–20 µs, and a parallel region waits for its slowest tile.
+
+**Forward and end to end** (`cpu_e2e`, `FOLO_BENCH_ITERS=60`, medians of three alternated rounds, ms):
+
+| threads | busy cores | forward, `main` | forward, branch | e2e 640×640, `main` | e2e 640×640, branch | e2e 1280×720, `main` | e2e 1280×720, branch |
+|---|---|---|---|---|---|---|---|
+| 1 | 2–6 | 76.9 / 83.8 / 73.5 | **73.3 / 73.7 / 72.5** | 84.1 / 82.3 / 74.8 | 73.3 / 82.6 / 73.7 | 49.5 / 54.1 / 45.6 | **43.4 / 52.8 / 44.6** |
+| 4 | 2–3 | 24.6 / 27.8 / 24.6 | **22.1 / 27.4 / 21.8** | 25.4 / 24.8 / 24.5 | 22.1 / 27.9 / 22.5 | 16.2 / 16.3 / 16.2 | 14.3 / 18.5 / 14.4 |
+| 8 | 2–6 | 17.6 / 18.3 / 20.9 | **14.8 / 16.6 / 18.7** | 17.8 / 18.7 / 21.9 | **15.3 / 15.6 / 19.1** | 11.9 / 14.5 / 17.8 | **10.7 / 12.3 / 13.7** |
+| 28 | 8–11 | 18.0 / 17.6 / 18.7 | **16.9 / 17.5 / 17.1** | 18.2 / 18.3 / 18.5 | **16.8 / 16.7 / 17.1** | 14.2 / 14.6 / 14.5 | **13.1 / 13.4 / 13.0** |
+
+The branch is ahead in every pair except the second 4-thread round and the second 1-thread end-to-end round
+(82.3 vs 82.6 ms). On this
+quieter machine 8 P-cores beat 28 threads (the E-cores and the extra synchronisation cost more than they add at
+this model size); the default pool stays at rayon's (all threads) because under other jobs' load, as in the
+section above, 28 threads were faster.
+
+**Accuracy.** Every change but one leaves the forward bit for bit `main`'s: the packing order, phase split, buffer
+cache and thread placement move no arithmetic, and the in-register epilogue uses the row pass's lanes (the
+few-channel stem test still checks the GEMM path bit for bit with bias, SiLU and ReLU). The stride-1 depthwise kernel
+now sums its taps with fused multiply-adds over the zero-padded plane instead of a multiply and an add per valid tap,
+so its outputs can differ from `main`'s by rounding; it is tested against an f64 reference within the f32 summation
+bound `K · 2^-23 · Σ|w·x|` (K = taps), plus SiLU's 5e-7 relative error, over edge shapes (rows narrower than a vector,
+ragged tails, taps that only see padding, dilation, channel multipliers, accumulation). The same test covers the
+GEMM paths (1×1 with ragged tiles and K over one block, stride-1/2/3 and mixed-stride phases, groups, the stem path).
+Results stay bitwise identical from run to run and across thread counts.
 
 **Next optimisations**, by expected gain:
 1. **Backward kernels** (two thirds of the training step now that the loss is on the device): a stride-phase

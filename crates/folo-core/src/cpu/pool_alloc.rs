@@ -1,9 +1,11 @@
 //! A cache of large `f32` buffers.
 //!
-//! Fresh multi-megabyte allocations are slow on first touch (the OS maps and zeroes every page, often taking
-//! longer than the kernel that fills them). Training and inference loops allocate the same sizes every step,
-//! so storages of at least [`MIN_POOLED`] floats are returned here when their last tensor drops and handed
-//! back out for the next request of exactly the same length.
+//! Fresh allocations are slow on first touch (the OS maps and zeroes every page, often taking longer than the
+//! kernel that fills them). On Windows that already holds at tens of kilobytes: the 230 KB padded input copy of
+//! a 32-channel 40x40 conv took 80 µs fresh and 13 µs reused, and a SiLU over a 64-channel 20x20 activation
+//! (100 KB) 85-110 µs against 47 µs, about as long as the conv that made it. Training and inference loops
+//! allocate the same sizes every step, so storages of at least [`MIN_POOLED`] floats are returned here when
+//! their last tensor drops and handed back out for the next request of exactly the same length.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -11,8 +13,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use rayon::prelude::*;
 
-/// Buffers shorter than this (in floats) bypass the pool.
-pub(crate) const MIN_POOLED: usize = 1 << 16;
+/// Buffers shorter than this (in floats, 16 KiB) bypass the pool.
+pub(crate) const MIN_POOLED: usize = 1 << 12;
 
 static LIMIT: AtomicUsize = AtomicUsize::new(1 << 30);
 
