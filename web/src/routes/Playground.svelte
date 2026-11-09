@@ -1259,11 +1259,13 @@
   .tabs-row {
     padding: 0 var(--space-4);
   }
+  /* A state in the frame (DESIGN_DIRECTION 8): one line with the panel's 16 px padding, on its left edge, never a
+     centred block held open. */
   .placeholder {
-    padding: var(--space-8) var(--space-4);
-    text-align: center;
+    padding: var(--space-4);
     color: var(--text-tertiary);
   }
+
   .inline {
     color: var(--accent-text);
     font-weight: var(--weight-medium);

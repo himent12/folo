@@ -104,6 +104,8 @@
   // The ranked lists point into the matrix: each line is a button that reveals its cell (on a phone the matrix scrolls
   // sideways, so the background column starts out of view).
   let matrixView = $state<ConfusionMatrix>();
+  /** The curves panel's band / every-curve switch (many classes). */
+  let allCurves = $state(false);
   let exportOpen = $state(false);
   // Below the desktop tier the rail stacks under the PR panel: the details fold into one line so the matrix follows soon.
   const narrow = new MediaQuery(media.upToLaptop, false);
@@ -354,12 +356,29 @@
     <div class="detail" class:off={!showing('curves') && !showing('classes') && !showing('details')}>
       <div class="main-col" class:off={!showing('curves')}>
         <Panel title="Precision–recall" meta="precision by recall · IoU 0.5" pad="none" id="pr">
+          <!-- Many classes: the band / every-curve switch is the chart's one header control, so the legend row keeps one
+               line in the laptop's narrower column. -->
+          {#snippet actions()}
+            {#if ev && m.classes.length > 10}
+              <Segmented
+                size="sm"
+                label="Curves shown"
+                bind:value={() => (allCurves ? 'all' : 'band'), (v) => (allCurves = v === 'all')}
+                options={[
+                  { value: 'band', label: 'Band' },
+                  { value: 'all', label: 'All curves' },
+                ]}
+              />
+            {/if}
+          {/snippet}
           {#if ev}
             <PrCurves
               classes={m.classes}
               {ev}
               map50={m.metrics?.map50 ?? null}
               view="curves"
+              bind:allCurves
+              modeInHeader
               bind:selected={prSelected}
               bind:hovered={prHovered}
               onback={backTo !== null ? backToClasses : undefined}

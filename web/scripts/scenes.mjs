@@ -935,7 +935,8 @@ export const scenes = [
     setup: async (page) => {
       await page.getByRole('button', { name: 'Add dataset' }).first().click();
       await page.locator('dialog[open]').waitFor();
-      // Register stays disabled until there is a folder path; a name the server would refuse is checked on submit.
+      // Register stays disabled until there is a folder path; a name the server would refuse is checked on submit,
+      // and Register is then gated on it ("Fix the name first") until the name is fixed.
       await page.locator('dialog[open] input[placeholder="e.g. D:/data/my-dataset"]').fill('D:/data/my dataset');
       await page.locator('dialog[open] input[id$="-name"]').fill('my dataset!');
       await page.locator('dialog[open] button[type="submit"]').click();

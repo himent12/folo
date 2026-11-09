@@ -36,6 +36,8 @@
     fill = false,
     selected = $bindable([]),
     hovered = $bindable(null),
+    allCurves = $bindable(false),
+    modeInHeader = false,
   }: {
     classes: readonly string[];
     ev: Evaluation;
@@ -51,6 +53,10 @@
     selected?: number[];
     /** The class under the pointer or keyboard focus in the table. */
     hovered?: number | null;
+    /** Many classes: every curve instead of the 10th–90th percentile band. */
+    allCurves?: boolean;
+    /** The band / all-curves switch sits in the panel's header (the page renders it), not at the legend row's end. */
+    modeInHeader?: boolean;
   } = $props();
   /** The plot's box when it fills its panel: the chart is drawn at that height. */
   let plotH = $state(0);
@@ -78,7 +84,6 @@
   // Curves end at their last recall point with precision > 0; the zero padding up to recall 1 is not data.
   // Many classes: by default a band (10th–90th percentile of the classes' precision) instead of 80 lines; every
   // curve is one click away. Few classes: every curve, as context lines.
-  let allCurves = $state(false);
   const banded = $derived(many && !allCurves);
   const envelope = $derived(many ? prEnvelope(classes.map((_, i) => trimPrTail(ev.curves[i] ?? []))) : null);
   const series = $derived<Series[]>([
@@ -145,8 +150,7 @@
           <span class="hint">Tap a class in Classes to trace its curve.</span>
         {/if}
       {/if}
-      {#if many}
-        <!-- Short, so the legend keeps one line in the laptop's narrower column (the count is in the panel's meta). -->
+      {#if many && !modeInHeader}
         <button type="button" class="clear mode" aria-pressed={allCurves} onclick={() => (allCurves = !allCurves)}>{allCurves ? 'Show band' : 'All curves'}</button>
 
       {/if}
