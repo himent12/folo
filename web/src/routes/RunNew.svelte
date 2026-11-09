@@ -57,9 +57,8 @@
   // This page is the create action: the top bar's New run steps aside instead of showing a pressed, disabled copy.
   ownCreateAction();
 
-  /** Where the architectures' reference latency was measured (docs/BENCHMARKS.md). */
-  const LATENCY_REF = 'RTX 4080 SUPER · 640 px · f32 · end to end';
-  /** The same, where the line already says 640 px and end to end. */
+  /** Where the architectures' reference latency was measured (docs/BENCHMARKS.md), where the line already says 640 px
+   *  and end to end. */
   const REF_WHERE = 'RTX 4080 SUPER, f32';
   // Phones pick the model size from a segmented control; the full specification table folds behind "Compare sizes".
   const phone = new MediaQuery(media.phone, false);
@@ -942,31 +941,24 @@
             </p>
           {/if}
           {#if phone.current}
-            <!-- Phones: the size as one segmented pick and the chosen model in words; the full comparison folds away. -->
+            <!-- Phones: the size as one segmented pick and one short recommendation in words; its figures (params,
+                 compute, latency and where each was measured) fold into "Compare sizes", so the section stays the
+                 pick, the recommendation and Start from. -->
             <div class="a-pick">
               <Segmented id="arch-pick" label="Model size" bind:value={arch} options={arches.map((a) => ({ value: a.arch, label: a.size }))} />
-              {#if selArch}
-                <p class="a-sel"><Ident value={selArch.arch} /> {selArch.note}</p>
-                <p class="a-specs num">{compact(selArch.params)} params · {num(selArch.flops, 1)} GFLOPs</p>
-                <!-- The architecture's reference figure, named as one, with where it was measured under it: not this
-                     device, not these weights. -->
-                {@const here = measuredLatency(tp.data, selArch.arch)}
-                {#if here}
-                  <!-- Measured on this server first, its spread and count beside it; the reference stays, secondary. -->
-                  <p class="a-lat num">Latency <span class="a-lat-v">{latencyMs(here.latency_ms)}</span> measured here</p>
-                  <p class="a-specs num">{latencyRange(here.latency_ms_low, here.latency_ms_high)} · {num(here.samples)} predictions · 640 px · {here.precision} · end to end</p>
-                  {#if selArch.ms !== undefined}<p class="a-specs num">Reference {latencyMs(selArch.ms)} · {REF_WHERE}</p>{/if}
-                {:else if selArch.ms !== undefined}
-                  <p class="a-lat num">Reference latency <span class="a-lat-v">{num(selArch.ms, 2)} ms</span></p>
-                  <p class="a-specs">{LATENCY_REF}</p>
-                {:else}
-                  <p class="a-lat">Reference latency not measured yet</p>
-                {/if}
-              {/if}
+              {#if selArch}<p class="a-sel"><Ident value={selArch.arch} /> {selArch.note}</p>{/if}
             </div>
             <details class="advanced a-compare">
               <summary><ChevronRight size={14} aria-hidden="true" /> Compare sizes <span class="faint">params, compute, latency</span></summary>
               {@render archTable()}
+              {#if selArch}
+                <!-- Measured on this server: the chosen size's spread and count, the table's "measured" figure in full. -->
+                {@const here = measuredLatency(tp.data, selArch.arch)}
+                {#if here}
+                  <p class="a-lat num"><Ident value={selArch.arch} /> measured here <span class="a-lat-v">{latencyMs(here.latency_ms)}</span></p>
+                  <p class="a-specs num">{latencyRange(here.latency_ms_low, here.latency_ms_high)} · {num(here.samples)} predictions · 640 px · {here.precision} · end to end</p>
+                {/if}
+              {/if}
             </details>
           {:else}
             {@render archTable()}
