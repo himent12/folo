@@ -597,13 +597,10 @@ impl FoloApp {
                         }))
                     })
                     .child({
-                        // A trailing count ("All 9") is metadata: tertiary tabular digits after the name.
-                        let (name, count) = match label.rsplit_once(' ') {
-                            Some((n, c))
-                                if !c.is_empty() && c.chars().all(|ch| ch.is_ascii_digit() || ch == ',') =>
-                            {
-                                (n, Some(c))
-                            }
+                        // A count after a no-break space ("All\u{a0}9", marked by the caller) is
+                        // metadata: tertiary tabular digits after the name. "GPU 0" is a name.
+                        let (name, count) = match label.split_once('\u{a0}') {
+                            Some((n, c)) => (n, Some(c)),
                             _ => (*label, None),
                         };
                         div()

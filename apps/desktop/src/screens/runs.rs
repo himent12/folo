@@ -79,7 +79,8 @@ impl FoloApp {
                     RunFilter::Completed => "Finished",
                     RunFilter::Failed => "Failed",
                 };
-                format!("{name}  {}", count(*f))
+                // A no-break space marks the count for the segmented control's quieter style.
+                format!("{name}\u{a0}{}", count(*f))
             })
             .collect();
         let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
