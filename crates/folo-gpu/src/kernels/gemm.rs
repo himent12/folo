@@ -149,6 +149,11 @@ impl TileConfig {
     pub const MEDIUM: TileConfig = TileConfig { bm: 64, bn: 128, bk: 16, tm: 4, tn: 8 };
     /// 64×64 tiles, depth 16, 4×4 per thread, 256 threads: small problems that would leave SMs idle.
     pub const SMALL: TileConfig = TileConfig { bm: 64, bn: 64, bk: 16, tm: 4, tn: 4 };
+    /// 32×128 tiles, depth 32, 4×4 per thread, 256 threads (40 KiB): `M <= 32` (convs with 17–32 output
+    /// channels), where 64-row tiles leave half the rows empty.
+    pub const ROWS32: TileConfig = TileConfig { bm: 32, bn: 128, bk: 32, tm: 4, tn: 4 };
+    /// 16×128 tiles, depth 32, 4×4 per thread, 128 threads (36 KiB): `M <= 16` (a 16-channel stem).
+    pub const ROWS16: TileConfig = TileConfig { bm: 16, bn: 128, bk: 32, tm: 4, tn: 4 };
 
     fn threads(&self) -> u32 {
         (self.bm / self.tm) * (self.bn / self.tn)
@@ -210,6 +215,26 @@ pub fn pick_config(ctx: &GpuContext, d: &GemmDesc) -> TileConfig {
         }
     }
     TileConfig::SMALL
+}
+
+/// [`pick_config`] for the forward convolutions, with the narrow [`TileConfig::ROWS16`] / [`TileConfig::ROWS32`]
+/// tiles for `M <= 16` / `M <= 32` (output channels per group) when they still give 64+ workgroups.
+pub fn pick_config_conv(ctx: &GpuContext, d: &GemmDesc) -> TileConfig {
+    let batch = d.batch.0.saturating_mul(d.batch.1);
+    let narrow = match d.m {
+        0..=16 => Some(TileConfig::ROWS16),
+        17..=32 => Some(TileConfig::ROWS32),
+        _ => None,
+    };
+    match narrow {
+        Some(cfg)
+            if d.n.div_ceil(cfg.bn as usize).saturating_mul(batch) >= 64
+                && cfg.workgroup_bytes() <= ctx.caps().max_workgroup_storage =>
+        {
+            cfg
+        }
+        _ => pick_config(ctx, d),
+    }
 }
 
 fn wgsl_ty(f16: bool, vec: bool) -> &'static str {

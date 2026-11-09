@@ -192,7 +192,11 @@ on the store (the GEMM and conv tiles are f32 in workgroup memory).
   load along k and scatter four scalars down the k-major tile.
 - Tile configs: `LARGE` 128×128×8 with 8×8 per thread, `MEDIUM` 64×128×16 with 4×8, `SMALL` 64×64×16 with 4×4.
   `pick_config` takes the largest config that still yields at least 64 workgroups and wastes no more than 25% of
-  its rows.
+  its rows. The forward convs pick through `pick_config_conv`, which first tries two narrow configs for few output
+  channels: `ROWS32` 32×128×32 (4×4, 256 threads) for `M <= 32` and `ROWS16` 16×128×32 (4×4, 128 threads) for
+  `M <= 16`, where a 64-row tile leaves half or three quarters of its rows empty (folo-n's 16- and 32-channel early
+  layers at 320 and 160 px: the stem 0.42 → 0.30 ms, 16 → 32 at stride 2 0.44 → 0.29 ms, a 16-channel 3×3 0.38 →
+  0.19 ms at batch 16).
 - `CONV_MODE = 1` turns the same generator into implicit-GEMM conv. The B tile is gathered straight from the NCHW
   image. Each thread keeps one output pixel for the whole K loop, so the per-element index math is a few
   divisions by constants. No im2col buffer is ever written.

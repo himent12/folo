@@ -300,13 +300,13 @@ pub fn conv2d_with_config(
     }
 
     if d.is_pointwise() {
-        let cfg = cfg.unwrap_or_else(|| gemm::pick_config(ctx, &g));
+        let cfg = cfg.unwrap_or_else(|| gemm::pick_config_conv(ctx, &g));
         gemm::gemm_with_config(ctx, &g, weight, x, bias, y, cfg)?;
         return Ok((oh, ow));
     }
 
     // Implicit GEMM.
-    let cfg = cfg.unwrap_or_else(|| gemm::pick_config(ctx, &g));
+    let cfg = cfg.unwrap_or_else(|| gemm::pick_config_conv(ctx, &g));
     gemm::check_config(ctx, cfg)?;
     let check = !g.m.is_multiple_of(cfg.bm as usize)
         || !g.n.is_multiple_of(cfg.bn as usize)
