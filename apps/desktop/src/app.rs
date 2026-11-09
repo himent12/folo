@@ -2072,10 +2072,10 @@ impl FoloApp {
     /// Why Mixed precision can't be used for a run on `device` (an entry of `DEVICES`), if it can't:
     /// the CPU, or the server's own answer (`capabilities.amp`, the message such a run would fail
     /// with). An older server without capabilities says nothing; the run's failure tells then.
-    /// Whether `m` is end-to-end (the one-to-one head: it predicts without NMS).
+    /// Whether `m` is end-to-end (the one-to-one head: it predicts without NMS). The model's own
+    /// record says (`Model.head`, from its folo.config), so imported and orphaned models read right.
     pub fn model_e2e(&self, m: &Model) -> bool {
-        // From the run that trained it until the model record carries its head (api/model-head).
-        m.run_id.as_ref().and_then(|r| self.store.run(r)).is_some_and(|r| r.config.head == Head::O2o)
+        m.head == Head::O2o
     }
 
     /// The help shown wherever a model or run is marked end-to-end.

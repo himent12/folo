@@ -272,9 +272,11 @@ impl FoloApp {
             });
         let mut subtitle =
             div().flex().items_center().gap(px(6.)).child(text(ty::BASE, t.text_secondary).child(format!(
-                "{} px · {} classes · created {created}",
+                "{} px · {} classes{} · created {created}",
                 m.imgsz,
-                m.classes.len()
+                m.classes.len(),
+                // How it was trained, when the record says (`trained_with`; exports have none).
+                if m.trained_with.is_some_and(|w| w.amp) { " · trained in f16" } else { "" },
             )));
         if let Some(r) = run.clone() {
             let rid = r.id.clone();
