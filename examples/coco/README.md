@@ -202,3 +202,44 @@ seed and epoch budget, both evaluated on r6-clean test and the held-out r6-fresh
 
 Pretraining is worth more than four times the epochs. In 100 epochs the fine-tune beats the 410-epoch from-scratch
 run on both splits, and it generalises much better to unseen footage (+70% on r6-fresh over the same budget).
+
+## v2: a 300-epoch schedule (in progress)
+
+The 50-epoch run above ended at its schedule's floor, still gaining every epoch. v2 trains the same folo-n from
+scratch, with the same recipe, for **300 epochs** to measure how much of the gap to the published nano models the
+schedule alone closes.
+
+```sh
+folo train --data D:/folo-data/coco --model folo-n --imgsz 640 --batch 16 --epochs 300 --cos-lr --amp \
+  --patience 1000 --workers 16 --device gpu:0 --seed 0 --project D:/folo-data/runs-coco --name coco-folo-n-long
+```
+
+**Recipe.** MODEL.md §8 as in v1 (SGD lr0 0.01, momentum 0.9, nominal batch 64, 3 warmup epochs, weight decay
+5e-4, EMA, mosaic + affine + HSV + flips, mosaic closed for the last 10 epochs, cosine decay to `lr0 · lrf`). Two
+things change: the epoch count, and mixed precision (`--amp`, MODEL.md §8.8), which is a speed change, checked
+against f32 below. No augmentation or optimizer setting changed: there is no evidence on this data that another one
+helps, and each would need its own ablation.
+
+**Budget.** Short timing probes (2026-11-09, same binary, the first epoch's batches after the dataset is open, the
+machine shared with other agents' builds): f32 222 img/s, AMP 248 img/s with 16 loader workers and 237 with 24.
+The loader, not the GPU, sets the pace (CPU at 100%, GPU at 44–79%), so AMP buys about 10% here rather than the
+24% of the bare training step, and more workers do not help. On a quieter machine the first AMP epochs ran at
+260–280 img/s, **440–482 s per epoch** with validation. At about 470 s per epoch, 300 epochs are about 39 h; at the
+v1 run's busier 600 s, 50 h. 300 epochs sits inside the 36–48 h budget at the expected rate, so that is the count.
+
+**AMP against f32.** The first five epochs of the AMP run against an f32 twin with identical settings (same seed, so
+the same batches and augmentations; stopped after epoch 5) and against the v1 f32 run (a 50-epoch cosine schedule,
+which differs from this one by under 2% in learning rate over these epochs):
+
+| epoch | f32 twin: loss box / cls / dfl | val mAP50 | mAP50-95 | **AMP**: loss box / cls / dfl | val mAP50 | mAP50-95 | v1 f32: mAP50-95 |
+|---:|---|---:|---:|---|---:|---:|---:|
+| 1 | 3.097 / 5.061 / 3.537 | 0.005 | 0.0019 | 3.135 / 5.080 / 3.565 | 0.006 | 0.0023 | 0.0023 |
+| 2 | 1.992 / 3.691 / 2.179 | 0.052 | 0.0272 | 2.004 / 3.689 / 2.173 | 0.056 | 0.0289 | 0.0285 |
+| 3 | 1.772 / 3.113 / 1.895 | 0.109 | 0.0628 | 1.769 / 3.089 / 1.884 | 0.110 | 0.0633 | 0.0642 |
+| 4 | 1.665 / 2.761 / 1.757 | 0.168 | 0.1014 | 1.662 / 2.742 / 1.755 | 0.167 | 0.1012 | 0.1032 |
+| 5 | 1.595 / 2.544 / 1.673 | 0.210 | 0.1308 | 1.592 / 2.526 / 1.671 | 0.214 | **0.1337** | 0.1343 |
+| epoch time | 638 / 602 / 553 / 537 / 508 s | | | **482 / 454 / 466 / 440 / 462 s** | | | |
+
+The two f32 runs differ by 0.0035 mAP50-95 at epoch 5, the AMP run lies between them, and the losses agree to 1%
+after the first epoch (the scaler skipped 9 steps for overflow, all in the first epoch, while the scale backed off
+from 2^16). AMP keeps f32 accuracy here, as it did on the shapes gate (docs/BENCHMARKS.md).
