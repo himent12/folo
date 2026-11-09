@@ -353,6 +353,15 @@ impl FoloApp {
                 .py(px(14.))
                 .child(content)
         };
+        let wide_tile = |content: gpui::Div| {
+            div()
+                .flex_grow()
+                .flex_basis(gpui::relative(0.21))
+                .min_w_0()
+                .px(px(16.))
+                .py(px(14.))
+                .child(content)
+        };
         let (p, pu) = count_si(m.params);
         let (b, bu) = bytes(m.bytes);
         // The headline metric gets the headline: twice the width, one size up; the rest are context.
@@ -404,8 +413,9 @@ impl FoloApp {
                 Some(text(ty::XS, t.text_tertiary).child("IoU 0.50")),
             )))
             .child(vline(&t))
-            // The same pair and caption as the run page (ui::metric_pair, ui::pr_caption).
-            .child(tile(
+            // The same pair and caption as the run page (ui::metric_pair, ui::pr_caption); a wider
+            // share than the other small tiles, as it holds two values and the operating point.
+            .child(wide_tile(
                 div()
                     .flex()
                     .flex_col()
