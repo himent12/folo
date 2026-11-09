@@ -369,17 +369,19 @@ pub fn paint_image_with_boxes(
                     // A chip on a neighbour's outline can read as the neighbour's, at any size: such
                     // a box goes unlabelled (the list beside the image, the inspector and hover name
                     // it). The selected box always keeps its chip; very dense images skip the check.
-                    // No clear spot: inside the box's own top-left corner, flush with its stroke, so
+                    // No clear spot: inside one of the box's own corners, flush with its stroke, so
                     // the chip shares a corner with its box and reads as its own even where it
                     // crosses a neighbour (up to 32 boxes; beyond, an unlabelled box is named by the
                     // list beside the image). The selected box and dense images take any free spot.
-                    let flush = candidates[2];
+                    // Any of its four inside corners shares the box's stroke; the first free one.
                     let free_spot = clear.or_else(|| {
                         if dense || b.highlight {
                             spots.clone().find(open)
-                        } else {
+                        } else if !compact && order.len() <= 32 {
                             // Thumbnails stay strict: too small for a shared corner to read.
-                            (!compact && order.len() <= 32 && open(&flush)).then_some(flush)
+                            candidates[2..].iter().copied().find(open)
+                        } else {
+                            None
                         }
                     });
                     // Nowhere free: skip this chip (the selected box's chip always shows), so two

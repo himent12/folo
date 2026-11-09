@@ -150,8 +150,9 @@ impl Curve {
         if frac < warm {
             self.lr0 * (0.1 + 0.9 * frac / warm)
         } else {
+            // Linear decay to 1% (lrf 0.01, cos_lr off), as the run's resolved settings say.
             let t = ((frac - warm) / (self.epochs as f32 - warm)).clamp(0.0, 1.0);
-            self.lr0 * (0.01 + 0.99 * 0.5 * (1.0 + (std::f32::consts::PI * t).cos()))
+            self.lr0 * (1.0 - 0.99 * t)
         }
     }
 
@@ -606,7 +607,8 @@ impl MockBackend {
                     seed: hash(s.id),
                     epochs: s.config.epochs,
                     spe: s.spe,
-                    lr0: s.config.lr0,
+                    // The rate the run resolves to (Auto's pick), not the form's.
+                    lr0: resolve(&s.config, s.spe * s.config.batch as u64, 5).lr0 as f32,
                     batch: s.config.batch,
                     map_max: s.map_max,
                     ips: s.ips,
@@ -846,7 +848,12 @@ impl Backend for MockBackend {
             tensor_cores: TensorCoreSupport { available: true, enabled: true, reason: None },
             amp: AmpSupport { available: true, reason: None },
         };
-        Ok(SystemResponse { system, data_dir: None, features: vec!["queue_control".into(), "weights_onnx".into()], capabilities: Some(capabilities) })
+        Ok(SystemResponse {
+            system,
+            data_dir: None,
+            features: vec!["queue_control".into(), "weights_onnx".into()],
+            capabilities: Some(capabilities),
+        })
     }
 
     fn datasets(&self) -> ApiResult<Vec<Dataset>> {
@@ -1036,7 +1043,7 @@ impl Backend for MockBackend {
             seed: hash(&id),
             epochs: config.epochs,
             spe,
-            lr0: config.lr0,
+            lr0: resolve(&config, ds.ds.splits.train, ds.ds.classes.len()).lr0 as f32,
             batch: config.batch,
             map_max: 0.66,
             ips: 380.0,
