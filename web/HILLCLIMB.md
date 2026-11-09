@@ -35,6 +35,8 @@ Lines: 1 hierarchy & layout · 2 typography · 3 colour & theming · 4 spacing r
 | r12 | Claude Opus 5.5 (all 184 via contact sheets) | 8 | 8.5 | 8.5 | 8.5 | 8.5 | 8.5 | 8.5 | 8.5 | 8.5 | 8.5 | 8 | 8.5 | 8 |
 | r15 | GPT-6.1 Sol (57 sheets, 26 full-size) | 8 | 8.5 | 9 | 8.5 | 8.5 | 8 | 7.5 | 8.5 | 8 | 8.5 | 8 | 8.5 | 7.5 |
 | r15 | Claude Opus 5.5 (57 sheets, 6 full-size) | 8 | 7.5 | 8 | 8 | 8 | 7.5 | 8 | 7.5 | 8 | 8 | 8 | 8 | 7.5 |
+| r16 | GPT-6.1 Sol (78 sheets, 32 full-size) | 8 | 8.5 | 8.5 | 8 | 8 | 8 | 8.5 | 8.5 | 9 | 8.5 | 7.5 | 8 | 7.5 |
+| r16 | Claude Opus 5.5 (78 sheets, 7 full-size) | 8 | 8 | 8.5 | 8 | 7.5 | 8.5 | 8.5 | 7.5 | 8.5 | 8 | 7.5 | 8 | 7.5 |
 
 ## Per-line minimum (lower of the two reviewers)
 
@@ -55,6 +57,7 @@ Rounds with one reviewer are marked; their minimum is that reviewer's row.
 | r10 | 8.5 ↑ | 8 | 8.5 ↑ | 8 | 8.5 ↑ | 8 ↑ | 8.5 ↑ | 8 | 8.5 | 8.5 ↑ | 8 ↑ | 8.5 ↑ | 8 |
 | r12 | 8 ↓ | 8.5 ↑ | 8.5 | 8.5 ↑ | 8.5 | 8.5 ↑ | 8 ↓ | 8.5 ↑ | 8.5 | 8.5 | 8 | 8.5 | 8 |
 | r15 | 8 | 7.5 ↓ | 8 ↓ | 8 ↓ | 8 ↓ | 7.5 ↓ | 7.5 ↓ | 7.5 ↓ | 8 ↓ | 8 ↓ | 8 | 8 ↓ | 7.5 |
+| r16 | 8 | 8 ↑ | 8.5 ↑ | 8 | 7.5 ↓ | 8 ↑ | 8.5 ↑ | 7.5 | 8.5 ↑ | 8 | 7.5 ↓ | 8 | 7.5 |
 
 r4 lowest lines: 6 data visualisation (5.5), 2 typography, 3 colour, 8 consistency (6). Diagnosis: 2, 3 and 8 are
 structural (no single rule for mono vs sans, class colours that changed between legend and box, two accents in light),
@@ -85,3 +88,13 @@ mixed decimals), 6 data visualisation (a 0–1 y domain everywhere, a 170 px Com
 density), 7 information design (the issue browser living inside the "broken label files" finding) and 8 consistency
 (nine hand-written tables). The structural moves for r15 → r16: one shared table component, fitted chart domains,
 the dataset check as its own section, route focus, and the compact phone preamble on Model and Dataset pages.
+
+r16 (#98: fitted chart domains, one table system, the dataset check as its own section, route focus, compact phone
+headers, `line.control`, loss hues): seven lines up or level, Sol's 9 on interaction the first 9 since r12. The two
+that dropped (5 states, 11 responsiveness) drop on one new bug both reviewers found first: at 1024 the Models table
+hid body cells but not the `SortHeader` cells (component-scoped hide classes), so every value sat under the wrong
+heading. The rest of what holds the lines at 7.5–8: undesigned states (an invalid field shows only the focus ring,
+images drawn as box outlines before they load, the Playground failure below the fold on phones with a stale
+"Detections appear here"), state frames held at desktop height on phones, Compare (faded or hidden series, short runs
+crushed on a 0–150 epoch axis), the confusion matrix ramp (invisible low cells in dark), the loss chart's two control
+groups, and header actions that move between pages at 1024.
