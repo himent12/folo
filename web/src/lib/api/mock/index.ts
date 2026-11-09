@@ -156,8 +156,8 @@ function profiles(t0: number, scenario: Scenario = 'normal'): RunProfile[] {
     {
       id: 'run_c19a',
       name: 'fasteners-n',
-      // Fine-tuned from shapes-n (the Model page's lineage line).
-      config: config('fasteners-n', 'ds_fasteners', 'folo-n', 150, { weights: 'm_shapes_n' }),
+      // Fine-tuned from shapes-n (the Model page's lineage line), with the NMS-free one-to-one head (its Details' Head).
+      config: config('fasteners-n', 'ds_fasteners', 'folo-n', 150, { weights: 'm_shapes_n', head: 'o2o' }),
       classes: 8,
       classEase: FASTENER_EASE,
       stepsPerEpoch: 120,

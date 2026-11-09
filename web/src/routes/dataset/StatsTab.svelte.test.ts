@@ -25,17 +25,28 @@ afterEach(() => {
 });
 
 describe('Dataset stats: health findings', () => {
-  it("takes keyboard focus to the check findings when a finding's evidence is asked for", async () => {
+  it("opens a finding's check issues under the finding, filtered to its severity, one finding at a time", async () => {
     const dataset = await hub.api.dataset('ds_shapes_hard');
     const counts = (await hub.api.datasetIssues('ds_shapes_hard', { limit: 1 })).counts;
     c = mount(StatsTab, { target, props: { dataset, stats: dataset.stats!, counts, onclass: () => {} } });
     flushSync();
-    const show = target.querySelector<HTMLButtonElement>('button.haction');
-    expect(show).not.toBeNull();
-    show!.click();
+    // No separate findings section: the list lives under the findings.
+    expect(target.querySelector('#ds-check')).toBeNull();
+    const shows = [...target.querySelectorAll<HTMLButtonElement>('button.haction')];
+    expect(shows.map((b) => b.textContent?.trim())).toEqual(['Show the files', 'Show the warnings', 'Show the images']);
+    shows[1]!.click();
+    flushSync();
+    const ev = target.querySelector(`#${shows[1]!.getAttribute('aria-controls')}`);
+    expect(shows[1]!.getAttribute('aria-expanded')).toBe('true');
+    expect(shows[1]!.textContent?.trim()).toBe('Hide the warnings');
+    expect(ev?.closest('li')?.classList.contains('warning')).toBe(true);
+    // Filtered: no severity control inside a finding.
+    expect(ev?.querySelector('[role="radio"]')).toBeNull();
+    shows[0]!.click();
+    flushSync();
+    expect(target.querySelectorAll('.evidence').length).toBe(1);
+    expect(shows[1]!.getAttribute('aria-expanded')).toBe('false');
     await tick();
-    await tick();
-    expect(document.activeElement?.id).toBe('ds-check-title');
   });
 
   it('rests on one line with each severity summed up, units named, and no second accounting', async () => {

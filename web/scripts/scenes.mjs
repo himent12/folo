@@ -350,17 +350,17 @@ export const scenes = [
     },
   },
   {
-    // "Dataset check findings", its own section: the severity filter moved to warnings from the warning finding's
-    // "Show the warnings", so the caption and rows are the warnings.
+    // The warning finding's "Show the warnings": the check's warnings open under that finding (the one issue list,
+    // filtered to its severity), so the caption and rows are the warnings.
     name: 'dataset-issues',
     path: '/datasets/ds_shapes_hard?tab=stats',
     fullPage: true,
-    viewports: ['desktop', 'laptop', 'mobile'],
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
     setup: async (page) => {
       await until(page, '#ds-health summary');
       await page.locator('#ds-health summary').click();
       await page.getByRole('button', { name: 'Show the warnings' }).click();
-      await until(page, '#ds-check .issues .fix');
+      await until(page, '#ds-health .evidence .fix');
       await page.clock.runFor(500);
     },
   },

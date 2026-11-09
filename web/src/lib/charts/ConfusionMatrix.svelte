@@ -2,7 +2,8 @@
   /**
    * Confusion matrix: rows are true classes, columns predicted, plus a "background" row/column for misses and false
    * positives. Cells are row-normalised and shaded on one sequential luminance ramp in ink (the diagonal is told apart
-   * by position, not hue), labelled in whole percentages ("<1" for small shares, ./confusionInk), counts on hover. An
+   * by position, not hue), every cell with objects labelled in whole percentages ("<1" for small shares,
+   * ./confusionInk) where the number fits, and marked with a dot where it does not; counts on hover or focus. An
    * empty cell is the panel with a hairline grid; the ramp's floor is stepped (under 1 %, 1 %, 5 %, then even from
    * 10 %, ./confusionInk), so a 2 % and an 8 % confusion never look alike. `reveal(r, c)` lets a summary elsewhere
    * point at one cell: it scrolls the cell into view and makes it the active cell, whose counts the readout states. A
@@ -19,15 +20,11 @@
   // Cells take their ink share from the ramp; labels are pure white or black, switched near the ramp's luminance
   // crossover (see ./confusionInk).
   const theme = $derived(prefs.resolvedTheme);
-  /** With sparse labels, the smallest share labelled in a cell of 32 px; cells of 72 px also label shares from 3 %. */
-  const SPARSE_MIN = 0.05;
-  const SPARSE_WIDE = 0.03;
 
   let {
     classes,
     matrix,
     label = 'Confusion matrix',
-    sparseLabels = false,
     minCell,
     scale = false,
     classIds,
@@ -36,12 +33,6 @@
     /** (n+1)×(n+1) counts; the last row/column is background. */
     matrix: number[][];
     label?: string;
-    /**
-     * Label only cells of at least 5% that are at least 32 px wide (from 3% in cells of 72 px), so dense matrices don't
-     * run numerals together;
-     * every cell still states its value in its accessible name and in the readout on hover or focus.
-     */
-    sparseLabels?: boolean;
     /**
      * Minimum cell size in px. Wide matrices then scroll sideways with the row labels pinned, instead of squeezing
      * cells; on touch screens cells are at least 44 px.
@@ -180,7 +171,7 @@
 {/snippet}
 
 <!-- svelte-ignore a11y_interactive_supports_focus -->
-<div class="cm" class:sparse={sparseLabels} class:fixed class:more-r={moreRight} style:--n={n} style:--min-cell={minCell !== undefined ? `${minCell}px` : undefined} role="grid" aria-label={label} aria-describedby="{uid}-readout" bind:this={root} {onkeydown} {onscroll}>
+<div class="cm" class:fixed class:more-r={moreRight} style:--n={n} style:--min-cell={minCell !== undefined ? `${minCell}px` : undefined} role="grid" aria-label={label} aria-describedby="{uid}-readout" bind:this={root} {onkeydown} {onscroll}>
   <div class="row" role="row">
     <div class="corner" role="columnheader"><span>Predicted →</span><span>True ↓</span></div>
     {#each names as name, c (c)}
@@ -216,7 +207,12 @@
           onclick={() => (hovered = pinned = { r, c })}
           onkeydown={() => {}}
         >
-          {#if v > 0 && v >= (sparseLabels ? SPARSE_WIDE : 0)}<span class:hi={labelHigh(v, theme)} class:low={sparseLabels && v < SPARSE_MIN}>{sharePct(v)}</span>{/if}
+          {#if v > 0}
+            {@const t = sharePct(v)}
+            <!-- The share where it fits; else a dot, so no shaded cell carries its value by shade alone. Either way the
+                 cell's name and the readout (hover, focus) state the counts. -->
+            <span class="v" class:hi={labelHigh(v, theme)} class:long={t.length > 2} aria-hidden="true">{t}</span><i class="mark" class:hi={labelHigh(v, theme)} aria-hidden="true"></i>
+          {/if}
         </div>
       {/each}
     </div>
@@ -377,19 +373,32 @@
     transition: box-shadow var(--dur-fast) var(--ease-standard);
     min-width: 22px;
   }
-  /* Each cell is a size container so a label can hide itself when its cell is too narrow to hold it. */
-  .sparse .cell {
+  /* Each cell is a size container, so a number too wide for its cell gives way to a dot: up to two characters ("<1",
+     "42") from 20 px, "100" from 28 px. */
+  .cell {
     container-type: inline-size;
   }
-  @container (max-width: 31.98px) {
-    .sparse .cell span {
+  .mark {
+    display: none;
+    width: 4px;
+    height: 4px;
+    border-radius: 50%;
+    background: currentColor;
+  }
+  @container (max-width: 19.98px) {
+    .cell .v {
       display: none;
     }
+    .cell .mark {
+      display: block;
+    }
   }
-  /* Shares of 3–4 % are labelled only in full-size (72 px) cells. */
-  @container (max-width: 71.98px) {
-    .sparse .cell span.low {
+  @container (max-width: 27.98px) {
+    .cell .v.long {
       display: none;
+    }
+    .cell .v.long + .mark {
+      display: block;
     }
   }
   /* No objects at all is the panel itself, edged by the hairline grid (both themes); the ramp begins at the first
@@ -409,17 +418,17 @@
       inset 0 0 0 3px var(--bg-panel);
   }
   /* Low cells sit near the well, high cells near the ink; the label takes the far extreme (labelHigh in ./confusionInk). */
-  :global([data-theme='dark']) .cell span {
+  :global([data-theme='dark']) .cell :is(.v, .mark) {
     color: #ffffff;
   }
-  :global([data-theme='dark']) .cell span.hi,
-  :global([data-theme='light']) .cell span {
+  :global([data-theme='dark']) .cell :is(.v, .mark).hi,
+  :global([data-theme='light']) .cell :is(.v, .mark) {
     color: #000000;
   }
-  :global([data-theme='light']) .cell span.hi {
+  :global([data-theme='light']) .cell :is(.v, .mark).hi {
     color: #ffffff;
   }
-  .cell span.hi {
+  .cell .v.hi {
     font-weight: var(--weight-medium);
   }
   /* The column-range control: the columns in view between two paging buttons. */
