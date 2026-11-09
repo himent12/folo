@@ -3,6 +3,7 @@
 // value is the one shown, the request a note beside it when it differs; without it (queued, older servers) the
 // request as today.
 
+import { closeMosaicEpochs } from '$lib/api/progress';
 import type { ResolvedTrain, TrainConfig } from '$lib/api/types';
 import { pct } from '$lib/format';
 
@@ -63,3 +64,32 @@ export function resolvedRows(resolved: ResolvedTrain): [label: string, Setting][
 
 /** A setting as one string, for telling cells apart ("6 identical settings") and plain-text uses. */
 export const settingText = (s: Setting) => (s.note ? `${s.value} ${s.note}` : s.value);
+
+/** The detection head in words, as Model › Details says it (docs/MODEL.md §6.6). */
+export const HEAD_LABEL = { o2m: 'NMS (one-to-many)', o2o: 'End-to-end (no NMS)' } as const;
+/** Training precision in words, as Model › Details says it ("Trained in"). */
+export const PRECISION_LABEL = { amp: 'Mixed precision (f16)', f32: 'f32' } as const;
+
+/** The run's head (`config.head`; missing means o2m). */
+export const headSetting = (config: TrainConfig): Setting => ({ value: HEAD_LABEL[config.head ?? 'o2m'] });
+/** The run's precision (`config.amp`; missing means f32). */
+export const precisionSetting = (config: TrainConfig): Setting => ({ value: config.amp ? PRECISION_LABEL.amp : PRECISION_LABEL.f32 });
+
+/**
+ * The epochs at the end of the run that train without mosaic, as the trainer runs them: the server's figure where it
+ * sends one (`resolved.close_mosaic`, the one place it is read), else the trainer's cap of the request,
+ * `min(close_mosaic, floor(epochs / 2))` (folo-data `close_mosaic_epochs`): a 15-epoch run asked for 10 closes for 7.
+ */
+export function effectiveCloseMosaic(run: { config: TrainConfig; resolved?: ResolvedTrain | null }): number {
+  const served = run.resolved?.close_mosaic;
+  if (typeof served === 'number' && Number.isFinite(served)) return served;
+  return closeMosaicEpochs(run.config.augment.close_mosaic, run.config.epochs);
+}
+
+/** "last 7 epochs (requested 10)" where the trainer capped the request, "last 10 epochs", "never". */
+export function closeMosaicSetting(run: { config: TrainConfig; resolved?: ResolvedTrain | null }): Setting {
+  const n = effectiveCloseMosaic(run);
+  const asked = run.config.augment.close_mosaic;
+  const value = n > 0 ? `last ${n} ${n === 1 ? 'epoch' : 'epochs'}` : 'never';
+  return n === asked ? { value } : { value, note: `(requested ${asked})` };
+}

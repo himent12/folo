@@ -36,6 +36,7 @@
   import { runHorizon } from '$lib/charts/horizon';
   import type { Epoch, Run, Step } from '$lib/api/types';
   import { runProgress, stepsPerEpoch } from '$lib/api/progress';
+  import { effectiveCloseMosaic } from './resolved';
   import { conf, duration, eta, metric, num } from '$lib/format';
   import Segmented from '$lib/ui/Segmented.svelte';
   import Meta from '$lib/ui/Meta.svelte';
@@ -90,7 +91,9 @@
 
   const live = $derived(['queued', 'running', 'stopping'].includes(run.status));
   const progress = $derived(runProgress(run));
-  const closeFrom = $derived(1 - run.config.augment.close_mosaic / run.epochs);
+  /** Epochs without mosaic as the trainer runs them (capped at half the run: 7 of a 15-epoch run asked for 10). */
+  const closeN = $derived(effectiveCloseMosaic(run));
+  const closeFrom = $derived(1 - closeN / run.epochs);
   /** The run's last epochs train without mosaic: the bar hatches them and every chart marks where they start. */
   const mosaicOff = $derived(closeFrom > 0 && closeFrom < 1);
   const elapsed = $derived(run.started ? ((run.finished ? Date.parse(run.finished) : Date.now()) - Date.parse(run.started)) / 1000 : null);
@@ -326,7 +329,7 @@
   const legendNote = $derived(unit ? (lastEpoch ? latestEp : undefined) : lastStep ? stepEp : undefined);
 
   // The last epochs train without mosaic (the hatched end of the progress bar): marked where they start, on every chart.
-  const xMark = $derived(mosaicOff ? { x: run.epochs - run.config.augment.close_mosaic, label: 'mosaic off' } : undefined);
+  const xMark = $derived(mosaicOff ? { x: run.epochs - closeN, label: 'mosaic off' } : undefined);
   const current = $derived(tabs.find((t) => t.id === tab)!);
 
 
@@ -388,9 +391,9 @@
           {#if mosaicOff}<div class="close" class:over={run.status === 'completed' || progress >= closeFrom} style:left="{closeFrom * 100}%"></div>{/if}
         </div>
         <!-- The hatched end explains itself on hover: a hit area over it, taller than the 4 px bar. -->
-        {#if mosaicOff}<span class="close-hit" aria-hidden="true" style:left="{closeFrom * 100}%" use:tooltip={`Last ${run.config.augment.close_mosaic} epochs train without mosaic`}></span>{/if}
+        {#if mosaicOff}<span class="close-hit" aria-hidden="true" style:left="{closeFrom * 100}%" use:tooltip={`Last ${closeN} ${closeN === 1 ? 'epoch trains' : 'epochs train'} without mosaic`}></span>{/if}
       </div>
-      {#if mosaicOff}<span class="sr-only">The hatched end of the bar marks the last {run.config.augment.close_mosaic} epochs, trained without mosaic.</span>{/if}
+      {#if mosaicOff}<span class="sr-only">The hatched end of the bar marks the last {closeN} {closeN === 1 ? 'epoch' : 'epochs'}, trained without mosaic.</span>{/if}
       <span class="cap num">
         {#if run.status === 'queued'}Not started{:else if live}<Meta line><span>{(progress * 100).toFixed(1)}%</span><span>{run.eta_s !== null ? `${eta(run.eta_s)} left` : 'estimating…'}</span></Meta>{:else}{elapsed !== null ? `${duration(elapsed)} total` : '—'}{/if}
       </span>

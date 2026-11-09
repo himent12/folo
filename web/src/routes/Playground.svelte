@@ -21,7 +21,7 @@
   import { classColor, media } from '$lib/design/tokens';
   import DetectionView from '$lib/detect/DetectionView.svelte';
   import { filterDetections } from '$lib/detect/nms';
-  import { BrowserEngine, hasWebGpu, PHASE_TEXT, type Backend } from '$lib/inference/browser.svelte';
+  import { BrowserEngine, hasWebGpu, NO_WASM, PHASE_TEXT, probeWasm, wasmFromSystem, type Backend } from '$lib/inference/browser.svelte';
   import { metric, ms, num, sentence } from '$lib/format';
   import { isOom } from '$lib/oom';
   import { href, router } from '$lib/router.svelte';
@@ -257,6 +257,20 @@
   let runOn = $state<RunOn>('server');
   const webgpu = hasWebGpu();
   const engine = new BrowserEngine();
+  // Whether this build has the in-browser runtime (folo-wasm): what /api/system says, else one probe of its files.
+  // The demo simulates the browser path, so there only its server's answer counts. Unknown (null) leaves both on.
+  const system = new Resource((s) => hub.api.system(s));
+  let probed = $state<boolean | null>(null);
+  $effect(() => {
+    if (!hub.api.mock && wasmFromSystem(system.data) === null) void probeWasm().then((v) => (probed = v));
+  });
+  const wasm = $derived(wasmFromSystem(system.data) ?? (hub.api.mock ? (system.data ? false : null) : probed));
+  /** Why the browser backends are off, or null when they are offered. */
+  const browserOff = $derived(wasm === false ? NO_WASM : null);
+  $effect(() => {
+    if (browserOff && untrack(() => runOn) !== 'server') runOn = 'server';
+  });
+  const runOnNote = $derived(browserOff ? 'No in-browser runtime in this build' : !webgpu ? 'No WebGPU in this browser' : null);
   /** .folo files the user picked, by model id. */
   let localWeights = $state.raw(new Map<string, File>());
   /** The server cannot send this model's file: ask for it. */
@@ -631,10 +645,10 @@
             title="Prediction failed"
             retry={() => retryTick++}
             compact
-            hint={oom ? (smaller ? 'Run it in this browser, or use a smaller model.' : 'Run it in this browser instead.') : undefined}
+            hint={!oom ? undefined : browserOff ? (smaller ? 'Use a smaller model.' : undefined) : smaller ? 'Run it in this browser, or use a smaller model.' : 'Run it in this browser instead.'}
           >
             {#snippet actions()}
-              {#if oom}
+              {#if oom && !browserOff}
                 <Button size="sm" variant="primary" onclick={() => (runOn = localBackend)}>Run in this browser</Button>
                 {#if smaller}<Button size="sm" title="{smaller.name} is {smaller.arch}: a smaller model of the same classes" onclick={() => chooseModel(smaller.id)}>Use {smaller.name}</Button>{/if}
               {/if}
@@ -663,7 +677,7 @@
       />
       {#if model}<Button icon={ArrowUpRight} href={href(`/models/${model.id}`)} aria-label="Open {model.name}" />{/if}
     </div>
-    <div class="runon" role="group" aria-label="Run on" aria-describedby={webgpu ? undefined : 'runon-note'}>
+    <div class="runon" role="group" aria-label="Run on" aria-describedby={runOnNote ? 'runon-note' : undefined}>
       <span class="pick-label" aria-hidden="true">Run on</span>
       <!-- A choice that is off says why: on the title row in a line under the control, from its left edge; in the
            toolbar row beside it. -->
@@ -674,11 +688,11 @@
           bind:value={runOn}
           options={[
             { value: 'server', label: 'Server' },
-            { value: 'webgpu', label: 'WebGPU', disabled: !webgpu },
-            { value: 'cpu', label: 'CPU' },
+            { value: 'webgpu', label: 'WebGPU', disabled: !webgpu || !!browserOff, tip: browserOff ?? 'No WebGPU in this browser' },
+            { value: 'cpu', label: 'CPU', disabled: !!browserOff, tip: browserOff ?? undefined },
           ]}
         />
-        {#if !webgpu}<span class="runon-note" id="runon-note">No WebGPU in this browser</span>{/if}
+        {#if runOnNote}<span class="runon-note" id="runon-note">{runOnNote}</span>{/if}
       </span>
     </div>
   {/if}

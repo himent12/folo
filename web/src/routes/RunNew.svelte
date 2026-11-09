@@ -22,6 +22,7 @@
   import { REF_CPU, REF_GPU } from '$lib/reference';
   import { basisLine, confidenceLine, hasFeature, latencyMs, latencyRange, measuredLatency, timeRange, updatedWords } from '$lib/throughput';
   import { href, router } from '$lib/router.svelte';
+  import { serverCommand, trainCommand } from '$lib/trainCli';
   import { ownCreateAction, setCrumbs } from '$lib/shell/crumbs.svelte';
   import { dock } from '$lib/shell/dock';
   import { sidebar } from '$lib/shell/sidebarState.svelte';
@@ -44,6 +45,7 @@
   import { toast } from '$lib/ui/toast.svelte';
   import { tooltip } from '$lib/ui/tooltip';
   import { VULKAN } from './settings/capabilities';
+  import { HEAD_LABEL } from './run/resolved';
   import AugPreview, { type AugKey } from './runnew/AugPreview.svelte';
   import { AMP_SPEEDUP, arches, autoCloseMosaic, closeMosaicEpochs, defaultImgsz, estimate, oomScale, shortRun, warmup } from './runnew/estimate';
   import { media } from '$lib/design/tokens';
@@ -278,11 +280,10 @@
   /** The trainer's schedule: optimizer steps an epoch, fewer than batches when gradients accumulate. */
   const sched = $derived(warmup(dataset?.splits.train ?? 0, Number.isInteger(epochs) && epochs > 0 ? epochs : 1, batchN));
   /** The batches behind the steps, for the Summary's tooltip and its accessible description: one line in the rail. */
-  const stepsWhy = $derived(
-    sched.accumulate > 1
-      ? `${num(est.stepsPerEpoch)} batches of ${batchN}; ${sched.accumulate} per optimizer step.`
-      : `${num(est.stepsPerEpoch)} batches of ${batchN}, one step each.`,
-  );
+  const batchesOf = $derived(`${num(est.stepsPerEpoch)} ${est.stepsPerEpoch === 1 ? 'batch' : 'batches'} of ${batchN}`);
+  const stepsWhy = $derived(sched.accumulate > 1 ? `${batchesOf}; ${sched.accumulate} per optimizer step.` : `${batchesOf}, one step each.`);
+  // The figures wait for the server's devices and the dataset: until then "Estimating…", never a CPU guess or 0 steps.
+  const estReady = $derived(!!dataset && (system.data !== undefined || system.error !== undefined));
   // wgpu cannot report adapter memory (real servers send 0): then there is no meter and no out-of-memory guess.
   const gpuMem = $derived(gpu && gpu.memory_bytes > 0 ? gpu.memory_bytes : null);
 
@@ -407,7 +408,8 @@
   const canEstimate = $derived(hasFeature(system.data, 'run_estimate'));
   let served = $state.raw<{ key: string; est: RunEstimate } | null>(null);
   let estimating = $state(false);
-  const estKey = $derived(JSON.stringify({ ...config, name: '' }));
+  // The name is part of the request: the server's command (`cli`) names the run.
+  const estKey = $derived(JSON.stringify(config));
   $effect(() => {
     const key = estKey;
     const body = { ...config, name: config.name || 'estimate' };
@@ -479,23 +481,14 @@
   const vram = $derived(shown.vram * (shown.vramMeasured ? 1 : scale));
   const vramPct = $derived(gpuMem ? vram / gpuMem : 0);
 
-  const cliParts = $derived(
-    [
-      'folo train',
-      `--data ${dataset?.path ?? datasetId}`,
-      `--model ${arch}`,
-      `--epochs ${epochs}`,
-      `--batch ${batchN}`,
-      `--imgsz ${imgszN}`,
-      device !== 'auto' ? `--device ${device}` : '',
-      ampOn ? '--amp' : '',
-      weights !== 'none' ? `--weights ${weights}` : '',
-      // The CLI's default head is the weights file's own (docs/CLI.md); the API's is o2m, so a fine-tune says which.
-      e2e ? '--head o2o' : weights !== 'none' ? '--head o2m' : '',
-      `--name ${name.trim()}`,
-    ].filter(Boolean),
-  );
-  const cli = $derived(cliParts.join(' '));
+  // The same run from a terminal: the server's command where it builds one (only it knows its files), else Studio's,
+  // from the CLI's own mapping ($lib/trainCli). A fine-tune names the weights file by path; where the server does
+  // not report it, a placeholder and a note say what to fill in.
+  const ownCli = $derived(trainCommand(config, dataset?.path ?? datasetId, models.data?.find((m) => m.id === weights)));
+  const servedCli = $derived(served?.key === estKey ? serverCommand(served.est) : null);
+  const cliParts = $derived(servedCli ? servedCli.split(/ (?=--)/) : ownCli.parts);
+  const cli = $derived(servedCli ?? ownCli.line);
+  const cliPlaceholder = $derived(servedCli ? null : ownCli.placeholder);
   /** Shell line continuation, for the multi-line display of the command. */
   const CONT = ' \\\n  ';
 
@@ -569,7 +562,7 @@
       warn: !!errors.weights,
     },
     ...(optimizer !== 'auto' ? [{ key: 'opt' as const, label: 'Optimizer', value: optimizer === 'sgd' ? 'SGD + momentum' : 'AdamW' }] : []),
-    ...(e2e ? [{ key: 'head' as const, label: 'Head', value: 'End-to-end, no NMS' }] : []),
+    ...(e2e ? [{ key: 'head' as const, label: 'Head', value: HEAD_LABEL.o2o }] : []),
   ]);
 
   /** The control a review row returns to; the picker that is on screen (cards or the phone select). */
@@ -625,6 +618,12 @@
 {/snippet}
 
 {#snippet figures(where: string)}
+  {#if !estReady}
+    <dl class="est" aria-busy="true">
+      <dt>Schedule</dt><dd class="num"><Skeleton w="88px" inline /></dd>
+      <dt>Est. time</dt><dd class="num rough">Estimating…</dd>
+    </dl>
+  {:else}
   <dl class="est">
     <!-- The trainer's count (the short-run warning's unit). The batches behind it: a tooltip on hover and focus (which
          also describes the value to a screen reader), and read after it in browse mode. -->
@@ -661,9 +660,11 @@
     </dd>
     {#if !onCpu && gpu}
       <dt>Est. GPU memory</dt>
-      <dd class="num" class:warn={vramPct > 0.9}>{roughBytes(vram)} <span class="faint">/ {gpuMem ? bytes(gpuMem, prefs.units) : 'GPU memory unknown'}</span></dd>
+      <dd class="num" class:warn={vramPct > 0.9}>{roughBytes(vram)}{#if gpuMem}{' '}<span class="faint">/ {bytes(gpuMem, prefs.units)}</span>{/if}</dd>
     {/if}
   </dl>
+  <!-- Some adapters report no memory size (`memory_bytes: 0`, e.g. through Vulkan): the estimate stands alone, said once. -->
+  {#if !onCpu && gpu && !gpuMem}<p class="calib">This GPU’s memory size isn’t reported.</p>{/if}
   {#if scale > 1 && !onCpu}<p class="calib">Scaled up from the failed run's settings, which did not fit.</p>{/if}
   {#if !onCpu && gpuMem}
     <div class="vram" aria-hidden="true"><i class:warn={vramPct > 0.9} style:width={pct2(Math.min(1, vramPct))}></i></div>
@@ -677,6 +678,7 @@
   {:else if onCpu}
     <p class="callout"><TriangleAlert size={14} aria-hidden="true" /><span>Training on the CPU is roughly 14× slower than on a GPU.</span></p>
   {/if}
+  {/if}
   {#if short}
     <!-- The trainer's warnings (folo_vision::train::schedule_warnings) as one line; the reasons and the fix behind Why?. -->
     <div class="short">
@@ -689,7 +691,7 @@
         <div class="short-why" id="{where}-short-why">
           {#if short.scratch}
             <p>
-              {num(short.steps)} optimizer steps: {num(epochs)} epochs × {num(short.stepsPerEpoch)}{#if short.accumulate > 1}{' '}({num(est.stepsPerEpoch)} batches of {batchN}, {short.accumulate} per step){/if}.
+              {num(short.steps)} optimizer steps: {num(epochs)} epochs × {num(short.stepsPerEpoch)}{#if short.accumulate > 1}{' '}({batchesOf}, {short.accumulate} per step){/if}.
               Trained from scratch, a detector needs a few hundred steps to learn anything, so expect an mAP near&nbsp;0.
             </p>
           {/if}
@@ -1045,9 +1047,10 @@
             <details class="cli">
               <summary><ChevronRight size={14} aria-hidden="true" />CLI command <span class="faint">the same run from a terminal</span></summary>
               <div class="cli-body">
-                <code>{cliParts.join(CONT)}</code>
+                <code aria-describedby={cliPlaceholder ? 'cli-note' : undefined}>{cliParts.join(CONT)}</code>
                 <span class="cli-copy"><Button size="sm" variant="ghost" icon={Copy} aria-label="Copy command" title="Copy command" onclick={() => copy(cli, 'Command copied')} /></span>
               </div>
+              {#if cliPlaceholder}<p class="cli-note" id="cli-note">Put the path of {cliPlaceholder} on the server in its place: this server does not report it.</p>{/if}
             </details>
             </div>
           </div>
@@ -1072,8 +1075,8 @@
         {:else}
           <button type="button" class="dock-est num" aria-haspopup="dialog" aria-label="Show the run summary" onclick={() => (sumOpen = true)}>
             <Meta>
-              <span class:rough={shown.rough}>{timeRange(shown.lo, shown.hi)}</span>
-              {#if !onCpu && gpu}<span class:warn={vramPct > 0.9}>{roughBytes(vram)} GPU memory</span>{/if}
+              <span class:rough={shown.rough || !estReady}>{estReady ? timeRange(shown.lo, shown.hi) : 'Estimating…'}</span>
+              {#if estReady && !onCpu && gpu}<span class:warn={vramPct > 0.9}>{roughBytes(vram)} GPU memory</span>{/if}
               {#if short}<span class="dock-warn"><TriangleAlert size={12} aria-hidden="true" />{short.scratch ? 'Too short to learn' : 'Mostly warmup'}</span>{/if}
               {#if dataset}<span class="faint"><Meta line><span>{dataset.name}</span><Ident value={arch} /></Meta></span>{/if}
             </Meta>
@@ -1908,6 +1911,12 @@
   .cli-body {
     position: relative;
     margin-top: var(--space-2);
+  }
+  .cli-note {
+    margin-top: var(--space-2);
+    color: var(--text-tertiary);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
   }
   .cli-copy {
     position: absolute;

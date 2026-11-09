@@ -38,6 +38,8 @@
   import Meta from '$lib/ui/Meta.svelte';
   import PrCurves from './model/PrCurves.svelte';
   import { MODEL_SECTIONS, sectionShown, type ModelSection } from './model/sections';
+  // The head and precision in the words Run's Config and Compare use.
+  import { HEAD_LABEL, PRECISION_LABEL } from './run/resolved';
   import { media } from '$lib/design/tokens';
 
   const id = $derived(router.route.params.id ?? '');
@@ -222,8 +224,6 @@
   // Phones: the four numbers as one compact 2 × 2 summary in every section (Curves too), so it never changes shape
   // between sections and each section starts on the first screen; what they mean is behind the ⓘ.
   const kpiGrid = $derived(phone.current);
-  /** The detection head, from the file (`Model.head`; missing, from older servers, means o2m). */
-  const HEAD_LABEL = { o2m: 'NMS (one-to-many)', o2o: 'End-to-end (no NMS)' } as const;
   /**
    * How the weights are stored (the file's folo.dtype and folo.fused, docs/API.md): "f16 · fused, inference only".
    * Null when the server does not say; a dtype this client has no name for reads as unknown, as the API asks.
@@ -477,7 +477,7 @@
             {#if m.trained_with}
               <div class="kv">
                 <dt>Trained in</dt>
-                <dd>{m.trained_with.amp ? 'Mixed precision (f16)' : 'f32'}</dd>
+                <dd>{m.trained_with.amp ? PRECISION_LABEL.amp : PRECISION_LABEL.f32}</dd>
               </div>
               <div class="kv">
                 <dt>Trained for</dt>

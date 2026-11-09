@@ -31,7 +31,7 @@
   import { nearest } from '$lib/charts/downsample';
   import { defaultAxis, runEnd, runX } from '$lib/charts/runAxis';
   import { conf, deviceName, duration, metric } from '$lib/format';
-  import { batchSetting, lrSetting, optimizerSetting, settingText, warmupSetting, type Setting } from './run/resolved';
+  import { batchSetting, closeMosaicSetting, headSetting, lrSetting, optimizerSetting, precisionSetting, settingText, warmupSetting, type Setting } from './run/resolved';
   import { href, router } from '$lib/router.svelte';
   import { setCrumbs } from '$lib/shell/crumbs.svelte';
   import Page from '$lib/shell/Page.svelte';
@@ -211,7 +211,9 @@
     ['LR', (r) => lrSetting(r.config, r.resolved)],
     ['Warmup', (r) => (r.resolved ? warmupSetting(r.resolved) : plain('—'))],
     ['Mosaic / mixup', (r) => plain(`${r.config.augment.mosaic} / ${r.config.augment.mixup}`)],
-    ['Close mosaic', (r) => plain(r.config.augment.close_mosaic > 0 ? `last ${r.config.augment.close_mosaic} epochs` : 'never')],
+    ['Close mosaic', (r) => closeMosaicSetting(r)],
+    ['Precision', (r) => precisionSetting(r.config)],
+    ['Head', (r) => headSetting(r.config)],
     ['Device', (r) => plain(deviceName(r.device))],
     ['Duration', (r) => plain(r.started ? duration(((r.finished ? Date.parse(r.finished) : Date.now()) - Date.parse(r.started)) / 1000) : '—')],
   ]);

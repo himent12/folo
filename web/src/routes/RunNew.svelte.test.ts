@@ -440,7 +440,7 @@ describe('New run: the end-to-end head', () => {
     await open();
     sw()!.click();
     flushSync();
-    expect(row()?.querySelector('.rv-v')?.textContent).toBe('End-to-end, no NMS');
+    expect(row()?.querySelector('.rv-v')?.textContent).toBe('End-to-end (no NMS)');
     expect(cli()).toContain('--head o2o');
     const create = vi.spyOn(api, 'createRun');
     await start();
