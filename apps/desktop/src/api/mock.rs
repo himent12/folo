@@ -1048,10 +1048,13 @@ impl Backend for MockBackend {
             .iter()
             .map(|cm| {
                 let p_at = curve(cm.map50);
-                // Sampled up to where the curve ends (its precision reaches 0).
-                let recall: Vec<f32> =
-                    (0..=100).map(|i| i as f32 / 100.).take_while(|&r| r == 0. || p_at(r) > 0.).collect();
-                let precision: Vec<f32> = recall.iter().map(|&r| p_at(r)).collect();
+                // Sampled up to where the curve ends, its end point (precision 0 at r1) included.
+                let r1 = if cm.map50 * 7. / 6. <= 1. { cm.map50 * 7. / 6. } else { 1. };
+                let mut recall: Vec<f32> =
+                    (0..=100).map(|i| i as f32 / 100.).take_while(|&r| r == 0. || r < r1).collect();
+                recall.push(r1);
+                let precision: Vec<f32> =
+                    recall.iter().map(|&r| if r >= r1 { 0. } else { p_at(r) }).collect();
                 PrCurve { class: cm.class, recall, precision, ap50: cm.map50 }
             })
             .collect();

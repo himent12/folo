@@ -294,7 +294,9 @@ impl FoloApp {
             .gap(px(if short { 12. } else { 16. }))
             .px(px(self.gutter()))
             .pt(px(if short { 16. } else { 20. }))
-            .pb(px(16.))
+            // In keyboard mode the key-hint strip (32 px) lies over the page's bottom: the grid
+            // ends above it, so a focused bottom row is never under it.
+            .pb(px(if self.kb { 48. } else { 16. }))
             .child(header)
             .child(strip)
             .child(

@@ -2940,7 +2940,7 @@ fn reveal(b: gpui::Bounds<Pixels>, window: &mut Window) {
             // Taller than the view (the run page's linked chart group at minimum size): its top
             // leads. Already in view, it stays; elsewhere, it comes to the top edge, never past.
             if b.top() < vp.top() || b.top() + margin > vp.bottom() - margin * 4. {
-                b.top() - margin - vp.top()
+                b.top() - top_m - vp.top()
             } else {
                 px(0.)
             }
