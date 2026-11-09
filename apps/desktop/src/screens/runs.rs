@@ -1648,8 +1648,12 @@ fn log_fields(s: &str) -> Vec<String> {
     s.split(" · ").enumerate().map(|(i, f)| if i > 0 { format!("· {f}") } else { f.to_string() }).collect()
 }
 
-/// A learning rate as typed (up to six decimals, no trailing zeros): 0.001667, 0.01.
+/// A learning rate as typed (up to six decimals, no trailing zeros): 0.001667, 0.01; smaller
+/// ones in powers of ten (1×10⁻⁷), never "0".
 fn fmt_rate(v: f64) -> String {
+    if v != 0. && v.abs() < 1e-5 {
+        return crate::charts::in_pow(v, v.abs().log10().floor() as i32);
+    }
     let s = format!("{v:.6}");
     s.trim_end_matches('0').trim_end_matches('.').to_string()
 }

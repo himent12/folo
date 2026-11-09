@@ -1059,6 +1059,8 @@ impl FoloApp {
                                     let n = crate::api::capped_close_mosaic(asked, last);
                                     let capped = if n < asked { " (capped at half the run)" } else { "" };
                                     match n {
+                                        // Mosaic off (Advanced): every epoch is on whole images.
+                                        _ if mosaic <= 0. => "Mosaic is off: every epoch trains on whole images".to_string(),
                                         0 if asked == 0 => "Off: mosaic all the way through".to_string(),
                                         0 => "Too short a run: mosaic all the way through".to_string(),
                                         1 => format!("Epoch {last} trains on whole images{capped}"),
