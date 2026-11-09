@@ -23,7 +23,7 @@
   import { runProgress } from '$lib/api/progress';
   import { rowNav } from '$lib/ui/rowNav';
   import Skeleton from '$lib/ui/Skeleton.svelte';
-  import StatusBadge from '$lib/ui/StatusBadge.svelte';
+  import StatusBadge, { STATUS_LABEL } from '$lib/ui/StatusBadge.svelte';
   import TableState from '$lib/ui/TableState.svelte';
   import Gate from '$lib/ui/Gate.svelte';
   import { compareHint, compareReason } from './runs/compareHint';
@@ -37,6 +37,7 @@
   import type { QueueRequest } from '$lib/api/types';
   import { moveQueued, queueItems, REMOVE_DESCRIPTION, REMOVE_LABEL, removeTitle } from './run/queueActions';
   import Dialog from '$lib/ui/Dialog.svelte';
+  import NoValue from '$lib/ui/NoValue.svelte';
   import { DialogStatus } from '$lib/ui/feedback.svelte';
   import X from '@lucide/svelte/icons/x';
   import { toast } from '$lib/ui/toast.svelte';
@@ -144,14 +145,6 @@
   }
 
   // Progress bars stay neutral; only a live run's bar carries the accent ("now"). Status is the dot beside it.
-  const STATUS: Record<Run['status'], string> = {
-    queued: 'Queued',
-    running: 'Running',
-    stopping: 'Stopping',
-    stopped: 'Stopped',
-    completed: 'Completed',
-    failed: 'Failed',
-  };
   const tone = (r: Run) => (r.status === 'running' ? 'accent' : 'neutral');
   // Nothing answers: the actions that need the server are disabled and say why (as on Datasets).
   const offline = $derived(!runs.data && isOffline(runs.error));
@@ -313,8 +306,7 @@
                   {/if}
                 </td>
                 <td class="r num best">
-                  {metric(r.best?.map50_95)}
-                  {#if r.best}<span class="faint" title="Best epoch">ep {r.best.epoch}</span>{/if}
+                  {#if r.best}{metric(r.best.map50_95)} <span class="faint" title="Best epoch">ep {r.best.epoch}</span>{:else}<NoValue />{/if}
                 </td>
                 <td class="hide-lg"><RunSpark run={r} width={96} /></td>
                 <td class="r faint hide-md">{ago(r.created)}</td>
@@ -369,9 +361,9 @@
                      otherwise the status leads that line. Lines wrap whole items, so no fact is cut (DESIGN_DIRECTION
                      §2.3). With the checkboxes in, the dataset steps out. -->
                 {#if cause}<span class="r-cause" data-fact>{cause}</span>{/if}
-                <span class="r-meta num"><Meta>{#if !cause}<span>{placeOf(r) !== null ? queuePlace(placeOf(r) ?? 0) : STATUS[r.status]}</span>{/if}<span>{r.epoch}/{r.epochs}</span>{#if !choosing}<span>{dsName.get(r.config.dataset_id) ?? r.config.dataset_id}</span>{/if}</Meta></span>
+                <span class="r-meta num"><Meta>{#if !cause}<span>{placeOf(r) !== null ? queuePlace(placeOf(r) ?? 0) : STATUS_LABEL[r.status]}</span>{/if}<span>{r.epoch}/{r.epochs}</span>{#if !choosing}<span>{dsName.get(r.config.dataset_id) ?? r.config.dataset_id}</span>{/if}</Meta></span>
               </span>
-              <span class="r-end"><span class="r-val num">{metric(r.best?.map50_95)}</span><span class="r-age">{ago(r.created)}</span></span>
+              <span class="r-end"><span class="r-val num">{#if r.best}{metric(r.best.map50_95)}{:else}<NoValue />{/if}</span><span class="r-age">{ago(r.created)}</span></span>
             </a>
             {#if !choosing && menuSlot}<span class="r-menu">{#if rowItems(r).length}<Menu label="Queue actions for {r.name}" items={rowItems(r)} variant="ghost" fixed />{/if}</span>{/if}
             {#if r.status === 'running'}
@@ -630,6 +622,55 @@
       flex-shrink: 0;
       width: 44px;
       height: 56px;
+    }
+    /* The checkbox itself is the 44 px target (DESIGN_DIRECTION §2.10), not only its label: the input is a 44 px box
+       whose drawn mark is the 20 px square at its centre, ink when checked as everywhere (§2.6). */
+    .r-check input[type='checkbox'] {
+      -webkit-appearance: none;
+      appearance: none;
+      position: relative;
+      width: 44px;
+      height: 44px;
+      border-radius: var(--radius-sm);
+    }
+    .r-check input[type='checkbox']::before {
+      content: '';
+      position: absolute;
+      inset: 12px;
+      border-radius: 4px;
+      background: var(--bg-raised);
+      box-shadow: inset 0 0 0 1.5px var(--line-control);
+    }
+    .r-check input[type='checkbox']:checked::before {
+      background: var(--text-primary);
+      box-shadow: none;
+    }
+    /* The check: a short L turned 45°, in the inverse ink on the filled box. */
+    .r-check input[type='checkbox']:checked::after {
+      content: '';
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      width: 6px;
+      height: 12px;
+      border: solid var(--text-inverse);
+      border-width: 0 2px 2px 0;
+      transform: translate(-50%, -60%) rotate(45deg);
+    }
+    .r-check input[type='checkbox']:disabled {
+      cursor: not-allowed;
+    }
+    .r-check input[type='checkbox']:disabled::before {
+      background: var(--bg-inset);
+      box-shadow: inset 0 0 0 1.5px var(--line-subtle);
+    }
+    /* Focus rings the drawn square, not the invisible target around it. */
+    .r-check input[type='checkbox']:focus-visible {
+      outline: none;
+    }
+    .r-check input[type='checkbox']:focus-visible::before {
+      outline: var(--size-focus-ring) solid var(--focus);
+      outline-offset: var(--size-focus-offset);
     }
     /* 56 px at least; a row that grows a line (a failure's cause) keeps 8 px above and below its text. */
     .r-main {

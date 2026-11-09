@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { startFrom } from './RunCompare.svelte';
-import { lrParts } from './run/RunMetrics.svelte';
+import { lrParts, stepEpoch } from './run/RunMetrics.svelte';
 
 describe('Compare: startFrom', () => {
   const models = [{ id: 'm_shapes_n', name: 'shapes-n' }];
@@ -23,5 +23,15 @@ describe('Run metrics: lrParts', () => {
     expect(lrParts(25)).toEqual({ value: '2.50', unit: '× 10¹', exp: '1' });
     expect(lrParts(null)).toEqual({ value: '—' });
     expect(lrParts(0)).toEqual({ value: '0' });
+  });
+});
+
+describe('Run metrics: stepEpoch', () => {
+  it("names a per-step reading's epoch, partial only past a finished run's last epoch", () => {
+    expect(stepEpoch('running', 23.4, 23)).toBe('ep 24');
+    expect(stepEpoch('failed', 23.4, 23)).toBe('ep 24 (partial)');
+    expect(stepEpoch('stopped', 23.4, 23)).toBe('ep 24 (partial)');
+    expect(stepEpoch('completed', 100, 100)).toBe('ep 100');
+    expect(stepEpoch('failed', 0.2, 0)).toBe('ep 1 (partial)');
   });
 });

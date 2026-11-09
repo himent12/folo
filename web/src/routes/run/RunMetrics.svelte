@@ -12,6 +12,16 @@
     const [m, e] = fmtLr(v).split(' × ');
     return e ? { value: m!, unit: `× ${e}`, exp: [...e.slice(2)].map((c) => PLAIN[c] ?? c).join('') } : { value: m! };
   }
+
+  /**
+   * The epoch a per-step reading (loss, LR, throughput) comes from: "ep 24". A run that ended inside an epoch (failed or
+   * stopped part-way) has steps past its last finished epoch, so their epoch says so, "ep 24 (partial)", and never seems
+   * to contradict the run's 23 finished epochs. `observed` is the progress in epochs (23.4).
+   */
+  export function stepEpoch(status: string, observed: number, finished: number): string {
+    const n = Math.max(1, Math.ceil(observed - 1e-9));
+    return `ep ${n}${status !== 'running' && status !== 'queued' && n > finished ? ' (partial)' : ''}`;
+  }
 </script>
 
 <script lang="ts">
@@ -272,10 +282,12 @@
   // The one live-value label, as in the chart's legend: "Latest · ep 37". Per-epoch values come from the last
   // validation; per-step values from the epoch the last step is in.
   const latestEp = $derived(lastEpoch ? `Latest · ep ${lastEpoch.epoch}` : 'after the first epoch');
-  const stepEp = $derived(lastStep ? `Latest · ep ${Math.max(1, Math.ceil(observed - 1e-9))}` : 'after the first step');
+  // One label for every per-step reading (the Loss, LR and Throughput tabs and the legend), "(partial)" past the end.
+  const stepEpWord = $derived(stepEpoch(run.status, observed, lastEpoch?.epoch ?? 0));
+  const stepEp = $derived(lastStep ? `Latest · ${stepEpWord}` : 'after the first step');
   // Tablets: the same readings in fewer words ("ep 37", "not yet").
   const latestShort = $derived(lastEpoch ? `ep ${lastEpoch.epoch}` : 'not yet');
-  const stepShort = $derived(lastStep ? `ep ${Math.max(1, Math.ceil(observed - 1e-9))}` : 'not yet');
+  const stepShort = $derived(lastStep ? stepEpWord : 'not yet');
   /** Precision and recall are read at each epoch's best-F1 confidence (docs/API.md, Operating point): the latest one. */
   const prConf = $derived(lastEpoch?.val.best_f1_conf);
   /** The LR schedule the trainer resolved (`Run.resolved`), else what the recipe defaults to. */
@@ -310,7 +322,7 @@
       value: num(lastStep?.loss.total, 3),
       // The last step's raw reading; the chart draws the total smoothed. The caption is the one place that says which
       // is which ("raw · smoothed 2.075", the legend's total), so the two numbers never seem to disagree.
-      caption: lastStep ? (smoothedLast !== undefined ? `raw · smoothed ${num(smoothedLast, 3)}` : `raw · ep ${Math.max(1, Math.ceil(observed - 1e-9))}`) : 'after the first step',
+      caption: lastStep ? (smoothedLast !== undefined ? `raw · smoothed ${num(smoothedLast, 3)}` : `raw · ${stepEpWord}`) : 'after the first step',
       capShort: lastStep ? (smoothedLast !== undefined ? `raw · smoothed ${num(smoothedLast, 3)}` : `raw · ${stepShort}`) : stepShort,
       title: 'Training loss',
       qualifier: 'by epoch',

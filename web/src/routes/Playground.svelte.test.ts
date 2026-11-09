@@ -142,6 +142,22 @@ describe('Playground on a tablet', () => {
   });
 });
 
+describe('Playground: the model picker', () => {
+  it('shows the name alone when closed, its score and every fact of its context under it, and the context in the list', async () => {
+    await run('normal', 'm_hard_s');
+    const sel = await until(() => target.querySelector<HTMLSelectElement>('.model-pick select'), 'the picker');
+    const shown = target.querySelector('.model-pick .shown')!;
+    const meta = target.querySelector('#model-meta')!;
+    const opt = sel.querySelector<HTMLOptionElement>('option[value="m_hard_s"]')!;
+    expect(shown.textContent).toBe(opt.textContent!.split(' · ')[0]);
+    expect(meta.textContent).toMatch(/^mAP 0\.\d{3} · shapes-hard, validation split$/);
+    expect(sel.getAttribute('aria-describedby')).toBe('model-meta');
+    // The open list keeps each option's context and its group.
+    expect(opt.textContent).toMatch(/ · mAP 0\.\d{3} on shapes-hard$/);
+    expect(opt.closest('optgroup')?.getAttribute('label')).toBe('Validation split of shapes-hard');
+  });
+});
+
 describe('Playground: detections', () => {
   it('shows scores with one precision in the table and the picked line', async () => {
     await run('normal', 'm_hard_s');

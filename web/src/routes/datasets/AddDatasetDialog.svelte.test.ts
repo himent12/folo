@@ -5,6 +5,7 @@ import { hub } from '$lib/api/index.svelte';
 import { MockApi } from '$lib/api/mock';
 import { router } from '$lib/router.svelte';
 import { toast } from '$lib/ui/toast.svelte';
+import { undescribedFields } from '$lib/ui/fieldA11y';
 import AddDatasetDialog from './AddDatasetDialog.svelte';
 
 let target: HTMLElement;
@@ -44,6 +45,16 @@ async function register(path: string, known?: { id: string }[]) {
 }
 
 describe('AddDatasetDialog', () => {
+  it('describes every control by the hint or error under it, in both modes', () => {
+    c = mount(AddDatasetDialog, { target, props: { open: true } });
+    flushSync();
+    expect(document.querySelectorAll('.field').length).toBeGreaterThan(2);
+    expect(undescribedFields(document)).toEqual([]);
+    [...document.querySelectorAll<HTMLButtonElement>('[role="tab"]')].at(-1)!.click();
+    flushSync();
+    expect(undescribedFields(document)).toEqual([]);
+  });
+
   it('keeps Register disabled, saying why, until there is a folder path', () => {
     c = mount(AddDatasetDialog, { target, props: { open: true } });
     flushSync();

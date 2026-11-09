@@ -17,7 +17,7 @@
   import Note from '$lib/ui/Note.svelte';
   import Panel from '$lib/ui/Panel.svelte';
   import { toast } from '$lib/ui/toast.svelte';
-  import { batchSetting, closeMosaicSetting, headSetting, lrSetting, optimizerSetting, precisionSetting, resolvedRows, type Setting } from './resolved';
+  import { batchSetting, closeMosaicSetting, headSetting, lrSetting, optimizerSetting, precisionSetting, resolvedRows, stepSetting, type Setting } from './resolved';
 
   let {
     config,
@@ -50,11 +50,15 @@
   // Three groups: what trains on what (the essentials), how the optimizer runs, and the rest of the setup. The rail
   // lists them in that order as one Training list; the two-column layout puts the optimizer over Augmentation so the
   // columns end together; a phone shows the essentials and folds the others.
+  // The batch's optimizer step sits under it ("4 batches · effective batch 64"); a phone keeps its six essentials and
+  // folds the step with the other settings.
+  const step = $derived<[string, Setting][]>(resolved ? [['Per optimizer step', stepSetting(resolved)]] : []);
   const core = $derived<[string, Setting][]>([
     ['Dataset', plain(datasetName ?? config.dataset_id)],
     ['Model', id(config.arch)],
     ['Epochs', plain(String(config.epochs))],
-    [resolved && resolved.accumulate > 1 ? 'Batch × accumulate' : 'Batch', batchSetting(config, resolved)],
+    ['Batch', batchSetting(config, resolved)],
+    ...(essential ? [] : step),
     ['Image size', plain(`${config.imgsz} px`)],
     ['Device', config.device === 'auto' ? plain('auto') : id(config.device)],
   ]);
@@ -107,7 +111,7 @@
   {#snippet actions()}<Button size="sm" variant="ghost" icon={Copy} onclick={copy}>Copy JSON</Button>{/snippet}
   {#if essential}
     {@render list(null, core)}
-    {@render fold('More training settings', [...optim, ...setup])}
+    {@render fold('More training settings', [...step, ...optim, ...setup])}
     {@render fold('Augmentation', aug)}
   {:else if compact}
     {@render list(null, [...core, ...optim, ...setup])}

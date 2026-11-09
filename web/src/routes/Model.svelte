@@ -613,25 +613,31 @@
                  (docs/BENCHMARKS.md) otherwise or under it. The label says whose it is; the conditions sit beside the
                  value. Last, apart from the facts about this model. -->
             <div class="kv wide ref">
-              <dt>{here ? 'Architecture latency on this server' : 'Architecture reference latency'}</dt>
+              <dt>{here ? 'Architecture latency' : 'Architecture reference latency'}</dt>
               {#if here}
-                <dd class="latency">
+                <!-- Two labelled rows, each value with its conditions under it, so no fact is left alone on a line. -->
+                <dd class="latency lat-rows">
+                  <span class="lat-k">Measured</span>
                   <span class="num">{latencyMs(here.latency_ms)}</span>
-                  <Meta class="figs num"><span>measured here</span><span>{latencyRange(here.latency_ms_low, here.latency_ms_high)}</span><span>{num(here.samples)} predictions</span><span>{m.imgsz} px</span><span>{here.precision}</span></Meta>
+                  <Meta class="figs num"><span>on this server</span><span>{latencyRange(here.latency_ms_low, here.latency_ms_high)}</span><span>{num(here.samples)} predictions</span><span>{m.imgsz} px</span><span>{here.precision}</span></Meta>
+                  <span class="lat-k">Reference</span>
+                  {#if latency(m) !== undefined}
+                    <span class="num">{latency(m)!.toFixed(2)} ms</span>
+                    <Meta class="figs num"><Ident value={m.arch} /><span>640 px</span><span>RTX 4080 SUPER</span></Meta>
+                  {:else}
+                    <span class="faint">Not measured for <Ident value={m.arch} /> yet</span>
+                  {/if}
+                </dd>
+              {:else}
+                <dd class="latency">
+                  {#if latency(m) !== undefined}
+                    <span class="num">{latency(m)!.toFixed(2)} ms</span>
+                    <Meta class="figs"><Ident value={m.arch} /><span>640 px</span><span>RTX 4080 SUPER</span><span>end to end</span></Meta>
+                  {:else}
+                    <span class="faint">Not measured for <Ident value={m.arch} /> yet</span>
+                  {/if}
                 </dd>
               {/if}
-              <dd class="latency" class:second={!!here}>
-                {#if here && latency(m) !== undefined}
-                  <Meta class="figs num"><span>Reference {latency(m)!.toFixed(2)} ms</span><Ident value={m.arch} /><span>640 px</span><span>RTX 4080 SUPER</span></Meta>
-                {:else if here}
-                  <span class="faint">No reference for <Ident value={m.arch} /> yet</span>
-                {:else if latency(m) !== undefined}
-                  <span class="num">{latency(m)!.toFixed(2)} ms</span>
-                  <Meta class="figs"><Ident value={m.arch} /><span>640 px</span><span>RTX 4080 SUPER</span><span>end to end</span></Meta>
-                {:else}
-                  <span class="faint">Not measured for <Ident value={m.arch} /> yet</span>
-                {/if}
-              </dd>
             </div>
           </dl>
         {/snippet}
@@ -1460,8 +1466,21 @@
   .latency :global(.figs) {
     color: var(--text-secondary);
   }
-  .latency.second {
-    margin-top: 2px;
+  /* Measured and Reference: a label column, the value beside it and its conditions under the value. */
+  .lat-rows {
+    grid-template-columns: max-content minmax(0, 1fr);
+    column-gap: var(--space-3);
+  }
+  .lat-rows > :not(.lat-k) {
+    grid-column: 2;
+  }
+  .lat-k {
+    grid-column: 1;
+    color: var(--text-tertiary);
+  }
+  .lat-rows > .lat-k:not(:first-child),
+  .lat-rows > .lat-k:not(:first-child) + * {
+    margin-top: var(--space-2);
   }
   .classes {
     display: flex;

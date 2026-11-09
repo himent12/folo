@@ -50,8 +50,10 @@ describe('ConfigPanel', () => {
     // A named optimizer is a name, in sans (Geist Mono's struck W reads as "₩").
     expect(r['Optimizer']?.querySelector('.mono')).toBeNull();
     expect(r['Initial LR']?.textContent).toBe('0.000833 (requested 0.01)');
-    expect(r['Batch × accumulate']?.textContent).toBe('16 × 4 = 64');
-    expect(r['Warmup']?.textContent).toBe('360 steps (3 epochs)');
+    // A batch and an optimizer step are two rows, never "per step" for a batch.
+    expect(r['Batch']?.textContent).toBe('16');
+    expect(r['Per optimizer step']?.textContent).toBe('4 batches · effective batch 64');
+    expect(r['Warmup']?.textContent).toBe('360 optimizer steps (3 epochs)');
     expect(r['LR decay']?.textContent).toBe('Linear to 1%');
     expect(r['Betas']?.textContent).toBe('0.9 · 0.999');
     expect(r['Weight decay']?.textContent).toBe('0.0005');

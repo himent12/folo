@@ -90,6 +90,21 @@ export function scoreText(score: number | null | undefined, c: ScoreContext): st
   return `${s} · ${tag ?? 'split unknown'}`;
 }
 
+/**
+ * A score with its whole context, as the meta line under a picker that shows the model's name alone:
+ * "mAP 0.606 · shapes-hard, validation split", "mAP 0.701 · imported, split unknown". Null without a score.
+ */
+export function scoreMeta(score: number | null | undefined, c: ScoreContext): string | null {
+  if (score == null) return null;
+  const on =
+    c.kind === 'published'
+      ? 'published weights, split unknown'
+      : c.kind === 'imported'
+        ? 'imported, split unknown'
+        : `${c.datasetName ?? 'unknown dataset'}, ${c.split ? `${splitWord(c.split)} split` : 'split unknown'}`;
+  return `mAP ${metric(score)} · ${on}`;
+}
+
 export interface ScoreGroup<T> {
   key: string;
   ctx: ScoreContext;
@@ -133,8 +148,12 @@ export interface ModelChoice<M> {
   ctx: ScoreContext;
   /** The `<optgroup>` it is listed under: what its score is on ("Validation split of fasteners"). */
   group: string;
-  /** "fasteners-n-best · mAP 0.604 on fasteners": the score never without its context, even in a closed select. */
+  /** "fasteners-n-best · mAP 0.604 on fasteners": the open list's option, the score never without its context. */
   label: string;
+  /** The closed select's text, the model's name alone; `meta` says the rest under it. */
+  short: string;
+  /** "mAP 0.604 · fasteners, validation split" (null without a score): the meta line under the closed select. */
+  meta: string | null;
 }
 
 /**
@@ -152,6 +171,8 @@ export function modelChoices<M extends Pick<Model, 'id' | 'name' | 'created' | '
     ctx,
     group: groupLabel(ctx),
     label: model.metrics ? `${model.name} · ${scoreText(model.metrics.map50_95, ctx)}` : model.name,
+    short: model.name,
+    meta: scoreMeta(model.metrics?.map50_95, ctx),
   });
   const order = (c: ScoreContext) => (c.kind === 'published' ? 0 : c.kind === 'imported' ? 1 : 2);
   const rest = unranked

@@ -29,6 +29,7 @@
   import TableState from '$lib/ui/TableState.svelte';
   import Ident from '$lib/ui/Ident.svelte';
   import Meta from '$lib/ui/Meta.svelte';
+  import NoValue from '$lib/ui/NoValue.svelte';
   import LiveRunCard from './overview/LiveRunCard.svelte';
   import Callout from './run/Callout.svelte';
   import WifiOff from '@lucide/svelte/icons/wifi-off';
@@ -184,7 +185,7 @@
                           <span class="num faint">{r.epoch}/{r.epochs}</span>
                         </div>
                       </td>
-                      <td class="r num">{metric(r.best?.map50_95)}</td>
+                      <td class="r num">{#if r.best}{metric(r.best.map50_95)}{:else}<NoValue />{/if}</td>
                       <td class="hide-sm"><RunSpark run={r} /></td>
                       <td class="r faint hide-sm">{ago(r.created)}</td>
                     </tr>

@@ -37,18 +37,32 @@ export function lrSetting(config: TrainConfig, resolved: ResolvedTrain | null | 
   return { value: String(resolved.lr0), note: `(requested ${config.lr0})` };
 }
 
-/** Gradients of `accumulate` batches per optimizer step: "16 × 4 = 64" (the batch alone when it does not accumulate). */
+/**
+ * A batch and an optimizer step are two things (DESIGN_DIRECTION §2.23): the trainer sums the gradients of
+ * `accumulate` batches into one optimizer step. The batch is the images per batch ("16"); the step is its own row,
+ * "4 batches · effective batch 64", in the one wording New run's Summary uses beside its schedule (`accumulationText`).
+ */
 export function batchSetting(config: TrainConfig, resolved: ResolvedTrain | null | undefined): Setting {
-  if (!resolved || resolved.accumulate <= 1) return { value: String(resolved?.batch ?? config.batch) };
-  return { value: `${resolved.batch} × ${resolved.accumulate} = ${resolved.batch * resolved.accumulate}` };
+  return { value: String(resolved?.batch ?? config.batch) };
 }
 
-/** The warmup in optimizer steps, and what that is in epochs: "100 steps (7.7 epochs)"; "None" without one. */
+/** "4 batches per optimizer step · effective batch 64": the one wording for accumulation, wherever it is shown. */
+export function accumulationText(accumulate: number, batch: number): string {
+  return `${accumulate} ${accumulate === 1 ? 'batch' : 'batches'} per optimizer step · effective batch ${accumulate * batch}`;
+}
+
+/** The Per optimizer step row: "4 batches · effective batch 64" ("1 batch" when the run does not accumulate). */
+export function stepSetting(resolved: ResolvedTrain): Setting {
+  const a = resolved.accumulate;
+  return { value: a > 1 ? `${a} batches · effective batch ${a * resolved.batch}` : '1 batch' };
+}
+
+/** The warmup in optimizer steps, and what that is in epochs: "100 optimizer steps (7.7 epochs)"; "None" without one. */
 export function warmupSetting(resolved: ResolvedTrain): Setting {
   if (resolved.warmup_iters <= 0) return { value: 'None' };
   const epochs = resolved.warmup_iters / Math.max(1, resolved.optimizer_steps_per_epoch);
   const e = Number(epochs.toFixed(epochs < 10 ? 1 : 0));
-  return { value: `${resolved.warmup_iters} steps`, note: `(${e} ${e === 1 ? 'epoch' : 'epochs'})` };
+  return { value: `${resolved.warmup_iters} optimizer steps`, note: `(${e} ${e === 1 ? 'epoch' : 'epochs'})` };
 }
 
 /** "Linear to 1%": the decay over the run, to `lrf` of the initial LR at the last step. */

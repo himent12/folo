@@ -2,6 +2,9 @@
 import { createRawSnippet, flushSync, mount, unmount, type Component } from 'svelte';
 import { afterEach, describe, expect, it } from 'vitest';
 import Field from './Field.svelte';
+import FieldsFixture from './FieldsFixture.test.svelte';
+import { describedBy } from './field';
+import { undescribedFields } from './fieldA11y';
 import Gate from './Gate.svelte';
 import Input from './Input.svelte';
 import Segmented from './Segmented.svelte';
@@ -75,6 +78,46 @@ describe('invalid fields', () => {
   it('Segmented: valid groups carry no aria-invalid', () => {
     const t = render(Segmented as Component<never>, { label: 'Split', value: 'a', options: [{ value: 'a', label: 'A' }] });
     expect(t.querySelector('[role="radiogroup"]')!.hasAttribute('aria-invalid')).toBe(false);
+  });
+});
+
+describe('a Field describes its control (the visible hint is the accessible description)', () => {
+  it('forwards the hint id to every shared control, with no wiring by the caller', () => {
+    const t = render(FieldsFixture as Component<never>, {});
+    expect(undescribedFields(t)).toEqual([]);
+    const d = (sel: string) => t.querySelector(sel)!.getAttribute('aria-describedby');
+    expect(d('#f-input')).toBe('extra f-input-hint');
+    expect(d('#f-seg')).toBe('f-seg-hint');
+    expect(d('#f-select')).toBe('f-select-hint');
+    // A Switch's own hint is its description too, and its name is the label alone.
+    expect(d('#f-switch')).toBe('f-switch-desc f-switch-hint');
+    expect(t.querySelector('#f-switch')!.getAttribute('aria-labelledby')).toBe('f-switch-label');
+    // A Field without `for` still ties its hint (an id of its own).
+    const mode = t.querySelectorAll('[role="radiogroup"]')[1]!.getAttribute('aria-describedby')!;
+    expect(document.getElementById(mode)?.textContent).toBe('Without an id of its own.');
+    expect(t.querySelectorAll('.field').length).toBe(6);
+  });
+
+  it('forwards the error instead while there is one, and marks the control invalid', () => {
+    const t = render(FieldsFixture as Component<never>, { error: 'Pick one.' });
+    expect(undescribedFields(t)).toEqual([]);
+    expect(t.querySelector('#f-input')!.getAttribute('aria-describedby')).toBe('extra f-input-error');
+    for (const sel of ['#f-input', '#f-seg', '#f-select']) expect(t.querySelector(sel)!.getAttribute('aria-invalid')).toBe('true');
+  });
+
+  it('the guard names a hint no control is described by', () => {
+    const t = render(Field as Component<never>, {
+      label: 'Seed',
+      for: 'seed',
+      hint: 'Any whole number.',
+      children: createRawSnippet(() => ({ render: () => '<input id="seed" />' })),
+    });
+    expect(undescribedFields(t)).toEqual(['Seed: its input is not described by #seed-hint']);
+  });
+
+  it('describedBy: each id once, empty parts dropped, nothing when none', () => {
+    expect(describedBy('a b', undefined, 'b', false, '', 'c')).toBe('a b c');
+    expect(describedBy(undefined, null)).toBeUndefined();
   });
 });
 

@@ -71,4 +71,17 @@ describe('copy', () => {
     }
     expect(hits).toEqual([]);
   });
+
+  it('writes a percentage one way, the number against its sign ("89%", `pct` in lib/format), never "89 %"', () => {
+    const hits: string[] = [];
+    for (const file of files(SRC, /\.(svelte|ts)$/)) {
+      uncommented(readFileSync(file, 'utf8'))
+        .split('\n')
+        .forEach((line, i) => {
+          // A figure or an interpolation, a space, then the sign, inside a string or as markup text.
+          if (/(\d|\}) %(?![\w-])/.test(line)) hits.push(`${relative(SRC, file)}:${i + 1}: ${line.trim()}`);
+        });
+    }
+    expect(hits).toEqual([]);
+  });
 });

@@ -16,7 +16,7 @@ describe('runGpu / deviceLine', () => {
 
   it('uses the GPU with the requested ordinal', () => {
     expect(runGpu(run('gpu:1', 'NVIDIA GeForce RTX 3060 (vulkan)'), gpus)?.ordinal).toBe(1);
-    expect(deviceLine(run('gpu:1', 'NVIDIA GeForce RTX 3060 (vulkan)'), gpus)).toBe('RTX 3060 · 12 % busy');
+    expect(deviceLine(run('gpu:1', 'NVIDIA GeForce RTX 3060 (vulkan)'), gpus)).toBe('RTX 3060 · GPU 12% busy');
   });
 
   it('matches auto runs by adapter name, and stays silent when unsure', () => {

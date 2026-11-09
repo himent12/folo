@@ -89,6 +89,13 @@ describe('CommandPalette actions on entities', () => {
     expect(hint('pi-ds-ds_fasteners').classList.contains('describes')).toBe(false);
   });
 
+  it("writes a run's status in StatusBadge's sentence-case word", async () => {
+    await openWith('shapes');
+    const hints = [...document.querySelectorAll<HTMLElement>('[id^="pi-run-"] .hint')].map((h) => h.textContent?.trim() ?? '');
+    expect(hints.length).toBeGreaterThan(0);
+    for (const h of hints) expect(h).toMatch(/^(Queued|Running|Stopping|Stopped|Completed|Failed)/);
+  });
+
   it('answers to "toggle theme"', async () => {
     await openWith('toggle theme', '#pi-theme');
     expect(options()[0]).toMatch(/^Switch theme/);

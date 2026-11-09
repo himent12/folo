@@ -1,7 +1,7 @@
 // The live card's device line: the run's own device label, plus live load only from the GPU that run actually uses.
 
 import type { Gpu, Run } from '$lib/api/types';
-import { deviceName } from '$lib/format';
+import { deviceName, pct } from '$lib/format';
 
 /**
  * The GPU a run trains on, or null for CPU runs and when it cannot be told. `gpu:<n>` picks ordinal n; `auto` matches
@@ -18,9 +18,9 @@ export function runGpu(run: Pick<Run, 'device' | 'config'>, gpus: Gpu[]): Gpu | 
   return hits.length === 1 ? hits[0]! : null;
 }
 
-/** "RTX 4080 SUPER · 93 % busy": the run's device, with utilisation when its GPU reports one. */
+/** "RTX 4080 SUPER · GPU 93% busy": the run's device, with utilisation (`pct`, no space) when its GPU reports one. */
 export function deviceLine(run: Pick<Run, 'device' | 'config'>, gpus: Gpu[]): string {
   const name = deviceName(run.device);
   const g = runGpu(run, gpus);
-  return g && g.util !== null ? `${name} · ${Math.round(g.util * 100)} % busy` : name;
+  return g && g.util !== null ? `${name} · GPU ${pct(g.util, 0)} busy` : name;
 }
