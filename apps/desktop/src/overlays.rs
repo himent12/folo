@@ -606,7 +606,7 @@ impl FoloApp {
             .rounded(px(radius::MD))
             .bg(t.bg_raised)
             .border_1()
-            .border_color(if name_focused { t.accent_line } else { t.line_default })
+            .border_color(if name_focused { t.accent_line } else { t.line_control })
             .text_size(px(ty::BASE.size))
             .when(name_ring, |d| d.child(crate::app::focus_ring(&t, radius::MD)))
             .child(name_input)
@@ -772,7 +772,7 @@ impl FoloApp {
                 } else if focused {
                     t.accent_line
                 } else {
-                    t.line_default
+                    t.line_control
                 })
                 .font_family(crate::theme::SANS)
                 .text_size(px(ty::SM.size))
@@ -1242,7 +1242,7 @@ impl FoloApp {
                 } else if focused {
                     t.accent_line
                 } else {
-                    t.line_default
+                    t.line_control
                 })
                 .text_size(px(ty::BASE.size))
                 .when(ring, |d| d.child(crate::app::focus_ring(&t, radius::MD)))

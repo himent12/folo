@@ -667,8 +667,8 @@ impl FoloApp {
                     .active(move |s| s.bg(down))
             })
             .when(!on, |d| {
-                d.border_color(t.line_default)
-                    .hover(|s| s.bg(t.bg_hover).border_color(t.line_strong))
+                d.border_color(t.line_control)
+                    .hover(|s| s.bg(t.bg_hover).border_color(t.text_tertiary))
                     .active(|s| s.bg(t.bg_active))
             })
             // Selected: a check in the class colour takes the swatch's slot, so selection isn't
@@ -718,7 +718,7 @@ impl FoloApp {
             .flex_none()
             .rounded_full()
             .cursor_pointer()
-            .bg(if on { t.accent_fill() } else { t.line_strong })
+            .bg(if on { t.accent_fill() } else { t.line_control })
             // Hover and pressed are fills a step apart, like every other control.
             .when(!on, |d| d.hover(|s| s.bg(t.text_disabled)).active(|s| s.bg(t.text_tertiary)))
             .when(on, |d| {
@@ -849,7 +849,8 @@ impl FoloApp {
                     .top(px(8.5))
                     .h(px(3.))
                     .rounded_full()
-                    .bg(t.line_strong)
+                    // The rail is the control's only mark: line.control (3:1), not a separator line.
+                    .bg(t.line_control)
                     // 8 px: a px under the proportional fill, so no seam shows where the two meet.
                     .child(
                         div().absolute().left_0().top_0().h_full().w(px(8.)).rounded_l_full().bg(fill_color),
@@ -974,9 +975,9 @@ impl FoloApp {
             .rounded(px(radius::MD))
             .bg(t.bg_raised)
             .border_1()
-            .border_color(if open { t.accent_line } else { t.line_default })
+            .border_color(if open { t.accent_line } else { t.line_control })
             .cursor_pointer()
-            .hover(|s| s.border_color(t.line_strong))
+            .hover(|s| s.border_color(t.text_tertiary))
             .active(|s| s.bg(t.bg_active))
             .when(open, |d| {
                 let cell = self.menu_trigger.clone();
