@@ -43,6 +43,10 @@ Status keys: `[ ]` todo, `[~]` in progress, `[x]` merged. The orchestrator keeps
 - [~] COCO 300-epoch folo-n (#144): **paused at epoch 62 of 300** (8.0 h, AMP), val2017 AP 0.317 / AP50 0.458; interim `folo-n-coco-v2` in the `weights-v2` draft release. Resume: `folo train --resume D:\folo-data\runs-coco\coco-folo-n-long\weights\last.folo --data D:\folo-data\coco` (about 29 h left; examples/coco/README.md, Resume (v2)); then re-evaluate, export and redo the R6 fine-tune comparison
 - [x] `Model.head` / `trained_with` (#117); [x] `Model.precision` / `fused` (#123); [x] operating-point conf, resolved optimizer/LR, queue control, ONNX download (#129); [x] measured throughput, run estimates, benchmark probe (#130)
 
+- [x] agent labeling: unlabeled images → boxes by Claude Code or Codex (one tool-free model request per batch) →
+  review in Studio → a registered YOLO dataset (`/api/label`, docs/LABELING.md). Next: the same screen in FOLO
+  Desktop, `folo label` and MCP tools
+
 ## M5 — polish
 - [x] README showcase, QUICKSTART, screenshots, llms.txt (#71); R6 example (examples/r6)
 - [x] dogfooding report 3 (#134) and its fixes: GPU memory released after runs, published weights as models, AMP refused up front, server-built CLI command (#140); eval provenance (#138)

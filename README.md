@@ -122,7 +122,9 @@ in-browser module.
 
 `folo serve` hosts Studio at `http://127.0.0.1:7878` (Svelte 5, our own design system). It has these screens:
 - **Datasets**: register a YOLO or COCO folder or generate a synthetic one, browse the images with their boxes, and
-  see class and box-size statistics and label issues.
+  see class and box-size statistics and label issues. No labels yet? **Label images** hands a set of unlabeled
+  images to Claude Code or Codex on your machine, shows you every box for review and correction, and makes the
+  dataset ([docs/LABELING.md](docs/LABELING.md)).
 - **Runs**: start a training run, follow it live (metrics over SSE, validation samples, per-class mAP, logs), stop
   or resume it, and compare runs.
 - **Models**: evaluation results, per-class metrics, and export.
@@ -246,6 +248,7 @@ The live checklist is [docs/ROADMAP.md](docs/ROADMAP.md).
 |---|---|
 | [QUICKSTART](docs/QUICKSTART.md) | Walkthrough: your own data, fine-tuning, export, in-browser inference |
 | [CLI](docs/CLI.md) | Every `folo` command, `--json`, exit codes, dataset tools |
+| [LABELING](docs/LABELING.md) | Unlabeled images to a dataset with Claude Code or Codex: workflow, cost, accuracy |
 | [AGENT_COOKBOOK](docs/AGENT_COOKBOOK.md) | Recipes for agents, as MCP tool calls and as `--json` commands |
 | [MCP](docs/MCP.md) | The `folo mcp` contract: tools, resources, prompts, errors |
 | [API](docs/API.md) | The HTTP + SSE API behind Studio and Desktop |

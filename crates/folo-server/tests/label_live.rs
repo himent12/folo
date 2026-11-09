@@ -3,8 +3,8 @@
 //! land on the objects (so the coordinate convention holds end to end).
 //!
 //! Ignored by default: they need the CLI installed and signed in, and they spend (a few thousand) tokens. Run
-//! one with `cargo test -p folo-server --test label_live -- --ignored --nocapture claude` (or `codex`);
-//! `FOLO_LABEL_LIVE_MODEL` names another model to try.
+//! one with `cargo test -p folo-server --test label_live -- --ignored --nocapture claude` (or `codex`). They use
+//! the agent's default model and effort; `FOLO_LABEL_LIVE_MODEL` names another model to try.
 
 use std::path::Path;
 use std::time::Duration;
@@ -26,7 +26,7 @@ fn iou(a: &BBox, b: &BBox) -> f32 {
 
 /// Labels [`IMAGES`] synthetic images with `agent` and checks the run against the images' true boxes.
 /// `max_input_per_call` bounds the input tokens of one call.
-fn label_shapes(agent: LabelAgentId, model: Option<&str>, max_input_per_call: u64) {
+fn label_shapes(agent: LabelAgentId, max_input_per_call: u64) {
     let t = TestDir::new(&format!("label-live-{}", agent.as_str()));
     let shapes = t.join("shapes");
     let cfg = folo_data::synthetic::SyntheticConfig {
@@ -59,7 +59,7 @@ fn label_shapes(agent: LabelAgentId, model: Option<&str>, max_input_per_call: u6
         .unwrap();
     assert_eq!(job.counts.images as usize, IMAGES);
 
-    let model = std::env::var("FOLO_LABEL_LIVE_MODEL").ok().or(model.map(String::from));
+    let model = std::env::var("FOLO_LABEL_LIVE_MODEL").ok();
     let start: StartLabeling =
         serde_json::from_value(serde_json::json!({ "agent": agent, "model": model })).unwrap();
     labeler.start(&job.id, start).unwrap();
@@ -119,12 +119,12 @@ fn label_shapes(agent: LabelAgentId, model: Option<&str>, max_input_per_call: u6
 fn claude_code_labels_shapes() {
     // Four 320 px images and the instructions are about 1500 tokens; a default Claude Code session starts at over
     // ten times that.
-    label_shapes(LabelAgentId::Claude, Some("haiku"), 4_000);
+    label_shapes(LabelAgentId::Claude, 4_000);
 }
 
 #[test]
 #[ignore = "calls the real Codex CLI: needs it installed and signed in, and spends tokens"]
 fn codex_labels_shapes() {
     // Codex's own instructions are most of this; a default `codex exec` call is about 20000.
-    label_shapes(LabelAgentId::Codex, None, 12_000);
+    label_shapes(LabelAgentId::Codex, 12_000);
 }

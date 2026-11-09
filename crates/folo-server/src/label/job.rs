@@ -240,9 +240,10 @@ impl Job {
         Ok(job)
     }
 
-    /// The job's state. Held briefly: never across an agent call or a decode.
+    /// The job's state. Held briefly: never across an agent call or a decode. A panic under the lock does not
+    /// take the job down with it: every change is a few plain assignments, so the state stays usable.
     pub fn lock(&self) -> MutexGuard<'_, State> {
-        self.state.lock().unwrap()
+        self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Where an image's file is.

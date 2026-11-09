@@ -9,15 +9,16 @@ use std::path::Path;
 use std::process::Command;
 
 use base64::Engine;
-use folo_api::{LabelAgent, LabelAgentId, LabelModel, LabelUsage};
+use folo_api::{LabelAgent, LabelAgentId, LabelEffort, LabelModel, LabelUsage};
 use serde_json::{Value, json};
 
 use super::agent::{Agent, AgentError, AgentReply, AgentRequest, CALL_TIMEOUT, Cli, Output, last_line, run};
 
-/// The model a run uses when it names none.
-const DEFAULT_MODEL: &str = "sonnet";
+/// The model a run uses when it names none: on photos, Haiku at medium effort finds about as many objects as
+/// the larger models for a small fraction of their cost (docs/LABELING.md has the numbers).
+const DEFAULT_MODEL: &str = "haiku";
 /// Claude Code's own aliases, which always name the latest model of each tier.
-const MODELS: [(&str, &str); 3] = [("sonnet", "Sonnet"), ("haiku", "Haiku"), ("opus", "Opus")];
+const MODELS: [(&str, &str); 3] = [("haiku", "Haiku"), ("sonnet", "Sonnet"), ("opus", "Opus")];
 const INSTALL: &str = "Install Claude Code (https://claude.com/claude-code) on the server's machine and sign in by \
                        running `claude` once";
 
@@ -54,6 +55,8 @@ impl Agent for ClaudeCode {
             version,
             models: MODELS.map(|(id, label)| LabelModel { id: id.into(), label: label.into() }).to_vec(),
             default_model: Some(DEFAULT_MODEL.into()),
+            // Haiku labels markedly better once it reasons a little; more than that buys little.
+            default_effort: LabelEffort::Medium,
         }
     }
 
@@ -161,8 +164,6 @@ fn parse(out: &Output) -> Result<AgentReply, AgentError> {
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::AtomicBool;
-
-    use folo_api::LabelEffort;
 
     use super::*;
 

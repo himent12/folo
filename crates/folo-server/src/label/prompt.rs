@@ -102,15 +102,8 @@ pub fn parse_reply(
     classes: &[String],
     sizes: &[(u32, u32)],
 ) -> Result<Vec<Option<Labels>>, String> {
-    // Models wrap JSON in a code fence or a sentence now and then; the object itself is what counts.
-    let json = match (text.find('{'), text.rfind('}')) {
-        (Some(a), Some(b)) if a < b => &text[a..=b],
-        _ => return Err("the reply has no JSON object".into()),
-    };
-    let reply: Reply =
-        serde_json::from_str(json).map_err(|e| format!("the reply is not the JSON asked for: {e}"))?;
     let mut out: Vec<Option<Labels>> = vec![None; sizes.len()];
-    for image in reply.images {
+    for image in reply_images(text)? {
         // The first entry for an image wins; entries for images that were not sent are ignored.
         let Some(i) = image.image.checked_sub(1).map(|i| i as usize).filter(|&i| i < sizes.len()) else {
             continue;
@@ -130,12 +123,41 @@ pub fn parse_reply(
     Ok(out)
 }
 
+/// The image entries of every reply object in `text`. Models wrap the JSON in a code fence or a sentence now and
+/// then, add a remark after it, or answer with one object per image: the objects are what counts, wherever they
+/// are (a reply read this way is a call that need not be made again).
+fn reply_images(text: &str) -> Result<Vec<ReplyImage>, String> {
+    /// Braces that may fail to open a reply before the text is given up on.
+    const MAX_MISSES: usize = 64;
+    let (mut images, mut found, mut misses, mut first_error) = (Vec::new(), false, 0, None);
+    let mut rest = text;
+    while let Some(start) = rest.find('{').filter(|_| misses < MAX_MISSES) {
+        let mut stream = serde_json::Deserializer::from_str(&rest[start..]).into_iter::<Reply>();
+        rest = match stream.next() {
+            Some(Ok(reply)) => {
+                found = true;
+                images.extend(reply.images);
+                &rest[start + stream.byte_offset()..]
+            }
+            Some(Err(e)) => {
+                misses += 1;
+                first_error.get_or_insert(e);
+                &rest[start + 1..]
+            }
+            None => break,
+        };
+    }
+    match (found, first_error) {
+        (true, _) => Ok(images),
+        (false, Some(e)) => Err(format!("the reply is not the JSON asked for: {e}")),
+        (false, None) => Err("the reply has no JSON object".into()),
+    }
+}
+
 /// A reply box in pixels of a `width` x `height` image, or `None` when it fails a check.
 fn to_pixels(b: &ReplyBox, classes: &[String], (width, height): (u32, u32)) -> Option<BBox> {
-    let label = b.label.trim();
-    let class = classes
-        .iter()
-        .position(|c| c.eq_ignore_ascii_case(label) || c.to_lowercase() == label.to_lowercase())?;
+    let label = b.label.trim().to_lowercase();
+    let class = classes.iter().position(|c| c.to_lowercase() == label)?;
     let &[x1, y1, x2, y2] = b.coords.as_slice() else { return None };
     if ![x1, y1, x2, y2].iter().all(|v| v.is_finite()) {
         return None;
@@ -244,6 +266,23 @@ mod tests {
         );
         let e = parse_reply("{\"boxes\":[]}", &classes(), &[(10, 10)]).unwrap_err();
         assert!(e.starts_with("the reply is not the JSON asked for: "), "{e}");
+    }
+
+    #[test]
+    fn replies_in_several_objects_or_with_text_around_them_are_read() {
+        // One object per image, as some models answer, and a remark with braces after them.
+        let text = "{\"images\":[{\"image\":1,\"boxes\":[]}]}\n\n\
+                    {\"images\":[{\"image\":2,\"boxes\":[{\"label\":\"car\",\"box\":[0,0,500,500]}]}]}\n\
+                    Note: {image 3} had nothing to label.";
+        let out = parse_reply(text, &classes(), &[(10, 10), (10, 10), (10, 10)]).unwrap();
+        assert_eq!(out[0], Some(Labels::default()));
+        assert_eq!(out[1].as_ref().unwrap().boxes.len(), 1);
+        assert_eq!(out[2], None);
+        // Braces before the reply do not hide it.
+        let text = "Using {x1, y1, x2, y2} boxes: {\"images\":[{\"image\":1,\"boxes\":[]}]}";
+        assert_eq!(parse_reply(text, &classes(), &[(10, 10)]).unwrap(), vec![Some(Labels::default())]);
+        // A text that is all braces is given up on, not scanned forever.
+        assert!(parse_reply(&"{".repeat(10_000), &classes(), &[(10, 10)]).is_err());
     }
 
     #[test]

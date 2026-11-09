@@ -70,6 +70,9 @@ pub struct LabelAgent {
     pub models: Vec<LabelModel>,
     /// The model a run uses when it names none; `null` means the CLI's own default.
     pub default_model: Option<String>,
+    /// The reasoning effort a run uses when it names none: the one that labels best for its cost with this
+    /// agent.
+    pub default_effort: LabelEffort,
     /// How to make the agent available (install, sign in); `null` when it is.
     pub hint: Option<String>,
 }
@@ -156,12 +159,11 @@ pub struct LabelCounts {
 }
 
 /// How hard the agent's model thinks per call (the CLIs' reasoning effort).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum LabelEffort {
-    /// Fewest reasoning tokens (the default).
-    #[default]
+    /// Fewest reasoning tokens.
     Low,
     /// Medium.
     Medium,
@@ -431,9 +433,9 @@ pub struct StartLabeling {
     /// Its model; absent or `null` uses [`LabelAgent::default_model`].
     #[serde(default)]
     pub model: Option<String>,
-    /// Reasoning effort.
+    /// Reasoning effort; absent or `null` uses [`LabelAgent::default_effort`].
     #[serde(default)]
-    pub effort: LabelEffort,
+    pub effort: Option<LabelEffort>,
     /// Which images to label, unless `image_ids` names them.
     #[serde(default)]
     pub scope: LabelScope,
@@ -547,7 +549,7 @@ mod tests {
     fn start_defaults_and_wire_names() {
         let s: StartLabeling = serde_json::from_str(r#"{"agent":"codex"}"#).unwrap();
         assert_eq!(s.agent, LabelAgentId::Codex);
-        assert_eq!((s.effort, s.scope), (LabelEffort::Low, LabelScope::Unlabeled));
+        assert_eq!((s.effort, s.scope), (None, LabelScope::Unlabeled));
         assert!(s.model.is_none() && s.image_ids.is_none() && s.batch.is_none() && s.note.is_empty());
         assert!(serde_json::from_str::<StartLabeling>(r#"{"agent":"gemini"}"#).is_err());
         for a in LabelAgentId::ALL {

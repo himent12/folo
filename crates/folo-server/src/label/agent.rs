@@ -12,8 +12,8 @@ use folo_api::{LabelAgent, LabelAgentId, LabelEffort, LabelUsage};
 
 /// How long one agent call may take.
 pub const CALL_TIMEOUT: Duration = Duration::from_secs(300);
-/// How long `--version` may take when probing for a CLI.
-const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a CLI may take to answer a question about itself (`--version`, its model list).
+pub const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long a probe's result is reused.
 const PROBE_TTL: Duration = Duration::from_secs(60);
 /// How often a running child is checked for its exit, the deadline and the cancel switch.
@@ -202,13 +202,7 @@ pub fn run(
     cmd.stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    #[cfg(windows)]
-    {
-        // No console window flashing up behind a desktop app that spawned the server.
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
+    no_window(&mut cmd);
     #[cfg(unix)]
     {
         // A group of its own, so the whole tree can be killed (see `kill_tree`).
@@ -259,6 +253,18 @@ pub fn run(
     })
 }
 
+/// Keeps a console child from opening a window of its own when the server has none (started by a desktop app).
+fn no_window(cmd: &mut Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    let _ = cmd;
+}
+
 /// Kills `child` and everything it started: a CLI installed through npm is a shim (a batch file, a node script)
 /// around the process that does the work, and killing only the shim would leave that one running.
 fn kill_tree(child: &mut std::process::Child) {
@@ -273,6 +279,7 @@ fn kill_tree(child: &mut std::process::Child) {
         c.args(["-KILL", "--", &format!("-{pid}")]);
         c
     };
+    no_window(&mut killer);
     let _ = killer.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();
     let _ = child.kill();
     let _ = child.wait();

@@ -87,6 +87,7 @@ impl Agent for Scripted {
             version: self.available.then(|| "1.0.0".into()),
             models: vec![LabelModel { id: "small".into(), label: "Small".into() }],
             default_model: Some("small".into()),
+            default_effort: LabelEffort::Medium,
             hint: (!self.available).then(|| "install it".into()),
         }
     }
@@ -354,10 +355,7 @@ async fn upload_label_review_and_make_a_dataset() {
     // An agent run: 6 images in calls of 2 (the agent's default batch).
     let started: LabelJob = ok(
         app,
-        post(
-            &format!("{uri}/start"),
-            json!({ "agent": "claude", "effort": "medium", "note": "Tight boxes." }),
-        ),
+        post(&format!("{uri}/start"), json!({ "agent": "claude", "effort": "high", "note": "Tight boxes." })),
     )
     .await;
     assert_eq!(started.status, LabelJobStatus::Running);
@@ -383,7 +381,7 @@ async fn upload_label_review_and_make_a_dataset() {
     let asked = f.agent.asked.lock().unwrap().clone();
     assert_eq!(asked.len(), 3);
     for a in &asked {
-        assert_eq!((a.images, a.model.as_deref(), a.effort), (2, Some("small"), LabelEffort::Medium));
+        assert_eq!((a.images, a.model.as_deref(), a.effort), (2, Some("small"), LabelEffort::High));
         assert!(
             a.prompt.starts_with("Classes: car, person\nInstructions: Only parked cars.\n"),
             "{}",
@@ -476,7 +474,7 @@ async fn upload_label_review_and_make_a_dataset() {
     let logs: RunLogs = ok(app, get(&format!("{uri}/logs"))).await;
     let text: Vec<&str> = logs.lines.iter().map(|l| l.message.as_str()).collect();
     assert!(
-        text[0].starts_with("Claude Code (small, medium effort) starts on 6 images: 3 calls of up to 2"),
+        text[0].starts_with("Claude Code (small, high effort) starts on 6 images: 3 calls of up to 2"),
         "{text:?}"
     );
     assert!(text.iter().any(|m| m.starts_with("call 1: 2 images labeled, 2 boxes · 1000 tokens in, 50 out")));
@@ -853,7 +851,9 @@ async fn start_refuses_what_it_cannot_run() {
     // A model named in the request reaches the agent; an empty job has nothing to label.
     ok::<LabelJob>(app, post(&start, json!({ "agent": "claude", "model": "claude-opus-5-5[1m]" }))).await;
     idle(app, &job.id).await;
-    assert_eq!(f.agent.asked.lock().unwrap()[0].model.as_deref(), Some("claude-opus-5-5[1m]"));
+    // ... and without an effort the agent's default is used.
+    let asked = f.agent.asked.lock().unwrap()[0].clone();
+    assert_eq!((asked.model.as_deref(), asked.effort), (Some("claude-opus-5-5[1m]"), LabelEffort::Medium));
     let empty = job_with_images(app, 0).await;
     let e = err(
         app,

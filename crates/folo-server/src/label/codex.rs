@@ -11,11 +11,12 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::AtomicBool;
 
-use folo_api::{LabelAgent, LabelAgentId, LabelModel, LabelUsage};
+use folo_api::{LabelAgent, LabelAgentId, LabelEffort, LabelModel, LabelUsage};
 use serde_json::Value;
 
 use super::agent::{
-    Agent, AgentError, AgentReply, AgentRequest, CALL_TIMEOUT, Cli, Memo, Output, last_line, run,
+    Agent, AgentError, AgentReply, AgentRequest, CALL_TIMEOUT, Cli, Memo, Output, PROBE_TIMEOUT, last_line,
+    run,
 };
 
 const INSTALL: &str = "Install Codex (https://developers.openai.com/codex/cli) on the server's machine and sign in with `codex login`";
@@ -65,7 +66,7 @@ impl Codex {
             let Ok(path) = self.cli.path() else { return Vec::new() };
             let mut cmd = Command::new(path);
             cmd.args(["debug", "models"]);
-            match run(cmd, None, CALL_TIMEOUT, &AtomicBool::new(false)) {
+            match run(cmd, None, PROBE_TIMEOUT, &AtomicBool::new(false)) {
                 Ok(out) if out.success => catalog_models(&out.stdout),
                 _ => Vec::new(),
             }
@@ -95,6 +96,8 @@ impl Agent for Codex {
             version,
             // Codex picks its own default; its config file, where a user would set one, is not loaded.
             default_model: None,
+            // Its default model labels well without reasoning long; more effort mostly adds time.
+            default_effort: LabelEffort::Low,
         }
     }
 
@@ -257,7 +260,6 @@ fn catalog_models(json: &str) -> Vec<LabelModel> {
 
 #[cfg(test)]
 mod tests {
-    use folo_api::LabelEffort;
     use folo_test_support::TestDir;
 
     use super::*;

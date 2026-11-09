@@ -563,7 +563,9 @@ impl Labeler {
         }
         let job = self.job(id)?;
         let agent = self.agent(req.agent)?;
-        let model = model.map(str::to_string).or(agent.info().default_model);
+        let info = agent.info();
+        let model = model.map(str::to_string).or(info.default_model);
+        let effort = req.effort.unwrap_or(info.default_effort);
 
         let mut state = job.lock();
         state.check_idle("start another run")?;
@@ -595,16 +597,16 @@ impl Labeler {
         let plan = run::Plan {
             agent: agent.clone(),
             model: model.clone(),
-            effort: req.effort,
+            effort,
             note,
             batches: ids.chunks(batch).map(<[String]>::to_vec).collect(),
             parallel: req.parallel.unwrap_or(DEFAULT_PARALLEL) as usize,
             cancel: Arc::new(AtomicBool::new(false)),
         };
-        state.file.run = Some(LabelRun {
+        let previous = state.file.run.replace(LabelRun {
             agent: req.agent,
             model: model.clone(),
-            effort: req.effort,
+            effort,
             started: rfc3339(unix_now()),
             finished: None,
             total: ids.len() as u64,
@@ -620,7 +622,7 @@ impl Labeler {
             "{} ({}, {} effort) starts on {} {}: {calls} {} of up to {batch}",
             req.agent.display_name(),
             model.as_deref().unwrap_or("its default model"),
-            req.effort.as_str(),
+            effort.as_str(),
             ids.len(),
             if ids.len() == 1 { "image" } else { "images" },
             if calls == 1 { "call" } else { "calls" },
@@ -632,21 +634,25 @@ impl Labeler {
             in_call: HashSet::new(),
             thread: None,
         });
-        job.log(&mut state, LogLevel::Info, message);
-        job.save(&state)?;
         // The thread's first step takes the job's lock, so it starts working once this call has let go of it.
         let worker = job.clone();
-        let thread = std::thread::Builder::new()
-            .name(format!("folo-label-{id}"))
-            .spawn(move || run::run(&worker, &plan))
-            .map_err(|e| {
+        let started = job.save(&state).and_then(|()| {
+            std::thread::Builder::new()
+                .name(format!("folo-label-{id}"))
+                .spawn(move || run::run(&worker, &plan))
+                .map_err(|e| Error::internal(format!("could not start the run's thread: {e}")))
+        });
+        match started {
+            Ok(thread) => state.active.as_mut().expect("set above").thread = Some(thread),
+            Err(e) => {
+                // Nothing runs: the job is as it was.
                 state.active = None;
-                state.file.run = None;
-                Error::internal(format!("could not start the run's thread: {e}"))
-            })?;
-        if let Some(active) = state.active.as_mut() {
-            active.thread = Some(thread);
+                state.file.run = previous;
+                let _ = job.save(&state);
+                return Err(e);
+            }
         }
+        job.log(&mut state, LogLevel::Info, message);
         job.emit_job(&state);
         Ok(state.job())
     }

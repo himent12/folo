@@ -50,11 +50,13 @@ enum Outcome {
     Untouched,
 }
 
-/// An image of a call, ready to send.
-struct Sent {
-    id: String,
-    size: (u32, u32),
-    jpeg: Vec<u8>,
+/// The images of a call, ready to send (the three lists run in step).
+#[derive(Default)]
+struct Batch {
+    ids: Vec<String>,
+    /// Width and height of each original image.
+    sizes: Vec<(u32, u32)>,
+    jpegs: Vec<Vec<u8>>,
 }
 
 struct Run<'a> {
@@ -73,6 +75,7 @@ struct Run<'a> {
 /// Runs `plan` on `job` to its end (the body of the run's thread). The job's `active` and `run` are set by the
 /// caller; this clears `active` and closes `run` when it is done.
 pub fn run(job: &Job, plan: &Plan) {
+    let _closed = CloseOnPanic(job);
     let (classes, instructions) = {
         let state = job.lock();
         (state.file.classes.clone(), state.file.instructions.clone())
@@ -134,24 +137,28 @@ impl Run<'_> {
             }
             taken
         };
-        let (mut sent, mut outcomes) = (Vec::new(), Vec::new());
+        let (mut batch, mut outcomes) = (Batch::default(), Vec::new());
         for (id, path, size) in taken {
             match agent_jpeg(&path) {
-                Ok(jpeg) => sent.push(Sent { id, size, jpeg }),
+                Ok(jpeg) => {
+                    batch.ids.push(id);
+                    batch.sizes.push(size);
+                    batch.jpegs.push(jpeg);
+                }
                 Err(why) => outcomes.push((id, Outcome::Failed(why))),
             }
         }
         let mut usage = LabelUsage::default();
-        if !sent.is_empty() {
-            outcomes.extend(self.ask(n, &sent, &mut usage));
+        if !batch.ids.is_empty() {
+            outcomes.extend(self.ask(n, &batch, &mut usage));
         }
         self.settle(n, outcomes, &usage);
     }
 
-    /// One agent call for `sent` (a second one when the first reply cannot be read): what became of each image.
-    fn ask(&self, n: usize, sent: &[Sent], usage: &mut LabelUsage) -> Vec<(String, Outcome)> {
+    /// One agent call for `batch` (a second one when the first reply cannot be read): what became of each image.
+    fn ask(&self, n: usize, batch: &Batch, usage: &mut LabelUsage) -> Vec<(String, Outcome)> {
         let all = |outcome: fn(String) -> Outcome, why: &str| -> Vec<(String, Outcome)> {
-            sent.iter().map(|s| (s.id.clone(), outcome(why.to_string()))).collect()
+            batch.ids.iter().map(|id| (id.clone(), outcome(why.to_string()))).collect()
         };
         let untouched = |_| Outcome::Untouched;
         let scratch = self.job.dir.join("tmp").join(format!("call-{n}"));
@@ -159,13 +166,11 @@ impl Run<'_> {
             self.fail(format!("creating {}: {e}", scratch.display()));
             return all(untouched, "");
         }
-        let images: Vec<Vec<u8>> = sent.iter().map(|s| s.jpeg.clone()).collect();
-        let sizes: Vec<(u32, u32)> = sent.iter().map(|s| s.size).collect();
-        let prompt = prompt::user_prompt(&self.classes, &self.instructions, &self.plan.note, sent.len());
+        let prompt = prompt::user_prompt(&self.classes, &self.instructions, &self.plan.note, batch.ids.len());
         let request = AgentRequest {
             system: prompt::SYSTEM,
             prompt: &prompt,
-            images: &images,
+            images: &batch.jpegs,
             schema: &self.schema,
             model: self.plan.model.as_deref(),
             effort: self.plan.effort,
@@ -189,18 +194,19 @@ impl Run<'_> {
                 }
             };
             usage.add(&reply.usage);
-            match prompt::parse_reply(&reply.text, &self.classes, &sizes) {
+            match prompt::parse_reply(&reply.text, &self.classes, &batch.sizes) {
                 Ok(labels) => {
                     self.soft_failures.store(0, Ordering::Relaxed);
-                    break sent
+                    break batch
+                        .ids
                         .iter()
                         .zip(labels)
-                        .map(|(s, labels)| {
+                        .map(|(id, labels)| {
                             let outcome = match labels {
                                 Some(labels) => Outcome::Labeled(labels),
                                 None => Outcome::Failed("the agent's reply left this image out".into()),
                             };
-                            (s.id.clone(), outcome)
+                            (id.clone(), outcome)
                         })
                         .collect();
                 }
@@ -331,6 +337,26 @@ impl Run<'_> {
             tracing::warn!(job = %self.job.id, "{e}");
         }
         self.job.emit_job(&state);
+    }
+}
+
+/// Frees a job whose run thread panicked: without this it would stay `running`, and locked, until a restart.
+struct CloseOnPanic<'a>(&'a Job);
+
+impl Drop for CloseOnPanic<'_> {
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            return;
+        }
+        let mut state = self.0.lock();
+        state.active = None;
+        if let Some(run) = state.file.run.as_mut().filter(|r| r.finished.is_none()) {
+            run.finished = Some(rfc3339(unix_now()));
+            run.outcome = Some(LabelOutcome::Failed);
+            run.error = Some("the run stopped on an internal error (see the server log)".into());
+        }
+        let _ = self.0.save(&state);
+        self.0.emit_job(&state);
     }
 }
 

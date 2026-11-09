@@ -637,7 +637,11 @@ exported more than once.
 - `GET /api/label/agents` → `{ "agents": [LabelAgent] }`: Claude Code, then Codex, each with whether its CLI is
   installed. The server looks for `claude` / `codex` on its `PATH` (`FOLO_CLAUDE_BIN` / `FOLO_CODEX_BIN` name
   another executable) and runs `--version`; the result is cached for 60 s. `available` says nothing about being
-  signed in: a run finds that out on its first call and fails with the CLI's own message.
+  signed in: a run finds that out on its first call and fails with the CLI's own message. `models` are Claude
+  Code's model aliases (`haiku`, `sonnet`, `opus`), and for Codex the models of its own catalog that take images
+  (`codex debug models`). `default_model` and `default_effort` are what a run uses when it names none: Claude
+  Code `haiku` at `medium`, Codex its own default model at `low` (docs/LABELING.md has the measurements behind
+  them).
 - `GET /api/label/jobs` → `{ "jobs": [LabelJob] }` (newest first)
 - `POST /api/label/jobs` body `{ "name", "classes": ["car", "person"], "instructions"?: "", "path"?: "D:/photos" }`
   → `201 LabelJob`. `name` must not be blank (at most 100 characters); `classes`: 1 to 80 distinct, non-blank
@@ -676,7 +680,8 @@ exported more than once.
 
 **Asking an agent**
 - `POST /api/label/jobs/{id}/start` body `StartLabeling` → `LabelJob` (`status: "running"`, with the new `run`).
-  Only `agent` is required. The run labels the `scope` (`unlabeled`, the default: `pending` and `failed`
+  Only `agent` is required; `model` and `effort` default to the agent's `default_model` and `default_effort`.
+  The run labels the `scope` (`unlabeled`, the default: `pending` and `failed`
   images; `all`: every image, replacing existing labels, hand-drawn ones too), or exactly `image_ids`. `note` (at
   most 2000 characters) is an extra instruction for this run only: the way to tell the agent what its last
   labels got wrong. Errors: `422 invalid_body` (an unknown `agent`), `400 invalid_body` (a `model` with characters
@@ -742,8 +747,9 @@ exported more than once.
 ```jsonc
 // LabelAgent
 { "id": "claude|codex", "name": "Claude Code", "available": true, "version": "2.1.302" | null,
-  "models": [{ "id": "sonnet", "label": "Sonnet" }],   // suggestions; `model` takes any name the CLI accepts
-  "default_model": "sonnet" | null,                    // null: the CLI's own default
+  "models": [{ "id": "haiku", "label": "Haiku" }],     // suggestions; `model` takes any name the CLI accepts
+  "default_model": "haiku" | null,                     // null: the CLI's own default
+  "default_effort": "low|medium|high",                 // what a run without `effort` uses
   "hint": null | "Install Claude Code (https://claude.com/claude-code) and sign in with `claude`, or ..." }
 // LabelJob
 { "id": "lb_3f9a", "name": "street", "classes": ["car", "person"], "instructions": "Label every ...",
@@ -765,7 +771,7 @@ exported more than once.
   "source": null | "agent|manual",      // who drew `boxes`
   "error": null | "..." }               // why the last agent call failed
 // StartLabeling (only agent is required; the rest shows the defaults)
-{ "agent": "claude", "model": null, "effort": "low", "scope": "unlabeled", "image_ids": null, "note": "",
+{ "agent": "claude", "model": null, "effort": null, "scope": "unlabeled", "image_ids": null, "note": "",
   "batch": null, "parallel": null }
 ```
 
