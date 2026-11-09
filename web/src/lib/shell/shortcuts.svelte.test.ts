@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { router } from '$lib/router.svelte';
 import { keyPrefs } from '$lib/ui/keyPrefs.svelte';
 import { rowNav } from '$lib/ui/rowNav';
-import { installShortcuts, shortcutList, showShortcuts } from './shortcuts';
+import { backPath, installShortcuts, shortcutList, showShortcuts } from './shortcuts';
 
 const key = (k: string, init: KeyboardEventInit = {}, el: EventTarget = window) =>
   el.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true, ...init }));
@@ -41,6 +41,16 @@ describe('single-key shortcuts preference', () => {
     key('n');
     expect(go).toHaveBeenCalledWith('/runs/new');
     go.mockRestore();
+  });
+
+  it('touch-only devices get no shortcuts reference: ? does nothing', () => {
+    const mm = vi.spyOn(window, 'matchMedia').mockImplementation(
+      (q: string) => ({ matches: q.includes('hover: none'), media: q, addEventListener() {}, removeEventListener() {} }) as unknown as MediaQueryList,
+    );
+    key('?');
+    showShortcuts();
+    expect(shortcuts).not.toHaveBeenCalled();
+    mm.mockRestore();
   });
 
   it('off: ?, N and G sequences do nothing; Mod+K still opens the palette', () => {
@@ -90,8 +100,37 @@ describe('single-key shortcuts preference', () => {
 
   it('marks exactly the keys Settings turns off: single characters outside a focused component', () => {
     const single = shortcutList.filter((s) => s.single).map((s) => s.keys);
-    expect(single).toEqual(['?', '[', 'N', 'G O', 'G D', 'G R', 'G M', 'G P', 'G S', 'J K', 'X']);
+    expect(single).toEqual(['?', '[', 'N', 'G O', 'G D', 'G R', 'G M', 'G P', 'G S', 'Escape', 'J K', 'X', '1–6']);
     // The image inspector's keys are its own (they work while it is open), so they stay listed as working.
     expect(shortcutList.filter((s) => s.group === 'Datasets').every((s) => !s.single)).toBe(true);
+  });
+});
+
+describe('Escape on a detail page', () => {
+  it('goes back to the list when nothing on the page is using it', () => {
+    const go = vi.spyOn(router, 'go').mockImplementation(() => {});
+    const route = vi.spyOn(router, 'route', 'get').mockReturnValue({ name: 'run', params: { id: 'r' }, query: new URLSearchParams(), path: '/runs/r' });
+    key('Escape');
+    expect(go).toHaveBeenCalledWith('/runs');
+    go.mockClear();
+    // A focused control keeps its own Escape.
+    const b = document.createElement('button');
+    document.body.appendChild(b);
+    b.focus();
+    key('Escape', {}, b);
+    expect(go).not.toHaveBeenCalled();
+    route.mockRestore();
+    go.mockRestore();
+  });
+
+  it('knows where each detail page goes back to', () => {
+    expect(['run', 'run-compare', 'model', 'dataset', 'runs', 'settings'].map((name) => backPath({ name }))).toEqual([
+      '/runs',
+      '/runs',
+      '/models',
+      '/datasets',
+      null,
+      null,
+    ]);
   });
 });

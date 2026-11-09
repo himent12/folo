@@ -6,6 +6,9 @@
    * (`?image=`), so it is linkable.
    */
   import { untrack } from 'svelte';
+  import { fly } from 'svelte/transition';
+  import { cubicOut } from 'svelte/easing';
+  import { motion } from '$lib/ui/motion';
   import ChevronLeft from '@lucide/svelte/icons/chevron-left';
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
   import Copy from '@lucide/svelte/icons/copy';
@@ -93,8 +96,11 @@
     }
   });
 
+  /** The last step's direction: the next image slides in from that side (120 ms, none under reduced motion). */
+  let stepDir = $state(0);
   async function step(d: number) {
     if (idx < 0) return;
+    stepDir = d;
     const j = idx + d;
     if (j < 0 || j >= total) return;
     const n = await pager.at(j);
@@ -128,7 +134,11 @@
     });
   });
 
-  function zoomAt(f: number, px = vw / 2, py = vh / 2) {
+  // Discrete moves (the buttons, + - 0, a double-click, a label's zoom) glide over 120 ms; continuous input (wheel,
+  // pinch, drag) follows the hand with no transition. The CSS reduced-motion rule turns the glide off.
+  let glide = $state(false);
+  function zoomAt(f: number, px = vw / 2, py = vh / 2, eased = true) {
+    glide = eased;
     const nz = Math.min(maxZ, Math.max(1, z * f));
     const ux = (px - x) / (s0 * z);
     const uy = (py - y) / (s0 * z);
@@ -138,6 +148,7 @@
   }
 
   function fit() {
+    glide = true;
     z = 1;
   }
 
@@ -159,6 +170,7 @@
     const bw = Math.max(8, b.x2 - b.x1);
     const bh = Math.max(8, b.y2 - b.y1);
     const nz = Math.min(maxZ, Math.max(1, Math.min((vw * 0.45) / (bw * s0), (vh * 0.45) / (bh * s0))));
+    glide = true;
     z = nz;
     tx = vw / 2 - ((b.x1 + b.x2) / 2) * s0 * nz;
     ty = vh / 2 - ((b.y1 + b.y2) / 2) * s0 * nz;
@@ -177,7 +189,7 @@
       e.preventDefault();
       const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? vh : 1;
       const [px, py] = local(e);
-      zoomAt(Math.exp(-e.deltaY * unit * (e.ctrlKey ? 0.01 : 0.002)), px, py);
+      zoomAt(Math.exp(-e.deltaY * unit * (e.ctrlKey ? 0.01 : 0.002)), px, py, false);
     };
     v.addEventListener('wheel', onwheel, { passive: false });
     return () => v.removeEventListener('wheel', onwheel);
@@ -203,6 +215,7 @@
     pointers.set(e.pointerId, { x: px, y: py });
     pinch = pointers.size === 2 ? pinchState() : null;
     dragging = true;
+    glide = false;
   }
 
   function onpointermove(e: PointerEvent) {
@@ -215,7 +228,7 @@
       if (now && pinch && pinch.d > 0) {
         tx = x + (now.mx - pinch.mx);
         ty = y + (now.my - pinch.my);
-        zoomAt(now.d / pinch.d, now.mx, now.my);
+        zoomAt(now.d / pinch.d, now.mx, now.my, false);
       }
       pinch = now;
     } else {
@@ -243,6 +256,7 @@
     if (!d || !e.shiftKey || e.metaKey || e.ctrlKey || e.altKey) return;
     e.preventDefault();
     e.stopPropagation();
+    glide = true;
     tx = x + d[0] * Math.max(24, vw / 10);
     ty = y + d[1] * Math.max(24, vh / 10);
   }
@@ -356,7 +370,14 @@
     >
       {#if img}
         {#key img.id}
-          <div class="stage" style:width="{dw}px" style:height="{dh}px" style:transform="translate3d({x}px, {y}px, 0)">
+          <div
+            class="stage"
+            class:glide
+            style:width="{dw}px"
+            style:height="{dh}px"
+            style:transform="translate3d({x}px, {y}px, 0)"
+            in:fly={{ x: 16 * stepDir, duration: motion(120), easing: cubicOut }}
+          >
             <DatasetImage
               datasetId={pager.datasetId}
               imageId={img.id}
@@ -604,6 +625,12 @@
     left: 0;
     top: 0;
     will-change: transform;
+  }
+  .stage.glide {
+    transition:
+      transform var(--dur-fast) var(--ease-out),
+      width var(--dur-fast) var(--ease-out),
+      height var(--dur-fast) var(--ease-out);
   }
   .loading {
     position: absolute;

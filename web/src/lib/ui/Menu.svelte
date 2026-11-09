@@ -11,7 +11,12 @@
 </script>
 
 <script lang="ts">
-  /** An overflow menu: a "⋯" button that opens a short list of actions (links or buttons). */
+  /**
+   * An overflow menu: a "⋯" button that opens a short list of actions (links or buttons). Keyboard (WAI-ARIA menu
+   * button): Enter, Space or ArrowDown on the button opens it on the first item (ArrowUp on the last); in the list,
+   * the arrows wrap, Home and End go to the ends, typing a letter moves to the next item starting with it (typeahead),
+   * Escape closes it back to the button, Tab closes it and moves on.
+   */
   import Ellipsis from '@lucide/svelte/icons/ellipsis';
   import { tick } from 'svelte';
   import Button from './Button.svelte';
@@ -43,11 +48,30 @@
 
   const entries = () => [...(list?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? [])];
 
-  async function show() {
+  async function show(at: 'first' | 'last' = 'first') {
     if (fixed) place();
     open = true;
     await tick();
-    entries()[0]?.focus();
+    const all = entries();
+    (at === 'first' ? all[0] : all.at(-1))?.focus();
+  }
+  function ontrigger(e: KeyboardEvent) {
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+    e.preventDefault();
+    void show(e.key === 'ArrowDown' ? 'first' : 'last');
+  }
+  // Typeahead: the letters typed within half a second, matched against the start of each label. A new search starts
+  // after the focused item; a word being typed may stay on it; one letter pressed again cycles through its items.
+  let typed = '';
+  let typedAt = 0;
+  function typeahead(key: string, all: HTMLElement[], i: number) {
+    const now = Date.now();
+    const k = key.toLowerCase();
+    typed = now - typedAt < 500 && typed !== k ? typed + k : k;
+    typedAt = now;
+    const start = typed.length > 1 ? Math.max(0, i) : i + 1;
+    const order = [...all.slice(start), ...all.slice(0, start)];
+    order.find((el) => el.textContent?.trim().toLowerCase().startsWith(typed))?.focus();
   }
   function hide(refocus = true) {
     open = false;
@@ -64,8 +88,14 @@
       e.preventDefault();
       const d = e.key === 'ArrowDown' ? 1 : -1;
       all[(i + d + all.length) % all.length]?.focus();
+    } else if (e.key === 'Home' || e.key === 'End') {
+      e.preventDefault();
+      (e.key === 'Home' ? all[0] : all.at(-1))?.focus();
     } else if (e.key === 'Tab') {
       hide(false);
+    } else if (e.key.length === 1 && e.key !== ' ' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      e.preventDefault();
+      typeahead(e.key, all, i);
     }
   }
 
@@ -102,6 +132,7 @@
     aria-expanded={open}
     aria-controls="{uid}-list"
     onclick={() => (open ? hide() : show())}
+    onkeydown={ontrigger}
   />
   {#if open}
     <!-- svelte-ignore a11y_interactive_supports_focus -->

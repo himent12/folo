@@ -25,9 +25,11 @@
   import { rememberFocus } from '$lib/ui/focus';
   import { highlight, rank } from './commands';
   import { mainNav, settingsNav } from './nav';
+  import { touchOnly as isTouchOnly } from './shortcuts';
+  import { pageCommandList, recentIds, rememberRecent } from './pageCommands.svelte';
 
   let { open = $bindable(false), onshortcuts }: { open?: boolean; onshortcuts: () => void } = $props();
-  const touchOnly = typeof matchMedia !== 'undefined' && matchMedia('(hover: none) and (pointer: coarse)').matches;
+  const touchOnly = isTouchOnly();
 
   interface Item {
     id: string;
@@ -46,6 +48,8 @@
     match?: string[];
     /** An action about one run, dataset or model: offered once the query names it. */
     scoped?: boolean;
+    /** A Recent entry: the id of the item it repeats (what is remembered when it is chosen). */
+    origin?: string;
     run: () => void;
   }
 
@@ -57,6 +61,8 @@
   let runs = $state.raw<Run[]>([]);
   let datasets = $state.raw<Dataset[]>([]);
   let models = $state.raw<Model[]>([]);
+  /** The items chosen last (ids), read on open: with no query they head the list, under Recent. */
+  let recent = $state.raw<string[]>([]);
 
   // Focus returns to the opener on close; a command that navigates then hands it to the new page (App).
   let restore: (() => void) | null = null;
@@ -66,6 +72,7 @@
       el.showModal();
       query = '';
       index = 0;
+      recent = recentIds();
       queueMicrotask(() => input?.focus());
       const api = hub.api;
       api.runs().then((r) => (runs = r), () => {});
@@ -77,6 +84,16 @@
   const go = (path: string) => () => router.go(path);
 
   const items = $derived.by((): Item[] => {
+    // What the page on screen offers (shell/pageCommands): first, under This page.
+    const page: Item[] = pageCommandList.items.map((c) => ({
+      id: `page-${c.id}`,
+      group: 'This page',
+      label: c.label,
+      match: c.match,
+      keys: c.keys,
+      icon: c.icon,
+      run: c.run,
+    }));
     const nav: Item[] = [...mainNav, settingsNav].map((n) => ({
       id: `nav-${n.id}`,
       group: 'Go to',
@@ -158,10 +175,20 @@
     ];
     // With no query: navigation, the actions and the runs in flight.
     const idle = (i: Item) => i.group === 'Go to' || i.group === 'Actions' || (i.group === 'Runs' && (i.hint?.[0] === 'running' || i.hint?.[0] === 'queued'));
-    return [...nav, ...actions, ...onEntity, ...r.map((i) => ({ ...i, scoped: !idle(i) })), ...d.map((i) => ({ ...i, scoped: true })), ...m.map((i) => ({ ...i, scoped: true }))];
+    return [...page, ...nav, ...actions, ...onEntity, ...r.map((i) => ({ ...i, scoped: !idle(i) })), ...d.map((i) => ({ ...i, scoped: true })), ...m.map((i) => ({ ...i, scoped: true }))];
   });
 
-  const results = $derived(rank(items, query));
+  // No query: this page's commands, then Recent (the last items chosen, wherever they live), then the usual list.
+  const results = $derived.by(() => {
+    if (query.trim()) return rank(items, query);
+    const byId = new Map(items.map((i) => [i.id, i]));
+    const rec = recent
+      .map((id) => byId.get(id))
+      .filter((i): i is Item => !!i)
+      .map((i) => ({ ...i, id: `recent-${i.id}`, group: 'Recent', scoped: false, origin: i.id }));
+    const all = rank(items, '');
+    return [...all.filter((i) => i.group === 'This page'), ...rec, ...all.filter((i) => i.group !== 'This page')];
+  });
 
   const grouped = $derived.by(() => {
     const out: { group: string; items: { item: Item; n: number }[] }[] = [];
@@ -191,6 +218,7 @@
 
   function choose(item: Item | undefined) {
     if (!item) return;
+    if (item.group !== 'This page') rememberRecent(item.origin ?? item.id);
     el.close();
     item.run();
   }
@@ -198,10 +226,11 @@
   function onkeydown(e: KeyboardEvent) {
     if (e.key === 'ArrowDown' || (e.key === 'n' && e.ctrlKey)) {
       e.preventDefault();
-      index = Math.min(flat.length - 1, index + 1);
+      // The selection wraps at the ends, so the last item is one key from the first.
+      index = flat.length ? (index + 1) % flat.length : 0;
     } else if (e.key === 'ArrowUp' || (e.key === 'p' && e.ctrlKey)) {
       e.preventDefault();
-      index = Math.max(0, index - 1);
+      index = flat.length ? (index - 1 + flat.length) % flat.length : 0;
     } else if (e.key === 'Enter') {
       e.preventDefault();
       choose(flat[index]);

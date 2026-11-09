@@ -13,15 +13,15 @@
    * The loss chart's one control: a compact button naming the current view ("EMA 0.9 · Log") that opens a small panel
    * with the two choices behind it, smoothing and y scale, as native radio groups (arrow keys move within a group, Tab
    * between them). On wider screens the panel is a non-modal popover: Escape, Tab away or a click outside closes it
-   * and Escape returns focus to the button. On phones it is the shared modal sheet (ui/Dialog: a visible Close and
-   * Done, focus held inside, the page inert, focus back on the button when it closes). A choice applies at once in
-   * both.
+   * and Escape returns focus to the button. On phones it is the shared modal sheet (ui/Dialog: one dismiss, its Close,
+   * focus held inside, the page inert, focus back on the button when it closes), each row with a radio mark. A choice
+   * applies at once in both.
+   * The trigger's focus ring is the global `:focus-visible` one (a tinted halo is under 3:1 on light panels).
    */
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import Check from '@lucide/svelte/icons/check';
   import { tick } from 'svelte';
   import { MediaQuery } from 'svelte/reactivity';
-  import Button from '$lib/ui/Button.svelte';
   import Dialog from '$lib/ui/Dialog.svelte';
   import { media } from '$lib/design/tokens';
 
@@ -83,8 +83,9 @@
     {#each options as o (o.value)}
       <label class="opt" class:on={value === o.value}>
         <input type="radio" name="{uid}-{name}" value={o.value} checked={value === o.value} onchange={() => set(o.value)} />
+        {#if phone.current}<span class="mark" aria-hidden="true"></span>{/if}
         <span>{o.label}</span>
-        {#if value === o.value}<Check size={14} aria-hidden="true" />{/if}
+        {#if value === o.value && !phone.current}<Check size={14} aria-hidden="true" />{/if}
       </label>
     {/each}
   </fieldset>
@@ -121,7 +122,6 @@
 {#if phone.current}
   <Dialog bind:open title="Loss view" size="sm">
     <div class="sheet" id="{uid}-panel" bind:this={sheetBody}>{@render groups()}</div>
-    {#snippet footer()}<Button onclick={() => (open = false)}>Done</Button>{/snippet}
   </Dialog>
 {/if}
 
@@ -149,11 +149,6 @@
   }
   .trigger:hover {
     border-color: var(--text-tertiary);
-  }
-  .trigger:focus-visible {
-    outline: none;
-    border-color: var(--focus);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus) 18%, transparent);
   }
   .panel {
     position: absolute;
@@ -242,5 +237,25 @@
     display: grid;
     gap: var(--space-1);
     margin: 0 calc(-1 * var(--space-3));
+  }
+  /* The sheet's radio mark: a ring, filled in ink when chosen (neutral, like a checked row box). */
+  .opt .mark {
+    flex: none;
+    display: grid;
+    place-items: center;
+    width: 18px;
+    height: 18px;
+    border: 1.5px solid var(--line-strong);
+    border-radius: 50%;
+  }
+  .on .mark {
+    border-color: var(--text-primary);
+  }
+  .on .mark::after {
+    content: '';
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--text-primary);
   }
 </style>

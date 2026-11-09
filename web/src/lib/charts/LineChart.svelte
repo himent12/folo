@@ -75,6 +75,11 @@
   import { chartHint, claimOnce, TAP_HINT_KEY } from './hint';
   import { paintOrder } from './layers';
   import { TouchGesture, type PinAction } from './pin';
+  import { MediaQuery } from 'svelte/reactivity';
+  import { Tween } from 'svelte/motion';
+  import { cubicOut } from 'svelte/easing';
+  import { motion } from '$lib/ui/motion';
+  import { media } from '$lib/design/tokens';
 
   interface Props {
     series: Series[];
@@ -272,8 +277,18 @@
   });
 
   const x = $derived(scaleLinear().domain(xExtent).range([margin.left, Math.max(margin.left + 1, width - margin.right)]));
+  // A y domain change eases over 240 ms (callers re-fit at most once per epoch, ./domain holdDomain; values themselves
+  // never tween): the lines and gridlines glide to the new scale instead of jumping. Instant under reduced motion and
+  // on a log scale.
+  const yEase = new Tween<[number, number]>(untrack(() => yExtent), { easing: cubicOut });
+  $effect(() => {
+    const d = yExtent;
+    const log = yLog;
+    untrack(() => void yEase.set(d, { duration: log ? 0 : motion(240) }));
+  });
+  const yShown = $derived(yLog ? yExtent : yEase.current);
   const y = $derived(
-    (yLog ? scaleLog().domain(yExtent) : scaleLinear().domain(yExtent)).range([height - margin.bottom, margin.top]),
+    (yLog ? scaleLog().domain(yShown) : scaleLinear().domain(yShown)).range([height - margin.bottom, margin.top]),
   );
   // When the x domain is fixed (e.g. 0..epochs), prefer a tick step that lands exactly on the end.
   // Default x labels: integers, or one decimal when the domain is too short for distinct integers.
@@ -431,10 +446,12 @@
   }
 
   // Reading hints in the readout row (./hint): "← → to inspect" while the plot has keyboard focus, and on a touch
-  // screen "Tap to pin a value" on the first chart of the session, until it is tapped. A mouse gets neither.
+  // screen "Tap to pin a value" on the first chart of the session, until it is tapped. A mouse gets neither, and the
+  // phone tier and touch-only devices get no key hint (no arrow keys to press there).
   let keyFocus = $state(false);
+  const keyless = new MediaQuery(`${media.phone}, (hover: none) and (pointer: coarse)`, false);
   let tapHint = $state(typeof matchMedia !== 'undefined' && matchMedia('(pointer: coarse)').matches && claimOnce(TAP_HINT_KEY));
-  const hintText = $derived(hasData ? chartHint({ reading: hover !== null, keyFocus, tap: tapHint }) : null);
+  const hintText = $derived(hasData ? chartHint({ reading: hover !== null, keyFocus: keyFocus && !keyless.current, tap: tapHint }) : null);
   $effect(() => {
     hint = hintText;
   });
@@ -643,7 +660,8 @@
         bind:this={svgEl}
         {width}
         {height}
-        role="img"
+        role="group"
+        aria-roledescription="chart"
         aria-label={label}
         tabindex={hasData ? 0 : -1}
         {onpointermove}

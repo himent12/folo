@@ -2,7 +2,8 @@
   /**
    * A run banner, one line (web/DESIGN_DIRECTION.md §4.4, the Vercel callout): status icon, title, cause, one action,
    * and a disclosure for the details. Only the icon and the title take the status hue; the cause stays in
-   * text.secondary. On phones the cause wraps under the title and the actions go under the text; a `stack` callout
+   * text.secondary. Below the laptop tier the actions go under the text (on a row of their own); on phones the cause
+   * also wraps under the title; a `stack` callout
    * gives its first action the full width (the one fix to take), the disclosure under it. An `also` line under the
    * first, with its own mark and hue, joins a second finding about the same run (a completed run's outcome, then the
    * trainer's warning that it was too short to learn), so one run never stacks two banners.
@@ -196,6 +197,29 @@
   @media (pointer: coarse) {
     .c-more {
       min-height: 44px;
+    }
+  }
+  /* Tablets and phones: the text takes the full width and the actions get a row of their own under it, so a cause
+     never wraps beside its buttons (a narrow column of text next to them). Laptops and up keep one line. */
+  @media (max-width: 1023px) {
+    .callout {
+      grid-template-columns: auto minmax(0, 1fr);
+      align-items: start;
+    }
+    .callout > :global(svg),
+    .c-also-mark {
+      margin-top: 2px;
+    }
+    .c-acts {
+      grid-column: 2;
+      justify-content: flex-start;
+      flex-wrap: wrap;
+    }
+    .c-detail,
+    .two .c-acts,
+    .two .c-detail {
+      grid-column: 2;
+      grid-row: auto;
     }
   }
   @media (max-width: 767px) {

@@ -43,6 +43,10 @@
   import Samples from './run/Samples.svelte';
   import { moveQueued, queueItems, startHint, startLabel } from './run/queueActions';
   import { scheduleWarnings } from './run/warnings';
+  import Copy from '@lucide/svelte/icons/copy';
+  import Play from '@lucide/svelte/icons/play';
+  import { isOom } from '$lib/oom';
+  import { copyText, pageCommands, type PageCommand } from '$lib/shell/pageCommands.svelte';
 
   const id = $derived(router.route.params.id ?? '');
   const live = new LiveRun(() => id || null);
@@ -195,6 +199,20 @@
   ]);
 
   // Resume: the same run continues from weights/last.folo (POST /api/runs with resume_run_id, docs/API.md).
+  // The palette's This page: the state action the header shows (Stop, Resume), Compare and the id.
+  pageCommands((): PageCommand[] => {
+    const r = run;
+    if (!r) return [];
+    const out: PageCommand[] = [];
+    if (r.status === 'running') out.push({ id: 'run-stop', label: `Stop ${r.name}`, match: ['Stop run'], icon: Square, run: () => (stopOpen = true) });
+    // As the run's banner: anything but out of memory continues from the last checkpoint.
+    if (r.status === 'stopped' || (r.status === 'failed' && !isOom(r.error)))
+      out.push({ id: 'run-resume', label: `Resume ${r.name}`, match: ['Resume run'], icon: Play, run: () => void resume() });
+    out.push({ id: 'run-compare', label: `Compare ${r.name}`, match: ['Compare run'], icon: GitCompare, run: () => router.go(`/runs/compare?ids=${r.id}`) });
+    out.push({ id: 'run-copy-id', label: 'Copy run id', match: [r.id], icon: Copy, run: () => void copyText(r.id, 'run id') });
+    return out;
+  });
+
   let resuming = $state(false);
   async function resume() {
     if (!run) return;
@@ -802,13 +820,17 @@
   @media (max-width: 1023px) {
     /* Tablets and phones: the rail no longer fits beside the samples, so one section at a time, picked above. */
     /* The section picker stays reachable while the section scrolls (just under the top bar). */
+    /* Flex, not block: the segmented group is inline, and a line box would add its descender under it (16 px to the
+       section at the tablet tier instead of 12). */
     .phone-pick {
-      display: block;
+      display: flex;
       position: sticky;
       top: var(--size-topbar);
       z-index: var(--z-sticky);
       margin-top: calc(-1 * var(--space-2));
       background: var(--bg-app);
+      /* 12 px to the section under the page's 20 px gap (16 on phones, below). */
+      margin-bottom: calc(var(--space-3) - var(--space-5));
     }
     /* One part is visible at a time, so the empty columns must not add gaps. */
     .detail,
@@ -831,6 +853,9 @@
     }
   }
   @media (max-width: 767px) {
+    .phone-pick {
+      margin-bottom: calc(var(--space-3) - var(--space-4));
+    }
     .phone-pick :global([role='tab']) {
       flex: 1;
       justify-content: center;

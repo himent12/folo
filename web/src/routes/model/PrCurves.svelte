@@ -177,7 +177,9 @@
 
   <div class="part" class:off={view === 'curves'}>
     <!-- The rows are the curves' controls: say so, and how many are traced, with a way back. -->
-    <div class="tools">
+    <!-- Phones: with classes traced, this row is the selection's action bar ("View curve"), held under the section
+         picker while the table scrolls. -->
+    <div class="tools" class:bar={narrow && !!onviewcurve && selected.length > 0}>
       {#if many}
         <div class="filter">
           <Input bind:value={query} icon={Search} size="sm" type="search" placeholder="Find a class" aria-label="Find a class" />
@@ -186,6 +188,11 @@
       <p class="pick num" aria-live="polite">
         {#if selected.length}
           <span>{selected.length} {selected.length === 1 ? 'class' : 'classes'} traced</span>
+          {#if onviewcurve}
+            <button type="button" class="view to-curve" onclick={() => viewCurve(selected[selected.length - 1]!)}
+              >{selected.length === 1 ? 'View curve' : 'View curves'}<ArrowRight size={14} aria-hidden="true" /></button
+            >
+          {/if}
           <button type="button" class="clear" onclick={() => (selected = [])}>Clear</button>
         {:else}
           <span class="hint">{narrow ? 'Tap a class to trace its curve, the arrow for its details' : 'Select classes to trace their curves'}</span>
@@ -416,6 +423,18 @@
     gap: var(--space-2) var(--space-4);
     padding: 0 var(--space-4) var(--space-2);
   }
+  /* Under the sticky section picker (the page sets --pick-bottom), on the panel's fill. */
+  .tools.bar {
+    position: sticky;
+    top: var(--pick-bottom, var(--size-topbar));
+    z-index: 1;
+    padding-top: var(--space-2);
+    margin-top: calc(var(--space-2) * -1);
+    background: var(--bg-panel);
+  }
+  .view.to-curve {
+    margin-top: 0;
+  }
   .filter {
     width: 240px;
     max-width: 100%;
@@ -625,11 +644,6 @@
     }
     .c-inst {
       width: 88px;
-    }
-    .legend,
-    .plot,
-    .tools {
-      padding-inline: var(--space-3);
     }
   }
 </style>

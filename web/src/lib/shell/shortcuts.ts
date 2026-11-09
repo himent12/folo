@@ -20,6 +20,12 @@ export function showShortcuts() {
 }
 
 /**
+ * A touch-only device (`(hover: none) and (pointer: coarse)`: a phone or tablet without a mouse). It gets no shortcuts
+ * reference (DESIGN_DIRECTION §9): no palette entry, no "Show shortcuts", and `?` does not open it.
+ */
+export const touchOnly = () => typeof matchMedia !== 'undefined' && matchMedia('(hover: none) and (pointer: coarse)').matches;
+
+/**
  * Every shortcut the reference lists. `single`: a single-character key that Settings can turn off (ui/keyPrefs); the
  * rest (Mod+K, the arrow keys and Enter of a focused list or chart, the image inspector's own keys) always work.
  */
@@ -29,17 +35,33 @@ export const shortcutList: { keys: string; label: string; group: string; single?
   { keys: '[', label: 'Collapse or expand the sidebar', group: 'General', single: true },
   { keys: 'N', label: 'New training run', group: 'General', single: true },
   ...[...mainNav, settingsNav].map((n) => ({ keys: n.keys, label: `Go to ${n.label}`, group: 'Navigation', single: true })),
+  // A run, model or dataset page (and Compare): back to its list, when nothing on the page is using Escape.
+  { keys: 'Escape', label: 'Back to the list (detail pages)', group: 'Navigation', single: true },
   // Rows of the Runs, Models and Datasets tables (ui/rowNav.ts). J / K enter the list when nothing has focus.
   { keys: 'J K', label: 'Next / previous row', group: 'Lists', single: true },
   { keys: 'ArrowDown ArrowUp', label: 'Next / previous row (focused list)', group: 'Lists' },
   { keys: 'Enter', label: 'Open the row', group: 'Lists' },
   { keys: 'X', label: 'Select the run to compare (Runs)', group: 'Lists', single: true },
   { keys: 'ArrowLeft ArrowRight', label: 'Move the chart cursor (focused chart)', group: 'Charts' },
+  { keys: '1–6', label: 'Pick a metric tab (run page)', group: 'Charts', single: true },
   // The dataset image inspector's own keys: they work while it is open, whatever the setting.
   { keys: 'J K', label: 'Next / previous image (inspector)', group: 'Datasets' },
   { keys: '+ -', label: 'Zoom in / out (inspector)', group: 'Datasets' },
   { keys: '0', label: 'Fit image (inspector)', group: 'Datasets' },
 ];
+
+/** Where Escape goes back to from a detail page (its list), or null where it does nothing. */
+export function backPath(route: { name: string }): string | null {
+  return ({ run: '/runs', 'run-compare': '/runs', model: '/models', dataset: '/datasets' } as Record<string, string>)[route.name] ?? null;
+}
+
+/**
+ * True when nothing that might use Escape itself has focus: the page (body), the main region, or the page heading new
+ * pages focus (`data-route-focus`). A focused chart, menu, field or popover keeps its own Escape.
+ */
+function atRest(el: Element | null): boolean {
+  return !el || el === document.body || (el instanceof HTMLElement && (el.id === 'content' || el.hasAttribute('data-route-focus')));
+}
 
 export function installShortcuts(h: ShortcutHandlers): () => void {
   let pendingG = 0;
@@ -66,7 +88,16 @@ export function installShortcuts(h: ShortcutHandlers): () => void {
       pendingG = Date.now();
       return;
     }
+    if (e.key === 'Escape') {
+      const back = backPath(router.route);
+      if (back && atRest(document.activeElement) && !document.querySelector('[aria-expanded="true"][aria-haspopup]')) {
+        e.preventDefault();
+        router.go(back);
+      }
+      return;
+    }
     if (e.key === '?') {
+      if (touchOnly()) return;
       e.preventDefault();
       h.shortcuts();
     } else if (e.key === '[') {
@@ -78,7 +109,7 @@ export function installShortcuts(h: ShortcutHandlers): () => void {
     }
   };
 
-  const onshow = () => h.shortcuts();
+  const onshow = () => !touchOnly() && h.shortcuts();
   window.addEventListener('keydown', onkeydown);
   window.addEventListener(SHOW_SHORTCUTS, onshow);
   return () => {

@@ -162,7 +162,8 @@
       bind:this={svgEl}
       {width}
       {height}
-      role="img"
+      role="group"
+      aria-roledescription="chart"
       aria-label="{label}. Focus and use the arrow keys to read each bin."
       tabindex="0"
       {onkeydown}

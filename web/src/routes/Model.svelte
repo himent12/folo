@@ -3,6 +3,8 @@
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
   import Download from '@lucide/svelte/icons/download';
+  import Copy from '@lucide/svelte/icons/copy';
+  import { copyText, pageCommands, type PageCommand } from '$lib/shell/pageCommands.svelte';
   import Info from '@lucide/svelte/icons/info';
   import ScanSearch from '@lucide/svelte/icons/scan-search';
   import { tick } from 'svelte';
@@ -46,6 +48,16 @@
 
   // The source run, its dataset and the model it was fine-tuned from (its `weights`), for the provenance links.
   const runId = $derived(model.data?.run_id ?? null);
+  // The palette's This page: the header's actions and the id.
+  pageCommands((): PageCommand[] => {
+    const m = model.data;
+    if (!m) return [];
+    return [
+      { id: 'model-export', label: `Export ${m.name}`, match: ['Export model', 'ONNX'], icon: Download, run: () => (exportOpen = true) },
+      { id: 'model-try', label: `Try ${m.name} in Playground`, match: ['Try model'], icon: ScanSearch, run: () => router.go(`/playground?model=${encodeURIComponent(m.id)}`) },
+      { id: 'model-copy-id', label: 'Copy model id', match: [m.id], icon: Copy, run: () => void copyText(m.id, 'model id') },
+    ];
+  });
   const context = new Resource<{ run: Run | null; dataset: Dataset | null; parent: Model | null }>(async (s) => {
     const rid = runId;
     if (!rid) return { run: null, dataset: null, parent: null };
@@ -116,6 +128,8 @@
   // Phones: after the headline metrics, one section at a time (as on the run page) instead of a 4,000 px column.
   const phone = new MediaQuery(media.phone, false);
   let section = $state<ModelSection>('curves');
+  /** The sticky picker's height: a section's own sticky bar (Classes' selection) holds just under it. */
+  let pickH = $state(0);
   const showing = (part: ModelSection) => sectionShown(phone.current, section, part);
 
   // What goes wrong most, ranked: beside the matrix in a rail on wider screens; on phones the Confusion section opens on
@@ -353,7 +367,7 @@
 
     {#if phone.current}
       <!-- Stays reachable under the top bar while a section scrolls. -->
-      <div class="phone-pick">
+      <div class="phone-pick" bind:offsetHeight={pickH}>
         <Tabs label="Model sections" idPrefix="model-sec" bind:value={section} tabs={MODEL_SECTIONS} />
       </div>
     {/if}
@@ -365,7 +379,11 @@
          taking what the rail adds; the per-class table, the curves' legend, follows in a row of its own. Up to 1199 px
          the table follows the curves and the details fold into one line under it. Both PR panels share the traced and
          pointed-at classes. -->
-    <div class="detail" class:off={!showing('curves') && !showing('classes') && !showing('details')}>
+    <div
+      class="detail"
+      class:off={!showing('curves') && !showing('classes') && !showing('details')}
+      style:--pick-bottom={phone.current ? `calc(var(--size-topbar) + var(--space-2) + ${pickH}px)` : undefined}
+    >
       <div class="main-col" class:off={!showing('curves')}>
         <Panel title="Precision–recall" meta="precision by recall · IoU 0.5" pad="none" id="pr">
           <!-- Many classes: the band / every-curve switch is the chart's one header control, so the legend row keeps one
@@ -823,7 +841,8 @@
     display: grid;
     grid-template-rows: 16px 28px;
     gap: 2px;
-    padding: var(--space-2) var(--space-3);
+    /* The phone panels' one 16 px inset, so labels line up with the sections' titles and bodies below. */
+    padding: var(--space-2) var(--space-4);
     background: var(--bg-panel);
     min-width: 0;
   }
@@ -1298,6 +1317,17 @@
     }
   }
   @media (max-width: 767px) {
+    /* One section at a time behind the picker: no named rows, so the hidden sections leave no empty tracks or gaps
+       and every section starts 12 px under the picker (as on Run; the shoot's QA checks it). */
+    .detail {
+      grid-template-areas: none;
+      gap: 0;
+    }
+    .main-col,
+    .rail,
+    .cls-part {
+      grid-area: auto;
+    }
     /* "View curve" and "Back to Classes" land the curves panel under the top bar and the section picker. */
     .main-col :global(#pr) {
       scroll-margin-top: calc(var(--size-topbar) + var(--space-16));

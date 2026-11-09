@@ -16,6 +16,9 @@
 
 <script lang="ts">
   import { MediaQuery } from 'svelte/reactivity';
+  import { fade } from 'svelte/transition';
+  import { motion } from '$lib/ui/motion';
+  import { pageKeys } from '$lib/shell/pageCommands.svelte';
   /**
    * The run's metrics as one instrument: the epoch progress, a row of KPI tabs (each with its current value) and the one
    * chart the selected tab names. A single run is drawn in ink (primary metric in text.primary, secondary ones
@@ -327,6 +330,14 @@
   const current = $derived(tabs.find((t) => t.id === tab)!);
 
 
+  // 1–6 pick a metric tab from anywhere on the page (a single-key shortcut: off with the others in Settings).
+  pageKeys((k) => {
+    const t = /^[1-9]$/.test(k) ? tabs[Number(k) - 1] : undefined;
+    if (!t) return false;
+    tab = t.id;
+    return true;
+  });
+
   function onkeydown(e: KeyboardEvent) {
     const i = tabs.findIndex((t) => t.id === tab);
     let j = i;
@@ -450,7 +461,9 @@
         {#if loading}
           <ChartSkeleton {height} />
         {:else}
+          <!-- A tab swap fades the new chart in over 160 ms (0 under reduced motion, ui/motion). -->
           {#key tab}
+            <div class="swap" in:fade={{ duration: motion(160) }}>
             <LineChart
               {series}
               {height}
@@ -471,6 +484,7 @@
               endLabels={tab === 'loss'}
               empty={queued ? 'Curves appear here once training starts' : unit ? 'Waiting for the first validation…' : 'Waiting for the first step…'}
             />
+            </div>
           {/key}
         {/if}
       </div>
@@ -903,5 +917,9 @@
     .q {
       white-space: normal;
     }
+  }
+  /* The fading wrapper of a swapped chart: it takes the chart's place in the layout. */
+  .swap {
+    min-width: 0;
   }
 </style>

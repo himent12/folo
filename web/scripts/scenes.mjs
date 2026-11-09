@@ -306,6 +306,19 @@ export const scenes = [
     },
   },
   // Nothing picked: the inline empty state with the standard secondary "Add run…" button.
+  {
+    // Phones: the side-by-side table two runs at a time, the baseline and the next run (paged once), differing values
+    // marked.
+    name: 'run-compare-pair-phone',
+    path: '/runs/compare?ids=run_7d1e,run_c19a,run_5be3,run_a2f0',
+    viewports: ['mobile'],
+    fullPage: true,
+    setup: async (page) => {
+      await until(page, '#cmp-table .pair');
+      await page.getByRole('button', { name: 'Next run' }).click();
+      await page.mouse.move(0, 0);
+    },
+  },
   { name: 'run-compare-empty', path: '/runs/compare', viewports: ['desktop', 'mobile'] },
   // A queued run, first of two waiting: its place, what it waits for and when it should start lead; from 768 px up the
   // config beside the queue and one quiet list of what the run will have (no empty frames). Phones keep their sections.
@@ -360,12 +373,13 @@ export const scenes = [
   },
   {
     // Keyboard focus on a chart: the readout row says how to read it.
+    // From the tablet tier up: phones and touch-only devices get no key hint.
     name: 'chart-key-hint',
     path: '/runs/run_c19a',
     fullPage: false,
-    viewports: ['desktop', 'mobile'],
+    viewports: ['desktop', 'tablet'],
     setup: async (page) => {
-      const svg = page.locator('#run-chart svg[role="img"]').first();
+      const svg = page.locator('#run-chart svg[aria-roledescription="chart"]').first();
       await svg.scrollIntoViewIfNeeded();
       await page.keyboard.press('Tab');
       await svg.focus();
@@ -451,7 +465,7 @@ export const scenes = [
     viewports: ['desktop', 'laptop', 'mobile'],
     setup: async (page, { vp }) => {
       await until(page, '#ds-size svg');
-      const svg = page.locator('#ds-size svg[role=img]');
+      const svg = page.locator('#ds-size svg[aria-roledescription=chart]');
       await svg.evaluate((el, touch) => {
         const r = el.getBoundingClientRect();
         const p = { clientX: r.left + r.width * 0.4, clientY: r.top + r.height * 0.6, bubbles: true };
@@ -461,6 +475,19 @@ export const scenes = [
       // The readout row switches from the total to the bin.
       await page.locator('#ds-size .readout.at').waitFor({ state: 'visible', timeout: 3000 });
       await page.clock.runFor(300);
+    },
+  },
+  {
+    // The watched run finished while another page was open: a toast says so, with "Open run" (no timer: it has an
+    // action). Mock scenario `finishing`: the live run's last epoch lands 3 s after load.
+    name: 'toast-run-finished',
+    path: '/models',
+    search: 'scenario=finishing',
+    fullPage: false,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page) => {
+      await until(page, 'text=finished training', 12000);
+      await page.mouse.move(0, 0);
     },
   },
   {
@@ -475,8 +502,15 @@ export const scenes = [
       await page.locator('dialog[open] input[placeholder="e.g. D:/data/my-dataset"]').fill('D:/data/shapes');
       await page.locator('dialog[open] form').evaluate((f) => /** @type {HTMLFormElement} */ (f).requestSubmit());
       await until(page, 'text=Already registered as shapes');
-      // The thumbnails render in real time (the page clock, which would close the toast, stays put).
-      await page.locator('.cell img.loaded').nth(17).waitFor({ timeout: 15000 }).catch(() => {});
+      // Hold the page clock (the shoot's runs in real time) so the toast is still up when the thumbnails have loaded:
+      // they decode in real time but wait on the mock's latency, so the clock steps 250 ms at a time, at most 2.5 s of
+      // the toast's 4.
+      await page.clock.pauseAt((await page.evaluate(() => Date.now())) + 100);
+      for (let t = 0; t < 2500; t += 250) {
+        if (await page.locator('.cell img.loaded').nth(17).isVisible().catch(() => false)) break;
+        await page.clock.runFor(250);
+        await page.waitForTimeout(600);
+      }
     },
   },
   {
@@ -1069,10 +1103,11 @@ export const scenes = [
   },
   {
     // Every group, General to Datasets: two columns where wide, one with an edge shadow on phones.
+    // Touch-only devices (phones) get no shortcuts reference (DESIGN_DIRECTION §9): a laptop's narrow tier instead.
     name: 'shortcuts-open',
     fullPage: false,
     path: '/runs',
-    viewports: ['desktop', 'mobile'],
+    viewports: ['desktop', 'laptop'],
     setup: async (page) => {
       await page.keyboard.press('Shift+?');
     },
@@ -1095,7 +1130,7 @@ export const scenes = [
     fullPage: false,
     setup: async (page) => {
       // Scroll the chart into view first: the pointer cannot hover outside the viewport. Then require the tooltip.
-      const svg = page.locator('#run-chart svg[role="img"]').first();
+      const svg = page.locator('#run-chart svg[aria-roledescription="chart"]').first();
       await svg.scrollIntoViewIfNeeded();
       const box = await svg.boundingBox();
       if (!box) throw new Error('chart-hover: no chart');

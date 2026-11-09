@@ -12,7 +12,7 @@ export interface Toast {
   title: string;
   detail?: string;
   action?: { label: string; run: () => void };
-  /** ms before auto-dismiss; 0 keeps it until closed. */
+  /** ms before auto-dismiss; 0 keeps it until closed (errors and toasts with an action, by default: WCAG 2.2.1). */
   timeout: number;
 }
 
@@ -25,7 +25,9 @@ class Toasts {
 
   show(t: Omit<Toast, 'id' | 'timeout'> & { timeout?: number }): number {
     const id = ++this.#id;
-    const toast: Toast = { timeout: t.tone === 'error' ? 8000 : 4000, ...t, id };
+    // An error, or a toast that offers an action, stays until it is closed: nobody should have to race a timer to read
+    // what went wrong or to take the action.
+    const toast: Toast = { timeout: t.tone === 'error' || t.action ? 0 : 4000, ...t, id };
     this.items = this.#held ? [...this.items, toast] : [...this.items.slice(-3), toast];
     if (toast.timeout > 0 && !this.#held) this.#timers.set(id, setTimeout(() => this.dismiss(id), toast.timeout));
     return id;

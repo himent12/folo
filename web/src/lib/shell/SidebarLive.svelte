@@ -1,20 +1,34 @@
 <script lang="ts">
-  /** The active training run, always one glance away in the sidebar. */
-  import { hub } from '$lib/api/index.svelte';
-  import { Resource } from '$lib/api/resource.svelte';
+  /**
+   * The active training run, always one glance away in the sidebar. A polite live region says when one starts
+   * training; its end is a toast (RunWatch), so it is never said twice.
+   */
   import { href } from '$lib/router.svelte';
   import { eta } from '$lib/format';
   import { runProgress } from '$lib/api/progress';
   import Progress from '$lib/ui/Progress.svelte';
   import { tooltip } from '$lib/ui/tooltip';
+  import { watched } from './runList.svelte';
 
   let { collapsed }: { collapsed: boolean } = $props();
 
-  const runs = new Resource((s) => hub.api.runs(s), { poll: 2000 });
-  const live = $derived(runs.data?.find((r) => r.status === 'running' || r.status === 'stopping'));
-  const queued = $derived(runs.data?.filter((r) => r.status === 'queued').length ?? 0);
+  const live = $derived(watched.runs?.find((r) => r.status === 'running' || r.status === 'stopping'));
+  const queued = $derived(watched.runs?.filter((r) => r.status === 'queued').length ?? 0);
   const progress = $derived(live ? runProgress(live) : 0);
+
+  // Said once, when a run starts training while Studio is open (not for the run already training at load).
+  let said = $state('');
+  let seen: string | null | undefined;
+  $effect(() => {
+    const id = live?.id ?? null;
+    const name = live?.name;
+    if (!watched.runs) return;
+    if (seen !== undefined && id && id !== seen) said = `${name} started training`;
+    seen = id;
+  });
 </script>
+
+<p class="sr-only" aria-live="polite">{said}</p>
 
 {#if live}
   {#if collapsed}
