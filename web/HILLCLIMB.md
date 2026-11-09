@@ -41,6 +41,8 @@ Lines: 1 hierarchy & layout · 2 typography · 3 colour & theming · 4 spacing r
 | r17 | Claude Opus 5.5 (90 sheets, ~18 full-size) | 8 | 8 | 8.5 | 8 | 7.5 | 8 | 8.5 | 8 | 8.5 | 8 | 7.5 | 8 | 7.5 |
 | r18 | GPT-6.1 Sol (109 sheets, 30 full-size) | 8.5 | 8.5 | 9 | 9 | 9 | 8 | 8 | 9 | 8.5 | 8.5 | 8.5 | 8.5 | 8 |
 | r18 | Claude Opus 5.5 (109 sheets, 16 full-size) | 8 | 8 | 8.5 | 8.5 | 8.5 | 7.5 | 8 | 8 | 8.5 | 8.5 | 8 | 8 | 7.5 |
+| r19 | GPT-6.1 Sol (120 sheets, 34 full-size) | 7.5 | 8.5 | 8.5 | 8.5 | 7.5 | 9 | 8 | 8 | 8 | 8 | 6.5 | 7.5 | 6.5 |
+| r19 | Claude Opus 5.5 (120 sheets, 23 full-size) | 7.5 | 7.5 | 8 | 7.5 | 7 | 8 | 7.5 | 8 | 8.5 | 8 | 6.5 | 7.5 | 6.5 |
 
 ## Per-line minimum (lower of the two reviewers)
 
@@ -64,6 +66,7 @@ Rounds with one reviewer are marked; their minimum is that reviewer's row.
 | r16 | 8 | 8 ↑ | 8.5 ↑ | 8 | 7.5 ↓ | 8 ↑ | 8.5 ↑ | 7.5 | 8.5 ↑ | 8 | 7.5 ↓ | 8 | 7.5 |
 | r17 | 8 | 8 | 8.5 | 8 | 7.5 | 8 | 8.5 | 8 ↑ | 8.5 | 8 | 7.5 | 8 | 7.5 |
 | r18 | 8 | 8 | 8.5 | 8.5 ↑ | 8.5 ↑ | 7.5 ↓ | 8 ↓ | 8 | 8.5 | 8.5 ↑ | 8 ↑ | 8 | 7.5 |
+| r19 | 7.5 ↓ | 7.5 ↓ | 8 ↓ | 7.5 ↓ | 7 ↓ | 8 ↑ | 7.5 ↓ | 8 | 8 ↓ | 8 ↓ | 6.5 ↓ | 7.5 ↓ | 6.5 |
 
 r4 lowest lines: 6 data visualisation (5.5), 2 typography, 3 colour, 8 consistency (6). Diagnosis: 2, 3 and 8 are
 structural (no single rule for mono vs sans, class colours that changed between legend and box, two accents in light),
@@ -119,3 +122,11 @@ visualisation, 7.5): the 3–5 tick cap made the PR curves' quarter steps read "
 decimal (fixed before merge, 97ff017), plus the box-size histogram's uneven bins and colliding end labels. 7 dropped
 to 8 on copy: four names for "from scratch", batches vs optimizer steps, the engine's warning as a technical
 paragraph.
+
+r19 (#113: Mixed precision, the Settings System panel, one-line run banners, categorical histogram): a regression
+round. The full-height sidebar wrapped the shell's column in `.rail`, and the shell's phone rule hid every `.rail`,
+including the Model and Run pages' own rails, so three phone sections (Model Details, Run Classes, the queued run's
+Config) rendered blank in the shots. Both reviewers found it first, and it drives 1, 5, 9, 11 and 12 (fixed before
+merge, 9af99df, as `.shell-rail`). Data visualisation reached Sol's 9. Opus is stricter on text size this round
+(10–11 px in dialogs, the LR exponent). From r20: the bug pass opens every phone section scene, and the shoot flags a
+picked section that renders nothing.
