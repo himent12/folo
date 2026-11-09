@@ -743,24 +743,18 @@ impl FoloApp {
                 .flex_col()
                 .gap(px(6.))
                 .child(caption(&t, "Precision / Recall"))
+                .child(metric_pair(
+                    &t,
+                    big,
+                    last.map_or("–".into(), |e| format!("{:.3}", e.val.precision)),
+                    last.map_or("–".into(), |e| format!("{:.3}", e.val.recall)),
+                ))
+                // The epoch's own operating point once the engine reports it (`best_f1_conf`).
                 .child(
-                    div()
-                        .flex()
-                        .items_baseline()
-                        .gap(px(4.))
-                        .child(
-                            text(big, t.text_primary)
-                                .tnum()
-                                .child(last.map_or("–".into(), |e| format!("{:.3}", e.val.precision))),
-                        )
-                        .child(text(ty::LG, t.text_tertiary).child("/"))
-                        .child(
-                            text(big, t.text_primary)
-                                .tnum()
-                                .child(last.map_or("–".into(), |e| format!("{:.3}", e.val.recall))),
-                        ),
-                )
-                .child(text(ty::XS, t.text_tertiary).child("best F1 · IoU 0.50 · val")),
+                    text(ty::XS, t.text_tertiary)
+                        .ellipsis()
+                        .child(pr_caption(last.and_then(|e| e.val.best_f1_conf), "val")),
+                ),
             div()
                 .flex()
                 .flex_col()
@@ -984,7 +978,11 @@ impl FoloApp {
             vec![Series::new("lr", t.text_tertiary, d.lr.clone()).area().live(live)],
             secondary_h,
         );
-        lr.y_range = Some((0., (d.lr_max * 1.15).max(1e-4)));
+        // The top on a nice tick above the peak, so the top gridline is labelled and the warm-up
+        // peak sits under it (a padded max left an unlabelled line and a peak above the last tick).
+        let top = (d.lr_max * 1.05).max(1e-4);
+        let step = crate::charts::nice_step(top, 3);
+        lr.y_range = Some((0., (top / step).ceil() * step));
         // Its "× 10⁻ⁿ" goes in the panel caption, once, beside the legend that uses it.
         lr.pow_caption = false;
         lr.y_ticks = 3;
@@ -1185,7 +1183,7 @@ impl FoloApp {
                 if pair_a { 0.5 } else { 0.4 },
             ))
             .child(row(
-                card("Precision / Recall", "best F1 · IoU 0.50 · val", pr_legend, line_chart(&t, pr))
+                card("Precision / Recall", &pr_caption(None, "val"), pr_legend, line_chart(&t, pr))
                     .into_any_element(),
                 card("Learning rate", &lr_caption, lr_legend, line_chart(&t, lr)).into_any_element(),
                 0.6,

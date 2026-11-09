@@ -253,6 +253,36 @@ pub trait Ellipsis: Styled + Sized {
 
 impl<T: Styled> Ellipsis for T {}
 
+/// Two values as one figure, "0.861 / 0.792": both at `size`, the slash a step down in tertiary
+/// ink. The run and model pages' Precision / Recall both use it.
+pub fn metric_pair(t: &Theme, size: TypeStep, a: String, b: String) -> Div {
+    div()
+        .flex()
+        .items_baseline()
+        .gap(px(4.))
+        .child(text(size, t.text_primary).tnum().child(a))
+        .child(text(ty::LG, t.text_tertiary).child("/"))
+        .child(text(size, t.text_primary).tnum().child(b))
+}
+
+/// The data a model was evaluated on, one way everywhere: "shapes-hard · val · 800 images" (the
+/// count when known).
+pub fn split_label(dataset: &str, split: &str, images: Option<u64>) -> String {
+    match images {
+        Some(n) => format!("{dataset} · {split} · {} images", int(n)),
+        None => format!("{dataset} · {split}"),
+    }
+}
+
+/// Where precision and recall were taken, as both pages caption them: the best-F1 confidence when
+/// known, the match rule, and the split ("best F1 · conf 0.31 · IoU 0.50 · val").
+pub fn pr_caption(conf: Option<f32>, split: &str) -> String {
+    match conf {
+        Some(c) => format!("best F1 · conf {} · IoU 0.50 · {split}", fmt_conf(c)),
+        None => format!("best F1 · IoU 0.50 · {split}"),
+    }
+}
+
 /// One metadata line: `lead` (an architecture, say), an optional tag right after it, then the rest
 /// as " · "-joined text. The line owns its separators (4 px either side of each dot) and only the
 /// rest gives way, with a real ellipsis, so every meta line spaces and truncates alike.

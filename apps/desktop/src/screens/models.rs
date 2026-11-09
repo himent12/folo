@@ -334,18 +334,16 @@ impl FoloApp {
         );
 
         let mm = m.metrics;
-        // Where precision and recall are taken: the best-F1 confidence, named when the record has it.
-        let op_point = match mm.as_ref().and_then(|x| x.best_f1_conf) {
-            Some(c) => format!("at conf {} (best F1)", fmt_conf(c)),
-            None => "at the best-F1 confidence".to_string(),
-        };
         // The dataset the headline numbers were measured on (the run's), named beside them.
         // The split evaluation used: validation, or train when the dataset has no validation
         // images (the server falls back to them).
         let head_ds = run
             .as_ref()
             .and_then(|r| self.store.dataset_summary(&r.config.dataset_id))
-            .map(|d| (d.name.clone(), if d.splits.val == 0 { "train" } else { "validation" }));
+            .map(|d| (d.name.clone(), if d.splits.val == 0 { "train" } else { "val" }));
+        // Where precision and recall are taken: the best-F1 confidence, named when the record has it.
+        let op_point =
+            pr_caption(mm.as_ref().and_then(|x| x.best_f1_conf), head_ds.as_ref().map_or("val", |(_, s)| *s));
         let tile = |content: gpui::Div| {
             div()
                 .flex_grow()
@@ -390,8 +388,10 @@ impl FoloApp {
                         )
                         .child(text(ty::XS, t.text_tertiary).whitespace_nowrap().ellipsis().child(
                             match &head_ds {
-                                Some((d, split)) => format!("IoU 0.50–0.95 · {d} {split}"),
-                                None => "IoU 0.50–0.95 · validation split".to_string(),
+                                Some((d, split)) => {
+                                    format!("IoU 0.50–0.95 · {}", split_label(d, split, None))
+                                }
+                                None => "IoU 0.50–0.95".to_string(),
                             },
                         )),
                 ),
@@ -404,20 +404,27 @@ impl FoloApp {
                 Some(text(ty::XS, t.text_tertiary).child("IoU 0.50")),
             )))
             .child(vline(&t))
-            // One tile for the pair, as on the run page; its caption stays on one line.
-            .child(tile(small(
-                "Precision / Recall",
-                mm.as_ref().map_or("–".into(), |x| format!("{:.3} / {:.3}", x.precision, x.recall)),
-                "",
-                // Two deliberate lines: where on the curve, then the match rule.
-                Some(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .child(text(ty::XS, t.text_tertiary).whitespace_nowrap().child(op_point.clone()))
-                        .child(text(ty::XS, t.text_tertiary).whitespace_nowrap().child("IoU 0.50")),
-                ),
-            )))
+            // The same pair and caption as the run page (ui::metric_pair, ui::pr_caption).
+            .child(tile(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.))
+                    .min_w_0()
+                    .child(caption(&t, "Precision / Recall"))
+                    .child(
+                        div().h(px(ty::X3XL.line)).flex().items_end().child(
+                            metric_pair(
+                                &t,
+                                ty::XL,
+                                mm.as_ref().map_or("–".into(), |x| format!("{:.3}", x.precision)),
+                                mm.as_ref().map_or("–".into(), |x| format!("{:.3}", x.recall)),
+                            )
+                            .pb(px(baseline_lift(ty::X3XL, ty::XL))),
+                        ),
+                    )
+                    .child(text(ty::XS, t.text_tertiary).ellipsis().child(op_point.clone())),
+            ))
             .child(vline(&t))
             .child(tile(small(
                 "Parameters",
@@ -1095,7 +1102,7 @@ impl FoloApp {
             .as_ref()
             .and_then(|r| self.store.run(r))
             .and_then(|r| self.store.dataset_summary(&r.config.dataset_id))
-            .map(|d| (d.name.clone(), if d.splits.val == 0 { "Train" } else { "Validation" }));
+            .map(|d| (d.name.clone(), if d.splits.val == 0 { "train" } else { "val" }));
         let seg = self.segmented(
             "cm-norm",
             &["Row %", "Counts"],
@@ -1465,7 +1472,7 @@ impl FoloApp {
                             text(ty::XS, t.text_tertiary)
                                 .tnum()
                                 .child(match &eval_ds {
-                                    Some((d, split)) => format!("{split} · {d} · {} images", int(ev.images as u64)),
+                                    Some((d, split)) => split_label(d, split, Some(ev.images as u64)),
                                     // Unknown dataset: the split isn't known either.
                                     None => format!("Evaluation · {} images", int(ev.images as u64)),
                                 }),
