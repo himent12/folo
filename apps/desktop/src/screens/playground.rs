@@ -502,6 +502,8 @@ impl FoloApp {
         // An end-to-end model (the run that trained it had the one-to-one head) predicts without NMS,
         // so its IoU setting does nothing.
         let e2e = model.as_ref().is_some_and(|m| self.model_e2e(m));
+        // The built-in demo's numbers are simulated: its timing says so.
+        let simulated = self.play_target.is_none() && !self.store.api.local_inference();
         let ids: Vec<String> = models.iter().map(|m| m.id.clone()).collect();
         let select = self.select(
             "play-model",
@@ -785,17 +787,18 @@ impl FoloApp {
                                     .flex()
                                     .items_baseline()
                                     .gap(px(6.))
+                                    // Where the number comes from: the built-in demo simulates it; a
+                                    // server or this app times one image (not sustained throughput).
                                     .child(
                                         text(ty::SM, t.text_secondary)
                                             .font_weight(FontWeight::MEDIUM)
                                             .flex_none()
-                                            .child("Latency"),
+                                            .child(if simulated { "Simulated latency" } else { "Latency" }),
                                     )
                                     .child(text(ty::XS, t.text_tertiary).tnum().min_w_0().truncate().child(
                                         format!(
-                                            "{} · {:.0} fps",
+                                            "{} · one image",
                                             device_name(&p.device, self.store.system.ready()),
-                                            1000. / total
                                         ),
                                     )),
                             )

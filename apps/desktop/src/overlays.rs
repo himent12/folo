@@ -600,6 +600,26 @@ impl FoloApp {
         let error = f.error.clone();
         let submitting = f.submitting;
         let ds = datasets.get(ds_i).cloned();
+        // Advanced: what differs from a fresh form's defaults, so a collapsed group still says
+        // what it will do. Open while one of its fields needs fixing.
+        let adv_summary = {
+            let mut changed: Vec<String> = Vec::new();
+            if f.e2e {
+                changed.push("end-to-end".into());
+            }
+            if opt != 0 {
+                changed.push(format!("{} at {lr0}", OPT_LABELS[opt]));
+            }
+            if f.amp {
+                changed.push("mixed precision".into());
+            }
+            let aug = mosaic != 1.0 || mixup != 0.0 || fliplr != 0.5 || f.scale != 0.5;
+            if aug {
+                changed.push("custom augmentation".into());
+            }
+            if changed.is_empty() { "Defaults".to_string() } else { changed.join(" · ") }
+        };
+        let adv_open = f.advanced || f.lr_invalid;
         // A Mixed precision switch that held focus when it became blocked (the device changed by
         // key, or the server's answer arrived) has no focus stop any more: focus moves to the
         // control before it, so keys keep working. Before the controls are built, so that one
@@ -979,60 +999,8 @@ impl FoloApp {
                         }),
                     ),
             )
-            // The head: one-to-many with NMS (the default), or the end-to-end head that predicts
-            // without it. A model property, so it closes the Model section.
-            .child({
-                let e2e = self.new_run.as_ref().is_some_and(|f| f.e2e);
-                let switch = self
-                    .switch(
-                        "nr-e2e",
-                        e2e,
-                        window,
-                        cx,
-                        act(|this, _, cx| {
-                            if let Some(f) = this.new_run.as_mut() {
-                                f.e2e = !f.e2e;
-                                cx.notify();
-                            }
-                        }),
-                    )
-                    .into_any_element();
-                div()
-                    // The left column's width (the 16 px gap halved off), so the switch sits by its
-                    // label, not across a two-column dialog.
-                    .w(gpui::relative(0.5))
-                    .pr(px(8.))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap(px(16.))
-                    .child(
-                        // The label toggles too (the switch keeps the one Tab stop).
-                        div()
-                            .id("nr-e2e-label")
-                            .cursor_pointer()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                if let Some(f) = this.new_run.as_mut() {
-                                    f.e2e = !f.e2e;
-                                    cx.notify();
-                                }
-                            }))
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .gap(px(2.))
-                            .child(label("End-to-end (no NMS)"))
-                            .child(
-                                text(ty::XS, t.text_tertiary)
-                                    .whitespace_normal()
-                                    .child("Predicts boxes directly, with no NMS step"),
-                            ),
-                    )
-                    .child(switch)
-            })
-            // Epochs first (how long it trains, in view at the minimum size), then the optimizer
-            // and the learning rate beside it, which depends on it (Auto sets it).
+            // Basic first: how long it trains. Everything a first run can leave alone sits under
+            // Advanced, collapsed, with a summary of what differs from the defaults.
             .child(section("Schedule"))
             .child(
                 div()
@@ -1069,172 +1037,260 @@ impl FoloApp {
                         ),
                     ),
             )
-            .child(
-                div()
-                    .flex()
-                    .gap(px(16.))
-                    .child(div().flex_1().child(field(
-                        "Optimizer",
-                        opt_seg,
-                        Some(match (opt, &auto_pick) {
-                            (0, Some((kind, _))) => {
-                                format!("Auto: {kind} for this run, at its own learning rate")
-                            }
-                            (0, None) => "Auto: SGD for long runs, else AdamW".to_string(),
-                            (1, _) => "SGD with Nesterov momentum 0.937".to_string(),
-                            _ => "AdamW with weight decay".to_string(),
-                        }),
-                    )))
-                    .child(
-                        div()
-                            .flex_1()
-                            .flex()
-                            .flex_col()
-                            .gap(px(8.))
-                            // Under Auto the engine sets the rate itself: the field shows that rate,
-                            // read-only, instead of an editable value it would ignore.
-                            .child(if opt == 0 {
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap(px(8.))
-                                    .child(label("Initial learning rate"))
-                                    .child(
-                                        div()
-                                            .h(px(crate::theme::size::CONTROL_MD))
-                                            .px(px(8.))
-                                            .flex()
-                                            .items_center()
-                                            .rounded(px(radius::MD))
-                                            // A value, not an input: an outline, no well.
-                                            .border_1()
-                                            .border_color(t.line_subtle)
-                                            .child(text(ty::SM, t.text_tertiary).tnum().child(
-                                                match &auto_pick {
-                                                    Some((_, lr)) => format!("Auto · {lr}"),
-                                                    None => "Auto".to_string(),
-                                                },
-                                            )),
-                                    )
-                                    .into_any_element()
-                            } else {
-                                typed(
-                                    "Initial learning rate",
-                                    lr_box,
-                                    lr_slider,
-                                    lr_bad
-                                        .then_some("Enter a number above 0 and below 10, e.g. 0.01 or 1e-3"),
-                                )
-                                .into_any_element()
-                            })
-                            // The schedule (short windows keep the Schedule above the footer).
-                            .when(!short && !lr_bad, |d| {
-                                d.child(text(ty::XS, t.text_tertiary).child(if opt == 0 {
-                                    "Set by Auto; pick SGD or AdamW to choose your own"
-                                } else {
-                                    "3-epoch warmup, then linear decay to 1%"
-                                }))
-                            }),
-                    ),
-            )
-            // Mixed precision: f16 on tensor cores. The server says whether its GPU can
-            // (`capabilities.amp`); when it can't, the switch is off and inert with its reason. An older
-            // server can't say, so the requirement is stated and a run's failure tells.
             .child({
-                let blocked = self.amp_blocked(DEVICES[device]);
-                let off = blocked.is_some();
-                let amp_on = amp && !off;
-                // Blocked: a disabled switch (no hover, press or focus stop); the reason is beside it.
-                let switch = if off {
-                    self.switch_disabled("nr-amp", cx).into_any_element()
-                } else {
-                    self.switch(
-                        "nr-amp",
-                        amp_on,
-                        window,
-                        cx,
-                        act(move |this, _, cx| {
-                            if let Some(f) = this.new_run.as_mut() {
-                                f.amp = !f.amp;
-                                cx.notify();
-                            }
-                        }),
-                    )
-                    .into_any_element()
-                };
-                div()
-                    // The left column's width (the 16 px gap halved off), so the switch sits by its
-                    // label, not across a two-column dialog.
-                    .w(gpui::relative(0.5))
-                    .pr(px(8.))
+                let open = adv_open;
+                let hdr = div()
+                    .id("nr-adv")
                     .flex()
                     .items_center()
-                    .justify_between()
-                    .gap(px(16.))
-                    .child(
-                        // The label toggles too when the switch can (it keeps the one Tab stop).
-                        div()
-                            .id("nr-amp-label")
-                            .when(!off, |d| {
-                                d.cursor_pointer().on_click(cx.listener(|this, _, _, cx| {
+                    .gap(px(8.))
+                    .py(px(4.))
+                    .border_t_1()
+                    .border_color(t.line_subtle)
+                    .pt(px(14.))
+                    .cursor_pointer()
+                    .child(icon(
+                        if open { "icons/chevron-down.svg" } else { "icons/chevron-right.svg" },
+                        14.,
+                        t.text_secondary,
+                    ))
+                    .child(text(ty::MD, t.text_primary).font_weight(FontWeight::SEMIBOLD).child("Advanced"))
+                    .child(text(ty::XS, t.text_tertiary).min_w_0().truncate().child(adv_summary.clone()));
+                self.bind(
+                    hdr,
+                    "nr-adv",
+                    radius::SM,
+                    window,
+                    cx,
+                    act(|this, _, cx| {
+                        if let Some(f) = this.new_run.as_mut() {
+                            f.advanced = !f.advanced;
+                            cx.notify();
+                        }
+                    }),
+                )
+            })
+            .when(adv_open, |d| {
+                d
+                // The head: one-to-many with NMS (the default), or the end-to-end head that predicts
+                // without it. It leads Advanced, as the model property among them.
+                .child({
+                    let e2e = self.new_run.as_ref().is_some_and(|f| f.e2e);
+                    let switch = self
+                        .switch(
+                            "nr-e2e",
+                            e2e,
+                            window,
+                            cx,
+                            act(|this, _, cx| {
+                                if let Some(f) = this.new_run.as_mut() {
+                                    f.e2e = !f.e2e;
+                                    cx.notify();
+                                }
+                            }),
+                        )
+                        .into_any_element();
+                    div()
+                        // The left column's width (the 16 px gap halved off), so the switch sits by its
+                        // label, not across a two-column dialog.
+                        .w(gpui::relative(0.5))
+                        .pr(px(8.))
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(16.))
+                        .child(
+                            // The label toggles too (the switch keeps the one Tab stop).
+                            div()
+                                .id("nr-e2e-label")
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _, _, cx| {
                                     if let Some(f) = this.new_run.as_mut() {
-                                        f.amp = !f.amp;
+                                        f.e2e = !f.e2e;
                                         cx.notify();
                                     }
                                 }))
-                            })
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .gap(px(2.))
-                            .child(label("Mixed precision"))
-                            .child(
-                                // The server's reason is plain text (a backtick in it is literal); only
-                                // the stated need carries a code chip.
-                                match blocked {
-                                    Some(why) => text(ty::XS, t.text_tertiary).whitespace_normal().child(why),
-                                    // The server confirmed it can; an older one can't say, so the need is stated.
-                                    None if self.store.capabilities.is_some() => {
-                                        text(ty::XS, t.text_tertiary).whitespace_normal().child(
-                                            "Trains in f16 on this server's tensor cores: about 40% less GPU memory (at 640 px, not faster)",
+                                .flex_1()
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                .gap(px(2.))
+                                .child(label("End-to-end (no NMS)"))
+                                .child(
+                                    text(ty::XS, t.text_tertiary)
+                                        .whitespace_normal()
+                                        .child("Predicts boxes directly, with no NMS step"),
+                                ),
+                        )
+                        .child(switch)
+                })
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(16.))
+                        .child(div().flex_1().child(field(
+                            "Optimizer",
+                            opt_seg,
+                            Some(match (opt, &auto_pick) {
+                                (0, Some((kind, _))) => {
+                                    format!("Auto: {kind} for this run, at its own learning rate")
+                                }
+                                (0, None) => "Auto: SGD for long runs, else AdamW".to_string(),
+                                (1, _) => "SGD with Nesterov momentum 0.937".to_string(),
+                                _ => "AdamW with weight decay".to_string(),
+                            }),
+                        )))
+                        .child(
+                            div()
+                                .flex_1()
+                                .flex()
+                                .flex_col()
+                                .gap(px(8.))
+                                // Under Auto the engine sets the rate itself: the field shows that rate,
+                                // read-only, instead of an editable value it would ignore.
+                                .child(if opt == 0 {
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap(px(8.))
+                                        .child(label("Initial learning rate"))
+                                        .child(
+                                            div()
+                                                .h(px(crate::theme::size::CONTROL_MD))
+                                                .px(px(8.))
+                                                .flex()
+                                                .items_center()
+                                                .rounded(px(radius::MD))
+                                                // A value, not an input: an outline, no well.
+                                                .border_1()
+                                                .border_color(t.line_subtle)
+                                                .child(text(ty::SM, t.text_tertiary).tnum().child(
+                                                    match &auto_pick {
+                                                        Some((_, lr)) => format!("Auto · {lr}"),
+                                                        None => "Auto".to_string(),
+                                                    },
+                                                )),
                                         )
-                                    }
-                                    None => rich(
-                                        &t,
-                                        ty::XS,
-                                        t.text_tertiary,
-                                        "Trains in f16 on tensor cores; needs `folo serve --tensor-cores`",
+                                        .into_any_element()
+                                } else {
+                                    typed(
+                                        "Initial learning rate",
+                                        lr_box,
+                                        lr_slider,
+                                        lr_bad
+                                            .then_some("Enter a number above 0 and below 10, e.g. 0.01 or 1e-3"),
                                     )
-                                    .text_left(),
-                                },
-                            ),
-                    )
-                    .child(switch)
+                                    .into_any_element()
+                                })
+                                // The schedule (short windows keep the Schedule above the footer).
+                                .when(!short && !lr_bad, |d| {
+                                    d.child(text(ty::XS, t.text_tertiary).child(if opt == 0 {
+                                        "Set by Auto; pick SGD or AdamW to choose your own"
+                                    } else {
+                                        "3-epoch warmup, then linear decay to 1%"
+                                    }))
+                                }),
+                        ),
+                )
+                // Mixed precision: f16 on tensor cores. The server says whether its GPU can
+                // (`capabilities.amp`); when it can't, the switch is off and inert with its reason. An older
+                // server can't say, so the requirement is stated and a run's failure tells.
+                .child({
+                    let blocked = self.amp_blocked(DEVICES[device]);
+                    let off = blocked.is_some();
+                    let amp_on = amp && !off;
+                    // Blocked: a disabled switch (no hover, press or focus stop); the reason is beside it.
+                    let switch = if off {
+                        self.switch_disabled("nr-amp", cx).into_any_element()
+                    } else {
+                        self.switch(
+                            "nr-amp",
+                            amp_on,
+                            window,
+                            cx,
+                            act(move |this, _, cx| {
+                                if let Some(f) = this.new_run.as_mut() {
+                                    f.amp = !f.amp;
+                                    cx.notify();
+                                }
+                            }),
+                        )
+                        .into_any_element()
+                    };
+                    div()
+                        // The left column's width (the 16 px gap halved off), so the switch sits by its
+                        // label, not across a two-column dialog.
+                        .w(gpui::relative(0.5))
+                        .pr(px(8.))
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(16.))
+                        .child(
+                            // The label toggles too when the switch can (it keeps the one Tab stop).
+                            div()
+                                .id("nr-amp-label")
+                                .when(!off, |d| {
+                                    d.cursor_pointer().on_click(cx.listener(|this, _, _, cx| {
+                                        if let Some(f) = this.new_run.as_mut() {
+                                            f.amp = !f.amp;
+                                            cx.notify();
+                                        }
+                                    }))
+                                })
+                                .flex_1()
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                .gap(px(2.))
+                                .child(label("Mixed precision"))
+                                .child(
+                                    // The server's reason is plain text (a backtick in it is literal); only
+                                    // the stated need carries a code chip.
+                                    match blocked {
+                                        Some(why) => text(ty::XS, t.text_tertiary).whitespace_normal().child(why),
+                                        // The server confirmed it can; an older one can't say, so the need is stated.
+                                        None if self.store.capabilities.is_some() => {
+                                            text(ty::XS, t.text_tertiary).whitespace_normal().child(
+                                                "Trains in f16 on this server's tensor cores: about 40% less GPU memory (at 640 px, not faster)",
+                                            )
+                                        }
+                                        None => rich(
+                                            &t,
+                                            ty::XS,
+                                            t.text_tertiary,
+                                            "Trains in f16 on tensor cores; needs `folo serve --tensor-cores`",
+                                        )
+                                        .text_left(),
+                                    },
+                                ),
+                        )
+                        .child(switch)
+                })
+                .child(section("Augmentation"))
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(16.))
+                        .child(div().flex_1().child(valued("Mosaic", format!("{mosaic:.2}"), mosaic_slider)))
+                        .child(div().flex_1().child(valued("Mixup", format!("{mixup:.2}"), mixup_slider))),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(16.))
+                        .child(div().flex_1().child(valued(
+                            "Horizontal flip",
+                            format!("{fliplr:.2}"),
+                            flip_slider,
+                        )))
+                        .child(div().flex_1().child(valued(
+                            "Scale jitter",
+                            format!("±{scale:.2}"),
+                            scale_slider,
+                        ))),
+                )
             })
-            .child(section("Augmentation"))
-            .child(
-                div()
-                    .flex()
-                    .gap(px(16.))
-                    .child(div().flex_1().child(valued("Mosaic", format!("{mosaic:.2}"), mosaic_slider)))
-                    .child(div().flex_1().child(valued("Mixup", format!("{mixup:.2}"), mixup_slider))),
-            )
-            .child(
-                div()
-                    .flex()
-                    .gap(px(16.))
-                    .child(div().flex_1().child(valued(
-                        "Horizontal flip",
-                        format!("{fliplr:.2}"),
-                        flip_slider,
-                    )))
-                    .child(div().flex_1().child(valued(
-                        "Scale jitter",
-                        format!("±{scale:.2}"),
-                        scale_slider,
-                    ))),
-            )
             .when_some(note, |d, n| {
                 d.child(
                     div()

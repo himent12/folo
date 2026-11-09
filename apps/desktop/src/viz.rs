@@ -332,10 +332,16 @@ pub fn paint_image_with_boxes(
                     let open = |o: &Point<Pixels>| fits(*o) && free(&Bounds::new(*o, size(cw, ch)));
                     // First a spot clear of every other outline (skipped on very dense images, where
                     // it costs a scan of every box per spot); in a cluster with none, any free spot.
-                    let free_spot = (order.len() <= 256)
+                    let dense = order.len() > 256;
+                    let clear = (!dense)
                         .then(|| spots.clone().find(|o| open(o) && !crosses(&Bounds::new(*o, size(cw, ch)))))
-                        .flatten()
-                        .or_else(|| spots.clone().find(open));
+                        .flatten();
+                    // A chip on a neighbour's outline can read as the neighbour's. Thumbnails, too
+                    // small to tell, leave such a box unlabelled (the inspector names it); larger
+                    // views keep the first free spot, where the chip's corner still meets its box.
+                    let free_spot = clear.or_else(|| {
+                        (dense || !compact || b.highlight).then(|| spots.clone().find(open)).flatten()
+                    });
                     // Nowhere free: skip this chip (the selected box's chip always shows), so two
                     // chips never paint over each other.
                     let Some(origin) = free_spot.or_else(|| {

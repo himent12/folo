@@ -140,11 +140,14 @@ impl FoloApp {
                         let id = m.id.clone();
                         let key = format!("model-row-{}", m.id);
                         let ids_k = ids.clone();
-                        // Keyboard focus shows what hover does: the full name and the exact time.
+                        // Keyboard focus shows what hover does: the full name, the exact time, and
+                        // what the e2e tag means.
+                        let e2e = self.model_e2e(m);
                         let focus_text = self.ring(&self.fh(key.clone(), cx), window).then(|| {
-                            time::parse(&m.created).map_or(m.name.clone(), |c| {
+                            let base = time::parse(&m.created).map_or(m.name.clone(), |c| {
                                 format!("{} · created {}", m.name, time::local_datetime(c))
-                            })
+                            });
+                            if e2e { base + " · end-to-end head: predicts without NMS" } else { base }
                         });
                         let row = cols(div().id(SharedString::from(key.clone())))
                             .when_some(focus_text, |d, s| d.child(crate::controls::focus_tip(&t, s, 36.)))

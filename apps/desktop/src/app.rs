@@ -250,6 +250,8 @@ pub struct NewRunForm {
     pub amp: bool,
     /// The NMS-free end-to-end head (`head: o2o`); off is the default one-to-many head.
     pub e2e: bool,
+    /// The Advanced group (head, optimizer, mixed precision, augmentation) is open.
+    pub advanced: bool,
     _subs: Vec<Subscription>,
     pub submitting: bool,
     pub error: Option<ApiError>,
@@ -1679,6 +1681,7 @@ impl FoloApp {
             close_invalid: false,
             amp: false,
             e2e: false,
+            advanced: false,
             epochs_invalid: false,
             lr_invalid: false,
             _subs: subs,
@@ -2114,7 +2117,7 @@ impl FoloApp {
             Some(if self.store.runs.error().is_some() {
                 "Not connected"
             } else {
-                "Models didn't load: retry under Best models"
+                "Models didn't load: retry under Best model per dataset"
             })
         } else if self.store.models.ready().is_none() {
             Some("Loading models…")
