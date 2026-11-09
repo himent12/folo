@@ -34,7 +34,7 @@
 
 <!-- The rail is the shell's column: it runs the page's full height (its fill and edge reach the bottom of a long page,
      full-page captures included), and the navigation sticks to the viewport inside it. -->
-<div class="rail" class:collapsed>
+<div class="shell-rail" class:collapsed>
 <nav class="sidebar" aria-label="Main">
   <div class="head">
     <a href={href('/')} class="brand" aria-label="FOLO Studio home"><Logo wordmark={!collapsed} /></a>
@@ -69,7 +69,7 @@
 </div>
 
 <style>
-  .rail {
+  .shell-rail {
     width: var(--size-sidebar);
     flex-shrink: 0;
     background: var(--bg-app);
@@ -77,7 +77,7 @@
     z-index: var(--z-sidebar);
     transition: width var(--dur-slow) var(--ease-standard);
   }
-  .rail.collapsed {
+  .shell-rail.collapsed {
     width: var(--size-sidebar-collapsed);
   }
   .sidebar {

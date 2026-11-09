@@ -131,10 +131,14 @@
   [role='menuitem'] :global(svg) {
     color: var(--text-tertiary);
   }
-  [role='menuitem']:hover,
+  [role='menuitem']:hover {
+    background: var(--bg-hover);
+  }
+  /* Keyboard focus is its own mark (an inset ring in the focus colour), not the faint hover fill. */
   [role='menuitem']:focus-visible {
     background: var(--bg-hover);
-    outline: none;
+    outline: var(--size-focus-ring) solid var(--focus);
+    outline-offset: -2px;
   }
   [role='menuitem'].danger,
   [role='menuitem'].danger :global(svg) {
