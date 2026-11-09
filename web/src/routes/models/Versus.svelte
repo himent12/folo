@@ -10,7 +10,7 @@
    * keep the table's semantics through the grid layout.
    */
   import { tick } from 'svelte';
-  import { advantage, BENCH_SOURCE, versusYolo26n, type Versus } from '$lib/benchmarks';
+  import { advantage, BENCH_SOURCE, unlike, versusYolo26n, type Versus } from '$lib/benchmarks';
   import { num } from '$lib/format';
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import Panel from '$lib/ui/Panel.svelte';
@@ -25,20 +25,8 @@
   }
   const caveats = versusYolo26n.filter((v) => v.caveat);
 
-  /**
-   * What keeps a row from being like for like (docs/BENCHMARKS.md, the rows' notes and caveats): the two engines ran
-   * at different numeric precision, or did different work (NMS over untrained weights' few candidates, a train step
-   * against a whole trainer, a machine under other load).
-   */
-  const DIFFERS: Record<string, ('precision' | 'workload')[]> = {
-    'GPU forward throughput, batch 16': ['precision'],
-    'GPU end to end, batch 1': ['workload'],
-    'GPU end-to-end throughput, batch 16': ['precision', 'workload'],
-    'CPU forward, batch 1': ['workload'],
-    'CPU end to end, batch 1': ['workload'],
-    'Training peak GPU memory': ['workload'],
-  };
-  const differs = (v: Versus) => DIFFERS[v.metric] ?? [];
+  // What keeps a row from being like for like: one list, lib/benchmarks.ts `unlike` (Models' summary counts it too).
+  const differs = (v: Versus) => unlike[v.metric] ?? [];
   const mixed = versusYolo26n.filter((v) => differs(v).length).length;
 
   let how = $state<HTMLDetailsElement>();
