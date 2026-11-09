@@ -7,7 +7,7 @@
   import { Resource } from '$lib/api/resource.svelte';
   import type { Model, Run, RunStatus } from '$lib/api/types';
   import RunSpark from '$lib/charts/RunSpark.svelte';
-  import { ago, duration, metric } from '$lib/format';
+  import { ago, metric } from '$lib/format';
   import { failureCause } from '$lib/oom';
   import { tooltip } from '$lib/ui/tooltip';
   import { href, router } from '$lib/router.svelte';
@@ -26,6 +26,7 @@
   import StatusBadge from '$lib/ui/StatusBadge.svelte';
   import TableState from '$lib/ui/TableState.svelte';
   import Gate from '$lib/ui/Gate.svelte';
+  import Ident from '$lib/ui/Ident.svelte';
   import { isOffline, OFFLINE_REASON } from '$lib/ui/offline';
   import { origin } from '$lib/lineage';
 
@@ -48,7 +49,7 @@
   const models = new Resource((s) => hub.api.models(s));
   const modelById = $derived(new Map<string, Model>((models.data ?? []).map((m) => [m.id, m])));
   /** Columns of the desktop table (for state rows that span it). */
-  const COLS = 11;
+  const COLS = 10;
 
   let filter = $state<Filter>((router.route.query.get('status') as Filter | null) ?? 'all');
   let query = $state('');
@@ -71,12 +72,6 @@
     selected = selected.includes(id) ? selected.filter((x) => x !== id) : selected.length >= 4 ? selected : [...selected, id];
   }
 
-  function elapsed(r: Run): number | null {
-    if (!r.started) return null;
-    const end = r.finished ? Date.parse(r.finished) : Date.now();
-    return (end - Date.parse(r.started)) / 1000;
-  }
-
   // Progress bars stay neutral; only a live run's bar carries the accent ("now"). Status is the dot beside it.
   const STATUS: Record<Run['status'], string> = {
     queued: 'Queued',
@@ -87,8 +82,6 @@
     failed: 'Failed',
   };
   const tone = (r: Run) => (r.status === 'running' ? 'accent' : 'neutral');
-  /** "From scratch" as a value of its own (capital F), "from <model>" after the dataset and model. */
-  const fromText = (from: ReturnType<typeof origin>) => (from.kind === 'scratch' ? 'from scratch' : `from ${from.label}`);
   // Nothing answers: the actions that need the server are disabled and say why (as on Datasets).
   const offline = $derived(!runs.data && isOffline(runs.error));
 </script>
@@ -117,8 +110,8 @@
   {/snippet}
 
   <!-- Filters only with runs to filter (or while they load): not over an empty or failed list, as on Models and Datasets. -->
-  {#if runs.data ? runs.data.length > 0 : !runs.error}<div class="toolbar">
-    <Segmented
+  {#if runs.data ? runs.data.length > 0 : !runs.error}<div class="list-toolbar">
+    <div class="lt-filter"><Segmented
       label="Filter runs by status"
       bind:value={filter}
       options={[
@@ -127,13 +120,13 @@
         { value: 'completed', label: 'Finished', meta: runs.data ? String(count('completed')) : undefined },
         { value: 'failed', label: 'Failed', meta: runs.data ? String(count('failed')) : undefined },
       ]}
-    />
-    <div class="search"><Input icon={Search} bind:value={query} placeholder="Filter by name, model or dataset" aria-label="Filter runs" /></div>
+    /></div>
+    <div class="lt-search"><Input icon={Search} bind:value={query} placeholder="Filter by name, model or dataset" aria-label="Filter runs" /></div>
   </div>{/if}
 
   <Panel pad="none">
     <!-- One table frame for every state: the header row stays, and an empty or failed list says so inside it. -->
-    <div class="scroll" class:state={!runs.data?.length || shown.length === 0}>
+    <div class="scroll" class:state={runs.data ? shown.length === 0 : !!runs.error}>
       <!-- Row checkboxes show on hover and focus, on selected rows, and on every row once one is selected (picking). -->
       <table
         class="table runs"
@@ -153,7 +146,6 @@
             <th>Progress</th>
             <th class="r">Best mAP50-95</th>
             <th class="hide-lg">mAP trend</th>
-            <th class="r hide-xl">Duration</th>
             <th class="r hide-md">Created</th>
           </tr>
         </thead>
@@ -172,7 +164,6 @@
                 <td><div class="prog"><Skeleton h="4px" /><span><Skeleton w="40px" h="10px" /></span></div></td>
                 <td class="r"><Skeleton w="72px" h="12px" /></td>
                 <td class="hide-lg"><Skeleton w="96px" h="12px" /></td>
-                <td class="r hide-xl"><Skeleton w="48px" h="12px" /></td>
                 <td class="r hide-md"><Skeleton w="56px" h="12px" /></td>
               </tr>
             {/each}
@@ -208,20 +199,20 @@
                 </td>
                 <td class="lead">
                   <a class="name" href={href(`/runs/${r.id}`)} onclick={(e) => e.stopPropagation()}>{r.name}</a>
-                  <span class="sub ctx">{dsName.get(r.config.dataset_id) ?? r.config.dataset_id} · <span class="mono">{r.config.arch}</span> · {fromText(from)}</span>
+                  <span class="sub ctx">{dsName.get(r.config.dataset_id) ?? r.config.dataset_id} · <Ident value={r.config.arch} /> · {#if from.kind === 'scratch'}from scratch{:else}from <Ident value={from.label} />{/if}</span>
                 </td>
                 <td use:tooltip={failureCause(r)}><StatusBadge status={r.status} plain /></td>
                 <td class="hide-lg muted">{dsName.get(r.config.dataset_id) ?? r.config.dataset_id}</td>
-                <td class="hide-lg"><span class="mono muted">{r.config.arch}</span></td>
+                <td class="hide-lg"><Ident value={r.config.arch} class="muted" /></td>
                 <td class="hide-lg from">
                   {#if from.kind === 'model' && modelById.has(from.id)}
-                    <a href={href(`/models/${from.id}`)} onclick={(e) => e.stopPropagation()}>{from.label}</a>
+                    <Ident value={from.label} href={href(`/models/${from.id}`)} onclick={(e) => e.stopPropagation()} />
                   {:else if from.kind === 'file'}
-                    <span class="mono" title={from.path}>{from.label}</span>
+                    <Ident value={from.label} title={from.path} />
                   {:else if from.kind === 'scratch'}
                     <span class="faint">From scratch</span>
                   {:else}
-                    <span class="faint">{from.label}</span>
+                    <Ident value={from.label} class="faint" />
                   {/if}
                 </td>
                 <td>
@@ -235,7 +226,6 @@
                   {#if r.best}<span class="faint" title="Best epoch">ep {r.best.epoch}</span>{/if}
                 </td>
                 <td class="hide-lg"><RunSpark run={r} width={96} /></td>
-                <td class="r num faint hide-xl">{r.status === 'queued' ? '—' : duration(elapsed(r))}</td>
                 <td class="r faint hide-md">{ago(r.created)}</td>
               </tr>
             {/each}
@@ -288,6 +278,18 @@
           </li>
         {/each}
       </ul>
+    {:else if !runs.data && !runs.error}
+      <!-- Phones, loading: the stacked rows' shape (name over one meta line, the score on the right). -->
+      <ul class="rows sk" aria-hidden="true">
+        {#each [0, 1, 2, 3, 4] as i (i)}
+          <li>
+            <span class="r-main">
+              <span class="r-text"><Skeleton w="55%" h="14px" /><Skeleton w="75%" h="10px" /></span>
+              <span class="r-end"><Skeleton w="40px" h="14px" /></span>
+            </span>
+          </li>
+        {/each}
+      </ul>
     {/if}
   </Panel>
 </Page>
@@ -295,17 +297,6 @@
 <style>
   .compare {
     display: contents;
-  }
-  .toolbar {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--space-3);
-    flex-wrap: wrap;
-  }
-  .search {
-    width: 280px;
-    max-width: 100%;
   }
   .scroll {
     overflow-x: auto;
@@ -369,15 +360,15 @@
   .name {
     display: block;
   }
-  .from a,
-  .from .mono {
+  .from :global(.ident) {
     color: var(--text-secondary);
   }
   .prog {
     display: flex;
     align-items: center;
     gap: var(--space-2);
-    width: 140px;
+    /* One width at every tier. */
+    width: 112px;
   }
   .prog span {
     font-size: var(--type-sm-size);
@@ -403,7 +394,7 @@
   .ctx {
     display: none;
   }
-  /* Below 1280 the Dataset, Model and Started from columns hide (.hide-lg, base.css). */
+  /* Below 1280 the Dataset, Model, Started from, and trend columns hide (.hide-lg, base.css). */
   @media (max-width: 1279px) {
     .ctx {
       display: block;
@@ -413,13 +404,7 @@
       height: 48px;
     }
   }
-  /* Below 1024 Created hides too (.hide-md) and the bar narrows, so the table fits from 768 px up, checkbox gutter
-     included. */
-  @media (max-width: 1023px) {
-    .prog {
-      width: 112px;
-    }
-  }
+  /* Below 1024 Created hides too (.hide-md), so the table fits from 768 px up, checkbox gutter included. */
   @media (max-width: 767px) {
     /* Phones show the stacked rows below; the table frame stays only to hold an empty or error state. */
     .scroll:not(.state),
@@ -503,6 +488,9 @@
       font-size: var(--type-sm-size);
       color: var(--text-tertiary);
     }
+    .sk .r-text {
+      gap: var(--space-2);
+    }
     .r-end {
       flex-shrink: 0;
       display: grid;
@@ -525,9 +513,6 @@
       height: 2px;
       transform-origin: left;
       background: var(--accent-line);
-    }
-    .search {
-      width: 100%;
     }
   }
 </style>

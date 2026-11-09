@@ -24,6 +24,7 @@
   import ErrorState from '$lib/ui/ErrorState.svelte';
   import Skeleton from '$lib/ui/Skeleton.svelte';
   import StatusBadge from '$lib/ui/StatusBadge.svelte';
+  import Ident from '$lib/ui/Ident.svelte';
   import { toast } from '$lib/ui/toast.svelte';
   import ConfigPanel from './run/ConfigPanel.svelte';
   import Logs from './run/Logs.svelte';
@@ -65,11 +66,7 @@
   const section = $derived<Section>(picked ?? (queuedOnly ? 'config' : 'samples'));
   const models = new Resource((s) => hub.api.models(s));
   /** Where the run started: "From scratch", or the model / file it was fine-tuned from (one reading, $lib/lineage). */
-  const lineage = $derived.by(() => {
-    if (!run) return '';
-    const o = origin(run.config.weights, models.data ?? []);
-    return o.kind === 'scratch' ? 'From scratch' : `Fine-tuned from ${o.label}`;
-  });
+  const lineage = $derived(run ? origin(run.config.weights, models.data ?? []) : null);
   let stopOpen = $state(false);
   let deleteOpen = $state(false);
   let busy = $state(false);
@@ -204,17 +201,17 @@
   <Page title={run.name} inlineActions>
     {#snippet lead()}
       <StatusBadge status={run.status} />
-      <span class="mono faint id">{run.id}</span>
+      <Ident value={run.id} class="faint id" />
       <!-- Phones: the time joins the status, so the meta line below fits one row. -->
       <span class="faint when-phone">{run.started ? `started ${ago(run.started)}` : `created ${ago(run.created)}`}</span>
       {#if live.connection === 'reconnecting'}<Badge tone="warning"><WifiOff size={12} /> Reconnecting</Badge>{/if}
     {/snippet}
     {#snippet sub()}
       <a class="link" href={href(`/datasets/${run.config.dataset_id}`)}>{dataset?.name ?? run.config.dataset_id}</a>
-      <span class="mono">{run.config.arch}</span>
+      <Ident value={run.config.arch} />
       <!-- Phones: size, batch and device are in the Config section; the id is in the URL. -->
       <span class="cfg">{run.config.imgsz} px · batch {run.config.batch}</span>
-      <span class="cfg lineage">{lineage}</span>
+      <span class="cfg lineage">{#if !lineage || lineage.kind === 'scratch'}From scratch{:else}Fine-tuned from <Ident value={lineage.label} title={lineage.kind === 'file' ? lineage.path : undefined} />{/if}</span>
       <span class="truncate dev" title={run.device}>{deviceName(run.device)}</span>
       <span class="faint when">{run.started ? `started ${ago(run.started)}` : `created ${ago(run.created)}`}</span>
     {/snippet}
@@ -252,7 +249,8 @@
       folded={section !== 'samples'}
     />
 
-    <!-- Evidence on the left (what the model sees, what the trainer says); reference in a sticky rail on the right. -->
+    <!-- Evidence on the left (what the model sees, what the trainer says); reference in a rail on the right, the two
+         columns ending together. -->
     <!-- Below 960 px one of these shows at a time, chosen here; wider screens show them all beside a rail. -->
     <div class="phone-pick">
       <Segmented
@@ -314,7 +312,7 @@
   }
   .sk-metrics {
     background: var(--bg-panel);
-    border: 1px solid var(--line-subtle);
+    border: 1px solid var(--line-panel);
     border-radius: var(--radius-lg);
     overflow: hidden;
   }
@@ -367,7 +365,7 @@
   }
   .sk-panel {
     background: var(--bg-panel);
-    border: 1px solid var(--line-subtle);
+    border: 1px solid var(--line-panel);
     border-radius: var(--radius-lg);
     overflow: hidden;
   }
@@ -425,17 +423,17 @@
     grid-template-columns: auto auto;
     justify-content: space-between;
   }
-  @media (max-width: 1199px) {
+  @media (max-width: 1279px) {
     .sk-tabs .sk-cell {
       grid-template-rows: 16px 32px 16px;
       gap: var(--space-1);
-      padding: var(--space-3) var(--space-4);
+      padding: var(--space-3);
     }
     .sk-tiles :global(.sk-tile:nth-child(9)) {
       display: block;
     }
   }
-  @media (max-width: 959px) {
+  @media (max-width: 1023px) {
     .sk-tabs {
       display: none;
     }
@@ -463,7 +461,7 @@
       grid-template-columns: repeat(2, minmax(0, 1fr));
     }
   }
-  .id {
+  :global(.ident.id) {
     font-size: var(--type-sm-size);
   }
   .when-phone {
@@ -497,21 +495,22 @@
   .dev {
     max-width: 320px;
   }
+  /* The two columns end together: each column's last panel takes what the other column adds. Usually the rail is the
+     taller, and the log (at least 200 px) grows to its bottom; under a short rail (few classes) Config's frame runs
+     down to the log's end, as a properties rail runs the page's height. No fixed heights. */
   .detail {
+    --log-h: 200px;
     display: grid;
     grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
     gap: var(--space-4);
-    align-items: start;
+    align-items: stretch;
   }
   .main-col,
   .rail {
     display: grid;
+    grid-template-rows: auto minmax(0, 1fr);
     gap: var(--space-4);
     min-width: 0;
-  }
-  .rail {
-    position: sticky;
-    top: calc(var(--size-topbar) + var(--space-4));
   }
   .part {
     display: grid;
@@ -520,8 +519,8 @@
   .phone-pick {
     display: none;
   }
-  @media (max-width: 959px) {
-    /* Below 960 px the rail no longer fits beside the samples: one section at a time, picked above. */
+  @media (max-width: 1023px) {
+    /* Tablets and phones: the rail no longer fits beside the samples, so one section at a time, picked above. */
     /* The section picker stays reachable while the section scrolls (just under the top bar). */
     .phone-pick {
       display: block;
@@ -545,8 +544,9 @@
     .detail {
       grid-template-columns: minmax(0, 1fr);
     }
-    .rail {
-      position: static;
+    /* One section at a time: the log keeps its own height. */
+    .detail {
+      --log-h: 300px;
     }
   }
   @media (max-width: 767px) {
@@ -560,8 +560,8 @@
     }
     .dev,
     .cfg,
-    .id,
-    .when {
+    .when,
+    :global(.ident.id) {
       display: none;
     }
     .when-phone {

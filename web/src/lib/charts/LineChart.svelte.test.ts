@@ -289,6 +289,23 @@ describe('LineChart round 18', () => {
     unmount(c);
   });
 
+  it('ends each line in its status mark and names the status after the label, which it never cuts', () => {
+    const series = [
+      { id: 'a', label: 'fasteners-s', color: 'red', end: 'live' as const, points: pts((x) => x / 30).slice(0, 12) },
+      { id: 'b', label: 'shapes-hard-s', color: 'blue', end: 'stopped' as const, points: pts((x) => x / 40).slice(0, 20) },
+      { id: 'c', label: 'a-very-long-run-name-indeed', color: 'green', end: 'failed' as const, points: pts((x) => x / 50).slice(0, 8) },
+      { id: 'd', label: 'fasteners-n', color: 'orange', points: pts((x) => x / 35) },
+    ];
+    const { target, c } = mountAt({ series, label: 'cmp', endLabels: true, endDots: true, xDomain: [0, 29] }, 900);
+    expect(target.querySelectorAll('.end-live')).toHaveLength(1);
+    expect(target.querySelectorAll('rect.end-dot')).toHaveLength(1);
+    expect(target.querySelectorAll('path.end-x')).toHaveLength(1);
+    expect(target.querySelectorAll('circle.end-dot')).toHaveLength(2);
+    const labels = [...target.querySelectorAll('.end-label')].map((t) => t.textContent).sort();
+    expect(labels).toEqual(['a-very-long-run-n… · failed', 'fasteners-n', 'fasteners-s · live', 'shapes-hard-s · stopped']);
+    unmount(c);
+  });
+
   it('keeps long labels off a narrow plot', () => {
     const series = [{ id: 'a', label: 'fasteners-s', color: 'red', points: pts((x) => x / 30) }];
     const { target, c } = mountAt({ series, label: 'cmp', endLabels: true }, 340);

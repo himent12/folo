@@ -12,6 +12,7 @@
 </script>
 
 <script lang="ts">
+  import { MediaQuery } from 'svelte/reactivity';
   import ChartSkeleton from '$lib/charts/ChartSkeleton.svelte';
   import { untrack } from 'svelte';
   import GitCompare from '@lucide/svelte/icons/git-compare-arrows';
@@ -25,7 +26,7 @@
   import LineChart, { type Series } from '$lib/charts/LineChart.svelte';
   import { niceDomain, unitDomain } from '$lib/charts/domain';
   import { nearest } from '$lib/charts/downsample';
-  import { defaultAxis, runX } from '$lib/charts/runAxis';
+  import { defaultAxis, runEnd, runX } from '$lib/charts/runAxis';
   import { deviceName, duration, metric } from '$lib/format';
   import { href, router } from '$lib/router.svelte';
   import { setCrumbs } from '$lib/shell/crumbs.svelte';
@@ -37,6 +38,8 @@
   import Segmented from '$lib/ui/Segmented.svelte';
   import Select from '$lib/ui/Select.svelte';
   import StatusBadge from '$lib/ui/StatusBadge.svelte';
+  import { media } from '$lib/design/tokens';
+  import Ident from '$lib/ui/Ident.svelte';
 
   setCrumbs({ label: 'Runs', path: '/runs' }, { label: 'Compare' });
 
@@ -52,18 +55,14 @@
     return new Map<string, RunMetrics>(out);
   });
 
-  let narrow = $state(typeof matchMedia !== 'undefined' && matchMedia('(max-width: 767px)').matches);
-  $effect(() => {
-    const mq = matchMedia('(max-width: 767px)');
-    const on = () => (narrow = mq.matches);
-    mq.addEventListener('change', on);
-    return () => mq.removeEventListener('change', on);
-  });
+  const phoneQuery = new MediaQuery(media.phone, false);
+  const narrow = $derived(phoneQuery.current);
   let cursor = $state<number | null>(null);
 
   const chosen = $derived(ids.map((id) => runs.data?.find((r) => r.id === id)).filter((r): r is Run => !!r));
-  // Runs of very different lengths (23 vs 150 epochs) would crush the short ones into the start of an epoch axis: then
-  // the axis defaults to "By progress" (each run over its own length, ../lib/charts/runAxis), and the axis says why.
+  // Runs planned for very different lengths (30 vs 150 epochs) would crush the short ones into the start of an epoch
+  // axis: then the axis defaults to "By progress" (each run over its planned epochs, ../lib/charts/runAxis), and the axis
+  // says why. Every run is divided by its plan, so a run that failed or stopped early ends where it ended.
   let xChoice = $state<Axis | null>(null);
   const x = $derived<Axis>(xChoice ?? defaultAxis(chosen));
   const xAuto = $derived(xChoice === null && x === 'progress');
@@ -72,7 +71,7 @@
     { value: 'progress', label: 'By progress' },
   ];
   // The normalised axis names itself; chosen for you, it also says why.
-  const xLabel = $derived(x === 'progress' ? (xAuto ? "% of each run's length · runs differ in length" : "% of each run's length") : undefined);
+  const xLabel = $derived(x === 'progress' ? (xAuto ? '% of planned epochs · plans differ in length' : '% of planned epochs') : undefined);
   let hint = $state<string | null>(null);
   // Colours follow the run, not its position: removing one run never repaints the others.
   let slots = $state<Record<string, number>>({});
@@ -110,6 +109,8 @@
         label: r.name,
         color: color(r.id),
         pattern: SLOT_PATTERN[slotOf(r.id)],
+        // Each line ends in its run's status mark (live, stopped, failed), so a line that stops short says why.
+        end: runEnd(r.status) ?? undefined,
         points: eps.map((e) => ({ x: runX(e.epoch, r, x), y: f(e) })),
       };
     });
@@ -178,14 +179,17 @@
   };
   const setX = (v: Axis) => (xChoice = v);
 
-  const rows = $derived<[string, (r: Run) => string][]>([
+  // The third field marks a row of identifiers (an architecture, a checkpoint, a named optimizer), set in mono like
+  // the chips and every other screen (ui/Ident); prose values ("From scratch", "auto") stay in sans.
+  const ID_PROSE = new Set(['From scratch', 'auto']);
+  const rows = $derived<[string, (r: Run) => string, boolean?][]>([
     ['Dataset', (r) => datasets.data?.find((d) => d.id === r.config.dataset_id)?.name ?? r.config.dataset_id],
-    ['Model', (r) => r.config.arch],
-    ['Start from', (r) => startOf(r) ?? 'From scratch'],
+    ['Model', (r) => r.config.arch, true],
+    ['Start from', (r) => startOf(r) ?? 'From scratch', true],
     ['Epochs', (r) => `${r.epoch}/${r.epochs}`],
     ['Batch', (r) => String(r.config.batch)],
     ['Image size', (r) => `${r.config.imgsz} px`],
-    ['Optimizer', (r) => r.config.optimizer],
+    ['Optimizer', (r) => r.config.optimizer, true],
     ['LR', (r) => String(r.config.lr0)],
     ['Mosaic / mixup', (r) => `${r.config.augment.mosaic} / ${r.config.augment.mixup}`],
     ['Close mosaic', (r) => (r.config.augment.close_mosaic > 0 ? `last ${r.config.augment.close_mosaic} epochs` : 'never')],
@@ -276,7 +280,9 @@
           </summary>
           <div class="about-body">
             {#if !sameData && chosen.length > 1}<p>The runs use different datasets: compare the shape of the curves, not their values.</p>{/if}
-            {#if x === 'progress'}<p>By progress puts each run over its own length, so a short run and a long one compare by shape.</p>{/if}
+            {#if x === 'progress'}<p>By progress puts each run over its planned epochs, so a short plan and a long one compare by shape.</p>{/if}
+            <p>Each line ends in its run's status: a ringed dot while it trains, a square where it was stopped, a cross
+              where it failed.</p>
             <p>Colours follow the run, not its rank. Tap a run to keep its line in front; Edit shows how each run
               started (fine-tuned, or from scratch).</p>
             <p>Tap or drag across the chart to read every run at one point; tap it again or anywhere else to let go.</p>
@@ -332,10 +338,10 @@
                   <td class="num" class:winner={sameData && i === bestIdx && chosen.length > 1}>{metric(r.best?.map50_95)}{#if sameData && i === bestIdx && chosen.length > 1}<span class="tag">best</span>{/if}</td>
                 {/each}
               </tr>
-              {#each diffRows as [k, f] (k)}
+              {#each diffRows as [k, f, id] (k)}
                 <tr>
                   <td class="k">{k}</td>
-                  {#each chosen as r (r.id)}<td class="num cfg diff">{f(r)}</td>{/each}
+                  {#each chosen as r (r.id)}<td class="num cfg diff">{@render cell(f(r), id)}</td>{/each}
                 </tr>
               {/each}
               {#if sameRows.length}
@@ -347,10 +353,10 @@
                   </td>
                 </tr>
                 {#if showSame}
-                  {#each sameRows as [k, f] (k)}
+                  {#each sameRows as [k, f, id] (k)}
                     <tr>
                       <td class="k">{k}</td>
-                      {#each chosen as r (r.id)}<td class="num cfg">{f(r)}</td>{/each}
+                      {#each chosen as r (r.id)}<td class="num cfg">{@render cell(f(r), id)}</td>{/each}
                     </tr>
                   {/each}
                 {/if}
@@ -362,6 +368,8 @@
     {/if}
   {/if}
 </Page>
+
+{#snippet cell(v: string, id: boolean | undefined)}{#if id && !ID_PROSE.has(v)}<Ident value={v} />{:else}{v}{/if}{/snippet}
 
 {#snippet chips()}
   <!-- The run chips are the legend: colour key, value under the cursor, link and remove. -->
@@ -398,7 +406,7 @@
         <!-- How the run started: fine-tuned vs from scratch often explains a gap between two curves. It lies over the
              toggle's lower half (clicks pass through to it) and runs on under the value. Phones show it only in Edit,
              on a full-width line of its own. -->
-        <span class="from" class:tuned={!!from} title={startLine(r)}>{#if from}Fine-tuned from <span class="mono src">{from}</span>{:else}From scratch{/if}</span>
+        <span class="from" class:tuned={!!from} title={startLine(r)}>{#if from}Fine-tuned from <Ident value={from} class="src" />{:else}From scratch{/if}</span>
         <span class="acts">
           <a class="open" href={href(`/runs/${r.id}`)} aria-label="Open {r.name}" title="Open run"><ArrowUpRight size={12} /></a>
           <button class="rm" aria-label="Remove {r.name}" onclick={() => setIds(ids.filter((id) => id !== r.id))}><X size={12} /></button>
@@ -463,12 +471,9 @@
     gap: var(--space-3);
     padding: var(--space-4);
     background: var(--bg-panel);
-    border: 1px solid var(--line-default);
+    border: 1px solid var(--line-panel);
     border-radius: var(--radius-lg);
     min-width: 0;
-  }
-  :global([data-theme='dark']) .compare {
-    border-color: var(--line-subtle);
   }
   /* The legend: one card per run (key, name, value under the cursor; how it started below), side by side. */
   .chips {
@@ -584,7 +589,7 @@
   .from.tuned {
     color: var(--text-secondary);
   }
-  .from .src {
+  .from :global(.ident) {
     font-size: var(--type-sm-size);
     white-space: nowrap;
   }

@@ -485,6 +485,22 @@ export class MockApi implements Api {
         // As a server reads them from the checkpoint: folo.config's head, folo.train's settings (planned epochs).
         head: p.config.head ?? 'o2m',
         trained_with: { amp: p.config.amp ?? false, imgsz: p.config.imgsz, epochs: p.config.epochs },
+        precision: 'f32',
+        fused: false,
+      });
+    }
+    // fasteners-n's f16 export, kept as a model (docs/API.md: the mock's m_53d2): fused, f16, no training record.
+    const src = out.find((m) => m.id === 'm_fast_n');
+    if (src) {
+      out.push({
+        ...src,
+        id: 'm_fast_n_f16',
+        name: 'fasteners-n-f16',
+        bytes: Math.round(src.params * 2.02),
+        created: new Date(Date.parse(src.created) + 3_600_000).toISOString(),
+        trained_with: null,
+        precision: 'f16',
+        fused: true,
       });
     }
     if (this.scenario !== 'empty') {
@@ -503,6 +519,8 @@ export class MockApi implements Api {
         // Imported weights: no training record.
         head: 'o2m',
         trained_with: null,
+        precision: 'f32',
+        fused: false,
       });
     }
     return out.sort((a, b) => b.created.localeCompare(a.created));

@@ -162,12 +162,13 @@
     background-clip: padding-box;
     box-shadow: 0 1px 2px #0a0e1414;
   }
-  /* Disabled, one treatment in both themes for every filled button: the raised surface, a disabled label, the
-     default edge, no shadow. It reads as off, not as a faded primary (no pale lime that still looks pressable). A
-     loading button is busy, not unavailable: it keeps its look and the spinner says it is working. */
+  /* Disabled, one treatment in both themes for every filled button: a quiet secondary, the raised surface, a disabled
+     label, the control edge (line.control, so it still reads as a button, not a faint pill), no shadow. It reads as
+     off, not as a faded primary (no pale lime that still looks pressable). A loading button is busy, not unavailable:
+     it keeps its look and the spinner says it is working. */
   .btn:disabled:not(.ghost, [aria-busy='true']) {
     background: var(--bg-raised);
-    border-color: var(--line-default);
+    border-color: var(--line-control);
     color: var(--text-disabled);
     box-shadow: none;
   }

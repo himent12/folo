@@ -2,7 +2,8 @@
   /**
    * Dataset statistics. Health comes first, only when there are findings: one compact line across the page (each
    * severity's icon and a short summary of its findings, units named; Details at its right end) that opens to every
-   * finding with its next step. A finding backed by `folo dataset check` issues opens them under itself: the one issue
+   * finding with its next step, in two columns from the laptop tier. Open, the line is a plain heading ("Health ·
+   * 4 checks"): the findings under it say what the summary said, so it is never said twice. A finding backed by `folo dataset check` issues opens them under itself: the one issue
    * list, filtered to that finding's severity (and inside it, by check type). Then four numbers, the class balance as
    * the focal chart, and the two histograms in ink.
    */
@@ -33,6 +34,7 @@
   const images = $derived(imageCount(dataset));
   const health = $derived(healthChecks(dataset, stats, counts));
   const groups = $derived(bySeverity(health));
+  const findings = $derived(health.filter((h) => h.severity !== 'ok'));
   // The line is the point; the evidence is one tap away.
   let healthOpen = $state(false);
 
@@ -78,20 +80,24 @@
       <details bind:open={healthOpen}>
         <summary>
           <span class="h-title" id="ds-health-title">Health</span>
-          <span class="h-sum">
-            {#each groups as g (g.severity)}
-              {@const Icon = icons[g.severity]}
-              <span class="h-sev {g.severity}">
-                <Icon size={14} strokeWidth={2} aria-hidden="true" /><span class="sr-only">{g.label}:</span>{groupSummary(g)}
-              </span>
-            {/each}
-          </span>
+          {#if healthOpen}
+            <span class="h-count num">{findings.length} {findings.length === 1 ? 'check' : 'checks'}</span>
+          {:else}
+            <span class="h-sum">
+              {#each groups as g (g.severity)}
+                {@const Icon = icons[g.severity]}
+                <span class="h-sev {g.severity}">
+                  <Icon size={14} strokeWidth={2} aria-hidden="true" /><span class="sr-only">{g.label}:</span>{groupSummary(g)}
+                </span>
+              {/each}
+            </span>
+          {/if}
           <span class="h-more" aria-hidden="true">{healthOpen ? 'Hide' : 'Details'}<ChevronDown size={14} strokeWidth={1.75} /></span>
         </summary>
         <ul class="hitems">
-          {#each health.filter((h) => h.severity !== 'ok') as h (h.id)}
+          {#each findings as h (h.id)}
             {@const Icon = icons[h.severity]}
-            <li class={h.severity}>
+            <li class={h.severity} class:wide={evidence === h.id}>
               <span class="hicon"><Icon size={16} strokeWidth={1.75} aria-hidden="true" /></span>
               <div class="htext">
                 <p class="htitle"><span class="sr-only">{sevWord[h.severity]}: </span>{h.title}</p>
@@ -133,7 +139,8 @@
     <div class="kpi">
       <span class="k-label">Images</span>
       <span class="k-value num">{num(images)}</span>
-      <!-- The split counts break between train and the rest where one line would cut them off (tablets). -->
+      <!-- The split counts break between train and the rest where one line would cut them off; tablets and phones show
+           the class count instead. -->
       <span class="k-sub num splits" use:wrapWhenNarrow
         ><span class="wide"><span class="seg">{num(dataset.splits.train)} train<span class="sep">{' · '}</span></span><span class="seg"
             >{num(dataset.splits.val)} val · {num(dataset.splits.test)} test</span
@@ -225,11 +232,8 @@
   /* Health: full width like the panels under it, the summary right after the title and Details at the right end. */
   .health {
     background: var(--bg-panel);
-    border: 1px solid var(--line-default);
+    border: 1px solid var(--line-panel);
     border-radius: var(--radius-lg);
-  }
-  :global([data-theme='dark']) .health {
-    border-color: var(--line-subtle);
   }
   /* Baseline: when the summaries wrap at the laptop tier, the title and Details stay on the first line. */
   summary {
@@ -259,6 +263,11 @@
     font-size: var(--type-md-size);
     line-height: var(--type-md-line);
     font-weight: var(--weight-medium);
+    white-space: nowrap;
+  }
+  .h-count {
+    font-size: var(--type-sm-size);
+    color: var(--text-tertiary);
     white-space: nowrap;
   }
   .h-sum {
@@ -322,6 +331,17 @@
     gap: var(--space-3);
     align-items: start;
   }
+  /* From the laptop tier, the findings in two columns (row by row, so severity order still reads left to right, top to
+     bottom); a finding whose evidence is open takes the full width for its file list. */
+  @media (min-width: 1024px) {
+    .hitems {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: var(--space-4) var(--space-8);
+    }
+    .hitems li.wide {
+      grid-column: 1 / -1;
+    }
+  }
   .hicon {
     display: grid;
     place-items: center;
@@ -379,12 +399,10 @@
     grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: 1px;
     background: var(--line-subtle);
-    border: 1px solid var(--line-default);
+    background-clip: padding-box;
+    border: 1px solid var(--line-panel);
     border-radius: var(--radius-lg);
     overflow: hidden;
-  }
-  :global([data-theme='dark']) .kpis {
-    border-color: var(--line-subtle);
   }
   .how {
     display: grid;
@@ -521,15 +539,23 @@
       margin-bottom: calc(var(--space-2) * -1);
     }
   }
-  /* Below the laptop tier the histograms stack, each at full width; Health takes the full width too. */
+  /* Tablets and phones: the histograms stack, each at full width; Health takes the full width too. The KPI captions
+     take their short form (the split counts are in the page header's meta line), so every cell stays one line. */
   @media (max-width: 1023px) {
     .two {
       grid-template-columns: minmax(0, 1fr);
     }
+    .wide {
+      display: none;
+    }
+    .narrow {
+      display: inline;
+    }
   }
   @media (max-width: 767px) {
-    /* Phones: the title and Details on the first line, the severity summaries wrapping under them. */
-    summary {
+    /* Phones, at rest: the title and Details on the first line, the severity summaries wrapping under them. Open, the
+       heading and its count fit the one line. */
+    details:not([open]) summary {
       display: grid;
       grid-template-columns: minmax(0, 1fr) auto;
       grid-template-areas:
@@ -564,12 +590,6 @@
     }
     .kpis {
       grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
-    .wide {
-      display: none;
-    }
-    .narrow {
-      display: inline;
     }
     .bars button {
       grid-template-columns: 10px minmax(56px, 88px) minmax(0, 1fr) 48px 44px;

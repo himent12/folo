@@ -15,6 +15,7 @@
 </script>
 
 <script lang="ts">
+  import { MediaQuery } from 'svelte/reactivity';
   /**
    * The run's metrics as one instrument: the epoch progress, a row of KPI tabs (each with its current value) and the one
    * chart the selected tab names. A single run is drawn in ink (primary metric in text.primary, secondary ones
@@ -25,7 +26,7 @@
   import ChartSkeleton from '$lib/charts/ChartSkeleton.svelte';
   import { BestPulse } from '$lib/charts/bestPulse';
   import LossOptions, { type Scale, type Smoothing } from '$lib/charts/LossOptions.svelte';
-  import { holdDomain, logDomain, niceDomain, unitDomain, type Fit, type Held } from '$lib/charts/domain';
+  import { holdDomain, logDomain, niceDomain, unitDomain, UNIT_MIN_TOP, type Fit, type Held } from '$lib/charts/domain';
   import { smooth, type Pt } from '$lib/charts/downsample';
   import LineChart, { type Marker, type Series } from '$lib/charts/LineChart.svelte';
   import { runHorizon } from '$lib/charts/horizon';
@@ -34,6 +35,7 @@
   import { duration, eta, metric, num } from '$lib/format';
   import Segmented from '$lib/ui/Segmented.svelte';
   import Select from '$lib/ui/Select.svelte';
+  import { media } from '$lib/design/tokens';
 
   let {
     run,
@@ -61,21 +63,16 @@
   type Tab = 'map' | 'map50' | 'pr' | 'loss' | 'lr' | 'ips';
   let tab = $state<Tab>('map');
 
-  // Below 960 px the six tabs become one metric picker in the chart header, where it replaces the title; phones also
-  // get a shorter plot, so the samples start within the first screen.
-  const media = (q: string) => typeof matchMedia !== 'undefined' && matchMedia(q).matches;
-  let narrow = $state(media('(max-width: 767px)'));
-  let picking = $state(media('(max-width: 959px)'));
-  $effect(() => {
-    const phone = matchMedia('(max-width: 767px)');
-    const tablet = matchMedia('(max-width: 959px)');
-    const on = () => ((narrow = phone.matches), (picking = tablet.matches));
-    phone.addEventListener('change', on);
-    tablet.addEventListener('change', on);
-    return () => (phone.removeEventListener('change', on), tablet.removeEventListener('change', on));
-  });
-  // Phones: a queued run's plot is the axes and one line, folded until asked for.
-  const height = $derived(queued && narrow ? 120 : narrow ? 168 : 320);
+  // Phones (< 768 px) turn the six tabs into one metric picker in the chart header, where it replaces the title, and
+  // get a shorter plot, so the samples start within the first screen. Tablets keep the tabs (scrolling sideways when
+  // a value needs it), as on laptops and desktops.
+  const phoneQuery = new MediaQuery(media.phone, false);
+  const narrow = $derived(phoneQuery.current);
+  // Phones: a queued run's plot is the axes and one line, folded until asked for. An ended run that learned almost
+  // nothing (its best mAP50-95 sits under the 0–1 axis's lowest top, ../../lib/charts/domain UNIT_MIN_TOP) gets a
+  // shorter plot on every tab, so its few low samples are not a thin line along the floor of a 320 px frame.
+  const flat = $derived(!['queued', 'running', 'stopping'].includes(run.status) && (run.best?.map50_95 ?? 0) + 0.02 < UNIT_MIN_TOP);
+  const height = $derived(queued && narrow ? 120 : narrow ? 168 : flat ? 200 : 320);
   let queuedOpen = $state(false);
   const queuedFold = $derived(queued && narrow && !queuedOpen);
   // Folded on phones while another section is picked; a tap on the readout opens it until the section changes.
@@ -113,7 +110,7 @@
     const spe = Math.max(1, stepsPerEpoch(run, steps));
     return Math.max(lastStep ? lastStep.step / spe : 0, lastEpoch ? lastEpoch.epoch : 0);
   });
-  const xDomain = $derived(runHorizon(observed, run.epochs, live, horizon));
+  const xDomain = $derived(runHorizon(observed, run.epochs, horizon));
   const epochTitle = (x: number) => `Epoch ${x.toFixed(x % 1 === 0 ? 0 : 1)}`;
 
   const INK = 'var(--text-primary)';
@@ -311,7 +308,7 @@
   }
 </script>
 
-<!-- A power of ten as "× 10" with a real 11 px superscript; other units as they are. -->
+<!-- A power of ten as "× 10" with a real 12 px superscript; other units as they are. -->
 {#snippet unitOf(t: TabDef)}
   {#if t.exp}<span class="unit" aria-label={t.unit}>× 10<sup class="exp">{t.exp}</sup></span>{:else}<span class="unit">{t.unit}</span>{/if}
 {/snippet}
@@ -356,7 +353,7 @@
     </div>
     <!-- Queued: the tabs read "—" until the first step, so the frame is the one a running run fills. -->
     <!-- svelte-ignore a11y_interactive_supports_focus -->
-    <div class="tabs" role="tablist" aria-label="Metric to chart" {onkeydown}>
+    <div class="tabs" role="tablist" aria-label="Metric to chart" data-scrolls {onkeydown}>
         {#each tabs as t (t.id)}
           <button
             role="tab"
@@ -389,8 +386,8 @@
     {#if !fold}
       <div class="chart-body" id="run-chart-body">
         <header>
-          <!-- Below 960 px the picker names the metric in place of the title (the tabs above are hidden). -->
-          {#if picking}<div class="pick">{@render picker()}</div>{/if}
+          <!-- Phones: the picker names the metric in place of the title (the tabs above are hidden). -->
+          {#if narrow}<div class="pick">{@render picker()}</div>{/if}
           <h2><span class="t">{current.title}</span><span class="q">{current.qualifier}{#if current.qExp}<sup class="exp">{current.qExp}</sup>{/if}</span></h2>
           <div class="ctl">
             <!-- One control for the loss view (smoothing and y scale behind one button), so the header keeps at most one
@@ -422,7 +419,7 @@
               yTickValues={fit && !fit.log ? fit.ticks : undefined}
               yLog={tab === 'loss' && scale === 'log'}
               yFormat={tab === 'lr' ? (v) => String(+(v / 10 ** lrExp).toFixed(2)) : undefined}
-              valueFormat={tab === 'lr' ? (v) => fmtLr(v) : tab === 'ips' ? (v) => `${num(v, 0)} img/s` : (v) => metric(v)}
+              valueFormat={tab === 'lr' ? (v) => (v / 10 ** lrExp).toFixed(2) : tab === 'ips' ? (v) => `${num(v, 0)} img/s` : (v) => metric(v)}
               xTitle={epochTitle}
               curve={unit ? 'monotone' : 'linear'}
               markers={best}
@@ -444,12 +441,9 @@
 <style>
   .metrics {
     background: var(--bg-panel);
-    border: 1px solid var(--line-default);
+    border: 1px solid var(--line-panel);
     border-radius: var(--radius-lg);
     min-width: 0;
-  }
-  :global([data-theme='dark']) .metrics {
-    border-color: var(--line-subtle);
   }
   .strip {
     display: grid;
@@ -465,11 +459,14 @@
     padding: var(--space-3) var(--space-4);
     border-bottom: 1px solid var(--line-subtle);
   }
-  /* Each tab is at least as wide as its value and caption, so no value is ever cut off; spare width is shared. */
+  /* Each tab is at least as wide as its value and caption, so no value is ever cut off; spare width is shared. Every
+     tier is sized to fit all six; a sideways scroll is only the fallback for values far wider than real ones. */
   .tabs {
     display: grid;
     grid-template-columns: repeat(6, minmax(max-content, 1fr));
     min-width: 0;
+    overflow-x: auto;
+    scrollbar-width: none;
   }
   .tab {
     position: relative;
@@ -489,13 +486,13 @@
   .tab:hover {
     background: var(--bg-hover);
   }
-  /* The selected metric: an ink bar on the edge it shares with its chart. */
+  /* The selected metric: an ink bar on the edge it shares with its chart (inside the tab, which the row may clip). */
   .tab::after {
     content: '';
     position: absolute;
     left: 0;
     right: 0;
-    bottom: -1px;
+    bottom: 0;
     height: 2px;
     background: var(--text-primary);
     transform: scaleX(0);
@@ -551,12 +548,12 @@
     color: var(--text-tertiary);
     letter-spacing: 0;
   }
-  /* A power of ten's exponent at 11 px, raised without opening up the line. */
+  /* A power of ten's exponent at the unit's own 12 px (the text floor), raised without opening up the line. */
   .exp {
     position: relative;
     top: -0.45em;
     margin-left: 1px;
-    font-size: var(--type-xs-size);
+    font-size: var(--type-sm-size);
     line-height: 0;
     vertical-align: baseline;
   }
@@ -739,40 +736,12 @@
     gap: var(--space-2);
     flex-wrap: wrap;
   }
-  @media (min-width: 1200px) and (max-width: 1299px) {
-    /* The narrow end of the wide tier: slimmer tab sides keep every value whole; a scroll is the fallback for values
-       wider than the mock's. */
-    .tabs {
-      overflow-x: auto;
-      scrollbar-width: thin;
-    }
-    .tab {
-      padding-inline: var(--space-3);
-    }
-    .tab::after {
-      bottom: 0;
-    }
-  }
-  @media (max-width: 1199px) {
-    /* Laptops: the six tabs keep their values in one row, scrolling sideways only if a narrow window cannot fit them. */
-    /* A window too narrow for all six scrolls them sideways rather than cutting a value off. */
-    .tabs {
-      overflow-x: auto;
-      scrollbar-width: thin;
-    }
+  /* Laptops: the same six tabs in one row, a step more compact (12 px sides, 20 px values), so all six fit from
+     1024 px up beside the collapsed sidebar. */
+  @media (max-width: 1279px) {
     .tab {
       grid-template-rows: 16px 32px 16px;
       gap: var(--space-1);
-      padding: var(--space-3) var(--space-4);
-    }
-    .tab::after {
-      bottom: 0;
-    }
-  }
-  @media (max-width: 1099px) {
-    /* The low end of the tier: values a step smaller and tighter sides, so all six tabs fit at 960 px without
-       scrolling. */
-    .tab {
       padding: var(--space-3);
     }
     .val {
@@ -781,9 +750,9 @@
       letter-spacing: var(--type-xl-tracking);
     }
   }
-  @media (max-width: 959px) {
-    /* Below 960 px six tiles would push the chart down: one compact metric picker in the chart header instead, in
-       place of the title (the qualifier stays beside it). */
+  @media (max-width: 767px) {
+    /* Phones: six tiles would push the chart down: one compact metric picker in the chart header instead, in place of
+       the title (the qualifier stays beside it). */
     .tabs {
       display: none;
     }
@@ -793,13 +762,6 @@
     .chart header {
       padding-top: var(--space-3);
       row-gap: var(--space-2);
-    }
-    .pick {
-      flex: 0 1 280px;
-      min-width: 0;
-    }
-    h2 {
-      flex: 1 1 200px;
     }
     h2 .t {
       position: absolute;
@@ -813,9 +775,7 @@
       font-size: var(--type-sm-size);
       font-weight: var(--weight-regular);
     }
-  }
-  @media (max-width: 767px) {
-    /* Phones: "23 / 100" and its meta on one baseline, the bar under the whole row 8 px below; the chart follows. */
+    /* "23 / 100" and its meta on one baseline, the bar under the whole row 8 px below; the chart follows. */
     .epoch {
       grid-template-columns: auto minmax(0, 1fr);
       align-items: baseline;
@@ -853,6 +813,7 @@
     }
     .pick {
       flex: 1 1 160px;
+      min-width: 0;
       max-width: 240px;
     }
     .ctl {

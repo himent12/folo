@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { tooltip } from './tooltip';
+import { placeTip, tooltip } from './tooltip';
 
 describe('tooltip', () => {
   afterEach(() => vi.useRealTimers());
@@ -101,5 +101,41 @@ describe('tooltip', () => {
     expect(document.getElementById('folo-tooltip')?.hasAttribute('data-show') ?? false).toBe(false);
     t.destroy();
     b.remove();
+  });
+
+  describe('placeTip', () => {
+    const view = { left: 4, top: 4, right: 1020, bottom: 764 };
+    const size = { width: 240, height: 40 };
+
+    it('centres above the anchor when there is room, the arrow on the anchor', () => {
+      const p = placeTip({ left: 400, top: 300, right: 480, bottom: 320 }, size, 'top', view);
+      expect(p).toEqual({ x: 320, y: 252, side: 'top', arrow: 120 });
+    });
+
+    it('flips below when the top has no room', () => {
+      const p = placeTip({ left: 400, top: 10, right: 480, bottom: 30 }, size, 'top', view);
+      expect(p.side).toBe('bottom');
+      expect(p.y).toBe(38);
+    });
+
+    it('shifts inside a rail’s right edge and keeps the arrow on the anchor', () => {
+      // The Summary rail ends at 999: an anchor at its right edge (New run's Schedule steps).
+      const rail = { ...view, left: 700, right: 999 };
+      const anchor = { left: 890, top: 505, right: 983, bottom: 521 };
+      const p = placeTip(anchor, size, 'top', rail);
+      expect(p.x + size.width).toBe(999);
+      expect(p.x + p.arrow).toBe(Math.round((anchor.left + anchor.right) / 2));
+    });
+
+    it('keeps the arrow off the corners when the anchor sits at the bounds’ edge', () => {
+      const p = placeTip({ left: 1014, top: 300, right: 1020, bottom: 316 }, size, 'top', view);
+      expect(p.arrow).toBe(size.width - 8);
+    });
+
+    it('moves a side tooltip that fits neither side above the anchor', () => {
+      const narrow = { left: 4, top: 4, right: 386, bottom: 840 };
+      const p = placeTip({ left: 100, top: 400, right: 290, bottom: 428 }, size, 'right', narrow);
+      expect(p.side).toBe('top');
+    });
   });
 });

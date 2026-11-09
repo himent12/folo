@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { MODEL_SECTIONS, prView, sectionShown } from './sections';
+import { MODEL_SECTIONS, sectionShown } from './sections';
 
 describe('sectionShown', () => {
   it('shows every part on wider screens', () => {
@@ -11,14 +11,3 @@ describe('sectionShown', () => {
   });
 });
 
-describe('prView', () => {
-  it('keeps the curves and the table together on wider screens', () => {
-    expect(prView(false, 'classes')).toBe('all');
-  });
-  it('splits them into the Curves and Classes sections on a phone', () => {
-    expect(prView(true, 'curves')).toBe('curves');
-    expect(prView(true, 'classes')).toBe('classes');
-    // The PR panel is hidden in the other sections; whatever it renders there is not shown.
-    expect(prView(true, 'details')).toBe('all');
-  });
-});

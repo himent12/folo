@@ -73,3 +73,22 @@ describe('Dataset stats: health findings', () => {
     expect(target.querySelector('.kpis')).not.toBeNull();
   });
 });
+
+describe('Dataset stats: Health heading', () => {
+  it('sums the findings up at rest and, open, is a plain heading with their count instead of repeating them', async () => {
+    const dataset = await hub.api.dataset('ds_shapes_hard');
+    const counts = (await hub.api.datasetIssues('ds_shapes_hard', { limit: 1 })).counts;
+    c = mount(StatsTab, { target, props: { dataset, stats: dataset.stats!, counts, onclass: () => {} } });
+    flushSync();
+    const summary = target.querySelector<HTMLElement>('#ds-health summary')!;
+    expect(summary.querySelectorAll('.h-sev').length).toBeGreaterThan(0);
+    expect(summary.querySelector('.h-count')).toBeNull();
+    const details = target.querySelector<HTMLDetailsElement>('#ds-health details')!;
+    details.open = true;
+    details.dispatchEvent(new Event('toggle'));
+    flushSync();
+    const n = target.querySelectorAll('.hitems > li').length;
+    expect(summary.querySelector('.h-count')?.textContent).toBe(`${n} checks`);
+    expect(summary.querySelectorAll('.h-sev').length).toBe(0);
+  });
+});

@@ -12,7 +12,8 @@
     "test": "vitest run",
     "shoot": "node scripts/shoot.mjs",
     "smoke": "node scripts/smoke.mjs",
-    "live-smoke": "node scripts/live-smoke.mjs"
+    "live-smoke": "node scripts/live-smoke.mjs",
+    "qa": "node scripts/shoot.mjs --qa"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^7.3.1",

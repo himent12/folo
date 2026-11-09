@@ -18,7 +18,7 @@
   import { MockApi } from '$lib/api/mock';
   import { Resource } from '$lib/api/resource.svelte';
   import type { Dataset, DatasetImage as Img, Model, PredictInput, Prediction } from '$lib/api/types';
-  import { classColor } from '$lib/design/tokens';
+  import { classColor, media } from '$lib/design/tokens';
   import DetectionView from '$lib/detect/DetectionView.svelte';
   import { filterDetections } from '$lib/detect/nms';
   import { BrowserEngine, hasWebGpu, PHASE_TEXT, type Backend } from '$lib/inference/browser.svelte';
@@ -54,9 +54,9 @@
   // Phones with an image loaded: no intro line, the image full-bleed with Confidence under it. IoU, max detections
   // and the display toggles open in a non-modal bottom sheet, so the image stays in view (and live) while tuning;
   // classes and timing fold into two disclosures under the detections.
-  const phone = new MediaQuery('max-width: 767px', false);
+  const phone = new MediaQuery(media.phone, false);
   // Below 1024 px the model and Run on leave the title row for a toolbar row of their own under it, full width.
-  const narrow = new MediaQuery('max-width: 1023px', false);
+  const narrow = new MediaQuery(media.upToLaptop, false);
   let moreOpen = $state(false);
   let sheetEl = $state<HTMLElement>();
   let moreBtn = $state<HTMLElement>();
@@ -1481,7 +1481,7 @@
     order: 3;
   }
   .disc {
-    border: 1px solid var(--line-default);
+    border: 1px solid var(--line-panel);
     border-radius: var(--radius-lg);
     background: var(--bg-panel);
   }

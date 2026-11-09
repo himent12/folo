@@ -49,9 +49,12 @@ export const scenes = [
     path: '/runs/run_c19a',
     viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
     setup: async (page) => {
+      // Tabs from 768 px, a picker on phones; wait for either (the QA run's clock is paused, so data lands later).
       const tab = page.locator('[data-tab="loss"]');
+      const pick = page.locator('select[aria-label="Metric to chart"]:visible');
+      await page.locator('[data-tab="loss"]:visible, select[aria-label="Metric to chart"]:visible').first().waitFor();
       if (await tab.isVisible()) await tab.click();
-      else await page.locator('select[aria-label="Metric to chart"]:visible').selectOption('loss');
+      else await pick.selectOption('loss');
       await page.mouse.move(0, 0);
       await page.clock.runFor(500);
     },
@@ -115,12 +118,13 @@ export const scenes = [
   },
   {
     // The short-run scenario's run (run_s5q1) set up again: shapes, folo-n from scratch, batch 32, 5 epochs. 25 batches an epoch
-    // make 13 optimizer steps, 65 in all: the Summary warns in one line with the trainer's fix (16 epochs, as the run
-    // page says), the reasons behind Why? (opened on desktop); below 960 px the dock says so too.
+    // make 13 optimizer steps, 65 in all: the Summary warns in a one-line callout above Start, the reasons and the
+    // trainer's fix (16 epochs, as the run page says) behind Why? (opened on desktop, closed on laptop); below 960 px
+    // the dock says so too.
     name: 'run-new-short',
     path: '/runs/new?dataset=ds_shapes',
     fullPage: false,
-    viewports: ['desktop', 'tablet', 'mobile'],
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
     setup: async (page, { vp }) => {
       await until(page, 'input#epochs');
       if (vp === 'mobile') await page.locator('#arch-pick [role="radio"]', { hasText: 'N' }).click();
@@ -131,6 +135,9 @@ export const scenes = [
       if (vp === 'mobile') {
         await page.locator('.dock-est').click();
         await page.locator('dialog[open]').waitFor();
+      } else if (vp === 'laptop') {
+        await until(page, '.summary .short');
+        await page.locator('.summary .short').scrollIntoViewIfNeeded();
       } else if (vp === 'desktop') {
         await until(page, '.summary .short');
         await page.locator('.summary .short button.more').click();
@@ -151,7 +158,7 @@ export const scenes = [
   },
   {
     // A server whose GPU has no tensor cores through DX12: the switch is off and disabled (its label a field label), one
-    // sentence and the way to Vulkan, and the server's own words under Driver report (opened, copyable).
+    // sentence, "In PowerShell:" and the Vulkan command on one copyable line, the Driver report folded (as it starts).
     name: 'run-new-amp-off',
     path: '/runs/new',
     search: 'scenario=no-tensor-cores',
@@ -159,7 +166,6 @@ export const scenes = [
     viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
     setup: async (page) => {
       await until(page, '#amp-why');
-      await page.locator('.amp .dev-detail summary').click();
       await page.mouse.move(0, 0);
     },
   },
@@ -262,8 +268,20 @@ export const scenes = [
       await page.locator('.aug-toggle').click();
     },
   },
-  // Run lengths 23 to 150 epochs: the x axis defaults to "% of run", and the control says so.
+  // Plans of 100 and 150 epochs: the x axis stays "By epoch"; each line ends in its run's status mark.
   { name: 'run-compare', path: '/runs/compare?ids=run_7d1e,run_c19a,run_5be3,run_a2f0', viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
+  {
+    // "By progress": every run over its planned epochs, so the failed and stopped runs end where they ended.
+    name: 'run-compare-progress',
+    path: '/runs/compare?ids=run_7d1e,run_c19a,run_5be3,run_a2f0',
+    fullPage: false,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page) => {
+      await until(page, '.chip .key');
+      await page.getByRole('radio', { name: 'By progress' }).click();
+      await page.mouse.move(0, 0);
+    },
+  },
   {
     // A run kept in front from the legend: its card selected, its line (here the dotted fourth run) painted over the rest.
     name: 'run-compare-pinned',
@@ -346,9 +364,12 @@ export const scenes = [
     viewports: ['desktop', 'mobile'],
     fullPage: false,
     setup: async (page) => {
+      // Tabs from 768 px, a picker on phones; wait for either (the QA run's clock is paused, so data lands later).
       const tab = page.locator('[data-tab="loss"]');
+      const pick = page.locator('select[aria-label="Metric to chart"]:visible');
+      await page.locator('[data-tab="loss"]:visible, select[aria-label="Metric to chart"]:visible').first().waitFor();
       if (await tab.isVisible()) await tab.click();
-      else await page.locator('select[aria-label="Metric to chart"]:visible').selectOption('loss');
+      else await pick.selectOption('loss');
       await page.locator('button.trigger').click();
       await page.clock.runFor(500);
     },
@@ -534,7 +555,7 @@ export const scenes = [
     // Details section.
     name: 'model-detail-details',
     path: '/models/m_fast_n',
-    viewports: ['laptop', 'mobile'],
+    viewports: ['tablet', 'mobile'],
     fullPage: true,
     setup: async (page, { vp }) => {
       if (vp === 'mobile') {
@@ -548,7 +569,7 @@ export const scenes = [
   },
   {
     // An o2o model (shapes-s-best, as the server mock's m_31ab): Details says Head "End-to-end (no NMS)" and how it was
-    // trained. Laptop folds the details: opened. Phones: the Details section.
+    // trained. Tablets fold the details (laptops and desktops show the rail): opened. Phones: the Details section.
     name: 'model-o2o',
     path: '/models/m_shapes_s',
     viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
@@ -556,7 +577,19 @@ export const scenes = [
     setup: async (page, { vp }) => {
       await until(page, '#pr svg');
       if (vp === 'mobile') await page.getByRole('radio', { name: 'Details' }).click();
-      else if (vp !== 'desktop') await page.locator('.d-line').click();
+      else if (vp === 'tablet') await page.locator('.d-line').click();
+    },
+  },
+  {
+    // fasteners-n's f16 export (as the server mock's m_53d2): Details says "Stored as f16 · fused, inference only" and,
+    // with no training record, nothing about training. Phones: the Details section.
+    name: 'model-f16',
+    path: '/models/m_fast_n_f16',
+    viewports: ['desktop', 'mobile'],
+    fullPage: true,
+    setup: async (page, { vp }) => {
+      await until(page, '#pr svg');
+      if (vp === 'mobile') await page.getByRole('radio', { name: 'Details' }).click();
     },
   },
   {
@@ -583,8 +616,8 @@ export const scenes = [
     setup: async (page) => {
       await until(page, '#pr svg');
       await page.getByRole('radio', { name: 'Classes' }).click();
-      await page.locator('#pr button.cls').first().click();
-      await page.locator('#pr button.disc').first().click();
+      await page.locator('#per-class button.cls').first().click();
+      await page.locator('#per-class button.disc').first().click();
     },
   },
   {
@@ -596,8 +629,8 @@ export const scenes = [
     setup: async (page) => {
       await until(page, '#pr svg');
       await page.getByRole('radio', { name: 'Classes' }).click();
-      await page.locator('#pr button.disc').nth(2).click();
-      await page.locator('#pr tr.detail button', { hasText: 'View curve' }).click();
+      await page.locator('#per-class button.disc').nth(2).click();
+      await page.locator('#per-class tr.detail button', { hasText: 'View curve' }).click();
       await until(page, '#pr .legend .back');
       await page.clock.runFor(500);
     },
@@ -736,8 +769,8 @@ export const scenes = [
     viewports: ['desktop', 'laptop'],
     setup: async (page) => {
       await until(page, '#cm .cell');
-      await page.locator('#pr button.cls').nth(1).click();
-      await page.locator('#pr button.cls').nth(4).click();
+      await page.locator('#per-class button.cls').nth(1).click();
+      await page.locator('#per-class button.cls').nth(4).click();
       await page.mouse.move(0, 0);
     },
   },
@@ -852,6 +885,8 @@ export const scenes = [
   { name: 'runs-empty', path: '/runs', search: 'scenario=empty', viewports: ['desktop', 'mobile'] },
   // Empty and error states sit in the table frame (header row, the message inside, a few rows tall).
   { name: 'runs-error', path: '/runs', search: 'scenario=error', viewports: ['desktop', 'laptop', 'mobile'] },
+  { name: 'runs-loading', path: '/runs', search: 'scenario=loading', viewports: ['desktop', 'tablet', 'mobile'] },
+  { name: 'datasets-loading', path: '/datasets', search: 'scenario=loading', viewports: ['desktop', 'tablet', 'mobile'] },
   { name: 'datasets-error', path: '/datasets', search: 'scenario=error', viewports: ['desktop', 'laptop', 'mobile'] },
   {
     // Offline: the create action is disabled and says why on hover (and to assistive tech).
@@ -1038,14 +1073,26 @@ export const scenes = [
         // The whole page: the harness shoots from the top, and the panel sits near the bottom.
         fullPage: true,
         viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
+        // The Driver report stays folded, as it starts in every state; settings-system-report opens it.
         setup: async (page) => {
           await until(page, '#system');
-          const details = page.locator('#system details.tech summary');
-          if (await details.count()) await details.click();
           await page.mouse.move(0, 0);
         },
       }),
   ),
+  {
+    // The server's own words opened under Driver report: wrapped prose in a well, copyable whole.
+    name: 'settings-system-report',
+    path: '/settings',
+    search: 'scenario=no-tensor-cores',
+    fullPage: true,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page) => {
+      await until(page, '#system');
+      await page.locator('#system details.report summary').click();
+      await page.mouse.move(0, 0);
+    },
+  },
   {
     // Single-key shortcuts turned off in Settings; the dialog (from the Settings button) says so.
     name: 'shortcuts-off',

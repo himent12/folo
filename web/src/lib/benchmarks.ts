@@ -48,16 +48,27 @@ export const versusYolo26n: Versus[] = [
 /**
  * What keeps a row from being like for like (docs/BENCHMARKS.md, the rows' notes and caveats): the two engines ran at
  * different numeric precision, or did different work (NMS over untrained weights' few candidates, a train step against
- * a whole trainer, a machine under other load). Models' one-line summary counts these rather than wins.
+ * a whole trainer, a machine under other load). Such a row keeps both measurements but states no winner: its conclusion
+ * is "Different conditions" with `differs`, the specific difference in a few words (FOLO's side first). Models' one-line
+ * summary counts these rather than wins.
  */
-export const unlike: Record<string, ('precision' | 'workload')[]> = {
-  'GPU forward throughput, batch 16': ['precision'],
-  'GPU end to end, batch 1': ['workload'],
-  'GPU end-to-end throughput, batch 16': ['precision', 'workload'],
-  'CPU forward, batch 1': ['workload'],
-  'CPU end to end, batch 1': ['workload'],
-  'Training peak GPU memory': ['workload'],
+export interface Unlike {
+  kinds: ('precision' | 'workload')[];
+  /** The specific difference, at most 24 characters: "f32 vs TF32", "train step vs trainer". */
+  differs: string;
+}
+
+export const unlike: Record<string, Unlike> = {
+  'GPU forward throughput, batch 16': { kinds: ['precision'], differs: 'f32 vs TF32' },
+  'GPU end to end, batch 1': { kinds: ['workload'], differs: 'less NMS work for FOLO' },
+  'GPU end-to-end throughput, batch 16': { kinds: ['precision', 'workload'], differs: 'f32 vs fp16' },
+  'CPU forward, batch 1': { kinds: ['workload'], differs: 'FOLO under other load' },
+  'CPU end to end, batch 1': { kinds: ['workload'], differs: 'less NMS work for FOLO' },
+  'Training peak GPU memory': { kinds: ['workload'], differs: 'train step vs trainer' },
 };
+
+/** Whether a row compares like with like, so it may state a winner ("1.66× faster"). */
+export const comparable = (v: Versus) => !unlike[v.metric];
 
 /** FOLO's factor over the incumbent (> 1: FOLO is ahead), in the metric's own direction. */
 export function advantage(v: Versus): number {

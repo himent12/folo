@@ -3,11 +3,82 @@
 // The node may be a wrapper (a span around a component's button): focus inside it shows the tooltip, and the
 // description goes on the focusable element, which is what assistive technology reads. A tooltip shown by hover stays
 // while the pointer moves onto it (WCAG 1.4.13, hoverable): leaving the trigger or the tooltip hides it after a short
-// grace period, unless the pointer arrives on the other.
+// grace period, unless the pointer arrives on the other. Placement is collision-aware (`placeTip`): the tooltip flips
+// to the other side when its own does not fit, shifts along the anchor to stay inside the anchor's panel (a rail's
+// edge) and the viewport, and its arrow keeps pointing at the anchor's centre.
 
 import { formatKeys } from '$lib/keys';
 
-export type TooltipOptions = string | { text: string; keys?: string; side?: 'top' | 'bottom' | 'right' | 'left' } | null | undefined;
+export type Side = 'top' | 'bottom' | 'right' | 'left';
+export type TooltipOptions = string | { text: string; keys?: string; side?: Side } | null | undefined;
+
+interface Box {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+/** Space between the anchor and the tooltip (the arrow sits in it), and the margin kept from the bounds' edges. */
+const GAP = 8;
+const EDGE = 4;
+/** The arrow never comes closer to a corner than this, so it never sits on the rounded radius. */
+const ARROW_INSET = 8;
+
+/**
+ * Where a tooltip of `size` goes next to `anchor`: on `side` when it fits inside `bounds`, else on the opposite side,
+ * else on whichever of the two has more room; then shifted along the anchor to stay inside `bounds`. `arrow` is the
+ * arrow's offset along the tooltip's edge (from its left for top / bottom, from its top for left / right), at the
+ * anchor's centre.
+ */
+export function placeTip(anchor: Box, size: { width: number; height: number }, side: Side, bounds: Box) {
+  const room: Record<Side, number> = {
+    top: anchor.top - bounds.top,
+    bottom: bounds.bottom - anchor.bottom,
+    left: anchor.left - bounds.left,
+    right: bounds.right - anchor.right,
+  };
+  const need = (s: Side) => (s === 'top' || s === 'bottom' ? size.height : size.width) + GAP;
+  const opposite: Record<Side, Side> = { top: 'bottom', bottom: 'top', left: 'right', right: 'left' };
+  let s = side;
+  if (room[s] < need(s)) {
+    const o = opposite[s];
+    if (room[o] >= need(o)) s = o;
+    // Neither horizontal side fits (a narrow screen): above or below, where there is more room.
+    else if (s === 'left' || s === 'right') s = room.top >= need('top') || room.top > room.bottom ? 'top' : 'bottom';
+    else if (room[o] > room[s]) s = o;
+  }
+  const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
+  const cx = (anchor.left + anchor.right) / 2;
+  const cy = (anchor.top + anchor.bottom) / 2;
+  let x: number;
+  let y: number;
+  if (s === 'top' || s === 'bottom') {
+    x = clamp(cx - size.width / 2, bounds.left, bounds.right - size.width);
+    y = s === 'top' ? anchor.top - GAP - size.height : anchor.bottom + GAP;
+  } else {
+    x = s === 'left' ? anchor.left - GAP - size.width : anchor.right + GAP;
+    y = clamp(cy - size.height / 2, bounds.top, bounds.bottom - size.height);
+  }
+  const arrow = s === 'top' || s === 'bottom' ? clamp(cx - x, ARROW_INSET, size.width - ARROW_INSET) : clamp(cy - y, ARROW_INSET, size.height - ARROW_INSET);
+  return { x: Math.round(x), y: Math.round(y), side: s, arrow: Math.round(arrow) };
+}
+
+/**
+ * The box a tooltip stays inside: the viewport, narrowed to the anchor's panel (a rail, a card) when the tooltip fits
+ * across it, so it never runs past the panel's edge onto the canvas beside it.
+ */
+function boundsFor(node: HTMLElement, width: number): Box {
+  const vw = document.documentElement.clientWidth || window.innerWidth;
+  const vh = window.innerHeight;
+  const view = { left: EDGE, top: EDGE, right: vw - EDGE, bottom: vh - EDGE };
+  const panel = node.closest<HTMLElement>('[data-tip-bounds], section.panel, [role="dialog"], dialog');
+  if (!panel) return view;
+  const p = panel.getBoundingClientRect();
+  const left = Math.max(view.left, p.left);
+  const right = Math.min(view.right, p.right);
+  return right - left >= width ? { ...view, left, right } : view;
+}
 
 let tip: HTMLDivElement | null = null;
 let showTimer: ReturnType<typeof setTimeout> | undefined;
@@ -15,7 +86,7 @@ let hideTimer: ReturnType<typeof setTimeout> | undefined;
 let lastHide = 0;
 /** Hides the tooltip currently shown (set by the trigger that showed it). */
 let hideCurrent: (() => void) | null = null;
-/** Time the pointer has to cross from a trigger to its tooltip (6 px apart) or back. */
+/** Time the pointer has to cross from a trigger to its tooltip (8 px apart, the arrow between) or back. */
 const GRACE_MS = 150;
 
 const leave = () => {
@@ -83,20 +154,10 @@ export function tooltip(node: HTMLElement, opts: TooltipOptions) {
       hideCurrent = hide;
       const r = node.getBoundingClientRect();
       const t = el.getBoundingClientRect();
-      const gap = 6;
-      let x = r.left + r.width / 2 - t.width / 2;
-      let y = r.top - t.height - gap;
-      if (o.side === 'bottom' || (o.side === 'top' && y < 4)) y = r.bottom + gap;
-      if (o.side === 'right') {
-        x = r.right + gap;
-        y = r.top + r.height / 2 - t.height / 2;
-      }
-      if (o.side === 'left') {
-        x = r.left - t.width - gap;
-        y = r.top + r.height / 2 - t.height / 2;
-      }
-      x = Math.max(4, Math.min(window.innerWidth - t.width - 4, x));
-      el.style.transform = `translate(${Math.round(x)}px, ${Math.round(y)}px)`;
+      const p = placeTip(r, t, o.side, boundsFor(node, t.width));
+      el.dataset.side = p.side;
+      el.style.setProperty('--arrow', `${p.arrow}px`);
+      el.style.transform = `translate(${p.x}px, ${p.y}px)`;
       // A new target (hover described one button, focus lands on another): the old one stops being described.
       const next = focused ?? target();
       if (next !== described) release(described);

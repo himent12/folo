@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { MediaQuery } from 'svelte/reactivity';
   import ChartSkeleton from '$lib/charts/ChartSkeleton.svelte';
   import ArrowRight from '@lucide/svelte/icons/arrow-right';
   import { LiveRun } from '$lib/api/live.svelte';
@@ -15,6 +16,8 @@
   import Skeleton from '$lib/ui/Skeleton.svelte';
   import Stat from '$lib/ui/Stat.svelte';
   import StatusBadge from '$lib/ui/StatusBadge.svelte';
+  import { media } from '$lib/design/tokens';
+  import Ident from '$lib/ui/Ident.svelte';
 
   /** `run: null` while the runs load: the same card with real labels and placeholder values, so nothing moves. */
   let { run: initial, dataset }: { run: Run | null; dataset?: Dataset } = $props();
@@ -25,13 +28,8 @@
 
   let cursor = $state<number | null>(null);
   // Phones: a shorter plot, so the recent runs below start on the first screen.
-  let narrow = $state(typeof matchMedia !== 'undefined' && matchMedia('(max-width: 767px)').matches);
-  $effect(() => {
-    const mq = matchMedia('(max-width: 767px)');
-    const on = () => (narrow = mq.matches);
-    mq.addEventListener('change', on);
-    return () => mq.removeEventListener('change', on);
-  });
+  const phoneQuery = new MediaQuery(media.phone, false);
+  const narrow = $derived(phoneQuery.current);
 
   const charts = $derived.by(() => {
     void live.version;
@@ -60,8 +58,8 @@
   const deviceText = $derived(run ? deviceLine(run, sys.data?.gpus ?? []) : '');
 </script>
 
-<!-- The lime hairline means "training now": only once a running run has loaded, never on the placeholder. -->
-<section class="card" class:live={run?.status === 'running'} aria-labelledby={run ? 'live-title' : undefined} aria-label={run ? undefined : 'Loading training'} aria-busy={!run}>
+<!-- "Training now" is the status badge and the progress bar; the card's edge stays a plain hairline. -->
+<section class="card" aria-labelledby={run ? 'live-title' : undefined} aria-label={run ? undefined : 'Loading training'} aria-busy={!run}>
   <header>
     <div class="title-row">
       {#if run}
@@ -75,7 +73,7 @@
     <p class="meta">
       {#if run}
         <span>{dataset?.name ?? run.config.dataset_id}</span><span class="sep">·</span>
-        <span class="mono">{run.config.arch}</span><span class="sep">·</span>
+        <Ident value={run.config.arch} /><span class="sep">·</span>
         <span>{run.config.imgsz} px · batch {run.config.batch}</span><span class="sep">·</span>
         <span class="truncate num">{deviceText}</span>
       {:else}
@@ -111,11 +109,11 @@
       </div>
     </div>
     <div class="chart">
-      <!-- Phones: the legend has no room for its "Latest · ep N" note, so the title carries it. -->
+      <!-- "Latest · ep N" is said once: in the legend's note where the legend has room for it; on phones in the title,
+           so the legend holds only the two series and their values, on one row. -->
       <p class="chart-title">Validation mAP <span class="faint">{narrow && lastEpoch ? `Latest · ep ${lastEpoch}` : 'by epoch, so far'}</span></p>
       {#if !run || live.loading}
-        <!-- Phones: the legend (note and two values) wraps to two rows. -->
-        <ChartSkeleton height={narrow ? 140 : 200} legendRows={narrow ? 2 : 1} />
+        <ChartSkeleton height={narrow ? 140 : 200} />
       {:else}
         <LineChart
           series={charts.map}
@@ -126,7 +124,7 @@
           valueFormat={(v) => metric(v)}
           xTitle={(x) => `Epoch ${Math.round(x)}`}
           curve="monotone"
-          legendNote={lastEpoch ? `Latest · ep ${lastEpoch}` : 'Latest'}
+          legendNote={narrow ? undefined : lastEpoch ? `Latest · ep ${lastEpoch}` : 'Latest'}
           label="Validation mAP by epoch"
           empty="Waiting for the first validation…"
         />
@@ -139,20 +137,9 @@
   .card {
     position: relative;
     background: var(--bg-panel);
-    border: 1px solid var(--line-subtle);
+    border: 1px solid var(--line-panel);
     border-radius: var(--radius-lg);
     overflow: hidden;
-  }
-  :global([data-theme='light']) .card {
-    border-color: var(--line-default);
-  }
-  .card.live::before {
-    content: '';
-    position: absolute;
-    inset: 0 0 auto 0;
-    height: 1px;
-    background: linear-gradient(90deg, transparent, var(--accent-line) 30%, var(--accent-line) 70%, transparent);
-    opacity: 0.55;
   }
   header {
     display: grid;

@@ -24,6 +24,7 @@
   import Skeleton from '$lib/ui/Skeleton.svelte';
   import StatusBadge from '$lib/ui/StatusBadge.svelte';
   import TableState from '$lib/ui/TableState.svelte';
+  import Ident from '$lib/ui/Ident.svelte';
   import LivePreview from './overview/LivePreview.svelte';
   import LiveRunCard from './overview/LiveRunCard.svelte';
 
@@ -161,7 +162,7 @@
                     <tr class="link" onclick={() => router.go(`/runs/${r.id}`)}>
                       <td>
                         <a class="run-name" href={href(`/runs/${r.id}`)} onclick={(e) => e.stopPropagation()}>{r.name}</a>
-                        <span class="sub">{dsById.get(r.config.dataset_id)?.name ?? r.config.dataset_id} · {r.config.arch}</span>
+                        <span class="sub">{dsById.get(r.config.dataset_id)?.name ?? r.config.dataset_id} · <Ident value={r.config.arch} /></span>
                       </td>
                       <td use:tooltip={failureCause(r)}><StatusBadge status={r.status} plain /></td>
                       <td class="hide-sm">
@@ -215,7 +216,7 @@
                     <span class="m-text">
                       <span class="m-ds truncate">{ds}</span>
                       <span class="m-name truncate">{m.name}</span>
-                      <span class="m-sub num">{m.arch} · {m.classes.length} classes · {bytes(m.bytes, prefs.units)}</span>
+                      <span class="m-sub num"><Ident value={m.arch} /> · {m.classes.length} classes · {bytes(m.bytes, prefs.units)}</span>
                     </span>
                     <span class="m-map"><span class="num"><span class="sr-only">mAP50-95 </span>{metric(m.metrics?.map50_95)}</span></span>
                   </a>
@@ -274,10 +275,7 @@
     padding: var(--space-6);
     border-radius: var(--radius-lg);
     background: var(--bg-panel);
-    border: 1px solid var(--line-subtle);
-  }
-  :global([data-theme='light']) .onboard {
-    border-color: var(--line-default);
+    border: 1px solid var(--line-panel);
   }
   .ob-head h2 {
     font-size: var(--type-lg-size);
@@ -336,6 +334,8 @@
     flex-wrap: wrap;
     margin-top: var(--space-1);
   }
+  /* A container query, not a tier: the onboarding card sits in the content column, whose width depends on the sidebar
+     as much as on the viewport; three steps need 840 px of it. */
   @container (min-width: 840px) {
     .steps {
       grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -488,7 +488,7 @@
   /* Wide screens: Recent runs and Best model share a row as equal-height panels (they end together in every state:
      loaded, loading, empty, error), and Datasets runs across the full width under both, its datasets side by side,
      instead of hanging below the side column alone. */
-  @media (min-width: 1200px) {
+  @media (min-width: 1280px) {
     .cols {
       align-items: stretch;
     }
@@ -505,14 +505,14 @@
       column-gap: var(--space-4);
     }
   }
-  @media (max-width: 1199px) {
+  @media (max-width: 1279px) {
     .cols {
       grid-template-columns: minmax(0, 1fr);
     }
   }
   /* Laptop and tablet: the rail's two panels stack full width under Recent runs (as Datasets is on desktop), each
      laying its entries out side by side, so neither panel stops halfway beside a taller one. */
-  @media (min-width: 768px) and (max-width: 1199px) {
+  @media (min-width: 768px) and (max-width: 1279px) {
     .models,
     .dslist {
       display: grid;

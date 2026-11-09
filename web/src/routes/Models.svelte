@@ -21,6 +21,7 @@
   import Skeleton from '$lib/ui/Skeleton.svelte';
   import SortHeader from '$lib/ui/SortHeader.svelte';
   import TableState from '$lib/ui/TableState.svelte';
+  import Ident from '$lib/ui/Ident.svelte';
   import { rowNav } from '$lib/ui/rowNav';
   import { unlike, versusYolo26n } from '$lib/benchmarks';
   import { origin } from '$lib/lineage';
@@ -145,7 +146,7 @@
   const strongScore = $derived<Key>(sortKey === 'map50' ? 'map50' : 'map50_95');
   /** One line for the collapsed engine benchmarks: what is measured and how many rows are not like for like (a win
    *  count would add up unlike conditions; each row's own qualifier says which way it goes). */
-  const benchUnlike = versusYolo26n.filter((v) => unlike[v.metric]?.length).length;
+  const benchUnlike = versusYolo26n.filter((v) => unlike[v.metric]).length;
 </script>
 
 <Page title="Models">
@@ -155,8 +156,9 @@
   {#snippet subPhone()}<span>Ranked per evaluation dataset.</span>{/snippet}
 
   {#if !models.error && (!models.data || models.data.length > 0)}
-    <!-- One row where it fits; narrower, two rows: the dataset chips, then the count and the filter on the right. -->
-    <div class="toolbar-frame"><div class="toolbar">
+    <!-- The list toolbar (base.css): one row on laptops and up; tablets and phones put the filter field on a row of its own. -->
+    <div class="list-toolbar">
+      <div class="lt-filter">
       {#if models.data}
         <div class="seg" data-scrolls><Segmented label="Evaluation dataset" bind:value={dsFilter} options={dsOptions} /></div>
         <!-- Phones: every dataset in a native picker; a strip that scrolls sideways hides the last ones. -->
@@ -172,13 +174,12 @@
           <span class="ctl-sk"><Skeleton h="100%" r="var(--radius-md)" /></span>
         </div>
       {/if}
-      <div class="end">
-        <span class="count num">
+      </div>
+        <span class="lt-count num">
           {#if models.data}{models.data.length} {models.data.length === 1 ? 'model' : 'models'} · {bytes(totalBytes, prefs.units)}{:else}<Skeleton inline w="104px" h="10px" />{/if}
         </span>
-        <div class="search"><Input bind:value={query} icon={Search} placeholder="Filter by name, arch or run" aria-label="Filter models" type="search" /></div>
-      </div>
-    </div></div>
+        <div class="lt-search"><Input bind:value={query} icon={Search} placeholder="Filter by name, arch or run" aria-label="Filter models" type="search" /></div>
+    </div>
   {/if}
 
   <Panel pad="none">
@@ -248,7 +249,7 @@
                 {@const parent = parentOf(m)}
                 <tr class="link" data-row aria-label={m.name} onclick={() => router.go(`/models/${m.id}`)}>
                   <td><a class="name" href={href(`/models/${m.id}`)} title={m.id} onclick={(e) => e.stopPropagation()}>{m.name}</a></td>
-                  <td class="mono faint">{m.arch}</td>
+                  <td><Ident value={m.arch} class="faint" /></td>
                   <td class="r spec hide-lg" title={m.classes.slice(0, 12).join(', ') + (m.classes.length > 12 ? ', …' : '')}>{m.classes.length}</td>
                   <td class="r spec hide-md">{m.imgsz}</td>
                   <td class="r spec">{compact(m.params)}</td>
@@ -265,11 +266,11 @@
                   </td>
                   <td class="hide-lg">
                     {#if parent?.kind === 'model' && modelById.has(parent.id)}
-                      <a class="src" href={href(`/models/${parent.id}`)} onclick={(e) => e.stopPropagation()}>{parent.label}</a>
+                      <Ident value={parent.label} class="src" href={href(`/models/${parent.id}`)} onclick={(e) => e.stopPropagation()} />
                     {:else if parent?.kind === 'file'}
-                      <span class="mono src" title={parent.path}>{parent.label}</span>
+                      <Ident value={parent.label} class="src" title={parent.path} />
                     {:else}
-                      <span class="faint">{parent?.kind === 'scratch' ? 'From scratch' : (parent?.label ?? '—')}</span>
+                      {#if parent && parent.kind !== 'scratch'}<Ident value={parent.label} class="faint" />{:else}<span class="faint">{parent ? 'From scratch' : '—'}</span>{/if}
                     {/if}
                   </td>
                   <td class="r faint" title={date(m.created)}>{ago(m.created)}</td>
@@ -313,7 +314,7 @@
                 <a href={href(`/models/${m.id}`)}>
                   <span class="m-main">
                     <span class="name truncate">{m.name}</span>
-                    <span class="m-meta truncate"><span class="mono">{m.arch}</span> · <span class="num">{m.imgsz} px · {compact(m.params)} · {bytes(m.bytes, prefs.units)}</span></span>
+                    <span class="m-meta truncate"><Ident value={m.arch} /> · <span class="num">{m.imgsz} px · {compact(m.params)} · {bytes(m.bytes, prefs.units)}</span></span>
                   </span>
                   <span class="m-side"><span class="num map"><span class="sr-only">mAP50-95 </span>{metric(m.metrics?.map50_95)}</span></span>
                 </a>
@@ -331,7 +332,7 @@
       <summary>
         <span class="chev" aria-hidden="true"></span>
         <span class="b-title">Engine benchmarks</span>
-        <span class="b-sum">{versusYolo26n.length} engine measurements · {benchUnlike} use different precision or workloads</span>
+        <span class="b-sum">{versusYolo26n.length} engine measurements · {benchUnlike} under different conditions</span>
       </summary>
       <div class="b-body"><Versus /></div>
     </details>
@@ -339,35 +340,6 @@
 </Page>
 
 <style>
-  .toolbar-frame {
-    container-type: inline-size;
-  }
-  .toolbar {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--space-3);
-    flex-wrap: wrap;
-  }
-  /* Too narrow for chips, count and filter on one line (820 px, or a wide sidebar at 1024): two deliberate rows rather
-     than a wrap that strands the count and the filter on a half-empty second line. The chips scroll sideways if they
-     must. */
-  @container (max-width: 879px) {
-    .toolbar {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr);
-    }
-    .seg {
-      justify-self: start;
-    }
-    .end {
-      justify-content: flex-end;
-    }
-  }
-  .search {
-    width: 280px;
-    max-width: 100%;
-  }
   .seg {
     max-width: 100%;
     overflow-x: auto;
@@ -439,18 +411,9 @@
     color: var(--text-primary);
     font-weight: var(--weight-medium);
   }
-  .src {
+  .src,
+  td :global(.ident.src) {
     color: var(--text-secondary);
-  }
-  .end {
-    display: flex;
-    align-items: center;
-    gap: var(--space-4);
-  }
-  .count {
-    font-size: var(--type-sm-size);
-    color: var(--text-tertiary);
-    white-space: nowrap;
   }
   /* The engine benchmarks: a collapsed row with a one-line summary; the comparison opens beneath it. */
   .bench {
@@ -462,15 +425,12 @@
     gap: var(--space-2);
     min-height: 40px;
     padding: var(--space-2) var(--space-4);
-    border: 1px solid var(--line-default);
+    border: 1px solid var(--line-panel);
     border-radius: var(--radius-lg);
     background: var(--bg-panel);
     cursor: pointer;
     list-style: none;
     transition: border-color var(--dur-fast) var(--ease-standard);
-  }
-  :global([data-theme='dark']) .bench summary {
-    border-color: var(--line-subtle);
   }
   .bench summary:hover {
     border-color: var(--line-strong);
@@ -536,12 +496,6 @@
     .scroll.state thead {
       display: none;
     }
-    .end {
-      width: 100%;
-      flex-direction: column-reverse;
-      align-items: stretch;
-      gap: var(--space-2);
-    }
     /* The summary wraps under the title, on the title's edge (past the chevron). */
     .b-sum {
       flex-basis: 100%;
@@ -559,9 +513,6 @@
     }
     .ds-pick {
       display: flex;
-    }
-    .search {
-      width: 100%;
     }
     .m-group {
       display: flex;

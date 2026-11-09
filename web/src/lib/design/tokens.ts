@@ -117,6 +117,21 @@ export const size = {
   "content_max": 1440
 } as const;
 
+export const breakpoint = {
+  "tablet": 768,
+  "laptop": 1024,
+  "desktop": 1280
+} as const;
+
+export const media = {
+  "phone": "(max-width: 767px)",
+  "tabletUp": "(min-width: 768px)",
+  "upToLaptop": "(max-width: 1023px)",
+  "laptopUp": "(min-width: 1024px)",
+  "upToDesktop": "(max-width: 1279px)",
+  "desktop": "(min-width: 1280px)"
+} as const;
+
 /** Colour for detection class `i` (wraps around the 16-colour palette). */
 export function classColor(i: number): string {
   const n = classPalette.length;
