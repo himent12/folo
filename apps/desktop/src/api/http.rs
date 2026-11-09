@@ -284,6 +284,14 @@ impl Backend for HttpBackend {
         self.post("/runs/estimate", config)
     }
 
+    fn throughput(&self) -> ApiResult<ThroughputTable> {
+        self.get("/system/throughput")
+    }
+
+    fn benchmark(&self, req: &BenchmarkRequest) -> ApiResult<BenchmarkReport> {
+        self.post("/system/benchmark", req)
+    }
+
     fn queue_run(&self, id: &str, req: QueueRequest) -> ApiResult<Run> {
         self.post(&format!("/runs/{}/queue", seg(id)), &req)
     }

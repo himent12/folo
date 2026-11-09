@@ -58,6 +58,7 @@ pub const ALL: &[&str] = &[
     "playground+light",
     "playground+canvas-focus",
     "settings",
+    "settings+reference",
     "toast",
     "kb-focus",
 ];
@@ -167,7 +168,16 @@ pub fn apply(app: &mut FoloApp, s: &Spec, window: &mut Window, cx: &mut Context<
         "models" => app.route = Route::Models,
         "model" => app.route = Route::Model("m_44c0".into()),
         "playground" => app.route = Route::Playground,
-        "settings" => app.route = Route::Settings,
+        "settings" => {
+            app.route = Route::Settings;
+            // The throughput table up front for a stable capture; `+reference` lists the reference
+            // rows too, on the inference side.
+            app.throughput = app.store.api.throughput().into();
+            if s.has("reference") {
+                app.tp_all = true;
+                app.tp_view = 1;
+            }
+        }
         _ => {}
     }
     if screen == "palette" {

@@ -491,6 +491,15 @@ pub struct FoloApp {
     /// `run_estimate`); the last good answer stands while a changed config is out.
     pub nr_estimate: Option<(String, Load<crate::api::RunEstimate>)>,
     pub nr_estimate_last: Option<crate::api::RunEstimate>,
+    /// Settings' device throughput table (`GET /api/system/throughput`).
+    pub throughput: Load<crate::api::ThroughputTable>,
+    /// Which half of it shows: training (0) or inference (1); reference rows too or measured only.
+    pub tp_view: usize,
+    pub tp_all: bool,
+    /// A "Measure now" probe is out.
+    pub bench_busy: bool,
+    /// What the last probe said: its result, or why the server declined (409 `run_active`).
+    pub bench_note: Option<(Tone, String)>,
     /// Bumped on every new estimate key (and on an invalid entry): only the latest settle timer asks.
     pub nr_estimate_gen: u64,
     /// Frames left to keep the page scrolled to its end (a review scene of a page's bottom): the
@@ -652,6 +661,11 @@ impl FoloApp {
             confirm_stop: None,
             nr_estimate: None,
             nr_estimate_last: None,
+            throughput: Load::Idle,
+            tp_view: 0,
+            tp_all: false,
+            bench_busy: false,
+            bench_note: None,
             nr_estimate_gen: 0,
             scroll_end_pending: 0,
             reveal_pending: 0,
@@ -3390,7 +3404,10 @@ impl FoloApp {
     /// Swap the data source; everything reloads from the new backend.
     pub fn set_backend(&mut self, api: Arc<dyn Backend>, mode: ServerMode, cx: &mut Context<Self>) {
         self.backend_gen += 1;
-        // Estimates are the old server's (and a pending one's answer will be dropped).
+        // Estimates and speeds are the old server's (and a pending answer will be dropped).
+        self.throughput = Load::Idle;
+        self.bench_busy = false;
+        self.bench_note = None;
         self.nr_estimate = None;
         self.nr_estimate_last = None;
         self.nr_estimate_gen += 1;
