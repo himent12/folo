@@ -5,13 +5,25 @@
    * tail of a message, without its time and level), pads the end by the cut so the top entry starts on the edge; read
    * by hand, it snaps to entries. The box is at least `--log-h` tall (300 px) and grows with its panel when the page
    * stretches it (Run's columns end together).
+   *
+   * **Silent by default** (DESIGN_DIRECTION §2.9, accessibility): a log streams several lines a second, and a live
+   * region on it would read every one with no way to stop it (follow mode only scrolls). The log is `role="log"` with
+   * `aria-live="off"`; "Announce new lines" (a pressed toggle in its header, while the run is live) turns on a polite
+   * status line that reads them in batches, at most one announcement every `ANNOUNCE_MS`: the one new line, or how
+   * many arrived and the latest. The run's milestones and failures are not the log's to say: its start is the shell's
+   * live region (shell/SidebarLive) and its end, failure included, a toast (shell/RunWatch), announced whether or not
+   * this is on.
    */
   import ArrowDownToLine from '@lucide/svelte/icons/arrow-down-to-line';
+  import Volume2 from '@lucide/svelte/icons/volume-2';
+  import VolumeOff from '@lucide/svelte/icons/volume-off';
+  import { untrack } from 'svelte';
   import type { LogLevel, LogLine } from '$lib/api/types';
   import { clock } from '$lib/format';
   import Button from '$lib/ui/Button.svelte';
   import Panel from '$lib/ui/Panel.svelte';
   import Segmented from '$lib/ui/Segmented.svelte';
+  import { tooltip } from '$lib/ui/tooltip';
   import { logPieces } from './logTokens';
 
   let { logs, version, live }: { logs: LogLine[]; version: number; live: boolean } = $props();
@@ -82,9 +94,45 @@
     if (!box) return;
     follow = box.scrollHeight - box.scrollTop - box.clientHeight < 24;
   }
+
+  /** At most one announcement this often: a batch of the lines that arrived since the last. */
+  const ANNOUNCE_MS = 10_000;
+  let announce = $state(false);
+  let said = $state('');
+  /** The last line announced (or the last one there when announcing was turned on): later ones are new. */
+  let heard: LogLine | undefined;
+  const lineText = (l: LogLine) => (l.level === 'info' ? l.message : `${l.level}: ${l.message}`);
+  /** The lines since `heard` that the level filter shows, said as one batch. */
+  function flush() {
+    const at = heard ? logs.lastIndexOf(heard) : -1;
+    const min = level === 'all' ? 0 : order[level];
+    // `heard` may have left the capped list (or a history load replaced it): then what came after it in time.
+    const since = at >= 0 || !heard ? logs.slice(at + 1) : logs.filter((l) => l.t > heard!.t);
+    const fresh = since.filter((l) => order[l.level] >= min);
+    heard = logs[logs.length - 1] ?? heard;
+    if (!fresh.length) return;
+    const last = fresh[fresh.length - 1]!;
+    said = fresh.length === 1 ? lineText(last) : `${fresh.length} new log lines. Latest: ${lineText(last)}`;
+  }
+  $effect(() => {
+    if (!announce || !live) return;
+    // From now on: what was there when it was turned on is not news.
+    untrack(() => {
+      heard = logs[logs.length - 1];
+      said = '';
+    });
+    const t = setInterval(flush, ANNOUNCE_MS);
+    return () => clearInterval(t);
+  });
 </script>
 
 {#snippet levels()}
+  {#if live}
+    <!-- Off by default: the log never speaks unless asked (see the header comment). -->
+    <span class="announce" use:tooltip={announce ? 'Stop announcing new lines' : 'Announce new lines'}>
+      <Button size="sm" variant="ghost" icon={announce ? Volume2 : VolumeOff} aria-pressed={announce} aria-label="Announce new lines" onclick={() => (announce = !announce)} />
+    </span>
+  {/if}
   <Segmented
     size="sm"
     label="Log level"
@@ -104,7 +152,8 @@
   {:else}
     <div class="wrap">
       <!-- svelte-ignore a11y_no_noninteractive_tabindex (scrollable region must be keyboard reachable) -->
-      <div class="log" bind:this={box} {onscroll} role="log" aria-live={live ? 'polite' : 'off'} aria-label="Training log" tabindex="0">
+      <!-- Silent: new lines are read only through the batched status line below, when asked for. -->
+      <div class="log" bind:this={box} {onscroll} role="log" aria-live="off" aria-label="Training log" tabindex="0">
         <div bind:this={inner}>
         {#each shown as l, i (i)}
           <!-- The message wraps only at spaces, each `key value` pair and flag whole (./logTokens). -->
@@ -116,6 +165,7 @@
         {/each}
         </div>
       </div>
+      <p class="sr-only" role="status">{announce && live ? said : ''}</p>
       {#if !follow}
         <div class="jump">
           <Button size="sm" icon={ArrowDownToLine} onclick={() => ((follow = true), pin())}>Follow</Button>
@@ -126,6 +176,9 @@
 </Panel>
 
 <style>
+  .announce {
+    display: inline-flex;
+  }
   .wrap {
     position: relative;
     flex: 1 1 auto;

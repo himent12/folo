@@ -115,6 +115,9 @@
   // The matrix's own thresholds and what it counted, never precision and recall's operating point.
   const matrixLine = $derived(ev ? matrixCounted(source, ev.images, ev.matrixAt) : '');
   const matrixHow = $derived(ev ? matrixVsPr(ev.matrixAt, atBestF1(ev.bestF1Conf)) : '');
+  // The matrix's thresholds in its header, as the curves' IoU is in theirs: the KPIs above are at another operating
+  // point (conf at best F1, IoU 0.50), so a panel whose figures depend on a threshold names it where it is titled.
+  const matrixAtMeta = $derived(ev?.matrixAt ? `conf ${ev.matrixAt.conf.toFixed(2)} · IoU ${ev.matrixAt.iou.toFixed(2)}` : null);
 
   // Large class sets (COCO) get a readable matrix of the most frequent classes.
   const CM_MAX = 12;
@@ -678,13 +681,12 @@
         title={phone.current && !cmExplore ? 'Confusions and misses' : 'Confusion matrix'}
         meta={phone.current && !cmExplore
           ? 'largest share of a class first'
-          : cm?.partial
-            ? phone.current
-              ? `top ${CM_MAX} + Other`
-              : `${CM_MAX} most common classes + Other + background`
-            : phone.current
-              ? undefined
-              : 'share of each true class'}
+          : [
+              cm?.partial ? (phone.current ? `top ${CM_MAX} + Other` : `${CM_MAX} most common classes + Other + background`) : phone.current ? null : 'share of each true class',
+              matrixAtMeta,
+            ]
+              .filter(Boolean)
+              .join(' · ') || undefined}
         actions={phone.current && cmExplore && cm ? cmBack : undefined}
         id="cm"
       >

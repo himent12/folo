@@ -68,6 +68,26 @@ describe('Dataset stats: health findings', () => {
     expect(target.querySelector('#ds-health details')?.hasAttribute('open')).toBe(false);
   });
 
+  it('never repeats a count Health lists: the strip gives those tiles to Boxes per image and Classes', async () => {
+    const dataset = await hub.api.dataset('ds_shapes_hard');
+    const counts = (await hub.api.datasetIssues('ds_shapes_hard', { limit: 1 })).counts;
+    c = mount(StatsTab, { target, props: { dataset, stats: dataset.stats!, counts, onclass: () => {} } });
+    flushSync();
+    const labels = [...target.querySelectorAll('.kpis .k-label')].map((e) => e.textContent);
+    expect(labels).toEqual(['Images', 'Boxes', 'Boxes per image', 'Classes']);
+    const strip = target.querySelector('.kpis')!.textContent!;
+    // Health says "42 empty images (0.8%)" and "3 broken label files"; the strip says neither.
+    expect(strip).not.toMatch(/\b42\b|0\.8%|broken/);
+  });
+
+  it('keeps the zero tiles (the all-clear) when Health lists neither', async () => {
+    const dataset = await hub.api.dataset('ds_shapes_hard');
+    const stats = { ...dataset.stats!, broken_labels: 0, empty_images: 0 };
+    c = mount(StatsTab, { target, props: { dataset, stats, onclass: () => {} } });
+    flushSync();
+    expect([...target.querySelectorAll('.kpis .k-label')].map((e) => e.textContent)).toEqual(['Images', 'Boxes', 'Empty images', 'Broken labels']);
+  });
+
   it('leaves Health out when there is nothing to report', async () => {
     const dataset = await hub.api.dataset('ds_shapes_hard');
     const stats = { ...dataset.stats!, broken_labels: 0, empty_images: 0, class_counts: dataset.stats!.class_counts.map(() => 1000), box_size_hist: { edges: [0, 0.05, 1], counts: [0, 6000] } };

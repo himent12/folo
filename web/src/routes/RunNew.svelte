@@ -42,6 +42,7 @@
   import Select from '$lib/ui/Select.svelte';
   import Skeleton from '$lib/ui/Skeleton.svelte';
   import Slider from '$lib/ui/Slider.svelte';
+  import Spinner from '$lib/ui/Spinner.svelte';
   import Switch from '$lib/ui/Switch.svelte';
   import Ident from '$lib/ui/Ident.svelte';
   import Meta from '$lib/ui/Meta.svelte';
@@ -283,25 +284,22 @@
   // older servers), and off where a run would fail with `not_supported`: one plain sentence, the command that works
   // (ui/Remedy: the shell, one unwrapped copyable line), the server's own words kept verbatim behind "Driver report".
   const caps = $derived(system.data?.capabilities);
-  // Each reason has two forms: `why`, the field's sentence while nothing was refused, and `cause`, the short clause a
-  // refusal leads with ("Mixed precision is unavailable: tensor cores are off on this server."); `restart` introduces
-  // the command under a refusal, so the cause is never said twice.
-  type AmpBlock = { why: string; cause: string; restart?: string; shell?: string; command?: string; raw?: string };
+  // Each reason is the field's one sentence (`why`), the same before and after a refusal: once the capabilities are read
+  // again the switch is off, so the refusal is answered and the field says only why and how to turn it back on.
+  type AmpBlock = { why: string; shell?: string; command?: string; raw?: string };
   const ampBlock = $derived.by((): AmpBlock | null => {
     if (!caps) return null;
-    if (device === 'cpu') return { why: 'The CPU has no tensor cores. Pick a GPU to train in mixed precision.', cause: 'the CPU has no tensor cores' };
+    if (device === 'cpu') return { why: 'The CPU has no tensor cores. Pick a GPU to train in mixed precision.' };
     // Auto on a server without a usable GPU is the CPU too: no GPU advice.
-    if (device === 'auto' && caps.device === 'cpu') return { why: 'This server has no usable GPU, so runs train on the CPU in f32.', cause: 'this server has no usable GPU' };
+    if (device === 'auto' && caps.device === 'cpu') return { why: 'This server has no usable GPU, so runs train on the CPU in f32.' };
     // `capabilities` describe the device `auto` resolves to; another GPU is left to the server.
     if (caps.amp.available || (device !== 'auto' && device !== caps.device)) return null;
     const raw = caps.amp.reason ?? caps.tensor_cores.reason ?? undefined;
     const t = caps.tensor_cores;
     if (t.available && !t.enabled) {
-      if (/self-test/i.test(t.reason ?? '')) return { why: "The server's tensor-core self-test failed. Train in f32 on this GPU.", cause: "the server's tensor-core self-test failed", raw };
+      if (/self-test/i.test(t.reason ?? '')) return { why: "The server's tensor-core self-test failed. Train in f32 on this GPU.", raw };
       return {
         why: 'Tensor cores are off on this server; restart it with them on:',
-        cause: 'tensor cores are off on this server',
-        restart: 'Or restart the server with tensor cores on:',
         command: 'folo serve --tensor-cores',
         raw,
       };
@@ -313,15 +311,13 @@
       if (g?.backend === 'dx12' && /nvidia/i.test(g.name) && /\brtx\b/i.test(g.name))
         return {
           why: 'DirectX 12 does not reach this GPU’s tensor cores; restart the server on Vulkan.',
-          cause: 'DirectX 12 does not reach this GPU’s tensor cores',
-          restart: 'Or restart the server on Vulkan:',
           shell: 'PowerShell',
           command: `${VULKAN} --tensor-cores`,
           raw,
         };
-      return { why: 'This GPU has no tensor cores FOLO can use. Train in f32 on this GPU.', cause: 'this GPU has no tensor cores FOLO can use', raw };
+      return { why: 'This GPU has no tensor cores FOLO can use. Train in f32 on this GPU.', raw };
     }
-    return { why: 'Not available on this server. Train in f32 on this GPU.', cause: 'the server cannot use them now', raw };
+    return { why: 'Not available on this server. Train in f32 on this GPU.', raw };
   });
   const ampOn = $derived(amp && !!caps && !ampBlock);
   /** What the switch does, with the speed measured for this size (docs/BENCHMARKS.md), where there is one. */
@@ -536,6 +532,13 @@
     const n = served?.key === estKey ? served.est.close_mosaic : undefined;
     return typeof n === 'number' && Number.isFinite(n) ? n : closeMosaicEpochs(augment.close_mosaic, epochs);
   });
+  /**
+   * Whether the figures shown answer earlier settings: the last answer stays up while the request for these is out, so
+   * the form never empties as it is edited, but it is not these settings' figure (DESIGN_DIRECTION §2.8, "a figure is
+   * either current or visibly marked as not"): Est. time and Est. GPU memory dim to tertiary, in the Summary and the
+   * dock, and the basis line reads "Updating…" until the answer for these settings is in.
+   */
+  const estStale = $derived(!!served && served.key !== estKey);
   /** What the Summary and the dock show: the server's estimate when there is one, else the reference's. */
   const shown = $derived.by(() => {
     const r = served?.est;
@@ -656,12 +659,6 @@
     } finally {
       submitting = false;
     }
-  }
-
-  /** A refusal's first way out: train without mixed precision. One click; the refusal is answered, so it goes. */
-  function fullPrecision() {
-    amp = false;
-    ampRefused = null;
   }
 
   /** The way out of a device the server cannot use: Auto, then back to the field. */
@@ -796,10 +793,17 @@
     {#if stepsOpen}<dd class="steps-why" id="{where}-steps-why">{stepsWhy}</dd>{/if}
     <!-- A range, never one precise figure; a rough one (low confidence) in secondary ink. What it stands on is the
          line under it, which opens the phases behind it. -->
-    <dt>Est. time</dt><dd class="num" class:rough={shown.rough} aria-busy={estimating || undefined}>{timeRange(shown.lo, shown.hi)}</dd>
+    <dt>Est. time</dt><dd class="num" class:rough={shown.rough} class:stale={estStale} aria-busy={estimating || undefined}>{timeRange(shown.lo, shown.hi)}</dd>
     <dd class="basis">
-      <details class="est-how">
-        <summary><span>{shown.basis}</span><ChevronRight size={12} strokeWidth={2} aria-hidden="true" /></summary>
+      <details class="est-how" class:stale={estStale}>
+        <!-- While the answer for these settings is out, the line says so in place of the old basis (`estStale`). -->
+        <summary
+          >{#if estStale}<span class="updating"><Spinner size={12} />Updating…</span>{:else}<span>{shown.basis}</span>{/if}<ChevronRight
+            size={12}
+            strokeWidth={2}
+            aria-hidden="true"
+          /></summary
+        >
         <!-- One grid for every row: the term wraps in its own column, the value sits on the term's first line at the
              right (never pushed to a line of its own), one word for a source, never a phrase in the value column. -->
         <dl class="how-list num">
@@ -815,7 +819,8 @@
           </div>
           <div><dt>First epoch</dt><dd>+{num(shown.startup, 1)} s startup</dd></div>
           {#if !onCpu && gpu}
-            <div><dt>Peak GPU memory</dt><dd>{shown.vramMeasured ? 'measured' : 'reference'}</dd></div>
+            <!-- The Summary's figure, with what it stands on: a row's value is a number, never a source alone. -->
+            <div><dt>Peak GPU memory</dt><dd>{roughBytes(vram)} {shown.vramMeasured ? 'measured' : 'reference'}</dd></div>
           {/if}
         </dl>
         <p class="how-note">{shown.how}{#if shown.updated}{' '}Last measured {shown.updated}.{/if}</p>
@@ -825,7 +830,7 @@
       <dt>Est. GPU memory</dt>
       <!-- The figure is a metric, in ink; its severity is the meter's and the line's under it (§2.6). A GPU that does not
            report its memory (0) gets no denominator. -->
-      <dd class="num">{roughBytes(vram)}{#if gpuMem}{' '}<span class="faint">/ {bytes(gpuMem, prefs.units)}</span>{/if}</dd>
+      <dd class="num" class:stale={estStale}>{roughBytes(vram)}{#if gpuMem}{' '}<span class="faint">/ {bytes(gpuMem, prefs.units)}</span>{/if}</dd>
     {/if}
   </dl>
   <!-- Some adapters report no memory size (`memory_bytes: 0`, e.g. through Vulkan): the estimate stands alone, said once. -->
@@ -975,7 +980,7 @@
                   <!-- Breaks only between the parts, and a wrapped line never ends on "·" (ui/Meta). -->
                   <span class="c-meta num"><Meta><span>{compact(d.splits.train)} train</span><span>{compact(d.splits.val)} val</span><span>{d.classes.length} classes</span></Meta></span>
                   </label>
-                  {#if d.stats}<span class="c-strip"><ClassStrip counts={d.stats.class_counts} classes={d.classes} height={4} /></span>{/if}
+                  {#if d.stats}<span class="c-strip"><ClassStrip counts={d.stats.class_counts} classes={d.classes} height={4} named /></span>{/if}
                 </div>
               {/each}
             </div>
@@ -1118,24 +1123,23 @@
                   checked={ampOn}
                   onchange={(v) => ((amp = v), (ampRefused = null))}
                   disabled={!!ampBlock}
-                  describedby={ampErr ? 'amp-error' : ampBlock ? 'amp-why' : 'amp-hint'}
+                  describedby={ampErr && ampOn ? 'amp-error' : ampBlock ? 'amp-why' : 'amp-hint'}
                 />
-                {#if ampErr}
-                  <!-- A refusal, where the setting is (never a toast): one short cause, then the ways out (full precision,
-                       one click; or the restart command), then the server's whole message folded and copyable. -->
+                {#if ampErr && ampOn}
+                  <!-- A refusal, where the setting is (never a toast), while it still applies: the switch is on and
+                       Start waits. One short cause and the way out (the switch beside it: off, Start trains in full
+                       precision), then the server's whole message folded and copyable. Once the switch is off, the
+                       refusal is answered and steps down to the quiet note below (DESIGN_DIRECTION §2.11). -->
                   <p class="sw-err" id="amp-error" role="alert">
-                    <CircleAlert size={14} strokeWidth={1.75} aria-hidden="true" /><span>Mixed precision is unavailable: {ampBlock?.cause ?? 'the server cannot use it now'}.</span>
+                    <CircleAlert size={14} strokeWidth={1.75} aria-hidden="true" /><span>Mixed precision is unavailable: the server cannot use it now. Turn it off to train in full precision.</span>
                   </p>
-                  <div class="sw-why amp-ways">
-                    <div class="cta-row"><Button size="sm" onclick={fullPrecision}>Train in full precision</Button></div>
-                    {#if ampBlock?.command}
-                      <Remedy compact id="amp-why" cause={ampBlock.restart ?? 'Or restart the server:'} shell={ampBlock.shell} command={ampBlock.command} report={ampErr.message} />
-                    {:else}
-                      <DriverReport report={ampErr.message} />
-                    {/if}
-                  </div>
+                  <div class="sw-why"><DriverReport report={ampErr.message} /></div>
+                {:else if ampErr && !ampBlock}
+                  <p class="sw-hint" id="amp-hint">The server refused mixed precision; this run trains in full precision.</p>
                 {:else if ampBlock}
-                  <div class="sw-why"><Remedy compact id="amp-why" cause={ampBlock.why} shell={ampBlock.shell} command={ampBlock.command} report={ampBlock.raw} /></div>
+                  <!-- After a refusal the capabilities were read again: the switch is off and held off, and the field says
+                       why and how to turn it back on, quietly (no alert: nothing is wrong with the run now). -->
+                  <div class="sw-why"><Remedy compact id="amp-why" cause={ampBlock.why} shell={ampBlock.shell} command={ampBlock.command} report={ampErr?.message ?? ampBlock.raw} /></div>
                 {:else}
                   <p class="sw-hint" id="amp-hint">{ampHint}</p>
                 {/if}
@@ -1318,10 +1322,10 @@
         {:else}
           <button type="button" class="dock-est num" aria-haspopup="dialog" aria-label="Show the run summary" onclick={() => (sumOpen = true)}>
             <Meta>
-              <span class:rough={shown.rough || !estReady}>{estReady ? timeRange(shown.lo, shown.hi) : 'Estimating…'}</span>
+              <span class:rough={shown.rough || !estReady} class:stale={estStale}>{estReady ? timeRange(shown.lo, shown.hi) : 'Estimating…'}</span>
               <!-- Over the memory: the figure against the GPU's in ink, and the verdict with its mark in the rail's one
                    severity. -->
-              {#if estReady && !onCpu && gpu}<span
+              {#if estReady && !onCpu && gpu}<span class:stale={estStale}
                   >{#if noFit && gpuMem}{roughBytes(vram)} / {bytes(gpuMem, prefs.units)}{:else}{roughBytes(vram)} GPU memory{/if}</span
                 >{/if}
               {#if estReady && noFit}<span class="dock-warn danger"><TriangleAlert size={12} aria-hidden="true" />Likely won't fit</span>{/if}
@@ -1839,6 +1843,18 @@
   .est dd.rough {
     color: var(--text-secondary);
   }
+  /* A figure for earlier settings while these settings' is out (`estStale`): kept, so nothing jumps, but tertiary, so it
+     never reads as current. The dock's figures dim the same way. */
+  .est dd.stale,
+  .dock-est .stale,
+  .est-how.stale .how-list dd {
+    color: var(--text-tertiary);
+  }
+  .updating {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+  }
   /* What the time stands on: one quiet line under it, across the row, opening the phases behind it. */
   .est dd.basis {
     grid-column: 1 / -1;
@@ -1972,15 +1988,6 @@
   .fields > .sw-field > .sw-why {
     align-self: start;
     min-width: 0;
-  }
-  /* Under a refusal: the one-click way out, then the command and the folded report (ui/Remedy). */
-  .amp-ways {
-    display: grid;
-    gap: var(--space-3);
-    justify-items: start;
-  }
-  .amp-ways > :global(.remedy) {
-    justify-self: stretch;
   }
   /* Start's refusal at the field (`501 not_supported`): danger ink with its icon, never red text alone (§2.11). */
   .sw-err {

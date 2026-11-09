@@ -7,9 +7,16 @@
 
   let { open = $bindable(false) }: { open?: boolean } = $props();
 
-  /** Off in Settings: the single keys leave their groups for one section of their own, marked as such. */
-  const working = $derived(keyPrefs.singleKeys ? shortcutList : shortcutList.filter((s) => !s.single));
-  const off = $derived(keyPrefs.singleKeys ? [] : shortcutList.filter((s) => s.single));
+  /**
+   * Off in Settings: the single keys leave their groups for one section of their own, marked as such; a row whose
+   * action also has keys that always work (`also`: J K and ↓ ↑) stays in its group with those.
+   */
+  const working = $derived(
+    keyPrefs.singleKeys
+      ? shortcutList
+      : shortcutList.filter((s) => !s.single || s.also).map((s) => (s.single && s.also ? { ...s, keys: s.also, also: undefined } : s)),
+  );
+  const off = $derived(keyPrefs.singleKeys ? [] : shortcutList.filter((s) => s.single).map((s) => ({ ...s, also: undefined })));
   const groups = $derived([...new Set(working.map((s) => s.group))]);
   const paletteKeys = isApple ? '⌘ K' : 'Ctrl K';
 </script>
@@ -31,7 +38,11 @@
         <h3 class="overline">{g}</h3>
         <ul>
           {#each working.filter((s) => s.group === g) as s (s.keys + s.label)}
-            <li><span>{s.label}</span><Kbd keys={s.keys} /></li>
+            <li>
+              <span>{s.label}</span><span class="keys"
+                ><Kbd keys={s.keys} />{#if s.also}<span class="or">or</span><Kbd keys={s.also} />{/if}</span
+              >
+            </li>
           {/each}
         </ul>
       </section>
@@ -80,6 +91,16 @@
     font-size: var(--type-base-size);
     line-height: var(--type-base-line);
     color: var(--text-primary);
+  }
+  .keys {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex-shrink: 0;
+  }
+  .or {
+    font-size: var(--type-sm-size);
+    color: var(--text-tertiary);
   }
   li:last-child {
     border-bottom: 0;

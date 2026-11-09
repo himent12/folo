@@ -150,10 +150,10 @@ describe('Playground: the model picker', () => {
     const meta = target.querySelector('#model-meta')!;
     const opt = sel.querySelector<HTMLOptionElement>('option[value="m_hard_s"]')!;
     expect(shown.textContent).toBe(opt.textContent!.split(' · ')[0]);
-    expect(meta.textContent).toMatch(/^mAP 0\.\d{3} · shapes-hard, validation split$/);
+    expect(meta.textContent).toMatch(/^mAP50-95 0\.\d{3} · shapes-hard, validation split$/);
     expect(sel.getAttribute('aria-describedby')).toBe('model-meta');
     // The open list keeps each option's context and its group.
-    expect(opt.textContent).toMatch(/ · mAP 0\.\d{3} on shapes-hard$/);
+    expect(opt.textContent).toMatch(/ · mAP50-95 0\.\d{3} on shapes-hard$/);
     expect(opt.closest('optgroup')?.getAttribute('label')).toBe('Validation split of shapes-hard');
   });
 });

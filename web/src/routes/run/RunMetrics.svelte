@@ -31,9 +31,22 @@
    * `exp` ("−4") is the exponent in plain digits, for a real superscript at a legible size (Unicode superscripts render
    * at about 8 px in a 12 px unit).
    */
-  /** What a progress bar's hatched end means (the last epochs train without mosaic), with the trainer's capped count. */
-  export function mosaicOffText(n: number): string {
-    return `Last ${n} ${n === 1 ? 'epoch' : 'epochs'}: mosaic off`;
+  /**
+   * What a progress bar's hatched end means (the last `n` of `epochs` train without mosaic, the trainer's capped count),
+   * said for where the run is (`epoch` done, `live`), so a phase still ahead never reads as the current state (round
+   * 27's "mosaic off" at epoch 38 of 100): before it, "Mosaic off after epoch 90"; while a live run is in it, "Mosaic off
+   * · final 10 epochs"; once past, "Last 10 epochs: mosaic off". `cap` is the caption under the hatch, `full` its tooltip
+   * and the bar's accessible description.
+   */
+  export function mosaicOffText(n: number, epochs: number, epoch: number, live: boolean): { cap: string; full: string } {
+    const from = epochs - n;
+    const last = `${n} ${n === 1 ? 'epoch' : 'epochs'}`;
+    if (epoch < from) return { cap: `Mosaic off after epoch ${from}`, full: `Mosaic off after epoch ${from}: the last ${last} train without mosaic` };
+    if (live) {
+      const final = n === 1 ? 'final epoch' : `final ${n} epochs`;
+      return { cap: `Mosaic off · ${final}`, full: `Mosaic off now: the ${final} train without mosaic` };
+    }
+    return { cap: `Last ${last}: mosaic off`, full: `Last ${last}: mosaic off` };
   }
 
   export function lrParts(v: number | null | undefined): { value: string; unit?: string; exp?: string } {
@@ -134,8 +147,8 @@
   const closeFrom = $derived(1 - closeN / run.epochs);
   /** The run's last epochs train without mosaic: the bar hatches them and every chart marks where they start. */
   const mosaicOff = $derived(closeFrom > 0 && closeFrom < 1);
-  /** What the hatch means, in one wording: its caption's tooltip and the bar's accessible description. */
-  const closeText = $derived(mosaicOffText(closeN));
+  /** What the hatch means, for where the run is: its caption, and in full its tooltip and the bar's description. */
+  const closeText = $derived(mosaicOffText(closeN, run.epochs, run.epoch, live));
   const uid = $props.id();
   const closeId = `${uid}-close`;
   const elapsed = $derived(run.started ? ((run.finished ? Date.parse(run.finished) : Date.now()) - Date.parse(run.started)) / 1000 : null);
@@ -480,9 +493,9 @@
         <!-- The hatched end says what it is: a caption under it, the same words on hover (a hit area taller than the
              4 px bar) and as the bar's accessible description, with the trainer's capped count. -->
         {#if mosaicOff}
-          <span class="close-hit" aria-hidden="true" style:left="{closeFrom * 100}%" use:tooltip={closeText}></span>
-          <span class="close-cap" aria-hidden="true" use:tooltip={closeText}>mosaic off</span>
-          <span class="sr-only" id={closeId}>{closeText}</span>
+          <span class="close-hit" aria-hidden="true" style:left="{closeFrom * 100}%" use:tooltip={closeText.full}></span>
+          <span class="close-cap" aria-hidden="true" use:tooltip={closeText.full}>{closeText.cap}</span>
+          <span class="sr-only" id={closeId}>{closeText.full}</span>
         {/if}
       </div>
       <span class="cap num">
@@ -755,8 +768,8 @@
     bottom: -12px;
     right: 0;
   }
-  /* "mosaic off" under the hatch, right-aligned to the bar's end: in the epoch row's spare height from the tablet up,
-     in a line the bar keeps for it on phones. */
+  /* The hatch's caption ("Mosaic off after epoch 90") under it, right-aligned to the bar's end: in the epoch row's spare
+     height from the tablet up, in a line the bar keeps for it on phones. */
   .close-cap {
     position: absolute;
     top: calc(100% + var(--space-1));

@@ -3,7 +3,7 @@ import { flushSync } from 'svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Api, RunEventHandlers } from './client';
 import { hub } from './index.svelte';
-import { keepStepsPerEpoch, LiveRun, mergeBy, STREAM_GRACE_MS } from './live.svelte';
+import { keepStepsPerEpoch, LiveRun, mergeBy, STREAM_GRACE_MS, streamedRun } from './live.svelte';
 import { MockApi } from './mock';
 import type { Run, RunMetrics, Step } from './types';
 
@@ -103,6 +103,28 @@ describe('LiveRun ordering', () => {
     await vi.advanceTimersByTimeAsync(1000);
     expect(live.lost).toBeNull();
     stop();
+  });
+
+  it("lends its run to the shell (streamedRun) while it is up, never while it loads or is lost, nor after unmount", async () => {
+    let live!: LiveRun;
+    const stop = $effect.root(() => {
+      live = new LiveRun(() => 'run_7d1e');
+    });
+    flushSync();
+    expect(streamedRun('run_7d1e')).toBeUndefined();
+    metrics.resolve({ steps: [], epochs: [] });
+    handlers.connection?.('open');
+    await vi.advanceTimersByTimeAsync(0);
+    handlers.step?.({ ...step(3), epoch: 59 });
+    expect(streamedRun('run_7d1e')?.epoch).toBe(59);
+    expect(streamedRun('run_other')).toBeUndefined();
+    // Down past the grace: the shell falls back to its own (polled) source.
+    handlers.connection?.('reconnecting');
+    await vi.advanceTimersByTimeAsync(STREAM_GRACE_MS);
+    expect(live.lost).not.toBeNull();
+    expect(streamedRun('run_7d1e')).toBeUndefined();
+    stop();
+    expect(streamedRun('run_7d1e')).toBeUndefined();
   });
 
   it('calls a reopened stream current again on its first step, even while the history load is still pending', async () => {

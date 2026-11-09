@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { MediaQuery } from 'svelte/reactivity';
   import ChartSkeleton from '$lib/charts/ChartSkeleton.svelte';
   import Box from '@lucide/svelte/icons/box';
@@ -16,6 +17,7 @@
   import type { QueueRequest } from '$lib/api/types';
   import { media } from '$lib/design/tokens';
   import { ago, deviceName, eta } from '$lib/format';
+  import { timeRange } from '$lib/throughput';
   import { FROM_SCRATCH_META, origin } from '$lib/lineage';
   import { href, router } from '$lib/router.svelte';
   import { setCrumbs } from '$lib/shell/crumbs.svelte';
@@ -46,7 +48,7 @@
   import Meta from '$lib/ui/Meta.svelte';
   import RunMetrics from './run/RunMetrics.svelte';
   import Samples from './run/Samples.svelte';
-  import { moveQueued, queueItems, REMOVE_DESCRIPTION, REMOVE_LABEL, removeTitle, startHint, startLabel } from './run/queueActions';
+  import { moveQueued, queueItems, queueWait, REMOVE_DESCRIPTION, REMOVE_LABEL, removeTitle, startHint, startLabel, type Length } from './run/queueActions';
   import { scheduleWarnings } from './run/warnings';
   import Copy from '@lucide/svelte/icons/copy';
   import Play from '@lucide/svelte/icons/play';
@@ -90,6 +92,34 @@
   const waitingCount = $derived(Math.max(live.waiting ?? 0, queue.length, place ?? 0));
   /** The waiting run just in front of this one. */
   const before = $derived(place && place > 1 ? queue.find((r) => r.id !== run?.id && r.queue_position === place - 1) : undefined);
+  /** The waiting runs in front of this one, front first; keyed by their ids, so a poll that changes nothing asks nothing. */
+  const inFront = $derived(place && place > 1 ? queue.filter((r) => r.id !== run?.id && (r.queue_position ?? 0) < place) : []);
+  const frontKey = $derived(inFront.map((r) => r.id).join(' '));
+  // Their lengths, from the server's estimate of each one's settings (servers with `run_estimate`): what makes "starts
+  // in about …" an estimate rather than a guess. One that cannot be estimated stays unknown, and the page says so.
+  const frontLengths = new Resource(async (s) => {
+    const key = frontKey;
+    if (!key || !hasFeature(system.data, 'run_estimate')) return { key, lengths: [] as Length[] };
+    const rs = untrack(() => inFront);
+    const lengths = await Promise.all(
+      rs.map((r) =>
+        hub.api.estimateRun({ ...r.config, name: r.name }, s).then(
+          (e): Length => ({ lo: e.est_total_s_low, hi: e.est_total_s_high }),
+          (): Length => null,
+        ),
+      ),
+    );
+    return { key, lengths };
+  });
+  /** Each run in front's length, in queue order (null: unknown, or not asked yet). */
+  const lengths = $derived<Length[]>(frontLengths.data?.key === frontKey ? frontLengths.data.lengths : inFront.map(() => null));
+  /** The wait: what the training run has left plus the lengths in front (`queueWait`); a floor when any is unknown. */
+  const wait = $derived(queueWait(ahead ? ahead.eta_s : undefined, lengths));
+  /** The queued runs in front, together: one run's estimate, or their sum when every one is known. */
+  const frontTime = $derived.by(() => {
+    const all = queueWait(undefined, lengths);
+    return all?.known ? `about ${timeRange(all.lo, all.hi)}` : inFront.length > 1 ? 'lengths not known yet' : 'length not known yet';
+  });
   /** Start next is a move only when something is in front (or nothing trains, and it starts at once). */
   const canStart = $derived(place !== null && (place > 1 || !ahead));
 
@@ -207,9 +237,10 @@
       if (run.status !== 'completed') out.push({ label: 'Try model', icon: ScanSearch, href: href(`/playground?model=${run.model_id}`) });
       out.push({ label: 'Open model', icon: Box, href: href(`/models/${run.model_id}`) });
     }
-    // The queue actions in their one order (Start next is the banner's button), Remove from queue last.
+    // The queue's one action set (`queueItems`), whole, as on the Runs list: the open menu covers the callout's Start
+    // next, so the menu never relies on it. Remove from queue last.
     const removeQueued = () => (stopOpen = true);
-    if (place !== null) out.push(...queueItems(place, waitingCount, ahead, move, { start: false, remove: removeQueued }));
+    if (place !== null) out.push(...queueItems(place, waitingCount, ahead, move, removeQueued));
     else if (run.status === 'queued') out.push({ label: REMOVE_LABEL, icon: X, danger: true, onclick: removeQueued });
     if (!active) out.push({ label: 'Delete run', icon: Trash, danger: true, onclick: () => (deleteOpen = true) });
     return out;
@@ -265,12 +296,14 @@
      will fill stay compact until there is data, and the config is in its rail. -->
 {#snippet waiting()}
   {#if place !== null && place > 1}
-    <!-- Behind other waiting runs: the one in front of it, and in brackets what trains now, so two run names never
-         run together as two sentences ("…shapes-hard-l. fasteners-s is training"). -->
-    Starts after {#if before}<a class="link" href={href(`/runs/${before.id}`)}>{before.name}</a>{#if place > 2}{' '}and {place - 2} more{/if}{:else}{place - 1} queued {place === 2 ? 'run' : 'runs'}{/if}{#if ahead}{' '}(<a
+    <!-- Behind other waiting runs: when it should start, then each run in front with its own time in brackets, in queue
+         order (what trains now, then the waiting ones), so the sum is checkable. A run whose length the server cannot
+         estimate makes the sum a floor ("more than 7m"), never an estimate of the whole (`queueWait`). -->
+    {#if wait?.known}Starts in about {timeRange(wait.lo, wait.hi)}, after{:else if wait}Starts in more than {eta(wait.lo)}, after{:else}Starts after{/if}{#if ahead}{' '}<a
         class="link"
         href={href(`/runs/${ahead.id}`)}>{ahead.name}</a
-      >{' '}is training now{#if ahead.eta_s !== null}, about {eta(ahead.eta_s)} left{/if}){/if}.
+      >{' '}({ahead.eta_s !== null ? `${eta(ahead.eta_s)} left` : 'time left not known'}) and{/if}{' '}{#if before}<a class="link" href={href(`/runs/${before.id}`)}>{before.name}</a
+      >{#if place > 2}{' '}and {place - 2} more{/if}{:else}{place - 1} queued {place === 2 ? 'run' : 'runs'}{/if}{' '}({frontTime}).
   {:else if ahead}
     Starts when <a class="link" href={href(`/runs/${ahead.id}`)}>{ahead.name}</a> finishes{#if ahead.eta_s !== null}, in about {eta(ahead.eta_s)}{/if}.
   {:else}
