@@ -25,7 +25,7 @@ import type {
   StartLabeling,
   UpdateLabelJob,
 } from '../types';
-import { classChangeError, classesError, INSTRUCTIONS_MAX, JOB_NAME_MAX, NOTE_MAX } from '../../label';
+import { AGENT_NAME, classChangeError, classesError, INSTRUCTIONS_MAX, JOB_NAME_MAX, NOTE_MAX } from '../../label';
 import { imageSize, inventBoxes, predictBoxes, round } from './boxes';
 import { image, specs, type MockDatasetSpec } from './datasets';
 import { renderImage } from './render';
@@ -37,8 +37,9 @@ const MIN = 60_000;
 const HOUR = 60 * MIN;
 /** A job's image limit (docs/API.md). */
 const MAX_IMAGES = 10_000;
+/** Over this many images added at once, the stream says `reload` instead of one `image` event each (docs/API.md). */
+const BULK = 100;
 
-const AGENT_NAME: Record<LabelAgentId, string> = { claude: 'Claude Code', codex: 'Codex' };
 /** Images per call when a run names none (docs/API.md: Claude Code 4, Codex 8). */
 const DEFAULT_BATCH: Record<LabelAgentId, number> = { claude: 4, codex: 8 };
 /** Claude Code's list prices per million tokens, input and output (Codex reports no cost). */
@@ -461,7 +462,8 @@ export class MockLabeling {
   #added(job: Job, added: Img[], skipped: SkippedImage[], what: string, now: number): LabelImagesAdded {
     if (added.length) this.#log(job, now, 'info', skipped.length ? `${what}; ${n(skipped.length)} skipped` : what);
     const out = this.#toJob(job);
-    for (const im of added) this.#emit(job.id, (h) => h.image?.(this.#toImage(im)));
+    if (added.length > BULK) this.#emit(job.id, (h) => h.reload?.({}));
+    else for (const im of added) this.#emit(job.id, (h) => h.image?.(this.#toImage(im)));
     this.#emit(job.id, (h) => h.job?.(out));
     return { added: added.map((i) => this.#toImage(i)), skipped, job: out };
   }

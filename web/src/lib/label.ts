@@ -1,8 +1,13 @@
 // Agent labeling's rules (docs/API.md, Agent labeling), shared by the forms that check what a person typed and the
 // in-browser mock that answers as the server would.
 
+import type { LabelAgentId } from './api/types';
+
 /** The feature a server lists in `/api/system` when it has the `/api/label` endpoints. */
 export const LABEL_FEATURE = 'agent_labeling';
+
+/** The agents' product names. */
+export const AGENT_NAME: Record<LabelAgentId, string> = { claude: 'Claude Code', codex: 'Codex' };
 
 export const JOB_NAME_MAX = 100;
 export const CLASSES_MAX = 80;
