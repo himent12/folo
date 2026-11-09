@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Box } from '$lib/api/types';
-import { clampBox, dragTo, fit, grab, handleAt, sameBoxes, settle, tidy, toImage, toScreen, tooSmall, type Drag } from './boxEdit';
+import { clampBox, dragTo, fit, grab, handleAt, MIN_SIDE, newBox, nudge, sameBoxes, settle, stretch, tidy, toImage, toScreen, tooSmall, type Drag } from './boxEdit';
 
 const box = (x1: number, y1: number, x2: number, y2: number, cls = 0): Box => ({ class: cls, x1, y1, x2, y2 });
 const W = 640;
@@ -94,5 +94,31 @@ describe('helpers', () => {
     expect(sameBoxes([box(1, 2, 3, 4)], [box(1, 2, 3, 4, 1)])).toBe(false);
     expect(sameBoxes([], [box(1, 2, 3, 4)])).toBe(false);
     expect(tidy(box(1.04, 2.06, 3.15, 4.449))).toEqual(box(1, 2.1, 3.2, 4.4));
+  });
+});
+
+describe('the keyboard: Add box, arrows and Alt+arrows', () => {
+  it('adds a square a quarter of the shorter side in the middle, in the class given', () => {
+    expect(newBox(W, H, 2)).toEqual(box(260, 180, 380, 300, 2));
+    // A tiny image still gets a box it can hold.
+    const tiny = newBox(3, 5, 0);
+    expect(tooSmall(tiny)).toBe(false);
+    expect(clampBox(tiny, 3, 5)).toEqual(tiny);
+  });
+
+  it('moves a box whole, sliding along the edge it reaches', () => {
+    const b = box(100, 100, 200, 150, 1);
+    expect(nudge(b, 1, 0, W, H)).toEqual(box(101, 100, 201, 150, 1));
+    expect(nudge(b, -10, 10, W, H)).toEqual(box(90, 110, 190, 160, 1));
+    expect(nudge(box(0, 0, 50, 50), -1, -10, W, H)).toEqual(box(0, 0, 50, 50));
+    expect(nudge(box(600, 470, 640, 480), 10, 10, W, H)).toEqual(box(600, 470, 640, 480));
+  });
+
+  it('resizes from the bottom-right corner, inside the image and never under the minimum', () => {
+    const b = box(100, 100, 200, 150);
+    expect(stretch(b, 1, 0, W, H)).toEqual(box(100, 100, 201, 150));
+    expect(stretch(b, -10, 10, W, H)).toEqual(box(100, 100, 190, 160));
+    expect(stretch(b, 1000, 1000, W, H)).toEqual(box(100, 100, W, H));
+    expect(stretch(b, -1000, -1000, W, H)).toEqual(box(100, 100, 100 + MIN_SIDE, 100 + MIN_SIDE));
   });
 });

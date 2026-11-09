@@ -102,26 +102,64 @@ if (typeof location !== 'undefined' && typeof history !== 'undefined') {
   if (to) history.replaceState(history.state, '', to);
 }
 
+/**
+ * Asked before the route changes (`router.go`, a link, Back, an edited URL): true lets the navigation go on; false holds
+ * it, and the page calls `proceed` to continue it later (its unsaved work saved or discarded) or drops it.
+ */
+export type NavigationGuard = (to: Route, proceed: () => void) => boolean;
+
 class Router {
   route = $state<Route>(parse(typeof location === 'undefined' ? '' : location.hash));
+  #guards = new Set<NavigationGuard>();
 
   constructor() {
     if (typeof window !== 'undefined') {
       window.addEventListener('hashchange', () => {
-        this.route = parse(location.hash);
+        const hash = location.hash;
+        const to = parse(hash);
+        // The URL has already moved (a link, Back): a held navigation puts back the page's own until it proceeds.
+        const shown = `#${this.route.path}${String(this.route.query) ? `?${this.route.query}` : ''}`;
+        if (this.#allowed(to, () => this.#show(hash))) this.route = to;
+        else history.replaceState(history.state, '', shown);
       });
     }
+  }
+
+  /** Holds navigations away while `guard` says so; returns its removal (call it when the page goes). */
+  guard(guard: NavigationGuard): () => void {
+    this.#guards.add(guard);
+    return () => this.#guards.delete(guard);
   }
 
   /** Navigate to an app path like `/runs/run_7d1e`. */
   go(path: string, opts: { replace?: boolean } = {}) {
     const hash = `#${path}`;
-    if (opts.replace) {
-      history.replaceState(null, '', hash);
+    if (!opts.replace && location.hash === hash) return;
+    if (this.#allowed(parse(hash), () => this.#navigate(hash, opts.replace))) this.#navigate(hash, opts.replace);
+  }
+
+  #allowed(to: Route, proceed: () => void): boolean {
+    let done = false;
+    const once = () => {
+      if (!done) (done = true), proceed();
+    };
+    for (const g of this.#guards) if (!g(to, once)) return false;
+    return true;
+  }
+
+  #navigate(hash: string, replace = false) {
+    if (replace) this.#show(hash);
+    else if (location.hash !== hash) {
+      // Guards have been asked: the hashchange this causes goes through.
+      history.pushState(null, '', hash);
       this.route = parse(hash);
-    } else if (location.hash !== hash) {
-      location.hash = hash;
     }
+  }
+
+  /** Shows `hash` in place of the current history entry. */
+  #show(hash: string) {
+    history.replaceState(null, '', hash);
+    this.route = parse(hash);
   }
 }
 

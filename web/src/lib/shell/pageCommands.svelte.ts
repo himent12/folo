@@ -56,6 +56,18 @@ export function pageKeys(handler: (key: string) => boolean) {
   });
 }
 
+/**
+ * A dialog's own keys (the labeling editor's): whether a key press is for `dialog`, with the page keys' guards (not
+ * while typing, with Ctrl or Cmd held, or once something else used it) and `dialog` the topmost one, which is where
+ * focus is: a dialog opened over it (the palette, a confirmation) takes focus, and the page under a modal cannot have
+ * it. Alt and Shift are the caller's to read. Since they only work with focus in the dialog, they work whether or not
+ * single-key shortcuts are on, as the image inspector's do.
+ */
+export function dialogKey(e: KeyboardEvent, dialog: Element | null | undefined): boolean {
+  if (e.defaultPrevented || e.metaKey || e.ctrlKey || isTyping(e)) return false;
+  return !!dialog && dialog instanceof HTMLDialogElement && dialog.open && e.target instanceof Node && dialog.contains(e.target);
+}
+
 /** Copies `text` and says so (a toast), or says it could not (no clipboard permission). */
 export async function copyText(text: string, what: string) {
   try {

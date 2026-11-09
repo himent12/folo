@@ -89,7 +89,7 @@
 
 <div class="canvas" bind:clientWidth={cw} bind:clientHeight={ch}>
   <DatasetImage {jobId} imageId={img.id} width={img.width} height={img.height} boxes={view} {classes} scores={false} active={hovered} selected={active} alt={img.file} />
-  <!-- svelte-ignore a11y_no_static_element_interactions: the pointer's way to draw and move boxes; the keyboard's is the box list beside it (select, class, delete) and the dialog's keys. -->
+  <!-- svelte-ignore a11y_no_static_element_interactions: the pointer's way to draw and move boxes; the keyboard's is the box list beside it (add, select, class, delete) and the dialog's keys (arrows move or resize the selected box). -->
   <div
     class="hit"
     class:off={disabled}

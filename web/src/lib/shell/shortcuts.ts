@@ -59,10 +59,12 @@ export const shortcutList: { keys: string; also?: string; label: string; group: 
   { keys: 'J K', label: 'Next / previous image (inspector)', group: 'Datasets' },
   { keys: '+ -', label: 'Zoom in / out (inspector)', group: 'Datasets' },
   { keys: '0', label: 'Fit image (inspector)', group: 'Datasets' },
-  // The labeling editor's own keys: they work while it is open, whatever the setting.
+  // The labeling editor's own keys: they work while it is the topmost dialog, whatever the setting.
   { keys: 'J K', label: 'Next / previous image (labeling editor)', group: 'Datasets' },
   { keys: '1–9', label: "Set the selected box's class (labeling editor)", group: 'Datasets' },
   { keys: 'Delete', also: 'Backspace', label: 'Delete the selected box (labeling editor)', group: 'Datasets' },
+  { keys: 'ArrowLeft ArrowRight ArrowUp ArrowDown', label: 'Move the selected box by 1 px, with Shift by 10 (labeling editor)', group: 'Datasets' },
+  { keys: 'Alt ArrowLeft ArrowRight ArrowUp ArrowDown', label: 'Resize the selected box from its bottom-right corner, with Shift by 10 px (labeling editor)', group: 'Datasets' },
 ];
 
 /** Where Escape goes back to from a detail page (its list), or null where it does nothing. */

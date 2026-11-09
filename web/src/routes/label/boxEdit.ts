@@ -131,6 +131,32 @@ export function settle(boxes: readonly Box[], d: Drag, shown: Box): { boxes: Box
   return { boxes: boxes.map((b, k) => (k === i ? shown : b)), selected: i };
 }
 
+// ---------- the keyboard's reach: a new box, and moving or resizing the selected one ----------
+
+/** A new box of class `cls` for Add box: a square a quarter of the image's shorter side, in its middle. */
+export function newBox(width: number, height: number, cls: number): Box {
+  const side = Math.max(MIN_SIDE, Math.min(width, height, Math.round(Math.min(width, height) / 4)));
+  const x1 = Math.round((width - side) / 2);
+  const y1 = Math.round((height - side) / 2);
+  return { class: cls, x1, y1, x2: x1 + side, y2: y1 + side };
+}
+
+/** `b` moved by (dx, dy) image px, kept whole inside the image (it slides along an edge it reaches). */
+export function nudge(b: Box, dx: number, dy: number, width: number, height: number): Box {
+  const w = b.x2 - b.x1;
+  const h = b.y2 - b.y1;
+  const x1 = Math.max(0, Math.min(width - w, b.x1 + dx));
+  const y1 = Math.max(0, Math.min(height - h, b.y1 + dy));
+  return { class: b.class, x1, y1, x2: x1 + w, y2: y1 + h };
+}
+
+/** `b` resized from its bottom-right corner by (dw, dh) image px: inside the image, never under `MIN_SIDE` a side. */
+export function stretch(b: Box, dw: number, dh: number, width: number, height: number): Box {
+  const x2 = Math.min(width, Math.max(b.x1 + MIN_SIDE, b.x2 + dw));
+  const y2 = Math.min(height, Math.max(b.y1 + MIN_SIDE, b.y2 + dh));
+  return { class: b.class, x1: b.x1, y1: b.y1, x2, y2 };
+}
+
 /** Whether two box lists are the same labels (order included), to tell an edited image from a saved one. */
 export function sameBoxes(a: readonly Box[], b: readonly Box[]): boolean {
   return a.length === b.length && a.every((x, i) => {

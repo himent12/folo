@@ -2,14 +2,17 @@
   /**
    * One image of a labeling job, to review and correct: its boxes in full size and as a list; select a box (on the
    * image, or in the list), change its class (the list's select, or 1–9), delete it (Delete, Backspace or its button),
-   * move or resize it by dragging, draw a new one on empty image. Save (the hand-drawn labels replace the image's; none
-   * is a background image) or Discard; stepping away from unsaved changes asks first. J / K step through the images in
-   * the current filter. "Ask the agent again" runs the agent on this image alone with a note; "Remove image" takes it
-   * out of the job. An image the agent has right now cannot be edited, and says so; one that waits for its turn in a run
-   * can, and then leaves the run.
+   * move or resize it by dragging or with the arrow keys (Alt: resize; Shift: 10 px), draw a new one on empty image or
+   * add one with Add box. Save (the hand-drawn labels replace the image's; none is a background image; an image not
+   * labeled yet can be saved as it is) or Discard; leaving unsaved changes asks first, whichever way (J / K, Close, a
+   * link, Back), and closing the tab warns. J / K step through the images in the current filter. "Ask the agent again"
+   * runs the agent on this image alone with a note; "Remove image" takes it out of the job. An image the agent has right
+   * now cannot be edited, and says so; one that waits for its turn in a run can, and then leaves the run. Its keys work
+   * while it is the topmost dialog (shell/pageCommands `dialogKey`).
    */
   import ChevronLeft from '@lucide/svelte/icons/chevron-left';
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
+  import Plus from '@lucide/svelte/icons/plus';
   import Sparkles from '@lucide/svelte/icons/sparkles';
   import Trash from '@lucide/svelte/icons/trash-2';
   import X from '@lucide/svelte/icons/x';
@@ -18,8 +21,9 @@
   import type { Box, LabelImage, LabelJob } from '$lib/api/types';
   import { classColor } from '$lib/design/tokens';
   import { num } from '$lib/format';
-  import { isTyping } from '$lib/keys';
   import { NOTE_MAX } from '$lib/label';
+  import { router } from '$lib/router.svelte';
+  import { dialogKey } from '$lib/shell/pageCommands.svelte';
   import Button from '$lib/ui/Button.svelte';
   import Dialog from '$lib/ui/Dialog.svelte';
   import { DialogStatus } from '$lib/ui/feedback.svelte';
@@ -29,7 +33,7 @@
   import Select from '$lib/ui/Select.svelte';
   import { tooltip } from '$lib/ui/tooltip';
   import type { AgentChoice } from './agentChoice.svelte';
-  import { sameBoxes, tidy } from './boxEdit';
+  import { newBox, nudge, sameBoxes, stretch, tidy } from './boxEdit';
   import EditCanvas from './EditCanvas.svelte';
   import { imageState } from './words';
 
@@ -104,18 +108,44 @@
     draft = draft.filter((_, i) => i !== selected);
     selected = null;
   }
+  /** Add box: a box of the class used last in the middle of the image, selected (the keyboard's way to draw one). */
+  function addBox() {
+    if (!img || locked) return;
+    draft = [...draft, newBox(img.width, img.height, Math.min(lastClass, job.classes.length - 1))];
+    selected = draft.length - 1;
+  }
+  const ARROWS: Record<string, [number, number]> = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
+  /** Arrow keys on the selected box: move it, or with Alt resize it from its bottom-right corner; Shift: 10 px. */
+  function arrow(e: KeyboardEvent): boolean {
+    const d = ARROWS[e.key];
+    const b = picked;
+    if (!d || !b || !img || locked) return false;
+    const by = e.shiftKey ? 10 : 1;
+    const next = e.altKey ? stretch(b, d[0] * by, d[1] * by, img.width, img.height) : nudge(b, d[0] * by, d[1] * by, img.width, img.height);
+    draft = draft.map((x, i) => (i === selected ? next : x));
+    return true;
+  }
 
   let saving = $state(false);
+  // An image not labeled yet (waiting, or failed) can be saved as it is: kept as labeled by hand, its boxes or none.
+  const savable = $derived(dirty || (!!img && img.status !== 'labeled'));
   async function save(): Promise<boolean> {
     if (!img || saving) return false;
+    // The answer is this image's, sent with these boxes: by the time it comes another image may be open, or the
+    // boxes edited further, and neither is the answer's to change.
+    const id = img.id;
+    const sent = draft;
+    const mark = live.mark();
     saving = true;
     status.clear();
     try {
-      const saved = await hub.api.updateLabelImage(job.id, img.id, draft.map(tidy));
-      live.put([saved], live.mark());
-      base = saved.boxes;
-      draft = saved.boxes;
-      status.success('Saved', imageState(saved));
+      const saved = await hub.api.updateLabelImage(job.id, id, sent.map(tidy));
+      live.put([saved], mark);
+      if (shownId === id) {
+        base = saved.boxes;
+        if (draft === sent) draft = saved.boxes;
+        status.success('Saved', imageState(saved));
+      }
       return true;
     } catch (e) {
       status.error(e, 'Could not save the boxes');
@@ -126,31 +156,51 @@
   }
 
   // ---------- leaving with changes ----------
-  /** Where to go once unsaved changes are answered: another image, or away (null). */
-  let leaving = $state<{ to: string | null } | null>(null);
+  /**
+   * Where to go once unsaved changes are answered: another image, or away (null); or a navigation the router holds
+   * (`proceed`: a link, Back, the palette, another `?image=`), which goes on after Save or Discard and is dropped on Cancel.
+   */
+  let leaving = $state<{ to: string | null; proceed?: () => void } | null>(null);
+  const unsaved = () => imageId !== null && dirty && !locked;
   function go(to: string | null) {
-    if (dirty && !locked) leaving = { to };
+    if (unsaved()) leaving = { to };
     else onnavigate(to);
   }
   async function answer(keep: 'save' | 'discard') {
-    const to = leaving?.to ?? null;
+    const ask = leaving;
     if (keep === 'save' && !(await save())) {
       leaving = null;
       return;
     }
     leaving = null;
     draft = base;
-    onnavigate(to);
+    if (ask?.proceed) ask.proceed();
+    else onnavigate(ask?.to ?? null);
+  }
+  // Any other way off this image (the route changes, or its `?image=` does) asks first too.
+  $effect(() =>
+    router.guard((to, proceed) => {
+      if (!unsaved() || (to.path === router.route.path && to.query.get('image') === imageId)) return true;
+      leaving = { to: null, proceed };
+      return false;
+    }),
+  );
+  function onbeforeunload(e: BeforeUnloadEvent) {
+    if (unsaved()) e.preventDefault();
   }
   const step = (d: number) => {
     const next = images[idx + d];
     if (next) go(next.id);
   };
 
+  let body = $state<HTMLElement>();
   function onkeydown(e: KeyboardEvent) {
-    if (!open || leaving || removing || e.metaKey || e.ctrlKey || e.altKey || isTyping(e)) return;
+    if (!open || leaving || removing || !dialogKey(e, body?.closest('dialog'))) return;
     const k = e.key;
-    if (k === 'j' || k === 'J') step(1);
+    if (k in ARROWS) {
+      if (!arrow(e)) return;
+    } else if (e.altKey) return;
+    else if (k === 'j' || k === 'J') step(1);
     else if (k === 'k' || k === 'K') step(-1);
     else if (/^[1-9]$/.test(k)) setClass(Number(k) - 1);
     else if (k === 'Delete' || k === 'Backspace') removeBox();
@@ -211,7 +261,7 @@
   const name = (c: number) => job.classes[c] ?? `class ${c + 1}`;
 </script>
 
-<svelte:window {onkeydown} />
+<svelte:window {onkeydown} {onbeforeunload} />
 
 <Dialog
   bind:open
@@ -228,13 +278,13 @@
   onclose={() => imageId !== null && !leaving && onnavigate(null)}
 >
   {#if img}
-    <div class="ed">
+    <div class="ed" bind:this={body}>
       <div class="stage">
         <div class="nav">
           <span use:tooltip={{ text: 'Previous', keys: 'K' }}><Button variant="ghost" size="sm" icon={ChevronLeft} aria-label="Previous image" disabled={idx <= 0} onclick={() => step(-1)} /></span>
           <span class="pos num">{#if idx >= 0}{num(idx + 1)} of {num(images.length)}{:else}Not in this filter{/if}</span>
           <span use:tooltip={{ text: 'Next', keys: 'J' }}><Button variant="ghost" size="sm" icon={ChevronRight} aria-label="Next image" disabled={idx < 0 || idx >= images.length - 1} onclick={() => step(1)} /></span>
-          {#if locked}<p class="lock" role="status"><span class="dot" aria-hidden="true"></span>{locked}</p>{:else}<p class="tip">Drag on the image to draw a box; drag a box to move it, its handles to resize it.</p>{/if}
+          {#if locked}<p class="lock" role="status"><span class="dot" aria-hidden="true"></span>{locked}</p>{:else}<p class="tip">Drag on the image to draw a box, a box to move it, a handle to resize it. Arrow keys move the selected box; Alt+arrows resize it.</p>{/if}
         </div>
         <div class="canvas-box">
           <EditCanvas jobId={job.id} {img} classes={job.classes} boxes={draft} bind:selected {hovered} cls={lastClass} disabled={!!locked} onchange={edit} />
@@ -243,7 +293,10 @@
 
       <aside class="side">
         <section>
-          <h3>Boxes <span class="meta num">{draft.length}</span></h3>
+          <div class="head">
+            <h3>Boxes <span class="meta num">{draft.length}</span></h3>
+            <Button variant="ghost" size="sm" icon={Plus} disabled={!!locked} onclick={addBox}>Add box</Button>
+          </div>
           {#if draft.length}
             <ul class="boxes scroll-shade" onpointerleave={() => (hovered = null)}>
               {#each draft as b, i (i)}
@@ -295,9 +348,11 @@
     </div>
   {/if}
   {#snippet footer()}
-    {#if dirty}<p class="state" data-gate-why>Unsaved changes</p>{:else if !locked}<p class="state" data-gate-why>No changes yet</p>{/if}
+    {#if dirty}<p class="state" data-gate-why>Unsaved changes</p>
+    {:else if savable && !locked}<p class="state">Save keeps it as labeled by hand, {draft.length ? 'with these boxes' : 'with no boxes: a background image'}.</p>
+    {:else if !locked}<p class="state" data-gate-why>No changes yet</p>{/if}
     <Button variant="ghost" disabled={!dirty} onclick={() => ((draft = base), (selected = null))}>Discard</Button>
-    <Gate reason={locked ? 'The image is with the agent' : dirty ? null : 'No changes yet'}>
+    <Gate reason={locked ? 'The image is with the agent' : savable ? null : 'No changes yet'}>
       {#snippet children(why)}
         <Button variant="primary" loading={saving} disabled={!!why} aria-describedby={why} onclick={save}>Save</Button>
       {/snippet}
@@ -396,6 +451,12 @@
   h3 {
     font-size: var(--type-base-size);
     font-weight: var(--weight-medium);
+  }
+  .head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
   }
   .meta {
     margin-left: var(--space-1);
