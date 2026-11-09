@@ -83,6 +83,7 @@ pub(super) fn val(store: &MockStore, req: ValRequest) -> Result<ValReport> {
     Ok(ValReport {
         model_id: model.id,
         dataset_id: meta.id.clone(),
+        dataset_name: Some(meta.name.clone()),
         split: req.split,
         imgsz,
         images,

@@ -361,6 +361,10 @@ struct EvalBasis {
     counts: Vec<u64>,
     images: u32,
     seed: u64,
+    /// The evaluated dataset's id and name, the split evaluated and why, when it is not `val`.
+    dataset: (String, String),
+    split: folo_api::Split,
+    split_fallback: Option<folo_api::SplitFallback>,
 }
 
 impl EvalBasis {
@@ -377,12 +381,19 @@ impl EvalBasis {
             }
         }
         let val = run.curve.val(best);
+        let meta = ds.meta();
+        let used = if split == Split::Val { folo_api::Split::Val } else { folo_api::Split::Train };
         EvalBasis {
             best_f1_conf: val.best_f1_conf,
             per_class: val.per_class,
             counts,
             images: page.total as u32,
             seed: fnv1a(run.id.as_bytes()),
+            split: used,
+            split_fallback: (used != folo_api::Split::Val).then(|| {
+                folo_api::SplitFallback::empty_split(folo_api::Split::Val, used, &meta.name, page.total)
+            }),
+            dataset: (meta.id.clone(), meta.name.clone()),
         }
     }
 
@@ -479,7 +490,21 @@ impl EvalBasis {
                 m.precision = runs::r4(confusion[c][c] as f32 / col as f32);
             }
         }
-        ModelEval { pr, confusion, per_class, images: self.images, best_f1_conf: self.best_f1_conf }
+        // The real evaluator's confusion thresholds (docs/METRICS.md §7).
+        let thresholds = folo_vision::EvalConfig::default();
+        ModelEval {
+            pr,
+            confusion,
+            per_class,
+            images: self.images,
+            best_f1_conf: self.best_f1_conf,
+            dataset_id: Some(self.dataset.0.clone()),
+            dataset_name: Some(self.dataset.1.clone()),
+            split: Some(self.split),
+            split_fallback: self.split_fallback.clone(),
+            confusion_conf: Some(thresholds.confusion_conf),
+            confusion_iou: Some(thresholds.confusion_iou),
+        }
     }
 }
 
@@ -1504,7 +1529,16 @@ mod eval_tests {
                 recall,
             })
             .collect();
-        EvalBasis { per_class, best_f1_conf: Some(0.3), counts: counts.to_vec(), images: 10, seed: 1 }
+        EvalBasis {
+            per_class,
+            best_f1_conf: Some(0.3),
+            counts: counts.to_vec(),
+            images: 10,
+            seed: 1,
+            dataset: ("ds_t".into(), "t".into()),
+            split: folo_api::Split::Val,
+            split_fallback: None,
+        }
     }
 
     /// Row sums equal instance counts and `per_class` precision / recall match the matrix.

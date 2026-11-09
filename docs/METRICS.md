@@ -109,6 +109,10 @@ the highest such `c` is chosen. The report's `precision`, `recall` and `f1` (and
 values at `best_conf`. (Ultralytics does the same selection but interpolates P and R linearly between prediction
 scores and smooths the mean F1 curve before the argmax; FOLO uses the exact step functions and no smoothing.)
 
+Every evaluation has its own `best_conf`: the trainer's validation after each epoch (every `Epoch.val` in
+docs/API.md carries it, not only the best epoch's), `/eval`, `folo val` and `POST /api/val`. It is absent (`null`)
+only when no class has ground truth.
+
 ## 6. Curves (for Studio charts)
 
 `report.curves`:
@@ -130,6 +134,11 @@ background:
   classes agree).
 - An unmatched ground truth adds 1 at `[background][true class]` (a miss); an unmatched prediction adds 1 at
   `[pred class][background]` (a false alarm).
+
+These thresholds are the matrix's own: they are neither the NMS settings (`conf 0.001`, `iou 0.7`) nor `best_conf`,
+so the matrix's diagonal is not the `precision` / `recall` of §5. The report keeps them with the matrix
+(`ConfusionMatrix::conf` / `iou`), and docs/API.md's `/eval` returns the matrix (transposed: rows = truth) with them
+as `confusion_conf` / `confusion_iou`, and with the dataset and split evaluated, so a view can label the matrix.
 
 (Ultralytics 8.4.198 matches in a different order: predictions in descending confidence order each claim their best
 unclaimed truth with IoU `> 0.45`. Earlier 8.x releases removed duplicate matches with two `np.unique` passes. Both
