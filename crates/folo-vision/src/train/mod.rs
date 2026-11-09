@@ -924,8 +924,9 @@ impl Trainer {
             None => Box::new(iter.map(|r| r.map(|b| (b, None)).map_err(Error::from))),
         };
         let mut k = 0usize;
+        // A batch's time runs from the end of the previous one, so waits for the loader count in the ETA.
+        let mut batch_start = Instant::now();
         for item in source.by_ref() {
-            let batch_start = Instant::now();
             let (mut batch, staged) = item?;
             let n = batch.len();
             let targets = targets_from_normalized(&batch.targets, n, s, s)?;
@@ -1011,6 +1012,7 @@ impl Trainer {
             epoch_images += n;
             clock.batches += 1;
             clock.train_time += batch_start.elapsed().as_secs_f64();
+            batch_start = Instant::now();
             if finite {
                 let elapsed = epoch_start.elapsed().as_secs_f64().max(1e-9);
                 let step = folo_api::Step {

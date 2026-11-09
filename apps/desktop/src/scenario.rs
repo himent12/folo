@@ -78,6 +78,14 @@ impl Spec {
 
 pub fn apply(app: &mut FoloApp, s: &Spec, window: &mut Window, cx: &mut Context<FoloApp>) {
     app.hold_loading = s.has("loading");
+    if s.fail {
+        // The failing backend answers at once, but through the async fetches a busy machine can
+        // still show "Connecting…" at capture time: settle the failure before the first frame.
+        app.store.health = app.store.api.health().into();
+        app.store.runs = app.store.api.runs().into();
+        app.store.models = app.store.api.models().into();
+        app.store.datasets = app.store.api.datasets().into();
+    }
     if !app.hold_loading && !s.fail {
         // Names in titles resolve from the dataset list; load it up front for stable captures.
         app.store.datasets = app.store.api.datasets().into();

@@ -16,6 +16,7 @@
 //! - `exports/`: `POST /api/models/{id}/export` output.
 //! - `cache/eval/<model id>.json`: cached `/eval` results (`POST /api/val` is computed on every request).
 //! - `cache/weights/<model id>.<hash>.f16.folo`: f16 exports served by `GET /api/models/{id}/weights?format=f16`.
+//! - `throughput.json`: the measured throughput table ([`crate::throughput`]).
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
@@ -23,10 +24,12 @@ use std::time::{Duration, Instant};
 
 use axum::http::StatusCode;
 use folo_api::{
-    BBox, Capabilities, Dataset, DatasetFormat, ExportResult, ExportSpec, GpuInfo, ImagePage, ImageSize,
-    LogLine, Model, ModelEval, PredictResponse, RegisterDataset, Run, RunMetrics, RunSamples, Sample,
-    ScoredBox, Splits, SyntheticDataset, TrainConfig, ValReport, ValRequest,
+    BBox, BenchmarkReport, BenchmarkRequest, Capabilities, Dataset, DatasetFormat, ExportResult, ExportSpec,
+    GpuInfo, ImagePage, ImageSize, InferPrecision, LogLine, Model, ModelEval, PredictResponse,
+    RegisterDataset, Run, RunEstimate, RunMetrics, RunSamples, Sample, ScoredBox, Splits, SyntheticDataset,
+    ThroughputTable, TrainConfig, ValReport, ValRequest,
 };
+use folo_core::Device;
 use folo_vision::PredictConfig;
 use serde::{Deserialize, Serialize};
 
@@ -39,6 +42,7 @@ use crate::store::{
     ImageData, ImageQuery, IssueQuery, PredictInput, PredictSource, QueueMove, Store, Subscription, Weights,
     WeightsFormat, weights_file_name,
 };
+use crate::throughput::{EstimateInput, InferKey, InferSample, Throughput};
 use crate::util::{fnv1a, rfc3339, unique_id, unix_now};
 
 /// How often a dataset's files are re-checked for changes (on `GET /api/datasets/{id}` and image listings).
@@ -141,6 +145,7 @@ pub struct RealStore {
     predictors: Predictors,
     device: String,
     precision: folo_vision::Precision,
+    throughput: Arc<Throughput>,
 }
 
 impl RealStore {
@@ -175,7 +180,8 @@ impl RealStore {
                 }
             }
         }
-        let runs = Runs::open(data_dir.join("runs"));
+        let throughput = Arc::new(Throughput::open(data_dir.join(crate::throughput::FILE)));
+        let runs = Runs::open(data_dir.join("runs"), throughput.clone());
         let models = Models::new(data_dir.clone());
         RealStore {
             data_dir,
@@ -186,6 +192,7 @@ impl RealStore {
             predictors: Predictors::default(),
             device: "auto".into(),
             precision: folo_vision::Precision::F32,
+            throughput,
         }
     }
 
@@ -655,6 +662,55 @@ impl Store for RealStore {
         Some(&self.data_dir)
     }
 
+    fn throughput(&self) -> Result<ThroughputTable> {
+        let auto = engine::device_id(engine::resolve("auto")?);
+        let mut devices = vec![auto.clone()];
+        if auto.is_gpu() {
+            devices.push(engine::device_id(Device::Cpu));
+        }
+        Ok(self.throughput.table(&auto, &devices))
+    }
+
+    fn estimate_run(&self, config: TrainConfig) -> Result<RunEstimate> {
+        let e = self.entry(&config.dataset_id)?;
+        let idx = self.fresh_index(&e)?;
+        let bad = |m: String| Error::new(StatusCode::BAD_REQUEST, "invalid_config", m);
+        if idx.classes.is_empty() {
+            return Err(bad("the dataset has no classes".into()));
+        }
+        if idx.splits.train == 0 {
+            return Err(bad("the dataset has no training images".into()));
+        }
+        if let Some(w) = &config.weights {
+            self.model(w)?;
+        }
+        // The same checks as POST /api/runs, the settings first (on the CPU).
+        let mut check = folo_vision::TrainConfig::from_api(&config);
+        check.device = "cpu".into();
+        check.validate().map_err(engine_error)?;
+        let device = engine::resolve(&config.device)?;
+        let (train, val) = (idx.splits.train, idx.splits.val);
+        Ok(self.throughput.estimate(&EstimateInput {
+            device: engine::device_id(device),
+            arch: config.arch,
+            imgsz: config.imgsz,
+            amp: config.amp,
+            batch: config.batch,
+            epochs: config.epochs,
+            mosaic: config.augment.mosaic > 0.0,
+            close_mosaic_epochs: check.augment.close_mosaic_epochs(config.epochs),
+            train_images: train,
+            val_images: if val == 0 { train } else { val },
+        }))
+    }
+
+    fn benchmark(&self, req: BenchmarkRequest) -> Result<BenchmarkReport> {
+        crate::probe::check(&req)?;
+        let device = engine::resolve(&self.device)?;
+        let _gate = self.runs.probe_gate()?;
+        crate::probe::run(&req, device, self.precision, &self.throughput)
+    }
+
     fn list_datasets(&self) -> Result<Vec<Dataset>> {
         let list = self.entries.read().unwrap().clone();
         Ok(list
@@ -893,6 +949,10 @@ impl Store for RealStore {
         };
         let m = self.model(&input.model_id)?;
         let device = engine::resolve(&self.device)?;
+        // Throughput samples: only a warm predictor's calls with no run queued or training from before the decode
+        // (it counts in `total_ms`) to the end, and none taken up or let go meanwhile.
+        let activity = self.runs.activity();
+        let idle = !self.runs.busy();
         let t0 = Instant::now();
         let decoded = match (&input.source, &path) {
             (PredictSource::Upload(bytes), _) => folo_data::decode(bytes).map_err(|err| {
@@ -912,8 +972,11 @@ impl Store for RealStore {
             _ => unreachable!("dataset sources have a path"),
         };
         let decode_ms = t0.elapsed().as_secs_f64() * 1e3;
-        let predictor = self.predictors.get(&m.path, device, self.precision)?;
-        let mut p = predictor.lock().unwrap();
+        let loaded = self.predictors.get(&m.path, device, self.precision)?;
+        let mut guard = loaded.lock().unwrap();
+        // A model's first prediction includes warm-up.
+        let warm = std::mem::replace(&mut guard.warm, true);
+        let p = &mut guard.predictor;
         let cfg = PredictConfig {
             imgsz: p.model().imgsz(),
             conf: input.conf,
@@ -928,6 +991,23 @@ impl Store for RealStore {
         let mut timing = pred.timing.to_api();
         timing.preprocess_ms += decode_ms;
         timing.total_ms += decode_ms;
+        if warm && idle && !self.runs.busy() && self.runs.activity() == activity {
+            let precision = match p.precision() {
+                folo_vision::Precision::F16 => InferPrecision::F16,
+                _ => InferPrecision::F32,
+            };
+            self.throughput.record_infer(InferSample {
+                key: InferKey {
+                    device: engine::device_id(p.device()),
+                    arch: m.model.arch,
+                    imgsz: p.model().imgsz(),
+                    precision,
+                    tensor_cores: engine::tensor_cores_on(p.device()),
+                },
+                total_ms: timing.total_ms,
+                inference_ms: timing.inference_ms,
+            });
+        }
         Ok(PredictResponse {
             model_id: m.model.id.clone(),
             image: ImageSize { width: pred.width, height: pred.height },
@@ -949,6 +1029,7 @@ impl Store for RealStore {
 
     fn shutdown(&self) {
         self.runs.shutdown(Some(SHUTDOWN_WAIT));
+        self.throughput.flush();
     }
 }
 

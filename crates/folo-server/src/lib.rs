@@ -13,6 +13,7 @@ pub mod error;
 mod index;
 pub mod mock;
 mod models;
+mod probe;
 mod raster;
 pub mod real;
 mod routes;
@@ -20,6 +21,7 @@ mod runs;
 mod stats;
 pub mod store;
 pub mod system;
+pub mod throughput;
 mod util;
 pub mod web;
 

@@ -299,6 +299,12 @@ fn full_flow(c: &mut Client, data_dir: &std::path::Path) {
     let templates =
         c.result("resources/templates/list", json!({}))["resourceTemplates"].as_array().unwrap().clone();
     assert!(templates.iter().any(|t| t["uriTemplate"] == "folo://datasets/{id}/images/{image_id}{?size}"));
+    assert!(
+        templates
+            .iter()
+            .any(|t| t["uriTemplate"] == "folo://estimate/{dataset_id}{?arch,epochs,batch,imgsz,device,amp}")
+    );
+    assert!(uris.contains(&"folo://system/throughput"));
     let doc = c.result("resources/read", json!({ "uri": "folo://docs/API" }));
     assert_eq!(doc["contents"][0]["mimeType"], "text/markdown");
     assert!(doc["contents"][0]["text"].as_str().unwrap().contains("/api/datasets"));
@@ -580,6 +586,30 @@ fn full_flow(c: &mut Client, data_dir: &std::path::Path) {
     assert!(runs["items"].as_array().unwrap().iter().all(|r| r["status"] == "completed"));
     let cmp = checked(c, &schemas, "compare_runs", json!({ "run_ids": [run_id, "run_2b02"] }));
     assert!(cmp["config_diff"]["dataset_id"].is_array());
+    // Throughput and estimates are resources: the mock measured folo-n at 640 on its GPU; the CPU has only the
+    // reference.
+    let mut json_resource = |uri: &str| -> Value {
+        let r = c.result("resources/read", json!({ "uri": uri }));
+        assert_eq!(r["contents"][0]["mimeType"], "application/json", "{uri}");
+        serde_json::from_str(r["contents"][0]["text"].as_str().unwrap()).unwrap()
+    };
+    let t = json_resource("folo://system/throughput");
+    assert_eq!(t["training"][0]["source"], "measured", "{t}");
+    let est = json_resource("folo://estimate/ds_5a1e?epochs=50");
+    assert_eq!(
+        (est["source"].as_str(), est["confidence"].as_str()),
+        (Some("measured"), Some("high")),
+        "{est}"
+    );
+    assert!(est["est_total_s_low"].as_f64() < est["est_total_s"].as_f64(), "{est}");
+    let est = json_resource("folo://estimate/ds_5a1e?device=cpu&imgsz=320");
+    assert_eq!(est["source"], "reference", "{est}");
+    for bad in
+        ["folo://estimate/nope", "folo://estimate/ds_5a1e?lr0=1", "folo://estimate/ds_5a1e?epochs=many"]
+    {
+        let e = c.request("resources/read", json!({ "uri": bad }));
+        assert!(e["error"]["code"].is_i64(), "{bad}: {e}");
+    }
     checked(c, &schemas, "list_datasets", json!({}));
     let live = checked(c, &schemas, "list_runs", json!({ "status": "running", "limit": 1 }));
     if let Some(r) = live["items"].as_array().unwrap().first() {

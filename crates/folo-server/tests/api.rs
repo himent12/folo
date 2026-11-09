@@ -1203,3 +1203,168 @@ async fn mock_model_metrics_match_their_run_epoch() {
     );
     assert!(checked >= 5, "{checked}");
 }
+
+/// `GET /api/system/throughput` in mock mode: the measured rows of the mock's runs first, labelled, then a
+/// reference row (with its docs/BENCHMARKS.md note) for every size and precision nothing measured.
+#[tokio::test]
+async fn mock_throughput_table_labels_both_sources() {
+    let (server, _) = mock();
+    let app = server.router();
+    let s: SystemResponse = ok(&app, get("/api/system")).await;
+    for f in [FEATURE_THROUGHPUT, FEATURE_RUN_ESTIMATE, FEATURE_BENCHMARK] {
+        assert!(s.features.iter().any(|x| x == f), "{f}: {:?}", s.features);
+    }
+    let raw: Value = ok(&app, get("/api/system/throughput")).await;
+    let t: ThroughputTable = serde_json::from_value(raw.clone()).unwrap();
+    assert_eq!((t.device.as_str(), t.device_name.as_str()), ("gpu:0", "NVIDIA GeForce RTX 4080 SUPER"));
+    assert_eq!(raw["training"][0]["source"], "measured", "{}", raw["training"][0]);
+    let n640 =
+        t.training.iter().find(|r| r.device == "gpu:0" && r.arch == Arch::N && r.imgsz == 640 && !r.amp);
+    let n640 = n640.expect("a folo-n 640 row");
+    assert_eq!((n640.source, n640.samples, n640.note.as_ref()), (ThroughputSource::Measured, 99, None));
+    let mosaic = n640.mosaic.unwrap();
+    assert!(
+        mosaic.low <= mosaic.imgs_per_s && mosaic.imgs_per_s <= mosaic.high && mosaic.samples == 81,
+        "{mosaic:?}"
+    );
+    assert!(n640.close_mosaic.is_some() && n640.val.is_some() && n640.updated.is_some());
+    assert!(n640.peak_vram_bytes.is_some_and(|b| b > 3_000_000_000) && n640.batch == 16);
+    assert_eq!(
+        (n640.imgs_per_s, n640.measured_on.as_str()),
+        (mosaic.imgs_per_s, "NVIDIA GeForce RTX 4080 SUPER")
+    );
+    // No row twice; references carry no samples and say where they come from.
+    let mut keys = std::collections::HashSet::new();
+    for r in &t.training {
+        assert!(keys.insert((r.device.clone(), r.arch, r.imgsz, r.amp)), "{r:?} twice");
+        if r.source == ThroughputSource::Reference {
+            assert_eq!((r.samples, r.updated.as_ref()), (0, None));
+            assert!(r.note.as_ref().is_some_and(|n| n.contains("docs/BENCHMARKS.md")), "{r:?}");
+        }
+    }
+    let x = t.training.iter().find(|r| r.arch == Arch::X && r.imgsz == 640 && r.device == "gpu:0" && !r.amp);
+    assert_eq!(x.unwrap().source, ThroughputSource::Reference);
+    assert!(
+        t.training.iter().any(|r| r.device == "cpu" && !r.amp)
+            && !t.training.iter().any(|r| r.device == "cpu" && r.amp)
+    );
+    let infer =
+        t.inference.iter().find(|r| r.source == ThroughputSource::Measured).expect("a measured predict row");
+    assert_eq!(
+        (infer.arch, infer.imgsz, infer.precision, infer.samples),
+        (Arch::N, 640, InferPrecision::F32, 214)
+    );
+    assert!((infer.imgs_per_s - 1000.0 / infer.latency_ms).abs() < 0.1);
+    assert!(
+        t.inference
+            .iter()
+            .any(|r| r.precision == InferPrecision::F16 && r.source == ThroughputSource::Reference)
+    );
+    // Deterministic.
+    let again: Value = ok(&app, get("/api/system/throughput")).await;
+    assert_eq!(again, raw);
+}
+
+/// `POST /api/runs/estimate` in mock mode: measured where the mock measured, carried to nearby sizes, the reference
+/// elsewhere, and the same checks as `POST /api/runs`.
+#[tokio::test]
+async fn mock_run_estimates() {
+    let (server, _) = mock();
+    let app = server.router();
+    // shapes-1k: 800 train / 200 val images; folo-n 640 is measured.
+    let e: RunEstimate =
+        ok(&app, post_json("/api/runs/estimate", json!({ "dataset_id": "ds_5a1e", "epochs": 100 }))).await;
+    assert_eq!(
+        (e.source, e.confidence, e.val_source),
+        (ThroughputSource::Measured, Confidence::High, ThroughputSource::Measured)
+    );
+    assert!(e.basis.exact && e.basis.samples == 99 && e.basis.updated.is_some(), "{:?}", e.basis);
+    assert_eq!((e.train_images, e.val_images, e.batches_per_epoch, e.epochs), (800, 200, 50, 100));
+    assert_eq!(
+        e.phases.iter().map(|p| (p.phase, p.epochs)).collect::<Vec<_>>(),
+        [(PhaseKind::Mosaic, 90), (PhaseKind::CloseMosaic, 10)]
+    );
+    let sum: f64 = e.phases.iter().map(|p| p.epochs as f64 * p.epoch_s).sum::<f64>() + e.startup_s;
+    assert!((sum - e.est_total_s).abs() < 1.0, "{sum} vs {}", e.est_total_s);
+    assert!(e.est_total_s_low < e.est_total_s && e.est_total_s < e.est_total_s_high);
+    assert_eq!(
+        (e.vram_source, e.est_peak_vram_bytes),
+        (Some(ThroughputSource::Measured), Some(3_652_000_000))
+    );
+    // A size nothing measured: carried from the nearest measured row (folo-s 640).
+    let e: RunEstimate =
+        ok(&app, post_json("/api/runs/estimate", json!({ "dataset_id": "ds_5a1e", "arch": "folo-m" }))).await;
+    assert_eq!((e.source, e.confidence), (ThroughputSource::Measured, Confidence::Medium));
+    assert!(!e.basis.exact && e.basis.arch == Arch::S, "{:?}", e.basis);
+    // The CPU: nothing measured, so the labelled reference.
+    let body = json!({ "dataset_id": "ds_5a1e", "device": "cpu", "imgsz": 320, "epochs": 10 });
+    let e: RunEstimate = ok(&app, post_json("/api/runs/estimate", body)).await;
+    assert_eq!(
+        (e.source, e.confidence, e.device.as_str()),
+        (ThroughputSource::Reference, Confidence::Low, "cpu")
+    );
+    assert!(e.basis.note.contains("docs/BENCHMARKS.md"), "{}", e.basis.note);
+    assert_eq!((e.est_peak_vram_bytes, e.vram_source), (None, None));
+    assert_eq!(e.phases.iter().map(|p| p.epochs).collect::<Vec<_>>(), [5, 5], "close_mosaic capped at half");
+    // Validation as for POST /api/runs.
+    err(
+        &app,
+        post_json("/api/runs/estimate", json!({ "dataset_id": "ds_nope" })),
+        StatusCode::NOT_FOUND,
+        "dataset_not_found",
+    )
+    .await;
+    let bad = json!({ "dataset_id": "ds_5a1e", "epochs": 0 });
+    err(&app, post_json("/api/runs/estimate", bad), StatusCode::BAD_REQUEST, "invalid_config").await;
+    err(
+        &app,
+        post_json("/api/runs/estimate", json!({ "epochs": 3 })),
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "invalid_body",
+    )
+    .await;
+    assert_eq!(ok::<RunList>(&app, get("/api/runs")).await.runs.len(), 7, "an estimate creates no run");
+}
+
+/// `POST /api/system/benchmark` in mock mode: it updates the table (as a probe), checks its settings and is
+/// refused while a run created through the API is active.
+#[tokio::test]
+async fn mock_benchmark_probe() {
+    let (server, _) = mock();
+    let app = server.router();
+    let r: BenchmarkReport = ok(&app, post_json("/api/system/benchmark", json!({}))).await;
+    assert_eq!((r.training.arch, r.training.imgsz, r.training.amp), (Arch::N, 320, false));
+    assert_eq!(
+        (r.training.source, r.training.samples, r.training.probes),
+        (ThroughputSource::Measured, 1, 1)
+    );
+    assert!(r.train_imgs_per_s > 300.0 && r.latency_ms > 0.0 && r.predictions >= 5, "{r:?}");
+    let t: ThroughputTable = ok(&app, get("/api/system/throughput")).await;
+    let row =
+        t.training.iter().find(|x| x.arch == Arch::N && x.imgsz == 320 && !x.amp && x.device == "gpu:0");
+    assert_eq!(row.unwrap().source, ThroughputSource::Measured, "the probe's row replaces the reference");
+    let bad = json!({ "budget_s": 0.5 });
+    err(&app, post_json("/api/system/benchmark", bad), StatusCode::BAD_REQUEST, "invalid_body").await;
+    err(
+        &app,
+        post_json("/api/system/benchmark", json!({ "imgsz": 100 })),
+        StatusCode::BAD_REQUEST,
+        "invalid_body",
+    )
+    .await;
+    let none = Server::new(
+        Arc::new(MockStore::new().with_tensor_cores(folo_server::mock::MockTensorCores::None)),
+        Options::default(),
+    )
+    .router();
+    err(
+        &none,
+        post_json("/api/system/benchmark", json!({ "amp": true })),
+        StatusCode::NOT_IMPLEMENTED,
+        "not_supported",
+    )
+    .await;
+    let run: Run = ok(&app, post_json("/api/runs", json!({ "dataset_id": "ds_5a1e", "epochs": 2 }))).await;
+    err(&app, post_json("/api/system/benchmark", json!({})), StatusCode::CONFLICT, "run_active").await;
+    ok::<Run>(&app, post_json(&format!("/api/runs/{}/stop", run.id), json!({}))).await;
+}

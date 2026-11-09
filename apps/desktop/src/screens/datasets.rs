@@ -717,6 +717,9 @@ impl FoloApp {
         let row_h = cell_w * 0.75 + GAP + 1.;
         let width_cell = self.grid_width.clone();
         let ds_id: SharedString = id.clone().into();
+        // Class names, so a tile can say what it holds, not only how many boxes.
+        let class_names: Vec<String> =
+            self.store.dataset_summary(&id).map(|d| d.classes.clone()).unwrap_or_default();
         let fit = if self.ds_fill { crate::viz::Fit::Cover } else { crate::viz::Fit::Contain };
         let grid = uniform_list(
             "ds-grid",
@@ -739,7 +742,28 @@ impl FoloApp {
                         };
                         let tile_el = this.tile(&ds_id, meta, this.ds_boxes, true, fit, cx);
                         let key = format!("tile-{}", meta.id);
-                        let n = meta.boxes.len();
+                        // "2 square · 1 triangle · +2": the two commonest classes, then the rest as a
+                        // count, so the box colours aren't the only way to tell what a tile holds.
+                        let what = {
+                            let mut counts: Vec<(u32, usize)> = Vec::new();
+                            for b in &meta.boxes {
+                                match counts.iter_mut().find(|(c, _)| *c == b.class) {
+                                    Some((_, k)) => *k += 1,
+                                    None => counts.push((b.class, 1)),
+                                }
+                            }
+                            counts.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+                            let name = |c: u32| {
+                                class_names.get(c as usize).cloned().unwrap_or_else(|| format!("class {c}"))
+                            };
+                            let mut parts: Vec<String> =
+                                counts.iter().take(2).map(|(c, k)| format!("{k} {}", name(*c))).collect();
+                            let rest: usize = counts.iter().skip(2).map(|(_, k)| k).sum();
+                            if rest > 0 {
+                                parts.push(format!("+{rest}"));
+                            }
+                            if parts.is_empty() { "no boxes".to_string() } else { parts.join(" · ") }
+                        };
                         let dsid = ds_id.to_string();
                         let focused = this.fh(key.clone(), cx).is_focused(window);
                         let el = div()
@@ -793,7 +817,8 @@ impl FoloApp {
                                             .child(
                                                 text(ty::XS, gpui::hsla(0., 0., 1., 0.75))
                                                     .tnum()
-                                                    .child(format!("{n} boxes")),
+                                                    .truncate()
+                                                    .child(what),
                                             ),
                                     ),
                             );

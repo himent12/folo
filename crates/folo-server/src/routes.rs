@@ -12,9 +12,10 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use folo_api::{
-    API_VERSION, DatasetList, ExportSpec, Health, ImagePage, IssuePage, LogLevel, LogLine, ModelList,
-    OnnxSwitches, PredictRequest, QueueRequest, RegisterDataset, RunEvent, RunList, RunLogs, Split,
-    SyntheticDataset, SystemInfo, SystemResponse, TrainConfig, ValReport, ValRequest,
+    API_VERSION, BenchmarkReport, BenchmarkRequest, DatasetList, ExportSpec, Health, ImagePage, IssuePage,
+    LogLevel, LogLine, ModelList, OnnxSwitches, PredictRequest, QueueRequest, RegisterDataset, RunEstimate,
+    RunEvent, RunList, RunLogs, Split, SyntheticDataset, SystemInfo, SystemResponse, ThroughputTable,
+    TrainConfig, ValReport, ValRequest,
 };
 use futures_util::{Stream, StreamExt, stream};
 use serde::Deserialize;
@@ -44,6 +45,8 @@ pub fn api() -> Router<AppState> {
     Router::new()
         .route("/health", get(health))
         .route("/system", get(system))
+        .route("/system/throughput", get(throughput))
+        .route("/system/benchmark", post(benchmark))
         .route("/datasets", get(list_datasets).post(register_dataset))
         .route("/datasets/synthetic", post(create_synthetic))
         .route("/datasets/{id}", get(get_dataset).delete(delete_dataset))
@@ -56,6 +59,7 @@ pub fn api() -> Router<AppState> {
         .route("/models/{id}/export", post(export_model))
         .route("/models/{id}/weights", get(model_weights))
         .route("/runs", get(list_runs).post(create_run))
+        .route("/runs/estimate", post(estimate_run))
         .route("/runs/{id}", get(get_run).delete(delete_run))
         .route("/runs/{id}/stop", post(stop_run))
         .route("/runs/{id}/queue", post(move_run))
@@ -122,6 +126,9 @@ async fn system(State(st): State<AppState>) -> Result<Json<SystemResponse>> {
         folo_api::FEATURE_EXPORT_ONNX_SWITCHES,
         folo_api::FEATURE_QUEUE_CONTROL,
         folo_api::FEATURE_WEIGHTS_ONNX,
+        folo_api::FEATURE_THROUGHPUT,
+        folo_api::FEATURE_RUN_ESTIMATE,
+        folo_api::FEATURE_BENCHMARK,
     ]
     .map(String::from)
     .to_vec();
@@ -131,6 +138,17 @@ async fn system(State(st): State<AppState>) -> Result<Json<SystemResponse>> {
         features,
         capabilities,
     }))
+}
+
+async fn throughput(State(st): State<AppState>) -> Result<Json<ThroughputTable>> {
+    Ok(Json(blocking(&st, |s| s.throughput()).await?))
+}
+
+async fn benchmark(
+    State(st): State<AppState>,
+    ApiJson(req): ApiJson<BenchmarkRequest>,
+) -> Result<Json<BenchmarkReport>> {
+    Ok(Json(blocking(&st, move |s| s.benchmark(req)).await?))
 }
 
 // ---- datasets ----------------------------------------------------------------------------------------------------
@@ -395,6 +413,13 @@ async fn create_run(
         serde_json::from_value(serde_json::Value::Object(fields)).map_err(body_error)?;
     let run = blocking(&st, move |s| s.create_run(config)).await?;
     Ok((StatusCode::CREATED, Json(run)).into_response())
+}
+
+async fn estimate_run(
+    State(st): State<AppState>,
+    ApiJson(config): ApiJson<TrainConfig>,
+) -> Result<Json<RunEstimate>> {
+    Ok(Json(blocking(&st, move |s| s.estimate_run(config)).await?))
 }
 
 async fn get_run(State(st): State<AppState>, ApiPath(id): ApiPath<String>) -> Result<Response> {

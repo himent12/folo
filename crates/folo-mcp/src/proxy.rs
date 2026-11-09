@@ -8,8 +8,8 @@ use std::time::Duration;
 use folo_api::{
     Dataset, DatasetList, ErrorBody, ExportResult, ExportSpec, FEATURE_EXPORT_ONNX_SWITCHES, GpuInfo, Health,
     ImagePage, IssuePage, LogLine, Model, ModelEval, ModelList, PredictRequest, PredictResponse, QueueAction,
-    QueueRequest, RegisterDataset, Run, RunList, RunLogs, RunMetrics, RunSamples, SyntheticDataset,
-    SystemInfo, SystemResponse, TrainConfig, ValReport, ValRequest,
+    QueueRequest, RegisterDataset, Run, RunEstimate, RunList, RunLogs, RunMetrics, RunSamples,
+    SyntheticDataset, SystemInfo, SystemResponse, ThroughputTable, TrainConfig, ValReport, ValRequest,
 };
 use folo_server::store::{
     ImageData, ImageQuery, IssueQuery, PredictInput, PredictSource, QueueMove, Store, Subscription,
@@ -342,6 +342,14 @@ impl Store for HttpStore {
 
     fn val(&self, req: ValRequest) -> Result<ValReport, Error> {
         self.post("/val", &req)
+    }
+
+    fn throughput(&self) -> Result<ThroughputTable, Error> {
+        self.get("/system/throughput")
+    }
+
+    fn estimate_run(&self, config: TrainConfig) -> Result<RunEstimate, Error> {
+        self.post("/runs/estimate", &config)
     }
 }
 
