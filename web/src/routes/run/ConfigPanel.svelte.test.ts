@@ -25,13 +25,18 @@ let target: HTMLElement;
 let c: ReturnType<typeof mount> | undefined;
 afterEach(() => {
   if (c) unmount(c);
+  c = undefined;
   target.remove();
 });
 
-function rows(resolved: ResolvedTrain | null) {
+function rows(resolved: ResolvedTrain | null, cfg: TrainConfig = config) {
+  if (c) {
+    unmount(c);
+    target.remove();
+  }
   target = document.createElement('div');
   document.body.appendChild(target);
-  c = mount(ConfigPanel, { target, props: { config, resolved, compact: true } });
+  c = mount(ConfigPanel, { target, props: { config: cfg, resolved, compact: true } });
   flushSync();
   const dts = [...target.querySelectorAll('dt')];
   return Object.fromEntries(dts.map((dt) => [dt.textContent?.trim(), dt.nextElementSibling as HTMLElement]));
@@ -58,5 +63,19 @@ describe('ConfigPanel', () => {
     expect(r['Initial LR']?.textContent).toBe('0.01');
     expect(r['Batch']?.textContent).toBe('16');
     expect(r['Warmup']).toBeUndefined();
+  });
+
+  it('shows the capped close mosaic, the precision and the head (DOGFOOD-3 S2, S4)', () => {
+    const short = { ...config, epochs: 15, amp: true, head: 'o2o' as const };
+    const r = rows(resolveTrain(short, 1920, 8, 120), short);
+    expect(r['Close mosaic']?.textContent).toBe('last 7 epochs(requested 10)');
+    expect(r['Close mosaic']?.querySelector('.note')?.textContent).toBe('(requested 10)');
+    expect(r['Precision']?.textContent).toBe('Mixed precision (f16)');
+    expect(r['Head']?.textContent).toBe('End-to-end (no NMS)');
+    // The defaults are said too.
+    const d = rows(null);
+    expect(d['Close mosaic']?.textContent).toBe('last 10 epochs');
+    expect(d['Precision']?.textContent).toBe('f32');
+    expect(d['Head']?.textContent).toBe('NMS (one-to-many)');
   });
 });

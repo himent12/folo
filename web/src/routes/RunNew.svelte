@@ -489,8 +489,6 @@
   const cliParts = $derived(servedCli ? servedCli.split(/ (?=--)/) : ownCli.parts);
   const cli = $derived(servedCli ?? ownCli.line);
   const cliPlaceholder = $derived(servedCli ? null : ownCli.placeholder);
-  /** Shell line continuation, for the multi-line display of the command. */
-  const CONT = ' \\\n  ';
 
   async function submit(e: SubmitEvent) {
     e.preventDefault();
@@ -1047,7 +1045,13 @@
             <details class="cli">
               <summary><ChevronRight size={14} aria-hidden="true" />CLI command <span class="faint">the same run from a terminal</span></summary>
               <div class="cli-body">
-                <code aria-describedby={cliPlaceholder ? 'cli-note' : undefined}>{cliParts.join(CONT)}</code>
+                <!-- One flag a line; a line too long for the rail wraps at a space and hangs deeper than the flags. -->
+                <code aria-describedby={cliPlaceholder ? 'cli-note' : undefined}
+                  >{#each cliParts as p, i (i)}<span class="ln" class:cont={i > 0}
+                      >{#if cliPlaceholder && p === `--weights <path to ${cliPlaceholder}>`}--weights <span class="ph">&lt;path to <span class="ph-file">{cliPlaceholder}</span>&gt;</span
+                        >{:else}{p}{/if}{i < cliParts.length - 1 ? ' \\' : ''}</span
+                    >{/each}</code
+                >
                 <span class="cli-copy"><Button size="sm" variant="ghost" icon={Copy} aria-label="Copy command" title="Copy command" onclick={() => copy(cli, 'Command copied')} /></span>
               </div>
               {#if cliPlaceholder}<p class="cli-note" id="cli-note">Put the path of {cliPlaceholder} on the server in its place: this server does not report it.</p>{/if}
@@ -1911,6 +1915,23 @@
   .cli-body {
     position: relative;
     margin-top: var(--space-2);
+  }
+  .ln {
+    display: block;
+    padding-left: 4ch;
+    text-indent: -4ch;
+  }
+  .ln.cont {
+    padding-left: 6ch;
+  }
+  /* The weights file to fill in, in placeholder ink; its name moves to the next line whole where it fits there. */
+  .ph {
+    color: var(--text-tertiary);
+  }
+  .ph-file {
+    display: inline-block;
+    max-width: 100%;
+    text-indent: 0;
   }
   .cli-note {
     margin-top: var(--space-2);

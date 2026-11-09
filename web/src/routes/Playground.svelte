@@ -270,7 +270,7 @@
   $effect(() => {
     if (browserOff && untrack(() => runOn) !== 'server') runOn = 'server';
   });
-  const runOnNote = $derived(browserOff ? 'No in-browser runtime in this build' : !webgpu ? 'No WebGPU in this browser' : null);
+  const runOnNote = $derived(browserOff ? 'No in-browser runtime' : !webgpu ? 'No WebGPU in this browser' : null);
   /** .folo files the user picked, by model id. */
   let localWeights = $state.raw(new Map<string, File>());
   /** The server cannot send this model's file: ask for it. */

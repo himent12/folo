@@ -716,3 +716,81 @@ describe('New run: the estimate', () => {
     expect(target.querySelector('p.ref')?.textContent?.replace(/\s+/g, ' ')).toMatch(/measured on this GPU for folo-n; the others are the reference/);
   });
 });
+
+describe('New run: DOGFOOD-3', () => {
+  const cli = () => target.querySelector('.cli code')!.textContent!;
+  async function fineTune() {
+    target.querySelector<HTMLInputElement>('input[name="arch"][value="folo-n"]')!.click();
+    flushSync();
+    const sel = target.querySelector<HTMLSelectElement>('select#weights')!;
+    const opt = await until(() => sel.querySelector<HTMLOptionElement>('option[value="m_fast_n"]'), 'fasteners-n-best');
+    opt.selected = true;
+    sel.dispatchEvent(new Event('change', { bubbles: true }));
+    flushSync();
+  }
+
+  it("fine-tunes from the weights file in the CLI command: no --model, and the file's path, not the model id (S1)", async () => {
+    hub.api = api = new MockApi('normal', 0);
+    await open();
+    await fineTune();
+    expect(cli()).not.toContain('--model');
+    expect(cli()).not.toContain('m_fast_n');
+    // This server does not report the file's path: a placeholder, and one line that says what to put there.
+    expect(cli()).toContain('--weights <path to fasteners-n-best.folo>');
+    expect(target.querySelector('.summary .cli-note')?.textContent).toBe(
+      'Put the path of fasteners-n-best.folo on the server in its place: this server does not report it.',
+    );
+    expect(target.querySelector('.summary .cli code')?.getAttribute('aria-describedby')).toBe('cli-note');
+  });
+
+  it('names the file where the server reports its path (Model.path)', async () => {
+    hub.api = api = new MockApi('normal', 0);
+    const models = api.models.bind(api);
+    vi.spyOn(api, 'models').mockImplementation(async () => (await models()).map((m) => ({ ...m, path: `D:/folo data/models/${m.name}.folo` })));
+    await open();
+    await fineTune();
+    expect(cli()).toContain("--weights 'D:/folo data/models/fasteners-n-best.folo'");
+    expect(target.querySelector('.summary .cli-note')).toBeNull();
+  });
+
+  it("shows the server's own command where its estimate carries one", async () => {
+    hub.api = api = new MockApi('normal', 0);
+    const est = api.estimateRun.bind(api);
+    vi.spyOn(api, 'estimateRun').mockImplementation(async (b) => ({ ...(await est(b)), cli: `folo train --data D:/x --weights D:/w.folo --name ${b.name}` }));
+    await open();
+    await fineTune();
+    await until(() => cli().includes('D:/w.folo'), "the server's command");
+    expect(cli()).toContain(`--name ${target.querySelector<HTMLInputElement>('input#name')!.value}`);
+    expect(target.querySelector('.summary .cli-note')).toBeNull();
+  });
+
+  it('says "Estimating…" until the server\'s devices load, never a CPU guess or 0 steps (S3)', async () => {
+    hub.api = api = new MockApi('normal', 0);
+    vi.spyOn(api, 'system').mockReturnValue(new Promise(() => {}));
+    router.route = parse('#/runs/new');
+    c = mount(RunNew, { target });
+    // The dataset loaded, the server's devices still not.
+    await until(() => target.querySelector('.dock-est'), 'the dataset');
+    const summary = target.querySelector('.summary')!.textContent!;
+    expect(summary).toContain('Estimating…');
+    expect(summary).not.toContain('CPU is roughly');
+    expect(summary).not.toContain('steps / epoch');
+    expect(summary).not.toContain('img/s');
+    expect(target.querySelector('.dock-est')?.textContent).toContain('Estimating…');
+  });
+
+  it("states the GPU memory estimate alone where the adapter's size is not reported (memory_bytes 0)", async () => {
+    hub.api = api = new MockApi('normal', 0);
+    const sys = api.system.bind(api);
+    vi.spyOn(api, 'system').mockImplementation(async () => {
+      const r = await sys();
+      return { ...r, gpus: r.gpus.map((g) => ({ ...g, memory_bytes: 0 })) };
+    });
+    await open();
+    const dd = [...target.querySelectorAll('.summary .est dt')].find((d) => d.textContent === 'Est. GPU memory')!.nextElementSibling!;
+    expect(dd.textContent).toMatch(/^~[\d.]+ GiB$/);
+    const summary = target.querySelector('.summary')!.textContent!;
+    expect(summary).not.toContain('unknown');
+    expect(summary.split('This GPU’s memory size isn’t reported.')).toHaveLength(2);
+  });
+});
