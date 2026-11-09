@@ -1,6 +1,7 @@
 // Dataset health checks and histogram labels. Pure functions so the thresholds are easy to test and tune.
 
 import type { Dataset, DatasetStats, Histogram, IssueCounts, IssueSeverity } from '$lib/api/types';
+import { TRAINED_ON } from '$lib/evaluated';
 
 export type Severity = 'danger' | 'warning' | 'info' | 'ok';
 
@@ -221,7 +222,8 @@ export function healthChecks(d: Dataset, s: DatasetStats, counts?: IssueCounts):
       title: 'No validation split',
       short: 'no validation split',
       tiny: 'no val split',
-      detail: 'mAP cannot be measured during training. Move 10–20% of the images into a val split.',
+      // Training and /eval fall back to the training split (docs/API.md, Split fallback), in the Model page's words.
+      detail: `Training and evaluation use the training split instead, so mAP is measured ${TRAINED_ON}. Move 10–20% of the images into a val split.`,
     });
   }
 

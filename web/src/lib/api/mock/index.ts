@@ -44,6 +44,7 @@ import type {
   RunMetrics,
   RunSamples,
   Sample,
+  Split,
   SystemInfo,
   ThroughputTable,
   TrainConfig,
@@ -681,6 +682,24 @@ export class MockApi implements Api {
         trained_with: null,
         precision: 'f32',
         fused: false,
+      });      // An imported file with fasteners-mini's classes: /eval runs on that dataset (the first with its classes, as a
+      // real server picks one), which has no validation images, so on its training split.
+      out.push({
+        id: 'm_mini_n',
+        name: 'fasteners-mini-n',
+        arch: 'folo-n',
+        imgsz: 640,
+        classes: ['bolt', 'nut'],
+        params: archInfo['folo-n'].params,
+        flops_g: archInfo['folo-n'].flops,
+        bytes: Math.round(archInfo['folo-n'].params * 2.06),
+        created: new Date(this.#t0 - 4 * DAY).toISOString(),
+        run_id: null,
+        metrics: { map50: 0.912, map50_95: 0.701, precision: 0.884, recall: 0.861, best_f1_conf: 0.402 },
+        head: 'o2m',
+        trained_with: { amp: false, imgsz: 640, epochs: 60 },
+        precision: 'f32',
+        fused: false,
       });
     }
     return out.sort((a, b) => b.created.localeCompare(a.created));
@@ -709,17 +728,40 @@ export class MockApi implements Api {
       if (p) {
         const best = bestOf(p, Math.floor(progressAt(p, Date.now()).done));
         perClass = best ? epochAt(p, best.epoch - 1).val.per_class : null;
-        const ds = this.#datasets.find((d) => d.id === p.config.dataset_id);
-        if (ds) {
-          const share = ds.splits.val / Math.max(1, total(ds));
-          instances = stats(ds).class_counts.map((c) => c * share);
-          images = ds.splits.val;
-        }
       }
+      // The run's dataset; an imported model's, the first with its classes (as a real server picks it).
+      const same = (a: readonly string[]) => a.length === m.classes.length && a.every((c, i) => c === m.classes[i]);
+      const ds = p ? this.#datasets.find((d) => d.id === p.config.dataset_id) : this.#datasets.find((d) => same(d.classes));
+      // Its val split, its train split when val is empty (docs/API.md, Split fallback).
+      const split: Split = ds && ds.splits.val === 0 ? 'train' : 'val';
+      if (ds) {
+        const share = ds.splits[split] / Math.max(1, total(ds));
+        instances = stats(ds).class_counts.map((c) => c * share);
+        images = ds.splits[split];
+      }
+      const evaluation = toModelEval(synthEvaluation({ seed: m.id, classes: m.classes, metrics: m.metrics, perClass, instances }), images);
+      // folo-s-coco80 has no dataset here: a real server answers 404 (no registered dataset has its 80 classes). The
+      // demo keeps its curves and answers as a server from before the provenance fields, which leaves them out.
+      if (!ds) return { ...evaluation, best_f1_conf: m.metrics?.best_f1_conf ?? null };
       // The same operating point as the model's metrics (the epoch that wrote its weights), as on folo-server's mock.
       return {
-        ...toModelEval(synthEvaluation({ seed: m.id, classes: m.classes, metrics: m.metrics, perClass, instances }), images),
+        ...evaluation,
         best_f1_conf: m.metrics?.best_f1_conf ?? null,
+        dataset_id: ds.id,
+        dataset_name: ds.name,
+        split,
+        // folo_api::SplitFallback::empty_split's sentence.
+        split_fallback:
+          split === 'val'
+            ? null
+            : {
+                requested: 'val',
+                reason: 'empty_split',
+                message: `dataset '${ds.name}' has no val images, so this is its train split (${images} images): training-set numbers, not held-out ones`,
+              },
+        // folo-vision's EvalConfig defaults (docs/METRICS.md §7), not the NMS settings or best_f1_conf.
+        confusion_conf: 0.25,
+        confusion_iou: 0.45,
       };
     }, 180);
   }

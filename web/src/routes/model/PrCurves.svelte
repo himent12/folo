@@ -19,6 +19,7 @@
   import type { Evaluation } from '$lib/api/evaluation';
   import LineChart, { type Series } from '$lib/charts/LineChart.svelte';
   import { classInk, classStroke } from '$lib/design/classInk.svelte';
+  import { imagesOf } from '$lib/evaluated';
   import { metric, num } from '$lib/format';
   import Input from '$lib/ui/Input.svelte';
   import ArrowLeft from '@lucide/svelte/icons/arrow-left';
@@ -311,8 +312,9 @@
         {all ? `Show the first ${ROWS_MAX}` : `Show all ${listed.length}`}
       </button>
     {/if}
+    <!-- The split actually evaluated, never "validation" by default: the page's notice says why when it is not. -->
     <p class="foot">
-      Evaluated on {num(ev.images)} validation images at IoU 0.50. Precision and recall {prContext(ev.bestF1Conf, false)}; instances are
+      Evaluated on {imagesOf(ev.source, ev.images)} at IoU 0.50. Precision and recall {prContext(ev.bestF1Conf, false)}; instances are
       ground-truth boxes per class.
     </p>
   </div>

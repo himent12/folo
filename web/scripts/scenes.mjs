@@ -841,6 +841,16 @@ export const scenes = [
     },
   },
   {
+    // fasteners-mini-n, imported, evaluated on fasteners-mini, which has no validation images: /eval fell back to the
+    // training split (docs/API.md, Split fallback). The page says so once, under the metrics, and names the training
+    // split wherever it names what was evaluated (the curves' meta, the per-class footer, Details, the matrix).
+    name: 'model-eval-train-fallback',
+    path: '/models/m_mini_n',
+    viewports: ['desktop', 'mobile'],
+    fullPage: true,
+    setup: (page, { vp }) => until(page, vp === 'mobile' ? '#pr svg' : '#cm .cell'),
+  },
+  {
     name: 'model-coco',
     path: '/models/m_coco_s',
     viewports: ['desktop', 'laptop'],
