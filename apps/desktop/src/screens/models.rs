@@ -432,7 +432,14 @@ impl FoloApp {
                             .pb(px(baseline_lift(ty::X3XL, ty::XL))),
                         ),
                     )
-                    .child(text(ty::SM, t.text_tertiary).ellipsis().child(op_point.clone())),
+                    // Clipped, not ellipsized: the run page's twin caption hit GPUI 0.2.2's truncation
+                    // panic (a stale run length sliced inside "·"); this one fits its tile.
+                    .child(
+                        text(ty::SM, t.text_tertiary)
+                            .whitespace_nowrap()
+                            .overflow_hidden()
+                            .child(op_point.clone()),
+                    ),
             ))
             .child(vline(&t))
             .child(tile(small(
@@ -457,11 +464,12 @@ impl FoloApp {
         let body = match self.store.evals.get(id) {
             Some(Load::Ready(ev)) => {
                 let ev = ev.clone();
-                // Side by side only while the PR panel keeps 520 px beside the matrix (46 %, 440 px
-                // minimum), so its plot stays ~240 px wide; else one above the other.
+                // Side by side only while the PR panel keeps 600 px beside the matrix (46 %, 440 px
+                // minimum): its plot and side legend both fit. Else one above the other, each full
+                // width (at the 1200 content cap that's below a ~1430 px window).
                 let stacked = {
                     let row = self.content_width(window) - 16.;
-                    row - (row * 0.46).max(440.) < 520.
+                    row - (row * 0.46).max(440.) < 600.
                 };
                 let pr = self.pr_panel(&m, &ev, window, cx);
                 let cm = self.confusion_panel(&m, &ev, window, cx);

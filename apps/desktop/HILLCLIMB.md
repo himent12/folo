@@ -2237,3 +2237,34 @@ Opus's next items:
 **Stacked Best model per dataset** adds Architecture, mAP50 and Created.
 
 **Open:** confusion-matrix headings at 1280. The matrix gets 42% of a 1000 px row, about 47 px per cell, so long class names shorten. Making it all-or-nothing gave "cir. / squ. / sta.", which reads worse than one "hex.", so that change was reverted. The real fix is a layout one: more width for the matrix, or a stacked PR / matrix pair.
+
+## Round 54
+
+| Line | Opus 5.5 | GPT-6.1 Sol |
+|------|----------|-------------|
+| Hierarchy | 9 | 9 |
+| Typography | 8 | 9 |
+| Colour | 9 | 9 |
+| Spacing | 9 | 9 |
+| Components | 9 | 9 |
+| Dataviz | 8 | 8.8 |
+| Info/copy | 9 | 9 |
+| Consistency | 9 | 8.8 |
+| Interaction | 9 | 9 |
+| Accessibility | 9 | 9 |
+| Responsiveness | 8 | 9 |
+| Polish | 8 | 8.8 |
+| **Average** | **8.7** | **8.95** |
+
+Round 54 changes:
+- **Overview chart:** reserves the run charts' annotation lane, so ETA sits above the plot.
+- **New run:** augmentation sliders are one-line rows, as on the Playground rail.
+- **Dataset Images tile:** wider below 1120.
+
+Fixed in-round after the reviews:
+- **Confusion matrix:** heads every column with the full class name. The bottom row's label is shorter ("FP share"), so the label column is 64 px, and the matrix gets 46 % of the row.
+- **Model page stacking:** PR and matrix stack by measured width. They sit side by side only while PR keeps 520 px, which the code review asked for after the plot shrank to ~76 px at 1120.
+- **Log:** continuation lines lead with "·".
+- **Playground:** the NMS row height holds when switching models.
+
+**Open:** at the 1200 cap the log's 2/5 column can't fit an epoch line. Round 55 stacks samples (one row of eight) and the log.

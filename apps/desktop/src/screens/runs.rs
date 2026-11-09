@@ -568,14 +568,9 @@ impl FoloApp {
         }
         let samples = self.samples_panel(&r, window, cx);
         let logs = self.logs_panel(&r, window, cx);
-        body = body.child(
-            div()
-                .flex()
-                .gap(px(16.))
-                // The same 3:2 columns as the chart rows above, so every gutter lines up.
-                .child(div().flex().min_w_0().flex_grow().flex_basis(gpui::relative(0.6)).child(samples))
-                .child(div().flex().min_w_0().flex_grow().flex_basis(gpui::relative(0.4)).child(logs)),
-        );
+        // Samples, then the log, each full width: an epoch's log line (~52 mono characters) reads on
+        // one line, as in a terminal, instead of wrapping in a 2/5 column at every window size.
+        body = body.child(div().flex().child(samples)).child(div().flex().child(logs));
         body = body.child(self.config_panel(&r, &ds_name, cx));
         self.page_frame(&t, header, body, cx)
     }
@@ -750,12 +745,16 @@ impl FoloApp {
                     last.map_or("–".into(), |e| format!("{:.3}", e.val.recall)),
                 ))
                 // The epoch's own operating point once the engine reports it (`best_f1_conf`); the
-                // P/R chart below states the match rule, so the tile's line fits at 1280.
-                .child(text(ty::SM, t.text_tertiary).ellipsis().child(pr_caption(
-                    last.and_then(|e| e.val.best_f1_conf),
-                    "val",
-                    false,
-                ))),
+                // P/R chart below states the match rule, so the tile's line fits at 1280. Clipped,
+                // not ellipsized: GPUI 0.2.2's truncation shortens the text's run in place, and a later
+                // untruncated measure in the same layout then slices inside the "·" and panics.
+                .child(
+                    text(ty::SM, t.text_tertiary).whitespace_nowrap().overflow_hidden().child(pr_caption(
+                        last.and_then(|e| e.val.best_f1_conf),
+                        "val",
+                        false,
+                    )),
+                ),
             div()
                 .flex()
                 .flex_col()
@@ -1270,18 +1269,22 @@ impl FoloApp {
                         div().flex_1().min_w(px(0.)).child(square).into_any_element()
                     })
                     .collect();
-                let mut it = tiles.into_iter();
-                let row1: Vec<AnyElement> = it.by_ref().take(4).collect();
-                let row2: Vec<AnyElement> = it.collect();
+                // One row of eight across the page's width (the log takes its own full-width row
+                // below), about the size the 3:5 column's two rows of four had.
                 div()
                     .flex()
                     .flex_col()
                     .gap(px(8.))
                     .p(px(16.))
-                    .child(div().flex().items_start().gap(px(8.)).children(row1))
-                    .child(div().flex().items_start().gap(px(8.)).children(row2))
+                    .child(div().flex().items_start().gap(px(8.)).children(tiles))
+                    // The caption says what the tiles show, view by view.
                     .child(text(ty::SM, t.text_tertiary).tnum().child(format!(
-                        "Epoch {epoch} · 8 of 16 fixed validation images · predictions with score ≥ 0.30"
+                        "Epoch {epoch} · 8 of 16 fixed validation images · {}",
+                        match view {
+                            SampleView::Predictions => "predictions with score ≥ 0.30",
+                            SampleView::Truth => "ground-truth labels",
+                            SampleView::Both => "ground truth and predictions with score ≥ 0.30",
+                        }
                     )))
                     .into_any_element()
             }
@@ -1293,7 +1296,7 @@ impl FoloApp {
                 .p(px(12.))
                 .flex()
                 .gap(px(8.))
-                .children((0..4).map(|i| {
+                .children((0..8).map(|i| {
                     let mut sq = div().w_full().child(skeleton(&t, format!("smp{i}")));
                     sq.style().aspect_ratio = Some(1.0);
                     div().flex_1().min_w(px(0.)).child(sq)
@@ -1584,17 +1587,18 @@ fn pr_floor(low: f32) -> f32 {
     if f < 0.4 { 0. } else { f.min(0.8) }
 }
 
-/// `D:\data\x.folo` → `D:/data/x.folo`: only whitespace-separated words that start with a drive
-/// (a letter, `:`, a separator) change, so a Unix path or escaped text with `\` keeps it.
 /// A log message as shown: Windows paths with `/`, split into its " · " fields, each but the
-/// first led by its dot (a wrapped line starts "· mAP50 0.745" instead of ending on "·"). Rows lay the fields out unbroken in a wrapping row, so a long entry
-/// breaks between fields, never inside "mAP50 0.745" (GPUI's wrapper breaks before any
-/// non-word character, so a no-break space can't hold a pair together).
+/// first led by its dot (a wrapped line starts "· mAP50 0.745" instead of ending on "·").
+/// Rows lay the fields out unbroken in a wrapping row, so a long entry breaks between fields,
+/// never inside "mAP50 0.745" (GPUI's wrapper breaks before any non-word character, so a
+/// no-break space can't hold a pair together).
 fn log_fields(s: &str) -> Vec<String> {
     let s = slash_paths(s);
     s.split(" · ").enumerate().map(|(i, f)| if i > 0 { format!("· {f}") } else { f.to_string() }).collect()
 }
 
+/// `D:\data\x.folo` → `D:/data/x.folo`: only whitespace-separated words that start with a drive
+/// (a letter, `:`, a separator) change, so a Unix path or escaped text with `\` keeps it.
 fn slash_paths(s: &str) -> String {
     let drive = |w: &str| {
         let b = w.trim_start_matches(['"', '\'', '(']).as_bytes();

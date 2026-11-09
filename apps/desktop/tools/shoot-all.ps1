@@ -31,7 +31,7 @@ if ($Only.Count -eq 0) {
         Shoot $s @{ Width = 960; Height = 620; Out = (Join-Path $Dir "$($s -replace '\+', '-')-min.png") }
     }
     # Large window (1680 x 1050).
-    foreach ($s in @("overview", "overview+empty", "run-live")) {
+    foreach ($s in @("overview", "overview+empty", "run-live", "model")) {
         Shoot $s @{ Width = 1680; Height = 1050; Out = (Join-Path $Dir "$($s -replace '\+', '-')-wide.png") }
     }
 }

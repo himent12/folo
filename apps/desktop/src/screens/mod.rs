@@ -84,10 +84,14 @@ impl FoloApp {
         let draw: Vec<DrawBox> = if boxes {
             let classes =
                 self.store.dataset_summary(dataset).map(|d| d.classes.as_slice()).unwrap_or_default();
+            // Filtered, a tile at rest names one match: the largest the painter can label (it tries
+            // them largest first), so every tile reads the same way; hovered or focused, all of them.
+            let one = !reveal;
             meta.boxes
                 .iter()
                 .map(|b| DrawBox {
                     dim: focus.is_some_and(|c| c != b.class),
+                    one_of: one && focus == Some(b.class),
                     label: classes.get(b.class as usize).map(|n| SharedString::from(n.clone())),
                     ..DrawBox::new(b.class, b.x1, b.y1, b.x2, b.y2)
                 })

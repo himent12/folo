@@ -26,11 +26,26 @@ pub struct DrawBox {
     pub truth: bool,
     pub highlight: bool,
     pub dim: bool,
+    /// One of a set that shares one chip: the first of them the painter can label (largest first,
+    /// as placement runs) takes it, and the rest stay unnamed (a filtered thumbnail names one match).
+    pub one_of: bool,
 }
 
 impl DrawBox {
     pub fn new(class: u32, x1: f32, y1: f32, x2: f32, y2: f32) -> Self {
-        Self { class, x1, y1, x2, y2, label: None, score: None, truth: false, highlight: false, dim: false }
+        Self {
+            class,
+            x1,
+            y1,
+            x2,
+            y2,
+            label: None,
+            score: None,
+            truth: false,
+            highlight: false,
+            dim: false,
+            one_of: false,
+        }
     }
 }
 
@@ -140,6 +155,8 @@ pub fn paint_image_with_boxes(
             .map(|b| Bounds::from_corners(to(b.x1, b.y1), to(b.x2, b.y2)))
             .collect();
         let group = |b: &DrawBox| (b.highlight, b.dim);
+        // Whether a `one_of` box has its chip yet.
+        let mut one_done = false;
         // Two passes. First the chips are placed, the selected and matching boxes first, so they
         // claim the free spots before dimmed ones (a class filter must not leave its own boxes
         // unlabelled). Then everything paints a group at a time, dimmed first and the selected
@@ -228,6 +245,7 @@ pub fn paint_image_with_boxes(
                 if pass == 0
                     && !b.truth
                     && labels
+                    && !(b.one_of && one_done)
                     && !small
                     && !off_view
                     && (b.label.is_some() || b.score.is_some())
@@ -312,9 +330,10 @@ pub fn paint_image_with_boxes(
                     // view a box less than half visible goes unlabelled unless it's selected.
                     let area = |x: &Bounds<Pixels>| f32::from(x.size.width) * f32::from(x.size.height);
                     let half_in = area(&visible) >= area(&r) * 0.5;
-                    if !b.highlight
-                        && (!half_in || strict && (visible.size.height < ch * 2. || placed.len() >= 4))
-                    {
+                    // A tile's one shared chip (`one_of`) needs only a chip's height plus 4 px of box:
+                    // it's the tile's single name, so a 26 px match still carries it.
+                    let tall_enough = visible.size.height >= if b.one_of { ch + px(4.) } else { ch * 2. };
+                    if !b.highlight && (!half_in || strict && (!tall_enough || placed.len() >= 4)) {
                         continue;
                     }
                     // Preferred spots: above the top-left corner, inside it, below the bottom-left
@@ -388,8 +407,9 @@ pub fn paint_image_with_boxes(
                     let free_spot = clear.or_else(|| {
                         if dense || b.highlight {
                             spots.clone().find(open)
-                        } else if !strict {
-                            // Thumbnails at rest stay strict: too small for a shared corner to read.
+                        } else if !strict || b.one_of {
+                            // Thumbnails at rest stay strict (too small for a shared corner to read),
+                            // except for a tile's one shared chip: a match in a cluster still gets it.
                             candidates[2..].iter().copied().find(open)
                         } else {
                             None
@@ -407,6 +427,7 @@ pub fn paint_image_with_boxes(
                     placed.push(chip);
                     let (ty_, lh) =
                         if compact { (origin.y + px(1.), px(12.)) } else { (origin.y + px(1.5), px(13.)) };
+                    one_done |= b.one_of;
                     chips[i] = Some(Chip {
                         bounds: chip,
                         bg: chip_bg,
