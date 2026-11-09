@@ -384,10 +384,14 @@ impl FoloApp {
                     .when(loading, |d| d.child(text(ty::XS, t.text_tertiary).flex_none().child("Detecting…")))
                     // The latency always reads here, beside the count (the rail's breakdown is
                     // below the fold at most window sizes).
+                    // The built-in demo's number is simulated, and says so wherever it shows.
                     .when_some(self.play_pred.ready().map(|p| p.timing.total_ms), |d, ms| {
-                        d.child(
-                            text(ty::XS, t.text_secondary).flex_none().tnum().child(format!("{ms:.1} ms")),
-                        )
+                        let sim = self.play_target.is_none() && !self.store.api.local_inference();
+                        d.child(text(ty::XS, t.text_secondary).flex_none().tnum().child(if sim {
+                            format!("Sim. {ms:.1} ms")
+                        } else {
+                            format!("{ms:.1} ms")
+                        }))
                         .child(div().flex_none().w(px(1.)).h(px(16.)).bg(t.line_subtle))
                     })
                     .when_some(count, |d, n| {

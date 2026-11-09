@@ -1022,8 +1022,8 @@ impl FoloApp {
                                 epochs_bad.then_some("Enter a whole number from 1 to 10,000"),
                             ))
                             .child(text(ty::XS, t.text_tertiary).child(match ds.as_ref() {
-                                Some(d) => format!("Each one pass over {} training images", int(d.splits.train)),
-                                None => "Each one pass over the training images".to_string(),
+                                Some(d) => format!("One epoch = one pass over {} training images", int(d.splits.train)),
+                                None => "One epoch = one pass over the training images".to_string(),
                             })),
                     )
                     .child(

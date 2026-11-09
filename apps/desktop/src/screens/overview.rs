@@ -733,7 +733,7 @@ impl FoloApp {
             .border_b_1()
             .border_color(t.line_subtle)
             .child(th(&t, "Run").w(px(name_w)).flex_none())
-            .when(wide, |d| d.child(th(&t, "Dataset · arch").w(px(meta_w)).flex_none()))
+            .when(wide, |d| d.child(th(&t, "Arch · dataset").w(px(meta_w)).flex_none()))
             .child(th(&t, "Status").w(px(96.)).flex_none())
             .child(th(&t, "Progress").w(px(prog_w)).flex_none())
             .child(div().flex_1())
@@ -806,9 +806,12 @@ impl FoloApp {
                         let key = format!("ov-run-{}", r.id);
                         // Keyboard focus shows what hover does: the full name and the exact time.
                         let e2e = r.config.head == crate::api::Head::O2o;
+                        // The focus tip says in full what the row may cut: name, architecture,
+                        // dataset, created time, and the head.
                         let focus_text = self.ring(&self.fh(key.clone(), cx), window).then(|| {
-                            let base = created_at.map_or(r.name.clone(), |c| {
-                                format!("{} · created {}", r.name, time::local_datetime(c))
+                            let who = format!("{} · {} · {ds}", r.name, r.config.arch.as_str());
+                            let base = created_at.map_or(who.clone(), |c| {
+                                format!("{who} · created {}", time::local_datetime(c))
                             });
                             if e2e { base + " · end-to-end head: predicts without NMS" } else { base }
                         });

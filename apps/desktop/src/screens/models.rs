@@ -149,9 +149,21 @@ impl FoloApp {
                             });
                             if e2e { base + " · end-to-end head: predicts without NMS" } else { base }
                         });
+                        // What its numbers were measured on: the dataset of the run that trained it
+                        // (mAPs compare only within one dataset), or that it isn't known.
+                        let eval_on = m
+                            .run_id
+                            .as_ref()
+                            .and_then(|r| self.store.run(r))
+                            .map(|r| {
+                                self.store
+                                    .dataset_summary(&r.config.dataset_id)
+                                    .map_or(r.config.dataset_id.clone(), |d| d.name.clone())
+                            })
+                            .map_or("Evaluation dataset unknown".to_string(), |d| format!("on {d}"));
                         let row = cols(div().id(SharedString::from(key.clone())))
-                            .when_some(focus_text, |d, s| d.child(crate::controls::focus_tip(&t, s, 36.)))
-                            .h(px(36.))
+                            .when_some(focus_text, |d, s| d.child(crate::controls::focus_tip(&t, s, 48.)))
+                            .h(px(48.))
                             .border_b_1()
                             .border_color(t.line_subtle)
                             .cursor_pointer()
@@ -168,10 +180,10 @@ impl FoloApp {
                                     cx.stop_propagation();
                                 }
                             }))
-                            .child(div().id(SharedString::from(format!("m-name-{}", m.id))).flex_1().min_w(px(200.)).when(crate::ui::may_overflow(&m.name, ty::SM.size, name_w), |d| d.tooltip(crate::controls::tip(m.name.clone(), None))).child(text(ty::SM, t.text_primary).font_weight(FontWeight::MEDIUM).w(px(name_w)).truncate().child(m.name.clone())))
+                            .child(div().id(SharedString::from(format!("m-name-{}", m.id))).flex_1().min_w(px(200.)).when(crate::ui::may_overflow(&m.name, ty::SM.size, name_w), |d| d.tooltip(crate::controls::tip(m.name.clone(), None))).child(text(ty::SM, t.text_primary).font_weight(FontWeight::MEDIUM).w(px(name_w)).truncate().child(m.name.clone())).child(text(ty::XS, t.text_tertiary).w(px(name_w)).truncate().child(eval_on)))
                             .child(div().w(px(150.)).flex_none().flex().items_center().gap(px(6.)).child(text(ty::SM, t.text_secondary).tnum().whitespace_nowrap().child(format!("{} · {} px", m.arch.as_str(), m.imgsz))).when(self.model_e2e(m), |d| d.child(e2e_tag(&t, format!("e2e-m-{}", m.id)))))
                             .when(wide, |d| d.child(text(ty::SM, t.text_tertiary).w(px(150.)).flex_none().truncate().child(run.trim_start_matches("from ").to_string())))
-                            .child(num_cell(130., metrics.as_ref().map_or(text(ty::SM, t.text_tertiary).child("–"), |mm| bar_value(&t, mm.map50_95, f3(mm.map50_95), t.text_tertiary))))
+                            .child(num_cell(130., metrics.as_ref().map_or(text(ty::SM, t.text_tertiary).child("–"), |mm| text(ty::SM, t.text_primary).tnum().child(f3(mm.map50_95)))))
                             .child(num_cell(72., text(ty::SM, t.text_secondary).tnum().child(metrics.as_ref().map_or("–".into(), |mm| f3(mm.map50)))))
                             .when(params_col, |d| d.child(num_cell(72., text(ty::SM, t.text_secondary).tnum().child(format!("{p} {pu}")))))
                             .child(num_cell(72., text(ty::SM, t.text_secondary).tnum().child(format!("{b} {bu}"))))
